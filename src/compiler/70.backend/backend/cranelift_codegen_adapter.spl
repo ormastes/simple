@@ -771,20 +771,32 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, func_handles: Dict<text, i64>, sr
         # yielding a pointer-ish garbage value instead of the parsed
         # number (task #94: stage4 int(text) hazard). `src_val` here is
         # the address of the {ptr, len} tuple (see load_local's aggregate
-        # branch) - load both fields and route through the same
-        # decimal-parse runtime path the interpreter uses: rt_string_new
-        # boxes the fat pointer into a tagged Value, then
-        # rt_string_to_int() strtoll-parses it: leading-digit-run parse,
-        # stops at the first non-digit ("4.2" -> 4), 0 if no digits at all
-        # ("abc"/"" -> 0). This is the task #118 canonical `int(text)`
-        # semantics, matching eval_builtins.spl's `eval_int_parse_lenient`
-        # (flat-AST interpreter) and interpreter_call/builtins.rs's
-        # `parse_int_lenient` (seed tree-walk interpreter) — no code change
-        # needed here, this path was already the reference implementation.
+        # branch) - load both fields and route through a decimal-parse
+        # runtime path: rt_string_new boxes the fat pointer into a tagged
+        # Value, then rt_string_to_int_lenient() parses it.
+        #
+        # Task #118 correction: this used to call `rt_string_to_int`, on the
+        # (incorrect) assumption it was strtoll-based/leading-prefix lenient
+        # like its C (`runtime_native.c`) and self-hosted
+        # (`simple_core/core_string.spl`) namesakes. The Rust-native
+        # `simple-runtime` crate's `rt_string_to_int` is actually a *strict
+        # whole-string* parse (0 on any partial match) — it also backs
+        # `.to_int()`/`.parse_int()`, which must reject partial matches, so it
+        # is intentionally left strict. `int(text_expr)` now routes through
+        # the sibling `rt_string_to_int_lenient` (added for task #118): a
+        # leading-digit-run parse that stops at the first non-digit
+        # ("4.2" -> 4), returning 0 if no digits at all ("abc"/"" -> 0). This
+        # is the task #118 canonical `int(text)` semantics, matching
+        # eval_builtins.spl's `eval_int_parse_lenient` (flat-AST interpreter)
+        # and interpreter_call/builtins.rs's `parse_int_lenient` (seed
+        # tree-walk interpreter). Requires a redeploy of bin/release/<triple>/
+        # simple to take effect for the self-hosted binary — verify with the
+        # matrix in doc/07_guide/quick_reference/syntax_quick_reference.md
+        # "int(text) Semantics" after rebuilding.
         val ptr_val = cranelift_load(ctx, CL_TYPE_I64, src_val, 0)
         val len_val = cranelift_load(ctx, CL_TYPE_I64, src_val, 8)
         val boxed = cl_call_runtime_i64(ctx, cl_module, func_handles, "rt_string_new", [ptr_val, len_val])
-        val parsed = cl_call_runtime_i64(ctx, cl_module, func_handles, "rt_string_to_int", [boxed])
+        val parsed = cl_call_runtime_i64(ctx, cl_module, func_handles, "rt_string_to_int_lenient", [boxed])
         val dst_size = target.size_bytes()
         return if dst_size < 8: cranelift_ireduce(ctx, to_cl, parsed) else: parsed
 

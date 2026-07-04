@@ -1110,6 +1110,18 @@ int64_t rt_string_to_int(int64_t value) {
     return (int64_t)strtoll(buf, NULL, 10);
 }
 
+/* Task #118: sibling of rt_string_to_int() with the canonical `int(text)`
+ * semantics — a total, leading-numeric-prefix parse (strtoll already IS
+ * this: it skips whitespace/sign, parses leading digits, stops at the first
+ * non-digit, returns 0 if none). Named distinctly from rt_string_to_int so
+ * the Rust-native `simple-runtime` crate's stricter, whole-string-match
+ * rt_string_to_int() (used by .to_int()/.parse_int()/to_i64()) is
+ * unaffected; the two are byte-for-byte identical here because this C
+ * runtime's rt_string_to_int() already implements the lenient behavior. */
+int64_t rt_string_to_int_lenient(int64_t value) {
+    return rt_string_to_int(value);
+}
+
 void rt_print_str(const uint8_t* ptr, uint64_t len) {
     rt_core_write_bytes(stdout, ptr, len);
     fflush(stdout);
