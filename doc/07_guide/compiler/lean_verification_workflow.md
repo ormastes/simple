@@ -263,6 +263,12 @@ properties are modeled above RTL. The critical SimpleOS gate pins named
 resource-capacity, closed-channel drain, DRF race/synchronized-safe, and
 memory-capability uniqueness theorems so regeneration cannot silently drop
 manual proof intent.
+When the claim is about agent resources, scheduler fairness, starvation,
+channel backpressure, lock ordering, or race freedom, the evidence row must
+name the model scope and exact checked gate. A generated Lean or BYL artifact
+is only the regenerated input surface; the claim is not formal evidence until
+the durable theorem file and its `lake build`, `simple gen-lean verify`, or
+wrapper gate pass after regeneration.
 
 ### RISC-V Dual-Track Formal Evidence
 
