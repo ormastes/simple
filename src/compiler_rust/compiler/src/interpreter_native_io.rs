@@ -446,7 +446,13 @@ pub fn native_disable_raw_mode(args: &[Value]) -> Result<Value, CompileError> {
     let fd = std::io::stdin().as_raw_fd();
 
     ORIGINAL_TERMIOS.with(|orig| {
-        if let Some(termios) = *orig.borrow() {
+        // Copy the saved termios OUT of the borrow first (termios is Copy), so
+        // the shared borrow ends before the borrow_mut() below. Reading it
+        // inline in the `if let` scrutinee would keep the Ref alive across the
+        // block and panic (BorrowMutError -> SIGABRT) on the borrow_mut() —
+        // the round-8 raw-mode-quit abort.
+        let saved = *orig.borrow();
+        if let Some(termios) = saved {
             unsafe {
                 if libc::tcsetattr(fd, libc::TCSAFLUSH, &termios) != 0 {
                     return Ok(Value::Int(-1));
