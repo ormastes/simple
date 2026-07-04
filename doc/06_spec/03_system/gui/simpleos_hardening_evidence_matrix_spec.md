@@ -160,21 +160,27 @@ The wrapper emits these rows:
 - `simpleos_hardening_formal_memory_safety_status`
 - `simpleos_hardening_formal_memory_safety_gate`
 - `simpleos_hardening_formal_memory_safety_scope`
+- `simpleos_hardening_formal_memory_safety_evidence`
 - `simpleos_hardening_formal_storage_integrity_status`
 - `simpleos_hardening_formal_storage_integrity_gate`
 - `simpleos_hardening_formal_storage_integrity_scope`
+- `simpleos_hardening_formal_storage_integrity_evidence`
 - `simpleos_hardening_formal_boundary_integrity_status`
 - `simpleos_hardening_formal_boundary_integrity_gate`
 - `simpleos_hardening_formal_boundary_integrity_scope`
+- `simpleos_hardening_formal_boundary_integrity_evidence`
 - `simpleos_hardening_formal_compiler_language_status`
 - `simpleos_hardening_formal_compiler_language_gate`
 - `simpleos_hardening_formal_compiler_language_scope`
+- `simpleos_hardening_formal_compiler_language_evidence`
 - `simpleos_hardening_formal_ui_policy_status`
 - `simpleos_hardening_formal_ui_policy_gate`
 - `simpleos_hardening_formal_ui_policy_scope`
+- `simpleos_hardening_formal_ui_policy_evidence`
 - `simpleos_hardening_formal_coverage_status`
 - `simpleos_hardening_formal_coverage_gate`
 - `simpleos_hardening_formal_coverage_scope`
+- `simpleos_hardening_formal_coverage_evidence`
 - `simpleos_hardening_shared_wm_status`
 - `simpleos_hardening_cpu_simd_status`
 - `simpleos_hardening_llvm_port_status`
@@ -319,21 +325,27 @@ expect(stdout).to_contain("simpleos_hardening_formal_critical_concurrency_eviden
 expect(stdout).to_contain("simpleos_hardening_formal_memory_safety_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_memory_safety_gate=scripts/check/check-simpleos-memory-safety-formal-proofs.shs")
 expect(stdout).to_contain("simpleos_hardening_formal_memory_safety_scope=Lean model gate: gc_reachability, gc_boundary, gc_manual_borrow, manual_pointer_borrow, nogc_compile")
+expect(stdout).to_contain("simpleos_hardening_formal_memory_safety_evidence=mark/sweep reachability invariant")
 expect(stdout).to_contain("simpleos_hardening_formal_storage_integrity_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_storage_integrity_gate=scripts/check/check-simpleos-storage-formal-proofs.shs")
 expect(stdout).to_contain("simpleos_hardening_formal_storage_integrity_scope=Lean model gate: db_storage, fat32, formal/nvfs")
+expect(stdout).to_contain("simpleos_hardening_formal_storage_integrity_evidence=B-tree ordering/bounds")
 expect(stdout).to_contain("simpleos_hardening_formal_boundary_integrity_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_boundary_integrity_gate=scripts/check/check-simpleos-boundary-formal-proofs.shs")
 expect(stdout).to_contain("simpleos_hardening_formal_boundary_integrity_scope=Lean model gate: ffi_contract, process_lifecycle, tls_isolation")
+expect(stdout).to_contain("simpleos_hardening_formal_boundary_integrity_evidence=FFI rejects undefined/null calls")
 expect(stdout).to_contain("simpleos_hardening_formal_compiler_language_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_compiler_language_gate=scripts/check/check-simpleos-compiler-language-formal-proofs.shs")
 expect(stdout).to_contain("simpleos_hardening_formal_compiler_language_scope=Lean model gate: module_resolution, macro_auto_import, type_inference_compile, type_value_semantics, visibility_export")
+expect(stdout).to_contain("simpleos_hardening_formal_compiler_language_evidence=module resolution ambiguity/exists rules")
 expect(stdout).to_contain("simpleos_hardening_formal_ui_policy_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_ui_policy_gate=scripts/check/check-simpleos-ui-policy-formal-proofs.shs")
 expect(stdout).to_contain("simpleos_hardening_formal_ui_policy_scope=Lean model gate: ui_compositor")
+expect(stdout).to_contain("simpleos_hardening_formal_ui_policy_evidence=damage add preserves the new rect")
 expect(stdout).to_contain("simpleos_hardening_formal_coverage_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_coverage_gate=scripts/check/check-simpleos-formal-coverage.shs")
 expect(stdout).to_contain("simpleos_hardening_formal_coverage_scope=Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, compiler/language, and UI policy")
+expect(stdout).to_contain("simpleos_hardening_formal_coverage_evidence=all SimpleOS hardening formal rows have executable wrapper gates")
 expect(stdout).to_contain("simpleos_hardening_byl_sby_artifact_audit_status=pass")
 expect(stdout).to_contain("simpleos_hardening_byl_sby_artifact_audit_gate=scripts/check/check-simpleos-byl-sby-artifacts.shs")
 expect(stdout).to_contain("simpleos_hardening_riscv_rtl_sby_proof_gate=scripts/check/check-riscv-rtl-sby-proof.shs")
