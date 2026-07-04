@@ -352,6 +352,8 @@ impl<'a> TypeTranslator<'a> {
             }
             HirType::Unknown => Ok(LeanType::Primitive("Unit".to_string())),
             HirType::Any => Ok(LeanType::Primitive("Unit".to_string())),
+            // Dict has the same runtime representation as Any.
+            HirType::Dict { .. } => Ok(LeanType::Primitive("Unit".to_string())),
             HirType::Char => Ok(LeanType::Primitive("Char".to_string())),
         }
     }

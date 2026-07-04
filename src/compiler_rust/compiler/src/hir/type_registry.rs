@@ -293,6 +293,8 @@ impl TypeRegistry {
             Some(HirType::Unknown) => false,
             // Any type is not snapshot-safe (could contain mutable data)
             Some(HirType::Any) => false,
+            // Dicts are mutable containers (same runtime repr as Any).
+            Some(HirType::Dict { .. }) => false,
             None => false,
         }
     }

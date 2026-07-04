@@ -422,8 +422,18 @@ impl Lowerer {
                 }
                 // Handle common generic types used in stdlib
                 match family_name.as_str() {
-                    // Dict<K, V> - dictionary type, represented as Any at native level
-                    "Dict" => Ok(TypeId::ANY),
+                    // Dict<K, V> - dictionary type. Runtime representation is
+                    // identical to Any (boxed RuntimeValue), but we thread the
+                    // key/value types so that element reads (`d[k]`,
+                    // `d.values()`) resolve field access against the real
+                    // value struct instead of the global most-fields-wins
+                    // ANY resolver (task #104).
+                    "Dict" | "Map" | "HashMap" if args.len() == 2 => {
+                        let key = self.resolve_type(&args[0])?;
+                        let value = self.resolve_type(&args[1])?;
+                        Ok(self.module.types.register(HirType::Dict { key, value }))
+                    }
+                    "Dict" | "Map" | "HashMap" => Ok(TypeId::ANY),
                     // Option<T> - preserve enum identity so builtin methods and
                     // payload extraction stay on the Option family.
                     "Option" if args.len() == 1 => self
@@ -507,6 +517,7 @@ impl Lowerer {
             HirType::Simd { lanes, .. } => format!("Simd<{}>", lanes),
             HirType::Tuple(elems) => format!("Tuple({})", elems.len()),
             HirType::LabeledTuple(fields) => format!("LabeledTuple({})", fields.len()),
+            HirType::Dict { .. } => "Dict".to_string(),
             HirType::Pointer { .. } => "Pointer".to_string(),
             HirType::Function { .. } => "Function".to_string(),
             HirType::Union { .. } => "Union".to_string(),
@@ -923,6 +934,10 @@ impl Lowerer {
                 HirType::Pointer { inner, .. } => self.get_index_element_type(*inner),
                 // String type - indexing returns a single-char string
                 HirType::String => Ok(TypeId::STRING),
+                // Dict<K, V> - indexing `d[k]` returns the value type V so
+                // field access on the retrieved value resolves against the
+                // real struct layout (task #104).
+                HirType::Dict { value, .. } => Ok(*value),
                 // Any type (Dict, generic containers) - indexing returns Any
                 HirType::Any => Ok(TypeId::ANY),
                 // Struct type - dynamic indexing (like dict["key"]) returns Any
