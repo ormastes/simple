@@ -24,6 +24,9 @@ description: "Codex release skill. Version bump (major/minor/patch/exact), CHANG
 Run `verify` skill first — must show **STATUS: PASS**.
 
 Do NOT proceed with release if verification has any FAIL items.
+For SimpleOS mission-critical releases, also run
+`sh scripts/check/check-simpleos-mission-critical-release.shs`; do not release
+while it reports blocked or failed.
 
 SPipe specs and SPipe coverage are verified before release. Do not create,
 rewrite, or weaken SPipe during release; if SPipe is missing, stale, or
@@ -116,6 +119,8 @@ override that credential.
 ## Rules
 
 - NEVER release without verify PASS
+- NEVER release SimpleOS mission-critical artifacts while
+  `check-simpleos-mission-critical-release.shs` is blocked or failed
 - NEVER update SPipe in release; release must consume verified SPipe evidence
 - NEVER accept generated-manual quality or sidecar-review gaps during release
 - NEVER push without user approval
