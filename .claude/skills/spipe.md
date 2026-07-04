@@ -66,7 +66,10 @@ the stable manual proof entry point and the post-regeneration gate that checked
 it (`lake build`, `simple gen-lean verify`, or `simple verify check`). Treat
 generated-only Lean/BYL citations as stale evidence whenever a manual proof
 layer exists; update the generated contract and manual proof layer together
-before accepting regeneration-safe PASS.
+before accepting regeneration-safe PASS. For RISC-V evidence that spans
+generated RTL sidecars plus Lean/BYL, cite
+`sh scripts/check/check-riscv-formal-dual-track.shs` so SPipe evidence covers
+the sidecar self-test, normal sidecar contract, and manual proof gate together.
 
 Check or install that wiring with:
 
