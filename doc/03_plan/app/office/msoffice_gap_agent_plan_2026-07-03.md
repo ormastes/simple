@@ -398,6 +398,24 @@ prints PASS — bug doc test_runner_60s_silent_kill_greenwash_2026-07-04.md).
 **~372 callable functions.** Open: CARDs 6 (deploy, build in flight),
 14, 15, 16 (pilot next).
 
+### CARD 16 pilot status (2026-07-04, honest blocker)
+Wiring SHIPPED (gui.spl: office_gui_frame → BrowserBackend.create 96x64
+"software" → render_frame(state.tree, state) → pixels_argb_u32; `office
+counter --gui` CLI; pilot recovered from a full clobber-delete via swept
+commit 33e635bc). Pivot '<name[' generics-ambiguity parse errors fixed
+(3 sites — `v < arr[i]` misparses as generic application under `run`; use
+an intermediate val; NEW LEDGER ENTRY). **E2E proof BLOCKED:** the run
+enters office_gui_frame and does not return within 500s, while
+browser_backend_pixel_paths_spec passes in ~61s under identical load — the
+hang/slowness is specific to BrowserBackend.render_frame on a UITree (vs
+the spec's direct-HTML path), not machine contention. The pilot spec is
+HELD OUT of the tree (scratchpad backup/round3/office_gui_pilot_spec.spl.held)
+because committing it would hang the test daemon (see the 60s silent-kill
+bug — it would greenwash anyway). NEXT: instrument which stage hangs
+(create vs render_frame vs pixel readback), try after the bootstrap build
+frees the machine, and/or run on the compiled binary instead of the
+interpreter. Do NOT claim GUI works until the proof line prints.
+
 ---
 
 ## Definition of done per card
