@@ -118,6 +118,7 @@ pub mod io_driver;
 pub mod qmp_socket;
 pub mod host_wm_bridge;
 pub mod host_gpu_lane;
+pub mod enum_sffi;
 
 // Import parent interpreter types
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -254,6 +255,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("coverage_summary", coverage::coverage_summary);
     insert_simple!("_current_time_unix", time::_current_time_unix);
     insert_simple!("default_memory_limit", memory::default_memory_limit);
+    // rt_enum_* — registered for codegen but were missing here entirely, so
+    // interpreting .spl source that uses the disc-dispatch idiom (the compiler
+    // source itself) failed with "unknown extern function" (task #113).
+    insert_simple!("rt_enum_discriminant", enum_sffi::rt_enum_discriminant_fn);
+    insert_simple!("rt_enum_payload", enum_sffi::rt_enum_payload_fn);
     insert_simple!("dprint", io::print::dprint);
     insert_simple!("eprintln", io::print::eprintln);
     insert_simple!("exit", process::exit);

@@ -309,6 +309,11 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver_ty))
                 .and_then(|ty| match ty {
                     HirType::Array { element, .. } => Some(*element),
+                    // Dict<K, V>: `d[k]` yields the value type V so a scalar
+                    // value gets unboxed symmetrically with the store side, and
+                    // a heap value type (struct/enum) is passed through verbatim
+                    // (no spurious unbox). Task #117.
+                    HirType::Dict { value, .. } => Some(*value),
                     _ => None,
                 })
                 .unwrap_or(expr_ty)

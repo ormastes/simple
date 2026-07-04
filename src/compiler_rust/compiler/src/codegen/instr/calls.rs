@@ -2284,7 +2284,13 @@ fn compile_known_enum_constructor_call<M: Module>(
     let disc_val = builder.ins().iconst(types::I32, disc);
     let payload_val = match args {
         [] => builder.ins().iconst(types::I64, 3),
-        [single] => get_vreg_or_default(ctx, builder, single),
+        // Single-payload construction must tag scalars exactly like the
+        // multi-arg path (runtime_payload_value) so that extraction — which
+        // assumes the tagged convention — recovers the value. Storing a raw
+        // scalar here made `Ok(42).unwrap()` untag to 5, floats read as raw
+        // bits, bools as nil. Heap payloads (text) pass through unchanged.
+        // Task #117 / #109.
+        [single] => runtime_payload_value(ctx, builder, *single),
         many => {
             let capacity = builder.ins().iconst(types::I64, many.len() as i64);
             let array = call_runtime_1(ctx, builder, "rt_array_new", capacity);
@@ -2745,7 +2751,9 @@ pub fn compile_call<M: Module>(
             let enum_id_val = builder.ins().iconst(types::I32, 0);
             let disc_val = builder.ins().iconst(types::I32, disc);
             let payload_val = if !args.is_empty() {
-                get_vreg_or_default(ctx, builder, &args[0])
+                // Tag scalar payloads (Ok/Err/Some) to match the multi-arg /
+                // extraction convention; heap payloads pass through. Task #117.
+                runtime_payload_value(ctx, builder, args[0])
             } else {
                 // Empty payload uses tagged nil (3), not raw 0
                 builder.ins().iconst(types::I64, 3)
