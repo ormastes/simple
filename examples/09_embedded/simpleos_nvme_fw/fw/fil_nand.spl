@@ -81,7 +81,10 @@ impl Nand:
     me read_page(ppn: i64) -> NandRead:
         if not ppn_in_range(ppn):
             return NandRead(data: 0, lba: UNMAP, seq: 0, ecc: 0, err: 2)
-        NandRead(data: me.data[ppn], lba: me.oob_lba[ppn], seq: me.oob_seq[ppn], ecc: me.oob_ecc[ppn], err: me.page_err[ppn])
+        var err: i64 = me.page_err[ppn]
+        if err < 0:
+            err = 0
+        NandRead(data: me.data[ppn], lba: me.oob_lba[ppn], seq: me.oob_seq[ppn], ecc: me.oob_ecc[ppn], err: err)
 
     me erase_block(blk: i64) -> i64:
         if not block_in_range(blk):
@@ -108,6 +111,8 @@ impl Nand:
 
     me erase_count(blk: i64) -> i64:
         if not block_in_range(blk):
+            return 0
+        if me.blk_erase[blk] < 0:
             return 0
         me.blk_erase[blk]
 
@@ -188,6 +193,10 @@ fn nand_selftest() -> i64:
     failures = failures + expect_eq(r2.err, 3, "bitflip err==3")
     nand.inject_read_bitflip(0, -1)
     failures = failures + expect_eq(nand.read_page(0).err, 0, "negative bitflip injection clamps to zero")
+    nand.page_err[0] = -7
+    failures = failures + expect_eq(nand.read_page(0).err, 0, "corrupted negative read error clamps to zero")
+    nand.blk_erase[1] = -5
+    failures = failures + expect_eq(nand.erase_count(1), 0, "corrupted negative erase count clamps to zero")
 
     val ppn3: i64 = block_first_ppn(3)
     rc = nand.program(ppn3, 42, 3, 0xCD)
