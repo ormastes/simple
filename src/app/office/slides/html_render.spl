@@ -9,6 +9,7 @@
 # widget stack.
 
 use app.office.slides.slide.{Slide, SlideElement, SlideElementKind, SlideLayout}
+use app.office.slides.deck_format.{bullet_id_level}
 use std.common.render_scene.office_style_resolver.{resolve_style, style_to_css_text}
 
 fn _html_escape(s: text) -> text:
@@ -69,6 +70,31 @@ fn _slide_element_style_tag(layout: SlideLayout, index: i32) -> text:
         _:
             return "slide_body"
 
+fn _layout_is_section(layout: SlideLayout) -> bool:
+    match layout:
+        SlideLayout.SectionHeader:
+            return true
+        _:
+            return false
+
+fn _slide_element_extra_css(slide: Slide, element: SlideElement, index: i32) -> text:
+    """Per-element inline CSS additions: bullet elements indent via
+    margin-left per nesting level; section-layout titles render with a larger
+    inline font size. Inline CSS only — no <style> blocks."""
+    if element.id.starts_with("bullet"):
+        val level = bullet_id_level(element.id)
+        val indent = 36 * level
+        return " margin-left: {indent}px;"
+    if index == 0 and _layout_is_section(slide.layout):
+        return " font-size: 44px;"
+    ""
+
+fn _slide_element_bullet_prefix(element: SlideElement) -> text:
+    """Visible bullet marker for bullet elements (HTML entity, inline)."""
+    if element.id.starts_with("bullet"):
+        return "&#8226; "
+    ""
+
 fn render_slide_html(slide: Slide) -> text:
     """Render a slide as a styled HTML fragment using the shared office style
     resolver's slide theme, so the PPT surface renders with Word-level
@@ -83,7 +109,9 @@ fn render_slide_html(slide: Slide) -> text:
         val style = resolve_style(tag, [])
         val css = style_to_css_text(style)
         val box_css = _slide_element_box_css(el)
-        out = "{out}<div class=\"{tag}\" style=\"{box_css} {css}\">{content}</div>"
+        val extra_css = _slide_element_extra_css(slide, el, index)
+        val bullet_prefix = _slide_element_bullet_prefix(el)
+        out = "{out}<div class=\"{tag}\" style=\"{box_css} {css}{extra_css}\">{bullet_prefix}{content}</div>"
         index = index + 1
     out = "{out}</section>"
     if slide.notes != "":

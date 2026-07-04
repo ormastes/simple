@@ -400,7 +400,17 @@ impl InterpreterBackendImpl:
                 Err(BackendError.not_implemented("expression kind not implemented"))
 
     fn exec_stmt(stmt: HirStmt, ctx: EvalContext) -> Result<(), BackendError>:
-        itrace("[ES] exec_stmt entry")
+        # LOAD-BEARING: explicitly materialize stmt.kind's discriminant BEFORE the
+        # match. `Expr`/`Block` are struct-shadowed variant names whose pattern
+        # tests compile ALWAYS-TRUE on stage4 (bug doc iteration 18 hazard #1);
+        # without this pre-read the seed compiles the sound Let/Assign arms such
+        # that a real Let statement falls through to the always-true Expr arm and
+        # eval_expr receives a garbage payload → "field access on nil receiver"
+        # SIGILL. Reading the discriminant first (iteration-18 disc pre-dispatch)
+        # forces the value to materialize so the qualified arms test correctly.
+        # Feed it into itrace so it is never dead-code-eliminated.
+        val stmt_disc = rt_enum_discriminant(stmt.kind)
+        itrace("[ES] exec_stmt entry disc={stmt_disc}")
         # Arm ORDER matters on stage4: `Expr` and `Block` are struct-shadowed
         # variant names, so their pattern tests compile ALWAYS-TRUE (bug doc
         # iteration 18 hazard #1) — an `Expr`-first arm swallows EVERY statement,

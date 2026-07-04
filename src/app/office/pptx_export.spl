@@ -10,7 +10,8 @@
 # PowerPoint-desktop rendering is untested locally — recorded ceiling.
 
 use std.common.archive.zip.{zip_write_stored, zip_text_file, ZipFile, zip_extract_text}
-use app.office.slides.slide.{Slide, SlideElement, SlideElementKind, blank_slide, add_text_box}
+use app.office.slides.slide.{Slide, SlideElement, SlideElementKind, SlideLayout, blank_slide, add_text_box}
+use app.office.slides.deck_format.{bullet_id_level}
 
 fn _x(s: text) -> text:
     var r = s
@@ -28,16 +29,36 @@ val _THEME = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><a:th
 fn _sp_tree_open() -> text:
     "<p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>"
 
-fn _text_shape(id: i32, name: text, content: text, x: i32, y: i32, w: i32, h: i32) -> text:
-    """One positioned text box shape. Coordinates are px, emitted as EMU."""
+fn _text_shape(id: i32, name: text, content: text, x: i32, y: i32, w: i32, h: i32, ppr: text, rpr: text) -> text:
+    """One positioned text box shape. Coordinates are px, emitted as EMU.
+    `ppr` is an optional `<a:pPr .../>` paragraph-properties fragment (bullet
+    level + marker); `rpr` an optional `<a:rPr .../>` run-properties fragment
+    (e.g. the section layout's larger font size)."""
     val emu_x = x.to_i64() * 9525
     val emu_y = y.to_i64() * 9525
     val emu_w = w.to_i64() * 9525
     val emu_h = h.to_i64() * 9525
     var out = "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"{name}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"
     out = "{out}<p:spPr><a:xfrm><a:off x=\"{emu_x}\" y=\"{emu_y}\"/><a:ext cx=\"{emu_w}\" cy=\"{emu_h}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr>"
-    out = "{out}<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{_x(content)}</a:t></a:r></a:p></p:txBody></p:sp>"
+    out = "{out}<p:txBody><a:bodyPr/><a:lstStyle/><a:p>{ppr}<a:r>{rpr}<a:t>{_x(content)}</a:t></a:r></a:p></p:txBody></p:sp>"
     out
+
+fn _bullet_ppr(level: i32) -> text:
+    """Paragraph properties for a bullet line: `lvl` attribute (omitted for
+    level 0, per OOXML defaulting) plus the bullet marker char."""
+    if level == 0:
+        return "<a:pPr><a:buChar char=\"-\"/></a:pPr>"
+    "<a:pPr lvl=\"{level}\"><a:buChar char=\"-\"/></a:pPr>"
+
+fn _first_textbox_content(slide: Slide) -> text:
+    """Content of the slide's first text box (its title), or ""."""
+    for e in slide.elements:
+        match e.kind:
+            SlideElementKind.TextBox(content: content):
+                return content
+            _:
+                pass_do_nothing("non-text elements skipped")
+    ""
 
 fn _transition_xml(transition: text) -> text:
     """Map a deck transition name to a `<p:transition>` child. Empty or
@@ -50,16 +71,38 @@ fn _transition_xml(transition: text) -> text:
         return "<p:transition><p:push/></p:transition>"
     ""
 
+fn _layout_shapes(slide: Slide) -> text:
+    """Shape arrangement per slide layout: TitleSlide (deck `title-only`)
+    emits just the title textbox vertically centered under the shape name
+    `ctrTitle`; SectionHeader (deck `section`) emits a big centered title with
+    a larger font size run attr under `sectionTitle`; anything else keeps the
+    default title+body arrangement with bullet paragraph levels."""
+    match slide.layout:
+        SlideLayout.TitleSlide:
+            val title = _first_textbox_content(slide)
+            return _text_shape(2, "ctrTitle", title, 60, 210, 840, 120, "", "")
+        SlideLayout.SectionHeader:
+            val title = _first_textbox_content(slide)
+            return _text_shape(2, "sectionTitle", title, 60, 190, 840, 160, "", "<a:rPr sz=\"4400\"/>")
+        _:
+            var shapes = ""
+            var id = 2
+            for el in slide.elements:
+                match el.kind:
+                    SlideElementKind.TextBox(content):
+                        var ppr = ""
+                        if el.id.starts_with("bullet"):
+                            val level = bullet_id_level(el.id)
+                            ppr = _bullet_ppr(level)
+                        val shape = _text_shape(id, el.id, content, el.x, el.y, el.width, el.height, ppr, "")
+                        shapes = "{shapes}{shape}"
+                        id = id + 1
+                    _:
+                        pass_do_nothing("only text boxes export to pptx v1")
+            return shapes
+
 fn _slide_xml(slide: Slide) -> text:
-    var shapes = ""
-    var id = 2
-    for el in slide.elements:
-        match el.kind:
-            SlideElementKind.TextBox(content):
-                shapes = "{shapes}{_text_shape(id, el.id, content, el.x, el.y, el.width, el.height)}"
-                id = id + 1
-            _:
-                pass_do_nothing("only text boxes export to pptx v1")
+    val shapes = _layout_shapes(slide)
     val transition_xml = _transition_xml(slide.transition)
     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:sld xmlns:a=\"{_NS_A}\" xmlns:p=\"{_NS_P}\" xmlns:r=\"{_NS_R}\"><p:cSld>{_sp_tree_open()}{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:overrideClrMapping bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>{transition_xml}</p:sld>"
 
@@ -123,6 +166,55 @@ fn _extract_transition(slide_xml: text) -> text:
         return "push"
     ""
 
+fn _extract_layout(slide_xml: text) -> SlideLayout:
+    """Read back the slide layout from the shape-name markers written by
+    `_layout_shapes` (`ctrTitle` = title-only, `sectionTitle` = section).
+    Shape names live in attributes, so escaped run text cannot collide."""
+    if _find_at(slide_xml, "name=\"sectionTitle\"", 0) >= 0:
+        return SlideLayout.SectionHeader
+    if _find_at(slide_xml, "name=\"ctrTitle\"", 0) >= 0:
+        return SlideLayout.TitleSlide
+    SlideLayout.Blank
+
+fn _paragraph_lvl(seg: text) -> i32:
+    """Bullet level from a paragraph segment's `lvl` attribute (0..2;
+    absent = 0, matching the writer omitting lvl for level 0)."""
+    val p = _find_at(seg, "lvl=\"", 0)
+    if p < 0:
+        return 0
+    val c = seg.slice(p + 5, p + 6)
+    if c == "1":
+        return 1
+    if c == "2":
+        return 2
+    0
+
+fn _paragraph_first_text(seg: text) -> text:
+    """First a:t run's text within a paragraph segment (our writer emits one
+    run per paragraph)."""
+    val t = _find_at(seg, "<a:t>", 0)
+    if t < 0:
+        return ""
+    val e = _find_at(seg, "</a:t>", t)
+    if e < 0:
+        return ""
+    _unx(seg.slice(t + 5, e))
+
+fn _slide_paragraphs(slide_xml: text) -> [text]:
+    """Every `<a:p>...</a:p>` segment's inner XML, in document order."""
+    var segs: [text] = []
+    var i = 0
+    while i < slide_xml.len():
+        val p = _find_at(slide_xml, "<a:p>", i)
+        if p < 0:
+            break
+        val e = _find_at(slide_xml, "</a:p>", p)
+        if e < 0:
+            break
+        segs.push(slide_xml.slice(p + 5, e))
+        i = e + 6
+    segs
+
 fn _notes_slide_text(notes_xml: text) -> text:
     """Join a notesSlide part's a:t runs (one per paragraph) back into
     newline-separated speaker notes text."""
@@ -137,10 +229,13 @@ fn _notes_slide_text(notes_xml: text) -> text:
     out
 
 fn pptx_bytes_to_deck(zip_bytes: [u8]) -> [Slide]:
-    """Import a real .pptx: each slide part's text runs become a slide with a
-    title box (first run) and body boxes — the same shape parse_deck builds.
-    Transitions and speaker notes are read back from `<p:transition>` and the
-    matching `ppt/notesSlides/notesSlideN.xml` part, if present."""
+    """Import a real .pptx: each slide part's paragraphs become a slide with a
+    title box (first paragraph) and body/bullet boxes — the same shape
+    parse_deck builds. Bullet paragraphs (marked by `<a:buChar>`) read their
+    nesting level back from the `lvl` attribute; slide layouts, transitions,
+    and speaker notes are read back from the shape-name markers,
+    `<p:transition>`, and the matching `ppt/notesSlides/notesSlideN.xml`
+    part, if present."""
     var slides: [Slide] = []
     var n = 1
     var more = true
@@ -151,9 +246,14 @@ fn pptx_bytes_to_deck(zip_bytes: [u8]) -> [Slide]:
         else:
             var s = blank_slide("slide{slides.len() + 1}")
             var bi = 0
-            for content in pptx_slide_texts(xml):
+            for seg in _slide_paragraphs(xml):
+                val content = _paragraph_first_text(seg)
                 if bi == 0:
                     s = add_text_box(s, "title", content, 60, 60, 840, 120)
+                elif _find_at(seg, "<a:buChar", 0) >= 0:
+                    val level = _paragraph_lvl(seg)
+                    val bullet_id = "bullet{level}_{bi}"
+                    s = add_text_box(s, bullet_id, content, 60, 220 + 90 * (bi - 1), 840, 80)
                 else:
                     s = add_text_box(s, "body{bi}", content, 60, 220 + 90 * (bi - 1), 840, 80)
                 bi = bi + 1
@@ -164,7 +264,7 @@ fn pptx_bytes_to_deck(zip_bytes: [u8]) -> [Slide]:
                 notes = _notes_slide_text(notes_xml)
             s = Slide(
                 id: s.id,
-                layout: s.layout,
+                layout: _extract_layout(xml),
                 elements: s.elements,
                 notes: notes,
                 background: s.background,

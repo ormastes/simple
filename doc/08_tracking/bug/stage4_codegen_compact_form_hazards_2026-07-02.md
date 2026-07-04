@@ -1281,3 +1281,116 @@ threefn rc=0; `use std.text` rc=0; lint src/app/cli/main.spl rc=0 clean;
 test target_presets_spec.spl PASS rc=0. Struct/class + `-c` are the two separate
 open defects above — coordinator should NOT re-flip the unstub default until at
 least struct/class lowers, since real programs use structs.
+
+## Iteration 20 (2026-07-04) — #87 FIXED; #86 SIGSEGV FIXED (decls lower + run); struct-prints-5 blocked by a deeper interpreter-runtime cascade
+
+### #87 (`-c "print(1+1)"`): FIXED — was printing `98`, not rc=1
+On the current-HEAD build `-c "print(1+1)"` printed **98** (= 49+49 = char('1')
++char('1')), NOT rc=1 as handed off. Root cause: `parser_guarded_int_text`
+(10.frontend/core/parser.spl) called bare `int(t)`, and the stage4 `int(text)`
+builtin returns the FIRST character's char code (iteration-18 hazard #7). The
+iteration-18 manual-decimal-accumulation workaround had been **reverted by
+commit bb9aa222509** ("stage4 parse surface at ZERO errors"), which replaced the
+loop with `int(t)`. Restored the char_code accumulation loop. `-c "print(1+1)"`
+now prints `2`. LESSON: bb9aa222509 also ADDED bug docs noting int() misdispatch
+yet removed the workaround — never remove a stage4 int()-avoidance without a
+replacement.
+
+### #86 (struct/class run files SIGSEGV rc=139): the SIGSEGV is FIXED
+Struct/class DECLARATIONS now lower and run (`struct P: x:int` + `main` printing
+a literal → rc=0). Chain of root causes fixed (gdb-localized each hop):
+
+1. **`lower_type` multi-arm `match lt_kind` MIS-ROUTES on stage4** (types.spl).
+   Struct/class field types lower to `TypeKind.Infer` (confirmed by disc probe:
+   field disc == Infer reference disc 3031551406; Named ref = 2288079638), but
+   the multi-arm qualified `match` routed the Infer value into its FIRST arm
+   `case TypeKind.Named(...)` (irrefutable — `Named` also names a HirTypeKind
+   variant), extracting garbage `args` and SIGSEGV in `lower_type_list`
+   (gdb: lower_type_list ← lower_type ← lower_field ← lower_struct). The IDENTICAL
+   match works for function param/return types (twofn's `-> text`), so it is
+   **value-specific irrefutable-first-arm mis-routing**, NOT a corrupt value.
+   FIX: disc-dispatch `lower_type` — reference discs from freshly constructed
+   TypeKind values + isolated single-arm guarded extraction (the
+   expressions.spl/statements.spl idiom). Qualifying the arms alone did NOT fix
+   it; disc-dispatch did (rc=139 → advanced).
+2. **`lower_field` default used Option `.?`/`.unwrap()` on a plain desugared
+   field** (declaration_lowering.spl). `Field.default` is a plain `Expr` gated by
+   `has_default` (NOT Optional); `if fld.default.?:` mis-evaluated true and
+   unwrapped a nil Expr → `lower_hir_expr(nil)` → "field access on nil receiver"
+   SIGILL. FIX: gate on `fld.has_default`, use `fld.default` directly (same class
+   as the iter14 eval_block fix).
+3. **`lower_hir_stmt` multi-arm match MIS-ROUTES `StmtKind.Val/Var/Return/Assign`**
+   (statements.spl) — SAME class as #1. A genuine `StmtKind.Val` matched NONE of
+   the qualified arms and fell to `case _:` → `HirExprKind.Error` (disc
+   2735847868 = hash("Error")), so **every val-decl (and non-Expr statement)
+   lowered to Error** and crashed the interpreter. Only Expr-statement bodies
+   (`print(...)`) were ever exercised on the unstub path — that is why `-c`,
+   `hello`, and `twofn` all worked while `val n = 5` did not. FIX: disc-dispatch
+   Val/Var/Return/Assign before the match (reference discs + single-arm
+   extraction). Repurposed the unused `hir_stmt_expr_disc`(ExprKind) extern to
+   `hir_stmt_kind_disc`(StmtKind) — a file may declare `rt_enum_discriminant`
+   only once (extern name == C symbol; no aliasing), and different files already
+   use different enum-typed copies. After this fix `val n = 5` no longer crashes.
+4. Also: `lower_struct`/`lower_class` switched from `match struct_: case
+   Struct(...)` destructure to direct field access (defensive; harmless), and
+   `module_assembly.spl` struct-Field construction switched positional → named
+   (defensive; the field type was already Infer, so this was a no-op for the
+   crash — recorded so a future reader does not re-chase it).
+
+### GENERALIZED HAZARD: irrefutable FIRST-ARM mis-routing in multi-arm matches
+`match kind: case Enum.FirstVariant(...)` on stage4 can (a) swallow OTHER
+variants (irrefutable), or (b) fail to match its OWN value which then falls to
+`case _`. Occurs when the variant name is shared across enums (Named in
+TypeKind+HirTypeKind; Expr in StmtKind+HirStmtKind) even when QUALIFIED. The
+reliable cure is **disc-dispatch**: `rt_enum_discriminant` of the scrutinee vs a
+reference disc from a freshly-constructed value, then an isolated single-arm
+guarded `match` for payload extraction. Applied to lower_type, lower_hir_stmt;
+the same template already lives in expressions.spl / statements.spl. Whole-match
+qualification is NOT sufficient.
+
+### REMAINING BLOCKER for the struct-prints-5 DONE gate (interpreter runtime, NOT lowering)
+With the above, `struct P: x:int; val p = P(x:5); print(p.x)` no longer SIGSEGVs
+in lowering — the crash moved to the **HIR interpreter**, which was only ever
+exercised with print-only bodies and is incomplete for real programs. Precisely
+localized, in order (all on scratchpad/stage4_it20h, gdb + itrace):
+- **Env variable resolution mis-keys.** `val n = 5; print(n)` now lowers fine and
+  runs rc=0 but prints nothing; `val a=3; val b=4; print(a+b)` → "invalid
+  operands for +". The env (env.spl) scopes are `Dict<SymbolId, Value>`; the Let
+  defines with the define-site SymbolId while the Var reads with the lookup-site
+  SymbolId (the iter19 shared/corrupt-handle), so struct-keyed lookup misses or
+  returns a wrong Value. Candidate fix: key the env by `symbol.id` (i64) — but
+  the looked-up SymbolId's `.id` may itself be degenerate (iter19), so verify.
+- **Struct construction is unimplemented.** `Value.Struct(type_, fields)` exists
+  (backend_types.spl) but `P(x:5)` is a `HirExprKind.Call` whose callee `P`
+  resolves to a struct symbol; the Call arm has no struct-constructor path, so it
+  eval's the callee as a value (NamedVar fallback → nil-payload `Value.Function`)
+  → `call_function` → `eval_block(nil)` → SIGILL. Needs: detect a struct-typed
+  callee (by name/symbol against `ctx.module.structs`) and build
+  `Value.Struct(name, {argname: argvalue})` from the named `HirCallArg`s.
+- **Field access is unimplemented.** `eval_expr` has NO `HirExprKind.Field` arm
+  (only IntLit…Call…Block…). `p.x` would hit `case _: not_implemented`. Needs a
+  Field arm; `Field` is struct-shadowed (struct Field) so it must be
+  DISC-PRE-DISPATCHED (hash("Field")=21232742) like expressions.spl, not a plain
+  match arm.
+These are three separate interpreter features (each with its own stage4 hazard),
+not codegen hazards — left for iteration 21 with the localization above.
+
+### cfg @cfg-same-name dispatch (coordinator repros) — NOT resolved
+`scratchpad/cfg_arch_dispatch_repro_a.spl`/`_b.spl` (two `@cfg(x86_64)`/
+`@cfg(arm64)` `fn arch_name()` + `fn main() -> i32`) still silently no-op (rc=0).
+Not investigated to root this iteration. Note: `_pp_extract_cfg_condition`
+handles only the COMMA `@cfg("k","v")` form; the spaced `@cfg(target_arch =
+"x86_64")` form is tokenized into 3 tokens and the atom "target_arch" alone
+evaluates false (separate cfg-eval gap). And `main() -> i32` exit codes are not
+propagated by the run path (rc stays 0). Left for a follow-up.
+
+### Verified on scratchpad/stage4_it20h (probe-free, all committed)
+`-c "print(1+1)"` → `2` rc=0; `run` single-fn/twofn/threefn/`use std.text` rc=0;
+struct/class DECLARATION (no construction) rc=0; `val n = 5` no longer crashes
+(rc=0); lint src/app/cli/main.spl rc=0; test
+test/01_unit/compiler/target_presets_spec.spl PASS 23/0 rc=0. Struct CONSTRUCTION
+(`P(x:5)`), variable READBACK, and the cfg repros remain open (interpreter-runtime
+cascade above). Commits: parser int-accum; lower_type disc-dispatch; lower_field
+has_default; lower_hir_stmt disc-dispatch; module_assembly named + lower_struct/
+class direct-access. Coordinator: do NOT re-flip the unstub default — real
+programs use variables and structs, which do not yet execute.

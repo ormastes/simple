@@ -88,3 +88,63 @@ describe "PPTX: speaker notes and transitions":
         expect(deck2[0].transition).to_equal("wipe")
         expect(deck2[1].notes).to_equal("")
         expect(deck2[1].transition).to_equal("push")
+
+describe "PPTX: bullet levels and slide layouts":
+    """Nested deck bullets export as `<a:pPr lvl=\"N\"><a:buChar/></a:pPr>`
+    paragraph properties (lvl omitted for level 0) and import back to
+    indentation; @layout: title-only|section map to alternate shape
+    arrangements (centered title / big centered title with a larger font
+    size attr) marked by shape names, round-tripping losslessly. Package
+    integrity is validated with the system `unzip -t`."""
+
+    it "writes lvl attributes for nested bullets, omitting level 0":
+        val deck = parse_deck("Agenda\n- Opening\n  - Welcome note\n    - Speaker intro")
+        val pptx = deck_to_pptx_bytes(deck)
+        val slide_xml = zip_extract_text(pptx, "ppt/slides/slide1.xml")
+        expect(slide_xml).to_contain("lvl=\"1\"")
+        expect(slide_xml).to_contain("lvl=\"2\"")
+        expect(slide_xml.contains("lvl=\"0\"")).to_be(false)
+        expect(slide_xml).to_contain("<a:pPr><a:buChar char=\"-\"/></a:pPr>")
+
+    it "keeps plain body paragraphs free of bullet properties":
+        val deck = parse_deck("Title\nPlain body")
+        val pptx = deck_to_pptx_bytes(deck)
+        val slide_xml = zip_extract_text(pptx, "ppt/slides/slide1.xml")
+        expect(slide_xml.contains("<a:buChar")).to_be(false)
+        expect(slide_xml.contains("<a:pPr")).to_be(false)
+
+    it "exports title-only layout as just a centered title shape":
+        val deck = parse_deck("Break Time\n@layout: title-only")
+        val pptx = deck_to_pptx_bytes(deck)
+        val slide_xml = zip_extract_text(pptx, "ppt/slides/slide1.xml")
+        expect(slide_xml).to_contain("name=\"ctrTitle\"")
+        val texts = pptx_slide_texts(slide_xml)
+        expect(texts.len()).to_equal(1)
+        expect(texts[0]).to_equal("Break Time")
+
+    it "exports section layout with a larger font size attr":
+        val deck = parse_deck("Part Two\n@layout: section")
+        val pptx = deck_to_pptx_bytes(deck)
+        val slide_xml = zip_extract_text(pptx, "ppt/slides/slide1.xml")
+        expect(slide_xml).to_contain("name=\"sectionTitle\"")
+        expect(slide_xml).to_contain("<a:rPr sz=\"4400\"/>")
+
+    it "round-trips bullet levels and layouts through a real .pptx losslessly":
+        val src = "Agenda\n- Opening\n  - Welcome note\n    - Speaker intro\n- Closing\nPlain wrap-up line\n@notes: pace slowly\n---\nBreak Time\n@layout: title-only\n---\nPart Two\n@layout: section\n@transition: fade"
+        val deck = parse_deck(src)
+        expect(deck_to_text(deck)).to_equal(src)
+        val pptx = deck_to_pptx_bytes(deck)
+        val deck2 = pptx_bytes_to_deck(pptx)
+        expect(deck2.len()).to_equal(3)
+        expect(deck_to_text(deck2)).to_equal(src)
+        expect(deck2[0].notes).to_equal("pace slowly")
+        expect(deck2[2].transition).to_equal("fade")
+
+    it "produces a package the system unzip tool validates":
+        val src = "Agenda\n- Opening\n  - Welcome note\n    - Speaker intro\n---\nBreak Time\n@layout: title-only\n---\nPart Two\n@layout: section"
+        val deck = parse_deck(src)
+        val pptx = deck_to_pptx_bytes(deck)
+        val out_path = "/tmp/claude-1000/-home-ormastes-dev-pub-simple/de80534b-2c68-466d-a211-9ec2529fed18/scratchpad/pptx_bullets_spec.pptx"
+        File.write_bytes(out_path, pptx)
+        val test_result = run("unzip", ["-t", out_path])
+        expect(test_result.exit_code).to_equal(0)

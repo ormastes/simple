@@ -9,7 +9,7 @@ Verifies parsing and serialization of deck text format:
 """
 
 use std.spec
-use app.office.slides.slide.{Slide, SlideElementKind}
+use app.office.slides.slide.{Slide, SlideElementKind, slide_layout_short_name}
 use app.office.slides.deck_format.{parse_deck, deck_to_text}
 
 describe "Deck Format: Parsing":
@@ -202,3 +202,122 @@ describe "Deck Format: speaker notes and transitions":
         val reparsed = parse_deck(deck_to_text(slides))
         expect(reparsed[0].notes).to_equal("n1")
         expect(reparsed[1].transition).to_equal("push")
+
+describe "Deck Format: nested bullets":
+    """Lines starting with `- ` are bullets; leading indentation sets the
+    nesting level (0/2/4 spaces = levels 0/1/2, deeper clamps to 2). Levels
+    are stored in `bullet<level>_<n>` element ids and re-indented on
+    serialization."""
+
+    it "parses a level-0 bullet line into a bullet element":
+        val content = "Title\n- Point one"
+        val slides = parse_deck(content)
+        var bullet_content = ""
+        var bullet_found = false
+        for el in slides[0].elements:
+            if el.id == "bullet0_1":
+                bullet_found = true
+                match el.kind:
+                    SlideElementKind.TextBox(content: c):
+                        bullet_content = c
+                    _:
+                        pass_do_nothing("non-textbox")
+        assert_true(bullet_found)
+        expect(bullet_content).to_equal("Point one")
+
+    it "parses 2-space and 4-space indents as levels 1 and 2":
+        val content = "Title\n- L0\n  - L1\n    - L2"
+        val slides = parse_deck(content)
+        var ids = ""
+        for el in slides[0].elements:
+            if el.id.starts_with("bullet"):
+                ids = "{ids}[{el.id}]"
+        expect(ids).to_equal("[bullet0_1][bullet1_2][bullet2_3]")
+
+    it "clamps deeper indentation to level 2":
+        val content = "Title\n      - Deep"
+        val slides = parse_deck(content)
+        var found = false
+        for el in slides[0].elements:
+            if el.id == "bullet2_1":
+                found = true
+        assert_true(found)
+
+    it "keeps plain body lines as body elements alongside bullets":
+        val content = "Title\n- Bullet\nPlain line"
+        val slides = parse_deck(content)
+        var ids = ""
+        for el in slides[0].elements:
+            if el.id != "title":
+                ids = "{ids}[{el.id}]"
+        expect(ids).to_equal("[bullet0_1][body2]")
+
+    it "treats a dash without a following space as plain body text":
+        val content = "Title\n-notabullet"
+        val slides = parse_deck(content)
+        var ids = ""
+        for el in slides[0].elements:
+            if el.id != "title":
+                ids = "{ids}[{el.id}]"
+        expect(ids).to_equal("[body1]")
+
+    it "serializes bullets back with indentation and marker":
+        val original = "Title\n- L0\n  - L1\n    - L2"
+        val slides = parse_deck(original)
+        val serialized = deck_to_text(slides)
+        expect(serialized).to_equal(original)
+
+    it "round-trips mixed bullets and plain lines exactly":
+        val original = "Agenda\n- Opening\n  - Welcome note\n- Closing\nPlain wrap-up"
+        val slides = parse_deck(original)
+        val serialized = deck_to_text(slides)
+        expect(serialized).to_equal(original)
+
+describe "Deck Format: @layout directive":
+    """@layout: title-only|title-body|section selects the slide arrangement;
+    absent, title-body, and unknown values mean the default title+body."""
+
+    it "parses @layout: title-only into the TitleSlide layout":
+        val content = "Title\n@layout: title-only"
+        val slides = parse_deck(content)
+        expect(slide_layout_short_name(slides[0].layout)).to_equal("Title")
+
+    it "parses @layout: section into the SectionHeader layout":
+        val content = "Title\n@layout: section"
+        val slides = parse_deck(content)
+        expect(slide_layout_short_name(slides[0].layout)).to_equal("Section")
+
+    it "defaults to Blank for title-body, absent, and unknown tags":
+        val a = parse_deck("Title\n@layout: title-body")
+        val b = parse_deck("Title\nBody")
+        val c = parse_deck("Title\n@layout: bogus-name")
+        expect(slide_layout_short_name(a[0].layout)).to_equal("Blank")
+        expect(slide_layout_short_name(b[0].layout)).to_equal("Blank")
+        expect(slide_layout_short_name(c[0].layout)).to_equal("Blank")
+
+    it "excludes the @layout directive from title/body content":
+        val content = "Title\nBody\n@layout: section"
+        val slides = parse_deck(content)
+        var body_count = 0
+        for el in slides[0].elements:
+            if el.id.starts_with("body"):
+                body_count = body_count + 1
+        expect(body_count).to_equal(1)
+
+    it "serializes non-default layouts back to @layout: lines":
+        val slides = parse_deck("Only Title\n@layout: title-only\n---\nBig Section\n@layout: section")
+        val serialized = deck_to_text(slides)
+        expect(serialized).to_contain("@layout: title-only")
+        expect(serialized).to_contain("@layout: section")
+
+    it "emits no @layout line for the default layout":
+        val slides = parse_deck("Title\nBody")
+        val serialized = deck_to_text(slides)
+        expect(serialized.contains("@layout:")).to_be(false)
+
+    it "round-trips the full ground-truth deck exactly (levels + layouts)":
+        val src = "Agenda\n- Opening\n  - Welcome note\n    - Speaker intro\n- Closing\nPlain wrap-up line\n@notes: pace slowly\n---\nBreak Time\n@layout: title-only\n---\nPart Two\n@layout: section\n@transition: fade"
+        val slides = parse_deck(src)
+        expect(slides.len()).to_equal(3)
+        val serialized = deck_to_text(slides)
+        expect(serialized).to_equal(src)
