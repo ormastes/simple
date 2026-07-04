@@ -7,7 +7,7 @@ commit → rebase onto origin/main (adds-only) → non-force SSH push.
 ## Done (run-green, on origin/main)
 - `nvme_types.spl` — frozen shared interface (constants, Handle, NvmeCmd/Cpl, helpers, expect_eq).
 - **FIL complete**: `fil_nand` (sim NAND), `fil_ecc`, `fil_badblock`, `fil_fmc` (P1 — wired into FIL),
-  `fil_scheduler` (P2 — channel scheduler, done-but-shelf), **`fil.spl`** (NAND+ECC+bad-block remap,
+  `fil_scheduler` (P2 — wired timing-floor scheduler), **`fil.spl`** (NAND+ECC+bad-block remap,
   page API for FTL; `FilRead{data,lba,seq,code}`).
 - **FTL leaves**: `ftl_map` (DFTL write-back cache), `ftl_band` (log allocator + valid bitmap), `ftl_journal` (WAL+checkpoint+A/B superblock).
 - **HIL+core leaves**: `hil_queue` (SQ/CQ rings), `hil_command` (decode/validate), `fw_pool` (gen-handle task pool; accessors cid/lba/data/status/old_ppn/new_ppn/seq/phase).
@@ -76,13 +76,10 @@ suite is green (gate
 `ALL FIRMWARE SELF-TESTS PASS`).
 
 Scope note (explicit): "full NVMe SSD fw" here = the host-runnable simulation (run-green).
-P9 — bare-metal **rv32** boot of *this Simple firmware*: `fw_rv32/entry.spl` is written (an
-array-free scalar re-expression of the RAIN reconstruct), `bin/simple check`-clean and
-host-verified. But the rv32 LLVM native build is environmentally broken here — it exits 255
-silently with no diagnostic and no ELF, and the proven full-OS recipe (`--entry
-src/os/kernel/arch/riscv32/boot.spl`) fails identically; the prebuilt
-`build/os/simpleos_riscv32.elf` is stale, so the boot was NOT observed. **P9 is BUILD-BLOCKED**
-(not done). See `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
+P9 — bare-metal **rv32** reference: `fw_rv32/entry.spl` is written as an array-free scalar
+re-expression of the RAIN reconstruct, `bin/simple check`-clean, and host-verified. The rv32 OS
+boot path is restored in the current lane, but the full 22-module no-alloc firmware has not been
+ported/wired into that boot path yet. P9 is therefore **reference-done, full-port pending**.
 
 ## Production hardening — DONE (run-green, on origin/main)
 
@@ -138,7 +135,7 @@ channel-level parallelism is a model a single-threaded sim cannot physically exh
 scope); P4 has a **wired segmented-PRP host-byte floor** (full HostMem/SGL/IOMMU remains out of scope);
 P5 has a **wired bounded-map-cache + fixed arena/free-list floor** (full DRAM subsystem remains out of scope);
 P6 has a **wired cooperative-owner floor** (true multicore/preemption remains out of scope);
-P9 is **build-blocked** (rv32 note above).
+P9 is **reference-done, full-port pending** (rv32 note above).
 
 Silicon-only pieces remain out of scope (real BCH/RS/LDPC hardware ECC, MMIO/PCIe, full PRP/SGL DMA, real DRAM refresh/ECC/bandwidth, multicore/preemptive scheduling, persistent backing
 store) — see `PRODUCTION_STATUS.md` § Silicon boundary. This is a hardware-FAITHFUL **simulation**,
