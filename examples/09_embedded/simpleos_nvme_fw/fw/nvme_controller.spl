@@ -111,6 +111,10 @@ impl NvmeController:
                 val ps_status: i64 = me.pt.set_power_state(cmd.cdw11)
                 if ps_status != SC_SUCCESS:
                     return AdminResult(status: ps_status, data: 0, post: true)
+            if admin_fid(cmd.cdw10) == FEAT_TEMP_THRESH:
+                val tt_status: i64 = me.pt.set_temperature_threshold(cmd.cdw11)
+                if tt_status != SC_SUCCESS:
+                    return AdminResult(status: tt_status, data: 0, post: true)
             if not me.features.set(admin_fid(cmd.cdw10), cmd.cdw11):
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             return AdminResult(status: SC_SUCCESS, data: cmd.cdw11, post: true)
@@ -119,6 +123,8 @@ impl NvmeController:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             if admin_fid(cmd.cdw10) == FEAT_POWER_MGMT:
                 return AdminResult(status: SC_SUCCESS, data: me.pt.get_power_state(), post: true)
+            if admin_fid(cmd.cdw10) == FEAT_TEMP_THRESH:
+                return AdminResult(status: SC_SUCCESS, data: me.pt.get_temperature_threshold(), post: true)
             return AdminResult(status: SC_SUCCESS, data: me.features.get(admin_fid(cmd.cdw10)), post: true)
         if cmd.opcode == ADMIN_GET_LOG:
             return me.do_get_log(cmd)
@@ -435,7 +441,14 @@ fn nvme_controller_selftest() -> i64:
     val sf: NvmeCpl = c.admin_reap()
     val gf: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(sf.status, SC_SUCCESS, "set feature ok")
-    fail = fail + expect_eq(gf.data, 345, "get feature returns the set value")
+    fail = fail + expect_eq(gf.data, 345, "get temperature threshold returns live value")
+    c.admin_submit(admin_set_feature_cmd(13, FEAT_TEMP_THRESH, THERMAL_BASE_K))
+    c.admin_submit(admin_get_feature_cmd(14, FEAT_TEMP_THRESH))
+    c.admin_process()
+    val btt: NvmeCpl = c.admin_reap()
+    val rtt: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(btt.status, SC_INVALID_FIELD, "set invalid temperature threshold rejected")
+    fail = fail + expect_eq(rtt.data, 345, "invalid temperature threshold leaves previous value")
     c.admin_submit(admin_set_feature_cmd(6, FEAT_MAX, 1))
     c.admin_submit(admin_get_feature_cmd(7, FEAT_MAX))
     c.admin_process()

@@ -23,11 +23,12 @@ val THERMAL_CRIT_K:     i64 = 363     # 90°C — SMART critical warning
 struct PowerThermal:
     power_state:     i64
     temp_k:          i64
+    crit_k:          i64
     throttled:       i64
     throttle_events: i64
 
 fn power_thermal_new() -> PowerThermal:
-    PowerThermal(power_state: 0, temp_k: THERMAL_BASE_K, throttled: 0, throttle_events: 0)
+    PowerThermal(power_state: 0, temp_k: THERMAL_BASE_K, crit_k: THERMAL_CRIT_K, throttled: 0, throttle_events: 0)
 
 impl PowerThermal:
     # Set Features FEAT_POWER_MGMT: select a power state (0 = highest performance). Invalid
@@ -40,6 +41,15 @@ impl PowerThermal:
 
     me get_power_state(self) -> i64:
         me.power_state
+
+    me set_temperature_threshold(tk: i64) -> i64:
+        if tk <= THERMAL_BASE_K:
+            return SC_INVALID_FIELD
+        me.crit_k = tk
+        SC_SUCCESS
+
+    me get_temperature_threshold(self) -> i64:
+        me.crit_k
 
     # Account for `ops` units of work this tick: activity heats the device (scaled down in
     # lower-power states), passive cooling pulls it toward the baseline. The throttle latches
@@ -81,7 +91,7 @@ impl PowerThermal:
 
     # SMART composite-temperature critical-warning bit (set over the critical threshold).
     me critical_warning(self) -> i64:
-        if me.temp_k >= THERMAL_CRIT_K:
+        if me.temp_k >= me.crit_k:
             return 1
         0
 
@@ -96,6 +106,11 @@ fn power_thermal_selftest() -> i64:
     fail = fail + expect_eq(pt.get_power_state(), 3, "pt: power state updated")
     fail = fail + expect_eq(pt.set_power_state(99), SC_INVALID_FIELD, "pt: invalid power state rejected")
     fail = fail + expect_eq(pt.get_power_state(), 3, "pt: invalid set leaves state unchanged")
+    fail = fail + expect_eq(pt.get_temperature_threshold(), THERMAL_CRIT_K, "pt: default thermal threshold")
+    fail = fail + expect_eq(pt.set_temperature_threshold(340), SC_SUCCESS, "pt: set thermal threshold")
+    fail = fail + expect_eq(pt.get_temperature_threshold(), 340, "pt: thermal threshold updated")
+    fail = fail + expect_eq(pt.set_temperature_threshold(THERMAL_BASE_K), SC_INVALID_FIELD, "pt: invalid thermal threshold rejected")
+    fail = fail + expect_eq(pt.get_temperature_threshold(), 340, "pt: invalid threshold leaves previous value")
 
     # A cool device is not throttled and runs at full budget.
     fail = fail + expect_eq(pt.is_throttled(), 0, "pt: cool device not throttled")
