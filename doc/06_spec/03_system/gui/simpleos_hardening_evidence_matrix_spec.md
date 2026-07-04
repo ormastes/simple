@@ -283,7 +283,7 @@ be mistaken for a completed RTL proof pass.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 87 lines folded for reproduction.
+Runnable source: 88 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -364,6 +364,7 @@ val report = file_read(_report_path(run_id))
 expect(report).to_contain("- mission_critical_release_status: blocked")
 expect(report).to_contain("- mission_critical_release_blockers: riscv_rtl_sby_proof")
 expect(report).to_contain("scripts/check/check-simpleos-mission-critical-release.shs")
+expect(report).to_contain("scripts/check/check-simpleos-mission-critical-prereqs.shs")
 expect(report).to_contain("- byl_sby_artifact_audit: pass")
 expect(report).to_contain("- byl_sby_artifact_audit_gate: scripts/check/check-simpleos-byl-sby-artifacts.shs")
 expect(report).to_contain("- riscv_rtl_sby_proof_gate: scripts/check/check-riscv-rtl-sby-proof.shs")
