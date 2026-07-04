@@ -1,0 +1,84 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "$#" -ne 5 ]; then
+    echo "usage: sh scripts/check/convert-riscv-vivado-reports.shs <rv32|rv64> <util.rpt> <timing.rpt> <target_mhz> <out_dir>" >&2
+    exit 2
+fi
+
+lane="$1"
+util_report="$2"
+timing_report="$3"
+target_mhz="$4"
+out_dir="$5"
+
+case "$lane" in
+    rv32|rv64) ;;
+    *) echo "FAIL: lane must be rv32 or rv64" >&2; exit 2 ;;
+esac
+
+test -f "$util_report" || { echo "FAIL: missing utilization report $util_report" >&2; exit 1; }
+test -f "$timing_report" || { echo "FAIL: missing timing report $timing_report" >&2; exit 1; }
+
+actual_luts="$(
+    awk -F'|' '
+        /CLB LUTs/ {
+            v=$3
+            gsub(/[,[:space:]]/, "", v)
+            if (v ~ /^[0-9]+$/) { print v; exit }
+        }
+    ' "$util_report"
+)"
+test -n "$actual_luts" || { echo "FAIL: $util_report missing CLB LUTs row" >&2; exit 1; }
+
+wns="$(
+    awk -F'|' '
+        /WNS\(ns\)/ { want=1; next }
+        want && /\|/ {
+            v=$2
+            gsub(/[[:space:]]/, "", v)
+            if (v ~ /^-?[0-9]+(\.[0-9]+)?$/) { print v; exit }
+            if (v == "NA") { print "NA"; exit }
+        }
+        want && ! /\|/ {
+            v=$1
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+            split(v, parts, /[[:space:]]+/)
+            if (parts[1] ~ /^-?[0-9]+(\.[0-9]+)?$/ || parts[1] == "NA") { print parts[1]; exit }
+        }
+        /WNS\(ns\)[^0-9-]*-?[0-9]+(\.[0-9]+)?/ {
+            line=$0
+            sub(/^.*WNS\(ns\)[^0-9-]*/, "", line)
+            sub(/[^0-9.-].*$/, "", line)
+            print line
+            exit
+        }
+    ' "$timing_report"
+)"
+test -n "$wns" || { echo "FAIL: $timing_report missing WNS(ns)" >&2; exit 1; }
+[ "$wns" != "NA" ] || { echo "FAIL: $timing_report has unconstrained WNS(ns)=NA" >&2; exit 1; }
+
+actual_mhz="$(
+    awk -v target="$target_mhz" -v wns="$wns" 'BEGIN {
+        period = 1000.0 / target
+        achieved_period = period - wns
+        if (achieved_period <= 0) {
+            print target
+        } else {
+            print int(1000.0 / achieved_period)
+        }
+    }'
+)"
+
+mkdir -p "$out_dir"
+{
+    printf 'source = "vivado"\n'
+    printf 'lane = "%s"\n' "$lane"
+    printf 'actual_luts = %s\n' "$actual_luts"
+    printf 'actual_mhz = %s\n' "$actual_mhz"
+    printf 'wns_ns = %s\n' "$wns"
+    printf 'utilization_report = "%s"\n' "$util_report"
+    printf 'timing_report = "%s"\n' "$timing_report"
+} > "$out_dir/${lane}_synth.sdn"
+
+echo "STATUS: PASS riscv-vivado-report-convert $lane"

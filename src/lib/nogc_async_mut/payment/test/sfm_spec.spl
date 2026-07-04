@@ -1,0 +1,98 @@
+use std.spec
+use std.io_runtime
+
+enum SfmSecurityLevel:
+    Normal
+    Trusted
+    Privileged
+
+enum LayerKind:
+    FrontCli
+    FrontGui
+    FrontAgent
+    BackService
+    BackDriver
+
+struct LayerDescriptor:
+    role: text
+    kind: LayerKind
+    entry_symbol: text
+    privileged: bool
+
+struct FeatureManifest:
+    manifest_name: text
+    version: text
+    security_level: SfmSecurityLevel
+    layers: list<LayerDescriptor>
+
+fn payment_sfm_manifest() -> FeatureManifest:
+    val gateway_layer = LayerDescriptor { role: "gateway", kind: LayerKind.BackService, entry_symbol: "gateway_dispatch", privileged: true }
+    val vault_layer = LayerDescriptor { role: "vault", kind: LayerKind.BackService, entry_symbol: "vault_dispatch", privileged: true }
+    val cli_layer = LayerDescriptor { role: "cli", kind: LayerKind.FrontCli, entry_symbol: "cli_payment_main", privileged: false }
+    val agent_layer = LayerDescriptor { role: "agent", kind: LayerKind.FrontAgent, entry_symbol: "handle_payment_tool", privileged: false }
+    return FeatureManifest {
+        manifest_name: "simple-payment",
+        version: "0.1.0",
+        security_level: SfmSecurityLevel.Trusted,
+        layers: [gateway_layer, vault_layer, cli_layer, agent_layer]
+    }
+
+describe "SFM manifest — payment module packaging":
+
+    describe "manifest structure":
+        it "has Trusted security level":
+            val manifest = payment_sfm_manifest()
+            expect manifest.security_level == SfmSecurityLevel.Trusted
+
+        it "has correct module name":
+            val manifest = payment_sfm_manifest()
+            expect manifest.manifest_name == "simple-payment"
+
+        it "has version 0.1.0":
+            val manifest = payment_sfm_manifest()
+            expect manifest.version == "0.1.0"
+
+    describe "layers":
+        it "exposes 4 layers (gateway, vault, cli, agent)":
+            val manifest = payment_sfm_manifest()
+            expect manifest.layers.length() == 4
+
+        it "gateway layer is privileged back-service":
+            val manifest = payment_sfm_manifest()
+            val gw = manifest.layers[0]
+            expect gw.role == "gateway"
+            expect gw.kind == LayerKind.BackService
+            expect gw.privileged == true
+
+        it "vault layer is privileged back-service":
+            val manifest = payment_sfm_manifest()
+            val v = manifest.layers[1]
+            expect v.role == "vault"
+            expect v.kind == LayerKind.BackService
+            expect v.privileged == true
+
+        it "cli layer is non-privileged front-cli":
+            val manifest = payment_sfm_manifest()
+            val cli = manifest.layers[2]
+            expect cli.role == "cli"
+            expect cli.kind == LayerKind.FrontCli
+            expect cli.privileged == false
+
+        it "agent layer is non-privileged front-agent":
+            val manifest = payment_sfm_manifest()
+            val ag = manifest.layers[3]
+            expect ag.role == "agent"
+            expect ag.kind == LayerKind.FrontAgent
+            expect ag.privileged == false
+
+    describe "authz gate":
+        it "privileged layers require Trusted security level":
+            val manifest = payment_sfm_manifest()
+            expect manifest.security_level == SfmSecurityLevel.Trusted
+            var priv_count = 0
+            var i = 0
+            while i < manifest.layers.length():
+                if manifest.layers[i].privileged:
+                    priv_count = priv_count + 1
+                i = i + 1
+            expect priv_count == 2

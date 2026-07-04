@@ -1,0 +1,142 @@
+#!/bin/sh
+# Repo Hygiene Regression Gate
+# Scans for policy violations that indicate clutter or drift.
+# Exit 0 = clean, exit 1 = violations found.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+VIOLATIONS=0
+WARNINGS=0
+
+log_violation() {
+    VIOLATIONS=$((VIOLATIONS + 1))
+    echo "VIOLATION: $1"
+}
+
+log_warning() {
+    WARNINGS=$((WARNINGS + 1))
+    echo "WARNING: $1"
+}
+
+# --- Check 1: Forbidden file types across entire repo ---
+# Python files: forbidden everywhere except vendor, node_modules, __pycache__
+PY_FILES=$(find . -name '*.py' \
+    -not -path './.git/*' \
+    -not -path './.jj/*' \
+    -not -path '*/vendor/*' \
+    -not -path '*/node_modules/*' \
+    -not -path '*/__pycache__/*' \
+    -not -path '*/build/*' \
+    2>/dev/null || true)
+if [ -n "$PY_FILES" ]; then
+    for f in $PY_FILES; do
+        log_violation "forbidden .py file: $f (convert to .spl or .shs)"
+    done
+fi
+
+# Bash/shell files: forbidden everywhere except 3 bootstrap scripts
+BASH_FILES=$(find . \( -name '*.bash' -o -name '*.sh' \) \
+    -not -path './.git/*' \
+    -not -path './.jj/*' \
+    -not -path '*/vendor/*' \
+    -not -path '*/node_modules/*' \
+    -not -path '*/build/*' \
+    -not -path './scripts/bootstrap/bootstrap-from-scratch.sh' \
+    -not -path './scripts/bootstrap/bootstrap-seed.sh' \
+    -not -path './scripts/bootstrap/bootstrap-verify.sh' \
+    2>/dev/null || true)
+if [ -n "$BASH_FILES" ]; then
+    for f in $BASH_FILES; do
+        log_violation "forbidden .sh/.bash file: $f (rename to .shs)"
+    done
+fi
+
+# --- Check 2: Stale .smf placeholders (179 bytes = empty stub) ---
+STALE_SMF=$(find src/ -name '*.smf' -size 179c 2>/dev/null | head -50 || true)
+STALE_SMF_COUNT=0
+if [ -n "$STALE_SMF" ]; then
+    STALE_SMF_COUNT=$(echo "$STALE_SMF" | wc -l)
+    # This is a warning, not a violation — stale stubs are expected during migration
+    log_warning "$STALE_SMF_COUNT stale 179-byte .smf placeholder(s) found"
+fi
+
+# --- Check 3: Uncommitted report/doc clutter in tracked dirs ---
+# Reports should not be auto-committed; check for untracked .md in doc/09_report
+REPORT_CLUTTER=$(find doc/09_report/ -name '*.md' -newer doc/09_report/.gitkeep 2>/dev/null \
+    | head -20 || true)
+# Note: .gitkeep may not exist; this check is best-effort
+
+# --- Check 4: Naming convention in src/lib — dirs should be snake_case ---
+BAD_LIB_DIRS=$(find src/lib/ -mindepth 2 -maxdepth 2 -type d 2>/dev/null \
+    | while read -r d; do
+        base=$(basename "$d")
+        if echo "$base" | grep -qE '[A-Z]|-'; then
+            echo "$d"
+        fi
+    done || true)
+if [ -n "$BAD_LIB_DIRS" ]; then
+    for d in $BAD_LIB_DIRS; do
+        log_violation "non-snake_case dir in src/lib/: $d"
+    done
+fi
+
+# --- Check 5: Credentials / secrets leak guard ---
+SECRET_FILES=$(find . -maxdepth 3 \
+    \( -name '.env' -o -name 'credentials.json' -o -name '*.pem' -o -name '*.key' \) \
+    -not -path './.git/*' \
+    -not -path './vendor/*' \
+    2>/dev/null || true)
+if [ -n "$SECRET_FILES" ]; then
+    for f in $SECRET_FILES; do
+        log_violation "potential secret/credential file: $f"
+    done
+fi
+
+# --- Check 6: TODO/FIXME items in .spl files that should be tracked ---
+# Just count — not a violation, but surface for awareness
+TODO_COUNT=$(grep -r 'TODO\|FIXME' src/ --include='*.spl' 2>/dev/null | wc -l || echo 0)
+
+# --- Check 7: Live KMS workflow must remain manual and credential-gated ---
+if ! sh scripts/check/check-live-kms-security-workflow.shs; then
+    log_violation "live KMS workflow invariant check failed"
+fi
+
+# --- Check 8: Workspace root write guard for newly added files ---
+if ! sh scripts/check-workspace-root-guard.shs audit --staged; then
+    log_violation "workspace root write guard staged audit failed"
+fi
+
+# --- Check 9: LLM-style numbered artifact guard for newly added/renamed files ---
+if ! sh scripts/audit/numbered-artifact-guard.shs --working; then
+    log_violation "numbered artifact working-copy audit failed"
+fi
+if ! sh scripts/audit/numbered-artifact-guard.shs --staged; then
+    log_violation "numbered artifact staged audit failed"
+fi
+
+NUMBERED_BASE_REF="${NUMBERED_ARTIFACT_BASE_REF:-}"
+if [ -z "$NUMBERED_BASE_REF" ] && git rev-parse --verify origin/main >/dev/null 2>&1; then
+    NUMBERED_BASE_REF="$(git merge-base HEAD origin/main 2>/dev/null || true)"
+fi
+if [ -n "$NUMBERED_BASE_REF" ]; then
+    if ! sh scripts/audit/numbered-artifact-guard.shs --changed-from "$NUMBERED_BASE_REF"; then
+        log_violation "numbered artifact changed-path audit failed"
+    fi
+fi
+
+# --- Summary ---
+echo ""
+echo "=== Repo Hygiene Gate ==="
+echo "Violations: $VIOLATIONS"
+echo "Warnings:   $WARNINGS"
+echo "TODOs/FIXMEs in src/: $TODO_COUNT"
+
+if [ "$VIOLATIONS" -gt 0 ]; then
+    echo "FAILED: $VIOLATIONS violation(s) found"
+    exit 1
+fi
+
+echo "PASSED: repository is clean"
+exit 0

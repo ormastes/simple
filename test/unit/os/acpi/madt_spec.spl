@@ -1,0 +1,82 @@
+"""
+# ACPI MADT Parser Specification
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.acpi.madt.{ACPI_SIG_APIC, acpi_madt_lapic_ids_raw}
+
+fn _zero_buf(len: u64) -> [u8]:
+    var buf: [u8] = []
+    var i: u64 = 0
+    while i < len:
+        buf = buf + [0u8]
+        i = i + 1
+    buf
+
+fn _put_u32_le(buf: [u8], off: u64, value: u32) -> [u8]:
+    var out = buf
+    out[off as i64] = (value & 0xFF) as u8
+    out[(off + 1) as i64] = ((value >> 8) & 0xFF) as u8
+    out[(off + 2) as i64] = ((value >> 16) & 0xFF) as u8
+    out[(off + 3) as i64] = ((value >> 24) & 0xFF) as u8
+    out
+
+fn _make_madt_fixture() -> [u8]:
+    var buf = _zero_buf(76u64)
+    buf = _put_u32_le(buf, 4u64, 76u32)
+
+    buf[44] = 0u8
+    buf[45] = 8u8
+    buf[46] = 1u8
+    buf[47] = 2u8
+    buf = _put_u32_le(buf, 48u64, 1u32)
+
+    buf[52] = 0u8
+    buf[53] = 8u8
+    buf[54] = 2u8
+    buf[55] = 3u8
+    buf = _put_u32_le(buf, 56u64, 0u32)
+
+    buf[60] = 9u8
+    buf[61] = 16u8
+    buf[62] = 0u8
+    buf[63] = 0u8
+    buf = _put_u32_le(buf, 64u64, 0x101u32)
+    buf = _put_u32_le(buf, 68u64, 8u32)
+    buf = _put_u32_le(buf, 72u64, 7u32)
+    buf
+
+fn _buf_read8(buf: [u8], off: u64) -> u8:
+    buf[off as i64]
+
+fn _buf_read32(buf: [u8], off: u64) -> u32:
+    val b0 = buf[(off + 0) as i64] as u32
+    val b1 = buf[(off + 1) as i64] as u32
+    val b2 = buf[(off + 2) as i64] as u32
+    val b3 = buf[(off + 3) as i64] as u32
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+describe "ACPI MADT parser":
+    it "encodes APIC table signature little-endian":
+        expect(ACPI_SIG_APIC).to_equal(0x43495041)
+
+    it "extracts enabled local APIC and online-capable x2APIC ids":
+        val buf = _make_madt_fixture()
+        fn r8(off: u64) -> u8: _buf_read8(buf, off)
+        fn r32(off: u64) -> u32: _buf_read32(buf, off)
+
+        val ids = acpi_madt_lapic_ids_raw(r8, r32, 0u64)
+
+        expect(ids.len()).to_equal(2)
+        expect(ids[0]).to_equal(2u32)
+        expect(ids[1]).to_equal(0x101u32)
+
+    it "returns empty ids for undersized MADT":
+        val buf = _zero_buf(40u64)
+        val sized = _put_u32_le(buf, 4u64, 40u32)
+        fn r8(off: u64) -> u8: _buf_read8(sized, off)
+        fn r32(off: u64) -> u32: _buf_read32(sized, off)
+
+        val ids = acpi_madt_lapic_ids_raw(r8, r32, 0u64)
+
+        expect(ids.len()).to_equal(0)

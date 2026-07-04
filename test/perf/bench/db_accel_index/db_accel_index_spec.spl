@@ -1,0 +1,346 @@
+# DB Accel Phase 2 Index Structures — Regression Tests
+#
+# Self-contained: all structs and helpers are defined inline.
+# Tests cover PrefixIndex, TextIndex, PageSummary, and FilterIn.
+
+# ============================================================================
+# Inline definitions (replicate logic without imports)
+# ============================================================================
+
+struct PrefixEntry:
+    key: text
+    row_id: i64
+
+struct PrefixIndex:
+    entries: [PrefixEntry]
+    sorted: bool
+
+fn prefix_index_new() -> PrefixIndex:
+    PrefixIndex(entries: [], sorted: false)
+
+fn prefix_index_insert(idx: PrefixIndex, key: text, row_id: i64) -> PrefixIndex:
+    var entries = idx.entries
+    entries.push(PrefixEntry(key: key, row_id: row_id))
+    PrefixIndex(entries: entries, sorted: false)
+
+fn prefix_index_lookup_prefix(idx: PrefixIndex, prefix_str: text) -> [i64]:
+    var result: [i64] = []
+    val n = idx.entries.len()
+    var i = 0
+    while i < n:
+        if idx.entries[i as i32].key.starts_with(prefix_str):
+            result.push(idx.entries[i as i32].row_id)
+        i = i + 1
+    result
+
+fn prefix_index_lookup_exact(idx: PrefixIndex, key: text) -> [i64]:
+    var result: [i64] = []
+    val n = idx.entries.len()
+    var i = 0
+    while i < n:
+        if idx.entries[i as i32].key == key:
+            result.push(idx.entries[i as i32].row_id)
+        i = i + 1
+    result
+
+fn prefix_index_size(idx: PrefixIndex) -> i64:
+    idx.entries.len()
+
+struct TextIndexEntry:
+    value: text
+    row_id: i64
+
+struct TextIndex:
+    entries: [TextIndexEntry]
+
+fn text_index_new() -> TextIndex:
+    TextIndex(entries: [])
+
+fn text_index_insert(idx: TextIndex, value: text, row_id: i64) -> TextIndex:
+    var entries = idx.entries
+    entries.push(TextIndexEntry(value: value, row_id: row_id))
+    TextIndex(entries: entries)
+
+fn text_index_size(idx: TextIndex) -> i64:
+    idx.entries.len()
+
+fn text_index_search_prefix(idx: TextIndex, prefix_str: text) -> [i64]:
+    var result: [i64] = []
+    val n = idx.entries.len()
+    var i = 0
+    while i < n:
+        if idx.entries[i as i32].value.starts_with(prefix_str):
+            result.push(idx.entries[i as i32].row_id)
+        i = i + 1
+    result
+
+fn text_index_search_contains(idx: TextIndex, token: text) -> [i64]:
+    var result: [i64] = []
+    val n = idx.entries.len()
+    var i = 0
+    while i < n:
+        if idx.entries[i as i32].value.contains(token):
+            result.push(idx.entries[i as i32].row_id)
+        i = i + 1
+    result
+
+fn text_index_search_exact(idx: TextIndex, needle: text) -> [i64]:
+    var result: [i64] = []
+    val n = idx.entries.len()
+    var i = 0
+    while i < n:
+        if idx.entries[i as i32].value == needle:
+            result.push(idx.entries[i as i32].row_id)
+        i = i + 1
+    result
+
+fn text_index_count_prefix(idx: TextIndex, prefix_str: text) -> i64:
+    text_index_search_prefix(idx, prefix_str).len()
+
+fn text_index_count_contains(idx: TextIndex, token: text) -> i64:
+    text_index_search_contains(idx, token).len()
+
+struct PageSummary:
+    page_id: i64
+    min_key: i64
+    max_key: i64
+    row_count: i64
+    summary_hash: i64
+
+struct PageSummaryIndex:
+    pages: [PageSummary]
+
+fn page_summary_hash(min_key: i64, max_key: i64, row_count: i64) -> i64:
+    val h1 = min_key * 2654435761
+    val h2 = max_key * 2246822519
+    val h3 = row_count * 3266489917
+    (h1 ^ h2 ^ h3) & 0x7FFFFFFF
+
+fn page_summary_new(page_id: i64, min_key: i64, max_key: i64, row_count: i64) -> PageSummary:
+    val h = page_summary_hash(min_key, max_key, row_count)
+    PageSummary(page_id: page_id, min_key: min_key, max_key: max_key, row_count: row_count, summary_hash: h)
+
+fn page_summary_index_new() -> PageSummaryIndex:
+    PageSummaryIndex(pages: [])
+
+fn page_summary_index_add(idx: PageSummaryIndex, summary: PageSummary) -> PageSummaryIndex:
+    var pages = idx.pages
+    pages.push(summary)
+    PageSummaryIndex(pages: pages)
+
+fn page_summary_index_size(idx: PageSummaryIndex) -> i64:
+    idx.pages.len()
+
+fn page_summary_scan_range(idx: PageSummaryIndex, lo: i64, hi: i64) -> [i64]:
+    var result: [i64] = []
+    val n = idx.pages.len()
+    var i = 0
+    while i < n:
+        val p = idx.pages[i as i32]
+        if p.max_key >= lo and p.min_key <= hi:
+            result.push(p.page_id)
+        i = i + 1
+    result
+
+fn page_summary_total_rows(idx: PageSummaryIndex) -> i64:
+    var total = 0
+    val n = idx.pages.len()
+    var i = 0
+    while i < n:
+        total = total + idx.pages[i as i32].row_count
+        i = i + 1
+    total
+
+struct FilterInResult:
+    matched_count: i64
+    row_ids: [i64]
+
+fn filter_in_text(values: [text], needles: [text]) -> FilterInResult:
+    var row_ids: [i64] = []
+    val n = values.len()
+    val m = needles.len()
+    var i = 0
+    while i < n:
+        var j = 0
+        var matched = false
+        while j < m and (matched == false):
+            if values[i as i32] == needles[j as i32]:
+                matched = true
+            j = j + 1
+        if matched:
+            row_ids.push(i)
+        i = i + 1
+    FilterInResult(matched_count: row_ids.len(), row_ids: row_ids)
+
+fn filter_in_int(values: [i64], needles: [i64]) -> FilterInResult:
+    var row_ids: [i64] = []
+    val n = values.len()
+    val m = needles.len()
+    var i = 0
+    while i < n:
+        var j = 0
+        var matched = false
+        while j < m and (matched == false):
+            if values[i as i32] == needles[j as i32]:
+                matched = true
+            j = j + 1
+        if matched:
+            row_ids.push(i)
+        i = i + 1
+    FilterInResult(matched_count: row_ids.len(), row_ids: row_ids)
+
+fn filter_in_text_count(values: [text], needles: [text]) -> i64:
+    filter_in_text(values, needles).matched_count
+
+fn filter_in_int_count(values: [i64], needles: [i64]) -> i64:
+    filter_in_int(values, needles).matched_count
+
+# ============================================================================
+# PrefixIndex Tests
+# ============================================================================
+
+describe "PrefixIndex":
+    it "starts empty":
+        val idx = prefix_index_new()
+        expect(prefix_index_size(idx)).to_equal(0)
+
+    it "insert increases size":
+        val idx = prefix_index_new()
+        val idx2 = prefix_index_insert(idx, "ns/foo", 1)
+        expect(prefix_index_size(idx2)).to_equal(1)
+
+    it "lookup prefix finds matching entry":
+        val idx = prefix_index_new()
+        val idx2 = prefix_index_insert(idx, "ns/foo", 10)
+        val idx3 = prefix_index_insert(idx2, "ns/bar", 20)
+        val hits = prefix_index_lookup_prefix(idx3, "ns/")
+        expect(hits.len()).to_equal(2)
+
+    it "lookup prefix excludes non-matching entry":
+        val idx = prefix_index_new()
+        val idx2 = prefix_index_insert(idx, "ns/foo", 10)
+        val idx3 = prefix_index_insert(idx2, "other/baz", 30)
+        val hits = prefix_index_lookup_prefix(idx3, "ns/")
+        expect(hits.len()).to_equal(1)
+
+    it "lookup exact returns only exact match":
+        val idx = prefix_index_new()
+        val idx2 = prefix_index_insert(idx, "ns/foo", 10)
+        val idx3 = prefix_index_insert(idx2, "ns/foobar", 20)
+        val hits = prefix_index_lookup_exact(idx3, "ns/foo")
+        expect(hits.len()).to_equal(1)
+
+# ============================================================================
+# TextIndex Tests
+# ============================================================================
+
+describe "TextIndex":
+    it "starts empty":
+        val tidx = text_index_new()
+        expect(text_index_size(tidx)).to_equal(0)
+
+    it "insert grows size":
+        val tidx = text_index_new()
+        val tidx2 = text_index_insert(tidx, "hello world", 0)
+        expect(text_index_size(tidx2)).to_equal(1)
+
+    it "search_prefix finds entries":
+        val tidx = text_index_new()
+        val tidx2 = text_index_insert(tidx, "user/alice", 0)
+        val tidx3 = text_index_insert(tidx2, "user/bob", 1)
+        val tidx4 = text_index_insert(tidx3, "admin/carol", 2)
+        expect(text_index_count_prefix(tidx4, "user/")).to_equal(2)
+
+    it "search_contains finds substring":
+        val tidx = text_index_new()
+        val tidx2 = text_index_insert(tidx, "hello world", 0)
+        val tidx3 = text_index_insert(tidx2, "goodbye world", 1)
+        val tidx4 = text_index_insert(tidx3, "nothing here", 2)
+        expect(text_index_count_contains(tidx4, "world")).to_equal(2)
+
+    it "search_exact returns only exact match":
+        val tidx = text_index_new()
+        val tidx2 = text_index_insert(tidx, "foo", 0)
+        val tidx3 = text_index_insert(tidx2, "foobar", 1)
+        val hits = text_index_search_exact(tidx3, "foo")
+        expect(hits.len()).to_equal(1)
+
+    it "search_contains empty token matches all":
+        val tidx = text_index_new()
+        val tidx2 = text_index_insert(tidx, "alpha", 0)
+        val tidx3 = text_index_insert(tidx2, "beta", 1)
+        expect(text_index_count_contains(tidx3, "")).to_equal(2)
+
+# ============================================================================
+# PageSummary Tests
+# ============================================================================
+
+describe "PageSummary":
+    it "scan_range returns pages overlapping range":
+        val idx = page_summary_index_new()
+        val p0 = page_summary_new(0, 1, 100, 50)
+        val p1 = page_summary_new(1, 101, 200, 50)
+        val idx2 = page_summary_index_add(idx, p0)
+        val idx3 = page_summary_index_add(idx2, p1)
+        val hits = page_summary_scan_range(idx3, 50, 150)
+        expect(hits.len()).to_equal(2)
+
+    it "scan_range excludes non-overlapping pages":
+        val idx = page_summary_index_new()
+        val p0 = page_summary_new(0, 1, 100, 50)
+        val p1 = page_summary_new(1, 101, 200, 50)
+        val idx2 = page_summary_index_add(idx, p0)
+        val idx3 = page_summary_index_add(idx2, p1)
+        val hits = page_summary_scan_range(idx3, 150, 200)
+        expect(hits.len()).to_equal(1)
+
+    it "total_rows sums all pages":
+        val idx = page_summary_index_new()
+        val p0 = page_summary_new(0, 1, 100, 30)
+        val p1 = page_summary_new(1, 101, 200, 20)
+        val idx2 = page_summary_index_add(idx, p0)
+        val idx3 = page_summary_index_add(idx2, p1)
+        expect(page_summary_total_rows(idx3)).to_equal(50)
+
+    it "hash is deterministic":
+        val h1 = page_summary_hash(1, 100, 50)
+        val h2 = page_summary_hash(1, 100, 50)
+        expect(h1).to_equal(h2)
+
+    it "hash differs for different inputs":
+        val h1 = page_summary_hash(1, 100, 50)
+        val h2 = page_summary_hash(1, 200, 50)
+        expect((h1 == h2) == false).to_equal(true)
+
+# ============================================================================
+# FilterIn Tests
+# ============================================================================
+
+describe "FilterIn":
+    it "filter_in_text matches all needles present":
+        val values = ["a", "b", "c", "d"]
+        val needles = ["b", "d"]
+        val result = filter_in_text(values, needles)
+        expect(result.matched_count).to_equal(2)
+
+    it "filter_in_text empty needles matches nothing":
+        val values = ["a", "b", "c"]
+        val needles: [text] = []
+        val result = filter_in_text(values, needles)
+        expect(result.matched_count).to_equal(0)
+
+    it "filter_in_int OR semantics returns correct row ids":
+        val values = [10, 20, 30, 40, 50]
+        val needles = [20, 40]
+        val result = filter_in_int(values, needles)
+        expect(result.row_ids.len()).to_equal(2)
+
+    it "filter_in_int_count helper is consistent":
+        val values = [1, 2, 3, 4, 5]
+        val needles = [1, 3, 5]
+        expect(filter_in_int_count(values, needles)).to_equal(3)
+
+    it "filter_in_text_count helper is consistent":
+        val values = ["x", "y", "z"]
+        val needles = ["x", "z"]
+        expect(filter_in_text_count(values, needles)).to_equal(2)

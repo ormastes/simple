@@ -1,0 +1,388 @@
+# Semantic doc similarity orchestrator
+# Two modes:
+#   semantic     — local docstring/signature token-vector comparison (default, fast)
+#   semantic-llm — Ollama embedding comparison (requires running Ollama server)
+
+use compiler.tools.duplicate_check.config.{DuplicationConfig}
+use compiler.tools.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_directory, build_embedding_key, content_hash}
+use compiler.tools.duplicate_check.ollama_client.{EmbeddingResult, check_ollama_available, get_embedding}
+use compiler.tools.duplicate_check.embedding_cache.{EmbeddingCacheManager, load_embedding_cache, save_embedding_cache, lookup_cached, set_cached, csv_to_floats, floats_to_csv}
+use compiler.tools.duplicate_check.math_utils.{cosine_similarity_dense}
+use compiler.tools.duplicate_check.features.{build_feature_vector, cosine_similarity, FeatureVec, feature_signature, signatures_share_token}
+
+struct SemanticMatch:
+    entry_a: DocEntry
+    entry_b: DocEntry
+    similarity: f64
+    match_kind: text
+
+struct SemanticReport:
+    matches: [SemanticMatch]
+    missing_docs: [DocEntry]
+    total_items: i64
+    items_with_docs: i64
+    cache_hits: i64
+    cache_misses: i64
+    used_fallback: bool
+
+struct DocEntryPartition:
+    documented: [DocEntry]
+    missing_docs: [DocEntry]
+
+fn partition_doc_entries(entries: [DocEntry]) -> DocEntryPartition:
+    var documented: [DocEntry] = []
+    var missing_docs: [DocEntry] = []
+    for entry in entries:
+        if entry.has_doc:
+            documented.push(entry)
+        else:
+            missing_docs.push(entry)
+    DocEntryPartition(documented: documented, missing_docs: missing_docs)
+
+fn semantic_match_kind(sim: f64) -> text:
+    if sim >= 0.97:
+        return "copy_paste"
+    "similar"
+
+fn make_semantic_match(a: DocEntry, b: DocEntry, sim: f64, suffix: text) -> SemanticMatch:
+    SemanticMatch(
+        entry_a: a,
+        entry_b: b,
+        similarity: sim,
+        match_kind: semantic_match_kind(sim) + suffix
+    )
+
+fn run_semantic_analysis(target_path: text, config: DuplicationConfig) -> SemanticReport:
+    val all_entries = extract_docs_from_directory(target_path, config.exclude_patterns)
+    if all_entries.len() == 0:
+        return empty_report()
+
+    val partition = partition_doc_entries(all_entries)
+    val documented = partition.documented
+    val missing_docs = partition.missing_docs
+
+    # Check if Ollama is available
+    val ollama_ok = check_ollama_available(config.ollama_url)
+
+    if not ollama_ok:
+        print "WARNING: Ollama not available at {config.ollama_url}"
+        print "  Install Ollama and pull model: ollama pull {config.semantic_model}"
+        print ""
+        print "Falling back to text-based similarity..."
+        print ""
+        val fallback_report = run_text_fallback(documented, config.semantic_threshold, config.semantic_drift_threshold)
+        return SemanticReport(
+            matches: fallback_report.matches,
+            missing_docs: missing_docs,
+            total_items: all_entries.len(),
+            items_with_docs: documented.len(),
+            cache_hits: 0,
+            cache_misses: 0,
+            used_fallback: true
+        )
+
+    # Load embedding cache
+    val cache_path = ".semantic_cache.txt"
+    var cache = load_embedding_cache(cache_path, config.semantic_model)
+    if config.rebuild_embeddings:
+        cache = load_embedding_cache("/dev/null/nonexistent", config.semantic_model)
+
+    # Get embeddings for all documented entries
+    var embeddings: [[f64]] = []
+    var cache_hits = 0
+    var cache_misses = 0
+    var embed_idx = 0
+    while embed_idx < documented.len():
+        val entry = documented[embed_idx]
+        val emb_key = entry.file_path + "::" + entry.item_name
+        val emb_text = build_embedding_key(entry)
+        val hash = content_hash(emb_text)
+
+        # Check cache first
+        val lookup = lookup_cached(cache, emb_key, hash)
+        if lookup.hit:
+            cache_hits = cache_hits + 1
+            # NOTE: local name must not be `vec` — HIR lowering resolves `vec`
+            # to the builtin and fails, knocking the module off the JIT path.
+            val cached_vec = csv_to_floats(lookup.embedding_csv)
+            embeddings.push(cached_vec)
+        else:
+            cache_misses = cache_misses + 1
+            # Fetch from Ollama
+            val result = get_embedding(config.ollama_url, config.semantic_model, emb_text)
+            if result.error.len() == 0 and result.vector.len() > 0:
+                val csv = floats_to_csv(result.vector)
+                cache = set_cached(cache, emb_key, hash, csv)
+                embeddings.push(result.vector)
+            else:
+                embeddings.push([])
+
+        embed_idx = embed_idx + 1
+
+    # Save cache
+    save_embedding_cache(cache)
+
+    # Find similar pairs
+    val matches = find_similar_pairs(documented, embeddings, config.semantic_threshold, config.semantic_drift_threshold)
+
+    SemanticReport(
+        matches: matches,
+        missing_docs: missing_docs,
+        total_items: all_entries.len(),
+        items_with_docs: documented.len(),
+        cache_hits: cache_hits,
+        cache_misses: cache_misses,
+        used_fallback: false
+    )
+
+fn find_similar_pairs(entries: [DocEntry], embeddings: [[f64]], threshold: f64, drift_threshold: f64) -> [SemanticMatch]:
+    var matches: [SemanticMatch] = []
+
+    var i = 0
+    while i < entries.len():
+        val vec_a = embeddings[i]
+        if vec_a.len() == 0:
+            i = i + 1
+            continue
+
+        var j = i + 1
+        while j < entries.len():
+            val vec_b = embeddings[j]
+            if vec_b.len() == 0:
+                j = j + 1
+                continue
+
+            val sim = cosine_similarity_dense(vec_a, vec_b)
+
+            if sim >= threshold:
+                matches.push(make_semantic_match(entries[i], entries[j], sim, ""))
+
+            j = j + 1
+
+        i = i + 1
+
+    # Sort by similarity descending (quicksort)
+    if matches.len() > 1:
+        quicksort_matches_by_sim(matches, 0, matches.len() - 1)
+
+    matches
+
+fn quicksort_matches_by_sim(arr: [SemanticMatch], low: i64, high: i64):
+    if low >= high:
+        return
+    val pivot_sim = arr[(low + high) / 2].similarity
+    var i = low
+    var j = high
+    while i <= j:
+        while arr[i].similarity > pivot_sim:
+            i = i + 1
+        while arr[j].similarity < pivot_sim:
+            j = j - 1
+        if i <= j:
+            val tmp = arr[i]
+            arr[i] = arr[j]
+            arr[j] = tmp
+            i = i + 1
+            j = j - 1
+    if low < j:
+        quicksort_matches_by_sim(arr, low, j)
+    if i < high:
+        quicksort_matches_by_sim(arr, i, high)
+
+fn run_text_fallback(entries: [DocEntry], threshold: f64, drift_threshold: f64) -> SemanticReport:
+    var matches: [SemanticMatch] = []
+
+    var i = 0
+    while i < entries.len():
+        var j = i + 1
+        while j < entries.len():
+            val doc_a = entries[i].doc_comment
+            val doc_b = entries[j].doc_comment
+
+            # Skip very short docs
+            val both_long = doc_a.len() >= 10 and doc_b.len() >= 10
+            if both_long:
+                val sim = text_similarity(doc_a, doc_b)
+                if sim >= threshold:
+                    matches.push(make_semantic_match(entries[i], entries[j], sim, " [text-based]"))
+
+            j = j + 1
+        i = i + 1
+
+    SemanticReport(
+        matches: matches,
+        missing_docs: [],
+        total_items: entries.len(),
+        items_with_docs: entries.len(),
+        cache_hits: 0,
+        cache_misses: 0,
+        used_fallback: true
+    )
+
+fn text_similarity(a: text, b: text) -> f64:
+    if a == b:
+        return 1.0
+    val total_len = a.len() + b.len()
+    if total_len == 0:
+        return 1.0
+    val lcs = longest_common_subsequence_len(a, b)
+    val numerator = (lcs * 2) * 1.0
+    val denominator = total_len * 1.0
+    numerator / denominator
+
+fn longest_common_subsequence_len(a: text, b: text) -> i64:
+    if a.len() == 0 or b.len() == 0:
+        return 0
+
+    var prev: [i64] = []
+    var init_j = 0
+    while init_j <= b.len():
+        prev.push(0)
+        init_j = init_j + 1
+
+    var i = 0
+    while i < a.len():
+        var curr: [i64] = [0]
+        var j = 0
+        while j < b.len():
+            val a_ch = a[i:i+1]
+            val b_ch = b[j:j+1]
+            if a_ch == b_ch:
+                curr.push(prev[j] + 1)
+            else:
+                curr.push(max_i64(curr[j], prev[j + 1]))
+            j = j + 1
+        prev = curr
+        i = i + 1
+
+    prev[b.len()]
+
+fn max_i64(a: i64, b: i64) -> i64:
+    if a >= b:
+        return a
+    b
+
+fn _tokenize_doc(text_val: text) -> {text: i64}:
+    var freq = {}
+    val bytes = text_val.bytes()
+    val len = bytes.len()
+    var word_start = -1
+    var i = 0
+    while i < len:
+        val c = bytes[i]
+        val is_alpha = (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95
+        val is_digit = c >= 48 and c <= 57
+        if is_alpha or is_digit:
+            if word_start < 0:
+                word_start = i
+        else:
+            if word_start >= 0 and i - word_start >= 2:
+                val lower = text_val[word_start:i].lower()
+                val existing = freq[lower] ?? 0
+                freq[lower] = existing + 1
+            word_start = -1
+        i = i + 1
+    if word_start >= 0 and len - word_start >= 2:
+        val lower = text_val[word_start:len].lower()
+        val existing = freq[lower] ?? 0
+        freq[lower] = existing + 1
+    freq
+
+fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> SemanticReport:
+    val all_entries = extract_docs_from_directory(target_path, config.exclude_patterns)
+    if all_entries.len() == 0:
+        return empty_report()
+
+    val partition = partition_doc_entries(all_entries)
+    val documented = partition.documented
+    val missing_docs = partition.missing_docs
+
+    var fvecs: [FeatureVec] = []
+    for entry in documented:
+        val text_val = build_embedding_key(entry)
+        val freq = _tokenize_doc(text_val)
+        val fv = build_feature_vector(0, freq)
+        fvecs.push(fv)
+
+    var sigs: [text] = []
+    for fv in fvecs:
+        val sig = feature_signature(fv, 5)
+        sigs.push(sig)
+
+    # Bucket by shared signature token (inverted index), NOT by directory —
+    # semantic clones usually live in different directories. Comparing only
+    # inside token buckets keeps this near-linear instead of global O(n²).
+    var token_to_indices: {text: text} = {}
+    var gi = 0
+    while gi < documented.len():
+        if fvecs[gi].magnitude != 0.0:
+            for tok in sigs[gi].split(","):
+                if tok.len() > 0:
+                    if token_to_indices.has(tok):
+                        token_to_indices[tok] = token_to_indices[tok] + "," + "{gi}"
+                    else:
+                        token_to_indices[tok] = "{gi}"
+        gi = gi + 1
+
+    var matches: [SemanticMatch] = []
+    val threshold = config.semantic_threshold
+    # Dedup: a pair sharing multiple signature tokens lands in multiple buckets.
+    var seen_pairs: {text: bool} = {}
+
+    for tok in token_to_indices.keys():
+        val idx_strs = token_to_indices[tok].split(",")
+        var indices: [i64] = []
+        for s in idx_strs:
+            indices.push(int(s))
+
+        # ponytail: cap giant buckets (a common token like "value"); raise if it
+        # ever drops a real clone — a genuine pair shares 5 tokens, so it also
+        # lands in 4 other, smaller buckets.
+        if indices.len() > 400:
+            continue
+
+        var pi = 0
+        while pi < indices.len():
+            val i = indices[pi]
+            var pj = pi + 1
+            while pj < indices.len():
+                val j = indices[pj]
+                if documented[i].file_path == documented[j].file_path:
+                    pj = pj + 1
+                    continue
+                val lo = if i < j: i else: j
+                val hi = if i < j: j else: i
+                val pair_key = "{lo}-{hi}"
+                if seen_pairs.has(pair_key):
+                    pj = pj + 1
+                    continue
+                seen_pairs[pair_key] = true
+                val sim = cosine_similarity(fvecs[i], fvecs[j])
+                if sim >= threshold:
+                    matches.push(make_semantic_match(documented[i], documented[j], sim, ""))
+                pj = pj + 1
+            pi = pi + 1
+
+    if matches.len() > 1:
+        quicksort_matches_by_sim(matches, 0, matches.len() - 1)
+
+    SemanticReport(
+        matches: matches,
+        missing_docs: missing_docs,
+        total_items: all_entries.len(),
+        items_with_docs: documented.len(),
+        cache_hits: 0,
+        cache_misses: 0,
+        used_fallback: false
+    )
+
+fn empty_report() -> SemanticReport:
+    SemanticReport(
+        matches: [],
+        missing_docs: [],
+        total_items: 0,
+        items_with_docs: 0,
+        cache_hits: 0,
+        cache_misses: 0,
+        used_fallback: false
+    )
