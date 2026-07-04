@@ -293,3 +293,78 @@ remains scheduled as a separate, architecture-sized follow-up.
 concurrent working-copy sweep mid-lane and had to be reapplied; verify the
 rename (`grep -rn 'default_style' <files>`) is still present before
 building on this workaround in a future session.
+
+## 2026-07-04 — Root-cause CORRECTED + working fix built in isolated worktree (NOT landed on main)
+
+An isolated-worktree agent built the seed (`cargo build -p simple-driver`),
+reproduced the bug with a minimal 2-module repro, and implemented a verified
+fix. Status: **fix works on the repro + overload-relevant specs; regression
+coverage PARTIAL; deliberately NOT landed on shared main** pending a dedicated
+hardening + full-regression pass (see caveats). Fix is preserved on git branch
+`worktree-agent-aa278f276edfdc49d` (commit `b8672cfbce2`, 8 seed files,
++177/-11) and as `scratchpad/card16_fix_final.diff`.
+
+### Correction to this doc's earlier analysis
+
+The earlier "Next step" pointed at the interpreter's runtime `use`-loader
+(`interpreter_module/module_loader.rs` → `module_evaluator.rs`). That path is
+**NOT** what the actual `bin/simple run`/`-c` CLI exercises. The CLI uses
+`pipeline::module_loader::load_module_with_imports`, which **flattens all
+imported modules' AST items into one combined list** (`strip_flattened_import_
+nodes`) BEFORE the interpreter's single registration pass runs — erasing
+per-function module identity before `interpreter_eval.rs` ever sees it. A naive
+"tag the function's module at registration" fix silently does nothing on this
+path (every function's owner reads as `"<entry>"`). This is why the collision
+persists into the CLI/GUI path specifically.
+
+### The fix (scoped to the tie case only)
+
+- `interpreter_state.rs`: 3 new thread-locals — `FUNCTION_MODULE_OWNER` (Arc
+  ptr-identity → owning module), `FLATTEN_FUNCTION_MODULE_HINT` (bridges module
+  identity across the flatten step, keyed by `(name, span.line, span.column)` —
+  the only thing surviving the flatten value-clone), `CURRENT_EXEC_MODULE`.
+- `pipeline/module_loader.rs`: `strip_flattened_import_nodes` records the hint.
+- `interpreter_eval.rs`: registration reads the hint to set the owner.
+- `interpreter_call/core/function_exec.rs`: save/restore `CURRENT_EXEC_MODULE`
+  around each function body (the single choke point).
+- `interpreter_call/mod.rs`: `select_overload` — ON AN EXACT SCORE TIE ONLY,
+  prefer the candidate whose owner == `CURRENT_EXEC_MODULE`; replace the
+  incumbent only if incumbent is not a same-module match and the new one is.
+  Every non-tie case is byte-for-byte identical to the old keep-first rule
+  (this is the key safety property: it cannot change a currently-correct
+  resolution, only arbitrary ties).
+
+### Verification (why it's promising but NOT yet landable)
+
+- Repro: pre-fix mis-dispatches `call_from_b()`'s `thing()` to module A
+  (`AResult has no field 'label'`); post-fix resolves correctly.
+- Specs on the fixed binary: `static_method_overload_dispatch_spec` 4/4,
+  `office_gui_pixel_spec` 5/5, `formula_financial_spec` 15/15; `counter --gui`
+  completes.
+- **Gaps:** `cargo test -p simple-compiler --lib` is PRE-broken (3× E0063
+  `missing field is_value_type` in test-cfg code the fix did NOT touch) — blocks
+  the full Rust unit regression. `simple_web_renderer_spec` (79 ex) hit the test
+  daemon's 2-min timeout — inconclusive, not a confirmed regression.
+- **KNOWN EDGE-CASE HOLE (must harden before landing):** the flatten hint is
+  keyed by `(name, line, col)` because `Span` has no source-file field. Two
+  different files with a same-named function at the same line/col would COLLIDE
+  → wrong module hint. Landing requires either adding a file/module id to `Span`
+  (or the hint key), or another disambiguator. Do not land until this is closed.
+
+### Orthogonal bug discovered (separate, file if lifting this)
+
+The DEFAULT JIT/native path (not the interpreter dispatch fixed here)
+mis-handles the same same-name/different-struct pattern with a memory
+corruption (`<invalid-heap:...>`), reproduced IDENTICALLY on pre- and post-fix
+binaries. Separate JIT/native-codegen issue, out of scope for the interpreter
+overload fix.
+
+### Recommended landing path
+
+Dedicated seed task: (1) harden the hint keying (close the line/col-collision
+hole), (2) fix or route around the pre-broken `cargo test` E0063s so full Rust
+regression runs, (3) full `.spl` spec sweep on the rebuilt binary, (4) land the
+seed diff + a targeted 2-module-same-name regression spec, (5) rebuild + deploy
+`bin/release` (the hazardous swap — coordinate with parallel sessions). Until
+then the source-level `default_style` rename workaround above keeps CARD 16's
+GUI repro unblocked.
