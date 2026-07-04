@@ -116,7 +116,7 @@ impl QueueSet:
     me create_cq(qid: i64, size: i64) -> i64:
         if not qid_in_range(qid):
             return SC_INVALID_QID
-        if me.cq_active[qid] == 1:
+        if me.cq_active[qid] != 0:
             return SC_INVALID_QID
         if size < 1 or size > MAX_QUEUE_SIZE:
             return SC_INVALID_QSIZE
@@ -130,7 +130,7 @@ impl QueueSet:
     me create_sq(qid: i64, size: i64, cqid: i64) -> i64:
         if not qid_in_range(qid):
             return SC_INVALID_QID
-        if me.sq_active[qid] == 1:
+        if me.sq_active[qid] != 0:
             return SC_INVALID_QID
         if size < 1 or size > MAX_QUEUE_SIZE:
             return SC_INVALID_QSIZE
@@ -147,7 +147,7 @@ impl QueueSet:
     me delete_sq(qid: i64) -> i64:
         if not qid_in_range(qid):
             return SC_INVALID_QID
-        if me.sq_active[qid] == 0:
+        if me.sq_active[qid] != 1:
             return SC_INVALID_QID
         me.sq_active[qid] = 0
         me.sq_cqid[qid] = 0
@@ -160,12 +160,12 @@ impl QueueSet:
     me delete_cq(qid: i64) -> i64:
         if not qid_in_range(qid):
             return SC_INVALID_QID
-        if me.cq_active[qid] == 0:
+        if me.cq_active[qid] != 1:
             return SC_INVALID_QID
         var bound: i64 = 0
         var s: i64 = 1
         while s <= MAX_IO_QUEUES:
-            if me.sq_active[s] == 1 and me.sq_cqid[s] == qid:
+            if me.sq_active[s] != 0 and me.sq_cqid[s] == qid:
                 bound = 1
             s = s + 1
         if bound == 1:
@@ -319,6 +319,13 @@ fn nvme_qset_selftest() -> i64:
     fail = fail + expect_eq(qs.create_cq(1, 64), SC_INVALID_QID, "re-create active CQ 1 rejected")
     fail = fail + expect_eq(qs.create_cq(99, 64), SC_INVALID_QID, "out-of-range qid rejected")
     fail = fail + expect_eq(qs.create_cq(2, 9999), SC_INVALID_QSIZE, "oversize queue rejected")
+    qs.cq_active[6] = 2
+    fail = fail + expect_eq(qs.create_cq(6, 64), SC_INVALID_QID, "corrupted CQ active flag blocks create")
+    qs.cq_active[6] = 0
+    qs.sq_active[6] = 2
+    fail = fail + expect_eq(qs.create_sq(6, 64, 1), SC_INVALID_QID, "corrupted SQ active flag blocks create")
+    fail = fail + expect_eq(qs.delete_sq(6), SC_INVALID_QID, "corrupted SQ active flag blocks delete")
+    qs.sq_active[6] = 0
 
     # submit / fetch round-trip on qid 1 (exact cid+data to catch the x8 bug)
     var ok: bool = qs.sq_submit(1, cmd_make(77, OP_WRITE, 13, 1, 0xC3))
@@ -392,6 +399,14 @@ fn nvme_qset_selftest() -> i64:
 
     # cannot delete CQ 1 while SQ 1 is bound; reverse order works
     fail = fail + expect_eq(qs.delete_cq(1), SC_QUEUE_BUSY, "delete CQ 1 with bound SQ rejected")
+    qs.sq_active[6] = 2
+    qs.sq_cqid[6] = 1
+    fail = fail + expect_eq(qs.delete_cq(1), SC_QUEUE_BUSY, "corrupted bound SQ blocks CQ delete")
+    qs.sq_active[6] = 0
+    qs.sq_cqid[6] = 0
+    qs.cq_active[6] = 2
+    fail = fail + expect_eq(qs.delete_cq(6), SC_INVALID_QID, "corrupted CQ active flag blocks delete")
+    qs.cq_active[6] = 0
     fail = fail + expect_eq(qs.delete_sq(1), SC_SUCCESS, "delete SQ 1")
     fail = fail + expect_eq(qs.delete_cq(1), SC_SUCCESS, "delete CQ 1 after SQ gone")
     fail = fail + expect_eq(qs.delete_sq(1), SC_INVALID_QID, "double-delete SQ 1 rejected")
