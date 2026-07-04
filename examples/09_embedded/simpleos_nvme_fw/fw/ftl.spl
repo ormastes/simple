@@ -249,6 +249,7 @@ impl Ftl:
     # writes to a stripe make its parity stale until the next seal (the ceiling: parity
     # is rebuilt on demand here rather than maintained on every program/erase/GC move).
     me rain_seal():
+        me.ensure_rain_parity_table()
         var group: i64 = 0
         while group < rain_num_groups():
             var page: i64 = 0
@@ -272,6 +273,8 @@ impl Ftl:
     # Returns the number of pages rebuilt.
     me rain_recover_channel(failed: i64) -> i64:
         if not rain_channel_valid(failed):
+            return 0
+        if not me.rain_parity_ready():
             return 0
         # Invert the L2P (lba → ppn) so we know which physical pages are live, and for whom.
         var rev: [i64] = ftl_fill(NUM_PAGES, UNMAP)
@@ -315,6 +318,13 @@ impl Ftl:
                 page = page + 1
             group = group + 1
         rebuilt
+
+    me rain_parity_ready() -> bool:
+        me.rain_parity.len() == rain_num_stripes()
+
+    me ensure_rain_parity_table():
+        if not me.rain_parity_ready():
+            me.rain_parity = ftl_fill(rain_num_stripes(), 0)
 
     # ── Read-only introspection (migration capture) ──────────────────────────
     # Physical page currently backing a logical block (UNMAP if unmapped).
@@ -585,6 +595,15 @@ fn ftl_rain_selftest() -> i64:
     val failed: i64 = blk0 % NUM_CHANNELS
     fail = fail + expect_eq(ftl.rain_recover_channel(NUM_CHANNELS), 0, "ftl-rain: invalid channel rebuild is inert")
     fail = fail + expect_eq(ftl.read(0), 1, "ftl-rain: invalid rebuild leaves data intact")
+    val saved_parity: [i64] = ftl.rain_parity
+    val erase_before_bad_parity: i64 = ftl.erase_count(blk0)
+    ftl.rain_parity = []
+    fail = fail + expect_eq(ftl.rain_recover_channel(failed), 0, "ftl-rain: corrupted parity table blocks rebuild")
+    fail = fail + expect_eq(ftl.erase_count(blk0), erase_before_bad_parity, "ftl-rain: corrupted parity table does not erase failed block")
+    ftl.rain_parity = saved_parity
+    ftl.rain_parity = []
+    ftl.rain_seal()
+    fail = fail + expect_eq(ftl.rain_parity_ready(), true, "ftl-rain: seal repairs corrupted parity table")
     var corrupted: i64 = 0
     i = 0
     while i < 64:
