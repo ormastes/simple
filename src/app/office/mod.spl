@@ -11,11 +11,11 @@ use app.office.slides.slide.{Slide, slide_count, blank_slide, add_text_box, slid
 use app.office.mail.mail_app.{MailApp}
 use app.office.planner.planner_app.{PlannerApp}
 use app.office.counter.{CounterApp}
-use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point}
+use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, session_scroll, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point}
 use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_source_pane, wysiwyg_update_line_checked}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.file_ops.{RecentFileStore}
-use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref, CellRef}
+use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref, CellRef, col_to_letter}
 use app.office.render_adapter.{office_render, office_render_source}
 use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv, recalculate_formula_cells}
 use app.office.slides.deck_format.{parse_deck, deck_to_text}
@@ -119,7 +119,7 @@ fn _run_office_gui_sheet_edit_command() -> i32:
     table_widget grid has no per-cell click target to hit-test against)."""
     val sheet = _build_office_gui_sheet_demo()
     var session = session_new(sheet, "D2")
-    session = session_select(session, "D2")
+    session = session_select(session, "D2", 5, 4)
 
     val before_view = sheet_gui_view_with_selection(session, 5, 4)
     val before_pixels = office_gui_sheet_session_pixels(before_view, session.selected_ref)
@@ -158,7 +158,7 @@ fn _run_office_gui_sheet_click_command() -> i32:
     val viewport_h = 480
     val sheet = _build_office_gui_sheet_demo()
     var session = session_new(sheet, "D2")
-    session = session_select(session, "D2")
+    session = session_select(session, "D2", 5, 4)
 
     val before_view = sheet_gui_view_with_selection(session, 5, 4)
     val before_pixels = office_gui_sheet_session_pixels(before_view, session.selected_ref)
@@ -214,7 +214,7 @@ fn _run_office_gui_sheet_key_command() -> i32:
 
     val keys: [text] = ["down", "9", "9", "enter"]
     for k in keys:
-        session = session_key(session, k, 5, 4)
+        session = session_key(session, k, 5, 4, 5, 4)
         print "office-gui-key: {k} -> {session.selected_ref}"
 
     val after_view = sheet_gui_view_with_selection(session, 5, 4)
@@ -226,6 +226,76 @@ fn _run_office_gui_sheet_key_command() -> i32:
     print "office-gui-key: AFTER frame {office_gui_frame_width()}x{office_gui_frame_height()}, {after_non_background} non-background pixels"
     for line in after_view.text_dump.split("\n"):
         print "office-gui-key-after: {line}"
+    return 0
+
+fn _build_office_gui_sheet_scroll_demo() -> Sheet:
+    """Build the demo sheet for `office sheet-gui-scroll`: 20 data rows
+    (A2:A21 labels, B2:B21 values 1..20) under a header row, plus a
+    =SUM(B2:B21) total placed a few rows further down (row 23) so it is
+    only reachable by scrolling PAST the initial 5-visible-row window --
+    proving the viewport is a real navigable window over a sheet bigger
+    than what first renders, not just a relabeled fixed grid."""
+    var sheet = Sheet.new("ScrollDemo")
+    sheet.set_value("A1", "Item")
+    sheet.set_value("B1", "Value")
+    var i = 1
+    while i <= 20:
+        val r = i + 1
+        sheet.set_value("A{r}", "Item {i}")
+        sheet.set_value("B{r}", "{i}")
+        i = i + 1
+    sheet.set_value("A23", "Total")
+    sheet.set_value("B23", "=SUM(B2:B21)")
+    sheet = recalculate_formula_cells(sheet)
+    sheet
+
+fn _office_gui_scroll_view_ref(session: SheetGuiSession) -> text:
+    """The current viewport's top-left cell ref (e.g. "A1"), built by
+    concatenation (not adjacent "{...}{...}" interpolation blocks) per the
+    quirk ledger's string-interpolation guidance."""
+    col_to_letter(session.view_left_col - 1) + "{session.view_top_row}"
+
+fn _run_office_gui_sheet_scroll_command() -> i32:
+    """Script the viewport/scroll path end to end over the 20-row scroll
+    demo sheet with a 5-visible-row x 2-column window: print the initial
+    window, walk the selection down 6 arrow-key steps (the viewport
+    auto-scrolls the minimal amount once the selection steps past the
+    window's bottom edge -- see gui.spl's _sheet_gui_scroll_to_show_row),
+    page down one full window (session_scroll -- selection follows the
+    page move, keeping its same relative row inside the window), then jump
+    the selection directly to A18 (an off-window session_select that must
+    scroll to reveal it). Each step prints "office-gui-scroll: <action> ->
+    sel=<ref> view=<top_ref>", then the final text_dump (which carries its
+    own "viewport|..." marker line -- see sheet_gui_view_with_selection)
+    and a pixel-rendered proof-of-frame line."""
+    val view_rows = 5
+    val view_cols = 2
+    val grid_rows = 30
+    val grid_cols = 2
+    val sheet = _build_office_gui_sheet_scroll_demo()
+    var session = session_new(sheet, "B2")
+    print "office-gui-scroll: initial -> sel={session.selected_ref} view={_office_gui_scroll_view_ref(session)}"
+
+    val keys: [text] = ["down", "down", "down", "down", "down", "down"]
+    for k in keys:
+        session = session_key(session, k, grid_rows, grid_cols, view_rows, view_cols)
+        print "office-gui-scroll: {k} -> sel={session.selected_ref} view={_office_gui_scroll_view_ref(session)}"
+
+    session = session_scroll(session, "page_down", view_rows, view_cols)
+    print "office-gui-scroll: page_down -> sel={session.selected_ref} view={_office_gui_scroll_view_ref(session)}"
+
+    session = session_select(session, "A18", view_rows, view_cols)
+    print "office-gui-scroll: select_A18 -> sel={session.selected_ref} view={_office_gui_scroll_view_ref(session)}"
+
+    val view = sheet_gui_view_with_selection(session, view_rows, view_cols)
+    val pixels = office_gui_sheet_session_pixels(view, session.selected_ref)
+    if pixels.len() == 0:
+        print "Error: office GUI render produced an empty frame for sheet-gui-scroll"
+        return 1
+    val non_background = office_gui_non_background_pixel_count(pixels)
+    print "office-gui-scroll: AFTER frame {office_gui_frame_width()}x{office_gui_frame_height()}, {non_background} non-background pixels"
+    for line in view.text_dump.split("\n"):
+        print "office-gui-scroll-after: {line}"
     return 0
 
 fn _run_office_gui_sheet_command() -> i32:
@@ -376,6 +446,8 @@ fn run_office(args: [text]) -> i32:
             return _run_office_gui_sheet_click_command()
         "sheet-gui-key" =>
             return _run_office_gui_sheet_key_command()
+        "sheet-gui-scroll" =>
+            return _run_office_gui_sheet_scroll_command()
         "chart-gui" =>
             return _run_office_gui_chart_command()
         "pivot-gui" =>
@@ -421,7 +493,7 @@ fn run_office(args: [text]) -> i32:
         "erp-invoice" =>
             return _run_erp_invoice_command(args)
         case _("unsupported office app names show usage"):
-            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|sheet-gui|sheet-gui-edit|sheet-gui-click|sheet-gui-key|chart-gui|pivot-gui|render|open|convert|toc|merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
+            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|sheet-gui|sheet-gui-edit|sheet-gui-click|sheet-gui-key|sheet-gui-scroll|chart-gui|pivot-gui|render|open|convert|toc|merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
             return 1
 
 fn _basename(path: text) -> text:
