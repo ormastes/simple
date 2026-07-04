@@ -16,6 +16,10 @@ use app.office.sheets.math_bridge.{excel_sin, excel_cos, excel_tan, excel_atan, 
                                         excel_ceiling, excel_atan2, excel_standardize, MATH_PI}
 use common.office.number.{office_parse_unsigned_decimal_f64}
 use common.string_core.{char_from_code, str_repeat}
+use std.math.special.{powf, exp_f64, ln_f64, sqrt_f64, gamma_ln, incomplete_beta, incomplete_beta_inv, incomplete_gamma_p, incomplete_gamma_p_inv, erf, erfc}
+use std.math.distributions.{norm_cdf, norm_inv, t_cdf_2t, t_inv, f_cdf, f_inv, binom_pmf, binom_cdf, lognorm_cdf, hypgeom_pmf, negbinom_pmf}
+use std.math.statistics.{mean, covar_pop, linfit}
+use std.math.financial.{daycount_frac, coup_prev, coup_next, xnpv_at, depreciation_coeff, amorlinc_period, amordegrc_period}
 
 # Runtime RNG (SFFI, same declaration as std core/random.spl). Inclusive on
 # both bounds — probed. Used by RAND / RANDBETWEEN only.
@@ -957,7 +961,7 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
         return CellValue.NumberVal(value: _parse_complex(s)[1])
     if name == "IMABS":
         val z = _parse_complex(s)
-        return CellValue.NumberVal(value: _sqrt_f64(z[0] * z[0] + z[1] * z[1]))
+        return CellValue.NumberVal(value: sqrt_f64(z[0] * z[0] + z[1] * z[1]))
     if name == "IMCONJUGATE":
         val z2 = _parse_complex(s)
         return CellValue.TextVal(value: _format_complex(z2[0], 0.0 - z2[1]))
@@ -1019,38 +1023,38 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
                 return CellValue.TextVal(value: _format_complex(inv[0], inv[1]))
             return CellValue.TextVal(value: _format_complex(rr, ri))
         # fractional exponent: polar form r^n * (cos n*theta + i sin n*theta)
-        val rmag = _sqrt_f64(pa * pa + pb * pb)
+        val rmag = sqrt_f64(pa * pa + pb * pb)
         val theta = _atan2_f64(pb, pa)
-        val rn = _powf(rmag, nf)
+        val rn = powf(rmag, nf)
         val ang = nf * theta
         return CellValue.TextVal(value: _format_complex(rn * _cos_f64(ang), rn * _sin_f64(ang)))
     if name == "IMSQRT":
         # Closed form: sqrt(a+bi) = sqrt((r+a)/2) + sign(b)*sqrt((r-a)/2) i
         val zsq = _parse_complex(s)
-        val rq = _sqrt_f64(zsq[0] * zsq[0] + zsq[1] * zsq[1])
-        val sre = _sqrt_f64((rq + zsq[0]) / 2.0)
-        var sim = _sqrt_f64((rq - zsq[0]) / 2.0)
+        val rq = sqrt_f64(zsq[0] * zsq[0] + zsq[1] * zsq[1])
+        val sre = sqrt_f64((rq + zsq[0]) / 2.0)
+        var sim = sqrt_f64((rq - zsq[0]) / 2.0)
         if zsq[1] < 0.0:
             sim = 0.0 - sim
         return CellValue.TextVal(value: _format_complex(sre, sim))
     if name == "IMEXP":
         val zex = _parse_complex(s)
-        val ea = _exp_f64(zex[0])
+        val ea = exp_f64(zex[0])
         return CellValue.TextVal(value: _format_complex(ea * _cos_f64(zex[1]), ea * _sin_f64(zex[1])))
     if name == "IMLN":
         val zln = _parse_complex(s)
-        val rln = _sqrt_f64(zln[0] * zln[0] + zln[1] * zln[1])
-        return CellValue.TextVal(value: _format_complex(_ln_f64(rln), _atan2_f64(zln[1], zln[0])))
+        val rln = sqrt_f64(zln[0] * zln[0] + zln[1] * zln[1])
+        return CellValue.TextVal(value: _format_complex(ln_f64(rln), _atan2_f64(zln[1], zln[0])))
     if name == "IMLOG10":
         val zl10 = _parse_complex(s)
-        val r10 = _sqrt_f64(zl10[0] * zl10[0] + zl10[1] * zl10[1])
-        val den10 = _ln_f64(10.0)
-        return CellValue.TextVal(value: _format_complex(_ln_f64(r10) / den10, _atan2_f64(zl10[1], zl10[0]) / den10))
+        val r10 = sqrt_f64(zl10[0] * zl10[0] + zl10[1] * zl10[1])
+        val den10 = ln_f64(10.0)
+        return CellValue.TextVal(value: _format_complex(ln_f64(r10) / den10, _atan2_f64(zl10[1], zl10[0]) / den10))
     if name == "IMLOG2":
         val zl2 = _parse_complex(s)
-        val r2 = _sqrt_f64(zl2[0] * zl2[0] + zl2[1] * zl2[1])
-        val den2 = _ln_f64(2.0)
-        return CellValue.TextVal(value: _format_complex(_ln_f64(r2) / den2, _atan2_f64(zl2[1], zl2[0]) / den2))
+        val r2 = sqrt_f64(zl2[0] * zl2[0] + zl2[1] * zl2[1])
+        val den2 = ln_f64(2.0)
+        return CellValue.TextVal(value: _format_complex(ln_f64(r2) / den2, _atan2_f64(zl2[1], zl2[0]) / den2))
     if name == "IMARGUMENT":
         val zar = _parse_complex(s)
         return CellValue.NumberVal(value: _atan2_f64(zar[1], zar[0]))
@@ -1852,7 +1856,7 @@ fn _subtotal_compute(func: i64, vals: [f64]) -> CellValue:
     if vals.len() == 0:
         return CellValue.ErrorVal(message: "SUBTOTAL/AGGREGATE requires values")
     if func == 1:
-        return CellValue.NumberVal(value: _mean(vals))
+        return CellValue.NumberVal(value: mean(vals))
     if func == 4:
         var mx = vals[0]
         for v in vals:
@@ -1876,13 +1880,13 @@ fn _subtotal_compute(func: i64, vals: [f64]) -> CellValue:
             total = total + v
         return CellValue.NumberVal(value: total)
     if func == 8:
-        return CellValue.NumberVal(value: _sqrt_f64(_pop_variance(vals)))
+        return CellValue.NumberVal(value: sqrt_f64(_pop_variance(vals)))
     if func == 11:
         return CellValue.NumberVal(value: _pop_variance(vals))
     if vals.len() < 2:
         return CellValue.ErrorVal(message: "SUBTOTAL/AGGREGATE requires 2+ values")
     if func == 7:
-        return CellValue.NumberVal(value: _sqrt_f64(_sample_variance(vals)))
+        return CellValue.NumberVal(value: sqrt_f64(_sample_variance(vals)))
     if func == 10:
         return CellValue.NumberVal(value: _sample_variance(vals))
     CellValue.ErrorVal(message: "SUBTOTAL/AGGREGATE function_num out of range")
@@ -2019,7 +2023,7 @@ fn _dispatch_a_variant(name: text, vals: [f64]) -> CellValue:
     if n == 0:
         return CellValue.ErrorVal(message: "{name} requires values")
     if name == "AVERAGEA":
-        return CellValue.NumberVal(value: _mean(vals))
+        return CellValue.NumberVal(value: mean(vals))
     if name == "MAXA":
         var mx = vals[0]
         for v in vals:
@@ -2035,13 +2039,13 @@ fn _dispatch_a_variant(name: text, vals: [f64]) -> CellValue:
     if name == "VARPA":
         return CellValue.NumberVal(value: _pop_variance(vals))
     if name == "STDEVPA":
-        return CellValue.NumberVal(value: _sqrt_f64(_pop_variance(vals)))
+        return CellValue.NumberVal(value: sqrt_f64(_pop_variance(vals)))
     if n < 2:
         return CellValue.ErrorVal(message: "{name} requires 2+ values")
     if name == "VARA":
         return CellValue.NumberVal(value: _sample_variance(vals))
     if name == "STDEVA":
-        return CellValue.NumberVal(value: _sqrt_f64(_sample_variance(vals)))
+        return CellValue.NumberVal(value: sqrt_f64(_sample_variance(vals)))
     CellValue.ErrorVal(message: "unknown A-variant {name}")
 
 fn _is_lookup_function(name: text) -> bool:
@@ -2908,7 +2912,7 @@ fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
     argument collector discards. All statistics are computed inline over LOCAL
     arrays: the interpreter reads array PARAMETERS as empty, so mean/variance
     helpers cannot cross a call boundary here (only the scalar-input CDF helpers
-    _gammainc_p / _t_2t_area / _f_cdf do)."""
+    incomplete_gamma_p / t_cdf_2t / f_cdf do)."""
     var vals: [[f64]] = []
     var rows: [i32] = []
     var cols: [i32] = []
@@ -2966,7 +2970,7 @@ fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
             df = obs.len() - 1
         if df < 1:
             return EvalResult(value: CellValue.ErrorVal(message: "CHISQ.TEST needs df >= 1"), next_pos: cur_pos)
-        val p = 1.0 - _gammainc_p(df.to_f64() / 2.0, stat / 2.0)
+        val p = 1.0 - incomplete_gamma_p(df.to_f64() / 2.0, stat / 2.0)
         return EvalResult(value: CellValue.NumberVal(value: p), next_pos: cur_pos)
 
     if name == "F.TEST":
@@ -3007,9 +3011,9 @@ fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         val d2 = a2.len().to_f64() - 1.0
         var p = 0.0
         if fstat > 1.0:
-            p = 2.0 * (1.0 - _f_cdf(fstat, d1, d2))
+            p = 2.0 * (1.0 - f_cdf(fstat, d1, d2))
         else:
-            p = 2.0 * _f_cdf(fstat, d1, d2)
+            p = 2.0 * f_cdf(fstat, d1, d2)
         return EvalResult(value: CellValue.NumberVal(value: p), next_pos: cur_pos)
 
     # T.TEST(range1, range2, tails, type)
@@ -3040,7 +3044,7 @@ fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
             sd = sd + dd * dd
             k = k + 1
         val vard = sd / (n - 1.0)
-        tstat = md / (_sqrt_f64(vard) / _sqrt_f64(n))
+        tstat = md / (sqrt_f64(vard) / sqrt_f64(n))
         df = n - 1.0
     else:
         if t1.len() < 2 or t2.len() < 2:
@@ -3075,16 +3079,16 @@ fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         val v2 = ss2 / (n2 - 1.0)
         if ttype == 2:
             val sp = ((n1 - 1.0) * v1 + (n2 - 1.0) * v2) / (n1 + n2 - 2.0)
-            tstat = (mm1 - mm2) / _sqrt_f64(sp * (1.0 / n1 + 1.0 / n2))
+            tstat = (mm1 - mm2) / sqrt_f64(sp * (1.0 / n1 + 1.0 / n2))
             df = n1 + n2 - 2.0
         else:
             val se = v1 / n1 + v2 / n2
-            tstat = (mm1 - mm2) / _sqrt_f64(se)
+            tstat = (mm1 - mm2) / sqrt_f64(se)
             val num = se * se
             val den = (v1 / n1) * (v1 / n1) / (n1 - 1.0) + (v2 / n2) * (v2 / n2) / (n2 - 1.0)
             df = num / den
     val at = if tstat < 0.0: 0.0 - tstat else: tstat
-    val area = _t_2t_area(at, df)
+    val area = t_cdf_2t(at, df)
     if tails == 1:
         return EvalResult(value: CellValue.NumberVal(value: area / 2.0), next_pos: cur_pos)
     EvalResult(value: CellValue.NumberVal(value: area), next_pos: cur_pos)
@@ -3310,7 +3314,10 @@ fn _lambda_body_uses_omitted(tokens: [text], body_start: i32, body_end: i32, ona
     author to guard every use themselves — this evaluator's IF isn't
     lazy (both branches are evaluated eagerly, see _dispatch_function's
     "IF" case), so an ISOMITTED-guarded body legitimately still contains
-    a bare `oname` token in its untaken branch."""
+    a bare `oname` token in its untaken branch. This also means a guarded
+    body whose TAKEN branch does arithmetic on the omitted param silently
+    computes with 0 instead of erroring, because the omitted-argument
+    sentinel coerces to 0 via the `.to_f64()` idiom rather than raising."""
     var has_isomitted_guard = false
     var i = body_start
     while i < body_end:
@@ -3533,47 +3540,6 @@ fn _eval_reduce(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResul
 val _LN2 = 0.6931471805599453
 val _PI = 3.141592653589793
 
-fn _exp_f64(x: f64) -> f64:
-    """e^x via argument halving + Taylor series, squared back up."""
-    var v = x
-    var squarings = 0
-    while v > 0.5 or v < -0.5:
-        v = v / 2.0
-        squarings = squarings + 1
-    # Taylor around 0
-    var term = 1.0
-    var sum = 1.0
-    var n = 1
-    while n <= 18:
-        term = term * v / n.to_f64()
-        sum = sum + term
-        n = n + 1
-    while squarings > 0:
-        sum = sum * sum
-        squarings = squarings - 1
-    sum
-
-fn _ln_f64(x: f64) -> f64:
-    """Natural log via binary normalization + atanh series. x must be > 0."""
-    var m = x
-    var e = 0
-    while m >= 2.0:
-        m = m / 2.0
-        e = e + 1
-    while m < 1.0:
-        m = m * 2.0
-        e = e - 1
-    val z = (m - 1.0) / (m + 1.0)
-    val z2 = z * z
-    var term = z
-    var sum = 0.0
-    var k = 1
-    while k <= 30:
-        sum = sum + term / k.to_f64()
-        term = term * z2
-        k = k + 2
-    e.to_f64() * _LN2 + 2.0 * sum
-
 fn _sin_f64(x: f64) -> f64:
     """Sine via range reduction to [-pi, pi] + Taylor series."""
     var v = x
@@ -3629,12 +3595,12 @@ fn _atan2_f64(y: f64, x: f64) -> f64:
 
 fn _sinh_f64(x: f64) -> f64:
     """Hyperbolic sine via exp: (e^x - e^-x) / 2."""
-    val ex = _exp_f64(x)
+    val ex = exp_f64(x)
     (ex - 1.0 / ex) / 2.0
 
 fn _cosh_f64(x: f64) -> f64:
     """Hyperbolic cosine via exp: (e^x + e^-x) / 2."""
-    val ex = _exp_f64(x)
+    val ex = exp_f64(x)
     (ex + 1.0 / ex) / 2.0
 
 fn _c_div(ar: f64, ai: f64, br: f64, bi: f64) -> [f64]:
@@ -3687,13 +3653,13 @@ fn _bessy0(x: f64) -> f64:
         val y = x * x
         val ans1 = -2957821389.0 + y * (7062834065.0 + y * (-512359803.6 + y * (10879881.29 + y * (-86327.92757 + y * 228.4622733))))
         val ans2 = 40076544269.0 + y * (745249964.8 + y * (7189466.438 + y * (47447.26470 + y * (226.1030244 + y * 1.0))))
-        return (ans1 / ans2) + 0.636619772 * _besselj(x, 0) * _ln_f64(x)
+        return (ans1 / ans2) + 0.636619772 * _besselj(x, 0) * ln_f64(x)
     val z = 8.0 / x
     val y = z * z
     val xx = x - 0.785398164
     val ans1 = 1.0 + y * (-0.1098628627e-2 + y * (0.2734510407e-4 + y * (-0.2073370639e-5 + y * 0.2093887211e-6)))
     val ans2 = -0.1562499995e-1 + y * (0.1430488765e-3 + y * (-0.6911147651e-5 + y * (0.7621095161e-6 + y * (-0.934935152e-7))))
-    _sqrt_f64(0.636619772 / x) * (_sin_f64(xx) * ans1 + z * _cos_f64(xx) * ans2)
+    sqrt_f64(0.636619772 / x) * (_sin_f64(xx) * ans1 + z * _cos_f64(xx) * ans2)
 
 fn _bessy1(x: f64) -> f64:
     """Bessel function of the second kind order 1, Y_1(x), x>0 (NR bessy1)."""
@@ -3701,13 +3667,13 @@ fn _bessy1(x: f64) -> f64:
         val y = x * x
         val ans1 = x * (-0.4900604943e13 + y * (0.1275274390e13 + y * (-0.5153438139e11 + y * (0.7349264551e9 + y * (-0.4237922726e7 + y * 0.8511937935e4)))))
         val ans2 = 0.2499580570e14 + y * (0.4244419664e12 + y * (0.3733650367e10 + y * (0.2245904002e8 + y * (0.1020426050e6 + y * (0.3549632885e3 + y)))))
-        return (ans1 / ans2) + 0.636619772 * (_besselj(x, 1) * _ln_f64(x) - 1.0 / x)
+        return (ans1 / ans2) + 0.636619772 * (_besselj(x, 1) * ln_f64(x) - 1.0 / x)
     val z = 8.0 / x
     val y = z * z
     val xx = x - 2.356194491
     val ans1 = 1.0 + y * (0.183105e-2 + y * (-0.3516396496e-4 + y * (0.2457520174e-5 + y * (-0.240337019e-6))))
     val ans2 = 0.04687499995 + y * (-0.2002690873e-3 + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)))
-    _sqrt_f64(0.636619772 / x) * (_sin_f64(xx) * ans1 + z * _cos_f64(xx) * ans2)
+    sqrt_f64(0.636619772 / x) * (_sin_f64(xx) * ans1 + z * _cos_f64(xx) * ans2)
 
 fn _bessy(n: i64, x: f64) -> f64:
     """Y_n(x) for integer order n>=0 via Y_0/Y_1 seeds + upward recurrence
@@ -3733,17 +3699,17 @@ fn _bessk0(x: f64) -> f64:
     asymptotic exp(-x)/sqrt(x) series for x>2."""
     if x <= 2.0:
         val y = x * x / 4.0
-        return (0.0 - _ln_f64(x / 2.0) * _besseli(x, 0)) + (-0.57721566 + y * (0.42278420 + y * (0.23069756 + y * (0.3488590e-1 + y * (0.262698e-2 + y * (0.10750e-3 + y * 0.74e-5))))))
+        return (0.0 - ln_f64(x / 2.0) * _besseli(x, 0)) + (-0.57721566 + y * (0.42278420 + y * (0.23069756 + y * (0.3488590e-1 + y * (0.262698e-2 + y * (0.10750e-3 + y * 0.74e-5))))))
     val y = 2.0 / x
-    (_exp_f64(0.0 - x) / _sqrt_f64(x)) * (1.25331414 + y * (-0.7832358e-1 + y * (0.2189568e-1 + y * (-0.1062446e-1 + y * (0.587872e-2 + y * (-0.251540e-2 + y * 0.53208e-3))))))
+    (exp_f64(0.0 - x) / sqrt_f64(x)) * (1.25331414 + y * (-0.7832358e-1 + y * (0.2189568e-1 + y * (-0.1062446e-1 + y * (0.587872e-2 + y * (-0.251540e-2 + y * 0.53208e-3))))))
 
 fn _bessk1(x: f64) -> f64:
     """Modified Bessel function of the second kind order 1, K_1(x), x>0 (NR bessk1)."""
     if x <= 2.0:
         val y = x * x / 4.0
-        return (_ln_f64(x / 2.0) * _besseli(x, 1)) + (1.0 / x) * (1.0 + y * (0.15443144 + y * (-0.67278579 + y * (-0.18156897 + y * (-0.1919402e-1 + y * (-0.110404e-2 + y * (-0.4686e-4)))))))
+        return (ln_f64(x / 2.0) * _besseli(x, 1)) + (1.0 / x) * (1.0 + y * (0.15443144 + y * (-0.67278579 + y * (-0.18156897 + y * (-0.1919402e-1 + y * (-0.110404e-2 + y * (-0.4686e-4)))))))
     val y = 2.0 / x
-    (_exp_f64(0.0 - x) / _sqrt_f64(x)) * (1.25331414 + y * (0.23498619 + y * (-0.3655620e-1 + y * (0.1504268e-1 + y * (-0.780353e-2 + y * (0.325614e-2 + y * (-0.68245e-3)))))))
+    (exp_f64(0.0 - x) / sqrt_f64(x)) * (1.25331414 + y * (0.23498619 + y * (-0.3655620e-1 + y * (0.1504268e-1 + y * (-0.780353e-2 + y * (0.325614e-2 + y * (-0.68245e-3)))))))
 
 fn _bessk(n: i64, x: f64) -> f64:
     """K_n(x) for integer order n>=0 via K_0/K_1 seeds + upward recurrence
@@ -3830,260 +3796,11 @@ fn _excel_format(v: f64, fmt_in: text) -> text:
         return _fmt_decimals_grouped(v, decs, grouped)
     _fmt_num_trim(v)
 
-fn _erf(x: f64) -> f64:
-    """Error function via Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7).
-
-    erf is odd, so negative arguments reflect the |x| computation. This is the
-    exact kernel previously inlined in _norm_cdf (see the identity note there)."""
-    val ax = if x < 0.0: 0.0 - x else: x
-    val t = 1.0 / (1.0 + 0.3275911 * ax)
-    val poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))))
-    val e = 1.0 - poly * _exp_f64(0.0 - ax * ax)
-    if x < 0.0:
-        return 0.0 - e
-    e
-
-fn _norm_cdf(z: f64) -> f64:
-    """Standard normal CDF via Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7).
-
-    Delegates to _erf: CDF(z) = 0.5*(1 + erf(|z|/sqrt2)), mirrored for z<0. This
-    keeps the same |z|-based kernel and the 1-cdf reflection as the original
-    inlined form, so results are bit-identical (NORMSDIST regression asserts it)."""
-    val x = if z < 0.0: 0.0 - z else: z
-    val cdf = 0.5 * (1.0 + _erf(x / 1.4142135623730951))
-    if z < 0.0:
-        return 1.0 - cdf
-    cdf
-
-fn _gammaln(x: f64) -> f64:
-    """Natural log of the gamma function via the Lanczos g=7 approximation (x > 0)."""
-    val xx = x - 1.0
-    var a = 0.99999999999980993
-    a = a + 676.5203681218851 / (xx + 1.0)
-    a = a - 1259.1392167224028 / (xx + 2.0)
-    a = a + 771.32342877765313 / (xx + 3.0)
-    a = a - 176.61502916214059 / (xx + 4.0)
-    a = a + 12.507343278686905 / (xx + 5.0)
-    a = a - 0.13857109526572012 / (xx + 6.0)
-    a = a + 9.9843695780195716e-6 / (xx + 7.0)
-    a = a + 1.5056327351493116e-7 / (xx + 8.0)
-    val t = xx + 7.5
-    0.5 * _ln_f64(2.0 * _PI) + (xx + 0.5) * _ln_f64(t) - t + _ln_f64(a)
-
-fn _norm_inv_std(p: f64) -> f64:
-    """Inverse standard normal CDF via Acklam's rational approximation (0 < p < 1)."""
-    val plow = 0.02425
-    val phigh = 1.0 - plow
-    if p < plow:
-        val q = _sqrt_f64(0.0 - 2.0 * _ln_f64(p))
-        val num = ((((-7.784894002430293e-03 * q - 3.223964580411365e-01) * q - 2.400758277161838e+00) * q - 2.549732539343734e+00) * q + 4.374664141464968e+00) * q + 2.938163982698783e+00
-        val den = (((7.784695709041462e-03 * q + 3.224671290700398e-01) * q + 2.445134137142996e+00) * q + 3.754408661907416e+00) * q + 1.0
-        return num / den
-    if p <= phigh:
-        val q = p - 0.5
-        val r = q * q
-        val num = (((((-3.969683028665376e+01 * r + 2.209460984245205e+02) * r - 2.759285104469687e+02) * r + 1.383577518672690e+02) * r - 3.066479806614716e+01) * r + 2.506628277459239e+00) * q
-        val den = ((((-5.447609879822406e+01 * r + 1.615858368580409e+02) * r - 1.556989798598866e+02) * r + 6.680131188771972e+01) * r - 1.328068155288572e+01) * r + 1.0
-        return num / den
-    val qh = _sqrt_f64(0.0 - 2.0 * _ln_f64(1.0 - p))
-    val numh = ((((-7.784894002430293e-03 * qh - 3.223964580411365e-01) * qh - 2.400758277161838e+00) * qh - 2.549732539343734e+00) * qh + 4.374664141464968e+00) * qh + 2.938163982698783e+00
-    val denh = (((7.784695709041462e-03 * qh + 3.224671290700398e-01) * qh + 2.445134137142996e+00) * qh + 3.754408661907416e+00) * qh + 1.0
-    0.0 - numh / denh
-
 fn _fabs(x: f64) -> f64:
     """Absolute value of an f64."""
     if x < 0.0:
         return 0.0 - x
     x
-
-fn _betacf(a: f64, b: f64, x: f64) -> f64:
-    """Continued fraction for the incomplete beta function via Lentz (NR §6.4).
-
-    100 iterations, tiny=1e-30, eps=3e-14."""
-    val fpmin = 1e-30
-    val eps = 3e-14
-    val qab = a + b
-    val qap = a + 1.0
-    val qam = a - 1.0
-    var c = 1.0
-    var d = 1.0 - qab * x / qap
-    if _fabs(d) < fpmin:
-        d = fpmin
-    d = 1.0 / d
-    var h = d
-    var m = 1
-    while m <= 100:
-        val fm = m.to_f64()
-        val m2 = 2.0 * fm
-        var aa = fm * (b - fm) * x / ((qam + m2) * (a + m2))
-        d = 1.0 + aa * d
-        if _fabs(d) < fpmin:
-            d = fpmin
-        c = 1.0 + aa / c
-        if _fabs(c) < fpmin:
-            c = fpmin
-        d = 1.0 / d
-        h = h * d * c
-        aa = 0.0 - (a + fm) * (qab + fm) * x / ((a + m2) * (qap + m2))
-        d = 1.0 + aa * d
-        if _fabs(d) < fpmin:
-            d = fpmin
-        c = 1.0 + aa / c
-        if _fabs(c) < fpmin:
-            c = fpmin
-        d = 1.0 / d
-        val del = d * c
-        h = h * del
-        if _fabs(del - 1.0) < eps:
-            break
-        m = m + 1
-    h
-
-fn _betainc(x: f64, a: f64, b: f64) -> f64:
-    """Regularized incomplete beta I_x(a,b) via Lentz continued fractions (NR §6.4).
-
-    Uses the symmetry I_x(a,b)=1-I_{1-x}(b,a) when x>(a+1)/(a+b+2) for convergence."""
-    if x <= 0.0:
-        return 0.0
-    if x >= 1.0:
-        return 1.0
-    val bt = _exp_f64(_gammaln(a + b) - _gammaln(a) - _gammaln(b) + a * _ln_f64(x) + b * _ln_f64(1.0 - x))
-    if x < (a + 1.0) / (a + b + 2.0):
-        return bt * _betacf(a, b, x) / a
-    1.0 - bt * _betacf(b, a, 1.0 - x) / b
-
-fn _gammainc_series(a: f64, x: f64) -> f64:
-    """Lower regularized incomplete gamma P(a,x) via series (NR §6.2), for x < a+1."""
-    val eps = 3e-14
-    val gln = _gammaln(a)
-    var ap = a
-    var sum = 1.0 / a
-    var del = sum
-    var n = 1
-    while n <= 300:
-        ap = ap + 1.0
-        del = del * x / ap
-        sum = sum + del
-        if _fabs(del) < _fabs(sum) * eps:
-            break
-        n = n + 1
-    sum * _exp_f64(0.0 - x + a * _ln_f64(x) - gln)
-
-fn _gammainc_cf(a: f64, x: f64) -> f64:
-    """Upper regularized incomplete gamma Q(a,x) via continued fraction (NR §6.2), x >= a+1."""
-    val fpmin = 1e-30
-    val eps = 3e-14
-    val gln = _gammaln(a)
-    var b = x + 1.0 - a
-    var c = 1.0 / fpmin
-    var d = 1.0 / b
-    var h = d
-    var i = 1
-    while i <= 300:
-        val fi = i.to_f64()
-        val an = 0.0 - fi * (fi - a)
-        b = b + 2.0
-        d = an * d + b
-        if _fabs(d) < fpmin:
-            d = fpmin
-        c = b + an / c
-        if _fabs(c) < fpmin:
-            c = fpmin
-        d = 1.0 / d
-        val del = d * c
-        h = h * del
-        if _fabs(del - 1.0) < eps:
-            break
-        i = i + 1
-    _exp_f64(0.0 - x + a * _ln_f64(x) - gln) * h
-
-fn _gammainc_p(a: f64, x: f64) -> f64:
-    """Regularized lower incomplete gamma P(a,x): series for x<a+1, CF otherwise (NR §6.2)."""
-    if x <= 0.0:
-        return 0.0
-    if x < a + 1.0:
-        return _gammainc_series(a, x)
-    1.0 - _gammainc_cf(a, x)
-
-fn _betainc_inv(p: f64, a: f64, b: f64) -> f64:
-    """Inverse of I_x(a,b) in x by bisection on [0,1], 60 iterations."""
-    var lo = 0.0
-    var hi = 1.0
-    var it = 0
-    while it < 60:
-        val mid = (lo + hi) / 2.0
-        if _betainc(mid, a, b) > p:
-            hi = mid
-        else:
-            lo = mid
-        it = it + 1
-    (lo + hi) / 2.0
-
-fn _gammainc_inv(p: f64, a: f64) -> f64:
-    """Inverse of P(a,x) in x by bracket-expand then bisection, 60 iterations."""
-    var hi = 1.0
-    var guard = 0
-    while _gammainc_p(a, hi) < p and guard < 200:
-        hi = hi * 2.0
-        guard = guard + 1
-    var lo = 0.0
-    var it = 0
-    while it < 60:
-        val mid = (lo + hi) / 2.0
-        if _gammainc_p(a, mid) > p:
-            hi = mid
-        else:
-            lo = mid
-        it = it + 1
-    (lo + hi) / 2.0
-
-fn _t_2t_area(x: f64, df: f64) -> f64:
-    """Two-tailed Student-t area P(|T|>x) = I_{df/(df+x^2)}(df/2, 1/2)."""
-    _betainc(df / (df + x * x), df / 2.0, 0.5)
-
-fn _t_inv_2t(alpha: f64, df: f64) -> f64:
-    """Inverse two-tailed t: x>0 s.t. _t_2t_area(x,df)=alpha (area decreases in x)."""
-    var lo = 0.0
-    var hi = 1.0
-    var guard = 0
-    while _t_2t_area(hi, df) > alpha and guard < 200:
-        hi = hi * 2.0
-        guard = guard + 1
-    var it = 0
-    while it < 60:
-        val mid = (lo + hi) / 2.0
-        if _t_2t_area(mid, df) > alpha:
-            lo = mid
-        else:
-            hi = mid
-        it = it + 1
-    (lo + hi) / 2.0
-
-fn _f_cdf(x: f64, d1: f64, d2: f64) -> f64:
-    """Snedecor F left-tail CDF = I_{d1*x/(d1*x+d2)}(d1/2, d2/2)."""
-    _betainc(d1 * x / (d1 * x + d2), d1 / 2.0, d2 / 2.0)
-
-fn _f_inv_left(p: f64, d1: f64, d2: f64) -> f64:
-    """Inverse of the F left-tail CDF by bracket-expand then bisection, 60 iterations."""
-    var hi = 1.0
-    var guard = 0
-    while _f_cdf(hi, d1, d2) < p and guard < 200:
-        hi = hi * 2.0
-        guard = guard + 1
-    var lo = 0.0
-    var it = 0
-    while it < 60:
-        val mid = (lo + hi) / 2.0
-        if _f_cdf(mid, d1, d2) > p:
-            hi = mid
-        else:
-            lo = mid
-        it = it + 1
-    (lo + hi) / 2.0
-
-fn _binom_pmf(k: i64, n: i64, p: f64) -> f64:
-    val c = _fact_i64(n) / (_fact_i64(k) * _fact_i64(n - k))
-    c * _pow_f64(p, k.to_f64()) * _pow_f64(1.0 - p, (n - k).to_f64())
 
 fn _fact_i64(n: i64) -> f64:
     var out = 1.0
@@ -4212,59 +3929,9 @@ fn _daycount_num(s1: f64, s2: f64, basis: i64) -> f64:
                 d2 = 30
     (360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)).to_f64()
 
-fn _daycount_frac(s1: f64, s2: f64, basis: i64) -> f64:
-    """Year fraction between two serials per basis 0..4 (Excel YEARFRAC)."""
-    if basis == 0 or basis == 4:
-        return _daycount_num(s1, s2, basis) / 360.0
-    if basis == 2:
-        return (s2 - s1) / 360.0
-    if basis == 3:
-        return (s2 - s1) / 365.0
-    # basis 1: actual/actual
-    val c1 = _civil_from_serial(s1)
-    val c2 = _civil_from_serial(s2)
-    val y1 = c1[0]
-    val y2 = c2[0]
-    if y1 == y2:
-        var denom = 365.0
-        if (y1 % 4 == 0 and (y1 % 100 != 0 or y1 % 400 == 0)):
-            denom = 366.0
-        return (s2 - s1) / denom
-    val years = (y2 - y1 + 1).to_f64()
-    val days = _serial_from_civil(y2 + 1, 1, 1) - _serial_from_civil(y1, 1, 1)
-    (s2 - s1) / (days / years)
-
-fn _coup_pcd(settle: f64, mat: f64, freq: i64) -> f64:
-    """Previous coupon date (serial) on or before settlement."""
-    val c = _civil_from_serial(mat)
-    val y = c[0]
-    val m = c[1]
-    val d = c[2]
-    val step = 12 / freq
-    var n = 0
-    var cd = _sec_edate(y, m, d, 0 - n * step)
-    while cd > settle:
-        n = n + 1
-        cd = _sec_edate(y, m, d, 0 - n * step)
-    cd
-
-fn _coup_ncd(settle: f64, mat: f64, freq: i64) -> f64:
-    """Next coupon date (serial) strictly after settlement."""
-    val c = _civil_from_serial(mat)
-    val y = c[0]
-    val m = c[1]
-    val d = c[2]
-    val step = 12 / freq
-    var n = 0
-    var cd = _sec_edate(y, m, d, 0 - n * step)
-    while cd > settle:
-        n = n + 1
-        cd = _sec_edate(y, m, d, 0 - n * step)
-    _sec_edate(y, m, d, 0 - (n - 1) * step)
-
 fn _coup_num(settle: f64, mat: f64, freq: i64) -> f64:
     """Number of coupons from the next coupon date to maturity, inclusive."""
-    val ncd = _coup_ncd(settle, mat, freq)
+    val ncd = coup_next(settle, mat, freq)
     val c = _civil_from_serial(mat)
     val y = c[0]
     val m = c[1]
@@ -4282,20 +3949,20 @@ fn _coup_num(settle: f64, mat: f64, freq: i64) -> f64:
 fn _coup_days(settle: f64, mat: f64, freq: i64, basis: i64) -> f64:
     """Days in the coupon period containing settlement."""
     if basis == 1:
-        return _coup_ncd(settle, mat, freq) - _coup_pcd(settle, mat, freq)
+        return coup_next(settle, mat, freq) - coup_prev(settle, mat, freq)
     if basis == 3:
         return 365.0 / freq.to_f64()
     360.0 / freq.to_f64()
 
 fn _coup_daybs(settle: f64, mat: f64, freq: i64, basis: i64) -> f64:
     """Days from the beginning of the coupon period to settlement."""
-    _daycount_num(_coup_pcd(settle, mat, freq), settle, basis)
+    _daycount_num(coup_prev(settle, mat, freq), settle, basis)
 
 fn _coup_daysnc(settle: f64, mat: f64, freq: i64, basis: i64) -> f64:
     """Days from settlement to the next coupon date."""
     if basis == 0 or basis == 4:
         return _coup_days(settle, mat, freq, basis) - _coup_daybs(settle, mat, freq, basis)
-    _coup_ncd(settle, mat, freq) - settle
+    coup_next(settle, mat, freq) - settle
 
 fn _sec_price(settle: f64, mat: f64, rate: f64, yld: f64, redemption: f64, freq: i64, basis: i64) -> f64:
     """Excel PRICE: PV of coupons + redemption less accrued, per-100 face."""
@@ -4306,11 +3973,11 @@ fn _sec_price(settle: f64, mat: f64, rate: f64, yld: f64, redemption: f64, freq:
     val coup = 100.0 * rate / freq.to_f64()
     val yf = yld / freq.to_f64()
     val dsce = dsc / e
-    val t1 = redemption / _powf(1.0 + yf, (n - 1).to_f64() + dsce)
+    val t1 = redemption / powf(1.0 + yf, (n - 1).to_f64() + dsce)
     var s = 0.0
     var k = 1
     while k <= n:
-        s = s + coup / _powf(1.0 + yf, (k - 1).to_f64() + dsce)
+        s = s + coup / powf(1.0 + yf, (k - 1).to_f64() + dsce)
         k = k + 1
     t1 + s - coup * a / e
 
@@ -4346,7 +4013,7 @@ fn _sec_duration(settle: f64, mat: f64, coup0: f64, yld: f64, freq: i64, basis: 
         if t == n:
             cf = c + 100.0
         val ex = (t - 1).to_f64() + dsce
-        val z = cf / _powf(yv, ex)
+        val z = cf / powf(yv, ex)
         p = p + z
         du = du + ex * z
         t = t + 1
@@ -4354,81 +4021,58 @@ fn _sec_duration(settle: f64, mat: f64, coup0: f64, yld: f64, freq: i64, basis: 
 
 fn _sec_pow10_digits(fr: f64) -> f64:
     """10 ^ (floor(log10(fraction)) + 1) — the DOLLARDE/DOLLARFR scale."""
-    val pw = _floor_f64(_ln_f64(fr) / _ln_f64(10.0)) + 1.0
-    _powf(10.0, pw)
+    val pw = _floor_f64(ln_f64(fr) / ln_f64(10.0)) + 1.0
+    powf(10.0, pw)
 
 fn _odd_last_price(settle: f64, mat: f64, last_int: f64, rate: f64, yld: f64, redemption: f64, freq: i64, basis: i64) -> f64:
-    """Excel ODDLPRICE: price with odd LAST period using simple interest discount."""
-    # Days from last_interest to maturity (the odd period length)
-    val odd_period_days = _daycount_num(last_int, mat, basis)
-    # Days from settlement to maturity (discount period)
-    val disc_days = _daycount_num(settle, mat, basis)
-    # Accrued days from last_interest to settlement
-    val accrued_days = _daycount_num(last_int, settle, basis)
+    """Excel ODDLPRICE: odd LAST coupon period, per the documented formula
 
-    # Year fraction for the odd period (basis-aware)
-    val odd_frac = if basis == 0 or basis == 4: odd_period_days.to_f64() / 360.0
-                   elif basis == 2: odd_period_days.to_f64() / 360.0
-                   elif basis == 3: odd_period_days.to_f64() / 365.0
-                   else: _daycount_frac(last_int, mat, basis)
+        P = (RDM + (Σ DCi/NLi)·100r/f) / (1 + (Σ DSCi/NLi)·y/f) − (Σ Ai/NLi)·100r/f
 
-    # Year fraction from settlement to maturity
-    val disc_frac = if basis == 0 or basis == 4: disc_days.to_f64() / 360.0
-                    elif basis == 2: disc_days.to_f64() / 360.0
-                    elif basis == 3: disc_days.to_f64() / 365.0
-                    else: _daycount_frac(settle, mat, basis)
-
-    # Year fraction for accrued interest
-    val accr_frac = if basis == 0 or basis == 4: accrued_days.to_f64() / 360.0
-                    elif basis == 2: accrued_days.to_f64() / 360.0
-                    elif basis == 3: accrued_days.to_f64() / 365.0
-                    else: _daycount_frac(last_int, settle, basis)
-
-    # Coupon per period (odd period uses freq as period count)
+    summed over the quasi-coupon periods that tile [last_interest, maturity]
+    (walk forward from last_interest in 12/freq month steps). DCi = odd-period
+    days in quasi period i, DSCi = of those, days on/after settlement,
+    Ai = accrued days (quasi start to settlement), NLi = full quasi length.
+    Verified against Excel's doc example: ODDLPRICE(2008-02-07, 2008-06-15,
+    2007-10-15, 3.75%, 4.05%, 100, 2, 0) = 99.87829."""
+    val c = _civil_from_serial(last_int)
+    val ly = c[0]
+    val lm = c[1]
+    val ld = c[2]
+    val stepm = 12 / freq
+    var qstart = last_int
+    var i = 1
+    var sum_dc = 0.0
+    var sum_dsc = 0.0
+    var sum_a = 0.0
+    var guard = 0
+    while qstart < mat and guard < 200:
+        val qend = _sec_edate(ly, lm, ld, i * stepm)
+        val nl = _daycount_num(qstart, qend, basis)
+        val seg_end = if mat < qend: mat else: qend
+        val dc = _daycount_num(qstart, seg_end, basis)
+        sum_dc = sum_dc + dc / nl
+        val dsc_start = if settle > qstart: settle else: qstart
+        if dsc_start < seg_end:
+            sum_dsc = sum_dsc + _daycount_num(dsc_start, seg_end, basis) / nl
+        if settle > qstart:
+            val a_end = if settle < qend: settle else: qend
+            sum_a = sum_a + _daycount_num(qstart, a_end, basis) / nl
+        qstart = qend
+        i = i + 1
+        guard = guard + 1
     val coup = 100.0 * rate / freq.to_f64()
-
-    # Discount from settlement to maturity using simple interest
-    val discount = 1.0 + yld * disc_frac
-
-    # Price: PV of redemption + final coupon, minus accrued interest
-    val price = (redemption + coup) / discount - coup * accr_frac / odd_frac
-    price
-
-fn _depreciation_coeff(years: f64) -> f64:
-    """Excel AMORDEGRC coefficient based on asset life (years)."""
-    if years < 3.0:
-        return 1.0
-    if years < 5.0:
-        return 1.5
-    if years < 7.0:
-        return 2.0
-    2.5
-
-fn _mean(values: [f64]) -> f64:
-    var sum = 0.0
-    for v in values:
-        sum = sum + v
-    sum / values.len().to_f64()
+    val yf = yld / freq.to_f64()
+    (redemption + sum_dc * coup) / (1.0 + sum_dsc * yf) - sum_a * coup
 
 fn _pop_variance(values: [f64]) -> f64:
     """Population variance (n denominator)."""
-    val m = _mean(values)
+    val m = mean(values)
     var sq = 0.0
     for v in values:
         val d = v - m
         sq = sq + d * d
     sq / values.len().to_f64()
-
-fn _covariance(ys: [f64], xs: [f64]) -> f64:
-    """Population covariance of two equal-length series."""
-    val my = _mean(ys)
-    val mx = _mean(xs)
-    var sum = 0.0
-    var i = 0
-    while i < ys.len():
-        sum = sum + (ys[i] - my) * (xs[i] - mx)
-        i = i + 1
-    sum / ys.len().to_f64()
 
 fn _sample_variance(values: [f64]) -> f64:
     """Sample variance (n-1 denominator), matching Excel VAR/STDEV."""
@@ -4580,7 +4224,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             return CellValue.ErrorVal(message: "MROUND requires 2 arguments")
         "SQRTPI":
             if flat.len() > 0 and flat[0] >= 0.0:
-                return CellValue.NumberVal(value: _sqrt_f64(flat[0] * _PI))
+                return CellValue.NumberVal(value: sqrt_f64(flat[0] * _PI))
             return CellValue.ErrorVal(message: "SQRTPI requires a non-negative argument")
         "EXP":
             if flat.len() > 0:
@@ -4739,7 +4383,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             return CellValue.NumberVal(value: dev_sum / flat.len().to_f64())
         "NORMSDIST":
             if flat.len() > 0:
-                return CellValue.NumberVal(value: _norm_cdf(flat[0]))
+                return CellValue.NumberVal(value: norm_cdf(flat[0], 0.0, 1.0))
             return CellValue.ErrorVal(message: "NORMSDIST requires z")
         "NORMDIST":
             if args.len() >= 4:
@@ -4750,8 +4394,8 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     return CellValue.ErrorVal(message: "NORMDIST sd must be positive")
                 val z = (x - mean) / sd
                 if _first_val(args[3]) != 0.0:
-                    return CellValue.NumberVal(value: _norm_cdf(z))
-                val pdf = _exp_f64(0.0 - z * z / 2.0) / (sd * _sqrt_f64(2.0 * _PI))
+                    return CellValue.NumberVal(value: norm_cdf(z, 0.0, 1.0))
+                val pdf = exp_f64(0.0 - z * z / 2.0) / (sd * sqrt_f64(2.0 * _PI))
                 return CellValue.NumberVal(value: pdf)
             return CellValue.ErrorVal(message: "NORMDIST requires x, mean, sd, cumulative")
         "NORM.S.INV":
@@ -4759,7 +4403,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val p = flat[0]
                 if p <= 0.0 or p >= 1.0:
                     return CellValue.ErrorVal(message: "NORM.S.INV requires 0 < p < 1")
-                return CellValue.NumberVal(value: _norm_inv_std(p))
+                return CellValue.NumberVal(value: norm_inv(p, 0.0, 1.0))
             return CellValue.ErrorVal(message: "NORM.S.INV requires probability")
         "NORM.INV":
             if args.len() >= 3:
@@ -4768,7 +4412,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val sd = _first_val(args[2])
                 if sd <= 0.0 or p <= 0.0 or p >= 1.0:
                     return CellValue.ErrorVal(message: "NORM.INV domain error")
-                return CellValue.NumberVal(value: mean + sd * _norm_inv_std(p))
+                return CellValue.NumberVal(value: norm_inv(p, mean, sd))
             return CellValue.ErrorVal(message: "NORM.INV requires p, mean, sd")
         "EXPONDIST":
             if args.len() >= 3:
@@ -4777,8 +4421,8 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 if lambda <= 0.0 or x < 0.0:
                     return CellValue.ErrorVal(message: "EXPONDIST domain error")
                 if _first_val(args[2]) != 0.0:
-                    return CellValue.NumberVal(value: 1.0 - _exp_f64(0.0 - lambda * x))
-                return CellValue.NumberVal(value: lambda * _exp_f64(0.0 - lambda * x))
+                    return CellValue.NumberVal(value: 1.0 - exp_f64(0.0 - lambda * x))
+                return CellValue.NumberVal(value: lambda * exp_f64(0.0 - lambda * x))
             return CellValue.ErrorVal(message: "EXPONDIST requires x, lambda, cumulative")
         "POISSON":
             if args.len() >= 3:
@@ -4790,10 +4434,10 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     var cdf = 0.0
                     var kk: i64 = 0
                     while kk <= k:
-                        cdf = cdf + _exp_f64(0.0 - mu) * _pow_f64(mu, kk.to_f64()) / _fact_i64(kk)
+                        cdf = cdf + exp_f64(0.0 - mu) * _pow_f64(mu, kk.to_f64()) / _fact_i64(kk)
                         kk = kk + 1
                     return CellValue.NumberVal(value: cdf)
-                return CellValue.NumberVal(value: _exp_f64(0.0 - mu) * _pow_f64(mu, k.to_f64()) / _fact_i64(k))
+                return CellValue.NumberVal(value: exp_f64(0.0 - mu) * _pow_f64(mu, k.to_f64()) / _fact_i64(k))
             return CellValue.ErrorVal(message: "POISSON requires x, mean, cumulative")
         "BINOMDIST":
             if args.len() >= 4:
@@ -4803,19 +4447,14 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 if k < 0 or n < 0 or k > n or n > 170 or p < 0.0 or p > 1.0:
                     return CellValue.ErrorVal(message: "BINOMDIST domain error")
                 if _first_val(args[3]) != 0.0:
-                    var cdf = 0.0
-                    var kk: i64 = 0
-                    while kk <= k:
-                        cdf = cdf + _binom_pmf(kk, n, p)
-                        kk = kk + 1
-                    return CellValue.NumberVal(value: cdf)
-                return CellValue.NumberVal(value: _binom_pmf(k, n, p))
+                    return CellValue.NumberVal(value: binom_cdf(k, n, p))
+                return CellValue.NumberVal(value: binom_pmf(k, n, p))
             return CellValue.ErrorVal(message: "BINOMDIST requires k, n, p, cumulative")
         "GAMMALN":
             if flat.len() > 0:
                 if flat[0] <= 0.0:
                     return CellValue.ErrorVal(message: "GAMMALN requires x > 0")
-                return CellValue.NumberVal(value: _gammaln(flat[0]))
+                return CellValue.NumberVal(value: gamma_ln(flat[0]))
             return CellValue.ErrorVal(message: "GAMMALN requires x")
         "BETA.DIST":
             if args.len() >= 4:
@@ -4831,11 +4470,11 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     return CellValue.ErrorVal(message: "BETA.DIST x out of range")
                 val y = (x - lo) / (hi - lo)
                 if cum != 0.0:
-                    return CellValue.NumberVal(value: _betainc(y, al, be))
+                    return CellValue.NumberVal(value: incomplete_beta(al, be, y))
                 if y <= 0.0 or y >= 1.0:
                     return CellValue.NumberVal(value: 0.0)
-                val lpdf = (al - 1.0) * _ln_f64(y) + (be - 1.0) * _ln_f64(1.0 - y) + _gammaln(al + be) - _gammaln(al) - _gammaln(be)
-                return CellValue.NumberVal(value: _exp_f64(lpdf) / (hi - lo))
+                val lpdf = (al - 1.0) * ln_f64(y) + (be - 1.0) * ln_f64(1.0 - y) + gamma_ln(al + be) - gamma_ln(al) - gamma_ln(be)
+                return CellValue.NumberVal(value: exp_f64(lpdf) / (hi - lo))
             return CellValue.ErrorVal(message: "BETA.DIST requires x, alpha, beta, cumulative")
         "BETADIST":
             if args.len() >= 3:
@@ -4847,7 +4486,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 if al <= 0.0 or be <= 0.0 or hi <= lo:
                     return CellValue.ErrorVal(message: "BETADIST domain error")
                 val y = (x - lo) / (hi - lo)
-                return CellValue.NumberVal(value: _betainc(y, al, be))
+                return CellValue.NumberVal(value: incomplete_beta(al, be, y))
             return CellValue.ErrorVal(message: "BETADIST requires x, alpha, beta")
         "BETA.INV":
             if args.len() >= 3:
@@ -4858,7 +4497,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val hi = if args.len() >= 5: _first_val(args[4]) else: 1.0
                 if al <= 0.0 or be <= 0.0 or hi <= lo or p <= 0.0 or p >= 1.0:
                     return CellValue.ErrorVal(message: "BETA.INV domain error")
-                return CellValue.NumberVal(value: lo + (hi - lo) * _betainc_inv(p, al, be))
+                return CellValue.NumberVal(value: lo + (hi - lo) * incomplete_beta_inv(al, be, p))
             return CellValue.ErrorVal(message: "BETA.INV requires p, alpha, beta")
         "GAMMA.DIST":
             if args.len() >= 4:
@@ -4869,11 +4508,11 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 if al <= 0.0 or be <= 0.0 or x < 0.0:
                     return CellValue.ErrorVal(message: "GAMMA.DIST domain error")
                 if cum != 0.0:
-                    return CellValue.NumberVal(value: _gammainc_p(al, x / be))
+                    return CellValue.NumberVal(value: incomplete_gamma_p(al, x / be))
                 if x <= 0.0:
                     return CellValue.NumberVal(value: 0.0)
-                val lpdf = (al - 1.0) * _ln_f64(x) - x / be - al * _ln_f64(be) - _gammaln(al)
-                return CellValue.NumberVal(value: _exp_f64(lpdf))
+                val lpdf = (al - 1.0) * ln_f64(x) - x / be - al * ln_f64(be) - gamma_ln(al)
+                return CellValue.NumberVal(value: exp_f64(lpdf))
             return CellValue.ErrorVal(message: "GAMMA.DIST requires x, alpha, beta, cumulative")
         "GAMMA.INV":
             if args.len() >= 3:
@@ -4882,7 +4521,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val be = _first_val(args[2])
                 if al <= 0.0 or be <= 0.0 or p <= 0.0 or p >= 1.0:
                     return CellValue.ErrorVal(message: "GAMMA.INV domain error")
-                return CellValue.NumberVal(value: be * _gammainc_inv(p, al))
+                return CellValue.NumberVal(value: be * incomplete_gamma_p_inv(al, p))
             return CellValue.ErrorVal(message: "GAMMA.INV requires p, alpha, beta")
         "CHISQ.DIST":
             if args.len() >= 3:
@@ -4892,12 +4531,12 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 if df < 1.0 or x < 0.0:
                     return CellValue.ErrorVal(message: "CHISQ.DIST domain error")
                 if cum != 0.0:
-                    return CellValue.NumberVal(value: _gammainc_p(df / 2.0, x / 2.0))
+                    return CellValue.NumberVal(value: incomplete_gamma_p(df / 2.0, x / 2.0))
                 if x <= 0.0:
                     return CellValue.NumberVal(value: 0.0)
                 val a = df / 2.0
-                val lpdf = (a - 1.0) * _ln_f64(x) - x / 2.0 - a * _LN2 - _gammaln(a)
-                return CellValue.NumberVal(value: _exp_f64(lpdf))
+                val lpdf = (a - 1.0) * ln_f64(x) - x / 2.0 - a * _LN2 - gamma_ln(a)
+                return CellValue.NumberVal(value: exp_f64(lpdf))
             return CellValue.ErrorVal(message: "CHISQ.DIST requires x, df, cumulative")
         "CHISQ.DIST.RT":
             if args.len() >= 2:
@@ -4905,7 +4544,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val df = _first_val(args[1])
                 if df < 1.0 or x < 0.0:
                     return CellValue.ErrorVal(message: "CHISQ.DIST.RT domain error")
-                return CellValue.NumberVal(value: 1.0 - _gammainc_p(df / 2.0, x / 2.0))
+                return CellValue.NumberVal(value: 1.0 - incomplete_gamma_p(df / 2.0, x / 2.0))
             return CellValue.ErrorVal(message: "CHISQ.DIST.RT requires x, df")
         "CHISQ.INV":
             if args.len() >= 2:
@@ -4913,7 +4552,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val df = _first_val(args[1])
                 if df < 1.0 or p <= 0.0 or p >= 1.0:
                     return CellValue.ErrorVal(message: "CHISQ.INV domain error")
-                return CellValue.NumberVal(value: 2.0 * _gammainc_inv(p, df / 2.0))
+                return CellValue.NumberVal(value: 2.0 * incomplete_gamma_p_inv(df / 2.0, p))
             return CellValue.ErrorVal(message: "CHISQ.INV requires p, df")
         "CHISQ.INV.RT":
             if args.len() >= 2:
@@ -4921,7 +4560,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val df = _first_val(args[1])
                 if df < 1.0 or p <= 0.0 or p >= 1.0:
                     return CellValue.ErrorVal(message: "CHISQ.INV.RT domain error")
-                return CellValue.NumberVal(value: 2.0 * _gammainc_inv(1.0 - p, df / 2.0))
+                return CellValue.NumberVal(value: 2.0 * incomplete_gamma_p_inv(df / 2.0, 1.0 - p))
             return CellValue.ErrorVal(message: "CHISQ.INV.RT requires p, df")
         "T.DIST":
             if args.len() >= 3:
@@ -4931,11 +4570,11 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 if df < 1.0:
                     return CellValue.ErrorVal(message: "T.DIST df must be >= 1")
                 if cum != 0.0:
-                    val ib = _t_2t_area(t, df)
+                    val ib = t_cdf_2t(t, df)
                     val cdf = if t >= 0.0: 1.0 - 0.5 * ib else: 0.5 * ib
                     return CellValue.NumberVal(value: cdf)
-                val lpdf = _gammaln((df + 1.0) / 2.0) - _gammaln(df / 2.0) - 0.5 * _ln_f64(df * _PI) - ((df + 1.0) / 2.0) * _ln_f64(1.0 + t * t / df)
-                return CellValue.NumberVal(value: _exp_f64(lpdf))
+                val lpdf = gamma_ln((df + 1.0) / 2.0) - gamma_ln(df / 2.0) - 0.5 * ln_f64(df * _PI) - ((df + 1.0) / 2.0) * ln_f64(1.0 + t * t / df)
+                return CellValue.NumberVal(value: exp_f64(lpdf))
             return CellValue.ErrorVal(message: "T.DIST requires x, df, cumulative")
         "T.DIST.2T":
             if args.len() >= 2:
@@ -4943,7 +4582,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val df = _first_val(args[1])
                 if df < 1.0 or x < 0.0:
                     return CellValue.ErrorVal(message: "T.DIST.2T domain error")
-                return CellValue.NumberVal(value: _t_2t_area(x, df))
+                return CellValue.NumberVal(value: t_cdf_2t(x, df))
             return CellValue.ErrorVal(message: "T.DIST.2T requires x, df")
         "T.DIST.RT":
             if args.len() >= 2:
@@ -4951,7 +4590,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val df = _first_val(args[1])
                 if df < 1.0:
                     return CellValue.ErrorVal(message: "T.DIST.RT df must be >= 1")
-                val ib = _t_2t_area(t, df)
+                val ib = t_cdf_2t(t, df)
                 val rt = if t >= 0.0: 0.5 * ib else: 1.0 - 0.5 * ib
                 return CellValue.NumberVal(value: rt)
             return CellValue.ErrorVal(message: "T.DIST.RT requires x, df")
@@ -4964,7 +4603,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 if p == 0.5:
                     return CellValue.NumberVal(value: 0.0)
                 val q = if p > 0.5: 1.0 - p else: p
-                val tm = _t_inv_2t(2.0 * q, df)
+                val tm = t_inv(1.0 - q, df)
                 val tv = if p > 0.5: tm else: 0.0 - tm
                 return CellValue.NumberVal(value: tv)
             return CellValue.ErrorVal(message: "T.INV requires p, df")
@@ -4974,7 +4613,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val df = _first_val(args[1])
                 if df < 1.0 or p <= 0.0 or p > 1.0:
                     return CellValue.ErrorVal(message: "T.INV.2T domain error")
-                return CellValue.NumberVal(value: _t_inv_2t(p, df))
+                return CellValue.NumberVal(value: t_inv(1.0 - p / 2.0, df))
             return CellValue.ErrorVal(message: "T.INV.2T requires p, df")
         "TDIST":
             if args.len() >= 3:
@@ -4983,7 +4622,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val tails = _first_val(args[2]).to_i64()
                 if df < 1.0 or x < 0.0 or (tails != 1 and tails != 2):
                     return CellValue.ErrorVal(message: "TDIST domain error")
-                val ib = _t_2t_area(x, df)
+                val ib = t_cdf_2t(x, df)
                 if tails == 2:
                     return CellValue.NumberVal(value: ib)
                 return CellValue.NumberVal(value: 0.5 * ib)
@@ -4997,11 +4636,11 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 if d1 < 1.0 or d2 < 1.0 or x < 0.0:
                     return CellValue.ErrorVal(message: "F.DIST domain error")
                 if cum != 0.0:
-                    return CellValue.NumberVal(value: _f_cdf(x, d1, d2))
+                    return CellValue.NumberVal(value: f_cdf(x, d1, d2))
                 if x <= 0.0:
                     return CellValue.NumberVal(value: 0.0)
-                val lpdf = _gammaln((d1 + d2) / 2.0) - _gammaln(d1 / 2.0) - _gammaln(d2 / 2.0) + (d1 / 2.0) * _ln_f64(d1 / d2) + (d1 / 2.0 - 1.0) * _ln_f64(x) - ((d1 + d2) / 2.0) * _ln_f64(1.0 + (d1 / d2) * x)
-                return CellValue.NumberVal(value: _exp_f64(lpdf))
+                val lpdf = gamma_ln((d1 + d2) / 2.0) - gamma_ln(d1 / 2.0) - gamma_ln(d2 / 2.0) + (d1 / 2.0) * ln_f64(d1 / d2) + (d1 / 2.0 - 1.0) * ln_f64(x) - ((d1 + d2) / 2.0) * ln_f64(1.0 + (d1 / d2) * x)
+                return CellValue.NumberVal(value: exp_f64(lpdf))
             return CellValue.ErrorVal(message: "F.DIST requires x, df1, df2, cumulative")
         "F.DIST.RT":
             if args.len() >= 3:
@@ -5010,7 +4649,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val d2 = _first_val(args[2])
                 if d1 < 1.0 or d2 < 1.0 or x < 0.0:
                     return CellValue.ErrorVal(message: "F.DIST.RT domain error")
-                return CellValue.NumberVal(value: 1.0 - _f_cdf(x, d1, d2))
+                return CellValue.NumberVal(value: 1.0 - f_cdf(x, d1, d2))
             return CellValue.ErrorVal(message: "F.DIST.RT requires x, df1, df2")
         "F.INV":
             if args.len() >= 3:
@@ -5019,7 +4658,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val d2 = _first_val(args[2])
                 if d1 < 1.0 or d2 < 1.0 or p <= 0.0 or p >= 1.0:
                     return CellValue.ErrorVal(message: "F.INV domain error")
-                return CellValue.NumberVal(value: _f_inv_left(p, d1, d2))
+                return CellValue.NumberVal(value: f_inv(p, d1, d2))
             return CellValue.ErrorVal(message: "F.INV requires p, df1, df2")
         "F.INV.RT":
             if args.len() >= 3:
@@ -5028,26 +4667,26 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val d2 = _first_val(args[2])
                 if d1 < 1.0 or d2 < 1.0 or p <= 0.0 or p >= 1.0:
                     return CellValue.ErrorVal(message: "F.INV.RT domain error")
-                return CellValue.NumberVal(value: _f_inv_left(1.0 - p, d1, d2))
+                return CellValue.NumberVal(value: f_inv(1.0 - p, d1, d2))
             return CellValue.ErrorVal(message: "F.INV.RT requires p, df1, df2")
         "GAMMA":
             if flat.len() > 0:
                 val x = flat[0]
                 if x > 0.0:
-                    return CellValue.NumberVal(value: _exp_f64(_gammaln(x)))
+                    return CellValue.NumberVal(value: exp_f64(gamma_ln(x)))
                 if x == x.to_i64().to_f64():
                     return CellValue.ErrorVal(message: "GAMMA undefined at nonpositive integer")
                 val s = _sin_f64(_PI * x)
-                return CellValue.NumberVal(value: _PI / (s * _exp_f64(_gammaln(1.0 - x))))
+                return CellValue.NumberVal(value: _PI / (s * exp_f64(gamma_ln(1.0 - x))))
             return CellValue.ErrorVal(message: "GAMMA requires x")
         "GAUSS":
             if flat.len() > 0:
-                return CellValue.NumberVal(value: _norm_cdf(flat[0]) - 0.5)
+                return CellValue.NumberVal(value: norm_cdf(flat[0], 0.0, 1.0) - 0.5)
             return CellValue.ErrorVal(message: "GAUSS requires z")
         "PHI":
             if flat.len() > 0:
                 val z = flat[0]
-                return CellValue.NumberVal(value: _exp_f64(0.0 - z * z / 2.0) / _sqrt_f64(2.0 * _PI))
+                return CellValue.NumberVal(value: exp_f64(0.0 - z * z / 2.0) / sqrt_f64(2.0 * _PI))
             return CellValue.ErrorVal(message: "PHI requires z")
         "WEIBULL":
             if args.len() >= 4:
@@ -5057,11 +4696,11 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 if alpha <= 0.0 or beta <= 0.0 or x < 0.0:
                     return CellValue.ErrorVal(message: "WEIBULL domain error")
                 val ratio = x / beta
-                val powa = if x == 0.0: 0.0 else: _exp_f64(alpha * _ln_f64(ratio))
+                val powa = if x == 0.0: 0.0 else: exp_f64(alpha * ln_f64(ratio))
                 if _first_val(args[3]) != 0.0:
-                    return CellValue.NumberVal(value: 1.0 - _exp_f64(0.0 - powa))
-                val powa1 = if x == 0.0: 0.0 else: _exp_f64((alpha - 1.0) * _ln_f64(ratio))
-                val pdf = (alpha / beta) * powa1 * _exp_f64(0.0 - powa)
+                    return CellValue.NumberVal(value: 1.0 - exp_f64(0.0 - powa))
+                val powa1 = if x == 0.0: 0.0 else: exp_f64((alpha - 1.0) * ln_f64(ratio))
+                val pdf = (alpha / beta) * powa1 * exp_f64(0.0 - powa)
                 return CellValue.NumberVal(value: pdf)
             return CellValue.ErrorVal(message: "WEIBULL requires x, alpha, beta, cumulative")
         "LOGNORMDIST":
@@ -5071,7 +4710,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val sd = _first_val(args[2])
                 if sd <= 0.0 or x <= 0.0:
                     return CellValue.ErrorVal(message: "LOGNORMDIST domain error")
-                return CellValue.NumberVal(value: _norm_cdf((_ln_f64(x) - mean) / sd))
+                return CellValue.NumberVal(value: lognorm_cdf(x, mean, sd))
             return CellValue.ErrorVal(message: "LOGNORMDIST requires x, mean, sd")
         "STANDARDIZE":
             if args.len() >= 3:
@@ -5090,10 +4729,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val np = _first_val(args[3]).to_i64()
                 if (ss < 0 or ns < 0 or ps < 0 or np < 0 or ss > ns or ss > ps or ns > np or ps > np or ns - ss > np - ps or np > 170):
                     return CellValue.ErrorVal(message: "HYPGEOMDIST domain error")
-                val c1 = _fact_i64(ps) / (_fact_i64(ss) * _fact_i64(ps - ss))
-                val c2 = _fact_i64(np - ps) / (_fact_i64(ns - ss) * _fact_i64(np - ps - (ns - ss)))
-                val c3 = _fact_i64(np) / (_fact_i64(ns) * _fact_i64(np - ns))
-                return CellValue.NumberVal(value: c1 * c2 / c3)
+                return CellValue.NumberVal(value: hypgeom_pmf(ss, ns, ps, np))
             return CellValue.ErrorVal(message: "HYPGEOMDIST requires sample_s, number_sample, population_s, number_pop")
         "NEGBINOMDIST":
             if args.len() >= 3:
@@ -5102,8 +4738,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val p = _first_val(args[2])
                 if nf < 0 or ns < 1 or p < 0.0 or p > 1.0 or nf + ns - 1 > 170:
                     return CellValue.ErrorVal(message: "NEGBINOMDIST domain error")
-                val c = _fact_i64(nf + ns - 1) / (_fact_i64(nf) * _fact_i64(ns - 1))
-                return CellValue.NumberVal(value: c * _pow_f64(p, ns.to_f64()) * _pow_f64(1.0 - p, nf.to_f64()))
+                return CellValue.NumberVal(value: negbinom_pmf(nf, ns, p))
             return CellValue.ErrorVal(message: "NEGBINOMDIST requires number_f, number_s, probability_s")
         "CONFIDENCE":
             if args.len() >= 3:
@@ -5112,8 +4747,8 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val size = _first_val(args[2])
                 if alpha <= 0.0 or alpha >= 1.0 or sd <= 0.0 or size < 1.0:
                     return CellValue.ErrorVal(message: "CONFIDENCE domain error")
-                val zc = _norm_inv_std(1.0 - alpha / 2.0)
-                return CellValue.NumberVal(value: zc * sd / _sqrt_f64(size))
+                val zc = norm_inv(1.0 - alpha / 2.0, 0.0, 1.0)
+                return CellValue.NumberVal(value: zc * sd / sqrt_f64(size))
             return CellValue.ErrorVal(message: "CONFIDENCE requires alpha, sd, size")
         "TODAY":
             # UTC day; local-timezone offset is a recorded ceiling
@@ -5131,13 +4766,13 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
         "ERF":
             # ERF(x) or ERF(lower, upper) = erf(upper) - erf(lower)
             if flat.len() >= 2:
-                return CellValue.NumberVal(value: _erf(flat[1]) - _erf(flat[0]))
+                return CellValue.NumberVal(value: erf(flat[1]) - erf(flat[0]))
             if flat.len() == 1:
-                return CellValue.NumberVal(value: _erf(flat[0]))
+                return CellValue.NumberVal(value: erf(flat[0]))
             return CellValue.ErrorVal(message: "ERF requires an argument")
         "ERFC":
             if flat.len() >= 1:
-                return CellValue.NumberVal(value: 1.0 - _erf(flat[0]))
+                return CellValue.NumberVal(value: erfc(flat[0]))
             return CellValue.ErrorVal(message: "ERFC requires an argument")
         "BESSELJ":
             # BESSELJ(x, n): integer order n>=0, series domain |x|<=15
@@ -5237,16 +4872,16 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
         "ACOSH":
             if flat.len() > 0 and flat[0] >= 1.0:
                 val v = flat[0]
-                return CellValue.NumberVal(value: _ln_f64(v + _sqrt_f64(v * v - 1.0)))
+                return CellValue.NumberVal(value: ln_f64(v + sqrt_f64(v * v - 1.0)))
             return CellValue.ErrorVal(message: "ACOSH requires x >= 1")
         "ASINH":
             if flat.len() > 0:
                 val v = flat[0]
-                return CellValue.NumberVal(value: _ln_f64(v + _sqrt_f64(v * v + 1.0)))
+                return CellValue.NumberVal(value: ln_f64(v + sqrt_f64(v * v + 1.0)))
             return CellValue.ErrorVal(message: "ASINH requires 1 argument")
         "ATANH":
             if flat.len() > 0 and flat[0] > -1.0 and flat[0] < 1.0:
-                return CellValue.NumberVal(value: 0.5 * _ln_f64((1.0 + flat[0]) / (1.0 - flat[0])))
+                return CellValue.NumberVal(value: 0.5 * ln_f64((1.0 + flat[0]) / (1.0 - flat[0])))
             return CellValue.ErrorVal(message: "ATANH requires -1 < x < 1")
         "COT":
             if flat.len() > 0:
@@ -5283,29 +4918,29 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             return CellValue.NumberVal(value: _pop_variance(flat) * flat.len().to_f64())
         "CORREL":
             if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() > 1:
-                val denom = _sqrt_f64(_pop_variance(args[0]) * _pop_variance(args[1]))
+                val denom = sqrt_f64(_pop_variance(args[0]) * _pop_variance(args[1]))
                 if denom == 0.0:
                     return CellValue.ErrorVal(message: "CORREL zero variance")
-                return CellValue.NumberVal(value: _covariance(args[0], args[1]) / denom)
+                return CellValue.NumberVal(value: covar_pop(args[0], args[1]) / denom)
             return CellValue.ErrorVal(message: "CORREL requires 2 equal ranges")
         "COVAR":
             if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() > 0:
-                return CellValue.NumberVal(value: _covariance(args[0], args[1]))
+                return CellValue.NumberVal(value: covar_pop(args[0], args[1]))
             return CellValue.ErrorVal(message: "COVAR requires 2 equal ranges")
         "SLOPE":
             if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() > 1:
                 val vx = _pop_variance(args[1])
                 if vx == 0.0:
                     return CellValue.ErrorVal(message: "SLOPE zero x variance")
-                return CellValue.NumberVal(value: _covariance(args[0], args[1]) / vx)
+                return CellValue.NumberVal(value: covar_pop(args[0], args[1]) / vx)
             return CellValue.ErrorVal(message: "SLOPE requires y then x ranges")
         "INTERCEPT":
             if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() > 1:
                 val vx2 = _pop_variance(args[1])
                 if vx2 == 0.0:
                     return CellValue.ErrorVal(message: "INTERCEPT zero x variance")
-                val slope = _covariance(args[0], args[1]) / vx2
-                return CellValue.NumberVal(value: _mean(args[0]) - slope * _mean(args[1]))
+                val slope = covar_pop(args[0], args[1]) / vx2
+                return CellValue.NumberVal(value: mean(args[0]) - slope * mean(args[1]))
             return CellValue.ErrorVal(message: "INTERCEPT requires y then x ranges")
         "FORECAST":
             if args.len() >= 3 and args[1].len() == args[2].len() and args[1].len() > 1:
@@ -5313,8 +4948,8 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val vxf = _pop_variance(args[2])
                 if vxf == 0.0:
                     return CellValue.ErrorVal(message: "FORECAST zero x variance")
-                val slope = _covariance(args[1], args[2]) / vxf
-                val intercept = _mean(args[1]) - slope * _mean(args[2])
+                val slope = covar_pop(args[1], args[2]) / vxf
+                val intercept = mean(args[1]) - slope * mean(args[2])
                 return CellValue.NumberVal(value: intercept + slope * xf)
             return CellValue.ErrorVal(message: "FORECAST requires x, known_ys, known_xs")
         "FORECAST.ETS":
@@ -5396,7 +5031,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                         val resid = args[1][i] - trend
                         resid_sum_sq = resid_sum_sq + resid * resid
                         i = i + 1
-                    val stddev = _sqrt_f64(resid_sum_sq / args[1].len().to_f64())
+                    val stddev = sqrt_f64(resid_sum_sq / args[1].len().to_f64())
                     return CellValue.NumberVal(value: z * stddev)
                 return CellValue.ErrorVal(message: "FORECAST.ETS.CONFINT decomposition failed")
             return CellValue.ErrorVal(message: "FORECAST.ETS.CONFINT requires target_date, values, timeline")
@@ -5464,7 +5099,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 if stat_type == 6:
                     return CellValue.NumberVal(value: mae_sum / args[0].len().to_f64())
                 if stat_type == 7:
-                    return CellValue.NumberVal(value: _sqrt_f64(rmse_sum_sq / args[0].len().to_f64()))
+                    return CellValue.NumberVal(value: sqrt_f64(rmse_sum_sq / args[0].len().to_f64()))
                 if stat_type == 5:
                     return CellValue.NumberVal(value: smape_sum / args[0].len().to_f64())
                 if stat_type == 4:
@@ -5476,7 +5111,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val d = _pop_variance(args[0]) * _pop_variance(args[1])
                 if d == 0.0:
                     return CellValue.ErrorVal(message: "RSQ zero variance")
-                val c = _covariance(args[0], args[1])
+                val c = covar_pop(args[0], args[1])
                 return CellValue.NumberVal(value: c * c / d)
             return CellValue.ErrorVal(message: "RSQ requires 2 equal ranges")
         "PMT":
@@ -5530,7 +5165,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val ratio = pmt / (pmt + pv * rate)
                 if ratio <= 0.0:
                     return CellValue.ErrorVal(message: "NPER domain error")
-                return CellValue.NumberVal(value: _ln_f64(ratio) / _ln_f64(1.0 + rate))
+                return CellValue.NumberVal(value: ln_f64(ratio) / ln_f64(1.0 + rate))
             return CellValue.ErrorVal(message: "NPER requires rate, pmt, pv")
         "IPMT":
             if args.len() >= 4:
@@ -5705,7 +5340,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     if di < d0:
                         return CellValue.ErrorVal(message: "XNPV date precedes start date")
                     i = i + 1
-                return CellValue.NumberVal(value: _xnpv_at(rate, flows, dts))
+                return CellValue.NumberVal(value: xnpv_at(rate, flows, dts))
             return CellValue.ErrorVal(message: "XNPV requires rate, values, dates")
         "XIRR":
             # XIRR(values, dates, [guess]): the rate where XNPV = 0, solved by
@@ -5726,14 +5361,14 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     i = i + 1
                 var lo = -0.99
                 var hi = 10.0
-                var flo = _xnpv_at(lo, flows, dts)
-                val fhi = _xnpv_at(hi, flows, dts)
+                var flo = xnpv_at(lo, flows, dts)
+                val fhi = xnpv_at(hi, flows, dts)
                 if (flo < 0.0) == (fhi < 0.0):
                     return CellValue.ErrorVal(message: "XIRR no sign change in bracket")
                 var j = 0
                 while j < 100:
                     val mid = (lo + hi) / 2.0
-                    val fm = _xnpv_at(mid, flows, dts)
+                    val fm = xnpv_at(mid, flows, dts)
                     if (fm < 0.0) == (flo < 0.0):
                         lo = mid
                         flo = fm
@@ -5801,7 +5436,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val npery = _first_val(args[1])
                 if npery < 1.0 or effect <= -1.0:
                     return CellValue.ErrorVal(message: "NOMINAL domain error")
-                return CellValue.NumberVal(value: (_powf(1.0 + effect, 1.0 / npery) - 1.0) * npery)
+                return CellValue.NumberVal(value: (powf(1.0 + effect, 1.0 / npery) - 1.0) * npery)
             return CellValue.ErrorVal(message: "NOMINAL requires effect, npery")
         "RRI":
             if args.len() >= 3:
@@ -5810,7 +5445,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val fv = _first_val(args[2])
                 if nper <= 0.0 or pv <= 0.0 or fv < 0.0:
                     return CellValue.ErrorVal(message: "RRI domain error")
-                return CellValue.NumberVal(value: _powf(fv / pv, 1.0 / nper) - 1.0)
+                return CellValue.NumberVal(value: powf(fv / pv, 1.0 / nper) - 1.0)
             return CellValue.ErrorVal(message: "RRI requires nper, pv, fv")
         "PDURATION":
             if args.len() >= 3:
@@ -5819,7 +5454,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val fv = _first_val(args[2])
                 if rate <= 0.0 or pv <= 0.0 or fv <= 0.0:
                     return CellValue.ErrorVal(message: "PDURATION domain error")
-                return CellValue.NumberVal(value: (_ln_f64(fv) - _ln_f64(pv)) / _ln_f64(1.0 + rate))
+                return CellValue.NumberVal(value: (ln_f64(fv) - ln_f64(pv)) / ln_f64(1.0 + rate))
             return CellValue.ErrorVal(message: "PDURATION requires rate, pv, fv")
         "FVSCHEDULE":
             if args.len() >= 2:
@@ -5839,7 +5474,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 7: _first_val(args[6]).to_i64() else: 0
                 if basis < 0 or basis > 4 or rate <= 0.0 or par <= 0.0 or issue >= settle:
                     return CellValue.ErrorVal(message: "ACCRINT domain error")
-                return CellValue.NumberVal(value: par * rate * _daycount_frac(issue, settle, basis))
+                return CellValue.NumberVal(value: par * rate * daycount_frac(issue, settle, basis))
             return CellValue.ErrorVal(message: "ACCRINT requires issue, first_interest, settle, rate, par, freq")
         "ACCRINTM":
             if args.len() >= 4:
@@ -5850,7 +5485,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
                 if basis < 0 or basis > 4 or rate <= 0.0 or par <= 0.0 or issue >= settle:
                     return CellValue.ErrorVal(message: "ACCRINTM domain error")
-                return CellValue.NumberVal(value: par * rate * _daycount_frac(issue, settle, basis))
+                return CellValue.NumberVal(value: par * rate * daycount_frac(issue, settle, basis))
             return CellValue.ErrorVal(message: "ACCRINTM requires issue, settle, rate, par")
         "COUPPCD":
             if args.len() >= 3:
@@ -5860,7 +5495,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 4: _first_val(args[3]).to_i64() else: 0
                 if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4):
                     return CellValue.ErrorVal(message: "COUPPCD domain error")
-                return CellValue.NumberVal(value: _coup_pcd(settle, mat, freq))
+                return CellValue.NumberVal(value: coup_prev(settle, mat, freq))
             return CellValue.ErrorVal(message: "COUPPCD requires settle, maturity, freq")
         "COUPNCD":
             if args.len() >= 3:
@@ -5870,7 +5505,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 4: _first_val(args[3]).to_i64() else: 0
                 if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4):
                     return CellValue.ErrorVal(message: "COUPNCD domain error")
-                return CellValue.NumberVal(value: _coup_ncd(settle, mat, freq))
+                return CellValue.NumberVal(value: coup_next(settle, mat, freq))
             return CellValue.ErrorVal(message: "COUPNCD requires settle, maturity, freq")
         "COUPNUM":
             if args.len() >= 3:
@@ -5947,7 +5582,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
                 if settle >= mat or basis < 0 or basis > 4 or discount <= 0.0 or redemption <= 0.0:
                     return CellValue.ErrorVal(message: "PRICEDISC domain error")
-                return CellValue.NumberVal(value: redemption - discount * redemption * _daycount_frac(settle, mat, basis))
+                return CellValue.NumberVal(value: redemption - discount * redemption * daycount_frac(settle, mat, basis))
             return CellValue.ErrorVal(message: "PRICEDISC requires settle, maturity, discount, redemption")
         "YIELDDISC":
             if args.len() >= 4:
@@ -5958,7 +5593,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
                 if settle >= mat or basis < 0 or basis > 4 or pr <= 0.0 or redemption <= 0.0:
                     return CellValue.ErrorVal(message: "YIELDDISC domain error")
-                return CellValue.NumberVal(value: (redemption - pr) / pr / _daycount_frac(settle, mat, basis))
+                return CellValue.NumberVal(value: (redemption - pr) / pr / daycount_frac(settle, mat, basis))
             return CellValue.ErrorVal(message: "YIELDDISC requires settle, maturity, pr, redemption")
         "PRICEMAT":
             if args.len() >= 5:
@@ -5970,9 +5605,9 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 6: _first_val(args[5]).to_i64() else: 0
                 if settle >= mat or issue >= settle or basis < 0 or basis > 4 or rate < 0.0 or yld < 0.0:
                     return CellValue.ErrorVal(message: "PRICEMAT domain error")
-                val dsm = _daycount_frac(settle, mat, basis)
-                val dim = _daycount_frac(issue, mat, basis)
-                val a = _daycount_frac(issue, settle, basis)
+                val dsm = daycount_frac(settle, mat, basis)
+                val dim = daycount_frac(issue, mat, basis)
+                val a = daycount_frac(issue, settle, basis)
                 return CellValue.NumberVal(value: (100.0 + dim * rate * 100.0) / (1.0 + dsm * yld) - a * rate * 100.0)
             return CellValue.ErrorVal(message: "PRICEMAT requires settle, maturity, issue, rate, yld")
         "YIELDMAT":
@@ -5985,9 +5620,9 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 6: _first_val(args[5]).to_i64() else: 0
                 if settle >= mat or issue >= settle or basis < 0 or basis > 4 or rate < 0.0 or pr <= 0.0:
                     return CellValue.ErrorVal(message: "YIELDMAT domain error")
-                val dim = _daycount_frac(issue, mat, basis)
-                val a = _daycount_frac(issue, settle, basis)
-                val dsm = _daycount_frac(settle, mat, basis)
+                val dim = daycount_frac(issue, mat, basis)
+                val a = daycount_frac(issue, settle, basis)
+                val dsm = daycount_frac(settle, mat, basis)
                 val base = pr / 100.0 + a * rate
                 return CellValue.NumberVal(value: ((1.0 + dim * rate) - base) / base / dsm)
             return CellValue.ErrorVal(message: "YIELDMAT requires settle, maturity, issue, rate, pr")
@@ -6000,7 +5635,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
                 if settle >= mat or basis < 0 or basis > 4 or pr <= 0.0 or redemption <= 0.0:
                     return CellValue.ErrorVal(message: "DISC domain error")
-                return CellValue.NumberVal(value: (redemption - pr) / redemption / _daycount_frac(settle, mat, basis))
+                return CellValue.NumberVal(value: (redemption - pr) / redemption / daycount_frac(settle, mat, basis))
             return CellValue.ErrorVal(message: "DISC requires settle, maturity, pr, redemption")
         "INTRATE":
             if args.len() >= 4:
@@ -6011,7 +5646,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
                 if settle >= mat or basis < 0 or basis > 4 or investment <= 0.0 or redemption <= 0.0:
                     return CellValue.ErrorVal(message: "INTRATE domain error")
-                return CellValue.NumberVal(value: (redemption - investment) / investment / _daycount_frac(settle, mat, basis))
+                return CellValue.NumberVal(value: (redemption - investment) / investment / daycount_frac(settle, mat, basis))
             return CellValue.ErrorVal(message: "INTRATE requires settle, maturity, investment, redemption")
         "RECEIVED":
             if args.len() >= 4:
@@ -6022,7 +5657,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
                 if settle >= mat or basis < 0 or basis > 4 or investment <= 0.0 or discount <= 0.0:
                     return CellValue.ErrorVal(message: "RECEIVED domain error")
-                val dd = 1.0 - discount * _daycount_frac(settle, mat, basis)
+                val dd = 1.0 - discount * daycount_frac(settle, mat, basis)
                 if dd <= 0.0:
                     return CellValue.ErrorVal(message: "RECEIVED domain error")
                 return CellValue.NumberVal(value: investment / dd)
@@ -6087,7 +5722,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val disc_root = ry * ry - (2.0 * ry - 1.0) * (1.0 - 100.0 / price)
                 if disc_root < 0.0:
                     return CellValue.ErrorVal(message: "TBILLEQ domain error")
-                return CellValue.NumberVal(value: (0.0 - ry + _sqrt_f64(disc_root)) / (ry - 0.5))
+                return CellValue.NumberVal(value: (0.0 - ry + sqrt_f64(disc_root)) / (ry - 0.5))
             return CellValue.ErrorVal(message: "TBILLEQ requires settle, maturity, discount")
         "DOLLARDE":
             if args.len() >= 2:
@@ -6147,41 +5782,33 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 if odd_period_days > max_period_days:
                     return CellValue.ErrorVal(message: "ODDFPRICE long odd first not supported")
 
-                # Discount the odd first coupon and all remaining coupons
+                # Excel's short-odd-first formula:
+                #   P = RDM/(1+y/f)^(N-1+DSC/E)
+                #     + (100r/f)·(DFC/E)/(1+y/f)^(DSC/E)
+                #     + Σ_{k=2..N} (100r/f)/(1+y/f)^(k-1+DSC/E)
+                #     − (100r/f)·(A/E)
+                # E = coupon period days, DSC = settlement→first coupon,
+                # DFC = issue→first coupon, A = issue→settlement.
+                # Verified against Excel's doc example: ODDFPRICE(2008-11-11,
+                # 2021-03-01, 2008-10-15, 2009-03-01, 7.85%, 6.25%, 100, 2, 1)
+                # = 113.598 (bare `price` fall-through previously discarded the
+                # result and returned the arity error below).
                 val n = _coup_num(settle, mat, freq).to_i64()
                 val e = _coup_days(settle, mat, freq, basis)
                 val dsc = _coup_daysnc(settle, mat, freq, basis)
-                val a = _coup_daybs(settle, mat, freq, basis)
                 val coup = 100.0 * rate / freq.to_f64()
                 val yf = yld / freq.to_f64()
                 val dsce = dsc / e
-
-                # Odd first coupon accrual fraction
                 val dfc = _daycount_num(issue, first_coup, basis)
-                val odd_frac = if basis == 0 or basis == 4: dfc.to_f64() / 360.0
-                               elif basis == 2: dfc.to_f64() / 360.0
-                               elif basis == 3: dfc.to_f64() / 365.0
-                               else: _daycount_frac(issue, first_coup, basis)
-
-                # Accrued in odd first period from settlement back to issue
-                val accrued_odd_days = _daycount_num(issue, settle, basis)
-                val accr_frac_first = if basis == 0 or basis == 4: accrued_odd_days.to_f64() / 360.0
-                                      elif basis == 2: accrued_odd_days.to_f64() / 360.0
-                                      elif basis == 3: accrued_odd_days.to_f64() / 365.0
-                                      else: _daycount_frac(issue, settle, basis)
-
-                # Odd first coupon amount (prorated)
-                val odd_coup = coup * odd_frac
-                # Discount the odd first coupon: if it's before next regular coupon, it needs special handling
-                # This is a simplified implementation of the short odd first period
-                val first_coup_discount = _powf(1.0 + yf, (n - 1).to_f64() + dsce)
-                var price = redemption / _powf(1.0 + yf, (n - 1).to_f64() + dsce)
-                var k = 1
+                val a_days = _daycount_num(issue, settle, basis)
+                var price = redemption / powf(1.0 + yf, (n - 1).to_f64() + dsce)
+                price = price + coup * (dfc / e) / powf(1.0 + yf, dsce)
+                var k = 2
                 while k <= n:
-                    price = price + coup / _powf(1.0 + yf, (k - 1).to_f64() + dsce)
+                    price = price + coup / powf(1.0 + yf, (k - 1).to_f64() + dsce)
                     k = k + 1
-                price = price - coup * accr_frac_first * odd_frac / odd_frac
-                price
+                price = price - coup * (a_days / e)
+                return CellValue.NumberVal(value: price)
             return CellValue.ErrorVal(message: "ODDFPRICE requires settle, maturity, issue, first_coupon, rate, yld, redemption, freq")
         "AMORLINC":
             if args.len() >= 6:
@@ -6192,30 +5819,11 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val period = _first_val(args[4]).to_i64()
                 val rate = _first_val(args[5])
                 val basis = if args.len() >= 7: _first_val(args[6]).to_i64() else: 0
-                if cost <= 0.0 or salvage < 0.0 or salvage >= cost or rate < 0.0 or rate > 1.0 or basis < 0 or basis > 4 or period <= 0 or first_period <= date_purch:
+                if cost <= 0.0 or salvage < 0.0 or salvage >= cost or rate < 0.0 or rate > 1.0 or basis < 0 or basis > 4 or period < 0 or first_period <= date_purch:
                     return CellValue.ErrorVal(message: "AMORLINC domain error")
-
-                # Calculate YEARFRAC for first period
-                val frac_first = _daycount_frac(date_purch, first_period, basis)
-                val book_value = cost - salvage
-                val annual_dep = book_value * rate
-
-                # First period depreciation
-                var dep = 0.0
-                if period == 1:
-                    dep = annual_dep * frac_first
-                else:
-                    # Subsequent full periods
-                    dep = annual_dep
-                    # Would need to accumulate to get the right value per period...
-
-                # For period >= 1: return the depreciation for that period
-                # Simplified: first period = annual × frac, then full period = annual
-                if period > 1:
-                    dep = annual_dep
-                if period * annual_dep > book_value:
-                    dep = 0.0
-                _round_f64(dep, 0)
+                # French straight-line amortization from std.math.financial
+                # (Excel numbering: period 0 is the prorated purchase slice).
+                return CellValue.NumberVal(value: amorlinc_period(cost, date_purch, first_period, salvage, period, rate, basis))
             return CellValue.ErrorVal(message: "AMORLINC requires cost, date_purchased, first_period, salvage, period, rate")
         "AMORDEGRC":
             if args.len() >= 6:
@@ -6226,41 +5834,11 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val period = _first_val(args[4]).to_i64()
                 val rate = _first_val(args[5])
                 val basis = if args.len() >= 7: _first_val(args[6]).to_i64() else: 0
-                if cost <= 0.0 or salvage < 0.0 or salvage >= cost or rate < 0.0 or rate > 1.0 or basis < 0 or basis > 4 or period <= 0 or first_period <= date_purch:
+                if cost <= 0.0 or salvage < 0.0 or salvage >= cost or rate < 0.0 or rate > 1.0 or basis < 0 or basis > 4 or period < 0 or first_period <= date_purch:
                     return CellValue.ErrorVal(message: "AMORDEGRC domain error")
-
-                # Estimate life from first period start to a guess (rough: 1 year units)
-                val life_est = 1.0 / rate
-                val coeff = _depreciation_coeff(life_est)
-
-                # Calculate YEARFRAC for first period
-                val frac_first = _daycount_frac(date_purch, first_period, basis)
-                val book_value = cost - salvage
-                val annual_dep = book_value * rate * coeff
-
-                # Degressive depreciation: first period prorated
-                var book = cost
-                var dep = 0.0
-                if period == 1:
-                    dep = annual_dep * frac_first
-                    book = book - dep
-                else:
-                    # Accumulate through periods
-                    var p = 1
-                    while p < period and book > salvage:
-                        var period_dep = 0.0
-                        if p == 1:
-                            period_dep = annual_dep * frac_first
-                        else:
-                            period_dep = book * rate * coeff
-                        book = book - period_dep
-                        p = p + 1
-                    if p == period:
-                        dep = book * rate * coeff
-
-                if dep < 0.0:
-                    dep = 0.0
-                _round_f64(dep, 0)
+                # French degressive amortization from std.math.financial
+                # (Excel numbering: period 0 is the prorated purchase slice).
+                return CellValue.NumberVal(value: amordegrc_period(cost, date_purch, first_period, salvage, period, rate, basis))
             return CellValue.ErrorVal(message: "AMORDEGRC requires cost, date_purchased, first_period, salvage, period, rate")
         "TRUE":
             return CellValue.BoolVal(value: true)
@@ -6282,8 +5860,8 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             for v in flat:
                 if v <= 0.0:
                     return CellValue.ErrorVal(message: "GEOMEAN requires positive values")
-                ln_sum = ln_sum + _ln_f64(v)
-            return CellValue.NumberVal(value: _exp_f64(ln_sum / flat.len().to_f64()))
+                ln_sum = ln_sum + ln_f64(v)
+            return CellValue.NumberVal(value: exp_f64(ln_sum / flat.len().to_f64()))
         "HARMEAN":
             if flat.len() == 0:
                 return CellValue.ErrorVal(message: "HARMEAN requires arguments")
@@ -6448,7 +6026,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 var cbcdf = 0.0
                 var cbk: i64 = 0
                 while cbk <= cbn:
-                    cbcdf = cbcdf + _binom_pmf(cbk, cbn, cbp)
+                    cbcdf = cbcdf + binom_pmf(cbk, cbn, cbp)
                     if cbcdf >= cba:
                         return CellValue.NumberVal(value: cbk.to_f64())
                     cbk = cbk + 1
@@ -6484,7 +6062,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 for v in flat:
                     val d = v - means
                     sqs = sqs + d * d
-                val sds = _sqrt_f64(sqs / (ns - 1).to_f64())
+                val sds = sqrt_f64(sqs / (ns - 1).to_f64())
                 if sds == 0.0:
                     return CellValue.ErrorVal(message: "SKEW zero deviation")
                 var s3 = 0.0
@@ -6505,7 +6083,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 for v in flat:
                     val d = v - meank
                     sqk = sqk + d * d
-                val sdk = _sqrt_f64(sqk / (nk - 1).to_f64())
+                val sdk = sqrt_f64(sqk / (nk - 1).to_f64())
                 if sdk == 0.0:
                     return CellValue.ErrorVal(message: "KURT zero deviation")
                 var s4 = 0.0
@@ -6542,11 +6120,11 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             return CellValue.ErrorVal(message: "GESTEP requires 2 arguments")
         "FISHER":
             if flat.len() > 0 and flat[0] > -1.0 and flat[0] < 1.0:
-                return CellValue.NumberVal(value: 0.5 * _ln_f64((1.0 + flat[0]) / (1.0 - flat[0])))
+                return CellValue.NumberVal(value: 0.5 * ln_f64((1.0 + flat[0]) / (1.0 - flat[0])))
             return CellValue.ErrorVal(message: "FISHER requires -1 < x < 1")
         "FISHERINV":
             if flat.len() > 0:
-                val e2 = _exp_f64(2.0 * flat[0])
+                val e2 = exp_f64(2.0 * flat[0])
                 return CellValue.NumberVal(value: (e2 - 1.0) / (e2 + 1.0))
             return CellValue.ErrorVal(message: "FISHERINV requires 1 argument")
         "MEDIAN":
@@ -6564,7 +6142,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
         "STDEV":
             if flat.len() < 2:
                 return CellValue.ErrorVal(message: "STDEV requires 2+ values")
-            return CellValue.NumberVal(value: _sqrt_f64(_sample_variance(flat)))
+            return CellValue.NumberVal(value: sqrt_f64(_sample_variance(flat)))
         "LARGE":
             if args.len() >= 2:
                 val ks = _first_val(args[args.len() - 1]).to_i64()
@@ -6885,7 +6463,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 return CellValue.NumberVal(value: days.to_f64())
             return CellValue.ErrorVal(message: "DAYS360 requires start, end")
         "YEARFRAC":
-            # Thin wrapper over _daycount_frac; Excel returns the absolute fraction.
+            # Thin wrapper over std.math.financial daycount_frac; Excel returns the absolute fraction.
             if args.len() >= 2:
                 var s1 = _first_val(args[0])
                 var s2 = _first_val(args[1])
@@ -6898,7 +6476,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     val tmp = s1
                     s1 = s2
                     s2 = tmp
-                return CellValue.NumberVal(value: _daycount_frac(s1, s2, basis))
+                return CellValue.NumberVal(value: daycount_frac(s1, s2, basis))
             return CellValue.ErrorVal(message: "YEARFRAC requires start, end")
         "NETWORKDAYS.INTL":
             # Weekend arg: numeric codes 1-7 (day pairs) and 11-17 (single day)
@@ -8573,42 +8151,6 @@ fn _array_munit(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
         r = r + 1
     out
 
-fn _linfit_compute(ys: [f64], xs: [f64]) -> [f64]:
-    """Compute least-squares linear fit: slope, intercept (or [0,0] on error).
-
-    Returns [slope, intercept] where:
-    - slope = Σ(x-x̄)(y-ȳ)/Σ(x-x̄)²
-    - intercept = ȳ - slope·x̄
-
-    Requirements: |xs| >= 2 and Σ(x-x̄)² > 0 (non-zero x-variance).
-    Returns [0, 0] if requirements not met."""
-    if ys.len() < 2 or xs.len() != ys.len():
-        return [0.0, 0.0]
-    var x_sum = 0.0
-    var y_sum = 0.0
-    var i = 0
-    while i < xs.len():
-        x_sum = x_sum + xs[i]
-        y_sum = y_sum + ys[i]
-        i = i + 1
-    val n = ys.len().to_f64()
-    val x_mean = x_sum / n
-    val y_mean = y_sum / n
-    var xy_dev = 0.0
-    var xx_dev = 0.0
-    var j = 0
-    while j < xs.len():
-        val dx = xs[j] - x_mean
-        val dy = ys[j] - y_mean
-        xy_dev = xy_dev + dx * dy
-        xx_dev = xx_dev + dx * dx
-        j = j + 1
-    if xx_dev == 0.0:
-        return [0.0, 0.0]
-    val slope = xy_dev / xx_dev
-    val intercept = y_mean - slope * x_mean
-    [slope, intercept]
-
 fn _array_linest(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     """LINEST(known_ys, [known_xs]) -> [slope, intercept] spilled horizontally.
 
@@ -8631,7 +8173,7 @@ fn _array_linest(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
             i = i + 1
     if xs.len() != ys.len():
         return [["#ERR"]]
-    val fit = _linfit_compute(ys, xs)
+    val fit = linfit(ys, xs)
     if fit[0] == 0.0 and fit[1] == 0.0 and ys.len() < 2:
         return [["#ERR"]]
     var out_row: [text] = []
@@ -8662,7 +8204,7 @@ fn _array_trend(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
             i = i + 1
     if xs.len() != ys.len():
         return [["#ERR"]]
-    val fit = _linfit_compute(ys, xs)
+    val fit = linfit(ys, xs)
     if fit[0] == 0.0 and fit[1] == 0.0 and ys.len() < 2:
         return [["#ERR"]]
     cur = _skip_comma(tokens, cur + 3)
@@ -8704,7 +8246,7 @@ fn _array_growth(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     var log_ys: [f64] = []
     var j = 0
     while j < ys.len():
-        log_ys.push(_ln_f64(ys[j]))
+        log_ys.push(ln_f64(ys[j]))
         j = j + 1
     var cur = _skip_comma(tokens, pos + 3)
     val xrs = _read_array_range_str(tokens, cur)
@@ -8718,7 +8260,7 @@ fn _array_growth(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
             k = k + 1
     if xs.len() != ys.len():
         return [["#ERR"]]
-    val fit = _linfit_compute(log_ys, xs)
+    val fit = linfit(log_ys, xs)
     if fit[0] == 0.0 and fit[1] == 0.0 and ys.len() < 2:
         return [["#ERR"]]
     cur = _skip_comma(tokens, cur + 3)
@@ -8739,7 +8281,7 @@ fn _array_growth(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     var m = 0
     while m < newxs.len():
         val log_y_pred = fit[0] * newxs[m] + fit[1]
-        val y_pred = _exp_f64(log_y_pred)
+        val y_pred = exp_f64(log_y_pred)
         out_row.push("{y_pred}")
         m = m + 1
     [out_row]
@@ -8993,17 +8535,6 @@ fn _ceil_f64(x: f64) -> f64:
         return t + 1.0
     t
 
-fn _sqrt_f64(x: f64) -> f64:
-    """Square root via Newton's method. Assumes x >= 0."""
-    if x == 0.0:
-        return 0.0
-    var g = x
-    var i = 0
-    while i < 40:
-        g = 0.5 * (g + (x / g))
-        i = i + 1
-    g
-
 fn _is_digit(c: text) -> bool:
     (c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or
      c == "5" or c == "6" or c == "7" or c == "8" or c == "9")
@@ -9076,16 +8607,6 @@ fn _first_val(vals: [f64]) -> f64:
         return vals[0]
     0.0
 
-fn _powf(base: f64, exp: f64) -> f64:
-    """base^exp for base > 0 via exp/ln — supports fractional exponents.
-
-    Integer-only _pow_f64 cannot express roots like (salvage/cost)^(1/life),
-    so the depreciation/rate functions route fractional powers through here.
-    """
-    if base <= 0.0:
-        return 0.0
-    _exp_f64(exp * _ln_f64(base))
-
 fn _fin_pmt(rate: f64, nper: f64, pv: f64, fv: f64, typ: f64) -> f64:
     """Excel PMT closed form including future value and annuity-due (type) term."""
     if rate == 0.0:
@@ -9121,7 +8642,7 @@ fn _fin_db(cost: f64, salvage: f64, life: f64, period: f64) -> f64:
     partial-period proration), matching a DB(...) call with month omitted.
     """
     val ratio = salvage / cost
-    val raw_rate = 1.0 - _powf(ratio, 1.0 / life)
+    val raw_rate = 1.0 - powf(ratio, 1.0 / life)
     val rate = _round_half_away(raw_rate, 1000.0)
     var book = cost
     var dep = 0.0
@@ -9193,20 +8714,6 @@ fn _fin_npv_at(r: f64, flows: [f64]) -> f64:
         i = i + 1
     s
 
-fn _xnpv_at(rate: f64, flows: [f64], dts: [f64]) -> f64:
-    """XNPV at the given rate: actual/365 fractional-year exponents measured
-    from the first date. Fractional powers go through _powf (rate > -1 keeps
-    the base positive)."""
-    val d0 = dts[0]
-    var s = 0.0
-    var i = 0
-    while i < flows.len():
-        val di = dts[i]
-        val fi = flows[i]
-        s = s + fi / _powf(1.0 + rate, (di - d0) / 365.0)
-        i = i + 1
-    s
-
 fn _fin_irr(flows: [f64], guess: f64) -> FinSolve:
     """Internal rate of return via Newton's method with a bisection fallback."""
     var r = guess
@@ -9271,7 +8778,7 @@ fn _fin_mirr(flows: [f64], fin_rate: f64, rei_rate: f64) -> FinSolve:
     val ratio = fv_pos / (0.0 - pv_neg)
     if ratio <= 0.0:
         return FinSolve(ok: false, value: 0.0)
-    FinSolve(ok: true, value: _powf(ratio, 1.0 / (n - 1).to_f64()) - 1.0)
+    FinSolve(ok: true, value: powf(ratio, 1.0 / (n - 1).to_f64()) - 1.0)
 
 fn _is_nonneg_int(v: f64) -> bool:
     """True when v is a whole number >= 0 (Excel bitwise-op domain)."""
