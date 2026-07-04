@@ -15,6 +15,9 @@
 - byl_sby_artifact_audit: pass
 - byl_sby_artifact_audit_scope: checked-in non-Lean formal artifacts currently consist of one BYL surface (`src/verification/riscv_product/riscv_product.byl`) and zero checked-in SBY files; generated SBY/RVFI artifacts are validated by the RISC-V sidecar contract and remain readiness evidence, not an RTL proof pass
 - byl_sby_artifact_audit_evidence: `find . \( -path './.git' -o -path './.jj' -o -path './src/**/.lake' \) -prune -o \( -name '*.byl' -o -name '*.sby' -o -name '*formal*manifest*' -o -name '*rvfi*manifest*' \) -type f -print | sort` returned only `./src/verification/riscv_product/riscv_product.byl`; placeholder scan over `*.byl`, `*.sby`, `*formal*manifest*`, and `*rvfi*manifest*` produced no hits; with temporary `bin/simple` symlinked directly to the existing self-hosted runtime, `sh scripts/check/check-riscv-formal-dual-track.shs` reported `STATUS: PASS riscv-fpga-sidecar-contract` and `STATUS: PASS riscv-formal-dual-track`
+- runtime_bypass_guard: pass
+- runtime_bypass_guard_scope: current working and staged changes introduce no app-leaf or `src/lib/gc_async_mut` direct env/process runtime bypasses outside owner facade modules
+- runtime_bypass_guard_evidence: `sh scripts/audit/direct-env-runtime-guard.shs --working` and `sh scripts/audit/direct-env-runtime-guard.shs --staged` both reported `STATUS: PASS direct-env-runtime-guard`
 - executable_launch_from_fs: pass
 - ssh_shell_smf_and_exec: pass
 - shared_wm_logic: pass
