@@ -9,8 +9,21 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_rename(from: text, to: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_sleep_ms(ms: i64)
+
+# Atomic write: tmp + rename (see test_runner_client.spl for the race this
+# closes — #98: a plain rt_file_write_text response could be observed
+# 0-byte/partial by the polling client between this daemon's open(truncate)
+# and its write()).
+fn atomic_write_text(path: text, content: text) -> bool:
+    val tmp_path = "{path}.tmp"
+    if rt_file_write_text(tmp_path, content):
+        if rt_file_rename(tmp_path, path):
+            return true
+        rt_file_delete(tmp_path)
+    rt_file_write_text(path, content)
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
 val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
@@ -50,7 +63,7 @@ fn handle_request(binary: text, name: text):
     val req_path = if name.contains("/"): name else: "{LIGHT_REQ_DIR}/{name}"
     val test_path = (rt_file_read_text(req_path) ?? "").trim()
     if test_path == "":
-        rt_file_write_text(response_path(name), "1\nmissing test path")
+        atomic_write_text(response_path(name), "1\nmissing test path")
         rt_file_delete(req_path)
         return
     val (stdout, stderr, code) = process_run_timeout(
@@ -61,7 +74,7 @@ fn handle_request(binary: text, name: text):
     var body = stdout
     if stderr != "":
         body = body + stderr
-    rt_file_write_text(response_path(name), "{code}\n{body}")
+    atomic_write_text(response_path(name), "{code}\n{body}")
     rt_file_delete(req_path)
 
 fn main() -> i64:

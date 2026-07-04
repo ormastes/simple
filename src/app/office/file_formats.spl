@@ -10,10 +10,10 @@
 # and word surfaces already speak, but produce the BlockKind model (not the
 # stale word_app DocBlock variant), so parsed docs feed render_document_html.
 
-use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, spans_to_plain_text}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, CommentDef, spans_to_plain_text, comment_def_for}
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.cell.{Cell, CellStyle, CellValue, CellRef, cell_display_text, col_to_letter, cell_ref_to_string, parse_cell_ref, default_style}
-use app.office.sheets.formula.{evaluate_formula, evaluate_formula_array}
+use app.office.sheets.formula.{evaluate_formula, evaluate_formula_array, set_formula_origin}
 use common.office.number.{office_parse_signed_decimal_f64}
 
 # =========================================================================
@@ -21,7 +21,7 @@ use common.office.number.{office_parse_signed_decimal_f64}
 # =========================================================================
 
 fn _span(s: text) -> TextSpan:
-    TextSpan(text: s, style: InlineStyle.Normal, link_url: "", footnote_id: "")
+    TextSpan(text: s, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "")
 
 fn _find_marker(s: text, marker: text, from: i32) -> i32:
     """Index of the next occurrence of marker at or after `from`, or -1."""
@@ -33,19 +33,51 @@ fn _find_marker(s: text, marker: text, from: i32) -> i32:
         i = i + 1
     -1
 
-fn parse_inline_spans(s: text) -> [TextSpan]:
+fn _replace_last_span(spans: [TextSpan], updated: TextSpan) -> [TextSpan]:
+    """Copy `spans` with its last element replaced by `updated`. Rebuilds via
+    push rather than index-assigning a local array element (the established
+    copy-return idiom elsewhere in this codebase — see `recalculate_formula_cells`
+    in this same file — used here for reliability under this interpreter)."""
+    var out: [TextSpan] = []
+    var j = 0
+    while j < spans.len() - 1:
+        out.push(spans[j])
+        j = j + 1
+    out.push(updated)
+    out
+
+fn parse_inline_spans(s: text, comment_start: i32) -> (spans: [TextSpan], comments: [CommentDef]):
     """Parse markdown inline styling — **bold**, *italic*, `code`,
-    [text](url) links, and `[^id]` footnote references — into styled spans.
-    A link span carries style=Normal plus a non-empty link_url; a footnote
-    reference span carries an empty visible text plus a non-empty
-    footnote_id (there is no inline text to preserve — the marker is
-    replaced by an auto-numbered superscript on render, same idea as a link
-    carrying its url separately from its visible text). A leading `!` before
-    `[` (image markdown, `![alt](src)`) is left as literal text here — images
-    stay a whole-block convention handled by the html renderer / docx writer,
-    not an inline span kind. Unterminated markers/links/references stay
-    literal text."""
+    [text](url) links, `[^id]` footnote references, and `[>>author: text<<]`
+    word comments — into styled spans. A link span carries style=Normal plus
+    a non-empty link_url; a footnote reference span carries an empty visible
+    text plus a non-empty footnote_id (there is no inline text to preserve —
+    the marker is replaced by an auto-numbered superscript on render, same
+    idea as a link carrying its url separately from its visible text).
+
+    A `[>>author: text<<]` comment token ATTACHES to the immediately
+    preceding span (mutating a copy of it to carry a fresh numeric
+    comment_id, via `_replace_last_span`) rather than becoming its own
+    marker span — unlike a footnote, a comment's author/text live inline at
+    the point of use, with no separate `[^id]:`-style definition line
+    elsewhere in the document, so there is no "reference" to point at
+    anything but the commented span itself. `comment_start` is the next free
+    numeric comment id: unlike `[^id]` (user-chosen, so never collides), a
+    comment token carries no id at all in the source, so the CALLER
+    (`_md_block` / `parse_markdown_document`) must hand out document-wide
+    unique ids across every line — the returned `comments` list holds one
+    CommentDef per token found here, in order, numbered
+    `comment_start, comment_start + 1, ...`. A comment token with no
+    preceding span/text to attach to, or a malformed body (no ": " author
+    separator), is left as literal text, same as any other unterminated
+    marker here.
+
+    A leading `!` before `[` (image markdown, `![alt](src)`) is left as
+    literal text here — images stay a whole-block convention handled by the
+    html renderer / docx writer, not an inline span kind. Unterminated
+    markers/links/references stay literal text."""
     var spans: [TextSpan] = []
+    var comments: [CommentDef] = []
     var plain = ""
     var i = 0
     while i < s.len():
@@ -56,9 +88,27 @@ fn parse_inline_spans(s: text) -> [TextSpan]:
                     spans.push(_span(plain))
                     plain = ""
                 val fn_id = s.slice(i + 2, close_bracket)
-                spans.push(TextSpan(text: "", style: InlineStyle.Normal, link_url: "", footnote_id: fn_id))
+                spans.push(TextSpan(text: "", style: InlineStyle.Normal, link_url: "", footnote_id: fn_id, comment_id: ""))
                 i = close_bracket + 1
                 continue
+        if s.slice(i, i + 3) == "[>>":
+            val close_marker = _find_marker(s, "<<]", i + 3)
+            if close_marker > i + 2:
+                val inner = s.slice(i + 3, close_marker)
+                val colon = _find_marker(inner, ": ", 0)
+                if colon > 0:
+                    if plain != "":
+                        spans.push(_span(plain))
+                        plain = ""
+                    if spans.len() > 0:
+                        val author = inner.slice(0, colon)
+                        val ctext = inner.slice(colon + 2, inner.len())
+                        val cid = "{comment_start + comments.len()}"
+                        val target = spans[spans.len() - 1]
+                        spans = _replace_last_span(spans, TextSpan(text: target.text, style: target.style, link_url: target.link_url, footnote_id: target.footnote_id, comment_id: cid))
+                        comments.push(CommentDef(id: cid, author: author, text: ctext))
+                        i = close_marker + 3
+                        continue
         if s.slice(i, i + 1) == "[" and not (i > 0 and s.slice(i - 1, i) == "!"):
             val close_bracket = _find_marker(s, "]", i + 1)
             if close_bracket > i and close_bracket + 1 < s.len() and s.slice(close_bracket + 1, close_bracket + 2) == "(":
@@ -69,7 +119,7 @@ fn parse_inline_spans(s: text) -> [TextSpan]:
                         plain = ""
                     val link_text = s.slice(i + 1, close_bracket)
                     val url = s.slice(close_bracket + 2, close_paren)
-                    spans.push(TextSpan(text: link_text, style: InlineStyle.Normal, link_url: url, footnote_id: ""))
+                    spans.push(TextSpan(text: link_text, style: InlineStyle.Normal, link_url: url, footnote_id: "", comment_id: ""))
                     i = close_paren + 1
                     continue
         var marker = ""
@@ -89,7 +139,7 @@ fn parse_inline_spans(s: text) -> [TextSpan]:
                 if plain != "":
                     spans.push(_span(plain))
                     plain = ""
-                spans.push(TextSpan(text: s.slice(i + marker.len(), close), style: style, link_url: "", footnote_id: ""))
+                spans.push(TextSpan(text: s.slice(i + marker.len(), close), style: style, link_url: "", footnote_id: "", comment_id: ""))
                 i = close + marker.len()
                 continue
         plain = "{plain}{s.slice(i, i + 1)}"
@@ -98,7 +148,7 @@ fn parse_inline_spans(s: text) -> [TextSpan]:
         spans.push(_span(plain))
     if spans.len() == 0:
         spans.push(_span(""))
-    spans
+    (spans: spans, comments: comments)
 
 fn _ff_is_digit(c: text) -> bool:
     (c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or
@@ -133,30 +183,40 @@ fn _footnote_def_parts(line: text) -> (is_def: bool, id: text, content: text):
         rest = rest.slice(1, rest.len())
     (is_def: true, id: fn_id, content: rest)
 
-fn _md_block(line: text) -> DocBlock:
-    """Classify a single non-fence, non-blank markdown line into a DocBlock."""
+fn _md_block(line: text, comment_start: i32) -> (block: DocBlock, comments: [CommentDef]):
+    """Classify a single non-fence, non-blank markdown line into a DocBlock.
+    `comment_start` is the next free numeric comment id, threaded document-
+    wide by `parse_markdown_document` (see `parse_inline_spans`)."""
     val fd = _footnote_def_parts(line)
     if fd.is_def:
-        return DocBlock(kind: BlockKind.FootnoteDef, spans: [TextSpan(text: fd.content, style: InlineStyle.Normal, link_url: "", footnote_id: fd.id)])
+        return (block: DocBlock(kind: BlockKind.FootnoteDef, spans: [TextSpan(text: fd.content, style: InlineStyle.Normal, link_url: "", footnote_id: fd.id, comment_id: "")]), comments: [])
     if line.starts_with("### "):
-        return DocBlock(kind: BlockKind.Heading3, spans: parse_inline_spans(line.slice(4, line.len())))
+        val r = parse_inline_spans(line.slice(4, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.Heading3, spans: r.spans), comments: r.comments)
     if line.starts_with("## "):
-        return DocBlock(kind: BlockKind.Heading2, spans: parse_inline_spans(line.slice(3, line.len())))
+        val r = parse_inline_spans(line.slice(3, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.Heading2, spans: r.spans), comments: r.comments)
     if line.starts_with("# "):
-        return DocBlock(kind: BlockKind.Heading1, spans: parse_inline_spans(line.slice(2, line.len())))
+        val r = parse_inline_spans(line.slice(2, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.Heading1, spans: r.spans), comments: r.comments)
     val ordered_len = _ordered_marker_len(line)
     if ordered_len > 0:
-        return DocBlock(kind: BlockKind.OrderedItem, spans: parse_inline_spans(line.slice(ordered_len, line.len())))
+        val r = parse_inline_spans(line.slice(ordered_len, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.OrderedItem, spans: r.spans), comments: r.comments)
     if line.starts_with("- ") or line.starts_with("* "):
-        return DocBlock(kind: BlockKind.BulletItem, spans: parse_inline_spans(line.slice(2, line.len())))
+        val r = parse_inline_spans(line.slice(2, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.BulletItem, spans: r.spans), comments: r.comments)
     if line.starts_with("> "):
-        return DocBlock(kind: BlockKind.Quote, spans: parse_inline_spans(line.slice(2, line.len())))
-    DocBlock(kind: BlockKind.Paragraph, spans: parse_inline_spans(line.trim()))
+        val r = parse_inline_spans(line.slice(2, line.len()), comment_start)
+        return (block: DocBlock(kind: BlockKind.Quote, spans: r.spans), comments: r.comments)
+    val r = parse_inline_spans(line.trim(), comment_start)
+    (block: DocBlock(kind: BlockKind.Paragraph, spans: r.spans), comments: r.comments)
 
 fn parse_markdown_document(content: text, title: text) -> RichDocument:
     """Parse a markdown subset (#/##/### headings, -/* bullets, `1.` ordered
-    items, > quote, ``` code fences, `[^id]`/`[^id]: text` footnotes, and
-    paragraphs) into a RichDocument the HTML renderer can style."""
+    items, > quote, ``` code fences, `[^id]`/`[^id]: text` footnotes,
+    `[>>author: text<<]` word comments, and paragraphs) into a RichDocument
+    the HTML renderer can style."""
     var doc = RichDocument.new(title)
     val lines = content.split("\n")
     var in_code = false
@@ -176,26 +236,35 @@ fn parse_markdown_document(content: text, title: text) -> RichDocument:
             continue
         if trimmed == "":
             continue
-        doc.blocks.push(_md_block(trimmed))
+        val r = _md_block(trimmed, doc.comments.len() + 1)
+        doc.blocks.push(r.block)
+        for c in r.comments:
+            doc.comments.push(c)
     if in_code:
         doc.blocks.push(DocBlock(kind: BlockKind.CodeBlock, spans: [_span(code_buf)]))
     doc
 
-fn _span_to_markdown(span: TextSpan) -> text:
+fn _span_to_markdown(span: TextSpan, comments: [CommentDef]) -> text:
+    var out = ""
     if span.footnote_id != "":
-        return "[^{span.footnote_id}]"
-    if span.link_url != "":
-        return "[{span.text}]({span.link_url})"
-    match span.style:
-        case Bold: return "**{span.text}**"
-        case Italic: return "*{span.text}*"
-        case Code: return "`{span.text}`"
-        _: return span.text
+        out = "[^{span.footnote_id}]"
+    elif span.link_url != "":
+        out = "[{span.text}]({span.link_url})"
+    else:
+        match span.style:
+            case Bold: out = "**{span.text}**"
+            case Italic: out = "*{span.text}*"
+            case Code: out = "`{span.text}`"
+            _: out = span.text
+    if span.comment_id != "":
+        val cd = comment_def_for(comments, span.comment_id)
+        out = "{out}[>>{cd.author}: {cd.text}<<]"
+    out
 
-fn _spans_to_markdown(spans: [TextSpan]) -> text:
+fn _spans_to_markdown(spans: [TextSpan], comments: [CommentDef]) -> text:
     var out = ""
     for span in spans:
-        out = "{out}{_span_to_markdown(span)}"
+        out = "{out}{_span_to_markdown(span, comments)}"
     out
 
 fn _footnote_def_block_id(block: DocBlock) -> text:
@@ -203,19 +272,20 @@ fn _footnote_def_block_id(block: DocBlock) -> text:
         return block.spans[0].footnote_id
     ""
 
-fn _block_to_markdown(block: DocBlock, ordinal: i64) -> text:
+fn _block_to_markdown(block: DocBlock, ordinal: i64, comments: [CommentDef]) -> text:
     """Serialize one block back to its markdown line. `ordinal` is the
     1-based position of this block within its run of consecutive
-    OrderedItem blocks (ignored by every other kind)."""
+    OrderedItem blocks (ignored by every other kind). `comments` resolves
+    any `TextSpan.comment_id` back to its `[>>author: text<<]` form."""
     match block.kind:
-        case Heading1: return "# {_spans_to_markdown(block.spans)}"
-        case Heading2: return "## {_spans_to_markdown(block.spans)}"
-        case Heading3: return "### {_spans_to_markdown(block.spans)}"
-        case BulletItem: return "- {_spans_to_markdown(block.spans)}"
-        case OrderedItem: return "{ordinal}. {_spans_to_markdown(block.spans)}"
-        case Quote: return "> {_spans_to_markdown(block.spans)}"
+        case Heading1: return "# {_spans_to_markdown(block.spans, comments)}"
+        case Heading2: return "## {_spans_to_markdown(block.spans, comments)}"
+        case Heading3: return "### {_spans_to_markdown(block.spans, comments)}"
+        case BulletItem: return "- {_spans_to_markdown(block.spans, comments)}"
+        case OrderedItem: return "{ordinal}. {_spans_to_markdown(block.spans, comments)}"
+        case Quote: return "> {_spans_to_markdown(block.spans, comments)}"
         case CodeBlock: return "```\n{spans_to_plain_text(block.spans)}\n```"
-        case Paragraph: return _spans_to_markdown(block.spans)
+        case Paragraph: return _spans_to_markdown(block.spans, comments)
         case FootnoteDef: return "[^{_footnote_def_block_id(block)}]: {spans_to_plain_text(block.spans)}"
 
 fn _md_is_tight_list_kind(kind: BlockKind) -> bool:
@@ -238,7 +308,7 @@ fn document_to_markdown(doc: RichDocument) -> text:
             ordinal = ordinal + 1
         else:
             ordinal = 0
-        val line = _block_to_markdown(block, ordinal)
+        val line = _block_to_markdown(block, ordinal, doc.comments)
         if first:
             out = line
         else:
@@ -426,6 +496,7 @@ fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
         val cell = work.get_cell(key)
         match cell.value:
             CellValue.FormulaVal(expr, cached_display):
+                set_formula_origin(key)
                 val agrid = evaluate_formula_array(expr, work)
                 if agrid.len() > 0 and agrid[0].len() > 0:
                     val is_blocked = _spill_blocked(work, key, agrid)
@@ -454,6 +525,7 @@ fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
                     else:
                         work = _write_spill(work, key, expr, spec.agrid, cell.style)
                 else:
+                    set_formula_origin(key)
                     val result = evaluate_formula(expr, work)
                     work.set_cell(key, Cell(
                         value: CellValue.FormulaVal(expr: expr, cached_display: _scalar_display(result)),
@@ -461,6 +533,7 @@ fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
                     ))
             _:
                 pass_do_nothing("non-formula cells keep their value")
+    set_formula_origin("")
     work
 
 fn sheet_to_csv(sheet: Sheet) -> text:
