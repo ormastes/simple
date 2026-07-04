@@ -405,6 +405,11 @@ when the generator contract is updated in the same lane.
 For RISC-V lanes that combine generated RTL sidecars with Lean/BYL proof
 models, cite `sh scripts/check/check-riscv-formal-dual-track.shs` as the
 aggregate SPipe evidence gate after regeneration.
+Keep the generated pieces and the added proof layer divided in the SPipe manual
+text: generated Lean/BYL/RTL artifacts prove regeneration shape, while manual
+constraint/theorem files prove the property claim. A future regeneration must
+be able to replace generated files without deleting the cited manual proof
+entry point.
 For SimpleOS mission-critical RISC-V evidence, also cite
 `sh scripts/check/check-riscv-rtl-sby-proof.shs` and
 `sh scripts/check/check-simpleos-mission-critical-release.shs`; release evidence
