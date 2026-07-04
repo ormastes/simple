@@ -63,9 +63,18 @@ fn fmc_new() -> Fmc:
         status: FMC_IDLE, result: fmc_result_empty())
 
 impl Fmc:
+    me safe_status() -> i64:
+        if me.status < FMC_IDLE or me.status > FMC_ERR:
+            me.status = FMC_ERR
+        me.status
+
     # Write the command register: accept a command, move IDLE/DONE/ERR → BUSY.
     me load(c: FmcCmd):
-        if me.status == FMC_BUSY:
+        val was_invalid: bool = me.status < FMC_IDLE or me.status > FMC_ERR
+        val st: i64 = me.safe_status()
+        if st == FMC_BUSY:
+            return
+        if was_invalid:
             return
         me.cmd = c
         me.result = fmc_result_empty()
@@ -74,7 +83,7 @@ impl Fmc:
     # Issue the loaded command against the NAND device, latch result + status. A no-op unless a
     # command is loaded (status BUSY) — you cannot complete a command that was never issued.
     me issue() -> i64:
-        if me.status != FMC_BUSY:
+        if me.safe_status() != FMC_BUSY:
             return me.status
         if me.cmd.op == FMC_OP_PROGRAM:
             val code: i64 = me.nand.program(me.cmd.ppn, me.cmd.lba, me.cmd.seq, me.cmd.data)
@@ -93,14 +102,15 @@ impl Fmc:
         me.status
 
     me poll() -> i64:
-        me.status
+        me.safe_status()
 
     me out() -> FmcResult:
         me.result
 
     # Acknowledge a completed command: DONE/ERR → IDLE. Clears the sticky ERR.
     me ack():
-        if me.status == FMC_DONE or me.status == FMC_ERR:
+        val st: i64 = me.safe_status()
+        if st == FMC_DONE or st == FMC_ERR:
             me.status = FMC_IDLE
 
     # ── Sideband device queries (not on the command path) ──
@@ -168,5 +178,15 @@ fn fil_fmc_selftest() -> i64:
     fail = fail + expect_eq(fmc.poll(), FMC_ERR, "fmc: ERR is sticky across poll")
     fmc.ack()
     fail = fail + expect_eq(fmc.poll(), FMC_IDLE, "fmc: ack clears ERR")
+
+    fmc.status = 99
+    fmc.load(fmc_cmd(FMC_OP_PROGRAM, ppn, 42, 7, 0xCD))
+    fail = fail + expect_eq(fmc.poll(), FMC_ERR, "fmc: corrupted oversized status fails closed")
+    fail = fail + expect_eq(fmc.issue(), FMC_ERR, "fmc: corrupted status blocks issue")
+    fmc.ack()
+    fail = fail + expect_eq(fmc.poll(), FMC_IDLE, "fmc: ack clears corrupted status")
+    fmc.status = -4
+    fail = fail + expect_eq(fmc.issue(), FMC_ERR, "fmc: corrupted negative status fails closed")
+    fmc.ack()
 
     fail
