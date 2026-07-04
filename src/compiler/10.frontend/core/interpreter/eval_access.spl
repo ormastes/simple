@@ -445,6 +445,39 @@ fn eval_null_coalesce(eid: i64) -> i64:
     # Non-nil, non-enum → return as-is
     left
 
+# EXPR_TRY: the `?` operator. Unwraps Ok/Some payload; on Err/None/nil it
+# early-returns the whole error value from the enclosing function via the
+# eval_returning / eval_return_value control-flow signal (same mechanism as
+# `return`). This is distinct from `.?` (EXPR_EXISTS_CHECK), which yields a
+# present-or-nil value and never propagates.
+fn eval_try(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val left = eval_expr(e_node.left)
+    if eval_had_error: return -1
+    # Plain nil → propagate nil out of the enclosing function.
+    if val_is_nil(left):
+        eval_returning = true
+        eval_return_value = left
+        return left
+    # Enum/Option/Result: struct with __tag field.
+    if val_is_struct(left):
+        val tag_field = val_struct_get_field(left, "__tag")
+        if tag_field != VAL_NONE:
+            val tag_text = val_get_text(tag_field)
+            if tag_text == "Ok" or tag_text == "Some":
+                # Present → unwrap payload (value flows on).
+                val payload = val_struct_get_field(left, "__payload")
+                if payload != VAL_NONE:
+                    return payload
+                return val_make_nil()
+            if tag_text == "Err" or tag_text == "None" or tag_text == "nil":
+                # Absent → early-return the error/none value.
+                eval_returning = true
+                eval_return_value = left
+                return left
+    # Non-nil, non-enum → treat as present, pass through unchanged.
+    left
+
 # ===== Enum Variant Construction =====
 
 fn eval_enum_variant_call(type_name: text, variant_name: text, arg_eids: [i64]) -> i64:

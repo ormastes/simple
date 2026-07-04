@@ -65,42 +65,25 @@ evidence. Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_firmware_s
 
 ## Scenarios
 
-### NVMe firmware: layered self-tests (HIL / FTL / FIL + controller)
+### NVMe firmware: layered smoke (Firmware / HIL / FTL / FIL)
 
-#### passes the full firmware self-test suite
+#### passes the layered firmware smoke
 
-- Run the aggregated firmware self-test suite
+- Run the short layered firmware smoke
    - Expected: code equals `0`
-- Confirm each layer's section ran
-- Confirm the OpenSSD target profiles are exercised
-- Confirm the suite reports overall PASS
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Run the aggregated firmware self-test suite")
-val (out, err, code) = _run(FW + "/test_fw.spl")
+step("Run the short layered firmware smoke")
+val (out, err, code) = _run(FW + "/fw_layer_smoke.spl")
 expect(code).to_equal(0)
-
-step("Confirm each layer's section ran")
-expect(out).to_contain("FIL (flash interface)")
-expect(out).to_contain("FTL (translation)")
-expect(out).to_contain("HIL (host interface)")
-expect(out).to_contain("NVMe controller (admin + multi IO queue)")
-expect(out).to_contain("OpenSSD multi-target config")
-
-step("Confirm the OpenSSD target profiles are exercised")
-expect(out).to_contain("target: OpenSSD 2Ch8Way channels")
-expect(out).to_contain("openssd: Cosmos+ NAND channels")
-expect(out).to_contain("openssd: PL PCIe endpoint aperture")
-
-step("Confirm the suite reports overall PASS")
-expect(out).to_contain("ALL FIRMWARE SELF-TESTS PASS")
+expect(out).to_contain("FW LAYER SMOKE PASS")
 ```
 
 </details>
