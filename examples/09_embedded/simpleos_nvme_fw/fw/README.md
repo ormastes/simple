@@ -94,7 +94,7 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 > **Integration status (wired vs. shelf).** The authoritative wired-vs-shelf accounting is
 > `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status — wired vs. shelf" —
 > P1/P2/P7/P8 are **wired**, P3/P4/P5/P6 have wired simulation floors, and P9
-> (`../fw_rv32/entry.spl`) is the host-verified rv32 RAIN reference; the full no-alloc firmware
+> (`../fw_rv32/entry.spl`) is the host-verified rv32 RAIN reference wired through the rv32 boot hook; the full no-alloc firmware
 > port remains the ceiling.
 
 ## Requirements coverage (from the research report)

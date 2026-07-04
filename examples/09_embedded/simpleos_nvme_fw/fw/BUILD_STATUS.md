@@ -77,9 +77,9 @@ suite is green (gate
 
 Scope note (explicit): "full NVMe SSD fw" here = the host-runnable simulation (run-green).
 P9 — bare-metal **rv32** reference: `fw_rv32/entry.spl` is written as an array-free scalar
-re-expression of the RAIN reconstruct, `bin/simple check`-clean, and host-verified. The rv32 OS
-boot path is restored in the current lane, but the full 22-module no-alloc firmware has not been
-ported/wired into that boot path yet. P9 is therefore **reference-done, full-port pending**.
+re-expression of the RAIN reconstruct, `bin/simple check`-clean, host-verified, and wired through
+the rv32 boot hook (`rt_rv32_boot_optional_nvme_fw_selftest`). The full 22-module no-alloc firmware
+has not been ported into that boot path yet. P9 is therefore **reference-wired, full-port pending**.
 
 ## Production hardening — DONE (run-green, on origin/main)
 

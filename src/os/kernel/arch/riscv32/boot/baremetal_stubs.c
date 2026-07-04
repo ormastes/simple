@@ -17,3 +17,8 @@ extern volatile unsigned int _smp_online_count;
 unsigned long long rt_rv32_smp_online_count(void) {
     return (unsigned long long)_smp_online_count;
 }
+
+long long rt_rv32_boot_optional_nvme_fw_selftest(void) __attribute__((weak));
+long long rt_rv32_boot_optional_nvme_fw_selftest(void) {
+    return 0;
+}
