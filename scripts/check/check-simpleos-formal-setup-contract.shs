@@ -5,6 +5,7 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 SETUP="$ROOT_DIR/scripts/setup/setup-simpleos-formal-env.shs"
 PREREQ="$ROOT_DIR/scripts/check/check-simpleos-mission-critical-prereqs.shs"
 RELEASE="$ROOT_DIR/scripts/check/check-simpleos-mission-critical-release.shs"
+RTL_PROOF="$ROOT_DIR/scripts/check/check-riscv-rtl-sby-proof.shs"
 
 print_out="$(sh "$SETUP" --print-install)"
 printf '%s\n' "$print_out" | grep -Fq "sudo apt-get install yosys symbiyosys boolector z3" || {
@@ -111,6 +112,20 @@ if PATH="$partial_bin" /bin/sh "$PREREQ" >/tmp/simpleos-formal-prereq-partial.ou
 fi
 grep -Fq "simpleos_mission_critical_prereqs_missing=yosys,smt-solver" /tmp/simpleos-formal-prereq-partial.out || {
     echo "FAIL: prereq doctor fake partial stack missing yosys/smt blocker" >&2
+    exit 1
+}
+
+rtl_partial_bin="$ROOT_DIR/build/simpleos_formal_setup_contract/rtl-partial-bin"
+mkdir -p "$rtl_partial_bin"
+printf '#!/bin/sh\nexec /usr/bin/dirname "$@"\n' >"$rtl_partial_bin/dirname"
+printf '#!/bin/sh\nexit 0\n' >"$rtl_partial_bin/sby"
+chmod +x "$rtl_partial_bin/dirname" "$rtl_partial_bin/sby"
+if PATH="$rtl_partial_bin" /bin/sh "$RTL_PROOF" >/tmp/simpleos-formal-rtl-partial.out 2>/tmp/simpleos-formal-rtl-partial.err; then
+    echo "FAIL: RISC-V SBY proof fake partial stack passed" >&2
+    exit 1
+fi
+grep -Fq "reason=missing-formal-prereqs missing=yosys,smt-solver" /tmp/simpleos-formal-rtl-partial.err || {
+    echo "FAIL: RISC-V SBY proof fake partial stack missing yosys/smt blocker" >&2
     exit 1
 }
 
