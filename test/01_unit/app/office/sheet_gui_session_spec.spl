@@ -12,7 +12,8 @@ selection survives an edit.
 use std.spec
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.file_formats.{recalculate_formula_cells}
-use app.office.gui.{session_new, session_select, session_edit, sheet_gui_view_with_selection}
+use app.office.gui.{session_new, session_select, session_edit, sheet_gui_view_with_selection, session_click, sheet_gui_cell_click_point}
+use common.ui.layout.{compute_layout, find_rect}
 
 fn _dump_contains(haystack: text, needle: text) -> bool:
     """Substring check via index_of's Option -- matches html_widgets.spl's
@@ -98,3 +99,65 @@ describe "session_edit: editing a formula cell replaces the formula":
         assert_false(_dump_contains(view.text_dump, "=B2*C2"))
         # D5 (=SUM(D2:D3)) now sums the literal 999 + D3's 60, not 20 + 60
         expect(view.text_dump).to_contain("1059")
+
+describe "pointer selection":
+    """Real event-dispatch coverage for the office_gui_no_per_cell_click_
+    target_2026-07-04.md gap: session_click builds the tree, routes a
+    genuine UIEvent.Resize + UIEvent.MouseEvent("down") through common.ui.
+    event's process_event/handle_pointer, and reads the hit widget id back
+    off state.focused_id -- no parallel coordinate mapper."""
+
+    it "a click computed to land on cell B2 selects B2":
+        val session = session_select(session_new(_demo_sheet(), "D2"), "D2")
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        val point = sheet_gui_cell_click_point(view, "B2", 640, 480)
+        val click_x = point.0
+        val click_y = point.1
+        assert_true(click_x >= 0)
+        assert_true(click_y >= 0)
+
+        val clicked = session_click(session, click_x, click_y, 5, 4, 640, 480)
+        expect(clicked.selected_ref).to_equal("B2")
+        val clicked_view = sheet_gui_view_with_selection(clicked, 5, 4)
+        expect(clicked_view.text_dump).to_contain("[10]")
+        assert_false(_dump_contains(clicked_view.text_dump, "[20]"))
+
+    it "a click outside the rendered viewport leaves the selection unchanged":
+        val session = session_select(session_new(_demo_sheet(), "D2"), "D2")
+        # (-10, -10) is outside every widget's rect at this viewport (the
+        # tree's root rect itself starts at (0, 0)) -- handle_pointer's
+        # hit-test finds nothing, so the real click-miss path (state
+        # unchanged) applies, not a fallback stub.
+        val clicked = session_click(session, -10, -10, 5, 4, 640, 480)
+        expect(clicked.selected_ref).to_equal("D2")
+
+    it "a click on a column-header widget (non-cell id) leaves the selection unchanged":
+        val session = session_select(session_new(_demo_sheet(), "D2"), "D2")
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        val rects = compute_layout(view.tree.root_node(), 0, 0, 640, 480)
+        var header_x = -1
+        var header_y = -1
+        match find_rect(rects, "sheet_sel_hdr_B"):
+            case Some(r):
+                header_x = r.x + r.w / 2
+                header_y = r.y + r.h / 2
+            case _:
+                pass
+        assert_true(header_x >= 0)
+        assert_true(header_y >= 0)
+
+        val clicked = session_click(session, header_x, header_y, 5, 4, 640, 480)
+        expect(clicked.selected_ref).to_equal("D2")
+
+    it "clicked-then-edited flow: click selects B2, then editing B2 recalculates D2 and D5":
+        var session = session_select(session_new(_demo_sheet(), "D2"), "D2")
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        val point = sheet_gui_cell_click_point(view, "B2", 640, 480)
+        session = session_click(session, point.0, point.1, 5, 4, 640, 480)
+        expect(session.selected_ref).to_equal("B2")
+
+        session = session_edit(session, "B2", "40")
+        val after = sheet_gui_view_with_selection(session, 5, 4)
+        expect(after.text_dump).to_contain("[40]")
+        expect(after.text_dump).to_contain("140")
+        assert_false(_dump_contains(after.text_dump, "[10]"))

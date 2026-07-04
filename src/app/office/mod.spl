@@ -11,7 +11,7 @@ use app.office.slides.slide.{Slide, slide_count, blank_slide, add_text_box, slid
 use app.office.mail.mail_app.{MailApp}
 use app.office.planner.planner_app.{PlannerApp}
 use app.office.counter.{CounterApp}
-use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, sheet_gui_view_with_selection, office_gui_sheet_session_pixels}
+use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point}
 use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_source_pane, wysiwyg_update_line_checked}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.file_ops.{RecentFileStore}
@@ -142,6 +142,51 @@ fn _run_office_gui_sheet_edit_command() -> i32:
     print "office-gui-edit: AFTER frame {office_gui_frame_width()}x{office_gui_frame_height()}, {after_non_background} non-background pixels"
     for line in after_view.text_dump.split("\n"):
         print "office-gui-edit-after: {line}"
+    return 0
+
+fn _run_office_gui_sheet_click_command() -> i32:
+    """Script the real pointer-click path end to end: start with D2 selected
+    (BEFORE frame), compute the on-screen point that lands on cell B2 from
+    the SAME layout pass handle_pointer's hit-test uses (sheet_gui_cell_
+    click_point), route that (x, y) through session_click (which itself
+    routes a genuine UIEvent.Resize + UIEvent.MouseEvent through common.ui.
+    event's process_event/handle_pointer -- no parallel coordinate mapper),
+    and print the coordinates used plus the hit result. Closes doc/
+    08_tracking/bug/office_gui_no_per_cell_click_target_2026-07-04.md's
+    pointer-click gap: real (x, y) -> hit-test -> cell selected."""
+    val viewport_w = 640
+    val viewport_h = 480
+    val sheet = _build_office_gui_sheet_demo()
+    var session = session_new(sheet, "D2")
+    session = session_select(session, "D2")
+
+    val before_view = sheet_gui_view_with_selection(session, 5, 4)
+    val before_pixels = office_gui_sheet_session_pixels(before_view, session.selected_ref)
+    if before_pixels.len() == 0:
+        print "Error: office GUI render produced an empty frame for sheet-gui-click (before)"
+        return 1
+    val before_non_background = office_gui_non_background_pixel_count(before_pixels)
+    print "office-gui-click: BEFORE frame {office_gui_frame_width()}x{office_gui_frame_height()}, {before_non_background} non-background pixels"
+    for line in before_view.text_dump.split("\n"):
+        print "office-gui-click-before: {line}"
+
+    val point = sheet_gui_cell_click_point(before_view, "B2", viewport_w, viewport_h)
+    val click_x = point.0
+    val click_y = point.1
+    print "office-gui-click: computed click point for B2 = ({click_x}, {click_y}) at viewport {viewport_w}x{viewport_h}"
+
+    session = session_click(session, click_x, click_y, 5, 4, viewport_w, viewport_h)
+    print "office-gui-click: hit={session.selected_ref}"
+
+    val after_view = sheet_gui_view_with_selection(session, 5, 4)
+    val after_pixels = office_gui_sheet_session_pixels(after_view, session.selected_ref)
+    if after_pixels.len() == 0:
+        print "Error: office GUI render produced an empty frame for sheet-gui-click (after)"
+        return 1
+    val after_non_background = office_gui_non_background_pixel_count(after_pixels)
+    print "office-gui-click: AFTER frame {office_gui_frame_width()}x{office_gui_frame_height()}, {after_non_background} non-background pixels"
+    for line in after_view.text_dump.split("\n"):
+        print "office-gui-click-after: {line}"
     return 0
 
 fn _run_office_gui_sheet_command() -> i32:
@@ -288,6 +333,8 @@ fn run_office(args: [text]) -> i32:
             return _run_office_gui_sheet_command()
         "sheet-gui-edit" =>
             return _run_office_gui_sheet_edit_command()
+        "sheet-gui-click" =>
+            return _run_office_gui_sheet_click_command()
         "chart-gui" =>
             return _run_office_gui_chart_command()
         "pivot-gui" =>
@@ -333,7 +380,7 @@ fn run_office(args: [text]) -> i32:
         "erp-invoice" =>
             return _run_erp_invoice_command(args)
         case _("unsupported office app names show usage"):
-            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|sheet-gui|sheet-gui-edit|chart-gui|pivot-gui|render|open|convert|toc|merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
+            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|sheet-gui|sheet-gui-edit|sheet-gui-click|chart-gui|pivot-gui|render|open|convert|toc|merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
             return 1
 
 fn _basename(path: text) -> text:
