@@ -324,6 +324,8 @@ impl Ftl:
             val live: bool = me.band.is_valid(ppn)
             if live:
                 val rd: FilRead = me.fil.read(ppn)
+                if rd.code == NAND_ECC_FAIL:
+                    return UNMAP    # source page is not safely readable; do NOT copy or erase
                 val newp: i64 = me.band.alloc_page()
                 if newp == NO_PPN:
                     return UNMAP    # cannot relocate -> do NOT erase; block stays intact
@@ -495,6 +497,18 @@ fn ftl_selftest() -> i64:
     fail = fail + expect_eq(erase_blocked, UNMAP, "gc does not free a block when erase fails")
     fail = fail + expect_eq(ef.read(1000), 2000, "failed erase gc keeps relocated data readable")
     fail = fail + expect_eq(ef.band.block_state(0), BLK_BAD, "failed erase retires victim in allocator")
+
+    var rf: Ftl = ftl_new()
+    i = 0
+    while i < PAGES_PER_BLOCK * 2:
+        rf.write(1200 + i, 3000 + i)
+        i = i + 1
+    val src_ppn: i64 = rf.physical_ppn(1200)
+    rf.inject_read_bitflip(src_ppn, 2)
+    val read_blocked: i64 = rf.gc_once()
+    fail = fail + expect_eq(read_blocked, UNMAP, "gc aborts on uncorrectable source read")
+    fail = fail + expect_eq(rf.read_status(1200), SC_MEDIA_ERR, "failed source read remains reported as media error")
+    fail = fail + expect_eq(rf.band.block_state(0), BLK_CLOSED, "failed source read keeps victim closed")
 
     fail
 
