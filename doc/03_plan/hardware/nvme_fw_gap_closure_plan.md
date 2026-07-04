@@ -53,7 +53,7 @@ the firmware":
 | P6 | `firmware.service_tick` | Foreground HIL ticks and background GC ticks share an explicit FTL-map owner token | **wired cooperative floor** — no multicore/preemption |
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
 | P8 | `rain` | `ftl` (`rain_seal` / `rain_recover_channel`: a failed channel is rebuilt inside the live FTL, verified end-to-end through the normal read path) | **wired** |
-| P2 | `fil_scheduler` | none (the host-runnable sim executes ops synchronously — channel-level parallelism is a model the single-threaded sim cannot itself exhibit) | shelf — verified model, not load-bearing |
+| P2 | `fil_scheduler` | `fil.spl` (every valid program/read/erase queues the target block through the scheduler before the FMC command) | **wired timing floor** — channel-level parallelism is still a model the single-threaded sim cannot physically exhibit |
 | P9 | `fw_rv32/entry.spl` | bare-metal rv32 ISA (re-expresses the RAIN reconstruct array-free; `check`-clean + host-verified) | started — **build-blocked (environmental)**: rv32 LLVM native-build broken here (proven OS recipe also exits 255); boot not observed |
 
 Adding more standalone modules (full P4 HostMem/PRP lists, full P5 DRAM refresh/ECC/bandwidth, multicore P6 beyond the cooperative token, or full BCH/LDPC beyond the P3 floor) widens the shelf without closing the gap. Prefer
@@ -114,7 +114,9 @@ mirroring `fmc_driver.c`: a command/address/status register file; issue → poll
 > NUM_CHANNELS=8; `channel_of(blk) = blk mod 8` is a *derived view*). Per-channel serialization
 > (one op per channel per step) + parallel drain (steps = deepest channel queue). Tested by
 > `fil_scheduler_selftest` (`test_fw`) and `parallelism_check.spl` (8× striped speedup; unbalanced
-> batch bounded by its deepest channel), the latter gated in the system spec. **No Lean proof** —
+> batch bounded by its deepest channel), the latter gated in the system spec. As of 2026-07-04,
+> `Fil.program/read/erase` also queue their live target block through the scheduler before the
+> FMC command, so P2 is load-bearing as a timing floor. **No Lean proof** —
 > the parallelism is a step-counting model (synchronous interpreter), proven by direct count, not
 > ceremony. True channel-striped *allocation* (changing which PPN a write lands on) was
 > deliberately **not** done: in a synchronous model it buys risk (re-deriving `Alloc.lean` on the

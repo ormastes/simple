@@ -7,7 +7,7 @@ commit → rebase onto origin/main (adds-only) → non-force SSH push.
 ## Done (run-green, on origin/main)
 - `nvme_types.spl` — frozen shared interface (constants, Handle, NvmeCmd/Cpl, helpers, expect_eq).
 - **FIL complete**: `fil_nand` (sim NAND), `fil_ecc`, `fil_badblock`, `fil_fmc` (P1 — wired into FIL),
-  `fil_scheduler` (P2 — channel scheduler, done-but-shelf), **`fil.spl`** (NAND+ECC+bad-block remap,
+  `fil_scheduler` (P2 — wired timing floor), **`fil.spl`** (NAND+ECC+bad-block remap,
   page API for FTL; `FilRead{data,lba,seq,code}`).
 - **FTL leaves**: `ftl_map` (DFTL write-back cache), `ftl_band` (log allocator + valid bitmap), `ftl_journal` (WAL+checkpoint+A/B superblock).
 - **HIL+core leaves**: `hil_queue` (SQ/CQ rings), `hil_command` (decode/validate), `fw_pool` (gen-handle task pool; accessors cid/lba/data/status/old_ppn/new_ppn/seq/phase).
@@ -131,10 +131,10 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   and `proofs/Rain.lean`.
 
 Integration status (canonical: `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration
-status", wired-vs-shelf table): P1 `fil_fmc`, P7 `power_thermal`, and P8 `rain` are all **WIRED**
-into the live controller/FTL; P2 `fil_scheduler` **landed but stays SHELF** — channel-level
-parallelism is a model a single-threaded sim cannot exhibit, so it is not flatly deferred but cannot
-be exercised; P3 has a **wired SECDED stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
+status", wired-vs-shelf table): P1 `fil_fmc`, P2 `fil_scheduler`, P7 `power_thermal`, and P8
+`rain` are all **WIRED** into the live controller/FTL; P2 remains a timing floor because
+channel-level parallelism is a model a single-threaded sim cannot physically exhibit; P3 has a
+**wired SECDED stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
 scope); P4 has a **wired segmented-PRP host-byte floor** (full HostMem/SGL/IOMMU remains out of scope);
 P5 has a **wired bounded-map-cache + fixed arena/free-list floor** (full DRAM subsystem remains out of scope);
 P6 has a **wired cooperative-owner floor** (true multicore/preemption remains out of scope);
