@@ -545,6 +545,47 @@ pub(crate) fn build_import_map(
 
     // Drop ambiguous (empty-name sentinel) entries before returning.
     fn_return_types.retain(|_, ty| !matches!(ty, simple_parser::Type::Simple(s) if s.is_empty()));
+
+    // #107 ROOT FIX — cross-kind (struct vs enum) bare-name collisions.
+    // The bare-name-keyed global registries (`struct_defs` / `enum_defs`) let a
+    // name that is an ENUM in one module (e.g. the interpreter's 20-variant
+    // `enum Value` in 70.backend) also carry a STRUCT layout collected from a
+    // DIFFERENT module that happens to define `struct Value` (app/interpreter).
+    // At whole-program scale the cross-module field/type fallback can then apply
+    // that struct layout to the enum receiver: a `Value.Int(5)` stored into a
+    // `Dict<text, Value>` is reinterpreted through the struct layout and reads
+    // back as a NON-Enum heap object, so `rt_enum_discriminant` returns -1 and
+    // the tag+payload are lost (bug doc: stage4 "disc=-1" wall, tasks #70/#103/
+    // #104). Isolated repros have a single `Value` so never collide, which is why
+    // the corruption only manifests in the full multi-module binary.
+    //
+    // Cure: a name that is an enum ANYWHERE must not expose a struct layout via
+    // the cross-module fallback. Enum construction/matching uses hashed
+    // discriminants + each file's local/imported definition, so dropping the
+    // struct-side of a cross-kind collision is sound; field access on the
+    // genuine struct still resolves through the per-file registry (local/import),
+    // and only the unsound cross-module struct-layout guess is removed.
+    let cross_kind: Vec<String> = struct_defs
+        .keys()
+        .filter(|k| enum_defs.contains_key(*k))
+        .cloned()
+        .collect();
+    if std::env::var("SIMPLE_CENSUS_COLLIDE").is_ok() {
+        for name in &cross_kind {
+            eprintln!(
+                "[COLLIDE-CROSSKIND] name='{}' struct_fields={} enum_variants={} (struct layout dropped from cross-module fallback)",
+                name,
+                struct_defs.get(name).map(|f| f.len()).unwrap_or(0),
+                enum_defs.get(name).map(|v| v.len()).unwrap_or(0),
+            );
+        }
+    }
+    for name in &cross_kind {
+        struct_defs.remove(name);
+        duplicate_struct_defs.remove(name);
+        ambiguous.insert(name.clone());
+    }
+
     ImportMapResult {
         map,
         ambiguous,

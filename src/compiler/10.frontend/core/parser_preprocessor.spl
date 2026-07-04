@@ -187,6 +187,24 @@ fn _pp_parse_primary() -> bool:
         return value
 
     val atom = _pp_take()
+    # Task #105: the tokenizer splits a SPACED key/value @cfg condition
+    # (`@cfg(arch = "x86_64")`) into separate whitespace-delimited tokens
+    # (["arch", "=", "\"x86_64\""] or, for `==`, two single "=" tokens).
+    # Without reassembly only `atom` ("arch") reaches `_pp_eval_atom`, which
+    # falls through every known-keyword case to `false` regardless of the
+    # real value -- so BOTH a matching and a non-matching `@cfg(key = ...)`
+    # variant were silently dropped (or, depending on source order, an
+    # inactive variant's declaration could survive the false-negative
+    # filter untouched), producing wrong/ambiguous @cfg-arch dispatch.
+    # Reassemble one or more adjacent "=" tokens plus the following value
+    # token into a single `key=value`/`key==value` atom so the existing
+    # `cfg_eval_key_value` path in `_pp_eval_atom` (line 67-74) is reached.
+    var eq_op: [text] = []
+    while _pp_peek() == "=":
+        eq_op.push(_pp_take())
+    if eq_op.len() > 0:
+        val value_tok = _pp_take()
+        return _pp_eval_atom("{atom}{eq_op.join("")}{value_tok}")
     _pp_eval_atom(atom)
 
 fn _pp_eval_condition(condition: text) -> bool:
