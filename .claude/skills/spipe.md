@@ -70,6 +70,9 @@ before accepting regeneration-safe PASS. For RISC-V evidence that spans
 generated RTL sidecars plus Lean/BYL, cite
 `sh scripts/check/check-riscv-formal-dual-track.shs` so SPipe evidence covers
 the sidecar self-test, normal sidecar contract, and manual proof gate together.
+Starvation, fairness, race-condition, scheduler, channel, lock, or
+resource-lifecycle claims require a concurrency/resource model gate or an
+explicit blocker; a single interleaving test is not formal evidence.
 
 Check or install that wiring with:
 

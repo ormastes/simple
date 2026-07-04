@@ -405,6 +405,9 @@ when the generator contract is updated in the same lane.
 For RISC-V lanes that combine generated RTL sidecars with Lean/BYL proof
 models, cite `sh scripts/check/check-riscv-formal-dual-track.shs` as the
 aggregate SPipe evidence gate after regeneration.
+Starvation, fairness, race-condition, scheduler, channel, lock, or
+resource-lifecycle claims require a concurrency/resource model gate or an
+explicit blocker; a single interleaving test is not formal evidence.
 
 For MCP/runtime-forwarding or startup-latency work, refresh both the lane state
 file and `doc/07_guide/app/mcp/startup_performance.md` before handoff. Keep the
