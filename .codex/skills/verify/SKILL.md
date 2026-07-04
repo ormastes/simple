@@ -149,6 +149,9 @@ Scan for stub patterns — any match is a **FAIL**:
   lock, or resource-lifecycle changes require a concurrency/resource model
   check or an explicit blocker; a single interleaving test is not enough for a
   formal verification PASS.
+  Generated Lean/BYL artifacts are not sufficient by themselves when manual
+  constraints or theorem files exist; verify the stable manual proof entry
+  point after regeneration and cite that exact gate in SPipe/report evidence.
 - **GUI/MDI evidence gates:** wrappers that claim live visual/event proof must
   fail when requested evidence is unavailable, times out, or only proves file
   existence. For Electron, Tauri mobile/iOS, hosted WM, QEMU/GTK WM, and pure WM

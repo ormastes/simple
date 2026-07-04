@@ -102,6 +102,10 @@
     wrapper with zero `sorry`/`admit`/untrusted axioms. Starvation, fairness,
     race-condition, scheduler, channel, lock, or resource-lifecycle changes
     require a concurrency/resource model check or an explicit blocker.
+    When generated Lean/BYL artifacts feed the claim, require the matching
+    manual theorem or constraint file to remain separate and pass its
+    post-regeneration gate (`lake build`, `simple gen-lean verify`, or
+    `simple verify check`) before accepting the evidence.
 16. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)

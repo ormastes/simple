@@ -59,6 +59,12 @@ workflow/tooling behavior changed but the matching guide, skill, agent,
 command, or generated/manual spec docs are stale. The documentation freshness
 gate is part of completion, not a release follow-up.
 
+For formal-verification evidence, generated Lean/BYL artifacts must stay
+separate from manual theorem or constraint files. A SPipe scenario, generated
+manual, or hardening report may cite generated artifacts only when it also names
+the stable manual proof entry point and the post-regeneration gate that checked
+it (`lake build`, `simple gen-lean verify`, or `simple verify check`).
+
 Check or install that wiring with:
 
 ```bash

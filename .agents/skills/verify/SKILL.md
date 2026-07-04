@@ -118,6 +118,9 @@ not create, rewrite, or weaken SPipe after verification.
     `FORMAL_MANIFEST`. Missing `sby` means readiness only, not proof pass.
   - Lean claims use `simple gen-lean verify`, `simple verify check`, or the
     lane-specific Lean proof wrapper with zero `sorry`/`admit`/untrusted axioms.
+    Generated Lean/BYL artifacts must stay separate from manual theorem or
+    constraint files; when manual proof files exist, rerun and cite the
+    post-regeneration gate that checked that stable entry point.
   - Use both when the lane spans RTL plus higher-level Simple/spec behavior.
     Starvation, fairness, race-condition, scheduler, channel, lock, or resource
     lifecycle changes require a concurrency/resource model check or an explicit

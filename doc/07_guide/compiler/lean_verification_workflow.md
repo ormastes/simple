@@ -249,6 +249,9 @@ Regeneration must be append-safe for manual proof work:
 - added proof intent belongs in the manual theorem/constraint file, not in a
   generated Lean or BYL file, unless the generator contract is updated in the
   same change.
+- SPipe and hardening-report rows must name the post-regeneration proof gate
+  (`lake build`, `simple gen-lean verify`, or `simple verify check`) next to the
+  generated artifact and manual theorem file.
 
 ---
 
