@@ -110,6 +110,8 @@
     SimpleOS mission-critical release evidence also requires
     `sh scripts/check/check-simpleos-mission-critical-release.shs` with
     `release_blockers=none`; readiness-only rows are not release completion.
+    Treat `sidecar-contract-failed`, `missing-artifact`, and `sby-run-failed`
+    as release-failing RTL evidence problems, not missing-tool blockers.
 16. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)
