@@ -6208,6 +6208,31 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     return CellValue.ErrorVal(message: "RANDBETWEEN requires bottom <= top")
                 return CellValue.NumberVal(value: rt_random_randint(lo, hi).to_f64())
             return CellValue.ErrorVal(message: "RANDBETWEEN requires bottom, top")
+        "PROB":
+            if args.len() >= 3:
+                val x_arr = args[0]
+                val p_arr = args[1]
+                val lower = _first_val(args[2])
+                val upper = if args.len() >= 4: _first_val(args[3]) else: lower
+                if x_arr.len() != p_arr.len():
+                    return CellValue.ErrorVal(message: "PROB ranges must match")
+                var p_sum = 0.0
+                var p_match = 0.0
+                var i = 0
+                while i < x_arr.len():
+                    val p = p_arr[i]
+                    if p < 0.0 or p > 1.0:
+                        return CellValue.ErrorVal(message: "PROB probabilities must be in [0,1]")
+                    p_sum = p_sum + p
+                    val x = x_arr[i]
+                    if x >= lower and x <= upper:
+                        p_match = p_match + p
+                    i = i + 1
+                val p_diff = if p_sum < 1.0: 1.0 - p_sum else: p_sum - 1.0
+                if p_diff > 1e-9:
+                    return CellValue.ErrorVal(message: "PROB probabilities must sum to 1")
+                return CellValue.NumberVal(value: p_match)
+            return CellValue.ErrorVal(message: "PROB requires 3+ arguments")
         _:
             return CellValue.ErrorVal(message: "Unknown function: {name}")
 
@@ -6281,6 +6306,14 @@ fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
         return _array_mode_mult(tokens, 2, sheet)
     if name == "FREQUENCY":
         return _array_frequency(tokens, 2, sheet)
+    if name == "LINEST":
+        return _array_linest(tokens, 2, sheet)
+    if name == "TREND":
+        return _array_trend(tokens, 2, sheet)
+    if name == "GROWTH":
+        return _array_growth(tokens, 2, sheet)
+    if name == "RANDARRAY":
+        return _array_randarray(tokens, 2, sheet)
     if name == "SORTBY":
         return _array_sortby(tokens, 2, sheet)
     if name == "WRAPROWS":
@@ -7403,6 +7436,232 @@ fn _array_munit(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
                 row.push("1")
             else:
                 row.push("0")
+            c = c + 1
+        out.push(row)
+        r = r + 1
+    out
+
+fn _linfit_compute(ys: [f64], xs: [f64]) -> [f64]:
+    """Compute least-squares linear fit: slope, intercept (or [0,0] on error).
+
+    Returns [slope, intercept] where:
+    - slope = Σ(x-x̄)(y-ȳ)/Σ(x-x̄)²
+    - intercept = ȳ - slope·x̄
+
+    Requirements: |xs| >= 2 and Σ(x-x̄)² > 0 (non-zero x-variance).
+    Returns [0, 0] if requirements not met."""
+    if ys.len() < 2 or xs.len() != ys.len():
+        return [0.0, 0.0]
+    var x_sum = 0.0
+    var y_sum = 0.0
+    var i = 0
+    while i < xs.len():
+        x_sum = x_sum + xs[i]
+        y_sum = y_sum + ys[i]
+        i = i + 1
+    val n = ys.len().to_f64()
+    val x_mean = x_sum / n
+    val y_mean = y_sum / n
+    var xy_dev = 0.0
+    var xx_dev = 0.0
+    var j = 0
+    while j < xs.len():
+        val dx = xs[j] - x_mean
+        val dy = ys[j] - y_mean
+        xy_dev = xy_dev + dx * dy
+        xx_dev = xx_dev + dx * dx
+        j = j + 1
+    if xx_dev == 0.0:
+        return [0.0, 0.0]
+    val slope = xy_dev / xx_dev
+    val intercept = y_mean - slope * x_mean
+    [slope, intercept]
+
+fn _array_linest(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """LINEST(known_ys, [known_xs]) -> [slope, intercept] spilled horizontally.
+
+    Computes least-squares linear regression: y = slope*x + intercept.
+    known_xs defaults to 1,2,...,n if omitted.
+    Returns [["#ERR"]] on error (mismatched lengths, n<2, zero x-variance)."""
+    val yrs = _read_array_range_str(tokens, pos)
+    if yrs == "":
+        return [["#ERR"]]
+    val ys = _resolve_cell_range(yrs, sheet, 0)
+    var cur = _skip_comma(tokens, pos + 3)
+    val xrs = _read_array_range_str(tokens, cur)
+    var xs: [f64] = []
+    if xrs != "":
+        xs = _resolve_cell_range(xrs, sheet, 0)
+    else:
+        var i = 1
+        while i <= ys.len():
+            xs.push(i.to_f64())
+            i = i + 1
+    if xs.len() != ys.len():
+        return [["#ERR"]]
+    val fit = _linfit_compute(ys, xs)
+    if fit[0] == 0.0 and fit[1] == 0.0 and ys.len() < 2:
+        return [["#ERR"]]
+    var out_row: [text] = []
+    out_row.push("{fit[0]}")
+    out_row.push("{fit[1]}")
+    [[out_row[0], out_row[1]]]
+
+fn _array_trend(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """TREND(known_ys, [known_xs], [new_xs]) -> predicted values via linear fit.
+
+    Fits y = slope*x + intercept using LINEST, then predicts at new_xs.
+    known_xs defaults to 1,2,...,n if omitted.
+    new_xs defaults to known_xs range if omitted, or can be a scalar/range.
+    Returns [["#ERR"]] on error (fit failed), or a row of predicted values."""
+    val yrs = _read_array_range_str(tokens, pos)
+    if yrs == "":
+        return [["#ERR"]]
+    val ys = _resolve_cell_range(yrs, sheet, 0)
+    var cur = _skip_comma(tokens, pos + 3)
+    val xrs = _read_array_range_str(tokens, cur)
+    var xs: [f64] = []
+    if xrs != "":
+        xs = _resolve_cell_range(xrs, sheet, 0)
+    else:
+        var i = 1
+        while i <= ys.len():
+            xs.push(i.to_f64())
+            i = i + 1
+    if xs.len() != ys.len():
+        return [["#ERR"]]
+    val fit = _linfit_compute(ys, xs)
+    if fit[0] == 0.0 and fit[1] == 0.0 and ys.len() < 2:
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur + 3)
+    val nxrs = _read_array_range_str(tokens, cur)
+    var newxs: [f64] = []
+    if nxrs != "":
+        newxs = _resolve_cell_range(nxrs, sheet, 0)
+    else:
+        if cur < tokens.len() and tokens.get(cur) != ")" and tokens.get(cur) != ",":
+            val nx_arg = _read_array_num_arg(tokens, cur, sheet)
+            if nx_arg.present:
+                newxs.push(nx_arg.value)
+            else:
+                newxs = xs
+        else:
+            newxs = xs
+    var out_row: [text] = []
+    var i = 0
+    while i < newxs.len():
+        val y_pred = fit[0] * newxs[i] + fit[1]
+        out_row.push("{y_pred}")
+        i = i + 1
+    [out_row]
+
+fn _array_growth(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """GROWTH(known_ys, [known_xs], [new_xs]) -> exponential predictions.
+
+    Fits ln(y) = slope*x + intercept, then predicts exp(slope*x + intercept).
+    All y must be > 0. Returns [["#ERR"]] on error or a row of predicted values."""
+    val yrs = _read_array_range_str(tokens, pos)
+    if yrs == "":
+        return [["#ERR"]]
+    val ys = _resolve_cell_range(yrs, sheet, 0)
+    var i = 0
+    while i < ys.len():
+        if ys[i] <= 0.0:
+            return [["#ERR"]]
+        i = i + 1
+    var log_ys: [f64] = []
+    var j = 0
+    while j < ys.len():
+        log_ys.push(_ln_f64(ys[j]))
+        j = j + 1
+    var cur = _skip_comma(tokens, pos + 3)
+    val xrs = _read_array_range_str(tokens, cur)
+    var xs: [f64] = []
+    if xrs != "":
+        xs = _resolve_cell_range(xrs, sheet, 0)
+    else:
+        var k = 1
+        while k <= ys.len():
+            xs.push(k.to_f64())
+            k = k + 1
+    if xs.len() != ys.len():
+        return [["#ERR"]]
+    val fit = _linfit_compute(log_ys, xs)
+    if fit[0] == 0.0 and fit[1] == 0.0 and ys.len() < 2:
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur + 3)
+    val nxrs = _read_array_range_str(tokens, cur)
+    var newxs: [f64] = []
+    if nxrs != "":
+        newxs = _resolve_cell_range(nxrs, sheet, 0)
+    else:
+        if cur < tokens.len() and tokens.get(cur) != ")" and tokens.get(cur) != ",":
+            val nx_arg = _read_array_num_arg(tokens, cur, sheet)
+            if nx_arg.present:
+                newxs.push(nx_arg.value)
+            else:
+                newxs = xs
+        else:
+            newxs = xs
+    var out_row: [text] = []
+    var m = 0
+    while m < newxs.len():
+        val log_y_pred = fit[0] * newxs[m] + fit[1]
+        val y_pred = _exp_f64(log_y_pred)
+        out_row.push("{y_pred}")
+        m = m + 1
+    [out_row]
+
+fn _array_randarray(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """RANDARRAY([rows], [cols], [min], [max], [integer]) -> random array.
+
+    Defaults: rows=1, cols=1, min=0, max=1, integer=FALSE.
+    Returns [["#ERR"]] on error (rows<1, cols<1, min>max)."""
+    var cur = pos
+    val rows_a = _read_array_num_arg(tokens, cur, sheet)
+    var rows = 1
+    if rows_a.present:
+        rows = rows_a.value.to_i64().to_i32()
+        cur = rows_a.next_pos
+    if rows < 1:
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur)
+    val cols_a = _read_array_num_arg(tokens, cur, sheet)
+    var cols = 1
+    if cols_a.present:
+        cols = cols_a.value.to_i64().to_i32()
+        cur = cols_a.next_pos
+    if cols < 1:
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur)
+    val min_a = _read_array_num_arg(tokens, cur, sheet)
+    var min_val = 0.0
+    if min_a.present:
+        min_val = min_a.value
+        cur = min_a.next_pos
+    cur = _skip_comma(tokens, cur)
+    val max_a = _read_array_num_arg(tokens, cur, sheet)
+    var max_val = 1.0
+    if max_a.present:
+        max_val = max_a.value
+        cur = max_a.next_pos
+    if min_val > max_val:
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur)
+    val int_a = _read_array_text_arg(tokens, cur, sheet)
+    var is_integer = false
+    if int_a.present:
+        is_integer = int_a.value.upper() == "TRUE" or int_a.value == "1"
+    var out: [[text]] = []
+    var r = 0
+    while r < rows:
+        var row: [text] = []
+        var c = 0
+        while c < cols:
+            val raw = rt_random_randint(0, 999999999).to_f64() / 1000000000.0
+            val scaled = min_val + raw * (max_val - min_val)
+            val val_final = if is_integer: _floor_f64(scaled) else: scaled
+            row.push("{val_final}")
             c = c + 1
         out.push(row)
         r = r + 1
