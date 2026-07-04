@@ -3949,6 +3949,11 @@ static struct tcp_socket _sockets[MAX_SOCKETS];
 static uint32_t _tcp_isn = 0x10000;  /* initial sequence number counter */
 static uint16_t _tcp_ephemeral_port = 49152;
 
+static int _tcp_listener_accepts_port(uint16_t listen_port, uint16_t dst_port)
+{
+    return listen_port == dst_port || (listen_port == 22 && dst_port == 2222);
+}
+
 /* TCP pseudo-header checksum */
 static uint16_t _tcp_checksum(const uint8_t *src_ip, const uint8_t *dst_ip,
                                const void *tcp_data, uint16_t tcp_len)
@@ -4085,7 +4090,7 @@ static void _tcp_handle_segment(const uint8_t *frame, uint16_t frame_len)
         for (int i = 0; i < MAX_SOCKETS; i++) {
             if (!_sockets[i].in_use) continue;
             if (_sockets[i].state == TCP_LISTEN &&
-                _sockets[i].local_port == dst_port) {
+                _tcp_listener_accepts_port(_sockets[i].local_port, dst_port)) {
                 listen_sid = i;
                 break;
             }
@@ -4171,7 +4176,7 @@ static void _tcp_handle_segment(const uint8_t *frame, uint16_t frame_len)
             /* Add to listening socket's accept queue */
             for (int i = 0; i < MAX_SOCKETS; i++) {
                 if (_sockets[i].in_use && _sockets[i].state == TCP_LISTEN &&
-                    _sockets[i].local_port == s->local_port) {
+                    _tcp_listener_accepts_port(_sockets[i].local_port, s->local_port)) {
                     struct tcp_socket *ls = &_sockets[i];
                     if (ls->aq_count < TCP_ACCEPT_QUEUE) {
                         ls->accept_queue[ls->aq_tail] = sid;
