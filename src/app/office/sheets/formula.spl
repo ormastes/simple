@@ -6,7 +6,7 @@
 # built-in functions. Cell-reference resolution is depth-bounded so
 # circular references resolve to an error instead of overflowing the stack.
 
-use app.office.sheets.cell.{CellValue, CellRef, parse_cell_ref, cell_ref_to_string, cell_display_text}
+use app.office.sheets.cell.{CellValue, CellRef, parse_cell_ref, cell_ref_to_string, cell_display_text, col_to_letter}
 use app.office.sheets.cell_ref.{parse_range, expand_range_refs, CellRange}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.number.{office_parse_unsigned_decimal_f64}
@@ -414,6 +414,8 @@ fn _is_text_function(name: text) -> bool:
      name == "DEC2BIN" or name == "BIN2DEC" or name == "DEC2HEX" or
      name == "HEX2DEC" or name == "DEC2OCT" or name == "OCT2DEC" or
      name == "BASE" or name == "DECIMAL" or name == "DATEDIF" or
+     name == "TEXTBEFORE" or name == "TEXTAFTER" or
+     name == "ARRAYTOTEXT" or name == "VALUETOTEXT" or
      name == "ROMAN" or name == "ARABIC")
 
 fn _fmt_num_trim(v: f64) -> text:
@@ -618,6 +620,29 @@ fn _temp_from_kelvin(k: f64, uname: text) -> f64:
         return k * 9.0 / 5.0 - 459.67
     k
 
+fn _find_nth_delim(src: text, delim: text, instance: i32) -> i32:
+    """Char index where the `instance`-th non-overlapping occurrence of `delim`
+    begins. Positive instance counts from the start (1-based); negative counts
+    from the end (-1 = last). Returns -1 when delim is empty or not found."""
+    if delim.len() == 0:
+        return -1
+    var starts: [i32] = []
+    var i = 0
+    while i + delim.len() <= src.len():
+        if src.slice(i, i + delim.len()) == delim:
+            starts.push(i)
+            i = i + delim.len()
+        else:
+            i = i + 1
+    if starts.len() == 0:
+        return -1
+    var idx = instance
+    if idx < 0:
+        idx = starts.len() + idx + 1
+    if idx < 1 or idx > starts.len():
+        return -1
+    starts[idx - 1]
+
 fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
     if name == "CONCAT" or name == "CONCATENATE":
         var out = ""
@@ -671,6 +696,31 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
         val start = _clamp_i32(_arg_int(args, 1) - 1, 0, s.len())
         val length = _clamp_i32(_arg_int(args, 2), 0, s.len() - start)
         return CellValue.TextVal(value: s.slice(start, start + length))
+    if name == "TEXTBEFORE":
+        if args.len() < 2:
+            return CellValue.ErrorVal(message: "TEXTBEFORE requires text and delimiter")
+        val delim = args[1]
+        val inst = if args.len() > 2: _arg_int(args, 2) else: 1
+        val at = _find_nth_delim(s, delim, inst)
+        if at < 0:
+            return CellValue.ErrorVal(message: "#N/A: TEXTBEFORE delimiter not found")
+        return CellValue.TextVal(value: s.slice(0, at))
+    if name == "TEXTAFTER":
+        if args.len() < 2:
+            return CellValue.ErrorVal(message: "TEXTAFTER requires text and delimiter")
+        val delim = args[1]
+        val inst = if args.len() > 2: _arg_int(args, 2) else: 1
+        val at = _find_nth_delim(s, delim, inst)
+        if at < 0:
+            return CellValue.ErrorVal(message: "#N/A: TEXTAFTER delimiter not found")
+        return CellValue.TextVal(value: s.slice(at + delim.len(), s.len()))
+    if name == "ARRAYTOTEXT":
+        # A range expands to one display-string arg per cell in _eval_text_function;
+        # join them comma+space per Excel's format-0 ARRAYTOTEXT.
+        return CellValue.TextVal(value: args.join(", "))
+    if name == "VALUETOTEXT":
+        # Format-0 (concise): the value's plain display text.
+        return CellValue.TextVal(value: s)
     if name == "EXACT":
         val other = if args.len() > 1: args[1] else: ""
         return CellValue.BoolVal(value: s == other)
@@ -1626,7 +1676,9 @@ fn _is_info_function(name: text) -> bool:
     (name == "IFERROR" or name == "IFS" or name == "SWITCH" or
      name == "CHOOSE" or name == "ISTEXT" or name == "ISNUMBER" or
      name == "ISBLANK" or name == "ISERROR" or name == "ISERR" or
-     name == "ISNA" or name == "N" or name == "T")
+     name == "ISNA" or name == "N" or name == "T" or
+     name == "NA" or name == "SHEET" or name == "SHEETS" or
+     name == "TYPE")
 
 fn _truthy(cv: CellValue) -> bool:
     """Excel truthiness for logical arguments: TRUE / nonzero number."""
@@ -1707,6 +1759,14 @@ fn _bool_cell(b: bool) -> CellValue:
     CellValue.BoolVal(value: b)
 
 fn _dispatch_info_function(name: text, args: [CellValue]) -> CellValue:
+    if name == "NA":
+        return CellValue.ErrorVal(message: "#N/A")
+    if name == "SHEET":
+        # Honest single-sheet model: the active/only sheet is always sheet 1.
+        return CellValue.NumberVal(value: 1.0)
+    if name == "SHEETS":
+        # Single-sheet workbook model: exactly one sheet.
+        return CellValue.NumberVal(value: 1.0)
     if name == "IFERROR":
         if args.len() < 2:
             return CellValue.ErrorVal(message: "IFERROR requires value and fallback")
@@ -1787,6 +1847,22 @@ fn _dispatch_info_function(name: text, args: [CellValue]) -> CellValue:
                 return a
             _:
                 return CellValue.TextVal(value: "")
+    if name == "TYPE":
+        # 1 number, 2 text, 4 boolean, 16 error. Excel's 64 (array) is not
+        # reachable through the scalar dispatch (array formulas spill instead),
+        # so it is intentionally unimplemented. Empty cells report as number (1),
+        # matching Excel's coercion of a blank reference.
+        match a:
+            CellValue.NumberVal(value):
+                return CellValue.NumberVal(value: 1.0)
+            CellValue.TextVal(value):
+                return CellValue.NumberVal(value: 2.0)
+            CellValue.BoolVal(value):
+                return CellValue.NumberVal(value: 4.0)
+            CellValue.ErrorVal(message):
+                return CellValue.NumberVal(value: 16.0)
+            _:
+                return CellValue.NumberVal(value: 1.0)
     CellValue.ErrorVal(message: "unknown info function {name}")
 
 fn _canonical_name(name: text) -> text:
@@ -1833,6 +1909,133 @@ fn _canonical_name(name: text) -> text:
         "FINV": return "F.INV.RT"
         _: return name
 
+fn _is_ref_function(name: text) -> bool:
+    """Reference functions read raw ref/range tokens (row/col geometry, stored
+    formula text) rather than evaluated values."""
+    (name == "ROWS" or name == "COLUMNS" or name == "ROW" or
+     name == "COLUMN" or name == "ADDRESS" or name == "FORMULATEXT" or
+     name == "ISFORMULA")
+
+fn _consume_to_paren(tokens: [text], pos: i32) -> i32:
+    """Advance past the reference argument list to just after its ')'. Reference
+    functions take only bare refs/ranges (no nested calls), so a flat scan to the
+    first ')' is exact."""
+    var cur = pos
+    while cur < tokens.len() and tokens.get(cur) != ")":
+        cur = cur + 1
+    if cur < tokens.len() and tokens.get(cur) == ")":
+        cur = cur + 1
+    cur
+
+fn _format_address(row: i32, col: i32, absn: i32, a1: bool) -> text:
+    """Excel ADDRESS text. abs: 1 $C$2, 2 C$2, 3 $C2, 4 C2. a1=FALSE -> R1C1
+    (absolute RnCn; relative components render as R[n]/C[n])."""
+    if a1:
+        val letter = col_to_letter(col - 1)
+        val rownum = "{row}"
+        if absn == 1:
+            return "${letter}${rownum}"
+        if absn == 2:
+            return "{letter}${rownum}"
+        if absn == 3:
+            return "${letter}{rownum}"
+        return "{letter}{rownum}"
+    if absn == 1:
+        return "R{row}C{col}"
+    if absn == 2:
+        return "R{row}C[{col}]"
+    if absn == 3:
+        return "R[{row}]C{col}"
+    return "R[{row}]C[{col}]"
+
+fn _eval_address(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """ADDRESS(row, col, [abs=1], [a1=TRUE]) -> a reference string. Args are
+    1-based; fails closed on non-positive row/col or an abs outside 1..4."""
+    var nums: [f64] = []
+    var cur = pos
+    while cur < tokens.len() and tokens.get(cur) != ")":
+        val r = _eval_comparison(tokens, cur, sheet, depth)
+        nums.push(_to_number(r.value))
+        cur = r.next_pos
+        if cur < tokens.len() and tokens.get(cur) == ",":
+            cur = cur + 1
+    if cur < tokens.len() and tokens.get(cur) == ")":
+        cur = cur + 1
+    if nums.len() < 2:
+        return EvalResult(value: CellValue.ErrorVal(message: "ADDRESS requires row and column"), next_pos: cur)
+    val row = nums[0].to_i64().to_i32()
+    val col = nums[1].to_i64().to_i32()
+    val absn = if nums.len() > 2: nums[2].to_i64().to_i32() else: 1
+    val a1 = if nums.len() > 3: nums[3] != 0.0 else: true
+    if row < 1 or col < 1 or absn < 1 or absn > 4:
+        return EvalResult(value: CellValue.ErrorVal(message: "ADDRESS argument out of range"), next_pos: cur)
+    EvalResult(value: CellValue.TextVal(value: _format_address(row, col, absn, a1)), next_pos: cur)
+
+fn _ref_cell_info(name: text, ref_str: text, sheet: Sheet, end: i32) -> EvalResult:
+    """ISFORMULA / FORMULATEXT on a single referenced cell. FORMULATEXT reads the
+    cell's stored FormulaVal expr (kept without the leading '='); a non-formula
+    cell yields #N/A."""
+    val cell = sheet.get_cell(ref_str)
+    if name == "ISFORMULA":
+        match cell.value:
+            CellValue.FormulaVal(expr, cached_display):
+                return EvalResult(value: CellValue.BoolVal(value: true), next_pos: end)
+            _:
+                return EvalResult(value: CellValue.BoolVal(value: false), next_pos: end)
+    if name == "FORMULATEXT":
+        match cell.value:
+            CellValue.FormulaVal(expr, cached_display):
+                return EvalResult(value: CellValue.TextVal(value: "={expr}"), next_pos: end)
+            _:
+                return EvalResult(value: CellValue.ErrorVal(message: "#N/A: FORMULATEXT target is not a formula"), next_pos: end)
+    EvalResult(value: CellValue.ErrorVal(message: "unknown ref function {name}"), next_pos: end)
+
+fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """ROWS/COLUMNS/ROW/COLUMN/ADDRESS/FORMULATEXT/ISFORMULA.
+
+    Bare ROW()/COLUMN() (no reference) need the origin cell of the formula being
+    recalculated. That origin is known in file_formats.recalculate_formula_cells,
+    but threading it to this leaf would require adding an origin parameter to the
+    whole recursive evaluator chain (_evaluate_formula -> _eval_comparison -> ...
+    -> _eval_function_call) — many call sites, not the one cheap param the plan
+    allows. Per CARD 5 / CARD 14 the bare forms fail closed with #ERR here; only
+    the with-argument forms are implemented."""
+    if name == "ADDRESS":
+        return _eval_address(tokens, pos, sheet, depth)
+    val end = _consume_to_paren(tokens, pos)
+    if (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":" and
+        _is_cell_ref_token(tokens.get(pos)) and _is_cell_ref_token(tokens.get(pos + 2))):
+        val a = parse_cell_ref(tokens.get(pos))
+        val b = parse_cell_ref(tokens.get(pos + 2))
+        if a == nil or b == nil:
+            return EvalResult(value: CellValue.ErrorVal(message: "{name} bad reference"), next_pos: end)
+        val minr = if a.row < b.row: a.row else: b.row
+        val maxr = if a.row > b.row: a.row else: b.row
+        val minc = if a.col < b.col: a.col else: b.col
+        val maxc = if a.col > b.col: a.col else: b.col
+        if name == "ROWS":
+            return EvalResult(value: CellValue.NumberVal(value: (maxr - minr + 1).to_f64()), next_pos: end)
+        if name == "COLUMNS":
+            return EvalResult(value: CellValue.NumberVal(value: (maxc - minc + 1).to_f64()), next_pos: end)
+        if name == "ROW":
+            return EvalResult(value: CellValue.NumberVal(value: (minr + 1).to_f64()), next_pos: end)
+        if name == "COLUMN":
+            return EvalResult(value: CellValue.NumberVal(value: (minc + 1).to_f64()), next_pos: end)
+        val tl = cell_ref_to_string(CellRef(col: minc, row: minr))
+        return _ref_cell_info(name, tl, sheet, end)
+    if _is_cell_ref_token(tokens.get(pos)):
+        val ref = parse_cell_ref(tokens.get(pos))
+        if ref == nil:
+            return EvalResult(value: CellValue.ErrorVal(message: "{name} bad reference"), next_pos: end)
+        if name == "ROWS" or name == "COLUMNS":
+            return EvalResult(value: CellValue.NumberVal(value: 1.0), next_pos: end)
+        if name == "ROW":
+            return EvalResult(value: CellValue.NumberVal(value: (ref.row + 1).to_f64()), next_pos: end)
+        if name == "COLUMN":
+            return EvalResult(value: CellValue.NumberVal(value: (ref.col + 1).to_f64()), next_pos: end)
+        return _ref_cell_info(name, tokens.get(pos), sheet, end)
+    EvalResult(value: CellValue.ErrorVal(message: "{name} requires a reference argument"), next_pos: end)
+
 fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Evaluate a function call. pos points to first token after '('."""
     if _is_text_function(name):
@@ -1853,6 +2056,8 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_info_function(name, tokens, pos, sheet, depth)
     if name == "MDETERM":
         return _eval_mdeterm(tokens, pos, sheet)
+    if _is_ref_function(name):
+        return _eval_ref_function(name, tokens, pos, sheet, depth)
     # Collect arguments separated by commas
     # Each argument can be a range (A1:B3) or an expression
     var args: [[f64]] = []
@@ -4597,6 +4802,8 @@ fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
         return _array_tocol(tokens, 2, sheet)
     if name == "TOROW":
         return _array_torow(tokens, 2, sheet)
+    if name == "TEXTSPLIT":
+        return _array_textsplit(tokens, 2, sheet)
     if name == "MMULT":
         return _array_mmult(tokens, 2, sheet)
     if name == "MINVERSE":
@@ -4619,6 +4826,52 @@ fn _read_array_num_arg(tokens: [text], pos: i32, sheet: Sheet) -> ArrNumArg:
         return ArrNumArg(value: 0.0, next_pos: pos, present: false)
     val r = _eval_comparison(tokens, pos, sheet, 0)
     ArrNumArg(value: _to_number(r.value), next_pos: r.next_pos, present: true)
+
+struct ArrTextArg:
+    value: text
+    next_pos: i32
+    present: bool
+
+fn _read_array_text_arg(tokens: [text], pos: i32, sheet: Sheet) -> ArrTextArg:
+    """Read a text argument as a display string: a quoted literal, a single cell
+    ref, or an evaluated expression. Marks absent at ')' / ',' / end."""
+    if pos >= tokens.len() or tokens.get(pos) == ")" or tokens.get(pos) == ",":
+        return ArrTextArg(value: "", next_pos: pos, present: false)
+    val tok = tokens.get(pos)
+    val next_tok = if pos + 1 < tokens.len(): tokens.get(pos + 1) else: ""
+    if tok.starts_with("\""):
+        return ArrTextArg(value: tok.slice(1, tok.len() - 1), next_pos: pos + 1, present: true)
+    if _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
+        return ArrTextArg(value: cell_display_text(sheet.get_cell(tok)), next_pos: pos + 1, present: true)
+    val r = _eval_comparison(tokens, pos, sheet, 0)
+    ArrTextArg(value: _cell_value_to_display(r.value), next_pos: r.next_pos, present: true)
+
+fn _array_textsplit(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """TEXTSPLIT(text, col_delim, [row_delim]) -> a 2D grid. The text is first
+    split into rows by row_delim (when given), then each row into columns by
+    col_delim. With no row_delim the result is a single row that spills across
+    columns."""
+    val a0 = _read_array_text_arg(tokens, pos, sheet)
+    if not a0.present:
+        return []
+    var cur = _skip_comma(tokens, a0.next_pos)
+    val a1 = _read_array_text_arg(tokens, cur, sheet)
+    if not a1.present or a1.value == "":
+        return []
+    cur = _skip_comma(tokens, a1.next_pos)
+    val a2 = _read_array_text_arg(tokens, cur, sheet)
+    val src = a0.value
+    val col_d = a1.value
+    val has_row = a2.present and a2.value != ""
+    var rows_src: [text] = []
+    if has_row:
+        rows_src = src.split(a2.value)
+    else:
+        rows_src.push(src)
+    var out: [[text]] = []
+    for r in rows_src:
+        out.push(r.split(col_d))
+    out
 
 fn _array_range_grid(range: CellRange, sheet: Sheet) -> [[text]]:
     """Read a range into a row-major grid of display strings."""
