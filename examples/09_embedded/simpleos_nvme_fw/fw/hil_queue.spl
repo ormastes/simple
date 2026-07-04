@@ -52,6 +52,8 @@ impl NvmeQueues:
         if me.sq_len == me.depth:
             return false
         val t: i64 = me.sq_tail
+        if t < 0 or t >= me.depth:
+            return false
         me.sq_cid[t]  = c.cid
         me.sq_op[t]   = c.opcode
         me.sq_lba[t]  = c.lba
@@ -66,6 +68,8 @@ impl NvmeQueues:
         if me.sq_len == 0:
             return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val h: i64 = me.sq_head
+        if h < 0 or h >= me.depth:
+            return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val cid:   i64 = me.sq_cid[h]
         val op:    i64 = me.sq_op[h]
         val lba:   i64 = me.sq_lba[h]
@@ -85,6 +89,8 @@ impl NvmeQueues:
         if me.cq_len == me.depth:
             return false
         val t: i64 = me.cq_tail
+        if t < 0 or t >= me.depth:
+            return false
         me.cq_cid[t]    = p.cid
         me.cq_status[t] = p.status
         me.cq_data[t]   = p.data
@@ -97,6 +103,8 @@ impl NvmeQueues:
         if me.cq_len == 0:
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val h: i64 = me.cq_head
+        if h < 0 or h >= me.depth:
+            return cpl_make(0, SC_INVALID_FIELD, 0)
         val cid:    i64 = me.cq_cid[h]
         val status: i64 = me.cq_status[h]
         val data:   i64 = me.cq_data[h]
@@ -140,6 +148,17 @@ fn hil_queue_selftest() -> i64:
     val empty_sq = q.sq_fetch()
     failures = failures + expect_eq(empty_sq.nblocks, 0, "empty SQ fetch returns inert flush")
     failures = failures + expect_eq(q.sq_pending(), 0, "empty SQ fetch leaves pending count unchanged")
+    q.sq_len = 1
+    q.sq_head = q.depth
+    val bad_sq_head = q.sq_fetch()
+    failures = failures + expect_eq(bad_sq_head.nblocks, 0, "invalid HIL SQ head fetch fails closed")
+    failures = failures + expect_eq(q.sq_pending(), 1, "invalid HIL SQ head leaves pending count unchanged")
+    q.sq_len = 0
+    q.sq_head = 0
+    q.sq_tail = q.depth
+    failures = failures + expect_eq(bool_to_i64(q.sq_submit(cmd_make(3, OP_READ, 30, 1, 0))), 0, "invalid HIL SQ tail submit fails closed")
+    failures = failures + expect_eq(q.sq_pending(), 0, "invalid HIL SQ tail leaves pending count unchanged")
+    q.sq_tail = 0
 
     # Test 3: completion post/reap round-trip (status + data preserved)
     val cpl = cpl_make(42, SC_SUCCESS, 0x99)
@@ -154,6 +173,17 @@ fn hil_queue_selftest() -> i64:
     val empty_cq = q.cq_reap()
     failures = failures + expect_eq(empty_cq.status, SC_INVALID_FIELD, "empty CQ reap fails closed")
     failures = failures + expect_eq(q.cq_pending(), 0, "empty CQ reap leaves pending count unchanged")
+    q.cq_len = 1
+    q.cq_head = q.depth
+    val bad_cq_head = q.cq_reap()
+    failures = failures + expect_eq(bad_cq_head.status, SC_INVALID_FIELD, "invalid HIL CQ head reap fails closed")
+    failures = failures + expect_eq(q.cq_pending(), 1, "invalid HIL CQ head leaves pending count unchanged")
+    q.cq_len = 0
+    q.cq_head = 0
+    q.cq_tail = q.depth
+    failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(43, SC_SUCCESS, 0))), 0, "invalid HIL CQ tail post fails closed")
+    failures = failures + expect_eq(q.cq_pending(), 0, "invalid HIL CQ tail leaves pending count unchanged")
+    q.cq_tail = 0
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(70000, SC_SUCCESS, 0))), 0, "reject oversized completion id")
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(-1, SC_SUCCESS, 0))), 0, "reject negative completion id")
 
