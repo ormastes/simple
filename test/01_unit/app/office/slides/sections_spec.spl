@@ -1,0 +1,100 @@
+"""Slide Sections + Summary Zoom spec.
+
+Verifies the deck-sections model in `app.office.slides.sections`: which
+section owns a given slide index, the summary-zoom thumbnail lines derived
+from section order, the `<p:sectionLst>` XML export, and reordering a
+section within the section pane (`move_section`).
+
+Ground-truth deck: Intro (slides 0-1, count 2), Body (slides 2-4, count 3),
+Close (slide 5, count 1) — 6 slides total.
+"""
+
+use std.spec
+use app.office.slides.sections.{DeckSections, section_entry_new, deck_sections_new, deck_sections_add, section_of_slide, total_slides, summary_zoom_targets, section_count, sections_to_xml, move_section}
+
+fn _sample_deck() -> DeckSections:
+    val intro = section_entry_new("Intro", 0, 2)
+    val body = section_entry_new("Body", 2, 3)
+    val close_section = section_entry_new("Close", 5, 1)
+    var ds = deck_sections_new()
+    ds = deck_sections_add(ds, intro)
+    ds = deck_sections_add(ds, body)
+    ds = deck_sections_add(ds, close_section)
+    return ds
+
+describe "sections: totals and counts":
+    """A 3-section, 6-slide deck reports the right totals."""
+
+    it "sums slide_count across all sections to 6":
+        val ds = _sample_deck()
+        expect(total_slides(ds)).to_equal(6)
+
+    it "counts exactly 3 sections":
+        val ds = _sample_deck()
+        expect(section_count(ds)).to_equal(3)
+
+describe "sections: section_of_slide lookup":
+    """Each slide index maps to the section whose range contains it;
+    an out-of-range index maps to no section."""
+
+    it "maps slide 0 to Intro (first slide of the first section)":
+        val ds = _sample_deck()
+        expect(section_of_slide(ds, 0)).to_equal("Intro")
+
+    it "maps slide 3 to Body (middle of the Body range 2..5)":
+        val ds = _sample_deck()
+        expect(section_of_slide(ds, 3)).to_equal("Body")
+
+    it "maps slide 5 to Close (the last, single-slide section)":
+        val ds = _sample_deck()
+        expect(section_of_slide(ds, 5)).to_equal("Close")
+
+    it "maps an out-of-range slide index to the empty section name":
+        val ds = _sample_deck()
+        expect(section_of_slide(ds, 99)).to_equal("")
+
+describe "sections: Summary Zoom targets":
+    """`summary_zoom_targets` renders one zoom-thumbnail line per section,
+    in section order, linking to each section's first slide."""
+
+    it "renders Intro -> slide 0, Body -> slide 2, Close -> slide 5 in order":
+        val ds = _sample_deck()
+        val targets = summary_zoom_targets(ds)
+        expect(targets[0]).to_equal("Intro -> slide 0")
+        expect(targets[1]).to_equal("Body -> slide 2")
+        expect(targets[2]).to_equal("Close -> slide 5")
+
+describe "sections: PowerPoint XML export":
+    """`sections_to_xml` emits a `<p:sectionLst>` fragment naming every
+    section."""
+
+    it "contains the sectionLst wrapper and all three section names":
+        val ds = _sample_deck()
+        val xml = sections_to_xml(ds)
+        expect(xml).to_contain("<p:sectionLst")
+        expect(xml).to_contain("Intro")
+        expect(xml).to_contain("Body")
+        expect(xml).to_contain("Close")
+
+describe "sections: move_section reorders the section pane":
+    """Dragging the Close section (index 2) to the front (index 0) yields
+    Close, Intro, Body."""
+
+    it "moves Close to the front, giving order Close, Intro, Body":
+        val ds = _sample_deck()
+        val reordered = move_section(ds, 2, 0)
+        val targets = summary_zoom_targets(reordered)
+        expect(targets[0]).to_equal("Close -> slide 5")
+        expect(targets[1]).to_equal("Intro -> slide 0")
+        expect(targets[2]).to_equal("Body -> slide 2")
+
+    describe "deliberate-fail probe (fixed to green)":
+        """A probe that intentionally asserted the wrong post-move order
+        first, to confirm the example is actually exercised, then
+        corrected to the real ground truth."""
+
+        it "has Body as the last entry after moving Close to the front":
+            val ds = _sample_deck()
+            val reordered = move_section(ds, 2, 0)
+            val targets = summary_zoom_targets(reordered)
+            expect(targets[2]).to_equal("Body -> slide 2")
