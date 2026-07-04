@@ -37,6 +37,7 @@ use app.office.counter.{CounterApp}
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.cell.{cell_display_text, col_to_letter}
 use app.office.sheets.chart.{ChartSeries, chart_series_from_ranges}
+use app.office.sheets.pivot.{pivot_build}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_render_html_pixels}
 
 # Matches BrowserApp's viewport (src/app/ui.browser/app.spl uses width=96,
@@ -287,4 +288,98 @@ fn office_gui_chart_pixels(view: ChartGuiView) -> [u32]:
     val state = init_state(view.tree)
     val body = render_html_tree(view.tree.root_node(), state)
     val html = "<html><head><style>" + office_gui_chart_minimal_css() + "</style></head><body>" + body + "</body></html>"
+    simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
+
+# ---------------------------------------------------------------------------
+# Pivot-table GUI view (CARD 16 third pillar): render the suite's existing
+# pivot_build engine (sheets/pivot.spl) through the same table_widget
+# machinery sheet_gui_view uses -- no reimplementation of the grouping/
+# aggregation logic here, only the GUI-view/text_dump wrapper.
+#
+# Engine-reuse notes: pivot_gui_view's (sheet, data_range, row_field_col,
+# col_field_col, value_col, agg_name, title) parameter list maps directly
+# onto pivot_build(sheet, range_a1, row_key_col, col_key_col, value_col, agg)
+# -- same order, same meaning -- so no adaptation was needed at the call
+# site beyond the extra `title` (GUI framing only, same role as
+# chart_gui_view's `title`). pivot_build's own agg-name validity list
+# (sum/count/average/min/max) is private to pivot.spl (not exported), so
+# `_pivot_gui_agg_is_valid` below duplicates that same 5-name check purely
+# to produce a distinct "unknown-agg" dump line before calling the engine
+# (pivot_build itself already fails closed on a bad agg name by returning
+# `[]`, but folds that outcome together with several other invalid-input
+# cases under one empty result).
+# ---------------------------------------------------------------------------
+
+struct PivotGuiView:
+    tree: UITree
+    text_dump: text
+
+fn _pivot_gui_agg_is_valid(agg_lower: text) -> bool:
+    """Mirrors pivot.spl's private _agg_is_valid (sum/count/average/min/max,
+    case-insensitive) -- duplicated here only so an unknown agg name can be
+    reported as its own "unknown-agg" dump line before calling pivot_build."""
+    (agg_lower == "sum" or agg_lower == "count" or agg_lower == "average" or
+     agg_lower == "min" or agg_lower == "max")
+
+fn _pivot_gui_error_tree(title: text) -> UITree:
+    val root = column("pivot_gui_root", [text_widget("pivot_gui_empty", "No data")])
+    build_tree_with_title(root, title, "light")
+
+fn pivot_gui_view(sheet: Sheet, data_range: text, row_field_col: i32, col_field_col: i32, value_col: i32, agg_name: text, title: text) -> PivotGuiView:
+    """Build a GUI pivot-table view of `sheet`'s data: runs the existing
+    pivot_build engine over `data_range` (grouping by `row_field_col` and,
+    when `col_field_col >= 0`, cross-tabulating by `col_field_col`,
+    aggregating `value_col` with `agg_name`), then renders the resulting
+    grid through the same table_widget machinery sheet_gui_view uses --
+    the engine's own header row (row-key label + column keys + "Grand
+    Total") becomes the table's headers, and every remaining row (each
+    row-key row plus the engine's own grand-total row) becomes a table
+    row, exactly as pivot_build lays them out (see sheets/pivot.spl).
+
+    Returns both a UITree (for real pixel rendering through the browser
+    engine) and a plain-text dump for testability without parsing HTML/
+    widget trees: "pivot|<agg>|<title>" first, then one pipe-joined line
+    per row of the engine's result grid (its column-keys header row, each
+    data row, and its grand-total row -- totals row/col exactly as the
+    engine provides them). Fail-closed (an "error|<reason>" dump line, no
+    crash) when `agg_name` is not one of sum/count/average/min/max, or when
+    `data_range` is empty/unparseable/out-of-bounds (pivot_build itself
+    returns `[]` for all of these -- reported here as "empty-range")."""
+    var dump_lines: [text] = ["pivot|{agg_name}|{title}"]
+    val agg_lower = agg_name.lower()
+    if not _pivot_gui_agg_is_valid(agg_lower):
+        dump_lines.push("error|unknown-agg")
+        return PivotGuiView(tree: _pivot_gui_error_tree(title), text_dump: dump_lines.join("\n"))
+
+    val result = pivot_build(sheet, data_range, row_field_col, col_field_col, value_col, agg_name)
+    if result.len() == 0:
+        dump_lines.push("error|empty-range")
+        return PivotGuiView(tree: _pivot_gui_error_tree(title), text_dump: dump_lines.join("\n"))
+
+    var r = 0
+    while r < result.len():
+        val row = result[r]
+        dump_lines.push(row.join("|"))
+        r = r + 1
+
+    val headers = result[0]
+    var rows_out: [[text]] = []
+    var r2 = 1
+    while r2 < result.len():
+        rows_out.push(result[r2])
+        r2 = r2 + 1
+
+    val table_node = table_widget("pivot_grid", headers, rows_out)
+    val root = column("pivot_gui_root", [table_node])
+    val tree = build_tree_with_title(root, title, "light")
+    PivotGuiView(tree: tree, text_dump: dump_lines.join("\n"))
+
+fn office_gui_pivot_pixels(view: PivotGuiView) -> [u32]:
+    """Render a PivotGuiView's tree to ARGB pixels via the same real
+    layout/paint pixel path office_gui_sheet_pixels uses -- reuses
+    office_gui_sheet_minimal_css since a pivot grid is rendered through the
+    exact same table_widget/widget-table CSS classes as the sheet grid."""
+    val state = init_state(view.tree)
+    val body = render_html_tree(view.tree.root_node(), state)
+    val html = "<html><head><style>" + office_gui_sheet_minimal_css() + "</style></head><body>" + body + "</body></html>"
     simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")

@@ -1,0 +1,104 @@
+"""Pivot-table GUI view spec.
+
+pivot_gui_view(sheet, data_range, row_field_col, col_field_col, value_col,
+agg_name, title) runs the existing pivot_build engine
+(app.office.sheets.pivot) over `data_range` and renders the resulting grid
+through the same table_widget machinery sheet_gui_view uses. The dump's
+first line is "pivot|<agg>|<title>"; each following line is one pipe-joined
+row of the engine's own result grid (its column-keys header row, each
+data row, and its grand-total row -- totals row/col exactly as the engine
+provides them). An unknown agg name or an empty/unparseable data range
+fails closed with an "error|<reason>" line instead of crashing.
+
+Ground truth (same dataset shape as sheets/pivot_spec.spl, hand-verified
+there and rechecked here): Region/Product/Amount rows
+  East,A,10
+  East,B,20
+  West,A,30
+  West,B,40
+  East,A,5
+  West,B,15
+2D pivot region x product SUM: East/A=15, East/B=20, West/A=30, West/B=55,
+row totals East=35 West=85, col totals A=45 B=75, grand=120.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.gui.{pivot_gui_view}
+
+fn _pivot_gui_dataset() -> Sheet:
+    var sheet = Sheet.new("data")
+    sheet.set_value("A1", "East")
+    sheet.set_value("B1", "A")
+    sheet.set_value("C1", "10")
+    sheet.set_value("A2", "East")
+    sheet.set_value("B2", "B")
+    sheet.set_value("C2", "20")
+    sheet.set_value("A3", "West")
+    sheet.set_value("B3", "A")
+    sheet.set_value("C3", "30")
+    sheet.set_value("A4", "West")
+    sheet.set_value("B4", "B")
+    sheet.set_value("C4", "40")
+    sheet.set_value("A5", "East")
+    sheet.set_value("B5", "A")
+    sheet.set_value("C5", "5")
+    sheet.set_value("A6", "West")
+    sheet.set_value("B6", "B")
+    sheet.set_value("C6", "15")
+    sheet
+
+describe "pivot_gui_view: header line":
+    """The dump always starts with a pivot|<agg>|<title> header line."""
+
+    it "the first line carries the agg name and title":
+        val sheet = _pivot_gui_dataset()
+        val view = pivot_gui_view(sheet, "A1:C6", 0, 1, 2, "SUM", "Region x Product")
+        val lines = view.text_dump.split("\n")
+        expect(lines[0]).to_equal("pivot|SUM|Region x Product")
+
+describe "pivot_gui_view: 2D SUM aggregates":
+    """Each row line carries the engine's own aggregates, incl. row/col/
+    grand totals, exactly as pivot_build lays them out."""
+
+    it "the column-keys header row lists row-key label, col keys, and Grand Total":
+        val sheet = _pivot_gui_dataset()
+        val view = pivot_gui_view(sheet, "A1:C6", 0, 1, 2, "SUM", "T")
+        val lines = view.text_dump.split("\n")
+        expect(lines[1]).to_equal("Row/Col|A|B|Grand Total")
+
+    it "the East row carries East/A=15, East/B=20, row total=35":
+        val sheet = _pivot_gui_dataset()
+        val view = pivot_gui_view(sheet, "A1:C6", 0, 1, 2, "SUM", "T")
+        val lines = view.text_dump.split("\n")
+        expect(lines[2]).to_equal("East|15|20|35")
+
+    it "the West row carries West/A=30, West/B=55, row total=85":
+        val sheet = _pivot_gui_dataset()
+        val view = pivot_gui_view(sheet, "A1:C6", 0, 1, 2, "SUM", "T")
+        val lines = view.text_dump.split("\n")
+        expect(lines[3]).to_equal("West|30|55|85")
+
+    it "the Grand Total row carries col totals A=45, B=75, and grand=120":
+        val sheet = _pivot_gui_dataset()
+        val view = pivot_gui_view(sheet, "A1:C6", 0, 1, 2, "SUM", "T")
+        val lines = view.text_dump.split("\n")
+        expect(lines[4]).to_equal("Grand Total|45|75|120")
+
+describe "pivot_gui_view: empty data range fails closed":
+    """An empty/unparseable data range must not crash; it produces an
+    error line."""
+
+    it "an empty data range produces an error|empty-range line":
+        val sheet = _pivot_gui_dataset()
+        val view = pivot_gui_view(sheet, "", 0, 1, 2, "SUM", "T")
+        expect(view.text_dump).to_contain("error|empty-range")
+
+describe "pivot_gui_view: unknown agg name fails closed":
+    """An agg name outside sum/count/average/min/max must not crash; it
+    produces an error line."""
+
+    it "an unknown agg name produces an error|unknown-agg line":
+        val sheet = _pivot_gui_dataset()
+        val view = pivot_gui_view(sheet, "A1:C6", 0, 1, 2, "BOGUS", "T")
+        expect(view.text_dump).to_contain("error|unknown-agg")
