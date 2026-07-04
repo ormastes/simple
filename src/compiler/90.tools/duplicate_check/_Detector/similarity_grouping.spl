@@ -1,7 +1,7 @@
 # Duplicate-check — file collection + similarity grouping/refinement
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
-use compiler.tools.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity}
+use compiler.tools.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity, feature_signature}
 use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens_with_content}
 use compiler.tools.duplicate_check.detector_files.{collect_detector_files}
 use compiler.tools.duplicate_check._Detector.interner_and_logging.*
@@ -11,8 +11,11 @@ fn collect_files(path: text, config: DuplicationConfig) -> [text]:
     collect_detector_files(path, config)
 
 fn sample_blocks_for_similarity(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateBlock]:
-    # Interpreter-safe limit for cosine mode to prevent timeout
-    val max_blocks_to_analyze = if config.use_cosine_similarity: 20 else: 320
+    # Outer safety net only — the real pruning now happens via the shared
+    # signature-token inverted index in build_similarity_adjacency (bucket by
+    # shared vocabulary, only cosine-score within-bucket pairs), not by
+    # capping the candidate pool to an arbitrary small N.
+    val max_blocks_to_analyze = 320
     var blocks_to_analyze = all_blocks
     if all_blocks.len() > max_blocks_to_analyze:
         log_progress(config, "WARNING: Too many blocks ({all_blocks.len()}), sampling {max_blocks_to_analyze} across files")
@@ -126,85 +129,108 @@ fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: Du
     )
 
 fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -> {text: [i64]}:
-    log_progress(config, "Starting pairwise comparison of {prep.blocks.len()} blocks...")
-    val total_possible = (prep.blocks.len() * (prep.blocks.len() - 1)) / 2
-    log_verbose(config, "  Max comparisons: {total_possible} (optimizations will reduce this)")
+    # Root-cause fix (was: nested O(n^2) loop capped at max_total_comparisons=7000
+    # with a token-count approximation standing in for real cosine_similarity —
+    # a silent-truncation workaround that also never scored genuine cosine
+    # similarity). Instead, build a signature-token inverted index (same
+    # technique already used by semantic.spl's local doc-similarity path):
+    # bucket blocks by their top-N highest-weighted tokens, and only run real
+    # cosine_similarity within a bucket. Two blocks that share no significant
+    # vocabulary never get compared, so the candidate-pair count stays near
+    # the number of buckets * bucket-size^2 instead of blocks^2.
+    log_progress(config, "Bucketing {prep.blocks.len()} blocks by shared token signature (inverted index)...")
 
-    var comparison_count = 0
-    var skipped_same_file = 0
-    var match_count = 0
-    val max_comparisons_per_block = 36
-    val max_total_comparisons = 7000
+    var sigs: [text] = []
+    var si = 0
+    while si < prep.features.len():
+        sigs.push(feature_signature(prep.features[si], 5))
+        si = si + 1
+
+    var token_to_indices: {text: text} = {}
+    var gi = 0
+    while gi < prep.blocks.len():
+        if prep.features[gi].magnitude != 0.0 and not prep.low_signal_flags[gi]:
+            for tok in sigs[gi].split(","):
+                if tok.len() > 0:
+                    if token_to_indices.has(tok):
+                        token_to_indices[tok] = token_to_indices[tok] + "," + "{gi}"
+                    else:
+                        token_to_indices[tok] = "{gi}"
+        gi = gi + 1
+
     var adjacency = {}
+    var comparison_count = 0
+    var match_count = 0
+    var dropped_bucket_blocks = 0
+    # Cap giant buckets (a token so common it isn't discriminative, e.g. "value").
+    # A genuine clone pair shares several signature tokens, so it also lands in
+    # smaller, non-capped buckets — this only drops the low-value comparisons
+    # that a common single token would otherwise force.
+    val max_bucket_size = 400
+    var seen_pairs: {text: bool} = {}
     val start_ms = current_time_ms()
     var last_ms = start_ms
 
-    var i = 0
-    while i < prep.blocks.len() and comparison_count < max_total_comparisons:
-        if i % 50 == 0:
-            log_verbose(config, "  Block {i}/{prep.blocks.len()}: {comparison_count} comparisons, {match_count} matches")
+    for tok in token_to_indices.keys():
+        val idx_strs = token_to_indices[tok].split(",")
+        if idx_strs.len() > max_bucket_size:
+            log_progress(config, "  Skipping oversized bucket '{tok}' ({idx_strs.len()} blocks, cap {max_bucket_size}) to bound work")
+            dropped_bucket_blocks = dropped_bucket_blocks + idx_strs.len()
+            continue
 
-        if comparison_count >= max_total_comparisons:
-            log_progress(config, "  Reached comparison limit ({max_total_comparisons}), stopping early")
-            break
+        var indices: [i64] = []
+        for s in idx_strs:
+            indices.push(int(s))
 
-        val block1 = prep.blocks[i]
-        var comparisons_this_block = 0
-        var j = i + 1
+        var pi = 0
+        while pi < indices.len():
+            val i = indices[pi]
+            var pj = pi + 1
+            while pj < indices.len():
+                val j = indices[pj]
+                val block1 = prep.blocks[i]
+                val block2 = prep.blocks[j]
 
-        while j < prep.blocks.len() and comparisons_this_block < max_comparisons_per_block:
-            val block2 = prep.blocks[j]
+                if block1.file == block2.file:
+                    pj = pj + 1
+                    continue
 
-            val same_file = block1.file == block2.file
-            if same_file:
-                skipped_same_file = skipped_same_file + 1
-                j = j + 1
-                continue
+                val lo = if i < j: i else: j
+                val hi = if i < j: j else: i
+                val pair_key = "{lo}-{hi}"
+                if seen_pairs.has(pair_key):
+                    pj = pj + 1
+                    continue
+                seen_pairs[pair_key] = true
 
-            if prep.low_signal_flags[i] and prep.low_signal_flags[j]:
-                j = j + 1
-                continue
+                comparison_count = comparison_count + 1
+                last_ms = progress_tick(config, "compare pass", comparison_count, comparison_count, start_ms, last_ms)
 
-            comparison_count = comparison_count + 1
-            comparisons_this_block = comparisons_this_block + 1
-            last_ms = progress_tick(config, "compare pass", comparison_count, total_possible.min(max_total_comparisons), start_ms, last_ms)
+                val sim = cosine_similarity(prep.features[i], prep.features[j])
+                if sim >= config.similarity_threshold:
+                    match_count = match_count + 1
+                    val key1 = "{i}"
+                    val key2 = "{j}"
+                    if adjacency.has(key1):
+                        var neighbors1 = adjacency[key1]
+                        neighbors1.push(j)
+                        adjacency[key1] = neighbors1
+                    else:
+                        adjacency[key1] = [j]
 
-            # FAST: Use token-count similarity instead of expensive cosine_similarity
-            # Avoids O(n²) dict iteration in interpreter
-            val feature_vec1 = prep.features[i]
-            val feature_vec2 = prep.features[j]
-            val count1 = feature_vec1.features.keys().len()
-            val count2 = feature_vec2.features.keys().len()
-            val max_count = if count1 > count2: count1 else: count2
-            val min_count = if count1 < count2: count1 else: count2
+                    if adjacency.has(key2):
+                        var neighbors2 = adjacency[key2]
+                        neighbors2.push(i)
+                        adjacency[key2] = neighbors2
+                    else:
+                        adjacency[key2] = [i]
 
-            # Token-count similarity: |A ∩ B| / max(|A|, |B|)
-            # Approximates cosine without dict iteration
-            val similarity = if max_count > 0: (min_count * 1.0) / (max_count * 1.0) else: 0.0
+                pj = pj + 1
+            pi = pi + 1
 
-            val above_threshold = similarity >= config.similarity_threshold
-            if above_threshold:
-                match_count = match_count + 1
-                val key1 = "{i}"
-                val key2 = "{j}"
-                if adjacency.has(key1):
-                    var neighbors1 = adjacency[key1]
-                    neighbors1.push(j)
-                    adjacency[key1] = neighbors1
-                else:
-                    adjacency[key1] = [j]
-
-                if adjacency.has(key2):
-                    var neighbors2 = adjacency[key2]
-                    neighbors2.push(i)
-                    adjacency[key2] = neighbors2
-                else:
-                    adjacency[key2] = [i]
-
-            j = j + 1
-        i = i + 1
-
-    log_progress(config, "Completed {comparison_count} comparisons, found {match_count} similar pairs")
+    if dropped_bucket_blocks > 0:
+        log_progress(config, "  Dropped {dropped_bucket_blocks} block-slots from oversized buckets (raise max_bucket_size if this misses a real clone)")
+    log_progress(config, "Completed {comparison_count} real cosine comparisons via inverted index, found {match_count} similar pairs")
     adjacency
 
 fn build_similarity_groups(adjacency: {text: [i64]}, blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateGroup]:
@@ -276,13 +302,23 @@ fn parse_idx(value: text) -> i64:
 fn scan_duplicate_blocks(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> [DuplicateBlock]:
     log_progress(config, "Pass 1: collecting hash counts across {files.len()} files...")
     val summary = collect_repeated_hashes(files, config, cache_manager, interner)
-    var candidate_files = summary.candidate_files.keys()
-    var repeated_hashes = summary.repeated_hashes
-    if config.selected_mode == "cosine":
-        candidate_files = files
-        repeated_hashes = {}
-    val repeated_count = summary.repeated_hashes.keys().len()
+    # Root-cause fix: cosine mode used to zero out repeated_hashes/candidate_files
+    # here, which forced Pass 2 to extract *every* sliding-window block from
+    # *every* file (unfiltered) — that unbounded extraction, not the pairwise
+    # comparison, is what timed out on medium directories (see
+    # doc/08_tracking/bug/duplicate_check_cosine_quadratic_timeout_2026-07-01.md).
+    # Reuse the same Pass-1 hash inverted index the exact/token path already
+    # built: only files containing at least one exactly-repeated token window
+    # are extraction candidates. Fuzzy (cosine) matches still need *some*
+    # shared literal token window to anchor on — this is the "keep a hash
+    # pre-filter for cosine too" fix direction from that bug report.
+    val candidate_files = summary.candidate_files.keys()
+    val repeated_hashes = summary.repeated_hashes
+    val repeated_count = repeated_hashes.keys().len()
     log_progress(config, "  {repeated_count} repeated hashes in {candidate_files.len()} candidate files")
+    if config.use_cosine_similarity and candidate_files.len() < files.len():
+        val pruned = files.len() - candidate_files.len()
+        log_progress(config, "  Cosine mode: pruned {pruned} file(s) with no repeated token window anywhere (no exact-match anchor to refine)")
 
     log_progress(config, "Pass 2: extracting blocks from candidate files...")
     var all_blocks = []
@@ -305,14 +341,6 @@ fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: Toke
         log_progress(config, "Grouped into {line_groups.len()} duplicate groups")
         return line_groups
 
-    # Cosine mode: skip expensive scan_duplicate_blocks, use fast hash-based similarity
-    if config.use_cosine_similarity:
-        log_progress(config, "Cosine mode: using fast hash-based detection (skipping expensive token scan)")
-        # Use token gate as fast pre-filter
-        val line_groups = fast_line_window_duplicate_groups(files, config)
-        log_progress(config, "Cosine mode: found {line_groups.len()} similarity groups")
-        return line_groups
-
     val interner = new_token_interner()
 
     log_progress(config, "Scanning {files.len()} files...")
@@ -323,7 +351,13 @@ fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: Toke
 
     val exact_groups = group_exact_blocks(all_blocks, config, cache_manager)
 
-    val sorted = sort_by_impact(exact_groups)
+    val refined_groups = if config.use_cosine_similarity:
+        log_progress(config, "Refining with cosine similarity (inverted-index pruned candidate pairs)...")
+        refine_groups_with_similarity(exact_groups, all_blocks, config, cache_manager)
+    else:
+        exact_groups
+
+    val sorted = sort_by_impact(refined_groups)
 
     log_progress(config, "Grouped into {sorted.len()} duplicate groups")
 
