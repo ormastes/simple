@@ -53,6 +53,7 @@ struct NvmeController:
     unsafe_shutdowns: i64   # power cycles without a clean checkpoint (SMART)
     error_count:  i64   # IO commands completed with a non-success status (error log)
     last_error:   i64   # status code of the most recent failed IO command
+    dirty_since_checkpoint: bool  # true when media state changed after the last clean checkpoint
     fw_slot:         i64   # firmware slot of the most recent successful Commit (0 = none yet)
     last_abort_sqid: i64   # SQID decoded from the most recent Abort (-1 = none)
     last_abort_cid:  i64   # CID  decoded from the most recent Abort (-1 = none)
@@ -60,7 +61,7 @@ struct NvmeController:
     wb:           DramWriteBuffer # fixed DRAM write buffer staged before FTL program
 
 fn nvme_controller_new() -> NvmeController:
-    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, fw_slot: 0, last_abort_sqid: -1, last_abort_cid: -1, pt: power_thermal_new(), wb: dram_write_buffer_new())
+    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, dirty_since_checkpoint: false, fw_slot: 0, last_abort_sqid: -1, last_abort_cid: -1, pt: power_thermal_new(), wb: dram_write_buffer_new())
 
 impl NvmeController:
     # ── Admin path ───────────────────────────────────────────────────────────
@@ -124,6 +125,7 @@ impl NvmeController:
         if cmd.opcode == ADMIN_FORMAT_NVM:
             me.ftl.format()                    # erase user data; preserve bad-block table + wear
             me.format_count = me.format_count + 1
+            me.dirty_since_checkpoint = false
             return AdminResult(status: SC_SUCCESS, data: 0, post: true)
         if cmd.opcode == ADMIN_FW_DOWNLOAD:
             me.fw_dl_bytes = me.fw_dl_bytes + cmd.cdw10 * 4   # NUMD dwords accumulated
@@ -263,6 +265,8 @@ impl NvmeController:
                 me.pool.set_phase(h, PH_DONE)
                 me.pool.release(h)
                 me.writes = me.writes + 1
+                if status == SC_SUCCESS:
+                    me.dirty_since_checkpoint = true
                 me.pt.tick(2)   # a program burns more energy than a read
             else:
                 if cmd_is_read(cmd):
@@ -273,9 +277,12 @@ impl NvmeController:
                 else:
                     if cmd_is_trim(cmd):
                         status = me.ftl.trim(cmd.lba)
+                        if status == SC_SUCCESS:
+                            me.dirty_since_checkpoint = true
                     else:
                         if cmd_is_flush(cmd):
                             me.ftl.checkpoint()
+                            me.dirty_since_checkpoint = false
                             status = SC_SUCCESS
                         else:
                             status = SC_INVALID_OPCODE
@@ -312,6 +319,7 @@ impl NvmeController:
 
     me checkpoint():
         me.ftl.checkpoint()
+        me.dirty_since_checkpoint = false
 
     # Physical page backing a logical block (introspection / test hook).
     me physical_ppn(lba: i64) -> i64:
@@ -322,12 +330,13 @@ impl NvmeController:
         me.ftl.inject_read_bitflip(ppn, n)
 
     me power_cycle():
-        # A power cycle is a dirty (unsafe) shutdown: the controller did not flush a
-        # clean checkpoint before losing power.
+        # NVMe SMART unsafe shutdowns count power losses with dirty media state.
         me.ftl.crash()
         me.ftl.recover()
         me.power_cycles = me.power_cycles + 1
-        me.unsafe_shutdowns = me.unsafe_shutdowns + 1
+        if me.dirty_since_checkpoint:
+            me.unsafe_shutdowns = me.unsafe_shutdowns + 1
+        me.dirty_since_checkpoint = false
 
 # ── Self-test (compact; full admin-driven e2e lives in nvme_main.spl) ─────────
 fn nvme_controller_selftest() -> i64:
@@ -510,11 +519,20 @@ fn nvme_controller_selftest() -> i64:
     val glf: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(glf.data, c.firmware_revision(), "get-log FW_SLOT returns the active fw revision")
 
-    # SMART: a power cycle is recorded as an unsafe shutdown.
+    # SMART: clean checkpointed power cycles are not unsafe; dirty ones are.
+    c.checkpoint()
     c.power_cycle()
     c.admin_submit(admin_get_log_cmd(41, LOG_SMART))
     c.admin_process()
     c.admin_reap()
-    fail = fail + expect_eq(c.last_smart().unsafe_shutdowns, 1, "power cycle counted as unsafe shutdown")
+    fail = fail + expect_eq(c.last_smart().unsafe_shutdowns, 0, "clean power cycle not counted as unsafe shutdown")
+    c.io_submit(1, cmd_make(123, OP_WRITE, 12, 1, 0x5A))
+    c.io_process()
+    c.io_reap(1)
+    c.power_cycle()
+    c.admin_submit(admin_get_log_cmd(45, LOG_SMART))
+    c.admin_process()
+    c.admin_reap()
+    fail = fail + expect_eq(c.last_smart().unsafe_shutdowns, 1, "dirty power cycle counted as unsafe shutdown")
 
     fail
