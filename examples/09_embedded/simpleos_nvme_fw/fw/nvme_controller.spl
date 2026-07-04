@@ -115,7 +115,7 @@ impl NvmeController:
         if cmd.opcode == ADMIN_IDENTIFY:
             return AdminResult(status: me.do_identify(cmd), data: 0, post: true)
         if cmd.opcode == ADMIN_SET_FEATURES:
-            if cmd.nsid != 0 or cmd.cdw12 != 0:
+            if cmd.nsid != 0 or cmd.cdw12 != 0 or cmd.cdw10 != admin_fid(cmd.cdw10):
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             if admin_fid(cmd.cdw10) == FEAT_POWER_MGMT:
                 val ps_status: i64 = me.pt.set_power_state(cmd.cdw11)
@@ -132,7 +132,7 @@ impl NvmeController:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             return AdminResult(status: SC_SUCCESS, data: cmd.cdw11, post: true)
         if cmd.opcode == ADMIN_GET_FEATURES:
-            if cmd.nsid != 0 or cmd.cdw11 != 0 or cmd.cdw12 != 0:
+            if cmd.nsid != 0 or cmd.cdw11 != 0 or cmd.cdw12 != 0 or cmd.cdw10 != admin_fid(cmd.cdw10):
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             if admin_fid(cmd.cdw10) < 0 or admin_fid(cmd.cdw10) >= FEAT_MAX:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
@@ -516,6 +516,13 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(msf.status, SC_INVALID_FIELD, "malformed set feature rejected")
     fail = fail + expect_eq(mgf.status, SC_INVALID_FIELD, "malformed get feature rejected")
     fail = fail + expect_eq(rgf.data, 345, "malformed set feature leaves value unchanged")
+    c.admin_submit(admin_cmd_make(50, ADMIN_SET_FEATURES, 0, FEAT_TEMP_THRESH | (1 << 16), 350, 0))
+    c.admin_submit(admin_cmd_make(51, ADMIN_GET_FEATURES, 0, FEAT_TEMP_THRESH | (1 << 16), 0, 0))
+    c.admin_process()
+    val rsf: NvmeCpl = c.admin_reap()
+    val rfg: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(rsf.status, SC_INVALID_FIELD, "set feature with reserved fid bits rejected")
+    fail = fail + expect_eq(rfg.status, SC_INVALID_FIELD, "get feature with reserved fid bits rejected")
     c.admin_submit(admin_set_feature_cmd(6, FEAT_MAX, 1))
     c.admin_submit(admin_get_feature_cmd(7, FEAT_MAX))
     c.admin_process()
