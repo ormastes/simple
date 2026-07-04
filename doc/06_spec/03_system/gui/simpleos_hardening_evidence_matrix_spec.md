@@ -169,6 +169,8 @@ The wrapper emits these rows:
 - `simpleos_hardening_formal_compiler_language_gate`
 - `simpleos_hardening_formal_compiler_language_scope`
 - `simpleos_hardening_formal_ui_policy_status`
+- `simpleos_hardening_formal_ui_policy_gate`
+- `simpleos_hardening_formal_ui_policy_scope`
 - `simpleos_hardening_formal_coverage_status`
 - `simpleos_hardening_shared_wm_status`
 - `simpleos_hardening_cpu_simd_status`
@@ -279,7 +281,7 @@ be mistaken for a completed RTL proof pass.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 68 lines folded for reproduction.
+Runnable source: 72 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -312,6 +314,8 @@ expect(stdout).to_contain("simpleos_hardening_formal_compiler_language_status=pa
 expect(stdout).to_contain("simpleos_hardening_formal_compiler_language_gate=scripts/check/check-simpleos-compiler-language-formal-proofs.shs")
 expect(stdout).to_contain("simpleos_hardening_formal_compiler_language_scope=Lean model gate: module_resolution, macro_auto_import, type_inference_compile, type_value_semantics, visibility_export")
 expect(stdout).to_contain("simpleos_hardening_formal_ui_policy_status=pass")
+expect(stdout).to_contain("simpleos_hardening_formal_ui_policy_gate=scripts/check/check-simpleos-ui-policy-formal-proofs.shs")
+expect(stdout).to_contain("simpleos_hardening_formal_ui_policy_scope=Lean model gate: ui_compositor")
 expect(stdout).to_contain("simpleos_hardening_formal_coverage_status=pass")
 expect(stdout).to_contain("simpleos_hardening_shared_wm_status=pass")
 expect(stdout).to_contain("simpleos_hardening_cpu_simd_status=pass")
@@ -365,6 +369,9 @@ expect(report).to_contain("TLS reads remain thread/key isolated")
 expect(report).to_contain("- formal_compiler_language_gate: scripts/check/check-simpleos-compiler-language-formal-proofs.shs")
 expect(report).to_contain("module resolution ambiguity")
 expect(report).to_contain("deterministic type inference")
+expect(report).to_contain("- formal_ui_policy_gate: scripts/check/check-simpleos-ui-policy-formal-proofs.shs")
+expect(report).to_contain("damage merge covers both inputs")
+expect(report).to_contain("recursive paint-order flatten")
 ```
 
 </details>
