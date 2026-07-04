@@ -5,7 +5,7 @@ use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
 use os.compositor.simple_web_window_renderer.{render_simple_web_app_content}
-use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
 use common.color.convert.{int_to_hex}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d, engine2d_fast_metal_available}
 use os.compositor.wm_action_applier.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
@@ -270,15 +270,18 @@ class HostCompositor:
                 self.backend.present()
                 return
         # Fallback (Metal unavailable, or active drag/resize): direct-draw the
-        # chrome. BYTE-IDENTICAL to the historical host compositor chrome contract.
+        # chrome. BYTE-IDENTICAL to the historical host compositor chrome contract
+        # (plus the taskbar dock, which the hit-test always honored but no
+        # render path ever drew).
         self.backend.clear(theme.compositor_bg)
         var i = 0
         while i < self.windows.len():
             val win = self.windows[i]
             if not win.minimized:
+                val bar_color = if win.focused: theme.accent else: theme.title_unfocused
                 self.backend.fill_rect(win.x, win.y, win.w, win.h, theme.host_window_body)
-                self.backend.fill_rect(win.x, win.y, win.w, 24, theme.accent)
-                self.backend.draw_text(win.x + 8, win.y + 4, win.title, theme.text_primary, theme.accent)
+                self.backend.fill_rect(win.x, win.y, win.w, 24, bar_color)
+                self.backend.draw_text(win.x + 8, win.y + 4, win.title, theme.text_primary, bar_color)
                 self.backend.fill_rect(win.x + win.w - 24, win.y, 24, 24, theme.close_button)
                 self.backend.draw_text(win.x + win.w - 17, win.y + 4, "X", theme.text_primary, theme.close_button)
                 val cx = win.x + 4
@@ -287,6 +290,7 @@ class HostCompositor:
                 val ch = win.h - 32
                 render_simple_web_app_content(self.backend, win.title, cx, cy, cw, ch, win.content)
             i = i + 1
+        host_compositor_draw_taskbar(self.backend, self.windows, self.width, self.height, theme)
         self.backend.present()
 
     me apply_bridge_request(seq: i64, owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text):
@@ -635,6 +639,34 @@ fn host_taskbar_dock_width(screen_width: i32, count: i32) -> i32:
 fn host_taskbar_item_x(screen_width: i32, count: i32, index: i32) -> i32:
     wm_taskbar_item_x(screen_width, count, index)
 
+fn host_compositor_draw_taskbar(backend: CompositorBackend, windows: [HostedWindow], width: i32, height: i32, theme: WmChromeColors):
+    """Draw the taskbar dock with one item per window (minimized included —
+    that is how restore works). Geometry mirrors wm_lifecycle_hit_taskbar
+    EXACTLY (band at height-62, 44 tall; centered items) so what the user
+    clicks is what they see. Item colors come from the shared theme:
+    focused window -> accent, minimized -> window body, else unfocused
+    titlebar color."""
+    val count = windows.len().to_i32()
+    if count <= 0:
+        return
+    val dock_w = wm_taskbar_dock_width(width, count)
+    val dock_x = (width - dock_w) / 2
+    val dock_y = height - 62
+    backend.fill_rect(dock_x, dock_y, dock_w, 44, theme.taskbar)
+    val item_w = wm_taskbar_item_width(width, count)
+    var i: i32 = 0
+    while i < count:
+        val win = windows[i]
+        val ix = wm_taskbar_item_x(width, count, i)
+        var item_color = theme.title_unfocused
+        if win.focused and not win.minimized:
+            item_color = theme.accent
+        elif win.minimized:
+            item_color = theme.host_window_body
+        backend.fill_rect(ix + 2, dock_y + 4, item_w - 4, 36, item_color)
+        backend.draw_text(ix + 8, dock_y + 14, win.title, theme.text_primary, item_color)
+        i = i + 1
+
 # Convert an opaque ARGB u32 (as stored in WmChromeColors) to a CSS "#RRGGBB"
 # hex string. The alpha byte is dropped: the host chrome colors are all opaque
 # (0xFF..) and the CSS engine rasterizes #RRGGBB back to the same 0xFF ARGB u32,
@@ -672,6 +704,34 @@ fn host_chrome_scene_html(windows: [HostedWindow], width: i32, height: i32) -> t
             body = body + "<div style='position:absolute;left:{title_x}px;top:{title_y}px;width:{title_w}px;height:16px;color:{text_hex};font:12px monospace;overflow:hidden;white-space:nowrap'>{win.title}</div>"
             body = body + "<div style='position:absolute;left:{close_x}px;top:{win.y}px;width:24px;height:24px;background:{close_hex}'></div>"
             body = body + "<div style='position:absolute;left:{close_text_x}px;top:{title_y}px;width:16px;height:16px;color:{text_hex};font:12px monospace'>X</div>"
+    # Taskbar dock: one item per window (minimized included — restore works
+    # through its item). Geometry mirrors wm_lifecycle_hit_taskbar exactly
+    # (band at height-62, 44 tall; centered items) so what the user clicks
+    # is what they see.
+    val tb_count = windows.len().to_i32()
+    if tb_count > 0:
+        val taskbar_hex = _argb_to_css_hex(theme.taskbar)
+        val unfocused_hex = _argb_to_css_hex(theme.title_unfocused)
+        val dock_w = wm_taskbar_dock_width(width, tb_count)
+        val dock_x = (width - dock_w) / 2
+        val dock_y = height - 62
+        val item_w = wm_taskbar_item_width(width, tb_count)
+        body = body + "<div style='position:absolute;left:{dock_x}px;top:{dock_y}px;width:{dock_w}px;height:44px;background:{taskbar_hex}'></div>"
+        var ti = 0
+        while ti < tb_count:
+            val twin = windows[ti]
+            val tix = wm_taskbar_item_x(width, tb_count, ti)
+            var item_hex = unfocused_hex
+            if twin.focused and not twin.minimized:
+                item_hex = accent_hex
+            elif twin.minimized:
+                item_hex = body_hex
+            val item_inner_w = item_w - 4
+            val label_w = item_w - 16
+            val label_y = dock_y + 14
+            body = body + "<div style='position:absolute;left:{tix + 2}px;top:{dock_y + 4}px;width:{item_inner_w}px;height:36px;background:{item_hex}'></div>"
+            body = body + "<div style='position:absolute;left:{tix + 8}px;top:{label_y}px;width:{label_w}px;height:16px;color:{text_hex};font:12px monospace;overflow:hidden;white-space:nowrap'>{twin.title}</div>"
+            ti = ti + 1
     "<!DOCTYPE html><html><head><style>body{{margin:0;width:{width}px;height:{height}px;background:{bg_hex}}}</style></head><body>" + body + "</body></html>"
 
 # Fingerprint the chrome-relevant scene state so render_frame() can reuse the
@@ -680,7 +740,7 @@ fn host_chrome_scene_html(windows: [HostedWindow], width: i32, height: i32) -> t
 # window's id/geometry/minimized/focused/title.
 fn host_chrome_scene_fingerprint(windows: [HostedWindow], width: i32, height: i32) -> text:
     val theme = wm_chrome_theme()
-    var fp = "{width}x{height}|{theme.compositor_bg}|{theme.host_window_body}|{theme.accent}|{theme.close_button}|{theme.text_primary}#"
+    var fp = "{width}x{height}|{theme.compositor_bg}|{theme.host_window_body}|{theme.accent}|{theme.close_button}|{theme.text_primary}|{theme.taskbar}|{theme.title_unfocused}#"
     for win in windows:
         val minf = if win.minimized: 1 else: 0
         val focf = if win.focused: 1 else: 0
