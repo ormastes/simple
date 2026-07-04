@@ -355,3 +355,22 @@ threshold 80%). Chrome/Electron sanity 99.96%. Node bitmap lane bit-exact
 Also restored the gate-required capture tools deleted by a concurrent commit
 (c8dbb4df4f): tools/chrome-live-bitmap/, tools/electron-live-bitmap/,
 tools/node-render-bitmap/ — now committed so the sweep cannot delete them again.
+
+## Addendum 7 (2026-07-05): taskbar geometry closed — flex floors + rounded gradient corners
+
+Three further layout/paint fixes drove the taskbar fixture from 88.28%/12px-band-miss
+to 92.37% with band edges within 1px of Chrome:
+- **Flex min-content floor** (CSS min-width:auto): flex items with visible
+  overflow no longer shrink below min-content; width:100% buttons in a tight
+  row previously collapsed to slivers and wrapped labels one char per line.
+- **Explicit CSS min-width floor** on every flex sizing branch: the taskbar
+  sections' `.layout-hbox > .panel-content > .widget-panel { min-width: 180px }`
+  keeps them 180 wide and lets the row overflow, exactly as Chromium lays it
+  (sections at x29/221/413 in Chrome; Simple now matches within ~5px).
+- **Rounded gradient corners**: the per-row gradient painter passed 1px-tall
+  strips to the corner helper, degenerating the radius tests — radius-16
+  buttons painted square accent corners where Chromium shows the page beneath
+  (this alone was the 4px band-bottom miss). New
+  fb_rounded_rect_row_span_opacity_clip carries the full rect geometry per row.
+
+Node bitmap lane bit-exact (mismatch_count=0) after each step.

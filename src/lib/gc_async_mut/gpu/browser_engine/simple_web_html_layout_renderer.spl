@@ -5559,6 +5559,57 @@ fn clamp_corner_radius(radius: i32, w: i32, h: i32) -> i32:
         return max_r
     radius
 
+# Paint ONE row (py) of the rounded rect (x,y,w,h), span sx..sx+sw, honoring
+# the per-corner radii of the FULL rect. The per-row gradient painter used to
+# pass 1px-tall strips to the corners helper, which degenerated the corner
+# tests and painted gradient backgrounds square (radius-16 buttons filled
+# their corners with accent where Chromium shows the page beneath).
+fn fb_rounded_rect_row_span_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, rtl: i32, rtr: i32, rbr: i32, rbl: i32, py: i32, sx: i32, sw: i32, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
+    val tl = clamp_corner_radius(rtl, w, h)
+    val tr = clamp_corner_radius(rtr, w, h)
+    val br = clamp_corner_radius(rbr, w, h)
+    val bl = clamp_corner_radius(rbl, w, h)
+    if tl <= 0 and tr <= 0 and br <= 0 and bl <= 0:
+        return fb_rect_opacity_clip(fb, fbw, fbh, sx, py, sw, 1, color, opacity_pct, clip)
+    if py < 0 or py >= fbh or py < clip.y0 or py >= clip.y1:
+        return fb
+    var out = fb
+    var x0 = sx
+    var x1 = sx + sw
+    if x0 < 0:
+        x0 = 0
+    if x1 > fbw:
+        x1 = fbw
+    if x0 < clip.x0:
+        x0 = clip.x0
+    if x1 > clip.x1:
+        x1 = clip.x1
+    val row = py * fbw
+    var px = x0
+    while px < x1:
+        var inside = true
+        if tl > 0 and px < x + tl and py < y + tl:
+            val dx = (x + tl - 1) - px
+            val dy = (y + tl - 1) - py
+            inside = dx * dx + dy * dy <= tl * tl
+        elif tr > 0 and px >= x + w - tr and py < y + tr:
+            val dx = px - (x + w - tr)
+            val dy = (y + tr - 1) - py
+            inside = dx * dx + dy * dy <= tr * tr
+        elif bl > 0 and px < x + bl and py >= y + h - bl:
+            val dx = (x + bl - 1) - px
+            val dy = py - (y + h - bl)
+            inside = dx * dx + dy * dy <= bl * bl
+        elif br > 0 and px >= x + w - br and py >= y + h - br:
+            val dx = px - (x + w - br)
+            val dy = py - (y + h - br)
+            inside = dx * dx + dy * dy <= br * br
+        if inside:
+            val idx = row + px
+            out[idx] = blend_opacity(color, out[idx], opacity_pct)
+        px = px + 1
+    out
+
 fn fb_rounded_rect_corners_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, rtl: i32, rtr: i32, rbr: i32, rbl: i32, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
     val tl = clamp_corner_radius(rtl, w, h)
     val tr = clamp_corner_radius(rtr, w, h)
@@ -5912,11 +5963,11 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
             var px = 0
             while px < max_x:
                 val color = mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, px, tile_py)
-                out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_base_x + px, image_base_y + py, 1, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, image_clip)
+                out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x + px, 1, color, st.opacity_pct, image_clip)
                 px = px + 1
         else:
             val color = mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, 0, tile_py)
-            out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_base_x, image_base_y + py, max_x, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, image_clip)
+            out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x, max_x, color, st.opacity_pct, image_clip)
         py = py + 1
     out
 
@@ -7476,6 +7527,13 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                         out_intrinsic_widths = floor_intrinsic2.widths
                         if floor_intrinsic2.width > 0 and remaining_w < floor_intrinsic2.width:
                             remaining_w = floor_intrinsic2.width
+                # Explicit CSS min-width floors every flex sizing branch: a
+                # min-width'd item (taskbar sections' min-width: 180px) keeps
+                # its floor and the row overflows, exactly as Chromium lays it.
+                if cst.min_width_px > 0:
+                    val min_w_outer = if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.min_width_px else: cst.min_width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
+                    if remaining_w < min_w_outer:
+                        remaining_w = min_w_outer
                 if remaining_w < 1:
                     remaining_w = 1
                 val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
