@@ -13,6 +13,7 @@ use nvme_types.*
 use fil_fmc.*           # Fmc — flash-memory-controller register driver (owns the NAND device)
 use fil_ecc.*
 use fil_badblock.*
+use fil_scheduler.*
 
 # Result of an ECC-verified read. `code` is NAND_OK / NAND_ECC_FIXED / NAND_ECC_FAIL.
 struct FilRead:
@@ -24,9 +25,10 @@ struct FilRead:
 struct Fil:
     fmc: Fmc
     bbt: BadBlockTable
+    sched: ChannelSched
 
 fn fil_new() -> Fil:
-    Fil(fmc: fmc_new(), bbt: bbt_new())
+    Fil(fmc: fmc_new(), bbt: bbt_new(), sched: channel_sched_new())
 
 impl Fil:
     # Program one page (data + OOB {lba, seq}). Retires the block on program failure.
@@ -38,6 +40,8 @@ impl Fil:
         val bad: bool = me.bbt.is_bad(blk)
         if bad:
             return NAND_BAD_BLOCK
+        me.sched.submit(blk)
+        me.sched.run()
         me.fmc.load(fmc_cmd(FMC_OP_PROGRAM, ppn, lba, seq, data))
         me.fmc.issue()
         val res: FmcResult = me.fmc.out()
@@ -52,6 +56,8 @@ impl Fil:
     me read(ppn: i64) -> FilRead:
         if not ppn_in_range(ppn):
             return FilRead(data: 0, lba: UNMAP, seq: 0, code: NAND_ECC_FAIL)
+        me.sched.submit(ppn_block(ppn))
+        me.sched.run()
         me.fmc.load(fmc_cmd(FMC_OP_READ, ppn, 0, 0, 0))
         me.fmc.issue()
         val res: FmcResult = me.fmc.out()
@@ -66,6 +72,8 @@ impl Fil:
         val bad: bool = me.bbt.is_bad(blk)
         if bad:
             return NAND_BAD_BLOCK
+        me.sched.submit(blk)
+        me.sched.run()
         me.fmc.load(fmc_cmd(FMC_OP_ERASE, blk, 0, 0, 0))
         me.fmc.issue()
         val res: FmcResult = me.fmc.out()
@@ -107,6 +115,9 @@ impl Fil:
         if not ppn_in_range(ppn):
             return
         me.fmc.corrupt_page_data(ppn, data)
+
+    me scheduled_ops() -> i64:
+        me.sched.completed()
 
 # ── Self-test ─────────────────────────────────────────────────────────────────
 
@@ -151,6 +162,7 @@ fn fil_selftest() -> i64:
     fail = fail + expect_eq(r3.lba, UNMAP, "OOB cleared after erase")
     val ec1: i64 = fil.erase_count(2)
     fail = fail + expect_eq(ec1, 1, "erase_count after erase")
+    fail = fail + expect_eq(fil.scheduled_ops(), 8, "FIL routes live program/read/erase through scheduler")
 
     # program failure retires the block; further programs hit NAND_BAD_BLOCK
     fil.inject_prog_fail(5)
