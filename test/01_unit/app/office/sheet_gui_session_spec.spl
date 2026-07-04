@@ -1,0 +1,100 @@
+"""Sheet GUI session spec: cell selection + cell edit + recalculation.
+
+SheetGuiSession (session_new/session_select/session_edit) plus
+sheet_gui_view_with_selection are the first sheet-GUI INTERACTION: select a
+cell (marks it in the dump with "[...]" brackets and, per gui.spl's
+office_gui_sheet_session_pixels, the widget carries the framework's real
+"focused" CSS class), edit a cell's raw content (recalculates every formula
+cell and returns a NEW session -- copy semantics, callers reassign), and
+selection survives an edit.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.file_formats.{recalculate_formula_cells}
+use app.office.gui.{session_new, session_select, session_edit, sheet_gui_view_with_selection}
+
+fn _dump_contains(haystack: text, needle: text) -> bool:
+    """Substring check via index_of's Option -- matches html_widgets.spl's
+    text_contains idiom (avoids a bare-boolean `==` assertion, which the
+    test runner silently no-ops)."""
+    val idx = haystack.index_of(needle)
+    match idx:
+        case Some(_):
+            return true
+        case _:
+            return false
+
+fn _demo_sheet() -> Sheet:
+    """A2/B2/C2/D2 form a =B2*C2 product row; D5 sums D2:D3, so editing B2
+    ripples into both D2 and D5."""
+    var sheet = Sheet.new("S1")
+    sheet.set_value("A2", "Widget")
+    sheet.set_value("B2", "10")
+    sheet.set_value("C2", "2")
+    sheet.set_value("D2", "=B2*C2")
+    sheet.set_value("A3", "Gadget")
+    sheet.set_value("B3", "20")
+    sheet.set_value("C3", "3")
+    sheet.set_value("D3", "=B3*C3")
+    sheet.set_value("D5", "=SUM(D2:D3)")
+    sheet = recalculate_formula_cells(sheet)
+    sheet
+
+describe "session_select: marks the right cell":
+
+    it "brackets the selected cell's text and leaves other cells plain":
+        val session = session_select(session_new(_demo_sheet(), "D2"), "D2")
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("[20]")
+        assert_false(_dump_contains(view.text_dump, "[10]"))
+        assert_false(_dump_contains(view.text_dump, "[2]"))
+
+    it "re-selecting a different ref moves the bracket":
+        var session = session_select(session_new(_demo_sheet(), "D2"), "D2")
+        session = session_select(session, "B2")
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("[10]")
+        assert_false(_dump_contains(view.text_dump, "[20]"))
+
+describe "session_edit: updates the cell":
+
+    it "a plain-value cell shows its new text after edit":
+        var session = session_new(_demo_sheet(), "A2")
+        session = session_edit(session, "A2", "Sprocket")
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("Sprocket")
+        assert_false(_dump_contains(view.text_dump, "Widget"))
+
+describe "session_edit: dependent formula cells recalculate":
+
+    it "editing B2 from 10 to 40 recalculates D2 (=B2*C2) and D5 (=SUM(D2:D3))":
+        var session = session_new(_demo_sheet(), "D2")
+        val before = sheet_gui_view_with_selection(session, 5, 4)
+        expect(before.text_dump).to_contain("[20]")
+
+        session = session_edit(session, "B2", "40")
+        val after = sheet_gui_view_with_selection(session, 5, 4)
+        expect(after.text_dump).to_contain("[80]")
+        expect(after.text_dump).to_contain("140")
+        assert_false(_dump_contains(after.text_dump, "[20]"))
+
+describe "session_edit: selection survives an edit":
+
+    it "the selected_ref is unchanged after editing a different cell":
+        var session = session_select(session_new(_demo_sheet(), "D2"), "D2")
+        session = session_edit(session, "B2", "40")
+        expect(session.selected_ref).to_equal("D2")
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("[80]")
+
+describe "session_edit: editing a formula cell replaces the formula":
+
+    it "overwriting D2 (=B2*C2) with a literal drops the formula entirely":
+        var session = session_new(_demo_sheet(), "D2")
+        session = session_edit(session, "D2", "999")
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("999")
+        assert_false(_dump_contains(view.text_dump, "=B2*C2"))
+        # D5 (=SUM(D2:D3)) now sums the literal 999 + D3's 60, not 20 + 60
+        expect(view.text_dump).to_contain("1059")

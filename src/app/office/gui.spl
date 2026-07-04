@@ -29,15 +29,16 @@
 # line to print. Remaining work: root-cause the full-binary slowdown and
 # restore full theme CSS here.
 
-use common.ui.widget.{UITree, WidgetNode}
+use common.ui.widget.{UITree, WidgetNode, UIState}
 use common.ui.state.{init_state}
-use common.ui.builder.{column, table_widget, build_tree_with_title, text_widget, progress, with_width, with_height}
+use common.ui.builder.{column, row, table_widget, build_tree_with_title, text_widget, progress, with_width, with_height}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.office.counter.{CounterApp}
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.cell.{cell_display_text, col_to_letter}
 use app.office.sheets.chart.{ChartSeries, chart_series_from_ranges}
 use app.office.sheets.pivot.{pivot_build}
+use app.office.file_formats.{recalculate_formula_cells}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_render_html_pixels}
 
 # Matches BrowserApp's viewport (src/app/ui.browser/app.spl uses width=96,
@@ -380,6 +381,131 @@ fn office_gui_pivot_pixels(view: PivotGuiView) -> [u32]:
     office_gui_sheet_minimal_css since a pivot grid is rendered through the
     exact same table_widget/widget-table CSS classes as the sheet grid."""
     val state = init_state(view.tree)
+    val body = render_html_tree(view.tree.root_node(), state)
+    val html = "<html><head><style>" + office_gui_sheet_minimal_css() + "</style></head><body>" + body + "</body></html>"
+    simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
+
+# ---------------------------------------------------------------------------
+# Sheet GUI session (first INTERACTION pillar): cell selection + cell edit +
+# recalculation.
+#
+# Capability-probe finding (see doc/08_tracking/bug/
+# office_gui_no_per_cell_click_target_2026-07-04.md for the full writeup):
+# common.ui.event.process_event / handle_pointer IS a real event-dispatch
+# machine (hit-tests a laid-out tree at (x,y), moves state.focused_id,
+# routes key presses to the focused widget -- see src/lib/common/ui/
+# event.spl:37-250). But office/gui.spl's render path never calls it (each
+# office-gui frame is built and painted once, no loop), and more
+# fundamentally sheet_gui_view's grid is built by builder.spl's
+# table_widget(), which folds every row's cells into ONE child text node
+# whose "label" prop is a single pipe-joined string
+# (src/lib/common/ui/builder.spl:259-288); html_widgets.spl's
+# render_html_table() splits that string back into plain "<td>{cell}</td>"
+# tags with no id/data-action per cell (src/app/ui.render/html_widgets.spl:
+# 268-307). There is no per-cell widget id to hit-test, click, or focus --
+# real click-to-select on today's sheet_gui_view table is not wired and
+# cannot be added without changing shared table_widget/render_html_table
+# (outside this lane's owned files).
+#
+# What DOES work today, reused as-is (no framework changes): render_html_
+# widget already computes a real per-widget "focused" CSS class by comparing
+# node.id to state.focused_id (html_widgets.spl:71-72), and .focused is
+# already defined in office_gui_minimal_css. sheet_gui_view_with_selection
+# below builds the grid as one row()/text_widget() panel per sheet row (each
+# cell a real widget with id "cell_<ref>") instead of table_widget's
+# single-string-per-row shape, so the selected cell's widget id can be
+# matched by state.focused_id and get a REAL distinct CSS class through the
+# existing mechanism -- honest MVP: the full session/state/edit/recalc/
+# re-render loop is real, only the input-DEVICE layer (mouse/keyboard event
+# source feeding process_event) is stubbed by scripting session_select/
+# session_edit calls directly instead of routing OS events through
+# handle_pointer/handle_keypress.
+# ---------------------------------------------------------------------------
+
+struct SheetGuiSession:
+    sheet: Sheet
+    selected_ref: text
+
+fn session_new(sheet: Sheet, selected_ref: text) -> SheetGuiSession:
+    """Start a GUI session over `sheet` with `selected_ref` (e.g. "D2")
+    already selected."""
+    SheetGuiSession(sheet: sheet, selected_ref: selected_ref)
+
+fn session_select(session: SheetGuiSession, ref_str: text) -> SheetGuiSession:
+    """Move the selection to `ref_str`. Returns a NEW session (copy
+    semantics) -- callers must reassign."""
+    SheetGuiSession(sheet: session.sheet, selected_ref: ref_str)
+
+fn session_edit(session: SheetGuiSession, ref_str: text, new_text: text) -> SheetGuiSession:
+    """Set `ref_str`'s raw content to `new_text` (replacing whatever was
+    there before, formula or literal), recalculate every formula cell in the
+    sheet, and return a NEW session with the recalculated sheet. The
+    selection is preserved across the edit -- callers must reassign."""
+    var sheet = session.sheet
+    sheet.set_value(ref_str, new_text)
+    sheet = recalculate_formula_cells(sheet)
+    SheetGuiSession(sheet: sheet, selected_ref: session.selected_ref)
+
+fn _sheet_gui_selection_cell_id(ref_str: text) -> text:
+    "cell_{ref_str}"
+
+fn sheet_gui_view_with_selection(session: SheetGuiSession, max_rows: i32, max_cols: i32) -> SheetGuiView:
+    """Like sheet_gui_view, but each cell is its own text_widget (id
+    "cell_<ref>") inside per-row row() panels instead of a single
+    table_widget -- so the selected cell's widget id can pick up a real
+    "focused" CSS class via office_gui_sheet_session_pixels below. The
+    selected cell's display text is also bracketed ("[80]") in both the
+    widget content and the text_dump, so selection is observable without
+    parsing HTML or pixels."""
+    val sheet = session.sheet
+    var headers: [text] = [""]
+    var header_cells: [WidgetNode] = [text_widget("sheet_sel_hdr_corner", "")]
+    var c = 0
+    while c < max_cols:
+        val letter = col_to_letter(c)
+        headers.push(letter)
+        header_cells.push(text_widget("sheet_sel_hdr_{letter}", letter))
+        c = c + 1
+    val header_row = row("sheet_sel_header", header_cells)
+
+    var row_nodes: [WidgetNode] = [header_row]
+    var dump_lines: [text] = [headers.join("|")]
+    var r = 1
+    while r <= max_rows:
+        if not sheet.is_row_hidden(r.to_i64()):
+            var row_cells: [WidgetNode] = [text_widget("sheet_sel_rowhdr_{r}", "{r}")]
+            var dump_cells: [text] = ["{r}"]
+            var rc = 0
+            while rc < max_cols:
+                val ref_str = "{col_to_letter(rc)}{r}"
+                var cell_text = cell_display_text(sheet.get_cell(ref_str))
+                if ref_str == session.selected_ref:
+                    cell_text = "[{cell_text}]"
+                row_cells.push(text_widget(_sheet_gui_selection_cell_id(ref_str), cell_text))
+                dump_cells.push(cell_text)
+                rc = rc + 1
+            row_nodes.push(row("sheet_sel_row_{r}", row_cells))
+            dump_lines.push(dump_cells.join("|"))
+        r = r + 1
+
+    val root = column("sheet_gui_sel_root", row_nodes)
+    val tree = build_tree_with_title(root, "Simple Sheet", "light")
+    SheetGuiView(tree: tree, text_dump: dump_lines.join("\n"))
+
+fn office_gui_sheet_session_pixels(view: SheetGuiView, selected_ref: text) -> [u32]:
+    """Render a sheet_gui_view_with_selection tree to ARGB pixels, with the
+    selected cell's widget carrying a real "focused" CSS class: builds
+    UIState directly with focused_id set to the selected cell's widget id
+    ("cell_<ref>") instead of the unfocused default from init_state, so
+    render_html_widget's existing node.id == state.focused_id check (see
+    html_widgets.spl) applies .focused for real -- no bespoke class hook."""
+    val base_state = init_state(view.tree)
+    val state = UIState(
+        tree: base_state.tree,
+        mode: base_state.mode,
+        focused_id: _sheet_gui_selection_cell_id(selected_ref),
+        command_buffer: base_state.command_buffer
+    )
     val body = render_html_tree(view.tree.root_node(), state)
     val html = "<html><head><style>" + office_gui_sheet_minimal_css() + "</style></head><body>" + body + "</body></html>"
     simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
