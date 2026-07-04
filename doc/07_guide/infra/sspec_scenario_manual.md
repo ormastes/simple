@@ -242,6 +242,14 @@ should use `ScenarioCaptureMode`, `ScenarioCaptureKind`,
 module includes pure constructors for API, execution, binary, redacted, and
 checker-linked evidence.
 
+Formal-verification scenarios must name the proof layer and exact gate in the
+manual text or evidence row. Cite generated Lean/BYL artifacts separately from
+durable manual theorem or constraint files, and distinguish RVFI/SymbiYosys
+readiness from an actual `sby` proof pass. Starvation, fairness,
+race-condition, scheduler, channel, lock, or resource-lifecycle claims need a
+concurrency/resource model gate or an explicit blocker; a single interleaving
+test is not formal evidence.
+
 Examples:
 
 ```simple
