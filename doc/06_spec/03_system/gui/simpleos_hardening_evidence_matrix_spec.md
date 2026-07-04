@@ -273,7 +273,8 @@ be mistaken for a completed RTL proof pass.
   gates that changed in the current branch, then run
   `scripts/check/check-simpleos-mission-critical-release.shs`. Do not promote a
   readiness pass into mission-critical release evidence while the strict SBY
-  proof lane is blocked.
+  proof lane is blocked or any release blocker remains; the final gate requires
+  `release_blockers=none`.
 
 **Requirements:** .spipe/gui_hardening_current_plan/state.md
 **Plan:** .spipe/gui_hardening_current_plan/state.md

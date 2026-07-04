@@ -81,9 +81,10 @@ Mission-critical SimpleOS release uses a stricter aggregate gate:
 sh scripts/check/check-simpleos-mission-critical-release.shs
 ```
 
-That gate fails while `scripts/check/check-riscv-rtl-sby-proof.shs` is blocked
-or failing. A hardening matrix readiness pass is not a mission-critical release
-pass until the strict SymbiYosys proof gate passes too.
+That gate fails unless the matrix reports `release_status=pass`,
+`release_blockers=none`, and ready formal prerequisites. A hardening matrix
+readiness pass is not a mission-critical release pass until the strict
+SymbiYosys proof gate passes too.
 
 For host setup triage, run:
 

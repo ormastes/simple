@@ -113,8 +113,8 @@ describe "<Feature Name>":
   mission-critical release wording separate and cite the stricter release gate
   explicitly with `sh scripts/check/check-riscv-rtl-sby-proof.shs` and
   `sh scripts/check/check-simpleos-mission-critical-release.shs`; a readiness
-  matrix pass or missing-tool blocker is not a substitute for a strict SBY proof
-  pass.
+  matrix pass or missing-tool blocker is not a substitute for `release_blockers=none`
+  and a strict SBY proof pass.
 - For broad lanes with shared interfaces, the primary/best model must define
   shared interface names, manual `step("...")` flow helper names, and
   setup/checker helper names before lower-model sidecars such as Codex Spark,

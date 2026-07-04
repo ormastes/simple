@@ -278,8 +278,9 @@ For SimpleOS mission-critical claims, the dual-track gate is still not a
 release gate by itself. Cite `sh scripts/check/check-riscv-rtl-sby-proof.shs`
 for the strict RVFI/SymbiYosys proof lane and
 `sh scripts/check/check-simpleos-mission-critical-release.shs` for the final
-release decision. If `sby`, `yosys`, or an SMT solver is missing, report the
-result as blocked readiness evidence, not as a proof pass.
+release decision, which also requires `release_blockers=none`. If `sby`,
+`yosys`, or an SMT solver is missing, report the result as blocked readiness
+evidence, not as a proof pass.
 
 ---
 
