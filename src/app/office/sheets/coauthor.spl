@@ -1,0 +1,60 @@
+# Live co-authoring session — thin composition over app.office.sheets.sync
+#
+# A CoauthorSession wraps the current Sheet plus bookkeeping for a single
+# author's live-edit stream: a monotonically increasing revision counter and
+# the author's id. It does not reimplement diff/apply/parse — every
+# operation here is a direct call into sync.spl's sheet_diff / sheet_apply /
+# ops_to_lines / lines_to_ops.
+#
+# Flow between two peers (Alice, Bob) sharing a base sheet:
+#   1. Each makes local edits via coauthor_local_edit (bumps revision by 1
+#      per edit).
+#   2. Each computes outgoing ops vs the shared base via coauthor_broadcast.
+#   3. Each merges the OTHER peer's op lines via coauthor_merge_incoming
+#      (bumps revision by the number of ops applied).
+#
+# Conflict rule: last-writer-wins per cell. coauthor_merge_incoming applies
+# incoming ops via sheet_apply, which calls Sheet.set_value — so an
+# incoming "set" op on a ref always overwrites whatever local value is
+# currently there, regardless of local edit history. The MERGE ORDER a
+# caller chooses therefore determines the winner on a doubly-edited cell:
+# whichever side's ops are merged in LAST wins.
+
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.sync.{sheet_diff, sheet_apply, ops_to_lines, lines_to_ops}
+
+struct CoauthorSession:
+    sheet: Sheet
+    revision: i32
+    author: text
+
+fn coauthor_new(sheet: Sheet, author: text) -> CoauthorSession:
+    """Start a co-authoring session over a shared base sheet at revision 0."""
+    CoauthorSession(sheet: sheet, revision: 0, author: author)
+
+fn coauthor_local_edit(session: CoauthorSession, cell_ref: text, cell_text: text) -> CoauthorSession:
+    """Apply one local edit and bump the revision counter by 1."""
+    var sh = session.sheet
+    sh.set_value(cell_ref, cell_text)
+    CoauthorSession(sheet: sh, revision: session.revision + 1, author: session.author)
+
+fn coauthor_merge_incoming(session: CoauthorSession, remote_lines: [text]) -> CoauthorSession:
+    """Parse remote op lines (sync.spl wire format) and apply them onto this
+    session's sheet. Last-writer-wins per cell: incoming ops overwrite
+    whatever local value currently sits at the same ref, since sheet_apply
+    replays via Sheet.set_value. Revision bumps by the number of ops
+    applied (0 if remote_lines carried no ops)."""
+    val ops = lines_to_ops(remote_lines)
+    val out = sheet_apply(session.sheet, ops)
+    CoauthorSession(sheet: out, revision: session.revision + ops.len(), author: session.author)
+
+fn coauthor_broadcast(session: CoauthorSession, base: Sheet) -> [text]:
+    """Outgoing op lines: this session's sheet diffed against `base`,
+    serialized to the sync.spl wire format so a peer can merge them via
+    coauthor_merge_incoming."""
+    val ops = sheet_diff(base, session.sheet)
+    ops_to_lines(ops)
+
+fn coauthor_revision(session: CoauthorSession) -> i32:
+    """Current revision counter."""
+    session.revision
