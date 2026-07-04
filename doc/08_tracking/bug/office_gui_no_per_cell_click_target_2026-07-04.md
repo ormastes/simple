@@ -2,7 +2,55 @@
 
 **Date:** 2026-07-04
 **Severity:** medium (blocks real mouse/keyboard click-to-select on the sheet-GUI pixel path; state-driven equivalent shipped as the honest MVP instead)
-**Status:** open — diagnosis complete, feeds the OS/UI lane
+**Status:** RESOLVED (2026-07-04, same day) for `sheet_gui_view_with_selection`'s
+grid — see "Resolution" below. `sheet_gui_view`'s plain `table_widget` grid
+(no `_with_selection`) remains unaddressable per-cell; that narrower gap is
+unchanged and still needs the shared-framework fix in item 1 of "What would
+close this gap" below.
+
+## Resolution (2026-07-04)
+
+`sheet_gui_view_with_selection`'s per-cell `text_widget`s (id `cell_<ref>`)
+turned out to be enough on their own: `widget_dispatch_click`
+(`widget_hit.spl:80-98`) hit-tests and returns ANY widget's id under the
+point — there is no `clickable` flag or registered action a widget needs; it
+only does *extra* prop work for `checkbox`/`input`/`textfield` kinds. So no
+framework change was required to make cells clickable. What was missing was
+purely an office-lane entry point that ROUTES a pointer event through
+`process_event`/`handle_pointer` instead of calling `session_select`
+directly.
+
+Shipped in `src/app/office/gui.spl`:
+- `session_click(session, x, y, max_rows, max_cols, viewport_w, viewport_h)`
+  — builds `sheet_gui_view_with_selection`'s tree, sends a real
+  `UIEvent.Resize` (sets the hit-test viewport) then a real
+  `UIEvent.MouseEvent(..., kind: "down")` through `process_event`
+  (`common.ui.event`), reads the hit id back off `state.focused_id`, maps
+  `cell_<ref>` back to `<ref>`, and returns a new session with that
+  selection. A click that hits no `cell_` widget (empty-space miss, or a
+  header/row-header widget) leaves the selection unchanged — real
+  click-miss semantics from `handle_pointer`, not a stub.
+- `sheet_gui_cell_rect`/`sheet_gui_cell_click_point` — compute a cell's
+  laid-out rect/center point via `common.ui.layout.compute_layout`, the SAME
+  layout pass `widget_hit_test` runs internally. Layout is NOT cached
+  anywhere — every hit-test (and every `session_click` call) re-runs
+  `compute_layout` fresh over the tree at the caller-chosen viewport, so a
+  click's (x, y) is only meaningful together with the viewport it was
+  computed against.
+
+CLI: `simple office sheet-gui-click` (`_run_office_gui_sheet_click_command`
+in `src/app/office/mod.spl`) scripts BEFORE (D2 selected) → compute the
+point that lands on B2 → real click → prints
+`office-gui-click: hit=<ref>` → AFTER dump showing `[10]` (B2) selected.
+
+Spec: `test/01_unit/app/office/sheet_gui_session_spec.spl`'s "pointer
+selection" describe block (4 new `it`s, all green, deliberate-fail probe
+run) covers: click-lands-on-B2, click-outside-viewport-is-a-miss,
+click-on-header-widget-is-a-miss, and click-then-edit end to end.
+
+The one remaining item from "What would close this gap" is #1 (extend
+`table_widget`/`render_html_table`, or a `cell_grid_widget`, for
+`sheet_gui_view`'s plain grid) — out of scope for this pass, unchanged.
 
 ## Summary
 
