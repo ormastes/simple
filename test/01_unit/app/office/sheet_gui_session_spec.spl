@@ -23,7 +23,7 @@ space in the viewport, so a window can backfill past it.
 use std.spec
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.file_formats.{recalculate_formula_cells}
-use app.office.gui.{SheetGuiSession, session_new, session_select, session_edit, sheet_gui_view_with_selection, session_click, sheet_gui_cell_click_point, session_key, session_scroll}
+use app.office.gui.{SheetGuiSession, session_new, session_select, session_edit, sheet_gui_view_with_selection, session_click, sheet_gui_cell_click_point, session_key, session_scroll, run_gui_live_step}
 use common.ui.layout.{compute_layout, find_rect}
 
 fn _dump_contains(haystack: text, needle: text) -> bool:
@@ -421,3 +421,61 @@ describe "viewport":
         val view = sheet_gui_view_with_selection(scrolled, 1, 4)
         expect(view.text_dump).to_contain("viewport|A1:D1")
         expect(view.text_dump).to_contain("[2]")
+
+describe "live loop step":
+    """run_gui_live_step (gui.spl) is the pure, spec-testable core of the
+    live sheet-GUI keystroke loop -- run_sheet_gui_live in interactive.spl
+    drives it with real termios input, which cannot itself be exercised
+    from a spec (it blocks on stdin). Every non-quit key is forwarded to
+    session_key unchanged; "q", "ctrl_c" (Ctrl-C), and "eof" (stdin closed)
+    signal quit via the returned GuiLiveStepResult.quit flag instead of
+    raising/exiting, with the session field left UNCHANGED from just before
+    the quit key -- a quit can never silently drop in-progress typing."""
+
+    it "step with \"down\" moves the selection one row":
+        val session = session_new(_demo_sheet(), "B2")
+        val step = run_gui_live_step(session, "down", 5, 4, 5, 4)
+        assert_false(step.quit)
+        expect(step.session.selected_ref).to_equal("B3")
+
+    it "step with typed chars then enter commits and recalculates dependent formula cells":
+        var session = session_new(_demo_sheet(), "B2")
+        var step = run_gui_live_step(session, "4", 5, 4, 5, 4)
+        session = step.session
+        step = run_gui_live_step(session, "0", 5, 4, 5, 4)
+        session = step.session
+        step = run_gui_live_step(session, "enter", 5, 4, 5, 4)
+        session = step.session
+        assert_false(step.quit)
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("[40]")
+        expect(view.text_dump).to_contain("140")
+
+    it "step with \"escape\" cancels a pending typed buffer without committing":
+        var session = session_new(_demo_sheet(), "B2")
+        var step = run_gui_live_step(session, "9", 5, 4, 5, 4)
+        session = step.session
+        step = run_gui_live_step(session, "escape", 5, 4, 5, 4)
+        session = step.session
+        assert_false(step.quit)
+        expect(session.pending_input).to_equal("")
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("[10]")
+
+    it "step with \"q\" signals quit and leaves the session unchanged":
+        val session = session_select(session_new(_demo_sheet(), "D2"), "D2", 5, 4)
+        val step = run_gui_live_step(session, "q", 5, 4, 5, 4)
+        assert_true(step.quit)
+        expect(step.session.selected_ref).to_equal("D2")
+
+    it "step with \"ctrl_c\" also signals quit":
+        val session = session_new(_demo_sheet(), "B2")
+        val step = run_gui_live_step(session, "ctrl_c", 5, 4, 5, 4)
+        assert_true(step.quit)
+        expect(step.session.selected_ref).to_equal("B2")
+
+    it "step with \"eof\" (stdin closed) also signals quit":
+        val session = session_new(_demo_sheet(), "B2")
+        val step = run_gui_live_step(session, "eof", 5, 4, 5, 4)
+        assert_true(step.quit)
+        expect(step.session.selected_ref).to_equal("B2")
