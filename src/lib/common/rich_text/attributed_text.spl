@@ -1,8 +1,8 @@
 # Attributed Text — rich document model with inline styles.
 #
-# Provides: InlineStyle, TextSpan, DocBlock, RichDocument,
-#           empty_document, document_word_count, document_headings,
-#           block_to_plain_text, spans_to_plain_text.
+# Provides: InlineStyle, TextSpan, DocBlock, CommentDef, RichDocument,
+#           empty_document, comment_def_for, document_word_count,
+#           document_headings, block_to_plain_text, spans_to_plain_text.
 
 enum InlineStyle:
     Normal
@@ -32,6 +32,28 @@ struct TextSpan:
                         # A FootnoteDef block's first span reuses this field to
                         # carry ITS OWN id (the definition's `[^id]:` label),
                         # not a reference — see file_formats.spl/odf_ooxml.spl.
+    comment_id: text   # "" = uncommented; non-empty = this span is the target
+                        # of a word comment (markdown `[>>author: text<<]`
+                        # attached right after it, docx <w:commentRangeStart/
+                        # End w:id="id"/> + <w:commentReference w:id="id"/>).
+                        # Unlike footnote_id, the id here is always a REFERENCE:
+                        # the author/text payload lives in the document-level
+                        # `RichDocument.comments` list (see `CommentDef` below),
+                        # not reused on the span itself — a comment's markdown
+                        # form carries author+text inline at the point of use
+                        # (no separate `[^id]:`-style definition line elsewhere
+                        # in the source), so a FootnoteDef-shaped BlockKind
+                        # would misplace it; a parallel doc-level list keeps
+                        # the span model to this one field. See file_formats.spl
+                        # / odf_ooxml.spl / word/html_render.spl.
+
+struct CommentDef:
+    """One word comment's payload, looked up by `TextSpan.comment_id`. Plain
+    text only (no inline styling) — comments are metadata about a span, not
+    renderable document content in their own right."""
+    id: text
+    author: text
+    text: text
 
 struct DocBlock:
     kind: BlockKind
@@ -40,12 +62,22 @@ struct DocBlock:
 class RichDocument:
     title: text
     blocks: [DocBlock]
+    comments: [CommentDef]   # doc-level list; see `TextSpan.comment_id`
 
     static fn new(title: text) -> RichDocument:
-        RichDocument(title: title, blocks: [])
+        RichDocument(title: title, blocks: [], comments: [])
 
 fn empty_document(title: text) -> RichDocument:
     RichDocument.new(title)
+
+fn comment_def_for(comments: [CommentDef], id: text) -> CommentDef:
+    """Linear lookup of a CommentDef by id; an empty CommentDef (all fields
+    "") if not found — callers treat that as "no comment" defensively rather
+    than crashing on a dangling comment_id."""
+    for c in comments:
+        if c.id == id:
+            return c
+    CommentDef(id: "", author: "", text: "")
 
 fn spans_to_plain_text(spans: [TextSpan]) -> text:
     var out = ""
