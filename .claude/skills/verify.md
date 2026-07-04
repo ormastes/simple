@@ -138,7 +138,9 @@ For each source file in scope:
      readiness is not release completion while that gate reports blocked or
      failed. If blocked, run
      `sh scripts/check/check-simpleos-mission-critical-prereqs.shs` for the host
-     dependency list.
+     dependency list and
+     `sh scripts/setup/setup-simpleos-formal-env.shs --print-install` for setup
+     commands.
 3. Flag NFR targets with no verification mechanism
 4. For GUI/web/2D RenderDoc+Vulkan evidence, start from the macOS top-level
    workflow:
