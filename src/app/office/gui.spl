@@ -350,6 +350,152 @@ fn office_gui_chart_pixels(view: ChartGuiView) -> [u32]:
     simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
 
 # ---------------------------------------------------------------------------
+# Chart GUI session (CHART GUI INTERACTIVITY): mirrors PivotGuiSession's
+# session pattern above -- a small value-type struct plus copy-return op
+# functions -- over chart_gui_view instead of pivot_build. No render
+# duplication: chart_session_view is a thin wrapper that forwards the
+# session's fields straight to the existing chart_gui_view (see that
+# function's docstring above for the render/text_dump contract this reuses
+# unchanged).
+#
+# GUI-supported kind list: chart_gui_view (see above) never branches on its
+# chart_kind argument -- every data point always renders as ONE horizontal
+# progress-bar widget, regardless of what kind name is passed in (the kind
+# only ever reaches the dump's "chart|<kind>|<title>" header line). So
+# "bar" is the ONLY chart_kind whose GUI rendering genuinely matches its
+# name; chart.spl itself knows several more shapes (sheet_line_chart_svg,
+# sheet_area_chart_svg, sheet_scatter_chart_svg, sheet_pie_chart_svg,
+# sheet_stacked_bar_chart_svg, sheet_hbar_chart_svg, sheet_donut_chart_svg),
+# but this GUI cannot render any of them as anything other than the same
+# bar shape today. chart_session_set_kind below is honest about that gap:
+# it accepts only "bar" and rejects every other kind name (known-to-chart.
+# spl or not) with last_error = "kind-not-in-gui", rather than silently
+# accepting a kind whose GUI rendering would not match what the caller
+# asked for.
+# ---------------------------------------------------------------------------
+
+val CHART_GUI_SESSION_W: i32 = 80
+val CHART_GUI_SESSION_H: i32 = 40
+
+struct ChartGuiSession:
+    sheet: Sheet
+    chart_kind: text
+    value_range: text
+    labels_range: text
+    title: text
+    last_error: text   # "" = no error; else the reason the last op left the session unchanged
+
+fn _chart_gui_kind_is_valid(kind_lower: text) -> bool:
+    """The only chart_kind whose GUI rendering genuinely matches its name --
+    see the "Chart GUI session" comment block above for why chart_gui_view
+    cannot honestly claim to support line/area/scatter/pie/stacked_bar/
+    hbar/donut today. Mirrors _pivot_gui_agg_is_valid's role: called before
+    accepting a kind change so an unsupported-but-known chart.spl kind can
+    be rejected with an honest reason instead of silently rendering the
+    wrong shape."""
+    kind_lower == "bar"
+
+fn chart_session_new(sheet: Sheet, chart_kind: text, value_range: text, labels_range: text, title: text) -> ChartGuiSession:
+    """Start a chart GUI session over `sheet` with the given chart_kind/
+    value_range/labels_range/title -- same parameter order and meaning as
+    chart_gui_view's own arguments (see that function's docstring), so an
+    existing chart_gui_view call site can be lifted into a session with no
+    reinterpretation of any argument."""
+    ChartGuiSession(sheet: sheet, chart_kind: chart_kind, value_range: value_range, labels_range: labels_range, title: title, last_error: "")
+
+fn chart_session_view(session: ChartGuiSession) -> ChartGuiView:
+    """Render the session's current state -- forwards straight to
+    chart_gui_view (no reimplementation of the series-resolution/render
+    logic here, the exact same engine-reuse discipline pivot_session_view
+    follows for pivot_gui_view). Uses a fixed CHART_GUI_SESSION_W x
+    CHART_GUI_SESSION_H progress-bar container size (matching `office
+    chart-gui`'s own demo call site) since ChartGuiSession has no notion of
+    a caller-chosen container size -- unlike pivot's table_widget, which
+    auto-sizes, chart_gui_view's bar column is explicitly sized."""
+    chart_gui_view(session.sheet, session.chart_kind, session.value_range, session.labels_range, session.title, CHART_GUI_SESSION_W, CHART_GUI_SESSION_H)
+
+fn chart_session_set_kind(session: ChartGuiSession, kind: text) -> ChartGuiSession:
+    """Change the session's chart kind to `kind` (case-insensitive). Only
+    "bar" is GUI-supported today (see _chart_gui_kind_is_valid above) --
+    any other kind, INCLUDING ones chart.spl itself knows how to render as
+    SVG (line/area/scatter/pie/stacked_bar/hbar/donut), leaves the session
+    UNCHANGED (chart_kind untouched) except `last_error`, set to
+    "kind-not-in-gui" -- documented fail-closed, honest about what this GUI
+    actually renders rather than accepting a kind name it would silently
+    ignore. A valid kind clears last_error back to "". Returns a NEW
+    session (copy semantics) -- callers must reassign."""
+    val kind_lower = kind.lower()
+    if not _chart_gui_kind_is_valid(kind_lower):
+        return ChartGuiSession(sheet: session.sheet, chart_kind: session.chart_kind, value_range: session.value_range, labels_range: session.labels_range, title: session.title, last_error: "kind-not-in-gui")
+    ChartGuiSession(sheet: session.sheet, chart_kind: kind, value_range: session.value_range, labels_range: session.labels_range, title: session.title, last_error: "")
+
+fn chart_session_set_value_range(session: ChartGuiSession, range_a1: text) -> ChartGuiSession:
+    """Re-point the session's data range to `range_a1` (e.g. Excel's
+    "Select Data" range re-point, modeled here as swapping value_range on
+    an otherwise-unchanged session -- the next chart_session_view call
+    reads whatever column `range_a1` names). An unparseable/empty
+    `range_a1` (parse_range returns nil) leaves the session UNCHANGED
+    (value_range untouched) except last_error, set to "empty-range" --
+    mirrors chart_gui_view's own "error|empty-range" dump line and
+    pivot_session_set_value_col's fail-closed discipline above. A valid
+    range clears last_error back to "". Returns a NEW session (copy
+    semantics) -- callers must reassign."""
+    val range_val = parse_range(range_a1)
+    if range_val == nil:
+        return ChartGuiSession(sheet: session.sheet, chart_kind: session.chart_kind, value_range: session.value_range, labels_range: session.labels_range, title: session.title, last_error: "empty-range")
+    ChartGuiSession(sheet: session.sheet, chart_kind: session.chart_kind, value_range: range_a1, labels_range: session.labels_range, title: session.title, last_error: "")
+
+fn chart_session_set_title(session: ChartGuiSession, title: text) -> ChartGuiSession:
+    """Change the session's chart title to `title` -- always succeeds (no
+    validity constraint on a title string), clearing last_error back to
+    "". Returns a NEW session (copy semantics) -- callers must reassign."""
+    ChartGuiSession(sheet: session.sheet, chart_kind: session.chart_kind, value_range: session.value_range, labels_range: session.labels_range, title: title, last_error: "")
+
+# ---------------------------------------------------------------------------
+# Chart GUI key-driven step (mirrors pivot_gui_step's quit modeling -- see
+# the "Live loop bridge" comment block below GuiLiveStepResult/run_gui_
+# live_step -- so a later live loop over ChartGuiSession can reuse the SAME
+# per-keystroke shape; per this round's scope, no live CLI or
+# interactive.spl change is added yet).
+# ---------------------------------------------------------------------------
+
+struct ChartGuiStepResult:
+    session: ChartGuiSession
+    quit: bool
+
+fn _chart_gui_next_kind(kind_lower: text) -> text:
+    """Cycle order across the GUI-supported kind list -- today just "bar"
+    (see _chart_gui_kind_is_valid above), so this always wraps back to
+    "bar" itself. Falls back to "bar" for any kind_lower outside the
+    supported list (defensive only -- every ChartGuiSession.chart_kind
+    reaching here already passed chart_session_set_kind's validity
+    check)."""
+    if kind_lower == "bar":
+        return "bar"
+    "bar"
+
+fn chart_gui_step(session: ChartGuiSession, key: text) -> ChartGuiStepResult:
+    """One decoded key name -> one ChartGuiSession transition: "k" cycles
+    chart_kind through the GUI-supported kind list (via _chart_gui_next_
+    kind + chart_session_set_kind -- always a valid kind, so last_error is
+    always cleared by this branch); "t" appends "*" to title (via
+    chart_session_set_title -- a demo-visible mutation with no validity
+    constraint); "q", "ctrl_c" (Ctrl-C), and "eof" (stdin closed) signal
+    quit via ChartGuiStepResult.quit rather than raising/exiting -- mirrors
+    pivot_gui_step/run_gui_live_step's quit modeling exactly, so the
+    session returned alongside a quit is the session UNCHANGED from just
+    before the quit key. Any other key is a no-op (session unchanged, quit
+    false)."""
+    if key == "q" or key == "ctrl_c" or key == "eof":
+        return ChartGuiStepResult(session: session, quit: true)
+    if key == "k":
+        val next_kind = _chart_gui_next_kind(session.chart_kind.lower())
+        return ChartGuiStepResult(session: chart_session_set_kind(session, next_kind), quit: false)
+    if key == "t":
+        return ChartGuiStepResult(session: chart_session_set_title(session, "{session.title}*"), quit: false)
+    ChartGuiStepResult(session: session, quit: false)
+
+# ---------------------------------------------------------------------------
 # Pivot-table GUI view (CARD 16 third pillar): render the suite's existing
 # pivot_build engine (sheets/pivot.spl) through the same table_widget
 # machinery sheet_gui_view uses -- no reimplementation of the grouping/

@@ -14,7 +14,7 @@ instead of crashing.
 use std.spec
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.file_formats.{recalculate_formula_cells}
-use app.office.gui.{chart_gui_view}
+use app.office.gui.{chart_gui_view, chart_session_new, chart_session_view, chart_session_set_kind, chart_session_set_value_range, chart_gui_step}
 
 fn _dump_contains(haystack: text, needle: text) -> bool:
     """Substring check via index_of's Option, matching sheet_gui_view_spec's
@@ -100,3 +100,96 @@ describe "chart_gui_view: mismatched range lengths fail closed":
         sheet.set_value("B1", "10")
         val view = chart_gui_view(sheet, "bar", "B1:B1", "A1:A2", "T", 80, 40)
         expect(view.text_dump).to_contain("error|range-length-mismatch")
+
+describe "chart session":
+    """ChartGuiSession/chart_session_* (gui.spl) bring CHART GUI
+    INTERACTIVITY to the render-only chart_gui_view -- same session pattern
+    as PivotGuiSession: a value-type struct plus copy-return op functions.
+    chart_session_view is a thin wrapper over chart_gui_view (no render
+    duplication), so its dump shape is identical to chart_gui_view's own.
+    chart_gui_view never branches on its chart_kind argument (every point
+    always renders as one progress-bar widget), so "bar" is the only
+    chart_kind whose GUI rendering genuinely matches its name -- set_kind
+    honestly rejects every other kind (even ones chart.spl itself knows,
+    like "line") with last_error = "kind-not-in-gui" rather than silently
+    accepting a kind whose render would not match."""
+
+    it "chart_session_view renders the same dump as a direct chart_gui_view call":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        sheet.set_value("A2", "Gadget")
+        sheet.set_value("B2", "20")
+        val session = chart_session_new(sheet, "bar", "B1:B2", "A1:A2", "Sales")
+        val view = chart_session_view(session)
+        val direct = chart_gui_view(sheet, "bar", "B1:B2", "A1:A2", "Sales", 80, 40)
+        expect(view.text_dump).to_equal(direct.text_dump)
+
+    it "set_value_range changes the dump to the new column's hand-computed values/pcts":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        sheet.set_value("C1", "5")
+        sheet.set_value("A2", "Gadget")
+        sheet.set_value("B2", "20")
+        sheet.set_value("C2", "15")
+        var session = chart_session_new(sheet, "bar", "B1:B2", "A1:A2", "Sales")
+        session = chart_session_set_value_range(session, "C1:C2")
+        expect(session.last_error).to_equal("")
+        expect(session.value_range).to_equal("C1:C2")
+        val view = chart_session_view(session)
+        val lines = view.text_dump.split("\n")
+        # C1:C2 = 5,15 -> max=15: Widget=5/15*100=33 (int-truncated), Gadget=15/15*100=100
+        expect(lines[1]).to_equal("bar|Widget|5|33")
+        expect(lines[2]).to_equal("bar|Gadget|15|100")
+
+    it "set_value_range with an unparseable range leaves value_range unchanged and sets last_error":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        var session = chart_session_new(sheet, "bar", "B1:B1", "A1:A1", "Sales")
+        session = chart_session_set_value_range(session, "")
+        expect(session.value_range).to_equal("B1:B1")
+        expect(session.last_error).to_equal("empty-range")
+
+    it "set_kind with a chart.spl-known-but-GUI-unsupported kind leaves chart_kind unchanged and sets last_error":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        var session = chart_session_new(sheet, "bar", "B1:B1", "A1:A1", "Sales")
+        session = chart_session_set_kind(session, "line")
+        expect(session.chart_kind).to_equal("bar")
+        expect(session.last_error).to_equal("kind-not-in-gui")
+        session = chart_session_set_kind(session, "bar")
+        expect(session.chart_kind).to_equal("bar")
+        expect(session.last_error).to_equal("")
+
+    it "step key \"k\" cycles chart_kind through the GUI-supported kind list":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        val session = chart_session_new(sheet, "bar", "B1:B1", "A1:A1", "Sales")
+        val step = chart_gui_step(session, "k")
+        assert_false(step.quit)
+        expect(step.session.chart_kind).to_equal("bar")
+        expect(step.session.last_error).to_equal("")
+
+    it "step key \"t\" appends \"*\" to the title":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        val session = chart_session_new(sheet, "bar", "B1:B1", "A1:A1", "Sales")
+        val step = chart_gui_step(session, "t")
+        assert_false(step.quit)
+        expect(step.session.title).to_equal("Sales*")
+
+    it "step key \"q\" signals quit and leaves the session unchanged":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        val session = chart_session_new(sheet, "bar", "B1:B1", "A1:A1", "Sales")
+        val step = chart_gui_step(session, "q")
+        assert_true(step.quit)
+        expect(step.session.chart_kind).to_equal("bar")
+        expect(step.session.value_range).to_equal("B1:B1")
+        expect(step.session.title).to_equal("Sales")
