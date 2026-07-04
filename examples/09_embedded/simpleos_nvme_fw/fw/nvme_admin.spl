@@ -110,6 +110,8 @@ fn build_identify_namespace(nsid: i64) -> IdentifyData:
 
 # Endurance used (percent), from the most-worn block against the rated PE cycles.
 fn smart_percent_used(max_erase: i64) -> i64:
+    if max_erase < 0:
+        return 0
     var pu: i64 = (max_erase * 100) / RATED_PE_CYCLES
     if pu > 100:
         pu = 100
@@ -117,22 +119,38 @@ fn smart_percent_used(max_erase: i64) -> i64:
 
 # Available spare (percent), from the bad-block count against the spare pool.
 fn smart_avail_spare(bad_blocks: i64) -> i64:
+    if bad_blocks < 0:
+        return 100
     var used: i64 = (bad_blocks * 100) / SPARE_BLOCKS
     if used > 100:
         used = 100
     100 - used
 
+fn smart_nonnegative(v: i64) -> i64:
+    if v < 0:
+        return 0
+    v
+
+fn smart_percent(v: i64) -> i64:
+    if v < 0:
+        return 0
+    if v > 100:
+        return 100
+    v
+
 fn build_smart_log(reads: i64, writes: i64, power_cycles: i64, unsafe_sd: i64, media_err: i64, percent_used: i64, avail_spare: i64, temperature: i64, thermal_crit: i64) -> SmartLog:
     # Critical warning when the spare pool is low (<10%), media errors have occurred,
     # or the device is thermally critical (composite temperature over the threshold).
+    val safe_spare: i64 = smart_percent(avail_spare)
+    val safe_media_err: i64 = smart_nonnegative(media_err)
     var crit: i64 = 0
-    if media_err > 0:
+    if safe_media_err > 0:
         crit = 1
-    if avail_spare < 10:
+    if safe_spare < 10:
         crit = 1
     if thermal_crit > 0:
         crit = 1
-    SmartLog(crit_warning: crit, temperature: temperature, avail_spare: avail_spare, percent_used: percent_used, data_units_read: reads, data_units_written: writes, power_cycles: power_cycles, unsafe_shutdowns: unsafe_sd, media_errors: media_err)
+    SmartLog(crit_warning: crit, temperature: smart_nonnegative(temperature), avail_spare: safe_spare, percent_used: smart_percent(percent_used), data_units_read: smart_nonnegative(reads), data_units_written: smart_nonnegative(writes), power_cycles: smart_nonnegative(power_cycles), unsafe_shutdowns: smart_nonnegative(unsafe_sd), media_errors: safe_media_err)
 
 # ── FeatureStore — Get/Set Features backing store ─────────────────────────────
 struct FeatureStore:
@@ -361,7 +379,18 @@ fn nvme_admin_selftest() -> i64:
     # SMART derived metrics: endurance used (from max erase) and available spare (from bad blocks).
     fail = fail + expect_eq(smart_percent_used(50), 50, "percent_used from max erase count")
     fail = fail + expect_eq(smart_percent_used(250), 100, "percent_used clamps at 100")
+    fail = fail + expect_eq(smart_percent_used(-1), 0, "percent_used clamps negative wear")
     fail = fail + expect_eq(smart_avail_spare(0), 100, "avail_spare full with no bad blocks")
     fail = fail + expect_eq(smart_avail_spare(1), 88, "avail_spare drops with a retired block")
+    fail = fail + expect_eq(smart_avail_spare(-1), 100, "avail_spare clamps negative bad-block count")
+    val sm_bad: SmartLog = build_smart_log(-1, -2, -3, -4, -5, -6, 150, -7, 0)
+    fail = fail + expect_eq(sm_bad.data_units_read, 0, "SMART clamps negative reads")
+    fail = fail + expect_eq(sm_bad.data_units_written, 0, "SMART clamps negative writes")
+    fail = fail + expect_eq(sm_bad.power_cycles, 0, "SMART clamps negative power cycles")
+    fail = fail + expect_eq(sm_bad.unsafe_shutdowns, 0, "SMART clamps negative unsafe shutdowns")
+    fail = fail + expect_eq(sm_bad.media_errors, 0, "SMART clamps negative media errors")
+    fail = fail + expect_eq(sm_bad.percent_used, 0, "SMART clamps negative percent used")
+    fail = fail + expect_eq(sm_bad.avail_spare, 100, "SMART clamps oversized available spare")
+    fail = fail + expect_eq(sm_bad.temperature, 0, "SMART clamps negative temperature")
 
     fail
