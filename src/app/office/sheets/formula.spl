@@ -54,6 +54,79 @@ fn set_formula_origin(key: text):
     driver before each evaluate_formula. Pass "" to clear the context."""
     _formula_origin_key = key
 
+# LET/LAMBDA binding stack (CARD 14-style module-level state, extended for
+# name -> value scoping). Parallel arrays, not a Dict-in-struct (quirk #7),
+# holding every name currently in scope. _eval_let/_eval_lambda_invoked push
+# one entry per name right before evaluating anything that might reference
+# it, and pop exactly what they pushed before returning on EVERY path
+# (success or #ERR) — so a formula's bindings never leak into a sibling LET
+# call or into the next cell's formula. Lookup is last-pushed-wins, which is
+# what makes shadowing (LET(x,1,LET(x,5,x))=5) and nested scoping fall out
+# for free.
+var _let_names: [text] = []
+var _let_values: [text] = []
+
+fn reset_let_bindings():
+    """Clear the LET/LAMBDA binding stack. Called by the recalc driver before
+    each formula, alongside set_formula_origin — defensive belt-and-braces:
+    LET/LAMBDA's own push/pop discipline should already leave the stack empty
+    between formulas, but every formula starting from depth 0 is an invariant
+    worth enforcing explicitly rather than trusting silently."""
+    _let_names = []
+    _let_values = []
+
+fn _let_find(name: text) -> i32:
+    """Index of the most-recently pushed binding for `name`, or -1. Reverse
+    scan so shadowing (re-pushing the same name in a nested/later scope)
+    resolves to the innermost binding."""
+    var i: i32 = _let_names.len().to_i32() - 1
+    while i >= 0:
+        if _let_names[i] == name:
+            return i
+        i = i - 1
+    -1
+
+fn _let_value_from_display(display: text) -> CellValue:
+    """Reconstruct a CellValue from a LET/LAMBDA binding's stored display
+    text (the evaluator is display-text-centric — see the quirk ledger).
+    Mirrors _cell_value_to_display's rendering rules in reverse."""
+    if display == "TRUE":
+        return CellValue.BoolVal(value: true)
+    if display == "FALSE":
+        return CellValue.BoolVal(value: false)
+    if display.len() > 0 and display.char_at(0) == "#":
+        return CellValue.ErrorVal(message: display)
+    if _arr_is_number(display):
+        return CellValue.NumberVal(value: display.to_f64())
+    CellValue.TextVal(value: display)
+
+fn _is_reserved_function_name(name: text, sheet: Sheet) -> bool:
+    """Whether `name` collides with a built-in function name reachable via
+    any dispatch path. LET/LAMBDA binding names must not shadow these (Excel
+    itself rejects a function name as a LET/LAMBDA parameter name) — this is
+    checked in addition to the cell-ref-pattern rejection."""
+    val upper = _canonical_name(name.upper())
+    if upper == "TRUE" or upper == "FALSE" or upper == "LET" or upper == "LAMBDA":
+        return true
+    if (_is_text_function(upper) or _is_criteria_function(upper) or _is_ifs_function(upper) or
+        _is_count_range_function(upper) or _is_lookup_function(upper) or _is_x_lookup_function(upper) or
+        _is_db_function(upper) or _is_info_function(upper) or _is_a_variant_function(upper) or
+        _is_ref_function(upper)):
+        return true
+    if (upper == "MDETERM" or upper == "CHISQ.TEST" or upper == "T.TEST" or upper == "F.TEST" or
+        upper == "OFFSET" or upper == "INDIRECT"):
+        return true
+    # Fall through to the big numeric dispatch table (SUM, SIN, ...): probe
+    # it with harmless dummy args and check whether it recognizes the name
+    # rather than hand-copying ~400 names. Every branch there guards its
+    # arg-count before indexing (audited), so a 2-value probe never crashes.
+    val probe = _dispatch_function(upper, [[1.0, 2.0]], sheet)
+    match probe:
+        CellValue.ErrorVal(message):
+            return not message.starts_with("Unknown function")
+        _:
+            return true
+
 # =========================================================================
 # Main Entry Point
 # =========================================================================
@@ -397,6 +470,17 @@ fn _eval_primary(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResu
             val v = _resolve_cell_value(upper_token, sheet, depth + 1)
             return EvalResult(
                 value: CellValue.NumberVal(value: v),
+                next_pos: pos + 1
+            )
+        # LET/LAMBDA-bound name? Checked after the cell-ref and (above)
+        # function-call checks, so A1-style refs and NAME( calls always take
+        # precedence — LET/LAMBDA names can't collide with either anyway
+        # since binding rejects both at bind time (see _is_cell_ref_token and
+        # _is_reserved_function_name in _eval_let / _eval_lambda_invoked).
+        val bound_idx = _let_find(upper_token)
+        if bound_idx >= 0:
+            return EvalResult(
+                value: _let_value_from_display(_let_values[bound_idx]),
                 next_pos: pos + 1
             )
         # Unknown identifier — treat as error
@@ -2654,6 +2738,10 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_offset(tokens, pos, sheet, depth)
     if name == "INDIRECT":
         return _eval_indirect(tokens, pos, sheet, depth)
+    if name == "LET":
+        return _eval_let(tokens, pos, sheet, depth)
+    if name == "LAMBDA":
+        return _eval_lambda_invoked(tokens, pos, sheet, depth)
     # Collect arguments separated by commas
     # Each argument can be a range (A1:B3) or an expression
     var args: [[f64]] = []
@@ -2686,6 +2774,196 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
 
     val result_val = _dispatch_function(name, args, sheet)
     EvalResult(value: result_val, next_pos: cur_pos)
+
+# =========================================================================
+# LET / LAMBDA
+# =========================================================================
+
+fn _let_name_error(tok: text, sheet: Sheet) -> text:
+    """Empty when `tok` is a legal LET/LAMBDA binding name, else the #ERR
+    reason. Names must be bare identifiers that are neither TRUE/FALSE, a
+    cell-ref-looking token (A1-style — Excel names can't collide with those
+    anyway), nor a built-in function name (Excel also rejects that)."""
+    if not _is_alpha(tok.char_at(0)):
+        return "LET/LAMBDA name must be an identifier: {tok}"
+    val upper = tok.upper()
+    if upper == "TRUE" or upper == "FALSE":
+        return "LET/LAMBDA name cannot be TRUE/FALSE: {tok}"
+    if _is_cell_ref_token(tok):
+        return "LET/LAMBDA name cannot look like a cell reference: {tok}"
+    if _is_reserved_function_name(upper, sheet):
+        return "LET/LAMBDA name cannot be a built-in function name: {tok}"
+    ""
+
+fn _eval_let(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """LET(name1, value1, [name2, value2, ...], calculation). Binds each name
+    to its evaluated value (as display text — the evaluator is display-text-
+    centric) on the module binding stack, evaluating later values/the
+    calculation with all prior names in scope (so value2 may reference
+    name1), then pops every binding it pushed before returning — on the
+    success path AND on every #ERR path, so scope never leaks across sibling
+    LET calls or across formulas.
+
+    A pair is distinguished from the final calculation argument by
+    lookahead: a bare identifier immediately followed by ',' is a name
+    (values/calc are never comma-adjacent since a name's value always
+    follows and the calculation is always the last argument)."""
+    var cur_pos = pos
+    var pushed = 0
+    var err_msg = ""
+    var final_value = CellValue.Empty
+    var done = false
+    while not done:
+        if cur_pos >= tokens.len() or tokens.get(cur_pos) == ")":
+            err_msg = "LET requires a name/value pair and a calculation"
+            done = true
+            break
+        val tok = tokens.get(cur_pos)
+        val looks_like_name = (_is_alpha(tok.char_at(0)) and cur_pos + 1 < tokens.len() and
+                                tokens.get(cur_pos + 1) == ",")
+        if looks_like_name:
+            val name_err = _let_name_error(tok, sheet)
+            if name_err.len() > 0:
+                err_msg = name_err
+                done = true
+                break
+            val upper_name = tok.upper()
+            cur_pos = cur_pos + 2  # skip name + comma
+            val value_result = _eval_concat(tokens, cur_pos, sheet, depth)
+            _let_names.push(upper_name)
+            _let_values.push(_cell_value_to_display(value_result.value))
+            pushed = pushed + 1
+            cur_pos = value_result.next_pos
+            if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+                cur_pos = cur_pos + 1
+            else:
+                err_msg = "LET is missing its calculation argument"
+                done = true
+                break
+        else:
+            if pushed == 0:
+                err_msg = "LET requires at least one name/value pair"
+                done = true
+                break
+            val calc_result = _eval_concat(tokens, cur_pos, sheet, depth)
+            final_value = calc_result.value
+            cur_pos = calc_result.next_pos
+            done = true
+
+    # Restore stack depth on every path (success or #ERR) — no leaks.
+    var i = 0
+    while i < pushed:
+        _let_names.pop()
+        _let_values.pop()
+        i = i + 1
+
+    var end_pos = cur_pos
+    if end_pos < tokens.len() and tokens.get(end_pos) == ")":
+        end_pos = end_pos + 1
+    if err_msg.len() > 0:
+        return EvalResult(value: CellValue.ErrorVal(message: err_msg), next_pos: end_pos)
+    EvalResult(value: final_value, next_pos: end_pos)
+
+fn _skip_balanced_to_paren(tokens: [text], pos: i32) -> i32:
+    """Advance past a token span (which may contain nested parens, e.g. a
+    LAMBDA body like `(x+1)*2`) until the ')' that closes the paren depth we
+    started at, returning the index right after it. Unlike
+    _consume_to_paren (a flat scan documented safe only for bare-ref
+    argument lists), this is needed for LAMBDA: its own closing paren must be
+    found WITHOUT evaluating the body, whose evaluation must wait until the
+    immediate-invocation arguments bind its parameters."""
+    var cur = pos
+    var depth = 0
+    while cur < tokens.len():
+        val t = tokens.get(cur)
+        if t == "(":
+            depth = depth + 1
+        elif t == ")":
+            if depth == 0:
+                return cur + 1
+            depth = depth - 1
+        cur = cur + 1
+    cur
+
+fn _eval_lambda_invoked(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """LAMBDA(param1, ..., paramN, body)(arg1, ..., argN) — IMMEDIATE
+    INVOCATION ONLY. A LAMBDA not immediately followed by '(...)' (e.g.
+    stored in a name via LET and called later: `LET(f, LAMBDA(x,x*2), f(3))`)
+    is unsupported: that requires plumbing a callable CellValue variant
+    through the whole engine, which is out of scope here — it fails closed
+    with #ERR rather than shipping half-working callable semantics.
+
+    Params are bound via the SAME module binding stack LET uses (push then
+    pop), so shadowing/nesting/no-leak guarantees carry over unchanged. The
+    body's token span is located (respecting nested parens) before being
+    evaluated, because evaluation must wait until the invocation's arguments
+    bind the parameters."""
+    var cur_pos = pos
+    var params: [text] = []
+    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        val tok = tokens.get(cur_pos)
+        val looks_like_param = (_is_alpha(tok.char_at(0)) and cur_pos + 1 < tokens.len() and
+                                 tokens.get(cur_pos + 1) == ",")
+        if not looks_like_param:
+            break
+        val name_err = _let_name_error(tok, sheet)
+        if name_err.len() > 0:
+            val bad_end = _skip_balanced_to_paren(tokens, pos)
+            return EvalResult(value: CellValue.ErrorVal(message: name_err), next_pos: bad_end)
+        params.push(tok.upper())
+        cur_pos = cur_pos + 2
+
+    if cur_pos >= tokens.len() or params.len() == 0:
+        val bad_end = _skip_balanced_to_paren(tokens, pos)
+        return EvalResult(value: CellValue.ErrorVal(message: "LAMBDA requires parameters and a body"), next_pos: bad_end)
+
+    val body_start = cur_pos
+    val lambda_end = _skip_balanced_to_paren(tokens, body_start)
+
+    if not (lambda_end < tokens.len() and tokens.get(lambda_end) == "("):
+        # Not immediately invoked — unsupported (stored/callable LAMBDA).
+        return EvalResult(
+            value: CellValue.ErrorVal(message: "LAMBDA must be immediately invoked: LAMBDA(...)(...)"),
+            next_pos: lambda_end
+        )
+
+    var inv_pos = lambda_end + 1
+    var pushed = 0
+    var arity_err = ""
+    var pi = 0
+    while pi < params.len():
+        if inv_pos >= tokens.len() or tokens.get(inv_pos) == ")":
+            arity_err = "LAMBDA invocation arity mismatch (too few arguments)"
+            break
+        val arg_result = _eval_concat(tokens, inv_pos, sheet, depth)
+        _let_names.push(params.get(pi))
+        _let_values.push(_cell_value_to_display(arg_result.value))
+        pushed = pushed + 1
+        inv_pos = arg_result.next_pos
+        if inv_pos < tokens.len() and tokens.get(inv_pos) == ",":
+            inv_pos = inv_pos + 1
+        pi = pi + 1
+
+    if arity_err.len() == 0 and not (inv_pos < tokens.len() and tokens.get(inv_pos) == ")"):
+        arity_err = "LAMBDA invocation arity mismatch (too many arguments)"
+
+    var result_value = CellValue.Empty
+    if arity_err.len() == 0:
+        val body_result = _eval_concat(tokens, body_start, sheet, depth)
+        result_value = body_result.value
+
+    var i = 0
+    while i < pushed:
+        _let_names.pop()
+        _let_values.pop()
+        i = i + 1
+
+    var end_pos = inv_pos
+    if end_pos < tokens.len() and tokens.get(end_pos) == ")":
+        end_pos = end_pos + 1
+    if arity_err.len() > 0:
+        return EvalResult(value: CellValue.ErrorVal(message: arity_err), next_pos: end_pos)
+    EvalResult(value: result_value, next_pos: end_pos)
 
 val _LN2 = 0.6931471805599453
 val _PI = 3.141592653589793
