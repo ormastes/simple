@@ -70,6 +70,9 @@ before accepting regeneration-safe PASS. For RISC-V evidence that spans
 generated RTL sidecars plus Lean/BYL, cite
 `sh scripts/check/check-riscv-formal-dual-track.shs` so SPipe evidence covers
 the sidecar self-test, normal sidecar contract, and manual proof gate together.
+Mission-critical SimpleOS release SPipe evidence must also cite
+`sh scripts/check/check-simpleos-mission-critical-release.shs` and keep
+`release_blockers=none`; matrix readiness alone is not release evidence.
 Starvation, fairness, race-condition, scheduler, channel, lock, or
 resource-lifecycle claims require a concurrency/resource model gate or an
 explicit blocker; a single interleaving test is not formal evidence.
