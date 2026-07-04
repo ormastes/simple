@@ -138,9 +138,11 @@ fn spawn_async_test(file_path: text, options: TestOptions) -> AsyncTestRun:
 
     val shell_cmd = "{binary} {args_str} > {stdout_file} 2> {stderr_file}"
 
-    # Spawn via platform-appropriate shell
+    # Spawn via platform-appropriate shell.
+    # Route through spawn_tracked_process so the PID is registered for
+    # cleanup on crash/Ctrl-C (process_spawn_async bypasses the tracker).
     val os = _detect_os()
-    val pid = if os == "windows" then process_spawn_async("cmd.exe", ["/c", shell_cmd]) else process_spawn_async("/bin/sh", ["-c", shell_cmd])
+    val pid = if os == "windows" then spawn_tracked_process("cmd.exe", ["/c", shell_cmd]) else spawn_tracked_process("/bin/sh", ["-c", shell_cmd])
 
     val start_time = time_now_unix_micros()
 
@@ -168,6 +170,8 @@ fn collect_async_result(run: AsyncTestRun) -> TestFileResult:
     """
     # Wait for process to complete (with timeout)
     val exit_code = process_wait(run.pid, run.timeout_ms)
+    # Unregister from tracker now that the process has been reaped
+    untrack_process(run.pid)
 
     val end_time = time_now_unix_micros()
     val duration_ms = (end_time - run.start_time) / 1000
