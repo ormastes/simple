@@ -27,10 +27,13 @@ obligations" below), never as admitted lemmas.
 - `axiom` declarations: **0**.
 - Gate self-test: `sh scripts/check/check-lean-proofs.shs --self-test`.
 
-## Inventory (24 Lake projects, theorem counts)
+## Inventory (27 Lake projects, theorem counts)
 
 | Domain | Theorems | What is proved |
 |---|---|---|
+| **process_lifecycle** (NEW) | 18 | spawn/exit/wait/reap machine — zombie-freedom, no double-reap, orphan reparent — see below |
+| **ffi_contract** (NEW) | 14 | rt_* extern resolution (#97) + tag/box convention (#117) — see below |
+| **tls_isolation** (NEW) | 4 | per-thread store independence — see below |
 | memory_model_drf | 90 | DRF definition sound; conflict table; unordered write/read + lock acquire/release races are NOT DRF (active parallel stream) |
 | kernel_scheduler | 80 | park/unpark/complete safety, double-complete, enqueue/tick progress, work-steal threshold, resource pool bounds |
 | memory_capabilities | 66 | capability lattice (shared/exclusive/isolated): downgrades allowed, upgrades denied; aliasing-xor-mutability access policy |
