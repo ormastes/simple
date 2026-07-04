@@ -19,8 +19,10 @@ fn _block_style_tag(kind: BlockKind) -> text:
         case Heading2: return "heading_2"
         case Heading3: return "heading_3"
         case BulletItem: return "bullet_list"
+        case OrderedItem: return "numbered_list"
         case CodeBlock: return "code_block"
         case Quote: return "quote"
+        case FootnoteDef: return "paragraph"   # never reached via render_document_html (intercepted below)
 
 fn _html_escape(s: text) -> text:
     """Escape HTML metacharacters so document content can't inject markup."""
@@ -33,10 +35,15 @@ fn _html_escape(s: text) -> text:
 
 fn _render_span_html(span: TextSpan) -> text:
     """Render one text span, wrapping escaped content in its inline-style tag.
+    A span carrying a footnote_id is a footnote reference marker and renders
+    as a superscript link to the footnote entry (`#fn{id}`), ignoring style.
     A span with a non-empty link_url renders as <a href> regardless of style
     (nested bold/italic-inside-a-link is not modeled — the span carries one
     style, matching the rest of this span model)."""
     val content = _html_escape(span.text)
+    if span.footnote_id != "":
+        val fid = _html_escape(span.footnote_id)
+        return "<sup><a href=\"#fn{fid}\">{fid}</a></sup>"
     if span.link_url != "":
         return "<a href=\"{_html_escape(span.link_url)}\">{content}</a>"
     match span.style:
@@ -136,12 +143,43 @@ fn _find_in(s: text, needle: text) -> i32:
         i = i + 1
     -1
 
+fn _render_ordered_list_html(items: [text]) -> text:
+    """Consecutive OrderedItem blocks render as one real `<ol><li>` list (real
+    semantic markup, unlike bullet items today — see the acceptance note in
+    the plan) rather than one `<div>` per item."""
+    var out = "<ol>"
+    for item in items:
+        out = "{out}<li>{item}</li>"
+    "{out}</ol>"
+
+fn _footnote_def_li_html(block: DocBlock) -> text:
+    """One footnote definition's `<li id="fn{id}">` entry for the footnotes
+    section rendered at the end of the document."""
+    val fid = if block.spans.len() > 0: _html_escape(block.spans[0].footnote_id) else: ""
+    val content = if block.spans.len() > 0: _html_escape(block.spans[0].text) else: ""
+    "<li id=\"fn{fid}\">{content}</li>"
+
 fn render_document_html(doc: RichDocument) -> text:
     """Render a whole rich-text document as a styled HTML article. Consecutive
-    |cell| paragraphs render as one table; ![alt](src) paragraphs as images."""
+    |cell| paragraphs render as one table; ![alt](src) paragraphs as images;
+    consecutive OrderedItem blocks as one <ol>; FootnoteDef blocks are
+    collected out of the normal flow and rendered as a footnotes section at
+    the very end (matching where they conventionally sit in the source
+    markdown — see file_formats.spl)."""
     var out = "<article class=\"document\">"
     var table_rows: [text] = []
+    var ordered_items: [text] = []
+    var footnote_defs: [text] = []
     for block in doc.blocks:
+        if block.kind == BlockKind.FootnoteDef:
+            footnote_defs.push(_footnote_def_li_html(block))
+            continue
+        if block.kind == BlockKind.OrderedItem:
+            ordered_items.push(render_spans_html(block.spans))
+            continue
+        if ordered_items.len() > 0:
+            out = "{out}{_render_ordered_list_html(ordered_items)}"
+            ordered_items = []
         if _is_table_row(block):
             table_rows.push(_block_plain(block).trim())
             continue
@@ -155,4 +193,11 @@ fn render_document_html(doc: RichDocument) -> text:
             out = "{out}{render_block_html(block)}"
     if table_rows.len() > 0:
         out = "{out}{_render_table_html(table_rows)}"
+    if ordered_items.len() > 0:
+        out = "{out}{_render_ordered_list_html(ordered_items)}"
+    if footnote_defs.len() > 0:
+        out = "{out}<div class=\"footnotes\"><ol>"
+        for fd in footnote_defs:
+            out = "{out}{fd}"
+        out = "{out}</ol></div>"
     "{out}</article>"

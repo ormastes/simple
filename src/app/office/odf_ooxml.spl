@@ -65,7 +65,7 @@ fn _xml_unescape(s: text) -> text:
     r
 
 fn _span(s: text) -> TextSpan:
-    TextSpan(text: s, style: InlineStyle.Normal)
+    TextSpan(text: s, style: InlineStyle.Normal, link_url: "", footnote_id: "")
 
 fn _plain_block(kind: BlockKind, content: text) -> DocBlock:
     DocBlock(kind: kind, spans: [_span(content)])
@@ -125,6 +125,8 @@ fn odt_bytes_to_document(zip_bytes: [u8], title: text) -> RichDocument:
 # =========================================================================
 
 fn _docx_para_kind(para_xml: text) -> BlockKind:
+    if para_xml.contains("<w:numPr>") or para_xml.contains("<w:numPr "):
+        return BlockKind.OrderedItem
     if para_xml.contains("w:val=\"Heading1\""):
         return BlockKind.Heading1
     if para_xml.contains("w:val=\"Heading2\""):
@@ -175,7 +177,13 @@ fn _docx_rel_target(rels: [_DocxRelEntry], rid: text) -> text:
 fn _docx_runs_in(region: text) -> [TextSpan]:
     """Every <w:r> run's styled span within `region` (w:b -> Bold, w:i ->
     Italic; bold wins when both are set — the span model carries one style).
-    link_url is always "" here; hyperlink wrapping is applied by the caller."""
+    link_url is always "" here; hyperlink wrapping is applied by the caller.
+    A run holding a <w:footnoteReference w:id="N"/> (no <w:t>) becomes an
+    empty-text span carrying footnote_id=N instead — the footnote reference
+    marker, matching how a link span carries its url instead of visible
+    text. A run holding only the in-footnote auto-number marker
+    (<w:footnoteRef/>, no "erence" suffix, no <w:t>) has neither and is
+    skipped, same as any other run with no extractable content."""
     var spans: [TextSpan] = []
     var i = 0
     while i < region.len():
@@ -199,7 +207,14 @@ fn _docx_runs_in(region: text) -> [TextSpan]:
                     style = InlineStyle.Bold
                 elif run.contains("<w:i/>") or run.contains("<w:i "):
                     style = InlineStyle.Italic
-                spans.push(TextSpan(text: content, style: style, link_url: ""))
+                spans.push(TextSpan(text: content, style: style, link_url: "", footnote_id: ""))
+        else:
+            val fr = _find_from(run, "<w:footnoteReference", 0)
+            if fr >= 0:
+                val fr_end = _find_from(run, "/>", fr)
+                if fr_end >= 0:
+                    val fid = _xml_attr(run.slice(fr, fr_end + 2), "w:id")
+                    spans.push(TextSpan(text: "", style: InlineStyle.Normal, link_url: "", footnote_id: fid))
         i = end_pos + 6
     spans
 
@@ -227,7 +242,7 @@ fn _docx_para_spans(para_xml: text, rels: [_DocxRelEntry]) -> [TextSpan]:
         val url = _docx_rel_target(rels, _xml_attr(attrs, "r:id"))
         val inner = para_xml.slice(tag_end + 1, hclose)
         for sp in _docx_runs_in(inner):
-            spans.push(TextSpan(text: sp.text, style: sp.style, link_url: url))
+            spans.push(TextSpan(text: sp.text, style: sp.style, link_url: url, footnote_id: sp.footnote_id))
         i = hclose + 14
     if spans.len() == 0:
         spans.push(_span(""))
@@ -322,12 +337,56 @@ fn docx_document_xml_to_document(document_xml: text, title: text) -> RichDocumen
     `docx_bytes_to_document` for the full container, which resolves both."""
     _docx_document_xml_to_document_with_rels(document_xml, [], [], title)
 
+fn _footnote_def_id(fn_def: DocBlock) -> text:
+    if fn_def.spans.len() > 0:
+        return fn_def.spans[0].footnote_id
+    ""
+
+fn _footnote_def_text(fn_def: DocBlock) -> text:
+    spans_to_plain_text(fn_def.spans)
+
+fn _parse_footnotes_xml(footnotes_xml: text) -> [DocBlock]:
+    """Every real (non-separator) <w:footnote w:id="N">...</w:footnote> in
+    word/footnotes.xml, reconstructed as a FootnoteDef block. The two
+    mandatory separator footnotes (w:id -1/0, both carrying a w:type) are
+    skipped. The note text is whatever `_docx_runs_in` finds inside the
+    footnote's paragraph — the auto-number marker run (<w:footnoteRef/>) has
+    no <w:t> and is naturally skipped there, so only the real text survives."""
+    var out: [DocBlock] = []
+    var i = 0
+    while true:
+        val s = _find_from(footnotes_xml, "<w:footnote ", i)
+        if s < 0:
+            break
+        val tag_end = _find_from(footnotes_xml, ">", s)
+        val e = _find_from(footnotes_xml, "</w:footnote>", s)
+        if tag_end < 0 or e < 0:
+            break
+        val open_tag = footnotes_xml.slice(s, tag_end + 1)
+        val fid = _xml_attr(open_tag, "w:id")
+        val ftype = _xml_attr(open_tag, "w:type")
+        if ftype == "":
+            val inner = footnotes_xml.slice(tag_end + 1, e)
+            val spans = _docx_runs_in(inner)
+            val text_content = spans_to_plain_text(spans)
+            out.push(DocBlock(kind: BlockKind.FootnoteDef, spans: [TextSpan(text: text_content, style: InlineStyle.Normal, link_url: "", footnote_id: fid)]))
+        i = e + 13
+    out
+
 fn docx_bytes_to_document(zip_bytes: [u8], title: text) -> RichDocument:
     """Import a real .docx file (zip container) into a RichDocument. Resolves
     w:hyperlink r:id -> external URL and w:drawing r:embed -> media bytes via
-    word/_rels/document.xml.rels."""
+    word/_rels/document.xml.rels, and word/footnotes.xml (if present) into
+    FootnoteDef blocks appended after the body's paragraphs (matching where
+    footnote definitions conventionally sit in markdown source — see
+    file_formats.spl's document_to_markdown)."""
     val rels = _parse_docx_rels(zip_extract_text(zip_bytes, "word/_rels/document.xml.rels"))
-    _docx_document_xml_to_document_with_rels(zip_extract_text(zip_bytes, "word/document.xml"), rels, zip_bytes, title)
+    var doc = _docx_document_xml_to_document_with_rels(zip_extract_text(zip_bytes, "word/document.xml"), rels, zip_bytes, title)
+    val footnotes_xml = zip_extract_text(zip_bytes, "word/footnotes.xml")
+    if footnotes_xml != "":
+        for fd in _parse_footnotes_xml(footnotes_xml):
+            doc.blocks.push(fd)
+    doc
 
 struct DocxHeaderFooter:
     """Header/footer plain text read back from a .docx's word/header1.xml
@@ -1097,18 +1156,20 @@ fn sheet_to_ods_bytes(sheet: Sheet) -> [u8]:
 
 # =========================================================================
 # Real .docx writer
-# =========================================================================
 #
-# Hyperlinks (w:hyperlink r:id + external rels) and inline PNG images
+# Hyperlinks (w:hyperlink r:id + external rels), inline PNG images
 # (w:drawing, wp:inline picture skeleton + word/media/imageN.png + image
-# rels) both need per-document relationship bookkeeping (rId allocation +
-# accumulated <Relationship> entries + extra zip parts). `_DocxRels` is a
-# plain `struct` threaded through paragraph building the same way the rest
-# of this file threads aggregates: every function that adds a relationship
-# returns the UPDATED `_DocxRels` (paired with whatever XML it built) and the
-# caller reassigns — the established copy-return idiom (see
-# `recalculate_formula_cells` in file_formats.spl), used here instead of a
-# mutable `class` builder for reliability under this interpreter.
+# rels), footnotes (word/footnotes.xml + w:footnoteReference runs), and
+# ordered lists (word/numbering.xml + w:numPr) all need per-document
+# relationship bookkeeping (rId allocation + accumulated <Relationship>
+# entries + extra zip parts). `_DocxRels` is a plain `struct` threaded
+# through paragraph building the same way the rest of this file threads
+# aggregates: every function that adds a relationship returns the UPDATED
+# `_DocxRels` (paired with whatever XML it built) and the caller reassigns —
+# the established copy-return idiom (see `recalculate_formula_cells` in
+# file_formats.spl), used here instead of a mutable `class` builder for
+# reliability under this interpreter.
+# =========================================================================
 
 val _DOCX_NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 val _DOCX_NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -1162,6 +1223,25 @@ fn _docx_rels_add_footer(rels: _DocxRels) -> _DocxRidResult:
     entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/footer\" Target=\"footer1.xml\"/>")
     _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: rels.media))
 
+fn _docx_rels_add_footnotes(rels: _DocxRels) -> _DocxRidResult:
+    """word/footnotes.xml isn't referenced by r:id anywhere in the body — Word
+    locates it by relationship TYPE — but the relationship entry must still
+    exist for the part to be found at all. Callers add this once per document
+    when any footnote definition is present; the returned rid is unused."""
+    val rid = "rId{rels.next_id}"
+    var entries = rels.entries
+    entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/footnotes\" Target=\"footnotes.xml\"/>")
+    _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: rels.media))
+
+fn _docx_rels_add_numbering(rels: _DocxRels) -> _DocxRidResult:
+    """word/numbering.xml, same fixed-name/type-lookup convention as
+    footnotes.xml above — added once per document when any OrderedItem block
+    is present."""
+    val rid = "rId{rels.next_id}"
+    var entries = rels.entries
+    entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/numbering\" Target=\"numbering.xml\"/>")
+    _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: rels.media))
+
 fn _docx_rels_xml(rels: _DocxRels) -> text:
     var body = "<Relationship Id=\"rId1\" Type=\"{_DOCX_NS_R}/styles\" Target=\"styles.xml\"/>"
     for e in rels.entries:
@@ -1181,7 +1261,16 @@ fn _xml_attr_escape(s: text) -> text:
 
 fn _docx_run(span: TextSpan, rels: _DocxRels) -> _DocxBuildResult:
     """One <w:r> (or <w:hyperlink><w:r>...</w:r></w:hyperlink> when the span
-    carries a link_url), styled runs unaffected by hyperlink-wrapping."""
+    carries a link_url), styled runs unaffected by hyperlink-wrapping. A span
+    carrying footnote_id is a footnote reference marker: it renders as
+    <w:footnoteReference w:id="..."/> instead of a text run (span.text is ""
+    for these — see `parse_inline_spans`'s `[^id]` handling) and needs no rels
+    bookkeeping (footnote ids are local to word/footnotes.xml, no external
+    relationship)."""
+    if span.footnote_id != "":
+        val fid = _xml_attr_escape(span.footnote_id)
+        val fr_run = "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference w:id=\"{fid}\"/></w:r>"
+        return _DocxBuildResult(xml: fr_run, rels: rels)
     val content = "<w:t xml:space=\"preserve\">{_xml_escape_d(span.text)}</w:t>"
     var run = ""
     match span.style:
@@ -1227,6 +1316,7 @@ fn _docx_para(block: DocBlock, rels: _DocxRels) -> _DocxBuildResult:
         case Heading2: style = "<w:pPr><w:pStyle w:val=\"Heading2\"/></w:pPr>"
         case Heading3: style = "<w:pPr><w:pStyle w:val=\"Heading3\"/></w:pPr>"
         case BulletItem: style = "<w:pPr><w:pStyle w:val=\"ListParagraph\"/></w:pPr>"
+        case OrderedItem: style = "<w:pPr><w:pStyle w:val=\"ListParagraph\"/><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr>"
         _: style = ""
     var runs = ""
     var cur_rels = rels
@@ -1235,6 +1325,43 @@ fn _docx_para(block: DocBlock, rels: _DocxRels) -> _DocxBuildResult:
         runs = "{runs}{r.xml}"
         cur_rels = r.rels
     _DocxBuildResult(xml: "<w:p>{style}{runs}</w:p>", rels: cur_rels)
+
+fn _collect_footnote_defs(doc: RichDocument) -> [DocBlock]:
+    """Every FootnoteDef block, in document order (== markdown source order,
+    conventionally the very end of the document — see file_formats.spl)."""
+    var out: [DocBlock] = []
+    for block in doc.blocks:
+        if block.kind == BlockKind.FootnoteDef:
+            out.push(block)
+    out
+
+fn _doc_has_ordered_list(doc: RichDocument) -> bool:
+    for block in doc.blocks:
+        if block.kind == BlockKind.OrderedItem:
+            return true
+    false
+
+fn _footnotes_xml(defs: [DocBlock]) -> text:
+    """word/footnotes.xml: the two mandatory separator footnotes (w:id -1
+    "separator", w:id 0 "continuationSeparator" — required by the ECMA schema
+    even with zero real footnotes) plus one <w:footnote> per definition. The
+    w:id is the markdown footnote id verbatim (this feature's scope is
+    numeric `[^1]`-style ids, matching `<w:footnoteReference w:id="...">` in
+    the body — see `_docx_run`); non-numeric ids would collide with nothing
+    reserved but also wouldn't be a valid ST_DecimalNumber, out of scope."""
+    var body = "<w:footnote w:type=\"separator\" w:id=\"-1\"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>"
+    body = "{body}<w:footnote w:type=\"continuationSeparator\" w:id=\"0\"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>"
+    for fn_def in defs:
+        val fid = _xml_attr_escape(_footnote_def_id(fn_def))
+        val text_ = _xml_escape_d(_footnote_def_text(fn_def))
+        body = "{body}<w:footnote w:id=\"{fid}\"><w:p><w:pPr><w:pStyle w:val=\"FootnoteText\"/></w:pPr><w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space=\"preserve\">{text_}</w:t></w:r></w:p></w:footnote>"
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:footnotes xmlns:w=\"{_DOCX_NS_W}\">{body}</w:footnotes>"
+
+fn _docx_numbering_xml() -> text:
+    """word/numbering.xml: one abstract numbering (decimal, `%1.`) + the one
+    concrete numId (1) `_docx_para` references for every OrderedItem block —
+    the minimal shape LibreOffice/Word need to render `1. / 2. / 3. ...`."""
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:numbering xmlns:w=\"{_DOCX_NS_W}\"><w:abstractNum w:abstractNumId=\"0\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"720\" w:hanging=\"360\"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num></w:numbering>"
 
 fn _document_to_docx_bytes_core(doc: RichDocument, header_text: text, footer_text: text) -> [u8]:
     """Shared builder behind `document_to_docx_bytes` (header_text and
@@ -1246,13 +1373,29 @@ fn _document_to_docx_bytes_core(doc: RichDocument, header_text: text, footer_tex
     non-empty, and the xmlns:r / xmlns:wp namespace declarations are added
     only when a hyperlink, image, or header/footer actually needs them — so
     a plain document with none of these features produces byte-identical
-    output to this writer before any of the three features existed."""
+    output to this writer before any of the three features existed. Same
+    guarantee for footnotes/ordered-lists added later: FootnoteDef blocks are
+    skipped from the paragraph loop below (they live only in
+    word/footnotes.xml, never in the body) and word/footnotes.xml /
+    word/numbering.xml are only emitted when the document actually uses
+    them."""
     var rels = _docx_rels_new()
+    val footnote_defs = _collect_footnote_defs(doc)
+    val has_footnotes = footnote_defs.len() > 0
+    val has_ordered = _doc_has_ordered_list(doc)
     var paras = ""
     for block in doc.blocks:
+        if block.kind == BlockKind.FootnoteDef:
+            continue
         val result = _docx_para(block, rels)
         paras = "{paras}{result.xml}"
         rels = result.rels
+    if has_footnotes:
+        val fn_added = _docx_rels_add_footnotes(rels)
+        rels = fn_added.rels
+    if has_ordered:
+        val num_added = _docx_rels_add_numbering(rels)
+        rels = num_added.rels
     val has_hf = header_text != "" or footer_text != ""
     var sect_pr = ""
     var header_part = ""
@@ -1280,6 +1423,10 @@ fn _document_to_docx_bytes_core(doc: RichDocument, header_text: text, footer_tex
     var overrides = "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/><Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>"
     if has_hf:
         overrides = "{overrides}<Override PartName=\"/word/header1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml\"/><Override PartName=\"/word/footer1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml\"/>"
+    if has_footnotes:
+        overrides = "{overrides}<Override PartName=\"/word/footnotes.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml\"/>"
+    if has_ordered:
+        overrides = "{overrides}<Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>"
     var default_exts = "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/>"
     if needs_wp:
         default_exts = "{default_exts}<Default Extension=\"png\" ContentType=\"image/png\"/>"
@@ -1295,6 +1442,10 @@ fn _document_to_docx_bytes_core(doc: RichDocument, header_text: text, footer_tex
     if has_hf:
         files.push(zip_text_file("word/header1.xml", header_part))
         files.push(zip_text_file("word/footer1.xml", footer_part))
+    if has_footnotes:
+        files.push(zip_text_file("word/footnotes.xml", _footnotes_xml(footnote_defs)))
+    if has_ordered:
+        files.push(zip_text_file("word/numbering.xml", _docx_numbering_xml()))
     for m in rels.media:
         files.push(m)
     zip_write_stored(files)
@@ -1302,10 +1453,12 @@ fn _document_to_docx_bytes_core(doc: RichDocument, header_text: text, footer_tex
 fn document_to_docx_bytes(doc: RichDocument) -> [u8]:
     """Build a genuine .docx: content types, rels, styles (Heading1-3 +
     ListParagraph), and word/document.xml with styled runs (w:b/w:i),
-    hyperlinks (w:hyperlink r:id + external rels), and inline PNG images
-    (w:drawing). No header/footer — see `document_to_docx_bytes_hf` — and
-    this function's output is unaffected by that feature by construction
-    (same core builder, called with header_text/footer_text both "")."""
+    hyperlinks (w:hyperlink r:id + external rels), inline PNG images
+    (w:drawing), footnotes (word/footnotes.xml + w:footnoteReference), and
+    ordered lists (word/numbering.xml + w:numPr). No header/footer — see
+    `document_to_docx_bytes_hf` — and this function's output is unaffected by
+    that feature by construction (same core builder, called with
+    header_text/footer_text both "")."""
     _document_to_docx_bytes_core(doc, "", "")
 
 fn document_to_docx_bytes_hf(doc: RichDocument, header_text: text, footer_text: text) -> [u8]:

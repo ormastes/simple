@@ -21,7 +21,7 @@ use common.office.number.{office_parse_signed_decimal_f64}
 # =========================================================================
 
 fn _span(s: text) -> TextSpan:
-    TextSpan(text: s, style: InlineStyle.Normal, link_url: "")
+    TextSpan(text: s, style: InlineStyle.Normal, link_url: "", footnote_id: "")
 
 fn _find_marker(s: text, marker: text, from: i32) -> i32:
     """Index of the next occurrence of marker at or after `from`, or -1."""
@@ -34,16 +34,31 @@ fn _find_marker(s: text, marker: text, from: i32) -> i32:
     -1
 
 fn parse_inline_spans(s: text) -> [TextSpan]:
-    """Parse markdown inline styling — **bold**, *italic*, `code`, and
-    [text](url) links — into styled spans. A link span carries style=Normal
-    plus a non-empty link_url; a leading `!` before `[` (image markdown,
-    `![alt](src)`) is left as literal text here — images stay a whole-block
-    convention handled by the html renderer / docx writer, not an inline
-    span kind. Unterminated markers/links stay literal text."""
+    """Parse markdown inline styling — **bold**, *italic*, `code`,
+    [text](url) links, and `[^id]` footnote references — into styled spans.
+    A link span carries style=Normal plus a non-empty link_url; a footnote
+    reference span carries an empty visible text plus a non-empty
+    footnote_id (there is no inline text to preserve — the marker is
+    replaced by an auto-numbered superscript on render, same idea as a link
+    carrying its url separately from its visible text). A leading `!` before
+    `[` (image markdown, `![alt](src)`) is left as literal text here — images
+    stay a whole-block convention handled by the html renderer / docx writer,
+    not an inline span kind. Unterminated markers/links/references stay
+    literal text."""
     var spans: [TextSpan] = []
     var plain = ""
     var i = 0
     while i < s.len():
+        if s.slice(i, i + 2) == "[^":
+            val close_bracket = _find_marker(s, "]", i + 2)
+            if close_bracket > i + 1:
+                if plain != "":
+                    spans.push(_span(plain))
+                    plain = ""
+                val fn_id = s.slice(i + 2, close_bracket)
+                spans.push(TextSpan(text: "", style: InlineStyle.Normal, link_url: "", footnote_id: fn_id))
+                i = close_bracket + 1
+                continue
         if s.slice(i, i + 1) == "[" and not (i > 0 and s.slice(i - 1, i) == "!"):
             val close_bracket = _find_marker(s, "]", i + 1)
             if close_bracket > i and close_bracket + 1 < s.len() and s.slice(close_bracket + 1, close_bracket + 2) == "(":
@@ -54,7 +69,7 @@ fn parse_inline_spans(s: text) -> [TextSpan]:
                         plain = ""
                     val link_text = s.slice(i + 1, close_bracket)
                     val url = s.slice(close_bracket + 2, close_paren)
-                    spans.push(TextSpan(text: link_text, style: InlineStyle.Normal, link_url: url))
+                    spans.push(TextSpan(text: link_text, style: InlineStyle.Normal, link_url: url, footnote_id: ""))
                     i = close_paren + 1
                     continue
         var marker = ""
@@ -74,7 +89,7 @@ fn parse_inline_spans(s: text) -> [TextSpan]:
                 if plain != "":
                     spans.push(_span(plain))
                     plain = ""
-                spans.push(TextSpan(text: s.slice(i + marker.len(), close), style: style, link_url: ""))
+                spans.push(TextSpan(text: s.slice(i + marker.len(), close), style: style, link_url: "", footnote_id: ""))
                 i = close + marker.len()
                 continue
         plain = "{plain}{s.slice(i, i + 1)}"
@@ -85,14 +100,53 @@ fn parse_inline_spans(s: text) -> [TextSpan]:
         spans.push(_span(""))
     spans
 
+fn _ff_is_digit(c: text) -> bool:
+    (c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or
+     c == "5" or c == "6" or c == "7" or c == "8" or c == "9")
+
+fn _ordered_marker_len(line: text) -> i32:
+    """Length of a leading `<digits>. ` ordered-list marker (e.g. "1. ",
+    "10. "), or -1 if the line doesn't start with one."""
+    var i = 0
+    while i < line.len() and _ff_is_digit(line.slice(i, i + 1)):
+        i = i + 1
+    if i == 0:
+        return -1
+    if i + 1 < line.len() and line.slice(i, i + 1) == "." and line.slice(i + 1, i + 2) == " ":
+        return i + 2
+    -1
+
+fn _footnote_def_parts(line: text) -> (is_def: bool, id: text, content: text):
+    """Match a `[^id]: note text` footnote definition line. The standard form
+    has exactly one space after the colon; that single space is consumed
+    (not part of the content) so round-tripping reproduces it exactly."""
+    if not line.starts_with("[^"):
+        return (is_def: false, id: "", content: "")
+    val close = _find_marker(line, "]", 2)
+    if close < 2:
+        return (is_def: false, id: "", content: "")
+    if close + 1 >= line.len() or line.slice(close + 1, close + 2) != ":":
+        return (is_def: false, id: "", content: "")
+    val fn_id = line.slice(2, close)
+    var rest = line.slice(close + 2, line.len())
+    if rest.starts_with(" "):
+        rest = rest.slice(1, rest.len())
+    (is_def: true, id: fn_id, content: rest)
+
 fn _md_block(line: text) -> DocBlock:
     """Classify a single non-fence, non-blank markdown line into a DocBlock."""
+    val fd = _footnote_def_parts(line)
+    if fd.is_def:
+        return DocBlock(kind: BlockKind.FootnoteDef, spans: [TextSpan(text: fd.content, style: InlineStyle.Normal, link_url: "", footnote_id: fd.id)])
     if line.starts_with("### "):
         return DocBlock(kind: BlockKind.Heading3, spans: parse_inline_spans(line.slice(4, line.len())))
     if line.starts_with("## "):
         return DocBlock(kind: BlockKind.Heading2, spans: parse_inline_spans(line.slice(3, line.len())))
     if line.starts_with("# "):
         return DocBlock(kind: BlockKind.Heading1, spans: parse_inline_spans(line.slice(2, line.len())))
+    val ordered_len = _ordered_marker_len(line)
+    if ordered_len > 0:
+        return DocBlock(kind: BlockKind.OrderedItem, spans: parse_inline_spans(line.slice(ordered_len, line.len())))
     if line.starts_with("- ") or line.starts_with("* "):
         return DocBlock(kind: BlockKind.BulletItem, spans: parse_inline_spans(line.slice(2, line.len())))
     if line.starts_with("> "):
@@ -100,8 +154,9 @@ fn _md_block(line: text) -> DocBlock:
     DocBlock(kind: BlockKind.Paragraph, spans: parse_inline_spans(line.trim()))
 
 fn parse_markdown_document(content: text, title: text) -> RichDocument:
-    """Parse a markdown subset (#/##/### headings, -/* bullets, > quote, ``` code
-    fences, paragraphs) into a RichDocument the HTML renderer can style."""
+    """Parse a markdown subset (#/##/### headings, -/* bullets, `1.` ordered
+    items, > quote, ``` code fences, `[^id]`/`[^id]: text` footnotes, and
+    paragraphs) into a RichDocument the HTML renderer can style."""
     var doc = RichDocument.new(title)
     val lines = content.split("\n")
     var in_code = false
@@ -127,6 +182,8 @@ fn parse_markdown_document(content: text, title: text) -> RichDocument:
     doc
 
 fn _span_to_markdown(span: TextSpan) -> text:
+    if span.footnote_id != "":
+        return "[^{span.footnote_id}]"
     if span.link_url != "":
         return "[{span.text}]({span.link_url})"
     match span.style:
@@ -141,25 +198,56 @@ fn _spans_to_markdown(spans: [TextSpan]) -> text:
         out = "{out}{_span_to_markdown(span)}"
     out
 
-fn _block_to_markdown(block: DocBlock) -> text:
-    val content = _spans_to_markdown(block.spans)
+fn _footnote_def_block_id(block: DocBlock) -> text:
+    if block.spans.len() > 0:
+        return block.spans[0].footnote_id
+    ""
+
+fn _block_to_markdown(block: DocBlock, ordinal: i64) -> text:
+    """Serialize one block back to its markdown line. `ordinal` is the
+    1-based position of this block within its run of consecutive
+    OrderedItem blocks (ignored by every other kind)."""
     match block.kind:
-        case Heading1: return "# {content}"
-        case Heading2: return "## {content}"
-        case Heading3: return "### {content}"
-        case BulletItem: return "- {content}"
-        case Quote: return "> {content}"
+        case Heading1: return "# {_spans_to_markdown(block.spans)}"
+        case Heading2: return "## {_spans_to_markdown(block.spans)}"
+        case Heading3: return "### {_spans_to_markdown(block.spans)}"
+        case BulletItem: return "- {_spans_to_markdown(block.spans)}"
+        case OrderedItem: return "{ordinal}. {_spans_to_markdown(block.spans)}"
+        case Quote: return "> {_spans_to_markdown(block.spans)}"
         case CodeBlock: return "```\n{spans_to_plain_text(block.spans)}\n```"
-        case Paragraph: return content
+        case Paragraph: return _spans_to_markdown(block.spans)
+        case FootnoteDef: return "[^{_footnote_def_block_id(block)}]: {spans_to_plain_text(block.spans)}"
+
+fn _md_is_tight_list_kind(kind: BlockKind) -> bool:
+    """List-like kinds that join consecutive same-kind blocks with a single
+    newline (a "tight" list/footnote-block run) instead of a blank line."""
+    kind == BlockKind.BulletItem or kind == BlockKind.OrderedItem or kind == BlockKind.FootnoteDef
 
 fn document_to_markdown(doc: RichDocument) -> text:
-    """Serialize a RichDocument back to markdown text for saving."""
+    """Serialize a RichDocument back to markdown text for saving. Consecutive
+    blocks of the same list-like kind (bullets, ordered items, footnote
+    definitions) join with a single newline (a tight run); every other
+    transition keeps a blank line between blocks, as before."""
     var out = ""
     var first = true
+    var ordinal: i64 = 0
+    var prev_kind = BlockKind.Paragraph
+    var has_prev = false
     for block in doc.blocks:
-        val line = _block_to_markdown(block)
-        out = if first: line else: "{out}\n\n{line}"
+        if block.kind == BlockKind.OrderedItem:
+            ordinal = ordinal + 1
+        else:
+            ordinal = 0
+        val line = _block_to_markdown(block, ordinal)
+        if first:
+            out = line
+        else:
+            val tight = has_prev and block.kind == prev_kind and _md_is_tight_list_kind(block.kind)
+            val sep = if tight: "\n" else: "\n\n"
+            out = "{out}{sep}{line}"
         first = false
+        has_prev = true
+        prev_kind = block.kind
     out
 
 # =========================================================================
@@ -227,10 +315,6 @@ fn _scalar_display(result: CellValue) -> text:
             return "#ERR: {message}"
         _:
             return ""
-
-fn _ff_is_digit(c: text) -> bool:
-    (c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or
-     c == "5" or c == "6" or c == "7" or c == "8" or c == "9")
 
 fn _ff_text_is_number(s: text) -> bool:
     """Whether a display string is a plain (optionally signed/decimal) number."""
