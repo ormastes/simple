@@ -5,6 +5,7 @@ set -eu
 #
 # Usage:
 #   sh scripts/check/check-lean-proofs.shs
+#   sh scripts/check/check-lean-proofs.shs --self-test
 #
 # Iterates all Lake projects under src/verification/ and the std proofs
 # project under src/compiler_rust/lib/std/src/, runs `lake build` in each,
@@ -19,6 +20,45 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-300}"
+TRUST_RE='(^|[^A-Za-z0-9_])(sorry|admit)($|[^A-Za-z0-9_])|^[[:space:]]*(axiom|constant|opaque|unsafe|set_option[[:space:]]+autoImplicit[[:space:]]+true|set_option[[:space:]]+maxHeartbeats[[:space:]]+0)\b'
+
+pass()  { printf '  PASS  %s\n' "$1"; }
+fail()  { printf '  FAIL  %s  --  %s\n' "$1" "$2"; }
+info()  { printf '  ...   %s\n' "$1"; }
+
+OVERALL=0
+
+count_trust_hits() {
+    proj_dir="$1"
+    find "$proj_dir" -name '*.lean' -not -path '*/.lake/*' 2>/dev/null \
+        -exec sed 's/--.*//' {} + 2>/dev/null \
+        | grep -Eh "$TRUST_RE" \
+        | grep -cv 'without .sorry.\|zero sorry\|no sorry\|No sorry' || true
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    tmp="${TMPDIR:-/tmp}/lean-proof-check-selftest.$$"
+    rm -rf "$tmp"
+    mkdir -p "$tmp"
+    {
+        echo 'theorem ok : True := by'
+        echo '  exact True.intro'
+        echo 'theorem badSorry : True := by'
+        echo '  exact (by sorry)'
+        echo 'theorem badAdmit : True := by'
+        echo '  exact admit,'
+        echo 'axiom trustedFact : True'
+        echo '-- sorry in a comment is ignored'
+    } >"$tmp/SelfTest.lean"
+    hits="$(count_trust_hits "$tmp")"
+    rm -rf "$tmp"
+    if [ "$hits" = 3 ]; then
+        echo "STATUS: PASS lean-proof-check self-test"
+        exit 0
+    fi
+    echo "STATUS: FAIL lean-proof-check self-test expected=3 actual=$hits" >&2
+    exit 1
+fi
 
 # Detect lake binary
 if [ -n "${LAKE_BIN:-}" ]; then
@@ -31,12 +71,6 @@ else
     printf 'error: lake not found; install via elan or set LAKE_BIN\n' >&2
     exit 1
 fi
-
-pass()  { printf '  PASS  %s\n' "$1"; }
-fail()  { printf '  FAIL  %s  --  %s\n' "$1" "$2"; }
-info()  { printf '  ...   %s\n' "$1"; }
-
-OVERALL=0
 
 # Check a single lake project directory.
 # Prints PASS, FAIL, or TIMEOUT and sets OVERALL=1 on any non-pass result.
@@ -69,11 +103,7 @@ check_project() {
     # Grep for real proof-trust bypasses: whole project tree (srcDir varies per
     # project), excluding the .lake build dir, comment lines, and doc-text
     # mentions like "without sorry".
-    trust_hits=$(find "$proj_dir" -name '*.lean' -not -path '*/.lake/*' 2>/dev/null \
-        -exec grep -Eh '(^|[[:space:]])(sorry|admit)($|[[:space:]])|^[[:space:]]*(axiom|constant|opaque|unsafe|set_option[[:space:]]+autoImplicit[[:space:]]+true|set_option[[:space:]]+maxHeartbeats[[:space:]]+0)\b' {} + 2>/dev/null \
-        | grep -v '^\s*--' \
-        | grep -v -- '--.*sorry' \
-        | grep -cv 'without .sorry.\|zero sorry\|no sorry\|No sorry' || true)
+    trust_hits=$(count_trust_hits "$proj_dir")
 
     if [ "${trust_hits:-0}" -gt 0 ]; then
         fail "$label" "contains $trust_hits proof trust bypass(es) outside comments"
