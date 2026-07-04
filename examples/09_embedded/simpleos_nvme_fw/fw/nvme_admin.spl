@@ -227,6 +227,8 @@ impl AdminQueue:
         me.sq_len
 
     me fetch() -> AdminCmd:
+        if me.sq_len == 0:
+            return admin_cmd_make(0, SC_INVALID_OPCODE, 0, 0, 0, 0)
         val h: i64 = me.sq_head
         val cid:   i64 = me.sq_cid[h]
         val op:    i64 = me.sq_op[h]
@@ -253,6 +255,8 @@ impl AdminQueue:
         me.cq_len
 
     me cq_reap() -> NvmeCpl:
+        if me.cq_len == 0:
+            return cpl_make(0, SC_INVALID_FIELD, 0)
         val h: i64 = me.cq_head
         val cid:    i64 = me.cq_cid[h]
         val status: i64 = me.cq_status[h]
@@ -302,10 +306,16 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(af.opcode, ADMIN_SET_FEATURES, "admin fetch opcode")
     fail = fail + expect_eq(admin_fid(af.cdw10), FEAT_TEMP_THRESH, "admin fetch fid")
     fail = fail + expect_eq(af.cdw11, 311, "admin fetch value dword")
+    val empty_af: AdminCmd = aq.fetch()
+    fail = fail + expect_eq(empty_af.opcode, SC_INVALID_OPCODE, "empty admin fetch returns invalid opcode")
+    fail = fail + expect_eq(aq.pending(), 0, "empty admin fetch leaves pending count unchanged")
     aq.cq_post(cpl_make(21, SC_SUCCESS, 0))
     fail = fail + expect_eq(aq.cq_pending(), 1, "admin CQ pending == 1")
     val ar: NvmeCpl = aq.cq_reap()
     fail = fail + expect_eq(ar.cid, 21, "admin completion cid round-trips")
+    val empty_ar: NvmeCpl = aq.cq_reap()
+    fail = fail + expect_eq(empty_ar.status, SC_INVALID_FIELD, "empty admin completion reap fails closed")
+    fail = fail + expect_eq(aq.cq_pending(), 0, "empty admin completion reap leaves pending count unchanged")
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(70000, FEAT_TEMP_THRESH, 1))), 0, "admin rejects oversized cid")
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(-1, FEAT_TEMP_THRESH, 1))), 0, "admin rejects negative cid")
 
