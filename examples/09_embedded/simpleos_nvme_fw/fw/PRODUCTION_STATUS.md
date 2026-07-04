@@ -15,9 +15,9 @@ silicon. The simulation boundary is deliberate and unchanged:
   RAID/RAIN cross-channel XOR-parity rebuild with no logical data loss (P8).
 - Out of scope (silicon-only — tracked, not built here): real BCH/Reed–Solomon hardware ECC,
   real register MMIO / PCIe transport, a persistent backing store, and multi-channel NAND
-  timing. The bare-metal **rv32** no-alloc port is **written + host-verified**, but its rv32 LLVM
-  native build is **build-blocked in this environment** (silent exit 255, no ELF, boot not observed —
-  `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`; see also `BUILD_STATUS.md`).
+  timing. The bare-metal **rv32** RAIN self-test/reference is written + host-verified, and the rv32
+  OS boot path is restored in the current lane, but the full 22-module no-alloc firmware port is
+  not wired into that boot path yet (see also `BUILD_STATUS.md`).
 
 ## Acceptance bar (the goal is met when every box is checked) — ✅ MET
 
@@ -97,17 +97,14 @@ controller/FTL**; P2 is still a timing floor because a single-threaded sim canno
 channel-level parallelism; **P3 has a wired SECDED payload-window stored-ECC simulation floor** (not full BCH/LDPC); **P4 has a
 wired segmented-PRP host-byte floor** (not full HostMem/SGL/IOMMU); **P5 has a wired bounded-map-cache
 and fixed arena/free-list floor** (not a full DRAM subsystem); **P6 has a wired cooperative-owner floor** (not
-multicore/preemptive); and **P9** (rv32 native build) is **build-blocked**
-(see the silicon boundary below).
+multicore/preemptive); and **P9** has a host-verified rv32 RAIN reference while the full no-alloc
+firmware port remains pending (see the silicon boundary below).
 
 **Silicon boundary (unchanged).** Real BCH/Reed–Solomon/LDPC hardware ECC (the sim keeps a
 stored SECDED payload-window ECC + injected-bit-error model), real register MMIO / PCIe transport, full PRP/SGL DMA,
-real DRAM refresh/ECC/bandwidth, true multicore/preemptive concurrency, a persistent backing store, and multi-channel NAND timing remain out of scope; the bare-metal **rv32** no-alloc port is
-**written + host-verified but build-blocked in this environment** — its rv32 LLVM native build exits
-255 silently with no ELF and the boot was not observed (bug filed:
-`doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`; `BUILD_STATUS.md`), so it
-is not merely deferred. "Production level" here = production-grade *logic and NVMe protocol
-compliance, simulation-validated*.
+real DRAM refresh/ECC/bandwidth, true multicore/preemptive concurrency, a persistent backing store, and multi-channel NAND timing remain out of scope; the bare-metal **rv32** RAIN reference is
+written + host-verified, but the full no-alloc firmware port has not been wired into rv32 boot yet.
+"Production level" here = production-grade *logic and NVMe protocol compliance, simulation-validated*.
 
 **Policy-hook sandbox boundary (req 7).** The real silicon trust boundary for dynamically loaded
 policy code is cryptographic module signing + a static verifier; in-sim the boundary is the

@@ -594,12 +594,36 @@ expect(out).to_contain("LEAN_OK")
 
 </details>
 
+### NVMe firmware: production documentation hygiene
+
+Production-facing firmware docs must not carry unresolved merge conflict markers.
+
+#### has no conflict markers in the firmware status docs
+
+- Scan the production-facing firmware docs for unresolved conflict markers
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Scan the production-facing firmware docs for unresolved conflict markers")
+val (out, err, code) = _shell("! rg -n '<<<<<<<|=======|>>>>>>>' examples/09_embedded/simpleos_nvme_fw/fw/README.md examples/09_embedded/simpleos_nvme_fw/fw/BUILD_STATUS.md examples/09_embedded/simpleos_nvme_fw/fw/PRODUCTION_STATUS.md doc/03_plan/hardware/nvme_fw_gap_closure_plan.md")
+expect(code).to_equal(0)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

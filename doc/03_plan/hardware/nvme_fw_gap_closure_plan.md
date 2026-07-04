@@ -52,16 +52,9 @@ the firmware":
 | P5 | `ftl_map` + `dram` | `Ftl` uses bounded LRU write-back cache; HIL/controller writes allocate a bounded DRAM arena span before programming media | **wired DRAM floor** — no full DRAM subsystem yet |
 | P6 | `firmware.service_tick` | Foreground HIL ticks and background GC ticks share an explicit FTL-map owner token | **wired cooperative floor** — no multicore/preemption |
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
-<<<<<<< Conflict 1 of 1
-%%%%%%% Changes from base to side #1
--| P8 | `rain` | `ftl` (`rain_seal` / `rain_recover_channel`: a failed channel is rebuilt inside the live FTL, verified end-to-end through the normal read path) | **wired** |
-+| P8 | `rain` | `ftl` (writes/GC/format maintain parity; `rain_recover_channel` rebuilds a failed channel inside the live FTL, verified end-to-end through the normal read path) | **wired** |
- | P2 | `fil_scheduler` | `fil.spl` (every valid program/read/erase queues the target block through the scheduler before the FMC command) | **wired timing floor** — channel-level parallelism is still a model the single-threaded sim cannot physically exhibit |
-+++++++ Contents of side #2
-| P8 | `rain` | `ftl` (`rain_seal` / `rain_recover_channel`: a failed channel is rebuilt inside the live FTL, verified end-to-end through the normal read path) | **wired** |
-| P2 | `fil_scheduler` | none (the host-runnable sim executes ops synchronously — channel-level parallelism is a model the single-threaded sim cannot itself exhibit) | shelf — verified model, not load-bearing |
->>>>>>> Conflict 1 of 1 ends
-| P9 | `fw_rv32/entry.spl` | bare-metal rv32 ISA (re-expresses the RAIN reconstruct array-free; `check`-clean + host-verified) | started — **build-blocked (environmental)**: rv32 LLVM native-build broken here (proven OS recipe also exits 255); boot not observed |
+| P8 | `rain` | `ftl` (writes/GC/format maintain parity; `rain_recover_channel` rebuilds a failed channel inside the live FTL, verified end-to-end through the normal read path) | **wired** |
+| P2 | `fil_scheduler` | `fil.spl` (every valid program/read/erase queues the target block through the scheduler before the FMC command) | **wired timing floor** — channel-level parallelism is still a model the single-threaded sim cannot physically exhibit |
+| P9 | `fw_rv32/entry.spl` | bare-metal rv32 ISA reference (re-expresses the RAIN reconstruct array-free; `check`-clean + host-verified) | reference done; rv32 OS boot path restored; full 22-module no-alloc firmware port remains the ceiling |
 
 Adding more standalone modules (full P4 HostMem/PRP lists, full P5 DRAM refresh/ECC/bandwidth, multicore P6 beyond the cooperative token, or full BCH/LDPC beyond the P3 floor) widens the shelf without closing the gap. Prefer
 wiring an existing verified module into the live path over landing a new disconnected one.
@@ -324,25 +317,14 @@ on an injected die/channel failure, reconstruct the lost page from the survivors
 **Silicon ceiling.** Real die/plane failure modes (partial-page, RBER drift) are modeled as
 whole-unit erasure.
 
-## P9 — Bare-metal rv32 no-alloc port  *(G9)*  — ⛔ STARTED, BUILD-BLOCKED (2026-06-30)
+## P9 — Bare-metal rv32 no-alloc port  *(G9)*  — ◐ REFERENCE DONE; FULL PORT REMAINS
 
-> **Status (2026-06-30) — build-blocked, ENVIRONMENTAL.** The on-device self-test source is
-> written, `check`-clean, and host-verified:
-> `examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl` re-expresses the Lean-proven RAIN
-> reconstruct + a channel-failure rebuild **array-free with scalars** (no heap, no arrays — per
-> `boot.spl`'s documented first-stage constraint), printing `ALL RV32 NVME FW CHECKS PASS` via
-> `rt_riscv_uart_put` byte-by-byte like `boot.spl`. It exposes `nvme_fw_rv32_selftest()` to be
-> called from `boot.spl` `boot_main`; `build.shs`/`boot.shs` carry the recipes. The QEMU rv32 boot
-> path is verified here (the prebuilt `build/os/simpleos_riscv32.elf` boots under `-bios none` and
-> prints on-device `PMM OK`/`HEAP OK`/`SVC OK`). **But** `native-build --backend llvm
-> --target riscv32-unknown-none` exits **255 with no diagnostic — including the proven full-OS
-> recipe** (verified by running it), producing no ELF. So this is **environmental** (the rv32 LLVM
-> backend is broken in this host; the prebuilt ELF is stale), not a firmware-logic or
-> entry-specific gap, and the **boot is not observed → P9 is NOT done**. Blocker:
-> `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`. Next, once the rv32
-> toolchain is restored: wire the call into `boot_main`, run `build.shs` → `boot.shs`, confirm the
-> marker, add a fail-closed QEMU system test. The full 22-module no-alloc port
-> (`ftl_fill`/dict-map/journal-ring → fixed-capacity) remains the larger ceiling.
+> **Status (2026-07-04).** The rv32 toolchain/OS boot blocker has been reduced: the rv32 OS boot
+> path builds/boots in the current lane, and `examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl`
+> is a `check`-clean, host-verified, array-free scalar reference for the Lean-proven RAIN
+> reconstruction. That is useful P9 evidence, not the full firmware port. The full 22-module
+> no-alloc firmware (`ftl_fill`/dict-map/journal-ring -> fixed-capacity) still has to be wired into
+> the rv32 boot path and observed printing `ALL RV32 NVME FW CHECKS PASS` before P9 is complete.
 
 **Goal.** Port the FTL/HIL/FIL to `nogc_async_mut_noalloc` (no heap, fixed arrays, no `.push`)
 and boot on `qemu-system-riscv32 -bios none`, joining the existing C NAND demo that already
