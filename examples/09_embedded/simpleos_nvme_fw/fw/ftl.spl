@@ -74,7 +74,7 @@ impl Ftl:
         if ppn == UNMAP:
             return 0
         val blk: i64 = ppn_block(ppn)
-        me.rd_disturb[blk] = me.rd_disturb[blk] + 1
+        me.bump_read_disturb(blk)
         val rd: FilRead = me.fil.read(ppn)
         rd.data
 
@@ -225,6 +225,18 @@ impl Ftl:
 
     me bad_blocks() -> i64:
         me.fil.bad_count()
+
+    me read_disturb_count(blk: i64) -> i64:
+        if not block_in_range(blk):
+            return 0
+        if me.rd_disturb[blk] < 0:
+            return 0
+        me.rd_disturb[blk]
+
+    me bump_read_disturb(blk: i64):
+        if not block_in_range(blk):
+            return
+        me.rd_disturb[blk] = me.read_disturb_count(blk) + 1
 
     # test hook: inject NAND read bit-errors at a physical page (forwarded to FIL).
     me inject_read_bitflip(ppn: i64, n: i64):
@@ -450,7 +462,7 @@ impl Ftl:
         var blk: i64 = 0
         while blk < NUM_BLOCKS:
             if me.band.block_state(blk) == BLK_CLOSED:
-                if me.band.valid_count(blk) > 0 and me.rd_disturb[blk] > READ_DISTURB_THRESHOLD:
+                if me.band.valid_count(blk) > 0 and me.read_disturb_count(blk) > READ_DISTURB_THRESHOLD:
                     if target == UNMAP:
                         target = blk
             blk = blk + 1
@@ -476,6 +488,11 @@ fn ftl_selftest() -> i64:
     fail = fail + expect_eq(ftl.trim(LBA_COUNT), SC_LBA_RANGE, "out-of-range FTL trim rejected")
     fail = fail + expect_eq(ftl.read(10), 0xAB, "read lba10")
     fail = fail + expect_eq(ftl.read(20), 0xCD, "read lba20")
+    val blk10: i64 = ftl.physical_block(10)
+    ftl.rd_disturb[blk10] = -11
+    fail = fail + expect_eq(ftl.read_disturb_count(blk10), 0, "corrupted negative read-disturb clamps to zero")
+    fail = fail + expect_eq(ftl.read(10), 0xAB, "read after corrupted read-disturb counter")
+    fail = fail + expect_eq(ftl.read_disturb_count(blk10), 1, "read-disturb resumes from zero after corruption")
     ftl.write(10, 0x99)
     fail = fail + expect_eq(ftl.read(10), 0x99, "overwrite lba10 (newest wins)")
 
