@@ -28,8 +28,10 @@ fn cmd_validate(c: NvmeCmd) -> i64:
     val known: bool = c.opcode == OP_FLUSH or c.opcode == OP_WRITE or c.opcode == OP_READ or c.opcode == OP_DSM_TRIM
     if not known:
         return SC_INVALID_OPCODE
-    # Flush carries nblocks=0 by spec and addresses no LBA range — pass unconditionally.
+    # Flush addresses no LBA range; reject host-supplied payload fields.
     if c.opcode == OP_FLUSH:
+        if c.lba != 0 or c.nblocks != 0 or c.data != 0:
+            return SC_INVALID_FIELD
         return SC_SUCCESS
     if c.lba < 0:
         return SC_LBA_RANGE
@@ -119,6 +121,8 @@ fn hil_command_selftest() -> i64:
     # --- flush nblocks=0 -> SC_SUCCESS ---
     val fl: NvmeCmd = cmd_make(13, OP_FLUSH, 0, 0, 0)
     failures = failures + expect_eq(cmd_validate(fl), SC_SUCCESS, "validate flush nblocks=0")
+    val badfl: NvmeCmd = cmd_make(18, OP_FLUSH, 7, 1, 9)
+    failures = failures + expect_eq(cmd_validate(badfl), SC_INVALID_FIELD, "validate malformed flush fields")
 
     # --- unknown opcode -> SC_INVALID_OPCODE (not silently accepted / SC_INTERNAL) ---
     val unk: NvmeCmd = cmd_make(14, 0x7F, 0, 1, 0)
