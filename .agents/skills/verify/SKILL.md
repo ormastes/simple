@@ -130,7 +130,9 @@ not create, rewrite, or weaken SPipe after verification.
     readiness is not release completion while that gate reports blocked or
     failed. If blocked, run
     `sh scripts/check/check-simpleos-mission-critical-prereqs.shs` for the host
-    dependency list.
+    dependency list and
+    `sh scripts/setup/setup-simpleos-formal-env.shs --print-install` for setup
+    commands.
 - Core/MCP regression gate for compiler/core/lib or MCP/LSP changes:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`

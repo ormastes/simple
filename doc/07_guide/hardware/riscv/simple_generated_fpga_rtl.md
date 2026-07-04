@@ -89,6 +89,7 @@ For host setup triage, run:
 
 ```bash
 sh scripts/check/check-simpleos-mission-critical-prereqs.shs
+sh scripts/setup/setup-simpleos-formal-env.shs --print-install
 ```
 stop protecting the normal sidecar contract.
 

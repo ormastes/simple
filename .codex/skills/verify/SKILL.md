@@ -157,7 +157,9 @@ Scan for stub patterns — any match is a **FAIL**:
   matrix readiness pass is not release completion while that gate reports
   blocked or failed. If blocked, run
   `sh scripts/check/check-simpleos-mission-critical-prereqs.shs` for the host
-  dependency list.
+  dependency list and
+  `sh scripts/setup/setup-simpleos-formal-env.shs --print-install` for setup
+  commands.
 - **GUI/MDI evidence gates:** wrappers that claim live visual/event proof must
   fail when requested evidence is unavailable, times out, or only proves file
   existence. For Electron, Tauri mobile/iOS, hosted WM, QEMU/GTK WM, and pure WM
