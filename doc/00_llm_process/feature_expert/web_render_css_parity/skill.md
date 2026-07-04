@@ -132,3 +132,28 @@ links and residual metrics here BEFORE committing, so the next agent starts from
 the current measured state.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
+
+## 2026-07-05: window fixture 97.11% — the ceiling was a byte/char slice bug
+
+- **Always suspect infrastructure before compositing math.** The documented
+  54-58% "flat ceiling" was an artifact: one multi-byte char (`content: '✓'`)
+  shifted every char-indexed `substring` slice after it in `extract_css`'s
+  byte-offset scanner, killing ~1400/1595 rules (all WM chrome + every @media
+  block). Byte scanners in this renderer must mirror byte positions with char
+  positions (continuation bytes 128..191 don't advance the char counter); see
+  `_cb_chars_between` and the chp mirror in `extract_css_vw`.
+- `extract_css_vw(html, viewport_w)` evaluates @media (min/max-width; unknown
+  feature terms fail closed, matching Chrome headless). The mobile
+  `@media (max-width: 599px)` block is load-bearing for 320px fixtures.
+- Interaction pseudo-classes (`:hover`, `:disabled`, ...) must never match in
+  a static render — `_is_interaction_state_pseudo` in `simple_match`.
+- Soft shadows: `fb_soft_box_shadow` uses per-axis gaussian CDF (`_phi256`,
+  sigma=blur/2) — the exact separable model for a gaussian-blurred rect.
+- Body radial tints: `Style.bg_layers_raw` + `fb_background_radial_stack_clip`.
+- Iteration loop: seed `gui/debug/simple` + traced entry
+  (`simple_web_layout_render_html_software_pixels_traced` prints per-stage ms)
+  + PPM dump (JSON pixel dumps via interpreted StringBuilder are O(n^2)-slow);
+  compare against saved Chrome ARGB with scratchpad an3.js. Full loop ~2.5 min.
+- Minimal-doc bisect beats full-sheet debugging — but slice whole top-level
+  blocks; truncated CSS chunks swallow appended probe rules (depth desync)
+  and produce false positives.

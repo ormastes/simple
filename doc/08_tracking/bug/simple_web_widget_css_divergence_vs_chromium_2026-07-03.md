@@ -300,3 +300,58 @@ implement->render->measure loop practical (minutes, not an hour).
   and discarded). Painting radials needs either a new `Style` field carrying the
   radial spec (the giant `Style(...)` constructor at ~3 sites must stay
   field-consistent) or a re-parse of the body decls in `paint`.
+
+## Addendum 6 (2026-07-05): ROOT CAUSE FOUND — the "flat ceiling" was measured on a corrupted cascade; window fixture now 97.11%
+
+The entire ceiling analysis above is SUPERSEDED. The dominant divergence was a
+single byte/char indexing bug, not a missing-compositor ceiling:
+
+- **UTF-8 slice corruption killed 1400+ of the sheet's 1595 rules.**
+  `extract_css`'s single-pass scanner tracks BYTE offsets in `css.bytes()` but
+  slices rules with the CHAR-indexed `text.substring`. The widget sheet contains
+  one multi-byte char — `content: '✓'` in `.widget-checkbox.checked
+  .check-box::after` (block ~176/1595) — so every selector/decl slice after it
+  was shifted by 2 chars: selectors like `#wm-desktop` became `m-desktop {`,
+  and effectively ALL later rules (statusbar, menubar, WM chrome, and every
+  `@media` block) silently never matched. FIX: the scanner now mirrors byte
+  positions with char positions (continuation bytes 128..191 do not advance
+  the char counter); `_css_collect_custom_props` got the same treatment via
+  `_cb_chars_between`.
+- **@media was structurally unsupported** (inner rules of every media block
+  emitted unconditionally pre-corruption; conditions never evaluated). FIX:
+  `extract_css_vw(html, viewport_w)` evaluates `@media` preludes —
+  min-width/max-width against the viewport, comma groups OR, unknown feature
+  terms (prefers-*, forced-colors) fail their group, matching Chrome headless
+  defaults. The mobile block `@media (max-width: 599px) { #app { padding: 14px
+  12px } ... }` is what puts the panel at (12,14) in Chrome — this was the
+  documented 8px/2px/6px "band offset", now reproduced. Legacy `extract_css`
+  (no viewport) keeps every block active.
+- **Interaction pseudo-classes matched everything.** `:hover`, `:disabled`,
+  `[disabled]`-adjacent `:disabled` etc. fell through the structural-pseudo
+  pass-through in `simple_match`, so `.widget-button:disabled { opacity: 0.4 }`
+  washed every accent button ~40% toward white (the "accent over-white ~2x"
+  finding — NOT the inset shadow as hypothesized). FIX:
+  `_is_interaction_state_pseudo` rejects hover/active/focus*/visited/target/
+  checked/placeholder-shown/autofill, and `:disabled` honors a real disabled
+  attribute.
+- **Soft shadow profile**: `fb_soft_box_shadow`'s linear edge ramp over-darkened
+  the halo (top band read ~10-15 too dark). FIX: per-axis gaussian-CDF profiles
+  (`_phi256` piecewise-linear Phi, sigma = blur/2, per-axis LUT precomputed per
+  call) — exact separable model for gaussian-blurred rects.
+- **Body radial-gradient page tint** now painted: new `Style.bg_layers_raw`
+  carries a radial-bearing `background` stack; `fb_background_radial_stack_clip`
+  paints back-to-front radial layers (linear falloff to the `transparent N%`
+  stop of the farthest-corner radius) over the linear base ramp, gated to the
+  widget-page body path (`skip_widget_page_bg`).
+- **Legacy focused-line overpaint** (`has_focused_class` 1px accent bar) now
+  gated on "no CSS background parsed" like the other legacy chrome overpaints.
+
+Measured (fresh Chrome/Electron ground truth, same comparator, tol 8, no blur):
+window 320x200 non-text agreement Simple/Chrome = **97.11%** (was 50-62%;
+threshold 80%). Chrome/Electron sanity 99.96%. Node bitmap lane bit-exact
+(mismatch_count=0) throughout. Remaining residuals: button top row off-by-one
+(y171, ~230 px), scattered AA edges.
+
+Also restored the gate-required capture tools deleted by a concurrent commit
+(c8dbb4df4f): tools/chrome-live-bitmap/, tools/electron-live-bitmap/,
+tools/node-render-bitmap/ — now committed so the sweep cannot delete them again.
