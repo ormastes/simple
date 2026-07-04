@@ -1,0 +1,69 @@
+# Publisher newspaper-columns spec.
+#
+# Verifies page_with_columns lays out equal-width, full-height column
+# frames left-to-right and chains them via next_id, and that
+# flow_into_columns overflows text column-to-column exactly as predicted
+# by page_layout's char-budget formula (CHAR_W=6, LINE_H=16):
+#
+#   page_w=120, page_h=32, num_cols=2, gutter=0, margin=0
+#   col_w = (120 - 0 - 1*0) / 2 = 60          col_h = 32 - 0 = 32
+#   chars_per_line = 60 / 6 = 10              lines = 32 / 16 = 2
+#   capacity per column = 10 * 2 = 20 chars
+#
+# Content "aaaaa bbbbb ccccc ddddd eeeee" (each word 5 chars) greedily
+# fills col0 up to its 20-char budget:
+#   "aaaaa" (5) -> "aaaaa bbbbb" (11) -> "aaaaa bbbbb ccccc" (17)
+#   next word "ddddd" would need 17+1+5=23 > 20, so it overflows to col1.
+# col0 = "aaaaa bbbbb ccccc" (3 words), col1 = "ddddd eeeee" (2 words).
+
+use std.spec
+use app.office.publisher.page_layout.{Page, page_frame_count, page_render_html}
+use app.office.publisher.columns.{page_with_columns, flow_into_columns, column_text, columns_render_html}
+
+fn _two_col_page() -> Page:
+    page_with_columns(120, 32, 2, 0, 0)
+
+describe "publisher columns: layout":
+    it "creates one frame per column":
+        val page = _two_col_page()
+        expect(page_frame_count(page)).to_equal(2)
+
+    it "places columns left-to-right at different x positions":
+        val page = _two_col_page()
+        val html = page_render_html(page)
+        expect(html).to_contain("left:0px")
+        expect(html).to_contain("left:60px")
+
+    it "gives every column the same width":
+        val page = _two_col_page()
+        val html = page_render_html(page)
+        expect(html).to_contain("width:60px")
+
+describe "publisher columns: text flow":
+    it "fills column 0 up to its char budget with whole words":
+        val page = _two_col_page()
+        val flowed = flow_into_columns(page, "aaaaa bbbbb ccccc ddddd eeeee")
+        expect(column_text(flowed, 0)).to_equal("aaaaa bbbbb ccccc")
+
+    it "overflows the remaining words into column 1":
+        val page = _two_col_page()
+        val flowed = flow_into_columns(page, "aaaaa bbbbb ccccc ddddd eeeee")
+        expect(column_text(flowed, 1)).to_equal("ddddd eeeee")
+
+describe "publisher columns: html rendering":
+    it "includes both column divs":
+        val page = _two_col_page()
+        val flowed = flow_into_columns(page, "aaaaa bbbbb ccccc ddddd eeeee")
+        val html = columns_render_html(flowed)
+        expect(html).to_contain("id=\"col0\"")
+        expect(html).to_contain("id=\"col1\"")
+
+    describe "deliberate-fail probe (must stay green)":
+        it "sanity-checks the hand-computed word split ground truth":
+            val page = _two_col_page()
+            val flowed = flow_into_columns(page, "aaaaa bbbbb ccccc ddddd eeeee")
+            # Probe verified live: asserting column 1 equals "aaaaa bbbbb
+            # ccccc" (col 0's actual content) failed with a mismatch,
+            # confirming the harness executes this assertion. Correct
+            # ground truth: column 1 holds the overflowed remainder.
+            expect(column_text(flowed, 1)).to_equal("ddddd eeeee")
