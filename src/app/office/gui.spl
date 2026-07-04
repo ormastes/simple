@@ -37,8 +37,8 @@ use common.ui.builder.{column, row, table_widget, build_tree_with_title, text_wi
 use app.ui.render.html_widgets.{render_html_tree}
 use app.office.counter.{CounterApp}
 use app.office.sheets.spreadsheet.{Sheet}
-use app.office.sheets.cell.{cell_display_text, col_to_letter, parse_cell_ref, cell_ref_to_string, CellRef}
-use app.office.sheets.cell_ref.{offset_ref}
+use app.office.sheets.cell.{cell_display_text, col_to_letter, parse_cell_ref, cell_ref_to_string, CellRef, letter_to_col}
+use app.office.sheets.cell_ref.{offset_ref, parse_range}
 use app.office.sheets.chart.{ChartSeries, chart_series_from_ranges}
 use app.office.sheets.pivot.{pivot_build}
 use app.office.file_formats.{recalculate_formula_cells}
@@ -442,6 +442,158 @@ fn office_gui_pivot_pixels(view: PivotGuiView) -> [u32]:
     val body = render_html_tree(view.tree.root_node(), state)
     val html = "<html><head><style>" + office_gui_sheet_minimal_css() + "</style></head><body>" + body + "</body></html>"
     simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
+
+# ---------------------------------------------------------------------------
+# Pivot GUI session (PIVOT-TABLE INTERACTIVITY): mirrors SheetGuiSession's
+# session pattern below -- a small value-type struct plus copy-return op
+# functions -- over pivot_gui_view/pivot_build instead of the sheet grid.
+# No render duplication: pivot_session_view is a thin wrapper that forwards
+# the session's fields straight to the existing pivot_gui_view (see that
+# function's docstring above for the render/text_dump contract this reuses
+# unchanged).
+# ---------------------------------------------------------------------------
+
+struct PivotGuiSession:
+    sheet: Sheet
+    data_range: text
+    row_field_col: i32
+    col_field_col: i32
+    value_col: i32
+    agg_name: text
+    title: text
+    last_error: text   # "" = no error; else the reason the last op left the session unchanged
+
+fn pivot_session_new(sheet: Sheet, data_range: text, row_field_col: i32, col_field_col: i32, value_col: i32, agg_name: text, title: text) -> PivotGuiSession:
+    """Start a pivot GUI session over `sheet` with the given data_range/
+    row_field_col/col_field_col/value_col/agg_name/title -- same parameter
+    order and meaning as pivot_gui_view's own arguments (see that function's
+    docstring), so an existing pivot_gui_view call site can be lifted into a
+    session with no reinterpretation of any argument."""
+    PivotGuiSession(sheet: sheet, data_range: data_range, row_field_col: row_field_col, col_field_col: col_field_col, value_col: value_col, agg_name: agg_name, title: title, last_error: "")
+
+fn pivot_session_view(session: PivotGuiSession) -> PivotGuiView:
+    """Render the session's current state -- forwards straight to
+    pivot_gui_view (no reimplementation of the grouping/aggregation/render
+    logic here, the exact same engine-reuse discipline pivot_gui_view
+    itself follows for pivot_build)."""
+    pivot_gui_view(session.sheet, session.data_range, session.row_field_col, session.col_field_col, session.value_col, session.agg_name, session.title)
+
+fn pivot_session_set_agg(session: PivotGuiSession, agg: text) -> PivotGuiSession:
+    """Change the session's aggregation to `agg` (sum/count/average/min/max,
+    case-insensitive -- same validity list as pivot_gui_view/pivot_build's
+    own agg-name check, mirrored here by _pivot_gui_agg_is_valid above). An
+    invalid `agg` name leaves the session UNCHANGED (agg_name untouched)
+    except for `last_error`, set to "unknown-agg" -- documented fail-closed,
+    mirrors pivot_gui_view's own "error|unknown-agg" dump line rather than
+    crashing or silently substituting a default. A valid `agg` clears
+    last_error back to "". Returns a NEW session (copy semantics) -- callers
+    must reassign."""
+    val agg_lower = agg.lower()
+    if not _pivot_gui_agg_is_valid(agg_lower):
+        return PivotGuiSession(sheet: session.sheet, data_range: session.data_range, row_field_col: session.row_field_col, col_field_col: session.col_field_col, value_col: session.value_col, agg_name: session.agg_name, title: session.title, last_error: "unknown-agg")
+    PivotGuiSession(sheet: session.sheet, data_range: session.data_range, row_field_col: session.row_field_col, col_field_col: session.col_field_col, value_col: session.value_col, agg_name: agg, title: session.title, last_error: "")
+
+fn pivot_session_swap_fields(session: PivotGuiSession) -> PivotGuiSession:
+    """Transpose the pivot: row_field_col and col_field_col trade places, so
+    the next pivot_session_view renders with the old column-keys as the new
+    row keys and vice versa (the engine's own row/col cross-tab, just fed
+    swapped field indices -- see pivot_build's row_key_col/col_key_col
+    parameters). Swapping a 1D pivot (col_field_col == -1, no cross-tab
+    field to swap in) leaves the session UNCHANGED except for last_error,
+    set to "no-col-field" -- documented fail-closed rather than producing an
+    invalid row_field_col == -1 that pivot_build would reject outright.
+    Returns a NEW session (copy semantics) -- callers must reassign."""
+    if session.col_field_col == -1:
+        return PivotGuiSession(sheet: session.sheet, data_range: session.data_range, row_field_col: session.row_field_col, col_field_col: session.col_field_col, value_col: session.value_col, agg_name: session.agg_name, title: session.title, last_error: "no-col-field")
+    PivotGuiSession(sheet: session.sheet, data_range: session.data_range, row_field_col: session.col_field_col, col_field_col: session.row_field_col, value_col: session.value_col, agg_name: session.agg_name, title: session.title, last_error: "")
+
+fn pivot_session_set_value_col(session: PivotGuiSession, col_letter: text) -> PivotGuiSession:
+    """Change the session's value column to `col_letter`'s (e.g. "C")
+    ABSOLUTE sheet column, converted to the 0-based-WITHIN-data_range index
+    pivot_build's value_col parameter expects (column 0 = data_range's
+    leftmost column -- see pivot_build's docstring above sheets/pivot.spl).
+    An unparseable data_range, or a `col_letter` left of the range's own
+    leftmost column, leaves the session UNCHANGED except for last_error
+    ("empty-range" / "bad-col" respectively) -- documented fail-closed, same
+    discipline as pivot_session_set_agg above. Returns a NEW session (copy
+    semantics) -- callers must reassign."""
+    val range_val = parse_range(session.data_range)
+    if range_val == nil:
+        return PivotGuiSession(sheet: session.sheet, data_range: session.data_range, row_field_col: session.row_field_col, col_field_col: session.col_field_col, value_col: session.value_col, agg_name: session.agg_name, title: session.title, last_error: "empty-range")
+    val min_col = if range_val.start.col < range_val.end_ref.col: range_val.start.col else: range_val.end_ref.col
+    val new_value_col = letter_to_col(col_letter) - min_col
+    if new_value_col < 0:
+        return PivotGuiSession(sheet: session.sheet, data_range: session.data_range, row_field_col: session.row_field_col, col_field_col: session.col_field_col, value_col: session.value_col, agg_name: session.agg_name, title: session.title, last_error: "bad-col")
+    PivotGuiSession(sheet: session.sheet, data_range: session.data_range, row_field_col: session.row_field_col, col_field_col: session.col_field_col, value_col: new_value_col, agg_name: session.agg_name, title: session.title, last_error: "")
+
+fn pivot_session_field_letters(session: PivotGuiSession) -> (text, text):
+    """Column letters for the session's current row_field_col/col_field_col,
+    computed against data_range's own leftmost column -- for human-readable
+    step logging only (e.g. `office pivot-gui`'s scripted step dump);
+    pivot_session_view/pivot_gui_view pass the raw 0-based-within-range
+    indices straight to pivot_build unchanged, never these letters.
+    col_field_col == -1 (1D pivot) renders its half of the pair as "-"; an
+    unparseable data_range renders both halves as "?" rather than
+    crashing."""
+    val range_val = parse_range(session.data_range)
+    if range_val == nil:
+        return ("?", "?")
+    val min_col = if range_val.start.col < range_val.end_ref.col: range_val.start.col else: range_val.end_ref.col
+    val row_letter = col_to_letter(min_col + session.row_field_col)
+    var col_letter = "-"
+    if session.col_field_col != -1:
+        col_letter = col_to_letter(min_col + session.col_field_col)
+    (row_letter, col_letter)
+
+# ---------------------------------------------------------------------------
+# Pivot GUI key-driven step (mirrors run_gui_live_step's quit modeling below
+# -- see the "Live loop bridge" comment block above GuiLiveStepResult/
+# run_gui_live_step -- so a later live loop over PivotGuiSession can reuse
+# the SAME per-keystroke shape; per this round's scope, no live CLI or
+# interactive.spl change is added yet).
+# ---------------------------------------------------------------------------
+
+struct PivotGuiStepResult:
+    session: PivotGuiSession
+    quit: bool
+
+fn _pivot_gui_next_agg(agg_lower: text) -> text:
+    """Cycle order sum -> count -> average -> min -> max -> sum (wraps).
+    Falls back to "sum" for any agg_lower outside the 5 known names
+    (defensive only -- every PivotGuiSession.agg_name reaching here already
+    passed _pivot_gui_agg_is_valid, via pivot_session_new or
+    pivot_session_set_agg)."""
+    if agg_lower == "sum":
+        return "count"
+    if agg_lower == "count":
+        return "average"
+    if agg_lower == "average":
+        return "min"
+    if agg_lower == "min":
+        return "max"
+    if agg_lower == "max":
+        return "sum"
+    "sum"
+
+fn pivot_gui_step(session: PivotGuiSession, key: text) -> PivotGuiStepResult:
+    """One decoded key name -> one PivotGuiSession transition: "a" cycles
+    agg_name through sum/count/average/min/max in order (via
+    _pivot_gui_next_agg + pivot_session_set_agg -- always a valid agg, so
+    last_error is always cleared by this branch); "s" swaps row_field_col/
+    col_field_col (pivot_session_swap_fields); "q", "ctrl_c" (Ctrl-C), and
+    "eof" (stdin closed) signal quit via PivotGuiStepResult.quit rather than
+    raising/exiting -- mirrors run_gui_live_step's quit modeling exactly (see
+    GuiLiveStepResult below), so the session returned alongside a quit is the
+    session UNCHANGED from just before the quit key. Any other key is a
+    no-op (session unchanged, quit false)."""
+    if key == "q" or key == "ctrl_c" or key == "eof":
+        return PivotGuiStepResult(session: session, quit: true)
+    if key == "a":
+        val next_agg = _pivot_gui_next_agg(session.agg_name.lower())
+        return PivotGuiStepResult(session: pivot_session_set_agg(session, next_agg), quit: false)
+    if key == "s":
+        return PivotGuiStepResult(session: pivot_session_swap_fields(session), quit: false)
+    PivotGuiStepResult(session: session, quit: false)
 
 # ---------------------------------------------------------------------------
 # Sheet GUI session (first INTERACTION pillar): cell selection + cell edit +
