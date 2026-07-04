@@ -2568,10 +2568,14 @@ fn expand_file_write_bytes_args<M: Module>(
     let path_ptr = builder.inst_results(path_ptr_call)[0];
     let path_len_call = adapted_call(builder, string_len_ref, &[arg_vals[0]]);
     let path_len = builder.inst_results(path_len_call)[0];
-    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
-    let array_header = builder.ins().band(arg_vals[1], ptr_mask);
-    let data_len = builder.ins().load(types::I64, MemFlags::new(), array_header, 8);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), array_header, 24);
+    let array_data_id = ctx.runtime_funcs["rt_array_data_ptr_u8"];
+    let array_len_id = ctx.runtime_funcs["rt_array_len"];
+    let array_data_ref = ctx.module.declare_func_in_func(array_data_id, builder.func);
+    let array_len_ref = ctx.module.declare_func_in_func(array_len_id, builder.func);
+    let data_ptr_call = adapted_call(builder, array_data_ref, &[arg_vals[1]]);
+    let data_ptr = builder.inst_results(data_ptr_call)[0];
+    let data_len_call = adapted_call(builder, array_len_ref, &[arg_vals[1]]);
+    let data_len = builder.inst_results(data_len_call)[0];
 
     Some(vec![path_ptr, path_len, data_ptr, data_len])
 }
