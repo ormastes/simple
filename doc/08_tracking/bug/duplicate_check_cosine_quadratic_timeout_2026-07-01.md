@@ -43,6 +43,13 @@ wall (interpreter). Before: killed, never completed. Fixes, in
   ~63–66s wall (pattern-based sweep; the same binary copied to another name
   runs 7m+ undisturbed). Long-running verification must use a renamed
   binary copy or `bin/simple test`.
+- Pre-existing spec failures (verified unchanged with this fix fully
+  reverted, so not regressions from it): `cache_spec.spl` — 4 examples fail
+  with "Cache: 0 files, 0 tokens" (token-cache mutation through the
+  `TokenCacheManager` parameter not visible to the spec's manager in the
+  `it`-block context), and `phase1_integration_spec.spl` — "reuses the
+  token cache across repeated scans" fails with the same signature. Same
+  probable root as the W1006 mut-capability note above.
 
 ## Symptom
 
