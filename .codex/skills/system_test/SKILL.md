@@ -105,8 +105,11 @@ describe "<Feature Name>":
   `admit`; RVFI/SymbiYosys evidence must distinguish readiness from an actual
   `sby` proof pass. For Lean or BYL lanes, cite generated artifacts separately
   from durable theorem files so regeneration cannot replace manual proof
-  obligations. Do not let regenerated SPipe docs replace the manual Lean/BYL
-  proof layer.
+  obligations. For RISC-V lanes spanning generated RTL sidecars and Lean/BYL,
+  cite `sh scripts/check/check-riscv-formal-dual-track.shs` as the aggregate
+  gate so the sidecar contract self-test and manual proof layer are checked
+  together. Do not let regenerated SPipe docs replace the manual Lean/BYL proof
+  layer.
 - For broad lanes with shared interfaces, the primary/best model must define
   shared interface names, manual `step("...")` flow helper names, and
   setup/checker helper names before lower-model sidecars such as Codex Spark,

@@ -69,6 +69,9 @@ That wrapper runs the generated RTL RVFI/SymbiYosys structural gate, checks the
 Lean generated/manual boundary files, and runs `lake build` for the RISC-V
 product model when Lake is installed. It also checks that the default RV32/RV64
 budget facts stay synchronized across generated RTL metadata, BYL, and Lean.
+The wrapper first runs the sidecar contract self-test so the aggregate gate
+fails if the Rust-seed rejection and repo-local Simple binary resolution guards
+stop protecting the normal sidecar contract.
 
 The RISC-V product Lean model is split so code changes are maintainable:
 
