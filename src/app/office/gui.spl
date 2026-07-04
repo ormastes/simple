@@ -85,18 +85,60 @@ fn office_gui_minimal_css() -> text:
     ".widget-statusbar{flex-direction:row;background:#f5f5f5;}" +
     ".status-left{flex:1;color:#333333;}" +
     ".status-right{color:#999999;}" +
-    ".focused{border:1px solid #0066cc;}"
+    # Selected-widget class (GUI polish, styling fidelity pass): a distinct
+    # background in addition to the pre-existing border, so a focused
+    # widget (e.g. a selected sheet cell -- see office_gui_sheet_session_
+    # pixels) is visually distinct, not just outlined. Shared across every
+    # office view that ever sets UIState.focused_id -- today only the sheet
+    # session path does, so this is additive, not a behavior change for
+    # counter/chart/pivot.
+    ".focused{border:1px solid #0066cc;background:#dbe9fa;}"
 
 fn office_gui_sheet_minimal_css() -> text:
-    """Curated stylesheet covering the sheet grid's widget classes (table/
-    th/td/filter-input) on top of office_gui_minimal_css's base panel/layout
-    classes. Same fallback-knob rationale as office_gui_minimal_css above:
-    a small curated sheet, not the full ~300KB theme CSS."""
+    """Curated stylesheet covering the sheet grid's widget classes on top of
+    office_gui_minimal_css's base panel/layout classes. Same fallback-knob
+    rationale as office_gui_minimal_css above: a small curated sheet, not
+    the full ~300KB theme CSS.
+
+    Two grid shapes share this stylesheet: pivot_gui_view's table_widget
+    grid (widget-table/th/td rules below) and sheet_gui_view/sheet_gui_
+    view_with_selection's per-cell row()/text_widget() grid (the
+    #sheet_gui_sel_root-scoped rules below -- see gui.spl's sheet_gui_view
+    docstring for why the plain sheet view now shares that construction
+    too). Styling-fidelity rules (GUI polish pass), verified against the
+    real browser-engine pixel path (nth-child, :first-child, ID selectors,
+    and descendant/child combinators are all live in this exact render
+    path, not just statically present in some selector-matcher source
+    file -- confirmed by a scratchpad pixel probe before relying on any of
+    them here):
+      - header ROW (#sheet_sel_header) and header COLUMN (every row/corner
+        cell, which is always the first child of its row -- scoped under
+        #sheet_gui_sel_root so this never bleeds into the nav/statusbar
+        chrome outside the sheet grid) get the SAME distinct gray as
+        pivot's own `th` background, for a consistent header look across
+        both grid shapes.
+      - zebra striping alternates data ROWS (nth-child position among the
+        root's row children -- the header row is nth-child(1), so data
+        rows land on nth-child(even)/nth-child(odd) starting at 2): a
+        light-gray/white alternation painted on each ROW container; header-
+        column/corner cells paint their OWN background over it (child
+        paints over parent), so the row/col headers stay solid regardless
+        of which stripe they sit on.
+      - the existing `.focused` class (extended above with a background)
+        already gives the selected cell a distinct look with no new rule
+        needed here.
+      - fixed column width (sheet_gui_view_with_selection's with_width
+        calls, SHEET_GUI_CELL_WIDTH/SHEET_GUI_ROWHDR_WIDTH) is layout, not
+        CSS -- nothing to add here for that part."""
     office_gui_minimal_css() +
     ".table-filter{padding:2px 4px;border:1px solid #cccccc;}" +
     ".widget-table{border-collapse:collapse;width:100%;}" +
     ".widget-table th{padding:2px 4px;border:1px solid #cccccc;background:#e8e8e8;text-align:left;}" +
-    ".widget-table td{padding:2px 4px;border:1px solid #cccccc;}"
+    ".widget-table td{padding:2px 4px;border:1px solid #cccccc;}" +
+    "#sheet_gui_sel_root .layout-hbox:nth-child(even){background:#f7f7f7;}" +
+    "#sheet_gui_sel_root .layout-hbox:nth-child(odd){background:#ffffff;}" +
+    "#sheet_sel_header{background:#e8e8e8;}" +
+    "#sheet_gui_sel_root .widget-text:first-child{background:#e8e8e8;}"
 
 struct SheetGuiView:
     tree: UITree
@@ -110,32 +152,45 @@ fn sheet_gui_view(sheet: Sheet, max_rows: i32, max_cols: i32) -> SheetGuiView:
     filtered sheet renders filtered. Returns both a UITree (for real pixel
     rendering through the browser engine) and a plain-text pipe-separated
     grid dump (for testability without parsing HTML/widget trees) --
-    the header line first, then one line per rendered row."""
-    var headers: [text] = [""]
-    var c = 0
-    while c < max_cols:
-        headers.push(col_to_letter(c))
-        c = c + 1
+    the header line first, then one line per rendered row.
 
-    var rows_out: [[text]] = []
-    var dump_lines: [text] = [headers.join("|")]
+    Implementation note (closes residual #1 of doc/08_tracking/bug/
+    office_gui_no_per_cell_click_target_2026-07-04.md): this is now a thin
+    wrapper over sheet_gui_view_with_selection's per-cell "cell_<ref>"
+    text_widget construction (an EMPTY selected_ref, "", never matches a
+    real cell ref, so no bracket/focus ever renders) instead of a separate
+    table_widget call -- the plain table_widget path is gone from the sheet
+    view entirely (chart/pivot views keep table_widget, unaffected).
+
+    Byte-compatibility: sheet_gui_view's OLD semantics scan GRID rows 1..
+    max_rows and skip hidden ones with NO backfill (a hidden row simply
+    produces fewer output lines) -- the OPPOSITE of sheet_gui_view_with_
+    selection's own N-VISIBLE window semantics (which backfills past a
+    hidden row to keep exactly N visible rows). To preserve the old
+    behavior exactly, `view_rows` passed down here is the COUNT of visible
+    (non-hidden) rows within 1..max_rows, not max_rows itself: since that
+    count already equals the total number of visible rows in that exact
+    range, the N-visible forward scan started at row 1 collects precisely
+    those rows and stops at max_rows -- it has nothing left to backfill
+    with. The "viewport|..." marker line sheet_gui_view_with_selection
+    prepends (a concept sheet_gui_view's dump has never had) is stripped
+    before returning."""
+    var visible_count = 0
     var r = 1
     while r <= max_rows:
         if not sheet.is_row_hidden(r.to_i64()):
-            var row_cells: [text] = ["{r}"]
-            var rc = 0
-            while rc < max_cols:
-                val ref_str = "{col_to_letter(rc)}{r}"
-                row_cells.push(cell_display_text(sheet.get_cell(ref_str)))
-                rc = rc + 1
-            rows_out.push(row_cells)
-            dump_lines.push(row_cells.join("|"))
+            visible_count = visible_count + 1
         r = r + 1
 
-    val table_node = table_widget("sheet_grid", headers, rows_out)
-    val root = column("sheet_gui_root", [table_node])
-    val tree = build_tree_with_title(root, "Simple Sheet", "light")
-    SheetGuiView(tree: tree, text_dump: dump_lines.join("\n"))
+    val session = session_new(sheet, "")
+    val view = sheet_gui_view_with_selection(session, visible_count, max_cols)
+    val lines = view.text_dump.split("\n")
+    var out_lines: [text] = []
+    var i = 1
+    while i < lines.len():
+        out_lines.push(lines[i])
+        i = i + 1
+    SheetGuiView(tree: view.tree, text_dump: out_lines.join("\n"))
 
 fn office_gui_sheet_pixels(view: SheetGuiView) -> [u32]:
     """Render a SheetGuiView's tree to ARGB pixels via the same real
@@ -425,6 +480,13 @@ fn office_gui_pivot_pixels(view: PivotGuiView) -> [u32]:
 # handle_pointer/handle_keypress.
 # ---------------------------------------------------------------------------
 
+# Fixed per-cell pixel widths (GUI polish, styling fidelity pass): every
+# data/header-letter cell gets the SAME width, and every row-number/corner
+# cell gets its own (narrower) SAME width, so columns visually align
+# instead of each text_widget auto-sizing to its own content.
+val SHEET_GUI_CELL_WIDTH: i32 = 18
+val SHEET_GUI_ROWHDR_WIDTH: i32 = 10
+
 struct SheetGuiSession:
     sheet: Sheet
     selected_ref: text
@@ -620,12 +682,16 @@ fn sheet_gui_view_with_selection(session: SheetGuiSession, max_rows: i32, max_co
     val visible_rows = _sheet_gui_visible_rows(sheet, session.view_top_row, max_rows)
 
     var headers: [text] = [""]
-    var header_cells: [WidgetNode] = [text_widget("sheet_sel_hdr_corner", "")]
+    var corner_cell = text_widget("sheet_sel_hdr_corner", "")
+    corner_cell = with_width(corner_cell, SHEET_GUI_ROWHDR_WIDTH)
+    var header_cells: [WidgetNode] = [corner_cell]
     var c = 0
     while c < max_cols:
         val letter = col_to_letter(left_col0 + c)
         headers.push(letter)
-        header_cells.push(text_widget("sheet_sel_hdr_{letter}", letter))
+        var hdr_cell = text_widget("sheet_sel_hdr_{letter}", letter)
+        hdr_cell = with_width(hdr_cell, SHEET_GUI_CELL_WIDTH)
+        header_cells.push(hdr_cell)
         c = c + 1
     val header_row = row("sheet_sel_header", header_cells)
 
@@ -634,7 +700,9 @@ fn sheet_gui_view_with_selection(session: SheetGuiSession, max_rows: i32, max_co
     var ri = 0
     while ri < visible_rows.len():
         val r = visible_rows[ri]
-        var row_cells: [WidgetNode] = [text_widget("sheet_sel_rowhdr_{r}", "{r}")]
+        var rowhdr_cell = text_widget("sheet_sel_rowhdr_{r}", "{r}")
+        rowhdr_cell = with_width(rowhdr_cell, SHEET_GUI_ROWHDR_WIDTH)
+        var row_cells: [WidgetNode] = [rowhdr_cell]
         var dump_cells: [text] = ["{r}"]
         var rc = 0
         while rc < max_cols:
@@ -645,7 +713,9 @@ fn sheet_gui_view_with_selection(session: SheetGuiSession, max_rows: i32, max_co
                     cell_text = "{ref_str}:{session.pending_input}"
                 else:
                     cell_text = "[{cell_text}]"
-            row_cells.push(text_widget(_sheet_gui_selection_cell_id(ref_str), cell_text))
+            var data_cell = text_widget(_sheet_gui_selection_cell_id(ref_str), cell_text)
+            data_cell = with_width(data_cell, SHEET_GUI_CELL_WIDTH)
+            row_cells.push(data_cell)
             dump_cells.push(cell_text)
             rc = rc + 1
         row_nodes.push(row("sheet_sel_row_{r}", row_cells))

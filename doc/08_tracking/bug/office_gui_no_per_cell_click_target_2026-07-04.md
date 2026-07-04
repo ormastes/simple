@@ -2,11 +2,42 @@
 
 **Date:** 2026-07-04
 **Severity:** medium (blocks real mouse/keyboard click-to-select on the sheet-GUI pixel path; state-driven equivalent shipped as the honest MVP instead)
-**Status:** RESOLVED (2026-07-04, same day) for `sheet_gui_view_with_selection`'s
-grid — see "Resolution" below. `sheet_gui_view`'s plain `table_widget` grid
-(no `_with_selection`) remains unaddressable per-cell; that narrower gap is
-unchanged and still needs the shared-framework fix in item 1 of "What would
-close this gap" below.
+**Status:** RESOLVED (2026-07-04) — both halves closed. `sheet_gui_view_with_
+selection`'s grid was closed same-day; see "Resolution" below. `sheet_gui_
+view`'s plain grid (the one remaining residual, previously table_widget-
+based and unaddressable per-cell) is now closed too — see "Resolution part
+2 (GUI polish pass)" below.
+
+## Resolution part 2 (GUI polish pass, 2026-07-04)
+
+`sheet_gui_view` (the read-only, no-session grid used by the plain
+`sheet-gui` CLI) no longer builds its own `table_widget` grid at all. It is
+now a thin wrapper over `sheet_gui_view_with_selection` (session created via
+`session_new(sheet, "")` — an empty `selected_ref` never matches a real cell
+ref, so no bracket/focus ever renders), so every cell in the read-only view
+is now the SAME real, addressable `text_widget` with id `cell_<ref>` that
+`sheet_gui_view_with_selection`'s cells always were. The plain-table-grid
+code path (item 1 of "What would close this gap" below) no longer exists in
+`sheet_gui_view` at all — there was nothing left needing a shared-framework
+`table_widget`/`render_html_table` change, because the office lane simply
+stopped using `table_widget` for the sheet view (pivot's grid still does,
+and is unaffected — pivot's use of `table_widget` was never part of this
+gap).
+
+Byte-compatibility: `sheet_gui_view`'s dump format is unchanged (verified by
+the full pre-existing `sheet_gui_view_spec` suite staying green, 9/9,
+unmodified) despite the internal rewrite — see gui.spl's `sheet_gui_view`
+docstring for how the old "scan grid rows 1..max_rows, skip hidden, no
+backfill" semantics is preserved on top of `sheet_gui_view_with_selection`'s
+different (N-visible, backfilling) windowing semantics: the row count
+passed down is computed as the number of visible rows already within that
+exact range, which forces the delegated call to stop before it would ever
+need to backfill.
+
+Item 1 of "What would close this gap" below is therefore no longer
+applicable to `sheet_gui_view` (superseded by this resolution) — the
+remaining items (2-4) are unchanged and still open for whichever lane wires
+a live GUI event loop / real OS input.
 
 ## Resolution (2026-07-04)
 
