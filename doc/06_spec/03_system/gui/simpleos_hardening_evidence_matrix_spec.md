@@ -160,6 +160,8 @@ The wrapper emits these rows:
 - `simpleos_hardening_formal_memory_safety_gate`
 - `simpleos_hardening_formal_memory_safety_scope`
 - `simpleos_hardening_formal_storage_integrity_status`
+- `simpleos_hardening_formal_storage_integrity_gate`
+- `simpleos_hardening_formal_storage_integrity_scope`
 - `simpleos_hardening_formal_boundary_integrity_status`
 - `simpleos_hardening_formal_compiler_language_status`
 - `simpleos_hardening_formal_ui_policy_status`
@@ -273,7 +275,7 @@ be mistaken for a completed RTL proof pass.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 56 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -297,6 +299,8 @@ expect(stdout).to_contain("simpleos_hardening_formal_memory_safety_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_memory_safety_gate=scripts/check/check-simpleos-memory-safety-formal-proofs.shs")
 expect(stdout).to_contain("simpleos_hardening_formal_memory_safety_scope=Lean model gate: gc_reachability, gc_boundary, gc_manual_borrow, manual_pointer_borrow, nogc_compile")
 expect(stdout).to_contain("simpleos_hardening_formal_storage_integrity_status=pass")
+expect(stdout).to_contain("simpleos_hardening_formal_storage_integrity_gate=scripts/check/check-simpleos-storage-formal-proofs.shs")
+expect(stdout).to_contain("simpleos_hardening_formal_storage_integrity_scope=Lean model gate: db_storage, fat32, formal/nvfs")
 expect(stdout).to_contain("simpleos_hardening_formal_boundary_integrity_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_compiler_language_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_ui_policy_status=pass")
@@ -344,6 +348,9 @@ expect(report).to_contain("DRF race constraints")
 expect(report).to_contain("- formal_memory_safety_gate: scripts/check/check-simpleos-memory-safety-formal-proofs.shs")
 expect(report).to_contain("no dangling after sweep")
 expect(report).to_contain("manual pointer exclusive/shared borrow constraints")
+expect(report).to_contain("- formal_storage_integrity_gate: scripts/check/check-simpleos-storage-formal-proofs.shs")
+expect(report).to_contain("WAL-before-data")
+expect(report).to_contain("crash refinement")
 ```
 
 </details>

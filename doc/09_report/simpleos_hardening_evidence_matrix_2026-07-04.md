@@ -23,6 +23,9 @@
 - formal_memory_safety_evidence: mark/sweep reachability invariant, no dangling after sweep, no-GC boundary rejection, alias counterexample, borrowed object liveness, manual pointer exclusive/shared borrow constraints, no-GC compile rejection for GC allocation
 - formal_storage_integrity: pass
 - formal_storage_integrity_log: build/simpleos_hardening_evidence_matrix_current/storage_integrity_formal.log
+- formal_storage_integrity_gate: scripts/check/check-simpleos-storage-formal-proofs.shs
+- formal_storage_integrity_scope: Lean model gate: db_storage, fat32, formal/nvfs
+- formal_storage_integrity_evidence: WAL-before-data and publish-root flush requirements, MVCC snapshot/recovery completeness, FAT32 chain/LBA/free-chain invariants, NVFS arena/pmap/WAL/checkpoint preservation and crash refinement
 - formal_boundary_integrity: pass
 - formal_compiler_language: pass
 - formal_ui_policy: pass
@@ -84,6 +87,12 @@
 - gui_entry_latest_dir: build/tmp/gui_entry_engine2d_wm_simple_web_spec_1958348_1783145478496067
 - gui_entry_capture_ppm_bytes: 2359312
 - gui_entry_capture_raw_bytes: 3145728
+- formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs
+- formal_critical_concurrency_scope: Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities
+- formal_critical_concurrency_evidence: resource_acquire/release capacity, work stealing, task completion idempotence, bounded-channel backpressure, closed-channel wakeup, DRF race constraints, kernel capability default-deny, memory capability unique/shared write constraints
+- formal_memory_safety_gate: scripts/check/check-simpleos-memory-safety-formal-proofs.shs
+- formal_memory_safety_scope: Lean model gate: gc_reachability, gc_boundary, gc_manual_borrow, manual_pointer_borrow, nogc_compile
+- formal_memory_safety_evidence: mark/sweep reachability invariant, no dangling after sweep, no-GC boundary rejection, alias counterexample, borrowed object liveness, manual pointer exclusive/shared borrow constraints, no-GC compile rejection for GC allocation
 - formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs
 - formal_critical_concurrency_scope: Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities
 - formal_critical_concurrency_evidence: resource_acquire/release capacity, work stealing, task completion idempotence, bounded-channel backpressure, closed-channel wakeup, DRF race constraints, kernel capability default-deny, memory capability unique/shared write constraints
