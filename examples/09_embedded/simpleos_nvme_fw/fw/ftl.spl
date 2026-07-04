@@ -47,6 +47,7 @@ impl Ftl:
         val old_ppn: i64 = me.map.lookup(lba)
         val pc: i64 = me.fil.program(ppn, lba, s, data)
         if pc != NAND_OK:
+            me.band.set_bad(ppn_block(ppn))
             return SC_INTERNAL
         me.ensure_journal_room()
         me.journal.append(0, lba, old_ppn, ppn, s)
@@ -327,7 +328,10 @@ impl Ftl:
                 if newp == NO_PPN:
                     return UNMAP    # cannot relocate -> do NOT erase; block stays intact
                 me.seq = me.seq + 1
-                me.fil.program(newp, rd.lba, me.seq, rd.data)
+                val pc: i64 = me.fil.program(newp, rd.lba, me.seq, rd.data)
+                if pc != NAND_OK:
+                    me.band.set_bad(ppn_block(newp))
+                    return UNMAP    # failed relocation -> old page remains live; do NOT erase
                 me.ensure_journal_room()
                 me.journal.append(0, rd.lba, ppn, newp, me.seq)
                 me.map.update(rd.lba, newp)
@@ -465,6 +469,17 @@ fn ftl_selftest() -> i64:
     fail = fail + expect_eq(ftl.read(100), 111, "post-GC read overwritten lba100")
     fail = fail + expect_eq(ftl.read(163), 263, "post-GC read relocated lba163")
     fail = fail + expect_eq(ftl.erase_count(victim), 1, "gc erased + reclaimed the victim block")
+
+    var gf: Ftl = ftl_new()
+    i = 0
+    while i < PAGES_PER_BLOCK * 2:
+        gf.write(700 + i, 1000 + i)
+        i = i + 1
+    gf.fil.inject_prog_fail(2)
+    val blocked: i64 = gf.gc_once()
+    fail = fail + expect_eq(blocked, UNMAP, "gc aborts when relocation program fails")
+    fail = fail + expect_eq(gf.read(700), 1000, "failed gc keeps old live page readable")
+    fail = fail + expect_eq(gf.band.block_state(2), BLK_BAD, "failed relocation retires target block in allocator")
 
     fail
 
