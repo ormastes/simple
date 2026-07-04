@@ -1714,3 +1714,101 @@ while the FULL stage4 build (explicit --source src/{compiler,app,lib}) builds
 Binaries: scratchpad `stage4_t117`, `stage4_t107base`; seed
 `src/compiler_rust/target/bootstrap_task117/bootstrap/simple` (built at HEAD
 0fae3e69bb0-era with all three fixes + #113).
+
+## Task #121 (2026-07-04) — BOTH defects PRECISELY ROOT-CAUSED; both naive point-fixes REGRESS self-host (clean-build proof); no net seed change landed
+
+Successor to #117. Built the #121 seed fresh from HEAD into
+`target/bootstrap_task121`. **Key methodology correction that unblocked both
+diagnoses:** the `SIMPLE_DUMP_MIR=<fn>` env dumps post-inline MIR; using it on
+the seed's own JIT (`$SEED run`, default `ExecutionMode::Jit`) gives instant
+primary evidence with NO stage4 rebuild. Also isolate stage4 builds from the
+shared `.simple/native_cache` (content-keyed, NOT seed-keyed → any seed-codegen
+change yields a FRANKEN binary of new+old-seed objects) with
+`native-build --cache-dir <isolated>`; a `993 compiled, 0 cached` line confirms a
+true clean build.
+
+### DEFECT B — `$SEED run payload_check.spl` prints `payload=5` — is CRANELIFT JIT, NOT the interpreter
+The #117 doc mis-attributed `$SEED run` to "the interpreter." Ground truth:
+`SIMPLE_EXECUTION_MODE=interpret $SEED run payload_check.spl` → **42 (correct)**;
+default (JIT) and `=cranelift` → **5**. The Rust tree-walker is fine; the bug is
+seed cranelift codegen. **Root (MIR-confirmed):** `Ok(42)` lowers to
+`MirInst::ResultOk`, whose codegen `create_enum_value`
+(`codegen/instr/result.rs:36-38`) stores the scalar payload **RAW** via
+`get_vreg_or_default`, but extraction (`rt_enum_payload` + MIR `UnboxInt`)
+unconditionally untags → `42 >> 3 = 5`. #117 fixed the *calls.rs* Call-based
+Ok/Err construction (`runtime_payload_value` tags scalars) but MISSED this
+dedicated `MirInst::ResultOk/ResultErr/OptionSome` path (`compile_option_some` /
+`compile_result_ok` → `create_enum_value`).
+**Fix attempted + REVERTED:** tagging the payload in `create_enum_value` via the
+shared `runtime_payload_value` made `$SEED run payload_check=42` / `b_unwrap=42`
+/ `b_some=42` (all verified), but a **clean full stage4 rebuild (993/0) with the
+tagging seed made `-c "print(1+1)"`/`hello`/`run` SILENT (no-op)** — the
+self-hosted compiler's enum-payload consumers rely on the RAW convention.
+Control `stage4_ctrl117` (task117 seed, same source, shared cache) → `-c`=2,
+`hello`=hello; the ONLY variable is the seed. So the tag-construction fix is
+net-negative and was reverted (commit landed then reverted; net zero seed diff).
+
+### DEFECT A — stage4 `run m4.spl` (`struct P{x:int}; P(x:7); print("x={p.x}")`) nil-receiver — env `Dict<text,Value>` round-trip NILs the nested `Value.Function` heap payload
+`SIMPLE_INTERP_TRACE=1` (the compiled-in `itrace`, no rebuild needed) pinpoints
+the fault: `call_function` (`interpreter_calls.spl:110-114`) `case
+Value.Function(f)` binds **f=nil** (`[CF] Function arm f_nil=true`) → crash at
+line 114 `f_t.name`. `P` is registered by `process_module`
+(`interpreter.spl:117-120`) as `Value.Function(FunctionValue{symbol,name})` via
+`define_global` into the env `Dict<text,Value>`, and resolved back by
+`NamedVar env-hit` → `.unwrap()`.
+**Decisive read-back probe** (temporarily inserted right after `define_global`,
+since removed): `[REG] store name=P gfv_nil=false` then `[REG] readback name=P
+disc=Function rbf_nil=true`. So the **store is good; the immediate
+lookup→unwrap read-back preserves the `Function` discriminant but NILs the
+nested `FunctionValue` heap payload.** This is the #107 env-channel family
+(enum-with-heap-struct payload lost through the `Dict<text,Value>` ANY value
+channel), NOT construction, and NOT fixed by #117's scalar Dict box/unbox.
+
+### A separate, REAL, non-stage4 bug found while isolating DEFECT A (minimal repro `scratchpad/enumdict3.spl`)
+`Some(heap_enum).unwrap()` corrupts the wrapped enum: `A CORRUPT` / `B CORRUPT`
+(dict) / `C ok` (direct match, no Option). MIR shows `.unwrap()` emits
+`rt_enum_payload` **+ `UnboxInt`** on the heap enum pointer (`>>3` mangles it →
+wrong disc). Root (probe-confirmed, `hir/lower/expr/mod.rs:57`
+`enum_payload_type_for_builtin_method`): an optional `T?` is `HirType::Pointer{
+inner:T }`; the Pointer arm **recurses into `T`** and, for `T = enum Val:
+Int(i64)|Func(FV)`, returns `Val`'s FIRST variant payload (`i64` → `TypeId(5)`),
+so a scalar `payload_ty` is stamped on the `rt_enum_payload` BuiltinCall and the
+MIR emits `UnboxInt` on the heap pointer.
+**Fix attempted + REVERTED:** making the Pointer arm `return Some(*inner)` fixed
+`enumdict3` (A/B/C ok) but ALSO made a clean stage4 (993/0) `-c`/`hello` SILENT:
+self-host optionals are pervasively **nullable pointers** (`unwrap` == identity),
+and forcing `Pointer{inner}` unwrap through `rt_enum_payload` breaks them.
+**Note this is NOT stage4's m4 mechanism:** enumdict3 CORRUPTS the disc, whereas
+stage4 m4 PRESERVES the `Function` disc and only nils the nested payload — two
+distinct manifestations of the same seed enum/Value convention family.
+
+### Unifying constraint (the wall for point-fixes)
+Seed cranelift codegen has several enum/`Value` payload-convention mismatches
+(construction RAW vs extraction `UnboxInt`; nullable-pointer optional vs
+`OptionSome` heap enum; `Dict<text,Value>` nested-heap-payload loss). The
+self-hosted compiler (src/compiler, compiled BY the seed) pervasively depends on
+the CURRENT (partially-buggy) form of each, so any point-fix to one convention
+regresses the whole self-host (`-c`/`hello` go silent). **Proven twice this task
+with clean 993/0 rebuilds.** A correct fix must make construction and extraction
+agree GLOBALLY (all of: `ResultOk/OptionSome` vs calls.rs Ok/Err; match-binding
+`UnboxInt` vs direct `.spl` `rt_enum_payload`; nullable-pointer vs enum optional
+representation) in ONE coordinated change, then full-rebuild + regate — not the
+incremental point-patches that cleared earlier layers.
+
+### Gate table (stage4 = clean 993/0 build with the HEALTHY task117 seed = current-source baseline; all seed fixes reverted)
+| gate | result |
+|---|---|
+| build 993/0 | PASS |
+| `-c "print(1+1)"` | 2 (PASS) |
+| `hello` | hello (PASS) |
+| `$SEED run` (interpret) payload_check | 42 (PASS) — tree-walker is correct |
+| `$SEED run` (JIT/default) payload_check | 5 (DEFECT B, open) |
+| stage4 `run m4` (struct x=7) | nil-receiver core (DEFECT A, open) |
+| stage4 `run payload_check` | core (DEFECT A + env family, open) |
+| stage4 `run p1`/`p2` (val x=5 / a+b) | silent / "invalid operands" (#107 env family, open) |
+
+**Net seed change landed: ZERO** (both fixes reverted; seed stays healthy at the
+task117 state). Repros: `scratchpad/{payload_check,p1_valscalar,p2_add,m4,
+b_unwrap,b_some,enumdict,enumdict2,enumdict3}.spl`. Diagnostic binaries (isolated
+cache): `scratchpad/stage4_ctrl117` (healthy baseline), `scratchpad/stage4_probeA`.
+Seed with reverted source: rebuild from HEAD or reuse task117.
