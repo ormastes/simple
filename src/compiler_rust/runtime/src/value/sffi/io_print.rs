@@ -270,6 +270,26 @@ pub extern "C" fn rt_println_alias(v: RuntimeValue) {
     rt_println_value(v);
 }
 
+/// Word-order alias for `rt_print_value`: pure-Simple modules declare the
+/// runtime print import as `extern fn rt_value_print(value)` (note the word
+/// order) — see src/compiler/70.backend/backend/interpreter_calls.spl,
+/// src/compiler/70.backend/sffi_minimal.spl, and src/lib/nogc_sync_mut/{ffi,sffi}/runtime.spl.
+/// The runtime only ever exported `rt_print_value`, so `rt_value_print` was an
+/// undefined symbol. native-build links with `--unresolved-symbols=ignore-all`,
+/// so the undefined import resolved to address 0 and any stage4 print via the
+/// interpreter round-trip (`rt_value_int` -> `rt_value_print`) jumped to 0x0 and
+/// SIGSEGV'd. Exporting the alias makes the symbol resolve to the real printer (#93).
+#[export_name = "rt_value_print"]
+pub extern "C" fn rt_value_print_alias(v: RuntimeValue) {
+    rt_print_value(v);
+}
+
+/// Word-order alias for `rt_println_value` (see `rt_value_print` above, #93).
+#[export_name = "rt_value_println"]
+pub extern "C" fn rt_value_println_alias(v: RuntimeValue) {
+    rt_println_value(v);
+}
+
 /// Print a RuntimeValue to stderr.
 /// Nil values are silently skipped.
 #[no_mangle]
