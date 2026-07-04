@@ -111,13 +111,22 @@ fn _hex_color_at(s: text, offset: i64, fallback: u32) -> u32:
     fallback
 
 fn _find_char_from(s: text, marker: text, start: i64) -> i64:
-    var idx = start
-    val s_len = s.len()
-    while idx < s_len:
-        if s.char_at(idx) == marker:
-            return idx
-        idx = idx + 1
-    -1
+    # Native byte-search (index_of + tail substring) instead of an interpreted
+    # char_at loop. In the interpreter char_at(i) is O(i) (UTF-8 walk from the
+    # start), so a char_at scan is O(n^2); repeated per-rule in the CSS pre-checks
+    # that made office GUI render scale ~quadratically with CSS size. These paths
+    # are ASCII byte==char, so native byte search is semantics-preserving.
+    val st = if start < 0: 0 else: start
+    val slen = s.len()
+    if st >= slen:
+        return -1
+    if st <= 0:
+        return s.index_of(marker)
+    val tail = s.substring(st, slen)
+    val idx = tail.index_of(marker)
+    if idx < 0:
+        return -1
+    st + idx
 
 fn _text_matches_at(s: text, marker: text, offset: i64) -> bool:
     val marker_len = marker.len()
@@ -131,26 +140,33 @@ fn _text_matches_at(s: text, marker: text, offset: i64) -> bool:
     true
 
 fn _find_text_from(s: text, marker: text, start: i64) -> i64:
+    # Native byte-search instead of a char_at loop (O(i) per char_at -> O(n^2)).
+    # ASCII byte==char on these HTML/CSS paths, so native index_of is exact.
     val marker_len = marker.len()
     if marker_len == 0:
         return start
-    var idx = start
-    val last = s.len() - marker_len
-    val first = marker.char_at(0)
-    while idx <= last:
-        if s.char_at(idx) == first and _text_matches_at(s, marker, idx):
-            return idx
-        idx = idx + 1
-    -1
+    val st = if start < 0: 0 else: start
+    val slen = s.len()
+    if st > slen - marker_len:
+        return -1
+    if st <= 0:
+        return s.index_of(marker)
+    val tail = s.substring(st, slen)
+    val idx = tail.index_of(marker)
+    if idx < 0:
+        return -1
+    st + idx
 
 fn _range_contains_char(s: text, start: i64, end: i64, marker: text) -> bool:
-    var idx = start
-    val limit = if end > s.len(): s.len() else: end
-    while idx < limit:
-        if s.char_at(idx) == marker:
-            return true
-        idx = idx + 1
-    false
+    # Native substring + index_of instead of a char_at loop (char_at is O(i) in
+    # the interpreter -> O(n^2) when scanned per CSS rule).
+    val slen = s.len()
+    val st = if start < 0: 0 else: start
+    val en = if end > slen: slen else: end
+    if st >= en:
+        return false
+    val sub = s.substring(st, en)
+    sub.index_of(marker) >= 0
 
 fn _first_hex_color_after(html: text, marker: text, fallback: u32) -> u32:
     val start = html.index_of(marker)

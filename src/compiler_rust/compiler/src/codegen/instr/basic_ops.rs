@@ -110,7 +110,25 @@ pub fn compile_cast<M: Module>(
         // (`rt_string_to_int`, strtoll-based, returns 0 on parse failure) so
         // int("42") == 42 instead of 52. `src_val` here is already the boxed
         // string RuntimeValue, so no rt_string_new re-boxing is needed.
-        let string_to_int_id = ctx.runtime_funcs["rt_string_to_int"];
+        // Not every JIT compilation pre-populates `rt_string_to_int` in
+        // `ctx.runtime_funcs` (unlike `rt_string_len`/`rt_string_data` used
+        // below) — fall back to declaring it fresh, mirroring the existing
+        // `.to_int()` method-call lowering in closures_structs.rs.
+        let string_to_int_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_int") {
+            fid
+        } else if let Some(&fid) = ctx.func_ids.get("rt_string_to_int") {
+            fid
+        } else {
+            let mut sig = cranelift_codegen::ir::Signature::new(crate::codegen::shared::platform_call_conv());
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            let fid = ctx
+                .module
+                .declare_function("rt_string_to_int", cranelift_module::Linkage::Import, &sig)
+                .map_err(|e| e.to_string())?;
+            ctx.func_ids.insert("rt_string_to_int".to_string(), fid);
+            fid
+        };
         let string_to_int_ref = ctx.module.declare_func_in_func(string_to_int_id, builder.func);
         let parse_call = adapted_call(builder, string_to_int_ref, &[src_val]);
         let parsed_i64 = builder.inst_results(parse_call)[0];

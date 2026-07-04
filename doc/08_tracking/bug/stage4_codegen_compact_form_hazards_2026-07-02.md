@@ -1575,3 +1575,75 @@ run <repro> 2>&1 | grep 'lowered funcs'`, expect 2).
 | twofn (helper + main) | `m1`/`plain-helper` rc=0 |
 | lint src/app/cli/main.spl | rc=0, "Lint passed: all files clean" |
 | cfg_arch_dispatch_repro_a (informational, gate not closed) | rc=0, `lowered funcs=3` |
+
+## Task #107 (2026-07-04) — env `Value` round-trip disc=-1 PRECISELY LOCALIZED to the seed Dict-value box channel (shared root with #109)
+
+Successor to #104. Built the #107 seed fresh from HEAD (includes #104's typed
+`HirType::Dict{K,V}`) into `target/bootstrap_task107`; stage4 = 993/0. Repros
+UNCHANGED: `val x=5; print(x)` SIGSEGV; `val a=2; val b=3; print(a+b)` →
+"invalid operands for +" (the looked-up operands are not `Value.Int`). Direct
+disc measurement (probes, since reverted) is the decisive new evidence:
+
+- STORE: in `env.spl::define`, `rt_enum_discriminant(value)` on the incoming
+  param = **2375492728** (a valid `Value.Int` Enum heap object; interpreter.spl
+  `[LET]` shows the same at the call site). Keys match (store `a` → read `a`).
+- LOAD: interpreter.spl NamedVar `ctx.env.lookup("a")` returns a HIT whose
+  `rt_enum_discriminant` = **-1**. `rt_enum_discriminant` (runtime
+  `value/objects.rs:282`) returns -1 **iff** `get_typed_ptr::<RuntimeEnum>` fails,
+  i.e. the value is NOT an Enum heap object. So the enum's heap-tag is destroyed
+  by the `Dict<text,Value>` store→load round-trip.
+
+### Hypotheses TESTED and RULED OUT (each a full stage4 rebuild)
+1. **Cross-kind struct/enum `Value` name collision** (4 types named `Value`:
+   enum in 70.backend/backend_types + std di.spl + gc_async_mut evaluator.spl;
+   struct in app/interpreter/core/value.spl). Added a seed census in
+   `pipeline/native_project/imports.rs` (`SIMPLE_CENSUS_COLLIDE`) flagging any
+   name present in BOTH `struct_defs` and `enum_defs`. Result: **ZERO** cross-kind
+   collisions in the entry closure — the imports walker only collects
+   closure-reachable files, and the peripheral `Value`s aren't reachable from
+   `main.spl`. Guard reverted (no-op). Enum discriminants are hash-based
+   (`variant_name.hash`, order-independent), so even the variant-merge in
+   `enum_defs.entry(name).or_default()` is disc-safe.
+2. **Method-name-collision mis-dispatch.** Three modules declare identical
+   `define(name:text,value:Value)` / `lookup(name:text)->Value?` (Environment,
+   pure evaluator, expression_evaluator). Probe anomaly (`[ENV-DEF]` fired but
+   `[ENV-LK]` did NOT while a hit still returned) suggested `ctx.env.lookup`
+   bound to a foreign body. Renamed all Environment value methods to unique
+   `env_define_value`/`env_lookup_value`/`env_assign_value`/
+   `env_define_global_value` (iteration-14 cure) across env.spl + interpreter.spl
+   + interpreter_calls.spl + jit_interpreter.spl, consistently. Rebuilt: **still
+   SIGSEGV / invalid operands.** Method-collision DISPROVEN as the cause. (The
+   rename is sound hardening but was swept by a parallel hourly-sync reconcile
+   before it could be re-landed; not re-attempted.)
+3. **Store-side typed rebind** (`var scope: Dict<text,Value> = self.scopes[i];
+   scope[name]=value; self.scopes[i]=scope`) — no change. Confirms `.spl`
+   typed-rebinds cannot recover the value; the erasure is in the seed codegen.
+
+### ROOT (seed codegen, shared with #109 — coordinator-verified)
+The enum heap pointer (`ptr | TAG_HEAP=0b001`, tags in
+`runtime/src/value/tags.rs`) is mis-boxed through the `Dict<text,Value>` ANY
+value channel: it round-trips as a NON-heap value → disc -1. Same family as
+#109's generic/ANY enum-payload double-untag (scalar `Ok(42).unwrap()`=`42>>3`=5).
+Fix locus is the seed Dict-value box/unbox convention:
+- `compile_index_get`/`compile_index_set` (`codegen/instr/collections.rs:338-378`)
+  pass values verbatim, deferring box/unbox to `MirInst::Box*/Unbox*` keyed on
+  `element_expr_ty` (`mir/lower/lowering_expr_struct.rs:307-317, 536-548`).
+- For a `Dict` receiver, `element_expr_ty` derivation only handles
+  `HirType::Array` (307-317), so a dict-get stays ANY→verbatim (no unbox). The
+  corruption is therefore on the **STORE**: the index-assign lowering emits a
+  `BoxInt` on the value operand when the value's static type resolves to
+  I64/scalar through the ANY channel — `rt_box_int(enum_ptr)` wraps the heap
+  pointer as a boxed-int object; the get returns that boxed-int verbatim (dict
+  element type is Value/heap → no compensating unbox) → disc -1.
+- Sibling site: single-payload enum construction stores the payload RAW
+  (`get_vreg_or_default`, `codegen/instr/calls.rs:2287` and Ok/Err at 2747-2748)
+  while multi-arg uses `runtime_payload_value` (tags scalars). The asymmetry is
+  #109's `>>3` bug and must be aligned in the same pass.
+
+### Handoff
+Fix belongs in the seed native codegen with #109: at the ANY/generic container
+value boundary, boxing and unboxing must agree — do NOT `BoxInt` a value that is
+already a heap RuntimeValue on dict/array store, and align single- vs multi-arg
+enum-payload boxing. Verify with `p2_add` (expect 5), `p1_valscalar` (5), AND
+#109's `scratchpad/payload_check.spl` (expect 42) on a stage4 rebuild.
+Repros: scratchpad `p1_valscalar.spl`, `p2_add.spl`; seed `target/bootstrap_task107`.
