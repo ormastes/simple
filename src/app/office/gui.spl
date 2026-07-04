@@ -37,7 +37,8 @@ use common.ui.builder.{column, row, table_widget, build_tree_with_title, text_wi
 use app.ui.render.html_widgets.{render_html_tree}
 use app.office.counter.{CounterApp}
 use app.office.sheets.spreadsheet.{Sheet}
-use app.office.sheets.cell.{cell_display_text, col_to_letter}
+use app.office.sheets.cell.{cell_display_text, col_to_letter, parse_cell_ref, cell_ref_to_string, CellRef}
+use app.office.sheets.cell_ref.{offset_ref}
 use app.office.sheets.chart.{ChartSeries, chart_series_from_ranges}
 use app.office.sheets.pivot.{pivot_build}
 use app.office.file_formats.{recalculate_formula_cells}
@@ -427,26 +428,30 @@ fn office_gui_pivot_pixels(view: PivotGuiView) -> [u32]:
 struct SheetGuiSession:
     sheet: Sheet
     selected_ref: text
+    pending_input: text   # uncommitted typed buffer for selected_ref; "" = none
 
 fn session_new(sheet: Sheet, selected_ref: text) -> SheetGuiSession:
     """Start a GUI session over `sheet` with `selected_ref` (e.g. "D2")
     already selected."""
-    SheetGuiSession(sheet: sheet, selected_ref: selected_ref)
+    SheetGuiSession(sheet: sheet, selected_ref: selected_ref, pending_input: "")
 
 fn session_select(session: SheetGuiSession, ref_str: text) -> SheetGuiSession:
-    """Move the selection to `ref_str`. Returns a NEW session (copy
-    semantics) -- callers must reassign."""
-    SheetGuiSession(sheet: session.sheet, selected_ref: ref_str)
+    """Move the selection to `ref_str`. Discards any uncommitted pending
+    buffer (a selection change abandons in-progress typing, same as an
+    arrow-key move via session_key -- only "enter" commits). Returns a NEW
+    session (copy semantics) -- callers must reassign."""
+    SheetGuiSession(sheet: session.sheet, selected_ref: ref_str, pending_input: "")
 
 fn session_edit(session: SheetGuiSession, ref_str: text, new_text: text) -> SheetGuiSession:
     """Set `ref_str`'s raw content to `new_text` (replacing whatever was
     there before, formula or literal), recalculate every formula cell in the
     sheet, and return a NEW session with the recalculated sheet. The
-    selection is preserved across the edit -- callers must reassign."""
+    selection and any pending typed buffer are preserved across the edit --
+    callers must reassign."""
     var sheet = session.sheet
     sheet.set_value(ref_str, new_text)
     sheet = recalculate_formula_cells(sheet)
-    SheetGuiSession(sheet: sheet, selected_ref: session.selected_ref)
+    SheetGuiSession(sheet: sheet, selected_ref: session.selected_ref, pending_input: session.pending_input)
 
 fn _sheet_gui_selection_cell_id(ref_str: text) -> text:
     "cell_{ref_str}"
@@ -458,7 +463,11 @@ fn sheet_gui_view_with_selection(session: SheetGuiSession, max_rows: i32, max_co
     "focused" CSS class via office_gui_sheet_session_pixels below. The
     selected cell's display text is also bracketed ("[80]") in both the
     widget content and the text_dump, so selection is observable without
-    parsing HTML or pixels."""
+    parsing HTML or pixels. When session.pending_input is non-empty (a
+    session_key typing sequence in progress on the selected cell, not yet
+    committed via "enter"), the selected cell's text is shown as
+    "<ref>:<buffer>" instead of the bracket form, so specs can assert
+    mid-typing state without parsing HTML/pixels either."""
     val sheet = session.sheet
     var headers: [text] = [""]
     var header_cells: [WidgetNode] = [text_widget("sheet_sel_hdr_corner", "")]
@@ -482,7 +491,10 @@ fn sheet_gui_view_with_selection(session: SheetGuiSession, max_rows: i32, max_co
                 val ref_str = "{col_to_letter(rc)}{r}"
                 var cell_text = cell_display_text(sheet.get_cell(ref_str))
                 if ref_str == session.selected_ref:
-                    cell_text = "[{cell_text}]"
+                    if session.pending_input != "":
+                        cell_text = "{ref_str}:{session.pending_input}"
+                    else:
+                        cell_text = "[{cell_text}]"
                 row_cells.push(text_widget(_sheet_gui_selection_cell_id(ref_str), cell_text))
                 dump_cells.push(cell_text)
                 rc = rc + 1
@@ -593,3 +605,127 @@ fn session_click(session: SheetGuiSession, x: i32, y: i32, max_rows: i32, max_co
     if ref_str == "":
         return session
     session_select(session, ref_str)
+
+# ---------------------------------------------------------------------------
+# Keyboard interaction: arrow-key grid navigation + typed-buffer cell edit.
+#
+# Capability-probe finding (see doc/08_tracking/bug/
+# office_gui_no_per_cell_click_target_2026-07-04.md's keyboard addendum for
+# the full writeup): common.ui.event.process_event DOES have a real key-
+# dispatch path (UIEvent.KeyPress(key) -> handle_keypress -> per-mode
+# handlers, event.spl:37-138) and a real direct-focus event
+# (UIEvent.FocusEvent(target_id, "focus") -> handle_focus_event, event.spl:
+# 260-271) -- this is not a "zero key support" framework. But neither
+# primitive fits this feature without changes outside this lane's owned
+# files:
+#   - Normal-mode movement (handle_normal_key, event.spl:97-109) only
+#     recognizes "j"/"k" (linear focus_next/focus_prev over
+#     tree.all_widget_ids() in DOM order) -- there is no "up"/"down"/"left"/
+#     "right" key name anywhere in process_event, and no 2D row/column
+#     concept at all: focus_next/focus_prev cannot express "same column,
+#     next visible row" or "skip a hidden row" without knowing the grid's
+#     shape, which lives in this sheet lane, not the framework.
+#   - Typed-character routing (handle_insert_key -> widget_hit.spl's
+#     widget_dispatch_key, widget_hit.spl:141-158) only acts on widgets
+#     whose kind is "input" or "textfield" (checked by name, hard-coded);
+#     sheet_gui_view_with_selection's per-cell widgets are text_widgets
+#     (kind "text"), so widget_dispatch_key is a silent no-op on them today.
+#     Making cells accept typed input through that exact real path would
+#     mean changing builder.spl/widget_hit.spl's kind dispatch -- shared
+#     framework code, outside src/app/office/gui.spl's owned scope, exactly
+#     the same shape of gap the click bug doc already documented for
+#     table_widget.
+# Unlike session_click (which genuinely NEEDS process_event/handle_pointer:
+# there is no way to know which widget a raw (x, y) point lands on without
+# running the real hit-test over a laid-out tree), arrow-key navigation has
+# no such geometry dependency -- the target ref is fully determined by
+# grid arithmetic (current ref + direction + hidden-row skip + clamp).
+# Routing that arithmetic through process_event/UIEvent.FocusEvent would
+# not reuse any framework behavior, since nothing in process_event
+# participates in computing WHICH ref is next -- it would just be a
+# build-tree-and-discard-the-result detour. So, per the "zero matching
+# key-dispatch primitive for this shape" finding above, session_key below
+# is the thin session-level translator the task's fallback path calls for,
+# not a workaround for a framework that has no key machinery at all.
+# ---------------------------------------------------------------------------
+
+fn _sheet_gui_move_within_bounds(ref_str: text, key: text, max_rows: i32, max_cols: i32, sheet: Sheet) -> text:
+    """One arrow-key step from `ref_str`, clamped to the max_rows x max_cols
+    grid and never landing on a hidden row. Reuses cell_ref.spl's offset_ref
+    (the sheet engine's existing CellRef-delta helper) for the raw column/
+    row arithmetic instead of reimplementing it; offset_ref only clamps a
+    negative result to 0, so the upper-bound clamp and the hidden-row skip
+    loop below are the only new logic (offset_ref has no concept of a grid's
+    caller-chosen size or of a sheet's hidden rows)."""
+    val parsed = parse_cell_ref(ref_str)
+    if parsed == nil:
+        return ref_str
+
+    var d_col = 0
+    var d_row = 0
+    if key == "left":
+        d_col = -1
+    elif key == "right":
+        d_col = 1
+    elif key == "up":
+        d_row = -1
+    elif key == "down":
+        d_row = 1
+    else:
+        return ref_str
+
+    val moved = offset_ref(parsed, d_col, d_row)
+    var col = moved.col
+    if col >= max_cols:
+        col = max_cols - 1
+    var row = moved.row
+    if row >= max_rows:
+        row = max_rows - 1
+
+    if d_row != 0:
+        # Hidden-row skip: keep stepping in the same row direction until a
+        # visible row is found, or clamp back to the original ref if the
+        # grid edge is hit before one is (never wraps around).
+        while row >= 0 and row < max_rows and sheet.is_row_hidden((row + 1).to_i64()):
+            row = row + d_row
+        if row < 0 or row >= max_rows:
+            return ref_str
+
+    cell_ref_to_string(CellRef(col: col, row: row))
+
+fn session_key(session: SheetGuiSession, key: text, max_rows: i32, max_cols: i32) -> SheetGuiSession:
+    """Session-level keyboard translator (see the "Keyboard interaction"
+    comment block above for why this isn't routed through common.ui.event.
+    process_event): "up"/"down"/"left"/"right" move selected_ref within the
+    max_rows x max_cols grid via _sheet_gui_move_within_bounds (clamped at
+    the edges, skipping hidden rows -- the selection can never land on a
+    hidden row) and discard any uncommitted pending buffer (same rule as
+    session_select); "enter" commits a non-empty pending buffer into
+    selected_ref via session_edit (recalculation runs) and clears the
+    buffer, or is a no-op when the buffer is already empty; "escape"
+    discards the pending buffer without committing; "backspace" trims the
+    last character off the buffer; any other single-character key appends
+    to the buffer (mirrors widget_hit.spl's widget_dispatch_key single-char
+    convention -- the same "printable" definition the framework's own key
+    sink uses, just applied to a text_widget cell instead of an input/
+    textfield one, since widget_dispatch_key only acts on those two kinds).
+    Returns a NEW session (copy semantics) -- callers must reassign."""
+    if key == "up" or key == "down" or key == "left" or key == "right":
+        val moved_ref = _sheet_gui_move_within_bounds(session.selected_ref, key, max_rows, max_cols, session.sheet)
+        return SheetGuiSession(sheet: session.sheet, selected_ref: moved_ref, pending_input: "")
+    if key == "enter":
+        if session.pending_input == "":
+            return session
+        val committed = session_edit(session, session.selected_ref, session.pending_input)
+        return SheetGuiSession(sheet: committed.sheet, selected_ref: committed.selected_ref, pending_input: "")
+    if key == "escape":
+        return SheetGuiSession(sheet: session.sheet, selected_ref: session.selected_ref, pending_input: "")
+    if key == "backspace":
+        var buf = session.pending_input
+        if buf.len() > 0:
+            buf = buf.slice(0, buf.len() - 1)
+        return SheetGuiSession(sheet: session.sheet, selected_ref: session.selected_ref, pending_input: buf)
+    if key.len() == 1:
+        val buf = "{session.pending_input}{key}"
+        return SheetGuiSession(sheet: session.sheet, selected_ref: session.selected_ref, pending_input: buf)
+    session

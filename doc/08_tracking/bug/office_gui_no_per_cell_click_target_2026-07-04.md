@@ -52,6 +52,80 @@ The one remaining item from "What would close this gap" is #1 (extend
 `table_widget`/`render_html_table`, or a `cell_grid_widget`, for
 `sheet_gui_view`'s plain grid) — out of scope for this pass, unchanged.
 
+## Keyboard addendum (2026-07-04, same day)
+
+Probe finding: `common.ui.event.process_event` DOES have a real key-dispatch
+path — `UIEvent.KeyPress(key)` (`event.spl:52-53`) routes through
+`handle_keypress` to per-mode handlers (`event.spl:79-138`), and there is
+also a real direct-focus event, `UIEvent.FocusEvent(target_id, "focus")` ->
+`handle_focus_event` (`event.spl:260-271`). So this is not a "zero key
+support" framework, unlike a literal reading of the task's fallback
+condition might suggest. But neither primitive fits sheet-grid keyboard
+interaction without changes outside this lane's owned files:
+
+- `handle_normal_key` (`event.spl:97-109`) only recognizes `"j"`/`"k"`
+  (linear `focus_next`/`focus_prev` over `tree.all_widget_ids()` in DOM
+  order) — there is no `"up"`/`"down"`/`"left"`/`"right"` key name anywhere
+  in `process_event`, and no 2D row/column concept: `focus_next`/
+  `focus_prev` cannot express "same column, next visible row" or "skip a
+  hidden row" without knowing the grid's shape, which lives in the sheet
+  lane, not the framework.
+- Typed-character routing (`handle_insert_key` -> `widget_hit.spl`'s
+  `widget_dispatch_key`, `widget_hit.spl:141-158`) only acts on widgets
+  whose `kind` is `"input"` or `"textfield"` (a hard-coded name check);
+  `sheet_gui_view_with_selection`'s per-cell widgets are `text_widget`s
+  (kind `"text"`), so `widget_dispatch_key` is a silent no-op on them today.
+  Making cells accept typed input through that exact path would mean
+  changing `builder.spl`/`widget_hit.spl`'s kind dispatch — shared
+  framework code, outside `src/app/office/gui.spl`'s owned scope, the same
+  shape of gap already documented above for `table_widget`.
+
+Unlike `session_click` (which genuinely needs `process_event`/
+`handle_pointer`: there is no way to know which widget a raw `(x, y)`
+point lands on without running the real hit-test over a laid-out tree),
+arrow-key navigation has no such geometry dependency — the target ref is
+fully determined by grid arithmetic (current ref + direction + hidden-row
+skip + clamp). Routing that arithmetic through `process_event`/
+`UIEvent.FocusEvent` would not reuse any framework behavior (nothing in
+`process_event` participates in computing *which* ref is next); it would
+just be a build-tree-and-discard-the-result detour.
+
+Shipped in `src/app/office/gui.spl`: `session_key(session, key, max_rows,
+max_cols)` — a thin session-level translator. `"up"`/`"down"`/`"left"`/
+`"right"` move `selected_ref` via `_sheet_gui_move_within_bounds` (reuses
+`cell_ref.spl`'s existing `offset_ref` CellRef-delta helper for the raw
+arithmetic; adds only the upper-bound clamp and the hidden-row skip loop,
+which have no framework equivalent) and discard any uncommitted pending
+buffer. `"enter"` commits a non-empty pending buffer into `selected_ref`
+via `session_edit` (recalculation runs) and clears the buffer. `"escape"`
+discards the buffer without committing. `"backspace"` trims the buffer.
+Any other single-character key appends to the buffer (mirrors
+`widget_dispatch_key`'s own `key.len() == 1` "printable" convention, just
+applied to a `text_widget` cell). `SheetGuiSession` gained a
+`pending_input: text` field; `sheet_gui_view_with_selection` renders the
+selected cell as `"<ref>:<buffer>"` instead of the `"[...]"` bracket form
+while a buffer is pending.
+
+CLI: `simple office sheet-gui-key` (`_run_office_gui_sheet_key_command` in
+`src/app/office/mod.spl`) scripts BEFORE (B2 selected) → `down` (B3) →
+`"9"`, `"9"` (buffer accumulates) → `enter` (commits, recalculates) → AFTER
+showing B3=99, D3 (`=B3*C3`) = 297, D5 (`=SUM(D2:D3)`) = 317, printing each
+key step as `office-gui-key: <key> -> <selected_ref>`.
+
+Spec: `test/01_unit/app/office/sheet_gui_session_spec.spl`'s "keyboard"
+describe block (7 new `it`s, all green, deliberate-fail probe run) covers:
+arrow-key loop-back movement, edge clamp, hidden-row skip (both
+directions), typed-buffer accumulation + dump marker, enter-commits-and-
+recalculates, escape-cancels, backspace-trims.
+
+Residual, still open: item #1 from "What would close this gap" above
+(per-cell `table_widget` grid) is unchanged. Additionally, neither this
+addendum nor the click resolution wires REAL OS keyboard/mouse input into
+`UIEvent`s for the browser-engine GUI backend (item #4 from "What would
+close this gap") — `session_click`/`session_key` are both scripted entry
+points, not an input-device-to-UIEvent bridge; that remains open for
+whichever lane wires a live GUI event loop.
+
 ## Summary
 
 The GPU-rendering gap analysis (2026-07-01) reported ZERO event-handling
