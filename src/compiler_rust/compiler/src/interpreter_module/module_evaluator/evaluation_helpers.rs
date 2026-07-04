@@ -13,7 +13,7 @@ use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, N
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
-use crate::interpreter::FUNCTION_OVERLOADS;
+use crate::interpreter::{FUNCTION_OVERLOADS, FUNCTION_MODULE_OWNER};
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
 use crate::interpreter::module_cache::filter_functions_from_value;
@@ -74,6 +74,7 @@ pub(super) fn add_builtin_types(env: &mut Env) {
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(super) fn register_definitions(
     items: &[Node],
+    module_path: Option<&Path>,
     local_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     global_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     local_classes: &mut HashMap<String, Arc<ClassDef>>,
@@ -83,10 +84,24 @@ pub(super) fn register_definitions(
     exports: &mut HashMap<String, Value>,
     env: &mut Env,
 ) {
+    // Module identity for this batch of registrations, recorded in
+    // FUNCTION_MODULE_OWNER so unqualified-call tie-breaking (see
+    // `select_overload` in interpreter_call/mod.rs) can prefer the candidate
+    // that belongs to the calling function's own module. `None` when the
+    // module path is unavailable — those functions simply get no owner entry
+    // and fall back to the pre-existing first-registered tie-break.
+    let module_ident: Option<Arc<str>> = module_path.map(|p| Arc::from(p.to_string_lossy().as_ref()));
+
     for item in items.iter() {
         match item {
             Node::Function(f) => {
                 let arc_f = Arc::new(f.clone());
+                if let Some(ident) = &module_ident {
+                    FUNCTION_MODULE_OWNER.with(|cell| {
+                        cell.borrow_mut()
+                            .insert(Arc::as_ptr(&arc_f) as usize, Arc::clone(ident));
+                    });
+                }
                 local_functions.insert(f.name.clone(), Arc::clone(&arc_f));
                 FUNCTION_OVERLOADS.with(|cell| {
                     cell.borrow_mut()

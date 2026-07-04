@@ -81,6 +81,7 @@ pub fn evaluate_module_exports_with_preloaded(
     // First pass: register functions and types
     register_definitions(
         items,
+        module_path,
         &mut local_functions,
         global_functions,
         &mut local_classes,

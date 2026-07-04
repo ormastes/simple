@@ -32,6 +32,7 @@ use super::{
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
     BLANKET_IMPL_METHODS, CLASS_OVERLOADS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, FUNCTION_OVERLOADS,
+    FUNCTION_MODULE_OWNER, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
     GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, SI_BASE_UNITS,
     UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
@@ -301,6 +302,27 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
         match item {
             Node::Function(f) => {
                 let func = Arc::new(f.clone());
+                // This is the only registration pass exercised by the
+                // `bin/simple run`/`-c` entry path: imports were already
+                // flattened into `items` before we got here (see
+                // `pipeline::module_loader::strip_flattened_import_nodes`),
+                // which tagged each flattened-in function with its true owning
+                // module via a synthetic attribute whose name starts with
+                // FLATTEN_MODULE_OWNER_ATTR_PREFIX. Read it back here (per-node,
+                // collision-proof). Functions genuinely defined in the
+                // entry/root script itself carry no such attribute and fall
+                // back to a fixed sentinel, which still keeps them in a
+                // distinct tie-break bucket from any imported module's
+                // same-named functions. See FUNCTION_MODULE_OWNER's doc comment
+                // in interpreter_state.rs.
+                let owner: Arc<str> = f
+                    .attributes
+                    .iter()
+                    .find_map(|a| a.name.strip_prefix(FLATTEN_MODULE_OWNER_ATTR_PREFIX).map(Arc::from))
+                    .unwrap_or_else(|| Arc::from("<entry>"));
+                FUNCTION_MODULE_OWNER.with(|cell| {
+                    cell.borrow_mut().insert(Arc::as_ptr(&func) as usize, owner);
+                });
                 functions.insert(f.name.clone(), Arc::clone(&func));
                 FUNCTION_OVERLOADS.with(|cell| {
                     cell.borrow_mut()

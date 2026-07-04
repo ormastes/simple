@@ -4,11 +4,12 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use simple_parser::ast::{Argument, Capability, Effect, Expr, ImportTarget, Module, Node, Type, UseStmt};
+use simple_parser::ast::{Argument, Attribute, Capability, Effect, Expr, ImportTarget, Module, Node, Type, UseStmt};
 use simple_parser::error_recovery::{ErrorHint, ErrorHintLevel};
 use simple_parser::Parser;
 
 use crate::error::{codes, CompileError, ErrorContext};
+use crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX;
 use crate::stdlib_variant::stdlib_root_candidates;
 use crate::CompileError as _;
 
@@ -441,23 +442,63 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
     None
 }
 
-fn strip_flattened_import_nodes(module: Module) -> Module {
+/// Splices `module`'s items into the caller's flat item list for the
+/// `bin/simple run`/`-c` interpreted entry path. This is also the point where
+/// each retained free function is tagged with its true owning-module path via a
+/// synthetic attribute (name prefix `FLATTEN_MODULE_OWNER_ATTR_PREFIX`) pushed
+/// onto `FunctionDef.attributes`. After this splice, the interpreter's single
+/// flat registration pass in `evaluate_module_impl` (interpreter_eval.rs) can
+/// no longer tell which file a `Node::Function` came from — the root cause of
+/// the unqualified same-name/same-arity cross-module overload collision (see
+/// doc/08_tracking/bug/interp_cross_module_struct_field_collision_2026-07-04.md).
+/// The attribute travels *with* the node value (unlike a span side-table, which
+/// collides when two files define a same-named fn at identical line/column), so
+/// registration recovers the exact owner per node. See the const's doc comment
+/// in `interpreter_state.rs`.
+///
+/// The `already_tagged` guard keeps the *innermost* owner: a function pulled in
+/// through a nested import was already tagged by that deeper flatten pass
+/// (nested loads run before this outer strip), so we must not overwrite it.
+fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
+    let owner_attr_name = format!("{FLATTEN_MODULE_OWNER_ATTR_PREFIX}{}", module_path.to_string_lossy());
     let items = module
         .items
         .into_iter()
-        .filter(|item| {
-            if let Node::Function(function) = item {
-                return function.name != "main";
+        .filter_map(|item| match item {
+            Node::Function(mut function) => {
+                if function.name == "main" {
+                    return None;
+                }
+                let already_tagged = function
+                    .attributes
+                    .iter()
+                    .any(|a| a.name.starts_with(FLATTEN_MODULE_OWNER_ATTR_PREFIX));
+                if !already_tagged {
+                    function.attributes.push(Attribute {
+                        span: function.span,
+                        name: owner_attr_name.clone(),
+                        value: None,
+                        args: None,
+                        named_args: None,
+                    });
+                }
+                Some(Node::Function(function))
             }
-            !matches!(
-                item,
-                Node::UseStmt(_)
-                    | Node::MultiUse(_)
-                    | Node::CommonUseStmt(_)
-                    | Node::ExportUseStmt(_)
-                    | Node::StructuredExportStmt(_)
-                    | Node::AutoImportStmt(_)
-            )
+            other => {
+                if matches!(
+                    other,
+                    Node::UseStmt(_)
+                        | Node::MultiUse(_)
+                        | Node::CommonUseStmt(_)
+                        | Node::ExportUseStmt(_)
+                        | Node::StructuredExportStmt(_)
+                        | Node::AutoImportStmt(_)
+                ) {
+                    None
+                } else {
+                    Some(other)
+                }
+            }
         })
         .collect();
     Module {
@@ -1446,7 +1487,7 @@ fn load_module_with_imports_internal(
 
                     // Add imported items for flattened access (functions/classes in global scope)
                     if flatten_this_import {
-                        items.extend(strip_flattened_import_nodes(imported).items);
+                        items.extend(strip_flattened_import_nodes(imported, &resolved).items);
                     }
                 }
                 // ALSO keep the UseStmt so evaluate_module can create the module binding
@@ -1502,7 +1543,7 @@ fn load_module_with_imports_internal(
                     }
 
                     if flatten_this_import {
-                        items.extend(strip_flattened_import_nodes(imported).items);
+                        items.extend(strip_flattened_import_nodes(imported, &resolved).items);
                     }
                 }
                 items.push(item);
@@ -1551,7 +1592,7 @@ fn load_module_with_imports_internal(
                     }
 
                     if flatten_this_import {
-                        items.extend(strip_flattened_import_nodes(imported).items);
+                        items.extend(strip_flattened_import_nodes(imported, &resolved).items);
                     }
                 }
                 items.push(item);
@@ -1605,7 +1646,7 @@ fn load_module_with_imports_internal(
 
                         // Add imported items for flattened access
                         if flatten_this_import {
-                            items.extend(strip_flattened_import_nodes(imported).items);
+                            items.extend(strip_flattened_import_nodes(imported, &resolved).items);
                         }
                     }
                 }

@@ -4,7 +4,10 @@ use super::arg_binding::{bind_args, bind_args_with_values};
 use super::async_support::{is_async_function, wrap_in_promise};
 use super::macros::*;
 use crate::error::CompileError;
-use crate::interpreter::{exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS};
+use crate::interpreter::{
+    exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS,
+    CURRENT_EXEC_MODULE, FUNCTION_MODULE_OWNER,
+};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 use simple_parser::ast::{
@@ -187,6 +190,22 @@ fn execute_function_body(
     let saved_const_names = CONST_NAMES.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
     let saved_immutable_vars = IMMUTABLE_VARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
 
+    // Track which module's function is currently executing (innermost frame),
+    // used only to break ties in unqualified same-name/same-arity overload
+    // resolution (see `select_overload` in interpreter_call/mod.rs). If this
+    // function has no recorded owner (e.g. a lambda), leave the inherited
+    // value from the caller's frame untouched rather than clearing it.
+    let func_module_key = func as *const FunctionDef as usize;
+    let func_owner_module = FUNCTION_MODULE_OWNER.with(|cell| cell.borrow().get(&func_module_key).cloned());
+    let saved_exec_module = CURRENT_EXEC_MODULE.with(|cell| {
+        let mut current = cell.borrow_mut();
+        let saved = current.clone();
+        if let Some(owner) = &func_owner_module {
+            *current = Some(Arc::clone(owner));
+        }
+        saved
+    });
+
     // Check if this is an immutable fn method (has self but not is_me_method)
     // Save and set IN_IMMUTABLE_FN_METHOD flag in single borrow
     let is_method_with_self = local_env.contains_key("self") || bound_args.contains_key("self");
@@ -218,6 +237,7 @@ fn execute_function_body(
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
     IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
+    CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = saved_exec_module);
 
     // Generator function: collect yields and return GeneratorValue
     if func.is_generator {

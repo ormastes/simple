@@ -439,6 +439,7 @@ pub fn main():
                 invariant: None,
                 macro_invocations: vec![],
                 mixins: vec![],
+                is_value_type: false,
             }),
             Node::Function(FunctionDef {
                 span: Span::new(0, 0, 0, 0),

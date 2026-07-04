@@ -569,6 +569,7 @@ mod tests {
             is_generic_template: false,
             specialization_of: None,
             type_bindings: std::collections::HashMap::new(),
+            is_value_type: false,
         })
     }
 
