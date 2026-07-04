@@ -48,7 +48,8 @@ silicon. The simulation boundary is deliberate and unchanged:
       read-disturb scrubbing (`scrub_once`, per-block read counter) relocate data without loss
       (`wear_scrub_check.spl`, `ftl_media_mgmt_selftest`).
   - [x] **RAID/RAIN rebuild (P8).** A whole-channel uncorrectable failure is rebuilt in place from
-        XOR parity with no logical data loss (`rain_seal`/`rain_recover_channel`;
+        live-maintained XOR parity with no logical data loss (`rain_recover_channel`; `rain_seal` is
+        the scrub/repair path;
         `rain_ftl_check.spl` → "RAIN-FTL OK"; `ftl_rain_selftest`; `fw/proofs/Rain.lean`).
 - [x] **Health.** SMART reflects real activity (data units r/w, host cmd counts, power cycles,
   unsafe shutdowns, media errors, percent-used from erase counts, available spare from bad

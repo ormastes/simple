@@ -28,7 +28,7 @@ struct Ftl:
     seq:       i64
     rd_disturb: [i64]      # per-block read counter (volatile) driving read-disturb scrub
     hooks:     PolicyHooks  # sandboxed dynamic policy hooks (req 7)
-    rain_parity: [i64]     # one XOR parity word per RAIN stripe (gap-closure P8), sealed on demand
+    rain_parity: [i64]     # one XOR parity word per RAIN stripe (gap-closure P8), maintained live
 
 fn ftl_new() -> Ftl:
     Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new(), rain_parity: ftl_fill(rain_num_stripes(), 0))
@@ -69,6 +69,7 @@ impl Ftl:
         if pc != NAND_OK:
             me.band.set_bad(ppn_block(ppn))
             return SC_INTERNAL
+        me.rain_update_page(ppn, 0, data)
         me.ensure_journal_room()
         me.journal.append(0, lba, old_ppn, ppn, s)
         me.map.update(lba, ppn)
@@ -148,6 +149,33 @@ impl Ftl:
         if me.journal.is_full():
             me.checkpoint()
 
+    me rain_update_page(ppn: i64, old_data: i64, new_data: i64):
+        val idx: i64 = rain_stripe_idx(ppn)
+        if idx == UNMAP:
+            return
+        me.ensure_rain_parity_table()
+        me.rain_parity[idx] = me.rain_parity[idx] ^ old_data ^ new_data
+
+    me rain_block_words(blk: i64) -> [i64]:
+        var words: [i64] = ftl_fill(PAGES_PER_BLOCK, 0)
+        if not block_in_range(blk):
+            return words
+        val base: i64 = block_first_ppn(blk)
+        var p: i64 = 0
+        while p < PAGES_PER_BLOCK:
+            words[p] = me.fil.read(base + p).data
+            p = p + 1
+        words
+
+    me rain_note_erased_block(blk: i64, old_words: [i64]):
+        if not block_in_range(blk):
+            return
+        val base: i64 = block_first_ppn(blk)
+        var p: i64 = 0
+        while p < PAGES_PER_BLOCK and p < old_words.len():
+            me.rain_update_page(base + p, old_words[p], 0)
+            p = p + 1
+
     # Simulate a power loss: lose ALL volatile DRAM state. The write-back map cache
     # (un-flushed dirty entries) and the band valid bitmap + allocator frontier are
     # gone; the flash-resident L2P, the journal, the NAND array + OOB, and the
@@ -199,7 +227,10 @@ impl Ftl:
         var blk: i64 = 0
         while blk < NUM_BLOCKS:
             if not me.fil.block_bad(blk):
-                me.fil.erase(blk)
+                val old_words: [i64] = me.rain_block_words(blk)
+                val er: i64 = me.fil.erase(blk)
+                if er == NAND_OK:
+                    me.rain_note_erased_block(blk, old_words)
             blk = blk + 1
         me.map = ftl_map_new()
         me.band = ftl_band_new()
@@ -258,11 +289,10 @@ impl Ftl:
         me.fil.inject_read_bitflip(ppn, n)
 
     # ── Internal RAID/RAIN (die/channel failure protection, gap-closure P8) ───────
-    # Seal RAIN parity over the device's current physical contents: for every stripe
+    # Scrub/repair RAIN parity over the device's current physical contents: for every stripe
     # (one page per channel at a fixed group+page), parity = XOR of the NUM_CHANNELS
-    # pages' data. A consistency snapshot, like a RAID parity-scrub pass; subsequent
-    # writes to a stripe make its parity stale until the next seal (the ceiling: parity
-    # is rebuilt on demand here rather than maintained on every program/erase/GC move).
+    # pages' data. This is the RAID parity-scrub pass; normal writes/GC/format keep
+    # parity current incrementally.
     me rain_seal():
         me.ensure_rain_parity_table()
         var group: i64 = 0
@@ -397,17 +427,20 @@ impl Ftl:
                 if pc != NAND_OK:
                     me.band.set_bad(ppn_block(newp))
                     return UNMAP    # failed relocation -> old page remains live; do NOT erase
+                me.rain_update_page(newp, 0, rd.data)
                 me.ensure_journal_room()
                 me.journal.append(0, rd.lba, ppn, newp, s)
                 me.map.update(rd.lba, newp)
                 me.band.mark_valid(newp)
                 me.band.mark_invalid(ppn)
             p = p + 1
+        val old_words: [i64] = me.rain_block_words(blk)
         val er: i64 = me.fil.erase(blk)
         if er != NAND_OK:
             me.band.set_bad(blk)
             me.rd_disturb[blk] = 0
             return UNMAP
+        me.rain_note_erased_block(blk, old_words)
         me.band.free_block(blk)
         me.rd_disturb[blk] = 0      # erased -> read-disturb accumulation cleared
         blk
@@ -598,7 +631,7 @@ fn ftl_selftest() -> i64:
 
     fail
 
-# RAIN wired into the FTL: write known data, seal parity, lose a whole channel, rebuild it.
+# RAIN wired into the FTL: write known data, lose a whole channel, rebuild it from live parity.
 fn ftl_rain_selftest() -> i64:
     var fail: i64 = 0
     var ftl: Ftl = ftl_new()
@@ -608,7 +641,7 @@ fn ftl_rain_selftest() -> i64:
         val st: i64 = ftl.write(i, v)
         fail = fail + expect_eq(st, SC_SUCCESS, "ftl-rain: write")
         i = i + 1
-    ftl.rain_seal()
+    fail = fail + expect_eq(ftl.rain_parity_ready(), true, "ftl-rain: writes maintain parity table")
     val ppn0: i64 = ftl.physical_ppn(0)
     val blk0: i64 = ppn_block(ppn0)
     val failed: i64 = blk0 % NUM_CHANNELS

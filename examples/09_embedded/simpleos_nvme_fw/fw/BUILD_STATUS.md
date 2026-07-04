@@ -122,13 +122,13 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   FTL GC victim selection, which only asks the hook to **score** its own CLOSED candidates (the
   hook never names a block). Tested by `policy_hooks_check.spl` + `hooks_selftest`/`sandbox_selftest`
   and proven by `proofs/Hooks.lean`.
-- **RAIN (req 8) — DONE**: `rain_parity` field + `rain_seal()`/`rain_recover_channel()` wired into
-  the live `Ftl` (additive — existing write/read/GC/recovery untouched). `rain_seal` snapshots
-  per-stripe XOR parity; `rain_recover_channel` rebuilds a corrupted/failed channel in place
-  (recovered = parity XOR survivors; erase the failed block; reprogram its live pages; L2P
-  unchanged). Proven by `rain_ftl_check.spl` (256 LBAs survive a whole-channel uncorrectable
-  failure, gated `RAIN-FTL OK`), the standalone `rain_check.spl` (`RAIN OK`), `ftl_rain_selftest`,
-  and `proofs/Rain.lean`.
+- **RAIN (req 8) — DONE**: `rain_parity` field + `rain_recover_channel()` wired into the live
+  `Ftl`. Writes and GC relocations add new page payloads to parity; successful erases from GC/Format
+  remove old page payloads; `rain_seal` remains the scrub/repair pass. `rain_recover_channel`
+  rebuilds a corrupted/failed channel in place (recovered = parity XOR survivors; erase the failed
+  block; reprogram its live pages; L2P unchanged). Proven by `rain_ftl_check.spl` (256 LBAs survive
+  a whole-channel uncorrectable failure without a pre-rebuild seal, gated `RAIN-FTL OK`), the
+  standalone `rain_check.spl` (`RAIN OK`), `ftl_rain_selftest`, and `proofs/Rain.lean`.
 
 Integration status (canonical: `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration
 status", wired-vs-shelf table): P1 `fil_fmc`, P2 `fil_scheduler`, P7 `power_thermal`, and P8
