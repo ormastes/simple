@@ -1,0 +1,96 @@
+"""
+Engine Atlas Builder Tests
+
+Tests AtlasBuilder sprite registration, shelf-based packing, and AtlasLayout lookups.
+
+Note: tests below that check multiple fields of a `find_sprite(...)` result
+fold every check into one boolean before a single final `expect(...)`/
+`assert_true(...)` call. `std.spec`'s `it` runner only reports the *last*
+assertion executed in a block — an earlier failing `expect()` is silently
+discarded if a later one in the same block passes (see
+doc/08_tracking/bug/spec_it_block_last_expect_wins_masks_earlier_failure_2026-07-03.md).
+"""
+
+use std.spec.{describe, it, expect, assert_true}
+use std.nogc_sync_mut.engine.sprite.atlas_builder.{AtlasBuilder, AtlasLayout, SpriteEntry, PackedSprite}
+
+describe "AtlasBuilder":
+    it "starts with zero entries":
+        val builder = AtlasBuilder.new(1)
+        expect(builder.entry_count()).to_equal(0)
+
+    it "adds sprite entries":
+        var builder = AtlasBuilder.new(1)
+        builder.add_sprite("hero", 32, 32)
+        builder.add_sprite("enemy", 16, 16)
+        expect(builder.entry_count()).to_equal(2)
+
+    it "clears all entries":
+        var builder = AtlasBuilder.new(1)
+        builder.add_sprite("hero", 32, 32)
+        builder.clear()
+        expect(builder.entry_count()).to_equal(0)
+
+    it "packs a single sprite":
+        var builder = AtlasBuilder.new(0)
+        builder.add_sprite("hero", 32, 32)
+        val layout = builder.pack()
+        val sp = layout.find_sprite("hero")
+        var ok = layout.sprite_count() == 1
+        if val Some(s) = sp:
+            ok = ok and s.x == 0 and s.y == 0 and s.width == 32 and s.height == 32
+        else:
+            ok = false
+        assert_true(ok)
+
+    it "packs multiple sprites on one shelf":
+        var builder = AtlasBuilder.new(0)
+        builder.add_sprite("a", 16, 32)
+        builder.add_sprite("b", 16, 32)
+        val layout = builder.pack()
+        # Both same height, should be on same shelf
+        val sa = layout.find_sprite("a")
+        val sb = layout.find_sprite("b")
+        var ok = layout.sprite_count() == 2
+        if val Some(a) = sa:
+            if val Some(b) = sb:
+                # Same y (same shelf)
+                ok = ok and (a.y == b.y)
+            else:
+                ok = false
+        else:
+            ok = false
+        assert_true(ok)
+
+    it "packs with padding between sprites":
+        var builder = AtlasBuilder.new(2)
+        builder.add_sprite("a", 10, 10)
+        builder.add_sprite("b", 10, 10)
+        val layout = builder.pack()
+        # With padding=2, second sprite should start at x=12
+        val sb = layout.find_sprite("b")
+        var ok = layout.sprite_count() == 2
+        if val Some(b) = sb:
+            ok = ok and b.x == 12
+        else:
+            ok = false
+        assert_true(ok)
+
+    it "computes atlas dimensions":
+        var builder = AtlasBuilder.new(0)
+        builder.add_sprite("a", 16, 32)
+        builder.add_sprite("b", 16, 32)
+        val layout = builder.pack()
+        # Two 16-wide sprites side by side = 32 wide, 32 tall
+        assert_true(layout.width == 32 and layout.height == 32)
+
+describe "AtlasLayout":
+    it "returns nil for missing sprite name":
+        var builder = AtlasBuilder.new(0)
+        builder.add_sprite("hero", 32, 32)
+        val layout = builder.pack()
+        val missing = layout.find_sprite("nonexistent")
+        var found = false
+        if val Some(m) = missing:
+            found = true
+        expect(found).to_equal(false)

@@ -1,0 +1,170 @@
+# Test Failure Analysis CLI.
+# Startup-light surface for source-mode help and readiness probes.
+
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+
+val TOOL_NAME = "Test Failure Analysis"
+val TOOL_VERSION = "0.1.0"
+
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("test-analysis", log_opts.error)
+        return 1
+
+    val args = analysis_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"test-analysis\",\"status\":\"ok\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+        return 0
+
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"test-analysis\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            val progress = render_progress(log_opts.progress, 1, 1, "test-analysis")
+            if progress != "":
+                print progress
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+            print "Ready for test failure analysis."
+        return 0
+
+    val command = args[0]
+    if not analysis_is_command(command):
+        val message = "Unknown test-analysis command: {command}"
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"test-analysis\",\"status\":\"error\",\"message\":\"{message}\"}"
+        else:
+            error("test-analysis", message)
+        return 1
+
+    if analysis_requires_message(command) and args.len() < 2:
+        val message = "Command {command} requires an error message"
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"test-analysis\",\"status\":\"error\",\"message\":\"{message}\"}"
+        else:
+            error("test-analysis", message)
+        return 1
+
+    if command == "classify":
+        val message = analysis_message(args)
+        val kind = classify_error_text(message)
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"test-analysis\",\"status\":\"ok\",\"operation\":\"classify\",\"errorType\":\"{kind}\"}"
+        else:
+            print "Error type: {kind}"
+        return 0
+
+    if command == "extract":
+        val message = analysis_message(args)
+        val feature = extract_feature_text(message)
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"test-analysis\",\"status\":\"ok\",\"operation\":\"extract\",\"feature\":\"{feature}\"}"
+        else:
+            print "Feature: {feature}"
+        return 0
+
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"test-analysis\",\"status\":\"planned\",\"operation\":\"{command}\",\"args\":{args.len() - 1}}"
+    else:
+        val progress = render_progress(log_opts.progress, 1, 1, "test-analysis-plan")
+        if progress != "":
+            print progress
+        print "Test analysis operation: {command}"
+        print "Argument count: {args.len() - 1}"
+    0
+
+fn print_help():
+    print "{TOOL_NAME} CLI"
+    print ""
+    print "Usage: simple test-analysis [command] [options]"
+    print ""
+    print "Commands:"
+    print "  classify <error>       Classify an error type"
+    print "  extract <error>        Extract a likely missing feature"
+    print "  analyze                Analyze all failures"
+    print "  details                Show failed test details"
+    print "  features               Cross-reference features"
+    print ""
+    print "Options:"
+    print "  -h, --help             Show this help message"
+    print "  -v, --version          Show version information"
+    print "  --db=PATH              Path to test database"
+    print "  --category=CAT         Filter by category"
+    print "  --limit=N              Limit details output"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
+fn analysis_is_command(command: text) -> bool:
+    command == "classify" or command == "extract" or command == "analyze" or
+        command == "details" or command == "features"
+
+fn analysis_requires_message(command: text) -> bool:
+    command == "classify" or command == "extract"
+
+fn analysis_message(args: [text]) -> text:
+    var parts: [text] = []
+    var i = 1
+    while i < args.len():
+        parts.push(args[i])
+        i = i + 1
+    parts.join(" ")
+
+fn classify_error_text(message: text) -> text:
+    if message.contains("parse error") or message.contains("Unexpected token"):
+        return "parse_error"
+    if message.contains("semantic:") or message.contains("not found"):
+        return "semantic_error"
+    if message.contains("No such file"):
+        return "file_not_found"
+    if message.contains("timeout") or message.contains("timed out"):
+        return "timeout"
+    "unknown_error"
+
+fn extract_feature_text(message: text) -> text:
+    if message.contains("expected Fn, found Static"):
+        return "static_fields"
+    if message.contains("expected expression, found At"):
+        return "matrix_multiplication"
+    if message.contains("method `char_at` not found"):
+        return "string_char_at_method"
+    if message.contains("cannot modify"):
+        return "mutability_checking"
+    "unknown_feature"
+
+fn analysis_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn analysis_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if analysis_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

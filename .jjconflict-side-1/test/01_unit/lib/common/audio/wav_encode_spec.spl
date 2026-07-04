@@ -1,0 +1,157 @@
+# @cover src/lib/common/audio/wav_encode.spl 90%
+# @tag: audio, wav, encode
+#
+# WAV Encode Specification
+#
+# Verifies the RIFF/WAVE encoder: exact header fields, exact PCM16 sample
+# bytes at documented offsets (asserting the trunc-then-clamp rounding rule),
+# exact bit-for-bit float32 sample bytes, mono/stereo channel fields, and
+# deterministic (byte-identical) repeat encoding.
+#
+# Plan: doc/03_plan/app/game_tools/sound_music_effects_plan.md (Step 1)
+
+use std.spec.{describe, context, it, expect}
+use std.common.audio.wav_encode.{encode_wav_pcm16, encode_wav_f32}
+
+# ============================================================================
+# Test Fixture — 4 known f32 samples covering zero/mid/negative-mid/clip
+# ============================================================================
+
+val SAMPLES: [f32] = [0.0, 0.5, -0.5, 1.0]
+
+describe "wav_encode encode_wav_pcm16":
+
+    context "RIFF/WAVE/fmt header — mono, 44100 Hz":
+
+        it "emits exact RIFF/WAVE/fmt/data chunk tags and sizes":
+            val bytes = encode_wav_pcm16(SAMPLES, 1, 44100)
+            expect(bytes.len()).to_equal(52)  # 44-byte header + 4 samples * 2 bytes
+            # "RIFF"
+            expect(bytes[0]).to_equal(82u8)
+            expect(bytes[1]).to_equal(73u8)
+            expect(bytes[2]).to_equal(70u8)
+            expect(bytes[3]).to_equal(70u8)
+            # RIFF chunk size = 36 + data_len(8) = 44, little-endian
+            expect(bytes[4]).to_equal(44u8)
+            expect(bytes[5]).to_equal(0u8)
+            expect(bytes[6]).to_equal(0u8)
+            expect(bytes[7]).to_equal(0u8)
+            # "WAVE"
+            expect(bytes[8]).to_equal(87u8)
+            expect(bytes[9]).to_equal(65u8)
+            expect(bytes[10]).to_equal(86u8)
+            expect(bytes[11]).to_equal(69u8)
+            # "fmt "
+            expect(bytes[12]).to_equal(102u8)
+            expect(bytes[13]).to_equal(109u8)
+            expect(bytes[14]).to_equal(116u8)
+            expect(bytes[15]).to_equal(32u8)
+            # fmt chunk size = 16
+            expect(bytes[16]).to_equal(16u8)
+            expect(bytes[17]).to_equal(0u8)
+            expect(bytes[18]).to_equal(0u8)
+            expect(bytes[19]).to_equal(0u8)
+            # audio_format = 1 (PCM)
+            expect(bytes[20]).to_equal(1u8)
+            expect(bytes[21]).to_equal(0u8)
+            # channels = 1
+            expect(bytes[22]).to_equal(1u8)
+            expect(bytes[23]).to_equal(0u8)
+            # sample_rate = 44100 LE = 0x0000AC44
+            expect(bytes[24]).to_equal(68u8)
+            expect(bytes[25]).to_equal(172u8)
+            expect(bytes[26]).to_equal(0u8)
+            expect(bytes[27]).to_equal(0u8)
+            # byte_rate = sample_rate * block_align = 88200 LE = 0x00015888
+            expect(bytes[28]).to_equal(136u8)
+            expect(bytes[29]).to_equal(88u8)
+            expect(bytes[30]).to_equal(1u8)
+            expect(bytes[31]).to_equal(0u8)
+            # block_align = channels * bytes_per_sample = 2
+            expect(bytes[32]).to_equal(2u8)
+            expect(bytes[33]).to_equal(0u8)
+            # bits per sample = 16
+            expect(bytes[34]).to_equal(16u8)
+            expect(bytes[35]).to_equal(0u8)
+            # "data"
+            expect(bytes[36]).to_equal(100u8)
+            expect(bytes[37]).to_equal(97u8)
+            expect(bytes[38]).to_equal(116u8)
+            expect(bytes[39]).to_equal(97u8)
+            # data chunk size = 4 samples * 2 bytes = 8
+            expect(bytes[40]).to_equal(8u8)
+            expect(bytes[41]).to_equal(0u8)
+            expect(bytes[42]).to_equal(0u8)
+            expect(bytes[43]).to_equal(0u8)
+
+    context "exact PCM16 sample bytes at documented rounding (trunc(s*32768), clamped)":
+
+        it "0.0 -> 0x0000, 0.5 -> 0x4000, -0.5 -> 0xC000 (u16), 1.0 -> clamped 0x7FFF":
+            val bytes = encode_wav_pcm16(SAMPLES, 1, 44100)
+            # sample 0: 0.0 -> 0
+            expect(bytes[44]).to_equal(0u8)
+            expect(bytes[45]).to_equal(0u8)
+            # sample 1: 0.5 -> trunc(0.5 * 32768) = 16384 = 0x4000
+            expect(bytes[46]).to_equal(0u8)
+            expect(bytes[47]).to_equal(64u8)
+            # sample 2: -0.5 -> trunc(-0.5 * 32768) = -16384 -> u16 0xC000
+            expect(bytes[48]).to_equal(0u8)
+            expect(bytes[49]).to_equal(192u8)
+            # sample 3: 1.0 -> trunc(1.0 * 32768) = 32768, clamped to 32767 = 0x7FFF
+            expect(bytes[50]).to_equal(255u8)
+            expect(bytes[51]).to_equal(127u8)
+
+    context "stereo channel field":
+
+        it "sets channels=2 and block_align=4 for a stereo buffer":
+            val stereo: [f32] = [0.0, 0.0, 1.0, -1.0]
+            val bytes = encode_wav_pcm16(stereo, 2, 8000)
+            expect(bytes[22]).to_equal(2u8)
+            expect(bytes[23]).to_equal(0u8)
+            expect(bytes[32]).to_equal(4u8)
+            expect(bytes[33]).to_equal(0u8)
+
+    context "determinism":
+
+        it "produces byte-identical output across two separate encode calls":
+            val bytes1 = encode_wav_pcm16(SAMPLES, 1, 44100)
+            val bytes2 = encode_wav_pcm16(SAMPLES, 1, 44100)
+            expect(bytes1).to_equal(bytes2)
+
+describe "wav_encode encode_wav_f32":
+
+    context "bit-exact IEEE-754 float32 samples, format code 3":
+
+        it "sets audio_format=3 and emits exact little-endian IEEE-754 bit patterns":
+            val bytes = encode_wav_f32(SAMPLES, 1, 44100)
+            expect(bytes.len()).to_equal(60)  # 44-byte header + 4 samples * 4 bytes
+            # audio_format = 3 (IEEE float)
+            expect(bytes[20]).to_equal(3u8)
+            expect(bytes[21]).to_equal(0u8)
+            # sample 0: 0.0 -> 0x00000000
+            expect(bytes[44]).to_equal(0u8)
+            expect(bytes[45]).to_equal(0u8)
+            expect(bytes[46]).to_equal(0u8)
+            expect(bytes[47]).to_equal(0u8)
+            # sample 1: 0.5 -> 0x3F000000 LE
+            expect(bytes[48]).to_equal(0u8)
+            expect(bytes[49]).to_equal(0u8)
+            expect(bytes[50]).to_equal(0u8)
+            expect(bytes[51]).to_equal(63u8)
+            # sample 2: -0.5 -> 0xBF000000 LE
+            expect(bytes[52]).to_equal(0u8)
+            expect(bytes[53]).to_equal(0u8)
+            expect(bytes[54]).to_equal(0u8)
+            expect(bytes[55]).to_equal(191u8)
+            # sample 3: 1.0 -> 0x3F800000 LE
+            expect(bytes[56]).to_equal(0u8)
+            expect(bytes[57]).to_equal(0u8)
+            expect(bytes[58]).to_equal(128u8)
+            expect(bytes[59]).to_equal(63u8)
+
+    context "determinism":
+
+        it "produces byte-identical output across two separate encode calls":
+            val bytes1 = encode_wav_f32(SAMPLES, 1, 44100)
+            val bytes2 = encode_wav_f32(SAMPLES, 1, 44100)
+            expect(bytes1).to_equal(bytes2)

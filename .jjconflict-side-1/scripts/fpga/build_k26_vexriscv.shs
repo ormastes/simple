@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Build K26 VexRiscv-SMP bitstream via Vivado 2025.2
+# Usage: sh scripts/fpga/build_k26_vexriscv.shs [--synth-only]
+
+set -euo pipefail
+
+VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
+BUILD_DIR="build/fpga/k26"
+LOCK_DIR="$BUILD_DIR.lock"
+RTL_DIR="build/vhdl/rv64"
+TCL_FILE="$BUILD_DIR/build_vexriscv.tcl"
+XDC_FILE="$BUILD_DIR/k26_uart.xdc"
+PRELIGHT_BITSTREAM="build/build/xilinx_kv260/gateware/xilinx_kv260.bit"
+
+if [ ! -f "$VIVADO_SETTINGS" ]; then
+    echo "ERROR: Vivado not found at $VIVADO_SETTINGS"
+    echo "Install Vivado 2025.2 or set VIVADO_SETTINGS env var"
+    exit 1
+fi
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "ERROR: RV64 K26 Vivado build already running ($LOCK_DIR)" >&2
+    exit 75
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+# shellcheck disable=SC1090
+. "$VIVADO_SETTINGS"
+
+mkdir -p "$BUILD_DIR"
+
+echo "Generating RV64 VHDL and Vivado TCL project..."
+bash scripts/fpga/generate_rv64_vhdl.shs
+if [ "${ALLOW_PLACEHOLDER_RTL:-0}" != "1" ] &&
+    grep -Eiq 'stub|placeholder' "$RTL_DIR/rv64gc_core.vhd"; then
+    echo "ERROR: $RTL_DIR/rv64gc_core.vhd is placeholder RTL; refusing to build a non-executable K26 bitstream." >&2
+    echo "Set ALLOW_PLACEHOLDER_RTL=1 only for Vivado plumbing diagnostics." >&2
+    exit 2
+fi
+if [ "${ALLOW_PLACEHOLDER_RTL:-0}" != "1" ] && ! grep -q '<=' "$RTL_DIR/rv64gc_core.vhd"; then
+    echo "ERROR: $RTL_DIR/rv64gc_core.vhd has no signal assignments; refusing to build a non-executable K26 bitstream." >&2
+    echo "Set ALLOW_PLACEHOLDER_RTL=1 only for Vivado plumbing diagnostics." >&2
+    exit 2
+fi
+cat > "$XDC_FILE" <<XDC
+set_property PACKAGE_PIN H12 [get_ports uart_tx]
+set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
+XDC
+cat > "$TCL_FILE" <<TCL
+set enable_uart_ila ${ENABLE_UART_ILA:-0}
+set ila_reset_release_count ${ILA_RESET_RELEASE_COUNT:-500000000}
+set ila_data_depth ${ILA_DATA_DEPTH:-4096}
+create_project k26_vexriscv $BUILD_DIR/k26_vexriscv -part xck26-sfvc784-2lv-c -force
+add_files [glob $RTL_DIR/*.vhd]
+add_files -fileset constrs_1 $XDC_FILE
+set_property top soc_top_rv64_k26 [current_fileset]
+if {\$enable_uart_ila} {
+  set_property generic "RESET_RELEASE_COUNT=\$ila_reset_release_count" [current_fileset]
+}
+update_compile_order -fileset sources_1
+launch_runs synth_1
+wait_on_run synth_1
+open_run synth_1
+report_utilization -file $BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_utilization_synth.rpt
+report_timing_summary -file $BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_timing_summary_synth.rpt
+if {\$enable_uart_ila} {
+  set uart_nets [lsort [get_nets -hier -filter {NAME =~ *uart_ila_probe[*]}]]
+  set clk_nets [get_nets -hier -filter {NAME =~ *cfgmclk*}]
+  if {[llength \$uart_nets] == 0} {
+    puts "ERROR: ENABLE_UART_ILA requested but uart_ila_probe net was not found"
+    exit 4
+  }
+  if {[llength \$clk_nets] == 0} {
+    puts "ERROR: ENABLE_UART_ILA requested but cfgmclk net was not found"
+    exit 4
+  }
+  create_debug_core u_uart_ila ila
+  set_property C_DATA_DEPTH \$ila_data_depth [get_debug_cores u_uart_ila]
+  set_property C_INPUT_PIPE_STAGES 1 [get_debug_cores u_uart_ila]
+  connect_debug_port u_uart_ila/clk [lindex \$clk_nets 0]
+  set bit_index 0
+  foreach uart_net \$uart_nets {
+    if {\$bit_index > 0} {
+      create_debug_port u_uart_ila probe
+    }
+    connect_debug_port u_uart_ila/probe\$bit_index \$uart_net
+    incr bit_index
+  }
+  save_constraints
+  puts "UART_ILA_STATUS=inserted"
+}
+if {[lsearch \$argv synth_only] >= 0} { exit }
+launch_runs impl_1 -to_step write_bitstream
+wait_on_run impl_1
+file copy -force $BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/impl_1/soc_top_rv64_k26.bit $BUILD_DIR/k26_vexriscv.bit
+file mkdir [file dirname $PRELIGHT_BITSTREAM]
+file copy -force $BUILD_DIR/k26_vexriscv.bit $PRELIGHT_BITSTREAM
+TCL
+
+SYNTH_ONLY=""
+if [ "${1:-}" = "--synth-only" ]; then
+    SYNTH_ONLY="1"
+fi
+
+echo "=== K26 VexRiscv-SMP Build ==="
+echo "Part:    xck26-sfvc784-2lv-c"
+echo "Build:   $BUILD_DIR"
+
+if [ -n "$SYNTH_ONLY" ]; then
+    echo "Mode:    synthesis only"
+    vivado -mode batch -source "$TCL_FILE" -tclargs synth_only \
+        -journal "$BUILD_DIR/vivado.jou" -log "$BUILD_DIR/vivado.log" 2>&1 | tail -40
+    vivado_rc="${PIPESTATUS[0]}"
+else
+    echo "Mode:    full (synth + impl + bitstream)"
+    vivado -mode batch -source "$TCL_FILE" \
+        -journal "$BUILD_DIR/vivado.jou" -log "$BUILD_DIR/vivado.log" 2>&1 | tail -40
+    vivado_rc="${PIPESTATUS[0]}"
+fi
+
+if [ "$vivado_rc" -ne 0 ]; then
+    echo "ERROR: Vivado failed (exit $vivado_rc); see $BUILD_DIR/vivado.log"
+    exit "$vivado_rc"
+fi
+
+UTIL_REPORT="$BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_utilization_synth.rpt"
+if [ -f "$UTIL_REPORT" ] &&
+    grep -Eq '^\| CLB LUTs\*?[[:space:]]+\|[[:space:]]+0[[:space:]]+\|' "$UTIL_REPORT" &&
+    grep -Eq '^\|[[:space:]]+RAMB36/FIFO\*[[:space:]]+\|[[:space:]]+0[[:space:]]+\|' "$UTIL_REPORT" &&
+    grep -Eq '^\|[[:space:]]+RAMB18[[:space:]]+\|[[:space:]]+0[[:space:]]+\|' "$UTIL_REPORT"; then
+    echo "ERROR: Vivado synthesized no CPU/RAM logic; only trivial IO remains. See $UTIL_REPORT" >&2
+    exit 3
+fi
+
+if [ -n "$SYNTH_ONLY" ]; then
+    sh scripts/check/convert-riscv-vivado-reports.shs rv64 \
+        "$BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_utilization_synth.rpt" \
+        "$BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26_timing_summary_synth.rpt" \
+        "${RISCV_RV64_MHZ:-50}" \
+        "${RISCV_SYNTH_REPORT_DIR:-build/riscv_synth_reports}"
+    echo "SUCCESS: Synthesis checkpoint at $BUILD_DIR/k26_vexriscv/k26_vexriscv.runs/synth_1/soc_top_rv64_k26.dcp"
+    exit 0
+fi
+
+if [ -f "$BUILD_DIR/k26_vexriscv.bit" ]; then
+    echo "SUCCESS: Bitstream at $BUILD_DIR/k26_vexriscv.bit"
+else
+    echo "WARNING: Bitstream not found — check Vivado logs in $BUILD_DIR"
+fi

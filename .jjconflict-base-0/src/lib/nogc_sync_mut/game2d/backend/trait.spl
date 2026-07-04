@@ -1,0 +1,81 @@
+# std.game2d.backend.trait — GameBackend trait surface (Wave B, AC-5/AC-1)
+#
+# Pure Simple, no inheritance. Backends compose by holding their own state
+# and *implementing* this trait via standalone `impl <Class>: GameBackend`
+# blocks at their declaration sites.
+
+use std.nogc_sync_mut.engine.render.command.{RenderCommandBuffer}
+use std.nogc_sync_mut.game2d.render.canvas.{Canvas}
+use std.nogc_sync_mut.game2d.render.image.{Image, RenderError}
+use std.nogc_sync_mut.game2d.audio.{Sound, AudioError}
+use std.nogc_sync_mut.game2d.input.snapshot.{InputSnapshot}
+
+
+# WindowConfig — minimal window descriptor used by `create_window`.
+class WindowConfig:
+    title: text
+    width: i64
+    height: i64
+    fullscreen: bool
+    vsync: bool
+    pixel_scale: i64
+
+    static fn default() -> WindowConfig:
+        WindowConfig(
+            title: "Simple Game",
+            width: 800,
+            height: 600,
+            fullscreen: false,
+            vsync: true,
+            pixel_scale: 1
+        )
+
+
+# Window — opaque handle returned by `create_window`. Backends interpret
+# the `raw` field in their own way (SDL handle, headless dummy, …).
+class Window:
+    raw: i64
+    width: i64
+    height: i64
+
+    static fn null() -> Window:
+        Window(raw: 0, width: 0, height: 0)
+
+
+# Event — simplified event union for `poll_native_events`. Wave C may extend.
+class Event:
+    kind: text       # "quit" | "key" | "mouse" | "none"
+    key_code: i64
+    key_down: bool
+    mouse_x: i64
+    mouse_y: i64
+
+    static fn quit() -> Event:
+        Event(kind: "quit", key_code: 0, key_down: false, mouse_x: 0, mouse_y: 0)
+
+    static fn none() -> Event:
+        Event(kind: "none", key_code: 0, key_down: false, mouse_x: 0, mouse_y: 0)
+
+
+# GameBackend — backend trait. Implementations live in headless_backend.spl
+# and sdl_backend.spl. Composition only — no inheritance.
+#
+# NOTE: the poll method is named `poll_native_events` (not `poll_events`) to
+# dodge a JIT bare-name method-dispatch collision (see
+# doc/08_tracking/bug/jit_bare_name_method_dispatch_collision_2026-07-02.md):
+# two co-compiled classes with a method literally named `poll_events` (this
+# trait's implementors previously collided with an unrelated `poll_events`
+# elsewhere in the co-compiled unit) corrupt each other's compiled code and
+# SIGSEGV, even if the method body is never called. `begin_frame`/etc. share
+# the same trait-witness co-compilation unit, so the corruption was not
+# confined to the colliding method — any call in the unit could crash.
+trait GameBackend:
+    me gb_create_window(self, cfg: WindowConfig) -> Window
+    fn poll_native_events(self, events_out: [Event]) -> i64
+    fn gb_begin_frame(self) -> Canvas
+    fn gb_end_frame(self)
+    me gb_execute_commands(self, cmds: RenderCommandBuffer)
+    fn gb_load_image(self, path: text) -> Result<Image, RenderError>
+    fn gb_load_sound(self, path: text) -> Result<Sound, AudioError>
+    me gb_shutdown(self)
+    fn gb_current_input(self) -> InputSnapshot

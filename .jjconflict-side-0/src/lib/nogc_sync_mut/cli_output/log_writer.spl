@@ -1,0 +1,91 @@
+# CLI Log Writer
+#
+# Saves all CLI output to timestamped log files under build/log/.
+# Strips ANSI escape codes before writing to ensure clean log files.
+
+use app.io.file_ops.{file_write, file_append, file_exists, file_read}
+use app.io.dir_ops.{dir_create_all}
+use app.io.time_ops.{time_now_unix_micros, timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
+use app.io.process_ops.{shell}
+use std.nogc_sync_mut.io.pipe.{Stdout, Stderr}
+
+fn log_open(command: text) -> text:
+    val log_dir = "build/log/{command}"
+    dir_create_all(log_dir)
+    val micros = time_now_unix_micros()
+    val year = timestamp_year(micros)
+    val month = timestamp_month(micros)
+    val day = timestamp_day(micros)
+    val hour = timestamp_hour(micros)
+    val minute = timestamp_minute(micros)
+    val second = timestamp_second(micros)
+    # Pad components to 2 digits
+    val month_s = _pad2(month)
+    val day_s = _pad2(day)
+    val hour_s = _pad2(hour)
+    val minute_s = _pad2(minute)
+    val second_s = _pad2(second)
+    val log_path = "{log_dir}/{year}{month_s}{day_s}_{hour_s}{minute_s}{second_s}.log"
+    file_write(log_path, "")
+    log_path
+
+fn log_line(log_path: text, line: text):
+    val clean = _strip_ansi(line)
+    file_append(log_path, "{clean}\n")
+
+fn log_close(log_path: text, command: text):
+    shell("ln -sf {log_path} build/log/{command}/latest.log")
+
+fn log_show(command: text):
+    val latest_path = "build/log/{command}/latest.log"
+    if file_exists(latest_path):
+        val content = file_read(latest_path)
+        var stdout = Stdout()
+        stdout.write_text(content)
+    else:
+        var stderr = Stderr()
+        stderr.write_text("error: no log found at {latest_path}\n")
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _pad2(n: i64) -> text:
+    if n < 10:
+        "0{n}"
+    else:
+        "{n}"
+
+fn _strip_ansi(s: text) -> text:
+    # Strip ANSI escape sequences by scanning for ESC[ ... m patterns.
+    var parts: [text] = []
+    var i = 0
+    var in_escape = false
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if in_escape:
+            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z"):
+                in_escape = false
+            i = i + 1
+            continue
+        if i + 1 < s.len():
+            val next = s[i + 1:i + 2]
+            if next == "[":
+                var j = i + 2
+                var looks_like_ansi = false
+                while j < s.len():
+                    val c = s[j:j + 1]
+                    if (c >= "0" and c <= "9") or c == ";" or c == "?":
+                        j = j + 1
+                    elif (c >= "a" and c <= "z") or (c >= "A" and c <= "Z"):
+                        looks_like_ansi = true
+                        j = j + 1
+                        break
+                    else:
+                        break
+                if looks_like_ansi:
+                    i = j
+                    continue
+        parts.push(ch)
+        i = i + 1
+    parts.join("")

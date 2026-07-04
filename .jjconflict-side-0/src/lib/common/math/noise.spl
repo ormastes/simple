@@ -1,0 +1,158 @@
+# Seeded value/Perlin noise — tier-neutral, pure functions only.
+#
+# `Perm` is built once from a seed via an INTERNAL hash (splitmix/LCG-style,
+# distinct constants from random_pure.spl). It must NOT reuse random_pure's
+# shared-state `_state` LCG: noise sampling has to be position-pure and
+# call-order-independent (sampling (3,4) then (1,2) must give the same
+# results as the reverse order), which a shared mutable generator cannot
+# guarantee. random_pure's LCG stays reserved for scatter/CA/BSP dice, where
+# call order is the point (see cave_ca.spl).
+#
+# Import path: use std.common.math.noise.{Perm, perm_new, noise2, noise3, fbm2}
+
+use std.common.math.math.{math_lerp}
+
+extern fn rt_math_floor(x: f64) -> f64
+
+# ---------------------------------------------------------------------------
+# Internal seeded hash (builds the permutation table only — bounded to
+# small integers, so plain i64 arithmetic never overflows)
+# ---------------------------------------------------------------------------
+
+val _MOD: i64 = 4294967296  # 2^32
+val _MIX_A: i64 = 1103515245
+val _MIX_C: i64 = 12345
+
+fn _mix_step(state: i64) -> i64:
+    """One step of the internal permutation-seeding generator.
+
+    Distinct constants from random_pure.spl's shared LCG on purpose — this
+    generator is local/explicit-state, never touches shared mutable state.
+    """
+    val next = (_MIX_A * state + _MIX_C) % _MOD
+    if next < 0: next + _MOD else: next
+
+struct Perm:
+    """Seeded permutation table (256 entries, duplicated to 512 to avoid
+    wraparound bounds checks in noise2/noise3)."""
+    table: [i64]
+
+pub fn perm_new(seed: i64) -> Perm:
+    """Build a seeded permutation table via a Fisher-Yates shuffle driven by
+    the internal mix step. Same seed always yields the same table."""
+    var p: [i64] = []
+    var i: i64 = 0
+    while i < 256:
+        p.push(i)
+        i = i + 1
+    var state = seed % _MOD
+    if state < 0:
+        state = state + _MOD
+    var idx: i64 = 255
+    while idx > 0:
+        state = _mix_step(state)
+        val j = state % (idx + 1)
+        val tmp = p[idx]
+        p[idx] = p[j]
+        p[j] = tmp
+        idx = idx - 1
+    var table: [i64] = []
+    i = 0
+    while i < 512:
+        table.push(p[i % 256])
+        i = i + 1
+    Perm(table: table)
+
+# ---------------------------------------------------------------------------
+# Gradient noise
+# ---------------------------------------------------------------------------
+
+fn _fade(t: f64) -> f64:
+    """Perlin's quintic fade curve: 6t^5 - 15t^4 + 10t^3."""
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+fn _grad2(hash: i64, x: f64, y: f64) -> f64:
+    val h = hash & 3
+    if h == 0: x + y
+    elif h == 1: 0.0 - x + y
+    elif h == 2: x - y
+    else: 0.0 - x - y
+
+fn _grad3(hash: i64, x: f64, y: f64, z: f64) -> f64:
+    val h = hash & 15
+    val u = if h < 8: x else: y
+    val v = if h < 4: y elif (h == 12 or h == 14): x else: z
+    val ru = if (h & 1) == 0: u else: 0.0 - u
+    val rv = if (h & 2) == 0: v else: 0.0 - v
+    ru + rv
+
+pub fn noise2(perm: Perm, x: f64, y: f64) -> f64:
+    """2D gradient (Perlin) noise, roughly bounded in [-1, 1].
+
+    Exactly 0.0 at every integer lattice point (the corner coinciding with
+    the sample point always has a zero offset, so its gradient dot product
+    is 0 and every other corner's interpolation weight is also 0).
+    """
+    val fx = rt_math_floor(x)
+    val fy = rt_math_floor(y)
+    val xi = (fx as i64) & 255
+    val yi = (fy as i64) & 255
+    val xf = x - fx
+    val yf = y - fy
+    val u = _fade(xf)
+    val v = _fade(yf)
+    val t = perm.table
+    val aa = t[t[xi] + yi]
+    val ab = t[t[xi] + yi + 1]
+    val ba = t[t[xi + 1] + yi]
+    val bb = t[t[xi + 1] + yi + 1]
+    val x1 = math_lerp(_grad2(aa, xf, yf), _grad2(ba, xf - 1.0, yf), u)
+    val x2 = math_lerp(_grad2(ab, xf, yf - 1.0), _grad2(bb, xf - 1.0, yf - 1.0), u)
+    math_lerp(x1, x2, v)
+
+pub fn noise3(perm: Perm, x: f64, y: f64, z: f64) -> f64:
+    """3D gradient (Perlin) noise, roughly bounded in [-1, 1].
+    Exactly 0.0 at every integer lattice point (same reasoning as noise2)."""
+    val fx = rt_math_floor(x)
+    val fy = rt_math_floor(y)
+    val fz = rt_math_floor(z)
+    val xi = (fx as i64) & 255
+    val yi = (fy as i64) & 255
+    val zi = (fz as i64) & 255
+    val xf = x - fx
+    val yf = y - fy
+    val zf = z - fz
+    val u = _fade(xf)
+    val v = _fade(yf)
+    val w = _fade(zf)
+    val t = perm.table
+    val a = t[xi] + yi
+    val aa = t[a] + zi
+    val ab = t[a + 1] + zi
+    val b = t[xi + 1] + yi
+    val ba = t[b] + zi
+    val bb = t[b + 1] + zi
+    val x1 = math_lerp(_grad3(t[aa], xf, yf, zf), _grad3(t[ba], xf - 1.0, yf, zf), u)
+    val x2 = math_lerp(_grad3(t[ab], xf, yf - 1.0, zf), _grad3(t[bb], xf - 1.0, yf - 1.0, zf), u)
+    val y1 = math_lerp(x1, x2, v)
+    val x3 = math_lerp(_grad3(t[aa + 1], xf, yf, zf - 1.0), _grad3(t[ba + 1], xf - 1.0, yf, zf - 1.0), u)
+    val x4 = math_lerp(_grad3(t[ab + 1], xf, yf - 1.0, zf - 1.0), _grad3(t[bb + 1], xf - 1.0, yf - 1.0, zf - 1.0), u)
+    val y2 = math_lerp(x3, x4, v)
+    math_lerp(y1, y2, w)
+
+pub fn fbm2(perm: Perm, x: f64, y: f64, octaves: i64, lacunarity: f64, gain: f64) -> f64:
+    """Fractal Brownian motion: sum of `octaves` noise2 layers at increasing
+    frequency (lacunarity) and decreasing amplitude (gain), normalized by
+    total amplitude so the result stays roughly bounded in [-1, 1]."""
+    var freq = 1.0
+    var amp = 1.0
+    var sum = 0.0
+    var norm = 0.0
+    var i: i64 = 0
+    while i < octaves:
+        sum = sum + noise2(perm, x * freq, y * freq) * amp
+        norm = norm + amp
+        freq = freq * lacunarity
+        amp = amp * gain
+        i = i + 1
+    if norm > 0.0: sum / norm else: sum

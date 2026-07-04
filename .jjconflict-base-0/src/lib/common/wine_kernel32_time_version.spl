@@ -1,0 +1,80 @@
+"""Bounded KERNEL32 time and version bridge for Wine startup probes."""
+
+class WineKernel32TimeVersionClock:
+    tick_count_ms: i64
+    performance_counter: i64
+    performance_frequency: i64
+    version_major: i64
+    version_minor: i64
+    version_build: i64
+    platform_id: text
+
+class WineKernel32TimeVersionResult:
+    ok: bool
+    error: text
+    tick_count_ms: i64
+    performance_counter: i64
+    performance_frequency: i64
+    version_value: i64
+    version_text: text
+    platform_id: text
+    operations: text
+
+fn _clock(tick_count_ms: i64, performance_counter: i64, performance_frequency: i64, version_major: i64, version_minor: i64, version_build: i64, platform_id: text) -> WineKernel32TimeVersionClock:
+    WineKernel32TimeVersionClock(tick_count_ms: tick_count_ms, performance_counter: performance_counter, performance_frequency: performance_frequency, version_major: version_major, version_minor: version_minor, version_build: version_build, platform_id: platform_id)
+
+fn _result(ok: bool, error: text, tick_count_ms: i64, performance_counter: i64, performance_frequency: i64, version_value: i64, version_text: text, platform_id: text, operations: text) -> WineKernel32TimeVersionResult:
+    WineKernel32TimeVersionResult(ok: ok, error: error, tick_count_ms: tick_count_ms, performance_counter: performance_counter, performance_frequency: performance_frequency, version_value: version_value, version_text: version_text, platform_id: platform_id, operations: operations)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    if symbols.len() == 0:
+        return "bridge-missing:kernel32-time-version"
+    for symbol in symbols:
+        if symbol != "GetTickCount" and symbol != "QueryPerformanceCounter" and symbol != "QueryPerformanceFrequency" and symbol != "GetVersion" and symbol != "GetVersionExW":
+            return "bridge-wrong-category:" + symbol
+    if symbols.len() != 5:
+        return "kernel32-time-version-sequence-count-mismatch"
+    if symbols[0] != "GetTickCount":
+        return "kernel32-time-version-sequence-expected:GetTickCount"
+    if symbols[1] != "QueryPerformanceCounter":
+        return "kernel32-time-version-sequence-expected:QueryPerformanceCounter"
+    if symbols[2] != "QueryPerformanceFrequency":
+        return "kernel32-time-version-sequence-expected:QueryPerformanceFrequency"
+    if symbols[3] != "GetVersion":
+        return "kernel32-time-version-sequence-expected:GetVersion"
+    if symbols[4] != "GetVersionExW":
+        return "kernel32-time-version-sequence-expected:GetVersionExW"
+    "ready"
+
+fn _version_value(clock: WineKernel32TimeVersionClock) -> i64:
+    (clock.version_build << 16) | (clock.version_minor << 8) | clock.version_major
+
+fn _version_text(clock: WineKernel32TimeVersionClock) -> text:
+    "{clock.version_major}.{clock.version_minor}.{clock.version_build}"
+
+pub fn wine_kernel32_time_version_clock_default() -> WineKernel32TimeVersionClock:
+    _clock(1234, 987654321, 10000000, 6, 1, 7601, "VER_PLATFORM_WIN32_NT")
+
+pub fn wine_kernel32_execute_time_version(symbols: [text], clock: WineKernel32TimeVersionClock) -> WineKernel32TimeVersionResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, 0, 0, 0, 0, "", "", "")
+    if clock.tick_count_ms < 0:
+        return _result(false, "GetTickCount:invalid-clock", 0, 0, 0, 0, "", "", "")
+    if clock.performance_counter < 0:
+        return _result(false, "QueryPerformanceCounter:invalid-counter", clock.tick_count_ms, 0, 0, 0, "", "", "GetTickCount")
+    if clock.performance_frequency <= 0:
+        return _result(false, "QueryPerformanceFrequency:invalid-frequency", clock.tick_count_ms, clock.performance_counter, 0, 0, "", "", "GetTickCount QueryPerformanceCounter")
+    if clock.version_major <= 0 or clock.version_minor < 0 or clock.version_build <= 0:
+        return _result(false, "GetVersion:invalid-version", clock.tick_count_ms, clock.performance_counter, clock.performance_frequency, 0, "", "", "GetTickCount QueryPerformanceCounter QueryPerformanceFrequency")
+    _result(
+        true,
+        "",
+        clock.tick_count_ms,
+        clock.performance_counter,
+        clock.performance_frequency,
+        _version_value(clock),
+        _version_text(clock),
+        clock.platform_id,
+        "GetTickCount QueryPerformanceCounter QueryPerformanceFrequency GetVersion GetVersionExW"
+    )

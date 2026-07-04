@@ -1,0 +1,119 @@
+# PBKDF2-HMAC-SHA-256 / SHA-512 industry test vectors
+# (draft-josefsson-pbkdf2-test-vectors-00, widely adopted)
+#
+# Tests the pure-Simple PBKDF2 implementation in
+# src/lib/common/crypto/pbkdf2.spl against de-facto industry reference
+# vectors for SHA-256 and SHA-512.
+#
+# Iteration-count coverage in interpreter mode:
+# - c=1 (TC1)        — instant, RFC vector exact-match.
+# - c=2 (TC2)        — instant, RFC vector exact-match.
+# - c=1000 (extra)   — exercises the fast inner-loop path (cached
+#                      K_ipad / K_opad SHA-256 prefix states + pre-built
+#                      tail block) with a vector cross-checked against
+#                      the unoptimised reference impl on 2026-05-01.
+#
+# c=4096 (TC3/TC5/TC6) and c=80000 (SHA-512 TC2) are NOT exercised here
+# because pure-Simple SHA-256 / SHA-512 throughput in interpreter mode
+# (~9.5 ms per HMAC-SHA-256 even after the 2026-05-01 perf landing)
+# puts a 4096-iter test at ~80 s — over the test runner's 60 s
+# wall-clock watchdog. They are unblocked by the native runtime helpers
+# tracked in
+# `doc/02_requirements/feature/pbkdf2_native_runtime_helpers_2026-05-01.md`.
+# TC4 (c=16777216) remains permanently out of scope for unit-test
+# duration even with a native helper.
+
+use std.spipe.*
+use std.crypto.pbkdf2.{pbkdf2_sha256_bytes, pbkdf2_sha512_bytes}
+use std.crypto.types.{bytes_to_hex}
+
+# ============================================================================
+# Shared byte helpers
+# ============================================================================
+
+fn _password() -> list:
+    # "password" — 8 bytes
+    [0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72, 0x64]
+
+fn _salt() -> list:
+    # "salt" — 4 bytes
+    [0x73, 0x61, 0x6c, 0x74]
+
+fn _long_password_sha512() -> list:
+    # 200 × 'A' — exceeds the 128-byte SHA-512 HMAC block size, so it
+    # forces the `key_bytes.len() > block_size → sha512_bytes(key)`
+    # branch in `hmac_sha512_bytes`. That branch is not covered by the
+    # short-key vector in `crypto_reference_spec.spl`.
+    var pw = []
+    var i = 0
+    while i < 200:
+        pw.push(0x41)
+        i = i + 1
+    pw
+
+# ============================================================================
+# PBKDF2-HMAC-SHA-256 industry test vectors
+# ============================================================================
+
+describe "PBKDF2-HMAC-SHA-256 industry test vectors":
+
+    it "TC1: password=password salt=salt c=1 dkLen=32 → 120fb6cf...":
+        # draft-josefsson-pbkdf2-test-vectors-00 §2
+        expect(bytes_to_hex(pbkdf2_sha256_bytes(_password(), _salt(), 1, 32))).to_equal(
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+        )
+
+    it "TC2: password=password salt=salt c=2 dkLen=32 → ae4d0c95...":
+        # draft-josefsson-pbkdf2-test-vectors-00 §2
+        expect(bytes_to_hex(pbkdf2_sha256_bytes(_password(), _salt(), 2, 32))).to_equal(
+            "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+        )
+
+    it "extra: password=password salt=salt c=1000 dkLen=32 (perf-path coverage)":
+        # Not an RFC vector. Exercises the c-iter fast path (cached
+        # SHA-256 K_ipad/K_opad prefix states + pre-built padding tail
+        # block). Hash cross-checked 2026-05-01 against the reference
+        # pre-optimisation implementation: both produce the same 32-byte
+        # output for these inputs at c=1000.
+        expect(bytes_to_hex(pbkdf2_sha256_bytes(_password(), _salt(), 1000, 32))).to_equal(
+            "632c2812e46d4604102ba7618e9d6d7d2f8128f6266b4a03264d2a0460b7dcb3"
+        )
+
+# ============================================================================
+# PBKDF2-HMAC-SHA-512 industry test vectors
+# ============================================================================
+#
+# Reference vectors from draft-josefsson-pbkdf2-test-vectors-00 §3
+# (de-facto industry vectors for PBKDF2-HMAC-SHA-512). RFC 7914 §11
+# only specifies PBKDF2-HMAC-SHA-256 vectors, not SHA-512.
+#
+# These were added on 2026-05-01 after closing
+# `doc/08_tracking/bug/hmac_sha512_pbkdf2_mismatch_2026-05-01.md` as a
+# bug-doc typo: the bug filer compared `passwd` impl output against the
+# reference vector for `password`. The HMAC-SHA-512 / SHA-512
+# implementations have been verified byte-exact against Python
+# `hashlib.pbkdf2_hmac("sha512", ...)` for all three vectors below.
+
+describe "PBKDF2-HMAC-SHA-512 industry test vectors":
+
+    it "TC1: password=password salt=salt c=1 dkLen=64 → 867f70cf...":
+        # draft-josefsson-pbkdf2-test-vectors-00 §3
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_password(), _salt(), 1, 64))).to_equal(
+            "867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5d513554e1c8cf252c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce"
+        )
+
+    it "TC2: password=password salt=salt c=2 dkLen=64 → e1d9c16a...":
+        # draft-josefsson-pbkdf2-test-vectors-00 §3
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_password(), _salt(), 2, 64))).to_equal(
+            "e1d9c16aa681708a45f5c7c4e215ceb66e011a2e9f0040713f18aefdb866d53cf76cab2868a39b9f7840edce4fef5a82be67335c77a6068e04112754f27ccf4e"
+        )
+
+    it "long-key: password=200×'A' salt=salt c=1 dkLen=64 (HMAC key>block_size)":
+        # Not in any RFC, but cross-checked 2026-05-01 against Python
+        # `hashlib.pbkdf2_hmac("sha512", b"A"*200, b"salt", 1, 64)`.
+        # Forces the `key > 128B → sha512_bytes(key)` branch in
+        # `hmac_sha512_bytes`, which the short-key reference spec does
+        # not cover.
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_long_password_sha512(), _salt(), 1, 64))).to_equal(
+            "d4d976cd28931aa0d74fe2ea17c14c15b6321b6e69520106468a2812bfc79866058d097bd7c71e1c498512f66248928f162833dce24793d7203dc2d2eabe9429"
+        )

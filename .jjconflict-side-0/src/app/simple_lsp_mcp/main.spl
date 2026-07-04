@@ -1,0 +1,322 @@
+# Simple LSP MCP Server - Simple-native replacement for the Python shim
+#
+# Migrated to McpServer facade (Wave C2).
+# Apps own only tool handlers + wiring (design rule D5).
+
+use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jsonrpc_result, jsonrpc_error, has_method, extract_id, read_stdin_message, write_stdout_message}
+use .tools.{
+    arg_field,
+    arg_int_field,
+    run_lsp_query, run_visibility_query, run_visibility_symbols,
+    run_lsp_diagnostics, format_lsp_diagnostics_block,
+    handle_tool_call, handle_resources_list, handle_resource_templates_list,
+    handle_prompts_list, handle_roots_list, handle_logging_set_level
+}
+use std.log.{error}
+use std.io_runtime.{get_args, exit}
+
+val SERVER_NAME = "simple-lsp-mcp"
+val SERVER_VERSION = "0.9.8"
+
+class SimpleLogOptions:
+    log_mode: text
+    surface: text
+    progress: text
+    quiet: bool
+    verbose: bool
+    valid: bool
+    error: text
+
+    static fn defaults() -> SimpleLogOptions:
+        SimpleLogOptions(log_mode: "human", surface: "stdout", progress: "summary", quiet: false, verbose: false, valid: true, error: "")
+
+fn log_options_help() -> [text]:
+    ["--log-mode <human|llm|json>  Select log rendering mode", "--human | --llm | --json     Shorthand log modes", "--stdout | --tui             Select output surface", "--progress <summary|count|dot|none>", "--dots | --count | --no-progress", "--quiet | --verbose"]
+
+fn render_progress(mode: text, done: i64, total: i64, label: text) -> text:
+    if mode == "none":
+        return ""
+    if mode == "dot":
+        return "."
+    var safe_total = total
+    if safe_total <= 0:
+        safe_total = 1
+    if mode == "count":
+        return str(done) + "/" + str(safe_total)
+    label + ": " + str(done) + "/" + str(safe_total)
+
+fn parse_log_options(args: [text]) -> SimpleLogOptions:
+    var opts = SimpleLogOptions.defaults()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--json":
+            opts.log_mode = "json"
+        elif arg == "--llm":
+            opts.log_mode = "llm"
+        elif arg == "--human":
+            opts.log_mode = "human"
+        elif arg == "--quiet":
+            opts.quiet = true
+            opts.progress = "none"
+        elif arg == "--verbose":
+            opts.verbose = true
+        elif arg == "--dots":
+            opts.progress = "dot"
+        elif arg == "--count":
+            opts.progress = "count"
+        elif arg == "--no-progress":
+            opts.progress = "none"
+        elif arg.starts_with("--log-mode="):
+            opts.log_mode = arg.replace("--log-mode=", "")
+        elif arg.starts_with("--progress="):
+            opts.progress = arg.replace("--progress=", "")
+        i = i + 1
+    opts
+
+fn print_usage():
+    print "{SERVER_NAME} {SERVER_VERSION}"
+    print ""
+    print "Usage: simple_lsp_mcp_server [options]"
+    print ""
+    print "Runs the Simple LSP MCP JSON-RPC server over stdin/stdout."
+    print ""
+    print "Options:"
+    print "  -v, --version         Show version"
+    print "  -h, --help            Show this help"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn simple_lsp_mcp_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn simple_lsp_mcp_clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if simple_lsp_mcp_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn simple_lsp_mcp_get_args() -> [text]:
+    val all_args = get_args()
+    var args: [text] = []
+    var found = false
+    var i = 0
+    while i < all_args.len():
+        if found:
+            args.push(all_args[i])
+        elif all_args[i] == "simple-lsp-mcp" or all_args[i] == "simple_lsp_mcp" or all_args[i] == "simple_lsp_mcp_server":
+            found = true
+        i = i + 1
+    if found:
+        return args
+
+    var start_idx = 0
+    i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("/app/simple_lsp_mcp/main.spl") or all_args[i] == "src/app/simple_lsp_mcp/main.spl" or all_args[i].ends_with(".smf"):
+            start_idx = i + 1
+        i = i + 1
+    i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
+
+fn make_position_schema() -> text:
+    var p = LB()
+    p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Path to the source file"))))
+    p = p + "," + jp("line", jo2(jp("type", js("integer")), jp("description", js("0-indexed line number"))))
+    p = p + "," + jp("character", jo2(jp("type", js("integer")), jp("description", js("0-indexed character offset"))))
+    p = p + RB()
+    var req = SB_L() + js("file") + "," + js("line") + "," + js("character") + SB_R()
+    var schema = LB()
+    schema = schema + jp("type", js("object"))
+    schema = schema + "," + jp("properties", p)
+    schema = schema + "," + jp("required", req)
+    schema = schema + RB()
+    schema
+
+fn make_file_schema() -> text:
+    val props = jo1(jp("file", jo2(jp("type", js("string")), jp("description", js("Path to the source file")))))
+    val req = SB_L() + js("file") + SB_R()
+    var schema = LB()
+    schema = schema + jp("type", js("object"))
+    schema = schema + "," + jp("properties", props)
+    schema = schema + "," + jp("required", req)
+    schema = schema + RB()
+    schema
+
+fn handle_position_tool(subcmd: text, is_visibility: bool, a: text) -> text:
+    val file = arg_field(a, "file")
+    val line0 = arg_int_field(a, "line")
+    val char0 = arg_int_field(a, "character")
+    if file == "" or line0 < 0 or char0 < 0:
+        return "Missing required argument: file/line/character"
+    if is_visibility:
+        run_visibility_query(subcmd, file, line0, char0)
+    else:
+        run_lsp_query(subcmd, file, line0, char0)
+
+fn lsp_extract_after(msg: text, search: text) -> text:
+    var offset = 0
+    while offset + search.len() <= msg.len():
+        if msg.substring(offset, offset + search.len()) == search:
+            return msg.substring(offset + search.len(), msg.len())
+        offset = offset + 1
+    ""
+
+fn lsp_extract_id_raw(msg: text) -> text:
+    val after = lsp_extract_after(msg, Q() + "id" + Q() + ":")
+    if after == "":
+        return "null"
+    val trimmed = after.trim()
+    if trimmed == "":
+        return "null"
+    var end = 0
+    var in_string = false
+    var escaped = false
+    while end < trimmed.len():
+        val ch = trimmed[end:end + 1]
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return trimmed.substring(0, end + 1)
+        else:
+            if ch == Q():
+                in_string = true
+            elif ch == "," or ch == RB() or ch == "]":
+                return trimmed.substring(0, end).trim()
+        end = end + 1
+    trimmed.trim()
+
+fn lsp_tool_json(name: text, description: text, schema: text) -> text:
+    var r = LB()
+    r = r + jp("name", js(name))
+    r = r + "," + jp("description", js(description))
+    r = r + "," + jp("inputSchema", schema)
+    r = r + RB()
+    r
+
+fn lsp_tools_list_result(id: text) -> text:
+    var tools: [text] = []
+    val pos_schema = make_position_schema()
+    val file_schema = make_file_schema()
+    tools.push(lsp_tool_json("lsp_definition", "Find where a symbol is defined in a Simple source file.", pos_schema))
+    tools.push(lsp_tool_json("lsp_references", "Find symbol references in Simple source.", pos_schema))
+    tools.push(lsp_tool_json("lsp_hover", "Get hover information for a symbol in Simple source.", pos_schema))
+    tools.push(lsp_tool_json("lsp_symbols", "List symbols in a Simple source file.", file_schema))
+    tools.push(lsp_tool_json("lsp_diagnostics", "Run lightweight diagnostics via simple check.", file_schema))
+    tools.push(lsp_tool_json("lsp_completion", "Get code completions at a position in a Simple source file.", pos_schema))
+    tools.push(lsp_tool_json("lsp_type_at", "Get the inferred type of a symbol at a position.", pos_schema))
+    tools.push(lsp_tool_json("lsp_signature_help", "Get function signature information at a call site.", pos_schema))
+    tools.push(lsp_tool_json("lsp_implementation", "Go to implementation of a trait or interface.", pos_schema))
+    tools.push(lsp_tool_json("lsp_document_highlight", "Highlight all occurrences of a symbol in the same file.", pos_schema))
+    tools.push(lsp_tool_json("lsp_type_definition", "Navigate to the type definition of a symbol.", pos_schema))
+    jsonrpc_result(id, jo1(jp("tools", SB_L() + tools.join(",") + SB_R())))
+
+fn lsp_initialize_result(id: text) -> text:
+    var caps = LB()
+    caps = caps + jp("tools", LB() + RB())
+    caps = caps + "," + jp("resources", LB() + RB())
+    caps = caps + "," + jp("prompts", LB() + RB())
+    caps = caps + "," + jp("logging", LB() + RB())
+    caps = caps + RB()
+    val info = jo2(jp("name", js(SERVER_NAME)), jp("version", js(SERVER_VERSION)))
+    var result = LB()
+    result = result + jp("protocolVersion", js("2025-06-18"))
+    result = result + "," + jp("capabilities", caps)
+    result = result + "," + jp("instructions", js("Simple LSP MCP backed by lsp_query.spl and simple lint. Provides 11 LSP tools."))
+    result = result + "," + jp("serverInfo", info)
+    result = result + RB()
+    jsonrpc_result(id, result)
+
+fn lsp_handle_message(msg: text) -> text:
+    val id = lsp_extract_id_raw(msg)
+    if has_method(msg, "initialize"):
+        return lsp_initialize_result(id)
+    if has_method(msg, "notifications/initialized"):
+        return ""
+    if has_method(msg, "tools/list"):
+        return lsp_tools_list_result(id)
+    if has_method(msg, "tools/call"):
+        return handle_tool_call(id, msg)
+    if has_method(msg, "resources/list"):
+        return handle_resources_list(id)
+    if has_method(msg, "resources/templates/list"):
+        return handle_resource_templates_list(id)
+    if has_method(msg, "prompts/list"):
+        return handle_prompts_list(id)
+    if has_method(msg, "roots/list"):
+        return handle_roots_list(id)
+    if has_method(msg, "logging/setLevel"):
+        return handle_logging_set_level(id, msg)
+    if has_method(msg, "ping"):
+        return jsonrpc_result(id, LB() + RB())
+    if msg.contains(Q() + "method" + Q() + ":" + Q() + "notifications/"):
+        return ""
+    jsonrpc_error(id, -32601, "Method not found")
+
+fn lsp_serve_stdio():
+    var running = true
+    while running:
+        val msg = read_stdin_message()
+        if msg == "":
+            running = false
+        else:
+            val response = lsp_handle_message(msg)
+            if response != "":
+                write_stdout_message(response)
+
+fn main() -> i64:
+    val raw_args = simple_lsp_mcp_get_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("simple-lsp-mcp", log_opts.error)
+        return 1
+
+    val args = simple_lsp_mcp_clean_args(raw_args)
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"simple-lsp-mcp\",\"status\":\"ready\"}"
+            return 0
+    else:
+        val arg = args[0]
+        if arg == "--version" or arg == "-v":
+            if log_opts.log_mode == "json":
+                print "{\"command\":\"simple-lsp-mcp\",\"status\":\"version\",\"version\":\"{SERVER_VERSION}\"}"
+            else:
+                print "{SERVER_NAME} {SERVER_VERSION}"
+            return 0
+        if arg == "--help" or arg == "-h":
+            val progress = render_progress(log_opts.progress, 0, 1, "usage")
+            if progress != "":
+                print progress
+            print_usage()
+            return 0
+        if arg.starts_with("-"):
+            if log_opts.log_mode == "json":
+                print "{\"command\":\"simple-lsp-mcp\",\"status\":\"error\",\"error\":\"unknown option\"}"
+                return 1
+            print "Error: Unknown option: {arg}"
+            print_usage()
+            return 1
+
+    lsp_serve_stdio()
+    0

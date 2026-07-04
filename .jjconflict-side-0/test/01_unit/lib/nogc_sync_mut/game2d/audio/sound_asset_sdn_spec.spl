@@ -1,0 +1,123 @@
+# @cover src/lib/nogc_sync_mut/game2d/audio/sound_asset_sdn.spl 85%
+# @tag: audio, sdn, sound-asset
+#
+# sound.sdn Loader Specification
+#
+# Verifies typed field extraction from a minimal tone sound.sdn, rejection of
+# a missing required `source.type`, and sequence-kind event parsing at exact
+# `at_ms` offsets.
+#
+# Plan: doc/03_plan/app/game_tools/sound_music_effects_plan.md (Step 3)
+
+use std.spec.{describe, context, it, expect}
+use std.io_runtime.{write_file}
+use std.nogc_sync_mut.game2d.audio.sound_asset_sdn.{load_sound_asset}
+
+val TONE_PATH = "build/test-artifacts/sound_asset_sdn_spec_tone.sdn"
+val MISSING_SOURCE_PATH = "build/test-artifacts/sound_asset_sdn_spec_missing_source.sdn"
+val SEQUENCE_PATH = "build/test-artifacts/sound_asset_sdn_spec_sequence.sdn"
+val NOT_SOUND_PATH = "build/test-artifacts/sound_asset_sdn_spec_not_sound.sdn"
+val REVERB_PATH = "build/test-artifacts/sound_asset_sdn_spec_reverb.sdn"
+val REVERB_BAD_ROOM_PATH = "build/test-artifacts/sound_asset_sdn_spec_reverb_bad_room.sdn"
+val REVERB_BAD_WET_PATH = "build/test-artifacts/sound_asset_sdn_spec_reverb_bad_wet.sdn"
+
+fn _write_fixtures() -> bool:
+    var ok = write_file(TONE_PATH, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 440, duration_ms: 200 }\n")
+    ok = ok and write_file(MISSING_SOURCE_PATH, "sound:\n  kind: \"sfx\"\n")
+    ok = ok and write_file(SEQUENCE_PATH, "sound:\n  kind: \"sequence\"\n  events: [ { at_ms: 0, clip: \"kick.wav\" }, { at_ms: 250, clip: \"snare.wav\" } ]\n")
+    ok = ok and write_file(NOT_SOUND_PATH, "scene:\n  name: \"not a sound\"\n")
+    ok = ok and write_file(REVERB_PATH, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 440, duration_ms: 200 }\n  effects: [ { type: \"reverb\", room_size: 0.5, wet: 0.3 } ]\n")
+    ok = ok and write_file(REVERB_BAD_ROOM_PATH, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 440, duration_ms: 200 }\n  effects: [ { type: \"reverb\", room_size: 1.5, wet: 0.3 } ]\n")
+    ok = ok and write_file(REVERB_BAD_WET_PATH, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 440, duration_ms: 200 }\n  effects: [ { type: \"reverb\", room_size: 0.5, wet: -0.1 } ]\n")
+    ok
+
+describe "sound_asset_sdn load_sound_asset":
+
+    context "minimal tone sound.sdn":
+
+        it "parses freq_hz=440, duration_ms=200 from source.tone":
+            expect(_write_fixtures()).to_equal(true)
+            val r = load_sound_asset(TONE_PATH)
+            if val Ok(a) = r:
+                expect(a.kind).to_equal("sfx")
+                expect(a.sample_rate).to_equal(8000)
+                expect(a.source.kind).to_equal("tone")
+                expect(a.source.wave).to_equal("sine")
+                expect(a.source.freq_hz).to_equal(440.0)
+                expect(a.source.duration_ms).to_equal(200.0)
+            if val Err(e) = r:
+                expect(e).to_equal("")
+
+    context "missing required source.type":
+
+        it "rejects with a path-qualified error":
+            expect(_write_fixtures()).to_equal(true)
+            val r = load_sound_asset(MISSING_SOURCE_PATH)
+            if val Ok(_a) = r:
+                expect("loaded").to_equal("should have been rejected")
+            if val Err(e) = r:
+                val has_marker = e.contains("source.type")
+                expect(has_marker).to_equal(true)
+
+    context "sequence kind with 2 events":
+
+        it "parses events at exact at_ms offsets":
+            expect(_write_fixtures()).to_equal(true)
+            val r = load_sound_asset(SEQUENCE_PATH)
+            if val Ok(a) = r:
+                expect(a.kind).to_equal("sequence")
+                expect(a.events.len()).to_equal(2)
+                expect(a.events[0].at_ms).to_equal(0)
+                expect(a.events[0].clip).to_equal("kick.wav")
+                expect(a.events[1].at_ms).to_equal(250)
+                expect(a.events[1].clip).to_equal("snare.wav")
+            if val Err(e) = r:
+                expect(e).to_equal("")
+
+    context "missing top-level sound block":
+
+        it "rejects with a clear error instead of a default asset":
+            expect(_write_fixtures()).to_equal(true)
+            val r = load_sound_asset(NOT_SOUND_PATH)
+            if val Ok(_a) = r:
+                expect("loaded").to_equal("should have been rejected")
+            if val Err(e) = r:
+                val has_marker = e.contains("sound")
+                expect(has_marker).to_equal(true)
+
+    context "missing file":
+
+        it "rejects with a not-found error":
+            val r = load_sound_asset("build/test-artifacts/sound_asset_sdn_spec_does_not_exist.sdn")
+            if val Ok(_a) = r:
+                expect("loaded").to_equal("should have been rejected")
+            if val Err(e) = r:
+                val has_marker = e.contains("not found")
+                expect(has_marker).to_equal(true)
+
+    context "reverb effect":
+
+        it "parses room_size=0.5 and wet=0.3 from effects[0]":
+            expect(_write_fixtures()).to_equal(true)
+            val r = load_sound_asset(REVERB_PATH)
+            var ok = false
+            if val Ok(a) = r:
+                ok = (a.effects.len() == 1 and a.effects[0].kind == "reverb" and
+                    a.effects[0].room_size == 0.5 and a.effects[0].wet == 0.3)
+            expect(ok).to_equal(true)
+
+        it "rejects room_size out of [0,1] with a path-qualified error":
+            expect(_write_fixtures()).to_equal(true)
+            val r = load_sound_asset(REVERB_BAD_ROOM_PATH)
+            var has_marker = false
+            if val Err(e) = r:
+                has_marker = e.contains("effects[0].room_size")
+            expect(has_marker).to_equal(true)
+
+        it "rejects wet out of [0,1] with a path-qualified error":
+            expect(_write_fixtures()).to_equal(true)
+            val r = load_sound_asset(REVERB_BAD_WET_PATH)
+            var has_marker = false
+            if val Err(e) = r:
+                has_marker = e.contains("effects[0].wet")
+            expect(has_marker).to_equal(true)

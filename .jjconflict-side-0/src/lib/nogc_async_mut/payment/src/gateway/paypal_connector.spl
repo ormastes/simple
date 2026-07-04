@@ -1,0 +1,120 @@
+use std.io_runtime
+use std.nogc_sync_mut.http_client.{http_post, response_get_status_code, response_get_body}
+use std.json.{json_parse, json_object_get, json_serialize}
+
+struct PayPalConfig:
+    client_id: text
+    client_secret: text
+    api_base: text
+    access_token: text
+    token_expires_at: int
+
+fn new_paypal_config(client_id: text, client_secret: text, sandbox: bool) -> PayPalConfig:
+    val base = if sandbox: "https://api-m.sandbox.paypal.com" else: "https://api-m.paypal.com"
+    return PayPalConfig {
+        client_id: client_id,
+        client_secret: client_secret,
+        api_base: base,
+        access_token: "",
+        token_expires_at: 0
+    }
+
+fn _paypal_get_access_token(config: PayPalConfig) -> (text, text):
+    val url = config.api_base + "/v1/oauth2/token"
+    val body = "grant_type=client_credentials"
+    val response = http_post(url, body)
+    val status = response_get_status_code(response)
+    val resp_body = response_get_body(response)
+    if status < 200 or status >= 300:
+        return ("", "auth failed: " + resp_body)
+    val parsed = json_parse(resp_body)
+    val tok = json_object_get(parsed, "access_token")
+    return (tok, "")
+
+fn _paypal_post(config: PayPalConfig, path: text, json_body: text) -> (int, text):
+    val url = config.api_base + path
+    val response = http_post(url, json_body)
+    val status = response_get_status_code(response)
+    val resp_body = response_get_body(response)
+    return (status, resp_body)
+
+fn _cents_to_decimal(cents: int) -> text:
+    val dollars = cents / 100
+    val remainder = cents % 100
+    val rem_str = if remainder < 10: "0" + _int_to_text(remainder) else: _int_to_text(remainder)
+    return _int_to_text(dollars) + "." + rem_str
+
+struct PayPalGateway:
+    config: PayPalConfig
+
+fn new_paypal_gateway(client_id: text, client_secret: text, sandbox: bool) -> PayPalGateway:
+    return PayPalGateway { config: new_paypal_config(client_id, client_secret, sandbox) }
+
+impl Gateway for PayPalGateway:
+    fn name(self) -> text:
+        return "paypal"
+
+    fn authorize(self, req: AuthorizeRequest) -> PaymentResult:
+        val amount_str = _cents_to_decimal(req.amount.cents)
+        val json_body = "{\"intent\":\"AUTHORIZE\",\"purchase_units\":[{\"reference_id\":\"" + req.merchant_ref + "\",\"amount\":{\"currency_code\":\"" + req.amount.currency + "\",\"value\":\"" + amount_str + "\"}}]}"
+        val resp = _paypal_post(self.config, "/v2/checkout/orders", json_body)
+        val status = resp[0]
+        val resp_body = resp[1]
+        if status < 200 or status >= 300:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: resp_body }
+        val parsed = json_parse(resp_body)
+        val order_id = json_object_get(parsed, "id")
+        val order_status = json_object_get(parsed, "status")
+        if order_status == "CREATED" or order_status == "APPROVED":
+            return PaymentResult { success: true, status: PaymentStatus.Authorized, transaction_id: order_id, error_message: "" }
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: order_id, error_message: "unexpected status: " + order_status }
+
+    fn capture(self, req: CaptureRequest) -> PaymentResult:
+        val path = "/v2/checkout/orders/" + req.transaction_id + "/capture"
+        val resp = _paypal_post(self.config, path, "{}")
+        val status = resp[0]
+        val resp_body = resp[1]
+        if status < 200 or status >= 300:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: req.transaction_id, error_message: resp_body }
+        return PaymentResult { success: true, status: PaymentStatus.Captured, transaction_id: req.transaction_id, error_message: "" }
+
+    fn charge(self, req: ChargeRequest) -> PaymentResult:
+        val amount_str = _cents_to_decimal(req.amount.cents)
+        val json_body = "{\"intent\":\"CAPTURE\",\"purchase_units\":[{\"reference_id\":\"" + req.merchant_ref + "\",\"amount\":{\"currency_code\":\"" + req.amount.currency + "\",\"value\":\"" + amount_str + "\"}}]}"
+        val resp = _paypal_post(self.config, "/v2/checkout/orders", json_body)
+        val status = resp[0]
+        val resp_body = resp[1]
+        if status < 200 or status >= 300:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: resp_body }
+        val parsed = json_parse(resp_body)
+        val order_id = json_object_get(parsed, "id")
+        val capture_path = "/v2/checkout/orders/" + order_id + "/capture"
+        val cap_resp = _paypal_post(self.config, capture_path, "{}")
+        val cap_status = cap_resp[0]
+        val cap_body = cap_resp[1]
+        if cap_status < 200 or cap_status >= 300:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: order_id, error_message: cap_body }
+        return PaymentResult { success: true, status: PaymentStatus.Captured, transaction_id: order_id, error_message: "" }
+
+    fn refund(self, req: RefundRequest) -> PaymentResult:
+        val amount_str = _cents_to_decimal(req.amount.cents)
+        val json_body = "{\"amount\":{\"currency_code\":\"USD\",\"value\":\"" + amount_str + "\"},\"note_to_payer\":\"" + req.reason + "\"}"
+        val path = "/v2/payments/captures/" + req.transaction_id + "/refund"
+        val resp = _paypal_post(self.config, path, json_body)
+        val status = resp[0]
+        val resp_body = resp[1]
+        if status < 200 or status >= 300:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: req.transaction_id, error_message: resp_body }
+        return PaymentResult { success: true, status: PaymentStatus.Refunded, transaction_id: req.transaction_id, error_message: "" }
+
+    fn void_payment(self, req: VoidRequest) -> PaymentResult:
+        val path = "/v2/checkout/orders/" + req.transaction_id + "/void"
+        val resp = _paypal_post(self.config, path, "{}")
+        val status = resp[0]
+        val resp_body = resp[1]
+        if status < 200 or status >= 300:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: req.transaction_id, error_message: resp_body }
+        return PaymentResult { success: true, status: PaymentStatus.Voided, transaction_id: req.transaction_id, error_message: "" }
+
+    fn tokenize(self, req: TokenizeRequest) -> TokenizeResult:
+        return TokenizeResult { success: false, token: "", error_message: "PayPal does not support raw card tokenization — use PayPal Vault API or hosted fields" }

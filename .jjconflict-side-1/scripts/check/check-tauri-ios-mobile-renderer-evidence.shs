@@ -1,0 +1,766 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
+BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/tauri_ios_mobile_renderer}"
+case "$BUILD_DIR" in
+    /*) ;;
+    *) BUILD_DIR="$ROOT_DIR/$BUILD_DIR" ;;
+esac
+PROBE_HELPER="$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl"
+MDI_PROOF_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-mobile-mdi-proof.js"
+IOS_RENDER_LOG_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-ios-render-log-proof.js"
+SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        "$ROOT_DIR"/src/compiler_rust/*|src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "$ROOT_DIR"/bin/simple "$ROOT_DIR"/build/bootstrap/stage3/simple; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ]; then
+        case "$(uname -s):$(uname -m)" in
+            Darwin:arm64) host_release_glob="$ROOT_DIR/release/aarch64-apple-darwin*/simple" ;;
+            Darwin:x86_64) host_release_glob="$ROOT_DIR/release/x86_64-apple-darwin*/simple" ;;
+            Linux:arm64|Linux:aarch64) host_release_glob="$ROOT_DIR/release/aarch64-unknown-linux-gnu/simple" ;;
+            Linux:x86_64) host_release_glob="$ROOT_DIR/release/x86_64-unknown-linux-gnu/simple" ;;
+            *) host_release_glob="" ;;
+        esac
+        for candidate in $host_release_glob; do
+            if [ -x "$candidate" ]; then
+                SIMPLE_BIN="$candidate"
+                SIMPLE_BIN_SOURCE="repo-host-release-fallback"
+                break
+            fi
+        done
+    fi
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+SCREENSHOT="${IOS_RENDERER_SCREENSHOT:-$BUILD_DIR/ios_renderer.png}"
+case "$SCREENSHOT" in
+    /*) ;;
+    *) SCREENSHOT="$ROOT_DIR/$SCREENSHOT" ;;
+esac
+LOG_STREAM="$BUILD_DIR/ios_renderer_log_stream.txt"
+IOS_DEV_LOG="$BUILD_DIR/ios_renderer_tauri_dev.log"
+MDI_PROOF_JSON="$BUILD_DIR/ios_mdi_proof.json"
+MDI_PROOF_VALIDATION_ENV="$BUILD_DIR/ios_mdi_proof.validation.env"
+IOS_RENDER_LOG_VALIDATION_ENV="$BUILD_DIR/ios_render_log.validation.env"
+TIMEOUT_SECS="${IOS_RENDERER_TIMEOUT_SECS:-120}"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+file_size_bytes() {
+    path="$1"
+    if [ -f "$path" ]; then
+        wc -c <"$path" | tr -d '[:space:]'
+    else
+        echo ""
+    fi
+}
+
+file_link_count() {
+    path="$1"
+    if command -v stat >/dev/null 2>&1; then
+        count="$(stat -c '%h' "$path" 2>/dev/null || stat -f '%l' "$path" 2>/dev/null || true)"
+        case "$count" in
+            ''|*[!0-9]*) echo "" ;;
+            *) echo "$count" ;;
+        esac
+    else
+        echo ""
+    fi
+}
+
+num_at_least() {
+    value="$1"
+    min="$2"
+    case "$value" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$value" -ge "$min" ]
+}
+
+artifact_file_reason() {
+    path="$1"
+    expected_size="$2"
+    if [ -n "$path" ] && [ -L "$path" ]; then
+        echo symlink
+        return
+    fi
+    if [ -z "$path" ] || [ ! -s "$path" ]; then
+        echo missing
+        return
+    fi
+    link_count="$(file_link_count "$path")"
+    if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+        echo hardlink
+        return
+    fi
+    actual_size="$(file_size_bytes "$path")"
+    if [ -n "$expected_size" ] && [ "$actual_size" != "$expected_size" ]; then
+        echo size-mismatch
+        return
+    fi
+    echo pass
+}
+
+validation_metric_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/.*[[:space:]]${key}=\\([^[:space:]]*\\).*/\\1/p" "$file" 2>/dev/null | tail -n 1
+}
+
+load_ios_screenshot_artifact_rows() {
+    validation_log="$BUILD_DIR/ios_screenshot_validation.log"
+    ios_screenshot_actual_size_bytes="$(file_size_bytes "$SCREENSHOT")"
+    ios_screenshot_width=""
+    ios_screenshot_height=""
+    ios_screenshot_distinct_color_count=""
+    ios_screenshot_distinct_color_min=16
+    ios_screenshot_pixel_diversity_status=unavailable
+    if [ -s "$validation_log" ]; then
+        ios_screenshot_width="$(validation_metric_of width "$validation_log")"
+        ios_screenshot_height="$(validation_metric_of height "$validation_log")"
+        ios_screenshot_distinct_color_count="$(validation_metric_of unique_colors "$validation_log")"
+        ios_screenshot_file_reason="$(artifact_file_reason "$SCREENSHOT" "")"
+        ios_screenshot_file_status="$(artifact_file_status "$ios_screenshot_file_reason")"
+        ios_screenshot_artifact_status="$ios_screenshot_file_status"
+        if num_at_least "$ios_screenshot_distinct_color_count" "$ios_screenshot_distinct_color_min"; then
+            ios_screenshot_pixel_diversity_status=pass
+        else
+            ios_screenshot_pixel_diversity_status=fail
+        fi
+    else
+        ios_screenshot_file_status=unavailable
+        ios_screenshot_file_reason=not-run
+        ios_screenshot_artifact_status=unavailable
+    fi
+}
+
+artifact_file_status() {
+    reason="$1"
+    if [ "$reason" = "pass" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+emit_ios_render_log_coherent_source_artifact_rows() {
+    source_path="$(value_of ios_render_log_coherent_source_path "$IOS_RENDER_LOG_VALIDATION_ENV")"
+    source_size="$(value_of ios_render_log_coherent_source_size_bytes "$IOS_RENDER_LOG_VALIDATION_ENV")"
+    if [ -n "$source_path" ]; then
+        actual_size="$(file_size_bytes "$source_path")"
+        file_reason="$(artifact_file_reason "$source_path" "$source_size")"
+        file_status="$(artifact_file_status "$file_reason")"
+    else
+        actual_size=""
+        file_status="unavailable"
+        file_reason="not-run"
+    fi
+    artifact_status="$file_status"
+    echo "ios_render_log_coherent_source_actual_size_bytes=$actual_size"
+    echo "ios_render_log_coherent_source_file_status=$file_status"
+    echo "ios_render_log_coherent_source_file_reason=$file_reason"
+    echo "ios_render_log_coherent_source_artifact_status=$artifact_status"
+}
+
+emit_ios_mdi_proof_marker_source_artifact_rows() {
+    source_path="$(value_of ios_mdi_proof_marker_source_path "$MDI_PROOF_VALIDATION_ENV")"
+    source_size="$(value_of ios_mdi_proof_marker_source_size_bytes "$MDI_PROOF_VALIDATION_ENV")"
+    if [ -n "$source_path" ]; then
+        actual_size="$(file_size_bytes "$source_path")"
+        file_reason="$(artifact_file_reason "$source_path" "$source_size")"
+        file_status="$(artifact_file_status "$file_reason")"
+    else
+        actual_size=""
+        file_status="unavailable"
+        file_reason="not-run"
+    fi
+    artifact_status="$file_status"
+    echo "ios_mdi_proof_marker_source_actual_size_bytes=$actual_size"
+    echo "ios_mdi_proof_marker_source_file_status=$file_status"
+    echo "ios_mdi_proof_marker_source_file_reason=$file_reason"
+    echo "ios_mdi_proof_marker_source_artifact_status=$artifact_status"
+}
+
+emit_existing_or_default() {
+    key="$1"
+    default_value="$2"
+    source_file="$3"
+    value="$(value_of "$key" "$source_file")"
+    if [ -z "$value" ]; then
+        value="$default_value"
+    fi
+    echo "$key=$value"
+}
+
+emit_unavailable_ios_diagnostics() {
+    diagnostic_status="$1"
+    diagnostic_reason="$2"
+    echo "tauri_ios_mobile_renderer_simple_bin=$SIMPLE_BIN"
+    echo "tauri_ios_mobile_renderer_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_ios_mobile_renderer_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "ios_screenshot=$SCREENSHOT"
+    load_ios_screenshot_artifact_rows
+    echo "ios_screenshot_actual_size_bytes=$ios_screenshot_actual_size_bytes"
+    echo "ios_screenshot_file_status=$ios_screenshot_file_status"
+    echo "ios_screenshot_file_reason=$ios_screenshot_file_reason"
+    echo "ios_screenshot_artifact_status=$ios_screenshot_artifact_status"
+    echo "ios_screenshot_width=$ios_screenshot_width"
+    echo "ios_screenshot_height=$ios_screenshot_height"
+    echo "ios_screenshot_distinct_color_count=$ios_screenshot_distinct_color_count"
+    echo "ios_screenshot_distinct_color_min=$ios_screenshot_distinct_color_min"
+    echo "ios_screenshot_pixel_diversity_status=$ios_screenshot_pixel_diversity_status"
+    echo "ios_log_stream=$LOG_STREAM"
+    echo "ios_dev_log=$IOS_DEV_LOG"
+    echo "ios_render_log_validation_env=$IOS_RENDER_LOG_VALIDATION_ENV"
+    echo "ios_mdi_proof_json=$MDI_PROOF_JSON"
+    echo "ios_mdi_proof_validation_env=$MDI_PROOF_VALIDATION_ENV"
+    echo "ios_render_log_status=$diagnostic_status"
+    echo "ios_layout_status=$diagnostic_status"
+    echo "ios_metal_log_status=$diagnostic_status"
+    emit_existing_or_default ios_render_log_validation_status "$diagnostic_status" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_validation_reason "$diagnostic_reason" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_requested_source_count 0 "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_source_count 0 "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_missing_source_count 0 "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_empty_source_count 0 "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_symlink_source_count 0 "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_hardlink_source_count 0 "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_duplicate_source_count 0 "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_nonregular_source_count 0 "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_source_coherence_status "$diagnostic_status" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_coherent_source_path "" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_coherent_source_size_bytes "" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_ios_render_log_coherent_source_artifact_rows
+    emit_existing_or_default ios_render_log_marker_status "$diagnostic_status" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_marker_source missing "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_html_len "" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_metal_marker_status "$diagnostic_status" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_fallback_marker_status "$diagnostic_status" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_tauri_context_status "$diagnostic_status" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_metal_context_status "$diagnostic_status" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_render_log_failure_marker_status "$diagnostic_status" "$IOS_RENDER_LOG_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_status "$diagnostic_status" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_failure_marker_status "$diagnostic_status" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_requested_source_count 0 "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_source_count 0 "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_marker_source_count 0 "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_missing_source_count 0 "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_symlink_source_count 0 "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_hardlink_source_count 0 "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_duplicate_source_count 0 "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_empty_source_count 0 "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_nonregular_source_count 0 "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_marker_source_path "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_proof_marker_source_size_bytes "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_ios_mdi_proof_marker_source_artifact_rows
+    emit_existing_or_default ios_mdi_proof_window_count "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_render_status "$diagnostic_status" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_render_image_count "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_render_html_renderable "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_status "$diagnostic_status" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_taskbar_item_count "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_taskbar_icon_count "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_has_desktop "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_drag_runtime_available "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_drag_events_available "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_drag_moved "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_window_event_runtime_available "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_app_action_control_found "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_app_input_control_found "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_body_click_routed "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_body_input_routed "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_body_key_routed "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_sequence "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_taskbar_icons_visible "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_event_taskbar_labels_visible "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_capture_status "$diagnostic_status" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_capture_viewport_width "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_capture_viewport_height "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_capture_device_pixel_ratio "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_capture_screen_orientation "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_performance_status "$diagnostic_status" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_performance_now_available "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_performance_now_delta_ms "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_interaction_latency_status "$diagnostic_status" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_input_to_paint_ms "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_animation_status "$diagnostic_status" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_animation_frame_available "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_animation_frame_count "" "$MDI_PROOF_VALIDATION_ENV"
+    emit_existing_or_default ios_mdi_css_animation_probe "" "$MDI_PROOF_VALIDATION_ENV"
+}
+
+fail() {
+    echo "status=fail"
+    echo "reason=$1"
+    emit_unavailable_ios_diagnostics fail "$1"
+    exit 1
+}
+
+validate_screenshot_png() {
+    path="$1"
+    label="$2"
+    validation_log="$BUILD_DIR/ios_screenshot_validation.log"
+
+    if "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-screenshot "$path" "$label" > "$validation_log" 2>&1; then
+        cat "$validation_log"
+        return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        SCREENSHOT_PATH="$path" SCREENSHOT_LABEL="$label" python3 - <<'PY' > "$validation_log" 2>&1
+import os
+import sys
+
+path = os.environ["SCREENSHOT_PATH"]
+label = os.environ["SCREENSHOT_LABEL"]
+try:
+    from PIL import Image
+except Exception as exc:
+    print(f"pillow unavailable: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+try:
+    image = Image.open(path).convert("RGBA")
+except Exception as exc:
+    print(f"failed to open screenshot: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+width, height = image.size
+if width < 300 or height < 300:
+    print(f"screenshot dimensions invalid: {width}x{height}", file=sys.stderr)
+    sys.exit(1)
+
+colors = image.getcolors(maxcolors=1000000)
+unique = 1000001 if colors is None else len(colors)
+if unique < 16:
+    print(f"screenshot appears blank: unique_colors={unique}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"{label}=pass width={width} height={height} unique_colors={unique}")
+PY
+        code=$?
+        cat "$validation_log"
+        return "$code"
+    fi
+
+    cat "$validation_log" 2>/dev/null || true
+    return 1
+}
+
+mkdir -p "$BUILD_DIR"
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    fail "simple-bin-forbidden"
+fi
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "ios_tooling=unavailable"
+    echo "reason=iOS simulator evidence requires macOS with Xcode; current host $(uname -s)"
+    emit_unavailable_ios_diagnostics unavailable "non-darwin-host"
+    echo "status=unavailable"
+    exit 0
+fi
+
+command -v xcrun >/dev/null 2>&1 || fail "xcrun not found; install Xcode"
+command -v xcodebuild >/dev/null 2>&1 || fail "xcodebuild not found; install Xcode"
+command -v cargo >/dev/null 2>&1 || fail "cargo not found"
+command -v npm >/dev/null 2>&1 || fail "npm not found"
+cargo tauri --version >/dev/null 2>&1 || fail "cargo-tauri not found"
+test -x "$SIMPLE_BIN" || fail "host Simple runtime missing: $SIMPLE_BIN"
+test -f "$PROBE_HELPER" || fail "screenshot validation helper missing: $PROBE_HELPER"
+test -f "$MDI_PROOF_VALIDATOR" || fail "MDI proof validator missing: $MDI_PROOF_VALIDATOR"
+test -f "$IOS_RENDER_LOG_VALIDATOR" || fail "iOS render-log validator missing: $IOS_RENDER_LOG_VALIDATOR"
+test -f "$SMOKE_SOURCE" || fail "mobile MDI smoke source missing: $SMOKE_SOURCE"
+test -f "$ROOT_DIR/tools/tauri-shell/scripts/build-ui-bundle.shs" \
+    || fail "UI bundle builder missing: $ROOT_DIR/tools/tauri-shell/scripts/build-ui-bundle.shs"
+
+SIM_UDID="${IOS_SIM_UDID:-}"
+if [ -z "$SIM_UDID" ]; then
+    SIM_UDID="$(
+        xcrun simctl list devices available -j |
+        node -e '
+const fs = require("fs");
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const devices = data.devices || {};
+const iphones = Object.values(devices).flat().filter((device) =>
+  String(device.name || "").includes("iPhone") && device.isAvailable
+);
+const booted = iphones.find((device) => String(device.state || "") === "Booted");
+const selected = booted || iphones[0];
+process.stdout.write(selected ? String(selected.udid || "") : "");
+'
+    )"
+fi
+test -n "$SIM_UDID" || fail "no available iPhone simulator found"
+
+SIM_DEVICE_NAME="$(
+    xcrun simctl list devices available -j |
+    node -e '
+const fs = require("fs");
+const target = process.argv[1];
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const devices = data.devices || {};
+for (const [runtime, runtimeDevices] of Object.entries(devices)) {
+  for (const device of runtimeDevices) {
+    if (device.udid === target) {
+      process.stdout.write(String(device.name || ""));
+      process.exit(0);
+    }
+  }
+}
+' "$SIM_UDID"
+)"
+test -n "$SIM_DEVICE_NAME" || fail "selected iPhone simulator name not found for $SIM_UDID"
+
+SIM_NAME="$(
+    xcrun simctl list devices available -j |
+    node -e '
+const fs = require("fs");
+const target = process.argv[1];
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const devices = data.devices || {};
+for (const [runtime, runtimeDevices] of Object.entries(devices)) {
+  for (const device of runtimeDevices) {
+    if (device.udid === target) {
+      process.stdout.write(String(device.name || "") + " (" + runtime + ")");
+      process.exit(0);
+    }
+  }
+}
+' "$SIM_UDID"
+)"
+
+cd "$TAURI_DIR"
+printf 'mdi-smoke\n' > "$TAURI_DIR/src-tauri/mobile_probe_entry.txt"
+cp "$SMOKE_SOURCE" "$TAURI_DIR/src-tauri/mobile_entry_source.spl"
+rm -f "$TAURI_DIR/src-tauri/mobile_mdi_proof_url.txt"
+sh "$ROOT_DIR/tools/tauri-shell/scripts/build-ui-bundle.shs" > "$BUILD_DIR/ios_build_ui_bundle.log" 2>&1 \
+    || fail "UI bundle generation failed; see $BUILD_DIR/ios_build_ui_bundle.log"
+npm run prepare:dist > "$BUILD_DIR/ios_prepare_dist.log" 2>&1 \
+    || fail "npm prepare:dist failed; see $BUILD_DIR/ios_prepare_dist.log"
+
+xcrun simctl boot "$SIM_UDID" >/dev/null 2>&1 || true
+xcrun simctl bootstatus "$SIM_UDID" -b > "$BUILD_DIR/ios_bootstatus.log" 2>&1
+xcrun simctl terminate "$SIM_UDID" com.simple.ui > "$BUILD_DIR/ios_pre_run_terminate.log" 2>&1 || true
+xcrun simctl uninstall "$SIM_UDID" com.simple.ui > "$BUILD_DIR/ios_pre_run_uninstall.log" 2>&1 || true
+
+: > "$LOG_STREAM"
+xcrun simctl spawn "$SIM_UDID" log stream --style compact \
+    --predicate 'process CONTAINS "simple" OR eventMessage CONTAINS "tauri-shell" OR eventMessage CONTAINS "Metal"' \
+    > "$LOG_STREAM" 2>&1 &
+LOG_PID=$!
+
+cleanup() {
+    if [ -n "${LOG_PID:-}" ]; then
+        kill "$LOG_PID" 2>/dev/null || true
+    fi
+    if [ -n "${IOS_DEV_PID:-}" ]; then
+        kill "$IOS_DEV_PID" 2>/dev/null || true
+    fi
+    rm -f "$TAURI_DIR/src-tauri/mobile_probe_entry.txt" "$TAURI_DIR/src-tauri/mobile_entry_source.spl" "$TAURI_DIR/src-tauri/mobile_mdi_proof_url.txt"
+}
+trap cleanup EXIT INT TERM
+
+SIMPLE_TAURI_MOBILE_PROBE_ENTRY=mdi-smoke \
+SIMPLE_TAURI_MDI_PROOF_PATH="$MDI_PROOF_JSON" \
+    cargo tauri ios dev --no-watch --no-dev-server --no-dev-server-wait "$SIM_DEVICE_NAME" > "$IOS_DEV_LOG" 2>&1 &
+IOS_DEV_PID=$!
+
+end=$(( $(date +%s) + TIMEOUT_SECS ))
+while [ "$(date +%s)" -lt "$end" ]; do
+    if grep -Eq '\[tauri-shell\] render, html_len=|\[tauri-shell\] raw stdout: \{"type":"render"' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+
+grep -Eq '\[tauri-shell\] render, html_len=|\[tauri-shell\] raw stdout: \{"type":"render"' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null \
+    || fail "Tauri iOS render log not observed within ${TIMEOUT_SECS}s"
+
+xcrun simctl io "$SIM_UDID" screenshot "$SCREENSHOT" > "$BUILD_DIR/ios_screenshot.log" 2>&1 \
+    || fail "failed to capture iOS simulator screenshot"
+test -s "$SCREENSHOT" || fail "iOS simulator screenshot is empty: $SCREENSHOT"
+
+mdi_end=$(( $(date +%s) + 10 ))
+while [ "$(date +%s)" -lt "$mdi_end" ]; do
+    if [ -s "$MDI_PROOF_JSON" ] || grep -q '\[tauri-shell\] mdi proof:' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+validate_screenshot_png "$SCREENSHOT" ios_mobile_renderer_screenshot \
+    || fail "iOS mobile renderer screenshot PNG validation failed"
+load_ios_screenshot_artifact_rows
+if [ "$ios_screenshot_file_status" != "pass" ] || [ "$ios_screenshot_artifact_status" != "pass" ]; then
+    fail "ios-screenshot-artifact-$ios_screenshot_file_reason"
+fi
+if ! num_at_least "$ios_screenshot_width" 300 || ! num_at_least "$ios_screenshot_height" 300; then
+    fail "ios-screenshot-dimensions-missing"
+fi
+if [ "$ios_screenshot_pixel_diversity_status" != "pass" ]; then
+    fail "ios-screenshot-pixel-diversity-failed"
+fi
+
+kill "$LOG_PID" 2>/dev/null || true
+wait "$LOG_PID" 2>/dev/null || true
+LOG_PID=""
+kill "$IOS_DEV_PID" 2>/dev/null || true
+wait "$IOS_DEV_PID" 2>/dev/null || true
+IOS_DEV_PID=""
+
+node "$IOS_RENDER_LOG_VALIDATOR" "$IOS_DEV_LOG" "$LOG_STREAM" > "$IOS_RENDER_LOG_VALIDATION_ENV" \
+    || {
+        cat "$IOS_RENDER_LOG_VALIDATION_ENV"
+        fail "iOS renderer log validation failed"
+    }
+cat "$IOS_RENDER_LOG_VALIDATION_ENV"
+
+ios_render_log_validation_status="$(value_of ios_render_log_validation_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_validation_reason="$(value_of ios_render_log_validation_reason "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_requested_source_count="$(value_of ios_render_log_requested_source_count "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_source_count="$(value_of ios_render_log_source_count "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_missing_source_count="$(value_of ios_render_log_missing_source_count "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_empty_source_count="$(value_of ios_render_log_empty_source_count "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_symlink_source_count="$(value_of ios_render_log_symlink_source_count "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_hardlink_source_count="$(value_of ios_render_log_hardlink_source_count "$IOS_RENDER_LOG_VALIDATION_ENV")"
+if [ -z "$ios_render_log_hardlink_source_count" ]; then ios_render_log_hardlink_source_count=0; fi
+ios_render_log_duplicate_source_count="$(value_of ios_render_log_duplicate_source_count "$IOS_RENDER_LOG_VALIDATION_ENV")"
+if [ -z "$ios_render_log_duplicate_source_count" ]; then ios_render_log_duplicate_source_count=0; fi
+ios_render_log_nonregular_source_count="$(value_of ios_render_log_nonregular_source_count "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_html_len="$(value_of ios_render_log_html_len "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_source_coherence_status="$(value_of ios_render_log_source_coherence_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_coherent_source_path="$(value_of ios_render_log_coherent_source_path "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_coherent_source_size_bytes="$(value_of ios_render_log_coherent_source_size_bytes "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_coherent_source_actual_size_bytes="$(file_size_bytes "$ios_render_log_coherent_source_path")"
+ios_render_log_coherent_source_file_reason="$(artifact_file_reason "$ios_render_log_coherent_source_path" "$ios_render_log_coherent_source_size_bytes")"
+ios_render_log_coherent_source_file_status="$(artifact_file_status "$ios_render_log_coherent_source_file_reason")"
+ios_render_log_coherent_source_artifact_status="$ios_render_log_coherent_source_file_status"
+if [ "$ios_render_log_coherent_source_file_status" != "pass" ] || [ "$ios_render_log_coherent_source_artifact_status" != "pass" ]; then
+    if [ "$ios_render_log_coherent_source_file_reason" = "symlink" ]; then
+        fail "ios-render-log-coherent-source-symlink"
+    elif [ "$ios_render_log_coherent_source_file_reason" = "hardlink" ]; then
+        fail "ios-render-log-coherent-source-hardlink"
+    elif [ "$ios_render_log_coherent_source_file_reason" = "size-mismatch" ]; then
+        fail "ios-render-log-coherent-source-size-mismatch"
+    else
+        fail "ios-render-log-coherent-source-artifact-missing"
+    fi
+fi
+ios_render_log_marker_status="$(value_of ios_render_log_marker_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_marker_source="$(value_of ios_render_log_marker_source "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_metal_marker_status="$(value_of ios_render_log_metal_marker_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_fallback_marker_status="$(value_of ios_render_log_fallback_marker_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_tauri_context_status="$(value_of ios_render_log_tauri_context_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_metal_context_status="$(value_of ios_render_log_metal_context_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
+ios_render_log_failure_marker_status="$(value_of ios_render_log_failure_marker_status "$IOS_RENDER_LOG_VALIDATION_ENV")"
+
+ios_mdi_validation_code=0
+node "$MDI_PROOF_VALIDATOR" ios "$MDI_PROOF_JSON" "$IOS_DEV_LOG" "$LOG_STREAM" >"$MDI_PROOF_VALIDATION_ENV" \
+    || ios_mdi_validation_code=$?
+cat "$MDI_PROOF_VALIDATION_ENV"
+if [ "$ios_mdi_validation_code" -ne 0 ]; then
+    fail "iOS MDI event/capture/performance/animation proof failed"
+fi
+
+ios_mdi_proof_status="$(value_of ios_mdi_proof_status "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_failure_marker_status="$(value_of ios_mdi_failure_marker_status "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_proof_requested_source_count="$(value_of ios_mdi_proof_requested_source_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_proof_source_count="$(value_of ios_mdi_proof_source_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_proof_marker_source_count="$(value_of ios_mdi_proof_marker_source_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_proof_missing_source_count="$(value_of ios_mdi_proof_missing_source_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_proof_symlink_source_count="$(value_of ios_mdi_proof_symlink_source_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_proof_hardlink_source_count="$(value_of ios_mdi_proof_hardlink_source_count "$MDI_PROOF_VALIDATION_ENV")"
+if [ -z "$ios_mdi_proof_hardlink_source_count" ]; then ios_mdi_proof_hardlink_source_count=0; fi
+ios_mdi_proof_duplicate_source_count="$(value_of ios_mdi_proof_duplicate_source_count "$MDI_PROOF_VALIDATION_ENV")"
+if [ -z "$ios_mdi_proof_duplicate_source_count" ]; then ios_mdi_proof_duplicate_source_count=0; fi
+ios_mdi_proof_empty_source_count="$(value_of ios_mdi_proof_empty_source_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_proof_nonregular_source_count="$(value_of ios_mdi_proof_nonregular_source_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_proof_marker_source_path="$(value_of ios_mdi_proof_marker_source_path "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_proof_marker_source_size_bytes="$(value_of ios_mdi_proof_marker_source_size_bytes "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_proof_marker_source_actual_size_bytes="$(file_size_bytes "$ios_mdi_proof_marker_source_path")"
+ios_mdi_proof_marker_source_file_reason="$(artifact_file_reason "$ios_mdi_proof_marker_source_path" "$ios_mdi_proof_marker_source_size_bytes")"
+ios_mdi_proof_marker_source_file_status="$(artifact_file_status "$ios_mdi_proof_marker_source_file_reason")"
+ios_mdi_proof_marker_source_artifact_status="$ios_mdi_proof_marker_source_file_status"
+if [ "$ios_mdi_proof_marker_source_file_status" != "pass" ] || [ "$ios_mdi_proof_marker_source_artifact_status" != "pass" ]; then
+    if [ "$ios_mdi_proof_marker_source_file_reason" = "symlink" ]; then
+        fail "ios-mdi-proof-marker-source-symlink"
+    elif [ "$ios_mdi_proof_marker_source_file_reason" = "hardlink" ]; then
+        fail "ios-mdi-proof-marker-source-hardlink"
+    elif [ "$ios_mdi_proof_marker_source_file_reason" = "size-mismatch" ]; then
+        fail "ios-mdi-proof-marker-source-size-mismatch"
+    else
+        fail "ios-mdi-proof-marker-source-artifact-missing"
+    fi
+fi
+ios_mdi_proof_window_count="$(value_of ios_mdi_proof_window_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_render_status="$(value_of ios_mdi_render_status "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_render_image_count="$(value_of ios_mdi_render_image_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_render_html_renderable="$(value_of ios_mdi_render_html_renderable "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_status="$(value_of ios_mdi_event_status "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_taskbar_item_count="$(value_of ios_mdi_event_taskbar_item_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_taskbar_icon_count="$(value_of ios_mdi_event_taskbar_icon_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_has_desktop="$(value_of ios_mdi_event_has_desktop "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_drag_runtime_available="$(value_of ios_mdi_event_drag_runtime_available "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_drag_events_available="$(value_of ios_mdi_event_drag_events_available "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_drag_moved="$(value_of ios_mdi_event_drag_moved "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_window_event_runtime_available="$(value_of ios_mdi_event_window_event_runtime_available "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_app_action_control_found="$(value_of ios_mdi_event_app_action_control_found "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_app_input_control_found="$(value_of ios_mdi_event_app_input_control_found "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_body_click_routed="$(value_of ios_mdi_event_body_click_routed "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_body_input_routed="$(value_of ios_mdi_event_body_input_routed "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_body_key_routed="$(value_of ios_mdi_event_body_key_routed "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_sequence="$(value_of ios_mdi_event_sequence "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_taskbar_icons_visible="$(value_of ios_mdi_event_taskbar_icons_visible "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_event_taskbar_labels_visible="$(value_of ios_mdi_event_taskbar_labels_visible "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_capture_status="$(value_of ios_mdi_capture_status "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_capture_viewport_width="$(value_of ios_mdi_capture_viewport_width "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_capture_viewport_height="$(value_of ios_mdi_capture_viewport_height "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_capture_device_pixel_ratio="$(value_of ios_mdi_capture_device_pixel_ratio "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_capture_screen_orientation="$(value_of ios_mdi_capture_screen_orientation "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_performance_status="$(value_of ios_mdi_performance_status "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_performance_now_available="$(value_of ios_mdi_performance_now_available "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_performance_now_delta_ms="$(value_of ios_mdi_performance_now_delta_ms "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_interaction_latency_status="$(value_of ios_mdi_interaction_latency_status "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_input_to_paint_ms="$(value_of ios_mdi_input_to_paint_ms "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_animation_status="$(value_of ios_mdi_animation_status "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_animation_frame_available="$(value_of ios_mdi_animation_frame_available "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_animation_frame_count="$(value_of ios_mdi_animation_frame_count "$MDI_PROOF_VALIDATION_ENV")"
+ios_mdi_css_animation_probe="$(value_of ios_mdi_css_animation_probe "$MDI_PROOF_VALIDATION_ENV")"
+
+echo "ios_tooling=available"
+echo "tauri_ios_mobile_renderer_simple_bin=$SIMPLE_BIN"
+echo "tauri_ios_mobile_renderer_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "tauri_ios_mobile_renderer_simple_bin_status=$SIMPLE_BIN_STATUS"
+echo "ios_simulator=$SIM_UDID"
+echo "ios_simulator_name=$SIM_NAME"
+echo "ios_screenshot=$SCREENSHOT"
+echo "ios_screenshot_actual_size_bytes=$ios_screenshot_actual_size_bytes"
+echo "ios_screenshot_file_status=$ios_screenshot_file_status"
+echo "ios_screenshot_file_reason=$ios_screenshot_file_reason"
+echo "ios_screenshot_artifact_status=$ios_screenshot_artifact_status"
+echo "ios_screenshot_width=$ios_screenshot_width"
+echo "ios_screenshot_height=$ios_screenshot_height"
+echo "ios_screenshot_distinct_color_count=$ios_screenshot_distinct_color_count"
+echo "ios_screenshot_distinct_color_min=$ios_screenshot_distinct_color_min"
+echo "ios_screenshot_pixel_diversity_status=$ios_screenshot_pixel_diversity_status"
+echo "ios_log_stream=$LOG_STREAM"
+echo "ios_dev_log=$IOS_DEV_LOG"
+echo "ios_render_log_validation_env=$IOS_RENDER_LOG_VALIDATION_ENV"
+echo "ios_mdi_proof_json=$MDI_PROOF_JSON"
+echo "ios_mdi_proof_validation_env=$MDI_PROOF_VALIDATION_ENV"
+echo "ios_render_log_status=pass"
+echo "ios_render_log_validation_status=$ios_render_log_validation_status"
+echo "ios_render_log_validation_reason=$ios_render_log_validation_reason"
+echo "ios_render_log_requested_source_count=$ios_render_log_requested_source_count"
+echo "ios_render_log_source_count=$ios_render_log_source_count"
+echo "ios_render_log_missing_source_count=$ios_render_log_missing_source_count"
+echo "ios_render_log_empty_source_count=$ios_render_log_empty_source_count"
+echo "ios_render_log_symlink_source_count=$ios_render_log_symlink_source_count"
+echo "ios_render_log_hardlink_source_count=$ios_render_log_hardlink_source_count"
+echo "ios_render_log_duplicate_source_count=$ios_render_log_duplicate_source_count"
+echo "ios_render_log_nonregular_source_count=$ios_render_log_nonregular_source_count"
+echo "ios_render_log_html_len=$ios_render_log_html_len"
+echo "ios_render_log_source_coherence_status=$ios_render_log_source_coherence_status"
+echo "ios_render_log_coherent_source_path=$ios_render_log_coherent_source_path"
+echo "ios_render_log_coherent_source_size_bytes=$ios_render_log_coherent_source_size_bytes"
+echo "ios_render_log_coherent_source_actual_size_bytes=$ios_render_log_coherent_source_actual_size_bytes"
+echo "ios_render_log_coherent_source_file_status=$ios_render_log_coherent_source_file_status"
+echo "ios_render_log_coherent_source_file_reason=$ios_render_log_coherent_source_file_reason"
+echo "ios_render_log_coherent_source_artifact_status=$ios_render_log_coherent_source_artifact_status"
+echo "ios_render_log_marker_status=$ios_render_log_marker_status"
+echo "ios_render_log_marker_source=$ios_render_log_marker_source"
+echo "ios_render_log_metal_marker_status=$ios_render_log_metal_marker_status"
+echo "ios_render_log_fallback_marker_status=$ios_render_log_fallback_marker_status"
+echo "ios_render_log_tauri_context_status=$ios_render_log_tauri_context_status"
+echo "ios_render_log_metal_context_status=$ios_render_log_metal_context_status"
+echo "ios_render_log_failure_marker_status=$ios_render_log_failure_marker_status"
+echo "ios_layout_status=pass"
+echo "ios_metal_log_status=pass"
+echo "ios_mdi_proof_status=$ios_mdi_proof_status"
+echo "ios_mdi_failure_marker_status=$ios_mdi_failure_marker_status"
+echo "ios_mdi_proof_requested_source_count=$ios_mdi_proof_requested_source_count"
+echo "ios_mdi_proof_source_count=$ios_mdi_proof_source_count"
+echo "ios_mdi_proof_marker_source_count=$ios_mdi_proof_marker_source_count"
+echo "ios_mdi_proof_missing_source_count=$ios_mdi_proof_missing_source_count"
+echo "ios_mdi_proof_symlink_source_count=$ios_mdi_proof_symlink_source_count"
+echo "ios_mdi_proof_hardlink_source_count=$ios_mdi_proof_hardlink_source_count"
+echo "ios_mdi_proof_duplicate_source_count=$ios_mdi_proof_duplicate_source_count"
+echo "ios_mdi_proof_empty_source_count=$ios_mdi_proof_empty_source_count"
+echo "ios_mdi_proof_nonregular_source_count=$ios_mdi_proof_nonregular_source_count"
+echo "ios_mdi_proof_marker_source_path=$ios_mdi_proof_marker_source_path"
+echo "ios_mdi_proof_marker_source_size_bytes=$ios_mdi_proof_marker_source_size_bytes"
+echo "ios_mdi_proof_marker_source_actual_size_bytes=$ios_mdi_proof_marker_source_actual_size_bytes"
+echo "ios_mdi_proof_marker_source_file_status=$ios_mdi_proof_marker_source_file_status"
+echo "ios_mdi_proof_marker_source_file_reason=$ios_mdi_proof_marker_source_file_reason"
+echo "ios_mdi_proof_marker_source_artifact_status=$ios_mdi_proof_marker_source_artifact_status"
+echo "ios_mdi_proof_window_count=$ios_mdi_proof_window_count"
+echo "ios_mdi_render_status=$ios_mdi_render_status"
+echo "ios_mdi_render_image_count=$ios_mdi_render_image_count"
+echo "ios_mdi_render_html_renderable=$ios_mdi_render_html_renderable"
+echo "ios_mdi_event_status=$ios_mdi_event_status"
+echo "ios_mdi_event_taskbar_item_count=$ios_mdi_event_taskbar_item_count"
+echo "ios_mdi_event_taskbar_icon_count=$ios_mdi_event_taskbar_icon_count"
+echo "ios_mdi_event_has_desktop=$ios_mdi_event_has_desktop"
+echo "ios_mdi_event_drag_runtime_available=$ios_mdi_event_drag_runtime_available"
+echo "ios_mdi_event_drag_events_available=$ios_mdi_event_drag_events_available"
+echo "ios_mdi_event_drag_moved=$ios_mdi_event_drag_moved"
+echo "ios_mdi_event_window_event_runtime_available=$ios_mdi_event_window_event_runtime_available"
+echo "ios_mdi_event_app_action_control_found=$ios_mdi_event_app_action_control_found"
+echo "ios_mdi_event_app_input_control_found=$ios_mdi_event_app_input_control_found"
+echo "ios_mdi_event_body_click_routed=$ios_mdi_event_body_click_routed"
+echo "ios_mdi_event_body_input_routed=$ios_mdi_event_body_input_routed"
+echo "ios_mdi_event_body_key_routed=$ios_mdi_event_body_key_routed"
+echo "ios_mdi_event_sequence=$ios_mdi_event_sequence"
+echo "ios_mdi_event_taskbar_icons_visible=$ios_mdi_event_taskbar_icons_visible"
+echo "ios_mdi_event_taskbar_labels_visible=$ios_mdi_event_taskbar_labels_visible"
+echo "ios_mdi_capture_status=$ios_mdi_capture_status"
+echo "ios_mdi_capture_viewport_width=$ios_mdi_capture_viewport_width"
+echo "ios_mdi_capture_viewport_height=$ios_mdi_capture_viewport_height"
+echo "ios_mdi_capture_device_pixel_ratio=$ios_mdi_capture_device_pixel_ratio"
+echo "ios_mdi_capture_screen_orientation=$ios_mdi_capture_screen_orientation"
+echo "ios_mdi_performance_status=$ios_mdi_performance_status"
+echo "ios_mdi_performance_now_available=$ios_mdi_performance_now_available"
+echo "ios_mdi_performance_now_delta_ms=$ios_mdi_performance_now_delta_ms"
+echo "ios_mdi_interaction_latency_status=$ios_mdi_interaction_latency_status"
+echo "ios_mdi_input_to_paint_ms=$ios_mdi_input_to_paint_ms"
+echo "ios_mdi_animation_status=$ios_mdi_animation_status"
+echo "ios_mdi_animation_frame_available=$ios_mdi_animation_frame_available"
+echo "ios_mdi_animation_frame_count=$ios_mdi_animation_frame_count"
+echo "ios_mdi_css_animation_probe=$ios_mdi_css_animation_probe"
+echo "status=pass"

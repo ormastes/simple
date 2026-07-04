@@ -1,0 +1,44 @@
+"""
+# Trait default-method dispatch with partial override (regression for task #55).
+#
+# A trait declares three DEFAULT methods (m1, m2, m3). The impl overrides ONLY
+# m3 and inherits m1, m2. Before the fix, HirImpl.methods was built solely from
+# methods textually present in the impl block, so the trait's un-overridden
+# defaults were never injected into the impl method table. Positional dispatch
+# against the trait's FULL method list then aliased the wrong body (t.m1() ran
+# m3's body) or dereferenced a missing slot (SIGSEGV on t.m2()).
+#
+# These checks call the methods through real receiver dispatch (t.mN()), so they
+# fail on a compiler binary that predates the fix and pass once trait defaults
+# are injected into the impl method table during HIR lowering.
+"""
+
+trait ThreeMethods:
+    fn m1() -> text:
+        "default-m1"
+    fn m2() -> text:
+        "default-m2"
+    fn m3() -> text:
+        "default-m3"
+
+struct DispatchTarget:
+    n: i64
+
+impl ThreeMethods for DispatchTarget:
+    fn m3() -> text:
+        "override-m3"
+
+describe "trait default method dispatch with partial override":
+    """Real p.method() dispatch through inherited and overridden trait defaults."""
+
+    it "inherited default m1 runs its own body":
+        val t = DispatchTarget(n: 1)
+        expect(t.m1()).to_equal("default-m1")
+
+    it "inherited default m2 runs its own body":
+        val t = DispatchTarget(n: 2)
+        expect(t.m2()).to_equal("default-m2")
+
+    it "overridden m3 runs the impl body, not a default":
+        val t = DispatchTarget(n: 3)
+        expect(t.m3()).to_equal("override-m3")

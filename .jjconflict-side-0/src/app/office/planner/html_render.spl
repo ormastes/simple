@@ -1,0 +1,120 @@
+# Planner HTML Rendering
+#
+# Renders the Planner surface as a Trello-like kanban board: one flex column
+# per board lane (status), each holding styled task cards. Pure model -> HTML
+# transform, inline CSS only (no <style> blocks, since `{`/`}` collide with
+# Simple string interpolation) — mirrors app.office.slides.html_render.
+
+use app.office.planner.task.{Task, BoardColumn, priority_name, status_name, task_count}
+use app.office.planner.board.{Project, tasks_in_column}
+use app.office.planner.planner_app.{PlannerApp}
+
+# =========================================================================
+# Escaping
+# =========================================================================
+
+fn _html_escape(s: text) -> text:
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result
+
+# =========================================================================
+# Badge colors
+# =========================================================================
+
+fn _priority_badge_color(prio_label: text) -> text:
+    """Background color for a priority badge, by display label."""
+    match prio_label:
+        "Urgent":
+            return "#d1242f"
+        "High":
+            return "#bc4c00"
+        "Medium":
+            return "#9a6700"
+        "Low":
+            return "#1a7f37"
+        _:
+            return "#6e7781"
+
+fn _status_badge_color(status_label: text) -> text:
+    """Background color for a status badge, by display label."""
+    match status_label:
+        "Todo":
+            return "#57606a"
+        "In Progress":
+            return "#0969da"
+        "Done":
+            return "#1a7f37"
+        "Blocked":
+            return "#d1242f"
+        _:
+            return "#57606a"
+
+# =========================================================================
+# Task Card
+# =========================================================================
+
+fn render_task_html(task: Task) -> text:
+    """Render a single task as a Trello-like card fragment: title plus
+    status/priority badges, styled with inline CSS only."""
+    val status_label = status_name(task.status)
+    val prio_label = priority_name(task.priority)
+    val status_color = _status_badge_color(status_label)
+    val prio_color = _priority_badge_color(prio_label)
+
+    val card_style = "background: #ffffff; border: 1px solid #d0d7de; border-radius: 6px; padding: 10px 12px; margin: 0 0 8px 0; box-shadow: 0 1px 2px rgba(0,0,0,0.08); font-family: -apple-system, Segoe UI, Roboto, sans-serif;"
+    val title_style = "font-size: 14px; font-weight: 600; color: #1f2937; margin-bottom: 6px;"
+    val badge_row_style = "display: flex; gap: 6px; flex-wrap: wrap;"
+    val status_badge_style = "display: inline-block; font-size: 11px; font-weight: 600; color: #ffffff; background: {status_color}; padding: 2px 8px; border-radius: 10px;"
+    val prio_badge_style = "display: inline-block; font-size: 11px; font-weight: 600; color: #ffffff; background: {prio_color}; padding: 2px 8px; border-radius: 10px;"
+
+    val title_html = _html_escape(task.title)
+    val id_html = _html_escape(task.id)
+
+    var out = "<div class=\"task-card\" data-task-id=\"{id_html}\" style=\"{card_style}\">"
+    out = "{out}<div class=\"task-title\" style=\"{title_style}\">{title_html}</div>"
+    out = "{out}<div class=\"task-badges\" style=\"{badge_row_style}\">"
+    out = "{out}<span class=\"status-badge\" style=\"{status_badge_style}\">{status_label}</span>"
+    if prio_label != "None":
+        out = "{out}<span class=\"priority-badge\" style=\"{prio_badge_style}\">{prio_label}</span>"
+    out = "{out}</div></div>"
+    out
+
+# =========================================================================
+# Kanban Lanes
+# =========================================================================
+
+fn _lane_header_html(col: BoardColumn, count: i32) -> text:
+    """Render a lane's header: name plus task count (and WIP limit, if set)."""
+    val header_style = "font-size: 13px; font-weight: 700; color: #57606a; text-transform: uppercase; letter-spacing: 0.03em; padding: 4px 4px 10px 4px;"
+    val name_html = _html_escape(col.name)
+    val label_text = if col.wip_limit > 0: "{name_html} ({count}/{col.wip_limit})" else: "{name_html} ({count})"
+    "<div class=\"lane-header\" style=\"{header_style}\">{label_text}</div>"
+
+fn _lane_html(project: Project, col: BoardColumn) -> text:
+    """Render one status lane: header plus its task cards, stacked vertically."""
+    val col_tasks = tasks_in_column(project, col.name)
+    val lane_style = "flex: 1 1 0; min-width: 240px; background: #f6f8fa; border-radius: 8px; padding: 12px; margin-right: 12px; box-sizing: border-box;"
+
+    var body = _lane_header_html(col, task_count(col_tasks))
+    for task in col_tasks:
+        body = "{body}{render_task_html(task)}"
+    "<div class=\"kanban-lane\" style=\"{lane_style}\">{body}</div>"
+
+# =========================================================================
+# Board
+# =========================================================================
+
+fn render_board_html(app: PlannerApp) -> text:
+    """Render the Planner's kanban board as a Trello-like flex row of status
+    lanes, each holding its task cards. Pure model -> HTML transform; call
+    with `PlannerApp.new()` (plus any tasks added/moved) for demo data."""
+    val board_style = "display: flex; align-items: flex-start; gap: 0; width: 100%; box-sizing: border-box; font-family: -apple-system, Segoe UI, Roboto, sans-serif;"
+
+    var body = ""
+    for col in app.project.board.columns:
+        body = "{body}{_lane_html(app.project, col)}"
+    "<div class=\"kanban-board\" style=\"{board_style}\">{body}</div>"
