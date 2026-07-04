@@ -41,8 +41,11 @@ use app.office.sheets.cell.{cell_display_text, col_to_letter, parse_cell_ref, ce
 use app.office.sheets.cell_ref.{offset_ref, parse_range}
 use app.office.sheets.chart.{ChartSeries, chart_series_from_ranges}
 use app.office.sheets.pivot.{pivot_build}
+use app.office.sheets.cond_format.{CondRule, cond_rule_matches_cell, cond_data_bar_percent}
 use app.office.file_formats.{recalculate_formula_cells}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_render_html_pixels}
+use app.office.slides.slide.{Slide, SlideElementKind}
+use app.office.slides.deck_format.{bullet_id_level, table_row_cells, is_table_separator_line}
 
 # Matches BrowserApp's viewport (src/app/ui.browser/app.spl uses width=96,
 # height=64; its host window presents that scaled by BROWSER_WINDOW_SCALE).
@@ -138,7 +141,30 @@ fn office_gui_sheet_minimal_css() -> text:
     "#sheet_gui_sel_root .layout-hbox:nth-child(even){background:#f7f7f7;}" +
     "#sheet_gui_sel_root .layout-hbox:nth-child(odd){background:#ffffff;}" +
     "#sheet_sel_header{background:#e8e8e8;}" +
-    "#sheet_gui_sel_root .widget-text:first-child{background:#e8e8e8;}"
+    "#sheet_gui_sel_root .widget-text:first-child{background:#e8e8e8;}" +
+    # Conditional-formatting classes (sheet_gui_view_with_formats / office_
+    # gui_sheet_cf_pixels): one small background tint per matched rule kind,
+    # and an 11-step white->#638ec6 tint ramp for the data-bar buckets 0-10
+    # (the engine's bar is a linear-gradient background -- see cond_format.
+    # spl's _data_bar_css -- but this render path's curated CSS keeps to the
+    # solid-background rules already proven on the pixel path, so the bucket
+    # ramp stands in for gradient fill width).
+    ".cf-highlight{background:#fde7e9;}" +
+    ".cf-above{background:#e2f0d9;}" +
+    ".cf-below{background:#fbe5d5;}" +
+    ".cf-dup{background:#ffd9d9;}" +
+    ".cf-uniq{background:#dff0ff;}" +
+    ".cf-bar-0{background:#ffffff;}" +
+    ".cf-bar-1{background:#eff4f9;}" +
+    ".cf-bar-2{background:#e0e8f4;}" +
+    ".cf-bar-3{background:#d0ddee;}" +
+    ".cf-bar-4{background:#c1d2e8;}" +
+    ".cf-bar-5{background:#b1c7e3;}" +
+    ".cf-bar-6{background:#a1bbdd;}" +
+    ".cf-bar-7{background:#92b0d7;}" +
+    ".cf-bar-8{background:#82a5d1;}" +
+    ".cf-bar-9{background:#7399cc;}" +
+    ".cf-bar-10{background:#638ec6;}"
 
 struct SheetGuiView:
     tree: UITree
@@ -974,7 +1000,83 @@ fn sheet_gui_view_with_selection(session: SheetGuiSession, max_rows: i32, max_co
     over rows 10..14), not the 0-based/1-based window-relative position.
     text_dump's FIRST line is a viewport marker, "viewport|<top_ref>:
     <bottom_right_ref>", so specs can assert the window's exact position
-    without re-deriving it from the header/row lines."""
+    without re-deriving it from the header/row lines.
+
+    Implementation: a thin wrapper over sheet_gui_view_with_formats with an
+    EMPTY rule list -- no conditional-formatting rule ever matches, so the
+    tree and text_dump stay byte-for-byte what this function has always
+    produced (the cf marker/class code is a no-op on every cell)."""
+    val no_rules: [CondRule] = []
+    sheet_gui_view_with_formats(session, no_rules, max_rows, max_cols)
+
+fn _sheet_gui_cf_marker(sheet: Sheet, rules: [CondRule], ref_str: text) -> text:
+    """First-match conditional-format marker for one cell, "" when no rule
+    matches. Rule matching is 100% the engine's own (cond_format.spl's
+    cond_rule_matches_cell / cond_data_bar_percent wrappers) in the SAME
+    first-match-wins rule order as the engine's cond_css_for_cell -- this
+    layer only names the match. Kind -> marker: data_bar -> "bar<N>" where
+    N is the engine's fill-percent bucketed to percent/10 (0..10: range
+    minimum = bar0, maximum = bar10); above_average -> "above";
+    below_average -> "below"; duplicate -> "dup"; unique -> "uniq"; the
+    plain highlight kinds (cell_value/top_n/color_scale) -> "hi"."""
+    var i = 0
+    while i < rules.len():
+        val rule = rules[i]
+        if cond_rule_matches_cell(sheet, rule, ref_str):
+            if rule.kind == "data_bar":
+                val p = cond_data_bar_percent(sheet, rule, ref_str)
+                val bucket = p / 10
+                return "bar{bucket}"
+            if rule.kind == "above_average":
+                return "above"
+            if rule.kind == "below_average":
+                return "below"
+            if rule.kind == "duplicate":
+                return "dup"
+            if rule.kind == "unique":
+                return "uniq"
+            return "hi"
+        i = i + 1
+    ""
+
+fn _sheet_gui_cf_class(marker: text) -> text:
+    """Map a _sheet_gui_cf_marker marker to its office_gui_sheet_minimal_css
+    class: "" -> ""; "bar<N>" -> "cf-bar-<N>"; "above"/"below"/"dup"/
+    "uniq" -> "cf-above"/"cf-below"/"cf-dup"/"cf-uniq"; "hi" ->
+    "cf-highlight"."""
+    if marker == "":
+        return ""
+    if marker.starts_with("bar"):
+        val n = marker.slice(3, marker.len())
+        return "cf-bar-" + n
+    if marker == "above":
+        return "cf-above"
+    if marker == "below":
+        return "cf-below"
+    if marker == "dup":
+        return "cf-dup"
+    if marker == "uniq":
+        return "cf-uniq"
+    "cf-highlight"
+
+fn sheet_gui_view_with_formats(session: SheetGuiSession, rules: [CondRule], max_rows: i32, max_cols: i32) -> SheetGuiView:
+    """sheet_gui_view_with_selection's exact grid construction (per-cell
+    "cell_<ref>" text_widgets, selection bracket/pending-buffer forms,
+    N-visible viewport window, "viewport|..." marker line -- see that
+    function's docstring; it now delegates here) plus LIVE conditional
+    formatting, Excel-style: every cell is checked against `rules` (first
+    match wins, the engine's own cond_css_for_cell order) via cond_format.
+    spl's evaluation wrappers. A matched cell gets
+      - a "class" prop on its cell widget carrying the cf-* CSS class
+        (cf-highlight / cf-bar-0..10 / cf-above / cf-below / cf-dup /
+        cf-uniq -- see _sheet_gui_cf_marker/_sheet_gui_cf_class), painted
+        on the real pixel path by office_gui_sheet_cf_pixels below;
+      - a "!<marker>" suffix on its text_dump cell (e.g. "42!bar7",
+        "8!above") so specs assert matches without parsing pixels or HTML.
+        The widget's visible TEXT stays clean (formatting is a style, not
+        cell content -- only the dump carries the marker).
+    An empty `rules` list renders byte-identically to
+    sheet_gui_view_with_selection."""
     val sheet = session.sheet
     val left_col0 = session.view_left_col - 1
     val visible_rows = _sheet_gui_visible_rows(sheet, session.view_top_row, max_rows)
@@ -1013,8 +1115,18 @@ fn sheet_gui_view_with_selection(session: SheetGuiSession, max_rows: i32, max_co
                     cell_text = "[{cell_text}]"
             var data_cell = text_widget(_sheet_gui_selection_cell_id(ref_str), cell_text)
             data_cell = with_width(data_cell, SHEET_GUI_CELL_WIDTH)
+            val cf_marker = _sheet_gui_cf_marker(sheet, rules, ref_str)
+            var dump_text = cell_text
+            if cf_marker != "":
+                dump_text = cell_text + "!" + cf_marker
+            # The widget prop store is process-global and keyed by widget id,
+            # so the class prop is written UNCONDITIONALLY ("" when no rule
+            # matches): a cell that stops matching on a later render (value
+            # edited, rule removed) must CLEAR its stale cf class, not keep
+            # painting last render's tint.
+            data_cell = data_cell.set_prop("class", _sheet_gui_cf_class(cf_marker))
             row_cells.push(data_cell)
-            dump_cells.push(cell_text)
+            dump_cells.push(dump_text)
             rc = rc + 1
         row_nodes.push(row("sheet_sel_row_{r}", row_cells))
         dump_lines.push(dump_cells.join("|"))
@@ -1053,6 +1165,48 @@ fn office_gui_sheet_session_pixels(view: SheetGuiView, selected_ref: text) -> [u
     )
     val body = render_html_tree(view.tree.root_node(), state)
     val html = "<html><head><style>" + office_gui_sheet_minimal_css() + "</style></head><body>" + body + "</body></html>"
+    simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
+
+fn sheet_gui_cf_html(view: SheetGuiView, selected_ref: text) -> text:
+    """Build the full page HTML for a sheet_gui_view_with_formats tree:
+    office_gui_sheet_session_pixels' exact HTML construction (same
+    render_html_tree conversion, same focused-cell state, same
+    office_gui_sheet_minimal_css stylesheet) plus each matched cell's cf-*
+    class (attached by the view builder as the cell widget's "class" prop)
+    injected into that cell's rendered class attribute, so the stylesheet's
+    cf rules paint it. render_html_text has no extra-class hook
+    (html_widgets.spl renders only content/label props and is outside this
+    surface's owned files), so the class lands by rewriting the exact
+    `class="widget-text" id="cell_<ref>"` attribute pair render_html_text
+    emits for that cell id. The FOCUSED cell renders
+    `class="widget-text focused"` instead and is deliberately left
+    untouched -- selection styling wins over cf tinting, matching Excel's
+    selection overlay drawing over conditional fills. Split out from
+    office_gui_sheet_cf_pixels so specs can assert the injected classes on
+    the REAL page HTML without paying for a pixel render."""
+    val base_state = init_state(view.tree)
+    val state = UIState(
+        tree: base_state.tree,
+        mode: base_state.mode,
+        focused_id: _sheet_gui_selection_cell_id(selected_ref),
+        command_buffer: base_state.command_buffer
+    )
+    val root = view.tree.root_node()
+    var body = render_html_tree(root, state)
+    for row_node in root.children():
+        for cell_node in row_node.children():
+            val cf_class = cell_node.get_prop("class")
+            if cf_class != "":
+                val old_attr = "class=\"widget-text\" id=\"" + cell_node.id + "\""
+                val new_attr = "class=\"widget-text " + cf_class + "\" id=\"" + cell_node.id + "\""
+                body = body.replace(old_attr, new_attr)
+    "<html><head><style>" + office_gui_sheet_minimal_css() + "</style></head><body>" + body + "</body></html>"
+
+fn office_gui_sheet_cf_pixels(view: SheetGuiView, selected_ref: text) -> [u32]:
+    """Render a sheet_gui_view_with_formats tree to ARGB pixels through the
+    same real layout/paint pixel path office_gui_sheet_session_pixels uses,
+    with the cf-* classes injected by sheet_gui_cf_html (see there)."""
+    val html = sheet_gui_cf_html(view, selected_ref)
     simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
 
 # ---------------------------------------------------------------------------
@@ -1380,3 +1534,248 @@ fn run_gui_live_step(session: SheetGuiSession, key: text, max_rows: i32, max_col
     if key == "q" or key == "ctrl_c" or key == "eof":
         return GuiLiveStepResult(session: session, quit: true)
     GuiLiveStepResult(session: session_key(session, key, max_rows, max_cols, view_rows, view_cols), quit: false)
+
+# ---------------------------------------------------------------------------
+# Slide presenter GUI view (SLIDE PRESENTER SURFACE, fourth pillar): render
+# ONE slide of a deck ([Slide], the exact shape deck_format.spl's parse_deck
+# returns and pptx_export/html_render already consume) through the same
+# session pattern proven for sheet/chart/pivot above.
+#
+# Honest ceilings: the browser-engine widget path this pilot renders through
+# has plain text widgets only -- no <img> bitmap decoding and no per-cell
+# table widget wired for slides -- so table elements render as a
+# "[table <rows>x<cols>]" placeholder text line and image elements as
+# "[image <alt>]" (shape elements, which only PPTX import produces today,
+# as "[shape <type>]"). Bullets DO carry their real nesting level (indent
+# spaces in the widget text, the level itself in the dump). The full-fidelity
+# slide surface stays html_render.spl's render_slide_html; this view is the
+# GUI/presenter projection of the same model.
+# ---------------------------------------------------------------------------
+
+struct SlideGuiView:
+    tree: UITree
+    text_dump: text
+
+fn _slide_gui_deck_len(deck: [Slide]) -> i32:
+    """Slide count of a deck as i32 (mirrors slide.spl's slide_count, which
+    only exists for Presentation, not a bare [Slide] list)."""
+    var count: i32 = 0
+    for s in deck:
+        count = count + 1
+    count
+
+fn _slide_gui_table_dim_label(rows_text: text) -> text:
+    """"<rows>x<cols>" label for a TableEl's canonical newline-joined
+    markdown rows: rows = every non-separator line (header + data rows),
+    cols = cell count of the first row. Counts manually (deck_format's
+    _table_ncols idiom) rather than trusting len() arithmetic across the
+    row-cells array."""
+    var nrows = 0
+    var ncols = 0
+    val lines = rows_text.split("\n")
+    for line in lines:
+        if not is_table_separator_line(line):
+            nrows = nrows + 1
+            if nrows == 1:
+                val cells = table_row_cells(line)
+                for c in cells:
+                    ncols = ncols + 1
+    "{nrows}x{ncols}"
+
+fn _slide_gui_bullet_indent(level: i32) -> text:
+    """Two spaces per bullet nesting level, for the widget text (the dump
+    line carries the raw level instead)."""
+    var indent = ""
+    var i = 0
+    while i < level:
+        indent = "{indent}  "
+        i = i + 1
+    indent
+
+fn _slide_gui_error_tree() -> UITree:
+    val root = column("slide_gui_root", [text_widget("slide_gui_empty", "No slide")])
+    build_tree_with_title(root, "Simple Slides", "light")
+
+fn slide_gui_view(deck: [Slide], slide_index: i32) -> SlideGuiView:
+    """Build a GUI view of ONE slide of `deck` (0-based `slide_index`): the
+    slide's title (its first element, when that element is a text box -- the
+    same index-0-is-title rule html_render.spl's style tagging uses, and the
+    slot parse_deck always fills first) as a title text widget, then one text
+    widget per remaining element -- bullets indented two spaces per nesting
+    level (level from the bullet<level>_<n> id, via deck_format's
+    bullet_id_level), plain body text as-is, and tables/images/shapes as
+    honest placeholder lines ("[table 2x3]" / "[image alt]" / "[shape rect]"
+    -- see the ceiling note in the section comment above).
+
+    Returns both a UITree (for real pixel rendering through the browser
+    engine, office_gui_slide_pixels below) and a plain-text dump for
+    testability without parsing HTML/widget trees:
+    "slide|<index+1>/<total>|<title>" first, then one line per element:
+    "bullet|<level>|<text>", "text|<text>", "table|<rows>x<cols>",
+    "image|<alt>", "shape|<type>". Fail-closed (an "error|bad-index" dump
+    line, no crash) when `slide_index` is outside the deck."""
+    val total = _slide_gui_deck_len(deck)
+    if slide_index < 0 or slide_index >= total:
+        val err_dump = "slide|{slide_index + 1}/{total}|\nerror|bad-index"
+        return SlideGuiView(tree: _slide_gui_error_tree(), text_dump: err_dump)
+    val slide = deck[slide_index]
+    var title = ""
+    var start_idx = 0
+    if slide.elements.len() > 0:
+        val first = slide.elements[0]
+        match first.kind:
+            SlideElementKind.TextBox(content: content):
+                title = content
+                start_idx = 1
+            _:
+                pass_do_nothing("a non-text first element stays a content line")
+    var dump_lines: [text] = ["slide|{slide_index + 1}/{total}|{title}"]
+    var widgets: [WidgetNode] = [text_widget("slide_gui_title", title)]
+    var i = start_idx
+    while i < slide.elements.len():
+        val el = slide.elements[i]
+        match el.kind:
+            SlideElementKind.TextBox(content: content):
+                if el.id.starts_with("bullet"):
+                    val level = bullet_id_level(el.id)
+                    dump_lines.push("bullet|{level}|{content}")
+                    val indent = _slide_gui_bullet_indent(level)
+                    widgets.push(text_widget("slide_gui_el_{i}", "{indent}- {content}"))
+                else:
+                    dump_lines.push("text|{content}")
+                    widgets.push(text_widget("slide_gui_el_{i}", content))
+            SlideElementKind.TableEl(rows: rows):
+                val dims = _slide_gui_table_dim_label(rows)
+                dump_lines.push("table|{dims}")
+                widgets.push(text_widget("slide_gui_el_{i}", "[table {dims}]"))
+            SlideElementKind.ImageEl(src: src, alt: alt):
+                dump_lines.push("image|{alt}")
+                widgets.push(text_widget("slide_gui_el_{i}", "[image {alt}]"))
+            SlideElementKind.ShapeEl(shape_type: shape_type, fill_color: fill_color):
+                dump_lines.push("shape|{shape_type}")
+                widgets.push(text_widget("slide_gui_el_{i}", "[shape {shape_type}]"))
+        i = i + 1
+    val root = column("slide_gui_root", widgets)
+    val tree = build_tree_with_title(root, "Simple Slides", "light")
+    SlideGuiView(tree: tree, text_dump: dump_lines.join("\n"))
+
+fn office_gui_slide_pixels(view: SlideGuiView) -> [u32]:
+    """Render a SlideGuiView's tree to ARGB pixels via the same real
+    layout/paint pixel path office_gui_frame uses -- the slide view emits
+    only text widgets inside column panels, all covered by
+    office_gui_minimal_css's base classes."""
+    val state = init_state(view.tree)
+    val body = render_html_tree(view.tree.root_node(), state)
+    val html = "<html><head><style>" + office_gui_minimal_css() + "</style></head><body>" + body + "</body></html>"
+    simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
+
+# ---------------------------------------------------------------------------
+# Slide GUI session (presenter navigation): mirrors ChartGuiSession/
+# PivotGuiSession's session pattern -- a small value-type struct plus
+# copy-return op functions -- over slide_gui_view. No render duplication:
+# slide_session_view forwards straight to slide_gui_view.
+# ---------------------------------------------------------------------------
+
+struct SlideGuiSession:
+    deck: [Slide]
+    current_index: i32
+    last_error: text   # "" = no error; else the reason the last op left the session unchanged
+
+struct SlideGuiStepResult:
+    session: SlideGuiSession
+    quit: bool
+
+fn slide_session_new(deck: [Slide]) -> SlideGuiSession:
+    """Start a presenter session over `deck`, positioned on the first slide
+    (current_index 0). The deck is the exact [Slide] list parse_deck
+    returns, so a deck.md load site lifts into a session with no adaptation."""
+    SlideGuiSession(deck: deck, current_index: 0, last_error: "")
+
+fn slide_session_view(session: SlideGuiSession) -> SlideGuiView:
+    """Render the session's current slide -- forwards straight to
+    slide_gui_view (the same engine-reuse discipline chart_session_view/
+    pivot_session_view follow)."""
+    slide_gui_view(session.deck, session.current_index)
+
+fn slide_session_next(session: SlideGuiSession) -> SlideGuiSession:
+    """Advance to the next slide, CLAMPING at the last slide (advancing past
+    the end is not an error -- it just stays on the last slide, the same
+    silent edge-clamp discipline session_key's arrow moves use -- so
+    last_error clears to ""). Returns a NEW session (copy semantics) --
+    callers must reassign."""
+    val total = _slide_gui_deck_len(session.deck)
+    var idx = session.current_index + 1
+    if idx > total - 1:
+        idx = total - 1
+    if idx < 0:
+        idx = 0
+    SlideGuiSession(deck: session.deck, current_index: idx, last_error: "")
+
+fn slide_session_prev(session: SlideGuiSession) -> SlideGuiSession:
+    """Step back to the previous slide, CLAMPING at the first slide (same
+    silent edge-clamp as slide_session_next; last_error clears to "").
+    Returns a NEW session (copy semantics) -- callers must reassign."""
+    var idx = session.current_index - 1
+    if idx < 0:
+        idx = 0
+    SlideGuiSession(deck: session.deck, current_index: idx, last_error: "")
+
+fn slide_session_goto(session: SlideGuiSession, n: i32) -> SlideGuiSession:
+    """Jump to slide `n` (1-BASED, the number a presenter reads off the
+    "slide|<n>/<total>|..." header). An out-of-range `n` (< 1 or > total)
+    leaves the session UNCHANGED (current_index untouched) except
+    last_error, set to "bad-index" -- documented fail-closed, mirrors
+    slide_gui_view's own "error|bad-index" dump line and the fail-closed
+    discipline of pivot_session_set_agg/chart_session_set_kind above. A
+    valid `n` clears last_error back to "". Returns a NEW session (copy
+    semantics) -- callers must reassign."""
+    val total = _slide_gui_deck_len(session.deck)
+    if n < 1 or n > total:
+        return SlideGuiSession(deck: session.deck, current_index: session.current_index, last_error: "bad-index")
+    SlideGuiSession(deck: session.deck, current_index: n - 1, last_error: "")
+
+fn _slide_gui_digit(key: text) -> i32:
+    """1-based slide number for a single-digit key name "1".."9"; 0 for
+    anything else (0 is never a valid 1-based goto target, so callers can
+    use it as the not-a-digit sentinel)."""
+    if key == "1":
+        return 1
+    if key == "2":
+        return 2
+    if key == "3":
+        return 3
+    if key == "4":
+        return 4
+    if key == "5":
+        return 5
+    if key == "6":
+        return 6
+    if key == "7":
+        return 7
+    if key == "8":
+        return 8
+    if key == "9":
+        return 9
+    0
+
+fn slide_gui_step(session: SlideGuiSession, key: text) -> SlideGuiStepResult:
+    """One decoded key name -> one SlideGuiSession transition, mirroring
+    chart_gui_step/pivot_gui_step's quit modeling exactly: "n"/"right"/
+    "space" advance (slide_session_next, clamped), "p"/"left" step back
+    (slide_session_prev, clamped), a single digit "1".."9" jumps to that
+    1-based slide (slide_session_goto -- out-of-range digits fail closed
+    with last_error "bad-index", session otherwise unchanged); "q",
+    "ctrl_c" (Ctrl-C), and "eof" (stdin closed) signal quit via
+    SlideGuiStepResult.quit rather than raising/exiting, with the session
+    UNCHANGED from just before the quit key. Any other key is a no-op
+    (session unchanged, quit false)."""
+    if key == "q" or key == "ctrl_c" or key == "eof":
+        return SlideGuiStepResult(session: session, quit: true)
+    if key == "n" or key == "right" or key == "space":
+        return SlideGuiStepResult(session: slide_session_next(session), quit: false)
+    if key == "p" or key == "left":
+        return SlideGuiStepResult(session: slide_session_prev(session), quit: false)
+    val digit = _slide_gui_digit(key)
+    if digit > 0:
+        return SlideGuiStepResult(session: slide_session_goto(session, digit), quit: false)
+    SlideGuiStepResult(session: session, quit: false)
