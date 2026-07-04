@@ -328,7 +328,7 @@ impl NvmeController:
                 me.pt.tick(2)   # a program burns more energy than a read
             else:
                 if cmd_is_read(cmd):
-                    status = me.ftl.read_status(cmd.lba)
+                    status = me.ftl.read_range_status(cmd.lba, cmd.nblocks)
                     if status == SC_SUCCESS:
                         rdata = me.ftl.read(cmd.lba)
                     me.reads = me.reads + 1
@@ -704,11 +704,20 @@ fn nvme_controller_selftest() -> i64:
     val mederr: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(mederr.status, SC_MEDIA_ERR, "uncorrectable read -> SC_MEDIA_ERR")
     fail = fail + expect_eq(mederr.data, 0, "uncorrectable read does not return corrupted data")
+    c.io_submit(1, cmd_make(124, OP_WRITE, 13, 2, prp_pack(0x5C, 0x6C)))
+    c.io_process()
+    c.io_reap(1)
+    val pp2: i64 = c.physical_ppn(14)
+    c.inject_read_bitflip(pp2, 2)
+    c.io_submit(1, cmd_make(125, OP_READ, 13, 2, 0))
+    c.io_process()
+    val medrange: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(medrange.status, SC_MEDIA_ERR, "multi-block read reports later media error")
     c.admin_submit(admin_get_log_cmd(40, LOG_SMART))
     c.admin_process()
     c.admin_reap()
     val sm: SmartLog = c.last_smart()
-    fail = fail + expect_eq(sm.media_errors, 1, "SMART media_errors counts the uncorrectable read")
+    fail = fail + expect_eq(sm.media_errors, 2, "SMART media_errors counts uncorrectable reads")
     fail = fail + expect_eq(sm.crit_warning, 1, "SMART critical warning set on media error")
     var duw_ok: i64 = 0
     if sm.data_units_written > 0:
