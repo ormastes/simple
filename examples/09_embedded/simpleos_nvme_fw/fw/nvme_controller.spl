@@ -177,6 +177,8 @@ impl NvmeController:
     # Async Event Request: complete immediately if an event is already pending,
     # otherwise hold the request outstanding (no completion) until one is raised.
     me admin_async_event(cmd: AdminCmd) -> AdminResult:
+        if cmd.cdw10 != 0 or cmd.cdw11 != 0 or cmd.cdw12 != 0 or cmd.nsid != 0:
+            return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
         if me.aer_event != 0:
             val evt: i64 = me.aer_event
             me.aer_event = 0
@@ -528,6 +530,11 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(c.admin_completions(), 1, "AER completes after event raised")
     val aer: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(aer.data, AER_SMART_HEALTH, "AER reports the event type")
+    c.admin_submit(admin_cmd_make(28, ADMIN_ASYNC_EVENT, 0, 1, 0, 0))
+    c.admin_process()
+    val badaer: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(badaer.status, SC_INVALID_FIELD, "AER with reserved dword rejected")
+    fail = fail + expect_eq(c.aer_outstanding(), 0, "failed AER is not held outstanding")
 
     # Firmware Download + Commit advances the active firmware revision.
     val rev0: i64 = c.firmware_revision()
