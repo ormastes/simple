@@ -3,7 +3,46 @@
 - **Date:** 2026-07-01
 - **Area:** `src/compiler/90.tools/duplicate_check` (cosine mode)
 - **Severity:** medium (mode is usable only on small scopes)
-- **Status:** open
+- **Status:** fixed (2026-07-04, task #89)
+
+## Resolution (2026-07-04)
+
+The bug-report repro now completes: 22-file tool directory, `--mode cosine
+--min-tokens 30 --min-lines 6 --max-allowed 999` → 34 groups, exit 0, 7m20s
+wall (interpreter). Before: killed, never completed. Fixes, in
+`_Detector/similarity_grouping.spl` / `_Detector/interner_and_logging.spl`:
+
+- Removed the `dada8d28f79b` workaround that silently aliased cosine mode to
+  the exact-hash line-window path (it computed zero cosine similarity;
+  `refine_groups_with_similarity` was dead code). Real pipeline restored.
+- Fixed a hidden O(n²) in `collect_token_window_candidates` /
+  `collect_hash_counts_in_file`: `end_idx` reset to `i+window_size` per outer
+  token instead of carrying forward (two-pointer). O(tokens) amortized now.
+- Extraction volume: cosine no longer zeroes `repeated_hashes` to scan every
+  file. New Pass 0 prunes files via an identifier-normalized line-window
+  inverted index (structure key: identifier runs → `#`, digit runs → `0`),
+  so renamed-identifier clones still anchor. An exact-hash pre-filter (this
+  report's original suggestion) is NOT usable: it prunes exactly the fuzzy
+  pairs cosine exists to find (caught by detector_grouping_spec).
+- Pairwise comparison: signature-token inverted index (same technique as
+  semantic.spl's local path) + real `cosine_similarity` within buckets,
+  replacing the capped O(n²) loop with its token-count approximation.
+  Oversized-bucket skips and block sampling are logged, never silent.
+- JIT unblocking (interpreter fallback was the per-token cost multiplier):
+  renamed `val vec` shadows (ollama_client.spl, semantic.spl) and replaced
+  deprecated `import std.env.*` module-alias calls in env config/validation
+  (both families) — each was an HIR "Unknown variable" lowering failure.
+
+### Residual (still open, separate concerns)
+
+- Interpreter tokenize() is ~2ms/token; 7m20s for 22 files is completion,
+  not speed. Next JIT blocker: W1006 "mutation without mut capability"
+  lowering `get_tokens_cached` (cache.spl mutates `manager.cache` through a
+  parameter) — capability-model issue, needs its own fix.
+- Something on the dev box SIGTERMs processes matching `simple run` at
+  ~63–66s wall (pattern-based sweep; the same binary copied to another name
+  runs 7m+ undisturbed). Long-running verification must use a renamed
+  binary copy or `bin/simple test`.
 
 ## Symptom
 
