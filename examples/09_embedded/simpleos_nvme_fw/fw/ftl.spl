@@ -338,7 +338,11 @@ impl Ftl:
                 me.band.mark_valid(newp)
                 me.band.mark_invalid(ppn)
             p = p + 1
-        me.fil.erase(blk)
+        val er: i64 = me.fil.erase(blk)
+        if er != NAND_OK:
+            me.band.set_bad(blk)
+            me.rd_disturb[blk] = 0
+            return UNMAP
         me.band.free_block(blk)
         me.rd_disturb[blk] = 0      # erased -> read-disturb accumulation cleared
         blk
@@ -480,6 +484,17 @@ fn ftl_selftest() -> i64:
     fail = fail + expect_eq(blocked, UNMAP, "gc aborts when relocation program fails")
     fail = fail + expect_eq(gf.read(700), 1000, "failed gc keeps old live page readable")
     fail = fail + expect_eq(gf.band.block_state(2), BLK_BAD, "failed relocation retires target block in allocator")
+
+    var ef: Ftl = ftl_new()
+    i = 0
+    while i < PAGES_PER_BLOCK * 2:
+        ef.write(1000 + i, 2000 + i)
+        i = i + 1
+    ef.fil.inject_erase_fail(0)
+    val erase_blocked: i64 = ef.gc_once()
+    fail = fail + expect_eq(erase_blocked, UNMAP, "gc does not free a block when erase fails")
+    fail = fail + expect_eq(ef.read(1000), 2000, "failed erase gc keeps relocated data readable")
+    fail = fail + expect_eq(ef.band.block_state(0), BLK_BAD, "failed erase retires victim in allocator")
 
     fail
 
