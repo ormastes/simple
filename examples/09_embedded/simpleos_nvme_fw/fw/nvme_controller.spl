@@ -374,9 +374,12 @@ impl NvmeController:
         val limit: i64 = MAX_IO_QUEUES * MAX_QUEUE_SIZE
         var qid: i64 = me.qset.next_pending_sq()
         while qid >= 1 and guard < limit:
+            val cqid: i64 = me.qset.sq_bound_cq(qid)
+            if me.qset.cq_is_full(cqid):
+                return n
             val cmd: NvmeCmd = me.qset.sq_fetch(qid)
             val cpl: NvmeCpl = me.process_one_io(cmd)
-            me.qset.cq_post(me.qset.sq_bound_cq(qid), cpl)
+            me.qset.cq_post(cqid, cpl)
             n = n + 1
             guard = guard + 1
             qid = me.qset.next_pending_sq()
@@ -474,6 +477,18 @@ fn nvme_controller_selftest() -> i64:
     val bdc: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(bds.status, SC_INVALID_FIELD, "malformed delete SQ rejected")
     fail = fail + expect_eq(bdc.status, SC_INVALID_FIELD, "malformed delete CQ rejected")
+    fill_cq = 0
+    while fill_cq < MAX_QUEUE_SIZE:
+        c.qset.cq_post(1, cpl_make(600 + fill_cq, SC_SUCCESS, 0))
+        fill_cq = fill_cq + 1
+    c.io_submit(1, cmd_make(75, OP_READ, 9, 1, 0))
+    fail = fail + expect_eq(c.io_process(), 0, "IO process backs off when completion queue is full")
+    fail = fail + expect_eq(c.qset.sq_pending(1), 1, "IO command stays pending behind full completion queue")
+    while c.io_completions(1) > 0:
+        c.io_reap(1)
+    c.io_process()
+    val deferred_io: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(deferred_io.status, SC_SUCCESS, "deferred IO command completes after CQ drains")
 
     # Write then read on the new IO queue
     c.io_submit(1, cmd_make(100, OP_WRITE, 9, 1, 0x55))
