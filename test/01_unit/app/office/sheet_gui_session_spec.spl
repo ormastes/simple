@@ -60,6 +60,25 @@ fn _demo_sheet_with_hidden_row() -> Sheet:
     sheet.hide_row(4)
     sheet
 
+fn _wide_demo_sheet() -> Sheet:
+    """10-column fixture (A..J), row 1 only: A1=1, B1=2, ..., J1=10 -- the
+    "10-col fixture" for hand-computing page_left/page_right column-viewport
+    transitions below (no hidden rows/cols involved, unlike _scroll_demo_
+    sheet -- column paging has no hidden-column concept to backfill, per
+    _sheet_gui_scroll_to_show_col's docstring, so a plain row is enough)."""
+    var sheet = Sheet.new("Wide")
+    sheet.set_value("A1", "1")
+    sheet.set_value("B1", "2")
+    sheet.set_value("C1", "3")
+    sheet.set_value("D1", "4")
+    sheet.set_value("E1", "5")
+    sheet.set_value("F1", "6")
+    sheet.set_value("G1", "7")
+    sheet.set_value("H1", "8")
+    sheet.set_value("I1", "9")
+    sheet.set_value("J1", "10")
+    sheet
+
 fn _scroll_demo_sheet() -> Sheet:
     """20-row viewport fixture: A{r}/B{r} for r=2..21 hold "Item {r-1}"/
     "{r-1}" (so B{r}'s value is always r-1), with row 12 hidden -- the exact
@@ -348,3 +367,57 @@ describe "viewport":
         expect(session.selected_ref).to_equal("B8")
         val view = sheet_gui_view_with_selection(session, 5, 2)
         expect(view.text_dump).to_contain("viewport|A6:B10")
+
+    it "session_scroll page_right moves the column viewport by a full window and keeps the selection's relative column":
+        # Hand-computed on the 10-col fixture (A..J): starting at column A
+        # (view_left_col=1, i.e. 0-based old_left0=0) with a 4-visible-
+        # column window and A1 selected (0-based col 0, so col_offset =
+        # 0 - 0 = 0). page_right: new_left0 = old_left0 + view_cols =
+        # 0 + 4 = 4 (column E, 0-based), new_sel_col0 = new_left0 +
+        # col_offset = 4 + 0 = 4 -> column E -- so the window becomes
+        # E..H and the selection moves from A1 to E1 (same relative
+        # position -- first column of the window -- as it held before).
+        val sheet = _wide_demo_sheet()
+        var session = session_new(sheet, "A1")
+        session = session_scroll(session, "page_right", 1, 4)
+        expect(session.view_left_col).to_equal(5)
+        expect(session.selected_ref).to_equal("E1")
+        val view = sheet_gui_view_with_selection(session, 1, 4)
+        expect(view.text_dump).to_contain("viewport|E1:H1")
+        expect(view.text_dump).to_contain("[5]")
+
+    it "session_scroll page_left after page_right returns to the original column window (round trip)":
+        # Continues from the page_right state above (window E..H, E1
+        # selected, 0-based old_left0=4, col_offset = 4 - 4 = 0).
+        # page_left: new_left0 = old_left0 - view_cols = 4 - 4 = 0 (back
+        # to column A), new_sel_col0 = new_left0 + col_offset = 0 + 0 = 0
+        # -> column A -- an exact round trip back to the state before
+        # page_right.
+        val sheet = _wide_demo_sheet()
+        var session = session_new(sheet, "A1")
+        session = session_scroll(session, "page_right", 1, 4)
+        session = session_scroll(session, "page_left", 1, 4)
+        expect(session.view_left_col).to_equal(1)
+        expect(session.selected_ref).to_equal("A1")
+        val view = sheet_gui_view_with_selection(session, 1, 4)
+        expect(view.text_dump).to_contain("viewport|A1:D1")
+
+    it "session_scroll page_left clamps at column A instead of scrolling past the left edge, preserving the selection's relative column":
+        # Hand-computed: window starts at column C (view_left_col=3, i.e.
+        # 0-based old_left0=2) with a 4-visible-column window (C..F) and
+        # D1 selected (0-based col 3, so col_offset = 3 - 2 = 1, one
+        # column into the window). page_left: new_left0 = old_left0 -
+        # view_cols = 2 - 4 = -2, clamped to 0 (column A) since there is
+        # no column left of A. new_sel_col0 = new_left0 + col_offset =
+        # 0 + 1 = 1 -> column B -- the selection keeps its SAME
+        # relative-into-the-window position (index 1) in the new,
+        # clamped A..D window, landing on B1 instead of the unclamped
+        # (and invalid) column -1.
+        val sheet = _wide_demo_sheet()
+        val session = SheetGuiSession(sheet: sheet, selected_ref: "D1", pending_input: "", view_top_row: 1, view_left_col: 3)
+        val scrolled = session_scroll(session, "page_left", 1, 4)
+        expect(scrolled.view_left_col).to_equal(1)
+        expect(scrolled.selected_ref).to_equal("B1")
+        val view = sheet_gui_view_with_selection(scrolled, 1, 4)
+        expect(view.text_dump).to_contain("viewport|A1:D1")
+        expect(view.text_dump).to_contain("[2]")
