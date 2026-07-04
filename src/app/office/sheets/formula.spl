@@ -17,8 +17,8 @@ use app.office.sheets.math_bridge.{excel_sin, excel_cos, excel_tan, excel_atan, 
 use common.office.number.{office_parse_unsigned_decimal_f64}
 use common.string_core.{char_from_code, str_repeat}
 use std.math.special.{powf, exp_f64, ln_f64, sqrt_f64, gamma_ln, incomplete_beta, incomplete_beta_inv, incomplete_gamma_p, incomplete_gamma_p_inv, erf, erfc}
-use std.math.distributions.{norm_cdf, norm_inv, t_cdf_2t, t_inv, f_cdf, f_inv, binom_pmf, binom_cdf, lognorm_cdf, hypgeom_pmf, negbinom_pmf}
-use std.math.statistics.{mean, covar_pop, linfit}
+use std.math.distributions.{norm_cdf, norm_inv, t_cdf_2t, t_inv, f_cdf, f_inv, binom_pmf, binom_cdf, lognorm_cdf, hypgeom_pmf, negbinom_pmf, weibull_pdf}
+use std.math.statistics.{mean, covar_pop, linfit, median, mode_single, large, small, percentile_inc, quartile_inc, steyx, rsq, devsq}
 use std.math.financial.{daycount_frac, coup_prev, coup_next, xnpv_at, depreciation_coeff, amorlinc_period, amordegrc_period}
 
 # Runtime RNG (SFFI, same declaration as std core/random.spl). Inclusive on
@@ -1906,9 +1906,86 @@ fn _agg_cell_value(cv: CellValue) -> AggCell:
         _:
             return AggCell(is_err: false, is_num: false, num: 0.0)
 
+fn _aggregate_kform(fnum: i64, vals: [f64], has_k: bool, k: f64) -> CellValue:
+    """function_num 12-19: MEDIAN/MODE.SNGL/LARGE/SMALL/PERCENTILE.INC/
+    QUARTILE.INC/PERCENTILE.EXC/QUARTILE.EXC. 14-19 require the trailing k
+    argument (AGGREGATE(function_num, options, array, k)); 12-13 don't take
+    one. EXC forms interpolate over the open-interval rank
+    k*(n+1) ∈ (1, n) — i.e. k ∈ (1/(n+1), n/(n+1)) — else #ERR, matching
+    Excel's PERCENTILE.EXC/QUARTILE.EXC domain."""
+    if vals.len() == 0:
+        return CellValue.ErrorVal(message: "AGGREGATE requires values")
+    if fnum == 12:
+        return CellValue.NumberVal(value: median(vals))
+    if fnum == 13:
+        return CellValue.NumberVal(value: mode_single(vals))
+    if not has_k:
+        return CellValue.ErrorVal(message: "AGGREGATE function_num 14-19 requires k")
+    val n = vals.len()
+    if fnum == 14:
+        val ki = k.to_i32()
+        if ki < 1 or ki > n:
+            return CellValue.ErrorVal(message: "AGGREGATE LARGE k out of range")
+        return CellValue.NumberVal(value: large(vals, ki))
+    if fnum == 15:
+        val ki = k.to_i32()
+        if ki < 1 or ki > n:
+            return CellValue.ErrorVal(message: "AGGREGATE SMALL k out of range")
+        return CellValue.NumberVal(value: small(vals, ki))
+    if fnum == 16:
+        if k < 0.0 or k > 1.0:
+            return CellValue.ErrorVal(message: "AGGREGATE PERCENTILE.INC k out of range")
+        return CellValue.NumberVal(value: percentile_inc(vals, k))
+    if fnum == 17:
+        if k < 0.0 or k > 4.0:
+            return CellValue.ErrorVal(message: "AGGREGATE QUARTILE.INC quart out of range")
+        return CellValue.NumberVal(value: quartile_inc(vals, k))
+    if fnum == 18:
+        return _percentile_exc(vals, k)
+    if fnum == 19:
+        return _percentile_exc(vals, k / 4.0)
+    CellValue.ErrorVal(message: "AGGREGATE unsupported function_num")
+
+fn _percentile_exc(vals: [f64], k: f64) -> CellValue:
+    """PERCENTILE.EXC core: rank = k*(n+1) must land strictly inside [1, n]
+    (equivalently k ∈ (1/(n+1), n/(n+1))), else #ERR. Otherwise linear
+    interpolation between the two bracketing order statistics.
+    Hand-verified: PERCENTILE.EXC([1,2,3,4], 0.3): rank = 0.3*5 = 1.5 ->
+    1 + 0.5*(2-1) = 1.5."""
+    val n = vals.len()
+    val lo_bound = 1.0 / (n.to_f64() + 1.0)
+    val hi_bound = n.to_f64() / (n.to_f64() + 1.0)
+    if k <= lo_bound or k >= hi_bound:
+        return CellValue.ErrorVal(message: "AGGREGATE PERCENTILE.EXC k out of range")
+    var sorted: [f64] = []
+    for v in vals:
+        sorted.push(v)
+    var si = 0
+    while si < sorted.len():
+        var sj = si + 1
+        while sj < sorted.len():
+            val a = sorted[si]
+            val b = sorted[sj]
+            if b < a:
+                sorted[si] = b
+                sorted[sj] = a
+            sj = sj + 1
+        si = si + 1
+    val rank = k * (n.to_f64() + 1.0)
+    val rank_floor = _floor_f64(rank).to_i64().to_i32()
+    val frac = rank - rank_floor.to_f64()
+    val lo_val = sorted[rank_floor - 1]
+    if rank_floor >= n:
+        return CellValue.NumberVal(value: lo_val)
+    val hi_val = sorted[rank_floor]
+    CellValue.NumberVal(value: lo_val + frac * (hi_val - lo_val))
+
 fn _eval_aggregate(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
-    """AGGREGATE(function_num, options, range). function_num 1-11 maps like
-    SUBTOTAL (AVERAGE..VARP; the k-argument forms 12-19 are not supported).
+    """AGGREGATE(function_num, options, range[, k]). function_num 1-11 maps
+    like SUBTOTAL (AVERAGE..VARP). 12-19 are the k-argument statistical
+    forms (MEDIAN, MODE.SNGL, LARGE, SMALL, PERCENTILE.INC/EXC,
+    QUARTILE.INC/EXC) — see _aggregate_kform. k, when present, is parsed
+    AFTER the range: AGGREGATE(func, options, range, k).
     Options supported: 0 (default — any error cell in the range makes the
     result #ERR) and 6 (ignore error cells). The other option values (hidden
     row / nested-subtotal filtering and their combinations) have no model
@@ -1928,14 +2005,23 @@ fn _eval_aggregate(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRe
         return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE requires a range"), next_pos: cur_pos)
     val rng = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
     cur_pos = cur_pos + 3
+    var has_k = false
+    var k_val = 0.0
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        cur_pos = cur_pos + 1
+        if cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+            val kr = _eval_comparison(tokens, cur_pos, sheet, depth)
+            k_val = _to_number(kr.value)
+            has_k = true
+            cur_pos = kr.next_pos
     if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
         cur_pos = cur_pos + 1
     if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
         cur_pos = cur_pos + 1
     if rng == nil:
         return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE invalid range"), next_pos: cur_pos)
-    if fnum < 1 or fnum > 11:
-        return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE function_num must be 1-11"), next_pos: cur_pos)
+    if fnum < 1 or fnum > 19:
+        return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE function_num must be 1-19"), next_pos: cur_pos)
     if opts != 0 and opts != 6:
         return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE options 0 and 6 only"), next_pos: cur_pos)
     var vals: [f64] = []
@@ -1954,6 +2040,8 @@ fn _eval_aggregate(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRe
                     return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE error in range"), next_pos: cur_pos)
             elif ac.is_num:
                 vals.push(ac.num)
+    if fnum >= 12:
+        return EvalResult(value: _aggregate_kform(fnum, vals, has_k, k_val), next_pos: cur_pos)
     EvalResult(value: _subtotal_compute(fnum, vals), next_pos: cur_pos)
 
 fn _is_a_variant_function(name: text) -> bool:
@@ -4699,9 +4787,7 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val powa = if x == 0.0: 0.0 else: exp_f64(alpha * ln_f64(ratio))
                 if _first_val(args[3]) != 0.0:
                     return CellValue.NumberVal(value: 1.0 - exp_f64(0.0 - powa))
-                val powa1 = if x == 0.0: 0.0 else: exp_f64((alpha - 1.0) * ln_f64(ratio))
-                val pdf = (alpha / beta) * powa1 * exp_f64(0.0 - powa)
-                return CellValue.NumberVal(value: pdf)
+                return CellValue.NumberVal(value: weibull_pdf(x, alpha, beta))
             return CellValue.ErrorVal(message: "WEIBULL requires x, alpha, beta, cumulative")
         "LOGNORMDIST":
             if args.len() >= 3:
@@ -6902,55 +6988,34 @@ fn _array_range_grid(range: CellRange, sheet: Sheet) -> [[text]]:
 # later `.len()`/index off a var named `grid` corrupts the parse. Every
 # range grid below is named `rgrid`/`agrid`/etc instead.
 
-fn _agg_index(name: text) -> i32:
-    """0=SUM,1=AVERAGE,2=MAX,3=MIN,4=COUNT,-1=not a BYROW/BYCOL-supported
-    aggregate."""
-    if name == "SUM":
-        return 0
-    if name == "AVERAGE":
-        return 1
-    if name == "MAX":
-        return 2
-    if name == "MIN":
-        return 3
-    if name == "COUNT":
-        return 4
-    0 - 1
+fn _byrow_fn_is_range_agg(name: text) -> bool:
+    """Whitelist of single-range-arg aggregate functions a BYROW/BYCOL
+    multi-cell row/column body may textually substitute into and dispatch
+    through the normal evaluator (see _byrow_body_fn_name)."""
+    (name == "SUM" or name == "AVERAGE" or name == "MAX" or name == "MIN" or
+     name == "COUNT" or name == "MEDIAN" or name == "PRODUCT" or
+     name == "STDEV" or name == "VAR")
 
-fn _agg_over_row(values: [text], agg: i32) -> text:
-    """SUM/AVERAGE/MAX/MIN/COUNT over a row/column of display-text cell
-    values: numeric coercion via _arr_is_number/.to_f64(); non-numeric
-    cells are skipped (Excel's numeric-only-aggregate behavior)."""
-    var count = 0
-    var total = 0.0
-    var mx = 0.0
-    var mn = 0.0
-    var have = false
-    for v in values:
-        if _arr_is_number(v):
-            val f = v.to_f64()
-            total = total + f
-            if not have:
-                mx = f
-                mn = f
-                have = true
-            else:
-                if f > mx:
-                    mx = f
-                if f < mn:
-                    mn = f
-            count = count + 1
-    if agg == 0:
-        return _format_number(total)
-    if agg == 1:
-        if count == 0:
-            return "0"
-        return _format_number(total / count.to_f64())
-    if agg == 2:
-        return _format_number(mx)
-    if agg == 3:
-        return _format_number(mn)
-    "{count}"
+fn _byrow_body_fn_name(tokens: [text], body_start: i32, end_pos: i32, pname: text) -> text:
+    """The function name F when the body span is EXACTLY `F ( pname )`
+    immediately closed by the LAMBDA's own ')' at end_pos-1 AND F is on the
+    _byrow_fn_is_range_agg whitelist -- else '' (empty = unsupported
+    shape). Bounds-guarded against a short/odd body."""
+    if body_start + 4 != end_pos - 1:
+        return ""
+    if body_start + 3 >= tokens.len():
+        return ""
+    val open_tok = tokens.get(body_start + 1)
+    val param_tok = tokens.get(body_start + 2)
+    val close_tok = tokens.get(body_start + 3)
+    if open_tok != "(" or close_tok != ")":
+        return ""
+    if param_tok.upper() != pname:
+        return ""
+    val fname = tokens.get(body_start).upper()
+    if not _byrow_fn_is_range_agg(fname):
+        return ""
+    fname
 
 fn _array_map(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     """MAP(range, LAMBDA(x, expr)) -> apply expr to each cell of range,
@@ -7046,11 +7111,15 @@ fn _array_scan(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
 
 fn _array_byrow(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     """BYROW(range, LAMBDA(r, expr)) -> one result per row, spilling a
-    column. CEILING: a single-cell row binds r to that cell's value and
-    evaluates expr normally; a multi-cell row supports ONLY expr of the
-    exact form AGG(r) (AGG in SUM/AVERAGE/MAX/MIN/COUNT), computed directly
-    over the row — anything else on a multi-cell row fails closed ([]),
-    since this evaluator has no array-valued LAMBDA parameter."""
+    column. A single-cell row binds r to that cell's value and evaluates
+    expr normally. A multi-cell row supports expr of the form F(r) for any
+    single-range-arg function F on the _byrow_fn_is_range_agg whitelist
+    (SUM/AVERAGE/MAX/MIN/COUNT/MEDIAN/PRODUCT/STDEV/VAR): r is substituted
+    with the row's actual range reference (e.g. A2:C2) and the whole call
+    is dispatched through the normal evaluator (_evaluate_formula) — no
+    aggregate math is reimplemented here. Anything else on a multi-cell
+    row fails closed ([]), since this evaluator has no array-valued LAMBDA
+    parameter."""
     val a_rs = _read_array_range_str(tokens, pos)
     if a_rs == "":
         return []
@@ -7067,11 +7136,14 @@ fn _array_byrow(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     val rng = parse_range(a_rs)
     if rng == nil:
         return []
+    val min_col = if rng.start.col < rng.end_ref.col: rng.start.col else: rng.end_ref.col
+    val max_col = if rng.start.col > rng.end_ref.col: rng.start.col else: rng.end_ref.col
+    val min_row = if rng.start.row < rng.end_ref.row: rng.start.row else: rng.end_ref.row
     val rgrid = _array_range_grid(rng, sheet)
     val pname = lam_params[0]
     val lam_body_start = lam.body_start
     val lam_end_pos = lam.end_pos
-    val agg = _byrow_agg_of(tokens, lam_body_start, lam_end_pos, pname)
+    val fn_name = _byrow_body_fn_name(tokens, lam_body_start, lam_end_pos, pname)
     var out: [[text]] = []
     var r = 0
     var failed = false
@@ -7085,8 +7157,12 @@ fn _array_byrow(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
             _let_names.pop()
             _let_values.pop()
             cell_text = _cell_value_to_display(body_result.value)
-        elif agg >= 0:
-            cell_text = _agg_over_row(rrow, agg)
+        elif fn_name != "":
+            val sheet_row = min_row + r
+            val row_start_ref = cell_ref_to_string(CellRef(col: min_col, row: sheet_row))
+            val row_end_ref = cell_ref_to_string(CellRef(col: max_col, row: sheet_row))
+            val body_value = _evaluate_formula("{fn_name}({row_start_ref}:{row_end_ref})", sheet, 0)
+            cell_text = _cell_value_to_display(body_value)
         else:
             failed = true
         if not failed:
@@ -7096,26 +7172,11 @@ fn _array_byrow(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
         return []
     out
 
-fn _byrow_agg_of(tokens: [text], body_start: i32, end_pos: i32, pname: text) -> i32:
-    """-1 unless the body span is EXACTLY `AGG ( pname )` immediately
-    closed by the LAMBDA's own ')' at end_pos-1 — the only multi-cell-row
-    shape BYROW/BYCOL supports. Bounds-guarded against a short/odd body."""
-    if body_start + 4 != end_pos - 1:
-        return 0 - 1
-    if body_start + 3 >= tokens.len():
-        return 0 - 1
-    val open_tok = tokens.get(body_start + 1)
-    val param_tok = tokens.get(body_start + 2)
-    val close_tok = tokens.get(body_start + 3)
-    if open_tok != "(" or close_tok != ")":
-        return 0 - 1
-    if param_tok.upper() != pname:
-        return 0 - 1
-    _agg_index(tokens.get(body_start).upper())
-
 fn _array_bycol(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     """BYCOL(range, LAMBDA(c, expr)) -> one result per column, spilling a
-    row. Same ceiling as BYROW (see _byrow_agg_of), applied per column."""
+    row. Same ceiling as BYROW (see _byrow_body_fn_name), applied per
+    column: c is substituted with the column's actual range reference and
+    dispatched through the normal evaluator."""
     val a_rs = _read_array_range_str(tokens, pos)
     if a_rs == "":
         return []
@@ -7132,13 +7193,16 @@ fn _array_bycol(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     val rng = parse_range(a_rs)
     if rng == nil:
         return []
+    val min_col = if rng.start.col < rng.end_ref.col: rng.start.col else: rng.end_ref.col
+    val min_row = if rng.start.row < rng.end_ref.row: rng.start.row else: rng.end_ref.row
+    val max_row = if rng.start.row > rng.end_ref.row: rng.start.row else: rng.end_ref.row
     val rgrid = _array_range_grid(rng, sheet)
     if rgrid.len() == 0:
         return []
     val pname = lam_params[0]
     val lam_body_start = lam.body_start
     val lam_end_pos = lam.end_pos
-    val agg = _byrow_agg_of(tokens, lam_body_start, lam_end_pos, pname)
+    val fn_name = _byrow_body_fn_name(tokens, lam_body_start, lam_end_pos, pname)
     val first_row = rgrid[0]
     val ncols = first_row.len()
     var out_row: [text] = []
@@ -7159,8 +7223,12 @@ fn _array_bycol(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
             _let_names.pop()
             _let_values.pop()
             cell_text = _cell_value_to_display(body_result.value)
-        elif agg >= 0:
-            cell_text = _agg_over_row(col_values, agg)
+        elif fn_name != "":
+            val sheet_col = min_col + c
+            val col_start_ref = cell_ref_to_string(CellRef(col: sheet_col, row: min_row))
+            val col_end_ref = cell_ref_to_string(CellRef(col: sheet_col, row: max_row))
+            val body_value = _evaluate_formula("{fn_name}({col_start_ref}:{col_end_ref})", sheet, 0)
+            cell_text = _cell_value_to_display(body_value)
         else:
             failed = true
         if not failed:
@@ -8152,10 +8220,18 @@ fn _array_munit(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     out
 
 fn _array_linest(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
-    """LINEST(known_ys, [known_xs]) -> [slope, intercept] spilled horizontally.
+    """LINEST(known_ys, [known_xs], [const], [stats]) -> spills horizontally.
 
     Computes least-squares linear regression: y = slope*x + intercept.
-    known_xs defaults to 1,2,...,n if omitted.
+    known_xs defaults to 1,2,...,n if omitted. `const` is accepted and
+    skipped (this engine's fit always includes an intercept). When `stats`
+    is TRUE/nonzero, spills the full 3-row form (2 columns):
+      [slope, intercept]
+      [se_slope, se_intercept]
+      [r2, se_y]
+    where se_y = STEYX, r2 = RSQ, se_slope = se_y/sqrt(DEVSQ(xs)),
+    se_intercept = se_y*sqrt(1/n + x̄²/DEVSQ(xs)). Omitting stats (or the
+    2-arg form) keeps the original single-row [slope, intercept] output.
     Returns [["#ERR"]] on error (mismatched lengths, n<2, zero x-variance)."""
     val yrs = _read_array_range_str(tokens, pos)
     if yrs == "":
@@ -8166,6 +8242,7 @@ fn _array_linest(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     var xs: [f64] = []
     if xrs != "":
         xs = _resolve_cell_range(xrs, sheet, 0)
+        cur = cur + 3
     else:
         var i = 1
         while i <= ys.len():
@@ -8176,10 +8253,30 @@ fn _array_linest(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     val fit = linfit(ys, xs)
     if fit[0] == 0.0 and fit[1] == 0.0 and ys.len() < 2:
         return [["#ERR"]]
-    var out_row: [text] = []
-    out_row.push("{fit[0]}")
-    out_row.push("{fit[1]}")
-    [[out_row[0], out_row[1]]]
+
+    # Optional trailing const, stats args (both booleans in Excel).
+    cur = _skip_comma(tokens, cur)
+    if cur < tokens.len() and tokens.get(cur) != ")":
+        val const_result = _eval_comparison(tokens, cur, sheet, 0)
+        cur = const_result.next_pos
+    cur = _skip_comma(tokens, cur)
+    var stats_requested = false
+    if cur < tokens.len() and tokens.get(cur) != ")":
+        val stats_result = _eval_comparison(tokens, cur, sheet, 0)
+        stats_requested = _to_number(stats_result.value) != 0.0
+
+    if stats_requested:
+        val dxs = devsq(xs)
+        if dxs == 0.0:
+            return [["#ERR"]]
+        val se_y = steyx(ys, xs)
+        val r2 = rsq(ys, xs)
+        val se_slope = se_y / sqrt_f64(dxs)
+        val xbar = mean(xs)
+        val n = xs.len().to_f64()
+        val se_intercept = se_y * sqrt_f64(1.0 / n + (xbar * xbar) / dxs)
+        return [["{fit[0]}", "{fit[1]}"], ["{se_slope}", "{se_intercept}"], ["{r2}", "{se_y}"]]
+    [["{fit[0]}", "{fit[1]}"]]
 
 fn _array_trend(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     """TREND(known_ys, [known_xs], [new_xs]) -> predicted values via linear fit.
@@ -9431,6 +9528,15 @@ fn _eval_getpivotdata(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> Eva
     # Determine pivot structure (1D vs 2D)
     val header_row = pivot_grid[0]
     val is_2d = header_row.len() > 2 and header_row[0] != "Row"
+
+    # Validate data_field against the pivot's value-column header (the
+    # top-left header cell, e.g. "Amount") before any lookup. Excel returns
+    # #REF for an unrecognized data field rather than silently falling back
+    # to the grand total.
+    if header_row.len() > 0:
+        val value_header = header_row[0]
+        if value_header.lower() != data_field.lower():
+            return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA unknown data_field"), next_pos: cur_pos)
 
     if field_items.len() == 0:
         # Grand total: bottom-right cell

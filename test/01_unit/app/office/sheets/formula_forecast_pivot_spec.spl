@@ -16,6 +16,14 @@ fn _eval(formula: text) -> text:
     sh = recalculate_formula_cells(sh)
     cell_display_text(sh.get_cell("B1"))
 
+fn _pivot_col_letter(pc: i32) -> text:
+    """Column letter for the pc-th pivot-render column starting at E.
+    Widened past the old E-H hardcode (elif chain capped at H clobbered
+    any pivot wider than 4 columns) so wider cross-tabs can be rendered
+    into the sheet for GETPIVOTDATA intersection tests."""
+    val letters: [text] = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N"]
+    letters[pc]
+
 describe "FORECAST.ETS":
     it "detects no seasonality in linear trend":
         # values 10,12,14,16,18,20 on timeline 1..6: trend = 8 + 2t, no seasonality
@@ -395,8 +403,13 @@ describe "GETPIVOTDATA":
             val prow = pivot_grid[pr]
             var pc = 0
             while pc < prow.len():
-                val letter = if pc == 0: "E" elif pc == 1: "F" elif pc == 2: "G" else: "H"
-                sh.set_value("{letter}{pr + 1}", prow[pc])
+                val letter = _pivot_col_letter(pc)
+                # Overwrite the structural top-left header cell ("Row/Col")
+                # with the real value-field name so GETPIVOTDATA can
+                # validate data_field against it (bug:
+                # getpivotdata_data_field_not_validated_2026-07-04.md).
+                val cell_text = if pr == 0 and pc == 0: "Amount" else: prow[pc]
+                sh.set_value("{letter}{pr + 1}", cell_text)
                 pc = pc + 1
             pr = pr + 1
 
@@ -429,8 +442,13 @@ describe "GETPIVOTDATA":
             val prow = pivot_grid[pr]
             var pc = 0
             while pc < prow.len():
-                val letter = if pc == 0: "E" elif pc == 1: "F" elif pc == 2: "G" else: "H"
-                sh.set_value("{letter}{pr + 1}", prow[pc])
+                val letter = _pivot_col_letter(pc)
+                # Overwrite the structural top-left header cell ("Row/Col")
+                # with the real value-field name so GETPIVOTDATA can
+                # validate data_field against it (bug:
+                # getpivotdata_data_field_not_validated_2026-07-04.md).
+                val cell_text = if pr == 0 and pc == 0: "Amount" else: prow[pc]
+                sh.set_value("{letter}{pr + 1}", cell_text)
                 pc = pc + 1
             pr = pr + 1
 
@@ -463,8 +481,13 @@ describe "GETPIVOTDATA":
             val prow = pivot_grid[pr]
             var pc = 0
             while pc < prow.len():
-                val letter = if pc == 0: "E" elif pc == 1: "F" elif pc == 2: "G" else: "H"
-                sh.set_value("{letter}{pr + 1}", prow[pc])
+                val letter = _pivot_col_letter(pc)
+                # Overwrite the structural top-left header cell ("Row/Col")
+                # with the real value-field name so GETPIVOTDATA can
+                # validate data_field against it (bug:
+                # getpivotdata_data_field_not_validated_2026-07-04.md).
+                val cell_text = if pr == 0 and pc == 0: "Amount" else: prow[pc]
+                sh.set_value("{letter}{pr + 1}", cell_text)
                 pc = pc + 1
             pr = pr + 1
 
@@ -488,8 +511,13 @@ describe "GETPIVOTDATA":
             val prow = pivot_grid[pr]
             var pc = 0
             while pc < prow.len():
-                val letter = if pc == 0: "E" elif pc == 1: "F" elif pc == 2: "G" else: "H"
-                sh.set_value("{letter}{pr + 1}", prow[pc])
+                val letter = _pivot_col_letter(pc)
+                # Overwrite the structural top-left header cell ("Row/Col")
+                # with the real value-field name so GETPIVOTDATA can
+                # validate data_field against it (bug:
+                # getpivotdata_data_field_not_validated_2026-07-04.md).
+                val cell_text = if pr == 0 and pc == 0: "Amount" else: prow[pc]
+                sh.set_value("{letter}{pr + 1}", cell_text)
                 pc = pc + 1
             pr = pr + 1
 
@@ -497,4 +525,95 @@ describe "GETPIVOTDATA":
         sh.set_value("D1", '=GETPIVOTDATA("Amount", E1, "Region", "North")')
         sh = recalculate_formula_cells(sh)
         cell_display_text(sh.get_cell("D1")).to_contain("#ERR")
+
+    it "errors on unknown data_field instead of returning the grand total":
+        var sh = Sheet.new("pivot_test5")
+        sh.set_value("A1", "Region")
+        sh.set_value("B1", "Product")
+        sh.set_value("C1", "Amount")
+        sh.set_value("A2", "East")
+        sh.set_value("B2", "A")
+        sh.set_value("C2", "10")
+        sh.set_value("A3", "East")
+        sh.set_value("B3", "B")
+        sh.set_value("C3", "20")
+        sh.set_value("A4", "West")
+        sh.set_value("B4", "A")
+        sh.set_value("C4", "30")
+        sh.set_value("A5", "West")
+        sh.set_value("B5", "B")
+        sh.set_value("C5", "40")
+
+        val pivot_grid = pivot_build(sh, "A1:C5", 0, 1, 2, "sum")
+        var pr = 0
+        while pr < pivot_grid.len():
+            val prow = pivot_grid[pr]
+            var pc = 0
+            while pc < prow.len():
+                val letter = _pivot_col_letter(pc)
+                val cell_text = if pr == 0 and pc == 0: "Amount" else: prow[pc]
+                sh.set_value("{letter}{pr + 1}", cell_text)
+                pc = pc + 1
+            pr = pr + 1
+
+        # Grand total (for reference) is 100, but "NoSuchField" is not the
+        # pivot's value field -- must #ERR, never silently fall back to it.
+        sh.set_value("D1", '=GETPIVOTDATA("NoSuchField", E1)')
+        sh = recalculate_formula_cells(sh)
+        cell_display_text(sh.get_cell("D1")).to_contain("#ERR")
+
+        # A case-insensitive match on the real field still works.
+        sh.set_value("D2", '=GETPIVOTDATA("amount", E1)')
+        sh = recalculate_formula_cells(sh)
+        cell_display_text(sh.get_cell("D2")).to_equal("100")
+
+    it "returns intersection on the second value column of a wider cross-tab":
+        var sh = Sheet.new("pivot_test6")
+        sh.set_value("A1", "Region")
+        sh.set_value("B1", "Product")
+        sh.set_value("C1", "Amount")
+        sh.set_value("A2", "East")
+        sh.set_value("B2", "A")
+        sh.set_value("C2", "10")
+        sh.set_value("A3", "East")
+        sh.set_value("B3", "B")
+        sh.set_value("C3", "20")
+        sh.set_value("A4", "East")
+        sh.set_value("B4", "C")
+        sh.set_value("C4", "5")
+        sh.set_value("A5", "West")
+        sh.set_value("B5", "A")
+        sh.set_value("C5", "30")
+        sh.set_value("A6", "West")
+        sh.set_value("B6", "B")
+        sh.set_value("C6", "40")
+        sh.set_value("A7", "West")
+        sh.set_value("B7", "C")
+        sh.set_value("C7", "15")
+
+        # 3 product columns (A, B, C) push the rendered grid to E:I --
+        # beyond the old E-H cap this spec's render helper used to clobber.
+        val pivot_grid = pivot_build(sh, "A1:C7", 0, 1, 2, "sum")
+        var pr = 0
+        while pr < pivot_grid.len():
+            val prow = pivot_grid[pr]
+            var pc = 0
+            while pc < prow.len():
+                val letter = _pivot_col_letter(pc)
+                val cell_text = if pr == 0 and pc == 0: "Amount" else: prow[pc]
+                sh.set_value("{letter}{pr + 1}", cell_text)
+                pc = pc + 1
+            pr = pr + 1
+
+        # Header row E1:I1 = Amount, A, B, C, Grand Total. Second value
+        # column (Product B) intersected with East = 20.
+        sh.set_value("D1", '=GETPIVOTDATA("Amount", E1, "Region", "East", "Product", "B")')
+        sh = recalculate_formula_cells(sh)
+        cell_display_text(sh.get_cell("D1")).to_equal("20")
+
+        # And West/B = 40, to pin down the column isn't just falling
+        # through to the first data column.
+        sh.set_value("D2", '=GETPIVOTDATA("Amount", E1, "Region", "West", "Product", "B")')
+        sh = recalculate_formula_cells(sh)
+        cell_display_text(sh.get_cell("D2")).to_equal("40")
 
