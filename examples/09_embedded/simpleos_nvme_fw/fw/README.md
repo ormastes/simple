@@ -92,8 +92,8 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 
 > **Integration status (wired vs. shelf).** The authoritative wired-vs-shelf accounting is
 > `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status — wired vs. shelf" —
-> P1 `fil_fmc`, P7 `power_thermal`, P8 `rain` **wired**; P2 `fil_scheduler` done-but-**shelf**;
-> P3–P6 not started; P9 (`../fw_rv32/entry.spl`) build-blocked.
+> P1/P7/P8 are **wired**, P3/P4/P5/P6 have wired simulation floors, P2 `fil_scheduler` is
+> done-but-**shelf**, and P9 (`../fw_rv32/entry.spl`) is build-blocked.
 
 ## Requirements coverage (from the research report)
 

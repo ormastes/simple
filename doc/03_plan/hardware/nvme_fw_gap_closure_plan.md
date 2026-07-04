@@ -50,12 +50,13 @@ the firmware":
 | P3 | `fil_ecc` + NAND OOB ECC latch | `fil.spl` reads stored ECC through `fil_fmc` and fails silent payload corruption | **wired floor** — stored-ECC simulation, not full BCH/LDPC |
 | P4 | `hil_command.prp_byte` | HIL + multi-queue NVMe writes program each LBA from a block-indexed host byte stream | **wired floor** — no HostMem/PRP list yet |
 | P5 | `ftl_map` | `Ftl` uses bounded LRU write-back cache with explicit DRAM budget + dirty eviction | **wired map-cache floor** — no general DRAM arena/write buffer yet |
+| P6 | `firmware.service_tick` | Foreground HIL ticks and background GC ticks share an explicit FTL-map owner token | **wired cooperative floor** — no multicore/preemption |
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
 | P8 | `rain` | `ftl` (`rain_seal` / `rain_recover_channel`: a failed channel is rebuilt inside the live FTL, verified end-to-end through the normal read path) | **wired** |
 | P2 | `fil_scheduler` | none (the host-runnable sim executes ops synchronously — channel-level parallelism is a model the single-threaded sim cannot itself exhibit) | shelf — verified model, not load-bearing |
 | P9 | `fw_rv32/entry.spl` | bare-metal rv32 ISA (re-expresses the RAIN reconstruct array-free; `check`-clean + host-verified) | started — **build-blocked (environmental)**: rv32 LLVM native-build broken here (proven OS recipe also exits 255); boot not observed |
 
-Adding more standalone modules (full P4 HostMem/PRP lists, full P5 DRAM arena/write buffer, P6, or full BCH/LDPC beyond the P3 floor) widens the shelf without closing the gap. Prefer
+Adding more standalone modules (full P4 HostMem/PRP lists, full P5 DRAM arena/write buffer, multicore P6 beyond the cooperative token, or full BCH/LDPC beyond the P3 floor) widens the shelf without closing the gap. Prefer
 wiring an existing verified module into the live path over landing a new disconnected one.
 
 ## Test discipline (applies to every phase)
@@ -212,7 +213,13 @@ LRU eviction of clean entries (dirty → flush first).
 
 **Silicon ceiling.** Real DRAM refresh/ECC/bandwidth is not modeled.
 
-## P6 — Concurrency: foreground I/O vs background tasks  *(G6)*
+## P6 — Concurrency: foreground I/O vs background tasks  *(G6)* — PARTIAL WIRED FLOOR (2026-07-04)
+
+> Landed floor: `Firmware.service_tick()` processes at most one foreground HIL command and then
+> one background GC opportunity. Both paths must acquire an explicit FTL-map owner token
+> (`MAP_OWNER_FG`/`MAP_OWNER_BG`), and conflicts are counted instead of overlapping map access.
+> Existing `service()` remains the drain API but now loops through `service_tick`, so the
+> cooperative interleave is load-bearing. True multicore preemption/cache coherence remains open.
 
 **Goal.** Model the commercial fg-I/O-vs-bg-task concurrency (GC/wear/scrub) sharing the FTL
 map safely — the core "miniature-OS" challenge.

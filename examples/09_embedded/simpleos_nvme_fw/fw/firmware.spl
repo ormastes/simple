@@ -156,6 +156,24 @@ fn firmware_selftest() -> i64:
     fail = fail + expect_eq(hw.hardware_target(), 1, "firmware can select OpenSSD hardware target")
     fail = fail + expect_eq(hw.target_channels(), NUM_CHANNELS, "firmware OpenSSD target exposes scheduler channels")
 
+    var lock_fw: Firmware = firmware_new()
+    lock_fw.map_owner = MAP_OWNER_BG
+    lock_fw.submit(cmd_make(90, OP_WRITE, 90, 1, 0x5A))
+    fail = fail + expect_eq(lock_fw.service_tick(), 0, "owner conflict blocks foreground tick")
+    fail = fail + expect_eq(lock_fw.conflict_count(), 1, "owner conflict counted")
+    lock_fw.map_owner = MAP_OWNER_NONE
+    fail = fail + expect_eq(lock_fw.service_tick(), 1, "foreground tick runs after owner release")
+    fail = fail + expect_eq(lock_fw.owner_idle(), 1, "owner released after foreground tick")
+
+    var tick_fw: Firmware = firmware_new()
+    tick_fw.submit(cmd_make(91, OP_WRITE, 91, 1, 0x61))
+    tick_fw.submit(cmd_make(92, OP_WRITE, 92, 1, 0x62))
+    fail = fail + expect_eq(tick_fw.service_tick(), 1, "service_tick handles one foreground command")
+    fail = fail + expect_eq(tick_fw.completions(), 1, "one completion after one foreground tick")
+    fail = fail + expect_eq(tick_fw.service(), 1, "service drains remaining foreground command")
+    fail = fail + expect_eq(tick_fw.completions(), 2, "two completions after service drain")
+    fail = fail + expect_eq(tick_fw.fg_ticks, 2, "foreground ticks counted")
+
     fw.submit(cmd_make(1, OP_WRITE, 5, 1, 0x42))
     fw.service()
     val c1: NvmeCpl = fw.reap()
