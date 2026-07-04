@@ -34,21 +34,35 @@ fn dram_write_buffer_new() -> DramWriteBuffer:
     DramWriteBuffer(data: dram_fill(WRITE_BUFFER_CAP_BLOCKS, 0), used_slots: dram_fill(WRITE_BUFFER_CAP_BLOCKS, 0), cap: WRITE_BUFFER_CAP_BLOCKS, count: 0, overflows: 0)
 
 impl DramWriteBuffer:
+    me effective_cap() -> i64:
+        var c: i64 = me.cap
+        if c < 0:
+            return 0
+        if c > WRITE_BUFFER_CAP_BLOCKS:
+            c = WRITE_BUFFER_CAP_BLOCKS
+        if c > me.data.len():
+            c = me.data.len()
+        if c > me.used_slots.len():
+            c = me.used_slots.len()
+        c
+
     me clear():
         me.count = 0
+        val cap: i64 = me.effective_cap()
         var i: i64 = 0
-        while i < me.cap:
+        while i < cap:
             me.used_slots[i] = 0
             i = i + 1
 
     me alloc(nblocks: i64) -> DramSpan:
+        val cap: i64 = me.effective_cap()
         if nblocks <= 0:
             return DramSpan(base: 0, len: 0, ok: true)
-        if nblocks > me.cap:
+        if nblocks > cap:
             me.overflows = me.overflows + 1
             return DramSpan(base: -1, len: 0, ok: false)
         var start: i64 = 0
-        while start + nblocks <= me.cap:
+        while start + nblocks <= cap:
             var i: i64 = 0
             var free: bool = true
             while i < nblocks:
@@ -70,12 +84,13 @@ impl DramWriteBuffer:
     me release(span: DramSpan):
         if not span.ok:
             return
-        if span.base < 0 or span.len < 0 or span.base + span.len > me.cap:
+        val cap: i64 = me.effective_cap()
+        if span.base < 0 or span.len < 0 or span.base + span.len > cap:
             return
         var i: i64 = 0
         while i < span.len:
             val idx: i64 = span.base + i
-            if idx >= 0 and idx < me.cap:
+            if idx >= 0 and idx < cap:
                 if me.used_slots[idx] != 0:
                     me.used_slots[idx] = 0
                     me.data[idx] = 0
@@ -84,6 +99,7 @@ impl DramWriteBuffer:
             i = i + 1
 
     me stage(span: DramSpan, index: i64, byte: i64) -> i64:
+        val cap: i64 = me.effective_cap()
         if not span.ok:
             me.overflows = me.overflows + 1
             return SC_NS_NOT_READY
@@ -93,8 +109,11 @@ impl DramWriteBuffer:
         if index >= span.len:
             me.overflows = me.overflows + 1
             return SC_NS_NOT_READY
+        if span.base < 0 or span.len < 0 or span.base + span.len > cap:
+            me.overflows = me.overflows + 1
+            return SC_NS_NOT_READY
         val slot: i64 = span.base + index
-        if slot < 0 or slot >= me.cap:
+        if slot < 0 or slot >= cap:
             me.overflows = me.overflows + 1
             return SC_NS_NOT_READY
         if me.used_slots[slot] == 0:
@@ -106,14 +125,17 @@ impl DramWriteBuffer:
         SC_SUCCESS
 
     me byte(span: DramSpan, index: i64) -> i64:
+        val cap: i64 = me.effective_cap()
         if not span.ok:
             return 0
         if index < 0:
             return 0
         if index >= span.len:
             return 0
+        if span.base < 0 or span.len < 0 or span.base + span.len > cap:
+            return 0
         val slot: i64 = span.base + index
-        if slot < 0 or slot >= me.cap:
+        if slot < 0 or slot >= cap:
             return 0
         if me.used_slots[slot] == 0:
             return 0
@@ -122,8 +144,9 @@ impl DramWriteBuffer:
     me used() -> i64:
         if me.count < 0:
             return 0
-        if me.count > me.cap:
-            return me.cap
+        val cap: i64 = me.effective_cap()
+        if me.count > cap:
+            return cap
         me.count
 
     me overflow_count() -> i64:
@@ -147,6 +170,13 @@ fn dram_selftest() -> i64:
     b.count = WRITE_BUFFER_CAP_BLOCKS + 3
     fail = fail + expect_eq(b.used(), WRITE_BUFFER_CAP_BLOCKS, "corrupted oversized DRAM usage clamps to capacity")
     b.count = 2
+    b.cap = WRITE_BUFFER_CAP_BLOCKS + 5
+    fail = fail + expect_eq(b.effective_cap(), WRITE_BUFFER_CAP_BLOCKS, "corrupted oversized DRAM cap clamps to backing arena")
+    fail = fail + expect_eq(b.stage(DramSpan(base: WRITE_BUFFER_CAP_BLOCKS, len: 1, ok: true), 0, 1), SC_NS_NOT_READY, "corrupted oversized DRAM cap cannot stage past backing arena")
+    b.cap = -1
+    fail = fail + expect_eq(b.effective_cap(), 0, "corrupted negative DRAM cap clamps to zero")
+    fail = fail + expect_eq(if b.alloc(1).ok: 1 else: 0, 0, "corrupted negative DRAM cap rejects allocation")
+    b.cap = WRITE_BUFFER_CAP_BLOCKS
     b.overflows = -4
     fail = fail + expect_eq(b.overflow_count(), 0, "corrupted negative DRAM overflow count clamps to zero")
     b.overflows = 0
