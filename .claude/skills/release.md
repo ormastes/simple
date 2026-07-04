@@ -26,7 +26,7 @@ verify. If generated manuals, sidecar review, or SPipe coverage are missing or
 stale, stop and return to verify/implementation.
 For SimpleOS mission-critical releases, also run
 `sh scripts/check/check-simpleos-mission-critical-release.shs`; do not release
-while it reports blocked or failed.
+while it reports blocked or failed, and PASS requires `release_blockers=none`.
 Workflow/tooling/evidence/spec/verification contract docs must already be fresh
 from verify; release must not repair stale `doc/07_guide`, `doc/06_spec`,
 `.codex/skills`, `.agents/skills`, `.claude/skills`, `.claude/agents/spipe`,

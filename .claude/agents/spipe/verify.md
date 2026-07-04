@@ -54,7 +54,8 @@
     `doc/06_spec`, `.codex/skills`, `.agents/skills`, `.claude/skills`,
     `.claude/agents/spipe`, and `.gemini/commands` updates exist or are
     explicitly recorded as `N/A`. Stale process docs fail verification; do not
-    mark the agent goal or SPipe lane complete before this gate passes.
+    mark the agent goal or SPipe lane complete before this gate passes. SimpleOS
+    mission-critical release PASS requires `release_blockers=none`.
 12. Verify the `## Cooperative Review` plan from the state file was completed:
     lower-model sidecar lanes are either reviewed/merged or explicitly `N/A`,
     and the normal/highest-capability review accepted broad findings,

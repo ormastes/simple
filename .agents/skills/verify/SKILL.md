@@ -128,7 +128,7 @@ not create, rewrite, or weaken SPipe after verification.
   - SimpleOS mission-critical release verification must run
     `sh scripts/check/check-simpleos-mission-critical-release.shs`; matrix
     readiness is not release completion while that gate reports blocked or
-    failed. If blocked, run
+    failed, and PASS requires `release_blockers=none`. If blocked, run
     `sh scripts/check/check-simpleos-mission-critical-prereqs.shs` for the host
     dependency list and
     `sh scripts/setup/setup-simpleos-formal-env.shs --print-install` for setup
