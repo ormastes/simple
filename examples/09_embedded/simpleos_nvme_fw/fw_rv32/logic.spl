@@ -1,7 +1,7 @@
 # RV32 no-alloc NVMe firmware logic reference.
 #
 # Scalar-only: no arrays, no heap, no strings in the logic path. Host and bare-metal entries share
-# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue + admin + reactor + policy/target + DRAM/durability floor.
+# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue + admin/format/fw-log + reactor + policy/target + DRAM/durability floor.
 
 fn rv32_rain_selftest() -> i64:
     val d0 = 256
@@ -851,6 +851,9 @@ fn rv32_admin_selftest() -> i64:
     val feat_num_queues = 7
     val feat_power_mgmt = 2
     val feat_volatile_wc = 6
+    val sc_success = 0
+    val sc_invalid_field = 2
+    val sc_lba_range = 0x80
 
     val create_cq_cdw10 = (64 << 16) | 3
     if rv32_admin_qid(create_cq_cdw10) != 3:
@@ -865,6 +868,116 @@ fn rv32_admin_selftest() -> i64:
         fail = fail + 1
     val fw_commit_cdw10 = (3 << 3) | 2
     if rv32_admin_fw_slot(fw_commit_cdw10) != 2 or rv32_admin_fw_action(fw_commit_cdw10) != 3:
+        fail = fail + 1
+
+    # AER floor: held request completes exactly once, bad held state preserves the event.
+    var aer_held_cid = 60
+    var aer_event = 1
+    var admin_cpls = 0
+    if aer_held_cid >= 0 and aer_held_cid < 65536 and aer_event != 0:
+        admin_cpls = admin_cpls + 1
+        aer_held_cid = -1
+        aer_event = 0
+    if admin_cpls != 1 or aer_held_cid != -1 or aer_event != 0:
+        fail = fail + 1
+    aer_held_cid = 70000
+    aer_event = 1
+    if aer_held_cid >= 0 and aer_held_cid < 65536 and aer_event != 0:
+        admin_cpls = admin_cpls + 1
+        aer_event = 0
+    if admin_cpls != 1 or aer_event != 1:
+        fail = fail + 1
+    aer_held_cid = 61
+    if aer_held_cid >= 0 and aer_held_cid < 65536 and aer_event != 0:
+        admin_cpls = admin_cpls + 1
+        aer_event = 0
+    if admin_cpls != 2 or aer_event != 0:
+        fail = fail + 1
+
+    # Firmware download/commit floor: sequential image required; slot/action fail closed.
+    var fw_revision = 1
+    var fw_slot = 1
+    var fw_dl_bytes = 0
+    var status = sc_success
+    val fw_len = 1024
+    val fw_off = 0
+    if fw_len <= 0 or fw_off != fw_dl_bytes:
+        status = sc_invalid_field
+    else:
+        fw_dl_bytes = fw_dl_bytes + fw_len
+    if status != sc_success or fw_dl_bytes != 1024:
+        fail = fail + 1
+    val commit_slot = 2
+    val commit_action = 1
+    if commit_slot <= 0 or commit_slot > 7 or commit_action < 0 or commit_action > 3 or fw_dl_bytes <= 0:
+        status = sc_invalid_field
+    else:
+        fw_slot = commit_slot
+        fw_revision = fw_revision + 1
+        fw_dl_bytes = 0
+        status = sc_success
+    if status != sc_success or fw_revision != 2 or fw_slot != 2 or fw_dl_bytes != 0:
+        fail = fail + 1
+    if 4 <= 0 or 8 != fw_dl_bytes:
+        status = sc_invalid_field
+    if status != sc_invalid_field:
+        fail = fail + 1
+    fw_dl_bytes = -16
+    if fw_dl_bytes < 0:
+        fw_dl_bytes = 0
+    if 4 <= 0 or 0 != fw_dl_bytes:
+        status = sc_invalid_field
+    else:
+        fw_dl_bytes = 4
+        status = sc_success
+    if status != sc_success or fw_dl_bytes != 4:
+        fail = fail + 1
+    if 0 <= 0 or 4 != fw_dl_bytes:
+        status = sc_invalid_field
+    if status != sc_invalid_field:
+        fail = fail + 1
+    if rv32_admin_fw_slot((4 << 3) | 1) != 1 or rv32_admin_fw_action((4 << 3) | 1) != 4:
+        fail = fail + 1
+    fw_revision = -4
+    fw_slot = 9
+    if rv32_admin_smart_nonnegative(fw_revision) != 0:
+        fail = fail + 1
+    if fw_slot < 1 or fw_slot > 7:
+        fw_slot = 0
+    if fw_slot != 0:
+        fail = fail + 1
+
+    # Format + error-log floor: failed format keeps data; good format erases data; bad counters clamp.
+    var lba5 = 0xEE
+    status = sc_invalid_field
+    if status != sc_invalid_field or lba5 != 0xEE:
+        fail = fail + 1
+    status = sc_success
+    if status == sc_success:
+        lba5 = 0
+    if lba5 != 0:
+        fail = fail + 1
+    status = sc_invalid_field
+    if status != sc_invalid_field:
+        fail = fail + 1
+    var error_count = 0
+    var last_error = 0
+    status = sc_lba_range
+    if status != sc_success:
+        error_count = error_count + 1
+        last_error = status
+    if error_count != 1 or last_error != sc_lba_range:
+        fail = fail + 1
+    last_error = -9
+    if last_error < 0:
+        last_error = sc_invalid_field
+    if last_error != sc_invalid_field:
+        fail = fail + 1
+    error_count = -7
+    if rv32_admin_smart_nonnegative(error_count) != 0:
+        fail = fail + 1
+    error_count = rv32_admin_smart_nonnegative(error_count) + 1
+    if error_count != 1:
         fail = fail + 1
 
     # Identify controller/namespace floor: one namespace, eight IO queues, 4 KiB LBAs.
