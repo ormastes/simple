@@ -250,9 +250,13 @@ impl NvmeController:
 
     # Target SQID / CID decoded from the most recent Abort (-1 = none seen).
     me aborted_sqid() -> i64:
+        if me.last_abort_sqid != ADMIN_QID and not qid_in_range(me.last_abort_sqid):
+            return -1
         me.last_abort_sqid
 
     me aborted_cid() -> i64:
+        if not cid_valid(me.last_abort_cid):
+            return -1
         me.last_abort_cid
 
     me format_passes() -> i64:
@@ -303,6 +307,8 @@ impl NvmeController:
         me.error_count
 
     me last_error_status() -> i64:
+        if me.last_error < 0:
+            return SC_INVALID_FIELD
         me.last_error
 
     # ── IO path (multi-queue) ────────────────────────────────────────────────
@@ -679,6 +685,12 @@ fn nvme_controller_selftest() -> i64:
     val mab: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(mab.status, SC_INVALID_FIELD, "malformed abort rejected")
     fail = fail + expect_eq(c.aborted_sqid(), 1, "malformed abort leaves previous target SQID")
+    c.last_abort_sqid = 99
+    c.last_abort_cid = 70000
+    fail = fail + expect_eq(c.aborted_sqid(), -1, "corrupted abort SQID getter fails closed")
+    fail = fail + expect_eq(c.aborted_cid(), -1, "corrupted abort CID getter fails closed")
+    c.last_abort_sqid = 1
+    c.last_abort_cid = 100
 
     # Async Event Request: held outstanding (no completion) until an event is raised.
     c.admin_submit(admin_async_event_cmd(31))
@@ -857,6 +869,9 @@ fn nvme_controller_selftest() -> i64:
     c.io_reap(1)
     fail = fail + expect_eq(c.error_log_count(), ec0 + 1, "error log counts the failed write")
     fail = fail + expect_eq(c.last_error_status(), SC_LBA_RANGE, "error log records the last status")
+    c.last_error = -9
+    fail = fail + expect_eq(c.last_error_status(), SC_INVALID_FIELD, "corrupted last error status fails closed")
+    c.last_error = SC_LBA_RANGE
     c.error_count = -7
     c.admin_submit(admin_get_log_cmd(52, LOG_ERROR))
     c.admin_process()
