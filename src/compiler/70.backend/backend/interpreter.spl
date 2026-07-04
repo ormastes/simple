@@ -448,24 +448,38 @@ impl InterpreterBackendImpl:
         match stmt.kind:
             case HirStmtKind.Let(symbol, _, init):
                 val value = self.eval_expr(init, ctx)?
-                ctx.env.define(symbol, value)
+                # Env is name-keyed (iteration 21, target (a)). The Let's `symbol`
+                # is define-fresh (readable `.id`); resolve to its name.
+                val let_name = resolve_sym_name(symbol, ctx)
+                ctx.env.define(let_name, value)
                 Ok(())
 
             case HirStmtKind.Assign(target, op, value):
                 val new_value = self.eval_expr(value, ctx)?
-                match target.kind:
-                    case HirExprKind.Var(symbol):
-                        if op.?:
-                            val old_value = ctx.env.lookup(symbol)
-                            if old_value.is_none():
-                                return Err(BackendError.runtime_error("undefined variable", Some(stmt.span)))
-                            val combined = self.apply_assign_op(op.unwrap(), old_value.unwrap(), new_value, stmt.span)?
-                            ctx.env.assign(symbol, combined)
-                        else:
-                            ctx.env.assign(symbol, new_value)
-                        Ok(())
+                # Resolve the assignment target name. Idents lower to NamedVar
+                # (reliable `name`); a plain Var carries a SymbolId resolved via
+                # ctx.names (iteration 21, target (a)).
+                val tgt_kind_v: HirExprKind = target.kind
+                var tgt_name: text = ""
+                match tgt_kind_v:
+                    case HirExprKind.NamedVar(_asym, aname):
+                        tgt_name = aname
+                    case HirExprKind.Var(asym2):
+                        tgt_name = resolve_sym_name(asym2, ctx)
                     case _:
-                        Err(BackendError.not_implemented("assignment target not implemented"))
+                        tgt_name = ""
+                if tgt_name == "":
+                    Err(BackendError.not_implemented("assignment target not implemented"))
+                else:
+                    if op.?:
+                        val old_value = ctx.env.lookup(tgt_name)
+                        if old_value.is_none():
+                            return Err(BackendError.runtime_error("undefined variable", Some(stmt.span)))
+                        val combined = self.apply_assign_op(op.unwrap(), old_value.unwrap(), new_value, stmt.span)?
+                        ctx.env.assign(tgt_name, combined)
+                    else:
+                        ctx.env.assign(tgt_name, new_value)
+                    Ok(())
 
             case HirStmtKind.Expr(expr):
                 itrace("[ES] Expr arm")
