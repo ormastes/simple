@@ -11,7 +11,7 @@ use app.office.slides.slide.{Slide, slide_count, blank_slide, add_text_box, slid
 use app.office.mail.mail_app.{MailApp}
 use app.office.planner.planner_app.{PlannerApp}
 use app.office.counter.{CounterApp}
-use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, session_scroll, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point, pivot_session_new, pivot_session_view, pivot_session_set_agg, pivot_session_swap_fields, pivot_session_field_letters}
+use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, session_scroll, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point, pivot_session_new, pivot_session_view, pivot_session_set_agg, pivot_session_swap_fields, pivot_session_field_letters, chart_session_new, chart_session_view, chart_session_set_value_range, chart_session_set_title}
 use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_source_pane, wysiwyg_update_line_checked}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.file_ops.{RecentFileStore}
@@ -25,7 +25,9 @@ use app.office.pptx_export.{deck_to_pptx_bytes, pptx_bytes_to_deck}
 use app.office.odf_ooxml.{odt_bytes_to_document, docx_bytes_to_document, document_to_odt_bytes, document_to_docx_bytes, ods_bytes_to_sheet, xlsx_bytes_to_sheet, sheet_to_ods_bytes, sheet_to_xlsx_bytes, sheet_to_xlsx_bytes_formatted}
 use app.office.interactive.{run_sheet_editor_mode, run_sheet_tui_mode, run_sheet_gui_live}
 use app.office.word.toc.{toc_generate}
-use app.office.word.mail_merge.{merge_all_markdown}
+use app.office.word.mail_merge.{merge_all_markdown, merge_all}
+use app.office.word.mail_merge_ui.{merge_fields_of, merge_preview, merge_validate}
+use common.rich_text.attributed_text.{RichDocument}
 use app.office.word.edit_ops.{document_find, document_stats}
 use app.office.sheets.data_ops.{sheet_sort_range, sheet_find}
 use app.office.sheets.pivot.{pivot_build, pivot_to_sheet}
@@ -44,7 +46,7 @@ fn _run_sheet_tui(in_path: text) -> i32:
     run_sheet_tui_mode(in_path)
 use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_write_bytes}
 use app.ui.render.types.{RenderConfig}
-use std.io_runtime.{write_file, read_file, file_exists}
+use std.io_runtime.{write_file, read_file, file_exists, mkdir_p}
 
 fn main() -> i64:
     val args = _get_office_cli_args()
@@ -332,16 +334,25 @@ fn _run_office_gui_sheet_command() -> i32:
 fn _build_office_gui_chart_demo() -> Sheet:
     """Build the demo sheet for `office chart-gui`: 4 labeled values, one of
     which (B4) is a =B1+B2 formula so the chart's rendered text_dump proves
-    it reads the computed value, not the raw formula text."""
+    it reads the computed value, not the raw formula text. Column C is a
+    second data column (Sales, distinct from column B's Units) so the
+    CHART GUI INTERACTIVITY step script below has a real second range to
+    re-point the chart's value_range onto -- same "second column" role
+    _pivot_gui_dataset_with_extra_col's column D plays for pivot_session_
+    set_value_col."""
     var sheet = Sheet.new("ChartDemo")
     sheet.set_value("A1", "Widget")
     sheet.set_value("B1", "10")
+    sheet.set_value("C1", "5")
     sheet.set_value("A2", "Gadget")
     sheet.set_value("B2", "20")
+    sheet.set_value("C2", "15")
     sheet.set_value("A3", "Gizmo")
     sheet.set_value("B3", "15")
+    sheet.set_value("C3", "10")
     sheet.set_value("A4", "Combo")
     sheet.set_value("B4", "=B1+B2")
+    sheet.set_value("C4", "20")
     sheet = recalculate_formula_cells(sheet)
     sheet
 
@@ -349,7 +360,16 @@ fn _run_office_gui_chart_command() -> i32:
     """Render the demo sheet's bar chart through the real UI stack and
     report the same pixel-level proof line style as sheet-gui, plus a
     content marker line per data point (pipe-separated) so tests can assert
-    content without pixel parsing."""
+    content without pixel parsing.
+
+    Then scripts a fixed ChartGuiSession op sequence (CHART GUI
+    INTERACTIVITY): set_title "Sales*" -> set_value_range C1:C4 (the demo
+    sheet's second, Sales, data column). Each step prints an "office-gui-
+    chart-step: <op> -> kind=<k> range=<r>" marker line, followed by the
+    resulting chart_session_view's own "office-gui-chart: <line>" dump
+    lines -- proves the session pattern drives the SAME chart_gui_view
+    render the static (pre-step) dump above uses, with no render
+    duplication."""
     val sheet = _build_office_gui_chart_demo()
     val view = chart_gui_view(sheet, "bar", "B1:B4", "A1:A4", "Demo Chart", 80, 40)
     val pixels = office_gui_chart_pixels(view)
@@ -360,6 +380,21 @@ fn _run_office_gui_chart_command() -> i32:
     print "office-gui: chart-gui frame {office_gui_frame_width()}x{office_gui_frame_height()}, {non_background} non-background pixels"
     for line in view.text_dump.split("\n"):
         print "office-gui-chart: {line}"
+
+    var session = chart_session_new(sheet, "bar", "B1:B4", "A1:A4", "Demo Chart")
+
+    session = chart_session_set_title(session, "Sales*")
+    print "office-gui-chart-step: set_title Sales* -> kind={session.chart_kind} range={session.value_range}"
+    val view1 = chart_session_view(session)
+    for line1 in view1.text_dump.split("\n"):
+        print "office-gui-chart: {line1}"
+
+    session = chart_session_set_value_range(session, "C1:C4")
+    print "office-gui-chart-step: set_value_range C1:C4 -> kind={session.chart_kind} range={session.value_range}"
+    val view2 = chart_session_view(session)
+    for line2 in view2.text_dump.split("\n"):
+        print "office-gui-chart: {line2}"
+
     return 0
 
 fn _build_office_gui_pivot_demo() -> Sheet:
@@ -518,6 +553,8 @@ fn run_office(args: [text]) -> i32:
             return _run_toc_command(args)
         "merge" =>
             return _run_merge_command(args)
+        "mail-merge" =>
+            return _run_mail_merge_command(args)
         "sort-sheet" =>
             return _run_sort_sheet_command(args)
         "find" =>
@@ -541,7 +578,7 @@ fn run_office(args: [text]) -> i32:
         "erp-invoice" =>
             return _run_erp_invoice_command(args)
         case _("unsupported office app names show usage"):
-            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|sheet-gui|sheet-gui-edit|sheet-gui-click|sheet-gui-key|sheet-gui-scroll|chart-gui|pivot-gui|render|open|convert|toc|merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
+            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|sheet-gui|sheet-gui-edit|sheet-gui-click|sheet-gui-key|sheet-gui-scroll|chart-gui|pivot-gui|render|open|convert|toc|merge|mail-merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
             return 1
 
 fn _basename(path: text) -> text:
@@ -767,6 +804,95 @@ fn _run_merge_command(args: [text]) -> i32:
         return 0
     print "office-merge: failed to write {out_path}"
     return 2
+
+fn _mail_merge_load_template(template_path: text) -> RichDocument:
+    """Load a mail-merge template document from .md or .docx (mirrors
+    `office open`'s doc-loading branch by extension)."""
+    if template_path.ends_with(".docx"):
+        return docx_bytes_to_document(file_read_bytes(template_path), _basename(template_path))
+    parse_markdown_document(read_file(template_path), _basename(template_path))
+
+fn _mail_merge_write_record(doc: RichDocument, template_path: text, out_dir: text, index: i32) -> text:
+    """Write one merged record document to out_dir/record_<index>.<ext>
+    (ext follows the template's format: docx or md), returning the path
+    written or "" on failure."""
+    val out_dir_clean = if out_dir.ends_with("/"): out_dir.slice(0, out_dir.len() - 1) else: out_dir
+    if template_path.ends_with(".docx"):
+        val out_path = "{out_dir_clean}/record_{index}.docx"
+        val bytes = document_to_docx_bytes(doc)
+        if file_write_bytes(out_path, bytes):
+            return out_path
+        return ""
+    val out_path = "{out_dir_clean}/record_{index}.md"
+    val md = document_to_markdown(doc)
+    if write_file(out_path, md):
+        return out_path
+    ""
+
+fn _run_mail_merge_command(args: [text]) -> i32:
+    """Inspect, preview, or run a mail merge with fail-closed validation.
+
+    Usage: simple office mail-merge <template.md-or-docx> <records.csv> [--preview N] [--out dir]
+
+    Validation issues (missing header columns, blank per-record values,
+    unused CSV columns) print first as warnings; the run still proceeds on
+    a nonzero-issue count (Office behavior). With --preview N, prints the
+    merged text of data record N (1-based) as "office-mail-merge:"-prefixed
+    lines instead of writing files. Without --preview, writes one merged
+    document per data row into --out (default build/mail_merge_out),
+    printing each file written."""
+    if args.len() < 3:
+        print "Usage: simple office mail-merge <template.md-or-docx> <records.csv> [--preview N] [--out dir]"
+        return 1
+    val template_path = args[1]
+    val data_path = args[2]
+    if not file_exists(template_path):
+        print "office-mail-merge: rejected (missing-file: {template_path})"
+        return 2
+    if not file_exists(data_path):
+        print "office-mail-merge: rejected (missing-file: {data_path})"
+        return 2
+
+    var preview_index: i32 = -1
+    var out_dir = "build/mail_merge_out"
+    var i = 3
+    while i < args.len():
+        val opt = args[i]
+        if opt == "--preview" and i + 1 < args.len() and _is_office_cli_non_negative_i32_token(args[i + 1]):
+            preview_index = args[i + 1].to_i32()
+            i = i + 2
+        elif opt == "--out" and i + 1 < args.len():
+            out_dir = args[i + 1]
+            i = i + 2
+        else:
+            print "office-mail-merge: rejected (invalid-option: {opt})"
+            return 1
+
+    val doc = _mail_merge_load_template(template_path)
+    val sheet = parse_csv_sheet(read_file(data_path), _basename(data_path))
+
+    val issues = merge_validate(doc, sheet)
+    for issue in issues:
+        print "office-mail-merge: warning: {issue}"
+
+    if preview_index >= 0:
+        val merged = merge_preview(doc, sheet, preview_index)
+        val text = document_to_markdown(merged)
+        for line in text.split("\n"):
+            print "office-mail-merge: {line}"
+        return 0
+
+    mkdir_p(out_dir)
+    val docs = merge_all(doc, sheet)
+    var idx = 1
+    for merged in docs:
+        val written = _mail_merge_write_record(merged, template_path, out_dir, idx)
+        if written == "":
+            print "office-mail-merge: failed to write record {idx}"
+        else:
+            print "office-mail-merge: wrote {written}"
+        idx = idx + 1
+    return 0
 
 fn _run_sort_sheet_command(args: [text]) -> i32:
     """Sort a CSV range by a key column and write the sorted sheet back out.
