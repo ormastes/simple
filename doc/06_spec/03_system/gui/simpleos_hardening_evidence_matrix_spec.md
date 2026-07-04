@@ -422,9 +422,10 @@ expect(report).to_contain("deterministic type inference")
 expect(report).to_contain("- formal_ui_policy_gate: scripts/check/check-simpleos-ui-policy-formal-proofs.shs")
 expect(report).to_contain("damage merge covers both inputs")
 expect(report).to_contain("recursive paint-order flatten")
+expect(report).to_contain("- formal_coverage_log: ")
 expect(report).to_contain("- formal_coverage_gate: scripts/check/check-simpleos-formal-coverage.shs")
-expect(report).to_contain("all SimpleOS hardening formal rows have executable wrapper gates")
-expect(report).to_contain("aggregate coverage cannot pass by status-only derivation")
+expect(report).to_contain("- formal_coverage_scope: Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, compiler/language, and UI policy")
+expect(report).to_contain("- formal_coverage_evidence: all SimpleOS hardening formal rows have executable wrapper gates and matrix gate/scope fields; aggregate coverage cannot pass by status-only derivation")
 ```
 
 </details>
