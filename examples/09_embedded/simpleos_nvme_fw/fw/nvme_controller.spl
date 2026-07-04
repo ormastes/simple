@@ -175,6 +175,8 @@ impl NvmeController:
         if cmd.opcode == ADMIN_FW_DOWNLOAD:
             if cmd.nsid != 0 or cmd.cdw10 <= 0 or cmd.cdw11 < 0 or cmd.cdw12 != 0:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
+            if me.fw_dl_bytes < 0:
+                me.fw_dl_bytes = 0
             if cmd.cdw11 != me.fw_dl_bytes / 4:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             me.fw_dl_bytes = me.fw_dl_bytes + cmd.cdw10 * 4   # NUMD dwords accumulated
@@ -726,6 +728,14 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(fwlog_bad.data, 1, "get-log FW_SLOT clamps corrupted revision")
     c.fw_revision = rev1
     c.fw_slot = 2
+    c.fw_dl_bytes = -16
+    c.admin_submit(admin_fw_download_cmd(58, 4, 0))
+    c.admin_submit(admin_fw_commit_cmd(59, 2, 0))
+    c.admin_process()
+    val fdneg: NvmeCpl = c.admin_reap()
+    val fcneg: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(fdneg.status, SC_SUCCESS, "fw download recovers corrupted negative byte count")
+    fail = fail + expect_eq(fcneg.status, SC_SUCCESS, "fw commit accepts recovered replacement image")
     # Invalid firmware image lengths and reserved commit actions fail closed.
     c.admin_submit(admin_fw_download_cmd(38, 0, 0))
     c.admin_submit(admin_fw_commit_cmd(39, 1, 4))
