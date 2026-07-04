@@ -222,14 +222,18 @@ impl NvmeController:
     # next AER the host posts.
     me raise_async_event(evt: i64):
         if me.aer_held_cid != -1:
-            me.aq.cq_post(cpl_make(me.aer_held_cid, SC_SUCCESS, evt))
-            me.aer_held_cid = -1
+            if cid_valid(me.aer_held_cid):
+                me.aq.cq_post(cpl_make(me.aer_held_cid, SC_SUCCESS, evt))
+                me.aer_held_cid = -1
+            else:
+                me.aer_held_cid = -1
+                me.aer_event = evt
         else:
             me.aer_event = evt
 
     me aer_outstanding() -> i64:
         var n: i64 = 0
-        if me.aer_held_cid != -1:
+        if cid_valid(me.aer_held_cid):
             n = 1
         n
 
@@ -690,6 +694,14 @@ fn nvme_controller_selftest() -> i64:
     val badaer: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(badaer.status, SC_INVALID_FIELD, "AER with reserved dword rejected")
     fail = fail + expect_eq(c.aer_outstanding(), 0, "failed AER is not held outstanding")
+    c.aer_held_cid = 70000
+    c.raise_async_event(AER_SMART_HEALTH)
+    fail = fail + expect_eq(c.aer_outstanding(), 0, "corrupted AER held cid is not outstanding")
+    fail = fail + expect_eq(c.admin_completions(), 0, "corrupted AER held cid posts no invalid completion")
+    c.admin_submit(admin_async_event_cmd(60))
+    c.admin_process()
+    val caerc: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(caerc.data, AER_SMART_HEALTH, "corrupted AER held cid preserves event for next request")
 
     # Firmware Download + Commit advances the active firmware revision.
     val rev0: i64 = c.firmware_revision()
