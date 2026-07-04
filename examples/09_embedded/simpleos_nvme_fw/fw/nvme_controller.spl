@@ -123,6 +123,8 @@ impl NvmeController:
             # Per NVMe, completion dword0 bit0 = 1 means "command not aborted" (already done).
             return AdminResult(status: SC_SUCCESS, data: 1, post: true)
         if cmd.opcode == ADMIN_FORMAT_NVM:
+            if cmd.nsid != 1:
+                return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             me.ftl.format()                    # erase user data; preserve bad-block table + wear
             me.format_count = me.format_count + 1
             me.dirty_since_checkpoint = false
@@ -197,10 +199,9 @@ impl NvmeController:
             me.last_id = build_identify_controller()
             return SC_SUCCESS
         if cns == CNS_NAMESPACE:
-            var nsid: i64 = cmd.nsid
-            if nsid == 0:
-                nsid = 1
-            me.last_id = build_identify_namespace(nsid)
+            if cmd.nsid != 1:
+                return SC_INVALID_FIELD
+            me.last_id = build_identify_namespace(cmd.nsid)
             return SC_SUCCESS
         SC_INVALID_FIELD
 
@@ -353,6 +354,10 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(ic.status, SC_SUCCESS, "identify controller ok")
     val id: IdentifyData = c.last_identify()
     fail = fail + expect_eq(id.max_queues, MAX_IO_QUEUES, "identify reports max IO queues")
+    c.admin_submit(admin_identify_ns_cmd(18, 99))
+    c.admin_process()
+    val badns: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(badns.status, SC_INVALID_FIELD, "identify invalid namespace rejected")
 
     # Bring up one IO queue pair (CQ then SQ) via admin
     c.admin_submit(admin_create_cq_cmd(2, 1, 64))
@@ -475,6 +480,10 @@ fn nvme_controller_selftest() -> i64:
     c.io_process()
     val rr: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(rr.data, 0, "format erased user data (read -> 0)")
+    c.admin_submit(admin_format_cmd(37, 99))
+    c.admin_process()
+    val badfmt: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(badfmt.status, SC_INVALID_FIELD, "format invalid namespace rejected")
 
     # SMART: an uncorrectable read is counted in media_errors and raises crit_warning.
     c.io_submit(1, cmd_make(120, OP_WRITE, 8, 1, 0xDD))
