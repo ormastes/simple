@@ -10,6 +10,12 @@
 # Bullet levels are stored in the element id (`bullet<level>_<n>`); plain body
 # lines keep the `body<n>` ids.
 #
+# A body line whose whole content is `![alt](path)` is an image element
+# (id `image<n>`, kind ImageEl) — the same whole-line markdown-image
+# convention the Word lane uses in odf_ooxml.spl. Image elements occupy the
+# ordinary body slot geometry and serialize back to the exact `![alt](path)`
+# line.
+#
 # Three optional directive lines may appear anywhere within a slide section:
 #   @layout: title-only|title-body|section
 #   @notes: <speaker notes text>
@@ -18,7 +24,7 @@
 # (the directive line absent) means "no transition"; an absent or `title-body`
 # layout tag means the default title+body arrangement.
 
-use app.office.slides.slide.{Slide, SlideLayout, blank_slide, add_text_box, SlideElementKind}
+use app.office.slides.slide.{Slide, SlideElement, SlideLayout, blank_slide, add_text_box, add_slide_element, SlideElementKind}
 
 val _NOTES_PREFIX = "@notes:"
 val _TRANSITION_PREFIX = "@transition:"
@@ -49,6 +55,38 @@ fn _leading_spaces(line: text) -> i32:
     while n < line.len() and line.slice(n, n + 1) == " ":
         n = n + 1
     n
+
+struct DeckImage:
+    """Result of matching a body line against the whole-line `![alt](path)`
+    image convention (mirrors odf_ooxml.spl's `_parse_md_image`)."""
+    is_image: bool
+    alt: text
+    src: text
+
+fn _find_sub(s: text, needle: text) -> i32:
+    """Index of the first occurrence of `needle` in `s`, or -1."""
+    var i = 0
+    while i + needle.len() <= s.len():
+        if s.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn parse_image_line(line: text) -> DeckImage:
+    """Match a body line against `![alt](path)`. Whole-line matches only;
+    paths containing `"`, `<`, or `>` are rejected (not a valid local path,
+    and unsafe to re-emit into XML/HTML attributes)."""
+    val t = line.trim()
+    if not t.starts_with("!["):
+        return DeckImage(is_image: false, alt: "", src: "")
+    val close_bracket = _find_sub(t, "](")
+    if close_bracket < 0 or not t.ends_with(")"):
+        return DeckImage(is_image: false, alt: "", src: "")
+    val alt = t.slice(2, close_bracket)
+    val src = t.slice(close_bracket + 2, t.len() - 1)
+    if src.contains("\"") or src.contains("<") or src.contains(">"):
+        return DeckImage(is_image: false, alt: "", src: "")
+    DeckImage(is_image: true, alt: alt, src: src)
 
 fn deck_layout_tag(layout: SlideLayout) -> text:
     """Deck directive tag for a slide layout. Empty for the default
@@ -83,6 +121,8 @@ fn parse_deck(content: text) -> [Slide]:
     - Following non-blank lines are body boxes (id "body1", "body2", ... x=60, y=220+90*(n-1), w=840, h=80)
     - Body lines starting with `- ` are bullets; leading spaces / 2 = level
       (max level 2), stored as id "bullet<level>_<n>"
+    - Body lines wholly of the form `![alt](path)` become image elements
+      (id "image<n>", kind ImageEl) in the same body slot geometry
     - Blank lines skipped within slides
     - Empty slides skipped
 
@@ -113,7 +153,18 @@ fn parse_deck(content: text) -> [Slide]:
                 val y = 220 + 90 * (body_idx - 1)
                 val raw = slide_lines[line_idx]
                 val trimmed = raw.trim()
-                if trimmed.starts_with("- "):
+                val img = parse_image_line(trimmed)
+                if img.is_image:
+                    val el = SlideElement(
+                        id: "image{body_idx}",
+                        kind: SlideElementKind.ImageEl(src: img.src, alt: img.alt),
+                        x: 60,
+                        y: y,
+                        width: 840,
+                        height: 80
+                    )
+                    s = add_slide_element(s, el)
+                elif trimmed.starts_with("- "):
                     var level = _leading_spaces(raw) / 2
                     if level > 2:
                         level = 2
@@ -191,8 +242,9 @@ fn deck_to_text(slides: [Slide]) -> text:
 
     Returns text with one title line, followed by body lines per slide,
     with slides separated by blank lines and `---`. Bullet elements are
-    re-indented (2 spaces per level) with a `- ` marker; non-default layouts
-    emit an `@layout:` directive line before `@notes:`/`@transition:`.
+    re-indented (2 spaces per level) with a `- ` marker; image elements emit
+    their `![alt](path)` line; non-default layouts emit an `@layout:`
+    directive line before `@notes:`/`@transition:`.
     """
     var out = ""
     var first_slide = true
@@ -233,8 +285,10 @@ fn _slide_to_lines(slide: Slide) -> [text]:
                     body_texts.push("{indent}- {content}")
                 elif e.id.starts_with("body"):
                     body_texts.push(content)
+            SlideElementKind.ImageEl(src: src, alt: alt):
+                body_texts.push("![{alt}]({src})")
             _:
-                pass_do_nothing("non-text elements ignored")
+                pass_do_nothing("shape elements ignored")
 
     # Add title first
     if title_text != "":
