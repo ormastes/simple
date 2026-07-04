@@ -1,0 +1,80 @@
+# Office GUI Pilot (CARD 16 step 2)
+#
+# Routes ONE office app's UITree through the REAL UI stack instead of the
+# print-root_id dead end: UITree (app.build_ui()) -> ui.browser backend
+# (BrowserBackend.render_frame, following src/app/ui.browser/app.spl's
+# BrowserApp.run_once headless one-shot exactly) -> browser engine -> ARGB
+# pixels. Headless: no window/event loop needed for the pilot.
+#
+# Pilot scope: "counter" only. Adding another office app is one new match
+# arm in office_gui_build_tree.
+
+use common.ui.widget.{UITree}
+use common.ui.state.{init_state}
+use app.ui.browser.backend.{BrowserBackend}
+use app.office.counter.{CounterApp}
+
+# Matches BrowserApp's viewport (src/app/ui.browser/app.spl uses width=96,
+# height=64; its host window presents that scaled by BROWSER_WINDOW_SCALE).
+# An 800x600 frame was probed first and exceeds 200s under the interpreter
+# (per-pixel interpreted work in the pixel-artifact path), so the pilot
+# stays on the framework's own proven viewport.
+val OFFICE_GUI_FRAME_WIDTH: i32 = 96
+val OFFICE_GUI_FRAME_HEIGHT: i32 = 64
+
+fn office_gui_frame_width() -> i32:
+    OFFICE_GUI_FRAME_WIDTH
+
+fn office_gui_frame_height() -> i32:
+    OFFICE_GUI_FRAME_HEIGHT
+
+fn office_gui_build_tree(app_name: text) -> UITree:
+    """Build the named office app's UITree. Pilot: only "counter" is wired;
+    future apps (word/sheets/slides/...) each add one match arm here."""
+    match app_name:
+        "counter" =>
+            return CounterApp.new().build_ui()
+        case _("CARD 16 pilot only wires counter; unknown names fall back to counter"):
+            return CounterApp.new().build_ui()
+
+fn office_gui_frame(app_name: text) -> [u32]:
+    """Render ONE frame of the named office app through the real UI stack
+    and return the ARGB pixel buffer. Empty result means the backend
+    genuinely failed to initialize (see BrowserBackend.create's Err arm).
+    """
+    val tree = office_gui_build_tree(app_name)
+    val state = init_state(tree)
+    val backend_result = BrowserBackend.create(OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
+    match backend_result:
+        Err(_):
+            return []
+        Ok(backend):
+            backend.render_frame(state.tree, state)
+            return backend.pixels_argb_u32()
+
+fn office_gui_background_pixel(pixels: [u32]) -> u32:
+    """Empirical background sample: the bottom-right pixel. The counter
+    app's stacked layout (nav + one control row + statusbar) never reaches
+    the bottom-right corner of the frame, so this pixel is always
+    unrendered background, whatever color the active theme picks."""
+    if pixels.len() == 0:
+        return 0u32
+    pixels[pixels.len() - 1]
+
+fn office_gui_non_background_pixel_count(pixels: [u32]) -> i64:
+    """Count pixels that differ from the sampled background — nonzero
+    proves the rendered frame carries real widget content, not a blank
+    canvas."""
+    val background = office_gui_background_pixel(pixels)
+    var count: i64 = 0
+    for p in pixels:
+        if p != background:
+            count = count + 1
+    count
+
+fn office_gui_pixel_checksum(pixels: [u32]) -> i64:
+    """Deterministic checksum over the frame's pixels (order-sensitive sum)."""
+    var sum: i64 = 0
+    for p in pixels:
+        sum = sum + p.to_i64()
+    sum
