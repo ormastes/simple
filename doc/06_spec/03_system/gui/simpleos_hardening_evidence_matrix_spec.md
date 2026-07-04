@@ -156,6 +156,7 @@ The wrapper emits these rows:
 - `simpleos_hardening_formal_critical_concurrency_status`
 - `simpleos_hardening_formal_critical_concurrency_gate`
 - `simpleos_hardening_formal_critical_concurrency_scope`
+- `simpleos_hardening_formal_critical_concurrency_evidence`
 - `simpleos_hardening_formal_memory_safety_status`
 - `simpleos_hardening_formal_memory_safety_gate`
 - `simpleos_hardening_formal_memory_safety_scope`
@@ -314,6 +315,7 @@ expect(stdout).to_contain("simpleos_hardening_formal_riscv_dual_track_status=pas
 expect(stdout).to_contain("simpleos_hardening_formal_critical_concurrency_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_critical_concurrency_gate=scripts/check/check-simpleos-critical-formal-proofs.shs")
 expect(stdout).to_contain("simpleos_hardening_formal_critical_concurrency_scope=Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities")
+expect(stdout).to_contain("simpleos_hardening_formal_critical_concurrency_evidence=resource_acquire/release capacity, work stealing, task completion idempotence, bounded-channel backpressure, closed-channel wakeup, DRF race constraints, kernel capability default-deny, memory capability unique/shared write constraints")
 expect(stdout).to_contain("simpleos_hardening_formal_memory_safety_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_memory_safety_gate=scripts/check/check-simpleos-memory-safety-formal-proofs.shs")
 expect(stdout).to_contain("simpleos_hardening_formal_memory_safety_scope=Lean model gate: gc_reachability, gc_boundary, gc_manual_borrow, manual_pointer_borrow, nogc_compile")
