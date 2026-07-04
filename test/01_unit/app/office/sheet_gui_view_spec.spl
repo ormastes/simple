@@ -1,0 +1,120 @@
+"""Sheet GUI grid view spec.
+
+sheet_gui_view(sheet, max_rows, max_cols) builds the first real spreadsheet
+UI surface: a WidgetNode table (rendered for real pixels by the CLI) plus a
+plain-text pipe-separated grid dump (for testability without parsing
+HTML/widget trees). The dump's first line is the header row ("|A|B|C|...");
+each following line is "{row_num}|{cell1}|{cell2}|...". Rows in
+sheet.hidden_rows are skipped entirely, so a filtered sheet renders
+filtered.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.file_formats.{recalculate_formula_cells}
+use app.office.gui.{sheet_gui_view}
+
+fn _dump_contains(haystack: text, needle: text) -> bool:
+    """Substring check via index_of's Option, matching html_widgets.spl's
+    text_contains idiom (avoids a bare-boolean `==` assertion, which the
+    test runner silently no-ops)."""
+    val idx = haystack.index_of(needle)
+    match idx:
+        case Some(_):
+            return true
+        case _:
+            return false
+
+describe "sheet_gui_view: column headers and row numbers":
+    """The grid dump always starts with a header line of column letters."""
+
+    it "the header line lists column letters A, B, C in order":
+        var sheet = Sheet.new("S1")
+        val view = sheet_gui_view(sheet, 2, 3)
+        val lines = view.text_dump.split("\n")
+        expect(lines[0]).to_equal("|A|B|C")
+
+    it "each data row starts with its 1-based row number":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "x")
+        val view = sheet_gui_view(sheet, 1, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[1]).to_equal("1|x")
+
+describe "sheet_gui_view: cell display text":
+    """Non-formula cell values show up verbatim in the grid dump."""
+
+    it "contains a plain text cell's value":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Hello")
+        val view = sheet_gui_view(sheet, 1, 1)
+        expect(view.text_dump).to_contain("Hello")
+
+    it "contains a numeric cell's display value":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("B2", "42")
+        val view = sheet_gui_view(sheet, 2, 2)
+        expect(view.text_dump).to_contain("42")
+
+describe "sheet_gui_view: formula cells show computed values":
+    """Formula cells display their recalculated cached value, not the raw
+    '=expr' text -- cell_display_text only falls back to '={expr}' when the
+    cache is empty (i.e. recalculate_formula_cells was never run)."""
+
+    it "shows the computed SUM result, not the raw formula text":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "3")
+        sheet.set_value("A2", "4")
+        sheet.set_value("A3", "=SUM(A1:A2)")
+        sheet = recalculate_formula_cells(sheet)
+        val view = sheet_gui_view(sheet, 3, 1)
+        expect(view.text_dump).to_contain("7")
+        assert_false(_dump_contains(view.text_dump, "=SUM(A1:A2)"))
+
+describe "sheet_gui_view: hidden rows are skipped":
+    """A row present in sheet.hidden_rows contributes no line to the dump,
+    matching how a filtered view must render filtered."""
+
+    it "a hidden row's line is absent from the dump":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "keep-1")
+        sheet.set_value("A2", "hide-me")
+        sheet.set_value("A3", "keep-3")
+        sheet.hide_row(2)
+        val view = sheet_gui_view(sheet, 3, 1)
+        val lines = view.text_dump.split("\n")
+        var found_hidden = false
+        for line in lines:
+            if line == "2|hide-me":
+                found_hidden = true
+        expect(found_hidden).to_equal(false)
+        expect(view.text_dump).to_contain("keep-1")
+        expect(view.text_dump).to_contain("keep-3")
+
+    it "surrounding visible rows still render when a middle row is hidden":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "keep-1")
+        sheet.set_value("A2", "hide-me")
+        sheet.set_value("A3", "keep-3")
+        sheet.hide_row(2)
+        val view = sheet_gui_view(sheet, 3, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[1]).to_equal("1|keep-1")
+        expect(lines[2]).to_equal("3|keep-3")
+
+describe "sheet_gui_view: empty sheet":
+    """With max_rows=0 (no rows requested), only the header line is
+    produced, regardless of sheet content."""
+
+    it "renders headers only when max_rows is 0":
+        var sheet = Sheet.new("Empty")
+        val view = sheet_gui_view(sheet, 0, 3)
+        expect(view.text_dump).to_equal("|A|B|C")
+
+    it "an empty sheet's requested rows still render (blank cells, no crash)":
+        var sheet = Sheet.new("Empty")
+        val view = sheet_gui_view(sheet, 2, 2)
+        val lines = view.text_dump.split("\n")
+        expect(lines.len()).to_equal(3)
+        expect(lines[1]).to_equal("1||")
+        expect(lines[2]).to_equal("2||")

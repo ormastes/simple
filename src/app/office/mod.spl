@@ -11,13 +11,13 @@ use app.office.slides.slide.{Slide, slide_count, blank_slide, add_text_box, slid
 use app.office.mail.mail_app.{MailApp}
 use app.office.planner.planner_app.{PlannerApp}
 use app.office.counter.{CounterApp}
-use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count}
+use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels}
 use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_source_pane, wysiwyg_update_line_checked}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.file_ops.{RecentFileStore}
 use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref, CellRef}
 use app.office.render_adapter.{office_render, office_render_source}
-use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv}
+use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv, recalculate_formula_cells}
 use app.office.slides.deck_format.{parse_deck, deck_to_text}
 use app.office.odf_export.{document_to_fodt, sheet_to_fods, sheet_to_fods_formatted}
 use app.office.office_api.{macro_parse_formats}
@@ -81,6 +81,50 @@ fn _run_office_gui_command(app_name: text) -> i32:
     print "office-gui: {app_name} frame {office_gui_frame_width()}x{office_gui_frame_height()}, {non_background} non-background pixels"
     return 0
 
+fn _build_office_gui_sheet_demo() -> Sheet:
+    """Build the demo sheet for `office sheet-gui`: a header row, 4 data
+    rows (one of which is hidden via hide_row, one of which is a =SUM(...)
+    formula total), rendered through sheet_gui_view/office_gui_sheet_pixels."""
+    var sheet = Sheet.new("Demo")
+    sheet.set_value("A1", "Item")
+    sheet.set_value("B1", "Price")
+    sheet.set_value("C1", "Qty")
+    sheet.set_value("D1", "Total")
+    sheet.set_value("A2", "Widget")
+    sheet.set_value("B2", "10")
+    sheet.set_value("C2", "2")
+    sheet.set_value("D2", "=B2*C2")
+    sheet.set_value("A3", "Gadget")
+    sheet.set_value("B3", "20")
+    sheet.set_value("C3", "3")
+    sheet.set_value("D3", "=B3*C3")
+    sheet.set_value("A4", "Hidden")
+    sheet.set_value("B4", "999")
+    sheet.set_value("C4", "1")
+    sheet.set_value("D4", "=B4*C4")
+    sheet.set_value("A5", "Total")
+    sheet.set_value("D5", "=SUM(D2:D3)")
+    sheet.hide_row(4)
+    sheet = recalculate_formula_cells(sheet)
+    sheet
+
+fn _run_office_gui_sheet_command() -> i32:
+    """Render the demo sheet's grid view through the real UI stack and
+    report the same pixel-level proof line style as the counter pilot, plus
+    a content marker line per rendered row (pipe-separated) so tests can
+    assert content without pixel parsing."""
+    val sheet = _build_office_gui_sheet_demo()
+    val view = sheet_gui_view(sheet, 5, 4)
+    val pixels = office_gui_sheet_pixels(view)
+    if pixels.len() == 0:
+        print "Error: office GUI render produced an empty frame for sheet-gui"
+        return 1
+    val non_background = office_gui_non_background_pixel_count(pixels)
+    print "office-gui: sheet-gui frame {office_gui_frame_width()}x{office_gui_frame_height()}, {non_background} non-background pixels"
+    for line in view.text_dump.split("\n"):
+        print "office-gui-sheet-row: {line}"
+    return 0
+
 fn run_office(args: [text]) -> i32:
     """Dispatch to the requested office app or show the launcher."""
     val cmd = if args.len() > 0: args[0] else: "launcher"
@@ -124,6 +168,8 @@ fn run_office(args: [text]) -> i32:
             val ui = app.build_ui()
             print "Simple Counter loaded (root={ui.root_id}, value={app.value}, modified={app.modified})"
             return 0
+        "sheet-gui" =>
+            return _run_office_gui_sheet_command()
         "render" =>
             return _run_render_command(args)
         "edit-sheet" =>
@@ -165,7 +211,7 @@ fn run_office(args: [text]) -> i32:
         "erp-invoice" =>
             return _run_erp_invoice_command(args)
         case _("unsupported office app names show usage"):
-            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|render|open|convert|toc|merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
+            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|sheet-gui|render|open|convert|toc|merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
             return 1
 
 fn _basename(path: text) -> text:
