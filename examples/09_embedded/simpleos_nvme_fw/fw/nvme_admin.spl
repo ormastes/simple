@@ -213,6 +213,8 @@ impl AdminQueue:
         if me.sq_len == me.depth:
             return false
         val t: i64 = me.sq_tail
+        if t < 0 or t >= me.depth:
+            return false
         me.sq_cid[t]   = c.cid
         me.sq_op[t]    = c.opcode
         me.sq_nsid[t]  = c.nsid
@@ -248,6 +250,8 @@ impl AdminQueue:
         if me.cq_len == me.depth:
             return false
         val t: i64 = me.cq_tail
+        if t < 0 or t >= me.depth:
+            return false
         me.cq_cid[t]    = p.cid
         me.cq_status[t] = p.status
         me.cq_data[t]   = p.data
@@ -321,6 +325,10 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(bad_head_af.opcode, SC_INVALID_OPCODE, "invalid admin SQ head fetch fails closed")
     aq.sq_len = 0
     aq.sq_head = 0
+    aq.sq_tail = MAX_QUEUE_SIZE
+    fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(22, FEAT_TEMP_THRESH, 312))), 0, "invalid admin SQ tail submit fails closed")
+    fail = fail + expect_eq(aq.pending(), 0, "invalid admin SQ tail submit leaves pending count unchanged")
+    aq.sq_tail = 0
     aq.cq_post(cpl_make(21, SC_SUCCESS, 0))
     fail = fail + expect_eq(aq.cq_pending(), 1, "admin CQ pending == 1")
     val ar: NvmeCpl = aq.cq_reap()
@@ -334,6 +342,10 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(bad_head_ar.status, SC_INVALID_FIELD, "invalid admin CQ head reap fails closed")
     aq.cq_len = 0
     aq.cq_head = 0
+    aq.cq_tail = MAX_QUEUE_SIZE
+    fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(22, SC_SUCCESS, 0))), 0, "invalid admin CQ tail post fails closed")
+    fail = fail + expect_eq(aq.cq_pending(), 0, "invalid admin CQ tail post leaves pending count unchanged")
+    aq.cq_tail = 0
     fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(70000, SC_SUCCESS, 0))), 0, "admin rejects oversized completion id")
     fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(-1, SC_SUCCESS, 0))), 0, "admin rejects negative completion id")
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(70000, FEAT_TEMP_THRESH, 1))), 0, "admin rejects oversized cid")
