@@ -11,8 +11,10 @@ use app.office.slides.slide.{Slide, slide_count, blank_slide, add_text_box, slid
 use app.office.mail.mail_app.{MailApp}
 use app.office.planner.planner_app.{PlannerApp}
 use app.office.counter.{CounterApp}
-use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, session_scroll, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point, pivot_session_new, pivot_session_view, pivot_session_set_agg, pivot_session_swap_fields, pivot_session_field_letters, chart_session_new, chart_session_view, chart_session_set_value_range, chart_session_set_title, slide_session_new, slide_session_view, slide_gui_step, office_gui_slide_pixels, sheet_gui_view_with_formats, office_gui_sheet_cf_pixels}
+use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, session_scroll, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point, pivot_session_new, pivot_session_view, pivot_session_set_agg, pivot_session_swap_fields, pivot_session_field_letters, chart_session_new, chart_session_view, chart_session_set_value_range, chart_session_set_title, slide_session_new, slide_session_view, slide_gui_step, office_gui_slide_pixels, sheet_gui_view_with_formats, office_gui_sheet_cf_pixels, sheet_gui_view_full, session_edit_validated}
 use app.office.sheets.cond_format.{CondRule}
+use app.office.sheets.cell_format.{SheetFormats, empty_sheet_formats, sheet_set_number_format}
+use app.office.sheets.validation.{ValidationRules, empty_validation_rules, validation_add}
 use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_source_pane, wysiwyg_update_line_checked}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.file_ops.{RecentFileStore}
@@ -371,6 +373,59 @@ fn _run_office_gui_sheet_cf_command() -> i32:
         print "office-gui-cf: {line}"
     return 0
 
+fn _run_office_gui_sheet_fmt_command() -> i32:
+    """`office sheet-gui-fmt`: number formats RENDERED and data validation
+    ENFORCED live in the sheet GUI (Excel parity: formatted values in the
+    grid, invalid entry rejected at commit time). Demo sheet: an Item
+    column plus a Price column whose cells B2:B4 carry the "$#,##0.00"
+    currency code AND a whole_number 1-100 validation rule on column B.
+    Script: render (formatted currency strings visible in the dump) ->
+    session_edit_validated B2 = "42" (valid; commits and re-renders as
+    "$42.00") -> session_edit_validated B2 = "999" (out of range; prints
+    the rejection message and the dump proves the cell is UNCHANGED)."""
+    var sheet = Sheet.new("Fmt")
+    sheet.set_value("A1", "Item")
+    sheet.set_value("B1", "Price")
+    sheet.set_value("A2", "Widget")
+    sheet.set_value("B2", "10")
+    sheet.set_value("A3", "Gadget")
+    sheet.set_value("B3", "1234.5")
+    sheet.set_value("A4", "Gizmo")
+    sheet.set_value("B4", "7")
+    var formats = empty_sheet_formats()
+    formats = sheet_set_number_format(formats, "B2", "$#,##0.00")
+    formats = sheet_set_number_format(formats, "B3", "$#,##0.00")
+    formats = sheet_set_number_format(formats, "B4", "$#,##0.00")
+    var vrules = empty_validation_rules()
+    vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
+    var session = session_new(sheet, "B2")
+    val no_rules: [CondRule] = []
+
+    val before_view = sheet_gui_view_full(session, no_rules, formats, 4, 2)
+    val pixels = office_gui_sheet_session_pixels(before_view, session.selected_ref)
+    if pixels.len() == 0:
+        print "Error: office GUI render produced an empty frame for sheet-gui-fmt"
+        return 1
+    val non_background = office_gui_non_background_pixel_count(pixels)
+    print "office-gui-fmt: frame {office_gui_frame_width()}x{office_gui_frame_height()}, {non_background} non-background pixels"
+    for line in before_view.text_dump.split("\n"):
+        print "office-gui-fmt-before: {line}"
+
+    val valid_outcome = session_edit_validated(session, "B2", "42", vrules)
+    session = valid_outcome.session
+    print "office-gui-fmt: edit B2=42 -> last_error=\"{valid_outcome.last_error}\""
+    val after_view = sheet_gui_view_full(session, no_rules, formats, 4, 2)
+    for line in after_view.text_dump.split("\n"):
+        print "office-gui-fmt-after: {line}"
+
+    val invalid_outcome = session_edit_validated(session, "B2", "999", vrules)
+    print "office-gui-fmt: rejected: {invalid_outcome.last_error}"
+    session = invalid_outcome.session
+    val rejected_view = sheet_gui_view_full(session, no_rules, formats, 4, 2)
+    for line in rejected_view.text_dump.split("\n"):
+        print "office-gui-fmt-rejected: {line}"
+    return 0
+
 fn _run_office_gui_sheet_command() -> i32:
     """Render the demo sheet's grid view through the real UI stack and
     report the same pixel-level proof line style as the counter pilot, plus
@@ -649,6 +704,8 @@ fn run_office(args: [text]) -> i32:
             return _run_office_gui_sheet_live_command()
         "sheet-gui-cf" =>
             return _run_office_gui_sheet_cf_command()
+        "sheet-gui-fmt" =>
+            return _run_office_gui_sheet_fmt_command()
         "chart-gui" =>
             return _run_office_gui_chart_command()
         "pivot-gui" =>

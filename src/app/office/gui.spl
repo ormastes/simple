@@ -42,6 +42,9 @@ use app.office.sheets.cell_ref.{offset_ref, parse_range}
 use app.office.sheets.chart.{ChartSeries, chart_series_from_ranges}
 use app.office.sheets.pivot.{pivot_build}
 use app.office.sheets.cond_format.{CondRule, cond_rule_matches_cell, cond_data_bar_percent}
+use app.office.sheets.cell_format.{SheetFormats, empty_sheet_formats}
+use app.office.sheets.number_format.{cell_display_formatted}
+use app.office.sheets.validation.{ValidationRules, validation_check}
 use app.office.file_formats.{recalculate_formula_cells}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_render_html_pixels}
 use app.office.slides.slide.{Slide, SlideElementKind}
@@ -859,6 +862,62 @@ fn session_edit(session: SheetGuiSession, ref_str: text, new_text: text) -> Shee
     sheet = recalculate_formula_cells(sheet)
     SheetGuiSession(sheet: sheet, selected_ref: session.selected_ref, pending_input: session.pending_input, view_top_row: session.view_top_row, view_left_col: session.view_left_col)
 
+# ---------------------------------------------------------------------------
+# Validation-enforced editing (Excel data-validation parity at ENTRY time).
+#
+# Why a composite outcome struct instead of a last_error FIELD on
+# SheetGuiSession (the chart/pivot sessions' pattern): sheet_gui_session_
+# spec.spl constructs SheetGuiSession(...) DIRECTLY with today's five fields
+# at three sites, and struct default-field omission is broken in interpreter
+# mode (quirk ledger) -- adding a sixth field would break those existing
+# specs. So the session struct stays untouched and the validated entry
+# points below return SheetEditOutcome pairing the (possibly unchanged)
+# session with the validation verdict; plain session_edit/session_key keep
+# their exact signatures and behavior for every existing call site.
+# ---------------------------------------------------------------------------
+
+struct SheetEditOutcome:
+    session: SheetGuiSession
+    last_error: text   # "" = the edit committed; else the validation message and the session is UNCHANGED
+
+fn session_edit_validated(session: SheetGuiSession, ref_str: text, new_text: text, vrules: ValidationRules) -> SheetEditOutcome:
+    """session_edit with Excel-style data validation enforced at entry:
+    `new_text` is checked against `vrules` (validation.spl's own
+    validation_check -- cell-exact or column rules, nothing re-decided
+    here) BEFORE it touches the sheet. Invalid input REJECTS the edit the
+    way Excel's validation dialog does: the returned outcome's session is
+    the input session UNCHANGED (cell keeps its old value, no
+    recalculation, same selection/buffer/viewport -- a re-render dumps
+    byte-identically) and last_error carries the rule's message. Valid
+    input commits through session_edit exactly as an unvalidated edit
+    would, with last_error "". An EMPTY rules container accepts
+    everything -- session_edit_validated(s, r, t, empty_validation_rules())
+    is session_edit(s, r, t). Callers must use the returned outcome's
+    session (copy semantics)."""
+    val check_result = validation_check(vrules, session.sheet, ref_str, new_text)
+    if not check_result.ok:
+        return SheetEditOutcome(session: session, last_error: check_result.message)
+    SheetEditOutcome(session: session_edit(session, ref_str, new_text), last_error: "")
+
+fn session_key_validated(session: SheetGuiSession, key: text, max_rows: i32, max_cols: i32, view_rows: i32, view_cols: i32, vrules: ValidationRules) -> SheetEditOutcome:
+    """session_key with data validation enforced on the ONLY key that
+    commits cell content: "enter" with a non-empty pending buffer runs the
+    buffer through validation_check against the selected cell first --
+    invalid input leaves the session ENTIRELY unchanged (the pending
+    buffer is RETAINED, mirroring Excel's validation dialog keeping you in
+    the cell to fix the entry; a re-render still shows the mid-typing
+    "<ref>:<buffer>" form) and sets last_error to the rule's message;
+    valid input commits through session_key's own enter path. Every other
+    key (arrows, typing, escape, backspace, empty-buffer enter) is
+    delegated to session_key untouched with last_error "" -- validation
+    gates COMMITTED values only, never typing in progress. Callers must
+    use the returned outcome's session (copy semantics)."""
+    if key == "enter" and session.pending_input != "":
+        val check_result = validation_check(vrules, session.sheet, session.selected_ref, session.pending_input)
+        if not check_result.ok:
+            return SheetEditOutcome(session: session, last_error: check_result.message)
+    SheetEditOutcome(session: session_key(session, key, max_rows, max_cols, view_rows, view_cols), last_error: "")
+
 fn _sheet_gui_selection_cell_id(ref_str: text) -> text:
     "cell_{ref_str}"
 
@@ -1076,7 +1135,34 @@ fn sheet_gui_view_with_formats(session: SheetGuiSession, rules: [CondRule], max_
         The widget's visible TEXT stays clean (formatting is a style, not
         cell content -- only the dump carries the marker).
     An empty `rules` list renders byte-identically to
-    sheet_gui_view_with_selection."""
+    sheet_gui_view_with_selection.
+
+    Implementation: a thin wrapper over sheet_gui_view_full with an EMPTY
+    SheetFormats container -- formats_get on an empty container returns the
+    general/default spec (num_fmt "") for every cell, so
+    cell_display_formatted falls back to cell_display_text on every cell
+    and the tree and text_dump stay byte-for-byte what this function has
+    always produced."""
+    sheet_gui_view_full(session, rules, empty_sheet_formats(), max_rows, max_cols)
+
+fn sheet_gui_view_full(session: SheetGuiSession, rules: [CondRule], formats: SheetFormats, max_rows: i32, max_cols: i32) -> SheetGuiView:
+    """sheet_gui_view_with_formats' exact grid construction (per-cell
+    "cell_<ref>" text_widgets, selection bracket/pending-buffer forms,
+    N-visible viewport window, "viewport|..." marker line, live cf-* rule
+    classes/"!<marker>" dump suffixes -- see that function's docstring; it
+    now delegates here) plus NUMBER-FORMAT-AWARE display, Excel-style:
+    every cell's display text comes from number_format.spl's
+    cell_display_formatted(sheet, formats, ref) instead of the raw
+    cell_display_text, so a cell whose FormatSpec carries a num_fmt code
+    (e.g. "$#,##0.00") renders its formatted string ("$1,234.50") in BOTH
+    the cell widget's text and the text_dump line. Cells without a format
+    entry (or with num_fmt "") fall back to cell_display_text inside
+    cell_display_formatted itself, so they render byte-identically to
+    sheet_gui_view_with_formats -- passing empty_sheet_formats() IS
+    sheet_gui_view_with_formats. The selection bracket ("[...]") and
+    pending-buffer ("<ref>:<buffer>") forms wrap the FORMATTED text, same
+    as they wrap the raw text today, and cf "!<marker>" dump suffixes
+    attach after the formatted text ("$42.00!hi")."""
     val sheet = session.sheet
     val left_col0 = session.view_left_col - 1
     val visible_rows = _sheet_gui_visible_rows(sheet, session.view_top_row, max_rows)
@@ -1107,7 +1193,7 @@ fn sheet_gui_view_with_formats(session: SheetGuiSession, rules: [CondRule], max_
         var rc = 0
         while rc < max_cols:
             val ref_str = "{col_to_letter(left_col0 + rc)}{r}"
-            var cell_text = cell_display_text(sheet.get_cell(ref_str))
+            var cell_text = cell_display_formatted(sheet, formats, ref_str)
             if ref_str == session.selected_ref:
                 if session.pending_input != "":
                     cell_text = "{ref_str}:{session.pending_input}"
