@@ -148,6 +148,10 @@ impl QueueSet:
         if me.sq_active[qid] == 0:
             return SC_INVALID_QID
         me.sq_active[qid] = 0
+        me.sq_cqid[qid] = 0
+        me.sq_head[qid] = 0
+        me.sq_tail[qid] = 0
+        me.sq_len[qid] = 0
         SC_SUCCESS
 
     # A CQ cannot be torn down while an SQ still feeds it.
@@ -165,6 +169,9 @@ impl QueueSet:
         if bound == 1:
             return SC_QUEUE_BUSY
         me.cq_active[qid] = 0
+        me.cq_head[qid] = 0
+        me.cq_tail[qid] = 0
+        me.cq_len[qid] = 0
         SC_SUCCESS
 
     me active_io_queue_count() -> i64:
@@ -196,12 +203,12 @@ impl QueueSet:
         true
 
     me sq_pending(qid: i64) -> i64:
-        if not qid_in_range(qid):
+        if not me.sq_is_active(qid):
             return 0
         me.sq_len[qid]
 
     me sq_fetch(qid: i64) -> NvmeCmd:
-        if not qid_in_range(qid) or me.sq_len[qid] == 0:
+        if not me.sq_is_active(qid) or me.sq_len[qid] == 0:
             return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val base: i64 = qid * MAX_QUEUE_SIZE
         val slot: i64 = base + me.sq_head[qid]
@@ -230,17 +237,17 @@ impl QueueSet:
         true
 
     me cq_pending(cqid: i64) -> i64:
-        if not qid_in_range(cqid):
+        if not me.cq_is_active(cqid):
             return 0
         me.cq_len[cqid]
 
     me cq_is_full(cqid: i64) -> bool:
-        if not qid_in_range(cqid):
+        if not me.cq_is_active(cqid):
             return true
         me.cq_len[cqid] == me.cq_size[cqid]
 
     me cq_reap(cqid: i64) -> NvmeCpl:
-        if not qid_in_range(cqid) or me.cq_len[cqid] == 0:
+        if not me.cq_is_active(cqid) or me.cq_len[cqid] == 0:
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val base: i64 = cqid * MAX_QUEUE_SIZE
         val slot: i64 = base + me.cq_head[cqid]
@@ -322,6 +329,22 @@ fn nvme_qset_selftest() -> i64:
     fail = fail + expect_eq(qs.delete_sq(1), SC_SUCCESS, "delete SQ 1")
     fail = fail + expect_eq(qs.delete_cq(1), SC_SUCCESS, "delete CQ 1 after SQ gone")
     fail = fail + expect_eq(qs.delete_sq(1), SC_INVALID_QID, "double-delete SQ 1 rejected")
+
+    qs.create_cq(4, 64)
+    qs.create_sq(4, 64, 4)
+    qs.sq_submit(4, cmd_make(88, OP_READ, 0, 1, 0))
+    fail = fail + expect_eq(qs.delete_sq(4), SC_SUCCESS, "delete pending SQ 4")
+    fail = fail + expect_eq(qs.sq_pending(4), 0, "deleted SQ hides stale pending commands")
+    val deleted_sq_fetch: NvmeCmd = qs.sq_fetch(4)
+    fail = fail + expect_eq(deleted_sq_fetch.nblocks, 0, "deleted SQ fetch returns inert command")
+    fail = fail + expect_eq(qs.delete_cq(4), SC_SUCCESS, "delete CQ 4 after SQ 4 gone")
+
+    qs.create_cq(5, 64)
+    qs.cq_post(5, cpl_make(89, SC_SUCCESS, 0x44))
+    fail = fail + expect_eq(qs.delete_cq(5), SC_SUCCESS, "delete CQ 5 with pending completion")
+    fail = fail + expect_eq(qs.cq_pending(5), 0, "deleted CQ hides stale completions")
+    val deleted_cq_reap: NvmeCpl = qs.cq_reap(5)
+    fail = fail + expect_eq(deleted_cq_reap.status, SC_INVALID_FIELD, "deleted CQ reap fails closed")
 
     # round-robin across two live queues
     qs.create_cq(2, 64)
