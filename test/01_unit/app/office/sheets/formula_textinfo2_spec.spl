@@ -1,0 +1,133 @@
+"""Calc text/info fill-in spec (textinfo2 batch).
+
+Ground truth is pinned to published Excel documentation examples:
+  * DOLLAR(1234.567, 2) = "$1,234.57" ; DOLLAR(-1234.567, -2) = "($1,200)"
+    (negative decimals round to the LEFT of the decimal point, i.e. to a
+    multiple of 10^2) ; DOLLAR(-0.123, 4) = "($0.1230)" ;
+    DOLLAR(99.888) = "$99.89"  (all four are the MS docs worked examples;
+    negatives render parenthesized).
+  * UNICHAR(65) = "A" ; UNICODE(" ") = 32 and UNICODE("A") = 65 (MS docs).
+    Runtime probe: char_from_code covers only 9/10/13 and 32..126 (codes
+    >126 return ""), so UNICHAR fails closed outside that range.
+  * CONCAT over a range concatenates every cell: CONCAT of [a,b,c] = "abc".
+  * ISNONTEXT(5) = TRUE, ISNONTEXT("x") = FALSE ; ISLOGICAL(TRUE) = TRUE,
+    ISLOGICAL(1) = FALSE (MS docs semantics).
+  * CELL("address", B2) = "$B$2" ; CELL("row", B2) = 2 ; CELL("col", B2) = 2 ;
+    CELL("contents", B2) = the cell's value; a range uses its top-left cell.
+    Only these four info_types are implemented — others are #ERR.
+  * INFO("numfile") = 1 and INFO("recalc") = "Automatic" — honest
+    single-sheet stubs on the SHEET()/SHEETS() precedent; other types #ERR.
+  * LENB/LEFTB/RIGHTB/MIDB alias LEN/LEFT/RIGHT/MID: the runtime's len() and
+    slice() are byte-based (probe: "é".len() == 2), which IS the B forms'
+    byte semantics, so the aliases are exact.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _eval(formula: text) -> text:
+    var sh = Sheet.new("f")
+    sh.set_value("Z1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("Z1"))
+
+fn _abc_sheet() -> Sheet:
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "a")
+    sh.set_value("A2", "b")
+    sh.set_value("A3", "c")
+    sh.set_value("B2", "7")
+    sh
+
+fn _run(sh_in: Sheet, formula: text) -> text:
+    var sh = sh_in
+    sh.set_value("Z1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("Z1"))
+
+describe "Calc DOLLAR":
+    it "formats with default 2 decimals and thousands grouping":
+        expect(_eval("=DOLLAR(1234.567)")).to_equal("$1,234.57")
+
+    it "rounds left of the decimal point for negative decimals":
+        expect(_eval("=DOLLAR(-1234.567,-2)")).to_equal("($1,200)")
+
+    it "keeps requested trailing decimals on a negative value":
+        expect(_eval("=DOLLAR(-0.123,4)")).to_equal("($0.1230)")
+
+    it "rounds half away from zero on display":
+        expect(_eval("=DOLLAR(99.888)")).to_equal("$99.89")
+
+describe "Calc UNICHAR / UNICODE":
+    it "UNICHAR(65) is A":
+        expect(_eval("=UNICHAR(65)")).to_equal("A")
+
+    it "UNICODE returns the first codepoint":
+        expect(_eval("=UNICODE(\"A\")")).to_equal("65")
+
+    it "UNICODE of a space is 32":
+        expect(_eval("=UNICODE(\" \")")).to_equal("32")
+
+    it "UNICHAR fails closed outside the runtime-supported range":
+        expect(_eval("=UNICHAR(0)")).to_contain("#ERR")
+        expect(_eval("=UNICHAR(200)")).to_contain("#ERR")
+
+    it "UNICODE of an empty string errors":
+        expect(_eval("=UNICODE(\"\")")).to_contain("#ERR")
+
+describe "Calc CONCAT range expansion":
+    it "concatenates every cell of a range":
+        expect(_run(_abc_sheet(), "=CONCAT(A1:A3)")).to_equal("abc")
+
+    it "mixes ranges and scalars":
+        expect(_run(_abc_sheet(), "=CONCAT(A1:A3,\"!\")")).to_equal("abc!")
+
+describe "Calc ISNONTEXT / ISLOGICAL":
+    it "ISNONTEXT is TRUE for numbers and FALSE for text":
+        expect(_eval("=ISNONTEXT(5)")).to_equal("TRUE")
+        expect(_eval("=ISNONTEXT(\"x\")")).to_equal("FALSE")
+
+    it "ISNONTEXT is TRUE for booleans":
+        expect(_eval("=ISNONTEXT(TRUE)")).to_equal("TRUE")
+
+    it "ISLOGICAL detects booleans only":
+        expect(_eval("=ISLOGICAL(TRUE)")).to_equal("TRUE")
+        expect(_eval("=ISLOGICAL(1)")).to_equal("FALSE")
+        expect(_eval("=ISLOGICAL(\"TRUE\")")).to_equal("FALSE")
+
+describe "Calc CELL":
+    it "address of B2 is $B$2":
+        expect(_run(_abc_sheet(), "=CELL(\"address\",B2)")).to_equal("$B$2")
+
+    it "row and col of B2 are 2":
+        expect(_run(_abc_sheet(), "=CELL(\"row\",B2)")).to_equal("2")
+        expect(_run(_abc_sheet(), "=CELL(\"col\",B2)")).to_equal("2")
+
+    it "contents reads the referenced cell's value":
+        expect(_run(_abc_sheet(), "=CELL(\"contents\",B2)")).to_equal("7")
+
+    it "a range argument uses its top-left cell":
+        expect(_run(_abc_sheet(), "=CELL(\"address\",B2:C5)")).to_equal("$B$2")
+
+    it "unsupported info_types and a missing reference fail closed":
+        expect(_run(_abc_sheet(), "=CELL(\"format\",B2)")).to_contain("#ERR")
+        expect(_eval("=CELL(\"row\")")).to_contain("#ERR")
+
+describe "Calc INFO":
+    it "reports the single-file, auto-recalc model honestly":
+        expect(_eval("=INFO(\"numfile\")")).to_equal("1")
+        expect(_eval("=INFO(\"recalc\")")).to_equal("Automatic")
+
+    it "fails closed on other info types":
+        expect(_eval("=INFO(\"osversion\")")).to_contain("#ERR")
+
+describe "Calc byte-form text aliases":
+    it "LENB counts bytes like LEN":
+        expect(_eval("=LENB(\"abc\")")).to_equal("3")
+
+    it "LEFTB / RIGHTB / MIDB slice by bytes like the base forms":
+        expect(_eval("=LEFTB(\"abcdef\",3)")).to_equal("abc")
+        expect(_eval("=RIGHTB(\"abcdef\",2)")).to_equal("ef")
+        expect(_eval("=MIDB(\"abcdef\",2,3)")).to_equal("bcd")
