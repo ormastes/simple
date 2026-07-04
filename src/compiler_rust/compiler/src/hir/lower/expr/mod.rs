@@ -947,19 +947,41 @@ impl Lowerer {
             }
         }
 
+        // Dict<K, V> methods — thread the key/value types through element
+        // reads so field access on the retrieved value resolves against the
+        // real struct layout instead of the global most-fields-wins ANY
+        // resolver (task #104). Copy out K/V (TypeId is Copy) so the
+        // immutable borrow is released before any `register` call below.
+        let dict_kv: Option<(TypeId, TypeId)> = match self.module.types.get(receiver.ty) {
+            Some(HirType::Dict { key, value }) => Some((*key, *value)),
+            _ => None,
+        };
+
         // Any type (Dict, generic containers) methods
         // These are dynamically typed at runtime
-        let is_any =
-            matches!(receiver.ty, TypeId::ANY) || matches!(self.module.types.get(receiver.ty), Some(HirType::Any));
+        let is_any = matches!(receiver.ty, TypeId::ANY)
+            || matches!(self.module.types.get(receiver.ty), Some(HirType::Any))
+            || dict_kv.is_some();
 
         if is_any {
             let result_ty = match method {
-                // Dict/Map operations
-                "get" | "remove" => Some(TypeId::ANY), // Returns Any (dynamic value)
+                // Dict/Map operations. For a typed Dict<K,V>, `get`/`remove`
+                // return the bare value V (the erased builtin dict returns the
+                // bare stored word — NOT an Option; see the bug doc iteration
+                // 12). `keys`/`values` return typed arrays.
+                "get" | "remove" => Some(dict_kv.map(|(_, v)| v).unwrap_or(TypeId::ANY)),
                 "insert" | "set" | "put" | "clear" => Some(TypeId::VOID),
                 "contains_key" | "has" | "contains" => Some(TypeId::BOOL),
                 "len" | "size" => Some(TypeId::I64),
-                "keys" | "values" | "items" | "entries" => Some(TypeId::ANY), // Returns iterator/list
+                "keys" => Some(match dict_kv {
+                    Some((k, _)) => self.module.types.register(HirType::Array { element: k, size: None }),
+                    None => TypeId::ANY,
+                }),
+                "values" => Some(match dict_kv {
+                    Some((_, v)) => self.module.types.register(HirType::Array { element: v, size: None }),
+                    None => TypeId::ANY,
+                }),
+                "items" | "entries" => Some(TypeId::ANY), // Returns iterator/list of pairs
                 "is_empty" => Some(TypeId::BOOL),
                 // Optional operations (for Option/Result types stored as Any)
                 "is_some" | "is_none" | "is_ok" | "is_err" => Some(TypeId::BOOL),

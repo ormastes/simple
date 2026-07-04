@@ -191,6 +191,20 @@ pub enum HirType {
     },
     Tuple(Vec<TypeId>),
     LabeledTuple(Vec<(String, TypeId)>),
+    /// Dictionary/map type `Dict<K, V>`.
+    ///
+    /// At runtime this is represented identically to `Any` (a boxed
+    /// `RuntimeValue`); the distinction exists ONLY so that static type
+    /// resolution can thread the value type `V` through element reads
+    /// (`d[k]`, `d.values()`) instead of erasing to `Any`. Without `V`,
+    /// field access on a dict-derived value falls to the global
+    /// "most-fields-wins" resolver, which at full-compiler scale picks the
+    /// WRONG struct layout when field names collide (see task #104 / the
+    /// stage4 codegen hazards bug doc).
+    Dict {
+        key: TypeId,
+        value: TypeId,
+    },
     Function {
         params: Vec<TypeId>,
         ret: TypeId,
