@@ -1,0 +1,126 @@
+# Slide Master + Placeholder Inheritance
+#
+# A slide master defines named placeholders (title/body/footer/pageno) with
+# position, size, and font inherited by every concrete slide. A slide only
+# supplies content (title text, body text, page number); when a slide gives
+# no content for a placeholder, the master's default_text is used instead.
+# This is a minimal PowerPoint-style `<p:sldMaster>` model: no theme engine,
+# just position/font inheritance + text substitution.
+
+# =========================================================================
+# Core Structs
+# =========================================================================
+
+struct Placeholder:
+    kind: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    font_pt: i32
+    default_text: text
+
+struct SlideMaster:
+    name: text
+    placeholders: [Placeholder]
+
+# =========================================================================
+# Constructors
+# =========================================================================
+
+fn placeholder_new(kind: text, x: i32, y: i32, w: i32, h: i32, font_pt: i32, default_text: text) -> Placeholder:
+    """Create a placeholder. `kind` is one of "title"/"body"/"footer"/"pageno"."""
+    Placeholder(
+        kind: kind,
+        x: x,
+        y: y,
+        w: w,
+        h: h,
+        font_pt: font_pt,
+        default_text: default_text
+    )
+
+fn master_new(name: text) -> SlideMaster:
+    """Create an empty slide master with the given name."""
+    SlideMaster(name: name, placeholders: [])
+
+fn master_add_placeholder(master: SlideMaster, ph: Placeholder) -> SlideMaster:
+    """Append a placeholder to a master and return the updated master
+    (placeholders are value types; mutating through a param is lost, so
+    build a new list)."""
+    var new_placeholders: [Placeholder] = []
+    for p in master.placeholders:
+        new_placeholders.push(p)
+    new_placeholders.push(ph)
+    SlideMaster(name: master.name, placeholders: new_placeholders)
+
+# =========================================================================
+# Placeholder Inheritance
+# =========================================================================
+
+fn _resolve_content(ph: Placeholder, title: text, body: text, page_number: i32) -> text:
+    """Resolve a placeholder's content for one slide: slide-supplied content
+    wins by kind, falling back to the master's default_text when the slide
+    gives nothing (empty text)."""
+    if ph.kind == "title":
+        if title != "":
+            return title
+        return ph.default_text
+    if ph.kind == "body":
+        if body != "":
+            return body
+        return ph.default_text
+    if ph.kind == "pageno":
+        return "{page_number}"
+    ph.default_text
+
+fn apply_master(master: SlideMaster, title: text, body: text, page_number: i32) -> [text]:
+    """Resolve every placeholder in the master for one slide. Position
+    (x/y) and font size are always inherited from the master; the resolved
+    text comes from the slide's title/body/page_number, or the master's
+    default_text as a fallback. One line per placeholder:
+    "<kind>@<x>,<y> <font_pt>pt: <resolved_text>"."""
+    var lines: [text] = []
+    for ph in master.placeholders:
+        val resolved = _resolve_content(ph, title, body, page_number)
+        val line = "{ph.kind}@{ph.x},{ph.y} {ph.font_pt}pt: {resolved}"
+        lines.push(line)
+    lines
+
+fn master_placeholder_count(master: SlideMaster) -> i32:
+    """Number of placeholders defined on the master."""
+    master.placeholders.len()
+
+# =========================================================================
+# XML Rendering
+# =========================================================================
+
+fn _xml_escape(s: text) -> text:
+    """Escape text for safe inclusion inside XML markup/attributes."""
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result
+
+fn _placeholder_to_xml(ph: Placeholder) -> text:
+    """Render one placeholder as a compact PowerPoint-like `<p:sp>` shape
+    carrying its kind, position/size, and font size."""
+    val kind_esc = _xml_escape(ph.kind)
+    val text_esc = _xml_escape(ph.default_text)
+    val nv = "<p:nvSpPr><p:ph type=\"{kind_esc}\"/></p:nvSpPr>"
+    val sp_pr = "<p:spPr><a:off x=\"{ph.x}\" y=\"{ph.y}\"/><a:ext cx=\"{ph.w}\" cy=\"{ph.h}\"/></p:spPr>"
+    val tx = "<p:txBody><a:p><a:r><a:rPr sz=\"{ph.font_pt}\"/><a:t>{text_esc}</a:t></a:r></a:p></p:txBody>"
+    "<p:sp>{nv}{sp_pr}{tx}</p:sp>"
+
+fn master_to_xml(master: SlideMaster) -> text:
+    """Render the master as a `<p:sldMaster>` fragment with one `<p:sp>`
+    per placeholder, escaped, as a single string."""
+    val name_esc = _xml_escape(master.name)
+    var parts: [text] = []
+    parts.push("<p:sldMaster name=\"{name_esc}\">")
+    for ph in master.placeholders:
+        parts.push(_placeholder_to_xml(ph))
+    parts.push("</p:sldMaster>")
+    parts.join("")

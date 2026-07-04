@@ -1,0 +1,208 @@
+# Parameterized Multi-Condition Query
+#
+# Access-style "parameter query" + query-design-grid AND/OR: a query is saved
+# as a small set of conditions (column, operator, named placeholder) with an
+# overall AND/OR conjunction, then later *run* by binding each placeholder to
+# a value. Reuses table.spl's Table storage (table_new/table_col_index/
+# table_insert) for the result; this file only adds the condition/binding/
+# matching logic on top, mirroring query.spl's numeric-vs-text compare rule
+# (hand-rolled numeric detection, since `to_f64()` silently returns 0.0 for
+# non-numeric text).
+
+use app.office.database.table.{Table, table_new, table_col_index, table_insert}
+
+struct Condition:
+    """One clause of a parameter query: `col` `op` `:param_name`, e.g.
+    salary >= :min_salary. The actual value is bound later, at run time, by
+    name — not stored here — so the same Condition can be re-run with
+    different parameter values."""
+    col: text
+    op: text
+    param_name: text
+
+fn condition_new(col: text, op: text, param_name: text) -> Condition:
+    """A condition `col op :param_name` (no value bound yet)."""
+    Condition(col: col, op: op, param_name: param_name)
+
+struct ParamQuery:
+    """A saved parameterized query: filter `table_name` by all/any of
+    `conditions` (per `conjunction`, "and" or "or")."""
+    table_name: text
+    conditions: [Condition]
+    conjunction: text
+
+fn param_query_new(table_name: text, conjunction: text) -> ParamQuery:
+    """An empty parameter query over `table_name` combined with
+    `conjunction` ("and" or "or")."""
+    ParamQuery(table_name: table_name, conditions: [], conjunction: conjunction)
+
+fn param_query_add(pq: ParamQuery, condition: Condition) -> ParamQuery:
+    """Append `condition` to `pq`. RETURN THE OBJECT — reassign at call
+    site (mutating `pq` in place does not persist across this fn boundary)."""
+    var new_conditions: [Condition] = []
+    var i = 0
+    while i < pq.conditions.len():
+        new_conditions.push(pq.conditions[i])
+        i = i + 1
+    new_conditions.push(condition)
+    ParamQuery(table_name: pq.table_name, conditions: new_conditions, conjunction: pq.conjunction)
+
+# =========================================================================
+# Internal helpers
+# =========================================================================
+
+fn _is_numeric_text(s: text) -> bool:
+    """True if `s` looks like a plain number (optional leading '-', digits,
+    at most one '.'). Mirrors query.spl's `_is_numeric_text`: `to_f64()`
+    alone would silently misclassify garbage text as numeric zero."""
+    if s == "":
+        return false
+    var i = 0
+    var has_digit = false
+    var has_dot = false
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "-" and i == 0:
+            pass_do_nothing("leading minus sign allowed")
+        elif ch == ".":
+            if has_dot:
+                return false
+            has_dot = true
+        elif ch >= "0" and ch <= "9":
+            has_digit = true
+        else:
+            return false
+        i = i + 1
+    has_digit
+
+fn _compare_values(a: text, b: text, op: text) -> bool:
+    """Apply `op` ("=","!=",">","<",">=","<=") to cell values `a`,`b`.
+    Numeric compare when both parse as numbers; otherwise case-insensitive
+    text compare. Same semantics as query.spl's `_compare_values`."""
+    if _is_numeric_text(a) and _is_numeric_text(b):
+        val av = a.to_f64()
+        val bv = b.to_f64()
+        if op == "=":
+            return av == bv
+        if op == "!=":
+            return av != bv
+        if op == ">":
+            return av > bv
+        if op == "<":
+            return av < bv
+        if op == ">=":
+            return av >= bv
+        if op == "<=":
+            return av <= bv
+        return false
+    val al = a.lower()
+    val bl = b.lower()
+    if op == "=":
+        return al == bl
+    if op == "!=":
+        return al != bl
+    if op == ">":
+        return al > bl
+    if op == "<":
+        return al < bl
+    if op == ">=":
+        return al >= bl
+    if op == "<=":
+        return al <= bl
+    false
+
+fn _param_value(param_names: [text], param_values: [text], name: text) -> text:
+    """Value bound to `name` in the parallel `param_names`/`param_values`
+    arrays, or "" if `name` was never bound (fail-soft)."""
+    var i = 0
+    while i < param_names.len():
+        if param_names[i] == name:
+            return param_values[i]
+        i = i + 1
+    ""
+
+fn _index_of_text(items: [text], target: text) -> i32:
+    """Linear scan for the first-seen-order dedup used by
+    `param_query_required_params`."""
+    var i = 0
+    while i < items.len():
+        if items[i] == target:
+            return i
+        i = i + 1
+    -1
+
+fn _row_matches(pq: ParamQuery, table: Table, row_vals: [text], param_names: [text], param_values: [text]) -> bool:
+    """Whether one row satisfies `pq`'s conditions under its conjunction:
+    AND requires every condition to match, OR requires at least one."""
+    val is_and = pq.conjunction == "and"
+    var matched = is_and
+    var i = 0
+    while i < pq.conditions.len():
+        val cond = pq.conditions[i]
+        val idx = table_col_index(table, cond.col)
+        var cell = ""
+        if idx >= 0 and idx < row_vals.len():
+            cell = row_vals[idx]
+        val bound = _param_value(param_names, param_values, cond.param_name)
+        val cond_hit = _compare_values(cell, bound, cond.op)
+        if is_and:
+            matched = matched and cond_hit
+        else:
+            matched = matched or cond_hit
+        i = i + 1
+    matched
+
+# =========================================================================
+# param_query_run
+# =========================================================================
+
+fn param_query_run(pq: ParamQuery, table: Table, param_names: [text], param_values: [text]) -> Table:
+    """Bind each condition's `param_name` to its value from the parallel
+    `param_names`/`param_values` arrays, then filter `table`: keep a row iff
+    (conjunction=="and" -> ALL conditions match) or (conjunction=="or" ->
+    ANY condition matches). Returns a new Table with the same columns."""
+    var out = table_new(table.name, table.cols)
+    var i = 0
+    while i < table.rows.len():
+        val row_vals = table.rows[i]
+        if _row_matches(pq, table, row_vals, param_names, param_values):
+            out = table_insert(out, row_vals)
+        i = i + 1
+    out
+
+# =========================================================================
+# param_query_required_params
+# =========================================================================
+
+fn param_query_required_params(pq: ParamQuery) -> [text]:
+    """Distinct `param_name`s used by `pq`'s conditions, in first-seen
+    order (so a UI can prompt for exactly these, once each)."""
+    var names: [text] = []
+    var i = 0
+    while i < pq.conditions.len():
+        val cond = pq.conditions[i]
+        val pos = _index_of_text(names, cond.param_name)
+        if pos < 0:
+            names.push(cond.param_name)
+        i = i + 1
+    names
+
+# =========================================================================
+# param_query_to_text
+# =========================================================================
+
+fn param_query_to_text(pq: ParamQuery) -> text:
+    """Readable SQL-like rendering, e.g.
+    "SELECT * FROM employees WHERE salary >= :min_salary AND dept = :dept"."""
+    var conj_text = " AND "
+    if pq.conjunction == "or":
+        conj_text = " OR "
+    var out_text = "SELECT * FROM {pq.table_name} WHERE "
+    var i = 0
+    while i < pq.conditions.len():
+        val cond = pq.conditions[i]
+        if i > 0:
+            out_text = "{out_text}{conj_text}"
+        out_text = "{out_text}{cond.col} {cond.op} :{cond.param_name}"
+        i = i + 1
+    out_text
