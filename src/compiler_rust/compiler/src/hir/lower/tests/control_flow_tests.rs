@@ -1,0 +1,214 @@
+use super::super::super::types::*;
+use super::super::*;
+use super::parse_and_lower;
+
+#[test]
+fn test_lower_if_statement() {
+    let module = parse_and_lower(
+        "fn max(a: i64, b: i64) -> i64:\n    if a > b:\n        return a\n    else:\n        return b\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    assert!(matches!(func.body[0], HirStmt::If { .. }));
+}
+
+#[test]
+fn test_lower_while_loop() {
+    let module =
+        parse_and_lower("fn count() -> i64:\n    let x: i64 = 0\n    while x < 10:\n        x = x + 1\n    return x\n")
+            .unwrap();
+
+    let func = &module.functions[0];
+    assert!(matches!(func.body[1], HirStmt::While { .. }));
+}
+
+#[test]
+fn test_lower_simd_loop_metadata() {
+    let module = parse_and_lower(
+        "fn count() -> i64:\n    @simd\n    for i in 0..4:\n        pass\n    @simd\n    while false:\n        pass\n    @simd\n    loop:\n        break\n    return 0\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    assert!(matches!(
+        func.body[0],
+        HirStmt::For {
+            simd_requested: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        func.body[1],
+        HirStmt::While {
+            simd_requested: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        func.body[2],
+        HirStmt::Loop {
+            simd_requested: true,
+            ..
+        }
+    ));
+}
+
+/// Regression: multi-statement match arms must keep their leading statements.
+/// `lower_match_arm_body` used to discard everything but the trailing
+/// expression — `val y = ...` only registered the local without a Let store,
+/// so the local stayed uninitialized (stage4 `CompileContext.create` SIGSEGV
+/// where a lambda captured the arm-local receiver as nil).
+#[test]
+fn test_match_arm_leading_statements_are_kept() {
+    let module = parse_and_lower(
+        "fn pick(mode: i64) -> i64:\n    val r = match mode:\n        case 0:\n            val y = 41\n            y + 1\n        case _:\n            0\n    return r\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    let repr = format!("{:?}", func.body[0]);
+    assert!(
+        repr.contains("Block"),
+        "match arm body lost its statement block: {repr}"
+    );
+    assert!(
+        repr.contains("Integer(41)"),
+        "match arm `val y = 41` initializer was dropped: {repr}"
+    );
+}
+
+#[test]
+fn test_untyped_empty_array_specializes_on_first_append() {
+    let module = parse_and_lower(
+        "class Boxed:\n    value: i64\n\nfn run_one() -> i64:\n    var items = []\n    items.append(Boxed(value: 7))\n    for item in items:\n        return item.value\n    return 0\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    let HirStmt::Let { local_index, ty, .. } = &func.body[0] else {
+        panic!("expected first statement to be the items binding");
+    };
+    let HirStmt::Expr(HirExpr {
+        kind: HirExprKind::MethodCall { receiver, .. },
+        ..
+    }) = &func.body[1]
+    else {
+        panic!("expected second statement to be items.append(...)");
+    };
+    let HirStmt::For {
+        pattern_local,
+        iterable,
+        ..
+    } = &func.body[2]
+    else {
+        panic!("expected third statement to be the items loop");
+    };
+
+    assert!(matches!(
+        module.types.get(*ty),
+        Some(HirType::Array { element, .. }) if *element == TypeId::ANY
+    ));
+    assert!(matches!(receiver.as_ref().kind, HirExprKind::Local(idx) if idx == *local_index));
+
+    let specialized_local = &func.locals[*local_index];
+    assert!(matches!(
+        module.types.get(specialized_local.ty),
+        Some(HirType::Array { element, .. }) if matches!(module.types.get(*element), Some(HirType::Struct { name, .. }) if name == "Boxed")
+    ));
+    let loop_local_index = pattern_local.expect("loop local should be recorded");
+    let loop_local = &func.locals[loop_local_index];
+    assert_eq!(loop_local.name, "item");
+    assert!(matches!(
+        module.types.get(loop_local.ty),
+        Some(HirType::Struct { name, .. }) if name == "Boxed"
+    ));
+    assert!(matches!(
+        module.types.get(iterable.ty),
+        Some(HirType::Array { element, .. }) if matches!(module.types.get(*element), Some(HirType::Struct { name, .. }) if name == "Boxed")
+    ));
+}
+
+/// A3 cranelift gap: positional class pattern `case ClassName(a, b, c)` must lower
+/// with Bool(true) condition (not rt_enum_check_discriminant) and FieldAccess
+/// bindings (not rt_enum_payload) so compiled/JIT mode matches correctly.
+///
+/// Regression for bug: positional_class_match_wide_destructure_2026-06-11.md
+#[test]
+fn test_positional_class_pattern_match_lowering() {
+    // match statement using positional class pattern
+    let source = "class Point:\n    x: i64\n    y: i64\n    z: i64\n\nfn run(p: Point) -> i64:\n    match p:\n        case Point(a, b, c):\n            return a\n        case _:\n            return 0\n";
+    let module = parse_and_lower(source).unwrap();
+
+    // Verify the Point type is a struct
+    let point_tid = module.types.lookup("Point").expect("Point type not found");
+    assert!(
+        matches!(module.types.get(point_tid), Some(HirType::Struct { name, .. }) if name == "Point"),
+        "Point should be a Struct type"
+    );
+
+    let func = &module.functions[0];
+
+    // Find the first HirStmt::If in the body (the match arm).
+    // There may be Let stmts before it (e.g. parameter copies).
+    // Its condition must be Bool(true) — NOT a BuiltinCall to rt_enum_check_discriminant.
+    let match_if = func
+        .body
+        .iter()
+        .find(|s| matches!(s, HirStmt::If { .. }))
+        .unwrap_or_else(|| panic!("expected a HirStmt::If in function body; body: {:?}", func.body));
+
+    let HirStmt::If {
+        condition, then_block, ..
+    } = match_if
+    else {
+        unreachable!()
+    };
+
+    assert!(
+        matches!(condition.kind, HirExprKind::Bool(true)),
+        "positional class pattern condition must be Bool(true), not a discriminant check; got: {:?}",
+        condition.kind
+    );
+
+    // The then_block must include FieldAccess bindings for a, b, c at indices 0, 1, 2.
+    // FieldAccess maps field_index to byte_offset = i*8, which matches the flat struct layout
+    // allocated by rt_alloc in the compiled path (fields at 0, 8, 16, …).
+    let repr = format!("{:?}", then_block);
+    assert!(
+        repr.contains("FieldAccess"),
+        "positional class pattern bindings must use FieldAccess; then_block repr: {repr}"
+    );
+    // Confirm rt_enum_payload is NOT used for the class pattern bindings
+    assert!(
+        !repr.contains("rt_enum_payload"),
+        "positional class pattern must NOT use rt_enum_payload; then_block repr: {repr}"
+    );
+}
+
+/// Enum variant positional patterns must still use rt_enum_check_discriminant
+/// (regression guard: class-pattern fix must not affect enum matching).
+#[test]
+fn test_enum_variant_pattern_condition_still_uses_discriminant() {
+    let source = "enum Color:\n    Red\n    Green\n    Blue\n\nfn is_red(c: Color) -> i64:\n    match c:\n        case Color.Red:\n            return 1\n        case _:\n            return 0\n";
+    let module = parse_and_lower(source).unwrap();
+
+    let func = &module.functions[0];
+
+    // Find the first HirStmt::If whose condition uses rt_enum_check_discriminant.
+    let match_if = func
+        .body
+        .iter()
+        .find(|s| matches!(s, HirStmt::If { .. }))
+        .unwrap_or_else(|| panic!("expected a HirStmt::If in function body"));
+
+    let HirStmt::If { condition, .. } = match_if else {
+        unreachable!()
+    };
+
+    let repr = format!("{:?}", condition.kind);
+    assert!(
+        repr.contains("rt_enum_check_discriminant") || repr.contains("rt_is_none") || repr.contains("rt_is_some"),
+        "enum variant pattern condition should use rt_enum_check_discriminant; got: {repr}"
+    );
+}

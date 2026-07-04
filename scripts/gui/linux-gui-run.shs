@@ -1,0 +1,110 @@
+#!/bin/sh
+# linux-gui-run.shs — run a Simple GUI program in a real on-screen window on Linux.
+#
+# Always launches `bin/simple run <app.spl>` under a PRIVATE Xvfb display and
+# captures only that display. It never renders to or captures the user's live
+# desktop session: pointing xwd/apps at the login display has crashed the
+# whole session before (2026-07-02, session logout via Xwayland). To reuse an
+# existing $DISPLAY anyway, set SIMPLE_GUI_ALLOW_LIVE_DISPLAY=1 explicitly.
+#
+# Captures land under build/gui-linux-run/<app-name>/.
+#
+# Usage: scripts/gui/linux-gui-run.shs <file.spl> [program args...] [--width W] [--height H]
+#
+# Env:
+#   SIMPLE_GUI_ALLOW_LIVE_DISPLAY — 1 to allow using a pre-set $DISPLAY (default: never)
+#   SIMPLE_GUI — passed through to the app (default: 1)
+set -eu
+
+repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$repo_root"
+
+spl="${1:-examples/06_io/ui/widget_showcase_gui.spl}"
+[ $# -gt 0 ] && shift
+case "$spl" in
+    /*) : ;;
+    *) spl="$repo_root/$spl" ;;
+esac
+if [ ! -f "$spl" ]; then
+    echo "error: file not found: $spl" >&2
+    exit 1
+fi
+app_name=$(basename "$spl" .spl)
+
+width=1280
+height=720
+depth=24
+program_args=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --width)  width="$2";  shift 2 ;;
+        --height) height="$2"; shift 2 ;;
+        *) program_args="$program_args $1"; shift ;;
+    esac
+done
+
+output_dir="build/gui-linux-run/$app_name"
+mkdir -p "$output_dir"
+timestamp=$(date +%Y%m%d-%H%M%S)
+log_file="$output_dir/run-$timestamp.log"
+capture_file="$output_dir/capture-$timestamp.png"
+ppm_file="$output_dir/capture-$timestamp.ppm"
+
+vfb_pid=""
+cleanup() {
+    if [ -n "$vfb_pid" ]; then
+        kill "$vfb_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+if [ "${SIMPLE_GUI_ALLOW_LIVE_DISPLAY:-0}" = "1" ] && [ -n "${DISPLAY:-}" ]; then
+    echo "WARNING: using live DISPLAY=$DISPLAY (SIMPLE_GUI_ALLOW_LIVE_DISPLAY=1)" | tee "$log_file"
+else
+    display_num=91
+    while [ -e "/tmp/.X11-unix/X$display_num" ] || [ -e "/tmp/.X$display_num-lock" ]; do
+        display_num=$((display_num + 1))
+    done
+    DISPLAY=":$display_num"
+    export DISPLAY
+    echo "Starting Xvfb at $DISPLAY (${width}x${height}x${depth})" | tee "$log_file"
+    Xvfb "$DISPLAY" -screen 0 "${width}x${height}x${depth}" >/dev/null 2>&1 &
+    vfb_pid=$!
+    sleep 1
+fi
+
+SIMPLE_GUI="${SIMPLE_GUI:-1}"
+export SIMPLE_GUI
+SHOWCASE_PPM="$ppm_file"
+export SHOWCASE_PPM
+
+echo "Launching: bin/simple run $spl$program_args" | tee -a "$log_file"
+# shellcheck disable=SC2086 — word-split program_args intentionally
+timeout 30 "$repo_root/bin/simple" run "$spl" $program_args 2>&1 | tee -a "$log_file" || {
+    echo "App exited with code $?" | tee -a "$log_file"
+}
+
+sleep 1
+
+echo "Capturing $DISPLAY to $capture_file" | tee -a "$log_file"
+if xwd -display "$DISPLAY" -root -out "$output_dir/xwd-$timestamp.xwd" 2>/dev/null; then
+    convert "$output_dir/xwd-$timestamp.xwd" "$capture_file" 2>/dev/null || \
+        echo "Warning: convert failed, output may be incomplete" | tee -a "$log_file"
+    rm -f "$output_dir/xwd-$timestamp.xwd"
+else
+    echo "Warning: xwd failed" | tee -a "$log_file"
+fi
+
+if [ -f "$ppm_file" ]; then
+    echo "PPM capture created: $ppm_file ($(wc -c <"$ppm_file") bytes)" | tee -a "$log_file"
+else
+    echo "Note: PPM capture not available (app may not support SHOWCASE_PPM)" | tee -a "$log_file"
+fi
+if [ -f "$capture_file" ]; then
+    echo "PNG capture created: $capture_file ($(wc -c <"$capture_file") bytes)" | tee -a "$log_file"
+else
+    echo "Warning: PNG capture not created" | tee -a "$log_file"
+fi
+
+echo "Run complete. Log: $log_file" | tee -a "$log_file"
+exit 0

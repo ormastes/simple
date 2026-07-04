@@ -1,0 +1,1280 @@
+#!/bin/sh
+# Shared RenderDoc evidence helpers for original renderdoccmd capture and the
+# Simple in-application rt_renderdoc_* capture path.
+
+rdoc_repo_root() {
+    if [ "${RDOC_ROOT:-}" != "" ]; then
+        printf '%s\n' "$RDOC_ROOT"
+    else
+        CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd
+    fi
+}
+
+rdoc_find_renderdoc_home() {
+    if [ "${RDOC_HOME:-}" != "" ] && [ -x "$(rdoc_renderdoccmd_path "$RDOC_HOME")" ]; then
+        printf '%s\n' "$RDOC_HOME"
+        return 0
+    fi
+    root="$1"
+    if [ "$(uname -s 2>/dev/null || echo unknown)" = "Linux" ] &&
+        [ -x "$root/build/tools/renderdoc-linux-vulkan-only/bin/renderdoccmd" ]; then
+        printf '%s\n' "$root/build/tools/renderdoc-linux-vulkan-only"
+        return 0
+    fi
+    if [ -x "$root/build/tools/renderdoc/bin/renderdoccmd" ]; then
+        printf '%s\n' "$root/build/tools/renderdoc"
+        return 0
+    fi
+    for candidate in "$root"/build/tools/renderdoc-*; do
+        if [ -x "$candidate/bin/renderdoccmd" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    for candidate in \
+        /Applications/RenderDoc.app \
+        "$HOME/Applications/RenderDoc.app" \
+        "$root"/build/tools/RenderDoc.app \
+        "$root"/build/tools/renderdoc/RenderDoc.app
+    do
+        if [ -x "$(rdoc_renderdoccmd_path "$candidate")" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    if command -v renderdoccmd >/dev/null 2>&1; then
+        renderdoc_cmd_path="$(command -v renderdoccmd)"
+        if command -v readlink >/dev/null 2>&1; then
+            renderdoc_cmd_path="$(readlink -f "$renderdoc_cmd_path" 2>/dev/null || printf '%s\n' "$renderdoc_cmd_path")"
+        fi
+        dirname -- "$(dirname -- "$renderdoc_cmd_path")"
+        return 0
+    fi
+    return 1
+}
+
+rdoc_renderdoc_search_paths_value() {
+    root="$1"
+    rdoc_home_value="${RDOC_HOME:-RDOC_HOME_UNSET}"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$rdoc_home_value" \
+        "$root/build/tools/renderdoc" \
+        "$root/build/tools/renderdoc-*" \
+        "/Applications/RenderDoc.app" \
+        "$HOME/Applications/RenderDoc.app" \
+        "$root/build/tools/RenderDoc.app" \
+        "$root/build/tools/renderdoc/RenderDoc.app" \
+        "PATH:renderdoccmd"
+}
+
+rdoc_missing_renderdoc_reason() {
+    if [ "${RDOC_HOME:-}" != "" ]; then
+        printf '%s\n' "rdoc-home-missing-renderdoccmd"
+    else
+        printf '%s\n' "missing-renderdoccmd-in-search-paths"
+    fi
+}
+
+rdoc_install_hint() {
+    uname_s="$(uname -s 2>/dev/null || echo unknown)"
+    case "$uname_s" in
+        Darwin)
+            printf '%s\n' "Homebrew installs Vulkan/MoltenVK but does not currently provide a RenderDoc formula or cask on this host. Use a project-approved macOS RenderDoc.app/fork or unpacked tree containing renderdoccmd, then set RDOC_HOME."
+            ;;
+        Linux)
+            printf '%s\n' "Install RenderDoc from the distro package, vendor package, or official AppImage/tree, then set RDOC_HOME if renderdoccmd is not on the standard search path."
+            ;;
+        *)
+            printf '%s\n' "Install RenderDoc and set RDOC_HOME to a bundle/tree containing renderdoccmd."
+            ;;
+    esac
+}
+
+rdoc_macos_homebrew_package_status() {
+    uname_s="$(uname -s 2>/dev/null || echo unknown)"
+    if [ "$uname_s" != "Darwin" ]; then
+        printf '%s\n' "not-applicable"
+        return 0
+    fi
+    if ! command -v brew >/dev/null 2>&1; then
+        printf '%s\n' "missing-homebrew"
+        return 0
+    fi
+    if HOMEBREW_NO_AUTO_UPDATE=1 brew info --cask renderdoc >/dev/null 2>&1; then
+        printf '%s\n' "homebrew-cask-renderdoc"
+        return 0
+    fi
+    if HOMEBREW_NO_AUTO_UPDATE=1 brew info renderdoc >/dev/null 2>&1; then
+        printf '%s\n' "homebrew-formula-renderdoc"
+        return 0
+    fi
+    printf '%s\n' "homebrew-renderdoc-unavailable"
+}
+
+rdoc_macos_upstream_support_status() {
+    uname_s="$(uname -s 2>/dev/null || echo unknown)"
+    if [ "$uname_s" = "Darwin" ]; then
+        printf '%s\n' "upstream-official-builds-list-windows-linux-android-not-macos"
+    else
+        printf '%s\n' "not-applicable"
+    fi
+}
+
+rdoc_renderdoccmd_path() {
+    renderdoc_home="$1"
+    if [ "$renderdoc_home" != "" ] && [ -x "$renderdoc_home/bin/renderdoccmd" ]; then
+        printf '%s\n' "$renderdoc_home/bin/renderdoccmd"
+    elif [ "$renderdoc_home" != "" ] && [ -x "$renderdoc_home/Contents/MacOS/renderdoccmd" ]; then
+        printf '%s\n' "$renderdoc_home/Contents/MacOS/renderdoccmd"
+    else
+        printf '%s\n' "$renderdoc_home/bin/renderdoccmd"
+    fi
+}
+
+rdoc_renderdoc_lib_path() {
+    renderdoc_home="$1"
+    if [ -d "$renderdoc_home/lib" ]; then
+        printf '%s\n' "$renderdoc_home/lib"
+    elif [ -d "$renderdoc_home/Contents/MacOS" ]; then
+        printf '%s\n' "$renderdoc_home/Contents/MacOS"
+    else
+        printf '%s\n' "$renderdoc_home/lib"
+    fi
+}
+
+rdoc_find_chrome() {
+    root="$1"
+    if [ "${RDOC_CHROME:-}" != "" ] && [ -x "$RDOC_CHROME" ]; then
+        printf '%s\n' "$RDOC_CHROME"
+        return 0
+    fi
+    for candidate in \
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+        "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+        "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+        "$HOME/Applications/Chromium.app/Contents/MacOS/Chromium" \
+        "$HOME/.cache/ms-playwright"/chromium-*/chrome-linux64/chrome \
+        "$root/.cache/ms-playwright"/chromium-*/chrome-linux64/chrome \
+        /usr/bin/google-chrome \
+        /usr/bin/google-chrome-stable \
+        /usr/bin/chromium \
+        /usr/bin/chromium-browser
+    do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+rdoc_find_electron() {
+    root="$1"
+    if [ "${RDOC_ELECTRON:-}" != "" ] && [ -x "$RDOC_ELECTRON" ]; then
+        printf '%s\n' "$RDOC_ELECTRON"
+        return 0
+    fi
+    for candidate in \
+        "$root/tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" \
+        "$root/tools/electron-shell/node_modules/.bin/electron" \
+        "$root/tools/electron-shell/node_modules/electron/dist/electron"
+    do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+rdoc_status_env() {
+    root="$1"
+    renderdoc_home="${2:-}"
+    chrome_bin="${3:-}"
+    electron_bin="${4:-}"
+    echo "rdoc_root=$root"
+    echo "rdoc_home=$renderdoc_home"
+    echo "rdoc_search_paths=$(rdoc_renderdoc_search_paths_value "$root")"
+    if [ "$renderdoc_home" != "" ]; then
+        echo "rdoc_cmd=$(rdoc_renderdoccmd_path "$renderdoc_home")"
+        echo "rdoc_lib=$(rdoc_renderdoc_lib_path "$renderdoc_home")"
+        echo "rdoc_status_reason=ready"
+        echo "rdoc_install_hint="
+    else
+        echo "rdoc_cmd="
+        echo "rdoc_lib="
+        echo "rdoc_status_reason=$(rdoc_missing_renderdoc_reason)"
+        echo "rdoc_install_hint=$(rdoc_install_hint)"
+    fi
+    echo "rdoc_macos_homebrew_package_status=$(rdoc_macos_homebrew_package_status)"
+    echo "rdoc_macos_upstream_support_status=$(rdoc_macos_upstream_support_status)"
+    echo "rdoc_chrome=$chrome_bin"
+    echo "rdoc_electron=$electron_bin"
+    echo "rdoc_output_dir=${RDOC_OUTPUT_DIR:-build/renderdoc/evidence}"
+    echo "rdoc_timeout_secs=${RDOC_CAPTURE_TIMEOUT_SECS:-45}"
+}
+
+rdoc_require_renderdoc() {
+    root="$1"
+    renderdoc_home="$(rdoc_find_renderdoc_home "$root" || true)"
+    if [ "$renderdoc_home" = "" ]; then
+        echo "SKIP: renderdoccmd not found under build/tools/renderdoc*" >&2
+        return 1
+    fi
+    printf '%s\n' "$renderdoc_home"
+}
+
+rdoc_prepare_output_dir() {
+    out_dir="$1"
+    rm -rf "$out_dir"
+    mkdir -p "$out_dir"
+}
+
+rdoc_write_unavailable_capture() {
+    out_dir="$1"
+    backend="$2"
+    scene="$3"
+    reason="$4"
+    rdoc_prepare_output_dir "$out_dir"
+    env_path="$out_dir/evidence.env"
+    {
+        echo "rdoc_backend=$backend"
+        echo "rdoc_scene=$scene"
+        echo "rdoc_capture_status=unavailable"
+        echo "rdoc_capture_reason=$reason"
+        echo "rdoc_capture_file="
+        echo "rdoc_capture_size=0"
+        echo "rdoc_capture_magic="
+    } | tee "$env_path"
+    return 1
+}
+
+rdoc_electron_vulkan_flags() {
+    in_process_gpu_flag=""
+    if [ "${RDOC_ELECTRON_IN_PROCESS_GPU:-0}" = "1" ]; then
+        in_process_gpu_flag=" --in-process-gpu"
+    fi
+    extra_flags=""
+    if [ "${RDOC_ELECTRON_EXTRA_VULKAN_FLAGS:-}" != "" ]; then
+        extra_flags=" ${RDOC_ELECTRON_EXTRA_VULKAN_FLAGS}"
+    fi
+    printf '%s\n' "--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform=x11 --enable-features=Vulkan --use-angle=vulkan$in_process_gpu_flag$extra_flags"
+}
+
+rdoc_chrome_vulkan_flags() {
+    in_process_gpu_flag=""
+    if [ "${RDOC_CHROME_IN_PROCESS_GPU:-0}" = "1" ]; then
+        in_process_gpu_flag=" --in-process-gpu"
+    fi
+    extra_flags=""
+    if [ "${RDOC_CHROME_EXTRA_VULKAN_FLAGS:-}" != "" ]; then
+        extra_flags=" ${RDOC_CHROME_EXTRA_VULKAN_FLAGS}"
+    fi
+    printf '%s\n' "--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan$in_process_gpu_flag$extra_flags"
+}
+
+rdoc_emit_chrome_html_metadata() {
+    root="$1"
+    chrome_bin="${2:-}"
+    out_dir="$3"
+    html_path="${RDOC_HTML_PATH:-$root/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html}"
+    width="${RDOC_CHROME_WIDTH:-1280}"
+    height="${RDOC_CHROME_HEIGHT:-720}"
+
+    echo "rdoc_html_path=$html_path"
+    echo "rdoc_chrome=$chrome_bin"
+    echo "rdoc_chrome_width=$width"
+    echo "rdoc_chrome_height=$height"
+    echo "rdoc_chromium_requested_api=vulkan"
+    echo "rdoc_chromium_requested_angle=vulkan"
+    echo "rdoc_chromium_requested_features=Vulkan"
+    echo "rdoc_chromium_launch_flags=$(rdoc_chrome_vulkan_flags)"
+}
+
+rdoc_emit_electron_html_metadata() {
+    root="$1"
+    electron_bin="${2:-}"
+    out_dir="$3"
+    html_path="${RDOC_HTML_PATH:-$root/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html}"
+    width="${RDOC_ELECTRON_WIDTH:-1280}"
+    height="${RDOC_ELECTRON_HEIGHT:-720}"
+    settle_ms="${RDOC_ELECTRON_SETTLE_MS:-1000}"
+    capture_script="${RDOC_ELECTRON_CAPTURE_SCRIPT:-$root/tools/electron-live-bitmap/renderdoc_display_html.js}"
+    electron_force_data_url="${ELECTRON_CAPTURE_FORCE_DATA_URL:-0}"
+    case "$capture_script" in
+        *tools/electron-live-bitmap/renderdoc_display_html.js)
+            electron_force_data_url="${ELECTRON_CAPTURE_FORCE_DATA_URL:-1}"
+            ;;
+    esac
+
+    echo "rdoc_html_path=$html_path"
+    echo "rdoc_electron=$electron_bin"
+    echo "rdoc_electron_capture_script=$capture_script"
+    echo "rdoc_electron_argb=$out_dir/electron_argb.json"
+    echo "rdoc_electron_width=$width"
+    echo "rdoc_electron_height=$height"
+    echo "rdoc_electron_settle_ms=$settle_ms"
+    echo "rdoc_chromium_requested_api=vulkan"
+    echo "rdoc_chromium_requested_angle=vulkan"
+    echo "rdoc_chromium_requested_features=Vulkan"
+    echo "rdoc_chromium_launch_flags=$(rdoc_electron_vulkan_flags)"
+}
+
+rdoc_emit_electron_argb_metadata() {
+    argb_path="${1:-}"
+    expected_width="${2:-}"
+    expected_height="${3:-}"
+
+    if [ ! -s "$argb_path" ]; then
+        echo "rdoc_electron_argb_status=missing"
+        echo "rdoc_electron_argb_reason=missing-electron-argb-file"
+        echo "rdoc_electron_argb_width="
+        echo "rdoc_electron_argb_height="
+        echo "rdoc_electron_argb_format="
+        echo "rdoc_electron_argb_producer="
+        echo "rdoc_electron_argb_native_width="
+        echo "rdoc_electron_argb_native_height="
+        echo "rdoc_electron_argb_pixel_count=0"
+        echo "rdoc_electron_argb_nonblank_pixel_count=0"
+        echo "rdoc_electron_argb_expected_width=$expected_width"
+        echo "rdoc_electron_argb_expected_height=$expected_height"
+        return 0
+    fi
+
+    if ! command -v node >/dev/null 2>&1; then
+        echo "rdoc_electron_argb_status=unavailable"
+        echo "rdoc_electron_argb_reason=missing-node-json-reader"
+        echo "rdoc_electron_argb_width="
+        echo "rdoc_electron_argb_height="
+        echo "rdoc_electron_argb_format="
+        echo "rdoc_electron_argb_producer="
+        echo "rdoc_electron_argb_native_width="
+        echo "rdoc_electron_argb_native_height="
+        echo "rdoc_electron_argb_pixel_count=0"
+        echo "rdoc_electron_argb_nonblank_pixel_count=0"
+        echo "rdoc_electron_argb_expected_width=$expected_width"
+        echo "rdoc_electron_argb_expected_height=$expected_height"
+        return 0
+    fi
+
+    node - "$argb_path" "$expected_width" "$expected_height" <<'NODE'
+const fs = require("fs");
+const argbPath = process.argv[2] || "";
+const expectedWidth = Number(process.argv[3] || 0);
+const expectedHeight = Number(process.argv[4] || 0);
+
+function emit(key, value) {
+  console.log(`rdoc_electron_argb_${key}=${value === undefined || value === null ? "" : value}`);
+}
+
+try {
+  const payload = JSON.parse(fs.readFileSync(argbPath, "utf8"));
+  const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
+  const width = Number(payload.width || 0);
+  const height = Number(payload.height || 0);
+  const format = String(payload.format || "");
+  const producer = String(payload.producer || "");
+  const nativeWidth = Number(payload.nativeWidth || 0);
+  const nativeHeight = Number(payload.nativeHeight || 0);
+  let nonblank = 0;
+  for (const value of pixels) {
+    const pixel = Number(value) >>> 0;
+    const alpha = (pixel >>> 24) & 255;
+    if (alpha !== 0 && pixel !== 0xffffffff) nonblank++;
+  }
+  let status = "pass";
+  let reason = "pass";
+  if (width <= 0 || height <= 0) {
+    status = "invalid";
+    reason = "missing-electron-argb-dimensions";
+  } else if (expectedWidth > 0 && width !== expectedWidth) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-width";
+  } else if (expectedHeight > 0 && height !== expectedHeight) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-height";
+  } else if (format !== "argb-u32") {
+    status = "invalid";
+    reason = "unexpected-electron-argb-format";
+  } else if (producer !== "electron-chromium-capture") {
+    status = "invalid";
+    reason = "unexpected-electron-argb-producer";
+  } else if (pixels.length !== width * height) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-pixel-count";
+  } else if (nonblank <= 0) {
+    status = "invalid";
+    reason = "blank-electron-argb-capture";
+  }
+  emit("status", status);
+  emit("reason", reason);
+  emit("width", width);
+  emit("height", height);
+  emit("format", format);
+  emit("producer", producer);
+  emit("native_width", nativeWidth);
+  emit("native_height", nativeHeight);
+  emit("pixel_count", pixels.length);
+  emit("nonblank_pixel_count", nonblank);
+  emit("expected_width", expectedWidth || "");
+  emit("expected_height", expectedHeight || "");
+} catch (error) {
+  emit("status", "invalid");
+  emit("reason", "invalid-electron-argb-json");
+  emit("width", "");
+  emit("height", "");
+  emit("format", "");
+  emit("producer", "");
+  emit("native_width", "");
+  emit("native_height", "");
+  emit("pixel_count", 0);
+  emit("nonblank_pixel_count", 0);
+  emit("expected_width", expectedWidth || "");
+  emit("expected_height", expectedHeight || "");
+}
+NODE
+}
+
+rdoc_write_electron_html_unavailable() {
+    root="$1"
+    electron_bin="${2:-}"
+    out_dir="$3"
+    reason="$4"
+    rdoc_prepare_output_dir "$out_dir"
+    env_path="$out_dir/evidence.env"
+    {
+        echo "rdoc_backend=electron"
+        echo "rdoc_scene=${RDOC_SCENE:-html-css-electron}"
+        echo "rdoc_capture_status=unavailable"
+        echo "rdoc_capture_reason=$reason"
+        echo "rdoc_capture_file="
+        echo "rdoc_capture_size=0"
+        echo "rdoc_capture_magic="
+        rdoc_emit_electron_html_metadata "$root" "$electron_bin" "$out_dir"
+    } | tee "$env_path"
+    return 1
+}
+
+rdoc_validate_rdc_magic() {
+    validate_rdc_file="$1"
+    validate_env_path="${2:-}"
+    if [ ! -s "$validate_rdc_file" ]; then
+        {
+            echo "rdoc_capture_status=fail"
+            echo "rdoc_capture_reason=missing-rdc"
+            echo "rdoc_capture_file="
+            echo "rdoc_capture_size=0"
+            echo "rdoc_capture_magic="
+        } | tee ${validate_env_path:+"$validate_env_path"}
+        return 1
+    fi
+    magic="$(dd if="$validate_rdc_file" bs=4 count=1 2>/dev/null || true)"
+    size="$(wc -c < "$validate_rdc_file")"
+    if [ "$magic" = "RDOC" ]; then
+        {
+            echo "rdoc_capture_status=pass"
+            echo "rdoc_capture_reason=pass"
+            echo "rdoc_capture_file=$validate_rdc_file"
+            echo "rdoc_capture_size=$size"
+            echo "rdoc_capture_magic=RDOC"
+        } | tee ${validate_env_path:+"$validate_env_path"}
+        return 0
+    fi
+    {
+        echo "rdoc_capture_status=fail"
+        echo "rdoc_capture_reason=bad-rdc-magic"
+        echo "rdoc_capture_file=$validate_rdc_file"
+        echo "rdoc_capture_size=$size"
+        echo "rdoc_capture_magic=$magic"
+    } | tee ${validate_env_path:+"$validate_env_path"}
+    return 1
+}
+
+rdoc_emit_chromium_gpu_process_exit_metadata() {
+    log_path="$1"
+
+    if [ "$log_path" = "" ] || [ ! -s "$log_path" ]; then
+        echo "rdoc_chromium_gpu_process_exit_status=not-recorded"
+        echo "rdoc_chromium_gpu_process_exit_count=0"
+        echo "rdoc_chromium_gpu_process_exit_codes="
+        echo "rdoc_chromium_gpu_process_exit_reason="
+        echo "rdoc_chromium_gpu_process_exit_renderdoc_stack_status=not-recorded"
+        echo "rdoc_chromium_gpu_process_exit_renderdoc_stack_count=0"
+        return 0
+    fi
+
+    exit_lines="$(grep -E 'GPU process exited unexpectedly: exit_code=' "$log_path" 2>/dev/null || true)"
+    renderdoc_stack_count="$(grep -c 'librenderdoc\.so' "$log_path" 2>/dev/null || true)"
+    if [ "$exit_lines" = "" ]; then
+        echo "rdoc_chromium_gpu_process_exit_status=pass"
+        echo "rdoc_chromium_gpu_process_exit_count=0"
+        echo "rdoc_chromium_gpu_process_exit_codes="
+        echo "rdoc_chromium_gpu_process_exit_reason=pass"
+        echo "rdoc_chromium_gpu_process_exit_renderdoc_stack_status=pass"
+        echo "rdoc_chromium_gpu_process_exit_renderdoc_stack_count=$renderdoc_stack_count"
+        return 0
+    fi
+
+    exit_count="$(printf '%s\n' "$exit_lines" | sed '/^$/d' | wc -l | tr -d ' ')"
+    exit_codes="$(printf '%s\n' "$exit_lines" | sed -n 's/.*exit_code=\([0-9][0-9]*\).*/\1/p' | sort -u | paste -sd, -)"
+    exit_reason="gpu-process-exited-unexpectedly"
+    renderdoc_stack_status="pass"
+    if printf '%s\n' "$exit_codes" | grep -Eq '(^|,)139(,|$)' && [ "${renderdoc_stack_count:-0}" -gt 0 ] 2>/dev/null; then
+        exit_reason="gpu-process-segv-in-renderdoc"
+        renderdoc_stack_status="fail"
+    fi
+    echo "rdoc_chromium_gpu_process_exit_status=fail"
+    echo "rdoc_chromium_gpu_process_exit_count=$exit_count"
+    echo "rdoc_chromium_gpu_process_exit_codes=$exit_codes"
+    echo "rdoc_chromium_gpu_process_exit_reason=$exit_reason"
+    echo "rdoc_chromium_gpu_process_exit_renderdoc_stack_status=$renderdoc_stack_status"
+    echo "rdoc_chromium_gpu_process_exit_renderdoc_stack_count=$renderdoc_stack_count"
+}
+
+rdoc_emit_chromium_angle_metadata() {
+    log_path="$1"
+    prefix="${2:-rdoc_chromium_angle}"
+    echo "${prefix}_log=$log_path"
+    if [ "$log_path" = "" ] || [ ! -s "$log_path" ]; then
+        echo "${prefix}_status=missing-log"
+        echo "${prefix}_error_count=0"
+        echo "${prefix}_first_error="
+        echo "${prefix}_gpu_init_exit_count=0"
+        return 0
+    fi
+
+    angle_lines="$(grep -E 'ANGLE Display::initialize error|eglInitialize .*failed|GLDisplayEGL::Initialize failed|Internal Vulkan error|Exiting GPU process due to errors during initialization' "$log_path" 2>/dev/null || true)"
+    gpu_init_exit_count="$(grep -c 'Exiting GPU process due to errors during initialization' "$log_path" 2>/dev/null || true)"
+    if [ "$angle_lines" = "" ]; then
+        echo "${prefix}_status=pass"
+        echo "${prefix}_error_count=0"
+        echo "${prefix}_first_error="
+        echo "${prefix}_gpu_init_exit_count=$gpu_init_exit_count"
+        return 0
+    fi
+
+    first_error="$(printf '%s\n' "$angle_lines" | sed -n '1p' | tr '\t' ' ' | sed 's/[[:space:]][[:space:]]*/ /g')"
+    error_count="$(printf '%s\n' "$angle_lines" | sed '/^$/d' | wc -l | tr -d ' ')"
+    echo "${prefix}_status=fail"
+    echo "${prefix}_error_count=$error_count"
+    echo "${prefix}_first_error=$first_error"
+    echo "${prefix}_gpu_init_exit_count=$gpu_init_exit_count"
+}
+
+rdoc_summary_value() {
+    field="$1"
+    line="$2"
+    printf '%s\n' "$line" | sed -n "s/.*${field}:\([^ ]*\).*/\1/p" | tail -n 1
+}
+
+rdoc_log_value() {
+    field="$1"
+    log_path="$2"
+    grep "^${field}=" "$log_path" 2>/dev/null | tail -n 1 | sed "s/^${field}=//" || true
+}
+
+rdoc_best_autocapture_summary() {
+    log_path="$1"
+    awk '
+        /^rdoc_autocapture_summary=/ {
+            score = 0
+            for (i = 1; i <= NF; i++) {
+                split($i, kv, ":")
+                value = kv[2] + 0
+                if (kv[1] == "api") score += value * 1000000
+                else if (kv[1] == "started") score += value * 100000
+                else if (kv[1] == "finished") score += value * 10000
+                else if (kv[1] == "vk_create_device") score += value * 1000
+                else if (kv[1] == "submit" || kv[1] == "present" || kv[1] == "egl_swap") score += value * 100
+                else if (kv[1] == "vk_create_instance") score += value * 10
+                else if (kv[1] == "egl_initialize") score += value
+            }
+            if (score > best_score || (score == best_score && NR >= best_line)) {
+                best_score = score
+                best_line = NR
+                best = $0
+            }
+        }
+        END { if (best != "") print best }
+    ' "$log_path" 2>/dev/null
+}
+
+rdoc_emit_gpu_autocapture_metadata() {
+    log_path="$1"
+
+    echo "rdoc_gpu_autocapture_log=$log_path"
+    if [ "$log_path" = "" ] || [ ! -s "$log_path" ]; then
+        echo "rdoc_gpu_autocapture_log_status=missing"
+        echo "rdoc_gpu_autocapture_summary="
+        echo "rdoc_gpu_autocapture_status=missing-log"
+        return 0
+    fi
+
+    summary="$(rdoc_best_autocapture_summary "$log_path")"
+    loaded_count="$(grep -c '^rdoc_autocapture_loaded=1$' "$log_path" 2>/dev/null || true)"
+    proc_trace_count="$(grep -c '^rdoc_autocapture_proc_' "$log_path" 2>/dev/null || true)"
+    start_line="$(grep '^rdoc_autocapture_start=' "$log_path" 2>/dev/null | tail -n 1 || true)"
+    end_line="$(grep '^rdoc_autocapture_end=' "$log_path" 2>/dev/null | tail -n 1 || true)"
+    signal_line="$(grep '^rdoc_autocapture_signal=' "$log_path" 2>/dev/null | tail -n 1 || true)"
+    delay_trigger_loaded_count="$(grep -c '^rdoc_delay_trigger=loaded$' "$log_path" 2>/dev/null || true)"
+    delay_trigger_api_ready_count="$(grep -c '^rdoc_delay_trigger=api-ready$' "$log_path" 2>/dev/null || true)"
+    delay_trigger_mode="$(sed -n 's/^rdoc_delay_trigger_mode=//p' "$log_path" 2>/dev/null | tail -n 1)"
+    delay_trigger_capture_count="$(grep -c '^rdoc_delay_trigger=triggercapture$' "$log_path" 2>/dev/null || true)"
+    delay_trigger_end_line="$(grep '^rdoc_delay_trigger=end ' "$log_path" 2>/dev/null | tail -n 1 || true)"
+    delay_trigger_elf_line="$(grep '^rdoc_delay_trigger_elf=' "$log_path" 2>/dev/null | tail -n 1 || true)"
+    delay_trigger_capfile_template="$(sed -n 's/^rdoc_delay_trigger_capfile_template=//p' "$log_path" 2>/dev/null | tail -n 1)"
+    delay_trigger_target_device="$(sed -n 's/^rdoc_delay_trigger_target_device=//p' "$log_path" 2>/dev/null | tail -n 1)"
+    delay_trigger_last_vk_instance="$(sed -n 's/^rdoc_delay_trigger_last_vk_instance=//p' "$log_path" 2>/dev/null | tail -n 1)"
+    delay_trigger_vk_create_instance_count="$(grep -c '^rdoc_delay_trigger_vk=vkCreateInstance$' "$log_path" 2>/dev/null || true)"
+    delay_trigger_num_captures_before="$(sed -n 's/^rdoc_delay_trigger_num_captures_before=//p' "$log_path" 2>/dev/null | tail -n 1)"
+    delay_trigger_num_captures_after="$(sed -n 's/^rdoc_delay_trigger_num_captures_after=//p' "$log_path" 2>/dev/null | tail -n 1)"
+    delay_trigger_capturing_after_start="$(sed -n 's/^rdoc_delay_trigger_is_capturing_after_start=//p' "$log_path" 2>/dev/null | tail -n 1)"
+    delay_trigger_capturing_after_trigger="$(sed -n 's/^rdoc_delay_trigger_is_capturing_after_trigger=//p' "$log_path" 2>/dev/null | tail -n 1)"
+    delay_trigger_capturing_before_end="$(sed -n 's/^rdoc_delay_trigger_is_capturing_before_end=//p' "$log_path" 2>/dev/null | tail -n 1)"
+    echo "rdoc_gpu_autocapture_log_status=pass"
+    echo "rdoc_gpu_launcher_command=$(rdoc_log_value renderdoc_gpu_launcher_command "$log_path")"
+    echo "rdoc_gpu_launcher_executable=$(rdoc_log_value renderdoc_gpu_launcher_executable "$log_path")"
+    echo "rdoc_gpu_launcher_argc=$(rdoc_log_value renderdoc_gpu_launcher_argc "$log_path")"
+    echo "rdoc_gpu_launcher_clear_renderdoc_layer=$(rdoc_log_value renderdoc_gpu_launcher_clear_renderdoc_layer "$log_path")"
+    echo "rdoc_gpu_launcher_initial_vk_layer_path=$(rdoc_log_value renderdoc_gpu_launcher_initial_vk_layer_path "$log_path")"
+    echo "rdoc_gpu_launcher_initial_vk_implicit_layer_path=$(rdoc_log_value renderdoc_gpu_launcher_initial_vk_implicit_layer_path "$log_path")"
+    echo "rdoc_gpu_launcher_initial_vk_instance_layers=$(rdoc_log_value renderdoc_gpu_launcher_initial_vk_instance_layers "$log_path")"
+    echo "rdoc_gpu_launcher_initial_ld_preload=$(rdoc_log_value renderdoc_gpu_launcher_initial_ld_preload "$log_path")"
+    echo "rdoc_gpu_launcher_ld_preload=$(rdoc_log_value renderdoc_gpu_launcher_ld_preload "$log_path")"
+    echo "rdoc_gpu_launcher_ld_library_path=$(rdoc_log_value renderdoc_gpu_launcher_ld_library_path "$log_path")"
+    echo "rdoc_gpu_launcher_vk_layer_path=$(rdoc_log_value renderdoc_gpu_launcher_vk_layer_path "$log_path")"
+    echo "rdoc_gpu_launcher_vk_implicit_layer_path=$(rdoc_log_value renderdoc_gpu_launcher_vk_implicit_layer_path "$log_path")"
+    echo "rdoc_gpu_launcher_vk_instance_layers=$(rdoc_log_value renderdoc_gpu_launcher_vk_instance_layers "$log_path")"
+    echo "rdoc_gpu_launcher_enable_vulkan_renderdoc_capture=$(rdoc_log_value renderdoc_gpu_launcher_enable_vulkan_renderdoc_capture "$log_path")"
+    echo "rdoc_gpu_launcher_renderdoc_capfile=$(rdoc_log_value renderdoc_gpu_launcher_renderdoc_capfile "$log_path")"
+    echo "rdoc_gpu_launcher_shim=$(rdoc_log_value renderdoc_gpu_launcher_shim "$log_path")"
+    echo "rdoc_gpu_launcher_renderdoc_lib=$(rdoc_log_value renderdoc_gpu_launcher_renderdoc_lib "$log_path")"
+    echo "rdoc_gpu_autocapture_loaded_count=$loaded_count"
+    echo "rdoc_gpu_autocapture_proc_trace_line_count=$proc_trace_count"
+    echo "rdoc_gpu_autocapture_last_start=$start_line"
+    echo "rdoc_gpu_autocapture_last_end=$end_line"
+    echo "rdoc_gpu_autocapture_signal=$signal_line"
+    echo "rdoc_gpu_delay_trigger_loaded_count=$delay_trigger_loaded_count"
+    echo "rdoc_gpu_delay_trigger_api_ready_count=$delay_trigger_api_ready_count"
+    echo "rdoc_gpu_delay_trigger_mode=$delay_trigger_mode"
+    echo "rdoc_gpu_delay_trigger_capture_count=$delay_trigger_capture_count"
+    echo "rdoc_gpu_delay_trigger_last_end=$delay_trigger_end_line"
+    echo "rdoc_gpu_delay_trigger_last_end_ok=$(printf '%s\n' "$delay_trigger_end_line" | sed -n 's/^rdoc_delay_trigger=end ok=//p')"
+    echo "rdoc_gpu_delay_trigger_elf_status=$delay_trigger_elf_line"
+    echo "rdoc_gpu_delay_trigger_capfile_template=$delay_trigger_capfile_template"
+    echo "rdoc_gpu_delay_trigger_target_device=$delay_trigger_target_device"
+    echo "rdoc_gpu_delay_trigger_last_vk_instance=$delay_trigger_last_vk_instance"
+    echo "rdoc_gpu_delay_trigger_vk_create_instance_count=$delay_trigger_vk_create_instance_count"
+    echo "rdoc_gpu_delay_trigger_num_captures_before=$delay_trigger_num_captures_before"
+    echo "rdoc_gpu_delay_trigger_num_captures_after=$delay_trigger_num_captures_after"
+    echo "rdoc_gpu_delay_trigger_is_capturing_after_start=$delay_trigger_capturing_after_start"
+    echo "rdoc_gpu_delay_trigger_is_capturing_after_trigger=$delay_trigger_capturing_after_trigger"
+    echo "rdoc_gpu_delay_trigger_is_capturing_before_end=$delay_trigger_capturing_before_end"
+    echo "rdoc_gpu_autocapture_summary=$summary"
+    if [ "$summary" = "" ]; then
+        if [ "${loaded_count:-0}" -gt 0 ]; then
+            echo "rdoc_gpu_autocapture_status=shim-loaded-no-summary"
+        else
+            echo "rdoc_gpu_autocapture_status=missing-summary"
+        fi
+        return 0
+    fi
+
+    echo "rdoc_gpu_autocapture_status=$(rdoc_summary_value status "$summary")"
+    echo "rdoc_gpu_autocapture_api=$(rdoc_summary_value api "$summary")"
+    echo "rdoc_gpu_autocapture_started=$(rdoc_summary_value started "$summary")"
+    echo "rdoc_gpu_autocapture_finished=$(rdoc_summary_value finished "$summary")"
+    echo "rdoc_gpu_autocapture_start_source=$(rdoc_summary_value start_source "$summary")"
+    echo "rdoc_gpu_autocapture_end_source=$(rdoc_summary_value end_source "$summary")"
+    echo "rdoc_gpu_autocapture_submit_count=$(rdoc_summary_value submit "$summary")"
+    echo "rdoc_gpu_autocapture_present_count=$(rdoc_summary_value present "$summary")"
+    echo "rdoc_gpu_autocapture_egl_swap_count=$(rdoc_summary_value egl_swap "$summary")"
+    echo "rdoc_gpu_autocapture_egl_prepare_swap_count=$(rdoc_summary_value egl_prepare_swap "$summary")"
+    echo "rdoc_gpu_autocapture_egl_wait_scheduled_count=$(rdoc_summary_value egl_wait_scheduled "$summary")"
+    echo "rdoc_gpu_autocapture_egl_vk_lock_count=$(rdoc_summary_value egl_vk_lock "$summary")"
+    echo "rdoc_gpu_autocapture_egl_vk_unlock_count=$(rdoc_summary_value egl_vk_unlock "$summary")"
+    echo "rdoc_gpu_autocapture_egl_make_current_count=$(rdoc_summary_value egl_make_current "$summary")"
+    echo "rdoc_gpu_autocapture_egl_create_window_surface_count=$(rdoc_summary_value egl_create_window_surface "$summary")"
+    echo "rdoc_gpu_autocapture_egl_create_platform_window_surface_count=$(rdoc_summary_value egl_create_platform_window_surface "$summary")"
+    echo "rdoc_gpu_autocapture_egl_get_display_count=$(rdoc_summary_value egl_get_display "$summary")"
+    echo "rdoc_gpu_autocapture_egl_get_platform_display_count=$(rdoc_summary_value egl_get_platform_display "$summary")"
+    echo "rdoc_gpu_autocapture_egl_initialize_count=$(rdoc_summary_value egl_initialize "$summary")"
+    echo "rdoc_gpu_autocapture_egl_initialize_return_count=$(rdoc_summary_value egl_initialize_return "$summary")"
+    echo "rdoc_gpu_autocapture_egl_initialize_success_count=$(rdoc_summary_value egl_initialize_success "$summary")"
+    echo "rdoc_gpu_autocapture_egl_initialize_fail_count=$(rdoc_summary_value egl_initialize_fail "$summary")"
+    echo "rdoc_gpu_autocapture_egl_initialize_last_result=$(rdoc_summary_value egl_initialize_last_result "$summary")"
+    echo "rdoc_gpu_autocapture_egl_initialize_last_error=$(rdoc_summary_value egl_initialize_last_error "$summary")"
+    echo "rdoc_gpu_autocapture_egl_choose_config_count=$(rdoc_summary_value egl_choose_config "$summary")"
+    echo "rdoc_gpu_autocapture_vk_create_instance_count=$(rdoc_summary_value vk_create_instance "$summary")"
+    echo "rdoc_gpu_autocapture_vk_create_device_count=$(rdoc_summary_value vk_create_device "$summary")"
+    echo "rdoc_gpu_autocapture_vk_enum_physical_device_count=$(rdoc_summary_value vk_enum_physical_device "$summary")"
+    echo "rdoc_gpu_autocapture_vk_enum_physical_device_return_count=$(rdoc_summary_value vk_enum_physical_device_return "$summary")"
+    echo "rdoc_gpu_autocapture_vk_enum_physical_device_last_result=$(rdoc_summary_value vk_enum_physical_device_last_result "$summary")"
+    echo "rdoc_gpu_autocapture_vk_enum_physical_device_last_count=$(rdoc_summary_value vk_enum_physical_device_last_count "$summary")"
+    echo "rdoc_gpu_autocapture_vk_get_physical_device_properties_count=$(rdoc_summary_value vk_get_physical_device_properties "$summary")"
+    echo "rdoc_gpu_autocapture_vk_get_physical_device_properties2_count=$(rdoc_summary_value vk_get_physical_device_properties2 "$summary")"
+    echo "rdoc_gpu_autocapture_vk_get_physical_device_features2_count=$(rdoc_summary_value vk_get_physical_device_features2 "$summary")"
+    echo "rdoc_gpu_autocapture_vk_get_physical_device_queue_family_count=$(rdoc_summary_value vk_get_physical_device_queue_family "$summary")"
+    echo "rdoc_gpu_autocapture_vk_get_physical_device_queue_family2_count=$(rdoc_summary_value vk_get_physical_device_queue_family2 "$summary")"
+    echo "rdoc_gpu_autocapture_vk_get_physical_device_queue_family_last_count=$(rdoc_summary_value vk_get_physical_device_queue_family_last_count "$summary")"
+    echo "rdoc_gpu_autocapture_vk_get_physical_device_queue_family2_last_count=$(rdoc_summary_value vk_get_physical_device_queue_family2_last_count "$summary")"
+    echo "rdoc_gpu_autocapture_vk_enum_device_extension_count=$(rdoc_summary_value vk_enum_device_extension "$summary")"
+    echo "rdoc_gpu_autocapture_vk_enum_device_extension_return_count=$(rdoc_summary_value vk_enum_device_extension_return "$summary")"
+    echo "rdoc_gpu_autocapture_vk_enum_device_extension_last_result=$(rdoc_summary_value vk_enum_device_extension_last_result "$summary")"
+    echo "rdoc_gpu_autocapture_vk_enum_device_extension_last_count=$(rdoc_summary_value vk_enum_device_extension_last_count "$summary")"
+    echo "rdoc_gpu_autocapture_vk_enum_instance_layer_count=$(rdoc_summary_value vk_enum_instance_layer "$summary")"
+    echo "rdoc_gpu_autocapture_vk_enum_instance_extension_count=$(rdoc_summary_value vk_enum_instance_extension "$summary")"
+    echo "rdoc_gpu_autocapture_proc_trace_count=$(rdoc_summary_value proc_trace "$summary")"
+}
+
+rdoc_emit_simple_runtime_metadata() {
+    log_path="$1"
+    if [ -s "$log_path" ]; then
+        runtime_backend="$(sed -n 's/^backend=//p' "$log_path" | tail -n 1)"
+        renderdoc_device="$(sed -n 's/^renderdoc_device=//p' "$log_path" | tail -n 1)"
+        renderdoc_capture_template="$(sed -n 's/^renderdoc_capture_template=//p' "$log_path" | tail -n 1)"
+        renderdoc_capture_template_set="$(sed -n 's/^renderdoc_capture_template_set=//p' "$log_path" | tail -n 1)"
+        renderdoc_available="$(sed -n 's/^renderdoc_available=//p' "$log_path" | tail -n 1)"
+        renderdoc_start="$(sed -n 's/^renderdoc_start=//p' "$log_path" | tail -n 1)"
+        renderdoc_capturing_after_start="$(sed -n 's/^renderdoc_capturing_after_start=//p' "$log_path" | tail -n 1)"
+        renderdoc_wildcard_start="$(sed -n 's/^renderdoc_wildcard_start=//p' "$log_path" | tail -n 1)"
+        renderdoc_wildcard_capturing_after_start="$(sed -n 's/^renderdoc_wildcard_capturing_after_start=//p' "$log_path" | tail -n 1)"
+        renderdoc_capturing_before_end="$(sed -n 's/^renderdoc_capturing_before_end=//p' "$log_path" | tail -n 1)"
+        renderdoc_end="$(sed -n 's/.*renderdoc_end=\([0-9-][0-9-]*\).*/\1/p' "$log_path" | tail -n 1)"
+        renderdoc_num_captures="$(sed -n 's/.*num_captures=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        pixel_count="$(sed -n 's/.*pixels=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        widget_html_path="$(sed -n 's/^widget_html_path=//p' "$log_path" | tail -n 1)"
+        widget_html_bytes="$(sed -n 's/^widget_html_bytes=//p' "$log_path" | tail -n 1)"
+        widget_width="$(sed -n 's/^widget_width=//p' "$log_path" | tail -n 1)"
+        widget_height="$(sed -n 's/^widget_height=//p' "$log_path" | tail -n 1)"
+        unavailable_marker="0"
+        if grep -q 'renderdoc_capture: VULKAN_UNAVAILABLE' "$log_path"; then
+            unavailable_marker="1"
+        fi
+    else
+        runtime_backend=""
+        renderdoc_device=""
+        renderdoc_capture_template=""
+        renderdoc_capture_template_set=""
+        renderdoc_available=""
+        renderdoc_start=""
+        renderdoc_capturing_after_start=""
+        renderdoc_wildcard_start=""
+        renderdoc_wildcard_capturing_after_start=""
+        renderdoc_capturing_before_end=""
+        renderdoc_end=""
+        renderdoc_num_captures=""
+        pixel_count=""
+        widget_html_path=""
+        widget_html_bytes=""
+        widget_width=""
+        widget_height=""
+        unavailable_marker="0"
+    fi
+    echo "rdoc_simple_runtime_backend=$runtime_backend"
+    echo "rdoc_simple_renderdoc_device=$renderdoc_device"
+    echo "rdoc_simple_renderdoc_capture_template=$renderdoc_capture_template"
+    echo "rdoc_simple_renderdoc_capture_template_set=$renderdoc_capture_template_set"
+    echo "rdoc_simple_renderdoc_available=$renderdoc_available"
+    echo "rdoc_simple_renderdoc_start=$renderdoc_start"
+    echo "rdoc_simple_renderdoc_capturing_after_start=$renderdoc_capturing_after_start"
+    echo "rdoc_simple_renderdoc_wildcard_start=$renderdoc_wildcard_start"
+    echo "rdoc_simple_renderdoc_wildcard_capturing_after_start=$renderdoc_wildcard_capturing_after_start"
+    echo "rdoc_simple_renderdoc_capturing_before_end=$renderdoc_capturing_before_end"
+    echo "rdoc_simple_renderdoc_end=$renderdoc_end"
+    echo "rdoc_simple_renderdoc_num_captures=$renderdoc_num_captures"
+    echo "rdoc_simple_pixel_count=$pixel_count"
+    echo "rdoc_simple_widget_html_path=$widget_html_path"
+    echo "rdoc_simple_widget_html_bytes=$widget_html_bytes"
+    echo "rdoc_simple_widget_width=$widget_width"
+    echo "rdoc_simple_widget_height=$widget_height"
+    echo "rdoc_simple_unavailable_marker=$unavailable_marker"
+}
+
+rdoc_build_simple_interpreter() {
+    root="$1"
+    fresh="$root/src/compiler_rust/target/release/simple"
+    ( cd "$root/src/compiler_rust" \
+        && unset MAKEFLAGS CARGO_MAKEFLAGS MFLAGS \
+        && cargo build --release --bin simple >/dev/null 2>&1 )
+    if [ ! -x "$fresh" ]; then
+        echo "FAIL: interpreter binary not built at $fresh" >&2
+        return 1
+    fi
+    printf '%s\n' "$fresh"
+}
+
+rdoc_prepare_vulkan_layer_manifest() {
+    root="$1"
+    renderdoc_home="$2"
+    out_dir="$3"
+    env_path="$4"
+    prefix="$5"
+    rdoc_lib="$(rdoc_renderdoc_lib_path "$renderdoc_home")"
+    rdoc_layer_src="$renderdoc_home/etc/vulkan/implicit_layer.d/renderdoc_capture.json"
+    rdoc_layer_dir="$out_dir/vulkan-layer.d"
+    case "$rdoc_layer_dir" in
+        /*) rdoc_layer_dir_abs="$rdoc_layer_dir" ;;
+        *) rdoc_layer_dir_abs="$root/$rdoc_layer_dir" ;;
+    esac
+    rdoc_layer_manifest=""
+    if [ -s "$rdoc_layer_src" ]; then
+        mkdir -p "$rdoc_layer_dir_abs"
+        rdoc_layer_manifest="$rdoc_layer_dir_abs/renderdoc_capture.json"
+        sed "s#/io/dist/lib/librenderdoc.so#$rdoc_lib/librenderdoc.so#g" \
+            "$rdoc_layer_src" >"$rdoc_layer_manifest"
+    fi
+    {
+        echo "${prefix}_vulkan_layer_manifest=$rdoc_layer_manifest"
+        echo "${prefix}_vulkan_layer_library=$rdoc_lib/librenderdoc.so"
+        echo "${prefix}_vulkan_layer_enable_env=VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture;ENABLE_VULKAN_RENDERDOC_CAPTURE=1"
+    } | tee -a "$env_path"
+}
+
+rdoc_capture_simple_vulkan() {
+    root="$1"
+    renderdoc_home="$2"
+    out_dir="$3"
+    prog="${RDOC_SIMPLE_PROG:-$root/src/app/test/renderdoc_vulkan_capture.spl}"
+    simple_bin="${RDOC_SIMPLE_BIN:-}"
+    rdoc_prepare_output_dir "$out_dir"
+    env_path="$out_dir/evidence.env"
+    if [ "$simple_bin" = "" ]; then
+        simple_bin="$(rdoc_build_simple_interpreter "$root")"
+        simple_bin_reason="built-rust-interpreter-with-renderdoc-externs"
+    else
+        simple_bin_reason="provided-rdoc-simple-bin"
+    fi
+    {
+        echo "rdoc_backend=simple"
+        echo "rdoc_scene=${RDOC_SCENE:-vulkan-engine2d}"
+        echo "rdoc_program=$prog"
+        echo "rdoc_html_path=${RDOC_HTML_PATH:-}"
+        echo "rdoc_simple_bin=$simple_bin"
+        echo "rdoc_simple_bin_reason=$simple_bin_reason"
+        echo "rdoc_renderdoc_home=$renderdoc_home"
+        echo "rdoc_log=$out_dir/renderdoc-simple.log"
+    } | tee "$env_path"
+    rdoc_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
+    rdoc_lib="$(rdoc_renderdoc_lib_path "$renderdoc_home")"
+    rdoc_prepare_vulkan_layer_manifest "$root" "$renderdoc_home" "$out_dir" "$env_path" "rdoc_simple"
+    LD_LIBRARY_PATH="$rdoc_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    DYLD_LIBRARY_PATH="$rdoc_lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+    VK_LAYER_PATH="$rdoc_layer_dir_abs" \
+    VK_IMPLICIT_LAYER_PATH="$rdoc_layer_dir_abs" \
+    VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture \
+    ENABLE_VULKAN_RENDERDOC_CAPTURE=1 \
+    RDOC_SIMPLE_CAPTURE_PATH="$out_dir/simple_gui_app" \
+    SIMPLE_EXECUTION_MODE=interpret \
+        "$rdoc_cmd" capture -d "$root" -c "$out_dir/simple_gui" -w \
+        "$simple_bin" run "$prog" >"$out_dir/renderdoc-simple.log" 2>&1 || true
+    sed -n '1,120p' "$out_dir/renderdoc-simple.log"
+    rdoc_emit_simple_runtime_metadata "$out_dir/renderdoc-simple.log" | tee -a "$env_path"
+    rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
+    tmp_env="$out_dir/evidence.status.env"
+    set +e
+    rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
+    validate_code=$?
+    set -e
+    cat "$tmp_env" >> "$env_path"
+    return "$validate_code"
+}
+
+rdoc_capture_html() {
+    root="$1"
+    renderdoc_home="$2"
+    chrome_bin="$3"
+    out_dir="$4"
+    html_path="${RDOC_HTML_PATH:-$root/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html}"
+    timeout_secs="${RDOC_CAPTURE_TIMEOUT_SECS:-45}"
+    width="${RDOC_CHROME_WIDTH:-1280}"
+    height="${RDOC_CHROME_HEIGHT:-720}"
+    child_hook_option="--opt-hook-children"
+    if [ "${RDOC_RENDERDOC_HOOK_CHILDREN:-1}" = "0" ]; then
+        child_hook_option=""
+    fi
+    case "$out_dir" in
+        /*) out_dir_abs="$out_dir" ;;
+        *) out_dir_abs="$root/$out_dir" ;;
+    esac
+    rdoc_prepare_output_dir "$out_dir"
+    env_path="$out_dir/evidence.env"
+    if [ ! -s "$html_path" ]; then
+        {
+            echo "rdoc_backend=original"
+            echo "rdoc_scene=${RDOC_SCENE:-html-css-chrome}"
+            echo "rdoc_capture_status=unavailable"
+            echo "rdoc_capture_reason=missing-html-fixture"
+            rdoc_emit_chrome_html_metadata "$root" "$chrome_bin" "$out_dir"
+        } | tee "$env_path"
+        return 1
+    fi
+    if [ "$chrome_bin" = "" ]; then
+        {
+            echo "rdoc_backend=original"
+            echo "rdoc_scene=${RDOC_SCENE:-html-css-chrome}"
+            echo "rdoc_capture_status=unavailable"
+            echo "rdoc_capture_reason=missing-chrome"
+            rdoc_emit_chrome_html_metadata "$root" "$chrome_bin" "$out_dir"
+        } | tee "$env_path"
+        return 1
+    fi
+    {
+        echo "rdoc_backend=original"
+        echo "rdoc_scene=${RDOC_SCENE:-html-css-chrome}"
+        rdoc_emit_chrome_html_metadata "$root" "$chrome_bin" "$out_dir"
+        echo "rdoc_renderdoc_home=$renderdoc_home"
+        echo "rdoc_log=$out_dir/renderdoc-html.log"
+        echo "rdoc_screenshot=$out_dir/html_chrome.png"
+    } | tee "$env_path"
+    rdoc_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
+    rdoc_lib="$(rdoc_renderdoc_lib_path "$renderdoc_home")"
+    rdoc_prepare_vulkan_layer_manifest "$root" "$renderdoc_home" "$out_dir" "$env_path" "rdoc_chrome"
+    export LD_LIBRARY_PATH="$rdoc_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export DYLD_LIBRARY_PATH="$rdoc_lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+    export VK_LAYER_PATH="$rdoc_layer_dir_abs"
+    export VK_IMPLICIT_LAYER_PATH="$rdoc_layer_dir_abs"
+    export VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture
+    export ENABLE_VULKAN_RENDERDOC_CAPTURE=1
+    chrome_display_mode="headless"
+    if [ "${RDOC_CHROME_GPU_AUTOCAPTURE:-0}" = "1" ] && [ "${DISPLAY:-}" != "" ]; then
+        chrome_display_mode="gpu-autocapture"
+    elif [ "${RDOC_CHROME_GPU_LAUNCHER:-0}" = "1" ] && [ "${DISPLAY:-}" != "" ]; then
+        chrome_display_mode="gpu-launcher"
+    elif [ "${RDOC_CHROME_USE_XVFB:-0}" = "1" ] && command -v xvfb-run >/dev/null 2>&1; then
+        chrome_display_mode="xvfb"
+    elif [ "${RDOC_CHROME_HEADLESS:-0}" != "1" ] && [ "${DISPLAY:-}" != "" ]; then
+        chrome_display_mode="display"
+    fi
+    echo "rdoc_chrome_display_mode=$chrome_display_mode" | tee -a "$env_path"
+    echo "rdoc_renderdoc_hook_children=${RDOC_RENDERDOC_HOOK_CHILDREN:-1}" | tee -a "$env_path"
+    echo "rdoc_chrome_gpu_launcher=$root/scripts/tool/renderdoc-gpu-launcher.shs" | tee -a "$env_path"
+    echo "rdoc_chrome_gpu_launcher_log=$out_dir/gpu-launcher.log" | tee -a "$env_path"
+    echo "rdoc_chrome_app_mode=${RDOC_CHROME_APP_MODE:-0}" | tee -a "$env_path"
+    if [ "$chrome_display_mode" = "xvfb" ]; then
+        if command -v timeout >/dev/null 2>&1; then
+            timeout "$timeout_secs" "$rdoc_cmd" capture -w $child_hook_option \
+                -c "$out_dir/html_chrome" \
+                xvfb-run -a "$chrome_bin" \
+                $(rdoc_chrome_vulkan_flags) \
+                --user-data-dir="$out_dir_abs/chrome-profile" \
+                --window-size="${width},${height}" \
+                --screenshot="$out_dir_abs/html_chrome.png" \
+                "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+        else
+            "$rdoc_cmd" capture -w $child_hook_option \
+                -c "$out_dir/html_chrome" \
+                xvfb-run -a "$chrome_bin" \
+                $(rdoc_chrome_vulkan_flags) \
+                --user-data-dir="$out_dir_abs/chrome-profile" \
+                --window-size="${width},${height}" \
+                --screenshot="$out_dir_abs/html_chrome.png" \
+                "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+        fi
+    elif [ "$chrome_display_mode" = "gpu-launcher" ] || [ "$chrome_display_mode" = "gpu-autocapture" ]; then
+        if [ "$chrome_display_mode" = "gpu-autocapture" ]; then
+            gpu_autocapture=1
+        else
+            gpu_autocapture=0
+        fi
+        if command -v timeout >/dev/null 2>&1; then
+            if [ "${RDOC_CHROME_APP_MODE:-0}" = "1" ]; then
+                RDOC_GPU_LAUNCHER_RENDERDOCCMD="$rdoc_cmd" \
+                RDOC_HOME="$renderdoc_home" \
+                RDOC_GPU_LAUNCHER_RENDERDOC_LIB="$rdoc_lib" \
+                RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$out_dir_abs/gpu_chrome" \
+                RDOC_GPU_LAUNCHER_LOG="$out_dir_abs/gpu-launcher.log" \
+                RDOC_GPU_LAUNCHER_AUTOCAPTURE="$gpu_autocapture" \
+                RDOC_GPU_LAUNCHER_ALLOW_DLOPEN="${RDOC_GPU_LAUNCHER_ALLOW_DLOPEN:-1}" \
+                RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK="${RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK:-1}" \
+                timeout "$timeout_secs" "$chrome_bin" \
+                    $(rdoc_chrome_vulkan_flags) \
+                    --disable-crash-reporter --disable-breakpad \
+                    --gpu-launcher="$root/scripts/tool/renderdoc-gpu-launcher.shs" \
+                    --user-data-dir="$out_dir_abs/chrome-profile" \
+                    --window-size="${width},${height}" \
+                    --app="file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+            else
+                RDOC_GPU_LAUNCHER_RENDERDOCCMD="$rdoc_cmd" \
+                RDOC_HOME="$renderdoc_home" \
+                RDOC_GPU_LAUNCHER_RENDERDOC_LIB="$rdoc_lib" \
+                RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$out_dir_abs/gpu_chrome" \
+                RDOC_GPU_LAUNCHER_LOG="$out_dir_abs/gpu-launcher.log" \
+                RDOC_GPU_LAUNCHER_AUTOCAPTURE="$gpu_autocapture" \
+                RDOC_GPU_LAUNCHER_ALLOW_DLOPEN="${RDOC_GPU_LAUNCHER_ALLOW_DLOPEN:-1}" \
+                RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK="${RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK:-1}" \
+                timeout "$timeout_secs" "$chrome_bin" \
+                    $(rdoc_chrome_vulkan_flags) \
+                    --disable-crash-reporter --disable-breakpad \
+                    --gpu-launcher="$root/scripts/tool/renderdoc-gpu-launcher.shs" \
+                    --user-data-dir="$out_dir_abs/chrome-profile" \
+                    --window-size="${width},${height}" \
+                    --screenshot="$out_dir_abs/html_chrome.png" \
+                    "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+            fi
+        else
+            if [ "${RDOC_CHROME_APP_MODE:-0}" = "1" ]; then
+                RDOC_GPU_LAUNCHER_RENDERDOCCMD="$rdoc_cmd" \
+                RDOC_HOME="$renderdoc_home" \
+                RDOC_GPU_LAUNCHER_RENDERDOC_LIB="$rdoc_lib" \
+                RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$out_dir_abs/gpu_chrome" \
+                RDOC_GPU_LAUNCHER_LOG="$out_dir_abs/gpu-launcher.log" \
+                RDOC_GPU_LAUNCHER_AUTOCAPTURE="$gpu_autocapture" \
+                RDOC_GPU_LAUNCHER_ALLOW_DLOPEN="${RDOC_GPU_LAUNCHER_ALLOW_DLOPEN:-1}" \
+                RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK="${RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK:-1}" \
+                "$chrome_bin" \
+                    $(rdoc_chrome_vulkan_flags) \
+                    --disable-crash-reporter --disable-breakpad \
+                    --gpu-launcher="$root/scripts/tool/renderdoc-gpu-launcher.shs" \
+                    --user-data-dir="$out_dir_abs/chrome-profile" \
+                    --window-size="${width},${height}" \
+                    --app="file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+            else
+                RDOC_GPU_LAUNCHER_RENDERDOCCMD="$rdoc_cmd" \
+                RDOC_HOME="$renderdoc_home" \
+                RDOC_GPU_LAUNCHER_RENDERDOC_LIB="$rdoc_lib" \
+                RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$out_dir_abs/gpu_chrome" \
+                RDOC_GPU_LAUNCHER_LOG="$out_dir_abs/gpu-launcher.log" \
+                RDOC_GPU_LAUNCHER_AUTOCAPTURE="$gpu_autocapture" \
+                RDOC_GPU_LAUNCHER_ALLOW_DLOPEN="${RDOC_GPU_LAUNCHER_ALLOW_DLOPEN:-1}" \
+                RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK="${RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK:-1}" \
+                "$chrome_bin" \
+                    $(rdoc_chrome_vulkan_flags) \
+                    --disable-crash-reporter --disable-breakpad \
+                    --gpu-launcher="$root/scripts/tool/renderdoc-gpu-launcher.shs" \
+                    --user-data-dir="$out_dir_abs/chrome-profile" \
+                    --window-size="${width},${height}" \
+                    --screenshot="$out_dir_abs/html_chrome.png" \
+                    "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+            fi
+        fi
+    elif [ "$chrome_display_mode" = "display" ]; then
+        if command -v timeout >/dev/null 2>&1; then
+            timeout "$timeout_secs" "$rdoc_cmd" capture -w $child_hook_option \
+                -c "$out_dir/html_chrome" \
+                "$chrome_bin" \
+                $(rdoc_chrome_vulkan_flags) \
+                --disable-crash-reporter --disable-breakpad \
+                --user-data-dir="$out_dir_abs/chrome-profile" \
+                --window-size="${width},${height}" \
+                --screenshot="$out_dir_abs/html_chrome.png" \
+                "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+        else
+            "$rdoc_cmd" capture -w $child_hook_option \
+                -c "$out_dir/html_chrome" \
+                "$chrome_bin" \
+                $(rdoc_chrome_vulkan_flags) \
+                --disable-crash-reporter --disable-breakpad \
+                --user-data-dir="$out_dir_abs/chrome-profile" \
+                --window-size="${width},${height}" \
+                --screenshot="$out_dir_abs/html_chrome.png" \
+                "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+        fi
+    else
+        if command -v timeout >/dev/null 2>&1; then
+            timeout "$timeout_secs" "$rdoc_cmd" capture -w $child_hook_option \
+                -c "$out_dir/html_chrome" \
+                "$chrome_bin" \
+                --headless=new $(rdoc_chrome_vulkan_flags) \
+                --user-data-dir="$out_dir_abs/chrome-profile" \
+                --window-size="${width},${height}" \
+                --screenshot="$out_dir_abs/html_chrome.png" \
+                "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+        else
+            "$rdoc_cmd" capture -w $child_hook_option \
+                -c "$out_dir/html_chrome" \
+                "$chrome_bin" \
+                --headless=new $(rdoc_chrome_vulkan_flags) \
+                --user-data-dir="$out_dir_abs/chrome-profile" \
+                --window-size="${width},${height}" \
+                --screenshot="$out_dir_abs/html_chrome.png" \
+                "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+        fi
+    fi
+    sed -n '1,160p' "$out_dir/renderdoc-html.log"
+    rdoc_emit_chromium_gpu_process_exit_metadata "$out_dir/renderdoc-html.log" | tee -a "$env_path"
+    rdoc_emit_chromium_angle_metadata "$out_dir/renderdoc-html.log" | tee -a "$env_path"
+    rdoc_emit_chromium_angle_metadata "$out_dir/gpu-launcher.log" "rdoc_chromium_gpu_launcher_angle" | tee -a "$env_path"
+    rdoc_emit_gpu_autocapture_metadata "$out_dir/gpu-launcher.log" | tee -a "$env_path"
+    rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
+    tmp_env="$out_dir/evidence.status.env"
+    set +e
+    rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
+    validate_code=$?
+    set -e
+    cat "$tmp_env" >> "$env_path"
+    return "$validate_code"
+}
+
+rdoc_capture_electron_html() {
+    root="$1"
+    renderdoc_home="$2"
+    electron_bin="$3"
+    out_dir="$4"
+    html_path="${RDOC_HTML_PATH:-$root/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html}"
+    timeout_secs="${RDOC_CAPTURE_TIMEOUT_SECS:-45}"
+    width="${RDOC_ELECTRON_WIDTH:-1280}"
+    height="${RDOC_ELECTRON_HEIGHT:-720}"
+    settle_ms="${RDOC_ELECTRON_SETTLE_MS:-1000}"
+    capture_script="${RDOC_ELECTRON_CAPTURE_SCRIPT:-$root/tools/electron-live-bitmap/renderdoc_display_html.js}"
+    electron_force_data_url="${ELECTRON_CAPTURE_FORCE_DATA_URL:-0}"
+    case "$capture_script" in
+        *tools/electron-live-bitmap/renderdoc_display_html.js)
+            electron_force_data_url="${ELECTRON_CAPTURE_FORCE_DATA_URL:-1}"
+            ;;
+    esac
+    child_hook_option="--opt-hook-children"
+    if [ "${RDOC_RENDERDOC_HOOK_CHILDREN:-1}" = "0" ]; then
+        child_hook_option=""
+    fi
+    case "$out_dir" in
+        /*) out_dir_abs="$out_dir" ;;
+        *) out_dir_abs="$root/$out_dir" ;;
+    esac
+    rdoc_prepare_output_dir "$out_dir"
+    env_path="$out_dir/evidence.env"
+    if [ ! -s "$html_path" ]; then
+        {
+            echo "rdoc_backend=electron"
+            echo "rdoc_scene=${RDOC_SCENE:-html-css-electron}"
+            echo "rdoc_capture_status=unavailable"
+            echo "rdoc_capture_reason=missing-html-fixture"
+            rdoc_emit_electron_html_metadata "$root" "$electron_bin" "$out_dir"
+        } | tee "$env_path"
+        return 1
+    fi
+    if [ ! -s "$capture_script" ]; then
+        {
+            echo "rdoc_backend=electron"
+            echo "rdoc_scene=${RDOC_SCENE:-html-css-electron}"
+            echo "rdoc_capture_status=unavailable"
+            echo "rdoc_capture_reason=missing-electron-capture-script"
+            rdoc_emit_electron_html_metadata "$root" "$electron_bin" "$out_dir"
+        } | tee "$env_path"
+        return 1
+    fi
+    if [ "$electron_bin" = "" ]; then
+        {
+            echo "rdoc_backend=electron"
+            echo "rdoc_scene=${RDOC_SCENE:-html-css-electron}"
+            echo "rdoc_capture_status=unavailable"
+            echo "rdoc_capture_reason=missing-electron"
+            rdoc_emit_electron_html_metadata "$root" "$electron_bin" "$out_dir"
+        } | tee "$env_path"
+        return 1
+    fi
+    {
+        echo "rdoc_backend=electron"
+        echo "rdoc_scene=${RDOC_SCENE:-html-css-electron}"
+        echo "rdoc_renderdoc_home=$renderdoc_home"
+        echo "rdoc_log=$out_dir/renderdoc-electron-html.log"
+        rdoc_emit_electron_html_metadata "$root" "$electron_bin" "$out_dir"
+    } | tee "$env_path"
+    rdoc_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
+    rdoc_lib="$(rdoc_renderdoc_lib_path "$renderdoc_home")"
+    rdoc_prepare_vulkan_layer_manifest "$root" "$renderdoc_home" "$out_dir" "$env_path" "rdoc_electron"
+    export LD_LIBRARY_PATH="$rdoc_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export DYLD_LIBRARY_PATH="$rdoc_lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+    export VK_LAYER_PATH="$rdoc_layer_dir_abs"
+    export VK_IMPLICIT_LAYER_PATH="$rdoc_layer_dir_abs"
+    export VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture
+    export ENABLE_VULKAN_RENDERDOC_CAPTURE=1
+    electron_display_mode="display"
+    if [ "${RDOC_ELECTRON_GPU_AUTOCAPTURE:-0}" = "1" ] && [ "${DISPLAY:-}" != "" ]; then
+        electron_display_mode="gpu-autocapture"
+    elif [ "${RDOC_ELECTRON_GPU_LAUNCHER:-0}" = "1" ] && [ "${DISPLAY:-}" != "" ]; then
+        electron_display_mode="gpu-launcher"
+    elif [ "$(uname -s 2>/dev/null || echo unknown)" = "Linux" ] &&
+        [ "${DISPLAY:-}" != "" ] &&
+        [ "$capture_script" = "$root/tools/electron-live-bitmap/renderdoc_display_html.js" ]; then
+        electron_display_mode="gpu-autocapture"
+    elif [ "${RDOC_ELECTRON_USE_XVFB:-0}" = "1" ] && command -v xvfb-run >/dev/null 2>&1; then
+        electron_display_mode="xvfb"
+    elif [ "${DISPLAY:-}" = "" ] && command -v xvfb-run >/dev/null 2>&1; then
+        electron_display_mode="xvfb"
+    fi
+    echo "rdoc_electron_display_mode=$electron_display_mode" | tee -a "$env_path"
+    echo "rdoc_renderdoc_hook_children=${RDOC_RENDERDOC_HOOK_CHILDREN:-1}" | tee -a "$env_path"
+    echo "rdoc_electron_gpu_launcher=$root/scripts/tool/renderdoc-gpu-launcher.shs" | tee -a "$env_path"
+    echo "rdoc_electron_gpu_launcher_log=$out_dir/gpu-launcher.log" | tee -a "$env_path"
+    echo "rdoc_electron_stage_log=$out_dir/electron-stage.log" | tee -a "$env_path"
+    if [ "$electron_display_mode" = "xvfb" ]; then
+        electron_prefix="xvfb-run -a"
+    else
+        electron_prefix=""
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        timeout_prefix="timeout $timeout_secs"
+    else
+        timeout_prefix=""
+    fi
+    if [ "$electron_display_mode" = "gpu-launcher" ] || [ "$electron_display_mode" = "gpu-autocapture" ]; then
+        if [ "$electron_display_mode" = "gpu-autocapture" ]; then
+            gpu_autocapture=1
+        else
+            gpu_autocapture=0
+        fi
+        set +e
+        # shellcheck disable=SC2086
+        RDOC_GPU_LAUNCHER_RENDERDOCCMD="$rdoc_cmd" \
+        RDOC_HOME="$renderdoc_home" \
+        RDOC_GPU_LAUNCHER_RENDERDOC_LIB="$rdoc_lib" \
+        RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$out_dir_abs/electron_gpu" \
+        RDOC_GPU_LAUNCHER_LOG="$out_dir_abs/gpu-launcher.log" \
+        RDOC_GPU_LAUNCHER_AUTOCAPTURE="$gpu_autocapture" \
+        RDOC_GPU_LAUNCHER_ALLOW_DLOPEN="${RDOC_GPU_LAUNCHER_ALLOW_DLOPEN:-1}" \
+        RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK="${RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK:-1}" \
+        ELECTRON_CAPTURE_HTML="$html_path" \
+        ELECTRON_CAPTURE_WIDTH="$width" \
+        ELECTRON_CAPTURE_HEIGHT="$height" \
+        ELECTRON_CAPTURE_OUTPUT="$out_dir_abs/electron_argb.json" \
+        ELECTRON_CAPTURE_STAGE_LOG="$out_dir_abs/electron-stage.log" \
+        ELECTRON_CAPTURE_SETTLE_MS="$settle_ms" \
+        ELECTRON_CAPTURE_FORCE_DATA_URL="$electron_force_data_url" \
+        ELECTRON_CAPTURE_SHOW_WINDOW="${RDOC_ELECTRON_SHOW_WINDOW:-0}" \
+        $timeout_prefix "$electron_bin" \
+            $(rdoc_electron_vulkan_flags) \
+            --gpu-launcher="$root/scripts/tool/renderdoc-gpu-launcher.shs" \
+            "$capture_script" >"$out_dir/renderdoc-electron-html.log" 2>&1
+        electron_launch_exit_code=$?
+        set -e
+    else
+        set +e
+        # shellcheck disable=SC2086
+        ELECTRON_CAPTURE_HTML="$html_path" \
+        ELECTRON_CAPTURE_WIDTH="$width" \
+        ELECTRON_CAPTURE_HEIGHT="$height" \
+        ELECTRON_CAPTURE_OUTPUT="$out_dir_abs/electron_argb.json" \
+        ELECTRON_CAPTURE_STAGE_LOG="$out_dir_abs/electron-stage.log" \
+        ELECTRON_CAPTURE_SETTLE_MS="$settle_ms" \
+        ELECTRON_CAPTURE_FORCE_DATA_URL="$electron_force_data_url" \
+        ELECTRON_CAPTURE_SHOW_WINDOW="${RDOC_ELECTRON_SHOW_WINDOW:-0}" \
+        $timeout_prefix "$rdoc_cmd" capture -w $child_hook_option \
+            -c "$out_dir/electron_html" \
+            $electron_prefix "$electron_bin" \
+            $(rdoc_electron_vulkan_flags) \
+            "$capture_script" >"$out_dir/renderdoc-electron-html.log" 2>&1
+        electron_launch_exit_code=$?
+        set -e
+    fi
+    echo "rdoc_electron_launch_exit_code=$electron_launch_exit_code" | tee -a "$env_path"
+    if [ "$electron_launch_exit_code" -eq 124 ]; then
+        echo "rdoc_electron_launch_timed_out=true" | tee -a "$env_path"
+    else
+        echo "rdoc_electron_launch_timed_out=false" | tee -a "$env_path"
+    fi
+    sed -n '1,160p' "$out_dir/renderdoc-electron-html.log"
+    rdoc_emit_chromium_gpu_process_exit_metadata "$out_dir/renderdoc-electron-html.log" | tee -a "$env_path"
+    rdoc_emit_chromium_angle_metadata "$out_dir/renderdoc-electron-html.log" | tee -a "$env_path"
+    rdoc_emit_chromium_angle_metadata "$out_dir/gpu-launcher.log" "rdoc_chromium_gpu_launcher_angle" | tee -a "$env_path"
+    rdoc_emit_gpu_autocapture_metadata "$out_dir/gpu-launcher.log" | tee -a "$env_path"
+    rdoc_emit_electron_argb_metadata "$out_dir/electron_argb.json" "$width" "$height" >>"$env_path"
+    rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
+    tmp_env="$out_dir/evidence.status.env"
+    set +e
+    rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
+    validate_code=$?
+    set -e
+    cat "$tmp_env" >> "$env_path"
+    return "$validate_code"
+}

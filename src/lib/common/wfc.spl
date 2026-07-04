@@ -1,0 +1,378 @@
+# Seeded tiled-model Wave Function Collapse (WFC), operating on a small
+# tile set with per-side (N/E/S/W) adjacency rules and producing a `[[i32]]`
+# grid of tile ids (same shape cave_ca.spl produces for its cave grid, so
+# `model3d gen wfc` can emit the exact `tilemap: { cols, rows, cells }` SDN
+# `gen tilemap` does). Pure/deterministic: same seed, tileset and dimensions
+# always produce the same grid.
+#
+# Uses random_pure's explicit-state `LcgRng` (not noise.spl's position-pure
+# gradient noise, not random_pure's shared-state module functions) for the
+# collapse-choice dice — call order matters here exactly like cave_ca.spl's
+# initial fill, so an explicit-state generator is the right tool.
+#
+# Constraint propagation uses an explicit stack (push/pop from the end),
+# mirroring `ca_floor_reachable`'s flood-fill worklist — not a front-popping
+# queue — since array `.slice()` support was unconfirmed for non-text
+# arrays at write time and propagation order does not affect the fixed
+# point reached (only queue vs. stack changes visit order, not the result).
+#
+# NOTE: locals are named `cells`/`poss` rather than `grid` — see
+# doc/08_tracking/bug/parser_grid_identifier_keyword_collision_2026-07-03.md
+# (same `grid`-identifier/GPU-keyword collision cave_ca.spl works around).
+#
+# Import path: use std.common.wfc.{Tile, TileSet, demo_tileset, parse_tileset, wfc_generate}
+
+use std.common.random_pure.{LcgRng, lcg_rng, lcg_advance, lcg_value}
+use std.sdn.{SdnValue, parse}
+
+val WFC_MAX_RESTARTS: i64 = 20
+
+# Direction codes used throughout this module: 0=N (y-1), 1=E (x+1),
+# 2=S (y+1), 3=W (x-1).
+val DIR_N: i64 = 0
+val DIR_E: i64 = 1
+val DIR_S: i64 = 2
+val DIR_W: i64 = 3
+
+pub val TILE_GRASS: i64 = 0
+pub val TILE_WATER: i64 = 1
+pub val TILE_COAST: i64 = 2
+
+struct Tile:
+    """One tile of the model: an id plus the list of tile ids allowed
+    immediately adjacent in each of the four directions."""
+    id: i64
+    name: text
+    n: [i64]
+    e: [i64]
+    s: [i64]
+    w: [i64]
+
+struct TileSet:
+    tiles: [Tile]
+
+# ---------------------------------------------------------------------------
+# Built-in demo tileset: grass/water/coast, coast mediates grass<->water so
+# grass and water are never directly adjacent (coast is compatible with
+# everything in every direction, so this ruleset never contradicts).
+# ---------------------------------------------------------------------------
+
+pub fn demo_tileset() -> TileSet:
+    val grass_ok = [TILE_GRASS, TILE_COAST]
+    val water_ok = [TILE_WATER, TILE_COAST]
+    val coast_ok = [TILE_GRASS, TILE_WATER, TILE_COAST]
+    val grass = Tile(id: TILE_GRASS, name: "grass", n: grass_ok, e: grass_ok, s: grass_ok, w: grass_ok)
+    val water = Tile(id: TILE_WATER, name: "water", n: water_ok, e: water_ok, s: water_ok, w: water_ok)
+    val coast = Tile(id: TILE_COAST, name: "coast", n: coast_ok, e: coast_ok, s: coast_ok, w: coast_ok)
+    TileSet(tiles: [grass, water, coast])
+
+# ---------------------------------------------------------------------------
+# SDN parsing (trust boundary: every field validated, no panics on
+# malformed input) —
+#   tileset:
+#     tiles:
+#       - { id: 0, name: "grass", n: [0, 2], e: [0, 2], s: [0, 2], w: [0, 2] }
+# ---------------------------------------------------------------------------
+
+fn _i64_list_of(v: SdnValue, what: text) -> Result<[i64], text>:
+    if val Some(items) = v.as_array():
+        var out: [i64] = []
+        var i: i64 = 0
+        while i < items.len():
+            if val Some(n) = items[i].as_i64():
+                out.push(n)
+            else:
+                return Err("{what}[{i}]: expected an integer (got {items[i].type_name()})")
+            i = i + 1
+        return Ok(out)
+    Err("{what}: expected an array of integers (got {v.type_name()})")
+
+fn _dir_field(v: SdnValue, dir: text, idx: i64) -> Result<[i64], text>:
+    if val Some(dv) = v.get(dir):
+        return _i64_list_of(dv, "tiles[{idx}].{dir}")
+    Err("tiles[{idx}]: missing required field `{dir}`")
+
+fn _tile_of(v: SdnValue, idx: i64) -> Result<Tile, text>:
+    if not v.is_dict():
+        return Err("tiles[{idx}]: expected a tile dict (got {v.type_name()})")
+    var id: i64 = -1
+    if val Some(iv) = v.get("id"):
+        if val Some(n) = iv.as_i64():
+            id = n
+        else:
+            return Err("tiles[{idx}].id: expected an integer")
+    else:
+        return Err("tiles[{idx}]: missing required field `id`")
+    var name = "tile{id}"
+    if val Some(nv) = v.get("name"):
+        if val Some(s) = nv.as_str():
+            name = s
+    var n_list: [i64] = []
+    val nr = _dir_field(v, "n", idx)
+    if val Err(e) = nr:
+        return Err(e)
+    if val Ok(l) = nr:
+        n_list = l
+    var e_list: [i64] = []
+    val er = _dir_field(v, "e", idx)
+    if val Err(e) = er:
+        return Err(e)
+    if val Ok(l) = er:
+        e_list = l
+    var s_list: [i64] = []
+    val sr = _dir_field(v, "s", idx)
+    if val Err(e) = sr:
+        return Err(e)
+    if val Ok(l) = sr:
+        s_list = l
+    var w_list: [i64] = []
+    val wr = _dir_field(v, "w", idx)
+    if val Err(e) = wr:
+        return Err(e)
+    if val Ok(l) = wr:
+        w_list = l
+    Ok(Tile(id: id, name: name, n: n_list, e: e_list, s: s_list, w: w_list))
+
+fn _known_id(tiles: [Tile], id: i64) -> bool:
+    var i: i64 = 0
+    while i < tiles.len():
+        if tiles[i].id == id:
+            return true
+        i = i + 1
+    false
+
+fn _validate_neighbor_ids(tiles: [Tile]) -> Result<bool, text>:
+    var i: i64 = 0
+    while i < tiles.len():
+        val t = tiles[i]
+        val lists = [t.n, t.e, t.s, t.w]
+        val dir_names = ["n", "e", "s", "w"]
+        var d: i64 = 0
+        while d < 4:
+            val lst = lists[d]
+            var k: i64 = 0
+            while k < lst.len():
+                if not _known_id(tiles, lst[k]):
+                    return Err("tile \"{t.name}\" (id {t.id}).{dir_names[d]}: unknown neighbor tile id {lst[k]}")
+                k = k + 1
+            d = d + 1
+        i = i + 1
+    Ok(true)
+
+pub fn parse_tileset(src: text) -> Result<TileSet, text>:
+    val parsed = parse(src)
+    if val Err(e) = parsed:
+        return Err("invalid SDN: {e}")
+    var root = SdnValue.null()
+    if val Ok(v) = parsed:
+        root = v
+    var ts = SdnValue.null()
+    if val Some(s) = root.get("tileset"):
+        ts = s
+    else:
+        return Err("missing top-level `tileset` block")
+    if not ts.is_dict():
+        return Err("`tileset` must be a dict (got {ts.type_name()})")
+    var items: [SdnValue] = []
+    if val Some(tv) = ts.get("tiles"):
+        if val Some(a) = tv.as_array():
+            items = a
+        else:
+            return Err("tileset.tiles must be an array (got {tv.type_name()})")
+    else:
+        return Err("missing `tileset.tiles`")
+    if items.len() == 0:
+        return Err("tileset.tiles is empty — nothing to generate from")
+    var tiles: [Tile] = []
+    var i: i64 = 0
+    while i < items.len():
+        val r = _tile_of(items[i], i)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(t) = r:
+            tiles.push(t)
+        i = i + 1
+    val valid = _validate_neighbor_ids(tiles)
+    if val Err(e) = valid:
+        return Err(e)
+    Ok(TileSet(tiles: tiles))
+
+# ---------------------------------------------------------------------------
+# WFC core
+# ---------------------------------------------------------------------------
+
+fn _all_ids(tileset: TileSet) -> [i64]:
+    var out: [i64] = []
+    for t in tileset.tiles:
+        out.push(t.id)
+    out
+
+fn _find_tile(tileset: TileSet, id: i64) -> Tile:
+    var i: i64 = 0
+    while i < tileset.tiles.len():
+        if tileset.tiles[i].id == id:
+            return tileset.tiles[i]
+        i = i + 1
+    tileset.tiles[0]
+
+fn _dir_list_of(t: Tile, dir: i64) -> [i64]:
+    if dir == DIR_N: t.n
+    elif dir == DIR_E: t.e
+    elif dir == DIR_S: t.s
+    else: t.w
+
+fn _opposite_dir(dir: i64) -> i64:
+    if dir == DIR_N: DIR_S
+    elif dir == DIR_E: DIR_W
+    elif dir == DIR_S: DIR_N
+    else: DIR_E
+
+fn _dir_delta(dir: i64) -> (i64, i64):
+    if dir == DIR_N: (0, -1)
+    elif dir == DIR_E: (1, 0)
+    elif dir == DIR_S: (0, 1)
+    else: (-1, 0)
+
+fn _contains_id(list: [i64], id: i64) -> bool:
+    var i: i64 = 0
+    while i < list.len():
+        if list[i] == id:
+            return true
+        i = i + 1
+    false
+
+pub fn wfc_compatible(tileset: TileSet, a_id: i64, b_id: i64, dir: i64) -> bool:
+    """True iff tile `b_id` may sit in direction `dir` from tile `a_id`.
+    Checked both ways (a allows b in `dir`, AND b allows a in the opposite
+    direction) so an asymmetric rule-authoring mistake surfaces as a
+    contradiction during generation rather than silently picking one side's
+    rule."""
+    val a = _find_tile(tileset, a_id)
+    val b = _find_tile(tileset, b_id)
+    _contains_id(_dir_list_of(a, dir), b_id) and _contains_id(_dir_list_of(b, _opposite_dir(dir)), a_id)
+
+fn _find_min_entropy(poss: [[i64]], n_cells: i64) -> i64:
+    """Index of the uncollapsed cell (possibility-list length != 1) with the
+    fewest remaining possibilities; -1 if every cell is already collapsed.
+    A length-0 cell (contradiction) always wins since 0 is the minimum."""
+    var best_idx: i64 = -1
+    var best_len: i64 = -1
+    var i: i64 = 0
+    while i < n_cells:
+        val l = poss[i].len()
+        if l != 1:
+            if (best_idx < 0 or l < best_len):
+                best_idx = i
+                best_len = l
+        i = i + 1
+    best_idx
+
+fn _rng_index(rng: LcgRng, n: i64) -> (LcgRng, i64):
+    val next = lcg_advance(rng)
+    (next, lcg_value(next) % n)
+
+fn _propagate(tileset: TileSet, poss_in: [[i64]], w: i64, h: i64, seeds: [i64]) -> ([[i64]], bool):
+    """Arc-consistency propagation seeded from `seeds` via an explicit stack
+    (see module doc comment). Returns (updated possibilities, ok) where
+    ok=false means some cell's possibilities were filtered to empty.
+
+    Called both with a single just-collapsed cell (mid-generation) and with
+    every cell (once, up front) — the up-front pass matters even though
+    every cell starts at its full domain: if the tileset has only one tile,
+    every cell's domain is already size-1 ("collapsed") before any explicit
+    choice is made, so the collapse loop below would never visit it and an
+    incompatible single-tile ruleset would go unverified. Seeding the stack
+    with the whole grid catches that instead of silently accepting it."""
+    var poss = poss_in
+    var stack: [i64] = seeds
+    while stack.len() > 0:
+        val cur = stack[stack.len() - 1]
+        stack.pop()
+        val cx = cur % w
+        val cy = cur / w
+        var dir: i64 = 0
+        while dir < 4:
+            val (dx, dy) = _dir_delta(dir)
+            val nx = cx + dx
+            val ny = cy + dy
+            if (nx >= 0 and ny >= 0 and nx < w and ny < h):
+                val nidx = ny * w + nx
+                var kept: [i64] = []
+                var k: i64 = 0
+                while k < poss[nidx].len():
+                    val cand = poss[nidx][k]
+                    var ok = false
+                    var j: i64 = 0
+                    while j < poss[cur].len():
+                        if wfc_compatible(tileset, poss[cur][j], cand, dir):
+                            ok = true
+                        j = j + 1
+                    if ok:
+                        kept.push(cand)
+                    k = k + 1
+                if kept.len() < poss[nidx].len():
+                    poss[nidx] = kept
+                    if kept.len() == 0:
+                        return (poss, false)
+                    stack.push(nidx)
+            dir = dir + 1
+    (poss, true)
+
+fn _wfc_attempt(tileset: TileSet, w: i64, h: i64, seed: i64) -> Result<[[i32]], text>:
+    val n_cells = w * h
+    val ids = _all_ids(tileset)
+    var poss: [[i64]] = []
+    var all_idx: [i64] = []
+    var i: i64 = 0
+    while i < n_cells:
+        poss.push(ids)
+        all_idx.push(i)
+        i = i + 1
+    val (poss0, ok0) = _propagate(tileset, poss, w, h, all_idx)
+    poss = poss0
+    if not ok0:
+        return Err("wfc: contradiction (tileset admits no valid neighbor for itself)")
+    var rng = lcg_rng(seed)
+    var done = false
+    while not done:
+        val idx = _find_min_entropy(poss, n_cells)
+        if idx < 0:
+            done = true
+        else:
+            if poss[idx].len() == 0:
+                return Err("wfc: contradiction (cell {idx} has no valid tile)")
+            val (next_rng, choice) = _rng_index(rng, poss[idx].len())
+            rng = next_rng
+            val chosen = poss[idx][choice]
+            poss[idx] = [chosen]
+            val (poss2, ok) = _propagate(tileset, poss, w, h, [idx])
+            poss = poss2
+            if not ok:
+                return Err("wfc: contradiction during propagation from cell {idx}")
+    var cells: [[i32]] = []
+    var y: i64 = 0
+    while y < h:
+        var row: [i32] = []
+        var x: i64 = 0
+        while x < w:
+            row.push(poss[y * w + x][0] as i32)
+            x = x + 1
+        cells.push(row)
+        y = y + 1
+    Ok(cells)
+
+pub fn wfc_generate(tileset: TileSet, w: i64, h: i64, seed: i64) -> Result<[[i32]], text>:
+    """Seeded WFC generation: lowest-entropy cell collapse + arc-consistency
+    propagation; on contradiction, restart from a seed deterministically
+    derived from `seed` and the attempt number (bounded by
+    `WFC_MAX_RESTARTS`), then give up with `Err`. Deterministic: the same
+    `seed`/tileset/dimensions always retry the exact same sequence of
+    derived seeds and so always produce the same outcome."""
+    var attempt: i64 = 0
+    while attempt <= WFC_MAX_RESTARTS:
+        val cur_seed = seed + attempt * 104729
+        val r = _wfc_attempt(tileset, w, h, cur_seed)
+        if val Ok(cells) = r:
+            return Ok(cells)
+        attempt = attempt + 1
+    Err("wfc: no contradiction-free {w}x{h} assignment found after {WFC_MAX_RESTARTS + 1} attempts (seed {seed})")
