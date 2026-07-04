@@ -11,7 +11,8 @@ use app.office.slides.slide.{Slide, slide_count, blank_slide, add_text_box, slid
 use app.office.mail.mail_app.{MailApp}
 use app.office.planner.planner_app.{PlannerApp}
 use app.office.counter.{CounterApp}
-use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, session_scroll, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point, pivot_session_new, pivot_session_view, pivot_session_set_agg, pivot_session_swap_fields, pivot_session_field_letters, chart_session_new, chart_session_view, chart_session_set_value_range, chart_session_set_title}
+use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, session_scroll, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point, pivot_session_new, pivot_session_view, pivot_session_set_agg, pivot_session_swap_fields, pivot_session_field_letters, chart_session_new, chart_session_view, chart_session_set_value_range, chart_session_set_title, slide_session_new, slide_session_view, slide_gui_step, office_gui_slide_pixels, sheet_gui_view_with_formats, office_gui_sheet_cf_pixels}
+use app.office.sheets.cond_format.{CondRule}
 use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_source_pane, wysiwyg_update_line_checked}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.file_ops.{RecentFileStore}
@@ -314,6 +315,62 @@ fn _run_office_gui_sheet_live_command() -> i32:
     rendered frame plus a documented notice and exits 0 instead of hanging."""
     run_sheet_gui_live(_build_office_gui_sheet_demo())
 
+fn _build_office_gui_sheet_cf_demo() -> Sheet:
+    """Build the demo sheet for `office sheet-gui-cf`: a Value column
+    B2:B6 = 10,20,30,40,50 (the data-bar rule's range -- percents 0/25/50/
+    75/100 over the 10..50 span, so buckets bar0/bar2/bar5/bar7/bar10) and
+    a Score column C2:C6 = 5,3,8,3,6 (the above_average rule's range --
+    mean (5+3+8+3+6)/5 = 5, so ONLY 8 (C4) and 6 (C6) are strictly above
+    it; the two 3s and the 5 itself are not)."""
+    var sheet = Sheet.new("CfDemo")
+    sheet.set_value("A1", "Item")
+    sheet.set_value("B1", "Value")
+    sheet.set_value("C1", "Score")
+    sheet.set_value("A2", "Alpha")
+    sheet.set_value("B2", "10")
+    sheet.set_value("C2", "5")
+    sheet.set_value("A3", "Beta")
+    sheet.set_value("B3", "20")
+    sheet.set_value("C3", "3")
+    sheet.set_value("A4", "Gamma")
+    sheet.set_value("B4", "30")
+    sheet.set_value("C4", "8")
+    sheet.set_value("A5", "Delta")
+    sheet.set_value("B5", "40")
+    sheet.set_value("C5", "3")
+    sheet.set_value("A6", "Epsilon")
+    sheet.set_value("B6", "50")
+    sheet.set_value("C6", "6")
+    sheet
+
+fn _run_office_gui_sheet_cf_command() -> i32:
+    """`office sheet-gui-cf`: conditional formatting rendered LIVE in the
+    sheet GUI (Excel-parity -- the grid shows rule matches, not just the
+    export path). Builds the cf demo sheet, applies the cond_format
+    engine's rules (a data_bar rule over B2:B6 and an above_average rule
+    over C2:C6, both plain engine CondRule values -- evaluation stays 100%
+    in cond_format.spl), renders one real pixel frame through
+    office_gui_sheet_cf_pixels (matched cells' cf-* classes painted by
+    office_gui_sheet_minimal_css), and prints the frame proof line plus
+    the text_dump whose "!<marker>" suffixes name every matched cell (see
+    _build_office_gui_sheet_cf_demo's docstring for the hand-computed
+    expected buckets/mean)."""
+    val sheet = _build_office_gui_sheet_cf_demo()
+    val session = session_new(sheet, "")
+    val bar_rule = CondRule(range: "B2:B6", kind: "data_bar", criteria: "", n: 0, css: "")
+    val avg_rule = CondRule(range: "C2:C6", kind: "above_average", criteria: "", n: 0, css: "")
+    val rules: [CondRule] = [bar_rule, avg_rule]
+    val view = sheet_gui_view_with_formats(session, rules, 6, 3)
+    val pixels = office_gui_sheet_cf_pixels(view, session.selected_ref)
+    if pixels.len() == 0:
+        print "Error: office GUI render produced an empty frame for sheet-gui-cf"
+        return 1
+    val non_background = office_gui_non_background_pixel_count(pixels)
+    print "office-gui-cf: frame {office_gui_frame_width()}x{office_gui_frame_height()}, {non_background} non-background pixels"
+    for line in view.text_dump.split("\n"):
+        print "office-gui-cf: {line}"
+    return 0
+
 fn _run_office_gui_sheet_command() -> i32:
     """Render the demo sheet's grid view through the real UI stack and
     report the same pixel-level proof line style as the counter pilot, plus
@@ -476,6 +533,65 @@ fn _run_office_gui_pivot_command() -> i32:
 
     return 0
 
+fn _build_office_gui_slides_demo_deck() -> [Slide]:
+    """Demo deck for `office slides-gui` when no file argument is given:
+    3 slides (a title slide, a bullets slide with two nesting levels, and a
+    table slide), built by parsing inline deck text through the REAL
+    deck_format parser (parse_deck) -- the exact load path a deck.md file
+    argument takes, not a bespoke hand-assembled model."""
+    val deck_text = "Demo Deck\nWelcome to Simple Slides\n@layout: title-only\n---\nAgenda\n- First point\n  - Nested detail\n- Second point\n---\nResults\n| Region | Sales |\n| --- | --- |\n| East | 10 |\n| West | 20 |"
+    parse_deck(deck_text)
+
+fn _run_office_gui_slides_command(args: [text]) -> i32:
+    """`office slides-gui [deck.md]`: load a deck (parse_deck over the named
+    file, or the inline 3-slide demo deck when no file is given), render
+    slide 1 through the real UI stack with the same pixel-level proof line
+    style as sheet-gui/chart-gui/pivot-gui plus "office-gui-slides: <line>"
+    content marker lines, then script a fixed presenter key sequence
+    (SLIDE PRESENTER SURFACE): n -> n -> p -> 3 (next, next, prev, digit
+    goto). Each step prints an "office-gui-slides-step: <key> ->
+    slide=<n>/<total>" marker line followed by the resulting
+    slide_session_view's own dump lines -- proves the session pattern drives
+    the SAME slide_gui_view render the static (pre-step) dump above uses,
+    with no render duplication."""
+    var deck: [Slide] = []
+    if args.len() > 1:
+        val deck_path = args[1]
+        if not file_exists(deck_path):
+            print "Error: deck file not found: {deck_path}"
+            return 1
+        val deck_content = read_file(deck_path)
+        deck = parse_deck(deck_content)
+    else:
+        deck = _build_office_gui_slides_demo_deck()
+    var total = 0
+    for s in deck:
+        total = total + 1
+    if total == 0:
+        print "Error: deck has no slides"
+        return 1
+
+    var session = slide_session_new(deck)
+    val view = slide_session_view(session)
+    val pixels = office_gui_slide_pixels(view)
+    if pixels.len() == 0:
+        print "Error: office GUI render produced an empty frame for slides-gui"
+        return 1
+    val non_background = office_gui_non_background_pixel_count(pixels)
+    print "office-gui: slides-gui frame {office_gui_frame_width()}x{office_gui_frame_height()}, {non_background} non-background pixels"
+    for line in view.text_dump.split("\n"):
+        print "office-gui-slides: {line}"
+
+    val keys = ["n", "n", "p", "3"]
+    for k in keys:
+        var step_res = slide_gui_step(session, k)
+        session = step_res.session
+        print "office-gui-slides-step: {k} -> slide={session.current_index + 1}/{total}"
+        val step_view = slide_session_view(session)
+        for step_line in step_view.text_dump.split("\n"):
+            print "office-gui-slides: {step_line}"
+    return 0
+
 fn run_office(args: [text]) -> i32:
     """Dispatch to the requested office app or show the launcher."""
     val cmd = if args.len() > 0: args[0] else: "launcher"
@@ -531,10 +647,14 @@ fn run_office(args: [text]) -> i32:
             return _run_office_gui_sheet_scroll_command()
         "sheet-gui-live" =>
             return _run_office_gui_sheet_live_command()
+        "sheet-gui-cf" =>
+            return _run_office_gui_sheet_cf_command()
         "chart-gui" =>
             return _run_office_gui_chart_command()
         "pivot-gui" =>
             return _run_office_gui_pivot_command()
+        "slides-gui" =>
+            return _run_office_gui_slides_command(args)
         "render" =>
             return _run_render_command(args)
         "edit-sheet" =>
@@ -578,7 +698,7 @@ fn run_office(args: [text]) -> i32:
         "erp-invoice" =>
             return _run_erp_invoice_command(args)
         case _("unsupported office app names show usage"):
-            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|sheet-gui|sheet-gui-edit|sheet-gui-click|sheet-gui-key|sheet-gui-scroll|chart-gui|pivot-gui|render|open|convert|toc|merge|mail-merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
+            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|sheet-gui|sheet-gui-edit|sheet-gui-click|sheet-gui-key|sheet-gui-scroll|sheet-gui-cf|chart-gui|pivot-gui|render|open|convert|toc|merge|mail-merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
             return 1
 
 fn _basename(path: text) -> text:
