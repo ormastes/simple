@@ -63,6 +63,8 @@ impl NvmeQueues:
         true
 
     me sq_fetch() -> NvmeCmd:
+        if me.sq_len == 0:
+            return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val h: i64 = me.sq_head
         val cid:   i64 = me.sq_cid[h]
         val op:    i64 = me.sq_op[h]
@@ -90,6 +92,8 @@ impl NvmeQueues:
         true
 
     me cq_reap() -> NvmeCpl:
+        if me.cq_len == 0:
+            return cpl_make(0, SC_INVALID_FIELD, 0)
         val h: i64 = me.cq_head
         val cid:    i64 = me.cq_cid[h]
         val status: i64 = me.cq_status[h]
@@ -131,6 +135,9 @@ fn hil_queue_selftest() -> i64:
     failures = failures + expect_eq(f2.cid,    2,        "fetch2 cid==2")
     failures = failures + expect_eq(f2.opcode, OP_WRITE, "fetch2 opcode==OP_WRITE")
     failures = failures + expect_eq(q.sq_pending(), 0,   "sq_pending==0 after fetches")
+    val empty_sq = q.sq_fetch()
+    failures = failures + expect_eq(empty_sq.nblocks, 0, "empty SQ fetch returns inert flush")
+    failures = failures + expect_eq(q.sq_pending(), 0, "empty SQ fetch leaves pending count unchanged")
 
     # Test 3: completion post/reap round-trip (status + data preserved)
     val cpl = cpl_make(42, SC_SUCCESS, 0x99)
@@ -142,6 +149,9 @@ fn hil_queue_selftest() -> i64:
     failures = failures + expect_eq(r1.status, SC_SUCCESS, "reaped status==SC_SUCCESS")
     failures = failures + expect_eq(r1.data,   0x99,       "reaped data==0x99")
     failures = failures + expect_eq(q.cq_pending(), 0,     "cq_pending==0 after reap")
+    val empty_cq = q.cq_reap()
+    failures = failures + expect_eq(empty_cq.status, SC_INVALID_FIELD, "empty CQ reap fails closed")
+    failures = failures + expect_eq(q.cq_pending(), 0, "empty CQ reap leaves pending count unchanged")
 
     # Test 4: fill SQ to depth; next submit must return false
     # At this point sq_head==2, sq_tail==2 (2 submit+fetch cycles above)
