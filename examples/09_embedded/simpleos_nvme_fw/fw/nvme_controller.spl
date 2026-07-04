@@ -253,6 +253,8 @@ impl NvmeController:
                 val span: DramSpan = me.wb.alloc(cmd.nblocks)
                 if not span.ok:
                     status = SC_NS_NOT_READY
+                if status == SC_SUCCESS and not me.ftl.can_write_blocks(cmd.nblocks):
+                    status = SC_NS_NOT_READY
                 while i < cmd.nblocks and status == SC_SUCCESS:
                     status = me.wb.stage(span, i, prp_byte(cmd, i))
                     i = i + 1
@@ -393,6 +395,19 @@ fn nvme_controller_selftest() -> i64:
     c.io_process()
     val rob: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(rob.data, 0, "oversized IO write leaves first LBA untouched")
+
+    c.ftl.band.active_blk = 0
+    c.ftl.band.blk_state[0] = BLK_OPEN
+    c.ftl.band.active_wp = PAGES_PER_BLOCK - 1
+    c.ftl.band.free_count = GC_RESERVE
+    c.io_submit(1, cmd_make(73, OP_WRITE, 72, 2, prp_pack(0x21, 0x31)))
+    c.io_process()
+    val mr: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(mr.status, SC_NS_NOT_READY, "media-capacity IO write rejected before partial program")
+    c.io_submit(1, cmd_make(74, OP_READ, 72, 1, 0))
+    c.io_process()
+    val mrr: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(mrr.data, 0, "media-capacity rejection leaves IO first LBA untouched")
 
     # Get/Set Features through the admin path
     c.admin_submit(admin_set_feature_cmd(4, FEAT_TEMP_THRESH, 345))

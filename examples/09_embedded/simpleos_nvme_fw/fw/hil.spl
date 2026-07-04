@@ -48,6 +48,8 @@ impl Hil:
                 val span: DramSpan = me.wb.alloc(cmd.nblocks)
                 if not span.ok:
                     status = SC_NS_NOT_READY
+                if status == SC_SUCCESS and not me.ftl.can_write_blocks(cmd.nblocks):
+                    status = SC_NS_NOT_READY
                 while i < cmd.nblocks and status == SC_SUCCESS:
                     status = me.wb.stage(span, i, prp_byte(cmd, i))
                     i = i + 1
@@ -162,6 +164,19 @@ fn hil_selftest() -> i64:
     hil.run()
     val c26: NvmeCpl = hil.reap()
     fail = fail + expect_eq(c26.data, 0, "oversized write leaves first LBA untouched")
+
+    hil.ftl.band.active_blk = 0
+    hil.ftl.band.blk_state[0] = BLK_OPEN
+    hil.ftl.band.active_wp = PAGES_PER_BLOCK - 1
+    hil.ftl.band.free_count = GC_RESERVE
+    hil.submit(cmd_make(27, OP_WRITE, 82, 2, prp_pack(0x55, 0x66)))
+    hil.run()
+    val c27: NvmeCpl = hil.reap()
+    fail = fail + expect_eq(c27.status, SC_NS_NOT_READY, "write rejected when media cannot fit whole command")
+    hil.submit(cmd_make(28, OP_READ, 82, 1, 0))
+    hil.run()
+    val c28: NvmeCpl = hil.reap()
+    fail = fail + expect_eq(c28.data, 0, "media-capacity rejection leaves first LBA untouched")
 
     # out-of-range write is rejected by validation
     hil.submit(cmd_make(3, OP_WRITE, LBA_COUNT + 5, 1, 0))
