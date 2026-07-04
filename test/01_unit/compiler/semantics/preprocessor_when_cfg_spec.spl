@@ -4,6 +4,9 @@
 # Tests the @when/@elif/@else/@end block directives and @cfg per-declaration
 # conditional compilation that replaced the old #if/#elif/#else/#endif syntax.
 
+use std.spec.*
+use compiler.frontend.frontend.{preprocess_conditionals}
+
 describe "Preprocessor @when/@cfg":
     describe "@when block directives":
         it "@when(true) includes block":
@@ -108,3 +111,65 @@ describe "Preprocessor @when/@cfg":
         it "@when(unix) detects Unix-like systems":
             # Should be true on Linux, macOS, FreeBSD, etc.
             expect("@when(unix):").to_contain("unix")
+
+# ================================================================
+# Task #45 residual — source-driven same-name @cfg/@when arch dispatch
+# ================================================================
+# #45: two same-named functions gated by different @cfg(arch) conditions
+# resolved to whichever was DECLARED FIRST, instead of the host-matching
+# one (last/first-write-wins bug). Repro: bin/simple run on a same-name
+# arch_name() pair still shows the pre-fix symptom on the deployed binary
+# ("arm64" wins when the arm64 variant is declared first, on an x86_64
+# host) — that is expected: the deployed binary's self-compiled frontend
+# is redeploy-gated. This block verifies the FIX ITSELF straight from
+# current .spl source, independent of the deployed binary.
+#
+# Investigation trail (see git log):
+#   - d4ae10aeb3c "fix(interpreter): evaluate @cfg conditions at
+#     registration time (#45)" touches src/app/interpreter/module/
+#     evaluator.spl's evaluate_module/cfg_decorators_active. That function
+#     has zero callers anywhere in src/ or test/ (grep "evaluate_module(")
+#     and its item types (Node/FunctionDef with a `.decorators` field) do
+#     not match any struct/enum defined in the .spl tree — this is
+#     orphaned code on a path `bin/simple run` never executes.
+#   - cb8d9df703558 "fix(frontend): activate @cfg stripping (was inert) +
+#     native host arch/os detection" (one day earlier) is the REAL fix:
+#     src/compiler/10.frontend/frontend.spl's `preprocess_conditionals`
+#     used to be a local passthrough (`fn preprocess_conditionals(source):
+#     source`) that bare-name-shadowed its own
+#     `use compiler.core.parser_preprocessor.{preprocess_conditionals}`
+#     import, so @cfg/@when stripping never ran and the FIRST-declared
+#     same-name variant always won regardless of host arch. The fix
+#     delegates to the uniquely-named `_pp_preprocess_conditionals` so the
+#     real text-level stripping (which blanks the losing declaration
+#     entirely before parsing) always executes.
+#   - `preprocess_conditionals` here is imported from
+#     `compiler.frontend.frontend` (the exact function that had the #45
+#     regression), driven directly from source — not a hand-rolled
+#     reimplementation of its logic.
+describe "Task #45 residual — same-name arch dispatch (source-driven)":
+    it "keeps the host-matching @cfg variant, x86_64 declared first (order A)":
+        val src = "@cfg(x86_64)\nfn arch_name() -> text:\n    \"x86_64\"\n\n@cfg(arm64)\nfn arch_name() -> text:\n    \"arm64\"\n"
+        val out = preprocess_conditionals(src)
+        expect(out.contains("\"x86_64\"")).to_equal(true)
+        expect(out.contains("\"arm64\"")).to_equal(false)
+
+    it "keeps the host-matching @cfg variant, arm64 declared first (order B — the #45 regression order)":
+        val src = "@cfg(arm64)\nfn arch_name() -> text:\n    \"arm64\"\n\n@cfg(x86_64)\nfn arch_name() -> text:\n    \"x86_64\"\n"
+        val out = preprocess_conditionals(src)
+        expect(out.contains("\"x86_64\"")).to_equal(true)
+        expect(out.contains("\"arm64\"")).to_equal(false)
+
+    it "@when sibling path: keeps the host-matching block-form variant regardless of order":
+        # cfg_eval_key_value/cfg_detect_arch (compiler.core.cfg_platform) is
+        # shared between the per-declaration @cfg path and the block-scoped
+        # @when path (both route through preprocess_conditionals's two
+        # preprocessing passes in _pp_preprocess_conditionals). This proves
+        # the @when sibling has no analogous same-name gap in the current
+        # source: the false-condition block is blanked in its entirety
+        # before parsing, same as @cfg, so no duplicate name ever reaches
+        # the parser/interpreter to race on declaration order.
+        val src = "@when(arm64)\nfn arch_name() -> text:\n    \"arm64\"\n@end\n\n@when(x86_64)\nfn arch_name() -> text:\n    \"x86_64\"\n@end\n"
+        val out = preprocess_conditionals(src)
+        expect(out.contains("\"x86_64\"")).to_equal(true)
+        expect(out.contains("\"arm64\"")).to_equal(false)

@@ -1812,3 +1812,82 @@ task117 state). Repros: `scratchpad/{payload_check,p1_valscalar,p2_add,m4,
 b_unwrap,b_some,enumdict,enumdict2,enumdict3}.spl`. Diagnostic binaries (isolated
 cache): `scratchpad/stage4_ctrl117` (healthy baseline), `scratchpad/stage4_probeA`.
 Seed with reverted source: rebuild from HEAD or reuse task117.
+
+## Task #45 (2026-07-04) — source-driven verification: fix confirmed correct in source; deployed-binary gap is the SAME iteration-22 divergence, not a new bug
+
+Task #45 asked to verify the "@cfg arch-variant symbol collision (last-write-wins)"
+fix from source, independent of the deployed binary (`bin/simple run
+scratchpad/cfg_arch_dispatch_repro_b.spl` still prints `arm64`/FAIL — confirmed,
+baseline reproduces on this deployed binary and under
+`SIMPLE_EXECUTION_MODE=interpret` identically).
+
+### Two candidate "fix" commits — only one is real
+- `d4ae10aeb3c` "fix(interpreter): evaluate @cfg conditions at registration time
+  (#45)" touches `src/app/interpreter/module/evaluator.spl`
+  (`evaluate_module`/`cfg_decorators_active`). **This is dead code**:
+  `grep -rn "evaluate_module(" src/ test/` finds zero call sites outside the file
+  itself and its `__init__.spl` re-export, and its item types (`Node`/`FunctionDef`
+  with a `.decorators` field, a `Decorator` struct) match no struct/enum defined
+  anywhere in the `.spl` tree — `src/app/interpreter/core/eval.spl`'s `eval_stmt`
+  (the one real caller chain from `src/app/interpreter/main.spl`) doesn't even have
+  a Function-statement arm. `bin/simple run` never touches `src/app/interpreter/*`.
+- `cb8d9df703558` "fix(frontend): activate @cfg stripping (was inert) + native
+  host arch/os detection" (one day earlier) is the real, LIVE fix, confirming this
+  section's own "candidate (a)" hypothesis: `src/compiler/10.frontend/frontend.spl`
+  had a local `fn preprocess_conditionals(source): source` passthrough that
+  bare-name-shadowed its own `use compiler.core.parser_preprocessor.
+  {preprocess_conditionals}` import, so stripping was inert and (per that commit's
+  own message) "the FIRST-defined won" — exactly the order-B symptom. Fixed by
+  delegating to the uniquely-named `_pp_preprocess_conditionals` so the shadow
+  can't happen. Traced live call chain: `bin/simple run` -> `cli_run_file` ->
+  `interpret_file` (`driver_api_interpret.spl`) -> `CompilerDriver.compile()`
+  (`driver.spl`) -> `parse_full_frontend` (`frontend.spl:39`, calls
+  `preprocess_conditionals` before parsing) -> HIR -> `InterpreterBackendImpl`.
+
+### Source-driven spec: PASS — added to `test/01_unit/compiler/semantics/preprocessor_when_cfg_spec.spl`
+New `describe "Task #45 residual — same-name arch dispatch (source-driven)"`
+imports `compiler.frontend.frontend.{preprocess_conditionals}` (the exact
+function `cb8d9df703558` fixed) directly from source and drives it with same-name
+`@cfg(x86_64)`/`@cfg(arm64)` `arch_name()` pairs in both declaration orders, plus
+an `@when(arm64)`/`@when(x86_64)` block-form pair (residual sweep below). All 3
+new assertions PASS via `bin/simple test` (18/0 total in the file, ~850ms, no
+OOM) — **the fix is correct in current source**: `preprocess_conditionals` keeps
+only the host-matching variant regardless of declaration order, in both the
+`@cfg` and `@when` forms.
+
+### Interpret-mode cross-check
+| mode | repro_a (x86_64 first) | repro_b (arm64 first) |
+|---|---|---|
+| default (`bin/simple run`) | PASS (`x86_64`) | **FAIL** (`arm64`) |
+| `SIMPLE_EXECUTION_MODE=interpret` | PASS (`x86_64`) | **FAIL** (`arm64`) |
+
+Both modes behave identically — consistent with the shared `parse_full_frontend`
+front door for both JIT and interpret (`driver.spl` phase5 dispatch), so this
+isn't an interpret-vs-JIT-specific gap.
+
+### @when sibling-path residual: same shared mechanism, no NEW gap found
+`cfg_eval_key_value`/`cfg_detect_arch` (`compiler.core.cfg_platform`) is shared
+between the per-declaration `@cfg` pass and the block-scoped `@when` pass inside
+`_pp_preprocess_conditionals`. Repro (`scratchpad/cfg_when_dispatch_repro.spl`,
+`@when(arm64)`/`@when(x86_64)` block form, arm64 first) reproduces the identical
+order-dependent symptom on the deployed binary (`arch_name() = arm64`, FAIL) —
+but the source-driven spec assertion above proves the CURRENT
+`preprocess_conditionals` already handles this same-name `@when` case correctly.
+So this is not a distinct/unfixed bug: it is the same deployed-binary gap as
+`@cfg`, not a separate residual.
+
+### The deployed-binary gap is this doc's own iteration-22 "gate NOT closed" divergence, not new
+This section's "Iteration 22" already proved the preprocessor is "verifiably
+CORRECT... when compiled by the seed and run standalone" but produces an
+unfiltered result "only on the 993-module self-hosted binary" (candidates (a)
+same-bare-name collision — now resolved/ruled out by the `cb8d9df703558` fix
+landing cleanly — vs (b) a `Module.functions: Dict<text, Function>` duplicate-key
+overwrite misbehaving at full self-host scale, independent of preprocessing).
+Task #45's deployed-binary repro failures are that same open item, not a new one:
+the currently-deployed `bin/simple` predates `cb8d9df703558` and/or still hits
+divergence (b) at full scale. **Verification-only outcome: no code change made
+here** — fix is confirmed correct from source; final closure is gated on a
+redeploy (fresh self-hosted rebuild) plus resolving iteration 22's (b) if the
+divergence persists post-redeploy. Repros: `scratchpad/cfg_arch_dispatch_repro_a.spl`,
+`_repro_b.spl`, `_repro_spaced.spl`, `cfg_when_dispatch_repro.spl`,
+`cfg_when_dispatch_repro_a.spl`.
