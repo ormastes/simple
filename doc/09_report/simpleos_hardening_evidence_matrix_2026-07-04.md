@@ -21,6 +21,10 @@
 - formal_compiler_language: pass
 - formal_ui_policy: pass
 - formal_coverage: pass
+- byl_sby_artifact_audit: pass
+- byl_sby_artifact_audit_scope: checked-in non-Lean formal artifacts consist of the RISC-V BYL surface; generated SBY/RVFI artifacts are validated by the RISC-V sidecar contract and remain readiness evidence, not an RTL proof pass
+- byl_sby_artifact_audit_evidence: src/verification/riscv_product/riscv_product.byl plus sh scripts/check/check-riscv-formal-dual-track.shs
+- riscv_rtl_rvfi_readiness_note: RISC-V generated RTL bundles pass RVFI port, formal harness, SBY, and manifest artifact checks through scripts/check/check-riscv-fpga-sidecar-contract.shs; without an installed sby runner this is RVFI/SymbiYosys readiness evidence, not an RTL proof pass
 - shared_wm_logic: pass
 - cpu_simd_engine2d_diagram: pass
 - cpu_simd_report: doc/09_report/cpu_simd_engine2d_evidence_current_2026-07-02.md
