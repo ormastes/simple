@@ -429,32 +429,165 @@ struct SheetGuiSession:
     sheet: Sheet
     selected_ref: text
     pending_input: text   # uncommitted typed buffer for selected_ref; "" = none
+    view_top_row: i32     # 1-based first GRID row of the current viewport window
+    view_left_col: i32    # 1-based first GRID column of the window (1 = column A)
 
 fn session_new(sheet: Sheet, selected_ref: text) -> SheetGuiSession:
     """Start a GUI session over `sheet` with `selected_ref` (e.g. "D2")
-    already selected."""
-    SheetGuiSession(sheet: sheet, selected_ref: selected_ref, pending_input: "")
+    already selected, and the viewport window anchored at the top-left
+    corner (view_top_row=1, view_left_col=1 -- column A). That default
+    anchor is what keeps every pre-viewport caller's behavior EXACTLY
+    unchanged: as long as the window (max_rows x max_cols passed to
+    sheet_gui_view_with_selection/session_key/session_select) covers the
+    whole sheet, no scroll ever triggers."""
+    SheetGuiSession(sheet: sheet, selected_ref: selected_ref, pending_input: "", view_top_row: 1, view_left_col: 1)
 
-fn session_select(session: SheetGuiSession, ref_str: text) -> SheetGuiSession:
+fn session_select(session: SheetGuiSession, ref_str: text, view_rows: i32, view_cols: i32) -> SheetGuiSession:
     """Move the selection to `ref_str`. Discards any uncommitted pending
     buffer (a selection change abandons in-progress typing, same as an
-    arrow-key move via session_key -- only "enter" commits). Returns a NEW
-    session (copy semantics) -- callers must reassign."""
-    SheetGuiSession(sheet: session.sheet, selected_ref: ref_str, pending_input: "")
+    arrow-key move via session_key -- only "enter" commits). `view_rows`/
+    `view_cols` is the viewport window's SIZE (visible rows/cols, matching
+    the same values passed to sheet_gui_view_with_selection) -- if
+    `ref_str` falls outside the CURRENT window, the viewport scrolls the
+    minimum amount needed to bring it into view (see _sheet_gui_scroll_to_
+    show_row/_col below); already-visible refs leave the viewport
+    untouched. Returns a NEW session (copy semantics) -- callers must
+    reassign."""
+    var new_top = session.view_top_row
+    var new_left = session.view_left_col
+    val parsed = parse_cell_ref(ref_str)
+    if parsed != nil:
+        new_top = _sheet_gui_scroll_to_show_row(session.sheet, session.view_top_row, view_rows, parsed.row + 1)
+        val new_left0 = _sheet_gui_scroll_to_show_col(session.view_left_col - 1, view_cols, parsed.col)
+        new_left = new_left0 + 1
+    SheetGuiSession(sheet: session.sheet, selected_ref: ref_str, pending_input: "", view_top_row: new_top, view_left_col: new_left)
 
 fn session_edit(session: SheetGuiSession, ref_str: text, new_text: text) -> SheetGuiSession:
     """Set `ref_str`'s raw content to `new_text` (replacing whatever was
     there before, formula or literal), recalculate every formula cell in the
     sheet, and return a NEW session with the recalculated sheet. The
-    selection and any pending typed buffer are preserved across the edit --
-    callers must reassign."""
+    selection, any pending typed buffer, and the current viewport window
+    are all preserved across the edit -- callers must reassign."""
     var sheet = session.sheet
     sheet.set_value(ref_str, new_text)
     sheet = recalculate_formula_cells(sheet)
-    SheetGuiSession(sheet: sheet, selected_ref: session.selected_ref, pending_input: session.pending_input)
+    SheetGuiSession(sheet: sheet, selected_ref: session.selected_ref, pending_input: session.pending_input, view_top_row: session.view_top_row, view_left_col: session.view_left_col)
 
 fn _sheet_gui_selection_cell_id(ref_str: text) -> text:
     "cell_{ref_str}"
+
+# ---------------------------------------------------------------------------
+# Viewport/scroll arithmetic (second INTERACTION pillar: navigable window
+# over a sheet larger than the rendered grid, with selection-follows-scroll).
+#
+# Window semantics -- N-VISIBLE, not N-grid rows: `max_rows`/`view_rows`
+# below always means "how many VISIBLE (non-hidden) rows the window shows",
+# never "how many consecutive grid row NUMBERS to scan". A hidden row costs
+# no space in the viewport: scrolling a 5-row window to start at row 10 with
+# row 12 hidden shows rows 10,11,13,14,15 (backfilling the one hidden row
+# cost by pulling in row 15) -- exactly Excel's own scrolling behavior,
+# where hiding a row does not shrink the screen's row count. Columns have no
+# hidden-column concept anywhere in this sheet engine today, so the column
+# axis is plain consecutive-index arithmetic (no backfill needed).
+# ---------------------------------------------------------------------------
+
+val OFFICE_GUI_SHEET_SCROLL_SCAN_LIMIT: i32 = 2000
+
+fn _sheet_gui_visible_rows(sheet: Sheet, start_row: i32, count: i32) -> [i32]:
+    """Forward-scan from `start_row` (inclusive), collecting up to `count`
+    VISIBLE 1-based grid row numbers (skipping every sheet.is_row_hidden
+    row). This is the core "N-visible window" primitive: the returned list
+    IS the window's actual rendered row set, in grid order, however far
+    forward it had to backfill past hidden rows. Bounded by
+    OFFICE_GUI_SHEET_SCROLL_SCAN_LIMIT rows past `start_row` so a
+    pathological all-hidden sheet cannot loop forever."""
+    var collected: [i32] = []
+    var scan_row = start_row
+    val cap = start_row + OFFICE_GUI_SHEET_SCROLL_SCAN_LIMIT
+    while collected.len() < count and scan_row <= cap and scan_row >= 1:
+        if not sheet.is_row_hidden(scan_row.to_i64()):
+            collected.push(scan_row)
+        scan_row = scan_row + 1
+    collected
+
+fn _sheet_gui_visible_rows_before(sheet: Sheet, end_row: i32, count: i32) -> [i32]:
+    """Backward-scan from `end_row` (inclusive) down to row 1, collecting up
+    to `count` VISIBLE row numbers, then returned in ASCENDING (grid) order
+    -- i.e. the window of up to `count` visible rows that ENDS at
+    `end_row`. Used to compute "scroll backward just enough to reveal this
+    row at the BOTTOM of the window" (page-up / arrow-up past the top
+    edge). Returns fewer than `count` entries near the top of the sheet."""
+    var collected: [i32] = []
+    var scan_row = end_row
+    while collected.len() < count and scan_row >= 1:
+        if not sheet.is_row_hidden(scan_row.to_i64()):
+            collected.push(scan_row)
+        scan_row = scan_row - 1
+    var ascending: [i32] = []
+    var j = collected.len() - 1
+    while j >= 0:
+        ascending.push(collected[j])
+        j = j - 1
+    ascending
+
+fn _sheet_gui_next_visible_row(sheet: Sheet, after_row: i32) -> i32:
+    """First VISIBLE row strictly after `after_row` (skips hidden rows).
+    Falls back to after_row + 1 if none is found within the scroll scan
+    limit (degenerate all-hidden case)."""
+    var scan_row = after_row + 1
+    val cap = after_row + OFFICE_GUI_SHEET_SCROLL_SCAN_LIMIT
+    while scan_row <= cap:
+        if not sheet.is_row_hidden(scan_row.to_i64()):
+            return scan_row
+        scan_row = scan_row + 1
+    after_row + 1
+
+fn _sheet_gui_prev_visible_row(sheet: Sheet, before_row: i32) -> i32:
+    """First VISIBLE row strictly before `before_row` (skips hidden rows),
+    scanning back to row 1. Falls back to row 1 if none is found."""
+    var scan_row = before_row - 1
+    while scan_row >= 1:
+        if not sheet.is_row_hidden(scan_row.to_i64()):
+            return scan_row
+        scan_row = scan_row - 1
+    1
+
+fn _sheet_gui_scroll_to_show_row(sheet: Sheet, view_top_row: i32, view_rows: i32, target_row: i32) -> i32:
+    """New view_top_row so `target_row` is visible in a `view_rows`-tall
+    N-visible window -- the MINIMAL scroll: unchanged if `target_row` is
+    already in the current window; otherwise the target becomes the window's
+    new TOP row (target above the window) or its new BOTTOM row (target
+    below the window), never overshooting further than needed."""
+    val current = _sheet_gui_visible_rows(sheet, view_top_row, view_rows)
+    var i = 0
+    var already_visible = false
+    while i < current.len():
+        val cur_row = current[i]
+        if cur_row == target_row:
+            already_visible = true
+        i = i + 1
+    if already_visible:
+        return view_top_row
+    if current.len() > 0:
+        val first_visible = current[0]
+        if target_row < first_visible:
+            return target_row
+    else:
+        return target_row
+    val ending_here = _sheet_gui_visible_rows_before(sheet, target_row, view_rows)
+    if ending_here.len() > 0:
+        return ending_here[0]
+    target_row
+
+fn _sheet_gui_scroll_to_show_col(view_left_col0: i32, view_cols: i32, target_col0: i32) -> i32:
+    """New 0-based view_left_col so `target_col0` (0-based) is visible in a
+    `view_cols`-wide window -- minimal scroll, no hidden-column backfill
+    (this sheet engine has no hidden-column concept)."""
+    if target_col0 >= view_left_col0 and target_col0 < view_left_col0 + view_cols:
+        return view_left_col0
+    if target_col0 < view_left_col0:
+        return target_col0
+    target_col0 - view_cols + 1
 
 fn sheet_gui_view_with_selection(session: SheetGuiSession, max_rows: i32, max_cols: i32) -> SheetGuiView:
     """Like sheet_gui_view, but each cell is its own text_widget (id
@@ -467,13 +600,30 @@ fn sheet_gui_view_with_selection(session: SheetGuiSession, max_rows: i32, max_co
     session_key typing sequence in progress on the selected cell, not yet
     committed via "enter"), the selected cell's text is shown as
     "<ref>:<buffer>" instead of the bracket form, so specs can assert
-    mid-typing state without parsing HTML/pixels either."""
+    mid-typing state without parsing HTML/pixels either.
+
+    Viewport: `max_rows`/`max_cols` are the window's SIZE in VISIBLE rows/
+    columns (see the "Viewport/scroll arithmetic" comment above for why
+    N-visible, not N-grid, is the chosen semantics), and the window starts
+    at session.view_top_row/view_left_col (both 1-based; view_left_col=1 is
+    column A) instead of always starting at row 1/column A -- so the SAME
+    grid a plain (non-session) sheet_gui_view would show is what renders
+    when view_top_row=1 and view_left_col=1 (session_new's defaults),
+    keeping every pre-viewport caller's behavior byte-for-byte unchanged.
+    Column/row headers show the window's ACTUAL letters/numbers (e.g. C..F
+    over rows 10..14), not the 0-based/1-based window-relative position.
+    text_dump's FIRST line is a viewport marker, "viewport|<top_ref>:
+    <bottom_right_ref>", so specs can assert the window's exact position
+    without re-deriving it from the header/row lines."""
     val sheet = session.sheet
+    val left_col0 = session.view_left_col - 1
+    val visible_rows = _sheet_gui_visible_rows(sheet, session.view_top_row, max_rows)
+
     var headers: [text] = [""]
     var header_cells: [WidgetNode] = [text_widget("sheet_sel_hdr_corner", "")]
     var c = 0
     while c < max_cols:
-        val letter = col_to_letter(c)
+        val letter = col_to_letter(left_col0 + c)
         headers.push(letter)
         header_cells.push(text_widget("sheet_sel_hdr_{letter}", letter))
         c = c + 1
@@ -481,30 +631,43 @@ fn sheet_gui_view_with_selection(session: SheetGuiSession, max_rows: i32, max_co
 
     var row_nodes: [WidgetNode] = [header_row]
     var dump_lines: [text] = [headers.join("|")]
-    var r = 1
-    while r <= max_rows:
-        if not sheet.is_row_hidden(r.to_i64()):
-            var row_cells: [WidgetNode] = [text_widget("sheet_sel_rowhdr_{r}", "{r}")]
-            var dump_cells: [text] = ["{r}"]
-            var rc = 0
-            while rc < max_cols:
-                val ref_str = "{col_to_letter(rc)}{r}"
-                var cell_text = cell_display_text(sheet.get_cell(ref_str))
-                if ref_str == session.selected_ref:
-                    if session.pending_input != "":
-                        cell_text = "{ref_str}:{session.pending_input}"
-                    else:
-                        cell_text = "[{cell_text}]"
-                row_cells.push(text_widget(_sheet_gui_selection_cell_id(ref_str), cell_text))
-                dump_cells.push(cell_text)
-                rc = rc + 1
-            row_nodes.push(row("sheet_sel_row_{r}", row_cells))
-            dump_lines.push(dump_cells.join("|"))
-        r = r + 1
+    var ri = 0
+    while ri < visible_rows.len():
+        val r = visible_rows[ri]
+        var row_cells: [WidgetNode] = [text_widget("sheet_sel_rowhdr_{r}", "{r}")]
+        var dump_cells: [text] = ["{r}"]
+        var rc = 0
+        while rc < max_cols:
+            val ref_str = "{col_to_letter(left_col0 + rc)}{r}"
+            var cell_text = cell_display_text(sheet.get_cell(ref_str))
+            if ref_str == session.selected_ref:
+                if session.pending_input != "":
+                    cell_text = "{ref_str}:{session.pending_input}"
+                else:
+                    cell_text = "[{cell_text}]"
+            row_cells.push(text_widget(_sheet_gui_selection_cell_id(ref_str), cell_text))
+            dump_cells.push(cell_text)
+            rc = rc + 1
+        row_nodes.push(row("sheet_sel_row_{r}", row_cells))
+        dump_lines.push(dump_cells.join("|"))
+        ri = ri + 1
+
+    var top_row = session.view_top_row
+    var bottom_row = session.view_top_row
+    if visible_rows.len() > 0:
+        top_row = visible_rows[0]
+        bottom_row = visible_rows[visible_rows.len() - 1]
+    val top_ref = "{col_to_letter(left_col0)}{top_row}"
+    val bottom_right_ref = "{col_to_letter(left_col0 + max_cols - 1)}{bottom_row}"
+    var marked_dump_lines: [text] = ["viewport|{top_ref}:{bottom_right_ref}"]
+    var di = 0
+    while di < dump_lines.len():
+        marked_dump_lines.push(dump_lines[di])
+        di = di + 1
 
     val root = column("sheet_gui_sel_root", row_nodes)
     val tree = build_tree_with_title(root, "Simple Sheet", "light")
-    SheetGuiView(tree: tree, text_dump: dump_lines.join("\n"))
+    SheetGuiView(tree: tree, text_dump: marked_dump_lines.join("\n"))
 
 fn office_gui_sheet_session_pixels(view: SheetGuiView, selected_ref: text) -> [u32]:
     """Render a sheet_gui_view_with_selection tree to ARGB pixels, with the
@@ -604,7 +767,12 @@ fn session_click(session: SheetGuiSession, x: i32, y: i32, max_rows: i32, max_co
     val ref_str = _sheet_gui_cell_ref_from_id(state.focused_id)
     if ref_str == "":
         return session
-    session_select(session, ref_str)
+    # A click can only hit a cell that WAS rendered inside the (max_rows x
+    # max_cols) window just built above, so the resulting ref is already
+    # inside the viewport -- passing this call's own max_rows/max_cols as
+    # session_select's view_rows/view_cols is a guaranteed no-op scroll,
+    # not a coincidence.
+    session_select(session, ref_str, max_rows, max_cols)
 
 # ---------------------------------------------------------------------------
 # Keyboard interaction: arrow-key grid navigation + typed-buffer cell edit.
@@ -693,39 +861,124 @@ fn _sheet_gui_move_within_bounds(ref_str: text, key: text, max_rows: i32, max_co
 
     cell_ref_to_string(CellRef(col: col, row: row))
 
-fn session_key(session: SheetGuiSession, key: text, max_rows: i32, max_cols: i32) -> SheetGuiSession:
+fn session_key(session: SheetGuiSession, key: text, max_rows: i32, max_cols: i32, view_rows: i32, view_cols: i32) -> SheetGuiSession:
     """Session-level keyboard translator (see the "Keyboard interaction"
     comment block above for why this isn't routed through common.ui.event.
     process_event): "up"/"down"/"left"/"right" move selected_ref within the
-    max_rows x max_cols grid via _sheet_gui_move_within_bounds (clamped at
+    max_rows x max_cols GRID via _sheet_gui_move_within_bounds (clamped at
     the edges, skipping hidden rows -- the selection can never land on a
-    hidden row) and discard any uncommitted pending buffer (same rule as
-    session_select); "enter" commits a non-empty pending buffer into
-    selected_ref via session_edit (recalculation runs) and clears the
-    buffer, or is a no-op when the buffer is already empty; "escape"
-    discards the pending buffer without committing; "backspace" trims the
-    last character off the buffer; any other single-character key appends
-    to the buffer (mirrors widget_hit.spl's widget_dispatch_key single-char
-    convention -- the same "printable" definition the framework's own key
-    sink uses, just applied to a text_widget cell instead of an input/
-    textfield one, since widget_dispatch_key only acts on those two kinds).
-    Returns a NEW session (copy semantics) -- callers must reassign."""
+    hidden row), auto-scroll the view_rows x view_cols VIEWPORT the minimal
+    amount needed if that move steps outside the current window (see
+    _sheet_gui_scroll_to_show_row/_col), and discard any uncommitted
+    pending buffer (same rule as session_select); "enter" commits a
+    non-empty pending buffer into selected_ref via session_edit
+    (recalculation runs) and clears the buffer, or is a no-op when the
+    buffer is already empty; "escape" discards the pending buffer without
+    committing; "backspace" trims the last character off the buffer; any
+    other single-character key appends to the buffer (mirrors widget_hit.
+    spl's widget_dispatch_key single-char convention -- the same
+    "printable" definition the framework's own key sink uses, just applied
+    to a text_widget cell instead of an input/textfield one, since
+    widget_dispatch_key only acts on those two kinds). Every branch below
+    carries the viewport (view_top_row/view_left_col) through unchanged
+    except the arrow-key branch, which is the only one that can move the
+    selection. Returns a NEW session (copy semantics) -- callers must
+    reassign."""
     if key == "up" or key == "down" or key == "left" or key == "right":
         val moved_ref = _sheet_gui_move_within_bounds(session.selected_ref, key, max_rows, max_cols, session.sheet)
-        return SheetGuiSession(sheet: session.sheet, selected_ref: moved_ref, pending_input: "")
+        var new_top = session.view_top_row
+        var new_left = session.view_left_col
+        val parsed = parse_cell_ref(moved_ref)
+        if parsed != nil:
+            new_top = _sheet_gui_scroll_to_show_row(session.sheet, session.view_top_row, view_rows, parsed.row + 1)
+            val new_left0 = _sheet_gui_scroll_to_show_col(session.view_left_col - 1, view_cols, parsed.col)
+            new_left = new_left0 + 1
+        return SheetGuiSession(sheet: session.sheet, selected_ref: moved_ref, pending_input: "", view_top_row: new_top, view_left_col: new_left)
     if key == "enter":
         if session.pending_input == "":
             return session
         val committed = session_edit(session, session.selected_ref, session.pending_input)
-        return SheetGuiSession(sheet: committed.sheet, selected_ref: committed.selected_ref, pending_input: "")
+        return SheetGuiSession(sheet: committed.sheet, selected_ref: committed.selected_ref, pending_input: "", view_top_row: session.view_top_row, view_left_col: session.view_left_col)
     if key == "escape":
-        return SheetGuiSession(sheet: session.sheet, selected_ref: session.selected_ref, pending_input: "")
+        return SheetGuiSession(sheet: session.sheet, selected_ref: session.selected_ref, pending_input: "", view_top_row: session.view_top_row, view_left_col: session.view_left_col)
     if key == "backspace":
         var buf = session.pending_input
         if buf.len() > 0:
             buf = buf.slice(0, buf.len() - 1)
-        return SheetGuiSession(sheet: session.sheet, selected_ref: session.selected_ref, pending_input: buf)
+        return SheetGuiSession(sheet: session.sheet, selected_ref: session.selected_ref, pending_input: buf, view_top_row: session.view_top_row, view_left_col: session.view_left_col)
     if key.len() == 1:
         val buf = "{session.pending_input}{key}"
-        return SheetGuiSession(sheet: session.sheet, selected_ref: session.selected_ref, pending_input: buf)
+        return SheetGuiSession(sheet: session.sheet, selected_ref: session.selected_ref, pending_input: buf, view_top_row: session.view_top_row, view_left_col: session.view_left_col)
+    session
+
+fn session_scroll(session: SheetGuiSession, direction: text, view_rows: i32, view_cols: i32) -> SheetGuiSession:
+    """Explicit page move over a view_rows x view_cols viewport:
+    "page_down"/"page_up" jump the window by one full page of VISIBLE rows
+    (the next/previous view_rows-tall N-visible window, backfilling past
+    hidden rows exactly like sheet_gui_view_with_selection's rendering
+    does); "page_left"/"page_right" jump it by view_cols columns (no
+    hidden-column concept to backfill). Selection follows the page move
+    (mirrors Excel's own Page Down/Up/Left/Right, which move the active
+    cell along with the viewport): the selected cell keeps the SAME
+    relative position inside the window (same row-within-window for a
+    vertical page, same column-within-window for a horizontal page) so it
+    is never left scrolled out of view. Unknown directions are a no-op.
+    Returns a NEW session (copy semantics) -- callers must reassign."""
+    if direction == "page_down" or direction == "page_up":
+        val old_visible = _sheet_gui_visible_rows(session.sheet, session.view_top_row, view_rows)
+        val parsed_sel = parse_cell_ref(session.selected_ref)
+        var sel_col0 = 0
+        var sel_row = session.view_top_row
+        if parsed_sel != nil:
+            sel_col0 = parsed_sel.col
+            sel_row = parsed_sel.row + 1
+        var offset = 0
+        var i = 0
+        while i < old_visible.len():
+            val cur_row = old_visible[i]
+            if cur_row == sel_row:
+                offset = i
+            i = i + 1
+        var new_top = session.view_top_row
+        if direction == "page_down" and old_visible.len() > 0:
+            val last_row = old_visible[old_visible.len() - 1]
+            new_top = _sheet_gui_next_visible_row(session.sheet, last_row)
+        if direction == "page_up" and old_visible.len() > 0:
+            val first_row = old_visible[0]
+            val prev_row = _sheet_gui_prev_visible_row(session.sheet, first_row)
+            val prior_page = _sheet_gui_visible_rows_before(session.sheet, prev_row, view_rows)
+            if prior_page.len() > 0:
+                new_top = prior_page[0]
+            else:
+                new_top = 1
+        val new_visible = _sheet_gui_visible_rows(session.sheet, new_top, view_rows)
+        var new_sel_row = new_top
+        if new_visible.len() > 0:
+            if offset < new_visible.len():
+                new_sel_row = new_visible[offset]
+            else:
+                new_sel_row = new_visible[new_visible.len() - 1]
+        val new_ref = cell_ref_to_string(CellRef(col: sel_col0, row: new_sel_row - 1))
+        return SheetGuiSession(sheet: session.sheet, selected_ref: new_ref, pending_input: "", view_top_row: new_top, view_left_col: session.view_left_col)
+    if direction == "page_left" or direction == "page_right":
+        val old_left0 = session.view_left_col - 1
+        val parsed_sel = parse_cell_ref(session.selected_ref)
+        var sel_row0 = 0
+        var sel_col0 = old_left0
+        if parsed_sel != nil:
+            sel_row0 = parsed_sel.row
+            sel_col0 = parsed_sel.col
+        var new_left0 = old_left0
+        if direction == "page_right":
+            new_left0 = old_left0 + view_cols
+        else:
+            new_left0 = old_left0 - view_cols
+            if new_left0 < 0:
+                new_left0 = 0
+        val col_offset = sel_col0 - old_left0
+        var new_sel_col0 = new_left0 + col_offset
+        if new_sel_col0 < 0:
+            new_sel_col0 = new_left0
+        val new_ref = cell_ref_to_string(CellRef(col: new_sel_col0, row: sel_row0))
+        return SheetGuiSession(sheet: session.sheet, selected_ref: new_ref, pending_input: "", view_top_row: session.view_top_row, view_left_col: new_left0 + 1)
     session
