@@ -24,12 +24,22 @@ fn ftl_fill(size: i64, fill: i64) -> [i64]:
         i = i + 1
     arr
 
+fn ftl_map_cap_limit(cap: i64) -> i64:
+    if cap < 0:
+        return 0
+    if cap > MAP_CACHE_CAP:
+        return MAP_CACHE_CAP
+    cap
+
 # Return index of slot with minimum c_age (LRU). Ties: lowest index wins.
 fn ftl_lru_slot(c_age: [i64], cap: i64) -> i64:
+    val lim: i64 = ftl_map_cap_limit(cap)
+    if lim <= 0:
+        return UNMAP
     var lru: i64 = 0
     var min_age: i64 = c_age[0]
     var i: i64 = 1
-    while i < cap:
+    while i < lim:
         if c_age[i] < min_age:
             min_age = c_age[i]
             lru = i
@@ -40,7 +50,8 @@ fn ftl_lru_slot(c_age: [i64], cap: i64) -> i64:
 fn ftl_cache_find(c_lba: [i64], cap: i64, lba: i64) -> i64:
     var found: i64 = -1
     var i: i64 = 0
-    while i < cap:
+    val lim: i64 = ftl_map_cap_limit(cap)
+    while i < lim:
         if c_lba[i] == lba:
             found = i
         i = i + 1
@@ -104,6 +115,8 @@ impl L2pMap:
             return ftl_map_sanitize_ppn(me.c_ppn[found])
         me.misses = me.misses + 1
         lru = ftl_lru_slot(me.c_age, me.cap)
+        if lru == UNMAP:
+            return ftl_map_sanitize_ppn(me.l2p[lba])
         if me.c_dirty[lru] == 1:
             el = me.c_lba[lru]
             if ftl_map_lba_valid(el) and ftl_map_ppn_valid(me.c_ppn[lru]):
@@ -133,6 +146,9 @@ impl L2pMap:
             me.c_age[found] = me.tick
         if found < 0:
             lru = ftl_lru_slot(me.c_age, me.cap)
+            if lru == UNMAP:
+                me.l2p[lba] = ppn
+                return
             if me.c_dirty[lru] == 1:
                 el = me.c_lba[lru]
                 if ftl_map_lba_valid(el) and ftl_map_ppn_valid(me.c_ppn[lru]):
@@ -149,7 +165,8 @@ impl L2pMap:
     # dirty updates are lost here and must be recovered from the journal (WAL replay).
     me crash_volatile():
         var i: i64 = 0
-        while i < me.cap:
+        val lim: i64 = ftl_map_cap_limit(me.cap)
+        while i < lim:
             me.c_lba[i] = UNMAP
             me.c_ppn[i] = UNMAP
             me.c_dirty[i] = 0
@@ -168,7 +185,8 @@ impl L2pMap:
     me flush():
         var i: i64 = 0
         var fl: i64 = 0
-        while i < me.cap:
+        val lim: i64 = ftl_map_cap_limit(me.cap)
+        while i < lim:
             if me.c_dirty[i] == 1:
                 fl = me.c_lba[i]
                 if ftl_map_lba_valid(fl) and ftl_map_ppn_valid(me.c_ppn[i]):
@@ -228,6 +246,17 @@ fn ftl_map_selftest() -> i64:
     m.l2p[47] = NUM_PAGES
     failures = failures + expect_eq(m.lookup(47), UNMAP, "invalid l2p ppn lookup fails closed")
     failures = failures + expect_eq(m.l2p_entry(47), UNMAP, "invalid l2p ppn entry fails closed")
+    m.cap = MAP_CACHE_CAP + 8
+    m.c_lba[63] = 48
+    m.c_ppn[63] = 2048
+    m.c_dirty[63] = 1
+    m.flush()
+    failures = failures + expect_eq(m.l2p_entry(48), 2048, "oversized cache cap flush clamps to real slots")
+    m.cap = 0
+    m.update(49, 2049)
+    failures = failures + expect_eq(m.l2p_entry(49), 2049, "zero cache cap update writes through")
+    failures = failures + expect_eq(m.lookup(49), 2049, "zero cache cap lookup reads backing map")
+    m.cap = MAP_CACHE_CAP
 
     # 4. force >cap distinct updates; assert evictions happened and data is correct
     var j: i64 = 0
