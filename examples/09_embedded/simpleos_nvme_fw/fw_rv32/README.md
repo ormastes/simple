@@ -13,7 +13,7 @@ like `boot.spl`'s `_line_*` helpers.
 The scalar logic is `bin/simple check`-clean and host-verified (the XOR-cancel math reproduces
 `fail=0`).
 
-## Integration (when the rv32 toolchain is restored)
+## Integration
 
 `entry.spl` exposes `nvme_fw_rv32_selftest()`, designed to be called from the rv32 boot chain:
 
@@ -21,6 +21,9 @@ The scalar logic is `bin/simple check`-clean and host-verified (the XOR-cancel m
    after `riscv_noalloc_log_init()`.
 2. Build the rv32 OS ELF: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`.
 3. Boot + check the marker: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs <elf>`.
+
+`build.shs` fails closed with `NVME_RV32_BOOT_NOT_WIRED` until step 1 is true, so a stock rv32 OS
+image cannot be mistaken for P9 firmware evidence.
 
 (No standalone `@naked _start` is hand-written here — the proven `_start`/crt/UART live in
 `boot.spl`; reusing them is more reliable than an untestable hand-rolled entry.)

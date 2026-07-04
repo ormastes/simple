@@ -47,6 +47,9 @@ fn _probe(cmd: text) -> (text, text, i64):
 fn _boot() -> (text, text, i64):
     process_run("/bin/sh", ["-c", "mkdir -p build/test-artifacts; timeout 12 qemu-system-riscv32 -machine virt -cpu rv32 -m 128M -nographic -bios none -kernel " + ELF + " -serial file:" + SERIAL + " </dev/null; cat " + SERIAL])
 
+fn _run(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
 describe "NVMe firmware rv32 baremetal-remote boot on QEMU":
     """
     The Simple-generated rv32 kernel binary boots on QEMU and its serial console
@@ -83,3 +86,18 @@ describe "NVMe firmware rv32 baremetal-remote boot on QEMU":
 
                 step("The supervisor-call subsystem self-check reports healthy")
                 expect(out).to_contain("SVC OK")
+
+describe "NVMe firmware rv32 P9 build evidence":
+    """
+    The P9 firmware-specific rv32 wrapper must not build a stock OS image and call it NVMe
+    evidence. Until boot.spl is wired to `nvme_fw_rv32_selftest`, it fails closed.
+    """
+
+    it "keeps the rv32 RAIN reference check-clean and fails closed until boot wiring exists":
+        step("The array-free rv32 RAIN reference typechecks")
+        val (check_out, check_err, check_code) = _run("bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
+        expect(check_code).to_equal(0)
+
+        step("The P9 build wrapper refuses to build a stock rv32 OS as firmware evidence")
+        val (build_out, build_err, build_code) = _run("sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs 2>&1 || true")
+        expect(build_out).to_contain("NVME_RV32_BOOT_NOT_WIRED")
