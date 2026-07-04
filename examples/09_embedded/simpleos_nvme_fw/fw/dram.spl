@@ -61,8 +61,7 @@ impl DramWriteBuffer:
                     me.used_slots[start + i] = 1
                     me.data[start + i] = 0
                     i = i + 1
-                if start + nblocks > me.count:
-                    me.count = start + nblocks
+                me.count = me.count + nblocks
                 return DramSpan(base: start, len: nblocks, ok: true)
             start = start + 1
         me.overflows = me.overflows + 1
@@ -75,8 +74,11 @@ impl DramWriteBuffer:
         while i < span.len:
             val idx: i64 = span.base + i
             if idx >= 0 and idx < me.cap:
-                me.used_slots[idx] = 0
-                me.data[idx] = 0
+                if me.used_slots[idx] != 0:
+                    me.used_slots[idx] = 0
+                    me.data[idx] = 0
+                    if me.count > 0:
+                        me.count = me.count - 1
             i = i + 1
 
     me stage(span: DramSpan, index: i64, byte: i64) -> i64:
@@ -130,9 +132,13 @@ fn dram_selftest() -> i64:
     fail = fail + expect_eq(b.stage(s, 2, 1), SC_NS_NOT_READY, "over-span stage fails")
     fail = fail + expect_eq(b.overflow_count(), 1, "overflow counted")
     b.release(s)
+    fail = fail + expect_eq(b.used(), 0, "release resets live usage")
     val full: DramSpan = b.alloc(WRITE_BUFFER_CAP_BLOCKS)
     fail = fail + expect_eq(if full.ok: 1 else: 0, 1, "release frees arena")
+    fail = fail + expect_eq(b.used(), WRITE_BUFFER_CAP_BLOCKS, "full alloc tracks live usage")
     val over: DramSpan = b.alloc(1)
     fail = fail + expect_eq(if over.ok: 1 else: 0, 0, "over-budget alloc fails")
     fail = fail + expect_eq(b.overflow_count(), 2, "alloc overflow counted")
+    b.release(full)
+    fail = fail + expect_eq(b.used(), 0, "full release resets live usage")
     fail
