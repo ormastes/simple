@@ -1,9 +1,9 @@
 # SimpleOS Hardening Evidence Matrix
 
-- status: fail
-- reason: matrix-incomplete
-- passed: 21/22
-- blocked_rows: qemu_wm_simple_gui_mdi
+- status: pass
+- reason: pass
+- passed: 22/22
+- blocked_rows: 
 - recovery_hints: ssh=test/03_system/os/ssh_live_login_in_qemu_spec.spl;web=test/03_system/gui/layered_simple_gui_web_engine2d_bitmap_evidence_spec.spl;mdi=test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl
 - executable_launch_from_fs: pass
 - ssh_shell_smf_and_exec: pass
@@ -45,15 +45,15 @@
 - qemu_guest_perf_harness_pending_marker: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=<positive> iterations=<positive> timing_unit=tsc
 - qemu_guest_perf_harness_marker_line: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=251664583 iterations=16 timing_unit=tsc scope=simple-vga-paint
 - qemu_host_perf_promotes_qemu_perf: false
-- qemu_wm_simple_gui_mdi: fail
-- qemu_wm_simple_gui_mdi_ppm_anchors: fail
+- qemu_wm_simple_gui_mdi: pass
+- qemu_wm_simple_gui_mdi_ppm_anchors: pass
 - qemu_wm_simple_gui_mdi_ppm_nonblack: 786432
 - qemu_wm_simple_gui_mdi_input_status: pass
 - qemu_wm_simple_gui_mdi_input_before_ppm_bytes: 2359312
 - qemu_wm_simple_gui_mdi_input_after_ppm_bytes: 2359312
 - qemu_wm_simple_gui_mdi_input_before_raw_bytes: 3145728
 - qemu_wm_simple_gui_mdi_input_after_raw_bytes: 3145728
-- qemu_wm_simple_gui_mdi_input_before_sha256: c3b4b04289e44c29a7e6f826859607916b9fee659f14bfcdee416299c83aac3c
+- qemu_wm_simple_gui_mdi_input_before_sha256: fe59dff4f3bf54bb26946fc11802fffddfe388c4b37183e1810a8683e89f338c
 - qemu_wm_simple_gui_mdi_input_after_sha256: 37232ce97acfba7871257a71e0bfa3837296a0e81b5b3fdcba662e705141bc21
 - rv64_display_smoke_qmp: pass
 - rv64_display_smoke_qmp_reason: rv64-display-smoke-qmp-wm-lifecycle-pass
@@ -71,6 +71,6 @@
 - production_gui_parity_report: doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-29.md
 - simple_web_node_env: build/simple_web_engine2d_js_bitmap_evidence_current/evidence.env
 - simple_web_bun_env: build/bun_simple_web_engine2d_js_bitmap_evidence_current/evidence.env
-- gui_entry_latest_dir: build/tmp/gui_entry_engine2d_wm_simple_web_spec_1933429_1783145216820871
+- gui_entry_latest_dir: build/tmp/gui_entry_engine2d_wm_simple_web_spec_1958348_1783145478496067
 - gui_entry_capture_ppm_bytes: 2359312
 - gui_entry_capture_raw_bytes: 3145728
