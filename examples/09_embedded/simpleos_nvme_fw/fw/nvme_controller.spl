@@ -239,6 +239,8 @@ impl NvmeController:
         SC_INVALID_FIELD
 
     me do_get_log(cmd: AdminCmd) -> AdminResult:
+        if cmd.nsid != 0 or cmd.cdw11 != 0 or cmd.cdw12 != 0 or cmd.cdw10 != admin_logid(cmd.cdw10):
+            return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
         val logid: i64 = admin_logid(cmd.cdw10)
         if logid == LOG_SMART:
             val pu: i64 = smart_percent_used(me.ftl.max_erase())
@@ -669,6 +671,13 @@ fn nvme_controller_selftest() -> i64:
     c.admin_process()
     val glf: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(glf.data, c.firmware_revision(), "get-log FW_SLOT returns the active fw revision")
+    c.admin_submit(admin_cmd_make(50, ADMIN_GET_LOG, 1, LOG_ERROR, 0, 0))
+    c.admin_submit(admin_cmd_make(51, ADMIN_GET_LOG, 0, LOG_ERROR | (1 << 16), 0, 0))
+    c.admin_process()
+    val gln: NvmeCpl = c.admin_reap()
+    val glr: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(gln.status, SC_INVALID_FIELD, "get-log with namespace rejected")
+    fail = fail + expect_eq(glr.status, SC_INVALID_FIELD, "get-log with reserved dword bits rejected")
 
     # SMART: clean checkpointed power cycles are not unsafe; dirty ones are.
     c.checkpoint()
