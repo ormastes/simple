@@ -1,8 +1,8 @@
 # NVMe firmware — bare-metal RV32 on-device self-test (gap-closure P9).
 #
-# Array-free, scalar re-expression of the firmware's core RAIN parity reconstruct
-# (../fw/rain.spl, proven in ../fw/proofs/Rain.lean) so it can run inside the bare-metal rv32
-# boot path with NO heap and NO arrays — matching the constraint documented in
+# Array-free, scalar re-expression of the firmware's core RAIN parity reconstruct and
+# SECDED payload-window ECC floor so it can run inside the bare-metal rv32 boot path with
+# NO heap and NO arrays — matching the constraint documented in
 # src/os/kernel/arch/riscv32/boot.spl ("keep this module freestanding and minimal ... without
 # pulling runtime formatting, arrays, or boot metadata into the first-stage entry object").
 # UART output uses rt_riscv_uart_put exactly like boot.spl's `_line_*` helpers — one byte at a
@@ -26,6 +26,7 @@
 # no-alloc port of ../fw/ is the larger ceiling.
 
 extern fn rt_riscv_uart_put(byte: u64)
+use logic.{nvme_fw_rv32_logic_selftest}
 
 fn _uart_put(byte: i64):
     rt_riscv_uart_put(byte as u64)
@@ -85,45 +86,8 @@ fn _emit_fail():
     _uart_put(76)
     _uart_put(10)
 
-# RAIN reconstruct on 8 scalar channels (no arrays): parity = XOR of all channels; for any lost
-# channel, parity XOR the survivors recovers the exact lost word (XOR is its own inverse). This is
-# the property proven in ../fw/proofs/Rain.lean, exercised here entirely with scalars.
 fn nvme_fw_rv32_selftest() -> i64:
-    val d0 = 256
-    val d1 = 263
-    val d2 = 270
-    val d3 = 277
-    val d4 = 284
-    val d5 = 291
-    val d6 = 298
-    val d7 = 305
-    val parity = d0 ^ d1 ^ d2 ^ d3 ^ d4 ^ d5 ^ d6 ^ d7
-
-    var fail = 0
-    # Lose each channel in turn; parity XOR the seven survivors must equal the lost word.
-    if (parity ^ d1 ^ d2 ^ d3 ^ d4 ^ d5 ^ d6 ^ d7) != d0:
-        fail = fail + 1
-    if (parity ^ d0 ^ d2 ^ d3 ^ d4 ^ d5 ^ d6 ^ d7) != d1:
-        fail = fail + 1
-    if (parity ^ d0 ^ d1 ^ d3 ^ d4 ^ d5 ^ d6 ^ d7) != d2:
-        fail = fail + 1
-    if (parity ^ d0 ^ d1 ^ d2 ^ d4 ^ d5 ^ d6 ^ d7) != d3:
-        fail = fail + 1
-    if (parity ^ d0 ^ d1 ^ d2 ^ d3 ^ d5 ^ d6 ^ d7) != d4:
-        fail = fail + 1
-    if (parity ^ d0 ^ d1 ^ d2 ^ d3 ^ d4 ^ d6 ^ d7) != d5:
-        fail = fail + 1
-    if (parity ^ d0 ^ d1 ^ d2 ^ d3 ^ d4 ^ d5 ^ d7) != d6:
-        fail = fail + 1
-    if (parity ^ d0 ^ d1 ^ d2 ^ d3 ^ d4 ^ d5 ^ d6) != d7:
-        fail = fail + 1
-
-    # Channel-failure rebuild: with parity sealed, channel 3 goes uncorrectable; reconstruct it
-    # from the parity and the surviving channels and confirm it matches the original word.
-    val recovered3 = parity ^ d0 ^ d1 ^ d2 ^ d4 ^ d5 ^ d6 ^ d7
-    if recovered3 != d3:
-        fail = fail + 1
-
+    val fail = nvme_fw_rv32_logic_selftest()
     if fail == 0:
         _emit_pass()
     else:
