@@ -32,6 +32,8 @@ impl Fil:
     # Program one page (data + OOB {lba, seq}). Retires the block on program failure.
     # Returns NAND_OK, NAND_BAD_BLOCK (target already retired), or NAND_PROG_FAIL.
     me program(ppn: i64, lba: i64, seq: i64, data: i64) -> i64:
+        if not ppn_in_range(ppn):
+            return NAND_BAD_BLOCK
         val blk: i64 = ppn_block(ppn)
         val bad: bool = me.bbt.is_bad(blk)
         if bad:
@@ -48,6 +50,8 @@ impl Fil:
 
     # Read one page and verify against the ECC stored in NAND OOB at program time.
     me read(ppn: i64) -> FilRead:
+        if not ppn_in_range(ppn):
+            return FilRead(data: 0, lba: UNMAP, seq: 0, code: NAND_ECC_FAIL)
         me.fmc.load(fmc_cmd(FMC_OP_READ, ppn, 0, 0, 0))
         me.fmc.issue()
         val res: FmcResult = me.fmc.out()
@@ -57,6 +61,8 @@ impl Fil:
 
     # Erase one block. Retires the block on erase failure.
     me erase(blk: i64) -> i64:
+        if not block_in_range(blk):
+            return NAND_BAD_BLOCK
         val bad: bool = me.bbt.is_bad(blk)
         if bad:
             return NAND_BAD_BLOCK
@@ -71,6 +77,8 @@ impl Fil:
         res.code
 
     me erase_count(blk: i64) -> i64:
+        if not block_in_range(blk):
+            return 0
         me.fmc.erase_count(blk)
 
     me block_bad(blk: i64) -> bool:
@@ -81,15 +89,23 @@ impl Fil:
 
     # ── test hooks (forwarded through the controller to the simulated NAND) ──
     me inject_prog_fail(blk: i64):
+        if not block_in_range(blk):
+            return
         me.fmc.inject_prog_fail(blk)
 
     me inject_erase_fail(blk: i64):
+        if not block_in_range(blk):
+            return
         me.fmc.inject_erase_fail(blk)
 
     me inject_read_bitflip(ppn: i64, n: i64):
+        if not ppn_in_range(ppn):
+            return
         me.fmc.inject_read_bitflip(ppn, n)
 
     me corrupt_page_data(ppn: i64, data: i64):
+        if not ppn_in_range(ppn):
+            return
         me.fmc.corrupt_page_data(ppn, data)
 
 # ── Self-test ─────────────────────────────────────────────────────────────────
@@ -157,5 +173,9 @@ fn fil_selftest() -> i64:
     if fil.block_bad(6):
         bb6 = 1
     fail = fail + expect_eq(bb6, 1, "block 6 retired after erase fail")
+    fail = fail + expect_eq(fil.program(NUM_PAGES, 1, 1, 1), NAND_BAD_BLOCK, "FIL out-of-range program fails closed")
+    fail = fail + expect_eq(fil.read(NUM_PAGES).code, NAND_ECC_FAIL, "FIL out-of-range read fails closed")
+    fail = fail + expect_eq(fil.erase(NUM_BLOCKS), NAND_BAD_BLOCK, "FIL out-of-range erase fails closed")
+    fail = fail + expect_eq(fil.erase_count(NUM_BLOCKS), 0, "FIL out-of-range erase count is inert")
 
     fail

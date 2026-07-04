@@ -61,6 +61,8 @@ fn nand_new() -> Nand:
 
 impl Nand:
     me program(ppn: i64, lba: i64, seq: i64, data: i64) -> i64:
+        if not ppn_in_range(ppn):
+            return NAND_BAD_BLOCK
         val blk: i64 = ppn_block(ppn)
         if me.blk_state[blk] == BLK_BAD:
             return NAND_BAD_BLOCK
@@ -75,9 +77,13 @@ impl Nand:
         NAND_OK
 
     me read_page(ppn: i64) -> NandRead:
+        if not ppn_in_range(ppn):
+            return NandRead(data: 0, lba: UNMAP, seq: 0, ecc: 0, err: 2)
         NandRead(data: me.data[ppn], lba: me.oob_lba[ppn], seq: me.oob_seq[ppn], ecc: me.oob_ecc[ppn], err: me.page_err[ppn])
 
     me erase_block(blk: i64) -> i64:
+        if not block_in_range(blk):
+            return NAND_BAD_BLOCK
         if me.blk_state[blk] == BLK_BAD:
             return NAND_BAD_BLOCK
         if me.erase_fail[blk] == 1:
@@ -99,21 +105,33 @@ impl Nand:
         NAND_OK
 
     me erase_count(blk: i64) -> i64:
+        if not block_in_range(blk):
+            return 0
         me.blk_erase[blk]
 
     me inject_prog_fail(blk: i64):
+        if not block_in_range(blk):
+            return
         me.prog_fail[blk] = 1
 
     me inject_erase_fail(blk: i64):
+        if not block_in_range(blk):
+            return
         me.erase_fail[blk] = 1
 
     me inject_read_bitflip(ppn: i64, n: i64):
+        if not ppn_in_range(ppn):
+            return
         me.page_err[ppn] = n
 
     me corrupt_page_data(ppn: i64, data: i64):
+        if not ppn_in_range(ppn):
+            return
         me.data[ppn] = data
 
     me set_bad(blk: i64):
+        if not block_in_range(blk):
+            return
         me.blk_state[blk] = BLK_BAD
 
 # ── Self-test ─────────────────────────────────────────────────────────────────
@@ -171,5 +189,9 @@ fn nand_selftest() -> i64:
     val r3: NandRead = nand.read_page(ppn3)
     failures = failures + expect_eq(r3.data, 0xCE, "corrupt_page_data changes payload")
     failures = failures + expect_eq(r3.ecc, ecc_compute(0xCD, 42, 3), "corrupt_page_data preserves stored ecc")
+    failures = failures + expect_eq(nand.program(NUM_PAGES, 1, 1, 1), NAND_BAD_BLOCK, "out-of-range program fails closed")
+    failures = failures + expect_eq(nand.read_page(NUM_PAGES).err, 2, "out-of-range read reports uncorrectable")
+    failures = failures + expect_eq(nand.erase_block(NUM_BLOCKS), NAND_BAD_BLOCK, "out-of-range erase fails closed")
+    failures = failures + expect_eq(nand.erase_count(NUM_BLOCKS), 0, "out-of-range erase count is inert")
 
     failures
