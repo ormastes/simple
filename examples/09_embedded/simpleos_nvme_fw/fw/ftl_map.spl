@@ -46,6 +46,9 @@ fn ftl_cache_find(c_lba: [i64], cap: i64, lba: i64) -> i64:
         i = i + 1
     found
 
+fn ftl_map_lba_valid(lba: i64) -> bool:
+    lba >= 0 and lba < LBA_COUNT
+
 # ── struct ────────────────────────────────────────────────────────────────────
 
 struct L2pMap:
@@ -81,6 +84,8 @@ impl L2pMap:
     # Look up lba. Cache hit -> return cached ppn.
     # Cache miss -> evict LRU (dirty writeback if needed), load from l2p, return.
     me lookup(lba: i64) -> i64:
+        if not ftl_map_lba_valid(lba):
+            return UNMAP
         val found: i64 = ftl_cache_find(me.c_lba, me.cap, lba)
         var lru: i64 = 0
         var el: i64 = 0
@@ -93,7 +98,7 @@ impl L2pMap:
         lru = ftl_lru_slot(me.c_age, me.cap)
         if me.c_dirty[lru] == 1:
             el = me.c_lba[lru]
-            if el >= 0:
+            if ftl_map_lba_valid(el):
                 me.l2p[el] = me.c_ppn[lru]
             me.evicts = me.evicts + 1
         me.tick = me.tick + 1
@@ -106,6 +111,8 @@ impl L2pMap:
     # Write lba->ppn into cache (dirty). Does NOT touch l2p directly.
     # Evicts LRU with dirty writeback if cache is full and lba not already cached.
     me update(lba: i64, ppn: i64):
+        if not ftl_map_lba_valid(lba):
+            return
         val found: i64 = ftl_cache_find(me.c_lba, me.cap, lba)
         var lru: i64 = 0
         var el: i64 = 0
@@ -118,7 +125,7 @@ impl L2pMap:
             lru = ftl_lru_slot(me.c_age, me.cap)
             if me.c_dirty[lru] == 1:
                 el = me.c_lba[lru]
-                if el >= 0:
+                if ftl_map_lba_valid(el):
                     me.l2p[el] = me.c_ppn[lru]
                 me.evicts = me.evicts + 1
             me.tick = me.tick + 1
@@ -143,6 +150,8 @@ impl L2pMap:
     # Authoritative (flash-resident) mapping for an lba, bypassing the cache.
     # Valid only after flush(); used to rebuild volatile state on recovery.
     me l2p_entry(lba: i64) -> i64:
+        if not ftl_map_lba_valid(lba):
+            return UNMAP
         me.l2p[lba]
 
     # Drain all dirty cache entries to l2p and clear dirty flags.
@@ -152,7 +161,7 @@ impl L2pMap:
         while i < me.cap:
             if me.c_dirty[i] == 1:
                 fl = me.c_lba[i]
-                if fl >= 0:
+                if ftl_map_lba_valid(fl):
                     me.l2p[fl] = me.c_ppn[i]
                 me.c_dirty[i] = 0
             i = i + 1
@@ -187,6 +196,12 @@ fn ftl_map_selftest() -> i64:
     val unmap_val: i64 = m.lookup(999)
     failures = failures + expect_eq(unmap_val, UNMAP, "unmapped lba returns UNMAP")
     failures = failures + expect_eq(m.miss_count(), 1, "miss_count == 1 after unmapped lookup")
+    failures = failures + expect_eq(m.lookup(LBA_COUNT), UNMAP, "out-of-range lookup fails closed")
+    failures = failures + expect_eq(m.miss_count(), 1, "out-of-range lookup does not touch cache")
+    m.update(LBA_COUNT, 123)
+    m.flush()
+    failures = failures + expect_eq(m.l2p_entry(LBA_COUNT), UNMAP, "out-of-range update is inert")
+    failures = failures + expect_eq(m.l2p_entry(-1), UNMAP, "negative l2p entry fails closed")
 
     # 4. force >cap distinct updates; assert evictions happened and data is correct
     var j: i64 = 0
