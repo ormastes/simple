@@ -2423,6 +2423,212 @@ fn _serial_from_civil(y: i64, m: i64, d: i64) -> f64:
 fn _civil_from_serial(serial: f64) -> [i64]:
     _civil_from_days(serial.to_i64() - 25569)
 
+# ---------------------------------------------------------------------------
+# Financial securities machinery (CARD 3): day-count basis + coupon walker.
+# All helpers take/return scalars only — the interpreter array-param bug
+# forbids passing arrays across call boundaries (plan quirk ledger).
+# ---------------------------------------------------------------------------
+
+fn _sec_days_in_month(y: i64, m: i64) -> i64:
+    """Days in month m of year y, with Gregorian leap-year rule."""
+    if m == 2:
+        if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)):
+            return 29
+        return 28
+    if m == 4 or m == 6 or m == 9 or m == 11:
+        return 30
+    31
+
+fn _sec_edate(y: i64, m: i64, d: i64, months: i64) -> f64:
+    """Add `months` to (y,m,d) with end-of-month day clamp; return Excel serial.
+
+    Coupon dates are always in the positive-year range so integer `/` and `%`
+    stay well-defined (no negative-modulo hazard).
+    """
+    val tot = y * 12 + (m - 1) + months
+    val ny = tot / 12
+    val nm = tot % 12 + 1
+    var nd = d
+    val dim = _sec_days_in_month(ny, nm)
+    if nd > dim:
+        nd = dim
+    _serial_from_civil(ny, nm, nd)
+
+fn _daycount_num(s1: f64, s2: f64, basis: i64) -> f64:
+    """Day-count numerator between two serials per basis 0..4.
+
+    basis 0 = US (NASD) 30/360: d1=min(d1,30); if d1==30 then d2=min(d2,30).
+    basis 4 = European 30/360: both days clamped to 30 unconditionally.
+    basis 1/2/3 = actual days (s2 - s1).
+    """
+    if basis == 1 or basis == 2 or basis == 3:
+        return s2 - s1
+    val c1 = _civil_from_serial(s1)
+    val c2 = _civil_from_serial(s2)
+    val y1 = c1[0]
+    val m1 = c1[1]
+    var d1 = c1[2]
+    val y2 = c2[0]
+    val m2 = c2[1]
+    var d2 = c2[2]
+    if basis == 4:
+        if d1 > 30:
+            d1 = 30
+        if d2 > 30:
+            d2 = 30
+    else:
+        if d1 > 30:
+            d1 = 30
+        if d1 == 30:
+            if d2 > 30:
+                d2 = 30
+    (360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)).to_f64()
+
+fn _daycount_frac(s1: f64, s2: f64, basis: i64) -> f64:
+    """Year fraction between two serials per basis 0..4 (Excel YEARFRAC)."""
+    if basis == 0 or basis == 4:
+        return _daycount_num(s1, s2, basis) / 360.0
+    if basis == 2:
+        return (s2 - s1) / 360.0
+    if basis == 3:
+        return (s2 - s1) / 365.0
+    # basis 1: actual/actual
+    val c1 = _civil_from_serial(s1)
+    val c2 = _civil_from_serial(s2)
+    val y1 = c1[0]
+    val y2 = c2[0]
+    if y1 == y2:
+        var denom = 365.0
+        if (y1 % 4 == 0 and (y1 % 100 != 0 or y1 % 400 == 0)):
+            denom = 366.0
+        return (s2 - s1) / denom
+    val years = (y2 - y1 + 1).to_f64()
+    val days = _serial_from_civil(y2 + 1, 1, 1) - _serial_from_civil(y1, 1, 1)
+    (s2 - s1) / (days / years)
+
+fn _coup_pcd(settle: f64, mat: f64, freq: i64) -> f64:
+    """Previous coupon date (serial) on or before settlement."""
+    val c = _civil_from_serial(mat)
+    val y = c[0]
+    val m = c[1]
+    val d = c[2]
+    val step = 12 / freq
+    var n = 0
+    var cd = _sec_edate(y, m, d, 0 - n * step)
+    while cd > settle:
+        n = n + 1
+        cd = _sec_edate(y, m, d, 0 - n * step)
+    cd
+
+fn _coup_ncd(settle: f64, mat: f64, freq: i64) -> f64:
+    """Next coupon date (serial) strictly after settlement."""
+    val c = _civil_from_serial(mat)
+    val y = c[0]
+    val m = c[1]
+    val d = c[2]
+    val step = 12 / freq
+    var n = 0
+    var cd = _sec_edate(y, m, d, 0 - n * step)
+    while cd > settle:
+        n = n + 1
+        cd = _sec_edate(y, m, d, 0 - n * step)
+    _sec_edate(y, m, d, 0 - (n - 1) * step)
+
+fn _coup_num(settle: f64, mat: f64, freq: i64) -> f64:
+    """Number of coupons from the next coupon date to maturity, inclusive."""
+    val ncd = _coup_ncd(settle, mat, freq)
+    val c = _civil_from_serial(mat)
+    val y = c[0]
+    val m = c[1]
+    val d = c[2]
+    val step = 12 / freq
+    var n = 0
+    var cnt = 0
+    var cd = _sec_edate(y, m, d, 0 - n * step)
+    while cd >= ncd:
+        cnt = cnt + 1
+        n = n + 1
+        cd = _sec_edate(y, m, d, 0 - n * step)
+    cnt.to_f64()
+
+fn _coup_days(settle: f64, mat: f64, freq: i64, basis: i64) -> f64:
+    """Days in the coupon period containing settlement."""
+    if basis == 1:
+        return _coup_ncd(settle, mat, freq) - _coup_pcd(settle, mat, freq)
+    if basis == 3:
+        return 365.0 / freq.to_f64()
+    360.0 / freq.to_f64()
+
+fn _coup_daybs(settle: f64, mat: f64, freq: i64, basis: i64) -> f64:
+    """Days from the beginning of the coupon period to settlement."""
+    _daycount_num(_coup_pcd(settle, mat, freq), settle, basis)
+
+fn _coup_daysnc(settle: f64, mat: f64, freq: i64, basis: i64) -> f64:
+    """Days from settlement to the next coupon date."""
+    if basis == 0 or basis == 4:
+        return _coup_days(settle, mat, freq, basis) - _coup_daybs(settle, mat, freq, basis)
+    _coup_ncd(settle, mat, freq) - settle
+
+fn _sec_price(settle: f64, mat: f64, rate: f64, yld: f64, redemption: f64, freq: i64, basis: i64) -> f64:
+    """Excel PRICE: PV of coupons + redemption less accrued, per-100 face."""
+    val n = _coup_num(settle, mat, freq).to_i64()
+    val e = _coup_days(settle, mat, freq, basis)
+    val dsc = _coup_daysnc(settle, mat, freq, basis)
+    val a = _coup_daybs(settle, mat, freq, basis)
+    val coup = 100.0 * rate / freq.to_f64()
+    val yf = yld / freq.to_f64()
+    val dsce = dsc / e
+    val t1 = redemption / _powf(1.0 + yf, (n - 1).to_f64() + dsce)
+    var s = 0.0
+    var k = 1
+    while k <= n:
+        s = s + coup / _powf(1.0 + yf, (k - 1).to_f64() + dsce)
+        k = k + 1
+    t1 + s - coup * a / e
+
+fn _sec_yield(settle: f64, mat: f64, rate: f64, pr: f64, redemption: f64, freq: i64, basis: i64) -> f64:
+    """Excel YIELD via bisection on PRICE (no closed form); bracket [0, 10]."""
+    var lo = 0.0
+    var hi = 10.0
+    var i = 0
+    while i < 100:
+        val mid = (lo + hi) / 2.0
+        val p = _sec_price(settle, mat, rate, mid, redemption, freq, basis)
+        if p > pr:
+            lo = mid
+        else:
+            hi = mid
+        i = i + 1
+    (lo + hi) / 2.0
+
+fn _sec_duration(settle: f64, mat: f64, coup0: f64, yld: f64, freq: i64, basis: i64) -> f64:
+    """Macaulay duration (years) using the same DSC/E fractional first period
+    as PRICE — this reproduces Excel exactly for on-coupon settlements."""
+    val n = _coup_num(settle, mat, freq).to_i64()
+    val e = _coup_days(settle, mat, freq, basis)
+    val dsc = _coup_daysnc(settle, mat, freq, basis)
+    val dsce = dsc / e
+    val c = coup0 * 100.0 / freq.to_f64()
+    val yv = 1.0 + yld / freq.to_f64()
+    var p = 0.0
+    var du = 0.0
+    var t = 1
+    while t <= n:
+        var cf = c
+        if t == n:
+            cf = c + 100.0
+        val ex = (t - 1).to_f64() + dsce
+        val z = cf / _powf(yv, ex)
+        p = p + z
+        du = du + ex * z
+        t = t + 1
+    du / p / freq.to_f64()
+
+fn _sec_pow10_digits(fr: f64) -> f64:
+    """10 ^ (floor(log10(fraction)) + 1) — the DOLLARDE/DOLLARFR scale."""
+    val pw = _floor_f64(_ln_f64(fr) / _ln_f64(10.0)) + 1.0
+    _powf(10.0, pw)
+
 fn _mean(values: [f64]) -> f64:
     var sum = 0.0
     for v in values:
@@ -3557,6 +3763,287 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     value = value * (1.0 + r)
                 return CellValue.NumberVal(value: value)
             return CellValue.ErrorVal(message: "FVSCHEDULE requires principal and rates")
+        "ACCRINT":
+            if args.len() >= 6:
+                val issue = _first_val(args[0])
+                val settle = _first_val(args[2])
+                val rate = _first_val(args[3])
+                val par = _first_val(args[4])
+                val basis = if args.len() >= 7: _first_val(args[6]).to_i64() else: 0
+                if basis < 0 or basis > 4 or rate <= 0.0 or par <= 0.0 or issue >= settle:
+                    return CellValue.ErrorVal(message: "ACCRINT domain error")
+                return CellValue.NumberVal(value: par * rate * _daycount_frac(issue, settle, basis))
+            return CellValue.ErrorVal(message: "ACCRINT requires issue, first_interest, settle, rate, par, freq")
+        "ACCRINTM":
+            if args.len() >= 4:
+                val issue = _first_val(args[0])
+                val settle = _first_val(args[1])
+                val rate = _first_val(args[2])
+                val par = _first_val(args[3])
+                val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
+                if basis < 0 or basis > 4 or rate <= 0.0 or par <= 0.0 or issue >= settle:
+                    return CellValue.ErrorVal(message: "ACCRINTM domain error")
+                return CellValue.NumberVal(value: par * rate * _daycount_frac(issue, settle, basis))
+            return CellValue.ErrorVal(message: "ACCRINTM requires issue, settle, rate, par")
+        "COUPPCD":
+            if args.len() >= 3:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val freq = _first_val(args[2]).to_i64()
+                val basis = if args.len() >= 4: _first_val(args[3]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4):
+                    return CellValue.ErrorVal(message: "COUPPCD domain error")
+                return CellValue.NumberVal(value: _coup_pcd(settle, mat, freq))
+            return CellValue.ErrorVal(message: "COUPPCD requires settle, maturity, freq")
+        "COUPNCD":
+            if args.len() >= 3:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val freq = _first_val(args[2]).to_i64()
+                val basis = if args.len() >= 4: _first_val(args[3]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4):
+                    return CellValue.ErrorVal(message: "COUPNCD domain error")
+                return CellValue.NumberVal(value: _coup_ncd(settle, mat, freq))
+            return CellValue.ErrorVal(message: "COUPNCD requires settle, maturity, freq")
+        "COUPNUM":
+            if args.len() >= 3:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val freq = _first_val(args[2]).to_i64()
+                val basis = if args.len() >= 4: _first_val(args[3]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4):
+                    return CellValue.ErrorVal(message: "COUPNUM domain error")
+                return CellValue.NumberVal(value: _coup_num(settle, mat, freq))
+            return CellValue.ErrorVal(message: "COUPNUM requires settle, maturity, freq")
+        "COUPDAYS":
+            if args.len() >= 3:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val freq = _first_val(args[2]).to_i64()
+                val basis = if args.len() >= 4: _first_val(args[3]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4):
+                    return CellValue.ErrorVal(message: "COUPDAYS domain error")
+                return CellValue.NumberVal(value: _coup_days(settle, mat, freq, basis))
+            return CellValue.ErrorVal(message: "COUPDAYS requires settle, maturity, freq")
+        "COUPDAYBS":
+            if args.len() >= 3:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val freq = _first_val(args[2]).to_i64()
+                val basis = if args.len() >= 4: _first_val(args[3]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4):
+                    return CellValue.ErrorVal(message: "COUPDAYBS domain error")
+                return CellValue.NumberVal(value: _coup_daybs(settle, mat, freq, basis))
+            return CellValue.ErrorVal(message: "COUPDAYBS requires settle, maturity, freq")
+        "COUPDAYSNC":
+            if args.len() >= 3:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val freq = _first_val(args[2]).to_i64()
+                val basis = if args.len() >= 4: _first_val(args[3]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4):
+                    return CellValue.ErrorVal(message: "COUPDAYSNC domain error")
+                return CellValue.NumberVal(value: _coup_daysnc(settle, mat, freq, basis))
+            return CellValue.ErrorVal(message: "COUPDAYSNC requires settle, maturity, freq")
+        "PRICE":
+            if args.len() >= 6:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val rate = _first_val(args[2])
+                val yld = _first_val(args[3])
+                val redemption = _first_val(args[4])
+                val freq = _first_val(args[5]).to_i64()
+                val basis = if args.len() >= 7: _first_val(args[6]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4) or rate < 0.0 or yld < 0.0 or redemption <= 0.0:
+                    return CellValue.ErrorVal(message: "PRICE domain error")
+                return CellValue.NumberVal(value: _sec_price(settle, mat, rate, yld, redemption, freq, basis))
+            return CellValue.ErrorVal(message: "PRICE requires settle, maturity, rate, yld, redemption, freq")
+        "YIELD":
+            if args.len() >= 6:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val rate = _first_val(args[2])
+                val pr = _first_val(args[3])
+                val redemption = _first_val(args[4])
+                val freq = _first_val(args[5]).to_i64()
+                val basis = if args.len() >= 7: _first_val(args[6]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4) or rate < 0.0 or pr <= 0.0 or redemption <= 0.0:
+                    return CellValue.ErrorVal(message: "YIELD domain error")
+                return CellValue.NumberVal(value: _sec_yield(settle, mat, rate, pr, redemption, freq, basis))
+            return CellValue.ErrorVal(message: "YIELD requires settle, maturity, rate, pr, redemption, freq")
+        "PRICEDISC":
+            if args.len() >= 4:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val discount = _first_val(args[2])
+                val redemption = _first_val(args[3])
+                val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or discount <= 0.0 or redemption <= 0.0:
+                    return CellValue.ErrorVal(message: "PRICEDISC domain error")
+                return CellValue.NumberVal(value: redemption - discount * redemption * _daycount_frac(settle, mat, basis))
+            return CellValue.ErrorVal(message: "PRICEDISC requires settle, maturity, discount, redemption")
+        "YIELDDISC":
+            if args.len() >= 4:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val pr = _first_val(args[2])
+                val redemption = _first_val(args[3])
+                val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or pr <= 0.0 or redemption <= 0.0:
+                    return CellValue.ErrorVal(message: "YIELDDISC domain error")
+                return CellValue.NumberVal(value: (redemption - pr) / pr / _daycount_frac(settle, mat, basis))
+            return CellValue.ErrorVal(message: "YIELDDISC requires settle, maturity, pr, redemption")
+        "PRICEMAT":
+            if args.len() >= 5:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val issue = _first_val(args[2])
+                val rate = _first_val(args[3])
+                val yld = _first_val(args[4])
+                val basis = if args.len() >= 6: _first_val(args[5]).to_i64() else: 0
+                if settle >= mat or issue >= settle or basis < 0 or basis > 4 or rate < 0.0 or yld < 0.0:
+                    return CellValue.ErrorVal(message: "PRICEMAT domain error")
+                val dsm = _daycount_frac(settle, mat, basis)
+                val dim = _daycount_frac(issue, mat, basis)
+                val a = _daycount_frac(issue, settle, basis)
+                return CellValue.NumberVal(value: (100.0 + dim * rate * 100.0) / (1.0 + dsm * yld) - a * rate * 100.0)
+            return CellValue.ErrorVal(message: "PRICEMAT requires settle, maturity, issue, rate, yld")
+        "YIELDMAT":
+            if args.len() >= 5:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val issue = _first_val(args[2])
+                val rate = _first_val(args[3])
+                val pr = _first_val(args[4])
+                val basis = if args.len() >= 6: _first_val(args[5]).to_i64() else: 0
+                if settle >= mat or issue >= settle or basis < 0 or basis > 4 or rate < 0.0 or pr <= 0.0:
+                    return CellValue.ErrorVal(message: "YIELDMAT domain error")
+                val dim = _daycount_frac(issue, mat, basis)
+                val a = _daycount_frac(issue, settle, basis)
+                val dsm = _daycount_frac(settle, mat, basis)
+                val base = pr / 100.0 + a * rate
+                return CellValue.NumberVal(value: ((1.0 + dim * rate) - base) / base / dsm)
+            return CellValue.ErrorVal(message: "YIELDMAT requires settle, maturity, issue, rate, pr")
+        "DISC":
+            if args.len() >= 4:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val pr = _first_val(args[2])
+                val redemption = _first_val(args[3])
+                val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or pr <= 0.0 or redemption <= 0.0:
+                    return CellValue.ErrorVal(message: "DISC domain error")
+                return CellValue.NumberVal(value: (redemption - pr) / redemption / _daycount_frac(settle, mat, basis))
+            return CellValue.ErrorVal(message: "DISC requires settle, maturity, pr, redemption")
+        "INTRATE":
+            if args.len() >= 4:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val investment = _first_val(args[2])
+                val redemption = _first_val(args[3])
+                val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or investment <= 0.0 or redemption <= 0.0:
+                    return CellValue.ErrorVal(message: "INTRATE domain error")
+                return CellValue.NumberVal(value: (redemption - investment) / investment / _daycount_frac(settle, mat, basis))
+            return CellValue.ErrorVal(message: "INTRATE requires settle, maturity, investment, redemption")
+        "RECEIVED":
+            if args.len() >= 4:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val investment = _first_val(args[2])
+                val discount = _first_val(args[3])
+                val basis = if args.len() >= 5: _first_val(args[4]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or investment <= 0.0 or discount <= 0.0:
+                    return CellValue.ErrorVal(message: "RECEIVED domain error")
+                val dd = 1.0 - discount * _daycount_frac(settle, mat, basis)
+                if dd <= 0.0:
+                    return CellValue.ErrorVal(message: "RECEIVED domain error")
+                return CellValue.NumberVal(value: investment / dd)
+            return CellValue.ErrorVal(message: "RECEIVED requires settle, maturity, investment, discount")
+        "DURATION":
+            if args.len() >= 5:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val coupon = _first_val(args[2])
+                val yld = _first_val(args[3])
+                val freq = _first_val(args[4]).to_i64()
+                val basis = if args.len() >= 6: _first_val(args[5]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4) or coupon < 0.0 or yld < 0.0:
+                    return CellValue.ErrorVal(message: "DURATION domain error")
+                return CellValue.NumberVal(value: _sec_duration(settle, mat, coupon, yld, freq, basis))
+            return CellValue.ErrorVal(message: "DURATION requires settle, maturity, coupon, yld, freq")
+        "MDURATION":
+            if args.len() >= 5:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val coupon = _first_val(args[2])
+                val yld = _first_val(args[3])
+                val freq = _first_val(args[4]).to_i64()
+                val basis = if args.len() >= 6: _first_val(args[5]).to_i64() else: 0
+                if settle >= mat or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4) or coupon < 0.0 or yld < 0.0:
+                    return CellValue.ErrorVal(message: "MDURATION domain error")
+                val dur = _sec_duration(settle, mat, coupon, yld, freq, basis)
+                return CellValue.NumberVal(value: dur / (1.0 + yld / freq.to_f64()))
+            return CellValue.ErrorVal(message: "MDURATION requires settle, maturity, coupon, yld, freq")
+        "TBILLPRICE":
+            if args.len() >= 3:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val discount = _first_val(args[2])
+                val dsm = mat - settle
+                if settle >= mat or discount <= 0.0 or dsm > 365.0:
+                    return CellValue.ErrorVal(message: "TBILLPRICE domain error")
+                return CellValue.NumberVal(value: 100.0 * (1.0 - discount * dsm / 360.0))
+            return CellValue.ErrorVal(message: "TBILLPRICE requires settle, maturity, discount")
+        "TBILLYIELD":
+            if args.len() >= 3:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val pr = _first_val(args[2])
+                val dsm = mat - settle
+                if settle >= mat or pr <= 0.0 or dsm > 365.0:
+                    return CellValue.ErrorVal(message: "TBILLYIELD domain error")
+                return CellValue.NumberVal(value: (100.0 - pr) / pr * 360.0 / dsm)
+            return CellValue.ErrorVal(message: "TBILLYIELD requires settle, maturity, pr")
+        "TBILLEQ":
+            if args.len() >= 3:
+                val settle = _first_val(args[0])
+                val mat = _first_val(args[1])
+                val discount = _first_val(args[2])
+                val dsm = mat - settle
+                if settle >= mat or discount <= 0.0 or dsm > 365.0:
+                    return CellValue.ErrorVal(message: "TBILLEQ domain error")
+                if dsm <= 182.0:
+                    return CellValue.NumberVal(value: 365.0 * discount / (360.0 - discount * dsm))
+                val price = 100.0 * (1.0 - discount * dsm / 360.0)
+                val ry = dsm / 365.0
+                val disc_root = ry * ry - (2.0 * ry - 1.0) * (1.0 - 100.0 / price)
+                if disc_root < 0.0:
+                    return CellValue.ErrorVal(message: "TBILLEQ domain error")
+                return CellValue.NumberVal(value: (0.0 - ry + _sqrt_f64(disc_root)) / (ry - 0.5))
+            return CellValue.ErrorVal(message: "TBILLEQ requires settle, maturity, discount")
+        "DOLLARDE":
+            if args.len() >= 2:
+                val fd = _first_val(args[0])
+                val fr = _first_val(args[1])
+                if fr <= 0.0:
+                    return CellValue.ErrorVal(message: "DOLLARDE domain error")
+                val ip = _floor_f64(fd)
+                val frac = fd - ip
+                val power = _sec_pow10_digits(fr)
+                return CellValue.NumberVal(value: ip + frac * power / fr)
+            return CellValue.ErrorVal(message: "DOLLARDE requires fractional_dollar, fraction")
+        "DOLLARFR":
+            if args.len() >= 2:
+                val dd = _first_val(args[0])
+                val fr = _first_val(args[1])
+                if fr <= 0.0:
+                    return CellValue.ErrorVal(message: "DOLLARFR domain error")
+                val ip = _floor_f64(dd)
+                val frac = dd - ip
+                val power = _sec_pow10_digits(fr)
+                return CellValue.NumberVal(value: ip + frac * fr / power)
+            return CellValue.ErrorVal(message: "DOLLARFR requires decimal_dollar, fraction")
         "TRUE":
             return CellValue.BoolVal(value: true)
         "FALSE":
