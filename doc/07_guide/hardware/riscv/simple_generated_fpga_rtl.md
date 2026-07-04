@@ -85,6 +85,10 @@ That gate fails unless the matrix reports `release_status=pass`,
 `release_blockers=none`, and ready formal prerequisites. A hardening matrix
 readiness pass is not a mission-critical release pass until the strict
 SymbiYosys proof gate passes too.
+The strict SBY lane distinguishes readiness from proof failures:
+`missing-formal-prereqs` is host setup, while `sidecar-contract-failed`,
+`missing-artifact`, and `sby-run-failed` are release-failing proof/artifact
+problems that must include the failing artifact or gate path.
 
 For host setup triage, run:
 
@@ -92,7 +96,8 @@ For host setup triage, run:
 sh scripts/check/check-simpleos-mission-critical-prereqs.shs
 sh scripts/setup/setup-simpleos-formal-env.shs --print-install
 ```
-stop protecting the normal sidecar contract.
+Do not bypass the sidecar contract to make a missing-tool environment look
+ready.
 
 The RISC-V product Lean model is split so code changes are maintainable:
 

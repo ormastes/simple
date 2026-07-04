@@ -132,7 +132,9 @@ not create, rewrite, or weaken SPipe after verification.
     `sh scripts/check/check-simpleos-mission-critical-prereqs.shs` for the host
     dependency list and
     `sh scripts/setup/setup-simpleos-formal-env.shs --print-install` for setup
-    commands.
+    commands. Treat `sidecar-contract-failed`, `missing-artifact`, and
+    `sby-run-failed` as release-failing RTL evidence problems, not missing-tool
+    blockers.
 - Core/MCP regression gate for compiler/core/lib or MCP/LSP changes:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`
