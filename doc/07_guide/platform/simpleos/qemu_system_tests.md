@@ -59,6 +59,21 @@ KV260 path in `doc/07_guide/hardware/fpga/kv260_rv64gc_fpga_boot.md` (Section 8)
 point `QEMU_RX`/`SERIAL_PORT` at a real tty to validate silicon with the same
 harness.
 
+## x86 SSH Host Forwarding
+
+The live x86 SSH smoke maps the host TCP endpoint to the guest-facing QEMU
+forwarded port. OpenSSH connections that reach the guest as destination port
+`2222` are accepted by the kernel's SSH listener on port `22`; the accepted
+socket then keeps the real packet destination port so replies match the
+host-forwarded flow.
+
+Keep this contract covered by
+`test/01_unit/os/x86_ssh_boot_tcp_contract_spec.spl` when editing the x86
+baremetal TCP listener path. The live SSH gate is
+`test/03_system/os/ssh_live_login_in_qemu_spec.spl`; a TCP accept or banner
+exchange pass is not a full SSH pass unless the later KEX/auth/session checks
+also complete.
+
 ## Known Blockers
 
 The `/bin/simple os` subcommands (e.g., `bin/simple os test`) are currently broken per `doc/08_tracking/bug/interp_simpleos_lane_contract_crash_2026-06-13.md`. System tests therefore boot `qemu-system-*` directly rather than through the compiler tool.

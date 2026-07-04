@@ -402,6 +402,9 @@ export consumed by a manual theorem, update the generator manifest/contract and
 the manual proof in the same lane before handoff. Added proof intent belongs in
 manual theorem/constraint files; generated Lean or BYL files should only gain it
 when the generator contract is updated in the same lane.
+For RISC-V lanes that combine generated RTL sidecars with Lean/BYL proof
+models, cite `sh scripts/check/check-riscv-formal-dual-track.shs` as the
+aggregate SPipe evidence gate after regeneration.
 
 For MCP/runtime-forwarding or startup-latency work, refresh both the lane state
 file and `doc/07_guide/app/mcp/startup_performance.md` before handoff. Keep the

@@ -255,6 +255,25 @@ Regeneration must be append-safe for manual proof work:
   (`lake build`, `simple gen-lean verify`, or `simple verify check`) next to the
   generated artifact and manual theorem file.
 
+### RISC-V Dual-Track Formal Evidence
+
+RISC-V lanes that span generated RTL and higher-level Lean or BYL proof models
+must keep the evidence split by layer. RTL readiness or proof artifacts belong
+to the RVFI/riscv-formal/SymbiYosys lane; Lean remains the checked theorem
+surface for Simple-level properties; BYL is generated proof-model interchange
+that can make regeneration cheaper but does not replace the checked proof
+command.
+
+Use the aggregate gate when a change crosses those boundaries:
+
+```bash
+sh scripts/check/check-riscv-formal-dual-track.shs
+```
+
+That wrapper is the citation to use in SPipe docs and hardening reports when
+both generated sidecars and manual theorem constraints must survive
+regeneration.
+
 ---
 
 ## Verification States
