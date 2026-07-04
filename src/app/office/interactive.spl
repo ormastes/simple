@@ -18,7 +18,8 @@ use app.office.odf_export.{sheet_to_fods}
 use std.io_runtime.{write_file, read_file, file_exists}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_write_bytes}
 use std.common.string_core.{char_from_code}
-use app.office.gui.{SheetGuiSession, SheetGuiView, session_new, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, office_gui_non_background_pixel_count, office_gui_frame_width, office_gui_frame_height, run_gui_live_step}
+use app.office.gui.{SheetGuiSession, SheetGuiView, session_new, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, office_gui_non_background_pixel_count, office_gui_frame_width, office_gui_frame_height, run_gui_live_step, SlideGuiSession, SlideGuiView, slide_session_new, slide_session_view, slide_gui_step, office_gui_slide_pixels}
+use app.office.slides.slide.{Slide}
 
 extern fn rt_stdin_read_line() -> text
 
@@ -429,6 +430,106 @@ fn run_sheet_gui_live(sheet: Sheet) -> i32:
             if not quit:
                 val view = sheet_gui_view_with_selection(session, GUI_LIVE_MAX_ROWS, GUI_LIVE_MAX_COLS)
                 print _gui_live_frame(view, session.selected_ref)
+    rt_terminal_disable_raw_mode()
+    print "bye"
+    0
+
+# =========================================================================
+# Live slides-GUI presenter loop (`office slides-gui-live`): the same real
+# termios raw-mode byte loop as run_sheet_gui_live above, bridged into
+# gui.spl's SlideGuiSession/slide_gui_step instead of SheetGuiSession --
+# a live keystroke-driven slide presenter, one frame re-rendered through
+# the REAL office_gui_slide_pixels pixel path per accepted key. Reuses
+# decode_key_byte (the ONE shared arrow-escape decoder above) and the same
+# rt_stdin_read_byte/rt_terminal_enable_raw_mode/rt_terminal_disable_raw_mode
+# externs -- zero duplicated termios plumbing.
+# =========================================================================
+
+fn slides_live_map_key(decoded: text) -> text:
+    """Map one decode_key_byte key name to the presenter step key
+    slide_gui_step consumes -- the pure per-keystroke translation layer of
+    run_slides_gui_live below, extracted so the mapping is spec-testable
+    without a terminal. "right" advances ("n"), "left" steps back ("p"),
+    and a decoded space -- which decode_key_byte emits as the printable
+    " " character, byte 32 -- also advances ("n"; the canonical "space"
+    name is accepted too). slide_gui_step's own names pass through
+    unchanged: "n"/"p", single digits "1".."9" (1-based goto), and the
+    quit keys "q"/"ctrl_c"/"eof". Every other key name (including a lone
+    "escape" and mid-escape-sequence "" non-keys) maps to "" -- no step,
+    no redraw."""
+    if decoded == "right":
+        return "n"
+    if decoded == "left":
+        return "p"
+    if decoded == " " or decoded == "space":
+        return "n"
+    if decoded == "n" or decoded == "p":
+        return decoded
+    if decoded == "q" or decoded == "ctrl_c" or decoded == "eof":
+        return decoded
+    if (decoded.len() == 1 and decoded >= "1" and decoded <= "9"):
+        return decoded
+    ""
+
+fn _slides_live_frame(view: SlideGuiView) -> text:
+    """One live presenter frame: an ANSI clear+home (same redraw discipline
+    as _gui_live_frame above) followed by the SAME pixel-path proof line the
+    slides-gui CLI command prints (office_gui_slide_pixels +
+    office_gui_non_background_pixel_count -- a real render through the
+    browser-engine pixel path, not a stub) and the view's text_dump, one
+    "slides-gui-live: <line>" per row (the leading "slide|<n>/<total>|..."
+    header line slide_gui_view always emits first, then one line per
+    element)."""
+    val esc = char_from_code(27)
+    val clear = "{esc}[2J{esc}[H"
+    val pixels = office_gui_slide_pixels(view)
+    val non_background = office_gui_non_background_pixel_count(pixels)
+    var out = "{clear}slides-gui-live: frame {office_gui_frame_width()}x{office_gui_frame_height()}, {non_background} non-background pixels\n"
+    for line in view.text_dump.split("\n"):
+        out = "{out}slides-gui-live: {line}\n"
+    out
+
+fn run_slides_gui_live(deck: [Slide]) -> i32:
+    """Live keystroke-driven slide presenter: renders the current
+    SlideGuiSession slide through the real pixel path, reads one raw termios
+    byte, decodes it with the shared decode_key_byte, maps the decoded key
+    name through slides_live_map_key (right/space -> next, left -> prev,
+    digits -> 1-based goto), and applies it via gui.spl's slide_gui_step --
+    re-rendering after every accepted key. 'q', Ctrl-C (byte 3), or EOF
+    quits via slide_gui_step's quit signal.
+
+    Non-TTY safety (same contract as run_sheet_gui_live above):
+    rt_terminal_enable_raw_mode() returns false when stdin isn't a real
+    terminal (tcgetattr fails on a pipe/redirect) -- in that case this
+    prints exactly ONE rendered frame plus a documented non-TTY notice and
+    returns 0 immediately, instead of blocking forever on a keystroke that
+    will never arrive (so CI/non-interactive callers can still exercise
+    this entry point)."""
+    var session = slide_session_new(deck)
+    print _slides_live_frame(slide_session_view(session))
+
+    if not rt_terminal_enable_raw_mode():
+        print "slides-gui-live: stdin is not a TTY (non-interactive input) -- printed one rendered frame above and exiting instead of blocking on a keystroke that will never arrive. Run 'simple office slides-gui-live' from a real terminal for the live presenter loop."
+        return 0
+
+    var quit = false
+    var pending_esc = 0
+    while not quit:
+        val b = rt_stdin_read_byte()
+        var key = ""
+        if b == 3:
+            key = "ctrl_c"
+        else:
+            val decoded = decode_key_byte(pending_esc, b)
+            pending_esc = decoded.pending_esc
+            key = decoded.key
+        val mapped = slides_live_map_key(key)
+        if mapped != "":
+            val step = slide_gui_step(session, mapped)
+            session = step.session
+            quit = step.quit
+            if not quit:
+                print _slides_live_frame(slide_session_view(session))
     rt_terminal_disable_raw_mode()
     print "bye"
     0
