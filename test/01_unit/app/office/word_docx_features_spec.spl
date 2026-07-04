@@ -23,8 +23,9 @@ Covers the three MS Word gap features through model -> .docx export ->
 
 use std.spec
 use app.office.file_formats.{parse_markdown_document, document_to_markdown}
-use app.office.odf_ooxml.{document_to_docx_bytes, document_to_docx_bytes_hf, docx_bytes_to_document, docx_bytes_to_header_footer}
+use app.office.odf_ooxml.{document_to_docx_bytes, document_to_docx_bytes_hf, docx_bytes_to_document, docx_bytes_to_header_footer, docx_document_xml_to_document}
 use app.office.word.html_render.{render_document_html}
+use common.rich_text.attributed_text.{BlockKind}
 use std.common.archive.zip.{zip_entries, zip_extract_text}
 
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
@@ -332,3 +333,93 @@ describe "DOCX comments: markdown [>>author: text<<] round trip":
         expect(html).to_contain("title=\"Alice: needs a citation\"")
         expect(html).to_contain("<div class=\"comments\"><ul>")
         expect(html).to_contain("<li>Alice: needs a citation</li>")
+
+describe "DOCX named paragraph styles: catalog + heading/blockquote/code round trip":
+    """A real named-style catalog (Normal, Heading1-3, Quote, Code,
+    ListParagraph) replaces the old bold-only Heading1-3 placeholder.
+    Headings already exported as w:pStyle before this change; blockquote and
+    fenced-code blocks did NOT — they exported as a plain <w:p> with no
+    pStyle at all, so re-importing saw an ordinary Paragraph and silently
+    dropped the `> ` prefix / code fence on the next markdown save. This
+    describe block proves the catalog, the two new pStyle mappings (export
+    AND import), and the fixed round trip."""
+
+    it "emits the full named-style catalog in word/styles.xml":
+        val doc = parse_markdown_document("# Report\n\nBody.", "d")
+        val docx = document_to_docx_bytes(doc)
+        val styles_xml = zip_extract_text(docx, "word/styles.xml")
+        expect(styles_xml).to_contain("w:styleId=\"Normal\"")
+        expect(styles_xml).to_contain("w:styleId=\"Heading1\"")
+        expect(styles_xml).to_contain("w:styleId=\"Heading2\"")
+        expect(styles_xml).to_contain("w:styleId=\"Heading3\"")
+        expect(styles_xml).to_contain("w:styleId=\"Quote\"")
+        expect(styles_xml).to_contain("w:styleId=\"Code\"")
+        expect(styles_xml).to_contain("w:styleId=\"ListParagraph\"")
+        expect(styles_xml).to_contain("w:sz w:val=\"32\"")
+        expect(styles_xml).to_contain("w:sz w:val=\"26\"")
+        expect(styles_xml).to_contain("w:sz w:val=\"22\"")
+        expect(styles_xml).to_contain("<w:i/>")
+        expect(styles_xml).to_contain("Courier New")
+
+    it "Heading1-3 are basedOn Normal and bold":
+        val doc = parse_markdown_document("# Report\n\nBody.", "d")
+        val docx = document_to_docx_bytes(doc)
+        val styles_xml = zip_extract_text(docx, "word/styles.xml")
+        expect(styles_xml).to_contain("<w:basedOn w:val=\"Normal\"/>")
+        expect(styles_xml).to_contain("<w:b/>")
+
+    it "exports a Heading1 paragraph with w:pStyle Heading1 in the body":
+        val doc = parse_markdown_document("# Title", "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:pStyle w:val=\"Heading1\"/>")
+
+    it "round-trips a blockquote through docx exactly (was silently lost before this change)":
+        val md = "> A wise quote."
+        val doc = parse_markdown_document(md, "d")
+        expect(doc.blocks[0].kind == BlockKind.Quote).to_be(true)
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:pStyle w:val=\"Quote\"/>")
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(back.blocks[0].kind == BlockKind.Quote).to_be(true)
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "round-trips a fenced code block through docx exactly (was silently lost before this change)":
+        val md = "```\nlet x = 1\nlet y = 2\n```"
+        val doc = parse_markdown_document(md, "d")
+        expect(doc.blocks[0].kind == BlockKind.CodeBlock).to_be(true)
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:pStyle w:val=\"Code\"/>")
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(back.blocks[0].kind == BlockKind.CodeBlock).to_be(true)
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "round-trips headings + blockquote + code together, md -> docx -> md exact":
+        val md = "# Title\n\n## Sub\n\n### Detail\n\n> Quoted line\n\nBody paragraph.\n\n```\ncode line one\ncode line two\n```"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "an unrecognized w:pStyle value falls back to a plain Paragraph on import":
+        val document_xml = "<w:body><w:p><w:pPr><w:pStyle w:val=\"SomeOtherAppsStyle\"/></w:pPr><w:r><w:t>Text</w:t></w:r></w:p></w:body>"
+        val back = docx_document_xml_to_document(document_xml, "d")
+        expect(back.blocks[0].kind == BlockKind.Paragraph).to_be(true)
+
+    it "a document with no headings/quote/code is byte-identical to a header/footer-empty call":
+        val doc = parse_markdown_document("Just a plain paragraph.", "d")
+        val plain = document_to_docx_bytes(doc)
+        val hf_empty = document_to_docx_bytes_hf(doc, "", "")
+        expect(plain == hf_empty).to_be(true)
+
+    it "renders a Quote block as a real <blockquote> and a CodeBlock as <pre><code> in HTML":
+        val md = "> Quoted line\n\n```\ncode here\n```"
+        val doc = parse_markdown_document(md, "d")
+        val html = render_document_html(doc)
+        expect(html).to_contain("<blockquote class=\"quote\"")
+        expect(html).to_contain("</blockquote>")
+        expect(html).to_contain("<pre class=\"code_block\"")
+        expect(html).to_contain("<code>code here</code>")
+        expect(html).to_contain("</pre>")
