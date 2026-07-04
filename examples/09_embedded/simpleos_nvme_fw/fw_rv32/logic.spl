@@ -1,0 +1,127 @@
+# RV32 no-alloc NVMe firmware logic reference.
+#
+# Scalar-only: no arrays, no heap, no strings in the logic path. Host and bare-metal entries share
+# this so P9 evidence exercises the same RAIN + ECC floor.
+
+fn rv32_rain_selftest() -> i64:
+    val d0 = 256
+    val d1 = 263
+    val d2 = 270
+    val d3 = 277
+    val d4 = 284
+    val d5 = 291
+    val d6 = 298
+    val d7 = 305
+    val parity = d0 ^ d1 ^ d2 ^ d3 ^ d4 ^ d5 ^ d6 ^ d7
+
+    var fail = 0
+    if (parity ^ d1 ^ d2 ^ d3 ^ d4 ^ d5 ^ d6 ^ d7) != d0:
+        fail = fail + 1
+    if (parity ^ d0 ^ d2 ^ d3 ^ d4 ^ d5 ^ d6 ^ d7) != d1:
+        fail = fail + 1
+    if (parity ^ d0 ^ d1 ^ d3 ^ d4 ^ d5 ^ d6 ^ d7) != d2:
+        fail = fail + 1
+    if (parity ^ d0 ^ d1 ^ d2 ^ d4 ^ d5 ^ d6 ^ d7) != d3:
+        fail = fail + 1
+    if (parity ^ d0 ^ d1 ^ d2 ^ d3 ^ d5 ^ d6 ^ d7) != d4:
+        fail = fail + 1
+    if (parity ^ d0 ^ d1 ^ d2 ^ d3 ^ d4 ^ d6 ^ d7) != d5:
+        fail = fail + 1
+    if (parity ^ d0 ^ d1 ^ d2 ^ d3 ^ d4 ^ d5 ^ d7) != d6:
+        fail = fail + 1
+    if (parity ^ d0 ^ d1 ^ d2 ^ d3 ^ d4 ^ d5 ^ d6) != d7:
+        fail = fail + 1
+
+    val recovered3 = parity ^ d0 ^ d1 ^ d2 ^ d4 ^ d5 ^ d6 ^ d7
+    if recovered3 != d3:
+        fail = fail + 1
+    fail
+
+fn rv32_bit(v: i64, bit: i64) -> i64:
+    (v >> bit) & 1
+
+fn rv32_ecc_parity_pos(pos: i64) -> bool:
+    pos == 1 or pos == 2 or pos == 4 or pos == 8 or pos == 16
+
+fn rv32_ecc_pos_for_data_bit(bit: i64) -> i64:
+    var pos = 1
+    var seen = 0
+    while pos <= 22:
+        if not rv32_ecc_parity_pos(pos):
+            if seen == bit:
+                return pos
+            seen = seen + 1
+        pos = pos + 1
+    0
+
+fn rv32_ecc_payload(data: i64) -> i64:
+    var p1 = 0
+    var p2 = 0
+    var p4 = 0
+    var p8 = 0
+    var p16 = 0
+    var overall = 0
+    var pos = 1
+    var data_bit = 0
+    while pos <= 22:
+        if not rv32_ecc_parity_pos(pos):
+            val bit = rv32_bit(data, data_bit)
+            overall = overall ^ bit
+            if (pos & 1) != 0:
+                p1 = p1 ^ bit
+            if (pos & 2) != 0:
+                p2 = p2 ^ bit
+            if (pos & 4) != 0:
+                p4 = p4 ^ bit
+            if (pos & 8) != 0:
+                p8 = p8 ^ bit
+            if (pos & 16) != 0:
+                p16 = p16 ^ bit
+            data_bit = data_bit + 1
+        pos = pos + 1
+    p1 | (p2 << 1) | (p4 << 2) | (p8 << 3) | (p16 << 4) | (overall << 5)
+
+fn rv32_ecc_flip_data_pos(data: i64, pos: i64) -> i64:
+    var bit = 0
+    while bit < 17:
+        if rv32_ecc_pos_for_data_bit(bit) == pos:
+            return data ^ (1 << bit)
+        bit = bit + 1
+    data
+
+fn rv32_ecc_status(data: i64, stored: i64) -> i64:
+    val recomputed = rv32_ecc_payload(data)
+    val syndrome = (stored ^ recomputed) & 0x1F
+    val overall = ((stored >> 5) ^ (recomputed >> 5)) & 1
+    if syndrome == 0:
+        if overall == 0:
+            return 0
+        return 1
+    if overall == 0:
+        return 2
+    1
+
+fn rv32_ecc_correct(data: i64, stored: i64) -> i64:
+    val recomputed = rv32_ecc_payload(data)
+    val syndrome = (stored ^ recomputed) & 0x1F
+    val overall = ((stored >> 5) ^ (recomputed >> 5)) & 1
+    if syndrome != 0 and overall != 0 and not rv32_ecc_parity_pos(syndrome):
+        return rv32_ecc_flip_data_pos(data, syndrome)
+    data
+
+fn rv32_ecc_selftest() -> i64:
+    var fail = 0
+    val data = 0x123456
+    val stored = rv32_ecc_payload(data)
+    val one = 0x133456
+    if rv32_ecc_status(one, stored) != 1:
+        fail = fail + 1
+    if rv32_ecc_correct(one, stored) != data:
+        fail = fail + 1
+    val two = data ^ 1 ^ 2
+    if rv32_ecc_status(two, stored) != 2:
+        fail = fail + 1
+    fail
+
+fn nvme_fw_rv32_logic_selftest() -> i64:
+    rv32_rain_selftest() + rv32_ecc_selftest()

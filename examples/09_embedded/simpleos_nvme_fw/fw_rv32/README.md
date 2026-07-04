@@ -1,8 +1,9 @@
 # NVMe firmware — bare-metal RV32 on-device self-test (`fw_rv32/`, gap-closure P9)
 
-`entry.spl` is an **array-free, scalar** re-expression of the firmware's core **RAIN XOR-parity
-reconstruct** (`../fw/rain.spl`, proven in `../fw/proofs/Rain.lean`), written to run inside the
-bare-metal rv32 boot path with **no heap and no arrays** — matching the constraint documented in
+`logic.spl` is an **array-free, scalar** re-expression of the firmware's core **RAIN XOR-parity
+reconstruct** (`../fw/rain.spl`, proven in `../fw/proofs/Rain.lean`) plus the SECDED
+payload-window ECC floor, written to run inside the bare-metal rv32 boot path with
+**no heap and no arrays** — matching the constraint documented in
 `src/os/kernel/arch/riscv32/boot.spl` ("keep this module freestanding and minimal ... without
 pulling runtime formatting, arrays, or boot metadata into the first-stage entry object"). It
 verifies, with eight scalar channels, that parity XOR the survivors recovers any lost channel
@@ -10,12 +11,14 @@ exactly (XOR is its own inverse), plus a channel-failure rebuild, then prints
 `ALL RV32 NVME FW CHECKS PASS` over the UART via `rt_riscv_uart_put` — one byte at a time, exactly
 like `boot.spl`'s `_line_*` helpers.
 
-The scalar logic is `bin/simple check`-clean and host-verified (the XOR-cancel math reproduces
-`fail=0`).
+The scalar logic is `bin/simple check`-clean and host-verified:
+`bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl` prints
+`RV32 NVME FW LOGIC OK`.
 
 ## Integration
 
-`entry.spl` exposes `nvme_fw_rv32_selftest()`, designed to be called from the rv32 boot chain:
+`entry.spl` exposes `nvme_fw_rv32_selftest()`, which delegates to `logic.spl` and is designed to
+be called from the rv32 boot chain:
 
 1. Add a `nvme_fw_rv32_selftest()` call in `src/os/kernel/arch/riscv32/boot.spl` `boot_main`,
    after `riscv_noalloc_log_init()`.
@@ -30,8 +33,8 @@ image cannot be mistaken for P9 firmware evidence.
 
 ## Status (2026-06-30): toolchain FIXED + freestanding runtime COMPLETED; rv32 OS builds & boots
 
-- ✅ `entry.spl` is `check`-clean, array-free, and the RAIN logic is host-verified (XOR-cancel
-  reproduces `fail=0`).
+- ✅ `logic.spl` / `entry.spl` are `check`-clean, array-free, and the RAIN+ECC logic is
+  host-verified (`RV32 NVME FW LOGIC OK`).
 - ✅ **Toolchain fixed and on origin.** `native-build --target riscv32-unknown-none` no longer
   exits with a silent 255: it routes to the in-process Rust LLVM handler, compiles riscv objects,
   and links (commits `a0652371728` pure-Simple surfacing + `187c62110138` Rust cross-target
