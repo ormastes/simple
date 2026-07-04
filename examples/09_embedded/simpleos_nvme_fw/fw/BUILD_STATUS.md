@@ -101,9 +101,10 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   program every LBA in `nblocks` from the modeled host segments rather than only the first block.
   Full HostMem/SGL/IOMMU descriptors remain out of scope.
 - **DRAM floor (P5) — WIRED**: `ftl_map` is the live FTL's bounded LRU write-back cache,
-  with `MAP_CACHE_DRAM_BUDGET_BYTES` making the cache budget explicit. `dram.spl` adds a fixed
-  write buffer used by HIL and the multi-queue NVMe controller before FTL programming; oversized
-  writes fail before partial media updates. Full DRAM arena/free-list modeling remains out of scope.
+  with `MAP_CACHE_DRAM_BUDGET_BYTES` making the cache budget explicit. `dram.spl` adds a bounded
+  arena span used by HIL and the multi-queue NVMe controller before FTL programming; oversized
+  writes fail before partial media updates and released spans are reusable. Full DRAM refresh/ECC/
+  bandwidth modeling remains out of scope.
 - **Cooperative concurrency floor (P6) — WIRED**: `firmware.service()` drains through
   `service_tick()`, which serializes foreground HIL work and background GC behind an explicit
   FTL-map owner token. Multicore/preemptive behavior remains out of scope.
@@ -135,10 +136,10 @@ into the live controller/FTL; P2 `fil_scheduler` **landed but stays SHELF** — 
 parallelism is a model a single-threaded sim cannot exhibit, so it is not flatly deferred but cannot
 be exercised; P3 has a **wired SECDED stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
 scope); P4 has a **wired segmented-PRP host-byte floor** (full HostMem/SGL/IOMMU remains out of scope);
-P5 has a **wired bounded-map-cache + fixed-write-buffer floor** (full DRAM arena/free-list remains out of scope);
+P5 has a **wired bounded-map-cache + fixed arena/free-list floor** (full DRAM subsystem remains out of scope);
 P6 has a **wired cooperative-owner floor** (true multicore/preemption remains out of scope);
 P9 is **build-blocked** (rv32 note above).
 
-Silicon-only pieces remain out of scope (real BCH/RS/LDPC hardware ECC, MMIO/PCIe, full PRP/SGL DMA, general DRAM arena/free-list, multicore/preemptive scheduling, persistent backing
+Silicon-only pieces remain out of scope (real BCH/RS/LDPC hardware ECC, MMIO/PCIe, full PRP/SGL DMA, real DRAM refresh/ECC/bandwidth, multicore/preemptive scheduling, persistent backing
 store) — see `PRODUCTION_STATUS.md` § Silicon boundary. This is a hardware-FAITHFUL **simulation**,
 not a silicon-shippable binary; "production level" in the literal sense is NOT done.

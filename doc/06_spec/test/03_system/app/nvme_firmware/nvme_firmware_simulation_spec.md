@@ -351,9 +351,9 @@ expect(out).to_contain("HOST TRANSPORT OK")
 
 </details>
 
-#### bounds host writes behind a DRAM write buffer with no partial media update (gap-closure P5)
+#### bounds host writes behind a DRAM arena span with no partial media update (gap-closure P5)
 
-- Fill the fixed write buffer, then submit one write larger than the DRAM budget
+- Fill a DRAM arena span, then submit one write larger than the DRAM budget
    - Expected: code equals `0`
 - The oversized write is rejected before any LBA is programmed
 
@@ -365,7 +365,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Fill the fixed write buffer, then submit one write larger than the DRAM budget")
+step("Fill a DRAM arena span, then submit one write larger than the DRAM budget")
 val (out, err, code) = _run(FW + "/dram_buffer_check.spl")
 expect(code).to_equal(0)
 step("The oversized write is rejected before any LBA is programmed")

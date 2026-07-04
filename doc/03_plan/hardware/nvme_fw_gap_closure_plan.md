@@ -49,14 +49,14 @@ the firmware":
 | P1 | `fil_fmc` | `fil.spl` (every program/read/erase routes through the FMC handshake) | **wired** |
 | P3 | `fil_ecc` + NAND OOB ECC latch | `fil.spl` reads stored ECC through `fil_fmc`, corrects one silent payload bit, and fails double-bit/OOB corruption closed | **wired SECDED floor** — not full BCH/LDPC |
 | P4 | `hil_command.prp_byte` | HIL + multi-queue NVMe writes program each LBA from a segmented PRP host byte stream | **wired segmented-PRP floor** — no full HostMem/SGL/IOMMU yet |
-| P5 | `ftl_map` + `dram` | `Ftl` uses bounded LRU write-back cache; HIL/controller writes stage through a fixed DRAM write buffer before programming media | **wired DRAM floor** — no general arena/free-list yet |
+| P5 | `ftl_map` + `dram` | `Ftl` uses bounded LRU write-back cache; HIL/controller writes allocate a bounded DRAM arena span before programming media | **wired DRAM floor** — no full DRAM subsystem yet |
 | P6 | `firmware.service_tick` | Foreground HIL ticks and background GC ticks share an explicit FTL-map owner token | **wired cooperative floor** — no multicore/preemption |
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
 | P8 | `rain` | `ftl` (`rain_seal` / `rain_recover_channel`: a failed channel is rebuilt inside the live FTL, verified end-to-end through the normal read path) | **wired** |
 | P2 | `fil_scheduler` | none (the host-runnable sim executes ops synchronously — channel-level parallelism is a model the single-threaded sim cannot itself exhibit) | shelf — verified model, not load-bearing |
 | P9 | `fw_rv32/entry.spl` | bare-metal rv32 ISA (re-expresses the RAIN reconstruct array-free; `check`-clean + host-verified) | started — **build-blocked (environmental)**: rv32 LLVM native-build broken here (proven OS recipe also exits 255); boot not observed |
 
-Adding more standalone modules (full P4 HostMem/PRP lists, full P5 DRAM arena/write buffer, multicore P6 beyond the cooperative token, or full BCH/LDPC beyond the P3 floor) widens the shelf without closing the gap. Prefer
+Adding more standalone modules (full P4 HostMem/PRP lists, full P5 DRAM refresh/ECC/bandwidth, multicore P6 beyond the cooperative token, or full BCH/LDPC beyond the P3 floor) widens the shelf without closing the gap. Prefer
 wiring an existing verified module into the live path over landing a new disconnected one.
 
 ## Test discipline (applies to every phase)
@@ -195,10 +195,10 @@ not silicon.
 
 > Landed floor: `ftl_map` is already load-bearing in `Ftl` as a bounded LRU write-back map cache.
 > Its capacity is tied to an explicit DRAM budget (`MAP_CACHE_DRAM_BUDGET_BYTES`), and the
-> self-test proves dirty eviction and budget fit. `dram.spl` now adds a fixed DRAM write buffer
+> self-test proves dirty eviction and budget fit. `dram.spl` now adds a bounded DRAM arena span
 > used by both HIL and the multi-queue controller before FTL programming; over-budget writes fail
-> before any partial media update (`dram_buffer_check.spl`). A general DRAM arena/free-list remains
-> open below.
+> before any partial media update, and released spans are reusable (`dram_buffer_check.spl`).
+> Real DRAM refresh/ECC/bandwidth remains open below.
 
 **Goal.** A fixed DRAM budget backing the LRU write buffer + a bounded DFTL map cache with
 miss→load-from-flash (real DRAM pressure), mirroring `lru_buffer.c`.
