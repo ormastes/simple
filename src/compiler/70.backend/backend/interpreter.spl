@@ -161,8 +161,73 @@ impl InterpreterBackendImpl:
     fn process_impl(impl_: HirImpl) -> Result<BackendResult, BackendError>:
         Ok(BackendResult.Unit)
 
+    # Construct a Value.Struct when a Call's callee names a declared struct or
+    # class (bug doc iteration 21, target (b)). Returns nil when the name is not
+    # a type (so the caller falls through to ordinary call dispatch). Named args
+    # bind by `arg.name`; positional args bind in declared field order.
+    fn try_construct_struct(type_name: text, args: [HirCallArg], arg_values: [Value], ctx: EvalContext) -> Value?:
+        var field_names: [text] = []
+        var found_type = false
+        for s_ in ctx.module.structs.values():
+            val s: HirStruct = s_
+            if s.name == type_name:
+                found_type = true
+                for f_ in s.fields:
+                    val f: HirField = f_
+                    field_names = field_names.push(f.name)
+        if not found_type:
+            for c_ in ctx.module.classes.values():
+                val c: HirClass = c_
+                if c.name == type_name:
+                    found_type = true
+                    for cf_ in c.fields:
+                        val cf: HirField = cf_
+                        field_names = field_names.push(cf.name)
+        if not found_type:
+            return nil
+        var fields: Dict<text, Value> = {}
+        for i in 0..args.len():
+            val arg_t: HirCallArg = args[i]
+            val fname = if arg_t.has_name and arg_t.name != "":
+                arg_t.name
+            elif i < field_names.len():
+                field_names[i]
+            else:
+                ""
+            if fname != "" and i < arg_values.len():
+                fields[fname] = arg_values[i]
+        Some(Value.Struct(type_name, fields))
+
     fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
-        itrace("[EE] eval_expr entry disc={rt_enum_discriminant(expr.kind)}")
+        val ee_disc: i64 = rt_enum_discriminant(expr.kind)
+        itrace("[EE] eval_expr entry disc={ee_disc}")
+        # DISC PRE-DISPATCH for struct-shadowed variant `Field` (bug doc
+        # iteration 21, target (c)). `struct Field` (parser_types.spl:232) exists,
+        # so a `case HirExprKind.Field(...)` TEST compiles ALWAYS-TRUE on stage4
+        # (seed struct/tuple pattern fallback = iconst 1) and would swallow every
+        # expression that reaches it in the big match. Handle it here, keyed on
+        # the discriminant (rt_enum_discriminant = DefaultHasher(variant name)
+        # truncated u32: hash("Field")=21232742), and keep it OUT of the match.
+        if ee_disc == 21232742:  # hash("Field")
+            match expr.kind:
+                case HirExprKind.Field(base, field, _):
+                    val fld_base_t: HirExpr = base
+                    val fld_name_t: text = field
+                    val base_val = self.eval_expr(fld_base_t, ctx)?
+                    # `Value.Struct` is itself struct-shadowed (`struct Struct`),
+                    # so this arm compiles always-true and acts as the struct
+                    # extractor; the payload binding still uses rt_enum_payload
+                    # (correct). For `p.x`, base_val is genuinely a Struct.
+                    match base_val:
+                        case Value.Struct(_stype, sfields):
+                            val sf: Dict<text, Value> = sfields
+                            if sf.has(fld_name_t):
+                                return Ok(sf[fld_name_t])
+                            return Err(BackendError.runtime_error("no such field: {fld_name_t}", Some(expr.span)))
+                        case _:
+                            return Err(BackendError.runtime_error("field access on non-struct value", Some(expr.span)))
+                case _:
+                    pass
         match expr.kind:
             case HirExprKind.IntLit(value, _):
                 itrace("[EE] IntLit arm")
@@ -328,6 +393,14 @@ impl InterpreterBackendImpl:
                         if cf_named.?:
                             itrace("[EE] Call user-fn fast-path name={cname_t}")
                             return self.call_hir_function(cf_named.unwrap(), arg_values, ctx)
+                        # Struct/class construction (bug doc iteration 21, target
+                        # (b)): `P(x: 5)` lowers to a Call whose callee names a
+                        # declared struct/class. After builtin + user-fn misses,
+                        # build a Value.Struct from the args.
+                        val struct_result = self.try_construct_struct(cname_t, call_args_t, arg_values, ctx)
+                        if struct_result.?:
+                            itrace("[EE] Call struct-construct name={cname_t}")
+                            return Ok(struct_result.unwrap())
                     case _:
                         pass
                 val fn_value = self.eval_expr(call_callee_t, ctx)?
