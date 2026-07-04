@@ -42,6 +42,10 @@
 - formal_ui_policy_scope: Lean model gate: ui_compositor
 - formal_ui_policy_evidence: damage merge covers both inputs, clip output stays inside both bounds, z-sort and stacking-context sort preserve all windows/surfaces, z-order renormalisation preserves relative order, recursive paint-order flatten keeps every surface exactly once
 - formal_coverage: pass
+- formal_coverage_log: build/simpleos_hardening_evidence_matrix_current/formal_coverage.log
+- formal_coverage_gate: scripts/check/check-simpleos-formal-coverage.shs
+- formal_coverage_scope: Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, compiler/language, and UI policy
+- formal_coverage_evidence: all SimpleOS hardening formal rows have executable wrapper gates and matrix gate/scope fields; aggregate coverage cannot pass by status-only derivation
 - byl_sby_artifact_audit: pass
 - byl_sby_artifact_audit_scope: checked-in non-Lean formal artifacts consist of the RISC-V BYL surface; generated SBY/RVFI artifacts are validated by the RISC-V sidecar contract and remain readiness evidence, not an RTL proof pass
 - byl_sby_artifact_audit_evidence: src/verification/riscv_product/riscv_product.byl plus sh scripts/check/check-riscv-formal-dual-track.shs
@@ -99,6 +103,24 @@
 - gui_entry_latest_dir: build/tmp/gui_entry_engine2d_wm_simple_web_spec_1958348_1783145478496067
 - gui_entry_capture_ppm_bytes: 2359312
 - gui_entry_capture_raw_bytes: 3145728
+- formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs
+- formal_critical_concurrency_scope: Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities
+- formal_critical_concurrency_evidence: resource_acquire/release capacity, work stealing, task completion idempotence, bounded-channel backpressure, closed-channel wakeup, DRF race constraints, kernel capability default-deny, memory capability unique/shared write constraints
+- formal_memory_safety_gate: scripts/check/check-simpleos-memory-safety-formal-proofs.shs
+- formal_memory_safety_scope: Lean model gate: gc_reachability, gc_boundary, gc_manual_borrow, manual_pointer_borrow, nogc_compile
+- formal_memory_safety_evidence: mark/sweep reachability invariant, no dangling after sweep, no-GC boundary rejection, alias counterexample, borrowed object liveness, manual pointer exclusive/shared borrow constraints, no-GC compile rejection for GC allocation
+- formal_storage_integrity_gate: scripts/check/check-simpleos-storage-formal-proofs.shs
+- formal_storage_integrity_scope: Lean model gate: db_storage, fat32, formal/nvfs
+- formal_storage_integrity_evidence: WAL-before-data and publish-root flush requirements, MVCC snapshot/recovery completeness, FAT32 chain/LBA/free-chain invariants, NVFS arena/pmap/WAL/checkpoint preservation and crash refinement
+- formal_boundary_integrity_gate: scripts/check/check-simpleos-boundary-formal-proofs.shs
+- formal_boundary_integrity_scope: Lean model gate: ffi_contract, process_lifecycle, tls_isolation
+- formal_boundary_integrity_evidence: FFI rejects undefined/null calls and unsafe untagging, process lifecycle prevents double reap and persistent zombies, TLS reads remain thread/key isolated with commuting independent writes
+- formal_compiler_language_gate: scripts/check/check-simpleos-compiler-language-formal-proofs.shs
+- formal_compiler_language_scope: Lean model gate: module_resolution, macro_auto_import, type_inference_compile, type_value_semantics, visibility_export
+- formal_compiler_language_evidence: module resolution ambiguity/exists rules, macro auto-import leakage guards, deterministic type inference and async effect rules, contract/generic constraints, class alias versus struct copy semantics, private visibility propagation
+- formal_ui_policy_gate: scripts/check/check-simpleos-ui-policy-formal-proofs.shs
+- formal_ui_policy_scope: Lean model gate: ui_compositor
+- formal_ui_policy_evidence: damage merge covers both inputs, clip output stays inside both bounds, z-sort and stacking-context sort preserve all windows/surfaces, z-order renormalisation preserves relative order, recursive paint-order flatten keeps every surface exactly once
 - formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs
 - formal_critical_concurrency_scope: Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities
 - formal_critical_concurrency_evidence: resource_acquire/release capacity, work stealing, task completion idempotence, bounded-channel backpressure, closed-channel wakeup, DRF race constraints, kernel capability default-deny, memory capability unique/shared write constraints
