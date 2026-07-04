@@ -348,6 +348,56 @@ Deliverable when unblocked: a checklist doc + per-format screenshots or
 user confirmation. Until then this is the honestly-stated verification
 ceiling, recorded in spec docstrings.
 
+### CARD 16 — Office onto the Simple-UI-GUI + web-renderer stack  [NEW, user directive 2026-07-04]
+**Directive:** office should be based on the IDE/UI-GUI/web-renderer stack;
+if not, refactor — validating similar examples first.
+**Recon findings (Explore, 2026-07-04):**
+- Office is NOT on the stack today: every `*App.build_ui()` builds a
+  `common.ui` UITree that is then DISCARDED (mod.spl prints root_id only);
+  the real output is render_adapter.spl's direct document→HTML path, which
+  bypasses widgets AND the browser engine.
+- `examples/10_tooling/simple_ide` is a DAP/LSP backend + test runner
+  (submodule, .smf), NOT a GUI layer — the literal "base on simple ide"
+  premise doesn't map; the correct base is the chain that DOES exist:
+  `common.ui` (UITree/builder/draw_ir/html_window) → `app.ui` backends
+  (`src/app/ui.browser/app.spl` renders in-process via browser engine) →
+  `browser_engine` (`WebRenderBackend.render_html_to_pixels(html)→[u32]`).
+- **Example validation PASSED** (user gate, 2026-07-04):
+  browser_backend_pixel_paths_spec + html_window_spec green in this
+  environment. The full native-GUI system spec
+  (gui_entry_engine2d_wm_simple_web_spec) requires an LLVM-flavored driver
+  build — environment ceiling; use unit+pixel-level proofs here.
+**Refactor steps (smallest-first):**
+1. DONE — validate examples (above).
+2. **Pilot**: route `CounterApp.build_ui()` through the ui.browser backend
+   (`render_frame(tree, …)` — study src/app/ui.browser/app.spl and follow
+   its structure exactly) to a real frame; spec asserts frame/pixel output
+   nonzero and a known widget's pixels differ from background. New CLI:
+   `office counter --gui`.
+3. Generalize: word/sheets/slides/mail/planner/launcher `--gui` through the
+   same path; audit each app's build_ui() actually reflects document state
+   (some are stubs today) and fix per app.
+4. Demote render_adapter.spl to file-export only (docstring note); the GUI
+   path becomes canonical for screen output.
+5. Stretch: interactivity via the browser_host_event_roundtrip pattern
+   (test/01_unit/app/ui/) — click/keyboard into office UITrees (sheet cell
+   click → edit → recalc frame).
+**Ownership when laned:** pilot agent owns the counter app file + one new
+gui glue file + spec; formula.spl/render_adapter.spl untouched in the pilot.
+
+### Post-round-15 status addendum (2026-07-04)
+CARD 3 DONE (24 securities fns, pushed a314a99, 3 more ground-truth
+corrections); CARD 13 DONE (pivot tables, same push); CARD 5 DONE (18
+text/reference fns, pushed 02d4a01; bare ROW/COLUMN → CARD 14 with cost
+documented); Word lane DONE (hyperlinks/images/headers-footers, full docx
+round-trip, desktop check PASS; _DocxRels mutable-class builder silently
+dropped state under test-tree runs — copy-return struct idiom fixed it,
+NEW QUIRK for the ledger); PPT lane DONE (bullet levels + @layout variants,
+pushed 7a856ed; NEW RUNNER BUG: spec file killed at ~60s budget still
+prints PASS — bug doc test_runner_60s_silent_kill_greenwash_2026-07-04.md).
+**~372 callable functions.** Open: CARDs 6 (deploy, build in flight),
+14, 15, 16 (pilot next).
+
 ---
 
 ## Definition of done per card
