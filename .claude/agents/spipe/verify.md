@@ -107,6 +107,9 @@
     manual theorem or constraint file to remain separate and pass its
     post-regeneration gate (`lake build`, `simple gen-lean verify`, or
     `simple verify check`) before accepting the evidence.
+    SimpleOS mission-critical release evidence also requires
+    `sh scripts/check/check-simpleos-mission-critical-release.shs` with
+    `release_blockers=none`; readiness-only rows are not release completion.
 16. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)
