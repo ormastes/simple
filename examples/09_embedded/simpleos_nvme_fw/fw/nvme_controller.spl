@@ -227,8 +227,12 @@ impl NvmeController:
         me.format_count
 
     me do_identify(cmd: AdminCmd) -> i64:
+        if cmd.cdw11 != 0 or cmd.cdw12 != 0 or cmd.cdw10 != admin_cns(cmd.cdw10):
+            return SC_INVALID_FIELD
         val cns: i64 = admin_cns(cmd.cdw10)
         if cns == CNS_CONTROLLER:
+            if cmd.nsid != 0:
+                return SC_INVALID_FIELD
             me.last_id = build_identify_controller()
             return SC_SUCCESS
         if cns == CNS_NAMESPACE:
@@ -397,6 +401,13 @@ fn nvme_controller_selftest() -> i64:
     c.admin_process()
     val badns: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(badns.status, SC_INVALID_FIELD, "identify invalid namespace rejected")
+    c.admin_submit(admin_cmd_make(19, ADMIN_IDENTIFY, 1, CNS_CONTROLLER, 0, 0))
+    c.admin_submit(admin_cmd_make(20, ADMIN_IDENTIFY, 0, CNS_CONTROLLER | (1 << 16), 0, 0))
+    c.admin_process()
+    val badic: NvmeCpl = c.admin_reap()
+    val badir: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(badic.status, SC_INVALID_FIELD, "identify controller with namespace rejected")
+    fail = fail + expect_eq(badir.status, SC_INVALID_FIELD, "identify with reserved dword bits rejected")
 
     # Bring up one IO queue pair (CQ then SQ) via admin
     c.admin_submit(admin_create_cq_cmd(2, 1, 64))
