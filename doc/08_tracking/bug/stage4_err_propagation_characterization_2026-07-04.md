@@ -188,3 +188,13 @@ All files use minimal imports and simple syntax to isolate error propagation beh
 - **Stage4 binary:** Built from iteration 20 (stage4_it20f)
 - **Test environment:** Linux x86-64, timeout 10s per test
 - **Status:** All tests completed without timeout
+
+## Coordinator verification (2026-07-04, Fable)
+
+Independent minimal repros on the deployed binary CORRECT two rows above:
+
+- `??` null-coalescing WORKS (`val x: text? = nil; x ?? "default"` → prints `default`). The row claiming `??` broken used a faulty repro.
+- `?` Err-propagation CONFIRMED BROKEN, worse than characterized: with `fn get(flag) -> Result<int,text>` and `val v = get(flag)?`:
+  - Ok(42) case: `v` = 5 (WRONG VALUE — not the payload)
+  - Err case: does NOT short-circuit; `v` = garbage (348752240628) and execution continues
+  - Repro: scratchpad qmark_check.spl. This is a silent-wrong-value correctness bug in the deployed interpreter, independent of stage4.
