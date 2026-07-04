@@ -70,6 +70,10 @@ before accepting regeneration-safe PASS. For RISC-V evidence that spans
 generated RTL sidecars plus Lean/BYL, cite
 `sh scripts/check/check-riscv-formal-dual-track.shs` so SPipe evidence covers
 the sidecar self-test, normal sidecar contract, and manual proof gate together.
+BYL is a backend/interchange surface, not the proof result. It is helpful when
+SPipe needs cheap regenerated facts, but added proof intent belongs in the
+manual Lean theorem or constraint file and the generated contract must name any
+BYL export consumed by that manual layer.
 Mission-critical SimpleOS release SPipe evidence must also cite
 `sh scripts/check/check-simpleos-mission-critical-release.shs` and keep
 `release_blockers=none`; matrix readiness alone is not release evidence.
