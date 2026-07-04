@@ -168,6 +168,9 @@ impl InterpreterBackendImpl:
     fn try_construct_struct(type_name: text, args: [HirCallArg], arg_values: [Value], ctx: EvalContext) -> Value?:
         var field_names: [text] = []
         var found_type = false
+        # Task #112: classes get REFERENCE semantics (a store handle), structs
+        # keep VALUE semantics (inline Value.Struct). Track which we matched.
+        var is_class = false
         for s_ in ctx.module.structs.values():
             val s: HirStruct = s_
             if s.name == type_name:
@@ -180,6 +183,7 @@ impl InterpreterBackendImpl:
                 val c: HirClass = c_
                 if c.name == type_name:
                     found_type = true
+                    is_class = true
                     for cf_ in c.fields:
                         val cf: HirField = cf_
                         field_names = field_names.push(cf.name)
@@ -196,6 +200,12 @@ impl InterpreterBackendImpl:
                 ""
             if fname != "" and i < arg_values.len():
                 fields[fname] = arg_values[i]
+        if is_class:
+            # Allocate in the shared store; return a handle-carrying Value.Object.
+            # Copies of this Value copy the int handle, so all holders share the
+            # one record -> reference semantics (Task #112).
+            val handle = ctx.env.store.alloc(type_name, fields)
+            return Some(Value.Object(ObjectValue(class_name: type_name, handle: handle)))
         Some(Value.Struct(type_name, fields))
 
     fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
@@ -214,11 +224,24 @@ impl InterpreterBackendImpl:
                     val fld_base_t: HirExpr = base
                     val fld_name_t: text = field
                     val base_val = self.eval_expr(fld_base_t, ctx)?
-                    # `Value.Struct` is itself struct-shadowed (`struct Struct`),
-                    # so this arm compiles always-true and acts as the struct
-                    # extractor; the payload binding still uses rt_enum_payload
-                    # (correct). For `p.x`, base_val is genuinely a Struct.
+                    # Task #112: a CLASS instance is a `Value.Object(handle)`.
+                    # Its arm MUST precede the `Value.Struct` arm: `Value.Struct`
+                    # is struct-shadowed (`struct Struct`) so its TEST compiles
+                    # ALWAYS-TRUE on stage4 and would swallow an Object. `Object`
+                    # is NOT struct-shadowed, so its test is genuinely refutable —
+                    # it matches only real Objects and lets Structs fall through.
+                    # Field reads dereference the shared store (reference sem).
                     match base_val:
+                        case Value.Object(objv):
+                            val ov: ObjectValue = objv
+                            val fld_opt = ctx.env.store.get_field(ov.handle, fld_name_t)
+                            if fld_opt.?:
+                                return Ok(fld_opt.unwrap())
+                            return Err(BackendError.runtime_error("no such field: {fld_name_t}", Some(expr.span)))
+                        # `Value.Struct` is itself struct-shadowed (`struct Struct`),
+                        # so this arm compiles always-true and acts as the struct
+                        # extractor; the payload binding still uses rt_enum_payload
+                        # (correct). For `p.x`, base_val is genuinely a Struct.
                         case Value.Struct(_stype, sfields):
                             val sf: Dict<text, Value> = sfields
                             if sf.has(fld_name_t):
@@ -529,6 +552,35 @@ impl InterpreterBackendImpl:
 
             case HirStmtKind.Assign(target, op, value):
                 val new_value = self.eval_expr(value, ctx)?
+                # Task #112: field assignment on a CLASS instance (`c.x = v`).
+                # `target.kind` may be a struct-shadowed `Field` whose pattern
+                # test is always-true on stage4, so DISC-DISPATCH on the target's
+                # discriminant (hash("Field")=21232742) BEFORE the name match,
+                # mirroring the eval_expr Field pre-dispatch. The mutation goes
+                # through the shared store so every holder of the handle sees it.
+                val tgt_disc_c: i64 = rt_enum_discriminant(target.kind)
+                if tgt_disc_c == 21232742:  # hash("Field")
+                    match target.kind:
+                        case HirExprKind.Field(fbase, ffield, _):
+                            val ab: HirExpr = fbase
+                            val afld: text = ffield
+                            val base_v = self.eval_expr(ab, ctx)?
+                            match base_v:
+                                case Value.Object(objv):
+                                    val ov: ObjectValue = objv
+                                    if op.?:
+                                        val cur = ctx.env.store.get_field(ov.handle, afld)
+                                        if cur.is_none():
+                                            return Err(BackendError.runtime_error("no such field: {afld}", Some(stmt.span)))
+                                        val combined = self.apply_assign_op(op.unwrap(), cur.unwrap(), new_value, stmt.span)?
+                                        ctx.env.store.set_field(ov.handle, afld, combined)
+                                    else:
+                                        ctx.env.store.set_field(ov.handle, afld, new_value)
+                                    return Ok(())
+                                case _:
+                                    return Err(BackendError.not_implemented("field assignment target must be a class instance"))
+                        case _:
+                            pass
                 # Resolve the assignment target name. Idents lower to NamedVar
                 # (reliable `name`); a plain Var carries a SymbolId resolved via
                 # ctx.names (iteration 21, target (a)).

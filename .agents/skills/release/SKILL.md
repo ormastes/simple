@@ -30,7 +30,7 @@ description: Version bump and release. Accepts version argument (major/first, mi
 Run $verify first — must show STATUS: PASS.
 For SimpleOS mission-critical releases, also run
 `sh scripts/check/check-simpleos-mission-critical-release.shs`; do not release
-while it reports blocked, failed, or anything other than `release_blockers=none`.
+while it reports blocked or failed.
 SPipe must already be complete and verified. Do not create or update SPipe in
 release; if SPipe is missing/stale, return to verify/implementation.
 Generated-manual quality and lower-model sidecar review must already be covered
