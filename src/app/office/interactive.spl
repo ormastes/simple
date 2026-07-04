@@ -18,6 +18,7 @@ use app.office.odf_export.{sheet_to_fods}
 use std.io_runtime.{write_file, read_file, file_exists}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_write_bytes}
 use std.common.string_core.{char_from_code}
+use app.office.gui.{SheetGuiSession, SheetGuiView, session_new, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, office_gui_non_background_pixel_count, office_gui_frame_width, office_gui_frame_height, run_gui_live_step}
 
 extern fn rt_stdin_read_line() -> text
 
@@ -206,34 +207,81 @@ fn _tui_move(state: TuiState, d_col: i32, d_row: i32) -> TuiState:
     s.pending_esc = 0
     s
 
+struct KeyDecodeResult:
+    key: text        # "" = no complete key yet (mid ESC-sequence, or an
+                      # unrecognized control byte); otherwise one of
+                      # "eof"/"up"/"down"/"left"/"right"/"enter"/
+                      # "backspace"/"escape", or a single printable character
+    pending_esc: i32
+
+fn decode_key_byte(pending_esc: i32, byte: i64) -> KeyDecodeResult:
+    """Shared raw-termios-byte decoder: turns one byte (as read one at a time
+    from rt_stdin_read_byte, under rt_terminal_enable_raw_mode) into a
+    canonical key name, threading `pending_esc` across calls the same way
+    tui_apply_key's own inline state machine used to (0 = no escape pending,
+    1 = got ESC, 2 = got ESC [, waiting for the arrow letter). This is the
+    ONE arrow-escape-sequence decoder shared by run_sheet_tui_mode's
+    tui_apply_key (below) and gui.spl's run_sheet_gui_live live loop
+    (interactive.spl) — extracted so the live sheet-GUI loop reuses the
+    exact same ESC [ A/B/C/D handling instead of a second, drifting copy.
+
+    A lone ESC not followed by "[" resolves to "escape" (tui_apply_key below
+    treats that as a no-op, matching its pre-extraction behavior exactly;
+    the live loop maps it to session_key's "escape" — cancel the pending
+    typed buffer). An unrecognized byte after ESC [ resolves to "" (no key),
+    same as the pre-extraction fallthrough."""
+    if byte < 0:
+        return KeyDecodeResult(key: "eof", pending_esc: 0)
+    if pending_esc == 1:
+        if byte == 91:
+            return KeyDecodeResult(key: "", pending_esc: 2)
+        return KeyDecodeResult(key: "escape", pending_esc: 0)
+    if pending_esc == 2:
+        if byte == 65:
+            return KeyDecodeResult(key: "up", pending_esc: 0)
+        if byte == 66:
+            return KeyDecodeResult(key: "down", pending_esc: 0)
+        if byte == 67:
+            return KeyDecodeResult(key: "right", pending_esc: 0)
+        if byte == 68:
+            return KeyDecodeResult(key: "left", pending_esc: 0)
+        return KeyDecodeResult(key: "", pending_esc: 0)
+    if byte == 27:
+        return KeyDecodeResult(key: "", pending_esc: 1)
+    if byte == 10 or byte == 13:
+        return KeyDecodeResult(key: "enter", pending_esc: 0)
+    if byte == 127 or byte == 8:
+        return KeyDecodeResult(key: "backspace", pending_esc: 0)
+    if byte >= 32 and byte <= 126:
+        return KeyDecodeResult(key: char_from_code(byte), pending_esc: 0)
+    KeyDecodeResult(key: "", pending_esc: pending_esc)
+
 fn tui_apply_key(state: TuiState, byte: i64) -> TuiState:
     """Apply one input byte to the editor state. Pure — the whole keystroke
     surface, spec-testable without a terminal. Arrow keys arrive as
-    ESC [ A/B/C/D; printable bytes build the cell buffer; Enter commits
-    (formulas recalculate); backspace edits; q quits; s marks save."""
+    ESC [ A/B/C/D (decoded by the shared decode_key_byte above); printable
+    bytes build the cell buffer; Enter commits (formulas recalculate);
+    backspace edits; q quits; s marks save. A lone Escape (decode_key_byte's
+    "escape") has no action here, same as before this function was rebuilt
+    on top of the shared decoder — the TUI has no cancel-buffer key today,
+    unlike the GUI live loop's session_key("escape")."""
     var s = state
     s.dirty = false
-    if byte < 0:
+    val decoded = decode_key_byte(s.pending_esc, byte)
+    s.pending_esc = decoded.pending_esc
+    val key = decoded.key
+    if key == "eof":
         s.quit = true
         return s
-    if s.pending_esc == 1:
-        s.pending_esc = if byte == 91: 2 else: 0
-        return s
-    if s.pending_esc == 2:
-        if byte == 65:
-            return _tui_move(s, 0, -1)
-        if byte == 66:
-            return _tui_move(s, 0, 1)
-        if byte == 67:
-            return _tui_move(s, 1, 0)
-        if byte == 68:
-            return _tui_move(s, -1, 0)
-        s.pending_esc = 0
-        return s
-    if byte == 27:
-        s.pending_esc = 1
-        return s
-    if byte == 10 or byte == 13:
+    if key == "up":
+        return _tui_move(s, 0, -1)
+    if key == "down":
+        return _tui_move(s, 0, 1)
+    if key == "right":
+        return _tui_move(s, 1, 0)
+    if key == "left":
+        return _tui_move(s, -1, 0)
+    if key == "enter":
         # Commit the buffer to the active cell and move down
         if s.buffer != "":
             var sh = s.sheet
@@ -243,19 +291,20 @@ fn tui_apply_key(state: TuiState, byte: i64) -> TuiState:
             s.status = "{cell_ref_to_string(s.cur)} = {cell_display_text(sh.get_cell(cell_ref_to_string(s.cur)))}"
             s.buffer = ""
         return _tui_move(s, 0, 1)
-    if byte == 127 or byte == 8:
+    if key == "backspace":
         if s.buffer.len() > 0:
             s.buffer = s.buffer.slice(0, s.buffer.len() - 1)
         return s
-    if s.buffer == "" and byte == 113:   # q
+    if key == "escape" or key == "":
+        return s
+    if s.buffer == "" and key == "q":
         s.quit = true
         return s
-    if s.buffer == "" and byte == 115:   # s
+    if s.buffer == "" and key == "s":
         s.dirty = true
         s.status = "saved"
         return s
-    if byte >= 32 and byte <= 126:
-        s.buffer = "{s.buffer}{char_from_code(byte)}"
+    s.buffer = "{s.buffer}{key}"
     s
 
 fn tui_frame(state: TuiState, file_label: text) -> text:
@@ -299,6 +348,87 @@ fn run_sheet_tui_mode(in_path: text) -> i32:
             editor_save_sheet(state.sheet, in_path)
         if not state.quit and state.pending_esc == 0:
             print tui_frame(state, in_path)
+    rt_terminal_disable_raw_mode()
+    print "bye"
+    0
+
+# =========================================================================
+# Live sheet-GUI keystroke loop (closes doc/08_tracking/bug/
+# office_gui_no_per_cell_click_target_2026-07-04.md's residual #4 for
+# TERMINAL input): the same real termios raw-mode byte loop as
+# run_sheet_tui_mode above, bridged into gui.spl's SheetGuiSession/
+# session_key instead of TuiState -- a live interactive GUI-session loop
+# driven by real keystrokes, one frame re-rendered through the REAL
+# office_gui_sheet_session_pixels pixel path per input. Reuses
+# decode_key_byte (the exact same ESC [ A/B/C/D arrow decoder
+# run_sheet_tui_mode's tui_apply_key uses above) and the same
+# rt_stdin_read_byte/rt_terminal_enable_raw_mode/rt_terminal_disable_raw_mode
+# externs declared above -- zero duplicated termios plumbing.
+# =========================================================================
+
+val GUI_LIVE_MAX_ROWS: i32 = 5
+val GUI_LIVE_MAX_COLS: i32 = 4
+
+fn _gui_live_frame(view: SheetGuiView, selected_ref: text) -> text:
+    """One live-loop frame: an ANSI clear+home (mirrors run_sheet_tui_mode's
+    tui_frame, which clears/homes before every redraw) followed by the SAME
+    pixel-path proof line every other sheet-gui-* CLI command prints
+    (office_gui_sheet_session_pixels + office_gui_non_background_pixel_count
+    -- a real render through the browser-engine pixel path, not a stub) and
+    the session's text_dump, one "sheet-gui-live: <line>" per row (including
+    the leading "viewport|..." marker sheet_gui_view_with_selection always
+    emits first)."""
+    val esc = char_from_code(27)
+    val clear = "{esc}[2J{esc}[H"
+    val pixels = office_gui_sheet_session_pixels(view, selected_ref)
+    val non_background = office_gui_non_background_pixel_count(pixels)
+    var out = "{clear}sheet-gui-live: frame {office_gui_frame_width()}x{office_gui_frame_height()}, {non_background} non-background pixels\n"
+    for line in view.text_dump.split("\n"):
+        out = "{out}sheet-gui-live: {line}\n"
+    out
+
+fn run_sheet_gui_live(sheet: Sheet) -> i32:
+    """Live keystroke-driven sheet-GUI session: renders the current
+    SheetGuiSession through the real pixel path, reads one raw termios byte,
+    decodes it with decode_key_byte, and maps the result through gui.spl's
+    run_gui_live_step (SheetGuiSession's session_key, plus a quit signal) --
+    re-rendering after every accepted key. 'q' or Ctrl-C (byte 3) quits;
+    Enter commits the pending typed buffer (formulas recalculate); arrow
+    keys move the selection; Escape cancels an in-progress buffer.
+
+    Non-TTY safety: rt_terminal_enable_raw_mode() returns false when stdin
+    isn't a real terminal (tcgetattr fails on a pipe/redirect — the same
+    signal this codebase already relies on, not a new TTY-detection extern)
+    — in that case this prints exactly ONE rendered frame plus a documented
+    non-TTY notice and returns 0 immediately, instead of blocking forever on
+    a keystroke that will never arrive (so CI/non-interactive callers can
+    still exercise this entry point)."""
+    var session = session_new(sheet, "A1")
+    val first_view = sheet_gui_view_with_selection(session, GUI_LIVE_MAX_ROWS, GUI_LIVE_MAX_COLS)
+    print _gui_live_frame(first_view, session.selected_ref)
+
+    if not rt_terminal_enable_raw_mode():
+        print "sheet-gui-live: stdin is not a TTY (non-interactive input) -- printed one rendered frame above and exiting instead of blocking on a keystroke that will never arrive. Run 'simple office sheet-gui-live' from a real terminal for the live keystroke loop."
+        return 0
+
+    var quit = false
+    var pending_esc = 0
+    while not quit:
+        val b = rt_stdin_read_byte()
+        var key = ""
+        if b == 3:
+            key = "ctrl_c"
+        else:
+            val decoded = decode_key_byte(pending_esc, b)
+            pending_esc = decoded.pending_esc
+            key = decoded.key
+        if key != "":
+            val step = run_gui_live_step(session, key, GUI_LIVE_MAX_ROWS, GUI_LIVE_MAX_COLS, GUI_LIVE_MAX_ROWS, GUI_LIVE_MAX_COLS)
+            session = step.session
+            quit = step.quit
+            if not quit:
+                val view = sheet_gui_view_with_selection(session, GUI_LIVE_MAX_ROWS, GUI_LIVE_MAX_COLS)
+                print _gui_live_frame(view, session.selected_ref)
     rt_terminal_disable_raw_mode()
     print "bye"
     0

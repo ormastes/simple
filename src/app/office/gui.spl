@@ -1052,3 +1052,33 @@ fn session_scroll(session: SheetGuiSession, direction: text, view_rows: i32, vie
         val new_ref = cell_ref_to_string(CellRef(col: new_sel_col0, row: sel_row0))
         return SheetGuiSession(sheet: session.sheet, selected_ref: new_ref, pending_input: "", view_top_row: session.view_top_row, view_left_col: new_left0 + 1)
     session
+
+# ---------------------------------------------------------------------------
+# Live loop bridge (closes doc/08_tracking/bug/office_gui_no_per_cell_click_
+# target_2026-07-04.md's residual #4, terminal-input half): interactive.spl's
+# run_sheet_gui_live drives a REAL termios raw-mode keystroke loop against a
+# SheetGuiSession, re-rendering through the real pixel path per keystroke.
+# A live raw-mode loop can't itself be exercised from a spec (it blocks on
+# stdin), so run_gui_live_step below is the loop's per-keystroke core pulled
+# out into a pure, directly spec-testable function -- see
+# test/01_unit/app/office/sheet_gui_session_spec.spl's "live loop step"
+# describe block.
+# ---------------------------------------------------------------------------
+
+struct GuiLiveStepResult:
+    session: SheetGuiSession
+    quit: bool
+
+fn run_gui_live_step(session: SheetGuiSession, key: text, max_rows: i32, max_cols: i32, view_rows: i32, view_cols: i32) -> GuiLiveStepResult:
+    """One decoded key name -> one session transition, for the live sheet-GUI
+    loop. "q", "ctrl_c" (Ctrl-C), and "eof" (stdin closed) signal quit via
+    GuiLiveStepResult.quit rather than raising/exiting -- the session
+    returned alongside a quit is the session UNCHANGED from just before the
+    quit key, so quitting can never silently drop an in-progress typed
+    buffer. Every other key (arrows/chars/enter/backspace/escape) is
+    forwarded to session_key unchanged -- this function adds no new key
+    semantics of its own beyond the quit-signal wrapper session_key itself
+    has no concept of."""
+    if key == "q" or key == "ctrl_c" or key == "eof":
+        return GuiLiveStepResult(session: session, quit: true)
+    GuiLiveStepResult(session: session_key(session, key, max_rows, max_cols, view_rows, view_cols), quit: false)
