@@ -99,13 +99,18 @@ impl BandAlloc:
 
     # Mark a physical page as holding the current version of its LBA.
     me mark_valid(ppn: i64):
-        me.valid[ppn] = 1
-        val blk: i64 = ppn_block(ppn)
-        me.blk_valid[blk] = me.blk_valid[blk] + 1
+        if not ppn_in_range(ppn):
+            return
+        if me.valid[ppn] == 0:
+            me.valid[ppn] = 1
+            val blk: i64 = ppn_block(ppn)
+            me.blk_valid[blk] = me.blk_valid[blk] + 1
 
     # Mark a physical page as stale (no longer the current version).
     # No-op if the page is already invalid.
     me mark_invalid(ppn: i64):
+        if not ppn_in_range(ppn):
+            return
         if me.valid[ppn] == 1:
             me.valid[ppn] = 0
             val blk: i64 = ppn_block(ppn)
@@ -113,19 +118,29 @@ impl BandAlloc:
 
     # Number of valid (live) pages in the given block.
     me valid_count(blk: i64) -> i64:
+        if not block_in_range(blk):
+            return 0
         me.blk_valid[blk]
 
     # Whether the given physical page currently holds the live version.
     me is_valid(ppn: i64) -> bool:
+        if not ppn_in_range(ppn):
+            return false
         me.valid[ppn] == 1
 
     # Lifecycle state (BLK_FREE/OPEN/CLOSED/BAD) of the given block.
     me block_state(blk: i64) -> i64:
+        if not block_in_range(blk):
+            return BLK_BAD
         me.blk_state[blk]
 
     # Return a block to BLK_FREE after the FIL layer has erased it.
     # Resets blk_valid to 0 and increments free_count.
     me free_block(blk: i64):
+        if not block_in_range(blk):
+            return
+        if me.blk_state[blk] == BLK_FREE:
+            return
         me.blk_state[blk] = BLK_FREE
         me.blk_valid[blk] = 0
         me.free_count = me.free_count + 1
@@ -159,6 +174,8 @@ impl BandAlloc:
     # Recovery: mark one physical page live (an L2P entry points at it) and close its
     # block (it holds committed data, so it is not free for allocation).
     me rebuild_mark(ppn: i64):
+        if not ppn_in_range(ppn):
+            return
         if me.valid[ppn] == 0:
             me.valid[ppn] = 1
             val blk: i64 = ppn_block(ppn)
@@ -222,14 +239,28 @@ fn ftl_band_selftest() -> i64:
     # 5. mark_valid -> valid_count == 1.
     ba.mark_valid(p0)
     fail = fail + expect_eq(ba.valid_count(0), 1, "valid_count==1 after mark_valid")
+    ba.mark_valid(p0)
+    fail = fail + expect_eq(ba.valid_count(0), 1, "mark_valid idempotent")
+    ba.mark_valid(NUM_PAGES)
+    fail = fail + expect_eq(ba.valid_count(NUM_BLOCKS), 0, "invalid block valid_count fails closed")
+    fail = fail + expect_eq(if ba.is_valid(NUM_PAGES): 1 else: 0, 0, "invalid ppn is_valid fails closed")
+    fail = fail + expect_eq(ba.block_state(NUM_BLOCKS), BLK_BAD, "invalid block state fails closed")
 
     # 6. mark_invalid -> valid_count == 0.
     ba.mark_invalid(p0)
     fail = fail + expect_eq(ba.valid_count(0), 0, "valid_count==0 after mark_invalid")
+    ba.mark_invalid(NUM_PAGES)
+    fail = fail + expect_eq(ba.valid_count(0), 0, "invalid mark_invalid is inert")
 
     # 7. mark_invalid on already-invalid page is a no-op.
     ba.mark_invalid(p0)
     fail = fail + expect_eq(ba.valid_count(0), 0, "mark_invalid idempotent")
+
+    val free_before_bad_free: i64 = ba.free_blocks()
+    ba.free_block(NUM_BLOCKS)
+    fail = fail + expect_eq(ba.free_blocks(), free_before_bad_free, "invalid free_block is inert")
+    ba.rebuild_mark(NUM_PAGES)
+    fail = fail + expect_eq(ba.free_blocks(), free_before_bad_free, "invalid rebuild_mark is inert")
 
     ba.active_wp = PAGES_PER_BLOCK - 1
     ba.free_count = GC_RESERVE
