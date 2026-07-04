@@ -3,7 +3,15 @@
 **Date:** 2026-07-04
 **Severity:** high — blocks CARD 16 office GUI; broader instance of the
 ledgered same-name struct collision
-**Status:** open — deterministic repro
+**Status:** WORKAROUND APPLIED — CARD 16 repro unblocked via source-level
+rename (see "Workaround applied" section below); root-cause architectural
+fix in the Rust seed interpreter's unqualified-call overload resolution
+remains open and unlanded.
+
+Prior status: PARTIAL — repro reconfirmed, root cause re-diagnosed (see
+2026-07-04 iter section below); original field-name-set hypothesis
+disproven, real mechanism is an unqualified zero-arg FUNCTION overload
+collision. Fix is architecture-sized, not landed.
 
 ## Symptom
 
@@ -52,3 +60,236 @@ src/compiler/70.backend/backend/interpreter*.spl; resolution must key on the
 declared/inferred TYPE, not field names. Cross-ref:
 [[interp_dict_in_struct_copy_corruption_2026-07-03]],
 [[interp_array_param_indexing_2026-07-03]].
+
+## 2026-07-04 iter — root cause re-verified: disprove field-name-set theory, real cause is unqualified FUNCTION overload collision
+
+### Repro confirmation
+
+`timeout 120 bin/simple run src/app/office/mod.spl office counter --gui`
+(note: `--` before `office` drops the args in `_get_office_cli_args()` in
+`src/app/office/mod.spl` — pass `office counter --gui` directly, no `--`).
+Fails deterministically, 3/3 runs, with:
+
+```
+error: semantic: class `CellStyle` has no field named `display`
+```
+
+The active binary is `bin/release/x86_64-unknown-linux-gnu/simple`
+(built 2026-07-03 12:40, confirmed via `strings` to be the **Rust seed**
+interpreter in `src/compiler_rust/compiler/src/interpreter*` — debug
+path strings like `compiler/src/interpreter_eval.rs` are baked into the
+binary). It predates today's #112 ObjectStore-model commits (which touch
+`src/compiler_rust/compiler/src/interpreter/expr.rs` too), so it does not
+yet reflect that in-flight migration.
+
+### Field-name-set theory: disproven
+
+Traced every `"class `X` has no field named `Y`"` emission site:
+`src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs`
+(construction, ~line 300), `src/compiler_rust/compiler/src/interpreter/expr.rs`
+(~line 120, field access) + `.../interpreter/expr/calls.rs` (~line 377,
+property access), and `src/compiler_rust/compiler/src/pipeline/lowering.rs`
+(static "struct" wording, different message — ruled out). All three
+runtime sites gate the field-name-set fallback
+(`pick_fitting_class_def()` / `CLASS_OVERLOADS.with(...).get(class_name)`
+in `class_instantiation.rs:28-51`) **by the exact class name being
+constructed/accessed** — both `classes: HashMap<String, Arc<ClassDef>>`
+and `CLASS_OVERLOADS: HashMap<String, Vec<Arc<ClassDef>>>` are keyed by
+the literal's own type name (`s.name.clone()` / `c.name.clone()` at
+registration in `interpreter_eval.rs:300-370`). A `Style(...)` call can
+never structurally resolve to a `CellStyle` def through this path — the
+`CellStyle` bucket is never consulted for a `Style` construction. This
+rules out cross-*struct* field-set matching as the mechanism, contrary to
+the "Why it matters" hypothesis above.
+
+### Real root cause: unqualified zero-arg FUNCTION name collision
+
+Three separate zero-parameter functions share the bare name
+`default_style`, each with a **different return type**, all reachable
+from one `office/mod.spl` load:
+
+- `src/app/office/sheets/cell.spl:37` — `fn default_style() -> CellStyle:`
+- `src/lib/nogc_sync_mut/tui/style.spl:137` — `fn default_style() -> Style:` (tui Style)
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:1593` — `fn default_style() -> Style:` (browser Style, has `display`)
+
+The browser layout renderer calls its own `default_style()` unqualified at
+line 5225/5229 (`var styles: [Style] = [default_style(); node_count]` /
+`else: default_style()`). All 3 candidates land in the same
+`FUNCTION_OVERLOADS: HashMap<String, Vec<Arc<FunctionDef>>>` bucket
+(populated in the function-registration loop in
+`src/compiler_rust/compiler/src/interpreter_eval.rs`, `Node::Function`
+arm) because the registry has **no module qualification at all** — flat
+bare-name key, the same gap as the struct/class registry but for
+functions, and with no cross-module disambiguation cache analogous to
+`MODULE_CLASSES_CACHE` / `MODULE_FUNCTIONS_CACHE`
+(`src/compiler_rust/compiler/src/module_cache.rs`) consulted at this
+call site — those caches only serve explicit qualified `module.symbol()`
+access, not unqualified bare calls.
+
+`select_overload()` (`src/compiler_rust/compiler/src/interpreter_call/mod.rs:116-127`)
+scores each candidate via `overload_score()`, which only compares
+parameter **count** and **argument value types**
+(`func.params.len() != values.len()` short-circuit, then per-param
+`value_matches_type`). With 0 params and 0 args, all three candidates tie
+at score 0 with no argument shape to break the tie on. The tie-break rule
+(`Some((best_score, _)) if *best_score >= score => {}`, i.e. keep the
+existing best on a tie) means whichever candidate was pushed into
+`FUNCTION_OVERLOADS["default_style"]` **first** wins — i.e. whichever
+module's `default_style` registered during the **earliest** module load.
+
+`src/app/office/mod.spl` imports `app.office.sheets.sheets_app.{SheetsApp}`
+(line 8, pulls in `cell.spl`) **before** `app.office.gui.{office_gui_frame,
+...}` (line 14, pulls in the browser engine transitively via
+`render_html_tree` / `simple_web_engine2d_render_html_pixels`). So
+`cell.spl`'s `default_style() -> CellStyle` registers first and wins the
+tie for every unqualified `default_style()` call in the whole process —
+including calls made from *inside* the browser engine's own rendering
+code, which then treats the returned `CellStyle` object as a `Style` and
+fails accessing/copying its `display` field. This reproduces the exact
+observed error and explains why it only appears once BOTH modules are
+loaded together (matches the original symptom description), but the
+actual mechanism is function-overload resolution, not struct-literal
+field-name matching.
+
+### Why this isn't a minimal/lane-sized fix
+
+A correct fix needs unqualified-call resolution to prefer (or restrict
+to) the candidate defined in the **calling function's own module**. That
+requires:
+
+1. Module identity attached to each registered function. `FunctionDef`
+   (`src/compiler_rust/parser/src/ast/nodes/definitions.rs`) has no
+   `module_path` / `source_module` field — only a `Span` (line/col).
+   Adding one means either extending the parser AST (touches parsing,
+   every `FunctionDef` construction site, and the self-hosted `.smf`
+   serialization format) or maintaining a parallel side-table in the
+   interpreter's own registries (`FUNCTION_OVERLOADS`, `functions`) — a
+   new field/companion map threaded through every registration and
+   lookup site in `interpreter_eval.rs`, `interpreter_call/mod.rs`, and
+   `module_cache.rs`.
+2. Threading "which module is the currently-executing code's home
+   module" into `select_overload`'s call site
+   (`interpreter_call/mod.rs:315-334`, Priority 4) — there is currently
+   no "current module" context plumbed into `evaluate_expr` / `eval_call`
+   at all for this purpose.
+
+Both changes ripple across the flat global function/class registries
+underlying the *entire* interpreter's overload resolution (used for
+every same-named function across the whole stdlib+app tree), not just
+this one symptom. That is architecture-sized, not lane-sized, and risks
+regressing unrelated overload resolution if rushed. Recommend a
+follow-up task scoped specifically to "module-qualified unqualified-call
+resolution", touching `interpreter_eval.rs` (registration),
+`interpreter_call/mod.rs` (dispatch + `select_overload`), and
+`module_cache.rs` (module-context plumbing), verified against a targeted
+regression spec with 2+ same-name zero-arg functions of differing return
+type across two modules.
+
+### Smallest safe interim mitigation (not applied — flagging, not deciding)
+
+Rename one of the two colliding `default_style()` functions (e.g. the
+browser engine's to `default_computed_style()`) to remove the immediate
+collision for CARD 16's repro. This is a workaround, not a root-cause fix
+— any other pair of same-named, same-arity functions across modules with
+differing return types remains latently broken. Left undone here per
+"don't paper over the root cause without recording it" — next lane should
+decide whether an interim rename is acceptable while the architectural
+fix is scheduled.
+
+### Status of this iteration: PARTIAL
+
+Root cause identified, prior theory disproven with file:line evidence, no
+code changed. The fix site is the Rust seed interpreter
+(`src/compiler_rust/compiler/src/interpreter_call/mod.rs` +
+`interpreter_eval.rs`); it would require a `cargo` rebuild of
+`src/compiler_rust` to take effect, since the deployed
+`bin/release/x86_64-unknown-linux-gnu/simple` predates any interpreter
+change made here. No bootstrap/seed rebuild performed in this lane, per
+lane scope ("don't rebuild — report what needs rebuilding and why"). A
+pure-`.spl`-level fix is not available: the colliding resolution logic
+lives entirely in the Rust seed interpreter, not in any self-hosted
+`.spl` interpreter path (`src/app/interpreter/`,
+`src/compiler/70.backend/backend/interpreter*.spl` do not implement
+unqualified-call overload resolution for the code path this repro
+exercises).
+
+## 2026-07-04 — Workaround applied (pure-`.spl` rename, CARD 16 unblock)
+
+Per the "smallest safe interim mitigation" noted above, renamed two of the
+three tied `default_style()` zero-arg functions so the global
+`FUNCTION_OVERLOADS["default_style"]` bucket no longer has a same-name tie.
+`src/app/office/sheets/cell.spl:37`'s `default_style() -> CellStyle` is left
+untouched (office code depends on the bare name; after the renames below it
+is the sole `default_style` in the process, so no collision remains).
+
+**Renames:**
+
+- Browser engine (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`):
+  `default_style` → `renderer_default_style`. 3 call sites in this file
+  (definition at line 1593, plus 2 internal call sites, formerly ~5225/5229).
+  Swept the whole file and `src/`/`test/` tree for other importers — none
+  found; nothing else references this file's `default_style` by name.
+- TUI style (`src/lib/nogc_sync_mut/tui/style.spl`): `default_style` →
+  `tui_default_style`. Definition (line 137) + 1 internal call site
+  (line 301), plus every re-export/import chain that names it explicitly:
+  `src/lib/nogc_sync_mut/tui/__init__.spl`,
+  `src/lib/nogc_sync_mut/tui/widget.spl`,
+  `src/lib/nogc_sync_mut/tui/widgets/{input,box_widget,text,list}.spl`,
+  `src/lib/gc_async_mut/tui/__init__.spl`,
+  `src/lib/gc_async_mut/tui/style.spl` (re-export),
+  `src/lib/nogc_async_mut/tui/__init__.spl`,
+  `src/lib/nogc_async_mut/tui/style.spl` (re-export), and the TUI widgets
+  facade specs under
+  `test/01_unit/lib/{gc_async_mut,nogc_async_mut}/tui/widgets/` (including
+  the untracked `.spipe_matchers_*` mirrors) and the older duplicate copies
+  under `test/unit/lib/{gc_async_mut,nogc_async_mut}/tui/widgets/`.
+  18 files total touched across both renames.
+
+**Classification sweep (ambiguous cases, left alone):**
+
+- `be_default_style()` in `src/lib/gc_async_mut/gpu/browser_engine/css.spl`
+  is a distinct, already-uniquely-named function — not part of the
+  collision, untouched.
+- `TextStyle.default_style(font: FontHandle)` (static method,
+  `src/lib/nogc_sync_mut/engine/render/text.spl:32` and the
+  `nogc_async_mut` mirror) is a qualified static-method call with 1 param —
+  different resolution path and arity, not part of the 0-arg unqualified
+  collision, untouched.
+- `default_style_for(tag: text)` (`src/lib/common/render_scene/office_style_resolver.spl`)
+  and `_default_style()` (`src/app/ui.tui_web/screen_to_html.spl`) are
+  already distinctly named — untouched.
+- **Pre-existing unrelated bug found, not fixed here:**
+  `src/os/compositor/browser_backend.spl:20` and
+  `src/os/apps/browser_sample/browser_sample.spl:24` both import a bare
+  `default_style` from `std.gc_async_mut.gpu.browser_engine.css` — but
+  `css.spl` only exports `be_default_style`, never a bare `default_style`.
+  This import appears stale/broken independent of this bug and of the
+  renames above (it doesn't reference either renamed symbol); flagging for
+  a separate fix, out of scope for CARD 16.
+
+**Verification:**
+
+- Repro `timeout 120 bin/simple run src/app/office/mod.spl office counter --gui`
+  (no `--` before `office`) no longer hits the CellStyle/display collision;
+  it now runs to completion: `office-gui: counter frame 96x64, 2523
+  non-background pixels`.
+- Specs green after the rename:
+  `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`
+  (79/79), `test/01_unit/lib/gc_async_mut/tui/widgets/tui_widgets_facade_spec.spl`
+  (1/1), `test/01_unit/lib/nogc_async_mut/tui/widgets/tui_widgets_facade_spec.spl`
+  (1/1), `test/01_unit/app/office/sheets/formula_financial_spec.spl` (15/15),
+  `test/01_unit/app/office/md_wysiwyg_render_spec.spl` (7/7).
+
+**Root cause still open:** this is a workaround, not the fix. Any other
+pair of same-name, same-arity, differing-return-type functions across
+modules remains latently broken by the same
+`FUNCTION_OVERLOADS`/`select_overload()` tie-break-keeps-first-registered
+mechanism described above. The architectural fix (module-qualified
+unqualified-call resolution in the Rust seed interpreter,
+`interpreter_eval.rs` + `interpreter_call/mod.rs` + `module_cache.rs`)
+remains scheduled as a separate, architecture-sized follow-up.
+
+**WC-sweep note:** all 18 files in this rename were reverted once by a
+concurrent working-copy sweep mid-lane and had to be reapplied; verify the
+rename (`grep -rn 'default_style' <files>`) is still present before
+building on this workaround in a future session.
