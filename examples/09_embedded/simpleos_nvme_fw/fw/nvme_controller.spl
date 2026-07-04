@@ -232,10 +232,14 @@ impl NvmeController:
         n
 
     me firmware_revision() -> i64:
+        if me.fw_revision < 1:
+            return 1
         me.fw_revision
 
     # Firmware slot recorded by the most recent successful Commit (0 = none yet).
     me committed_fw_slot() -> i64:
+        if not admin_fw_slot_valid(me.fw_slot):
+            return 0
         me.fw_slot
 
     # Target SQID / CID decoded from the most recent Abort (-1 = none seen).
@@ -283,7 +287,7 @@ impl NvmeController:
             return AdminResult(status: SC_SUCCESS, data: me.error_log_count(), post: true)
         if logid == LOG_FW_SLOT:
             # Firmware Slot Information log: the completion reports the active firmware revision.
-            return AdminResult(status: SC_SUCCESS, data: me.fw_revision, post: true)
+            return AdminResult(status: SC_SUCCESS, data: me.firmware_revision(), post: true)
         AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
 
     # Error-log introspection (the Get Log Page ERROR data the host would read).
@@ -701,6 +705,16 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(fc3.status, SC_SUCCESS, "fw commit (replace-only) accepted")
     fail = fail + expect_eq(c.committed_fw_slot(), 2, "replace-only commit still records the slot")
     fail = fail + expect_eq(c.firmware_revision(), rev1, "replace-only commit does NOT advance the revision")
+    c.fw_revision = -4
+    c.fw_slot = 9
+    fail = fail + expect_eq(c.firmware_revision(), 1, "firmware revision clamps corrupted negative value")
+    fail = fail + expect_eq(c.committed_fw_slot(), 0, "firmware slot clamps corrupted invalid value")
+    c.admin_submit(admin_get_log_cmd(57, LOG_FW_SLOT))
+    c.admin_process()
+    val fwlog_bad: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(fwlog_bad.data, 1, "get-log FW_SLOT clamps corrupted revision")
+    c.fw_revision = rev1
+    c.fw_slot = 2
     # Invalid firmware image lengths and reserved commit actions fail closed.
     c.admin_submit(admin_fw_download_cmd(38, 0, 0))
     c.admin_submit(admin_fw_commit_cmd(39, 1, 4))
