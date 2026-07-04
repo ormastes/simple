@@ -1,7 +1,7 @@
 # RV32 no-alloc NVMe firmware logic reference.
 #
 # Scalar-only: no arrays, no heap, no strings in the logic path. Host and bare-metal entries share
-# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue + admin/format/fw-log + reactor + policy/target + DRAM/durability + wear/scrub + media-retire + power-cycle + backpressure/abort + feature-guard + namespace-guard floor.
+# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue + queue-phase + admin/format/fw-log + reactor + policy/target + DRAM/durability + wear/scrub + media-retire + power-cycle + backpressure/abort + feature-guard + namespace-guard floor.
 
 fn rv32_rain_selftest() -> i64:
     val d0 = 256
@@ -1643,6 +1643,70 @@ fn rv32_feature_guard_selftest() -> i64:
     if volatile_wc != 0 or feat_power_mgmt != 2 or feat_volatile_wc != 6:
         fail = fail + 1
     fail
+
+fn rv32_queue_phase_selftest() -> i64:
+    # Scalar NVMe ring floor: bounded doorbells and CQ phase flips only on wrap.
+    var fail = 0
+    val depth = 4
+    var sq_head = 0
+    var sq_tail = 0
+    var sq_len = 0
+    var cq_head = 0
+    var cq_tail = 0
+    var cq_len = 0
+    var cq_phase = 1
+    var host_seen_phase = 1
+
+    val doorbell = 1
+    if doorbell < 0 or doorbell >= depth:
+        fail = fail + 1
+    else:
+        sq_tail = doorbell
+        sq_len = sq_len + 1
+    if sq_tail != 1 or sq_len != 1:
+        fail = fail + 1
+
+    val bad_doorbell = depth
+    if bad_doorbell >= 0 and bad_doorbell < depth:
+        sq_tail = bad_doorbell
+        sq_len = sq_len + 1
+    if sq_tail != 1 or sq_len != 1:
+        fail = fail + 1
+
+    while sq_len < depth:
+        sq_tail = (sq_tail + 1) % depth
+        sq_len = sq_len + 1
+    if sq_len != depth:
+        fail = fail + 1
+    if sq_len < depth:
+        sq_tail = (sq_tail + 1) % depth
+        sq_len = sq_len + 1
+    if sq_len != depth:
+        fail = fail + 1
+
+    while sq_len > 0:
+        sq_head = (sq_head + 1) % depth
+        sq_len = sq_len - 1
+    if sq_head != sq_tail or sq_len != 0:
+        fail = fail + 1
+
+    while cq_len < depth:
+        cq_tail = (cq_tail + 1) % depth
+        cq_len = cq_len + 1
+        if cq_tail == 0:
+            cq_phase = 1 - cq_phase
+    if cq_tail != 0 or cq_phase != 0 or cq_len != depth:
+        fail = fail + 1
+    if host_seen_phase == cq_phase:
+        fail = fail + 1
+    host_seen_phase = cq_phase
+
+    while cq_len > 0:
+        cq_head = (cq_head + 1) % depth
+        cq_len = cq_len - 1
+    if cq_head != 0 or cq_len != 0 or host_seen_phase != 0:
+        fail = fail + 1
+    fail
  
 fn rv32_namespace_guard_selftest() -> i64:
     # Scalar NVMe namespace/reserved-field floor: malformed admin commands are inert.
@@ -1701,4 +1765,4 @@ fn rv32_namespace_guard_selftest() -> i64:
     fail
 
 fn nvme_fw_rv32_logic_selftest() -> i64:
-    rv32_rain_selftest() + rv32_ecc_selftest() + rv32_journal_selftest() + rv32_map_selftest() + rv32_band_selftest() + rv32_sched_selftest() + rv32_pt_selftest() + rv32_hil_selftest() + rv32_admin_selftest() + rv32_reactor_selftest() + rv32_policy_target_selftest() + rv32_dram_durability_selftest() + rv32_wear_scrub_selftest() + rv32_media_retire_selftest() + rv32_power_cycle_selftest() + rv32_backpressure_abort_selftest() + rv32_feature_guard_selftest() + rv32_namespace_guard_selftest()
+    rv32_rain_selftest() + rv32_ecc_selftest() + rv32_journal_selftest() + rv32_map_selftest() + rv32_band_selftest() + rv32_sched_selftest() + rv32_pt_selftest() + rv32_hil_selftest() + rv32_queue_phase_selftest() + rv32_admin_selftest() + rv32_reactor_selftest() + rv32_policy_target_selftest() + rv32_dram_durability_selftest() + rv32_wear_scrub_selftest() + rv32_media_retire_selftest() + rv32_power_cycle_selftest() + rv32_backpressure_abort_selftest() + rv32_feature_guard_selftest() + rv32_namespace_guard_selftest()
