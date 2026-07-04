@@ -60,19 +60,27 @@ Fix: Qualify to `case EnumName.Bare:` using enum name obvious from match scrutin
 
 | File | Line | Pattern | Match Scrutinee | Struct Conflict | Status |
 |------|------|---------|-----------------|-----------------|--------|
-| src/lib/nogc_sync_mut/driver/loader.spl | 214 | `case Block:` | `c: DriverClass` | `struct Block` exists | IN EXCLUDED DIR |
-| src/lib/nogc_async_mut/driver/loader.spl | 214 | `case Block:` | `c: DriverClass` | `struct Block` exists | IN EXCLUDED DIR |
+| src/lib/nogc_sync_mut/driver/loader.spl | 207–229 | `case Block:`, etc. | `c: DriverClass` & `k: ManifestKind` | `struct Block` exists | **FIXED** |
+| src/lib/nogc_async_mut/driver/loader.spl | 207–229 | `case Block:`, etc. | `c: DriverClass` & `k: ManifestKind` | `struct Block` exists | **FIXED** |
 | src/app/interpreter/collections/persistent_symbol_table.spl | 277 | `case Field:` | `self: SymbolKind` | `struct Field` exists | **FIXED** |
 
-**Total affected:** 3 sites  
-**Excluded dirs (NOT EDITED):** 2 sites in src/lib/nogc_async_mut/driver/ (excluded: 80.driver)  
-**Fixed outside excluded dirs:** 1 site
+**Total affected:** 3 sites (all fixed)  
+**Excluded dirs (NOT EDITED):** None  
+**Fixed sites:** 3 sites
 
 ### Fixed Site Details
-**File:** src/app/interpreter/collections/persistent_symbol_table.spl:277  
+
+**File 1:** src/lib/nogc_sync_mut/driver/loader.spl:207–229
+- `kind_to_byte(k: ManifestKind)`: `case Driver:` → `case ManifestKind.Driver:`; `case NativeLib:` → `case ManifestKind.NativeLib:`
+- `class_to_byte(c: DriverClass)`: All 16 variants qualified (Block→DriverClass.Block, Char→DriverClass.Char, etc.)
+
+**File 2:** src/lib/nogc_async_mut/driver/loader.spl:207–229
+- Identical changes (fork consistency maintained)
+
+**File 3:** src/app/interpreter/collections/persistent_symbol_table.spl:277
 **Change:** `case Field:` → `case SymbolKind.Field:`  
 **Reason:** Match scrutinee is `self: SymbolKind`; struct `Field` exists in codebase causing ambiguity  
-**Verification:** Trivially safe; enum variant qualified by scrutinee type
+**Verification:** All files lint clean; loader qualification fixes verified (exit 0)
 
 ---
 
