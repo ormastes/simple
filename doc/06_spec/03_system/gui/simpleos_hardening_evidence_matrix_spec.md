@@ -395,6 +395,8 @@ expect(report).to_contain("scripts/check/check-simpleos-mission-critical-prereqs
 expect(report).to_contain("- mission_critical_prereqs_missing: sby,yosys,smt-solver")
 expect(report).to_contain("- byl_sby_artifact_audit: pass")
 expect(report).to_contain("- byl_sby_artifact_audit_gate: scripts/check/check-simpleos-byl-sby-artifacts.shs")
+expect(report).to_contain("- byl_sby_artifact_audit_scope: checked-in non-Lean formal artifacts consist of the RISC-V BYL surface")
+expect(report).to_contain("- byl_sby_artifact_audit_evidence: src/verification/riscv_product/riscv_product.byl")
 expect(report).to_contain("- riscv_rtl_sby_proof_gate: scripts/check/check-riscv-rtl-sby-proof.shs")
 expect(report).to_contain("- riscv_rtl_sby_proof_blocker: sby,yosys,smt-solver")
 expect(report).to_contain("RISC-V generated RTL bundles pass RVFI port")
