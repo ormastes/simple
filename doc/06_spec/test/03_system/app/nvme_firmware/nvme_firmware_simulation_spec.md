@@ -72,13 +72,14 @@ evidence. Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_firmware_s
 - Run the aggregated firmware self-test suite
    - Expected: code equals `0`
 - Confirm each layer's section ran
+- Confirm the OpenSSD target profiles are exercised
 - Confirm the suite reports overall PASS
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -91,6 +92,12 @@ expect(out).to_contain("FIL (flash interface)")
 expect(out).to_contain("FTL (translation)")
 expect(out).to_contain("HIL (host interface)")
 expect(out).to_contain("NVMe controller (admin + multi IO queue)")
+expect(out).to_contain("OpenSSD multi-target config")
+
+step("Confirm the OpenSSD target profiles are exercised")
+expect(out).to_contain("target: OpenSSD 2Ch8Way channels")
+expect(out).to_contain("openssd: Cosmos+ NAND channels")
+expect(out).to_contain("openssd: PL PCIe endpoint aperture")
 
 step("Confirm the suite reports overall PASS")
 expect(out).to_contain("ALL FIRMWARE SELF-TESTS PASS")
