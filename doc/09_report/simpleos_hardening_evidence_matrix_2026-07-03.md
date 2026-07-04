@@ -93,8 +93,8 @@
 - tensor_memory_formal_scope: per-component tensor memory min/max bounds compose into total min <= total max, and any actual usage below total max fits when total max fits available device memory
 - tensor_memory_formal_evidence: src/verification/tensor_dimensions/src/TensorMemory.lean training_total_min_le_max + training_fits_if_max_fits; `cd src/verification/tensor_dimensions && lake build`
 - tensor_dimensions_formal: pass
-- tensor_dimensions_formal_scope: tensor shape compatibility is reflexive, mismatched ranks are rejected, matmul shape inference is deterministic, and computed min/max element bounds are comparable when both exist
-- tensor_dimensions_formal_evidence: src/verification/tensor_dimensions/src/TensorDimensions.lean shapesCompatible_refl + shapesCompatible_rank_mismatch_left + matmulShape_deterministic + min_le_max_elements; `cd src/verification/tensor_dimensions && lake build`
+- tensor_dimensions_formal_scope: tensor shape compatibility is reflexive, mismatched ranks are rejected, successful dimension unification returns the expected dimension, matmul shape inference is deterministic, and computed min/max element bounds are comparable when both exist
+- tensor_dimensions_formal_evidence: src/verification/tensor_dimensions/src/TensorDimensions.lean shapesCompatible_refl + shapesCompatible_rank_mismatch_left + unifyDim_success_eq + matmulShape_deterministic + min_le_max_elements; `cd src/verification/tensor_dimensions && lake build`
 - type_inference_core_formal: pass
 - type_inference_core_formal_scope: core expression type inference is deterministic and rejects numeric addition with a boolean operand
 - type_inference_core_formal_evidence: src/verification/type_inference_compile/src/TypeInferenceCompile.lean infer_deterministic + infer_add_rejects_bool_operand; `cd src/verification/type_inference_compile && lake build`
