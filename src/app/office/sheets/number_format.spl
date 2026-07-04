@@ -1,0 +1,253 @@
+# Number Format Codes
+#
+# format_number() implements a practical subset of Excel's Format Cells >
+# Number format-code language: fixed decimals, thousands grouping, percent,
+# a generic currency/literal-prefix form, scientific notation, and date
+# serials. It is the richer sibling of `cell_format._cf_excel_format` (which
+# stays as-is to protect its existing green regression spec); this module is
+# the new home for number-format work and the one to extend going forward.
+#
+# Subset shipped (docstring ceiling -- everything else falls back to
+# general display rather than erroring):
+#   "0" / "0.00" / "0.000"     fixed decimals, round-half-away-from-zero
+#   "#,##0" / "#,##0.00"       thousands-grouped, fixed decimals
+#   "0%" / "0.0%" / "0.00%"    value * 100 with a trailing "%"
+#   "$#,##0.00"                any LITERAL run before the first "0"/"#" is
+#                               kept as a prefix (currency symbol, "USD ", ...)
+#   "0.00E+00"                 scientific notation, N-digit mantissa,
+#                               2-digit signed exponent
+#   "yyyy-mm-dd" / "mm/dd/yyyy" / "dd.mm.yyyy"
+#                               value read as an Excel date serial
+#   "@"                        text passthrough (meaningful at the
+#                               cell_display_formatted layer; on a bare f64
+#                               it degrades to general)
+#   ""                         general -- trim to integer form when the
+#                               value has no fraction
+# Negative numbers get a plain "-" prefix. A ";"-separated multi-section
+# code (positive;negative;zero;text) is OUT of scope: only the first
+# section is used. Unknown/unsupported codes fall back to general rather
+# than erroring the display path.
+#
+# Date serials reuse `civil_from_serial` from `std.math.financial` (the
+# financial library's own Hinnant's-algorithm civil<->serial conversion) --
+# no third copy of that arithmetic in this codebase.
+
+use common.office.number.{office_pow10_f64, office_parse_signed_decimal_f64}
+use std.math.financial.{civil_from_serial}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{CellValue, cell_display_text}
+use app.office.sheets.cell_format.{SheetFormats, formats_get}
+
+# =========================================================================
+# Public API
+# =========================================================================
+
+fn format_number(value: f64, code: text) -> text:
+    """Format `value` per an Excel-style number-format `code` (see module
+    docstring for the supported subset). Only the first ";"-separated
+    section of `code` is honored. Unknown codes fall back to general
+    display -- this function never errors."""
+    val semi = code.index_of(";")
+    val sec0 = if semi >= 0: code.substring(0, semi) else: code
+    if sec0 == "" or sec0.lower() == "general":
+        return _nf_general(value)
+    if sec0 == "@":
+        return _nf_general(value)
+    val lower = sec0.lower()
+    if lower.contains("y") and (lower.contains("m") or lower.contains("d")):
+        return _nf_format_date(value, lower)
+    val neg = value < 0.0
+    val av = if neg: 0.0 - value else: value
+    if lower.contains("e+") or lower.contains("e-"):
+        val body = _nf_format_scientific(av, _nf_count_decimals(lower))
+        if neg:
+            return "-{body}"
+        return body
+    if sec0.ends_with("%"):
+        val decs = _nf_count_decimals(sec0)
+        val body = "{_nf_fixed_grouped(av * 100.0, decs, false)}%"
+        if neg:
+            return "-{body}"
+        return body
+    val zero_idx = sec0.index_of("0")
+    val hash_idx = sec0.index_of("#")
+    var digit_idx = -1
+    if zero_idx < 0:
+        digit_idx = hash_idx
+    elif hash_idx < 0:
+        digit_idx = zero_idx
+    elif zero_idx < hash_idx:
+        digit_idx = zero_idx
+    else:
+        digit_idx = hash_idx
+    if digit_idx < 0:
+        return _nf_general(value)
+    val prefix = sec0.substring(0, digit_idx)
+    val core = sec0.substring(digit_idx, sec0.len())
+    val grouped = core.contains(",")
+    val decs = _nf_count_decimals(core)
+    val body = "{prefix}{_nf_fixed_grouped(av, decs, grouped)}"
+    if neg:
+        return "-{body}"
+    body
+
+fn cell_display_formatted(sheet: Sheet, formats: SheetFormats, ref: text) -> text:
+    """Number-format-aware display text for one cell: applies `format_number`
+    when the cell resolves to a number (a plain numeric cell, or a formula
+    cell whose cached display is a plain numeric result) AND a format code
+    is set, otherwise falls back to `cell_display_text` (unchanged, general
+    display). Opt-in at the call site -- `cell_display_text` itself is
+    untouched."""
+    val cell = sheet.get_cell(ref)
+    val spec = formats_get(formats, ref)
+    if spec.num_fmt != "":
+        match cell.value:
+            CellValue.NumberVal(value):
+                return format_number(value, spec.num_fmt)
+            CellValue.FormulaVal(expr, cached_display):
+                if _nf_looks_numeric(cached_display):
+                    return format_number(office_parse_signed_decimal_f64(cached_display), spec.num_fmt)
+                return cell_display_text(cell)
+            _:
+                pass
+    cell_display_text(cell)
+
+fn _nf_looks_numeric(s: text) -> bool:
+    """True if `s` is a plain signed decimal ("5", "-1.25") -- used to
+    detect a formula cell's cached_display holding a numeric result before
+    re-formatting it. Text results ("hello") and error markers ("#ERR: ...")
+    are rejected."""
+    if s.len() == 0:
+        return false
+    var i = 0
+    if s.substring(0, 1) == "-":
+        i = 1
+    if i >= s.len():
+        return false
+    var saw_digit = false
+    var saw_dot = false
+    while i < s.len():
+        val c = s.substring(i, i + 1)
+        if c == ".":
+            if saw_dot:
+                return false
+            saw_dot = true
+        else:
+            val code = c.char_code_at(0)
+            if code >= 48 and code <= 57:
+                saw_digit = true
+            else:
+                return false
+        i = i + 1
+    saw_digit
+
+# =========================================================================
+# Helpers (private to this module; `_nf_` prefix avoids the interpreter's
+# documented same-name flat-symbol-table collision across modules -- see
+# cell_format.spl's `_cf_` helpers for the precedent).
+# =========================================================================
+
+fn _nf_general(value: f64) -> text:
+    """General/unformatted display: integer form when there's no fraction,
+    otherwise the plain f64 text form."""
+    val i = value.to_i64()
+    if value - i.to_f64() == 0.0:
+        return "{i}"
+    "{value}"
+
+fn _nf_count_decimals(fmt: text) -> i32:
+    """Zeros directly after the first '.' in a format code ("0.00" -> 2)."""
+    val dot = fmt.index_of(".")
+    if dot < 0:
+        return 0
+    var n = 0
+    var i = dot + 1
+    while i < fmt.len() and fmt.substring(i, i + 1) == "0":
+        n = n + 1
+        i = i + 1
+    n
+
+fn _nf_floor(x: f64) -> f64:
+    """Largest integer <= x. Call sites in this module only ever pass
+    non-negative x (sign is handled by the caller)."""
+    val t = x.to_i64().to_f64()
+    if t > x:
+        return t - 1.0
+    t
+
+fn _nf_group_thousands(int_txt: text) -> text:
+    """Insert commas every 3 digits from the right: "1234568" -> "1,234,568"."""
+    var out = ""
+    var count = 0
+    var i = int_txt.len() - 1
+    while i >= 0:
+        out = "{int_txt.substring(i, i + 1)}{out}"
+        count = count + 1
+        if count % 3 == 0 and i > 0:
+            out = ",{out}"
+        i = i - 1
+    out
+
+fn _nf_fixed_grouped(v: f64, decimals: i32, grouped: bool) -> text:
+    """Round a NON-NEGATIVE value to `decimals` places (round-half-away-
+    from-zero), optionally inserting thousands commas in the integer part.
+    Callers own the sign -- see `format_number`."""
+    val scale = office_pow10_f64(decimals)
+    val scaled = _nf_floor(v * scale + 0.5)
+    val int_part = (scaled / scale).to_i64()
+    val frac_scaled = scaled.to_i64() - int_part * scale.to_i64()
+    var int_txt = "{int_part}"
+    if grouped:
+        int_txt = _nf_group_thousands(int_txt)
+    if decimals > 0:
+        var frac_txt = "{frac_scaled}"
+        while frac_txt.len() < decimals:
+            frac_txt = "0{frac_txt}"
+        return "{int_txt}.{frac_txt}"
+    int_txt
+
+fn _nf_pad2(n: i64) -> text:
+    """Zero-pad a non-negative integer to at least 2 digits."""
+    if n < 10:
+        return "0{n}"
+    "{n}"
+
+fn _nf_format_scientific(v: f64, decimals: i32) -> text:
+    """Mantissa in [1,10) with `decimals` places + a 2-digit signed
+    exponent ("1.23E+04"). `v` is assumed non-negative; the caller owns the
+    sign (see `format_number`)."""
+    if v == 0.0:
+        return "{_nf_fixed_grouped(0.0, decimals, false)}E+00"
+    var mantissa = v
+    var exp = 0
+    while mantissa >= 10.0:
+        mantissa = mantissa / 10.0
+        exp = exp + 1
+    while mantissa < 1.0:
+        mantissa = mantissa * 10.0
+        exp = exp - 1
+    var mant_txt = _nf_fixed_grouped(mantissa, decimals, false)
+    if mant_txt.starts_with("10"):
+        # Rounding pushed the mantissa up to 10.0[...] -- renormalize once.
+        mantissa = mantissa / 10.0
+        exp = exp + 1
+        mant_txt = _nf_fixed_grouped(mantissa, decimals, false)
+    val exp_abs = if exp < 0: 0 - exp else: exp
+    val exp_sign = if exp < 0: "-" else: "+"
+    "{mant_txt}E{exp_sign}{_nf_pad2(exp_abs)}"
+
+fn _nf_format_date(value: f64, lower_fmt: text) -> text:
+    """yyyy-mm-dd (default) / mm/dd/yyyy (code contains "/") / dd.mm.yyyy
+    (code contains "."). Ceiling: only these three separator/order
+    combinations are recognized -- e.g. dd/mm/yyyy is not distinguished
+    from mm/dd/yyyy. `value` is read as an Excel date serial via the
+    financial library's own conversion (no duplicated date arithmetic)."""
+    val ymd = civil_from_serial(value)
+    val y = ymd[0]
+    val m = _nf_pad2(ymd[1])
+    val d = _nf_pad2(ymd[2])
+    if lower_fmt.contains("/"):
+        return "{m}/{d}/{y}"
+    if lower_fmt.contains("."):
+        return "{d}.{m}.{y}"
+    "{y}-{m}-{d}"
