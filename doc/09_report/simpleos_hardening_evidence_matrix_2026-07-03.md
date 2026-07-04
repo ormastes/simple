@@ -6,6 +6,9 @@
 - lean_theorem_citation_audit: pass
 - lean_theorem_citation_audit_scope: every Lean theorem declaration under `src/verification` has a matching theorem-name citation in this hardening evidence matrix; model definitions are excluded from this theorem-citation audit
 - lean_theorem_citation_audit_evidence: `for f in $(find src/verification -path '*/.lake' -prune -o -name '*.lean' -print | sort); do miss=$(rg -o '^theorem [A-Za-z0-9_\.]+' "$f" | sed 's/^theorem //' | while read n; do rg -q "(^|[^A-Za-z0-9_.])$n([^A-Za-z0-9_]|$)" doc/09_report/simpleos_hardening_evidence_matrix_2026-07-03.md || echo "$n"; done | head -20); if [ -n "$miss" ]; then echo "$f"; echo "$miss" | sed 's/^/  /'; fi; done` produced no missing theorem names
+- lean_package_build_audit: pass
+- lean_package_build_audit_scope: all 21 Lean package roots under `src/verification` build through their stable `lake build` entry point
+- lean_package_build_audit_evidence: `for d in $(find src/verification -name lakefile.toml -printf '%h\n' | sort); do (cd "$d" && lake build) || exit 1; done` passed for actor_channel, aop_weaver, async_compile, db_storage, fat32, formal/nvfs, gc_boundary, gc_manual_borrow, kernel_capabilities, kernel_scheduler, macro_auto_import, manual_pointer_borrow, memory_capabilities, memory_model_drf, module_resolution, nogc_compile, riscv_product, tensor_dimensions, type_inference_compile, ui_compositor, and visibility_export
 - executable_launch_from_fs: pass
 - ssh_shell_smf_and_exec: pass
 - shared_wm_logic: pass
