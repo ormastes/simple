@@ -322,7 +322,7 @@ whole-unit erasure.
 > **Status (2026-07-04).** The rv32 toolchain/OS boot blocker has been reduced: the rv32 OS boot
 > path builds/boots in the current lane, and `examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl`
 > is a `check`-clean, host-verified, array-free scalar reference for the Lean-proven RAIN
-> reconstruction, SECDED ECC floor, fixed scheduler floor, fixed power/thermal floor, fixed map-cache floor, fixed band floor, and fixed journal-ring floor, wired through the optional rv32 boot hook. That is useful P9 evidence, not the full firmware port. The full 22-module
+> reconstruction, SECDED ECC floor, fixed scheduler floor, fixed power/thermal floor, fixed map-cache floor, fixed band floor, fixed journal-ring floor, and fixed HIL command/queue floor, wired through the optional rv32 boot hook. That is useful P9 evidence, not the full firmware port. The full 22-module
 > no-alloc firmware (`ftl_fill`/dict-map/journal-ring -> fixed-capacity) still has to be wired into
 > the rv32 boot path and observed printing `ALL RV32 NVME FW CHECKS PASS` before P9 is complete.
 
