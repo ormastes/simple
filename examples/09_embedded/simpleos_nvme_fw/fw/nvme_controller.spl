@@ -107,9 +107,12 @@ impl NvmeController:
         if cmd.opcode == ADMIN_IDENTIFY:
             return AdminResult(status: me.do_identify(cmd), data: 0, post: true)
         if cmd.opcode == ADMIN_SET_FEATURES:
-            me.features.set(admin_fid(cmd.cdw10), cmd.cdw11)
+            if not me.features.set(admin_fid(cmd.cdw10), cmd.cdw11):
+                return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             return AdminResult(status: SC_SUCCESS, data: cmd.cdw11, post: true)
         if cmd.opcode == ADMIN_GET_FEATURES:
+            if admin_fid(cmd.cdw10) < 0 or admin_fid(cmd.cdw10) >= FEAT_MAX:
+                return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             return AdminResult(status: SC_SUCCESS, data: me.features.get(admin_fid(cmd.cdw10)), post: true)
         if cmd.opcode == ADMIN_GET_LOG:
             return me.do_get_log(cmd)
@@ -423,6 +426,13 @@ fn nvme_controller_selftest() -> i64:
     val gf: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(sf.status, SC_SUCCESS, "set feature ok")
     fail = fail + expect_eq(gf.data, 345, "get feature returns the set value")
+    c.admin_submit(admin_set_feature_cmd(6, FEAT_MAX, 1))
+    c.admin_submit(admin_get_feature_cmd(7, FEAT_MAX))
+    c.admin_process()
+    val badsf: NvmeCpl = c.admin_reap()
+    val badgf: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(badsf.status, SC_INVALID_FIELD, "set invalid feature rejected")
+    fail = fail + expect_eq(badgf.status, SC_INVALID_FIELD, "get invalid feature rejected")
 
     # Abort (best-effort): completes; the synchronous target is already done.
     c.admin_submit(admin_abort_cmd(30, 1, 100))
