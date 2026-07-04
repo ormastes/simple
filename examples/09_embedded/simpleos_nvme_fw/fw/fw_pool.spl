@@ -61,6 +61,19 @@ fn task_pool_new() -> TaskPool:
     )
 
 impl TaskPool:
+    me counted_live() -> i64:
+        var n: i64 = 0
+        var i: i64 = 0
+        while i < me.cap and i < POOL_CAP:
+            if me.used[i] == 1:
+                n = n + 1
+            i = i + 1
+        if me.live < 0:
+            return 0
+        if me.live < n:
+            return me.live
+        n
+
     # acquire: find a free slot, stamp it, return a valid Handle.
     # Returns handle_invalid() when the pool is full.
     me acquire(cid: i64, lba: i64, nblk: i64, data: i64) -> Handle:
@@ -96,7 +109,7 @@ impl TaskPool:
         if h.index >= POOL_CAP:
             return false
         val u = me.used[h.index]
-        if u == 0:
+        if u != 1:
             return false
         val g = me.gen[h.index]
         g == h.generation
@@ -177,7 +190,7 @@ impl TaskPool:
             me.live = me.live - 1
 
     me live_count() -> i64:
-        me.live
+        me.counted_live()
 
 # ── Self-test ─────────────────────────────────────────────────────────────────
 fn fw_pool_selftest() -> i64:
@@ -225,6 +238,14 @@ fn fw_pool_selftest() -> i64:
     fail = fail + expect_eq(distinct, 1, "second acquire: distinct slot")
     val lc2 = p.live_count()
     fail = fail + expect_eq(lc2, 2, "second acquire: live=2")
+    p.live = -4
+    fail = fail + expect_eq(p.live_count(), 0, "corrupted negative pool live clamps to zero")
+    p.live = POOL_CAP + 99
+    fail = fail + expect_eq(p.live_count(), 2, "corrupted oversized pool live counts slots")
+    p.live = 2
+    p.used[h2.index] = 7
+    fail = fail + expect_eq(if p.valid(h2): 1 else: 0, 0, "corrupted pool used flag fails closed")
+    p.used[h2.index] = 1
 
     # --- release: stale-handle / use-after-free guard + live_count drops ---
     p.release(h1)
