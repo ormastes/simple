@@ -49,6 +49,9 @@ fn ftl_cache_find(c_lba: [i64], cap: i64, lba: i64) -> i64:
 fn ftl_map_lba_valid(lba: i64) -> bool:
     lba >= 0 and lba < LBA_COUNT
 
+fn ftl_map_ppn_valid(ppn: i64) -> bool:
+    ppn == UNMAP or ppn_in_range(ppn)
+
 # ── struct ────────────────────────────────────────────────────────────────────
 
 struct L2pMap:
@@ -98,7 +101,7 @@ impl L2pMap:
         lru = ftl_lru_slot(me.c_age, me.cap)
         if me.c_dirty[lru] == 1:
             el = me.c_lba[lru]
-            if ftl_map_lba_valid(el):
+            if ftl_map_lba_valid(el) and ftl_map_ppn_valid(me.c_ppn[lru]):
                 me.l2p[el] = me.c_ppn[lru]
             me.evicts = me.evicts + 1
         me.tick = me.tick + 1
@@ -113,6 +116,8 @@ impl L2pMap:
     me update(lba: i64, ppn: i64):
         if not ftl_map_lba_valid(lba):
             return
+        if not ftl_map_ppn_valid(ppn):
+            return
         val found: i64 = ftl_cache_find(me.c_lba, me.cap, lba)
         var lru: i64 = 0
         var el: i64 = 0
@@ -125,7 +130,7 @@ impl L2pMap:
             lru = ftl_lru_slot(me.c_age, me.cap)
             if me.c_dirty[lru] == 1:
                 el = me.c_lba[lru]
-                if ftl_map_lba_valid(el):
+                if ftl_map_lba_valid(el) and ftl_map_ppn_valid(me.c_ppn[lru]):
                     me.l2p[el] = me.c_ppn[lru]
                 me.evicts = me.evicts + 1
             me.tick = me.tick + 1
@@ -161,7 +166,7 @@ impl L2pMap:
         while i < me.cap:
             if me.c_dirty[i] == 1:
                 fl = me.c_lba[i]
-                if ftl_map_lba_valid(fl):
+                if ftl_map_lba_valid(fl) and ftl_map_ppn_valid(me.c_ppn[i]):
                     me.l2p[fl] = me.c_ppn[i]
                 me.c_dirty[i] = 0
             i = i + 1
@@ -202,6 +207,14 @@ fn ftl_map_selftest() -> i64:
     m.flush()
     failures = failures + expect_eq(m.l2p_entry(LBA_COUNT), UNMAP, "out-of-range update is inert")
     failures = failures + expect_eq(m.l2p_entry(-1), UNMAP, "negative l2p entry fails closed")
+    m.update(44, NUM_PAGES)
+    m.flush()
+    failures = failures + expect_eq(m.l2p_entry(44), UNMAP, "invalid ppn update is inert")
+    m.c_lba[0] = 45
+    m.c_ppn[0] = NUM_PAGES
+    m.c_dirty[0] = 1
+    m.flush()
+    failures = failures + expect_eq(m.l2p_entry(45), UNMAP, "invalid cached ppn writeback is inert")
 
     # 4. force >cap distinct updates; assert evictions happened and data is correct
     var j: i64 = 0
