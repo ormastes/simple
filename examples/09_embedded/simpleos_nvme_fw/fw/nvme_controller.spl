@@ -146,6 +146,8 @@ impl NvmeController:
         if cmd.opcode == ADMIN_FORMAT_NVM:
             if cmd.nsid != 1:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
+            if cmd.cdw10 != 0 or cmd.cdw11 != 0 or cmd.cdw12 != 0:
+                return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             me.ftl.format()                    # erase user data; preserve bad-block table + wear
             me.format_count = me.format_count + 1
             me.dirty_since_checkpoint = false
@@ -573,6 +575,14 @@ fn nvme_controller_selftest() -> i64:
     c.io_submit(1, cmd_make(110, OP_WRITE, 5, 1, 0xEE))
     c.io_process()
     c.io_reap(1)
+    c.admin_submit(admin_cmd_make(47, ADMIN_FORMAT_NVM, 1, 1, 0, 0))
+    c.admin_process()
+    val badfmt_param: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(badfmt_param.status, SC_INVALID_FIELD, "format with reserved dword rejected")
+    c.io_submit(1, cmd_make(112, OP_READ, 5, 1, 0))
+    c.io_process()
+    val rf: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(rf.data, 0xEE, "failed format leaves user data intact")
     c.admin_submit(admin_format_cmd(34, 1))
     c.admin_process()
     val fmt: NvmeCpl = c.admin_reap()
