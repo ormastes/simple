@@ -283,7 +283,7 @@ be mistaken for a completed RTL proof pass.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 82 lines folded for reproduction.
+Runnable source: 86 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -295,6 +295,8 @@ val code = result[2]
 expect(code).to_equal(0)
 expect(stdout).to_contain("simpleos_hardening_matrix_status=pass")
 expect(stdout).to_contain("simpleos_hardening_matrix_reason=pass")
+expect(stdout).to_contain("simpleos_hardening_mission_critical_release_status=blocked")
+expect(stdout).to_contain("simpleos_hardening_mission_critical_release_blockers=riscv_rtl_sby_proof")
 expect(stdout).to_contain("simpleos_hardening_matrix_passed=23/23")
 expect(stdout).to_contain("simpleos_hardening_exec_launch_fs_status=pass")
 expect(stdout).to_contain("simpleos_hardening_ssh_smf_exec_status=pass")
@@ -359,6 +361,8 @@ expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_anchor_matc
 expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_ppm_bytes=2359312")
 expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_raw_bytes=3145728")
 val report = file_read(_report_path(run_id))
+expect(report).to_contain("- mission_critical_release_status: blocked")
+expect(report).to_contain("- mission_critical_release_blockers: riscv_rtl_sby_proof")
 expect(report).to_contain("- byl_sby_artifact_audit: pass")
 expect(report).to_contain("- byl_sby_artifact_audit_gate: scripts/check/check-simpleos-byl-sby-artifacts.shs")
 expect(report).to_contain("- riscv_rtl_sby_proof_gate: scripts/check/check-riscv-rtl-sby-proof.shs")
