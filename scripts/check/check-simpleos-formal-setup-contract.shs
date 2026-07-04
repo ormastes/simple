@@ -172,7 +172,13 @@ mkdir -p "$rtl_partial_bin"
 printf '#!/bin/sh\nexec /usr/bin/dirname "$@"\n' >"$rtl_partial_bin/dirname"
 printf '#!/bin/sh\nexit 0\n' >"$rtl_partial_bin/sby"
 chmod +x "$rtl_partial_bin/dirname" "$rtl_partial_bin/sby"
-if PATH="$rtl_partial_bin" /bin/sh "$RTL_PROOF" >/tmp/simpleos-formal-rtl-partial.out 2>/tmp/simpleos-formal-rtl-partial.err; then
+fake_good_sidecar="$ROOT_DIR/build/simpleos_formal_setup_contract/fake-good-sidecar.shs"
+cat >"$fake_good_sidecar" <<'EOF'
+#!/usr/bin/env sh
+exit 0
+EOF
+chmod +x "$fake_good_sidecar"
+if PATH="$rtl_partial_bin" SIDECAR_CONTRACT="$fake_good_sidecar" /bin/sh "$RTL_PROOF" >/tmp/simpleos-formal-rtl-partial.out 2>/tmp/simpleos-formal-rtl-partial.err; then
     echo "FAIL: RISC-V SBY proof fake partial stack passed" >&2
     exit 1
 fi
@@ -189,6 +195,22 @@ grep -Fq "reason=missing-formal-prereqs missing=yosys,smt-solver" /tmp/simpleos-
     exit 1
 }
 
+fake_bad_sidecar="$ROOT_DIR/build/simpleos_formal_setup_contract/fake-bad-sidecar.shs"
+cat >"$fake_bad_sidecar" <<'EOF'
+#!/usr/bin/env sh
+echo "fake sidecar failed" >&2
+exit 42
+EOF
+chmod +x "$fake_bad_sidecar"
+if PATH="$rtl_partial_bin" SIDECAR_CONTRACT="$fake_bad_sidecar" /bin/sh "$RTL_PROOF" >/tmp/simpleos-formal-rtl-sidecar-fail.out 2>/tmp/simpleos-formal-rtl-sidecar-fail.err; then
+    echo "FAIL: RISC-V SBY proof fake sidecar failure passed" >&2
+    exit 1
+fi
+grep -Fq "STATUS: FAIL riscv-rtl-sby-proof reason=sidecar-contract-failed" /tmp/simpleos-formal-rtl-sidecar-fail.err || {
+    echo "FAIL: RISC-V SBY proof fake sidecar failure hidden by prereq blocker" >&2
+    exit 1
+}
+
 rtl_missing_sby_bin="$ROOT_DIR/build/simpleos_formal_setup_contract/rtl-missing-sby-bin"
 mkdir -p "$rtl_missing_sby_bin"
 printf '#!/bin/sh\nexec /usr/bin/dirname "$@"\n' >"$rtl_missing_sby_bin/dirname"
@@ -197,7 +219,7 @@ for tool in yosys z3; do
     chmod +x "$rtl_missing_sby_bin/$tool"
 done
 chmod +x "$rtl_missing_sby_bin/dirname"
-if PATH="$rtl_missing_sby_bin" /bin/sh "$RTL_PROOF" >/tmp/simpleos-formal-rtl-missing-sby.out 2>/tmp/simpleos-formal-rtl-missing-sby.err; then
+if PATH="$rtl_missing_sby_bin" SIDECAR_CONTRACT="$fake_good_sidecar" /bin/sh "$RTL_PROOF" >/tmp/simpleos-formal-rtl-missing-sby.out 2>/tmp/simpleos-formal-rtl-missing-sby.err; then
     echo "FAIL: RISC-V SBY proof fake missing-sby stack passed" >&2
     exit 1
 fi
@@ -222,7 +244,7 @@ for tool in sby yosys; do
     chmod +x "$rtl_missing_solver_bin/$tool"
 done
 chmod +x "$rtl_missing_solver_bin/dirname"
-if PATH="$rtl_missing_solver_bin" /bin/sh "$RTL_PROOF" >/tmp/simpleos-formal-rtl-missing-solver.out 2>/tmp/simpleos-formal-rtl-missing-solver.err; then
+if PATH="$rtl_missing_solver_bin" SIDECAR_CONTRACT="$fake_good_sidecar" /bin/sh "$RTL_PROOF" >/tmp/simpleos-formal-rtl-missing-solver.out 2>/tmp/simpleos-formal-rtl-missing-solver.err; then
     echo "FAIL: RISC-V SBY proof fake missing-solver stack passed" >&2
     exit 1
 fi
