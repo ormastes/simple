@@ -10267,6 +10267,84 @@ RuntimeValue rt_tls13_sha256(RuntimeValue data_rv)
     return _tls_runtime_array_from_bytes(out, 32);
 }
 
+static int _ssh_hash_append_u32(uint8_t *out, uint32_t *off, uint32_t cap, uint32_t value)
+{
+    if (*off + 4U > cap) return 0;
+    out[(*off)++] = (uint8_t)(value >> 24);
+    out[(*off)++] = (uint8_t)(value >> 16);
+    out[(*off)++] = (uint8_t)(value >> 8);
+    out[(*off)++] = (uint8_t)value;
+    return 1;
+}
+
+static int _ssh_hash_append_string(uint8_t *out, uint32_t *off, uint32_t cap,
+                                   const uint8_t *data, uint32_t len)
+{
+    if (*off + 4U + len > cap) return 0;
+    if (!_ssh_hash_append_u32(out, off, cap, len)) return 0;
+    if (len > 0U) memcpy(out + *off, data, len);
+    *off += len;
+    return 1;
+}
+
+static int _ssh_hash_append_mpint(uint8_t *out, uint32_t *off, uint32_t cap,
+                                  const uint8_t *data, uint32_t len)
+{
+    uint32_t start = 0U;
+    uint32_t body_len;
+    while (start < len && data[start] == 0U) start++;
+    if (start >= len) return _ssh_hash_append_u32(out, off, cap, 0U);
+    body_len = len - start + ((data[start] & 0x80U) ? 1U : 0U);
+    if (*off + 4U + body_len > cap) return 0;
+    if (!_ssh_hash_append_u32(out, off, cap, body_len)) return 0;
+    if ((data[start] & 0x80U) != 0U) out[(*off)++] = 0U;
+    memcpy(out + *off, data + start, len - start);
+    *off += len - start;
+    return 1;
+}
+
+RuntimeValue rt_ssh_curve25519_exchange_hash(RuntimeValue client_version_rv,
+                                             RuntimeValue server_version_rv,
+                                             RuntimeValue client_kexinit_rv,
+                                             RuntimeValue server_kexinit_rv,
+                                             RuntimeValue host_key_blob_rv,
+                                             RuntimeValue client_public_rv,
+                                             RuntimeValue server_public_rv,
+                                             RuntimeValue shared_secret_rv)
+{
+    uint32_t cv_len = 0, sv_len = 0, ck_len = 0, sk_len = 0;
+    uint32_t hk_len = 0, cp_len = 0, sp_len = 0, ss_len = 0;
+    uint8_t *cv = _tls_copy_runtime_bytes(client_version_rv, &cv_len);
+    uint8_t *sv = _tls_copy_runtime_bytes(server_version_rv, &sv_len);
+    uint8_t *ck = _tls_copy_runtime_bytes(client_kexinit_rv, &ck_len);
+    uint8_t *sk = _tls_copy_runtime_bytes(server_kexinit_rv, &sk_len);
+    uint8_t *hk = _tls_copy_runtime_bytes(host_key_blob_rv, &hk_len);
+    uint8_t *cp = _tls_copy_runtime_bytes(client_public_rv, &cp_len);
+    uint8_t *sp = _tls_copy_runtime_bytes(server_public_rv, &sp_len);
+    uint8_t *ss = _tls_copy_runtime_bytes(shared_secret_rv, &ss_len);
+    uint8_t input[4096];
+    uint8_t out[32];
+    uint32_t off = 0U;
+    RuntimeValue rv = _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+
+    if (!cv || !sv || !ck || !sk || !hk || !cp || !sp || !ss) goto done;
+    if (!_ssh_hash_append_string(input, &off, sizeof(input), cv, cv_len)) goto done;
+    if (!_ssh_hash_append_string(input, &off, sizeof(input), sv, sv_len)) goto done;
+    if (!_ssh_hash_append_string(input, &off, sizeof(input), ck, ck_len)) goto done;
+    if (!_ssh_hash_append_string(input, &off, sizeof(input), sk, sk_len)) goto done;
+    if (!_ssh_hash_append_string(input, &off, sizeof(input), hk, hk_len)) goto done;
+    if (!_ssh_hash_append_string(input, &off, sizeof(input), cp, cp_len)) goto done;
+    if (!_ssh_hash_append_string(input, &off, sizeof(input), sp, sp_len)) goto done;
+    if (!_ssh_hash_append_mpint(input, &off, sizeof(input), ss, ss_len)) goto done;
+    _tls_sha256_digest(input, off, out);
+    rv = _tls_runtime_array_from_bytes(out, 32U);
+
+done:
+    if (cv) free(cv); if (sv) free(sv); if (ck) free(ck); if (sk) free(sk);
+    if (hk) free(hk); if (cp) free(cp); if (sp) free(sp); if (ss) free(ss);
+    return rv;
+}
+
 RuntimeValue rt_tls13_transcript_hash_2(RuntimeValue a_rv, RuntimeValue b_rv)
 {
     uint32_t a_len = 0, b_len = 0;
