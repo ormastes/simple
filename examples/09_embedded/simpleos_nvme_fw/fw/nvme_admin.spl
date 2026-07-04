@@ -225,13 +225,28 @@ fn admin_queue_new() -> AdminQueue:
     AdminQueue(sq_cid: sq_cid, sq_op: sq_op, sq_nsid: sq_nsid, sq_cdw10: sq_cdw10, sq_cdw11: sq_cdw11, sq_cdw12: sq_cdw12, sq_head: 0, sq_tail: 0, sq_len: 0, cq_cid: cq_cid, cq_status: cq_status, cq_data: cq_data, cq_head: 0, cq_tail: 0, cq_len: 0, depth: cap)
 
 impl AdminQueue:
+    me effective_depth() -> i64:
+        var d: i64 = me.depth
+        if d < 0:
+            return 0
+        if d > MAX_QUEUE_SIZE:
+            d = MAX_QUEUE_SIZE
+        if d > me.sq_cid.len():
+            d = me.sq_cid.len()
+        if d > me.cq_cid.len():
+            d = me.cq_cid.len()
+        d
+
     me submit(c: AdminCmd) -> bool:
         if not cid_valid(c.cid):
             return false
-        if me.sq_len < 0 or me.sq_len >= me.depth:
+        val depth: i64 = me.effective_depth()
+        if depth <= 0:
+            return false
+        if me.sq_len < 0 or me.sq_len >= depth:
             return false
         val t: i64 = me.sq_tail
-        if t < 0 or t >= me.depth:
+        if t < 0 or t >= depth:
             return false
         me.sq_cid[t]   = c.cid
         me.sq_op[t]    = c.opcode
@@ -239,22 +254,26 @@ impl AdminQueue:
         me.sq_cdw10[t] = c.cdw10
         me.sq_cdw11[t] = c.cdw11
         me.sq_cdw12[t] = c.cdw12
-        me.sq_tail = (me.sq_tail + 1) % me.depth
+        me.sq_tail = (me.sq_tail + 1) % depth
         me.sq_len = me.sq_len + 1
         true
 
     me pending() -> i64:
+        val depth: i64 = me.effective_depth()
         if me.sq_len < 0:
             return 0
-        if me.sq_len > me.depth:
-            return me.depth
+        if me.sq_len > depth:
+            return depth
         me.sq_len
 
     me fetch() -> AdminCmd:
         if me.sq_len <= 0:
             return admin_cmd_make(0, SC_INVALID_OPCODE, 0, 0, 0, 0)
+        val depth: i64 = me.effective_depth()
+        if depth <= 0:
+            return admin_cmd_make(0, SC_INVALID_OPCODE, 0, 0, 0, 0)
         val h: i64 = me.sq_head
-        if h < 0 or h >= me.depth:
+        if h < 0 or h >= depth:
             return admin_cmd_make(0, SC_INVALID_OPCODE, 0, 0, 0, 0)
         val cid:   i64 = me.sq_cid[h]
         val op:    i64 = me.sq_op[h]
@@ -262,42 +281,49 @@ impl AdminQueue:
         val cdw10: i64 = me.sq_cdw10[h]
         val cdw11: i64 = me.sq_cdw11[h]
         val cdw12: i64 = me.sq_cdw12[h]
-        me.sq_head = (me.sq_head + 1) % me.depth
+        me.sq_head = (me.sq_head + 1) % depth
         me.sq_len = me.sq_len - 1
         admin_cmd_make(cid, op, nsid, cdw10, cdw11, cdw12)
 
     me cq_post(p: NvmeCpl) -> bool:
         if not cid_valid(p.cid):
             return false
-        if me.cq_len < 0 or me.cq_len >= me.depth:
+        val depth: i64 = me.effective_depth()
+        if depth <= 0:
+            return false
+        if me.cq_len < 0 or me.cq_len >= depth:
             return false
         val t: i64 = me.cq_tail
-        if t < 0 or t >= me.depth:
+        if t < 0 or t >= depth:
             return false
         me.cq_cid[t]    = p.cid
         me.cq_status[t] = p.status
         me.cq_data[t]   = p.data
-        me.cq_tail = (me.cq_tail + 1) % me.depth
+        me.cq_tail = (me.cq_tail + 1) % depth
         me.cq_len = me.cq_len + 1
         true
 
     me cq_pending() -> i64:
+        val depth: i64 = me.effective_depth()
         if me.cq_len < 0:
             return 0
-        if me.cq_len > me.depth:
-            return me.depth
+        if me.cq_len > depth:
+            return depth
         me.cq_len
 
     me cq_reap() -> NvmeCpl:
         if me.cq_len <= 0:
             return cpl_make(0, SC_INVALID_FIELD, 0)
+        val depth: i64 = me.effective_depth()
+        if depth <= 0:
+            return cpl_make(0, SC_INVALID_FIELD, 0)
         val h: i64 = me.cq_head
-        if h < 0 or h >= me.depth:
+        if h < 0 or h >= depth:
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val cid:    i64 = me.cq_cid[h]
         val status: i64 = me.cq_status[h]
         val data:   i64 = me.cq_data[h]
-        me.cq_head = (me.cq_head + 1) % me.depth
+        me.cq_head = (me.cq_head + 1) % depth
         me.cq_len = me.cq_len - 1
         cpl_make(cid, status, data)
 
@@ -364,6 +390,15 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(aq.pending(), aq.depth, "oversized admin SQ length pending clamps to depth")
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(24, FEAT_TEMP_THRESH, 314))), 0, "oversized admin SQ length submit fails closed")
     aq.sq_len = 0
+    aq.depth = MAX_QUEUE_SIZE + 5
+    fail = fail + expect_eq(aq.effective_depth(), MAX_QUEUE_SIZE, "oversized admin queue depth clamps to backing rings")
+    fail = fail + expect_eq(aq.pending(), 0, "oversized admin queue depth keeps SQ pending safe")
+    aq.depth = -1
+    fail = fail + expect_eq(aq.effective_depth(), 0, "negative admin queue depth clamps to zero")
+    fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(25, FEAT_TEMP_THRESH, 315))), 0, "negative admin queue depth blocks submit")
+    val bad_depth_af: AdminCmd = aq.fetch()
+    fail = fail + expect_eq(bad_depth_af.opcode, SC_INVALID_OPCODE, "negative admin queue depth fetch fails closed")
+    aq.depth = MAX_QUEUE_SIZE
     aq.cq_post(cpl_make(21, SC_SUCCESS, 0))
     fail = fail + expect_eq(aq.cq_pending(), 1, "admin CQ pending == 1")
     val ar: NvmeCpl = aq.cq_reap()
@@ -390,6 +425,15 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(aq.cq_pending(), aq.depth, "oversized admin CQ length pending clamps to depth")
     fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(24, SC_SUCCESS, 0))), 0, "oversized admin CQ length post fails closed")
     aq.cq_len = 0
+    aq.depth = MAX_QUEUE_SIZE + 6
+    fail = fail + expect_eq(aq.effective_depth(), MAX_QUEUE_SIZE, "oversized admin CQ depth clamps to backing rings")
+    fail = fail + expect_eq(aq.cq_pending(), 0, "oversized admin CQ depth keeps pending safe")
+    aq.depth = -1
+    fail = fail + expect_eq(aq.effective_depth(), 0, "negative admin CQ depth clamps to zero")
+    fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(25, SC_SUCCESS, 0))), 0, "negative admin queue depth blocks completion post")
+    val bad_depth_ar: NvmeCpl = aq.cq_reap()
+    fail = fail + expect_eq(bad_depth_ar.status, SC_INVALID_FIELD, "negative admin queue depth reap fails closed")
+    aq.depth = MAX_QUEUE_SIZE
     fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(70000, SC_SUCCESS, 0))), 0, "admin rejects oversized completion id")
     fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(-1, SC_SUCCESS, 0))), 0, "admin rejects negative completion id")
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(70000, FEAT_TEMP_THRESH, 1))), 0, "admin rejects oversized cid")
