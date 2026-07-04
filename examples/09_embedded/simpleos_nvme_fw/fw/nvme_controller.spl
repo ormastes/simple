@@ -133,12 +133,16 @@ impl NvmeController:
             me.dirty_since_checkpoint = false
             return AdminResult(status: SC_SUCCESS, data: 0, post: true)
         if cmd.opcode == ADMIN_FW_DOWNLOAD:
+            if cmd.cdw10 <= 0:
+                return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             me.fw_dl_bytes = me.fw_dl_bytes + cmd.cdw10 * 4   # NUMD dwords accumulated
             return AdminResult(status: SC_SUCCESS, data: 0, post: true)
         if cmd.opcode == ADMIN_FW_COMMIT:
             val fw_slot: i64 = admin_fw_slot(cmd.cdw10)       # cdw10 bits 0..2
             val fw_action: i64 = admin_fw_action(cmd.cdw10)   # cdw10 bits 3..5
             if not admin_fw_slot_valid(fw_slot):
+                return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
+            if fw_action > 3:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             me.fw_slot = fw_slot
             # Commit action 0 = replace image only (no activation); actions 1..3 activate it,
@@ -472,6 +476,14 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(fc3.status, SC_SUCCESS, "fw commit (replace-only) accepted")
     fail = fail + expect_eq(c.committed_fw_slot(), 2, "replace-only commit still records the slot")
     fail = fail + expect_eq(c.firmware_revision(), rev1, "replace-only commit does NOT advance the revision")
+    # Invalid firmware image lengths and reserved commit actions fail closed.
+    c.admin_submit(admin_fw_download_cmd(38, 0, 0))
+    c.admin_submit(admin_fw_commit_cmd(39, 1, 4))
+    c.admin_process()
+    val fdz: NvmeCpl = c.admin_reap()
+    val fca: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(fdz.status, SC_INVALID_FIELD, "fw download with zero length is rejected")
+    fail = fail + expect_eq(fca.status, SC_INVALID_FIELD, "fw commit with reserved action is rejected")
     # An invalid firmware slot is rejected (slot 0 is reserved).
     c.admin_submit(admin_fw_commit_cmd(36, 0, 1))
     c.admin_process()
