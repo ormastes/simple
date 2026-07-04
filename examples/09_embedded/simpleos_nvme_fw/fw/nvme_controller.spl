@@ -132,9 +132,12 @@ impl NvmeController:
         if cmd.opcode == ADMIN_GET_LOG:
             return me.do_get_log(cmd)
         if cmd.opcode == ADMIN_ABORT:
+            val abort_sqid: i64 = admin_qid(cmd.cdw10)
+            if abort_sqid != ADMIN_QID and not me.qset.sq_is_active(abort_sqid):
+                return AdminResult(status: SC_INVALID_QID, data: 0, post: true)
             me.abort_count = me.abort_count + 1
             # Decode and record the Abort target (SQID in cdw10 low 16, CID in high 16).
-            me.last_abort_sqid = admin_qid(cmd.cdw10)
+            me.last_abort_sqid = abort_sqid
             me.last_abort_cid = admin_abort_cid(cmd.cdw10)
             # Synchronous controller: a submitted IO command completes inline within
             # io_process, so no host command is ever in flight when an Abort is serviced.
@@ -510,6 +513,11 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(ab.data, 1, "abort reports target not in flight")
     fail = fail + expect_eq(c.aborted_sqid(), 1, "abort decoded the target SQID from cdw10")
     fail = fail + expect_eq(c.aborted_cid(), 100, "abort decoded the target CID from cdw10")
+    c.admin_submit(admin_abort_cmd(29, 99, 100))
+    c.admin_process()
+    val badab: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(badab.status, SC_INVALID_QID, "abort with missing target SQ rejected")
+    fail = fail + expect_eq(c.aborted_sqid(), 1, "failed abort leaves previous target SQID")
 
     # Async Event Request: held outstanding (no completion) until an event is raised.
     c.admin_submit(admin_async_event_cmd(31))
