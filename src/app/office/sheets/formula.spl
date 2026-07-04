@@ -437,7 +437,7 @@ fn _is_text_function(name: text) -> bool:
      name == "BASE" or name == "DECIMAL" or name == "DATEDIF" or
      name == "TEXTBEFORE" or name == "TEXTAFTER" or
      name == "ARRAYTOTEXT" or name == "VALUETOTEXT" or
-     name == "ROMAN" or name == "ARABIC")
+     name == "ROMAN" or name == "ARABIC" or name == "HYPERLINK")
 
 fn _fmt_num_trim(v: f64) -> text:
     val i = v.to_i64()
@@ -691,6 +691,13 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
     if args.len() == 0:
         return CellValue.ErrorVal(message: "{name} requires arguments")
     val s = args[0]
+    if name == "HYPERLINK":
+        # HYPERLINK(url, [friendly]) -> the friendly display text (or the url
+        # itself). The cell model has no clickable-link attribute; only the
+        # display text is produced.
+        if args.len() > 1:
+            return CellValue.TextVal(value: args[1])
+        return CellValue.TextVal(value: s)
     if name == "ROMAN":
         val rn = s.to_f64().to_i64()
         if rn < 1 or rn > 3999:
@@ -2132,7 +2139,7 @@ fn _is_ref_function(name: text) -> bool:
     formula text) rather than evaluated values."""
     (name == "ROWS" or name == "COLUMNS" or name == "ROW" or
      name == "COLUMN" or name == "ADDRESS" or name == "FORMULATEXT" or
-     name == "ISFORMULA" or name == "CELL")
+     name == "ISFORMULA" or name == "CELL" or name == "AREAS")
 
 fn _consume_to_paren(tokens: [text], pos: i32) -> i32:
     """Advance past the reference argument list to just after its ')'. Reference
@@ -2255,6 +2262,101 @@ fn _eval_cell_info(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRe
                 return EvalResult(value: cell.value, next_pos: end)
     EvalResult(value: CellValue.ErrorVal(message: "CELL info_type {info} not supported"), next_pos: end)
 
+fn _ref_target_value(ref_str: text, sheet: Sheet, depth: i32) -> CellValue:
+    """The value a reference function yields for a target cell: FormulaVal
+    re-evaluates (same convention as CELL(\"contents\")), Empty reports 0."""
+    val cell = sheet.get_cell(ref_str)
+    match cell.value:
+        CellValue.FormulaVal(expr, cached_display):
+            return _evaluate_formula(expr, sheet, depth + 1)
+        CellValue.Empty:
+            return CellValue.NumberVal(value: 0.0)
+        _:
+            return cell.value
+
+fn _eval_offset(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """OFFSET(ref, rows, cols, [height=1], [width=1]) — scalar path: the value
+    of the single cell at ref's top-left shifted by rows/cols. height/width > 1
+    is array-context-only (evaluate_formula_array spills the grid); in scalar
+    context — e.g. nested inside SUM, whose argument collector only accepts
+    literal REF:REF tokens or scalar expressions — a >1 height/width fails
+    closed with #ERR rather than silently returning the top-left value.
+    #ERR on: bad ref, missing rows/cols, height/width < 1, or a shifted
+    coordinate falling above row 1 / left of column A."""
+    if pos >= tokens.len() or not _is_cell_ref_token(tokens.get(pos)):
+        val e0 = _consume_to_paren(tokens, pos)
+        return EvalResult(value: CellValue.ErrorVal(message: "OFFSET requires a reference argument"), next_pos: e0)
+    val ref = parse_cell_ref(tokens.get(pos))
+    var cur = pos + 1
+    # Range reference: use its top-left corner (Excel behavior).
+    if (cur + 1 < tokens.len() and tokens.get(cur) == ":" and
+        _is_cell_ref_token(tokens.get(cur + 1))):
+        cur = cur + 2
+    if ref == nil:
+        val e1 = _consume_to_paren(tokens, pos)
+        return EvalResult(value: CellValue.ErrorVal(message: "OFFSET bad reference"), next_pos: e1)
+    if cur >= tokens.len() or tokens.get(cur) != ",":
+        val e2 = _consume_to_paren(tokens, pos)
+        return EvalResult(value: CellValue.ErrorVal(message: "OFFSET requires rows and cols"), next_pos: e2)
+    cur = cur + 1
+    val rr = _eval_comparison(tokens, cur, sheet, depth)
+    cur = rr.next_pos
+    if cur >= tokens.len() or tokens.get(cur) != ",":
+        val e3 = _consume_to_paren(tokens, cur)
+        return EvalResult(value: CellValue.ErrorVal(message: "OFFSET requires rows and cols"), next_pos: e3)
+    cur = cur + 1
+    val cc = _eval_comparison(tokens, cur, sheet, depth)
+    cur = cc.next_pos
+    var height = 1.0
+    var width = 1.0
+    if cur < tokens.len() and tokens.get(cur) == ",":
+        cur = cur + 1
+        val hh = _eval_comparison(tokens, cur, sheet, depth)
+        height = _to_number(hh.value)
+        cur = hh.next_pos
+    if cur < tokens.len() and tokens.get(cur) == ",":
+        cur = cur + 1
+        val ww = _eval_comparison(tokens, cur, sheet, depth)
+        width = _to_number(ww.value)
+        cur = ww.next_pos
+    if cur < tokens.len() and tokens.get(cur) == ")":
+        cur = cur + 1
+    val hi = height.to_i64().to_i32()
+    val wi = width.to_i64().to_i32()
+    if hi < 1 or wi < 1:
+        return EvalResult(value: CellValue.ErrorVal(message: "OFFSET height/width must be >= 1"), next_pos: cur)
+    if hi > 1 or wi > 1:
+        return EvalResult(value: CellValue.ErrorVal(message: "OFFSET with height/width > 1 needs array context"), next_pos: cur)
+    val trow = ref.row + _to_number(rr.value).to_i64().to_i32()
+    val tcol = ref.col + _to_number(cc.value).to_i64().to_i32()
+    if trow < 0 or tcol < 0:
+        return EvalResult(value: CellValue.ErrorVal(message: "OFFSET target out of sheet bounds"), next_pos: cur)
+    val target = cell_ref_to_string(CellRef(col: tcol, row: trow))
+    EvalResult(value: _ref_target_value(target, sheet, depth), next_pos: cur)
+
+fn _eval_indirect(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """INDIRECT(ref_text) — scalar path: the argument is an evaluated STRING
+    (literal or built by concatenation) naming a single cell in A1 form; the
+    named cell's value is returned. The range form \"A1:B2\" is array-context-
+    only (evaluate_formula_array spills its grid). The R1C1 reference style is
+    UNSUPPORTED — only A1 notation parses. #ERR on unparseable text."""
+    val r = _eval_comparison(tokens, pos, sheet, depth)
+    var cur = r.next_pos
+    if cur < tokens.len() and tokens.get(cur) == ")":
+        cur = cur + 1
+    val ref_text = _cell_value_to_display(r.value)
+    val ref_up = ref_text.trim()
+    if ref_up.contains(":"):
+        val rng = parse_range(ref_up)
+        if rng == nil:
+            return EvalResult(value: CellValue.ErrorVal(message: "INDIRECT cannot parse reference '{ref_text}'"), next_pos: cur)
+        return EvalResult(value: CellValue.ErrorVal(message: "INDIRECT range form needs array context"), next_pos: cur)
+    val ref = parse_cell_ref(ref_up.upper())
+    if ref == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "INDIRECT cannot parse reference '{ref_text}'"), next_pos: cur)
+    val target = cell_ref_to_string(ref)
+    EvalResult(value: _ref_target_value(target, sheet, depth), next_pos: cur)
+
 fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """ROWS/COLUMNS/ROW/COLUMN/ADDRESS/FORMULATEXT/ISFORMULA.
 
@@ -2269,6 +2371,13 @@ fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
     if name == "CELL":
         return _eval_cell_info(tokens, pos, sheet, depth)
     val end = _consume_to_paren(tokens, pos)
+    if name == "AREAS":
+        # AREAS(ref) = 1 always: this model has no multi-area reference
+        # unions (no "(A1:B2,D1:E2)" form), so every valid reference is a
+        # single area. Honest stub per the SHEET precedent.
+        if pos < tokens.len() and _is_cell_ref_token(tokens.get(pos)):
+            return EvalResult(value: CellValue.NumberVal(value: 1.0), next_pos: end)
+        return EvalResult(value: CellValue.ErrorVal(message: "AREAS requires a reference argument"), next_pos: end)
     if (name == "ROW" or name == "COLUMN") and tokens.get(pos) == ")":
         if _formula_origin_key.len() == 0:
             return EvalResult(value: CellValue.ErrorVal(message: "{name}() needs a cell context"), next_pos: end)
@@ -2525,6 +2634,10 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_test_function(name, tokens, pos, sheet, depth)
     if _is_ref_function(name):
         return _eval_ref_function(name, tokens, pos, sheet, depth)
+    if name == "OFFSET":
+        return _eval_offset(tokens, pos, sheet, depth)
+    if name == "INDIRECT":
+        return _eval_indirect(tokens, pos, sheet, depth)
     # Collect arguments separated by commas
     # Each argument can be a range (A1:B3) or an expression
     var args: [[f64]] = []
@@ -5643,6 +5756,10 @@ fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
         return _array_wrapcols(tokens, 2, sheet)
     if name == "EXPAND":
         return _array_expand(tokens, 2, sheet)
+    if name == "OFFSET":
+        return _array_offset(tokens, 2, sheet)
+    if name == "INDIRECT":
+        return _array_indirect(tokens, 2, sheet)
     []
 
 fn _read_array_range_str(tokens: [text], pos: i32) -> text:
@@ -5705,6 +5822,67 @@ fn _array_textsplit(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     for r in rows_src:
         out.push(r.split(col_d))
     out
+
+fn _array_offset(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """OFFSET(ref, rows, cols, height, width) — array form. Only a height or
+    width > 1 makes OFFSET an array formula (the resulting rectangle SPILLS);
+    every other case — height/width absent, both 1, out-of-domain values,
+    negative target coordinates — returns [] so the scalar path either yields
+    the single value or reports the precise #ERR."""
+    if pos >= tokens.len() or not _is_cell_ref_token(tokens.get(pos)):
+        return []
+    val ref = parse_cell_ref(tokens.get(pos))
+    if ref == nil:
+        return []
+    var cur = pos + 1
+    # Range reference: use its top-left corner (Excel behavior).
+    if (cur + 1 < tokens.len() and tokens.get(cur) == ":" and
+        _is_cell_ref_token(tokens.get(cur + 1))):
+        cur = cur + 2
+    if cur >= tokens.len() or tokens.get(cur) != ",":
+        return []
+    val rr = _read_array_num_arg(tokens, cur + 1, sheet)
+    if not rr.present:
+        return []
+    cur = _skip_comma(tokens, rr.next_pos)
+    val cc = _read_array_num_arg(tokens, cur, sheet)
+    if not cc.present:
+        return []
+    cur = _skip_comma(tokens, cc.next_pos)
+    val hh = _read_array_num_arg(tokens, cur, sheet)
+    if not hh.present:
+        return []
+    cur = _skip_comma(tokens, hh.next_pos)
+    val ww = _read_array_num_arg(tokens, cur, sheet)
+    val hi = hh.value.to_i64().to_i32()
+    val wi = if ww.present: ww.value.to_i64().to_i32() else: 1
+    if hi < 1 or wi < 1:
+        return []
+    if hi == 1 and wi == 1:
+        return []
+    val r0 = ref.row + rr.value.to_i64().to_i32()
+    val c0 = ref.col + cc.value.to_i64().to_i32()
+    if r0 < 0 or c0 < 0:
+        return []
+    val rng = CellRange(start: CellRef(col: c0, row: r0),
+                        end_ref: CellRef(col: c0 + wi - 1, row: r0 + hi - 1))
+    _array_range_grid(rng, sheet)
+
+fn _array_indirect(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """INDIRECT(\"A1:B2\") — array form: a range-shaped reference string spills
+    the referenced rectangle. Single-cell text (and anything unparseable)
+    returns [] so the scalar path yields the value or the precise #ERR.
+    R1C1 style is unsupported (A1 notation only)."""
+    val a0 = _read_array_text_arg(tokens, pos, sheet)
+    if not a0.present:
+        return []
+    val trimmed = a0.value.trim()
+    if not trimmed.contains(":"):
+        return []
+    val rng = parse_range(trimmed)
+    if rng == nil:
+        return []
+    _array_range_grid(rng, sheet)
 
 fn _array_range_grid(range: CellRange, sheet: Sheet) -> [[text]]:
     """Read a range into a row-major grid of display strings."""
