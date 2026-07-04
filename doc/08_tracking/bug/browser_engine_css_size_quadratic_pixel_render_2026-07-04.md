@@ -41,6 +41,24 @@ CARD 16 step-1 example gate) proved nothing about real rendering.
 `IOSDesignTokens.light()/.dark()` → interpreter crash on first iOS-themed
 render (equivalent fix landed via a parallel session; verified on disk).
 
+## Cross-validation + additional findings (second independent lane, same date)
+
+- Root cause CONFIRMED independently: hang is CPU-bound (user≈wall) inside
+  `web_render_pixel_cache.html_request_to_pixel_artifact()`; the fast path
+  `_is_production_parity_widget_html()` matches only 4 hard-coded pinned
+  fixture widget-id pairs; everything else falls into the real ~10K-line
+  flex/CSS layout engine.
+- Stage timings (all fast except rasterization): CounterApp.new ~0.1ms,
+  build_ui ~4.5ms, init_state <0.1ms, BrowserBackend.create ~0.6ms,
+  generate_css ~55ms.
+- iOS theme crash (`IOSDesignTokens.light()/.dark()` nonexistent —
+  ui/ios/theme.spl) fixed: both branches now return `default_tokens()`;
+  landed in HEAD.
+- PRE-EXISTING at HEAD (verified with empty diff): `browser_host_event_roundtrip_spec`
+  and `backend_alias_browser_spec` fail/hang — backend_alias's own 4th test
+  falls off the hard-coded fast path too. These were listed as CARD 16
+  regression gates; they cannot gate anything until fixed.
+
 ## Next steps
 
 1. Fix the quadratic stage (selector matching per pixel? per-node re-parse?)
