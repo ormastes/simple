@@ -14,6 +14,7 @@ class Sheet:
     cells: Dict<text, Cell>   # Key: "A1", "B2" etc.
     col_count: i32
     row_count: i32
+    hidden_rows: [i64]   # 1-based hidden row indices; plain list (no Dict-in-struct), deduped on insert
 
 struct SheetEditResult:
     accepted: bool
@@ -32,7 +33,8 @@ impl Sheet:
             name: name,
             cells: {},
             col_count: 26,
-            row_count: 100
+            row_count: 100,
+            hidden_rows: []
         )
 
     me get_cell(ref_str: text) -> Cell:
@@ -173,6 +175,54 @@ impl Sheet:
         val start_ref = CellRef(col: min_col, row: min_row)
         val end_ref = CellRef(col: max_col, row: max_row)
         "{cell_ref_to_string(start_ref)}:{cell_ref_to_string(end_ref)}"
+
+    me is_row_hidden(row: i64) -> bool:
+        """Whether the given 1-based row index is currently hidden."""
+        for r in me.hidden_rows:
+            if r == row:
+                return true
+        false
+
+    me hide_row(row: i64):
+        """Hide a single 1-based row index. Idempotent (hiding twice is a
+        no-op) and out-of-range rows (< 1 or beyond row_count) are ignored.
+        Mutates in place like set_cell/set_value; callers do not need to
+        reassign the Sheet."""
+        if row < 1 or row > me.row_count.to_i64():
+            return
+        if me.is_row_hidden(row):
+            return
+        var rows = me.hidden_rows
+        rows.push(row)
+        me.hidden_rows = rows
+
+    me unhide_row(row: i64):
+        """Unhide a single 1-based row index. No-op if it was not hidden."""
+        var rows = me.hidden_rows
+        var kept: [i64] = []
+        for r in rows:
+            if r != row:
+                kept.push(r)
+        me.hidden_rows = kept
+
+    me hide_rows(from: i64, to: i64):
+        """Hide every row in the inclusive range [from, to] (order-agnostic:
+        from > to is swapped). Each row goes through hide_row so the same
+        idempotency/range rules apply."""
+        var lo = from
+        var hi = to
+        if lo > hi:
+            val tmp = lo
+            lo = hi
+            hi = tmp
+        var r = lo
+        while r <= hi:
+            me.hide_row(r)
+            r = r + 1
+
+    me unhide_all_rows():
+        """Clear all row hiding (used by AutoFilter's clear-filter action)."""
+        me.hidden_rows = []
 
 # =========================================================================
 # Workbook

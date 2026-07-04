@@ -148,3 +148,4 @@ fn _eval(formula: text) -> text:
 - **Bare-boolean assertions are no-ops** — `"x" == y` alone in an it-block is silently ignored; always `expect(...)` / `assert_*` matchers.
 - **Function-evaluator cursor contract** — every `_eval_*` must return `next_pos` PAST its closing paren; returning the paren's own index corrupts the caller's parse (symptom: enclosing function reports wrong arity).
 - **Numeric fns never go in `_is_text_function`** — a name listed there is hijacked to the text dispatcher before `_dispatch_function` sees it ("unknown text function").
+- **Bare trailing `me` misparses** — a method ending in `me` (fluent-return intent) dies with `expected identifier, found Newline` (parser wants `.` after `me`). Sheet-style classes use in-place void mutators instead; no `return me` precedent exists in the codebase.
