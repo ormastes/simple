@@ -280,7 +280,7 @@ impl NvmeController:
         if logid == LOG_ERROR:
             # Error Information log: the completion reports the number of error-log entries
             # the host would retrieve (this model's width-1 log-page datum).
-            return AdminResult(status: SC_SUCCESS, data: me.error_count, post: true)
+            return AdminResult(status: SC_SUCCESS, data: me.error_log_count(), post: true)
         if logid == LOG_FW_SLOT:
             # Firmware Slot Information log: the completion reports the active firmware revision.
             return AdminResult(status: SC_SUCCESS, data: me.fw_revision, post: true)
@@ -288,6 +288,8 @@ impl NvmeController:
 
     # Error-log introspection (the Get Log Page ERROR data the host would read).
     me error_log_count() -> i64:
+        if me.error_count < 0:
+            return 0
         me.error_count
 
     me last_error_status() -> i64:
@@ -360,6 +362,8 @@ impl NvmeController:
                             status = SC_INVALID_OPCODE
         # Health telemetry: record uncorrectable reads and the error log.
         if status != SC_SUCCESS:
+            if me.error_count < 0:
+                me.error_count = 0
             me.error_count = me.error_count + 1
             me.last_error = status
             if status == SC_MEDIA_ERR:
@@ -806,6 +810,15 @@ fn nvme_controller_selftest() -> i64:
     c.io_reap(1)
     fail = fail + expect_eq(c.error_log_count(), ec0 + 1, "error log counts the failed write")
     fail = fail + expect_eq(c.last_error_status(), SC_LBA_RANGE, "error log records the last status")
+    c.error_count = -7
+    c.admin_submit(admin_get_log_cmd(52, LOG_ERROR))
+    c.admin_process()
+    val neglog: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(neglog.data, 0, "get-log ERROR clamps negative error count")
+    c.io_submit(1, cmd_make(123, OP_WRITE, LBA_COUNT + 2, 1, 0))
+    c.io_process()
+    c.io_reap(1)
+    fail = fail + expect_eq(c.error_log_count(), 1, "error log restarts from zero after corrupted negative count")
 
     # Get Log Page (ERROR) reports the error-entry count; (FW_SLOT) reports the active fw revision.
     c.admin_submit(admin_get_log_cmd(43, LOG_ERROR))
