@@ -33,10 +33,15 @@ struct Ftl:
 fn ftl_new() -> Ftl:
     Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new(), rain_parity: ftl_fill(rain_num_stripes(), 0))
 
+fn ftl_host_lba_valid(lba: i64) -> bool:
+    lba >= 0 and lba < LBA_COUNT
+
 impl Ftl:
     # Write one logical block (log-structured): program a fresh physical page with OOB
     # {lba, seq}, journal the remap, update L2P, invalidate the previous version.
     me write(lba: i64, data: i64) -> i64:
+        if not ftl_host_lba_valid(lba):
+            return SC_LBA_RANGE
         # Host writes never consume the GC scratch reserve (over-provisioning headroom),
         # so garbage collection can always relocate a victim and reclaim stale space.
         val ppn: i64 = me.band.alloc_page_host(GC_RESERVE)
@@ -63,6 +68,8 @@ impl Ftl:
     # Read one logical block; an unmapped (never-written / trimmed) LBA reads 0.
     # Each read accumulates read-disturb on the backing block (drives scrub_once).
     me read(lba: i64) -> i64:
+        if not ftl_host_lba_valid(lba):
+            return 0
         val ppn: i64 = me.map.lookup(lba)
         if ppn == UNMAP:
             return 0
@@ -73,6 +80,8 @@ impl Ftl:
 
     # Read status: SC_MEDIA_ERR if ECC could not recover the page, else SC_SUCCESS.
     me read_status(lba: i64) -> i64:
+        if not ftl_host_lba_valid(lba):
+            return SC_LBA_RANGE
         val ppn: i64 = me.map.lookup(lba)
         if ppn == UNMAP:
             return SC_SUCCESS
@@ -83,6 +92,11 @@ impl Ftl:
         st
 
     me read_range_status(lba: i64, nblocks: i64) -> i64:
+        if nblocks < 0:
+            return SC_LBA_RANGE
+        if nblocks > 0:
+            if not ftl_host_lba_valid(lba) or lba + nblocks > LBA_COUNT:
+                return SC_LBA_RANGE
         var i: i64 = 0
         var st: i64 = SC_SUCCESS
         while i < nblocks and st == SC_SUCCESS:
@@ -92,6 +106,8 @@ impl Ftl:
 
     # Trim/deallocate: drop the mapping and invalidate the physical page.
     me trim(lba: i64) -> i64:
+        if not ftl_host_lba_valid(lba):
+            return SC_LBA_RANGE
         val ppn: i64 = me.map.lookup(lba)
         if ppn != UNMAP:
             me.band.mark_invalid(ppn)
@@ -450,6 +466,13 @@ fn ftl_selftest() -> i64:
     # basic write / read / overwrite
     fail = fail + expect_eq(ftl.write(10, 0xAB), SC_SUCCESS, "write lba10")
     fail = fail + expect_eq(ftl.write(20, 0xCD), SC_SUCCESS, "write lba20")
+    val free_before_bad_write: i64 = ftl.free_blocks()
+    fail = fail + expect_eq(ftl.write(LBA_COUNT, 0xEE), SC_LBA_RANGE, "out-of-range FTL write rejected")
+    fail = fail + expect_eq(ftl.free_blocks(), free_before_bad_write, "out-of-range FTL write consumes no block")
+    fail = fail + expect_eq(ftl.read(LBA_COUNT), 0, "out-of-range FTL read is inert")
+    fail = fail + expect_eq(ftl.read_status(LBA_COUNT), SC_LBA_RANGE, "out-of-range FTL read_status rejected")
+    fail = fail + expect_eq(ftl.read_range_status(LBA_COUNT - 1, 2), SC_LBA_RANGE, "out-of-range FTL read range rejected")
+    fail = fail + expect_eq(ftl.trim(LBA_COUNT), SC_LBA_RANGE, "out-of-range FTL trim rejected")
     fail = fail + expect_eq(ftl.read(10), 0xAB, "read lba10")
     fail = fail + expect_eq(ftl.read(20), 0xCD, "read lba20")
     ftl.write(10, 0x99)
