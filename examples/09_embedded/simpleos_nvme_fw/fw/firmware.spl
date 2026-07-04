@@ -61,7 +61,14 @@ impl Firmware:
     me free_blocks() -> i64:
         me.hil.free_blocks()
 
+    me sanitize_map_owner():
+        if me.map_owner < MAP_OWNER_NONE or me.map_owner > MAP_OWNER_BG:
+            me.map_owner = MAP_OWNER_NONE
+
     me acquire_map_owner(owner: i64) -> bool:
+        me.sanitize_map_owner()
+        if owner <= MAP_OWNER_NONE or owner > MAP_OWNER_BG:
+            return false
         if me.map_owner == MAP_OWNER_NONE:
             me.map_owner = owner
             return true
@@ -73,12 +80,15 @@ impl Firmware:
             me.map_owner = MAP_OWNER_NONE
 
     me owner_idle() -> i64:
+        me.sanitize_map_owner()
         var idle: i64 = 0
         if me.map_owner == MAP_OWNER_NONE:
             idle = 1
         idle
 
     me conflict_count() -> i64:
+        if me.owner_conflicts < 0:
+            return 0
         me.owner_conflicts
 
     # One cooperative scheduler tick: at most one foreground command, then at most
@@ -164,6 +174,12 @@ fn firmware_selftest() -> i64:
     lock_fw.map_owner = MAP_OWNER_NONE
     fail = fail + expect_eq(lock_fw.service_tick(), 1, "foreground tick runs after owner release")
     fail = fail + expect_eq(lock_fw.owner_idle(), 1, "owner released after foreground tick")
+    lock_fw.owner_conflicts = -3
+    fail = fail + expect_eq(lock_fw.conflict_count(), 0, "corrupted negative owner conflicts clamps to zero")
+    lock_fw.map_owner = -9
+    lock_fw.submit(cmd_make(93, OP_WRITE, 93, 1, 0x63))
+    fail = fail + expect_eq(lock_fw.service_tick(), 1, "corrupted owner token is recovered for foreground")
+    fail = fail + expect_eq(lock_fw.owner_idle(), 1, "recovered owner token releases after tick")
 
     var tick_fw: Firmware = firmware_new()
     tick_fw.submit(cmd_make(91, OP_WRITE, 91, 1, 0x61))
