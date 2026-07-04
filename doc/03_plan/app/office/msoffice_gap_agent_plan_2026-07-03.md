@@ -1,6 +1,28 @@
 # MS-Office Gap — Remaining Work, Agent-Based Execution Plan
 
-**Date:** 2026-07-03
+**Date:** 2026-07-03 (reviewed & updated post-round-13, same date)
+
+## Execution status at review
+
+| Card | Status | Evidence |
+|------|--------|----------|
+| 1 Alias pack | **DONE** (round 11, pushed c4855c5) | dotted-name lexing + `_canonical_name`; RANK.AVG/CEILING.MATH/PRECISE real semantics; AVERAGEA-family correctly refused |
+| 2 Distribution core | **DONE** (round 13, pushed 355f4e2) | `_betainc`/`_gammainc_p` + inverses; ~30 fns; 2 plan ground-truth typos caught & corrected; tests → CARD 14 |
+| 3 Securities | **OPEN — next priority** | day-count engine not started |
+| 4 Engineering | **DONE** (round 12, pushed b6245d3) | ERF/ERFC, 18 IM*, BESSELJ/I, CONVERT; BESSELY/K → CARD 14 |
+| 5 Text/misc | **OPEN** | serialize on formula.spl |
+| 6 Deploy swap | **REOPENED** — lane died (credit outage); probe 2026-07-03 12:5x: production binary still errors `unknown extern` on raw-mode; fix remains seed-only | re-run CARD 6 protocol from step 3 |
+| 7 ODS styles | **DONE** (round 10) | sheet_to_fods_formatted, xmllint-validated |
+| 8 Matrix batch | **DONE** (pushed 87661f0) | fully-inline flat arrays (interp array-param bugs) |
+| 9 Audit consumption | **PARTIAL** | first audit consumed; **exact count re-run OPEN** — agent-reported totals drifted off stale baselines; loose grep bound 349, honest claim ~330 |
+| 10 Desktop render | **HEADLESS PASSED** (round 12, pushed b6245d3) | all 4 formats → PDF in real LibreOffice via docker; check script committed; residual = GUI fidelity (CARD 15) |
+| 11 CLI/macro catch-up | **DONE** (round 11) | --styles flag + macro format API; md5-identical no-flag path |
+| 12 Cube/web exclusion | **DECIDED** | out of offline scope, recorded |
+| — Find/replace (uncarded) | **DONE** (round 13, pushed 355f4e2) | sheet_find/sheet_replace + find-sheet CLI; shipped during credit-death recovery |
+
+Suite state at review: **~330 Calc functions** (exact pending CARD 9 re-run),
+**55 office spec files**, all green per-file; all shipped rounds pushed and
+content-verified on origin (latest 355f4e2).
 **Audit (Explore lane, this date):** **231 implemented** vs Excel 365's ~505
 → **~274 missing**, of which: 21 pure dotted-name aliases of functions we
 HAVE (STDEV→STDEV.S, RANK→RANK.EQ, GAMMALN→GAMMALN.PRECISE, …), ~73 stats
@@ -59,6 +81,29 @@ continuously — pathspec commits often no-op; the HEAD grep IS the check).
 - Test runner: directory BATCH runs hang (daemon issue) — run spec files
   individually. Confirm assertions execute once per new spec via a
   deliberate-fail probe, then remove it.
+- Array PARAMETERS are broken in the interpreter: `[[text]]` params misparse;
+  variable-indexing any array param reads 0 (bug doc
+  interp_array_param_indexing_2026-07-03.md) — matrix-style code must inline
+  with LOCAL flat arrays; only scalars cross call boundaries.
+- Dotted function names now lex correctly (fixed rounds 11+13 inside
+  formula.spl's tokenize_formula: name continues across `.` followed by
+  alpha OR digit) — new dotted functions need no lexer work.
+- `File.write` (std.fs) fails under the interpreter — use rt_file_write_text
+  (see fods_styles_spec.spl precedent).
+
+### Failure-mode protocol (added post-round-13)
+- **Agent death mid-edit** (credit outage, API error) can leave the tree
+  BROKEN — half-wired imports/dispatches. After ANY lane failure: grep the
+  files it owned for dangling references and load the entry module
+  (`bin/simple run src/app/office/mod.spl stats <f>`-style smoke) before
+  committing anything that includes those files.
+- **Do not trust agent-reported function totals** — agents count deltas off
+  whatever baseline they read (often the stale audit). The only honest count
+  is a fresh CARD 9 dispatch-extraction audit.
+- **mod.spl is clobber-prone** (parallel reconciles dropped committed-looking
+  edits twice in round 13): after committing it, immediately
+  `git show HEAD:src/app/office/mod.spl | grep <new-dispatch>` and re-commit
+  the delta if dropped.
 
 ### VCS discipline
 - NEVER bare `git commit` — always pathspec form
@@ -81,7 +126,7 @@ continuously — pathspec commits often no-op; the HEAD grep IS the check).
 
 ## Task cards — remaining work
 
-### CARD 1 (opus lane) — Compatibility-alias batch  [HIGHEST coverage/effort]
+### CARD 1 (opus lane) — Compatibility-alias batch  [DONE round 11, pushed c4855c5]
 **Objective:** Excel's modern dotted names for functions we already have:
 RANK.EQ, RANK.AVG, STDEV.S/STDEV.P, VAR.S/VAR.P, MODE.SNGL, QUARTILE.INC,
 PERCENTILE.INC, PERCENTRANK.INC, NORM.DIST/NORM.S.DIST/NORM.INV/NORM.S.INV,
@@ -106,7 +151,7 @@ input; the genuinely-new semantics (RANK.AVG ties, CEILING.MATH negatives)
 hand-computed; dot-name tokenization proven by a formula mixing dotted and
 plain calls.
 
-### CARD 2 (opus lane) — Continuous-distribution machinery
+### CARD 2 (opus lane) — Continuous-distribution machinery  [DONE round 13, pushed 355f4e2; tests → CARD 14]
 **Objective:** BETA.DIST/BETA.INV, GAMMA.DIST/GAMMA.INV, CHISQ.DIST/
 CHISQ.DIST.RT/CHISQ.INV/CHISQ.TEST, T.DIST/T.DIST.2T/T.DIST.RT/T.INV/T.TEST,
 F.DIST/F.DIST.RT/F.INV/F.TEST, GAMMA, GAUSS, PHI.
@@ -127,7 +172,7 @@ F.DIST(15.2069,6,4,TRUE)≈0.99; GAMMA(2.5)=1.329340; GAUSS(2)=0.477250;
 PHI(0.75)=0.301137. Verify each against a second source in the probe.
 **Files:** formula.spl + `formula_dist2_spec.spl`.
 
-### CARD 3 (opus lane) — Financial securities batch
+### CARD 3 (opus lane) — Financial securities batch  [OPEN — NEXT PRIORITY]
 **Objective:** ACCRINT/ACCRINTM, COUPDAYBS/COUPDAYS/COUPDAYSNC/COUPNCD/
 COUPNUM/COUPPCD, PRICE/PRICEDISC/PRICEMAT, YIELD/YIELDDISC/YIELDMAT,
 DISC, INTRATE, RECEIVED, DURATION/MDURATION, TBILLEQ/TBILLPRICE/TBILLYIELD,
@@ -149,7 +194,7 @@ DOLLARDE(1.02,16)=1.125; DOLLARFR(1.125,16)=1.02.
 **Files:** formula.spl + `formula_securities_spec.spl`. Congruence of
 settle<maturity, basis 0..4, freq∈{1,2,4} → else #ERR.
 
-### CARD 4 (opus lane) — Engineering remainder
+### CARD 4 (opus lane) — Engineering remainder  [DONE round 12, pushed b6245d3; BESSELY/K → CARD 14]
 **Objective:** ERF/ERFC (we have `_norm_cdf`'s A-S erf — expose + add
 complementary w/ 2-arg ERF(lo,hi)), BESSELJ/BESSELY/BESSELI/BESSELK
 (series for small x, asymptotic/recurrence for large — NR §6.5-6.7; integer
@@ -167,7 +212,7 @@ IMSUM("3+4i","5-3i")="8+i"; IMPRODUCT("3+4i","5-3i")="27+11i";
 IMSQRT("1+i")≈"1.09868411346781+0.455089860562227i" (prefix-assert).
 **Files:** formula.spl + `formula_eng2_spec.spl`.
 
-### CARD 5 (haiku lane) — Text/misc remainder
+### CARD 5 (haiku lane) — Text/misc remainder  [OPEN — serialize on formula.spl after CARD 3]
 **Objective:** TEXTBEFORE/TEXTAFTER/TEXTSPLIT (TEXTSPLIT is ARRAY-returning —
 row delim + col delim → spill via evaluate_formula_array), NUMBERSTRING?,
 LEN variants done; ARRAYTOTEXT/VALUETOTEXT, LET (defer — needs evaluator
@@ -188,7 +233,14 @@ ADDRESS(2,3)="$C$2"; ROWS(A1:B3)=3; COLUMNS(A1:B3)=2.
 formula.spl — serialize AFTER whichever opus card is running, or give it the
 card only when formula.spl is free.
 
-### CARD 6 (sonnet lane) — Deploy swap completion  [IN FLIGHT round 9]
+### CARD 6 (sonnet lane) — Deploy swap completion  [REOPENED — lane died in credit outage]
+**Status 2026-07-03:** the round-9 lane's background build died with the
+Fable credit outage. A parallel session deployed an UNRELATED binary at 12:40;
+probe confirms production `bin/simple` still errors
+`unknown extern function: rt_terminal_enable_raw_mode` on `edit-sheet --tui`.
+The raw-mode fix exists ONLY in the bootstrap seed
+(src/compiler_rust/target/bootstrap/simple). Re-run from step 3 below; the
+acceptance probe above IS the reopen/close test.
 **Objective:** production `bin/simple` carries the raw-mode termios +
 interpreter-dispatch fixes.
 **Design:** canonical path `bin/simple build bootstrap` (or
@@ -203,24 +255,28 @@ new binary. ANY failure → rollback + re-verify + honest report.
 **If the build fails twice on parallel-session churn:** stop, log tail,
 leave binaries untouched, report — do not force.
 
-### CARD 7 (haiku lane) — ODS styles  [IN FLIGHT round 10]
+### CARD 7 (haiku lane) — ODS styles  [DONE round 10]
 As briefed: `sheet_to_fods_formatted` in odf_export.spl mirroring xlsx
 styles (automatic-styles, number/percentage/date styles, bold/bg/fg),
 `fods_styles_spec.spl`, old writer byte-identical, ceiling = structural
 (no LibreOffice locally).
 
-### CARD 8 (opus lane) — Matrix batch  [IN FLIGHT round 10]
+### CARD 8 (opus lane) — Matrix batch  [DONE, pushed 87661f0]
 As briefed: MMULT/MINVERSE(Gauss-Jordan)/MDETERM(LU)/MUNIT spill +
 SUMX2MY2/SUMX2PY2/SUMXMY2 + FACTDOUBLE/MULTINOMIAL/SERIESSUM +
 ROMAN/ARABIC. `formula_matrix_spec.spl`.
 
-### CARD 9 (any lane) — Function-gap audit consumption  [audit IN FLIGHT]
+### CARD 9 (any lane) — Function-gap audit  [PARTIAL — exact recount OPEN]
+**Re-run required:** extract the exact dispatchable-name set from formula.spl
+(all dispatch paths + `_canonical_name` table + array-function names), dedupe,
+publish the number. Agents have been reporting totals off stale baselines;
+loose grep upper bound is 349, honest working claim ~330. Original brief:
 When `scratchpad/function_gap_audit.md` lands: copy it into
 `doc/09_report/office_function_gap_audit_2026-07-03.md`, re-derive CARD 1's
 exact alias list and CARD 2-5 exact membership from it, update THIS plan's
 counts, and re-order remaining cards by coverage-per-effort.
 
-### CARD 10 (sonnet lane) — Desktop render verification  [BLOCKED locally]
+### CARD 10 (sonnet lane) — Desktop render verification  [HEADLESS PASSED round 12; residual → CARD 15]
 **Objective:** prove .docx/.xlsx/.pptx/.fods open correctly in real
 Office/LibreOffice. **Blocked:** neither installed on this host.
 **Plan:** (a) container route — check `scripts/local-container-test.shs`
@@ -231,7 +287,7 @@ check script (`.shs`) + doc, and record the ceiling in
 `doc/08_tracking/test/` as an environment-blocked verification item.
 NEVER claim desktop-verified until (a) or user confirmation.
 
-### CARD 11 (haiku lane) — CLI + macro API catch-up
+### CARD 11 (haiku lane) — CLI + macro API catch-up  [DONE round 11]
 After CARDs 1-5 land: extend `office_api.spl` wrappers + mod.spl help for
 any new user-facing surface (formatted xlsx/fods export flags on `convert`:
 `--styles <fmt-spec-file>`? design the smallest flag that exposes
@@ -244,6 +300,49 @@ network access inside formulas — both violate the suite's offline pure-Simple
 model. Decision: implement as fail-closed #N/A stubs ONLY if the audit shows
 compatibility value; otherwise document exclusion in the audit report.
 These are excluded from the parity count with rationale, not silently.
+
+### CARD 13 (opus lane) — Pivot tables  [NEW, OPEN]
+**Objective:** the marquee Excel analysis feature we lack entirely: group a
+data range by one or two key columns, aggregate a value column
+(SUM/COUNT/AVERAGE/MIN/MAX), emit a result grid.
+**Design:** NEW FILE `src/app/office/sheets/pivot.spl` (disjoint — can run
+parallel to any formula.spl card). Model: `pivot_build(sheet, range_a1,
+row_key_col, col_key_col_or_neg1, value_col, agg) -> [[text]]` returning a
+2D grid (row keys sorted first-seen or lexicographic — pick one, document it;
+col_key -1 = one-dimensional pivot with a single value column; grand-total
+row and column). Reuse the range-iteration idiom from data_ops.spl
+(parse_range + min/max normalization + get_cell/cell_display_text); numeric
+extraction via the CellValue.NumberVal match idiom. Then:
+`pivot_to_sheet(grid_result, name) -> Sheet` for CSV/render output, a
+`pivot` CLI subcommand (`pivot <in.csv> <range> <row_col> <val_col> <agg>
+[--col <col>]` — remember mod.spl's clobber protocol), and
+`macro_pivot(...)` in office_api.spl.
+**Ground truth:** hand-compute a 6-row dataset with 2 regions × 2 products:
+SUM/COUNT/AVERAGE per group, grand totals. Fail-closed on non-numeric value
+cells (skip, like Excel), empty range, bad agg name.
+**Spec:** `test/01_unit/app/office/sheets/pivot_spec.spl` — the hand-computed
+table asserted cell-exact, 1D and 2D forms, each agg, error cases.
+
+### CARD 14 (opus lane) — Deferred-math remainder  [NEW, OPEN]
+Collected honest skips, each needing dedicated ground truth work:
+- CHISQ.TEST / T.TEST / F.TEST (two-range statistical tests; T.TEST types
+  1/2/3 + tails; verify against published worked examples, not self-derived)
+- BESSELY / BESSELK (need Y/K-specific series with log + Euler–Mascheroni
+  terms; verify to 6 digits against tables before shipping)
+- LET / LAMBDA (need evaluator variable-scoping machinery — largest item)
+- Bare ROW()/COLUMN() (need origin-cell context threaded into the evaluator;
+  CARD 5 ships the with-arg forms first)
+Rule stands: no unverified math ships; a skipped function stays on this card
+with its blocker named.
+
+### CARD 15 — GUI-interactive fidelity  [NEW, BLOCKED by environment]
+CARD 10 proved headless import+PDF-render in real LibreOffice for all 4
+container formats. Remaining tier: interactive fidelity (formatting seen in
+the GUI, formula recalc inside LibreOffice/Excel, edit round-trips).
+Requires a display server + real desktop app or user-side verification.
+Deliverable when unblocked: a checklist doc + per-format screenshots or
+user confirmation. Until then this is the honestly-stated verification
+ceiling, recorded in spec docstrings.
 
 ---
 
