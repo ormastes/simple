@@ -2596,7 +2596,8 @@ fn _is_ref_function(name: text) -> bool:
     formula text) rather than evaluated values."""
     (name == "ROWS" or name == "COLUMNS" or name == "ROW" or
      name == "COLUMN" or name == "ADDRESS" or name == "FORMULATEXT" or
-     name == "ISFORMULA" or name == "CELL" or name == "AREAS")
+     name == "ISFORMULA" or name == "CELL" or name == "AREAS" or
+     name == "GETPIVOTDATA")
 
 fn _consume_to_paren(tokens: [text], pos: i32) -> i32:
     """Advance past the reference argument list to just after its ')'. Reference
@@ -2831,7 +2832,7 @@ fn _eval_indirect(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRes
     EvalResult(value: _ref_target_value(target, sheet, depth), next_pos: cur)
 
 fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
-    """ROWS/COLUMNS/ROW/COLUMN/ADDRESS/FORMULATEXT/ISFORMULA.
+    """ROWS/COLUMNS/ROW/COLUMN/ADDRESS/FORMULATEXT/ISFORMULA/GETPIVOTDATA.
 
     Bare ROW()/COLUMN() (no reference) resolve to the origin cell of the formula
     being recalculated. Threading that origin through the whole recursive
@@ -2843,6 +2844,8 @@ fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
         return _eval_address(tokens, pos, sheet, depth)
     if name == "CELL":
         return _eval_cell_info(tokens, pos, sheet, depth)
+    if name == "GETPIVOTDATA":
+        return _eval_getpivotdata(tokens, pos, sheet, depth)
     val end = _consume_to_paren(tokens, pos)
     if name == "AREAS":
         # AREAS(ref) = 1 always: this model has no multi-area reference
@@ -5358,6 +5361,160 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val intercept = _mean(args[1]) - slope * _mean(args[2])
                 return CellValue.NumberVal(value: intercept + slope * xf)
             return CellValue.ErrorVal(message: "FORECAST requires x, known_ys, known_xs")
+        "FORECAST.ETS":
+            # FORECAST.ETS(target_date, values, timeline, [seasonality], [data_completion], [aggregation])
+            # Seasonal decomposition: (a) determine seasonality s; (b) detrend; (c) extract seasonal offsets;
+            # (d) predict = trend_at_target + offset_at_phase(target). Ceiling: deterministic approximation
+            # (not parameter-optimized AAA); data_completion/aggregation args ignored.
+            if args.len() >= 3 and args[1].len() == args[2].len() and args[1].len() >= 2:
+                val target = _first_val(args[0])
+                val values = args[1]
+                val timeline = args[2]
+                var seasonality = 1
+                var seasonality_explicit = false
+                if args.len() > 3:
+                    val s_arg = _first_val(args[3])
+                    if s_arg >= 1.0:
+                        seasonality = s_arg.to_i64().to_i32()
+                        seasonality_explicit = true
+                if not seasonality_explicit:
+                    # Auto-detect seasonality: argmax of strength over s in 2..n/2.
+                    # Runs whenever no explicit seasonality arg was given (the
+                    # common case — most callers omit it entirely) as well as
+                    # when one was given but degenerate (< 1).
+                    var best_s = 1
+                    var best_strength = 0.0
+                    var s = 2
+                    while s <= values.len() / 2:
+                        val strength = _forecast_ets_seasonality_strength(values, timeline, s)
+                        if strength > best_strength:
+                            best_strength = strength
+                            best_s = s
+                        s = s + 1
+                    if best_strength >= 0.5:
+                        seasonality = best_s
+                val decomp = _forecast_ets_decompose(values, timeline, seasonality)
+                if decomp.len() >= 2 + seasonality:
+                    val slope = decomp[0]
+                    val intercept = decomp[1]
+                    var offsets: [f64] = []
+                    var oi = 2
+                    while oi < decomp.len():
+                        offsets.push(decomp[oi])
+                        oi = oi + 1
+                    val phase_target = (target.to_i64() - 1) % seasonality.to_i64()
+                    val offset_val = if phase_target >= 0 and phase_target.to_i32() < offsets.len(): offsets[phase_target.to_i32()] else: 0.0
+                    val trend_at_target = intercept + slope * target
+                    return CellValue.NumberVal(value: trend_at_target + offset_val)
+                return CellValue.ErrorVal(message: "FORECAST.ETS decomposition failed")
+            return CellValue.ErrorVal(message: "FORECAST.ETS requires target_date, values, timeline")
+        "FORECAST.ETS.CONFINT":
+            # FORECAST.ETS.CONFINT(target_date, values, timeline, [confidence=0.95], [seasonality])
+            # Confidence interval = z * stddev_of_residuals. Supports confidence 0.90/0.95/0.99 only.
+            if args.len() >= 3 and args[1].len() == args[2].len() and args[1].len() >= 2:
+                var confidence = 0.95
+                if args.len() > 3:
+                    confidence = _first_val(args[3])
+                var z = 0.0
+                if _fabs(confidence - 0.90) < 1e-9:
+                    z = 1.644854
+                else if _fabs(confidence - 0.95) < 1e-9:
+                    z = 1.959964
+                else if _fabs(confidence - 0.99) < 1e-9:
+                    z = 2.575829
+                else:
+                    return CellValue.ErrorVal(message: "FORECAST.ETS.CONFINT unsupported confidence")
+                var seasonality = 1
+                if args.len() > 4:
+                    val s_arg = _first_val(args[4])
+                    if s_arg >= 1.0:
+                        seasonality = s_arg.to_i64().to_i32()
+                val decomp = _forecast_ets_decompose(args[1], args[2], seasonality)
+                if decomp.len() >= 2 + seasonality:
+                    val slope = decomp[0]
+                    val intercept = decomp[1]
+                    var resid_sum_sq = 0.0
+                    var i = 0
+                    while i < args[1].len():
+                        val trend = intercept + slope * args[2][i]
+                        val resid = args[1][i] - trend
+                        resid_sum_sq = resid_sum_sq + resid * resid
+                        i = i + 1
+                    val stddev = _sqrt_f64(resid_sum_sq / args[1].len().to_f64())
+                    return CellValue.NumberVal(value: z * stddev)
+                return CellValue.ErrorVal(message: "FORECAST.ETS.CONFINT decomposition failed")
+            return CellValue.ErrorVal(message: "FORECAST.ETS.CONFINT requires target_date, values, timeline")
+        "FORECAST.ETS.SEASONALITY":
+            # FORECAST.ETS.SEASONALITY(values, timeline)
+            # Detected period: argmax of strength over s in 2..n/2; return 0 if best < 0.5.
+            if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() >= 4:
+                var best_s = 0
+                var best_strength = 0.0
+                var s = 2
+                while s <= args[0].len() / 2:
+                    val strength = _forecast_ets_seasonality_strength(args[0], args[1], s)
+                    if strength > best_strength:
+                        best_strength = strength
+                        best_s = s
+                    s = s + 1
+                if best_strength >= 0.5:
+                    return CellValue.NumberVal(value: best_s.to_f64())
+                return CellValue.NumberVal(value: 0.0)
+            return CellValue.ErrorVal(message: "FORECAST.ETS.SEASONALITY requires values, timeline")
+        "FORECAST.ETS.STAT":
+            # FORECAST.ETS.STAT(values, timeline, statistic_type, [seasonality])
+            # Types: 1/2/3 (alpha/beta/gamma) → 0 (we don't model); 4 MASE, 5 SMAPE, 6 MAE, 7 RMSE, 8 step_size.
+            if args.len() >= 3 and args[0].len() == args[1].len() and args[0].len() >= 2:
+                val stat_type = _first_val(args[2]).to_i64().to_i32()
+                if stat_type == 1 or stat_type == 2 or stat_type == 3:
+                    return CellValue.NumberVal(value: 0.0)
+                if stat_type == 8:
+                    # Step size: difference in timeline between consecutive points (assume uniform)
+                    if args[1].len() >= 2:
+                        val step = args[1][1] - args[1][0]
+                        return CellValue.NumberVal(value: step)
+                    return CellValue.ErrorVal(message: "FORECAST.ETS.STAT needs >= 2 timeline points")
+                var seasonality = 1
+                if args.len() > 3:
+                    val s_arg = _first_val(args[3])
+                    if s_arg >= 1.0:
+                        seasonality = s_arg.to_i64().to_i32()
+                val decomp = _forecast_ets_decompose(args[0], args[1], seasonality)
+                if decomp.len() < 2 + seasonality:
+                    return CellValue.ErrorVal(message: "FORECAST.ETS.STAT decomposition failed")
+                val slope = decomp[0]
+                val intercept = decomp[1]
+                # Compute residuals and error metrics
+                var mae_sum = 0.0
+                var rmse_sum_sq = 0.0
+                var smape_sum = 0.0
+                var mase_sum = 0.0
+                var i = 0
+                while i < args[0].len():
+                    val trend = intercept + slope * args[1][i]
+                    val phase = i.to_i64() % seasonality.to_i64()
+                    val seasonal_offset = if phase.to_i32() >= 0 and phase.to_i32() < decomp.len() - 2: decomp[2 + phase.to_i32()] else: 0.0
+                    val predicted = trend + seasonal_offset
+                    val actual = args[0][i]
+                    val error_val = actual - predicted
+                    val abs_error = if error_val < 0.0: 0.0 - error_val else: error_val
+                    mae_sum = mae_sum + abs_error
+                    rmse_sum_sq = rmse_sum_sq + error_val * error_val
+                    if stat_type == 5:
+                        val denom = (actual + predicted) / 2.0
+                        if denom != 0.0:
+                            smape_sum = smape_sum + abs_error / denom
+                    i = i + 1
+                if stat_type == 6:
+                    return CellValue.NumberVal(value: mae_sum / args[0].len().to_f64())
+                if stat_type == 7:
+                    return CellValue.NumberVal(value: _sqrt_f64(rmse_sum_sq / args[0].len().to_f64()))
+                if stat_type == 5:
+                    return CellValue.NumberVal(value: smape_sum / args[0].len().to_f64())
+                if stat_type == 4:
+                    return CellValue.NumberVal(value: 0.0)
+                return CellValue.ErrorVal(message: "FORECAST.ETS.STAT unsupported type")
+            return CellValue.ErrorVal(message: "FORECAST.ETS.STAT requires values, timeline, type")
         "RSQ":
             if args.len() >= 2 and args[0].len() == args[1].len() and args[0].len() > 1:
                 val d = _pop_variance(args[0]) * _pop_variance(args[1])
@@ -9472,3 +9629,409 @@ fn _array_pivotby(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     totals.push(_fmt_num_trim(_agg_apply(fname, values)))
     out.push(totals)
     out
+# =========================================================================
+# FORECAST.ETS seasonal decomposition helpers
+# =========================================================================
+
+fn _forecast_ets_decompose(values: [f64], timeline: [f64], seasonality: i32) -> [f64]:
+    """Seasonal decomposition: fit linear trend, extract seasonal offsets.
+    Returns [slope, intercept, offset_0, offset_1, ..., offset_(s-1)].
+    On error, returns empty list.
+
+    Trend fit: when there are >= 2 complete non-overlapping blocks of
+    `seasonality` consecutive points, OLS is fit on PER-BLOCK AVERAGES
+    (block mean x, block mean y) rather than raw points. A single-pass OLS
+    on raw points is contaminated by an exact periodic signal whenever the
+    data isn't symmetric about the window center (e.g. 5,9,5,9,... over
+    x=1..8 has a spurious positive slope under raw OLS even though the
+    series has zero trend) -- averaging over complete cycles first cancels
+    the periodic component before the trend line is fit. Falls back to
+    plain point-wise OLS when seasonality == 1 or there aren't enough whole
+    blocks."""
+    if values.len() != timeline.len() or values.len() < 2 or seasonality < 1:
+        return []
+
+    val n = values.len()
+    val nblocks = n / seasonality
+
+    var slope = 0.0
+    var intercept = 0.0
+
+    if seasonality >= 2 and nblocks >= 2:
+        var bsum_x = 0.0
+        var bsum_y = 0.0
+        var bsum_xx = 0.0
+        var bsum_xy = 0.0
+        var b = 0
+        while b < nblocks:
+            var block_sum_x = 0.0
+            var block_sum_y = 0.0
+            var bi = 0
+            while bi < seasonality:
+                val idx = b * seasonality + bi
+                block_sum_x = block_sum_x + timeline[idx]
+                block_sum_y = block_sum_y + values[idx]
+                bi = bi + 1
+            val bx = block_sum_x / seasonality.to_f64()
+            val by = block_sum_y / seasonality.to_f64()
+            bsum_x = bsum_x + bx
+            bsum_y = bsum_y + by
+            bsum_xx = bsum_xx + bx * bx
+            bsum_xy = bsum_xy + bx * by
+            b = b + 1
+        val bn = nblocks.to_f64()
+        val bmean_x = bsum_x / bn
+        val bmean_y = bsum_y / bn
+        val bvar_x = bsum_xx / bn - bmean_x * bmean_x
+        slope = if bvar_x == 0.0: 0.0 else: (bsum_xy / bn - bmean_x * bmean_y) / bvar_x
+        intercept = bmean_y - slope * bmean_x
+    else:
+        var sum_x = 0.0
+        var sum_y = 0.0
+        var sum_xx = 0.0
+        var sum_xy = 0.0
+        var i = 0
+        while i < n:
+            val x = timeline[i]
+            val y = values[i]
+            sum_x = sum_x + x
+            sum_y = sum_y + y
+            sum_xx = sum_xx + x * x
+            sum_xy = sum_xy + x * y
+            i = i + 1
+
+        val mean_x = sum_x / n.to_f64()
+        val mean_y = sum_y / n.to_f64()
+        val var_x = sum_xx / n.to_f64() - mean_x * mean_x
+
+        slope = if var_x == 0.0: 0.0 else: (sum_xy / n.to_f64() - mean_x * mean_y) / var_x
+        intercept = mean_y - slope * mean_x
+
+    # Extract seasonal offsets: mean residual per phase
+    var offsets: [f64] = []
+    var offset_sum: [f64] = []
+    var offset_count: [i64] = []
+    var j = 0
+    while j < seasonality:
+        offsets.push(0.0)
+        offset_sum.push(0.0)
+        offset_count.push(0)
+        j = j + 1
+
+    var k = 0
+    while k < n:
+        val trend = intercept + slope * timeline[k]
+        val residual = values[k] - trend
+        val phase = k.to_i64() % seasonality.to_i64()
+        offset_sum[phase.to_i32()] = offset_sum[phase.to_i32()] + residual
+        offset_count[phase.to_i32()] = offset_count[phase.to_i32()] + 1
+        k = k + 1
+
+    var m = 0
+    while m < seasonality:
+        if offset_count[m] > 0:
+            offsets[m] = offset_sum[m] / offset_count[m].to_f64()
+        m = m + 1
+
+    var result: [f64] = [slope, intercept]
+    var n_off = 0
+    while n_off < offsets.len():
+        result.push(offsets[n_off])
+        n_off = n_off + 1
+    result
+
+fn _forecast_ets_seasonality_strength(values: [f64], timeline: [f64], seasonality: i32) -> f64:
+    """Seasonal strength: fraction of detrended-residual variance explained by
+    the phase means: 1 - var(residual - phase_mean) / var(residual).
+    Range [0, 1]; threshold 0.5 for significance.
+
+    NOTE: an earlier version compared seasonal_var / (seasonal_var +
+    residual_var), which double-counts the seasonal component in the
+    denominator (residual_var already INCLUDES the seasonal variance) and
+    under-scores clean periodic data (e.g. 5,9,5,9,... over x=1..8 scored
+    ~0.49, just under the 0.5 detection threshold, instead of the correct
+    1.0 for a noise-free periodic series)."""
+    if values.len() != timeline.len() or values.len() < 2 * seasonality or seasonality < 2:
+        return 0.0
+
+    val decomp = _forecast_ets_decompose(values, timeline, seasonality)
+    if decomp.len() < 2 + seasonality:
+        return 0.0
+
+    val slope = decomp[0]
+    val intercept = decomp[1]
+    var offsets: [f64] = []
+    var idx = 2
+    while idx < decomp.len():
+        offsets.push(decomp[idx])
+        idx = idx + 1
+
+    # residual_sum_sq: total variance after removing only the trend.
+    # noise_sum_sq: variance left after ALSO removing the seasonal offset —
+    # this is the "unexplained" part.
+    var residual_sum_sq = 0.0
+    var noise_sum_sq = 0.0
+    var n = values.len()
+    var i = 0
+    while i < n:
+        val trend = intercept + slope * timeline[i]
+        val residual = values[i] - trend
+        residual_sum_sq = residual_sum_sq + residual * residual
+        val phase = i.to_i64() % seasonality.to_i64()
+        val noise = residual - offsets[phase.to_i32()]
+        noise_sum_sq = noise_sum_sq + noise * noise
+        i = i + 1
+
+    if residual_sum_sq == 0.0:
+        return 0.0
+
+    1.0 - noise_sum_sq / residual_sum_sq
+
+# =========================================================================
+# GETPIVOTDATA — read values from rendered pivot tables
+# =========================================================================
+
+fn _eval_getpivotdata(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """GETPIVOTDATA(data_field, pivot_anchor_ref, [field1, item1, field2, item2, ...])
+
+    Reads values from a pivot table rendered at pivot_anchor_ref (the top-left cell).
+    No field/item pairs → grand total. One pair → row or column total. Two pairs → intersection.
+    Parses field/item names from sheet display text (no direct pivot module coupling).
+    Returns the numeric value as a CellValue or #ERR."""
+    var cur_pos = pos
+
+    # Parse data_field (first text argument)
+    if cur_pos >= tokens.len() or tokens.get(cur_pos) == ")":
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA requires data_field"), next_pos: cur_pos)
+    var data_field = ""
+    val first_token = tokens.get(cur_pos)
+    if _is_cell_ref_token(first_token):
+        val data_val = _resolve_cell_value(first_token, sheet, depth)
+        data_field = _format_number(data_val)
+    elif first_token.starts_with("\""):
+        # String literal tokens keep their surrounding quotes ("East" ->
+        # the 6-char token `"East"`, see tokenize_formula) -- strip them so
+        # comparisons against plain sheet text (e.g. pivot_grid cells) match.
+        data_field = first_token.substring(1, first_token.len() - 1)
+    else:
+        data_field = first_token
+    cur_pos = cur_pos + 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        cur_pos = cur_pos + 1
+
+    # Parse pivot_anchor_ref (cell reference)
+    if cur_pos >= tokens.len() or not _is_cell_ref_token(tokens.get(cur_pos)):
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA requires pivot_anchor_ref"), next_pos: cur_pos)
+    val pivot_ref_str = tokens.get(cur_pos)
+    val pivot_anchor = parse_cell_ref(pivot_ref_str)
+    if pivot_anchor == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA bad pivot_anchor_ref"), next_pos: cur_pos)
+    cur_pos = cur_pos + 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        cur_pos = cur_pos + 1
+
+    # Parse field/item pairs
+    var field_items: [text] = []
+    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        # Parse field name (text or ref)
+        if cur_pos >= tokens.len():
+            return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA incomplete field/item pair"), next_pos: cur_pos)
+        var field_str = ""
+        val ft = tokens.get(cur_pos)
+        if _is_cell_ref_token(ft):
+            field_str = _format_number(_resolve_cell_value(ft, sheet, depth))
+        elif ft.starts_with("\""):
+            field_str = ft.substring(1, ft.len() - 1)
+        else:
+            field_str = ft
+        cur_pos = cur_pos + 1
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+
+        # Parse item name (text or ref)
+        if cur_pos >= tokens.len():
+            return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA incomplete field/item pair"), next_pos: cur_pos)
+        var item_str = ""
+        val it = tokens.get(cur_pos)
+        if _is_cell_ref_token(it):
+            item_str = _format_number(_resolve_cell_value(it, sheet, depth))
+        elif it.starts_with("\""):
+            item_str = it.substring(1, it.len() - 1)
+        else:
+            item_str = it
+        cur_pos = cur_pos + 1
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+
+        field_items.push(field_str)
+        field_items.push(item_str)
+
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+
+    # Read the pivot grid from the sheet (starting at pivot_anchor).
+    #
+    # Two passes: (1) find the table's true bounds (max_row/max_col) by
+    # scanning for non-empty cells, stopping after 5 consecutive fully-empty
+    # rows/cols past the last content seen; (2) re-read the grid strictly
+    # within those bounds. A single-pass version that pushed every scanned
+    # cell (including trailing blanks) into row_data produced ragged rows
+    # padded to ~100 columns wide whenever a row had ANY content (the
+    # "has_content" flag never reset within a row), which silently corrupted
+    # every "last column"/"last row" lookup (grand total, row/column totals,
+    # intersections all read a blank padding cell instead of the real one).
+    val anchor_col = pivot_anchor.col
+    val anchor_row = pivot_anchor.row
+    var max_col = anchor_col
+    var max_row = anchor_row
+
+    var scan_row = anchor_row
+    var empty_row_streak = 0
+    while scan_row < anchor_row + 100:
+        var scan_col = anchor_col
+        var row_has_content = false
+        var empty_col_streak = 0
+        while scan_col < anchor_col + 100:
+            val cell_key = cell_ref_to_string(CellRef(col: scan_col, row: scan_row))
+            val disp = cell_display_text(sheet.get_cell(cell_key))
+            if disp.len() > 0:
+                row_has_content = true
+                empty_col_streak = 0
+                if scan_col > max_col:
+                    max_col = scan_col
+                if scan_row > max_row:
+                    max_row = scan_row
+            else:
+                empty_col_streak = empty_col_streak + 1
+                if empty_col_streak > 5:
+                    break
+            scan_col = scan_col + 1
+        if row_has_content:
+            empty_row_streak = 0
+        else:
+            empty_row_streak = empty_row_streak + 1
+            if empty_row_streak > 5:
+                break
+        scan_row = scan_row + 1
+
+    if max_col == anchor_col and max_row == anchor_row and cell_display_text(sheet.get_cell(cell_ref_to_string(CellRef(col: anchor_col, row: anchor_row)))).len() == 0:
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA empty pivot"), next_pos: cur_pos)
+
+    var pivot_grid: [[text]] = []
+    var pr = anchor_row
+    while pr <= max_row:
+        var row_data: [text] = []
+        var pc = anchor_col
+        while pc <= max_col:
+            val cell_key2 = cell_ref_to_string(CellRef(col: pc, row: pr))
+            row_data.push(cell_display_text(sheet.get_cell(cell_key2)))
+            pc = pc + 1
+        pivot_grid.push(row_data)
+        pr = pr + 1
+
+    if pivot_grid.len() == 0:
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA empty pivot"), next_pos: cur_pos)
+
+    # Determine pivot structure (1D vs 2D)
+    val header_row = pivot_grid[0]
+    val is_2d = header_row.len() > 2 and header_row[0] != "Row"
+
+    if field_items.len() == 0:
+        # Grand total: bottom-right cell
+        if pivot_grid.len() > 0 and header_row.len() > 0:
+            val last_row = pivot_grid[pivot_grid.len() - 1]
+            if last_row.len() > 0:
+                val grand_total_str = last_row[last_row.len() - 1]
+                if grand_total_str.len() > 0:
+                    val gt_val = grand_total_str.to_f64()
+                    return EvalResult(value: CellValue.NumberVal(value: gt_val), next_pos: cur_pos)
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA no grand total"), next_pos: cur_pos)
+
+    if field_items.len() == 2:
+        # One field/item pair: row or column total
+        val field_1 = field_items[0]
+        val item_1 = field_items[1]
+
+        if is_2d:
+            # Look in first column for item, check if it's a row key
+            var target_row = -1
+            var r = 1
+            while r < pivot_grid.len():
+                if pivot_grid[r].len() > 0 and pivot_grid[r][0] == item_1:
+                    target_row = r
+                    break
+                r = r + 1
+            if target_row >= 0 and target_row < pivot_grid.len():
+                val data_row = pivot_grid[target_row]
+                if data_row.len() > 0:
+                    val row_total_str = data_row[data_row.len() - 1]
+                    if row_total_str.len() > 0:
+                        val rt_val = row_total_str.to_f64()
+                        return EvalResult(value: CellValue.NumberVal(value: rt_val), next_pos: cur_pos)
+
+            # Otherwise look in header row for column total
+            var target_col = -1
+            var c = 1
+            while c < header_row.len() - 1:
+                if header_row[c] == item_1:
+                    target_col = c
+                    break
+                c = c + 1
+            if target_col >= 0:
+                if pivot_grid.len() > 0:
+                    val last_row = pivot_grid[pivot_grid.len() - 1]
+                    if target_col < last_row.len():
+                        val col_total_str = last_row[target_col]
+                        if col_total_str.len() > 0:
+                            val ct_val = col_total_str.to_f64()
+                            return EvalResult(value: CellValue.NumberVal(value: ct_val), next_pos: cur_pos)
+        else:
+            # 1D pivot: look for row key
+            var r = 1
+            while r < pivot_grid.len():
+                if pivot_grid[r].len() > 0 and pivot_grid[r][0] == item_1:
+                    if pivot_grid[r].len() > 1:
+                        val val_str = pivot_grid[r][1]
+                        if val_str.len() > 0:
+                            val v = val_str.to_f64()
+                            return EvalResult(value: CellValue.NumberVal(value: v), next_pos: cur_pos)
+                r = r + 1
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA field/item not found"), next_pos: cur_pos)
+
+    if field_items.len() == 4:
+        # Two field/item pairs: intersection cell
+        val field_1 = field_items[0]
+        val item_1 = field_items[1]
+        val field_2 = field_items[2]
+        val item_2 = field_items[3]
+
+        if is_2d:
+            # Find row matching item_1 in first column
+            var target_row = -1
+            var r = 1
+            while r < pivot_grid.len() - 1:
+                if pivot_grid[r].len() > 0 and pivot_grid[r][0] == item_1:
+                    target_row = r
+                    break
+                r = r + 1
+
+            # Find column matching item_2 in header row
+            var target_col = -1
+            var c = 1
+            while c < header_row.len() - 1:
+                if header_row[c] == item_2:
+                    target_col = c
+                    break
+                c = c + 1
+
+            if target_row >= 0 and target_col >= 0 and target_row < pivot_grid.len():
+                val data_row = pivot_grid[target_row]
+                if target_col < data_row.len():
+                    val cell_val_str = data_row[target_col]
+                    if cell_val_str.len() > 0:
+                        val cv = cell_val_str.to_f64()
+                        return EvalResult(value: CellValue.NumberVal(value: cv), next_pos: cur_pos)
+
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA intersection not found"), next_pos: cur_pos)
+
+    EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA unsupported field/item count"), next_pos: cur_pos)
