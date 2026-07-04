@@ -14,15 +14,19 @@
 | 6 Deploy swap | **REOPENED** — lane died (credit outage); probe 2026-07-03 12:5x: production binary still errors `unknown extern` on raw-mode; fix remains seed-only | re-run CARD 6 protocol from step 3 |
 | 7 ODS styles | **DONE** (round 10) | sheet_to_fods_formatted, xmllint-validated |
 | 8 Matrix batch | **DONE** (pushed 87661f0) | fully-inline flat arrays (interp array-param bugs) |
-| 9 Audit consumption | **PARTIAL** | first audit consumed; **exact count re-run OPEN** — agent-reported totals drifted off stale baselines; loose grep bound 349, honest claim ~330 |
+| 9 Audit consumption | **DONE 2026-07-04** | exact census: **330 callable** (296 distinct impls + 34 pure aliases), 10/10 sanity checks; missing vs Excel-365 concretely **enumerated 152** (nominal ~175 incl. catalog fuzz); top buckets: securities 30 (CARD 3 in flight), info/dynamic-array 19, stat A-variants 18; census file in session scratchpad `function_census_2026-07-04.md` |
 | 10 Desktop render | **HEADLESS PASSED** (round 12, pushed b6245d3) | all 4 formats → PDF in real LibreOffice via docker; check script committed; residual = GUI fidelity (CARD 15) |
 | 11 CLI/macro catch-up | **DONE** (round 11) | --styles flag + macro format API; md5-identical no-flag path |
 | 12 Cube/web exclusion | **DECIDED** | out of offline scope, recorded |
 | — Find/replace (uncarded) | **DONE** (round 13, pushed 355f4e2) | sheet_find/sheet_replace + find-sheet CLI; shipped during credit-death recovery |
 
-Suite state at review: **~330 Calc functions** (exact pending CARD 9 re-run),
+Suite state at review: **330 callable Calc functions** (296 distinct
+implementations + 34 dotted aliases; census 2026-07-04, 10/10 sanity checks),
 **55 office spec files**, all green per-file; all shipped rounds pushed and
-content-verified on origin (latest 355f4e2).
+content-verified on origin. Missing vs Excel 365: **152 enumerated** —
+securities 30 (CARD 3 in flight), info/dynamic-array 19, stat A-variants 18,
+tests/regression 16, text 13, lookup/ref 12, LAMBDA-family 11, date/time 9,
+math 9, cube 7 + web 3 (excluded, CARD 12), BESSELY/K 2.
 **Audit (Explore lane, this date):** **231 implemented** vs Excel 365's ~505
 → **~274 missing**, of which: 21 pure dotted-name aliases of functions we
 HAVE (STDEV→STDEV.S, RANK→RANK.EQ, GAMMALN→GAMMALN.PRECISE, …), ~73 stats
