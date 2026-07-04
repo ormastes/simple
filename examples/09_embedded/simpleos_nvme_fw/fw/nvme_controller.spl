@@ -171,6 +171,8 @@ impl NvmeController:
         if cmd.opcode == ADMIN_FW_DOWNLOAD:
             if cmd.nsid != 0 or cmd.cdw10 <= 0 or cmd.cdw11 < 0 or cmd.cdw12 != 0:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
+            if cmd.cdw11 != me.fw_dl_bytes / 4:
+                return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             me.fw_dl_bytes = me.fw_dl_bytes + cmd.cdw10 * 4   # NUMD dwords accumulated
             return AdminResult(status: SC_SUCCESS, data: 0, post: true)
         if cmd.opcode == ADMIN_FW_COMMIT:
@@ -660,6 +662,10 @@ fn nvme_controller_selftest() -> i64:
     val fca: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(fdz.status, SC_INVALID_FIELD, "fw download with zero length is rejected")
     fail = fail + expect_eq(fca.status, SC_INVALID_FIELD, "fw commit with reserved action is rejected")
+    c.admin_submit(admin_fw_download_cmd(54, 4, 8))
+    c.admin_process()
+    val fdoff: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(fdoff.status, SC_INVALID_FIELD, "fw download with non-sequential offset is rejected")
     c.admin_submit(admin_cmd_make(52, ADMIN_FW_DOWNLOAD, 1, 4, 0, 0))
     c.admin_submit(admin_cmd_make(53, ADMIN_FW_COMMIT, 0, (1 << 16) | (1 << 3) | 1, 0, 0))
     c.admin_process()
