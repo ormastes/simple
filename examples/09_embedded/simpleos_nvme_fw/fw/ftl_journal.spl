@@ -41,6 +41,12 @@ fn ftl_journal_new() -> Journal:
             ckpt_seq: 0, ckpt_valid: 0,
             sb_gen: 0, sb_ckpt_ptr: UNMAP)
 
+fn journal_lba_valid(lba: i64) -> bool:
+    lba >= 0 and lba < LBA_COUNT
+
+fn journal_ppn_valid_or_unmap(ppn: i64) -> bool:
+    ppn == UNMAP or ppn_in_range(ppn)
+
 # ── Methods ───────────────────────────────────────────────────────────────────
 
 impl Journal:
@@ -51,6 +57,10 @@ impl Journal:
     # new code is a single struct param (see fw/CONVENTIONS.md).
     me append(_p0: i64, map_lba: i64, old_ppn: i64, new_ppn: i64, map_seq: i64) -> i64:
         if me.wal_count >= me.cap:
+            return me.wal_count
+        if not journal_lba_valid(map_lba):
+            return me.wal_count
+        if not journal_ppn_valid_or_unmap(old_ppn) or not journal_ppn_valid_or_unmap(new_ppn):
             return me.wal_count
         val slot: i64 = me.wal_count
         me.wal_lba[slot] = map_lba
@@ -79,12 +89,18 @@ impl Journal:
 
     # Accessors for WAL replay.
     me record_lba(ridx: i64) -> i64:
+        if ridx < 0 or ridx >= me.wal_count:
+            return UNMAP
         me.wal_lba[ridx]
 
     me record_new(ridx: i64) -> i64:
+        if ridx < 0 or ridx >= me.wal_count:
+            return UNMAP
         me.wal_new[ridx]
 
     me record_seq(ridx: i64) -> i64:
+        if ridx < 0 or ridx >= me.wal_count:
+            return 0
         me.wal_seq[ridx]
 
     # Drop all WAL records whose seq <= ckpt_seq (durable in checkpoint).
@@ -157,5 +173,12 @@ fn ftl_journal_selftest() -> i64:
     # Second checkpoint bumps sb_gen to 2.
     j.checkpoint(3)
     fail = fail + expect_eq(j.sb_gen, 2, "sb_gen after second checkpoint")
+    fail = fail + expect_eq(j.record_lba(-1), UNMAP, "negative WAL record read returns sentinel")
+    fail = fail + expect_eq(j.record_new(99), UNMAP, "past-end WAL record read returns sentinel")
+    fail = fail + expect_eq(j.record_seq(99), 0, "past-end WAL sequence read returns zero")
+    val before_bad: i64 = j.wal_len()
+    j.append(0, LBA_COUNT, UNMAP, 1, 4)
+    j.append(0, 5, UNMAP, NUM_PAGES, 5)
+    fail = fail + expect_eq(j.wal_len(), before_bad, "invalid WAL records are rejected")
 
     fail
