@@ -299,9 +299,73 @@ fn parse_idx(value: text) -> i64:
         i = i + 1
     result
 
+fn collect_cheap_line_window_candidates(files: [text], config: DuplicationConfig) -> {text: bool}:
+    # Cheap pre-filter (Pass 0): reuse the same string-based line-window
+    # keying that fast_line_window_duplicate_groups already uses for token
+    # mode. It works on raw split("\n") text -- no per-token SimpleToken
+    # struct allocation -- so it is far cheaper than tokenize(), which
+    # profiling showed costs ~2ms/token in this interpreter and dominates
+    # wall time regardless of how well the comparison stage is pruned.
+    # Cosine mode runs with ignore_identifiers=false/ignore_literals=false
+    # (see apply_analysis_mode), so its token-hash pre-filter already
+    # requires byte-identical windows to register as "repeated" -- this
+    # cheap line-based filter has the same discriminating power at a
+    # fraction of the cost, and only files that pass it get tokenized at all.
+    val window = if config.min_lines > 0: config.min_lines else: 5
+    var key_counts: {text: i64} = {}
+    var file_keys: {text: [text]} = {}
+
+    for file in files:
+        val source = read_detector_source(file)
+        val lines = source.split("\n")
+        if lines.len() < window:
+            continue
+
+        var seen_in_file: {text: bool} = {}
+        var start = 0
+        while start + window <= lines.len():
+            val key = line_window_key(lines, start, window)
+            if line_window_has_signal(key):
+                if not seen_in_file.has(key):
+                    seen_in_file[key] = true
+                    val existing = key_counts[key] ?? 0
+                    key_counts[key] = existing + 1
+            start = start + 1
+
+        var keys_list: [text] = []
+        for k in seen_in_file.keys():
+            keys_list.push(k)
+        file_keys[file] = keys_list
+
+    var candidate_files: {text: bool} = {}
+    for file in file_keys.keys():
+        val keys_list = file_keys[file]
+        var ki = 0
+        while ki < keys_list.len():
+            val k = keys_list[ki]
+            if (key_counts[k] ?? 0) > 1:
+                candidate_files[file] = true
+                ki = keys_list.len()
+            else:
+                ki = ki + 1
+    candidate_files
+
 fn scan_duplicate_blocks(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> [DuplicateBlock]:
-    log_progress(config, "Pass 1: collecting hash counts across {files.len()} files...")
-    val summary = collect_repeated_hashes(files, config, cache_manager, interner)
+    var scan_files = files
+    if config.use_cosine_similarity:
+        log_progress(config, "Pass 0: cheap line-window pre-filter across {files.len()} files (skips tokenize() for files with no repeated line-window)...")
+        val cheap_candidates = collect_cheap_line_window_candidates(files, config)
+        var reduced: [text] = []
+        for f in files:
+            if cheap_candidates.has(f):
+                reduced.push(f)
+        if reduced.len() < files.len():
+            val pruned0 = files.len() - reduced.len()
+            log_progress(config, "  Pass 0 pruned {pruned0} file(s) before tokenizing (no repeated line-window anywhere)")
+        scan_files = reduced
+
+    log_progress(config, "Pass 1: collecting hash counts across {scan_files.len()} files...")
+    val summary = collect_repeated_hashes(scan_files, config, cache_manager, interner)
     # Root-cause fix: cosine mode used to zero out repeated_hashes/candidate_files
     # here, which forced Pass 2 to extract *every* sliding-window block from
     # *every* file (unfiltered) — that unbounded extraction, not the pairwise
@@ -316,9 +380,9 @@ fn scan_duplicate_blocks(files: [text], config: DuplicationConfig, cache_manager
     val repeated_hashes = summary.repeated_hashes
     val repeated_count = repeated_hashes.keys().len()
     log_progress(config, "  {repeated_count} repeated hashes in {candidate_files.len()} candidate files")
-    if config.use_cosine_similarity and candidate_files.len() < files.len():
-        val pruned = files.len() - candidate_files.len()
-        log_progress(config, "  Cosine mode: pruned {pruned} file(s) with no repeated token window anywhere (no exact-match anchor to refine)")
+    if config.use_cosine_similarity and candidate_files.len() < scan_files.len():
+        val pruned = scan_files.len() - candidate_files.len()
+        log_progress(config, "  Cosine mode: pruned {pruned} more file(s) with no repeated token window anywhere (no exact-match anchor to refine)")
 
     log_progress(config, "Pass 2: extracting blocks from candidate files...")
     var all_blocks = []
