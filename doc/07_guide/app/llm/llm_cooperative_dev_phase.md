@@ -130,6 +130,10 @@ If multiple LLMs participate in research:
 - Generate mirrored `doc/06_spec/...` manuals from SSpec and read them as
   manuals; revise steps, captures, inline/previous expansion, and visibility
   until primary flows are understandable without opening the source test.
+- For formal-verification manuals, keep generated readiness evidence separate
+  from durable Lean/BYL proof obligations and from stricter release gates. A
+  SPipe matrix pass must not be worded as mission-critical release evidence
+  while a strict SBY proof lane is still blocked.
 
 **2.4 Detail Design**
 - Data structures, algorithms, module interactions, error handling

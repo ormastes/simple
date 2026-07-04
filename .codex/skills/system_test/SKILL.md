@@ -109,7 +109,10 @@ describe "<Feature Name>":
   cite `sh scripts/check/check-riscv-formal-dual-track.shs` as the aggregate
   gate so the sidecar contract self-test and manual proof layer are checked
   together. Do not let regenerated SPipe docs replace the manual Lean/BYL proof
-  layer.
+  layer. If a generated evidence matrix reports readiness rows as `pass`, keep
+  mission-critical release wording separate and cite the stricter release gate
+  explicitly; a readiness matrix pass is not a substitute for a strict SBY proof
+  pass.
 - For broad lanes with shared interfaces, the primary/best model must define
   shared interface names, manual `step("...")` flow helper names, and
   setup/checker helper names before lower-model sidecars such as Codex Spark,
