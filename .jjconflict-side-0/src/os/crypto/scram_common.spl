@@ -1,0 +1,373 @@
+# SCRAM — shared helpers (RFC 5802)
+#
+# Used by scram_sha256.spl, scram_sha512.spl, scram_sha1.spl.
+
+mod os.crypto.scram_common
+
+use std.crypto.pbkdf2.{pbkdf2_sha256_bytes, pbkdf2_sha512_bytes, pbkdf2_sha1_bytes}
+use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha512_bytes, hmac_sha1_bytes}
+use std.crypto.sha256.{sha256_bytes}
+use std.crypto.sha512.{sha512_bytes}
+use std.crypto.sha1.{sha1_bytes}
+use string.{char_from_code}
+
+# rt_black_box prevents Cranelift from rewriting the XOR-accumulate loop
+# in _ct_eq_bytes into an early-exit branch (same pattern as
+# std.crypto.constant_time; see compiler_bugs_for_crypto_2026-04-25.md).
+extern fn rt_black_box(x: i64) -> i64
+
+# ===========================================================================
+# Internal bridge helpers: [u8] <-> list-of-i64
+# ===========================================================================
+
+fn _u8_to_list(buf: [u8]) -> list:
+    """Convert [u8] array to list-of-i64 for crypto primitives."""
+    var out = []
+    var i: u64 = 0
+    val n = buf.len().to_u64()
+    while i < n:
+        out.push(buf[i].to_i64())
+        i = i + 1
+    out
+
+fn _base64_decode_u8_range(buf: [u8], start: i64, end_excl: i64) -> [u8]:
+    """Decode base64 directly from a [u8] byte buffer (ASCII codes).
+    No text conversion — avoids char_from_code round-trip entirely."""
+    var out: [u8] = []
+    val n = end_excl - start
+    var i = 0
+    while i + 4 <= n:
+        val p = (start + i).to_u64()
+        val v0 = _b64_val_code(buf[p].to_i64())
+        val v1 = _b64_val_code(buf[p + 1].to_i64())
+        val v2 = _b64_val_code(buf[p + 2].to_i64())
+        val v3 = _b64_val_code(buf[p + 3].to_i64())
+        out.push(((v0 << 2) | (v1 >> 4)).to_u8())
+        if v2 != -1:
+            out.push((((v1 & 0xF) << 4) | (v2 >> 2)).to_u8())
+        if v3 != -1:
+            out.push((((v2 & 0x3) << 6) | v3).to_u8())
+        i = i + 4
+    out
+
+fn _parse_field_b64_u8(buf: [u8], prefix: text) -> [u8]:
+    """Find a SCRAM field in a [u8] buffer and base64-decode its value.
+    Operates entirely on byte values — no char_from_code round-trip."""
+    val plen = prefix.len()
+    val n = buf.len()
+    val comma_code: i64 = 44  # ','
+    var i: i64 = 0
+    while i < n:
+        var j: i64 = i
+        while j < n and buf[j.to_u64()].to_i64() != comma_code:
+            j = j + 1
+        val tlen = j - i
+        if tlen >= plen:
+            var match: bool = true
+            var k: i64 = 0
+            while k < plen:
+                if buf[(i + k).to_u64()].to_i64() != prefix.char_code_at(k):
+                    match = false
+                    k = plen
+                k = k + 1
+            if match:
+                return _base64_decode_u8_range(buf, i + plen, j)
+        i = j + 1
+    []
+
+fn _list_to_u8(buf: list) -> [u8]:
+    """Convert list-of-i64 (each 0..=255) to [u8] array."""
+    var out: [u8] = []
+    var i = 0
+    while i < buf.len():
+        val b = buf.get(i)
+        out.push(b.to_u8())
+        i = i + 1
+    out
+
+fn _text_to_list(s: text) -> list:
+    """Encode an ASCII text string to list-of-i64 bytes."""
+    var out = []
+    var i = 0
+    while i < s.len():
+        out.push(s.char_code_at(i))
+        i = i + 1
+    out
+
+fn _u8_concat(a: [u8], b: [u8]) -> [u8]:
+    """Concatenate two [u8] arrays."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < a.len().to_u64():
+        out.push(a[i])
+        i = i + 1
+    i = 0
+    while i < b.len().to_u64():
+        out.push(b[i])
+        i = i + 1
+    out
+
+fn _u8_xor(a: [u8], b: [u8]) -> [u8]:
+    """XOR two equal-length [u8] arrays."""
+    var out: [u8] = []
+    var i: u64 = 0
+    val n = a.len().to_u64()
+    while i < n:
+        out.push((a[i].to_i64() ^ b[i].to_i64()).to_u8())
+        i = i + 1
+    out
+
+# ===========================================================================
+# Constant-time comparison for [u8] (proof / signature verification).
+# XOR-accumulate all bytes; wrap accumulator through rt_black_box before
+# the final comparison to prevent Cranelift from emitting an early-exit
+# branch (mirrors std.crypto.constant_time pattern).
+# ===========================================================================
+
+fn _ct_eq_bytes(a: [u8], b: [u8]) -> bool:
+    """Constant-time equality for two byte arrays.
+    Length inequality is public information in SCRAM (output length is fixed
+    at 32 bytes for SHA-256), so early exit on length mismatch is safe.
+    Content comparison is timing-safe via XOR-accumulate + rt_black_box."""
+    if a.len() != b.len():
+        return false
+    var diff: i64 = 0
+    var i: u64 = 0
+    val n = a.len().to_u64()
+    while i < n:
+        diff = diff | (a[i].to_i64() ^ b[i].to_i64())
+        i = i + 1
+    rt_black_box(diff) == 0
+
+# ===========================================================================
+# Base64 encoding/decoding (RFC 4648 §4, standard alphabet with padding)
+# ===========================================================================
+
+fn _b64_char(v: i64) -> text:
+    """Map a 6-bit value (0..63) to its base64 alphabet character."""
+    if v == 0: "A"
+    else if v == 1: "B"
+    else if v == 2: "C"
+    else if v == 3: "D"
+    else if v == 4: "E"
+    else if v == 5: "F"
+    else if v == 6: "G"
+    else if v == 7: "H"
+    else if v == 8: "I"
+    else if v == 9: "J"
+    else if v == 10: "K"
+    else if v == 11: "L"
+    else if v == 12: "M"
+    else if v == 13: "N"
+    else if v == 14: "O"
+    else if v == 15: "P"
+    else if v == 16: "Q"
+    else if v == 17: "R"
+    else if v == 18: "S"
+    else if v == 19: "T"
+    else if v == 20: "U"
+    else if v == 21: "V"
+    else if v == 22: "W"
+    else if v == 23: "X"
+    else if v == 24: "Y"
+    else if v == 25: "Z"
+    else if v == 26: "a"
+    else if v == 27: "b"
+    else if v == 28: "c"
+    else if v == 29: "d"
+    else if v == 30: "e"
+    else if v == 31: "f"
+    else if v == 32: "g"
+    else if v == 33: "h"
+    else if v == 34: "i"
+    else if v == 35: "j"
+    else if v == 36: "k"
+    else if v == 37: "l"
+    else if v == 38: "m"
+    else if v == 39: "n"
+    else if v == 40: "o"
+    else if v == 41: "p"
+    else if v == 42: "q"
+    else if v == 43: "r"
+    else if v == 44: "s"
+    else if v == 45: "t"
+    else if v == 46: "u"
+    else if v == 47: "v"
+    else if v == 48: "w"
+    else if v == 49: "x"
+    else if v == 50: "y"
+    else if v == 51: "z"
+    else if v == 52: "0"
+    else if v == 53: "1"
+    else if v == 54: "2"
+    else if v == 55: "3"
+    else if v == 56: "4"
+    else if v == 57: "5"
+    else if v == 58: "6"
+    else if v == 59: "7"
+    else if v == 60: "8"
+    else if v == 61: "9"
+    else if v == 62: "+"
+    else: "/"
+
+fn _base64_encode(bytes: [u8]) -> text:
+    """Standard base64 encode (RFC 4648 §4)."""
+    var out: text = ""
+    val n = bytes.len()
+    var i: u64 = 0
+    while i.to_i64() < n:
+        val b0 = bytes[i].to_i64()
+        val has1 = (i.to_i64() + 1) < n
+        val has2 = (i.to_i64() + 2) < n
+        val b1 = if has1: bytes[i + 1].to_i64() else: 0
+        val b2 = if has2: bytes[i + 2].to_i64() else: 0
+
+        out = out + _b64_char((b0 >> 2) & 0x3F)
+        out = out + _b64_char(((b0 << 4) | (b1 >> 4)) & 0x3F)
+        out = out + (if has1: _b64_char(((b1 << 2) | (b2 >> 6)) & 0x3F) else: "=")
+        out = out + (if has2: _b64_char(b2 & 0x3F) else: "=")
+        i = i + 3
+    out
+
+fn _b64_val_code(code: i64) -> i64:
+    """Decode one base64 character (by ASCII code) to its 6-bit value; -1 for '='.
+
+    NOTE: interpreter mode evaluates only the first sequential `if X: return Y`
+    branch (per `feedback_w18k_b64_seq_return_interpreter_bug`); use if/elif/else
+    expression chain so all cases dispatch correctly.
+    """
+    if code == 61: -1                                      # '='
+    else if code >= 65 and code <= 90: code - 65           # 'A'..'Z' → 0..25
+    else if code >= 97 and code <= 122: code - 97 + 26     # 'a'..'z' → 26..51
+    else if code >= 48 and code <= 57: code - 48 + 52      # '0'..'9' → 52..61
+    else if code == 43: 62                                  # '+' → 62
+    else if code == 47: 63                                  # '/' → 63
+    else: -1
+
+fn _base64_decode(s: text) -> [u8]:
+    """Standard base64 decode (RFC 4648 §4)."""
+    _base64_decode_range(s, 0, s.len())
+
+fn _base64_decode_range(s: text, start: i64, end_excl: i64) -> [u8]:
+    """Decode base64 from s[start..end_excl] using char_code_at directly.
+    Avoids any text-slice or char_from_code round-trip."""
+    var out: [u8] = []
+    val n = end_excl - start
+    var i = 0
+    while i + 4 <= n:
+        val v0 = _b64_val_code(s.char_code_at(start + i))
+        val v1 = _b64_val_code(s.char_code_at(start + i + 1))
+        val v2 = _b64_val_code(s.char_code_at(start + i + 2))
+        val v3 = _b64_val_code(s.char_code_at(start + i + 3))
+        out.push(((v0 << 2) | (v1 >> 4)).to_u8())
+        if v2 != -1:
+            out.push((((v1 & 0xF) << 4) | (v2 >> 2)).to_u8())
+        if v3 != -1:
+            out.push((((v2 & 0x3) << 6) | v3).to_u8())
+        i = i + 4
+    out
+
+# ===========================================================================
+# Text helpers (ASCII-safe; all SCRAM protocol strings are ASCII)
+# ===========================================================================
+
+fn _code_to_char(code: i64) -> text:
+    """Convert ASCII code point (32–126) to a single-character text."""
+    if code >= 32 and code <= 126:
+        char_from_code(code)
+    else:
+        ""
+
+fn _u8_to_text(buf: [u8]) -> text:
+    """Decode [u8] ASCII bytes to text."""
+    var s: text = ""
+    var i: u64 = 0
+    val n = buf.len().to_u64()
+    while i < n:
+        s = s + _code_to_char(buf[i].to_i64())
+        i = i + 1
+    s
+
+fn _u8_to_text_from(buf: [u8], start: i64) -> text:
+    """Decode [u8] ASCII bytes starting at `start` offset."""
+    var s: text = ""
+    var i: u64 = start.to_u64()
+    val n = buf.len().to_u64()
+    while i < n:
+        s = s + _code_to_char(buf[i].to_i64())
+        i = i + 1
+    s
+
+fn _text_to_u8(s: text) -> [u8]:
+    """Encode ASCII text to [u8]."""
+    var out: [u8] = []
+    var i = 0
+    while i < s.len():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+fn _prefix_matches(s: text, pos: i64, prefix: text) -> bool:
+    """Check whether `s` starting at `pos` has the given prefix (char-code comparison)."""
+    val plen = prefix.len()
+    if pos + plen > s.len():
+        return false
+    var k = 0
+    while k < plen:
+        if s.char_code_at(pos + k) != prefix.char_code_at(k):
+            return false
+        k = k + 1
+    true
+
+fn _extract_substr(s: text, start: i64, end_excl: i64) -> text:
+    """Extract substring s[start..end_excl] by building char-by-char."""
+    var out: text = ""
+    var k = start
+    while k < end_excl:
+        out = out + char_from_code(s.char_code_at(k))
+        k = k + 1
+    out
+
+fn _find_field_range(s: text, prefix: text) -> (i64, i64):
+    """Return (value_start, value_end) for the first matching SCRAM field.
+    Returns (-1, -1) if not found. value_start/end are char indices into s."""
+    val plen = prefix.len()
+    val slen = s.len()
+    val comma_code = 44  # ','
+    var i = 0
+    while i < slen:
+        var j = i
+        while j < slen and s.char_code_at(j) != comma_code:
+            j = j + 1
+        if j - i >= plen:
+            if _prefix_matches(s, i, prefix):
+                return (i + plen, j)
+        i = j + 1
+    (-1, -1)
+
+fn _parse_field(s: text, prefix: text) -> text:
+    """Extract value of a SCRAM message field given its prefix (e.g. 'r=', 's=', 'i=').
+    Scans comma-separated tokens; returns the value after the first match.
+    Returns empty string if not found."""
+    val (vstart, vend) = _find_field_range(s, prefix)
+    if vstart == -1:
+        return ""
+    _extract_substr(s, vstart, vend)
+
+fn _parse_field_b64(s: text, prefix: text) -> [u8]:
+    """Like _parse_field but decodes the value as base64 directly from the
+    original text using char_code_at — avoids the char_from_code round-trip."""
+    val (vstart, vend) = _find_field_range(s, prefix)
+    if vstart == -1:
+        return []
+    _base64_decode_range(s, vstart, vend)
+
+fn _text_to_i64(s: text) -> i64:
+    """Parse a non-negative decimal integer from text."""
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val digit = s.char_code_at(i) - 48
+        result = result * 10 + digit
+        i = i + 1
+    result

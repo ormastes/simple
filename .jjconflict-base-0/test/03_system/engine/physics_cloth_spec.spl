@@ -1,0 +1,156 @@
+# Physics2 XPBD Cloth — System Test
+#
+# Verifies: 10x10 cloth grid, gravity sag, fixed top row,
+# particle bounding, horizontal preservation, constraint convergence.
+
+use std.io_runtime
+use std.spec.{describe, it, expect}
+use std.common.math.{math_sqrt, math_abs}
+use std.nogc_sync_mut.engine.physics.solver.xpbd_solver.{XpbdWorld}
+
+fn make_cloth() -> XpbdWorld:
+    var world = XpbdWorld.create(4)
+    # 10x10 grid, spacing 0.5
+    # Row 0 = fixed (top row), rows 1-9 = dynamic
+    var row = 0
+    while row < 10:
+        var col = 0
+        while col < 10:
+            val x = col.to_f64() * 0.5
+            val y = row.to_f64() * (-0.5)
+            if row == 0:
+                world.add_fixed_particle(x, y, 0.0)
+            else:
+                world.add_particle(x, y, 0.0, 1.0)
+            col = col + 1
+        row = row + 1
+    # Horizontal constraints: (row, col) <-> (row, col+1)
+    var hr = 0
+    while hr < 10:
+        var hc = 0
+        while hc < 9:
+            val a = hr * 10 + hc
+            val b = hr * 10 + hc + 1
+            world.add_distance_constraint(a, b, 100.0)
+            hc = hc + 1
+        hr = hr + 1
+    # Vertical constraints: (row, col) <-> (row+1, col)
+    var vr = 0
+    while vr < 9:
+        var vc = 0
+        while vc < 10:
+            val a = vr * 10 + vc
+            val b = (vr + 1) * 10 + vc
+            world.add_distance_constraint(a, b, 100.0)
+            vc = vc + 1
+        vr = vr + 1
+    world
+
+fn step_cloth(world: XpbdWorld, n: i64):
+    var i = 0
+    while i < n:
+        world.step(0.016)
+        i = i + 1
+
+fn get_bottom_row_avg_y(world: XpbdWorld) -> f64:
+    # Average y position of bottom row (indices 90-99)
+    var total = 0.0
+    var i = 90
+    while i < 100:
+        val pos = world.get_position(i)
+        total = total + pos.1
+        i = i + 1
+    total / 10.0
+
+fn check_top_row_fixed(world: XpbdWorld) -> bool:
+    # All top row particles (indices 0-9) should still be at y=0
+    var i = 0
+    while i < 10:
+        val pos = world.get_position(i)
+        if pos.1 > 0.01 or pos.1 < -0.01:
+            return false
+        i = i + 1
+    true
+
+fn check_all_bounded(world: XpbdWorld) -> bool:
+    var i = 0
+    while i < 100:
+        val pos = world.get_position(i)
+        if pos.1 < -30.0 or pos.1 > 5.0:
+            return false
+        if pos.0 < -20.0 or pos.0 > 20.0:
+            return false
+        i = i + 1
+    true
+
+fn get_min_x(world: XpbdWorld) -> f64:
+    var min_x = 999.0
+    var i = 0
+    while i < 100:
+        val pos = world.get_position(i)
+        if pos.0 < min_x:
+            min_x = pos.0
+        i = i + 1
+    min_x
+
+fn get_max_x(world: XpbdWorld) -> f64:
+    var max_x = -999.0
+    var i = 0
+    while i < 100:
+        val pos = world.get_position(i)
+        if pos.0 > max_x:
+            max_x = pos.0
+        i = i + 1
+    max_x
+
+fn check_constraints_reasonable(world: XpbdWorld) -> bool:
+    # Check that no adjacent pair (horizontal) is farther than 2x rest_length (1.0)
+    var row = 0
+    while row < 10:
+        var col = 0
+        while col < 9:
+            val a = row * 10 + col
+            val b = row * 10 + col + 1
+            val pa = world.get_position(a)
+            val pb = world.get_position(b)
+            val dx = pb.0 - pa.0
+            val dy = pb.1 - pa.1
+            val dist = math_sqrt(dx * dx + dy * dy)
+            if dist > 1.0:
+                return false
+            col = col + 1
+        row = row + 1
+    true
+
+describe "Physics2 XPBD Cloth System":
+    it "cloth sags under gravity":
+        var world = make_cloth()
+        step_cloth(world, 80)
+        val avg_y = get_bottom_row_avg_y(world)
+        expect(avg_y < -1.0).to_equal(true)
+
+    it "top row stays fixed":
+        var world = make_cloth()
+        step_cloth(world, 60)
+        val fixed = check_top_row_fixed(world)
+        expect(fixed).to_equal(true)
+
+    it "all particles bounded":
+        var world = make_cloth()
+        step_cloth(world, 100)
+        val bounded = check_all_bounded(world)
+        expect(bounded).to_equal(true)
+
+    it "cloth width preserved":
+        var world = make_cloth()
+        step_cloth(world, 60)
+        val min_x = get_min_x(world)
+        val max_x = get_max_x(world)
+        val width = max_x - min_x
+        expect(width > 2.0).to_equal(true)
+
+    it "constraint convergence":
+        var world = make_cloth()
+        step_cloth(world, 100)
+        val ok = check_constraints_reasonable(world)
+        expect(ok).to_equal(true)

@@ -1,0 +1,119 @@
+# State Synchronization — entity state replication
+
+struct SyncField:
+    name: text
+    value: text
+    dirty: bool
+    last_sync_tick: i32
+
+struct EntitySync:
+    entity_id: i32
+    owner_id: i32
+    fields: [SyncField]
+    authority: text
+
+class StateSync:
+    entities: [EntitySync]
+    sync_interval: i32
+    current_tick: i32
+
+impl StateSync:
+    static fn new(sync_interval: i32) -> StateSync:
+        StateSync(entities: [], sync_interval: sync_interval, current_tick: 0)
+
+    me register_entity(entity_id: i32, owner_id: i32) -> bool:
+        var i = 0
+        while i < self.entities.len():
+            if self.entities[i].entity_id == entity_id:
+                return false
+            i = i + 1
+        val es = EntitySync(
+            entity_id: entity_id, owner_id: owner_id,
+            fields: [], authority: "server"
+        )
+        self.entities.push(es)
+        true
+
+    me set_field(entity_id: i32, name: text, value: text):
+        var i = 0
+        while i < self.entities.len():
+            if self.entities[i].entity_id == entity_id:
+                val old_ent = self.entities[i]
+                var new_fields: [SyncField] = []
+                var found = false
+                var j = 0
+                while j < old_ent.fields.len():
+                    if old_ent.fields[j].name == name:
+                        new_fields.push(SyncField(
+                            name: name, value: value, dirty: true,
+                            last_sync_tick: old_ent.fields[j].last_sync_tick
+                        ))
+                        found = true
+                    else:
+                        new_fields.push(old_ent.fields[j])
+                    j = j + 1
+                if not found:
+                    new_fields.push(SyncField(name: name, value: value, dirty: true, last_sync_tick: 0))
+                self.entities[i] = EntitySync(
+                    entity_id: old_ent.entity_id, owner_id: old_ent.owner_id,
+                    fields: new_fields, authority: old_ent.authority
+                )
+                return
+            i = i + 1
+
+    me tick():
+        self.current_tick = self.current_tick + 1
+
+    me mark_synced(entity_id: i32):
+        var i = 0
+        while i < self.entities.len():
+            if self.entities[i].entity_id == entity_id:
+                val old_ent = self.entities[i]
+                var new_fields: [SyncField] = []
+                var j = 0
+                while j < old_ent.fields.len():
+                    val old = old_ent.fields[j]
+                    new_fields.push(SyncField(
+                        name: old.name, value: old.value, dirty: false,
+                        last_sync_tick: self.current_tick
+                    ))
+                    j = j + 1
+                self.entities[i] = EntitySync(
+                    entity_id: old_ent.entity_id, owner_id: old_ent.owner_id,
+                    fields: new_fields, authority: old_ent.authority
+                )
+                return
+            i = i + 1
+
+    fn entity_count() -> i32:
+        self.entities.len().to_i32()
+
+    fn get_dirty_count(entity_id: i32) -> i32:
+        var i = 0
+        while i < self.entities.len():
+            val ent = self.entities[i]
+            if ent.entity_id == entity_id:
+                var count = 0
+                var j = 0
+                while j < ent.fields.len():
+                    val f = ent.fields[j]
+                    if f.dirty:
+                        count = count + 1
+                    j = j + 1
+                return count
+            i = i + 1
+        0
+
+    fn get_field_value(entity_id: i32, name: text) -> text:
+        var i = 0
+        while i < self.entities.len():
+            val ent = self.entities[i]
+            if ent.entity_id == entity_id:
+                var j = 0
+                while j < ent.fields.len():
+                    val f = ent.fields[j]
+                    if f.name == name:
+                        return f.value
+                    j = j + 1
+            i = i + 1
+        ""

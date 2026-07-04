@@ -1,0 +1,267 @@
+# MCP Test Fixtures
+# Provides JSON building and assertion helpers for protocol_intensive_spec.spl
+
+use std.common.text.{escape_json}
+
+# --- Low-level JSON builders ---
+
+fn jstr(value: text) -> text:
+    "\"" + escape_json(value) + "\""
+
+fn jnum(value: i64) -> text:
+    value.to_string()
+
+fn jpair(key: text, value: text) -> text:
+    "\"" + key + "\":" + value
+
+fn jobj(pairs: [text]) -> text:
+    var result = "{"
+    for i in 0..pairs.len():
+        if i > 0:
+            result = result + ","
+        result = result + pairs[i]
+    result + "}"
+
+fn jarray(items: [text]) -> text:
+    var result = "["
+    for i in 0..items.len():
+        if i > 0:
+            result = result + ","
+        result = result + items[i]
+    result + "]"
+
+# --- JSON query helpers ---
+
+fn json_contains(json: text, substring: text) -> bool:
+    json.contains(substring)
+
+fn json_contains_key(json: text, key: text) -> bool:
+    json.contains("\"" + key + "\"")
+
+fn extract_json_string(json: text, key: text) -> text:
+    val marker = "\"" + key + "\":\""
+    val idx = json.index_of(marker)
+    if idx == -1:
+        return ""
+    val start = idx + marker.len()
+    val rest = json.substring(start)
+    val end = rest.index_of("\"")
+    if end == -1:
+        return ""
+    rest.substring(0, end)
+
+fn extract_json_number(json: text, key: text) -> i64:
+    val marker = "\"" + key + "\":"
+    val idx = json.index_of(marker)
+    if idx == -1:
+        return 0
+    val start = idx + marker.len()
+    val rest = json.substring(start)
+    var end = 0
+    for i in 0..rest.len():
+        val c = rest.char_at(i)
+        if c == ',' or c == '}' or c == ']' or c == ' ':
+            end = i
+            break
+        end = i + 1
+    val num_str = rest.substring(0, end)
+    num_str.parse_int() ?? 0
+
+# --- Assertion helpers ---
+
+fn assert_valid_json_rpc(json: text):
+    expect(json.contains("\"jsonrpc\":\"2.0\"")).to_equal(true)
+
+fn assert_has_id(json: text, id: i64):
+    expect(json.contains("\"id\":" + id.to_string())).to_equal(true)
+
+fn assert_has_result(json: text):
+    expect(json.contains("\"result\"")).to_equal(true)
+
+fn assert_has_error(json: text):
+    expect(json.contains("\"error\"")).to_equal(true)
+
+# --- JSON-RPC request builders ---
+
+fn build_initialize_request(id: i64) -> text:
+    jobj([
+        jpair("jsonrpc", jstr("2.0")),
+        jpair("id", jnum(id)),
+        jpair("method", jstr("initialize")),
+        jpair("params", jobj([
+            jpair("protocolVersion", jstr("2024-11-05")),
+            jpair("capabilities", jobj([])),
+            jpair("clientInfo", jobj([
+                jpair("name", jstr("test-client")),
+                jpair("version", jstr("1.0"))
+            ]))
+        ]))
+    ])
+
+fn build_resources_list_request(id: i64) -> text:
+    jobj([
+        jpair("jsonrpc", jstr("2.0")),
+        jpair("id", jnum(id)),
+        jpair("method", jstr("resources/list")),
+        jpair("params", jobj([]))
+    ])
+
+fn build_resources_read_request(id: i64, uri: text) -> text:
+    jobj([
+        jpair("jsonrpc", jstr("2.0")),
+        jpair("id", jnum(id)),
+        jpair("method", jstr("resources/read")),
+        jpair("params", jobj([
+            jpair("uri", jstr(uri))
+        ]))
+    ])
+
+fn build_prompts_list_request(id: i64) -> text:
+    jobj([
+        jpair("jsonrpc", jstr("2.0")),
+        jpair("id", jnum(id)),
+        jpair("method", jstr("prompts/list")),
+        jpair("params", jobj([]))
+    ])
+
+fn build_prompts_get_request(id: i64, name: text, args: [text]) -> text:
+    var params_pairs = [
+        jpair("name", jstr(name))
+    ]
+    if args.len() > 0:
+        params_pairs = params_pairs + [jpair("arguments", jobj(args))]
+    jobj([
+        jpair("jsonrpc", jstr("2.0")),
+        jpair("id", jnum(id)),
+        jpair("method", jstr("prompts/get")),
+        jpair("params", jobj(params_pairs))
+    ])
+
+fn build_success_response(id: i64, result: text) -> text:
+    jobj([
+        jpair("jsonrpc", jstr("2.0")),
+        jpair("id", jnum(id)),
+        jpair("result", result)
+    ])
+
+fn build_error_response(id: i64, code: i64, message: text) -> text:
+    jobj([
+        jpair("jsonrpc", jstr("2.0")),
+        jpair("id", jnum(id)),
+        jpair("error", jobj([
+            jpair("code", jnum(code)),
+            jpair("message", jstr(message))
+        ]))
+    ])
+
+fn build_invalid_request(id: i64) -> text:
+    jobj([
+        jpair("jsonrpc", jstr("2.0")),
+        jpair("id", jnum(id)),
+        jpair("method", jstr("invalid/method")),
+        jpair("params", jobj([]))
+    ])
+
+fn build_malformed_json() -> text:
+    "{\"jsonrpc\":\"2.0\",\"id\":broken"
+
+# --- URI builders ---
+
+fn get_test_uris() -> [text]:
+    [
+        "file:///test.spl",
+        "file:///src/main.spl",
+        "symbol://main.spl#main",
+        "type://String",
+        "bugdb://all"
+    ]
+
+fn build_file_uri(path: text) -> text:
+    "file://" + path
+
+fn build_symbol_uri(file: text, symbol: text) -> text:
+    "symbol://" + file + "#" + symbol
+
+fn build_type_uri(type_name: text) -> text:
+    "type://" + type_name
+
+fn build_bugdb_uri(filter: text) -> text:
+    "bugdb://" + filter
+
+# --- Prompt helpers ---
+
+fn get_test_prompt_names() -> [text]:
+    [
+        "refactor-extract-function",
+        "explain-code",
+        "generate-tests",
+        "fix-error",
+        "optimize-performance"
+    ]
+
+fn build_prompt_argument(name: text, description: text, required: bool) -> text:
+    jobj([
+        jpair("name", jstr(name)),
+        jpair("description", jstr(description)),
+        jpair("required", if required: "true" else: "false")
+    ])
+
+fn build_prompt_info(name: text, description: text, args: [text]) -> text:
+    jobj([
+        jpair("name", jstr(name)),
+        jpair("description", jstr(description)),
+        jpair("arguments", jarray(args))
+    ])
+
+# --- Resource builders ---
+
+fn build_file_resource(uri: text, name: text, description: text) -> text:
+    jobj([
+        jpair("uri", jstr(uri)),
+        jpair("name", jstr(name)),
+        jpair("description", jstr(description)),
+        jpair("mimeType", jstr("text/plain"))
+    ])
+
+fn build_symbol_resource(uri: text, name: text) -> text:
+    jobj([
+        jpair("uri", jstr(uri)),
+        jpair("name", jstr(name)),
+        jpair("mimeType", jstr("text/plain"))
+    ])
+
+fn build_bugdb_resource(uri: text, name: text) -> text:
+    jobj([
+        jpair("uri", jstr(uri)),
+        jpair("name", jstr(name)),
+        jpair("mimeType", jstr("application/json"))
+    ])
+
+# --- Bug database JSON builders ---
+
+fn build_bug_json(id: text, severity: text, status: text, title: text) -> text:
+    jobj([
+        jpair("id", jstr(id)),
+        jpair("severity", jstr(severity)),
+        jpair("status", jstr(status)),
+        jpair("title", jstr(title)),
+        jpair("file", jstr("")),
+        jpair("line", jnum(0))
+    ])
+
+fn build_bug_array_json(bugs: [(text, text, text, text)]) -> text:
+    var items: [text] = []
+    for bug in bugs:
+        val (id, severity, status, title) = bug
+        items = items + [build_bug_json(id, severity, status, title)]
+    jarray(items)
+
+fn build_bugdb_stats_json(total: i64, open: i64, critical: i64) -> text:
+    jobj([
+        jpair("total", jnum(total)),
+        jpair("open", jnum(open)),
+        jpair("investigating", jnum(0)),
+        jpair("fixed", jnum(0)),
+        jpair("closed", jnum(0)),
+        jpair("critical", jnum(critical))
+    ])

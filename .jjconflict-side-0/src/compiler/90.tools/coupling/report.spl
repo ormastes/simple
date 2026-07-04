@@ -1,0 +1,401 @@
+# ============================================================================
+# Coupling Analysis Report Formatter
+# ============================================================================
+#
+# Formats coupling analysis results in text, JSON, and Markdown formats.
+# ============================================================================
+
+use compiler.tools.coupling.metrics.{CouplingMetrics, InstabilityInversion}
+use compiler.tools.coupling.layer_check.{LayerViolation}
+use compiler.tools.coupling.lcom.{LCOMResult}
+use compiler.tools.coupling.api_quality.{PublicAPIMetrics}
+use compiler.tools.coupling.dsm.{DSMMatrix}
+use compiler.tools.coupling.atss.{ATSSWarning}
+
+# ============================================================================
+# Report Data
+# ============================================================================
+
+struct CouplingReport:
+    metrics: [CouplingMetrics]
+    cycles: [[text]]
+    layer_violations: [LayerViolation]
+    inversions: [InstabilityInversion]
+    lcom_results: [LCOMResult]
+    api_metrics: [PublicAPIMetrics]
+    dsm: Option<DSMMatrix>
+    atss_warnings: [ATSSWarning]
+    cbo_threshold: i64
+
+# ============================================================================
+# Text Format
+# ============================================================================
+
+fn format_text(report: CouplingReport) -> text:
+    var lines: [text] = []
+    lines.push("=== Coupling Report ===")
+    lines.push("")
+
+    # Metrics table header
+    if report.metrics.len() > 0:
+        lines.push(pad_right("Module", 45) + pad_right("CBO", 6) + pad_right("Fan-in", 8) + pad_right("Fan-out", 9) + pad_right("Instab", 8) + pad_right("Dist", 6))
+        lines.push("-".repeat(82))
+
+        for m in report.metrics:
+            val line = pad_right(m.module_name, 45) + pad_right(m.cbo.to_text(), 6) + pad_right(m.fan_in.to_text(), 8) + pad_right(m.fan_out.to_text(), 9) + pad_right(format_f64(m.instability, 2), 8) + pad_right(format_f64(m.distance, 2), 6)
+            lines.push(line)
+        lines.push("")
+
+    # High CBO warnings
+    var high_cbo: [CouplingMetrics] = []
+    for m in report.metrics:
+        if m.cbo > report.cbo_threshold:
+            high_cbo.push(m)
+
+    if high_cbo.len() > 0:
+        lines.push("WARNING: {high_cbo.len()} modules exceed CBO threshold ({report.cbo_threshold}):")
+        for m in high_cbo:
+            lines.push("  {m.module_name}   CBO={m.cbo}")
+        lines.push("")
+
+    # Cycles
+    if report.cycles.len() > 0:
+        lines.push("CYCLES: {report.cycles.len()} SCC found:")
+        var idx = 1
+        for cycle in report.cycles:
+            lines.push("  SCC #{idx} ({cycle.len()} modules):")
+            for mod_name in cycle:
+                lines.push("    {mod_name}")
+            idx = idx + 1
+        lines.push("")
+
+    # Layer violations
+    if report.layer_violations.len() > 0:
+        lines.push("LAYER VIOLATIONS: {report.layer_violations.len()} found:")
+        for v in report.layer_violations:
+            lines.push("  {v.from_module} -> {v.to_module} (layer {v.from_layer} -> {v.to_layer})")
+        lines.push("")
+
+    # Instability inversions
+    if report.inversions.len() > 0:
+        lines.push("INSTABILITY INVERSIONS: {report.inversions.len()} found:")
+        for inv in report.inversions:
+            lines.push("  {inv.stable_module} (I={format_f64(inv.stable_instability, 2)}) -> {inv.unstable_module} (I={format_f64(inv.unstable_instability, 2)})")
+        lines.push("")
+
+    # LCOM results
+    var high_lcom: [LCOMResult] = []
+    for r in report.lcom_results:
+        if r.lcom4 > 3:
+            high_lcom.push(r)
+
+    if high_lcom.len() > 0:
+        lines.push("LOW COHESION: {high_lcom.len()} classes with LCOM4 > 3:")
+        for r in high_lcom:
+            lines.push("  {r.class_name}   LCOM4={r.lcom4} (methods={r.method_count}, fields={r.field_count})")
+        lines.push("")
+
+    # API quality
+    if report.api_metrics.len() > 0:
+        lines.push("PUBLIC API QUALITY:")
+        lines.push(pad_right("Module", 40) + pad_right("PSS", 6) + pad_right("Ratio", 7) + pad_right("EUR", 6) + pad_right("Entropy", 9) + pad_right("Complexity", 11))
+        lines.push("-".repeat(79))
+        for a in report.api_metrics:
+            val line = pad_right(a.module_name, 40) + pad_right(a.pss.to_text(), 6) + pad_right(format_f64(a.public_ratio, 2), 7) + pad_right(format_f64(a.eur, 2), 6) + pad_right(format_f64(a.entropy, 2), 9) + pad_right(format_f64(a.api_complexity, 2), 11)
+            lines.push(line)
+        lines.push("")
+
+    # ATSS warnings
+    if report.atss_warnings.len() > 0:
+        lines.push("SIMILAR SIGNATURES: {report.atss_warnings.len()} pairs found:")
+        for w in report.atss_warnings:
+            lines.push("  {w.fn1_name} <-> {w.fn2_name} (edit_distance={w.edit_distance})")
+        lines.push("")
+
+    lines.join("\n")
+
+# ============================================================================
+# JSON Format
+# ============================================================================
+
+fn format_json(report: CouplingReport) -> text:
+    var parts: [text] = []
+    parts.push("{")
+
+    # Modules
+    parts.push("  \"modules\": [")
+    var i = 0
+    for m in report.metrics:
+        val comma = if i < report.metrics.len() - 1: "," else: ""
+        parts.push("    {\"name\": \"{m.module_name}\", \"cbo\": {m.cbo}, \"fan_in\": {m.fan_in}, \"fan_out\": {m.fan_out}, \"instability\": {format_f64(m.instability, 4)}, \"distance\": {format_f64(m.distance, 4)}}{comma}")
+        i = i + 1
+    parts.push("  ],")
+
+    # Cycles
+    parts.push("  \"cycles\": [")
+    var ci = 0
+    for cycle in report.cycles:
+        val mods = cycle.map(\m: "\"{m}\"").join(", ")
+        val comma = if ci < report.cycles.len() - 1: "," else: ""
+        parts.push("    [{mods}]{comma}")
+        ci = ci + 1
+    parts.push("  ],")
+
+    # Layer violations
+    parts.push("  \"layer_violations\": [")
+    var vi = 0
+    for v in report.layer_violations:
+        val comma = if vi < report.layer_violations.len() - 1: "," else: ""
+        parts.push("    {\"from\": \"{v.from_module}\", \"to\": \"{v.to_module}\", \"from_layer\": {v.from_layer}, \"to_layer\": {v.to_layer}}{comma}")
+        vi = vi + 1
+    parts.push("  ],")
+
+    # Inversions
+    parts.push("  \"instability_inversions\": [")
+    var ii = 0
+    for inv in report.inversions:
+        val comma = if ii < report.inversions.len() - 1: "," else: ""
+        parts.push("    {\"stable\": \"{inv.stable_module}\", \"unstable\": \"{inv.unstable_module}\", \"stable_i\": {format_f64(inv.stable_instability, 4)}, \"unstable_i\": {format_f64(inv.unstable_instability, 4)}}{comma}")
+        ii = ii + 1
+    parts.push("  ],")
+
+    # LCOM
+    parts.push("  \"lcom\": [")
+    var li = 0
+    for r in report.lcom_results:
+        val comma = if li < report.lcom_results.len() - 1: "," else: ""
+        parts.push("    {\"class\": \"{r.class_name}\", \"lcom4\": {r.lcom4}, \"methods\": {r.method_count}, \"fields\": {r.field_count}}{comma}")
+        li = li + 1
+    parts.push("  ],")
+
+    # API metrics
+    parts.push("  \"api_quality\": [")
+    var ai = 0
+    for a in report.api_metrics:
+        val comma = if ai < report.api_metrics.len() - 1: "," else: ""
+        parts.push("    {\"module\": \"{a.module_name}\", \"pss\": {a.pss}, \"public_ratio\": {format_f64(a.public_ratio, 4)}, \"eur\": {format_f64(a.eur, 4)}, \"entropy\": {format_f64(a.entropy, 4)}, \"complexity\": {format_f64(a.api_complexity, 4)}}{comma}")
+        ai = ai + 1
+    parts.push("  ],")
+
+    # ATSS
+    parts.push("  \"similar_signatures\": [")
+    var si = 0
+    for w in report.atss_warnings:
+        val comma = if si < report.atss_warnings.len() - 1: "," else: ""
+        parts.push("    {\"fn1\": \"{w.fn1_name}\", \"fn2\": \"{w.fn2_name}\", \"edit_distance\": {w.edit_distance}}{comma}")
+        si = si + 1
+    parts.push("  ]")
+
+    parts.push("}")
+    parts.join("\n")
+
+# ============================================================================
+# Markdown Format
+# ============================================================================
+
+fn format_markdown(report: CouplingReport) -> text:
+    var lines: [text] = []
+    lines.push("# Coupling Report")
+    lines.push("")
+
+    # Metrics table
+    if report.metrics.len() > 0:
+        lines.push("## Module Metrics")
+        lines.push("")
+        lines.push("| Module | CBO | Fan-in | Fan-out | Instability | Distance |")
+        lines.push("|--------|-----|--------|---------|-------------|----------|")
+        for m in report.metrics:
+            lines.push("| {m.module_name} | {m.cbo} | {m.fan_in} | {m.fan_out} | {format_f64(m.instability, 2)} | {format_f64(m.distance, 2)} |")
+        lines.push("")
+
+    # Cycles
+    if report.cycles.len() > 0:
+        lines.push("## Circular Dependencies")
+        lines.push("")
+        var idx = 1
+        for cycle in report.cycles:
+            lines.push("**SCC #{idx}** ({cycle.len()} modules):")
+            for mod_name in cycle:
+                lines.push("- {mod_name}")
+            lines.push("")
+            idx = idx + 1
+
+    # Layer violations
+    if report.layer_violations.len() > 0:
+        lines.push("## Layer Violations")
+        lines.push("")
+        lines.push("| From | To | From Layer | To Layer |")
+        lines.push("|------|----|-----------|----------|")
+        for v in report.layer_violations:
+            lines.push("| {v.from_module} | {v.to_module} | {v.from_layer} | {v.to_layer} |")
+        lines.push("")
+
+    # API quality
+    if report.api_metrics.len() > 0:
+        lines.push("## Public API Quality")
+        lines.push("")
+        lines.push("| Module | PSS | Ratio | EUR | Entropy | Complexity |")
+        lines.push("|--------|-----|-------|-----|---------|------------|")
+        for a in report.api_metrics:
+            lines.push("| {a.module_name} | {a.pss} | {format_f64(a.public_ratio, 2)} | {format_f64(a.eur, 2)} | {format_f64(a.entropy, 2)} | {format_f64(a.api_complexity, 2)} |")
+        lines.push("")
+
+    # ATSS
+    if report.atss_warnings.len() > 0:
+        lines.push("## Similar Function Signatures")
+        lines.push("")
+        lines.push("| Function 1 | Function 2 | Edit Distance |")
+        lines.push("|-----------|-----------|---------------|")
+        for w in report.atss_warnings:
+            lines.push("| {w.fn1_name} | {w.fn2_name} | {w.edit_distance} |")
+        lines.push("")
+
+    lines.join("\n")
+
+# ============================================================================
+# DSM Formatters
+# ============================================================================
+
+fn format_dsm_text(dsm: DSMMatrix) -> text:
+    var lines: [text] = []
+    lines.push("=== Dependency Structure Matrix ===")
+    lines.push("")
+
+    # Header row
+    var header = pad_right("Module", 30)
+    for mod_name in dsm.modules:
+        val short = shorten_module_name(mod_name)
+        header = header + pad_right(short, 8)
+    lines.push(header)
+    lines.push("-".repeat(30 + dsm.modules.len() * 8))
+
+    # Data rows
+    var row_idx = 0
+    for mod_name in dsm.modules:
+        var row = pad_right(shorten_module_name(mod_name), 30)
+        var col_idx = 0
+        for _col in dsm.modules:
+            val cell = dsm.matrix[row_idx][col_idx]
+            val cell_str = if row_idx == col_idx: "-" else: cell.to_text()
+            row = row + pad_right(cell_str, 8)
+            col_idx = col_idx + 1
+        lines.push(row)
+        row_idx = row_idx + 1
+
+    lines.join("\n")
+
+fn format_dsm_markdown(dsm: DSMMatrix) -> text:
+    var lines: [text] = []
+    lines.push("## Dependency Structure Matrix")
+    lines.push("")
+
+    # Header
+    var header = "| Module |"
+    var sep = "|--------|"
+    for mod_name in dsm.modules:
+        val short = shorten_module_name(mod_name)
+        header = header + " {short} |"
+        sep = sep + "--------|"
+    lines.push(header)
+    lines.push(sep)
+
+    # Rows
+    var row_idx = 0
+    for mod_name in dsm.modules:
+        var row = "| {shorten_module_name(mod_name)} |"
+        var col_idx = 0
+        for _col in dsm.modules:
+            val cell = dsm.matrix[row_idx][col_idx]
+            val cell_str = if row_idx == col_idx: "-" else: cell.to_text()
+            row = row + " {cell_str} |"
+            col_idx = col_idx + 1
+        lines.push(row)
+        row_idx = row_idx + 1
+
+    lines.join("\n")
+
+# ============================================================================
+# Layer Violations Only
+# ============================================================================
+
+fn format_layers_text(violations: [LayerViolation]) -> text:
+    var lines: [text] = []
+    lines.push("=== Layer Violations ===")
+    if violations.len() == 0:
+        lines.push("No layer violations found.")
+    else:
+        for v in violations:
+            lines.push("{v.from_module} -> {v.to_module} (layer {v.from_layer} -> {v.to_layer})")
+        lines.push("")
+        lines.push("{violations.len()} violations found.")
+    lines.join("\n")
+
+# ============================================================================
+# Cycles Only
+# ============================================================================
+
+fn format_cycles_text(cycles: [[text]]) -> text:
+    var lines: [text] = []
+    lines.push("=== Strongly Connected Components ===")
+    if cycles.len() == 0:
+        lines.push("No circular dependencies found.")
+    else:
+        var idx = 1
+        for cycle in cycles:
+            lines.push("SCC #{idx} ({cycle.len()} modules):")
+            for mod_name in cycle:
+                lines.push("  {mod_name}")
+            lines.push("")
+            idx = idx + 1
+        lines.push("{cycles.len()} SCCs with circular dependencies found.")
+    lines.join("\n")
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn pad_right(s: text, width: i64) -> text:
+    if s.len() >= width:
+        s
+    else:
+        val padding = " ".repeat(width - s.len())
+        s + padding
+
+fn format_f64(value: f64, decimals: i64) -> text:
+    # Simple formatting: multiply, truncate, format
+    var multiplier = 1.0
+    var i = 0
+    while i < decimals:
+        multiplier = multiplier * 10.0
+        i = i + 1
+    val scaled = (value * multiplier + 0.5).to_i64()
+    val integer_part = scaled / multiplier.to_i64()
+    val frac_part = scaled % multiplier.to_i64()
+    val frac_str = frac_part.to_text()
+    # Pad with leading zeros
+    var padded_frac = frac_str
+    while padded_frac.len() < decimals:
+        padded_frac = "0" + padded_frac
+    "{integer_part}.{padded_frac}"
+
+fn shorten_module_name(name: text) -> text:
+    # Shorten "compiler/90.tools/coupling" to "90.tools/coupling"
+    if name.starts_with("compiler/"):
+        name.substring(9)
+    else:
+        name
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CouplingReport
+export format_text
+export format_json
+export format_markdown
+export format_dsm_text
+export format_dsm_markdown
+export format_layers_text
+export format_cycles_text
+export pad_right
+export format_f64

@@ -1,0 +1,145 @@
+# Execution Guard
+#
+# Combined safety checks for interpreter execution:
+# - Execution limit (instruction count)
+# - Interrupt handling (Ctrl-C)
+# - Timeout (watchdog)
+# - Stack overflow (recursion depth)
+#
+# Port of execution limit / interrupt / debug mode from
+# rust/compiler/src/interpreter_state.rs
+
+from std.common.fault_detection import {
+    is_timeout_exceeded, check_faults, FaultKind,
+    increment_recursion_depth, decrement_recursion_depth, current_recursion_depth,
+    get_max_recursion_depth
+}
+
+export ExecutionGuard, check_safety, check_loop_safety
+export set_execution_limit, reset_execution_count, get_execution_count
+export set_execution_limit_enabled, is_execution_limit_enabled
+export is_interrupted, reset_interrupt, init_signal_handlers
+export set_debug_mode, is_debug_mode
+
+# ============================================================================
+# Execution Limit
+# ============================================================================
+
+var execution_limit: i64 = 10_000_000
+var instruction_count: i64 = 0
+var execution_limit_enabled: bool = false  # Off by default in Simple interpreter
+
+fn set_execution_limit(limit: i64):
+    """Set maximum instruction count (0 = no limit)."""
+    execution_limit = limit
+
+fn reset_execution_count():
+    """Reset instruction counter (call before each file/test)."""
+    instruction_count = 0
+
+fn get_execution_count() -> i64:
+    instruction_count
+
+fn set_execution_limit_enabled(enabled: bool):
+    execution_limit_enabled = enabled
+
+fn is_execution_limit_enabled() -> bool:
+    execution_limit_enabled
+
+fn check_execution_limit() -> Result<(), text>:
+    """Increment instruction counter and check limit."""
+    if not execution_limit_enabled:
+        return Ok(())
+    instruction_count = instruction_count + 1
+    if execution_limit > 0 and instruction_count >= execution_limit:
+        return Err("execution limit of {execution_limit} operations exceeded")
+    Ok(())
+
+# ============================================================================
+# Interrupt Handling (Ctrl-C)
+# ============================================================================
+
+var interrupt_requested: bool = false
+
+extern fn rt_init_signal_handlers()
+
+fn init_signal_handlers():
+    """Install Ctrl-C handler. Call once at startup."""
+    rt_init_signal_handlers()
+
+fn is_interrupted() -> bool:
+    interrupt_requested
+
+fn reset_interrupt():
+    interrupt_requested = false
+
+fn request_interrupt():
+    """Called by signal handler FFI callback."""
+    interrupt_requested = true
+
+fn check_interrupt() -> Result<(), text>:
+    if interrupt_requested:
+        Err("execution interrupted (Ctrl-C)")
+    else:
+        Ok(())
+
+# ============================================================================
+# Debug Mode
+# ============================================================================
+
+var debug_mode: bool = false
+
+fn set_debug_mode(enabled: bool):
+    debug_mode = enabled
+
+fn is_debug_mode() -> bool:
+    debug_mode
+
+# ============================================================================
+# Combined Safety Checks
+# ============================================================================
+
+fn check_loop_safety() -> Result<(), text>:
+    """Check all safety conditions inside a loop iteration.
+    This is the single check point called at the top of every loop body.
+    Order: interrupt (fast) -> timeout (fast) -> execution limit (counter increment)."""
+    if interrupt_requested:
+        return Err("execution interrupted (Ctrl-C)")
+    if is_timeout_exceeded():
+        return Err("execution timed out")
+    check_execution_limit()
+
+fn check_safety() -> Result<(), text>:
+    """General safety check (no execution limit increment).
+    Use for non-loop check points."""
+    if interrupt_requested:
+        return Err("execution interrupted (Ctrl-C)")
+    if is_timeout_exceeded():
+        return Err("execution timed out")
+    Ok(())
+
+# ============================================================================
+# Recursion Guard (RAII-style for function calls)
+# ============================================================================
+
+struct ExecutionGuard:
+    """Guard that decrements recursion depth when dropped.
+    Created by push_call_depth(), auto-decrements via drop()."""
+    active: bool
+
+impl ExecutionGuard:
+    static fn inactive() -> ExecutionGuard:
+        ExecutionGuard(active: false)
+
+    fn drop():
+        if self.active:
+            decrement_recursion_depth()
+
+fn push_call_depth(function_name: text) -> Result<ExecutionGuard, text>:
+    """Increment recursion depth, returning a guard that auto-decrements.
+    Returns Err if stack overflow detected."""
+    if not increment_recursion_depth():
+        val depth = current_recursion_depth()
+        val limit = get_max_recursion_depth()
+        return Err("stack overflow: recursion depth {depth} exceeds limit {limit} in {function_name}")
+    Ok(ExecutionGuard(active: true))

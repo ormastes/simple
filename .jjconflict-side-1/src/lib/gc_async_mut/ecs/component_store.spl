@@ -1,0 +1,81 @@
+# ECS ComponentStore<T> — sparse-set column for one component type (GC-async variant)
+#
+# Parity with src/lib/nogc_sync_mut/ecs/component_store.spl; same API so services
+# import `use std.ecs.component_store.{ComponentStore}` and the build selects
+# the tier appropriate for the target (kernel-adjacent vs. GC-heap app).
+
+use std.ecs.entity.{Entity}
+
+struct ComponentStore<T>:
+    dense: [T]
+    ents: [i32]
+    sparse: [i32]
+    ticks: [i64]
+
+    static fn new() -> ComponentStore<T>:
+        ComponentStore(
+            dense: [],
+            ents: [],
+            sparse: [],
+            ticks: []
+        )
+
+    fn ensure_sparse_capacity(self, id: i32):
+        while (self.sparse.len() as i32) <= id:
+            self.sparse.push(-1)
+
+    fn contains(self, e: Entity) -> bool:
+        if e.id < 0 or e.id >= (self.sparse.len() as i32):
+            return false
+        self.sparse[e.id] >= 0
+
+    fn insert(self, e: Entity, value: T, tick: i64) -> bool:
+        self.ensure_sparse_capacity(e.id)
+        val slot = self.sparse[e.id]
+        if slot >= 0:
+            self.dense[slot] = value
+            self.ticks[slot] = tick
+            return false
+        val new_slot = (self.dense.len() as i32)
+        self.dense.push(value)
+        self.ents.push(e.id)
+        self.ticks.push(tick)
+        self.sparse[e.id] = new_slot
+        true
+
+    fn remove(self, e: Entity) -> bool:
+        if not self.contains(e):
+            return false
+        val slot = self.sparse[e.id]
+        val last = (self.dense.len() as i32) - 1
+        if slot != last:
+            self.dense[slot] = self.dense[last]
+            self.ents[slot] = self.ents[last]
+            self.ticks[slot] = self.ticks[last]
+            self.sparse[self.ents[slot]] = slot
+        self.dense.pop()
+        self.ents.pop()
+        self.ticks.pop()
+        self.sparse[e.id] = -1
+        true
+
+    fn get_slot(self, e: Entity) -> i32:
+        if e.id < 0 or e.id >= (self.sparse.len() as i32):
+            return -1
+        self.sparse[e.id]
+
+    fn touch(self, e: Entity, tick: i64) -> bool:
+        val slot = self.get_slot(e)
+        if slot < 0:
+            return false
+        self.ticks[slot] = tick
+        true
+
+    fn len(self) -> i32:
+        self.dense.len() as i32
+
+    fn entity_at(self, slot: i32) -> i32:
+        self.ents[slot]
+
+    fn tick_at(self, slot: i32) -> i64:
+        self.ticks[slot]

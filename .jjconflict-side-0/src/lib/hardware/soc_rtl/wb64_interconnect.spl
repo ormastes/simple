@@ -1,0 +1,114 @@
+# ============================================================================
+# SoC RTL Wishbone64 Interconnect — 64-bit Region-Based Address Decoder
+# ============================================================================
+#
+# Combinational address decoder and data router for the 64-bit Wishbone bus.
+# Maps the QEMU virt memory layout to peripheral regions.
+#
+# QEMU virt memory map:
+#   0x00001000-0x00001FFF  Boot ROM   (4 KB)
+#   0x02000000-0x0200FFFF  CLINT      (64 KB)
+#   0x0C000000-0x0FFFFFFF  PLIC       (4 MB)
+#   0x10000000-0x100000FF  UART0      (256 bytes)
+#   0x80000000-0x87FFFFFF  DRAM       (128 MB)
+#
+# Uses a region-based model: each peripheral registers a base address,
+# size, and peripheral_id.  Address decode iterates regions linearly.
+#
+# VHDL synthesizable subset: i64, bool, structs only.
+# ============================================================================
+
+# ============================================================================
+# Peripheral ID constants
+# ============================================================================
+
+val WB64_PID_BOOTROM: i64 = 0
+val WB64_PID_CLINT:   i64 = 1
+val WB64_PID_PLIC:    i64 = 2
+val WB64_PID_UART:    i64 = 3
+val WB64_PID_DRAM:    i64 = 4
+
+# ============================================================================
+# Address range constants (QEMU virt layout)
+# ============================================================================
+
+val WB64_BOOTROM_BASE: i64 = 0x1000
+val WB64_BOOTROM_SIZE: i64 = 0x1000
+
+val WB64_CLINT_BASE:   i64 = 0x200_0000
+val WB64_CLINT_SIZE:   i64 = 0x10000
+
+val WB64_PLIC_BASE:    i64 = 0xC00_0000
+val WB64_PLIC_SIZE:    i64 = 0x400000
+
+val WB64_UART_BASE:    i64 = 0x1000_0000
+val WB64_UART_SIZE:    i64 = 0x100
+
+val WB64_DRAM_BASE:    i64 = 0x8000_0000
+val WB64_DRAM_SIZE:    i64 = 0x800_0000
+
+# ============================================================================
+# Wishbone64 Structs
+# ============================================================================
+
+struct WbRegion64:
+    """A single address region entry in the interconnect."""
+    base_addr:     i64  # First byte of region
+    size:          i64  # Region size in bytes
+    peripheral_id: i64  # Peripheral identifier constant
+
+struct Wb64Interconnect:
+    """Region-based 64-bit Wishbone interconnect state."""
+    regions:      [WbRegion64]  # Registered peripheral regions
+    region_count: i64           # Number of active regions
+
+struct Wb64Response:
+    """Response from one Wishbone64 transaction."""
+    data: i64   # Read data (0 for writes)
+    ack:  bool  # Transaction acknowledged (address mapped)
+    err:  bool  # Bus error (address unmapped)
+
+# ============================================================================
+# Standard QEMU virt memory map
+# ============================================================================
+
+fn wb64_qemu_virt_regions() -> [WbRegion64]:
+    """Return the standard QEMU virt memory map as a region list."""
+    val bootrom = WbRegion64(base_addr: WB64_BOOTROM_BASE, size: WB64_BOOTROM_SIZE, peripheral_id: WB64_PID_BOOTROM)
+    val clint   = WbRegion64(base_addr: WB64_CLINT_BASE,   size: WB64_CLINT_SIZE,   peripheral_id: WB64_PID_CLINT)
+    val plic    = WbRegion64(base_addr: WB64_PLIC_BASE,    size: WB64_PLIC_SIZE,    peripheral_id: WB64_PID_PLIC)
+    val uart    = WbRegion64(base_addr: WB64_UART_BASE,    size: WB64_UART_SIZE,    peripheral_id: WB64_PID_UART)
+    val dram    = WbRegion64(base_addr: WB64_DRAM_BASE,    size: WB64_DRAM_SIZE,    peripheral_id: WB64_PID_DRAM)
+    [bootrom, clint, plic, uart, dram]
+
+# ============================================================================
+# Initialize interconnect from region list
+# ============================================================================
+
+fn wb64_init(regions: [WbRegion64]) -> Wb64Interconnect:
+    """Create an interconnect from the given region list."""
+    Wb64Interconnect(
+        regions:      regions,
+        region_count: len(regions) as i64
+    )
+
+# ============================================================================
+# Address decode and transaction routing
+# ============================================================================
+
+fn wb64_request(ic: Wb64Interconnect, addr: i64, data: i64, is_write: bool, mask: i64) -> Wb64Response:
+    """Issue a Wishbone64 transaction.
+
+    Iterates regions; returns ack=true if addr falls within any region,
+    err=true if no region matches.
+
+    data and mask are used by the caller for writes; this function performs
+    only address decode — peripheral state updates are handled by the SoC
+    tick layer."""
+    var i: i64 = 0
+    while i < ic.region_count:
+        val region = ic.regions[i]
+        if (addr >= region.base_addr) and (addr < (region.base_addr + region.size)):
+            return Wb64Response(data: 0, ack: true, err: false)
+        i = i + 1
+    Wb64Response(data: 0, ack: false, err: true)

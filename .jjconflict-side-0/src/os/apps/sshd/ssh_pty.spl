@@ -1,0 +1,180 @@
+# SSH Pseudo-Terminal — PTY Emulation
+#
+# Creates a virtual terminal pair (master/slave) using POSIX pipes.
+# Master side: SSH server reads/writes encrypted data
+# Slave side:  Shell reads/writes through this as its terminal
+#
+# Two pipes form the bidirectional connection:
+#   Pipe 1 (input):  master_write -> slave_read   (user input to shell)
+#   Pipe 2 (output): slave_write  -> master_read  (shell output to SSH)
+
+use os.posix.pipe_compat.{posix_pipe, pipe_read, pipe_write, pipe_close_read, pipe_close_write, pipe_has_data}
+
+extern fn unsafe_addr_of(ref: any) -> u64
+extern fn mmio_read8(addr: u64) -> u8
+
+# ============================================================================
+# Types
+# ============================================================================
+
+class SshPty:
+    """Pseudo-terminal pair for SSH sessions.
+
+    Connects an SSH channel to a shell process via two pipes.
+    The SSH server reads shell output from master_read_fd and
+    writes decrypted user input to master_write_fd.
+    """
+    master_read_fd: i32      # SSH reads shell output from here
+    master_write_fd: i32     # SSH writes user input here
+    slave_read_fd: i32       # Shell reads input from here
+    slave_write_fd: i32      # Shell writes output here
+    term_type: text          # e.g. "xterm-256color"
+    cols: u32
+    rows: u32
+    closed: bool
+
+impl SshPty:
+
+    static fn create(term: text, cols: u32, rows: u32) -> Result<SshPty, text>:
+        """Create a PTY pair using two POSIX pipes.
+
+        Pipe 1 (input):  master_write_fd (write end) -> slave_read_fd (read end)
+        Pipe 2 (output): slave_write_fd (write end)  -> master_read_fd (read end)
+
+        Returns: Ok(SshPty) or Err(description)
+        """
+        # Allocate addresses for pipe FD outputs
+        # We use small stack arrays and read results via their addresses
+        var input_read: [i32; 1] = [0]
+        var input_write: [i32; 1] = [0]
+        var output_read: [i32; 1] = [0]
+        var output_write: [i32; 1] = [0]
+
+        val input_read_addr = unsafe_addr_of(input_read)
+        val input_write_addr = unsafe_addr_of(input_write)
+        val output_read_addr = unsafe_addr_of(output_read)
+        val output_write_addr = unsafe_addr_of(output_write)
+
+        # Create input pipe (master -> slave)
+        val r1 = posix_pipe(input_read_addr, input_write_addr)
+        if r1 < 0:
+            return Err("failed to create input pipe: errno {0 - r1}")
+
+        # Create output pipe (slave -> master)
+        val r2 = posix_pipe(output_read_addr, output_write_addr)
+        if r2 < 0:
+            # Clean up input pipe
+            pipe_close_read(input_read[0])
+            pipe_close_write(input_write[0])
+            return Err("failed to create output pipe: errno {0 - r2}")
+
+        Ok(SshPty(
+            master_read_fd: output_read[0],
+            master_write_fd: input_write[0],
+            slave_read_fd: input_read[0],
+            slave_write_fd: output_write[0],
+            term_type: term,
+            cols: cols,
+            rows: rows,
+            closed: false
+        ))
+
+    fn master_read(max: u64) -> [u8]:
+        """Read shell output (for SSH encryption and send to client).
+
+        Reads up to max bytes from the output pipe's read end.
+        Returns empty array if no data available.
+        """
+        if self.closed:
+            return []
+
+        # Allocate a buffer
+        var buf: [u8; 4096] = [0; 4096]
+        val buf_addr = unsafe_addr_of(buf)
+        val read_len = if max < 4096: max else: 4096
+
+        val n = pipe_read(self.master_read_fd, buf_addr, read_len)
+        if n <= 0:
+            return []
+
+        # Copy read bytes into result
+        var result: [u8] = []
+        var i: u64 = 0
+        while i < n.to_u64():
+            result.push(buf[i])
+            i = i + 1
+        result
+
+    fn master_has_data() -> bool:
+        """Check if shell has pending output data (non-blocking)."""
+        if self.closed:
+            return false
+        pipe_has_data(self.master_read_fd)
+
+    me master_write(data: [u8]) -> i64:
+        """Write user input (from SSH client, decrypted, to shell).
+
+        Writes data into the input pipe's write end.
+        Returns bytes written or -errno.
+        """
+        if self.closed:
+            return -1
+
+        if data.len() == 0:
+            return 0
+
+        val data_addr = unsafe_addr_of(data)
+        pipe_write(self.master_write_fd, data_addr, data.len())
+
+    me slave_read(max: u64) -> [u8]:
+        """Shell reads input from here.
+
+        Called by the shell process to get user input.
+        """
+        if self.closed:
+            return []
+
+        var buf: [u8; 4096] = [0; 4096]
+        val buf_addr = unsafe_addr_of(buf)
+        val read_len = if max < 4096: max else: 4096
+
+        val n = pipe_read(self.slave_read_fd, buf_addr, read_len)
+        if n <= 0:
+            return []
+
+        var result: [u8] = []
+        var i: u64 = 0
+        while i < n.to_u64():
+            result.push(buf[i])
+            i = i + 1
+        result
+
+    me slave_write(data: [u8]) -> i64:
+        """Shell writes output here.
+
+        Called by the shell process to produce output.
+        """
+        if self.closed:
+            return -1
+
+        if data.len() == 0:
+            return 0
+
+        val data_addr = unsafe_addr_of(data)
+        pipe_write(self.slave_write_fd, data_addr, data.len())
+
+    me resize(cols: u32, rows: u32):
+        """Handle terminal resize (window-change request)."""
+        self.cols = cols
+        self.rows = rows
+
+    me close():
+        """Close all pipe endpoints."""
+        if self.closed:
+            return
+        self.closed = true
+
+        pipe_close_read(self.master_read_fd)
+        pipe_close_write(self.master_write_fd)
+        pipe_close_read(self.slave_read_fd)
+        pipe_close_write(self.slave_write_fd)

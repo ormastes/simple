@@ -1,0 +1,71 @@
+"""Bounded PE DLL byte validation before real Wine DLL mapping."""
+
+class WineDllFileBytesResult:
+    ok: bool
+    error: text
+    dll_name: text
+    selected_path: text
+    byte_count: i64
+    image_size: i64
+    entrypoint_rva: i64
+    evidence: text
+    status: text
+
+fn _read_u16_le(data: [u8], offset: i64) -> i64:
+    if offset + 1 >= data.len():
+        return 0
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
+
+fn _read_u32_le(data: [u8], offset: i64) -> i64:
+    if offset + 3 >= data.len():
+        return 0
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8) | ((data[offset + 2] as i64) << 16) | ((data[offset + 3] as i64) << 24)
+
+fn _result(ok: bool, error: text, dll_name: text, selected_path: text, byte_count: i64, image_size: i64, entrypoint_rva: i64, evidence: text, status: text) -> WineDllFileBytesResult:
+    WineDllFileBytesResult(ok: ok, error: error, dll_name: dll_name.lower(), selected_path: selected_path, byte_count: byte_count, image_size: image_size, entrypoint_rva: entrypoint_rva, evidence: evidence, status: status)
+
+pub fn wine_dll_validate_file_bytes(dll_name: text, selected_path: text, data: [u8]) -> WineDllFileBytesResult:
+    if dll_name == "":
+        return _result(false, "missing-dll-name", dll_name, selected_path, data.len(), 0, 0, "", "rejected")
+    if selected_path == "":
+        return _result(false, "missing-selected-path", dll_name, selected_path, data.len(), 0, 0, "", "rejected")
+    if data.len() < 0x100:
+        return _result(false, "dll-bytes-too-small", dll_name, selected_path, data.len(), 0, 0, "host-dll-bytes-present", "rejected")
+    if data[0] != 0x4d or data[1] != 0x5a:
+        return _result(false, "bad-mz", dll_name, selected_path, data.len(), 0, 0, "host-dll-bytes-present", "rejected")
+
+    val pe_offset = _read_u32_le(data, 0x3c)
+    if pe_offset <= 0 or pe_offset + 0x98 >= data.len():
+        return _result(false, "bad-pe-offset", dll_name, selected_path, data.len(), 0, 0, "host-dll-bytes-present", "rejected")
+    if data[pe_offset] != 0x50 or data[pe_offset + 1] != 0x45 or data[pe_offset + 2] != 0 or data[pe_offset + 3] != 0:
+        return _result(false, "bad-pe-signature", dll_name, selected_path, data.len(), 0, 0, "host-dll-bytes-present", "rejected")
+
+    val machine = _read_u16_le(data, pe_offset + 4)
+    if machine != 0x8664:
+        return _result(false, "unsupported-machine", dll_name, selected_path, data.len(), 0, 0, "host-dll-bytes-present pe-signature", "rejected")
+    val section_count = _read_u16_le(data, pe_offset + 6)
+    if section_count <= 0:
+        return _result(false, "missing-section-table", dll_name, selected_path, data.len(), 0, 0, "host-dll-bytes-present pe-signature machine-x86_64", "rejected")
+    val characteristics = _read_u16_le(data, pe_offset + 22)
+    if (characteristics & 0x2000) == 0:
+        return _result(false, "pe-image-is-not-dll", dll_name, selected_path, data.len(), 0, 0, "host-dll-bytes-present pe-signature machine-x86_64", "rejected")
+    val optional_size = _read_u16_le(data, pe_offset + 20)
+    val optional_offset = pe_offset + 24
+    if optional_size < 0x40 or optional_offset + optional_size > data.len():
+        return _result(false, "optional-header-out-of-bounds", dll_name, selected_path, data.len(), 0, 0, "host-dll-bytes-present pe-signature machine-x86_64 pe-dll-characteristic", "rejected")
+    val optional_magic = _read_u16_le(data, optional_offset)
+    if optional_magic != 0x20b:
+        return _result(false, "unsupported-optional-header", dll_name, selected_path, data.len(), 0, 0, "host-dll-bytes-present pe-signature machine-x86_64 pe-dll-characteristic", "rejected")
+
+    val entrypoint_rva = _read_u32_le(data, optional_offset + 0x10)
+    val image_size = _read_u32_le(data, optional_offset + 0x38)
+    val headers_size = _read_u32_le(data, optional_offset + 0x3c)
+    if headers_size <= 0:
+        return _result(false, "missing-headers-size", dll_name, selected_path, data.len(), image_size, entrypoint_rva, "host-dll-bytes-present pe-signature machine-x86_64 pe32plus pe-dll-characteristic", "rejected")
+    if image_size <= headers_size:
+        return _result(false, "bad-image-size", dll_name, selected_path, data.len(), image_size, entrypoint_rva, "host-dll-bytes-present pe-signature machine-x86_64 pe32plus pe-dll-characteristic", "rejected")
+    if entrypoint_rva <= 0:
+        return _result(false, "missing-dll-entrypoint", dll_name, selected_path, data.len(), image_size, entrypoint_rva, "host-dll-bytes-present pe-signature machine-x86_64 pe32plus pe-dll-characteristic", "rejected")
+
+    val evidence = "host-dll-bytes-present selected-dll-path file-backed-dll-bytes pe-signature machine-x86_64 pe32plus pe-dll-characteristic section-table-present image-size-validated dll-entrypoint-rva-present no-persistent-dll-view no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution"
+    _result(true, "", dll_name, selected_path, data.len(), image_size, entrypoint_rva, evidence, "dll-file-bytes-validated")

@@ -1,0 +1,133 @@
+# Serial Port SFFI Wrapper
+#
+# SFFI pattern for termios serial port operations.
+# Provides open/close/read/write/set_baud/set_parity for serial devices.
+#
+# Native library: termios (POSIX)
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw FFI — termios)
+# ============================================================================
+
+# --- Port Management ---
+
+extern fn rt_serial_open(path: text, baud: i32) -> i64
+extern fn rt_serial_close(fd: i64) -> bool
+
+# --- Data Transfer ---
+
+extern fn rt_serial_read(fd: i64, max_bytes: i32) -> text
+extern fn rt_serial_write(fd: i64, data: text) -> i64
+
+# --- Configuration ---
+
+extern fn rt_serial_set_baud(fd: i64, baud: i32) -> bool
+extern fn rt_serial_set_parity(fd: i64, parity: text) -> bool
+extern fn rt_serial_set_databits(fd: i64, bits: i32) -> bool
+extern fn rt_serial_set_stopbits(fd: i64, bits: i32) -> bool
+extern fn rt_serial_set_timeout(fd: i64, timeout_ms: i64) -> bool
+
+# --- Status ---
+
+extern fn rt_serial_available(fd: i64) -> i32
+extern fn rt_serial_flush(fd: i64) -> bool
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+# --- Core Types ---
+
+struct SerialPort:
+    fd: i64
+    path: text
+    baud_rate: i32
+    is_valid: bool
+
+struct SerialConfig:
+    baud_rate: i32
+    data_bits: i32
+    stop_bits: i32
+    parity: text
+    timeout_ms: i64
+
+# --- Port Management ---
+
+fn serial_open(path: text, baud_rate: i32) -> SerialPort:
+    """Open a serial port
+
+    Args:
+        path: Device path (e.g., /dev/ttyUSB0)
+        baud_rate: Baud rate (e.g., 115200)
+
+    Returns: SerialPort (check is_valid)
+    """
+    val fd = rt_serial_open(path, baud_rate)
+    SerialPort(fd: fd, path: path, baud_rate: baud_rate, is_valid: fd >= 0)
+
+fn serial_close(port: SerialPort) -> bool:
+    """Close a serial port"""
+    if not port.is_valid:
+        return false
+    rt_serial_close(port.fd)
+
+fn serial_configure(port: SerialPort, config: SerialConfig) -> bool:
+    """Configure a serial port with all parameters"""
+    if not port.is_valid:
+        return false
+    var ok = true
+    if not rt_serial_set_baud(port.fd, config.baud_rate):
+        ok = false
+    if not rt_serial_set_databits(port.fd, config.data_bits):
+        ok = false
+    if not rt_serial_set_stopbits(port.fd, config.stop_bits):
+        ok = false
+    if not rt_serial_set_parity(port.fd, config.parity):
+        ok = false
+    if config.timeout_ms > 0:
+        if not rt_serial_set_timeout(port.fd, config.timeout_ms):
+            ok = false
+    ok
+
+# --- Data Transfer ---
+
+fn serial_read(port: SerialPort, max_bytes: i32) -> text:
+    """Read data from serial port
+
+    Returns: Received text data (empty if nothing available)
+    """
+    if not port.is_valid:
+        return ""
+    rt_serial_read(port.fd, max_bytes)
+
+fn serial_write(port: SerialPort, data: text) -> i64:
+    """Write data to serial port
+
+    Returns: Number of bytes written (-1 on error)
+    """
+    if not port.is_valid:
+        return -1
+    rt_serial_write(port.fd, data)
+
+fn serial_available(port: SerialPort) -> i32:
+    """Check how many bytes are available to read"""
+    if not port.is_valid:
+        return 0
+    rt_serial_available(port.fd)
+
+fn serial_flush(port: SerialPort) -> bool:
+    """Flush serial port buffers"""
+    if not port.is_valid:
+        return false
+    rt_serial_flush(port.fd)
+
+# --- Default Config ---
+
+fn default_serial_config() -> SerialConfig:
+    SerialConfig(
+        baud_rate: 115200,
+        data_bits: 8,
+        stop_bits: 1,
+        parity: "none",
+        timeout_ms: 1000
+    )

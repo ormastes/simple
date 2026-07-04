@@ -1,0 +1,322 @@
+"""
+nvme_qset — the controller's IO queue registry (multi-queue emulation).
+
+Real NVMe lets the host create/delete many IO submission/completion queue pairs
+at run time via admin commands. This models that: up to MAX_IO_QUEUES pairs,
+addressed by qid (1..MAX_IO_QUEUES; qid 0 is the admin queue, handled elsewhere).
+
+Storage is flat parallel `[i64]` arrays — queue `q`'s ring lives at offset
+`q * MAX_QUEUE_SIZE`, exactly how a controller lays contiguous queue memory out.
+This deliberately avoids arrays-of-structs.
+
+Semantics enforced (NVMe-faithful):
+  * a CQ must exist before an SQ can bind to it (else SC_CQ_INVALID);
+  * a CQ with a live SQ bound to it cannot be deleted (else SC_QUEUE_BUSY);
+  * qid must be in range and not already in use (else SC_INVALID_QID);
+  * requested size must fit the device max (else SC_INVALID_QSIZE).
+"""
+
+use nvme_types.*
+use nvme_admin_types.*
+use hil_queue.*   # bool_to_i64
+
+struct QueueSet:
+    # completion queues, indexed by qid (0..MAX_IO_QUEUES)
+    cq_active: [i64]
+    cq_size:   [i64]
+    cq_head:   [i64]
+    cq_tail:   [i64]
+    cq_len:    [i64]
+    cq_cid:    [i64]   # ring storage, (MAX+1)*MAX_QUEUE_SIZE
+    cq_status: [i64]
+    cq_data:   [i64]
+    # submission queues, indexed by qid
+    sq_active: [i64]
+    sq_size:   [i64]
+    sq_cqid:   [i64]   # the CQ this SQ posts completions to
+    sq_head:   [i64]
+    sq_tail:   [i64]
+    sq_len:    [i64]
+    sq_cid:    [i64]   # ring storage
+    sq_op:     [i64]
+    sq_lba:    [i64]
+    sq_nblk:   [i64]
+    sq_data:   [i64]
+    rr:        i64     # round-robin cursor for fair servicing
+
+fn queue_set_new() -> QueueSet:
+    val slots: i64 = MAX_IO_QUEUES + 1
+    val cells: i64 = slots * MAX_QUEUE_SIZE
+    var cq_active: [i64] = []
+    var cq_size:   [i64] = []
+    var cq_head:   [i64] = []
+    var cq_tail:   [i64] = []
+    var cq_len:    [i64] = []
+    var sq_active: [i64] = []
+    var sq_size:   [i64] = []
+    var sq_cqid:   [i64] = []
+    var sq_head:   [i64] = []
+    var sq_tail:   [i64] = []
+    var sq_len:    [i64] = []
+    var i: i64 = 0
+    while i < slots:
+        cq_active.push(0)
+        cq_size.push(0)
+        cq_head.push(0)
+        cq_tail.push(0)
+        cq_len.push(0)
+        sq_active.push(0)
+        sq_size.push(0)
+        sq_cqid.push(0)
+        sq_head.push(0)
+        sq_tail.push(0)
+        sq_len.push(0)
+        i = i + 1
+    var cq_cid:    [i64] = []
+    var cq_status: [i64] = []
+    var cq_data:   [i64] = []
+    var sq_cid:    [i64] = []
+    var sq_op:     [i64] = []
+    var sq_lba:    [i64] = []
+    var sq_nblk:   [i64] = []
+    var sq_data:   [i64] = []
+    var j: i64 = 0
+    while j < cells:
+        cq_cid.push(0)
+        cq_status.push(0)
+        cq_data.push(0)
+        sq_cid.push(0)
+        sq_op.push(0)
+        sq_lba.push(0)
+        sq_nblk.push(0)
+        sq_data.push(0)
+        j = j + 1
+    QueueSet(cq_active: cq_active, cq_size: cq_size, cq_head: cq_head, cq_tail: cq_tail, cq_len: cq_len, cq_cid: cq_cid, cq_status: cq_status, cq_data: cq_data, sq_active: sq_active, sq_size: sq_size, sq_cqid: sq_cqid, sq_head: sq_head, sq_tail: sq_tail, sq_len: sq_len, sq_cid: sq_cid, sq_op: sq_op, sq_lba: sq_lba, sq_nblk: sq_nblk, sq_data: sq_data, rr: 1)
+
+fn qid_in_range(qid: i64) -> bool:
+    qid >= 1 and qid <= MAX_IO_QUEUES
+
+impl QueueSet:
+    me cq_is_active(qid: i64) -> bool:
+        if not qid_in_range(qid):
+            return false
+        me.cq_active[qid] == 1
+
+    me sq_is_active(qid: i64) -> bool:
+        if not qid_in_range(qid):
+            return false
+        me.sq_active[qid] == 1
+
+    me sq_bound_cq(qid: i64) -> i64:
+        me.sq_cqid[qid]
+
+    # ── Create / delete (admin-driven) ───────────────────────────────────────
+    me create_cq(qid: i64, size: i64) -> i64:
+        if not qid_in_range(qid):
+            return SC_INVALID_QID
+        if me.cq_active[qid] == 1:
+            return SC_INVALID_QID
+        if size < 1 or size > MAX_QUEUE_SIZE:
+            return SC_INVALID_QSIZE
+        me.cq_active[qid] = 1
+        me.cq_size[qid] = size
+        me.cq_head[qid] = 0
+        me.cq_tail[qid] = 0
+        me.cq_len[qid] = 0
+        SC_SUCCESS
+
+    me create_sq(qid: i64, size: i64, cqid: i64) -> i64:
+        if not qid_in_range(qid):
+            return SC_INVALID_QID
+        if me.sq_active[qid] == 1:
+            return SC_INVALID_QID
+        if size < 1 or size > MAX_QUEUE_SIZE:
+            return SC_INVALID_QSIZE
+        if not me.cq_is_active(cqid):
+            return SC_CQ_INVALID
+        me.sq_active[qid] = 1
+        me.sq_size[qid] = size
+        me.sq_cqid[qid] = cqid
+        me.sq_head[qid] = 0
+        me.sq_tail[qid] = 0
+        me.sq_len[qid] = 0
+        SC_SUCCESS
+
+    me delete_sq(qid: i64) -> i64:
+        if not qid_in_range(qid):
+            return SC_INVALID_QID
+        if me.sq_active[qid] == 0:
+            return SC_INVALID_QID
+        me.sq_active[qid] = 0
+        SC_SUCCESS
+
+    # A CQ cannot be torn down while an SQ still feeds it.
+    me delete_cq(qid: i64) -> i64:
+        if not qid_in_range(qid):
+            return SC_INVALID_QID
+        if me.cq_active[qid] == 0:
+            return SC_INVALID_QID
+        var bound: i64 = 0
+        var s: i64 = 1
+        while s <= MAX_IO_QUEUES:
+            if me.sq_active[s] == 1 and me.sq_cqid[s] == qid:
+                bound = 1
+            s = s + 1
+        if bound == 1:
+            return SC_QUEUE_BUSY
+        me.cq_active[qid] = 0
+        SC_SUCCESS
+
+    me active_io_queue_count() -> i64:
+        var n: i64 = 0
+        var q: i64 = 1
+        while q <= MAX_IO_QUEUES:
+            if me.sq_active[q] == 1:
+                n = n + 1
+            q = q + 1
+        n
+
+    # ── Submission ring (host -> controller) ─────────────────────────────────
+    me sq_submit(qid: i64, c: NvmeCmd) -> bool:
+        if not me.sq_is_active(qid):
+            return false
+        if me.sq_len[qid] == me.sq_size[qid]:
+            return false
+        val base: i64 = qid * MAX_QUEUE_SIZE
+        val slot: i64 = base + me.sq_tail[qid]
+        me.sq_cid[slot]  = c.cid
+        me.sq_op[slot]   = c.opcode
+        me.sq_lba[slot]  = c.lba
+        me.sq_nblk[slot] = c.nblocks
+        me.sq_data[slot] = c.data
+        me.sq_tail[qid] = (me.sq_tail[qid] + 1) % me.sq_size[qid]
+        me.sq_len[qid] = me.sq_len[qid] + 1
+        true
+
+    me sq_pending(qid: i64) -> i64:
+        if not qid_in_range(qid):
+            return 0
+        me.sq_len[qid]
+
+    me sq_fetch(qid: i64) -> NvmeCmd:
+        val base: i64 = qid * MAX_QUEUE_SIZE
+        val slot: i64 = base + me.sq_head[qid]
+        val cid:  i64 = me.sq_cid[slot]
+        val op:   i64 = me.sq_op[slot]
+        val lba:  i64 = me.sq_lba[slot]
+        val nblk: i64 = me.sq_nblk[slot]
+        val data: i64 = me.sq_data[slot]
+        me.sq_head[qid] = (me.sq_head[qid] + 1) % me.sq_size[qid]
+        me.sq_len[qid] = me.sq_len[qid] - 1
+        cmd_make(cid, op, lba, nblk, data)
+
+    # ── Completion ring (controller -> host) ─────────────────────────────────
+    me cq_post(cqid: i64, p: NvmeCpl) -> bool:
+        if not me.cq_is_active(cqid):
+            return false
+        if me.cq_len[cqid] == me.cq_size[cqid]:
+            return false
+        val base: i64 = cqid * MAX_QUEUE_SIZE
+        val slot: i64 = base + me.cq_tail[cqid]
+        me.cq_cid[slot]    = p.cid
+        me.cq_status[slot] = p.status
+        me.cq_data[slot]   = p.data
+        me.cq_tail[cqid] = (me.cq_tail[cqid] + 1) % me.cq_size[cqid]
+        me.cq_len[cqid] = me.cq_len[cqid] + 1
+        true
+
+    me cq_pending(cqid: i64) -> i64:
+        if not qid_in_range(cqid):
+            return 0
+        me.cq_len[cqid]
+
+    me cq_reap(cqid: i64) -> NvmeCpl:
+        val base: i64 = cqid * MAX_QUEUE_SIZE
+        val slot: i64 = base + me.cq_head[cqid]
+        val cid:    i64 = me.cq_cid[slot]
+        val status: i64 = me.cq_status[slot]
+        val data:   i64 = me.cq_data[slot]
+        me.cq_head[cqid] = (me.cq_head[cqid] + 1) % me.cq_size[cqid]
+        me.cq_len[cqid] = me.cq_len[cqid] - 1
+        cpl_make(cid, status, data)
+
+    # ── Fair round-robin: next active SQ (qid>=1) with pending work, or -1 ────
+    me next_pending_sq() -> i64:
+        var seen: i64 = 0
+        var q: i64 = me.rr
+        var found: i64 = -1
+        while seen < MAX_IO_QUEUES:
+            if me.sq_active[q] == 1 and me.sq_len[q] > 0:
+                found = q
+                seen = MAX_IO_QUEUES
+            else:
+                q = q + 1
+                if q > MAX_IO_QUEUES:
+                    q = 1
+                seen = seen + 1
+        if found >= 1:
+            var nxt: i64 = found + 1
+            if nxt > MAX_IO_QUEUES:
+                nxt = 1
+            me.rr = nxt
+        found
+
+# ── Self-test ─────────────────────────────────────────────────────────────────
+fn nvme_qset_selftest() -> i64:
+    var fail: i64 = 0
+    var qs: QueueSet = queue_set_new()
+
+    # create CQ before SQ (correct order)
+    fail = fail + expect_eq(qs.create_cq(1, 64), SC_SUCCESS, "create CQ 1")
+    fail = fail + expect_eq(qs.create_sq(1, 64, 1), SC_SUCCESS, "create SQ 1 -> CQ 1")
+
+    # SQ bound to a non-existent CQ is rejected
+    fail = fail + expect_eq(qs.create_sq(2, 64, 5), SC_CQ_INVALID, "SQ 2 -> missing CQ 5 rejected")
+
+    # re-create an active queue / out-of-range / bad size
+    fail = fail + expect_eq(qs.create_cq(1, 64), SC_INVALID_QID, "re-create active CQ 1 rejected")
+    fail = fail + expect_eq(qs.create_cq(99, 64), SC_INVALID_QID, "out-of-range qid rejected")
+    fail = fail + expect_eq(qs.create_cq(2, 9999), SC_INVALID_QSIZE, "oversize queue rejected")
+
+    # submit / fetch round-trip on qid 1 (exact cid+data to catch the x8 bug)
+    var ok: bool = qs.sq_submit(1, cmd_make(77, OP_WRITE, 13, 1, 0xC3))
+    fail = fail + expect_eq(bool_to_i64(ok), 1, "submit to SQ 1 accepted")
+    fail = fail + expect_eq(qs.sq_pending(1), 1, "SQ 1 pending == 1")
+    val fc: NvmeCmd = qs.sq_fetch(1)
+    fail = fail + expect_eq(fc.cid, 77, "fetched cid round-trips (x8 guard)")
+    fail = fail + expect_eq(fc.lba, 13, "fetched lba round-trips")
+    fail = fail + expect_eq(fc.data, 0xC3, "fetched data round-trips")
+
+    # submit to an inactive SQ is refused
+    fail = fail + expect_eq(bool_to_i64(qs.sq_submit(3, cmd_make(1, OP_READ, 0, 1, 0))), 0, "submit to inactive SQ 3 refused")
+
+    # completion post / reap on CQ 1
+    var pok: bool = qs.cq_post(1, cpl_make(77, SC_SUCCESS, 0xC3))
+    fail = fail + expect_eq(bool_to_i64(pok), 1, "post to CQ 1 accepted")
+    fail = fail + expect_eq(qs.cq_pending(1), 1, "CQ 1 pending == 1")
+    val rc: NvmeCpl = qs.cq_reap(1)
+    fail = fail + expect_eq(rc.cid, 77, "reaped cid round-trips")
+    fail = fail + expect_eq(rc.data, 0xC3, "reaped data round-trips")
+
+    # cannot delete CQ 1 while SQ 1 is bound; reverse order works
+    fail = fail + expect_eq(qs.delete_cq(1), SC_QUEUE_BUSY, "delete CQ 1 with bound SQ rejected")
+    fail = fail + expect_eq(qs.delete_sq(1), SC_SUCCESS, "delete SQ 1")
+    fail = fail + expect_eq(qs.delete_cq(1), SC_SUCCESS, "delete CQ 1 after SQ gone")
+    fail = fail + expect_eq(qs.delete_sq(1), SC_INVALID_QID, "double-delete SQ 1 rejected")
+
+    # round-robin across two live queues
+    qs.create_cq(2, 64)
+    qs.create_sq(2, 64, 2)
+    qs.create_cq(3, 64)
+    qs.create_sq(3, 64, 3)
+    qs.sq_submit(2, cmd_make(1, OP_READ, 0, 1, 0))
+    qs.sq_submit(3, cmd_make(2, OP_READ, 0, 1, 0))
+    fail = fail + expect_eq(qs.active_io_queue_count(), 2, "two active IO queues")
+    val r1: i64 = qs.next_pending_sq()
+    val r2: i64 = qs.next_pending_sq()
+    var both: i64 = 0
+    if (r1 == 2 and r2 == 3) or (r1 == 3 and r2 == 2):
+        both = 1
+    fail = fail + expect_eq(both, 1, "round-robin visits both queues")
+
+    fail

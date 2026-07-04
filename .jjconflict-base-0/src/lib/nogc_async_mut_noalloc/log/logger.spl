@@ -1,0 +1,137 @@
+# Minimal noalloc logger facade.
+
+use targets.{TARGET_DEVICE, TARGET_SEMIHOST, TARGET_HOST_FILE, target_device_write, target_semihost_write, target_file_write}
+
+val LOG_TRACE: i32 = 0
+val LOG_DEBUG: i32 = 1
+val LOG_INFO: i32 = 2
+val LOG_WARN: i32 = 3
+val LOG_ERROR: i32 = 4
+val LOG_FATAL: i32 = 5
+val LOG_OFF: i32 = 6
+
+val LOG_DEV_KIND_COM1: i32 = 1
+val LOG_DEV_KIND_PL011: i32 = 2
+val LOG_DEV_KIND_NS16550: i32 = 3
+
+var g_log_level: i32 = LOG_INFO
+var g_log_targets: i32 = TARGET_DEVICE
+var g_log_device_kind: i32 = LOG_DEV_KIND_COM1
+var g_log_device_base: u64 = 0
+
+extern fn rt_string_data(value: text) -> i64
+extern fn rt_string_len(value: text) -> i64
+extern fn rt_simpleos_log_init(level: i64, targets: i64) -> bool
+extern fn rt_simpleos_log_emit(level: i64, msg_ptr: i64, msg_len: i64) -> bool
+extern fn rt_simpleos_log_set_device(kind: i64, base: i64) -> bool
+
+fn log_init(level: i32, targets: i32):
+    g_log_level = level
+    g_log_targets = targets
+    rt_simpleos_log_init(level.to_i64(), targets.to_i64())
+
+fn log_init_serial(level: i32):
+    log_init(level, TARGET_DEVICE)
+
+fn log_init_from_config(config: text):
+    g_log_level = log_parse_level(config)
+    g_log_targets = log_parse_targets(config)
+    rt_simpleos_log_init(g_log_level.to_i64(), g_log_targets.to_i64())
+
+fn log_parse_level(level: text) -> i32:
+    val normalized = level.lower()
+    if normalized.contains("trace"):
+        return LOG_TRACE
+    if normalized.contains("debug"):
+        return LOG_DEBUG
+    if normalized.contains("warn"):
+        return LOG_WARN
+    if normalized.contains("error"):
+        return LOG_ERROR
+    if normalized.contains("fatal"):
+        return LOG_FATAL
+    if normalized.contains("off"):
+        return LOG_OFF
+    LOG_INFO
+
+fn log_parse_targets(targets: text) -> i32:
+    val normalized = targets.lower()
+    var flags = 0
+    if normalized.contains("device") or normalized.contains("serial"):
+        flags = flags | TARGET_DEVICE
+    if normalized.contains("semihost"):
+        flags = flags | TARGET_SEMIHOST
+    if normalized.contains("file"):
+        flags = flags | TARGET_HOST_FILE
+    if flags == 0:
+        return TARGET_DEVICE
+    flags
+
+fn log_set_level(level: i32):
+    g_log_level = level
+    rt_simpleos_log_init(g_log_level.to_i64(), g_log_targets.to_i64())
+
+fn log_set_targets(targets: i32):
+    g_log_targets = targets
+    rt_simpleos_log_init(g_log_level.to_i64(), g_log_targets.to_i64())
+
+fn log_set_device(kind: i32, base: u64):
+    g_log_device_kind = kind
+    g_log_device_base = base
+    rt_simpleos_log_set_device(kind.to_i64(), base.to_i64())
+
+fn log_level_name(level: i32) -> text:
+    if level == LOG_TRACE:
+        return "TRACE"
+    if level == LOG_DEBUG:
+        return "DEBUG"
+    if level == LOG_INFO:
+        return "INFO"
+    if level == LOG_WARN:
+        return "WARN"
+    if level == LOG_ERROR:
+        return "ERROR"
+    if level == LOG_FATAL:
+        return "FATAL"
+    "OFF"
+
+fn _log_should_emit(level: i32) -> bool:
+    level >= g_log_level and g_log_level < LOG_OFF and g_log_targets != 0
+
+fn _log_emit(level: i32, msg: text):
+    if not _log_should_emit(level):
+        return
+    val line = "[" + log_level_name(level) + "] " + msg
+    if rt_simpleos_log_emit(level.to_i64(), rt_string_data(line), rt_string_len(line)):
+        return
+    log_raw(line)
+
+fn log_trace(msg: text):
+    _log_emit(LOG_TRACE, msg)
+
+fn log_debug(msg: text):
+    _log_emit(LOG_DEBUG, msg)
+
+fn log_info(msg: text):
+    _log_emit(LOG_INFO, msg)
+
+fn log_warn(msg: text):
+    _log_emit(LOG_WARN, msg)
+
+fn log_error(msg: text):
+    _log_emit(LOG_ERROR, msg)
+
+fn log_fatal(msg: text):
+    _log_emit(LOG_FATAL, msg)
+
+fn log_raw(msg: text):
+    if g_log_targets & TARGET_DEVICE != 0:
+        target_device_write(msg)
+    if g_log_targets & TARGET_SEMIHOST != 0:
+        target_semihost_write(msg)
+    if g_log_targets & TARGET_HOST_FILE != 0:
+        target_file_write(msg)
+
+fn log_raw_println(msg: text):
+    log_raw(msg)
+

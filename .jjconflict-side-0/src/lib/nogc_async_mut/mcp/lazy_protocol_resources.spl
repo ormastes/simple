@@ -1,0 +1,156 @@
+# MCP Lazy Server — resources, prompts, and completion handlers
+
+fn make_result_response(id: text, result: text) -> text:
+    make_json_result(id, result)
+
+fn make_resource_json(uri: text, name: text, desc: text, mime: text) -> text:
+    var r = LB()
+    r = r + jp("uri", js(uri))
+    r = r + "," + jp("name", js(name))
+    if desc != "":
+        r = r + "," + jp("description", js(desc))
+    if mime != "":
+        r = r + "," + jp("mimeType", js(mime))
+    r = r + RB()
+    r
+
+fn build_resources_json() -> text:
+    var r = make_resource_json(uri: "project:///info", name: "Project Information", desc: "Project metadata and cwd", mime: "text/plain")
+    r = r + "," + make_resource_json(uri: "file:///*", name: "File Contents", desc: "Read file contents by absolute path", mime: "text/plain")
+    r = r + "," + make_resource_json(uri: "debuglog:///status", name: "Debug Log Status", desc: "Debug log status", mime: "application/json")
+    "[" + r + "]"
+
+fn handle_resources_list(id: text) -> text:
+    val result = jo1(jp("resources", build_resources_json()))
+    make_result_response(id: id, result: result)
+
+fn handle_resource_templates_list(id: text) -> text:
+    var t1 = LB()
+    t1 = t1 + jp("uriTemplate", js("file:///" + LB() + "path" + RB()))
+    t1 = t1 + "," + jp("name", js("File Contents"))
+    t1 = t1 + "," + jp("description", js("Read file contents by path"))
+    t1 = t1 + "," + jp("mimeType", js("text/plain"))
+    t1 = t1 + RB()
+
+    var t2 = LB()
+    t2 = t2 + jp("uriTemplate", js("project:///" + LB() + "name" + RB()))
+    t2 = t2 + "," + jp("name", js("Project Info"))
+    t2 = t2 + "," + jp("description", js("Read project information"))
+    t2 = t2 + "," + jp("mimeType", js("text/plain"))
+    t2 = t2 + RB()
+
+    val result = jo1(jp("resourceTemplates", "[" + t1 + "," + t2 + "]"))
+    make_result_response(id: id, result: result)
+
+fn get_cwd() -> text:
+    val (out, _) = shell_cmd("pwd")
+    if out.ends_with(NL):
+        return out.substring(0, out.len() - 1)
+    out
+
+fn make_resource_content_response(id: text, uri: text, content: text, mime: text) -> text:
+    var rc = LB()
+    rc = rc + jp("uri", js(uri))
+    rc = rc + "," + jp("mimeType", js(mime))
+    rc = rc + "," + jp("text", js(escape_json(content)))
+    rc = rc + RB()
+    val result = jo1(jp("contents", "[" + rc + "]"))
+    make_result_response(id: id, result: result)
+
+fn handle_resources_read(id: text, uri: text) -> text:
+    if uri == "":
+        return make_error(id, -32602, "Missing required parameter: uri")
+    if uri == "project:///info":
+        val info = "Simple MCP (main_lazy)" + NL + "Working Dir: " + get_cwd()
+        return make_resource_content_response(id: id, uri: uri, content: info, mime: "text/plain")
+    if uri.starts_with("file:///"):
+        val path = uri.substring(8)
+        val content = file_read(path)
+        if content == "":
+            return make_error(id, -32002, "File not found: " + path)
+        return make_resource_content_response(id: id, uri: uri, content: content, mime: "text/plain")
+    if uri == "debuglog:///status":
+        val status_json = debug_log_status_json()
+        return make_resource_content_response(id: id, uri: uri, content: status_json, mime: "application/json")
+    make_error(id, -32002, "Resource not found: " + uri)
+
+fn make_prompt_arg(name: text, desc: text, required: bool) -> text:
+    var r = LB()
+    r = r + jp("name", js(name))
+    r = r + "," + jp("description", js(desc))
+    var req = "false"
+    if required:
+        req = "true"
+    r = r + "," + jp("required", req)
+    r = r + RB()
+    r
+
+fn make_prompt_json(name: text, desc: text, args_json: text) -> text:
+    var r = LB()
+    r = r + jp("name", js(name))
+    r = r + "," + jp("description", js(desc))
+    r = r + "," + jp("arguments", args_json)
+    r = r + RB()
+    r
+
+fn handle_prompts_list(id: text) -> text:
+    val p1 = make_prompt_json(name: "analyze-file", desc: "Analyze a Simple source file", args_json: "[" + make_prompt_arg(name: "path", desc: "Path to file", required: true) + "]")
+    val p2 = make_prompt_json(name: "generate-tests", desc: "Generate SPipe tests for a file", args_json: "[" + make_prompt_arg(name: "path", desc: "Path to file", required: true) + "]")
+    val result = jo1(jp("prompts", "[" + p1 + "," + p2 + "]"))
+    make_result_response(id: id, result: result)
+
+fn make_prompt_response(id: text, description: text, user_content: text) -> text:
+    var msg = LB()
+    msg = msg + jp("role", js("user"))
+    var content_obj = LB()
+    content_obj = content_obj + jp("type", js("text"))
+    content_obj = content_obj + "," + jp("text", js(escape_json(user_content)))
+    content_obj = content_obj + RB()
+    msg = msg + "," + jp("content", content_obj)
+    msg = msg + RB()
+
+    var result = LB()
+    result = result + jp("description", js(escape_json(description)))
+    result = result + "," + jp("messages", "[" + msg + "]")
+    result = result + RB()
+    make_result_response(id: id, result: result)
+
+fn handle_prompts_get(id: text, prompt_name: text, body: text) -> text:
+    if prompt_name == "":
+        return make_error(id, -32602, "Missing required parameter: name")
+    val path = extract_field(body, "path")
+    if prompt_name == "analyze-file":
+        var content = "Analyze this file for issues and improvements."
+        if path != "":
+            content = content + " File: " + path
+        return make_prompt_response(id: id, description: "Analyze file", user_content: content)
+    elif prompt_name == "generate-tests":
+        var content = "Generate comprehensive SPipe tests."
+        if path != "":
+            content = content + " File: " + path
+        return make_prompt_response(id: id, description: "Generate tests", user_content: content)
+    make_error(id, -32601, "Unknown prompt: " + prompt_name)
+
+fn handle_completion_req(id: text, body: text) -> text:
+    val arg_name = extract_field(body, "name")
+    val arg_value = extract_field(body, "value")
+    var values = "[]"
+    if arg_name == "path":
+        values = "[" + js("src/") + "," + js("test/") + "," + js("doc/") + "," + js("scripts/") + "]"
+    elif arg_name == "mode":
+        values = "[" + js("over") + "," + js("in") + "," + js("out") + "]"
+    elif arg_name == "target_type":
+        values = "[" + js("interpreter") + "," + js("smf") + "," + js("native") + "," + js("remote") + "]"
+    elif arg_name == "level":
+        values = "[" + js("trace") + "," + js("debug") + "," + js("info") + "," + js("warn") + "," + js("error") + "]"
+    elif arg_value != "":
+        values = "[" + js(arg_value) + "]"
+
+    val total = top_level_item_count(values)
+    var completion = LB()
+    completion = completion + jp("values", values)
+    completion = completion + "," + jp("total", str(total))
+    completion = completion + "," + jp("hasMore", "false")
+    completion = completion + RB()
+    val result = jo1(jp("completion", completion))
+    make_result_response(id: id, result: result)

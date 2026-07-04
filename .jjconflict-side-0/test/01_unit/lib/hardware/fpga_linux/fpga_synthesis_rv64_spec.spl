@@ -1,0 +1,126 @@
+# @cover src/lib/hardware/fpga_linux/synthesis_wrapper.spl 0%
+# @cover src/lib/hardware/fpga_linux/xdc_gen.spl 0%
+# @cover src/lib/hardware/fpga_k26/k26_xdc.spl 0%
+"""
+# FPGA Synthesis and Constraints Specification (RV64)
+
+**Feature IDs:** rv64-fpga-linux-boot
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Draft
+**Requirements:** REQ-12, REQ-13
+**Research:** doc/01_research/domain/riscv_fpga_linux.md
+**Artifacts:** N/A
+
+## Overview
+
+Tests for FPGA synthesis pipeline: XDC constraint generation for
+Kria K26 (clock, UART TX/RX, reset, JTAG), Vivado TCL script
+generation with correct FPGA part, and VHDL source inclusion.
+
+Covers:
+- AC-4 (XDC constraints generated for target FPGA board)
+- AC-5 (Vivado synthesis completes without critical errors)
+
+## Compiled-Mode Notes
+
+XDC text pattern checks and TCL script content checks are
+interpreter-safe. Actual Vivado synthesis (AC-5) requires Vivado
+installed and is a hardware-gated test.
+"""
+
+use std.spipe.*
+use lib.hardware.fpga_k26.k26_xdc.{k26_generate_xdc}
+use lib.hardware.fpga_linux.xdc_gen.{generate_xdc_constraints}
+use lib.hardware.fpga_linux.synthesis_wrapper.{generate_vivado_tcl_rv64}
+
+
+# ============================================================================
+# AC-4: XDC Constraints — K26 Pin Assignments (REQ-12)
+# ============================================================================
+
+describe "K26 XDC Constraints":
+    it "AC-4: k26_xdc generates constraint text":
+        val xdc = k26_generate_xdc()
+        val len = xdc.length()
+        expect(len).to_be_greater_than(0)
+
+    it "AC-4: XDC contains clock constraint":
+        val xdc = k26_generate_xdc()
+        expect(xdc).to_contain("create_clock")
+
+    it "AC-4: XDC contains UART TX pin":
+        val xdc = k26_generate_xdc()
+        expect(xdc).to_contain("uart_tx")
+
+    it "AC-4: XDC contains UART RX pin":
+        val xdc = k26_generate_xdc()
+        expect(xdc).to_contain("uart_rx")
+
+    it "AC-4: XDC contains reset pin":
+        val xdc = k26_generate_xdc()
+        expect(xdc).to_contain("rst")
+
+    it "AC-4: XDC contains JTAG pin constraint":
+        val xdc = k26_generate_xdc()
+        expect(xdc).to_contain("jtag")
+
+
+# ============================================================================
+# AC-4: XDC Generation via xdc_gen
+# ============================================================================
+
+describe "XDC Generator":
+    it "AC-4: xdc_gen produces valid XDC format":
+        val xdc = generate_xdc_constraints()
+        expect(xdc).to_contain("set_property")
+
+    it "AC-4: xdc_gen includes PACKAGE_PIN assignments":
+        val xdc = generate_xdc_constraints()
+        expect(xdc).to_contain("PACKAGE_PIN")
+
+    it "AC-4: xdc_gen includes IOSTANDARD":
+        val xdc = generate_xdc_constraints()
+        expect(xdc).to_contain("IOSTANDARD")
+
+
+# ============================================================================
+# AC-5: Vivado TCL Script Generation (REQ-13)
+# ============================================================================
+
+describe "Synthesis Wrapper TCL":
+    it "AC-5: synthesis TCL contains create_project":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("create_project")
+
+    it "AC-5: synthesis TCL contains add_files for VHDL sources":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("add_files")
+
+    it "AC-5: synthesis TCL sets correct FPGA part for K26":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("xck26")
+
+    it "AC-5: synthesis TCL sets top entity":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("set_property top")
+
+    it "AC-5: synthesis TCL launches synthesis run":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("launch_runs synth_1")
+
+    it "AC-5: synthesis TCL launches implementation run":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("launch_runs impl_1")
+
+    it "AC-5: synthesis TCL generates bitstream":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("write_bitstream")
+
+    it "AC-5: synthesis TCL includes XDC constraint file":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain(".xdc")
+
+    it "AC-5: synthesis TCL includes RV64 core VHDL source":
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("rv64gc")

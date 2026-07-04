@@ -1,0 +1,136 @@
+# Microbenchmark: pure Simple ctype — cross-module static lookup table.
+#
+# Tests whether module-level array data in a separate Simple module can make the
+# lookup-table ctype approach shippable without per-call table construction.
+
+use ctype_lut_tables.{CTYPE_FLAG_TABLE}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_exit(code: i32) -> void
+
+fn iters_count() -> i64:
+    1000000
+
+fn ascii_range() -> i64:
+    128
+
+fn report(bench: text, ops: i64, micros_in: i64, checksum: i64):
+    var micros = micros_in
+    if micros <= 0:
+        micros = 1
+    val ops_per_ms = (ops * 1000) / micros
+    print "[ctypebench] lang=simple_static_lut bench={bench} ops={ops} micros={micros} ops_per_ms={ops_per_ms} checksum={checksum}"
+
+fn lut_flag(ch: i64) -> i64:
+    if ch < 0 or ch >= 256:
+        0
+    else:
+        CTYPE_FLAG_TABLE[ch]
+
+fn lut_is_alpha(ch: i64) -> bool:
+    (lut_flag(ch) & 6) != 0
+
+fn lut_is_alnum(ch: i64) -> bool:
+    (lut_flag(ch) & 7) != 0
+
+fn lut_is_xdigit(ch: i64) -> bool:
+    (lut_flag(ch) & 9) != 0
+
+fn lut_is_space(ch: i64) -> bool:
+    (lut_flag(ch) & 16) != 0
+
+fn bench_is_alpha() -> i64:
+    val iters = iters_count()
+    val range = ascii_range()
+    val start = rt_time_now_unix_micros()
+    var i = 0
+    var chk = 0
+    while i < iters:
+        var ch = 0
+        while ch < range:
+            if lut_is_alpha(ch):
+                chk = chk + 1
+            ch = ch + 1
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - start
+    report("is_alpha", iters * range, elapsed, chk)
+    chk
+
+fn bench_is_alnum() -> i64:
+    val iters = iters_count()
+    val range = ascii_range()
+    val start = rt_time_now_unix_micros()
+    var i = 0
+    var chk = 0
+    while i < iters:
+        var ch = 0
+        while ch < range:
+            if lut_is_alnum(ch):
+                chk = chk + 1
+            ch = ch + 1
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - start
+    report("is_alnum", iters * range, elapsed, chk)
+    chk
+
+fn bench_is_xdigit() -> i64:
+    val iters = iters_count()
+    val range = ascii_range()
+    val start = rt_time_now_unix_micros()
+    var i = 0
+    var chk = 0
+    while i < iters:
+        var ch = 0
+        while ch < range:
+            if lut_is_xdigit(ch):
+                chk = chk + 1
+            ch = ch + 1
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - start
+    report("is_xdigit", iters * range, elapsed, chk)
+    chk
+
+fn bench_is_space() -> i64:
+    val iters = iters_count()
+    val range = ascii_range()
+    val start = rt_time_now_unix_micros()
+    var i = 0
+    var chk = 0
+    while i < iters:
+        var ch = 0
+        while ch < range:
+            if lut_is_space(ch):
+                chk = chk + 1
+            ch = ch + 1
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - start
+    report("is_space", iters * range, elapsed, chk)
+    chk
+
+fn main():
+    print "=== ctype microbenchmark: Simple native (static LUT, guarded) ==="
+    val total_iters = iters_count()
+    val total_range = ascii_range()
+    val total_ops = total_iters * total_range
+    print "iters={total_iters} x ascii_range={total_range} = {total_ops} calls per function"
+    val alpha = bench_is_alpha()
+    val alnum = bench_is_alnum()
+    val xdigit = bench_is_xdigit()
+    val space = bench_is_space()
+    var failed = false
+    if alpha != (52 * total_iters):
+        print "[ctypebench-error] static_lut checksum mismatch bench=is_alpha expected={52 * total_iters} actual={alpha}"
+        failed = true
+    if alnum != (62 * total_iters):
+        print "[ctypebench-error] static_lut checksum mismatch bench=is_alnum expected={62 * total_iters} actual={alnum}"
+        failed = true
+    if xdigit != (22 * total_iters):
+        print "[ctypebench-error] static_lut checksum mismatch bench=is_xdigit expected={22 * total_iters} actual={xdigit}"
+        failed = true
+    if space != (6 * total_iters):
+        print "[ctypebench-error] static_lut checksum mismatch bench=is_space expected={6 * total_iters} actual={space}"
+        failed = true
+    val chk = alpha + alnum + xdigit + space
+    print "combined_checksum={chk}"
+    if failed:
+        rt_exit(1)

@@ -1,0 +1,206 @@
+"""Metal Session — MTLDevice + Command Queue + Pipeline Cache
+
+@tag:stdlib
+@tag:gpu
+
+Owns a Metal device handle, command queue, and a flat pipeline cache.
+macOS-only: init_device() returns an error string on non-macOS platforms.
+
+Usage:
+    val session = MetalSession.create("compute")
+    val err = session.init_device()
+    if err != "":
+        use std.io
+        io.println(err)
+"""
+
+# ============================================================================
+# Extern declarations (resolved at link time against Rust runtime)
+# ============================================================================
+
+extern fn rt_metal_is_available() -> bool
+extern fn rt_metal_create_device() -> i64
+extern fn rt_metal_device_name(device: i64) -> text
+extern fn rt_metal_create_queue(device: i64) -> i64
+extern fn rt_metal_create_library(device: i64, source: text) -> i64
+extern fn rt_metal_create_compute_pipeline(device: i64, library: i64, fn_name: text) -> i64
+extern fn rt_metal_begin_command(queue: i64) -> i64
+extern fn rt_metal_commit_command(cmd: i64) -> text
+extern fn rt_metal_wait_completion(cmd: i64) -> text
+extern fn rt_metal_cleanup_device(device: i64) -> i64
+
+fn metal_session_is_available() -> bool:
+    rt_metal_is_available()
+
+fn metal_session_create_device() -> i64:
+    rt_metal_create_device()
+
+fn metal_session_device_name(device: i64) -> text:
+    rt_metal_device_name(device)
+
+fn metal_session_create_queue(device: i64) -> i64:
+    rt_metal_create_queue(device)
+
+fn metal_session_create_library(device: i64, source: text) -> i64:
+    rt_metal_create_library(device, source)
+
+fn metal_session_create_compute_pipeline(device: i64, library: i64, fn_name: text) -> i64:
+    rt_metal_create_compute_pipeline(device, library, fn_name)
+
+fn metal_session_begin_command(queue: i64) -> i64:
+    rt_metal_begin_command(queue)
+
+fn metal_session_commit_command(cmd: i64) -> text:
+    rt_metal_commit_command(cmd)
+
+fn metal_session_wait_completion(cmd: i64) -> text:
+    rt_metal_wait_completion(cmd)
+
+fn metal_session_cleanup_device(device: i64) -> i64:
+    rt_metal_cleanup_device(device)
+
+# ============================================================================
+# MetalPipelineCache — flat storage for up to 4 named pipeline handles
+# ============================================================================
+
+class MetalPipelineCache:
+    p0_name: text
+    p0_handle: i64
+    p1_name: text
+    p1_handle: i64
+    p2_name: text
+    p2_handle: i64
+    p3_name: text
+    p3_handle: i64
+    count: i64
+
+    static fn create() -> MetalPipelineCache:
+        MetalPipelineCache(
+            p0_name: "", p0_handle: 0,
+            p1_name: "", p1_handle: 0,
+            p2_name: "", p2_handle: 0,
+            p3_name: "", p3_handle: 0,
+            count: 0)
+
+    me cache_pipeline(name: text, handle: i64) -> text:
+        if self.count == 0:
+            self.p0_name = name
+            self.p0_handle = handle
+            self.count = 1
+            return ""
+        if self.count == 1:
+            self.p1_name = name
+            self.p1_handle = handle
+            self.count = 2
+            return ""
+        if self.count == 2:
+            self.p2_name = name
+            self.p2_handle = handle
+            self.count = 3
+            return ""
+        if self.count == 3:
+            self.p3_name = name
+            self.p3_handle = handle
+            self.count = 4
+            return ""
+        "pipeline cache full (max 4)"
+
+    me find_pipeline(name: text) -> i64:
+        if self.p0_name == name:
+            return self.p0_handle
+        if self.p1_name == name:
+            return self.p1_handle
+        if self.p2_name == name:
+            return self.p2_handle
+        if self.p3_name == name:
+            return self.p3_handle
+        0
+
+# ============================================================================
+# MetalSession
+# ============================================================================
+
+class MetalSession:
+    device_handle: i64
+    queue_handle: i64
+    device_name: text
+    pipeline_cache: MetalPipelineCache
+    library_count: i64
+    command_count: i64
+    mode: text
+    initialized: bool
+    available: bool
+    generation: i64
+
+    static fn create(mode: text) -> MetalSession:
+        MetalSession(
+            device_handle: 0,
+            queue_handle: 0,
+            device_name: "",
+            pipeline_cache: MetalPipelineCache.create(),
+            library_count: 0,
+            command_count: 0,
+            mode: mode,
+            initialized: false,
+            available: false,
+            generation: 0)
+
+    me init_device() -> text:
+        if metal_session_is_available() == false:
+            return "Metal requires macOS"
+        self.available = true
+        val dev = metal_session_create_device()
+        if dev <= 0:
+            return "metal_session_create_device failed"
+        self.device_handle = dev
+        self.device_name = metal_session_device_name(dev)
+        val q = metal_session_create_queue(dev)
+        if q <= 0:
+            return "metal_session_create_queue failed"
+        self.queue_handle = q
+        self.initialized = true
+        self.generation = self.generation + 1
+        ""
+
+    me load_library(source: text) -> i64:
+        if self.initialized == false:
+            return 0
+        val lib = metal_session_create_library(self.device_handle, source)
+        if lib != 0:
+            self.library_count = self.library_count + 1
+        lib
+
+    me get_or_create_pipeline(name: text, library: i64, fn_name: text) -> i64:
+        val cached = self.pipeline_cache.find_pipeline(name)
+        if cached != 0:
+            return cached
+        val handle = metal_session_create_compute_pipeline(self.device_handle, library, fn_name)
+        if handle != 0:
+            self.pipeline_cache.cache_pipeline(name, handle)
+        handle
+
+    me begin_command() -> i64:
+        if self.initialized == false:
+            return 0
+        val cmd = metal_session_begin_command(self.queue_handle)
+        if cmd != 0:
+            self.command_count = self.command_count + 1
+        cmd
+
+    me commit_and_wait(cmd: i64) -> text:
+        val err = metal_session_commit_command(cmd)
+        if err != "":
+            return err
+        metal_session_wait_completion(cmd)
+
+    me release() -> text:
+        if self.initialized == false:
+            return ""
+        metal_session_cleanup_device(self.device_handle)
+        self.device_handle = 0
+        self.queue_handle = 0
+        self.initialized = false
+        ""
+
+    me stats() -> text:
+        "device=" + self.device_name + " mode=" + self.mode + " libs=" + self.library_count + " cmds=" + self.command_count + " gen=" + self.generation

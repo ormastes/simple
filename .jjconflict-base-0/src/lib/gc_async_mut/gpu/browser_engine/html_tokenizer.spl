@@ -1,0 +1,478 @@
+# HTML Tokenizer — WHATWG §13.2.5 state-machine tokenizer
+#
+# Produces a flat list of HtmlToken from raw HTML text.
+# No DOM dependency — pure text-in, tokens-out.
+# Ported from examples/browser/feature/parser/html_tokenizer.spl
+# with adaptations for canonical engine types.
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+
+# =========================================================================
+# Token types
+# =========================================================================
+
+pub enum HtmlTokenKind:
+    Doctype
+    StartTag
+    EndTag
+    Character
+    Comment
+    Eof
+
+pub class HtmlAttr:
+    """A single HTML attribute name/value pair."""
+    name: text
+    value: text
+
+pub class HtmlToken:
+    """A single lexical token emitted by the HTML tokenizer."""
+    token_kind: HtmlTokenKind
+    tag_name: text
+    attrs: [HtmlAttr]
+    self_closing: bool
+    data: text
+
+fn _tok_eof() -> HtmlToken:
+    HtmlToken(token_kind: HtmlTokenKind.Eof, tag_name: "", attrs: [], self_closing: false, data: "")
+
+fn _tok_start(tag: text, attrs: [HtmlAttr], self_closing: bool) -> HtmlToken:
+    HtmlToken(token_kind: HtmlTokenKind.StartTag, tag_name: tag, attrs: attrs, self_closing: self_closing, data: "")
+
+fn _tok_end(tag: text) -> HtmlToken:
+    HtmlToken(token_kind: HtmlTokenKind.EndTag, tag_name: tag, attrs: [], self_closing: false, data: "")
+
+fn _tok_char(data: text) -> HtmlToken:
+    HtmlToken(token_kind: HtmlTokenKind.Character, tag_name: "", attrs: [], self_closing: false, data: data)
+
+fn _tok_comment(data: text) -> HtmlToken:
+    HtmlToken(token_kind: HtmlTokenKind.Comment, tag_name: "", attrs: [], self_closing: false, data: data)
+
+fn _tok_doctype(name: text) -> HtmlToken:
+    HtmlToken(token_kind: HtmlTokenKind.Doctype, tag_name: name, attrs: [], self_closing: false, data: "")
+
+# =========================================================================
+# HtmlTokenizer class
+# =========================================================================
+
+pub class HtmlTokenizer:
+    """WHATWG §13.2.5 state-machine tokenizer."""
+    html: text
+    pos: i32
+    length: i32
+
+pub fn html_tokenizer_new(html: text) -> HtmlTokenizer:
+    """Create a new tokenizer for the given HTML string."""
+    HtmlTokenizer(html: html, pos: 0, length: html.len())
+
+pub fn html_tokenizer_tokenize(t: HtmlTokenizer) -> [HtmlToken]:
+    """Tokenize the entire input, returning all tokens including final EOF."""
+    var tokens: [HtmlToken] = []
+    var pos = 0
+    val html = t.html
+    val n = html.len()
+    # raw-text mode for script/style (tag name stored here)
+    var raw_text_tag = ""
+    while pos < n:
+        val ch = html.char_at(pos)
+        if raw_text_tag != "":
+            # In raw-text mode: scan for </tag>
+            val end_tag = "</" + raw_text_tag
+            val found_end = _find_substr(html, end_tag, pos)
+            var raw_data = ""
+            if found_end < 0:
+                # No closing tag found — consume everything as character data
+                raw_data = html.slice(pos, n)
+                pos = n
+                if raw_data.len() > 0:
+                    tokens.push(_tok_char(raw_data))
+                raw_text_tag = ""
+            else:
+                raw_data = html.slice(pos, found_end)
+                pos = found_end
+                if raw_data.len() > 0:
+                    tokens.push(_tok_char(raw_data))
+                # Emit the end tag
+                val close_end = _find_char(html, ">", pos)
+                if close_end < 0:
+                    pos = n
+                else:
+                    pos = close_end + 1
+                tokens.push(_tok_end(raw_text_tag))
+                raw_text_tag = ""
+        elif ch == "<":
+            # Peek at next char
+            if pos + 1 >= n:
+                # Lone < at end — emit as character
+                tokens.push(_tok_char("<"))
+                pos = pos + 1
+            else:
+                val next = html.char_at(pos + 1)
+                if next == "!":
+                    # Comment or doctype
+                    if pos + 3 < n and html.slice(pos + 2, pos + 4) == "--":
+                        # Comment: <!-- ... -->
+                        val comment_end = _find_substr(html, "-->", pos + 4)
+                        if comment_end < 0:
+                            val comment_data = html.slice(pos + 4, n)
+                            tokens.push(_tok_comment(comment_data))
+                            pos = n
+                        else:
+                            val comment_data2 = html.slice(pos + 4, comment_end)
+                            tokens.push(_tok_comment(comment_data2))
+                            pos = comment_end + 3
+                    elif pos + 8 < n and html.slice(pos + 2, pos + 9).lower() == "doctype":
+                        # Doctype
+                        val gt = _find_char(html, ">", pos)
+                        if gt < 0:
+                            pos = n
+                        else:
+                            val dt_inner = html.slice(pos + 9, gt).trim()
+                            val dt_parts = _split_first_word(dt_inner)
+                            tokens.push(_tok_doctype(dt_parts))
+                            pos = gt + 1
+                    else:
+                        # Unknown <! sequence — skip to >
+                        val gt2 = _find_char(html, ">", pos)
+                        if gt2 < 0:
+                            pos = n
+                        else:
+                            pos = gt2 + 1
+                elif next == "/":
+                    # End tag
+                    val gt = _find_char(html, ">", pos + 2)
+                    if gt < 0:
+                        tokens.push(_tok_char("<"))
+                        pos = pos + 1
+                    else:
+                        val tag_raw = html.slice(pos + 2, gt).trim().lower()
+                        val tag_name = _strip_tag_name(tag_raw)
+                        tokens.push(_tok_end(tag_name))
+                        pos = gt + 1
+                elif next == "?":
+                    # Processing instruction — skip to >
+                    val gt3 = _find_char(html, ">", pos)
+                    if gt3 < 0:
+                        pos = n
+                    else:
+                        pos = gt3 + 1
+                elif _is_alpha_char(next):
+                    # Start tag
+                    val gt4 = _find_tag_close(html, pos + 1)
+                    if gt4 < 0:
+                        tokens.push(_tok_char("<"))
+                        pos = pos + 1
+                    else:
+                        val self_closing = gt4 > 0 and html.char_at(gt4 - 1) == "/"
+                        val inner = html.slice(pos + 1, if self_closing: gt4 - 1 else: gt4).trim()
+                        val parsed = _parse_start_tag(inner)
+                        val tag_name2 = parsed.tag_name
+                        val attrs2 = parsed.attrs
+                        tokens.push(_tok_start(tag_name2, attrs2, self_closing))
+                        pos = gt4 + 1
+                        # Enter raw-text mode for script and style
+                        if tag_name2 == "script" or tag_name2 == "style":
+                            raw_text_tag = tag_name2
+                else:
+                    # Stray < — emit as character
+                    tokens.push(_tok_char("<"))
+                    pos = pos + 1
+        elif ch == "&":
+            # Named entity reference
+            val entity_result = _parse_entity(html, pos)
+            tokens.push(_tok_char(entity_result.decoded))
+            pos = entity_result.end_pos
+        else:
+            # Regular character data — accumulate until < or &
+            val end_pos = _scan_char_data(html, pos)
+            val char_data = html.slice(pos, end_pos)
+            if char_data.len() > 0:
+                tokens.push(_tok_char(char_data))
+            pos = end_pos
+    tokens.push(_tok_eof())
+    tokens
+
+# =========================================================================
+# Tag parsing helpers
+# =========================================================================
+
+class _ParsedTag:
+    tag_name: text
+    attrs: [HtmlAttr]
+
+fn _parse_start_tag(inner: text) -> _ParsedTag:
+    """Parse tag name and attributes from the inner content of a start tag."""
+    val n = inner.len()
+    if n == 0:
+        return _ParsedTag(tag_name: "", attrs: [])
+    # Extract tag name: up to first whitespace
+    var name_end = 0
+    while name_end < n:
+        val c = inner.char_at(name_end)
+        if c == " " or c == "\t" or c == "\n" or c == "\r" or c == "/":
+            name_end = n  # break out
+        else:
+            name_end = name_end + 1
+    # Re-find actual end of tag name
+    var ne = 0
+    while ne < n:
+        val c2 = inner.char_at(ne)
+        if c2 == " " or c2 == "\t" or c2 == "\n" or c2 == "\r" or c2 == "/":
+            ne = n + 1  # signal exit
+        else:
+            ne = ne + 1
+    # Since we can't break easily, do it differently
+    var tag_end = 0
+    var found_ws = false
+    while tag_end < n and not found_ws:
+        val cc = inner.char_at(tag_end)
+        if cc == " " or cc == "\t" or cc == "\n" or cc == "\r":
+            found_ws = true
+        else:
+            tag_end = tag_end + 1
+    val tag_name = inner.slice(0, tag_end).lower()
+    # Parse attributes from the remainder
+    val attrs_str = if tag_end < n: inner.slice(tag_end, n).trim() else: ""
+    val attrs = _parse_attrs(attrs_str)
+    _ParsedTag(tag_name: tag_name, attrs: attrs)
+
+fn _is_ws(c: text) -> bool:
+    c == " " or c == "\t" or c == "\n" or c == "\r"
+
+fn _skip_ws(s: text, start: i32) -> i32:
+    """Return the first index >= start that is not whitespace."""
+    val n = s.len()
+    var i = start
+    var done = false
+    while i < n and not done:
+        if _is_ws(s.char_at(i)):
+            i = i + 1
+        else:
+            done = true
+    i
+
+fn _parse_attrs(s: text) -> [HtmlAttr]:
+    """Parse attribute string into list of HtmlAttr."""
+    var attrs: [HtmlAttr] = []
+    val n = s.len()
+    var pos = _skip_ws(s, 0)
+    while pos < n:
+        # Read attribute name: until = or whitespace or end
+        var name_end = pos
+        var ne_done = false
+        while name_end < n and not ne_done:
+            val nc = s.char_at(name_end)
+            if nc == "=" or _is_ws(nc):
+                ne_done = true
+            else:
+                name_end = name_end + 1
+        val attr_name = s.slice(pos, name_end).lower()
+        pos = _skip_ws(s, name_end)
+        # Check for =
+        if pos < n and s.char_at(pos) == "=":
+            pos = _skip_ws(s, pos + 1)
+            # Read value
+            var attr_val = ""
+            if pos < n:
+                val qc = s.char_at(pos)
+                if qc == "\"" or qc == "'":
+                    pos = pos + 1
+                    val val_end = _find_char(s, qc, pos)
+                    if val_end < 0:
+                        attr_val = s.slice(pos, n)
+                        pos = n
+                    else:
+                        attr_val = s.slice(pos, val_end)
+                        pos = val_end + 1
+                else:
+                    # Unquoted value: until whitespace
+                    var uq_end = pos
+                    var uq_done = false
+                    while uq_end < n and not uq_done:
+                        if _is_ws(s.char_at(uq_end)):
+                            uq_done = true
+                        else:
+                            uq_end = uq_end + 1
+                    attr_val = s.slice(pos, uq_end)
+                    pos = uq_end
+            if attr_name.len() > 0:
+                attrs.push(HtmlAttr(name: attr_name, value: attr_val))
+        else:
+            # Boolean attribute
+            if attr_name.len() > 0:
+                attrs.push(HtmlAttr(name: attr_name, value: ""))
+        pos = _skip_ws(s, pos)
+    attrs
+
+# =========================================================================
+# Entity parsing
+# =========================================================================
+
+class _EntityResult:
+    decoded: text
+    end_pos: i32
+
+fn _parse_entity(html: text, pos: i32) -> _EntityResult:
+    """Parse an HTML entity reference starting at pos (which points to &)."""
+    val n = html.len()
+    if pos + 1 >= n:
+        return _EntityResult(decoded: "&", end_pos: pos + 1)
+    val next = html.char_at(pos + 1)
+    if next == "#":
+        # Numeric character reference — just pass through for now
+        val semi = _find_char(html, ";", pos + 2)
+        if semi < 0:
+            return _EntityResult(decoded: "&", end_pos: pos + 1)
+        # Skip numeric refs — return as-is (pass_todo: full numeric decode)
+        return _EntityResult(decoded: "&", end_pos: semi + 1)
+    # Named entity: scan to ; or whitespace
+    var end = pos + 1
+    while end < n:
+        val c = html.char_at(end)
+        if c == ";":
+            end = end + 1
+            end = n + 1  # break
+        elif _is_alpha_char(c) or (c >= "0" and c <= "9"):
+            end = end + 1
+        else:
+            end = n + 1  # break
+    # Re-find actual entity end
+    var entity_end = pos + 1
+    var e_done = false
+    while entity_end < n and not e_done:
+        val ec = html.char_at(entity_end)
+        if ec == ";":
+            entity_end = entity_end + 1
+            e_done = true
+        elif _is_alpha_char(ec) or (ec >= "0" and ec <= "9"):
+            entity_end = entity_end + 1
+        else:
+            e_done = true
+    val entity_name = html.slice(pos + 1, entity_end)
+    val stripped = if entity_name.ends_with(";"): entity_name.slice(0, entity_name.len() - 1) else: entity_name
+    val decoded = _decode_named_entity(stripped)
+    _EntityResult(decoded: decoded, end_pos: entity_end)
+
+fn _decode_named_entity(name: text) -> text:
+    """Decode a named HTML entity to its character."""
+    if name == "amp":
+        return "&"
+    if name == "lt":
+        return "<"
+    if name == "gt":
+        return ">"
+    if name == "quot":
+        return "\""
+    if name == "apos":
+        return "'"
+    if name == "nbsp":
+        return " "
+    if name == "copy":
+        return "(c)"
+    if name == "reg":
+        return "(r)"
+    if name == "mdash":
+        return "-"
+    if name == "ndash":
+        return "-"
+    if name == "hellip":
+        return "..."
+    if name == "laquo":
+        return "<<"
+    if name == "raquo":
+        return ">>"
+    if name == "ldquo":
+        return "\""
+    if name == "rdquo":
+        return "\""
+    if name == "lsquo":
+        return "'"
+    if name == "rsquo":
+        return "'"
+    # Unknown entity — return as-is with & prefix
+    "&" + name + ";"
+
+# =========================================================================
+# String scanning utilities
+# =========================================================================
+
+fn _find_char(s: text, ch: text, start: i32) -> i32:
+    """Find first occurrence of single char ch in s starting at start. Returns -1 if not found."""
+    val n = s.len()
+    var i = start
+    while i < n:
+        if s.char_at(i) == ch:
+            return i
+        i = i + 1
+    -1
+
+fn _find_substr(s: text, needle: text, start: i32) -> i32:
+    """Find first occurrence of needle in s starting at start. Returns -1 if not found."""
+    val n = s.len()
+    val m = needle.len()
+    if m == 0:
+        return start
+    val limit = n - m
+    var i = start
+    while i <= limit:
+        if s.slice(i, i + m) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _find_tag_close(s: text, start: i32) -> i32:
+    """Find the closing > of a tag, respecting quoted attribute values."""
+    val n = s.len()
+    var i = start
+    var in_quote = ""
+    while i < n:
+        val c = s.char_at(i)
+        if in_quote != "":
+            if c == in_quote:
+                in_quote = ""
+        elif c == "\"" or c == "'":
+            in_quote = c
+        elif c == ">":
+            return i
+        i = i + 1
+    -1
+
+fn _scan_char_data(s: text, start: i32) -> i32:
+    """Scan from start until < or & or end. Returns end position."""
+    val n = s.len()
+    var i = start
+    while i < n:
+        val c = s.char_at(i)
+        if c == "<" or c == "&":
+            return i
+        i = i + 1
+    n
+
+fn _is_alpha_char(c: text) -> bool:
+    """True if c is a letter a-z or A-Z."""
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z")
+
+fn _strip_tag_name(raw: text) -> text:
+    """Extract just the tag name from a raw end-tag inner string."""
+    val n = raw.len()
+    var end = 0
+    var done = false
+    while end < n and not done:
+        val c = raw.char_at(end)
+        if c == " " or c == "\t" or c == "\n" or c == "\r" or c == "/":
+            done = true
+        else:
+            end = end + 1
+    raw.slice(0, end).lower()
+
+fn _split_first_word(s: text) -> text:
+    """Return the first whitespace-delimited word from s."""
+    val n = s.len()
+    var end = 0
+    var done = false
+    while end < n and not done:
+        val c = s.char_at(end)
+        if c == " " or c == "\t" or c == "\n" or c == "\r":
+            done = true
+        else:
+            end = end + 1
+    s.slice(0, end)

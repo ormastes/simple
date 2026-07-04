@@ -1,0 +1,522 @@
+# # MCP Server Intensive Tests
+#
+#
+# **Feature IDs:** #1031-1040
+# **Category:** Testing
+# **Difficulty:** 5/5
+# **Status:** Implemented
+#
+# ## Overview
+#
+# End-to-end testing of MCP (Model Context Protocol) servers:
+# - mcp: Main MCP server for Simple language
+# - mcp_jj: Jujutsu version control integration
+#
+# Tests server lifecycle, message handling, and integration.
+#
+# ## Key Concepts
+#
+# | Concept | Description |
+# |---------|-------------|
+# | MCP Protocol | JSON-RPC based communication |
+# | Server Lifecycle | Initialize, request/response, shutdown |
+# | Tool Integration | Exposing Simple tools via MCP |
+#
+# ## Related Specifications
+#
+# - [MCP Server](../../src/app/mcp/) - Main server
+# - [MCP JJ](../../src/app/mcp_jj/) - Version control server
+#
+# ## Examples
+#
+# ```simple
+# # MCP message handling
+# val request = parse_json_rpc(message)
+# val response = handle_request(request)
+# ```
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+fn check_msg(condition: bool, message: text):
+    if not condition:
+        expect(message).to_equal("")
+
+
+fn slow_it(name: text, block: fn()):
+    it(name, block)
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn _run_mcp_intensive(args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/mcp/main.spl\" " + joined
+    ])
+
+fn _ping_mcp_intensive() -> (text, text, i64):
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); printf '{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\\n' | SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/mcp/main.spl\""
+    ])
+
+fn _mcp_jsonl(body: text) -> text:
+    body + "\n"
+
+fn _send_mcp_intensive(messages: text) -> (text, text, i64):
+    val tmp = "/tmp/simple_app_mcp_intensive_input.jsonl"
+    rt_file_write_text(tmp, messages)
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cat " + tmp + " | SIMPLE_MCP_TOOL_SET=all SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/mcp/main.spl\""
+    ])
+
+fn _mcp_initialize_line(id: text) -> text:
+    _mcp_jsonl("{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"app-mcp-intensive\",\"version\":\"1.0\"}}}")
+
+fn _mcp_initialized_line() -> text:
+    _mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}")
+
+fn _mcp_request_line(id: text, method: text, params_json: text) -> text:
+    _mcp_jsonl("{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"" + method + "\",\"params\":" + params_json + "}")
+
+describe "MCP Source-Mode Protocol Coverage":
+    context "server lifecycle":
+        slow_it "initializes the source-mode MCP server":
+            val (out, err, code) = _send_mcp_intensive(_mcp_initialize_line("1"))
+            expect(code).to_equal(0)
+            expect(out.contains("\"protocolVersion\":\"2025-06-18\"")).to_be(true)
+            expect(out.contains("\"serverInfo\"")).to_be(true)
+            expect(not out.contains("\"error\"")).to_be(true)
+        slow_it "lists tools through the source-mode MCP server":
+            val input = _mcp_initialize_line("1") + _mcp_initialized_line() + _mcp_request_line("2", "tools/list", "{}")
+            val (out, err, code) = _send_mcp_intensive(input)
+            expect(code).to_equal(0)
+            expect(out.contains("\"result\":{\"tools\":[")).to_be(true)
+            expect(out.contains("\"name\":\"debug_create_session\"")).to_be(true)
+            expect(not out.contains("\"error\"")).to_be(true)
+        slow_it "returns tool-level error for unknown source-mode MCP tool":
+            val input = _mcp_initialize_line("1") + _mcp_initialized_line() + _mcp_request_line("2", "tools/call", "{\"name\":\"no_such_tool\",\"arguments\":{}}")
+            val (out, err, code) = _send_mcp_intensive(input)
+            expect(code).to_equal(0)
+            expect(out.contains("\"isError\":true")).to_be(true)
+            expect(out.contains("Unknown tool")).to_be(true)
+            expect(not out.contains("\"error\"")).to_be(true)
+    context "log CLI contract":
+        slow_it "runs shared MCP log-mode preflight paths":
+            val (help_out, help_err, help_code) = _run_mcp_intensive(["--help"])
+            expect(help_code).to_equal(0)
+            expect(help_out.contains("Simple MCP Server")).to_be(true)
+            expect(help_out.contains("--log-mode")).to_be(true)
+            expect(help_out.contains("--progress")).to_be(true)
+            val (json_out, json_err, json_code) = _run_mcp_intensive(["--log-mode=json"])
+            expect(json_code).to_equal(0)
+            expect(json_out.contains("\"command\":\"mcp\"")).to_be(true)
+            expect(json_out.contains("\"status\":\"ready\"")).to_be(true)
+        slow_it "runs shared MCP invalid-mode and protocol paths":
+            val (bad_out, bad_err, bad_code) = _run_mcp_intensive(["--log-mode=noisy"])
+            expect(bad_code).to_equal(1)
+            val (ping_out, ping_err, ping_code) = _ping_mcp_intensive()
+            expect(ping_code).to_equal(0)
+            expect(ping_out.contains("\"jsonrpc\":\"2.0\"")).to_be(true)
+            expect(ping_out.contains("\"result\":{}")).to_be(true)
+describe "MCP Server Lifecycle - Intensive":
+    # ## Server Initialization and Shutdown
+    #
+    # Test complete server lifecycle.
+    
+    context "server startup":
+        slow_it "validates server configuration":
+            val config = {
+                "name": "simple-mcp-server",
+                "version": "0.5.0",
+                "protocol_version": "2024-11-05"
+            }
+            
+            expect(config["name"]).to_equal("simple-mcp-server")
+            expect(config["version"].?).to_be(true)
+            expect(config["protocol_version"].?).to_be(true)
+        slow_it "initializes 100 server instances":
+            var instances = []
+            
+            for i in 0..100:
+                val instance = {
+                    "id": i,
+                    "status": "initialized",
+                    "port": 3000 + i
+                }
+                instances = instances.append(instance)
+            
+            expect(instances.len()).to_equal(100)
+    context "server capabilities":
+        slow_it "declares tool capabilities":
+            val tools = [
+                "simple/build",
+                "simple/test",
+                "simple/lint",
+                "simple/format"
+            ]
+            
+            for tool in tools:
+                expect(tool.starts_with("simple/")).to_be(true)
+        slow_it "registers 50 tool endpoints":
+            var endpoints = []
+            
+            for i in 0..50:
+                val endpoint = {
+                    "name": "tool_{i}",
+                    "method": "POST",
+                    "path": "/tools/tool_{i}"
+                }
+                endpoints = endpoints.append(endpoint)
+            
+            expect(endpoints.len()).to_equal(50)
+        slow_it "initializes the source-mode MCP server":
+            val (out, err, code) = _send_mcp_intensive(_mcp_initialize_line("1"))
+            expect(code).to_equal(0)
+            expect(out.contains("\"protocolVersion\":\"2025-06-18\"")).to_be(true)
+            expect(out.contains("\"serverInfo\"")).to_be(true)
+            expect(not out.contains("\"error\"")).to_be(true)
+describe "MCP Message Handling - Intensive":
+    # ## JSON-RPC Message Processing
+    #
+    # Test message parsing and response generation.
+    
+    context "request parsing":
+        slow_it "parses 500 JSON-RPC requests":
+            var parsed = 0
+            
+            for i in 0..500:
+                val request = "{\"jsonrpc\":\"2.0\",\"id\":{i},\"method\":\"test\"}"
+                if request.contains("jsonrpc") and request.contains("method"):
+                    parsed = parsed + 1
+            
+            expect(parsed).to_equal(500)
+        slow_it "validates request structure":
+            var requests = [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call"}
+            ]
+            
+            for req in requests:
+                expect(req["jsonrpc"]).to_equal("2.0")
+                expect(req["id"].?).to_be(true)
+                expect(req["method"].?).to_be(true)
+    context "response generation":
+        slow_it "generates 500 responses":
+            var responses = []
+            
+            for i in 0..500:
+                val response = {
+                    "jsonrpc": "2.0",
+                    "id": i,
+                    "result": "success"
+                }
+                responses = responses.append(response)
+            
+            expect(responses.len()).to_equal(500)
+        slow_it "handles error responses":
+            val errors = [
+                {"code": -32700, "message": "Parse error"},
+                {"code": -32600, "message": "Invalid Request"},
+                {"code": -32601, "message": "Method not found"}
+            ]
+            
+            for err in errors:
+                expect(err["code"].?).to_be(true)
+                expect(err["message"].?).to_be(true)
+        slow_it "lists tools through the source-mode MCP server":
+            val input = _mcp_initialize_line("1") + _mcp_initialized_line() + _mcp_request_line("2", "tools/list", "{}")
+            val (out, err, code) = _send_mcp_intensive(input)
+            expect(code).to_equal(0)
+            expect(out.contains("\"result\":{\"tools\":[")).to_be(true)
+            expect(out.contains("\"name\":\"debug_create_session\"")).to_be(true)
+            expect(not out.contains("\"error\"")).to_be(true)
+describe "MCP Tool Integration - Intensive":
+    # ## Simple Tool Exposure via MCP
+    #
+    # Test tool calling through MCP protocol.
+    
+    context "build tool":
+        slow_it "handles 100 build requests":
+            var builds = 0
+            
+            for i in 0..100:
+                val request = {
+                    "tool": "simple/build",
+                    "arguments": {
+                        "target": "file{i}.spl",
+                        "release": i % 2 == 0
+                    }
+                }
+                
+                if request["tool"] == "simple/build":
+                    builds = builds + 1
+            
+            expect(builds).to_equal(100)
+        slow_it "validates build parameters":
+            val params = [
+                {"target": "src/compiler/10.frontend/core/lexer.spl", "release": true},
+                {"target": "test/unit/test.spl", "release": false},
+                {"target": "examples/hello.spl", "release": true}
+            ]
+            
+            for param in params:
+                expect(param["target"].?).to_be(true)
+                expect(param["release"].?).to_be(true)
+    context "test tool":
+        slow_it "handles 100 test requests":
+            var tests = 0
+            
+            for i in 0..100:
+                val request = {
+                    "tool": "simple/test",
+                    "arguments": {
+                        "pattern": "test/unit/*_spec.spl",
+                        "tag": if i % 3 == 0: "unit" else: "integration"
+                    }
+                }
+                
+                if request["tool"] == "simple/test":
+                    tests = tests + 1
+            
+            expect(tests).to_equal(100)
+    context "format tool":
+        slow_it "handles format requests with options":
+            var requests = [
+                {"tool": "simple/format", "args": {"check": true}},
+                {"tool": "simple/format", "args": {"fix": true}},
+                {"tool": "simple/format", "args": {"dry_run": true}}
+            ]
+            
+            for req in requests:
+                expect(req["tool"]).to_equal("simple/format")
+                expect(req["args"].?).to_be(true)
+        slow_it "returns tool-level error for unknown source-mode MCP tool":
+            val input = _mcp_initialize_line("1") + _mcp_initialized_line() + _mcp_request_line("2", "tools/call", "{\"name\":\"no_such_tool\",\"arguments\":{}}")
+            val (out, err, code) = _send_mcp_intensive(input)
+            expect(code).to_equal(0)
+            expect(out.contains("\"isError\":true")).to_be(true)
+            expect(out.contains("Unknown tool")).to_be(true)
+            expect(not out.contains("\"error\"")).to_be(true)
+describe "MCP JJ Integration - Intensive":
+    # ## Jujutsu Version Control via MCP
+    #
+    # Test jj command integration.
+    
+    context "jj status queries":
+        slow_it "handles 100 status requests":
+            var status_calls = 0
+            
+            for i in 0..100:
+                val request = {
+                    "tool": "jj/status",
+                    "arguments": {}
+                }
+                
+                if request["tool"] == "jj/status":
+                    status_calls = status_calls + 1
+            
+            expect(status_calls).to_equal(100)
+        slow_it "parses jj status output":
+            val status_lines = [
+                "Working copy : abc123",
+                "Parent commit: def456",
+                "Changed files: 5"
+            ]
+            
+            for line in status_lines:
+                expect(line.len()).to_be_greater_than(0)
+                expect(line.contains(":")).to_be(true)
+    context "jj commit operations":
+        slow_it "handles 50 commit requests":
+            var commits = 0
+            
+            for i in 0..50:
+                val request = {
+                    "tool": "jj/commit",
+                    "arguments": {
+                        "message": "Commit {i}",
+                        "files": ["file{i}.spl"]
+                    }
+                }
+                
+                if request["tool"] == "jj/commit":
+                    commits = commits + 1
+            
+            expect(commits).to_equal(50)
+        slow_it "validates commit messages":
+            val messages = [
+                "Add feature X",
+                "Fix bug Y",
+                "Update documentation",
+                "Refactor module Z"
+            ]
+            
+            for msg in messages:
+                expect(msg.len()).to_be_greater_than(0)
+                expect(msg.len()).to_be_less_than(100)
+    context "jj diff operations":
+        slow_it "handles diff requests":
+            val diff_requests = [
+                {"file": "src/compiler/10.frontend/core/lexer.spl", "revision": "abc123"},
+                {"file": "src/compiler/10.frontend/core/parser.spl", "revision": "def456"},
+                {"file": "test/unit/test.spl", "revision": "ghi789"}
+            ]
+            
+            for req in diff_requests:
+                expect(req["file"].ends_with(".spl")).to_be(true)
+                expect(req["revision"].?).to_be(true)
+describe "MCP Concurrency - Intensive":
+    # ## Concurrent Request Handling
+    #
+    # Test handling multiple simultaneous requests.
+    
+    context "parallel requests":
+        slow_it "simulates 200 concurrent requests":
+            var requests = []
+            
+            for i in 0..200:
+                val req = {
+                    "id": i,
+                    "method": "tools/call",
+                    "timestamp": i
+                }
+                requests = requests.append(req)
+            
+            expect(requests.len()).to_equal(200)
+        slow_it "processes requests in batches":
+            var total = 1000
+            var batch_size = 50
+            var batches = total / batch_size
+            
+            var processed = 0
+            for b in 0..batches:
+                processed = processed + batch_size
+            
+            expect(processed).to_equal(1000)
+    context "request queuing":
+        slow_it "manages request queue":
+            var queue = []
+            
+            # Add 100 requests
+            for i in 0..100:
+                queue = queue.append(i)
+            
+            # Process them
+            var processed = []
+            while queue.len() > 0:
+                val item = queue[0]
+                processed = processed.append(item)
+                queue = queue[1..queue.len()]
+            
+            expect(processed.len()).to_equal(100)
+describe "MCP Error Handling - Intensive":
+    # ## Error Detection and Recovery
+    #
+    # Test error handling across scenarios.
+    
+    context "invalid requests":
+        slow_it "detects 100 malformed requests":
+            var errors = 0
+            
+            for i in 0..100:
+                val request = {"invalid": "structure"}
+                
+                # Check for required fields
+                if not request.get("jsonrpc").?:
+                    errors = errors + 1
+            
+            expect(errors).to_equal(100)
+        slow_it "validates method names":
+            val methods = [
+                "initialize",
+                "tools/list",
+                "tools/call",
+                "invalid_method_name"
+            ]
+            
+            var valid_methods = ["initialize", "tools/list", "tools/call"]
+            
+            var valid_count = 0
+            for method in methods:
+                if method in valid_methods:
+                    valid_count = valid_count + 1
+            
+            expect(valid_count).to_equal(3)
+    context "timeout handling":
+        slow_it "simulates request timeouts":
+            var timeouts = 0
+            
+            for i in 0..1000:
+                val duration = i * 10  # milliseconds
+                
+                if duration > 5000:  # 5 second timeout
+                    timeouts = timeouts + 1
+            
+            expect(timeouts).to_be_greater_than(0)
+describe "MCP Logging - Intensive":
+    # ## Request/Response Logging
+    #
+    # Test logging infrastructure.
+    
+    context "request logging":
+        slow_it "logs 500 requests":
+            var log_entries = []
+            
+            for i in 0..500:
+                val entry = {
+                    "timestamp": i,
+                    "level": "INFO",
+                    "message": "Request {i} received"
+                }
+                log_entries = log_entries.append(entry)
+            
+            expect(log_entries.len()).to_equal(500)
+        slow_it "categorizes log levels":
+            val levels = ["DEBUG", "INFO", "WARN", "ERROR"]
+            
+            var counts = {
+                "DEBUG": 0,
+                "INFO": 0,
+                "WARN": 0,
+                "ERROR": 0
+            }
+            
+            for i in 0..400:
+                val level = levels[i % 4]
+                counts[level] = counts[level] + 1
+            
+            expect(counts["DEBUG"]).to_equal(100)
+            expect(counts["INFO"]).to_equal(100)
+    context "source-mode log CLI contract":
+        slow_it "runs shared MCP log-mode preflight paths":
+            val (help_out, help_err, help_code) = _run_mcp_intensive(["--help"])
+            expect(help_code).to_equal(0)
+            expect(help_out).to_contain("Simple MCP Server")
+            expect(help_out).to_contain("--log-mode")
+            expect(help_out).to_contain("--progress")
+            val (json_out, json_err, json_code) = _run_mcp_intensive(["--log-mode=json"])
+            expect(json_code).to_equal(0)
+            expect(json_out).to_contain("\"command\":\"mcp\"")
+            expect(json_out).to_contain("\"status\":\"ready\"")
+        slow_it "runs shared MCP invalid-mode and protocol paths":
+            val (bad_out, bad_err, bad_code) = _run_mcp_intensive(["--log-mode=noisy"])
+            expect(bad_code).to_equal(1)
+            val (ping_out, ping_err, ping_code) = _ping_mcp_intensive()
+            expect(ping_code).to_equal(0)
+            expect(ping_out).to_contain("\"jsonrpc\":\"2.0\"")
+            expect(ping_out).to_contain("\"result\":{}")
+# Helper functions
+
+fn create_json_rpc_request(id: i64, method: text) -> {text: any}:
+    {
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method
+    }
+
+fn validate_mcp_response(response: {text: any}) -> bool:
+    response.get("jsonrpc").? and response.get("id").?

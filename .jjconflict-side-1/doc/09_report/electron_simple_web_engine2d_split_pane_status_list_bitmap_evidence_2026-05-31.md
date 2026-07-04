@@ -1,0 +1,152 @@
+# Electron Simple Web Engine2D Bitmap Evidence
+
+- status: pass
+- reason: pass
+- scene: simple-web-engine2d-split-pane-status-list
+- dimensions: 96x64
+- Simple checksum: 26296404319380
+- Electron checksum: 26296404319380
+- Simple weighted checksum: 80789881624687138
+- Electron weighted checksum: 80789881624687138
+- mismatch count: 0
+- blur/tolerance used: false
+- Electron frame us: 23444
+
+## Raw Evidence
+- electron_simple_web_engine2d_status=pass
+- electron_simple_web_engine2d_reason=pass
+- electron_simple_web_engine2d_scene=simple-web-engine2d-split-pane-status-list
+- electron_simple_web_engine2d_width=96
+- electron_simple_web_engine2d_height=64
+- electron_simple_web_engine2d_iterations=2
+- electron_simple_web_engine2d_simple_checksum=26296404319380
+- electron_simple_web_engine2d_electron_checksum=26296404319380
+- electron_simple_web_engine2d_simple_weighted_checksum=80789881624687138
+- electron_simple_web_engine2d_electron_weighted_checksum=80789881624687138
+- electron_simple_web_engine2d_mismatch_count=0
+- electron_simple_web_engine2d_blur_or_tolerance_used=false
+- electron_simple_web_engine2d_electron_frame_us=23444
+- electron_simple_web_engine2d_exit_code=0
+
+## Simple Output
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/gpu/engine2d/simd_provider.spl:3:1
+-    |
+-   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.opengl_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.rocm_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/gpu/engine2d/simd_provider.spl:3:1
+-    |
+-   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/opengl_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.opengl_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/rocm_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.rocm_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- renderer=pure-simple-web-engine2d
+- scene=simple-web-engine2d-split-pane-status-list
+- width=96
+- height=64
+- checksum=26296404319380
+- weighted_checksum=80789881624687138
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d
+- scene=simple-web-engine2d-split-pane-status-list
+- width=96
+- height=64
+- checksum=26296404319380
+- weighted_checksum=80789881624687138
+- blur_or_tolerance_used=false
+
+## Electron Output
+- [208779:0531/073117.067979:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
+- [208878:0531/073117.424610:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
+- [208878:0531/073117.424770:ERROR:raster_decoder.cc(1968)] [.RenderWorker-0x288400024100]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
+- renderer=electron-live-capture-page
+- scene=simple-web-engine2d-split-pane-status-list
+- width=96
+- height=64
+- iterations=2
+- checksum=26296404319380
+- expected_checksum=26296404319380
+- weighted_checksum=80789881624687138
+- expected_weighted_checksum=80789881624687138
+- mismatch_count=0
+- frame_us=23444
+- blur_or_tolerance_used=false
+- [208750:0531/073117.705592:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.

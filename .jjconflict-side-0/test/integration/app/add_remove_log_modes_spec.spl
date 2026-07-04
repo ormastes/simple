@@ -1,0 +1,72 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FIXTURE_DIR = "/tmp/simple_add_remove_log_mode_fixture"
+
+fn _setup_fixture():
+    val (_out, _err, _code) = rt_process_run("/bin/sh", [
+        "-c",
+        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + " && cat > " + FIXTURE_DIR + "/simple.sdn <<'EOF'\nname: add-remove-fixture\nversion: 6.7.8\ndependencies:\n  alpha: \"*\"\nEOF"
+    ])
+
+fn _run_app(app: text, args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/" + app + "/main.spl\" " + joined
+    ])
+
+describe "add/remove log mode CLI options":
+    it "shows shared add log options in help":
+        _setup_fixture()
+        val (out, err, code) = _run_app("add", ["--help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("--log-mode")
+        expect(out).to_contain("--progress")
+
+    it "shows shared remove log options in help":
+        _setup_fixture()
+        val (out, err, code) = _run_app("remove", ["--help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("--log-mode")
+        expect(out).to_contain("--progress")
+
+    it "supports add log-mode json":
+        _setup_fixture()
+        val (out, err, code) = _run_app("add", ["beta@^1.0.0", "--log-mode=json"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"command\":\"add\"")
+        expect(out).to_contain("\"name\":\"beta\"")
+        expect(out).to_contain("\"constraint\":\"^1.0.0\"")
+
+    it "supports remove log-mode json":
+        _setup_fixture()
+        val (out, err, code) = _run_app("remove", ["alpha", "--log-mode=json"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"command\":\"remove\"")
+        expect(out).to_contain("\"name\":\"alpha\"")
+
+    it "supports add dot progress":
+        _setup_fixture()
+        val (out, err, code) = _run_app("add", ["beta", "--progress=dot"])
+        expect(code).to_equal(0)
+        expect(out).to_start_with(".")
+        expect(out).to_contain("Added dependency 'beta'")
+
+    it "supports remove dot progress":
+        _setup_fixture()
+        val (out, err, code) = _run_app("remove", ["alpha", "--progress=dot"])
+        expect(code).to_equal(0)
+        expect(out).to_start_with(".")
+        expect(out).to_contain("Removed dependency 'alpha'")
+
+    it "rejects invalid add log mode":
+        _setup_fixture()
+        val (out, err, code) = _run_app("add", ["beta", "--log-mode=noisy"])
+        expect(code).to_equal(1)
+
+    it "rejects invalid remove log mode":
+        _setup_fixture()
+        val (out, err, code) = _run_app("remove", ["alpha", "--log-mode=noisy"])
+        expect(code).to_equal(1)

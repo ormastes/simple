@@ -1,0 +1,49 @@
+# Integration tests for doctest parsing from source files
+# Tests parse_doctests with realistic doc-comment source content
+
+use std.spec
+use std.spec.{expect}
+use std.common.doctest.parser
+
+describe "Doctest Source Parsing":
+    context "parse_doctests integration":
+        it "discovers doctests in doc comments":
+            val source = "/// Example usage:\n/// >>> 1 + 2\n/// 3\nfn add(a: i64, b: i64) -> i64:\n    a + b\n"
+            val items = parse_doctests(source, "lib/math.spl")
+
+            expect items.len to eq 1
+            expect items[0].commands to eq ["1 + 2"]
+            expect items[0].source_path to eq "lib/math.spl"
+
+        it "discovers multiple doctests across functions":
+            val source = "/// >>> 1 + 1\n/// 2\nfn foo(): pass\n\n/// >>> 2 + 2\n/// 4\nfn bar(): pass\n"
+            val items = parse_doctests(source, "lib/ops.spl")
+
+            expect items.len to eq 2
+            expect items[0].commands to eq ["1 + 1"]
+            expect items[1].commands to eq ["2 + 2"]
+
+        it "skips functions without doc comments":
+            val source = "fn helper(): pass\n\n/// >>> 42\n/// 42\nfn documented(): pass\n"
+            val items = parse_doctests(source, "lib/mixed.spl")
+
+            expect items.len to eq 1
+            expect items[0].commands to eq ["42"]
+
+        it "handles exception expectations in doc comments":
+            val source = "/// >>> bad_call()\n/// Error: ValueError\nfn risky(): pass\n"
+            val items = parse_doctests(source, "lib/errors.spl")
+
+            expect items.len to eq 1
+            match items[0].expected:
+                case Expected.Exception(type, msg):
+                    expect type to eq "ValueError"
+                case _:
+                    fail "Expected Exception"
+
+        it "preserves line numbers":
+            val source = "# header\n\n/// >>> 1\n/// 1\nfn f(): pass\n"
+            val items = parse_doctests(source, "test.spl")
+
+            expect items.len to eq 1
+            expect items[0].start_line to eq 3

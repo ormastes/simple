@@ -1,0 +1,131 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+# HTTP/2 stream state machine and H2Stream class.
+# Reference: RFC 7540 Section 5.1
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.FetchRequest
+use std.gc_async_mut.gpu.browser_engine.shared.error.network_error
+use std.js.types.pair.{Pair}
+
+# --- Stream state machine (RFC 7540 Section 5.1) ---
+
+enum H2StreamState:
+    Idle              # Initial state
+    Open              # Both sides can send
+    HalfClosedLocal   # Local side has sent END_STREAM
+    HalfClosedRemote  # Remote side has sent END_STREAM
+    Closed            # Terminal state
+    ReservedLocal     # Reserved via PUSH_PROMISE (local)
+    ReservedRemote    # Reserved via PUSH_PROMISE (remote)
+
+fn stream_state_name(state: H2StreamState) -> text:
+    match state:
+        H2StreamState.Idle: "idle"
+        H2StreamState.Open: "open"
+        H2StreamState.HalfClosedLocal: "half-closed (local)"
+        H2StreamState.HalfClosedRemote: "half-closed (remote)"
+        H2StreamState.Closed: "closed"
+        H2StreamState.ReservedLocal: "reserved (local)"
+        H2StreamState.ReservedRemote: "reserved (remote)"
+
+class H2Stream:
+    id: i64
+    state: H2StreamState
+    request: FetchRequest
+    response_headers: [Pair<text, text>]
+    response_body: text
+    window_size: i64
+
+    static fn create(id: i64, req: FetchRequest, initial_window: i64) -> H2Stream:
+        H2Stream(
+            id: id,
+            state: H2StreamState.Idle,
+            request: req,
+            response_headers: List<Pair<text, text>>(),
+            response_body: "",
+            window_size: initial_window
+        )
+
+    fn is_active() -> bool:
+        match self.state:
+            H2StreamState.Open: true
+            H2StreamState.HalfClosedLocal: true
+            H2StreamState.HalfClosedRemote: true
+            _: false
+
+    fn is_closed() -> bool:
+        match self.state:
+            H2StreamState.Closed: true
+            _: false
+
+    fn description() -> text:
+        "stream {self.id}: {stream_state_name(self.state)}, window={self.window_size}"
+
+# Stream state transitions
+
+fn transition_send_headers(stream: H2Stream, end_stream: bool) -> Result<H2StreamState>:
+    # Transition when sending HEADERS frame.
+    match stream.state:
+        H2StreamState.Idle:
+            if end_stream:
+                Ok(H2StreamState.HalfClosedLocal)
+            else:
+                Ok(H2StreamState.Open)
+        H2StreamState.ReservedLocal:
+            if end_stream:
+                Ok(H2StreamState.Closed)
+            else:
+                Ok(H2StreamState.HalfClosedRemote)
+        _:
+            Err(network_error("h2: cannot send HEADERS in state {stream_state_name(stream.state)}"))
+
+fn transition_send_end_stream(stream: H2Stream) -> Result<H2StreamState>:
+    # Transition when sending a frame with END_STREAM flag.
+    match stream.state:
+        H2StreamState.Open:
+            Ok(H2StreamState.HalfClosedLocal)
+        H2StreamState.HalfClosedRemote:
+            Ok(H2StreamState.Closed)
+        _:
+            Err(network_error("h2: cannot send END_STREAM in state {stream_state_name(stream.state)}"))
+
+fn transition_recv_headers(stream: H2Stream, end_stream: bool) -> Result<H2StreamState>:
+    # Transition when receiving HEADERS frame.
+    match stream.state:
+        H2StreamState.Idle:
+            if end_stream:
+                Ok(H2StreamState.HalfClosedRemote)
+            else:
+                Ok(H2StreamState.Open)
+        H2StreamState.ReservedRemote:
+            if end_stream:
+                Ok(H2StreamState.Closed)
+            else:
+                Ok(H2StreamState.HalfClosedLocal)
+        H2StreamState.Open:
+            if end_stream:
+                Ok(H2StreamState.HalfClosedRemote)
+            else:
+                Ok(H2StreamState.Open)
+        H2StreamState.HalfClosedLocal:
+            if end_stream:
+                Ok(H2StreamState.Closed)
+            else:
+                Ok(H2StreamState.HalfClosedLocal)
+        _:
+            Err(network_error("h2: cannot receive HEADERS in state {stream_state_name(stream.state)}"))
+
+fn transition_recv_end_stream(stream: H2Stream) -> Result<H2StreamState>:
+    # Transition when receiving a frame with END_STREAM flag.
+    match stream.state:
+        H2StreamState.Open:
+            Ok(H2StreamState.HalfClosedRemote)
+        H2StreamState.HalfClosedLocal:
+            Ok(H2StreamState.Closed)
+        _:
+            Err(network_error("h2: cannot receive END_STREAM in state {stream_state_name(stream.state)}"))
+
+fn transition_rst_stream(stream: H2Stream) -> H2StreamState:
+    # RST_STREAM always transitions to Closed.
+    H2StreamState.Closed

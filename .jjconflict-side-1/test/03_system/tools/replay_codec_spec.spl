@@ -1,0 +1,131 @@
+use std.spec
+use os.kernel.replay.event_kinds.{EventKind, ReplayEntry}
+use std.nogc_sync_mut.replay.codec.{encode_entry, decode_entry, encode_entries, decode_entries}
+
+describe "encode_entry":
+    it "produces non-empty byte array":
+        val entry = ReplayEntry.create(EventKind.Schedule, 1, 1, 0)
+        val bytes = encode_entry(entry)
+        expect(bytes.len() > 0).to_equal(true)
+
+    it "produces exactly 80 bytes":
+        val entry = ReplayEntry.create(EventKind.SyscallEnter, 1, 1, 0)
+        val bytes = encode_entry(entry)
+        expect(bytes.len()).to_equal(80)
+
+describe "decode_entry round-trip":
+    it "decode_entry round-trip preserves event_id":
+        var entry = ReplayEntry.create(EventKind.Schedule, 1, 1, 0)
+        entry.event_id = 42
+        val bytes = encode_entry(entry)
+        match decode_entry(bytes, 0):
+            case Ok(got):
+                expect(got.event_id).to_equal(42)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "decode_entry round-trip preserves kind":
+        val entry = ReplayEntry.create(EventKind.SyscallExit, 3, 2, 1)
+        val bytes = encode_entry(entry)
+        match decode_entry(bytes, 0):
+            case Ok(got):
+                expect(got.kind).to_equal(EventKind.SyscallExit.to_i32())
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "decode_entry round-trip preserves thread_id":
+        val entry = ReplayEntry.create(EventKind.TimerRead, 77, 1, 0)
+        val bytes = encode_entry(entry)
+        match decode_entry(bytes, 0):
+            case Ok(got):
+                expect(got.thread_id).to_equal(77)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "decode_entry round-trip preserves process_id":
+        val entry = ReplayEntry.create(EventKind.InterruptDeliver, 1, 99, 0)
+        val bytes = encode_entry(entry)
+        match decode_entry(bytes, 0):
+            case Ok(got):
+                expect(got.process_id).to_equal(99)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "decode_entry round-trip preserves payload_a":
+        var entry = ReplayEntry.create(EventKind.SyscallEnter, 1, 1, 0)
+        entry.payload_a = 12345
+        val bytes = encode_entry(entry)
+        match decode_entry(bytes, 0):
+            case Ok(got):
+                expect(got.payload_a).to_equal(12345)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+describe "encode/decode i64 edge values":
+    it "round-trips large positive i64":
+        var entry = ReplayEntry.create(EventKind.TimerRead, 1, 1, 0)
+        entry.payload_b = 9223372036854775807
+        val bytes = encode_entry(entry)
+        match decode_entry(bytes, 0):
+            case Ok(got):
+                expect(got.payload_b).to_equal(9223372036854775807)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "round-trips negative i64":
+        var entry = ReplayEntry.create(EventKind.TimerRead, 1, 1, 0)
+        entry.payload_c = -1
+        val bytes = encode_entry(entry)
+        match decode_entry(bytes, 0):
+            case Ok(got):
+                expect(got.payload_c).to_equal(-1)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+describe "encode_entries / decode_entries batch":
+    it "encode_entries 3 entries produces 240 bytes":
+        val e0 = ReplayEntry.create(EventKind.Schedule, 1, 1, 0)
+        val e1 = ReplayEntry.create(EventKind.SyscallEnter, 2, 1, 0)
+        val e2 = ReplayEntry.create(EventKind.SyscallExit, 3, 1, 0)
+        val entries = [e0, e1, e2]
+        val bytes = encode_entries(entries)
+        expect(bytes.len()).to_equal(240)
+
+    it "decode_entries 3 entries returns count 3":
+        val e0 = ReplayEntry.create(EventKind.Schedule, 10, 1, 0)
+        val e1 = ReplayEntry.create(EventKind.SyscallEnter, 20, 1, 0)
+        val e2 = ReplayEntry.create(EventKind.TimerRead, 30, 1, 0)
+        val entries = [e0, e1, e2]
+        val bytes = encode_entries(entries)
+        val decoded = decode_entries(bytes)
+        expect(decoded.len()).to_equal(3)
+
+    it "decode_entries preserves kind order":
+        val e0 = ReplayEntry.create(EventKind.Schedule, 1, 1, 0)
+        val e1 = ReplayEntry.create(EventKind.SyscallEnter, 2, 1, 0)
+        val e2 = ReplayEntry.create(EventKind.TimerRead, 3, 1, 0)
+        val entries = [e0, e1, e2]
+        val bytes = encode_entries(entries)
+        val decoded = decode_entries(bytes)
+        expect(decoded[0].kind).to_equal(EventKind.Schedule.to_i32())
+        expect(decoded[1].kind).to_equal(EventKind.SyscallEnter.to_i32())
+        expect(decoded[2].kind).to_equal(EventKind.TimerRead.to_i32())
+
+    it "decode_entry at offset skips first entry":
+        var e0 = ReplayEntry.create(EventKind.Schedule, 1, 1, 0)
+        e0.payload_a = 111
+        var e1 = ReplayEntry.create(EventKind.SyscallEnter, 2, 1, 0)
+        e1.payload_a = 222
+        val entries = [e0, e1]
+        val bytes = encode_entries(entries)
+        match decode_entry(bytes, 80):
+            case Ok(got):
+                expect(got.payload_a).to_equal(222)
+                expect(got.kind).to_equal(EventKind.SyscallEnter.to_i32())
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "decode_entries empty bytes returns empty list":
+        val bytes: [i32] = []
+        val decoded = decode_entries(bytes)
+        expect(decoded.len()).to_equal(0)

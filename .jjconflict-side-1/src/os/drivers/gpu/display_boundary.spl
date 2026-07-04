@@ -1,0 +1,55 @@
+# Display acceleration boundary for framebuffer/MMIO and VirtIO-GPU DMA.
+
+use std.io.dma.{SharedDmaBuffer, DmaCachePolicy}
+
+struct DisplayAccelerationSummary:
+    """Backend summary used by display service and tests."""
+    backend_kind: text
+    flush_mode: text
+    cache_policy: text
+    dma_accelerated: bool
+    executable_mapping: bool
+
+fn framebuffer_mmio_summary(width: u32, height: u32) -> DisplayAccelerationSummary:
+    """Legacy VGA/BGA framebuffer path: MMIO, dirty-rect, not DMA."""
+    val _w = width
+    val _h = height
+    DisplayAccelerationSummary(
+        backend_kind: "framebuffer-mmio",
+        flush_mode: "dirty-rect",
+        cache_policy: "write-combining",
+        dma_accelerated: false,
+        executable_mapping: false
+    )
+
+fn virtio_gpu_dma_summary(initialized: bool) -> DisplayAccelerationSummary:
+    """VirtIO-GPU path: shared-DMA transfer/flush when initialized."""
+    if initialized:
+        return DisplayAccelerationSummary(
+            backend_kind: "virtio-gpu-dma",
+            flush_mode: "dirty-rect",
+            cache_policy: "coherent",
+            dma_accelerated: true,
+            executable_mapping: false
+        )
+    DisplayAccelerationSummary(
+        backend_kind: "virtio-gpu-unavailable",
+        flush_mode: "none",
+        cache_policy: "none",
+        dma_accelerated: false,
+        executable_mapping: false
+    )
+
+fn display_select_summary(has_virtio_gpu: bool) -> DisplayAccelerationSummary:
+    """Prefer VirtIO-GPU DMA when present; otherwise use framebuffer MMIO."""
+    if has_virtio_gpu:
+        return virtio_gpu_dma_summary(true)
+    framebuffer_mmio_summary(0u32, 0u32)
+
+fn virtio_gpu_transfer_buffer_valid(buf: SharedDmaBuffer) -> bool:
+    """Validate the canonical descriptor shape for VirtIO-GPU transfers."""
+    if not buf.is_valid():
+        return false
+    if buf.cache_policy != DmaCachePolicy.Coherent and buf.cache_policy != DmaCachePolicy.FlushRequired:
+        return false
+    (buf.device_addr % 4096u64) == 0

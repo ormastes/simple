@@ -1,0 +1,110 @@
+# SReplay VM — QEMU Bridge
+#
+# Hybrid mode: QEMU handles execution, Simple controls replay/snapshots.
+# Bridges VmReplayDriver state with a live QEMU instance via QMP + GDB MI.
+
+use std.nogc_sync_mut.replay.vm.vm_types.{VmConfig, VmState, VmReplayMode}
+use std.nogc_sync_mut.replay.vm.replay_driver.{VmReplayDriver, VmSnapshot}
+
+# ============================================================================
+# QEMU Bridge
+# ============================================================================
+
+class QemuBridge:
+    qmp_socket: text
+    gdb_port: i32
+    qemu_pid: i64
+    connected: bool
+    checkpoint_names: [text]
+    checkpoint_counter: i32
+
+impl QemuBridge:
+    static fn create(qmp_socket: text, gdb_port: i32) -> QemuBridge:
+        QemuBridge(
+            qmp_socket: qmp_socket,
+            gdb_port: gdb_port,
+            qemu_pid: -1,
+            connected: false,
+            checkpoint_names: [],
+            checkpoint_counter: 0
+        )
+
+    fn connect() -> Result<Nil, text>:
+        val result = shell("echo '{\"execute\":\"qmp_capabilities\"}' | socat - UNIX-CONNECT:{self.qmp_socket}")
+        if result.exit_code != 0:
+            return Err("failed to connect to QMP at {self.qmp_socket}")
+        self.connected = true
+        Ok(nil)
+
+    fn is_connected() -> bool:
+        self.connected
+
+    fn save_vm_snapshot(name: text) -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected to QEMU")
+        val cmd = "echo '{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"savevm {name}\"}}' | socat - UNIX-CONNECT:{self.qmp_socket}"
+        val result = shell(cmd)
+        if result.exit_code != 0:
+            return Err("savevm failed: {result.stderr}")
+        self.checkpoint_names.push(name)
+        self.checkpoint_counter = self.checkpoint_counter + 1
+        Ok(name)
+
+    fn load_vm_snapshot(name: text) -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected to QEMU")
+        var found = false
+        for cp in self.checkpoint_names:
+            if cp == name:
+                found = true
+        if not found:
+            return Err("snapshot '{name}' not found")
+        val cmd = "echo '{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"loadvm {name}\"}}' | socat - UNIX-CONNECT:{self.qmp_socket}"
+        val result = shell(cmd)
+        if result.exit_code != 0:
+            return Err("loadvm failed: {result.stderr}")
+        Ok(name)
+
+    fn list_snapshots() -> [text]:
+        self.checkpoint_names
+
+    fn query_status() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected to QEMU")
+        val cmd = "echo '{\"execute\":\"query-status\"}' | socat - UNIX-CONNECT:{self.qmp_socket}"
+        val result = shell(cmd)
+        if result.exit_code != 0:
+            return Err("query-status failed")
+        Ok(result.stdout)
+
+    fn stop_vm() -> Result<Nil, text>:
+        if not self.connected:
+            return Err("not connected to QEMU")
+        val cmd = "echo '{\"execute\":\"stop\"}' | socat - UNIX-CONNECT:{self.qmp_socket}"
+        val result = shell(cmd)
+        if result.exit_code != 0:
+            return Err("stop failed")
+        Ok(nil)
+
+    fn cont_vm() -> Result<Nil, text>:
+        if not self.connected:
+            return Err("not connected to QEMU")
+        val cmd = "echo '{\"execute\":\"cont\"}' | socat - UNIX-CONNECT:{self.qmp_socket}"
+        val result = shell(cmd)
+        if result.exit_code != 0:
+            return Err("cont failed")
+        Ok(nil)
+
+    fn quit_vm() -> Result<Nil, text>:
+        if not self.connected:
+            return Err("not connected to QEMU")
+        val cmd = "echo '{\"execute\":\"quit\"}' | socat - UNIX-CONNECT:{self.qmp_socket}"
+        shell(cmd)
+        self.connected = false
+        Ok(nil)
+
+    fn gdb_address() -> text:
+        "localhost:{self.gdb_port}"
+
+    fn checkpoint_count() -> i32:
+        self.checkpoint_counter

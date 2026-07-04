@@ -1,0 +1,102 @@
+# frame_builder_spec.spl — tests for the Viz CompositorFrame builder.
+#
+# Mirrors cc::CompositorFrame + viz::CompositorFrame: a tree of RenderPasses,
+# each with a DrawQuad list, with the root pass identified by id.
+
+use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.color.{SkColor4f}
+use std.viz.feature.frame_builder.{
+    frame_builder_new,
+    DrawQuadKind,
+    DrawQuad,
+    RenderPass,
+    CompositorFrame,
+    CompositorFrameBuilder
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _rect(l: f64, t: f64, r: f64, b: f64) -> SkRect:
+    SkRect(left: l, top: t, right: r, bottom: b)
+
+fn _red() -> SkColor4f:
+    SkColor4f(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+
+# ---------------------------------------------------------------------------
+# Test suite
+# ---------------------------------------------------------------------------
+
+describe "frame_builder":
+
+    # 1. frame_builder_new starts empty with no current pass
+    it "frame_builder_new: passes is empty, current_pass is None":
+        val b = frame_builder_new()
+        b.passes.len().to_equal(0)
+        b.current_pass.to_be_nil()
+
+    # 2. begin_render_pass returns monotonically increasing ids
+    it "begin_render_pass: returns monotonic pass id (1, then 2)":
+        var b = frame_builder_new()
+        val bounds = _rect(0.0, 0.0, 800.0, 600.0)
+        val id1 = b.begin_render_pass(bounds)
+        b.end_render_pass()
+        val id2 = b.begin_render_pass(bounds)
+        id1.to_equal(1)
+        id2.to_equal(2)
+        id2.to_be_greater_than(id1)
+
+    # 3. add_solid_color_quad mutates the in-progress pass
+    it "add_solid_color_quad: appends to current pass":
+        var b = frame_builder_new()
+        val bounds = _rect(0.0, 0.0, 100.0, 100.0)
+        b.begin_render_pass(bounds)
+        b.add_solid_color_quad(_rect(0.0, 0.0, 50.0, 50.0), _red())
+        b.add_solid_color_quad(_rect(50.0, 50.0, 100.0, 100.0), _red())
+        match b.current_pass:
+            case Some(p):
+                p.quads.len().to_equal(2)
+            case None:
+                (false).to_equal(true)
+
+    # 4. end_render_pass moves the in-progress pass into passes
+    it "end_render_pass: moves current pass into passes":
+        var b = frame_builder_new()
+        val bounds = _rect(0.0, 0.0, 100.0, 100.0)
+        b.begin_render_pass(bounds)
+        b.add_solid_color_quad(_rect(0.0, 0.0, 10.0, 10.0), _red())
+        b.end_render_pass()
+        b.passes.len().to_equal(1)
+        b.current_pass.to_be_nil()
+
+    # 5. build returns a frame carrying every finished pass
+    it "build: returns frame with all passes":
+        var b = frame_builder_new()
+        val bounds = _rect(0.0, 0.0, 100.0, 100.0)
+        b.begin_render_pass(bounds)
+        b.end_render_pass()
+        b.begin_render_pass(bounds)
+        b.end_render_pass()
+        b.begin_render_pass(bounds)
+        b.end_render_pass()
+        val frame = b.build()
+        frame.render_passes.len().to_equal(3)
+
+    # 6. build picks the LAST begun pass as the root
+    it "build: root_pass_id is last begun pass id":
+        var b = frame_builder_new()
+        val bounds = _rect(0.0, 0.0, 100.0, 100.0)
+        val id1 = b.begin_render_pass(bounds)
+        b.end_render_pass()
+        val id2 = b.begin_render_pass(bounds)
+        b.end_render_pass()
+        val frame = b.build()
+        frame.root_pass_id.to_equal(id2)
+
+    # 7. build with nothing added returns an empty frame with root_pass_id=0
+    it "build with no passes returns empty frame":
+        val b = frame_builder_new()
+        val frame = b.build()
+        frame.render_passes.len().to_equal(0)
+        frame.root_pass_id.to_equal(0)

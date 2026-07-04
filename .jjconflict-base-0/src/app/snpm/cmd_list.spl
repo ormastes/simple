@@ -1,0 +1,72 @@
+# snpm list — Show dependency tree and check for outdated packages
+
+use app.snpm.config.{SnpmConfig}
+use app.snpm.manifest.{parse_manifest}
+
+extern fn rt_file_exists(path: text) -> bool
+
+fn cmd_list(config: SnpmConfig, args: [text]):
+    """Show dependency tree or check outdated packages."""
+    var show_outdated = false
+    var depth = -1
+    var i = 0
+    while i < args.len():
+        if args[i] == "--outdated":
+            show_outdated = true
+        if args[i].starts_with("--depth="):
+            val depth_parts = args[i].split("=")
+            if depth_parts.len() >= 2:
+                depth = depth_parts[1].parse_i64() ?? -1
+        i = i + 1
+
+    if not rt_file_exists(config.manifest_name):
+        print "snpm: no {config.manifest_name} found"
+        return
+
+    val manifest_result = parse_manifest(config.manifest_name)
+    match manifest_result:
+        Err(msg):
+            print "snpm: {msg}"
+            return
+        Ok(manifest):
+            if show_outdated:
+                _show_outdated(manifest, config)
+                return
+
+            print "{manifest.name}@{manifest.version}"
+            var di = 0
+            val dep_count = manifest.dependencies.len()
+            while di < dep_count:
+                val dep = manifest.dependencies[di]
+                val prefix = if di == dep_count - 1: "└── " else: "├── "
+                val installed_ver = _get_installed_version(dep.first, config)
+                print "{prefix}{dep.first}@{installed_ver} (wanted: {dep.second})"
+                di = di + 1
+
+            if manifest.dev_dependencies.len() > 0:
+                print ""
+                print "devDependencies:"
+                var ddi = 0
+                while ddi < manifest.dev_dependencies.len():
+                    val dep = manifest.dev_dependencies[ddi]
+                    val prefix = if ddi == manifest.dev_dependencies.len() - 1: "└── " else: "├── "
+                    print "{prefix}{dep.first}@{dep.second}"
+                    ddi = ddi + 1
+
+fn _get_installed_version(name: text, config: SnpmConfig) -> text:
+    val pkg_manifest = "{config.modules_dir}/{name}/package.sdn"
+    if rt_file_exists(pkg_manifest):
+        val result = parse_manifest(pkg_manifest)
+        match result:
+            Ok(m): return m.version
+            _: pass_dn
+    "(not installed)"
+
+fn _show_outdated(manifest: SnpmManifest, config: SnpmConfig):
+    print "Package          Current  Wanted   Latest"
+    var i = 0
+    while i < manifest.dependencies.len():
+        val dep = manifest.dependencies[i]
+        val current = _get_installed_version(dep.first, config)
+        print "{dep.first}  {current}  {dep.second}  (check registry)"
+        i = i + 1

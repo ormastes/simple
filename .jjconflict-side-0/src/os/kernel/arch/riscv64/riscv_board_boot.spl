@@ -1,0 +1,156 @@
+class BoardProfile:
+    board_name: text
+    fpga_part: text
+    clock_mhz: i32
+    ram_kb: i32
+    flash_kb: i32
+    has_uart: bool
+    has_ethernet: bool
+    has_spi: bool
+
+    me has_enough_ram(required_kb: i32) -> bool:
+        return ram_kb >= required_kb
+
+    me is_xilinx() -> bool:
+        return fpga_part.starts_with("xc")
+
+    me supports_linux() -> bool:
+        return ram_kb >= 16384 and clock_mhz >= 25
+
+    static fn mlk_s02_100t() -> BoardProfile:
+        return BoardProfile {
+            board_name: "MLK-S02-100T",
+            fpga_part: "xc7a100t",
+            clock_mhz: 100,
+            ram_kb: 65536,
+            flash_kb: 16384,
+            has_uart: true,
+            has_ethernet: false,
+            has_spi: true
+        }
+
+    static fn generic_sim() -> BoardProfile:
+        return BoardProfile {
+            board_name: "simulation",
+            fpga_part: "sim",
+            clock_mhz: 50,
+            ram_kb: 131072,
+            flash_kb: 0,
+            has_uart: true,
+            has_ethernet: false,
+            has_spi: false
+        }
+
+
+class FpgaConstraint:
+    signal_name: text
+    pin: text
+    io_standard: text
+    is_clock: bool
+    frequency_mhz: i32
+
+    me xdc_line() -> text:
+        return "set_property PACKAGE_PIN " + pin + " [get_ports " + signal_name + "]"
+
+    static fn clock_pin(name: text, pin: text, freq: i32) -> FpgaConstraint:
+        return FpgaConstraint {
+            signal_name: name,
+            pin: pin,
+            io_standard: "LVCMOS33",
+            is_clock: true,
+            frequency_mhz: freq
+        }
+
+    static fn gpio_pin(name: text, pin: text) -> FpgaConstraint:
+        return FpgaConstraint {
+            signal_name: name,
+            pin: pin,
+            io_standard: "LVCMOS33",
+            is_clock: false,
+            frequency_mhz: 0
+        }
+
+
+class BootCheckpoint:
+    name: text
+    stage: text
+    reached: bool
+    cycle_count: i32
+    expected_next: text
+
+    me is_passed() -> bool:
+        return reached
+
+    me is_kernel() -> bool:
+        return stage == "kernel"
+
+    static fn rom_start() -> BootCheckpoint:
+        return BootCheckpoint {
+            name: "rom_entry",
+            stage: "rom",
+            reached: true,
+            cycle_count: 0,
+            expected_next: "opensbi_entry"
+        }
+
+    static fn kernel_entry() -> BootCheckpoint:
+        return BootCheckpoint {
+            name: "kernel_entry",
+            stage: "kernel",
+            reached: false,
+            cycle_count: 0,
+            expected_next: "mmu_enable"
+        }
+
+    static fn init_start() -> BootCheckpoint:
+        return BootCheckpoint {
+            name: "init_start",
+            stage: "init",
+            reached: false,
+            cycle_count: 0,
+            expected_next: ""
+        }
+
+
+class KernelState:
+    checkpoints_passed: i32
+    checkpoints_total: i32
+    last_checkpoint: text
+    mmu_enabled: bool
+    interrupts_enabled: bool
+    hart_count: i32
+
+    me boot_progress_pct() -> i32:
+        if checkpoints_total > 0:
+            return (checkpoints_passed * 100) / checkpoints_total
+        return 0
+
+    me is_fully_booted() -> bool:
+        return checkpoints_passed == checkpoints_total
+
+    me is_smp() -> bool:
+        return hart_count > 1
+
+    static fn initial(total: i32) -> KernelState:
+        return KernelState {
+            checkpoints_passed: 0,
+            checkpoints_total: total,
+            last_checkpoint: "none",
+            mmu_enabled: false,
+            interrupts_enabled: false,
+            hart_count: 1
+        }
+
+    static fn booted(total: i32, harts: i32) -> KernelState:
+        return KernelState {
+            checkpoints_passed: total,
+            checkpoints_total: total,
+            last_checkpoint: "init_start",
+            mmu_enabled: true,
+            interrupts_enabled: true,
+            hart_count: harts
+        }
+
+
+fn main():
+    print("riscv_board_boot loaded")

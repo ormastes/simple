@@ -1,0 +1,108 @@
+use app.llm_dashboard.data.types.{AgentActivity, AgentNode, RoomKind, activity_label}
+
+val MAX_SLOTS_PER_ROOM = 6
+
+pub struct AgentPosition:
+    agent_id: text
+    room: RoomKind
+    slot: i64
+    activity_label: text
+
+    static fn new(agent_id: text, room: RoomKind, slot: i64) -> AgentPosition:
+        AgentPosition(agent_id: agent_id, room: room, slot: slot, activity_label: "")
+
+    static fn with_activity(agent_id: text, room: RoomKind, slot: i64, label: text) -> AgentPosition:
+        AgentPosition(agent_id: agent_id, room: room, slot: slot, activity_label: label)
+
+type AgentPos = AgentPosition
+
+var POSITIONS: {text: AgentPosition} = {}
+
+fn _room_for_activity(activity: AgentActivity) -> RoomKind:
+    match activity:
+        case AgentActivity.Reading(_):
+            RoomKind.Research
+        case AgentActivity.Searching(_):
+            RoomKind.Research
+        case AgentActivity.WebFetch(_):
+            RoomKind.Research
+        case AgentActivity.Writing(_):
+            RoomKind.Code
+        case AgentActivity.ToolUse(_):
+            RoomKind.Code
+        case AgentActivity.SubAgentSpawn(_):
+            RoomKind.Code
+        case _:
+            RoomKind.Chat
+
+fn _same_room(a: RoomKind, b: RoomKind) -> bool:
+    match a:
+        case RoomKind.Research:
+            match b:
+                case RoomKind.Research:
+                    true
+                case _:
+                    false
+        case RoomKind.Code:
+            match b:
+                case RoomKind.Code:
+                    true
+                case _:
+                    false
+        case RoomKind.Chat:
+            match b:
+                case RoomKind.Chat:
+                    true
+                case _:
+                    false
+
+pub fn pos_clear():
+    POSITIONS = {}
+
+pub fn pos_get(agent_id: text) -> AgentPosition:
+    val existing = POSITIONS[agent_id]
+    if existing.?:
+        return existing
+    AgentPosition.new(agent_id, RoomKind.Chat, 0)
+
+pub fn pos_update_from_nodes(nodes: [AgentNode]):
+    var next_slot_by_room: {text: i64} = {}
+    for node in nodes:
+        val room = _room_for_activity(node.activity)
+        var room_key = "chat"
+        match room:
+            case RoomKind.Research:
+                room_key = "research"
+            case RoomKind.Code:
+                room_key = "code"
+            case RoomKind.Chat:
+                room_key = "chat"
+        var next_slot = next_slot_by_room[room_key]
+        if not next_slot.?:
+            next_slot = 0
+        POSITIONS[node.id] = AgentPosition.with_activity(
+            node.id,
+            room,
+            next_slot % MAX_SLOTS_PER_ROOM,
+            activity_label(node.activity)
+        )
+        next_slot_by_room[room_key] = next_slot + 1
+
+pub fn pos_agents_in_room(room: RoomKind) -> [AgentPosition]:
+    var result: [AgentPosition] = []
+    val keys = POSITIONS.keys()
+    var i = 0
+    while i < keys.len():
+        val pos = POSITIONS[keys[i]]
+        if pos.? and _same_room(pos.room, room):
+            result.push(pos)
+        i = i + 1
+    result
+
+pub fn pos_agent_count_in_room(room: RoomKind) -> i64:
+    pos_agents_in_room(room).len()
+
+export AgentPosition
+export AgentPos
+export pos_clear, pos_get, pos_update_from_nodes
+export pos_agents_in_room, pos_agent_count_in_room

@@ -1,0 +1,273 @@
+#!/bin/sh
+# Validate Simple in-application Vulkan RenderDoc capture evidence.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/simple-gate}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/renderdoc_simple_gate_$(date -u +%F).md}"
+SOURCE_ENV="${RDOC_SIMPLE_EVIDENCE_ENV:-build/renderdoc/canonical-probe/simple/evidence.env}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+REQUIRED_SCENE="${RDOC_SIMPLE_GATE_REQUIRED_SCENE:-vulkan-engine2d}"
+REQUIRED_PROGRAM="${RDOC_SIMPLE_GATE_REQUIRED_PROGRAM:-src/app/test/renderdoc_vulkan_capture.spl}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+file_exists_status() {
+    path="$1"
+    if [ -z "$path" ]; then
+        echo "missing"
+    elif [ -L "$path" ]; then
+        echo "symlink"
+    elif [ -s "$path" ]; then
+        echo "pass"
+    else
+        echo "missing"
+    fi
+}
+
+is_positive_int() {
+    case "${1:-}" in
+        ""|*[!0-9]*)
+            return 1
+            ;;
+        *)
+            [ "$1" -gt 0 ]
+            ;;
+    esac
+}
+
+append_missing_runtime_field() {
+    field="$1"
+    if [ -z "${missing_runtime_fields:-}" ]; then
+        missing_runtime_fields="$field"
+    else
+        missing_runtime_fields="$missing_runtime_fields,$field"
+    fi
+}
+
+classify_runtime_metadata() {
+    missing_runtime_fields=""
+    runtime_metadata_status="pass"
+    if [ -z "${runtime_backend:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_runtime_backend"
+    fi
+    if [ -z "${renderdoc_available:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_renderdoc_available"
+    fi
+    if [ -z "${renderdoc_start:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_renderdoc_start"
+    fi
+    if [ -z "${renderdoc_end:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_renderdoc_end"
+    fi
+    if [ -z "${renderdoc_num_captures:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_renderdoc_num_captures"
+    fi
+    if [ -z "${pixel_count:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_pixel_count"
+    fi
+    if [ -n "$missing_runtime_fields" ]; then
+        runtime_metadata_status="missing"
+    elif [ "${runtime_backend:-}" != "vulkan" ] \
+        || [ "${renderdoc_available:-}" != "1" ] \
+        || [ "${renderdoc_start:-}" != "1" ] \
+        || ! is_positive_int "${renderdoc_num_captures:-}" \
+        || ! is_positive_int "${pixel_count:-}"; then
+        runtime_metadata_status="fail"
+    fi
+}
+
+write_evidence() {
+    status="$1"
+    reason="$2"
+    {
+        echo "rdoc_simple_gate_status=$status"
+        echo "rdoc_simple_gate_reason=$reason"
+        echo "rdoc_simple_gate_source_env=$SOURCE_ENV"
+        echo "rdoc_simple_gate_backend=${backend:-}"
+        echo "rdoc_simple_gate_scene=${scene:-}"
+        echo "rdoc_simple_gate_program=${program:-}"
+        echo "rdoc_simple_gate_capture_status=${capture_status:-}"
+        echo "rdoc_simple_gate_capture_reason=${capture_reason:-}"
+        echo "rdoc_simple_gate_capture_file=${capture_file:-}"
+        echo "rdoc_simple_gate_capture_file_status=${capture_file_status:-}"
+        echo "rdoc_simple_gate_capture_magic=${capture_magic:-}"
+        echo "rdoc_simple_gate_capture_file_magic=${capture_file_magic:-}"
+        echo "rdoc_simple_gate_runtime_backend=${runtime_backend:-}"
+        echo "rdoc_simple_gate_renderdoc_available=${renderdoc_available:-}"
+        echo "rdoc_simple_gate_renderdoc_start=${renderdoc_start:-}"
+        echo "rdoc_simple_gate_renderdoc_end=${renderdoc_end:-}"
+        echo "rdoc_simple_gate_renderdoc_num_captures=${renderdoc_num_captures:-}"
+        echo "rdoc_simple_gate_pixel_count=${pixel_count:-}"
+        echo "rdoc_simple_gate_widget_html_path=${widget_html_path:-}"
+        echo "rdoc_simple_gate_widget_html_bytes=${widget_html_bytes:-}"
+        echo "rdoc_simple_gate_widget_width=${widget_width:-}"
+        echo "rdoc_simple_gate_widget_height=${widget_height:-}"
+        echo "rdoc_simple_gate_runtime_metadata_status=${runtime_metadata_status:-missing}"
+        echo "rdoc_simple_gate_missing_runtime_metadata=${missing_runtime_fields:-}"
+        echo "rdoc_simple_gate_unavailable_marker=${unavailable_marker:-}"
+        echo "rdoc_simple_gate_required_backend=simple"
+        echo "rdoc_simple_gate_required_scene=$REQUIRED_SCENE"
+        echo "rdoc_simple_gate_required_program=$REQUIRED_PROGRAM"
+        echo "rdoc_simple_gate_required_status=pass"
+        echo "rdoc_simple_gate_required_magic=RDOC"
+        echo "rdoc_simple_gate_required_runtime_backend=vulkan"
+        echo "rdoc_simple_gate_required_renderdoc_available=1"
+        echo "rdoc_simple_gate_required_renderdoc_start=1"
+        echo "rdoc_simple_gate_required_renderdoc_end_recorded=1"
+        echo "rdoc_simple_gate_required_num_captures_min=1"
+        echo "rdoc_simple_gate_required_pixel_count_min=1"
+    } >"$OUT_ENV"
+    {
+        echo "# RenderDoc Simple Gate"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- source evidence: $SOURCE_ENV"
+        echo "- backend: ${backend:-}"
+        echo "- scene: ${scene:-}"
+        echo "- program: ${program:-}"
+        echo "- capture status: ${capture_status:-}"
+        echo "- capture reason: ${capture_reason:-}"
+        echo "- capture file: ${capture_file:-}"
+        echo "- capture magic: ${capture_magic:-}"
+        echo "- capture file magic: ${capture_file_magic:-}"
+        echo "- runtime backend: ${runtime_backend:-}"
+        echo "- RenderDoc available: ${renderdoc_available:-}"
+        echo "- RenderDoc start: ${renderdoc_start:-}"
+        echo "- RenderDoc end: ${renderdoc_end:-}"
+        echo "- RenderDoc captures: ${renderdoc_num_captures:-}"
+        echo "- pixel count: ${pixel_count:-}"
+        echo "- runtime metadata status: ${runtime_metadata_status:-missing}"
+        echo "- missing runtime metadata: ${missing_runtime_fields:-}"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$OUT_ENV"
+    } >"$REPORT_PATH"
+    cat "$OUT_ENV"
+}
+
+if [ ! -s "$SOURCE_ENV" ]; then
+    backend=""
+    scene=""
+    program=""
+    capture_status=""
+    capture_reason="missing-source-evidence"
+    capture_file=""
+    capture_file_status="missing"
+    capture_magic=""
+    capture_file_magic=""
+    runtime_backend=""
+    renderdoc_available=""
+    renderdoc_start=""
+    renderdoc_end=""
+    renderdoc_num_captures=""
+    pixel_count=""
+    unavailable_marker=""
+    widget_html_path=""
+    widget_html_bytes=""
+    widget_width=""
+    widget_height=""
+    classify_runtime_metadata
+    write_evidence "unavailable" "missing-source-evidence"
+    exit 1
+fi
+
+backend="$(value_of rdoc_backend "$SOURCE_ENV")"
+scene="$(value_of rdoc_scene "$SOURCE_ENV")"
+program="$(value_of rdoc_program "$SOURCE_ENV")"
+capture_status="$(value_of rdoc_capture_status "$SOURCE_ENV")"
+capture_reason="$(value_of rdoc_capture_reason "$SOURCE_ENV")"
+capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
+capture_file_status="$(file_exists_status "$capture_file")"
+capture_magic="$(value_of rdoc_capture_magic "$SOURCE_ENV")"
+runtime_backend="$(value_of rdoc_simple_runtime_backend "$SOURCE_ENV")"
+renderdoc_available="$(value_of rdoc_simple_renderdoc_available "$SOURCE_ENV")"
+renderdoc_start="$(value_of rdoc_simple_renderdoc_start "$SOURCE_ENV")"
+renderdoc_end="$(value_of rdoc_simple_renderdoc_end "$SOURCE_ENV")"
+renderdoc_num_captures="$(value_of rdoc_simple_renderdoc_num_captures "$SOURCE_ENV")"
+pixel_count="$(value_of rdoc_simple_pixel_count "$SOURCE_ENV")"
+unavailable_marker="$(value_of rdoc_simple_unavailable_marker "$SOURCE_ENV")"
+widget_html_path="$(value_of rdoc_simple_widget_html_path "$SOURCE_ENV")"
+widget_html_bytes="$(value_of rdoc_simple_widget_html_bytes "$SOURCE_ENV")"
+widget_width="$(value_of rdoc_simple_widget_width "$SOURCE_ENV")"
+widget_height="$(value_of rdoc_simple_widget_height "$SOURCE_ENV")"
+capture_file_magic=""
+if [ "$capture_file_status" = "pass" ]; then
+    capture_file_magic="$(dd if="$capture_file" bs=4 count=1 2>/dev/null || true)"
+fi
+
+case "$program" in
+    *"$REQUIRED_PROGRAM")
+        program_matches="1"
+        ;;
+    *)
+        program_matches="0"
+        ;;
+esac
+
+if [ "$backend" = "simple" ] \
+    && [ "$scene" = "$REQUIRED_SCENE" ] \
+    && [ "$program_matches" = "1" ] \
+    && [ "$capture_status" = "pass" ] \
+    && [ "$capture_magic" = "RDOC" ] \
+    && [ "$capture_file_magic" = "RDOC" ] \
+    && [ "$runtime_backend" = "vulkan" ] \
+    && [ "$renderdoc_available" = "1" ] \
+    && [ "$renderdoc_start" = "1" ] \
+    && [ "$renderdoc_end" != "" ] \
+    && is_positive_int "$renderdoc_num_captures" \
+    && is_positive_int "$pixel_count" \
+    && [ "$capture_file_status" = "pass" ]; then
+    classify_runtime_metadata
+    write_evidence "pass" "pass"
+    exit 0
+fi
+
+classify_runtime_metadata
+
+if [ "$capture_status" = "" ]; then
+    write_evidence "unavailable" "missing-capture-status"
+elif [ "$backend" != "simple" ]; then
+    write_evidence "fail" "unexpected-backend"
+elif [ "$scene" != "$REQUIRED_SCENE" ]; then
+    write_evidence "fail" "unexpected-scene"
+elif [ "$capture_status" != "pass" ]; then
+    write_evidence "fail" "${capture_reason:-capture-not-pass}"
+elif [ "$program_matches" != "1" ]; then
+    write_evidence "fail" "unexpected-program"
+elif [ "$capture_magic" != "RDOC" ]; then
+    write_evidence "fail" "missing-rdoc-magic"
+elif [ "$capture_file_status" = "symlink" ]; then
+    write_evidence "fail" "rdc-file-symlink"
+elif [ "$capture_file_status" != "pass" ]; then
+    write_evidence "fail" "missing-rdc-file"
+elif [ "$capture_file_magic" != "RDOC" ]; then
+    write_evidence "fail" "missing-rdoc-file-magic"
+elif [ "$runtime_backend" = "" ]; then
+    write_evidence "fail" "missing-vulkan-runtime-backend"
+elif [ "$runtime_backend" != "vulkan" ]; then
+    write_evidence "fail" "unexpected-runtime-backend"
+elif [ "$renderdoc_available" != "1" ]; then
+    write_evidence "fail" "missing-renderdoc-availability"
+elif [ "$renderdoc_start" != "1" ]; then
+    write_evidence "fail" "missing-renderdoc-start"
+elif [ "$renderdoc_end" = "" ]; then
+    write_evidence "fail" "missing-renderdoc-end"
+elif ! is_positive_int "$renderdoc_num_captures"; then
+    write_evidence "fail" "missing-renderdoc-capture-count"
+elif ! is_positive_int "$pixel_count"; then
+    write_evidence "fail" "missing-rendered-pixels"
+else
+    write_evidence "fail" "simple-renderdoc-gate-failed"
+fi
+exit 1

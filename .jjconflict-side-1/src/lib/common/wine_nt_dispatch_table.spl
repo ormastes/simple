@@ -1,0 +1,399 @@
+"""NT dispatch table mapping 22 API symbols to handler categories and dispatch logic."""
+
+use common.wine_nt_bridge.{
+    wine_nt_bridge_call_get_std_handle,
+    wine_nt_bridge_call_write_file,
+    wine_nt_bridge_call_exit_process,
+    wine_nt_bridge_stdout_handle
+}
+
+class NtDispatchEntry:
+    symbol: text
+    dll: text
+    category: text
+    implemented: bool
+
+class NtDispatchResult:
+    is_ok: bool
+    error: text
+    symbol: text
+    category: text
+    i64_value: i64
+    text_value: text
+
+class NtDispatchFileHandle:
+    handle: i64
+    path: text
+    open: bool
+
+class NtDispatchModule:
+    handle: i64
+    name: text
+    exports: [text]
+    loaded: bool
+
+class NtDispatchHeapBlock:
+    ptr: i64
+    size: i64
+    freed: bool
+
+class NtDispatchHeap:
+    handle: i64
+    next_ptr: i64
+    blocks: [NtDispatchHeapBlock]
+    active: bool
+
+class NtDispatchState:
+    file_handles: [NtDispatchFileHandle]
+    next_file_handle: i64
+    modules: [NtDispatchModule]
+    next_module_handle: i64
+    heaps: [NtDispatchHeap]
+    next_heap_handle: i64
+    virtual_next_base: i64
+    virtual_freed: [i64]
+    command_line: text
+
+fn _entry(symbol: text, dll: text, category: text, implemented: bool) -> NtDispatchEntry:
+    NtDispatchEntry(symbol: symbol, dll: dll, category: category, implemented: implemented)
+
+fn _ok_result(symbol: text, category: text, i64_value: i64, text_value: text) -> NtDispatchResult:
+    NtDispatchResult(is_ok: true, error: "", symbol: symbol, category: category, i64_value: i64_value, text_value: text_value)
+
+fn _err_result(symbol: text, category: text, error: text) -> NtDispatchResult:
+    NtDispatchResult(is_ok: false, error: error, symbol: symbol, category: category, i64_value: 0, text_value: "")
+
+fn _file_handle(handle: i64, path: text, open: bool) -> NtDispatchFileHandle:
+    NtDispatchFileHandle(handle: handle, path: path, open: open)
+
+fn _module(handle: i64, name: text, exports: [text], loaded: bool) -> NtDispatchModule:
+    NtDispatchModule(handle: handle, name: name, exports: exports, loaded: loaded)
+
+fn _heap_block(ptr: i64, size: i64, freed: bool) -> NtDispatchHeapBlock:
+    NtDispatchHeapBlock(ptr: ptr, size: size, freed: freed)
+
+fn _heap(handle: i64, next_ptr: i64, blocks: [NtDispatchHeapBlock], active: bool) -> NtDispatchHeap:
+    NtDispatchHeap(handle: handle, next_ptr: next_ptr, blocks: blocks, active: active)
+
+"""Module-level state for dispatch table tracking."""
+var _dt_file_handles: [NtDispatchFileHandle] = []
+var _dt_next_file_handle: i64 = 100
+var _dt_modules: [NtDispatchModule] = []
+var _dt_next_module_handle: i64 = 0x10000
+var _dt_heaps: [NtDispatchHeap] = []
+var _dt_next_heap_handle: i64 = 0x50000
+var _dt_virtual_next_base: i64 = 0x20000000
+var _dt_virtual_freed: [i64] = []
+var _dt_command_line: text = "simple.exe"
+var _dt_process_heap_handle: i64 = 0x70000000
+var _dt_process_heap_next_ptr: i64 = 0x71000000
+var _dt_process_heap_blocks: [NtDispatchHeapBlock] = []
+var _dt_seeded: bool = false
+
+fn _seed_modules():
+    if _dt_seeded:
+        return
+    _dt_seeded = true
+    _dt_modules.push(_module(0x10000, "kernel32.dll", ["GetProcAddress", "LoadLibraryExW", "GetModuleHandleW"], true))
+    _dt_next_module_handle = 0x10001
+    _dt_modules.push(_module(0x10001, "ntdll.dll", ["NtQueryInformationProcess", "NtClose"], true))
+    _dt_next_module_handle = 0x10002
+    _dt_modules.push(_module(0x10002, "user32.dll", ["MessageBoxW", "CreateWindowExW"], true))
+    _dt_next_module_handle = 0x10003
+
+fn _all_entries() -> [NtDispatchEntry]:
+    [
+        _entry("CreateFileW", "kernel32.dll", "file", true),
+        _entry("ReadFile", "kernel32.dll", "file", true),
+        _entry("WriteFile", "kernel32.dll", "file", true),
+        _entry("CloseHandle", "kernel32.dll", "file", true),
+        _entry("ExitProcess", "kernel32.dll", "process", true),
+        _entry("GetCommandLineW", "kernel32.dll", "process", true),
+        _entry("GetStdHandle", "kernel32.dll", "process", true),
+        _entry("HeapCreate", "kernel32.dll", "heap", true),
+        _entry("HeapAlloc", "kernel32.dll", "heap", true),
+        _entry("HeapFree", "kernel32.dll", "heap", true),
+        _entry("GetProcessHeap", "kernel32.dll", "heap", true),
+        _entry("GetModuleHandleW", "kernel32.dll", "module", true),
+        _entry("LoadLibraryExW", "kernel32.dll", "module", true),
+        _entry("GetProcAddress", "kernel32.dll", "module", true),
+        _entry("VirtualAlloc", "kernel32.dll", "memory", true),
+        _entry("VirtualFree", "kernel32.dll", "memory", true),
+        _entry("NtQueryInformationProcess", "ntdll.dll", "ntdll", false),
+        _entry("NtClose", "ntdll.dll", "ntdll", false),
+        _entry("MessageBoxW", "user32.dll", "user32", false),
+        _entry("CreateWindowExW", "user32.dll", "user32", false),
+        _entry("CreateDC", "gdi32.dll", "gdi32", false),
+        _entry("TextOutW", "gdi32.dll", "gdi32", false)
+    ]
+
+pub fn nt_dispatch_table_lookup(symbol: text) -> NtDispatchEntry:
+    for e in _all_entries():
+        if e.symbol == symbol:
+            return e
+    _entry(symbol, "", "", false)
+
+pub fn nt_dispatch_table_list_all() -> [text]:
+    var out: [text] = []
+    for e in _all_entries():
+        out.push(e.symbol)
+    out
+
+pub fn nt_dispatch_table_list_implemented() -> [text]:
+    var out: [text] = []
+    for e in _all_entries():
+        if e.implemented:
+            out.push(e.symbol)
+    out
+
+pub fn nt_dispatch_table_count() -> i64:
+    _all_entries().len()
+
+pub fn nt_dispatch_table_implemented_count() -> i64:
+    var count = 0
+    for e in _all_entries():
+        if e.implemented:
+            count = count + 1
+    count
+
+pub fn nt_dispatch_table_reset():
+    _dt_file_handles = []
+    _dt_next_file_handle = 100
+    _dt_modules = []
+    _dt_next_module_handle = 0x10000
+    _dt_heaps = []
+    _dt_next_heap_handle = 0x50000
+    _dt_virtual_next_base = 0x20000000
+    _dt_virtual_freed = []
+    _dt_command_line = "simple.exe"
+    _dt_process_heap_handle = 0x70000000
+    _dt_process_heap_next_ptr = 0x71000000
+    _dt_process_heap_blocks = []
+    _dt_seeded = false
+
+fn _dispatch_create_file_w(path: text) -> NtDispatchResult:
+    if path == "":
+        return _err_result("CreateFileW", "file", "empty-path")
+    val handle = _dt_next_file_handle
+    _dt_next_file_handle = _dt_next_file_handle + 1
+    _dt_file_handles.push(_file_handle(handle, path, true))
+    _ok_result("CreateFileW", "file", handle, path)
+
+fn _find_file_handle(handle: i64) -> NtDispatchFileHandle:
+    for fh in _dt_file_handles:
+        if fh.handle == handle:
+            return fh
+    _file_handle(0, "", false)
+
+fn _dispatch_read_file(handle: i64, requested_len: i64) -> NtDispatchResult:
+    val fh = _find_file_handle(handle)
+    if not fh.open:
+        return _err_result("ReadFile", "file", "invalid-handle")
+    val bytes_read = if requested_len > 0:
+        requested_len
+    else:
+        0
+    _ok_result("ReadFile", "file", bytes_read, "")
+
+fn _dispatch_write_file(handle: i64, payload: text, requested_len: i64) -> NtDispatchResult:
+    val fh = _find_file_handle(handle)
+    if fh.handle == 0 and handle != wine_nt_bridge_stdout_handle():
+        return _err_result("WriteFile", "file", "invalid-handle")
+    if handle == wine_nt_bridge_stdout_handle():
+        val bridge_result = wine_nt_bridge_call_write_file(handle, payload, requested_len)
+        if not bridge_result.ok:
+            return _err_result("WriteFile", "file", bridge_result.error)
+        return _ok_result("WriteFile", "file", bridge_result.i64_value, bridge_result.text_value)
+    _ok_result("WriteFile", "file", requested_len, payload)
+
+fn _dispatch_close_handle(handle: i64) -> NtDispatchResult:
+    var found = false
+    var already_closed = false
+    var new_handles: [NtDispatchFileHandle] = []
+    for fh in _dt_file_handles:
+        if fh.handle == handle:
+            if not fh.open:
+                already_closed = true
+                new_handles.push(fh)
+            else:
+                found = true
+                new_handles.push(_file_handle(handle, fh.path, false))
+        else:
+            new_handles.push(fh)
+    if already_closed:
+        return _err_result("CloseHandle", "file", "already-closed")
+    if not found:
+        return _err_result("CloseHandle", "file", "invalid-handle")
+    _dt_file_handles = new_handles
+    _ok_result("CloseHandle", "file", 1, "")
+
+fn _dispatch_get_std_handle(handle_id: i64) -> NtDispatchResult:
+    val bridge_result = wine_nt_bridge_call_get_std_handle(handle_id)
+    if not bridge_result.ok:
+        return _err_result("GetStdHandle", "process", bridge_result.error)
+    _ok_result("GetStdHandle", "process", bridge_result.i64_value, "")
+
+fn _dispatch_exit_process(exit_code: i64) -> NtDispatchResult:
+    val bridge_result = wine_nt_bridge_call_exit_process(exit_code)
+    if not bridge_result.ok:
+        return _err_result("ExitProcess", "process", bridge_result.error)
+    _ok_result("ExitProcess", "process", bridge_result.i64_value, "")
+
+fn _dispatch_get_command_line_w() -> NtDispatchResult:
+    _ok_result("GetCommandLineW", "process", _dt_command_line.len(), _dt_command_line)
+
+fn _dispatch_virtual_alloc(size: i64) -> NtDispatchResult:
+    if size <= 0:
+        return _err_result("VirtualAlloc", "memory", "invalid-size")
+    val base = _dt_virtual_next_base
+    _dt_virtual_next_base = _dt_virtual_next_base + size
+    _ok_result("VirtualAlloc", "memory", base, "")
+
+fn _dispatch_virtual_free(base: i64) -> NtDispatchResult:
+    if base <= 0:
+        return _err_result("VirtualFree", "memory", "invalid-base")
+    _dt_virtual_freed.push(base)
+    _ok_result("VirtualFree", "memory", 1, "")
+
+fn _dispatch_heap_create(size: i64) -> NtDispatchResult:
+    val handle = _dt_next_heap_handle
+    _dt_next_heap_handle = _dt_next_heap_handle + 1
+    var blocks: [NtDispatchHeapBlock] = []
+    _dt_heaps.push(_heap(handle, 0x60000000, blocks, true))
+    _ok_result("HeapCreate", "heap", handle, "")
+
+fn _dispatch_get_process_heap() -> NtDispatchResult:
+    _ok_result("GetProcessHeap", "heap", _dt_process_heap_handle, "")
+
+fn _find_heap_by_handle(heap_handle: i64) -> NtDispatchHeap:
+    for h in _dt_heaps:
+        if h.handle == heap_handle and h.active:
+            return h
+    _heap(0, 0, [], false)
+
+fn _replace_heap(old_handle: i64, replacement: NtDispatchHeap):
+    var new_heaps: [NtDispatchHeap] = []
+    for h in _dt_heaps:
+        if h.handle == old_handle:
+            new_heaps.push(replacement)
+        else:
+            new_heaps.push(h)
+    _dt_heaps = new_heaps
+
+fn _dispatch_heap_alloc(heap_handle: i64, size: i64) -> NtDispatchResult:
+    if size <= 0:
+        return _err_result("HeapAlloc", "heap", "invalid-size")
+    if heap_handle == _dt_process_heap_handle:
+        val ptr = _dt_process_heap_next_ptr
+        _dt_process_heap_next_ptr = _dt_process_heap_next_ptr + size
+        _dt_process_heap_blocks.push(_heap_block(ptr, size, false))
+        return _ok_result("HeapAlloc", "heap", ptr, "")
+    val found_heap = _find_heap_by_handle(heap_handle)
+    if not found_heap.active:
+        return _err_result("HeapAlloc", "heap", "invalid-heap-handle")
+    val ptr = found_heap.next_ptr
+    val next = ptr + size
+    var new_blocks = found_heap.blocks
+    new_blocks.push(_heap_block(ptr, size, false))
+    _replace_heap(heap_handle, _heap(found_heap.handle, next, new_blocks, true))
+    _ok_result("HeapAlloc", "heap", ptr, "")
+
+fn _mark_block_freed(blocks: [NtDispatchHeapBlock], ptr: i64) -> [NtDispatchHeapBlock]:
+    var new_blocks: [NtDispatchHeapBlock] = []
+    for b in blocks:
+        if b.ptr == ptr and not b.freed:
+            new_blocks.push(_heap_block(ptr, b.size, true))
+        else:
+            new_blocks.push(b)
+    new_blocks
+
+fn _has_block(blocks: [NtDispatchHeapBlock], ptr: i64) -> bool:
+    for b in blocks:
+        if b.ptr == ptr and not b.freed:
+            return true
+    false
+
+fn _dispatch_heap_free(heap_handle: i64, ptr: i64) -> NtDispatchResult:
+    if heap_handle == _dt_process_heap_handle:
+        if not _has_block(_dt_process_heap_blocks, ptr):
+            return _err_result("HeapFree", "heap", "invalid-ptr")
+        _dt_process_heap_blocks = _mark_block_freed(_dt_process_heap_blocks, ptr)
+        return _ok_result("HeapFree", "heap", 1, "")
+    val found_heap = _find_heap_by_handle(heap_handle)
+    if not found_heap.active:
+        return _err_result("HeapFree", "heap", "invalid-heap-handle")
+    if not _has_block(found_heap.blocks, ptr):
+        return _err_result("HeapFree", "heap", "invalid-ptr")
+    val new_blocks = _mark_block_freed(found_heap.blocks, ptr)
+    _replace_heap(heap_handle, _heap(found_heap.handle, found_heap.next_ptr, new_blocks, true))
+    _ok_result("HeapFree", "heap", 1, "")
+
+fn _dispatch_get_module_handle_w(name: text) -> NtDispatchResult:
+    _seed_modules()
+    for m in _dt_modules:
+        if m.loaded and m.name == name:
+            return _ok_result("GetModuleHandleW", "module", m.handle, m.name)
+    _err_result("GetModuleHandleW", "module", "module-not-found:" + name)
+
+fn _dispatch_load_library_ex_w(name: text) -> NtDispatchResult:
+    _seed_modules()
+    for m in _dt_modules:
+        if m.loaded and m.name == name:
+            return _ok_result("LoadLibraryExW", "module", m.handle, m.name)
+    val handle = _dt_next_module_handle
+    _dt_next_module_handle = _dt_next_module_handle + 1
+    var exports: [text] = []
+    _dt_modules.push(_module(handle, name, exports, true))
+    _ok_result("LoadLibraryExW", "module", handle, name)
+
+fn _dispatch_get_proc_address(module_handle: i64, proc_name: text) -> NtDispatchResult:
+    _seed_modules()
+    for m in _dt_modules:
+        if m.loaded and m.handle == module_handle:
+            for export_name in m.exports:
+                if export_name == proc_name:
+                    return _ok_result("GetProcAddress", "module", module_handle + proc_name.len(), proc_name)
+            return _err_result("GetProcAddress", "module", "proc-not-found:" + proc_name)
+    _err_result("GetProcAddress", "module", "module-not-found")
+
+pub fn nt_dispatch_table_call(symbol: text, arg0: i64, arg1: i64, arg2: text) -> NtDispatchResult:
+    val entry = nt_dispatch_table_lookup(symbol)
+    if entry.dll == "":
+        return _err_result(symbol, "", "unknown-symbol:" + symbol)
+    if not entry.implemented:
+        return _err_result(symbol, entry.category, "not-implemented:" + symbol)
+
+    if symbol == "CreateFileW":
+        return _dispatch_create_file_w(arg2)
+    if symbol == "ReadFile":
+        return _dispatch_read_file(arg0, arg1)
+    if symbol == "WriteFile":
+        return _dispatch_write_file(arg0, arg2, arg1)
+    if symbol == "CloseHandle":
+        return _dispatch_close_handle(arg0)
+    if symbol == "GetStdHandle":
+        return _dispatch_get_std_handle(arg0)
+    if symbol == "ExitProcess":
+        return _dispatch_exit_process(arg0)
+    if symbol == "GetCommandLineW":
+        return _dispatch_get_command_line_w()
+    if symbol == "VirtualAlloc":
+        return _dispatch_virtual_alloc(arg1)
+    if symbol == "VirtualFree":
+        return _dispatch_virtual_free(arg0)
+    if symbol == "HeapCreate":
+        return _dispatch_heap_create(arg1)
+    if symbol == "HeapAlloc":
+        return _dispatch_heap_alloc(arg0, arg1)
+    if symbol == "HeapFree":
+        return _dispatch_heap_free(arg0, arg1)
+    if symbol == "GetProcessHeap":
+        return _dispatch_get_process_heap()
+    if symbol == "GetModuleHandleW":
+        return _dispatch_get_module_handle_w(arg2)
+    if symbol == "LoadLibraryExW":
+        return _dispatch_load_library_ex_w(arg2)
+    if symbol == "GetProcAddress":
+        return _dispatch_get_proc_address(arg0, arg2)
+
+    _err_result(symbol, entry.category, "dispatch-missing:" + symbol)

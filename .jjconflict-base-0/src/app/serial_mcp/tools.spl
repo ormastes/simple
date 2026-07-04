@@ -1,0 +1,124 @@
+# Serial MCP Tool Handlers
+#
+# Migrated to McpServer facade (Wave C3).
+# Handlers take args JSON object text, return plain content text.
+
+use app.simple_lsp_mcp.json_helpers.{Q, LB, RB, jp, js, jo1, jo2, jo3, escape_json, extract_field}
+use std.nogc_sync_mut.io.ssh_serial.{SshSerialExecResult, ssh_serial_run, ssh_serial_run_native}
+use std.nogc_sync_mut.io.serial_sffi.{SerialPort, serial_open, serial_close, serial_write, serial_read}
+
+fn get_arg(args: text, key: text) -> text:
+    extract_field(args, key)
+
+fn get_arg_int(args: text, key: text, default_val: i64) -> i64:
+    val s = extract_field(args, key)
+    if s == "":
+        return default_val
+    val n = s.to_int() ?? default_val
+    if n == 0 and s != "0":
+        return default_val
+    n
+
+fn handle_ssh_serial_connect(a: text) -> text:
+    val device = get_arg(a, "device")
+    val baud   = get_arg_int(a, "baud", 115200)
+    val user   = get_arg(a, "user")
+
+    if device == "":
+        return "Missing required argument: device"
+    if user == "":
+        return "Missing required argument: user"
+
+    var result = LB()
+    result = result + jp("device", js(escape_json(device)))
+    result = result + "," + jp("baud", str(baud))
+    result = result + "," + jp("user", js(escape_json(user)))
+    result = result + "," + jp("is_valid", "true")
+    result = result + "," + jp("note", js("Session ready. Call ssh_serial_exec to run commands."))
+    result = result + RB()
+    result
+
+fn handle_ssh_serial_exec(a: text) -> text:
+    val device = get_arg(a, "device")
+    val baud   = get_arg_int(a, "baud", 115200)
+    val user   = get_arg(a, "user")
+    val cmd    = get_arg(a, "cmd")
+    val path   = get_arg(a, "path")
+
+    if device == "":
+        return "Missing required argument: device"
+    if user == "":
+        return "Missing required argument: user"
+    if cmd == "":
+        return "Missing required argument: cmd"
+
+    val use_native = path == "native"
+    var exec_result = SshSerialExecResult(exit_code: 0, stdout: "", stderr: "")
+    if use_native:
+        exec_result = ssh_serial_run_native(device, baud, user, cmd)
+    else:
+        exec_result = ssh_serial_run(device, baud, user, cmd)
+
+    var result = LB()
+    result = result + jp("exit_code", str(exec_result.exit_code))
+    result = result + "," + jp("stdout", js(escape_json(exec_result.stdout)))
+    result = result + "," + jp("stderr", js(escape_json(exec_result.stderr)))
+    result = result + RB()
+    result
+
+fn handle_serial_open(a: text) -> text:
+    val device = get_arg(a, "device")
+    val baud   = get_arg_int(a, "baud", 115200)
+
+    if device == "":
+        return "Missing required argument: device"
+
+    val port = serial_open(device, baud)
+    if not port.is_valid:
+        return "Failed to open serial port: " + device + " at " + str(baud) + " baud"
+
+    var result = LB()
+    result = result + jp("handle", str(port.handle))
+    result = result + "," + jp("device", js(escape_json(port.device)))
+    result = result + "," + jp("baud", str(port.baud))
+    result = result + "," + jp("is_valid", "true")
+    result = result + RB()
+    result
+
+fn handle_serial_write(a: text) -> text:
+    val handle = get_arg_int(a, "handle", 0)
+    val data   = get_arg(a, "data")
+
+    if handle == 0:
+        return "Missing or invalid argument: handle"
+    if data == "":
+        return "Missing required argument: data"
+
+    val port = serial_open_from_handle(handle)
+    val bytes_written = serial_write(port, data)
+
+    var result = LB()
+    result = result + jp("bytes_written", str(bytes_written))
+    result = result + RB()
+    result
+
+fn handle_serial_read(a: text) -> text:
+    val handle    = get_arg_int(a, "handle", 0)
+    val max_bytes = get_arg_int(a, "max_bytes", 1024)
+
+    if handle == 0:
+        return "Missing or invalid argument: handle"
+
+    val port = serial_open_from_handle(handle)
+    val data = serial_read(port, max_bytes)
+
+    var result = LB()
+    result = result + jp("data", js(escape_json(data)))
+    result = result + "," + jp("bytes_read", str(data.len()))
+    result = result + RB()
+    result
+
+# Build a minimal SerialPort wrapper from a raw handle (fd).
+# Used by serial_write/serial_read tools when the port is already open.
+fn serial_open_from_handle(handle: i64) -> SerialPort:
+    SerialPort(handle: handle, device: "", baud: 0, is_valid: handle > 0)

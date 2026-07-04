@@ -1,0 +1,325 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/wm_browser_event_routing_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/wm_browser_event_routing_evidence_$(date -u +%F).md}"
+OUT="$BUILD_DIR/wm-event-check.out"
+RESULT_JSON="$BUILD_DIR/wm-event-check.json"
+VALIDATED_ENV="$BUILD_DIR/wm-event-check.validation.env"
+VALIDATOR="scripts/check/validate-wm-browser-event-routing-proof.js"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT" "$RESULT_JSON" "$VALIDATED_ENV" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+fail() {
+    reason="$1"
+    {
+        echo "wm_browser_event_routing_status=fail"
+        echo "wm_browser_event_routing_reason=$reason"
+        echo "wm_browser_event_routing_validation_status=fail"
+        echo "wm_browser_event_routing_validation_reason=$reason"
+        echo "wm_browser_event_routing_proof_symlink_status="
+        echo "wm_browser_event_routing_proof_hardlink_status="
+        echo "wm_browser_event_routing_target="
+        echo "wm_browser_event_routing_surface_id="
+        echo "wm_browser_event_routing_proof_source="
+        echo "wm_browser_event_routing_proof_source_file_status="
+        echo "wm_browser_event_routing_proof_source_size_bytes="
+        echo "wm_browser_event_routing_proof_source_actual_size_bytes="
+        echo "wm_browser_event_routing_proof_source_file_reason="
+        echo "wm_browser_event_routing_proof_source_artifact_status="
+        echo "wm_browser_event_routing_browser_engine="
+        echo "wm_browser_event_routing_electron_user_agent="
+        echo "wm_browser_event_routing_electron_process_version="
+        echo "wm_browser_event_routing_chrome_process_version="
+        echo "wm_browser_event_routing_result_path=$RESULT_JSON"
+        echo "wm_browser_event_routing_ready="
+        echo "wm_browser_event_routing_wm_found="
+        echo "wm_browser_event_routing_window_cmd_count="
+        echo "wm_browser_event_routing_input_event_count="
+        echo "wm_browser_event_routing_focus_count="
+        echo "wm_browser_event_routing_move_count="
+        echo "wm_browser_event_routing_maximize_count="
+        echo "wm_browser_event_routing_title_command_count="
+        echo "wm_browser_event_routing_text_input_count="
+        echo "wm_browser_event_routing_pointer_down_count="
+        echo "wm_browser_event_routing_pointer_up_count="
+        echo "wm_browser_event_routing_event_sequence="
+        echo "wm_browser_event_routing_performance_now_available="
+        echo "wm_browser_event_routing_performance_now_delta_ms="
+        echo "wm_browser_event_routing_input_to_paint_ms="
+        echo "wm_browser_event_routing_animation_frame_available="
+        echo "wm_browser_event_routing_animation_frame_count="
+        echo "wm_browser_event_routing_css_animation_probe="
+        echo "wm_browser_event_routing_title_text="
+        echo "wm_browser_event_routing_title_context_text="
+        echo "wm_browser_event_routing_traffic_button_count="
+        echo "wm_browser_event_routing_title_input_tag="
+        echo "wm_browser_event_routing_titlebar_height="
+        echo "wm_browser_event_routing_titlebar_display="
+        echo "wm_browser_event_routing_titlebar_cursor="
+        echo "wm_browser_event_routing_titlebar_background="
+        echo "wm_browser_event_routing_title_color="
+        echo "wm_browser_event_routing_title_font_weight="
+        echo "wm_browser_event_routing_title_input_min_width="
+        echo "wm_browser_event_routing_title_input_width="
+        echo "wm_browser_event_routing_title_input_width_px="
+        echo "wm_browser_event_routing_title_input_height="
+        echo "wm_browser_event_routing_title_input_cursor="
+        echo "wm_browser_event_routing_title_input_background="
+        echo "wm_browser_event_routing_close_button_background="
+        echo "wm_browser_event_routing_minimize_button_background="
+        echo "wm_browser_event_routing_maximize_button_background="
+        echo "wm_browser_event_routing_expected_move_x="
+        echo "wm_browser_event_routing_expected_move_y="
+        echo "wm_browser_event_routing_move_payload_x="
+        echo "wm_browser_event_routing_move_payload_y="
+        echo "wm_browser_event_routing_move_payload_source="
+        echo "wm_browser_event_routing_move_payload_window_id_hint="
+        echo "wm_browser_event_routing_title_command_text="
+        echo "wm_browser_event_routing_text_input_text="
+        echo "wm_browser_event_routing_blur_or_tolerance_used=false"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# WM Browser Event Routing Evidence"
+        echo
+        echo "- status: fail"
+        echo "- reason: $reason"
+        echo "- proof source artifact:  /  / "
+        echo "- blur/tolerance used: false"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$BUILD_DIR/evidence.env"
+        if [ -s "$OUT" ]; then
+            echo
+            echo "## Probe Output"
+            sed 's/^/- /' "$OUT"
+        fi
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+    exit 1
+}
+
+for cmd in node npm; do
+    command -v "$cmd" >/dev/null 2>&1 || fail "missing-command:$cmd"
+done
+[ -f "$VALIDATOR" ] || fail "missing-validator:$VALIDATOR"
+
+RUNNER="npx electron --no-sandbox --disable-gpu"
+if [ -z "${DISPLAY:-}" ] && [ "$(uname -s)" != "Darwin" ]; then
+    command -v xvfb-run >/dev/null 2>&1 || fail "missing-command:xvfb-run"
+    RUNNER="xvfb-run -a --server-args=\"-screen 0 1280x720x24\" $RUNNER"
+fi
+
+set +e
+ELECTRON_DISABLE_SANDBOX=1 sh -c "$RUNNER tools/web-render-backend/wm_event_check.js" >"$OUT" 2>&1
+code=$?
+set -e
+
+line="$(sed -n 's/^WM_EVENT_CHECK //p' "$OUT" | tail -n 1)"
+if [ "$line" = "" ]; then
+    fail "missing-wm-event-check-json"
+fi
+printf '%s\n' "$line" >"$RESULT_JSON"
+
+set +e
+node "$VALIDATOR" "$RESULT_JSON" >"$VALIDATED_ENV"
+validator_code=$?
+set -e
+
+field() {
+    sed -n "s/^wm_browser_event_routing_$1=//p" "$VALIDATED_ENV" | tail -n 1
+}
+
+ready="$(field ready)"
+wm_found="$(field wm_found)"
+window_cmd_count="$(field window_cmd_count)"
+input_event_count="$(field input_event_count)"
+focus_count="$(field focus_count)"
+move_count="$(field move_count)"
+maximize_count="$(field maximize_count)"
+title_command_count="$(field title_command_count)"
+text_input_count="$(field text_input_count)"
+pointer_down_count="$(field pointer_down_count)"
+pointer_up_count="$(field pointer_up_count)"
+event_sequence="$(field event_sequence)"
+performance_now_available="$(field performance_now_available)"
+performance_now_delta_ms="$(field performance_now_delta_ms)"
+input_to_paint_ms="$(field input_to_paint_ms)"
+animation_frame_available="$(field animation_frame_available)"
+animation_frame_count="$(field animation_frame_count)"
+css_animation_probe="$(field css_animation_probe)"
+title_text="$(field title_text)"
+title_context_text="$(field title_context_text)"
+traffic_button_count="$(field traffic_button_count)"
+title_input_tag="$(field title_input_tag)"
+titlebar_height="$(field titlebar_height)"
+titlebar_display="$(field titlebar_display)"
+titlebar_cursor="$(field titlebar_cursor)"
+titlebar_background="$(field titlebar_background)"
+title_color="$(field title_color)"
+title_input_min_width="$(field title_input_min_width)"
+title_input_width="$(field title_input_width)"
+title_input_width_px="$(field title_input_width_px)"
+title_input_height="$(field title_input_height)"
+title_input_cursor="$(field title_input_cursor)"
+title_input_background="$(field title_input_background)"
+close_button_background="$(field close_button_background)"
+minimize_button_background="$(field minimize_button_background)"
+maximize_button_background="$(field maximize_button_background)"
+title_font_weight="$(field title_font_weight)"
+expected_move_x="$(field expected_move_x)"
+expected_move_y="$(field expected_move_y)"
+move_payload_x="$(field move_payload_x)"
+move_payload_y="$(field move_payload_y)"
+move_payload_source="$(field move_payload_source)"
+move_payload_window_id_hint="$(field move_payload_window_id_hint)"
+title_command_text="$(field title_command_text)"
+text_input_text="$(field text_input_text)"
+validation_status="$(field validation_status)"
+validation_reason="$(field validation_reason)"
+proof_symlink_status="$(field proof_symlink_status)"
+proof_hardlink_status="$(field proof_hardlink_status)"
+target="$(field target)"
+surface_id="$(field surface_id)"
+proof_source="$(field proof_source)"
+proof_source_file_status="$(field proof_source_file_status)"
+proof_source_size_bytes="$(field proof_source_size_bytes)"
+proof_source_actual_size_bytes="$(field proof_source_actual_size_bytes)"
+proof_source_file_reason="$(field proof_source_file_reason)"
+proof_source_artifact_status="$(field proof_source_artifact_status)"
+browser_engine="$(field browser_engine)"
+electron_user_agent="$(field electron_user_agent)"
+electron_process_version="$(field electron_process_version)"
+chrome_process_version="$(field chrome_process_version)"
+
+status=pass
+reason=pass
+if [ "$code" -ne 0 ]; then
+    status=fail
+    reason=probe-exit-$code
+elif [ "$validator_code" -ne 0 ] || [ "$validation_status" != "pass" ]; then
+    status=fail
+    reason="${validation_reason:-event-routing-proof-invalid}"
+elif [ "$proof_symlink_status" != "pass" ]; then
+    status=fail
+    reason=proof-json-symlink-status-not-pass
+elif [ "$proof_hardlink_status" != "pass" ]; then
+    status=fail
+    reason=proof-json-hardlink-status-not-pass
+elif [ "$proof_source_file_reason" != "pass" ]; then
+    status=fail
+    reason=event-routing-proof-source-$proof_source_file_reason
+elif [ "$proof_source_artifact_status" != "pass" ]; then
+    status=fail
+    reason=event-routing-proof-source-artifact-status-not-pass
+fi
+
+{
+    echo "wm_browser_event_routing_status=$status"
+    echo "wm_browser_event_routing_reason=$reason"
+    echo "wm_browser_event_routing_validation_status=$validation_status"
+    echo "wm_browser_event_routing_validation_reason=$validation_reason"
+    echo "wm_browser_event_routing_proof_symlink_status=$proof_symlink_status"
+    echo "wm_browser_event_routing_proof_hardlink_status=$proof_hardlink_status"
+    echo "wm_browser_event_routing_target=$target"
+    echo "wm_browser_event_routing_surface_id=$surface_id"
+    echo "wm_browser_event_routing_proof_source=$proof_source"
+    echo "wm_browser_event_routing_proof_source_file_status=$proof_source_file_status"
+    echo "wm_browser_event_routing_proof_source_size_bytes=$proof_source_size_bytes"
+    echo "wm_browser_event_routing_proof_source_actual_size_bytes=$proof_source_actual_size_bytes"
+    echo "wm_browser_event_routing_proof_source_file_reason=$proof_source_file_reason"
+    echo "wm_browser_event_routing_proof_source_artifact_status=$proof_source_artifact_status"
+    echo "wm_browser_event_routing_browser_engine=$browser_engine"
+    echo "wm_browser_event_routing_electron_user_agent=$electron_user_agent"
+    echo "wm_browser_event_routing_electron_process_version=$electron_process_version"
+    echo "wm_browser_event_routing_chrome_process_version=$chrome_process_version"
+    echo "wm_browser_event_routing_result_path=$RESULT_JSON"
+    echo "wm_browser_event_routing_ready=$ready"
+    echo "wm_browser_event_routing_wm_found=$wm_found"
+    echo "wm_browser_event_routing_window_cmd_count=$window_cmd_count"
+    echo "wm_browser_event_routing_input_event_count=$input_event_count"
+    echo "wm_browser_event_routing_focus_count=$focus_count"
+    echo "wm_browser_event_routing_move_count=$move_count"
+    echo "wm_browser_event_routing_maximize_count=$maximize_count"
+    echo "wm_browser_event_routing_title_command_count=$title_command_count"
+    echo "wm_browser_event_routing_text_input_count=$text_input_count"
+    echo "wm_browser_event_routing_pointer_down_count=$pointer_down_count"
+    echo "wm_browser_event_routing_pointer_up_count=$pointer_up_count"
+    echo "wm_browser_event_routing_event_sequence=$event_sequence"
+    echo "wm_browser_event_routing_performance_now_available=$performance_now_available"
+    echo "wm_browser_event_routing_performance_now_delta_ms=$performance_now_delta_ms"
+    echo "wm_browser_event_routing_input_to_paint_ms=$input_to_paint_ms"
+    echo "wm_browser_event_routing_animation_frame_available=$animation_frame_available"
+    echo "wm_browser_event_routing_animation_frame_count=$animation_frame_count"
+    echo "wm_browser_event_routing_css_animation_probe=$css_animation_probe"
+    echo "wm_browser_event_routing_title_text=$title_text"
+    echo "wm_browser_event_routing_title_context_text=$title_context_text"
+    echo "wm_browser_event_routing_traffic_button_count=$traffic_button_count"
+    echo "wm_browser_event_routing_title_input_tag=$title_input_tag"
+    echo "wm_browser_event_routing_titlebar_height=$titlebar_height"
+    echo "wm_browser_event_routing_titlebar_display=$titlebar_display"
+    echo "wm_browser_event_routing_titlebar_cursor=$titlebar_cursor"
+    echo "wm_browser_event_routing_titlebar_background=$titlebar_background"
+    echo "wm_browser_event_routing_title_color=$title_color"
+    echo "wm_browser_event_routing_title_font_weight=$title_font_weight"
+    echo "wm_browser_event_routing_title_input_min_width=$title_input_min_width"
+    echo "wm_browser_event_routing_title_input_width=$title_input_width"
+    echo "wm_browser_event_routing_title_input_width_px=$title_input_width_px"
+    echo "wm_browser_event_routing_title_input_height=$title_input_height"
+    echo "wm_browser_event_routing_title_input_cursor=$title_input_cursor"
+    echo "wm_browser_event_routing_title_input_background=$title_input_background"
+    echo "wm_browser_event_routing_close_button_background=$close_button_background"
+    echo "wm_browser_event_routing_minimize_button_background=$minimize_button_background"
+    echo "wm_browser_event_routing_maximize_button_background=$maximize_button_background"
+    echo "wm_browser_event_routing_expected_move_x=$expected_move_x"
+    echo "wm_browser_event_routing_expected_move_y=$expected_move_y"
+    echo "wm_browser_event_routing_move_payload_x=$move_payload_x"
+    echo "wm_browser_event_routing_move_payload_y=$move_payload_y"
+    echo "wm_browser_event_routing_move_payload_source=$move_payload_source"
+    echo "wm_browser_event_routing_move_payload_window_id_hint=$move_payload_window_id_hint"
+    echo "wm_browser_event_routing_title_command_text=$title_command_text"
+    echo "wm_browser_event_routing_text_input_text=$text_input_text"
+    echo "wm_browser_event_routing_blur_or_tolerance_used=false"
+    echo "wm_browser_event_routing_exit_code=$code"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# WM Browser Event Routing Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- target: $target"
+    echo "- surface id: $surface_id"
+    echo "- proof source: $proof_source"
+    echo "- proof source artifact: $proof_source_file_status / $proof_source_file_reason / $proof_source_artifact_status"
+    echo "- browser engine: $browser_engine"
+    echo "- Electron version: $electron_process_version"
+    echo "- Chrome version: $chrome_process_version"
+    echo "- window commands: $window_cmd_count"
+    echo "- input events: $input_event_count"
+    echo "- performance.now: $performance_now_available delta_ms=$performance_now_delta_ms input_to_paint_ms=$input_to_paint_ms"
+    echo "- animation frames: $animation_frame_available count=$animation_frame_count css_probe=$css_animation_probe"
+    echo "- title text: $title_text"
+    echo "- traffic buttons: $traffic_button_count"
+    echo "- traffic button colors: close=$close_button_background minimize=$minimize_button_background maximize=$maximize_button_background"
+    echo "- titlebar height: $titlebar_height"
+    echo "- title input: $title_input_tag $title_input_width x $title_input_height"
+    echo "- title command text: $title_command_text"
+    echo "- body text input: $text_input_text"
+    echo "- event sequence: $event_sequence"
+    echo "- move payload: $move_payload_window_id_hint $move_payload_source $move_payload_x,$move_payload_y expected $expected_move_x,$expected_move_y"
+    echo "- blur/tolerance used: false"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    echo
+    echo "## Probe Output"
+    sed 's/^/- /' "$OUT"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$status" = "pass" ]

@@ -1,0 +1,39 @@
+use std.spec
+use std.gc_async_mut.replay.adapters.{
+    InterpreterReplayAdapter, InterpreterReplayEventKind,
+    JitReplayAdapter, JitReplayMode,
+    RemoteReplayAdapter, RemoteReplayMode,
+    TestRunnerReplayAdapter, TestReplayMode,
+    ExecutionReplayHook, QemuReplayAdapter
+}
+
+describe "gc_async_mut replay adapter facades":
+
+    it "re-exports interpreter and JIT adapters":
+        var interp = InterpreterReplayAdapter.create("record")
+        interp.wrap_step()
+
+        var jit = JitReplayAdapter.create(JitReplayMode.Record, "/tmp/simple-jit-replay")
+        jit.on_jit_compile("main", "module")
+
+        expect(InterpreterReplayEventKind.Step.to_i32()).to_equal(0)
+        expect(interp.event_count()).to_equal(1)
+        expect(jit.event_count()).to_equal(1)
+
+    it "re-exports remote and test runner adapters":
+        var remote = RemoteReplayAdapter.create(RemoteReplayMode.Record)
+        remote.on_register_read("pc", 12)
+
+        var runner = TestRunnerReplayAdapter.create(TestReplayMode.RecordAlways, "/tmp/simple-test-replay")
+        runner.wrap_test_execution("sample_spec.spl", "default")
+
+        expect(remote.event_count()).to_equal(1)
+        expect(runner.list_recorded_traces().len()).to_equal(1)
+        expect(TestReplayMode.from_text("replay").to_text()).to_equal("replay")
+
+    it "re-exports hosted execution and QEMU adapter constructors":
+        val hook = ExecutionReplayHook.create("/tmp/simple-exec-replay")
+        val qemu = QemuReplayAdapter.create_from_backend("/tmp/qmp.sock", 1234)
+
+        expect(hook.recording).to_equal(false)
+        expect(qemu.status()).to_equal("off")

@@ -1,0 +1,168 @@
+# Desktop Shell Baremetal Overlay — CompositorBackend rendering
+#
+# Companion to shell.spl. Draws the taskbar, launcher grid, launched-app
+# windows, and process panel through the shared CompositorBackend draw
+# contract — no WidgetNode DSL, which crashes in baremetal.
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.desktop.app_manifest.{load_app_manifests}
+
+# ============================================================================
+# Baremetal Engine2D adapter (shared CompositorBackend contract)
+# ============================================================================
+
+class BaremetalEngine2dOverlayBackend:
+    engine: Engine2D
+    w: i32
+    h: i32
+
+impl CompositorBackend for BaremetalEngine2dOverlayBackend:
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        self.engine.clear(color)
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.engine.draw_rect_filled(x, y, w, h, color)
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        self.engine.draw_text(x, y, text_str, fg, 12)
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.engine.draw_text(x, y, "{ch}", fg, 12)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        self.engine.draw_rect_filled(x, y, 1, 1, color)
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        var row: i32 = 0
+        while row < h:
+            var col: i32 = 0
+            while col < w:
+                val src_idx = row * w + col
+                if src_idx >= 0 and src_idx < pixels.len():
+                    self.put_pixel(x + col, y + row, pixels[src_idx])
+                col = col + 1
+            row = row + 1
+
+    me present():
+        self.engine.present()
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        self.engine.present()
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+fn baremetal_engine2d_overlay_backend(engine: Engine2D, screen_w: i32, screen_h: i32) -> BaremetalEngine2dOverlayBackend:
+    BaremetalEngine2dOverlayBackend(engine: engine, w: screen_w, h: screen_h)
+
+fn _draw_overlay_text(backend: CompositorBackend, x: i32, y: i32, value: text, fg: u32):
+    backend.draw_text(x, y, value, fg, 0x00000000u32)
+
+# ============================================================================
+# Baremetal Overlay (CompositorBackend, no WidgetNode DSL)
+# ============================================================================
+
+fn _draw_baremetal_overlay(
+    backend: CompositorBackend,
+    apps: [text],
+    process_rows: [text],
+    selected_process_idx: i64,
+    screen_w: i32,
+    screen_h: i32,
+    clock: text
+):
+    """Draw the taskbar, launcher grid, and launched-app windows directly
+    via CompositorBackend. Bypasses the widget builder DSL that crashes in baremetal.
+
+    Layout:
+      - Top: title banner
+      - Middle: launcher grid with each app as a colored tile
+      - Bottom: taskbar with clock and list of running apps
+    """
+    # --- Title banner ---
+    backend.fill_rect(0, 0, screen_w, 28, 0xFF1E1E2E)
+    _draw_overlay_text(backend, 12, 6, "SimpleOS Desktop", 0xFFFFFFFF)
+
+    # --- Launcher grid (4 apps per row) ---
+    val grid_x0: i32 = 40
+    val grid_y0: i32 = 60
+    val tile_w: i32 = 140
+    val tile_h: i32 = 60
+    val gap: i32 = 16
+
+    val demo_apps = load_app_manifests()
+
+    var idx: i32 = 0
+    for manifest in demo_apps:
+        val col = idx % 4
+        val row_i = idx / 4
+        val tx = grid_x0 + col * (tile_w + gap)
+        val ty = grid_y0 + row_i * (tile_h + gap)
+        backend.fill_rect(tx, ty, tile_w, tile_h, 0xFF2E2E3E)
+        backend.fill_rect(tx, ty, tile_w, 18, 0xFF3498DB)
+        _draw_overlay_text(backend, tx + 8, ty + 2, manifest.name, 0xFFFFFFFF)
+        _draw_overlay_text(backend, tx + 8, ty + 26, manifest.icon, 0xFF8BD3FF)
+        _draw_overlay_text(backend, tx + 28, ty + 26, manifest.category, 0xFFB8D8D8)
+        idx = idx + 1
+        if idx >= 12:
+            break
+
+    # --- Launched app "windows" (stacked cascading) ---
+    val win_w: i32 = 280
+    val win_h: i32 = 160
+    var win_idx: i32 = 0
+    for name in apps:
+        val wx = 260 + win_idx * 20
+        val wy = 220 + win_idx * 24
+        backend.fill_rect(wx + 4, wy + 4, win_w, win_h, 0xFF000000)
+        backend.fill_rect(wx, wy, win_w, win_h, 0xFF1E1E2E)
+        backend.fill_rect(wx, wy, win_w, 22, 0xFFE74C3C)
+        _draw_overlay_text(backend, wx + 8, wy + 4, name, 0xFFFFFFFF)
+        _draw_overlay_text(backend, wx + 12, wy + 36, "Welcome to {name}", 0xFFCCCCCC)
+        win_idx = win_idx + 1
+
+    # --- Process panel (all launched processes, including headless) ---
+    val panel_w: i32 = 250
+    val panel_x = screen_w - panel_w - 20
+    val panel_y: i32 = 60
+    val panel_h = screen_h - panel_y - 60
+    backend.fill_rect(panel_x, panel_y, panel_w, panel_h, 0xFF182430)
+    backend.fill_rect(panel_x, panel_y, panel_w, 22, 0xFF16A085)
+    _draw_overlay_text(backend, panel_x + 8, panel_y + 4, "Process Manager", 0xFFFFFFFF)
+    _draw_overlay_text(backend, panel_x + 12, panel_y + 30, "all launched processes", 0xFFB8D8D8)
+    var row_y = panel_y + 52
+    var proc_idx: u64 = 0
+    while proc_idx < process_rows.len() and proc_idx < 8:
+        val row_color = if proc_idx.to_i64() == selected_process_idx: 0xFF2E5266 else: 0xFF22313F
+        backend.fill_rect(panel_x + 10, row_y, panel_w - 20, 26, row_color)
+        _draw_overlay_text(backend, panel_x + 16, row_y + 6, process_rows[proc_idx], 0xFFFFFFFF)
+        row_y = row_y + 32
+        proc_idx = proc_idx + 1
+    if process_rows.len() == 0:
+        _draw_overlay_text(backend, panel_x + 12, panel_y + 60, "no running processes", 0xFF9AA5B1)
+    else:
+        _draw_overlay_text(backend, panel_x + 12, panel_h + panel_y - 34, "Ctrl+Alt J/K select  F focus", 0xFF9AA5B1)
+        _draw_overlay_text(backend, panel_x + 12, panel_h + panel_y - 20, "Ctrl+Alt X terminate  R relaunch", 0xFF9AA5B1)
+
+    # --- Taskbar at the bottom ---
+    val tb_h: i32 = 32
+    val tb_y = screen_h - tb_h
+    backend.fill_rect(0, tb_y, screen_w, tb_h, 0xFF1E1E2E)
+    backend.fill_rect(0, tb_y, 60, tb_h, 0xFF3498DB)
+    _draw_overlay_text(backend, 10, tb_y + 8, "Apps", 0xFFFFFFFF)
+
+    var tb_x: i32 = 70
+    for name in apps:
+        backend.fill_rect(tb_x, tb_y + 4, 110, tb_h - 8, 0xFF2E2E3E)
+        _draw_overlay_text(backend, tb_x + 6, tb_y + 8, name, 0xFFFFFFFF)
+        tb_x = tb_x + 118
+
+    val clock_x = screen_w - 80
+    _draw_overlay_text(backend, clock_x, tb_y + 8, clock, 0xFFFFFFFF)

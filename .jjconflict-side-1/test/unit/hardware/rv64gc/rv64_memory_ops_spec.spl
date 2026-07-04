@@ -1,0 +1,236 @@
+"""
+# RV64 Memory Operations Unit Tests
+
+**Feature IDs:** #RV64-MEMOPS-001
+**Category:** Hardware
+**Difficulty:** 2/5
+**Status:** Draft
+
+## Overview
+
+Unit tests for all load/store variants: LB, LH, LW, LD, LBU, LHU, LWU,
+SB, SH, SW, SD. Tests byte-level memory access with sign/zero extension.
+"""
+
+# tag: only-compiled
+
+import std.spec
+
+use hardware.rv64gc.mem.rv64_ram.Rv64Ram
+
+fn _sign_extend_8(v: i64) -> i64:
+    if (v and 0x80) != 0:
+        v or 0xFFFFFFFFFFFFFF00
+    else:
+        v and 0xFF
+
+fn _sign_extend_16(v: i64) -> i64:
+    if (v and 0x8000) != 0:
+        v or 0xFFFFFFFFFFFF0000
+    else:
+        v and 0xFFFF
+
+fn _sign_extend_32(v: i64) -> i64:
+    if (v and 0x80000000) != 0:
+        v or 0xFFFFFFFF00000000
+    else:
+        v and 0xFFFFFFFF
+
+describe "SB (Store Byte)":
+    it "stores lowest byte":
+        var ram = Rv64Ram.create(16)
+        ram.write8(0, 0xAB)
+        expect(ram.read8(0).value).to_equal(0xAB)
+
+    it "stores only lower 8 bits":
+        var ram = Rv64Ram.create(16)
+        ram.write8(0, 0x1AB)
+        expect(ram.read8(0).value).to_equal(0xAB)
+
+    it "stores to specific address":
+        var ram = Rv64Ram.create(16)
+        ram.write8(5, 0xFF)
+        expect(ram.read8(5).value).to_equal(0xFF)
+        expect(ram.read8(4).value).to_equal(0x00)
+
+describe "SH (Store Halfword)":
+    it "stores 16-bit little-endian":
+        var ram = Rv64Ram.create(16)
+        ram.write16(0, 0xBEEF)
+        expect(ram.read8(0).value).to_equal(0xEF)
+        expect(ram.read8(1).value).to_equal(0xBE)
+
+    it "read16 returns correct value":
+        var ram = Rv64Ram.create(16)
+        ram.write16(2, 0x1234)
+        expect(ram.read16(2).value).to_equal(0x1234)
+
+describe "SW (Store Word)":
+    it "stores 32-bit little-endian":
+        var ram = Rv64Ram.create(16)
+        ram.write32(0, 0xDEADBEEF)
+        expect(ram.read32(0).value).to_equal(0xDEADBEEF)
+
+    it "bytes stored in correct order":
+        var ram = Rv64Ram.create(16)
+        ram.write32(0, 0x04030201)
+        expect(ram.read8(0).value).to_equal(0x01)
+        expect(ram.read8(1).value).to_equal(0x02)
+        expect(ram.read8(2).value).to_equal(0x03)
+        expect(ram.read8(3).value).to_equal(0x04)
+
+describe "SD (Store Doubleword)":
+    it "stores 64-bit little-endian":
+        var ram = Rv64Ram.create(16)
+        ram.write64(0, 0xDEADBEEFCAFEBABE)
+        expect(ram.read64(0).value).to_equal(0xDEADBEEFCAFEBABE)
+
+    it "bytes stored in correct order":
+        var ram = Rv64Ram.create(16)
+        ram.write64(0, 0x0807060504030201)
+        expect(ram.read8(0).value).to_equal(0x01)
+        expect(ram.read8(7).value).to_equal(0x08)
+
+describe "LB (Load Byte — sign-extended)":
+    it "LB positive byte":
+        var ram = Rv64Ram.create(16)
+        ram.write8(0, 0x7F)
+        val raw = ram.read8(0).value
+        expect(_sign_extend_8(raw)).to_equal(0x7F)
+
+    it "LB negative byte sign-extends to 64 bits":
+        var ram = Rv64Ram.create(16)
+        ram.write8(0, 0x80)
+        val raw = ram.read8(0).value
+        expect(_sign_extend_8(raw)).to_equal(0xFFFFFFFFFFFFFF80)
+
+    it "LB 0xFF sign-extends to -1":
+        var ram = Rv64Ram.create(16)
+        ram.write8(0, 0xFF)
+        val raw = ram.read8(0).value
+        expect(_sign_extend_8(raw)).to_equal(0xFFFFFFFFFFFFFFFF)
+
+describe "LBU (Load Byte Unsigned — zero-extended)":
+    it "LBU positive byte":
+        var ram = Rv64Ram.create(16)
+        ram.write8(0, 0x7F)
+        expect(ram.read8(0).value).to_equal(0x7F)
+
+    it "LBU high byte stays unsigned":
+        var ram = Rv64Ram.create(16)
+        ram.write8(0, 0xFF)
+        expect(ram.read8(0).value).to_equal(0xFF)
+
+    it "LBU 0x80 stays positive":
+        var ram = Rv64Ram.create(16)
+        ram.write8(0, 0x80)
+        expect(ram.read8(0).value).to_equal(0x80)
+
+describe "LH (Load Halfword — sign-extended)":
+    it "LH positive halfword":
+        var ram = Rv64Ram.create(16)
+        ram.write16(0, 0x7FFF)
+        val raw = ram.read16(0).value
+        expect(_sign_extend_16(raw)).to_equal(0x7FFF)
+
+    it "LH negative halfword sign-extends":
+        var ram = Rv64Ram.create(16)
+        ram.write16(0, 0x8000)
+        val raw = ram.read16(0).value
+        expect(_sign_extend_16(raw)).to_equal(0xFFFFFFFFFFFF8000)
+
+    it "LH 0xFFFF sign-extends to -1":
+        var ram = Rv64Ram.create(16)
+        ram.write16(0, 0xFFFF)
+        val raw = ram.read16(0).value
+        expect(_sign_extend_16(raw)).to_equal(0xFFFFFFFFFFFFFFFF)
+
+describe "LHU (Load Halfword Unsigned)":
+    it "LHU stays unsigned":
+        var ram = Rv64Ram.create(16)
+        ram.write16(0, 0xFFFF)
+        expect(ram.read16(0).value).to_equal(0xFFFF)
+
+    it "LHU 0x8000 stays positive":
+        var ram = Rv64Ram.create(16)
+        ram.write16(0, 0x8000)
+        expect(ram.read16(0).value).to_equal(0x8000)
+
+describe "LW (Load Word — sign-extended)":
+    it "LW positive word":
+        var ram = Rv64Ram.create(16)
+        ram.write32(0, 0x7FFFFFFF)
+        val raw = ram.read32(0).value
+        expect(_sign_extend_32(raw)).to_equal(0x7FFFFFFF)
+
+    it "LW negative word sign-extends":
+        var ram = Rv64Ram.create(16)
+        ram.write32(0, 0x80000000)
+        val raw = ram.read32(0).value
+        expect(_sign_extend_32(raw)).to_equal(0xFFFFFFFF80000000)
+
+    it "LW 0xFFFFFFFF sign-extends to -1":
+        var ram = Rv64Ram.create(16)
+        ram.write32(0, 0xFFFFFFFF)
+        val raw = ram.read32(0).value
+        expect(_sign_extend_32(raw)).to_equal(0xFFFFFFFFFFFFFFFF)
+
+describe "LWU (Load Word Unsigned)":
+    it "LWU stays unsigned":
+        var ram = Rv64Ram.create(16)
+        ram.write32(0, 0xFFFFFFFF)
+        expect(ram.read32(0).value).to_equal(0xFFFFFFFF)
+
+    it "LWU 0x80000000 stays positive":
+        var ram = Rv64Ram.create(16)
+        ram.write32(0, 0x80000000)
+        expect(ram.read32(0).value).to_equal(0x80000000)
+
+describe "LD (Load Doubleword)":
+    it "LD full 64-bit value":
+        var ram = Rv64Ram.create(16)
+        ram.write64(0, 0xDEADBEEFCAFEBABE)
+        expect(ram.read64(0).value).to_equal(0xDEADBEEFCAFEBABE)
+
+    it "LD zero":
+        var ram = Rv64Ram.create(16)
+        expect(ram.read64(0).value).to_equal(0)
+
+describe "Out-of-Bounds Access":
+    it "read beyond bounds returns fault":
+        var ram = Rv64Ram.create(8)
+        val result = ram.read8(8)
+        expect(result.fault).to_equal(true)
+
+    it "write beyond bounds returns fault":
+        var ram = Rv64Ram.create(8)
+        val result = ram.write8(8, 0xFF)
+        expect(result.fault).to_equal(true)
+
+    it "64-bit access at boundary faults":
+        var ram = Rv64Ram.create(8)
+        val result = ram.read64(1)
+        expect(result.fault).to_equal(true)
+
+describe "Mixed Width Operations":
+    it "write word then read bytes":
+        var ram = Rv64Ram.create(16)
+        ram.write32(0, 0xDEADBEEF)
+        expect(ram.read8(0).value).to_equal(0xEF)
+        expect(ram.read8(1).value).to_equal(0xBE)
+        expect(ram.read8(2).value).to_equal(0xAD)
+        expect(ram.read8(3).value).to_equal(0xDE)
+
+    it "write bytes then read word":
+        var ram = Rv64Ram.create(16)
+        ram.write8(0, 0x01)
+        ram.write8(1, 0x02)
+        ram.write8(2, 0x03)
+        ram.write8(3, 0x04)
+        expect(ram.read32(0).value).to_equal(0x04030201)
+
+    it "write double then read words":
+        var ram = Rv64Ram.create(16)
+        ram.write64(0, 0xCAFEBABEDEADBEEF)
+        expect(ram.read32(0).value).to_equal(0xDEADBEEF)
+        expect(ram.read32(4).value).to_equal(0xCAFEBABE)

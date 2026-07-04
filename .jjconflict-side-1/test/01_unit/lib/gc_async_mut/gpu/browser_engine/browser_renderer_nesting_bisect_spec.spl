@@ -1,0 +1,63 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixels_with_viewport}
+use std.gc_async_mut.gpu.browser_engine.html_string_parser.{
+    browser_renderer_normalize_style_rules, browser_renderer_normalize_style_blocks}
+
+val TEST_WIDTH: i32 = 32
+val TEST_HEIGHT: i32 = 24
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _sum_red(pixels: [u32]) -> i64:
+    var total: i64 = 0
+    for pixel in pixels:
+        total = total + (((pixel >> 16) & 0xFF) as i64)
+    total
+
+fn _sum_green(pixels: [u32]) -> i64:
+    var total: i64 = 0
+    for pixel in pixels:
+        total = total + (((pixel >> 8) & 0xFF) as i64)
+    total
+
+describe "CSS nesting bisect":
+
+    it "flat card.primary selector renders color":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card.primary { width: 12px; height: 8px; background-color: #7e22ce; }</style></head><body><div class='card primary'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+        expect(_count_color(result.pixel_data, 0xFF7E22CEu32)).to_be_greater_than(0)
+
+    it "normalizes &.primary to .card.primary":
+        val normalized = browser_renderer_normalize_style_rules(".card { &.primary { width: 12px; height: 8px; background-color: #7e22ce; } }")
+        expect(normalized).to_contain(".card.primary {")
+
+    it "normalized CSS renders card.primary color":
+        val css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(".card { &.primary { width: 12px; height: 8px; background-color: #7e22ce; } }")
+        val html = "<html><head><style>" + css + "</style></head><body><div class='card primary'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+        expect(_count_color(result.pixel_data, 0xFF7E22CEu32)).to_be_greater_than(0)
+
+    it "layer blocks: simple class selector inside layer":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } @layer components { .card { width: 12px; height: 8px; background-color: #0f766e; } }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+        expect(_count_color(result.pixel_data, 0xFF0F766Eu32)).to_be_greater_than(0)
+
+    it "layer blocks: :not() inside layer applies when no option matches":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } @layer components { div:not(.disabled) { width: 12px; height: 8px; background-color: #be123c; } }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+        expect(_count_color(result.pixel_data, 0xFFBE123Cu32)).to_be_greater_than(0)
+
+    it "descendant span text color red vs green":
+        val red_css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(".card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; & span { color:#dc2626; } }")
+        val green_css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(".card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; & span { color:#16a34a; } }")
+        val red_pixels = render_html_to_pixels_with_viewport("<html><head><style>" + red_css + "</style></head><body><div class='card'><span>Hi</span></div></body></html>", TEST_WIDTH, TEST_HEIGHT).pixel_data
+        val green_pixels = render_html_to_pixels_with_viewport("<html><head><style>" + green_css + "</style></head><body><div class='card'><span>Hi</span></div></body></html>", TEST_WIDTH, TEST_HEIGHT).pixel_data
+        expect(_sum_red(red_pixels)).to_be_greater_than(_sum_red(green_pixels))
+        expect(_sum_green(green_pixels)).to_be_greater_than(_sum_green(red_pixels))

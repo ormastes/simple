@@ -1,0 +1,61 @@
+# C-backend lowering of the ACTIVE `bulk_copy` intrinsic to a single memmove (SG-1.3).
+#
+# The MIR elision pass (C-backend + SIMPLE_MIR_BULK_OPS=1) collapses a contiguous,
+# index-ordered element-wise array copy into one `bulk_copy` intrinsic carrying
+# [src_base, dst_base, count] and removes the subsumed GEP/Load/Store. This backend
+# arm lowers that intrinsic to `memmove((void*)dst, (void*)src, count*8)` — stride 8
+# matches the GEP lowering. These tests pin: (a) a memmove is emitted, (b) the byte
+# length is count*8, (c) ARG ORDER is (dst, src, n) — the one thing that makes the
+# lowering correct rather than merely present, and (d) the no-op `*_hint` path is
+# untouched (back-compat). The non-bulk control is the false-green guard.
+#
+# Imports `_ops` so get_local/translate_operand resolve under the seed interpreter
+# (they live in c_backend_translate_ops.spl; the umbrella import alone does not load
+# that impl block — see the SG-1.3 investigation notes).
+#
+# Run:  SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed \
+#       bin/simple run test/01_unit/compiler/backend/c_backend_bulk_copy_memmove_spec.spl
+
+use compiler.backend.backend.c_backend_translate.{MirToC}
+use compiler.backend.backend.c_backend_stubs.*
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instructions.*
+
+fn _copy(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: id)))
+
+fn _const(v: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(v), MirType(kind: MirTypeKind.I64)))
+
+fn _bulk_copy() -> MirInst:
+    MirInst(kind: MirInstKind.Intrinsic(nil, "bulk_copy", [_copy(10), _copy(20), _const(4)]), span: nil)
+
+fn _emit_inst(inst: MirInst) -> text:
+    val t = MirToC.create("test.bulkcopy")
+    t.translate_instruction(inst)
+    t.builder.build()
+
+fn _operand_text(op: MirOperand) -> text:
+    val t = MirToC.create("test.names")
+    t.translate_operand(op)
+
+describe "C backend lowers active bulk_copy to memmove (SG-1.3)":
+    it "emits a memmove for bulk_copy":
+        expect(_emit_inst(_bulk_copy()).contains("memmove(")).to_equal(true)
+
+    it "memmove byte length is count * 8 (element stride)":
+        expect(_emit_inst(_bulk_copy()).contains(") * 8")).to_equal(true)
+
+    it "memmove arg order is (dst, src, n) — dst first, src second":
+        val dst_name = _operand_text(_copy(20))
+        val src_name = _operand_text(_copy(10))
+        val expected = "memmove((void*)" + dst_name + ", (void*)" + src_name + ", "
+        expect(_emit_inst(_bulk_copy()).contains(expected)).to_equal(true)
+
+    it "false-green guard: a non-bulk intrinsic still emits __simple_intrinsic_":
+        val out = _emit_inst(MirInst(kind: MirInstKind.Intrinsic(nil, "some_other", [_copy(10)]), span: nil))
+        expect(out.contains("__simple_intrinsic_some_other")).to_equal(true)
+
+    it "no-op hint path is untouched: emits no memmove (back-compat)":
+        val out = _emit_inst(MirInst(kind: MirInstKind.Intrinsic(nil, "bulk_copy_hint", [_copy(10), _copy(20), _const(4)]), span: nil))
+        expect(out.contains("memmove(")).to_equal(false)

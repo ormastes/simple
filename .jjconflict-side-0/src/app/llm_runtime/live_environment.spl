@@ -1,0 +1,67 @@
+use app.mcp.main_lazy_json.{LB, RB, jp, js}
+
+pub class LlmRuntimeLiveEnvironmentEvidence:
+    status: text
+    reason: text
+    vllm_status: text
+    gpu_status: text
+    gpu_name: text
+    evidence_jsonl: text
+
+pub fn llm_runtime_vllm_live_environment_evidence(vllm_available: bool, gpu_available: bool, gpu_name: text) -> LlmRuntimeLiveEnvironmentEvidence:
+    val vllm_status = if vllm_available: "available" else: "missing"
+    val gpu_status = if gpu_available: "available" else: "missing"
+    val status = _environment_status(vllm_available, gpu_available)
+    val reason = _environment_reason(vllm_available, gpu_available)
+    val public_gpu_name = _public_gpu_name(gpu_available, gpu_name)
+    LlmRuntimeLiveEnvironmentEvidence(
+        status: status,
+        reason: reason,
+        vllm_status: vllm_status,
+        gpu_status: gpu_status,
+        gpu_name: public_gpu_name,
+        evidence_jsonl: _live_environment_jsonl_event(status, reason, vllm_status, gpu_status, public_gpu_name)
+    )
+
+pub fn llm_runtime_vllm_live_environment_jsonl_event(result: LlmRuntimeLiveEnvironmentEvidence) -> text:
+    _live_environment_jsonl_event(result.status, result.reason, result.vllm_status, result.gpu_status, result.gpu_name)
+
+fn _live_environment_jsonl_event(status: text, reason: text, vllm_status: text, gpu_status: text, gpu_name: text) -> text:
+    LB() +
+    jp("event", js("llm_runtime_vllm_live_environment")) +
+    "," + jp("status", js(status)) +
+    "," + jp("reason", js(reason)) +
+    "," + jp("vllm", js(vllm_status)) +
+    "," + jp("gpu", js(gpu_status)) +
+    "," + jp("gpu_name", js(gpu_name)) +
+    RB() + "\n"
+
+fn _environment_status(vllm_available: bool, gpu_available: bool) -> text:
+    if vllm_available and gpu_available:
+        return "ready"
+    "skipped"
+
+fn _environment_reason(vllm_available: bool, gpu_available: bool) -> text:
+    if vllm_available and gpu_available:
+        return "local_vllm_gpu_ready"
+    if not vllm_available and not gpu_available:
+        return "missing_local_vllm_and_gpu"
+    if not vllm_available:
+        return "missing_local_vllm"
+    "missing_local_gpu"
+
+fn _public_gpu_name(gpu_available: bool, gpu_name: text) -> text:
+    if not gpu_available:
+        return "none"
+    if gpu_name.trim() == "":
+        return "available"
+    if _looks_sensitive(gpu_name):
+        return "redacted"
+    gpu_name
+
+fn _looks_sensitive(value: text) -> bool:
+    val lower = value.to_lower()
+    lower.contains("token") or lower.contains("apikey") or lower.contains("api_key") or lower.contains("password") or lower.contains("secret") or lower.contains("@") or value.contains("/") or value.starts_with("~") or value.contains("\\")
+
+export LlmRuntimeLiveEnvironmentEvidence
+export llm_runtime_vllm_live_environment_evidence, llm_runtime_vllm_live_environment_jsonl_event

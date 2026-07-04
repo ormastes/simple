@@ -1,0 +1,208 @@
+# Editor File Watcher
+#
+# Poll-based file change detection. Portable across Desktop and SimpleOS.
+# Detects external modifications by tracking file content hashes.
+
+use std.editor.core.path_text.*
+use std.io_runtime.{file_exists, file_read, dir_walk}
+
+struct WatchedFile:
+    path: text
+    last_hash: i64
+    last_length: i64
+
+struct WatchedDirectory:
+    path: text
+    known_paths: [text]
+
+struct FileWatchEvent:
+    path: text
+    change_type: i64
+
+class FileWatcher:
+    watched: [WatchedFile]
+    watched_dirs: [WatchedDirectory]
+    poll_interval_ms: i64
+    ignore_globs: [text]
+    debounce_elapsed_ms: i64
+
+impl FileWatcher:
+
+    static fn new() -> FileWatcher:
+        FileWatcher(watched: [], watched_dirs: [], poll_interval_ms: 2000, ignore_globs: [], debounce_elapsed_ms: 2000)
+
+    me configure_policy(poll_interval_ms: i64, ignore_globs: [text]):
+        if poll_interval_ms >= 0:
+            me.poll_interval_ms = poll_interval_ms
+        me.ignore_globs = ignore_globs
+        me.debounce_elapsed_ms = 0
+        var dirs: [WatchedDirectory] = []
+        for dir in me.watched_dirs:
+            dirs.push(WatchedDirectory(path: dir.path, known_paths: _fw_directory_paths_with_ignores(dir.path, me.ignore_globs)))
+        me.watched_dirs = dirs
+
+    me watch(path: text):
+        if _fw_path_ignored_with_globs(path, me.ignore_globs):
+            return
+        var i = 0
+        while i < me.watched.len():
+            if me.watched[i].path == path:
+                return
+            i = i + 1
+        val exists = file_exists(path)
+        val content = if exists then file_read(path) ?? "" else: ""
+        me.watched.push(WatchedFile(
+            path: path,
+            last_hash: _fw_hash(content),
+            last_length: if exists then content.len() else: -1
+        ))
+
+    me watch_directory(path: text):
+        var i = 0
+        while i < me.watched_dirs.len():
+            if me.watched_dirs[i].path == path:
+                return
+            i = i + 1
+        me.watched_dirs.push(WatchedDirectory(path: path, known_paths: _fw_directory_paths_with_ignores(path, me.ignore_globs)))
+
+    me watch_parent_directory(path: text):
+        val dir = _fw_parent_dir(path)
+        if dir != "" and not _fw_is_broad_temp_root(dir):
+            me.watch_directory(dir)
+
+    me unwatch(path: text):
+        var new_list: [WatchedFile] = []
+        for w in me.watched:
+            if w.path != path:
+                new_list.push(w)
+        me.watched = new_list
+
+    me check_changes() -> [text]:
+        var changed: [text] = []
+        val events = me.check_events()
+        for event in events:
+            changed.push(event.path)
+        changed
+
+    me check_events() -> [FileWatchEvent]:
+        var events: [FileWatchEvent] = []
+        var i = 0
+        while i < me.watched.len():
+            val w = me.watched[i]
+            if _fw_path_ignored_with_globs(w.path, me.ignore_globs):
+                i = i + 1
+                continue
+            val exists = file_exists(w.path)
+            if not exists:
+                if w.last_length >= 0:
+                    events.push(FileWatchEvent(path: w.path, change_type: 3))
+                    var deleted = me.watched[i]
+                    deleted.last_hash = 0
+                    deleted.last_length = -1
+                    me.watched[i] = deleted
+            else:
+                val content = file_read(w.path) ?? ""
+                val new_hash = _fw_hash(content)
+                val new_length = content.len()
+                if w.last_length < 0:
+                    events.push(FileWatchEvent(path: w.path, change_type: 1))
+                elif new_hash != w.last_hash or new_length != w.last_length:
+                    events.push(FileWatchEvent(path: w.path, change_type: 2))
+                var updated = me.watched[i]
+                updated.last_hash = new_hash
+                updated.last_length = new_length
+                me.watched[i] = updated
+            i = i + 1
+        var d = 0
+        while d < me.watched_dirs.len():
+            var dir = me.watched_dirs[d]
+            val current = _fw_directory_paths_with_ignores(dir.path, me.ignore_globs)
+            for path in current:
+                if not editor_text_list_contains(dir.known_paths, path) and not _fw_event_list_contains(events, path):
+                    events.push(FileWatchEvent(path: path, change_type: 1))
+            for path in dir.known_paths:
+                if not editor_text_list_contains(current, path) and not _fw_event_list_contains(events, path):
+                    events.push(FileWatchEvent(path: path, change_type: 3))
+            dir.known_paths = current
+            me.watched_dirs[d] = dir
+            d = d + 1
+        events
+
+    me check_events_debounced(elapsed_ms: i64) -> [FileWatchEvent]:
+        if me.poll_interval_ms <= 0:
+            return me.check_events()
+        me.debounce_elapsed_ms = me.debounce_elapsed_ms + elapsed_ms
+        if me.debounce_elapsed_ms < me.poll_interval_ms:
+            return []
+        me.debounce_elapsed_ms = 0
+        me.check_events()
+
+    fn watched_count() -> i64:
+        me.watched.len()
+
+    fn watched_directory_count() -> i64:
+        me.watched_dirs.len()
+
+
+fn _fw_hash(content: text) -> i64:
+    var hash = 5381
+    var i = 0
+    while i < content.len():
+        val code = content.char_code_at(i)
+        hash = (hash * 33 + code) % 1000000007
+        i = i + 1
+    hash
+
+fn _fw_directory_paths(path: text) -> [text]:
+    _fw_directory_paths_with_ignores(path, [])
+
+fn _fw_directory_paths_with_ignores(path: text, ignore_globs: [text]) -> [text]:
+    if not file_exists(path):
+        return []
+    var filtered: [text] = []
+    val paths = dir_walk(path)
+    for item in paths:
+        if not _fw_path_ignored_with_globs(item, ignore_globs):
+            filtered.push(item)
+    filtered
+
+fn _fw_path_ignored(path: text) -> bool:
+    _fw_path_ignored_with_globs(path, [])
+
+fn _fw_path_ignored_with_globs(path: text, ignore_globs: [text]) -> bool:
+    if path.contains("/.git") or path.contains("/node_modules") or path.contains("/.simple-vault-search.cache"):
+        return true
+    for glob in ignore_globs:
+        if _fw_matches_glob(path, glob.trim()):
+            return true
+    false
+
+fn _fw_matches_glob(path: text, glob: text) -> bool:
+    if glob == "":
+        return false
+    if glob == path:
+        return true
+    if glob.starts_with("**/"):
+        return _fw_matches_glob(path, glob.slice(3, glob.len()))
+    if glob.starts_with("*") and glob.ends_with("*") and glob.len() > 2:
+        return path.contains(glob.slice(1, glob.len() - 1))
+    if glob.starts_with("*") and glob.len() > 1:
+        return path.ends_with(glob.slice(1, glob.len()))
+    if glob.ends_with("*") and glob.len() > 1:
+        return path.starts_with(glob.slice(0, glob.len() - 1))
+    path.contains("/" + glob) or path.contains(glob)
+
+fn _fw_event_list_contains(events: [FileWatchEvent], target: text) -> bool:
+    for event in events:
+        if event.path == target:
+            return true
+    false
+
+fn _fw_parent_dir(path: text) -> text:
+    val idx = path.last_index_of("/") ?? -1
+    if idx <= 0:
+        return ""
+    path.substring(0, idx)
+
+fn _fw_is_broad_temp_root(path: text) -> bool:
+    path == "/tmp" or path == "/var/tmp"

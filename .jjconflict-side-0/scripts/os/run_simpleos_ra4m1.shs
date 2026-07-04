@@ -1,0 +1,126 @@
+#!/bin/sh
+set -eu
+
+# run_simpleos_ra4m1.shs — SimpleOS Lite on Arduino UNO R4 WiFi (Renesas RA4M1, Cortex-M4)
+#
+# Usage:
+#   sh scripts/run_simpleos_ra4m1.shs              # build + flash + monitor
+#   sh scripts/run_simpleos_ra4m1.shs --no-build   # flash existing ELF
+#   sh scripts/run_simpleos_ra4m1.shs --build-only  # build only, no flash
+#   sh scripts/run_simpleos_ra4m1.shs --protection=fault-test
+#
+# Env knobs:
+#   SIMPLEOS_RA4M1_ELF   Path to kernel ELF (default: build/os/simpleos_ra4m1.elf)
+#   SERIAL_PORT          Serial port (default: /dev/ttyACM0)
+#   SERIAL_BAUD          Baud rate (default: 115200)
+#   SIMPLEOS_SERIAL_LOG  If set, capture serial to this file and verify it
+#   SIMPLEOS_SERIAL_SECONDS Capture duration when SIMPLEOS_SERIAL_LOG is set (default: 20)
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+
+SIMPLEOS_RA4M1_ELF="${SIMPLEOS_RA4M1_ELF:-${ROOT_DIR}/build/os/simpleos_ra4m1.elf}"
+SERIAL_PORT="${SERIAL_PORT:-/dev/ttyACM0}"
+SERIAL_BAUD="${SERIAL_BAUD:-115200}"
+SERIAL_LOG="${SIMPLEOS_SERIAL_LOG:-}"
+SERIAL_SECONDS="${SIMPLEOS_SERIAL_SECONDS:-20}"
+PROTECTION_MODE="${SIMPLEOS_PROTECTION_MODE:-enforce}"
+LINKER_SCRIPT="${ROOT_DIR}/src/compiler/70.backend/baremetal/cortex_m33/linker_ra4m1.ld"
+BOARD_DIR="${ROOT_DIR}/src/os/kernel/arch/cortex_m33"
+
+NO_BUILD=0
+BUILD_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --no-build)  NO_BUILD=1 ;;
+        --build-only) BUILD_ONLY=1 ;;
+        --protection=off) PROTECTION_MODE=off ;;
+        --protection=detect) PROTECTION_MODE=detect ;;
+        --protection=enforce) PROTECTION_MODE=enforce ;;
+        --protection=fault-test) PROTECTION_MODE=fault-test ;;
+        --protection=*) echo "[ra4m1] Unknown protection mode: ${arg#--protection=}" >&2; exit 1 ;;
+        *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+    esac
+done
+
+echo "[ra4m1] board=ra4m1-uno-r4 protection=$PROTECTION_MODE kind=pmsav7-mpu profile=c-shim-board-bringup linker=$LINKER_SCRIPT"
+
+if [ "$NO_BUILD" -eq 0 ]; then
+    echo "[ra4m1] Building SimpleOS Lite for RA4M1 (Cortex-M4)..."
+    mkdir -p "$(dirname "$SIMPLEOS_RA4M1_ELF")"
+
+    SHIM_C="${BOARD_DIR}/cm33_shim.c"
+
+    if [ ! -f "$SHIM_C" ]; then
+        echo "[ra4m1] ERROR: C shim not found: $SHIM_C" >&2
+        exit 1
+    fi
+
+    clang \
+        --target=thumbv7em-none-eabihf \
+        -mcpu=cortex-m4 -mthumb -mfloat-abi=soft \
+        -DTARGET_RA4M1 \
+        -DSIMPLEOS_PROTECTION_MODE_TEXT=\"${PROTECTION_MODE}\" \
+        $(if [ "$PROTECTION_MODE" = "fault-test" ]; then echo "-DSIMPLEOS_PROTECTION_MODE_FAULT_TEST"; fi) \
+        -I "$BOARD_DIR" \
+        -nostdlib -nostartfiles -ffreestanding -O1 \
+        -T "$LINKER_SCRIPT" \
+        -o "$SIMPLEOS_RA4M1_ELF" \
+        "$SHIM_C" \
+        -fuse-ld=lld \
+        2>&1
+
+    echo "[ra4m1] Built: $SIMPLEOS_RA4M1_ELF"
+    SIZE_OUT=$(llvm-size "$SIMPLEOS_RA4M1_ELF" 2>/dev/null || arm-none-eabi-size "$SIMPLEOS_RA4M1_ELF" 2>/dev/null || true)
+    if [ -n "$SIZE_OUT" ]; then
+        echo "[ra4m1] Size:"
+        echo "$SIZE_OUT"
+    fi
+fi
+
+if [ "$BUILD_ONLY" -eq 1 ]; then
+    echo "[ra4m1] Build-only mode, skipping flash."
+    echo "[ra4m1] REAL_BOARD_NOT_RUN board=ra4m1-uno-r4 reason=build-only protection=$PROTECTION_MODE"
+    exit 0
+fi
+
+if [ ! -f "$SIMPLEOS_RA4M1_ELF" ]; then
+    echo "[ra4m1] ERROR: ELF not found: $SIMPLEOS_RA4M1_ELF" >&2
+    exit 1
+fi
+
+echo "[ra4m1] Flashing via OpenOCD + CMSIS-DAP..."
+openocd \
+    -f interface/cmsis-dap.cfg \
+    -c "transport select swd" \
+    -c "adapter speed 4000" \
+    -f target/renesas_ra.cfg \
+    -c "program $SIMPLEOS_RA4M1_ELF verify reset exit" \
+    2>&1
+
+echo "[ra4m1] Flash complete. Opening serial monitor on $SERIAL_PORT @ $SERIAL_BAUD..."
+
+if [ -n "$SERIAL_LOG" ]; then
+    mkdir -p "$(dirname "$SERIAL_LOG")"
+    echo "[ra4m1] board=ra4m1-uno-r4 protection=$PROTECTION_MODE kind=pmsav7-mpu profile=c-shim-board-bringup" > "$SERIAL_LOG"
+    stty -F "$SERIAL_PORT" "$SERIAL_BAUD" raw -echo 2>/dev/null || true
+    echo "[ra4m1] Capturing serial for ${SERIAL_SECONDS}s to $SERIAL_LOG"
+    timeout "$SERIAL_SECONDS" cat "$SERIAL_PORT" >> "$SERIAL_LOG" 2>/dev/null || true
+    echo "[ra4m1] SERIAL_CAPTURED board=ra4m1-uno-r4 path=$SERIAL_LOG protection=$PROTECTION_MODE"
+    exec "${ROOT_DIR}/bin/release/x86_64-unknown-linux-gnu/simple" run \
+        "${ROOT_DIR}/src/app/simpleos_board_serial_check/main.spl" \
+        --board ra4m1-uno-r4 \
+        --mode "$PROTECTION_MODE" \
+        --serial-log "$SERIAL_LOG"
+fi
+
+if command -v picocom >/dev/null 2>&1; then
+    exec picocom -b "$SERIAL_BAUD" "$SERIAL_PORT"
+elif command -v screen >/dev/null 2>&1; then
+    exec screen "$SERIAL_PORT" "$SERIAL_BAUD"
+elif command -v minicom >/dev/null 2>&1; then
+    exec minicom -b "$SERIAL_BAUD" -D "$SERIAL_PORT"
+else
+    echo "[ra4m1] No serial monitor found. Install picocom, screen, or minicom."
+    echo "[ra4m1] Manual: cat $SERIAL_PORT"
+    exit 1
+fi

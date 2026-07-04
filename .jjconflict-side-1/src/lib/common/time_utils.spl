@@ -1,0 +1,198 @@
+# Pure arithmetic time utilities — Simple port of runtime_time.c civil-date logic
+# No syscalls. All functions are deterministic given their inputs.
+# Syscall-backed externs are declared at the bottom for callers that need them.
+#
+# Reference: Howard Hinnant civil_from_days algorithm
+# https://howardhinnant.github.io/date_algorithms.html
+
+# ============================================================================
+# Internal: floor division helpers for i64
+# ============================================================================
+
+# Converts micros-since-epoch to whole days (floor, not truncation)
+fn micros_to_days(micros: i64) -> i64:
+    val d = micros / 86400000000
+    if micros < 0 and micros % 86400000000 != 0:
+        d - 1
+    else:
+        d
+
+# ============================================================================
+# Internal: Howard Hinnant days_to_ymd (days since Unix epoch 1970-01-01)
+# ============================================================================
+
+fn _floor_era(z2: i64) -> i64:
+    # Floor division by 146097 — bias for negative so truncation acts as floor
+    if z2 >= 0: z2 / 146097 else: (z2 - 146096) / 146097
+
+fn _era_bias(y: i64) -> i64:
+    # Floor division by 400 — bias for negative so truncation acts as floor
+    if y >= 0: y / 400 else: (y - 399) / 400
+
+fn _days_to_ymd_year(z: i64) -> i64:
+    val z2  = z + 719468
+    val era = _floor_era(z2)
+    val doe = z2 - era * 146097
+    val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    val y   = yoe + era * 400
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp  = (5 * doy + 2) / 153
+    val m   = if mp < 10: mp + 3 else: mp - 9
+    if m <= 2: y + 1 else: y
+
+fn _days_to_ymd_month(z: i64) -> i64:
+    val z2  = z + 719468
+    val era = _floor_era(z2)
+    val doe = z2 - era * 146097
+    val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp  = (5 * doy + 2) / 153
+    if mp < 10: mp + 3 else: mp - 9
+
+fn _days_to_ymd_day(z: i64) -> i64:
+    val z2  = z + 719468
+    val era = _floor_era(z2)
+    val doe = z2 - era * 146097
+    val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp  = (5 * doy + 2) / 153
+    doy - (153 * mp + 2) / 5 + 1
+
+# ============================================================================
+# Leap year and days-in-month
+# ============================================================================
+
+pub fn leap_year(year: i64) -> bool:
+    """Return true if the given year is a leap year (proleptic Gregorian)."""
+    (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
+
+# Compatibility alias — forwards to canonical `leap_year`.
+pub fn is_leap_year(year: i64) -> bool:
+    leap_year(year)
+
+pub fn days_in_month(year: i64, month: i64) -> i64:
+    """Return the number of days in the given month of the given year."""
+    if month == 1:
+        31
+    else if month == 2:
+        if leap_year(year): 29 else: 28
+    else if month == 3:
+        31
+    else if month == 4:
+        30
+    else if month == 5:
+        31
+    else if month == 6:
+        30
+    else if month == 7:
+        31
+    else if month == 8:
+        31
+    else if month == 9:
+        30
+    else if month == 10:
+        31
+    else if month == 11:
+        30
+    else:
+        31
+
+# ============================================================================
+# Day-of-week (0=Sunday … 6=Saturday, matching ISO weekday offset from epoch)
+# Unix epoch 1970-01-01 was a Thursday = 4
+# ============================================================================
+
+pub fn day_of_week(micros: i64) -> i64:
+    """Return day-of-week for timestamp: 0=Sunday, 1=Monday … 6=Saturday."""
+    val days = micros_to_days(micros)
+    # 1970-01-01 is Thursday (4). Shift so modulo gives 0=Sunday.
+    val shifted = days + 4
+    val r = shifted % 7
+    if r < 0: r + 7 else: r
+
+# ============================================================================
+# Timestamp component extraction (micros since Unix epoch)
+# ============================================================================
+
+pub fn timestamp_get_year(micros: i64) -> i64:
+    """Extract UTC year from microseconds-since-epoch."""
+    _days_to_ymd_year(micros_to_days(micros))
+
+pub fn timestamp_get_month(micros: i64) -> i64:
+    """Extract UTC month (1-12) from microseconds-since-epoch."""
+    _days_to_ymd_month(micros_to_days(micros))
+
+pub fn timestamp_get_day(micros: i64) -> i64:
+    """Extract UTC day-of-month (1-31) from microseconds-since-epoch."""
+    _days_to_ymd_day(micros_to_days(micros))
+
+pub fn timestamp_get_hour(micros: i64) -> i64:
+    """Extract UTC hour (0-23) from microseconds-since-epoch."""
+    val secs = micros / 1000000
+    val s = secs % 86400
+    val s2 = if s < 0: s + 86400 else: s
+    s2 / 3600
+
+pub fn timestamp_get_minute(micros: i64) -> i64:
+    """Extract UTC minute (0-59) from microseconds-since-epoch."""
+    val secs = micros / 1000000
+    val s = secs % 86400
+    val s2 = if s < 0: s + 86400 else: s
+    (s2 % 3600) / 60
+
+pub fn timestamp_get_second(micros: i64) -> i64:
+    """Extract UTC second (0-59) from microseconds-since-epoch."""
+    val secs = micros / 1000000
+    val s = secs % 60
+    if s < 0: s + 60 else: s
+
+pub fn timestamp_get_microsecond(micros: i64) -> i64:
+    """Extract sub-second microseconds (0-999999) from microseconds-since-epoch."""
+    val us = micros % 1000000
+    if us < 0: us + 1000000 else: us
+
+# ============================================================================
+# Construct timestamp from UTC components (inverse of above)
+# ============================================================================
+
+pub fn timestamp_from_components(year: i64, month: i64, day: i64,
+                                  hour: i64, minute: i64, second: i64,
+                                  microsecond: i64) -> i64:
+    """Build microseconds-since-epoch from UTC components.
+
+    Uses the Howard Hinnant civil_to_days algorithm (march-based).
+    """
+    val y  = if month <= 2: year - 1 else: year
+    val m  = if month <= 2: month + 9 else: month - 3
+    val era = _era_bias(y)
+    val yoe = y - era * 400
+    val doy = (153 * m + 2) / 5 + day - 1
+    val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    val days = era * 146097 + doe - 719468
+    val secs = days * 86400 + hour * 3600 + minute * 60 + second
+    secs * 1000000 + microsecond
+
+# ============================================================================
+# Arithmetic operations on timestamps
+# ============================================================================
+
+pub fn timestamp_add_days(micros: i64, days: i64) -> i64:
+    """Add a number of whole days to a timestamp."""
+    micros + days * 86400000000
+
+pub fn timestamp_diff_days(micros1: i64, micros2: i64) -> i64:
+    """Difference in whole days between two timestamps (truncated toward zero)."""
+    (micros1 - micros2) / 86400000000
+
+# ============================================================================
+# Extern declarations for syscall-backed functions
+# (implemented in src/runtime/runtime_time.c)
+# ============================================================================
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_time_now_nanos() -> i64
+extern fn rt_time_now_micros() -> i64
+extern fn rt_time_now_seconds_f64() -> f64
+extern fn rt_progress_init()
+extern fn rt_progress_reset()
+extern fn rt_progress_get_elapsed_seconds() -> f64

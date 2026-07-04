@@ -1,0 +1,330 @@
+# @cover src/compiler/70.backend/gpu_intrinsics.spl 80%
+# @cover src/compiler/70.backend/backend/opencl_backend.spl 80%
+# @cover src/compiler/70.backend/backend/cuda_backend.spl 80%
+# @tag: unit, compiler, gpu, codegen, subgroup
+
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, compileoptions_default_options, CompileError}
+use compiler.backend.opencl_backend.{OpenClBackend}
+use compiler.backend.cuda_backend.{CudaBackend}
+use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic, recognize_gpu_intrinsic, all_gpu_intrinsic_names}
+use compiler.semantics.gpu_checker.{is_gpu_builtin_call}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalId}
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, GpuBarrierScope}
+use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, MirConstValue, LocalKind}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn u32_type() -> MirType:
+    MirType(kind: MirTypeKind.U32)
+
+fn i32_type() -> MirType:
+    MirType(kind: MirTypeKind.I32)
+
+fn bool_type() -> MirType:
+    MirType(kind: MirTypeKind.Bool)
+
+fn temp_local(id: i64, type_: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: type_, kind: LocalKind.Temp, is_ghost: false)
+
+fn make_opencl_subgroup_kernel(name: text, sym_id: i64, block: MirBlock) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: sym_id),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [temp_local(0, i32_type()), temp_local(1, i32_type()), temp_local(2, u32_type())],
+        blocks: [block],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: true,
+        gpu_target: "opencl",
+        gpu_backend_order: "opencl",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn make_cuda_subgroup_kernel(name: text, sym_id: i64, block: MirBlock) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: sym_id),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [temp_local(0, i32_type()), temp_local(1, i32_type()), temp_local(2, u32_type())],
+        blocks: [block],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: true,
+        gpu_target: "cuda",
+        gpu_backend_order: "cuda",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn make_module_from(func: MirFunction) -> MirModule:
+    var map: Dict<SymbolId, MirFunction> = {}
+    map[func.symbol] = func
+    MirModule(name: "subgroup_test_module", functions: map, statics: {}, constants: {}, types: {})
+
+# ============================================================================
+# MIR blocks using Intrinsic variant
+# ============================================================================
+
+fn lane_id_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_lane_id", []), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn warp_id_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_warp_id", []), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn warp_size_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_warp_size", []), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn warp_shuffle_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_warp_shuffle", [MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2))]), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn warp_shuffle_down_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_warp_shuffle_down", [MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2))]), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn warp_shuffle_up_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_warp_shuffle_up", [MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2))]), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn warp_shuffle_xor_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_warp_shuffle_xor", [MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2))]), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn warp_ballot_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_warp_ballot", [MirOperand.copy(LocalId(id: 1))]), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn subgroup_barrier_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.GpuBarrier(GpuBarrierScope.Subgroup), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+# ============================================================================
+# Contract spec
+# ============================================================================
+
+describe "subgroup intrinsics contract — OpenCL backend":
+
+    it "emits get_sub_group_local_id() for gpu_lane_id":
+        val func = make_opencl_subgroup_kernel("sg_lane_id_kernel", 100, lane_id_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("get_sub_group_local_id()")
+
+    it "emits get_sub_group_id() for gpu_warp_id":
+        val func = make_opencl_subgroup_kernel("sg_warp_id_kernel", 101, warp_id_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("get_sub_group_id()")
+
+    it "emits get_sub_group_size() for gpu_warp_size":
+        val func = make_opencl_subgroup_kernel("sg_warp_size_kernel", 102, warp_size_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("get_sub_group_size()")
+
+    it "emits sub_group_shuffle for gpu_warp_shuffle":
+        val func = make_opencl_subgroup_kernel("sg_shuffle_kernel", 103, warp_shuffle_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("sub_group_shuffle(")
+
+    it "emits sub_group_shuffle_down for gpu_warp_shuffle_down":
+        val func = make_opencl_subgroup_kernel("sg_shuffle_down_kernel", 104, warp_shuffle_down_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("sub_group_shuffle_down(")
+
+    it "emits sub_group_shuffle_up for gpu_warp_shuffle_up":
+        val func = make_opencl_subgroup_kernel("sg_shuffle_up_kernel", 105, warp_shuffle_up_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("sub_group_shuffle_up(")
+
+    it "emits sub_group_shuffle_xor for gpu_warp_shuffle_xor":
+        val func = make_opencl_subgroup_kernel("sg_shuffle_xor_kernel", 106, warp_shuffle_xor_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("sub_group_shuffle_xor(")
+
+    it "emits sub_group_ballot for gpu_warp_ballot":
+        val func = make_opencl_subgroup_kernel("sg_ballot_kernel", 107, warp_ballot_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("sub_group_ballot(")
+
+    it "emits sub_group_barrier for Subgroup scope GpuBarrier":
+        val func = make_opencl_subgroup_kernel("sg_barrier_kernel", 108, subgroup_barrier_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source).to_contain("sub_group_barrier(")
+
+    it "does not emit placeholder comment for any subgroup intrinsic":
+        val func = make_opencl_subgroup_kernel("sg_lane_id_check_kernel", 109, lane_id_block())
+        val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
+        expect(source.contains("subgroup barrier deferred")).to_equal(false)
+        expect(source.contains("// unsupported OpenCL intrinsic")).to_equal(false)
+
+describe "subgroup intrinsics contract — CUDA/PTX backend":
+
+    it "emits %laneid mov for gpu_lane_id":
+        val func = make_cuda_subgroup_kernel("cuda_lane_id_kernel", 200, lane_id_block())
+        val backend = CudaBackend.create((8, 6))
+        val result = backend.compile(make_module_from(func))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("%laneid")
+
+    it "emits %warpid mov for gpu_warp_id":
+        val func = make_cuda_subgroup_kernel("cuda_warp_id_kernel", 201, warp_id_block())
+        val backend = CudaBackend.create((8, 6))
+        val result = backend.compile(make_module_from(func))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("%warpid")
+
+    it "emits %WARP_SZ mov for gpu_warp_size":
+        val func = make_cuda_subgroup_kernel("cuda_warp_size_kernel", 202, warp_size_block())
+        val backend = CudaBackend.create((8, 6))
+        val result = backend.compile(make_module_from(func))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("%WARP_SZ")
+
+    it "emits shfl.sync.idx.b32 for gpu_warp_shuffle":
+        val func = make_cuda_subgroup_kernel("cuda_shuffle_kernel", 203, warp_shuffle_block())
+        val backend = CudaBackend.create((8, 6))
+        val result = backend.compile(make_module_from(func))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("shfl.sync.idx.b32")
+
+    it "emits shfl.sync.down.b32 for gpu_warp_shuffle_down":
+        val func = make_cuda_subgroup_kernel("cuda_shuffle_down_kernel", 204, warp_shuffle_down_block())
+        val backend = CudaBackend.create((8, 6))
+        val result = backend.compile(make_module_from(func))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("shfl.sync.down.b32")
+
+    it "emits shfl.sync.up.b32 for gpu_warp_shuffle_up":
+        val func = make_cuda_subgroup_kernel("cuda_shuffle_up_kernel", 205, warp_shuffle_up_block())
+        val backend = CudaBackend.create((8, 6))
+        val result = backend.compile(make_module_from(func))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("shfl.sync.up.b32")
+
+    it "emits shfl.sync.bfly.b32 for gpu_warp_shuffle_xor":
+        val func = make_cuda_subgroup_kernel("cuda_shuffle_xor_kernel", 206, warp_shuffle_xor_block())
+        val backend = CudaBackend.create((8, 6))
+        val result = backend.compile(make_module_from(func))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("shfl.sync.bfly.b32")
+
+    it "emits vote.sync.ballot.b32 for gpu_warp_ballot":
+        val func = make_cuda_subgroup_kernel("cuda_ballot_kernel", 207, warp_ballot_block())
+        val backend = CudaBackend.create((8, 6))
+        val result = backend.compile(make_module_from(func))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("vote.sync.ballot.b32")
+
+    it "emits bar.warp.sync for Subgroup scope GpuBarrier":
+        val func = make_cuda_subgroup_kernel("cuda_subgroup_barrier_kernel", 208, subgroup_barrier_block())
+        val backend = CudaBackend.create((8, 6))
+        val result = backend.compile(make_module_from(func))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("bar.warp.sync")
+
+    it "does not emit placeholder warp sync comment":
+        val func = make_cuda_subgroup_kernel("cuda_barrier_no_comment_kernel", 209, subgroup_barrier_block())
+        val backend = CudaBackend.create((8, 6))
+        val result = backend.compile(make_module_from(func))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx.contains("// warp sync")).to_equal(false)
+
+describe "gpu_intrinsics — subgroup recognition and arity":
+
+    it "recognizes all subgroup intrinsic names":
+        expect(recognize_gpu_intrinsic("gpu_lane_id").?).to_equal(true)
+        expect(recognize_gpu_intrinsic("gpu_warp_id").?).to_equal(true)
+        expect(recognize_gpu_intrinsic("gpu_warp_size").?).to_equal(true)
+        expect(recognize_gpu_intrinsic("gpu_warp_shuffle").?).to_equal(true)
+        expect(recognize_gpu_intrinsic("gpu_warp_shuffle_down").?).to_equal(true)
+        expect(recognize_gpu_intrinsic("gpu_warp_shuffle_up").?).to_equal(true)
+        expect(recognize_gpu_intrinsic("gpu_warp_shuffle_xor").?).to_equal(true)
+        expect(recognize_gpu_intrinsic("gpu_warp_ballot").?).to_equal(true)
+
+    it "returns nil for unrecognized names":
+        expect(recognize_gpu_intrinsic("gpu_lane_id_nonexistent")).to_be_nil()
+
+    it "all_gpu_intrinsic_names includes subgroup intrinsics":
+        val names = all_gpu_intrinsic_names()
+        expect(names.contains("gpu_lane_id")).to_equal(true)
+        expect(names.contains("gpu_warp_shuffle")).to_equal(true)
+        expect(names.contains("gpu_warp_ballot")).to_equal(true)
+
+    it "gpu_lane_id is whitelisted as kernel builtin by gpu_checker":
+        expect(is_gpu_builtin_call("gpu_lane_id")).to_equal(true)
+        expect(is_gpu_builtin_call("gpu_warp_shuffle")).to_equal(true)
+        expect(is_gpu_builtin_call("gpu_warp_ballot")).to_equal(true)

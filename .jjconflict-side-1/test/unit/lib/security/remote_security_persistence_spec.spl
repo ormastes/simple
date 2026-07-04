@@ -1,0 +1,107 @@
+use std.security.types.{RemoteSecurityContextHeaders, RemoteSecurityKeyRolloutProvider, RemoteSecuritySessionStore, RemoteSecuritySessionStoreAdapter, RemoteSecuritySigningKeyRing, remote_security_token_payload_v2, remote_security_token_with_external_signature, sign_remote_security_token_with_key_ring, validate_remote_security_context_with_adapters, validate_remote_security_context_with_key_ring}
+
+fn bearer_headers(token: text) -> RemoteSecurityContextHeaders:
+    RemoteSecurityContextHeaders(
+        authorization: "Bearer {token}",
+        traceparent: "",
+        tenant_id: "",
+        policy_version: "",
+        request_class: ""
+    )
+
+describe "remote security persistence":
+    it "reloads key ring and sessions from SDN export":
+        var key_ring = RemoteSecuritySigningKeyRing.new("k1", "old-secret")
+        key_ring.rotate_key("k2", "new-secret")
+        var sessions = RemoteSecuritySessionStore.new()
+        sessions.create_session("persisted-session", "user-1", ["profile.read", "profile.write"], 9000)
+
+        val key_sdn = key_ring.export_sdn()
+        val session_sdn = sessions.export_sdn()
+        val loaded_keys = RemoteSecuritySigningKeyRing.from_sdn(key_sdn)
+        val loaded_sessions = RemoteSecuritySessionStore.from_sdn(session_sdn)
+
+        val token = sign_remote_security_token_with_key_ring(loaded_keys, "persisted-session", "user-1", 8000, ["profile.read"])
+        val ctx = validate_remote_security_context_with_key_ring(bearer_headers(token), "198.51.100.30", "persisted-session", loaded_keys, loaded_sessions, 2000)
+
+        expect(key_sdn).to_contain("active: k2")
+        expect(session_sdn).to_contain("session|persisted-session|user-1|9000|false|profile.read,profile.write")
+        expect(ctx.is_authenticated()).to_equal(true)
+        expect(ctx.has_capability("profile.write")).to_equal(true)
+
+    it "merges later expiry while propagating revocation":
+        var primary = RemoteSecuritySessionStore.new()
+        primary.create_session("shared-session", "user-2", ["admin.read"], 4000)
+        var replica = RemoteSecuritySessionStore.new()
+        replica.create_session("shared-session", "user-2", ["admin.read", "admin.write"], 7000)
+
+        primary.merge_from(replica)
+
+        var key_ring = RemoteSecuritySigningKeyRing.new("k1", "server-secret")
+        val refreshed_token = sign_remote_security_token_with_key_ring(key_ring, "shared-session", "user-2", 6500, ["admin.read"])
+        val refreshed_ctx = validate_remote_security_context_with_key_ring(bearer_headers(refreshed_token), "198.51.100.31", "shared-session", key_ring, primary, 5000)
+        expect(refreshed_ctx.is_authenticated()).to_equal(true)
+        expect(refreshed_ctx.has_capability("admin.write")).to_equal(true)
+
+        replica.revoke_session("shared-session")
+        primary.merge_from(replica)
+
+        val revoked_ctx = validate_remote_security_context_with_key_ring(bearer_headers(refreshed_token), "198.51.100.31", "shared-session", key_ring, primary, 5000)
+        expect(revoked_ctx.is_authenticated()).to_equal(false)
+
+    it "keeps rotated keys across reload and rejects retired keys":
+        var key_ring = RemoteSecuritySigningKeyRing.new("k1", "old-secret")
+        var sessions = RemoteSecuritySessionStore.new()
+        sessions.create_session("rotated-session", "user-3", ["profile.read"], 9000)
+        val old_token = sign_remote_security_token_with_key_ring(key_ring, "rotated-session", "user-3", 8000, ["profile.read"])
+
+        var peer_keys = RemoteSecuritySigningKeyRing.new("k1", "old-secret")
+        peer_keys.rotate_key("k2", "new-secret")
+        key_ring.merge_from(peer_keys)
+        val new_token = sign_remote_security_token_with_key_ring(key_ring, "rotated-session", "user-3", 8000, ["profile.read"])
+        var loaded_keys = RemoteSecuritySigningKeyRing.from_sdn(key_ring.export_sdn())
+
+        val old_ctx = validate_remote_security_context_with_key_ring(bearer_headers(old_token), "198.51.100.32", "rotated-session", loaded_keys, sessions, 2000)
+        val new_ctx = validate_remote_security_context_with_key_ring(bearer_headers(new_token), "198.51.100.32", "rotated-session", loaded_keys, sessions, 2000)
+        expect(old_ctx.is_authenticated()).to_equal(true)
+        expect(new_ctx.is_authenticated()).to_equal(true)
+
+        loaded_keys.retire_key("k1")
+        val retired_ctx = validate_remote_security_context_with_key_ring(bearer_headers(old_token), "198.51.100.32", "rotated-session", loaded_keys, sessions, 2000)
+        val active_ctx = validate_remote_security_context_with_key_ring(bearer_headers(new_token), "198.51.100.32", "rotated-session", loaded_keys, sessions, 2000)
+        expect(retired_ctx.is_authenticated()).to_equal(false)
+        expect(active_ctx.is_authenticated()).to_equal(true)
+
+    it "validates through replicated session and opaque key rollout adapters":
+        var sessions = RemoteSecuritySessionStoreAdapter.replicated("redis", "security:session")
+        sessions.create_session("adapter-session", "user-4", ["billing.read", "billing.write"], 9000)
+        var key_provider = RemoteSecurityKeyRolloutProvider.with_active_key("kms-key-1", "kms://security/kms-key-1")
+        val payload = remote_security_token_payload_v2("kms-key-1", "adapter-session", "user-4", 8000, ["billing.read"])
+        val signature = "external-signature-1"
+        key_provider.allow_external_signature("kms-key-1", payload, signature)
+        val token = remote_security_token_with_external_signature("kms-key-1", "adapter-session", "user-4", 8000, ["billing.read"], signature)
+
+        val ctx = validate_remote_security_context_with_adapters(bearer_headers(token), "198.51.100.33", "adapter-session", key_provider, sessions, 2000)
+
+        expect(sessions.export_sdn()).to_contain("backend: redis")
+        expect(key_provider.export_sdn()).to_contain("key_handle|kms-key-1|kms://security/kms-key-1")
+        expect(ctx.is_authenticated()).to_equal(true)
+        expect(ctx.has_capability("billing.write")).to_equal(true)
+
+    it "rejects adapter validation after external key retirement or session revocation":
+        var sessions = RemoteSecuritySessionStoreAdapter.replicated("redis", "security:session")
+        sessions.create_session("revoked-adapter-session", "user-5", ["audit.read"], 9000)
+        var key_provider = RemoteSecurityKeyRolloutProvider.with_active_key("hsm-key-1", "hsm://cluster/key-1")
+        val payload = remote_security_token_payload_v2("hsm-key-1", "revoked-adapter-session", "user-5", 8000, ["audit.read"])
+        key_provider.allow_external_signature("hsm-key-1", payload, "sig")
+        val token = remote_security_token_with_external_signature("hsm-key-1", "revoked-adapter-session", "user-5", 8000, ["audit.read"], "sig")
+
+        key_provider.retire_key("hsm-key-1")
+        val retired_ctx = validate_remote_security_context_with_adapters(bearer_headers(token), "198.51.100.34", "revoked-adapter-session", key_provider, sessions, 2000)
+        expect(retired_ctx.is_authenticated()).to_equal(false)
+
+        key_provider.rotate_key("hsm-key-1", "hsm://cluster/key-1")
+        key_provider.allow_external_signature("hsm-key-1", payload, "sig")
+        sessions.revoke_session("revoked-adapter-session")
+        val revoked_ctx = validate_remote_security_context_with_adapters(bearer_headers(token), "198.51.100.34", "revoked-adapter-session", key_provider, sessions, 2000)
+        expect(revoked_ctx.is_authenticated()).to_equal(false)

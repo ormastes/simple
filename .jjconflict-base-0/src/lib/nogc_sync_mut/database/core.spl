@@ -1,0 +1,636 @@
+# Unified Database Library - Core Module
+#
+# ⚠️ WARNING: DO NOT MANUALLY EDIT DATABASE FILES
+# ⚠️ All database updates MUST use this library's atomic operations
+# ⚠️ Direct file writes to .sdn files will cause race conditions and data corruption
+#
+# Provides shared infrastructure for Bug DB, Test DB, and Feature DB:
+# - StringInterner: Efficient string deduplication
+# - SdnTable/SdnRow: In-memory SDN table representation
+# - SdnDatabase: Base class for all databases
+#
+# CORRECT USAGE:
+#   use std.database.bug (create_bug_database)
+#   var db = create_bug_database("doc/08_tracking/bug/bug_db.sdn")
+#   db.add_bug(bug)
+#   db.save()  // Atomic operation with locking
+#
+# INCORRECT USAGE (FORBIDDEN):
+#   use app.io (file_write)
+#   file_write("doc/08_tracking/bug/bug_db.sdn", content)  // ❌ Race condition!
+
+use nogc_sync_mut.database.atomic (atomic_write, atomic_read)
+
+extern fn rt_crc32_text(content: text) -> i64
+use nogc_sync_mut.database.wal (WriteAheadLog, WalEntry, WalEntryType, wal_payload_to_row)
+use nogc_sync_mut.database.db_metrics (DbMetrics)
+# Minimal StringId definition (avoids external dependency during bootstrap)
+struct StringId:
+    value: i32
+
+# Direct extern declarations for bootstrap runtime compatibility
+# (use app.io.{...} import doesn't resolve reliably in bootstrap interpreter)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_rename(from: text, to: text) -> bool
+
+fn file_read(path: text) -> text:
+    # Bootstrap runtime wraps rt_file_read_text result in Option
+    val result = rt_file_read_text(path)
+    result ?? ""
+fn file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+# ============================================================================
+# StringInterner - Efficient string deduplication
+# ============================================================================
+
+class StringInterner:
+    str_to_id: Dict<text, i32>    # string -> id mapping
+    id_to_str: Dict<i32, text>    # id -> string mapping
+    next_id: StringId
+
+    # Create empty interner
+    static fn empty() -> StringInterner:
+        StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0))
+
+    # Intern a string, return its ID
+    me intern(s: text) -> i32:
+        if self.str_to_id.contains_key(s):
+            self.str_to_id[s]
+        else:
+            val id = self.next_id.value
+            self.str_to_id[s] = id
+            self.id_to_str[id] = s
+            self.next_id = StringId(value: self.next_id.value + 1)
+            id
+
+    # Get string by ID
+    fn get(id: i32) -> text?:
+        if self.id_to_str.contains_key(id):
+            Some(self.id_to_str[id])
+        else:
+            nil
+
+    # Lookup string by ID (alias for get)
+    fn lookup(id: i32) -> text?:
+        self.get(id)
+
+    # Get ID by string (forward lookup)
+    fn get_id(s: text) -> i32?:
+        if self.str_to_id.contains_key(s):
+            Some(self.str_to_id[s])
+        else:
+            nil
+
+    # Get all (id, string) pairs
+    fn all_strings() -> Dict<i32, text>:
+        self.id_to_str
+
+    # Load from SDN table
+    static fn from_sdn(table: SdnTable) -> StringInterner:
+        var interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0))
+        for row in table.rows:
+            if val Some(id_str) = row.get("id"):
+                if val Some(value) = row.get("value"):
+                    val id = id_str.to_int() ?? 0
+                    if id > 0:
+                        interner.str_to_id[value] = id
+                        interner.id_to_str[id] = value
+                        if id >= interner.next_id.value:
+                            interner.next_id = StringId(value: id + 1)
+        interner
+
+    # Export to SDN table
+    fn to_sdn() -> SdnTable:
+        val table = SdnTable(name: "strings", columns: ["id", "value"], rows: [], index: {})
+        for (id, value) in self.id_to_str:
+            val row = SdnRow(fields: {}, _version: 0)
+            row.set("id", "{id}")
+            row.set("value", value)
+            table.add_row(row)
+        table
+
+# ============================================================================
+# SdnRow - Single row in SDN table
+# ============================================================================
+
+struct SdnRow:
+    fields: Dict<text, text>
+    _version: i64
+
+    # Create empty row
+    static fn empty() -> SdnRow:
+        SdnRow(fields: {}, _version: 0)
+
+    # Get field value
+    fn get(column: text) -> text?:
+        if self.fields.contains_key(column):
+            Some(self.fields[column])
+        else:
+            nil
+
+    # Get as i32
+    fn get_i32(column: text) -> i32?:
+        val value = self.get(column)?
+        val parsed = value.to_int()
+        if parsed == nil:
+            return nil
+        Some(parsed)
+
+    # Get as i64
+    fn get_i64(column: text) -> i64?:
+        val value = self.get(column)?
+        val parsed = value.to_int()
+        if parsed == nil:
+            return nil
+        Some(parsed)
+
+    # Get as f64
+    fn get_f64(column: text) -> f64?:
+        val value = self.get(column)?
+        Some(value.to_float())
+
+    # Get as bool
+    fn get_bool(column: text) -> bool?:
+        val value = self.get(column)?
+        if value == "true":
+            Some(true)
+        elif value == "false":
+            Some(false)
+        else:
+            nil
+
+    # Set field value
+    me set(column: text, value: text):
+        self.fields[column] = value
+
+    # Deep copy row contents so native callers do not rely on struct copies
+    fn copy() -> SdnRow:
+        val row = SdnRow(fields: {}, _version: 0)
+        for (column, value) in self.fields:
+            row.set(column, value)
+        row
+
+    # Check if has column
+    fn has_column(column: text) -> bool:
+        self.fields.contains_key(column)
+
+# ============================================================================
+# SdnTable - In-memory representation of SDN table
+# ============================================================================
+
+class SdnTable:
+    name: text
+    columns: [text]
+    rows: [SdnRow]
+    index: Dict<text, i64>      # Primary key -> row index
+
+    # Create new table
+    static fn new(name: text, columns: [text]) -> SdnTable:
+        SdnTable(name: name, columns: columns, rows: [], index: {})
+
+    # Parse from SDN format
+    static fn parse(content: text) -> SdnTable?:
+        val lines: [text] = content.split("\n")
+        if lines.len() == 0:
+            return nil
+
+        # Find table header line (format: "table_name |col1, col2, col3|")
+        var header_idx = -1
+        var table_name: text = ""
+        var columns: [text] = []
+
+        for (i, line) in lines.enumerate():
+            val trimmed = line.trim()
+            if trimmed.contains("|") and not trimmed.starts_with("#"):
+                # Parse header
+                val parts: [text] = trimmed.split("|")
+                if parts.len() >= 3:
+                    table_name = parts[0].trim()
+                    val col_part = parts[1].trim()
+                    # NOTE: Cannot chain .split().map() - bootstrap runtime bug
+                    val raw_cols: [text] = col_part.split(",")
+                    columns = raw_cols.map(&:trim)
+                    header_idx = i
+                    break
+
+        if header_idx == -1:
+            return nil
+
+        # Parse rows
+        val table = SdnTable(name: table_name, columns: columns, rows: [], index: {})
+        for i in (header_idx + 1)..lines.len():
+            val line = lines[i].trim()
+            if line == "" or line.starts_with("#"):
+                continue
+
+            # Parse row with quote-aware CSV splitting
+            # Handles quoted values that contain commas
+            val parts = split_sdn_row(line)
+            if parts.len() != columns.len():
+                continue
+
+            val row = SdnRow(fields: {}, _version: 0)
+            for (j, col) in columns.enumerate():
+                val value = parts[j].trim()
+                # Strip surrounding quotes if present
+                val unquoted = strip_quotes(value)
+                row.set(col, unquoted)
+
+            table.add_row(row)
+
+        Some(table)
+
+    # Export to SDN format
+    fn to_sdn() -> text:
+        var parts: [text] = []
+        parts.push("{self.name} |")
+        parts.push(self.columns.join(", "))
+        parts.push("|\n")
+
+        for row in self.rows:
+            parts.push("    ")
+            var values: [text] = []
+            for col in self.columns:
+                val value = row.get(col) ?? ""
+                val formatted = quote_if_needed(value)
+                values.push(formatted)
+            parts.push(values.join(", "))
+            parts.push("\n")
+
+        parts.join("")
+
+    # Add row
+    me add_row(row: SdnRow) -> bool:
+        # If has primary key (id field), add to index
+        val id = row.get("id")
+        if id.?:
+            self.index[id ?? ""] = self.rows.len()
+
+        # Bootstrap/native field receivers can mutate a copy of `self.rows`.
+        # Read-modify-write the array back explicitly.
+        var rows = self.rows
+        rows.push(row)
+        self.rows = rows
+        true
+
+    # Update row by primary key
+    me update_row(key: text, row: SdnRow) -> bool:
+        for (i, current) in self.rows.enumerate():
+            val current_row: SdnRow = current
+            if current_row.get("id") == Some(key):
+                self.rows[i] = row
+                self.index[key] = i
+                return true
+        false
+
+    # Update row only if current version matches expected_version (optimistic locking)
+    me update_row_if(key: text, row: SdnRow, expected_version: i64) -> Result<bool, text>:
+        for (i, current) in self.rows.enumerate():
+            val current_row: SdnRow = current
+            if current_row.get("id") == Some(key):
+                if current_row._version != expected_version:
+                    return Err("version mismatch: expected {expected_version}, got {current_row._version}")
+                val new_row = SdnRow(fields: row.fields, _version: expected_version + 1)
+                self.rows[i] = new_row
+                self.index[key] = i
+                return Ok(true)
+        Ok(false)
+
+    # Get row by primary key
+    fn get_row(key: text) -> SdnRow?:
+        for row in self.rows:
+            if row.get("id") == Some(key):
+                return Some(row)
+        nil
+
+    # Soft delete (set valid=false)
+    me mark_deleted(key: text) -> bool:
+        for (i, current) in self.rows.enumerate():
+            val current_row: SdnRow = current
+            if current_row.get("id") == Some(key):
+                # NOTE: self.rows[idx].set() modifies a copy in bootstrap runtime
+                # Must read, modify, write back
+                var row: SdnRow = current_row
+                row.set("valid", "false")
+                self.rows[i] = row
+                self.index[key] = i
+                return true
+        false
+
+    # Delete row by primary key (alias for mark_deleted)
+    me delete_row(key: text) -> bool:
+        self.mark_deleted(key)
+
+    # Get all valid rows (where valid=true or no valid field)
+    fn valid_rows() -> [SdnRow]:
+        var result: [SdnRow] = []
+        for row in self.rows:
+            var include = true
+            if val Some(valid_str) = row.get("valid"):
+                include = valid_str != "false"
+            if include:
+                result.push(row)
+        result
+
+    # Clear all rows and index
+    me clear():
+        self.rows = []
+        self.index = {}
+
+    # Rebuild index after loading
+    me rebuild_index():
+        self.index = {}
+        for (i, row) in self.rows.enumerate():
+            val current_row: SdnRow = row
+            if val Some(id_value) = current_row.get("id"):
+                self.index[id_value] = i
+
+# ============================================================================
+# SdnDatabase - Base class for all databases
+# ============================================================================
+
+class SdnDatabase:
+    path: text
+    interner: StringInterner
+    tables: Dict<text, SdnTable>
+    modified: bool
+    wal: WriteAheadLog?
+    metrics: DbMetrics?
+
+    # Create new database
+    static fn new(path: text) -> SdnDatabase:
+        SdnDatabase(
+            path: path,
+            interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)),
+            tables: {},
+            modified: false,
+            wal: nil,
+            metrics: nil
+        )
+
+    # Load existing database
+    static fn load(path: text) -> SdnDatabase?:
+        if not file_exists(path):
+            return nil
+
+        val raw_content = file_read(path)
+        if raw_content == "":
+            return nil
+
+        var content: text = raw_content
+        if content.starts_with("#sdn-crc32:"):
+            val newline_idx = content.index_of("\n") ?? -1
+            if newline_idx > 0:
+                val header = content.slice(0, newline_idx)
+                val stored_crc_str = header.slice(11, header.len())
+                val stored_crc = stored_crc_str.to_int() ?? -1
+                val body = content.slice(newline_idx + 1, content.len())
+                val computed_crc = rt_crc32_text(body)
+                if stored_crc != computed_crc:
+                    return nil
+                content = body
+
+        var db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)), modified: false, wal: nil, metrics: nil)
+
+        val sections: [text] = content.split("\n\n")
+        for section in sections:
+            if section.trim() == "":
+                continue
+
+            val table_opt = parse_sdn_table(section)
+            if not table_opt.?:
+                # Tracked SDN files may contain prose/report sections between
+                # tables. Ignore any section that does not parse as a table.
+                continue
+
+            match table_opt:
+                Some(table):
+                    # Special handling for strings table
+                    if table.name == "strings":
+                        db.interner = interner_from_sdn(table)
+                    else:
+                        table.rebuild_index()
+                        db.tables[table.name] = table
+                nil:
+                    pass
+
+        db.modified = false
+
+        # Replay WAL for crash recovery: re-apply any entries written after last checkpoint
+        var db_wal = WriteAheadLog.open(path)
+        val pending = db_wal.replay()
+        if pending.len() > 0:
+            for entry in pending:
+                if entry.entry_type == WalEntryType.Insert or entry.entry_type == WalEntryType.Update:
+                    if db.tables.contains_key(entry.table_name):
+                        var t = db.tables[entry.table_name]
+                        val row_opt = wal_payload_to_row(entry.data, t.columns)
+                        match row_opt:
+                            Some(replayed_row):
+                                if entry.entry_type == WalEntryType.Update:
+                                    t.update_row(entry.row_key, replayed_row)
+                                else:
+                                    t.add_row(replayed_row)
+                                db.tables[entry.table_name] = t
+                            nil:
+                                pass
+                elif entry.entry_type == WalEntryType.Delete:
+                    if db.tables.contains_key(entry.table_name):
+                        var t = db.tables[entry.table_name]
+                        t.mark_deleted(entry.row_key)
+                        db.tables[entry.table_name] = t
+            db.modified = true
+        db.wal = Some(db_wal)
+
+        Some(db)
+
+    # Save to disk (atomic with file locking)
+    me save() -> bool:
+        var sections: [text] = []
+
+        # Write strings table first
+        val strings_table: SdnTable = self.interner.to_sdn()
+        sections.push(strings_table.to_sdn())
+
+        # Write all other tables
+        for (name, table) in self.tables:
+            val typed_table: SdnTable = table
+            sections.push(typed_table.to_sdn())
+
+        val body = sections.join("\n\n") + "\n\n"
+        val crc = rt_crc32_text(body)
+        val content = "#sdn-crc32:{crc}\n" + body
+
+        if not atomic_write(self.path, content):
+            return false
+
+        self.modified = false
+
+        # Checkpoint WAL now that main file is successfully written
+        match self.wal:
+            Some(wal):
+                var w = wal
+                w.checkpoint()
+                self.wal = Some(w)
+            nil:
+                pass
+
+        true
+
+    # Get table by name
+    fn get_table(name: text) -> SdnTable?:
+        if self.tables.contains_key(name):
+            Some(self.tables[name])
+        else:
+            nil
+
+    # Get mutable table reference
+    me get_table_mut(name: text) -> SdnTable?:
+        if self.tables.contains_key(name):
+            Some(self.tables[name])
+        else:
+            nil
+
+    # Add or update table
+    me set_table(name: text, table: SdnTable):
+        self.tables[name] = table
+        self.modified = true
+
+    # Add row to table (helper for common pattern)
+    me add_row_to_table(table_name: text, row: SdnRow) -> bool:
+        val table_opt = self.get_table_mut(table_name)
+        match table_opt:
+            Some(table_value):
+                var table = table_value
+                table.add_row(row)
+                self.set_table(table_name, table)
+                true
+            nil:
+                false
+
+    # Export a table to SDN text
+    fn export_table_sdn(name: text) -> text?:
+        if not self.tables.contains_key(name):
+            return nil
+        val table: SdnTable = self.tables[name]
+        Some(table.to_sdn())
+
+    # Import a table from SDN text
+    me import_table_sdn(content: text) -> bool:
+        val table = parse_sdn_table(content)
+        match table:
+            Some(t):
+                t.rebuild_index()
+                self.tables[t.name] = t
+                self.modified = true
+                true
+            nil:
+                false
+
+    # String interning helpers
+    me intern(s: text) -> i32:
+        self.modified = true
+        self.interner.intern(s)
+
+    fn resolve(id: i32) -> text?:
+        self.interner.get(id)
+
+    # Validation - base checks applicable to all databases
+    # Returns list of issue descriptions. Subclasses should call this
+    # and add domain-specific checks.
+    fn validate() -> [text]:
+        var errors: [text] = []
+
+        # Check interner consistency
+        for (id, value) in self.interner.id_to_str:
+            if id < 0 or id >= self.interner.next_id.value:
+                errors.push("String interner: ID {id} out of bounds (max: {self.interner.next_id.value})")
+
+        # Check valid column in all tables
+        for (name, table) in self.tables:
+            for row in table.rows:
+                val valid_opt = row.get("valid")
+                if val Some(valid_str) = valid_opt:
+                    if valid_str != "true" and valid_str != "false":
+                        val id = row.get("id") ?? "unknown"
+                        errors.push("Table '{name}' row '{id}': invalid valid value '{valid_str}'")
+
+        errors
+
+# ============================================================================
+# SDN Row Parsing Helpers (quote-aware CSV splitting)
+# ============================================================================
+
+# Split an SDN row line respecting quoted strings that may contain commas.
+# For example: '1, "hello, world", true' -> ["1", '"hello, world"', "true"]
+fn split_sdn_row(line: text) -> [text]:
+    var parts: [text] = []
+    var chars: [text] = []
+    var in_quotes = false
+    var i = 0
+
+    # Iterate over Unicode characters, not bytes. `line.len()` returns the byte
+    # count, but indexing (`line[i]`) is char-based, so a byte-bounded loop walks
+    # past the last char on multibyte input (e.g. an em-dash) and crashes with
+    # "string index out of bounds". `line.chars()` yields one char per slot.
+    val cs = line.chars()
+    while i < cs.len():
+        val ch = cs[i]
+        if ch == '"':
+            in_quotes = not in_quotes
+            chars.push(ch)
+        elif ch == ',' and not in_quotes:
+            parts.push(chars.join(""))
+            chars = []
+        else:
+            chars.push(ch)
+        i = i + 1
+
+    # Add last field
+    if chars.len() > 0 or parts.len() > 0:
+        parts.push(chars.join(""))
+
+    parts
+
+# Strip surrounding double quotes from a value.
+# '"hello"' -> 'hello', 'plain' -> 'plain'
+fn strip_quotes(value: text) -> text:
+    # Slice by character count, not byte length. `value.len()` is the byte count,
+    # but slicing is char-based, so `value[1..(value.len() - 1)]` mis-slices (and
+    # silently yields empty) on multibyte content like an em-dash. `chars().len()`
+    # is the character count, so this strips exactly the two ASCII quote chars.
+    val n = value.chars().len()
+    if n >= 2 and value.starts_with('"') and value.ends_with('"'):
+        return value[1..(n - 1)]
+    value
+
+# Quote a value if it contains commas (for SDN export).
+fn quote_if_needed(value: text) -> text:
+    if value.contains(","):
+        return '"' + value + '"'
+    value
+
+# ============================================================================
+# Standalone wrappers for static methods (bootstrap runtime compatibility)
+# ============================================================================
+
+fn parse_sdn_table(content: text) -> SdnTable?:
+    SdnTable.parse(content)
+
+fn interner_from_sdn(table: SdnTable) -> StringInterner:
+    StringInterner.from_sdn(table)
+
+fn new_sdn_database(path: text) -> SdnDatabase:
+    SdnDatabase.new(path)
+
+fn load_sdn_database(path: text) -> SdnDatabase?:
+    SdnDatabase.load(path)
+
+# ============================================================================
+# Exports
+# ============================================================================

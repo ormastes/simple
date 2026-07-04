@@ -1,0 +1,222 @@
+# SWA ZIP Builder - Create ZIP-based Simple Web Archive files
+#
+# Wraps ZipWriter to create SWA files with a well-known directory structure,
+# similar to how Java's JAR/WAR files use ZIP with conventional paths.
+#
+# SWA ZIP Layout:
+#   META-SWA/
+#     descriptor.sdn     # Deployment descriptor (webapp.sdn)
+#     manifest.sdn       # Package metadata
+#   modules/
+#     app/controllers/home.smf
+#     app/services/user.smf
+#   public/
+#     index.html
+#     css/style.css
+#     js/app.js
+#   i18n/
+#     messages.sdn       # Default locale
+#     messages_en.sdn    # English
+#     messages_ko.sdn    # Korean
+#
+# Usage:
+#   var builder = SwaZipBuilder.new()
+#   builder.set_descriptor("webapp:\n  name: myapp\n")
+#   builder.set_manifest("name: myapp\nversion: 1.0.0\n")
+#   builder.add_module("app/controllers/home", "/path/to/home.smf")
+#   builder.add_asset("css/style.css", "/path/to/style.css")
+#   builder.add_i18n("en", "greeting: Hello\n")
+#   builder.add_i18n("ko", "greeting: 안녕하세요\n")
+#   builder.write("myapp.swa")
+
+use app.io.{file_read, file_exists}
+use std.archive.{ZipWriter}
+
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+# ============================================================================
+# SWA ZIP Builder
+# ============================================================================
+
+# Builder for creating ZIP-based Simple Web Archive (.swa) files.
+#
+# The builder accumulates modules, assets, i18n bundles, and metadata,
+# then writes them all into a single ZIP file with the SWA directory
+# convention.
+struct SwaZipBuilder:
+    zip: ZipWriter
+    descriptor: text
+    manifest: text
+    verbose: bool
+
+impl SwaZipBuilder:
+    # Create a new SWA ZIP builder.
+    static fn new() -> SwaZipBuilder:
+        SwaZipBuilder(
+            zip: ZipWriter.new(),
+            descriptor: "",
+            manifest: "",
+            verbose: false
+        )
+
+    # Enable verbose output.
+    me set_verbose(v: bool):
+        self.verbose = v
+
+    # Add a compiled module (.smf) to the archive.
+    # The module is placed at modules/{name}.smf inside the ZIP.
+    #
+    # Args:
+    #   name: Module path (e.g., "app/controllers/home")
+    #   smf_path: Path to the SMF file on disk
+    #
+    # Returns:
+    #   Ok(()) on success, Err with message on failure
+    me add_module(name: text, smf_path: text) -> Result<(), text>:
+        if not file_exists(smf_path):
+            return Err("SMF file not found: {smf_path}")
+
+        val data = rt_file_read_bytes(smf_path)
+        val zip_path = "modules/{name}.smf"
+        val result = self.zip.add_file(zip_path, data)
+
+        if self.verbose:
+            if result.is_ok():
+                print "[swa-zip] Added module: {name} ({data.len()} bytes)"
+
+        result
+
+    # Add a static asset to the archive.
+    # The asset is placed at public/{path} inside the ZIP.
+    #
+    # Args:
+    #   path: Relative path for the asset (e.g., "css/style.css")
+    #   file_path: Path to the file on disk
+    #
+    # Returns:
+    #   Ok(()) on success, Err with message on failure
+    me add_asset(path: text, file_path: text) -> Result<(), text>:
+        if not file_exists(file_path):
+            return Err("Asset file not found: {file_path}")
+
+        val data = rt_file_read_bytes(file_path)
+        val zip_path = "public/{path}"
+        val result = self.zip.add_file(zip_path, data)
+
+        if self.verbose:
+            if result.is_ok():
+                print "[swa-zip] Added asset: {path} ({data.len()} bytes)"
+
+        result
+
+    # Add an asset from in-memory data.
+    #
+    # Args:
+    #   path: Relative path for the asset (e.g., "css/style.css")
+    #   data: File contents as bytes
+    #
+    # Returns:
+    #   Ok(()) on success, Err with message on failure
+    me add_asset_data(path: text, data: [u8]) -> Result<(), text>:
+        val zip_path = "public/{path}"
+        self.zip.add_file(zip_path, data)
+
+    # Add an i18n (internationalization) resource bundle.
+    # The bundle is placed at i18n/messages_{locale}.sdn inside the ZIP.
+    # Use locale "" (empty) for the default messages.sdn.
+    #
+    # Args:
+    #   locale: Locale code (e.g., "en", "ko", or "" for default)
+    #   content: SDN content for the locale
+    me add_i18n(locale: text, content: text):
+        var zip_path = "i18n/messages.sdn"
+        if locale.len() > 0:
+            zip_path = "i18n/messages_{locale}.sdn"
+
+        val data = text_to_bytes(content)
+        # Ignore error for i18n (not critical)
+        val _result = self.zip.add_file(zip_path, data)
+
+        if self.verbose:
+            print "[swa-zip] Added i18n: {zip_path} ({data.len()} bytes)"
+
+    # Set the deployment descriptor content.
+    # Written as META-SWA/descriptor.sdn.
+    #
+    # Args:
+    #   content: The descriptor content (SDN format)
+    me set_descriptor(content: text):
+        self.descriptor = content
+
+    # Set the manifest content.
+    # Written as META-SWA/manifest.sdn.
+    #
+    # Args:
+    #   content: The manifest content (SDN format)
+    me set_manifest(content: text):
+        self.manifest = content
+
+    # Write the SWA ZIP archive to a file.
+    #
+    # This method finalizes the archive by adding the META-SWA directory
+    # entries (descriptor and manifest), then writes the ZIP to disk.
+    #
+    # Args:
+    #   output_path: Path for the output .swa file
+    #
+    # Returns:
+    #   Ok(()) on success, Err with message on failure
+    fn write(output_path: text) -> Result<(), text>:
+        # Add META-SWA directory structure
+        self.zip.add_directory("META-SWA/")
+
+        # Add descriptor
+        if self.descriptor.len() > 0:
+            val desc_bytes = text_to_bytes(self.descriptor)
+            val desc_result = self.zip.add_file("META-SWA/descriptor.sdn", desc_bytes)
+            if desc_result.is_err():
+                return Err("Failed to add descriptor: {desc_result.unwrap_err()}")
+
+        # Add manifest
+        if self.manifest.len() > 0:
+            val manifest_bytes = text_to_bytes(self.manifest)
+            val manifest_result = self.zip.add_file("META-SWA/manifest.sdn", manifest_bytes)
+            if manifest_result.is_err():
+                return Err("Failed to add manifest: {manifest_result.unwrap_err()}")
+
+        # Add conventional directory entries
+        self.zip.add_directory("modules/")
+        self.zip.add_directory("public/")
+        self.zip.add_directory("i18n/")
+
+        if self.verbose:
+            print "[swa-zip] Writing SWA ZIP to {output_path} ({self.zip.entry_count()} entries)"
+
+        val result = self.zip.write(output_path)
+
+        if self.verbose:
+            if result.is_ok():
+                print "[swa-zip] Successfully wrote {output_path}"
+
+        result
+
+    # Get number of entries (including directories and metadata).
+    fn entry_count() -> i64:
+        self.zip.entry_count()
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+# Convert text to bytes.
+fn text_to_bytes(t: text) -> [u8]:
+    var bytes: [u8] = []
+    var i = 0
+    while i < t.len():
+        bytes.push(t[i] as u8)
+        i = i + 1
+    bytes
+
+# ============================================================================
+# Exports
+# ============================================================================

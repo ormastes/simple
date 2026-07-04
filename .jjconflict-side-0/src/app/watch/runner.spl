@@ -1,0 +1,178 @@
+# Watch Runner - Main loop with debounce and rebuild
+#
+# Polls for file changes, debounces rapid edits, and triggers
+# rebuild or test commands on change detection.
+
+use app.watch.watcher.{FileSnapshot, ChangeSet, collect_multi_snapshot,
+    diff_snapshots, changeset_has_changes, changeset_all_files, changeset_count,
+    snapshot_new}
+use app.watch.deps.{DepGraph, build_dep_graph, find_dependents, dep_graph_new}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Watch configuration
+struct WatchConfig:
+    watch_paths: [text]
+    ext: text
+    command: text
+    command_args: [text]
+    poll_interval_ms: i64
+    debounce_ms: i64
+    clear_screen: bool
+    track_deps: bool
+
+fn watch_config_default() -> WatchConfig:
+    WatchConfig(
+        watch_paths: ["src"],
+        ext: ".spl",
+        command: "bin/simple",
+        command_args: ["build"],
+        poll_interval_ms: 1000,
+        debounce_ms: 200,
+        clear_screen: false,
+        track_deps: true
+    )
+
+fn watch_config_build() -> WatchConfig:
+    watch_config_default()
+
+fn watch_config_test() -> WatchConfig:
+    var config = watch_config_default()
+    config.command_args = ["test"]
+    config
+
+fn watch_config_test_file(test_path: text) -> WatchConfig:
+    var config = watch_config_default()
+    config.command_args = ["test", test_path]
+    config
+
+# Format a relative path for display
+fn display_path(file: text) -> text:
+    # Strip common prefixes for cleaner output
+    if file.starts_with("src/"):
+        return file
+    file
+
+# Print the change summary
+fn print_changes(changes: ChangeSet):
+    val total = changeset_count(changes)
+    print ""
+    print "--- {total} file(s) changed ---"
+    for f in changes.modified:
+        print "  [modified] {display_path(f)}"
+    for f in changes.added:
+        print "  [added]    {display_path(f)}"
+    for f in changes.deleted:
+        print "  [deleted]  {display_path(f)}"
+
+# Print dependent files that will also be rebuilt
+fn print_dependents(dependents: [text]):
+    if dependents.len() > 0:
+        print "  Dependent files affected: {dependents.len()}"
+        for d in dependents:
+            print "    -> {display_path(d)}"
+
+# Run the build/test command
+fn run_command(config: WatchConfig) -> i64:
+    val full_cmd = "{config.command} {config.command_args.join(\" \")}"
+    print "Running: {full_cmd}"
+    print ""
+
+    val (stdout, stderr, exit_code) = rt_process_run(config.command, config.command_args)
+
+    if stdout != "":
+        print stdout
+    if stderr != "":
+        print stderr
+
+    if exit_code == 0:
+        print "[watch] Build succeeded"
+    else:
+        print "[watch] Build failed (exit code: {exit_code})"
+    print ""
+
+    exit_code
+
+# Clear the terminal screen
+fn clear_screen():
+    val (out, err, code) = rt_process_run("clear", [])
+    pass_dn
+
+# Sleep using shell sleep command (portable, no busy-wait)
+fn sleep(ms: i64):
+    val seconds = ms / 1000
+    val remainder = ms % 1000
+    var sleep_arg = ""
+    if seconds > 0 and remainder > 0:
+        sleep_arg = "{seconds}.{remainder}"
+    elif seconds > 0:
+        sleep_arg = "{seconds}"
+    elif remainder > 0:
+        sleep_arg = "0.{remainder}"
+    if sleep_arg != "":
+        rt_process_run("/bin/sh", ["-c", "sleep {sleep_arg}"])
+
+# Main watch loop
+fn watch_loop(config: WatchConfig) -> i64:
+    val paths_display = config.watch_paths.join(", ")
+    print "[watch] Watching: {paths_display}"
+    print "[watch] Extension: {config.ext}"
+    val full_cmd = "{config.command} {config.command_args.join(\" \")}"
+    print "[watch] Command: {full_cmd}"
+    print "[watch] Poll interval: {config.poll_interval_ms}ms, Debounce: {config.debounce_ms}ms"
+    print "[watch] Press Ctrl+C to stop."
+    print ""
+
+    # Initial build
+    print "[watch] Running initial build..."
+    val initial_exit = run_command(config)
+
+    # Take initial snapshot
+    var prev_snapshot = collect_multi_snapshot(config.watch_paths, config.ext)
+
+    # Build initial dep graph if tracking deps
+    var dep_graph = dep_graph_new()
+    if config.track_deps:
+        var all_files: [text] = []
+        for entry in prev_snapshot.entries:
+            all_files.push(entry.0)
+        dep_graph = build_dep_graph(all_files)
+
+    # Main poll loop
+    while true:
+        sleep(config.poll_interval_ms)
+
+        val current_snapshot = collect_multi_snapshot(config.watch_paths, config.ext)
+        val changes = diff_snapshots(prev_snapshot, current_snapshot)
+
+        if changeset_has_changes(changes):
+            # Debounce: wait a bit, then re-check to batch rapid changes
+            sleep(config.debounce_ms)
+            val debounced_snapshot = collect_multi_snapshot(config.watch_paths, config.ext)
+            val debounced_changes = diff_snapshots(prev_snapshot, debounced_snapshot)
+
+            if config.clear_screen:
+                clear_screen()
+
+            print_changes(debounced_changes)
+
+            # Find dependent files
+            if config.track_deps:
+                val changed_files = changeset_all_files(debounced_changes)
+                val dependents = find_dependents(dep_graph, changed_files)
+                print_dependents(dependents)
+
+            print ""
+            val exit_code = run_command(config)
+
+            # Update snapshot after build
+            prev_snapshot = collect_multi_snapshot(config.watch_paths, config.ext)
+
+            # Rebuild dep graph on structural changes (adds/deletes)
+            if config.track_deps and (debounced_changes.added.len() > 0 or debounced_changes.deleted.len() > 0):
+                var all_files: [text] = []
+                for entry in prev_snapshot.entries:
+                    all_files.push(entry.0)
+                dep_graph = build_dep_graph(all_files)
+
+    0

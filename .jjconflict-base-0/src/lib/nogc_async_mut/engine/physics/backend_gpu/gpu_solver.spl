@@ -1,0 +1,756 @@
+# Physics2 — GPU Solver Orchestrator
+#
+# Coordinates GPU physics dispatch: upload body/constraint data,
+# launch one kernel per graph color batch, download results.
+# Falls back to CPU scalar solve if GPU is unavailable at runtime.
+#
+# Pipeline per step:
+#   1. upload_bodies       — SolverBodyStore2D SoA arrays → device buffers
+#   2. upload_constraints  — ContactConstraintSoA → device buffer
+#   3. dispatch_velocity_solve — velocity PGS per color batch (graph-colored,
+#                                one CUDA thread per constraint, no data races)
+#   4. dispatch_position_solve — Baumgarte position correction per color batch
+#   5. download_results    — device velocity/position → SolverBodyStore2D
+
+use std.nogc_async_mut.engine.physics.data.solver_body2d.{SolverBodyStore2D}
+use std.nogc_async_mut.engine.physics.data.constraint.{ContactConstraintSoA}
+use std.nogc_async_mut.engine.physics.backend_gpu.gpu_buffers.{GpuPhysicsBuffers}
+use std.nogc_async_mut.engine.physics.graph.graph_coloring.{ColorAssignment, greedy_color}
+use std.nogc_async_mut.engine.physics.config.{PhysicsConfig2D}
+
+# ── CUDA extern bindings ────────────────────────────────────────────────────
+extern fn rt_cuda_is_available() -> bool
+extern fn rt_cuda_malloc(size: i64) -> i64
+extern fn rt_cuda_free(ptr: i64) -> bool
+extern fn rt_cuda_memcpy_h2d(dst_device: i64, src_host: [u8], size: i64) -> bool
+extern fn rt_cuda_memcpy_d2h(dst_host: [u8], src_device: i64, size: i64) -> bool
+extern fn rt_cuda_memset(ptr: i64, value: i64, size: i64) -> bool
+extern fn rt_cuda_compile_ptx(ptx_source: text) -> i64
+extern fn rt_cuda_get_function(module: i64, name: text) -> i64
+extern fn rt_cuda_launch_kernel(func: i64, gx: i64, gy: i64, gz: i64, blk_x: i64, blk_y: i64, blk_z: i64, shared_mem: i64, args: [i64]) -> bool
+extern fn rt_cuda_unload_module(module: i64) -> bool
+extern fn rt_cuda_synchronize() -> bool
+extern fn rt_cuda_stream_create() -> i64
+extern fn rt_cuda_stream_destroy(stream: i64) -> bool
+
+# ── Spatial hash broad-phase ────────────────────────────────────────────────
+# Maps each body AABB into a uniform grid; collects candidate pairs.
+# Cell size = 2 * max_radius.  Hash: (ix * P1) XOR (iy * P2) mod table_size.
+
+val SPATIAL_HASH_P1: i64 = 73856093
+val SPATIAL_HASH_P2: i64 = 19349663
+val SPATIAL_HASH_TABLE: i64 = 4096
+
+struct SpatialHashEntry:
+    body_idx: i64
+    next: i64        # index into entry pool, -1 = end
+
+struct SpatialHashBroadphase:
+    cell_size: f64
+    table: [i64]     # head indices, length = SPATIAL_HASH_TABLE
+    pool: [SpatialHashEntry]
+    pool_used: i64
+
+impl SpatialHashBroadphase:
+    static fn create(cell_size: f64) -> SpatialHashBroadphase:
+        var table: [i64] = []
+        var i = 0
+        while i < SPATIAL_HASH_TABLE:
+            table.push(-1)
+            i = i + 1
+        SpatialHashBroadphase(
+            cell_size: cell_size,
+            table: table,
+            pool: [],
+            pool_used: 0
+        )
+
+    me clear():
+        var i = 0
+        while i < SPATIAL_HASH_TABLE:
+            self.table[i] = -1
+            i = i + 1
+        self.pool = []
+        self.pool_used = 0
+
+    me hash_cell(ix: i64, iy: i64) -> i64:
+        val h = (ix * SPATIAL_HASH_P1) + (iy * SPATIAL_HASH_P2)
+        # Simple non-negative modulo
+        val r = h - (h / SPATIAL_HASH_TABLE) * SPATIAL_HASH_TABLE
+        if r < 0:
+            r + SPATIAL_HASH_TABLE
+        else:
+            r
+
+    me insert(body_idx: i64, px: f64, py: f64, radius: f64):
+        val half = self.cell_size * 0.5
+        val min_x = px - radius
+        val max_x = px + radius
+        val min_y = py - radius
+        val max_y = py + radius
+        val ix0 = (min_x / self.cell_size) - 1.0
+        val ix1 = (max_x / self.cell_size) + 1.0
+        val iy0 = (min_y / self.cell_size) - 1.0
+        val iy1 = (max_y / self.cell_size) + 1.0
+        var ix = ix0
+        while ix <= ix1:
+            var iy = iy0
+            while iy <= iy1:
+                val h = self.hash_cell(ix as i64, iy as i64)
+                val entry = SpatialHashEntry(body_idx: body_idx, next: self.table[h])
+                self.pool.push(entry)
+                self.table[h] = self.pool_used
+                self.pool_used = self.pool_used + 1
+                iy = iy + 1.0
+            ix = ix + 1.0
+
+    # Returns flat list of (a, b) candidate pairs as interleaved [a0,b0,a1,b1,...]
+    me collect_pairs(bodies: SolverBodyStore2D, radius: f64) -> [i64]:
+        var pairs: [i64] = []
+        # Insert all bodies
+        var i = 0
+        while i < bodies.body_count:
+            self.insert(i, bodies.pos_x[i], bodies.pos_y[i], radius)
+            i = i + 1
+        # For each bucket, emit pairs for all distinct body combinations
+        i = 0
+        while i < SPATIAL_HASH_TABLE:
+            var ea = self.table[i]
+            while ea >= 0:
+                val a = self.pool[ea].body_idx
+                var eb = self.pool[ea].next
+                while eb >= 0:
+                    val b = self.pool[eb].body_idx
+                    if a != b:
+                        pairs.push(a)
+                        pairs.push(b)
+                    eb = self.pool[eb].next
+                ea = self.pool[ea].next
+            i = i + 1
+        pairs
+
+# ── PTX kernel sources ──────────────────────────────────────────────────────
+# Velocity PGS kernel — one thread per constraint within a color batch.
+# Args layout (device pointers + scalars passed as i64):
+#   0: d_vel_x   1: d_vel_y   2: d_ang_vel
+#   3: d_inv_mass  4: d_inv_inertia  5: d_pos_x  6: d_pos_y
+#   7: d_body_a  8: d_body_b  9: d_nx  10: d_ny
+#   11: d_px  12: d_py  13: d_penetration  14: d_restitution
+#   15: d_friction  16: d_lambda_n  17: d_lambda_t
+#   18: batch_start (i64)  19: batch_count (i64)
+val VELOCITY_KERNEL_PTX: text = """.version 7.0
+.target sm_70
+.address_size 64
+
+// solve_velocity_batch(args as above)
+.visible .entry solve_velocity_batch(
+    .param .u64 p_vel_x, .param .u64 p_vel_y, .param .u64 p_ang_vel,
+    .param .u64 p_inv_mass, .param .u64 p_inv_inertia,
+    .param .u64 p_pos_x, .param .u64 p_pos_y,
+    .param .u64 p_body_a, .param .u64 p_body_b,
+    .param .u64 p_nx, .param .u64 p_ny,
+    .param .u64 p_px, .param .u64 p_py,
+    .param .u64 p_pen, .param .u64 p_restitution,
+    .param .u64 p_friction, .param .u64 p_lambda_n, .param .u64 p_lambda_t,
+    .param .u64 p_batch_start, .param .u64 p_batch_count
+)
+{
+    .reg .u64  %base_a, %base_b, %base_nx, %base_ny, %base_px, %base_py;
+    .reg .u64  %base_vx, %base_vy, %base_wz, %base_im, %base_ii;
+    .reg .u64  %base_pen, %base_rest, %base_fric, %base_ln, %base_lt;
+    .reg .u64  %batch_start, %batch_count, %tid, %ci;
+    .reg .f64  %vax, %vay, %vbx, %vby, %wza, %wzb;
+    .reg .f64  %ima, %imb, %iia, %iib;
+    .reg .f64  %pax, %pay, %pbx, %pby;
+    .reg .f64  %nx, %ny, %px, %py;
+    .reg .f64  %rax, %ray, %rbx, %rby;
+    .reg .f64  %va_vx, %va_vy, %vb_vx, %vb_vy;
+    .reg .f64  %rvx, %rvy, %vn;
+    .reg .f64  %ra_cn, %rb_cn, %eff_m;
+    .reg .f64  %rest_v, %bias, %lraw, %old_ln, %new_ln, %jn;
+    .reg .f64  %tx, %ty, %tlen_sq, %tlen, %tnx, %tny;
+    .reg .f64  %vt, %ra_ct, %rb_ct, %eff_mt, %fric_v, %maxf;
+    .reg .f64  %jt_raw, %old_lt, %new_lt, %jt;
+    .reg .pred %p;
+    .reg .u64  %offset, %addr;
+    .reg .u32  %tid32;
+
+    mov.u32     %tid32, %tid.x;
+    ld.param.u64 %batch_start, [p_batch_start];
+    ld.param.u64 %batch_count, [p_batch_count];
+    cvt.u64.u32 %tid, %tid32;
+    setp.ge.u64 %p, %tid, %batch_count;
+    @%p bra DONE;
+
+    add.u64     %ci, %tid, %batch_start;
+
+    // Load pointers
+    ld.param.u64 %base_a,    [p_body_a];
+    ld.param.u64 %base_b,    [p_body_b];
+    ld.param.u64 %base_nx,   [p_nx];
+    ld.param.u64 %base_ny,   [p_ny];
+    ld.param.u64 %base_px,   [p_px];
+    ld.param.u64 %base_py,   [p_py];
+    ld.param.u64 %base_vx,   [p_vel_x];
+    ld.param.u64 %base_vy,   [p_vel_y];
+    ld.param.u64 %base_wz,   [p_ang_vel];
+    ld.param.u64 %base_im,   [p_inv_mass];
+    ld.param.u64 %base_ii,   [p_inv_inertia];
+    ld.param.u64 %base_rest, [p_restitution];
+    ld.param.u64 %base_fric, [p_friction];
+    ld.param.u64 %base_ln,   [p_lambda_n];
+    ld.param.u64 %base_lt,   [p_lambda_t];
+
+    // Load constraint index a, b (i64 = 8 bytes)
+    mul.lo.u64  %offset, %ci, 8;
+    add.u64     %addr, %base_a, %offset;
+    ld.global.u64 %base_a, [%addr];   // reuse as body_a index
+    add.u64     %addr, %base_b, %offset;
+    ld.global.u64 %base_b, [%addr];   // reuse as body_b index
+
+    // Load scalar constraint fields (f64 = 8 bytes each)
+    add.u64     %addr, %base_nx, %offset;  ld.global.f64 %nx, [%addr];
+    add.u64     %addr, %base_ny, %offset;  ld.global.f64 %ny, [%addr];
+    add.u64     %addr, %base_px, %offset;  ld.global.f64 %px, [%addr];
+    add.u64     %addr, %base_py, %offset;  ld.global.f64 %py, [%addr];
+    add.u64     %addr, %base_rest, %offset; ld.global.f64 %rest_v, [%addr];
+    add.u64     %addr, %base_fric, %offset; ld.global.f64 %fric_v, [%addr];
+    add.u64     %addr, %base_ln, %offset;   ld.global.f64 %old_ln, [%addr];
+    add.u64     %addr, %base_lt, %offset;   ld.global.f64 %old_lt, [%addr];
+
+    // Load body fields for a
+    mul.lo.u64  %offset, %base_a, 8;
+    add.u64     %addr, %base_vx, %offset;  ld.global.f64 %vax, [%addr];
+    add.u64     %addr, %base_vy, %offset;  ld.global.f64 %vay, [%addr];
+    add.u64     %addr, %base_wz, %offset;  ld.global.f64 %wza, [%addr];
+    add.u64     %addr, %base_im, %offset;  ld.global.f64 %ima, [%addr];
+    add.u64     %addr, %base_ii, %offset;  ld.global.f64 %iia, [%addr];
+
+    ld.param.u64 %base_px, [p_pos_x];
+    ld.param.u64 %base_py, [p_pos_y];
+    add.u64     %addr, %base_px, %offset;  ld.global.f64 %pax, [%addr];
+    add.u64     %addr, %base_py, %offset;  ld.global.f64 %pay, [%addr];
+
+    // Load body fields for b
+    mul.lo.u64  %offset, %base_b, 8;
+    add.u64     %addr, %base_vx, %offset;  ld.global.f64 %vbx, [%addr];
+    add.u64     %addr, %base_vy, %offset;  ld.global.f64 %vby, [%addr];
+    add.u64     %addr, %base_wz, %offset;  ld.global.f64 %wzb, [%addr];
+    add.u64     %addr, %base_im, %offset;  ld.global.f64 %imb, [%addr];
+    add.u64     %addr, %base_ii, %offset;  ld.global.f64 %iib, [%addr];
+    add.u64     %addr, %base_px, %offset;  ld.global.f64 %pbx, [%addr];
+    add.u64     %addr, %base_py, %offset;  ld.global.f64 %pby, [%addr];
+
+    // ra = contact_point - pos_a, rb = contact_point - pos_b
+    // (px,py are the world-space contact point stored in constraint arrays)
+    // reload constraint px/py from original ci offset
+    mul.lo.u64  %offset, %ci, 8;
+    ld.param.u64 %base_px, [p_px];
+    ld.param.u64 %base_py, [p_py];
+    add.u64     %addr, %base_px, %offset;  ld.global.f64 %rax, [%addr];
+    add.u64     %addr, %base_py, %offset;  ld.global.f64 %ray, [%addr];
+    sub.f64     %rax, %rax, %pax;
+    sub.f64     %ray, %ray, %pay;
+    add.u64     %addr, %base_px, %offset;  ld.global.f64 %rbx, [%addr];
+    add.u64     %addr, %base_py, %offset;  ld.global.f64 %rby, [%addr];
+    sub.f64     %rbx, %rbx, %pbx;
+    sub.f64     %rby, %rby, %pby;
+
+    // va = vel_a + ang_vel_a x ra  (2D: (-wza*ray, wza*rax))
+    mul.f64     %va_vx, %wza, %ray;  neg.f64 %va_vx, %va_vx;
+    add.f64     %va_vx, %va_vx, %vax;
+    mul.f64     %va_vy, %wza, %rax;
+    add.f64     %va_vy, %va_vy, %vay;
+
+    mul.f64     %vb_vx, %wzb, %rby;  neg.f64 %vb_vx, %vb_vx;
+    add.f64     %vb_vx, %vb_vx, %vbx;
+    mul.f64     %vb_vy, %wzb, %rbx;
+    add.f64     %vb_vy, %vb_vy, %vby;
+
+    // rel_v = vb - va
+    sub.f64 %rvx, %vb_vx, %va_vx;
+    sub.f64 %rvy, %vb_vy, %va_vy;
+    // vn = rel_v . n
+    mul.f64 %vn,  %rvx, %nx;
+    mul.f64 %jn,  %rvy, %ny;
+    add.f64 %vn,  %vn, %jn;
+
+    // ra_cross_n = rax*ny - ray*nx
+    mul.f64 %ra_cn, %rax, %ny;
+    mul.f64 %jn,    %ray, %nx;
+    sub.f64 %ra_cn, %ra_cn, %jn;
+    // rb_cross_n
+    mul.f64 %rb_cn, %rbx, %ny;
+    mul.f64 %jn,    %rby, %nx;
+    sub.f64 %rb_cn, %rb_cn, %jn;
+
+    // eff_mass = ima + imb + ra_cn^2*iia + rb_cn^2*iib
+    mul.f64 %eff_m, %ra_cn, %ra_cn;  mul.f64 %eff_m, %eff_m, %iia;
+    mul.f64 %jn,    %rb_cn, %rb_cn;  mul.f64 %jn, %jn, %iib;
+    add.f64 %eff_m, %eff_m, %jn;
+    add.f64 %eff_m, %eff_m, %ima;
+    add.f64 %eff_m, %eff_m, %imb;
+
+    setp.le.f64 %p, %eff_m, 0.0;
+    @%p bra DONE;
+
+    // bias = vn < -1.0 ? rest*vn : 0.0
+    setp.lt.f64 %p, %vn, -1.0;
+    mul.f64 %bias, %rest_v, %vn;
+    selp.f64 %bias, %bias, 0.0, %p;
+
+    // lambda_raw = -(vn + bias) / eff_m
+    add.f64 %lraw, %vn, %bias;
+    neg.f64 %lraw, %lraw;
+    div.rn.f64 %lraw, %lraw, %eff_m;
+
+    // new_ln = max(old_ln + lraw, 0)
+    add.f64 %new_ln, %old_ln, %lraw;
+    setp.lt.f64 %p, %new_ln, 0.0;
+    selp.f64 %new_ln, 0.0, %new_ln, %p;
+
+    // j = new_ln - old_ln
+    sub.f64 %jn, %new_ln, %old_ln;
+
+    // store new lambda_n
+    mul.lo.u64  %offset, %ci, 8;
+    ld.param.u64 %base_ln, [p_lambda_n];
+    add.u64     %addr, %base_ln, %offset;
+    st.global.f64 [%addr], %new_ln;
+
+    // apply normal impulse to vel_a, vel_b, ang_vel_a, ang_vel_b
+    mul.f64 %jt, %nx, %jn;   // jx
+    mul.f64 %jraw, %ny, %jn; // jy  (reuse %jraw as tmp)
+    // vel_a -= (jx*ima, jy*ima);  ang_vel_a -= ra_cn*j*iia
+    mul.lo.u64 %offset, %base_a, 8;
+    ld.param.u64 %base_vx, [p_vel_x];
+    ld.param.u64 %base_vy, [p_vel_y];
+    ld.param.u64 %base_wz, [p_ang_vel];
+    add.u64 %addr, %base_vx, %offset;
+    ld.global.f64 %vax, [%addr];
+    mul.f64 %tlen, %jt, %ima;  sub.f64 %vax, %vax, %tlen;
+    st.global.f64 [%addr], %vax;
+    add.u64 %addr, %base_vy, %offset;
+    ld.global.f64 %vay, [%addr];
+    mul.f64 %tlen, %jraw, %ima;  sub.f64 %vay, %vay, %tlen;
+    st.global.f64 [%addr], %vay;
+    add.u64 %addr, %base_wz, %offset;
+    ld.global.f64 %wza, [%addr];
+    mul.f64 %tlen, %ra_cn, %jn;  mul.f64 %tlen, %tlen, %iia;  sub.f64 %wza, %wza, %tlen;
+    st.global.f64 [%addr], %wza;
+    // vel_b += ...
+    mul.lo.u64 %offset, %base_b, 8;
+    add.u64 %addr, %base_vx, %offset;
+    ld.global.f64 %vbx, [%addr];
+    mul.f64 %tlen, %jt, %imb;  add.f64 %vbx, %vbx, %tlen;
+    st.global.f64 [%addr], %vbx;
+    add.u64 %addr, %base_vy, %offset;
+    ld.global.f64 %vby, [%addr];
+    mul.f64 %tlen, %jraw, %imb;  add.f64 %vby, %vby, %tlen;
+    st.global.f64 [%addr], %vby;
+    add.u64 %addr, %base_wz, %offset;
+    ld.global.f64 %wzb, [%addr];
+    mul.f64 %tlen, %rb_cn, %jn;  mul.f64 %tlen, %tlen, %iib;  add.f64 %wzb, %wzb, %tlen;
+    st.global.f64 [%addr], %wzb;
+
+DONE:
+    ret;
+}
+"""
+
+# Position correction kernel — Baumgarte method, one thread per constraint.
+# Args: d_pos_x, d_pos_y, d_inv_mass, d_body_a, d_body_b,
+#        d_normal_x, d_normal_y, d_penetration,
+#        baumgarte (f64 bits), slop (f64 bits), batch_start, batch_count
+val POSITION_KERNEL_PTX: text = """.version 7.0
+.target sm_70
+.address_size 64
+
+.visible .entry solve_position_batch(
+    .param .u64 p_pos_x, .param .u64 p_pos_y,
+    .param .u64 p_inv_mass,
+    .param .u64 p_body_a, .param .u64 p_body_b,
+    .param .u64 p_nx, .param .u64 p_ny,
+    .param .u64 p_pen,
+    .param .f64 p_baumgarte, .param .f64 p_slop,
+    .param .u64 p_batch_start, .param .u64 p_batch_count
+)
+{
+    .reg .u64  %base_px, %base_py, %base_im, %base_a, %base_b;
+    .reg .u64  %base_nx, %base_ny, %base_pen;
+    .reg .u64  %batch_start, %batch_count, %tid, %ci, %offset, %addr;
+    .reg .f64  %baumgarte, %slop, %pen, %nx, %ny;
+    .reg .f64  %ima, %imb, %inv_sum, %correction;
+    .reg .f64  %pax, %pay, %pbx, %pby, %tmp;
+    .reg .u64  %ai, %bi;
+    .reg .pred %p;
+    .reg .u32  %tid32;
+
+    mov.u32     %tid32, %tid.x;
+    ld.param.u64 %batch_start, [p_batch_start];
+    ld.param.u64 %batch_count, [p_batch_count];
+    cvt.u64.u32 %tid, %tid32;
+    setp.ge.u64 %p, %tid, %batch_count;
+    @%p bra DONE;
+
+    add.u64     %ci, %tid, %batch_start;
+    mul.lo.u64  %offset, %ci, 8;
+
+    ld.param.u64 %base_pen, [p_pen];
+    add.u64     %addr, %base_pen, %offset;
+    ld.global.f64 %pen, [%addr];
+
+    ld.param.f64 %slop, [p_slop];
+    setp.le.f64 %p, %pen, %slop;
+    @%p bra DONE;
+
+    ld.param.u64 %base_a, [p_body_a];
+    ld.param.u64 %base_b, [p_body_b];
+    add.u64 %addr, %base_a, %offset;  ld.global.u64 %ai, [%addr];
+    add.u64 %addr, %base_b, %offset;  ld.global.u64 %bi, [%addr];
+
+    ld.param.u64 %base_nx, [p_nx];
+    ld.param.u64 %base_ny, [p_ny];
+    add.u64 %addr, %base_nx, %offset;  ld.global.f64 %nx, [%addr];
+    add.u64 %addr, %base_ny, %offset;  ld.global.f64 %ny, [%addr];
+
+    ld.param.u64 %base_im, [p_inv_mass];
+    mul.lo.u64 %offset, %ai, 8;
+    add.u64 %addr, %base_im, %offset;  ld.global.f64 %ima, [%addr];
+    mul.lo.u64 %offset, %bi, 8;
+    add.u64 %addr, %base_im, %offset;  ld.global.f64 %imb, [%addr];
+
+    add.f64 %inv_sum, %ima, %imb;
+    setp.le.f64 %p, %inv_sum, 0.0;
+    @%p bra DONE;
+
+    ld.param.f64 %baumgarte, [p_baumgarte];
+    sub.f64 %correction, %pen, %slop;
+    mul.f64 %correction, %correction, %baumgarte;
+    div.rn.f64 %correction, %correction, %inv_sum;
+
+    ld.param.u64 %base_px, [p_pos_x];
+    ld.param.u64 %base_py, [p_pos_y];
+
+    // pos_a -= n * correction * ima
+    mul.lo.u64 %offset, %ai, 8;
+    add.u64 %addr, %base_px, %offset;  ld.global.f64 %pax, [%addr];
+    mul.f64 %tmp, %nx, %correction;  mul.f64 %tmp, %tmp, %ima;
+    sub.f64 %pax, %pax, %tmp;
+    st.global.f64 [%addr], %pax;
+    add.u64 %addr, %base_py, %offset;  ld.global.f64 %pay, [%addr];
+    mul.f64 %tmp, %ny, %correction;  mul.f64 %tmp, %tmp, %ima;
+    sub.f64 %pay, %pay, %tmp;
+    st.global.f64 [%addr], %pay;
+
+    // pos_b += n * correction * imb
+    mul.lo.u64 %offset, %bi, 8;
+    add.u64 %addr, %base_px, %offset;  ld.global.f64 %pbx, [%addr];
+    mul.f64 %tmp, %nx, %correction;  mul.f64 %tmp, %tmp, %imb;
+    add.f64 %pbx, %pbx, %tmp;
+    st.global.f64 [%addr], %pbx;
+    add.u64 %addr, %base_py, %offset;  ld.global.f64 %pby, [%addr];
+    mul.f64 %tmp, %ny, %correction;  mul.f64 %tmp, %tmp, %imb;
+    add.f64 %pby, %pby, %tmp;
+    st.global.f64 [%addr], %pby;
+
+DONE:
+    ret;
+}
+"""
+
+# ── Compiled PTX module handle cache ───────────────────────────────────────
+# Module is compiled once per solver lifetime and cached in struct fields.
+
+enum GpuBackend:
+    Cuda
+    Vulkan
+
+struct GpuSolver:
+    gpu_backend: GpuBackend
+    velocity_iterations: i64
+    position_iterations: i64
+    buffers: GpuPhysicsBuffers
+    baumgarte: f64
+    slop: f64
+    # CUDA module handles (0 = not yet compiled)
+    vel_module: i64
+    vel_kernel: i64
+    pos_module: i64
+    pos_kernel: i64
+    # Device body arrays (pointers; 0 = not yet allocated)
+    d_vel_x: i64
+    d_vel_y: i64
+    d_ang_vel: i64
+    d_pos_x: i64
+    d_pos_y: i64
+    d_inv_mass: i64
+    d_inv_inertia: i64
+    # Device constraint arrays
+    d_body_a: i64
+    d_body_b: i64
+    d_nx: i64
+    d_ny: i64
+    d_px: i64
+    d_py: i64
+    d_penetration: i64
+    d_restitution: i64
+    d_friction: i64
+    d_lambda_n: i64
+    d_lambda_t: i64
+    # Current allocation sizes (in elements) to avoid redundant realloc
+    body_cap: i64
+    constraint_cap: i64
+
+impl GpuSolver:
+    static fn create_cuda(config: PhysicsConfig2D) -> GpuSolver:
+        GpuSolver(
+            gpu_backend: GpuBackend.Cuda,
+            velocity_iterations: config.velocity_iterations,
+            position_iterations: config.position_iterations,
+            buffers: GpuPhysicsBuffers.create(),
+            baumgarte: config.baumgarte_factor,
+            slop: config.slop,
+            vel_module: 0, vel_kernel: 0,
+            pos_module: 0, pos_kernel: 0,
+            d_vel_x: 0, d_vel_y: 0, d_ang_vel: 0,
+            d_pos_x: 0, d_pos_y: 0,
+            d_inv_mass: 0, d_inv_inertia: 0,
+            d_body_a: 0, d_body_b: 0,
+            d_nx: 0, d_ny: 0,
+            d_px: 0, d_py: 0,
+            d_penetration: 0, d_restitution: 0, d_friction: 0,
+            d_lambda_n: 0, d_lambda_t: 0,
+            body_cap: 0, constraint_cap: 0
+        )
+
+    static fn create_vulkan(config: PhysicsConfig2D) -> GpuSolver:
+        # Vulkan compute path: same structure, kernel dispatch handled via
+        # Vulkan compute shaders (rt_vulkan_* externs, Phase 6).
+        # For now, uses the same buffer bookkeeping; dispatch stubs below.
+        GpuSolver(
+            gpu_backend: GpuBackend.Vulkan,
+            velocity_iterations: config.velocity_iterations,
+            position_iterations: config.position_iterations,
+            buffers: GpuPhysicsBuffers.create(),
+            baumgarte: config.baumgarte_factor,
+            slop: config.slop,
+            vel_module: 0, vel_kernel: 0,
+            pos_module: 0, pos_kernel: 0,
+            d_vel_x: 0, d_vel_y: 0, d_ang_vel: 0,
+            d_pos_x: 0, d_pos_y: 0,
+            d_inv_mass: 0, d_inv_inertia: 0,
+            d_body_a: 0, d_body_b: 0,
+            d_nx: 0, d_ny: 0,
+            d_px: 0, d_py: 0,
+            d_penetration: 0, d_restitution: 0, d_friction: 0,
+            d_lambda_n: 0, d_lambda_t: 0,
+            body_cap: 0, constraint_cap: 0
+        )
+
+    # ── Kernel compilation ──────────────────────────────────────────────────
+    me ensure_kernels_compiled():
+        if self.vel_module == 0:
+            self.vel_module = rt_cuda_compile_ptx(VELOCITY_KERNEL_PTX)
+            self.vel_kernel = rt_cuda_get_function(self.vel_module, "solve_velocity_batch")
+        if self.pos_module == 0:
+            self.pos_module = rt_cuda_compile_ptx(POSITION_KERNEL_PTX)
+            self.pos_kernel = rt_cuda_get_function(self.pos_module, "solve_position_batch")
+
+    # ── Device buffer helpers ───────────────────────────────────────────────
+    # Ensures device array pointer holds at least `need` f64 elements.
+    # Returns the existing or newly allocated pointer.
+    me ensure_f64_buf(current_ptr: i64, current_cap: i64, need: i64) -> i64:
+        if need <= current_cap:
+            current_ptr
+        else:
+            if current_ptr != 0:
+                rt_cuda_free(current_ptr)
+            rt_cuda_malloc(need * 8)
+
+    me ensure_i64_buf(current_ptr: i64, current_cap: i64, need: i64) -> i64:
+        if need <= current_cap:
+            current_ptr
+        else:
+            if current_ptr != 0:
+                rt_cuda_free(current_ptr)
+            rt_cuda_malloc(need * 8)
+
+    # ── Upload bodies ───────────────────────────────────────────────────────
+    me upload_bodies(bodies: SolverBodyStore2D):
+        val n = bodies.body_count
+        if n == 0:
+            return
+
+        # Grow device buffers if needed
+        if n > self.body_cap:
+            self.d_vel_x      = self.ensure_f64_buf(self.d_vel_x,      self.body_cap, n)
+            self.d_vel_y      = self.ensure_f64_buf(self.d_vel_y,      self.body_cap, n)
+            self.d_ang_vel    = self.ensure_f64_buf(self.d_ang_vel,    self.body_cap, n)
+            self.d_pos_x      = self.ensure_f64_buf(self.d_pos_x,      self.body_cap, n)
+            self.d_pos_y      = self.ensure_f64_buf(self.d_pos_y,      self.body_cap, n)
+            self.d_inv_mass   = self.ensure_f64_buf(self.d_inv_mass,   self.body_cap, n)
+            self.d_inv_inertia = self.ensure_f64_buf(self.d_inv_inertia, self.body_cap, n)
+            self.body_cap = n
+
+        val byte_n = n * 8
+        rt_cuda_memcpy_h2d(self.d_vel_x,       bodies.vel_x   as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_vel_y,       bodies.vel_y   as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_ang_vel,     bodies.ang_vel as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_pos_x,       bodies.pos_x   as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_pos_y,       bodies.pos_y   as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_inv_mass,    bodies.inv_mass    as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_inv_inertia, bodies.inv_inertia as [u8], byte_n)
+        self.buffers.body_count = n
+
+    # ── Upload constraints ──────────────────────────────────────────────────
+    me upload_constraints(constraints: ContactConstraintSoA):
+        val n = constraints.count
+        if n == 0:
+            return
+
+        if n > self.constraint_cap:
+            self.d_body_a      = self.ensure_i64_buf(self.d_body_a,      self.constraint_cap, n)
+            self.d_body_b      = self.ensure_i64_buf(self.d_body_b,      self.constraint_cap, n)
+            self.d_nx          = self.ensure_f64_buf(self.d_nx,          self.constraint_cap, n)
+            self.d_ny          = self.ensure_f64_buf(self.d_ny,          self.constraint_cap, n)
+            self.d_px          = self.ensure_f64_buf(self.d_px,          self.constraint_cap, n)
+            self.d_py          = self.ensure_f64_buf(self.d_py,          self.constraint_cap, n)
+            self.d_penetration = self.ensure_f64_buf(self.d_penetration, self.constraint_cap, n)
+            self.d_restitution = self.ensure_f64_buf(self.d_restitution, self.constraint_cap, n)
+            self.d_friction    = self.ensure_f64_buf(self.d_friction,    self.constraint_cap, n)
+            self.d_lambda_n    = self.ensure_f64_buf(self.d_lambda_n,    self.constraint_cap, n)
+            self.d_lambda_t    = self.ensure_f64_buf(self.d_lambda_t,    self.constraint_cap, n)
+            self.constraint_cap = n
+
+        val byte_n  = n * 8
+        rt_cuda_memcpy_h2d(self.d_body_a,      constraints.body_a      as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_body_b,      constraints.body_b      as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_nx,          constraints.normal_x    as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_ny,          constraints.normal_y    as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_px,          constraints.point_x     as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_py,          constraints.point_y     as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_penetration, constraints.penetration as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_restitution, constraints.restitution as [u8], byte_n)
+        rt_cuda_memcpy_h2d(self.d_friction,    constraints.friction    as [u8], byte_n)
+        # lambda arrays are zero-initialised on device each solve step
+        rt_cuda_memset(self.d_lambda_n, 0, byte_n)
+        rt_cuda_memset(self.d_lambda_t, 0, byte_n)
+        self.buffers.constraint_count = n
+
+    # ── Velocity solve dispatch ─────────────────────────────────────────────
+    # One kernel launch per color batch; each thread solves one constraint.
+    # Graph coloring guarantees no two constraints in a batch share a body,
+    # so threads write-conflict-free impulses to the body velocity arrays.
+    me dispatch_velocity_solve(coloring: ColorAssignment):
+        val BLOCK = 128
+        var iter = 0
+        while iter < self.velocity_iterations:
+            var color = 0
+            while color < coloring.num_colors:
+                val batch_start = coloring.batch_starts[color]
+                val batch_count = coloring.batch_counts[color]
+                if batch_count > 0:
+                    val grid_x = (batch_count + BLOCK - 1) / BLOCK
+                    val args: [i64] = [
+                        self.d_vel_x, self.d_vel_y, self.d_ang_vel,
+                        self.d_inv_mass, self.d_inv_inertia,
+                        self.d_pos_x, self.d_pos_y,
+                        self.d_body_a, self.d_body_b,
+                        self.d_nx, self.d_ny,
+                        self.d_px, self.d_py,
+                        self.d_penetration, self.d_restitution,
+                        self.d_friction, self.d_lambda_n, self.d_lambda_t,
+                        batch_start, batch_count
+                    ]
+                    rt_cuda_launch_kernel(self.vel_kernel, grid_x, 1, 1, BLOCK, 1, 1, 0, args)
+                    rt_cuda_synchronize()
+                color = color + 1
+            iter = iter + 1
+
+    # ── Position solve dispatch ─────────────────────────────────────────────
+    # Baumgarte position correction per color batch.
+    me dispatch_position_solve(coloring: ColorAssignment):
+        val BLOCK = 128
+        var iter = 0
+        while iter < self.position_iterations:
+            var color = 0
+            while color < coloring.num_colors:
+                val batch_start = coloring.batch_starts[color]
+                val batch_count = coloring.batch_counts[color]
+                if batch_count > 0:
+                    val grid_x = (batch_count + BLOCK - 1) / BLOCK
+                    # Pack baumgarte and slop as i64 bit-patterns for args array
+                    val baumgarte_bits = self.baumgarte as i64
+                    val slop_bits = self.slop as i64
+                    val args: [i64] = [
+                        self.d_pos_x, self.d_pos_y,
+                        self.d_inv_mass,
+                        self.d_body_a, self.d_body_b,
+                        self.d_nx, self.d_ny,
+                        self.d_penetration,
+                        baumgarte_bits, slop_bits,
+                        batch_start, batch_count
+                    ]
+                    rt_cuda_launch_kernel(self.pos_kernel, grid_x, 1, 1, BLOCK, 1, 1, 0, args)
+                    rt_cuda_synchronize()
+                color = color + 1
+            iter = iter + 1
+
+    # ── Download results ────────────────────────────────────────────────────
+    # Copy modified velocity and position arrays back to CPU SolverBodyStore2D.
+    me download_results(bodies: SolverBodyStore2D):
+        val n = self.buffers.body_count
+        if n == 0:
+            return
+        val byte_n = n * 8
+        rt_cuda_memcpy_d2h(bodies.vel_x   as [u8], self.d_vel_x,    byte_n)
+        rt_cuda_memcpy_d2h(bodies.vel_y   as [u8], self.d_vel_y,    byte_n)
+        rt_cuda_memcpy_d2h(bodies.ang_vel as [u8], self.d_ang_vel,  byte_n)
+        rt_cuda_memcpy_d2h(bodies.pos_x   as [u8], self.d_pos_x,    byte_n)
+        rt_cuda_memcpy_d2h(bodies.pos_y   as [u8], self.d_pos_y,    byte_n)
+
+    # ── Top-level solve ─────────────────────────────────────────────────────
+    me solve(bodies: SolverBodyStore2D, constraints: ContactConstraintSoA):
+        if constraints.count == 0:
+            return
+        val coloring = greedy_color(constraints, bodies.body_count)
+        self.ensure_kernels_compiled()
+        self.upload_bodies(bodies)
+        self.upload_constraints(constraints)
+        self.dispatch_velocity_solve(coloring)
+        self.dispatch_position_solve(coloring)
+        self.download_results(bodies)
+
+    # ── Cleanup ─────────────────────────────────────────────────────────────
+    me destroy():
+        if self.vel_module != 0:
+            rt_cuda_unload_module(self.vel_module)
+            self.vel_module = 0
+            self.vel_kernel = 0
+        if self.pos_module != 0:
+            rt_cuda_unload_module(self.pos_module)
+            self.pos_module = 0
+            self.pos_kernel = 0
+        # Free body device buffers
+        if self.d_vel_x      != 0: rt_cuda_free(self.d_vel_x)
+        if self.d_vel_y      != 0: rt_cuda_free(self.d_vel_y)
+        if self.d_ang_vel    != 0: rt_cuda_free(self.d_ang_vel)
+        if self.d_pos_x      != 0: rt_cuda_free(self.d_pos_x)
+        if self.d_pos_y      != 0: rt_cuda_free(self.d_pos_y)
+        if self.d_inv_mass   != 0: rt_cuda_free(self.d_inv_mass)
+        if self.d_inv_inertia != 0: rt_cuda_free(self.d_inv_inertia)
+        # Free constraint device buffers
+        if self.d_body_a      != 0: rt_cuda_free(self.d_body_a)
+        if self.d_body_b      != 0: rt_cuda_free(self.d_body_b)
+        if self.d_nx          != 0: rt_cuda_free(self.d_nx)
+        if self.d_ny          != 0: rt_cuda_free(self.d_ny)
+        if self.d_px          != 0: rt_cuda_free(self.d_px)
+        if self.d_py          != 0: rt_cuda_free(self.d_py)
+        if self.d_penetration != 0: rt_cuda_free(self.d_penetration)
+        if self.d_restitution != 0: rt_cuda_free(self.d_restitution)
+        if self.d_friction    != 0: rt_cuda_free(self.d_friction)
+        if self.d_lambda_n    != 0: rt_cuda_free(self.d_lambda_n)
+        if self.d_lambda_t    != 0: rt_cuda_free(self.d_lambda_t)
+        self.body_cap = 0
+        self.constraint_cap = 0

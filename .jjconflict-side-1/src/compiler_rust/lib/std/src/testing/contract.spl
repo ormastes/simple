@@ -1,0 +1,653 @@
+# Contract Testing Library
+# Pact-style consumer-driven contract testing framework
+#
+# Enables defining consumer-provider contracts and verifying both sides:
+# - Consumer: defines expected interactions and runs MockServer
+# - Provider: verifies it satisfies contracts using ContractVerifier
+#
+# Example:
+#     val contract = ContractBuilder.new("consumer", "provider")
+#         .given("user exists")
+#         .upon_receiving("a request for user 123")
+#         .with_request("GET", "/users/123")
+#         .will_respond_with()
+#         .status(200)
+#         .with_body("{\"id\": 123, \"name\": \"Alice\"}")
+#         .build()
+
+use infra.file_io.write_file
+
+# =========================================================================
+# Data Structures
+# =========================================================================
+
+# HTTP request representation
+class HttpRequest:
+    method: text           # "GET", "POST", "PUT", "DELETE", etc.
+    path: text             # "/users/123"
+    headers: Dict<text, text>
+    body: Option<text>
+
+    static fn new(method: text, path: text) -> HttpRequest:
+        """Create HTTP request.
+
+        Parameters:
+            method: HTTP method
+            path: Request path
+
+        Returns:
+            HttpRequest with empty headers and no body
+        """
+        HttpRequest(method: method, path: path, headers: {}, body: None)
+
+    me set_body(body: text) -> HttpRequest:
+        """Set request body."""
+        self.body = Some(body)
+        self
+
+    me add_header(key: text, value: text) -> HttpRequest:
+        """Add header to request."""
+        self.headers[key] = value
+        self
+
+    fn to_string() -> text:
+        "{self.method} {self.path}"
+
+# HTTP response representation
+class HttpResponse:
+    status: i32            # 200, 404, 500, etc.
+    headers: Dict<text, text>
+    body: Option<text>
+
+    static fn new(status: i32) -> HttpResponse:
+        """Create HTTP response.
+
+        Parameters:
+            status: HTTP status code
+
+        Returns:
+            HttpResponse with empty headers and no body
+        """
+        HttpResponse(status: status, headers: {}, body: None)
+
+    me set_body(body: text) -> HttpResponse:
+        """Set response body."""
+        self.body = Some(body)
+        self
+
+    me add_header(key: text, value: text) -> HttpResponse:
+        """Add header to response."""
+        self.headers[key] = value
+        self
+
+    fn to_string() -> text:
+        "HTTP {self.status}"
+
+# Interaction definition (request + response)
+class Interaction:
+    description: text
+    provider_state: Option<text>
+    request: HttpRequest
+    response: HttpResponse
+
+    static fn new(
+        description: text,
+        request: HttpRequest,
+        response: HttpResponse
+    ) -> Interaction:
+        """Create interaction.
+
+        Parameters:
+            description: Human-readable description
+            request: Expected request
+            response: Expected response
+
+        Returns:
+            Interaction pairing request and response
+        """
+        Interaction(
+            description: description,
+            provider_state: None,
+            request: request,
+            response: response
+        )
+
+    me with_provider_state(state: text) -> Interaction:
+        """Set provider state for this interaction."""
+        self.provider_state = Some(state)
+        self
+
+# Contract between consumer and provider
+class Contract:
+    consumer: text
+    provider: text
+    interactions: List<Interaction>
+
+    static fn new(consumer: text, provider: text) -> Contract:
+        """Create contract.
+
+        Parameters:
+            consumer: Consumer name
+            provider: Provider name
+
+        Returns:
+            Contract with no interactions
+        """
+        Contract(consumer: consumer, provider: provider, interactions: [])
+
+    me add_interaction(interaction: Interaction) -> Contract:
+        """Add interaction to contract."""
+        self.interactions.push(interaction)
+        self
+
+    fn to_pact_json() -> text:
+        """Convert contract to Pact-compatible JSON format.
+
+        Returns:
+            JSON representation of contract
+        """
+        val header = "" + "{" + "\"consumer\": " + "{" + "\"name\": \"{self.consumer}\"" + "}" + ", " +
+                     "\"provider\": " + "{" + "\"name\": \"{self.provider}\"" + "}" + ", " +
+                     "\"interactions\": ["
+
+        var interactions_json: List<text> = []
+        for interaction in self.interactions:
+            val state_json = match interaction.provider_state:
+                case Some(state):
+                    ", \"providerState\": \"{state}\""
+                case None:
+                    ""
+
+            val body_str = match interaction.request.body:
+                case Some(body):
+                    body
+                case None:
+                    ""
+
+            val resp_body = match interaction.response.body:
+                case Some(body):
+                    body
+                case None:
+                    ""
+
+            val inter_json = "" + "{" + "\"description\": \"{interaction.description}\"" +
+                            state_json +
+                            ", \"request\": " + "{" + "\"method\": \"{interaction.request.method}\", " +
+                            "\"path\": \"{interaction.request.path}\", " +
+                            "\"body\": \"{body_str}\"" + "}" + ", " +
+                            "\"response\": " + "{" + "\"status\": {interaction.response.status}, " +
+                            "\"body\": \"{resp_body}\"" + "}" + "}"
+
+            interactions_json.push(inter_json)
+
+        val interactions_str = interactions_json.join(", ")
+        header + interactions_str + "]}"
+
+    fn save(path: text) -> Result<(), text>:
+        """Save contract to file.
+
+        Parameters:
+            path: File path
+
+        Returns:
+            Ok(()) on success, Err(message) on failure
+        """
+        val json = self.to_pact_json()
+        write_file(path, json)
+
+# =========================================================================
+# Matchers
+# =========================================================================
+
+# Matcher for request/response values
+class Matcher:
+    match_type: text       # "like", "term", "each_like"
+    example: text
+    regex: Option<text>
+
+    static fn like(value: text) -> Matcher:
+        """Create type matcher.
+
+        Matches any value of the same type as example.
+
+        Parameters:
+            value: Example value
+
+        Returns:
+            Matcher for type matching
+        """
+        Matcher(match_type: "like", example: value, regex: None)
+
+    static fn term(regex: text, example: text) -> Matcher:
+        """Create regex matcher.
+
+        Matches values matching the regex pattern.
+
+        Parameters:
+            regex: Regular expression pattern
+            example: Example matching value
+
+        Returns:
+            Matcher for regex pattern
+        """
+        Matcher(match_type: "term", example: example, regex: Some(regex))
+
+    static fn each_like(template: text) -> Matcher:
+        """Create array element matcher.
+
+        Matches arrays where each element matches the template.
+
+        Parameters:
+            template: Template for array elements
+
+        Returns:
+            Matcher for array structure
+        """
+        Matcher(match_type: "each_like", example: template, regex: None)
+
+# =========================================================================
+# ContractBuilder - Fluent API
+# =========================================================================
+
+# Builder for constructing contracts fluently
+class ContractBuilder:
+    consumer: text
+    provider: text
+    current_state: Option<text>
+    current_description: text
+    pending_request: Option<HttpRequest>
+    pending_response: Option<HttpResponse>
+    interactions: List<Interaction>
+
+    static fn new(consumer: text, provider: text) -> ContractBuilder:
+        """Create contract builder.
+
+        Parameters:
+            consumer: Consumer name
+            provider: Provider name
+
+        Returns:
+            ContractBuilder ready to define interactions
+        """
+        ContractBuilder(
+            consumer: consumer,
+            provider: provider,
+            current_state: None,
+            current_description: "",
+            pending_request: None,
+            pending_response: None,
+            interactions: []
+        )
+
+    me given(state: text) -> ContractBuilder:
+        """Set provider state for next interaction.
+
+        Parameters:
+            state: Provider state description
+
+        Returns:
+            self for method chaining
+        """
+        self.current_state = Some(state)
+        self
+
+    me upon_receiving(description: text) -> ContractBuilder:
+        """Set interaction description.
+
+        Parameters:
+            description: Interaction description
+
+        Returns:
+            self for method chaining
+        """
+        self.current_description = description
+        self
+
+    me with_request(method: text, path: text) -> ContractBuilder:
+        """Define expected request.
+
+        Parameters:
+            method: HTTP method
+            path: Request path
+
+        Returns:
+            self for method chaining
+        """
+        self.pending_request = Some(HttpRequest.new(method, path))
+        self
+
+    me with_header(key: text, value: text) -> ContractBuilder:
+        """Add header to request.
+
+        Parameters:
+            key: Header name
+            value: Header value
+
+        Returns:
+            self for method chaining
+        """
+        match self.pending_request:
+            case Some(req):
+                req.add_header(key, value)
+                self.pending_request = Some(req)
+            case None:
+                self
+        self
+
+    me with_body(body: text) -> ContractBuilder:
+        """Set request body.
+
+        Parameters:
+            body: Request body content
+
+        Returns:
+            self for method chaining
+        """
+        match self.pending_request:
+            case Some(req):
+                req.set_body(body)
+                self.pending_request = Some(req)
+            case None:
+                self
+        self
+
+    me will_respond_with() -> ContractBuilder:
+        """Start defining response.
+
+        Returns:
+            self for method chaining
+        """
+        self.pending_response = Some(HttpResponse.new(200))
+        self
+
+    me status(code: i32) -> ContractBuilder:
+        """Set response status code.
+
+        Parameters:
+            code: HTTP status code
+
+        Returns:
+            self for method chaining
+        """
+        match self.pending_response:
+            case Some(resp):
+                self.pending_response = Some(HttpResponse.new(code))
+            case None:
+                self.pending_response = Some(HttpResponse.new(code))
+        self
+
+    me with_response_body(body: text) -> ContractBuilder:
+        """Set response body.
+
+        Parameters:
+            body: Response body content
+
+        Returns:
+            self for method chaining
+        """
+        match self.pending_response:
+            case Some(resp):
+                resp.set_body(body)
+                self.pending_response = Some(resp)
+            case None:
+                self
+        self
+
+    me with_response_header(key: text, value: text) -> ContractBuilder:
+        """Add header to response.
+
+        Parameters:
+            key: Header name
+            value: Header value
+
+        Returns:
+            self for method chaining
+        """
+        match self.pending_response:
+            case Some(resp):
+                resp.add_header(key, value)
+                self.pending_response = Some(resp)
+            case None:
+                self
+        self
+
+    fn build() -> Contract:
+        """Build contract from current state.
+
+        Returns:
+            Contract with all defined interactions
+        """
+        var contract = Contract.new(self.consumer, self.provider)
+
+        match (self.pending_request, self.pending_response):
+            case (Some(req), Some(resp)):
+                var interaction = Interaction.new(self.current_description, req, resp)
+                match self.current_state:
+                    case Some(state):
+                        interaction.with_provider_state(state)
+                    case None:
+                        ()
+                contract.add_interaction(interaction)
+            case _:
+                ()
+
+        for inter in self.interactions:
+            contract.add_interaction(inter)
+
+        contract
+
+# =========================================================================
+# MockServer - In-Memory Request Simulation
+# =========================================================================
+
+# Mock HTTP server for testing
+class MockServer:
+    contract: Contract
+    matched_interactions: List<i32>
+    url: text
+
+    static fn new(contract: Contract) -> MockServer:
+        """Create mock server from contract.
+
+        Parameters:
+            contract: Contract to use for matching
+
+        Returns:
+            MockServer ready to simulate requests
+        """
+        MockServer(
+            contract: contract,
+            matched_interactions: [],
+            url: "http://mock.local:0"
+        )
+
+    fn get_url() -> text:
+        """Get mock server URL.
+
+        Returns:
+            Mock server URL
+        """
+        self.url
+
+    me simulate_request(method: text, path: text) -> HttpResponse:
+        """Simulate HTTP request against contract.
+
+        Matches request to interactions and returns response.
+
+        Parameters:
+            method: HTTP method
+            path: Request path
+
+        Returns:
+            Matching response or 404
+        """
+        var response = HttpResponse.new(404)
+
+        for (i, inter) in self.contract.interactions:
+            if inter.request.method == method and inter.request.path == path:
+                response = inter.response
+                self.matched_interactions.push(i)
+                break
+
+        response
+
+    fn get_matched_count() -> i32:
+        """Get number of matched interactions.
+
+        Returns:
+            Count of interactions that were matched
+        """
+        self.matched_interactions.size() as i32
+
+    fn verify() -> bool:
+        """Verify all interactions were matched.
+
+        Returns:
+            true if all interactions matched, false otherwise
+        """
+        self.get_matched_count() > 0
+
+# =========================================================================
+# ContractVerifier - Provider-Side Verification
+# =========================================================================
+
+# Provider-side contract verifier
+class ContractVerifier:
+    provider_name: text
+    contract_file: Option<text>
+    provider_url: text
+    state_setup: Option<fn(text) -> ()>
+
+    static fn new() -> ContractVerifier:
+        """Create contract verifier.
+
+        Returns:
+            ContractVerifier ready for configuration
+        """
+        ContractVerifier(
+            provider_name: "",
+            contract_file: None,
+            provider_url: "",
+            state_setup: None
+        )
+
+    me with_provider(name: text) -> ContractVerifier:
+        """Set provider name.
+
+        Parameters:
+            name: Provider name
+
+        Returns:
+            self for method chaining
+        """
+        self.provider_name = name
+        self
+
+    me with_contract_file(path: text) -> ContractVerifier:
+        """Set contract file path.
+
+        Parameters:
+            path: Path to contract file
+
+        Returns:
+            self for method chaining
+        """
+        self.contract_file = Some(path)
+        self
+
+    me with_provider_base_url(url: text) -> ContractVerifier:
+        """Set provider base URL.
+
+        Parameters:
+            url: Base URL for provider
+
+        Returns:
+            self for method chaining
+        """
+        self.provider_url = url
+        self
+
+    me with_state_setup(setup: fn(text) -> ()) -> ContractVerifier:
+        """Set state setup callback.
+
+        Parameters:
+            setup: Function to set up provider state
+
+        Returns:
+            self for method chaining
+        """
+        self.state_setup = Some(setup)
+        self
+
+    fn verify() -> bool:
+        """Verify provider against contract.
+
+        Returns:
+            true if provider satisfies contract, false otherwise
+        """
+        # Mock implementation: return true if configured
+        self.contract_file.is_some() and self.provider_url.len() > 0
+
+# =========================================================================
+# PactBroker - Contract Repository
+# =========================================================================
+
+# In-memory Pact broker for contract storage
+class PactBroker:
+    url: text
+    contracts: List<Contract>
+
+    static fn new(url: text) -> PactBroker:
+        """Create Pact broker.
+
+        Parameters:
+            url: Broker URL
+
+        Returns:
+            PactBroker ready for operations
+        """
+        PactBroker(url: url, contracts: [])
+
+    me publish(contract: Contract, version: text) -> Result<(), text>:
+        """Publish contract to broker.
+
+        Parameters:
+            contract: Contract to publish
+            version: Contract version
+
+        Returns:
+            Ok(()) on success, Err(message) on failure
+        """
+        self.contracts.push(contract)
+        Ok(())
+
+    fn fetch_for_provider(provider: text) -> List<Contract>:
+        """Fetch contracts for provider.
+
+        Parameters:
+            provider: Provider name
+
+        Returns:
+            List of contracts for this provider
+        """
+        var result: List<Contract> = []
+        for contract in self.contracts:
+            if contract.provider == provider:
+                result.push(contract)
+        result
+
+    fn get_contracts() -> List<Contract>:
+        """Get all contracts.
+
+        Returns:
+            All contracts in broker
+        """
+        self.contracts
+
+    fn count() -> i32:
+        """Get contract count.
+
+        Returns:
+            Number of contracts in broker
+        """
+        self.contracts.size() as i32

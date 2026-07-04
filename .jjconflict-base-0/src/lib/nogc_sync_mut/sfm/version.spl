@@ -1,0 +1,39 @@
+# SFM version reader + public API surface (AC-12 / AC-13).
+#
+# `read_version_md` is the build-time VERSION.md reader feeding
+# `manifest.version`. `sfm_load` / `sfm_resolve` are the documented public entry
+# points the Simple toolchain and external consumers reuse (AC-13).
+
+use std.sfm.manifest.{FeatureManifest}
+use std.sfm.loader.{SfmModule, SfmProfile, load_sfm}
+use std.sfm.authz.{AuthzContext}
+use std.sfm.di_bridge.{SfmContainer, new_sfm_container, register_layers, resolve_layer}
+
+extern fn rt_file_read_text(path: text) -> text
+
+# AC-12: read the first non-empty, non-comment line of VERSION.md as the version
+# string. VERSION.md format: a single SemVer line, optional `#`-comment lines.
+fn read_version_md(path: text) -> text:
+    val raw: text = rt_file_read_text(path)
+    if raw.len() == 0:
+        return "0.0.0"
+    val lines: [text] = raw.split("\n")
+    var i: i32 = 0
+    val n: i32 = lines.len() as i32
+    while i < n:
+        val line: text = lines[i].trim()
+        if line.len() > 0 and not line.starts_with("#"):
+            return line
+        i = i + 1
+    return "0.0.0"
+
+# AC-13: public entry — load a `.sfm` preferring the native profile.
+pub fn sfm_load(path: text) -> Result<SfmModule, text>:
+    return load_sfm(path, SfmProfile.Native)
+
+# AC-13: public entry — register a module's layers and resolve one by role
+# through the authorization gate. One-call reuse surface for consumers.
+pub fn sfm_resolve(m: SfmModule, role: text, ctx: AuthzContext) -> Result<Any, text>:
+    val c: SfmContainer = new_sfm_container(m.manifest)
+    register_layers(c, m.manifest)
+    return resolve_layer(c, role, ctx)

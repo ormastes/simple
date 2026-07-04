@@ -1,0 +1,62 @@
+use compiler.frontend.core.parser_preprocessor.{preprocess_conditionals}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "Preprocess Conditionals":
+    it "should expose conditional preprocessing through parser entrypoints":
+        val parser_src = read_source("src/compiler/10.frontend/core/parser.spl")
+        val init_src = read_source("src/compiler/10.frontend/core/__init__.spl")
+        expect(parser_src.contains("use compiler.frontend.core.parser_preprocessor")).to_equal(true)
+        expect(parser_src.contains("val preprocessed = _pp_preprocess_conditionals(source)")).to_equal(true)
+        expect(parser_src.contains("export _pp_preprocess_conditionals, preprocess_conditionals")).to_equal(true)
+        expect(init_src.contains("export preprocess_conditionals")).to_equal(true)
+
+    it "should recognize when elif else and end directives":
+        val src = read_source("src/compiler/10.frontend/core/parser_preprocessor.spl")
+        expect(src.contains("fn _pp_preprocess_conditionals(source: text) -> text")).to_equal(true)
+        expect(src.contains("val is_when = trimmed.starts_with(\"@when(\")")).to_equal(true)
+        expect(src.contains("val is_elif = trimmed.starts_with(\"@elif(\")")).to_equal(true)
+        expect(src.contains("val is_else = trimmed == \"@else\" or trimmed == \"@else:\"")).to_equal(true)
+        expect(src.contains("val is_end = trimmed == \"@end\"")).to_equal(true)
+
+    it "should preserve diagnostic line count for inactive branches":
+        val src = read_source("src/compiler/10.frontend/core/parser_preprocessor.spl")
+        expect(src.contains("if active:")).to_equal(true)
+        expect(src.contains("out_lines.push(line)")).to_equal(true)
+        expect(src.contains("Keep line count stable for diagnostics")).to_equal(true)
+        expect(src.contains("out_lines.push(\"\")")).to_equal(true)
+
+    it "should honor target os and arch environment overrides":
+        val src = read_source("src/compiler/10.frontend/core/cfg_platform.spl")
+        expect(src.contains("cfg_env(\"SIMPLE_TARGET_OS\")")).to_equal(true)
+        expect(src.contains("cfg_env(\"SIMPLE_TARGET_ARCH\")")).to_equal(true)
+        expect(src.contains("fn cfg_detect_os() -> text")).to_equal(true)
+        expect(src.contains("fn cfg_detect_arch() -> text")).to_equal(true)
+
+    it "should gate multi-line brace-delimited use imports under a false @cfg":
+        # Regression for the hal.spl import-closure bug: @cfg only blanked a
+        # single following line, so a multi-line `use module.{ ... }` import
+        # (opening brace on the @cfg'd line, closing brace on a later line)
+        # left its continuation lines as dangling unconditional source when
+        # the condition was false. Fixed by tracking brace depth through the
+        # matching close, symmetric with the existing colon/dedent handling.
+        val src = read_source("src/compiler/10.frontend/core/parser_preprocessor.spl")
+        expect(src.contains("skip_until_close_brace")).to_equal(true)
+        expect(src.contains("next_trimmed.ends_with(\"{\") and not next_trimmed.ends_with(\"}\")")).to_equal(true)
+        expect(src.contains("brace_depth")).to_equal(true)
+
+        val out = preprocess_conditionals(
+            "@cfg(arm64)\nuse std.text.{\n    to_upper,\n    to_lower\n}\n\nfn main():\n    print(1)\n"
+        )
+        expect(out.contains("to_upper")).to_equal(false)
+        expect(out.contains("to_lower")).to_equal(false)
+        expect(out.contains("fn main():")).to_equal(true)
+
+        val kept = preprocess_conditionals(
+            "@cfg(x86_64)\nuse std.text.{\n    to_upper,\n    to_lower\n}\n\nfn main():\n    print(1)\n"
+        )
+        expect(kept.contains("to_upper")).to_equal(true)
+        expect(kept.contains("to_lower")).to_equal(true)

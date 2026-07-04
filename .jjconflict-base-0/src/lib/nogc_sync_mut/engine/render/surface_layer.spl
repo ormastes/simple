@@ -1,0 +1,148 @@
+"""
+Scene3D ↔ Compositor bridge — joins 3D render output into the 2D layer stack.
+
+Implements unification plan P1 (game_engine_2d3d_unification_plan_2026-06-12.md):
+the 3D renderer's frame target becomes one `CompositeLayer` registered in the
+shared `LayerTree`, so 2D canvases and GUI surfaces composite above or below it
+purely by z-index. No new compositor abstraction is introduced.
+
+Composition over inheritance: this module owns no rendering or layout logic.
+It adapts a 3D frame target (id + width/height) into the compositor's existing
+`CompositeLayer` / `DisplayEntry` types and delegates all z-ordering to the
+existing stacking logic in `std.compositor.stacking`.
+
+OPAQUENESS CONSTRAINT: the 3D layer is treated as opaque color output. There is
+NO shared depth buffer between the 3D layer and 2D layers — 2D layers do not
+depth-test against 3D geometry. Ordering between the 3D layer and any 2D layer
+is decided solely by z-index in the compositor stack, never by per-pixel depth.
+"""
+
+use std.compositor.layer.{CompositeLayer, LayerTree, DisplayEntry}
+use std.compositor.stacking.{StackingContext, flatten_to_paint_order}
+use std.common.core.collections.{List}
+
+# ---------------------------------------------------------------------------
+# Scene3DLayer — adapter from a 3D frame target into a compositor layer.
+#
+# Holds the compositor layer id assigned by the LayerTree plus the z-index at
+# which the 3D output composites. The 3D output is opaque (see module note).
+# ---------------------------------------------------------------------------
+class Scene3DLayer:
+    target_id: i64
+    layer_id: i64
+    z_index: i64
+    width: i64
+    height: i64
+
+    # Pure construction of the adapter WITHOUT a LayerTree.
+    #
+    # Exposes the 3D frame target id, geometry, and z-index as a plain value so
+    # the decision logic (z-ordering, display-entry derivation) is testable in
+    # isolation. `layer_id` is set to the unattached sentinel -1; call `attach`
+    # (or assign via the tree path) to register it in a LayerTree. The 3D output
+    # is opaque (see module note).
+    static fn create(target_id: i64, width: i64, height: i64, z_index: i64) -> Scene3DLayer:
+        Scene3DLayer(
+            target_id: target_id,
+            layer_id: -1,
+            z_index: z_index,
+            width: width,
+            height: height
+        )
+
+    # Register a 3D frame target as a CompositeLayer in `tree`.
+    # `target_id` is the 3D frame/render-target id (used as the layer's node_id).
+    # The layer is created at origin with the target's pixel dimensions and the
+    # given z_index (default 0 per the unification plan: 3D sits at z 0, with 2D
+    # layers stacking above/below by z-index).
+    static fn attach(tree: LayerTree, target_id: i64, width: i64, height: i64, z_index: i64) -> Scene3DLayer:
+        val lid = tree.create_layer(target_id, 0.0, 0.0, _to_f64(width), _to_f64(height))
+        Scene3DLayer(
+            target_id: target_id,
+            layer_id: lid,
+            z_index: z_index,
+            width: width,
+            height: height
+        )
+
+    # Convenience: attach at the default z-index 0.
+    static fn attach_default(tree: LayerTree, target_id: i64, width: i64, height: i64) -> Scene3DLayer:
+        Scene3DLayer.attach(tree, target_id, width, height, 0)
+
+    # The display entry representing this 3D layer in the composite stack.
+    # Uses the assigned compositor layer id once attached; an unattached adapter
+    # (layer_id -1) reports its target_id so the entry is still meaningful.
+    fn display_entry(self) -> DisplayEntry:
+        DisplayEntry.create(self.entry_id(), self.z_index)
+
+    # Id carried into the composite stack: the tree-assigned layer id when
+    # attached, else the 3D frame target id.
+    fn entry_id(self) -> i64:
+        if self.layer_id < 0:
+            self.target_id
+        else:
+            self.layer_id
+
+impl Scene3DLayer:
+    # Change the z-index at which the 3D output composites and return the
+    # updated adapter (value-type; callers must use the returned copy).
+    me set_z_index(z: i64):
+        self.z_index = z
+
+
+fn _to_f64(v: i64) -> f64:
+    v + 0.0
+
+
+# ---------------------------------------------------------------------------
+# Mixed 2D/3D composition order.
+#
+# Given a set of display entries (each = layer id + z_index, sourced from either
+# 2D compositor layers or a Scene3DLayer), return them in back-to-front
+# composite order. Delegates entirely to the existing stacking sort by wrapping
+# each entry in a single-item StackingContext and flattening — no duplicated
+# ordering logic.
+# ---------------------------------------------------------------------------
+fn composite_order(entries: List<DisplayEntry>) -> List<DisplayEntry>:
+    var root = StackingContext.root(0)
+    for e in entries:
+        var ctx = StackingContext.create(_ctx_node_id(e), e.z_index, 1.0)
+        ctx.display_items.push(e)
+        root.children.push(ctx)
+    flatten_to_paint_order(root)
+
+
+# Each wrapped context borrows the entry's layer id as its node id so the
+# flattened order carries the original entries through unchanged.
+fn _ctx_node_id(e: DisplayEntry) -> i64:
+    e.id
+
+
+# ---------------------------------------------------------------------------
+# Pure z-index ordering oracle.
+#
+# Returns the given z-index values sorted ascending = back-to-front paint order.
+# This mirrors `flatten_to_paint_order`'s ordering, which emits negative z-index
+# contexts first, then z 0, then positive z-index — i.e. ascending by z-index.
+# It is the same total order, just over raw z values rather than wrapped
+# DisplayEntries, so it is testable without constructing a LayerTree/List. The
+# compositor stays the single source of truth for the actual layer sort;
+# `composite_order` delegates there. Arrays are value types — a new array is
+# returned and the input is left unchanged.
+fn z_paint_order(zs: [i64]) -> [i64]:
+    var out = zs
+    var i = 1
+    while i < out.len():
+        var j = i
+        while j > 0 and out[j - 1] > out[j]:
+            val tmp = out[j - 1]
+            out[j - 1] = out[j]
+            out[j] = tmp
+            j = j - 1
+        i = i + 1
+    out
+
+
+export Scene3DLayer
+export composite_order
+export z_paint_order

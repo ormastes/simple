@@ -1,0 +1,29 @@
+# Node.js process.nextTick scheduling conformance.
+# @cover src/lib/nogc_sync_mut/js/engine/interpreter_native.spl
+# @cover src/lib/nogc_sync_mut/js/engine/interpreter_async.spl
+
+use std.spec.*
+use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.engine.interpreter_types.{js_to_string}
+
+fn _eval_text(runtime: JsRuntime, source: text) -> text:
+    val result = runtime.eval(source)
+    match result:
+        Ok(value): js_to_string(value)
+        Err(err): "error"
+
+describe "Node.js process.nextTick scheduling":
+    it "runs process.nextTick callbacks on the runtime drain":
+        var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
+        val before = _eval_text(runtime, "var tickValue = 0; process.nextTick(() => { tickValue = 7; }); tickValue")
+        expect(before).to_equal("0")
+        expect(runtime.drain_due_timers(0)).to_equal(1)
+        expect(_eval_text(runtime, "tickValue")).to_equal("7")
+
+    it "runs require('process').nextTick callbacks on the runtime drain":
+        var runtime = JsRuntime.new(Logger.new(LogLevel.Error))
+        val before = _eval_text(runtime, "var tickValue = 0; require('process').nextTick(() => { tickValue = 9; }); tickValue")
+        expect(before).to_equal("0")
+        expect(runtime.drain_due_timers(0)).to_equal(1)
+        expect(_eval_text(runtime, "tickValue")).to_equal("9")

@@ -1,0 +1,80 @@
+---
+name: refactor
+description: "Code quality refactoring workflow — 5 phases: file size, duplication, coupling, Big-O, test verification. Use when cleaning up code."
+---
+
+# Refactor Skill — Code Quality Workflow
+
+## Phase 1: File Size & Structure
+- **800 lines max** per source file. Split oversized files with meaningful names (NOT `xx_1.spl`, `xx_2.spl`, `part1.spl`, `ver1.spl`, `v1.spl`, or other numbered copy/version names)
+- Update all imports after splitting. Confirm each deletion/move with user.
+- Intentional exceptions: `#![allow(large_file)]  # Intentional: <reason>`
+- Run `sh scripts/audit/numbered-artifact-guard.shs --working` and
+  `sh scripts/audit/numbered-artifact-guard.shs --staged` before finishing.
+
+## Phase 2: Duplication Removal
+
+```bash
+bin/simple duplicate-check <dir> --mode semantic
+bin/simple duplicate-check <dir> --mode token --min-lines 5
+bin/simple duplicate-check <dir> --mode cosine --similarity-threshold 0.85
+bin/simple duplicate-check <dir> --format json
+```
+
+Guidance:
+- Run `semantic` to catch concept and documentation duplication.
+- Run `token` at `5+` lines before extracting concrete helpers.
+- Run `cosine` for fuzzy near-duplicates that differ in identifiers or literals.
+
+Fix: extract shared helpers, use parameter objects for repeated param lists (3+).
+
+## Phase 3: Coupling Measurement
+
+| Metric | Target |
+|--------|--------|
+| CBO (coupled classes) | < 8 |
+| Fan-out (dependencies) | < 10 |
+| SCC cycles | 0 |
+| RFC (methods + called) | < 50 |
+| LCOM (cohesion) | Close to 0 |
+
+Layer violations: deps must flow downward through `src/compiler/NN.name/` layers.
+
+```bash
+bin/simple query workspace-symbols --query <symbol>
+bin/simple query references <file> <line>
+```
+
+## Phase 4: Big-O Analysis
+For each public function, identify complexity. Flag O(n^2)+:
+- Nested loops over same collection -> hash lookup
+- String concat in loops -> builder
+- `arr + [item]` in loops -> `.push()`
+- Re-reading files/recomputing in loops -> cache/hoist
+
+## Runtime Boundary Audit
+
+- Remove direct `rt_*` extern use from Simple code unless the file is an
+  infrastructure/provider boundary that supplies a capability to higher layers.
+- Prefer generated Simple, stdlib wrappers, or capability/trait injection over a
+  runtime bypass. If Simple cannot express the required hardware operation yet,
+  record the compiler/runtime performance or baremetal/direct-hardware gap
+  before keeping the `rt_*` bridge.
+- For baremetal or direct hardware work, keep the hot path in generated/native
+  Simple where possible; use runtime glue only for host/board services such as
+  boot, MMIO, interrupts, clocks, DMA, process/filesystem access, or probes.
+
+## Phase 5: Test Verification
+
+```bash
+bin/simple test && bin/simple build lint && bin/simple build check
+```
+
+Run after EACH phase. NEVER skip failing tests. Fix refactoring, not tests.
+
+## Critical Rules
+- All code in `.spl` — no Python, no Bash
+- Generics: `<>` not `[]`
+- No inheritance — use composition, traits, mixins
+- New `rt_*` use is refactor debt unless it is an infrastructure/provider
+  boundary or has a linked direct-hardware/compiler-performance blocker.

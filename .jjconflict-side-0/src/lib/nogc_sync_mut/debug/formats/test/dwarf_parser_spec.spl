@@ -1,0 +1,298 @@
+"""DWARF parser specification tests."""
+
+use std.debug.formats.dwarf_parser.{DwarfParser, DwarfSections}
+
+# ============================================================================
+# Helper: build minimal .debug_abbrev via direct push (no iteration helpers)
+# ============================================================================
+# Abbrev 1: DW_TAG_compile_unit (0x11), has_children=true
+#   attrs: DW_AT_low_pc(0x11)/DW_FORM_addr(0x01),
+#          DW_AT_high_pc(0x12)/DW_FORM_data4(0x06),
+#          DW_AT_stmt_list(0x10)/DW_FORM_sec_offset(0x17)
+# Abbrev 2: DW_TAG_subprogram (0x2e), has_children=false
+#   attrs: DW_AT_low_pc(0x11)/DW_FORM_addr(0x01),
+#          DW_AT_high_pc(0x12)/DW_FORM_data4(0x06)
+# Table terminator: 0x00
+
+fn _build_abbrev() -> [u8]:
+    var b: [u8] = []
+    # Abbrev 1: compile_unit
+    b = b.push(0x01) # code
+    b = b.push(0x11) # DW_TAG_compile_unit
+    b = b.push(0x01) # has_children = true
+    b = b.push(0x11) # DW_AT_low_pc
+    b = b.push(0x01) # DW_FORM_addr
+    b = b.push(0x12) # DW_AT_high_pc
+    b = b.push(0x06) # DW_FORM_data4
+    b = b.push(0x10) # DW_AT_stmt_list
+    b = b.push(0x17) # DW_FORM_sec_offset
+    b = b.push(0x00) # attr terminator
+    b = b.push(0x00)
+    # Abbrev 2: subprogram
+    b = b.push(0x02) # code
+    b = b.push(0x2e) # DW_TAG_subprogram
+    b = b.push(0x00) # has_children = false
+    b = b.push(0x11) # DW_AT_low_pc
+    b = b.push(0x01) # DW_FORM_addr
+    b = b.push(0x12) # DW_AT_high_pc
+    b = b.push(0x06) # DW_FORM_data4
+    b = b.push(0x00) # attr terminator
+    b = b.push(0x00)
+    # Table terminator
+    b = b.push(0x00)
+    b
+
+# ============================================================================
+# Helper: build minimal .debug_info via direct push
+# ============================================================================
+# CU header (11 bytes for DWARF v4, addr_size=4):
+#   u32 unit_length=0x1e (30), u16 version=4, u32 abbrev_offset=0, u8 addr_size=4
+# CU DIE (abbrev 1): low_pc=0x1000, high_pc=0x100 (offset), stmt_list=0
+# Subprogram DIE (abbrev 2): low_pc=0x1000, high_pc=0x80 (offset)
+# Children terminator: 0x00
+#
+# DIE payload = 1 + 4 + 4 + 4 + 1 + 4 + 4 + 1 = 23 bytes
+# unit_length = 2 + 4 + 1 + 23 = 30 = 0x1e
+
+fn _build_info() -> [u8]:
+    var b: [u8] = []
+    # --- CU header ---
+    # unit_length = 30 = 0x1e (LE)
+    b = b.push(0x1e)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # version = 4 (LE)
+    b = b.push(0x04)
+    b = b.push(0x00)
+    # abbrev_offset = 0 (LE)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # addr_size = 4
+    b = b.push(0x04)
+    # --- CU DIE (abbrev code 1) ---
+    b = b.push(0x01)
+    # DW_AT_low_pc = 0x1000 (4 bytes LE)
+    b = b.push(0x00)
+    b = b.push(0x10)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # DW_AT_high_pc = 0x100 (offset, 4 bytes LE)
+    b = b.push(0x00)
+    b = b.push(0x01)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # DW_AT_stmt_list = 0 (4 bytes LE)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # --- Subprogram DIE (abbrev code 2) ---
+    b = b.push(0x02)
+    # DW_AT_low_pc = 0x1000 (4 bytes LE)
+    b = b.push(0x00)
+    b = b.push(0x10)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # DW_AT_high_pc = 0x80 (offset, 4 bytes LE)
+    b = b.push(0x80)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # Children terminator for CU
+    b = b.push(0x00)
+    b
+
+# ============================================================================
+# Helper: build minimal .debug_line via direct push
+# ============================================================================
+# DWARF v3 line program with empty file/dir tables (avoids text.from_char_code
+# interpreter bug). Emits:
+#   addr=0x1000, line=10
+#   addr=0x1020, line=20
+#   end_sequence
+#
+# Prologue body = 5 fields + 12 opcode lengths + 1 dir term + 1 file term = 19
+# Program = 7(set_addr) + 2(adv_line) + 1(copy) + 2(adv_pc) + 2(adv_line)
+#         + 1(copy) + 3(end_seq) = 18
+# total_after_unit_length = 2(version) + 4(header_length) + 19 + 18 = 43 = 0x2b
+
+fn _build_line() -> [u8]:
+    var b: [u8] = []
+    # unit_length = 43 = 0x2b (LE)
+    b = b.push(0x2b)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # version = 3 (LE)
+    b = b.push(0x03)
+    b = b.push(0x00)
+    # header_length = 19 = 0x13 (LE)
+    b = b.push(0x13)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # --- prologue body ---
+    b = b.push(0x01) # min_instruction_length
+    b = b.push(0x01) # default_is_stmt
+    b = b.push(0xfb) # line_base = -5 (251 as unsigned byte)
+    b = b.push(0x0e) # line_range = 14
+    b = b.push(0x0d) # opcode_base = 13
+    # 12 standard opcode lengths
+    b = b.push(0x00)
+    b = b.push(0x01)
+    b = b.push(0x01)
+    b = b.push(0x01)
+    b = b.push(0x01)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x01)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    b = b.push(0x01)
+    # include_directories: empty
+    b = b.push(0x00)
+    # file_names: empty
+    b = b.push(0x00)
+    # --- line program ---
+    # DW_LNE_set_address(0x1000) addr_size=4
+    b = b.push(0x00) # extended opcode marker
+    b = b.push(0x05) # ext_len = 5 (1 + 4)
+    b = b.push(0x02) # DW_LNE_set_address
+    b = b.push(0x00) # 0x1000 LE
+    b = b.push(0x10)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # DW_LNS_advance_line +9 (line 1 -> 10)
+    b = b.push(0x03)
+    b = b.push(0x09)
+    # DW_LNS_copy (emit row: addr=0x1000, line=10)
+    b = b.push(0x01)
+    # DW_LNS_advance_pc +32 (0x20)
+    b = b.push(0x02)
+    b = b.push(0x20)
+    # DW_LNS_advance_line +10 (line 10 -> 20)
+    b = b.push(0x03)
+    b = b.push(0x0a)
+    # DW_LNS_copy (emit row: addr=0x1020, line=20)
+    b = b.push(0x01)
+    # DW_LNE_end_sequence
+    b = b.push(0x00)
+    b = b.push(0x01)
+    b = b.push(0x01)
+    b
+
+# ============================================================================
+# Helper: build DwarfSections from the three builders
+# ============================================================================
+
+fn _build_sections() -> DwarfSections:
+    DwarfSections(
+        debug_info: _build_info(),
+        debug_abbrev: _build_abbrev(),
+        debug_line: _build_line(),
+        debug_str: [],
+        debug_line_str: [],
+        addr_size: 4,
+    )
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "DwarfParser Construction":
+    it "rejects empty debug_info":
+        val sections = DwarfSections(
+            debug_info: [],
+            debug_abbrev: [],
+            debug_line: [],
+            debug_str: [],
+            debug_line_str: [],
+            addr_size: 4,
+        )
+        val result = DwarfParser.from_sections(sections)
+        expect(result.is_err()).to_equal(true)
+
+    it "creates parser from valid sections":
+        val sections = _build_sections()
+        val result = DwarfParser.from_sections(sections)
+        expect(result.is_ok()).to_equal(true)
+
+    it "reports DWARF format kind":
+        val sections = _build_sections()
+        val parser = DwarfParser.from_sections(sections).ok()!
+        expect(parser.format_kind().to_string()).to_equal("DWARF")
+
+describe "DwarfParser Compilation Units":
+    it "parses one compilation unit":
+        val sections = _build_sections()
+        val parser = DwarfParser.from_sections(sections).ok()!
+        val units = parser.compilation_units()
+        expect(units.len()).to_equal(1)
+
+    it "compilation unit has correct address range":
+        val sections = _build_sections()
+        val parser = DwarfParser.from_sections(sections).ok()!
+        val cu = parser.compilation_units()[0]
+        expect(cu.low_pc).to_equal(0x1000)
+        expect(cu.high_pc).to_equal(0x1100)
+
+describe "DwarfParser Queries":
+    it "addr_to_source resolves address to source location":
+        val sections = _build_sections()
+        val parser = DwarfParser.from_sections(sections).ok()!
+        val loc = parser.addr_to_source(0x1000)
+        expect(loc.?).to_equal(true)
+        expect(loc!.line).to_equal(10)
+
+    it "addr_to_source picks best match for mid-range address":
+        val sections = _build_sections()
+        val parser = DwarfParser.from_sections(sections).ok()!
+        # 0x1010 is between 0x1000 (line 10) and 0x1020 (line 20)
+        # Should pick the entry with greatest address <= query -> line 10
+        val loc = parser.addr_to_source(0x1010)
+        expect(loc.?).to_equal(true)
+        expect(loc!.line).to_equal(10)
+
+    it "addr_to_source returns nil for address before all entries":
+        val sections = _build_sections()
+        val parser = DwarfParser.from_sections(sections).ok()!
+        val loc = parser.addr_to_source(0x0100)
+        expect(loc.?).to_equal(false)
+
+    it "function_at finds function containing address":
+        val sections = _build_sections()
+        val parser = DwarfParser.from_sections(sections).ok()!
+        val func = parser.function_at(0x1040)
+        expect(func.?).to_equal(true)
+        expect(func!.low_pc).to_equal(0x1000)
+        expect(func!.high_pc).to_equal(0x1080)
+
+    it "function_at returns nil for address outside all functions":
+        val sections = _build_sections()
+        val parser = DwarfParser.from_sections(sections).ok()!
+        val func = parser.function_at(0x2000)
+        expect(func.?).to_equal(false)
+
+    it "line_entries returns all decoded line entries":
+        val sections = _build_sections()
+        val parser = DwarfParser.from_sections(sections).ok()!
+        val entries = parser.line_entries()
+        # 2 copy rows + 1 end_sequence = 3 entries
+        expect(entries.len()).to_equal(3)
+
+    it "functions_in_range returns matching functions":
+        val sections = _build_sections()
+        val parser = DwarfParser.from_sections(sections).ok()!
+        val funcs = parser.functions_in_range(0x1000, 0x1100)
+        expect(funcs.len()).to_equal(1)
+        expect(funcs[0].low_pc).to_equal(0x1000)
+
+    it "functions_in_range returns empty for non-overlapping range":
+        val sections = _build_sections()
+        val parser = DwarfParser.from_sections(sections).ok()!
+        val funcs = parser.functions_in_range(0x2000, 0x3000)
+        expect(funcs.len()).to_equal(0)

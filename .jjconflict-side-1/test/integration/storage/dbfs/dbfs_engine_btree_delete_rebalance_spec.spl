@@ -1,0 +1,169 @@
+"""
+# BTree Delete Rebalancing Specification
+
+**Feature:** F4 — BTree delete rebalancing (data correctness P0)
+**ACs:** AC-5 (hardening fix), AC-7 (new tests)
+**Status:** Failing (no implementation yet)
+
+Tests the CLRS top-down proactive fix-up for BTree deletion:
+ensure_min_keys, borrow_from_left, borrow_from_right, merge_children.
+Without rebalancing, deletions can leave underflowed nodes that violate
+the BTree invariant (each non-root node has >= t keys).
+
+BTree<V> uses BTreeKey { a: i64, b: i64 } as composite key with
+lexicographic ordering. We use b=0 for simple single-dimension keys.
+"""
+
+# @cover src/lib/nogc_sync_mut/storage/shared/btree.spl
+
+use std.spec
+use std.storage.shared.btree.{BTree, BTreeKey}
+
+# ============================================================================
+# Module-level helpers (avoid it-block mutation limits)
+# ============================================================================
+
+fn k(n: i64) -> BTreeKey:
+    BTreeKey(a: n, b: 0)
+
+fn make_tree(keys: [i64]) -> BTree<text>:
+    var tree = BTree<text>.new(3)  # fanout=3
+    for n in keys:
+        tree.insert(k(n), "v{n}")
+    tree
+
+fn has(tree: BTree<text>, n: i64) -> bool:
+    val result = tree.lookup(k(n))
+    result.?
+
+fn delete_key(tree: BTree<text>, n: i64):
+    tree.delete(k(n))
+
+# ============================================================================
+# Basic delete correctness (prerequisite for rebalancing)
+# ============================================================================
+
+describe "BTree delete":
+    describe "leaf deletion":
+        it "removes a key from a single-node tree":
+            var tree = make_tree([10, 20, 30])
+            delete_key(tree, 20)
+            expect(has(tree, 20)).to_equal(false)
+            expect(has(tree, 10)).to_equal(true)
+            expect(has(tree, 30)).to_equal(true)
+
+        it "removes all keys leaving empty tree":
+            var tree = make_tree([5, 10])
+            delete_key(tree, 5)
+            delete_key(tree, 10)
+            expect(has(tree, 5)).to_equal(false)
+            expect(has(tree, 10)).to_equal(false)
+
+        it "delete of nonexistent key is a no-op":
+            var tree = make_tree([10, 20, 30])
+            delete_key(tree, 99)
+            expect(has(tree, 10)).to_equal(true)
+            expect(has(tree, 20)).to_equal(true)
+            expect(has(tree, 30)).to_equal(true)
+
+    describe "internal node deletion":
+        it "deletes key from internal node using predecessor":
+            var tree = make_tree([10, 20, 30, 40, 50])
+            delete_key(tree, 30)
+            expect(has(tree, 30)).to_equal(false)
+            expect(has(tree, 10)).to_equal(true)
+            expect(has(tree, 20)).to_equal(true)
+            expect(has(tree, 40)).to_equal(true)
+            expect(has(tree, 50)).to_equal(true)
+
+# ============================================================================
+# Rebalancing: borrow from siblings
+# ============================================================================
+
+describe "BTree rebalancing":
+    describe "borrow_from_left":
+        it "borrows from left sibling when right child underflows":
+            var tree = make_tree([10, 20, 30, 40, 50, 60, 70])
+            delete_key(tree, 70)
+            delete_key(tree, 60)
+            expect(has(tree, 10)).to_equal(true)
+            expect(has(tree, 20)).to_equal(true)
+            expect(has(tree, 30)).to_equal(true)
+            expect(has(tree, 40)).to_equal(true)
+            expect(has(tree, 50)).to_equal(true)
+
+    describe "borrow_from_right":
+        it "borrows from right sibling when left child underflows":
+            var tree = make_tree([10, 20, 30, 40, 50, 60, 70])
+            delete_key(tree, 10)
+            delete_key(tree, 20)
+            expect(has(tree, 30)).to_equal(true)
+            expect(has(tree, 40)).to_equal(true)
+            expect(has(tree, 50)).to_equal(true)
+            expect(has(tree, 60)).to_equal(true)
+            expect(has(tree, 70)).to_equal(true)
+
+    describe "merge_children":
+        it "merges nodes when both siblings are at minimum":
+            var tree = make_tree([10, 20, 30, 40, 50])
+            delete_key(tree, 10)
+            delete_key(tree, 50)
+            delete_key(tree, 30)
+            expect(has(tree, 20)).to_equal(true)
+            expect(has(tree, 40)).to_equal(true)
+
+        it "merge reduces tree height when root becomes empty":
+            var tree = make_tree([10, 20, 30, 40, 50])
+            delete_key(tree, 10)
+            delete_key(tree, 20)
+            delete_key(tree, 30)
+            delete_key(tree, 40)
+            expect(has(tree, 50)).to_equal(true)
+
+    describe "cascade rebalancing":
+        it "handles multi-level rebalancing cascade":
+            var tree = make_tree([5, 10, 15, 20, 25, 30, 35, 40, 45, 50])
+            delete_key(tree, 5)
+            delete_key(tree, 15)
+            delete_key(tree, 25)
+            delete_key(tree, 35)
+            delete_key(tree, 45)
+            expect(has(tree, 10)).to_equal(true)
+            expect(has(tree, 20)).to_equal(true)
+            expect(has(tree, 30)).to_equal(true)
+            expect(has(tree, 40)).to_equal(true)
+            expect(has(tree, 50)).to_equal(true)
+
+# ============================================================================
+# Order invariant after deletions (verified via lookup, not traversal)
+# ============================================================================
+
+describe "BTree order invariant":
+    it "all surviving keys remain accessible after mixed delete":
+        var tree = make_tree([50, 30, 70, 10, 40, 60, 80, 20])
+        delete_key(tree, 30)
+        delete_key(tree, 60)
+        # Remaining: 10, 20, 40, 50, 70, 80
+        expect(has(tree, 10)).to_equal(true)
+        expect(has(tree, 20)).to_equal(true)
+        expect(has(tree, 40)).to_equal(true)
+        expect(has(tree, 50)).to_equal(true)
+        expect(has(tree, 70)).to_equal(true)
+        expect(has(tree, 80)).to_equal(true)
+        # Deleted keys must not be found
+        expect(has(tree, 30)).to_equal(false)
+        expect(has(tree, 60)).to_equal(false)
+
+    it "insert after delete maintains correctness":
+        var tree = make_tree([10, 20, 30, 40, 50])
+        delete_key(tree, 30)
+        tree.insert(k(25), "v25")
+        tree.insert(k(35), "v35")
+        expect(has(tree, 25)).to_equal(true)
+        expect(has(tree, 35)).to_equal(true)
+        expect(has(tree, 30)).to_equal(false)
+        # Original survivors still present
+        expect(has(tree, 10)).to_equal(true)
+        expect(has(tree, 20)).to_equal(true)
+        expect(has(tree, 40)).to_equal(true)
+        expect(has(tree, 50)).to_equal(true)

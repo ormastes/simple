@@ -1,0 +1,157 @@
+# Shadow Map System
+#
+# Shadow map configuration and cascaded shadow map management
+# for directional light shadows.
+#
+# Usage:
+#   val config = ShadowMapConfig.high_quality()
+#   var csm = CascadedShadowMap.new(4, config)
+#   var system = ShadowSystem.new(config)
+#   system.add_shadow_map(csm)
+
+struct ShadowMapConfig:
+    resolution: i32
+    bias: f64
+    normal_bias: f64
+    soft_shadows: bool
+
+impl ShadowMapConfig:
+    static fn default_config() -> ShadowMapConfig:
+        ShadowMapConfig(resolution: 1024, bias: 0.005, normal_bias: 0.02, soft_shadows: true)
+
+    static fn high_quality() -> ShadowMapConfig:
+        ShadowMapConfig(resolution: 2048, bias: 0.003, normal_bias: 0.01, soft_shadows: true)
+
+struct CascadeLevel:
+    split_distance: f64
+    resolution: i32
+
+struct CascadedShadowMap:
+    cascade_count: i32
+    cascades: [CascadeLevel]
+    config: ShadowMapConfig
+
+impl CascadedShadowMap:
+    static fn new(cascade_count: i32, config: ShadowMapConfig) -> CascadedShadowMap:
+        # Auto-generate cascade splits using exponential distribution
+        # split_i = near * (far/near)^(i/n)
+        val near = 0.1
+        val far = 500.0
+        val ratio = far / near
+        var cascades: [CascadeLevel] = []
+        var i = 0
+        while i < cascade_count:
+            # Compute split distance: near * ratio^((i+1)/n)
+            val frac = (i + 1) * 1.0 / (cascade_count * 1.0)
+            val split = near * _pow_simple(ratio, frac)
+            # Higher cascades get lower resolution
+            var res = config.resolution
+            var shift = 0
+            while shift < i:
+                res = res / 2
+                if res < 256:
+                    res = 256
+                shift = shift + 1
+            val level = CascadeLevel(split_distance: split, resolution: res)
+            cascades.push(level)
+            i = i + 1
+        CascadedShadowMap(cascade_count: cascade_count, cascades: cascades, config: config)
+
+    fn get_cascade(index: i32) -> CascadeLevel?:
+        var idx: i64 = index
+        if idx < 0:
+            return None
+        if idx >= self.cascades.len():
+            return None
+        Some(self.cascades[idx])
+
+    fn total_resolution() -> i32:
+        var total = 0
+        var i = 0
+        while i < self.cascades.len():
+            total = total + self.cascades[i].resolution
+            i = i + 1
+        total
+
+class ShadowSystem:
+    shadow_maps: [CascadedShadowMap]
+    enabled: bool
+    global_config: ShadowMapConfig
+
+impl ShadowSystem:
+    static fn new(config: ShadowMapConfig) -> ShadowSystem:
+        ShadowSystem(shadow_maps: [], enabled: true, global_config: config)
+
+    me add_shadow_map(csm: CascadedShadowMap) -> i32:
+        self.shadow_maps.push(csm)
+        var idx: i32 = self.shadow_maps.len() - 1
+        idx
+
+    me set_enabled(on: bool):
+        self.enabled = on
+
+    fn is_enabled() -> bool:
+        self.enabled
+
+    fn shadow_map_count() -> i32:
+        var count: i32 = self.shadow_maps.len()
+        count
+
+    me clear():
+        self.shadow_maps = []
+
+# Simple power approximation for cascade split computation
+fn _pow_simple(base: f64, exp: f64) -> f64:
+    if base <= 0.0:
+        return 0.0
+    if exp == 0.0:
+        return 1.0
+    # exp(exp * ln(base)) via Taylor series
+    val ln_b = _ln_simple(base)
+    _exp_simple(exp * ln_b)
+
+fn _ln_simple(x: f64) -> f64:
+    if x <= 0.0:
+        return -100.0
+    var val_x = x
+    var adjust = 0.0
+    while val_x > 2.0:
+        val_x = val_x / 2.718281828
+        adjust = adjust + 1.0
+    while val_x < 0.3:
+        val_x = val_x * 2.718281828
+        adjust = adjust - 1.0
+    val u = val_x - 1.0
+    val u2 = u * u
+    val u3 = u2 * u
+    val u4 = u3 * u
+    val u5 = u4 * u
+    val result = u - u2 / 2.0 + u3 / 3.0 - u4 / 4.0 + u5 / 5.0
+    result + adjust
+
+fn _exp_simple(x: f64) -> f64:
+    var val_x = x
+    if val_x > 20.0:
+        val_x = 20.0
+    if val_x < -20.0:
+        return 0.0
+    var neg = false
+    if val_x < 0.0:
+        neg = true
+        val_x = -val_x
+    var n: i64 = val_x
+    val f = val_x - n * 1.0
+    var en = 1.0
+    var i = 0
+    while i < n:
+        en = en * 2.718281828
+        i = i + 1
+    val f2 = f * f
+    val f3 = f2 * f
+    val f4 = f3 * f
+    val f5 = f4 * f
+    val ef = 1.0 + f + f2 / 2.0 + f3 / 6.0 + f4 / 24.0 + f5 / 120.0
+    val result = en * ef
+    if neg:
+        return 1.0 / result
+    result

@@ -1,0 +1,195 @@
+"""
+firmware — top-level NVMe controller firmware.
+
+A cooperative reactor wrapping the HIL/FTL/FIL stack: each `service()` cycle drains
+the host submission queue, then runs background garbage collection while free space
+is below the low watermark. Also exposes checkpoint and power-cycle for durability.
+"""
+
+use nvme_types.*
+use hil.*
+use openssd_config.*
+
+val GC_LOW_WATERMARK: i64 = 4    # background GC engages below this many free blocks
+val GC_SWEEP_MAX: i64 = 3        # bounded GC passes per maintenance sweep
+val MAP_OWNER_NONE: i64 = 0
+val MAP_OWNER_FG: i64 = 1
+val MAP_OWNER_BG: i64 = 2
+
+struct Firmware:
+    hil:   Hil
+    ticks: i64
+    target: OpenSsdConfig
+    map_owner: i64
+    fg_ticks: i64
+    bg_ticks: i64
+    owner_conflicts: i64
+
+fn firmware_new() -> Firmware:
+    firmware_new_for_target(TARGET_SIMPLE_SIM)
+
+fn firmware_new_for_target(target_id: i64) -> Firmware:
+    Firmware(hil: hil_new(), ticks: 0, target: nvme_fw_target_config(target_id),
+        map_owner: MAP_OWNER_NONE, fg_ticks: 0, bg_ticks: 0, owner_conflicts: 0)
+
+impl Firmware:
+    me submit(c: NvmeCmd) -> bool:
+        me.hil.submit(c)
+
+    me completions() -> i64:
+        me.hil.completions()
+
+    me target_id() -> i64:
+        me.target.target_id
+
+    me target_channels() -> i64:
+        me.target.channels
+
+    me hardware_target() -> i64:
+        openssd_target_is_hardware(me.target)
+
+    me reap() -> NvmeCpl:
+        me.hil.reap()
+
+    # Drain every queued completion (discarded — used to clear the CQ between phases).
+    me reap_all():
+        var c: i64 = me.completions()
+        while c > 0:
+            var cpl: NvmeCpl = me.reap()
+            c = me.completions()
+
+    me free_blocks() -> i64:
+        me.hil.free_blocks()
+
+    me acquire_map_owner(owner: i64) -> bool:
+        if me.map_owner == MAP_OWNER_NONE:
+            me.map_owner = owner
+            return true
+        me.owner_conflicts = me.owner_conflicts + 1
+        false
+
+    me release_map_owner(owner: i64):
+        if me.map_owner == owner:
+            me.map_owner = MAP_OWNER_NONE
+
+    me owner_idle() -> i64:
+        var idle: i64 = 0
+        if me.map_owner == MAP_OWNER_NONE:
+            idle = 1
+        idle
+
+    me conflict_count() -> i64:
+        me.owner_conflicts
+
+    # One cooperative scheduler tick: at most one foreground command, then at most
+    # one background GC step. The owner token serializes FTL-map access.
+    me service_tick() -> i64:
+        me.ticks = me.ticks + 1
+        var processed: i64 = 0
+        if me.acquire_map_owner(MAP_OWNER_FG):
+            processed = me.hil.tick()
+            if processed > 0:
+                me.fg_ticks = me.fg_ticks + 1
+            me.release_map_owner(MAP_OWNER_FG)
+        if me.hil.free_blocks() < GC_LOW_WATERMARK:
+            if me.acquire_map_owner(MAP_OWNER_BG):
+                val v: i64 = me.hil.gc()
+                if v != UNMAP:
+                    me.bg_ticks = me.bg_ticks + 1
+                me.release_map_owner(MAP_OWNER_BG)
+        processed
+
+    # One reactor service cycle: drain host commands, then background-GC while the
+    # free-block count is below the low watermark (bounded; always terminates).
+    me service() -> i64:
+        var processed: i64 = 0
+        var guard: i64 = 0
+        while me.hil.pending() > 0 and guard < NUM_PAGES:
+            processed = processed + me.service_tick()
+            guard = guard + 1
+        var free: i64 = me.hil.free_blocks()
+        guard = 0
+        while (free < GC_LOW_WATERMARK and guard < NUM_BLOCKS):
+            val before: i64 = me.bg_ticks
+            me.service_tick()
+            if me.bg_ticks == before:
+                guard = NUM_BLOCKS
+            else:
+                free = me.hil.free_blocks()
+                guard = guard + 1
+        processed
+
+    # Explicit bounded GC sweep (maintenance / demo). Returns blocks reclaimed.
+    me gc_sweep() -> i64:
+        var reclaimed: i64 = 0
+        var k: i64 = 0
+        while k < GC_SWEEP_MAX:
+            if me.acquire_map_owner(MAP_OWNER_BG):
+                val v: i64 = me.hil.gc()
+                if v == UNMAP:
+                    k = GC_SWEEP_MAX
+                else:
+                    reclaimed = reclaimed + 1
+                    me.bg_ticks = me.bg_ticks + 1
+                    k = k + 1
+                me.release_map_owner(MAP_OWNER_BG)
+            else:
+                k = GC_SWEEP_MAX
+        reclaimed
+
+    me checkpoint():
+        me.hil.checkpoint()
+
+    # Power-fail then power-on: lose volatile L2P, then recover committed mappings.
+    me power_cycle():
+        me.hil.crash()
+        me.hil.recover()
+
+# ── Self-test ─────────────────────────────────────────────────────────────────
+
+fn firmware_selftest() -> i64:
+    var fail: i64 = 0
+    var fw: Firmware = firmware_new()
+    var hw: Firmware = firmware_new_for_target(TARGET_OPENSSD_8CH8WAY)
+
+    fail = fail + expect_eq(fw.target_id(), TARGET_SIMPLE_SIM, "firmware target defaults to simulator")
+    fail = fail + expect_eq(hw.hardware_target(), 1, "firmware can select OpenSSD hardware target")
+    fail = fail + expect_eq(hw.target_channels(), NUM_CHANNELS, "firmware OpenSSD target exposes scheduler channels")
+
+    var lock_fw: Firmware = firmware_new()
+    lock_fw.map_owner = MAP_OWNER_BG
+    lock_fw.submit(cmd_make(90, OP_WRITE, 90, 1, 0x5A))
+    fail = fail + expect_eq(lock_fw.service_tick(), 0, "owner conflict blocks foreground tick")
+    fail = fail + expect_eq(lock_fw.conflict_count(), 1, "owner conflict counted")
+    lock_fw.map_owner = MAP_OWNER_NONE
+    fail = fail + expect_eq(lock_fw.service_tick(), 1, "foreground tick runs after owner release")
+    fail = fail + expect_eq(lock_fw.owner_idle(), 1, "owner released after foreground tick")
+
+    var tick_fw: Firmware = firmware_new()
+    tick_fw.submit(cmd_make(91, OP_WRITE, 91, 1, 0x61))
+    tick_fw.submit(cmd_make(92, OP_WRITE, 92, 1, 0x62))
+    fail = fail + expect_eq(tick_fw.service_tick(), 1, "service_tick handles one foreground command")
+    fail = fail + expect_eq(tick_fw.completions(), 1, "one completion after one foreground tick")
+    fail = fail + expect_eq(tick_fw.service(), 1, "service drains remaining foreground command")
+    fail = fail + expect_eq(tick_fw.completions(), 2, "two completions after service drain")
+    fail = fail + expect_eq(tick_fw.fg_ticks, 2, "foreground ticks counted")
+
+    fw.submit(cmd_make(1, OP_WRITE, 5, 1, 0x42))
+    fw.service()
+    val c1: NvmeCpl = fw.reap()
+    fail = fail + expect_eq(c1.status, SC_SUCCESS, "write serviced")
+
+    fw.submit(cmd_make(2, OP_READ, 5, 1, 0))
+    fw.service()
+    val c2: NvmeCpl = fw.reap()
+    fail = fail + expect_eq(c2.data, 0x42, "read back via reactor")
+
+    # checkpoint, power cycle, committed data survives
+    fw.checkpoint()
+    fw.power_cycle()
+    fw.submit(cmd_make(3, OP_READ, 5, 1, 0))
+    fw.service()
+    val c3: NvmeCpl = fw.reap()
+    fail = fail + expect_eq(c3.data, 0x42, "data survives power cycle")
+
+    fail

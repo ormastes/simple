@@ -1,0 +1,69 @@
+"""
+NVMe firmware + emulator unit self-tests (per-layer leaf coverage).
+
+**Feature IDs:** #NVME-UNIT-001
+**Category:** Hardware
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** doc/03_plan/hardware/nvme_fw_baremetal_parallel_agent_plan.md
+**Design:** N/A
+**Research:** doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md
+
+The unit tier exercises the pure-Simple firmware and emulator self-test
+aggregators that live under examples/09_embedded/simpleos_nvme_fw/. Those modules
+cannot be bare-imported from test/ (cross-example import is unsupported), so the
+tier drives each aggregator through the real CLI (`bin/simple run`) as a
+subprocess and asserts the operator-visible per-layer PASS evidence — exactly
+what the generated manual shows. Run:
+`bin/simple test test/01_unit/app/nvme_firmware/nvme_units_spec.spl`.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val FW: text = "examples/09_embedded/simpleos_nvme_fw/fw"
+val EMU: text = "examples/09_embedded/simpleos_nvme_fw/emu"
+
+fn _run(file: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", "bin/simple run " + file])
+
+describe "NVMe firmware unit self-tests (per-layer)":
+    """
+    The firmware self-test aggregator runs every FIL/FTL/HIL leaf plus the NVMe
+    controller leaves and reports a section per layer before the overall verdict.
+    """
+
+    it "passes every per-layer firmware self-test (FIL, FTL, HIL, NVMe controller)":
+        step("Run the firmware self-test aggregator through the CLI")
+        val (out, err, code) = _run(FW + "/test_fw.spl")
+        expect(code).to_equal(0)
+
+        step("The FIL (flash interface) layer reports its self-test section")
+        expect(out).to_contain("FIL (flash interface)")
+
+        step("The FTL (translation) layer reports its self-test section")
+        expect(out).to_contain("FTL (translation)")
+
+        step("The HIL (host interface) layer reports its self-test section")
+        expect(out).to_contain("HIL (host interface)")
+
+        step("The NVMe controller (admin + multi IO queue) reports its self-test section")
+        expect(out).to_contain("NVMe controller (admin + multi IO queue)")
+
+        step("The aggregator reports overall firmware PASS")
+        expect(out).to_contain("ALL FIRMWARE SELF-TESTS PASS")
+
+describe "NVMe emulator unit self-tests":
+    """
+    The emulator self-test aggregator runs the NAND array, shared memcpy/DMA seam,
+    emulated FTL, and NVMe device leaf self-tests and reports the overall verdict.
+    """
+
+    it "passes every emulator module self-test (NAND, memcpy, FTL, device)":
+        step("Run the emulator self-test aggregator through the CLI")
+        val (out, err, code) = _run(EMU + "/test_emu.spl")
+        expect(code).to_equal(0)
+
+        step("The aggregator reports overall emulator PASS")
+        expect(out).to_contain("ALL EMU SELFTESTS PASS")

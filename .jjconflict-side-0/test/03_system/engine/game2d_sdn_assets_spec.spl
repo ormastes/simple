@@ -1,0 +1,107 @@
+# @cover src/lib/nogc_sync_mut/game2d/asset/table.spl 80%
+# @cover src/lib/nogc_sync_mut/game2d/asset/diagnostic.spl 80%
+# @cover src/lib/nogc_sync_mut/game2d/asset/asset_id.spl 60%
+# @cover src/lib/nogc_sync_mut/game2d/config/game_sdn.spl 60%
+"""
+# Game2D SDN Assets (AC-6)
+
+`load_assets("...")` → `AssetTable` keyed by name. Missing path yields
+`GAME-ASSET-001` carrying `file:line` from `parse_with_spans`. Wrong-type
+asset (Sound where Image expected) → `GAME-ASSET-002`. Atlas region exceeds
+image bounds → `GAME-ASSET-014`.
+
+Fixtures:
+- `test/fixtures/assets_ok.sdn` — happy-path declarations
+- `test/fixtures/assets_missing.sdn` — references a missing path
+- `test/fixtures/assets_wrong_type.sdn` — typed mismatch
+- `test/fixtures/assets_atlas_oob.sdn` — out-of-bounds atlas region
+
+Red-phase: AssetTable / load_assets absent; assertions fail until Phase 5.
+
+**Status:** Failing (no impl)
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn _read(path: text) -> text:
+    if rt_file_exists(path):
+        rt_file_read_text(path)
+    else:
+        ""
+
+fn _has(s: text, n: text) -> bool:
+    s.contains(n)
+
+describe "Game2D SDN Assets (AC-6)":
+    """## SDN-driven typed asset loader."""
+
+    describe "AssetTable / AssetId / load_assets API":
+        it "asset/table.spl declares fn load_assets":
+            val src = _read("src/lib/nogc_sync_mut/game2d/asset/table.spl")
+            expect(_has(src, "fn load_assets(")).to_equal(true)
+
+        it "asset/table.spl declares class AssetTable":
+            val src = _read("src/lib/nogc_sync_mut/game2d/asset/table.spl")
+            expect(_has(src, "class AssetTable")).to_equal(true)
+
+        it "asset/asset_id.spl declares class AssetId<T>":
+            val src = _read("src/lib/nogc_sync_mut/game2d/asset/asset_id.spl")
+            expect(_has(src, "class AssetId")).to_equal(true)
+
+        it "AssetTable.image/sound/font return Result<_, AssetError>":
+            val src = _read("src/lib/nogc_sync_mut/game2d/asset/table.spl")
+            expect(_has(src, "Result<") and _has(src, "AssetError")
+                ).to_equal(true)
+
+        it "diagnostic.spl declares class AssetError with code/file/line/key/msg":
+            val src = _read("src/lib/nogc_sync_mut/game2d/asset/diagnostic.spl")
+            expect(_has(src, "class AssetError") and
+                   _has(src, "code") and _has(src, "file") and
+                   _has(src, "line") and _has(src, "key")).to_equal(true)
+
+    describe "happy-path fixture":
+        it "test/fixtures/assets_ok.sdn exists":
+            expect(rt_file_exists(
+                "test/fixtures/assets_ok.sdn")).to_equal(true)
+
+        it "assets_ok.sdn declares an image entry":
+            val src = _read("test/fixtures/assets_ok.sdn")
+            expect(_has(src, "image") or _has(src, "Image")
+                ).to_equal(true)
+
+    describe "edge case: missing-path diagnostic GAME-ASSET-001":
+        it "test/fixtures/assets_missing.sdn exists":
+            expect(rt_file_exists(
+                "test/fixtures/assets_missing.sdn")).to_equal(true)
+
+        it "diagnostic.spl wires GAME-ASSET-001":
+            val src = _read("src/lib/nogc_sync_mut/game2d/asset/diagnostic.spl")
+            expect(_has(src, "GAME-ASSET-001")).to_equal(true)
+
+        it "synthetic: detector matches the code form":
+            expect(_has("error GAME-ASSET-001 missing image at file:line",
+                "GAME-ASSET-001")).to_equal(true)
+
+    describe "error path: wrong-type asset GAME-ASSET-002":
+        it "test/fixtures/assets_wrong_type.sdn exists":
+            expect(rt_file_exists(
+                "test/fixtures/assets_wrong_type.sdn")).to_equal(true)
+
+        it "diagnostic.spl wires GAME-ASSET-002":
+            val src = _read("src/lib/nogc_sync_mut/game2d/asset/diagnostic.spl")
+            expect(_has(src, "GAME-ASSET-002")).to_equal(true)
+
+    describe "error path: atlas-OOB GAME-ASSET-014":
+        it "test/fixtures/assets_atlas_oob.sdn exists":
+            expect(rt_file_exists(
+                "test/fixtures/assets_atlas_oob.sdn")).to_equal(true)
+
+        it "diagnostic.spl wires GAME-ASSET-014":
+            val src = _read("src/lib/nogc_sync_mut/game2d/asset/diagnostic.spl")
+            expect(_has(src, "GAME-ASSET-014")).to_equal(true)
+
+        it "edge case: empty source does not falsely satisfy":
+            expect(_has("", "GAME-ASSET-014")).to_equal(false)

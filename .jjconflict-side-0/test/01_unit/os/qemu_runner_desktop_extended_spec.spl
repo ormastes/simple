@@ -1,0 +1,265 @@
+use os.qemu_runner.{
+    build_qemu_command, build_qemu_command_with_options,
+    get_all_targets, get_gui_target, get_qemu_target, get_target,
+    get_scenario, scenario_arm64_virtio_fat32_smf, scenario_arm32_virtio_fat32_smf,
+    scenario_riscv64_virtio_fat32_smf, scenario_riscv64_hosted, scenario_riscv32_virtio_fat32_smf,
+    scenario_x64_desktop_uefi, scenario_x64_wm_simple_web_check,
+    scenario_x64_net_user, scenario_x64_ssh,
+    build_scenario_command, scenario_test_timeout_ms, arm_fs_exec_disk_image_path,
+    riscv_fs_exec_disk_image_path, scenario_target, get_wm_simple_web_check_target,
+    get_ssh_live_target, get_ssh_x25519_probe_target,
+    default_os_build_backend_for_target,
+    desktop_disk_image_candidates, desktop_disk_image_path_in, desktop_disk_make_script_args,
+    desktop_installer_iso_candidates, desktop_release_disk_image_path_in,
+    desktop_release_installer_iso_path, native_build_prerequisite_hint, ovmf_code_path,
+    os_native_build_args, os_native_build_sources, os_native_build_env_prefix,
+    desktop_container_marker_fragments,
+    desktop_uefi_disk_image_tool_app_validation_command, build_os_with_backend,
+    board_bundle_command, ensure_board_bundle, board_lane_test_command, test_board_lane,
+    desktop_uefi_required_marker_fragments, riscv64_hosted_required_marker_fragments,
+    desktop_wine_exec_env_marker_contract_accepts,
+    desktop_wine_exec_env_required_marker_fragments,
+    arm_fs_exec_required_marker_fragments,
+    scenario_lane_kind,
+    is_qemu_success, scenario_qemu_exit_success,
+    qemu_protection_serial_accepts_hardening,
+    qemu_protection_serial_reason,
+    qemu_scenario_protection_board_id,
+    qemu_scenario_protection_serial_accepts_hardening,
+    qemu_scenario_protection_serial_reason,
+    _simpleos_log_config_source,
+    OsTarget,
+    qemu_run_options_debug_gui
+}
+use os.kernel.arch.arch_context.{Architecture}
+use os.desktop_qemu_contract.{run_x64_desktop_disk_probe}
+use os.port.simpleos_multiplatform_build.{SimpleOsLaneKind, simpleos_platform_qemu_lane}
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_exit(code: i32) -> void
+
+fn scenario_name_or_missing(name: text) -> text:
+    val scenario = get_scenario(name)
+    if val resolved = scenario:
+        return resolved.name
+    "missing"
+
+fn command_contains_label(cmd: [text], needle: text) -> text:
+    if cmd.contains(needle):
+        return "present"
+    "absent"
+
+fn shell_exit_code(cmd: text) -> i32:
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    exit_code
+
+fn shell_status_output(cmd: text) -> text:
+    val wrapped = cmd + "\ncode=$?\nprintf '\\n__exit=%s\\n' \"$code\"\nexit 0"
+    val (stdout, _stderr, _exit_code) = rt_process_run_timeout("/bin/sh", ["-c", wrapped], 5000)
+    stdout
+
+fn shell_ok(cmd: text) -> bool:
+    shell_exit_code(cmd) == 0
+
+fn write_shell_shim(path: text, content: text) -> bool:
+    if not rt_file_write_text(path, content):
+        return false
+    shell_ok("/bin/chmod +x \"" + path + "\"")
+
+fn install_failing_simple_shim(root: text, exit_code: i32) -> text:
+    val path = root + "/simple-fails.sh"
+    val _ = rt_dir_create_all(root)
+    val _ok = write_shell_shim(path, "#!/bin/sh\nexit " + exit_code.to_text() + "\n")
+    path
+
+fn restore_board_bundle_tooling(root: text) -> bool:
+    val script_backup = root + "/backup/scripts/os/make_os_disk.shs"
+    val runner_backup = root + "/backup/scripts/mlk_s02_100t_generated_linux.shs"
+    val simple_backup = root + "/backup/bin/simple"
+    var ok = true
+    val _ = shell_exit_code("rm -f \"scripts/os/make_os_disk.shs\"")
+    val _ = shell_exit_code("rm -f \"scripts/mlk_s02_100t_generated_linux.shs\"")
+    val _ = shell_exit_code("rm -f \"bin/simple\"")
+    if rt_file_exists(script_backup):
+        if not shell_ok("mv \"" + script_backup + "\" \"scripts/os/make_os_disk.shs\""):
+            ok = false
+    if rt_file_exists(runner_backup):
+        if not shell_ok("mv \"" + runner_backup + "\" \"scripts/mlk_s02_100t_generated_linux.shs\""):
+            ok = false
+    if rt_file_exists(simple_backup):
+        if not shell_ok("mv \"" + simple_backup + "\" \"bin/simple\""):
+            ok = false
+    ok
+
+fn install_board_bundle_tooling_shims(root: text) -> bool:
+    val _ = shell_exit_code("rm -rf \"" + root + "\"")
+    if not rt_dir_create_all(root + "/backup/scripts"):
+        return false
+    if not rt_dir_create_all(root + "/backup/bin"):
+        return false
+    if rt_file_exists("scripts/os/make_os_disk.shs"):
+        if not shell_ok("mv \"scripts/os/make_os_disk.shs\" \"" + root + "/backup/scripts/os/make_os_disk.shs\""):
+            return false
+    if rt_file_exists("scripts/mlk_s02_100t_generated_linux.shs"):
+        if not shell_ok("mv \"scripts/mlk_s02_100t_generated_linux.shs\" \"" + root + "/backup/scripts/mlk_s02_100t_generated_linux.shs\""):
+            val _ = shell_exit_code("mv \"" + root + "/backup/scripts/os/make_os_disk.shs\" \"scripts/os/make_os_disk.shs\"")
+            return false
+    if rt_file_exists("bin/simple"):
+        if not shell_ok("mv \"bin/simple\" \"" + root + "/backup/bin/simple\""):
+            val _ = shell_exit_code("mv \"" + root + "/backup/scripts/os/make_os_disk.shs\" \"scripts/os/make_os_disk.shs\"")
+            val _ = shell_exit_code("mv \"" + root + "/backup/scripts/mlk_s02_100t_generated_linux.shs\" \"scripts/mlk_s02_100t_generated_linux.shs\"")
+            return false
+    val disk_shim = "#!/bin/sh\n" +
+        "mkdir -p \"$(dirname \"$2\")\"\n" +
+        "printf 'fake-board-bundle:%s\\n' \"$4\" > \"$2\"\n"
+    if not write_shell_shim("scripts/os/make_os_disk.shs", disk_shim):
+        return false
+    val simple_shim = "#!/bin/sh\n" +
+        "out=\"\"\n" +
+        "for arg in \"$@\"; do out=\"$arg\"; done\n" +
+        "mkdir -p \"$out\"\n" +
+        "printf 'fake-board-bundle:riscv64\\n' > \"$out/board_linux_boot_products.sdn\"\n"
+    if not write_shell_shim("bin/simple", simple_shim):
+        return false
+    val runner_shim = "#!/bin/sh\n" +
+        "bundle_root=\"\"\n" +
+        "product_root=\"\"\n" +
+        "for arg in \"$@\"; do\n" +
+        "  case \"$arg\" in\n" +
+        "    --bundle-root=*) bundle_root=\"$(printf '%s\\n' \"$arg\" | cut -d= -f2-)\" ;;\n" +
+        "    --product-root=*) product_root=\"$(printf '%s\\n' \"$arg\" | cut -d= -f2-)\" ;;\n" +
+        "  esac\n" +
+        "done\n" +
+        "[ -n \"$bundle_root\" ] || exit 2\n" +
+        "[ -n \"$product_root\" ] || exit 2\n" +
+        "mkdir -p \"$bundle_root\" \"$product_root\"\n" +
+        "printf 'fake-board-run:riscv64\\n' > \"$product_root/run.log\"\n" +
+        "[ -f \"$bundle_root/board_linux_boot_products.sdn\" ] || exit 3\n"
+    if not write_shell_shim("scripts/mlk_s02_100t_generated_linux.shs", runner_shim):
+        return false
+    true
+
+fn desktop_tool_app_fallback_fixture() -> text:
+    "SBROWSMF\n" +
+        "SMUXSMF\n" +
+        "info|src/app/info/main.spl|smoke|staged\n" +
+        "SCOMPSMF\n" +
+        "SINTSMF\n" +
+        "SLOADSMF\n" +
+        "SIMPLSTC\n" +
+        "LLVMSMF\n" +
+        "CLANGSMF\n" +
+        "RUSTSMF\n" +
+        "WINHLSMF\n" +
+        "SimpleOS LLVM standalone app v1\n" +
+        "clang version 20.0.0\n" +
+        "SimpleOS Rust standalone app v1\n" +
+        "mode=native-filesystem-app\n" +
+        "lane=x86_64-uefi-hardware\n" +
+        "status=standalone-required\n" +
+        "SIMPLECLI.CAT\n" +
+        "/sys/apps/simple_browser\n" +
+        "/sys/apps/smux\n" +
+        "/sys/apps/simple_compiler\n" +
+        "/sys/apps/simple_interpreter\n" +
+        "/sys/apps/simple_loader\n" +
+        "/sys/apps/simple\n" +
+        "/sys/apps/llvm\n" +
+        "/sys/apps/clang\n" +
+        "/sys/apps/rust\n" +
+        "/sys/apps/wine_hello\n" +
+        "/usr/share/simpleos/toolchain/clang/hello.c\n" +
+        "/usr/share/simpleos/toolchain/clang/pipeline.step\n" +
+        "/usr/share/simpleos/toolchain/llvm/hello.ll\n" +
+        "/usr/share/simpleos/toolchain/llvm/pipeline.step\n" +
+        "/usr/share/simpleos/toolchain/rust/hello.rs\n" +
+        "/usr/share/simpleos/toolchain/rust/pipeline.step\n" +
+        "SMF\n"
+
+fn expect_tool_app_validation_reference(cmd: text, app_name: text, marker: text, app_path: text):
+    val img_path = "build/os/fat32-x86_64.img"
+    expect(cmd).to_contain("::/SYS/APPS/{app_name}")
+    expect(cmd).to_contain("::/SYS/APPS/{app_name}.smf")
+    expect(cmd).to_contain("grep -a -q '{marker}'")
+    expect(cmd).to_contain("grep -a -q '{app_path}'")
+    expect(cmd).to_contain("mtype -i \"{img_path}\" ::/SYS/APPS/{app_name} 2>/dev/null | strings | grep -q '{app_path}'")
+    expect(cmd).to_contain("mtype -i \"{img_path}\" ::/SYS/APPS/{app_name}.smf 2>/dev/null | strings | grep -q '{app_path}'")
+    expect(cmd).to_contain("mtype -i \"{img_path}\" ::/SYS/APPS/{app_name}.smf 2>/dev/null | grep -a -q 'SMF'")
+
+describe "Qemu runner desktop UEFI tool app validator":
+    it "requires clang in the x64 desktop live acceptance marker set":
+        val markers = desktop_uefi_required_marker_fragments()
+        expect(markers).to_contain("[desktop-e2e] process-backed:ok app=clang pid=")
+        expect(markers).to_contain("[desktop-e2e] native-toolchain-launch:ok app=clang lane=x86_64-uefi-hardware mode=native-filesystem-app status=standalone-required tool=/sys/apps/clang manifest=/SYS/CLANGMAN.TXT")
+        expect(markers).to_contain("[desktop-e2e] native-capability:ok app=clang capability=local-c-source-inspection proof=/usr/share/simpleos/toolchain/clang/hello.c")
+        expect(markers).to_contain("[desktop-e2e] native-capability:ok app=clang capability=driver-flag-inspection proof=/usr/share/simpleos/toolchain/clang/flags.rsp")
+        expect(markers).to_contain("[desktop-e2e] native-capability:ok app=clang capability=compile-pipeline-step proof=/usr/share/simpleos/toolchain/clang/pipeline.step")
+
+    it "requires validated container namespace and rootfs markers in x64 desktop acceptance":
+        val container_markers = desktop_container_marker_fragments()
+        val uefi_markers = desktop_uefi_required_marker_fragments()
+        expect(container_markers).to_equal(["[desktop-e2e] container-namespace:ok", "[desktop-e2e] container-rootfs:ok"])
+        expect(uefi_markers).to_contain("[desktop-e2e] container-namespace:ok")
+        expect(uefi_markers).to_contain("[desktop-e2e] container-rootfs:ok")
+
+    it "requires Wine hello to be VFS-backed and spawned in x64 desktop acceptance":
+        val markers = desktop_uefi_required_marker_fragments()
+        expect(markers).to_contain("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/wine_hello bytes=")
+        expect(markers).to_contain("[fs-exec] spawn:image path=/sys/apps/wine_hello")
+        expect(markers).to_contain("[desktop-e2e] process-backed:ok app=wine_hello pid=")
+
+    it "defines the extra Wine executable-environment markers needed before readiness claims":
+        val markers = desktop_wine_exec_env_required_marker_fragments()
+        expect(markers).to_contain("[fs-exec] spawn:image path=/sys/apps/wine_hello")
+        expect(markers).to_contain("[desktop-e2e] process-backed:ok app=wine_hello pid=")
+        expect(markers).to_contain("[desktop-e2e] container-namespace:ok")
+        expect(markers).to_contain("[desktop-e2e] container-rootfs:ok")
+
+        val serial = "QEMU x86_64 desktop lane\n" +
+            "[phase-3-mount] fat32 ok\n" +
+            "[kernel] syscall-abi:ok arch=x86_64\n" +
+            "[kernel] scheduler:ok runqueue=user\n" +
+            "[kernel] vfs-service:ok root=/\n" +
+            "[vfs] mounted fat32 device=nvme0 volume=simpleos\n" +
+            "[fs-exec] spawn:image path=/sys/apps/wine_hello entry=0 segments=1 stub_bytes=128 argv_count=1 env_count=0\n" +
+            "[desktop-e2e] process-backed:ok app=wine_hello pid=42\n" +
+            "[desktop-e2e] wm:ok pid=42 wid=1001\n" +
+            "[desktop-e2e] network-smoke:bounded ok packets=1\n" +
+            "[desktop-e2e] container-namespace:ok pid fs ipc net capability\n" +
+            "[desktop-e2e] container-rootfs:ok rootfs=/containers/wine rootfs_backend=nvfs\n" +
+            "[desktop-e2e] mdsoc-capsule:ok owner=process-container-wm\n" +
+            "[desktop-e2e] mdsoc-public-port:ok facade=exec-env\n" +
+            "[desktop-e2e] mdsoc-resident-state-owner:ok ecs=wm,process,container\n" +
+            "TEST PASSED"
+        expect(desktop_wine_exec_env_marker_contract_accepts(serial)).to_equal(true)
+        expect(desktop_wine_exec_env_marker_contract_accepts(serial.replace("[desktop-e2e] container-rootfs:ok", "[desktop-e2e] container-rootfs:missing"))).to_equal(false)
+
+    it "captures the x64 desktop disk probe terminal serial pass marker":
+        val root = "build/test-x64-desktop-disk-probe"
+        val serial = root + "/serial.log"
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val (stdout, _stderr, exit_code) = run_x64_desktop_disk_probe(
+            ["/bin/sh", "-c", "'printf \"boot\\\\nTEST PASSED\\\\n\"'"],
+            serial,
+            1500)
+        expect(exit_code).to_equal(0)
+        expect(stdout).to_contain("TEST PASSED")
+
+    it "requires clang in the riscv64 hosted acceptance marker set":
+        val markers = riscv64_hosted_required_marker_fragments()
+        expect(markers).to_contain("[desktop-e2e] process-backed:ok app=clang pid=")
+        expect(markers).to_contain("[desktop-e2e] native-toolchain-launch:ok app=clang lane=riscv64-hosted mode=native-filesystem-app status=standalone-required tool=/sys/apps/clang manifest=/SYS/CLANGMAN.TXT")
+        expect(markers).to_contain("HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=simple_compiler,simple_loader,llvm,clang,rust")
+        val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted")
+        if val resolved_lane = lane:
+            expect(markers).to_equal(resolved_lane.required_serial_markers)
+        else:
+            fail("missing riscv64 hosted lane")
+
+rt_exit(0)

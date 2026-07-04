@@ -1,0 +1,170 @@
+# Module Path Resolution
+#
+# Resolves module paths from import statements to actual file paths.
+# Supports relative imports, project-root-relative imports, stdlib imports,
+# and __init__.spl directory modules.
+#
+# Port of rust/compiler/src/interpreter_module/path_resolution.rs (205 lines)
+
+from app.io import {file_exists, cwd}
+
+export resolve_module_path, clear_path_resolution_cache
+
+# ============================================================================
+# Module Resolution Cache (thread-local equivalent in Simple)
+# ============================================================================
+
+# Cache for resolved module paths to avoid repeated filesystem probing
+var _path_cache: {text: text?} = {}
+
+fn clear_path_resolution_cache():
+    """Clear the path resolution cache (called between test runs)."""
+    _path_cache = {}
+
+# ============================================================================
+# Path Resolution
+# ============================================================================
+
+fn resolve_module_path(parts: [text], base_dir: text) -> Result<text, text>:
+    """Resolve module path from segments.
+
+    Attempts to resolve a module path by trying multiple strategies in order:
+    1. Relative to base directory (sibling files)
+    2. __init__.spl in directory (package modules)
+    3. Parent directories (project-root-relative imports)
+    4. Standard library locations
+    5. src/ directory (for app modules)
+
+    Args:
+        parts: Module path segments (e.g., ["std", "spec"])
+        base_dir: Base directory to resolve from (usually parent of current file)
+
+    Returns:
+        Absolute path to the module file, or an error if not found
+    """
+    # Build cache key
+    val cache_key = "{base_dir}:{parts.join(\".\")}"
+
+    # Check cache first
+    if _path_cache.contains_key(cache_key):
+        val cached = _path_cache[cache_key]
+        if cached.?:
+            return Ok(cached.unwrap())
+        else:
+            return Err("cannot resolve module: {parts.join(\".\")}")
+
+    # Try resolution
+    val result = resolve_module_path_uncached(parts, base_dir)
+
+    # Cache the result
+    match result:
+        case Ok(path):
+            _path_cache[cache_key] = Some(path)
+        case Err(_):
+            _path_cache[cache_key] = nil
+
+    result
+
+fn resolve_module_path_uncached(parts: [text], base_dir: text) -> Result<text, text>:
+    # Try resolving from base directory first (sibling files)
+    var resolved = base_dir
+    for part in parts:
+        resolved = "{resolved}/{part}"
+
+    # Try .spl extension
+    val spl_path = "{resolved}.spl"
+    if file_exists(spl_path):
+        return Ok(spl_path)
+
+    # Try .ssh extension (Simple shell scripts)
+    val ssh_path = "{resolved}.ssh"
+    if file_exists(ssh_path):
+        return Ok(ssh_path)
+
+    # Try __init__.spl in directory
+    val init_path = "{resolved}/__init__.spl"
+    if file_exists(init_path):
+        return Ok(init_path)
+
+    # Try resolving from parent directories (for project-root-relative imports)
+    var parent_dir = base_dir
+    for _ in 0..10:
+        parent_dir = parent_dirname(parent_dir)
+        if parent_dir == "" or parent_dir == "/":
+            break
+
+        # Try module.spl in parent
+        var parent_resolved = parent_dir
+        for part in parts:
+            parent_resolved = "{parent_resolved}/{part}"
+
+        val parent_spl = "{parent_resolved}.spl"
+        if file_exists(parent_spl):
+            return Ok(parent_spl)
+
+        # Try __init__.spl in parent
+        val parent_init = "{parent_resolved}/__init__.spl"
+        if file_exists(parent_init):
+            return Ok(parent_init)
+
+    # Try stdlib locations - walk up directory tree from base_dir
+    var current = base_dir
+    for _ in 0..10:
+        # Try various stdlib locations
+        for stdlib_subpath in ["src/std/src", "src/lib/std/src", "lib/std/src",
+                                "rust/lib/std/src", "simple/std_lib/src", "std_lib/src"]:
+            val stdlib_candidate = "{current}/{stdlib_subpath}"
+            if file_exists(stdlib_candidate):
+                # Strip "std" prefix if present (std represents stdlib root)
+                val stdlib_parts = if parts.len() > 0 and parts[0] == "std":
+                    parts[1..]
+                else:
+                    parts
+
+                if stdlib_parts.len() > 0:
+                    var stdlib_path = stdlib_candidate
+                    for part in stdlib_parts:
+                        stdlib_path = "{stdlib_path}/{part}"
+
+                    val stdlib_spl = "{stdlib_path}.spl"
+                    if file_exists(stdlib_spl):
+                        return Ok(stdlib_spl)
+
+                    val stdlib_init = "{stdlib_path}/__init__.spl"
+                    if file_exists(stdlib_init):
+                        return Ok(stdlib_init)
+
+        # Try src/ directory (for app modules like app.lsp.server)
+        val src_candidate = "{current}/src"
+        if file_exists(src_candidate):
+            var src_path = src_candidate
+            for part in parts:
+                src_path = "{src_path}/{part}"
+
+            val src_spl = "{src_path}.spl"
+            if file_exists(src_spl):
+                return Ok(src_spl)
+
+            val src_init = "{src_path}/__init__.spl"
+            if file_exists(src_init):
+                return Ok(src_init)
+
+        current = parent_dirname(current)
+        if current == "" or current == "/":
+            break
+
+    Err("cannot resolve module: {parts.join(\".\")}")
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn parent_dirname(path: text) -> text:
+    """Get parent directory of a path."""
+    val idx = path.rfind("/")
+    if idx.? and idx.unwrap() > 0:
+        path[0..idx.unwrap()]
+    elif idx.? and idx.unwrap() == 0:
+        "/"
+    else:
+        ""

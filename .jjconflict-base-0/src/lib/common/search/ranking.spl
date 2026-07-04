@@ -1,0 +1,264 @@
+# ============================================================================
+# common/search/ranking.spl — lexical ranking (TF-IDF + Okapi BM25) -> Score
+#
+# Phase 2 of the custom-type alpha search team plan
+# (doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md).
+#
+# Produces behavior-carrying `Score` values from term frequencies, document
+# lengths, average document length, and document frequencies, plus a top-k
+# selector over `Score`.
+#
+# WHY FIXED-POINT: f64 is unreliable across this repo's backends (returns
+# 0.0 / garbage — MEMORY: "f64 Unreliable All Backends",
+# bug interp_f64_nested_struct_payload_zero_2026-06-14). All arithmetic here is
+# integer fixed-point. Internal precision is SCALE = 1_000_000; results are
+# stored in `Score` at its native milli scale (raw = value * 1000) so the public
+# values are deterministic and integer-verifiable.
+#
+# IDF uses the non-negative (Lucene) form  ln(1 + (N - df + 0.5)/(df + 0.5))
+# so scores stay >= 0 and "higher is better" holds for top-k.
+#
+# CAVEAT (not a compiler bug): `fixed_ln` is an integer series approximation
+# (< 5e-6 abs error), so a public milli score whose true value sits within a
+# few thousandths of a milli boundary may truncate 1 unit low vs. true math.
+# Tests pick mid-interval fixtures so the independent true-math oracle matches.
+# OVERFLOW: terms use fx_mul on values ~1e6; tf*1e6 * (k1+1) approaches i64 max
+# only for tf in the millions (far beyond realistic term frequencies).
+#
+# KNOWN BUGS designed around:
+#   * no for-in over custom structs -> index/counter loops only.
+#   * `text + i64` produces garbage -> never concatenate; we never build text.
+# ============================================================================
+
+use std.common.search.types.{Score}
+
+# Internal fixed-point scale (1e6). Score's public scale is milli (1e3), so the
+# bridge from internal raw -> Score.raw is `internal / SCALE_TO_MILLI`.
+val SCALE: i64 = 1000000
+val SCALE_TO_MILLI: i64 = 1000
+
+# ln(2) * SCALE, used by range-reduction in `fixed_ln`.
+val LN2_FIXED: i64 = 693147
+
+# BM25 parameters as fixed-point constants (defaults k1 = 1.2, b = 0.75).
+val K1_DEFAULT: i64 = 1200000
+val B_DEFAULT: i64 = 750000
+
+# ----------------------------------------------------------------------------
+# Fixed-point primitives
+# ----------------------------------------------------------------------------
+fn fx_mul(a: i64, b: i64) -> i64:
+    """Fixed-point multiply: (a * b) rescaled back down by SCALE."""
+    (a * b) / SCALE
+
+fn fx_div(a: i64, b: i64) -> i64:
+    """Fixed-point divide: (a / b) keeping SCALE precision. b must be != 0."""
+    (a * SCALE) / b
+
+fn fx_from_int(n: i64) -> i64:
+    """Lift a whole number into fixed-point."""
+    n * SCALE
+
+# ----------------------------------------------------------------------------
+# fixed_ln — natural log of a fixed-point argument (x = real * SCALE, x > 0)
+# ----------------------------------------------------------------------------
+# Range-reduce x = m * 2^e with m in [1, 2), so ln(x) = e*ln2 + ln(m).
+# ln(m) = 2 * atanh(t) with t = (m-1)/(m+1) in [0, 1/3); the odd-power series
+# 2*(t + t^3/3 + t^5/5 + ... ) converges in a handful of terms over that range.
+# Verified independently to < 5e-6 absolute error (oracle is true ln, not this).
+fn fixed_ln(x: i64) -> i64:
+    if x <= 0:
+        return 0
+    var m = x
+    var e = 0
+    while m >= 2 * SCALE:
+        m = m / 2
+        e = e + 1
+    while m < SCALE:
+        m = m * 2
+        e = e - 1
+    val t = fx_div(m - SCALE, m + SCALE)
+    val t2 = fx_mul(t, t)
+    var term = t
+    var acc = t
+    var k = 3
+    while k <= 13:
+        term = fx_mul(term, t2)
+        acc = acc + (term / k)
+        k = k + 2
+    (e * LN2_FIXED) + (2 * acc)
+
+# ----------------------------------------------------------------------------
+# IDF (inverse document frequency), fixed-point, non-negative (Lucene form)
+# ----------------------------------------------------------------------------
+# idf = ln(1 + (N - df + 0.5)/(df + 0.5)) = ln(1 + (2N - 2df + 1)/(2df + 1)).
+# Halves are cleared to pure integers before the ratio so no f64 is touched.
+fn idf_fixed(num_docs: i64, doc_freq: i64) -> i64:
+    val numer = (2 * num_docs) - (2 * doc_freq) + 1
+    val denom = (2 * doc_freq) + 1
+    val ratio = fx_div(fx_from_int(numer), fx_from_int(denom))
+    val arg = SCALE + ratio
+    fixed_ln(arg)
+
+# ----------------------------------------------------------------------------
+# TF-IDF — simple lexical weight (tf * idf), fixed-point
+# ----------------------------------------------------------------------------
+fn tfidf_term_fixed(tf: i64, num_docs: i64, doc_freq: i64) -> i64:
+    """Internal fixed-point tf-idf weight for one term in one document."""
+    if tf <= 0:
+        return 0
+    val idf = idf_fixed(num_docs, doc_freq)
+    fx_mul(fx_from_int(tf), idf)
+
+# ----------------------------------------------------------------------------
+# BM25 — Okapi BM25 term contribution, fixed-point
+# ----------------------------------------------------------------------------
+# score_t = idf * ( tf*(k1+1) ) / ( tf + k1*(1 - b + b*dl/avgdl) )
+# tf == 0 contributes 0 (term absent in this document).
+fn bm25_term_fixed(tf: i64, doc_len: i64, avg_doc_len_fixed: i64,
+                   num_docs: i64, doc_freq: i64, k1: i64, b: i64) -> i64:
+    if tf <= 0:
+        return 0
+    if avg_doc_len_fixed <= 0:
+        return 0
+    val idf = idf_fixed(num_docs, doc_freq)
+    val tf_fx = fx_from_int(tf)
+    val k1p1 = k1 + SCALE
+    val numer = fx_mul(idf, fx_mul(tf_fx, k1p1))
+    val one_minus_b = SCALE - b
+    val dl_over_avg = fx_div(fx_from_int(doc_len), avg_doc_len_fixed)
+    val inner = one_minus_b + fx_mul(b, dl_over_avg)
+    val denom = tf_fx + fx_mul(k1, inner)
+    if denom <= 0:
+        return 0
+    fx_div(numer, denom)
+
+# ----------------------------------------------------------------------------
+# Document-level scorers — sum term contributions, return a Score (milli scale)
+# ----------------------------------------------------------------------------
+# Parallel arrays describe one document's query-term occurrences:
+#   tfs[i]       = term frequency of query term i in this document
+#   doc_freqs[i] = number of documents containing query term i (df)
+# Shared scalars: doc_len, avg_doc_len_fixed (avgdl already in fixed-point),
+# num_docs (N). The fixed-point internal sum is rescaled to Score's milli scale.
+
+fn bm25_score(tfs: [i64], doc_freqs: [i64], doc_len: i64,
+              avg_doc_len_fixed: i64, num_docs: i64, k1: i64, b: i64) -> Score:
+    """BM25 score for one document given its per-query-term frequencies."""
+    var acc = 0
+    var i = 0
+    val n = tfs.len()
+    while i < n:
+        acc = acc + bm25_term_fixed(tfs[i], doc_len, avg_doc_len_fixed,
+                                    num_docs, doc_freqs[i], k1, b)
+        i = i + 1
+    Score.from_milli(acc / SCALE_TO_MILLI)
+
+fn bm25_score_default(tfs: [i64], doc_freqs: [i64], doc_len: i64,
+                      avg_doc_len_fixed: i64, num_docs: i64) -> Score:
+    """BM25 with the standard defaults k1 = 1.2, b = 0.75."""
+    bm25_score(tfs, doc_freqs, doc_len, avg_doc_len_fixed, num_docs,
+               K1_DEFAULT, B_DEFAULT)
+
+fn tfidf_score(tfs: [i64], doc_freqs: [i64], num_docs: i64) -> Score:
+    """TF-IDF score for one document (sum of tf*idf over query terms)."""
+    var acc = 0
+    var i = 0
+    val n = tfs.len()
+    while i < n:
+        acc = acc + tfidf_term_fixed(tfs[i], num_docs, doc_freqs[i])
+        i = i + 1
+    Score.from_milli(acc / SCALE_TO_MILLI)
+
+# ----------------------------------------------------------------------------
+# avg_doc_len_fixed — helper to build the fixed-point average doc length
+# ----------------------------------------------------------------------------
+fn avg_doc_len_fixed(doc_lens: [i64]) -> i64:
+    """Fixed-point mean of doc lengths (0 when empty). Keeps SCALE precision so
+    a non-integer average does not collapse to an integer before BM25 uses it."""
+    val n = doc_lens.len()
+    if n <= 0:
+        return 0
+    var total = 0
+    var i = 0
+    while i < n:
+        total = total + doc_lens[i]
+        i = i + 1
+    fx_div(fx_from_int(total), fx_from_int(n))
+
+# ----------------------------------------------------------------------------
+# ScoredDoc — a typed (id, Score) pair for ranked output
+# ----------------------------------------------------------------------------
+struct ScoredDoc:
+    """A document id paired with its relevance Score, the unit of ranked
+    output. `better_than` is the total order used by top-k: Score descending,
+    ties broken by ascending id so ordering is deterministic across backends
+    (never relies on sort stability)."""
+    id: i64
+    score: Score
+
+impl ScoredDoc:
+    static fn of(id: i64, score: Score) -> ScoredDoc:
+        ScoredDoc(id: id, score: score)
+
+    fn doc_id() -> i64:
+        self.id
+
+    fn relevance() -> Score:
+        self.score
+
+    fn better_than(other: ScoredDoc) -> bool:
+        """True if self ranks strictly ahead of other: higher Score first,
+        then lower id wins a tie."""
+        if self.score.is_greater_than(other.score):
+            return true
+        if self.score.is_less_than(other.score):
+            return false
+        self.id < other.id
+
+# ----------------------------------------------------------------------------
+# top_k — selection of the k best-ranked ScoredDocs, fully ordered
+# ----------------------------------------------------------------------------
+# Partial selection sort: k passes, each pulling the current best by
+# `better_than`. O(n*k); k is small for ranking (don't over-engineer a heap).
+# Returns at most k docs in ranked (best-first) order. Negative or oversized k
+# is clamped to [0, n].
+fn top_k(docs: [ScoredDoc], k: i64) -> [ScoredDoc]:
+    var out: [ScoredDoc] = []
+    val n = docs.len()
+    if n == 0:
+        return out
+    var limit = k
+    if limit < 0:
+        limit = 0
+    if limit > n:
+        limit = n
+    # taken[i] marks docs already pulled into the result.
+    var taken: [bool] = []
+    var t = 0
+    while t < n:
+        taken.push(false)
+        t = t + 1
+    var picked = 0
+    while picked < limit:
+        var best = 0 - 1
+        var j = 0
+        while j < n:
+            if not taken[j]:
+                if best < 0:
+                    best = j
+                else:
+                    if docs[j].better_than(docs[best]):
+                        best = j
+            j = j + 1
+        if best < 0:
+            return out
+        taken[best] = true
+        out.push(docs[best])
+        picked = picked + 1
+    out
+
+# rank_all — convenience: full ranking (top_k with k = n).
+fn rank_all(docs: [ScoredDoc]) -> [ScoredDoc]:
+    """Rank every document best-first (BM25/TF-IDF order with id tie-break)."""
+    top_k(docs, docs.len())

@@ -1,0 +1,149 @@
+# Editor Search Service
+#
+# Find-in-file and cross-file grep functionality.
+# Functional-style: functions take and return state structs.
+
+use std.io_runtime.{file_read, dir_list, dir_exists}
+
+struct SearchMatch:
+    line: i64
+    col: i64
+    length: i64
+    context: text
+
+struct SearchState:
+    query: text
+    matches: [SearchMatch]
+    current_match: i64
+    active: bool
+    wrap: bool
+
+struct GrepResult:
+    path: text
+    line: i64
+    content: text
+
+fn search_new() -> SearchState:
+    SearchState(query: "", matches: [], current_match: 0, active: false, wrap: true)
+
+fn search_in_text(content: text, query: text) -> [SearchMatch]:
+    var results: [SearchMatch] = []
+    if query == "":
+        return results
+    val lines = content.split("\n")
+    var line_idx = 0
+    while line_idx < lines.len():
+        val line_text = lines[line_idx]
+        var search_start = 0
+        while search_start < line_text.len():
+            val pos = _search_index_of(line_text, query, search_start)
+            if pos < 0:
+                break
+            val m = SearchMatch(line: line_idx, col: pos, length: query.len(), context: line_text)
+            results.push(m)
+            search_start = pos + 1
+        line_idx = line_idx + 1
+    results
+
+fn search_activate(state: SearchState, query: text, content: text) -> SearchState:
+    val found = search_in_text(content, query)
+    SearchState(query: query, matches: found, current_match: 0, active: true, wrap: state.wrap)
+
+fn search_next(state: SearchState) -> SearchState:
+    if state.matches.len() == 0:
+        return state
+    var next_idx = state.current_match + 1
+    if next_idx >= state.matches.len():
+        if state.wrap:
+            next_idx = 0
+        else:
+            next_idx = state.matches.len() - 1
+    SearchState(query: state.query, matches: state.matches, current_match: next_idx, active: state.active, wrap: state.wrap)
+
+fn search_prev(state: SearchState) -> SearchState:
+    if state.matches.len() == 0:
+        return state
+    var prev_idx = state.current_match - 1
+    if prev_idx < 0:
+        if state.wrap:
+            prev_idx = state.matches.len() - 1
+        else:
+            prev_idx = 0
+    SearchState(query: state.query, matches: state.matches, current_match: prev_idx, active: state.active, wrap: state.wrap)
+
+fn search_clear(state: SearchState) -> SearchState:
+    SearchState(query: "", matches: [], current_match: 0, active: false, wrap: state.wrap)
+
+fn search_current(state: SearchState) -> SearchMatch:
+    if state.matches.len() == 0:
+        return SearchMatch(line: -1, col: -1, length: 0, context: "")
+    val idx = state.current_match
+    if idx < 0 or idx >= state.matches.len():
+        return SearchMatch(line: -1, col: -1, length: 0, context: "")
+    state.matches[idx]
+
+fn grep_in_file(path: text, query: text) -> [GrepResult]:
+    var results: [GrepResult] = []
+    val raw = file_read(path) ?? ""
+    if raw == "":
+        return results
+    val lines = raw.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line_text = lines[i]
+        if line_text.contains(query):
+            val gr = GrepResult(path: path, line: i, content: line_text)
+            results.push(gr)
+        i = i + 1
+    results
+
+fn grep_files(root: text, query: text, extensions: [text]) -> [GrepResult]:
+    var results: [GrepResult] = []
+    val entries = dir_list(root) ?? []
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        val full_path = root + "/" + entry
+        if dir_exists(full_path):
+            val sub = grep_files(full_path, query, extensions)
+            var j = 0
+            while j < sub.len():
+                results.push(sub[j])
+                j = j + 1
+        else:
+            if _search_ext_match(entry, extensions):
+                val file_results = grep_in_file(full_path, query)
+                var k = 0
+                while k < file_results.len():
+                    results.push(file_results[k])
+                    k = k + 1
+        i = i + 1
+    results
+
+# --- internal helpers ---
+
+fn _search_index_of(haystack: text, needle: text, start: i64) -> i64:
+    # Simple linear scan for first occurrence of needle in haystack from start
+    val h_len = haystack.len()
+    val n_len = needle.len()
+    if n_len == 0 or start + n_len > h_len:
+        return -1
+    var pos = start
+    while pos + n_len <= h_len:
+        val slice = haystack.slice(pos, pos + n_len)
+        if slice == needle:
+            return pos
+        pos = pos + 1
+    -1
+
+fn _search_ext_match(filename: text, extensions: [text]) -> bool:
+    # Empty extensions list means match all files
+    if extensions.len() == 0:
+        return true
+    var i = 0
+    while i < extensions.len():
+        val ext = extensions[i]
+        if filename.ends_with(ext):
+            return true
+        i = i + 1
+    false

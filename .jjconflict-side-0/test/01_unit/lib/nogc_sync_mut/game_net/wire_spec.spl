@@ -1,0 +1,114 @@
+# @cover src/lib/nogc_sync_mut/game_net/wire.spl 90%
+"""
+# game_net wire frame codecs (KAT)
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/app/game_engine/netcode_prediction_plan.md
+**Design:** N/A
+**Research:** doc/01_research/app/game_engine/netcode_prediction.md
+
+## Overview
+
+Exact-byte known-answer tests for InputFrame / Snapshot (full + delta) /
+TxnMsg / Ack per the netcode prediction plan's P1 wire protocol slice. Every
+frame is versioned (`proto_ver:u16` + `msg_kind:u8`) and round-trips through
+`ByteWriter`/`ByteReader` byte-identically.
+
+## Examples
+
+```simple
+val f = InputFrame(seq: 7u32, tick: 42u32, move_x: 1.0, move_y: -0.5)
+val bytes = encode_input_frame(f)
+val g = decode_input_frame(bytes)   # g == f, byte-identical round trip
+```
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.game_net.wire.{
+    InputFrame, EntityState, Snapshot, TxnMsg, Ack,
+    encode_input_frame, decode_input_frame,
+    encode_snapshot_full, encode_snapshot_delta, decode_snapshot,
+    encode_txn_msg, decode_txn_msg,
+    encode_ack, decode_ack
+}
+
+describe "game_net wire frame codecs":
+    it "InputFrame round-trips with exact byte layout":
+        val f = InputFrame(seq: 7u32, tick: 42u32, move_x: 1.0, move_y: -0.5)
+        val bytes = encode_input_frame(f)
+        # header(3) + seq(4) + tick(4) + move_x(4) + move_y(4) = 19 bytes
+        expect(bytes.len()).to_equal(19)
+        expect(bytes[0]).to_equal(0u8)
+        expect(bytes[1]).to_equal(1u8)
+        expect(bytes[2]).to_equal(0u8)   # MSG_INPUT
+        match decode_input_frame(bytes):
+            case Ok(g):
+                expect(g.seq).to_equal(7u32)
+                expect(g.tick).to_equal(42u32)
+                expect(g.move_x).to_equal(1.0)
+                expect(g.move_y).to_equal(-0.5)
+            case Err(_): assert_true(false)
+
+    it "Snapshot full mode round-trips two entities with exact byte layout":
+        val entities: [EntityState] = [
+            EntityState(entity_id: 1u32, pos_x: 0.5, pos_y: 0.0, vel_x: 5.0, vel_y: 0.0),
+            EntityState(entity_id: 2u32, pos_x: 1.0, pos_y: 1.0, vel_x: 0.0, vel_y: 5.0)
+        ]
+        val s = Snapshot(tick: 10u32, ack_input_seq: 3u32, entities: entities)
+        val bytes = encode_snapshot_full(s)
+        # header(3) + mode(1) + tick(4) + ack(4) + count(2) + 2*(id(4)+4*f32(16)) = 18 + 40 = 58
+        expect(bytes.len()).to_equal(58)
+        match decode_snapshot(bytes, []):
+            case Ok(g):
+                expect(g.tick).to_equal(10u32)
+                expect(g.ack_input_seq).to_equal(3u32)
+                expect(g.entities.len()).to_equal(2)
+                expect(g.entities[0].pos_x).to_equal(0.5)
+                expect(g.entities[1].vel_y).to_equal(5.0)
+            case Err(_): assert_true(false)
+
+    it "Snapshot delta mode writes only dirty fields vs baseline":
+        val baseline: [EntityState] = [
+            EntityState(entity_id: 1u32, pos_x: 0.0, pos_y: 0.0, vel_x: 5.0, vel_y: 0.0)
+        ]
+        val updated: [EntityState] = [
+            EntityState(entity_id: 1u32, pos_x: 0.5, pos_y: 0.0, vel_x: 5.0, vel_y: 0.0)
+        ]
+        val s = Snapshot(tick: 11u32, ack_input_seq: 4u32, entities: updated)
+        val bytes = encode_snapshot_delta(s, baseline)
+        # header(3) + mode(1) + tick(4) + ack(4) + count(2) + id(4) + mask(1) + pos_x(4) = 23
+        expect(bytes.len()).to_equal(23)
+        match decode_snapshot(bytes, baseline):
+            case Ok(g):
+                expect(g.entities[0].pos_x).to_equal(0.5)
+                expect(g.entities[0].vel_x).to_equal(5.0)   # merged from baseline, not on wire
+            case Err(_): assert_true(false)
+
+    it "TxnMsg round-trips with payload":
+        val payload: [u8] = [9u8, 8u8, 7u8]
+        val t = TxnMsg(op_seq: 5u32, kind: 0u8, payload: payload)
+        val bytes = encode_txn_msg(t)
+        # header(3) + op_seq(4) + kind(1) + payload_len(2) + payload(3) = 13
+        expect(bytes.len()).to_equal(13)
+        match decode_txn_msg(bytes):
+            case Ok(g):
+                expect(g.op_seq).to_equal(5u32)
+                expect(g.kind).to_equal(0u8)
+                expect(g.payload.len()).to_equal(3)
+                expect(g.payload[1]).to_equal(8u8)
+            case Err(_): assert_true(false)
+
+    it "Ack round-trips with exact byte layout":
+        val a = Ack(last_seq: 99u32)
+        val bytes = encode_ack(a)
+        expect(bytes.len()).to_equal(7)   # header(3) + last_seq(4)
+        match decode_ack(bytes):
+            case Ok(g): expect(g.last_seq).to_equal(99u32)
+            case Err(_): assert_true(false)
+
+    it "decode rejects a frame with the wrong msg_kind":
+        val f = InputFrame(seq: 1u32, tick: 1u32, move_x: 0.0, move_y: 0.0)
+        val bytes = encode_input_frame(f)
+        match decode_ack(bytes):
+            case Ok(_): assert_true(false)
+            case Err(msg): expect(msg).to_contain("expected MSG_ACK")

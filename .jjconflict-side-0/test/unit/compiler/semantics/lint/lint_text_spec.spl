@@ -1,0 +1,71 @@
+use compiler.semantics.lint.lint_text.{count_triple_quotes, iter_code_lines, CodeLine}
+
+describe "lint_text helpers":
+    """Pin behavior of the shared docstring-aware line walker so the lint files
+    that delegate to it (mcp_perf_lint, remote_exec_lint, security_*) keep their
+    original semantics: in_docstring is updated BEFORE the in_docstring check, so
+    a line that ENDS a docstring is yielded as code, and a line that STARTS one
+    is skipped."""
+
+    it "count_triple_quotes returns 0 for empty line":
+        """Empty input has no triple-quote sequences."""
+        expect(count_triple_quotes("")).to_equal(0)
+
+    it "count_triple_quotes returns 0 for plain text":
+        """Lines without triple-quotes return 0."""
+        expect(count_triple_quotes("    val x = 1")).to_equal(0)
+
+    it "count_triple_quotes counts one opener":
+        """A bare opener returns 1 (odd -> toggles in_docstring)."""
+        expect(count_triple_quotes("    \"\"\"docstring start")).to_equal(1)
+
+    it "count_triple_quotes counts a same-line pair":
+        """A single-line docstring like `\"\"\"text\"\"\"` returns 2 (even -> no toggle)."""
+        expect(count_triple_quotes("    \"\"\"one-liner\"\"\"")).to_equal(2)
+
+    it "iter_code_lines yields all lines when no docstrings":
+        """Plain code source: every line is a CodeLine."""
+        val src = "fn f():\n    var x = 1\n    x"
+        val lines = iter_code_lines(src)
+        expect(lines.len()).to_equal(3)
+        expect(lines[0].line_num).to_equal(1)
+        expect(lines[0].trimmed).to_equal("fn f():")
+        expect(lines[2].trimmed).to_equal("x")
+
+    it "iter_code_lines skips a multi-line docstring body":
+        """Lines strictly INSIDE a docstring are not yielded; the closing line IS
+        yielded (in_docstring toggles BEFORE the check)."""
+        val src = "fn f():\n    \"\"\"\n    docs body\n    \"\"\"\n    x"
+        val lines = iter_code_lines(src)
+        # Yielded: 'fn f():' (1), '"""' closing (4), 'x' (5).  Skipped: opener (2), body (3).
+        expect(lines.len()).to_equal(3)
+        expect(lines[0].line_num).to_equal(1)
+        expect(lines[1].line_num).to_equal(4)
+        expect(lines[2].line_num).to_equal(5)
+
+    it "iter_code_lines treats single-line docstring as code":
+        """Even count of triple-quotes on one line means no toggle, so the line is yielded."""
+        val src = "fn f():\n    \"\"\"summary\"\"\"\n    x"
+        val lines = iter_code_lines(src)
+        expect(lines.len()).to_equal(3)
+        expect(lines[1].trimmed).to_equal("\"\"\"summary\"\"\"")
+
+    it "iter_code_lines preserves 1-based line numbers":
+        """Consumers (linters) rely on line_num matching the source's 1-based numbering."""
+        val src = "a\nb\nc"
+        val lines = iter_code_lines(src)
+        expect(lines[0].line_num).to_equal(1)
+        expect(lines[1].line_num).to_equal(2)
+        expect(lines[2].line_num).to_equal(3)
+
+    it "iter_code_lines handles back-to-back docstrings":
+        """Two separate docstrings: each opener is skipped, each closer is yielded as code."""
+        val src = "x\n\"\"\"\nA\n\"\"\"\ny\n\"\"\"\nB\n\"\"\"\nz"
+        val lines = iter_code_lines(src)
+        # Yielded line_nums: 1 (x), 4 (close-1), 5 (y), 8 (close-2), 9 (z).
+        expect(lines.len()).to_equal(5)
+        expect(lines[0].line_num).to_equal(1)
+        expect(lines[1].line_num).to_equal(4)
+        expect(lines[2].line_num).to_equal(5)
+        expect(lines[3].line_num).to_equal(8)
+        expect(lines[4].line_num).to_equal(9)

@@ -1,0 +1,550 @@
+/*
+ * Native SimpleOS FAT32 image builder.
+ *
+ * This keeps scripts/os/make_os_disk.shs independent of Python while
+ * preserving the real FAT32 image and optional x86_64 ESP sidecar behavior.
+ */
+
+#define _POSIX_C_SOURCE 200809L
+
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+enum {
+    SECTOR_SIZE = 512,
+    TOTAL_SECTORS = 8192,
+    RESERVED_SECTORS = 32,
+    FAT_COUNT = 1,
+    FAT_SIZE_SECTORS = 64,
+    SECTORS_PER_CLUSTER = 8,
+    ROOT_CLUSTER = 2,
+};
+
+struct bytes {
+    unsigned char *data;
+    size_t len;
+};
+
+static unsigned char *g_image;
+static uint32_t *g_fat;
+static int g_next_cluster = 3;
+
+static const int DATA_START_SECTOR = RESERVED_SECTORS + FAT_COUNT * FAT_SIZE_SECTORS;
+static const int CLUSTER_SIZE = SECTOR_SIZE * SECTORS_PER_CLUSTER;
+
+static void die(const char *msg)
+{
+    fprintf(stderr, "%s\n", msg);
+    exit(1);
+}
+
+static void *xcalloc(size_t count, size_t size)
+{
+    void *ptr = calloc(count, size);
+    if (!ptr)
+        die("allocation failed");
+    return ptr;
+}
+
+static void le16(size_t offset, uint16_t value)
+{
+    g_image[offset] = (unsigned char)(value & 0xff);
+    g_image[offset + 1] = (unsigned char)((value >> 8) & 0xff);
+}
+
+static void le32(size_t offset, uint32_t value)
+{
+    g_image[offset] = (unsigned char)(value & 0xff);
+    g_image[offset + 1] = (unsigned char)((value >> 8) & 0xff);
+    g_image[offset + 2] = (unsigned char)((value >> 16) & 0xff);
+    g_image[offset + 3] = (unsigned char)((value >> 24) & 0xff);
+}
+
+static void write_u16(unsigned char *data, size_t offset, uint16_t value)
+{
+    data[offset] = (unsigned char)(value & 0xff);
+    data[offset + 1] = (unsigned char)((value >> 8) & 0xff);
+}
+
+static void write_u32(unsigned char *data, size_t offset, uint32_t value)
+{
+    data[offset] = (unsigned char)(value & 0xff);
+    data[offset + 1] = (unsigned char)((value >> 8) & 0xff);
+    data[offset + 2] = (unsigned char)((value >> 16) & 0xff);
+    data[offset + 3] = (unsigned char)((value >> 24) & 0xff);
+}
+
+static void write_u64(unsigned char *data, size_t offset, uint64_t value)
+{
+    for (int i = 0; i < 8; ++i)
+        data[offset + (size_t)i] = (unsigned char)((value >> (i * 8)) & 0xff);
+}
+
+static size_t cluster_offset(int cluster)
+{
+    return (size_t)(DATA_START_SECTOR + (cluster - 2) * SECTORS_PER_CLUSTER) * SECTOR_SIZE;
+}
+
+static int alloc_clusters(const unsigned char *data, size_t len)
+{
+    int needed = (int)((len + (size_t)CLUSTER_SIZE - 1) / (size_t)CLUSTER_SIZE);
+    if (needed < 1)
+        needed = 1;
+    int first = g_next_cluster;
+    for (int i = 0; i < needed; ++i) {
+        int cluster = first + i;
+        g_fat[cluster] = (i + 1 < needed) ? (uint32_t)(cluster + 1) : 0x0fffffffU;
+        size_t start = (size_t)i * (size_t)CLUSTER_SIZE;
+        size_t chunk = len > start ? len - start : 0;
+        if (chunk > (size_t)CLUSTER_SIZE)
+            chunk = (size_t)CLUSTER_SIZE;
+        if (chunk > 0)
+            memcpy(g_image + cluster_offset(cluster), data + start, chunk);
+    }
+    g_next_cluster += needed;
+    return first;
+}
+
+static struct bytes text_bytes(const char *text)
+{
+    struct bytes out;
+    out.len = strlen(text);
+    out.data = (unsigned char *)xcalloc(out.len + 1, 1);
+    memcpy(out.data, text, out.len);
+    return out;
+}
+
+static struct bytes textf(const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    int needed = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+    if (needed < 0)
+        die("format failed");
+    struct bytes out;
+    out.len = (size_t)needed;
+    out.data = (unsigned char *)xcalloc(out.len + 1, 1);
+    va_start(args, fmt);
+    vsnprintf((char *)out.data, out.len + 1, fmt, args);
+    va_end(args);
+    return out;
+}
+
+static struct bytes read_file(const char *path)
+{
+    struct bytes out = {0};
+    if (!path || path[0] == '\0')
+        return out;
+    FILE *file = fopen(path, "rb");
+    if (!file)
+        return out;
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    if (size < 0) {
+        fclose(file);
+        return out;
+    }
+    fseek(file, 0, SEEK_SET);
+    out.len = (size_t)size;
+    out.data = (unsigned char *)xcalloc(out.len + 1, 1);
+    if (out.len > 0 && fread(out.data, 1, out.len, file) != out.len)
+        die("file read failed");
+    fclose(file);
+    return out;
+}
+
+static struct bytes read_cfat4k_baseline(void)
+{
+    const char *override = getenv("SIMPLEOS_CFAT4K_BASELINE");
+    if (override && override[0] != '\0')
+        return read_file(override);
+    return read_file("build/os/perf/CFAT4K.TXT");
+}
+
+static void put_dir_entry(unsigned char *entries, int *count, const char *name, int cluster, size_t size, unsigned char attr)
+{
+    if (strlen(name) != 11)
+        die("bad FAT short name");
+    unsigned char *entry = entries + ((size_t)(*count) * 32U);
+    memset(entry, 0, 32);
+    memcpy(entry, name, 11);
+    entry[11] = attr;
+    write_u16(entry, 20, (uint16_t)(((uint32_t)cluster >> 16) & 0xffffU));
+    write_u16(entry, 26, (uint16_t)((uint32_t)cluster & 0xffffU));
+    write_u32(entry, 28, (uint32_t)size);
+    *count += 1;
+}
+
+static struct bytes elf_image(const char *marker, int machine, bool is64)
+{
+    size_t marker_len = strlen(marker) + 1;
+    size_t header = is64 ? 64 : 52;
+    size_t phdr = is64 ? 56 : 32;
+    struct bytes out;
+    out.len = header + phdr + marker_len;
+    out.data = (unsigned char *)xcalloc(out.len, 1);
+    out.data[0] = 0x7f;
+    out.data[1] = 'E';
+    out.data[2] = 'L';
+    out.data[3] = 'F';
+    out.data[4] = is64 ? 2 : 1;
+    out.data[5] = 1;
+    out.data[6] = 1;
+    write_u16(out.data, 16, 2);
+    write_u16(out.data, 18, (uint16_t)machine);
+    write_u32(out.data, 20, 1);
+    if (is64) {
+        write_u64(out.data, 24, 0x1000);
+        write_u64(out.data, 32, 64);
+        write_u16(out.data, 52, 64);
+        write_u16(out.data, 54, 56);
+        write_u16(out.data, 56, 1);
+        write_u32(out.data, 64, 1);
+        write_u32(out.data, 68, 5);
+        write_u64(out.data, 80, 0x1000);
+        write_u64(out.data, 88, 0x1000);
+        write_u64(out.data, 96, out.len);
+        write_u64(out.data, 104, out.len);
+        write_u64(out.data, 112, 0x1000);
+    } else {
+        write_u32(out.data, 24, 0x1000);
+        write_u32(out.data, 28, 52);
+        write_u16(out.data, 40, 52);
+        write_u16(out.data, 42, 32);
+        write_u16(out.data, 44, 1);
+        write_u32(out.data, 52, 1);
+        write_u32(out.data, 60, 0x1000);
+        write_u32(out.data, 64, 0x1000);
+        write_u32(out.data, 68, (uint32_t)out.len);
+        write_u32(out.data, 72, (uint32_t)out.len);
+        write_u32(out.data, 76, 5);
+        write_u32(out.data, 80, 0x1000);
+    }
+    memcpy(out.data + header + phdr, marker, marker_len);
+    return out;
+}
+
+static struct bytes smf(struct bytes payload)
+{
+    struct bytes out;
+    out.len = payload.len + 128;
+    out.data = (unsigned char *)xcalloc(out.len, 1);
+    memcpy(out.data, payload.data, payload.len);
+    memcpy(out.data + payload.len, "SMF", 3);
+    write_u32(out.data, payload.len + 52, (uint32_t)payload.len);
+    return out;
+}
+
+static const char *lane_for_platform(const char *platform)
+{
+    if (strcmp(platform, "riscv64") == 0)
+        return "riscv64-hosted";
+    if (strcmp(platform, "riscv32") == 0)
+        return "riscv32-virtio-fat32-smf";
+    if (strcmp(platform, "arm64") == 0)
+        return "arm64-virtio-fat32-smf";
+    if (strcmp(platform, "arm32") == 0)
+        return "arm32-virtio-fat32-smf";
+    if (strcmp(platform, "x86_32") == 0)
+        return "x86_32-initrd-fat32-smf";
+    return "x86_64-uefi-hardware";
+}
+
+static int machine_for_platform(const char *platform, bool *is64)
+{
+    *is64 = true;
+    if (strcmp(platform, "riscv32") == 0) {
+        *is64 = false;
+        return 243;
+    }
+    if (strcmp(platform, "arm32") == 0) {
+        *is64 = false;
+        return 40;
+    }
+    if (strcmp(platform, "arm64") == 0)
+        return 183;
+    if (strcmp(platform, "x86_64") == 0)
+        return 62;
+    if (strcmp(platform, "x86_32") == 0) {
+        *is64 = false;
+        return 3;
+    }
+    return 243;
+}
+
+static struct bytes platform_elf(const char *platform, const char *marker)
+{
+    bool is64 = true;
+    int machine = machine_for_platform(platform, &is64);
+    return elf_image(marker, machine, is64);
+}
+
+static struct bytes app_elf(const char *platform, const char *suffix)
+{
+    char marker[256];
+    snprintf(marker, sizeof(marker), "SIMPLEOS_%s_%s_ELF", platform, suffix);
+    for (char *p = marker; *p; ++p)
+        if (*p >= 'a' && *p <= 'z')
+            *p = (char)(*p - 'a' + 'A');
+    return smf(platform_elf(platform, marker));
+}
+
+static void mkdir_p(const char *path)
+{
+    char tmp[2048];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    for (char *p = tmp + 1; *p; ++p) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0777);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0777);
+}
+
+static void write_file_path(const char *path, const unsigned char *data, size_t len)
+{
+    FILE *file = fopen(path, "wb");
+    if (!file) {
+        perror(path);
+        exit(1);
+    }
+    if (len > 0 && fwrite(data, 1, len, file) != len)
+        die("file write failed");
+    fclose(file);
+}
+
+static void maybe_write_esp(const char *img_path, const struct bytes *bootloader, const struct bytes *kernel, const struct bytes *limine)
+{
+    if (bootloader->len == 0)
+        return;
+    char base[1024];
+    snprintf(base, sizeof(base), "%s", img_path);
+    char *slash = strrchr(base, '/');
+    if (slash)
+        *slash = '\0';
+    else
+        snprintf(base, sizeof(base), ".");
+    char boot_dir[1200];
+    snprintf(boot_dir, sizeof(boot_dir), "%s/esp/EFI/BOOT", base);
+    mkdir_p(boot_dir);
+    char path[1400];
+    snprintf(path, sizeof(path), "%s/BOOTX64.EFI", boot_dir);
+    write_file_path(path, bootloader->data, bootloader->len);
+    snprintf(path, sizeof(path), "%s/esp/kernel.elf", base);
+    write_file_path(path, kernel->data, kernel->len);
+    snprintf(path, sizeof(path), "%s/esp/limine.conf", base);
+    write_file_path(path, limine->data, limine->len);
+    snprintf(path, sizeof(path), "%s/limine.conf", boot_dir);
+    write_file_path(path, limine->data, limine->len);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc != 5)
+        die("usage: make_os_disk IMAGE PLATFORM SIZE_BITS KERNEL");
+    const char *img_path = argv[1];
+    const char *platform = argv[2];
+    (void)argv[3];
+    const char *kernel_path = argv[4];
+    const char *lane = lane_for_platform(platform);
+
+    size_t image_size = (size_t)TOTAL_SECTORS * SECTOR_SIZE;
+    g_image = (unsigned char *)xcalloc(image_size, 1);
+    g_fat = (uint32_t *)xcalloc((size_t)FAT_SIZE_SECTORS * SECTOR_SIZE / 4, sizeof(uint32_t));
+    g_fat[0] = 0x0ffffff8U;
+    g_fat[1] = 0x0fffffffU;
+    g_fat[ROOT_CLUSTER] = 0x0fffffffU;
+
+    int efi_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int boot_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int sys_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int apps_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int perf_cluster = alloc_clusters((const unsigned char *)"", 0);
+
+    const char *hello_marker = strcmp(platform, "riscv64") == 0 ? "SIMPLEOS_RISCV64_HELLO_ELF" :
+        strcmp(platform, "riscv32") == 0 ? "SIMPLEOS_RISCV32_HELLO_ELF" :
+        strcmp(platform, "arm64") == 0 ? "SIMPLEOS_ARM64_HELLO_ELF" :
+        strcmp(platform, "arm32") == 0 ? "SIMPLEOS_ARM32_HELLO_ELF" :
+        strcmp(platform, "x86_32") == 0 ? "SIMPLEOS_X86_32_HELLO_ELF" : "SIMPLEOS_X86_64_HELLO_ELF";
+    const char *gui_marker = strcmp(platform, "riscv64") == 0 ? "SIMPLEOS_RISCV64_GUI_ELF" :
+        strcmp(platform, "riscv32") == 0 ? "SIMPLEOS_RISCV32_GUI_ELF" :
+        strcmp(platform, "arm64") == 0 ? "SIMPLEOS_ARM64_GUI_ELF" :
+        strcmp(platform, "arm32") == 0 ? "SIMPLEOS_ARM32_GUI_ELF" :
+        strcmp(platform, "x86_32") == 0 ? "SIMPLEOS_X86_32_GUI_ELF" : "SIMPLEOS_X86_64_GUI_ELF";
+
+    struct bytes kernel_file = read_file(kernel_path);
+    struct bytes bootloader_file = read_file(getenv("SIMPLEOS_UEFI_BOOTLOADER"));
+    struct bytes cfat4k = read_cfat4k_baseline();
+    struct bytes kernel = kernel_file.len ? kernel_file : text_bytes("SIMPLEOS_UEFI_KERNEL_MISSING\n");
+    struct bytes bootloader = bootloader_file.len ? bootloader_file : text_bytes("SIMPLEOS_UEFI_BOOTLOADER_MISSING\n");
+    struct bytes limine = text_bytes("timeout: 0\nserial: yes\n/ SimpleOS\nprotocol: multiboot1\npath: boot():/kernel.elf\ntextmode: no\nresolution: 1024x768x32\ncmdline: console=serial root=/dev/nvme0n1\n");
+    struct bytes hello_txt = text_bytes("Hello from SimpleOS\n");
+    struct bytes numbers_txt = text_bytes("5\n");
+    struct bytes hello_spl = text_bytes("fn main:\n    print \"Hello from SimpleOS\"\n");
+    struct bytes nvfs = textf("nvfs-image-version=1\nplatform=%s\nlane=%s\n", platform, lane);
+    struct bytes toolset = textf("lane = \"%s\"\nmode=native-filesystem-app\nstatus=standalone-required\n", lane);
+    struct bytes markers = textf(
+        "\nHELLOSMF\nBROWSMF\nSBROWSMF\nSMUXSMF\nSCOMPSMF\nSINTSMF\nSLOADSMF\nLLVMSMF\nCLANGSMF\nRUSTSMF\nSTEAM204SMF\n"
+        "[steam-2048-demo] source=2048\n[game-port] profile=steamos-rebuild-v1 source=2048\nrebuild_target=simpleos-native\n"
+        "steam_facade=simple-steam-sffi-v1\nport_required_capabilities=8\nruntime=SteamLinuxRuntime/soldier\nnetwork=true\nachievement=true\ndrm=true\n"
+        "steam_backend_ready=false\nsteam_backend_blocker=missing_authenticated_steam_client\nsteam_backend_required_symbols=20\nsteam_backend_required_os_capabilities=11\n"
+        "SMF\n/sys/apps/hello_world\n/sys/apps/simple_browser\n/sys/apps/smux\nSIMPLEOS_DISK_HELLO_ELF\nbrowser_demo_remote_main\nhello_world_remote_main\n"
+        "file_manager_remote_main\nshell_remote_main\neditor_remote_main\nsmux_remote_main\ninfo|src/app/info/main.spl|smoke|staged\nlist|src/app/list/main.spl|smoke|staged\n"
+        "stats|src/app/stats/main.spl|smoke|staged\nentry_app=/sys/apps/simple_compiler\nentry_app=/sys/apps/simple_loader\nentry_app=/sys/apps/llvm\nentry_app=/sys/apps/clang\nentry_app=/sys/apps/rust\n"
+        "lane=%s\nlane = \"%s\"\nelf-machine=%s\nmode=native-filesystem-app\nstatus=standalone-required\npipeline=compile-pipeline-step\npipeline=build-pipeline-step\n"
+        "proof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step\nproof_pipeline=/usr/share/simpleos/toolchain/clang/pipeline.step\nproof_pipeline=/usr/share/simpleos/toolchain/rust/pipeline.step\n"
+        "/usr/share/simpleos/toolchain/llvm/hello.ll\n/sys/apps/simple_compiler status=standalone-required\n/sys/apps/simple_loader status=standalone-required\n/sys/apps/llvm status=standalone-required\n"
+        "/sys/apps/clang status=standalone-required\n/sys/apps/rust status=standalone-required\nSimpleOS LLVM standalone app v1\nclang version 20.0.0\nSimpleOS Rust standalone app v1\n"
+        "/usr/share/simpleos/toolchain/llvm/pipeline.step\n/usr/share/simpleos/toolchain/clang/pipeline.step\n/usr/share/simpleos/toolchain/rust/pipeline.step\n",
+        lane, lane, platform);
+
+    struct bytes llvm_manifest = textf("[toolchain]\napp=llvm\ntitle=LLVM\ntool=/sys/apps/llvm\nlane=%s\nmode=native-filesystem-app\nstatus=standalone-required\ncapability_primary=local-ir-inspection\nproof_primary=/usr/share/simpleos/toolchain/llvm/hello.ll\ncapability_secondary=object-assembly-inspection\nproof_secondary=/usr/share/simpleos/toolchain/llvm/hello.s\npipeline=compile-pipeline-step\nproof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step\n", lane);
+    struct bytes clang_manifest = textf("[toolchain]\napp=clang\ntitle=Clang\ntool=/sys/apps/clang\nlane=%s\nmode=native-filesystem-app\nstatus=standalone-required\ncapability_primary=local-c-source-inspection\nproof_primary=/usr/share/simpleos/toolchain/clang/hello.c\ncapability_secondary=driver-flag-inspection\nproof_secondary=/usr/share/simpleos/toolchain/clang/flags.rsp\npipeline=compile-pipeline-step\nproof_pipeline=/usr/share/simpleos/toolchain/clang/pipeline.step\n", lane);
+    struct bytes rust_manifest = textf("[toolchain]\napp=rust\ntitle=Rust\ntool=/sys/apps/rust\nlane=%s\nmode=native-filesystem-app\nstatus=standalone-required\ncapability_primary=local-source-inspection\nproof_primary=/usr/share/simpleos/toolchain/rust/hello.rs\ncapability_secondary=package-layout-inspection\nproof_secondary=/usr/share/simpleos/toolchain/rust/Cargo.toml\npipeline=build-pipeline-step\nproof_pipeline=/usr/share/simpleos/toolchain/rust/pipeline.step\n", lane);
+    struct bytes steam_manifest = textf("[game]\napp=steam_2048\ntitle=Steam 2048 Smoke\ntool=/sys/apps/steam_2048\nlane=%s\nmode=native-filesystem-app\nstatus=standalone-required\nsource=2048\nlicense=MIT\nruntime=SteamLinuxRuntime/soldier\nproof_marker=/usr/share/simpleos/games/steam_2048/marker.txt\n", lane);
+    struct bytes steam_port = text_bytes("port_profile=steamos-rebuild-v1\napp_id=2048\napp_name=SimpleOS Steam 2048 Smoke\nsource=2048\nupstream=https://github.com/gabrielecirulli/2048\nlicense=MIT\nrebuild_target=simpleos-native\nruntime_profile=SteamLinuxRuntime/soldier-source-rebuild\npackage_path=/sys/apps/steam_2048\ngraphics_api=sdl2_subset\ninput_api=simple_input_events\naudio_api=simple_audio_optional\nnetwork_api=simple_bsd_sockets_optional\nstorage_api=simple_posix_save_data\nsteam_facade=simple-steam-sffi-v1\n");
+    struct bytes steam_marker = text_bytes("[steam-2048-demo] source=2048 license=MIT board=2,2,0,0->4,0,0,0 score=4 session=true runtime=SteamLinuxRuntime/soldier overlay=true input=true friend=true network=true achievement=true drm=true\n[game-port] profile=steamos-rebuild-v1 source=2048 license=MIT rebuild_target=simpleos-native package=/sys/apps/steam_2048 graphics=sdl2_subset input=simple_input_events storage=simple_posix_save_data steam_facade=simple-steam-sffi-v1 ready=true caps=8/8\n");
+    struct bytes llvm_ll = text_bytes("source_filename = \"hello.simple\"\ndefine i32 @main() { ret i32 0 }\n");
+    struct bytes llvm_s = text_bytes(".globl _start\n_start:\n  ret\n");
+    struct bytes llvm_pipe = text_bytes("pipeline=compile-pipeline-step\ninput=/work/hello.simple\noutput=/work/hello.ll\nnext=/sys/apps/simple_loader\n");
+    struct bytes clang_c = text_bytes("#include <stdint.h>\nint main(void) { return 0; }\nconst char *msg = \"hello from simpleos clang\";\n");
+    struct bytes clang_flags = text_bytes("-target x86_64-unknown-simpleos\n-ffreestanding\n-nostdlib\n");
+    struct bytes clang_pipe = text_bytes("pipeline=compile-pipeline-step\ninput=/work/hello.c\noutput=/work/hello.o\nnext=/sys/apps/simple_loader\n");
+    struct bytes rust_rs = text_bytes("#![no_std]\n#![no_main]\nfn main() {}\n");
+    struct bytes rust_cargo = text_bytes("[package]\nname = \"simpleos-hello\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+    struct bytes rust_pipe = text_bytes("pipeline=build-pipeline-step\ninput=/work/Cargo.toml\noutput=/work/target/hello\nnext=/sys/apps/simple_loader\n");
+    struct bytes fat4k = text_bytes("SIMPLEOS_FAT32_DIRECT_IO_4K_FIXTURE\n");
+
+    struct bytes hello = smf(platform_elf(platform, hello_marker));
+    struct bytes browser = smf(platform_elf(platform, gui_marker));
+    struct bytes simple_compiler = app_elf(platform, "SIMPLE_COMPILER");
+    struct bytes simple_interpreter = app_elf(platform, "SIMPLE_INTERPRETER");
+    struct bytes simple_loader = app_elf(platform, "SIMPLE_LOADER");
+    struct bytes llvm_app = app_elf(platform, "LLVM");
+    struct bytes clang_app = app_elf(platform, "CLANG");
+    struct bytes rust_app = app_elf(platform, "RUST");
+    struct bytes steam_app = smf(platform_elf(platform, "[steam-2048-demo] source=2048 runtime=SteamLinuxRuntime/soldier network=true achievement=true drm=true"));
+
+    int kernel_cluster = alloc_clusters(kernel.data, kernel.len);
+    int bootloader_cluster = alloc_clusters(bootloader.data, bootloader.len);
+    int limine_cluster = alloc_clusters(limine.data, limine.len);
+    int hello_txt_cluster = alloc_clusters(hello_txt.data, hello_txt.len);
+    int numbers_cluster = alloc_clusters(numbers_txt.data, numbers_txt.len);
+    int hello_spl_cluster = alloc_clusters(hello_spl.data, hello_spl.len);
+    int nvfs_cluster = alloc_clusters(nvfs.data, nvfs.len);
+    int toolset_cluster = alloc_clusters(toolset.data, toolset.len);
+    int markers_cluster = alloc_clusters(markers.data, markers.len);
+    int llvm_manifest_cluster = alloc_clusters(llvm_manifest.data, llvm_manifest.len);
+    int clang_manifest_cluster = alloc_clusters(clang_manifest.data, clang_manifest.len);
+    int rust_manifest_cluster = alloc_clusters(rust_manifest.data, rust_manifest.len);
+    int steam_manifest_cluster = alloc_clusters(steam_manifest.data, steam_manifest.len);
+    int steam_port_cluster = alloc_clusters(steam_port.data, steam_port.len);
+    int steam_marker_cluster = alloc_clusters(steam_marker.data, steam_marker.len);
+    int llvm_ll_cluster = alloc_clusters(llvm_ll.data, llvm_ll.len);
+    int llvm_s_cluster = alloc_clusters(llvm_s.data, llvm_s.len);
+    int llvm_pipe_cluster = alloc_clusters(llvm_pipe.data, llvm_pipe.len);
+    int clang_c_cluster = alloc_clusters(clang_c.data, clang_c.len);
+    int clang_flags_cluster = alloc_clusters(clang_flags.data, clang_flags.len);
+    int clang_pipe_cluster = alloc_clusters(clang_pipe.data, clang_pipe.len);
+    int rust_rs_cluster = alloc_clusters(rust_rs.data, rust_rs.len);
+    int rust_cargo_cluster = alloc_clusters(rust_cargo.data, rust_cargo.len);
+    int rust_pipe_cluster = alloc_clusters(rust_pipe.data, rust_pipe.len);
+    int hello_cluster = alloc_clusters(hello.data, hello.len);
+    int browser_cluster = alloc_clusters(browser.data, browser.len);
+    int compiler_cluster = alloc_clusters(simple_compiler.data, simple_compiler.len);
+    int interpreter_cluster = alloc_clusters(simple_interpreter.data, simple_interpreter.len);
+    int loader_cluster = alloc_clusters(simple_loader.data, simple_loader.len);
+    int llvm_cluster = alloc_clusters(llvm_app.data, llvm_app.len);
+    int clang_cluster = alloc_clusters(clang_app.data, clang_app.len);
+    int rust_cluster = alloc_clusters(rust_app.data, rust_app.len);
+    int steam_cluster = alloc_clusters(steam_app.data, steam_app.len);
+    int cfat4k_cluster = cfat4k.len ? alloc_clusters(cfat4k.data, cfat4k.len) : 0;
+    int fat4k_cluster = alloc_clusters(fat4k.data, fat4k.len);
+
+    unsigned char root[4096] = {0}, efi[4096] = {0}, boot[4096] = {0}, sys[4096] = {0}, apps[4096] = {0}, perf[4096] = {0};
+    int root_n = 0, efi_n = 0, boot_n = 0, sys_n = 0, apps_n = 0, perf_n = 0;
+    put_dir_entry(root, &root_n, "EFI        ", efi_cluster, 0, 0x10);
+    put_dir_entry(root, &root_n, "SYS        ", sys_cluster, 0, 0x10);
+    put_dir_entry(root, &root_n, "KERNEL  ELF", kernel_cluster, kernel.len, 0x20);
+    put_dir_entry(root, &root_n, "LIMINE  CNF", limine_cluster, limine.len, 0x20);
+    put_dir_entry(root, &root_n, "HELLO   TXT", hello_txt_cluster, hello_txt.len, 0x20);
+    put_dir_entry(root, &root_n, "NUMBERS TXT", numbers_cluster, numbers_txt.len, 0x20);
+    put_dir_entry(root, &root_n, "HELLO   SPL", hello_spl_cluster, hello_spl.len, 0x20);
+    put_dir_entry(efi, &efi_n, "BOOT       ", boot_cluster, 0, 0x10);
+    put_dir_entry(boot, &boot_n, "BOOTX64 EFI", bootloader_cluster, bootloader.len, 0x20);
+    put_dir_entry(sys, &sys_n, "APPS       ", apps_cluster, 0, 0x10);
+    put_dir_entry(sys, &sys_n, "PERF       ", perf_cluster, 0, 0x10);
+    put_dir_entry(sys, &sys_n, "NVFSVER TXT", nvfs_cluster, nvfs.len, 0x20);
+    put_dir_entry(sys, &sys_n, "TOOLSET SDN", toolset_cluster, toolset.len, 0x20);
+    put_dir_entry(sys, &sys_n, "MARKERS TXT", markers_cluster, markers.len, 0x20);
+    put_dir_entry(sys, &sys_n, "LLVMMAN TXT", llvm_manifest_cluster, llvm_manifest.len, 0x20);
+    put_dir_entry(sys, &sys_n, "CLANGMANTXT", clang_manifest_cluster, clang_manifest.len, 0x20);
+    put_dir_entry(sys, &sys_n, "RUSTMAN TXT", rust_manifest_cluster, rust_manifest.len, 0x20);
+    put_dir_entry(sys, &sys_n, "ST204PRTTXT", steam_port_cluster, steam_port.len, 0x20);
+    put_dir_entry(sys, &sys_n, "LLVHELLOLL ", llvm_ll_cluster, llvm_ll.len, 0x20);
+    put_dir_entry(sys, &sys_n, "LLVMPIPESTP", llvm_pipe_cluster, llvm_pipe.len, 0x20);
+    put_dir_entry(sys, &sys_n, "LLVMHELLS  ", llvm_s_cluster, llvm_s.len, 0x20);
+    put_dir_entry(sys, &sys_n, "CLANGHELC  ", clang_c_cluster, clang_c.len, 0x20);
+    put_dir_entry(sys, &sys_n, "CLANGFLGRSP", clang_flags_cluster, clang_flags.len, 0x20);
+    put_dir_entry(sys, &sys_n, "CLANGPLNSTP", clang_pipe_cluster, clang_pipe.len, 0x20);
+    put_dir_entry(sys, &sys_n, "RUSTHELORS ", rust_rs_cluster, rust_rs.len, 0x20);
+    put_dir_entry(sys, &sys_n, "RUSTCARGTOM", rust_cargo_cluster, rust_cargo.len, 0x20);
+    put_dir_entry(sys, &sys_n, "RUSTPIPESTP", rust_pipe_cluster, rust_pipe.len, 0x20);
+    put_dir_entry(apps, &apps_n, "HELLOSMFSMF", hello_cluster, hello.len, 0x20);
+    put_dir_entry(apps, &apps_n, "BROWSMF SMF", browser_cluster, browser.len, 0x20);
+    put_dir_entry(apps, &apps_n, "SCOMPSMFSMF", compiler_cluster, simple_compiler.len, 0x20);
+    put_dir_entry(apps, &apps_n, "SINTSMF SMF", interpreter_cluster, simple_interpreter.len, 0x20);
+    put_dir_entry(apps, &apps_n, "SLOADSMFSMF", loader_cluster, simple_loader.len, 0x20);
+    put_dir_entry(apps, &apps_n, "LLVMSMF SMF", llvm_cluster, llvm_app.len, 0x20);
+    put_dir_entry(apps, &apps_n, "CLANGSMFSMF", clang_cluster, clang_app.len, 0x20);
+    put_dir_entry(apps, &apps_n, "RUSTSMF SMF", rust_cluster, rust_app.len, 0x20);
+    put_dir_entry(apps, &apps_n, "STEAM204SMF", steam_cluster, steam_app.len, 0x20);
+    if (cfat4k.len)
+        put_dir_entry(perf, &perf_n, "CFAT4K  TXT", cfat4k_cluster, cfat4k.len, 0x20);
+    put_dir_entry(perf, &perf_n, "FAT4K   BIN", fat4k_cluster, fat4k.len, 0x20);
+
+    memcpy(g_image + cluster_offset(ROOT_CLUSTER), root, (size_t)root_n * 32);
+    memcpy(g_image + cluster_offset(efi_cluster), efi, (size_t)efi_n * 32);
+    memcpy(g_image + cluster_offset(boot_cluster), boot, (size_t)boot_n * 32);
+    memcpy(g_image + cluster_offset(sys_cluster), sys, (size_t)sys_n * 32);
+    memcpy(g_image + cluster_offset(apps_cluster), apps, (size_t)apps_n * 32);
+    memcpy(g_image + cluster_offset(perf_cluster), perf, (size_t)perf_n * 32);
+
+    g_image[0] = 0xeb;
+    g_image[1] = 0x58;
+    g_image[2] = 0x90;
+    memcpy(g_image + 3, "SIMPLEOS", 8);
+    le16(11, SECTOR_SIZE);
+    g_image[13] = SECTORS_PER_CLUSTER;
+    le16(14, RESERVED_SECTORS);
+    g_image[16] = FAT_COUNT;
+    g_image[21] = 0xf8;
+    le16(24, 63);
+    le16(26, 255);
+    le32(32, TOTAL_SECTORS);
+    le32(36, FAT_SIZE_SECTORS);
+    le32(44, ROOT_CLUSTER);
+    le16(48, 1);
+    le16(50, 6);
+    g_image[510] = 0x55;
+    g_image[511] = 0xaa;
+
+    unsigned char *fat_bytes = g_image + ((size_t)RESERVED_SECTORS * SECTOR_SIZE);
+    for (size_t i = 0; i < (size_t)FAT_SIZE_SECTORS * SECTOR_SIZE / 4; ++i)
+        write_u32(fat_bytes, i * 4, g_fat[i]);
+
+    write_file_path(img_path, g_image, image_size);
+    if (strcmp(platform, "x86_64") == 0 && bootloader_file.len)
+        maybe_write_esp(img_path, &bootloader, &kernel, &limine);
+    return 0;
+}

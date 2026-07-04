@@ -1,0 +1,52 @@
+# Target Memory Allocator
+#
+# Bump allocator that manages code memory on the remote target.
+# Tracks allocated regions within the target's MemoryMap boundaries.
+#
+# Feature ID: #RJE-002
+
+use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap}
+
+class TargetMemoryAllocator:
+    """Bump allocator for target code memory."""
+    map: MemoryMap
+    offset: i64
+    allocations: [CodeAllocation]
+
+    static fn new(map: MemoryMap) -> TargetMemoryAllocator:
+        TargetMemoryAllocator(map: map, offset: 0, allocations: [])
+
+    me allocate(size: i64, align: i64) -> Result<i64, text>:
+        """Allocate `size` bytes with `align` alignment. Returns start address."""
+        val current = self.map.code_start + self.offset
+        val aligned = align_up(current, align)
+        val end = aligned + size
+        if end > self.map.code_end:
+            return Err("memory exhausted: need {size} bytes, {self.remaining()} available")
+        self.offset = end - self.map.code_start
+        self.allocations.push(CodeAllocation(addr: aligned, size: size))
+        Ok(aligned)
+
+    fn remaining() -> i64:
+        self.map.code_capacity() - self.offset
+
+    fn total_allocated() -> i64:
+        self.offset
+
+    me reset():
+        """Free all allocations and reset to start."""
+        self.offset = 0
+        self.allocations = []
+
+    fn allocation_count() -> i64:
+        self.allocations.len()
+
+class CodeAllocation:
+    addr: i64
+    size: i64
+
+fn align_up(value: i64, align: i64) -> i64:
+    if align <= 1:
+        return value
+    val mask = align - 1
+    (value + mask) & (~mask)

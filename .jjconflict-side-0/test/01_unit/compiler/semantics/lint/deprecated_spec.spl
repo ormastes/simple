@@ -1,0 +1,125 @@
+# Deprecated Usage Lint Specification
+#
+# Tests for DEPR001-DEPR003 detection of deprecated patterns:
+# - DEPR001: Type__method() call syntax
+# - DEPR002: .new() constructor calls
+# - DEPR003: Bare 'pass' usage
+#
+# Uses text-based heuristic (mirrors _emit_source_lint_diagnostics in query_rich.spl).
+
+# ============================================================================
+# Text-based lint helpers
+# ============================================================================
+
+fn check_deprecated_text(source: text) -> [text]:
+    """Text-based heuristic for deprecated pattern detection.
+    Returns list of diagnostic codes found."""
+    var codes: [text] = []
+    val lines = source.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        # DEPR001: Type__method() calls
+        if _has_deprecated_dunder(trimmed):
+            codes.push("DEPR001")
+        # DEPR002: .new() constructor calls
+        if trimmed.contains(".new("):
+            codes.push("DEPR002")
+        # DEPR003: Bare 'pass' and related no-op variants
+        if (trimmed == "pass" or trimmed.starts_with("pass ") or trimmed.starts_with("pass#")):
+            if not trimmed.starts_with("pass_"):
+                codes.push("DEPR003")
+        li = li + 1
+    codes
+
+fn _has_deprecated_dunder(trimmed: text) -> bool:
+    """Check if a line contains a Type__method() pattern.
+    Returns true for patterns like Vec__new(), String__from().
+    Returns false for dunder names like __init__."""
+    var ci = 0
+    while ci < trimmed.len() - 3:
+        val ch = trimmed.substring(ci, ci + 1)
+        val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+        if is_alpha:
+            var end_ci = ci + 1
+            while end_ci < trimmed.len():
+                val wc = trimmed.substring(end_ci, end_ci + 1)
+                val is_word = (wc >= "a" and wc <= "z") or (wc >= "A" and wc <= "Z") or (wc >= "0" and wc <= "9") or wc == "_"
+                if not is_word:
+                    break
+                end_ci = end_ci + 1
+            val word = trimmed.substring(ci, end_ci)
+            # Check for __ in the middle (not at start/end)
+            if not word.starts_with("__") and not word.ends_with("__"):
+                if _contains_double_underscore(word):
+                    # Check if followed by (
+                    if end_ci < trimmed.len() and trimmed.substring(end_ci, end_ci + 1) == "(":
+                        return true
+            ci = end_ci
+        else:
+            ci = ci + 1
+    false
+
+fn _contains_double_underscore(word: text) -> bool:
+    """Check if a word contains __ (not at start or end)."""
+    var i = 1
+    while i < word.len() - 2:
+        if word.substring(i, i + 2) == "__":
+            return true
+        i = i + 1
+    false
+
+fn codes_contain(codes: [text], target: text) -> bool:
+    """Check if codes list contains a target code."""
+    for c in codes:
+        if c == target:
+            return true
+    false
+
+# ============================================================================
+# DEPR001: Type__method() deprecated syntax
+# ============================================================================
+
+describe "Deprecated Usage Lint":
+    context "DEPR001 - Type__method() syntax":
+        it "flags Type__method() call pattern as DEPR001":
+            val code = "fn test():\n    val result = Vec__new()\n"
+            val codes = check_deprecated_text(code)
+            val has_depr001 = codes_contain(codes, "DEPR001")
+            expect(has_depr001).to_equal(true)
+
+        it "flags String__from() as DEPR001":
+            val code = "fn test():\n    val s = String__from(\"hello\")\n"
+            val codes = check_deprecated_text(code)
+            val has_depr001 = codes_contain(codes, "DEPR001")
+            expect(has_depr001).to_equal(true)
+
+        it "does not flag dunder names like __init__":
+            val code = "fn __init__():\n    print \"init\"\n"
+            val codes = check_deprecated_text(code)
+            val has_depr001 = codes_contain(codes, "DEPR001")
+            expect(has_depr001).to_equal(false)
+
+        it "does not flag normal function calls":
+            val code = "fn test():\n    val x = compute_value()\n"
+            val codes = check_deprecated_text(code)
+            val has_depr001 = codes_contain(codes, "DEPR001")
+            expect(has_depr001).to_equal(false)
+
+    # ============================================================================
+    # DEPR002: .new() constructor deprecated
+    # ============================================================================
+
+    context "DEPR002 - .new() constructor":
+        it "flags .new() constructor as DEPR002":
+            val code = "fn test():\n    val p = Point.new(1, 2)\n"
+            val codes = check_deprecated_text(code)
+            val has_depr002 = codes_contain(codes, "DEPR002")
+            expect(has_depr002).to_equal(true)
+
+        it "does not flag methods named new_item":
+            val code = "fn test():\n    val x = create_new_item()\n"
+            val codes = check_deprecated_text(code)
+            val has_depr002 = codes_contain(codes, "DEPR002")
+            expect(has_depr002).to_equal(false)

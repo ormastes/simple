@@ -1,0 +1,71 @@
+use std.spec
+use common.ui.builder.{column, label, build_tree_with_title}
+use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
+use common.ui.window.{WindowManager}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB}
+use common.ui.window_scene.{shared_wm_scene_from_window_manager}
+use common.ui.wm_runtime_dispatch.{wm_runtime_shell_state_empty}
+use os.desktop.wm_runtime_bridge.{simpleos_wm_apply_pointer, simpleos_wm_event_loop_marker, simpleos_wm_pointer_runtime_command, simpleos_wm_pointer_runtime_marker}
+
+fn _tree(title: text):
+    build_tree_with_title(column("{title}_root", [label("{title}_label", title)]), title, "glass_dark")
+
+fn _scene():
+    var manager = WindowManager.new()
+    val _one = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+    val _two = manager.open_window("surf2", "Two", 80, 120, 300, 200, _tree("two"))
+    var registry = UiWindowSurfaceRegistry.new()
+    registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+    registry.bind_with_kind("win2", "surf2", 43u64, "demo.two", "Window Two", UI_SURFACE_KIND_SIMPLE_WEB)
+    shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+
+fn _taskbar() -> TaskbarModel:
+    TaskbarModel(
+        pinned: [
+            AppRef(app_id: "terminal", display_name: "Terminal", icon: "term"),
+            AppRef(app_id: "browser", display_name: "Browser", icon: "browser")
+        ],
+        running: [
+            WindowRef(window_id: "win1", app_id: "demo.app", title: "Window One", minimized: false)
+        ],
+        tray: [
+            TrayItem(item_id: "clock", label: "09:41", icon: "clock")
+        ]
+    )
+
+describe "SimpleOS WM runtime bridge":
+
+    it "maps framebuffer taskbar pointer hits to launcher commands":
+        val command = simpleos_wm_pointer_runtime_command(_scene(), _taskbar(), 70, 575, "left", "down", 1000, "09:41", 2)
+        expect(command.kind).to_equal("launcher_launch")
+        expect(command.app_id).to_equal("browser")
+        expect(command.handled).to_equal(true)
+
+    it "applies running-window focus and titlebar drag state":
+        val focused = simpleos_wm_apply_pointer(wm_runtime_shell_state_empty(), _scene(), _taskbar(), 120, 575, "left", "down", 1000, "09:41", 2)
+        val dragging = simpleos_wm_apply_pointer(focused, _scene(), _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2)
+
+        expect(focused.focused_window_id).to_equal("win1")
+        expect(dragging.focused_window_id).to_equal("win2")
+        expect(dragging.dragging_surface_id).to_equal("surf2")
+        expect(dragging.last_command_kind).to_equal("window_drag_begin")
+
+    it "emits serial-friendly command markers for QEMU capture checks":
+        val marker = simpleos_wm_pointer_runtime_marker(_scene(), _taskbar(), 780, 8, "left", "down", 1000, "09:41", 2)
+        expect(marker).to_contain("[simpleos-wm] command=command_lane_icon")
+        expect(marker).to_contain("target=right_icon_1")
+        expect(marker).to_contain("handled=true")
+
+    it "emits event-loop step markers for direct shell-loop invocation":
+        val marker = simpleos_wm_event_loop_marker(_scene(), _taskbar(), 120, 575, "left", "down", 1000, "09:41", 2)
+        expect(marker).to_contain("[simpleos-wm] loop-step command=window_focus")
+        expect(marker).to_contain("window=win1")
+        expect(marker).to_contain("handled=true")
+
+    it "keeps unsupported pointer gestures ignored":
+        val command = simpleos_wm_pointer_runtime_command(_scene(), _taskbar(), 70, 575, "right", "down", 1000, "09:41", 2)
+        val state = simpleos_wm_apply_pointer(wm_runtime_shell_state_empty(), _scene(), _taskbar(), 70, 575, "right", "down", 1000, "09:41", 2)
+
+        expect(command.kind).to_equal("ignored")
+        expect(command.handled).to_equal(false)
+        expect(state.last_command_kind).to_equal("ignored")

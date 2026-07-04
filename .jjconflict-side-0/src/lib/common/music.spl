@@ -1,0 +1,157 @@
+# Minimal typed music{} authoring model and MusicXML interchange.
+#
+# The compiler raw-domain layer preserves music{} payloads. This module is the
+# pure Simple IR/export/import surface used by that carrier.
+
+class MusicNote:
+    pitch: text
+    duration: text
+    measure: i32
+    staff: i32
+    voice: i32
+    articulation: text
+
+class MusicScore:
+    title: text
+    part_id: text
+    part_name: text
+    divisions: i32
+    notes: [MusicNote]
+
+fn music_note(pitch: text, duration: text, measure: i32, staff: i32) -> MusicNote:
+    MusicNote(pitch: pitch, duration: duration, measure: measure, staff: staff, voice: 1, articulation: "")
+
+fn music_score(title: text) -> MusicScore:
+    MusicScore(title: title, part_id: "P1", part_name: "Music", divisions: 1, notes: [])
+
+fn music_score_add_note(score: MusicScore, note: MusicNote) -> MusicScore:
+    MusicScore(
+        title: score.title,
+        part_id: score.part_id,
+        part_name: score.part_name,
+        divisions: score.divisions,
+        notes: score.notes.push(note)
+    )
+
+fn music_lower_minimal_score(source: text) -> MusicScore:
+    var score = music_score("Untitled")
+    for raw_line in source.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            pass_dn
+        elif line.starts_with("title:"):
+            score = MusicScore(
+                title: line.substring(6, line.len()).trim(),
+                part_id: score.part_id,
+                part_name: score.part_name,
+                divisions: score.divisions,
+                notes: score.notes
+            )
+        elif line.starts_with("note "):
+            val parts = line.split(" ")
+            if parts.len() >= 5:
+                val pitch = parts[1].trim()
+                val duration = parts[2].trim()
+                val measure = _music_parse_prefixed_i32(parts[3].trim(), "m")
+                val staff = _music_parse_prefixed_i32(parts[4].trim(), "s")
+                score = music_score_add_note(score, music_note(pitch, duration, measure, staff))
+    score
+
+fn music_score_to_musicxml4(score: MusicScore) -> text:
+    var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    xml = "{xml}<score-partwise version=\"4.0\">\n"
+    xml = "{xml}  <work><work-title>{_music_xml_escape(score.title)}</work-title></work>\n"
+    xml = "{xml}  <part-list><score-part id=\"{score.part_id}\"><part-name>{_music_xml_escape(score.part_name)}</part-name></score-part></part-list>\n"
+    xml = "{xml}  <part id=\"{score.part_id}\">\n"
+    var current_measure = -1
+    for note in score.notes:
+        if note.measure != current_measure:
+            if current_measure != -1:
+                xml = "{xml}    </measure>\n"
+            current_measure = note.measure
+            xml = "{xml}    <measure number=\"{current_measure}\">\n"
+            xml = "{xml}      <attributes><divisions>{score.divisions}</divisions><staves>1</staves><clef number=\"1\"><sign>G</sign><line>2</line></clef></attributes>\n"
+        xml = "{xml}      <note>\n"
+        xml = "{xml}        <pitch><step>{_music_pitch_step(note.pitch)}</step><octave>{_music_pitch_octave(note.pitch)}</octave></pitch>\n"
+        xml = "{xml}        <duration>{_music_duration_units(note.duration, score.divisions)}</duration>\n"
+        xml = "{xml}        <voice>{note.voice}</voice>\n"
+        xml = "{xml}        <type>{_music_xml_escape(note.duration)}</type>\n"
+        xml = "{xml}        <staff>{note.staff}</staff>\n"
+        xml = "{xml}      </note>\n"
+    if current_measure != -1:
+        xml = "{xml}    </measure>\n"
+    xml = "{xml}  </part>\n"
+    xml = "{xml}</score-partwise>\n"
+    xml
+
+fn musicxml4_validate_baseline(xml: text) -> bool:
+    if not xml.contains("<score-partwise version=\"4.0\""):
+        return false
+    if not xml.contains("<part-list>") or not xml.contains("<score-part id="):
+        return false
+    if not xml.contains("<part id="):
+        return false
+    if not xml.contains("<measure number="):
+        return false
+    if xml.contains("<note>"):
+        if not xml.contains("<pitch>") or not xml.contains("<duration>") or not xml.contains("<type>") or not xml.contains("<staff>"):
+            return false
+    true
+
+fn musicxml4_import_baseline(xml: text) -> MusicScore:
+    var score = music_score(_music_extract_first(xml, "<work-title>", "</work-title>"))
+    var measure = 1
+    for measure_chunk in xml.split("<measure number=\""):
+        if measure_chunk.contains("</measure>"):
+            val quote = measure_chunk.index_of("\"") ?? -1
+            if quote >= 0:
+                measure = measure_chunk.substring(0, quote).parse_i32() ?? 1
+            for note_chunk in measure_chunk.split("<note>"):
+                if note_chunk.contains("</note>"):
+                    val step = _music_extract_first(note_chunk, "<step>", "</step>")
+                    val octave = _music_extract_first(note_chunk, "<octave>", "</octave>")
+                    val duration = _music_extract_first(note_chunk, "<type>", "</type>")
+                    val staff_text = _music_extract_first(note_chunk, "<staff>", "</staff>")
+                    val staff = staff_text.parse_i32() ?? 1
+                    score = music_score_add_note(score, music_note("{step}{octave}", duration, measure, staff))
+    score
+
+fn _music_parse_prefixed_i32(value: text, prefix: text) -> i32:
+    if value.starts_with(prefix):
+        return value.substring(prefix.len(), value.len()).parse_i32() ?? 1
+    value.parse_i32() ?? 1
+
+fn _music_duration_units(duration: text, divisions: i32) -> i32:
+    if duration == "whole": return divisions * 4
+    if duration == "half": return divisions * 2
+    if duration == "quarter": return divisions
+    if duration == "eighth": return 1
+    divisions
+
+fn _music_pitch_step(pitch: text) -> text:
+    if pitch.len() == 0:
+        return "C"
+    pitch.substring(0, 1)
+
+fn _music_pitch_octave(pitch: text) -> text:
+    if pitch.len() <= 1:
+        return "4"
+    pitch.substring(pitch.len() - 1, pitch.len())
+
+fn _music_extract_first(source: text, start_tag: text, end_tag: text) -> text:
+    val start = source.index_of(start_tag) ?? -1
+    if start < 0:
+        return ""
+    val body_start = start + start_tag.len()
+    val rest = source.substring(body_start, source.len())
+    val end = rest.index_of(end_tag) ?? -1
+    if end < 0:
+        return ""
+    rest.substring(0, end)
+
+fn _music_xml_escape(value: text) -> text:
+    var out = value.replace("&", "&amp;")
+    out = out.replace("<", "&lt;")
+    out = out.replace(">", "&gt;")
+    out = out.replace("\"", "&quot;")
+    out

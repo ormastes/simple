@@ -1,0 +1,91 @@
+class StringBuilder:
+    parts: [text]
+
+impl StringBuilder:
+    static fn new() -> StringBuilder:
+        StringBuilder(parts: [])
+
+    fn push(s: text):
+        me.parts.push(s)
+
+    fn push_line(s: text):
+        me.parts.push(s)
+        me.parts.push("\n")
+
+    fn to_text() -> text:
+        me.parts.join("")
+
+    fn build() -> text:
+        me.parts.join("")
+
+    fn len() -> i64:
+        me.to_text().length()
+
+    fn is_empty() -> bool:
+        me.len() == 0
+
+    me clear():
+        me.parts = []
+
+# Free-function constructors (convenience over `StringBuilder.new()`).
+fn string_builder() -> StringBuilder:
+    StringBuilder(parts: [])
+
+fn string_builder_from(s: text) -> StringBuilder:
+    StringBuilder(parts: [s])
+
+# ---------------------------------------------------------------------------
+# RtStringBuilder: runtime-backed incremental builder.
+#
+# `StringBuilder` (above) collects parts in an array and joins them at finish —
+# that already avoids the O(n^2) `acc = acc + piece` pattern, but still
+# allocates the parts array and a separate joined buffer.
+#
+# `RtStringBuilder` wraps a single heap `String` in the Rust runtime (bug
+# rt_string_concat_quadratic_2026-06-12, fix H1). Each `push` appends in
+# amortized O(1) (the backing String grows exponentially); `finish` copies the
+# bytes out exactly once. This is the lowest-copy option for building one large
+# string (e.g. the MCP `tools/list` JSON payload).
+#
+# Lifecycle (no GC): the handle is an opaque i64 owned by the runtime. ALWAYS
+# end with `finish()` (which consumes the handle and returns the text) or
+# `free()` (abandon path). A builder that is neither finished nor freed leaks
+# its backing buffer — there is no garbage collector to reclaim it.
+# ---------------------------------------------------------------------------
+
+extern fn rt_string_builder_new() -> i64
+extern fn rt_string_builder_push(handle: i64, s: text) -> i64
+extern fn rt_string_builder_finish(handle: i64) -> text
+extern fn rt_string_builder_len(handle: i64) -> i64
+extern fn rt_string_builder_free(handle: i64)
+
+class RtStringBuilder:
+    handle: i64
+
+impl RtStringBuilder:
+    static fn new() -> RtStringBuilder:
+        RtStringBuilder(handle: rt_string_builder_new())
+
+    fn push(s: text):
+        rt_string_builder_push(me.handle, s)
+
+    fn push_line(s: text):
+        rt_string_builder_push(me.handle, s)
+        rt_string_builder_push(me.handle, "\n")
+
+    fn len() -> i64:
+        rt_string_builder_len(me.handle)
+
+    # Consumes the builder: returns the accumulated text and releases the
+    # runtime handle. Do not call any method on this builder afterwards.
+    # `me` method: mutates `me.handle` (sets it to 0 after release).
+    me finish() -> text:
+        val out = rt_string_builder_finish(me.handle)
+        me.handle = 0
+        out
+
+    # Abandon the builder without producing a string (releases the handle).
+    # `me` method: mutates `me.handle`.
+    me free():
+        rt_string_builder_free(me.handle)
+        me.handle = 0

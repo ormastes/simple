@@ -1,0 +1,56 @@
+# Host/GPU target.later MIR queue evidence regression.
+#
+# @cover src/compiler/50.mir/host_gpu_lane_queue.spl 80%
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+
+fn make_logger() -> Logger:
+    Logger(level: 0)
+
+fn host_gpu_mir_submission_score(src: text, fname: text, strict_backend_available: bool, expected_hash: i64) -> i64:
+    val log = make_logger()
+    val module = parse_full_frontend(src, fname + ".spl", fname + ".spl", log)
+    var hir_lowering = HirLowering.with_filename(fname + ".spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    val functions = mir.functions.values()
+    for fn_ in functions:
+        if fn_.name == fname:
+            val evidence = host_gpu_mir_function_submission_evidence(
+                fn_,
+                strict_backend_available,
+                20,
+                4,
+                3,
+                1113616374,
+                expected_hash
+            )
+            var score = 0
+            if evidence.transport.packet_count == 1:
+                score = score + 1
+            if evidence.transport.total_payload_bytes == 64:
+                score = score + 10
+            if evidence.transport.max_packet_bytes == 512:
+                score = score + 100
+            if evidence.submitted_to_device:
+                score = score + 1000
+            if evidence.readback_verified:
+                score = score + 10000
+            if evidence.rejected_before_submission:
+                score = score + 100000
+            return score
+    0
+
+describe "Host/GPU lane MIR queue evidence", tag: ["only-compiled"]:
+    it "turns lowered MIR lane markers into strict queue submission evidence":
+        val src = "fn f():\n    target.later(max_packet: 512) gpu \\:\n        val draw_ir_batch = \"batch\"\n"
+        expect(host_gpu_mir_submission_score(src, "f", true, 1113616374)).to_equal(11111)
+
+    it "rejects fallback MIR lane packets before device submission":
+        val src = "fn f():\n    target.later(max_packet: 512) gpu \\:\n        val draw_ir_batch = \"batch\"\n"
+        expect(host_gpu_mir_submission_score(src, "f", false, 1113616374)).to_equal(100111)

@@ -1,0 +1,95 @@
+# RISC-V 32 HalSmp Implementation
+#
+# Mirrors the rv64 HalSmp implementation for 32-bit RISC-V targets.
+# Key difference: hartid and register-width values are u32 (not u64).
+# SBI calls pass u32 values cast to the SBI ecall register width.
+#
+# All state variables, ApBootArgs, and test-seam functions are identical
+# in shape to riscv64/hal_smp.spl.
+
+use os.kernel.arch.riscv32.sbi.{sbi_hart_start, sbi_call}
+
+val MAX_HARTS_RV32: u32 = 8u32
+
+class ApBootArgs32:
+    stack: u32
+    arg: u32
+
+var HAL_SMP32_CPU_COUNT_STATE: u32 = 1u32
+var HAL_SMP32_PENDING_IPI: [u32] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32]
+var HAL_SMP32_BOOT_ARGS: [ApBootArgs32] = [
+    ApBootArgs32(stack: 0u32, arg: 0u32),
+    ApBootArgs32(stack: 0u32, arg: 0u32),
+    ApBootArgs32(stack: 0u32, arg: 0u32),
+    ApBootArgs32(stack: 0u32, arg: 0u32),
+    ApBootArgs32(stack: 0u32, arg: 0u32),
+    ApBootArgs32(stack: 0u32, arg: 0u32),
+    ApBootArgs32(stack: 0u32, arg: 0u32),
+    ApBootArgs32(stack: 0u32, arg: 0u32)
+]
+
+var HAL_SMP32_PENDING_COUNT: u32 = 1u32
+
+fn hal_smp32_init_with_null_dtb():
+    """Initialise rv32 HalSmp with fallback of 1 hart."""
+    HAL_SMP32_CPU_COUNT_STATE = 1u32
+
+fn hal_smp32_init_from_bytes(fdt: [u8]):
+    """Initialise rv32 HalSmp from sentinel FDT blob."""
+    if fdt.len() < 4u32:
+        HAL_SMP32_CPU_COUNT_STATE = 1u32
+        return
+    val b0 = fdt[0u32]
+    val b1 = fdt[1u32]
+    val b2 = fdt[2u32]
+    val b3 = fdt[3u32]
+    if b0 != 0xD0u8 or b1 != 0x0Du8 or b2 != 0xFEu8 or b3 != 0xEDu8:
+        HAL_SMP32_CPU_COUNT_STATE = 1u32
+        return
+    HAL_SMP32_CPU_COUNT_STATE = HAL_SMP32_PENDING_COUNT
+
+fn hal_smp32_set_pending_count(count: u32):
+    HAL_SMP32_PENDING_COUNT = count
+
+fn hal_smp32_cpu_count() -> u32:
+    HAL_SMP32_CPU_COUNT_STATE
+
+fn hal_smp32_get_pending_ipi(target: u32) -> u32:
+    HAL_SMP32_PENDING_IPI[target]
+
+fn hal_smp32_get_boot_args(ap_id: u32) -> ApBootArgs32:
+    HAL_SMP32_BOOT_ARGS[ap_id]
+
+# ============================================================================
+# Canonical trait methods — production-callable (AC-1, rv32 mirror)
+# ============================================================================
+
+val SBI_EXT_IPI_RV32: u32 = 0x735049u32
+
+fn hal_smp32_cpu_start(ap_id: u32, entry: u32, stack: u32, arg: u32) -> bool:
+    """Start AP hart via SBI HSM (rv32). Populates boot args slot before calling SBI."""
+    if ap_id < MAX_HARTS_RV32:
+        HAL_SMP32_BOOT_ARGS[ap_id] = ApBootArgs32(stack: stack, arg: arg)
+    val ret = sbi_hart_start(ap_id, entry, ap_id)
+    ret == 0u32
+
+fn hal_smp32_ipi_send(target: u32, vector: u32):
+    """Send IPI to target hart (rv32): write vector to PENDING_IPI slot then SBI ecall."""
+    if target < MAX_HARTS_RV32:
+        HAL_SMP32_PENDING_IPI[target] = vector
+    val hart_mask = 1u32 << target
+    sbi_call(SBI_EXT_IPI_RV32, 0u32, hart_mask, 0u32, 0u32)
+
+fn hal_smp32_ipi_broadcast(vector: u32):
+    """Broadcast IPI to all non-self harts (rv32; self = hart 0)."""
+    val self_id = 0u32
+    val count = HAL_SMP32_CPU_COUNT_STATE
+    var i: u32 = 0u32
+    var mask: u32 = 0u32
+    while i < count:
+        if i != self_id:
+            HAL_SMP32_PENDING_IPI[i] = vector
+            mask = mask | (1u32 << i)
+        i = i + 1u32
+    if mask != 0u32:
+        sbi_call(SBI_EXT_IPI_RV32, 0u32, mask, 0u32, 0u32)

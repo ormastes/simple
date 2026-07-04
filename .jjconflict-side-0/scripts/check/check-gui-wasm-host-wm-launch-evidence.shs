@@ -1,0 +1,351 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gui_wasm_host_wm_launch_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_wasm_host_wm_launch_evidence_$(date -u +%F).md}"
+TARGET_PACKAGE_BUILD_DIR="${GUI_WASM_TARGET_PACKAGE_BUILD_DIR:-build/gui_wasm_target_package_evidence}"
+TARGET_PACKAGE_REPORT_PATH="${GUI_WASM_TARGET_PACKAGE_REPORT_PATH:-doc/09_report/gui_wasm_target_package_evidence_$(date -u +%F).md}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple" "bin/simple" "./bin/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+TIMEOUT_SECS="${GUI_WASM_HOST_WM_TIMEOUT_SECS:-45}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -rf "$BUILD_DIR"/* "$REPORT_PATH"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "gui_wasm_host_wm_launch_status=unavailable"
+        echo "gui_wasm_host_wm_launch_reason=$reason"
+        echo "gui_wasm_host_wm_launch_simple_bin=$SIMPLE_BIN"
+        echo "gui_wasm_host_wm_launch_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "gui_wasm_host_wm_launch_simple_bin_status=$SIMPLE_BIN_STATUS"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# GUI WASM Host WM Launch Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+        echo "- simple bin: $SIMPLE_BIN"
+        echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+        echo "- simple bin status: $SIMPLE_BIN_STATUS"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    emit_unavailable "simple-bin-forbidden"
+    exit 1
+fi
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    emit_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
+    exit 1
+fi
+if [ ! -x "$SIMPLE_BIN" ]; then
+    emit_unavailable "missing-simple-bin"
+    exit 1
+fi
+if ! have node; then
+    emit_unavailable "missing-command:node"
+    exit 1
+fi
+
+BUILD_DIR="$TARGET_PACKAGE_BUILD_DIR" \
+REPORT_PATH="$TARGET_PACKAGE_REPORT_PATH" \
+SIMPLE_BIN="$SIMPLE_BIN" \
+SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" \
+    sh scripts/check/check-gui-wasm-target-package-evidence.shs >"$BUILD_DIR/target-package.out" 2>"$BUILD_DIR/target-package.err"
+
+HOST_BRIDGE_DIR="$BUILD_DIR/host-wm-bridge"
+CLIENT_SRC="$BUILD_DIR/gui_wasm_host_wm_launch_client.spl"
+SERVER_JS="$BUILD_DIR/gui_wasm_host_wm_launch_server.js"
+SERVER_OUT="$BUILD_DIR/host-wm-server.out"
+CLIENT_OUT="$BUILD_DIR/host-wm-client.out"
+CLIENT_ERR="$BUILD_DIR/host-wm-client.err"
+PROOF_PATH="$BUILD_DIR/host-wm-launch-proof.json"
+
+mkdir -p "$HOST_BRIDGE_DIR/requests" "$HOST_BRIDGE_DIR/replies" "$HOST_BRIDGE_DIR/events"
+
+cat >"$CLIENT_SRC" <<'SIMPLE'
+use os.userlib.window.{WindowClient}
+
+fn launch_wasm_window(app_id: text, title: text, content: text) -> u64:
+    var client = WindowClient.new()
+    client.set_app_identity(app_id)
+    val connected = client.connect()
+    print("client_" + app_id + "_connected=" + connected.to_text())
+    if not connected:
+        return 0
+    val window_id = client.create_window(title, 40, 40, 360, 220)
+    print("client_" + app_id + "_window_id=" + window_id.to_text())
+    if window_id > 0:
+        client.update_window_content(window_id, content)
+        client.focus_window(window_id)
+        client.destroy_window_id(window_id)
+    client.disconnect()
+    return window_id
+
+fn main() -> i64:
+    val hello = launch_wasm_window(
+        "gui-wasm-host-hello",
+        "GUI WASM hello host WM",
+        "module=build/gui/host-wm/hello.wasm;launcher=host-wm-native-wasm-window;simple_app_init=1;render_probe=8;event_probe=5;data-simple-wasm='hello'"
+    )
+    val widget = launch_wasm_window(
+        "gui-wasm-host-widget",
+        "GUI WASM widget matrix host WM",
+        "module=build/gui/host-wm/widget_matrix.wasm;launcher=host-wm-native-wasm-window;simple_app_init=1;render_probe=25;event_probe=23;data-simple-wasm='widget_matrix'"
+    )
+    val builder = launch_wasm_window(
+        "gui-wasm-host-builder",
+        "GUI WASM builder matrix host WM",
+        "module=build/gui/host-wm/builder_matrix.wasm;launcher=host-wm-native-wasm-window;simple_app_init=1;render_probe=48;event_probe=8;data-simple-wasm='builder_matrix'"
+    )
+    print("client_all_windows_created=" + ((hello > 0 and widget > 0 and builder > 0).to_text()))
+    return 0
+SIMPLE
+
+cat >"$SERVER_JS" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+
+const dir = process.argv[2];
+const proofPath = process.argv[3];
+const deadline = Date.now() + Number(process.argv[4] || 30000);
+const requestDir = path.join(dir, "requests");
+const replyDir = path.join(dir, "replies");
+const requests = [];
+let nextWindowId = 1000;
+
+function decodeHex(value) {
+  if (!value) return "";
+  return Buffer.from(value, "hex").toString("utf8");
+}
+
+function parseRequest(raw) {
+  const out = {};
+  for (const line of raw.split(/\n/)) {
+    const idx = line.indexOf("=");
+    if (idx > 0) out[line.slice(0, idx)] = line.slice(idx + 1);
+  }
+  out.title = decodeHex(out.title_hex);
+  out.content = decodeHex(out.content_hex);
+  out.app_id = decodeHex(out.app_id_hex);
+  return out;
+}
+
+function writeReply(requestId, status, windowId) {
+  const replyPath = path.join(replyDir, `${requestId}.rep`);
+  const tmp = `${replyPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `status=${status}\nwindow_id=${windowId}\n`);
+  fs.renameSync(tmp, replyPath);
+}
+
+function pollOnce() {
+  if (!fs.existsSync(requestDir)) return;
+  const files = fs.readdirSync(requestDir).filter(name => name.endsWith(".req")).sort();
+  for (const name of files) {
+    const filePath = path.join(requestDir, name);
+    let parsed;
+    try {
+      parsed = parseRequest(fs.readFileSync(filePath, "utf8"));
+      fs.unlinkSync(filePath);
+    } catch (_) {
+      continue;
+    }
+    const method = Number(parsed.method || 0);
+    let windowId = Number(parsed.window_id || 0);
+    if (method === 1) {
+      windowId = nextWindowId++;
+    }
+    requests.push({
+      request_id: Number(parsed.request_id || 0),
+      client_id: Number(parsed.client_id || 0),
+      method,
+      window_id: windowId,
+      title: parsed.title,
+      content: parsed.content,
+      app_id: parsed.app_id,
+      width: Number(parsed.w || 0),
+      height: Number(parsed.h || 0)
+    });
+    writeReply(parsed.request_id, 0, windowId);
+  }
+}
+
+(async () => {
+  while (Date.now() < deadline) {
+    pollOnce();
+    const creates = requests.filter(item => item.method === 1).length;
+    const updates = requests.filter(item => item.method === 3).length;
+    const destroys = requests.filter(item => item.method === 2).length;
+    if (creates >= 3 && updates >= 3 && destroys >= 3) break;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  pollOnce();
+  const expected = [
+    { app: "gui-wasm-host-hello", module: "build/gui/host-wm/hello.wasm", marker: "data-simple-wasm='hello'", render: "render_probe=8", event: "event_probe=5" },
+    { app: "gui-wasm-host-widget", module: "build/gui/host-wm/widget_matrix.wasm", marker: "data-simple-wasm='widget_matrix'", render: "render_probe=25", event: "event_probe=23" },
+    { app: "gui-wasm-host-builder", module: "build/gui/host-wm/builder_matrix.wasm", marker: "data-simple-wasm='builder_matrix'", render: "render_probe=48", event: "event_probe=8" }
+  ];
+  const perApp = expected.map(item => {
+    const appRequests = requests.filter(req => req.app_id === item.app);
+    const update = appRequests.find(req => req.method === 3 && req.content.includes(item.module));
+    return {
+      app_id: item.app,
+      create_count: appRequests.filter(req => req.method === 1).length,
+      update_count: appRequests.filter(req => req.method === 3).length,
+      destroy_count: appRequests.filter(req => req.method === 2).length,
+      module_present: !!update,
+      marker_present: !!update && update.content.includes(item.marker),
+      lifecycle_present: !!update && update.content.includes("simple_app_init=1") && update.content.includes(item.render) && update.content.includes(item.event),
+      title: (appRequests.find(req => req.method === 1) || {}).title || ""
+    };
+  });
+  const proof = {
+    status: "fail",
+    reason: "host-wm-launch-contract-failed",
+    request_count: requests.length,
+    create_count: requests.filter(req => req.method === 1).length,
+    update_count: requests.filter(req => req.method === 3).length,
+    destroy_count: requests.filter(req => req.method === 2).length,
+    focus_count: requests.filter(req => req.method === 6).length,
+    per_app: perApp,
+    requests
+  };
+  const ok = proof.create_count >= 3 &&
+    proof.update_count >= 3 &&
+    proof.destroy_count >= 3 &&
+    perApp.every(item => item.create_count >= 1 && item.update_count >= 1 && item.destroy_count >= 1 && item.module_present && item.marker_present && item.lifecycle_present);
+  proof.status = ok ? "pass" : "fail";
+  proof.reason = ok ? "pass" : proof.reason;
+  fs.writeFileSync(proofPath, JSON.stringify(proof, null, 2));
+  console.log(`host_wm_launch_server_status=${proof.status}`);
+  console.log(`host_wm_launch_server_reason=${proof.reason}`);
+  console.log(`host_wm_launch_request_count=${proof.request_count}`);
+})();
+NODE
+
+node "$SERVER_JS" "$HOST_BRIDGE_DIR" "$PROOF_PATH" "$((TIMEOUT_SECS * 1000))" >"$SERVER_OUT" 2>&1 &
+server_pid=$!
+
+set +e
+if have timeout; then
+    SIMPLE_HOST_WM_DIR="$HOST_BRIDGE_DIR" SIMPLE_LIB="${SIMPLE_LIB:-src}" timeout "$TIMEOUT_SECS" "$SIMPLE_BIN" run "$CLIENT_SRC" --mode=interpreter --clean >"$CLIENT_OUT" 2>"$CLIENT_ERR"
+else
+    SIMPLE_HOST_WM_DIR="$HOST_BRIDGE_DIR" SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$CLIENT_SRC" --mode=interpreter --clean >"$CLIENT_OUT" 2>"$CLIENT_ERR"
+fi
+client_code=$?
+wait "$server_pid"
+server_code=$?
+set -e
+
+if [ ! -s "$PROOF_PATH" ]; then
+    echo '{"status":"fail","reason":"missing-host-wm-proof"}' >"$PROOF_PATH"
+fi
+
+proof_status="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.status||'fail')" "$PROOF_PATH")"
+proof_reason="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.reason||'unknown')" "$PROOF_PATH")"
+request_count="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.request_count||0))" "$PROOF_PATH")"
+create_count="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.create_count||0))" "$PROOF_PATH")"
+update_count="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.update_count||0))" "$PROOF_PATH")"
+destroy_count="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.destroy_count||0))" "$PROOF_PATH")"
+per_app_pass="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const rows=p.per_app||[]; console.log(String(rows.filter(x=>x.module_present&&x.marker_present&&x.lifecycle_present).length)+'/'+String(rows.length))" "$PROOF_PATH")"
+
+status=pass
+reason=pass
+if [ "$client_code" -ne 0 ]; then
+    status=fail
+    reason="client-exit-$client_code"
+elif [ "$server_code" -ne 0 ]; then
+    status=fail
+    reason="server-exit-$server_code"
+elif [ "$proof_status" != "pass" ]; then
+    status=fail
+    reason="$proof_reason"
+fi
+
+{
+    echo "gui_wasm_host_wm_launch_status=$status"
+    echo "gui_wasm_host_wm_launch_reason=$reason"
+    echo "gui_wasm_host_wm_launch_simple_bin=$SIMPLE_BIN"
+    echo "gui_wasm_host_wm_launch_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "gui_wasm_host_wm_launch_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "gui_wasm_host_wm_launch_client_exit_code=$client_code"
+    echo "gui_wasm_host_wm_launch_server_exit_code=$server_code"
+    echo "gui_wasm_host_wm_launch_request_count=$request_count"
+    echo "gui_wasm_host_wm_launch_create_count=$create_count"
+    echo "gui_wasm_host_wm_launch_update_count=$update_count"
+    echo "gui_wasm_host_wm_launch_destroy_count=$destroy_count"
+    echo "gui_wasm_host_wm_launch_per_app=$per_app_pass"
+    echo "gui_wasm_host_wm_launch_proof_path=$PROOF_PATH"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# GUI WASM Host WM Launch Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- simple bin: $SIMPLE_BIN"
+    echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+    echo "- simple bin status: $SIMPLE_BIN_STATUS"
+    echo "- request count: $request_count"
+    echo "- create/update/destroy: $create_count/$update_count/$destroy_count"
+    echo "- per-app WASM content lifecycle proof: $per_app_pass"
+    echo "- proof path: $PROOF_PATH"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    echo
+    echo "## Client Output"
+    sed 's/^/- /' "$CLIENT_OUT" 2>/dev/null || true
+    echo
+    echo "## Client Error"
+    sed 's/^/- /' "$CLIENT_ERR" 2>/dev/null || true
+    echo
+    echo "## Server Output"
+    sed 's/^/- /' "$SERVER_OUT" 2>/dev/null || true
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$status" = "pass" ]

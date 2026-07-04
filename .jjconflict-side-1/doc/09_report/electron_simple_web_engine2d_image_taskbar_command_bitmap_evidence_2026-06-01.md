@@ -1,0 +1,111 @@
+# Electron Simple Web Engine2D Bitmap Evidence
+
+- status: pass
+- reason: pass
+- scene: simple-web-engine2d-image-taskbar-command
+- dimensions: 96x64
+- Simple checksum: 26296152649728
+- Electron checksum: 26296152649728
+- Simple weighted checksum: 80792557145241600
+- Electron weighted checksum: 80792557145241600
+- mismatch count: 0
+- blur/tolerance used: false
+- Electron frame us: 19622
+- expected ARGB path: build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/expected-argb.json
+- captured ARGB path: build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/electron-argb.json
+- captured ARGB written: true
+
+## Raw Evidence
+- electron_simple_web_engine2d_status=pass
+- electron_simple_web_engine2d_reason=pass
+- electron_simple_web_engine2d_scene=simple-web-engine2d-image-taskbar-command
+- electron_simple_web_engine2d_width=96
+- electron_simple_web_engine2d_height=64
+- electron_simple_web_engine2d_iterations=5
+- electron_simple_web_engine2d_simple_checksum=26296152649728
+- electron_simple_web_engine2d_electron_checksum=26296152649728
+- electron_simple_web_engine2d_simple_weighted_checksum=80792557145241600
+- electron_simple_web_engine2d_electron_weighted_checksum=80792557145241600
+- electron_simple_web_engine2d_mismatch_count=0
+- electron_simple_web_engine2d_blur_or_tolerance_used=false
+- electron_simple_web_engine2d_electron_frame_us=19622
+- electron_simple_web_engine2d_expected_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/expected-argb.json
+- electron_simple_web_engine2d_captured_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/electron-argb.json
+- electron_simple_web_engine2d_captured_argb_written=true
+- electron_simple_web_engine2d_exit_code=0
+
+## Simple Output
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-engine2d
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- expected_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/expected-argb.json
+- blur_or_tolerance_used=false
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-engine2d
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- expected_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/expected-argb.json
+- blur_or_tolerance_used=false
+
+## Electron Output
+- [1995467:0601/074833.766782:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [1995467:0601/074833.767092:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [1995467:0601/074833.767183:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [1995467:0601/074833.767239:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [1995467:0601/074833.767269:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [1995467:0601/074833.815362:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [1995497:0601/074834.168359:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
+- [1995610:0601/074834.559120:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
+- [1995610:0601/074834.559271:ERROR:raster_decoder.cc(1968)] [.RenderWorker-0x2e3400024100]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
+- renderer=electron-live-capture-page
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=5
+- checksum=26296152649728
+- expected_checksum=26296152649728
+- weighted_checksum=80792557145241600
+- expected_weighted_checksum=80792557145241600
+- mismatch_count=0
+- frame_us=19622
+- captured_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/electron-argb.json
+- captured_argb_written=true
+- blur_or_tolerance_used=false

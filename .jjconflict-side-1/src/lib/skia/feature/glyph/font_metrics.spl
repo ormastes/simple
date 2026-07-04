@@ -1,0 +1,170 @@
+# OpenType font metrics — hhea / vhea / OS/2 table parsers.
+#
+# Extracts:
+#   - ascent, descent, line_gap (from hhea per-font typographic metrics)
+#   - vertical_ascent, vertical_descent (from vhea for CJK)
+#   - x_height, cap_height (from OS/2 sxHeight, sCapHeight)
+#   - win_ascent, win_descent (from OS/2 usWinAscent, usWinDescent)
+#   - underline_position, underline_thickness (from post)
+#
+# All values are in font units; caller scales by size_px / units_per_em.
+
+# ===== private big-endian byte readers (mirrors ot_parser.spl pattern) =====
+
+fn _read_u16_be(data: [u8], offset: i64) -> i64:
+    if offset < 0:
+        return 0
+    if offset + 1 >= data.len():
+        return 0
+    val hi = data[offset] as i64
+    val lo = data[offset + 1] as i64
+    (hi << 8) | lo
+
+fn _read_i16_be(data: [u8], offset: i64) -> i64:
+    val raw = _read_u16_be(data, offset)
+    if raw >= 32768:
+        raw - 65536
+    else:
+        raw
+
+fn _read_u32_be(data: [u8], offset: i64) -> i64:
+    if offset < 0:
+        return 0
+    if offset + 3 >= data.len():
+        return 0
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+# ===== metric record classes =====
+
+class FontMetricsHhea:
+    ascent: i64
+    descent: i64
+    line_gap: i64
+    advance_width_max: i64
+    num_long_hor_metrics: i64
+
+class FontMetricsOs2:
+    x_height: i64
+    cap_height: i64
+    win_ascent: i64
+    win_descent: i64
+    typo_ascent: i64
+    typo_descent: i64
+    typo_line_gap: i64
+
+class FontMetricsPost:
+    italic_angle: f64
+    underline_position: i64
+    underline_thickness: i64
+    is_fixed_pitch: bool
+
+# ===== parsers =====
+
+# hhea table layout (OpenType spec):
+#   0  Fixed   version (0x00010000)
+#   4  FWord   ascender
+#   6  FWord   descender
+#   8  FWord   lineGap
+#  10  UFWord  advanceWidthMax
+#  12  FWord   minLeftSideBearing
+#  14  FWord   minRightSideBearing
+#  16  FWord   xMaxExtent
+#  18  int16   caretSlopeRise
+#  20  int16   caretSlopeRun
+#  22  int16   caretOffset
+#  24..32 reserved (4 * int16)
+#  32  int16   metricDataFormat
+#  34  uint16  numberOfHMetrics
+# Minimum size: 36 bytes.
+fn parse_hhea(data: [u8]) -> Option<FontMetricsHhea>:
+    if data.len() < 36:
+        return None
+    val ascent = _read_i16_be(data, 4)
+    val descent = _read_i16_be(data, 6)
+    val line_gap = _read_i16_be(data, 8)
+    val advance_width_max = _read_u16_be(data, 10)
+    val num_long_hor_metrics = _read_u16_be(data, 34)
+    Some(FontMetricsHhea(
+        ascent: ascent,
+        descent: descent,
+        line_gap: line_gap,
+        advance_width_max: advance_width_max,
+        num_long_hor_metrics: num_long_hor_metrics
+    ))
+
+# OS/2 table (relevant offsets):
+#   0   uint16  version
+#  68   int16   sTypoAscender
+#  70   int16   sTypoDescender
+#  72   int16   sTypoLineGap
+#  74   uint16  usWinAscent
+#  76   uint16  usWinDescent
+#  86   int16   sxHeight     (version >= 2)
+#  88   int16   sCapHeight   (version >= 2)
+#
+# Version 0 minimum: 78 bytes. Version >= 2 minimum: 96 bytes.
+fn parse_os2(data: [u8]) -> Option<FontMetricsOs2>:
+    if data.len() < 78:
+        return None
+    val version = _read_u16_be(data, 0)
+    val typo_ascent = _read_i16_be(data, 68)
+    val typo_descent = _read_i16_be(data, 70)
+    val typo_line_gap = _read_i16_be(data, 72)
+    val win_ascent = _read_u16_be(data, 74)
+    val win_descent = _read_u16_be(data, 76)
+    val x_height = if version >= 2:
+        if data.len() < 96:
+            0
+        else:
+            _read_i16_be(data, 86)
+    else:
+        0
+    val cap_height = if version >= 2:
+        if data.len() < 96:
+            0
+        else:
+            _read_i16_be(data, 88)
+    else:
+        0
+    Some(FontMetricsOs2(
+        x_height: x_height,
+        cap_height: cap_height,
+        win_ascent: win_ascent,
+        win_descent: win_descent,
+        typo_ascent: typo_ascent,
+        typo_descent: typo_descent,
+        typo_line_gap: typo_line_gap
+    ))
+
+# post table layout (header, version 1/2/3/4 share first 32 bytes):
+#   0  Fixed   version
+#   4  Fixed   italicAngle (16.16)
+#   8  FWord   underlinePosition
+#  10  FWord   underlineThickness
+#  12  uint32  isFixedPitch
+#  16..32  uint32 * 4 (minMemType42/maxMemType42/minMemType1/maxMemType1)
+# Minimum header size: 32 bytes.
+fn parse_post(data: [u8]) -> Option<FontMetricsPost>:
+    if data.len() < 32:
+        return None
+    val angle_raw = _read_u32_be(data, 4)
+    # Interpret as signed 32-bit Fixed 16.16.
+    val angle_signed = if angle_raw >= 2147483648:
+        angle_raw - 4294967296
+    else:
+        angle_raw
+    val italic_angle = (angle_signed as f64) / 65536.0
+    val underline_position = _read_i16_be(data, 8)
+    val underline_thickness = _read_i16_be(data, 10)
+    val fixed_pitch_raw = _read_u32_be(data, 12)
+    val is_fixed_pitch = fixed_pitch_raw != 0
+    Some(FontMetricsPost(
+        italic_angle: italic_angle,
+        underline_position: underline_position,
+        underline_thickness: underline_thickness,
+        is_fixed_pitch: is_fixed_pitch
+    ))

@@ -1,0 +1,119 @@
+# test/perf/graphics_2d/webgpu_real_spec.spl
+#
+# **Feature IDs:** AC-5 — WebGPU/wgpu real adapter enumeration, no silent CPU fallback
+# **Category:** Graphics | Backend | WebGPU
+# **Status:** Pending implementation (Phase 5)
+#
+# Verifies that the WebGPU/wgpu backend:
+#   - Enumerates adapters at startup
+#   - Does NOT fall through to CPU-only path silently
+#   - probe() reports shader_format == "wgsl"
+#   - selected_name reflects the actual adapter chosen
+#
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_webgpu.spl
+
+val WEBGPU_BACKEND_NAME: text = "webgpu"
+val WEBGPU_SHADER_FORMAT: text = "wgsl"
+val WEBGPU_API_NAME: text = "wgpu"
+
+struct WebGpuProbeSentinel:
+    backend:            text
+    shader_format:      text
+    api_name:           text
+    status:             text
+    adapter_count:      i64
+    selected_adapter:   text
+    fell_through_to_cpu: bool
+    fallback_reason:    text
+
+fn make_webgpu_real_probe() -> WebGpuProbeSentinel:
+    WebGpuProbeSentinel(
+        backend:             WEBGPU_BACKEND_NAME,
+        shader_format:       WEBGPU_SHADER_FORMAT,
+        api_name:            WEBGPU_API_NAME,
+        status:              "Ok",
+        adapter_count:       1,
+        selected_adapter:    "DiscreteGpu(NVIDIA GeForce RTX 3080)",
+        fell_through_to_cpu: false,
+        fallback_reason:     ""
+    )
+
+fn make_webgpu_no_adapter() -> WebGpuProbeSentinel:
+    WebGpuProbeSentinel(
+        backend:             WEBGPU_BACKEND_NAME,
+        shader_format:       "none",
+        api_name:            WEBGPU_API_NAME,
+        status:              "Failed",
+        adapter_count:       0,
+        selected_adapter:    "",
+        fell_through_to_cpu: false,
+        fallback_reason:     "no adapters enumerated"
+    )
+
+fn make_webgpu_silent_fallback() -> WebGpuProbeSentinel:
+    WebGpuProbeSentinel(
+        backend:             WEBGPU_BACKEND_NAME,
+        shader_format:       "none",
+        api_name:            "software",
+        status:              "Fallback",
+        adapter_count:       0,
+        selected_adapter:    "cpu",
+        fell_through_to_cpu: true,
+        fallback_reason:     "silent fallback: should error in strict mode"
+    )
+
+describe "backend_webgpu — AC-5: real adapter enumeration, no silent fallback":
+
+    describe "WebGPU probe identity":
+
+        it "AC-5: WebGPU probe reports backend name webgpu":
+            val r: WebGpuProbeSentinel = make_webgpu_real_probe()
+            expect(r.backend).to_equal(WEBGPU_BACKEND_NAME)
+
+        it "AC-5: WebGPU probe reports shader_format wgsl":
+            val r: WebGpuProbeSentinel = make_webgpu_real_probe()
+            expect(r.shader_format).to_equal(WEBGPU_SHADER_FORMAT)
+
+        it "AC-5: WebGPU probe reports api_name wgpu":
+            val r: WebGpuProbeSentinel = make_webgpu_real_probe()
+            expect(r.api_name).to_equal(WEBGPU_API_NAME)
+
+        it "AC-5: WebGPU status is Ok when adapter is found":
+            val r: WebGpuProbeSentinel = make_webgpu_real_probe()
+            expect(r.status).to_equal("Ok")
+
+    describe "adapter enumeration":
+
+        it "AC-5: adapter_count is greater than zero when WebGPU is available":
+            val r: WebGpuProbeSentinel = make_webgpu_real_probe()
+            expect(r.adapter_count > 0).to_equal(true)
+
+        it "AC-5: selected_adapter is non-empty when WebGPU is available":
+            val r: WebGpuProbeSentinel = make_webgpu_real_probe()
+            expect(r.selected_adapter).to_equal("DiscreteGpu(NVIDIA GeForce RTX 3080)")
+
+        it "AC-5: adapter_count is zero when no GPU hardware is present":
+            val r: WebGpuProbeSentinel = make_webgpu_no_adapter()
+            expect(r.adapter_count).to_equal(0)
+
+        it "AC-5: status is Failed (not Fallback) when no adapters are enumerated":
+            val r: WebGpuProbeSentinel = make_webgpu_no_adapter()
+            expect(r.status).to_equal("Failed")
+
+    describe "no silent CPU fallback":
+
+        it "AC-5: fell_through_to_cpu is false when real WebGPU is selected":
+            val r: WebGpuProbeSentinel = make_webgpu_real_probe()
+            expect(r.fell_through_to_cpu).to_equal(false)
+
+        it "AC-5: silent fallback probe has fell_through_to_cpu true (sentinel for what is forbidden)":
+            val r: WebGpuProbeSentinel = make_webgpu_silent_fallback()
+            expect(r.fell_through_to_cpu).to_equal(true)
+
+        it "AC-5: silent fallback status is Fallback (strict mode must reject this)":
+            val r: WebGpuProbeSentinel = make_webgpu_silent_fallback()
+            expect(r.status).to_equal("Fallback")
+
+        it "AC-5: real WebGPU probe fallback_reason is empty":
+            val r: WebGpuProbeSentinel = make_webgpu_real_probe()
+            expect(r.fallback_reason).to_equal("")

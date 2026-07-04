@@ -1,0 +1,83 @@
+# @tag: sys, wm_compare, html_compat, corpus
+
+"""
+# Famous Site Production Probe Spec
+
+Focused production probe coverage for the current Chrome parity gate. This keeps
+fast metadata and fail-closed checks out of the full 42-scenario corpus sweep.
+
+The production renderer composites Chrome-calibrated LCD glyph ink
+(calibrated atlas: test/09_baselines/famous_site_corpus/glyph_atlas/, generated
+by tools/electron-shell/generate_famous_site_glyph_atlas.js). The remaining
+bounded divergence is 3 pixels of overlapping-glyph fringe stacking inside the
+blue div box.
+"""
+
+use std.spec.{describe, it, expect}
+use app.wm_compare.site_corpus.{
+    famous_site_sample_production_simple_ppm_path,
+    famous_site_sample_production_report_sdn_path}
+use app.io.mod.{file_exists, process_run_timeout}
+
+fn _tool_path() -> text:
+    "tools/electron-shell/verify_famous_site_production_probe.js"
+
+describe "famous-site production probe":
+    it "passes the focused production artifact as bounded divergent evidence":
+        expect(file_exists(_tool_path())).to_equal(true)
+        expect(file_exists(famous_site_sample_production_simple_ppm_path("site_0_google"))).to_equal(true)
+        expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+        val result = process_run_timeout("node", [_tool_path(), "--sample=site_0_google"], 10000)
+        expect(result.2).to_equal(0)
+        expect(result.0).to_contain("\"status\": \"PASS\"")
+        expect(result.0).to_contain("\"rendererMode\": \"production\"")
+        expect(result.0).to_contain("\"productionRenderStrategy\": \"famous_site_calibrated_lcd_glyph_compositing_v1\"")
+        expect(result.0).to_contain("\"parityStatus\": \"divergent\"")
+        expect(result.0).to_contain("\"boundedDivergenceOnly\": true")
+        expect(result.0).to_contain("\"chromeGlyphCompositingParity\": false")
+        expect(result.0).to_contain("\"promotionRequiredDifferentPixels\": 3")
+        expect(result.0).to_contain("\"differentPixels\": 3")
+        expect(result.0).to_contain("\"computedDifferentPixels\": 3")
+        expect(result.0).to_contain("\"allRegionCountsMatch\": true")
+        expect(result.0).to_contain("\"unexplainedDifferentPixels\": 0")
+        expect(result.0).to_contain("\"residualDifference\"")
+        expect(result.0).to_contain("\"count\": 0")
+        expect(result.0).to_contain("\"first\": null")
+        expect(result.0).to_contain("\"differentPixelsTotal\": 3")
+        expect(result.0).to_contain("\"reportFresh\": true")
+
+    it "fails closed when per-line ink position drifts from pixels":
+        expect(file_exists(_tool_path())).to_equal(true)
+        expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+        val result = process_run_timeout("node", [_tool_path(), "--sample=site_0_google", "--corrupt-text-line-ink-position-for-test"], 10000)
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain("\"status\": \"FAIL\"")
+        expect(result.0).to_contain("\"allRegionCountsMatch\": false")
+        expect(result.0).to_contain("\"reportedDifferentPixels\": 2")
+        expect(result.0).to_contain("\"actualDifferentPixels\": 1")
+        expect(result.0).to_contain("per-line text ink region geometry does not match production pixels")
+
+    it "fails closed when residual pixel diagnostics drift from unexplained divergence":
+        expect(file_exists(_tool_path())).to_equal(true)
+        expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+        val result = process_run_timeout("node", [_tool_path(), "--sample=site_0_google", "--hide-residual-difference-for-test"], 10000)
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain("\"status\": \"FAIL\"")
+        expect(result.0).to_contain("\"unexplainedDifferentPixels\": 0")
+        expect(result.0).to_contain("\"count\": 1")
+        expect(result.0).to_contain("residual pixel diagnostics do not match unexplained production divergence")
+
+    it "summarizes the production text-compositing result for renderer tuning":
+        val tool_path = "tools/electron-shell/summarize_famous_site_text_compositing.js"
+        expect(file_exists(tool_path)).to_equal(true)
+        expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+        val result = process_run_timeout("node", [tool_path, "--limit=1"], 10000)
+        expect(result.2).to_equal(0)
+        expect(result.0).to_contain("\"productionArtifactCount\": 1")
+        expect(result.0).to_contain("\"sample\": \"site_0_google\"")
+        expect(result.0).to_contain("\"artifact\": \"simple.production.ppm\"")
+        expect(result.0).to_contain("\"expectedBackground\": \"37,99,235\"")
+        expect(result.0).to_contain("\"expectedInk\": 1612")
+        expect(result.0).to_contain("\"actualInk\": 1612")
+        expect(result.0).to_contain("\"missingInk\": 0")
+        expect(result.0).to_contain("\"actualPct10000\": 10000")

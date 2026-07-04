@@ -1,0 +1,135 @@
+# ============================================================================
+# SoC RTL CLINT — Core Local Interruptor
+# ============================================================================
+#
+# Implements the RISC-V CLINT (Core Local Interruptor) for a single hart.
+# Provides:
+#   - mtime: 64-bit free-running timer (split into lo/hi u32)
+#   - mtimecmp: 64-bit timer compare register
+#   - msip: software interrupt register
+#
+# MMIO register map (offsets from CLINT base, e.g. 0x02000000):
+#   0x0000: msip[hart0]
+#   0x4000: mtimecmp_lo[hart0]
+#   0x4004: mtimecmp_hi[hart0]
+#   0xBFF8: mtime_lo
+#   0xBFFC: mtime_hi
+#
+# All operations are pure functions — suitable for synthesizable RTL.
+# VHDL synthesizable subset: u32, bool, structs only.
+# ============================================================================
+
+# ============================================================================
+# CLINT MMIO Offsets
+# ============================================================================
+
+val CLINT_OFF_MSIP: u32        = 0x0000
+val CLINT_OFF_MTIMECMP_LO: u32 = 0x4000
+val CLINT_OFF_MTIMECMP_HI: u32 = 0x4004
+val CLINT_OFF_MTIME_LO: u32   = 0xBFF8
+val CLINT_OFF_MTIME_HI: u32   = 0xBFFC
+
+# ============================================================================
+# CLINT State
+# ============================================================================
+
+struct ClintState:
+    """CLINT register state for a single hart."""
+    mtime_lo: u32       # Lower 32 bits of mtime
+    mtime_hi: u32       # Upper 32 bits of mtime
+    mtimecmp_lo: u32    # Lower 32 bits of mtimecmp
+    mtimecmp_hi: u32    # Upper 32 bits of mtimecmp
+    msip: u32           # Software interrupt pending (bit 0 only)
+    mtime: i64          # Full 64-bit mtime (kept in sync with lo/hi)
+
+# ============================================================================
+# CLINT Tick Result
+# ============================================================================
+
+struct ClintTickResult:
+    """Result of one CLINT clock tick."""
+    state: ClintState   # Updated state (mtime incremented)
+    mtip: bool          # Timer interrupt pending (mtime >= mtimecmp)
+    msip_out: bool      # Software interrupt pending
+
+# ============================================================================
+# Create — initial CLINT state
+# ============================================================================
+
+fn clint_create() -> ClintState:
+    """Create CLINT in reset state. Timer at 0, compare at max (no immediate interrupt)."""
+    ClintState(
+        mtime_lo: 0,
+        mtime_hi: 0,
+        mtimecmp_lo: 0xFFFFFFFF,
+        mtimecmp_hi: 0xFFFFFFFF,
+        msip: 0,
+        mtime: 0
+    )
+
+# ============================================================================
+# MMIO Read
+# ============================================================================
+
+fn clint_mmio_read(state: ClintState, offset: u32) -> u32:
+    """Read a CLINT register by offset from CLINT base."""
+    if offset == CLINT_OFF_MSIP:
+        return state.msip & 0x1
+    if offset == CLINT_OFF_MTIMECMP_LO:
+        return state.mtimecmp_lo
+    if offset == CLINT_OFF_MTIMECMP_HI:
+        return state.mtimecmp_hi
+    if offset == CLINT_OFF_MTIME_LO:
+        return state.mtime_lo
+    if offset == CLINT_OFF_MTIME_HI:
+        return state.mtime_hi
+    0
+
+# ============================================================================
+# MMIO Write
+# ============================================================================
+
+fn clint_mmio_write(state: ClintState, offset: u32, value: u32) -> ClintState:
+    """Write a CLINT register by offset from CLINT base."""
+    var out = state
+    if offset == CLINT_OFF_MSIP:
+        out.msip = value & 0x1
+    else if offset == CLINT_OFF_MTIMECMP_LO:
+        out.mtimecmp_lo = value
+    else if offset == CLINT_OFF_MTIMECMP_HI:
+        out.mtimecmp_hi = value
+    else if offset == CLINT_OFF_MTIME_LO:
+        out.mtime_lo = value
+    else if offset == CLINT_OFF_MTIME_HI:
+        out.mtime_hi = value
+    out
+
+# ============================================================================
+# CLINT Tick — increment mtime, compare against mtimecmp
+# ============================================================================
+
+fn clint_tick(state: ClintState) -> ClintTickResult:
+    """Advance mtime by one tick and evaluate timer/software interrupts.
+    mtime is a 64-bit counter split across mtime_lo and mtime_hi.
+    Timer interrupt (mtip) is asserted when mtime >= mtimecmp."""
+    var out = state
+
+    # Increment mtime (64-bit, split into lo/hi)
+    val new_lo = state.mtime_lo + 1
+    out.mtime_lo = new_lo
+    if new_lo == 0:
+        out.mtime_hi = state.mtime_hi + 1
+    out.mtime = state.mtime + 1
+
+    # Compare mtime >= mtimecmp (unsigned 64-bit comparison)
+    var mtip: bool = false
+    if out.mtime_hi > out.mtimecmp_hi:
+        mtip = true
+    else if out.mtime_hi == out.mtimecmp_hi:
+        if out.mtime_lo >= out.mtimecmp_lo:
+            mtip = true
+
+    # Software interrupt
+    val msip_out = (out.msip & 0x1) != 0
+
+    ClintTickResult(state: out, mtip: mtip, msip_out: msip_out)

@@ -1,0 +1,107 @@
+# Shared 5x7 bitmap font — single source of truth for both the browser text
+# paint path (simple_web_html_layout_renderer.spl) and the Engine2D glyph path
+# (std.gpu.engine2d.glyph). The browser side is pinned by checked-in
+# exact-pixel baselines, so this table IS the browser's original table verbatim;
+# Engine2D adopts it so both paths rasterize byte-identically.
+#
+# Each glyph is 7 rows; each row's low 5 bits are pixels (bit 4 = leftmost).
+# Rows are packed little-endian into an i64: row r occupies bits [r*5, r*5+5).
+# Charset: A-Z 0-9 space, common punctuation, a-z (88 glyphs). Characters
+# outside the charset resolve to FONT_UNKNOWN_PACKED (a box outline).
+
+val FONT_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?-_()[]/\\'\"+=#%&@*<>abcdefghijklmnopqrstuvwxyz"
+
+val FONT_ROWS_PACKED: [i64] = [
+    18842895918i64, 32801094206i64, 15620129326i64, 32801080894i64, 33840200223i64, 17734072863i64, 15621407278i64, 18842451505i64,
+    15170932878i64, 13507823687i64, 18879369809i64, 33840185872i64, 18842572657i64, 18842507057i64, 15621211694i64, 17734518334i64,
+    14585218606i64, 18879563326i64, 32247333391i64, 4433514655i64, 15621211697i64, 4648912433i64, 19182306865i64, 18593485137i64,
+    4433514833i64, 33831389247i64, 15629733422i64, 15170933124i64, 33831454254i64, 15604060255i64, 2247698626i64, 15603923487i64,
+    15621636358i64, 8866891839i64, 15621113390i64, 12953568814i64, 0i64, 4294967296i64, 8724152320i64, 134217856i64,
+    8724152448i64, 4295102596i64, 4299295278i64, 1015808i64, 33285996544i64, 2290360450i64, 8726317192i64, 15309480206i64,
+    15101659214i64, 17456826433i64, 1143087376i64, 8324i64, 10570i64, 139432064i64, 32537600i64, 368389098i64,
+    120853337i64, 455782988i64, 487282222i64, 5014436516i64, 2290622594i64, 8726284424i64, 521635264i64, 1025047056i64,
+    487080384i64, 521714721i64, 487572928i64, 277117190i64, 471320032i64, 588839440i64, 474099716i64, 421599234i64,
+    625758800i64, 474091660i64, 588961600i64, 588826560i64, 488162752i64, 554649536i64, 35112416i64, 554197696i64,
+    1008157152i64, 211035080i64, 456705568i64, 145278496i64, 358270496i64, 581052960i64, 471320096i64, 1048710112i64
+]
+
+val FONT_UNKNOWN_PACKED: i64 = 33874822719i64
+val FONT_ROWS_PACKED_COUNT: i32 = 88
+
+fn glyph_row_bits(gi: i32, row: i32) -> i32:
+    if row < 0 or row >= 7:
+        return 0
+    val packed = if gi >= 0 and gi < FONT_ROWS_PACKED_COUNT: FONT_ROWS_PACKED[gi] else: FONT_UNKNOWN_PACKED
+    ((packed >> (row * 5)) & 31i64) as i32
+
+fn glyph_index_for_char_code(code: i32) -> i32:
+    if code >= 65 and code <= 90:
+        return code - 65
+    if code >= 48 and code <= 57:
+        return 26 + (code - 48)
+    if code == 32: return 36
+    if code == 46: return 37
+    if code == 44: return 38
+    if code == 58: return 39
+    if code == 59: return 40
+    if code == 33: return 41
+    if code == 63: return 42
+    if code == 45: return 43
+    if code == 95: return 44
+    if code == 40: return 45
+    if code == 41: return 46
+    if code == 91: return 47
+    if code == 93: return 48
+    if code == 47: return 49
+    if code == 92: return 50
+    if code == 39: return 51
+    if code == 34: return 52
+    if code == 43: return 53
+    if code == 61: return 54
+    if code == 35: return 55
+    if code == 37: return 56
+    if code == 38: return 57
+    if code == 64: return 58
+    if code == 42: return 59
+    if code == 60: return 60
+    if code == 62: return 61
+    if code >= 97 and code <= 122:
+        return 62 + (code - 97)
+    -1
+
+fn _glyph_charset_index_of(ch: text) -> i32:
+    if ch.len() != 1:
+        return -1
+    val needle = ch.char_code_at(0)
+    var i = 0
+    val charset_len = FONT_CHARSET.len()
+    while i < charset_len:
+        if FONT_CHARSET.char_code_at(i) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn glyph_index_for_char(ch: text) -> i32:
+    if ch.len() == 1:
+        val direct_code = glyph_index_for_char_code(ch.char_code_at(0))
+        if direct_code >= 0:
+            return direct_code
+    val direct = _glyph_charset_index_of(ch)
+    if direct >= 0:
+        return direct
+    _glyph_charset_index_of(ch.upper())
+
+# 7-row bitmap for a character (each row 5 bits, bit 4 = leftmost). Characters
+# outside the charset return the unknown box outline. Used by the Engine2D
+# glyph path so it rasterizes identically to the browser's glyph_row_bits.
+fn glyph_rows_for_char(ch: text) -> [i32]:
+    val gi = if ch.len() == 1: glyph_index_for_char_code(ch.char_code_at(0)) else: -1
+    [
+        glyph_row_bits(gi, 0),
+        glyph_row_bits(gi, 1),
+        glyph_row_bits(gi, 2),
+        glyph_row_bits(gi, 3),
+        glyph_row_bits(gi, 4),
+        glyph_row_bits(gi, 5),
+        glyph_row_bits(gi, 6)
+    ]

@@ -1,0 +1,221 @@
+"""
+# HTTP Cache
+
+HTTP response cache with Cache-Control enforcement and LRU eviction.
+Stores [u8] body responses keyed by URL, enforcing freshness rules.
+"""
+
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.cache_types.{CacheEntry, CachePolicy, CacheControl, ETag}
+use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserError, network_error}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+pub class HttpCache:
+    entries: [CacheEntry]
+    max_size_bytes: i64
+    current_size: i64
+    logger: Logger
+
+    static fn new(logger: Logger, max_size_mb: i64) -> HttpCache:
+        HttpCache(
+            entries: [],
+            max_size_bytes: max_size_mb * 1024 * 1024,
+            current_size: 0,
+            logger: logger
+        )
+
+    me lookup(url: text) -> CacheEntry?:
+        val now = rt_time_now_unix_micros() / 1000000
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries[i]
+            if entry.url == url:
+                if is_fresh(entry, now):
+                    self.logger.debug("Cache hit for {url}")
+                    return Some(entry)
+                else:
+                    self.logger.debug("Cache stale for {url}, removing")
+                    self.remove_at(i)
+                    self.current_size = self.current_size - entry_size(entry)
+                    return nil
+            i = i + 1
+        self.logger.debug("Cache miss for {url}")
+        nil
+
+    me store(url: text, body: [u8], headers: text) -> Result<(), BrowserError>:
+        if not should_cache(200, headers):
+            self.logger.debug("Response not cacheable for {url}")
+            return Ok(())
+
+        val controls = parse_cache_control(find_header_value(headers, "cache-control"))
+        if has_directive(controls, "no-store"):
+            self.logger.debug("no-store directive, skipping cache for {url}")
+            return Ok(())
+
+        val etag_str = find_header_value(headers, "etag")
+        val etag = if etag_str.starts_with("W/"): ETag.weak(etag_str.slice(2, etag_str.len())) else: ETag.strong(etag_str)
+        val now = rt_time_now_unix_micros() / 1000000
+        val policy = CachePolicy.create(controls, etag, 0)
+
+        self.invalidate(url)
+
+        val entry = CacheEntry(
+            url: url,
+            body: body,
+            headers: headers,
+            policy: policy,
+            stored_at: now
+        )
+
+        val size = body.len() + url.len()
+
+        while self.current_size + size > self.max_size_bytes and self.entries.len() > 0:
+            self.evict()
+
+        if size > self.max_size_bytes:
+            self.logger.warn("Single entry too large to cache: {url}")
+            return Err(network_error("Entry exceeds cache size limit"))
+
+        self.entries.push(entry)
+        self.current_size = self.current_size + size
+        Ok(())
+
+    me invalidate(url: text):
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries[i]
+            if entry.url == url:
+                self.current_size = self.current_size - entry_size(entry)
+                self.remove_at(i)
+                return
+            i = i + 1
+
+    me evict():
+        if self.entries.len() == 0:
+            return
+        val oldest = self.entries[0]
+        self.current_size = self.current_size - entry_size(oldest)
+        self.remove_at(0)
+        self.logger.debug("Evicted oldest cache entry: {oldest.url}")
+
+    me remove_at(index: i64):
+        var result: [CacheEntry] = []
+        var i = 0
+        while i < self.entries.len():
+            if i != index:
+                result.push(self.entries[i])
+            i = i + 1
+        self.entries = result
+
+fn parse_cache_control(header: text) -> [CacheControl]:
+    var result: [CacheControl] = []
+    if header.len() == 0:
+        return result
+    val parts = header.split(",")
+    var i = 0
+    while i < parts.len():
+        val part = parts[i].trim().to_lower()
+        i = i + 1
+        if part == "no-cache":
+            result.push(CacheControl.NoCache)
+        elif part == "no-store":
+            result.push(CacheControl.NoStore)
+        elif part == "public":
+            result.push(CacheControl.Public)
+        elif part == "private":
+            result.push(CacheControl.Private)
+        elif part == "must-revalidate":
+            result.push(CacheControl.MustRevalidate)
+        elif part.starts_with("max-age="):
+            val age_str = part.slice(8, part.len())
+            val seconds = simple_parse_i64(age_str)
+            if seconds >= 0:
+                result.push(CacheControl.MaxAge(seconds))
+    result
+
+fn is_fresh(entry: CacheEntry, now: i64) -> bool:
+    val controls = entry.policy.controls
+    if has_directive(controls, "no-cache"):
+        return false
+
+    val max_age = extract_max_age(controls)
+    if max_age > 0:
+        val age = now - entry.stored_at
+        return age < max_age
+
+    val default_max_age = 3600
+    val age = now - entry.stored_at
+    age < default_max_age
+
+fn extract_max_age(controls: [CacheControl]) -> i64:
+    var i = 0
+    while i < controls.len():
+        val ctrl = controls[i]
+        i = i + 1
+        match ctrl:
+            CacheControl.MaxAge(seconds):
+                return seconds
+            _:
+                pass_do_nothing
+    0
+
+fn should_cache(status: i64, headers: text) -> bool:
+    if status != 200 and status != 203 and status != 204 and status != 301 and status != 404:
+        return false
+    val cc = find_header_value(headers, "cache-control")
+    if cc.contains("no-store"):
+        return false
+    true
+
+fn entry_size(entry: CacheEntry) -> i64:
+    entry.url.len() + entry.body.len()
+
+fn has_directive(controls: [CacheControl], name: text) -> bool:
+    var i = 0
+    while i < controls.len():
+        val ctrl = controls[i]
+        i = i + 1
+        val matches = match ctrl:
+            CacheControl.NoCache: name == "no-cache"
+            CacheControl.NoStore: name == "no-store"
+            CacheControl.Public: name == "public"
+            CacheControl.Private: name == "private"
+            CacheControl.MustRevalidate: name == "must-revalidate"
+            CacheControl.MaxAge(_): name == "max-age"
+        if matches:
+            return true
+    false
+
+fn find_header_value(headers: text, name: text) -> text:
+    val lower_name = name.to_lower()
+    val lines = headers.split("\r\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        i = i + 1
+        val colon = line.index_of(":")
+        if colon > 0:
+            val hname = line.slice(0, colon).trim().to_lower()
+            if hname == lower_name:
+                return line.slice(colon + 1, line.len()).trim()
+    ""
+
+fn simple_parse_i64(s: text) -> i64:
+    if s.len() == 0:
+        return -1
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        i = i + 1
+        if ch >= "0" and ch <= "9":
+            val d = ch.char_at(0) - "0".char_at(0)
+            result = result * 10 + d
+        else:
+            return -1
+    result

@@ -1,0 +1,442 @@
+# @cover src/lib/nogc_sync_mut/ui_test/sgtti.spl 80%
+use std.spec.{describe, it, expect}
+use std.ui_test.sgtti.{SgttiTestDriver, UI_TEST_TARGET_TUI, UI_TEST_TARGET_GUI, UI_TEST_TARGET_BOTH, ui_test_targets, sgtti_parity_check, sgtti_snapshot_from_tui_state, sgtti_snapshot_from_draw_ir_batch, sgtti_snapshot_from_draw_ir_composition, expect_draw, gui_test_snapshot, gui_test_snapshot_default}
+use common.ui.access_types.{UiAccessNode, UiAccessProp, UiAccessSurface}
+use common.ui.builder.{column, text_widget, build_tree}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, draw_ir_batch_with_source, draw_ir_box_with_style, draw_ir_composition, draw_ir_embedding_config, draw_ir_port_command, draw_ir_rect_bounds, draw_ir_source_gui_ast, draw_ir_source_html_ast, draw_ir_style_prop}
+use common.ui.widget.{UIState}
+use common.ui.win_text_access.{
+    WinTextSnapshot,
+    win_text_make_node,
+    win_text_snapshot_from_parts,
+    win_text_source
+}
+
+fn _sgtti_fixture_snapshot() -> WinTextSnapshot:
+    val surface = UiAccessSurface(
+        surface_id: "surface:main",
+        title: "Main",
+        active: true,
+        window_id: "main",
+        app_id: "sgtti_test",
+        root_canonical_id: "surface:main#root"
+    )
+    val button = win_text_make_node(
+        surface_id: "surface:main",
+        widget_id: "button_ok",
+        kind: "button",
+        text_value: "OK",
+        action_names: ["click"],
+        props: [UiAccessProp(key: "role", value: "primary action")]
+    )
+    val input = win_text_make_node(
+        surface_id: "surface:main",
+        widget_id: "name_input",
+        kind: "input",
+        text_value: "Ada",
+        action_names: ["type_text"],
+        props: [UiAccessProp(key: "placeholder", value: "Name")]
+    )
+    val source = win_text_source(
+        source_id: "sgtti_test",
+        source_kind: "in_process_semantic",
+        confidence: "high",
+        capabilities: ["query_text", "act_node"],
+        captured_at_ms: 1000,
+        max_age_ms: 5000,
+        now_ms: 1000
+    )
+    win_text_snapshot_from_parts(
+        mode: "sgtti_test",
+        active_surface: "surface:main",
+        surfaces: [surface],
+        nodes: [button, input],
+        sources: [source]
+    )
+
+fn _sgtti_parity_snapshot(mode: text, visible: bool, focused: bool, enabled: bool, selected: bool) -> WinTextSnapshot:
+    val surface = UiAccessSurface(
+        surface_id: "{mode}:main",
+        title: mode,
+        active: true,
+        window_id: mode,
+        app_id: "sgtti_{mode}",
+        root_canonical_id: "{mode}:main#root"
+    )
+    val node = UiAccessNode(
+        canonical_id: "{mode}:main#shared",
+        surface_id: "{mode}:main",
+        widget_id: "shared",
+        kind: "button",
+        visible: visible,
+        focused: focused,
+        enabled: enabled,
+        selected: selected,
+        text_value: "Shared",
+        props: [],
+        child_ids: [],
+        action_names: ["click"]
+    )
+    val source = win_text_source(
+        source_id: mode,
+        source_kind: "in_process_semantic",
+        confidence: "high",
+        capabilities: ["query_text", "act_node"],
+        captured_at_ms: 1000,
+        max_age_ms: 5000,
+        now_ms: 1000
+    )
+    win_text_snapshot_from_parts(mode: mode, active_surface: "{mode}:main", surfaces: [surface], nodes: [node], sources: [source])
+
+fn _sgtti_tui_state() -> UIState:
+    val root = column("root", [text_widget("shared_text", "Shared UI").set_prop("text", "Shared UI")])
+    UIState.new(build_tree(root))
+
+fn _sgtti_gui_button_snapshot() -> WinTextSnapshot:
+    val surface = UiAccessSurface(
+        surface_id: "gui:main",
+        title: "GUI",
+        active: true,
+        window_id: "gui",
+        app_id: "sgtti_gui",
+        root_canonical_id: "gui:main#root"
+    )
+    val node = UiAccessNode(
+        canonical_id: "gui:main#shared_text",
+        surface_id: "gui:main",
+        widget_id: "shared_text",
+        kind: "text",
+        visible: true,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text_value: "Shared UI",
+        props: [],
+        child_ids: [],
+        action_names: []
+    )
+    val source = win_text_source(
+        source_id: "gui",
+        source_kind: "in_process_semantic",
+        confidence: "high",
+        capabilities: ["query_text", "act_node"],
+        captured_at_ms: 1000,
+        max_age_ms: 5000,
+        now_ms: 1000
+    )
+    win_text_snapshot_from_parts(mode: "gui", active_surface: "gui:main", surfaces: [surface], nodes: [node], sources: [source])
+
+fn _sgtti_shared_text_parity(tui: SgttiTestDriver, gui: SgttiTestDriver):
+    sgtti_parity_check(tui, gui, "shared_text")
+
+fn _sgtti_gui_draw_ir_batch():
+    val panel = draw_ir_box_with_style(
+        "root",
+        10,
+        20,
+        100,
+        40,
+        0x112233u32,
+        draw_ir_rect_bounds(10, 20, 100, 40),
+        draw_ir_rect_bounds(12, 22, 96, 36),
+        draw_ir_rect_bounds(10, 20, 100, 40),
+        draw_ir_rect_bounds(0, 0, 200, 120),
+        [
+            draw_ir_style_prop("kind", "panel"),
+            draw_ir_style_prop("role", "canvas"),
+            draw_ir_style_prop("display", "flex")
+        ]
+    )
+    val port = draw_ir_port_command("root-port", "root", 30, 35)
+    draw_ir_batch_with_source(
+        "sgtti-gui-draw",
+        DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config("main", "root", 0, 0, 200, 120, 0, 1000, true),
+        [panel, port],
+        draw_ir_source_gui_ast("sgtti-test", "style", "1")
+    )
+
+describe "SGTTI UI test driver":
+
+    it "finds an element by canonical id":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        val node = driver.get_element("surface:main#button_ok").unwrap()
+        expect(node.widget_id).to_equal("button_ok")
+
+    it "finds an element by widget id":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        val node = driver.get_element("name_input").unwrap()
+        expect(node.canonical_id).to_equal("surface:main#name_input")
+
+    it "returns all elements":
+        val driver = SgttiTestDriver.from_snapshot(_sgtti_fixture_snapshot())
+        val nodes = driver.get_elements().unwrap()
+        expect(nodes.len()).to_equal(2)
+
+    it "delegates filtered node queries to WinText":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        val nodes = driver.find_nodes("surface:main", "input", "Ada", 10).unwrap()
+        expect(nodes.len()).to_equal(1)
+        expect(nodes[0].widget_id).to_equal("name_input")
+
+    it "checks visibility, focus, enabled, selected, existence, and text":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        expect(driver.check_exists("button_ok").unwrap()).to_equal(true)
+        expect(driver.check_visible("button_ok").unwrap()).to_equal(true)
+        expect(driver.check_focused("button_ok").unwrap()).to_equal(false)
+        expect(driver.check_enabled("button_ok").unwrap()).to_equal(true)
+        expect(driver.check_selected("button_ok").unwrap()).to_equal(false)
+        expect(driver.check_text("button_ok", "primary").unwrap()).to_equal(true)
+
+    it "routes click and type_text actions":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        expect(driver.click("button_ok").unwrap()).to_equal(true)
+        expect(driver.type_text("name_input", "Grace").unwrap()).to_equal(true)
+
+    it "reports missing and unsupported targets":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        expect(driver.check_exists("missing").unwrap()).to_equal(false)
+        expect(driver.get_element("missing").is_err()).to_equal(true)
+        expect(driver.click("name_input").is_err()).to_equal(true)
+
+    it "expands ui test target config":
+        expect(ui_test_targets(UI_TEST_TARGET_TUI).len()).to_equal(1)
+        expect(ui_test_targets(UI_TEST_TARGET_TUI)[0]).to_equal(UI_TEST_TARGET_TUI)
+        expect(ui_test_targets(UI_TEST_TARGET_GUI)[0]).to_equal(UI_TEST_TARGET_GUI)
+        expect(ui_test_targets(UI_TEST_TARGET_BOTH).len()).to_equal(2)
+        expect(ui_test_targets(UI_TEST_TARGET_BOTH)[0]).to_equal(UI_TEST_TARGET_TUI)
+        expect(ui_test_targets(UI_TEST_TARGET_BOTH)[1]).to_equal(UI_TEST_TARGET_GUI)
+        expect(ui_test_targets("unknown").len()).to_equal(0)
+
+    it "passes parity when tui and gui snapshots agree":
+        val tui = SgttiTestDriver.new(_sgtti_parity_snapshot("tui", true, false, true, false))
+        val gui = SgttiTestDriver.new(_sgtti_parity_snapshot("gui", true, false, true, false))
+        val result = sgtti_parity_check(tui, gui, "shared")
+
+        expect(result.ok).to_equal(true)
+        expect(result.tui_found).to_equal(true)
+        expect(result.gui_found).to_equal(true)
+        expect(result.visible_match).to_equal(true)
+        expect(result.focused_match).to_equal(true)
+        expect(result.enabled_match).to_equal(true)
+        expect(result.selected_match).to_equal(true)
+
+    it "converts TUI UIState onto SGTTI and shares a parity body with GUI":
+        val state = _sgtti_tui_state()
+        val snapshot = sgtti_snapshot_from_tui_state(state, 1000, 5000, 1000)
+        val tui = SgttiTestDriver.new(snapshot)
+        val tui_from_state = SgttiTestDriver.from_tui_state(state, 1000, 5000, 1000)
+        val gui = SgttiTestDriver.new(_sgtti_gui_button_snapshot())
+
+        expect(snapshot.access.active_surface).to_equal("main")
+        expect(tui.get_element("shared_text").unwrap().text_value).to_equal("Shared UI")
+        expect(tui_from_state.check_exists("shared_text").unwrap()).to_equal(true)
+        val result = _sgtti_shared_text_parity(tui, gui)
+        expect(result.ok).to_equal(true)
+        expect(tui.check_text("shared_text", "Shared UI").unwrap()).to_equal(true)
+        expect(gui.check_text("shared_text", "Shared UI").unwrap()).to_equal(true)
+
+    it "builds a headless GUI snapshot with one helper call":
+        val snapshot = gui_test_snapshot("Settings", 12, 24, 320, 200, 2000, 2000)
+        val driver = SgttiTestDriver.new(snapshot)
+        val default_snapshot = gui_test_snapshot_default("Terminal")
+
+        expect(snapshot.access.nodes.len()).to_equal(1)
+        expect(snapshot.access.nodes[0].kind).to_equal("compositor_window")
+        expect(snapshot.access.nodes[0].text_value).to_equal("Settings")
+        expect(driver.check_text("compositor:1#root", "Settings").unwrap()).to_equal(true)
+        expect(default_snapshot.access.nodes[0].text_value).to_equal("Terminal")
+
+    it "fails parity on divergent state or missing targets":
+        val tui = SgttiTestDriver.new(_sgtti_parity_snapshot("tui", true, false, true, false))
+        val gui = SgttiTestDriver.new(_sgtti_parity_snapshot("gui", false, false, true, false))
+        val mismatch = sgtti_parity_check(tui, gui, "shared")
+        val missing = sgtti_parity_check(tui, gui, "missing")
+
+        expect(mismatch.ok).to_equal(false)
+        expect(mismatch.visible_match).to_equal(false)
+        expect(mismatch.focused_match).to_equal(true)
+        expect(missing.ok).to_equal(false)
+        expect(missing.tui_found).to_equal(false)
+        expect(missing.gui_found).to_equal(false)
+
+    it "asserts Draw IR geometry, hit rect, css, parent, and kind":
+        val box = draw_ir_box_with_style(
+            "root",
+            10,
+            20,
+            100,
+            40,
+            0x112233u32,
+            draw_ir_rect_bounds(10, 20, 100, 40),
+            draw_ir_rect_bounds(12, 22, 96, 36),
+            draw_ir_rect_bounds(10, 20, 100, 40),
+            draw_ir_rect_bounds(0, 0, 200, 120),
+            [
+                draw_ir_style_prop("kind", "panel"),
+                draw_ir_style_prop("role", "canvas"),
+                draw_ir_style_prop("display", "flex")
+            ]
+        )
+        val port = draw_ir_port_command("root-port", "root", 30, 35)
+        val batch = draw_ir_batch_with_source(
+            "sgtti-draw",
+            DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("main", "root", 0, 0, 200, 120, 0, 1000, true),
+            [box, port],
+            draw_ir_source_gui_ast("sgtti-test", "style", "1")
+        )
+        val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000))
+
+        expect(driver.expect_draw("root", "visible").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "geometry 10 20 101 39 tolerance 1").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "hit_rect contains 25 30").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "css display flex").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "kind panel").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "role canvas").unwrap()).to_equal(true)
+        expect(expect_draw(driver, "root-port", "parent root").unwrap()).to_equal(true)
+
+    it "asserts HTML backed Draw IR with visible text css and hit geometry":
+        val card = draw_ir_box_with_style(
+            "card",
+            4,
+            6,
+            120,
+            48,
+            0x1D4ED8u32,
+            draw_ir_rect_bounds(4, 6, 120, 48),
+            draw_ir_rect_bounds(8, 10, 112, 40),
+            draw_ir_rect_bounds(4, 6, 120, 48),
+            draw_ir_rect_bounds(0, 0, 160, 96),
+            [
+                draw_ir_style_prop("tag", "section"),
+                draw_ir_style_prop("kind", "html"),
+                draw_ir_style_prop("role", "region"),
+                draw_ir_style_prop("display", "block"),
+                draw_ir_style_prop("background-color", "#1d4ed8")
+            ]
+        )
+        val batch = draw_ir_batch_with_source(
+            "html-draw",
+            DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("web", "card", 0, 0, 160, 96, 0, 1000, true),
+            [card],
+            draw_ir_source_html_ast("simple-web", "section", "card", "#card", "panel", "style", "1")
+        )
+        val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000))
+
+        expect(driver.expect_draw("card", "visible").unwrap()).to_equal(true)
+        expect(driver.expect_draw("card", "kind html").unwrap()).to_equal(true)
+        expect(driver.expect_draw("card", "role region").unwrap()).to_equal(true)
+        expect(driver.expect_draw("card", "css display block").unwrap()).to_equal(true)
+        expect(driver.expect_draw("card", "css background-color #1d4ed8").unwrap()).to_equal(true)
+        expect(driver.expect_draw("card", "geometry 4 6 120 48").unwrap()).to_equal(true)
+        expect(expect_draw(driver, "card", "hit_rect contains 32 24").unwrap()).to_equal(true)
+
+    it "asserts composed 2D html css and wasm draw contracts through expect_draw":
+        val html_panel = draw_ir_box_with_style(
+            "html-panel",
+            8,
+            10,
+            180,
+            90,
+            0x0F172Au32,
+            draw_ir_rect_bounds(8, 10, 180, 90),
+            draw_ir_rect_bounds(16, 18, 164, 74),
+            draw_ir_rect_bounds(8, 10, 180, 90),
+            draw_ir_rect_bounds(0, 0, 220, 140),
+            [
+                draw_ir_style_prop("kind", "html"),
+                draw_ir_style_prop("role", "region"),
+                draw_ir_style_prop("display", "grid"),
+                draw_ir_style_prop("contain", "paint")
+            ]
+        )
+        val wasm_canvas = draw_ir_box_with_style(
+            "wasm-canvas",
+            20,
+            28,
+            96,
+            48,
+            0x2563EBu32,
+            draw_ir_rect_bounds(20, 28, 96, 48),
+            draw_ir_rect_bounds(24, 32, 88, 40),
+            draw_ir_rect_bounds(20, 28, 96, 48),
+            draw_ir_rect_bounds(8, 10, 180, 90),
+            [
+                draw_ir_style_prop("kind", "canvas"),
+                draw_ir_style_prop("role", "wasm"),
+                draw_ir_style_prop("wasm-abi", "wasm32-simple-ui-host-wm")
+            ]
+        )
+        val canvas_port = draw_ir_port_command("wasm-canvas-port", "wasm-canvas", 44, 52)
+        val composition = draw_ir_composition("expect-draw-2d-wasm", "scene-2d-wasm", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch_with_source(
+                "html-css-batch",
+                DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config("web-surface", "html-panel", 0, 0, 220, 140, 0, 1000, true),
+                [html_panel],
+                draw_ir_source_html_ast("html-node-9", "section", "html-panel", "#app .panel", "panel", "panel.grid", "css-rev-2")
+            ),
+            draw_ir_batch_with_source(
+                "wasm-2d-batch",
+                DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config("wasm-surface", "wasm-canvas", 0, 0, 220, 140, 1, 1000, true),
+                [wasm_canvas, canvas_port],
+                draw_ir_source_gui_ast("wasm-scene-node", "canvas.wasm", "wasm-rev-1")
+            )
+        ])
+        val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_composition(composition, 1000, 5000, 1000))
+
+        expect(driver.expect_draw("html-panel", "visible").unwrap()).to_equal(true)
+        expect(driver.expect_draw("html-panel", "kind html").unwrap()).to_equal(true)
+        expect(driver.expect_draw("html-panel", "css display grid").unwrap()).to_equal(true)
+        expect(driver.expect_draw("html-panel", "css contain paint").unwrap()).to_equal(true)
+        expect(driver.expect_draw("html-panel", "geometry 8 10 180 90").unwrap()).to_equal(true)
+        expect(driver.expect_draw("wasm-canvas", "role wasm").unwrap()).to_equal(true)
+        expect(driver.expect_draw("wasm-canvas", "css wasm-abi wasm32-simple-ui-host-wm").unwrap()).to_equal(true)
+        expect(driver.expect_draw("wasm-canvas", "hit_rect contains 64 48").unwrap()).to_equal(true)
+        expect(expect_draw(driver, "wasm-canvas-port", "parent wasm-canvas").unwrap()).to_equal(true)
+        expect(driver.expect_draw("wasm-canvas", "geometry 20 28 120 48").unwrap()).to_equal(false)
+
+    it "captures GUI Draw IR as visible access state evidence":
+        val batch = _sgtti_gui_draw_ir_batch()
+        val snapshot = sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000)
+        val driver = SgttiTestDriver.new(snapshot)
+        val root = driver.get_element("draw_ir:sgtti-gui-draw#root").unwrap()
+
+        expect(snapshot.access.mode).to_equal("draw_ir")
+        expect(snapshot.access.active_surface).to_equal("draw_ir:sgtti-gui-draw")
+        expect(snapshot.access.surfaces[0].app_id).to_equal("draw_ir")
+        expect(snapshot.sources[0].source_kind).to_equal("in_process_semantic")
+        expect(snapshot.sources[0].capabilities).to_contain("layout_read")
+        expect(root.visible).to_equal(true)
+        expect(root.kind).to_equal("rect")
+        expect(root.text_value).to_equal("")
+        expect(driver.check_visible("root").unwrap()).to_equal(true)
+        expect(driver.check_exists("root-port").unwrap()).to_equal(true)
+
+    it "converts GUI Draw IR compositions into expect_draw targets":
+        val batch = _sgtti_gui_draw_ir_batch()
+        val composition = draw_ir_composition("sgtti-composition", "scene-1", DRAW_IR_BACKEND_CPU, [batch])
+        val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_composition(composition, 1000, 5000, 1000))
+
+        expect(driver.get_elements().unwrap().len()).to_equal(2)
+        expect(driver.expect_draw("root", "geometry 10 20 100 40").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "css display flex").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root-port", "parent root").unwrap()).to_equal(true)
+
+    it "reports failed GUI Draw IR assertions without passing silently":
+        val batch = _sgtti_gui_draw_ir_batch()
+        val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000))
+        val missing_kind = driver.expect_draw("root", "kind dialog").unwrap()
+        val outside_hit_rect = driver.expect_draw("root", "hit_rect contains 500 500").unwrap()
+        val unknown_assertion = driver.expect_draw("root", "opacity 1000")
+        val malformed_geometry = driver.expect_draw("root", "geometry 10")
+
+        expect(missing_kind).to_equal(false)
+        expect(outside_hit_rect).to_equal(false)
+        expect(unknown_assertion.is_err()).to_equal(true)
+        expect(unknown_assertion.unwrap_err()).to_contain("unknown draw assertion")
+        expect(malformed_geometry.is_err()).to_equal(true)
+        expect(malformed_geometry.unwrap_err()).to_contain("geometry assertion requires")

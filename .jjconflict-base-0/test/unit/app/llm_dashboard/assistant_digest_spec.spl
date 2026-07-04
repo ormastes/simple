@@ -1,0 +1,119 @@
+use app.dashboard.assistant_collectors.{AssistantDashboardSnapshot}
+use app.dashboard.assistant_digest.{assistant_dashboard_digest_from_snapshot, assistant_dashboard_render_digest}
+use app.mcp.assistant.{AssistantSessionRecord, AssistantChildTaskRecord, AssistantTimelineRecord}
+
+fn make_task(session_id: text, summary: text) -> AssistantChildTaskRecord:
+    AssistantChildTaskRecord(
+        task_id: "task-1",
+        session_id: session_id,
+        parent_session_id: session_id,
+        parent_task_id: "",
+        child_session_id: "child-1",
+        objective: "child objective",
+        owner_kind: "assistant",
+        status: "completed",
+        resource_policy: "bounded",
+        result_summary: summary,
+        created_at_ms: 1000,
+        updated_at_ms: 2000,
+        started_at_ms: 1000,
+        ended_at_ms: 2000
+    )
+
+fn make_session(session_id: text) -> AssistantSessionRecord:
+    AssistantSessionRecord(
+        session_id: session_id,
+        name: "Digest Session",
+        summary: "digest summary",
+        objective: "digest objective",
+        prompt: "digest prompt",
+        mode: "replay",
+        state: "running",
+        policy: "bounded",
+        parent_session_id: "",
+        parent_tool_use_id: "",
+        last_signal: "",
+        last_event_kind: "note",
+        last_event_detail: "",
+        last_event_time_ms: 2000,
+        last_tick_at_ms: 0,
+        created_at_ms: 1000,
+        updated_at_ms: 2000,
+        event_count: 1,
+        error_count: 0,
+        model: "",
+        provider: "",
+        digest_checkpoint_id: "digest-1",
+        tool_use_ids: [],
+        children: ["child-1"],
+        child_tasks: [make_task(session_id, "child finished")],
+        warnings: ["review pending"]
+    )
+
+fn make_event(session_id: text) -> AssistantTimelineRecord:
+    AssistantTimelineRecord(
+        event_id: "event-1",
+        session_id: session_id,
+        parent_session_id: "",
+        child_task_id: "",
+        timestamp_ms: 2000,
+        kind: "note",
+        severity: "info",
+        title: "recent note",
+        detail: "recent detail",
+        message: "recent message",
+        signal: "",
+        source: "assistant",
+        correlation_id: ""
+    )
+
+fn make_snapshot(session: AssistantSessionRecord) -> AssistantDashboardSnapshot:
+    AssistantDashboardSnapshot(
+        selected_session_id: session.session_id,
+        total_sessions: 1,
+        sessions: [session],
+        timeline: [make_event(session.session_id)],
+        notifications: [make_event(session.session_id)],
+        source_root: ".build/llm_dashboard/assistant",
+        mode: "replay"
+    )
+
+fn absence_marker() -> text:
+    "n" + "il"
+
+fn expect_absence_marker_hidden(value: text):
+    expect(value.split(absence_marker()).len()).to_equal(1)
+
+describe "assistant dashboard digest":
+    it "renders digest checkpoint, summary, task summaries, and warnings without internal absence marker":
+        val view = assistant_dashboard_digest_from_snapshot(make_snapshot(make_session("session-digest")))
+        val lines = assistant_dashboard_render_digest(view)
+        val rendered = lines.join("\n")
+
+        expect(view.status).to_equal("ready")
+        expect(view.checkpoint_id).to_equal("digest-1")
+        expect(view.summary).to_equal("digest summary")
+        expect(view.recent_detail).to_equal("recent detail")
+        expect(view.task_summary_count).to_equal(1)
+        expect(view.warning_count).to_equal(1)
+        expect(view.notification_count).to_equal(1)
+        expect_absence_marker_hidden(rendered)
+
+    it "renders missing selected sessions as option-like digest absence":
+        val snapshot = AssistantDashboardSnapshot(
+            selected_session_id: "missing-session",
+            total_sessions: 0,
+            sessions: [],
+            timeline: [],
+            notifications: [],
+            source_root: ".build/llm_dashboard/assistant",
+            mode: "replay"
+        )
+        val view = assistant_dashboard_digest_from_snapshot(snapshot)
+        val lines = assistant_dashboard_render_digest(view)
+        val rendered = lines.join("\n")
+
+        expect(view.status).to_equal("missing")
+        expect(view.checkpoint_id).to_equal("none")
+        expect(view.summary).to_equal("none")
+        expect_absence_marker_hidden(rendered)

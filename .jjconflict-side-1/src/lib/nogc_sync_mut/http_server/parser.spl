@@ -1,0 +1,201 @@
+# HTTP Request Parser — Lightweight Embedded Web Server
+#
+# Part of std.nogc_sync_mut.http_server
+# Full standalone example: examples/06_io/simple_web_server/
+# Design: doc/05_design/simple_web_server_lib_api.md
+
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.http_server.types.{
+    HttpRequest, HttpMethod, http_method_from_text
+}
+
+# =============================================================================
+# Request size limits
+# =============================================================================
+
+# Maximum length (bytes) of the request line (method + path + version).
+val MAX_REQUEST_LINE: i32 = 8192
+
+# Maximum number of request headers accepted per request.
+val MAX_HEADER_COUNT: i32 = 100
+
+# Maximum length (bytes) of a single header line (name + colon + value).
+val MAX_HEADER_LINE: i32 = 8192
+
+# Maximum body size (bytes) accepted via Content-Length.  10 MiB default.
+val MAX_BODY_SIZE: i32 = 10485760
+
+# =============================================================================
+# Public API
+# =============================================================================
+
+fn parse_request(stream: TcpStream) -> Result<HttpRequest, text>:
+    return parse_request_with_limits(stream, MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE)
+
+# parse_request_with_limits parses an HTTP/1.x request from `stream` enforcing
+# caller-supplied limits.  Returns Err with a descriptive message on any
+# violation so the caller can send a 400/413/431 response.
+#
+# max_read_iters caps the number of header read_line calls so that a slow
+# client cannot hold the handler thread indefinitely (AC-4).
+fn parse_request_with_limits(stream: TcpStream, max_request_line: i32, max_header_count: i32, max_header_line: i32, max_body: i32) -> Result<HttpRequest, text>:
+    match stream.read_line():
+        Err(e):
+            return Err("Failed to read request line: {e}")
+        Ok(request_line):
+            val trimmed = request_line.trim()
+            if trimmed == "":
+                return Err("Empty request line")
+
+            # AC-1 / finding 2: enforce request-line length
+            if trimmed.len() > max_request_line:
+                return Err("431 Request line too long: {trimmed.len()} bytes")
+
+            val parsed = parse_request_line(trimmed)
+            val method_str = parsed.0
+            val raw_path = parsed.1
+            val version = parsed.2
+
+            if method_str == "" or raw_path == "":
+                return Err("Malformed request line: {trimmed}")
+
+            val method = http_method_from_text(method_str)
+
+            var path = raw_path
+            var query = ""
+            val qmark = raw_path.index_of("?")
+            if qmark >= 0:
+                path = raw_path.slice(0, qmark)
+                query = raw_path.slice(qmark + 1, raw_path.len())
+
+            var headers: [(text, text)] = []
+            var header_count: i32 = 0
+            loop:
+                match stream.read_line():
+                    Ok(header_line):
+                        val hl = header_line.trim()
+                        if hl == "":
+                            break
+                        # AC-1 / finding 2: per-header line length
+                        if hl.len() > max_header_line:
+                            return Err("431 Header line too long: {hl.len()} bytes")
+                        # AC-1 / finding 2: header count limit
+                        header_count = header_count + 1
+                        if header_count > max_header_count:
+                            return Err("431 Too many headers: {header_count}")
+                        val colon = hl.index_of(":")
+                        if colon > 0:
+                            val name = hl.slice(0, colon).trim()
+                            val value = hl.slice(colon + 1, hl.len()).trim()
+                            headers.push((name, value))
+                    Err(_):
+                        break
+
+            val decision = headers_decision(headers, max_body)
+            if decision.0 != "":
+                return Err(decision.0)
+            val content_length = decision.1
+
+            var body = ""
+            if content_length > 0:
+                match stream.read_bytes(content_length):
+                    Ok(data):
+                        body = data
+                    Err(_):
+                        pass
+
+            return Ok(HttpRequest(
+                method: method,
+                path: path,
+                query: query,
+                version: version,
+                headers: headers,
+                body: body,
+                remote_addr: ""
+            ))
+
+# headers_decision inspects parsed headers and decides how the body must be
+# handled. Returns (err, content_length): err is "" when the request is
+# acceptable, otherwise a status-prefixed message (400/413/501).
+# Pure function over parsed headers — fully unit-testable without a socket.
+# Enforced here (fail closed):
+#   - duplicate Content-Length is a request-smuggling vector -> 400
+#   - invalid (negative/non-numeric/overflow) Content-Length -> 400
+#   - Content-Length above max_body -> 413
+#   - Transfer-Encoding: chunked is unsupported -> 501, never misparsed
+fn headers_decision(headers: [(text, text)], max_body: i32) -> (text, i32):
+    var content_length: i32 = 0
+    var seen_content_length = false
+    for h in headers:
+        val lname = h.0.to_lower()
+        if lname == "content-length":
+            if seen_content_length:
+                return ("400 Duplicate Content-Length header", 0)
+            seen_content_length = true
+            val parsed_len = content_length_from_text(h.1)
+            if parsed_len < 0:
+                return ("400 Invalid Content-Length: {h.1}", 0)
+            if parsed_len > max_body:
+                return ("413 Content-Length too large: {parsed_len}", 0)
+            content_length = parsed_len
+        elif lname == "transfer-encoding":
+            if h.1.to_lower().contains("chunked"):
+                return ("501 Transfer-Encoding: chunked is not supported", 0)
+    ("", content_length)
+
+fn parse_request_line(line: text) -> (text, text, text):
+    var method = ""
+    var path = ""
+    var version = ""
+    var idx = 0
+    for part in line.split(" "):
+        if idx == 0:
+            method = part
+        elif idx == 1:
+            path = part
+        elif idx == 2:
+            version = part
+            break
+        idx = idx + 1
+    return (method, path, version)
+
+# content_length_from_text parses a Content-Length header value.
+# Returns the length as i32 on success, or -1 on any parse error
+# (negative value, non-numeric characters, or overflow beyond i32 max).
+fn content_length_from_text(s: text) -> i32:
+    val trimmed = s.trim()
+    val n = trimmed.len()
+    if n == 0:
+        return -1
+    # Reject explicit negative sign — Content-Length must be non-negative.
+    if trimmed.char_at(0) == "-":
+        return -1
+    # Verify every character is an ASCII digit using char equality.
+    # Note: char_at().to_i64() returns a platform-dependent encoding in the
+    # interpreter, so we use char == "N" comparisons instead of arithmetic.
+    var i = 0
+    while i < n:
+        val c = trimmed.char_at(i)
+        val is_digit = (c == "0") or (c == "1") or (c == "2") or (c == "3") or (c == "4") or (c == "5") or (c == "6") or (c == "7") or (c == "8") or (c == "9")
+        if not is_digit:
+            return -1
+        i = i + 1
+    # All characters are digits.  Use text.to_i64() for the actual numeric value.
+    # i32 max = 2147483647; use i64 to detect overflow.
+    val i32_max: i64 = 2147483647
+    val result = trimmed.to_i64()
+    if result > i32_max:
+        return -1
+    return result.to_i32()
+
+# to_i32_safe is kept for backward compatibility.  New callers should prefer
+# content_length_from_text which returns -1 on error instead of 0.
+fn to_i32_safe(s: text) -> i32:
+    val v = content_length_from_text(s)
+    if v < 0:
+        return 0
+    return v
+
+export parse_request, parse_request_with_limits, parse_request_line
+export to_i32_safe, content_length_from_text, headers_decision
+export MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE

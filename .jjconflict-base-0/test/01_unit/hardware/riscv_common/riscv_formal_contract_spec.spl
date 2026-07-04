@@ -1,0 +1,139 @@
+import std.spec
+
+use hardware.riscv_common.core.riscv_formal.{
+    RiscvFormalContract, RiscvRetireEvent,
+    RISCV_PRIV_USER, RISCV_PRIV_SUPERVISOR, RISCV_PRIV_MACHINE,
+    RISCV_ECALL_INSTR, RV64_DEBUG_WRITE_ECALL_PC, RV64_DEBUG_WRITE_RESUME_PC,
+    RV64_CAUSE_ECALL_FROM_U,
+    probe_riscv_external_formal, riscv_mask_for_xlen, riscv_instruction_size,
+    verify_riscv_event, verify_riscv_events,
+    verify_rv32_default_vhdl_constraints,
+    verify_rv32_ghdl_return_zero_contract,
+    verify_rv64_qemu_user_proof_contract
+}
+
+describe "RISC-V shared formal contract":
+    it "uses 32-bit mask for rv32":
+        expect(riscv_mask_for_xlen(32)).to_equal(0xFFFFFFFF)
+
+    it "uses compressed instruction size when low bits are not 11":
+        expect(riscv_instruction_size(0x0001, true)).to_equal(2)
+
+    it "verifies a valid rv32 retire step":
+        val contract = RiscvFormalContract.rv32_ghdl()
+        val event = RiscvRetireEvent.step(
+            pc_before: 0x80010000,
+            pc_after: 0x80010004,
+            instr_bits: 0x00000513,
+            rd_index: 10,
+            rd_value: 0,
+            x0_value: 0,
+            privilege: RISCV_PRIV_MACHINE
+        )
+        expect(verify_riscv_event(contract, event).is_ok()).to_equal(true)
+
+    it "rejects x0 mutation":
+        val contract = RiscvFormalContract.rv32_ghdl()
+        val event = RiscvRetireEvent.step(
+            pc_before: 0x80010000,
+            pc_after: 0x80010004,
+            instr_bits: 0x00000013,
+            rd_index: 0,
+            rd_value: 1,
+            x0_value: 1,
+            privilege: RISCV_PRIV_MACHINE
+        )
+        val result = verify_riscv_event(contract, event)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("x0")
+
+    it "rejects step pc mismatch":
+        val contract = RiscvFormalContract.rv32_ghdl()
+        val event = RiscvRetireEvent.step(
+            pc_before: 0x80010000,
+            pc_after: 0x80010008,
+            instr_bits: 0x00000513,
+            rd_index: 10,
+            rd_value: 0,
+            x0_value: 0,
+            privilege: RISCV_PRIV_MACHINE
+        )
+        val result = verify_riscv_event(contract, event)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("pc_after")
+
+    it "rejects rv32 width overflow":
+        val contract = RiscvFormalContract.rv32_ghdl()
+        val event = RiscvRetireEvent.step(
+            pc_before: 0x80010000,
+            pc_after: 0x80010004,
+            instr_bits: 0x00000513,
+            rd_index: 10,
+            rd_value: 0x100000000,
+            x0_value: 0,
+            privilege: RISCV_PRIV_MACHINE
+        )
+        val result = verify_riscv_event(contract, event)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("xlen 32")
+
+    it "verifies trap and return transitions for rv64":
+        val contract = RiscvFormalContract.rv64_qemu()
+        val events = [
+            RiscvRetireEvent.trap(
+                pc_before: RV64_DEBUG_WRITE_ECALL_PC,
+                trap_pc: 0x80200000,
+                instr_bits: RISCV_ECALL_INSTR,
+                privilege_before: RISCV_PRIV_USER,
+                privilege_after: RISCV_PRIV_SUPERVISOR,
+                trap_cause: RV64_CAUSE_ECALL_FROM_U
+            ),
+            RiscvRetireEvent.return_transfer(
+                pc_before: 0x80200000,
+                resume_pc: RV64_DEBUG_WRITE_RESUME_PC,
+                privilege_before: RISCV_PRIV_SUPERVISOR,
+                privilege_after: RISCV_PRIV_USER
+            )
+        ]
+        expect(verify_riscv_events(contract, events).is_ok()).to_equal(true)
+
+    it "rejects trap that does not raise privilege":
+        val contract = RiscvFormalContract.rv64_qemu()
+        val event = RiscvRetireEvent.trap(
+            pc_before: RV64_DEBUG_WRITE_ECALL_PC,
+            trap_pc: 0x80200000,
+            instr_bits: RISCV_ECALL_INSTR,
+            privilege_before: RISCV_PRIV_USER,
+            privilege_after: RISCV_PRIV_USER,
+            trap_cause: RV64_CAUSE_ECALL_FROM_U
+        )
+        val result = verify_riscv_event(contract, event)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("raise privilege")
+
+    it "rejects return that does not lower privilege":
+        val contract = RiscvFormalContract.rv64_qemu()
+        val event = RiscvRetireEvent.return_transfer(
+            pc_before: 0x80200000,
+            resume_pc: RV64_DEBUG_WRITE_RESUME_PC,
+            privilege_before: RISCV_PRIV_SUPERVISOR,
+            privilege_after: RISCV_PRIV_SUPERVISOR
+        )
+        val result = verify_riscv_event(contract, event)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("lower privilege")
+
+describe "RISC-V formal helper integrations":
+    it "verifies the default rv32 VHDL proof constraints":
+        expect(verify_rv32_default_vhdl_constraints().is_ok()).to_equal(true)
+
+    it "verifies the rv32 ghdl return-zero contract":
+        expect(verify_rv32_ghdl_return_zero_contract(0x80010000, 0).is_ok()).to_equal(true)
+
+    it "verifies rv64 qemu proof output markers with shared contract":
+        val output = "[KERNEL] trap vector installed\n[KERNEL] trap runtime installed\n[KERNEL] spawned user task id=1 entry=0x400000\n[KERNEL] entering U-mode at sepc=0x400000\nP\n[BOOT] RISC-V 64 boot complete\n"
+        expect(verify_rv64_qemu_user_proof_contract(output).is_ok()).to_equal(true)
+
+    it "reports missing external formal tools cleanly":
+        val report = probe_riscv_external_formal()
+        expect(report.detail.len()).to_be_greater_than(0)

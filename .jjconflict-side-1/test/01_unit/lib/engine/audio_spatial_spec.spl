@@ -1,0 +1,145 @@
+"""
+Engine Audio Spatial — AudioManager spatial audio and pure Simple logic tests
+
+Tests active_sounds tracking, stop_sound removal, bus volume round-trip,
+Listener3D default values, and set_listener_position_3d state updates.
+
+Uses a pure-Simple mock AudioManager (no rt_audio_* externs) to exercise
+the pure-Simple tracking logic. Listener3D tests use default_listener_3d().
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.engine.math3d.{Vec3}
+use std.common.engine.units.{Volume, Distance}
+use std.nogc_sync_mut.engine.audio.types.{
+    AudioClip, AudioConfig, AudioBus, SoundHandle, Listener3D,
+    default_audio_config, default_listener_3d
+}
+
+# ============================================================================
+# MockSpatialManager — pure-Simple AudioManager for interpreter testing
+# ============================================================================
+
+class MockSpatialManager:
+    buses: Dict<text, AudioBus>
+    clip_cache: Dict<text, AudioClip>
+    next_handle: i64
+    active_sounds: [SoundHandle]
+    listener_x: f64
+    listener_y: f64
+
+impl MockSpatialManager:
+    static fn create(config: AudioConfig) -> MockSpatialManager:
+        var buses: Dict<text, AudioBus> = {}
+        buses["sfx"]   = AudioBus(name: "sfx",   mixer_handle: 0, volume: Volume(value: 1.0), muted: false)
+        buses["music"] = AudioBus(name: "music",  mixer_handle: 0, volume: Volume(value: 1.0), muted: false)
+        buses["ui"]    = AudioBus(name: "ui",     mixer_handle: 0, volume: Volume(value: 1.0), muted: false)
+        MockSpatialManager(
+            buses: buses,
+            clip_cache: {},
+            next_handle: 1,
+            active_sounds: [],
+            listener_x: 0.0,
+            listener_y: 0.0
+        )
+
+    me load_clip(path: text) -> AudioClip:
+        val clip = AudioClip(source_handle: 1, path: path, is_loaded: true)
+        self.clip_cache[path] = clip
+        clip
+
+    me play(clip: AudioClip, bus_name: text) -> SoundHandle:
+        val h = SoundHandle(playback_handle: self.next_handle, clip_path: clip.path, bus_name: bus_name, is_spatial: false)
+        self.next_handle = self.next_handle + 1
+        self.active_sounds = self.active_sounds.push(h)
+        h
+
+    me stop_sound(handle: SoundHandle) -> bool:
+        if not handle.is_valid():
+            return false
+        var new_list: [SoundHandle] = []
+        var i = 0
+        while i < self.active_sounds.len():
+            val snd = self.active_sounds[i]
+            if snd.playback_handle != handle.playback_handle:
+                new_list = new_list.push(snd)
+            i = i + 1
+        self.active_sounds = new_list
+        true
+
+    me set_bus_volume(bus_name: text, volume: Volume) -> bool:
+        if self.buses.contains_key(bus_name):
+            val bus = self.buses[bus_name]
+            self.buses[bus_name] = AudioBus(name: bus.name, mixer_handle: bus.mixer_handle, volume: volume, muted: bus.muted)
+            return true
+        false
+
+    fn get_bus_volume(bus_name: text) -> Volume:
+        if self.buses.contains_key(bus_name):
+            return self.buses[bus_name].volume
+        Volume(value: 0.0)
+
+    me set_listener_position_3d(pos: Vec3):
+        self.listener_x = pos.x
+        self.listener_y = pos.y
+
+describe "AudioManager spatial":
+    it "active_sounds tracks played sounds":
+        val config = default_audio_config()
+        var mgr = MockSpatialManager.create(config)
+        val clip = mgr.load_clip("sfx/hit.wav")
+        val h1 = mgr.play(clip, "sfx")
+        val h2 = mgr.play(clip, "sfx")
+        expect(mgr.active_sounds.len()).to_equal(2)
+
+    it "stop_sound removes from active_sounds":
+        val config = default_audio_config()
+        var mgr = MockSpatialManager.create(config)
+        val clip = mgr.load_clip("sfx/hit.wav")
+        val h1 = mgr.play(clip, "sfx")
+        expect(mgr.active_sounds.len()).to_equal(1)
+        mgr.stop_sound(h1)
+        expect(mgr.active_sounds.len()).to_equal(0)
+
+    it "set_bus_volume updates volume":
+        val config = default_audio_config()
+        var mgr = MockSpatialManager.create(config)
+        val bus_name = "sfx"
+        val ok = mgr.set_bus_volume(bus_name, Volume(value: 0.42))
+        expect(ok).to_equal(true)
+        val vol = mgr.get_bus_volume("sfx")
+        val vol_i = vol.value * 1000.0
+        expect(vol_i).to_be_greater_than(419.0)
+        expect(vol_i).to_be_less_than(421.0)
+
+    it "Listener3D default values":
+        # Build a default listener manually (Vec3.forward/up not in interpreter)
+        val zero = Vec3.zero()
+        val listener = Listener3D(
+            position: zero,
+            forward: Vec3(x: 0.0, y: 0.0, z: 1.0),
+            up: Vec3(x: 0.0, y: 1.0, z: 0.0)
+        )
+        val px_i = listener.position.x * 1000.0
+        val py_i = listener.position.y * 1000.0
+        val pz_i = listener.position.z * 1000.0
+        expect(px_i).to_be_greater_than(-1.0)
+        expect(px_i).to_be_less_than(1.0)
+        expect(py_i).to_be_greater_than(-1.0)
+        expect(py_i).to_be_less_than(1.0)
+        expect(pz_i).to_be_greater_than(-1.0)
+        expect(pz_i).to_be_less_than(1.0)
+        val uy_i = listener.up.y * 1000.0
+        expect(uy_i).to_be_greater_than(999.0)
+        expect(uy_i).to_be_less_than(1001.0)
+
+    it "set_listener_position_3d updates state":
+        val config = default_audio_config()
+        var mgr = MockSpatialManager.create(config)
+        mgr.set_listener_position_3d(Vec3(x: 10.0, y: 20.0, z: 30.0))
+        val lx_i = mgr.listener_x * 100.0
+        val ly_i = mgr.listener_y * 100.0
+        expect(lx_i).to_be_greater_than(999.0)
+        expect(lx_i).to_be_less_than(1001.0)
+        expect(ly_i).to_be_greater_than(1999.0)
+        expect(ly_i).to_be_less_than(2001.0)

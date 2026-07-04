@@ -1,0 +1,38 @@
+# @cover src/lib/nogc_async_mut/gpu/engine2d/host_gpu_event_queue.spl 80%
+# @tag: unit, gpu, host_gpu_queue, nogc
+
+use std.spec.*
+use std.nogc_async_mut.gpu.engine2d.backend_lane.{ENGINE2D_HOST_GPU_LANE_HOST, ENGINE2D_HOST_GPU_LANE_GPU, engine2d_host_gpu_lane_schedule}
+use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    engine2d_host_gpu_event,
+    engine2d_host_gpu_event_handler_decision,
+    engine2d_host_gpu_event_submit_to_runtime_payload_text,
+    engine2d_host_gpu_runtime_drain,
+    engine2d_host_gpu_runtime_dispatch_draw_ir,
+    engine2d_host_gpu_runtime_queue_with_backend_handle
+}
+
+extern fn rt_host_gpu_queue_reset()
+
+describe "no-GC host GPU event queue":
+
+    it "round-trips backend handle and Draw IR payload text through runtime drain":
+        rt_host_gpu_queue_reset()
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        val lane = engine2d_host_gpu_lane_schedule(ENGINE2D_HOST_GPU_LANE_HOST, ENGINE2D_HOST_GPU_LANE_GPU, "draw_ir_delta", 128, 4096, false, false, true, 2)
+        val event = engine2d_host_gpu_event("evt-1", ENGINE2D_HOST_GPU_LANE_GPU, "draw_ir_delta", 128, 4096, false, false, false, true)
+        val decision = engine2d_host_gpu_event_handler_decision(event, lane)
+        val payload = "schema=simple-draw-ir-v2\ncomposition id=evt-1 scene=browser-frame backend=gpu\nbatch id=evt-1 backend=gpu source_kind=gui_ast source_id=evt-1 surface=s component=c commands=1"
+
+        val submitted = engine2d_host_gpu_event_submit_to_runtime_payload_text(queue, decision, lane, 12345, payload)
+        val drained = engine2d_host_gpu_runtime_drain(queue, 1)
+        val dispatched = engine2d_host_gpu_runtime_dispatch_draw_ir(queue, drained, 12345)
+
+        expect(submitted.submitted).to_be(true)
+        expect(submitted.packet_id).to_equal(1)
+        expect(drained.drained).to_equal(1)
+        expect(drained.last_backend_handle).to_equal(7)
+        expect(drained.last_payload_hash).to_equal(12345)
+        expect(drained.last_payload_text).to_contain("schema=simple-draw-ir-v2")
+        expect(dispatched.status).to_equal("dispatched")
+        expect(dispatched.backend_handle).to_equal(7)

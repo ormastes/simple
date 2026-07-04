@@ -1,0 +1,43 @@
+"""Bounded GDI32 drawing bridge for SimpleOS-backed Wine windows."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_gdi_dispatch_gate}
+
+class WineGdi32DrawingResult:
+    ok: bool
+    error: text
+    hdc: i64
+    text: text
+    checksum: i64
+    operations: text
+
+fn _result(ok: bool, error: text, hdc: i64, text: text, checksum: i64, operations: text) -> WineGdi32DrawingResult:
+    WineGdi32DrawingResult(ok: ok, error: error, hdc: hdc, text: text, checksum: checksum, operations: operations)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_gdi_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 4:
+        return "gdi32-sequence-count-mismatch"
+    if symbols[0] != "CreateCompatibleDC":
+        return "gdi32-sequence-expected:CreateCompatibleDC"
+    if symbols[1] != "TextOutW":
+        return "gdi32-sequence-expected:TextOutW"
+    if symbols[2] != "BitBlt":
+        return "gdi32-sequence-expected:BitBlt"
+    if symbols[3] != "DeleteDC":
+        return "gdi32-sequence-expected:DeleteDC"
+    "ready"
+
+pub fn wine_gdi32_execute_text_blit(symbols: [text], hdc: i64, text: text, width: u32, height: u32) -> WineGdi32DrawingResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, hdc, text, 0, "")
+    if hdc <= 0:
+        return _result(false, "invalid-hdc", hdc, text, 0, "")
+    if text == "":
+        return _result(false, "empty-text", hdc, text, 0, "")
+    if width == 0 or height == 0:
+        return _result(false, "invalid-size", hdc, text, 0, "")
+    val checksum = hdc + text.len() + ((width as i64) * (height as i64) * 4)
+    _result(true, "", hdc, text, checksum, "CreateCompatibleDC TextOutW BitBlt DeleteDC")

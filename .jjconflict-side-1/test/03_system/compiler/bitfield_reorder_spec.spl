@@ -1,0 +1,96 @@
+# bitfield_reorder_spec
+#
+# Phase 1: Bitfield field reordering by size.
+# Verifies that compiler source contains reorder logic,
+# @preserve_order / @compactq attribute parsing, and
+# word-boundary straddle avoidance.
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "Bitfield field reorder — attribute parsing":
+
+    it "LayoutAttr has is_preserve_order and is_compactq fields":
+        val src = read_text("src/compiler/30.types/type_layout.spl")
+        expect(src.contains("is_preserve_order: bool")).to_equal(true)
+        expect(src.contains("is_compactq: bool")).to_equal(true)
+
+    it "parse_layout_attrs recognises @preserve_order":
+        val src = read_text("src/compiler/00.common/attributes.spl")
+        expect(src.contains("attr.name == \"preserve_order\"")).to_equal(true)
+        expect(src.contains("is_preserve_order = true")).to_equal(true)
+
+    it "parse_layout_attrs recognises @compactq":
+        val src = read_text("src/compiler/00.common/attributes.spl")
+        expect(src.contains("attr.name == \"compactq\"")).to_equal(true)
+        expect(src.contains("is_compactq = true")).to_equal(true)
+
+    it "@repr(C) implies preserve_order in attribute parser":
+        val src = read_text("src/compiler/00.common/attributes.spl")
+        expect(src.contains("layout_kind = LayoutKind.C")).to_equal(true)
+        expect(src.contains("is_preserve_order = true")).to_equal(true)
+
+    it "@repr(C) factory sets preserve_order true":
+        val src = read_text("src/compiler/30.types/type_layout.spl")
+        expect(src.contains("layout_kind: LayoutKind.C")).to_equal(true)
+        expect(src.contains("is_preserve_order: true")).to_equal(true)
+
+describe "Bitfield field reorder — backend logic":
+
+    it "defines sort_fields_by_width_desc function":
+        val src = read_text("src/compiler/70.backend/bitfield.spl")
+        expect(src.contains("fn sort_fields_by_width_desc")).to_equal(true)
+
+    it "defines would_straddle_word function":
+        val src = read_text("src/compiler/70.backend/bitfield.spl")
+        expect(src.contains("fn would_straddle_word")).to_equal(true)
+
+    it "compile_bitfield accepts preserve_order and compactq params":
+        val src = read_text("src/compiler/70.backend/bitfield.spl")
+        expect(src.contains("preserve_order: bool")).to_equal(true)
+        expect(src.contains("compactq: bool")).to_equal(true)
+        expect(src.contains("target_word_bits: i64")).to_equal(true)
+
+    it "compile_bitfield calls sort when not preserve_order":
+        val src = read_text("src/compiler/70.backend/bitfield.spl")
+        expect(src.contains("if not preserve_order")).to_equal(true)
+        expect(src.contains("sort_fields_by_width_desc")).to_equal(true)
+
+    it "compile_bitfield checks word straddle when not compactq":
+        val src = read_text("src/compiler/70.backend/bitfield.spl")
+        expect(src.contains("if not compactq")).to_equal(true)
+        expect(src.contains("would_straddle_word")).to_equal(true)
+
+describe "Bitfield field reorder — HIR lowering":
+
+    it "lower_bitfield parses layout attrs from bitfield attributes":
+        val src = read_text("src/compiler/20.hir/hir_lowering/items.spl")
+        expect(src.contains("parse_layout_attrs(bf.attributes)")).to_equal(true)
+
+    it "lower_bitfield sorts fields by width descending":
+        val src = read_text("src/compiler/20.hir/hir_lowering/items.spl")
+        expect(src.contains("widths[indices[j - 1]] < widths[indices[j]]")).to_equal(true)
+
+    it "lower_bitfield respects is_preserve_order":
+        val src = read_text("src/compiler/20.hir/hir_lowering/items.spl")
+        expect(src.contains("not layout_attr.is_preserve_order")).to_equal(true)
+
+    it "lower_bitfield avoids word straddle unless compactq":
+        val src = read_text("src/compiler/20.hir/hir_lowering/items.spl")
+        expect(src.contains("not layout_attr.is_compactq")).to_equal(true)
+        expect(src.contains("word_end")).to_equal(true)
+
+describe "Bitfield field reorder — layoutattr factory defaults":
+
+    it "layoutattr_default_ has preserve_order false":
+        val src = read_text("src/compiler/30.types/type_layout.spl")
+        expect(src.contains("is_preserve_order: false")).to_equal(true)
+        expect(src.contains("is_compactq: false")).to_equal(true)
+
+    it "layoutattr_c_repr has preserve_order true":
+        val src = read_text("src/compiler/30.types/type_layout.spl")
+        expect(src.contains("is_preserve_order: true")).to_equal(true)

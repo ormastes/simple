@@ -1,0 +1,443 @@
+# Core Interpreter — Arena-Based Value Representation
+#
+# Seed-compilable value types for the core interpreter.
+# Uses parallel arrays (arena pattern) — no generics, no enums with data.
+#
+# Value kinds: nil, bool, int, float, text, array, struct, function
+
+# ===== Value Kind Tags =====
+val VAL_NIL: i64 = 0
+val VAL_BOOL: i64 = 1
+val VAL_INT: i64 = 2
+val VAL_FLOAT: i64 = 3
+val VAL_TEXT: i64 = 4
+val VAL_ARRAY: i64 = 5
+val VAL_STRUCT: i64 = 6
+val VAL_FUNCTION: i64 = 7
+val VAL_THUNK: i64 = 8    # Unevaluated lazy expression (forced on first access)
+
+# ===== Value Arena Pools =====
+# Each value has a kind + per-kind data stored in parallel arrays.
+var val_kinds: [i64] = []
+var val_ints: [i64] = []
+var val_floats: [f64] = []
+var val_texts: [text] = []
+var val_arrays: [[i64]] = []        # array of value_id arrays
+var val_struct_names: [text] = []   # struct type name
+var val_struct_fields: [[text]] = []  # struct field names
+var val_struct_values: [[i64]] = []   # struct field value_ids
+var val_func_names: [text] = []     # function name (for VAL_FUNCTION → decl lookup)
+var val_func_decls: [i64] = []      # function decl_id
+var val_thunk_expr_ids: [i64] = []  # expression id for VAL_THUNK (deferred eval)
+
+# ===== Sentinel =====
+val VAL_NONE: i64 = -1
+
+# ===== Free List for Value Recycling =====
+# When values are no longer needed, their slots can be reused instead of growing the arena.
+var val_free_list: [i64] = []
+
+# ===== Value Cache =====
+# Pre-allocated singletons for frequently created values.
+# Avoids arena allocation for nil, true, false, small ints 0..255, empty text.
+var cache_nil: i64 = -1
+var cache_true: i64 = -1
+var cache_false: i64 = -1
+var cache_empty_text: i64 = -1
+var cache_ints: [i64] = []
+var cache_initialized: bool = false
+# Interned common text literals
+var cache_text_nil: i64 = -1
+var cache_text_true: i64 = -1
+var cache_text_false: i64 = -1
+
+# ===== Value Arena Management =====
+
+fn val_count() -> i64:
+    val_kinds.len()
+
+fn val_reset():
+    val_kinds = []
+    val_ints = []
+    val_floats = []
+    val_texts = []
+    val_arrays = []
+    val_struct_names = []
+    val_struct_fields = []
+    val_struct_values = []
+    val_func_names = []
+    val_func_decls = []
+    val_thunk_expr_ids = []
+    val_free_list = []
+    cache_initialized = false
+    val_init_cache()
+
+fn val_init_cache():
+    if cache_initialized: return
+    # Allocate cached nil
+    cache_nil = val_alloc(VAL_NIL)
+    # Allocate cached booleans
+    cache_true = val_alloc(VAL_BOOL)
+    val_ints[cache_true] = 1
+    cache_false = val_alloc(VAL_BOOL)
+    val_ints[cache_false] = 0
+    # Allocate cached empty text
+    cache_empty_text = val_alloc(VAL_TEXT)
+    val_texts[cache_empty_text] = ""
+    # Allocate cached common text literals
+    cache_text_nil = val_alloc(VAL_TEXT)
+    val_texts[cache_text_nil] = "nil"
+    cache_text_true = val_alloc(VAL_TEXT)
+    val_texts[cache_text_true] = "true"
+    cache_text_false = val_alloc(VAL_TEXT)
+    val_texts[cache_text_false] = "false"
+    # Allocate cached small integers 0..255
+    cache_ints = []
+    var i: i64 = 0
+    while i < 256:
+        val idx = val_alloc(VAL_INT)
+        val_ints[idx] = i
+        cache_ints.push(idx)
+        i = i + 1
+    cache_initialized = true
+
+fn val_alloc(kind: i64) -> i64:
+    # Reuse a recycled slot if available — avoids growing all 11 arrays
+    if val_free_list.len() > 0:
+        val idx = val_free_list[val_free_list.len() - 1]
+        val_free_list.pop()
+        val_kinds[idx] = kind
+        val_ints[idx] = 0
+        val_floats[idx] = 0.0
+        val_texts[idx] = ""
+        val_arrays[idx] = []
+        val_struct_names[idx] = ""
+        val_struct_fields[idx] = []
+        val_struct_values[idx] = []
+        val_func_names[idx] = ""
+        val_func_decls[idx] = -1
+        val_thunk_expr_ids[idx] = -1
+        return idx
+    val idx = val_kinds.len()
+    val_kinds.push(kind)
+    val_ints.push(0)
+    val_floats.push(0.0)
+    val_texts.push("")
+    val_arrays.push([])
+    val_struct_names.push("")
+    val_struct_fields.push([])
+    val_struct_values.push([])
+    val_func_names.push("")
+    val_func_decls.push(-1)
+    val_thunk_expr_ids.push(-1)
+    idx
+
+# ===== Value Recycling =====
+# Release a value slot back to the free list for reuse.
+# Do NOT free cached singletons (nil, true, false, small ints, empty text).
+fn val_free(vid: i64):
+    if vid < 0: return
+    # Don't free cached values (first 259 slots: nil + true + false + empty_text + 256 ints)
+    if cache_initialized and vid < 260: return
+    val_kinds[vid] = VAL_NIL
+    val_texts[vid] = ""
+    val_arrays[vid] = []
+    val_struct_names[vid] = ""
+    val_struct_fields[vid] = []
+    val_struct_values[vid] = []
+    val_func_names[vid] = ""
+    val_free_list.push(vid)
+
+# ===== Value Constructors =====
+
+fn val_make_nil() -> i64:
+    if cache_initialized: return cache_nil
+    val_alloc(VAL_NIL)
+
+fn val_make_bool(b: bool) -> i64:
+    if cache_initialized:
+        if b: return cache_true
+        return cache_false
+    val idx = val_alloc(VAL_BOOL)
+    if b:
+        val_ints[idx] = 1
+    else:
+        val_ints[idx] = 0
+    idx
+
+fn val_make_int(n: i64) -> i64:
+    if cache_initialized and n >= 0 and n < 256:
+        return cache_ints[n]
+    val idx = val_alloc(VAL_INT)
+    val_ints[idx] = n
+    idx
+
+fn val_make_float(f: f64) -> i64:
+    val idx = val_alloc(VAL_FLOAT)
+    val_floats[idx] = f
+    idx
+
+fn val_make_text(s: text) -> i64:
+    if cache_initialized:
+        if s == "": return cache_empty_text
+        if s == "nil": return cache_text_nil
+        if s == "true": return cache_text_true
+        if s == "false": return cache_text_false
+    val idx = val_alloc(VAL_TEXT)
+    val_texts[idx] = s
+    idx
+
+fn val_make_array(elements: [i64]) -> i64:
+    val idx = val_alloc(VAL_ARRAY)
+    val_arrays[idx] = elements
+    idx
+
+fn val_make_struct(type_name: text, field_names: [text], field_values: [i64]) -> i64:
+    val idx = val_alloc(VAL_STRUCT)
+    val_struct_names[idx] = type_name
+    val_struct_fields[idx] = field_names
+    val_struct_values[idx] = field_values
+    idx
+
+fn val_make_function(name: text, decl_id: i64) -> i64:
+    val idx = val_alloc(VAL_FUNCTION)
+    val_func_names[idx] = name
+    val_func_decls[idx] = decl_id
+    idx
+
+fn val_make_thunk(expr_id: i64) -> i64:
+    val idx = val_alloc(VAL_THUNK)
+    val_thunk_expr_ids[idx] = expr_id
+    idx
+
+fn val_is_thunk(vid: i64) -> bool:
+    if vid < 0: return false
+    val_kinds[vid] == VAL_THUNK
+
+fn val_thunk_get_expr(vid: i64) -> i64:
+    val_thunk_expr_ids[vid]
+
+# ===== Value Accessors =====
+
+fn val_get_kind(vid: i64) -> i64:
+    if vid < 0: return VAL_NIL
+    val_kinds[vid]
+
+fn val_get_int(vid: i64) -> i64:
+    val_ints[vid]
+
+fn val_get_bool(vid: i64) -> bool:
+    val_ints[vid] != 0
+
+fn val_get_float(vid: i64) -> f64:
+    val_floats[vid]
+
+fn val_get_text(vid: i64) -> text:
+    val_texts[vid]
+
+fn val_get_array(vid: i64) -> [i64]:
+    val_arrays[vid]
+
+fn val_get_struct_name(vid: i64) -> text:
+    val_struct_names[vid]
+
+fn val_get_struct_fields(vid: i64) -> [text]:
+    val_struct_fields[vid]
+
+fn val_get_struct_values(vid: i64) -> [i64]:
+    val_struct_values[vid]
+
+fn val_get_func_name(vid: i64) -> text:
+    val_func_names[vid]
+
+fn val_get_func_decl(vid: i64) -> i64:
+    val_func_decls[vid]
+
+# ===== Struct Field Access =====
+
+fn val_struct_get_field(vid: i64, field_name: text) -> i64:
+    val fields = val_struct_fields[vid]
+    val values = val_struct_values[vid]
+    var i: i64 = 0
+    for name in fields:
+        if name == field_name:
+            return values[i]
+        i = i + 1
+    VAL_NONE
+
+fn val_struct_set_field(vid: i64, field_name: text, new_val: i64):
+    val fields = val_struct_fields[vid]
+    var values = val_struct_values[vid]
+    var i: i64 = 0
+    for name in fields:
+        if name == field_name:
+            values[i] = new_val
+            val_struct_values[vid] = values
+            return
+        i = i + 1
+
+# ===== Indexed Struct Field Access (inline cache) =====
+
+fn val_struct_get_field_idx(vid: i64, idx: i64) -> i64:
+    val values = val_struct_values[vid]
+    if idx < values.len():
+        return values[idx]
+    VAL_NONE
+
+fn val_struct_set_field_idx(vid: i64, idx: i64, new_val: i64):
+    var values = val_struct_values[vid]
+    if idx < values.len():
+        values[idx] = new_val
+        val_struct_values[vid] = values
+
+fn val_struct_check_field_idx(vid: i64, idx: i64, expected_name: text) -> bool:
+    val fields = val_struct_fields[vid]
+    if idx >= fields.len(): return false
+    fields[idx] == expected_name
+
+fn val_struct_find_field_idx(vid: i64, field_name: text) -> i64:
+    val fields = val_struct_fields[vid]
+    var i: i64 = 0
+    for name in fields:
+        if name == field_name:
+            return i
+        i = i + 1
+    -1
+
+# ===== Value Predicates =====
+
+fn val_is_nil(vid: i64) -> bool:
+    if vid < 0: return true
+    val_kinds[vid] == VAL_NIL
+
+fn val_is_bool(vid: i64) -> bool:
+    if vid < 0: return false
+    val_kinds[vid] == VAL_BOOL
+
+fn val_is_int(vid: i64) -> bool:
+    if vid < 0: return false
+    val_kinds[vid] == VAL_INT
+
+fn val_is_float(vid: i64) -> bool:
+    if vid < 0: return false
+    val_kinds[vid] == VAL_FLOAT
+
+fn val_is_text(vid: i64) -> bool:
+    if vid < 0: return false
+    val_kinds[vid] == VAL_TEXT
+
+fn val_is_array(vid: i64) -> bool:
+    if vid < 0: return false
+    val_kinds[vid] == VAL_ARRAY
+
+fn val_is_struct(vid: i64) -> bool:
+    if vid < 0: return false
+    val_kinds[vid] == VAL_STRUCT
+
+fn val_is_function(vid: i64) -> bool:
+    if vid < 0: return false
+    val_kinds[vid] == VAL_FUNCTION
+
+# ===== Truthiness =====
+
+fn val_is_truthy(vid: i64) -> bool:
+    if vid < 0: return false
+    val kind = val_kinds[vid]
+    if kind == VAL_NIL: return false
+    if kind == VAL_BOOL: return val_ints[vid] != 0
+    if kind == VAL_INT: return val_ints[vid] != 0
+    if kind == VAL_FLOAT: return val_floats[vid] != 0.0
+    if kind == VAL_TEXT: return val_texts[vid] != ""
+    if kind == VAL_ARRAY: return val_arrays[vid].len() > 0
+    true
+
+fn val_exists(vid: i64) -> bool:
+    """Check if value is 'present' (.? existence semantics).
+    nil/None -> false, "" -> false, [] -> false.
+    All others (including 0, false) -> true."""
+    if vid < 0: return false
+    val kind = val_kinds[vid]
+    if kind == VAL_NIL: return false
+    if kind == VAL_TEXT: return val_texts[vid] != ""
+    if kind == VAL_ARRAY: return val_arrays[vid].len() > 0
+    true
+
+# ===== String Conversion =====
+
+fn val_to_text(vid: i64) -> text:
+    if vid < 0: return "nil"
+    val kind = val_kinds[vid]
+    if kind == VAL_NIL: return "nil"
+    if kind == VAL_BOOL:
+        if val_ints[vid] != 0: return "true"
+        return "false"
+    if kind == VAL_INT: return "{val_ints[vid]}"
+    if kind == VAL_FLOAT: return "{val_floats[vid]}"
+    if kind == VAL_TEXT: return val_texts[vid]
+    if kind == VAL_ARRAY:
+        val elems = val_arrays[vid]
+        var parts: [text] = []
+        for eid in elems:
+            parts.push(val_to_text(eid))
+        return "[" + parts.join(", ") + "]"
+    if kind == VAL_STRUCT:
+        return val_struct_names[vid] + "(...)"
+    if kind == VAL_FUNCTION:
+        return "<fn " + val_func_names[vid] + ">"
+    if kind == VAL_THUNK: return "<thunk>"
+    "unknown"
+
+# ===== Value Kind Name =====
+
+fn val_kind_name(kind: i64) -> text:
+    if kind == VAL_NIL: return "nil"
+    if kind == VAL_BOOL: return "bool"
+    if kind == VAL_INT: return "i64"
+    if kind == VAL_FLOAT: return "f64"
+    if kind == VAL_TEXT: return "text"
+    if kind == VAL_ARRAY: return "array"
+    if kind == VAL_STRUCT: return "struct"
+    if kind == VAL_FUNCTION: return "function"
+    if kind == VAL_THUNK: return "thunk"
+    "unknown"
+
+# ===== Equality =====
+
+fn val_equals(a: i64, b: i64) -> bool:
+    val ka = val_get_kind(a)
+    val kb = val_get_kind(b)
+    if ka != kb: return false
+    if ka == VAL_NIL: return true
+    if ka == VAL_BOOL: return val_ints[a] == val_ints[b]
+    if ka == VAL_INT: return val_ints[a] == val_ints[b]
+    if ka == VAL_FLOAT: return val_floats[a] == val_floats[b]
+    if ka == VAL_TEXT: return val_texts[a] == val_texts[b]
+    false
+
+# ===== JIT Bridge Accessors =====
+# Integer-based accessors for JIT interop (value_id → primitive)
+
+fn core_val_make_int(n: i64) -> i64:
+    val_make_int(n)
+
+fn core_val_make_string(s: text) -> i64:
+    val_make_text(s)
+
+fn core_val_get_int(vid: i64) -> i64:
+    if vid < 0: return 0
+    if val_kinds[vid] != VAL_INT: return 0
+    val_ints[vid]
+
+fn core_val_get_string(vid: i64) -> text:
+    if vid < 0: return ""
+    if val_kinds[vid] != VAL_TEXT: return ""
+    val_texts[vid]
+
+fn core_val_type_tag(vid: i64) -> i64:
+    if vid < 0: return VAL_NIL
+    val_kinds[vid]
+
+fn core_val_is_truthy_i(vid: i64) -> i64:
+    if val_is_truthy(vid): return 1
+    0
+

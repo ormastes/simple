@@ -1,0 +1,75 @@
+"""
+# POSIX signal_compat Specification
+**Feature IDs:** #WAVE2-G6
+**Category:** POSIX shim
+**Status:** In Progress
+
+Verifies signal registration, masking, pending-tracking, and the
+`signal_deliver` alias used by PM's extern.
+"""
+use std.spec.*
+use os.posix.signal_compat.*
+
+describe "posix_sigprocmask":
+    it "SIG_BLOCK sets mask bits":
+        val prev = posix_sigprocmask(0, 0b1010)
+        val now  = posix_sigprocmask(0, 0)
+        expect (now & 0b1010u64).to_equal(0b1010u64)
+        posix_sigprocmask(2, 0)  # reset to empty
+
+    it "SIG_UNBLOCK clears mask bits":
+        posix_sigprocmask(2, 0b1111)
+        posix_sigprocmask(1, 0b0010)
+        val after = posix_sigprocmask(2, 0)
+        expect (after & 0b0010u64).to_equal(0u64)
+        posix_sigprocmask(2, 0)
+
+    it "SIG_SETMASK replaces mask wholesale":
+        posix_sigprocmask(2, 0xFF)
+        val after = posix_sigprocmask(2, 0x01)
+        expect (after & 0x01u64).to_equal(0x01u64)
+        posix_sigprocmask(2, 0)
+
+    it "SIGKILL cannot be blocked":
+        posix_sigprocmask(2, 0xFFFFFFFFu64)
+        val now = posix_sigprocmask(2, 0xFFFFFFFFu64)
+        val kill_bit: u64 = 1u64 << 9u64
+        expect (now & kill_bit).to_equal(0u64)
+        posix_sigprocmask(2, 0)
+
+describe "signal_raise + signal_is_pending":
+    it "raises a signal into the pending set":
+        posix_sigprocmask(2, 0)
+        signal_raise(SIGUSR1)
+        expect signal_is_pending(SIGUSR1).to_equal(true)
+
+    it "returns false for out-of-range signum":
+        expect signal_is_pending(0).to_equal(false)
+        expect signal_is_pending(1000).to_equal(false)
+
+describe "signal_deliver alias":
+    """signal_deliver is a thin rename PM's extern expects."""
+
+    it "signal_deliver returns an i32 (zero or negative errno)":
+        """Covers the alias's calling convention."""
+        val r = signal_deliver(1u64, SIGUSR1)
+        val bounded: bool = r <= 0
+        expect bounded.to_equal(true)
+
+describe "signal_queue_has_pending":
+    it "empty queue reports false":
+        posix_sigprocmask(2, 0)
+        # Drain any pending from earlier cases.
+        signal_deliver_pending()
+        val any = signal_queue_has_pending(1u64)
+        expect any.to_equal(false)
+
+    it "blocked signal does not count as pending":
+        posix_sigprocmask(2, 0)
+        val block_usr1: u64 = 1u64 << (SIGUSR1 as u64)
+        posix_sigprocmask(0, block_usr1)
+        signal_raise(SIGUSR1)
+        val any_while_blocked = signal_queue_has_pending(1u64)
+        expect any_while_blocked.to_equal(false)
+        posix_sigprocmask(2, 0)
+        signal_deliver_pending()

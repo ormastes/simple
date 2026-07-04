@@ -1,0 +1,263 @@
+# @cover src/lib/nogc_sync_mut/engine/render/graph_ir3d.spl 80%
+use std.spec
+use std.nogc_sync_mut.engine.render.graph_ir3d.{
+    GraphIr3D, GraphIr3DResourceKind, graph_ir3d_optimize_for_3d,
+    graph_ir3d_execute
+}
+use std.nogc_sync_mut.engine.render.gpu_mesh3d.{GpuMeshHandle}
+use std.nogc_sync_mut.engine.render.backend3d.{
+    RenderBackend3D, BufferHandle, TextureHandle, PipelineHandle,
+    RenderPassHandle, TextureFormat3D, PipelineDesc3D
+}
+use std.nogc_sync_mut.engine.render.capability3d.{RenderCapability3D, capability_software_3d}
+use std.nogc_sync_mut.engine.render.software_backend3d.{SoftwareRenderBackend3D}
+
+fn mesh_handle(v: i64, i: i64, count: i64) -> GpuMeshHandle:
+    GpuMeshHandle(
+        vbuf: BufferHandle(id: v),
+        ibuf: BufferHandle(id: i),
+        index_count: count
+    )
+
+class RecordingRenderBackend3D:
+    next_id: i64
+    begin_frame_count: i64
+    begin_pass_count: i64
+    set_pipeline_count: i64
+    bind_vertex_count: i64
+    bind_index_count: i64
+    bind_uniform_count: i64
+    bind_texture_count: i64
+    upload_buffer_count: i64
+    upload_texture_count: i64
+    draw_count: i64
+    end_pass_count: i64
+    end_frame_count: i64
+    present_count: i64
+    shutdown_count: i64
+    last_pipeline_id: i64
+    last_vbuf_id: i64
+    last_ibuf_id: i64
+    last_uniform_id: i64
+    last_texture_id: i64
+    last_index_count: i64
+
+    static fn create() -> RecordingRenderBackend3D:
+        RecordingRenderBackend3D(
+            next_id: 1,
+            begin_frame_count: 0,
+            begin_pass_count: 0,
+            set_pipeline_count: 0,
+            bind_vertex_count: 0,
+            bind_index_count: 0,
+            bind_uniform_count: 0,
+            bind_texture_count: 0,
+            upload_buffer_count: 0,
+            upload_texture_count: 0,
+            draw_count: 0,
+            end_pass_count: 0,
+            end_frame_count: 0,
+            present_count: 0,
+            shutdown_count: 0,
+            last_pipeline_id: -1,
+            last_vbuf_id: -1,
+            last_ibuf_id: -1,
+            last_uniform_id: -1,
+            last_texture_id: -1,
+            last_index_count: 0
+        )
+
+fn _rec_next_id(backend: RecordingRenderBackend3D) -> i64:
+    val id = backend.next_id
+    backend.next_id = backend.next_id + 1
+    id
+
+impl RenderBackend3D for RecordingRenderBackend3D:
+    fn capabilities(self) -> RenderCapability3D:
+        capability_software_3d()
+
+    fn init(self, width: i64, height: i64) -> bool:
+        true
+
+    fn create_pipeline(self, desc: PipelineDesc3D) -> PipelineHandle:
+        PipelineHandle(id: _rec_next_id(self))
+
+    fn create_vertex_buffer(self, byte_count: i64) -> BufferHandle:
+        BufferHandle(id: _rec_next_id(self))
+
+    fn create_index_buffer(self, byte_count: i64) -> BufferHandle:
+        BufferHandle(id: _rec_next_id(self))
+
+    fn create_uniform_buffer(self, byte_count: i64) -> BufferHandle:
+        BufferHandle(id: _rec_next_id(self))
+
+    fn upload_buffer(self, buf: BufferHandle, data: [u8], offset: i64):
+        self.upload_buffer_count = self.upload_buffer_count + 1
+
+    fn create_texture(self, width: i64, height: i64, format: TextureFormat3D) -> TextureHandle:
+        TextureHandle(id: _rec_next_id(self))
+
+    fn upload_texture(self, tex: TextureHandle, data: [u8]):
+        self.upload_texture_count = self.upload_texture_count + 1
+
+    fn begin_frame(self):
+        self.begin_frame_count = self.begin_frame_count + 1
+
+    fn begin_render_pass(self, color_tex: TextureHandle, depth_tex: TextureHandle) -> RenderPassHandle:
+        self.begin_pass_count = self.begin_pass_count + 1
+        RenderPassHandle(id: _rec_next_id(self))
+
+    fn set_pipeline(self, rph: RenderPassHandle, pipeline: PipelineHandle):
+        self.set_pipeline_count = self.set_pipeline_count + 1
+        self.last_pipeline_id = pipeline.id
+
+    fn bind_vertex_buffer(self, rph: RenderPassHandle, buf: BufferHandle, slot: i64):
+        self.bind_vertex_count = self.bind_vertex_count + 1
+        self.last_vbuf_id = buf.id
+
+    fn bind_index_buffer(self, rph: RenderPassHandle, buf: BufferHandle):
+        self.bind_index_count = self.bind_index_count + 1
+        self.last_ibuf_id = buf.id
+
+    fn bind_texture(self, rph: RenderPassHandle, tex: TextureHandle, slot: i64):
+        self.bind_texture_count = self.bind_texture_count + 1
+        self.last_texture_id = tex.id
+
+    fn bind_uniform_buffer(self, rph: RenderPassHandle, buf: BufferHandle, slot: i64):
+        self.bind_uniform_count = self.bind_uniform_count + 1
+        self.last_uniform_id = buf.id
+
+    fn draw_indexed(self, rph: RenderPassHandle, index_count: i64, base_vertex: i64):
+        self.draw_count = self.draw_count + 1
+        self.last_index_count = index_count
+
+    fn end_render_pass(self, rph: RenderPassHandle):
+        self.end_pass_count = self.end_pass_count + 1
+
+    fn end_frame(self):
+        self.end_frame_count = self.end_frame_count + 1
+
+    fn present(self):
+        self.present_count = self.present_count + 1
+
+    fn shutdown(self):
+        self.shutdown_count = self.shutdown_count + 1
+
+describe "Graph IR 3D":
+    describe "REQ-3D-GRAPH-001: records backend-neutral 3D passes and draws":
+        it "tracks pass, draw, and deduped resource counts":
+            var graph = GraphIr3D.new()
+            val pass_id = graph.begin_pass(TextureHandle(id: 1), TextureHandle(id: 2))
+            val mesh = mesh_handle(10, 11, 6)
+            graph.add_draw(pass_id, mesh, BufferHandle(id: 12), PipelineHandle(id: 20))
+            graph.add_draw(pass_id, mesh, BufferHandle(id: 12), PipelineHandle(id: 20))
+
+            val stats = graph.stats()
+            expect(stats.pass_count).to_equal(1)
+            expect(stats.draw_count).to_equal(2)
+            expect(stats.resource_count).to_equal(6)
+
+        it "ignores invalid mesh and pipeline handles":
+            var graph = GraphIr3D.new()
+            val pass_id = graph.begin_pass(TextureHandle(id: 1), TextureHandle(id: 2))
+            graph.add_draw(pass_id, GpuMeshHandle.invalid(), BufferHandle(id: 12), PipelineHandle(id: 20))
+            graph.add_draw(pass_id, mesh_handle(10, 11, 6), BufferHandle(id: 12), PipelineHandle.invalid())
+
+            expect(graph.stats().draw_count).to_equal(0)
+
+    describe "REQ-3D-GRAPH-002: optimizes draw order for 3D backend state locality":
+        it "sorts draws inside each pass by pipeline then texture then mesh":
+            var graph = GraphIr3D.new()
+            val pass_id = graph.begin_pass(TextureHandle(id: 1), TextureHandle(id: 2))
+            graph.add_textured_draw(pass_id, mesh_handle(30, 31, 3), BufferHandle(id: 80), TextureHandle(id: 6), PipelineHandle(id: 9))
+            graph.add_textured_draw(pass_id, mesh_handle(10, 11, 3), BufferHandle(id: 81), TextureHandle(id: 4), PipelineHandle(id: 3))
+            graph.add_textured_draw(pass_id, mesh_handle(20, 21, 3), BufferHandle(id: 82), TextureHandle(id: 5), PipelineHandle(id: 3))
+
+            val optimized = graph_ir3d_optimize_for_3d(graph)
+
+            expect(optimized.draws[0].pipeline_id).to_equal(3)
+            expect(optimized.draws[0].texture_id).to_equal(4)
+            expect(optimized.draws[1].pipeline_id).to_equal(3)
+            expect(optimized.draws[1].texture_id).to_equal(5)
+            expect(optimized.draws[2].pipeline_id).to_equal(9)
+
+        it "preserves pass boundaries while batching":
+            var graph = GraphIr3D.new()
+            val first = graph.begin_pass(TextureHandle(id: 1), TextureHandle(id: 2))
+            val second = graph.begin_pass(TextureHandle(id: 3), TextureHandle(id: 4))
+            graph.add_draw(first, mesh_handle(30, 31, 3), BufferHandle(id: 80), PipelineHandle(id: 9))
+            graph.add_draw(second, mesh_handle(10, 11, 3), BufferHandle(id: 81), PipelineHandle(id: 3))
+
+            val optimized = graph_ir3d_optimize_for_3d(graph)
+
+            expect(optimized.passes.len()).to_equal(2)
+            expect(optimized.passes[0].draw_count).to_equal(1)
+            expect(optimized.passes[1].draw_count).to_equal(1)
+            expect(optimized.draws[0].pass_id).to_equal(optimized.passes[0].id)
+            expect(optimized.draws[1].pass_id).to_equal(optimized.passes[1].id)
+
+    describe "REQ-3D-GRAPH-003: replays optimized graph through RenderBackend3D":
+        it "executes graph draws through a RenderBackend3D implementation":
+            var backend = RecordingRenderBackend3D.create()
+            val color = backend.create_texture(16, 16, TextureFormat3D.Rgba8Unorm)
+            val depth = backend.create_texture(16, 16, TextureFormat3D.Depth32Float)
+            val vbuf = backend.create_vertex_buffer(96)
+            val ibuf = backend.create_index_buffer(12)
+            val uniform = backend.create_uniform_buffer(64)
+            val pipeline = backend.create_pipeline(PipelineDesc3D(
+                vertex_shader_spirv: [],
+                fragment_shader_spirv: [],
+                vertex_shader_wgsl: "",
+                fragment_shader_wgsl: "",
+                vertex_stride: 96,
+                cull_back_faces: true,
+                depth_write: true,
+                depth_test: true
+            ))
+
+            var graph = GraphIr3D.new()
+            val pass_id = graph.begin_pass(color, depth)
+            graph.add_draw(pass_id, mesh_handle(vbuf.id, ibuf.id, 3), uniform, pipeline)
+            val optimized = graph_ir3d_optimize_for_3d(graph)
+            graph_ir3d_execute(backend, optimized)
+
+            expect(backend.begin_frame_count).to_equal(1)
+            expect(backend.begin_pass_count).to_equal(1)
+            expect(backend.set_pipeline_count).to_equal(1)
+            expect(backend.bind_vertex_count).to_equal(1)
+            expect(backend.bind_index_count).to_equal(1)
+            expect(backend.bind_uniform_count).to_equal(1)
+            expect(backend.draw_count).to_equal(1)
+            expect(backend.end_pass_count).to_equal(1)
+            expect(backend.end_frame_count).to_equal(1)
+            expect(backend.last_pipeline_id).to_equal(pipeline.id)
+            expect(backend.last_vbuf_id).to_equal(vbuf.id)
+            expect(backend.last_ibuf_id).to_equal(ibuf.id)
+            expect(backend.last_uniform_id).to_equal(uniform.id)
+            expect(backend.last_index_count).to_equal(3)
+
+        it "executes graph draws through the software 3D backend":
+            var backend = SoftwareRenderBackend3D.create()
+            val _ = backend.init(16, 16)
+            val color = backend.create_texture(16, 16, TextureFormat3D.Rgba8Unorm)
+            val depth = backend.create_texture(16, 16, TextureFormat3D.Depth32Float)
+            val vbuf = backend.create_vertex_buffer(96)
+            val ibuf = backend.create_index_buffer(12)
+            val uniform = backend.create_uniform_buffer(64)
+            val pipeline = backend.create_pipeline(PipelineDesc3D(
+                vertex_shader_spirv: [],
+                fragment_shader_spirv: [],
+                vertex_shader_wgsl: "",
+                fragment_shader_wgsl: "",
+                vertex_stride: 96,
+                cull_back_faces: true,
+                depth_write: true,
+                depth_test: true
+            ))
+
+            var graph = GraphIr3D.new()
+            val pass_id = graph.begin_pass(color, depth)
+            graph.add_draw(pass_id, mesh_handle(vbuf.id, ibuf.id, 3), uniform, pipeline)
+            graph_ir3d_execute(backend, graph_ir3d_optimize_for_3d(graph))
+
+            expect(backend.renderer.get_stats().draw_calls).to_equal(1)

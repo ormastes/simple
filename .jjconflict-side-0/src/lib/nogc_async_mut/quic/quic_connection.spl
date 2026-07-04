@@ -1,0 +1,166 @@
+# QUIC Connection — Simple-side wrapper around quiche SFFI
+#
+# Provides a pure-Simple API over the quiche C library bindings declared in
+# quic_sffi.spl.  All mutable state is passed and returned by value so callers
+# can chain updates without hidden side-effects.
+#
+# RFC 9000 defaults (quic_config_default):
+#   version          = 1        (RFC 9000)
+#   max_idle_timeout = 30 000 ms
+#   max_streams_bidi = 100
+#   max_streams_uni  = 100
+#   initial_window   = 65 535   (64 KiB)
+
+use nogc_async_mut.quic.quic_sffi.{
+    rt_quic_config_new,
+    rt_quic_config_set_max_idle_timeout,
+    rt_quic_config_set_initial_max_streams_bidi,
+    rt_quic_accept,
+    rt_quic_connect,
+    rt_quic_recv,
+    rt_quic_send,
+    rt_quic_stream_recv,
+    rt_quic_stream_send,
+    rt_quic_conn_close,
+    rt_quic_timeout_as_millis,
+    rt_quic_on_timeout,
+    rt_quic_is_established,
+    rt_quic_is_closed
+}
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+class QuicConfig:
+    """QUIC connection configuration (passed by value)."""
+    version: i64
+    max_idle_timeout: i64
+    max_streams_bidi: i64
+    max_streams_uni: i64
+    initial_window: i64
+
+pub fn quic_config_default() -> QuicConfig:
+    """Return RFC 9000 default configuration."""
+    QuicConfig {
+        version: 1,
+        max_idle_timeout: 30000,
+        max_streams_bidi: 100,
+        max_streams_uni: 100,
+        initial_window: 65535
+    }
+
+# ============================================================================
+# Named result helpers (avoids anonymous tuple returns)
+# ============================================================================
+
+class QuicOutgoing:
+    """Result of quic_get_outgoing: updated connection + outgoing data."""
+    conn: QuicConnection
+    data: text
+    data_len: i64
+
+class QuicStreamRead:
+    """Result of quic_stream_recv: received data + byte count."""
+    data: text
+    data_len: i64
+
+# ============================================================================
+# Connection
+# ============================================================================
+
+class QuicConnection:
+    """Opaque QUIC connection handle plus bookkeeping flags."""
+    handle: i64
+    is_server: bool
+    established: bool
+    closed: bool
+
+pub fn quic_accept(scid: text, config: QuicConfig) -> QuicConnection:
+    """Accept an incoming QUIC connection (server side)."""
+    val cfg_handle = rt_quic_config_new(config.version)
+    rt_quic_config_set_max_idle_timeout(cfg_handle, config.max_idle_timeout)
+    rt_quic_config_set_initial_max_streams_bidi(cfg_handle, config.max_streams_bidi)
+    val conn_handle = rt_quic_accept(scid, cfg_handle)
+    QuicConnection {
+        handle: conn_handle,
+        is_server: true,
+        established: false,
+        closed: false
+    }
+
+pub fn quic_connect(server_name: text, scid: text, config: QuicConfig) -> QuicConnection:
+    """Initiate an outgoing QUIC connection (client side)."""
+    val cfg_handle = rt_quic_config_new(config.version)
+    rt_quic_config_set_max_idle_timeout(cfg_handle, config.max_idle_timeout)
+    rt_quic_config_set_initial_max_streams_bidi(cfg_handle, config.max_streams_bidi)
+    val conn_handle = rt_quic_connect(server_name, scid, cfg_handle)
+    QuicConnection {
+        handle: conn_handle,
+        is_server: false,
+        established: false,
+        closed: false
+    }
+
+pub fn quic_feed_udp(conn: QuicConnection, data: text, len: i64) -> QuicConnection:
+    """Feed an incoming UDP datagram into the QUIC state machine."""
+    rt_quic_recv(conn.handle, data, len)
+    val is_up = rt_quic_is_established(conn.handle) != 0
+    val is_down = rt_quic_is_closed(conn.handle) != 0
+    QuicConnection {
+        handle: conn.handle,
+        is_server: conn.is_server,
+        established: is_up,
+        closed: is_down
+    }
+
+pub fn quic_get_outgoing(conn: QuicConnection) -> QuicOutgoing:
+    """Retrieve outgoing UDP data that the stack wants to send."""
+    val buf_size: i64 = 65535
+    val buf = ""
+    val n = rt_quic_send(conn.handle, buf, buf_size)
+    QuicOutgoing {
+        conn: conn,
+        data: buf,
+        data_len: n
+    }
+
+pub fn quic_stream_recv(conn: QuicConnection, stream_id: i64, buf_size: i64) -> QuicStreamRead:
+    """Read up to buf_size bytes from a QUIC stream."""
+    val buf = ""
+    val n = rt_quic_stream_recv(conn.handle, stream_id, buf, buf_size)
+    QuicStreamRead {
+        data: buf,
+        data_len: n
+    }
+
+pub fn quic_stream_send(conn: QuicConnection, stream_id: i64, data: text, fin: bool) -> i64:
+    """Write data to a QUIC stream. Set fin=true to close the stream."""
+    val fin_flag: i64 = if fin: 1 else: 0
+    rt_quic_stream_send(conn.handle, stream_id, data, len(data), fin_flag)
+
+pub fn quic_close(conn: QuicConnection, reason: text) -> QuicConnection:
+    """Initiate graceful closure of the QUIC connection."""
+    rt_quic_conn_close(conn.handle, 0, reason)
+    QuicConnection {
+        handle: conn.handle,
+        is_server: conn.is_server,
+        established: false,
+        closed: true
+    }
+
+pub fn quic_check_timeout(conn: QuicConnection) -> QuicConnection:
+    """Fire any expired timers and refresh established/closed flags."""
+    rt_quic_on_timeout(conn.handle)
+    val is_up = rt_quic_is_established(conn.handle) != 0
+    val is_down = rt_quic_is_closed(conn.handle) != 0
+    QuicConnection {
+        handle: conn.handle,
+        is_server: conn.is_server,
+        established: is_up,
+        closed: is_down
+    }
+
+pub fn quic_timeout_millis(conn: QuicConnection) -> i64:
+    """Return milliseconds until the next QUIC timer fires (-1 = no timer)."""
+    rt_quic_timeout_as_millis(conn.handle)

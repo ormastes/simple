@@ -1,0 +1,144 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
+BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build/riscv_budget_evidence}"
+REPORT_DIR="${SYNTH_REPORT_DIR:-}"
+REQUIRE_SYNTH="${REQUIRE_SYNTH_REPORTS:-0}"
+REQUIRE_VIVADO="${REQUIRE_VIVADO_REPORTS:-0}"
+RISCV_BOARD_ID="${RISCV_BOARD_ID:-}"
+RISCV_PRODUCT_LEVEL="${RISCV_PRODUCT_LEVEL:-linux-rtl}"
+RISCV_CONFIG_PROFILE="${RISCV_CONFIG_PROFILE:-qemu-virt+fpga-board}"
+RISCV_RV32_LUTS="${RISCV_RV32_LUTS:-25000}"
+RISCV_RV64_LUTS="${RISCV_RV64_LUTS:-45000}"
+RISCV_RV32_MHZ="${RISCV_RV32_MHZ:-50}"
+RISCV_RV64_MHZ="${RISCV_RV64_MHZ:-50}"
+
+for arg in "$@"; do
+    case "$arg" in
+        --require-synth)
+            REQUIRE_SYNTH=1
+            ;;
+        --require-vivado)
+            REQUIRE_SYNTH=1
+            REQUIRE_VIVADO=1
+            ;;
+        *)
+            echo "FAIL: unknown argument $arg" >&2
+            exit 1
+            ;;
+    esac
+done
+
+check_contains() {
+    file="$1"
+    needle="$2"
+    if ! grep -Fq "$needle" "$file"; then
+        echo "FAIL: $file missing $needle" >&2
+        exit 1
+    fi
+}
+
+value_for() {
+    file="$1"
+    key="$2"
+    grep -E "^${key}[[:space:]]*=" "$file" | head -n 1 | sed 's/.*=[[:space:]]*//; s/"//g'
+}
+
+check_report() {
+    lane="$1"
+    max_luts="$2"
+    target_mhz="$3"
+    report="$REPORT_DIR/${lane}_synth.sdn"
+
+    test -f "$report" || {
+        echo "FAIL: missing synthesis report $report" >&2
+        exit 1
+    }
+
+    actual_luts="$(value_for "$report" actual_luts)"
+    actual_mhz="$(value_for "$report" actual_mhz)"
+    test -n "$actual_luts" || { echo "FAIL: $report missing actual_luts" >&2; exit 1; }
+    test -n "$actual_mhz" || { echo "FAIL: $report missing actual_mhz" >&2; exit 1; }
+    if [ "$REQUIRE_VIVADO" = "1" ]; then
+        source="$(value_for "$report" source)"
+        [ "$source" = "vivado" ] || { echo "FAIL: $report is not Vivado-derived" >&2; exit 1; }
+    fi
+
+    if [ "$actual_luts" -gt "$max_luts" ]; then
+        echo "FAIL: $lane actual_luts=$actual_luts exceeds max_luts=$max_luts" >&2
+        exit 1
+    fi
+    if [ "$actual_mhz" -lt "$target_mhz" ]; then
+        echo "FAIL: $lane actual_mhz=$actual_mhz below target_mhz=$target_mhz" >&2
+        exit 1
+    fi
+}
+
+rm -rf "$BUILD_ROOT"
+mkdir -p "$BUILD_ROOT"
+
+"$SIMPLE_BIN" run "$ROOT_DIR/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl" \
+    --board="$RISCV_BOARD_ID" \
+    --product-level="$RISCV_PRODUCT_LEVEL" \
+    --profile="$RISCV_CONFIG_PROFILE" \
+    --rv32-luts="$RISCV_RV32_LUTS" \
+    --rv64-luts="$RISCV_RV64_LUTS" \
+    --rv32-mhz="$RISCV_RV32_MHZ" \
+    --rv64-mhz="$RISCV_RV64_MHZ" \
+    "$BUILD_ROOT/default" >/dev/null
+
+manifest="$BUILD_ROOT/default/manifest.sdn"
+if [ ! -f "$manifest" ]; then
+    manifest="$BUILD_ROOT/default/riscv_fpga_rtl_manifest.sdn"
+fi
+byl="$BUILD_ROOT/default/riscv_product.byl"
+rv32="$BUILD_ROOT/default/rv32/rtl/simple_rv32gc_core.debug.json"
+rv64="$BUILD_ROOT/default/rv64/rtl/simple_rv64gc_core.debug.json"
+
+check_contains "$manifest" "product_level = \"$RISCV_PRODUCT_LEVEL\""
+check_contains "$manifest" "configuration_profile = \"$RISCV_CONFIG_PROFILE\""
+check_contains "$manifest" "rtl_size_budget_luts = \"$RISCV_RV32_LUTS\""
+check_contains "$manifest" "rtl_size_budget_luts = \"$RISCV_RV64_LUTS\""
+check_contains "$manifest" "perf_target_mhz = \"$RISCV_RV32_MHZ\""
+check_contains "$manifest" "perf_target_mhz = \"$RISCV_RV64_MHZ\""
+check_contains "$byl" "product_level = \"$RISCV_PRODUCT_LEVEL\""
+check_contains "$byl" "configuration_profile = \"$RISCV_CONFIG_PROFILE\""
+check_contains "$byl" "max_luts = $RISCV_RV32_LUTS"
+check_contains "$byl" "max_luts = $RISCV_RV64_LUTS"
+check_contains "$byl" "target_mhz = $RISCV_RV32_MHZ"
+check_contains "$byl" "target_mhz = $RISCV_RV64_MHZ"
+check_contains "$rv32" "\"productLevel\": \"$RISCV_PRODUCT_LEVEL\""
+check_contains "$rv32" "\"configurationProfile\": \"$RISCV_CONFIG_PROFILE\""
+check_contains "$rv32" "\"rtlBudget\": {\"maxLuts\": $RISCV_RV32_LUTS, \"targetMhz\": $RISCV_RV32_MHZ}"
+check_contains "$rv64" "\"productLevel\": \"$RISCV_PRODUCT_LEVEL\""
+check_contains "$rv64" "\"configurationProfile\": \"$RISCV_CONFIG_PROFILE\""
+check_contains "$rv64" "\"rtlBudget\": {\"maxLuts\": $RISCV_RV64_LUTS, \"targetMhz\": $RISCV_RV64_MHZ}"
+
+if [ "$RISCV_BOARD_ID" = "" ] &&
+    [ "$RISCV_PRODUCT_LEVEL" = "linux-rtl" ] &&
+    [ "$RISCV_CONFIG_PROFILE" = "qemu-virt+fpga-board" ] &&
+    [ "$RISCV_RV32_LUTS" = "25000" ] &&
+    [ "$RISCV_RV64_LUTS" = "45000" ] &&
+    [ "$RISCV_RV32_MHZ" = "50" ] &&
+    [ "$RISCV_RV64_MHZ" = "50" ]; then
+    cmp -s "$ROOT_DIR/src/verification/riscv_product/riscv_product.byl" "$byl" || {
+        echo "FAIL: generated default BYL differs from src/verification/riscv_product/riscv_product.byl" >&2
+        exit 1
+    }
+fi
+
+if [ -z "$REPORT_DIR" ]; then
+    if [ "$REQUIRE_SYNTH" = "1" ]; then
+        echo "FAIL: SYNTH_REPORT_DIR is required by --require-synth" >&2
+        exit 1
+    fi
+    echo "STATUS: WARN riscv-budget-evidence target-metadata-only"
+    exit 0
+fi
+
+check_report rv32 "$RISCV_RV32_LUTS" "$RISCV_RV32_MHZ"
+check_report rv64 "$RISCV_RV64_LUTS" "$RISCV_RV64_MHZ"
+
+echo "STATUS: PASS riscv-budget-evidence"

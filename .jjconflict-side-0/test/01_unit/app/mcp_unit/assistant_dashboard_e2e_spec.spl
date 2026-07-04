@@ -1,0 +1,82 @@
+use app.dashboard.assistant_collectors.{collect_assistant_snapshot, collect_assistant_timeline}
+use std.io_runtime.{file_delete}
+use app.mcp.assistant.session_store.{assistant_store_list_sessions}
+use app.mcp.main_lazy_assistant.{handle_assistant_start, handle_assistant_list_sessions, handle_assistant_push_signal}
+use std.nogc_async_mut.mcp.helpers.{extract_json_string, jo1, jo2, jp, js}
+
+extern fn rt_getpid() -> i64
+
+val ASSISTANT_STORE_ROOT = ".build/llm_dashboard/assistant"
+
+fn assistant_session_path(session_id: text) -> text:
+    "{ASSISTANT_STORE_ROOT}/sessions/{session_id}.json"
+
+fn assistant_timeline_path(session_id: text) -> text:
+    "{ASSISTANT_STORE_ROOT}/timelines/{session_id}.jsonl"
+
+fn assistant_notifications_path(session_id: text) -> text:
+    "{ASSISTANT_STORE_ROOT}/notifications/{session_id}.jsonl"
+
+fn start_assistant(token: text) -> text:
+    val body = jo2(
+        jp("name", js("E2E {token}")),
+        jp("prompt", js("Verify assistant store bridge {token}"))
+    )
+    handle_assistant_start("1", body)
+
+fn find_session_by_prompt(prompt: text) -> text:
+    for session in assistant_store_list_sessions(ASSISTANT_STORE_ROOT):
+        if session.prompt == prompt:
+            return session.session_id
+    ""
+
+fn push_wake_signal(session_id: text) -> text:
+    handle_assistant_push_signal(
+        "3",
+        jo2(jp("session_id", js(session_id)), jp("signal", js("wake")))
+    )
+
+fn cleanup_assistant_e2e_session(session_id: text):
+    file_delete(assistant_session_path(session_id))
+    file_delete(assistant_timeline_path(session_id))
+    file_delete(assistant_notifications_path(session_id))
+
+describe "assistant MCP to dashboard e2e":
+    it "starts a session, lists it, and the dashboard reads the stored timeline":
+        # @step: Start an assistant session through the MCP handler.
+        val token = "assistant_e2e_{rt_getpid()}"
+        val start_resp = start_assistant(token)
+        val session_id = find_session_by_prompt("Verify assistant store bridge {token}")
+
+        expect(session_id == "").to_be(false)
+        expect(start_resp.contains(token)).to_be(true)
+
+        # @step: List MCP assistant sessions and verify the new session is visible.
+        val list_resp = handle_assistant_list_sessions("2", jo1(""))
+        expect(list_resp.contains(session_id)).to_be(true)
+        expect(list_resp.contains(token)).to_be(true)
+
+        # @step: Push a wake signal and require a successful MCP response.
+        val signal_resp = push_wake_signal(session_id)
+        expect(signal_resp.contains("\"status\":\"ok\"")).to_be(true)
+
+        # @step: Collect the dashboard snapshot from persisted assistant store files.
+        val snapshot = collect_assistant_snapshot()
+        var matched = false
+        for session in snapshot.sessions:
+            if session.session_id == session_id:
+                matched = true
+        expect(matched).to_be(true)
+        expect(snapshot.total_sessions).to_be_greater_than(0)
+
+        # @step: Read the dashboard timeline and verify the persisted signal event.
+        val timeline = collect_assistant_timeline(session_id)
+        expect(timeline.len()).to_be_greater_than(0)
+        var signal_found = false
+        for event in timeline:
+            if event.kind == "signal_event" and event.signal == "wake":
+                signal_found = true
+        expect(signal_found).to_be(true)
+
+        # @step: Remove the fixture session, timeline, and notification files.
+        cleanup_assistant_e2e_session(session_id)

@@ -1,0 +1,285 @@
+# Noalloc Allocation Checker
+#
+# Compiler-owned semantic pass that enforces @noalloc annotations at function
+# granularity. Uses alloc_inference results and the RUNTIME_FAMILY_MANIFEST
+# to reject allocation in @noalloc-annotated functions.
+#
+# Three violation kinds:
+#   1. DirectAlloc    — new, array/dict literal, string interpolation in @noalloc fn
+#   2. TransitiveCall — call to a function classified as allocating by alloc_inference
+#   3. FamilyImport   — call into an allocating runtime family per the manifest
+#
+# Emits hard errors (not warnings) so @noalloc is a compile-time guarantee.
+
+use compiler.semantics.gc_boundary_check.{
+    RuntimeFamilyManifestEntry, RUNTIME_FAMILY_MANIFEST,
+    runtime_family_manifest_entry
+}
+
+# ============================================================================
+# Violation Kind
+# ============================================================================
+
+enum NoallocViolationKind:
+    """Classification of why an @noalloc context was violated."""
+    DirectAlloc
+    TransitiveCall
+    FamilyImport
+
+# ============================================================================
+# Violation
+# ============================================================================
+
+struct NoallocViolation:
+    """A single allocation violation inside an @noalloc function.
+
+    Fields:
+        fn_name:  The @noalloc function where the violation was found.
+        kind:     DirectAlloc | TransitiveCall | FamilyImport.
+        detail:   Human-readable description (e.g. callee name, expr kind).
+        line:     Source line number (0 when unavailable).
+    """
+    fn_name: text
+    kind: NoallocViolationKind
+    detail: text
+    line: i64
+
+# ============================================================================
+# Capability Manifest
+# ============================================================================
+
+struct NoallocFnEntry:
+    """Per-function noalloc capability record.
+
+    Fields:
+        name:          Fully-qualified function name.
+        is_noalloc:    true when the function is annotated @noalloc.
+        allocates:     true when alloc_inference classifies it as allocating.
+        family_module: Module path for runtime-family lookup (empty if local).
+    """
+    name: text
+    is_noalloc: bool
+    allocates: bool
+    family_module: text
+
+class NoallocCapabilityManifest:
+    """Registry of per-function noalloc status and allocation classification.
+
+    Built once per compilation unit by the driver, then passed to the checker.
+    """
+    entries: [NoallocFnEntry]
+    index: {text: i64}
+
+impl NoallocCapabilityManifest:
+    static fn new() -> NoallocCapabilityManifest:
+        """Create an empty manifest."""
+        NoallocCapabilityManifest(entries: [], index: {})
+
+    me register(name: text, is_noalloc: bool, allocates: bool, family_module: text):
+        """Register a function in the manifest."""
+        val idx = self.entries.len()
+        self.entries.push(NoallocFnEntry(
+            name: name,
+            is_noalloc: is_noalloc,
+            allocates: allocates,
+            family_module: family_module
+        ))
+        self.index[name] = idx
+
+    fn lookup(name: text) -> NoallocFnEntry:
+        """Look up a function entry. Returns a default non-noalloc, non-allocating entry if unknown."""
+        if self.index.has(name):
+            val idx = self.index[name]
+            return self.entries[idx]
+        NoallocFnEntry(name: name, is_noalloc: false, allocates: false, family_module: "")
+
+    fn is_noalloc_fn(name: text) -> bool:
+        """Check whether a function is annotated @noalloc."""
+        self.lookup(name).is_noalloc
+
+    fn is_allocating_fn(name: text) -> bool:
+        """Check whether a function is classified as allocating."""
+        self.lookup(name).allocates
+
+    fn get_noalloc_fns() -> [text]:
+        """Return names of all @noalloc-annotated functions."""
+        var result: [text] = []
+        for entry in self.entries:
+            if entry.is_noalloc:
+                result.push(entry.name)
+        result
+
+# ============================================================================
+# Direct Allocation Detection
+# ============================================================================
+
+fn is_direct_alloc_expr(expr_tag: text) -> bool:
+    """Return true for expression tags that represent direct heap allocation.
+
+    Recognized patterns:
+    - "new"              new Foo()
+    - "array_literal"    [1, 2, 3]
+    - "dict_literal"     {"a": 1}
+    - "interpolation"    "hello {name}"
+    - "string_concat"    a + b (when both are text — runtime alloc)
+    """
+    expr_tag == "new" or expr_tag == "array_literal" or expr_tag == "dict_literal" or expr_tag == "interpolation" or expr_tag == "string_concat"
+
+fn direct_alloc_description(expr_tag: text) -> text:
+    """Human-readable description for a direct allocation expression."""
+    if expr_tag == "new":
+        return "heap allocation via 'new'"
+    if expr_tag == "array_literal":
+        return "array literal allocates on heap"
+    if expr_tag == "dict_literal":
+        return "dict literal allocates on heap"
+    if expr_tag == "interpolation":
+        return "string interpolation allocates on heap"
+    if expr_tag == "string_concat":
+        return "string concatenation allocates on heap"
+    "unknown allocation expression"
+
+# ============================================================================
+# Family-Based Allocation Check
+# ============================================================================
+
+fn is_allocating_family_call(callee_module: text) -> bool:
+    """Return true if the callee lives in a runtime family that allocates.
+
+    Uses RUNTIME_FAMILY_MANIFEST — the same manifest model used by
+    gc_boundary_check for import violations.
+    """
+    if callee_module == "":
+        return false
+    val entry = runtime_family_manifest_entry(callee_module)
+    entry.allocates
+
+# ============================================================================
+# Checker — Main Entry Point
+# ============================================================================
+
+fn check_noalloc_violations(fn_name: text, expr_tags: [text], callee_names: [text], manifest: NoallocCapabilityManifest) -> [NoallocViolation]:
+    """Check a single @noalloc function body for allocation violations.
+
+    Arguments:
+        fn_name:      Name of the @noalloc function being checked.
+        expr_tags:    List of expression-kind tags found in the function body
+                      (e.g. "new", "array_literal", "call").
+        callee_names: List of function names called from the body.
+        manifest:     The capability manifest for this compilation unit.
+
+    Returns a list of violations. Empty list means the function is clean.
+
+    sdoctest:
+        val m = NoallocCapabilityManifest.new()
+        m.register("pure_fn", false, false, "")
+        m.register("alloc_fn", false, true, "")
+        # Direct alloc
+        expect(check_noalloc_violations("my_fn", ["new"], [], m).len()).to_equal(1)
+        # Transitive call to allocating fn
+        expect(check_noalloc_violations("my_fn", [], ["alloc_fn"], m).len()).to_equal(1)
+        # Clean
+        expect(check_noalloc_violations("my_fn", [], ["pure_fn"], m).len()).to_equal(0)
+    """
+    var violations: [NoallocViolation] = []
+
+    # Phase 1: Direct allocation expressions
+    for tag in expr_tags:
+        if is_direct_alloc_expr(tag):
+            violations.push(NoallocViolation(
+                fn_name: fn_name,
+                kind: NoallocViolationKind.DirectAlloc,
+                detail: direct_alloc_description(tag),
+                line: 0
+            ))
+
+    # Phase 2: Transitive calls to allocating functions
+    for callee in callee_names:
+        val entry = manifest.lookup(callee)
+
+        # Check alloc_inference classification
+        if entry.allocates:
+            violations.push(NoallocViolation(
+                fn_name: fn_name,
+                kind: NoallocViolationKind.TransitiveCall,
+                detail: "call to allocating function '{callee}'",
+                line: 0
+            ))
+            continue
+
+        # Check runtime family allocation status
+        if entry.family_module != "" and is_allocating_family_call(entry.family_module):
+            violations.push(NoallocViolation(
+                fn_name: fn_name,
+                kind: NoallocViolationKind.FamilyImport,
+                detail: "call to '{callee}' in allocating family '{entry.family_module}'",
+                line: 0
+            ))
+
+    violations
+
+fn check_all_noalloc_fns(fn_bodies: [{text: [text]}], fn_callees: [{text: [text]}], manifest: NoallocCapabilityManifest) -> [NoallocViolation]:
+    """Check all @noalloc functions in a compilation unit.
+
+    Arguments:
+        fn_bodies:  Map from function name to list of expression tags in body.
+        fn_callees: Map from function name to list of callee names in body.
+        manifest:   The capability manifest.
+
+    Returns all violations across all @noalloc functions.
+    """
+    var all_violations: [NoallocViolation] = []
+    val noalloc_fns = manifest.get_noalloc_fns()
+
+    for fn_name in noalloc_fns:
+        var expr_tags: [text] = []
+        var callees: [text] = []
+
+        for body_entry in fn_bodies:
+            if body_entry.has(fn_name):
+                expr_tags = body_entry[fn_name]
+
+        for callee_entry in fn_callees:
+            if callee_entry.has(fn_name):
+                callees = callee_entry[fn_name]
+
+        val violations = check_noalloc_violations(fn_name, expr_tags, callees, manifest)
+        for v in violations:
+            all_violations.push(v)
+
+    all_violations
+
+# ============================================================================
+# Formatting
+# ============================================================================
+
+fn format_noalloc_violation(v: NoallocViolation) -> text:
+    """Format a single violation as a compiler diagnostic string.
+
+    sdoctest:
+        val v = NoallocViolation(fn_name: "boot", kind: NoallocViolationKind.DirectAlloc, detail: "heap allocation via 'new'", line: 42)
+        expect(format_noalloc_violation(v).starts_with("error[noalloc]")).to_equal(true)
+    """
+    var kind_label = "unknown"
+    match v.kind:
+        NoallocViolationKind.DirectAlloc:
+            kind_label = "direct-alloc"
+        NoallocViolationKind.TransitiveCall:
+            kind_label = "transitive-call"
+        NoallocViolationKind.FamilyImport:
+            kind_label = "family-import"
+
+    if v.line > 0:
+        return "error[noalloc]: in @noalloc fn '{v.fn_name}' (line {v.line}): {kind_label} — {v.detail}"
+    "error[noalloc]: in @noalloc fn '{v.fn_name}': {kind_label} — {v.detail}"
+
+fn format_noalloc_violations(violations: [NoallocViolation]) -> [text]:
+    """Format all violations as diagnostic strings.
+
+    sdoctest:
+        expect(format_noalloc_violations([]).len()).to_equal(0)
+    """
+    var messages: [text] = []
+    for v in violations:
+        messages.push(format_noalloc_violation(v))
+    messages

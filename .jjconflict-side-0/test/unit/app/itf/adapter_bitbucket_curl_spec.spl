@@ -1,0 +1,319 @@
+# Bitbucket Cloud curl-shellout Adapter Unit Tests
+#
+# Feature: Bitbucket curl adapter for SPipe Infra (#10 follow-up to #11)
+# Category: ITF, Adapter, Bitbucket, Curl
+# Status: Implemented
+#
+# Covers:
+#   - URL builders (collection / resource / sub)
+#   - auth_header() and is_configured()
+#   - argv builders for GET/POST/DELETE (verb, headers, -w escape, body, url)
+#   - response status-tail parsing (curl -w newline + http_code output)
+#   - error-label mapping for 401/403(general)/403(merge)/404/409/429/500/0
+#   - ready-to-merge logic on JSON fixtures (delegated to bb_eval_ready_to_merge)
+#
+# All tests target pure helpers — NO subprocess execution.
+
+use app.itf.adapter_bitbucket_curl.{
+    BbCurlClient,
+    bbc_auth_header,
+    bbc_pr_collection_url,
+    bbc_pr_url,
+    bbc_pr_sub_url,
+    _argv_curl_get,
+    _argv_curl_post,
+    _argv_curl_delete,
+    _bbc_parse_status_tail,
+    _bbc_status_label,
+    bb_build_create_pr_body,
+    bb_build_comment_body,
+    bb_build_merge_body,
+    bb_eval_ready_to_merge,
+    BB_OP_GENERAL,
+    BB_OP_MERGE
+}
+use std.common.json.{json_parse}
+
+
+# ============================================================================
+# Helper to build a fixed test client.
+# ============================================================================
+
+fn _mk_client() -> BbCurlClient:
+    BbCurlClient(base_url: "https://api.bitbucket.org/2.0", workspace: "acme", repo: "widgets", token: "tk_abc", curl_path: "curl")
+
+
+fn _list_contains(xs: [text], needle: text) -> bool:
+    for x in xs:
+        if x == needle:
+            return true
+    false
+
+
+# ============================================================================
+# Auth header & is_configured()
+# ============================================================================
+
+describe "bbc auth header":
+    it "builds Bearer when token present":
+        expect(bbc_auth_header("abc123")).to_equal("Bearer abc123")
+
+    it "returns empty when token blank":
+        expect(bbc_auth_header("")).to_equal("")
+
+    it "client.auth_header() forwards to bbc_auth_header":
+        val c = _mk_client()
+        expect(c.auth_header()).to_equal("Bearer tk_abc")
+
+    it "is_configured true when ws+repo+token set":
+        val c = _mk_client()
+        expect(c.is_configured()).to_equal(true)
+
+    it "is_configured false when token blank":
+        val c = BbCurlClient(base_url: "x", workspace: "w", repo: "r", token: "", curl_path: "curl")
+        expect(c.is_configured()).to_equal(false)
+
+    it "is_configured false when workspace blank":
+        val c = BbCurlClient(base_url: "x", workspace: "", repo: "r", token: "t", curl_path: "curl")
+        expect(c.is_configured()).to_equal(false)
+
+
+# ============================================================================
+# URL builders
+# ============================================================================
+
+describe "bbc URL builders":
+    it "PR collection URL has /pullrequests suffix":
+        val c = _mk_client()
+        expect(bbc_pr_collection_url(c)).to_equal("https://api.bitbucket.org/2.0/repositories/acme/widgets/pullrequests")
+
+    it "PR resource URL appends id":
+        val c = _mk_client()
+        expect(bbc_pr_url(c, 42)).to_equal("https://api.bitbucket.org/2.0/repositories/acme/widgets/pullrequests/42")
+
+    it "PR comments sub URL":
+        val c = _mk_client()
+        expect(bbc_pr_sub_url(c, 7, "comments")).to_end_with("/pullrequests/7/comments")
+
+    it "PR approve sub URL":
+        val c = _mk_client()
+        expect(bbc_pr_sub_url(c, 7, "approve")).to_end_with("/pullrequests/7/approve")
+
+    it "PR merge sub URL":
+        val c = _mk_client()
+        expect(bbc_pr_sub_url(c, 7, "merge")).to_end_with("/pullrequests/7/merge")
+
+    it "PR statuses sub URL":
+        val c = _mk_client()
+        expect(bbc_pr_sub_url(c, 7, "statuses")).to_end_with("/pullrequests/7/statuses")
+
+
+# ============================================================================
+# argv builders — verb, header tokens, -w escape, body, url placement
+# ============================================================================
+
+describe "_argv_curl_get":
+    it "uses GET verb with -s -S":
+        val args = _argv_curl_get("https://x/foo", "Bearer t")
+        expect(_list_contains(args, "-X")).to_equal(true)
+        expect(_list_contains(args, "GET")).to_equal(true)
+        expect(_list_contains(args, "-s")).to_equal(true)
+        expect(_list_contains(args, "-S")).to_equal(true)
+
+    it "includes Authorization header when auth non-empty":
+        val args = _argv_curl_get("https://x/foo", "Bearer t")
+        expect(_list_contains(args, "Authorization: Bearer t")).to_equal(true)
+
+    it "omits Authorization header when auth empty":
+        val args = _argv_curl_get("https://x/foo", "")
+        expect(_list_contains(args, "Authorization: ")).to_equal(false)
+
+    it "includes Accept: application/json":
+        val args = _argv_curl_get("https://x/foo", "")
+        expect(_list_contains(args, "Accept: application/json")).to_equal(true)
+
+    it "uses curl http_code write-out built without interpolation":
+        val args = _argv_curl_get("https://x/foo", "")
+        # The runtime-built literal must equal the curl write-out string.
+        val expected = "\n" + "%" + "{" + "http_code" + "}"
+        expect(_list_contains(args, expected)).to_equal(true)
+
+    it "url is the last arg":
+        val args = _argv_curl_get("https://x/foo", "")
+        expect(args[args.len() - 1]).to_equal("https://x/foo")
+
+
+describe "_argv_curl_post":
+    it "uses POST verb":
+        val args = _argv_curl_post("https://x/foo", "Bearer t", "{}")
+        expect(_list_contains(args, "POST")).to_equal(true)
+
+    it "includes Content-Type for JSON body":
+        val args = _argv_curl_post("https://x/foo", "Bearer t", "{}")
+        expect(_list_contains(args, "Content-Type: application/json")).to_equal(true)
+
+    it "passes body via -d when non-empty":
+        val args = _argv_curl_post("https://x/foo", "Bearer t", "{\"a\":1}")
+        expect(_list_contains(args, "-d")).to_equal(true)
+        expect(_list_contains(args, "{\"a\":1}")).to_equal(true)
+
+    it "omits -d entirely when body is empty":
+        val args = _argv_curl_post("https://x/foo", "Bearer t", "")
+        expect(_list_contains(args, "-d")).to_equal(false)
+
+    it "url is the last arg":
+        val args = _argv_curl_post("https://x/foo", "Bearer t", "")
+        expect(args[args.len() - 1]).to_equal("https://x/foo")
+
+
+describe "_argv_curl_delete":
+    it "uses DELETE verb":
+        val args = _argv_curl_delete("https://x/foo", "Bearer t")
+        expect(_list_contains(args, "DELETE")).to_equal(true)
+
+    it "does NOT include -d (DELETE has no body here)":
+        val args = _argv_curl_delete("https://x/foo", "Bearer t")
+        expect(_list_contains(args, "-d")).to_equal(false)
+
+    it "url is the last arg":
+        val args = _argv_curl_delete("https://x/foo", "Bearer t")
+        expect(args[args.len() - 1]).to_equal("https://x/foo")
+
+
+# ============================================================================
+# JSON body builders (mirror adapter_bitbucket.spl shapes)
+# ============================================================================
+
+describe "bb_build_create_pr_body":
+    it "minimum body has title and source branch":
+        val body = bb_build_create_pr_body("My PR", "feat-x", "", [])
+        expect(body).to_contain("\"title\": \"My PR\"")
+        expect(body).to_contain("\"name\": \"feat-x\"")
+        expect(json_parse(body) != nil).to_equal(true)
+
+    it "omits destination when blank":
+        val body = bb_build_create_pr_body("T", "src", "", [])
+        expect(body.contains("\"destination\":")).to_equal(false)
+
+    it "includes reviewers as uuid objects":
+        val body = bb_build_create_pr_body("T", "src", "main", ["uuid-aaa", "uuid-bbb"])
+        expect(body).to_contain("\"uuid\": \"uuid-aaa\"")
+        expect(body).to_contain("\"uuid\": \"uuid-bbb\"")
+
+
+describe "bb_build_comment_body":
+    it "general comment has no inline":
+        val body = bb_build_comment_body("Looks good", "", -1, -1)
+        expect(body).to_contain("\"raw\": \"Looks good\"")
+        expect(body.contains("\"inline\":")).to_equal(false)
+
+    it "inline comment encodes from=null when negative":
+        val body = bb_build_comment_body("Bug", "src/x.spl", -1, 42)
+        expect(body).to_contain("\"from\": null")
+        expect(body).to_contain("\"to\": 42")
+
+
+describe "bb_build_merge_body":
+    it "squash + close":
+        val body = bb_build_merge_body("squash", true, "")
+        expect(body).to_contain("\"merge_strategy\": \"squash\"")
+        expect(body).to_contain("\"close_source_branch\": true")
+
+
+# ============================================================================
+# Status-tail parser
+# ============================================================================
+
+describe "_bbc_parse_status_tail":
+    it "splits body and trailing http_code":
+        val (status, body) = _bbc_parse_status_tail("{\"id\": 1}\n200")
+        expect(status).to_equal(200)
+        expect(body).to_equal("{\"id\": 1}")
+
+    it "handles a multi-line body":
+        val (status, body) = _bbc_parse_status_tail("line1\nline2\nline3\n404")
+        expect(status).to_equal(404)
+        expect(body).to_equal("line1\nline2\nline3")
+
+    it "handles 5xx codes":
+        val (status, _body) = _bbc_parse_status_tail("err\n503")
+        expect(status).to_equal(503)
+
+    it "returns (0, raw) when tail is non-numeric":
+        val (status, body) = _bbc_parse_status_tail("only-output-no-code")
+        expect(status).to_equal(0)
+        expect(body).to_equal("")
+
+    it "handles empty input":
+        val (status, body) = _bbc_parse_status_tail("")
+        expect(status).to_equal(0)
+        expect(body).to_equal("")
+
+
+# ============================================================================
+# Error-label mapping
+# ============================================================================
+
+describe "_bbc_status_label":
+    it "401 → blocked-auth":
+        val s = _bbc_status_label(401, "no token", BB_OP_GENERAL)
+        expect(s).to_contain("blocked-auth")
+        expect(s).to_contain("401")
+
+    it "403 on merge → branch policy":
+        val s = _bbc_status_label(403, "branch restriction", BB_OP_MERGE)
+        expect(s).to_contain("blocked")
+        expect(s).to_contain("branch policy")
+
+    it "403 on general → blocked-auth":
+        val s = _bbc_status_label(403, "no scope", BB_OP_GENERAL)
+        expect(s).to_contain("blocked-auth")
+        expect(s).to_contain("403")
+
+    it "404 → not_found":
+        val s = _bbc_status_label(404, "", BB_OP_GENERAL)
+        expect(s).to_contain("not_found")
+
+    it "409 → blocked-conflict":
+        val s = _bbc_status_label(409, "merge conflict", BB_OP_GENERAL)
+        expect(s).to_contain("blocked-conflict")
+
+    it "429 → rate_limited":
+        val s = _bbc_status_label(429, "", BB_OP_GENERAL)
+        expect(s).to_contain("rate_limited")
+
+    it "500 → api_error":
+        val s = _bbc_status_label(500, "boom", BB_OP_GENERAL)
+        expect(s).to_contain("api_error")
+        expect(s).to_contain("500")
+
+    it "0 (curl process error) → network_error":
+        val s = _bbc_status_label(0, "curl: not found", BB_OP_GENERAL)
+        expect(s).to_contain("network_error")
+
+
+# ============================================================================
+# Ready-to-merge logic on fixture JSON (uses pure helper from adapter_bitbucket).
+# Verifies the curl adapter shares the same evaluator semantics.
+# ============================================================================
+
+val FIXTURE_PR_APPROVED_OPEN = "{\"state\": \"OPEN\", \"participants\": [{\"role\": \"REVIEWER\", \"approved\": true, \"state\": \"approved\"}, {\"role\": \"PARTICIPANT\", \"approved\": false}]}"
+val FIXTURE_PR_PENDING = "{\"state\": \"OPEN\", \"participants\": [{\"role\": \"REVIEWER\", \"approved\": false}]}"
+val FIXTURE_STATUSES_OK = "{\"values\": [{\"key\": \"ci-build\", \"state\": \"SUCCESSFUL\"}]}"
+val FIXTURE_STATUSES_FAIL = "{\"values\": [{\"key\": \"ci-build\", \"state\": \"FAILED\"}]}"
+
+
+describe "bbc ready-to-merge (via shared bb_eval_ready_to_merge)":
+    it "ready when OPEN + approved + statuses SUCCESSFUL":
+        val (ready, _reason) = bb_eval_ready_to_merge(json_parse(FIXTURE_PR_APPROVED_OPEN), json_parse(FIXTURE_STATUSES_OK))
+        expect(ready).to_equal(true)
+
+    it "not ready when no approval":
+        val (ready, reason) = bb_eval_ready_to_merge(json_parse(FIXTURE_PR_PENDING), json_parse(FIXTURE_STATUSES_OK))
+        expect(ready).to_equal(false)
+        expect(reason).to_contain("no approved reviewers")
+
+    it "not ready when a status FAILED":
+        val (ready, reason) = bb_eval_ready_to_merge(json_parse(FIXTURE_PR_APPROVED_OPEN), json_parse(FIXTURE_STATUSES_FAIL))
+        expect(ready).to_equal(false)
+        expect(reason).to_contain("FAILED")

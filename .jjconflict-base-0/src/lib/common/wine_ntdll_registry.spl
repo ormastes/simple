@@ -1,0 +1,72 @@
+"""Bounded NTDLL registry key/value query bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_ntdll_registry_dispatch_gate}
+
+class WineNtdllRegistryValue:
+    key: text
+    name: text
+    value: text
+
+class WineNtdllRegistryHive:
+    values: [WineNtdllRegistryValue]
+    next_handle: i64
+
+class WineNtdllRegistryResult:
+    ok: bool
+    error: text
+    hive: WineNtdllRegistryHive
+    handle: i64
+    key: text
+    name: text
+    value: text
+    operations: text
+
+fn _value(key: text, name: text, value: text) -> WineNtdllRegistryValue:
+    WineNtdllRegistryValue(key: key, name: name, value: value)
+
+fn _hive(values: [WineNtdllRegistryValue], next_handle: i64) -> WineNtdllRegistryHive:
+    WineNtdllRegistryHive(values: values, next_handle: next_handle)
+
+fn _result(ok: bool, error: text, hive: WineNtdllRegistryHive, handle: i64, key: text, name: text, value: text, operations: text) -> WineNtdllRegistryResult:
+    WineNtdllRegistryResult(ok: ok, error: error, hive: hive, handle: handle, key: key, name: name, value: value, operations: operations)
+
+pub fn wine_ntdll_registry_hive_default() -> WineNtdllRegistryHive:
+    _hive([
+        _value("\\Registry\\Machine\\Software\\Wine", "InstallRoot", "C:\\windows"),
+        _value("\\Registry\\User\\S-1-5-21\\Software\\Wine", "Version", "SimpleOS-Wine")
+    ], 0x600)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_ntdll_registry_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 3:
+        return "ntdll-registry-sequence-count-mismatch"
+    if symbols[0] != "NtOpenKey":
+        return "ntdll-registry-sequence-expected:NtOpenKey"
+    if symbols[1] != "NtQueryValueKey":
+        return "ntdll-registry-sequence-expected:NtQueryValueKey"
+    if symbols[2] != "NtClose":
+        return "ntdll-registry-sequence-expected:NtClose"
+    "ready"
+
+fn _find_value(hive: WineNtdllRegistryHive, key: text, name: text) -> WineNtdllRegistryValue:
+    for item in hive.values:
+        if item.key == key and item.name == name:
+            return item
+    _value("", "", "")
+
+pub fn wine_ntdll_execute_registry_query(symbols: [text], hive: WineNtdllRegistryHive, key: text, name: text) -> WineNtdllRegistryResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, hive, 0, "", "", "", "")
+    if key == "":
+        return _result(false, "NtOpenKey:invalid-key", hive, 0, "", "", "", "")
+    if name == "":
+        return _result(false, "NtQueryValueKey:invalid-name", hive, hive.next_handle, key, "", "", "NtOpenKey")
+    val found = _find_value(hive, key, name)
+    if found.key == "":
+        return _result(false, "NtQueryValueKey:value-not-found", hive, hive.next_handle, key, name, "", "NtOpenKey")
+    val handle = hive.next_handle
+    val updated = _hive(hive.values, handle + 1)
+    _result(true, "", updated, handle, key, name, found.value, "NtOpenKey NtQueryValueKey NtClose")

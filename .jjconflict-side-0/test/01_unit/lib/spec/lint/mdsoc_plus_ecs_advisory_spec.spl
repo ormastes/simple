@@ -1,0 +1,240 @@
+# @cover src/compiler/35.semantics/lint/mdsoc_plus_ecs_advisory.spl
+# @cover src/compiler/35.semantics/lint/__init__.spl
+"""
+# MDSOC+ ECS Advisory Lint Rule Specification
+
+**Feature IDs:** #MDSOC-PLUS-001
+**Category:** Compiler | Semantics | Lint
+**Difficulty:** 2/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Tests the `mdsoc_plus_ecs_advisory` lint rule (`check_mdsoc_plus_001`) that
+scans source text for structs with >= 7 fields in MDSOC+ userland paths
+(`src/os/services/**`, `src/os/apps/**`) that do not import any ECS module.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| MDSOC_PLUS_001 | Struct with >= 7 fields in os/services or os/apps without ECS import |
+| MdsocPlusEcsWarning | Struct: code, severity, message, hint, line_num, file_path |
+| check_mdsoc_plus_001 | Entry-point: (source: text, path: text) -> [MdsocPlusEcsWarning] |
+"""
+
+use compiler.semantics.lint.mdsoc_plus_ecs_advisory.{
+    check_mdsoc_plus_001, MdsocPlusEcsWarning
+}
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_large_struct(name: text) -> text:
+    """Return source text for a struct with 8 fields (triggers the rule)."""
+    "struct {name}:\n    a: i64\n    b: i64\n    c: i64\n    d: i64\n    e: i64\n    f: i64\n    g: i64\n    h: i64\n"
+
+fn make_small_struct(name: text) -> text:
+    """Return source text for a struct with 4 fields (below the threshold)."""
+    "struct {name}:\n    a: i64\n    b: i64\n    c: i64\n    d: i64\n"
+
+fn services_path() -> text:
+    "src/os/services/scheduler/sched.spl"
+
+fn apps_path() -> text:
+    "src/os/apps/launcher/main.spl"
+
+fn kernel_path() -> text:
+    "src/os/kernel/mm/page.spl"
+
+fn drivers_path() -> text:
+    "src/os/drivers/virtio/net.spl"
+
+
+# ============================================================================
+# Test Group 1: Rule fires on matching paths
+# ============================================================================
+
+describe "mdsoc_plus_ecs_advisory — MDSOC_PLUS_001 fires":
+    """
+    ## Rule fires when path is os/services or os/apps and struct has >= 7 fields
+    """
+
+    context "src/os/services/ path with 8-field struct and no ECS import":
+        it "emits at least one MDSOC_PLUS_001 warning":
+            val src = make_large_struct("SchedulerState")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws.len()).to_be_greater_than(0)
+
+        it "warning code is MDSOC_PLUS_001":
+            val src = make_large_struct("SchedulerState")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws[0].code).to_equal("MDSOC_PLUS_001")
+
+        it "warning severity is WARNING":
+            val src = make_large_struct("SchedulerState")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws[0].severity).to_equal("WARNING")
+
+        it "warning file_path matches the supplied path":
+            val src = make_large_struct("SchedulerState")
+            val path = services_path()
+            val ws = check_mdsoc_plus_001(src, path)
+            expect(ws[0].file_path).to_equal(path)
+
+    context "src/os/apps/ path with 8-field struct and no ECS import":
+        it "emits at least one MDSOC_PLUS_001 warning":
+            val src = make_large_struct("AppState")
+            val ws = check_mdsoc_plus_001(src, apps_path())
+            expect(ws.len()).to_be_greater_than(0)
+
+        it "warning code is MDSOC_PLUS_001":
+            val src = make_large_struct("AppState")
+            val ws = check_mdsoc_plus_001(src, apps_path())
+            expect(ws[0].code).to_equal("MDSOC_PLUS_001")
+
+
+# ============================================================================
+# Test Group 2: Rule does NOT fire on excluded paths
+# ============================================================================
+
+describe "mdsoc_plus_ecs_advisory — excluded paths produce no warnings":
+    """
+    ## Excluded paths: kernel/, drivers/, test/, _spec.spl
+    """
+
+    context "src/os/kernel/ path":
+        it "emits no warnings for kernel path":
+            val src = make_large_struct("PageTable")
+            val ws = check_mdsoc_plus_001(src, kernel_path())
+            expect(ws.len()).to_equal(0)
+
+    context "src/os/drivers/ path":
+        it "emits no warnings for drivers path":
+            val src = make_large_struct("VirtioNetState")
+            val ws = check_mdsoc_plus_001(src, drivers_path())
+            expect(ws.len()).to_equal(0)
+
+
+# ============================================================================
+# Test Group 3: Rule does NOT fire when ECS is imported
+# ============================================================================
+
+describe "mdsoc_plus_ecs_advisory — ECS import suppresses the warning":
+    """
+    ## Files that already import std.ecs.* are exempt
+    """
+
+    context "file imports std.ecs.*":
+        it "emits no warnings when std.ecs.world is imported":
+            val src = "use std.ecs.world\n" + make_large_struct("ServiceState")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws.len()).to_equal(0)
+
+        it "emits no warnings when std.ecs.component is imported":
+            val src = "use std.ecs.component\n" + make_large_struct("ServiceState")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws.len()).to_equal(0)
+
+
+# ============================================================================
+# Test Group 4: Struct-level exemptions
+# ============================================================================
+
+describe "mdsoc_plus_ecs_advisory — struct-level exemptions":
+    """
+    ## @repr(\"C\") and DTO-suffix names are exempt
+    """
+
+    context "@repr(\"C\") annotated struct":
+        it "emits no warnings for repr-C struct":
+            val src = "@repr(\"C\")\nstruct FfiLayout:\n    a: i64\n    b: i64\n    c: i64\n    d: i64\n    e: i64\n    f: i64\n    g: i64\n    h: i64\n"
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws.len()).to_equal(0)
+
+    context "struct name ends in Action":
+        it "emits no warnings for DTO-suffix Action":
+            val src = make_large_struct("SpawnAction")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws.len()).to_equal(0)
+
+    context "struct name ends in Message":
+        it "emits no warnings for DTO-suffix Message":
+            val src = make_large_struct("BootMessage")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws.len()).to_equal(0)
+
+    context "struct name ends in Request":
+        it "emits no warnings for DTO-suffix Request":
+            val src = make_large_struct("AllocRequest")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws.len()).to_equal(0)
+
+    context "struct name ends in Reply":
+        it "emits no warnings for DTO-suffix Reply":
+            val src = make_large_struct("AllocReply")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws.len()).to_equal(0)
+
+    context "struct name ends in Event":
+        it "emits no warnings for DTO-suffix Event":
+            val src = make_large_struct("TimerEvent")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws.len()).to_equal(0)
+
+
+# ============================================================================
+# Test Group 5: Small struct (below threshold)
+# ============================================================================
+
+describe "mdsoc_plus_ecs_advisory — small structs are exempt":
+    """
+    ## Structs with fewer than 7 fields do not trigger the rule
+    """
+
+    context "struct with 4 fields in services path":
+        it "emits no warnings for small struct":
+            val src = make_small_struct("TinyState")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws.len()).to_equal(0)
+
+    context "struct with exactly 6 fields in apps path":
+        it "emits no warnings for 6-field struct":
+            val src = "struct SixField:\n    a: i64\n    b: i64\n    c: i64\n    d: i64\n    e: i64\n    f: i64\n"
+            val ws = check_mdsoc_plus_001(src, apps_path())
+            expect(ws.len()).to_equal(0)
+
+
+# ============================================================================
+# Test Group 6: MdsocPlusEcsWarning fields
+# ============================================================================
+
+describe "MdsocPlusEcsWarning — struct fields":
+    """
+    ## Warning struct carries all required fields
+    """
+
+    context "warning produced for large struct in services":
+        it "hint field is non-empty":
+            val src = make_large_struct("LargeService")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            val hint = ws[0].hint
+            expect(hint.len()).to_be_greater_than(0)
+
+        it "message contains the struct name":
+            val src = make_large_struct("LargeService")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            expect(ws[0].message).to_contain("LargeService")
+
+        it "fmt() includes the warning code":
+            val src = make_large_struct("LargeService")
+            val ws = check_mdsoc_plus_001(src, services_path())
+            val formatted = ws[0].fmt()
+            expect(formatted).to_contain("MDSOC_PLUS_001")

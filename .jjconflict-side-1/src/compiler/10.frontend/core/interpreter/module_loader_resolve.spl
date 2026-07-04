@@ -1,0 +1,394 @@
+# Core Interpreter — Module Path Resolution
+#
+# Resolves `use` statement module names to filesystem paths.
+# Split from module_loader.spl for file-size compliance.
+#
+# Key responsibilities:
+# 1. Resolve dotted module names (std.string → src/lib/text.spl)
+# 2. Handle numbered directory resolution (NN.name pattern)
+# 3. Unit-system path resolution (unit.X → src/unit/org/X.spl)
+# 4. Library subdirectory search (lib/* GC family directories)
+#
+# Module Path Resolution (in order):
+# 1. Local directory (relative to current file)
+# 2. SIMPLE_LIB environment variable path
+# 3. Fallback to src/lib/ (standard library)
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_path_join(base: text, rel: text) -> text
+extern fn rt_path_dirname(path: text) -> text
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_dir_exists(path: text) -> bool
+
+# ===== Module Path Resolution =====
+
+# Cache resolved module paths to avoid repeated filesystem probing.
+# Fast cache: module_name → resolved path (for stdlib modules resolved identically regardless of caller)
+# Full cache: "module_name|current_file" → resolved path (for relative imports)
+var _interp_module_fast_cache: {text: text} = {}
+var _interp_module_cache: {text: text} = {}
+
+fn module_resolve_cache_reset():
+    _interp_module_fast_cache = {}
+    _interp_module_cache = {}
+
+fn resolve_module_path(module_name: text, current_file: text) -> text:
+    # Fast path: check module-only cache first (no string concat needed)
+    val fast = _interp_module_fast_cache[module_name] ?? ""
+    if fast != "":
+        return fast
+    # Full path: composite key for relative imports
+    val cache_key = module_name + "|" + current_file
+    val cached = _interp_module_cache[cache_key] ?? ""
+    if cached != "":
+        return cached
+    val result = _resolve_module_path_uncached(module_name, current_file)
+    _interp_module_cache[cache_key] = result
+    # Cache in fast path if it's a stdlib/lib import (not relative)
+    if module_name.starts_with("std.") or module_name.starts_with("lib.") or module_name.starts_with("compiler.") or module_name.starts_with("app.") or module_name.starts_with("unit."):
+        _interp_module_fast_cache[module_name] = result
+    result
+
+fn _replace_text(value: text, from: text, to: text) -> text:
+    if from == "":
+        return value
+    if not value.contains(from):
+        return value
+    value.replace(from, to)
+
+fn _domain_to_dir(domain: text) -> text:
+    _replace_text(value: domain, from: "-", to: "_")
+
+fn _interp_path_parent(path: text) -> text:
+    val slash = path.last_index_of("/") ?? -1
+    if slash <= 0:
+        return path
+    path.substring(0, slash)
+
+fn _resolve_project_relative_path(current_dir: text, relative_path: text) -> text:
+    var probe_dir = current_dir
+    for _unused in 0..10:
+        val candidate = rt_path_join(probe_dir, relative_path)
+        if rt_file_exists(candidate):
+            return candidate
+
+        val parent = _interp_path_parent(probe_dir)
+        if parent == probe_dir:
+            break
+        probe_dir = parent
+    ""
+
+fn _normalize_type_relative_path(module_name: text) -> text:
+    if module_name.contains("/"):
+        val explicit = module_name.split("/")
+        if explicit.len() >= 2 and explicit[0].contains("-"):
+            return rt_path_join(
+                rt_path_join("type", _domain_to_dir(explicit[0])),
+                explicit[1..].join("/")
+            ) + ".spl"
+
+    if not module_name.contains("."):
+        return rt_path_join(
+            rt_path_join("type", _domain_to_dir("simple-lang")),
+            module_name
+        ) + ".spl"
+
+    ""
+
+fn resolve_unit_path(tail: [text]) -> text:
+    """Resolve `unit.<...>` import tail to a concrete src/unit/ file path.
+
+    Rules (see sstack unit-system-consolidation §2 Import Resolver):
+      * If tail[0] is `simple-lang` or `simple-lang.com` → org = `simple-lang`, drop it.
+      * Else if an org dir exists at `src/unit/<tail[0]>[.com]/` → use that org.
+      * Else → default org `simple-lang`, keep full tail.
+    A mid-path `.com` segment is stripped.
+    Both `src/unit/<org>/` and `src/unit/<org>.com/` are tried.
+    Each final segment is tried as `<name>.spl` then `<name>/__init__.spl`.
+    Returns the first existing path, or "" on miss."""
+    if tail.len() == 0:
+        return ""
+    var org: text = "simple-lang"
+    var rest: [text] = tail
+    val first = tail[0]
+    if first == "simple-lang" or first == "simple-lang.com":
+        org = "simple-lang"
+        rest = tail[1..]
+    else:
+        val direct_dir = rt_path_join(rt_path_join("src", "unit"), first)
+        val com_dir = rt_path_join(rt_path_join("src", "unit"), first + ".com")
+        if rt_file_exists(direct_dir) or rt_file_exists(com_dir):
+            org = first
+            rest = tail[1..]
+    # Strip a leading "com" segment mid-path (tolerates `unit.acme.com.robotics`).
+    if rest.len() >= 1 and rest[0] == "com":
+        rest = rest[1..]
+
+    val unit_root = rt_path_join("src", "unit")
+    val org_bare = rt_path_join(unit_root, org)
+    val org_com = rt_path_join(unit_root, org + ".com")
+    val joined = rest.join("/")
+
+    val cand1 = org_bare + "/" + joined + ".spl"
+    if rt_file_exists(cand1):
+        return cand1
+    val cand2 = org_bare + "/" + joined + "/__init__.spl"
+    if rt_file_exists(cand2):
+        return cand2
+    val cand3 = org_com + "/" + joined + ".spl"
+    if rt_file_exists(cand3):
+        return cand3
+    val cand4 = org_com + "/" + joined + "/__init__.spl"
+    if rt_file_exists(cand4):
+        return cand4
+    ""
+
+fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
+    # Convert dotted name to file path
+    # std.string → std/text.spl
+    # app.io.mod → app/io/mod.spl
+    # compiler.frontend.X → compiler/10.frontend/X.spl (numbered dir support)
+    # unit.length.km → src/unit/simple-lang/length/km.spl (unit-system-consolidation)
+
+    val current_dir = rt_path_dirname(current_file)
+    val type_relative_path = _normalize_type_relative_path(module_name)
+    if type_relative_path != "":
+        val type_path = _resolve_project_relative_path(current_dir, type_relative_path)
+        if type_path != "":
+            return type_path
+
+    # Split dotted module name into parts using array+join (avoids O(n²) concat)
+    var path_parts = module_name.split(".")
+
+    # Reject deprecated `std.ffi` — must use `std.sffi` instead
+    if path_parts.len() >= 2 and path_parts[0] == "std" and path_parts[1] == "ffi":
+        rt_eprintln("[error] `use std.ffi` is deprecated — use `use std.sffi` instead")
+        rt_eprintln("  hint: rename `std.ffi` → `std.sffi` in your import")
+        path_parts[1] = "sffi"
+
+    # Unit-system routing: `unit.<...>` → src/unit/<org>/<...>.spl
+    if path_parts.len() >= 2 and path_parts[0] == "unit":
+        val unit_path = resolve_unit_path(path_parts[1..])
+        if unit_path != "":
+            return unit_path
+
+    # Build relative path with / separator
+    var relative_path = path_parts.join("/") + ".spl"
+
+    # Rewrite std/ → lib/ (std is a package alias, real code is in lib/)
+    if relative_path.starts_with("std/"):
+        relative_path = "lib" + relative_path.substring(3)
+
+    # Try resolution strategies:
+
+    # 1. Local directory (relative to current file)
+    val local_path = rt_path_join(current_dir, relative_path)
+    if rt_file_exists(local_path):
+        return local_path
+
+    # 2. SIMPLE_LIB environment variable
+    val simple_lib = rt_env_get("SIMPLE_LIB")
+    val has_simple_lib = simple_lib != ""
+    val lib_not_nil = simple_lib != nil
+    val should_check_lib = has_simple_lib and lib_not_nil
+    if should_check_lib:
+        val lib_path = rt_path_join(simple_lib, relative_path)
+        if rt_file_exists(lib_path):
+            return lib_path
+
+    # 3. Fallback to src/ directory
+    val src_path = rt_path_join("src", relative_path)
+    if rt_file_exists(src_path):
+        return src_path
+
+    # 4. Try lib subdirectory search (lib/*/X for use std.X / use lib.X)
+    #    Default app mode is nogc_async_mut. Search order:
+    #    nogc_async_mut (default) > nogc_async_immut > nogc_sync_immut
+    #    > nogc_sync_mut (sync fallback) > common > gc_async_mut
+    #    > gc_async_immut > gc_sync_mut > gc_sync_immut
+    #    > nogc_async_mut_noalloc
+    if relative_path.starts_with("lib/"):
+        val lib_subpath = relative_path.substring(4)
+        val lib_dir = rt_path_join("src", "lib")
+        val nam = rt_path_join(lib_dir, rt_path_join("nogc_async_mut", lib_subpath))
+        if rt_file_exists(nam):
+            return nam
+        val naim = rt_path_join(lib_dir, rt_path_join("nogc_async_immut", lib_subpath))
+        if rt_file_exists(naim):
+            return naim
+        val nsim = rt_path_join(lib_dir, rt_path_join("nogc_sync_immut", lib_subpath))
+        if rt_file_exists(nsim):
+            return nsim
+        val nsm = rt_path_join(lib_dir, rt_path_join("nogc_sync_mut", lib_subpath))
+        if rt_file_exists(nsm):
+            return nsm
+        val cm = rt_path_join(lib_dir, rt_path_join("common", lib_subpath))
+        if rt_file_exists(cm):
+            return cm
+        val gam = rt_path_join(lib_dir, rt_path_join("gc_async_mut", lib_subpath))
+        if rt_file_exists(gam):
+            return gam
+        val gaim = rt_path_join(lib_dir, rt_path_join("gc_async_immut", lib_subpath))
+        if rt_file_exists(gaim):
+            return gaim
+        val gsm = rt_path_join(lib_dir, rt_path_join("gc_sync_mut", lib_subpath))
+        if rt_file_exists(gsm):
+            return gsm
+        val gsim = rt_path_join(lib_dir, rt_path_join("gc_sync_immut", lib_subpath))
+        if rt_file_exists(gsim):
+            return gsim
+        val nanm = rt_path_join(lib_dir, rt_path_join("nogc_async_mut_noalloc", lib_subpath))
+        if rt_file_exists(nanm):
+            return nanm
+
+    # 5. Try numbered directory resolution (NN.name pattern)
+    val numbered_path = resolve_with_numbered_dirs("src", path_parts)
+    if numbered_path != "":
+        if rt_file_exists(numbered_path):
+            return numbered_path
+
+    # 6. `_`-transparent folder fallback (underscore packages). A class file
+    #    moved into a `_ClassName/` folder resolves as if it still sat in the
+    #    parent folder, so siblings keep importing it by the original path. The
+    #    `_` folder is transparent and applies recursively to nested `_` folders.
+    #    ponytail: only runs after every normal strategy misses (rare/error path),
+    #    so it adds no cost to successful imports.
+    val np = path_parts.len()
+    if np >= 1:
+        val t_name = path_parts[np - 1]
+        var rel_parts = relative_path.split("/")
+        var rel_dirs: [text] = []
+        var ri: i64 = 0
+        val rn = rel_parts.len()
+        for rp in rel_parts:
+            if ri < rn - 1:
+                rel_dirs = rel_dirs + [rp]
+            ri = ri + 1
+        # a) relative to the importing file
+        val ta = _resolve_transparent(current_dir, rel_dirs, t_name)
+        if ta != "":
+            return ta
+        # b) under src/
+        val tb = _resolve_transparent("src", rel_dirs, t_name)
+        if tb != "":
+            return tb
+        # c) under src/lib/<family>/ for std./lib. imports
+        if rel_dirs.len() >= 1 and rel_dirs[0] == "lib":
+            var sub: [text] = []
+            var si: i64 = 0
+            for sp in rel_dirs:
+                if si >= 1:
+                    sub = sub + [sp]
+                si = si + 1
+            val fams = ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]
+            for fam in fams:
+                var famparts: [text] = ["lib", fam]
+                for sp2 in sub:
+                    famparts = famparts + [sp2]
+                val tc = _resolve_transparent("src", famparts, t_name)
+                if tc != "":
+                    return tc
+
+    # Return attempted path even if not found (will error later)
+    relative_path
+
+fn resolve_with_numbered_dirs(base: text, parts: [text]) -> text:
+    """Walk path parts, resolving each segment with NN. prefix fallback."""
+    var current_dir = base
+    var pi: i64 = 0
+    val last_idx = parts.len() - 1
+
+    for part in parts:
+        if pi < last_idx:
+            # Intermediate segment — must be a directory
+            val direct = rt_path_join(current_dir, part)
+            if rt_dir_exists(direct):
+                current_dir = direct
+            else:
+                # Try numbered directory
+                val numbered = find_numbered_dir_interp(current_dir, part)
+                if numbered != "":
+                    current_dir = numbered
+                else:
+                    return ""
+        else:
+            # Last segment — try as .spl file
+            val file_path = rt_path_join(current_dir, part + ".spl")
+            return file_path
+        pi = pi + 1
+    ""
+
+fn find_numbered_dir_interp(parent: text, segment: text) -> text:
+    """Find NN.segment directory in parent. Returns path or empty string."""
+    if not rt_dir_exists(parent):
+        return ""
+
+    val entries = rt_dir_list(parent)
+    for entry in entries:
+        # Look for dot in entry name
+        var dot_pos: i64 = -1
+        var ci: i64 = 0
+        for ch in entry:
+            if ch == "." and dot_pos == -1:
+                dot_pos = ci
+            ci = ci + 1
+
+        if dot_pos >= 1 and dot_pos <= 3:
+            # Check if prefix is all digits
+            val prefix = entry.substring(0, dot_pos)
+            var all_digits = true
+            for ch in prefix:
+                if ch < "0" or ch > "9":
+                    all_digits = false
+
+            if all_digits:
+                val name = entry.substring(dot_pos + 1)
+                if name == segment:
+                    val full_path = rt_path_join(parent, entry)
+                    if rt_dir_exists(full_path):
+                        return full_path
+    ""
+
+fn _find_transparent_file(dir: text, name: text) -> text:
+    """Search `dir`'s `_`-prefixed descendant folders (recursively) for
+    `name`.spl. A `_`-prefixed folder is a transparent package: its files
+    resolve as if they sat directly in `dir`. Returns path or ""."""
+    if not rt_dir_exists(dir):
+        return ""
+    val entries = rt_dir_list(dir)
+    for entry in entries:
+        if entry.starts_with("_"):
+            val tdir = rt_path_join(dir, entry)
+            if rt_dir_exists(tdir):
+                val cand = rt_path_join(tdir, name + ".spl")
+                if rt_file_exists(cand):
+                    return cand
+                val deeper = _find_transparent_file(tdir, name)
+                if deeper != "":
+                    return deeper
+    ""
+
+fn _walk_dir_chain(base: text, parts: [text]) -> text:
+    """Resolve intermediate dir `parts` under `base` (direct child or NN.
+    numbered child). Returns concrete dir path, or "" if a segment is missing."""
+    var cur = base
+    for part in parts:
+        val direct = rt_path_join(cur, part)
+        if rt_dir_exists(direct):
+            cur = direct
+        else:
+            val numbered = find_numbered_dir_interp(cur, part)
+            if numbered != "":
+                cur = numbered
+            else:
+                return ""
+    cur
+
+fn _resolve_transparent(base: text, dir_parts: [text], name: text) -> text:
+    """Walk `dir_parts` under `base`, then search `_`-transparent descendants
+    for `name`.spl. Empty `dir_parts` searches `base` itself."""
+    val dir = _walk_dir_chain(base, dir_parts)
+    if dir == "":
+        return ""
+    _find_transparent_file(dir, name)

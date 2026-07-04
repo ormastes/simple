@@ -1,0 +1,142 @@
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use std.gc_async_mut.gpu.browser_engine.browser_script_execute.{execute_scripts_in_html}
+
+extern fn rt_bytes_alloc(n: i64) -> [u8]
+
+fn browser_script_render_alloc_bytes(n: i64) -> [u8]:
+    rt_bytes_alloc(n)
+
+pub class BeScriptParseResult:
+    scripts: [text]        # inline script bodies
+    script_types: [text]   # corresponding script type attributes
+    src_paths: [text]      # external script src paths
+    src_types: [text]      # corresponding type attributes for src scripts
+
+impl BeScriptParseResult:
+    static fn empty() -> BeScriptParseResult:
+        var scripts: [text] = []
+        var script_types: [text] = []
+        var src_paths: [text] = []
+        var src_types: [text] = []
+        BeScriptParseResult(scripts: scripts, script_types: script_types, src_paths: src_paths, src_types: src_types)
+
+fn _parse_index_of_from(haystack: text, marker: text, start: i64) -> i64:
+    if marker == "":
+        return start
+    val haystack_len = haystack.len()
+    val marker_len = marker.len()
+    if marker_len > haystack_len:
+        return -1
+    var offset = start
+    val last_start = haystack_len - marker_len
+    while offset <= last_start:
+        var marker_idx: i64 = 0
+        var matches = true
+        while marker_idx < marker_len:
+            if haystack.char_at(offset + marker_idx) != marker.char_at(marker_idx):
+                matches = false
+                break
+            marker_idx = marker_idx + 1
+        if matches:
+            return offset
+        offset = offset + 1
+    -1
+
+fn _parse_extract_attr(tag_text: text, attr: text) -> text:
+    val key_dq = attr + "=\""
+    val key_sq = attr + "='"
+    val lo = tag_text.lower()
+    val idx_dq = lo.index_of(key_dq)
+    if idx_dq >= 0:
+        val after = tag_text.substring(idx_dq + key_dq.len(), tag_text.len())
+        val close = after.index_of("\"")
+        if close >= 0:
+            return after.substring(0, close)
+    val idx_sq = lo.index_of(key_sq)
+    if idx_sq >= 0:
+        val after = tag_text.substring(idx_sq + key_sq.len(), tag_text.len())
+        val close = after.index_of("'")
+        if close >= 0:
+            return after.substring(0, close)
+    ""
+
+pub fn browser_renderer_parse_html_with_scripts(html: text) -> BeScriptParseResult:
+    var result = BeScriptParseResult.empty()
+    val lo = html.lower()
+    val html_len = html.len()
+    var search_pos: i64 = 0
+    while search_pos < html_len:
+        val tag_open = _parse_index_of_from(lo, "<script", search_pos)
+        if tag_open < 0:
+            return result
+        val tag_close = _parse_index_of_from(html, ">", tag_open)
+        if tag_close < 0:
+            return result
+        val close_idx = _parse_index_of_from(lo, "</script>", tag_close + 1)
+        if close_idx < 0:
+            return result
+        val open_tag = html.substring(tag_open, tag_close + 1)
+        val script_type = _parse_extract_attr(open_tag, "type")
+        val src_attr = _parse_extract_attr(open_tag, "src")
+        if src_attr != "":
+            result.src_paths.push(src_attr)
+            result.src_types.push(script_type)
+        else:
+            val body = html.substring(tag_close + 1, close_idx)
+            result.scripts.push(body)
+            result.script_types.push(script_type)
+        search_pos = close_idx + 9
+    result
+
+pub class BeScriptRenderResult:
+    pixels: [u8]
+    width: i32
+    height: i32
+    title: text
+    ok: bool
+    error: text
+    scripts_collected: i64   # total inline scripts found
+    scripts_executed: i64    # scripts executed by the hardened browser JS policy
+    scripts_denied: i64      # scripts denied before host/process access
+    console_output: [text]   # captured console lines from executed scripts
+    diagnostics: [text]      # denial diagnostics for unsupported or unsafe scripts
+
+impl BeScriptRenderResult:
+    static fn empty(width: i32, height: i32) -> BeScriptRenderResult:
+        val n = width.to_i64() * height.to_i64() * 4
+        val px = browser_script_render_alloc_bytes(n)
+        var co: [text] = []
+        var diagnostics: [text] = []
+        BeScriptRenderResult(
+            pixels: px,
+            width: width,
+            height: height,
+            title: "",
+            ok: true,
+            error: "",
+            scripts_collected: 0,
+            scripts_executed: 0,
+            scripts_denied: 0,
+            console_output: co,
+            diagnostics: diagnostics
+        )
+
+pub fn render_html_to_pixels_with_scripts(html: text, width: i32, height: i32) -> BeScriptRenderResult:
+    var renderer = BrowserRenderer.create(width, height)
+    val render = renderer.render_html(html)
+
+    val execution = execute_scripts_in_html(html)
+
+    BeScriptRenderResult(
+        pixels: render.pixels,
+        width: render.width,
+        height: render.height,
+        title: render.title,
+        ok: render.ok,
+        error: render.error,
+        scripts_collected: execution.scripts_collected,
+        scripts_executed: execution.scripts_executed,
+        scripts_denied: execution.scripts_denied,
+        console_output: execution.console_output,
+        diagnostics: execution.diagnostics
+    )

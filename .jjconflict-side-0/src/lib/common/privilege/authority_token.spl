@@ -1,0 +1,125 @@
+# Privilege AuthorityToken — capability token minted by an approval broker.
+#
+# Provides: AuthorityToken, AuthorityLevel, TrustSource, Scope, authority_level_name.
+
+use std.common.privilege.id_path.{IdPath, id_path_intern}
+use std.common.privilege.principal.{Principal, PrincipalKind}
+
+enum AuthorityLevel:
+    Public
+    Read
+    Write
+    Sensitive
+    Admin
+    Internal
+    Secret
+
+enum TrustSource:
+    Untrusted
+    SystemTrusted
+    UserTrusted
+    RegistryTrusted
+    Revoked
+
+class Scope:
+    one_shot_flag: bool
+
+impl Scope:
+    static fn one_shot() -> Scope:
+        Scope(one_shot_flag: true)
+
+    static fn persistent() -> Scope:
+        Scope(one_shot_flag: false)
+
+class AuthorityToken:
+    id_path: IdPath
+    level: AuthorityLevel
+    principal: Principal
+    trust_source: TrustSource
+    scope: Scope
+    issuer_sig: [u8]
+
+impl AuthorityToken:
+    # A zero-trust public token with no elevated authority.
+    static fn public() -> AuthorityToken:
+        AuthorityToken(
+            id_path: id_path_intern("id.public"),
+            level: AuthorityLevel.Public,
+            principal: Principal(id: "public", kind: PrincipalKind.Anonymous),
+            trust_source: TrustSource.Untrusted,
+            scope: Scope.persistent(),
+            issuer_sig: [])
+
+    # Root token for a principal — used as mint parent.
+    static fn root_for(principal: Principal) -> AuthorityToken:
+        AuthorityToken(
+            id_path: id_path_intern("id." + principal.id),
+            level: AuthorityLevel.Admin,
+            principal: principal,
+            trust_source: TrustSource.SystemTrusted,
+            scope: Scope.persistent(),
+            issuer_sig: ("root:" + principal.id).bytes())
+
+    # Mock token for testing — system-trusted by default.
+    static fn mock(id_path: IdPath, level: AuthorityLevel, principal: Principal) -> AuthorityToken:
+        AuthorityToken(
+            id_path: id_path,
+            level: level,
+            principal: principal,
+            trust_source: TrustSource.SystemTrusted,
+            scope: Scope.persistent(),
+            issuer_sig: ("mock:" + principal.id + ":" + id_path.path).bytes())
+
+    # Mock token with explicit trust source — used to test revocation.
+    static fn mock_with_trust(id_path: IdPath, level: AuthorityLevel, principal: Principal, trust: TrustSource) -> AuthorityToken:
+        AuthorityToken(
+            id_path: id_path,
+            level: level,
+            principal: principal,
+            trust_source: trust,
+            scope: Scope.persistent(),
+            issuer_sig: ("mock:" + principal.id + ":" + id_path.path).bytes())
+
+fn authority_level_name(level: AuthorityLevel) -> text:
+    match level:
+        AuthorityLevel.Public:     "public"
+        AuthorityLevel.Read:       "read"
+        AuthorityLevel.Write:      "write"
+        AuthorityLevel.Sensitive:  "sensitive"
+        AuthorityLevel.Admin:      "admin"
+        AuthorityLevel.Internal:   "internal"
+        AuthorityLevel.Secret:     "secret"
+
+fn authority_level_from_name(name: text) -> AuthorityLevel:
+    if name == "read":      return AuthorityLevel.Read
+    if name == "write":     return AuthorityLevel.Write
+    if name == "sensitive": return AuthorityLevel.Sensitive
+    if name == "admin":     return AuthorityLevel.Admin
+    if name == "internal":  return AuthorityLevel.Internal
+    if name == "secret":    return AuthorityLevel.Secret
+    AuthorityLevel.Public
+
+fn authority_level_rank(level: AuthorityLevel) -> i64:
+    match level:
+        AuthorityLevel.Public:    0
+        AuthorityLevel.Read:      1
+        AuthorityLevel.Write:     2
+        AuthorityLevel.Sensitive: 3
+        AuthorityLevel.Admin:     4
+        AuthorityLevel.Internal:  5
+        AuthorityLevel.Secret:    6
+
+fn is_revoked(token: AuthorityToken) -> bool:
+    token.issuer_sig.len() == 0 and token.level != AuthorityLevel.Public
+
+fn trust_source_name(source: TrustSource) -> text:
+    match source:
+        TrustSource.Untrusted:        "untrusted"
+        TrustSource.SystemTrusted:    "system"
+        TrustSource.UserTrusted:      "user"
+        TrustSource.RegistryTrusted:  "registry"
+        TrustSource.Revoked:          "revoked"
+
+export AuthorityToken, AuthorityLevel, TrustSource, Scope
+export authority_level_name, authority_level_from_name, authority_level_rank
+export is_revoked, trust_source_name

@@ -1,0 +1,63 @@
+use std.io_runtime.{dir_create_all, file_write}
+use app.ponytail.audit.{ponytail_audit, ponytail_simplification_report}
+
+fn _ponytail_fixture_path(name: text) -> text:
+    "build/test/ponytail/" + name + ".spl"
+
+fn _write_ponytail_fixture(name: text, source: text) -> text:
+    dir_create_all("build/test/ponytail")
+    val path = _ponytail_fixture_path(name)
+    file_write(path, source)
+    path
+
+fn absence_marker() -> text:
+    "n" + "il"
+
+fn expect_absence_marker_hidden(value: text):
+    expect(value.split(absence_marker()).len()).to_equal(1)
+
+describe "ponytail audit":
+    it "renders clean audit output":
+        val path = _write_ponytail_fixture("clean", "fn hello() -> text:\n    \"ok\"\n")
+        val output = ponytail_audit(path)
+        expect(output).to_contain("Ponytail Audit")
+        expect(output).to_contain("status: ok")
+        expect_absence_marker_hidden(output)
+
+    it "flags placeholder and abstraction markers":
+        val path = _write_ponytail_fixture("smells", "interface FutureThing:\n    pass_todo\n")
+        val output = ponytail_audit(path)
+        expect(output).to_contain("status: review")
+        expect(output).to_contain("placeholder markers:")
+        expect(output).to_contain("abstraction smells:")
+
+    it "returns explicit missing status for absent source":
+        val output = ponytail_audit("build/test/ponytail/missing.spl")
+        expect(output).to_contain("status: missing")
+        expect(output).to_contain("reason: source unavailable")
+        expect_absence_marker_hidden(output)
+
+    it "renders simplification report suggestions":
+        val path = _write_ponytail_fixture("report", "interface FutureThing:\n    pass_todo\n    # TODO simplify\n")
+        val output = ponytail_simplification_report(path)
+        expect(output).to_contain("Ponytail Simplification Report")
+        expect(output).to_contain("status: review")
+        expect(output).to_contain("cut placeholder passes:")
+        expect(output).to_contain("cut speculative abstraction:")
+        expect(output).to_contain("resolve todo markers:")
+        expect(output).to_contain("total_suggestions:")
+        expect_absence_marker_hidden(output)
+
+    it "renders clean simplification report without suggestions":
+        val path = _write_ponytail_fixture("report_clean", "fn hello() -> text:\n    \"ok\"\n")
+        val output = ponytail_simplification_report(path)
+        expect(output).to_contain("status: ok")
+        expect(output).to_contain("summary: no simplification targets found")
+        expect(output).to_contain("total_suggestions: 0")
+
+    it "renders missing simplification report as explicit absence":
+        val output = ponytail_simplification_report("build/test/ponytail/report_missing.spl")
+        expect(output).to_contain("status: missing")
+        expect(output).to_contain("reason: source unavailable")
+        expect(output).to_contain("total_suggestions: 0")
+        expect_absence_marker_hidden(output)

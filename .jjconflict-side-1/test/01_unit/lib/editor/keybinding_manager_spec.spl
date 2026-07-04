@@ -1,0 +1,137 @@
+# # Editor Keybinding Manager Tests
+#
+# **Feature ID:** #EDITOR-KB-001
+# **Category:** Editor | Core
+# **Status:** Implemented
+#
+# @cover src/lib/editor/core/keybinding_manager.spl 80%
+# @cover src/lib/editor/common/keybindings.spl 40%
+
+use std.editor.common.keybindings.*
+use std.editor.core.keybinding_manager.*
+
+describe "keybinding manager defaults":
+    it "creates manager with default bindings":
+        val mgr = keybinding_manager_new()
+        val cmd = keybinding_manager_resolve(mgr, "h", "normal")
+        expect(cmd).to_equal("move-left")
+
+    it "resolves vim movement keys in normal mode":
+        val mgr = keybinding_manager_new()
+        expect(keybinding_manager_resolve(mgr, "j", "normal")).to_equal("move-down")
+        expect(keybinding_manager_resolve(mgr, "k", "normal")).to_equal("move-up")
+        expect(keybinding_manager_resolve(mgr, "l", "normal")).to_equal("move-right")
+
+    it "resolves line-start and line-end":
+        val mgr = keybinding_manager_new()
+        expect(keybinding_manager_resolve(mgr, "0", "normal")).to_equal("move-line-start")
+        expect(keybinding_manager_resolve(mgr, "$", "normal")).to_equal("move-line-end")
+
+    it "resolves editing keys in normal mode":
+        val mgr = keybinding_manager_new()
+        expect(keybinding_manager_resolve(mgr, "i", "normal")).to_equal("enter-insert")
+        expect(keybinding_manager_resolve(mgr, "x", "normal")).to_equal("delete")
+        expect(keybinding_manager_resolve(mgr, "u", "normal")).to_equal("undo")
+
+    it "resolves insert mode keys":
+        val mgr = keybinding_manager_new()
+        expect(keybinding_manager_resolve(mgr, "\x1b", "insert")).to_equal("exit-insert")
+        expect(keybinding_manager_resolve(mgr, "\x7f", "insert")).to_equal("backspace")
+        expect(keybinding_manager_resolve(mgr, "\r", "insert")).to_equal("newline")
+
+    it "resolves command mode keys":
+        val mgr = keybinding_manager_new()
+        expect(keybinding_manager_resolve(mgr, "\x1b", "command")).to_equal("cancel")
+        expect(keybinding_manager_resolve(mgr, "\r", "command")).to_equal("execute")
+
+describe "keybinding manager resolution":
+    it "returns empty for unbound key":
+        val mgr = keybinding_manager_new()
+        val cmd = keybinding_manager_resolve(mgr, "Z", "normal")
+        expect(cmd).to_equal("")
+
+    it "returns empty for wrong mode":
+        val mgr = keybinding_manager_new()
+        val cmd = keybinding_manager_resolve(mgr, "h", "insert")
+        expect(cmd).to_equal("")
+
+    it "returns empty for empty key":
+        val mgr = keybinding_manager_new()
+        val cmd = keybinding_manager_resolve(mgr, "", "normal")
+        expect(cmd).to_equal("")
+
+describe "keybinding manager overrides":
+    it "override takes precedence over default":
+        var mgr = keybinding_manager_new()
+        val binding = KeyBinding(key: "h", command: "custom-left", mode: "normal", args: "")
+        mgr = keybinding_manager_add_override(mgr, binding)
+        val cmd = keybinding_manager_resolve(mgr, "h", "normal")
+        expect(cmd).to_equal("custom-left")
+
+    it "non-overridden keys still resolve from defaults":
+        var mgr = keybinding_manager_new()
+        val binding = KeyBinding(key: "h", command: "custom-left", mode: "normal", args: "")
+        mgr = keybinding_manager_add_override(mgr, binding)
+        val cmd = keybinding_manager_resolve(mgr, "j", "normal")
+        expect(cmd).to_equal("move-down")
+
+    it "mode-specific override does not affect other modes":
+        var mgr = keybinding_manager_new()
+        val binding = KeyBinding(key: "\r", command: "custom-enter", mode: "insert", args: "")
+        mgr = keybinding_manager_add_override(mgr, binding)
+        expect(keybinding_manager_resolve(mgr, "\r", "insert")).to_equal("custom-enter")
+        expect(keybinding_manager_resolve(mgr, "\r", "command")).to_equal("execute")
+
+    it "global override applies to any mode":
+        val config = KeybindingConfig(bindings: [])
+        var mgr = keybinding_manager_from_config(config)
+        val binding = KeyBinding(key: "F1", command: "help", mode: "", args: "")
+        mgr = keybinding_manager_add_override(mgr, binding)
+        expect(keybinding_manager_resolve(mgr, "F1", "normal")).to_equal("help")
+        expect(keybinding_manager_resolve(mgr, "F1", "insert")).to_equal("help")
+
+describe "keybinding manager mode listing":
+    it "lists bindings for normal mode":
+        val mgr = keybinding_manager_new()
+        val normal_bindings = keybinding_manager_all_for_mode(mgr, "normal")
+        expect(normal_bindings.len() > 0).to_equal(true)
+
+    it "lists bindings for insert mode":
+        val mgr = keybinding_manager_new()
+        val insert_bindings = keybinding_manager_all_for_mode(mgr, "insert")
+        expect(insert_bindings.len() > 0).to_equal(true)
+
+    it "returns empty for unknown mode":
+        val config = KeybindingConfig(bindings: [
+            KeyBinding(key: "a", command: "cmd-a", mode: "normal", args: "")
+        ])
+        val mgr = keybinding_manager_from_config(config)
+        val unknown = keybinding_manager_all_for_mode(mgr, "visual")
+        expect(unknown.len()).to_equal(0)
+
+    it "includes overrides in mode listing":
+        var mgr = keybinding_manager_new()
+        val binding = KeyBinding(key: "F2", command: "rename", mode: "normal", args: "")
+        mgr = keybinding_manager_add_override(mgr, binding)
+        val all_normal = keybinding_manager_all_for_mode(mgr, "normal")
+        var found = false
+        for b in all_normal:
+            if b.key == "F2":
+                found = true
+        expect(found).to_equal(true)
+
+describe "keybinding config from scratch":
+    it "empty config resolves nothing":
+        val config = KeybindingConfig(bindings: [])
+        val mgr = keybinding_manager_from_config(config)
+        expect(keybinding_manager_resolve(mgr, "h", "normal")).to_equal("")
+
+    it "custom config resolves custom bindings":
+        val config = KeybindingConfig(bindings: [
+            KeyBinding(key: "a", command: "alpha", mode: "edit", args: ""),
+            KeyBinding(key: "b", command: "beta", mode: "edit", args: "")
+        ])
+        val mgr = keybinding_manager_from_config(config)
+        expect(keybinding_manager_resolve(mgr, "a", "edit")).to_equal("alpha")
+        expect(keybinding_manager_resolve(mgr, "b", "edit")).to_equal("beta")
+        expect(keybinding_manager_resolve(mgr, "c", "edit")).to_equal("")

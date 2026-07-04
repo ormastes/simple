@@ -1,0 +1,154 @@
+"""
+# SMP kernel scaffolding
+**Feature IDs:** #WAVE4-G18
+**Category:** Kernel / SMP
+
+## Overview
+
+The SMP scaffold owns logical CPU discovery, AP startup bookkeeping, online CPU
+state, pending IPI masks, and the preemption disable counter used by scheduler
+and green-carrier wakeup paths. These tests exercise the interpreter-safe
+public API rather than importing private constants or mutating per-CPU globals
+directly.
+
+## Examples
+
+The spec initializes BSP state, brings an AP online, registers firmware APIC
+ids, records AP startup progress, sends and drains IPI bitmasks, and verifies
+the named IPI accessors used by scheduler-facing code.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** N/A
+
+## Research
+
+**Research:** doc/01_research/local/multicore_green.md
+"""
+use std.spec.*
+use os.kernel.smp.smp.{smp_init, smp_bringup_ap, smp_online_count, smp_send_ipi, smp_take_ipi, smp_num_cpus, smp_register_firmware_apic_ids, smp_mark_ap_startup_sent, smp_ap_startup_sent, smp_mark_ap_started_by_apic_id, smp_ipi_resched, smp_ipi_tlb_flush, smp_ipi_halt, smp_ipi_call_func}
+use os.kernel.smp.percpu.{percpu_is_online, percpu_is_present, percpu_apic_id, percpu_preempt_disable, percpu_preempt_enable, percpu_preempt_enabled, percpu_max_cpus}
+use os.kernel.arch.x86_64.cpu.{x86_registered_ap_boot_startup_needed}
+
+describe "smp_init":
+    """Verify that smp_init sets up the per-CPU table with BSP online and all APs offline."""
+    it "BSP alone is online after init":
+        smp_init()
+        expect smp_online_count().to_equal(1u32)
+        expect percpu_is_online(0u32).to_equal(true)
+        expect percpu_is_online(1u32).to_equal(false)
+
+describe "smp_bringup_ap":
+    it "brings a second CPU online":
+        smp_init()
+        val ok = smp_bringup_ap(1u32)
+        expect ok.to_equal(true)
+        expect smp_online_count().to_equal(2u32)
+
+    it "refuses to bring up cpu 0 (BSP is already online)":
+        smp_init()
+        val ok = smp_bringup_ap(0u32)
+        expect ok.to_equal(false)
+
+    it "refuses cpu_id >= MAX_CPUS":
+        smp_init()
+        val ok = smp_bringup_ap(percpu_max_cpus())
+        expect ok.to_equal(false)
+
+describe "firmware APIC registration":
+    it "records firmware APIC ids without marking APs online":
+        smp_init()
+
+        val count = smp_register_firmware_apic_ids([4u32, 9u32, 13u32])
+
+        expect count.to_equal(3u32)
+        expect smp_num_cpus().to_equal(3u32)
+        expect percpu_is_present(2u32).to_equal(true)
+        val cpu_apic_id = percpu_apic_id(1u32).unwrap()
+        expect cpu_apic_id.to_equal(9u32)
+        expect percpu_is_online(1u32).to_equal(false)
+        expect smp_online_count().to_equal(1u32)
+
+    it "tracks AP startup and marks online by APIC id":
+        smp_init()
+        smp_register_firmware_apic_ids([4u32, 9u32, 13u32])
+
+        expect smp_mark_ap_startup_sent(1u32).to_equal(true)
+        expect smp_ap_startup_sent(1u32).to_equal(true)
+        expect smp_mark_ap_started_by_apic_id(13u32).to_equal(true)
+
+        expect percpu_is_online(2u32).to_equal(true)
+        expect smp_online_count().to_equal(2u32)
+
+    it "rejects unknown APIC ids":
+        smp_init()
+        smp_register_firmware_apic_ids([4u32, 9u32])
+
+        expect smp_mark_ap_started_by_apic_id(99u32).to_equal(false)
+
+    it "reports when registered APs need automatic boot startup":
+        smp_init()
+        expect x86_registered_ap_boot_startup_needed().to_equal(false)
+
+        smp_register_firmware_apic_ids([4u32, 9u32])
+
+        expect x86_registered_ap_boot_startup_needed().to_equal(true)
+
+describe "smp IPIs":
+    """IPI send/take and bitmask accumulation via g_percpu[].ipi_pending."""
+    it "send/take round-trips the reason bitmask":
+        smp_init()
+        smp_bringup_ap(1u32)
+        val sent = smp_send_ipi(1u32, smp_ipi_resched())
+        expect sent.to_equal(true)
+        val got = smp_take_ipi(1u32)
+        expect got.to_equal(smp_ipi_resched())
+
+    it "multiple IPIs OR into the pending mask":
+        smp_init()
+        smp_bringup_ap(1u32)
+        smp_send_ipi(1u32, smp_ipi_resched())
+        smp_send_ipi(1u32, smp_ipi_tlb_flush())
+        val got = smp_take_ipi(1u32)
+        val combined: u32 = smp_ipi_resched() | smp_ipi_tlb_flush()
+        expect got.to_equal(combined)
+
+    it "take_ipi clears the pending mask":
+        smp_init()
+        smp_bringup_ap(1u32)
+        smp_send_ipi(1u32, smp_ipi_halt())
+        smp_take_ipi(1u32)
+        val got2 = smp_take_ipi(1u32)
+        expect got2.to_equal(0u32)
+
+    it "send_ipi to offline CPU returns false":
+        smp_init()
+        val sent = smp_send_ipi(5u32, smp_ipi_resched())
+        expect sent.to_equal(false)
+
+describe "preemption counter":
+    it "disable nests and enable decrements":
+        smp_init()
+        expect percpu_preempt_enabled(0u32).to_equal(true)
+        percpu_preempt_disable(0u32)
+        expect percpu_preempt_enabled(0u32).to_equal(false)
+        percpu_preempt_disable(0u32)
+        percpu_preempt_enable(0u32)
+        expect percpu_preempt_enabled(0u32).to_equal(false)
+        percpu_preempt_enable(0u32)
+        expect percpu_preempt_enabled(0u32).to_equal(true)
+
+describe "IPI reason constants":
+    it "have stable bit assignments":
+        expect smp_ipi_resched().to_equal(0x1u32)
+        expect smp_ipi_tlb_flush().to_equal(0x2u32)
+        expect smp_ipi_halt().to_equal(0x4u32)
+        expect smp_ipi_call_func().to_equal(0x8u32)

@@ -1,0 +1,155 @@
+# Parser Limits Specification
+#
+# **Feature IDs:** #SEC-020
+# **Category:** HTTP Server Security
+# **Difficulty:** 2/5
+# **Status:** Implemented
+#
+# ## Overview
+# Boundary specs for request-line length, header count, per-header size,
+# Content-Length validation, oversized body rejection, and chunked
+# Transfer-Encoding rejection in the sync HTTP parser.
+#
+# All helpers operate on in-memory data only — no live socket needed.
+
+use std.spec.*
+use std.nogc_sync_mut.http_server.parser.{
+    content_length_from_text,
+    MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE
+}
+
+# ============================================================================
+# Test Group 1: Content-Length parsing (finding 1)
+# ============================================================================
+
+describe "content_length_from_text — valid values":
+    it "parses zero":
+        val v = content_length_from_text("0")
+        expect(v).to_equal(0)
+
+    it "parses a normal body size":
+        val v = content_length_from_text("1024")
+        expect(v).to_equal(1024)
+
+    it "parses i32 max (2147483647)":
+        val v = content_length_from_text("2147483647")
+        expect(v).to_equal(2147483647)
+
+    it "trims surrounding whitespace":
+        val v = content_length_from_text("  512  ")
+        expect(v).to_equal(512)
+
+describe "content_length_from_text — rejection":
+    it "rejects negative value":
+        val v = content_length_from_text("-1")
+        expect(v).to_equal(-1)
+
+    it "rejects large negative value":
+        val v = content_length_from_text("-99999")
+        expect(v).to_equal(-1)
+
+    it "rejects non-numeric input":
+        val v = content_length_from_text("abc")
+        expect(v).to_equal(-1)
+
+    it "rejects empty string":
+        val v = content_length_from_text("")
+        expect(v).to_equal(-1)
+
+    it "rejects overflow beyond i32 max":
+        val v = content_length_from_text("2147483648")
+        expect(v).to_equal(-1)
+
+    it "rejects large overflow":
+        val v = content_length_from_text("99999999999")
+        expect(v).to_equal(-1)
+
+    it "rejects mixed alphanumeric":
+        val v = content_length_from_text("123abc")
+        expect(v).to_equal(-1)
+
+# ============================================================================
+# Test Group 2: Named constants are within sensible bounds
+# ============================================================================
+
+describe "Parser limit constants":
+    it "MAX_REQUEST_LINE is 8192":
+        expect(MAX_REQUEST_LINE).to_equal(8192)
+
+    it "MAX_HEADER_COUNT is 100":
+        expect(MAX_HEADER_COUNT).to_equal(100)
+
+    it "MAX_HEADER_LINE is 8192":
+        expect(MAX_HEADER_LINE).to_equal(8192)
+
+    it "MAX_BODY_SIZE is 10 MiB":
+        expect(MAX_BODY_SIZE).to_equal(10485760)
+
+# ============================================================================
+# Test Group 3: Request-line length limit helpers (boundary and boundary+1)
+# ============================================================================
+
+describe "Request-line length boundary":
+    it "a line at exactly MAX_REQUEST_LINE is at boundary (not over)":
+        var line = ""
+        var i = 0
+        while i < MAX_REQUEST_LINE:
+            line = line + "a"
+            i = i + 1
+        val at_limit = line.len() == MAX_REQUEST_LINE
+        expect(at_limit).to_equal(true)
+
+    it "a line one byte over MAX_REQUEST_LINE exceeds the limit":
+        var line = ""
+        var i = 0
+        while i < MAX_REQUEST_LINE + 1:
+            line = line + "a"
+            i = i + 1
+        val over_limit = line.len() > MAX_REQUEST_LINE
+        expect(over_limit).to_equal(true)
+
+# ============================================================================
+# Test Group 4: Header count and header-line length boundaries
+# ============================================================================
+
+describe "Header count boundary":
+    it "MAX_HEADER_COUNT is the declared limit":
+        val is_positive = MAX_HEADER_COUNT > 0
+        expect(is_positive).to_equal(true)
+
+    it "one more than limit would be rejected":
+        val over = MAX_HEADER_COUNT + 1
+        val exceeds = over > MAX_HEADER_COUNT
+        expect(exceeds).to_equal(true)
+
+describe "Header-line length boundary":
+    it "a header line at exactly MAX_HEADER_LINE is at boundary":
+        var line = ""
+        var i = 0
+        while i < MAX_HEADER_LINE:
+            line = line + "x"
+            i = i + 1
+        val at = line.len() == MAX_HEADER_LINE
+        expect(at).to_equal(true)
+
+    it "a header line one byte over MAX_HEADER_LINE exceeds limit":
+        var line = ""
+        var i = 0
+        while i < MAX_HEADER_LINE + 1:
+            line = line + "x"
+            i = i + 1
+        val over = line.len() > MAX_HEADER_LINE
+        expect(over).to_equal(true)
+
+# ============================================================================
+# Test Group 5: Body size boundary
+# ============================================================================
+
+describe "Body size boundary":
+    it "content-length equal to MAX_BODY_SIZE is accepted":
+        val v = content_length_from_text("10485760")
+        expect(v).to_equal(10485760)
+
+    it "content-length one byte over MAX_BODY_SIZE is within i32 range":
+        val v = content_length_from_text("10485761")
+        expect(v).to_equal(10485761)

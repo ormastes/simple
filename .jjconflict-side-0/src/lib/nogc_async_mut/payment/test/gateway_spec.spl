@@ -1,0 +1,321 @@
+use std.spec
+use std.io_runtime
+
+enum PaymentStatus:
+    Created
+    Authorized
+    Captured
+    Settled
+    Refunded
+    Voided
+    Failed
+
+struct Amount:
+    cents: int
+    currency: text
+
+struct PaymentResult:
+    success: bool
+    status: PaymentStatus
+    transaction_id: text
+    error_message: text
+
+struct AuthorizeRequest:
+    token: text
+    amount: Amount
+    merchant_ref: text
+    idempotency_key: text
+
+struct CaptureRequest:
+    transaction_id: text
+    amount: Amount
+
+struct RefundRequest:
+    transaction_id: text
+    amount: Amount
+    reason: text
+
+struct VoidRequest:
+    transaction_id: text
+    reason: text
+
+struct ChargeRequest:
+    token: text
+    amount: Amount
+    merchant_ref: text
+    idempotency_key: text
+
+struct TokenizeRequest:
+    card_number: text
+    expiry_month: int
+    expiry_year: int
+    cardholder_name: text
+
+struct TokenizeResult:
+    success: bool
+    token: text
+    error_message: text
+
+fn _char_to_digit(ch: text) -> int:
+    if ch == "0": return 0 as int
+    if ch == "1": return 1 as int
+    if ch == "2": return 2 as int
+    if ch == "3": return 3 as int
+    if ch == "4": return 4 as int
+    if ch == "5": return 5 as int
+    if ch == "6": return 6 as int
+    if ch == "7": return 7 as int
+    if ch == "8": return 8 as int
+    if ch == "9": return 9 as int
+    return -1 as int
+
+fn _text_to_int(s: text) -> int:
+    var result: int = 0 as int
+    var i: int = 0 as int
+    while i < s.length():
+        val d = _char_to_digit(s.char_at(i))
+        if d < 0: return 0 as int
+        result = result * 10 + d
+        i = i + 1
+    return result
+
+fn _int_to_text(n: int) -> text:
+    if n == 0: return "0"
+    var result = ""
+    var v = n
+    while v > 0:
+        val digit = v % 10
+        val ch = _digit_char(digit)
+        result = ch + result
+        v = v / 10
+    return result
+
+fn _digit_char(d: int) -> text:
+    if d == 0: return "0"
+    if d == 1: return "1"
+    if d == 2: return "2"
+    if d == 3: return "3"
+    if d == 4: return "4"
+    if d == 5: return "5"
+    if d == 6: return "6"
+    if d == 7: return "7"
+    if d == 8: return "8"
+    if d == 9: return "9"
+    return "?"
+
+fn luhn_check(card_number: text) -> bool:
+    if card_number == "": return false
+    var sum = 0
+    var double_next = false
+    var i = card_number.length() - 1
+    while i >= 0:
+        val ch = card_number.char_at(i)
+        val digit = _char_to_digit(ch)
+        if digit < 0: return false
+        if double_next:
+            var doubled = digit * 2
+            if doubled > 9: doubled = doubled - 9
+            sum = sum + doubled
+        else:
+            sum = sum + digit
+        double_next = !double_next
+        i = i - 1
+    return sum > 0 and sum % 10 == 0
+
+fn extract_last4(card_number: text) -> text:
+    val len = card_number.length()
+    if len <= 4: return card_number
+    return card_number.substring(len - 4, len)
+
+struct MockGateway:
+    fail_mode: bool
+    next_id: int
+
+fn new_mock_gateway() -> MockGateway:
+    return MockGateway { fail_mode: false, next_id: 1 }
+
+fn new_failing_mock_gateway() -> MockGateway:
+    return MockGateway { fail_mode: true, next_id: 1 }
+
+fn _gw_authorize(gw: MockGateway, req: AuthorizeRequest) -> PaymentResult:
+    if gw.fail_mode:
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "fail mode" }
+    if req.token == "":
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "empty token" }
+    if req.amount.cents <= 0:
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "invalid amount" }
+    val txn_id = "txn_mock_" + _int_to_text(gw.next_id)
+    return PaymentResult { success: true, status: PaymentStatus.Authorized, transaction_id: txn_id, error_message: "" }
+
+fn _gw_capture(gw: MockGateway, req: CaptureRequest) -> PaymentResult:
+    if gw.fail_mode:
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "fail mode" }
+    if req.transaction_id == "":
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "missing txn id" }
+    return PaymentResult { success: true, status: PaymentStatus.Captured, transaction_id: req.transaction_id, error_message: "" }
+
+fn _gw_charge(gw: MockGateway, req: ChargeRequest) -> PaymentResult:
+    if gw.fail_mode:
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "fail mode" }
+    if req.token == "":
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "empty token" }
+    if req.amount.cents <= 0:
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "invalid amount" }
+    val txn_id = "txn_mock_" + _int_to_text(gw.next_id)
+    return PaymentResult { success: true, status: PaymentStatus.Captured, transaction_id: txn_id, error_message: "" }
+
+fn _gw_refund(gw: MockGateway, req: RefundRequest) -> PaymentResult:
+    if gw.fail_mode:
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "fail mode" }
+    if req.transaction_id == "":
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "missing txn id" }
+    return PaymentResult { success: true, status: PaymentStatus.Refunded, transaction_id: req.transaction_id, error_message: "" }
+
+fn _gw_void(gw: MockGateway, req: VoidRequest) -> PaymentResult:
+    if gw.fail_mode:
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "fail mode" }
+    if req.transaction_id == "":
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "missing txn id" }
+    return PaymentResult { success: true, status: PaymentStatus.Voided, transaction_id: req.transaction_id, error_message: "" }
+
+fn _gw_tokenize(gw: MockGateway, req: TokenizeRequest) -> TokenizeResult:
+    if gw.fail_mode:
+        return TokenizeResult { success: false, token: "", error_message: "fail mode" }
+    if req.card_number == "":
+        return TokenizeResult { success: false, token: "", error_message: "empty card" }
+    if !luhn_check(req.card_number):
+        return TokenizeResult { success: false, token: "", error_message: "invalid card number" }
+    val last4 = extract_last4(req.card_number)
+    return TokenizeResult { success: true, token: "tok_mock_" + last4, error_message: "" }
+
+struct ConnectorEntry:
+    cname: text
+    priority: int
+
+struct ConnectorRegistry:
+    entries: list<ConnectorEntry>
+
+fn new_connector_registry() -> ConnectorRegistry:
+    return ConnectorRegistry { entries: [] }
+
+fn reg_register(reg: ConnectorRegistry, cname: text, priority: int) -> ConnectorRegistry:
+    var new_entries = reg.entries
+    new_entries.push(ConnectorEntry { cname: cname, priority: priority })
+    return ConnectorRegistry { entries: new_entries }
+
+fn reg_list(reg: ConnectorRegistry) -> list<text>:
+    var names = []
+    var i = 0
+    while i < reg.entries.length():
+        names.push(reg.entries[i].cname)
+        i = i + 1
+    return names
+
+fn reg_route(reg: ConnectorRegistry, amount: Amount) -> text:
+    if reg.entries.length() == 0: return ""
+    var best = ""
+    var best_p = 999999
+    var i = 0
+    while i < reg.entries.length():
+        if reg.entries[i].priority < best_p:
+            best_p = reg.entries[i].priority
+            best = reg.entries[i].cname
+        i = i + 1
+    return best
+
+describe "Gateway — payment connector abstraction":
+
+    describe "authorize":
+        it "returns Authorized status on valid token and amount":
+            val gw = new_mock_gateway()
+            val req = AuthorizeRequest { token: "tok_test_visa_1234", amount: Amount { cents: 1000, currency: "USD" }, merchant_ref: "order-001", idempotency_key: "idem-001" }
+            val result = _gw_authorize(gw, req)
+            expect result.success == true
+            expect result.status == PaymentStatus.Authorized
+            expect result.transaction_id != ""
+
+        it "returns Failed on invalid token":
+            val gw = new_mock_gateway()
+            val req = AuthorizeRequest { token: "", amount: Amount { cents: 1000, currency: "USD" }, merchant_ref: "order-002", idempotency_key: "idem-002" }
+            val result = _gw_authorize(gw, req)
+            expect result.success == false
+            expect result.status == PaymentStatus.Failed
+
+        it "rejects negative amounts":
+            val gw = new_mock_gateway()
+            val req = AuthorizeRequest { token: "tok_test_visa_1234", amount: Amount { cents: -100, currency: "USD" }, merchant_ref: "order-003", idempotency_key: "idem-003" }
+            val result = _gw_authorize(gw, req)
+            expect result.success == false
+
+    describe "capture":
+        it "captures a previously authorized transaction":
+            val gw = new_mock_gateway()
+            val auth_req = AuthorizeRequest { token: "tok_test_visa_1234", amount: Amount { cents: 2000, currency: "USD" }, merchant_ref: "order-010", idempotency_key: "idem-010" }
+            val auth = _gw_authorize(gw, auth_req)
+            val cap_req = CaptureRequest { transaction_id: auth.transaction_id, amount: Amount { cents: 2000, currency: "USD" } }
+            val result = _gw_capture(gw, cap_req)
+            expect result.success == true
+            expect result.status == PaymentStatus.Captured
+
+    describe "charge":
+        it "authorize + capture in one step":
+            val gw = new_mock_gateway()
+            val req = ChargeRequest { token: "tok_test_mc_5678", amount: Amount { cents: 5000, currency: "EUR" }, merchant_ref: "order-020", idempotency_key: "idem-020" }
+            val result = _gw_charge(gw, req)
+            expect result.success == true
+            expect result.status == PaymentStatus.Captured
+
+    describe "refund":
+        it "refunds a captured transaction":
+            val gw = new_mock_gateway()
+            val req = RefundRequest { transaction_id: "txn_captured_001", amount: Amount { cents: 1000, currency: "USD" }, reason: "customer request" }
+            val result = _gw_refund(gw, req)
+            expect result.success == true
+            expect result.status == PaymentStatus.Refunded
+
+    describe "void":
+        it "voids an authorized but uncaptured transaction":
+            val gw = new_mock_gateway()
+            val req = VoidRequest { transaction_id: "txn_auth_001", reason: "order canceled" }
+            val result = _gw_void(gw, req)
+            expect result.success == true
+            expect result.status == PaymentStatus.Voided
+
+    describe "tokenize":
+        it "returns opaque token from card data":
+            val gw = new_mock_gateway()
+            val req = TokenizeRequest { card_number: "4111111111111111", expiry_month: 12, expiry_year: 2028, cardholder_name: "Test User" }
+            val result = _gw_tokenize(gw, req)
+            expect result.success == true
+            expect result.token != ""
+
+    describe "failing gateway":
+        it "returns failure on all operations when in fail mode":
+            val gw = new_failing_mock_gateway()
+            val req = ChargeRequest { token: "tok_test", amount: Amount { cents: 100, currency: "USD" }, merchant_ref: "order-fail", idempotency_key: "idem-fail" }
+            val result = _gw_charge(gw, req)
+            expect result.success == false
+            expect result.status == PaymentStatus.Failed
+
+    describe "idempotency":
+        it "same gateway returns same txn prefix for same id":
+            val gw = new_mock_gateway()
+            val req = ChargeRequest { token: "tok_test_visa_1234", amount: Amount { cents: 1000, currency: "USD" }, merchant_ref: "order-idem", idempotency_key: "idem-same" }
+            val r1 = _gw_charge(gw, req)
+            val r2 = _gw_charge(gw, req)
+            expect r1.transaction_id == r2.transaction_id
+
+    describe "connector registry":
+        it "registers and lists connectors":
+            var reg = new_connector_registry()
+            reg = reg_register(reg, "stripe", 1)
+            reg = reg_register(reg, "paypal", 2)
+            val names = reg_list(reg)
+            expect names.length() == 2
+
+        it "routes to highest priority connector":
+            var reg = new_connector_registry()
+            reg = reg_register(reg, "stripe", 1)
+            reg = reg_register(reg, "paypal", 2)
+            val chosen = reg_route(reg, Amount { cents: 1000, currency: "USD" })
+            expect chosen == "stripe"

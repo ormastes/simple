@@ -1,0 +1,120 @@
+"""
+# Native Struct Array Runtime Regression
+
+**Feature IDs:** #native-struct-array-runtime-blocker
+**Category:** Runtime / Native / Collections
+**Status:** Regression Covered
+
+## Overview
+
+This SSpec keeps the closed lower hosted-native struct-array regression
+covered. A direct native array of by-value structs is green again on
+current-source seed/native and should stay that way while the higher
+`multicore_green` handle-array blocker is fixed.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/multicore_green.md
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** doc/05_design/multicore_green.md
+
+## Research
+
+**Research:** doc/08_tracking/bug/native_struct_array_runtime_blocker_2026-06-11.md
+
+## Syntax
+
+```sh
+SIMPLE_BIN=src/compiler_rust/target/debug/simple src/compiler_rust/target/debug/simple test test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl --mode=interpreter --clean
+```
+
+## TUI Capture
+
+```text
+Simple Test Runner v1.0.0-beta
+Running: test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl
+native struct array runtime regression PASSED
+Files: 1
+Passed: 1
+Failed: 0
+```
+
+## Traceability Expectations
+
+- The fixture writes a direct array of by-value `Boxed` structs.
+- The same generated source is checked and compiled by `SIMPLE_BIN`.
+- The standalone native output must contain `result=7`.
+- The standalone native exit marker must contain `EXIT=0`.
+- The test command must honor `SIMPLE_BIN` for Docker-isolated runs.
+- The Syntax block must not point at the stale `bin/release/simple` wrapper.
+- The closed native struct-array tracker must remain linked.
+"""
+
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+val BUILD_DIR: text = "build/test/native_struct_array_runtime_blocker"
+val SOURCE_PATH: text = BUILD_DIR + "/struct_array_probe.spl"
+val NATIVE_PATH: text = BUILD_DIR + "/struct_array_probe"
+
+fn simple_bin() -> text:
+    val configured = rt_env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "src/compiler_rust/target/debug/simple"
+
+fn shell(command: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, code)
+
+fn probe_source() -> text:
+    [
+        "class Boxed:\n",
+        "    value: i64\n",
+        "    fn get() -> i64:\n",
+        "        self.value\n",
+        "\n",
+        "fn run_one() -> i64:\n",
+        "    val items = [Boxed(value: 7)]\n",
+        "    items[0].get()\n",
+        "\n",
+        "fn main() -> i64:\n",
+        "    val result = run_one()\n",
+        "    println(\"result={{result}}\")\n",
+        "    if result != 7:\n",
+        "        return 77\n",
+        "    0\n"
+    ].join("")
+
+describe "native struct array runtime regression":
+    it "keeps the closed native struct-array path green":
+        step("Write the direct struct-array probe source")
+        val (write_out, write_code) = shell("mkdir -p " + BUILD_DIR + " && cat > " + SOURCE_PATH + " <<'EOF'\n" + probe_source() + "\nEOF")
+        expect(write_code).to_equal(0)
+
+        step("The generated probe still type-checks under the fresh debug compiler")
+        val (_, check_code) = shell(simple_bin() + " check " + SOURCE_PATH)
+        expect(check_code).to_equal(0)
+
+        step("Hosted native compile still succeeds")
+        val (_, compile_code) = shell(simple_bin() + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
+        expect(compile_code).to_equal(0)
+
+        step("The native probe now returns the expected result boundary")
+        val (native_out, native_code) = shell("sh -c './" + NATIVE_PATH + " >/tmp/native_struct_array_probe.out 2>&1; code=$?; cat /tmp/native_struct_array_probe.out; echo EXIT=$code'")
+        expect(native_code).to_equal(0)
+        expect(native_out).to_contain("result=7")
+        expect(native_out).to_contain("EXIT=0")
+
+        step("The tracker records the lower blocker as closed")
+        val (blocker, blocker_code) = shell("cat doc/08_tracking/bug/native_struct_array_runtime_blocker_2026-06-11.md")
+        expect(blocker_code).to_equal(0)
+        expect(blocker).to_contain("Status: closed")

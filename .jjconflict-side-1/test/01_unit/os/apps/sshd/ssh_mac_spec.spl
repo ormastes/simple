@@ -1,0 +1,150 @@
+# @cover src/os/apps/sshd/ssh_mac.spl 60%
+use std.spipe.*
+use os.apps.sshd.ssh_mac.{ssh_mac_verify, ssh_mac_compute, ssh_mac_is_none, ssh_mac_len}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+fn _make_key_32() -> [u8]:
+    var k: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        k.push(i.to_u8())
+        i = i + 1
+    k
+
+fn _make_key_64() -> [u8]:
+    var k: [u8] = []
+    var i: u64 = 0
+    while i < 64:
+        k.push(i.to_u8())
+        i = i + 1
+    k
+
+fn _make_packet(n: u64) -> [u8]:
+    var p: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        p.push(((i + 1) & 0xFF).to_u8())
+        i = i + 1
+    p
+
+describe "ssh_mac constant-time verify":
+    it "accepts a correctly computed hmac-sha2-256-etm MAC":
+        val key = _make_key_32()
+        val pkt = _make_packet(16)
+        val computed = ssh_mac_compute("hmac-sha2-256-etm@openssh.com", key, 0, pkt)
+        expect(computed.is_ok()).to_equal(true)
+        val mac = computed.unwrap()
+        val ok = ssh_mac_verify("hmac-sha2-256-etm@openssh.com", key, 0, pkt, mac)
+        expect(ok.is_ok()).to_equal(true)
+        expect(ok.unwrap()).to_equal(true)
+
+    it "rejects a tampered MAC (single-byte flip) for hmac-sha2-256-etm":
+        val key = _make_key_32()
+        val pkt = _make_packet(16)
+        val computed = ssh_mac_compute("hmac-sha2-256-etm@openssh.com", key, 0, pkt)
+        expect(computed.is_ok()).to_equal(true)
+        var mac = computed.unwrap()
+        # Flip the first byte of the MAC
+        var tampered: [u8] = []
+        tampered.push((_u8_at(mac, 0) ^ 0xFF))
+        var i: u64 = 1
+        while i < mac.len():
+            tampered.push(_u8_at(mac, i))
+            i = i + 1
+        val ok = ssh_mac_verify("hmac-sha2-256-etm@openssh.com", key, 0, pkt, tampered)
+        expect(ok.is_ok()).to_equal(true)
+        expect(ok.unwrap()).to_equal(false)
+
+    it "rejects a MAC of wrong length (shorter than expected)":
+        val key = _make_key_32()
+        val pkt = _make_packet(8)
+        var short_mac: [u8] = []
+        short_mac.push(0xAB)
+        short_mac.push(0xCD)
+        val ok = ssh_mac_verify("hmac-sha2-256-etm@openssh.com", key, 0, pkt, short_mac)
+        expect(ok.is_ok()).to_equal(true)
+        expect(ok.unwrap()).to_equal(false)
+
+    it "rejects a MAC of wrong length (longer than expected)":
+        val key = _make_key_32()
+        val pkt = _make_packet(8)
+        val computed = ssh_mac_compute("hmac-sha2-256-etm@openssh.com", key, 0, pkt)
+        expect(computed.is_ok()).to_equal(true)
+        var long_mac = computed.unwrap()
+        long_mac.push(0x00)
+        val ok = ssh_mac_verify("hmac-sha2-256-etm@openssh.com", key, 0, pkt, long_mac)
+        expect(ok.is_ok()).to_equal(true)
+        expect(ok.unwrap()).to_equal(false)
+
+    it "accepts a correctly computed hmac-sha2-512-etm MAC":
+        val key = _make_key_64()
+        val pkt = _make_packet(16)
+        val computed = ssh_mac_compute("hmac-sha2-512-etm@openssh.com", key, 0, pkt)
+        expect(computed.is_ok()).to_equal(true)
+        val mac = computed.unwrap()
+        val ok = ssh_mac_verify("hmac-sha2-512-etm@openssh.com", key, 0, pkt, mac)
+        expect(ok.is_ok()).to_equal(true)
+        expect(ok.unwrap()).to_equal(true)
+
+    it "rejects a tampered MAC for hmac-sha2-512-etm":
+        val key = _make_key_64()
+        val pkt = _make_packet(16)
+        val computed = ssh_mac_compute("hmac-sha2-512-etm@openssh.com", key, 0, pkt)
+        expect(computed.is_ok()).to_equal(true)
+        var mac = computed.unwrap()
+        var tampered: [u8] = []
+        tampered.push((_u8_at(mac, 0) ^ 0x01))
+        var i: u64 = 1
+        while i < mac.len():
+            tampered.push(_u8_at(mac, i))
+            i = i + 1
+        val ok = ssh_mac_verify("hmac-sha2-512-etm@openssh.com", key, 0, pkt, tampered)
+        expect(ok.is_ok()).to_equal(true)
+        expect(ok.unwrap()).to_equal(false)
+
+    it "verify returns Err for unknown algorithm":
+        val key = _make_key_32()
+        val pkt = _make_packet(4)
+        var dummy_mac: [u8] = []
+        dummy_mac.push(0x00)
+        val ok = ssh_mac_verify("hmac-unknown", key, 0, pkt, dummy_mac)
+        expect(ok.is_err()).to_equal(true)
+
+    it "none algorithm accepts empty MAC":
+        val key = _make_key_32()
+        val pkt = _make_packet(4)
+        var empty: [u8] = []
+        val ok = ssh_mac_verify("none", key, 0, pkt, empty)
+        expect(ok.is_ok()).to_equal(true)
+        expect(ok.unwrap()).to_equal(true)
+
+describe "ssh_mac constant-time helper property":
+    it "equal-content equal-length buffers compare as equal via mac_verify":
+        val key = _make_key_32()
+        val pkt = _make_packet(4)
+        val computed = ssh_mac_compute("hmac-sha2-256-etm@openssh.com", key, 0, pkt)
+        expect(computed.is_ok()).to_equal(true)
+        val mac = computed.unwrap()
+        # Verify same value compares equal
+        val again = ssh_mac_compute("hmac-sha2-256-etm@openssh.com", key, 0, pkt)
+        expect(again.is_ok()).to_equal(true)
+        val ok = ssh_mac_verify("hmac-sha2-256-etm@openssh.com", key, 0, pkt, again.unwrap())
+        expect(ok.is_ok()).to_equal(true)
+        expect(ok.unwrap()).to_equal(true)
+
+    it "all-zero MAC of correct length is rejected for a real packet":
+        val key = _make_key_32()
+        val pkt = _make_packet(4)
+        # Build a 32-byte all-zero fake MAC (correct length for sha2-256 but wrong content)
+        var zero_mac: [u8] = []
+        var zi: u64 = 0
+        while zi < 32:
+            zero_mac.push(0)
+            zi = zi + 1
+        val ok = ssh_mac_verify("hmac-sha2-256-etm@openssh.com", key, 0, pkt, zero_mac)
+        expect(ok.is_ok()).to_equal(true)
+        expect(ok.unwrap()).to_equal(false)

@@ -1,0 +1,221 @@
+# SQL Repository Specification
+#
+# Tests Repository<T> CRUD operations: create_table, insert, find_by_id,
+# find_all, update, delete_by_id, count, insert_batch.
+# All tests use Database.memory().
+
+use std.database.sql.repository.{Repository}
+use std.database.sql.codec.{DbCodec}
+use std.database.sql.connection.{Database}
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.database.sql.schema.{TableSchema}
+
+# ============================================================================
+# Test model and codec
+# ============================================================================
+
+struct RepoUser:
+    name: text
+    age: i64
+
+class RepoUserCodec with DbCodec<RepoUser>:
+    fn table_name() -> text:
+        "repo_users"
+
+    fn schema() -> TableSchema:
+        var s = TableSchema.new("repo_users")
+        s = s.id_col()
+        s = s.text_col("name")
+        s = s.int_col("age")
+        s
+
+    fn columns() -> [text]:
+        ["name", "age"]
+
+    fn encode(entity: RepoUser) -> [DbValue]:
+        [DbValue.Text(value: entity.name), DbValue.Integer(value: entity.age)]
+
+    fn decode(row: DbRow) -> Result<RepoUser, DbError>:
+        val name = row.get_text("name")
+        val age = row.get_int("age")
+        if val Some(n) = name:
+            if val Some(a) = age:
+                return Ok(RepoUser(name: n, age: a))
+        Err(DbError.TypeMismatch(column: "repo_user", expected: "name+age", actual: "missing"))
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Repository":
+    context "create_table":
+        it "creates the table in the database":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            val result = repo.create_table()
+            if val Ok(_) = result:
+                expect(db.table_exists("repo_users")).to_equal(true)
+            else:
+                expect("create_table should succeed").to_equal("")
+
+        it "is idempotent - can be called twice":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val result = repo.create_table()
+            if val Ok(_) = result:
+                expect(true).to_equal(true)
+            else:
+                expect("second create_table should succeed").to_equal("")
+
+    context "insert":
+        it "inserts a single entity and returns row id":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val result = repo.insert(RepoUser(name: "Alice", age: 30))
+            if val Ok(id) = result:
+                expect(id).to_be_greater_than(0)
+            else:
+                expect("insert should succeed").to_equal("")
+
+        it "inserts multiple entities with incrementing ids":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val id1 = repo.insert(RepoUser(name: "Alice", age: 30))?
+            val id2 = repo.insert(RepoUser(name: "Bob", age: 25))?
+            expect(id2).to_be_greater_than(id1)
+
+    context "find_by_id":
+        it "finds an existing entity by id":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val id = repo.insert(RepoUser(name: "Alice", age: 30))?
+            val result = repo.find_by_id(id)?
+            if val Some(user) = result:
+                expect(user.name).to_equal("Alice")
+                expect(user.age).to_equal(30)
+            else:
+                expect("find_by_id should return user").to_equal("")
+
+        it "returns nil for non-existent id":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val result = repo.find_by_id(999)?
+            expect(result.?).to_equal(false)
+
+    context "find_all":
+        it "returns all entities":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            repo.insert(RepoUser(name: "Alice", age: 30))?
+            repo.insert(RepoUser(name: "Bob", age: 25))?
+            repo.insert(RepoUser(name: "Charlie", age: 35))?
+            val users = repo.find_all()?
+            expect(users.len()).to_equal(3)
+
+        it "returns empty list for empty table":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val users = repo.find_all()?
+            expect(users.len()).to_equal(0)
+
+    context "update":
+        it "updates an existing entity":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val id = repo.insert(RepoUser(name: "Alice", age: 30))?
+            repo.update(id, RepoUser(name: "Alice Updated", age: 31))?
+            val updated = repo.find_by_id(id)?
+            if val Some(user) = updated:
+                expect(user.name).to_equal("Alice Updated")
+                expect(user.age).to_equal(31)
+            else:
+                expect("updated user should be found").to_equal("")
+
+    context "delete_by_id":
+        it "deletes an existing entity":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val id = repo.insert(RepoUser(name: "Alice", age: 30))?
+            repo.delete_by_id(id)?
+            val result = repo.find_by_id(id)?
+            expect(result.?).to_equal(false)
+
+        it "returns 0 for non-existent id":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val deleted = repo.delete_by_id(999)?
+            expect(deleted).to_equal(0)
+
+    context "count":
+        it "counts all entities":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            repo.insert(RepoUser(name: "Alice", age: 30))?
+            repo.insert(RepoUser(name: "Bob", age: 25))?
+            val n = repo.count()?
+            expect(n).to_equal(2)
+
+        it "returns 0 for empty table":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val n = repo.count()?
+            expect(n).to_equal(0)
+
+    context "insert_batch":
+        it "inserts multiple entities in a batch":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val entities = [
+                RepoUser(name: "Alice", age: 30),
+                RepoUser(name: "Bob", age: 25),
+                RepoUser(name: "Charlie", age: 35)
+            ]
+            val count = repo.insert_batch(entities)?
+            expect(count).to_equal(3)
+            val total = repo.count()?
+            expect(total).to_equal(3)
+
+        it "returns 0 for empty batch":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            repo.create_table()?
+            val count = repo.insert_batch([])?
+            expect(count).to_equal(0)
+
+    context "select":
+        it "returns a SelectQuery for the table":
+            var db = Database.memory()?
+            val codec = RepoUserCodec()
+            var repo = Repository.new(db, codec)
+            val q = repo.select()
+            val result = q.build()
+            val sql = result.0
+            expect(sql).to_contain("repo_users")

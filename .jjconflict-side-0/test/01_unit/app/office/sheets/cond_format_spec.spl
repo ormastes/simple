@@ -1,0 +1,377 @@
+"""Office sheets conditional formatting spec.
+
+Comprehensive tests for conditional formatting rules.
+Tests cell_value criteria, top_n highlighting, and color scale interpolation.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cond_format.{CondRule, cond_css_for_cell, cond_format_range_css}
+
+describe "cond_css_for_cell: cell_value criteria":
+    """Match cells by numeric comparison operators and text equality."""
+
+    it "matches cell value with > operator":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "150")
+
+        val rule = CondRule(
+            range: "A1:A10",
+            kind: "cell_value",
+            criteria: ">100",
+            n: 0,
+            css: "background:#fde7e9;color:#c00"
+        )
+
+        val result = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result).to_equal("background:#fde7e9;color:#c00")
+
+    it "does not match cell value when criteria not met":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "50")
+
+        val rule = CondRule(
+            range: "A1:A10",
+            kind: "cell_value",
+            criteria: ">100",
+            n: 0,
+            css: "background:#fde7e9;color:#c00"
+        )
+
+        val result = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result).to_equal("")
+
+    it "matches cell value with <= operator":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A2", "50")
+
+        val rule = CondRule(
+            range: "A1:A10",
+            kind: "cell_value",
+            criteria: "<=100",
+            n: 0,
+            css: "background:#fff3cd"
+        )
+
+        val result = cond_css_for_cell(sheet, [rule], "A2")
+        expect(result).to_equal("background:#fff3cd")
+
+    it "matches text with case-insensitive equality":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Error")
+
+        val rule = CondRule(
+            range: "A1:A10",
+            kind: "cell_value",
+            criteria: "error",
+            n: 0,
+            css: "background:#ffcccc"
+        )
+
+        val result = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result).to_equal("background:#ffcccc")
+
+describe "cond_css_for_cell: first-match-wins":
+    """When multiple rules match, return CSS of first matching rule."""
+
+    it "returns first matching rule when multiple overlap":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "150")
+
+        val rule1 = CondRule(
+            range: "A1:A10",
+            kind: "cell_value",
+            criteria: ">100",
+            n: 0,
+            css: "background:#fde7e9"
+        )
+
+        val rule2 = CondRule(
+            range: "A1:A10",
+            kind: "cell_value",
+            criteria: ">50",
+            n: 0,
+            css: "background:#fff3cd"
+        )
+
+        val result = cond_css_for_cell(sheet, [rule1, rule2], "A1")
+        expect(result).to_equal("background:#fde7e9")
+
+describe "cond_css_for_cell: top_n highlighting":
+    """Highlight cells among the top N values in a range."""
+
+    it "identifies top 2 values in range":
+        var sheet = Sheet.new("S1")
+        # Values: 5, 30, 10, 20
+        sheet.set_value("A1", "5")
+        sheet.set_value("A2", "30")
+        sheet.set_value("A3", "10")
+        sheet.set_value("A4", "20")
+
+        val rule = CondRule(
+            range: "A1:A4",
+            kind: "top_n",
+            criteria: "",
+            n: 2,
+            css: "background:#c6efce"
+        )
+
+        # 30 is top 1
+        val result_a2 = cond_css_for_cell(sheet, [rule], "A2")
+        expect(result_a2).to_equal("background:#c6efce")
+
+        # 20 is top 2
+        val result_a4 = cond_css_for_cell(sheet, [rule], "A4")
+        expect(result_a4).to_equal("background:#c6efce")
+
+        # 10 is not in top 2
+        val result_a3 = cond_css_for_cell(sheet, [rule], "A3")
+        expect(result_a3).to_equal("")
+
+        # 5 is not in top 2
+        val result_a1 = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result_a1).to_equal("")
+
+    it "top_n returns empty for non-numeric cells":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "text")
+
+        val rule = CondRule(
+            range: "A1:A1",
+            kind: "top_n",
+            criteria: "",
+            n: 1,
+            css: "background:#c6efce"
+        )
+
+        val result = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result).to_equal("")
+
+describe "cond_css_for_cell: out of range":
+    """Rules should not apply to cells outside their range."""
+
+    it "does not apply rule to cell outside range":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "150")
+        sheet.set_value("B1", "150")
+
+        val rule = CondRule(
+            range: "A1:A10",
+            kind: "cell_value",
+            criteria: ">100",
+            n: 0,
+            css: "background:#fde7e9"
+        )
+
+        # A1 is in range
+        val result_a1 = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result_a1).to_equal("background:#fde7e9")
+
+        # B1 is outside range A1:A10
+        val result_b1 = cond_css_for_cell(sheet, [rule], "B1")
+        expect(result_b1).to_equal("")
+
+describe "cond_format_range_css: range formatting":
+    """Format all cells in a range and return CSS entries for matches."""
+
+    it "formats multiple cells in range":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "50")
+        sheet.set_value("A2", "150")
+        sheet.set_value("A3", "75")
+
+        val rule = CondRule(
+            range: "A1:A3",
+            kind: "cell_value",
+            criteria: ">100",
+            n: 0,
+            css: "background:#fde7e9"
+        )
+
+        val result = cond_format_range_css(sheet, [rule], "A1:A3")
+
+        # Only A2 (150) should match
+        expect(result.len()).to_equal(1)
+        if result.len() >= 1:
+            expect(result[0]).to_contain("A2:")
+            expect(result[0]).to_contain("background:#fde7e9")
+
+    it "skips cells with no matching rules":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "10")
+        sheet.set_value("A2", "20")
+        sheet.set_value("A3", "30")
+
+        val rule = CondRule(
+            range: "A1:A3",
+            kind: "cell_value",
+            criteria: ">100",
+            n: 0,
+            css: "background:#fde7e9"
+        )
+
+        val result = cond_format_range_css(sheet, [rule], "A1:A3")
+
+        # No cells match >100
+        expect(result.len()).to_equal(0)
+
+    it "returns row-major order":
+        var sheet = Sheet.new("S1")
+        # Set up a 2x2 grid with top-left and bottom-right matching
+        sheet.set_value("A1", "150")
+        sheet.set_value("A2", "50")
+        sheet.set_value("B1", "50")
+        sheet.set_value("B2", "150")
+
+        val rule = CondRule(
+            range: "A1:B2",
+            kind: "cell_value",
+            criteria: ">100",
+            n: 0,
+            css: "background:#fde7e9"
+        )
+
+        val result = cond_format_range_css(sheet, [rule], "A1:B2")
+
+        # Should have 2 results
+        expect(result.len()).to_equal(2)
+
+        # Row-major order: A1, then A2, then B1, then B2
+        if result.len() >= 2:
+            expect(result[0]).to_start_with("A1:")
+            expect(result[1]).to_start_with("B2:")
+
+describe "cond_css_for_cell: color_scale":
+    """Linear color interpolation between min and max values."""
+
+    it "interpolates white to green across the range":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "0")
+        sheet.set_value("A2", "50")
+        sheet.set_value("A3", "100")
+
+        val rule = CondRule(
+            range: "A1:A3",
+            kind: "color_scale",
+            criteria: "",
+            n: 0,
+            css: ""  # CSS is computed per value, not static
+        )
+
+        # min -> white, max -> #63be7b, midpoint per-channel round half up:
+        # r (255+99)/2=177=b1, g (255+190)/2=222.5->223=df, b (255+123)/2=189=bd
+        expect(cond_css_for_cell(sheet, [rule], "A1")).to_equal("background:#ffffff")
+        expect(cond_css_for_cell(sheet, [rule], "A2")).to_equal("background:#b1dfbd")
+        expect(cond_css_for_cell(sheet, [rule], "A3")).to_equal("background:#63be7b")
+
+    it "gives the max color to a degenerate single-value range":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "42")
+
+        val rule = CondRule(
+            range: "A1:A1",
+            kind: "color_scale",
+            criteria: "",
+            n: 0,
+            css: ""
+        )
+
+        expect(cond_css_for_cell(sheet, [rule], "A1")).to_equal("background:#63be7b")
+
+    it "skips non-numeric cells for color_scale":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "text")
+
+        val rule = CondRule(
+            range: "A1:A10",
+            kind: "color_scale",
+            criteria: "",
+            n: 0,
+            css: ""
+        )
+
+        val result = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result).to_equal("")
+
+describe "cond_css_for_cell: unknown rule kind":
+    """Unknown rule kinds should not match."""
+
+    it "returns empty for unknown rule kind":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "100")
+
+        val rule = CondRule(
+            range: "A1:A10",
+            kind: "unknown_kind",
+            criteria: ">50",
+            n: 0,
+            css: "background:#fde7e9"
+        )
+
+        val result = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result).to_equal("")
+
+describe "cond_css_for_cell: empty and missing cells":
+    """Handle empty cells and missing references."""
+
+    it "returns empty for missing cell":
+        var sheet = Sheet.new("S1")
+
+        val rule = CondRule(
+            range: "A1:A10",
+            kind: "cell_value",
+            criteria: ">100",
+            n: 0,
+            css: "background:#fde7e9"
+        )
+
+        val result = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result).to_equal("")  # Missing cells are empty, don't match >100
+
+describe "cond_css_for_cell: comparison operators":
+    """Test various numeric comparison operators."""
+
+    it "matches with >= operator":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "100")
+
+        val rule = CondRule(
+            range: "A1:A10",
+            kind: "cell_value",
+            criteria: ">=100",
+            n: 0,
+            css: "background:#c6efce"
+        )
+
+        val result = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result).to_equal("background:#c6efce")
+
+    it "matches with <> (not equal) operator":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "50")
+
+        val rule = CondRule(
+            range: "A1:A10",
+            kind: "cell_value",
+            criteria: "<>100",
+            n: 0,
+            css: "background:#fff3cd"
+        )
+
+        val result = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result).to_equal("background:#fff3cd")
+
+    it "does not match with <> when values are equal":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "100")
+
+        val rule = CondRule(
+            range: "A1:A10",
+            kind: "cell_value",
+            criteria: "<>100",
+            n: 0,
+            css: "background:#fff3cd"
+        )
+
+        val result = cond_css_for_cell(sheet, [rule], "A1")
+        expect(result).to_equal("")

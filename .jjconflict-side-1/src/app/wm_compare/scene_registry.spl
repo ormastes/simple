@@ -1,0 +1,208 @@
+# WM Compare — Named Scene Registry
+#
+# Maps scene names (used by the wm_compare CLI) to concrete WmSceneSpec
+# instances and their on-disk .ui.sdn fixture paths. Scenes are built
+# programmatically so that all three capture sources (A Electron, B host
+# Simple Web WM, D QEMU Simple OS) render the same logical layout.
+#
+# The fixture path is informational — it points at a .ui.sdn file that
+# describes the same scene for tools that consume SDN directly. The
+# capture pipelines in this repo render from WmSceneSpec, not SDN.
+
+use os.compositor.wm_scene.{WmSceneSpec, SceneElement}
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct SceneEntry:
+    """A named scene + its fixture path."""
+    name: text
+    fixture_path: text
+    spec: WmSceneSpec
+
+# ============================================================================
+# Scene Builders
+# ============================================================================
+
+fn build_empty_desktop(width: i32, height: i32) -> WmSceneSpec:
+    """Scene: empty desktop chrome, no windows."""
+    var elements: [SceneElement] = []
+    elements = elements + [SceneElement(
+        kind: "desktop_chrome",
+        x: 0, y: 0, w: width, h: height,
+        properties: ["color_top", "0xFF1A1A2E", "color_bottom", "0xFF16213E"]
+    )]
+    WmSceneSpec(
+        name: "empty_desktop",
+        width: width,
+        height: height,
+        elements: elements
+    )
+
+fn build_single_window(width: i32, height: i32) -> WmSceneSpec:
+    """Scene: one centered window on desktop chrome."""
+    var elements: [SceneElement] = []
+
+    elements = elements + [SceneElement(
+        kind: "desktop_chrome",
+        x: 0, y: 0, w: width, h: height,
+        properties: ["color_top", "0xFF1A1A2E", "color_bottom", "0xFF16213E"]
+    )]
+
+    val win_w = width * 3 / 4
+    val win_h = height * 3 / 4
+    val win_x = (width - win_w) / 2
+    val win_y = (height - win_h) / 2
+
+    # Title bar decoration
+    elements = elements + [SceneElement(
+        kind: "decoration",
+        x: win_x, y: win_y, w: win_w, h: 24,
+        properties: ["color", "0xFF2D2D44", "title", "Simple WM"]
+    )]
+
+    # Glass panel body
+    elements = elements + [SceneElement(
+        kind: "glass_panel",
+        x: win_x + 6, y: win_y + 30, w: win_w - 12, h: win_h - 38,
+        properties: ["surface_color", "0xFF303050", "alpha", "180", "blur_radius", "6"]
+    )]
+
+    # Title text label
+    elements = elements + [SceneElement(
+        kind: "text_label",
+        x: win_x + 8, y: win_y + 4, w: win_w - 16, h: 16,
+        properties: ["text", "Simple WM", "fg", "0xFFFFFFFF", "bg", "0x00000000"]
+    )]
+
+    WmSceneSpec(
+        name: "single_window",
+        width: width,
+        height: height,
+        elements: elements
+    )
+
+fn _add_floating_window(elements_in: [SceneElement], wx: i32, wy: i32, ww: i32, wh: i32, title: text) -> [SceneElement]:
+    """Append one floating window (decoration + glass body + title) at scaled coords."""
+    var elements = elements_in
+
+    elements = elements + [SceneElement(
+        kind: "decoration",
+        x: wx, y: wy, w: ww, h: 18,
+        properties: ["color", "0xFF2D2D44", "title", title]
+    )]
+
+    elements = elements + [SceneElement(
+        kind: "glass_panel",
+        x: wx + 2, y: wy + 20, w: ww - 4, h: wh - 22,
+        properties: ["surface_color", "0xFF303050", "alpha", "180", "blur_radius", "4"]
+    )]
+
+    elements = elements + [SceneElement(
+        kind: "text_label",
+        x: wx + 4, y: wy + 2, w: ww - 8, h: 14,
+        properties: ["text", title, "fg", "0xFFFFFFFF", "bg", "0x00000000"]
+    )]
+
+    elements
+
+fn build_four_windows(width: i32, height: i32) -> WmSceneSpec:
+    """Scene: four floating windows on desktop chrome.
+
+    Mirrors the four windows painted by `handle_ws_wm_upgrade` in
+    src/app/ui.web/ws_handler.spl (Terminal, Editor, Browser, File Manager).
+    Positions are scaled from the reference 1280x720 layout down to the
+    requested width/height.
+    """
+    var elements: [SceneElement] = []
+
+    elements = elements + [SceneElement(
+        kind: "desktop_chrome",
+        x: 0, y: 0, w: width, h: height,
+        properties: ["color_top", "0xFF1A1A2E", "color_bottom", "0xFF16213E"]
+    )]
+
+    # Reference layout is the (x,y,w,h) used by ws_handler on a 1280x720 screen.
+    # Scale to (width,height). 320x240 is the default target.
+    # Terminal  : (50,60,600,400)
+    # Editor    : (300,120,700,500)
+    # Browser   : (500,80,650,450)
+    # FileMgr   : (150,200,550,350)
+    val ref_w = 1280
+    val ref_h = 720
+
+    # Terminal
+    val t_x = 50 * width / ref_w
+    val t_y = 60 * height / ref_h
+    val t_w = 600 * width / ref_w
+    val t_h = 400 * height / ref_h
+    elements = _add_floating_window(elements, t_x, t_y, t_w, t_h, "Terminal")
+
+    # Editor
+    val e_x = 300 * width / ref_w
+    val e_y = 120 * height / ref_h
+    val e_w = 700 * width / ref_w
+    val e_h = 500 * height / ref_h
+    elements = _add_floating_window(elements, e_x, e_y, e_w, e_h, "Editor")
+
+    # Browser
+    val b_x = 500 * width / ref_w
+    val b_y = 80 * height / ref_h
+    val b_w = 650 * width / ref_w
+    val b_h = 450 * height / ref_h
+    elements = _add_floating_window(elements, b_x, b_y, b_w, b_h, "Browser")
+
+    # File Manager
+    val f_x = 150 * width / ref_w
+    val f_y = 200 * height / ref_h
+    val f_w = 550 * width / ref_w
+    val f_h = 350 * height / ref_h
+    elements = _add_floating_window(elements, f_x, f_y, f_w, f_h, "Files")
+
+    WmSceneSpec(
+        name: "four_windows",
+        width: width,
+        height: height,
+        elements: elements
+    )
+
+# ============================================================================
+# Registry Lookup
+# ============================================================================
+
+fn fixture_path_for(name: text) -> text:
+    """Resolve a scene name to its .ui.sdn fixture path."""
+    if name == "empty_desktop":
+        return "test/fixtures/web_pages/empty_desktop.ui.sdn"
+    if name == "single_window":
+        return "test/fixtures/web_pages/single_window.ui.sdn"
+    if name == "four_windows":
+        return "test/fixtures/web_pages/four_windows.ui.sdn"
+    ""
+
+fn resolve_scene(name: text, width: i32, height: i32) -> SceneEntry?:
+    """Look up a scene by name, returning nil if unknown."""
+    if name == "empty_desktop":
+        return SceneEntry(
+            name: name,
+            fixture_path: fixture_path_for(name),
+            spec: build_empty_desktop(width, height)
+        )
+    if name == "single_window":
+        return SceneEntry(
+            name: name,
+            fixture_path: fixture_path_for(name),
+            spec: build_single_window(width, height)
+        )
+    if name == "four_windows":
+        return SceneEntry(
+            name: name,
+            fixture_path: fixture_path_for(name),
+            spec: build_four_windows(width, height)
+        )
+    nil
+
+fn list_scene_names() -> [text]:
+    """Return the list of registered scene names."""
+    ["empty_desktop", "single_window", "four_windows"]

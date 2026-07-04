@@ -1,0 +1,268 @@
+@allow(unnamed_duplicate_typed_args)
+# Leak Check - Static Runner
+#
+# Lightweight source analysis for @no_alloc enforcement that avoids importing
+# the full compiler frontend into interpreter-based test paths.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+use compiler.driver.build.{check_alloc_imports}
+use types
+
+class StaticFunctionSummary:
+    name: text
+    annotation: text
+    start_line: i64
+    body_lines: [text]
+    direct_alloc: bool
+    unknown_call: bool
+    unknown_detail: text
+    callees: [text]
+
+fn _append_unique_text(items: [text], value: text) -> [text]:
+    var found = false
+    for existing in items:
+        if existing == value:
+            found = true
+    if found:
+        return items
+    var updated = items
+    updated.push(value)
+    updated
+
+fn _summarize_static_function(name: text, annotation: text, start_line: i64, body_lines: [text], summaries: [StaticFunctionSummary]) -> [StaticFunctionSummary]:
+    if name == "":
+        return summaries
+
+    var direct_alloc = false
+    var unknown_call = false
+    var unknown_detail = ""
+    var callees: [text] = []
+
+    for body_line in body_lines:
+        if line_has_direct_alloc(body_line):
+            direct_alloc = true
+        for callee in extract_calls_from_line(body_line):
+            callees = _append_unique_text(callees, callee)
+
+    var updated = summaries
+    updated.push(StaticFunctionSummary(
+        name: name,
+        annotation: annotation,
+        start_line: start_line,
+        body_lines: body_lines,
+        direct_alloc: direct_alloc,
+        unknown_call: unknown_call,
+        unknown_detail: unknown_detail,
+        callees: callees
+    ))
+    updated
+
+fn is_ident_char(ch: text) -> bool:
+    if ch == "_":
+        return true
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "A" and ch <= "Z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    false
+
+fn parse_function_name(trimmed_line: text) -> text:
+    if not trimmed_line.starts_with("fn "):
+        return ""
+    val after = trimmed_line.substring(3)
+    var name = ""
+    var i = 0
+    while i < after.len():
+        val ch = after.substring(i, i + 1)
+        if ch == "(" or ch == " " or ch == ":":
+            break
+        name = name + ch
+        i = i + 1
+    name
+
+fn line_has_direct_alloc(line: text) -> bool:
+    val trimmed = line.trim()
+    if trimmed == "" or trimmed.starts_with("#"):
+        return false
+    if trimmed.contains("new ") or trimmed.contains("new("):
+        return true
+    if trimmed.contains("\"") and trimmed.contains("{") and trimmed.contains("}"):
+        return true
+    if trimmed.contains("[") and trimmed.contains("]"):
+        if not trimmed.starts_with("fn ") and not trimmed.starts_with("use "):
+            return true
+    false
+
+fn is_known_non_alloc_call(name: text) -> bool:
+    if name == "if" or name == "for" or name == "while" or name == "match":
+        return true
+    if name == "print" or name == "expect" or name == "describe" or name == "it":
+        return true
+    if name == "skip" or name == "range" or name == "Some" or name == "Ok" or name == "Err":
+        return true
+    false
+
+fn extract_calls_from_line(line: text) -> [text]:
+    val trimmed = line.trim()
+    if trimmed == "" or trimmed.starts_with("#"):
+        return []
+    var calls: [text] = []
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.substring(i, i + 1)
+        if ch == "(":
+            var j = i - 1
+            var ident = ""
+            while j >= 0:
+                val left = trimmed.substring(j, j + 1)
+                if is_ident_char(left):
+                    ident = left + ident
+                    j = j - 1
+                else:
+                    break
+            if ident != "" and not is_known_non_alloc_call(ident):
+                var seen = false
+                for existing in calls:
+                    if existing == ident:
+                        seen = true
+                if not seen:
+                    calls.push(ident)
+        i = i + 1
+    calls
+
+fn summarize_functions(source_text: text) -> [StaticFunctionSummary]:
+    val lines = source_text.split("\n")
+    var summaries: [StaticFunctionSummary] = []
+    var pending_annotation = ""
+    var current_name = ""
+    var current_annotation = ""
+    var current_start_line: i64 = 0
+    var current_body_lines: [text] = []
+
+    var line_no: i64 = 1
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "@no_alloc" or trimmed == "@alloc":
+            pending_annotation = trimmed
+            line_no = line_no + 1
+            continue
+        if trimmed.starts_with("fn "):
+            summaries = _summarize_static_function(
+                current_name,
+                current_annotation,
+                current_start_line,
+                current_body_lines,
+                summaries
+            )
+            current_name = parse_function_name(trimmed)
+            current_annotation = pending_annotation
+            current_start_line = line_no
+            current_body_lines = []
+            pending_annotation = ""
+            line_no = line_no + 1
+            continue
+        if current_name != "":
+            current_body_lines.push(line)
+        line_no = line_no + 1
+    _summarize_static_function(
+        current_name,
+        current_annotation,
+        current_start_line,
+        current_body_lines,
+        summaries
+    )
+
+fn analyze_static_source_text(source_text: text) -> [StaticViolation]:
+    var violations: [StaticViolation] = []
+
+    for err in check_alloc_imports(source_text, false):
+        violations.push(StaticViolation(
+            function_name: "(module)",
+            category: "alloc_import",
+            detail: err.message,
+            source_line: 0
+        ))
+
+    val summaries = summarize_functions(source_text)
+    var names: [text] = []
+    var start_lines: [i64] = []
+    var annotations: [text] = []
+    var callees_by_fn: [[text]] = []
+    for summary in summaries:
+        names.push(summary.name)
+    var may_alloc: [bool] = []
+    var unknown_details: [text] = []
+
+    for summary in summaries:
+        start_lines.push(summary.start_line)
+        annotations.push(summary.annotation)
+        callees_by_fn.push(summary.callees)
+        var function_may_alloc = summary.direct_alloc or summary.annotation == "@alloc"
+        var unknown_detail = ""
+        for callee in summary.callees:
+            var known = false
+            for known_name in names:
+                if known_name == callee:
+                    known = true
+            if not known and not is_known_non_alloc_call(callee):
+                function_may_alloc = true
+                if unknown_detail == "":
+                    unknown_detail = "unknown or external call '{callee}' treated as may-allocate"
+        may_alloc.push(function_may_alloc)
+        unknown_details.push(unknown_detail)
+    var changed = true
+    while changed:
+        changed = false
+        var i = 0
+        while i < names.len():
+            if may_alloc[i] == false:
+                for callee in callees_by_fn[i]:
+                    var j = 0
+                    while j < names.len():
+                        if names[j] == callee and may_alloc[j]:
+                            may_alloc[i] = true
+                            changed = true
+                        j = j + 1
+            i = i + 1
+
+    var i = 0
+    while i < names.len():
+        if annotations[i] == "@no_alloc" and may_alloc[i]:
+            var detail = "function inferred to allocate"
+            if unknown_details[i] != "":
+                detail = unknown_details[i]
+            violations.push(StaticViolation(
+                function_name: names[i],
+                category: "no_alloc_violation",
+                detail: detail,
+                source_line: start_lines[i]
+            ))
+        i = i + 1
+
+    violations
+
+fn run_static_check(cfg: LeakCheckConfig) -> LeakCheckResult:
+    var result = empty_leak_check_result()
+    result.mode = "static"
+    result.target = cfg.source_file
+    result.evidence_level = "strong"
+
+    if cfg.source_file == "":
+        print "Error: no static-analysis target specified"
+        result.exit_code = 1
+        result.verdict = "fail"
+        return result
+
+    if not rt_file_exists(cfg.source_file):
+        print "Error: source file not found: {cfg.source_file}"
+        result.exit_code = 1
+        result.verdict = "fail"
+        return result
+
+    val source_text = rt_file_read_text(cfg.source_file) ?? ""
+    result.static_violations = analyze_static_source_text(source_text)
+    result

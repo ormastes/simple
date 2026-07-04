@@ -1,0 +1,178 @@
+# @cover src/compiler_rust/compiler/src/pipeline/native_project/tools.rs 60%
+# @cover src/compiler_rust/compiler/src/pipeline/native_project/config.rs 40%
+# @cover src/compiler_rust/driver/src/cli/commands/misc_commands.rs 20%
+"""
+# Stage 3 SEGFAULT Fix (LIM-010) Specification
+
+**Feature IDs:** LIM-010
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Verifies the fix for bootstrap Stage 3 SEGFAULT (exit 139) caused by duplicate
+LLVM CLI option registration. The fix changes strip_llvm_constructors() to return
+Result, replaces silent unwrap_or fallbacks with explicit warn!(), adds
+verify_stripped_archive() post-condition, and adds exit-139 detection in
+compile_stage().
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| LIM-010 | LLVM constructor conflict causing SEGFAULT at Stage 3 |
+| strip_llvm_constructors | Function that removes .init_array/.ctors from archives |
+| StripError | New error enum for stripping failure modes |
+| verify_stripped_archive | Post-condition check that constructor sections are gone |
+
+## Behavior
+
+- strip_llvm_constructors() returns Result<PathBuf, StripError> instead of PathBuf
+- Callers in config.rs use explicit match + warn!() instead of unwrap_or
+- verify_stripped_archive() confirms no constructor sections remain after stripping
+- compile_stage() detects exit code 139 and emits LIM-010 diagnostic
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_exists, read_text_file}
+
+
+# ============================================================================
+# Test Group 1: Source File Structure
+# ============================================================================
+
+describe "Stage3 SEGFAULT Fix — Source Structure":
+    """
+    ## Source File Existence
+
+    Verify that all files targeted by the architecture exist and are ready
+    for modification.
+    """
+
+    it "AC-2: tools.rs exists for strip_llvm_constructors changes":
+        expect(file_exists("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")).to_equal(true)
+
+    it "AC-2: config.rs exists for callsite error handling changes":
+        expect(file_exists("src/compiler_rust/compiler/src/pipeline/native_project/config.rs")).to_equal(true)
+
+    it "AC-3: misc_commands.rs exists for compile_stage diagnostics":
+        expect(file_exists("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")).to_equal(true)
+
+    it "AC-2: native_all lib.rs exists as the archive source":
+        expect(file_exists("src/compiler_rust/native_all/src/lib.rs")).to_equal(true)
+
+
+# ============================================================================
+# Test Group 2: StripError Enum and Result Return Type
+# ============================================================================
+
+describe "Stage3 SEGFAULT Fix — StripError and Result Return":
+    """
+    ## D-1: Result Return Type
+
+    strip_llvm_constructors() must return Result<PathBuf, StripError> so callers
+    cannot silently fall back to unstripped archives.
+    """
+
+    it "AC-2: tools.rs contains StripError enum definition":
+        val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+        expect(content).to_contain("StripError")
+
+    it "AC-2: StripError has ObjcopyNotFound variant":
+        val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+        expect(content).to_contain("ObjcopyNotFound")
+
+    it "AC-2: StripError has ObjcopyFailed variant":
+        val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+        expect(content).to_contain("ObjcopyFailed")
+
+    it "AC-2: StripError has VerificationFailed variant":
+        val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+        expect(content).to_contain("VerificationFailed")
+
+    it "AC-2: strip_llvm_constructors returns Result":
+        val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+        expect(content).to_contain("Result<PathBuf, StripError>")
+
+
+# ============================================================================
+# Test Group 3: Silent Fallback Elimination
+# ============================================================================
+
+describe "Stage3 SEGFAULT Fix — Silent Fallback Elimination":
+    """
+    ## D-6: Explicit Error Handling in config.rs
+
+    All 4 callsites in config.rs must replace unwrap_or(native_all.clone())
+    with explicit match + warn!() logging.
+    """
+
+    it "AC-2: config.rs no longer uses unwrap_or for strip results":
+        val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/config.rs")
+        # After the fix, unwrap_or(native_all.clone()) pattern should be gone
+        # from strip_llvm_constructors calls. The content should contain
+        # explicit match or warn! instead.
+        expect(content).to_contain("warn!")
+
+    it "AC-2: config.rs contains LIM-010 in warning messages":
+        val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/config.rs")
+        expect(content).to_contain("LIM-010")
+
+
+# ============================================================================
+# Test Group 4: Verify Stripped Archive Post-Condition
+# ============================================================================
+
+describe "Stage3 SEGFAULT Fix — Archive Verification":
+    """
+    ## D-2: verify_stripped_archive()
+
+    A post-condition check must exist that runs objdump on the stripped archive
+    and confirms no .init_array/.ctors/.fini_array/.dtors sections remain.
+    """
+
+    it "AC-2: verify_stripped_archive function exists in tools.rs":
+        val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+        expect(content).to_contain("verify_stripped_archive")
+
+    it "AC-2: find_objdump_tool function exists in tools.rs":
+        val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+        expect(content).to_contain("find_objdump_tool")
+
+    it "AC-2: verification checks for .init_array section":
+        val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+        expect(content).to_contain(".init_array")
+
+    it "AC-2: verification checks for .ctors section":
+        val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+        expect(content).to_contain(".ctors")
+
+
+# ============================================================================
+# Test Group 5: SIGSEGV Detection in compile_stage
+# ============================================================================
+
+describe "Stage3 SEGFAULT Fix — SIGSEGV Detection":
+    """
+    ## D-4: Exit Code 139 Detection
+
+    compile_stage() must detect exit code 139 (128 + SIGSEGV) and emit
+    a targeted diagnostic referencing LIM-010.
+    """
+
+    it "AC-6: compile_stage detects exit code 139":
+        val content = read_text_file("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")
+        expect(content).to_contain("139")
+
+    it "AC-6: SIGSEGV diagnostic references LIM-010":
+        val content = read_text_file("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")
+        expect(content).to_contain("LIM-010")
+
+    it "AC-6: diagnostic mentions SEGFAULT":
+        val content = read_text_file("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")
+        expect(content).to_contain("SEGFAULT")

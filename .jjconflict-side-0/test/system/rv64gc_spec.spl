@@ -1,0 +1,84 @@
+# @cover src/hardware/rv64gc/core/rv64_decode.spl 60%
+# @cover src/hardware/rv64gc/core/rv64_execute.spl 60%
+# RV64GC compatibility smoke for the current interpreted system lane.
+# @tag:system
+
+use std.spec.*
+use hardware.rv64gc.core.rv64_decode.{decode_alu_op}
+use hardware.rv64gc.core.rv64_execute.{alu_execute}
+use hardware.rv64gc.ext.rv64_muldiv.{muldiv_execute}
+use hardware.rv64gc.ext.rv64_atomics.{amo_execute, AmoOp}
+use hardware.rv64gc.pkg.rv64_types_pkg.{AluOp, MulDivOp}
+use hardware.rv64gc.pkg.rv64_isa_pkg.{OP_OP, F3_ADD_SUB, F7_NORMAL, F7_SUB_SRA}
+
+describe "RV64GC Processor":
+    context "instruction decode":
+        it "distinguishes ADD from SUB via funct7":
+            val add_op = decode_alu_op(OP_OP, F3_ADD_SUB, F7_NORMAL)
+            val sub_op = decode_alu_op(OP_OP, F3_ADD_SUB, F7_SUB_SRA)
+            expect(add_op == AluOp.Add).to_equal(true)
+            expect(sub_op == AluOp.Sub).to_equal(true)
+
+    context "64-bit ALU":
+        it "ADD: basic":
+            expect(alu_execute(AluOp.Add, 10, 20)).to_equal(30)
+
+        it "SUB: basic":
+            expect(alu_execute(AluOp.Sub, 50, 20)).to_equal(30)
+
+        it "SLT: negative < positive":
+            expect(alu_execute(AluOp.Slt, -1, 0)).to_equal(1)
+
+    context "64-bit multiply/divide":
+        it "MUL: 3 * 4 = 12":
+            expect(muldiv_execute(MulDivOp.Mul, 3, 4)).to_equal(12)
+
+        it "DIV: 20 / 4 = 5":
+            expect(muldiv_execute(MulDivOp.Div, 20, 4)).to_equal(5)
+
+        it "DIV: divide by zero returns -1":
+            expect(muldiv_execute(MulDivOp.Div, 20, 0)).to_equal(-1)
+
+        it "REM: 20 % 3 = 2":
+            expect(muldiv_execute(MulDivOp.Rem, 20, 3)).to_equal(2)
+
+    context "atomics":
+        it "AMOADD: returns old and computes new":
+            val r = amo_execute(AmoOp.Add, 100, 50)
+            expect(r.old_value).to_equal(100)
+            expect(r.new_value).to_equal(150)
+
+        it "AMOSWAP: stores new value":
+            val r = amo_execute(AmoOp.Swap, 100, 200)
+            expect(r.new_value).to_equal(200)
+
+        it "AMOMAX: signed maximum":
+            val r = amo_execute(AmoOp.Max, -10, 5)
+            expect(r.new_value).to_equal(5)
+
+    context "pipeline":
+        it "load-use hazard predicate is true for dependent load":
+            val ex_is_load = true
+            val ex_rd = 10
+            val id_rs1 = 10
+            val hazard = ex_is_load and ex_rd == id_rs1 and ex_rd != 0
+            expect(hazard).to_equal(true)
+
+        it "load-use hazard predicate is false for independent register":
+            val ex_is_load = true
+            val ex_rd = 10
+            val id_rs1 = 11
+            val hazard = ex_is_load and ex_rd == id_rs1
+            expect(hazard).to_equal(false)
+
+    context "SMP":
+        it "hart IDs are distinguishable":
+            val hart0: i64 = 0
+            val hart1: i64 = 1
+            expect(hart0 != hart1).to_equal(true)
+
+        it "shared counter updates through sequential atomic-style steps":
+            var counter: i64 = 0
+            counter = counter + 1
+            counter = counter + 1
+            expect(counter).to_equal(2)

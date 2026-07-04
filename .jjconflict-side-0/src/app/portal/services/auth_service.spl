@@ -1,0 +1,323 @@
+"""
+# Auth Service
+
+Authentication and user management: password hashing,
+user creation, login verification, and API token generation.
+"""
+
+use std.database.sql.connection.{Database}
+use std.database.sql.types.{DbValue, DbError}
+use std.database.sql.repository.{Repository}
+use std.database.sql.codec.{DbCodec}
+use std.bcrypt.hash.{bcrypt_hash}
+use std.bcrypt.verify.{bcrypt_verify}
+use std.crypto.hmac.{hmac_sha256}
+use portal.models.user.{User, UserCodec, new_user}
+use portal.models.api_token.{ApiToken, ApiTokenCodec, new_api_token}
+
+# ============================================================================
+# Password Hashing
+# ============================================================================
+
+fn hash_password(password: text) -> text:
+    """Hash a password using bcrypt.
+
+    Args:
+        password: Raw password text
+
+    Returns:
+        Bcrypt hash string
+    """
+    bcrypt_hash(password, 12)
+
+fn verify_password(password: text, hash: text) -> bool:
+    """Verify a password against a bcrypt hash.
+
+    Args:
+        password: Raw password to check
+        hash: Stored bcrypt hash
+
+    Returns:
+        true if password matches hash
+    """
+    bcrypt_verify(password, hash)
+
+# ============================================================================
+# User Management
+# ============================================================================
+
+fn create_user(db: Database, username: text, email: text, password: text) -> Result<i64, text>:
+    """Create a new user account.
+
+    Validates uniqueness, hashes password, and inserts into database.
+
+    Args:
+        db: Database connection
+        username: Desired username
+        email: User email address
+        password: Raw password (will be hashed)
+
+    Returns:
+        Ok(user_id) on success, Err with message on failure
+    """
+    # Check username length
+    if username.len() < 3:
+        return Err("Username must be at least 3 characters")
+    if username.len() > 40:
+        return Err("Username must be at most 40 characters")
+
+    # Check password length
+    if password.len() < 8:
+        return Err("Password must be at least 8 characters")
+
+    # Check if username already exists
+    val check_sql = "SELECT COUNT(*) FROM users WHERE username = ?"
+    val check_params: [DbValue] = [DbValue.Text(value: username)]
+    val check_result = db.query(check_sql, check_params)
+    match check_result:
+        Ok(rows):
+            if rows.len() > 0:
+                val count = rows[0].get_int("COUNT(*)") ?? 0
+                if count > 0:
+                    return Err("Username already taken")
+        Err(e):
+            return Err("Database error checking username")
+
+    # Check if email already exists
+    val email_check_sql = "SELECT COUNT(*) FROM users WHERE email = ?"
+    val email_check_params: [DbValue] = [DbValue.Text(value: email)]
+    val email_result = db.query(email_check_sql, email_check_params)
+    match email_result:
+        Ok(rows):
+            if rows.len() > 0:
+                val count = rows[0].get_int("COUNT(*)") ?? 0
+                if count > 0:
+                    return Err("Email already registered")
+        Err(e):
+            return Err("Database error checking email")
+
+    # Hash password and create user
+    val pw_hash = hash_password(password)
+    val insert_sql = "INSERT INTO users (username, email, password_hash, display_name, bio, role) VALUES (?, ?, ?, ?, '', 'user')"
+    val insert_params: [DbValue] = [
+        DbValue.Text(value: username),
+        DbValue.Text(value: email),
+        DbValue.Text(value: pw_hash),
+        DbValue.Text(value: username)
+    ]
+    val insert_result = db.exec(insert_sql, insert_params)
+    match insert_result:
+        Ok(_):
+            val row_id = db.last_insert_rowid()
+            Ok(row_id)
+        Err(e):
+            Err("Failed to create user account")
+
+fn authenticate(db: Database, username: text, password: text) -> Result<User, text>:
+    """Authenticate a user by username and password.
+
+    Args:
+        db: Database connection
+        username: Username to look up
+        password: Password to verify
+
+    Returns:
+        Ok(User) if credentials valid, Err with message otherwise
+    """
+    val sql = "SELECT * FROM users WHERE username = ? LIMIT 1"
+    val params: [DbValue] = [DbValue.Text(value: username)]
+    val result = db.query(sql, params)
+
+    match result:
+        Ok(rows):
+            if rows.len() == 0:
+                return Err("Invalid username or password")
+
+            val row = rows[0]
+            val codec = UserCodec()
+            val user_result = codec.decode(row)
+            match user_result:
+                Ok(user):
+                    if verify_password(password, user.password_hash):
+                        Ok(user)
+                    else:
+                        Err("Invalid username or password")
+                Err(e):
+                    Err("Failed to decode user data")
+        Err(e):
+            Err("Database error during authentication")
+
+fn find_user_by_id(db: Database, user_id: i64) -> Result<User?, text>:
+    """Find a user by their ID.
+
+    Args:
+        db: Database connection
+        user_id: User ID to look up
+
+    Returns:
+        Ok(Some(user)) if found, Ok(nil) if not, Err on DB error
+    """
+    val sql = "SELECT * FROM users WHERE id = ? LIMIT 1"
+    val params: [DbValue] = [DbValue.Integer(value: user_id)]
+    val result = db.query(sql, params)
+
+    match result:
+        Ok(rows):
+            if rows.len() == 0:
+                return Ok(nil)
+            val codec = UserCodec()
+            val user_result = codec.decode(rows[0])
+            match user_result:
+                Ok(user): Ok(Some(user))
+                Err(e): Err("Failed to decode user data")
+        Err(e):
+            Err("Database error finding user")
+
+fn update_user_profile(db: Database, user_id: i64, display_name: text, bio: text, email: text) -> Result<(), text>:
+    """Update a user's profile information.
+
+    Args:
+        db: Database connection
+        user_id: User ID to update
+        display_name: New display name
+        bio: New bio text
+        email: New email address
+
+    Returns:
+        Ok(()) on success
+    """
+    val sql = "UPDATE users SET display_name = ?, bio = ?, email = ?, updated_at = datetime('now') WHERE id = ?"
+    val params: [DbValue] = [
+        DbValue.Text(value: display_name),
+        DbValue.Text(value: bio),
+        DbValue.Text(value: email),
+        DbValue.Integer(value: user_id)
+    ]
+    val result = db.exec(sql, params)
+    match result:
+        Ok(_): Ok(())
+        Err(e): Err("Failed to update profile")
+
+# ============================================================================
+# API Token Management
+# ============================================================================
+
+fn create_api_token(db: Database, user_id: i64, name: text, scopes: text) -> Result<text, text>:
+    """Create a new API token for a user.
+
+    Generates a random token, stores its hash, and returns
+    the raw token (shown only once).
+
+    Args:
+        db: Database connection
+        user_id: User ID to create token for
+        name: Human-readable token name
+        scopes: Comma-separated permission scopes
+
+    Returns:
+        Ok(raw_token) to display to user (only shown once)
+    """
+    val raw_token = generate_token()
+    val token_hash_bytes = hmac_sha256("portal-token", raw_token)
+    val token_hash = bytes_to_hex(token_hash_bytes)
+
+    val sql = "INSERT INTO api_tokens (user_id, name, token_hash, scopes) VALUES (?, ?, ?, ?)"
+    val params: [DbValue] = [
+        DbValue.Integer(value: user_id),
+        DbValue.Text(value: name),
+        DbValue.Text(value: token_hash),
+        DbValue.Text(value: scopes)
+    ]
+    val result = db.exec(sql, params)
+    match result:
+        Ok(_): Ok(raw_token)
+        Err(e): Err("Failed to create API token")
+
+fn verify_api_token(db: Database, raw_token: text) -> Result<ApiToken, text>:
+    """Verify an API token and return its record.
+
+    Args:
+        db: Database connection
+        raw_token: Raw token from client
+
+    Returns:
+        Ok(ApiToken) if valid, Err otherwise
+    """
+    val token_hash_bytes = hmac_sha256("portal-token", raw_token)
+    val token_hash = bytes_to_hex(token_hash_bytes)
+
+    val sql = "SELECT * FROM api_tokens WHERE token_hash = ? LIMIT 1"
+    val params: [DbValue] = [DbValue.Text(value: token_hash)]
+    val result = db.query(sql, params)
+
+    match result:
+        Ok(rows):
+            if rows.len() == 0:
+                return Err("Invalid API token")
+            val codec = ApiTokenCodec()
+            val token_result = codec.decode(rows[0])
+            match token_result:
+                Ok(token):
+                    # Update last_used_at
+                    val update_sql = "UPDATE api_tokens SET last_used_at = datetime('now') WHERE id = ?"
+                    val update_params: [DbValue] = [DbValue.Integer(value: token.id)]
+                    val _update = db.exec(update_sql, update_params)
+                    Ok(token)
+                Err(e):
+                    Err("Failed to decode API token")
+        Err(e):
+            Err("Database error verifying token")
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn generate_token() -> text:
+    """Generate a random-looking API token.
+
+    Uses timestamp and hash for uniqueness. In production,
+    this would use a CSPRNG.
+    """
+    val ts = current_timestamp()
+    var parts: [text] = []
+    var n = ts
+    var i = 0
+    while i < 32:
+        val digit = (n * 2654435761) % 16
+        n = n + digit + i + 13
+        if digit < 10:
+            parts.push("{digit}")
+        else:
+            match digit:
+                10: parts.push("a")
+                11: parts.push("b")
+                12: parts.push("c")
+                13: parts.push("d")
+                14: parts.push("e")
+                _: parts.push("f")
+        i = i + 1
+    "spl_" + parts.join("")
+
+fn bytes_to_hex(bytes: [i64]) -> text:
+    """Convert byte array to hex string."""
+    var parts: [text] = []
+    for b in bytes:
+        val hi = (b / 16) % 16
+        val lo = b % 16
+        parts.push(hex_digit(hi))
+        parts.push(hex_digit(lo))
+    parts.join("")
+
+fn hex_digit(n: i64) -> text:
+    """Convert 0-15 to hex character."""
+    if n < 10:
+        return "{n}"
+    match n:
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        _: "f"
+
+extern fn current_timestamp() -> i64

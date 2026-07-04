@@ -1,0 +1,35 @@
+# Capability gate for filesystem-exec spawn.
+#
+# Checks that a calling task holds both FileExec and ProcessSpawn before the
+# loader reads or maps any executable bytes.  Uses a fresh kernel-local
+# CapabilityManager per call (no records => deny by default for non-kernel
+# callers) until the per-task token grant path lands in a later phase.
+#
+# Constraint: must NOT import os.apps.* or os.services.vfs.vfs_init — this
+# module is linked into the freestanding kernel ELF via fs_exec_spawn.
+
+use os.kernel.types.capability_types.{CapabilityKind}
+use os.kernel.ipc.capability.{CapabilityManager}
+use os.kernel.types.task_types.{TaskId}
+
+extern fn serial_println(msg: text)
+
+pub fn exec_cap_check(caller: i64, path: text) -> i32:
+    """Check that caller holds FileExec(path) + ProcessSpawn.
+
+    Returns 0 on success, -13 (EACCES) on denial.
+    caller == 0 is the kernel-origin sentinel and always passes.
+    """
+    if caller == 0:
+        return 0
+    val task = TaskId(id: caller as u64)
+    val mgr = CapabilityManager.new()
+    val has_exec = mgr.check(task, CapabilityKind.FileExec(path_prefix: path))
+    if not has_exec:
+        serial_println("[cap-gate] deny FileExec caller={caller} path={path}")
+        return -13
+    val has_spawn = mgr.check(task, CapabilityKind.ProcessSpawn)
+    if not has_spawn:
+        serial_println("[cap-gate] deny ProcessSpawn caller={caller} path={path}")
+        return -13
+    0

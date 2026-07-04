@@ -1,0 +1,201 @@
+"""
+# Multicore Green Resumable Stepper Native Blocker
+
+**Feature IDs:** #multicore-green-resumable-stepper-native-blocker
+**Category:** Runtime / Native / Concurrency
+**Status:** Regression
+
+## Overview
+
+This SSpec keeps the historical host-native blocker closed for the best
+explicit fairness path found so far: a resumable stepper scheduler over the
+existing `multicore_green` worker pool. The generated probe type-checks,
+compiles to a native binary, and returns the first completion.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/multicore_green.md
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** doc/05_design/multicore_green.md
+
+## Research
+
+**Research:** doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md
+
+## Syntax
+
+```sh
+SIMPLE_BIN=src/compiler_rust/target/debug/simple src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.spl --mode=interpreter --clean
+```
+
+## TUI Capture
+
+```text
+Simple Test Runner v1.0.0-beta
+Running: test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.spl
+multicore green resumable stepper native blocker PASSED
+Files: 1
+Passed: 1
+Failed: 0
+```
+
+## Traceability Expectations
+
+- The generated probe models a resumable stepper over multicore-green workers.
+- The probe uses callback ids rather than sharing mutable closures across tasks.
+- The generated source must type-check before native compilation.
+- The standalone native compile must succeed before run evidence is accepted.
+- The run output must include the expected first-completion result.
+- The tracker must keep the historical blocker marked closed.
+- The test command must honor `SIMPLE_BIN` for Docker-isolated runs.
+- The Syntax block must not point at the stale `bin/release/simple` wrapper.
+- This spec is perf-sensitive because it compiles a generated native probe.
+- Short verification may use `simple check` when the full native run is too slow.
+- The supported public fairness API remains `multicore_green_spawn_sliced`.
+- Ordinary `multicore_green_spawn` closure preemption remains future work.
+"""
+
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+val BUILD_DIR: text = "build/test/multicore_green_resumable_stepper_native_blocker"
+val SOURCE_PATH: text = BUILD_DIR + "/resumable_stepper_probe.spl"
+val NATIVE_PATH: text = BUILD_DIR + "/resumable_stepper_probe.bin"
+
+fn simple_bin() -> text:
+    val configured = rt_env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "src/compiler_rust/target/debug/simple"
+
+fn shell(command: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, code)
+
+fn probe_source() -> text:
+    [
+        "use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism}\n",
+        "use std.nogc_sync_mut.concurrent.channel.{channel_new, channel_from_id}\n",
+        "\n",
+        "class StepResult:\n",
+        "    done: bool\n",
+        "    value: i64\n",
+        "    static fn yielded() -> StepResult:\n",
+        "        StepResult(done: false, value: 0)\n",
+        "    static fn completed(value: i64) -> StepResult:\n",
+        "        StepResult(done: true, value: value)\n",
+        "\n",
+        "class Stepper:\n",
+        "    callback_id: i64\n",
+        "    static fn new(step_fn: fn() -> StepResult) -> Stepper:\n",
+        "        Stepper(callback_id: register_stepper(step_fn))\n",
+        "\n",
+        "class StepTask:\n",
+        "    stop: bool\n",
+        "    index: i64\n",
+        "    callback_id: i64\n",
+        "\n",
+        "class StepCompletion:\n",
+        "    index: i64\n",
+        "    value: i64\n",
+        "\n",
+        "var CALLBACK_IDS: [i64] = []\n",
+        "var CALLBACKS: [fn() -> StepResult] = []\n",
+        "var NEXT_ID: i64 = 1\n",
+        "\n",
+        "fn register_stepper(step_fn: fn() -> StepResult) -> i64:\n",
+        "    val callback_id = NEXT_ID\n",
+        "    NEXT_ID = NEXT_ID + 1\n",
+        "    CALLBACK_IDS = CALLBACK_IDS + [callback_id]\n",
+        "    CALLBACKS = CALLBACKS + [step_fn]\n",
+        "    callback_id\n",
+        "\n",
+        "fn get_stepper(callback_id: i64) -> fn() -> StepResult:\n",
+        "    for i in 0..CALLBACK_IDS.len():\n",
+        "        if CALLBACK_IDS[i] == callback_id:\n",
+        "            return CALLBACKS[i]\n",
+        "    \\\\: StepResult.completed(0)\n",
+        "\n",
+        "fn stop_task() -> StepTask:\n",
+        "    StepTask(stop: true, index: -1, callback_id: 0)\n",
+        "\n",
+        "fn worker_loop(work_id: i64, result_id: i64) -> i64:\n",
+        "    val work = channel_from_id(work_id)\n",
+        "    val results = channel_from_id(result_id)\n",
+        "    while true:\n",
+        "        val next = work.recv()\n",
+        "        if next == nil:\n",
+        "            return 0\n",
+        "        val task = next as StepTask\n",
+        "        if task.stop:\n",
+        "            return 0\n",
+        "        val step = get_stepper(task.callback_id)()\n",
+        "        if step.done:\n",
+        "            results.send(StepCompletion(index: task.index, value: step.value))\n",
+        "        else:\n",
+        "            work.send(task)\n",
+        "    0\n",
+        "\n",
+        "fn run_steppers(steppers: [Stepper]) -> [i64]:\n",
+        "    val work = channel_new()\n",
+        "    val results = channel_new()\n",
+        "    for i in 0..steppers.len():\n",
+        "        work.send(StepTask(stop: false, index: i, callback_id: steppers[i].callback_id))\n",
+        "    var handles = []\n",
+        "    for _ in 0..1:\n",
+        "        handles.append(multicore_green_spawn(\\\\: worker_loop(work.id(), results.id())))\n",
+        "    var ordered = [0]\n",
+        "    val completion = results.recv() as StepCompletion\n",
+        "    ordered[completion.index] = completion.value\n",
+        "    work.send(stop_task())\n",
+        "    for handle in handles:\n",
+        "        handle.join()\n",
+        "    ordered\n",
+        "\n",
+        "fn main() -> i64:\n",
+        "    multicore_green_set_parallelism(1)\n",
+        "    val results = run_steppers([\n",
+        "        Stepper.new(\\\\: StepResult.completed(7))\n",
+        "    ])\n",
+        "    println(\"result={{results[0]}}\")\n",
+        "    if results[0] != 7:\n",
+        "        return 81\n",
+        "    0\n"
+    ].join("")
+
+describe "multicore green resumable stepper native regression":
+    it "keeps the historical native crash boundary closed":
+        step("Write the resumable-stepper probe source")
+        val (write_out, write_code) = shell("mkdir -p " + BUILD_DIR + " && cat > " + SOURCE_PATH + " <<'EOF'\n" + probe_source() + "\nEOF")
+        expect(write_code).to_equal(0)
+
+        step("The generated probe still type-checks under the fresh debug compiler")
+        val (check_out, check_code) = shell(simple_bin() + " check " + SOURCE_PATH)
+        expect(check_code).to_equal(0)
+        expect(check_out).to_contain("All checks passed")
+
+        step("Hosted native compile succeeds for the resumable-stepper path")
+        val (compile_out, compile_code) = shell(simple_bin() + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
+        expect(compile_code).to_equal(0)
+        expect(compile_out).to_contain("Compiled")
+
+        step("The native probe returns the completed stepper value")
+        val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " >/tmp/mcg_resumable_stepper.out 2>&1; code=$?; cat /tmp/mcg_resumable_stepper.out; echo EXIT=$code'")
+        expect(native_code).to_equal(0)
+        expect(native_out).to_contain("result=7")
+        expect(native_out).to_contain("EXIT=0")
+
+        step("The tracker records the stepper path as closed")
+        val (blocker, blocker_code) = shell("cat doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md")
+        expect(blocker_code).to_equal(0)
+        expect(blocker).to_contain("Status: closed")
+        expect(blocker).to_contain("resumable stepper native path returns")
+        expect(blocker).to_contain("EXIT=0")

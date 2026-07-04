@@ -1,0 +1,61 @@
+# Core parser raw asm block tests.
+
+use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors}
+use compiler.core.parser.{parser_warnings_clear, parser_warnings_get}
+use compiler.core.ast.{decl_count, decl_get_body}
+use compiler.core.ast.{stmt_get_expr, expr_get_tag, expr_get_str}
+use compiler.core.ast.{EXPR_ASM}
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+fn parse_first_asm_text(source: text) -> text:
+    parser_warnings_clear()
+    parse_module(source, "inline_asm_core_parser_spec.spl")
+    if parser_has_errors():
+        expect(parser_get_errors().join("\n")).to_equal("")
+    expect(decl_count()).to_be_greater_than(0)
+    val body = decl_get_body(0)
+    expect(body.len()).to_be_greater_than(0)
+    val expr = stmt_get_expr(body[0])
+    expect(expr_get_tag(expr)).to_equal(EXPR_ASM)
+    expr_get_str(expr)
+
+fn parse_first_asm_warning_count(source: text) -> i64:
+    parser_warnings_clear()
+    parse_module(source, "inline_asm_core_parser_spec.spl")
+    if parser_has_errors():
+        expect(parser_get_errors().join("\n")).to_equal("")
+    parser_warnings_get().len()
+
+describe "Core parser raw asm blocks":
+    it "preserves unquoted x86 instruction":
+        expect(parse_first_asm_text("fn test():\n    asm { cli }\n")).to_equal("cli")
+
+    it "preserves ARM immediate hash text":
+        expect(parse_first_asm_text("fn test():\n    asm volatile { bkpt #0 }\n")).to_equal("bkpt #0")
+
+    it "preserves RISC-V comma operands":
+        expect(parse_first_asm_text("fn test():\n    asm { fence rw, rw }\n")).to_equal("fence rw, rw")
+
+    it "normalizes multiple lines":
+        val text = parse_first_asm_text("fn test():\n    asm {\n        cli\n        hlt\n    }\n")
+        expect(text).to_equal("cli\nhlt")
+
+    it "keeps quoted braced lines compatible":
+        expect(parse_first_asm_text("fn test():\n    asm { \"nop\" }\n")).to_equal("nop")
+
+    it "does not warn for canonical braced asm":
+        expect(parse_first_asm_warning_count("fn test():\n    asm { nop }\n")).to_equal(0)
+
+    it "warns for legacy parenthesized asm":
+        expect(parse_first_asm_warning_count("fn test():\n    asm(\"nop\")\n")).to_equal(1)
+
+    it "warns for legacy bare string asm":
+        expect(parse_first_asm_warning_count("fn test():\n    asm \"nop\"\n")).to_equal(1)
+
+    it "warns for legacy colon string asm":
+        expect(parse_first_asm_warning_count("fn test():\n    asm: \"nop\"\n")).to_equal(1)
+
+    it "warns for legacy colon block asm":
+        expect(parse_first_asm_warning_count("fn test():\n    asm:\n        \"nop\"\n")).to_equal(1)

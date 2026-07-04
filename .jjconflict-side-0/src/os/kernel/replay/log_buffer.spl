@@ -1,0 +1,109 @@
+# SimpleOS Kernel Replay — Ring Buffer
+#
+# Pre-allocated ring buffer in module-level vars (BSS equivalent).
+# No heap allocation — works in no_gc/no_alloc kernel context.
+# 64K entries * 80 bytes = ~5 MB.
+
+use os.kernel.replay.event_kinds.{ReplayEntry, EventKind}
+use os.kernel.replay.mode.{replay_is_off, replay_is_recording, replay_mode, KernelReplayMode}
+
+# ============================================================================
+# Ring Buffer State
+# ============================================================================
+
+val REPLAY_BUFFER_SIZE: i64 = 65536
+
+var replay_ring: [ReplayEntry] = []
+var replay_head: i64 = 0       # next write position
+var replay_tail: i64 = 0       # next read position (replay mode)
+var replay_count: i64 = 0      # total events written
+var replay_initialized: bool = false
+
+# ============================================================================
+# Initialization
+# ============================================================================
+
+fn replay_buffer_init():
+    if replay_initialized:
+        return
+    replay_ring = []
+    replay_head = 0
+    replay_tail = 0
+    replay_count = 0
+    replay_initialized = true
+
+# ============================================================================
+# Write (Record Mode)
+# ============================================================================
+
+fn replay_log_event(entry: ReplayEntry) -> i64:
+    if replay_is_off():
+        return -1
+
+    if not replay_initialized:
+        replay_buffer_init()
+
+    var stamped = entry
+    stamped.event_id = replay_count
+    stamped.logical_time = replay_count
+
+    replay_ring.push(stamped)
+    replay_count = replay_count + 1
+
+    # Trim if over capacity (keep last REPLAY_BUFFER_SIZE entries)
+    if replay_ring.len() > REPLAY_BUFFER_SIZE:
+        var trimmed: [ReplayEntry] = []
+        val start = replay_ring.len() - REPLAY_BUFFER_SIZE
+        var i = start
+        while i < replay_ring.len():
+            trimmed.push(replay_ring[i])
+            i = i + 1
+        replay_ring = trimmed
+
+    stamped.event_id
+
+# ============================================================================
+# Read (Replay Mode)
+# ============================================================================
+
+fn replay_read_next() -> Option<ReplayEntry>:
+    if replay_tail >= replay_ring.len():
+        return None
+    val entry = replay_ring[replay_tail]
+    replay_tail = replay_tail + 1
+    Some(entry)
+
+fn replay_peek_next() -> Option<ReplayEntry>:
+    if replay_tail >= replay_ring.len():
+        return None
+    Some(replay_ring[replay_tail])
+
+# ============================================================================
+# Verify (Verify Mode)
+# ============================================================================
+
+fn replay_verify_next(expected_kind: EventKind) -> bool:
+    match replay_read_next():
+        case Some(entry):
+            entry.kind == expected_kind.to_i32()
+        case None:
+            false
+
+# ============================================================================
+# Query
+# ============================================================================
+
+fn replay_event_count() -> i64:
+    replay_count
+
+fn replay_buffer_len() -> i64:
+    replay_ring.len()
+
+fn replay_buffer_reset():
+    replay_ring = []
+    replay_head = 0
+    replay_tail = 0
+    replay_count = 0
+
+fn replay_get_events() -> [ReplayEntry]:
+    replay_ring

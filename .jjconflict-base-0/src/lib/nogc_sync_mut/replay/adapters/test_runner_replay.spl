@@ -1,0 +1,59 @@
+
+use std.nogc_sync_mut.replay.trace_format.{TracePackage}
+use std.io.{shell}
+
+enum TestReplayMode:
+    Off
+    RecordOnFail
+    RecordAlways
+    Replay
+
+    fn to_text(self) -> text:
+        match self:
+            TestReplayMode.Off => "off"
+            TestReplayMode.RecordOnFail => "record_on_fail"
+            TestReplayMode.RecordAlways => "record_always"
+            TestReplayMode.Replay => "replay"
+
+    fn from_text(v: text) -> TestReplayMode:
+        if v == "record_on_fail": TestReplayMode.RecordOnFail
+        else if v == "record_always": TestReplayMode.RecordAlways
+        else if v == "replay": TestReplayMode.Replay
+        else: TestReplayMode.Off
+
+class TestRunnerReplayAdapter:
+    mode: TestReplayMode
+    trace_dir: text
+    recorded_tests: [text]
+
+    static fn create(mode: TestReplayMode, trace_dir: text) -> TestRunnerReplayAdapter:
+        TestRunnerReplayAdapter(
+            mode: mode,
+            trace_dir: trace_dir,
+            recorded_tests: []
+        )
+
+    me fn wrap_test_execution(test_file: text, strategy: text):
+        match self.mode:
+            TestReplayMode.RecordAlways =>
+                self.recorded_tests.push(test_file)
+            TestReplayMode.RecordOnFail =>
+                self.recorded_tests.push(test_file)
+            _ =>
+                pass_dn
+
+    fn replay_test(test_file: text):
+        val trace_path = "{self.trace_dir}/{test_file}"
+        val manifest_result = TracePackage.read_manifest(trace_path)
+        match manifest_result:
+            Ok(manifest):
+                shell("echo \"[replay] {test_file}: {manifest.event_count} events arch={manifest.arch} mode={manifest.replay_mode}\"")
+            Err(msg):
+                shell("echo \"[replay] {test_file}: trace not found: {msg}\" >&2")
+
+    me fn record_on_fail(test_file: text, result: text, exit_code: i32):
+        if exit_code != 0:
+            self.recorded_tests.push(test_file)
+
+    fn list_recorded_traces() -> [text]:
+        self.recorded_tests

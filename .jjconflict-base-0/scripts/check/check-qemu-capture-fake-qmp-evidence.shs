@@ -1,0 +1,401 @@
+#!/bin/sh
+set -eu
+
+BUILD_DIR="${BUILD_DIR:-build/qemu_capture_fake_qmp_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/qemu_capture_fake_qmp_evidence_2026-05-31.md}"
+REPORT_DATE="${REPORT_DATE:-2026-05-31}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple" "bin/simple" "./bin/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+SOCKET_PATH="$BUILD_DIR/fake-qmp.sock"
+SCREEN_PATH="$BUILD_DIR/fake-screendump.ppm"
+EXPECTED_ARGB="$BUILD_DIR/expected-argb.json"
+CAPTURED_ARGB="$BUILD_DIR/captured-argb.json"
+SERVER_JS="$BUILD_DIR/fake_qmp_server.js"
+SIMPLE_SRC="$BUILD_DIR/check_qemu_capture_fake_qmp.spl"
+SERVER_LOG="$BUILD_DIR/fake-qmp-server.log"
+SIMPLE_LOG="$BUILD_DIR/simple-capture.log"
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+rm -f "$SOCKET_PATH" "$SCREEN_PATH" "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$SERVER_LOG" "$SIMPLE_LOG"
+
+emit_simple_bin_failure() {
+    reason="$1"
+    {
+        echo "# QEMU Capture Fake QMP Evidence - $REPORT_DATE"
+        echo
+        echo "- status: fail"
+        echo "- reason: $reason"
+        echo "- simple_bin: $SIMPLE_BIN"
+        echo "- simple_bin_source: $SIMPLE_BIN_SOURCE"
+        echo "- simple_bin_status: $SIMPLE_BIN_STATUS"
+    } >"$REPORT_PATH"
+    echo "qemu_capture_fake_qmp_status=fail"
+    echo "qemu_capture_fake_qmp_reason=$reason"
+    echo "qemu_capture_fake_qmp_simple_bin=$SIMPLE_BIN"
+    echo "qemu_capture_fake_qmp_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "qemu_capture_fake_qmp_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "qemu_capture_fake_qmp_report=$REPORT_PATH"
+}
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    emit_simple_bin_failure "simple-bin-forbidden"
+    exit 1
+fi
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    emit_simple_bin_failure "simple-bin-$SIMPLE_BIN_STATUS"
+    exit 1
+fi
+
+cat >"$SERVER_JS" <<'JS'
+const fs = require('fs');
+const net = require('net');
+
+const socketPath = process.argv[2];
+const expectedOut = process.argv[3];
+
+function ppmBytes() {
+  const width = 64;
+  const height = 48;
+  const header = Buffer.from(`P6\n${width} ${height}\n255\n`, 'ascii');
+  const body = Buffer.alloc(width * height * 3);
+  function rgbAt(x, y) {
+    if (y < 6) return [32, 80, 160];
+    if (y >= height - 8) return [15, 23, 42];
+    if (x >= 6 && x < 42 && y >= 10 && y < 32) return [229, 231, 235];
+    if (x >= 12 && x < 34 && y >= 15 && y < 20) return [34, 197, 94];
+    if (x >= 28 && x < 58 && y >= 20 && y < 39) return [51, 65, 85];
+    if (x >= 32 && x < 53 && y >= 25 && y < 30) return [245, 158, 11];
+    return [17, 24, 39];
+  }
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const [r, g, b] = rgbAt(x, y);
+      const off = (y * width + x) * 3;
+      body[off] = r;
+      body[off + 1] = g;
+      body[off + 2] = b;
+    }
+  }
+  return Buffer.concat([header, body]);
+}
+
+try { fs.unlinkSync(socketPath); } catch {}
+
+const server = net.createServer((conn) => {
+  let buffer = '';
+  conn.write(JSON.stringify({ QMP: { version: { qemu: { major: 8, minor: 2, micro: 0 } }, capabilities: [] } }) + '\n');
+  conn.on('data', (chunk) => {
+    buffer += chunk.toString('utf8');
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const msg = JSON.parse(line);
+      if (msg.execute === 'qmp_capabilities') {
+        conn.write(JSON.stringify({ return: {} }) + '\n');
+      } else if (msg.execute === 'human-monitor-command') {
+        const command = String(msg.arguments && msg.arguments['command-line'] || '');
+        if (command !== `screendump ${expectedOut}`) {
+          conn.write(JSON.stringify({ error: { class: 'GenericError', desc: `unexpected command ${command}` } }) + '\n');
+          continue;
+        }
+        fs.writeFileSync(expectedOut, ppmBytes());
+        conn.write(JSON.stringify({ return: '' }) + '\n');
+        setTimeout(() => server.close(() => process.exit(0)), 20);
+      } else {
+        conn.write(JSON.stringify({ error: { class: 'CommandNotFound', desc: msg.execute } }) + '\n');
+      }
+    }
+  });
+});
+
+server.listen(socketPath, () => {
+  fs.chmodSync(socketPath, 0o700);
+  console.log(`fake_qmp_socket=${socketPath}`);
+});
+
+setTimeout(() => {
+  console.error('fake QMP timed out waiting for screendump');
+  process.exit(2);
+}, 15000).unref();
+JS
+
+node "$SERVER_JS" "$SOCKET_PATH" "$SCREEN_PATH" >"$SERVER_LOG" 2>&1 &
+server_pid=$!
+trap 'kill "$server_pid" 2>/dev/null || true; rm -f "$SOCKET_PATH"' EXIT
+
+i=0
+while [ ! -S "$SOCKET_PATH" ] && [ "$i" -lt 100 ]; do
+    i=$((i + 1))
+    sleep 0.05
+done
+
+if [ ! -S "$SOCKET_PATH" ]; then
+    echo "qemu_capture_fake_qmp_status=fail"
+    echo "qemu_capture_fake_qmp_reason=socket-not-ready"
+    cat "$SERVER_LOG" || true
+    exit 1
+fi
+
+cat >"$SIMPLE_SRC" <<SIMPLE
+extern fn rt_time_now_nanos() -> i64
+
+use os.compositor.qemu_capture.{capture_qemu_vm}
+
+fn expected_pixel(x: i32, y: i32) -> u32:
+    var r: u32 = 17u32
+    var g: u32 = 24u32
+    var b: u32 = 39u32
+    if y < 6:
+        return 0xFF2050A0u32
+    elif y >= 40:
+        return 0xFF0F172Au32
+    elif x >= 6 and x < 42 and y >= 10 and y < 32:
+        return 0xFFE5E7EBu32
+    elif x >= 12 and x < 34 and y >= 15 and y < 20:
+        return 0xFF22C55Eu32
+    elif x >= 28 and x < 58 and y >= 20 and y < 39:
+        return 0xFF334155u32
+    elif x >= 32 and x < 53 and y >= 25 and y < 30:
+        return 0xFFF59E0Bu32
+    0xFF000000u32 | (r << 16) | (g << 8) | b
+
+fn main() -> i64:
+    val start = rt_time_now_nanos()
+    val cap = capture_qemu_vm("$SOCKET_PATH", "$SCREEN_PATH")
+    val elapsed = rt_time_now_nanos() - start
+    var capture_checksum: i64 = 0
+    var reference_checksum: i64 = 0
+    var mismatch_count: i64 = 0
+    var first_mismatch: i64 = -1
+    var i = 0
+    val expected_len = 64 * 48
+    while i < expected_len:
+        val x = i % 64
+        val y = i / 64
+        val expected = expected_pixel(x, y)
+        reference_checksum = reference_checksum + expected.to_i64() * ((i + 1) as i64)
+        if i < cap.pixels.len():
+            capture_checksum = capture_checksum + cap.pixels[i].to_i64() * ((i + 1) as i64)
+            if cap.pixels[i] != expected:
+                mismatch_count = mismatch_count + 1
+                if first_mismatch < 0:
+                    first_mismatch = i.to_i64()
+        else:
+            mismatch_count = mismatch_count + 1
+            if first_mismatch < 0:
+                first_mismatch = i.to_i64()
+        i = i + 1
+    if cap.pixels.len() > expected_len:
+        mismatch_count = mismatch_count + (cap.pixels.len() - expected_len).to_i64()
+        if first_mismatch < 0:
+            first_mismatch = expected_len.to_i64()
+    print("qemu_capture_fake_qmp_success=" + cap.success.to_text())
+    print("qemu_capture_fake_qmp_backend=" + cap.backend_name)
+    print("qemu_capture_fake_qmp_width=" + cap.width.to_text())
+    print("qemu_capture_fake_qmp_height=" + cap.height.to_text())
+    print("qemu_capture_fake_qmp_pixels=" + cap.pixels.len().to_text())
+    print("qemu_capture_fake_qmp_capture_checksum=" + capture_checksum.to_text())
+    print("qemu_capture_fake_qmp_reference_checksum=" + reference_checksum.to_text())
+    print("qemu_capture_fake_qmp_mismatch_count=" + mismatch_count.to_text())
+    print("qemu_capture_fake_qmp_first_mismatch=" + first_mismatch.to_text())
+    print("qemu_capture_fake_qmp_blur_or_tolerance_used=false")
+    print("qemu_capture_fake_qmp_capture_us=" + (elapsed / 1000).to_text())
+    if cap.pixels.len() >= 1024:
+        print("qemu_capture_fake_qmp_pixel0=" + cap.pixels[0].to_text())
+        print("qemu_capture_fake_qmp_pixel384=" + cap.pixels[384].to_text())
+        print("qemu_capture_fake_qmp_pixel1000=" + cap.pixels[1000].to_text())
+    print("qemu_capture_fake_qmp_error=" + cap.error)
+    return 0
+SIMPLE
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_LOG" 2>&1
+simple_code=$?
+wait "$server_pid"
+server_code=$?
+set -e
+
+cat "$SIMPLE_LOG"
+cat "$SERVER_LOG"
+
+node -e '
+const fs = require("fs");
+const ppmPath = process.argv[1];
+const expectedPath = process.argv[2];
+const capturedPath = process.argv[3];
+const width = 64;
+const height = 48;
+function expectedPixel(x, y) {
+  if (y < 6) return 0xFF2050A0 >>> 0;
+  if (y >= height - 8) return 0xFF0F172A >>> 0;
+  if (x >= 6 && x < 42 && y >= 10 && y < 32) return 0xFFE5E7EB >>> 0;
+  if (x >= 12 && x < 34 && y >= 15 && y < 20) return 0xFF22C55E >>> 0;
+  if (x >= 28 && x < 58 && y >= 20 && y < 39) return 0xFF334155 >>> 0;
+  if (x >= 32 && x < 53 && y >= 25 && y < 30) return 0xFFF59E0B >>> 0;
+  return 0xFF111827 >>> 0;
+}
+function checksum(pixels) {
+  let sum = 0n;
+  for (let i = 0; i < pixels.length; i += 1) {
+    sum += BigInt(pixels[i] >>> 0) * BigInt(i + 1);
+  }
+  return sum.toString();
+}
+const expected = new Uint32Array(width * height);
+for (let y = 0; y < height; y += 1) {
+  for (let x = 0; x < width; x += 1) {
+    expected[y * width + x] = expectedPixel(x, y);
+  }
+}
+const ppm = fs.readFileSync(ppmPath);
+let pos = 0;
+function readToken() {
+  while (pos < ppm.length && ppm[pos] <= 32) pos += 1;
+  const start = pos;
+  while (pos < ppm.length && ppm[pos] > 32) pos += 1;
+  return ppm.slice(start, pos).toString("ascii");
+}
+const magic = readToken();
+const w = Number(readToken());
+const h = Number(readToken());
+const max = Number(readToken());
+while (pos < ppm.length && ppm[pos] <= 32) pos += 1;
+if (magic !== "P6" || w !== width || h !== height || max !== 255) {
+  throw new Error("unexpected PPM header");
+}
+const captured = new Uint32Array(width * height);
+for (let i = 0; i < captured.length; i += 1) {
+  const off = pos + i * 3;
+  const r = ppm[off];
+  const g = ppm[off + 1];
+  const b = ppm[off + 2];
+  captured[i] = ((0xFF << 24) >>> 0) | (r << 16) | (g << 8) | b;
+}
+fs.writeFileSync(expectedPath, JSON.stringify({
+  width,
+  height,
+  format: "argb-u32",
+  producer: "fake-qmp-reference",
+  checksum: checksum(expected),
+  pixels: Array.from(expected, v => v >>> 0)
+}));
+fs.writeFileSync(capturedPath, JSON.stringify({
+  width,
+  height,
+  format: "argb-u32",
+  producer: "fake-qmp-screendump-ppm",
+  checksum: checksum(captured),
+  pixels: Array.from(captured, v => v >>> 0)
+}));
+' "$SCREEN_PATH" "$EXPECTED_ARGB" "$CAPTURED_ARGB"
+
+success="$(sed -n 's/^qemu_capture_fake_qmp_success=//p' "$SIMPLE_LOG" | tail -n 1)"
+backend="$(sed -n 's/^qemu_capture_fake_qmp_backend=//p' "$SIMPLE_LOG" | tail -n 1)"
+width="$(sed -n 's/^qemu_capture_fake_qmp_width=//p' "$SIMPLE_LOG" | tail -n 1)"
+height="$(sed -n 's/^qemu_capture_fake_qmp_height=//p' "$SIMPLE_LOG" | tail -n 1)"
+pixels="$(sed -n 's/^qemu_capture_fake_qmp_pixels=//p' "$SIMPLE_LOG" | tail -n 1)"
+pixel0="$(sed -n 's/^qemu_capture_fake_qmp_pixel0=//p' "$SIMPLE_LOG" | tail -n 1)"
+pixel384="$(sed -n 's/^qemu_capture_fake_qmp_pixel384=//p' "$SIMPLE_LOG" | tail -n 1)"
+pixel1000="$(sed -n 's/^qemu_capture_fake_qmp_pixel1000=//p' "$SIMPLE_LOG" | tail -n 1)"
+capture_checksum="$(sed -n 's/^qemu_capture_fake_qmp_capture_checksum=//p' "$SIMPLE_LOG" | tail -n 1)"
+reference_checksum="$(sed -n 's/^qemu_capture_fake_qmp_reference_checksum=//p' "$SIMPLE_LOG" | tail -n 1)"
+mismatch_count="$(sed -n 's/^qemu_capture_fake_qmp_mismatch_count=//p' "$SIMPLE_LOG" | tail -n 1)"
+first_mismatch="$(sed -n 's/^qemu_capture_fake_qmp_first_mismatch=//p' "$SIMPLE_LOG" | tail -n 1)"
+blur_or_tolerance_used="$(sed -n 's/^qemu_capture_fake_qmp_blur_or_tolerance_used=//p' "$SIMPLE_LOG" | tail -n 1)"
+capture_us="$(sed -n 's/^qemu_capture_fake_qmp_capture_us=//p' "$SIMPLE_LOG" | tail -n 1)"
+error="$(sed -n 's/^qemu_capture_fake_qmp_error=//p' "$SIMPLE_LOG" | tail -n 1)"
+
+status=pass
+reason=fake-qmp-screendump-pass
+if [ "$simple_code" -ne 0 ] || [ "$server_code" -ne 0 ]; then
+    status=fail
+    reason=process-exit-failed
+elif [ "$success" != "true" ] || [ "$backend" != "qemu_vm" ] || [ "$width" != "64" ] || [ "$height" != "48" ] || [ "$pixels" != "3072" ]; then
+    status=fail
+    reason=capture-fields-mismatch
+elif [ "$pixel0" != "4280307872" ] || [ "$pixel384" != "4279310375" ] || [ "$pixel1000" != "4293257195" ]; then
+    status=fail
+    reason=decoded-pixels-mismatch
+elif [ "$capture_checksum" != "$reference_checksum" ] || [ "$mismatch_count" != "0" ] || [ "$blur_or_tolerance_used" != "false" ]; then
+    status=fail
+    reason=exact-bitmap-comparison-failed
+elif [ ! -s "$EXPECTED_ARGB" ] || [ ! -s "$CAPTURED_ARGB" ]; then
+    status=fail
+    reason=missing-argb-artifact
+fi
+
+{
+    echo "# QEMU Capture Fake QMP Evidence - $REPORT_DATE"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- simple_bin: $SIMPLE_BIN"
+    echo "- simple_bin_source: $SIMPLE_BIN_SOURCE"
+    echo "- simple_bin_status: $SIMPLE_BIN_STATUS"
+    echo "- simple_exit_code: $simple_code"
+    echo "- fake_qmp_exit_code: $server_code"
+    echo "- backend: ${backend:-}"
+    echo "- dimensions: ${width:-0}x${height:-0}"
+    echo "- pixels: ${pixels:-0}"
+    echo "- pixel0_argb: ${pixel0:-}"
+    echo "- pixel384_argb: ${pixel384:-}"
+    echo "- pixel1000_argb: ${pixel1000:-}"
+    echo "- capture_checksum: ${capture_checksum:-0}"
+    echo "- reference_checksum: ${reference_checksum:-0}"
+    echo "- mismatch_count: ${mismatch_count:-0}"
+    echo "- first_mismatch: ${first_mismatch:-}"
+    echo "- blur_or_tolerance_used: ${blur_or_tolerance_used:-}"
+    echo "- expected_argb_path: $EXPECTED_ARGB"
+    echo "- captured_argb_path: $CAPTURED_ARGB"
+    echo "- capture_us: ${capture_us:-0}"
+    echo "- error: ${error:-}"
+    echo "- socket_path: $SOCKET_PATH"
+    echo "- screendump_path: $SCREEN_PATH"
+} >"$REPORT_PATH"
+
+echo "qemu_capture_fake_qmp_status=$status"
+echo "qemu_capture_fake_qmp_reason=$reason"
+echo "qemu_capture_fake_qmp_simple_bin=$SIMPLE_BIN"
+echo "qemu_capture_fake_qmp_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "qemu_capture_fake_qmp_simple_bin_status=$SIMPLE_BIN_STATUS"
+echo "qemu_capture_fake_qmp_report=$REPORT_PATH"
+echo "qemu_capture_fake_qmp_expected_argb_path=$EXPECTED_ARGB"
+echo "qemu_capture_fake_qmp_captured_argb_path=$CAPTURED_ARGB"
+
+if [ "$status" != "pass" ]; then
+    exit 1
+fi

@@ -1,0 +1,195 @@
+# Tier-Based Grammar Validator
+#
+# Post-lexing validation that checks if code stays within a tier's grammar.
+#
+# Usage:
+#   bin/simple check --tier=seed src/core/tokens.spl
+#   bin/simple check --tier=core src/std/spec.spl
+#
+# How it works:
+#   1. Reads tier SDN to get allowed keywords for target tier
+#   2. Tokenizes the target file using the core lexer
+#   3. Walks token stream checking each keyword against allowed set
+#   4. Reports violations: file:line:col: error: 'trait' not available in seed tier
+
+extern fn rt_file_read_text(path: text) -> text
+
+# =========================================================================
+# Tier keyword sets (populated from SDN)
+# =========================================================================
+
+var seed_keywords: [text] = []
+var core_keywords: [text] = []
+var full_keywords: [text] = []
+
+fn load_tier_keywords(sdn_path: text) -> bool:
+    """Load tier_keywords.sdn and populate keyword sets."""
+    seed_keywords = []
+    core_keywords = []
+    full_keywords = []
+
+    val text_content = rt_file_read_text(sdn_path) ?? ""
+    if text_content == "": return false
+
+    var current_section = ""
+    val lines = text_content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "": continue
+        if trimmed.starts_with("#"): continue
+
+        if trimmed.starts_with("["):
+            var header = trimmed.replace("[", "")
+            header = header.replace("]", "")
+            val parts = header.split(".")
+            current_section = parts[0]
+            continue
+
+        # Only process keyword sections
+        if current_section != "keywords": continue
+
+        if trimmed.contains("="):
+            val eq_idx = trimmed.index_of("=") ?? -1
+            if eq_idx > 0:
+                val key = trimmed.slice(0, eq_idx).trim()
+                var value_part = trimmed.slice(eq_idx + 1, trimmed.len()).trim()
+                value_part = value_part.replace("\"", "")
+
+                if value_part == "seed":
+                    seed_keywords.push(key)
+                elif value_part == "core":
+                    core_keywords.push(key)
+                elif value_part == "full":
+                    full_keywords.push(key)
+    true
+
+fn is_allowed_in_tier(keyword: text, tier: text) -> bool:
+    """Check if a keyword is allowed in the given tier."""
+    # Seed keywords are always allowed
+    for kw in seed_keywords:
+        if kw == keyword: return true
+
+    if tier == "seed": return false
+
+    # Core keywords allowed in core and full
+    for kw in core_keywords:
+        if kw == keyword: return true
+
+    if tier == "core": return false
+
+    # Full keywords allowed in full
+    for kw in full_keywords:
+        if kw == keyword: return true
+
+    false
+
+# =========================================================================
+# Simple tokenizer for tier checking
+# =========================================================================
+
+fn check_file_tier(file_path: text, tier: text) -> i64:
+    """Check if a file stays within the given tier's grammar.
+    Returns number of violations found."""
+    val source = rt_file_read_text(file_path) ?? ""
+    if source == "":
+        print "Error: could not read {file_path}"
+        return -1
+
+    var violations = 0
+    var line_num = 1
+    var col = 1
+    val lines = source.split("\n")
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Skip comments and empty lines
+        if trimmed == "":
+            line_num = line_num + 1
+            continue
+        if trimmed.starts_with("#"):
+            line_num = line_num + 1
+            continue
+
+        # Extract words from the line and check against tier
+        val words = extract_words(trimmed)
+        for word in words:
+            # Check if this word is a keyword at all
+            var is_any_keyword = false
+            for kw in seed_keywords:
+                if kw == word: is_any_keyword = true
+            for kw in core_keywords:
+                if kw == word: is_any_keyword = true
+            for kw in full_keywords:
+                if kw == word: is_any_keyword = true
+
+            if is_any_keyword:
+                if not is_allowed_in_tier(word, tier):
+                    val word_col = find_word_col(line, word)
+                    print "{file_path}:{line_num}:{word_col}: error: '{word}' not available in {tier} tier"
+                    violations = violations + 1
+
+        line_num = line_num + 1
+
+    if violations == 0:
+        print "{file_path}: OK ({tier} tier)"
+
+    violations
+
+fn extract_words(line: text) -> [text]:
+    """Extract identifier-like words from a line of code."""
+    var words: [text] = []
+    var current = ""
+    var i = 0
+    for ch in line:
+        val is_letter = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+        val is_digit = ch >= "0" and ch <= "9"
+        if is_letter or is_digit:
+            current = current + ch
+        else:
+            if current != "":
+                words.push(current)
+                current = ""
+        i = i + 1
+    if current != "":
+        words.push(current)
+    words
+
+fn find_word_col(line: text, word: text) -> i64:
+    """Find the column position of a word in a line."""
+    val idx = line.index_of(word) ?? -1
+    if idx >= 0: return idx + 1
+    1
+
+# =========================================================================
+# Entry point
+# =========================================================================
+
+fn run_tier_check(tier: text, files: [text]) -> i64:
+    """Run tier check on given files. Returns total violations."""
+    val sdn_path = "doc/spec/grammar/tier_keywords.sdn"
+    if not load_tier_keywords(sdn_path):
+        print "Error: could not load {sdn_path}"
+        return 1
+
+    print "Checking {files.len()} file(s) against {tier} tier..."
+    print "Allowed: seed={seed_keywords.len()}, core={core_keywords.len()}, full={full_keywords.len()} keywords"
+    print ""
+
+    var total_violations = 0
+    for file_path in files:
+        val v = check_file_tier(file_path, tier)
+        if v > 0:
+            total_violations = total_violations + v
+        elif v < 0:
+            return 1
+
+    print ""
+    if total_violations > 0:
+        print "Found {total_violations} tier violation(s)"
+        return 1
+    else:
+        print "All files pass {tier} tier check"
+        return 0
+
+export run_tier_check, load_tier_keywords, is_allowed_in_tier, check_file_tier

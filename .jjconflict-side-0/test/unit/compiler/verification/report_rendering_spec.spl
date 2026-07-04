@@ -1,0 +1,274 @@
+# @cover src/compiler_rust/lib/std/src/verification/report.spl 80%
+"""
+# Verification Report Rendering Specification
+
+**Feature IDs:** #LEAN-DIAG-001
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** In Progress
+
+## Overview
+
+Tests that the VerificationReport renders correctly at all four levels
+(Project, File, Symbol, Theorem) and that admitted/trusted states are
+never confused with verified.
+"""
+
+use std.spec.{describe, it, expect}
+use verification.state.{VerificationState, StateCounts}
+use verification.proof_unit.{ProofUnit, ProofUnitSet}
+use verification.report.{VerificationReport, ReportLevel, FileEntry, TheoremEntry}
+
+# ============================================================================
+# Test Group 1: Project-level rendering
+# ============================================================================
+
+describe "Verification Report - Project Level":
+    it "renders project summary with state counts":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "Test Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render(ReportLevel.Project)
+        expect(output).to_contain("Lean Verification:")
+        expect(output).to_contain("verified")
+        expect(output).to_contain("failed")
+
+    it "renders debt warning when admitted units exist":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "Test Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render(ReportLevel.Project)
+        expect(output).to_contain("DEBT")
+        expect(output).to_contain("sorry/assume")
+
+    it "renders 0 total for empty units":
+        val units = ProofUnitSet.empty()
+        val report = VerificationReport.from_units(
+            "Empty Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render(ReportLevel.Project)
+        expect(output).to_contain("0 total")
+        expect(output).to_contain("Total: 0 proof units")
+
+# ============================================================================
+# Test Group 2: File-level rendering
+# ============================================================================
+
+describe "Verification Report - File Level":
+    it "shows per-file states":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "File Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render(ReportLevel.File)
+        expect(output).to_contain("Files:")
+        expect(output).to_contain("src/a.spl")
+        expect(output).to_contain("src/b.spl")
+        expect(output).to_contain("src/c.spl")
+
+    it "shows admitted count prominently per file":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "File Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render(ReportLevel.File)
+        # The admitted file (src/c.spl) has sorry count
+        expect(output).to_contain("sorry")
+
+    it "shows trusted count prominently per file":
+        val units = build_trusted_unit_set()
+        val report = VerificationReport.from_units(
+            "Trust Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render(ReportLevel.File)
+        expect(output).to_contain("assume")
+
+    it "never shows admitted as Verified":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "File Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render(ReportLevel.File)
+        # The admitted entry must show "Admitted (sorry)" not "Verified"
+        # Split by lines and check admitted file line
+        expect(output).to_contain("Admitted (sorry)")
+
+    it "never shows trusted as Verified":
+        val units = build_trusted_unit_set()
+        val report = VerificationReport.from_units(
+            "Trust Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render(ReportLevel.File)
+        expect(output).to_contain("Trusted (assume)")
+
+# ============================================================================
+# Test Group 3: Symbol-level rendering
+# ============================================================================
+
+describe "Verification Report - Symbol Level":
+    it "shows per-symbol summaries":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "Symbol Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render(ReportLevel.Symbol)
+        expect(output).to_contain("Symbols:")
+        expect(output).to_contain("fn_verified")
+        expect(output).to_contain("fn_failed")
+        expect(output).to_contain("fn_admitted")
+
+    it "includes debt info in symbol summary":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "Symbol Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render(ReportLevel.Symbol)
+        expect(output).to_contain("sorry")
+
+# ============================================================================
+# Test Group 4: Theorem-level rendering
+# ============================================================================
+
+describe "Verification Report - Theorem Level":
+    it "shows individual theorem detail":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "Theorem Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render(ReportLevel.Theorem)
+        expect(output).to_contain("All Theorems")
+        expect(output).to_contain("thm_soundness")
+        expect(output).to_contain("source:")
+        expect(output).to_contain("lean:")
+
+    it "separates environment errors from proof errors":
+        val units = build_mixed_unit_set()
+        var report = VerificationReport.from_units(
+            "Theorem Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        # Manually add an environment error entry
+        val env_entry = TheoremEntry(
+            theorem_name="thm_env_fail",
+            source_file="src/env.spl",
+            source_line=10,
+            lean_file="Verification/Env.lean",
+            state=VerificationState.Failed,
+            error_message=Some("lake build failed: toolchain mismatch"),
+            is_environment_error=true
+        )
+        report.theorem_entries = report.theorem_entries + [env_entry]
+        val output = report.render(ReportLevel.Theorem)
+        expect(output).to_contain("Environment Errors")
+        expect(output).to_contain("ENV ERROR")
+
+# ============================================================================
+# Test Group 5: SDN output
+# ============================================================================
+
+describe "Verification Report - SDN Output":
+    it "produces parseable SDN format":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "SDN Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render_sdn()
+        expect(output).to_contain("verification_report {")
+        expect(output).to_contain("counts {")
+        expect(output).to_contain("files {")
+        expect(output).to_contain("theorems {")
+
+    it "includes state counts in SDN":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "SDN Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render_sdn()
+        expect(output).to_contain("verified:")
+        expect(output).to_contain("failed:")
+        expect(output).to_contain("admitted:")
+        expect(output).to_contain("trusted:")
+
+    it "includes file entries in SDN":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "SDN Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render_sdn()
+        expect(output).to_contain("file {")
+        expect(output).to_contain("path: \"src/a.spl\"")
+
+    it "SDN never labels admitted as verified":
+        val units = build_mixed_unit_set()
+        val report = VerificationReport.from_units(
+            "SDN Report", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render_sdn()
+        # The admitted file must have state: "admitted", not state: "verified"
+        expect(output).to_contain("state: \"admitted\"")
+
+    it "handles empty units in SDN":
+        val units = ProofUnitSet.empty()
+        val report = VerificationReport.from_units(
+            "Empty SDN", "project", units, "2026-04-04T00:00:00Z"
+        )
+        val output = report.render_sdn()
+        expect(output).to_contain("total: 0")
+
+# ============================================================================
+# Test Group 6: ReportLevel enum
+# ============================================================================
+
+describe "ReportLevel":
+    it "converts to string":
+        expect(ReportLevel.Project.to_string()).to_equal("project")
+        expect(ReportLevel.File.to_string()).to_equal("file")
+        expect(ReportLevel.Symbol.to_string()).to_equal("symbol")
+        expect(ReportLevel.Theorem.to_string()).to_equal("theorem")
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+fn build_mixed_unit_set() -> ProofUnitSet:
+    var units = ProofUnitSet.empty()
+
+    # Verified unit
+    var u1 = ProofUnit.create("src/a.spl", "fn_verified", "Verification.A", "Verification/A.lean")
+    u1 = u1.with_state(VerificationState.Verified)
+    u1 = u1.with_obligations(["thm_soundness", "thm_completeness"])
+    units = units.add(u1)
+
+    # Failed unit
+    var u2 = ProofUnit.create("src/b.spl", "fn_failed", "Verification.B", "Verification/B.lean")
+    u2 = u2.with_state(VerificationState.Failed)
+    u2 = u2.with_obligations(["thm_safety"])
+    units = units.add(u2)
+
+    # Admitted unit (has sorry debt)
+    var u3 = ProofUnit.create("src/c.spl", "fn_admitted", "Verification.C", "Verification/C.lean")
+    u3 = u3.with_state(VerificationState.Admitted)
+    u3 = u3.with_obligations(["thm_progress"])
+    u3 = u3.with_debt(2, 0)
+    units = units.add(u3)
+
+    units
+
+fn build_trusted_unit_set() -> ProofUnitSet:
+    var units = ProofUnitSet.empty()
+
+    # Trusted unit (has assume debt)
+    var u1 = ProofUnit.create("src/d.spl", "fn_trusted", "Verification.D", "Verification/D.lean")
+    u1 = u1.with_state(VerificationState.Trusted)
+    u1 = u1.with_obligations(["thm_axiom_ok"])
+    u1 = u1.with_debt(0, 3)
+    units = units.add(u1)
+
+    # Verified unit for contrast
+    var u2 = ProofUnit.create("src/e.spl", "fn_ok", "Verification.E", "Verification/E.lean")
+    u2 = u2.with_state(VerificationState.Verified)
+    u2 = u2.with_obligations(["thm_simple"])
+    units = units.add(u2)
+
+    units

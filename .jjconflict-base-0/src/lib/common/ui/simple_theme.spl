@@ -1,0 +1,96 @@
+use common.ui.glass.tokens.{GlassDesignTokens}
+use common.ui.wm_chrome_theme.{WmChromeColors, wm_chrome_colors_from_gui_tokens, register_wm_chrome_theme}
+
+class SimpleTheme:
+    name: text
+    css: text
+    tokens: GlassDesignTokens
+    token_map: Dict<text, text>
+
+    static fn from_css(name: text, css: text) -> SimpleTheme:
+        SimpleTheme(
+            name: name,
+            css: css,
+            tokens: _simple_theme_tokens_for_name(name),
+            token_map: _simple_theme_token_map_from_css(css)
+        )
+
+    fn resolve_token(key: text) -> text:
+        val normalized = if key.starts_with("--"): key else: "--{key}"
+        if self.token_map.contains_key(normalized):
+            return self.token_map[normalized]
+        return _simple_theme_fallback_token(normalized, self.tokens)
+
+fn _simple_theme_tokens_for_name(name: text) -> GlassDesignTokens:
+    val lower = name.to_lower()
+    if lower == "light" or lower == "ios_light" or lower == "obsidian_light":
+        return GlassDesignTokens.obsidian_light()
+    if lower == "dark" or lower == "ios_dark":
+        return GlassDesignTokens.dark()
+    GlassDesignTokens.obsidian_dark()
+
+fn _simple_theme_token_map_from_css(css: text) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    for line in css.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("--") and trimmed.contains(":"):
+            val parts = trimmed.split(":")
+            if parts.len() >= 2:
+                val key = parts[0].trim()
+                var value = parts[1].trim()
+                if value.ends_with(";"):
+                    value = value.substring(0, value.len() - 1).trim()
+                out[key] = value
+    out
+
+fn _simple_theme_fallback_token(key: text, tokens: GlassDesignTokens) -> text:
+    val colors = tokens.colors
+    if key == "--ui-bg":
+        return colors.surface_level_0
+    if key == "--ui-fg":
+        return colors.text_primary
+    if key == "--ui-accent":
+        return colors.accent
+    if key == "--app-bg":
+        return colors.surface_level_0
+    if key == "--app-surface":
+        return colors.surface_primary
+    if key == "--app-border":
+        return colors.border_subtle
+    if key == "--app-surface-hover":
+        return colors.surface_secondary
+    if key == "--ui-error":
+        return colors.error
+    if key == "--ui-warning":
+        return colors.warning
+    if key == "--ui-success":
+        return colors.success
+    if key == "--ui-info":
+        return colors.info
+    ""
+
+# =========================================================================
+# WM chrome sharing — one theme source for GUI widgets AND WM chrome.
+#
+# The WM chrome palette (titlebars, taskbar, desktop, close button) derives
+# from the same CSS tokens this theme resolves for widgets, so switching
+# the GUI theme retunes the window manager in one call. Fields whose token
+# is missing/unparseable keep the byte-identical chrome defaults (bitmap
+# gates unaffected until a theme is actually applied).
+# =========================================================================
+
+fn wm_chrome_colors_from_simple_theme(theme: SimpleTheme) -> WmChromeColors:
+    """Project this GUI theme's tokens onto the WM chrome palette."""
+    wm_chrome_colors_from_gui_tokens(
+        theme.resolve_token("--ui-bg"),
+        theme.resolve_token("--ui-fg"),
+        theme.resolve_token("--ui-accent"),
+        theme.resolve_token("--app-surface"),
+        theme.resolve_token("--app-surface-hover"),
+        theme.resolve_token("--ui-error"))
+
+fn apply_simple_theme_to_wm_chrome(theme: SimpleTheme):
+    """Install this GUI theme as the WM chrome palette. All WM chrome
+    pipelines (Draw IR scene, wm_scene CSS, host compositor direct draw)
+    pick it up on their next render."""
+    register_wm_chrome_theme(wm_chrome_colors_from_simple_theme(theme))

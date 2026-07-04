@@ -1,0 +1,86 @@
+# @cover src/lib/nogc_async_mut/compute/exec_target.spl
+use std.spec.*
+use std.nogc_async_mut.compute.exec_target.{
+    DeviceClass, ComputeBackend, EnforceMode, BackendCaps, ExecTarget,
+    compute_backend_name, parse_device_class, parse_enforce_mode,
+    best_gpu_backend, resolve_exec_target
+}
+
+fn caps_cuda_only() -> BackendCaps:
+    var c = BackendCaps.none()
+    c.has_cuda = true
+    return c
+
+fn caps_vulkan_and_cuda() -> BackendCaps:
+    var c = BackendCaps.none()
+    c.has_cuda = true
+    c.has_vulkan = true
+    return c
+
+fn caps_metal_only() -> BackendCaps:
+    var c = BackendCaps.none()
+    c.has_metal = true
+    return c
+
+fn device_class_text(c: DeviceClass) -> text:
+    if c == DeviceClass.SimdCpu:
+        return "simd_cpu"
+    if c == DeviceClass.Gpu:
+        return "gpu"
+    return "other"
+
+describe "ExecTarget two-level resolver":
+
+    it "cpu class always resolves to scalar":
+        step("Resolve cpu on a machine with no accelerators")
+        val t = resolve_exec_target(DeviceClass.Cpu, ComputeBackend.NoneBackend, EnforceMode.Suggest, BackendCaps.none())
+        expect(compute_backend_name(t.backend)).to_equal("scalar")
+        expect(t.resolved).to_be(true)
+
+    it "gpu auto-picks best backend in landed order (vulkan over cuda)":
+        step("Resolve gpu when both vulkan and cuda are present")
+        val t = resolve_exec_target(DeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Suggest, caps_vulkan_and_cuda())
+        expect(compute_backend_name(t.backend)).to_equal("vulkan")
+        expect(t.resolved).to_be(true)
+
+    it "gpu picks cuda when it is the only gpu":
+        val t = resolve_exec_target(DeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Suggest, caps_cuda_only())
+        expect(compute_backend_name(t.backend)).to_equal("cuda")
+
+    it "require gpu with no gpu fails closed (resolved=false)":
+        step("require enforcement must NOT silently downgrade")
+        val t = resolve_exec_target(DeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Require, BackendCaps.none())
+        expect(t.resolved).to_be(false)
+        expect(compute_backend_name(t.backend)).to_equal("none")
+
+    it "suggest gpu with no gpu falls back to pure_simple (resolved=true)":
+        val t = resolve_exec_target(DeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Suggest, BackendCaps.none())
+        expect(t.resolved).to_be(true)
+        expect(compute_backend_name(t.backend)).to_equal("pure_simple")
+
+    it "explicit backend require honored when available":
+        step("require cuda when cuda present")
+        val t = resolve_exec_target(DeviceClass.Gpu, ComputeBackend.Cuda, EnforceMode.Require, caps_vulkan_and_cuda())
+        expect(compute_backend_name(t.backend)).to_equal("cuda")
+        expect(t.resolved).to_be(true)
+
+    it "explicit backend require fails closed when absent":
+        step("require metal on a cuda-only machine")
+        val t = resolve_exec_target(DeviceClass.Gpu, ComputeBackend.Metal, EnforceMode.Require, caps_cuda_only())
+        expect(t.resolved).to_be(false)
+
+    it "simd umbrella lowers to gpu when present":
+        val t = resolve_exec_target(DeviceClass.Simd, ComputeBackend.NoneBackend, EnforceMode.Suggest, caps_metal_only())
+        expect(compute_backend_name(t.backend)).to_equal("metal")
+
+    it "simd_cpu require fails closed without a simd cpu backend":
+        val t = resolve_exec_target(DeviceClass.SimdCpu, ComputeBackend.NoneBackend, EnforceMode.Require, BackendCaps.none())
+        expect(t.resolved).to_be(false)
+
+    it "default resolves to cpu on a bare machine":
+        val t = resolve_exec_target(DeviceClass.Default, ComputeBackend.NoneBackend, EnforceMode.Suggest, BackendCaps.none())
+        expect(compute_backend_name(t.backend)).to_equal("pure_simple")
+
+    it "parses device class names":
+        expect(device_class_text(parse_device_class("simd_cpu"))).to_equal("simd_cpu")
+        expect(device_class_text(parse_device_class("gpu"))).to_equal("gpu")

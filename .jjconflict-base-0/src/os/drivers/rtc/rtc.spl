@@ -1,0 +1,126 @@
+# CMOS RTC Driver
+#
+# Reads the real-time clock from standard CMOS ports 0x70/0x71.
+# Register values are BCD-encoded; this driver converts to binary.
+#
+# MDSOC: driver dimension, hardware layer
+
+extern fn rt_port_outb(port: u16, value: u8)
+extern fn rt_port_inb(port: u16) -> u8
+
+# CMOS RTC I/O ports
+val RTC_INDEX_PORT: u16 = 0x70
+val RTC_DATA_PORT: u16 = 0x71
+
+# CMOS register addresses
+val REG_SECONDS: u8 = 0x00
+val REG_MINUTES: u8 = 0x02
+val REG_HOURS: u8 = 0x04
+val REG_DAY: u8 = 0x07
+val REG_MONTH: u8 = 0x08
+val REG_YEAR: u8 = 0x09
+val REG_STATUS_A: u8 = 0x0A
+val REG_STATUS_B: u8 = 0x0B
+
+# =========================================================================
+# Low-Level Register Access
+# =========================================================================
+
+fn rtc_read_register(reg: u8) -> u8:
+    """Read a single CMOS RTC register.
+
+    Selects the register via the index port, then reads the data port.
+    """
+    rt_port_outb(RTC_INDEX_PORT, reg)
+    rt_port_inb(RTC_DATA_PORT)
+
+fn _bcd_to_binary(bcd: u8) -> u8:
+    """Convert a BCD-encoded byte to binary."""
+    val high = bcd >> 4
+    val low = bcd & 0x0F
+    (high * 10 + low).to_u8()
+
+fn _rtc_update_in_progress() -> bool:
+    """Check whether an RTC update cycle is in progress.
+
+    Bit 7 of Status Register A is set during an update.
+    """
+    val status = rtc_read_register(REG_STATUS_A)
+    (status & 0x80) != 0
+
+# =========================================================================
+# Public Time Accessors
+# =========================================================================
+
+fn rtc_get_seconds() -> u8:
+    """Read the current seconds (0-59) from the RTC."""
+    val bcd = rtc_read_register(REG_SECONDS)
+    _bcd_to_binary(bcd)
+
+fn rtc_get_minutes() -> u8:
+    """Read the current minutes (0-59) from the RTC."""
+    val bcd = rtc_read_register(REG_MINUTES)
+    _bcd_to_binary(bcd)
+
+fn rtc_get_hours() -> u8:
+    """Read the current hours (0-23) from the RTC."""
+    val bcd = rtc_read_register(REG_HOURS)
+    _bcd_to_binary(bcd)
+
+fn rtc_get_day() -> u8:
+    """Read the current day of the month (1-31) from the RTC."""
+    val bcd = rtc_read_register(REG_DAY)
+    _bcd_to_binary(bcd)
+
+fn rtc_get_month() -> u8:
+    """Read the current month (1-12) from the RTC."""
+    val bcd = rtc_read_register(REG_MONTH)
+    _bcd_to_binary(bcd)
+
+fn rtc_get_year() -> u8:
+    """Read the current year (two-digit, 0-99) from the RTC."""
+    val bcd = rtc_read_register(REG_YEAR)
+    _bcd_to_binary(bcd)
+
+# =========================================================================
+# Composite Reads
+# =========================================================================
+
+struct RtcTime:
+    """Snapshot of the RTC time registers."""
+    hours: u8
+    minutes: u8
+    seconds: u8
+
+struct RtcDate:
+    """Snapshot of the RTC date registers."""
+    year: u8
+    month: u8
+    day: u8
+
+fn rtc_read_time() -> RtcTime:
+    """Read hours, minutes, and seconds atomically.
+
+    Waits for any in-progress update to complete, then reads
+    all three registers in quick succession.
+    """
+    # Wait until update-in-progress clears
+    while _rtc_update_in_progress():
+        pass_dn
+
+    RtcTime(
+        hours: rtc_get_hours(),
+        minutes: rtc_get_minutes(),
+        seconds: rtc_get_seconds()
+    )
+
+fn rtc_read_date() -> RtcDate:
+    """Read year, month, and day atomically."""
+    while _rtc_update_in_progress():
+        pass_dn
+
+    RtcDate(
+        year: rtc_get_year(),
+        month: rtc_get_month(),
+        day: rtc_get_day()
+    )

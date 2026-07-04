@@ -1,0 +1,425 @@
+# ITF CLI — Bitbucket Cloud commands
+#
+# Subcommands: pr, comment, approve, merge, status
+# Backend: Bitbucket Cloud REST 2.0 (api.bitbucket.org/2.0)
+# Auth:    Repository Access Token (Bearer); see /itf bb auth in skills/bb/bb_setup.md
+
+use app.itf.adapter_bitbucket.{
+    BbClient,
+    BbPr,
+    BbComment,
+    BbStatus,
+    bb_create_pr,
+    bb_get_pr,
+    bb_list_pr_comments,
+    bb_post_pr_comment,
+    bb_approve_pr,
+    bb_unapprove_pr,
+    bb_merge_pr,
+    bb_get_pr_statuses,
+    bb_check_ready_to_merge
+}
+use app.itf.flags.{_extract_flag, _has_flag, _positional_args}
+use app.itf.output.{print_error, print_success, print_info, print_table_header, print_table_row, format_json_output, wants_json, should_use_color}
+use std.nogc_sync_mut.env.{env_get}
+
+
+# ============================================================================
+# Public entry: handle_bb
+# ============================================================================
+
+fn handle_bb(args: [text]) -> i64:
+    """Dispatch bb subcommands."""
+    if args.len() == 0:
+        _print_bb_help()
+        return 0
+
+    val action = args[0]
+    val action_args = if args.len() > 1: args[1:] else: []
+
+    match action:
+        "pr":
+            _bb_pr(action_args)
+        "comment":
+            _bb_comment(action_args)
+        "approve":
+            _bb_approve(action_args)
+        "merge":
+            _bb_merge(action_args)
+        "status":
+            _bb_status(action_args)
+        "-h" | "--help" | "help":
+            _print_bb_help()
+            0
+        _:
+            print_error("unknown bb command: " + action)
+            _print_bb_help()
+            1
+
+
+# ============================================================================
+# Workspace / repo resolution
+# ============================================================================
+
+fn _bb_resolve_workspace(args: [text]) -> text:
+    """Resolve workspace from --workspace flag or BB_WORKSPACE env var."""
+    val flag = _extract_flag(args, "--workspace", "")
+    if flag != "":
+        return flag
+    val ws = _extract_flag(args, "--ws", "")
+    if ws != "":
+        return ws
+    env_get("BB_WORKSPACE")
+
+
+fn _bb_resolve_repo(args: [text]) -> text:
+    """Resolve repo slug from --repo flag or BB_REPO env var."""
+    val flag = _extract_flag(args, "--repo", "")
+    if flag != "":
+        return flag
+    env_get("BB_REPO")
+
+
+fn _bb_parse_int(s: text, default_val: i64) -> i64:
+    """Parse a non-negative decimal integer; return default_val on failure/empty."""
+    if s == "":
+        return default_val
+    var n: i64 = 0
+    var any_digit = false
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + (ch.to_i64() - "0".to_i64())
+            any_digit = true
+    if not any_digit:
+        return default_val
+    n
+
+
+# ============================================================================
+# pr subcommand: create, view
+# ============================================================================
+
+fn _bb_pr(args: [text]) -> i64:
+    """itf bb pr {create|view} ..."""
+    if args.len() == 0:
+        _print_bb_pr_help()
+        return 0
+    val sub = args[0]
+    val sub_args = if args.len() > 1: args[1:] else: []
+    match sub:
+        "create":
+            _bb_pr_create(sub_args)
+        "view":
+            _bb_pr_view(sub_args)
+        "-h" | "--help" | "help":
+            _print_bb_pr_help()
+            0
+        _:
+            print_error("unknown bb pr command: " + sub)
+            _print_bb_pr_help()
+            1
+
+
+fn _bb_pr_create(args: [text]) -> i64:
+    """itf bb pr create --title T --source S [--dest D] [--reviewer UUID]..."""
+    val client = BbClient.from_env()
+    val ws = _bb_resolve_workspace(args)
+    val repo = _bb_resolve_repo(args)
+    if ws == "" or repo == "":
+        print_error("--workspace and --repo are required (or set BB_WORKSPACE/BB_REPO)")
+        return 1
+    val title = _extract_flag(args, "--title", "")
+    val source = _extract_flag(args, "--source", "")
+    val dest = _extract_flag(args, "--dest", "")
+    if title == "" or source == "":
+        print_error("--title and --source are required")
+        return 1
+    var reviewers: [text] = []
+    var i: i64 = 0
+    while i < args.len():
+        if args[i] == "--reviewer" and i + 1 < args.len():
+            reviewers = reviewers + [args[i + 1]]
+        i = i + 1
+    val (ok, pr, raw) = bb_create_pr(client, ws, repo, title, source, dest, reviewers)
+    if not ok:
+        print_error(raw)
+        return 1
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+    print_success("PR #" + pr.id.to_string() + " created: " + pr.title)
+    if pr.web_url != "":
+        print "URL: " + pr.web_url
+    0
+
+
+fn _bb_pr_view(args: [text]) -> i64:
+    """itf bb pr view <ID> [--json]"""
+    val client = BbClient.from_env()
+    val ws = _bb_resolve_workspace(args)
+    val repo = _bb_resolve_repo(args)
+    if ws == "" or repo == "":
+        print_error("--workspace and --repo are required (or set BB_WORKSPACE/BB_REPO)")
+        return 1
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("PR id required. Usage: itf bb pr view <ID>")
+        return 1
+    val pr_id = _bb_parse_int(positionals[0], 0)
+    if pr_id <= 0:
+        print_error("invalid PR id: " + positionals[0])
+        return 1
+    val (ok, pr, raw) = bb_get_pr(client, ws, repo, pr_id)
+    if not ok:
+        print_error(raw)
+        return 1
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+    print "PR #" + pr.id.to_string() + ": " + pr.title
+    print "State: " + pr.state + " | " + pr.source_branch + " -> " + pr.dest_branch
+    if pr.author != "":
+        print "Author: " + pr.author
+    if pr.web_url != "":
+        print "URL: " + pr.web_url
+    0
+
+
+# ============================================================================
+# comment subcommand
+# ============================================================================
+
+fn _bb_comment(args: [text]) -> i64:
+    """itf bb comment {list|post} ..."""
+    if args.len() == 0:
+        _print_bb_comment_help()
+        return 0
+    val sub = args[0]
+    val sub_args = if args.len() > 1: args[1:] else: []
+    match sub:
+        "list":
+            _bb_comment_list(sub_args)
+        "post":
+            _bb_comment_post(sub_args)
+        "-h" | "--help" | "help":
+            _print_bb_comment_help()
+            0
+        _:
+            print_error("unknown bb comment command: " + sub)
+            _print_bb_comment_help()
+            1
+
+
+fn _bb_comment_list(args: [text]) -> i64:
+    """itf bb comment list <PR_ID> [--json]"""
+    val client = BbClient.from_env()
+    val ws = _bb_resolve_workspace(args)
+    val repo = _bb_resolve_repo(args)
+    if ws == "" or repo == "":
+        print_error("--workspace and --repo are required")
+        return 1
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("PR id required")
+        return 1
+    val pr_id = _bb_parse_int(positionals[0], 0)
+    val (ok, comments, raw) = bb_list_pr_comments(client, ws, repo, pr_id)
+    if not ok:
+        print_error(raw)
+        return 1
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+    if comments.len() == 0:
+        print "No comments."
+        return 0
+    print_table_header(["ID", "AUTHOR", "PATH", "CONTENT"])
+    for c in comments:
+        val path_label = if c.inline_path == "": "(general)" else: c.inline_path
+        print_table_row([c.id.to_string(), c.author, path_label, c.content])
+    0
+
+
+fn _bb_comment_post(args: [text]) -> i64:
+    """itf bb comment post <PR_ID> --content C [--inline-path P --inline-to N [--inline-from M]]"""
+    val client = BbClient.from_env()
+    val ws = _bb_resolve_workspace(args)
+    val repo = _bb_resolve_repo(args)
+    if ws == "" or repo == "":
+        print_error("--workspace and --repo are required")
+        return 1
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("PR id required")
+        return 1
+    val pr_id = _bb_parse_int(positionals[0], 0)
+    val content = _extract_flag(args, "--content", "")
+    if content == "":
+        print_error("--content required")
+        return 1
+    val inline_path = _extract_flag(args, "--inline-path", "")
+    val inline_from = _bb_parse_int(_extract_flag(args, "--inline-from", ""), -1)
+    val inline_to = _bb_parse_int(_extract_flag(args, "--inline-to", ""), -1)
+    val (ok, comment, raw) = bb_post_pr_comment(client, ws, repo, pr_id, content, inline_path, inline_from, inline_to)
+    if not ok:
+        print_error(raw)
+        return 1
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+    print_success("Comment #" + comment.id.to_string() + " posted")
+    0
+
+
+# ============================================================================
+# approve subcommand
+# ============================================================================
+
+fn _bb_approve(args: [text]) -> i64:
+    """itf bb approve <PR_ID> [--unapprove]"""
+    val client = BbClient.from_env()
+    val ws = _bb_resolve_workspace(args)
+    val repo = _bb_resolve_repo(args)
+    if ws == "" or repo == "":
+        print_error("--workspace and --repo are required")
+        return 1
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("PR id required")
+        return 1
+    val pr_id = _bb_parse_int(positionals[0], 0)
+    val unapprove = _has_flag(args, "--unapprove")
+    if unapprove:
+        val (un_ok, un_msg, un_raw) = bb_unapprove_pr(client, ws, repo, pr_id)
+        if not un_ok:
+            print_error(un_raw)
+            return 1
+        if wants_json(args):
+            print format_json_output(un_raw, args)
+            return 0
+        print_success("PR #" + pr_id.to_string() + " " + un_msg)
+        return 0
+    val (ap_ok, ap_msg, ap_raw) = bb_approve_pr(client, ws, repo, pr_id)
+    if not ap_ok:
+        print_error(ap_raw)
+        return 1
+    if wants_json(args):
+        print format_json_output(ap_raw, args)
+        return 0
+    print_success("PR #" + pr_id.to_string() + " " + ap_msg)
+    0
+
+
+# ============================================================================
+# merge subcommand
+# ============================================================================
+
+fn _bb_merge(args: [text]) -> i64:
+    """itf bb merge <PR_ID> [--strategy squash|merge_commit|fast_forward] [--keep-source]"""
+    val client = BbClient.from_env()
+    val ws = _bb_resolve_workspace(args)
+    val repo = _bb_resolve_repo(args)
+    if ws == "" or repo == "":
+        print_error("--workspace and --repo are required")
+        return 1
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("PR id required")
+        return 1
+    val pr_id = _bb_parse_int(positionals[0], 0)
+    val strategy = _extract_flag(args, "--strategy", "squash")
+    val close_source = not _has_flag(args, "--keep-source")
+    val (ok, pr, raw) = bb_merge_pr(client, ws, repo, pr_id, strategy, close_source)
+    if not ok:
+        print_error(raw)
+        return 1
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+    print_success("PR #" + pr.id.to_string() + " merged via " + strategy)
+    if pr.merge_commit != "":
+        print "Merge commit: " + pr.merge_commit
+    0
+
+
+# ============================================================================
+# status subcommand
+# ============================================================================
+
+fn _bb_status(args: [text]) -> i64:
+    """itf bb status <PR_ID> [--ready-check]"""
+    val client = BbClient.from_env()
+    val ws = _bb_resolve_workspace(args)
+    val repo = _bb_resolve_repo(args)
+    if ws == "" or repo == "":
+        print_error("--workspace and --repo are required")
+        return 1
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("PR id required")
+        return 1
+    val pr_id = _bb_parse_int(positionals[0], 0)
+    if _has_flag(args, "--ready-check"):
+        val (ready, reason) = bb_check_ready_to_merge(client, ws, repo, pr_id)
+        if wants_json(args):
+            val ready_str = if ready: "true" else: "false"
+            print "{\"ready\": " + ready_str + ", \"reason\": \"" + reason.replace("\"", "\\\"") + "\"}"
+            return if ready: 0 else: 1
+        if ready:
+            print_success("PR #" + pr_id.to_string() + " is ready to merge")
+        else:
+            print_info("PR #" + pr_id.to_string() + " not ready: " + reason)
+        return if ready: 0 else: 1
+    val (ok, statuses, raw) = bb_get_pr_statuses(client, ws, repo, pr_id)
+    if not ok:
+        print_error(raw)
+        return 1
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+    if statuses.len() == 0:
+        print "No statuses."
+        return 0
+    print_table_header(["KEY", "STATE", "NAME"])
+    for s in statuses:
+        print_table_row([s.key, s.state, s.name])
+    0
+
+
+# ============================================================================
+# Help
+# ============================================================================
+
+fn _print_bb_help():
+    """Print bb subcommand help."""
+    print "Usage: itf bb <command> [flags]"
+    print ""
+    print "Commands:"
+    print "  pr        Create or view a pull request"
+    print "  comment   List or post review comments"
+    print "  approve   Approve or unapprove a PR"
+    print "  merge     Merge a PR"
+    print "  status    Show commit statuses or ready-to-merge check"
+    print ""
+    print "Common flags:"
+    print "  --workspace W   Bitbucket workspace slug (or BB_WORKSPACE env)"
+    print "  --repo R        Repository slug (or BB_REPO env)"
+    print "  --json          Output as JSON"
+    print "  --jq EXPR       Filter JSON output"
+    print ""
+    print "Auth:    ~/.config/itf/auth.sdn → bitbucket: token = <repo access token>"
+    print "Setup:   /repo_and_pull_req:bb:bb_setup"
+
+
+fn _print_bb_pr_help():
+    print "Usage: itf bb pr {create|view} [flags]"
+    print ""
+    print "  create  --title T --source S [--dest D] [--reviewer UUID]..."
+    print "  view    <PR_ID>"
+
+
+fn _print_bb_comment_help():
+    print "Usage: itf bb comment {list|post} <PR_ID> [flags]"
+    print ""
+    print "  list    <PR_ID>"
+    print "  post    <PR_ID> --content C [--inline-path P --inline-to N [--inline-from M]]"

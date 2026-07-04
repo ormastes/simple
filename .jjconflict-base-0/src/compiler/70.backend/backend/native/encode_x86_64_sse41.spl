@@ -1,0 +1,167 @@
+# encode_x86_64_sse41.spl
+#
+# x86_64 SSE4.1 Instruction Byte-Emit Encoder — Pure Simple
+#
+# Produces exact byte sequences for SSE4.1 blend and pack instructions:
+#   PBLENDW   (word blend,           66 0F 3A 0E /r ib)
+#   BLENDPS   (float blend,          66 0F 3A 0C /r ib)
+#   BLENDPD   (double blend,         66 0F 3A 0D /r ib)
+#   PBLENDVB  (variable byte blend,  66 0F 38 10 /r)
+#   PACKUSDW  (pack dword→word sat,  66 0F 38 2B /r)
+#   PMOVZXBD  (zero-extend byte→dw,  66 0F 38 31 /r)
+#   DPPS      (dot product SP,       66 0F 3A 40 /r ib)
+#
+# Encoding convention:
+#   [0x66] [REX] [0x0F] [0x38 or 0x3A] [opcode] [ModRM] [imm8?]
+#   All functions return [i64] — list of byte values 0..255.
+#   This matches the convention in encode_x86_64_crypto.spl, arm_neon.spl.
+#
+# Register parameters (dst, src): XMM register index 0..15.
+#   XMM0..XMM7  → index 0..7  (no REX extension needed)
+#   XMM8..XMM15 → index 8..15 (REX.R extends ModRM.reg; REX.B extends ModRM.rm)
+#
+# Reference: Intel SDM Vol 2, SSE4.1 entries (PBLENDW, BLENDPS, BLENDPD,
+#            PBLENDVB, PACKUSDW, PMOVZXBD, DPPS).
+# ALL byte goldens verified against Intel SDM Vol 2 opcode tables.
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _modrm_direct(reg: i64, rm: i64) -> i64:
+    """
+    ModRM byte for register-direct operands (mod=11).
+    mod=11 → 192; reg field uses low 3 bits of reg; rm field uses low 3 bits of rm.
+    """
+    192 + ((reg % 8) * 8) + (rm % 8)
+
+fn _needs_rex_rb(dst: i64, src: i64) -> bool:
+    dst >= 8 or src >= 8
+
+fn _rex_rb(dst: i64, src: i64) -> i64:
+    """
+    REX prefix byte for no-W ops (XMM or 32-bit GPR).
+    REX = 0x40 | (R << 2) | B
+      R: extends ModRM.reg (dst); set when dst >= 8
+      B: extends ModRM.rm  (src); set when src >= 8
+    """
+    var rex = 0x40
+    if dst >= 8:
+        rex = rex + 4
+    if src >= 8:
+        rex = rex + 1
+    rex
+
+fn _emit_sse41_0f38(dst: i64, src: i64, opcode: i64) -> [i64]:
+    """
+    Core helper for SSE4.1 ops in the 66 0F 38 <opcode> /r encoding family.
+    No imm8 trailing byte.
+    """
+    val modrm = _modrm_direct(dst, src)
+    if _needs_rex_rb(dst, src):
+        val rex = _rex_rb(dst, src)
+        [0x66, rex, 0x0F, 0x38, opcode, modrm]
+    else:
+        [0x66, 0x0F, 0x38, opcode, modrm]
+
+fn _emit_sse41_0f3a(dst: i64, src: i64, opcode: i64, imm8: i64) -> [i64]:
+    """
+    Core helper for SSE4.1 ops in the 66 0F 3A <opcode> /r ib encoding family.
+    imm8 is appended as the trailing immediate byte.
+    """
+    val modrm = _modrm_direct(dst, src)
+    if _needs_rex_rb(dst, src):
+        val rex = _rex_rb(dst, src)
+        [0x66, rex, 0x0F, 0x3A, opcode, modrm, imm8]
+    else:
+        [0x66, 0x0F, 0x3A, opcode, modrm, imm8]
+
+# ============================================================================
+# SSE4.1 blend instructions (66 0F 3A xx /r ib)
+# ============================================================================
+
+fn emit_pblendw(dst: i64, src: i64, imm8: i64) -> [i64]:
+    """
+    PBLENDW dst, src, imm8 — blend 16-bit words using immediate mask.
+    Encoding: 66 [REX] 0F 3A 0E /r ib
+    dst, src: XMM register indices 0..15.
+    imm8: 8-bit mask; bit N=1 selects src word N, bit N=0 keeps dst word N.
+    Example: emit_pblendw(0, 1, 0xFF) → [0x66, 0x0F, 0x3A, 0x0E, 0xC1, 0xFF]
+    """
+    _emit_sse41_0f3a(dst, src, 0x0E, imm8)
+
+fn emit_blendps(dst: i64, src: i64, imm8: i64) -> [i64]:
+    """
+    BLENDPS dst, src, imm8 — blend single-precision floats using immediate mask.
+    Encoding: 66 [REX] 0F 3A 0C /r ib
+    dst, src: XMM register indices 0..15.
+    imm8: 4-bit mask (bits 3:0); bit N=1 selects src lane N, bit N=0 keeps dst lane N.
+    Example: emit_blendps(0, 1, 0x0F) → [0x66, 0x0F, 0x3A, 0x0C, 0xC1, 0x0F]
+    """
+    _emit_sse41_0f3a(dst, src, 0x0C, imm8)
+
+fn emit_blendpd(dst: i64, src: i64, imm8: i64) -> [i64]:
+    """
+    BLENDPD dst, src, imm8 — blend double-precision floats using immediate mask.
+    Encoding: 66 [REX] 0F 3A 0D /r ib
+    dst, src: XMM register indices 0..15.
+    imm8: 2-bit mask (bits 1:0); bit N=1 selects src lane N, bit N=0 keeps dst lane N.
+    Example: emit_blendpd(0, 1, 0x03) → [0x66, 0x0F, 0x3A, 0x0D, 0xC1, 0x03]
+    """
+    _emit_sse41_0f3a(dst, src, 0x0D, imm8)
+
+fn emit_dpps(dst: i64, src: i64, imm8: i64) -> [i64]:
+    """
+    DPPS dst, src, imm8 — dot product of single-precision floats.
+    Encoding: 66 [REX] 0F 3A 40 /r ib
+    dst, src: XMM register indices 0..15.
+    imm8: upper nibble selects src lanes to multiply; lower nibble selects dst lanes to write.
+    Example: emit_dpps(0, 1, 0xFF) → [0x66, 0x0F, 0x3A, 0x40, 0xC1, 0xFF]
+    """
+    _emit_sse41_0f3a(dst, src, 0x40, imm8)
+
+# ============================================================================
+# SSE4.1 variable-blend and pack/extend instructions (66 0F 38 xx /r)
+# ============================================================================
+
+fn emit_pblendvb(dst: i64, src: i64) -> [i64]:
+    """
+    PBLENDVB dst, src — variable byte blend using implicit XMM0 as mask.
+    Encoding: 66 [REX] 0F 38 10 /r
+    dst, src: XMM register indices 0..15.
+    XMM0 (implicit, not encoded) provides the per-byte mask.
+    Example: emit_pblendvb(0, 1) → [0x66, 0x0F, 0x38, 0x10, 0xC1]
+    """
+    _emit_sse41_0f38(dst, src, 0x10)
+
+fn emit_packusdw(dst: i64, src: i64) -> [i64]:
+    """
+    PACKUSDW dst, src — pack 32-bit integers to 16-bit unsigned with saturation.
+    Encoding: 66 [REX] 0F 38 2B /r
+    dst, src: XMM register indices 0..15.
+    Saturates dwords in dst and src to unsigned words; result in dst.
+    Example: emit_packusdw(0, 1) → [0x66, 0x0F, 0x38, 0x2B, 0xC1]
+    """
+    _emit_sse41_0f38(dst, src, 0x2B)
+
+fn emit_pmovzxbd(dst: i64, src: i64) -> [i64]:
+    """
+    PMOVZXBD dst, src — zero-extend four packed bytes to four packed dwords.
+    Encoding: 66 [REX] 0F 38 31 /r
+    dst, src: XMM register indices 0..15.
+    Reads low 4 bytes of src, zero-extends each byte to 32 bits, writes to dst.
+    Example: emit_pmovzxbd(0, 1) → [0x66, 0x0F, 0x38, 0x31, 0xC1]
+    """
+    _emit_sse41_0f38(dst, src, 0x31)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export emit_pblendw
+export emit_blendps
+export emit_blendpd
+export emit_dpps
+export emit_pblendvb
+export emit_packusdw
+export emit_pmovzxbd

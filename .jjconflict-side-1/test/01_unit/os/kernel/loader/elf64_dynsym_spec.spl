@@ -1,0 +1,285 @@
+"""
+# ELF64 dynamic symbol resolution
+**Feature IDs:** #WAVE2-G10-DYNSYM
+**Category:** Kernel loader
+
+Verifies section header parsing and .dynsym/.symtab symbol lookup
+from a minimal hand-crafted ELF64 binary with embedded symbol tables.
+"""
+use std.spec.*
+use os.kernel.loader.elf64.{
+    elf64_parse_header,
+    elf64_has_magic,
+    elf64_parse_section_headers,
+    elf64_find_section_by_type,
+    elf64_parse_symbols,
+    elf64_strtab_get,
+    elf64_dynsym_lookup,
+    SHT_DYNSYM,
+    SHT_STRTAB,
+    ELF64_EHDR_SIZE,
+    ELF64_SHDR_SIZE,
+    ELF64_SYM_SIZE
+}
+
+# ============================================================================
+# Helpers to build a minimal ELF64 with section headers + .dynsym + .strtab
+# ============================================================================
+
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+    buf
+
+fn _push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32_le(out, value & 0xFFFFFFFF)
+    out = _push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _pad_to(buf: [u8], target: i64) -> [u8]:
+    while buf.len() < target:
+        buf.push(0.to_u8())
+    buf
+
+fn _make_elf64_with_dynsym() -> [u8]:
+    """Build a minimal ELF64 with:
+    - ELF header (64 bytes)
+    - Program header (1 PT_LOAD, 56 bytes) at offset 64
+    - .strtab section at offset 128 containing: \\0 hello \\0 world \\0
+    - .dynsym section at offset 144 containing 2 symbols (null + hello)
+    - Section header table at offset 192 with 3 entries: null, .dynsym, .strtab
+    """
+    # Layout constants
+    val phdr_off: i64 = 64
+    val strtab_off: i64 = 128
+    val strtab_content = "\x00hello\x00world\x00"
+    # \0 h e l l o \0 w o r l d \0 = 13 bytes
+    val strtab_size: i64 = 13
+    val dynsym_off: i64 = 144
+    val sym_entry_size: i64 = 24   # ELF64_SYM_SIZE
+    val dynsym_count: i64 = 2      # null sym + hello sym
+    val dynsym_size: i64 = sym_entry_size * dynsym_count  # 48
+    val shdr_off: i64 = 192
+    val shdr_count: i64 = 3        # null, .dynsym, .strtab
+    val shdr_entry: i64 = 64       # ELF64_SHDR_SIZE
+
+    var b: [u8] = []
+
+    # === ELF header (64 bytes) ===
+    # e_ident[0..4] = magic
+    b.push(0x7F.to_u8())
+    b.push(0x45.to_u8())
+    b.push(0x4C.to_u8())
+    b.push(0x46.to_u8())
+    # e_ident[4] = class (64-bit)
+    b.push(2.to_u8())
+    # e_ident[5] = data (little-endian)
+    b.push(1.to_u8())
+    # e_ident[6] = version
+    b.push(1.to_u8())
+    # e_ident[7..16] = padding
+    b = _pad_to(b, 16)
+
+    # e_type (16) = ET_EXEC = 2
+    b = _push_u16_le(b, 2)
+    # e_machine (18) = EM_X86_64 = 62
+    b = _push_u16_le(b, 62)
+    # e_version (20) = 1
+    b = _push_u32_le(b, 1)
+    # e_entry (24) = 0x400000
+    b = _push_u64_le(b, 0x400000)
+    # e_phoff (32) = 64
+    b = _push_u64_le(b, phdr_off)
+    # e_shoff (40) = shdr_off
+    b = _push_u64_le(b, shdr_off)
+    # e_flags (48) = 0
+    b = _push_u32_le(b, 0)
+    # e_ehsize (52) = 64
+    b = _push_u16_le(b, 64)
+    # e_phentsize (54) = 56
+    b = _push_u16_le(b, 56)
+    # e_phnum (56) = 1
+    b = _push_u16_le(b, 1)
+    # e_shentsize (58) = 64
+    b = _push_u16_le(b, shdr_entry)
+    # e_shnum (60) = 3
+    b = _push_u16_le(b, shdr_count)
+    # e_shstrndx (62) = 0 (unused — we don't need section names)
+    b = _push_u16_le(b, 0)
+
+    # === Program header (56 bytes at offset 64) ===
+    # p_type = PT_LOAD = 1
+    b = _push_u32_le(b, 1)
+    # p_flags = PF_R | PF_X = 5
+    b = _push_u32_le(b, 5)
+    # p_offset = 0
+    b = _push_u64_le(b, 0)
+    # p_vaddr = 0x400000
+    b = _push_u64_le(b, 0x400000)
+    # p_paddr = 0x400000
+    b = _push_u64_le(b, 0x400000)
+    # p_filesz = 120 (just needs to be > 0 for validity)
+    b = _push_u64_le(b, 120)
+    # p_memsz = 120
+    b = _push_u64_le(b, 120)
+    # p_align = 0x1000
+    b = _push_u64_le(b, 0x1000)
+
+    # Pad to strtab_off = 128
+    b = _pad_to(b, strtab_off)
+
+    # === .strtab data (13 bytes at offset 128) ===
+    # Index 0: \0 (null string)
+    b.push(0.to_u8())
+    # Index 1: "hello\0"
+    b.push(0x68.to_u8())  # h
+    b.push(0x65.to_u8())  # e
+    b.push(0x6C.to_u8())  # l
+    b.push(0x6C.to_u8())  # l
+    b.push(0x6F.to_u8())  # o
+    b.push(0.to_u8())
+    # Index 7: "world\0"
+    b.push(0x77.to_u8())  # w
+    b.push(0x6F.to_u8())  # o
+    b.push(0x72.to_u8())  # r
+    b.push(0x6C.to_u8())  # l
+    b.push(0x64.to_u8())  # d
+    b.push(0.to_u8())
+
+    # Pad to dynsym_off = 144 (strtab 128 + 13 = 141, need 3 more)
+    b = _pad_to(b, dynsym_off)
+
+    # === .dynsym entries (2 * 24 = 48 bytes at offset 144) ===
+    # Symbol 0: null symbol (all zeros)
+    b = _pad_to(b, dynsym_off + sym_entry_size)
+
+    # Symbol 1: "hello" at 0xDEAD
+    # st_name (4 bytes) = 1 (index into strtab)
+    b = _push_u32_le(b, 1)
+    # st_info (1 byte) = 0x12 (STB_GLOBAL | STT_FUNC)
+    b.push(0x12.to_u8())
+    # st_other (1 byte) = 0
+    b.push(0.to_u8())
+    # st_shndx (2 bytes) = 1
+    b = _push_u16_le(b, 1)
+    # st_value (8 bytes) = 0xDEAD
+    b = _push_u64_le(b, 0xDEAD)
+    # st_size (8 bytes) = 16
+    b = _push_u64_le(b, 16)
+
+    # Pad to shdr_off = 192
+    b = _pad_to(b, shdr_off)
+
+    # === Section headers (3 * 64 = 192 bytes at offset 192) ===
+
+    # Section 0: SHT_NULL (64 bytes of zeros)
+    b = _pad_to(b, shdr_off + shdr_entry)
+
+    # Section 1: .dynsym (SHT_DYNSYM = 11)
+    # sh_name (4)
+    b = _push_u32_le(b, 0)
+    # sh_type (4) = SHT_DYNSYM = 11
+    b = _push_u32_le(b, 11)
+    # sh_flags (8)
+    b = _push_u64_le(b, 0)
+    # sh_addr (8)
+    b = _push_u64_le(b, 0)
+    # sh_offset (8)
+    b = _push_u64_le(b, dynsym_off)
+    # sh_size (8)
+    b = _push_u64_le(b, dynsym_size)
+    # sh_link (4) = 2 (index of associated .strtab)
+    b = _push_u32_le(b, 2)
+    # sh_info (4)
+    b = _push_u32_le(b, 0)
+    # sh_addralign (8)
+    b = _push_u64_le(b, 0)
+    # sh_entsize (8) = 24
+    b = _push_u64_le(b, sym_entry_size)
+
+    # Section 2: .strtab (SHT_STRTAB = 3)
+    # sh_name (4)
+    b = _push_u32_le(b, 0)
+    # sh_type (4) = SHT_STRTAB = 3
+    b = _push_u32_le(b, 3)
+    # sh_flags (8)
+    b = _push_u64_le(b, 0)
+    # sh_addr (8)
+    b = _push_u64_le(b, 0)
+    # sh_offset (8)
+    b = _push_u64_le(b, strtab_off)
+    # sh_size (8)
+    b = _push_u64_le(b, strtab_size)
+    # sh_link (4)
+    b = _push_u32_le(b, 0)
+    # sh_info (4)
+    b = _push_u32_le(b, 0)
+    # sh_addralign (8)
+    b = _push_u64_le(b, 0)
+    # sh_entsize (8) = 0
+    b = _push_u64_le(b, 0)
+
+    b
+
+describe "elf64_has_magic":
+    it "detects ELF magic at offset 0":
+        val data = _make_elf64_with_dynsym()
+        expect(elf64_has_magic(data)).to_equal(true)
+
+    it "rejects non-ELF bytes":
+        var data: [u8] = []
+        data.push(0.to_u8())
+        data.push(0.to_u8())
+        data.push(0.to_u8())
+        data.push(0.to_u8())
+        expect(elf64_has_magic(data)).to_equal(false)
+
+describe "elf64_parse_section_headers":
+    it "parses section headers from minimal ELF64":
+        val data = _make_elf64_with_dynsym()
+        val hdr_opt = elf64_parse_header(data)
+        val hdr = hdr_opt.unwrap()
+        val shdrs = elf64_parse_section_headers(data, hdr)
+        expect(shdrs.len()).to_equal(3)
+
+    it "finds .dynsym section by type":
+        val data = _make_elf64_with_dynsym()
+        val hdr = elf64_parse_header(data).unwrap()
+        val shdrs = elf64_parse_section_headers(data, hdr)
+        val dynsym_opt = elf64_find_section_by_type(shdrs, 11)
+        val dynsym = dynsym_opt.unwrap()
+        expect(dynsym.sh_type).to_equal(11)
+
+describe "elf64_dynsym_lookup":
+    it "resolves a known symbol from .dynsym":
+        val data = _make_elf64_with_dynsym()
+        val hdr = elf64_parse_header(data).unwrap()
+        val shdrs = elf64_parse_section_headers(data, hdr)
+        val result = elf64_dynsym_lookup(data, shdrs, "hello")
+        val addr = result.unwrap()
+        expect(addr).to_equal(0xDEAD.to_u64())
+
+    it "returns nil for an unknown symbol":
+        val data = _make_elf64_with_dynsym()
+        val hdr = elf64_parse_header(data).unwrap()
+        val shdrs = elf64_parse_section_headers(data, hdr)
+        val result = elf64_dynsym_lookup(data, shdrs, "nonexistent")
+        expect(result == nil).to_equal(true)
+
+describe "elf64_strtab_get":
+    it "extracts NUL-terminated strings from strtab":
+        var strtab: [u8] = []
+        strtab.push(0.to_u8())       # index 0: empty
+        strtab.push(0x41.to_u8())    # index 1: "AB"
+        strtab.push(0x42.to_u8())
+        strtab.push(0.to_u8())
+        expect(elf64_strtab_get(strtab, 0)).to_equal("")
+        expect(elf64_strtab_get(strtab, 1)).to_equal("AB")

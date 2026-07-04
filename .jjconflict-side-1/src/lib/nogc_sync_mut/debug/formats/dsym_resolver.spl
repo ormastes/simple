@@ -1,0 +1,52 @@
+# dSYM Bundle Resolver
+# Locates macOS .dSYM bundles and extracts DWARF debug info from Mach-O binaries within.
+# dSYM layout: <binary>.dSYM/Contents/Resources/DWARF/<binary_name>
+
+use std.debug.formats.dwarf_parser.{DwarfParser}
+
+extern fn rt_file_exists(path: text) -> i64
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_path_basename(path: text) -> text
+
+fn dsym_find_bundle(binary_path: text) -> text?:
+    val dsym_path = binary_path + ".dSYM"
+    if rt_file_exists(dsym_path) != 0:
+        val basename = rt_path_basename(binary_path)
+        val dwarf_path = dsym_path + "/Contents/Resources/DWARF/" + basename
+        if rt_file_exists(dwarf_path) != 0:
+            return dwarf_path
+    return nil
+
+fn dsym_load(binary_path: text) -> Result<DwarfParser, text>:
+    val dwarf_path = dsym_find_bundle(binary_path)
+    if dwarf_path.? == false:
+        return Err("no dSYM bundle found for {binary_path}")
+
+    val data = rt_file_read_bytes(dwarf_path!)
+    if data.len() == 0:
+        return Err("empty dSYM DWARF file at {dwarf_path!}")
+
+    DwarfParser.from_macho(data)
+
+fn dsym_or_binary_load(binary_path: text) -> Result<DwarfParser, text>:
+    val dsym_result = dsym_load(binary_path)
+    if dsym_result.is_ok():
+        return dsym_result
+
+    val data = rt_file_read_bytes(binary_path)
+    if data.len() == 0:
+        return Err("cannot read binary at {binary_path}")
+
+    if data.len() >= 4:
+        val b0 = data[0] as i64
+        val b1 = data[1] as i64
+        val b2 = data[2] as i64
+        val b3 = data[3] as i64
+        val magic = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+        if magic == 0xfeedfacf or magic == 0xcffaedfe:
+            return DwarfParser.from_macho(data)
+
+    if data.len() >= 4 and data[0] == 0x7f and data[1] == 0x45 and data[2] == 0x4c and data[3] == 0x46:
+        return DwarfParser.from_elf(data)
+
+    Err("unrecognized binary format at {binary_path}")

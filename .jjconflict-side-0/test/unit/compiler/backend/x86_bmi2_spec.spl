@@ -1,0 +1,340 @@
+# test/unit/compiler/backend/x86_bmi2_spec.spl
+#
+# Byte-level golden tests for x86_64 BMI2 VEX emit functions.
+# Verifies emit_pdep_r64, emit_pdep_r32, emit_pext_r64, emit_pext_r32,
+# emit_bzhi_r64, emit_bzhi_r32 produce exact Intel SDM byte sequences.
+#
+# All goldens verified with:
+#   llvm-mc --show-encoding -triple=x86_64 -mattr=+bmi2
+# AT&T operand order: pdepq %src2, %src1, %dst
+#
+# Reference: Intel SDM Vol 2B PDEP/PEXT/BZHI entries; Vol 2A §2.3.5 (VEX prefix).
+
+import std.spec
+
+use compiler.backend.native.encode_x86_64_bmi2.{
+    emit_pdep_r64, emit_pdep_r32,
+    emit_pext_r64, emit_pext_r32,
+    emit_bzhi_r64, emit_bzhi_r32
+}
+
+# ============================================================================
+# PDEP r64 — VEX.LZ.F2.0F38.W1 F5 /r
+# emit_pdep_r64(dst, src1, src2): src1→vvvv(data), src2→rm(mask)
+# ============================================================================
+
+describe "BMI2 emit_pdep_r64 rax rcx rdx golden":
+    # pdepq %rdx, %rcx, %rax → [0xc4,0xe2,0xf3,0xf5,0xc2]
+    # dst=0(rax), src1=1(rcx), src2=2(rdx)
+    it "emits 5 bytes":
+        val result = emit_pdep_r64(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte0 is VEX escape 0xC4":
+        val result = emit_pdep_r64(0, 1, 2)
+        expect result[0] == 196
+
+    it "byte1 is 0xE2 (~R=1 ~X=1 ~B=1 mmmmm=2)":
+        # dst<8 → ~R=1, rm(src2)<8 → ~B=1, ~X=1, mmmmm=2 → 226
+        val result = emit_pdep_r64(0, 1, 2)
+        expect result[1] == 226
+
+    it "byte2 is 0xF3 (W=1 ~vvvv=14 L=0 pp=3/F2)":
+        # W=1, ~vvvv=(15-src1=1)=14, L=0, pp=3(F2) → 128+14*8+3=243
+        val result = emit_pdep_r64(0, 1, 2)
+        expect result[2] == 243
+
+    it "byte3 is opcode 0xF5":
+        val result = emit_pdep_r64(0, 1, 2)
+        expect result[3] == 245
+
+    it "byte4 is ModRM 0xC2 (mod=11 reg=0 rm=2)":
+        # mod=11, reg=dst%8=0, rm=src2%8=2 → 192+0*8+2=194
+        val result = emit_pdep_r64(0, 1, 2)
+        expect result[4] == 194
+
+describe "BMI2 emit_pdep_r64 extended dst r9":
+    # pdepq %rdx, %rcx, %r9 → [0xc4,0x62,0xf3,0xf5,0xca]
+    # dst=9(r9), src1=1(rcx), src2=2(rdx)
+    it "byte1 is 0x62 (~R=0 ~X=1 ~B=1 mmmmm=2)":
+        # dst>=8 → ~R=0; rm(src2)<8 → ~B=1 → 226-128=98
+        val result = emit_pdep_r64(9, 1, 2)
+        expect result[1] == 98
+
+    it "byte2 is 0xF3 (W=1 ~vvvv=14 L=0 pp=3/F2)":
+        val result = emit_pdep_r64(9, 1, 2)
+        expect result[2] == 243
+
+    it "byte4 is ModRM 0xCA (mod=11 reg=1 rm=2)":
+        # mod=11, reg=9%8=1, rm=2%8=2 → 192+1*8+2=202
+        val result = emit_pdep_r64(9, 1, 2)
+        expect result[4] == 202
+
+describe "BMI2 emit_pdep_r64 extended src1 r9":
+    # pdepq %rdx, %r9, %rax → [0xc4,0xe2,0xb3,0xf5,0xc2]
+    # dst=0(rax), src1=9(r9), src2=2(rdx)
+    it "byte1 is 0xE2 (~R=1 ~X=1 ~B=1 mmmmm=2)":
+        val result = emit_pdep_r64(0, 9, 2)
+        expect result[1] == 226
+
+    it "byte2 is 0xB3 (W=1 ~vvvv=6 L=0 pp=3/F2)":
+        # W=1, ~vvvv=(15-src1=9)=6, L=0, pp=3(F2) → 128+6*8+3=179
+        val result = emit_pdep_r64(0, 9, 2)
+        expect result[2] == 179
+
+    it "byte4 is ModRM 0xC2 (mod=11 reg=0 rm=2)":
+        val result = emit_pdep_r64(0, 9, 2)
+        expect result[4] == 194
+
+describe "BMI2 emit_pdep_r64 extended src2 r9":
+    # pdepq %r9, %rcx, %rax → [0xc4,0xc2,0xf3,0xf5,0xc1]
+    # dst=0(rax), src1=1(rcx), src2=9(r9)
+    it "byte1 is 0xC2 (~R=1 ~X=1 ~B=0 mmmmm=2)":
+        # dst<8 → ~R=1; rm(src2=9)>=8 → ~B=0 → 226-32=194
+        val result = emit_pdep_r64(0, 1, 9)
+        expect result[1] == 194
+
+    it "byte2 is 0xF3 (W=1 ~vvvv=14 L=0 pp=3/F2)":
+        val result = emit_pdep_r64(0, 1, 9)
+        expect result[2] == 243
+
+    it "byte4 is ModRM 0xC1 (mod=11 reg=0 rm=1)":
+        # mod=11, reg=0%8=0, rm=9%8=1 → 192+0*8+1=193
+        val result = emit_pdep_r64(0, 1, 9)
+        expect result[4] == 193
+
+# ============================================================================
+# PDEP r32 — VEX.LZ.F2.0F38.W0 F5 /r
+# ============================================================================
+
+describe "BMI2 emit_pdep_r32 eax ecx edx golden":
+    # pdepl %edx, %ecx, %eax → [0xc4,0xe2,0x73,0xf5,0xc2]
+    # dst=0(eax), src1=1(ecx), src2=2(edx)
+    it "emits 5 bytes":
+        val result = emit_pdep_r32(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte0 is VEX escape 0xC4":
+        val result = emit_pdep_r32(0, 1, 2)
+        expect result[0] == 196
+
+    it "byte1 is 0xE2":
+        val result = emit_pdep_r32(0, 1, 2)
+        expect result[1] == 226
+
+    it "byte2 is 0x73 (W=0 ~vvvv=14 L=0 pp=3/F2)":
+        # W=0, ~vvvv=14, L=0, pp=3 → 14*8+3=115
+        val result = emit_pdep_r32(0, 1, 2)
+        expect result[2] == 115
+
+    it "byte3 is opcode 0xF5":
+        val result = emit_pdep_r32(0, 1, 2)
+        expect result[3] == 245
+
+    it "byte4 is ModRM 0xC2":
+        val result = emit_pdep_r32(0, 1, 2)
+        expect result[4] == 194
+
+describe "BMI2 emit_pdep_r32 extended src2 r9d":
+    # pdepl %r9d, %ecx, %eax → [0xc4,0xc2,0x73,0xf5,0xc1]
+    # dst=0(eax), src1=1(ecx), src2=9(r9d)
+    it "byte1 is 0xC2 (~R=1 ~X=1 ~B=0 mmmmm=2)":
+        val result = emit_pdep_r32(0, 1, 9)
+        expect result[1] == 194
+
+    it "byte2 is 0x73 (W=0 ~vvvv=14 L=0 pp=3/F2)":
+        val result = emit_pdep_r32(0, 1, 9)
+        expect result[2] == 115
+
+    it "byte4 is ModRM 0xC1 (mod=11 reg=0 rm=1)":
+        val result = emit_pdep_r32(0, 1, 9)
+        expect result[4] == 193
+
+# ============================================================================
+# PEXT r64 — VEX.LZ.F3.0F38.W1 F5 /r
+# emit_pext_r64(dst, src1, src2): src1→vvvv(data), src2→rm(mask)
+# ============================================================================
+
+describe "BMI2 emit_pext_r64 rax rcx rdx golden":
+    # pextq %rdx, %rcx, %rax → [0xc4,0xe2,0xf2,0xf5,0xc2]
+    # dst=0(rax), src1=1(rcx), src2=2(rdx)
+    it "emits 5 bytes":
+        val result = emit_pext_r64(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte0 is VEX escape 0xC4":
+        val result = emit_pext_r64(0, 1, 2)
+        expect result[0] == 196
+
+    it "byte1 is 0xE2":
+        val result = emit_pext_r64(0, 1, 2)
+        expect result[1] == 226
+
+    it "byte2 is 0xF2 (W=1 ~vvvv=14 L=0 pp=2/F3)":
+        # W=1, ~vvvv=14, L=0, pp=2(F3) → 128+14*8+2=242
+        val result = emit_pext_r64(0, 1, 2)
+        expect result[2] == 242
+
+    it "byte3 is opcode 0xF5":
+        val result = emit_pext_r64(0, 1, 2)
+        expect result[3] == 245
+
+    it "byte4 is ModRM 0xC2":
+        val result = emit_pext_r64(0, 1, 2)
+        expect result[4] == 194
+
+describe "BMI2 emit_pext_r64 extended dst r9":
+    # pextq %rdx, %rcx, %r9 → [0xc4,0x62,0xf2,0xf5,0xca]
+    # dst=9(r9), src1=1(rcx), src2=2(rdx)
+    it "byte1 is 0x62 (~R=0 ~X=1 ~B=1 mmmmm=2)":
+        val result = emit_pext_r64(9, 1, 2)
+        expect result[1] == 98
+
+    it "byte2 is 0xF2 (W=1 ~vvvv=14 L=0 pp=2/F3)":
+        val result = emit_pext_r64(9, 1, 2)
+        expect result[2] == 242
+
+    it "byte4 is ModRM 0xCA (mod=11 reg=1 rm=2)":
+        val result = emit_pext_r64(9, 1, 2)
+        expect result[4] == 202
+
+# ============================================================================
+# PEXT r32 — VEX.LZ.F3.0F38.W0 F5 /r
+# ============================================================================
+
+describe "BMI2 emit_pext_r32 eax ecx edx golden":
+    # pextl %edx, %ecx, %eax → [0xc4,0xe2,0x72,0xf5,0xc2]
+    it "emits 5 bytes":
+        val result = emit_pext_r32(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte1 is 0xE2":
+        val result = emit_pext_r32(0, 1, 2)
+        expect result[1] == 226
+
+    it "byte2 is 0x72 (W=0 ~vvvv=14 L=0 pp=2/F3)":
+        # W=0, ~vvvv=14, L=0, pp=2(F3) → 14*8+2=114
+        val result = emit_pext_r32(0, 1, 2)
+        expect result[2] == 114
+
+    it "byte3 is opcode 0xF5":
+        val result = emit_pext_r32(0, 1, 2)
+        expect result[3] == 245
+
+    it "byte4 is ModRM 0xC2":
+        val result = emit_pext_r32(0, 1, 2)
+        expect result[4] == 194
+
+# ============================================================================
+# BZHI r64 — VEX.LZ.NP.0F38.W1 F5 /r
+# emit_bzhi_r64(dst, src, idx): idx→vvvv(bit-count), src→rm(data)
+# ============================================================================
+
+describe "BMI2 emit_bzhi_r64 rax rcx rdx golden":
+    # bzhiq %rdx, %rcx, %rax → [0xc4,0xe2,0xe8,0xf5,0xc1]
+    # dst=0(rax), src=1(rcx), idx=2(rdx)
+    it "emits 5 bytes":
+        val result = emit_bzhi_r64(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte0 is VEX escape 0xC4":
+        val result = emit_bzhi_r64(0, 1, 2)
+        expect result[0] == 196
+
+    it "byte1 is 0xE2 (~R=1 ~X=1 ~B=1 mmmmm=2)":
+        # dst<8 → ~R=1; rm(src=1)<8 → ~B=1 → 226
+        val result = emit_bzhi_r64(0, 1, 2)
+        expect result[1] == 226
+
+    it "byte2 is 0xE8 (W=1 ~vvvv=13 L=0 pp=0/NP)":
+        # W=1, ~vvvv=(15-idx=2)=13, L=0, pp=0(NP) → 128+13*8+0=232
+        val result = emit_bzhi_r64(0, 1, 2)
+        expect result[2] == 232
+
+    it "byte3 is opcode 0xF5":
+        val result = emit_bzhi_r64(0, 1, 2)
+        expect result[3] == 245
+
+    it "byte4 is ModRM 0xC1 (mod=11 reg=0 rm=1)":
+        # mod=11, reg=dst%8=0, rm=src%8=1 → 192+0*8+1=193
+        val result = emit_bzhi_r64(0, 1, 2)
+        expect result[4] == 193
+
+describe "BMI2 emit_bzhi_r64 extended dst r9":
+    # bzhiq %rdx, %rcx, %r9 → [0xc4,0x62,0xe8,0xf5,0xc9]
+    # dst=9(r9), src=1(rcx), idx=2(rdx)
+    it "byte1 is 0x62 (~R=0 ~X=1 ~B=1 mmmmm=2)":
+        # dst>=8 → ~R=0; rm(src=1)<8 → ~B=1 → 226-128=98
+        val result = emit_bzhi_r64(9, 1, 2)
+        expect result[1] == 98
+
+    it "byte2 is 0xE8 (W=1 ~vvvv=13 L=0 pp=0/NP)":
+        val result = emit_bzhi_r64(9, 1, 2)
+        expect result[2] == 232
+
+    it "byte4 is ModRM 0xC9 (mod=11 reg=1 rm=1)":
+        # mod=11, reg=9%8=1, rm=1%8=1 → 192+1*8+1=201
+        val result = emit_bzhi_r64(9, 1, 2)
+        expect result[4] == 201
+
+describe "BMI2 emit_bzhi_r64 extended idx r9":
+    # bzhiq %r9, %rcx, %rax → [0xc4,0xe2,0xb0,0xf5,0xc1]
+    # dst=0(rax), src=1(rcx), idx=9(r9)
+    it "byte1 is 0xE2 (~R=1 ~X=1 ~B=1 mmmmm=2)":
+        # rm(src=1)<8 → ~B=1 → 226
+        val result = emit_bzhi_r64(0, 1, 9)
+        expect result[1] == 226
+
+    it "byte2 is 0xB0 (W=1 ~vvvv=6 L=0 pp=0/NP)":
+        # W=1, ~vvvv=(15-idx=9)=6, L=0, pp=0(NP) → 128+6*8+0=176
+        val result = emit_bzhi_r64(0, 1, 9)
+        expect result[2] == 176
+
+    it "byte4 is ModRM 0xC1 (mod=11 reg=0 rm=1)":
+        val result = emit_bzhi_r64(0, 1, 9)
+        expect result[4] == 193
+
+describe "BMI2 emit_bzhi_r64 extended src r9":
+    # bzhiq %rdx, %r9, %rax → [0xc4,0xc2,0xe8,0xf5,0xc1]
+    # dst=0(rax), src=9(r9), idx=2(rdx)
+    it "byte1 is 0xC2 (~R=1 ~X=1 ~B=0 mmmmm=2)":
+        # dst<8 → ~R=1; rm(src=9)>=8 → ~B=0 → 226-32=194
+        val result = emit_bzhi_r64(0, 9, 2)
+        expect result[1] == 194
+
+    it "byte2 is 0xE8 (W=1 ~vvvv=13 L=0 pp=0/NP)":
+        val result = emit_bzhi_r64(0, 9, 2)
+        expect result[2] == 232
+
+    it "byte4 is ModRM 0xC1 (mod=11 reg=0 rm=1)":
+        # mod=11, reg=0%8=0, rm=9%8=1 → 192+0*8+1=193
+        val result = emit_bzhi_r64(0, 9, 2)
+        expect result[4] == 193
+
+# ============================================================================
+# BZHI r32 — VEX.LZ.NP.0F38.W0 F5 /r
+# ============================================================================
+
+describe "BMI2 emit_bzhi_r32 eax ecx edx golden":
+    # bzhi eax, ecx, edx → W=0 form
+    # dst=0(eax), src=1(ecx), idx=2(edx)
+    it "emits 5 bytes":
+        val result = emit_bzhi_r32(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte1 is 0xE2":
+        val result = emit_bzhi_r32(0, 1, 2)
+        expect result[1] == 226
+
+    it "byte2 is 0x68 (W=0 ~vvvv=13 L=0 pp=0/NP)":
+        # W=0, ~vvvv=(15-idx=2)=13, L=0, pp=0(NP) → 13*8+0=104
+        val result = emit_bzhi_r32(0, 1, 2)
+        expect result[2] == 104
+
+    it "byte3 is opcode 0xF5":
+        val result = emit_bzhi_r32(0, 1, 2)
+        expect result[3] == 245
+
+    it "byte4 is ModRM 0xC1 (mod=11 reg=0 rm=1)":
+        val result = emit_bzhi_r32(0, 1, 2)
+        expect result[4] == 193

@@ -1,0 +1,182 @@
+"""
+# MCP Dynload Upgrade State Machine Specification
+
+**Feature IDs:** #MCP-DYNLOAD-001
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** Active
+**Requirements:** doc/03_plan/app/mcp/mcp_core_default_dynload_plan_2026-06-13.md
+
+## Overview
+
+When tool-set is "auto" the server advertises the 20-tool core list first,
+then upgrades to the full 151-tool list via a one-shot list_changed
+notification. This spec asserts the state machine in main.spl:
+
+  _mcp_tools_list_payload() — returns core (20 tools) on first call in auto
+                               mode; returns full (151 tools) on all later calls
+  _mcp_list_upgraded()      — false before first payload; true after
+  _mcp_take_emit_list_changed() — one-shot: true once (after first auto serve),
+                               then false forever
+
+## State-ordering note
+
+Module-level vars (_MCP_LIST_UPGRADED, one-shot flag) persist across `it`
+blocks in a single file. Each `it` block calls _mcp_init_tool_set first to
+reset the tool-set selection; however _MCP_LIST_UPGRADED may not reset on
+re-init (impl detail). Tests are ordered so the auto-mode block runs first and
+subsequent blocks explicitly re-init before asserting their invariants.
+
+## Payload count method
+
+Tool count = split("{\"name\":").len() - 1  (same approach as existing specs)
+"""
+
+# @req REQ-MCP-TOOLSET-001
+# @feature mcp_tool_set_selection
+# tag: unit
+
+use std.spec
+use app.mcp.main.{_mcp_get_tool_set, _mcp_init_tool_set, _mcp_tools_list_payload, _mcp_list_upgraded, _mcp_take_emit_list_changed}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn count_tools_in_payload(json: text) -> i64:
+    val parts = json.split("{\"name\":")
+    parts.len() - 1
+
+# ============================================================================
+# (a) auto mode — core first, then full, one-shot list_changed
+# NOTE: This describe block must run FIRST because _MCP_LIST_UPGRADED
+# starts false and flips to true on first payload call.
+# ============================================================================
+
+describe "MCP dynload upgrade — auto mode (run first)":
+    """
+    ## Auto Mode State Machine
+
+    In auto mode:
+    - Before any payload call: upgraded flag is false
+    - First payload call: returns 20-tool core; sets upgraded=true;
+      take_emit_list_changed returns true (one-shot)
+    - Immediately after: take_emit_list_changed returns false (consumed)
+    - Second payload call: returns 151-tool full list
+    """
+
+    it "auto mode: pre-payload upgraded flag is false":
+        val reset = ["--tool-set=auto"]
+        _mcp_init_tool_set(reset)
+        expect(_mcp_get_tool_set()).to_equal("auto")
+        # NOTE: If impl resets _MCP_LIST_UPGRADED on _mcp_init_tool_set,
+        # this is a clean start. If not, a prior test run may have flipped it.
+        # The contract says default state is false; we assert it here.
+        expect(_mcp_list_upgraded()).to_equal(false)
+
+    it "auto mode: first payload has exactly 20 tools":
+        val reset = ["--tool-set=auto"]
+        _mcp_init_tool_set(reset)
+        val payload = _mcp_tools_list_payload()
+        val count = count_tools_in_payload(payload)
+        expect(count).to_equal(20)
+
+    it "auto mode: first payload starts with tools array wrapper":
+        val reset = ["--tool-set=auto"]
+        _mcp_init_tool_set(reset)
+        val payload = _mcp_tools_list_payload()
+        expect(payload.starts_with("{\"tools\":[")).to_equal(true)
+
+    it "auto mode: upgraded flag is true after first payload":
+        # Depends on the first-payload `it` having run above (state persists).
+        expect(_mcp_list_upgraded()).to_equal(true)
+
+    it "auto mode: take_emit_list_changed is true once then false":
+        # First call: should be true (one-shot, consumed by first auto serve)
+        val first = _mcp_take_emit_list_changed()
+        expect(first).to_equal(true)
+        # Second call immediately: must be false (one-shot consumed)
+        val second = _mcp_take_emit_list_changed()
+        expect(second).to_equal(false)
+
+    it "auto mode: second payload has exactly 151 tools":
+        # After upgrade flag is set, all subsequent payloads serve full list.
+        val payload = _mcp_tools_list_payload()
+        val count = count_tools_in_payload(payload)
+        expect(count).to_equal(151)
+
+    it "auto mode: second payload starts with tools array wrapper":
+        val payload = _mcp_tools_list_payload()
+        expect(payload.starts_with("{\"tools\":[")).to_equal(true)
+
+# ============================================================================
+# (b) all mode — always full list, no list_changed
+# ============================================================================
+
+describe "MCP dynload upgrade — all mode":
+    """
+    ## All Mode
+
+    In all mode the server always serves the full 151-tool list on every
+    payload call. list_changed is never emitted (take_emit returns false).
+    """
+
+    it "all mode: first payload has exactly 151 tools":
+        val reset = ["--tool-set=all"]
+        _mcp_init_tool_set(reset)
+        expect(_mcp_get_tool_set()).to_equal("all")
+        val payload = _mcp_tools_list_payload()
+        val count = count_tools_in_payload(payload)
+        expect(count).to_equal(151)
+
+    it "all mode: payload starts with tools array wrapper":
+        val reset = ["--tool-set=all"]
+        _mcp_init_tool_set(reset)
+        val payload = _mcp_tools_list_payload()
+        expect(payload.starts_with("{\"tools\":[")).to_equal(true)
+
+    it "all mode: take_emit_list_changed is false (no upgrade notification)":
+        val reset = ["--tool-set=all"]
+        _mcp_init_tool_set(reset)
+        val changed = _mcp_take_emit_list_changed()
+        expect(changed).to_equal(false)
+
+# ============================================================================
+# (c) core mode — always 20-tool list, never upgrades
+# ============================================================================
+
+describe "MCP dynload upgrade — core mode":
+    """
+    ## Core Mode
+
+    In core mode the server always serves exactly 20 tools. The upgrade flag
+    never flips and list_changed is never emitted.
+    """
+
+    it "core mode: first payload has exactly 20 tools":
+        val reset = ["--tool-set=core"]
+        _mcp_init_tool_set(reset)
+        expect(_mcp_get_tool_set()).to_equal("core")
+        val payload = _mcp_tools_list_payload()
+        val count = count_tools_in_payload(payload)
+        expect(count).to_equal(20)
+
+    it "core mode: payload starts with tools array wrapper":
+        val reset = ["--tool-set=core"]
+        _mcp_init_tool_set(reset)
+        val payload = _mcp_tools_list_payload()
+        expect(payload.starts_with("{\"tools\":[")).to_equal(true)
+
+    it "core mode: second payload still has exactly 20 tools (no upgrade)":
+        val reset = ["--tool-set=core"]
+        _mcp_init_tool_set(reset)
+        val _ = _mcp_tools_list_payload()
+        val second = _mcp_tools_list_payload()
+        val count = count_tools_in_payload(second)
+        expect(count).to_equal(20)
+
+    it "core mode: take_emit_list_changed is false":
+        val reset = ["--tool-set=core"]
+        _mcp_init_tool_set(reset)
+        val changed = _mcp_take_emit_list_changed()
+        expect(changed).to_equal(false)

@@ -1,0 +1,91 @@
+use app.llm_runtime.manifest.{LlmRuntimeManifest}
+use app.llm_runtime.live_request_plan.{llm_runtime_vllm_models_request_plan, llm_runtime_vllm_chat_request_plan}
+use app.llm_runtime.live_models_probe.{llm_runtime_probe_vllm_models_response}
+use app.llm_runtime.live_chat_probe.{llm_runtime_probe_vllm_chat_response}
+use app.mcp.main_lazy_json.{LB, RB, jp, js}
+use std.nogc_sync_mut.io.http_sffi.{HttpMethod, http_request}
+
+pub class LlmRuntimeLiveTransportResult:
+    status: text
+    reason: text
+    endpoint_status: text
+    method: text
+    path: text
+    http_status: i64
+    response_status: text
+    response_reason: text
+    body_status: text
+    evidence_jsonl: text
+
+pub fn llm_runtime_fetch_vllm_models(manifest: LlmRuntimeManifest) -> LlmRuntimeLiveTransportResult:
+    val plan = llm_runtime_vllm_models_request_plan(manifest)
+    if plan.status != "planned":
+        return _result_from_plan(plan.status, plan.reason, plan.endpoint_status, plan.method, plan.path, 0, "not_fetched", "request_not_planned", plan.body_status)
+    val response = http_request(HttpMethod.GET, _append_path(manifest.endpoint, "/models"), ["Accept: application/json"], "")
+    llm_runtime_vllm_models_transport_result_from_response(manifest, response.status_code, response.body)
+
+pub fn llm_runtime_fetch_vllm_chat(manifest: LlmRuntimeManifest, messages_json: text, unsupported_param_count: i64) -> LlmRuntimeLiveTransportResult:
+    val plan = llm_runtime_vllm_chat_request_plan(manifest, messages_json, unsupported_param_count)
+    if plan.status != "planned":
+        return _result_from_plan(plan.status, plan.reason, plan.endpoint_status, plan.method, plan.path, 0, "not_fetched", "request_not_planned", plan.body_status)
+    val response = http_request(HttpMethod.POST, _append_path(manifest.endpoint, "/chat/completions"), ["Content-Type: application/json", "Accept: application/json"], messages_json)
+    llm_runtime_vllm_chat_transport_result_from_response(manifest, response.status_code, response.body)
+
+pub fn llm_runtime_vllm_models_transport_result_from_response(manifest: LlmRuntimeManifest, http_status: i64, response_body: text) -> LlmRuntimeLiveTransportResult:
+    val plan = llm_runtime_vllm_models_request_plan(manifest)
+    val parsed = llm_runtime_probe_vllm_models_response(manifest, http_status, response_body)
+    _transport_result("complete", "http_request_complete", plan.endpoint_status, plan.method, plan.path, http_status, parsed.status, parsed.reason, _response_body_status(response_body))
+
+pub fn llm_runtime_vllm_chat_transport_result_from_response(manifest: LlmRuntimeManifest, http_status: i64, response_body: text) -> LlmRuntimeLiveTransportResult:
+    val plan = llm_runtime_vllm_chat_request_plan(manifest, "{}", 0)
+    val parsed = llm_runtime_probe_vllm_chat_response(manifest, http_status, response_body)
+    _transport_result("complete", "http_request_complete", plan.endpoint_status, plan.method, plan.path, http_status, parsed.status, parsed.reason, _response_body_status(response_body))
+
+pub fn llm_runtime_live_transport_jsonl_event(result: LlmRuntimeLiveTransportResult) -> text:
+    LB() +
+    jp("event", js("llm_runtime_vllm_live_transport")) +
+    "," + jp("status", js(result.status)) +
+    "," + jp("reason", js(result.reason)) +
+    "," + jp("endpoint", js(result.endpoint_status)) +
+    "," + jp("method", js(result.method)) +
+    "," + jp("path", js(result.path)) +
+    "," + jp("http_status", str(result.http_status)) +
+    "," + jp("response_status", js(result.response_status)) +
+    "," + jp("response_reason", js(result.response_reason)) +
+    "," + jp("body", js(result.body_status)) +
+    RB() + "\n"
+
+fn _result_from_plan(status: text, reason: text, endpoint_status: text, method: text, path: text, http_status: i64, response_status: text, response_reason: text, body_status: text) -> LlmRuntimeLiveTransportResult:
+    _transport_result(status, reason, endpoint_status, method, path, http_status, response_status, response_reason, body_status)
+
+fn _transport_result(status: text, reason: text, endpoint_status: text, method: text, path: text, http_status: i64, response_status: text, response_reason: text, body_status: text) -> LlmRuntimeLiveTransportResult:
+    val result = LlmRuntimeLiveTransportResult(
+        status: status,
+        reason: reason,
+        endpoint_status: endpoint_status,
+        method: method,
+        path: path,
+        http_status: http_status,
+        response_status: response_status,
+        response_reason: response_reason,
+        body_status: body_status,
+        evidence_jsonl: ""
+    )
+    result.evidence_jsonl = llm_runtime_live_transport_jsonl_event(result)
+    result
+
+fn _response_body_status(body: text) -> text:
+    if body.trim() == "":
+        return "empty"
+    "present"
+
+fn _append_path(endpoint: text, path: text) -> text:
+    var base = endpoint.trim()
+    while base.ends_with("/"):
+        base = base.slice(0, base.len() - 1)
+    if path.starts_with("/"):
+        return base + path
+    base + "/" + path
+
+export LlmRuntimeLiveTransportResult
+export llm_runtime_fetch_vllm_models, llm_runtime_fetch_vllm_chat, llm_runtime_vllm_models_transport_result_from_response, llm_runtime_vllm_chat_transport_result_from_response, llm_runtime_live_transport_jsonl_event

@@ -1,0 +1,149 @@
+"""
+# MCP Context/Ponytail Dispatch Execution Specification
+
+## Overview
+
+This specification proves the Simple-owned context/Ponytail replacement tools
+execute through both MCP dispatch layers. App MCP coverage proves
+`simple_context` and `simple_ponytail` are not only registered in tool tables.
+Lower MCP coverage proves the shared lazy handlers execute the same replacement
+behavior instead of relying only on schema/source-shape checks.
+
+## Examples
+
+- `simple_context` renders a bounded context pack for a source file.
+- `simple_context` can run a source-less embedded SQL query against a generated
+  context DB.
+- `simple_ponytail` renders an audit report from app and lower MCP handlers.
+
+**Requirements:** doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md
+**Plan:** doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md
+**Design:** doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md
+**Research:** doc/01_research/local/llm_tooling_context_ponytail_mimic.md
+"""
+
+use std.spec
+use std.io_runtime.{dir_create_all, file_write}
+use app.mcp.main_dispatch.{dispatch_tool_content}
+use app.io.context_ops.{context_sql_index_packs}
+use lib.nogc_async_mut.mcp.main_lazy_query_tools.{
+    handle_simple_context as lower_handle_simple_context,
+    handle_simple_pipe as lower_handle_simple_pipe,
+    handle_simple_ponytail as lower_handle_simple_ponytail,
+}
+use lib.nogc_async_mut.mcp.main_lazy.{make_tools_list as lower_make_tools_list}
+
+fn _absence_marker() -> text:
+    "n" + "il"
+
+fn _expect_absence_marker_hidden(value: text):
+    expect(value.split(_absence_marker()).len()).to_equal(1)
+
+describe "MCP context and Ponytail replacement dispatch":
+    context "simple_context":
+        it "executes through the app MCP dispatcher and returns a context pack":
+            val args = """{"file":"src/app/mcp/main_dispatch.spl","target":"dispatch_tool","format":"text"}"""
+            val response = dispatch_tool_content("simple_context", args)
+            expect(response).to_contain("-- simple_context file=src/app/mcp/main_dispatch.spl --")
+            expect(response).to_contain("--- Context Pack ---")
+            expect(response).to_contain("dispatch_tool")
+
+        it "executes source-less embedded SQL query through the app MCP dispatcher":
+            dir_create_all("build/test/mcp_context_ponytail_dispatch")
+            val source_path = "build/test/mcp_context_ponytail_dispatch/sql_dispatch_literal.spl"
+            val broad_path = "build/test/mcp_context_ponytail_dispatch/sql_dispatch_broad.spl"
+            val db_path = "build/test/mcp_context_ponytail_dispatch/context_dispatch.db"
+            file_write(source_path, "fn dispatch_sql_context_marker() -> text:\n    \"dispatch_sql_context_marker dispatch_sql_100%_exact sql_dispatch_only\"\n")
+            file_write(broad_path, "fn dispatch_sql_context_marker_broad() -> text:\n    \"dispatch_sql_context_marker dispatch_sql_100xxexact sql_dispatch_broad\"\n")
+
+            val index_output = context_sql_index_packs([source_path, broad_path], "ctx", db_path, "text")
+            expect(index_output).to_contain("status: ready")
+
+            val args = "{\"sql\":\"true\",\"query\":\"dispatch_sql_100%_exact\",\"db\":\"" + db_path + "\",\"format\":\"text\"}"
+            val response = dispatch_tool_content("simple_context", args)
+            expect(response).to_contain("-- simple_context sql query db=" + db_path + " --")
+            expect(response).to_contain("status: ready")
+            expect(response).to_contain("matches: 1")
+            expect(response).to_contain("sql_dispatch_only")
+            expect(response.split("sql_dispatch_broad").len()).to_equal(1)
+
+        it "renders MCP context and Ponytail absence without internal markers":
+            dir_create_all("build/test/mcp_context_ponytail_dispatch")
+            val clean_path = "build/test/mcp_context_ponytail_dispatch/absence_clean.spl"
+            file_write(clean_path, "fn clean_marker() -> text:\n    \"absence_safe_context_marker\"\n")
+
+            val context_args = "{\"file\":\"" + clean_path + "\",\"target\":\"clean_marker\",\"format\":\"text\"}"
+            val app_context = dispatch_tool_content("simple_context", context_args)
+            val lower_context = lower_handle_simple_context("lower-absence-context", context_args)
+            expect(app_context).to_contain("status: ready")
+            expect(lower_context).to_contain("status: ready")
+            _expect_absence_marker_hidden(app_context)
+            _expect_absence_marker_hidden(lower_context)
+
+            val missing_context_args = """{"file":"build/test/mcp_context_ponytail_dispatch/missing_context.spl","format":"text"}"""
+            _expect_absence_marker_hidden(dispatch_tool_content("simple_context", missing_context_args))
+            _expect_absence_marker_hidden(lower_handle_simple_context("lower-missing-context", missing_context_args))
+
+            val ponytail_args = "{\"file\":\"" + clean_path + "\",\"mode\":\"audit\",\"format\":\"text\"}"
+            _expect_absence_marker_hidden(dispatch_tool_content("simple_ponytail", ponytail_args))
+            _expect_absence_marker_hidden(lower_handle_simple_ponytail("lower-absence-ponytail", ponytail_args))
+
+            val missing_ponytail_args = """{"file":"build/test/mcp_context_ponytail_dispatch/missing_ponytail.spl","mode":"audit","format":"text"}"""
+            _expect_absence_marker_hidden(dispatch_tool_content("simple_ponytail", missing_ponytail_args))
+            _expect_absence_marker_hidden(lower_handle_simple_ponytail("lower-missing-ponytail", missing_ponytail_args))
+
+    context "simple_ponytail":
+        it "executes through the app MCP dispatcher and returns an audit report":
+            val args = """{"file":"src/app/mcp/main_dispatch.spl","mode":"audit","format":"text"}"""
+            val response = dispatch_tool_content("simple_ponytail", args)
+            expect(response).to_contain("Ponytail Audit")
+            expect(response).to_contain("source: src/app/mcp/main_dispatch.spl")
+
+    context "simple_pipe":
+        it "advertises one SPipe-linked front door for context and Ponytail":
+            val response = lower_make_tools_list("\"lower-list-pipe\"")
+            expect(response).to_contain("\"name\":\"simple_pipe\"")
+            expect(response).to_contain("SPipe-linked codebase, context, and Ponytail surface")
+
+        it "routes context through the app MCP dispatcher":
+            val args = """{"surface":"context","file":"src/app/mcp/main_dispatch.spl","target":"dispatch_tool","format":"text"}"""
+            val response = dispatch_tool_content("simple_pipe", args)
+            expect(response).to_contain("-- simple_context file=src/app/mcp/main_dispatch.spl --")
+            expect(response).to_contain("dispatch_tool")
+
+        it "routes Ponytail through lower MCP with mode=ponytail":
+            val args = """{"mode":"ponytail","file":"src/lib/nogc_async_mut/mcp/main_lazy.spl","format":"text"}"""
+            val response = lower_handle_simple_pipe("lower-pipe-ponytail", args)
+            expect(response).to_contain("Ponytail Audit")
+            expect(response).to_contain("source: src/lib/nogc_async_mut/mcp/main_lazy.spl")
+
+        it "reports the SPipe-linked surface without requiring a file":
+            val response = dispatch_tool_content("simple_pipe", """{"surface":"spipe"}""")
+            expect(response).to_contain("simple_pipe")
+            expect(response).to_contain("spipe: linked")
+            expect(response).to_contain("surfaces: context, codebase, ponytail, search")
+
+    context "lower MCP":
+        it "advertises simple_context and simple_ponytail through the lower MCP tools list":
+            val response = lower_make_tools_list("\"lower-list-1\"")
+            expect(response).to_contain("\"id\":\"lower-list-1\"")
+            expect(response).to_contain("\"name\":\"simple_pipe\"")
+            expect(response).to_contain("\"name\":\"simple_context\"")
+            expect(response).to_contain("\"name\":\"simple_ponytail\"")
+            expect(response).to_contain("\"inputSchema\"")
+            expect(response).to_contain("\"Source file path; required except when sql=true and query is non-empty\"")
+            expect(response).to_contain("\"Mode: audit/review, simplification/simplify\"")
+            expect(response).to_contain("\"source_filter\"")
+
+        it "executes simple_context through the lower MCP handler":
+            val args = """{"file":"src/lib/nogc_async_mut/mcp/main_lazy.spl","target":"handle_simple_context","format":"text"}"""
+            val response = lower_handle_simple_context("lower-context-1", args)
+            expect(response).to_contain("-- simple_context file=src/lib/nogc_async_mut/mcp/main_lazy.spl --")
+            expect(response).to_contain("--- Context Pack ---")
+            expect(response).to_contain("handle_simple_context")
+
+        it "executes simple_ponytail through the lower MCP handler":
+            val args = """{"file":"src/lib/nogc_async_mut/mcp/main_lazy.spl","mode":"audit","format":"text"}"""
+            val response = lower_handle_simple_ponytail("lower-ponytail-1", args)
+            expect(response).to_contain("Ponytail Audit")
+            expect(response).to_contain("source: src/lib/nogc_async_mut/mcp/main_lazy.spl")

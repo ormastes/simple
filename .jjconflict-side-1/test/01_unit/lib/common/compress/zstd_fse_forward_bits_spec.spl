@@ -1,0 +1,40 @@
+use std.spec
+use std.common.compress.{CompressionError}
+use std.common.compress.zstd_fse.{ZstdFseForwardBits, _zstd_fse_forward_bits_read}
+
+fn check(condition: bool):
+    expect condition == true
+
+describe "Zstd FSE forward bit reader validation":
+    it "rejects negative bit positions before indexing":
+        var data: [u8] = [0x00u8]
+        val state = ZstdFseForwardBits(data: data, start: 0, limit: 1, bit_pos: -1)
+        val result = _zstd_fse_forward_bits_read(state, 1)
+        check(result.is_err())
+        val err = result.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("position"))
+            _:
+                check(false)
+
+    it "rejects malformed ranges before indexing":
+        var data: [u8] = [0x00u8]
+        val negative_start = ZstdFseForwardBits(data: data, start: -1, limit: 1, bit_pos: 0)
+        val inverted = ZstdFseForwardBits(data: data, start: 1, limit: 0, bit_pos: 0)
+        val beyond_data = ZstdFseForwardBits(data: data, start: 0, limit: 2, bit_pos: 0)
+        check(_zstd_fse_forward_bits_read(negative_start, 1).is_err())
+        check(_zstd_fse_forward_bits_read(inverted, 1).is_err())
+        check(_zstd_fse_forward_bits_read(beyond_data, 1).is_err())
+
+    it "rejects empty ranges before indexing":
+        var data: [u8] = [0x00u8]
+        val empty_range = ZstdFseForwardBits(data: data, start: 0, limit: 0, bit_pos: 0)
+        val result = _zstd_fse_forward_bits_read(empty_range, 1)
+        check(result.is_err())
+        val err = result.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("range"))
+            _:
+                check(false)

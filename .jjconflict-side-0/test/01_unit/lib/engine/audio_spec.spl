@@ -1,0 +1,182 @@
+"""
+Engine Audio — AudioManager silent backend tests
+
+Tests AudioManager creation, clip loading/caching, sound handle generation,
+bus volume control, master volume, and mute/unmute.
+
+Uses a pure-Simple mock AudioManager (no rt_audio_* externs) to exercise the
+pure-Simple logic: bus tracking, volume round-trips, handle generation, caching.
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.engine.units.{Volume, Distance}
+use std.nogc_sync_mut.engine.audio.types.{AudioClip, AudioConfig, AudioBus, SoundHandle, default_audio_config}
+
+# ============================================================================
+# MockAudioManager — pure-Simple AudioManager for interpreter testing
+# ============================================================================
+
+class MockAudioManager:
+    buses: Dict<text, AudioBus>
+    clip_cache: Dict<text, AudioClip>
+    master_volume: Volume
+    next_handle: i64
+    active_sounds: [SoundHandle]
+
+impl MockAudioManager:
+    static fn create(config: AudioConfig) -> MockAudioManager:
+        var buses: Dict<text, AudioBus> = {}
+        buses["sfx"]   = AudioBus(name: "sfx",   mixer_handle: 0, volume: Volume(value: 1.0), muted: false)
+        buses["music"] = AudioBus(name: "music",  mixer_handle: 0, volume: Volume(value: 1.0), muted: false)
+        buses["ui"]    = AudioBus(name: "ui",     mixer_handle: 0, volume: Volume(value: 1.0), muted: false)
+        MockAudioManager(
+            buses: buses,
+            clip_cache: {},
+            master_volume: config.master_volume,
+            next_handle: 1,
+            active_sounds: []
+        )
+
+    fn get_bus_volume(bus_name: text) -> Volume:
+        if self.buses.contains_key(bus_name):
+            return self.buses[bus_name].volume
+        Volume(value: 0.0)
+
+    me load_clip(path: text) -> AudioClip:
+        val clip = AudioClip(source_handle: 1, path: path, is_loaded: true)
+        self.clip_cache[path] = clip
+        clip
+
+    me load_clip_cached(path: text) -> AudioClip:
+        if self.clip_cache.contains_key(path):
+            return self.clip_cache[path]
+        self.load_clip(path)
+
+    me play(clip: AudioClip, bus_name: text) -> SoundHandle:
+        val h = SoundHandle(playback_handle: self.next_handle, clip_path: clip.path, bus_name: bus_name, is_spatial: false)
+        self.next_handle = self.next_handle + 1
+        self.active_sounds = self.active_sounds.push(h)
+        h
+
+    me set_bus_volume(bus_name: text, volume: Volume) -> bool:
+        if self.buses.contains_key(bus_name):
+            val bus = self.buses[bus_name]
+            self.buses[bus_name] = AudioBus(name: bus.name, mixer_handle: bus.mixer_handle, volume: volume, muted: bus.muted)
+            return true
+        false
+
+    me set_master_volume(volume: Volume):
+        self.master_volume = volume
+
+    fn get_master_volume() -> Volume:
+        self.master_volume
+
+    me mute_bus(bus_name: text) -> bool:
+        if self.buses.contains_key(bus_name):
+            val bus = self.buses[bus_name]
+            self.buses[bus_name] = AudioBus(name: bus.name, mixer_handle: bus.mixer_handle, volume: bus.volume, muted: true)
+            return true
+        false
+
+    me unmute_bus(bus_name: text) -> bool:
+        if self.buses.contains_key(bus_name):
+            val bus = self.buses[bus_name]
+            self.buses[bus_name] = AudioBus(name: bus.name, mixer_handle: bus.mixer_handle, volume: bus.volume, muted: false)
+            return true
+        false
+
+describe "AudioManager":
+    it "create initializes with 3 default buses":
+        val config = default_audio_config()
+        val mgr = MockAudioManager.create(config)
+        val sfx_vol = mgr.get_bus_volume("sfx")
+        val music_vol = mgr.get_bus_volume("music")
+        val ui_vol = mgr.get_bus_volume("ui")
+        val sfx_i = sfx_vol.value * 1000.0
+        val music_i = music_vol.value * 1000.0
+        val ui_i = ui_vol.value * 1000.0
+        expect(sfx_i).to_be_greater_than(999.0)
+        expect(sfx_i).to_be_less_than(1001.0)
+        expect(music_i).to_be_greater_than(999.0)
+        expect(music_i).to_be_less_than(1001.0)
+        expect(ui_i).to_be_greater_than(999.0)
+        expect(ui_i).to_be_less_than(1001.0)
+
+    it "load_clip returns valid clip":
+        val config = default_audio_config()
+        var mgr = MockAudioManager.create(config)
+        val clip = mgr.load_clip("sfx/hit.wav")
+        expect(clip.path).to_equal("sfx/hit.wav")
+        expect(clip.is_loaded).to_equal(true)
+
+    it "load_clip_cached returns same on second call":
+        val config = default_audio_config()
+        var mgr = MockAudioManager.create(config)
+        val clip1 = mgr.load_clip_cached("sfx/hit.wav")
+        val clip2 = mgr.load_clip_cached("sfx/hit.wav")
+        expect(clip1.path).to_equal(clip2.path)
+        expect(clip1.is_loaded).to_equal(clip2.is_loaded)
+
+    it "play returns valid SoundHandle":
+        val config = default_audio_config()
+        var mgr = MockAudioManager.create(config)
+        val clip = mgr.load_clip("sfx/hit.wav")
+        val handle = mgr.play(clip, "sfx")
+        expect(handle.is_valid()).to_equal(true)
+        expect(handle.playback_handle).to_be_greater_than(0)
+
+    it "each play gives unique handle":
+        val config = default_audio_config()
+        var mgr = MockAudioManager.create(config)
+        val clip = mgr.load_clip("sfx/hit.wav")
+        val h1 = mgr.play(clip, "sfx")
+        val h2 = mgr.play(clip, "sfx")
+        val h3 = mgr.play(clip, "sfx")
+        val different_1_2 = h1.playback_handle != h2.playback_handle
+        val different_2_3 = h2.playback_handle != h3.playback_handle
+        expect(different_1_2).to_equal(true)
+        expect(different_2_3).to_equal(true)
+
+    it "set_bus_volume and get_bus_volume round-trip":
+        val config = default_audio_config()
+        var mgr = MockAudioManager.create(config)
+        val from_name = "sfx"
+        val ok = mgr.set_bus_volume(from_name, Volume(value: 0.5))
+        expect(ok).to_equal(true)
+        val vol = mgr.get_bus_volume("sfx")
+        val vol_i = vol.value * 1000.0
+        expect(vol_i).to_be_greater_than(499.0)
+        expect(vol_i).to_be_less_than(501.0)
+
+    it "set_master_volume and get_master_volume round-trip":
+        val config = default_audio_config()
+        var mgr = MockAudioManager.create(config)
+        mgr.set_master_volume(Volume(value: 0.75))
+        val vol = mgr.get_master_volume()
+        val vol_i = vol.value * 1000.0
+        expect(vol_i).to_be_greater_than(749.0)
+        expect(vol_i).to_be_less_than(751.0)
+
+    it "mute_bus and unmute_bus":
+        val config = default_audio_config()
+        var mgr = MockAudioManager.create(config)
+        val from_name = "music"
+        val muted = mgr.mute_bus(from_name)
+        expect(muted).to_equal(true)
+        val unmuted = mgr.unmute_bus(from_name)
+        expect(unmuted).to_equal(true)
+
+    it "set_bus_volume returns false for unknown bus":
+        val config = default_audio_config()
+        var mgr = MockAudioManager.create(config)
+        val from_name = "nonexistent"
+        val ok = mgr.set_bus_volume(from_name, Volume(value: 0.5))
+        expect(ok).to_equal(false)
+
+    it "get_bus_volume returns 0 for unknown bus":
+        val config = default_audio_config()
+        val mgr = MockAudioManager.create(config)
+        val vol = mgr.get_bus_volume("nonexistent")
+        val vol_i = vol.value * 1000.0
+        expect(vol_i).to_be_greater_than(-1.0)
+        expect(vol_i).to_be_less_than(1.0)

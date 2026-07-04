@@ -1,0 +1,191 @@
+# Async TUI Application Specification
+#
+# Tests the channel-based async event loop architecture:
+#   - AsyncTuiApp creation
+#   - Event channel send/receive
+#   - Input parser pushes correct events to channel
+#   - File change detection pushes FileChanged
+#   - Render triggered by state change (not continuously)
+#   - Channel close stops the app
+
+use std.spec.*
+
+use std.nogc_async_mut.concurrent.channel.{Channel, channel_new}
+use common.ui.widget.{UIState, UITree, UIEvent, UIMode, WidgetNode}
+use common.ui.builder.{column, text_widget, build_tree, build_tree_with_title}
+use common.ui.state.{init_state, update_state, update_tree, is_quit_event}
+use app.ui.tui.input.{parse_input_line}
+
+# ============================================================================
+# Helper: build a simple tree for testing
+# ============================================================================
+
+fn make_async_test_tree() -> UITree:
+    val root = column("async_root", [
+        text_widget("async_w1", "First"),
+        text_widget("async_w2", "Second"),
+        text_widget("async_w3", "Third")
+    ])
+    return build_tree(root)
+
+# ============================================================================
+# Channel Event Delivery
+# ============================================================================
+
+describe "event channel":
+
+    it "receives events pushed via send":
+        val ch = channel_new()
+        ch.send(UIEvent.FocusNext)
+        val received = ch.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "try_recv returns nil on empty channel":
+        val ch = channel_new()
+        val received = ch.try_recv()
+        expect(received == nil).to_equal(true)
+
+    it "preserves FIFO ordering":
+        val ch = channel_new()
+        ch.send(UIEvent.FocusNext)
+        ch.send(UIEvent.FocusPrev)
+        ch.send(UIEvent.Quit)
+        val first = ch.try_recv()
+        val second = ch.try_recv()
+        val third = ch.try_recv()
+        # All three should be non-nil
+        expect(first != nil).to_equal(true)
+        expect(second != nil).to_equal(true)
+        expect(third != nil).to_equal(true)
+        # Fourth should be nil (empty)
+        val fourth = ch.try_recv()
+        expect(fourth == nil).to_equal(true)
+
+    it "is_closed returns false before close":
+        val ch = channel_new()
+        expect(ch.is_closed()).to_equal(false)
+
+    it "is_closed returns true after close":
+        val ch = channel_new()
+        ch.close()
+        expect(ch.is_closed()).to_equal(true)
+
+    it "buffered messages survive close":
+        val ch = channel_new()
+        ch.send(UIEvent.Quit)
+        ch.close()
+        val received = ch.try_recv()
+        expect(received != nil).to_equal(true)
+
+# ============================================================================
+# Input Parser -> Channel Integration
+# ============================================================================
+
+describe "input parser channel integration":
+
+    it "quit command produces Quit event":
+        val event = parse_input_line("quit")
+        expect(is_quit_event(event)).to_equal(true)
+
+    it "j key produces FocusNext when sent through channel":
+        val ch = channel_new()
+        val event = parse_input_line("j")
+        ch.send(event)
+        val received = ch.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it ":q command produces Quit event":
+        val event = parse_input_line(":q")
+        expect(is_quit_event(event)).to_equal(true)
+
+    it "empty line produces KeyPress enter":
+        val event = parse_input_line("")
+        # parse_input_line("") returns KeyPress(key: "enter")
+        val ch = channel_new()
+        ch.send(event)
+        val received = ch.try_recv()
+        expect(received != nil).to_equal(true)
+
+# ============================================================================
+# File Change Detection
+# ============================================================================
+
+describe "file change detection":
+
+    it "FileChanged event can be sent and received on channel":
+        val ch = channel_new()
+        ch.send(UIEvent.FileChanged)
+        val received = ch.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "update_tree replaces the tree in state":
+        val tree1 = make_async_test_tree()
+        val state1 = init_state(tree1)
+        # Build a different tree
+        val root2 = column("async_root2", [
+            text_widget("async_w4", "Fourth")
+        ])
+        val tree2 = build_tree(root2)
+        val state2 = update_tree(state1, tree2)
+        expect(state2.tree.root_id).to_equal("async_root2")
+
+    it "update_tree preserves mode and focus":
+        val tree1 = make_async_test_tree()
+        val state1 = init_state(tree1)
+        val focused = update_state(state1, UIEvent.FocusNext)
+        val root2 = column("async_alt", [
+            text_widget("async_a1", "Alt")
+        ])
+        val tree2 = build_tree(root2)
+        val state2 = update_tree(focused, tree2)
+        # Mode should be preserved
+        expect(state2.mode_name()).to_equal("NORMAL")
+
+# ============================================================================
+# State Change Detection
+# ============================================================================
+
+describe "state change detection":
+
+    it "FocusNext changes focused_id":
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        val ids = tree.all_widget_ids()
+        val new_state = update_state(state, UIEvent.FocusNext)
+        expect(new_state.focused_id != state.focused_id).to_equal(true)
+
+    it "CommandMode changes mode name":
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        val new_state = update_state(state, UIEvent.CommandMode)
+        expect(new_state.mode_name()).to_equal("COMMAND")
+        expect(new_state.mode_name() != state.mode_name()).to_equal(true)
+
+    it "duplicate normal key does not change state":
+        val tree = make_async_test_tree()
+        val state = init_state(tree)
+        # An unknown key in Normal mode should not change state
+        val new_state = update_state(state, UIEvent.KeyPress(key: "z"))
+        expect(new_state.focused_id).to_equal(state.focused_id)
+        expect(new_state.mode_name()).to_equal(state.mode_name())
+
+# ============================================================================
+# Channel Close Stops App
+# ============================================================================
+
+describe "channel close":
+
+    it "closed channel rejects new sends gracefully":
+        val ch = channel_new()
+        ch.close()
+        # send on closed channel is a no-op
+        ch.send(UIEvent.Quit)
+        # try_recv should return nil (nothing delivered)
+        val received = ch.try_recv()
+        expect(received == nil).to_equal(true)
+
+    it "multiple close calls are safe":
+        val ch = channel_new()
+        ch.close()
+        ch.close()
+        expect(ch.is_closed()).to_equal(true)

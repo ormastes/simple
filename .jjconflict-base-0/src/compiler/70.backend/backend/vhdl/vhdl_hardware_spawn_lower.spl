@@ -1,0 +1,220 @@
+# VHDL Hardware Spawn Lower — Orchestrates the full hardware spawn lowering pipeline.
+#
+# Pipeline: validate attrs -> resolve labels -> lower calls -> emit VHDL signals
+#
+# This module ties together vhdl_hardware_metadata, vhdl_call_lowering, and
+# vhdl_bit_semantics into a single pass that converts @hardware-annotated
+# Simple functions into synthesizable VHDL entity instantiations.
+#
+# Classes:
+#   SpawnLowerInput     — input to the lowering pipeline
+#   SpawnLowerOutput    — output of the lowering pipeline
+#   SpawnLowerDiag      — pipeline diagnostic
+
+use compiler.backend.vhdl.vhdl_hardware_metadata.{HardwareAttr, ReturnLabel, HardwareCallInstance, CallLowerResult, LabelValidation, PortMapEntry, validate_hardware_attr, deterministic_instance_name}
+use compiler.backend.vhdl.vhdl_call_lowering.{CallSite, CallLowerContext, TempSignal, LoweringDiagnostic, lower_call_site, build_instance, allocate_temp_signals}
+use compiler.backend.vhdl.vhdl_bit_semantics.{BitWidth, BitSlice, BitConcat, BitExtension, BitDiagnostic, validate_bit_slice}
+
+# ============================================================================
+# SpawnLowerInput — input to the lowering pipeline
+# ============================================================================
+
+class SpawnLowerInput:
+    """Input describing a hardware spawn to be lowered."""
+    module_name: text
+    function_name: text
+    attr: HardwareAttr
+    call_count: i32
+    s0_caller: text
+    s0_callee: text
+    s0_arg0: text
+    s0_arg1: text
+    s1_caller: text
+    s1_callee: text
+    s1_arg0: text
+    s1_arg1: text
+
+    me has_calls():
+        """Returns true when there are call sites to lower."""
+        return self.call_count > 0
+
+    static fn single_call(mod_name: text, fn_name: text, hw_attr: HardwareAttr, caller: text, callee: text, arg0: text, arg1: text) -> SpawnLowerInput:
+        """Create input with a single call site."""
+        return SpawnLowerInput(
+            module_name: mod_name,
+            function_name: fn_name,
+            attr: hw_attr,
+            call_count: 1,
+            s0_caller: caller,
+            s0_callee: callee,
+            s0_arg0: arg0,
+            s0_arg1: arg1,
+            s1_caller: "",
+            s1_callee: "",
+            s1_arg0: "",
+            s1_arg1: ""
+        )
+
+    static fn two_calls(mod_name: text, fn_name: text, hw_attr: HardwareAttr, c0: text, e0: text, a00: text, a01: text, c1: text, e1: text, a10: text, a11: text) -> SpawnLowerInput:
+        """Create input with two call sites."""
+        return SpawnLowerInput(
+            module_name: mod_name,
+            function_name: fn_name,
+            attr: hw_attr,
+            call_count: 2,
+            s0_caller: c0,
+            s0_callee: e0,
+            s0_arg0: a00,
+            s0_arg1: a01,
+            s1_caller: c1,
+            s1_callee: e1,
+            s1_arg0: a10,
+            s1_arg1: a11
+        )
+
+# ============================================================================
+# SpawnLowerDiag — pipeline diagnostic
+# ============================================================================
+
+class SpawnLowerDiag:
+    """Diagnostic produced during the hardware spawn lowering pipeline."""
+    phase: text
+    level: text
+    message: text
+    is_fatal: bool
+
+    me format() -> text:
+        """Format for display."""
+        return "[" + self.phase + "/" + self.level + "] " + self.message
+
+    static fn validation_error(msg: text) -> SpawnLowerDiag:
+        """Create a validation-phase error."""
+        return SpawnLowerDiag(phase: "validate", level: "error", message: msg, is_fatal: true)
+
+    static fn lowering_error(msg: text) -> SpawnLowerDiag:
+        """Create a lowering-phase error."""
+        return SpawnLowerDiag(phase: "lower", level: "error", message: msg, is_fatal: true)
+
+    static fn emit_info(msg: text) -> SpawnLowerDiag:
+        """Create an emit-phase info."""
+        return SpawnLowerDiag(phase: "emit", level: "info", message: msg, is_fatal: false)
+
+# ============================================================================
+# SpawnLowerOutput — output of the lowering pipeline
+# ============================================================================
+
+class SpawnLowerOutput:
+    """Result of the hardware spawn lowering pipeline."""
+    success: bool
+    instance_count: i32
+    signal_decls: [text]
+    instantiations: [text]
+    diag_count: i32
+    d0: text
+    d1: text
+
+    me has_errors():
+        """Returns true when the pipeline produced errors."""
+        return not self.success
+
+    me vhdl_signals() -> text:
+        """Return all signal declarations joined by newlines."""
+        return self.signal_decls.join("\n")
+
+    me vhdl_instances() -> text:
+        """Return all entity instantiations joined by newlines."""
+        return self.instantiations.join("\n")
+
+    static fn failed(reason: text) -> SpawnLowerOutput:
+        """Create a failed pipeline output."""
+        return SpawnLowerOutput(
+            success: false,
+            instance_count: 0,
+            signal_decls: [],
+            instantiations: [],
+            diag_count: 1,
+            d0: reason,
+            d1: ""
+        )
+
+    static fn empty_ok() -> SpawnLowerOutput:
+        """Create an empty successful output (no calls to lower)."""
+        return SpawnLowerOutput(
+            success: true,
+            instance_count: 0,
+            signal_decls: [],
+            instantiations: [],
+            diag_count: 0,
+            d0: "",
+            d1: ""
+        )
+
+# ============================================================================
+# Pipeline: lower_hardware_spawn
+# ============================================================================
+
+fn lower_hardware_spawn(input: SpawnLowerInput) -> SpawnLowerOutput:
+    """Execute the full hardware spawn lowering pipeline.
+
+    Steps:
+    1. Validate hardware attributes and return labels
+    2. For each call site: lower to entity instance, allocate temp signals
+    3. Collect VHDL signal declarations and instantiation text
+    """
+    # Step 1: Validate attributes
+    var validation = validate_hardware_attr(input.attr)
+    if not validation.is_valid:
+        return SpawnLowerOutput.failed("validation: " + validation.first_error())
+
+    if not input.has_calls():
+        return SpawnLowerOutput.empty_ok()
+
+    # Step 2: Lower each call site
+    var ctx = CallLowerContext.create(input.module_name)
+    var signal_decls = []
+    var instantiations = []
+    var inst_count = 0
+
+    # Call site 0
+    if input.call_count >= 1:
+        var site0 = CallSite.direct(input.s0_caller, input.s0_callee, 0)
+        site0 = site0.with_args(input.s0_arg0, input.s0_arg1)
+        var result0 = lower_call_site(site0, input.attr, ctx)
+        if result0.is_rejected():
+            return SpawnLowerOutput.failed("call_site_0: " + result0.rejection_text())
+        var instance0 = build_instance(site0, input.attr, result0)
+        var temps0 = allocate_temp_signals(input.attr, result0.instance_name)
+        for t in temps0:
+            signal_decls.push(t.vhdl_decl())
+        instantiations.push(instance0.vhdl_instantiation())
+        ctx = ctx.advance()
+        inst_count = inst_count + 1
+
+    # Call site 1
+    if input.call_count >= 2:
+        var site1 = CallSite.direct(input.s1_caller, input.s1_callee, 1)
+        site1 = site1.with_args(input.s1_arg0, input.s1_arg1)
+        var result1 = lower_call_site(site1, input.attr, ctx)
+        if result1.is_rejected():
+            return SpawnLowerOutput.failed("call_site_1: " + result1.rejection_text())
+        var instance1 = build_instance(site1, input.attr, result1)
+        var temps1 = allocate_temp_signals(input.attr, result1.instance_name)
+        for t in temps1:
+            signal_decls.push(t.vhdl_decl())
+        instantiations.push(instance1.vhdl_instantiation())
+        ctx = ctx.advance()
+        inst_count = inst_count + 1
+
+    # Step 3: Build output
+    return SpawnLowerOutput(
+        success: true,
+        instance_count: inst_count,
+        signal_decls: signal_decls,
+        instantiations: instantiations,
+        diag_count: 0,
+        d0: "",
+        d1: ""
+    )
+
+fn main():
+    print("vhdl_hardware_spawn_lower loaded")

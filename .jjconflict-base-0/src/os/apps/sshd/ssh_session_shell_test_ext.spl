@@ -1,0 +1,71 @@
+use os.apps.sshd.ssh_session.{SshShellLaunchReport}
+use os.kernel.loader.app_registry.{app_registry_cached_bytes, app_registry_fat32_alias, app_registry_root_alias}
+
+fn _ssh_shell_command_token(command_line: text) -> text:
+    val trimmed = command_line.trim()
+    if trimmed == "":
+        return ""
+    val parts = trimmed.split(" ")
+    if parts.len() == 0:
+        return ""
+    parts[0]
+
+fn _ssh_shell_candidate_launchable(path: text) -> bool:
+    app_registry_cached_bytes(path).len() > 4
+
+fn _ssh_shell_resolve_launch_path(command: text) -> text:
+    if command.starts_with("/"):
+        if _ssh_shell_candidate_launchable(command):
+            return command
+        return ""
+    val usr_bin = "/usr/bin/{command}"
+    if _ssh_shell_candidate_launchable(usr_bin):
+        return usr_bin
+    val sys_apps = "/sys/apps/{command}"
+    if _ssh_shell_candidate_launchable(sys_apps):
+        return sys_apps
+    val bin_path = "/bin/{command}"
+    if _ssh_shell_candidate_launchable(bin_path):
+        return bin_path
+    ""
+
+pub fn ssh_shell_launch_report_for_test(command_line: text) -> SshShellLaunchReport:
+    """Resolve an SSH shell/exec command through the shell filesystem launch path."""
+    val command = _ssh_shell_command_token(command_line)
+    if command == "":
+        return SshShellLaunchReport(
+            command_line: command_line,
+            command: "",
+            resolved_path: "",
+            fat32_alias: "",
+            root_alias: "",
+            launchable: false,
+            smf_backed: false,
+            shell_exec_path: false
+        )
+    val path = _ssh_shell_resolve_launch_path(command)
+    if path == "":
+        return SshShellLaunchReport(
+            command_line: command_line,
+            command: command,
+            resolved_path: "",
+            fat32_alias: "",
+            root_alias: "",
+            launchable: false,
+            smf_backed: false,
+            shell_exec_path: true
+        )
+    val fat32 = app_registry_fat32_alias(path)
+    val root = app_registry_root_alias(path)
+    val fat32_text = if fat32 == nil: "" else: fat32.unwrap()
+    val root_text = if root == nil: "" else: root.unwrap()
+    SshShellLaunchReport(
+        command_line: command_line,
+        command: command,
+        resolved_path: path,
+        fat32_alias: fat32_text,
+        root_alias: root_text,
+        launchable: true,
+        smf_backed: fat32_text.ends_with(".SMF"),
+        shell_exec_path: true
+    )

@@ -1,0 +1,87 @@
+# GIC Common — ARM Generic Interrupt Controller v2/v3 register layout
+# helpers shared between arm32 and arm64.
+#
+# Both GICv2 (arm32 + early arm64) and GICv3 (modern arm64 + arm32 LPAE)
+# share the same MMIO register names; bitfield encodings differ for
+# affinity and security extensions only. This module captures the
+# register offsets + the most-common configurations.
+#
+# Wave 2 — added 2026-04-25 for AC-3 helper extraction.
+
+# ---- Distributor (GICD) register offsets ----
+val GICD_CTLR:        u64 = 0x000
+val GICD_TYPER:       u64 = 0x004
+val GICD_IIDR:        u64 = 0x008
+val GICD_IGROUPR:     u64 = 0x080            # +4*n
+val GICD_ISENABLER:   u64 = 0x100            # +4*n
+val GICD_ICENABLER:   u64 = 0x180            # +4*n
+val GICD_ISPENDR:     u64 = 0x200            # +4*n
+val GICD_ICPENDR:     u64 = 0x280            # +4*n
+val GICD_ISACTIVER:   u64 = 0x300
+val GICD_ICACTIVER:   u64 = 0x380
+val GICD_IPRIORITYR:  u64 = 0x400            # +4*n  (1 byte per IRQ)
+val GICD_ITARGETSR:   u64 = 0x800            # GICv2 only — +4*n
+val GICD_ICFGR:       u64 = 0xC00            # +4*n  (2 bits/IRQ: edge/level)
+val GICD_SGIR:        u64 = 0xF00            # GICv2 SGI generate
+
+# ---- CPU Interface (GICC, GICv2) register offsets ----
+val GICC_CTLR:        u64 = 0x0000
+val GICC_PMR:         u64 = 0x0004
+val GICC_BPR:         u64 = 0x0008
+val GICC_IAR:         u64 = 0x000C
+val GICC_EOIR:        u64 = 0x0010
+val GICC_RPR:         u64 = 0x0014
+val GICC_HPPIR:       u64 = 0x0018
+val GICC_DIR:         u64 = 0x1000
+
+# ---- GICv3 Redistributor register offsets (per-CPU 64K frame) ----
+val GICR_CTLR:           u64 = 0x0000
+val GICR_TYPER:          u64 = 0x0008
+val GICR_WAKER:          u64 = 0x0014
+val GICR_SGI_BASE:       u64 = 0x10000      # +0x10000 from RD_base
+val GICR_ISENABLER0:     u64 = 0x10100
+val GICR_ICENABLER0:     u64 = 0x10180
+val GICR_IPRIORITYR0:    u64 = 0x10400      # 8 priority bytes per word
+
+# ---- Bit masks ----
+val GICD_CTLR_ENABLE_GRP0: u32 = 0x1
+val GICD_CTLR_ENABLE_GRP1: u32 = 0x2
+val GICC_CTLR_ENABLE:      u32 = 0x1
+val GICR_WAKER_PROC_SLEEP: u32 = 0x2
+val GICR_WAKER_CHILD_ASLEEP: u32 = 0x4
+
+# Number of IRQs reported by GICD_TYPER (low 5 bits + 1) * 32.
+fn gicd_typer_irq_lines(typer: u32) -> u32:
+    32 * ((typer & 0x1F) + 1)
+
+# Interrupt config register encoding: 2 bits per IRQ, 0b00=level, 0b10=edge.
+fn gicd_icfgr_make(irq_idx: u32, edge: bool) -> u32:
+    val pos: u32 = (irq_idx & 0xF) * 2
+    val val_: u32 = if edge: 0x2 else: 0x0
+    val_ << pos
+
+# Compute the byte offset into GICD_IPRIORITYR / GICR_IPRIORITYR for an IRQ.
+fn priority_byte_offset(irq: u32) -> u32:
+    irq
+
+# Compute the word offset + bit position within ISENABLER/ICENABLER for an IRQ.
+fn enable_word_bit(irq: u32) -> [u32; 2]:
+    [irq / 32, irq % 32]
+
+# Validate IRQ range.
+fn is_sgi(irq: u32) -> bool: irq < 16
+fn is_ppi(irq: u32) -> bool: irq >= 16 and irq < 32
+fn is_spi(irq: u32) -> bool: irq >= 32 and irq < 1020
+
+# Generate-SGI (GICv2 GICD_SGIR encoding).
+@repr("C")
+struct SgirRequest:
+    """GICv2 software-generated-interrupt request."""
+    target_filter: u32     # 0=use list, 1=all-except-self, 2=self
+    cpu_target_list: u32   # 8-bit mask
+    sgi_intid: u32         # 0..15
+    nsatt: bool
+
+fn sgir_encode(req: SgirRequest) -> u32:
+    val nsatt_bit: u32 = if req.nsatt: 1 else: 0
+    ((req.target_filter & 0x3) << 24) | ((req.cpu_target_list & 0xFF) << 16) | ((nsatt_bit & 0x1) << 15) | (req.sgi_intid & 0xF)

@@ -1,0 +1,63 @@
+#!/bin/sh
+set -eu
+
+# run_simpleos_qemu.shs — End-to-end SimpleOS QEMU x86_64 launcher
+#
+# Usage:
+#   sh scripts/run_simpleos_qemu.shs            # bake disk image + launch QEMU
+#   sh scripts/run_simpleos_qemu.shs --no-bake  # skip disk bake, use existing image
+#
+# Env knobs:
+#   SIMPLEOS_KERNEL_ELF   Path to kernel ELF  (default: build/os/kernel.elf)
+#   SIMPLEOS_DISK_IMG     Path to FAT32 disk image (default: build/os/simpleos.img)
+#   QEMU_MEM              RAM for QEMU (default: 256M)
+#   QEMU_CPUS             CPU count    (default: 1)
+#   QEMU_EXTRA_ARGS       Extra args appended to the qemu-system-x86_64 command
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+
+SIMPLEOS_KERNEL_ELF="${SIMPLEOS_KERNEL_ELF:-${ROOT_DIR}/build/os/kernel.elf}"
+SIMPLEOS_DISK_IMG="${SIMPLEOS_DISK_IMG:-${ROOT_DIR}/build/os/simpleos.img}"
+QEMU_MEM="${QEMU_MEM:-256M}"
+QEMU_CPUS="${QEMU_CPUS:-1}"
+QEMU_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
+
+NO_BAKE=0
+for arg in "$@"; do
+    case "$arg" in
+        --no-bake) NO_BAKE=1 ;;
+        *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+    esac
+done
+
+if [ "$NO_BAKE" -eq 0 ]; then
+    echo "[run-simpleos] Baking disk image via disk_image_bake.spl..."
+    "${ROOT_DIR}/bin/simple" "${ROOT_DIR}/src/os/port/disk_image_bake.spl"
+fi
+
+if [ ! -f "$SIMPLEOS_KERNEL_ELF" ]; then
+    echo "[run-simpleos] ERROR: kernel ELF not found: $SIMPLEOS_KERNEL_ELF" >&2
+    exit 1
+fi
+
+if [ ! -f "$SIMPLEOS_DISK_IMG" ]; then
+    echo "[run-simpleos] ERROR: disk image not found: $SIMPLEOS_DISK_IMG" >&2
+    exit 1
+fi
+
+echo "[run-simpleos] Launching QEMU x86_64..."
+echo "  kernel : $SIMPLEOS_KERNEL_ELF"
+echo "  disk   : $SIMPLEOS_DISK_IMG"
+echo "  mem    : $QEMU_MEM"
+echo "  cpus   : $QEMU_CPUS"
+
+# shellcheck disable=SC2086
+exec qemu-system-x86_64 \
+    -kernel "$SIMPLEOS_KERNEL_ELF" \
+    -drive "file=${SIMPLEOS_DISK_IMG},format=raw,if=virtio" \
+    -m "$QEMU_MEM" \
+    -smp "$QEMU_CPUS" \
+    -serial stdio \
+    -display none \
+    -no-reboot \
+    $QEMU_EXTRA_ARGS

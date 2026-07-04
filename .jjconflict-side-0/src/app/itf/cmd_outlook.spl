@@ -1,0 +1,357 @@
+# ITF CLI — Outlook (Microsoft Graph mail) commands
+#
+# Subcommands: folders, messages, get, move, mark
+# All subcommands honour --json.
+#
+# Auth: requires `outlook.tenant_id`, `outlook.client_id`, and
+#       `outlook.shared_mailbox` in `~/.config/itf/auth.sdn`, plus the
+#       client secret in env var named by `outlook.client_secret_env`
+#       (default GRAPH_CLIENT_SECRET).
+#
+# This file does NOT modify auth.spl or main.spl — the orchestrator
+# wires those up after both adapter agents finish.
+
+use std.nogc_sync_mut.file_system.file_ops.{file_exists, file_read_text}
+use app.itf.config.{ItfConfig, load_config, config_dir}
+use app.itf.flags.{_extract_flag, _has_flag, _positional_args}
+use app.itf.output.{print_error, print_success, print_info, print_table_header, print_table_row, format_json_output, wants_json}
+use app.itf.adapter_outlook.{
+    OutlookClient,
+    OutlookFolder,
+    OutlookMessage,
+    outlook_client_acquire,
+    outlook_list_folders,
+    outlook_list_messages,
+    outlook_get_message,
+    outlook_mark_read,
+    outlook_move_message,
+}
+
+
+fn handle_outlook(args: [text]) -> i64:
+    """Dispatch outlook subcommands.
+
+    Subcommands: folders | messages | get | move | mark.
+    Returns the exit code (0 = success, non-zero = error).
+    """
+    if args.len() == 0:
+        _print_outlook_help()
+        return 0
+
+    val action = args[0]
+    val action_args = if args.len() > 1: args[1:] else: []
+
+    match action:
+        "folders":
+            _outlook_folders(action_args)
+        "messages":
+            _outlook_messages(action_args)
+        "get":
+            _outlook_get(action_args)
+        "move":
+            _outlook_move(action_args)
+        "mark":
+            _outlook_mark(action_args)
+        "-h" | "--help" | "help":
+            _print_outlook_help()
+            0
+        _:
+            print_error("unknown outlook command: {action}")
+            _print_outlook_help()
+            1
+
+
+# ============================================================================
+# Subcommand handlers
+# ============================================================================
+
+fn _outlook_folders(args: [text]) -> i64:
+    """List mail folders. Usage: itf outlook folders [--json]"""
+    val (ok, client) = _acquire_client()
+    if not ok:
+        return 1
+
+    val (success, folders, raw) = outlook_list_folders(client)
+    if not success:
+        print_error("failed to list folders: {raw}")
+        return 1
+
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+
+    if folders.len() == 0:
+        print "No folders."
+        return 0
+
+    print_table_header(["ID", "NAME", "TOTAL", "UNREAD"])
+    for f in folders:
+        print_table_row([_truncate(f.id, 24), f.display_name, "{f.total_item_count}", "{f.unread_item_count}"])
+
+    0
+
+
+fn _outlook_messages(args: [text]) -> i64:
+    """List messages. Usage: itf outlook messages <FOLDER_ID> [--filter EXPR] [--top N] [--json]"""
+    val (ok, client) = _acquire_client()
+    if not ok:
+        return 1
+
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("folder id required. Usage: itf outlook messages <FOLDER_ID>")
+        return 1
+
+    val folder_id = positionals[0]
+    val filter = _extract_flag(args, "--filter", "")
+    val top_str = _extract_flag(args, "--top", "50")
+    var top: i64 = 50
+    var n: i64 = 0
+    for ch in top_str:
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + (ch.to_i64() - "0".to_i64())
+    if n > 0:
+        top = n
+
+    val (success, messages, raw) = outlook_list_messages(client, folder_id, filter, top)
+    if not success:
+        print_error("failed to list messages: {raw}")
+        return 1
+
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+
+    if messages.len() == 0:
+        print "No messages."
+        return 0
+
+    print_table_header(["ID", "FROM", "SUBJECT", "RECEIVED"])
+    for m in messages:
+        print_table_row([
+            _truncate(m.id, 18),
+            _truncate(if m.from_name != "": m.from_name else: m.from_address, 24),
+            _truncate(m.subject, 50),
+            m.received,
+        ])
+
+    0
+
+
+fn _outlook_get(args: [text]) -> i64:
+    """Get one message. Usage: itf outlook get <MSG_ID> [--attachments] [--json]"""
+    val (ok, client) = _acquire_client()
+    if not ok:
+        return 1
+
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("message id required. Usage: itf outlook get <MSG_ID>")
+        return 1
+
+    val msg_id = positionals[0]
+    val expand = _has_flag(args, "--attachments")
+
+    val (success, msg, raw) = outlook_get_message(client, msg_id, expand)
+    if not success:
+        print_error("failed to get message: {raw}")
+        return 1
+
+    if wants_json(args):
+        print format_json_output(raw, args)
+        return 0
+
+    print "Subject: {msg.subject}"
+    print "From: {msg.from_name} <{msg.from_address}>"
+    print "Received: {msg.received}"
+    print "Has attachments: {msg.has_attachments}"
+    if msg.body_preview != "":
+        print ""
+        print msg.body_preview
+
+    0
+
+
+fn _outlook_move(args: [text]) -> i64:
+    """Move a message. Usage: itf outlook move <MSG_ID> --to <DEST_FOLDER_ID> [--json]"""
+    val (ok, client) = _acquire_client()
+    if not ok:
+        return 1
+
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("message id required. Usage: itf outlook move <MSG_ID> --to <DEST>")
+        return 1
+    val msg_id = positionals[0]
+    val dest = _extract_flag(args, "--to", "")
+    if dest == "":
+        print_error("--to <DEST_FOLDER_ID> is required")
+        return 1
+
+    val (success, raw) = outlook_move_message(client, msg_id, dest)
+    if not success:
+        print_error("failed to move message: {raw}")
+        return 1
+
+    if wants_json(args):
+        print raw
+        return 0
+
+    print_success("Moved {msg_id} to {dest}")
+    0
+
+
+fn _outlook_mark(args: [text]) -> i64:
+    """Mark a message read/unread. Usage: itf outlook mark <MSG_ID> [--unread] [--json]"""
+    val (ok, client) = _acquire_client()
+    if not ok:
+        return 1
+
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("message id required. Usage: itf outlook mark <MSG_ID>")
+        return 1
+    val msg_id = positionals[0]
+    val is_read = not _has_flag(args, "--unread")
+
+    val (success, raw) = outlook_mark_read(client, msg_id, is_read)
+    if not success:
+        print_error("failed to mark message: {raw}")
+        return 1
+
+    if wants_json(args):
+        print raw
+        return 0
+
+    val verb = if is_read: "read" else: "unread"
+    print_success("Marked {msg_id} as {verb}")
+    0
+
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _acquire_client() -> (bool, OutlookClient):
+    """Pull tenant/client/UPN from config and acquire a Graph client.
+
+    Reads outlook.{tenant_id, client_id, client_secret_env, shared_mailbox}
+    from auth.sdn. The client_secret itself is resolved from the env var
+    named by client_secret_env (default GRAPH_CLIENT_SECRET) — never stored
+    inline.
+    """
+    val outlook = _load_outlook_section()
+    if outlook.tenant_id == "" or outlook.client_id == "" or outlook.shared_mailbox == "":
+        print_error("outlook auth not configured. See `itf auth login --outlook`.")
+        return (false, OutlookClient(access_token: "", mailbox_upn: "", base_url: ""))
+
+    val secret_env = if outlook.client_secret_env != "": outlook.client_secret_env else: "GRAPH_CLIENT_SECRET"
+    val cache_path = "{config_dir()}/outlook_token_cache.sdn"
+
+    val (ok, client) = outlook_client_acquire(
+        outlook.tenant_id,
+        outlook.client_id,
+        secret_env,
+        outlook.shared_mailbox,
+        cache_path,
+    )
+    if not ok:
+        print_error("failed to acquire Graph access token (env var {secret_env} missing or token endpoint failed)")
+    (ok, client)
+
+
+class OutlookSection:
+    """Parsed [outlook] section of auth.sdn (read locally; auth.spl owns the
+    canonical schema after the orchestrator wires it up)."""
+    tenant_id: text
+    client_id: text
+    client_secret_env: text
+    shared_mailbox: text
+
+
+fn _load_outlook_section() -> OutlookSection:
+    """Best-effort SDN parse of the [outlook] section in auth.sdn.
+
+    This is a stop-gap until auth.spl exposes a typed accessor. The
+    orchestrator will replace this with `load_outlook_config(config)`.
+    """
+    val empty = OutlookSection(tenant_id: "", client_id: "", client_secret_env: "", shared_mailbox: "")
+    val path = "{config_dir()}/auth.sdn"
+    if not file_exists(path):
+        return empty
+    val content = file_read_text(path)
+    if content == nil:
+        return empty
+
+    var section = ""
+    var tenant = ""
+    var cid = ""
+    var senv = ""
+    var mailbox = ""
+
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            pass_dn
+        else if trimmed.ends_with(":") and not trimmed.contains(" "):
+            section = trimmed.replace(":", "")
+        else if section == "outlook" and trimmed.contains(":"):
+            val parts = trimmed.split(":", 2)
+            val key = parts[0].trim()
+            val raw_value = parts[1].trim()
+            val value = _strip_quotes(raw_value)
+            match key:
+                "tenant_id":
+                    tenant = value
+                "client_id":
+                    cid = value
+                "client_secret_env":
+                    senv = value
+                "shared_mailbox":
+                    mailbox = value
+                _:
+                    pass_dn
+
+    OutlookSection(
+        tenant_id: tenant,
+        client_id: cid,
+        client_secret_env: senv,
+        shared_mailbox: mailbox,
+    )
+
+
+fn _strip_quotes(s: text) -> text:
+    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
+        return s[1:s.len() - 1]
+    s
+
+
+fn _truncate(s: text, max_len: i64) -> text:
+    if s.len() <= max_len:
+        return s
+    s[0:max_len - 3] + "..."
+
+
+fn _print_outlook_help():
+    """Print outlook subcommand help."""
+    print "Usage: itf outlook <command> [flags]"
+    print ""
+    print "Commands:"
+    print "  folders             List mail folders"
+    print "  messages <FID>      List messages in a folder"
+    print "  get <MID>           Get a single message"
+    print "  move <MID> --to F   Move a message to another folder"
+    print "  mark <MID>          Mark a message read (--unread to mark unread)"
+    print ""
+    print "Common flags:"
+    print "  --json              Output as JSON"
+    print "  --jq EXPR           Filter JSON output"
+    print "  --filter EXPR       Graph $filter expression (messages only)"
+    print "  --top N             Page size (default: 50, messages only)"
+    print "  --attachments       Expand attachments inline (get only)"
+    print ""
+    print "Auth:"
+    print "  Reads tenant_id/client_id/shared_mailbox from ~/.config/itf/auth.sdn"
+    print "  Reads the client secret from env var GRAPH_CLIENT_SECRET (override"
+    print "  via outlook.client_secret_env in auth.sdn)."

@@ -1,0 +1,328 @@
+# WebRenderSession and Engine2D API Tests
+#
+# Tests WebRenderSession lifecycle and the Engine2D session-aware constructors.
+#
+# No imports — types are replicated at module level to avoid interpreter
+# timeout issues (same pattern as session_mode_separation_spec.spl).
+
+# ============================================================================
+# Replicated enums
+# ============================================================================
+
+enum BackendSessionMode:
+    LegacyNoSession
+    ManagedShared
+    PerfExclusive
+
+enum BackendSessionKind:
+    Cpu
+    Cuda
+    Vulkan
+    Metal
+    WebGpu
+
+# ============================================================================
+# Replicated WebRenderSession
+# ============================================================================
+
+class WebRenderSession:
+    surface_id: i64
+    session_id: i64
+    session_mode: BackendSessionMode
+    ref_count: i64
+    frame_count: i64
+    begin_count: i64
+    end_count: i64
+    is_active: bool
+    valid: bool
+
+    static fn create(surface_id: i64, session_id: i64, session_mode: BackendSessionMode) -> WebRenderSession:
+        if session_mode == BackendSessionMode.PerfExclusive:
+            return WebRenderSession(
+                surface_id: surface_id,
+                session_id: 0,
+                session_mode: session_mode,
+                ref_count: 0,
+                frame_count: 0,
+                begin_count: 0,
+                end_count: 0,
+                is_active: false,
+                valid: false
+            )
+        WebRenderSession(
+            surface_id: surface_id,
+            session_id: session_id,
+            session_mode: session_mode,
+            ref_count: 1,
+            frame_count: 0,
+            begin_count: 0,
+            end_count: 0,
+            is_active: false,
+            valid: true
+        )
+
+    fn is_valid() -> bool:
+        self.valid
+
+    me create_surface() -> i64:
+        if not self.valid:
+            return 0
+        self.surface_id
+
+    me retain_session() -> i64:
+        if not self.valid:
+            return -1
+        self.ref_count = self.ref_count + 1
+        self.ref_count
+
+    me release_session():
+        if not self.valid:
+            return
+        if self.ref_count <= 0:
+            return
+        self.ref_count = self.ref_count - 1
+        if self.ref_count == 0:
+            self.is_active = false
+            self.valid = false
+
+    me begin_frame():
+        if not self.valid:
+            return
+        self.is_active = true
+        self.begin_count = self.begin_count + 1
+
+    me end_frame():
+        if not self.valid:
+            return
+        self.is_active = false
+        self.end_count = self.end_count + 1
+        self.frame_count = self.frame_count + 1
+
+# ============================================================================
+# Replicated Engine2D
+# ============================================================================
+
+fn resolve_kind(kind: text) -> BackendSessionKind:
+    if kind == "cuda":
+        return BackendSessionKind.Cuda
+    if kind == "vulkan":
+        return BackendSessionKind.Vulkan
+    if kind == "metal":
+        return BackendSessionKind.Metal
+    if kind == "webgpu":
+        return BackendSessionKind.WebGpu
+    BackendSessionKind.Cpu
+
+fn resolve_mode(policy: text) -> BackendSessionMode:
+    if policy == "legacy":
+        return BackendSessionMode.LegacyNoSession
+    if policy == "perf":
+        return BackendSessionMode.PerfExclusive
+    BackendSessionMode.ManagedShared
+
+class Engine2D:
+    width: i64
+    height: i64
+    session_handle_id: i64
+    session_mode: BackendSessionMode
+    session_kind: BackendSessionKind
+    initialized: bool
+
+    static fn create(w: i64, h: i64) -> Engine2D:
+        Engine2D(
+            width: w,
+            height: h,
+            session_handle_id: 0,
+            session_mode: BackendSessionMode.LegacyNoSession,
+            session_kind: BackendSessionKind.Cpu,
+            initialized: true
+        )
+
+    static fn create_managed(w: i64, h: i64, kind: text, policy: text) -> Engine2D:
+        val bkind = resolve_kind(kind)
+        val bmode = resolve_mode(policy)
+        val hid = w * h
+        Engine2D(
+            width: w,
+            height: h,
+            session_handle_id: hid,
+            session_mode: bmode,
+            session_kind: bkind,
+            initialized: true
+        )
+
+    static fn create_with_session(w: i64, h: i64, session_handle: i64) -> Engine2D:
+        Engine2D(
+            width: w,
+            height: h,
+            session_handle_id: session_handle,
+            session_mode: BackendSessionMode.ManagedShared,
+            session_kind: BackendSessionKind.Cpu,
+            initialized: true
+        )
+
+    me fill(x: i64, y: i64, rw: i64, rh: i64, color: i64) -> i64:
+        if not self.initialized:
+            return 1
+        0
+
+    me present() -> i64:
+        if not self.initialized:
+            return 1
+        0
+
+    fn get_session_handle() -> i64:
+        self.session_handle_id
+
+# ============================================================================
+# Module-level helpers (avoids var-rebind issues in it-blocks)
+# ============================================================================
+
+fn make_managed_web_session() -> WebRenderSession:
+    WebRenderSession.create(42, 7, BackendSessionMode.ManagedShared)
+
+fn make_legacy_web_session() -> WebRenderSession:
+    WebRenderSession.create(10, 3, BackendSessionMode.LegacyNoSession)
+
+fn make_perf_web_session() -> WebRenderSession:
+    WebRenderSession.create(99, 5, BackendSessionMode.PerfExclusive)
+
+fn make_legacy_engine() -> Engine2D:
+    Engine2D.create(800, 600)
+
+fn make_managed_engine(knd: text) -> Engine2D:
+    Engine2D.create_managed(1920, 1080, knd, "managed")
+
+fn make_session_engine(hid: i64) -> Engine2D:
+    Engine2D.create_with_session(640, 480, hid)
+
+fn web_retain_result(ws: WebRenderSession) -> i64:
+    ws.retain_session()
+
+fn web_frame_cycle(ws: WebRenderSession) -> i64:
+    ws.begin_frame()
+    ws.end_frame()
+    ws.frame_count
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "WebRenderSession lifecycle":
+
+    it "managed web session is valid after create":
+        val ws = make_managed_web_session()
+        expect(ws.is_valid()).to_equal(true)
+        expect(ws.surface_id).to_equal(42)
+        expect(ws.session_id).to_equal(7)
+        expect(ws.ref_count).to_equal(1)
+
+    it "legacy mode web session is valid":
+        val ws = make_legacy_web_session()
+        expect(ws.is_valid()).to_equal(true)
+        expect(ws.session_mode == BackendSessionMode.LegacyNoSession).to_equal(true)
+
+    it "perf exclusive web session is rejected - is_valid false":
+        val ws = make_perf_web_session()
+        expect(ws.is_valid()).to_equal(false)
+        expect(ws.ref_count).to_equal(0)
+
+    it "create_surface returns surface_id for valid session":
+        val ws = make_managed_web_session()
+        val sid = ws.create_surface()
+        expect(sid).to_equal(42)
+
+    it "create_surface returns 0 for invalid perf-exclusive session":
+        val ws = make_perf_web_session()
+        val sid = ws.create_surface()
+        expect(sid).to_equal(0)
+
+    it "retain_session increments ref_count":
+        val ws = make_managed_web_session()
+        val cnt = web_retain_result(ws)
+        expect(cnt).to_equal(2)
+
+    it "retain_session on invalid session returns -1":
+        val ws = make_perf_web_session()
+        val cnt = ws.retain_session()
+        expect(cnt).to_equal(-1)
+
+    it "release_session decrements ref_count":
+        val ws = make_managed_web_session()
+        ws.retain_session()
+        expect(ws.ref_count).to_equal(2)
+        ws.release_session()
+        expect(ws.ref_count).to_equal(1)
+
+    it "release to zero invalidates session":
+        val ws = make_managed_web_session()
+        ws.release_session()
+        expect(ws.ref_count).to_equal(0)
+        expect(ws.is_valid()).to_equal(false)
+
+    it "begin_frame sets is_active true":
+        val ws = make_managed_web_session()
+        ws.begin_frame()
+        expect(ws.is_active).to_equal(true)
+        expect(ws.begin_count).to_equal(1)
+
+    it "end_frame clears is_active and increments frame_count":
+        val ws = make_managed_web_session()
+        ws.begin_frame()
+        ws.end_frame()
+        expect(ws.is_active).to_equal(false)
+        expect(ws.frame_count).to_equal(1)
+        expect(ws.end_count).to_equal(1)
+
+    it "multiple frame cycles accumulate frame_count":
+        val ws = make_managed_web_session()
+        val fc1 = web_frame_cycle(ws)
+        val fc2 = web_frame_cycle(ws)
+        expect(fc1).to_equal(1)
+        expect(fc2).to_equal(2)
+
+    it "begin_frame on invalid session is a no-op":
+        val ws = make_perf_web_session()
+        ws.begin_frame()
+        expect(ws.begin_count).to_equal(0)
+
+describe "Engine2D API constructors":
+
+    it "legacy create produces no-session engine":
+        val e = make_legacy_engine()
+        expect(e.initialized).to_equal(true)
+        expect(e.width).to_equal(800)
+        expect(e.height).to_equal(600)
+        expect(e.get_session_handle()).to_equal(0)
+        expect(e.session_mode == BackendSessionMode.LegacyNoSession).to_equal(true)
+
+    it "create_managed with cpu produces managed engine":
+        val e = make_managed_engine("cpu")
+        expect(e.initialized).to_equal(true)
+        expect(e.session_mode == BackendSessionMode.ManagedShared).to_equal(true)
+        expect(e.session_kind == BackendSessionKind.Cpu).to_equal(true)
+
+    it "create_managed with cuda resolves kind":
+        val e = Engine2D.create_managed(320, 240, "cuda", "managed")
+        expect(e.session_kind == BackendSessionKind.Cuda).to_equal(true)
+        expect(e.session_mode == BackendSessionMode.ManagedShared).to_equal(true)
+
+    it "create_managed session_handle_id is non-zero":
+        val e = make_managed_engine("cpu")
+        val hid = e.get_session_handle()
+        expect(hid).to_be_greater_than(0)
+
+    it "create_with_session stores provided handle id":
+        val e = make_session_engine(99)
+        expect(e.get_session_handle()).to_equal(99)
+        expect(e.session_mode == BackendSessionMode.ManagedShared).to_equal(true)
+
+    it "fill returns 0 on initialized engine":
+        val e = make_legacy_engine()
+        val rc = e.fill(0, 0, 100, 100, 0)
+        expect(rc).to_equal(0)
+
+    it "present returns 0 on initialized engine":
+        val e = make_legacy_engine()
+        val rc = e.present()
+        expect(rc).to_equal(0)

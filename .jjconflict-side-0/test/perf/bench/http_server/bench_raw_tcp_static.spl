@@ -1,0 +1,101 @@
+"""
+Raw TCP static file benchmark. Pre-caches a file from disk then serves it.
+Compare with nginx: nginx -c $(pwd)/test/perf/bench/http_server/nginx_bench.conf
+"""
+
+extern fn rt_io_tcp_socket_create(family: i64) -> i64
+extern fn rt_io_tcp_set_reuseaddr(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_set_reuseport(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_set_nonblocking(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_bind_fd(fd: i64, addr: text) -> bool
+extern fn rt_io_tcp_listen(fd: i64, backlog: i64) -> bool
+extern fn rt_io_tcp_accept(fd: i64) -> i64
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+extern fn rt_event_loop_create() -> i64
+extern fn rt_event_loop_register(epfd: i64, fd: i64, mode: i64) -> i64
+extern fn rt_event_loop_poll(epfd: i64, max_events: i64, timeout_ms: i64) -> i64
+extern fn rt_event_loop_poll_get_fd(index: i64) -> i64
+extern fn rt_file_read_all_text(path: text) -> text
+extern fn rt_string_len(s: text) -> i64
+
+fn main():
+    val file_path = "/tmp/simple_bench_data/hello.txt"
+    print "Raw TCP Static File Server"
+    print "  Reading file: {file_path}"
+
+    val body = rt_file_read_all_text(file_path)
+    val body_len = rt_string_len(body)
+    print "  File size: {body_len} bytes"
+
+    if body_len == 0:
+        print "  ERROR: File not found or empty. Create it:"
+        print "    mkdir -p /tmp/simple_bench_data"
+        print "    echo -n 'Hello, World!' > /tmp/simple_bench_data/hello.txt"
+        return
+
+    val resp = "HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\n{body}"
+    val resp_len = rt_string_len(resp)
+    print "  Response size: {resp_len} bytes (header + body)"
+
+    print "  Creating socket..."
+    val fd = rt_io_tcp_socket_create(4)
+    print "  Socket fd: {fd}"
+
+    val r1 = rt_io_tcp_set_reuseaddr(fd, true)
+    print "  SO_REUSEADDR: {r1}"
+    val r2 = rt_io_tcp_set_reuseport(fd, true)
+    print "  SO_REUSEPORT: {r2}"
+
+    val r3 = rt_io_tcp_bind_fd(fd, "0.0.0.0:9090")
+    print "  Bind: {r3}"
+
+    rt_io_tcp_set_nonblocking(fd, true)
+
+    val r4 = rt_io_tcp_listen(fd, 1024)
+    print "  Listen: {r4}"
+
+    print "  Creating epoll..."
+    val epfd = rt_event_loop_create()
+    print "  epoll fd: {epfd}"
+
+    val r5 = rt_event_loop_register(epfd, fd, 0)
+    print "  Register: {r5}"
+
+    print ""
+    print "  Listening on http://0.0.0.0:9090"
+    print "  Serving: {file_path} ({body_len} bytes)"
+    print ""
+    print "  Benchmark:"
+    print "    wrk -t4 -c100 -d10s http://localhost:9090/hello.txt"
+    print "  Compare with nginx (port 9091):"
+    print "    wrk -t4 -c100 -d10s http://localhost:9091/hello.txt"
+    print ""
+
+    var count: i64 = 0
+    while true:
+        val n = rt_event_loop_poll(epfd, 256, 1000)
+        var i: i64 = 0
+        while i < n:
+            val efd = rt_event_loop_poll_get_fd(i)
+            if efd == fd:
+                var j = 0
+                while j < 64:
+                    val cfd = rt_io_tcp_accept(fd)
+                    if cfd < 0:
+                        j = 64
+                    else:
+                        rt_io_tcp_set_nonblocking(cfd, true)
+                        rt_io_tcp_set_nodelay(cfd, true)
+                        rt_event_loop_register(epfd, cfd, 0)
+                    j = j + 1
+            else:
+                val data = rt_io_tcp_read(efd, 4096)
+                if data.len() > 0:
+                    rt_io_tcp_write_text(efd, resp)
+                    count = count + 1
+                else:
+                    rt_io_tcp_close(efd)
+            i = i + 1

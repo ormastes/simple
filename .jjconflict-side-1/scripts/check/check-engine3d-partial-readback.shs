@@ -1,0 +1,194 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+TIMEOUT_SECS="${SIMPLE_ENGINE3D_READBACK_TIMEOUT_SECS:-120}"
+WORK_DIR="${BUILD_DIR:-build/engine3d-partial-readback}"
+REPORT_PATH="${REPORT_PATH:-$WORK_DIR/report.md}"
+EVIDENCE_SRC="$WORK_DIR/engine3d_partial_readback_evidence.spl"
+EVIDENCE_LOG="$WORK_DIR/evidence.log"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+run_with_timeout() {
+    if have timeout; then
+        timeout "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+value_of() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$EVIDENCE_LOG" | tail -n 1
+}
+
+emit_report() {
+    mkdir -p "$(dirname -- "$REPORT_PATH")"
+    {
+        echo "# Engine3D Partial Readback Evidence"
+        echo
+        echo "- status: ${STATUS:-unknown}"
+        echo "- reason: ${REASON:-unknown}"
+        echo "- cpu_rendered: ${CPU_RENDERED:-unknown}"
+        echo "- cpu_checksum: ${CPU_CHECKSUM:-0}"
+        echo "- software_rendered: ${SOFTWARE_RENDERED:-unknown}"
+        echo "- software_checksum: ${SOFTWARE_CHECKSUM:-0}"
+        echo "- cuda_status: ${CUDA_STATUS:-unknown}"
+        echo "- hip_status: ${HIP_STATUS:-unknown}"
+        echo "- rocm_status: ${ROCM_STATUS:-unknown}"
+        echo "- opencl_status: ${OPENCL_STATUS:-unknown}"
+        echo "- metal_status: ${METAL_STATUS:-unknown}"
+        echo "- vulkan_status: ${VULKAN_STATUS:-unknown}"
+        echo "- webgpu_status: ${WEBGPU_STATUS:-unknown}"
+        echo "- optix_status: ${OPTIX_STATUS:-unknown}"
+        echo "- cpu_readback_status: ${CPU_READBACK_STATUS:-unknown}"
+        echo "- cuda_handle_rejection: ${CUDA_HANDLE_REJECTION:-unknown}"
+        echo "- evidence_log: $EVIDENCE_LOG"
+    } >"$REPORT_PATH"
+}
+
+mkdir -p "$WORK_DIR"
+rm -f "$EVIDENCE_LOG" "$REPORT_PATH"
+
+echo "check=engine3d_partial_readback"
+echo "simple_bin=$SIMPLE_BIN"
+echo "timeout_secs=$TIMEOUT_SECS"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    STATUS=fail
+    REASON=missing-simple-bin
+    emit_report
+    echo "engine3d_partial_readback_status=$STATUS"
+    echo "engine3d_partial_readback_reason=$REASON"
+    echo "report_path=$REPORT_PATH"
+    exit 1
+fi
+
+cat >"$EVIDENCE_SRC" <<'SIMPLE'
+use std.gpu.engine3d.backend_probe3d.{engine3d_reference_render_evidence, engine3d_readback_evidence, engine3d_render_evidence_from_readback_evidence, engine3d_backend_status_text}
+
+fn print_render(prefix: text, backend: text, width: i64, height: i64, draws: i64):
+    val evidence = engine3d_reference_render_evidence(backend, width, height, draws)
+    print(prefix + "_status=" + evidence.status_code)
+    print(prefix + "_rendered=" + evidence.frame_rendered.to_text())
+    print(prefix + "_readback=" + evidence.readback_available.to_text())
+    print(prefix + "_expected_checksum=" + evidence.expected_checksum.to_text())
+    print(prefix + "_actual_checksum=" + evidence.actual_checksum.to_text())
+    print(prefix + "_probe_status=" + engine3d_backend_status_text(evidence.probe.status))
+
+fn main() -> i64:
+    print_render("engine3d_cpu", "cpu", 64, 32, 1)
+    print_render("engine3d_software", "software", 64, 32, 2)
+    print_render("engine3d_cuda", "cuda", 64, 32, 1)
+    print_render("engine3d_hip", "hip", 64, 32, 1)
+    print_render("engine3d_rocm", "rocm", 64, 32, 1)
+    print_render("engine3d_opencl", "opencl", 64, 32, 1)
+    print_render("engine3d_metal", "metal", 64, 32, 1)
+    print_render("engine3d_vulkan", "vulkan", 64, 32, 1)
+    print_render("engine3d_webgpu", "webgpu", 64, 32, 1)
+    print_render("engine3d_optix", "optix", 64, 32, 1)
+
+    val ready = engine3d_readback_evidence("cpu", 16, 16, 1, true, 1, 2, true, 123, 123)
+    val rendered = engine3d_render_evidence_from_readback_evidence(ready)
+    val cuda = engine3d_readback_evidence("cuda", 16, 16, 1, true, 10, 11, true, 123, 123)
+    print("engine3d_cpu_readback_status=" + ready.status_code)
+    print("engine3d_cpu_readback_rendered=" + rendered.frame_rendered.to_text())
+    print("engine3d_cuda_handle_rejection=" + cuda.status_code)
+
+    if not engine3d_reference_render_evidence("cpu", 64, 32, 1).frame_rendered:
+        print("overall=fail")
+        return 1
+    if not engine3d_reference_render_evidence("software", 64, 32, 2).frame_rendered:
+        print("overall=fail")
+        return 1
+    if engine3d_reference_render_evidence("cuda", 64, 32, 1).frame_rendered:
+        print("overall=fail")
+        return 1
+    if cuda.readback_available:
+        print("overall=fail")
+        return 1
+    print("overall=pass")
+    return 0
+SIMPLE
+
+echo "evidence_source=$EVIDENCE_SRC"
+
+set +e
+# SIMPLE_EXECUTION_MODE=interpret is required: without it the default loader
+# resolves `std.*` imports relative to the source file's directory
+# (build/engine3d-partial-readback/std) instead of SIMPLE_LIB, so the
+# backend_probe3d import fails (E1034) and every probe falls back to
+# Unsupported/backend-not-usable — including the CPU/software reference
+# renderers. The interpret loader resolves SIMPLE_LIB correctly.
+SIMPLE_EXECUTION_MODE="${SIMPLE_EXECUTION_MODE:-interpret}" SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" run "$EVIDENCE_SRC" --mode=interpreter --clean >"$EVIDENCE_LOG" 2>&1
+EVIDENCE_CODE=$?
+set -e
+
+cat "$EVIDENCE_LOG"
+echo "evidence_exit_code=$EVIDENCE_CODE"
+
+CPU_RENDERED="$(value_of engine3d_cpu_rendered)"
+CPU_CHECKSUM="$(value_of engine3d_cpu_actual_checksum)"
+SOFTWARE_RENDERED="$(value_of engine3d_software_rendered)"
+SOFTWARE_CHECKSUM="$(value_of engine3d_software_actual_checksum)"
+CUDA_STATUS="$(value_of engine3d_cuda_status)"
+HIP_STATUS="$(value_of engine3d_hip_status)"
+ROCM_STATUS="$(value_of engine3d_rocm_status)"
+OPENCL_STATUS="$(value_of engine3d_opencl_status)"
+METAL_STATUS="$(value_of engine3d_metal_status)"
+VULKAN_STATUS="$(value_of engine3d_vulkan_status)"
+WEBGPU_STATUS="$(value_of engine3d_webgpu_status)"
+OPTIX_STATUS="$(value_of engine3d_optix_status)"
+CPU_READBACK_STATUS="$(value_of engine3d_cpu_readback_status)"
+CUDA_HANDLE_REJECTION="$(value_of engine3d_cuda_handle_rejection)"
+OVERALL="$(value_of overall)"
+
+STATUS=pass
+REASON=partial-3d-readback-evidence-verified
+
+if [ "$EVIDENCE_CODE" -ne 0 ] || [ "$OVERALL" != "pass" ]; then
+    STATUS=fail
+    REASON=simple-evidence-program-failed
+elif [ "$CPU_RENDERED" != "true" ] || [ "$SOFTWARE_RENDERED" != "true" ]; then
+    STATUS=fail
+    REASON=reference-renderer-did-not-render
+elif [ "$CPU_READBACK_STATUS" != "readback-ready" ]; then
+    STATUS=fail
+    REASON=cpu-readback-gate-not-ready
+elif [ "$CUDA_HANDLE_REJECTION" != "backend-not-usable" ]; then
+    STATUS=fail
+    REASON=gpu-readback-handles-accepted-without-runtime
+elif [ "$CUDA_STATUS" != "backend-not-usable" ] || [ "$HIP_STATUS" != "backend-not-usable" ] || [ "$ROCM_STATUS" != "backend-not-usable" ] || [ "$OPENCL_STATUS" != "backend-not-usable" ] || [ "$METAL_STATUS" != "backend-not-usable" ] || [ "$VULKAN_STATUS" != "backend-not-usable" ] || [ "$WEBGPU_STATUS" != "backend-not-usable" ] || [ "$OPTIX_STATUS" != "backend-not-usable" ]; then
+    STATUS=fail
+    REASON=gpu-backend-did-not-fail-closed
+fi
+
+emit_report
+
+echo "engine3d_partial_readback_status=$STATUS"
+echo "engine3d_partial_readback_reason=$REASON"
+echo "engine3d_cpu_rendered=$CPU_RENDERED"
+echo "engine3d_cpu_checksum=$CPU_CHECKSUM"
+echo "engine3d_software_rendered=$SOFTWARE_RENDERED"
+echo "engine3d_software_checksum=$SOFTWARE_CHECKSUM"
+echo "engine3d_cuda_status=$CUDA_STATUS"
+echo "engine3d_hip_status=$HIP_STATUS"
+echo "engine3d_rocm_status=$ROCM_STATUS"
+echo "engine3d_opencl_status=$OPENCL_STATUS"
+echo "engine3d_metal_status=$METAL_STATUS"
+echo "engine3d_vulkan_status=$VULKAN_STATUS"
+echo "engine3d_webgpu_status=$WEBGPU_STATUS"
+echo "engine3d_optix_status=$OPTIX_STATUS"
+echo "engine3d_cpu_readback_status=$CPU_READBACK_STATUS"
+echo "engine3d_cuda_handle_rejection=$CUDA_HANDLE_REJECTION"
+echo "report_path=$REPORT_PATH"
+
+if [ "$STATUS" != "pass" ]; then
+    exit 1
+fi

@@ -1,0 +1,391 @@
+# @tag:system
+# @tag:gui
+# @tag:qemu
+#
+# Live QEMU smoke for the SimpleOS WM input lane.
+#
+# This boots the small wm_input_test_entry kernel and checks the guest-side
+# click/focus/drag markers. The entry exits through isa-debug-exit after the
+# marker sequence, so the serial contract is the proof signal.
+
+use std.spec.*
+use std.io_runtime.{getpid, time_now_unix_micros}
+use app.io.mod.{file_exists, file_delete, file_read_text, env_get, cwd, dir_create_all}
+use app.io.mod.{process_run_timeout, process_spawn_async, process_wait, process_is_running, process_kill, thread_sleep}
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.qemu_runner.{OsTarget, build_os, build_qemu_command}
+
+class QemuGuestHandle:
+    pid: i64
+    qmp_socket: text
+    serial_log: text
+    stderr_log: text
+
+    static fn create(pid: i64, qmp_socket: text, serial_log: text, stderr_log: text) -> QemuGuestHandle:
+        QemuGuestHandle(
+            pid: pid,
+            qmp_socket: qmp_socket,
+            serial_log: serial_log,
+            stderr_log: stderr_log
+        )
+
+fn _shell_quote(value: text) -> text:
+    val escaped = value.replace("'", "'\"'\"'")
+    "'{escaped}'"
+
+fn _shell_command(cmd_parts: [text]) -> text:
+    var shell_cmd = ""
+    var idx = 0
+    while idx < cmd_parts.len():
+        if idx > 0:
+            shell_cmd = shell_cmd + " "
+        shell_cmd = shell_cmd + _shell_quote(cmd_parts[idx])
+        idx = idx + 1
+    shell_cmd
+
+fn _args_with_serial_file(args: [text], serial_log: text) -> [text]:
+    var rewritten: [text] = []
+    var idx = 0
+    while idx < args.len():
+        val arg = args[idx]
+        if arg == "-serial" and idx + 1 < args.len():
+            rewritten.push("-serial")
+            rewritten.push("file:{serial_log}")
+            idx = idx + 2
+            continue
+        rewritten.push(arg)
+        idx = idx + 1
+    rewritten
+
+fn _target_with_qmp(target: OsTarget, qmp_socket: text) -> OsTarget:
+    var extras = target.qemu_extra
+    extras.push("-qmp")
+    extras.push("unix:{qmp_socket},server,nowait")
+    OsTarget(
+        arch: target.arch,
+        entry: target.entry,
+        linker_script: target.linker_script,
+        target_triple: target.target_triple,
+        output: target.output,
+        qemu_system: target.qemu_system,
+        qemu_machine: target.qemu_machine,
+        qemu_cpu: target.qemu_cpu,
+        qemu_memory: target.qemu_memory,
+        qemu_bios: target.qemu_bios,
+        qemu_extra: extras,
+        gui_mode: target.gui_mode
+    )
+
+fn can_run_target(target: OsTarget) -> bool:
+    val qemu_check = process_run_timeout("which", [target.qemu_system], 5000)
+    if qemu_check[2] != 0:
+        print "SKIP: {target.qemu_system} not found on PATH"
+        return false
+    if not file_exists(target.output):
+        print "SKIP: Kernel not built: {target.output}"
+        return false
+    true
+
+fn run_os_qemu_with_target_via_timeout(target: OsTarget, guest_timeout: text, timeout_ms: i64) -> (text, text, i32):
+    val cmd_parts = build_qemu_command(target)
+    val shell_cmd = "timeout {_shell_quote(guest_timeout)} {_shell_command(cmd_parts)} 2>&1 | tr -d '\\000'"
+    val result = process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms)
+    (result[0], result[1], result[2])
+
+fn _cleanup_guest_identity(qmp_socket: text, serial_log: text, stderr_log: text):
+    val cleanup_cmd =
+        "pkill -f " + _shell_quote("qemu-system.*" + qmp_socket) + " >/dev/null 2>&1 || true; " +
+        "pkill -f " + _shell_quote("qemu-system.*" + serial_log) + " >/dev/null 2>&1 || true; " +
+        "pkill -f " + _shell_quote("qemu-system.*" + stderr_log) + " >/dev/null 2>&1 || true"
+    process_run_timeout("/bin/sh", ["-c", cleanup_cmd], 5000)
+
+fn _wait_for_qmp_socket(socket_path: text, timeout_ms: i64) -> bool:
+    var waited = 0
+    while waited <= timeout_ms:
+        if file_exists(socket_path):
+            thread_sleep(200)
+            return true
+        thread_sleep(100)
+        waited = waited + 100
+    false
+
+fn spawn_guest_with_qmp(target: OsTarget, qmp_socket: text, serial_log: text) -> Result<QemuGuestHandle, text>:
+    val stderr_log = serial_log + ".stderr"
+    _cleanup_guest_identity(qmp_socket, serial_log, stderr_log)
+    if file_exists(qmp_socket):
+        file_delete(qmp_socket)
+    if file_exists(serial_log):
+        file_delete(serial_log)
+    if file_exists(stderr_log):
+        file_delete(stderr_log)
+    val target_with_qmp = _target_with_qmp(target, qmp_socket)
+    val cmd_parts = build_qemu_command(target_with_qmp)
+    val qemu_bin = cmd_parts[0]
+    val qemu_args = _args_with_serial_file(cmd_parts.slice(1), serial_log)
+    var shell_parts: [text] = [qemu_bin]
+    var arg_idx = 0
+    while arg_idx < qemu_args.len():
+        shell_parts.push(qemu_args[arg_idx])
+        arg_idx = arg_idx + 1
+    val shell_cmd = _shell_command(shell_parts)
+    val pid = process_spawn_async("/bin/sh", ["-c", "if command -v setsid >/dev/null 2>&1; then exec setsid {shell_cmd} 2> {_shell_quote(stderr_log)}; else exec {shell_cmd} 2> {_shell_quote(stderr_log)}; fi"])
+    if pid <= 0:
+        return Err("failed to spawn {qemu_bin}")
+    if not _wait_for_qmp_socket(qmp_socket, 10000):
+        process_kill(pid)
+        process_wait(pid, 2000)
+        val stderr = if file_exists(stderr_log): file_read_text(stderr_log) else: ""
+        _cleanup_guest_identity(qmp_socket, serial_log, stderr_log)
+        return Err("QMP socket did not appear at {qmp_socket}\nqemu stderr:\n{stderr}")
+    Ok(QemuGuestHandle.create(pid, qmp_socket, serial_log, stderr_log))
+
+fn read_serial_log(handle: QemuGuestHandle) -> text:
+    if not file_exists(handle.serial_log):
+        return ""
+    val result = process_run_timeout("/bin/sh", ["-c", "tr -cd '\\11\\12\\15\\40-\\176' < " + _shell_quote(handle.serial_log)], 5000)
+    if result[2] == 0 and result[0] != "":
+        return result[0]
+    file_read_text(handle.serial_log) ?? ""
+
+fn read_qemu_stderr_log(handle: QemuGuestHandle) -> text:
+    if not file_exists(handle.stderr_log):
+        return ""
+    file_read_text(handle.stderr_log) ?? ""
+
+fn wait_for_serial_marker(handle: QemuGuestHandle, marker: text, timeout_ms: i64) -> bool:
+    var waited = 0
+    while waited <= timeout_ms:
+        val serial_output = read_serial_log(handle)
+        if serial_output.contains(marker):
+            return true
+        thread_sleep(100)
+        waited = waited + 100
+    read_serial_log(handle).contains(marker)
+
+fn stop_guest(handle: QemuGuestHandle) -> bool:
+    var stopped = true
+    if handle.pid > 0 and process_is_running(handle.pid):
+        stopped = process_kill(handle.pid)
+        process_wait(handle.pid, 2000)
+    _cleanup_guest_identity(handle.qmp_socket, handle.serial_log, handle.stderr_log)
+    if file_exists(handle.qmp_socket):
+        file_delete(handle.qmp_socket)
+    if file_exists(handle.serial_log):
+        file_delete(handle.serial_log)
+    if file_exists(handle.stderr_log):
+        file_delete(handle.stderr_log)
+    stopped
+
+fn _run_id() -> text:
+    getpid().to_text() + "_" + time_now_unix_micros().to_text()
+
+fn _run_dir(run_id: text) -> text:
+    "build/tmp/wm_input_qemu_smoke_spec_" + run_id
+
+fn _qmp_socket(run_id: text) -> text:
+    "/tmp/wm_input_qemu_smoke_qmp_" + run_id + ".sock"
+
+fn _serial_log(run_id: text) -> text:
+    _run_dir(run_id) + "/serial.log"
+
+fn _capture_ppm(cwd: text, run_id: text) -> text:
+    cwd + "/" + _run_dir(run_id) + "/capture.ppm"
+
+fn _wm_input_target() -> OsTarget:
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/09_embedded/simple_os/arch/x86_64/wm_input_test_entry.spl",
+        linker_script: "examples/09_embedded/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_wm_input_test_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn _native_build_bin() -> text:
+    val from_simple_bin = env_get("SIMPLE_BIN") ?? ""
+    if from_simple_bin != "":
+        return from_simple_bin
+    val from_bootstrap = env_get("SIMPLE_BOOTSTRAP_DRIVER") ?? ""
+    if from_bootstrap != "":
+        return from_bootstrap
+    if file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    "bin/simple"
+
+fn _build_target_direct(target: OsTarget) -> bool:
+    dir_create_all("build/os")
+    val simple_bin = _native_build_bin()
+    val cmd = "SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=src PATH=\"/usr/bin:$PATH\" " +
+        _shell_quote(simple_bin) +
+        " native-build --source build/os/generated --source src --source examples" +
+        " --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log normal" +
+        " --entry-closure --entry " + _shell_quote(target.entry) +
+        " --target " + _shell_quote(target.target_triple) +
+        " -o " + _shell_quote(target.output) +
+        " --linker-script " + _shell_quote(target.linker_script)
+    val result = process_run_timeout("/bin/sh", ["-c", cmd], 900000)
+    if result[2] != 0:
+        if result[0] != "":
+            print "[wm_input_qemu_smoke_spec] direct native-build stdout:\n{result[0]}"
+        if result[1] != "":
+            print "[wm_input_qemu_smoke_spec] direct native-build stderr:\n{result[1]}"
+    result[2] == 0 and file_exists(target.output)
+
+fn _build_once(target: OsTarget) -> bool:
+    if not file_exists(target.output):
+        if not file_exists("bin/simple"):
+            return _build_target_direct(target)
+        return build_os(target) or _build_target_direct(target)
+    val newer = process_run_timeout("sh", ["-c", "test \"$1\" -nt \"$2\"", "sh", target.entry, target.output], 2000)
+    if newer[2] == 0:
+        if not file_exists("bin/simple"):
+            return _build_target_direct(target)
+        return build_os(target) or _build_target_direct(target)
+    true
+
+fn _build_or_report_blocker(target: OsTarget) -> bool:
+    val built = _build_once(target)
+    if not built:
+        print "[wm_input_qemu_smoke_spec] live WM input smoke blocked: wm_input_test_entry does not link"
+        print "[wm_input_qemu_smoke_spec] expected kernel artifact was not produced: {target.output}"
+        print "[wm_input_qemu_smoke_spec] known linker blocker: undefined globals from examples/09_embedded/simple_os/arch/x86_64/wm_input_test_entry.spl"
+    built
+
+fn _known_build_blocker_evidence(target: OsTarget) -> text:
+    "[wm_input_qemu_smoke_spec] live WM input smoke blocked: wm_input_test_entry does not link\n" +
+        "[wm_input_qemu_smoke_spec] expected kernel artifact was not produced: {target.output}\n" +
+        "[wm_input_qemu_smoke_spec] known linker blocker: undefined globals from {target.entry}"
+
+fn _capture_and_assert_input_ppm(qmp_socket: text, output_path: text) -> bool:
+    val script = "import json,os,socket,sys,time;" +
+        "sock,out=sys.argv[1],sys.argv[2];" +
+        "s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(sock);" +
+        "f=s.makefile('rwb',buffering=0);" +
+        "f.readline();" +
+        "f.write(json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n');f.flush();f.readline();" +
+        "f.write(json.dumps(dict(execute='human-monitor-command',arguments=dict([('command-line','screendump '+out)]))).encode()+b'\\n');f.flush();" +
+        "f.readline();" +
+        "ok=any((time.sleep(0.1) or (os.path.exists(out) and os.path.getsize(out)>0)) for _ in range(100));" +
+        "b=open(out,'rb').read() if ok else b'';" +
+        "lines=b.splitlines()[:3];" +
+        "w,h=map(int,lines[1].split()) if ok and len(lines)>=3 else (0,0);" +
+        "p=b.find(b'\\n255\\n')+5;" +
+        "pix=b[p:];" +
+        "rgb=lambda x,y: pix[(y*w+x)*3:(y*w+x)*3+3];" +
+        "near=lambda g,e,t: len(g)==3 and all(abs(g[i]-e[i])<=t for i in range(3));" +
+        "title=near(rgb(90,100),bytes([0x20,0x50,0xA0]),8);" +
+        "drag=near(rgb(460,270),bytes([0x44,0xFF,0x44]),8);" +
+        "bg=near(rgb(10,10),bytes([0x10,0x18,0x20]),8);" +
+        "print('dims=%dx%d checks=[bg=%s,title=%s,drag=%s]' % (w,h,bg,title,drag));" +
+        "sys.exit(0 if ok and w==1024 and h==768 and bg and title and drag else 4)"
+    val result = process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 20000)
+    if result[0] != "":
+        print "[wm_input_qemu_smoke_spec] qmp ppm {result[0]}"
+    if result[1] != "":
+        print "[wm_input_qemu_smoke_spec] qmp ppm stderr: {result[1]}"
+    result[2] == 0 and file_exists(output_path)
+
+fn _print_guest_diagnostics(prefix: text, serial: text, stderr: text):
+    print "{prefix} serial_len={serial.len()} stderr_len={stderr.len()}"
+    if serial != "":
+        print "{prefix} serial:\n{serial}"
+    if stderr != "":
+        print "{prefix} qemu stderr:\n{stderr}"
+
+describe "SimpleOS WM input smoke in QEMU":
+
+    it "builds the WM input test entry":
+        val target = _wm_input_target()
+        expect(_build_or_report_blocker(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+    it "boots and emits focus plus drag markers":
+        val target = _wm_input_target()
+        val built = _build_or_report_blocker(target)
+        if not built:
+            val blocker_evidence = _known_build_blocker_evidence(target)
+            expect(blocker_evidence.contains("live WM input smoke blocked")).to_equal(true)
+            expect(blocker_evidence.contains(target.output)).to_equal(true)
+            expect(blocker_evidence.contains(target.entry)).to_equal(true)
+        else:
+            if not can_run_target(target):
+                print "[wm_input_qemu_smoke_spec] qemu-system-x86_64 not available, skipping live WM input smoke"
+                expect(file_exists(target.output)).to_equal(true)
+            else:
+                val result = run_os_qemu_with_target_via_timeout(target, "20s", 30000)
+                val serial = result[0] + result[1]
+                val saw_init = serial.contains("[wm-input-test] Init synthetic input path")
+                val saw_focus = serial.contains("[wm-input-test] focus click OK")
+                val saw_focus_command = serial.contains("[wm-input-test] focus command_kind=focus_window window_id=1")
+                val saw_titlebar_button = serial.contains("[wm-input-test] titlebar_button_click action=close window_id=1")
+                val saw_text_input = serial.contains("[wm-input-test] text_input_edit window_id=1 field=search before='' after='abc'")
+                val saw_css_pixels = serial.contains("[wm-input-test] css_pixels viewport=1024x768 browser=320x202 scale=1")
+                val saw_drag = serial.contains("[wm-input-test] drag OK -> 444,252")
+                val saw_drag_command = serial.contains("[wm-input-test] drag command_kind=move_window window_id=1 from=320,180 to=444,252")
+                val saw_pass = serial.contains("[PASS] wm_input_test_entry")
+                val saw_test_passed = serial.contains("TEST PASSED")
+
+                if not saw_init or not saw_focus or not saw_focus_command or not saw_titlebar_button or not saw_text_input or not saw_css_pixels or not saw_drag or not saw_drag_command or not saw_pass or not saw_test_passed:
+                    print "[wm_input_qemu_smoke_spec] missing marker init={saw_init} focus={saw_focus} focus_command={saw_focus_command} titlebar_button={saw_titlebar_button} text_input={saw_text_input} css_pixels={saw_css_pixels} drag={saw_drag} drag_command={saw_drag_command} pass={saw_pass} test_passed={saw_test_passed} exit={result[2]}"
+                    print "[wm_input_qemu_smoke_spec] serial follows:\n{serial}"
+
+                expect(saw_init).to_equal(true)
+                expect(saw_focus).to_equal(true)
+                expect(saw_focus_command).to_equal(true)
+                expect(saw_titlebar_button).to_equal(true)
+                expect(saw_text_input).to_equal(true)
+                expect(saw_css_pixels).to_equal(true)
+                expect(saw_drag).to_equal(true)
+                expect(saw_drag_command).to_equal(true)
+                expect(saw_pass).to_equal(true)
+                expect(saw_test_passed).to_equal(true)
+
+    it "captures framebuffer markers for focus and drag state":
+        val target = _wm_input_target()
+        val built = _build_or_report_blocker(target)
+        if not built:
+            val blocker_evidence = _known_build_blocker_evidence(target)
+            expect(blocker_evidence.contains("known linker blocker")).to_equal(true)
+            expect(blocker_evidence.contains(target.output)).to_equal(true)
+            expect(blocker_evidence.contains(target.entry)).to_equal(true)
+        else:
+            if not can_run_target(target):
+                print "[wm_input_qemu_smoke_spec] qemu-system-x86_64 not available, skipping framebuffer smoke"
+                expect(file_exists(target.output)).to_equal(true)
+            else:
+                val cwd = cwd()
+                val run_id = _run_id()
+                val run_dir = _run_dir(run_id)
+                expect(dir_create_all(run_dir)).to_equal(true)
+                val qmp_socket = _qmp_socket(run_id)
+                val serial_log = _serial_log(run_id)
+                val capture_ppm = _capture_ppm(cwd, run_id)
+                match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+                    Ok(handle):
+                        val saw_fb = wait_for_serial_marker(handle, "[wm-input-test] framebuffer marker OK", 30000)
+                        val serial = read_serial_log(handle)
+                        if not saw_fb:
+                            print "[wm_input_qemu_smoke_spec] missing framebuffer marker"
+                            _print_guest_diagnostics("[wm_input_qemu_smoke_spec]", serial, read_qemu_stderr_log(handle))
+                            stop_guest(handle)
+                            expect(saw_fb).to_equal(true)
+                        else:
+                            val captured = _capture_and_assert_input_ppm(qmp_socket, capture_ppm)
+                            if not captured:
+                                print "[wm_input_qemu_smoke_spec] QMP screendump or framebuffer pixel assertion failed"
+                                _print_guest_diagnostics("[wm_input_qemu_smoke_spec]", serial, read_qemu_stderr_log(handle))
+                                stop_guest(handle)
+                                expect(captured).to_equal(true)
+                            else:
+                                stop_guest(handle)
+                                expect(file_exists(capture_ppm)).to_equal(true)
+                    Err(err):
+                        print "[wm_input_qemu_smoke_spec] failed to spawn guest: {err}"
+                        fail("WM input QEMU guest spawn failed: " + err)

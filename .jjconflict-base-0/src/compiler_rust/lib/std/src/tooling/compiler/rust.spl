@@ -1,0 +1,451 @@
+# Rust/Cargo Compiler Adapter
+# Integrates cargo build with tooling framework
+
+use tooling.core.project.{Language, LanguageConfig}
+use tooling.compiler.compiler_interface.{LanguageCompiler, CompilationMode, CompilationResult, Artifact, ArtifactType, CompilationError, ErrorSeverity}
+
+# Rust compiler adapter (uses cargo)
+pub class RustCompiler:
+    pub cargo_path: text
+    pub target_dir: text
+
+    pub fn new() -> RustCompiler:
+        """Create Rust compiler adapter.
+
+        Returns:
+            Compiler with default settings
+
+        Example:
+            val compiler = RustCompiler.new()
+            val result = compiler.compile(config, CompilationMode.Release, false)
+        """
+        RustCompiler {
+            cargo_path: "cargo",  # Use 'cargo' from PATH
+            target_dir: "target"
+        }
+
+    pub fn set_cargo_path(self, path: text):
+        """Set path to cargo binary.
+
+        Args:
+            path: Path to cargo
+        """
+        self.cargo_path = path
+
+    pub fn set_target_dir(self, dir: text):
+        """Set custom target directory.
+
+        Args:
+            dir: Target directory path
+        """
+        self.target_dir = dir
+
+    pub fn get_build_command(self, mode: CompilationMode) -> text:
+        """Get cargo build command for display.
+
+        Args:
+            mode: Compilation mode
+
+        Returns:
+            Command string
+
+        Example:
+            compiler.get_build_command(CompilationMode.Release)
+            # → "cargo build --release"
+        """
+        val mode_flag = match mode:
+            CompilationMode.Debug: ""
+            CompilationMode.Release: " --release"
+            CompilationMode.Profile: " --profile release"
+
+        "{self.cargo_path} build{mode_flag}"
+
+impl LanguageCompiler for RustCompiler:
+    fn compile(config: LanguageConfig,
+        mode: CompilationMode,
+        incremental: bool
+    ) -> CompilationResult:
+        """Compile Rust code using cargo.
+
+        Args:
+            config: Language configuration
+            mode: Compilation mode (Debug/Release/Profile)
+            incremental: Enable incremental compilation (always on in cargo)
+
+        Returns:
+            Compilation result
+        """
+        @extern("runtime", "rt_time_now_unix_micros")
+        fn _rt_time_now_unix_micros() -> i64
+
+        val result = CompilationResult.new()
+        val start_time = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+
+        # Build cargo command
+        var args: List<text> = []
+        args.append("build")
+
+        # Add mode flag
+        match mode:
+            CompilationMode.Debug:
+                pass  # Default
+            CompilationMode.Release:
+                args.append("--release")
+            CompilationMode.Profile:
+                args.append("--profile")
+                args.append("release")  # Use release profile for profiling
+
+        # Add manifest path
+        args.append("--manifest-path")
+        args.append("{config.root}/Cargo.toml")
+
+        # Add JSON output for easier parsing
+        args.append("--message-format")
+        args.append("json-render-diagnostics")
+
+        # Execute cargo
+        val output = self.execute_cargo(args)
+
+        # Parse cargo JSON output
+        if output.exit_code == 0:
+            # Success - parse artifacts from JSON
+            val artifacts = self.parse_artifacts(output.stdout, mode, config.root)
+            for artifact in artifacts:
+                result.add_artifact(artifact)
+        else:
+            # Failure - parse errors from JSON
+            val errors = self.parse_errors_json(output.stdout)
+            for error in errors:
+                result.add_error(error)
+
+        val end_time = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+        result.duration_ms = end_time - start_time
+
+        result
+
+    fn get_language() -> Language:
+        """Get language type.
+
+        Returns:
+            Language.Rust
+        """
+        Language.Rust
+
+    fn supports_incremental() -> bool:
+        """Check if incremental compilation is supported.
+
+        Returns:
+            True (cargo always uses incremental compilation)
+        """
+        true
+
+    fn get_executable_extension() -> text:
+        """Get executable file extension.
+
+        Returns:
+            "" on Unix, ".exe" on Windows
+        """
+        @extern("runtime", "rt_platform_name")
+        fn _rt_platform_name() -> text
+
+        val platform = _rt_platform_name()
+        if platform == "windows":
+            ".exe"
+        else:
+            ""
+
+    fn get_library_extension() -> text:
+        """Get library file extension.
+
+        Returns:
+            ".so" on Linux, ".dylib" on macOS, ".dll" on Windows
+        """
+        @extern("runtime", "rt_platform_name")
+        fn _rt_platform_name() -> text
+
+        val platform = _rt_platform_name()
+        match platform:
+            "windows": ".dll"
+            "macos": ".dylib"
+            _: ".so"
+
+# Helper class for process execution
+class ProcessOutput:
+    pub exit_code: i32
+    pub stdout: text
+    pub stderr: text
+
+    pub fn new(exit_code: i32, stdout: text, stderr: text) -> ProcessOutput:
+        ProcessOutput {
+            exit_code: exit_code,
+            stdout: stdout,
+            stderr: stderr
+        }
+
+    pub fn is_success(self) -> bool:
+        """Check if process succeeded.
+
+        Returns:
+            True if exit code is 0
+        """
+        self.exit_code == 0
+
+    pub fn is_failure(self) -> bool:
+        """Check if process failed.
+
+        Returns:
+            True if exit code is non-zero
+        """
+        self.exit_code != 0
+
+    pub fn has_stdout(self) -> bool:
+        """Check if stdout is non-empty.
+
+        Returns:
+            True if stdout has content
+        """
+        not self.stdout.is_empty()
+
+    pub fn has_stderr(self) -> bool:
+        """Check if stderr is non-empty.
+
+        Returns:
+            True if stderr has content
+        """
+        not self.stderr.is_empty()
+
+    pub fn summary(self) -> text:
+        """Get process output summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            output.summary()
+            # → "Exit code: 0, stdout: 1234 bytes, stderr: 0 bytes"
+        """
+        "Exit code: {self.exit_code}, stdout: {self.stdout.len()} bytes, stderr: {self.stderr.len()} bytes"
+
+# Helper methods
+impl RustCompiler:
+    fn execute_cargo(args: List<text>) -> ProcessOutput:
+        """Execute cargo command.
+
+        Args:
+            args: Cargo arguments
+
+        Returns:
+            Process output
+        """
+        import shell
+        val result = shell.run("cargo", args)
+        ProcessOutput.new(result.exit_code as i32, result.stdout, result.stderr)
+
+    fn parse_artifacts(json_output: text,
+        mode: CompilationMode,
+        root: text
+    ) -> List<Artifact>:
+        """Parse artifacts from cargo JSON output.
+
+        Args:
+            json_output: Cargo JSON output
+            mode: Compilation mode
+            root: Project root
+
+        Returns:
+            List of build artifacts
+
+        Cargo JSON format:
+        {"reason":"compiler-artifact","target":{"name":"app","kind":["bin"]},"filenames":["/path/to/app"],"...}
+        """
+        import core.json.{parse, JsonValue}
+
+        val artifacts: List<Artifact> = []
+
+        # Parse JSON output line by line (cargo outputs one JSON object per line)
+        for line in json_output.lines():
+            val trimmed = line.trim()
+            if trimmed.is_empty():
+                continue
+
+            match parse(trimmed):
+                case Ok(JsonValue.Object(obj)):
+                    # Check if this is an artifact message
+                    if val Some(JsonValue.String(reason)) = obj.get("reason"):
+                        if reason == "compiler-artifact":
+                            # Extract artifact info
+                            if val Some(JsonValue.Array(filenames)) = obj.get("filenames"):
+                                for filename in filenames:
+                                    if val JsonValue.String(path) = filename:
+                                        val artifact_type = if path.ends_with(".rlib"):
+                                            ArtifactType.Library
+                                        elif path.ends_with(".so") or path.ends_with(".dylib"):
+                                            ArtifactType.SharedLibrary
+                                        else:
+                                            ArtifactType.Executable
+                                        val artifact = Artifact.new(path, artifact_type, Language.Rust)
+                                        artifacts.append(artifact)
+                case _:
+                    # Not valid JSON, skip
+                    pass
+
+        # Fallback if no artifacts parsed: infer from mode
+        if artifacts.is_empty():
+            val mode_dir = match mode:
+                CompilationMode.Debug: "debug"
+                CompilationMode.Release: "release"
+                CompilationMode.Profile: "release"
+
+            val artifact_path = "{root}/target/{mode_dir}/app"
+            val artifact = Artifact.new(artifact_path, ArtifactType.Executable, Language.Rust)
+            artifacts.append(artifact)
+
+        artifacts
+
+    fn parse_errors_json(json_output: text) -> List<CompilationError>:
+        """Parse errors from cargo JSON output.
+
+        Args:
+            json_output: Cargo JSON diagnostic output
+
+        Returns:
+            List of compilation errors
+
+        Cargo JSON diagnostic format:
+        {"reason":"compiler-message","message":{"level":"error","message":"...","spans":[{"file_name":"...","line_start":10,"column_start":5}]}}
+        """
+        import core.json.{parse, JsonValue}
+
+        val errors: List<CompilationError> = []
+
+        # Parse JSON output line by line
+        for line in json_output.lines():
+            val trimmed = line.trim()
+            if trimmed.is_empty():
+                continue
+
+            match parse(trimmed):
+                case Ok(JsonValue.Object(obj)):
+                    # Check if this is a compiler message
+                    if val Some(JsonValue.String(reason)) = obj.get("reason"):
+                        if reason == "compiler-message":
+                            # Extract message info
+                            if val Some(JsonValue.Object(msg)) = obj.get("message"):
+                                var file = ""
+                                var line_num: i32 = 0
+                                var column: i32 = 0
+                                var message = ""
+                                var severity = ErrorSeverity.Error
+
+                                if val Some(JsonValue.String(msg_text)) = msg.get("message"):
+                                    message = msg_text
+
+                                if val Some(JsonValue.String(level)) = msg.get("level"):
+                                    severity = match level:
+                                        "error": ErrorSeverity.Error
+                                        "warning": ErrorSeverity.Warning
+                                        "note": ErrorSeverity.Info
+                                        "help": ErrorSeverity.Hint
+                                        _: ErrorSeverity.Error
+
+                                # Extract span info
+                                if val Some(JsonValue.Array(spans)) = msg.get("spans"):
+                                    if spans.len() > 0:
+                                        if val JsonValue.Object(span) = spans[0]:
+                                            if val Some(JsonValue.String(fname)) = span.get("file_name"):
+                                                file = fname
+                                            if val Some(JsonValue.Number(ln)) = span.get("line_start"):
+                                                line_num = ln as i32
+                                            if val Some(JsonValue.Number(col)) = span.get("column_start"):
+                                                column = col as i32
+
+                                val error = CompilationError.new(file, line_num, column, message, severity)
+                                errors.append(error)
+                case _:
+                    # Not valid JSON, skip
+                    pass
+
+        errors
+
+    fn parse_error_message(json_msg: text) -> CompilationError:
+        """Parse single error message from JSON.
+
+        Args:
+            json_msg: JSON error message object
+
+        Returns:
+            Compilation error
+
+        Cargo JSON diagnostic format:
+        {"level":"error","message":"...","spans":[{"file_name":"...","line_start":10,"column_start":5}]}
+        """
+        import core.json.{parse, JsonValue}
+
+        match parse(json_msg):
+            case Ok(JsonValue.Object(obj)):
+                var file = ""
+                var line: i32 = 0
+                var column: i32 = 0
+                var message = ""
+                var severity = ErrorSeverity.Error
+
+                # Extract message
+                match obj.get("message"):
+                    case Some(JsonValue.text(msg)):
+                        message = msg
+                    case _:
+                        pass
+
+                # Extract level/severity
+                match obj.get("level"):
+                    case Some(JsonValue.text(level)):
+                        severity = match level:
+                            case "error": ErrorSeverity.Error
+                            case "warning": ErrorSeverity.Warning
+                            case _: ErrorSeverity.Error
+                    case _:
+                        pass
+
+                # Extract spans for location info
+                match obj.get("spans"):
+                    case Some(JsonValue.Array(spans)):
+                        if spans.len() > 0:
+                            match spans[0]:
+                                case JsonValue.Object(span):
+                                    match span.get("file_name"):
+                                        case Some(JsonValue.text(f)):
+                                            file = f
+                                        case _:
+                                            pass
+                                    match span.get("line_start"):
+                                        case Some(JsonValue.Integer(l)):
+                                            line = l as i32
+                                        case _:
+                                            pass
+                                    match span.get("column_start"):
+                                        case Some(JsonValue.Integer(c)):
+                                            column = c as i32
+                                        case _:
+                                            pass
+                                case _:
+                                    pass
+                    case _:
+                        pass
+
+                CompilationError.new(
+                    file: file,
+                    line: line,
+                    column: column,
+                    message: message,
+                    severity: severity,
+                    language: Language.Rust
+                )
+            case _:
+                CompilationError.new(
+                    file: "",
+                    line: 0,
+                    column: 0,
+                    message: "Failed to parse error JSON",
+                    severity: ErrorSeverity.Error,
+                    language: Language.Rust
+                )

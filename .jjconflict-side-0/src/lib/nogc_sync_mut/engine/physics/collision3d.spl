@@ -1,0 +1,315 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(primitive_api)
+# Physics System — 3D Collision Detection
+#
+# Narrow-phase collision detection for sphere, box, and capsule shapes.
+# Returns Contact3D with contact point, normal, and penetration depth.
+#
+# Supported pairs:
+#   - Sphere vs Sphere
+#   - AABB vs AABB (axis-aligned boxes)
+#   - Sphere vs AABB
+#   - OBB vs OBB (oriented boxes, 15-axis SAT)
+#   - Sphere vs Capsule
+
+use std.common.engine.math3d.{Vec3, Quaternion, _sqrt}
+use std.common.math.{math_abs, math_clamp, math_min, math_max}
+
+# ============================================================================
+# Contact3D — collision contact information
+# ============================================================================
+
+class Contact3D:
+    point: Vec3
+    normal: Vec3
+    penetration: f64
+
+# ============================================================================
+# Sphere vs Sphere
+# ============================================================================
+
+fn collide_sphere_sphere(pos_a: Vec3, radius_a: f64, pos_b: Vec3, radius_b: f64) -> Option<Contact3D>:
+    """Detect and generate contact between two spheres."""
+    val d = pos_b.sub(pos_a)
+    val dist_sq = d.length_squared()
+    val sum_radii = radius_a + radius_b
+
+    if dist_sq >= sum_radii * sum_radii:
+        return nil
+
+    val dist = _sqrt(dist_sq)
+
+    # Handle overlapping centers
+    var normal = Vec3(x: 1.0, y: 0.0, z: 0.0)
+    if dist > 0.0000001:
+        normal = Vec3(x: d.x / dist, y: d.y / dist, z: d.z / dist)
+
+    val penetration = sum_radii - dist
+    val point = Vec3(
+        x: pos_a.x + normal.x * radius_a,
+        y: pos_a.y + normal.y * radius_a,
+        z: pos_a.z + normal.z * radius_a
+    )
+
+    Contact3D(point: point, normal: normal, penetration: penetration)
+
+# ============================================================================
+# AABB vs AABB (no rotation) — 3-axis overlap
+# ============================================================================
+
+fn collide_aabb_aabb(pos_a: Vec3, half_a: Vec3, pos_b: Vec3, half_b: Vec3) -> Option<Contact3D>:
+    """Detect and generate contact between two axis-aligned 3D boxes."""
+    val dx = pos_b.x - pos_a.x
+    val dy = pos_b.y - pos_a.y
+    val dz = pos_b.z - pos_a.z
+
+    val overlap_x = half_a.x + half_b.x - math_abs(dx)
+    if overlap_x <= 0.0:
+        return nil
+
+    val overlap_y = half_a.y + half_b.y - math_abs(dy)
+    if overlap_y <= 0.0:
+        return nil
+
+    val overlap_z = half_a.z + half_b.z - math_abs(dz)
+    if overlap_z <= 0.0:
+        return nil
+
+    # Use axis with smallest overlap (minimum penetration axis)
+    var normal = Vec3.zero()
+    var penetration = 0.0
+    var point = Vec3.zero()
+
+    if overlap_x <= overlap_y and overlap_x <= overlap_z:
+        # Separate along X
+        penetration = overlap_x
+        if dx < 0.0:
+            normal = Vec3(x: -1.0, y: 0.0, z: 0.0)
+            point = Vec3(x: pos_a.x - half_a.x, y: pos_a.y, z: pos_a.z)
+        else:
+            normal = Vec3(x: 1.0, y: 0.0, z: 0.0)
+            point = Vec3(x: pos_a.x + half_a.x, y: pos_a.y, z: pos_a.z)
+    elif overlap_y <= overlap_z:
+        # Separate along Y
+        penetration = overlap_y
+        if dy < 0.0:
+            normal = Vec3(x: 0.0, y: -1.0, z: 0.0)
+            point = Vec3(x: pos_a.x, y: pos_a.y - half_a.y, z: pos_a.z)
+        else:
+            normal = Vec3(x: 0.0, y: 1.0, z: 0.0)
+            point = Vec3(x: pos_a.x, y: pos_a.y + half_a.y, z: pos_a.z)
+    else:
+        # Separate along Z
+        penetration = overlap_z
+        if dz < 0.0:
+            normal = Vec3(x: 0.0, y: 0.0, z: -1.0)
+            point = Vec3(x: pos_a.x, y: pos_a.y, z: pos_a.z - half_a.z)
+        else:
+            normal = Vec3(x: 0.0, y: 0.0, z: 1.0)
+            point = Vec3(x: pos_a.x, y: pos_a.y, z: pos_a.z + half_a.z)
+
+    Contact3D(point: point, normal: normal, penetration: penetration)
+
+# ============================================================================
+# Sphere vs AABB
+# ============================================================================
+
+fn collide_sphere_aabb(sphere_pos: Vec3, radius: f64, box_pos: Vec3, half: Vec3) -> Option<Contact3D>:
+    """Detect and generate contact between a sphere and an axis-aligned box."""
+    # Clamp sphere center to box extent to find closest point on box
+    val closest_x = math_clamp(sphere_pos.x, box_pos.x - half.x, box_pos.x + half.x)
+    val closest_y = math_clamp(sphere_pos.y, box_pos.y - half.y, box_pos.y + half.y)
+    val closest_z = math_clamp(sphere_pos.z, box_pos.z - half.z, box_pos.z + half.z)
+
+    val dx = sphere_pos.x - closest_x
+    val dy = sphere_pos.y - closest_y
+    val dz = sphere_pos.z - closest_z
+    val dist_sq = dx * dx + dy * dy + dz * dz
+
+    if dist_sq >= radius * radius:
+        return nil
+
+    val dist = _sqrt(dist_sq)
+
+    var normal = Vec3(x: 1.0, y: 0.0, z: 0.0)
+    if dist > 0.0000001:
+        normal = Vec3(x: dx / dist, y: dy / dist, z: dz / dist)
+    else:
+        # Sphere center is inside the box — push out along shortest axis
+        val diff_x = half.x - math_abs(sphere_pos.x - box_pos.x)
+        val diff_y = half.y - math_abs(sphere_pos.y - box_pos.y)
+        val diff_z = half.z - math_abs(sphere_pos.z - box_pos.z)
+        if diff_x <= diff_y and diff_x <= diff_z:
+            if sphere_pos.x < box_pos.x:
+                normal = Vec3(x: -1.0, y: 0.0, z: 0.0)
+            else:
+                normal = Vec3(x: 1.0, y: 0.0, z: 0.0)
+        elif diff_y <= diff_z:
+            if sphere_pos.y < box_pos.y:
+                normal = Vec3(x: 0.0, y: -1.0, z: 0.0)
+            else:
+                normal = Vec3(x: 0.0, y: 1.0, z: 0.0)
+        else:
+            if sphere_pos.z < box_pos.z:
+                normal = Vec3(x: 0.0, y: 0.0, z: -1.0)
+            else:
+                normal = Vec3(x: 0.0, y: 0.0, z: 1.0)
+
+    val penetration = radius - dist
+    val point = Vec3(x: closest_x, y: closest_y, z: closest_z)
+
+    Contact3D(point: point, normal: normal, penetration: penetration)
+
+# ============================================================================
+# OBB vs OBB — 15-axis SAT (3 from A, 3 from B, 9 edge cross products)
+# ============================================================================
+
+fn _get_box_axes(rot: Quaternion) -> (Vec3, Vec3, Vec3):
+    """Return rotated local axes of a box."""
+    val ax = rot.rotate_vector(Vec3(x: 1.0, y: 0.0, z: 0.0))
+    val ay = rot.rotate_vector(Vec3(x: 0.0, y: 1.0, z: 0.0))
+    val az = rot.rotate_vector(Vec3(x: 0.0, y: 0.0, z: 1.0))
+    (ax, ay, az)
+
+fn _project_box_onto_axis(half_extents: Vec3, axes_0: Vec3, axes_1: Vec3, axes_2: Vec3, axis: Vec3) -> f64:
+    """Project box half-extents onto axis, return radius of projection."""
+    val r = half_extents.x * math_abs(axis.dot(axes_0)) + half_extents.y * math_abs(axis.dot(axes_1)) + half_extents.z * math_abs(axis.dot(axes_2))
+    r
+
+fn _sat_test_3d(center_diff: Vec3, axis: Vec3, proj_a: f64, proj_b: f64) -> (bool, f64):
+    """Separating axis test. Returns (separated, penetration)."""
+    val dist = math_abs(center_diff.dot(axis))
+    val overlap = proj_a + proj_b - dist
+    if overlap <= 0.0:
+        return (true, 0.0)
+    (false, overlap)
+
+fn collide_obb_obb(pos_a: Vec3, half_a: Vec3, rot_a: Quaternion, pos_b: Vec3, half_b: Vec3, rot_b: Quaternion) -> Option<Contact3D>:
+    """Detect contact between two oriented boxes using 15-axis SAT."""
+    val axes_a = _get_box_axes(rot_a)
+    val a0 = axes_a.0
+    val a1 = axes_a.1
+    val a2 = axes_a.2
+
+    val axes_b = _get_box_axes(rot_b)
+    val b0 = axes_b.0
+    val b1 = axes_b.1
+    val b2 = axes_b.2
+
+    val d = pos_b.sub(pos_a)
+
+    var min_pen = 999999999.0
+    var min_axis = Vec3(x: 1.0, y: 0.0, z: 0.0)
+
+    # Test 3 face normals from A
+    var test_axes: [Vec3] = [a0, a1, a2, b0, b1, b2]
+
+    var i = 0
+    while i < 6:
+        val axis = test_axes[i]
+        val pa = _project_box_onto_axis(half_a, a0, a1, a2, axis)
+        val pb = _project_box_onto_axis(half_b, b0, b1, b2, axis)
+        val result = _sat_test_3d(d, axis, pa, pb)
+        if result.0:
+            return nil
+        if result.1 < min_pen:
+            min_pen = result.1
+            min_axis = axis
+        i = i + 1
+
+    # Test 9 edge cross products
+    var edge_axes_a: [Vec3] = [a0, a1, a2]
+    var edge_axes_b: [Vec3] = [b0, b1, b2]
+
+    var ia = 0
+    while ia < 3:
+        var ib = 0
+        while ib < 3:
+            val cross = edge_axes_a[ia].cross(edge_axes_b[ib])
+            val cross_len_sq = cross.length_squared()
+            # Skip near-parallel axes
+            if cross_len_sq > 0.000001:
+                val cross_len = _sqrt(cross_len_sq)
+                val norm_cross = Vec3(x: cross.x / cross_len, y: cross.y / cross_len, z: cross.z / cross_len)
+                val pa = _project_box_onto_axis(half_a, a0, a1, a2, norm_cross)
+                val pb = _project_box_onto_axis(half_b, b0, b1, b2, norm_cross)
+                val result = _sat_test_3d(d, norm_cross, pa, pb)
+                if result.0:
+                    return nil
+                if result.1 < min_pen:
+                    min_pen = result.1
+                    min_axis = norm_cross
+            ib = ib + 1
+        ia = ia + 1
+
+    # Ensure normal points from A to B
+    if d.dot(min_axis) < 0.0:
+        min_axis = min_axis.mul_scalar(-1.0)
+
+    val mid = Vec3(
+        x: (pos_a.x + pos_b.x) * 0.5,
+        y: (pos_a.y + pos_b.y) * 0.5,
+        z: (pos_a.z + pos_b.z) * 0.5
+    )
+
+    Contact3D(point: mid, normal: min_axis, penetration: min_pen)
+
+# ============================================================================
+# Sphere vs Capsule
+# ============================================================================
+
+fn _closest_point_on_segment(p: Vec3, seg_a: Vec3, seg_b: Vec3) -> Vec3:
+    """Find the closest point on line segment seg_a->seg_b to point p."""
+    val ab = seg_b.sub(seg_a)
+    val ab_len_sq = ab.length_squared()
+    if ab_len_sq < 0.0000001:
+        return seg_a
+    val ap = p.sub(seg_a)
+    var t = ap.dot(ab) / ab_len_sq
+    if t < 0.0:
+        t = 0.0
+    if t > 1.0:
+        t = 1.0
+    Vec3(x: seg_a.x + ab.x * t, y: seg_a.y + ab.y * t, z: seg_a.z + ab.z * t)
+
+fn collide_sphere_capsule(sphere_pos: Vec3, sphere_radius: f64, cap_pos: Vec3, cap_rot: Quaternion, cap_radius: f64, cap_half_height: f64) -> Option<Contact3D>:
+    """Detect contact between a sphere and a capsule."""
+    # Capsule axis endpoints: local Y axis, offset by half_height
+    val local_up = Vec3(x: 0.0, y: 1.0, z: 0.0)
+    val axis_dir = cap_rot.rotate_vector(local_up)
+    val cap_top = Vec3(
+        x: cap_pos.x + axis_dir.x * cap_half_height,
+        y: cap_pos.y + axis_dir.y * cap_half_height,
+        z: cap_pos.z + axis_dir.z * cap_half_height
+    )
+    val cap_bottom = Vec3(
+        x: cap_pos.x - axis_dir.x * cap_half_height,
+        y: cap_pos.y - axis_dir.y * cap_half_height,
+        z: cap_pos.z - axis_dir.z * cap_half_height
+    )
+
+    # Find closest point on capsule segment to sphere center
+    val closest = _closest_point_on_segment(sphere_pos, cap_bottom, cap_top)
+
+    # Now it's sphere vs sphere (sphere_pos,sphere_radius) vs (closest,cap_radius)
+    val d = sphere_pos.sub(closest)
+    val dist_sq = d.length_squared()
+    val sum_radii = sphere_radius + cap_radius
+
+    if dist_sq >= sum_radii * sum_radii:
+        return nil
+
+    val dist = _sqrt(dist_sq)
+
+    var normal = Vec3(x: 1.0, y: 0.0, z: 0.0)
+    if dist > 0.0000001:
+        normal = Vec3(x: d.x / dist, y: d.y / dist, z: d.z / dist)
+
+    val penetration = sum_radii - dist
+    val point = Vec3(
+        x: closest.x + normal.x * cap_radius,
+        y: closest.y + normal.y * cap_radius,
+        z: closest.z + normal.z * cap_radius
+    )
+
+    Contact3D(point: point, normal: normal, penetration: penetration)

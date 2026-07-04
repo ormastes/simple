@@ -1,0 +1,175 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_runtime_svllm_setup_contract}"
+NATIVE_BUILD_DIR="$BUILD_DIR/native"
+LOCAL_BUILD_DIR="$BUILD_DIR/local"
+NATIVE_REPORT="$BUILD_DIR/llm_runtime_svllm_setup_contract_native_report.md"
+LOCAL_REPORT="$BUILD_DIR/llm_runtime_svllm_setup_contract_local_report.md"
+OUT_ENV="$BUILD_DIR/evidence.env"
+NATIVE_ENV="$NATIVE_BUILD_DIR/evidence.env"
+LOCAL_ENV="$LOCAL_BUILD_DIR/evidence.env"
+NATIVE_STDOUT="$BUILD_DIR/native_stdout.log"
+LOCAL_STDOUT="$BUILD_DIR/local_stdout.log"
+mkdir -p "$BUILD_DIR"
+rm -f "$OUT_ENV" "$NATIVE_REPORT" "$LOCAL_REPORT" "$NATIVE_STDOUT" "$LOCAL_STDOUT"
+
+failures=""
+checked_count=0
+
+add_failure() {
+    if [ -z "$failures" ]; then
+        failures="$1"
+    else
+        failures="$failures|$1"
+    fi
+}
+
+env_value() {
+    file="$1"
+    key="$2"
+    if [ -f "$file" ]; then
+        sed -n "s/^${key}=//p" "$file" | tail -n 1
+    fi
+}
+
+require_env_key() {
+    file="$1"
+    key="$2"
+    checked_count=$((checked_count + 1))
+    value="$(env_value "$file" "$key")"
+    if [ -z "$value" ]; then
+        add_failure "missing_env:$key"
+    fi
+}
+
+require_report_key() {
+    file="$1"
+    key="$2"
+    checked_count=$((checked_count + 1))
+    if ! rg -q "^- ${key}: \`.+" "$file"; then
+        add_failure "missing_report:$key"
+    fi
+}
+
+if BUILD_DIR="$NATIVE_BUILD_DIR" REPORT_PATH="$NATIVE_REPORT" sh scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs >"$NATIVE_STDOUT" 2>&1; then
+    native_exit=0
+else
+    native_exit=$?
+fi
+
+if BUILD_DIR="$LOCAL_BUILD_DIR" REPORT_PATH="$LOCAL_REPORT" SVLLM_NATIVE_EVIDENCE_ENV="$NATIVE_ENV" sh scripts/check/check-llm-runtime-svllm-local-readiness.shs >"$LOCAL_STDOUT" 2>&1; then
+    local_exit=0
+else
+    local_exit=$?
+fi
+
+if [ ! -s "$NATIVE_ENV" ]; then
+    add_failure "missing_native_env"
+else
+    for key in \
+        svllm_native_streaming_status \
+        svllm_native_streaming_reason \
+        svllm_native_streaming_blocked_gates \
+        svllm_native_streaming_primary_blocked_gate \
+        svllm_native_streaming_next_action \
+        svllm_native_streaming_local_readiness_status \
+        svllm_native_streaming_capability_provenance_status \
+        svllm_native_streaming_capability_evidence_status \
+        svllm_native_streaming_capability_probe_status \
+        svllm_native_streaming_read_range_status \
+        svllm_native_streaming_pinned_buffer_status \
+        svllm_native_streaming_device_staging_status \
+        svllm_native_streaming_local_read_bytes_status \
+        svllm_native_streaming_surface_manifest_sha256
+    do
+        require_env_key "$NATIVE_ENV" "$key"
+    done
+fi
+
+if [ ! -s "$LOCAL_ENV" ]; then
+    add_failure "missing_local_env"
+else
+    for key in \
+        llm_runtime_svllm_local_readiness_status \
+        llm_runtime_svllm_local_readiness_native_status \
+        llm_runtime_svllm_local_readiness_native_next_action \
+        llm_runtime_svllm_local_readiness_surface_manifest_sha256 \
+        llm_runtime_svllm_local_readiness_manifest_status \
+        llm_runtime_svllm_local_readiness_tensor_bytes_status \
+        llm_runtime_svllm_local_readiness_stream_plan_status \
+        llm_runtime_svllm_local_readiness_transport_status \
+        llm_runtime_svllm_local_readiness_std_fs_status \
+        llm_runtime_svllm_local_readiness_streaming_readiness_status \
+        llm_runtime_svllm_local_readiness_svllm_pack_cli_status \
+        llm_runtime_svllm_local_readiness_svllm_pack_log_modes_status
+    do
+        require_env_key "$LOCAL_ENV" "$key"
+    done
+fi
+
+if [ ! -s "$NATIVE_REPORT" ]; then
+    add_failure "missing_native_report"
+else
+    for key in \
+        status \
+        reason \
+        blocked_gates \
+        primary_blocked_gate \
+        next_action \
+        capability_provenance \
+        capability_evidence \
+        read_range \
+        pinned_buffer \
+        device_staging \
+        surface_manifest_sha256
+    do
+        require_report_key "$NATIVE_REPORT" "$key"
+    done
+fi
+
+if [ ! -s "$LOCAL_REPORT" ]; then
+    add_failure "missing_local_report"
+else
+    for key in \
+        status \
+        native_streaming \
+        native_next_action \
+        surface_manifest_sha256
+    do
+        require_report_key "$LOCAL_REPORT" "$key"
+    done
+fi
+
+if [ -z "$failures" ]; then
+    status="pass"
+    reason="svllm_setup_diagnostics_present"
+else
+    status="fail"
+    reason="$failures"
+fi
+
+{
+    printf '%s\n' "llm_runtime_svllm_setup_contract_status=$status"
+    printf '%s\n' "llm_runtime_svllm_setup_contract_reason=$reason"
+    printf '%s\n' "llm_runtime_svllm_setup_contract_checked_count=$checked_count"
+    printf '%s\n' "llm_runtime_svllm_setup_contract_native_exit=$native_exit"
+    printf '%s\n' "llm_runtime_svllm_setup_contract_local_exit=$local_exit"
+    printf '%s\n' "llm_runtime_svllm_setup_contract_native_env=$NATIVE_ENV"
+    printf '%s\n' "llm_runtime_svllm_setup_contract_local_env=$LOCAL_ENV"
+    printf '%s\n' "llm_runtime_svllm_setup_contract_native_report=$NATIVE_REPORT"
+    printf '%s\n' "llm_runtime_svllm_setup_contract_local_report=$LOCAL_REPORT"
+    printf '%s\n' "llm_runtime_svllm_setup_contract_native_stdout=$NATIVE_STDOUT"
+    printf '%s\n' "llm_runtime_svllm_setup_contract_local_stdout=$LOCAL_STDOUT"
+} >"$OUT_ENV"
+
+if [ "$status" = "pass" ]; then
+    printf '%s\n' "STATUS: PASS llm-runtime-svllm-setup-contract checked_count=$checked_count"
+    exit 0
+fi
+
+printf '%s\n' "STATUS: FAIL llm-runtime-svllm-setup-contract reason=$reason"
+exit 1

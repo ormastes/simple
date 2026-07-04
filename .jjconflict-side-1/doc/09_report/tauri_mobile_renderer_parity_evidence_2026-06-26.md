@@ -1,0 +1,47 @@
+# Tauri Mobile Renderer Parity Evidence
+
+- status: pass
+- reason: pass
+- production parity source: build/production_gui_web_renderer_parity_evidence/evidence.env
+- iOS: pass ()
+- Android: pass ()
+- iOS expected GPU/log contract: metal / pass
+- Android expected GPU/log contract: vulkan / pass
+
+## Raw Evidence
+- tauri_mobile_renderer_parity_status=pass
+- tauri_mobile_renderer_parity_reason=pass
+- tauri_mobile_renderer_parity_production_env=build/production_gui_web_renderer_parity_evidence/evidence.env
+- tauri_mobile_renderer_parity_production_status=pass
+- tauri_mobile_renderer_parity_production_layout_manifest_status=pass
+- tauri_mobile_renderer_parity_production_surface_manifest_status=pass
+- tauri_mobile_renderer_parity_production_no_fake_capture=true
+- tauri_mobile_renderer_parity_tauri_v2_status=pass
+- tauri_mobile_renderer_parity_tauri_v2_reason=tauri-v2-configured
+- tauri_mobile_renderer_parity_ios_project_status=pass
+- tauri_mobile_renderer_parity_ios_project_reason=generated-ios-project-present
+- tauri_mobile_renderer_parity_android_project_status=pass
+- tauri_mobile_renderer_parity_android_project_reason=generated-android-project-present
+- tauri_mobile_renderer_parity_ios_exit_code=0
+- tauri_mobile_renderer_parity_ios_status=pass
+- tauri_mobile_renderer_parity_ios_reason=
+- tauri_mobile_renderer_parity_ios_tooling=available
+- tauri_mobile_renderer_parity_ios_expected_gpu_backend=metal
+- tauri_mobile_renderer_parity_ios_tauri_backend=tauri2-wkwebview
+- tauri_mobile_renderer_parity_ios_render_log_status=pass
+- tauri_mobile_renderer_parity_ios_layout_status=pass
+- tauri_mobile_renderer_parity_ios_metal_log_status=pass
+- tauri_mobile_renderer_parity_ios_screenshot=/Users/ormastes/simple/build/tauri_ios_mobile_renderer/ios_renderer.png
+- tauri_mobile_renderer_parity_ios_log_stream=/Users/ormastes/simple/build/tauri_ios_mobile_renderer/ios_renderer_log_stream.txt
+- tauri_mobile_renderer_parity_ios_dev_log=/Users/ormastes/simple/build/tauri_ios_mobile_renderer/ios_renderer_tauri_dev.log
+- tauri_mobile_renderer_parity_android_exit_code=0
+- tauri_mobile_renderer_parity_android_status=pass
+- tauri_mobile_renderer_parity_android_reason=
+- tauri_mobile_renderer_parity_android_expected_gpu_backend=vulkan
+- tauri_mobile_renderer_parity_android_tauri_backend=tauri2-android-webview
+- tauri_mobile_renderer_parity_android_render_log_status=pass
+- tauri_mobile_renderer_parity_android_layout_status=pass
+- tauri_mobile_renderer_parity_android_vulkan_log_status=pass
+- tauri_mobile_renderer_parity_android_screenshot=/Users/ormastes/simple/build/tauri_android_mobile_renderer/android_renderer.png
+- tauri_mobile_renderer_parity_android_logcat=/Users/ormastes/simple/build/tauri_android_mobile_renderer/android_renderer_logcat.txt
+- tauri_mobile_renderer_parity_android_gpu_log=/Users/ormastes/simple/build/tauri_android_mobile_renderer/emulator.out

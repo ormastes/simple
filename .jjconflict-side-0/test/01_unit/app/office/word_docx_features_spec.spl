@@ -1,0 +1,163 @@
+"""DOCX hyperlinks, images, and headers/footers — full-pipeline spec.
+
+Covers the three MS Word gap features through model -> .docx export ->
+.docx import -> markdown, plus the header/footer sibling writer:
+
+  - Hyperlinks: markdown `[text](url)` is a first-class TextSpan (link_url),
+    exported as `<w:hyperlink r:id="rIdN">` + an external relationship in
+    word/_rels/document.xml.rels, imported back by resolving r:id, and
+    serialized back to `[text](url)`.
+  - Images: markdown `![alt](path)` (whole-paragraph convention, same as the
+    html renderer) embeds the PNG bytes as word/media/imageN.png + a minimal
+    wp:inline DrawingML picture when the file exists; a missing (or non-PNG)
+    path falls back to a plain alt-text run instead of crashing. alt/src are
+    stashed on wp:docPr name/descr so import reconstructs the exact
+    `![alt](src)` reference losslessly.
+  - Headers/footers: `document_to_docx_bytes_hf(doc, header, footer)` is a
+    sibling of `document_to_docx_bytes` (which stays byte-identical when
+    called with header_text/footer_text both "") that adds
+    word/header1.xml + word/footer1.xml, wired via sectPr headerReference/
+    footerReference + rels + content types; the footer always carries a
+    PAGE field (`<w:fldSimple w:instr=" PAGE "/>`).
+"""
+
+use std.spec
+use app.office.file_formats.{parse_markdown_document, document_to_markdown}
+use app.office.odf_ooxml.{document_to_docx_bytes, document_to_docx_bytes_hf, docx_bytes_to_document, docx_bytes_to_header_footer}
+use std.common.archive.zip.{zip_entries, zip_extract_text}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+fn _tiny_png_bytes() -> [u8]:
+    """A hand-verified valid 1x1 PNG (68 bytes; `file` reports
+    'PNG image data, 1 x 1, 8-bit gray+alpha, non-interlaced')."""
+    var b: [u8] = []
+    for v in [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 96, 0, 2, 0, 0, 5, 0, 1, 233, 250, 220, 216, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]:
+        b.push(v.to_u8())
+    b
+
+fn _has_entry(zip_bytes: [u8], name: text) -> bool:
+    var found = false
+    for e in zip_entries(zip_bytes):
+        if e.name == name:
+            found = true
+    found
+
+describe "DOCX hyperlinks: markdown [text](url) round trip":
+    """[text](url) survives md -> model -> docx -> model -> md exactly, via
+    a first-class TextSpan.link_url and a real w:hyperlink + external rel."""
+
+    it "round-trips a link mixed with other inline styles exactly":
+        val md = "See [details](http://example.com/x) for **more** info."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "emits word/_rels/document.xml.rels with the URL as an External target":
+        val doc = parse_markdown_document("[go](http://example.org/page)", "d")
+        val docx = document_to_docx_bytes(doc)
+        val rels = zip_extract_text(docx, "word/_rels/document.xml.rels")
+        expect(rels).to_contain("http://example.org/page")
+        expect(rels).to_contain("TargetMode=\"External\"")
+        expect(rels).to_contain("relationships/hyperlink")
+
+    it "wraps the run in <w:hyperlink r:id=...> in word/document.xml":
+        val doc = parse_markdown_document("[go](http://example.org/page)", "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:hyperlink r:id=\"")
+        expect(document_xml).to_contain("</w:hyperlink>")
+
+    it "round-trips a paragraph with two different links":
+        val md = "[one](http://a.example/1) and [two](http://b.example/2)."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+describe "DOCX images: markdown ![alt](path) round trip":
+    """An existing PNG embeds as word/media/imageN.png + a minimal inline
+    DrawingML picture; a missing path (or non-.png) falls back to the alt
+    text as a placeholder run, never crashing the export."""
+
+    it "embeds an existing PNG and round-trips the ![alt](src) reference":
+        val png_path = "/tmp/word_docx_features_spec_tiny.png"
+        rt_file_write_bytes(png_path, _tiny_png_bytes())
+        val md = "![a tiny dot]({png_path})"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/media/image1.png")).to_be(true)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:drawing>")
+        expect(document_xml).to_contain("a:blip r:embed=\"")
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+        rt_file_delete(png_path)
+
+    it "falls back to the alt text when the image file is missing (no crash)":
+        val md = "![missing pic](/no/such/path/does-not-exist.png)"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml.contains("<w:drawing>")).to_be(false)
+        expect(document_xml).to_contain("missing pic")
+        expect(_has_entry(docx, "word/media/image1.png")).to_be(false)
+
+    it "falls back to the alt text for a non-PNG path even if it exists":
+        val jpg_path = "/tmp/word_docx_features_spec_tiny.jpg"
+        rt_file_write_bytes(jpg_path, _tiny_png_bytes())
+        val md = "![a jpeg]({jpg_path})"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml.contains("<w:drawing>")).to_be(false)
+        expect(document_xml).to_contain("a jpeg")
+        rt_file_delete(jpg_path)
+
+describe "DOCX headers/footers: document_to_docx_bytes_hf":
+    """A sibling of document_to_docx_bytes: header1.xml/footer1.xml parts
+    wired via sectPr + rels + content types, footer carries a PAGE field.
+    The base writer stays byte-identical when header/footer are both empty."""
+
+    it "document_to_docx_bytes is byte-identical to the _hf sibling called with empty header/footer":
+        val doc = parse_markdown_document("# Report\n\nBody text.", "d")
+        val plain = document_to_docx_bytes(doc)
+        val hf_empty = document_to_docx_bytes_hf(doc, "", "")
+        expect(plain == hf_empty).to_be(true)
+
+    it "emits word/header1.xml and word/footer1.xml, wired into sectPr and content types":
+        val doc = parse_markdown_document("# Report\n\nBody text.", "d")
+        val docx = document_to_docx_bytes_hf(doc, "Acme Corp", "Confidential")
+        expect(_has_entry(docx, "word/header1.xml")).to_be(true)
+        expect(_has_entry(docx, "word/footer1.xml")).to_be(true)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:headerReference w:type=\"default\" r:id=\"")
+        expect(document_xml).to_contain("<w:footerReference w:type=\"default\" r:id=\"")
+        val types = zip_extract_text(docx, "[Content_Types].xml")
+        expect(types).to_contain("/word/header1.xml")
+        expect(types).to_contain("/word/footer1.xml")
+        val rels = zip_extract_text(docx, "word/_rels/document.xml.rels")
+        expect(rels).to_contain("relationships/header")
+        expect(rels).to_contain("relationships/footer")
+
+    it "footer includes a PAGE field":
+        val doc = parse_markdown_document("Body.", "d")
+        val docx = document_to_docx_bytes_hf(doc, "H", "F")
+        val footer_xml = zip_extract_text(docx, "word/footer1.xml")
+        expect(footer_xml).to_contain("<w:fldSimple w:instr=\" PAGE \"/>")
+
+    it "header/footer text reads back via docx_bytes_to_header_footer":
+        val doc = parse_markdown_document("Body.", "d")
+        val docx = document_to_docx_bytes_hf(doc, "Acme Corp", "Confidential")
+        val hf = docx_bytes_to_header_footer(docx)
+        expect(hf.header_text).to_equal("Acme Corp")
+        expect(hf.footer_text.contains("Confidential")).to_be(true)
+
+    it "docx_bytes_to_header_footer returns empty strings for a header/footer-less docx":
+        val doc = parse_markdown_document("Body.", "d")
+        val docx = document_to_docx_bytes(doc)
+        val hf = docx_bytes_to_header_footer(docx)
+        expect(hf.header_text).to_equal("")
+        expect(hf.footer_text).to_equal("")

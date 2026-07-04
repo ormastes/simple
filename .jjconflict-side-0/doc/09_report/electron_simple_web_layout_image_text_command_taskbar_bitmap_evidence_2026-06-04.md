@@ -1,0 +1,200 @@
+# Electron Simple Web Layout Bitmap Evidence
+
+- status: divergent
+- reason: checksum-mismatch
+- scene: simple-web-layout-image-text-command-taskbar
+- dimensions: 96x64
+- Simple checksum: 26338575432571
+- Electron checksum: 26331582866784
+- Simple weighted checksum: 80959832907581928
+- Electron weighted checksum: 80944366486423423
+- mismatch count: 5211
+- same pixels: 933
+- Chrome extra text pixels: 3279
+- Simple extra text pixels: 475
+- text color delta pixels: 436
+- surface geometry pixels: 1021
+- blur/tolerance used: false
+- Electron frame us: 32467
+- HTML path: build/electron_simple_web_layout_image_text_command_taskbar_bitmap_evidence/scene.html
+- expected ARGB path: build/electron_simple_web_layout_image_text_command_taskbar_bitmap_evidence/expected-argb.json
+- captured ARGB path: build/electron_simple_web_layout_image_text_command_taskbar_bitmap_evidence/electron-argb.json
+- captured ARGB written: true
+
+## Raw Evidence
+- electron_simple_web_layout_status=divergent
+- electron_simple_web_layout_reason=checksum-mismatch
+- electron_simple_web_layout_scene=simple-web-layout-image-text-command-taskbar
+- electron_simple_web_layout_width=96
+- electron_simple_web_layout_height=64
+- electron_simple_web_layout_iterations=3
+- electron_simple_web_layout_simple_checksum=26338575432571
+- electron_simple_web_layout_electron_checksum=26331582866784
+- electron_simple_web_layout_simple_weighted_checksum=80959832907581928
+- electron_simple_web_layout_electron_weighted_checksum=80944366486423423
+- electron_simple_web_layout_mismatch_count=5211
+- electron_simple_web_layout_same_pixels=933
+- electron_simple_web_layout_chrome_extra_text_pixels=3279
+- electron_simple_web_layout_simple_extra_text_pixels=475
+- electron_simple_web_layout_text_color_delta_pixels=436
+- electron_simple_web_layout_surface_geometry_pixels=1021
+- electron_simple_web_layout_blur_or_tolerance_used=false
+- electron_simple_web_layout_electron_frame_us=32467
+- electron_simple_web_layout_html_path=build/electron_simple_web_layout_image_text_command_taskbar_bitmap_evidence/scene.html
+- electron_simple_web_layout_expected_argb_path=build/electron_simple_web_layout_image_text_command_taskbar_bitmap_evidence/expected-argb.json
+- electron_simple_web_layout_captured_argb_path=build/electron_simple_web_layout_image_text_command_taskbar_bitmap_evidence/electron-argb.json
+- electron_simple_web_layout_captured_argb_written=true
+- electron_simple_web_layout_exit_code=2
+
+## Simple Output
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2393:47
+-    |
+- 2393 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
+-    |                                               ^
+- 
+- Use angle brackets: pixels<...> instead of pixels[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2393:47
+-    |
+- 2393 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
+-    |                                               ^
+- 
+- Use angle brackets: pixels<...> instead of pixels[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-layout-renderer
+- scene=simple-web-layout-image-text-command-taskbar
+- width=96
+- height=64
+- checksum=26338575432571
+- weighted_checksum=80959832907581928
+- expected_argb_path=build/electron_simple_web_layout_image_text_command_taskbar_bitmap_evidence/expected-argb.json
+- blur_or_tolerance_used=false
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-layout-renderer
+- scene=simple-web-layout-image-text-command-taskbar
+- width=96
+- height=64
+- checksum=26338575432571
+- weighted_checksum=80959832907581928
+- expected_argb_path=build/electron_simple_web_layout_image_text_command_taskbar_bitmap_evidence/expected-argb.json
+- blur_or_tolerance_used=false
+
+## Electron Output
+- [3251950:0604/110715.571268:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
+- [3251874:0604/110715.988102:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
+- renderer=electron-live-capture-page
+- scene=simple-web-layout-image-text-command-taskbar
+- width=96
+- height=64
+- iterations=3
+- checksum=26331582866784
+- expected_checksum=26338575432571
+- weighted_checksum=80944366486423423
+- expected_weighted_checksum=80959832907581928
+- mismatch_count=5211
+- frame_us=32467
+- capture_native_width=96
+- capture_native_height=64
+- capture_downsampled=false
+- captured_argb_path=build/electron_simple_web_layout_image_text_command_taskbar_bitmap_evidence/electron-argb.json
+- captured_argb_written=true
+- blur_or_tolerance_used=false

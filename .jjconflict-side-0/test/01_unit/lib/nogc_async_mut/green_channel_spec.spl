@@ -1,0 +1,100 @@
+"""
+# Green Channel Specification
+
+Tests the pure Simple cooperative green-channel contract. The contract is
+nonblocking for carrier workers: empty recv parks a logical green task, send
+unparks a waiter, and full bounded send reports backpressure instead of parking
+the sender.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Overview
+
+Green channels are scheduler-facing contracts for logical green tasks. They do
+not block carrier workers. Instead, a receive on an empty channel records the
+task id as parked, and a later send reports which parked task should be
+unparked. Bounded full sends report backpressure so a scheduler can choose when
+to retry without stalling the current OS thread.
+
+## Examples
+
+```simple
+val channel = green_channel_new(1)
+val parked = green_channel_recv(channel, 41)
+val sent = green_channel_send(parked.channel, 99)
+expect(sent.receiver_task_id).to_equal(41)
+```
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** N/A
+
+## Research
+
+**Research:** doc/01_research/local/multicore_green.md
+"""
+
+use std.spec.*
+use std.concurrent.green_channel.{
+    green_channel_new,
+    green_channel_len,
+    green_channel_waiting_count,
+    green_channel_backpressure_count,
+    green_channel_recv,
+    green_channel_send
+}
+
+describe "Green channel contract":
+    it "parks a receiver task when the channel is empty":
+        val channel = green_channel_new(2)
+        val received = green_channel_recv(channel, 41)
+
+        expect(received.received).to_equal(false)
+        expect(received.parked).to_equal(true)
+        expect(received.task_id).to_equal(41)
+        expect(received.reason).to_equal("parked_on_empty_recv")
+        expect(green_channel_waiting_count(received.channel)).to_equal(1)
+
+    it "send unparks the oldest parked receiver without buffering":
+        val channel = green_channel_new(2)
+        val parked = green_channel_recv(channel, 41)
+        val sent = green_channel_send(parked.channel, 99)
+
+        expect(sent.sent).to_equal(true)
+        expect(sent.unparked).to_equal(true)
+        expect(sent.receiver_task_id).to_equal(41)
+        expect(sent.value).to_equal(99)
+        expect(sent.reason).to_equal("unpark_receiver")
+        expect(green_channel_waiting_count(sent.channel)).to_equal(0)
+        expect(green_channel_len(sent.channel)).to_equal(0)
+
+    it "receives buffered values in FIFO order without parking":
+        val channel = green_channel_new(2)
+        val first_send = green_channel_send(channel, 11)
+        val second_send = green_channel_send(first_send.channel, 22)
+        val first_recv = green_channel_recv(second_send.channel, 1)
+        val second_recv = green_channel_recv(first_recv.channel, 2)
+
+        expect(first_recv.received).to_equal(true)
+        expect(first_recv.parked).to_equal(false)
+        expect(first_recv.value).to_equal(11)
+        expect(second_recv.value).to_equal(22)
+        expect(green_channel_len(second_recv.channel)).to_equal(0)
+
+    it "reports bounded backpressure without parking the sender":
+        val channel = green_channel_new(1)
+        val first_send = green_channel_send(channel, 7)
+        val second_send = green_channel_send(first_send.channel, 8)
+
+        expect(second_send.sent).to_equal(false)
+        expect(second_send.backpressure).to_equal(true)
+        expect(second_send.sender_should_park).to_equal(false)
+        expect(second_send.reason).to_equal("bounded_backpressure")
+        expect(green_channel_len(second_send.channel)).to_equal(1)
+        expect(green_channel_backpressure_count(second_send.channel)).to_equal(1)

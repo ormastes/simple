@@ -1,0 +1,161 @@
+# types_spec.spl — search custom-type barrier invariants (AC-1, AC-7)
+#
+# Proves MatchSpan start/end correctness, Score ordering, and the GENERIC
+# PostingList<Id> sorted-merge intersect/union against hand-written ABSOLUTE
+# ORACLE fixtures (no self-comparison, no boolean-wrapper assertions).
+use std.spec
+use lib.common.search.types.{Haystack, Pattern, MatchPos, MatchSpan, Score, PostingList, Embedding}
+
+describe "MatchSpan":
+    it "reports start/end and derives length without drift":
+        val m = MatchSpan.of(3, 8)
+        expect(m.start()).to_equal(3)
+        expect(m.end()).to_equal(8)
+        expect(m.length()).to_equal(5)
+
+    it "at_len builds end = start + length":
+        val m = MatchSpan.at_len(10, 4)
+        expect(m.start()).to_equal(10)
+        expect(m.end()).to_equal(14)
+        expect(m.length()).to_equal(4)
+
+    it "contains is half-open [start, end)":
+        val m = MatchSpan.of(2, 5)
+        expect(m.contains(2)).to_equal(true)
+        expect(m.contains(4)).to_equal(true)
+        expect(m.contains(5)).to_equal(false)
+        expect(m.contains(1)).to_equal(false)
+
+    it "empty span has zero length":
+        val m = MatchSpan.of(7, 7)
+        expect(m.is_empty()).to_equal(true)
+        expect(m.length()).to_equal(0)
+
+describe "MatchPos":
+    it "carries a typed index and compares by value":
+        val a = MatchPos.at(12)
+        val b = MatchPos.at(12)
+        val c = MatchPos.at(13)
+        expect(a.value()).to_equal(12)
+        expect(a.equals(b)).to_equal(true)
+        expect(a.equals(c)).to_equal(false)
+
+describe "Score":
+    it "orders by raw fixed-point value (higher is better)":
+        val lo = Score.from_count(2)
+        val hi = Score.from_count(5)
+        expect(hi.is_greater_than(lo)).to_equal(true)
+        expect(lo.is_less_than(hi)).to_equal(true)
+        expect(hi.is_less_than(lo)).to_equal(false)
+
+    it "cmp returns -1 / 0 / +1 as a sort key":
+        val a = Score.from_milli(1500)
+        val b = Score.from_milli(1500)
+        val c = Score.from_milli(2000)
+        expect(a.cmp(b)).to_equal(0)
+        expect(a.cmp(c)).to_equal(0 - 1)
+        expect(c.cmp(a)).to_equal(1)
+
+    it "max picks the higher score":
+        val a = Score.from_count(3)
+        val b = Score.from_count(7)
+        expect(a.max(b).raw_value()).to_equal(7000)
+
+    it "from_count scales by FIXED_ONE (1000)":
+        expect(Score.from_count(4).raw_value()).to_equal(4000)
+
+describe "PostingList<Id> generic sorted-merge (AC-7)":
+    it "intersect matches a hand-computed oracle":
+        # Oracle: [1,3,5,7,9] INTERSECT [3,4,5,6,9] == [3,5,9]
+        val a = PostingList.of([1, 3, 5, 7, 9])
+        val b = PostingList.of([3, 4, 5, 6, 9])
+        val r = a.intersect(b)
+        expect(r.len()).to_equal(3)
+        expect(r.at(0)).to_equal(3)
+        expect(r.at(1)).to_equal(5)
+        expect(r.at(2)).to_equal(9)
+
+    it "intersect of disjoint lists is empty":
+        # Oracle: [1,2,3] INTERSECT [4,5,6] == []
+        val a = PostingList.of([1, 2, 3])
+        val b = PostingList.of([4, 5, 6])
+        val r = a.intersect(b)
+        expect(r.is_empty()).to_equal(true)
+        expect(r.len()).to_equal(0)
+
+    it "union deduplicates and stays sorted vs oracle":
+        # Oracle: [1,3,5] UNION [2,3,4,6] == [1,2,3,4,5,6]
+        val a = PostingList.of([1, 3, 5])
+        val b = PostingList.of([2, 3, 4, 6])
+        val r = a.union(b)
+        expect(r.len()).to_equal(6)
+        expect(r.at(0)).to_equal(1)
+        expect(r.at(1)).to_equal(2)
+        expect(r.at(2)).to_equal(3)
+        expect(r.at(3)).to_equal(4)
+        expect(r.at(4)).to_equal(5)
+        expect(r.at(5)).to_equal(6)
+
+    it "union with empty is identity":
+        # Oracle: [10,20] UNION [] == [10,20]
+        val a = PostingList.of([10, 20])
+        val b: PostingList<i64> = PostingList.new()
+        val r = a.union(b)
+        expect(r.len()).to_equal(2)
+        expect(r.at(0)).to_equal(10)
+        expect(r.at(1)).to_equal(20)
+
+    it "me push builds a list then merges":
+        var a: PostingList<i64> = PostingList.new()
+        a.push(2)
+        a.push(4)
+        a.push(8)
+        val b = PostingList.of([4, 8, 16])
+        # Oracle: [2,4,8] INTERSECT [4,8,16] == [4,8]
+        val r = a.intersect(b)
+        expect(r.len()).to_equal(2)
+        expect(r.at(0)).to_equal(4)
+        expect(r.at(1)).to_equal(8)
+
+    it "advance_to skip-cursor leaps to first id >= target":
+        val a = PostingList.of([1, 4, 9, 16, 25])
+        # first id >= 10 is 16, at index 3
+        expect(a.advance_to(0, 10)).to_equal(3)
+        # first id >= 1 is 1, at index 0
+        expect(a.advance_to(0, 1)).to_equal(0)
+        # nothing >= 100 -> len()
+        expect(a.advance_to(0, 100)).to_equal(5)
+
+describe "Haystack / Pattern barrier":
+    it "find_from locates the first matching byte at/after a cursor":
+        val h = Haystack.new([65u8, 66u8, 67u8, 66u8, 68u8])
+        expect(h.find_from(0, 66u8)).to_equal(1)
+        expect(h.find_from(2, 66u8)).to_equal(3)
+        expect(h.find_from(0, 90u8)).to_equal(0 - 1)
+
+    it "matches_at verifies a pattern at a position":
+        val h = Haystack.new([97u8, 98u8, 99u8, 98u8, 99u8])
+        val p = Pattern.new([98u8, 99u8])
+        expect(h.matches_at(1, p)).to_equal(true)
+        expect(h.matches_at(3, p)).to_equal(true)
+        expect(h.matches_at(0, p)).to_equal(false)
+
+    it "Pattern skip table gives a shift >= 1 for any byte":
+        val p = Pattern.new([97u8, 98u8, 99u8])
+        # 'a'(97) last occurs at index 0 of len-3 -> shift = 3-1-0 = 2
+        expect(p.skip_for(97u8)).to_equal(2)
+        # unseen byte -> full pattern length
+        expect(p.skip_for(120u8)).to_equal(3)
+
+describe "Embedding<D> fixed-point path":
+    it "dot_fixed computes integer dot product":
+        val x: Embedding<i64> = Embedding.from_fixed([1, 2, 3])
+        val y: Embedding<i64> = Embedding.from_fixed([4, 5, 6])
+        # 1*4 + 2*5 + 3*6 = 32
+        expect(x.dot_fixed(y)).to_equal(32)
+
+    it "l2_sq_fixed computes squared norm":
+        val x: Embedding<i64> = Embedding.from_fixed([3, 4])
+        # 9 + 16 = 25
+        expect(x.l2_sq_fixed()).to_equal(25)
+        expect(x.dimension()).to_equal(2)

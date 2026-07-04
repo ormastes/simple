@@ -1,0 +1,300 @@
+# test/unit/compiler/backend/fma3_emit_spec.spl
+#
+# Byte-level golden tests for x86_64 FMA3 VEX emit functions.
+# Verifies emit_vfmadd132ps_ymm, emit_vfmadd213ps_ymm, emit_vfmadd231ps_ymm,
+# emit_vfmsub132ps_ymm, emit_vfmsub213ps_ymm, emit_vfmsub231ps_ymm,
+# emit_vfnmadd213ps_ymm, emit_vfmadd132pd_ymm produce exact Intel SDM byte sequences.
+#
+# All goldens verified with:
+#   llvm-mc --show-encoding -triple=x86_64 -mattr=+avx,+fma
+# AT&T operand order: vfmadd132ps %ymm_rm, %ymm_rn, %ymm_rd
+#
+# Reference: Intel SDM Vol 2B §VFMADD132PS/PD, §VFMADD213PS, §VFMADD231PS,
+#            §VFMSUB132PS, §VFMSUB213PS, §VFMSUB231PS, §VFNMADD213PS;
+#            Vol 2A §2.3.5 (VEX prefix).
+
+import std.spec
+
+use compiler.backend.native.encode_x86_64_fma3.{
+    emit_vfmadd132ps_ymm,
+    emit_vfmadd213ps_ymm,
+    emit_vfmadd231ps_ymm,
+    emit_vfmsub132ps_ymm,
+    emit_vfmsub213ps_ymm,
+    emit_vfmsub231ps_ymm,
+    emit_vfnmadd213ps_ymm,
+    emit_vfmadd132pd_ymm
+}
+
+# ============================================================================
+# VFMADD132PS — VEX.256.66.0F38.W0 98 /r
+# emit_vfmadd132ps_ymm(rd, rn, rm): rd→ModRM.reg, rn→VEX.vvvv, rm→ModRM.rm
+# ============================================================================
+
+describe "FMA3 emit_vfmadd132ps_ymm ymm0 ymm1 ymm2 golden":
+    # vfmadd132ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0x98,0xc2]
+    # rd=0(ymm0), rn=1(ymm1), rm=2(ymm2)
+    it "emits 5 bytes":
+        val result = emit_vfmadd132ps_ymm(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte0 is VEX escape 0xC4":
+        val result = emit_vfmadd132ps_ymm(0, 1, 2)
+        expect result[0] == 196
+
+    it "byte1 is 0xE2 (~R=1 ~X=1 ~B=1 mmmmm=2)":
+        # rd<8 → ~R=1, rm<8 → ~B=1, ~X=1, mmmmm=2 → 226
+        val result = emit_vfmadd132ps_ymm(0, 1, 2)
+        expect result[1] == 226
+
+    it "byte2 is 0x75 (W=0 ~vvvv=14 L=1 pp=01)":
+        # W=0, ~vvvv=(15-rn=1)=14, L=1(bit2=4), pp=01(1) → 14*8+5=117
+        val result = emit_vfmadd132ps_ymm(0, 1, 2)
+        expect result[2] == 117
+
+    it "byte3 is opcode 0x98":
+        val result = emit_vfmadd132ps_ymm(0, 1, 2)
+        expect result[3] == 152
+
+    it "byte4 is ModRM 0xC2 (mod=11 reg=0 rm=2)":
+        # mod=11, reg=rd%8=0, rm=rm%8=2 → 192+0*8+2=194
+        val result = emit_vfmadd132ps_ymm(0, 1, 2)
+        expect result[4] == 194
+
+describe "FMA3 emit_vfmadd132ps_ymm extended rd ymm9":
+    # vfmadd132ps %ymm2, %ymm1, %ymm9 → [0xc4,0x62,0x75,0x98,0xca]
+    # rd=9(ymm9), rn=1(ymm1), rm=2(ymm2)
+    it "byte1 is 0x62 (~R=0 ~X=1 ~B=1 mmmmm=2)":
+        # rd>=8 → ~R=0, rm<8 → ~B=1 → 226-128=98
+        val result = emit_vfmadd132ps_ymm(9, 1, 2)
+        expect result[1] == 98
+
+    it "byte2 is 0x75 (W=0 ~vvvv=14 L=1 pp=01)":
+        val result = emit_vfmadd132ps_ymm(9, 1, 2)
+        expect result[2] == 117
+
+    it "byte4 is ModRM 0xCA (mod=11 reg=1 rm=2)":
+        # mod=11, reg=9%8=1, rm=2%8=2 → 192+1*8+2=202
+        val result = emit_vfmadd132ps_ymm(9, 1, 2)
+        expect result[4] == 202
+
+describe "FMA3 emit_vfmadd132ps_ymm extended rn ymm9":
+    # vfmadd132ps %ymm2, %ymm9, %ymm0 → byte2 changes for ~vvvv
+    # rd=0(ymm0), rn=9(ymm9), rm=2(ymm2)
+    it "byte2 is 0x35 (W=0 ~vvvv=6 L=1 pp=01)":
+        # ~vvvv=(15-rn=9)=6, L=1, pp=01 → 6*8+5=53
+        val result = emit_vfmadd132ps_ymm(0, 9, 2)
+        expect result[2] == 53
+
+    it "byte4 is ModRM 0xC2 (mod=11 reg=0 rm=2)":
+        val result = emit_vfmadd132ps_ymm(0, 9, 2)
+        expect result[4] == 194
+
+describe "FMA3 emit_vfmadd132ps_ymm extended rm ymm9":
+    # vfmadd132ps %ymm9, %ymm1, %ymm0 → byte1 ~B flips
+    # rd=0(ymm0), rn=1(ymm1), rm=9(ymm9)
+    it "byte1 is 0xC2 (~R=1 ~X=1 ~B=0 mmmmm=2)":
+        # rd<8 → ~R=1; rm>=8 → ~B=0 → 226-32=194
+        val result = emit_vfmadd132ps_ymm(0, 1, 9)
+        expect result[1] == 194
+
+    it "byte4 is ModRM 0xC1 (mod=11 reg=0 rm=1)":
+        # mod=11, reg=0%8=0, rm=9%8=1 → 192+0*8+1=193
+        val result = emit_vfmadd132ps_ymm(0, 1, 9)
+        expect result[4] == 193
+
+# ============================================================================
+# VFMADD213PS — VEX.256.66.0F38.W0 A8 /r
+# ============================================================================
+
+describe "FMA3 emit_vfmadd213ps_ymm ymm0 ymm1 ymm2 golden":
+    # vfmadd213ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0xa8,0xc2]
+    it "emits 5 bytes":
+        val result = emit_vfmadd213ps_ymm(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte3 is opcode 0xA8":
+        val result = emit_vfmadd213ps_ymm(0, 1, 2)
+        expect result[3] == 168
+
+    it "byte2 is 0x75 (W=0 ~vvvv=14 L=1 pp=01)":
+        val result = emit_vfmadd213ps_ymm(0, 1, 2)
+        expect result[2] == 117
+
+describe "FMA3 emit_vfmadd213ps_ymm extended rm ymm9":
+    # rd=0, rn=1, rm=9 → byte1=0xC2, byte4=0xC1
+    it "byte1 is 0xC2 (~R=1 ~X=1 ~B=0 mmmmm=2)":
+        val result = emit_vfmadd213ps_ymm(0, 1, 9)
+        expect result[1] == 194
+
+    it "byte4 is ModRM 0xC1 (mod=11 reg=0 rm=1)":
+        val result = emit_vfmadd213ps_ymm(0, 1, 9)
+        expect result[4] == 193
+
+# ============================================================================
+# VFMADD231PS — VEX.256.66.0F38.W0 B8 /r
+# ============================================================================
+
+describe "FMA3 emit_vfmadd231ps_ymm ymm0 ymm1 ymm2 golden":
+    # vfmadd231ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0xb8,0xc2]
+    it "emits 5 bytes":
+        val result = emit_vfmadd231ps_ymm(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte3 is opcode 0xB8":
+        val result = emit_vfmadd231ps_ymm(0, 1, 2)
+        expect result[3] == 184
+
+    it "byte2 is 0x75 (W=0 ~vvvv=14 L=1 pp=01)":
+        val result = emit_vfmadd231ps_ymm(0, 1, 2)
+        expect result[2] == 117
+
+# ============================================================================
+# VFMSUB132PS — VEX.256.66.0F38.W0 9A /r
+# ============================================================================
+
+describe "FMA3 emit_vfmsub132ps_ymm ymm0 ymm1 ymm2 golden":
+    # vfmsub132ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0x9a,0xc2]
+    it "emits 5 bytes":
+        val result = emit_vfmsub132ps_ymm(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte3 is opcode 0x9A":
+        val result = emit_vfmsub132ps_ymm(0, 1, 2)
+        expect result[3] == 154
+
+    it "byte2 is 0x75 (W=0 ~vvvv=14 L=1 pp=01)":
+        val result = emit_vfmsub132ps_ymm(0, 1, 2)
+        expect result[2] == 117
+
+describe "FMA3 emit_vfmsub132ps_ymm extended rd ymm9":
+    # rd=9, rn=1, rm=2 → byte1=0x62, byte4=0xCA
+    it "byte1 is 0x62 (~R=0 ~X=1 ~B=1 mmmmm=2)":
+        val result = emit_vfmsub132ps_ymm(9, 1, 2)
+        expect result[1] == 98
+
+    it "byte4 is ModRM 0xCA (mod=11 reg=1 rm=2)":
+        val result = emit_vfmsub132ps_ymm(9, 1, 2)
+        expect result[4] == 202
+
+# ============================================================================
+# VFMSUB213PS — VEX.256.66.0F38.W0 AA /r
+# ============================================================================
+
+describe "FMA3 emit_vfmsub213ps_ymm ymm0 ymm1 ymm2 golden":
+    # vfmsub213ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0xaa,0xc2]
+    it "emits 5 bytes":
+        val result = emit_vfmsub213ps_ymm(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte3 is opcode 0xAA":
+        val result = emit_vfmsub213ps_ymm(0, 1, 2)
+        expect result[3] == 170
+
+    it "byte2 is 0x75":
+        val result = emit_vfmsub213ps_ymm(0, 1, 2)
+        expect result[2] == 117
+
+# ============================================================================
+# VFMSUB231PS — VEX.256.66.0F38.W0 BA /r
+# ============================================================================
+
+describe "FMA3 emit_vfmsub231ps_ymm ymm0 ymm1 ymm2 golden":
+    # vfmsub231ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0xba,0xc2]
+    it "emits 5 bytes":
+        val result = emit_vfmsub231ps_ymm(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte3 is opcode 0xBA":
+        val result = emit_vfmsub231ps_ymm(0, 1, 2)
+        expect result[3] == 186
+
+    it "byte2 is 0x75":
+        val result = emit_vfmsub231ps_ymm(0, 1, 2)
+        expect result[2] == 117
+
+describe "FMA3 emit_vfmsub231ps_ymm extended rd ymm9":
+    # rd=9, rn=1, rm=2 → byte1=0x62, byte4=0xCA
+    it "byte1 is 0x62 (~R=0 ~X=1 ~B=1 mmmmm=2)":
+        val result = emit_vfmsub231ps_ymm(9, 1, 2)
+        expect result[1] == 98
+
+    it "byte4 is ModRM 0xCA (mod=11 reg=1 rm=2)":
+        val result = emit_vfmsub231ps_ymm(9, 1, 2)
+        expect result[4] == 202
+
+# ============================================================================
+# VFNMADD213PS — VEX.256.66.0F38.W0 AC /r
+# ============================================================================
+
+describe "FMA3 emit_vfnmadd213ps_ymm ymm0 ymm1 ymm2 golden":
+    # vfnmadd213ps %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0x75,0xac,0xc2]
+    it "emits 5 bytes":
+        val result = emit_vfnmadd213ps_ymm(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte3 is opcode 0xAC":
+        val result = emit_vfnmadd213ps_ymm(0, 1, 2)
+        expect result[3] == 172
+
+    it "byte2 is 0x75 (W=0 ~vvvv=14 L=1 pp=01)":
+        val result = emit_vfnmadd213ps_ymm(0, 1, 2)
+        expect result[2] == 117
+
+describe "FMA3 emit_vfnmadd213ps_ymm extended rn ymm9":
+    # rd=0, rn=9, rm=2 → byte2=0x35 (~vvvv=6)
+    it "byte2 is 0x35 (W=0 ~vvvv=6 L=1 pp=01)":
+        # ~vvvv=(15-rn=9)=6 → 6*8+5=53
+        val result = emit_vfnmadd213ps_ymm(0, 9, 2)
+        expect result[2] == 53
+
+    it "byte4 is ModRM 0xC2 (mod=11 reg=0 rm=2)":
+        val result = emit_vfnmadd213ps_ymm(0, 9, 2)
+        expect result[4] == 194
+
+# ============================================================================
+# VFMADD132PD — VEX.256.66.0F38.W1 98 /r
+# ============================================================================
+
+describe "FMA3 emit_vfmadd132pd_ymm ymm0 ymm1 ymm2 golden":
+    # vfmadd132pd %ymm2, %ymm1, %ymm0 → [0xc4,0xe2,0xf5,0x98,0xc2]
+    it "emits 5 bytes":
+        val result = emit_vfmadd132pd_ymm(0, 1, 2)
+        expect result.len() == 5
+
+    it "byte0 is VEX escape 0xC4":
+        val result = emit_vfmadd132pd_ymm(0, 1, 2)
+        expect result[0] == 196
+
+    it "byte1 is 0xE2 (~R=1 ~X=1 ~B=1 mmmmm=2)":
+        val result = emit_vfmadd132pd_ymm(0, 1, 2)
+        expect result[1] == 226
+
+    it "byte2 is 0xF5 (W=1 ~vvvv=14 L=1 pp=01)":
+        # W=1 adds 128, ~vvvv=14, L=1, pp=01 → 128+14*8+5=245
+        val result = emit_vfmadd132pd_ymm(0, 1, 2)
+        expect result[2] == 245
+
+    it "byte3 is opcode 0x98":
+        val result = emit_vfmadd132pd_ymm(0, 1, 2)
+        expect result[3] == 152
+
+    it "byte4 is ModRM 0xC2 (mod=11 reg=0 rm=2)":
+        val result = emit_vfmadd132pd_ymm(0, 1, 2)
+        expect result[4] == 194
+
+describe "FMA3 emit_vfmadd132pd_ymm extended rd ymm9":
+    # rd=9(ymm9), rn=1, rm=2 → [0xc4,0x62,0xf5,0x98,0xca]
+    it "byte1 is 0x62 (~R=0 ~X=1 ~B=1 mmmmm=2)":
+        # rd>=8 → ~R=0 → 226-128=98
+        val result = emit_vfmadd132pd_ymm(9, 1, 2)
+        expect result[1] == 98
+
+    it "byte2 is 0xF5 (W=1 ~vvvv=14 L=1 pp=01)":
+        val result = emit_vfmadd132pd_ymm(9, 1, 2)
+        expect result[2] == 245
+
+    it "byte4 is ModRM 0xCA (mod=11 reg=1 rm=2)":
+        # mod=11, reg=9%8=1, rm=2%8=2 → 192+1*8+2=202
+        val result = emit_vfmadd132pd_ymm(9, 1, 2)
+        expect result[4] == 202

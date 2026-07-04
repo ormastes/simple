@@ -1,0 +1,196 @@
+"""
+fil_ecc — page ECC utility for the SimpleOS NVMe firmware simulation.
+
+Pure free functions only (no struct, no me-methods).
+Computes and verifies a compact 16-bit ECC word. The low bits are Hamming
+SECDED parity over the simulated payload byte; the high bits protect OOB
+metadata sensitivity for {lba, seq}.
+"""
+
+use nvme_types.*
+
+struct EccDecode:
+    data: i64
+    code: i64
+
+fn ecc_bit(v: i64, bit: i64) -> i64:
+    (v >> bit) & 1
+
+fn ecc_data_bit_for_pos(data: i64, pos: i64) -> i64:
+    if pos == 3:
+        return ecc_bit(data, 0)
+    if pos == 5:
+        return ecc_bit(data, 1)
+    if pos == 6:
+        return ecc_bit(data, 2)
+    if pos == 7:
+        return ecc_bit(data, 3)
+    if pos == 9:
+        return ecc_bit(data, 4)
+    if pos == 10:
+        return ecc_bit(data, 5)
+    if pos == 11:
+        return ecc_bit(data, 6)
+    if pos == 12:
+        return ecc_bit(data, 7)
+    0
+
+fn ecc_hamming_payload(data: i64) -> i64:
+    val d: i64 = data & 0xFF
+    var p1: i64 = 0
+    var p2: i64 = 0
+    var p4: i64 = 0
+    var p8: i64 = 0
+    var overall: i64 = 0
+    var pos: i64 = 1
+    while pos <= 12:
+        val bit: i64 = ecc_data_bit_for_pos(d, pos)
+        if (pos & 1) != 0:
+            p1 = p1 ^ bit
+        if (pos & 2) != 0:
+            p2 = p2 ^ bit
+        if (pos & 4) != 0:
+            p4 = p4 ^ bit
+        if (pos & 8) != 0:
+            p8 = p8 ^ bit
+        overall = overall ^ bit
+        pos = pos + 1
+    overall = overall ^ p1 ^ p2 ^ p4 ^ p8
+    p1 | (p2 << 1) | (p4 << 2) | (p8 << 3) | (overall << 4)
+
+# ── ecc_compute ───────────────────────────────────────────────────────────────
+# Low 5 bits: Hamming SECDED parity over data byte. Upper 11 bits: metadata guard.
+fn ecc_compute(data: i64, lba: i64, seq: i64) -> i64:
+    val payload: i64 = ecc_hamming_payload(data)
+    val meta: i64 = (lba ^ (seq << 4) ^ (lba >> 3) ^ (seq >> 5)) & 0x7FF
+    payload | (meta << 5)
+
+fn ecc_flip_data_pos(data: i64, pos: i64) -> i64:
+    if pos == 3:
+        return data ^ 0x01
+    if pos == 5:
+        return data ^ 0x02
+    if pos == 6:
+        return data ^ 0x04
+    if pos == 7:
+        return data ^ 0x08
+    if pos == 9:
+        return data ^ 0x10
+    if pos == 10:
+        return data ^ 0x20
+    if pos == 11:
+        return data ^ 0x40
+    if pos == 12:
+        return data ^ 0x80
+    data
+
+fn ecc_decode(data: i64, lba: i64, seq: i64, stored: i64, injected_flips: i64) -> EccDecode:
+    val recomputed: i64 = ecc_compute(data, lba, seq)
+    val stored_meta: i64 = (stored >> 5) & 0x7FF
+    val recomputed_meta: i64 = (recomputed >> 5) & 0x7FF
+    if injected_flips >= 2:
+        return EccDecode(data: data, code: NAND_ECC_FAIL)
+    if stored_meta != recomputed_meta:
+        return EccDecode(data: data, code: NAND_ECC_FAIL)
+
+    val syndrome: i64 = (stored ^ recomputed) & 0xF
+    val overall: i64 = ((stored >> 4) ^ (recomputed >> 4)) & 1
+    if syndrome == 0:
+        if overall == 0:
+            if injected_flips == 1:
+                return EccDecode(data: data, code: NAND_ECC_FIXED)
+            return EccDecode(data: data, code: NAND_OK)
+        return EccDecode(data: data, code: NAND_ECC_FIXED)
+    if overall == 0:
+        return EccDecode(data: data, code: NAND_ECC_FAIL)
+    EccDecode(data: ecc_flip_data_pos(data, syndrome) & 0xFF, code: NAND_ECC_FIXED)
+
+# ── ecc_check ─────────────────────────────────────────────────────────────────
+# Verify a page read against its stored ECC given an injected_flips count
+# (the NAND hardware bit-error counter for this read).
+#
+# NAND semantics:
+#   injected_flips >= 2  ->  NAND_ECC_FAIL (uncorrectable)
+#   recomputed != stored ->  NAND_ECC_FAIL (silent data/OOB corruption)
+#   injected_flips == 1  ->  NAND_ECC_FIXED (1-bit error, correctable)
+#   otherwise            ->  NAND_OK
+fn ecc_check(data: i64, lba: i64, seq: i64, stored: i64, injected_flips: i64) -> i64:
+    ecc_decode(data, lba, seq, stored, injected_flips).code
+
+# ── ecc_selftest ──────────────────────────────────────────────────────────────
+fn ecc_selftest() -> i64:
+    var failures: i64 = 0
+
+    # Determinism: identical inputs must produce identical checksum
+    val e1: i64 = ecc_compute(0xAB, 7, 3)
+    val e2: i64 = ecc_compute(0xAB, 7, 3)
+    failures = failures + expect_eq(e1, e2, "ecc_compute deterministic")
+
+    # Result fits in 16 bits (>= 0 and <= 0xFFFF)
+    val e3: i64 = ecc_compute(0xFF, 255, 63)
+    var range_ok: i64 = 0
+    if e3 >= 0:
+        if e3 <= 0xFFFF:
+            range_ok = 1
+    failures = failures + expect_eq(range_ok, 1, "ecc_compute 16-bit range")
+
+    # Sensitivity: different data must differ (or at least not trivially collide)
+    val ea: i64 = ecc_compute(0x01, 0, 0)
+    val eb: i64 = ecc_compute(0x02, 0, 0)
+    var differs: i64 = 0
+    if ea != eb:
+        differs = 1
+    failures = failures + expect_eq(differs, 1, "ecc_compute data sensitivity")
+
+    val em0: i64 = ecc_compute(0x02, 1, 1)
+    val em1: i64 = ecc_compute(0x02, 2, 1)
+    var meta_differs: i64 = 0
+    if em0 != em1:
+        meta_differs = 1
+    failures = failures + expect_eq(meta_differs, 1, "ecc_compute metadata sensitivity")
+
+    # --- ecc_check cases ---
+    val data1: i64 = 0x42
+    val lba1: i64 = 100
+    val seq1: i64 = 5
+    val ecc1: i64 = ecc_compute(data1, lba1, seq1)
+
+    # matching stored, 0 flips -> NAND_OK
+    failures = failures + expect_eq(
+        ecc_check(data1, lba1, seq1, ecc1, 0),
+        NAND_OK,
+        "check 0-flips -> NAND_OK")
+
+    # matching stored, 1 flip -> NAND_ECC_FIXED
+    failures = failures + expect_eq(
+        ecc_check(data1, lba1, seq1, ecc1, 1),
+        NAND_ECC_FIXED,
+        "check 1-flip -> NAND_ECC_FIXED")
+
+    # matching stored, 2 flips -> NAND_ECC_FAIL (uncorrectable)
+    failures = failures + expect_eq(
+        ecc_check(data1, lba1, seq1, ecc1, 2),
+        NAND_ECC_FAIL,
+        "check 2-flips -> NAND_ECC_FAIL")
+
+    # matching stored, 3 flips -> NAND_ECC_FAIL (>= 2)
+    failures = failures + expect_eq(
+        ecc_check(data1, lba1, seq1, ecc1, 3),
+        NAND_ECC_FAIL,
+        "check 3-flips -> NAND_ECC_FAIL")
+
+    # wrong stored ecc, 0 flips -> NAND_ECC_FAIL (silent corruption)
+    val bad_ecc: i64 = ecc1 ^ 0x1
+    failures = failures + expect_eq(
+        ecc_check(data1, lba1, seq1, bad_ecc, 0),
+        NAND_ECC_FAIL,
+        "check stored-ecc parity mismatch -> NAND_ECC_FAIL")
+
+    val single_data: EccDecode = ecc_decode(data1 ^ 0x01, lba1, seq1, ecc1, 0)
+    failures = failures + expect_eq(single_data.code, NAND_ECC_FIXED, "single silent payload bit -> ECC_FIXED")
+    failures = failures + expect_eq(single_data.data, data1, "single silent payload bit corrected")
+
+    val double_data: EccDecode = ecc_decode(data1 ^ 0x03, lba1, seq1, ecc1, 0)
+    failures = failures + expect_eq(double_data.code, NAND_ECC_FAIL, "double silent payload bit -> ECC_FAIL")
+
+    failures

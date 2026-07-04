@@ -1,0 +1,118 @@
+# Host-side JTAG state capture and restore.
+# Reads .rtos_state region + CPU registers via probe, serializes to file.
+
+class StateCaptureResult:
+    """Result of a state capture operation."""
+    success: bool
+    task_count: i32
+    tick_count: u64
+    active_task: i32
+    message: text
+
+    static fn ok(tasks: i32, ticks: u64, active: i32) -> StateCaptureResult:
+        StateCaptureResult(
+            success: true,
+            task_count: tasks,
+            tick_count: ticks,
+            active_task: active,
+            message: "capture ok"
+        )
+
+    static fn err(msg: text) -> StateCaptureResult:
+        StateCaptureResult(
+            success: false,
+            task_count: 0,
+            tick_count: 0u64,
+            active_task: -1,
+            message: msg
+        )
+
+val RTOS_SNAPSHOT_MAGIC: u32 = 0x52544F53
+val RTOS_STATE_SIZE: i32 = 1024
+
+fn save_state(probe: JtagProbe, state_addr: u64, cpu_regs_out: [u64]) -> StateCaptureResult:
+    """Capture full RTOS state via JTAG probe.
+
+    1. Halt target
+    2. Read .rtos_state region
+    3. Read CPU registers
+    4. Validate magic
+    Returns capture result with metadata."""
+
+    if not probe.halt():
+        return StateCaptureResult.err("failed to halt target")
+
+    val region = probe.read_region(state_addr, RTOS_STATE_SIZE)
+    if region.length() < 4:
+        return StateCaptureResult.err("failed to read state region")
+
+    val magic = bytes_to_u32(region, 0)
+    if magic != RTOS_SNAPSHOT_MAGIC:
+        return StateCaptureResult.err("invalid snapshot magic")
+
+    val regs = probe.read_all_registers()
+    var i = 0
+    while i < regs.length():
+        cpu_regs_out.push(regs[i])
+        i = i + 1
+
+    val task_count = bytes_to_i32(region, 8)
+    val active_id = bytes_to_i32(region, 12)
+    val tick_lo = bytes_to_u32(region, 16)
+    val tick_hi = bytes_to_u32(region, 20)
+    val tick = tick_lo.to_u64() | (tick_hi.to_u64() << 32)
+
+    StateCaptureResult.ok(task_count, tick, active_id)
+
+fn restore_state(probe: JtagProbe, state_addr: u64, region_data: [u8], cpu_regs: [u64]) -> bool:
+    """Restore RTOS state via JTAG probe.
+
+    1. Write .rtos_state region
+    2. Write CPU registers
+    3. Resume target"""
+
+    if not probe.halt():
+        return false
+
+    if not probe.write_region(state_addr, region_data):
+        return false
+
+    if not probe.write_all_registers(cpu_regs):
+        return false
+
+    probe.resume()
+
+fn checkpoint_save(probe: JtagProbe, state_addr: u64) -> [u8]:
+    """High-level: halt, read entire state region, return as byte array."""
+    probe.halt()
+    val data = probe.read_region(state_addr, RTOS_STATE_SIZE)
+    data
+
+fn checkpoint_restore(probe: JtagProbe, state_addr: u64, data: [u8]) -> bool:
+    """High-level: write state region, resume."""
+    probe.halt()
+    val ok = probe.write_region(state_addr, data)
+    if ok:
+        probe.resume()
+    ok
+
+fn bytes_to_u32(data: [u8], offset: i32) -> u32:
+    """Little-endian bytes to u32."""
+    if offset + 4 > data.length():
+        return 0u32
+    val b0 = data[offset].to_u32()
+    val b1 = data[offset + 1].to_u32() << 8
+    val b2 = data[offset + 2].to_u32() << 16
+    val b3 = data[offset + 3].to_u32() << 24
+    b0 | b1 | b2 | b3
+
+fn bytes_to_i32(data: [u8], offset: i32) -> i32:
+    """Little-endian bytes to i32."""
+    bytes_to_u32(data, offset).to_i32()
+
+fn u32_to_bytes(value: u32, out: [u8]):
+    """u32 to little-endian bytes, appended to out."""
+    out.push((value & 0xFFu32).to_u8())
+    out.push(((value >> 8) & 0xFFu32).to_u8())
+    out.push(((value >> 16) & 0xFFu32).to_u8())
+    out.push(((value >> 24) & 0xFFu32).to_u8())

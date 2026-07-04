@@ -1,0 +1,50 @@
+# RenderDoc Simple Gate
+
+- status: pass
+- reason: pass
+- source evidence: build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/evidence.env
+- backend: simple
+- scene: vulkan-engine2d
+- program: /home/yoon/simple/src/app/test/renderdoc_vulkan_capture.spl
+- capture status: pass
+- capture reason: pass
+- capture file: build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/simple_gui_app_capture.rdc
+- capture magic: RDOC
+- capture file magic: RDOC
+- runtime backend: vulkan
+- RenderDoc available: 1
+- RenderDoc start: 1
+- RenderDoc end: 1
+- RenderDoc captures: 1
+- pixel count: 3072
+
+## Raw Evidence
+- rdoc_simple_gate_status=pass
+- rdoc_simple_gate_reason=pass
+- rdoc_simple_gate_source_env=build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/evidence.env
+- rdoc_simple_gate_backend=simple
+- rdoc_simple_gate_scene=vulkan-engine2d
+- rdoc_simple_gate_program=/home/yoon/simple/src/app/test/renderdoc_vulkan_capture.spl
+- rdoc_simple_gate_capture_status=pass
+- rdoc_simple_gate_capture_reason=pass
+- rdoc_simple_gate_capture_file=build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/simple_gui_app_capture.rdc
+- rdoc_simple_gate_capture_magic=RDOC
+- rdoc_simple_gate_capture_file_magic=RDOC
+- rdoc_simple_gate_runtime_backend=vulkan
+- rdoc_simple_gate_renderdoc_available=1
+- rdoc_simple_gate_renderdoc_start=1
+- rdoc_simple_gate_renderdoc_end=1
+- rdoc_simple_gate_renderdoc_num_captures=1
+- rdoc_simple_gate_pixel_count=3072
+- rdoc_simple_gate_unavailable_marker=0
+- rdoc_simple_gate_required_backend=simple
+- rdoc_simple_gate_required_scene=vulkan-engine2d
+- rdoc_simple_gate_required_program=src/app/test/renderdoc_vulkan_capture.spl
+- rdoc_simple_gate_required_status=pass
+- rdoc_simple_gate_required_magic=RDOC
+- rdoc_simple_gate_required_runtime_backend=vulkan
+- rdoc_simple_gate_required_renderdoc_available=1
+- rdoc_simple_gate_required_renderdoc_start=1
+- rdoc_simple_gate_required_renderdoc_end_recorded=1
+- rdoc_simple_gate_required_num_captures_min=1
+- rdoc_simple_gate_required_pixel_count_min=1

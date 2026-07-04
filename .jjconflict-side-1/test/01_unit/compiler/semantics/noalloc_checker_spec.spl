@@ -1,0 +1,425 @@
+# Noalloc Checker Specification
+#
+# Tests for the @noalloc semantic analysis pass in 35.semantics/noalloc_checker.spl.
+#
+# NOTE: This spec is self-contained (no module imports) because it runs in
+# interpreter mode where complex imports are not available. The checker logic
+# is replicated locally for testing.
+#
+# Covers: violation kinds, manifest CRUD, direct-alloc detection, transitive calls,
+# family-import detection, bulk checker, and diagnostic formatting.
+
+use std.spec.*
+
+# ============================================================================
+# Local replica of violation kind enum
+# ============================================================================
+
+val KIND_DIRECT_ALLOC: text = "DirectAlloc"
+val KIND_TRANSITIVE_CALL: text = "TransitiveCall"
+val KIND_FAMILY_IMPORT: text = "FamilyImport"
+
+# ============================================================================
+# Local replica of NoallocViolation struct
+# ============================================================================
+
+struct TestViolation:
+    fn_name: text
+    kind: text
+    detail: text
+    line: i64
+
+# ============================================================================
+# Local replica of NoallocFnEntry
+# ============================================================================
+# Note: the real NoallocCapabilityManifest mutates in place via `me register(...)`.
+# This spec uses a functional style (register returns a new list) to work around
+# interpreter-mode variable-mutation limits in it blocks. The semantic contract
+# is identical; only the call-site style differs.
+
+struct TestFnEntry:
+    name: text
+    is_noalloc: bool
+    allocates: bool
+    family_module: text
+
+# ============================================================================
+# Local replica of NoallocCapabilityManifest
+# ============================================================================
+
+fn manifest_new() -> [TestFnEntry]:
+    []
+
+fn manifest_register(entries: [TestFnEntry], name: text, is_noalloc: bool, allocates: bool, family_module: text) -> [TestFnEntry]:
+    var result: [TestFnEntry] = []
+    for e in entries:
+        result.push(e)
+    result.push(TestFnEntry(
+        name: name,
+        is_noalloc: is_noalloc,
+        allocates: allocates,
+        family_module: family_module
+    ))
+    result
+
+fn manifest_lookup(entries: [TestFnEntry], name: text) -> TestFnEntry:
+    for e in entries:
+        if e.name == name:
+            return e
+    TestFnEntry(name: name, is_noalloc: false, allocates: false, family_module: "")
+
+fn manifest_get_noalloc_fns(entries: [TestFnEntry]) -> [text]:
+    var result: [text] = []
+    for e in entries:
+        if e.is_noalloc:
+            result.push(e.name)
+    result
+
+fn manifest_is_noalloc_fn(entries: [TestFnEntry], name: text) -> bool:
+    manifest_lookup(entries, name).is_noalloc
+
+fn manifest_is_allocating_fn(entries: [TestFnEntry], name: text) -> bool:
+    manifest_lookup(entries, name).allocates
+
+# ============================================================================
+# Local replica of is_direct_alloc_expr
+# ============================================================================
+
+fn test_is_direct_alloc_expr(expr_tag: text) -> bool:
+    (expr_tag == "new" or expr_tag == "array_literal" or
+     expr_tag == "dict_literal" or expr_tag == "interpolation" or
+     expr_tag == "string_concat")
+
+# ============================================================================
+# Local replica of direct_alloc_description
+# ============================================================================
+
+fn test_direct_alloc_description(expr_tag: text) -> text:
+    if expr_tag == "new":
+        return "heap allocation via new"
+    if expr_tag == "array_literal":
+        return "array literal allocates on heap"
+    if expr_tag == "dict_literal":
+        return "dict literal allocates on heap"
+    if expr_tag == "interpolation":
+        return "string interpolation allocates on heap"
+    if expr_tag == "string_concat":
+        return "string concatenation allocates on heap"
+    "unknown allocation expression"
+
+# ============================================================================
+# Local replica of is_allocating_family_call
+# Mirrors the RUNTIME_FAMILY_MANIFEST: noalloc family does NOT allocate;
+# gc and nogc_async_mut families DO allocate.
+# ============================================================================
+
+fn test_is_allocating_family_call(callee_module: text) -> bool:
+    if callee_module == "":
+        return false
+    # noalloc family — does not allocate
+    val noalloc_prefix = "std.nogc_async_mut_noalloc."
+    if callee_module.len() >= noalloc_prefix.len():
+        val head = callee_module[0:noalloc_prefix.len()]
+        if head == noalloc_prefix:
+            return false
+    # common family — does not allocate
+    val common_prefix = "std.common."
+    if callee_module.len() >= common_prefix.len():
+        val head2 = callee_module[0:common_prefix.len()]
+        if head2 == common_prefix:
+            return false
+    # everything else (gc, nogc_async_mut, etc.) — allocates
+    true
+
+# ============================================================================
+# Local replica of check_noalloc_violations
+# ============================================================================
+
+fn test_check_noalloc_violations(fn_name: text, expr_tags: [text], callee_names: [text], entries: [TestFnEntry]) -> [TestViolation]:
+    var violations: [TestViolation] = []
+
+    for tag in expr_tags:
+        if test_is_direct_alloc_expr(tag):
+            violations.push(TestViolation(
+                fn_name: fn_name,
+                kind: KIND_DIRECT_ALLOC,
+                detail: test_direct_alloc_description(tag),
+                line: 0
+            ))
+
+    for callee in callee_names:
+        val entry = manifest_lookup(entries, callee)
+        if entry.allocates:
+            violations.push(TestViolation(
+                fn_name: fn_name,
+                kind: KIND_TRANSITIVE_CALL,
+                detail: "call to allocating function " + callee,
+                line: 0
+            ))
+            continue
+        if entry.family_module != "" and test_is_allocating_family_call(entry.family_module):
+            violations.push(TestViolation(
+                fn_name: fn_name,
+                kind: KIND_FAMILY_IMPORT,
+                detail: "call to " + callee + " in allocating family " + entry.family_module,
+                line: 0
+            ))
+
+    violations
+
+# ============================================================================
+# Local replica of format_noalloc_violation
+# ============================================================================
+
+fn test_format_violation(v: TestViolation) -> text:
+    var kind_label = "unknown"
+    if v.kind == KIND_DIRECT_ALLOC:
+        kind_label = "direct-alloc"
+    if v.kind == KIND_TRANSITIVE_CALL:
+        kind_label = "transitive-call"
+    if v.kind == KIND_FAMILY_IMPORT:
+        kind_label = "family-import"
+
+    if v.line > 0:
+        return "error[noalloc]: in @noalloc fn " + v.fn_name + " (line " + v.line.to_text() + "): " + kind_label + " - " + v.detail
+    "error[noalloc]: in @noalloc fn " + v.fn_name + ": " + kind_label + " - " + v.detail
+
+fn test_format_violations(violations: [TestViolation]) -> [text]:
+    var messages: [text] = []
+    for v in violations:
+        messages.push(test_format_violation(v))
+    messages
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "noalloc checker — direct alloc detection":
+    it "recognises 'new' as a direct allocation":
+        expect(test_is_direct_alloc_expr("new")).to_equal(true)
+
+    it "recognises 'array_literal' as a direct allocation":
+        expect(test_is_direct_alloc_expr("array_literal")).to_equal(true)
+
+    it "recognises 'dict_literal' as a direct allocation":
+        expect(test_is_direct_alloc_expr("dict_literal")).to_equal(true)
+
+    it "recognises 'interpolation' as a direct allocation":
+        expect(test_is_direct_alloc_expr("interpolation")).to_equal(true)
+
+    it "recognises 'string_concat' as a direct allocation":
+        expect(test_is_direct_alloc_expr("string_concat")).to_equal(true)
+
+    it "does not flag 'call' as a direct allocation":
+        expect(test_is_direct_alloc_expr("call")).to_equal(false)
+
+    it "does not flag 'literal_int' as a direct allocation":
+        expect(test_is_direct_alloc_expr("literal_int")).to_equal(false)
+
+    it "does not flag empty string":
+        expect(test_is_direct_alloc_expr("")).to_equal(false)
+
+describe "noalloc checker — alloc descriptions":
+    it "describes 'new' allocation":
+        val desc = test_direct_alloc_description("new")
+        expect(desc).to_contain("heap allocation")
+
+    it "describes 'array_literal' allocation":
+        val desc = test_direct_alloc_description("array_literal")
+        expect(desc).to_contain("array literal")
+
+    it "describes 'dict_literal' allocation":
+        val desc = test_direct_alloc_description("dict_literal")
+        expect(desc).to_contain("dict literal")
+
+    it "describes 'interpolation' allocation":
+        val desc = test_direct_alloc_description("interpolation")
+        expect(desc).to_contain("interpolation")
+
+    it "describes 'string_concat' allocation":
+        val desc = test_direct_alloc_description("string_concat")
+        expect(desc).to_contain("concatenation")
+
+    it "returns fallback for unknown tag":
+        val desc = test_direct_alloc_description("unknown_tag")
+        expect(desc).to_contain("unknown")
+
+describe "noalloc checker — family classification":
+    it "returns false for empty module path":
+        expect(test_is_allocating_family_call("")).to_equal(false)
+
+    it "returns false for noalloc family module":
+        expect(test_is_allocating_family_call("std.nogc_async_mut_noalloc.memory")).to_equal(false)
+
+    it "returns false for common family module":
+        expect(test_is_allocating_family_call("std.common.text")).to_equal(false)
+
+    it "returns true for gc_async_mut family module":
+        expect(test_is_allocating_family_call("std.gc_async_mut.gpu")).to_equal(true)
+
+    it "returns true for nogc_async_mut family module":
+        expect(test_is_allocating_family_call("std.nogc_async_mut.actor")).to_equal(true)
+
+describe "noalloc checker — capability manifest":
+    it "starts empty with no noalloc fns":
+        val m = manifest_new()
+        expect(manifest_get_noalloc_fns(m).len()).to_equal(0)
+
+    it "registers and looks up a noalloc function":
+        val m = manifest_new()
+        val m2 = manifest_register(m, "boot_fn", true, false, "")
+        val entry = manifest_lookup(m2, "boot_fn")
+        expect(entry.is_noalloc).to_equal(true)
+        expect(entry.allocates).to_equal(false)
+
+    it "registers and looks up an allocating function":
+        val m = manifest_new()
+        val m2 = manifest_register(m, "heap_fn", false, true, "")
+        val entry = manifest_lookup(m2, "heap_fn")
+        expect(entry.is_noalloc).to_equal(false)
+        expect(entry.allocates).to_equal(true)
+
+    it "returns default entry for unknown function":
+        val m = manifest_new()
+        val entry = manifest_lookup(m, "unknown_fn")
+        expect(entry.is_noalloc).to_equal(false)
+        expect(entry.allocates).to_equal(false)
+
+    it "get_noalloc_fns returns only noalloc-annotated names":
+        val m = manifest_new()
+        val m2 = manifest_register(m, "noalloc_fn", true, false, "")
+        val m3 = manifest_register(m2, "regular_fn", false, false, "")
+        val m4 = manifest_register(m3, "alloc_fn", false, true, "")
+        val noalloc_list = manifest_get_noalloc_fns(m4)
+        expect(noalloc_list.len()).to_equal(1)
+        expect(noalloc_list[0]).to_equal("noalloc_fn")
+
+    it "is_noalloc_fn returns true only for registered noalloc fns":
+        val m = manifest_new()
+        val m2 = manifest_register(m, "safe_fn", true, false, "")
+        val m3 = manifest_register(m2, "other_fn", false, false, "")
+        expect(manifest_is_noalloc_fn(m3, "safe_fn")).to_equal(true)
+        expect(manifest_is_noalloc_fn(m3, "other_fn")).to_equal(false)
+        expect(manifest_is_noalloc_fn(m3, "missing_fn")).to_equal(false)
+
+    it "is_allocating_fn returns true for allocating fns":
+        val m = manifest_new()
+        val m2 = manifest_register(m, "heap_fn", false, true, "")
+        val m3 = manifest_register(m2, "pure_fn", false, false, "")
+        expect(manifest_is_allocating_fn(m3, "heap_fn")).to_equal(true)
+        expect(manifest_is_allocating_fn(m3, "pure_fn")).to_equal(false)
+
+describe "noalloc checker — violation detection":
+    it "returns empty list for clean function":
+        val m = manifest_new()
+        val m2 = manifest_register(m, "pure_fn", false, false, "")
+        val violations = test_check_noalloc_violations("my_fn", [], ["pure_fn"], m2)
+        expect(violations.len()).to_equal(0)
+
+    it "catches direct new allocation":
+        val m = manifest_new()
+        val violations = test_check_noalloc_violations("boot", ["new"], [], m)
+        expect(violations.len()).to_equal(1)
+        expect(violations[0].fn_name).to_equal("boot")
+
+    it "direct violation kind is DirectAlloc":
+        val m = manifest_new()
+        val violations = test_check_noalloc_violations("boot", ["array_literal"], [], m)
+        expect(violations.len()).to_equal(1)
+        val v = violations[0]
+        expect(v.kind).to_equal(KIND_DIRECT_ALLOC)
+        expect(v.detail).to_contain("array literal")
+
+    it "catches transitive call to allocating function":
+        val m = manifest_new()
+        val m2 = manifest_register(m, "heap_fn", false, true, "")
+        val violations = test_check_noalloc_violations("my_fn", [], ["heap_fn"], m2)
+        expect(violations.len()).to_equal(1)
+        expect(violations[0].kind).to_equal(KIND_TRANSITIVE_CALL)
+        expect(violations[0].detail).to_contain("heap_fn")
+
+    it "does not flag call to pure function":
+        val m = manifest_new()
+        val m2 = manifest_register(m, "pure_fn", false, false, "")
+        val violations = test_check_noalloc_violations("my_fn", [], ["pure_fn"], m2)
+        expect(violations.len()).to_equal(0)
+
+    it "catches family-import violation":
+        val m = manifest_new()
+        val m2 = manifest_register(m, "gpu_fn", false, false, "std.gc_async_mut.gpu")
+        val violations = test_check_noalloc_violations("my_fn", [], ["gpu_fn"], m2)
+        expect(violations.len()).to_equal(1)
+        expect(violations[0].kind).to_equal(KIND_FAMILY_IMPORT)
+        expect(violations[0].detail).to_contain("gpu_fn")
+
+    it "accumulates multiple direct violations":
+        val m = manifest_new()
+        val violations = test_check_noalloc_violations("boot", ["new", "array_literal", "dict_literal"], [], m)
+        expect(violations.len()).to_equal(3)
+
+    it "does not flag unknown callee (conservative — unknown not in manifest)":
+        val m = manifest_new()
+        val violations = test_check_noalloc_violations("my_fn", [], ["unknown_fn"], m)
+        expect(violations.len()).to_equal(0)
+
+    it "noalloc family callee does not trigger family-import violation":
+        val m = manifest_new()
+        val m2 = manifest_register(m, "mem_fn", false, false, "std.nogc_async_mut_noalloc.memory")
+        val violations = test_check_noalloc_violations("my_fn", [], ["mem_fn"], m2)
+        expect(violations.len()).to_equal(0)
+
+describe "noalloc checker — formatting":
+    it "starts with error[noalloc]":
+        val v = TestViolation(
+            fn_name: "boot",
+            kind: KIND_DIRECT_ALLOC,
+            detail: "heap allocation via new",
+            line: 0
+        )
+        val msg = test_format_violation(v)
+        expect(msg).to_contain("error[noalloc]")
+
+    it "includes fn_name in message":
+        val v = TestViolation(
+            fn_name: "boot_init",
+            kind: KIND_TRANSITIVE_CALL,
+            detail: "call to allocating fn",
+            line: 0
+        )
+        val msg = test_format_violation(v)
+        expect(msg).to_contain("boot_init")
+
+    it "includes line number when non-zero":
+        val v = TestViolation(
+            fn_name: "boot",
+            kind: KIND_DIRECT_ALLOC,
+            detail: "heap allocation via new",
+            line: 42
+        )
+        val msg = test_format_violation(v)
+        expect(msg).to_contain("42")
+
+    it "includes kind label direct-alloc":
+        val v = TestViolation(fn_name: "f", kind: KIND_DIRECT_ALLOC, detail: "new", line: 0)
+        val msg = test_format_violation(v)
+        expect(msg).to_contain("direct-alloc")
+
+    it "includes kind label transitive-call":
+        val v = TestViolation(fn_name: "f", kind: KIND_TRANSITIVE_CALL, detail: "call to alloc_fn", line: 0)
+        val msg = test_format_violation(v)
+        expect(msg).to_contain("transitive-call")
+
+    it "includes kind label family-import":
+        val v = TestViolation(fn_name: "f", kind: KIND_FAMILY_IMPORT, detail: "call to gpu_fn", line: 0)
+        val msg = test_format_violation(v)
+        expect(msg).to_contain("family-import")
+
+    it "format_violations returns empty list for no violations":
+        val messages = test_format_violations([])
+        expect(messages.len()).to_equal(0)
+
+    it "format_violations returns one message per violation":
+        val v1 = TestViolation(fn_name: "f1", kind: KIND_DIRECT_ALLOC, detail: "new", line: 0)
+        val v2 = TestViolation(fn_name: "f2", kind: KIND_TRANSITIVE_CALL, detail: "call", line: 0)
+        val messages = test_format_violations([v1, v2])
+        expect(messages.len()).to_equal(2)

@@ -1,0 +1,179 @@
+# RISC-V Cache Management Operations (Zicbom / Zicboz / Zicbop)
+#
+# Provides wrappers for the RISC-V CMO extension instructions:
+#   fence.i       — instruction-cache synchronisation (always available)
+#   cbo.clean     — clean D-cache line to PoC
+#   cbo.inval     — invalidate D-cache line
+#   cbo.flush     — flush (clean + invalidate) D-cache line
+#   cbo.zero      — zero a D-cache line (Zicboz)
+#   prefetch.r/w/i — software prefetch hints (Zicbop)
+#
+# On platforms that do not support Zicbom/Zicboz/Zicbop, callers must
+# gate calls on hal_cache probe results (CmoCapSnapshot).
+#
+# Public API:
+#   fence_i()
+#   cbo_clean(addr: u64)
+#   cbo_inval(addr: u64)
+#   cbo_flush(addr: u64)
+#   cbo_zero(addr: u64)
+#   prefetch_r(addr: u64)
+#   prefetch_w(addr: u64)
+#   prefetch_i(addr: u64)
+#
+# CmoCapSnapshot — lightweight capability snapshot for observable test seams
+#   hal_cache_count_sync_icache_flushes(caps, addr, len) -> u32
+#   hal_cache_count_clean_dcache_lines(caps, addr, len, stride) -> u32
+#   hal_cache_count_inval_dcache_lines(caps, addr, len, stride) -> u32
+
+# ============================================================================
+# CMO capability snapshot (shared between cmo.spl and hal_cache.spl)
+# ============================================================================
+
+class CmoCapSnapshot:
+    has_zicbom: bool
+    has_zicboz: bool
+    has_zicbop: bool
+
+# ============================================================================
+# fence.i — always available (base ISA)
+# ============================================================================
+
+fn fence_i():
+    """Emit fence.i — synchronise instruction and data caches."""
+    unsafe:
+        asm volatile:
+            "fence.i"
+
+# ============================================================================
+# Zicbom instructions
+# ============================================================================
+
+fn cbo_clean(addr: u64):
+    """cbo.clean: write dirty D-cache lines containing addr back to memory."""
+    unsafe:
+        asm volatile:
+            "cbo.clean 0({addr})"
+            in(reg) addr
+
+fn cbo_inval(addr: u64):
+    """cbo.inval: invalidate D-cache lines containing addr."""
+    unsafe:
+        asm volatile:
+            "cbo.inval 0({addr})"
+            in(reg) addr
+
+fn cbo_flush(addr: u64):
+    """cbo.flush: clean + invalidate D-cache lines containing addr."""
+    unsafe:
+        asm volatile:
+            "cbo.flush 0({addr})"
+            in(reg) addr
+
+# ============================================================================
+# Zicboz instruction
+# ============================================================================
+
+fn cbo_zero(addr: u64):
+    """cbo.zero: zero the D-cache line containing addr (Zicboz)."""
+    unsafe:
+        asm volatile:
+            "cbo.zero 0({addr})"
+            in(reg) addr
+
+# ============================================================================
+# Zicbop prefetch hints
+# ============================================================================
+
+fn prefetch_r(addr: u64):
+    """prefetch.r: hint that addr will be read soon."""
+    unsafe:
+        asm volatile:
+            "prefetch.r 0({addr})"
+            in(reg) addr
+
+fn prefetch_w(addr: u64):
+    """prefetch.w: hint that addr will be written soon."""
+    unsafe:
+        asm volatile:
+            "prefetch.w 0({addr})"
+            in(reg) addr
+
+fn prefetch_i(addr: u64):
+    """prefetch.i: hint that addr will be fetched as instructions soon."""
+    unsafe:
+        asm volatile:
+            "prefetch.i 0({addr})"
+            in(reg) addr
+
+# ============================================================================
+# Observable count helpers — shared logic for production + test-log seams
+#
+# These pure functions compute how many CMO operations a range/stride
+# combination would emit.  Production hal_cache methods call these to
+# determine loop counts without duplicating the stride logic; test helpers
+# use them to drive CacheOpLog counters without executing real asm.
+# ============================================================================
+
+fn hal_cache_count_sync_icache_flushes(caps: CmoCapSnapshot, addr: u64, len: u64) -> u32:
+    """Return number of cbo.flush calls that hal_cache_sync_icache would emit."""
+    if not caps.has_zicbom:
+        0u32
+    else:
+        val stride: u64 = 64u64
+        var count: u32 = 0u32
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            count = count + 1u32
+            cur = cur + stride
+        count
+
+fn hal_cache_count_clean_dcache_lines(caps: CmoCapSnapshot, addr: u64, len: u64, stride: u32) -> u32:
+    """Return number of cbo.clean calls that hal_cache_clean_dcache would emit."""
+    if not caps.has_zicbom:
+        0u32
+    else:
+        var count: u32 = 0u32
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            count = count + 1u32
+            cur = cur + stride as u64
+        count
+
+fn hal_cache_count_inval_dcache_lines(caps: CmoCapSnapshot, addr: u64, len: u64, stride: u32) -> u32:
+    """Return number of cbo.inval calls that hal_cache_invalidate_dcache would emit."""
+    if not caps.has_zicbom:
+        0u32
+    else:
+        var count: u32 = 0u32
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            count = count + 1u32
+            cur = cur + stride as u64
+        count
+
+# ============================================================================
+# CMO probe helpers — pure ISA-string / config-flag probing
+# ============================================================================
+
+fn cmo_probe_isa(isa: text) -> CmoCapSnapshot:
+    """Parse an ISA string for Zicbom/Zicboz/Zicbop extension markers."""
+    val has_zicbom = isa.contains("zicbom")
+    val has_zicboz = isa.contains("zicboz")
+    val has_zicbop = isa.contains("zicbop")
+    CmoCapSnapshot(has_zicbom: has_zicbom, has_zicboz: has_zicboz, has_zicbop: has_zicbop)
+
+fn cmo_probe_trap_fires() -> CmoCapSnapshot:
+    """Return capability snapshot for the case where illegal-instruction probe fires."""
+    CmoCapSnapshot(has_zicbom: false, has_zicboz: false, has_zicbop: false)
+
+fn cmo_probe_trap_succeeds() -> CmoCapSnapshot:
+    """Return capability snapshot for the case where probe succeeds (no trap)."""
+    CmoCapSnapshot(has_zicbom: true, has_zicboz: false, has_zicbop: false)
+
+fn cmo_probe_disabled() -> CmoCapSnapshot:
+    """Return capability snapshot when CMO probing is disabled by config."""
+    CmoCapSnapshot(has_zicbom: false, has_zicboz: false, has_zicbop: false)

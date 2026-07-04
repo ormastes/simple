@@ -1,0 +1,337 @@
+# Assistant Store Helpers
+#
+# Shared constants, list helpers, path/IO helpers, and JSON serialization
+# extracted from _SessionStore/store_core and store_operations to break the mutual import cycle.
+# Both store_core and store_operations import from this module only (no cross-part imports).
+
+use ..main_lazy_json.{extract_field, js, jp, LB, RB}
+use .types.{
+    AssistantSessionRecord, AssistantTimelineRecord, AssistantChildTaskRecord,
+    assistant_first_non_empty, assistant_now_ms, assistant_generate_event_id,
+    assistant_timeline_severity, assistant_timeline_title, assistant_timeline_detail
+}
+
+use std.io_runtime.{file_exists, file_read, file_write, mkdir_p}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_to_number, json_to_string}
+
+# =========================================================================
+# Constants
+# =========================================================================
+
+pub val ASSISTANT_STORE_ROOT = ".build/llm_dashboard/assistant"
+pub val ASSISTANT_STORE_SESSIONS = ASSISTANT_STORE_ROOT + "/sessions"
+pub val ASSISTANT_STORE_TIMELINES = ASSISTANT_STORE_ROOT + "/timelines"
+pub val ASSISTANT_STORE_NOTIFICATIONS = ASSISTANT_STORE_ROOT + "/notifications"
+pub val ASSISTANT_STORE_DIGESTS = ASSISTANT_STORE_ROOT + "/digests"
+export ASSISTANT_STORE_ROOT, ASSISTANT_STORE_SESSIONS, ASSISTANT_STORE_TIMELINES, ASSISTANT_STORE_NOTIFICATIONS, ASSISTANT_STORE_DIGESTS
+
+# =========================================================================
+# List Helpers
+# =========================================================================
+
+pub fn _assistant_text_list_contains(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+pub fn _assistant_text_list_append_unique(items: [text], value: text) -> [text]:
+    if value.trim() == "":
+        return items
+    if _assistant_text_list_contains(items, value):
+        return items
+    var out: [text] = []
+    for item in items:
+        out.push(item)
+    out.push(value)
+    out
+
+pub fn _assistant_child_tasks_append(items: [AssistantChildTaskRecord], value: AssistantChildTaskRecord) -> [AssistantChildTaskRecord]:
+    var out: [AssistantChildTaskRecord] = []
+    var found = false
+    for item in items:
+        if value.task_id != "" and item.task_id == value.task_id:
+            out.push(value)
+            found = true
+        else:
+            out.push(item)
+    if not found:
+        out.push(value)
+    out
+
+pub fn _assistant_sort_sessions_by_updated_at(sessions: [AssistantSessionRecord]) -> [AssistantSessionRecord]:
+    var sorted: [AssistantSessionRecord] = []
+    for session in sessions:
+        sorted = _assistant_insert_session_sorted(sorted, session)
+    sorted
+
+pub fn _assistant_insert_session_sorted(sorted: [AssistantSessionRecord], session: AssistantSessionRecord) -> [AssistantSessionRecord]:
+    if sorted.len() == 0:
+        return [session]
+    var out: [AssistantSessionRecord] = []
+    var inserted = false
+    for item in sorted:
+        if not inserted and session.updated_at_ms > item.updated_at_ms:
+            out.push(session)
+            inserted = true
+        out.push(item)
+    if not inserted:
+        out.push(session)
+    out
+
+# =========================================================================
+# Path / IO Helpers
+# =========================================================================
+
+pub fn assistant_store_write_json(path: text, value: text) -> bool:
+    file_write(path, value)
+
+pub fn assistant_store_append_jsonl(path: text, line: text) -> bool:
+    var content = ""
+    if file_exists(path):
+        content = file_read(path)
+    if content != "" and not content.ends_with("\n"):
+        content = content + "\n"
+    content = content + line + "\n"
+    file_write(path, content)
+
+pub fn assistant_store_resolve_root(root: text) -> text:
+    if root.trim() == "":
+        ASSISTANT_STORE_ROOT
+    else:
+        root
+
+pub fn assistant_store_sessions_dir(root: text) -> text:
+    "{assistant_store_resolve_root(root: root)}/sessions"
+
+pub fn assistant_store_timelines_dir(root: text) -> text:
+    "{assistant_store_resolve_root(root: root)}/timelines"
+
+pub fn assistant_store_notifications_dir(root: text) -> text:
+    "{assistant_store_resolve_root(root: root)}/notifications"
+
+pub fn assistant_store_digests_dir(root: text) -> text:
+    "{assistant_store_resolve_root(root: root)}/digests"
+
+pub fn assistant_store_session_path(root: text, session_id: text) -> text:
+    "{assistant_store_sessions_dir(root: root)}/{session_id}.json"
+
+pub fn assistant_store_timeline_path(root: text, session_id: text) -> text:
+    "{assistant_store_timelines_dir(root: root)}/{session_id}.jsonl"
+
+pub fn assistant_store_notifications_path(root: text, session_id: text) -> text:
+    "{assistant_store_notifications_dir(root: root)}/{session_id}.jsonl"
+
+pub fn assistant_store_digest_path(root: text, session_id: text) -> text:
+    "{assistant_store_digests_dir(root: root)}/{session_id}.jsonl"
+
+pub fn assistant_store_ensure_dirs(root: text) -> bool:
+    mkdir_p(assistant_store_sessions_dir(root: root)) and mkdir_p(assistant_store_timelines_dir(root: root)) and mkdir_p(assistant_store_notifications_dir(root: root)) and mkdir_p(assistant_store_digests_dir(root: root))
+
+# =========================================================================
+# JSON Text Helpers
+# =========================================================================
+
+pub fn assistant_store_text_value(json: text, keys: [text]) -> text:
+    for key in keys:
+        val value = extract_field(json, key)
+        if value != "":
+            return value
+    ""
+
+pub fn assistant_store_number_value(json: text, keys: [text]) -> i64:
+    for key in keys:
+        val value = extract_field(json, key)
+        if value != "":
+            return value.to_i64() ?? 0
+    0
+
+pub fn assistant_store_session_record_from_json_text(json: text) -> AssistantSessionRecord:
+    AssistantSessionRecord(
+        session_id: assistant_store_text_value(json, ["id", "session_id"]),
+        name: assistant_store_text_value(json, ["name"]),
+        summary: assistant_store_text_value(json, ["summary", "objective", "prompt", "name"]),
+        objective: assistant_store_text_value(json, ["objective", "summary", "prompt", "name"]),
+        prompt: assistant_store_text_value(json, ["prompt"]),
+        mode: assistant_first_non_empty([assistant_store_text_value(json, ["mode"]), "proactive"]),
+        state: assistant_first_non_empty([assistant_store_text_value(json, ["state", "status"]), "running"]),
+        policy: assistant_first_non_empty([assistant_store_text_value(json, ["policy"]), "bounded"]),
+        parent_session_id: assistant_store_text_value(json, ["parent_session_id"]),
+        parent_tool_use_id: assistant_store_text_value(json, ["parent_tool_use_id", "parentToolUseID"]),
+        last_signal: assistant_store_text_value(json, ["last_signal", "lastWakeReason", "wake_reason"]),
+        last_event_kind: assistant_store_text_value(json, ["last_event_kind", "lastEventKind"]),
+        last_event_detail: assistant_store_text_value(json, ["last_event_detail", "lastEventDetail", "summary"]),
+        last_event_time_ms: assistant_store_number_value(json, ["last_event_time_ms", "last_event_time", "updated_at_ms", "updated_at"]),
+        last_tick_at_ms: assistant_store_number_value(json, ["last_tick_at_ms", "last_tick_at"]),
+        created_at_ms: assistant_store_number_value(json, ["created_at_ms", "created_at"]),
+        updated_at_ms: assistant_store_number_value(json, ["updated_at_ms", "updated_at"]),
+        event_count: assistant_store_number_value(json, ["event_count", "timeline_count"]),
+        error_count: assistant_store_number_value(json, ["error_count"]),
+        model: assistant_store_text_value(json, ["model"]),
+        provider: assistant_store_text_value(json, ["provider"]),
+        digest_checkpoint_id: assistant_store_text_value(json, ["digest_checkpoint_id"]),
+        tool_use_ids: [],
+        children: [],
+        child_tasks: assistant_store_child_tasks_from_json_text(json),
+        warnings: []
+    )
+
+pub fn assistant_store_json_text(value: any, keys: [text]) -> text:
+    for key in keys:
+        val raw = json_to_string(json_object_get(value, key))
+        if raw != nil and raw != "":
+            return raw
+    ""
+
+pub fn assistant_store_json_i64(value: any, keys: [text]) -> i64:
+    for key in keys:
+        val raw = json_to_number(json_object_get(value, key))
+        if raw != nil:
+            return raw.to_i64() ?? 0
+    0
+
+pub fn assistant_store_child_task_record_from_json_value(value: any) -> AssistantChildTaskRecord:
+    AssistantChildTaskRecord(
+        task_id: assistant_store_json_text(value, ["id", "task_id"]),
+        session_id: assistant_store_json_text(value, ["session_id"]),
+        parent_session_id: assistant_store_json_text(value, ["parent_session_id"]),
+        parent_task_id: assistant_store_json_text(value, ["parent_task_id"]),
+        child_session_id: assistant_store_json_text(value, ["child_session_id"]),
+        objective: assistant_store_json_text(value, ["objective", "summary", "prompt"]),
+        owner_kind: assistant_store_json_text(value, ["owner_kind"]),
+        status: assistant_store_json_text(value, ["status", "state"]),
+        resource_policy: assistant_store_json_text(value, ["resource_policy", "policy"]),
+        result_summary: assistant_store_json_text(value, ["result_summary", "summary"]),
+        created_at_ms: assistant_store_json_i64(value, ["created_at_ms", "created_at"]),
+        updated_at_ms: assistant_store_json_i64(value, ["updated_at_ms", "updated_at"]),
+        started_at_ms: assistant_store_json_i64(value, ["started_at_ms", "started_at"]),
+        ended_at_ms: assistant_store_json_i64(value, ["ended_at_ms", "ended_at"])
+    )
+
+pub fn assistant_store_child_tasks_from_json_text(json: text) -> [AssistantChildTaskRecord]:
+    val parsed = json_parse(json)
+    if parsed == nil:
+        return []
+    val child_tasks = json_object_get(parsed, "child_tasks")
+    val count = json_array_length(child_tasks)
+    var out: [AssistantChildTaskRecord] = []
+    var i: i64 = 0
+    while i < count:
+        val item = json_array_get(child_tasks, i)
+        if item != nil:
+            out.push(assistant_store_child_task_record_from_json_value(item))
+        i = i + 1
+    out
+
+pub fn assistant_store_timeline_record_from_json_text(json: text) -> AssistantTimelineRecord:
+    val kind = assistant_store_text_value(json, ["kind", "event_type"])
+    val message = assistant_store_text_value(json, ["message", "summary", "detail"])
+    val signal = assistant_store_text_value(json, ["signal", "wake_reason"])
+    AssistantTimelineRecord(
+        event_id: assistant_store_text_value(json, ["id", "event_id"]),
+        session_id: assistant_store_text_value(json, ["session_id"]),
+        parent_session_id: assistant_store_text_value(json, ["parent_session_id"]),
+        child_task_id: assistant_store_text_value(json, ["child_task_id"]),
+        timestamp_ms: assistant_store_number_value(json, ["timestamp_ms", "timestamp", "created_at_ms", "created_at"]),
+        kind: kind,
+        severity: assistant_first_non_empty([assistant_store_text_value(json, ["severity"]), assistant_timeline_severity(kind)]),
+        title: assistant_first_non_empty([assistant_store_text_value(json, ["title"]), assistant_timeline_title(kind, message, signal)]),
+        detail: assistant_first_non_empty([assistant_store_text_value(json, ["detail", "summary"]), assistant_timeline_detail(kind: kind, message: message, signal: signal)]),
+        message: message,
+        signal: signal,
+        source: assistant_first_non_empty([assistant_store_text_value(json, ["source"]), "assistant"]),
+        correlation_id: assistant_store_text_value(json, ["correlation_id"])
+    )
+
+pub fn assistant_store_child_task_record_to_json_text(task: AssistantChildTaskRecord) -> text:
+    LB() + jp("id", js(task.task_id)) +
+    "," + jp("task_id", js(task.task_id)) +
+    "," + jp("session_id", js(task.session_id)) +
+    "," + jp("parent_session_id", js(task.parent_session_id)) +
+    "," + jp("parent_task_id", js(task.parent_task_id)) +
+    "," + jp("child_session_id", js(task.child_session_id)) +
+    "," + jp("objective", js(task.objective)) +
+    "," + jp("owner_kind", js(task.owner_kind)) +
+    "," + jp("status", js(task.status)) +
+    "," + jp("state", js(task.status)) +
+    "," + jp("resource_policy", js(task.resource_policy)) +
+    "," + jp("result_summary", js(task.result_summary)) +
+    "," + jp("created_at", str(task.created_at_ms)) +
+    "," + jp("created_at_ms", str(task.created_at_ms)) +
+    "," + jp("updated_at", str(task.updated_at_ms)) +
+    "," + jp("updated_at_ms", str(task.updated_at_ms)) +
+    "," + jp("started_at", str(task.started_at_ms)) +
+    "," + jp("started_at_ms", str(task.started_at_ms)) +
+    "," + jp("ended_at", str(task.ended_at_ms)) +
+    "," + jp("ended_at_ms", str(task.ended_at_ms)) + RB()
+
+pub fn assistant_store_text_array_json(values: [text]) -> text:
+    var items: [text] = []
+    for value in values:
+        items.push(js(value))
+    "[" + items.join(",") + "]"
+
+pub fn assistant_store_child_tasks_json(tasks: [AssistantChildTaskRecord]) -> text:
+    var items: [text] = []
+    for task in tasks:
+        items.push(assistant_store_child_task_record_to_json_text(task))
+    "[" + items.join(",") + "]"
+
+pub fn assistant_store_session_record_to_json_text(session: AssistantSessionRecord) -> text:
+    LB() + jp("id", js(session.session_id)) +
+    "," + jp("session_id", js(session.session_id)) +
+    "," + jp("name", js(session.name)) +
+    "," + jp("summary", js(session.summary)) +
+    "," + jp("objective", js(session.objective)) +
+    "," + jp("prompt", js(session.prompt)) +
+    "," + jp("mode", js(session.mode)) +
+    "," + jp("state", js(session.state)) +
+    "," + jp("status", js(session.state)) +
+    "," + jp("policy", js(session.policy)) +
+    "," + jp("parent_session_id", js(session.parent_session_id)) +
+    "," + jp("parent_tool_use_id", js(session.parent_tool_use_id)) +
+    "," + jp("last_signal", js(session.last_signal)) +
+    "," + jp("last_event_kind", js(session.last_event_kind)) +
+    "," + jp("last_event_detail", js(session.last_event_detail)) +
+    "," + jp("last_event_time", str(session.last_event_time_ms)) +
+    "," + jp("last_event_time_ms", str(session.last_event_time_ms)) +
+    "," + jp("last_tick_at", str(session.last_tick_at_ms)) +
+    "," + jp("last_tick_at_ms", str(session.last_tick_at_ms)) +
+    "," + jp("created_at", str(session.created_at_ms)) +
+    "," + jp("created_at_ms", str(session.created_at_ms)) +
+    "," + jp("updated_at", str(session.updated_at_ms)) +
+    "," + jp("updated_at_ms", str(session.updated_at_ms)) +
+    "," + jp("event_count", str(session.event_count)) +
+    "," + jp("error_count", str(session.error_count)) +
+    "," + jp("model", js(session.model)) +
+    "," + jp("provider", js(session.provider)) +
+    "," + jp("digest_checkpoint_id", js(session.digest_checkpoint_id)) +
+    "," + jp("tool_use_ids", assistant_store_text_array_json(session.tool_use_ids)) +
+    "," + jp("children", assistant_store_text_array_json(session.children)) +
+    "," + jp("child_tasks", assistant_store_child_tasks_json(session.child_tasks)) +
+    "," + jp("warnings", assistant_store_text_array_json(session.warnings)) + RB()
+
+pub fn assistant_store_timeline_record_to_json_text(event: AssistantTimelineRecord) -> text:
+    LB() + jp("id", js(event.event_id)) +
+    "," + jp("event_id", js(event.event_id)) +
+    "," + jp("session_id", js(event.session_id)) +
+    "," + jp("parent_session_id", js(event.parent_session_id)) +
+    "," + jp("child_task_id", js(event.child_task_id)) +
+    "," + jp("timestamp", str(event.timestamp_ms)) +
+    "," + jp("timestamp_ms", str(event.timestamp_ms)) +
+    "," + jp("created_at", str(event.timestamp_ms)) +
+    "," + jp("created_at_ms", str(event.timestamp_ms)) +
+    "," + jp("kind", js(event.kind)) +
+    "," + jp("event_type", js(event.kind)) +
+    "," + jp("severity", js(event.severity)) +
+    "," + jp("title", js(event.title)) +
+    "," + jp("detail", js(event.detail)) +
+    "," + jp("summary", js(event.detail)) +
+    "," + jp("message", js(event.message)) +
+    "," + jp("signal", js(event.signal)) +
+    "," + jp("wake_reason", js(event.signal)) +
+    "," + jp("source", js(event.source)) +
+    "," + jp("correlation_id", js(event.correlation_id)) + RB()
