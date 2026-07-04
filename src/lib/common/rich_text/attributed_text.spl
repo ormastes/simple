@@ -1,8 +1,14 @@
 # Attributed Text — rich document model with inline styles.
 #
-# Provides: InlineStyle, TextSpan, DocBlock, CommentDef, RichDocument,
-#           empty_document, comment_def_for, document_word_count,
-#           document_headings, block_to_plain_text, spans_to_plain_text.
+# Provides: InlineStyle, TextSpan, DocBlock, CommentDef, RevisionDef,
+#           RichDocument, empty_document, comment_def_for, revision_def_for,
+#           document_word_count, document_headings, block_to_plain_text,
+#           spans_to_plain_text.
+#
+# Track-changes note: revision OPERATIONS (tracked_insert/tracked_delete/
+# accept/reject/summary) live in track_changes.spl — this file only carries
+# the data model (TextSpan.revision_id + RichDocument.revisions), mirroring
+# how CommentDef sits here while comment-producing logic lives elsewhere.
 
 enum InlineStyle:
     Normal
@@ -46,6 +52,18 @@ struct TextSpan:
                         # would misplace it; a parallel doc-level list keeps
                         # the span model to this one field. See file_formats.spl
                         # / odf_ooxml.spl / word/html_render.spl.
+    revision_id: text   # "" = untouched by track-changes; non-empty = this
+                        # span is part of an insertion or deletion recorded in
+                        # `RichDocument.revisions` (Word track-changes). Same
+                        # reference-only shape as `comment_id`: the payload
+                        # (author/kind/timestamp) lives doc-level in a
+                        # `RevisionDef`, looked up by id — see `revision_def_for`
+                        # below and src/lib/common/rich_text/track_changes.spl,
+                        # which owns all revision-producing operations
+                        # (tracked_insert/tracked_delete/accept/reject).
+                        # Office semantics: a delete-revision span's text
+                        # STAYS in the document (not removed) until the
+                        # revision is accepted — see track_changes.spl.
 
 struct CommentDef:
     """One word comment's payload, looked up by `TextSpan.comment_id`. Plain
@@ -55,6 +73,17 @@ struct CommentDef:
     author: text
     text: text
 
+struct RevisionDef:
+    """One track-changes revision's payload, looked up by `TextSpan.revision_id`.
+    `kind` is "insert" or "delete" (a span's revision_id always points at
+    exactly one RevisionDef, so a span cannot be both — a delete-over-an-
+    insert boundary splits into separate spans, each with its own id, same
+    as any other span split in this model)."""
+    id: text
+    author: text
+    kind: text          # "insert" | "delete"
+    timestamp_text: text
+
 struct DocBlock:
     kind: BlockKind
     spans: [TextSpan]
@@ -63,9 +92,10 @@ class RichDocument:
     title: text
     blocks: [DocBlock]
     comments: [CommentDef]   # doc-level list; see `TextSpan.comment_id`
+    revisions: [RevisionDef]   # doc-level list; see `TextSpan.revision_id`
 
     static fn new(title: text) -> RichDocument:
-        RichDocument(title: title, blocks: [], comments: [])
+        RichDocument(title: title, blocks: [], comments: [], revisions: [])
 
 fn empty_document(title: text) -> RichDocument:
     RichDocument.new(title)
@@ -78,6 +108,15 @@ fn comment_def_for(comments: [CommentDef], id: text) -> CommentDef:
         if c.id == id:
             return c
     CommentDef(id: "", author: "", text: "")
+
+fn revision_def_for(revisions: [RevisionDef], id: text) -> RevisionDef:
+    """Linear lookup of a RevisionDef by id; an empty RevisionDef (all fields
+    "") if not found — mirrors `comment_def_for`'s defensive-empty-value
+    contract for a dangling revision_id."""
+    for r in revisions:
+        if r.id == id:
+            return r
+    RevisionDef(id: "", author: "", kind: "", timestamp_text: "")
 
 fn spans_to_plain_text(spans: [TextSpan]) -> text:
     var out = ""

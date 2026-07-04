@@ -1,0 +1,194 @@
+"""Track-changes spec.
+
+Verifies the revision model (TextSpan.revision_id + RichDocument.revisions)
+and the operations in track_changes.spl: tracked_insert/tracked_delete split
+spans at exact offsets; accept/reject resolve a revision in the Office
+direction (accept-insert keeps text, accept-delete removes it; reject is the
+inverse); revisions_summary reports every pending revision; final_text is
+the accepted-preview reading (delete-marked text excluded, insert-marked
+text included) while spans_to_plain_text stays the "display / show markup"
+reading (everything present, including delete-marked text) — every fixture
+is hand-constructed and every assertion is over exact strings.
+"""
+
+use std.spec
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, spans_to_plain_text}
+use common.rich_text.track_changes.{tracked_insert, tracked_delete, accept_revision, reject_revision, accept_all, reject_all, revisions_summary, final_text}
+
+fn _plain_span(t: text) -> TextSpan:
+    TextSpan(text: t, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")
+
+fn _doc1(spans: [TextSpan]) -> RichDocument:
+    RichDocument(title: "T", blocks: [DocBlock(kind: BlockKind.Paragraph, spans: spans)], comments: [], revisions: [])
+
+fn _span_texts(doc: RichDocument, block_idx: i32) -> [text]:
+    var out: [text] = []
+    for s in doc.blocks[block_idx].spans:
+        out.push(s.text)
+    out
+
+describe "track changes: tracked_insert splits spans":
+    """Inserting mid-span produces before/new/after spans with exact text;
+    the new span carries a fresh insert revision."""
+
+    it "splits a single span into before, inserted, after":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d2 = tracked_insert(doc, 0, 5, " there", "Alice")
+        val spans = d2.blocks[0].spans
+        expect(spans.len()).to_equal(3)
+        expect(spans[0].text).to_equal("Hello")
+        expect(spans[0].revision_id).to_equal("")
+        expect(spans[1].text).to_equal(" there")
+        expect(spans[1].revision_id).to_equal("1")
+        expect(spans[2].text).to_equal(" world")
+        expect(spans[2].revision_id).to_equal("")
+        expect(d2.revisions.len()).to_equal(1)
+        expect(d2.revisions[0].id).to_equal("1")
+        expect(d2.revisions[0].author).to_equal("Alice")
+        expect(d2.revisions[0].kind).to_equal("insert")
+
+    it "inserts at offset 0 with no before-part":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d2 = tracked_insert(doc, 0, 0, "Hi ", "Bob")
+        val spans = d2.blocks[0].spans
+        expect(spans.len()).to_equal(2)
+        expect(spans[0].text).to_equal("Hi ")
+        expect(spans[0].revision_id).to_equal("1")
+        expect(spans[1].text).to_equal("Hello world")
+
+    it "inserts at the end with no after-part":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d2 = tracked_insert(doc, 0, 11, "!", "Bob")
+        val spans = d2.blocks[0].spans
+        expect(spans.len()).to_equal(2)
+        expect(spans[0].text).to_equal("Hello world")
+        expect(spans[1].text).to_equal("!")
+        expect(spans[1].revision_id).to_equal("1")
+
+describe "track changes: tracked_delete marks, does not remove":
+    """A delete-revision span keeps its text (display view still recovers
+    the original string) but is excluded from final_text (accepted view)."""
+
+    it "marks the deleted range instead of removing it":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d2 = tracked_delete(doc, 0, 0, 5, "Carol")
+        val spans = d2.blocks[0].spans
+        expect(spans.len()).to_equal(2)
+        expect(spans[0].text).to_equal("Hello")
+        expect(spans[0].revision_id).to_equal("1")
+        expect(spans[1].text).to_equal(" world")
+        expect(spans[1].revision_id).to_equal("")
+        expect(spans_to_plain_text(spans)).to_equal("Hello world")
+        expect(final_text(d2)).to_equal(" world")
+        expect(d2.revisions[0].kind).to_equal("delete")
+        expect(d2.revisions[0].author).to_equal("Carol")
+
+    it "splits a delete across 3 spans at exact boundaries":
+        val doc = _doc1([_plain_span("AAA"), _plain_span("BBB"), _plain_span("CCC")])
+        val d2 = tracked_delete(doc, 0, 1, 8, "Dave")
+        val spans = d2.blocks[0].spans
+        expect(spans.len()).to_equal(5)
+        expect(spans[0].text).to_equal("A")
+        expect(spans[0].revision_id).to_equal("")
+        expect(spans[1].text).to_equal("AA")
+        expect(spans[1].revision_id).to_equal("1")
+        expect(spans[2].text).to_equal("BBB")
+        expect(spans[2].revision_id).to_equal("1")
+        expect(spans[3].text).to_equal("CC")
+        expect(spans[3].revision_id).to_equal("1")
+        expect(spans[4].text).to_equal("C")
+        expect(spans[4].revision_id).to_equal("")
+        expect(spans_to_plain_text(spans)).to_equal("AAABBBCCC")
+        expect(final_text(d2)).to_equal("AC")
+
+describe "track changes: accept / reject":
+    """accept keeps an insert's text (strips the mark) and removes a
+    delete's spans; reject is the exact inverse."""
+
+    it "accept_revision on an insert strips the mark and keeps the text":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_insert(doc, 0, 5, " there", "Alice")
+        val d2 = accept_revision(d1, "1")
+        val spans = d2.blocks[0].spans
+        expect(spans.len()).to_equal(3)
+        expect(spans[1].text).to_equal(" there")
+        expect(spans[1].revision_id).to_equal("")
+        expect(d2.revisions.len()).to_equal(0)
+
+    it "reject_revision on an insert removes the inserted span":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_insert(doc, 0, 5, " there", "Alice")
+        val d2 = reject_revision(d1, "1")
+        val spans = d2.blocks[0].spans
+        expect(spans.len()).to_equal(2)
+        expect(spans[0].text).to_equal("Hello")
+        expect(spans[1].text).to_equal(" world")
+        expect(spans_to_plain_text(spans)).to_equal("Hello world")
+        expect(d2.revisions.len()).to_equal(0)
+
+    it "accept_revision on a delete removes the deleted span":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_delete(doc, 0, 0, 5, "Carol")
+        val d2 = accept_revision(d1, "1")
+        val spans = d2.blocks[0].spans
+        expect(spans.len()).to_equal(1)
+        expect(spans[0].text).to_equal(" world")
+        expect(d2.revisions.len()).to_equal(0)
+
+    it "reject_revision on a delete restores the text and strips the mark":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_delete(doc, 0, 0, 5, "Carol")
+        val d2 = reject_revision(d1, "1")
+        val spans = d2.blocks[0].spans
+        expect(spans.len()).to_equal(2)
+        expect(spans[0].text).to_equal("Hello")
+        expect(spans[0].revision_id).to_equal("")
+        expect(spans_to_plain_text(spans)).to_equal("Hello world")
+        expect(d2.revisions.len()).to_equal(0)
+
+describe "track changes: accept_all / reject_all":
+    """Resolving every pending revision at once, insert and delete mixed."""
+
+    it "accept_all resolves both an insert and a delete revision":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_insert(doc, 0, 0, "Hi ", "Alice")
+        val d2 = tracked_delete(d1, 0, 3, 8, "Bob")
+        val d3 = accept_all(d2)
+        expect(d3.revisions.len()).to_equal(0)
+        expect(spans_to_plain_text(d3.blocks[0].spans)).to_equal("Hi  world")
+
+    it "reject_all undoes the insert and restores the deleted text":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_insert(doc, 0, 0, "Hi ", "Alice")
+        val d2 = tracked_delete(d1, 0, 3, 8, "Bob")
+        val d3 = reject_all(d2)
+        expect(d3.revisions.len()).to_equal(0)
+        expect(spans_to_plain_text(d3.blocks[0].spans)).to_equal("Hello world")
+
+describe "track changes: revisions_summary (multi-author)":
+    """One '<id>|<author>|<kind>|<affected text>' line per pending revision."""
+
+    it "reports insert then delete revisions from two different authors":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_insert(doc, 0, 0, "Hi ", "Alice")
+        val d2 = tracked_delete(d1, 0, 3, 8, "Bob")
+        val lines = revisions_summary(d2)
+        expect(lines.len()).to_equal(2)
+        expect(lines[0]).to_equal("1|Alice|insert|Hi ")
+        expect(lines[1]).to_equal("2|Bob|delete|Hello")
+
+describe "track changes: final_text vs display text":
+    """final_text (accepted preview) excludes delete-marked text and keeps
+    insert-marked text; spans_to_plain_text (display / show-markup) always
+    keeps everything, unaffected by revisions."""
+
+    it "final_text differs from the display text when a delete is pending":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_delete(doc, 0, 0, 5, "Carol")
+        expect(spans_to_plain_text(d1.blocks[0].spans)).to_equal("Hello world")
+        expect(final_text(d1)).to_equal(" world")
+
+    it "final_text keeps pending insert text (accepted by default in that view)":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_insert(doc, 0, 5, " there", "Alice")
+        expect(final_text(d1)).to_equal("Hello there world")

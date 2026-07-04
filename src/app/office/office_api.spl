@@ -33,6 +33,7 @@ use app.office.sheets.data_ops.{sheet_sort_range, sheet_filter_rows}
 use app.office.sheets.pivot.{pivot_build, pivot_to_sheet}
 use app.office.word.edit_ops.{document_find, document_replace, document_stats, document_word_count_new, document_character_count, document_paragraph_count}
 use app.office.word.mail_merge.{merge_fields, merge_all_markdown}
+use common.rich_text.track_changes.{tracked_insert, tracked_delete, accept_revision, reject_revision, accept_all, reject_all, revisions_summary, final_text}
 use app.office.mail.message.{Email}
 use app.office.mail.rules.{parse_rules, apply_rules}
 use app.office.sheets.cond_format.{CondRule, cond_css_for_cell}
@@ -238,6 +239,74 @@ fn macro_merge_all_markdown(doc: RichDocument, sheet: Sheet) -> text:
     merge_all_markdown(doc, sheet)
 
 # =========================================================================
+# Writer documents: track changes
+# =========================================================================
+
+fn macro_track_insert(doc: RichDocument, block_idx: i32, offset: i32, text_: text, author: text) -> RichDocument:
+    """Insert text at a character offset within one block, tracked as an
+    insert-revision by author (splits spans as needed). Returns updated
+    document.
+
+    Example macro: `doc = macro_track_insert(doc, 0, 5, " there", "Alice")`
+    """
+    tracked_insert(doc, block_idx, offset, text_, author)
+
+fn macro_track_delete(doc: RichDocument, block_idx: i32, from: i32, to: i32, author: text) -> RichDocument:
+    """Mark a character range within one block as deleted by author — the
+    text stays in the document (Office semantics) until accepted. Returns
+    updated document.
+
+    Example macro: `doc = macro_track_delete(doc, 0, 0, 5, "Carol")`
+    """
+    tracked_delete(doc, block_idx, from, to, author)
+
+fn macro_accept_revision(doc: RichDocument, id: text) -> RichDocument:
+    """Accept one pending revision by id (insert: keep text, strip mark;
+    delete: remove the marked spans). Returns updated document.
+
+    Example macro: `doc = macro_accept_revision(doc, "1")`
+    """
+    accept_revision(doc, id)
+
+fn macro_reject_revision(doc: RichDocument, id: text) -> RichDocument:
+    """Reject one pending revision by id — the inverse of accept (insert:
+    remove the inserted spans; delete: restore the text, strip mark).
+    Returns updated document.
+
+    Example macro: `doc = macro_reject_revision(doc, "1")`
+    """
+    reject_revision(doc, id)
+
+fn macro_accept_all_revisions(doc: RichDocument) -> RichDocument:
+    """Accept every pending revision in the document. Returns updated document.
+
+    Example macro: `doc = macro_accept_all_revisions(doc)`
+    """
+    accept_all(doc)
+
+fn macro_reject_all_revisions(doc: RichDocument) -> RichDocument:
+    """Reject every pending revision in the document. Returns updated document.
+
+    Example macro: `doc = macro_reject_all_revisions(doc)`
+    """
+    reject_all(doc)
+
+fn macro_track_changes_summary(doc: RichDocument) -> [text]:
+    """One "<id>|<author>|<kind>|<affected text>" line per pending revision.
+
+    Example macro: `lines = macro_track_changes_summary(doc)`
+    """
+    revisions_summary(doc)
+
+fn macro_final_text(doc: RichDocument) -> text:
+    """The accepted-preview reading of the document (Show Markup off):
+    delete-marked text excluded, insert-marked text included.
+
+    Example macro: `text_ = macro_final_text(doc)`
+    """
+    final_text(doc)
+
+# =========================================================================
 # Mail rules
 # =========================================================================
 
@@ -268,26 +337,6 @@ fn macro_set_format(formats: SheetFormats, cell_a1: text, num_fmt: text, bold: b
     """
     val spec = FormatSpec(num_fmt: num_fmt, bold: bold, bg: bg, fg: fg)
     formats_set(formats, cell_a1, spec)
-
-fn macro_set_number_format(formats: SheetFormats, cell_a1: text, code: text) -> SheetFormats:
-    """Set a cell's Excel-style number-format code only ("0.00", "#,##0.00",
-    "0.0%", "$#,##0.00", "0.00E+00", "yyyy-mm-dd", ...), preserving any
-    bold/bg/fg already recorded for it. Returns the updated container;
-    reassign.
-
-    Example macro:
-        var fmts = empty_sheet_formats()
-        fmts = macro_set_number_format(fmts, "B2", "#,##0.00")
-    """
-    sheet_set_number_format(formats, cell_a1, code)
-
-fn macro_get_cell_formatted(sheet: Sheet, formats: SheetFormats, cell_a1: text) -> text:
-    """Read a cell's display text honoring its number-format code, falling
-    back to plain display when unformatted or non-numeric.
-
-    Example macro: `val shown = macro_get_cell_formatted(sh, fmts, "B2")`
-    """
-    cell_display_formatted(sheet, formats, cell_a1)
 
 fn macro_parse_formats(spec_text: text) -> SheetFormats:
     """Parse a plain-text format spec into a SheetFormats container.
@@ -434,3 +483,24 @@ fn macro_erp_invoice_md(sheet: Sheet, row: i32) -> text:
     """
     val doc = erp_invoice_from_sheet(sheet, row, default_invoice_template())
     document_to_markdown(doc)
+
+fn macro_set_number_format(formats: SheetFormats, cell_a1: text, code: text) -> SheetFormats:
+    """Set a cell's Excel-style number-format code only ("0.00", "#,##0.00",
+    "0.0%", "$#,##0.00", "0.00E+00", "yyyy-mm-dd", ...), preserving any
+    bold/bg/fg already recorded for it. Returns the updated container;
+    reassign.
+
+    Example macro:
+        var fmts = empty_sheet_formats()
+        fmts = macro_set_number_format(fmts, "B2", "#,##0.00")
+    """
+    sheet_set_number_format(formats, cell_a1, code)
+
+fn macro_get_cell_formatted(sheet: Sheet, formats: SheetFormats, cell_a1: text) -> text:
+    """Read a cell's display text honoring its number-format code, falling
+    back to plain display when unformatted or non-numeric.
+
+    Example macro: `val shown = macro_get_cell_formatted(sh, fmts, "B2")`
+    """
+    cell_display_formatted(sheet, formats, cell_a1)
+
