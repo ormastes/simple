@@ -14,9 +14,13 @@ use compiler.common.dependency.visibility.{Visibility}
 use compiler.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: TypeKind) -> i64
 
 fn hir_type_env_get(key: text) -> text:
     rt_env_get(key)
+
+fn hir_type_kind_disc(k: TypeKind) -> i64:
+    rt_enum_discriminant(k)
 
 # Local placeholder for the module resolver port used in FR-COMPILER-003 A2.
 # The actual 85.mdsoc implementation will be wired by the A2 agent at call sites.
@@ -189,8 +193,30 @@ impl HirLowering:
         # local restores the correct discriminant + payload layout.
         val lt: Type = t
         val lt_kind: TypeKind = lt.kind
+
+        # QUALIFIED arms (`case TypeKind.*`) are REQUIRED on stage4: bare
+        # `case Named(...)` etc. compile as irrefutable bindings (the variant
+        # names also exist in HirTypeKind), so the first arm swallowed every
+        # value. `struct Function` (parser_types.spl) additionally SHADOWS
+        # TypeKind.Function: even a qualified `case TypeKind.Function` compiles
+        # as an always-true struct pattern (bug doc iteration 18 hazard #1), so
+        # it is pre-dispatched by discriminant (reference disc from a constructed
+        # value — no fragile hardcoded name-hash) and kept OUT of the big match.
+        # NOTE: the corrupt-field-type upstream cause is fixed in lower_struct/
+        # lower_class (direct field access instead of struct destructure).
+        val kind_disc_v: i64 = hir_type_kind_disc(lt_kind)
+        val fn_ref_disc: i64 = hir_type_kind_disc(TypeKind.Function([], lt))
+        if kind_disc_v == fn_ref_disc:
+            match lt_kind:
+                case TypeKind.Function(params, ret):
+                    val fn_params = self.lower_type_list(params)
+                    val fn_ret = self.lower_type(ret)
+                    return HirType(kind: HirTypeKind.Function(fn_params, fn_ret, []), span: lt.span)
+                case _:
+                    pass
+
         val kind = match lt_kind:
-            case Named(name, args):
+            case TypeKind.Named(name, args):
                 val hir_args = self.lower_type_list(args)
 
                 # Check for builtin types
@@ -224,28 +250,29 @@ impl HirLowering:
                             self.error("unresolved type: {name}", lt.span)
                             HirTypeKind.Error
 
-            case Tuple(elements):
+            case TypeKind.Tuple(elements):
                 if elements.is_empty():
                     HirTypeKind.Unit
                 else:
                     HirTypeKind.Tuple(self.lower_type_list(elements))
 
-            case Array(element, size):
+            case TypeKind.Array(element, size):
                 val hir_element = self.lower_type(element)
                 HirTypeKind.Array(hir_element, nil)
 
-            case Function(params, ret):
+            case TypeKind.Function(params, ret):
+                # Unreachable: pre-dispatched above (struct Function shadow).
                 val hir_params = self.lower_type_list(params)
                 val hir_ret = self.lower_type(ret)
                 HirTypeKind.Function(hir_params, hir_ret, [])
 
-            case Optional(inner):
+            case TypeKind.Optional(inner):
                 HirTypeKind.Optional(self.lower_type(inner))
 
-            case Reference(inner, mutable):
+            case TypeKind.Reference(inner, mutable):
                 HirTypeKind.Ref(self.lower_type(inner), mutable)
 
-            case Union(members):
+            case TypeKind.Union(members):
                 val hir_members = self.lower_type_list(members)
                 if hir_members.len() == 0:
                     HirTypeKind.Unit
@@ -254,14 +281,14 @@ impl HirLowering:
                 else:
                     HirTypeKind.Union(hir_members)
 
-            case Projection(base, assoc_name):
+            case TypeKind.Projection(base, assoc_name):
                 val hir_base = self.lower_type(base)
                 HirTypeKind.Projection(hir_base, assoc_name)
 
-            case Infer:
+            case TypeKind.Infer:
                 HirTypeKind.Infer(0, 0)
 
-            case Error:
+            case _:
                 HirTypeKind.Error
 
         HirType(kind: kind, span: lt.span)
