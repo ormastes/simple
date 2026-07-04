@@ -96,10 +96,10 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   persistent bad-block table.
 - **Protocol surface**: overflow-safe command validation (correct `SC_*`, no crash) + the
   mandatory admin set (Abort, Async Event Request, Format NVM, Firmware Download/Commit).
-- **Host data transport floor (P4) — WIRED**: `hil_command.prp_byte` produces a block-indexed
-  simulated host byte stream, and both HIL + multi-queue NVMe controller program every LBA in
-  `nblocks` rather than only the first block. Full HostMem/PRP/SGL descriptors remain out of
-  scope.
+- **Host data transport floor (P4) — WIRED**: `hil_command.prp_byte` decodes a compact
+  two-segment PRP descriptor from `NvmeCmd.data`, and both HIL + multi-queue NVMe controller
+  program every LBA in `nblocks` from the modeled host segments rather than only the first block.
+  Full HostMem/SGL/IOMMU descriptors remain out of scope.
 - **Map-cache DRAM floor (P5) — WIRED**: `ftl_map` is the live FTL's bounded LRU write-back cache,
   with `MAP_CACHE_DRAM_BUDGET_BYTES` making the cache budget explicit. Full DRAM arena/write-buffer
   modeling remains out of scope.
@@ -133,7 +133,7 @@ status", wired-vs-shelf table): P1 `fil_fmc`, P7 `power_thermal`, and P8 `rain` 
 into the live controller/FTL; P2 `fil_scheduler` **landed but stays SHELF** — channel-level
 parallelism is a model a single-threaded sim cannot exhibit, so it is not flatly deferred but cannot
 be exercised; P3 has a **wired SECDED stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
-scope); P4 has a **wired multi-block host-byte floor** (full HostMem/PRP/SGL remains out of scope);
+scope); P4 has a **wired segmented-PRP host-byte floor** (full HostMem/SGL/IOMMU remains out of scope);
 P5 has a **wired bounded-map-cache floor** (full DRAM arena/write buffer remains out of scope);
 P6 has a **wired cooperative-owner floor** (true multicore/preemption remains out of scope);
 P9 is **build-blocked** (rv32 note above).

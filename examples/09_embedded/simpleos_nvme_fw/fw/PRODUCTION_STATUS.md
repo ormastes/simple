@@ -60,9 +60,10 @@ silicon. The simulation boundary is deliberate and unchanged:
       payload ECC word at program time into NAND spare-area state and reads it back through the
       ONFI/FMC latches; FIL corrects one silent payload-bit error, detects double-bit payload
       corruption, and fails closed on stored-ECC/OOB metadata corruption (`fil_selftest`).
-- [x] **Multi-block host writes are load-bearing.** HIL and the multi-queue NVMe controller now
-      write every LBA in `nblocks` from a block-indexed simulated PRP byte stream instead of
-      silently programming only the first block (`hil_selftest`, `nvme_controller_selftest`).
+- [x] **Segmented PRP host writes are load-bearing.** HIL and the multi-queue NVMe controller now
+      write every LBA in `nblocks` from a modeled two-segment PRP byte stream instead of silently
+      programming only the first block (`host_transport_check.spl`, `hil_selftest`,
+      `nvme_controller_selftest`).
 - [x] **Map-cache DRAM pressure is explicit.** The live `Ftl` uses a bounded LRU write-back
       `ftl_map` cache whose capacity is tied to `MAP_CACHE_DRAM_BUDGET_BYTES`; dirty evictions
       write back to the flash-resident L2P (`ftl_map_selftest`).
@@ -90,7 +91,7 @@ same as "all gap-closure / production work is done." Per
 (`power_thermal`), and **P8** (`rain`) are **wired into the live controller/FTL**; **P2**
 (`fil_scheduler`) is **modeled but shelf** (a single-threaded sim cannot exhibit channel-level
 parallelism); **P3 has a wired SECDED stored-ECC simulation floor** (not full BCH/LDPC); **P4 has a
-wired multi-block host-byte floor** (not full HostMem/PRP/SGL); **P5 has a wired bounded-map-cache
+wired segmented-PRP host-byte floor** (not full HostMem/SGL/IOMMU); **P5 has a wired bounded-map-cache
 floor** (not a general DRAM arena/write buffer); **P6 has a wired cooperative-owner floor** (not
 multicore/preemptive); and **P9** (rv32 native build) is **build-blocked**
 (see the silicon boundary below).

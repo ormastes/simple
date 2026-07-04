@@ -48,7 +48,7 @@ the firmware":
 |-------|--------|-------------|--------|
 | P1 | `fil_fmc` | `fil.spl` (every program/read/erase routes through the FMC handshake) | **wired** |
 | P3 | `fil_ecc` + NAND OOB ECC latch | `fil.spl` reads stored ECC through `fil_fmc`, corrects one silent payload bit, and fails double-bit/OOB corruption closed | **wired SECDED floor** — not full BCH/LDPC |
-| P4 | `hil_command.prp_byte` | HIL + multi-queue NVMe writes program each LBA from a block-indexed host byte stream | **wired floor** — no HostMem/PRP list yet |
+| P4 | `hil_command.prp_byte` | HIL + multi-queue NVMe writes program each LBA from a segmented PRP host byte stream | **wired segmented-PRP floor** — no full HostMem/SGL/IOMMU yet |
 | P5 | `ftl_map` | `Ftl` uses bounded LRU write-back cache with explicit DRAM budget + dirty eviction | **wired map-cache floor** — no general DRAM arena/write buffer yet |
 | P6 | `firmware.service_tick` | Foreground HIL ticks and background GC ticks share an explicit FTL-map owner token | **wired cooperative floor** — no multicore/preemption |
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
@@ -167,10 +167,11 @@ faithful, partially-provable step, not the production code.
 
 ## P4 — DMA / host data transport (byte-accurate)  *(G4)* — PARTIAL WIRED FLOOR (2026-07-04)
 
-> Landed floor: `hil_command.prp_byte` now produces a block-indexed byte stream and both the
-> legacy HIL and multi-queue NVMe controller write every LBA in `nblocks`, not just the first.
-> The command `data` field remains the host-buffer base byte; full HostMem/PRP/SGL descriptors
-> remain open below.
+> Landed floor: `hil_command.prp_byte` now decodes a compact two-segment PRP descriptor from
+> `NvmeCmd.data`; both legacy HIL and the multi-queue NVMe controller write every LBA in
+> `nblocks` from the modeled host segments, not just the first block. Covered by
+> `host_transport_check.spl` in the system spec. Full HostMem/SGL/IOMMU descriptors remain open
+> below.
 
 **Goal.** Move real **bytes** between a modeled host memory and the device via a
 PRP/SGL scatter-gather descriptor, replacing `i64`-value data.

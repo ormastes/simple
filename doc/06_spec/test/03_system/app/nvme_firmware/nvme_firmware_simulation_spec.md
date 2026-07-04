@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -328,6 +328,29 @@ expect(out).to_contain("ECC OK")
 
 </details>
 
+#### moves multi-block host data through segmented PRP descriptors (gap-closure P4)
+
+- Submit a write whose simulated host buffer crosses from PRP segment 1 to PRP segment 2
+   - Expected: code equals `0`
+- The HIL writes bytes from both PRP segments in LBA order
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Submit a write whose simulated host buffer crosses from PRP segment 1 to PRP segment 2")
+val (out, err, code) = _run(FW + "/host_transport_check.spl")
+expect(code).to_equal(0)
+step("The HIL writes bytes from both PRP segments in LBA order")
+expect(out).to_contain("HOST TRANSPORT OK")
+```
+
+</details>
+
 #### schedules NAND ops across channels in parallel with per-channel serialization (gap-closure P2)
 
 - Stripe a write batch across the channels and drain the multi-channel scheduler
@@ -552,8 +575,8 @@ expect(out).to_contain("LEAN_OK")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
