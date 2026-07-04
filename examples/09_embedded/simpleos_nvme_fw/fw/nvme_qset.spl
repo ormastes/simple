@@ -213,7 +213,10 @@ impl QueueSet:
         if not me.sq_is_active(qid) or me.sq_len[qid] == 0:
             return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val base: i64 = qid * MAX_QUEUE_SIZE
-        val slot: i64 = base + me.sq_head[qid]
+        val head: i64 = me.sq_head[qid]
+        if head < 0 or head >= me.sq_size[qid]:
+            return cmd_make(0, OP_FLUSH, 0, 0, 0)
+        val slot: i64 = base + head
         val cid:  i64 = me.sq_cid[slot]
         val op:   i64 = me.sq_op[slot]
         val lba:  i64 = me.sq_lba[slot]
@@ -254,7 +257,10 @@ impl QueueSet:
         if not me.cq_is_active(cqid) or me.cq_len[cqid] == 0:
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val base: i64 = cqid * MAX_QUEUE_SIZE
-        val slot: i64 = base + me.cq_head[cqid]
+        val head: i64 = me.cq_head[cqid]
+        if head < 0 or head >= me.cq_size[cqid]:
+            return cpl_make(0, SC_INVALID_FIELD, 0)
+        val slot: i64 = base + head
         val cid:    i64 = me.cq_cid[slot]
         val status: i64 = me.cq_status[slot]
         val data:   i64 = me.cq_data[slot]
@@ -311,6 +317,12 @@ fn nvme_qset_selftest() -> i64:
     val empty_fetch: NvmeCmd = qs.sq_fetch(1)
     fail = fail + expect_eq(empty_fetch.nblocks, 0, "empty SQ fetch returns inert flush")
     fail = fail + expect_eq(qs.sq_pending(1), 0, "empty SQ fetch leaves pending count unchanged")
+    qs.sq_len[1] = 1
+    qs.sq_head[1] = MAX_QUEUE_SIZE
+    val bad_sq_head_fetch: NvmeCmd = qs.sq_fetch(1)
+    fail = fail + expect_eq(bad_sq_head_fetch.nblocks, 0, "invalid SQ head fetch fails closed")
+    qs.sq_len[1] = 0
+    qs.sq_head[1] = 0
 
     # submit to an inactive SQ is refused
     fail = fail + expect_eq(bool_to_i64(qs.sq_submit(3, cmd_make(1, OP_READ, 0, 1, 0))), 0, "submit to inactive SQ 3 refused")
@@ -329,6 +341,12 @@ fn nvme_qset_selftest() -> i64:
     val empty_reap: NvmeCpl = qs.cq_reap(1)
     fail = fail + expect_eq(empty_reap.status, SC_INVALID_FIELD, "empty CQ reap fails closed")
     fail = fail + expect_eq(qs.cq_pending(1), 0, "empty CQ reap leaves pending count unchanged")
+    qs.cq_len[1] = 1
+    qs.cq_head[1] = MAX_QUEUE_SIZE
+    val bad_cq_head_reap: NvmeCpl = qs.cq_reap(1)
+    fail = fail + expect_eq(bad_cq_head_reap.status, SC_INVALID_FIELD, "invalid CQ head reap fails closed")
+    qs.cq_len[1] = 0
+    qs.cq_head[1] = 0
     fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(70000, SC_SUCCESS, 0))), 0, "post rejects oversized completion id")
     fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(-1, SC_SUCCESS, 0))), 0, "post rejects negative completion id")
 
