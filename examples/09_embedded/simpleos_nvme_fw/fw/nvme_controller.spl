@@ -184,6 +184,8 @@ impl NvmeController:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             if fw_action > 3:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
+            if me.fw_dl_bytes <= 0:
+                return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             me.fw_slot = fw_slot
             # Commit action 0 = replace image only (no activation); actions 1..3 activate it,
             # so the running firmware revision advances. (The model collapses "activate on next
@@ -648,6 +650,14 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(c.committed_fw_slot(), 1, "fw commit recorded the target slot")
     # Commit action 0 = replace-only: the slot is recorded but the running revision does NOT advance.
     val rev1: i64 = c.firmware_revision()
+    c.admin_submit(admin_fw_commit_cmd(55, 2, 0))
+    c.admin_process()
+    val fcempt: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(fcempt.status, SC_INVALID_FIELD, "fw commit without downloaded image is rejected")
+    c.admin_submit(admin_fw_download_cmd(56, 4, 0))
+    c.admin_process()
+    val fd2: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(fd2.status, SC_SUCCESS, "fw replacement image download accepted")
     c.admin_submit(admin_fw_commit_cmd(35, 2, 0))
     c.admin_process()
     val fc3: NvmeCpl = c.admin_reap()
