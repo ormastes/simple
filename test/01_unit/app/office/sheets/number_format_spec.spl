@@ -1,0 +1,166 @@
+"""Office sheets number-format-code spec.
+
+Hand-verified cases for `format_number` (Excel Format-Cells number-code
+subset: fixed decimals, thousands grouping, percent, generic currency
+prefix, scientific notation, date serials, "@" text passthrough, general
+fallback, negative numbers), the `sheet_set_number_format` registry helper,
+and the `cell_display_formatted` end-to-end display path.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell_format.{
+    FormatSpec, empty_sheet_formats, formats_set, formats_get,
+    sheet_set_number_format
+}
+use app.office.sheets.number_format.{format_number, cell_display_formatted}
+use app.office.file_formats.{recalculate_formula_cells}
+
+describe "format_number: fixed decimals":
+    """"0.00"-style codes: round-half-away-from-zero, zero-padded."""
+
+    it "rounds 1234.567 to two decimals":
+        # 1234.567 * 100 = 123456.7 -> +0.5 -> 123457.2 -> floor -> 1234.57
+        expect(format_number(1234.567, "0.00")).to_equal("1234.57")
+
+    it "rounds to three decimals":
+        expect(format_number(1234.5, "0.000")).to_equal("1234.500")
+
+    it "rounds to a whole number with no decimal point":
+        expect(format_number(1234.5, "0")).to_equal("1235")
+
+describe "format_number: thousands grouping":
+    """"#,##0"-style codes."""
+
+    it "groups thousands with two decimals":
+        expect(format_number(1234.567, "#,##0.00")).to_equal("1,234.57")
+
+    it "groups millions with no decimals, rounding up":
+        # 1234567.891 -> +0.5 -> 1234568.391 -> floor -> 1,234,568
+        expect(format_number(1234567.891, "#,##0")).to_equal("1,234,568")
+
+describe "format_number: percent":
+    """"0%"-style codes: value * 100 with a trailing '%'."""
+
+    it "formats a percentage with one decimal":
+        # 0.4567 * 100 = 45.67 -> round half up to 1 decimal -> 45.7%
+        expect(format_number(0.4567, "0.0%")).to_equal("45.7%")
+
+    it "formats a percentage with no decimals":
+        expect(format_number(0.5, "0%")).to_equal("50%")
+
+describe "format_number: currency / generic literal prefix":
+    """Leading literal characters before the first '0'/'#' are kept as a
+    prefix (e.g. a currency symbol)."""
+
+    it "formats dollars with a currency prefix":
+        expect(format_number(1234.5, "$#,##0.00")).to_equal("$1,234.50")
+
+    it "keeps a multi-character literal prefix":
+        expect(format_number(1234.5, "USD #,##0.00")).to_equal("USD 1,234.50")
+
+describe "format_number: scientific notation":
+    """"0.00E+00"-style codes: mantissa in [1,10) + 2-digit signed exponent."""
+
+    it "formats 12345.6789 in scientific notation":
+        # 12345.6789 = 1.23456789e4 -> mantissa rounds to 1.23, exponent 4
+        expect(format_number(12345.6789, "0.00E+00")).to_equal("1.23E+04")
+
+describe "format_number: dates":
+    """Value read as an Excel date serial (days since 1899-12-30, 1900
+    leap-year-bug system), converted via std.math.financial's own
+    civil<->serial conversion.
+
+    Recomputed independently with `date -u -d "1970-01-01 +N days" +%F`
+    where N = serial - 25569 (the financial lib's Excel-epoch offset):
+    serial 45107 -> N = 19538 -> 2023-06-30 (matches the brief's example;
+    no correction needed).
+    """
+
+    it "formats an Excel date serial as yyyy-mm-dd":
+        expect(format_number(45107.0, "yyyy-mm-dd")).to_equal("2023-06-30")
+
+    it "formats the same serial as mm/dd/yyyy":
+        expect(format_number(45107.0, "mm/dd/yyyy")).to_equal("06/30/2023")
+
+    it "formats the same serial as dd.mm.yyyy":
+        expect(format_number(45107.0, "dd.mm.yyyy")).to_equal("30.06.2023")
+
+describe "format_number: negative numbers":
+    """A plain '-' prefix ahead of the formatted magnitude."""
+
+    it "prefixes a minus sign for a negative grouped value":
+        expect(format_number(-1234.5, "#,##0.00")).to_equal("-1,234.50")
+
+    it "prefixes a minus sign ahead of a currency literal":
+        expect(format_number(-1234.5, "$#,##0.00")).to_equal("-$1,234.50")
+
+describe "format_number: fallbacks":
+    """"@"/'' and unknown codes never error the display path."""
+
+    it "falls back to general for an empty code":
+        expect(format_number(42.0, "")).to_equal("42")
+
+    it "trims a whole-number value under general display":
+        expect(format_number(3.0, "")).to_equal("3")
+
+    it "keeps a fractional value under general display":
+        expect(format_number(3.5, "")).to_equal("3.5")
+
+    it "falls back to general for an unrecognized code":
+        expect(format_number(42.5, "???")).to_equal("42.5")
+
+describe "sheet_set_number_format: registry":
+    """Sets only the number-format code, preserving existing bold/bg/fg."""
+
+    it "sets a number format on a cell with no prior format":
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "B2", "0.00")
+        val spec = formats_get(formats, "B2")
+        expect(spec.num_fmt).to_equal("0.00")
+        expect(spec.bold).to_equal(false)
+
+    it "preserves existing bold/bg/fg when only the number format changes":
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "B2", FormatSpec(num_fmt: "0", bold: true, bg: "#ffe4b5", fg: "#7a2e00"))
+        formats = sheet_set_number_format(formats, "B2", "#,##0.00")
+        val spec = formats_get(formats, "B2")
+        expect(spec.num_fmt).to_equal("#,##0.00")
+        expect(spec.bold).to_equal(true)
+        expect(spec.bg).to_equal("#ffe4b5")
+        expect(spec.fg).to_equal("#7a2e00")
+
+describe "cell_display_formatted: end-to-end display":
+    """Applies format_number to numeric cells with a code set, falls back
+    to cell_display_text (formula/text cells, or numeric cells with no
+    code)."""
+
+    it "formats a plain numeric cell with a set number format":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "1234.567")
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "A1", "0.00")
+        expect(cell_display_formatted(sheet, formats, "A1")).to_equal("1234.57")
+
+    it "formats a formula cell's numeric result":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("B1", "2")
+        sheet.set_value("B2", "3")
+        sheet.set_value("B3", "=B1+B2")
+        sheet = recalculate_formula_cells(sheet)
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "B3", "0.00")
+        expect(cell_display_formatted(sheet, formats, "B3")).to_equal("5.00")
+
+    it "passes a text cell through unchanged regardless of any code":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("C1", "hello")
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "C1", "@")
+        expect(cell_display_formatted(sheet, formats, "C1")).to_equal("hello")
+
+    it "falls back to plain display when no format is set":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("D1", "42")
+        val formats = empty_sheet_formats()
+        expect(cell_display_formatted(sheet, formats, "D1")).to_equal("42")
