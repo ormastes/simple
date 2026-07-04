@@ -12,17 +12,25 @@ use openssd_config.*
 
 val GC_LOW_WATERMARK: i64 = 4    # background GC engages below this many free blocks
 val GC_SWEEP_MAX: i64 = 3        # bounded GC passes per maintenance sweep
+val MAP_OWNER_NONE: i64 = 0
+val MAP_OWNER_FG: i64 = 1
+val MAP_OWNER_BG: i64 = 2
 
 struct Firmware:
     hil:   Hil
     ticks: i64
     target: OpenSsdConfig
+    map_owner: i64
+    fg_ticks: i64
+    bg_ticks: i64
+    owner_conflicts: i64
 
 fn firmware_new() -> Firmware:
     firmware_new_for_target(TARGET_SIMPLE_SIM)
 
 fn firmware_new_for_target(target_id: i64) -> Firmware:
-    Firmware(hil: hil_new(), ticks: 0, target: nvme_fw_target_config(target_id))
+    Firmware(hil: hil_new(), ticks: 0, target: nvme_fw_target_config(target_id),
+        map_owner: MAP_OWNER_NONE, fg_ticks: 0, bg_ticks: 0, owner_conflicts: 0)
 
 impl Firmware:
     me submit(c: NvmeCmd) -> bool:
@@ -53,16 +61,58 @@ impl Firmware:
     me free_blocks() -> i64:
         me.hil.free_blocks()
 
+    me acquire_map_owner(owner: i64) -> bool:
+        if me.map_owner == MAP_OWNER_NONE:
+            me.map_owner = owner
+            return true
+        me.owner_conflicts = me.owner_conflicts + 1
+        false
+
+    me release_map_owner(owner: i64):
+        if me.map_owner == owner:
+            me.map_owner = MAP_OWNER_NONE
+
+    me owner_idle() -> i64:
+        var idle: i64 = 0
+        if me.map_owner == MAP_OWNER_NONE:
+            idle = 1
+        idle
+
+    me conflict_count() -> i64:
+        me.owner_conflicts
+
+    # One cooperative scheduler tick: at most one foreground command, then at most
+    # one background GC step. The owner token serializes FTL-map access.
+    me service_tick() -> i64:
+        me.ticks = me.ticks + 1
+        var processed: i64 = 0
+        if me.acquire_map_owner(MAP_OWNER_FG):
+            processed = me.hil.tick()
+            if processed > 0:
+                me.fg_ticks = me.fg_ticks + 1
+            me.release_map_owner(MAP_OWNER_FG)
+        if me.hil.free_blocks() < GC_LOW_WATERMARK:
+            if me.acquire_map_owner(MAP_OWNER_BG):
+                val v: i64 = me.hil.gc()
+                if v != UNMAP:
+                    me.bg_ticks = me.bg_ticks + 1
+                me.release_map_owner(MAP_OWNER_BG)
+        processed
+
     # One reactor service cycle: drain host commands, then background-GC while the
     # free-block count is below the low watermark (bounded; always terminates).
     me service() -> i64:
-        me.ticks = me.ticks + 1
-        val processed: i64 = me.hil.run()
-        var free: i64 = me.hil.free_blocks()
+        var processed: i64 = 0
         var guard: i64 = 0
+        while me.hil.pending() > 0 and guard < NUM_PAGES:
+            processed = processed + me.service_tick()
+            guard = guard + 1
+        var free: i64 = me.hil.free_blocks()
+        guard = 0
         while (free < GC_LOW_WATERMARK and guard < NUM_BLOCKS):
-            val v: i64 = me.hil.gc()
-            if v == UNMAP:
+            val before: i64 = me.bg_ticks
+            me.service_tick()
+            if me.bg_ticks == before:
                 guard = NUM_BLOCKS
             else:
                 free = me.hil.free_blocks()
@@ -74,12 +124,17 @@ impl Firmware:
         var reclaimed: i64 = 0
         var k: i64 = 0
         while k < GC_SWEEP_MAX:
-            val v: i64 = me.hil.gc()
-            if v == UNMAP:
-                k = GC_SWEEP_MAX
+            if me.acquire_map_owner(MAP_OWNER_BG):
+                val v: i64 = me.hil.gc()
+                if v == UNMAP:
+                    k = GC_SWEEP_MAX
+                else:
+                    reclaimed = reclaimed + 1
+                    me.bg_ticks = me.bg_ticks + 1
+                    k = k + 1
+                me.release_map_owner(MAP_OWNER_BG)
             else:
-                reclaimed = reclaimed + 1
-                k = k + 1
+                k = GC_SWEEP_MAX
         reclaimed
 
     me checkpoint():

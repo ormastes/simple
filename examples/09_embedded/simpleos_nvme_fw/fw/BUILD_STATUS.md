@@ -98,6 +98,9 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   simulated host byte stream, and both HIL + multi-queue NVMe controller program every LBA in
   `nblocks` rather than only the first block. Full HostMem/PRP/SGL descriptors remain out of
   scope.
+- **Map-cache DRAM floor (P5) — WIRED**: `ftl_map` is the live FTL's bounded LRU write-back cache,
+  with `MAP_CACHE_DRAM_BUDGET_BYTES` making the cache budget explicit. Full DRAM arena/write-buffer
+  modeling remains out of scope.
 - **Media management**: static wear-leveling (`wear_level_once`) + read-disturb scrub (`scrub_once`).
 - **Health**: SMART wired to real activity (wear, spare, media errors, unsafe shutdowns) + error log.
 - **Live thermal (P7) — WIRED**: `pt: PowerThermal` field ticked in `process_one_io` on every
@@ -126,8 +129,9 @@ into the live controller/FTL; P2 `fil_scheduler` **landed but stays SHELF** — 
 parallelism is a model a single-threaded sim cannot exhibit, so it is not flatly deferred but cannot
 be exercised; P3 has a **wired stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
 scope); P4 has a **wired multi-block host-byte floor** (full HostMem/PRP/SGL remains out of scope);
-P5–P6 are **NOT started**; P9 is **build-blocked** (rv32 note above).
+P5 has a **wired bounded-map-cache floor** (full DRAM arena/write buffer remains out of scope);
+P6 is **NOT started**; P9 is **build-blocked** (rv32 note above).
 
-Silicon-only pieces remain out of scope (real BCH/RS/LDPC hardware ECC, MMIO/PCIe, full PRP/SGL DMA, persistent backing
+Silicon-only pieces remain out of scope (real BCH/RS/LDPC hardware ECC, MMIO/PCIe, full PRP/SGL DMA, general DRAM arena/write buffer, persistent backing
 store) — see `PRODUCTION_STATUS.md` § Silicon boundary. This is a hardware-FAITHFUL **simulation**,
 not a silicon-shippable binary; "production level" in the literal sense is NOT done.

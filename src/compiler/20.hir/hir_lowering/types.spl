@@ -204,94 +204,148 @@ impl HirLowering:
         # value — no fragile hardcoded name-hash) and kept OUT of the big match.
         # NOTE: the corrupt-field-type upstream cause is fixed in lower_struct/
         # lower_class (direct field access instead of struct destructure).
+        # DISC-DISPATCH (bug doc iteration 20 #86). A multi-arm `match lt_kind`
+        # over qualified TypeKind variants MIS-ROUTES on stage4 for the
+        # struct/class field-type path: an `Infer` field value (confirmed by
+        # probe: disc == Infer reference) is swallowed by the FIRST arm
+        # `case TypeKind.Named(...)` (irrefutable — `Named` also names a
+        # HirTypeKind variant), which then extracts garbage `args` and SIGSEGVs
+        # in lower_type_list (gdb: lower_type_list <- lower_type <- lower_field).
+        # The identical match works for function param/return types, so this is
+        # value-specific irrefutable-arm mis-routing. Dispatch by discriminant
+        # (reference discs from freshly constructed values — construction is
+        # always correct; only pattern MATCHING mis-dereferences) and extract
+        # each payload in an ISOLATED single-arm guarded match, the idiom proven
+        # in expressions.spl / statements.spl.
         val kind_disc_v: i64 = hir_type_kind_disc(lt_kind)
-        val fn_ref_disc: i64 = hir_type_kind_disc(TypeKind.Function([], lt))
-        if kind_disc_v == fn_ref_disc:
+        val d_named: i64 = hir_type_kind_disc(TypeKind.Named("", []))
+        val d_tuple: i64 = hir_type_kind_disc(TypeKind.Tuple([]))
+        val d_array: i64 = hir_type_kind_disc(TypeKind.Array(lt, nil))
+        val d_func: i64 = hir_type_kind_disc(TypeKind.Function([], lt))
+        val d_opt: i64 = hir_type_kind_disc(TypeKind.Optional(lt))
+        val d_ref: i64 = hir_type_kind_disc(TypeKind.Reference(lt, false))
+        val d_union: i64 = hir_type_kind_disc(TypeKind.Union([]))
+        val d_proj: i64 = hir_type_kind_disc(TypeKind.Projection(lt, ""))
+
+        var kind: HirTypeKind = HirTypeKind.Infer(0, 0)
+        if kind_disc_v == d_named:
+            var nm: text = ""
+            var nargs: [Type] = []
             match lt_kind:
-                case TypeKind.Function(params, ret):
-                    val fn_params = self.lower_type_list(params)
-                    val fn_ret = self.lower_type(ret)
-                    return HirType(kind: HirTypeKind.Function(fn_params, fn_ret, []), span: lt.span)
+                case TypeKind.Named(name, args):
+                    nm = name
+                    nargs = args
                 case _:
                     pass
-
-        val kind = match lt_kind:
-            case TypeKind.Named(name, args):
-                val hir_args = self.lower_type_list(args)
-
-                # Check for builtin types
-                match name:
-                    case "i8": HirTypeKind.Int(8, true)
-                    case "i16": HirTypeKind.Int(16, true)
-                    case "i32": HirTypeKind.Int(32, true)
-                    case "i64": HirTypeKind.Int(64, true)
-                    case "u8": HirTypeKind.Int(8, false)
-                    case "u16": HirTypeKind.Int(16, false)
-                    case "u32": HirTypeKind.Int(32, false)
-                    case "u64": HirTypeKind.Int(64, false)
-                    case "f32": HirTypeKind.Float(32)
-                    case "f64": HirTypeKind.Float(64)
-                    case "bool": HirTypeKind.Bool
-                    case "char": HirTypeKind.Char
-                    case "text" | "str" | "String": HirTypeKind.Str
-                    case "Result":
-                        if hir_args.len() == 2:
-                            HirTypeKind.Result(hir_args[0], hir_args[1])
-                        else:
-                            self.error("Result type expects 2 type arguments", lt.span)
-                            HirTypeKind.Error
-                    case _:
-                        val symbol_id = self.symbols.lookup_or_invalid(name)
-                        if symbol_id.is_valid():
-                            if custom_primitive_is_name(name):
-                                custom_primitive_bind_symbol(name, symbol_id.id)
-                            HirTypeKind.Named(symbol_id, hir_args)
-                        else:
-                            self.error("unresolved type: {name}", lt.span)
-                            HirTypeKind.Error
-
-            case TypeKind.Tuple(elements):
-                if elements.is_empty():
-                    HirTypeKind.Unit
-                else:
-                    HirTypeKind.Tuple(self.lower_type_list(elements))
-
-            case TypeKind.Array(element, size):
-                val hir_element = self.lower_type(element)
-                HirTypeKind.Array(hir_element, nil)
-
-            case TypeKind.Function(params, ret):
-                # Unreachable: pre-dispatched above (struct Function shadow).
-                val hir_params = self.lower_type_list(params)
-                val hir_ret = self.lower_type(ret)
-                HirTypeKind.Function(hir_params, hir_ret, [])
-
-            case TypeKind.Optional(inner):
-                HirTypeKind.Optional(self.lower_type(inner))
-
-            case TypeKind.Reference(inner, mutable):
-                HirTypeKind.Ref(self.lower_type(inner), mutable)
-
-            case TypeKind.Union(members):
-                val hir_members = self.lower_type_list(members)
-                if hir_members.len() == 0:
-                    HirTypeKind.Unit
-                elif hir_members.len() == 1:
-                    hir_members[0].kind
-                else:
-                    HirTypeKind.Union(hir_members)
-
-            case TypeKind.Projection(base, assoc_name):
-                val hir_base = self.lower_type(base)
-                HirTypeKind.Projection(hir_base, assoc_name)
-
-            case TypeKind.Infer:
-                HirTypeKind.Infer(0, 0)
-
-            case _:
-                HirTypeKind.Error
+            val hir_args = self.lower_type_list(nargs)
+            kind = self.lower_named_kind(nm, hir_args, lt.span)
+        elif kind_disc_v == d_tuple:
+            var elems: [Type] = []
+            match lt_kind:
+                case TypeKind.Tuple(elements):
+                    elems = elements
+                case _:
+                    pass
+            if elems.is_empty():
+                kind = HirTypeKind.Unit
+            else:
+                kind = HirTypeKind.Tuple(self.lower_type_list(elems))
+        elif kind_disc_v == d_array:
+            var elem: Type = lt
+            match lt_kind:
+                case TypeKind.Array(element, size):
+                    elem = element
+                case _:
+                    pass
+            kind = HirTypeKind.Array(self.lower_type(elem), nil)
+        elif kind_disc_v == d_func:
+            var fparams: [Type] = []
+            var fret: Type = lt
+            match lt_kind:
+                case TypeKind.Function(params, ret):
+                    fparams = params
+                    fret = ret
+                case _:
+                    pass
+            kind = HirTypeKind.Function(self.lower_type_list(fparams), self.lower_type(fret), [])
+        elif kind_disc_v == d_opt:
+            var oinner: Type = lt
+            match lt_kind:
+                case TypeKind.Optional(inner):
+                    oinner = inner
+                case _:
+                    pass
+            kind = HirTypeKind.Optional(self.lower_type(oinner))
+        elif kind_disc_v == d_ref:
+            var rinner: Type = lt
+            var rmut: bool = false
+            match lt_kind:
+                case TypeKind.Reference(inner, mutable):
+                    rinner = inner
+                    rmut = mutable
+                case _:
+                    pass
+            kind = HirTypeKind.Ref(self.lower_type(rinner), rmut)
+        elif kind_disc_v == d_union:
+            var umembers: [Type] = []
+            match lt_kind:
+                case TypeKind.Union(members):
+                    umembers = members
+                case _:
+                    pass
+            val hir_members = self.lower_type_list(umembers)
+            if hir_members.len() == 0:
+                kind = HirTypeKind.Unit
+            elif hir_members.len() == 1:
+                kind = hir_members[0].kind
+            else:
+                kind = HirTypeKind.Union(hir_members)
+        elif kind_disc_v == d_proj:
+            var pbase: Type = lt
+            var passoc: text = ""
+            match lt_kind:
+                case TypeKind.Projection(base, assoc_name):
+                    pbase = base
+                    passoc = assoc_name
+                case _:
+                    pass
+            kind = HirTypeKind.Projection(self.lower_type(pbase), passoc)
+        else:
+            # Infer / Atomic / Isolated / Error and any unrecognized disc.
+            kind = HirTypeKind.Infer(0, 0)
 
         HirType(kind: kind, span: lt.span)
+
+    me lower_named_kind(name: text, hir_args: [HirType], span: Span) -> HirTypeKind:
+        match name:
+            case "i8": HirTypeKind.Int(8, true)
+            case "i16": HirTypeKind.Int(16, true)
+            case "i32": HirTypeKind.Int(32, true)
+            case "i64": HirTypeKind.Int(64, true)
+            case "u8": HirTypeKind.Int(8, false)
+            case "u16": HirTypeKind.Int(16, false)
+            case "u32": HirTypeKind.Int(32, false)
+            case "u64": HirTypeKind.Int(64, false)
+            case "f32": HirTypeKind.Float(32)
+            case "f64": HirTypeKind.Float(64)
+            case "bool": HirTypeKind.Bool
+            case "char": HirTypeKind.Char
+            case "text" | "str" | "String": HirTypeKind.Str
+            case "Result":
+                if hir_args.len() == 2:
+                    HirTypeKind.Result(hir_args[0], hir_args[1])
+                else:
+                    self.error("Result type expects 2 type arguments", span)
+                    HirTypeKind.Error
+            case _:
+                val symbol_id = self.symbols.lookup_or_invalid(name)
+                if symbol_id.is_valid():
+                    if custom_primitive_is_name(name):
+                        custom_primitive_bind_symbol(name, symbol_id.id)
+                    HirTypeKind.Named(symbol_id, hir_args)
+                else:
+                    self.error("unresolved type: {name}", span)
+                    HirTypeKind.Error
 
     me lower_type_list(types: [Type]) -> [HirType]:
         var result: [HirType] = []

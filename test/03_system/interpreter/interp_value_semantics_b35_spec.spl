@@ -10,10 +10,10 @@
 ## type-registry same-name collision hazard (two modules defining the same
 ## struct name corrupt each other's runtime type registry).
 ##
-## STATUS: 11 cases pass; 1 case is marked `pending(...)` because it documents a
-## KNOWN BUG (direct field mutation of a struct PARAMETER leaks to the caller).
-## See the comment on that case for the root cause; remove the `pending(...)`
-## line and restore the leak assertion when the bug is fixed.
+## STATUS: all cases pass. The former KNOWN BUG (direct field mutation of a
+## struct PARAMETER leaking to the caller) was fixed in task #91: the seed
+## interpreter tags struct-derived ClassDefs with `is_value_type` and excludes
+## value-type struct params from the Bug #19 mutable-param write-back.
 
 struct SemPointB35:
     x: i32
@@ -75,35 +75,19 @@ fn holder_mutate_nested_b35(h: SemHolderB35):
     h.bump_inner(321)
 
 describe "Task 35B - struct value semantics on parameter passing":
-    it "struct: mut-param direct field mutation callee-view (KNOWN BUG: leaks)":
+    it "struct: mut-param direct field mutation does NOT leak to caller":
         # The callee's OWN view is correct: it observes 999.
         var orig = SemPointB35(x: 1, y: 2)
         val r = struct_mut_param_direct_b35(orig)
         expect(r).to_equal(999)
         #
-        # KNOWN BUG (task #35 track B): the assertion
-        #     expect(orig.x).to_equal(1)
-        # currently FAILS — orig.x becomes 999. Direct field mutation of a
-        # struct that was passed as a parameter LEAKS back to the caller;
-        # struct value semantics are NOT enforced on parameter passing.
-        #
-        # Root cause: the interpreter that runs `bin/simple test` is the Rust
-        # seed (`src/compiler_rust`), NOT any pure-Simple interpreter — the
-        # pure-Simple `70.backend` interpreter cannot even construct structs and
-        # `_cli_driver_binary()` delegates `run` to `simple_seed`. In the seed,
-        # structs and classes share ONE representation:
-        # `Value::Object { class, fields: Arc<HashMap> }` (value.rs:918) — no
-        # value-type/reference distinction at the Value level. `arg_binding.rs`
-        # clones the `Arc` on param bind (shares the field map), so a struct
-        # param's field write mutates the caller's storage. Assignment
-        # (`var b = a`) deep-copies, which is why every copy-based case passes.
-        #
-        # Not fixable in pure-Simple `.spl` today (no pure-Simple interpreter is
-        # on the CLI run path). A real fix needs the seed to distinguish struct
-        # vs class kind and deep-copy struct values on param bind + a seed
-        # rebuild, which conflicts with the "fix .spl not Rust / seed is
-        # bootstrap-only" rule and needs explicit authorization.
-        pending("struct param field mutation leaks to caller: seed arg_binding shares the Arc<HashMap> field map instead of deep-copying value-type structs")
+        # Fixed (task #91): structs are VALUE types, so a direct field mutation
+        # of a struct PARAMETER must NOT leak back to the caller. The seed
+        # interpreter now tags struct-derived ClassDefs with `is_value_type` and
+        # excludes value-type struct params from the Bug #19 mutable-param
+        # write-back (exec_function_inner). Classes keep reference semantics.
+        expect(orig.x).to_equal(1)
+        expect(orig.y).to_equal(2)
 
     it "struct: mutating a local copy does not leak to the caller":
         var orig = SemPointB35(x: 1, y: 2)
