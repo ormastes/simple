@@ -1,7 +1,7 @@
 # RV32 no-alloc NVMe firmware logic reference.
 #
 # Scalar-only: no arrays, no heap, no strings in the logic path. Host and bare-metal entries share
-# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue + admin/format/fw-log + reactor + policy/target + DRAM/durability + wear/scrub + media-retire floor.
+# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue + admin/format/fw-log + reactor + policy/target + DRAM/durability + wear/scrub + media-retire + power-cycle floor.
 
 fn rv32_rain_selftest() -> i64:
     val d0 = 256
@@ -1470,5 +1470,49 @@ fn rv32_media_retire_selftest() -> i64:
         fail = fail + 1
     fail
 
+fn rv32_power_cycle_selftest() -> i64:
+    # Scalar controller floor: SMART unsafe shutdowns follow dirty media state and VWC policy.
+    var fail = 0
+    var power_cycles = 0
+    var unsafe_shutdowns = 0
+    var dirty_since_checkpoint = 0
+    var volatile_wc = 1
+    var lba12 = 0
+
+    dirty_since_checkpoint = 1
+    dirty_since_checkpoint = 0
+    power_cycles = power_cycles + 1
+    if dirty_since_checkpoint == 1:
+        unsafe_shutdowns = unsafe_shutdowns + 1
+    if power_cycles != 1 or unsafe_shutdowns != 0:
+        fail = fail + 1
+
+    dirty_since_checkpoint = 1
+    lba12 = 0x5A
+    power_cycles = power_cycles + 1
+    if dirty_since_checkpoint == 1:
+        unsafe_shutdowns = unsafe_shutdowns + 1
+    dirty_since_checkpoint = 0
+    if power_cycles != 2 or unsafe_shutdowns != 1 or lba12 != 0x5A:
+        fail = fail + 1
+
+    volatile_wc = 0
+    dirty_since_checkpoint = 1
+    if volatile_wc == 0:
+        dirty_since_checkpoint = 0
+    power_cycles = power_cycles + 1
+    if dirty_since_checkpoint == 1:
+        unsafe_shutdowns = unsafe_shutdowns + 1
+    if power_cycles != 3 or unsafe_shutdowns != 1:
+        fail = fail + 1
+
+    power_cycles = -3
+    unsafe_shutdowns = -1
+    if rv32_admin_smart_nonnegative(power_cycles) != 0:
+        fail = fail + 1
+    if rv32_admin_smart_nonnegative(unsafe_shutdowns) != 0:
+        fail = fail + 1
+    fail
+
 fn nvme_fw_rv32_logic_selftest() -> i64:
-    rv32_rain_selftest() + rv32_ecc_selftest() + rv32_journal_selftest() + rv32_map_selftest() + rv32_band_selftest() + rv32_sched_selftest() + rv32_pt_selftest() + rv32_hil_selftest() + rv32_admin_selftest() + rv32_reactor_selftest() + rv32_policy_target_selftest() + rv32_dram_durability_selftest() + rv32_wear_scrub_selftest() + rv32_media_retire_selftest()
+    rv32_rain_selftest() + rv32_ecc_selftest() + rv32_journal_selftest() + rv32_map_selftest() + rv32_band_selftest() + rv32_sched_selftest() + rv32_pt_selftest() + rv32_hil_selftest() + rv32_admin_selftest() + rv32_reactor_selftest() + rv32_policy_target_selftest() + rv32_dram_durability_selftest() + rv32_wear_scrub_selftest() + rv32_media_retire_selftest() + rv32_power_cycle_selftest()

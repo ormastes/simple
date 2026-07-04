@@ -54,7 +54,7 @@ the firmware":
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
 | P8 | `rain` | `ftl` (writes/GC/format maintain parity; `rain_recover_channel` rebuilds a failed channel inside the live FTL, verified end-to-end through the normal read path) | **wired** |
 | P2 | `fil_scheduler` | `fil.spl` (every valid program/read/erase queues the target block through the scheduler before the FMC command) | **wired timing floor** — channel-level parallelism is still a model the single-threaded sim cannot physically exhibit |
-| P9 | `fw_rv32/entry.spl` | bare-metal rv32 ISA reference (re-expresses RAIN, ECC, fixed scheduler, fixed power/thermal, fixed map-cache, fixed band, fixed journal-ring, fixed HIL, fixed admin/format/fw-log, fixed reactor, fixed policy/target, fixed DRAM/durability, fixed wear/scrub, and fixed media-retire floors array-free; `check`-clean + host-verified) | reference wired through rv32 boot hook; full 22-module no-alloc firmware port remains the ceiling |
+| P9 | `fw_rv32/entry.spl` | bare-metal rv32 ISA reference (re-expresses RAIN, ECC, fixed scheduler, fixed power/thermal, fixed map-cache, fixed band, fixed journal-ring, fixed HIL, fixed admin/format/fw-log, fixed reactor, fixed policy/target, fixed DRAM/durability, fixed wear/scrub, fixed media-retire, and fixed power-cycle floors array-free; `check`-clean + host-verified) | reference wired through rv32 boot hook; full 22-module no-alloc firmware port remains the ceiling |
 
 Adding more standalone modules (full P4 HostMem/PRP lists, full P5 DRAM refresh/ECC/bandwidth, multicore P6 beyond the cooperative token, or full BCH/LDPC beyond the P3 floor) widens the shelf without closing the gap. Prefer
 wiring an existing verified module into the live path over landing a new disconnected one.
@@ -322,7 +322,7 @@ whole-unit erasure.
 > **Status (2026-07-04).** The rv32 toolchain/OS boot blocker has been reduced: the rv32 OS boot
 > path builds/boots in the current lane, and `examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl`
 > is a `check`-clean, host-verified, array-free scalar reference for the Lean-proven RAIN
-> reconstruction, SECDED ECC floor, fixed scheduler floor, fixed power/thermal floor, fixed map-cache floor, fixed band floor, fixed journal-ring floor, fixed HIL command/queue floor, fixed admin/format/fw-log floor, fixed reactor floor, fixed policy/target floor, fixed DRAM/durability floor, fixed wear/scrub floor, and fixed media-retire floor, wired through the optional rv32 boot hook. That is useful P9 evidence, not the full firmware port. The full 22-module
+> reconstruction, SECDED ECC floor, fixed scheduler floor, fixed power/thermal floor, fixed map-cache floor, fixed band floor, fixed journal-ring floor, fixed HIL command/queue floor, fixed admin/format/fw-log floor, fixed reactor floor, fixed policy/target floor, fixed DRAM/durability floor, fixed wear/scrub floor, fixed media-retire floor, and fixed power-cycle floor, wired through the optional rv32 boot hook. That is useful P9 evidence, not the full firmware port. The full 22-module
 > no-alloc firmware (`ftl_fill`/dict-map/journal-ring -> fixed-capacity) still has to be wired into
 > the rv32 boot path and observed printing `ALL RV32 NVME FW CHECKS PASS` before P9 is complete.
 
