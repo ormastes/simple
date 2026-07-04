@@ -90,41 +90,90 @@ fn _setup_prob_data() -> Sheet:
 
 # =========================================================================
 # LINEST Tests
+#
+# NOTE (bug: formula_regression_spec_orphan_it_2026-07-04.md): every `it` in
+# this file used to be a TOP-LEVEL `it` outside any `describe` -- the test
+# runner silently ignores those (see writing_calc_functions.md quirk
+# ledger), so none of the 24 pre-existing cases in this file actually ran;
+# the whole-file summary just reported "Passed: 1" (file load only). Wrapped
+# the LINEST section (directly gating this batch's work) in a real
+# `describe` so these assertions execute. TREND/GROWTH/PROB/RANDARRAY below
+# are still orphaned -- out of scope for this batch, flagged in the bug doc.
 # =========================================================================
 
-it "LINEST: basic slope and intercept":
-    var sh = _setup_linest_data()
-    sh.set_value("D1", "=LINEST(A1:A5, B1:B5)")
-    sh = recalculate_formula_cells(sh)
-    val slope = cell_display_text(sh.get_cell("D1"))
-    val intercept = cell_display_text(sh.get_cell("E1"))
-    expect(slope).to_start_with("2.3")
-    expect(intercept).to_start_with("0.5")
+describe "LINEST":
+    it "LINEST: basic slope and intercept":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5, B1:B5)")
+        sh = recalculate_formula_cells(sh)
+        val slope = cell_display_text(sh.get_cell("D1"))
+        val intercept = cell_display_text(sh.get_cell("E1"))
+        expect(slope).to_start_with("2.3")
+        expect(intercept).to_start_with("0.5")
 
-it "LINEST: omitted known_xs defaults to 1..n":
-    var sh = _setup_linest_data()
-    sh.set_value("D1", "=LINEST(A1:A5)")
-    sh = recalculate_formula_cells(sh)
-    val slope = cell_display_text(sh.get_cell("D1"))
-    val intercept = cell_display_text(sh.get_cell("E1"))
-    expect(slope).to_start_with("2.3")
-    expect(intercept).to_start_with("0.5")
+    it "LINEST: omitted known_xs defaults to 1..n":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5)")
+        sh = recalculate_formula_cells(sh)
+        val slope = cell_display_text(sh.get_cell("D1"))
+        val intercept = cell_display_text(sh.get_cell("E1"))
+        expect(slope).to_start_with("2.3")
+        expect(intercept).to_start_with("0.5")
 
-it "LINEST: mismatched ranges returns empty":
-    var sh = _setup_linest_data()
-    sh.set_value("D1", "=LINEST(A1:A5, B1:B3)")
-    sh = recalculate_formula_cells(sh)
-    val result = cell_display_text(sh.get_cell("D1"))
-    expect(result).to_contain("#ERR")
+    it "LINEST: mismatched ranges returns empty":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5, B1:B3)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
 
-it "LINEST: n<2 returns empty":
-    var sh = Sheet.new("f")
-    sh.set_value("A1", "5")
-    sh.set_value("B1", "1")
-    sh.set_value("D1", "=LINEST(A1, B1)")
-    sh = recalculate_formula_cells(sh)
-    val result = cell_display_text(sh.get_cell("D1"))
-    expect(result).to_contain("#ERR")
+    it "LINEST: n<2 returns empty":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "5")
+        sh.set_value("B1", "1")
+        sh.set_value("D1", "=LINEST(A1, B1)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+    it "LINEST: 2-arg form stays a single row (no stats requested)":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5, B1:B5)")
+        sh = recalculate_formula_cells(sh)
+        val row2_slope_col = cell_display_text(sh.get_cell("D2"))
+        expect(row2_slope_col).to_equal("")
+
+    it "LINEST: 3-arg form (const) stays a single row":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5, B1:B5, TRUE)")
+        sh = recalculate_formula_cells(sh)
+        val slope = cell_display_text(sh.get_cell("D1"))
+        val intercept = cell_display_text(sh.get_cell("E1"))
+        val row2 = cell_display_text(sh.get_cell("D2"))
+        expect(slope).to_start_with("2.3")
+        expect(intercept).to_start_with("0.5")
+        expect(row2).to_equal("")
+
+    it "LINEST: stats=TRUE spills the 3-row form with hand-verified stats":
+        # x=1..5, y=[3,5,7,10,12]; hand anchors (doc-verified, see
+        # writing_calc_functions.md ground-truth discipline):
+        #   se_y=0.3162278, se_slope=0.1, se_intercept=0.331662,
+        #   r2=0.9943609
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5, B1:B5, TRUE, TRUE)")
+        sh = recalculate_formula_cells(sh)
+        val slope = cell_display_text(sh.get_cell("D1"))
+        val intercept = cell_display_text(sh.get_cell("E1"))
+        val se_slope = cell_display_text(sh.get_cell("D2"))
+        val se_intercept = cell_display_text(sh.get_cell("E2"))
+        val r2 = cell_display_text(sh.get_cell("D3"))
+        val se_y = cell_display_text(sh.get_cell("E3"))
+        expect(slope).to_start_with("2.3")
+        expect(intercept).to_start_with("0.5")
+        expect(se_slope).to_start_with("0.1")
+        expect(se_intercept).to_start_with("0.331662")
+        expect(r2).to_start_with("0.994360")
+        expect(se_y).to_start_with("0.316227")
 
 # =========================================================================
 # TREND Tests
