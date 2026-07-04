@@ -8,45 +8,47 @@
 - executable_launch_from_fs: pass
 - ssh_shell_smf_and_exec: pass
 - formal_lean_proofs: pass
-- formal_lean_proofs_log: build/simpleos_hardening_evidence_matrix_current/lean_proofs.log
+- formal_lean_proofs_log: build/simpleos_hardening_evidence_matrix_byl_sby/lean_proofs.log
 - formal_riscv_dual_track: pass
-- formal_riscv_dual_track_log: build/simpleos_hardening_evidence_matrix_current/riscv_formal_dual_track.log
+- formal_riscv_dual_track_log: build/simpleos_hardening_evidence_matrix_byl_sby/riscv_formal_dual_track.log
 - formal_critical_concurrency: pass
-- formal_critical_concurrency_log: build/simpleos_hardening_evidence_matrix_current/critical_concurrency_formal.log
+- formal_critical_concurrency_log: build/simpleos_hardening_evidence_matrix_byl_sby/critical_concurrency_formal.log
 - formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs
 - formal_critical_concurrency_scope: Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities
 - formal_critical_concurrency_evidence: resource_acquire/release capacity, work stealing, task completion idempotence, bounded-channel backpressure, closed-channel wakeup, DRF race constraints, kernel capability default-deny, memory capability unique/shared write constraints
 - formal_memory_safety: pass
-- formal_memory_safety_log: build/simpleos_hardening_evidence_matrix_current/memory_safety_formal.log
+- formal_memory_safety_log: build/simpleos_hardening_evidence_matrix_byl_sby/memory_safety_formal.log
 - formal_memory_safety_gate: scripts/check/check-simpleos-memory-safety-formal-proofs.shs
 - formal_memory_safety_scope: Lean model gate: gc_reachability, gc_boundary, gc_manual_borrow, manual_pointer_borrow, nogc_compile
 - formal_memory_safety_evidence: mark/sweep reachability invariant, no dangling after sweep, no-GC boundary rejection, alias counterexample, borrowed object liveness, manual pointer exclusive/shared borrow constraints, no-GC compile rejection for GC allocation
 - formal_storage_integrity: pass
-- formal_storage_integrity_log: build/simpleos_hardening_evidence_matrix_current/storage_integrity_formal.log
+- formal_storage_integrity_log: build/simpleos_hardening_evidence_matrix_byl_sby/storage_integrity_formal.log
 - formal_storage_integrity_gate: scripts/check/check-simpleos-storage-formal-proofs.shs
 - formal_storage_integrity_scope: Lean model gate: db_storage, fat32, formal/nvfs
 - formal_storage_integrity_evidence: WAL-before-data and publish-root flush requirements, MVCC snapshot/recovery completeness, FAT32 chain/LBA/free-chain invariants, NVFS arena/pmap/WAL/checkpoint preservation and crash refinement
 - formal_boundary_integrity: pass
-- formal_boundary_integrity_log: build/simpleos_hardening_evidence_matrix_current/boundary_integrity_formal.log
+- formal_boundary_integrity_log: build/simpleos_hardening_evidence_matrix_byl_sby/boundary_integrity_formal.log
 - formal_boundary_integrity_gate: scripts/check/check-simpleos-boundary-formal-proofs.shs
 - formal_boundary_integrity_scope: Lean model gate: ffi_contract, process_lifecycle, tls_isolation
 - formal_boundary_integrity_evidence: FFI rejects undefined/null calls and unsafe untagging, process lifecycle prevents double reap and persistent zombies, TLS reads remain thread/key isolated with commuting independent writes
 - formal_compiler_language: pass
-- formal_compiler_language_log: build/simpleos_hardening_evidence_matrix_current/compiler_language_formal.log
+- formal_compiler_language_log: build/simpleos_hardening_evidence_matrix_byl_sby/compiler_language_formal.log
 - formal_compiler_language_gate: scripts/check/check-simpleos-compiler-language-formal-proofs.shs
 - formal_compiler_language_scope: Lean model gate: module_resolution, macro_auto_import, type_inference_compile, type_value_semantics, visibility_export
 - formal_compiler_language_evidence: module resolution ambiguity/exists rules, macro auto-import leakage guards, deterministic type inference and async effect rules, contract/generic constraints, class alias versus struct copy semantics, private visibility propagation
 - formal_ui_policy: pass
-- formal_ui_policy_log: build/simpleos_hardening_evidence_matrix_current/ui_policy_formal.log
+- formal_ui_policy_log: build/simpleos_hardening_evidence_matrix_byl_sby/ui_policy_formal.log
 - formal_ui_policy_gate: scripts/check/check-simpleos-ui-policy-formal-proofs.shs
 - formal_ui_policy_scope: Lean model gate: ui_compositor
 - formal_ui_policy_evidence: damage merge covers both inputs, clip output stays inside both bounds, z-sort and stacking-context sort preserve all windows/surfaces, z-order renormalisation preserves relative order, recursive paint-order flatten keeps every surface exactly once
 - formal_coverage: pass
-- formal_coverage_log: build/simpleos_hardening_evidence_matrix_current/formal_coverage.log
+- formal_coverage_log: build/simpleos_hardening_evidence_matrix_byl_sby/formal_coverage.log
 - formal_coverage_gate: scripts/check/check-simpleos-formal-coverage.shs
 - formal_coverage_scope: Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, compiler/language, and UI policy
 - formal_coverage_evidence: all SimpleOS hardening formal rows have executable wrapper gates and matrix gate/scope fields; aggregate coverage cannot pass by status-only derivation
 - byl_sby_artifact_audit: pass
+- byl_sby_artifact_audit_log: build/simpleos_hardening_evidence_matrix_byl_sby/byl_sby_artifact_audit.log
+- byl_sby_artifact_audit_gate: scripts/check/check-simpleos-byl-sby-artifacts.shs
 - byl_sby_artifact_audit_scope: checked-in non-Lean formal artifacts consist of the RISC-V BYL surface; generated SBY/RVFI artifacts are validated by the RISC-V sidecar contract and remain readiness evidence, not an RTL proof pass
 - byl_sby_artifact_audit_evidence: src/verification/riscv_product/riscv_product.byl plus sh scripts/check/check-riscv-formal-dual-track.shs
 - riscv_rtl_rvfi_readiness_note: RISC-V generated RTL bundles pass RVFI port, formal harness, SBY, and manifest artifact checks through scripts/check/check-riscv-fpga-sidecar-contract.shs; without an installed sby runner this is RVFI/SymbiYosys readiness evidence, not an RTL proof pass
@@ -103,6 +105,27 @@
 - gui_entry_latest_dir: build/tmp/gui_entry_engine2d_wm_simple_web_spec_1958348_1783145478496067
 - gui_entry_capture_ppm_bytes: 2359312
 - gui_entry_capture_raw_bytes: 3145728
+- formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs
+- formal_critical_concurrency_scope: Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities
+- formal_critical_concurrency_evidence: resource_acquire/release capacity, work stealing, task completion idempotence, bounded-channel backpressure, closed-channel wakeup, DRF race constraints, kernel capability default-deny, memory capability unique/shared write constraints
+- formal_memory_safety_gate: scripts/check/check-simpleos-memory-safety-formal-proofs.shs
+- formal_memory_safety_scope: Lean model gate: gc_reachability, gc_boundary, gc_manual_borrow, manual_pointer_borrow, nogc_compile
+- formal_memory_safety_evidence: mark/sweep reachability invariant, no dangling after sweep, no-GC boundary rejection, alias counterexample, borrowed object liveness, manual pointer exclusive/shared borrow constraints, no-GC compile rejection for GC allocation
+- formal_storage_integrity_gate: scripts/check/check-simpleos-storage-formal-proofs.shs
+- formal_storage_integrity_scope: Lean model gate: db_storage, fat32, formal/nvfs
+- formal_storage_integrity_evidence: WAL-before-data and publish-root flush requirements, MVCC snapshot/recovery completeness, FAT32 chain/LBA/free-chain invariants, NVFS arena/pmap/WAL/checkpoint preservation and crash refinement
+- formal_boundary_integrity_gate: scripts/check/check-simpleos-boundary-formal-proofs.shs
+- formal_boundary_integrity_scope: Lean model gate: ffi_contract, process_lifecycle, tls_isolation
+- formal_boundary_integrity_evidence: FFI rejects undefined/null calls and unsafe untagging, process lifecycle prevents double reap and persistent zombies, TLS reads remain thread/key isolated with commuting independent writes
+- formal_compiler_language_gate: scripts/check/check-simpleos-compiler-language-formal-proofs.shs
+- formal_compiler_language_scope: Lean model gate: module_resolution, macro_auto_import, type_inference_compile, type_value_semantics, visibility_export
+- formal_compiler_language_evidence: module resolution ambiguity/exists rules, macro auto-import leakage guards, deterministic type inference and async effect rules, contract/generic constraints, class alias versus struct copy semantics, private visibility propagation
+- formal_ui_policy_gate: scripts/check/check-simpleos-ui-policy-formal-proofs.shs
+- formal_ui_policy_scope: Lean model gate: ui_compositor
+- formal_ui_policy_evidence: damage merge covers both inputs, clip output stays inside both bounds, z-sort and stacking-context sort preserve all windows/surfaces, z-order renormalisation preserves relative order, recursive paint-order flatten keeps every surface exactly once
+- formal_coverage_gate: scripts/check/check-simpleos-formal-coverage.shs
+- formal_coverage_scope: Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, compiler/language, and UI policy
+- formal_coverage_evidence: all SimpleOS hardening formal rows have executable wrapper gates and matrix gate/scope fields; aggregate coverage cannot pass by status-only derivation
 - formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs
 - formal_critical_concurrency_scope: Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities
 - formal_critical_concurrency_evidence: resource_acquire/release capacity, work stealing, task completion idempotence, bounded-channel backpressure, closed-channel wakeup, DRF race constraints, kernel capability default-deny, memory capability unique/shared write constraints

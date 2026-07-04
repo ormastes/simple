@@ -283,7 +283,7 @@ be mistaken for a completed RTL proof pass.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 76 lines folded for reproduction.
+Runnable source: 78 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -321,6 +321,8 @@ expect(stdout).to_contain("simpleos_hardening_formal_ui_policy_scope=Lean model 
 expect(stdout).to_contain("simpleos_hardening_formal_coverage_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_coverage_gate=scripts/check/check-simpleos-formal-coverage.shs")
 expect(stdout).to_contain("simpleos_hardening_formal_coverage_scope=Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, compiler/language, and UI policy")
+expect(stdout).to_contain("simpleos_hardening_byl_sby_artifact_audit_status=pass")
+expect(stdout).to_contain("simpleos_hardening_byl_sby_artifact_audit_gate=scripts/check/check-simpleos-byl-sby-artifacts.shs")
 expect(stdout).to_contain("simpleos_hardening_shared_wm_status=pass")
 expect(stdout).to_contain("simpleos_hardening_cpu_simd_status=pass")
 expect(stdout).to_contain("simpleos_hardening_llvm_port_status=pass")
@@ -356,6 +358,7 @@ expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_ppm_bytes=235931
 expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_raw_bytes=3145728")
 val report = file_read(_report_path(run_id))
 expect(report).to_contain("- byl_sby_artifact_audit: pass")
+expect(report).to_contain("- byl_sby_artifact_audit_gate: scripts/check/check-simpleos-byl-sby-artifacts.shs")
 expect(report).to_contain("RISC-V generated RTL bundles pass RVFI port")
 expect(report).to_contain("readiness evidence, not an RTL proof pass")
 expect(report).to_contain("- formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs")
