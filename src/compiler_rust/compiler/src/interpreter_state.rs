@@ -41,6 +41,27 @@ pub struct LiteralFunctionInfo {
     pub body: Block,
 }
 
+/// Synthetic attribute-name prefix used to carry a flattened function's true
+/// owning-module path *inside the AST node itself*, from import-flatten time
+/// (`pipeline::module_loader::strip_flattened_import_nodes`) to interpreter
+/// registration (`interpreter_eval.rs`).
+///
+/// Why an attribute and not a span/side-table: the `bin/simple run`/`-c` path
+/// splices every imported module's top-level items into one combined
+/// `Vec<Node>` *before* the interpreter runs, so registration sees a fresh
+/// `FunctionDef` value with no idea which file it came from. A side-table keyed
+/// by `(name, span.line, span.column)` collides whenever two files define a
+/// same-named function at the same line/column (identical file layout), which
+/// would silently mis-resolve. `FunctionDef.attributes` is a `Vec<Attribute>`
+/// that travels *with* the node value and survives the `f.clone()` registration
+/// does, so encoding `"<prefix><module-path>"` as a synthetic attribute name is
+/// collision-proof (each node carries its own owner) and needs no new AST field
+/// (52 construction sites) or parser change. The prefix is deliberately
+/// non-source-legal so it can never clash with a user attribute; it is only
+/// ever present in the in-memory flattened AST during a run, never in source,
+/// so the lint "unknown attribute" check never sees it.
+pub(crate) const FLATTEN_MODULE_OWNER_ATTR_PREFIX: &str = "__simple_flatten_module_owner__=";
+
 //==============================================================================
 // Thread-local state declarations
 //==============================================================================
@@ -203,6 +224,27 @@ thread_local! {
     /// This keeps all duplicate definitions so runtime dispatch can choose the
     /// correct overload instead of relying on the flat function map.
     pub(crate) static FUNCTION_OVERLOADS: RefCell<HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>> = RefCell::new(HashMap::new());
+
+    /// Maps a registered `FunctionDef`'s identity (its `Arc` allocation address,
+    /// stable across `Arc::clone`) to the module it was registered from (a
+    /// source-file path string for imported modules, or a fixed sentinel for
+    /// the entry/root module). `FunctionDef` carries no module field of its own
+    /// (only a `Span` with line/col) — see the same-name zero-arg overload
+    /// collision writeup — so this is a companion side-table populated
+    /// alongside `FUNCTION_OVERLOADS` at each registration site instead of
+    /// threading a new AST field through parsing/serialization. Consulted only
+    /// to break ties in `select_overload` when multiple same-name candidates
+    /// score equally; absent entries fall back to the pre-existing
+    /// first-registered tie-break unchanged.
+    pub(crate) static FUNCTION_MODULE_OWNER: RefCell<HashMap<usize, Arc<str>>> = RefCell::new(HashMap::new());
+
+    /// Module of the function whose body is *currently executing* (innermost
+    /// call frame), set/restored around `execute_function_body`. Used with
+    /// `FUNCTION_MODULE_OWNER` so an unqualified call that ties can prefer the
+    /// candidate defined in the calling function's own module. `None` when no
+    /// owner is known for the running function (e.g. lambdas), in which case
+    /// the previous frame's value is left untouched rather than cleared.
+    pub(crate) static CURRENT_EXEC_MODULE: RefCell<Option<Arc<str>>> = const { RefCell::new(None) };
 
     /// Interpreted struct/class overload registry keyed by source-level type name.
     /// The flat `classes` map is keyed by bare name (last-write-wins), so two

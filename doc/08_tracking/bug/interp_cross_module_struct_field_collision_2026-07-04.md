@@ -368,3 +368,53 @@ seed diff + a targeted 2-module-same-name regression spec, (5) rebuild + deploy
 `bin/release` (the hazardous swap — coordinate with parallel sessions). Until
 then the source-level `default_style` rename workaround above keeps CARD 16's
 GUI repro unblocked.
+
+## 2026-07-04 — Hardening pass DONE; source LANDED (inert until rebuild); only deploy remains
+
+Steps (1)(2)(3)(4-source) above are now DONE (isolated worktree branch
+`worktree-agent-aa278f276edfdc49d`, commits `b8672cfbce2` + `67259836cc7`), and
+the seed source is LANDED on main (inert until the next seed rebuild). Only the
+rebuild + `bin/release` DEPLOY (step 5, the hazardous shared-binary swap) and a
+release-build re-confirm of the heavy renderer spec remain — deferred, same
+hazard class as CARD 6.
+
+- **(1) Edge case CLOSED — collision-proof by construction.** Approaches (a)/(b)
+  were impossible (flatten holds `Node::Function` BY VALUE — no Arc — and mints a
+  fresh `Arc::new(f.clone())` at registration; registration doesn't know its
+  module). Solution (c'): the flattener pushes a SYNTHETIC ATTRIBUTE
+  (`FLATTEN_MODULE_OWNER_ATTR_PREFIX` + module_path) onto each flattened
+  `FunctionDef`; the attribute travels WITH the node value and survives the
+  clone, so registration reads the exact per-node owner. The unsound
+  `(name,line,col)` side-table is DELETED. Proof the old key was unsound: a trace
+  showed two byte-identical-layout files yield IDENTICAL spans for `fn thing()`
+  (`line=3 col=1 start=24 end=65`). Honest caveat: a parallel `register_
+  definitions` path also assigns owners by Arc-identity and currently MASKS the
+  collision in minimal repros, so a live minimal pre-hardening mis-resolution
+  couldn't be exhibited — the real office/browser `default_style` collision is
+  the live evidence; the attribute fix removes the unsound key as defense-in-depth
+  regardless.
+- **(2) Rust regression GREEN — 0 new failures.** E0063 fixed via
+  `is_value_type: false` in the 3 test-cfg ClassDefs (context_pack.rs,
+  interpreter_module/module_loader.rs, mcp.rs). `cargo test -p simple-compiler
+  --lib` = 2860 pass / 234 fail; the 234 fail-set is BYTE-IDENTICAL to baseline
+  (b8672 + only the E0063 fixes) → this fix introduces ZERO regressions. The 234
+  are pre-existing env/WIP-seed failures (codegen/mir/pipeline/native/std-io,
+  e.g. missing `examples/ui/web_wm.spl`).
+- **(3) Specs.** Overload/dispatch/module-resolver green (static_method_overload
+  4/4, module_resolver_1/2/3, cross_module_trait_default_dispatch,
+  trait_static_dispatch); browser_engine green (html_renderer, selector_matcher,
+  paint_image_scene, engine2d_backend_resolver). `simple_web_renderer_spec` (79
+  ex) hits the test-runner daemon timeout on the DEBUG/unoptimized binary
+  (never completed pre-change either — debug perf, not a regression); re-confirm
+  on a release build during the deploy pass.
+- **Orthogonal bug (file when deploying):** the DEFAULT JIT/native path
+  memory-corrupts (`<invalid-heap:...>`) on the same same-name/different-struct
+  pattern, identical pre/post-fix — separate JIT/native-codegen issue.
+
+**BOTH residuals now converge on ONE deferred action.** CARD 16's fix and CARD 6's
+raw-mode extern are both SEED changes that only take effect after a seed
+bootstrap rebuild + `bin/release` deploy. That single, hazardous-in-a-shared-WC
+step (it replaces the binary every parallel session uses) is the only thing left
+for BOTH — do them together in a coordinated deploy window, with the release-build
+renderer re-confirm. The CARD 16 source is already in-tree and regression-clean;
+the CARD 6 externs are already declared (interactive.spl:333).

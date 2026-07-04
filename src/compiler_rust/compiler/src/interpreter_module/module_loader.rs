@@ -1593,6 +1593,7 @@ export register_wiki_tool
             invariant: None,
             macro_invocations: vec![],
             mixins: vec![],
+            is_value_type: false,
         });
         let requested = vec!["compile_file".to_string()];
         assert!(should_keep_selective_export(&node, &requested));

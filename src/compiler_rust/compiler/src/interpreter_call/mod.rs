@@ -24,7 +24,7 @@ use std::io::Write;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
-    FUNCTION_OVERLOADS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, BITFIELDS,
+    FUNCTION_OVERLOADS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, BITFIELDS, CURRENT_EXEC_MODULE, FUNCTION_MODULE_OWNER,
 };
 use crate::interpreter::module_cache::MODULE_CLASSES_CACHE;
 use crate::runtime_profile;
@@ -113,12 +113,53 @@ fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
     Some(score)
 }
 
+/// Identity-keyed lookup into `FUNCTION_MODULE_OWNER` (see its doc comment):
+/// `None` when this candidate's owning module was never recorded (e.g. a
+/// struct's mangled static-method overload registration doesn't tag one).
+fn function_module_owner(func: &Arc<FunctionDef>) -> Option<Arc<str>> {
+    let key = Arc::as_ptr(func) as usize;
+    FUNCTION_MODULE_OWNER.with(|cell| cell.borrow().get(&key).cloned())
+}
+
+/// True when `func`'s owning module matches the module of the function whose
+/// body is currently executing. False (never preferred) when either side is
+/// unknown, so callers with no module info behave exactly as before.
+fn is_current_module_candidate(func: &Arc<FunctionDef>) -> bool {
+    let current = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
+    let owner = function_module_owner(func);
+    if debug_overload_select() {
+        println!(
+            "[module-tie] fn={} current={:?} owner={:?}",
+            func.name, current, owner
+        );
+    }
+    match (current, owner) {
+        (Some(cur), Some(owner)) => cur == owner,
+        _ => false,
+    }
+}
+
 fn select_overload(candidates: &[Arc<FunctionDef>], values: &[Value]) -> Option<Arc<FunctionDef>> {
     let mut best: Option<(usize, Arc<FunctionDef>)> = None;
     for func in candidates {
         if let Some(score) = overload_score(func, values) {
             match &best {
-                Some((best_score, _)) if *best_score >= score => {}
+                // Exact tie: keep the existing first-registered candidate
+                // UNLESS the new one is the candidate defined in the calling
+                // function's own module and the current best is not — this
+                // is the sole behavior change from the historical
+                // "keep first on tie" rule, scoped to fix the cross-module
+                // unqualified same-name/same-arity collision (see
+                // doc/08_tracking/bug/interp_cross_module_struct_field_collision_2026-07-04.md).
+                // When module ownership is unknown for either candidate,
+                // `is_current_module_candidate` is false for both and this
+                // arm is a no-op, so untagged call sites are unaffected.
+                Some((best_score, best_func)) if *best_score == score => {
+                    if !is_current_module_candidate(best_func) && is_current_module_candidate(func) {
+                        best = Some((score, Arc::clone(func)));
+                    }
+                }
+                Some((best_score, _)) if *best_score > score => {}
                 _ => best = Some((score, Arc::clone(func))),
             }
         }
