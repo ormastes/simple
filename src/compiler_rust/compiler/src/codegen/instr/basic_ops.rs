@@ -100,7 +100,28 @@ pub fn compile_cast<M: Module>(
     let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
     let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
 
-    let val = if from_ty == TypeId::STRING && (to_int_width.is_some() || is_to_float) {
+    let val = if from_ty == TypeId::STRING && to_int_width.is_some() {
+        // `int(text_expr)` (and any other integer-cast of a `text` value) used
+        // to load the first byte of the string data and use its char code as
+        // the result (e.g. int("42") == 52, the ASCII code of '4') instead of
+        // parsing the decimal digits. Task #100 — Rust-side sibling of task
+        // #94's `cranelift_codegen_adapter.spl` fix (`cl_translate_cast`):
+        // route through the same runtime parser the interpreter uses
+        // (`rt_string_to_int`, strtoll-based, returns 0 on parse failure) so
+        // int("42") == 42 instead of 52. `src_val` here is already the boxed
+        // string RuntimeValue, so no rt_string_new re-boxing is needed.
+        let string_to_int_id = ctx.runtime_funcs["rt_string_to_int"];
+        let string_to_int_ref = ctx.module.declare_func_in_func(string_to_int_id, builder.func);
+        let parse_call = adapted_call(builder, string_to_int_ref, &[src_val]);
+        let parsed_i64 = builder.inst_results(parse_call)[0];
+
+        match to_int_width {
+            Some(types::I8) => builder.ins().ireduce(types::I8, parsed_i64),
+            Some(types::I16) => builder.ins().ireduce(types::I16, parsed_i64),
+            Some(types::I32) => builder.ins().ireduce(types::I32, parsed_i64),
+            _ => parsed_i64,
+        }
+    } else if from_ty == TypeId::STRING && is_to_float {
         let string_len_id = ctx.runtime_funcs["rt_string_len"];
         let string_len_ref = ctx.module.declare_func_in_func(string_len_id, builder.func);
         let len_call = adapted_call(builder, string_len_ref, &[src_val]);
@@ -121,19 +142,10 @@ pub fn compile_cast<M: Module>(
         let widened_first_byte = builder.ins().uextend(types::I64, first_byte);
         let code_i64 = builder.ins().select(has_data, widened_first_byte, zero);
 
-        if is_to_float {
-            if to_ty == TypeId::F32 {
-                builder.ins().fcvt_from_uint(types::F32, code_i64)
-            } else {
-                builder.ins().fcvt_from_uint(types::F64, code_i64)
-            }
+        if to_ty == TypeId::F32 {
+            builder.ins().fcvt_from_uint(types::F32, code_i64)
         } else {
-            match to_int_width {
-                Some(types::I8) => builder.ins().ireduce(types::I8, code_i64),
-                Some(types::I16) => builder.ins().ireduce(types::I16, code_i64),
-                Some(types::I32) => builder.ins().ireduce(types::I32, code_i64),
-                _ => code_i64,
-            }
+            builder.ins().fcvt_from_uint(types::F64, code_i64)
         }
     } else if is_from_float && !is_to_float {
         // Float to int conversion. The HIR `from` type can disagree with the

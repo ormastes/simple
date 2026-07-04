@@ -335,7 +335,10 @@ impl NvmeController:
                     me.pt.tick(1)
                 else:
                     if cmd_is_trim(cmd):
-                        status = me.ftl.trim(cmd.lba)
+                        var i: i64 = 0
+                        while i < cmd.nblocks and status == SC_SUCCESS:
+                            status = me.ftl.trim(cmd.lba + i)
+                            i = i + 1
                         if status == SC_SUCCESS:
                             me.dirty_since_checkpoint = true
                     else:
@@ -477,6 +480,18 @@ fn nvme_controller_selftest() -> i64:
     c.io_process()
     val wzr: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(wzr.data, 0, "write-zero IO clears written LBA")
+
+    c.io_submit(1, cmd_make(110, OP_WRITE, 24, 2, prp_pack(0x71, 0x81)))
+    c.io_process()
+    c.io_reap(1)
+    c.io_submit(1, cmd_make(111, OP_DSM_TRIM, 24, 2, 0))
+    c.io_process()
+    val tr: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(tr.status, SC_SUCCESS, "multi-block trim IO completed")
+    c.io_submit(1, cmd_make(112, OP_READ, 25, 1, 0))
+    c.io_process()
+    val trr: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(trr.data, 0, "multi-block trim IO clears second LBA")
 
     c.io_submit(1, cmd_make(106, OP_WRITE, 30, WRITE_BUFFER_CAP_BLOCKS + 1, 0x70))
     c.io_process()
