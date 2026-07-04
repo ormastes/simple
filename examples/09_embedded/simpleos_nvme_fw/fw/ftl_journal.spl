@@ -46,19 +46,34 @@ fn ftl_journal_new() -> Journal:
 # ── Methods ───────────────────────────────────────────────────────────────────
 
 impl Journal:
+    me effective_count() -> i64:
+        var n: i64 = me.wal_count
+        if n < 0:
+            return 0
+        var c: i64 = me.cap
+        if c < 0:
+            return 0
+        if c > JOURNAL_CAP:
+            c = JOURNAL_CAP
+        if n > c:
+            n = c
+        if n > JOURNAL_CAP:
+            n = JOURNAL_CAP
+        n
+
     # Append a MAP_COMMIT record; returns the new wal_count.
     # NOTE(interp bug): a leading dummy _p0 (always 0) absorbs a conditional interpreter
     # defect where the FIRST param of THIS multi-param me method binds to value*8. Real
     # args start at position 2. Single-param me methods are unaffected; the clean fix for
     # new code is a single struct param (see fw/CONVENTIONS.md).
     me append(_p0: i64, map_lba: i64, old_ppn: i64, new_ppn: i64, map_seq: i64) -> i64:
-        if me.wal_count < 0:
-            return me.wal_count
-        if me.wal_count >= me.cap:
-            return me.wal_count
-        if me.wal_count >= JOURNAL_CAP:
-            return me.wal_count
-        val slot: i64 = me.wal_count
+        val count: i64 = me.effective_count()
+        me.wal_count = count
+        if count >= me.cap:
+            return count
+        if count >= JOURNAL_CAP:
+            return count
+        val slot: i64 = count
         me.wal_lba[slot] = map_lba
         me.wal_old[slot] = old_ppn
         me.wal_new[slot] = new_ppn
@@ -75,31 +90,32 @@ impl Journal:
 
     # Number of valid WAL records.
     me wal_len() -> i64:
-        me.wal_count
+        me.effective_count()
 
     # True when the WAL ring is full: a further append would be dropped. The caller
     # must checkpoint (flush durable + truncate) before appending so no record is
     # ever silently lost (and a write acked to the host whose record went missing).
     me is_full() -> bool:
-        me.wal_count >= me.cap or me.wal_count >= JOURNAL_CAP
+        val count: i64 = me.effective_count()
+        count >= me.cap or count >= JOURNAL_CAP
 
     # Accessors for WAL replay.
     me record_lba(ridx: i64) -> i64:
-        if ridx < 0 or ridx >= me.wal_count:
+        if ridx < 0 or ridx >= me.effective_count():
             return UNMAP
         if ridx >= JOURNAL_CAP:
             return UNMAP
         me.wal_lba[ridx]
 
     me record_new(ridx: i64) -> i64:
-        if ridx < 0 or ridx >= me.wal_count:
+        if ridx < 0 or ridx >= me.effective_count():
             return UNMAP
         if ridx >= JOURNAL_CAP:
             return UNMAP
         me.wal_new[ridx]
 
     me record_seq(ridx: i64) -> i64:
-        if ridx < 0 or ridx >= me.wal_count:
+        if ridx < 0 or ridx >= me.effective_count():
             return 0
         if ridx >= JOURNAL_CAP:
             return 0
@@ -114,7 +130,8 @@ impl Journal:
         var new_seq: [i64] = []
         var kept: i64 = 0
         var i: i64 = 0
-        while i < me.wal_count and i < JOURNAL_CAP:
+        val count: i64 = me.effective_count()
+        while i < count:
             if me.wal_seq[i] > me.ckpt_seq:
                 new_addr.push(me.wal_lba[i])
                 new_old.push(me.wal_old[i])
@@ -160,9 +177,22 @@ fn ftl_journal_selftest() -> i64:
     fail = fail + expect_eq(j.record_lba(-1), UNMAP, "negative WAL read fails closed")
     fail = fail + expect_eq(j.record_new(j.wal_len()), UNMAP, "past-end WAL ppn read fails closed")
     fail = fail + expect_eq(j.record_seq(j.wal_len()), 0, "past-end WAL seq read fails closed")
+    j.wal_count = -4
+    fail = fail + expect_eq(j.wal_len(), 0, "corrupt negative WAL count clamps to zero")
+    fail = fail + expect_eq(j.append(0, 199, 29, 39, 4), 1, "append recovers corrupt negative WAL count")
+    fail = fail + expect_eq(j.record_lba(0), 199, "recovered WAL append stores lba")
+    j.wal_lba[0] = 100
+    j.wal_old[0] = 10
+    j.wal_new[0] = 20
+    j.wal_seq[0] = 1
+    j.wal_count = 3
     j.wal_count = JOURNAL_CAP + 1
+    fail = fail + expect_eq(j.wal_len(), JOURNAL_CAP, "corrupt oversized WAL count clamps to cap")
     fail = fail + expect_eq(j.record_lba(JOURNAL_CAP), UNMAP, "corrupt oversized WAL count lba read fails closed")
     fail = fail + expect_eq(j.record_seq(JOURNAL_CAP), 0, "corrupt oversized WAL count seq read fails closed")
+    j.cap = -1
+    fail = fail + expect_eq(j.wal_len(), 0, "corrupt negative WAL cap clamps len to zero")
+    j.cap = JOURNAL_CAP
     j.wal_count = JOURNAL_CAP
     j.cap = JOURNAL_CAP + 1
     fail = fail + expect_eq(j.append(0, 200, 30, 40, 4), JOURNAL_CAP, "corrupt oversized WAL cap append fails closed")
