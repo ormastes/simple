@@ -12,7 +12,7 @@ selection survives an edit.
 use std.spec
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.file_formats.{recalculate_formula_cells}
-use app.office.gui.{session_new, session_select, session_edit, sheet_gui_view_with_selection, session_click, sheet_gui_cell_click_point}
+use app.office.gui.{session_new, session_select, session_edit, sheet_gui_view_with_selection, session_click, sheet_gui_cell_click_point, session_key}
 use common.ui.layout.{compute_layout, find_rect}
 
 fn _dump_contains(haystack: text, needle: text) -> bool:
@@ -40,6 +40,13 @@ fn _demo_sheet() -> Sheet:
     sheet.set_value("D3", "=B3*C3")
     sheet.set_value("D5", "=SUM(D2:D3)")
     sheet = recalculate_formula_cells(sheet)
+    sheet
+
+fn _demo_sheet_with_hidden_row() -> Sheet:
+    """Like _demo_sheet, but row 4 (blank in _demo_sheet) is hidden -- the
+    fixture for arrow-key hidden-row-skip coverage below."""
+    var sheet = _demo_sheet()
+    sheet.hide_row(4)
     sheet
 
 describe "session_select: marks the right cell":
@@ -161,3 +168,78 @@ describe "pointer selection":
         expect(after.text_dump).to_contain("[40]")
         expect(after.text_dump).to_contain("140")
         assert_false(_dump_contains(after.text_dump, "[10]"))
+
+describe "keyboard":
+    """session_key routes arrow-key grid navigation, a typed pending-input
+    buffer, and enter/escape/backspace through a thin session-level
+    translator -- see gui.spl's "Keyboard interaction" comment block for why
+    this is not routed through common.ui.event.process_event (its key
+    machinery has no 2D-grid movement and widget_dispatch_key only accepts
+    input/textfield widget kinds, never the text_widget kind sheet cells
+    use)."""
+
+    it "arrow keys move the selection one cell at a time, looping back to the start":
+        var session = session_new(_demo_sheet(), "B2")
+        session = session_key(session, "down", 5, 4)
+        expect(session.selected_ref).to_equal("B3")
+        session = session_key(session, "right", 5, 4)
+        expect(session.selected_ref).to_equal("C3")
+        session = session_key(session, "up", 5, 4)
+        expect(session.selected_ref).to_equal("C2")
+        session = session_key(session, "left", 5, 4)
+        expect(session.selected_ref).to_equal("B2")
+
+    it "arrow keys clamp at the grid's top-left edge instead of moving off-grid":
+        var session = session_new(_demo_sheet(), "A1")
+        session = session_key(session, "up", 5, 4)
+        expect(session.selected_ref).to_equal("A1")
+        session = session_key(session, "left", 5, 4)
+        expect(session.selected_ref).to_equal("A1")
+
+    it "down/up skip a hidden row instead of landing on it":
+        val hidden_sheet = _demo_sheet_with_hidden_row()
+        var session = session_new(hidden_sheet, "B3")
+        session = session_key(session, "down", 5, 4)
+        expect(session.selected_ref).to_equal("B5")
+        session = session_key(session, "up", 5, 4)
+        expect(session.selected_ref).to_equal("B3")
+
+    it "typing accumulates a pending buffer, shown as ref:buffer in the dump":
+        var session = session_new(_demo_sheet(), "B3")
+        session = session_key(session, "9", 5, 4)
+        var view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("B3:9")
+        session = session_key(session, "9", 5, 4)
+        view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("B3:99")
+        assert_false(_dump_contains(view.text_dump, "[20]"))
+
+    it "enter commits the pending buffer and recalculates dependent formula cells":
+        var session = session_new(_demo_sheet(), "B3")
+        session = session_key(session, "9", 5, 4)
+        session = session_key(session, "9", 5, 4)
+        session = session_key(session, "enter", 5, 4)
+        expect(session.pending_input).to_equal("")
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("[99]")
+        expect(view.text_dump).to_contain("297")
+        expect(view.text_dump).to_contain("317")
+        assert_false(_dump_contains(view.text_dump, "[20]"))
+
+    it "escape cancels the pending buffer without committing or changing the sheet":
+        var session = session_new(_demo_sheet(), "B3")
+        session = session_key(session, "9", 5, 4)
+        session = session_key(session, "escape", 5, 4)
+        expect(session.pending_input).to_equal("")
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("[20]")
+        assert_false(_dump_contains(view.text_dump, "B3:9"))
+
+    it "backspace trims the last character off the pending buffer":
+        var session = session_new(_demo_sheet(), "B3")
+        session = session_key(session, "9", 5, 4)
+        session = session_key(session, "9", 5, 4)
+        session = session_key(session, "backspace", 5, 4)
+        val view = sheet_gui_view_with_selection(session, 5, 4)
+        expect(view.text_dump).to_contain("B3:9")
+        assert_false(_dump_contains(view.text_dump, "B3:99"))
