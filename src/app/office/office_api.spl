@@ -46,6 +46,9 @@ use app.office.odf_export.{sheet_to_fods_formatted}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
 use app.office.erp_bridge.{erp_records_to_sheet, erp_invoice_from_sheet, default_invoice_template}
 use app.office.sheets.merge.{MergeResult, sheet_merge3, conflict_report}
+use app.office.sheets.sync.{sheet_diff, sheet_apply, ops_to_lines, lines_to_ops}
+use app.office.notes.notebook.{Notebook, notebook_new, add_page}
+use app.office.notes.search.{notes_search}
 
 # =========================================================================
 # Writer documents (markdown-backed)
@@ -531,6 +534,31 @@ fn macro_merge_conflicts(result: MergeResult) -> [text]:
     """
     conflict_report(result)
 
+fn macro_sheet_diff(base: Sheet, current: Sheet) -> [text]:
+    """Change list from `base` to `current` as shippable "op|<kind>|<ref>|
+    <text>" lines: set/clear cell ops in row-major order, then hide/unhide
+    row-visibility ops. Ship the lines to a peer holding the same base and
+    replay with macro_sheet_apply; reconcile overlaps with
+    macro_sheet_merge3. See app.office.sheets.sync for the op model.
+
+    Example macro:
+        for line in macro_sheet_diff(base_sheet, edited_sheet):
+            println(line)
+    """
+    val ops = sheet_diff(base, current)
+    ops_to_lines(ops)
+
+fn macro_sheet_apply(sheet: Sheet, lines: [text]) -> Sheet:
+    """Replay "op|<kind>|<ref>|<text>" lines (from macro_sheet_diff) onto a
+    sheet; formulas are recalculated when any applied op sets formula text.
+    Returns the updated sheet — reassign.
+
+    Example macro:
+        sh = macro_sheet_apply(sh, diff_lines)
+    """
+    val ops = lines_to_ops(lines)
+    sheet_apply(sheet, ops)
+
 # =========================================================================
 # Table queries: select / sort / join / group-by
 # =========================================================================
@@ -576,4 +604,36 @@ fn macro_sheet_group_agg(sheet: Sheet, header_row: i64, group_col: text, value_c
         val totals = macro_sheet_group_agg(sh, 1, "Region", "Qty", "sum")
     """
     sheet_group_agg(sheet, header_row, group_col, value_col, agg)
+
+# =========================================================================
+# Notes notebooks (notebook -> sections -> pages)
+# =========================================================================
+
+fn macro_notes_new(name: text) -> Notebook:
+    """A new, empty notes notebook. Every notes mutator RETURNS the updated
+    notebook; reassign it.
+
+    Example macro:
+        var nb = macro_notes_new("Project X")
+    """
+    notebook_new(name)
+
+fn macro_notes_add_page(nb: Notebook, section: text, title: text, markdown_text: text) -> Notebook:
+    """Add a markdown page to `section` (auto-created). Re-adding an
+    existing (section, title) replaces that page's body.
+
+    Example macro:
+        nb = macro_notes_add_page(nb, "Meetings", "Kickoff", "# Kickoff\\n\\nAgenda...")
+    """
+    add_page(nb, section, title, markdown_text)
+
+fn macro_notes_search(nb: Notebook, query: text) -> [text]:
+    """Case-insensitive full-text search; one "section|title|<matching line>"
+    hit per matching page (title matches count).
+
+    Example macro:
+        for hit in macro_notes_search(nb, "agenda"):
+            println(hit)
+    """
+    notes_search(nb, query)
 
