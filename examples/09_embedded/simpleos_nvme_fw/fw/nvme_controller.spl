@@ -86,6 +86,8 @@ impl NvmeController:
         var n: i64 = 0
         var pend: i64 = me.aq.pending()
         while pend > 0:
+            if me.aq.cq_pending() == MAX_QUEUE_SIZE:
+                return n
             val cmd: AdminCmd = me.aq.fetch()
             val r: AdminResult = me.admin_exec(cmd)
             if r.post:
@@ -426,6 +428,18 @@ fn nvme_controller_selftest() -> i64:
     c.admin_process()
     val badns: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(badns.status, SC_INVALID_FIELD, "identify invalid namespace rejected")
+    var fill_cq: i64 = 0
+    while fill_cq < MAX_QUEUE_SIZE:
+        c.aq.cq_post(cpl_make(500 + fill_cq, SC_SUCCESS, 0))
+        fill_cq = fill_cq + 1
+    c.admin_submit(admin_identify_cmd(26, CNS_CONTROLLER))
+    fail = fail + expect_eq(c.admin_process(), 0, "admin process backs off when completion queue is full")
+    fail = fail + expect_eq(c.aq.pending(), 1, "admin command stays pending behind full completion queue")
+    while c.admin_completions() > 0:
+        c.admin_reap()
+    c.admin_process()
+    val deferred_id: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(deferred_id.status, SC_SUCCESS, "deferred admin command completes after CQ drains")
     c.admin_submit(admin_cmd_make(19, ADMIN_IDENTIFY, 1, CNS_CONTROLLER, 0, 0))
     c.admin_submit(admin_cmd_make(20, ADMIN_IDENTIFY, 0, CNS_CONTROLLER | (1 << 16), 0, 0))
     c.admin_process()
