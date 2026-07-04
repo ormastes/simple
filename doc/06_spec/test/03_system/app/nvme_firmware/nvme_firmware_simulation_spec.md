@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -305,6 +305,29 @@ expect(out).to_contain("POLICY HOOKS OK")
 
 </details>
 
+#### corrects one silent payload bit and fails double-bit corruption closed (gap-closure P3)
+
+- Program a NAND page, corrupt one payload bit under stored OOB ECC, and read through FIL
+   - Expected: code equals `0`
+- The FIL caller receives corrected data for one bit; two silent payload bits report media failure
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Program a NAND page, corrupt one payload bit under stored OOB ECC, and read through FIL")
+val (out, err, code) = _run(FW + "/ecc_check.spl")
+expect(code).to_equal(0)
+step("The FIL caller receives corrected data for one bit; two silent payload bits report media failure")
+expect(out).to_contain("ECC OK")
+```
+
+</details>
+
 #### schedules NAND ops across channels in parallel with per-channel serialization (gap-closure P2)
 
 - Stripe a write batch across the channels and drain the multi-channel scheduler
@@ -529,8 +552,8 @@ expect(out).to_contain("LEAN_OK")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -69,8 +69,10 @@ The full-controller layer, on top of the FTL/FIL stack (legacy single-queue
 **The FIL runs on the ONFI device** (plan phase E3, done): `fil.spl` composes `NandDevice` (not the
 behavioural `fil_nand.Nand`), so every write/read/GC-erase/recovery-OOB-scan in `sim_main` and
 `nvme_main` goes through the real ONFI handshake. `fil_ecc` keeps the FIL-level ECC; NAND stores
-the ECC word in spare-area state at program time, the FMC latches it on read, and FIL verifies the
-stored value instead of recomputing from read data. The self-test suite is green (gate
+the SECDED payload-ECC word in spare-area state at program time, the FMC latches it on read, and
+FIL decodes the stored value instead of recomputing from read data. One silent payload-bit error
+is corrected; double-bit payload and stored-ECC/OOB metadata corruption fail closed. The self-test
+suite is green (gate
 `ALL FIRMWARE SELF-TESTS PASS`).
 
 Scope note (explicit): "full NVMe SSD fw" here = the host-runnable simulation (run-green).
@@ -130,7 +132,7 @@ Integration status (canonical: `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md
 status", wired-vs-shelf table): P1 `fil_fmc`, P7 `power_thermal`, and P8 `rain` are all **WIRED**
 into the live controller/FTL; P2 `fil_scheduler` **landed but stays SHELF** — channel-level
 parallelism is a model a single-threaded sim cannot exhibit, so it is not flatly deferred but cannot
-be exercised; P3 has a **wired stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
+be exercised; P3 has a **wired SECDED stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
 scope); P4 has a **wired multi-block host-byte floor** (full HostMem/PRP/SGL remains out of scope);
 P5 has a **wired bounded-map-cache floor** (full DRAM arena/write buffer remains out of scope);
 P6 has a **wired cooperative-owner floor** (true multicore/preemption remains out of scope);

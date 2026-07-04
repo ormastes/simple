@@ -52,8 +52,8 @@ impl Fil:
         me.fmc.issue()
         val res: FmcResult = me.fmc.out()
         me.fmc.ack()
-        val code: i64 = ecc_check(res.data, res.lba, res.seq, res.ecc, res.err)
-        FilRead(data: res.data, lba: res.lba, seq: res.seq, code: code)
+        val dec: EccDecode = ecc_decode(res.data, res.lba, res.seq, res.ecc, res.err)
+        FilRead(data: dec.data, lba: res.lba, seq: res.seq, code: dec.code)
 
     # Erase one block. Retires the block on erase failure.
     me erase(blk: i64) -> i64:
@@ -118,9 +118,13 @@ fn fil_selftest() -> i64:
     val r2: FilRead = fil.read(ppn)
     fail = fail + expect_eq(r2.code, NAND_ECC_FAIL, "2 flips -> ECC_FAIL")
     fil.inject_read_bitflip(ppn, 0)
-    fil.corrupt_page_data(ppn, 0xAC)
+    fil.corrupt_page_data(ppn, 0xAA)
+    val rf: FilRead = fil.read(ppn)
+    fail = fail + expect_eq(rf.code, NAND_ECC_FIXED, "silent single-bit payload corruption -> ECC_FIXED")
+    fail = fail + expect_eq(rf.data, 0xAB, "silent single-bit payload corruption corrected")
+    fil.corrupt_page_data(ppn, 0xA8)
     val rc: FilRead = fil.read(ppn)
-    fail = fail + expect_eq(rc.code, NAND_ECC_FAIL, "silent payload corruption -> ECC_FAIL")
+    fail = fail + expect_eq(rc.code, NAND_ECC_FAIL, "silent double-bit payload corruption -> ECC_FAIL")
 
     # erase clears the page OOB and bumps the erase count
     val ec0: i64 = fil.erase_count(2)

@@ -9,6 +9,10 @@ metadata sensitivity for {lba, seq}.
 
 use nvme_types.*
 
+struct EccDecode:
+    data: i64
+    code: i64
+
 fn ecc_bit(v: i64, bit: i64) -> i64:
     (v >> bit) & 1
 
@@ -61,6 +65,46 @@ fn ecc_compute(data: i64, lba: i64, seq: i64) -> i64:
     val meta: i64 = (lba ^ (seq << 4) ^ (lba >> 3) ^ (seq >> 5)) & 0x7FF
     payload | (meta << 5)
 
+fn ecc_flip_data_pos(data: i64, pos: i64) -> i64:
+    if pos == 3:
+        return data ^ 0x01
+    if pos == 5:
+        return data ^ 0x02
+    if pos == 6:
+        return data ^ 0x04
+    if pos == 7:
+        return data ^ 0x08
+    if pos == 9:
+        return data ^ 0x10
+    if pos == 10:
+        return data ^ 0x20
+    if pos == 11:
+        return data ^ 0x40
+    if pos == 12:
+        return data ^ 0x80
+    data
+
+fn ecc_decode(data: i64, lba: i64, seq: i64, stored: i64, injected_flips: i64) -> EccDecode:
+    val recomputed: i64 = ecc_compute(data, lba, seq)
+    val stored_meta: i64 = (stored >> 5) & 0x7FF
+    val recomputed_meta: i64 = (recomputed >> 5) & 0x7FF
+    if injected_flips >= 2:
+        return EccDecode(data: data, code: NAND_ECC_FAIL)
+    if stored_meta != recomputed_meta:
+        return EccDecode(data: data, code: NAND_ECC_FAIL)
+
+    val syndrome: i64 = (stored ^ recomputed) & 0xF
+    val overall: i64 = ((stored >> 4) ^ (recomputed >> 4)) & 1
+    if syndrome == 0:
+        if overall == 0:
+            if injected_flips == 1:
+                return EccDecode(data: data, code: NAND_ECC_FIXED)
+            return EccDecode(data: data, code: NAND_OK)
+        return EccDecode(data: data, code: NAND_ECC_FIXED)
+    if overall == 0:
+        return EccDecode(data: data, code: NAND_ECC_FAIL)
+    EccDecode(data: ecc_flip_data_pos(data, syndrome) & 0xFF, code: NAND_ECC_FIXED)
+
 # ── ecc_check ─────────────────────────────────────────────────────────────────
 # Verify a page read against its stored ECC given an injected_flips count
 # (the NAND hardware bit-error counter for this read).
@@ -71,14 +115,7 @@ fn ecc_compute(data: i64, lba: i64, seq: i64) -> i64:
 #   injected_flips == 1  ->  NAND_ECC_FIXED (1-bit error, correctable)
 #   otherwise            ->  NAND_OK
 fn ecc_check(data: i64, lba: i64, seq: i64, stored: i64, injected_flips: i64) -> i64:
-    val recomputed: i64 = ecc_compute(data, lba, seq)
-    if injected_flips >= 2:
-        return NAND_ECC_FAIL
-    if recomputed != stored:
-        return NAND_ECC_FAIL
-    if injected_flips == 1:
-        return NAND_ECC_FIXED
-    NAND_OK
+    ecc_decode(data, lba, seq, stored, injected_flips).code
 
 # ── ecc_selftest ──────────────────────────────────────────────────────────────
 fn ecc_selftest() -> i64:
@@ -147,6 +184,13 @@ fn ecc_selftest() -> i64:
     failures = failures + expect_eq(
         ecc_check(data1, lba1, seq1, bad_ecc, 0),
         NAND_ECC_FAIL,
-        "check bad-ecc -> NAND_ECC_FAIL")
+        "check stored-ecc parity mismatch -> NAND_ECC_FAIL")
+
+    val single_data: EccDecode = ecc_decode(data1 ^ 0x01, lba1, seq1, ecc1, 0)
+    failures = failures + expect_eq(single_data.code, NAND_ECC_FIXED, "single silent payload bit -> ECC_FIXED")
+    failures = failures + expect_eq(single_data.data, data1, "single silent payload bit corrected")
+
+    val double_data: EccDecode = ecc_decode(data1 ^ 0x03, lba1, seq1, ecc1, 0)
+    failures = failures + expect_eq(double_data.code, NAND_ECC_FAIL, "double silent payload bit -> ECC_FAIL")
 
     failures
