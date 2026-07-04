@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use simple_common::target::{TargetArch, TargetOS};
@@ -5,7 +6,12 @@ use simple_common::target::{TargetArch, TargetOS};
 use crate::linker::error::{LinkerError, LinkerResult};
 
 use super::builder::NativeBinaryBuilder;
-use super::options::{compile_c_args, detect_c_compiler, detect_nm_command, is_msvc_compiler};
+use super::options::{compile_c_args, detect_c_compiler, detect_nm_command, is_msvc_compiler, NativeBinaryOptions};
+
+/// Env var escape hatch (task #97): when set to "1", a rt_* symbol that would otherwise
+/// silently receive a fabricated zero-returning stub is downgraded to a loud warning
+/// instead of a hard build failure.
+pub(super) const ALLOW_UNRESOLVED_RT_ENV: &str = "SIMPLE_ALLOW_UNRESOLVED_RT";
 
 /// Symbols in the extra_keep allowlist used for both pass-1 and pass-2 stub generation.
 const EXTRA_KEEP: &[&str] = &[
@@ -419,6 +425,81 @@ int main(int argc, char** argv) {
         Ok(())
     }
 
+    /// Real symbols defined by the target's runtime static library (libsimple_runtime.a /
+    /// libsimple_compiler.a), if it can be located and `nm` is available. `None` means "could
+    /// not determine" (e.g. cross-compiling without nm) — callers must treat that as "skip the
+    /// check" rather than "nothing is defined", to avoid false positives on platforms where we
+    /// can't inspect the archive.
+    fn real_runtime_defined_symbols(&self) -> Option<HashSet<String>> {
+        let runtime_dir = NativeBinaryOptions::find_runtime_library_path_for_target(&self.options.target)?;
+        let candidates = [
+            runtime_dir.join(NativeBinaryOptions::static_lib_name("simple_runtime", &self.options.target)),
+            runtime_dir.join(NativeBinaryOptions::static_lib_name("simple_compiler", &self.options.target)),
+        ];
+        let mut set = HashSet::new();
+        let mut found_any = false;
+        for lib in candidates.iter().filter(|p| p.exists()) {
+            let out = std::process::Command::new("nm")
+                .arg("--defined-only")
+                .arg("-g")
+                .arg(lib)
+                .output();
+            let Ok(out) = out else { continue };
+            if !out.status.success() {
+                continue;
+            }
+            found_any = true;
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if let Some(sym) = line.split_whitespace().last() {
+                    set.insert(sym.trim_start_matches('_').to_string());
+                }
+            }
+        }
+        found_any.then_some(set)
+    }
+
+    /// Guard for task #97: reject undeclared/missing `rt_*` externs instead of letting the
+    /// bootstrap auto-stub generator silently fabricate a zero-returning definition for them.
+    /// A fake stub for a genuine ABI symbol is indistinguishable from a real one at link time —
+    /// it links clean and only crashes (or misbehaves) the first time it's actually called,
+    /// which is exactly the failure mode that burned rt_get_host_target_code and rt_value_print
+    /// (#93). Compiler-internal bootstrap placeholders stay allowed via the `RT_KEEP` allowlist.
+    fn check_no_fake_rt_stubs(&self, symbols: &std::collections::BTreeSet<String>) -> LinkerResult<()> {
+        let Some(real) = self.real_runtime_defined_symbols() else {
+            return Ok(()); // could not determine; do not block platforms we can't inspect
+        };
+        let suspicious: Vec<&str> = symbols
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|s| s.starts_with("rt_") && !RT_KEEP.contains(s) && !real.contains(*s))
+            .collect();
+        if suspicious.is_empty() {
+            return Ok(());
+        }
+        let names = suspicious.join(", ");
+        if std::env::var(ALLOW_UNRESOLVED_RT_ENV).as_deref() == Ok("1") {
+            eprintln!(
+                "WARNING (task #97): rt_* symbol(s) [{names}] are not defined by the runtime \
+                 library and would be satisfied by an auto-generated zero-returning stub \
+                 ({env}=1 set — proceeding anyway). Calls to these will silently return 0 and \
+                 may crash or misbehave.",
+                names = names,
+                env = ALLOW_UNRESOLVED_RT_ENV,
+            );
+            return Ok(());
+        }
+        Err(LinkerError::LinkFailed(format!(
+            "native-build: undeclared/missing rt_* extern(s) [{names}] are not defined by the \
+             runtime library; linking would silently fabricate a zero-returning stub for them \
+             instead of failing, and calls would crash at runtime (task #97). Fix the extern \
+             name/declaration, implement it in the runtime, add it to RT_KEEP in \
+             linker/native_binary/stubs.rs if it is intentionally optional, or set {env}=1 to \
+             bypass at your own risk.",
+            names = names,
+            env = ALLOW_UNRESOLVED_RT_ENV,
+        )))
+    }
+
     /// Build pass-1 bootstrap stubs: common missing-symbol stub + auto-generated stubs from obj.
     pub(super) fn build_pass1_stubs(
         &self,
@@ -573,6 +654,7 @@ static inline int64_t _rt_now_nanos(void) {{
         if symbols.is_empty() {
             return Ok(());
         }
+        self.check_no_fake_rt_stubs(&symbols)?;
 
         let code = gen_stub_code(&symbols, use_strong, self.options.target.os, ret_insn);
         let auto_c = temp_path.join(c_name);
@@ -618,6 +700,7 @@ static inline int64_t _rt_now_nanos(void) {{
         if symbols.is_empty() {
             return Ok(());
         }
+        self.check_no_fake_rt_stubs(&symbols)?;
 
         let use_strong = matches!(self.options.target.os, TargetOS::Windows | TargetOS::FreeBSD);
         let code = gen_stub_code(&symbols, use_strong, self.options.target.os, ret_insn);

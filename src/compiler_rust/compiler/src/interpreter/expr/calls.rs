@@ -362,6 +362,17 @@ pub(super) fn eval_call_expr(
                         ctx = ctx.with_note(format!("available fields: {}", fields_list));
                     }
 
+                    if std::env::var("SIMPLE_DBG_COLLISION").is_ok() {
+                        let recv_desc = match receiver.as_ref() {
+                            Expr::Identifier(n) => format!("Ident({})", n),
+                            other => format!("{:?}", std::mem::discriminant(other)),
+                        };
+                        eprintln!(
+                            "[DBG PROP-ACCESS-ERR] class={} missing_field={} recv={} actual_fields=[{}]",
+                            class, field, recv_desc,
+                            available_fields.join(",")
+                        );
+                    }
                     Err(CompileError::semantic_with_context(
                         format!("class `{}` has no field named `{}`", class, field),
                         ctx,

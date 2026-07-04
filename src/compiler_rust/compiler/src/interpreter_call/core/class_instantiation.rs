@@ -90,6 +90,15 @@ pub(crate) fn instantiate_class(
     // same-named overload whose fields do. Only rescues constructions that would
     // otherwise fail, so it cannot change the result of an already-valid literal.
     let class_def = pick_fitting_class_def(class_name, class_def, args);
+    if std::env::var("SIMPLE_DBG_COLLISION").is_ok() {
+        eprintln!(
+            "[DBG INST] call_name={} picked_def={} def_fields=[{}] args=[{}]",
+            class_name,
+            class_def.name,
+            class_def.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(","),
+            args.iter().filter_map(|a| a.name.clone()).collect::<Vec<_>>().join(",")
+        );
+    }
 
     let mut fields: HashMap<String, Value> = HashMap::new();
     for field in &class_def.fields {
@@ -280,6 +289,13 @@ pub(crate) fn instantiate_class(
                     ctx = ctx.with_note(format!("available fields: {}", fields_list));
                 }
 
+                if std::env::var("SIMPLE_DBG_COLLISION").is_ok() {
+                    eprintln!(
+                        "[DBG CONSTRUCT-ERR] call_name={} picked_def={} missing_field={} def_fields=[{}]",
+                        class_name, class_def.name, name,
+                        class_def.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(",")
+                    );
+                }
                 return Err(CompileError::semantic_with_context(
                     format!("class `{}` has no field named `{}`", class_name, name),
                     ctx,
