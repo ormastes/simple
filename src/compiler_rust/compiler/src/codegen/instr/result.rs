@@ -6,7 +6,7 @@ use cranelift_module::Module;
 
 use crate::mir::{BlockId, VReg};
 
-use super::helpers::{call_runtime_1, call_runtime_3, get_vreg_or_default};
+use super::helpers::{call_runtime_1, call_runtime_3, get_vreg_or_default, tag_enum_payload, untag_enum_payload_for};
 use super::{InstrContext, InstrResult};
 
 /// Calculate discriminant for enum variant using DefaultHasher (matches pattern.rs).
@@ -32,9 +32,13 @@ fn create_enum_value<M: Module>(
 ) {
     let enum_id_val = builder.ins().iconst(types::I32, enum_id);
     let disc_val = builder.ins().iconst(types::I32, discriminant);
-    // Empty payload uses tagged nil (3), not raw 0
+    // Empty payload uses tagged nil (3), not raw 0.
+    // Task #122: native int/bool payloads must be TAGGED (value << 3) here -- the
+    // same convention every other enum construct site uses -- so extraction
+    // (rt_enum_payload + UnboxInt / match-binding untag) recovers the value. Prior
+    // to #122 this stored the scalar RAW, so `Ok(42).unwrap()` untagged to 5.
     let payload_val = payload
-        .map(|v| get_vreg_or_default(ctx, builder, &v))
+        .map(|v| tag_enum_payload(ctx, builder, &v))
         .unwrap_or_else(|| builder.ins().iconst(types::I64, 3));
     let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id_val, disc_val, payload_val);
     ctx.vreg_values.insert(dest, result);
@@ -65,8 +69,12 @@ pub(crate) fn compile_try_unwrap<M: Module>(
     builder.seal_block(success_block);
 
     builder.switch_to_block(success_block);
-    // Use rt_enum_payload to extract the payload
+    // Use rt_enum_payload to extract the payload.
+    // Task #122: untag when the success payload flows into a native int/bool dest,
+    // symmetric with the tagged construct convention.
     let payload = call_runtime_1(ctx, builder, "rt_enum_payload", val);
+    let dest_ty = ctx.vreg_types.get(&dest).copied();
+    let payload = untag_enum_payload_for(builder, dest_ty, payload);
     ctx.vreg_values.insert(dest, payload);
     ctx.vreg_values.insert(error_dest, val);
 }

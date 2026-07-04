@@ -14,7 +14,7 @@ use cranelift_module::Module;
 
 use crate::mir::VReg;
 
-use super::helpers::{call_runtime_1, call_runtime_3};
+use super::helpers::{call_runtime_1, call_runtime_3, untag_enum_payload_for};
 use super::{InstrContext, InstrResult};
 
 /// Compile EnumDiscriminant instruction
@@ -38,7 +38,11 @@ pub fn compile_enum_payload<M: Module>(
     value: VReg,
 ) -> InstrResult<()> {
     let val = ctx.get_vreg(&value)?;
-    let result = call_runtime_1(ctx, builder, "rt_enum_payload", val);
+    let raw = call_runtime_1(ctx, builder, "rt_enum_payload", val);
+    // Task #122: untag native int/bool dests, symmetric with the tagged enum
+    // construct convention (EnumWith / create_enum_value / calls.rs).
+    let dest_ty = ctx.vreg_types.get(&dest).copied();
+    let result = untag_enum_payload_for(builder, dest_ty, raw);
     ctx.vreg_values.insert(dest, result);
     Ok(())
 }

@@ -6,7 +6,7 @@ use cranelift_module::Module;
 
 use crate::mir::{BindingStep, MirLiteral, MirPattern, PatternBinding, VReg};
 
-use super::helpers::{call_runtime_1, call_runtime_2, call_runtime_3};
+use super::helpers::{call_runtime_1, call_runtime_2, call_runtime_3, tag_enum_payload, untag_enum_payload_for};
 use super::{InstrContext, InstrResult};
 
 pub(crate) fn compile_pattern_test<M: Module>(
@@ -101,8 +101,15 @@ pub(crate) fn compile_pattern_bind<M: Module>(
     let current = ctx.vreg_values[&subject];
 
     let result = if binding.path.iter().any(|s| matches!(s, BindingStep::EnumPayload)) {
-        // All enums use rt_enum_new format, so use rt_enum_payload consistently
-        call_runtime_1(ctx, builder, "rt_enum_payload", current)
+        // All enums use rt_enum_new format, so use rt_enum_payload consistently.
+        // Task #122: untag when the bound variable is a native int/bool scalar,
+        // symmetric with the tagged construct convention. The binding's concrete
+        // type comes from the pattern's named enum variant field (resolved in
+        // build_pattern_binding_stmts), so `case V(n: i64)` untags while heap/ANY
+        // bindings pass the RuntimeValue / pointer through verbatim.
+        let raw = call_runtime_1(ctx, builder, "rt_enum_payload", current);
+        let dest_ty = ctx.vreg_types.get(&dest).copied();
+        untag_enum_payload_for(builder, dest_ty, raw)
     } else {
         current
     };
@@ -143,7 +150,9 @@ pub(crate) fn compile_enum_with<M: Module>(
     let disc = calculate_variant_discriminant(variant_name);
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
     let enum_id = builder.ins().iconst(types::I32, 0);
-    let payload_val = ctx.vreg_values[&payload];
+    // Task #122: tag native int/bool payloads (value << 3) so the general enum
+    // construct path matches the extraction convention (match-binding untag).
+    let payload_val = tag_enum_payload(ctx, builder, &payload);
     let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, disc_val, payload_val);
     ctx.vreg_values.insert(dest, result);
 }

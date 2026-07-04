@@ -6,7 +6,64 @@ use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
 use super::{InstrContext, InstrResult};
+use crate::hir::TypeId;
 use crate::mir::VReg;
+
+/// Returns true when the given TypeId is a native integer/bool scalar that the
+/// RuntimeValue convention stores TAGGED (value << 3 | tag) in enum payload slots.
+/// Floats and heap types are excluded (floats use the Box/UnboxFloat path; heap
+/// values are raw-tagged pointers). Task #122.
+pub(crate) fn is_tagged_scalar_type(ty: Option<TypeId>) -> bool {
+    matches!(
+        ty,
+        Some(
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::BOOL
+        )
+    )
+}
+
+/// Enum-payload CONSTRUCT convention (Task #122): tag a native int/bool scalar as
+/// a RuntimeValue (value << 3) so extraction -- which untags concrete scalars --
+/// recovers the value. Heap/float/ANY payloads pass through verbatim. Shared by
+/// every enum construction path so construction and extraction agree globally.
+pub(crate) fn tag_enum_payload<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    vreg: &VReg,
+) -> cranelift_codegen::ir::Value {
+    let value = get_vreg_or_default(ctx, builder, vreg);
+    if is_tagged_scalar_type(ctx.vreg_types.get(vreg).copied()) {
+        let three = builder.ins().iconst(types::I64, 3);
+        builder.ins().ishl(value, three)
+    } else {
+        value
+    }
+}
+
+/// Enum-payload EXTRACT convention (Task #122): given a raw payload read via
+/// rt_enum_payload and the static type of the dest it flows into, untag a native
+/// int/bool scalar (value >> 3, arithmetic to match MirInst::UnboxInt). Heap/float/
+/// ANY dests keep the value verbatim. Symmetric with `tag_enum_payload`.
+pub(crate) fn untag_enum_payload_for(
+    builder: &mut FunctionBuilder,
+    dest_ty: Option<TypeId>,
+    value: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    if is_tagged_scalar_type(dest_ty) {
+        let three = builder.ins().iconst(types::I64, 3);
+        builder.ins().sshr(value, three)
+    } else {
+        value
+    }
+}
 
 /// Helper to get a VReg value, returning tagged nil (3) if missing.
 /// This handles cases where control flow or complex patterns leave VRegs undefined.
