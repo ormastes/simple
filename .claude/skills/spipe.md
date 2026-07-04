@@ -63,7 +63,10 @@ For formal-verification evidence, generated Lean/BYL artifacts must stay
 separate from manual theorem or constraint files. A SPipe scenario, generated
 manual, or hardening report may cite generated artifacts only when it also names
 the stable manual proof entry point and the post-regeneration gate that checked
-it (`lake build`, `simple gen-lean verify`, or `simple verify check`).
+it (`lake build`, `simple gen-lean verify`, or `simple verify check`). Treat
+generated-only Lean/BYL citations as stale evidence whenever a manual proof
+layer exists; update the generated contract and manual proof layer together
+before accepting regeneration-safe PASS.
 
 Check or install that wiring with:
 

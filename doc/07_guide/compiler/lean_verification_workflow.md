@@ -246,6 +246,8 @@ Regeneration must be append-safe for manual proof work:
 - generated manifests must list the exported names consumed by manual proofs;
 - SPipe evidence should cite both the generated artifact and the stable manual
   theorem entry point checked after regeneration.
+- generated-only citations are insufficient for SPipe or hardening-report
+  evidence when a manual theorem/constraint layer exists.
 - added proof intent belongs in the manual theorem/constraint file, not in a
   generated Lean or BYL file, unless the generator contract is updated in the
   same change.
