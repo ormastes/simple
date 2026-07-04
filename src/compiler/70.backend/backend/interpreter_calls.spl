@@ -161,7 +161,9 @@ impl InterpreterBackendImpl:
             else:
                 return Err(BackendError.runtime_error("missing argument for parameter {param.name}", Some(fn_.span)))
 
-            ctx.env.define(param.symbol, value)
+            # Env is name-keyed (iteration 21, target (a)); HirParam.name is
+            # reliable while param.symbol is a corrupt looked-up handle.
+            ctx.env.define(param.name, value)
 
         # Execute body
         val result = self.eval_block(fn_.body, ctx)?
@@ -183,10 +185,12 @@ impl InterpreterBackendImpl:
     fn call_closure(closure: ClosureValue, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
         ctx.env.push_scope()
 
-        # Bind captured variables
+        # Bind captured variables (name-keyed env, iteration 21). Resolve each
+        # captured SymbolId to its name via ctx.names.
         for symbol in closure.captures.keys():
             val value = closure.captures[symbol]
-            ctx.env.define(symbol, value)
+            val cap_name = ctx.names.get(symbol.id) ?? ""
+            ctx.env.define(cap_name, value)
 
         # Bind parameters
         for i in 0..closure.params.len():
@@ -196,7 +200,7 @@ impl InterpreterBackendImpl:
             else:
                 return Err(BackendError.runtime_error("missing argument for parameter", nil))
 
-            ctx.env.define(param.symbol, value)
+            ctx.env.define(param.name, value)
 
         # Evaluate body
         val result = self.eval_expr(closure.body, ctx)?
