@@ -34,6 +34,22 @@ val MAX_EVAL_DEPTH = 64
 
 extern fn rt_time_now_unix_micros() -> i64
 
+# Origin cell of the formula currently being recalculated. Bare ROW()/COLUMN()
+# (no reference argument) need the cell they live in. Threading that origin
+# through the whole recursive evaluator chain would touch ~15 helpers; instead
+# file_formats.recalculate_formula_cells sets this module-level var immediately
+# before each evaluate_formula call (the evaluator is single-threaded per
+# recalc, so there is no interleaving). When the empty string is present (a
+# direct evaluate_formula call with no cell context), bare ROW()/COLUMN() fail
+# closed with #ERR. See CARD 14.
+var _formula_origin_key: text = ""
+
+fn set_formula_origin(key: text):
+    """Record the origin cell key (e.g. "C5") for the formula about to be
+    evaluated, so bare ROW()/COLUMN() can resolve it. Called by the recalc
+    driver before each evaluate_formula. Pass "" to clear the context."""
+    _formula_origin_key = key
+
 # =========================================================================
 # Main Entry Point
 # =========================================================================
@@ -1999,6 +2015,9 @@ fn _canonical_name(name: text) -> text:
         "TINV": return "T.INV.2T"
         "FDIST": return "F.DIST.RT"
         "FINV": return "F.INV.RT"
+        "CHITEST": return "CHISQ.TEST"
+        "TTEST": return "T.TEST"
+        "FTEST": return "F.TEST"
         _: return name
 
 fn _is_ref_function(name: text) -> bool:
@@ -2085,16 +2104,24 @@ fn _ref_cell_info(name: text, ref_str: text, sheet: Sheet, end: i32) -> EvalResu
 fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """ROWS/COLUMNS/ROW/COLUMN/ADDRESS/FORMULATEXT/ISFORMULA.
 
-    Bare ROW()/COLUMN() (no reference) need the origin cell of the formula being
-    recalculated. That origin is known in file_formats.recalculate_formula_cells,
-    but threading it to this leaf would require adding an origin parameter to the
-    whole recursive evaluator chain (_evaluate_formula -> _eval_comparison -> ...
-    -> _eval_function_call) — many call sites, not the one cheap param the plan
-    allows. Per CARD 5 / CARD 14 the bare forms fail closed with #ERR here; only
-    the with-argument forms are implemented."""
+    Bare ROW()/COLUMN() (no reference) resolve to the origin cell of the formula
+    being recalculated. Threading that origin through the whole recursive
+    evaluator chain would touch ~15 helpers; instead the recalc driver records it
+    in the module-level _formula_origin_key before each evaluate_formula call and
+    the bare forms read it here (CARD 14). A direct evaluate_formula call with no
+    cell context leaves the key empty and the bare forms fail closed with #ERR."""
     if name == "ADDRESS":
         return _eval_address(tokens, pos, sheet, depth)
     val end = _consume_to_paren(tokens, pos)
+    if (name == "ROW" or name == "COLUMN") and tokens.get(pos) == ")":
+        if _formula_origin_key.len() == 0:
+            return EvalResult(value: CellValue.ErrorVal(message: "{name}() needs a cell context"), next_pos: end)
+        val origin = parse_cell_ref(_formula_origin_key)
+        if origin == nil:
+            return EvalResult(value: CellValue.ErrorVal(message: "{name}() bad origin"), next_pos: end)
+        if name == "ROW":
+            return EvalResult(value: CellValue.NumberVal(value: (origin.row + 1).to_f64()), next_pos: end)
+        return EvalResult(value: CellValue.NumberVal(value: (origin.col + 1).to_f64()), next_pos: end)
     if (pos + 2 < tokens.len() and tokens.get(pos + 1) == ":" and
         _is_cell_ref_token(tokens.get(pos)) and _is_cell_ref_token(tokens.get(pos + 2))):
         val a = parse_cell_ref(tokens.get(pos))
@@ -2128,6 +2155,194 @@ fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
         return _ref_cell_info(name, tokens.get(pos), sheet, end)
     EvalResult(value: CellValue.ErrorVal(message: "{name} requires a reference argument"), next_pos: end)
 
+fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """CHISQ.TEST / T.TEST / F.TEST — statistical hypothesis tests over two cell
+    ranges. Handled ahead of the generic collector because CHISQ.TEST's degrees
+    of freedom depend on the observed range's shape (rows x cols), which the flat
+    argument collector discards. All statistics are computed inline over LOCAL
+    arrays: the interpreter reads array PARAMETERS as empty, so mean/variance
+    helpers cannot cross a call boundary here (only the scalar-input CDF helpers
+    _gammainc_p / _t_2t_area / _f_cdf do)."""
+    var vals: [[f64]] = []
+    var rows: [i32] = []
+    var cols: [i32] = []
+    var cur_pos = pos
+    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        if (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":" and
+            _is_cell_ref_token(tokens.get(cur_pos)) and _is_cell_ref_token(tokens.get(cur_pos + 2))):
+            val range_str = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+            val v = _resolve_cell_range(range_str, sheet, depth)
+            val a = parse_cell_ref(tokens.get(cur_pos))
+            val b = parse_cell_ref(tokens.get(cur_pos + 2))
+            vals.push(v)
+            if a == nil or b == nil:
+                rows.push(1)
+                cols.push(1)
+            else:
+                val minr = if a.row < b.row: a.row else: b.row
+                val maxr = if a.row > b.row: a.row else: b.row
+                val minc = if a.col < b.col: a.col else: b.col
+                val maxc = if a.col > b.col: a.col else: b.col
+                rows.push(maxr - minr + 1)
+                cols.push(maxc - minc + 1)
+            cur_pos = cur_pos + 3
+        else:
+            val result = _eval_comparison(tokens, cur_pos, sheet, depth)
+            vals.push([_to_number(result.value)])
+            rows.push(1)
+            cols.push(1)
+            cur_pos = result.next_pos
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+    if vals.len() < 2:
+        return EvalResult(value: CellValue.ErrorVal(message: "{name} requires two ranges"), next_pos: cur_pos)
+
+    if name == "CHISQ.TEST":
+        val obs = vals[0]
+        val exp = vals[1]
+        if obs.len() != exp.len() or obs.len() == 0:
+            return EvalResult(value: CellValue.ErrorVal(message: "CHISQ.TEST ranges must match in size"), next_pos: cur_pos)
+        var stat = 0.0
+        var i = 0
+        while i < obs.len():
+            val ev = exp[i]
+            if ev == 0.0:
+                return EvalResult(value: CellValue.ErrorVal(message: "CHISQ.TEST expected value is zero"), next_pos: cur_pos)
+            val d = obs[i] - ev
+            stat = stat + d * d / ev
+            i = i + 1
+        val r = rows[0]
+        val c = cols[0]
+        var df = (r - 1) * (c - 1)
+        if r == 1 or c == 1:
+            df = obs.len() - 1
+        if df < 1:
+            return EvalResult(value: CellValue.ErrorVal(message: "CHISQ.TEST needs df >= 1"), next_pos: cur_pos)
+        val p = 1.0 - _gammainc_p(df.to_f64() / 2.0, stat / 2.0)
+        return EvalResult(value: CellValue.NumberVal(value: p), next_pos: cur_pos)
+
+    if name == "F.TEST":
+        val a1 = vals[0]
+        val a2 = vals[1]
+        if a1.len() < 2 or a2.len() < 2:
+            return EvalResult(value: CellValue.ErrorVal(message: "F.TEST needs >= 2 values per range"), next_pos: cur_pos)
+        var m1 = 0.0
+        var i1 = 0
+        while i1 < a1.len():
+            m1 = m1 + a1[i1]
+            i1 = i1 + 1
+        m1 = m1 / a1.len().to_f64()
+        var s1 = 0.0
+        var j1 = 0
+        while j1 < a1.len():
+            val dv = a1[j1] - m1
+            s1 = s1 + dv * dv
+            j1 = j1 + 1
+        val var1 = s1 / (a1.len().to_f64() - 1.0)
+        var m2 = 0.0
+        var i2 = 0
+        while i2 < a2.len():
+            m2 = m2 + a2[i2]
+            i2 = i2 + 1
+        m2 = m2 / a2.len().to_f64()
+        var s2 = 0.0
+        var j2 = 0
+        while j2 < a2.len():
+            val dv2 = a2[j2] - m2
+            s2 = s2 + dv2 * dv2
+            j2 = j2 + 1
+        val var2 = s2 / (a2.len().to_f64() - 1.0)
+        if var1 == 0.0 or var2 == 0.0:
+            return EvalResult(value: CellValue.ErrorVal(message: "F.TEST needs nonzero variance"), next_pos: cur_pos)
+        val fstat = var1 / var2
+        val d1 = a1.len().to_f64() - 1.0
+        val d2 = a2.len().to_f64() - 1.0
+        var p = 0.0
+        if fstat > 1.0:
+            p = 2.0 * (1.0 - _f_cdf(fstat, d1, d2))
+        else:
+            p = 2.0 * _f_cdf(fstat, d1, d2)
+        return EvalResult(value: CellValue.NumberVal(value: p), next_pos: cur_pos)
+
+    # T.TEST(range1, range2, tails, type)
+    if vals.len() < 4:
+        return EvalResult(value: CellValue.ErrorVal(message: "T.TEST requires range1, range2, tails, type"), next_pos: cur_pos)
+    val t1 = vals[0]
+    val t2 = vals[1]
+    val tailsv = vals[2]
+    val typev = vals[3]
+    val tails = tailsv[0].to_i64()
+    val ttype = typev[0].to_i64()
+    var tstat = 0.0
+    var df = 0.0
+    if ttype == 1:
+        if t1.len() != t2.len() or t1.len() < 2:
+            return EvalResult(value: CellValue.ErrorVal(message: "T.TEST paired ranges must match, n >= 2"), next_pos: cur_pos)
+        val n = t1.len().to_f64()
+        var md = 0.0
+        var i = 0
+        while i < t1.len():
+            md = md + (t1[i] - t2[i])
+            i = i + 1
+        md = md / n
+        var sd = 0.0
+        var k = 0
+        while k < t1.len():
+            val dd = (t1[k] - t2[k]) - md
+            sd = sd + dd * dd
+            k = k + 1
+        val vard = sd / (n - 1.0)
+        tstat = md / (_sqrt_f64(vard) / _sqrt_f64(n))
+        df = n - 1.0
+    else:
+        if t1.len() < 2 or t2.len() < 2:
+            return EvalResult(value: CellValue.ErrorVal(message: "T.TEST needs >= 2 values per range"), next_pos: cur_pos)
+        val n1 = t1.len().to_f64()
+        val n2 = t2.len().to_f64()
+        var mm1 = 0.0
+        var p1 = 0
+        while p1 < t1.len():
+            mm1 = mm1 + t1[p1]
+            p1 = p1 + 1
+        mm1 = mm1 / n1
+        var ss1 = 0.0
+        var q1 = 0
+        while q1 < t1.len():
+            val e1 = t1[q1] - mm1
+            ss1 = ss1 + e1 * e1
+            q1 = q1 + 1
+        val v1 = ss1 / (n1 - 1.0)
+        var mm2 = 0.0
+        var p2 = 0
+        while p2 < t2.len():
+            mm2 = mm2 + t2[p2]
+            p2 = p2 + 1
+        mm2 = mm2 / n2
+        var ss2 = 0.0
+        var q2 = 0
+        while q2 < t2.len():
+            val e2 = t2[q2] - mm2
+            ss2 = ss2 + e2 * e2
+            q2 = q2 + 1
+        val v2 = ss2 / (n2 - 1.0)
+        if ttype == 2:
+            val sp = ((n1 - 1.0) * v1 + (n2 - 1.0) * v2) / (n1 + n2 - 2.0)
+            tstat = (mm1 - mm2) / _sqrt_f64(sp * (1.0 / n1 + 1.0 / n2))
+            df = n1 + n2 - 2.0
+        else:
+            val se = v1 / n1 + v2 / n2
+            tstat = (mm1 - mm2) / _sqrt_f64(se)
+            val num = se * se
+            val den = (v1 / n1) * (v1 / n1) / (n1 - 1.0) + (v2 / n2) * (v2 / n2) / (n2 - 1.0)
+            df = num / den
+    val at = if tstat < 0.0: 0.0 - tstat else: tstat
+    val area = _t_2t_area(at, df)
+    if tails == 1:
+        return EvalResult(value: CellValue.NumberVal(value: area / 2.0), next_pos: cur_pos)
+    EvalResult(value: CellValue.NumberVal(value: area), next_pos: cur_pos)
+
 fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Evaluate a function call. pos points to first token after '('."""
     if _is_text_function(name):
@@ -2150,6 +2365,8 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_a_variant_function(name, tokens, pos, sheet, depth)
     if name == "MDETERM":
         return _eval_mdeterm(tokens, pos, sheet)
+    if name == "CHISQ.TEST" or name == "T.TEST" or name == "F.TEST":
+        return _eval_test_function(name, tokens, pos, sheet, depth)
     if _is_ref_function(name):
         return _eval_ref_function(name, tokens, pos, sheet, depth)
     # Collect arguments separated by commas
@@ -2333,6 +2550,90 @@ fn _besseli(x: f64, n: i64) -> f64:
         else:
             k = k + 1
     sum
+
+fn _bessy0(x: f64) -> f64:
+    """Bessel function of the second kind order 0, Y_0(x), x>0. Rational
+    approximation (Numerical Recipes bessy0): polynomial ratio for x<8 with a
+    2/pi * J_0(x) * ln(x) log term; asymptotic form for x>=8."""
+    if x < 8.0:
+        val y = x * x
+        val ans1 = -2957821389.0 + y * (7062834065.0 + y * (-512359803.6 + y * (10879881.29 + y * (-86327.92757 + y * 228.4622733))))
+        val ans2 = 40076544269.0 + y * (745249964.8 + y * (7189466.438 + y * (47447.26470 + y * (226.1030244 + y * 1.0))))
+        return (ans1 / ans2) + 0.636619772 * _besselj(x, 0) * _ln_f64(x)
+    val z = 8.0 / x
+    val y = z * z
+    val xx = x - 0.785398164
+    val ans1 = 1.0 + y * (-0.1098628627e-2 + y * (0.2734510407e-4 + y * (-0.2073370639e-5 + y * 0.2093887211e-6)))
+    val ans2 = -0.1562499995e-1 + y * (0.1430488765e-3 + y * (-0.6911147651e-5 + y * (0.7621095161e-6 + y * (-0.934935152e-7))))
+    _sqrt_f64(0.636619772 / x) * (_sin_f64(xx) * ans1 + z * _cos_f64(xx) * ans2)
+
+fn _bessy1(x: f64) -> f64:
+    """Bessel function of the second kind order 1, Y_1(x), x>0 (NR bessy1)."""
+    if x < 8.0:
+        val y = x * x
+        val ans1 = x * (-0.4900604943e13 + y * (0.1275274390e13 + y * (-0.5153438139e11 + y * (0.7349264551e9 + y * (-0.4237922726e7 + y * 0.8511937935e4)))))
+        val ans2 = 0.2499580570e14 + y * (0.4244419664e12 + y * (0.3733650367e10 + y * (0.2245904002e8 + y * (0.1020426050e6 + y * (0.3549632885e3 + y)))))
+        return (ans1 / ans2) + 0.636619772 * (_besselj(x, 1) * _ln_f64(x) - 1.0 / x)
+    val z = 8.0 / x
+    val y = z * z
+    val xx = x - 2.356194491
+    val ans1 = 1.0 + y * (0.183105e-2 + y * (-0.3516396496e-4 + y * (0.2457520174e-5 + y * (-0.240337019e-6))))
+    val ans2 = 0.04687499995 + y * (-0.2002690873e-3 + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)))
+    _sqrt_f64(0.636619772 / x) * (_sin_f64(xx) * ans1 + z * _cos_f64(xx) * ans2)
+
+fn _bessy(n: i64, x: f64) -> f64:
+    """Y_n(x) for integer order n>=0 via Y_0/Y_1 seeds + upward recurrence
+    Y_{j+1}=(2j/x)Y_j - Y_{j-1} (NR bessy)."""
+    if n == 0:
+        return _bessy0(x)
+    if n == 1:
+        return _bessy1(x)
+    val tox = 2.0 / x
+    var by = _bessy1(x)
+    var bym = _bessy0(x)
+    var j: i64 = 1
+    while j < n:
+        val byp = j.to_f64() * tox * by - bym
+        bym = by
+        by = byp
+        j = j + 1
+    by
+
+fn _bessk0(x: f64) -> f64:
+    """Modified Bessel function of the second kind order 0, K_0(x), x>0. Rational
+    approximation (NR bessk0) using I_0(x) and a -ln(x/2) log term for x<=2;
+    asymptotic exp(-x)/sqrt(x) series for x>2."""
+    if x <= 2.0:
+        val y = x * x / 4.0
+        return (0.0 - _ln_f64(x / 2.0) * _besseli(x, 0)) + (-0.57721566 + y * (0.42278420 + y * (0.23069756 + y * (0.3488590e-1 + y * (0.262698e-2 + y * (0.10750e-3 + y * 0.74e-5))))))
+    val y = 2.0 / x
+    (_exp_f64(0.0 - x) / _sqrt_f64(x)) * (1.25331414 + y * (-0.7832358e-1 + y * (0.2189568e-1 + y * (-0.1062446e-1 + y * (0.587872e-2 + y * (-0.251540e-2 + y * 0.53208e-3))))))
+
+fn _bessk1(x: f64) -> f64:
+    """Modified Bessel function of the second kind order 1, K_1(x), x>0 (NR bessk1)."""
+    if x <= 2.0:
+        val y = x * x / 4.0
+        return (_ln_f64(x / 2.0) * _besseli(x, 1)) + (1.0 / x) * (1.0 + y * (0.15443144 + y * (-0.67278579 + y * (-0.18156897 + y * (-0.1919402e-1 + y * (-0.110404e-2 + y * (-0.4686e-4)))))))
+    val y = 2.0 / x
+    (_exp_f64(0.0 - x) / _sqrt_f64(x)) * (1.25331414 + y * (0.23498619 + y * (-0.3655620e-1 + y * (0.1504268e-1 + y * (-0.780353e-2 + y * (0.325614e-2 + y * (-0.68245e-3)))))))
+
+fn _bessk(n: i64, x: f64) -> f64:
+    """K_n(x) for integer order n>=0 via K_0/K_1 seeds + upward recurrence
+    K_{j+1}=(2j/x)K_j + K_{j-1} (NR bessk)."""
+    if n == 0:
+        return _bessk0(x)
+    if n == 1:
+        return _bessk1(x)
+    val tox = 2.0 / x
+    var bkm = _bessk0(x)
+    var bk = _bessk1(x)
+    var j: i64 = 1
+    while j < n:
+        val bkp = bkm + j.to_f64() * tox * bk
+        bkm = bk
+        bk = bkp
+        j = j + 1
+    bk
 
 fn _count_decimals_in_fmt(fmt: text) -> i32:
     """Zeros after the decimal point in an Excel format ('0.00' -> 2)."""
@@ -3674,6 +3975,28 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
             if ix > 15.0 or ix < -15.0:
                 return CellValue.ErrorVal(message: "BESSELI domain is |x| <= 15")
             return CellValue.NumberVal(value: _besseli(ix, in_))
+        "BESSELY":
+            # BESSELY(x, n): Bessel Y_n, integer order n>=0, x>0 (singular at 0)
+            if flat.len() < 2:
+                return CellValue.ErrorVal(message: "BESSELY requires x and order n")
+            val yn = flat[1].to_i64()
+            val yx = flat[0]
+            if yn < 0:
+                return CellValue.ErrorVal(message: "BESSELY order must be >= 0")
+            if yx <= 0.0:
+                return CellValue.ErrorVal(message: "BESSELY requires x > 0")
+            return CellValue.NumberVal(value: _bessy(yn, yx))
+        "BESSELK":
+            # BESSELK(x, n): modified Bessel K_n, integer order n>=0, x>0
+            if flat.len() < 2:
+                return CellValue.ErrorVal(message: "BESSELK requires x and order n")
+            val kn = flat[1].to_i64()
+            val kx = flat[0]
+            if kn < 0:
+                return CellValue.ErrorVal(message: "BESSELK order must be >= 0")
+            if kx <= 0.0:
+                return CellValue.ErrorVal(message: "BESSELK requires x > 0")
+            return CellValue.NumberVal(value: _bessk(kn, kx))
         "DATE":
             if args.len() >= 3:
                 return CellValue.NumberVal(value: _serial_from_civil(_first_val(args[0]).to_i64(), _first_val(args[1]).to_i64(), _first_val(args[2]).to_i64()))

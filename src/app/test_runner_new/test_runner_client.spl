@@ -8,9 +8,25 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_rename(from: text, to: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_sleep_ms(ms: i64)
 extern fn rt_time_now_unix_micros() -> i64
+
+# Atomic write: tmp + rename. Plain rt_file_write_text does open(create,
+# truncate) then write() as two separate steps, so a concurrent reader that
+# lists the directory and opens the file between those steps can observe a
+# 0-byte (or partially written) file. The daemon's poll loop lists+reads
+# request files this way, so a non-atomic write here races with it and the
+# daemon can misread an in-flight request as empty ("missing test path"),
+# consuming and discarding the real request (#98).
+fn atomic_write_text(path: text, content: text) -> bool:
+    val tmp_path = "{path}.tmp"
+    if rt_file_write_text(tmp_path, content):
+        if rt_file_rename(tmp_path, path):
+            return true
+        rt_file_delete(tmp_path)
+    rt_file_write_text(path, content)
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
 val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
@@ -151,7 +167,7 @@ fn main() -> i64:
     val req_path = "{LIGHT_REQ_DIR}/{id}"
     val resp_path = "{LIGHT_RESP_DIR}/{id}.resp"
     rt_file_delete(resp_path)
-    rt_file_write_text(req_path, run.path)
+    atomic_write_text(req_path, run.path)
     val deadline = rt_time_now_unix_micros() + (run.timeout_secs * 1000000)
     while rt_time_now_unix_micros() < deadline:
         if rt_file_exists(resp_path):
