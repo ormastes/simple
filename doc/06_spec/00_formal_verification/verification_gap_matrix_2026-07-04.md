@@ -81,7 +81,7 @@ Plus `src/compiler_rust/lib/std/src` (std proofs project, same gate).
 | LOCKS: acquire/release ordering races | COVERED | `memory_model_drf` lock theorems (parallel stream) | P0 |
 | TYPE SYSTEM: struct=value, class=ref soundness | **COVERED (NEW)** | `type_value_semantics` — copy independence both directions, alias write visibility | P0 |
 | TYPE SYSTEM: inference determinism, async effects | COVERED | `type_inference_compile` | P1 |
-| FFI: rt_* contract safety (arg/ownership across boundary) | MISSING — propose: model rt_* call as capability transfer; no callee retention of caller-owned nogc pointers | — | P1 |
+| FFI: rt_* contract safety (extern resolution + tag/box) | **COVERED (NEW)** | `ffi_contract` — (a) #97 link guard: accepted build ⇒ every declared rt_* resolves, no null call (`no_null_call`, `undefined_rejects`); (b) #117 tag/box: RuntimeValue is tagged-scalar XOR heap-ptr; box∘unbox=id per kind (`int_roundtrip`, `heap_roundtrip`), and double-untag is impossible (`no_double_untag`, `unbox_result_not_reboxable`) — each op consumes exactly one box level | P1 |
 | FILESYSTEM | COVERED | `fat32`, `formal/nvfs` | P1 |
 | KERNEL: capabilities | COVERED | `kernel_capabilities`, `memory_capabilities` | P0 |
 | HARDWARE: RISC-V RVFI | COVERED | `riscv_product` (stream) | P1 |

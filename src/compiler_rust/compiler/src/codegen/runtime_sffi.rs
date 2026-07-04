@@ -378,6 +378,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_to_upper", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_lower", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_int", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_to_int_lenient", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_index_of", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_find", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_rfind", &[I64, I64], &[I64]),
