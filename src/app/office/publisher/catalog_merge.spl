@@ -1,0 +1,95 @@
+# Publisher-like Catalog Merge
+#
+# Publisher's "catalog merge" repeats a single template tile once per data
+# record, tiling the filled-in tiles across a grid on a page — e.g. a
+# product catalog where each tile shows one row's Name/Price. Reuses the
+# already-landed page_layout Page/TextFrame model; this module only adds
+# the template + substitution + grid-placement logic on top of it.
+#
+# Placeholder substitution: `{FieldName}` (single braces) in a template
+# line is replaced with the matching record value. Unmatched placeholders
+# are left as-is (no matching field name means no substitution happens for
+# that token, so the literal "{Foo}" stays in the output).
+
+use app.office.publisher.page_layout.{TextFrame, Page, page_new, frame_new, page_add_frame, frame_text, page_frame_count, page_render_html}
+
+# =========================================================================
+# Core Struct
+# =========================================================================
+
+struct CatalogTemplate:
+    tile_w: i32
+    tile_h: i32
+    field_lines: [text]
+
+fn catalog_template_new(tile_w: i32, tile_h: i32, field_lines: [text]) -> CatalogTemplate:
+    """Create a catalog tile template: a tile of tile_w x tile_h holding the
+    given text lines, each of which may contain `{FieldName}` placeholders."""
+    return CatalogTemplate(tile_w: tile_w, tile_h: tile_h, field_lines: field_lines)
+
+# =========================================================================
+# Merge
+# =========================================================================
+
+fn _substitute_line(line_text: text, field_names: [text], field_values: [text]) -> text:
+    """Replace every `{FieldName}` placeholder in line_text with the parallel
+    field_values entry for that name. Fields with no matching template
+    placeholder are simply not substituted; placeholders with no matching
+    field name are left as-is (unmatched -> literal token stays)."""
+    var result = line_text
+    var i: i32 = 0
+    while i < field_names.len():
+        val placeholder = "{" + field_names[i] + "}"
+        result = result.replace(placeholder, field_values[i])
+        i = i + 1
+    result
+
+fn merge_tile(template: CatalogTemplate, field_names: [text], field_values: [text]) -> text:
+    """Fill one tile: substitute every template line's `{FieldName}`
+    placeholders from the parallel field_names/field_values arrays, and
+    join the filled lines with "\\n"."""
+    var result = ""
+    var first = true
+    for line_text in template.field_lines:
+        val filled = _substitute_line(line_text, field_names, field_values)
+        if first:
+            result = filled
+            first = false
+        else:
+            result = result + "\n" + filled
+    result
+
+fn catalog_merge(template: CatalogTemplate, page_w: i32, page_h: i32, cols: i32, field_names: [text], records: [[text]]) -> Page:
+    """Tile one filled tile per record across a `cols`-column grid on a
+    page_w x page_h page. Record i is placed at grid position
+    (row = i / cols, col = i % cols), at pixel position
+    (x = col * tile_w, y = row * tile_h), as a TextFrame named "tile<i>"
+    whose text is merge_tile(template, field_names, record)."""
+    var page = page_new(page_w, page_h)
+    var i: i32 = 0
+    for record in records:
+        val row = i / cols
+        val col = i % cols
+        val x = col * template.tile_w
+        val y = row * template.tile_h
+        val tile_text = merge_tile(template, field_names, record)
+        val id = "tile" + i.to_text()
+        val blank_frame = frame_new(id, x, y, template.tile_w, template.tile_h, "")
+        val frame = TextFrame(id: blank_frame.id, x: blank_frame.x, y: blank_frame.y, w: blank_frame.w, h: blank_frame.h, text: tile_text, next_id: blank_frame.next_id)
+        page = page_add_frame(page, frame)
+        i = i + 1
+    page
+
+# =========================================================================
+# Queries / Rendering
+# =========================================================================
+
+fn catalog_tile_count(page: Page) -> i32:
+    """Return the number of merged tiles (frames) on the page."""
+    page_frame_count(page)
+
+fn catalog_render_html(template: CatalogTemplate, page_w: i32, page_h: i32, cols: i32, field_names: [text], records: [[text]]) -> text:
+    """Merge and render the resulting page as one self-contained HTML
+    string (via page_layout.page_render_html)."""
+    val page = catalog_merge(template, page_w, page_h, cols, field_names, records)
+    page_render_html(page)
