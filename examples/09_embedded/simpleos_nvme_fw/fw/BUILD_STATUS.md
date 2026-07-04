@@ -77,7 +77,7 @@ suite is green (gate
 
 Scope note (explicit): "full NVMe SSD fw" here = the host-runnable simulation (run-green).
 P9 — bare-metal **rv32** reference: `fw_rv32/entry.spl` is written as an array-free scalar
-re-expression of the RAIN reconstruct, `bin/simple check`-clean, host-verified, and wired through
+re-expression of the RAIN reconstruct, SECDED ECC floor, fixed map cache, and fixed journal ring, `bin/simple check`-clean, host-verified, and wired through
 the rv32 boot hook (`rt_rv32_boot_optional_nvme_fw_selftest`). The full 22-module no-alloc firmware
 has not been ported into that boot path yet. P9 is therefore **reference-wired, full-port pending**.
 
@@ -135,7 +135,7 @@ channel-level parallelism is a model a single-threaded sim cannot physically exh
 scope); P4 has a **wired segmented-PRP host-byte floor** (full HostMem/SGL/IOMMU remains out of scope);
 P5 has a **wired bounded-map-cache + fixed arena/free-list floor** (full DRAM subsystem remains out of scope);
 P6 has a **wired cooperative-owner floor** (true multicore/preemption remains out of scope);
-P9 is **reference-done, full-port pending** (rv32 note above).
+P9 is **reference-wired, full-port pending** (rv32 note above).
 
 Silicon-only pieces remain out of scope (real BCH/RS/LDPC hardware ECC, MMIO/PCIe, full PRP/SGL DMA, real DRAM refresh/ECC/bandwidth, multicore/preemptive scheduling, persistent backing
 store) — see `PRODUCTION_STATUS.md` § Silicon boundary. This is a hardware-FAITHFUL **simulation**,

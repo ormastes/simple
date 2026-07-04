@@ -1,8 +1,9 @@
 # NVMe firmware — bare-metal RV32 on-device self-test (`fw_rv32/`, gap-closure P9)
 
 `logic.spl` is an **array-free, scalar** re-expression of the firmware's core **RAIN XOR-parity
-reconstruct** (`../fw/rain.spl`, proven in `../fw/proofs/Rain.lean`) plus the SECDED
-payload-window ECC floor, written to run inside the bare-metal rv32 boot path with
+reconstruct** (`../fw/rain.spl`, proven in `../fw/proofs/Rain.lean`), the SECDED
+payload-window ECC floor, a fixed-capacity write-back map-cache floor, and a fixed-capacity
+journal-ring floor, written to run inside the bare-metal rv32 boot path with
 **no heap and no arrays** — matching the constraint documented in
 `src/os/kernel/arch/riscv32/boot.spl` ("keep this module freestanding and minimal ... without
 pulling runtime formatting, arrays, or boot metadata into the first-stage entry object"). It
@@ -33,7 +34,7 @@ rv32 OS image cannot be mistaken for P9 firmware evidence.
 
 ## Status (2026-06-30): toolchain FIXED + freestanding runtime COMPLETED; rv32 OS builds & boots
 
-- ✅ `logic.spl` / `entry.spl` are `check`-clean, array-free, and the RAIN+ECC logic is
+- ✅ `logic.spl` / `entry.spl` are `check`-clean, array-free, and the RAIN+ECC+map-cache+journal-ring logic is
   host-verified (`RV32 NVME FW LOGIC OK`).
 - ✅ **Toolchain fixed and on origin.** `native-build --target riscv32-unknown-none` no longer
   exits with a silent 255: it routes to the in-process Rust LLVM handler, compiles riscv objects,
@@ -52,8 +53,8 @@ rv32 OS image cannot be mistaken for P9 firmware evidence.
   boots under `qemu-system-riscv32 -bios none`: `=== SimpleOS RV32 smoke boot === / SimpleOS RV32 boot
   OK` (the trailing `TEST FAILED` is only the absent fat32 disk image).
 
-`entry.spl` remains the **standalone logic reference** for the firmware's RAIN reconstruct
-(host-verified), now wired through the rv32 boot hook. A standalone `native-build` of it alone still
+`entry.spl` remains the **standalone logic reference** for the firmware's RAIN reconstruct,
+ECC floor, fixed map cache, and fixed journal ring (host-verified), now wired through the rv32 boot hook. A standalone `native-build` of it alone still
 won't link — its dir has no `boot/` for C autodiscovery — so the bootable path is the OS build
 (`simple os build --arch=riscv32`, or the proven smoke-lane recipe), which links the shared
 freestanding runtime. The full 22-module no-alloc port of `../fw/` remains the larger ceiling.
