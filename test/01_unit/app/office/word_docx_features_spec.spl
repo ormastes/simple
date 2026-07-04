@@ -161,3 +161,99 @@ describe "DOCX headers/footers: document_to_docx_bytes_hf":
         val hf = docx_bytes_to_header_footer(docx)
         expect(hf.header_text).to_equal("")
         expect(hf.footer_text).to_equal("")
+
+describe "DOCX footnotes: markdown [^1] / [^1]: note round trip":
+    """A footnote reference (`[^1]`, an empty-text TextSpan carrying
+    footnote_id) and its definition (a FootnoteDef block, conventionally at
+    the end of the document) round-trip through word/footnotes.xml: the two
+    mandatory separator footnotes (w:id -1/0), one <w:footnote> per
+    definition, and <w:footnoteReference w:id="N"/> runs in the body."""
+
+    it "round-trips a single footnote reference + definition exactly":
+        val md = "See the note.[^1]\n\n[^1]: This is the note text."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "emits word/footnotes.xml with the two mandatory separators and the real footnote":
+        val md = "Ref here.[^1]\n\n[^1]: Note body."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/footnotes.xml")).to_be(true)
+        val footnotes_xml = zip_extract_text(docx, "word/footnotes.xml")
+        expect(footnotes_xml).to_contain("w:type=\"separator\"")
+        expect(footnotes_xml).to_contain("w:type=\"continuationSeparator\"")
+        expect(footnotes_xml).to_contain("<w:footnote w:id=\"1\">")
+        expect(footnotes_xml).to_contain("Note body.")
+
+    it "emits a <w:footnoteReference w:id=...> run in word/document.xml":
+        val md = "Ref here.[^1]\n\n[^1]: Note body."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:footnoteReference w:id=\"1\"/>")
+
+    it "wires word/footnotes.xml into content types and document.xml.rels":
+        val md = "Ref here.[^1]\n\n[^1]: Note body."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val types = zip_extract_text(docx, "[Content_Types].xml")
+        expect(types).to_contain("/word/footnotes.xml")
+        val rels = zip_extract_text(docx, "word/_rels/document.xml.rels")
+        expect(rels).to_contain("relationships/footnotes")
+
+    it "round-trips two footnote references with two definitions":
+        val md = "First.[^1] Second.[^2]\n\n[^1]: One.\n[^2]: Two."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "a footnote-less document has no footnotes.xml part (plain-doc byte identity)":
+        val doc = parse_markdown_document("# Report\n\nBody text.", "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/footnotes.xml")).to_be(false)
+
+describe "DOCX ordered lists: markdown `1. item` round trip":
+    """An OrderedItem block exports as w:numPr (numId 1, decimal) against a
+    minimal word/numbering.xml, imports back via <w:numPr> detection, renders
+    as a real <ol><li> (not the per-item <div> bullets get today), and
+    re-serializes with sequential 1-based numbers."""
+
+    it "round-trips a 3-item ordered list exactly":
+        val md = "1. First\n2. Second\n3. Third"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "emits w:numPr with numId 1 and a minimal word/numbering.xml":
+        val md = "1. First\n2. Second"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>")
+        expect(_has_entry(docx, "word/numbering.xml")).to_be(true)
+        val numbering_xml = zip_extract_text(docx, "word/numbering.xml")
+        expect(numbering_xml).to_contain("w:numFmt w:val=\"decimal\"")
+
+    it "wires word/numbering.xml into content types and document.xml.rels":
+        val md = "1. First\n2. Second"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val types = zip_extract_text(docx, "[Content_Types].xml")
+        expect(types).to_contain("/word/numbering.xml")
+        val rels = zip_extract_text(docx, "word/_rels/document.xml.rels")
+        expect(rels).to_contain("relationships/numbering")
+
+    it "an ordered-list-less document has no numbering.xml part (plain-doc byte identity)":
+        val doc = parse_markdown_document("# Report\n\nBody text.", "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/numbering.xml")).to_be(false)
+
+    it "a plain document with no new features is byte-identical to a header/footer-empty call":
+        val doc = parse_markdown_document("# Report\n\n- a bullet\n\nBody text.", "d")
+        val plain = document_to_docx_bytes(doc)
+        val hf_empty = document_to_docx_bytes_hf(doc, "", "")
+        expect(plain == hf_empty).to_be(true)
