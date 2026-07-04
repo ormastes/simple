@@ -69,8 +69,8 @@ and never skips silently. Run:
 `bin/simple test test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl`.
 
 NOTE (2026-07-04): this asserts the prebuilt rv32 OS ELF boots. The firmware-specific P9 wrapper
-has a separate fail-closed scenario below: until `boot.spl` calls `nvme_fw_rv32_selftest`, it must
-refuse to build a stock rv32 OS image as NVMe firmware evidence.
+has a separate scenario below proving the boot hook is wired and the firmware entry owns the
+strong exported hook that prints the PASS marker.
 
 ## Scenarios
 
@@ -130,17 +130,22 @@ else:
 ### NVMe firmware rv32 P9 build evidence
 
 The P9 firmware-specific rv32 wrapper must not build a stock OS image and call it NVMe
-evidence. Until boot.spl is wired to `nvme_fw_rv32_selftest`, it fails closed.
+evidence. The rv32 boot path now has an optional weak hook, and the NVMe firmware entry
+provides the strong exported hook that prints the firmware PASS marker.
 
-#### runs the rv32 no-alloc logic reference and fails closed until boot wiring exists
+#### runs the rv32 no-alloc logic reference and proves the boot hook is wired
 
 - The array-free rv32 RAIN+ECC reference typechecks
    - Expected: check_code equals `0`
 - The host-runnable scalar logic reference passes
    - Expected: logic_code equals `0`
    - Expected: logic_out contains `RV32 NVME FW LOGIC OK`
-- The P9 build wrapper refuses to build a stock rv32 OS as firmware evidence
-   - Expected: build_out contains `NVME_RV32_BOOT_NOT_WIRED`
+- The stock rv32 boot path calls the optional NVMe firmware self-test hook
+   - Expected: boot_code equals `0`
+- The firmware rv32 entry exports the strong hook that prints the PASS marker
+   - Expected: hook_code equals `0`
+   - Expected: hook_out contains `rt_rv32_boot_optional_nvme_fw_selftest`
+   - Expected: hook_out contains `ALL RV32 NVME FW CHECKS PASS`
 
 
 <details>
@@ -159,9 +164,15 @@ val (logic_out, logic_err, logic_code) = _run("bin/simple run examples/09_embedd
 expect(logic_code).to_equal(0)
 expect(logic_out).to_contain("RV32 NVME FW LOGIC OK")
 
-step("The P9 build wrapper refuses to build a stock rv32 OS as firmware evidence")
-val (build_out, build_err, build_code) = _run("sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs 2>&1 || true")
-expect(build_out).to_contain("NVME_RV32_BOOT_NOT_WIRED")
+step("The stock rv32 boot path calls the optional NVMe firmware self-test hook")
+val (boot_out, boot_err, boot_code) = _run("rg -n 'rt_rv32_boot_optional_nvme_fw_selftest\\(\\)' src/os/kernel/arch/riscv32/boot.spl")
+expect(boot_code).to_equal(0)
+
+step("The firmware rv32 entry exports the strong hook that prints the PASS marker")
+val (hook_out, hook_err, hook_code) = _run("rg -n '@export\\(\"C\", name: \"rt_rv32_boot_optional_nvme_fw_selftest\"\\)|ALL RV32 NVME FW CHECKS PASS' examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
+expect(hook_code).to_equal(0)
+expect(hook_out).to_contain("rt_rv32_boot_optional_nvme_fw_selftest")
+expect(hook_out).to_contain("ALL RV32 NVME FW CHECKS PASS")
 ```
 
 </details>

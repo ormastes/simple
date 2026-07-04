@@ -17,16 +17,16 @@ The scalar logic is `bin/simple check`-clean and host-verified:
 
 ## Integration
 
-`entry.spl` exposes `nvme_fw_rv32_selftest()`, which delegates to `logic.spl` and is designed to
-be called from the rv32 boot chain:
+`entry.spl` exposes `nvme_fw_rv32_selftest()`, delegates to `logic.spl`, and exports the strong
+`rt_rv32_boot_optional_nvme_fw_selftest` hook consumed by the rv32 boot chain:
 
-1. Add a `nvme_fw_rv32_selftest()` call in `src/os/kernel/arch/riscv32/boot.spl` `boot_main`,
-   after `riscv_noalloc_log_init()`.
+1. `src/os/kernel/arch/riscv32/boot.spl` calls `rt_rv32_boot_optional_nvme_fw_selftest()` after
+   `riscv_noalloc_log_init()`.
 2. Build the rv32 OS ELF: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`.
 3. Boot + check the marker: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs <elf>`.
 
-`build.shs` fails closed with `NVME_RV32_BOOT_NOT_WIRED` until step 1 is true, so a stock rv32 OS
-image cannot be mistaken for P9 firmware evidence.
+`build.shs` fails closed with `NVME_RV32_BOOT_NOT_WIRED` if the boot hook is removed, so a stock
+rv32 OS image cannot be mistaken for P9 firmware evidence.
 
 (No standalone `@naked _start` is hand-written here — the proven `_start`/crt/UART live in
 `boot.spl`; reusing them is more reliable than an untestable hand-rolled entry.)
@@ -53,8 +53,9 @@ image cannot be mistaken for P9 firmware evidence.
   OK` (the trailing `TEST FAILED` is only the absent fat32 disk image).
 
 `entry.spl` remains the **standalone logic reference** for the firmware's RAIN reconstruct
-(host-verified). A standalone `native-build` of it alone still won't link — its dir has no `boot/`
-for C autodiscovery — so the bootable path is the OS build (`simple os build --arch=riscv32`, or the
-proven smoke-lane recipe), which links the shared freestanding runtime. The full 22-module no-alloc
-port of `../fw/` remains the larger ceiling. Tracked:
+(host-verified), now wired through the rv32 boot hook. A standalone `native-build` of it alone still
+won't link — its dir has no `boot/` for C autodiscovery — so the bootable path is the OS build
+(`simple os build --arch=riscv32`, or the proven smoke-lane recipe), which links the shared
+freestanding runtime. The full 22-module no-alloc port of `../fw/` remains the larger ceiling.
+Tracked:
 `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
