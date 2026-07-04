@@ -418,9 +418,16 @@ impl HirLowering:
         val type_ = self.lower_type(fld_type)
         val symbol = self.symbols.define(fld.name, SymbolKind.Field, Some(type_), fld.span, fld.visibility, false, nil)
 
-        # Lower default without closures to avoid bootstrap SSA issues
-        val lowered_default = if fld.default.?:
-            Some(self.lower_hir_expr(fld.default.unwrap()))
+        # Lower default without closures to avoid bootstrap SSA issues.
+        # `Field.default` is a DESUGARED plain Expr field gated by `has_default`
+        # (NOT an Optional): the old `fld.default.?` / `.unwrap()` applied Option
+        # semantics to a plain field, which on stage4 mis-evaluates to true and
+        # unwraps a nil Expr -> lower_hir_expr(nil) -> "field access on nil
+        # receiver" SIGILL (bug doc iteration 20 #86; same class as the iter14
+        # eval_block trailing-value fix). Gate on has_default + use default
+        # directly.
+        val lowered_default = if fld.has_default:
+            Some(self.lower_hir_expr(fld.default))
         else:
             nil
 
