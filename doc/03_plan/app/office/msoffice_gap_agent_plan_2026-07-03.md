@@ -411,10 +411,25 @@ hang/slowness is specific to BrowserBackend.render_frame on a UITree (vs
 the spec's direct-HTML path), not machine contention. The pilot spec is
 HELD OUT of the tree (scratchpad backup/round3/office_gui_pilot_spec.spl.held)
 because committing it would hang the test daemon (see the 60s silent-kill
-bug — it would greenwash anyway). NEXT: instrument which stage hangs
-(create vs render_frame vs pixel readback), try after the bootstrap build
-frees the machine, and/or run on the compiled binary instead of the
-interpreter. Do NOT claim GUI works until the proof line prints.
+bug — it would greenwash anyway). Do NOT claim GUI works until the proof
+line prints.
+
+### CARD 16 blocker DIAGNOSED (2026-07-04, measured)
+The pixel stage of render_frame scales ~QUADRATICALLY with `<style>` CSS
+size under the interpreter: empty ~4.7s, 10KB ~6.9s, 40KB >60s, full
+generate_css("dark") 292,724B never completes. Routing:
+simple_web_engine2d_renderer.spl:887 (any class/id selector disables the
+fast heuristic) → :892 simple_web_layout_render_html_pixels (the quadratic
+stage). **AUDIT: browser_backend_pixel_paths_spec is GREENWASHED — the
+renderer HARD-CODES that spec's widget ids (:775-784) and paints fixed
+rectangles (:786); the step-1 example validation never exercised the real
+pixel path.** Bug doc:
+doc/08_tracking/bug/browser_engine_css_size_quadratic_pixel_render_2026-07-04.md.
+Unblock path: fix the quadratic stage or add a cached/minimal-CSS knob
+(~10KB budget measured feasible at 96x64); REMOVE the hard-coded fast path
+and make the framework spec pass on the real path; then re-run the pilot
+acceptance. gui.spl + mod.spl wiring is committed and correct against the
+real API — it goes green the moment the renderer fix lands.
 
 ---
 
