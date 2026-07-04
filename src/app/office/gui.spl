@@ -29,13 +29,14 @@
 # line to print. Remaining work: root-cause the full-binary slowdown and
 # restore full theme CSS here.
 
-use common.ui.widget.{UITree}
+use common.ui.widget.{UITree, WidgetNode}
 use common.ui.state.{init_state}
-use common.ui.builder.{column, table_widget, build_tree_with_title}
+use common.ui.builder.{column, table_widget, build_tree_with_title, text_widget, progress, with_width, with_height}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.office.counter.{CounterApp}
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.cell.{cell_display_text, col_to_letter}
+use app.office.sheets.chart.{ChartSeries, chart_series_from_ranges}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_render_html_pixels}
 
 # Matches BrowserApp's viewport (src/app/ui.browser/app.spl uses width=96,
@@ -182,3 +183,108 @@ fn office_gui_pixel_checksum(pixels: [u32]) -> i64:
     for p in pixels:
         sum = sum + p.to_i64()
     sum
+
+# ---------------------------------------------------------------------------
+# Chart GUI view (CARD 16 next pillar): render one of the suite's existing
+# sheet_*_chart_svg data sources through the real GUI widget/pixel pipeline.
+#
+# Key finding: the browser engine has NO inline-SVG support (no "svg" hit
+# anywhere under src/lib/gc_async_mut/gpu/browser_engine/ or
+# src/app/ui.browser/), so the sheet_*_chart_svg text generators in
+# sheets/chart.spl cannot be embedded as-is. Instead this view reuses
+# chart.spl's DATA layer only (chart_series_from_ranges, which already
+# resolves formula cells to their cached computed value) and renders each
+# data point as a "progress" widget: apply_decls/DeclPairs confirmed
+# width/height/background ARE supported CSS properties, and the existing
+# progress widget already emits a percent-width inner bar
+# (render_html_progress: style="width: {value}%") -- a real proportional
+# bar out of native widget machinery, no SVG needed.
+# ---------------------------------------------------------------------------
+
+fn office_gui_chart_minimal_css() -> text:
+    """Curated stylesheet adding the chart view's progress-bar classes on top
+    of office_gui_minimal_css's base panel/layout classes. Same fallback-knob
+    rationale as office_gui_minimal_css/office_gui_sheet_minimal_css above."""
+    office_gui_minimal_css() +
+    ".widget-progress{flex-direction:column;margin-bottom:4px;}" +
+    ".progress-track{background:#e5e7eb;height:10px;border-radius:3px;}" +
+    ".progress-bar{background:#2b579a;height:10px;border-radius:3px;}"
+
+struct ChartGuiView:
+    tree: UITree
+    text_dump: text
+
+fn _chart_gui_fmt_val(v: f64) -> text:
+    """Match chart.spl's _fmt_val: integer-valued floats print without a
+    trailing '.0'."""
+    val i = v.to_i64()
+    if v - i.to_f64() == 0.0:
+        return "{i}"
+    "{v}"
+
+fn _chart_gui_error_tree(title: text) -> UITree:
+    val root = column("chart_gui_root", [text_widget("chart_gui_empty", "No data")])
+    build_tree_with_title(root, title, "light")
+
+fn chart_gui_view(sheet: Sheet, chart_kind: text, value_range: text, labels_range: text, title: text, w: i32, h: i32) -> ChartGuiView:
+    """Build a GUI chart view of `sheet`'s data (labels from labels_range,
+    numbers from value_range -- same two-range shape sheet_*_chart_svg's
+    chart_series_from_ranges takes, so formula cells resolve to their cached
+    computed value, not raw '=expr' text). Renders one horizontal
+    progress-bar widget per data point (bar width% = value's share of the
+    max value) under a title text widget, wrapped in a `w`x`h` container.
+    Returns both a UITree (for real pixel rendering through the browser
+    engine) and a plain-text dump for testability without parsing HTML/
+    widget trees: "chart|<kind>|<title>" first, then one
+    "bar|<label>|<value>|<pct-of-max>" line per data point. Fail-closed (an
+    "error|<reason>" dump line, no crash) when either range is empty/
+    unparseable or the two ranges resolve to different lengths."""
+    val series = chart_series_from_ranges(sheet, labels_range, value_range)
+    var dump_lines: [text] = ["chart|{chart_kind}|{title}"]
+    if series.labels.len() == 0 or series.values.len() == 0:
+        dump_lines.push("error|empty-range")
+        return ChartGuiView(tree: _chart_gui_error_tree(title), text_dump: dump_lines.join("\n"))
+    if series.labels.len() != series.values.len():
+        dump_lines.push("error|range-length-mismatch")
+        return ChartGuiView(tree: _chart_gui_error_tree(title), text_dump: dump_lines.join("\n"))
+
+    var max_v = 0.0
+    for v in series.values:
+        if v > max_v:
+            max_v = v
+    var axis_max = max_v
+    if axis_max <= 0.0:
+        axis_max = 1.0
+
+    var bars: [WidgetNode] = []
+    val n = series.values.len()
+    var i = 0
+    while i < n:
+        val v = series.values[i]
+        val label = series.labels[i]
+        val vlab = _chart_gui_fmt_val(v)
+        val pct = ((v / axis_max) * 100.0).to_i64()
+        var pct_i32 = pct.to_i32()
+        if pct_i32 < 0:
+            pct_i32 = 0
+        val bar_node = progress("chart_bar_{i}", pct_i32)
+        val bar_labeled = bar_node.set_prop("label", "{label}: {vlab}")
+        bars.push(bar_labeled)
+        dump_lines.push("bar|{label}|{vlab}|{pct}")
+        i = i + 1
+
+    val title_node = text_widget("chart_gui_title", title)
+    var chart_col = column("chart_gui_bars", bars)
+    chart_col = with_width(chart_col, w)
+    chart_col = with_height(chart_col, h)
+    val root = column("chart_gui_root", [title_node, chart_col])
+    val tree = build_tree_with_title(root, title, "light")
+    ChartGuiView(tree: tree, text_dump: dump_lines.join("\n"))
+
+fn office_gui_chart_pixels(view: ChartGuiView) -> [u32]:
+    """Render a ChartGuiView's tree to ARGB pixels via the same real
+    layout/paint pixel path office_gui_frame/office_gui_sheet_pixels use."""
+    val state = init_state(view.tree)
+    val body = render_html_tree(view.tree.root_node(), state)
+    val html = "<html><head><style>" + office_gui_chart_minimal_css() + "</style></head><body>" + body + "</body></html>"
+    simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
