@@ -68,12 +68,9 @@ that reason instead of asserting a boot it could not perform — it never fakes 
 and never skips silently. Run:
 `bin/simple test test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl`.
 
-NOTE (2026-06-30): this asserts the prebuilt ELF *boots*, not that the rv32 build
-pipeline is healthy. The rv32 LLVM native-build is currently broken in some
-environments — even the proven full-OS recipe exits 255 with no diagnostic and no ELF
-— so `build/os/simpleos_riscv32.elf` may be a stale artifact that cannot be regenerated
-there (the fail-closed missing-media branch then fires). See
-`doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
+NOTE (2026-07-04): this asserts the prebuilt rv32 OS ELF boots. The firmware-specific P9 wrapper
+has a separate fail-closed scenario below: until `boot.spl` calls `nvme_fw_rv32_selftest`, it must
+refuse to build a stock rv32 OS image as NVMe firmware evidence.
 
 ## Scenarios
 
@@ -130,12 +127,43 @@ else:
 
 </details>
 
+### NVMe firmware rv32 P9 build evidence
+
+The P9 firmware-specific rv32 wrapper must not build a stock OS image and call it NVMe
+evidence. Until boot.spl is wired to `nvme_fw_rv32_selftest`, it fails closed.
+
+#### keeps the rv32 RAIN reference check-clean and fails closed until boot wiring exists
+
+- The array-free rv32 RAIN reference typechecks
+   - Expected: check_code equals `0`
+- The P9 build wrapper refuses to build a stock rv32 OS as firmware evidence
+   - Expected: build_out contains `NVME_RV32_BOOT_NOT_WIRED`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("The array-free rv32 RAIN reference typechecks")
+val (check_out, check_err, check_code) = _run("bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
+expect(check_code).to_equal(0)
+
+step("The P9 build wrapper refuses to build a stock rv32 OS as firmware evidence")
+val (build_out, build_err, build_code) = _run("sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs 2>&1 || true")
+expect(build_out).to_contain("NVME_RV32_BOOT_NOT_WIRED")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
