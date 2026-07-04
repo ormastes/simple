@@ -681,6 +681,16 @@ theorem two_unordered_lock_acquire_release_same_location_race
     | inl hpo => exact hpo
     | inr hsw => exact hsw
 
+theorem two_unordered_lock_acquire_release_same_location_not_drf
+    (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
+    (hneq_ids : id1 ≠ id2) (hneq_threads : tid1 ≠ tid2) :
+    ¬dataRaceFree
+      { ops := [(id1, MemoryOperation.LockAcquire loc tid1), (id2, MemoryOperation.LockRelease loc tid2)]
+      , programOrder := fun _ _ => False
+      , synchronizesWith := fun _ _ => False } :=
+  hasDataRace_not_dataRaceFree _
+    (two_unordered_lock_acquire_release_same_location_race id1 id2 loc tid1 tid2 hneq_ids hneq_threads)
+
 theorem two_unordered_lock_releases_same_location_race
     (id1 id2 : OperationId) (loc : LocationId) (tid1 tid2 : ThreadId)
     (hneq_ids : id1 ≠ id2) (hneq_threads : tid1 ≠ tid2) :
