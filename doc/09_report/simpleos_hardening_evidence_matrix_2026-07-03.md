@@ -3,6 +3,9 @@
 - status: pass
 - reason: pass
 - passed: 13/13
+- lean_theorem_citation_audit: pass
+- lean_theorem_citation_audit_scope: every Lean theorem declaration under `src/verification` has a matching theorem-name citation in this hardening evidence matrix; model definitions are excluded from this theorem-citation audit
+- lean_theorem_citation_audit_evidence: `for f in $(find src/verification -path '*/.lake' -prune -o -name '*.lean' -print | sort); do miss=$(rg -o '^theorem [A-Za-z0-9_\.]+' "$f" | sed 's/^theorem //' | while read n; do rg -q "(^|[^A-Za-z0-9_.])$n([^A-Za-z0-9_]|$)" doc/09_report/simpleos_hardening_evidence_matrix_2026-07-03.md || echo "$n"; done | head -20); if [ -n "$miss" ]; then echo "$f"; echo "$miss" | sed 's/^/  /'; fi; done` produced no missing theorem names
 - executable_launch_from_fs: pass
 - ssh_shell_smf_and_exec: pass
 - shared_wm_logic: pass
