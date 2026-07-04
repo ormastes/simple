@@ -177,41 +177,18 @@ impl CompilerDriver:
         if trace:
             print "[NATIVE] compiling {total_modules} modules..."
 
-        if total_modules <= 0 or total_modules > 1000000:
-            if trace:
-                print "[NATIVE] bootstrap fallback: compiling app.cli.bootstrap_main"
-            val direct_result = _compile_one_module(ctx, backend_name, is_release, driver_opt_level, output, "app.cli.bootstrap_main")
-            match direct_result:
-                case Ok(obj_path):
-                    if effective_backend == "llvm" or effective_backend == "llvm-lib":
-                        val llvm_opts = NativeLinkOptions(
-                            debug: ctx.options.debug_info,
-                            verbose: ctx.options.verbose,
-                            pie: true,
-                            bare_metal: false,
-                            opt_level: driver_opt_level
-                        )
-                        match link_llvm_native([obj_path], output, llvm_opts):
-                            case Ok(_):
-                                return driver_native_success_with_launch_metadata(ctx, output)
-                            case Err(e):
-                                return CompileResult.CodegenError("LLVM native linking failed: {e}")
-                    val direct_config = NativeLinkConfig(
-                        libraries: [],
-                        library_paths: [],
-                        runtime_path: "",
-                        pie: true,
-                        debug: ctx.options.debug_info,
-                        verbose: ctx.options.verbose,
-                        extra_flags: []
-                    )
-                    match link_to_native([obj_path], output, direct_config):
-                        case Ok(_):
-                            return driver_native_success_with_launch_metadata(ctx, output)
-                        case Err(e):
-                            return CompileResult.CodegenError("Linking failed: {e}")
-                case Err(e):
-                    return CompileResult.CodegenError(e)
+        # Guard (bug #119): refuse empty mir_modules. A requested --entry that
+        # produces no modules is likely a misconfiguration (isolated entry with
+        # zero imports). Hard-error instead of silently falling back to bootstrap_main.
+        if total_modules <= 0:
+            val entry_hint = if ctx.options.input_files.len() > 0:
+                " (input: {ctx.options.input_files[0]})"
+            else:
+                ""
+            return CompileResult.CodegenError("native-build produced empty mir_modules{entry_hint} — no modules loaded. Try adding an import (use std.text) or using the standard entry point.")
+
+        if total_modules > 1000000:
+            return CompileResult.CodegenError("native-build mir_modules exceeds sanity limit (1000000 modules)")
 
         # Phase 1: Check cache, collect cached objects, identify uncached modules
         var uncached_names: [text] = []
@@ -296,15 +273,14 @@ impl CompilerDriver:
             print "[NATIVE] cache: {cache_hit_count} hits, {cache_miss_count} misses"
 
         # Link object files into final executable
-        if object_files.len() == 0 and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            if trace:
-                print "[NATIVE] bootstrap late fallback: compiling app.cli.bootstrap_main"
-            val direct_result = _compile_one_module(ctx, backend_name, is_release, driver_opt_level, output, "app.cli.bootstrap_main")
-            match direct_result:
-                case Ok(obj_path):
-                    object_files = [obj_path]
-                case Err(e):
-                    return CompileResult.CodegenError(e)
+        # Guard (bug #119): refuse to silently fallback when no object files were produced.
+        # This indicates zero modules compiled, which is a hard error — do not substitute bootstrap_main.
+        if object_files.len() == 0:
+            val entry_hint = if ctx.options.input_files.len() > 0:
+                " (input: {ctx.options.input_files[0]})"
+            else:
+                ""
+            return CompileResult.CodegenError("native-build produced no object files{entry_hint} — no modules compiled. Try adding an import (use std.text) or using the standard entry point.")
 
         if (rt_env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? "") == "1":
             if object_files.len() == 0:

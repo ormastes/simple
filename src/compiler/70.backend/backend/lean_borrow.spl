@@ -9,6 +9,7 @@
 
 use compiler.mir.mir_data.*
 use compiler.borrow.borrow_check.*
+use compiler.backend.lean_mir_translate.{sort_mir_functions_by_name}
 
 # ============================================================================
 # Lean Code Generation
@@ -120,9 +121,26 @@ fn generate_borrow_list(count: i64) -> text:
     parts.join(", ")
 
 fn generate_place_definition(place: Place) -> text:
-    """Generate Lean definition for a Place (borrow_graph type)."""
-    var proj_list = "[]"
-    # Build projection list (simplified)
+    """Generate Lean definition for a Place (borrow_graph type).
+
+    Projections are emitted faithfully: dropping them (the previous
+    "simplified" behaviour) merged distinct field/index places into their
+    base, corrupting the aliasing model the safety theorems reason about.
+    """
+    var proj_parts: [text] = []
+    for proj in place.projections:
+        match proj:
+            case Deref:
+                proj_parts = proj_parts.push("PlaceElem.Deref")
+            case Field(idx):
+                proj_parts = proj_parts.push("PlaceElem.Field {idx}")
+            case Index(local):
+                proj_parts = proj_parts.push("PlaceElem.Index {local}")
+            case ConstantIndex(idx):
+                proj_parts = proj_parts.push("PlaceElem.ConstantIndex {idx}")
+            case Downcast(variant):
+                proj_parts = proj_parts.push("PlaceElem.Downcast {variant}")
+    val proj_list = if proj_parts.is_empty(): "[]" else: "[{proj_parts.join(\", \")}]"
     "Place.mk {place.base_id()} {proj_list}"
 
 fn generate_mir_place_definition(place: MirPlace) -> text:
@@ -143,10 +161,13 @@ fn generate_mir_place_definition(place: MirPlace) -> text:
 
 fn generate_borrow_definition(borrow: Borrow, idx: i64) -> text:
     """Generate Lean definition for a Borrow."""
+    # Unique borrows are exclusive: model them as Mutable. Mapping them to
+    # Shared (the previous catch-all) would let a false no-aliasing theorem
+    # be proved over an exclusive borrow.
     val kind = match borrow.kind:
         case Shared: "BorrowKind.Shared"
         case Mutable: "BorrowKind.Mutable"
-        case _: "BorrowKind.Shared"
+        case Unique: "BorrowKind.Mutable"
 
     val place_def = generate_place_definition(borrow.place)
 
@@ -246,10 +267,14 @@ fn generate_lean_module(module: MirModule) -> text:
     output = "{output}namespace {module.name}_safety\n\n"
     output = "{output}open BorrowCheckerSafety\n\n"
 
-    # Generate proofs for each function
+    # Generate proofs for each function in deterministic (name-sorted)
+    # order: Dict key order is not guaranteed, and generated verification
+    # artifacts must be byte-identical for identical input.
     var checker = BorrowChecker.create()
+    var fns: [MirFunction] = []
     for symbol in module.functions.keys():
-        val mir_fn = module.functions[symbol]
+        fns = fns.push(module.functions[symbol])
+    for mir_fn in sort_mir_functions_by_name(fns):
         val body = MirBody.from_function(mir_fn)
 
         # Run borrow checking

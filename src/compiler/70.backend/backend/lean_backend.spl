@@ -354,17 +354,34 @@ class LeanBackend:
 
         # Would iterate through module type definitions
 
-    fn export_function(builder: LeanBuilder, name: text, body: MirBody):
-        """Export a function definition."""
+    fn export_function(builder: LeanBuilder, name: text, body: MirBody) -> Result<(), CompileError>:
+        """Export a function definition.
+
+        Parameter types are taken from the MIR argument locals (not assumed
+        to be Int); a body whose argument locals do not cover `arg_count`
+        is malformed MIR and hard-fails.
+        """
         builder.emit_blank()
         builder.emit_doc_comment("Function: {name}")
 
-        # Build parameters
+        # Build parameters from argument locals, preserving declared types.
         var params: [(text, text)] = []
         for i in 0..body.arg_count:
-            params = params.push(("arg{i}", "Int"))
+            var found = false
+            for local in body.locals:
+                match local.kind:
+                    case Arg(index):
+                        if index == i:
+                            val lean_ty = mir_type_to_lean(local.type_)?
+                            params = params.push(("arg{i}", lean_ty))
+                            found = true
+                    case _:
+                        pass
+            if not found:
+                return Err(compileerror_backend_error(BackendKind.Lean,
+                    "lean-backend: function `{name}` is malformed MIR: argument {i} of {body.arg_count} has no argument local; cannot type the Lean parameter"))
 
-        val ret_type = mir_type_to_lean(body.return_ty)
+        val ret_type = mir_type_to_lean(body.return_ty)?
 
         # Generate function signature
         if self.level == VerificationLevel.Minimal:
@@ -374,13 +391,15 @@ class LeanBackend:
             builder.emit_axiom(name, full_type)
         else:
             # Generate full definition by translating MIR body
-            val lean_body = translate_mir_body(body)
+            val lean_body = translate_mir_body(body)?
             builder.emit_def(name, params, ret_type, lean_body)
 
         # Generate contracts if requested
         if self.level.includes_contracts():
             val contract = FunctionContract.empty(name)
             contract.to_lean_spec(builder, params, ret_type)
+
+        Ok(())
 
     fn generate_proof_obligations(builder: LeanBuilder, module: MirModule):
         """Generate proof obligations for the module."""
@@ -395,11 +414,20 @@ struct LeanExportResult:
     proof_obligations: [ProofObligation]
     export_time_ms: i64
 
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
 impl LeanExportResult:
     fn write_to_file(path: text) -> Result<(), text>:
-        """Write Lean code to file."""
-        # Would write self.lean_code to path
-        Ok(())
+        """Write Lean code to file.
+
+        Previously a silent no-op that reported success without writing —
+        a durability hole for a verification artifact. Now actually writes
+        and reports failure.
+        """
+        if rt_file_write_text(path, self.lean_code):
+            Ok(())
+        else:
+            Err("lean-backend: failed to write Lean module `{self.module_name}` to {path}")
 
     fn has_unproven_obligations() -> bool:
         not self.proof_obligations.is_empty()
@@ -525,7 +553,10 @@ fn select_tactic(obligation: text) -> text:
     elif obligation.contains("refl") or obligation.contains("equal"):
         "rfl"
     else:
-        "sorry"
+        # Never emit `sorry`: it admits any goal, so an unproven obligation
+        # would silently pass verification. `simp <;> omega` either
+        # discharges the goal or fails loudly at `lake build`.
+        "first | simp | omega"
 
 # ============================================================================
 # Codegen Trait Implementation
@@ -552,7 +583,8 @@ impl Codegen for LeanBackend:
 # ============================================================================
 
 impl VerificationCodegen for LeanBackend:
-    fn export_function(name: text, body: MirBody) -> text:
+    fn export_function(name: text, body: MirBody) -> Result<text, CompileError>:
+        val _ = name
         translate_mir_body(body)
 
     fn generate_proof_obligations(module: MirModule) -> [text]:
