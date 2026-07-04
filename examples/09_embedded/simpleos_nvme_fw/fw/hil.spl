@@ -40,7 +40,7 @@ impl Hil:
         var status: i64 = cmd_validate(cmd)
         var rdata: i64 = 0
         if status == SC_SUCCESS:
-            if cmd_is_write(cmd):
+            if cmd_is_write(cmd) or cmd_is_write_zero(cmd):
                 # Drive the write behind a generation-handle task context.
                 val h: Handle = me.pool.acquire(cmd.cid, cmd.lba, cmd.nblocks, cmd.data)
                 me.pool.set_phase(h, PH_PROGRAM)
@@ -51,7 +51,7 @@ impl Hil:
                 if status == SC_SUCCESS and not me.ftl.can_write_blocks(cmd.nblocks):
                     status = SC_NS_NOT_READY
                 while i < cmd.nblocks and status == SC_SUCCESS:
-                    status = me.wb.stage(span, i, prp_byte(cmd, i))
+                    status = me.wb.stage(span, i, host_write_byte(cmd, i))
                     i = i + 1
                 i = 0
                 while i < cmd.nblocks and status == SC_SUCCESS:
@@ -155,6 +155,15 @@ fn hil_selftest() -> i64:
     fail = fail + expect_eq(c22.data, 0x20, "multi-block read byte 0")
     fail = fail + expect_eq(c23.data, 0x21, "multi-block read byte 1")
     fail = fail + expect_eq(c24.data, 0x90, "multi-block read byte 2")
+
+    hil.submit(cmd_make(29, OP_WRITE_ZERO, 40, 3, 0))
+    hil.run()
+    val c29: NvmeCpl = hil.reap()
+    fail = fail + expect_eq(c29.status, SC_SUCCESS, "write-zero completed")
+    hil.submit(cmd_make(30, OP_READ, 41, 1, 0))
+    hil.run()
+    val c30: NvmeCpl = hil.reap()
+    fail = fail + expect_eq(c30.data, 0, "write-zero clears written LBA")
 
     # Oversized writes fail before any partial media update.
     hil.submit(cmd_make(25, OP_WRITE, 80, WRITE_BUFFER_CAP_BLOCKS + 1, 0x40))

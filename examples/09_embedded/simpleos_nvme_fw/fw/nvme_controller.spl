@@ -298,7 +298,7 @@ impl NvmeController:
         var status: i64 = cmd_validate(cmd)
         var rdata: i64 = 0
         if status == SC_SUCCESS:
-            if cmd_is_write(cmd):
+            if cmd_is_write(cmd) or cmd_is_write_zero(cmd):
                 val h: Handle = me.pool.acquire(cmd.cid, cmd.lba, cmd.nblocks, cmd.data)
                 me.pool.set_phase(h, PH_PROGRAM)
                 var i: i64 = 0
@@ -308,7 +308,7 @@ impl NvmeController:
                 if status == SC_SUCCESS and not me.ftl.can_write_blocks(cmd.nblocks):
                     status = SC_NS_NOT_READY
                 while i < cmd.nblocks and status == SC_SUCCESS:
-                    status = me.wb.stage(span, i, prp_byte(cmd, i))
+                    status = me.wb.stage(span, i, host_write_byte(cmd, i))
                     i = i + 1
                 i = 0
                 while i < cmd.nblocks and status == SC_SUCCESS:
@@ -468,6 +468,15 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(r0.data, 0x60, "multi-block IO read byte 0")
     fail = fail + expect_eq(r1.data, 0x61, "multi-block IO read byte 1")
     fail = fail + expect_eq(r2.data, 0xA0, "multi-block IO read byte 2")
+
+    c.io_submit(1, cmd_make(108, OP_WRITE_ZERO, 20, 3, 0))
+    c.io_process()
+    val wz: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(wz.status, SC_SUCCESS, "write-zero IO completed")
+    c.io_submit(1, cmd_make(109, OP_READ, 21, 1, 0))
+    c.io_process()
+    val wzr: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(wzr.data, 0, "write-zero IO clears written LBA")
 
     c.io_submit(1, cmd_make(106, OP_WRITE, 30, WRITE_BUFFER_CAP_BLOCKS + 1, 0x70))
     c.io_process()
