@@ -144,6 +144,8 @@ impl NvmeController:
         if cmd.opcode == ADMIN_GET_LOG:
             return me.do_get_log(cmd)
         if cmd.opcode == ADMIN_ABORT:
+            if cmd.nsid != 0 or cmd.cdw11 != 0 or cmd.cdw12 != 0:
+                return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             val abort_sqid: i64 = admin_qid(cmd.cdw10)
             if abort_sqid != ADMIN_QID and not me.qset.sq_is_active(abort_sqid):
                 return AdminResult(status: SC_INVALID_QID, data: 0, post: true)
@@ -573,6 +575,11 @@ fn nvme_controller_selftest() -> i64:
     val badab: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(badab.status, SC_INVALID_QID, "abort with missing target SQ rejected")
     fail = fail + expect_eq(c.aborted_sqid(), 1, "failed abort leaves previous target SQID")
+    c.admin_submit(admin_cmd_make(27, ADMIN_ABORT, 1, (100 << 16) | 1, 0, 0))
+    c.admin_process()
+    val mab: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(mab.status, SC_INVALID_FIELD, "malformed abort rejected")
+    fail = fail + expect_eq(c.aborted_sqid(), 1, "malformed abort leaves previous target SQID")
 
     # Async Event Request: held outstanding (no completion) until an event is raised.
     c.admin_submit(admin_async_event_cmd(31))
