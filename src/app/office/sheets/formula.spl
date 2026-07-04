@@ -3113,10 +3113,14 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_offset(tokens, pos, sheet, depth)
     if name == "INDIRECT":
         return _eval_indirect(tokens, pos, sheet, depth)
+    if name == "ISOMITTED":
+        return _eval_isomitted(tokens, pos, sheet)
     if name == "LET":
         return _eval_let(tokens, pos, sheet, depth)
     if name == "LAMBDA":
         return _eval_lambda_invoked(tokens, pos, sheet, depth)
+    if name == "REDUCE":
+        return _eval_reduce(tokens, pos, sheet, depth)
     # Collect arguments separated by commas
     # Each argument can be a range (A1:B3) or an expression
     var args: [[f64]] = []
@@ -3169,6 +3173,35 @@ fn _let_name_error(tok: text, sheet: Sheet) -> text:
     if _is_reserved_function_name(upper, sheet):
         return "LET/LAMBDA name cannot be a built-in function name: {tok}"
     ""
+
+fn _eval_isomitted(tokens: [text], pos: i32, sheet: Sheet) -> EvalResult:
+    """ISOMITTED(param_name) inside a LAMBDA body: check if the param was omitted."""
+    if pos >= tokens.len() or tokens.get(pos) == ")":
+        return EvalResult(
+            value: CellValue.ErrorVal(message: "ISOMITTED requires a parameter name"),
+            next_pos: pos + 1
+        )
+    val tok = tokens.get(pos)
+    if tok.len() == 0 or not _is_alpha(tok.char_at(0)):
+        return EvalResult(
+            value: CellValue.ErrorVal(message: "ISOMITTED requires a parameter name"),
+            next_pos: pos + 1
+        )
+    val idx = _let_find(tok.upper())
+    val result = if idx < 0:
+        CellValue.BoolVal(value: false)
+    elif _let_values[idx] == "__OMITTED__":
+        CellValue.BoolVal(value: true)
+    else:
+        CellValue.BoolVal(value: false)
+    # ISOMITTED takes exactly one bare identifier argument — consume its
+    # own closing ')' here so the caller's next_pos lands past this whole
+    # nested call (mirrors the generic dispatch's "skip closing paren"
+    # step at the end of _eval_function_call's default arg loop).
+    var end_pos = pos + 1
+    if end_pos < tokens.len() and tokens.get(end_pos) == ")":
+        end_pos = end_pos + 1
+    EvalResult(value: result, next_pos: end_pos)
 
 fn _eval_let(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """LET(name1, value1, [name2, value2, ...], calculation). Binds each name
@@ -3260,6 +3293,34 @@ fn _skip_balanced_to_paren(tokens: [text], pos: i32) -> i32:
         cur = cur + 1
     cur
 
+fn _lambda_body_uses_omitted(tokens: [text], body_start: i32, body_end: i32, oname: text) -> bool:
+    """True if the body never guards `oname` (already uppercased) with
+    ISOMITTED(oname) ANYWHERE, yet references it as a bare identifier
+    somewhere in tokens[body_start, body_end). Excel errors when an
+    omitted LAMBDA parameter is used directly with no ISOMITTED check at
+    all; once the body checks ISOMITTED(oname) even once, we trust the
+    author to guard every use themselves — this evaluator's IF isn't
+    lazy (both branches are evaluated eagerly, see _dispatch_function's
+    "IF" case), so an ISOMITTED-guarded body legitimately still contains
+    a bare `oname` token in its untaken branch."""
+    var has_isomitted_guard = false
+    var i = body_start
+    while i < body_end:
+        if (tokens.get(i).upper() == "ISOMITTED" and i + 3 < body_end and
+            tokens.get(i + 1) == "(" and tokens.get(i + 2).upper() == oname and
+            tokens.get(i + 3) == ")"):
+            has_isomitted_guard = true
+        i = i + 1
+    if has_isomitted_guard:
+        return false
+    var j = body_start
+    while j < body_end:
+        val tok = tokens.get(j)
+        if tok.len() > 0 and _is_alpha(tok.char_at(0)) and tok.upper() == oname:
+            return true
+        j = j + 1
+    false
+
 fn _eval_lambda_invoked(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """LAMBDA(param1, ..., paramN, body)(arg1, ..., argN) — IMMEDIATE
     INVOCATION ONLY. A LAMBDA not immediately followed by '(...)' (e.g.
@@ -3305,22 +3366,37 @@ fn _eval_lambda_invoked(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> E
     var inv_pos = lambda_end + 1
     var pushed = 0
     var arity_err = ""
+    var omitted_names: [text] = []
     var pi = 0
     while pi < params.len():
-        if inv_pos >= tokens.len() or tokens.get(inv_pos) == ")":
-            arity_err = "LAMBDA invocation arity mismatch (too few arguments)"
-            break
-        val arg_result = _eval_concat(tokens, inv_pos, sheet, depth)
         _let_names.push(params.get(pi))
-        _let_values.push(_cell_value_to_display(arg_result.value))
         pushed = pushed + 1
-        inv_pos = arg_result.next_pos
-        if inv_pos < tokens.len() and tokens.get(inv_pos) == ",":
-            inv_pos = inv_pos + 1
+        if inv_pos >= tokens.len() or tokens.get(inv_pos) == ")":
+            # Missing argument: bind to the omitted sentinel. Excel allows
+            # this ONLY when the body checks ISOMITTED(param) — a bare
+            # reference to an omitted param elsewhere in the body is itself
+            # a #CALC!-style error (checked below, after all params are
+            # bound, since a later param's default expression could still
+            # reference an earlier omitted one).
+            _let_values.push("__OMITTED__")
+            omitted_names.push(params.get(pi))
+        else:
+            val arg_result = _eval_concat(tokens, inv_pos, sheet, depth)
+            _let_values.push(_cell_value_to_display(arg_result.value))
+            inv_pos = arg_result.next_pos
+            if inv_pos < tokens.len() and tokens.get(inv_pos) == ",":
+                inv_pos = inv_pos + 1
         pi = pi + 1
 
-    if arity_err.len() == 0 and not (inv_pos < tokens.len() and tokens.get(inv_pos) == ")"):
+    if inv_pos < tokens.len() and tokens.get(inv_pos) != ")":
         arity_err = "LAMBDA invocation arity mismatch (too many arguments)"
+
+    if arity_err.len() == 0:
+        var oi = 0
+        while oi < omitted_names.len():
+            if _lambda_body_uses_omitted(tokens, body_start, lambda_end - 1, omitted_names.get(oi)):
+                arity_err = "LAMBDA body references an omitted parameter directly (wrap it in ISOMITTED)"
+            oi = oi + 1
 
     var result_value = CellValue.Empty
     if arity_err.len() == 0:
@@ -3339,6 +3415,112 @@ fn _eval_lambda_invoked(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> E
     if arity_err.len() > 0:
         return EvalResult(value: CellValue.ErrorVal(message: arity_err), next_pos: end_pos)
     EvalResult(value: result_value, next_pos: end_pos)
+
+# =========================================================================
+# LAMBDA-literal helpers (MAP / REDUCE / SCAN / BYROW / BYCOL / MAKEARRAY)
+# =========================================================================
+#
+# These functions invoke the SAME LAMBDA body once per cell/row/col/fold
+# step, unlike _eval_lambda_invoked's single immediate invocation. Per the
+# interpreter quirk ledger (writing_calc_functions.md §3.4), a [[text]] grid
+# must never be handed to a helper as a parameter — every array_* function
+# below builds its own grid locally via _array_range_grid and indexes it
+# in its own loop; only scalars (params/body position ints) cross the
+# LambdaLit struct boundary.
+
+# A parsed (not-yet-invoked) LAMBDA(...) literal: parameter names and the
+# body's token span. `end_pos` is the position right after the LAMBDA's own
+# closing ')' — for a MAP/REDUCE/... call this is always the position of
+# the outer call's own closing ')', since the LAMBDA is always the last
+# argument. `ok` is false for anything malformed.
+struct LambdaLit:
+    params: [text]
+    body_start: i32
+    end_pos: i32
+    ok: bool
+
+fn _parse_lambda_literal(tokens: [text], pos: i32, sheet: Sheet) -> LambdaLit:
+    """Parse `param1, ..., paramN, body` starting right after 'LAMBDA(' (pos
+    points at the first param token). Does NOT evaluate or invoke — callers
+    re-evaluate the body once per binding via _eval_concat(tokens,
+    lam.body_start, ...), pushing/popping _let_names/_let_values themselves
+    around each call (mirrors _eval_lambda_invoked's own discipline)."""
+    var cur_pos = pos
+    var params: [text] = []
+    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        val tok = tokens.get(cur_pos)
+        val looks_like_param = (_is_alpha(tok.char_at(0)) and cur_pos + 1 < tokens.len() and
+                                 tokens.get(cur_pos + 1) == ",")
+        if not looks_like_param:
+            break
+        val name_err = _let_name_error(tok, sheet)
+        if name_err.len() > 0:
+            return LambdaLit(params: [], body_start: 0, end_pos: 0, ok: false)
+        params.push(tok.upper())
+        cur_pos = cur_pos + 2
+    if cur_pos >= tokens.len() or params.len() == 0:
+        return LambdaLit(params: [], body_start: 0, end_pos: 0, ok: false)
+    val body_start = cur_pos
+    val end_pos = _skip_balanced_to_paren(tokens, body_start)
+    LambdaLit(params: params, body_start: body_start, end_pos: end_pos, ok: true)
+
+fn _eval_reduce(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """REDUCE(initial, range, LAMBDA(acc, v, expr)) -> SCALAR row-major fold
+    over range, starting the accumulator at initial. Fails closed with #ERR
+    (consuming to the matching close paren so the caller's parse position
+    stays sane) on a malformed range or LAMBDA argument."""
+    val init_result = _eval_concat(tokens, pos, sheet, depth)
+    var cur = init_result.next_pos
+    if not (cur < tokens.len() and tokens.get(cur) == ","):
+        val bad_end = _skip_balanced_to_paren(tokens, pos)
+        return EvalResult(value: CellValue.ErrorVal(message: "REDUCE requires initial, range, LAMBDA"), next_pos: bad_end)
+    cur = cur + 1
+    val a_rs = _read_array_range_str(tokens, cur)
+    if a_rs == "":
+        val bad_end = _skip_balanced_to_paren(tokens, pos)
+        return EvalResult(value: CellValue.ErrorVal(message: "REDUCE requires a range argument"), next_pos: bad_end)
+    cur = _skip_comma(tokens, cur + 3)
+    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_upper = lambda_tok.upper()
+    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    if not (cur + 1 < tokens.len() and lambda_upper == "LAMBDA" and after_lambda_tok == "("):
+        val bad_end = _skip_balanced_to_paren(tokens, pos)
+        return EvalResult(value: CellValue.ErrorVal(message: "REDUCE requires a LAMBDA(acc, v, expr) argument"), next_pos: bad_end)
+    val lam = _parse_lambda_literal(tokens, cur + 2, sheet)
+    val lam_params = lam.params
+    if not lam.ok or lam_params.len() != 2:
+        val bad_end = _skip_balanced_to_paren(tokens, pos)
+        return EvalResult(value: CellValue.ErrorVal(message: "REDUCE's LAMBDA needs exactly 2 parameters"), next_pos: bad_end)
+    val rng = parse_range(a_rs)
+    if rng == nil:
+        val bad_end = _skip_balanced_to_paren(tokens, pos)
+        return EvalResult(value: CellValue.ErrorVal(message: "REDUCE requires a valid range"), next_pos: bad_end)
+    val rgrid = _array_range_grid(rng, sheet)
+    val acc_name = lam_params[0]
+    val v_name = lam_params[1]
+    val lam_body_start = lam.body_start
+    var acc_disp = _cell_value_to_display(init_result.value)
+    var r = 0
+    while r < rgrid.len():
+        val rrow = rgrid[r]
+        var c = 0
+        while c < rrow.len():
+            _let_names.push(acc_name)
+            _let_values.push(acc_disp)
+            _let_names.push(v_name)
+            _let_values.push(rrow[c])
+            val body_result = _eval_concat(tokens, lam_body_start, sheet, depth)
+            _let_names.pop()
+            _let_values.pop()
+            _let_names.pop()
+            _let_values.pop()
+            acc_disp = _cell_value_to_display(body_result.value)
+            c = c + 1
+        r = r + 1
+    var end_pos = lam.end_pos
+    if end_pos < tokens.len() and tokens.get(end_pos) == ")":
+        end_pos = end_pos + 1
+    EvalResult(value: _let_value_from_display(acc_disp), next_pos: end_pos)
 
 val _LN2 = 0.6931471805599453
 val _PI = 3.141592653589793
@@ -6769,6 +6951,16 @@ fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
         return _array_offset(tokens, 2, sheet)
     if name == "INDIRECT":
         return _array_indirect(tokens, 2, sheet)
+    if name == "MAP":
+        return _array_map(tokens, 2, sheet)
+    if name == "SCAN":
+        return _array_scan(tokens, 2, sheet)
+    if name == "BYROW":
+        return _array_byrow(tokens, 2, sheet)
+    if name == "BYCOL":
+        return _array_bycol(tokens, 2, sheet)
+    if name == "MAKEARRAY":
+        return _array_makearray(tokens, 2, sheet)
     []
 
 fn _read_array_range_str(tokens: [text], pos: i32) -> text:
@@ -6951,6 +7143,332 @@ fn _array_range_grid(range: CellRange, sheet: Sheet) -> [[text]]:
         rows.push(row)
         r = r + 1
     rows
+
+# =========================================================================
+# MAP / SCAN / BYROW / BYCOL / MAKEARRAY (LAMBDA-driven array formulas)
+# =========================================================================
+#
+# NOTE: never name a local `grid` or `unit` — both are broken/reserved
+# identifiers in this interpreter (writing_calc_functions.md quirk #6); a
+# later `.len()`/index off a var named `grid` corrupts the parse. Every
+# range grid below is named `rgrid`/`agrid`/etc instead.
+
+fn _agg_index(name: text) -> i32:
+    """0=SUM,1=AVERAGE,2=MAX,3=MIN,4=COUNT,-1=not a BYROW/BYCOL-supported
+    aggregate."""
+    if name == "SUM":
+        return 0
+    if name == "AVERAGE":
+        return 1
+    if name == "MAX":
+        return 2
+    if name == "MIN":
+        return 3
+    if name == "COUNT":
+        return 4
+    0 - 1
+
+fn _agg_over_row(values: [text], agg: i32) -> text:
+    """SUM/AVERAGE/MAX/MIN/COUNT over a row/column of display-text cell
+    values: numeric coercion via _arr_is_number/.to_f64(); non-numeric
+    cells are skipped (Excel's numeric-only-aggregate behavior)."""
+    var count = 0
+    var total = 0.0
+    var mx = 0.0
+    var mn = 0.0
+    var have = false
+    for v in values:
+        if _arr_is_number(v):
+            val f = v.to_f64()
+            total = total + f
+            if not have:
+                mx = f
+                mn = f
+                have = true
+            else:
+                if f > mx:
+                    mx = f
+                if f < mn:
+                    mn = f
+            count = count + 1
+    if agg == 0:
+        return _format_number(total)
+    if agg == 1:
+        if count == 0:
+            return "0"
+        return _format_number(total / count.to_f64())
+    if agg == 2:
+        return _format_number(mx)
+    if agg == 3:
+        return _format_number(mn)
+    "{count}"
+
+fn _array_map(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """MAP(range, LAMBDA(x, expr)) -> apply expr to each cell of range,
+    preserving its shape (spills the same rows x cols as range). A
+    non-LAMBDA 2nd argument or an unparseable range fails closed ([]),
+    letting the scalar fallback report #ERR (Unknown function: MAP)."""
+    val a_rs = _read_array_range_str(tokens, pos)
+    if a_rs == "":
+        return []
+    var cur = _skip_comma(tokens, pos + 3)
+    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_upper = lambda_tok.upper()
+    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    if not (lambda_upper == "LAMBDA" and after_lambda_tok == "("):
+        return []
+    val lam = _parse_lambda_literal(tokens, cur + 2, sheet)
+    val lam_params = lam.params
+    if not lam.ok or lam_params.len() != 1:
+        return []
+    val rng = parse_range(a_rs)
+    if rng == nil:
+        return []
+    val rgrid = _array_range_grid(rng, sheet)
+    val pname = lam_params[0]
+    val lam_body_start = lam.body_start
+    var out: [[text]] = []
+    var r = 0
+    while r < rgrid.len():
+        val rrow = rgrid[r]
+        var out_row: [text] = []
+        var c = 0
+        while c < rrow.len():
+            _let_names.push(pname)
+            _let_values.push(rrow[c])
+            val body_result = _eval_concat(tokens, lam_body_start, sheet, 0)
+            _let_names.pop()
+            _let_values.pop()
+            out_row.push(_cell_value_to_display(body_result.value))
+            c = c + 1
+        out.push(out_row)
+        r = r + 1
+    out
+
+fn _array_scan(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """SCAN(initial, range, LAMBDA(acc, v, expr)) -> row-major running fold,
+    spilling one intermediate accumulator value per cell of range (same
+    shape as range). Fails closed ([]) on a malformed range or LAMBDA."""
+    val init_result = _eval_comparison(tokens, pos, sheet, 0)
+    var cur = _skip_comma(tokens, init_result.next_pos)
+    val a_rs = _read_array_range_str(tokens, cur)
+    if a_rs == "":
+        return []
+    cur = _skip_comma(tokens, cur + 3)
+    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_upper = lambda_tok.upper()
+    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    if not (lambda_upper == "LAMBDA" and after_lambda_tok == "("):
+        return []
+    val lam = _parse_lambda_literal(tokens, cur + 2, sheet)
+    val lam_params = lam.params
+    if not lam.ok or lam_params.len() != 2:
+        return []
+    val rng = parse_range(a_rs)
+    if rng == nil:
+        return []
+    val rgrid = _array_range_grid(rng, sheet)
+    val acc_name = lam_params[0]
+    val v_name = lam_params[1]
+    val lam_body_start = lam.body_start
+    var acc_disp = _cell_value_to_display(init_result.value)
+    var out: [[text]] = []
+    var r = 0
+    while r < rgrid.len():
+        val rrow = rgrid[r]
+        var out_row: [text] = []
+        var c = 0
+        while c < rrow.len():
+            _let_names.push(acc_name)
+            _let_values.push(acc_disp)
+            _let_names.push(v_name)
+            _let_values.push(rrow[c])
+            val body_result = _eval_concat(tokens, lam_body_start, sheet, 0)
+            _let_names.pop()
+            _let_values.pop()
+            _let_names.pop()
+            _let_values.pop()
+            acc_disp = _cell_value_to_display(body_result.value)
+            out_row.push(acc_disp)
+            c = c + 1
+        out.push(out_row)
+        r = r + 1
+    out
+
+fn _array_byrow(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """BYROW(range, LAMBDA(r, expr)) -> one result per row, spilling a
+    column. CEILING: a single-cell row binds r to that cell's value and
+    evaluates expr normally; a multi-cell row supports ONLY expr of the
+    exact form AGG(r) (AGG in SUM/AVERAGE/MAX/MIN/COUNT), computed directly
+    over the row — anything else on a multi-cell row fails closed ([]),
+    since this evaluator has no array-valued LAMBDA parameter."""
+    val a_rs = _read_array_range_str(tokens, pos)
+    if a_rs == "":
+        return []
+    var cur = _skip_comma(tokens, pos + 3)
+    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_upper = lambda_tok.upper()
+    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    if not (lambda_upper == "LAMBDA" and after_lambda_tok == "("):
+        return []
+    val lam = _parse_lambda_literal(tokens, cur + 2, sheet)
+    val lam_params = lam.params
+    if not lam.ok or lam_params.len() != 1:
+        return []
+    val rng = parse_range(a_rs)
+    if rng == nil:
+        return []
+    val rgrid = _array_range_grid(rng, sheet)
+    val pname = lam_params[0]
+    val lam_body_start = lam.body_start
+    val lam_end_pos = lam.end_pos
+    val agg = _byrow_agg_of(tokens, lam_body_start, lam_end_pos, pname)
+    var out: [[text]] = []
+    var r = 0
+    var failed = false
+    while r < rgrid.len() and not failed:
+        val rrow = rgrid[r]
+        var cell_text = ""
+        if rrow.len() == 1:
+            _let_names.push(pname)
+            _let_values.push(rrow[0])
+            val body_result = _eval_concat(tokens, lam_body_start, sheet, 0)
+            _let_names.pop()
+            _let_values.pop()
+            cell_text = _cell_value_to_display(body_result.value)
+        elif agg >= 0:
+            cell_text = _agg_over_row(rrow, agg)
+        else:
+            failed = true
+        if not failed:
+            out.push([cell_text])
+        r = r + 1
+    if failed:
+        return []
+    out
+
+fn _byrow_agg_of(tokens: [text], body_start: i32, end_pos: i32, pname: text) -> i32:
+    """-1 unless the body span is EXACTLY `AGG ( pname )` immediately
+    closed by the LAMBDA's own ')' at end_pos-1 — the only multi-cell-row
+    shape BYROW/BYCOL supports. Bounds-guarded against a short/odd body."""
+    if body_start + 4 != end_pos - 1:
+        return 0 - 1
+    if body_start + 3 >= tokens.len():
+        return 0 - 1
+    val open_tok = tokens.get(body_start + 1)
+    val param_tok = tokens.get(body_start + 2)
+    val close_tok = tokens.get(body_start + 3)
+    if open_tok != "(" or close_tok != ")":
+        return 0 - 1
+    if param_tok.upper() != pname:
+        return 0 - 1
+    _agg_index(tokens.get(body_start).upper())
+
+fn _array_bycol(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """BYCOL(range, LAMBDA(c, expr)) -> one result per column, spilling a
+    row. Same ceiling as BYROW (see _byrow_agg_of), applied per column."""
+    val a_rs = _read_array_range_str(tokens, pos)
+    if a_rs == "":
+        return []
+    var cur = _skip_comma(tokens, pos + 3)
+    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_upper = lambda_tok.upper()
+    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    if not (lambda_upper == "LAMBDA" and after_lambda_tok == "("):
+        return []
+    val lam = _parse_lambda_literal(tokens, cur + 2, sheet)
+    val lam_params = lam.params
+    if not lam.ok or lam_params.len() != 1:
+        return []
+    val rng = parse_range(a_rs)
+    if rng == nil:
+        return []
+    val rgrid = _array_range_grid(rng, sheet)
+    if rgrid.len() == 0:
+        return []
+    val pname = lam_params[0]
+    val lam_body_start = lam.body_start
+    val lam_end_pos = lam.end_pos
+    val agg = _byrow_agg_of(tokens, lam_body_start, lam_end_pos, pname)
+    val first_row = rgrid[0]
+    val ncols = first_row.len()
+    var out_row: [text] = []
+    var c = 0
+    var failed = false
+    while c < ncols and not failed:
+        var col_values: [text] = []
+        var r = 0
+        while r < rgrid.len():
+            val rrow = rgrid[r]
+            col_values.push(rrow[c])
+            r = r + 1
+        var cell_text = ""
+        if col_values.len() == 1:
+            _let_names.push(pname)
+            _let_values.push(col_values[0])
+            val body_result = _eval_concat(tokens, lam_body_start, sheet, 0)
+            _let_names.pop()
+            _let_values.pop()
+            cell_text = _cell_value_to_display(body_result.value)
+        elif agg >= 0:
+            cell_text = _agg_over_row(col_values, agg)
+        else:
+            failed = true
+        if not failed:
+            out_row.push(cell_text)
+        c = c + 1
+    if failed:
+        return []
+    [out_row]
+
+fn _array_makearray(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """MAKEARRAY(rows, cols, LAMBDA(r, c, expr)) -> build a rows x cols
+    grid, binding r and c as 1-based row/column indices for each cell.
+    rows<1 or cols<1 fails closed ([]) -> scalar fallback reports #ERR."""
+    val a0 = _read_array_num_arg(tokens, pos, sheet)
+    if not a0.present:
+        return []
+    var cur = _skip_comma(tokens, a0.next_pos)
+    val a1 = _read_array_num_arg(tokens, cur, sheet)
+    if not a1.present:
+        return []
+    cur = _skip_comma(tokens, a1.next_pos)
+    val lambda_tok = if cur < tokens.len(): tokens.get(cur) else: ""
+    val lambda_upper = lambda_tok.upper()
+    val after_lambda_tok = if cur + 1 < tokens.len(): tokens.get(cur + 1) else: ""
+    if not (lambda_upper == "LAMBDA" and after_lambda_tok == "("):
+        return []
+    val lam = _parse_lambda_literal(tokens, cur + 2, sheet)
+    val lam_params = lam.params
+    if not lam.ok or lam_params.len() != 2:
+        return []
+    val n_rows = a0.value.to_i64().to_i32()
+    val n_cols = a1.value.to_i64().to_i32()
+    if n_rows < 1 or n_cols < 1:
+        return []
+    val rname = lam_params[0]
+    val cname = lam_params[1]
+    val lam_body_start = lam.body_start
+    var out: [[text]] = []
+    var r = 1
+    while r <= n_rows:
+        var out_row: [text] = []
+        var c = 1
+        while c <= n_cols:
+            _let_names.push(rname)
+            _let_values.push("{r}")
+            _let_names.push(cname)
+            _let_values.push("{c}")
+            val body_result = _eval_concat(tokens, lam_body_start, sheet, 0)
+            _let_names.pop()
+            _let_values.pop()
+            _let_names.pop()
+            _let_values.pop()
+            out_row.push(_cell_value_to_display(body_result.value))
+            c = c + 1
+        out.push(out_row)
+        r = r + 1
+    out
 
 fn _array_sequence(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     """SEQUENCE(rows, [cols=1], [start=1], [step=1]) -> a rows x cols grid
