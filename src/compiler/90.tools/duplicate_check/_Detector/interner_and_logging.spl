@@ -455,6 +455,14 @@ fn collect_token_window_candidates(tokens: [SimpleToken], config: DuplicationCon
 
     var candidates = []
     var i = 0
+    # Two-pointer: end_idx only ever advances across outer iterations. The
+    # original code reset `end_idx = i + window_size` fresh on every i and
+    # re-scanned forward token-by-token to reach min_lines — since start_line
+    # is non-decreasing in i, the minimal satisfying end_idx is too, so
+    # resetting made this O(n^2) on files with long/dense lines (each outer
+    # step re-walks tokens an earlier step already walked). Carrying end_idx
+    # forward makes total work O(tokens.len()) amortized over the whole file.
+    var end_idx = window_size.min(tokens.len())
     while i + config.min_tokens <= tokens.len():
         if i > 0:
             val old_code = token_codes[i - 1]
@@ -463,7 +471,8 @@ fn collect_token_window_candidates(tokens: [SimpleToken], config: DuplicationCon
             hash = (hash * base + new_code) % mod_val
 
         val start_line = tokens[i].line
-        var end_idx = (i + config.min_tokens).min(tokens.len())
+        if end_idx < i + config.min_tokens:
+            end_idx = i + config.min_tokens
         while end_idx < tokens.len():
             val current_end_line = tokens[end_idx - 1].line
             if current_end_line - start_line + 1 >= config.min_lines:
@@ -503,6 +512,10 @@ fn collect_hash_counts_in_file(file_path: text, config: DuplicationConfig, cache
         j = j + 1
 
     var i = 0
+    # Two-pointer: see collect_token_window_candidates for why end_idx must
+    # carry forward instead of resetting to i+window_size each iteration
+    # (that reset made this O(n^2) on files with long/dense lines).
+    var end_idx = window_size.min(tokens.len())
     while i + window_size <= tokens.len():
         if i > 0:
             val old_code = compute_token_code(tokens[i - 1])
@@ -511,7 +524,8 @@ fn collect_hash_counts_in_file(file_path: text, config: DuplicationConfig, cache
             hash = (hash * base + new_code) % mod_val
 
         val start_line = tokens[i].line
-        var end_idx = (i + window_size).min(tokens.len())
+        if end_idx < i + window_size:
+            end_idx = i + window_size
         while end_idx < tokens.len():
             val current_end_line = tokens[end_idx - 1].line
             if current_end_line - start_line + 1 >= config.min_lines:
