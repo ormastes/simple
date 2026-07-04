@@ -1391,6 +1391,98 @@ fn _eval_count_range_function(name: text, tokens: [text], pos: i32, sheet: Sheet
         i = i + 1
     EvalResult(value: CellValue.NumberVal(value: count.to_f64()), next_pos: cur_pos)
 
+fn _is_a_variant_function(name: text) -> bool:
+    """The Excel *A statistics: text counts as 0, TRUE=1/FALSE=0, empty cells are
+    skipped. They need the raw typed cell value, not the numeric-coerced path."""
+    (name == "AVERAGEA" or name == "MAXA" or name == "MINA" or
+     name == "STDEVA" or name == "VARA" or name == "STDEVPA" or name == "VARPA")
+
+fn _a_value_of(cv: CellValue) -> f64:
+    """The A-family numeric value of a typed cell: numbers as-is, TRUE=1/FALSE=0,
+    any text (including numeric-looking text stored as text) counts as 0."""
+    match cv:
+        CellValue.NumberVal(value):
+            return value
+        CellValue.BoolVal(value):
+            if value:
+                return 1.0
+            return 0.0
+        _:
+            return 0.0
+
+fn _eval_a_variant_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """AVERAGEA/MAXA/MINA/STDEVA/VARA/STDEVPA/VARPA over raw typed cells. Empty
+    cells are skipped; text contributes 0; booleans contribute 1/0. Accepts range
+    and scalar arguments (scalars are always countable)."""
+    var vals: [f64] = []
+    var cur_pos = pos
+    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        if (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":" and
+            _is_cell_ref_token(tokens.get(cur_pos)) and _is_cell_ref_token(tokens.get(cur_pos + 2))):
+            val rng = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
+            if rng != nil:
+                for ref_str in expand_range_refs(rng):
+                    val cell = sheet.get_cell(ref_str)
+                    if cell_display_text(cell) != "":
+                        match cell.value:
+                            CellValue.FormulaVal(expr, cached_display):
+                                vals.push(_a_value_of(_evaluate_formula(expr, sheet, depth + 1)))
+                            _:
+                                vals.push(_a_value_of(cell.value))
+            cur_pos = cur_pos + 3
+        else:
+            val tok = tokens.get(cur_pos)
+            val next_tok = if cur_pos + 1 < tokens.len(): tokens.get(cur_pos + 1) else: ""
+            if _is_cell_ref_token(tok) and (next_tok == "," or next_tok == ")"):
+                val cell = sheet.get_cell(tok)
+                if cell_display_text(cell) != "":
+                    match cell.value:
+                        CellValue.FormulaVal(expr, cached_display):
+                            vals.push(_a_value_of(_evaluate_formula(expr, sheet, depth + 1)))
+                        _:
+                            vals.push(_a_value_of(cell.value))
+                cur_pos = cur_pos + 1
+            else:
+                val r = _eval_comparison(tokens, cur_pos, sheet, depth)
+                vals.push(_a_value_of(r.value))
+                cur_pos = r.next_pos
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+    EvalResult(value: _dispatch_a_variant(name, vals), next_pos: cur_pos)
+
+fn _dispatch_a_variant(name: text, vals: [f64]) -> CellValue:
+    """Compute one *A statistic from the collected A-values."""
+    val n = vals.len()
+    if n == 0:
+        return CellValue.ErrorVal(message: "{name} requires values")
+    if name == "AVERAGEA":
+        return CellValue.NumberVal(value: _mean(vals))
+    if name == "MAXA":
+        var mx = vals[0]
+        for v in vals:
+            if v > mx:
+                mx = v
+        return CellValue.NumberVal(value: mx)
+    if name == "MINA":
+        var mn = vals[0]
+        for v in vals:
+            if v < mn:
+                mn = v
+        return CellValue.NumberVal(value: mn)
+    if name == "VARPA":
+        return CellValue.NumberVal(value: _pop_variance(vals))
+    if name == "STDEVPA":
+        return CellValue.NumberVal(value: _sqrt_f64(_pop_variance(vals)))
+    if n < 2:
+        return CellValue.ErrorVal(message: "{name} requires 2+ values")
+    if name == "VARA":
+        return CellValue.NumberVal(value: _sample_variance(vals))
+    if name == "STDEVA":
+        return CellValue.NumberVal(value: _sqrt_f64(_sample_variance(vals)))
+    CellValue.ErrorVal(message: "unknown A-variant {name}")
+
 fn _is_lookup_function(name: text) -> bool:
     name == "VLOOKUP" or name == "HLOOKUP" or name == "INDEX" or name == "MATCH"
 
@@ -2054,6 +2146,8 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_db_function(name, tokens, pos, sheet, depth)
     if _is_info_function(name):
         return _eval_info_function(name, tokens, pos, sheet, depth)
+    if _is_a_variant_function(name):
+        return _eval_a_variant_function(name, tokens, pos, sheet, depth)
     if name == "MDETERM":
         return _eval_mdeterm(tokens, pos, sheet)
     if _is_ref_function(name):
@@ -4367,6 +4461,80 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     rank = ((idx - 1).to_f64() + frac) / (nr - 1).to_f64()
                 return CellValue.NumberVal(value: _trunc_sig3(rank))
             return CellValue.ErrorVal(message: "PERCENTRANK requires range and x")
+        "PERCENTILE.EXC":
+            if args.len() >= 2:
+                val ke = _first_val(args[args.len() - 1])
+                val poole = _sorted_asc(_flatten_args(args[0:args.len() - 1]))
+                val ne = poole.len()
+                if ne == 0 or ke <= 0.0 or ke >= 1.0:
+                    return CellValue.ErrorVal(message: "PERCENTILE.EXC domain error")
+                val pose = ke * (ne + 1).to_f64()
+                val nef = ne.to_f64()
+                if pose < 1.0 or pose > nef:
+                    return CellValue.ErrorVal(message: "PERCENTILE.EXC out of range")
+                val loe = _floor_f64(pose).to_i64().to_i32()
+                val frace = pose - loe.to_f64()
+                if loe >= ne:
+                    return CellValue.NumberVal(value: poole[ne - 1])
+                return CellValue.NumberVal(value: poole[loe - 1] + frace * (poole[loe] - poole[loe - 1]))
+            return CellValue.ErrorVal(message: "PERCENTILE.EXC requires range and k")
+        "QUARTILE.EXC":
+            if args.len() >= 2:
+                val qe = _first_val(args[args.len() - 1])
+                val poolqe = _sorted_asc(_flatten_args(args[0:args.len() - 1]))
+                val nqe = poolqe.len()
+                if nqe == 0 or qe < 1.0 or qe > 3.0:
+                    return CellValue.ErrorVal(message: "QUARTILE.EXC domain error")
+                val posqe = qe / 4.0 * (nqe + 1).to_f64()
+                val nqef = nqe.to_f64()
+                if posqe < 1.0 or posqe > nqef:
+                    return CellValue.ErrorVal(message: "QUARTILE.EXC out of range")
+                val loqe = _floor_f64(posqe).to_i64().to_i32()
+                val fracqe = posqe - loqe.to_f64()
+                if loqe >= nqe:
+                    return CellValue.NumberVal(value: poolqe[nqe - 1])
+                return CellValue.NumberVal(value: poolqe[loqe - 1] + fracqe * (poolqe[loqe] - poolqe[loqe - 1]))
+            return CellValue.ErrorVal(message: "QUARTILE.EXC requires range and quart")
+        "PERCENTRANK.EXC":
+            if args.len() >= 2:
+                val xe = _first_val(args[args.len() - 1])
+                val poolre = _sorted_asc(_flatten_args(args[0:args.len() - 1]))
+                val nre = poolre.len()
+                if nre == 0:
+                    return CellValue.ErrorVal(message: "PERCENTRANK.EXC domain error")
+                val emin = poolre[0]
+                val emax = poolre[nre - 1]
+                if xe < emin or xe > emax:
+                    return CellValue.ErrorVal(message: "PERCENTRANK.EXC out of range")
+                var idxe = 0
+                while idxe < nre and poolre[idxe] < xe:
+                    idxe = idxe + 1
+                var ranke = 0.0
+                if idxe < nre and poolre[idxe] == xe:
+                    ranke = (idxe + 1).to_f64() / (nre + 1).to_f64()
+                else:
+                    val elov = poolre[idxe - 1]
+                    val ehiv = poolre[idxe]
+                    val efrac = (xe - elov) / (ehiv - elov)
+                    ranke = (idxe.to_f64() + efrac) / (nre + 1).to_f64()
+                return CellValue.NumberVal(value: _trunc_sig3(ranke))
+            return CellValue.ErrorVal(message: "PERCENTRANK.EXC requires range and x")
+        "CRITBINOM":
+            if args.len() >= 3:
+                val cbn = _first_val(args[0]).to_i64()
+                val cbp = _first_val(args[1])
+                val cba = _first_val(args[2])
+                if cbn < 0 or cbp < 0.0 or cbp > 1.0 or cba <= 0.0 or cba > 1.0:
+                    return CellValue.ErrorVal(message: "CRITBINOM domain error")
+                var cbcdf = 0.0
+                var cbk: i64 = 0
+                while cbk <= cbn:
+                    cbcdf = cbcdf + _binom_pmf(cbk, cbn, cbp)
+                    if cbcdf >= cba:
+                        return CellValue.NumberVal(value: cbk.to_f64())
+                    cbk = cbk + 1
+                return CellValue.NumberVal(value: cbn.to_f64())
+            return CellValue.ErrorVal(message: "CRITBINOM requires trials, probability, alpha")
         "TRIMMEAN":
             if args.len() >= 2:
                 val pct = _first_val(args[args.len() - 1])
@@ -4810,6 +4978,16 @@ fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
         return _array_minverse(tokens, 2, sheet)
     if name == "MUNIT":
         return _array_munit(tokens, 2, sheet)
+    if name == "MODE.MULT":
+        return _array_mode_mult(tokens, 2, sheet)
+    if name == "SORTBY":
+        return _array_sortby(tokens, 2, sheet)
+    if name == "WRAPROWS":
+        return _array_wraprows(tokens, 2, sheet)
+    if name == "WRAPCOLS":
+        return _array_wrapcols(tokens, 2, sheet)
+    if name == "EXPAND":
+        return _array_expand(tokens, 2, sheet)
     []
 
 fn _read_array_range_str(tokens: [text], pos: i32) -> text:
@@ -5138,6 +5316,235 @@ fn _array_read_grid(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rng == nil:
         return []
     _array_range_grid(rng, sheet)
+
+fn _array_flatten_rowmajor(src2d: [[text]]) -> [text]:
+    """Flatten a 2D grid into a single list, row by row (Excel row-major order)."""
+    var out: [text] = []
+    for row in src2d:
+        for c in row:
+            out.push(c)
+    out
+
+fn _array_mode_mult(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """MODE.MULT(range) -> every value that repeats, in first-seen order, spilled
+    down a single column. #ERR when no value repeats (Excel yields #N/A)."""
+    val src = _array_read_grid(tokens, pos, sheet)
+    if src.len() == 0:
+        return []
+    val flat = _array_flatten_rowmajor(src)
+    var nums: [f64] = []
+    for s in flat:
+        if _arr_is_number(s):
+            nums.push(s.to_f64())
+    if nums.len() == 0:
+        return [["#ERR"]]
+    var seen: [f64] = []
+    var counts: [i32] = []
+    for v in nums:
+        var found = -1
+        var i = 0
+        while i < seen.len():
+            val sv = seen[i]
+            if sv == v:
+                found = i
+            i = i + 1
+        if found >= 0:
+            counts[found] = counts[found] + 1
+        else:
+            seen.push(v)
+            counts.push(1)
+    var out: [[text]] = []
+    var j = 0
+    while j < seen.len():
+        if counts[j] >= 2:
+            out.push([_fmt_num_trim(seen[j])])
+        j = j + 1
+    if out.len() == 0:
+        return [["#ERR"]]
+    out
+
+fn _array_key_less(a: text, b: text, ascending: bool) -> bool:
+    """Whether key a sorts before key b. Numeric compare when both numeric, else
+    lexicographic. Ascending/descending controlled by the flag."""
+    val both_num = _arr_is_number(a) and _arr_is_number(b)
+    if ascending:
+        if both_num:
+            val an = a.to_f64()
+            val bn = b.to_f64()
+            return an < bn
+        return _arr_text_lt(a, b)
+    if both_num:
+        val an2 = a.to_f64()
+        val bn2 = b.to_f64()
+        return bn2 < an2
+    _arr_text_lt(b, a)
+
+fn _array_sortby(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """SORTBY(range, by_range, [order]) -> rows of `range` reordered by the
+    parallel single-column `by_range` keys (order 1=ascending default, -1=descending).
+    Stable insertion sort preserves ties."""
+    val rs = _read_array_range_str(tokens, pos)
+    if rs == "":
+        return []
+    val rng = parse_range(rs)
+    if rng == nil:
+        return []
+    val src = _array_range_grid(rng, sheet)
+    var cur = _skip_comma(tokens, pos + 3)
+    val brs = _read_array_range_str(tokens, cur)
+    if brs == "":
+        return []
+    val brng = parse_range(brs)
+    if brng == nil:
+        return []
+    val bgrid = _array_range_grid(brng, sheet)
+    var keys: [text] = []
+    for brow in bgrid:
+        if brow.len() > 0:
+            keys.push(brow[0])
+        else:
+            keys.push("")
+    if keys.len() != src.len():
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur + 3)
+    val ord_a = _read_array_num_arg(tokens, cur, sheet)
+    val ascending = if ord_a.present: ord_a.value >= 0.0 else: true
+    var out_rows: [[text]] = []
+    var out_keys: [text] = []
+    var ri = 0
+    while ri < src.len():
+        val row = src[ri]
+        val key = keys[ri]
+        var inserted = false
+        var res_rows: [[text]] = []
+        var res_keys: [text] = []
+        var k = 0
+        while k < out_rows.len():
+            val ek = out_keys[k]
+            if not inserted and _array_key_less(key, ek, ascending):
+                res_rows.push(row)
+                res_keys.push(key)
+                inserted = true
+            res_rows.push(out_rows[k])
+            res_keys.push(ek)
+            k = k + 1
+        if not inserted:
+            res_rows.push(row)
+            res_keys.push(key)
+        out_rows = res_rows
+        out_keys = res_keys
+        ri = ri + 1
+    out_rows
+
+fn _array_wraprows(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """WRAPROWS(vector, count, [pad]) -> the flattened vector wrapped into rows of
+    `count` columns, row by row; the final short row is right-padded with pad
+    (default #N/A)."""
+    val src = _array_read_grid(tokens, pos, sheet)
+    if src.len() == 0:
+        return []
+    val flat = _array_flatten_rowmajor(src)
+    var cur = _skip_comma(tokens, pos + 3)
+    val cnt_a = _read_array_num_arg(tokens, cur, sheet)
+    if not cnt_a.present:
+        return [["#ERR"]]
+    val count = cnt_a.value.to_i64().to_i32()
+    if count < 1:
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cnt_a.next_pos)
+    val pad_a = _read_array_text_arg(tokens, cur, sheet)
+    val pad = if pad_a.present: pad_a.value else: "#N/A"
+    var out: [[text]] = []
+    var i = 0
+    while i < flat.len():
+        var row: [text] = []
+        var j = 0
+        while j < count:
+            val idx = i + j
+            if idx < flat.len():
+                row.push(flat[idx])
+            else:
+                row.push(pad)
+            j = j + 1
+        out.push(row)
+        i = i + count
+    out
+
+fn _array_wrapcols(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """WRAPCOLS(vector, count, [pad]) -> the flattened vector wrapped into columns
+    of `count` rows, filling each column top-to-bottom; the final short column is
+    bottom-padded with pad (default #N/A)."""
+    val src = _array_read_grid(tokens, pos, sheet)
+    if src.len() == 0:
+        return []
+    val flat = _array_flatten_rowmajor(src)
+    var cur = _skip_comma(tokens, pos + 3)
+    val cnt_a = _read_array_num_arg(tokens, cur, sheet)
+    if not cnt_a.present:
+        return [["#ERR"]]
+    val count = cnt_a.value.to_i64().to_i32()
+    if count < 1:
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cnt_a.next_pos)
+    val pad_a = _read_array_text_arg(tokens, cur, sheet)
+    val pad = if pad_a.present: pad_a.value else: "#N/A"
+    val total = flat.len()
+    var ncols = total / count
+    if total % count != 0:
+        ncols = ncols + 1
+    var out: [[text]] = []
+    var r = 0
+    while r < count:
+        var row: [text] = []
+        var c = 0
+        while c < ncols:
+            val idx = c * count + r
+            if idx < total:
+                row.push(flat[idx])
+            else:
+                row.push(pad)
+            c = c + 1
+        out.push(row)
+        r = r + 1
+    out
+
+fn _array_expand(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """EXPAND(range, rows, [cols], [pad]) -> the range grown to `rows` x `cols`,
+    filling new cells with pad (default #N/A). Shrinking below the source size
+    fails closed with #ERR."""
+    val src = _array_read_grid(tokens, pos, sheet)
+    if src.len() == 0:
+        return []
+    val srows = src.len()
+    val scols = src[0].len()
+    var cur = _skip_comma(tokens, pos + 3)
+    val rows_a = _read_array_num_arg(tokens, cur, sheet)
+    if not rows_a.present:
+        return [["#ERR"]]
+    val nrows = rows_a.value.to_i64().to_i32()
+    cur = _skip_comma(tokens, rows_a.next_pos)
+    val cols_a = _read_array_num_arg(tokens, cur, sheet)
+    val ncols = if cols_a.present: cols_a.value.to_i64().to_i32() else: scols
+    if cols_a.present:
+        cur = _skip_comma(tokens, cols_a.next_pos)
+    val pad_a = _read_array_text_arg(tokens, cur, sheet)
+    val pad = if pad_a.present: pad_a.value else: "#N/A"
+    if nrows < srows or ncols < scols:
+        return [["#ERR"]]
+    var out: [[text]] = []
+    var r = 0
+    while r < nrows:
+        var row: [text] = []
+        var c = 0
+        while c < ncols:
+            if r < srows and c < scols:
+                row.push(src[r][c])
+            else:
+                row.push(pad)
+            c = c + 1
+        out.push(row)
+        r = r + 1
+    out
 
 fn _array_choose_cols(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     """CHOOSECOLS(range, c1, [c2...]) -> the named columns in order (1-based;
