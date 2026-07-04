@@ -114,7 +114,7 @@ fn _is_reserved_function_name(name: text, sheet: Sheet) -> bool:
         _is_ref_function(upper)):
         return true
     if (upper == "MDETERM" or upper == "CHISQ.TEST" or upper == "T.TEST" or upper == "F.TEST" or
-        upper == "OFFSET" or upper == "INDIRECT"):
+        upper == "OFFSET" or upper == "INDIRECT" or upper == "AGGREGATE"):
         return true
     # Fall through to the big numeric dispatch table (SUM, SIN, ...): probe
     # it with harmless dummy args and check whether it recognizes the name
@@ -1585,6 +1585,116 @@ fn _eval_count_range_function(name: text, tokens: [text], pos: i32, sheet: Sheet
         i = i + 1
     EvalResult(value: CellValue.NumberVal(value: count.to_f64()), next_pos: cur_pos)
 
+fn _subtotal_compute(func: i64, vals: [f64]) -> CellValue:
+    """Shared SUBTOTAL/AGGREGATE aggregator core. function_num 1-11 maps to
+    AVERAGE/COUNT/COUNTA/MAX/MIN/PRODUCT/STDEV/STDEVP/SUM/VAR/VARP over the
+    collected numeric values. COUNT and COUNTA coincide here because callers
+    only collect numeric values (ceiling of this engine's numeric paths)."""
+    if func == 2 or func == 3:
+        return CellValue.NumberVal(value: vals.len().to_f64())
+    if vals.len() == 0:
+        return CellValue.ErrorVal(message: "SUBTOTAL/AGGREGATE requires values")
+    if func == 1:
+        return CellValue.NumberVal(value: _mean(vals))
+    if func == 4:
+        var mx = vals[0]
+        for v in vals:
+            if v > mx:
+                mx = v
+        return CellValue.NumberVal(value: mx)
+    if func == 5:
+        var mn = vals[0]
+        for v in vals:
+            if v < mn:
+                mn = v
+        return CellValue.NumberVal(value: mn)
+    if func == 6:
+        var prod = 1.0
+        for v in vals:
+            prod = prod * v
+        return CellValue.NumberVal(value: prod)
+    if func == 9:
+        var total = 0.0
+        for v in vals:
+            total = total + v
+        return CellValue.NumberVal(value: total)
+    if func == 8:
+        return CellValue.NumberVal(value: _sqrt_f64(_pop_variance(vals)))
+    if func == 11:
+        return CellValue.NumberVal(value: _pop_variance(vals))
+    if vals.len() < 2:
+        return CellValue.ErrorVal(message: "SUBTOTAL/AGGREGATE requires 2+ values")
+    if func == 7:
+        return CellValue.NumberVal(value: _sqrt_f64(_sample_variance(vals)))
+    if func == 10:
+        return CellValue.NumberVal(value: _sample_variance(vals))
+    CellValue.ErrorVal(message: "SUBTOTAL/AGGREGATE function_num out of range")
+
+struct AggCell:
+    is_err: bool
+    is_num: bool
+    num: f64
+
+fn _agg_cell_value(cv: CellValue) -> AggCell:
+    """Classify a resolved cell value for AGGREGATE: error, numeric, or other."""
+    match cv:
+        CellValue.ErrorVal(message):
+            return AggCell(is_err: true, is_num: false, num: 0.0)
+        CellValue.NumberVal(value):
+            return AggCell(is_err: false, is_num: true, num: value)
+        _:
+            return AggCell(is_err: false, is_num: false, num: 0.0)
+
+fn _eval_aggregate(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """AGGREGATE(function_num, options, range). function_num 1-11 maps like
+    SUBTOTAL (AVERAGE..VARP; the k-argument forms 12-19 are not supported).
+    Options supported: 0 (default — any error cell in the range makes the
+    result #ERR) and 6 (ignore error cells). The other option values (hidden
+    row / nested-subtotal filtering and their combinations) have no model
+    here and return #ERR. Text, boolean, and empty cells are ignored."""
+    var cur_pos = pos
+    val fr = _eval_comparison(tokens, cur_pos, sheet, depth)
+    val fnum = _to_number(fr.value).to_i64()
+    cur_pos = fr.next_pos
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        cur_pos = cur_pos + 1
+    val opr = _eval_comparison(tokens, cur_pos, sheet, depth)
+    val opts = _to_number(opr.value).to_i64()
+    cur_pos = opr.next_pos
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        cur_pos = cur_pos + 1
+    if not (cur_pos + 2 < tokens.len() and tokens.get(cur_pos + 1) == ":"):
+        return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE requires a range"), next_pos: cur_pos)
+    val rng = parse_range("{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}")
+    cur_pos = cur_pos + 3
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        cur_pos = cur_pos + 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+    if rng == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE invalid range"), next_pos: cur_pos)
+    if fnum < 1 or fnum > 11:
+        return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE function_num must be 1-11"), next_pos: cur_pos)
+    if opts != 0 and opts != 6:
+        return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE options 0 and 6 only"), next_pos: cur_pos)
+    var vals: [f64] = []
+    for ref_str in expand_range_refs(rng):
+        val cell = sheet.get_cell(ref_str)
+        if cell_display_text(cell) != "":
+            var resolved = cell.value
+            match cell.value:
+                CellValue.FormulaVal(expr, cached_display):
+                    resolved = _evaluate_formula(expr, sheet, depth + 1)
+                _:
+                    resolved = cell.value
+            val ac = _agg_cell_value(resolved)
+            if ac.is_err:
+                if opts != 6:
+                    return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE error in range"), next_pos: cur_pos)
+            elif ac.is_num:
+                vals.push(ac.num)
+    EvalResult(value: _subtotal_compute(fnum, vals), next_pos: cur_pos)
+
 fn _is_a_variant_function(name: text) -> bool:
     """The Excel *A statistics: text counts as 0, TRUE=1/FALSE=0, empty cells are
     skipped. They need the raw typed cell value, not the numeric-coerced path."""
@@ -1964,7 +2074,8 @@ fn _is_info_function(name: text) -> bool:
      name == "ISBLANK" or name == "ISERROR" or name == "ISERR" or
      name == "ISNA" or name == "N" or name == "T" or
      name == "NA" or name == "SHEET" or name == "SHEETS" or
-     name == "TYPE" or name == "ISNONTEXT" or name == "ISLOGICAL")
+     name == "TYPE" or name == "ISNONTEXT" or name == "ISLOGICAL" or
+     name == "ERROR.TYPE")
 
 fn _truthy(cv: CellValue) -> bool:
     """Excel truthiness for logical arguments: TRUE / nonzero number."""
@@ -2120,6 +2231,16 @@ fn _dispatch_info_function(name: text, args: [CellValue]) -> CellValue:
                 return _bool_cell(true)
             _:
                 return _bool_cell(false)
+    if name == "ERROR.TYPE":
+        # Excel maps each error kind to 1-8. This engine has a single generic
+        # error kind, so every error maps to 2 (#DIV/0!'s code) except #N/A
+        # (from NA() / lookup misses), which is distinguishable and maps to 7.
+        # ERROR.TYPE of a non-error is #N/A in Excel -> #ERR here.
+        if _is_na_value(a):
+            return CellValue.NumberVal(value: 7.0)
+        if _is_error_value(a):
+            return CellValue.NumberVal(value: 2.0)
+        return CellValue.ErrorVal(message: "ERROR.TYPE of a non-error value")
     if name == "ISERROR":
         return _bool_cell(_is_error_value(a))
     if name == "ISERR":
@@ -2718,6 +2839,8 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_ifs_function(name, tokens, pos, sheet, depth)
     if _is_count_range_function(name):
         return _eval_count_range_function(name, tokens, pos, sheet, depth)
+    if name == "AGGREGATE":
+        return _eval_aggregate(tokens, pos, sheet, depth)
     if _is_lookup_function(name):
         return _eval_lookup_function(name, tokens, pos, sheet, depth)
     if _is_x_lookup_function(name):
@@ -4926,6 +5049,120 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     return CellValue.ErrorVal(message: "DDB domain error")
                 return CellValue.NumberVal(value: _fin_ddb(cost, salvage, life, period))
             return CellValue.ErrorVal(message: "DDB requires cost, salvage, life, period")
+        "SUBTOTAL":
+            # SUBTOTAL(function_num, range...). 1-11 map to AVERAGE/COUNT/
+            # COUNTA/MAX/MIN/PRODUCT/STDEV/STDEVP/SUM/VAR/VARP over the
+            # flattened range values. 101-111 behave identically: there is no
+            # hidden-rows model here, and nested SUBTOTALs are not excluded.
+            if args.len() >= 2:
+                var fnum = _first_val(args[0]).to_i64()
+                if fnum >= 101 and fnum <= 111:
+                    fnum = fnum - 100
+                if fnum < 1 or fnum > 11:
+                    return CellValue.ErrorVal(message: "SUBTOTAL function_num out of range")
+                return _subtotal_compute(fnum, _flatten_args(args[1:]))
+            return CellValue.ErrorVal(message: "SUBTOTAL requires function_num and range")
+        "XNPV":
+            # XNPV(rate, values, dates): sum of v_i / (1+rate)^((d_i-d_0)/365)
+            # where d_0 is the FIRST date. Ranges must be congruent and no
+            # date may precede the first date (Excel #NUM!).
+            if args.len() >= 3:
+                val rate = _first_val(args[0])
+                val flows = args[1]
+                val dts = args[2]
+                if rate <= -1.0:
+                    return CellValue.ErrorVal(message: "XNPV rate must be > -1")
+                if flows.len() != dts.len() or flows.len() == 0:
+                    return CellValue.ErrorVal(message: "XNPV ranges incongruent")
+                val d0 = dts[0]
+                var i = 0
+                while i < dts.len():
+                    val di = dts[i]
+                    if di < d0:
+                        return CellValue.ErrorVal(message: "XNPV date precedes start date")
+                    i = i + 1
+                return CellValue.NumberVal(value: _xnpv_at(rate, flows, dts))
+            return CellValue.ErrorVal(message: "XNPV requires rate, values, dates")
+        "XIRR":
+            # XIRR(values, dates, [guess]): the rate where XNPV = 0, solved by
+            # bisection on [-0.99, 10] (100 iterations); #ERR when the bracket
+            # has no sign change. The guess argument is accepted but unused —
+            # bisection needs no starting point.
+            if args.len() >= 2:
+                val flows = args[0]
+                val dts = args[1]
+                if flows.len() != dts.len() or flows.len() < 2:
+                    return CellValue.ErrorVal(message: "XIRR ranges incongruent")
+                val d0 = dts[0]
+                var i = 0
+                while i < dts.len():
+                    val di = dts[i]
+                    if di < d0:
+                        return CellValue.ErrorVal(message: "XIRR date precedes start date")
+                    i = i + 1
+                var lo = -0.99
+                var hi = 10.0
+                var flo = _xnpv_at(lo, flows, dts)
+                val fhi = _xnpv_at(hi, flows, dts)
+                if (flo < 0.0) == (fhi < 0.0):
+                    return CellValue.ErrorVal(message: "XIRR no sign change in bracket")
+                var j = 0
+                while j < 100:
+                    val mid = (lo + hi) / 2.0
+                    val fm = _xnpv_at(mid, flows, dts)
+                    if (fm < 0.0) == (flo < 0.0):
+                        lo = mid
+                        flo = fm
+                    else:
+                        hi = mid
+                    j = j + 1
+                return CellValue.NumberVal(value: (lo + hi) / 2.0)
+            return CellValue.ErrorVal(message: "XIRR requires values and dates")
+        "VDB":
+            # VDB(cost, salvage, life, start, end, [factor=2], [no_switch]):
+            # declining-balance depreciation between two periods, switching to
+            # straight-line over the remaining life whenever that is larger
+            # (Excel's default; pass no_switch<>0 for pure declining balance).
+            # Verified against Excel-doc values 396.31 / 311.81 and the
+            # full-depreciation identity VDB(c,0,n,0,n)=c. Partial first/last
+            # periods are prorated linearly within the period.
+            if args.len() >= 5:
+                val cost = _first_val(args[0])
+                val salvage = _first_val(args[1])
+                val life = _first_val(args[2])
+                val sp = _first_val(args[3])
+                val ep = _first_val(args[4])
+                val factor = if args.len() >= 6: _first_val(args[5]) else: 2.0
+                val no_switch = if args.len() >= 7: _first_val(args[6]) != 0.0 else: false
+                if (cost < 0.0 or salvage < 0.0 or life <= 0.0 or factor <= 0.0 or
+                    sp < 0.0 or ep < sp or ep > life):
+                    return CellValue.ErrorVal(message: "VDB domain error")
+                val vdb_rate = factor / life
+                var book = cost
+                var total = 0.0
+                var p = 1.0
+                val last = _ceil_f64(ep)
+                while p <= last:
+                    var dep = book * vdb_rate
+                    val sl = (book - salvage) / (life - p + 1.0)
+                    if not no_switch and sl > dep:
+                        dep = sl
+                    if book - dep < salvage:
+                        dep = book - salvage
+                        if dep < 0.0:
+                            dep = 0.0
+                    var seg_lo = p - 1.0
+                    if seg_lo < sp:
+                        seg_lo = sp
+                    var seg_hi = p
+                    if seg_hi > ep:
+                        seg_hi = ep
+                    if seg_hi > seg_lo:
+                        total = total + dep * (seg_hi - seg_lo)
+                    book = book - dep
+                    p = p + 1.0
+                return CellValue.NumberVal(value: total)
+            return CellValue.ErrorVal(message: "VDB requires cost, salvage, life, start, end")
         "EFFECT":
             if args.len() >= 2:
                 val nominal = _first_val(args[0])
@@ -6042,6 +6279,8 @@ fn evaluate_formula_array(expr: text, sheet: Sheet) -> [[text]]:
         return _array_munit(tokens, 2, sheet)
     if name == "MODE.MULT":
         return _array_mode_mult(tokens, 2, sheet)
+    if name == "FREQUENCY":
+        return _array_frequency(tokens, 2, sheet)
     if name == "SORTBY":
         return _array_sortby(tokens, 2, sheet)
     if name == "WRAPROWS":
@@ -6089,6 +6328,46 @@ fn _read_array_text_arg(tokens: [text], pos: i32, sheet: Sheet) -> ArrTextArg:
         return ArrTextArg(value: cell_display_text(sheet.get_cell(tok)), next_pos: pos + 1, present: true)
     val r = _eval_comparison(tokens, pos, sheet, 0)
     ArrTextArg(value: _cell_value_to_display(r.value), next_pos: r.next_pos, present: true)
+
+fn _array_frequency(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """FREQUENCY(data_range, bins_range) -> a column of bins+1 counts that
+    SPILLS: values <= bin_1, each (bin_i-1, bin_i], and finally values above
+    the last bin. Bins are assumed ascending (unsorted bins are not
+    re-ordered as Excel does); empty data cells resolve to 0 on this numeric
+    range path."""
+    val a_rs = _read_array_range_str(tokens, pos)
+    if a_rs == "":
+        return []
+    val cur = _skip_comma(tokens, pos + 3)
+    val b_rs = _read_array_range_str(tokens, cur)
+    if b_rs == "":
+        return []
+    val data = _resolve_cell_range(a_rs, sheet, 0)
+    val bins = _resolve_cell_range(b_rs, sheet, 0)
+    val nbins = bins.len()
+    if nbins == 0:
+        return []
+    var counts: [i64] = []
+    var i = 0
+    while i <= nbins:
+        counts.push(0)
+        i = i + 1
+    for v in data:
+        var idx = nbins
+        var j = 0
+        while j < nbins:
+            val bj = bins[j]
+            if idx == nbins and v <= bj:
+                idx = j
+            j = j + 1
+        counts[idx] = counts[idx] + 1
+    var out: [[text]] = []
+    var k = 0
+    while k <= nbins:
+        val c = counts[k]
+        out.push(["{c}"])
+        k = k + 1
+    out
 
 fn _array_textsplit(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     """TEXTSPLIT(text, col_delim, [row_delim]) -> a 2D grid. The text is first
@@ -7520,6 +7799,20 @@ fn _fin_npv_at(r: f64, flows: [f64]) -> f64:
     var i = 0
     while i < flows.len():
         s = s + flows[i] / _pow_f64(1.0 + r, i.to_f64())
+        i = i + 1
+    s
+
+fn _xnpv_at(rate: f64, flows: [f64], dts: [f64]) -> f64:
+    """XNPV at the given rate: actual/365 fractional-year exponents measured
+    from the first date. Fractional powers go through _powf (rate > -1 keeps
+    the base positive)."""
+    val d0 = dts[0]
+    var s = 0.0
+    var i = 0
+    while i < flows.len():
+        val di = dts[i]
+        val fi = flows[i]
+        s = s + fi / _powf(1.0 + rate, (di - d0) / 365.0)
         i = i + 1
     s
 
