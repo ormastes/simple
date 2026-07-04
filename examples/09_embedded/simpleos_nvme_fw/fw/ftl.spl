@@ -156,7 +156,8 @@ impl Ftl:
         while i < n:
             val lba: i64 = me.journal.record_lba(i)
             val newp: i64 = me.journal.record_new(i)
-            me.map.update(lba, newp)
+            if ftl_host_lba_valid(lba) and (newp == UNMAP or ppn_in_range(newp)):
+                me.map.update(lba, newp)
             i = i + 1
         me.map.flush()
         var lba2: i64 = 0
@@ -488,6 +489,12 @@ fn ftl_selftest() -> i64:
     ftl.recover()
     fail = fail + expect_eq(ftl.read(10), 0x99, "recover: lba10 newest survives")
     fail = fail + expect_eq(ftl.read(20), 0, "recover: lba20 stays trimmed")
+    ftl.journal.append(0, LBA_COUNT, UNMAP, block_first_ppn(1), ftl.seq + 1)
+    ftl.journal.append(0, 10, UNMAP, NUM_PAGES, ftl.seq + 2)
+    ftl.crash()
+    ftl.recover()
+    fail = fail + expect_eq(ftl.read(10), 0x99, "recover skips invalid WAL ppn")
+    fail = fail + expect_eq(ftl.read(LBA_COUNT), 0, "recover skips invalid WAL lba")
 
     # garbage collection: create a CLOSED block full of mostly-stale data, reclaim it
     var i: i64 = 0
