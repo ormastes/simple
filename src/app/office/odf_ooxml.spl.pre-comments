@@ -12,7 +12,7 @@
 # add run-property scanning when styled import matters.
 
 use std.common.archive.zip.{zip_extract, zip_extract_text, zip_write_stored, zip_text_file, ZipFile}
-use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, CommentDef, spans_to_plain_text}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, spans_to_plain_text}
 use app.office.odf_export.{document_to_fodt, sheet_to_fods}
 use app.office.file_formats.{parse_inline_spans, recalculate_formula_cells}
 use app.office.sheets.spreadsheet.{Sheet}
@@ -65,7 +65,7 @@ fn _xml_unescape(s: text) -> text:
     r
 
 fn _span(s: text) -> TextSpan:
-    TextSpan(text: s, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "")
+    TextSpan(text: s, style: InlineStyle.Normal, link_url: "", footnote_id: "")
 
 fn _plain_block(kind: BlockKind, content: text) -> DocBlock:
     DocBlock(kind: kind, spans: [_span(content)])
@@ -207,70 +207,32 @@ fn _docx_runs_in(region: text) -> [TextSpan]:
                     style = InlineStyle.Bold
                 elif run.contains("<w:i/>") or run.contains("<w:i "):
                     style = InlineStyle.Italic
-                spans.push(TextSpan(text: content, style: style, link_url: "", footnote_id: "", comment_id: ""))
+                spans.push(TextSpan(text: content, style: style, link_url: "", footnote_id: ""))
         else:
             val fr = _find_from(run, "<w:footnoteReference", 0)
             if fr >= 0:
                 val fr_end = _find_from(run, "/>", fr)
                 if fr_end >= 0:
                     val fid = _xml_attr(run.slice(fr, fr_end + 2), "w:id")
-                    spans.push(TextSpan(text: "", style: InlineStyle.Normal, link_url: "", footnote_id: fid, comment_id: ""))
+                    spans.push(TextSpan(text: "", style: InlineStyle.Normal, link_url: "", footnote_id: fid))
         i = end_pos + 6
     spans
-
-fn _docx_comment_reference_run(cid: text) -> text:
-    """The zero-width `<w:commentReference w:id="cid"/>` run written right
-    after a commented run's `<w:commentRangeEnd>` — shared by the writer
-    (`_docx_run`) and the reader (`_docx_para_spans`, which needs the exact
-    same literal to recognize and skip it) so the two can never drift apart."""
-    "<w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:commentReference w:id=\"{cid}\"/></w:r>"
 
 fn _docx_para_spans(para_xml: text, rels: [_DocxRelEntry]) -> [TextSpan]:
     """Every run in the paragraph as a styled span, resolving <w:hyperlink
     r:id="..."> wrappers to their external URL (via `rels`; unresolved ids
-    degrade to a plain, non-linked span rather than failing), and
-    <w:commentRangeStart w:id="N"/>...<w:commentRangeEnd w:id="N"/> wrappers
-    (written only around the single commented run — see `_docx_run`) to a
-    comment_id on the enclosed span. The immediately-following
-    <w:commentReference> run carries no visible text and is dropped rather
-    than becoming its own span: the model attaches a comment to the
-    COMMENTED span itself, not a separate marker span (mirrors
-    file_formats.spl's `parse_inline_spans`, which attaches the same way at
-    the markdown layer)."""
+    degrade to a plain, non-linked span rather than failing)."""
     var spans: [TextSpan] = []
     var i = 0
     while i < para_xml.len():
         val h = _find_from(para_xml, "<w:hyperlink", i)
-        val cs = _find_from(para_xml, "<w:commentRangeStart", i)
-        val comment_first = cs >= 0 and (h < 0 or cs < h)
-        val marker = if comment_first: cs else: h
-        if marker < 0:
+        if h < 0:
             for sp in _docx_runs_in(para_xml.slice(i, para_xml.len())):
                 spans.push(sp)
             i = para_xml.len()
             continue
-        for sp in _docx_runs_in(para_xml.slice(i, marker)):
+        for sp in _docx_runs_in(para_xml.slice(i, h)):
             spans.push(sp)
-        if comment_first:
-            val cs_tag_end = _find_from(para_xml, "/>", cs)
-            if cs_tag_end < 0:
-                i = para_xml.len()
-                continue
-            val cid = _xml_attr(para_xml.slice(cs, cs_tag_end + 2), "w:id")
-            val range_end_tag = "<w:commentRangeEnd w:id=\"{cid}\"/>"
-            val ce = _find_from(para_xml, range_end_tag, cs_tag_end)
-            if ce < 0:
-                i = para_xml.len()
-                continue
-            val inner = para_xml.slice(cs_tag_end + 2, ce)
-            for sp in _docx_runs_in(inner):
-                spans.push(TextSpan(text: sp.text, style: sp.style, link_url: sp.link_url, footnote_id: sp.footnote_id, comment_id: cid))
-            var after = ce + range_end_tag.len()
-            val cr_run = _docx_comment_reference_run(cid)
-            if after + cr_run.len() <= para_xml.len() and para_xml.slice(after, after + cr_run.len()) == cr_run:
-                after = after + cr_run.len()
-            i = after
-            continue
         val tag_end = _find_from(para_xml, ">", h)
         val hclose = _find_from(para_xml, "</w:hyperlink>", h)
         if tag_end < 0 or hclose < 0:
@@ -280,7 +242,7 @@ fn _docx_para_spans(para_xml: text, rels: [_DocxRelEntry]) -> [TextSpan]:
         val url = _docx_rel_target(rels, _xml_attr(attrs, "r:id"))
         val inner = para_xml.slice(tag_end + 1, hclose)
         for sp in _docx_runs_in(inner):
-            spans.push(TextSpan(text: sp.text, style: sp.style, link_url: url, footnote_id: sp.footnote_id, comment_id: sp.comment_id))
+            spans.push(TextSpan(text: sp.text, style: sp.style, link_url: url, footnote_id: sp.footnote_id))
         i = hclose + 14
     if spans.len() == 0:
         spans.push(_span(""))
@@ -407,52 +369,23 @@ fn _parse_footnotes_xml(footnotes_xml: text) -> [DocBlock]:
             val inner = footnotes_xml.slice(tag_end + 1, e)
             val spans = _docx_runs_in(inner)
             val text_content = spans_to_plain_text(spans)
-            out.push(DocBlock(kind: BlockKind.FootnoteDef, spans: [TextSpan(text: text_content, style: InlineStyle.Normal, link_url: "", footnote_id: fid, comment_id: "")]))
+            out.push(DocBlock(kind: BlockKind.FootnoteDef, spans: [TextSpan(text: text_content, style: InlineStyle.Normal, link_url: "", footnote_id: fid)]))
         i = e + 13
-    out
-
-fn _parse_comments_xml(comments_xml: text) -> [CommentDef]:
-    """Every <w:comment w:id="N" w:author="...">...</w:comment> in
-    word/comments.xml, reconstructed as a CommentDef. Mirrors
-    `_parse_footnotes_xml`'s tag-scan shape; comments.xml has no mandatory
-    separator entries to skip."""
-    var out: [CommentDef] = []
-    var i = 0
-    while true:
-        val s = _find_from(comments_xml, "<w:comment ", i)
-        if s < 0:
-            break
-        val tag_end = _find_from(comments_xml, ">", s)
-        val e = _find_from(comments_xml, "</w:comment>", s)
-        if tag_end < 0 or e < 0:
-            break
-        val open_tag = comments_xml.slice(s, tag_end + 1)
-        val cid = _xml_attr(open_tag, "w:id")
-        val author = _xml_unescape(_xml_attr(open_tag, "w:author"))
-        val inner = comments_xml.slice(tag_end + 1, e)
-        val text_content = spans_to_plain_text(_docx_runs_in(inner))
-        out.push(CommentDef(id: cid, author: author, text: text_content))
-        i = e + 12
     out
 
 fn docx_bytes_to_document(zip_bytes: [u8], title: text) -> RichDocument:
     """Import a real .docx file (zip container) into a RichDocument. Resolves
     w:hyperlink r:id -> external URL and w:drawing r:embed -> media bytes via
-    word/_rels/document.xml.rels, word/footnotes.xml (if present) into
+    word/_rels/document.xml.rels, and word/footnotes.xml (if present) into
     FootnoteDef blocks appended after the body's paragraphs (matching where
     footnote definitions conventionally sit in markdown source — see
-    file_formats.spl's document_to_markdown), and word/comments.xml (if
-    present) into `doc.comments`."""
+    file_formats.spl's document_to_markdown)."""
     val rels = _parse_docx_rels(zip_extract_text(zip_bytes, "word/_rels/document.xml.rels"))
     var doc = _docx_document_xml_to_document_with_rels(zip_extract_text(zip_bytes, "word/document.xml"), rels, zip_bytes, title)
     val footnotes_xml = zip_extract_text(zip_bytes, "word/footnotes.xml")
     if footnotes_xml != "":
         for fd in _parse_footnotes_xml(footnotes_xml):
             doc.blocks.push(fd)
-    val comments_xml = zip_extract_text(zip_bytes, "word/comments.xml")
-    if comments_xml != "":
-        for cd in _parse_comments_xml(comments_xml):
-            doc.comments.push(cd)
     doc
 
 struct DocxHeaderFooter:
@@ -1300,15 +1233,6 @@ fn _docx_rels_add_footnotes(rels: _DocxRels) -> _DocxRidResult:
     entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/footnotes\" Target=\"footnotes.xml\"/>")
     _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: rels.media))
 
-fn _docx_rels_add_comments(rels: _DocxRels) -> _DocxRidResult:
-    """word/comments.xml, same fixed-name/type-lookup convention as
-    footnotes.xml above (see `_docx_rels_add_footnotes`) — added once per
-    document when any comment is present; the returned rid is unused."""
-    val rid = "rId{rels.next_id}"
-    var entries = rels.entries
-    entries.push("<Relationship Id=\"{rid}\" Type=\"{_DOCX_NS_R}/comments\" Target=\"comments.xml\"/>")
-    _DocxRidResult(rid: rid, rels: _DocxRels(entries: entries, next_id: rels.next_id + 1, media: rels.media))
-
 fn _docx_rels_add_numbering(rels: _DocxRels) -> _DocxRidResult:
     """word/numbering.xml, same fixed-name/type-lookup convention as
     footnotes.xml above — added once per document when any OrderedItem block
@@ -1342,12 +1266,7 @@ fn _docx_run(span: TextSpan, rels: _DocxRels) -> _DocxBuildResult:
     <w:footnoteReference w:id="..."/> instead of a text run (span.text is ""
     for these — see `parse_inline_spans`'s `[^id]` handling) and needs no rels
     bookkeeping (footnote ids are local to word/footnotes.xml, no external
-    relationship). A span carrying comment_id gets wrapped AROUND (after any
-    hyperlink-wrapping, since it's a separate concept) with
-    <w:commentRangeStart/End w:id="..."/> plus a trailing
-    <w:commentReference w:id="..."/> run (see `_docx_comment_reference_run`);
-    comment ids are likewise local to word/comments.xml, no external
-    relationship needed on the run itself."""
+    relationship)."""
     if span.footnote_id != "":
         val fid = _xml_attr_escape(span.footnote_id)
         val fr_run = "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference w:id=\"{fid}\"/></w:r>"
@@ -1358,16 +1277,10 @@ fn _docx_run(span: TextSpan, rels: _DocxRels) -> _DocxBuildResult:
         case Bold: run = "<w:r><w:rPr><w:b/></w:rPr>{content}</w:r>"
         case Italic: run = "<w:r><w:rPr><w:i/></w:rPr>{content}</w:r>"
         _: run = "<w:r>{content}</w:r>"
-    var xml = run
-    var out_rels = rels
     if span.link_url != "":
         val added = _docx_rels_add_hyperlink(rels, span.link_url)
-        xml = "<w:hyperlink r:id=\"{added.rid}\">{run}</w:hyperlink>"
-        out_rels = added.rels
-    if span.comment_id != "":
-        val cid = _xml_attr_escape(span.comment_id)
-        xml = "<w:commentRangeStart w:id=\"{cid}\"/>{xml}<w:commentRangeEnd w:id=\"{cid}\"/>{_docx_comment_reference_run(cid)}"
-    _DocxBuildResult(xml: xml, rels: out_rels)
+        return _DocxBuildResult(xml: "<w:hyperlink r:id=\"{added.rid}\">{run}</w:hyperlink>", rels: added.rels)
+    _DocxBuildResult(xml: run, rels: rels)
 
 fn _docx_drawing_xml(rid: text, alt: text, src: text) -> text:
     """Minimal wp:inline DrawingML picture skeleton (PNG only). alt/src are
@@ -1444,20 +1357,6 @@ fn _footnotes_xml(defs: [DocBlock]) -> text:
         body = "{body}<w:footnote w:id=\"{fid}\"><w:p><w:pPr><w:pStyle w:val=\"FootnoteText\"/></w:pPr><w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space=\"preserve\">{text_}</w:t></w:r></w:p></w:footnote>"
     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:footnotes xmlns:w=\"{_DOCX_NS_W}\">{body}</w:footnotes>"
 
-fn _comments_xml(comments: [CommentDef]) -> text:
-    """word/comments.xml: one <w:comment> per CommentDef, in document order
-    (mirrors `_footnotes_xml`'s shape, minus the mandatory-separator entries
-    footnotes.xml requires — comments.xml has none). w:date is a fixed
-    constant ("2026-01-01T00:00:00Z") rather than a wall-clock read, keeping
-    export deterministic for round-trip/byte diffs in specs."""
-    var body = ""
-    for c in comments:
-        val cid = _xml_attr_escape(c.id)
-        val author = _xml_attr_escape(c.author)
-        val text_ = _xml_escape_d(c.text)
-        body = "{body}<w:comment w:id=\"{cid}\" w:author=\"{author}\" w:date=\"2026-01-01T00:00:00Z\"><w:p><w:r><w:t xml:space=\"preserve\">{text_}</w:t></w:r></w:p></w:comment>"
-    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:comments xmlns:w=\"{_DOCX_NS_W}\">{body}</w:comments>"
-
 fn _docx_numbering_xml() -> text:
     """word/numbering.xml: one abstract numbering (decimal, `%1.`) + the one
     concrete numId (1) `_docx_para` references for every OrderedItem block —
@@ -1475,18 +1374,15 @@ fn _document_to_docx_bytes_core(doc: RichDocument, header_text: text, footer_tex
     only when a hyperlink, image, or header/footer actually needs them — so
     a plain document with none of these features produces byte-identical
     output to this writer before any of the three features existed. Same
-    guarantee for footnotes/ordered-lists/comments added later: FootnoteDef
-    blocks are skipped from the paragraph loop below (they live only in
+    guarantee for footnotes/ordered-lists added later: FootnoteDef blocks are
+    skipped from the paragraph loop below (they live only in
     word/footnotes.xml, never in the body) and word/footnotes.xml /
-    word/numbering.xml / word/comments.xml are only emitted when the
-    document actually uses them (a comment-less doc's `doc.comments` is
-    empty, so `has_comments` is false and nothing comment-related is
-    written — same byte-identity guarantee)."""
+    word/numbering.xml are only emitted when the document actually uses
+    them."""
     var rels = _docx_rels_new()
     val footnote_defs = _collect_footnote_defs(doc)
     val has_footnotes = footnote_defs.len() > 0
     val has_ordered = _doc_has_ordered_list(doc)
-    val has_comments = doc.comments.len() > 0
     var paras = ""
     for block in doc.blocks:
         if block.kind == BlockKind.FootnoteDef:
@@ -1500,9 +1396,6 @@ fn _document_to_docx_bytes_core(doc: RichDocument, header_text: text, footer_tex
     if has_ordered:
         val num_added = _docx_rels_add_numbering(rels)
         rels = num_added.rels
-    if has_comments:
-        val cm_added = _docx_rels_add_comments(rels)
-        rels = cm_added.rels
     val has_hf = header_text != "" or footer_text != ""
     var sect_pr = ""
     var header_part = ""
@@ -1534,8 +1427,6 @@ fn _document_to_docx_bytes_core(doc: RichDocument, header_text: text, footer_tex
         overrides = "{overrides}<Override PartName=\"/word/footnotes.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml\"/>"
     if has_ordered:
         overrides = "{overrides}<Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>"
-    if has_comments:
-        overrides = "{overrides}<Override PartName=\"/word/comments.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml\"/>"
     var default_exts = "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/>"
     if needs_wp:
         default_exts = "{default_exts}<Default Extension=\"png\" ContentType=\"image/png\"/>"
@@ -1555,8 +1446,6 @@ fn _document_to_docx_bytes_core(doc: RichDocument, header_text: text, footer_tex
         files.push(zip_text_file("word/footnotes.xml", _footnotes_xml(footnote_defs)))
     if has_ordered:
         files.push(zip_text_file("word/numbering.xml", _docx_numbering_xml()))
-    if has_comments:
-        files.push(zip_text_file("word/comments.xml", _comments_xml(doc.comments)))
     for m in rels.media:
         files.push(m)
     zip_write_stored(files)
@@ -1565,10 +1454,8 @@ fn document_to_docx_bytes(doc: RichDocument) -> [u8]:
     """Build a genuine .docx: content types, rels, styles (Heading1-3 +
     ListParagraph), and word/document.xml with styled runs (w:b/w:i),
     hyperlinks (w:hyperlink r:id + external rels), inline PNG images
-    (w:drawing), footnotes (word/footnotes.xml + w:footnoteReference),
-    ordered lists (word/numbering.xml + w:numPr), and comments
-    (word/comments.xml + w:commentRangeStart/End + w:commentReference). No
-    header/footer — see
+    (w:drawing), footnotes (word/footnotes.xml + w:footnoteReference), and
+    ordered lists (word/numbering.xml + w:numPr). No header/footer — see
     `document_to_docx_bytes_hf` — and this function's output is unaffected by
     that feature by construction (same core builder, called with
     header_text/footer_text both "")."""

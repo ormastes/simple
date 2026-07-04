@@ -24,6 +24,7 @@ Covers the three MS Word gap features through model -> .docx export ->
 use std.spec
 use app.office.file_formats.{parse_markdown_document, document_to_markdown}
 use app.office.odf_ooxml.{document_to_docx_bytes, document_to_docx_bytes_hf, docx_bytes_to_document, docx_bytes_to_header_footer}
+use app.office.word.html_render.{render_document_html}
 use std.common.archive.zip.{zip_entries, zip_extract_text}
 
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
@@ -257,3 +258,77 @@ describe "DOCX ordered lists: markdown `1. item` round trip":
         val plain = document_to_docx_bytes(doc)
         val hf_empty = document_to_docx_bytes_hf(doc, "", "")
         expect(plain == hf_empty).to_be(true)
+
+describe "DOCX comments: markdown [>>author: text<<] round trip":
+    """A word comment attaches to the immediately preceding span (markdown
+    `[>>author: text<<]`, a TextSpan.comment_id) and round-trips through
+    word/comments.xml (<w:comment w:id w:author w:date>) plus
+    <w:commentRangeStart/End w:id> + <w:commentReference w:id> runs around
+    the commented run in word/document.xml — mirroring the footnotes lane's
+    architecture (see attributed_text.spl/file_formats.spl/odf_ooxml.spl),
+    but with author+text carried inline at the point of use and resolved via
+    a parallel RichDocument.comments list rather than a separate FootnoteDef-
+    shaped block, since a comment has no `[^id]:`-style definition line
+    elsewhere in the source."""
+
+    it "round-trips a single comment exactly":
+        val md = "Please check this claim.[>>Alice: needs a citation<<]"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "emits word/comments.xml with the author attribute and a fixed w:date":
+        val md = "Flagged text.[>>Alice: needs a citation<<]"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/comments.xml")).to_be(true)
+        val comments_xml = zip_extract_text(docx, "word/comments.xml")
+        expect(comments_xml).to_contain("w:author=\"Alice\"")
+        expect(comments_xml).to_contain("w:date=\"2026-01-01T00:00:00Z\"")
+        expect(comments_xml).to_contain("needs a citation")
+
+    it "wraps the commented run in commentRangeStart/End + commentReference in word/document.xml":
+        val md = "Flagged text.[>>Alice: needs a citation<<]"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:commentRangeStart w:id=\"")
+        expect(document_xml).to_contain("<w:commentRangeEnd w:id=\"")
+        expect(document_xml).to_contain("<w:commentReference w:id=\"")
+
+    it "wires word/comments.xml into content types and document.xml.rels":
+        val md = "Flagged text.[>>Alice: needs a citation<<]"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val types = zip_extract_text(docx, "[Content_Types].xml")
+        expect(types).to_contain("/word/comments.xml")
+        val rels = zip_extract_text(docx, "word/_rels/document.xml.rels")
+        expect(rels).to_contain("relationships/comments")
+
+    it "round-trips two comments by different authors exactly":
+        val md = "First point.[>>Alice: check this<<] Second point.[>>Bob: and this too<<]"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+        val comments_xml = zip_extract_text(docx, "word/comments.xml")
+        expect(comments_xml).to_contain("w:author=\"Alice\"")
+        expect(comments_xml).to_contain("w:author=\"Bob\"")
+
+    it "a comment-less document has no comments.xml part (plain-doc byte identity)":
+        val doc = parse_markdown_document("# Report\n\nBody text.", "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/comments.xml")).to_be(false)
+        val plain = document_to_docx_bytes(doc)
+        val hf_empty = document_to_docx_bytes_hf(doc, "", "")
+        expect(plain == hf_empty).to_be(true)
+
+    it "renders a dotted underline and a trailing comments section in HTML":
+        val md = "Flagged text.[>>Alice: needs a citation<<]"
+        val doc = parse_markdown_document(md, "d")
+        val html = render_document_html(doc)
+        expect(html).to_contain("border-bottom: 1px dotted #888;")
+        expect(html).to_contain("title=\"Alice: needs a citation\"")
+        expect(html).to_contain("<div class=\"comments\"><ul>")
+        expect(html).to_contain("<li>Alice: needs a citation</li>")
