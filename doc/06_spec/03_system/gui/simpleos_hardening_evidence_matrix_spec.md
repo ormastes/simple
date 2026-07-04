@@ -63,13 +63,26 @@ SIMD Engine2D diagram evidence, layered WebRenderer/Engine2D bitmap evidence,
 Simple GUI through WebRenderer bitmap evidence, host/QEMU WM counterpart
 bitmap evidence, SimpleOS LLVM port evidence, and the latest live QEMU Simple
 GUI/MDI framebuffer artifact. It also verifies the current GUI/Web/2D
-Vulkan-backed RenderDoc aggregate evidence.
+Vulkan-backed RenderDoc aggregate evidence, the full Lean formal proof
+integrity gate, the RISC-V/BYL dual-track formal gate, the focused critical
+concurrency/resource formal gate, and the focused memory-safety formal gate.
 
 ## Acceptance Criteria
 
 - Executable launch from the SimpleOS filesystem is proven by the SSH transcript
   for `/usr/bin/simple`.
 - SSH server and shell launch both `/usr/bin/simple.smf` and `/usr/bin/simple`.
+- Lean formal proof projects build through the shared proof checker and reject
+  proof-trust bypasses.
+- RISC-V generated RTL sidecars, BYL model facts, and manual Lean constraints
+  pass the dual-track formal gate, while generated SBY/RVFI artifacts are
+  reported as readiness evidence rather than claimed as an RTL proof pass when
+  `sby` is unavailable.
+- Scheduler resource lifecycle, actor/channel backpressure, memory DRF,
+  kernel-capability, and memory-capability theorem surfaces pass the focused
+  critical formal gate.
+- GC reachability, no-GC boundary, manual borrow, pointer borrow, and no-GC
+  compile theorem surfaces pass the focused memory-safety formal gate.
 - Hosted WM source and SimpleOS WM lifecycle behavior are covered by the shared
   WM renderer unification evidence report.
 - CPU SIMD Engine2D diagram rendering has exact-bitmap mismatch count zero and
@@ -162,6 +175,10 @@ The wrapper emits these rows:
 The matrix passes only when all twenty-two rows are `pass` and the required
 guest-side QEMU performance release gate is `pass`.
 
+The report also emits non-counted audit rows for `byl_sby_artifact_audit` and
+`riscv_rtl_rvfi_readiness_note` so generated SBY/RVFI readiness artifacts cannot
+be mistaken for a completed RTL proof pass.
+
 ## Evidence Sources
 
 - SSH rows read `build/os/x64-ssh-live.session-smf.txt` and
@@ -252,7 +269,7 @@ guest-side QEMU performance release gate is `pass`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -309,6 +326,10 @@ expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_height=240"
 expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_anchor_matches=5")
 expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_ppm_bytes=2359312")
 expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_raw_bytes=3145728")
+val report = file_read(_report_path(run_id))
+expect(report).to_contain("- byl_sby_artifact_audit: pass")
+expect(report).to_contain("RISC-V generated RTL bundles pass RVFI port")
+expect(report).to_contain("readiness evidence, not an RTL proof pass")
 ```
 
 </details>
@@ -361,7 +382,7 @@ expect(stdout).to_contain("simpleos_hardening_matrix_status=fail")
 expect(stdout).to_contain("simpleos_hardening_matrix_reason=matrix-incomplete")
 expect(stdout).to_contain("simpleos_hardening_matrix_blocked_rows=")
 expect(stdout).to_contain("qemu_gui_smf_artifact_contract")
-expect(stdout).to_contain("simpleos_hardening_matrix_recovery_hints=ssh=test/03_system/ssh_live_login_in_qemu_spec.spl")
+expect(stdout).to_contain("simpleos_hardening_matrix_recovery_hints=ssh=test/03_system/os/ssh_live_login_in_qemu_spec.spl")
 expect(stdout).to_contain("simpleos_hardening_formal_lean_proofs_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_riscv_dual_track_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_critical_concurrency_status=pass")
