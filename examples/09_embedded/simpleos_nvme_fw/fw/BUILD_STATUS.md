@@ -69,9 +69,9 @@ The full-controller layer, on top of the FTL/FIL stack (legacy single-queue
 **The FIL runs on the ONFI device** (plan phase E3, done): `fil.spl` composes `NandDevice` (not the
 behavioural `fil_nand.Nand`), so every write/read/GC-erase/recovery-OOB-scan in `sim_main` and
 `nvme_main` goes through the real ONFI handshake. `fil_ecc` keeps the FIL-level ECC; NAND stores
-the SECDED payload-ECC word in spare-area state at program time, the FMC latches it on read, and
+the SECDED payload-window ECC in spare-area state at program time, the FMC latches it on read, and
 FIL decodes the stored value instead of recomputing from read data. One silent payload-bit error
-is corrected; double-bit payload and stored-ECC/OOB metadata corruption fail closed. The self-test
+through bit 16 is corrected; double-bit payload and stored-ECC/OOB metadata corruption fail closed. The self-test
 suite is green (gate
 `ALL FIRMWARE SELF-TESTS PASS`).
 
@@ -131,10 +131,10 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   standalone `rain_check.spl` (`RAIN OK`), `ftl_rain_selftest`, and `proofs/Rain.lean`.
 
 Integration status (canonical: `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration
-status", wired-vs-shelf table): P1 `fil_fmc`, P7 `power_thermal`, and P8 `rain` are all **WIRED**
-into the live controller/FTL; P2 `fil_scheduler` **landed but stays SHELF** — channel-level
-parallelism is a model a single-threaded sim cannot exhibit, so it is not flatly deferred but cannot
-be exercised; P3 has a **wired SECDED stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
+status", wired-vs-shelf table): P1 `fil_fmc`, P2 `fil_scheduler`, P7 `power_thermal`, and P8
+`rain` are all **WIRED** into the live controller/FTL; P2 remains a timing floor because
+channel-level parallelism is a model a single-threaded sim cannot physically exhibit; P3 has a
+**wired SECDED payload-window stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
 scope); P4 has a **wired segmented-PRP host-byte floor** (full HostMem/SGL/IOMMU remains out of scope);
 P5 has a **wired bounded-map-cache + fixed arena/free-list floor** (full DRAM subsystem remains out of scope);
 P6 has a **wired cooperative-owner floor** (true multicore/preemption remains out of scope);
