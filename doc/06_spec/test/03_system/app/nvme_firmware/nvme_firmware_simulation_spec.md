@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -351,6 +351,29 @@ expect(out).to_contain("HOST TRANSPORT OK")
 
 </details>
 
+#### bounds host writes behind a DRAM write buffer with no partial media update (gap-closure P5)
+
+- Fill the fixed write buffer, then submit one write larger than the DRAM budget
+   - Expected: code equals `0`
+- The oversized write is rejected before any LBA is programmed
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Fill the fixed write buffer, then submit one write larger than the DRAM budget")
+val (out, err, code) = _run(FW + "/dram_buffer_check.spl")
+expect(code).to_equal(0)
+step("The oversized write is rejected before any LBA is programmed")
+expect(out).to_contain("DRAM BUFFER OK")
+```
+
+</details>
+
 #### schedules NAND ops across channels in parallel with per-channel serialization (gap-closure P2)
 
 - Stripe a write batch across the channels and drain the multi-channel scheduler
@@ -575,8 +598,8 @@ expect(out).to_contain("LEAN_OK")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -64,9 +64,11 @@ silicon. The simulation boundary is deliberate and unchanged:
       write every LBA in `nblocks` from a modeled two-segment PRP byte stream instead of silently
       programming only the first block (`host_transport_check.spl`, `hil_selftest`,
       `nvme_controller_selftest`).
-- [x] **Map-cache DRAM pressure is explicit.** The live `Ftl` uses a bounded LRU write-back
-      `ftl_map` cache whose capacity is tied to `MAP_CACHE_DRAM_BUDGET_BYTES`; dirty evictions
-      write back to the flash-resident L2P (`ftl_map_selftest`).
+- [x] **DRAM pressure is explicit.** The live `Ftl` uses a bounded LRU write-back `ftl_map` cache
+      whose capacity is tied to `MAP_CACHE_DRAM_BUDGET_BYTES`; dirty evictions write back to the
+      flash-resident L2P. HIL and the multi-queue NVMe controller also stage host writes through a
+      fixed DRAM write buffer and reject over-budget writes before any partial media update
+      (`ftl_map_selftest`, `dram_buffer_check.spl`).
 - [x] **Foreground/background FTL access is serialized.** `Firmware.service()` now drains work
       through `service_tick()`, which gives each tick one foreground HIL command and one
       background-GC opportunity behind an explicit FTL-map owner token (`firmware_selftest`).
@@ -92,13 +94,13 @@ same as "all gap-closure / production work is done." Per
 (`fil_scheduler`) is **modeled but shelf** (a single-threaded sim cannot exhibit channel-level
 parallelism); **P3 has a wired SECDED stored-ECC simulation floor** (not full BCH/LDPC); **P4 has a
 wired segmented-PRP host-byte floor** (not full HostMem/SGL/IOMMU); **P5 has a wired bounded-map-cache
-floor** (not a general DRAM arena/write buffer); **P6 has a wired cooperative-owner floor** (not
+and fixed-write-buffer floor** (not a general DRAM arena/free-list); **P6 has a wired cooperative-owner floor** (not
 multicore/preemptive); and **P9** (rv32 native build) is **build-blocked**
 (see the silicon boundary below).
 
 **Silicon boundary (unchanged).** Real BCH/Reed–Solomon/LDPC hardware ECC (the sim keeps a
 stored SECDED payload-ECC + injected-bit-error model), real register MMIO / PCIe transport, full PRP/SGL DMA,
-a general DRAM allocator/write buffer, true multicore/preemptive concurrency, a persistent backing store, and multi-channel NAND timing remain out of scope; the bare-metal **rv32** no-alloc port is
+a general DRAM allocator/free-list, true multicore/preemptive concurrency, a persistent backing store, and multi-channel NAND timing remain out of scope; the bare-metal **rv32** no-alloc port is
 **written + host-verified but build-blocked in this environment** — its rv32 LLVM native build exits
 255 silently with no ELF and the boot was not observed (bug filed:
 `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`; `BUILD_STATUS.md`), so it

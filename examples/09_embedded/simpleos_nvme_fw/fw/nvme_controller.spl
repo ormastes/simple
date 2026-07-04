@@ -23,6 +23,7 @@ use hil_queue.*
 use fw_pool.*
 use ftl.*
 use power_thermal.*
+use dram.*
 
 # Result of dispatching one admin command. `post` is false only for an Async Event
 # Request held outstanding (its completion is posted later, when an event is raised).
@@ -56,9 +57,10 @@ struct NvmeController:
     last_abort_sqid: i64   # SQID decoded from the most recent Abort (-1 = none)
     last_abort_cid:  i64   # CID  decoded from the most recent Abort (-1 = none)
     pt:           PowerThermal   # power-state + thermal model, driven by live IO (SMART temperature)
+    wb:           DramWriteBuffer # fixed DRAM write buffer staged before FTL program
 
 fn nvme_controller_new() -> NvmeController:
-    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, fw_slot: 0, last_abort_sqid: -1, last_abort_cid: -1, pt: power_thermal_new())
+    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, fw_slot: 0, last_abort_sqid: -1, last_abort_cid: -1, pt: power_thermal_new(), wb: dram_write_buffer_new())
 
 impl NvmeController:
     # ── Admin path ───────────────────────────────────────────────────────────
@@ -246,8 +248,13 @@ impl NvmeController:
                 val h: Handle = me.pool.acquire(cmd.cid, cmd.lba, cmd.nblocks, cmd.data)
                 me.pool.set_phase(h, PH_PROGRAM)
                 var i: i64 = 0
+                me.wb.clear()
                 while i < cmd.nblocks and status == SC_SUCCESS:
-                    status = me.ftl.write(cmd.lba + i, prp_byte(cmd, i))
+                    status = me.wb.stage(i, prp_byte(cmd, i))
+                    i = i + 1
+                i = 0
+                while i < cmd.nblocks and status == SC_SUCCESS:
+                    status = me.ftl.write(cmd.lba + i, me.wb.byte(i))
                     i = i + 1
                 me.pool.set_status(h, status)
                 me.pool.set_phase(h, PH_DONE)
@@ -365,6 +372,15 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(r0.data, 0x60, "multi-block IO read byte 0")
     fail = fail + expect_eq(r1.data, 0x61, "multi-block IO read byte 1")
     fail = fail + expect_eq(r2.data, 0xA0, "multi-block IO read byte 2")
+
+    c.io_submit(1, cmd_make(106, OP_WRITE, 30, WRITE_BUFFER_CAP_BLOCKS + 1, 0x70))
+    c.io_process()
+    val wob: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(wob.status, SC_NS_NOT_READY, "oversized IO write buffer command rejected")
+    c.io_submit(1, cmd_make(107, OP_READ, 30, 1, 0))
+    c.io_process()
+    val rob: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(rob.data, 0, "oversized IO write leaves first LBA untouched")
 
     # Get/Set Features through the admin path
     c.admin_submit(admin_set_feature_cmd(4, FEAT_TEMP_THRESH, 345))

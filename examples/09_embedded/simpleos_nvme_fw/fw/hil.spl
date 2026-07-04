@@ -14,14 +14,16 @@ use hil_queue.*
 use hil_command.*
 use fw_pool.*
 use ftl.*
+use dram.*
 
 struct Hil:
     q:    NvmeQueues
     ftl:  Ftl
     pool: TaskPool
+    wb:   DramWriteBuffer
 
 fn hil_new() -> Hil:
-    Hil(q: nvme_queues_new(), ftl: ftl_new(), pool: task_pool_new())
+    Hil(q: nvme_queues_new(), ftl: ftl_new(), pool: task_pool_new(), wb: dram_write_buffer_new())
 
 impl Hil:
     # Host submits a command to the submission queue. False if the SQ is full.
@@ -43,8 +45,13 @@ impl Hil:
                 val h: Handle = me.pool.acquire(cmd.cid, cmd.lba, cmd.nblocks, cmd.data)
                 me.pool.set_phase(h, PH_PROGRAM)
                 var i: i64 = 0
+                me.wb.clear()
                 while i < cmd.nblocks and status == SC_SUCCESS:
-                    status = me.ftl.write(cmd.lba + i, prp_byte(cmd, i))
+                    status = me.wb.stage(i, prp_byte(cmd, i))
+                    i = i + 1
+                i = 0
+                while i < cmd.nblocks and status == SC_SUCCESS:
+                    status = me.ftl.write(cmd.lba + i, me.wb.byte(i))
                     i = i + 1
                 me.pool.set_status(h, status)
                 me.pool.set_phase(h, PH_DONE)
@@ -142,6 +149,16 @@ fn hil_selftest() -> i64:
     fail = fail + expect_eq(c22.data, 0x20, "multi-block read byte 0")
     fail = fail + expect_eq(c23.data, 0x21, "multi-block read byte 1")
     fail = fail + expect_eq(c24.data, 0x90, "multi-block read byte 2")
+
+    # Oversized writes fail before any partial media update.
+    hil.submit(cmd_make(25, OP_WRITE, 80, WRITE_BUFFER_CAP_BLOCKS + 1, 0x40))
+    hil.run()
+    val c25: NvmeCpl = hil.reap()
+    fail = fail + expect_eq(c25.status, SC_NS_NOT_READY, "oversized write buffer command rejected")
+    hil.submit(cmd_make(26, OP_READ, 80, 1, 0))
+    hil.run()
+    val c26: NvmeCpl = hil.reap()
+    fail = fail + expect_eq(c26.data, 0, "oversized write leaves first LBA untouched")
 
     # out-of-range write is rejected by validation
     hil.submit(cmd_make(3, OP_WRITE, LBA_COUNT + 5, 1, 0))

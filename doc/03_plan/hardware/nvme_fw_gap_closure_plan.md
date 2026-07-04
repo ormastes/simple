@@ -49,7 +49,7 @@ the firmware":
 | P1 | `fil_fmc` | `fil.spl` (every program/read/erase routes through the FMC handshake) | **wired** |
 | P3 | `fil_ecc` + NAND OOB ECC latch | `fil.spl` reads stored ECC through `fil_fmc`, corrects one silent payload bit, and fails double-bit/OOB corruption closed | **wired SECDED floor** — not full BCH/LDPC |
 | P4 | `hil_command.prp_byte` | HIL + multi-queue NVMe writes program each LBA from a segmented PRP host byte stream | **wired segmented-PRP floor** — no full HostMem/SGL/IOMMU yet |
-| P5 | `ftl_map` | `Ftl` uses bounded LRU write-back cache with explicit DRAM budget + dirty eviction | **wired map-cache floor** — no general DRAM arena/write buffer yet |
+| P5 | `ftl_map` + `dram` | `Ftl` uses bounded LRU write-back cache; HIL/controller writes stage through a fixed DRAM write buffer before programming media | **wired DRAM floor** — no general arena/free-list yet |
 | P6 | `firmware.service_tick` | Foreground HIL ticks and background GC ticks share an explicit FTL-map owner token | **wired cooperative floor** — no multicore/preemption |
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
 | P8 | `rain` | `ftl` (`rain_seal` / `rain_recover_channel`: a failed channel is rebuilt inside the live FTL, verified end-to-end through the normal read path) | **wired** |
@@ -191,11 +191,13 @@ PRP pointer; `hil`/`nvme_controller` move data through DMA, not inline values.
 **Silicon ceiling.** Real PCIe BAR/doorbell electrical + IOMMU are modeled as a register file,
 not silicon.
 
-## P5 — DRAM-backed buffer & bounded map cache  *(G5)* — PARTIAL WIRED FLOOR (2026-07-04)
+## P5 — DRAM-backed buffer & bounded map cache  *(G5)* — WIRED FLOOR (2026-07-04)
 
 > Landed floor: `ftl_map` is already load-bearing in `Ftl` as a bounded LRU write-back map cache.
-> Its capacity is now tied to an explicit DRAM budget (`MAP_CACHE_DRAM_BUDGET_BYTES`), and the
-> self-test proves dirty eviction and budget fit. A general DRAM arena and write buffer remain
+> Its capacity is tied to an explicit DRAM budget (`MAP_CACHE_DRAM_BUDGET_BYTES`), and the
+> self-test proves dirty eviction and budget fit. `dram.spl` now adds a fixed DRAM write buffer
+> used by both HIL and the multi-queue controller before FTL programming; over-budget writes fail
+> before any partial media update (`dram_buffer_check.spl`). A general DRAM arena/free-list remains
 > open below.
 
 **Goal.** A fixed DRAM budget backing the LRU write buffer + a bounded DFTL map cache with
