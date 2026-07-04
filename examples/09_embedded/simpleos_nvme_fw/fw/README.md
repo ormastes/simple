@@ -84,16 +84,23 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 | Layer | Modules |
 |-------|---------|
 | Interface | `nvme_types` (constants, `Handle`, `NvmeCmd`/`NvmeCpl`, geometry, helpers) |
-| **FIL** | `fil_nand`, `fil_nand_device` (ONFI NAND *device*), `fil_fmc` (flash-memory-controller register driver, gap-closure P1 — **wired**: every program/read/erase routes through the FMC register handshake; the `Fmc` owns `fil_nand_device`), `fil_scheduler` (multi-channel request scheduler, gap-closure P2 — **wired timing floor**: every valid program/read/erase routes through it; the single-threaded host sim cannot physically exhibit channel-level parallelism), `fil_ecc`, `fil_badblock`, `fil` |
-| **FTL** | `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `ftl`, `rain` (XOR-parity die/channel resilience, gap-closure P8 — **wired**: the FTL maintains parity on writes/GC/format and rebuilds a failed channel in place via `rain_recover_channel`; `rain_seal` remains the scrub/repair pass) |
+<<<<<<< Conflict 1 of 1
+%%%%%%% Changes from base to side #1
+ | **FIL** | `fil_nand`, `fil_nand_device` (ONFI NAND *device*), `fil_fmc` (flash-memory-controller register driver, gap-closure P1 — **wired**: every program/read/erase routes through the FMC register handshake; the `Fmc` owns `fil_nand_device`), `fil_scheduler` (multi-channel request scheduler, gap-closure P2 — **wired timing floor**: every valid program/read/erase routes through it; the single-threaded host sim cannot physically exhibit channel-level parallelism), `fil_ecc`, `fil_badblock`, `fil` |
+-| **FTL** | `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `ftl`, `rain` (XOR-parity die/channel resilience, gap-closure P8 — **wired**: the FTL seals parity and rebuilds a failed channel in place via `rain_seal`/`rain_recover_channel`) |
++| **FTL** | `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `ftl`, `rain` (XOR-parity die/channel resilience, gap-closure P8 — **wired**: the FTL maintains parity on writes/GC/format and rebuilds a failed channel in place via `rain_recover_channel`; `rain_seal` remains the scrub/repair pass) |
++++++++ Contents of side #2
+| **FIL** | `fil_nand`, `fil_nand_device` (ONFI NAND *device*), `fil_fmc` (flash-memory-controller register driver, gap-closure P1 — **wired**: every program/read/erase routes through the FMC register handshake; the `Fmc` owns `fil_nand_device`), `fil_scheduler` (multi-channel request scheduler, gap-closure P2 — **shelf**: verified model, not load-bearing; the single-threaded host sim cannot exhibit channel-level parallelism), `fil_ecc`, `fil_badblock`, `fil` |
+| **FTL** | `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `ftl`, `rain` (XOR-parity die/channel resilience, gap-closure P8 — **wired**: the FTL seals parity and rebuilds a failed channel in place via `rain_seal`/`rain_recover_channel`) |
+>>>>>>> Conflict 1 of 1 ends
 | **HIL + core** | `hil_queue`, `hil_command`, `fw_pool`, `hil`, `firmware` |
 | **NVMe controller front end** | `nvme_admin_types`, `nvme_admin` (admin queue: Identify, Create/Delete IO SQ/CQ, Get/Set Features, Get Log Page), `nvme_qset` (multi IO queue, round-robin), `nvme_controller`, `power_thermal` (power states + thermal throttling, gap-closure P7 — **wired**: the controller IO path drives it and SMART reports its live composite temperature) |
 | Tests | `test_fw` (all self-tests, 526 checks), `sim_main` (single-queue e2e), `nvme_main` (controller e2e) |
 
 > **Integration status (wired vs. shelf).** The authoritative wired-vs-shelf accounting is
 > `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status — wired vs. shelf" —
-> P1/P2/P7/P8 are **wired**, P3/P4/P5/P6 have wired simulation floors, and P9
-> (`../fw_rv32/entry.spl`) is build-blocked.
+> P1/P7/P8 are **wired**, P3/P4/P5/P6 have wired simulation floors, P2 `fil_scheduler` is
+> done-but-**shelf**, and P9 (`../fw_rv32/entry.spl`) is build-blocked.
 
 ## Requirements coverage (from the research report)
 

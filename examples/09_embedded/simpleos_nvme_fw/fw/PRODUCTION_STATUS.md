@@ -90,10 +90,10 @@ silicon. The simulation boundary is deliberate and unchanged:
 
 **Gap-closure vs. acceptance bar.** The acceptance bar above (req 1-7) is **MET** — that is *not* the
 same as "all gap-closure / production work is done." Per
-`doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status": **P1** (`fil_fmc`), **P2**
-(`fil_scheduler`), **P7** (`power_thermal`), and **P8** (`rain`) are **wired into the live
-controller/FTL**; P2 is still a timing floor because a single-threaded sim cannot physically exhibit
-channel-level parallelism; **P3 has a wired SECDED stored-ECC simulation floor** (not full BCH/LDPC); **P4 has a
+`doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status": **P1** (`fil_fmc`), **P7**
+(`power_thermal`), and **P8** (`rain`) are **wired into the live controller/FTL**; **P2**
+(`fil_scheduler`) is **modeled but shelf** (a single-threaded sim cannot exhibit channel-level
+parallelism); **P3 has a wired SECDED stored-ECC simulation floor** (not full BCH/LDPC); **P4 has a
 wired segmented-PRP host-byte floor** (not full HostMem/SGL/IOMMU); **P5 has a wired bounded-map-cache
 and fixed arena/free-list floor** (not a full DRAM subsystem); **P6 has a wired cooperative-owner floor** (not
 multicore/preemptive); and **P9** (rv32 native build) is **build-blocked**

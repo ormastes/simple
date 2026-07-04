@@ -136,7 +136,7 @@ For each source file in scope:
      SimpleOS mission-critical release verification must run
      `sh scripts/check/check-simpleos-mission-critical-release.shs`; matrix
      readiness is not release completion while that gate reports blocked or
-     failed, and the gate must report `release_blockers=none`. If blocked, run
+     failed. If blocked, run
      `sh scripts/check/check-simpleos-mission-critical-prereqs.shs` for the host
      dependency list and
      `sh scripts/setup/setup-simpleos-formal-env.shs --print-install` for setup
