@@ -157,3 +157,14 @@ Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
 - Minimal-doc bisect beats full-sheet debugging — but slice whole top-level
   blocks; truncated CSS chunks swallow appended probe rules (depth desync)
   and produce false positives.
+
+## 2026-07-05 (final): GATE GREEN — window 97.17%, taskbar 92.37%
+`check-widget-shells-crossengine-evidence.shs` passes end-to-end (exit 0,
+comparator and thresholds untouched, metal backend both fixtures, panel bands
+within 1px of Chrome). Closing fixes after the UTF-8/media/pseudo/shadow set:
+flex min-content floor (min-width:auto), explicit CSS min-width floor on all
+flex sizing branches (sections' min-width:180px overflow the row like
+Chromium), and per-row gradient painting that carries the full rect geometry
+so border-radius corners on gradient backgrounds render round (square accent
+corners were the last panel-band-bottom miss). Remaining residuals are glyph
+metrics (bitmap vs Inter), excluded by design via the Chrome DOM text mask.
