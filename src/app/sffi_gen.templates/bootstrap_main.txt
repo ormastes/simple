@@ -1,0 +1,82 @@
+//! Simple Bootstrap CLI
+//!
+//! Full CLI that provides interpreter and compiler functionality.
+
+use std::env;
+use std::ffi::CString;
+use simple_ffi_wrapper::{rt_gc_init, rt_cli_handle_compile, rt_cli_run_file};
+
+fn main() {
+    // Initialize GC
+    rt_gc_init();
+
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 {
+        print_help();
+        std::process::exit(0);
+    }
+
+    let cmd = &args[1];
+
+    match cmd.as_str() {
+        "compile" => {
+            let args_str = args[1..].join("\n");
+            let c_args = CString::new(args_str).unwrap();
+            let result = unsafe { rt_cli_handle_compile(c_args.as_ptr()) };
+            std::process::exit(result as i32);
+        }
+        "run" => {
+            if args.len() < 3 {
+                eprintln!("error: run requires a file");
+                std::process::exit(1);
+            }
+            let args_str = args[2..].join("\n");
+            let c_args = CString::new(args_str).unwrap();
+            let result = unsafe { rt_cli_run_file(c_args.as_ptr(), false, false) };
+            std::process::exit(result as i32);
+        }
+        "-h" | "--help" | "help" => {
+            print_help();
+        }
+        "-v" | "--version" | "version" => {
+            println!("Simple 0.1.0 (Bootstrap)");
+        }
+        "-c" => {
+            if args.len() < 3 {
+                eprintln!("error: -c requires code");
+                std::process::exit(1);
+            }
+            // Run code string - wrap in main function
+            let code = format!("fn main():\n    {}", args[2..].join(" "));
+            let c_code = CString::new(code).unwrap();
+            let result = unsafe { simple_ffi_wrapper::rt_cli_run_code(c_code.as_ptr(), 0, false, false) };
+            std::process::exit(result as i32);
+        }
+        _ => {
+            // Check if it's a .spl file to run
+            if cmd.ends_with(".spl") {
+                let args_str = args[1..].join("\n");
+                let c_args = CString::new(args_str).unwrap();
+                let result = unsafe { rt_cli_run_file(c_args.as_ptr(), false, false) };
+                std::process::exit(result as i32);
+            } else {
+                eprintln!("Unknown command: {}", cmd);
+                print_help();
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn print_help() {
+    println!("Simple 0.1.0 (Bootstrap)");
+    println!();
+    println!("Usage:");
+    println!("  simple <file.spl>                    Run source file");
+    println!("  simple run <file.spl>                Run source file");
+    println!("  simple compile <file.spl> [-o out]   Compile to object file");
+    println!("  simple -c \"code\"                     Run code string");
+    println!("  simple --help                        Show this help");
+    println!("  simple --version                     Show version");
+}

@@ -1,0 +1,218 @@
+use std.spec
+use std.nogc_sync_mut.replay.process.thread_recorder.{ThreadRecorder, ThreadSwitchEvent, ThreadCreateEvent}
+use std.nogc_sync_mut.replay.process.chaos_scheduler.{ChaosScheduler, ChaosStrategy}
+
+# ============================================================================
+# ThreadRecorder
+# ============================================================================
+
+describe "ThreadRecorder creation":
+    it "starts with zero threads":
+        val rec = ThreadRecorder.create()
+        expect(rec.thread_count()).to_equal(0)
+
+    it "starts with zero switches":
+        val rec = ThreadRecorder.create()
+        expect(rec.switch_count()).to_equal(0)
+
+
+describe "ThreadRecorder on_thread_create":
+    it "adds both parent and child to active set on first create":
+        var rec = ThreadRecorder.create()
+        rec.on_thread_create(1, 2, 1000)
+        expect(rec.thread_count()).to_equal(2)
+
+    it "does not duplicate parent on second create":
+        var rec = ThreadRecorder.create()
+        rec.on_thread_create(1, 2, 1000)
+        rec.on_thread_create(1, 3, 2000)
+        expect(rec.thread_count()).to_equal(3)
+
+    it "does not duplicate child if already active":
+        var rec = ThreadRecorder.create()
+        rec.on_thread_create(1, 2, 1000)
+        rec.on_thread_create(1, 2, 2000)
+        expect(rec.thread_count()).to_equal(2)
+
+describe "ThreadRecorder on_thread_switch":
+    it "records a context switch":
+        var rec = ThreadRecorder.create()
+        rec.on_thread_switch(1, 2, 0, 5000)
+        expect(rec.switch_count()).to_equal(1)
+
+    it "records multiple switches":
+        var rec = ThreadRecorder.create()
+        rec.on_thread_switch(1, 2, 0, 5000)
+        rec.on_thread_switch(2, 3, 0, 6000)
+        rec.on_thread_switch(3, 1, 1, 7000)
+        expect(rec.switch_count()).to_equal(3)
+
+describe "ThreadRecorder on_thread_exit":
+    it "removes tid from active threads":
+        var rec = ThreadRecorder.create()
+        rec.on_thread_create(1, 2, 1000)
+        expect(rec.thread_count()).to_equal(2)
+        rec.on_thread_exit(2, 3000)
+        expect(rec.thread_count()).to_equal(1)
+
+    it "handles exit of non-existent tid gracefully":
+        var rec = ThreadRecorder.create()
+        rec.on_thread_exit(999, 5000)
+        expect(rec.thread_count()).to_equal(0)
+
+describe "ThreadRecorder get_schedule_order":
+    it "returns empty list with no switches":
+        val rec = ThreadRecorder.create()
+        val order = rec.get_schedule_order()
+        expect(order.len()).to_equal(0)
+
+    it "returns to_tids in switch order":
+        var rec = ThreadRecorder.create()
+        rec.on_thread_switch(1, 2, 0, 100)
+        rec.on_thread_switch(2, 3, 0, 200)
+        rec.on_thread_switch(3, 1, 0, 300)
+        val order = rec.get_schedule_order()
+        expect(order.len()).to_equal(3)
+        expect(order[0]).to_equal(2)
+        expect(order[1]).to_equal(3)
+        expect(order[2]).to_equal(1)
+
+# ============================================================================
+# ChaosStrategy
+# ============================================================================
+
+describe "ChaosStrategy enum":
+    it "Random to_i32 round-trip":
+        val s = ChaosStrategy::Random
+        expect(ChaosStrategy.from_i32(s.to_i32()).to_i32()).to_equal(0)
+
+    it "RoundRobin to_i32 round-trip":
+        val s = ChaosStrategy::RoundRobin
+        expect(ChaosStrategy.from_i32(s.to_i32()).to_i32()).to_equal(1)
+
+    it "StarveLast to_i32 round-trip":
+        val s = ChaosStrategy::StarveLast
+        expect(ChaosStrategy.from_i32(s.to_i32()).to_i32()).to_equal(2)
+
+    it "PrioritizeNew to_i32 round-trip":
+        val s = ChaosStrategy::PrioritizeNew
+        expect(ChaosStrategy.from_i32(s.to_i32()).to_i32()).to_equal(3)
+
+    it "to_text returns human-readable name":
+        expect(ChaosStrategy::Random.to_text()).to_equal("random")
+        expect(ChaosStrategy::RoundRobin.to_text()).to_equal("round_robin")
+
+# ============================================================================
+# ChaosScheduler
+# ============================================================================
+
+describe "ChaosScheduler creation":
+    it "starts with zero schedule count":
+        val sched = ChaosScheduler.create(ChaosStrategy::Random, 42)
+        expect(sched.schedule_count()).to_equal(0)
+
+    it "replay_schedule is empty initially":
+        val sched = ChaosScheduler.create(ChaosStrategy::Random, 42)
+        expect(sched.replay_schedule().len()).to_equal(0)
+
+describe "ChaosScheduler pick_next empty list":
+    it "returns -1 for empty runnable list":
+        var sched = ChaosScheduler.create(ChaosStrategy::Random, 42)
+        val empty: [i64] = []
+        val picked = sched.pick_next(empty)
+        expect(picked).to_equal(-1)
+
+describe "ChaosScheduler Random strategy":
+    it "picks a valid tid from runnable list":
+        var sched = ChaosScheduler.create(ChaosStrategy::Random, 42)
+        val picked = sched.pick_next([10, 20, 30])
+        var valid = false
+        if picked == 10 or picked == 20 or picked == 30:
+            valid = true
+        expect(valid).to_equal(true)
+
+    it "deterministic with same seed":
+        var s1 = ChaosScheduler.create(ChaosStrategy::Random, 123)
+        var s2 = ChaosScheduler.create(ChaosStrategy::Random, 123)
+        val tids: [i64] = [5, 10, 15, 20]
+        val a = s1.pick_next(tids)
+        val b = s2.pick_next(tids)
+        expect(a).to_equal(b)
+
+    it "reseed changes future picks":
+        var sched = ChaosScheduler.create(ChaosStrategy::Random, 1)
+        sched.pick_next([1, 2, 3])
+        sched.reseed(999)
+        # After reseed, schedule_count is preserved
+        expect(sched.schedule_count()).to_equal(1)
+
+describe "ChaosScheduler RoundRobin strategy":
+    it "cycles through tids in order":
+        var sched = ChaosScheduler.create(ChaosStrategy::RoundRobin, 0)
+        val tids: [i64] = [10, 20, 30]
+        val a = sched.pick_next(tids)
+        val b = sched.pick_next(tids)
+        val c = sched.pick_next(tids)
+        expect(a).to_equal(10)
+        expect(b).to_equal(20)
+        expect(c).to_equal(30)
+
+    it "wraps around after exhausting list":
+        var sched = ChaosScheduler.create(ChaosStrategy::RoundRobin, 0)
+        val tids: [i64] = [10, 20]
+        sched.pick_next(tids)
+        sched.pick_next(tids)
+        val third = sched.pick_next(tids)
+        expect(third).to_equal(10)
+
+describe "ChaosScheduler StarveLast strategy":
+    it "picks different tid from last pick":
+        var sched = ChaosScheduler.create(ChaosStrategy::StarveLast, 0)
+        val tids: [i64] = [10, 20]
+        val first = sched.pick_next(tids)
+        val second = sched.pick_next(tids)
+        # first and second must differ (two choices available)
+        var differ = false
+        if first != second:
+            differ = true
+        expect(differ).to_equal(true)
+
+    it "falls back when only one tid available":
+        var sched = ChaosScheduler.create(ChaosStrategy::StarveLast, 0)
+        val tids: [i64] = [10]
+        val picked = sched.pick_next(tids)
+        expect(picked).to_equal(10)
+
+describe "ChaosScheduler PrioritizeNew strategy":
+    it "picks the highest tid (newest)":
+        var sched = ChaosScheduler.create(ChaosStrategy::PrioritizeNew, 0)
+        val picked = sched.pick_next([5, 100, 50])
+        expect(picked).to_equal(100)
+
+    it "consistently picks highest tid":
+        var sched = ChaosScheduler.create(ChaosStrategy::PrioritizeNew, 0)
+        val tids: [i64] = [3, 7, 2]
+        val a = sched.pick_next(tids)
+        val b = sched.pick_next(tids)
+        expect(a).to_equal(7)
+        expect(b).to_equal(7)
+
+describe "ChaosScheduler replay_schedule":
+    it "logs all picks for replay":
+        var sched = ChaosScheduler.create(ChaosStrategy::RoundRobin, 0)
+        val tids: [i64] = [1, 2, 3]
+        sched.pick_next(tids)
+        sched.pick_next(tids)
+        sched.pick_next(tids)
+        val log = sched.replay_schedule()
+        expect(log.len()).to_equal(3)
+        expect(log[0]).to_equal(1)
+        expect(log[1]).to_equal(2)
+        expect(log[2]).to_equal(3)
+
+    it "schedule_count matches log length":
+        var sched = ChaosScheduler.create(ChaosStrategy::Random, 77)
+        sched.pick_next([10, 20])
+        sched.pick_next([10, 20])
+        expect(sched.schedule_count()).to_equal(2)
+        expect(sched.replay_schedule().len()).to_equal(2)

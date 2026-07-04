@@ -1,0 +1,136 @@
+# Experiment Configuration Module
+#
+# Provides types and pure functions for defining, loading, and validating
+# experiment hyperparameters.
+#
+# Design:
+#   - ConfigValue enum  — typed value variants
+#   - ConfigEntry class — key + value + description triple
+#   - ExperimentConfig  — named, versioned list of entries
+#   - Pure functions: config_new, config_set, config_get, config_get_int,
+#                     config_get_float, config_validate
+
+# ============================================================================
+# Config Value Types
+# ============================================================================
+
+pub enum ConfigValue:
+    """A typed hyperparameter value."""
+    IntVal(i64)
+    FloatVal(f64)
+    StringVal(text)
+    BoolVal(bool)
+    ListVal([ConfigValue])
+
+# ============================================================================
+# Config Entry
+# ============================================================================
+
+pub class ConfigEntry:
+    """A single named config entry with an optional description."""
+    key: text
+    value: ConfigValue
+    description: text
+
+# ============================================================================
+# Experiment Config
+# ============================================================================
+
+pub class ExperimentConfig:
+    """An immutable, versioned collection of named config entries."""
+    name: text
+    entries: [ConfigEntry]
+    version: i64
+
+# ============================================================================
+# Schema Entry — used by config_validate
+# ============================================================================
+
+pub class SchemaEntry:
+    """Describes an expected key: its required type tag and whether it is required."""
+    key: text
+    required: bool
+    # Type tag: "int", "float", "string", "bool", "list"
+    type_tag: text
+
+pub class ConfigSchema:
+    """Ordered list of schema entries for validation."""
+    entries: [SchemaEntry]
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn config_new(name: text) -> ExperimentConfig:
+    """Create an empty ExperimentConfig with the given name at version 1."""
+    ExperimentConfig(name: name, entries: [], version: 1)
+
+pub fn config_set(config: ExperimentConfig, key: text, value: ConfigValue, description: text) -> ExperimentConfig:
+    """Return a new ExperimentConfig with the entry for key set (or replaced).
+    Existing entries for other keys are preserved in order."""
+    val new_entry = ConfigEntry(key: key, value: value, description: description)
+    # Filter out any existing entry for the same key, then append the new one
+    val kept = config.entries.filter(_.key != key)
+    val new_entries = kept.push(new_entry)
+    ExperimentConfig(name: config.name, entries: new_entries, version: config.version)
+
+pub fn config_get(config: ExperimentConfig, key: text) -> ConfigValue?:
+    """Look up an entry by key. Returns nil if not found."""
+    for entry in config.entries:
+        if entry.key == key:
+            return Some(entry.value)
+    nil
+
+pub fn config_get_int(config: ExperimentConfig, key: text) -> i64?:
+    """Look up an entry and return its value as i64, or nil if missing / wrong type."""
+    val v = config_get(config, key)
+    if val Some(value) = v:
+        match value:
+            case IntVal(n): Some(n)
+            case _: nil
+    else:
+        nil
+
+pub fn config_get_float(config: ExperimentConfig, key: text) -> f64?:
+    """Look up an entry and return its value as f64.
+    Promotes IntVal to f64; returns nil for other types or missing keys."""
+    val v = config_get(config, key)
+    if val Some(value) = v:
+        match value:
+            case FloatVal(f): Some(f)
+            case IntVal(n): Some(n as f64)
+            case _: nil
+    else:
+        nil
+
+pub fn config_validate(config: ExperimentConfig, schema: ConfigSchema) -> [text]:
+    """Validate config against schema. Returns a list of human-readable error strings.
+    An empty list means the config is valid."""
+    var errors: [text] = []
+
+    for rule in schema.entries:
+        val found = config_get(config, rule.key)
+        if not found.?:
+            if rule.required:
+                errors = errors.push("missing required key: {rule.key}")
+        elif val Some(value) = found:
+            val actual_tag = value_type_tag(value)
+            if actual_tag != rule.type_tag:
+                errors = errors.push(
+                    "key '{rule.key}' has type '{actual_tag}', expected '{rule.type_tag}'"
+                )
+
+    errors
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn value_type_tag(v: ConfigValue) -> text:
+    """Return the type tag string for a ConfigValue."""
+    match v:
+        case IntVal(_): "int"
+        case FloatVal(_): "float"
+        case StringVal(_): "string"
+        case BoolVal(_): "bool"
+        case ListVal(_): "list"

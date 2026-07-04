@@ -1,0 +1,61 @@
+use app.llm_runtime.manifest.{llm_runtime_manifest}
+use app.llm_runtime.live_chat_probe.{llm_runtime_probe_vllm_chat_response}
+
+fn absence_marker() -> text:
+    "n" + "il"
+
+describe "vLLM live chat response probe":
+    it "marks a valid chat completion response as ready without exposing generated content":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"secret generated answer\"},\"finish_reason\":\"stop\"}]}"
+        val result = llm_runtime_probe_vllm_chat_response(manifest, 200, body)
+
+        expect(result.status).to_equal("ready")
+        expect(result.reason).to_equal("chat_completions_ready")
+        expect(result.endpoint_status).to_equal("configured")
+        expect(result.choice_count).to_equal(1)
+        expect(result.content_status).to_equal("present")
+        expect(result.finish_reason_status).to_equal("stop")
+        expect(result.evidence_jsonl.split("secret generated answer").len()).to_equal(1)
+        expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+
+    it "reports auth rejection separately from malformed chat responses":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val result = llm_runtime_probe_vllm_chat_response(manifest, 403, "{\"error\":\"forbidden\"}")
+
+        expect(result.status).to_equal("blocked")
+        expect(result.reason).to_equal("auth_rejected")
+        expect(result.choice_count).to_equal(0)
+
+    it "reports malformed chat response bodies as errors":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val result = llm_runtime_probe_vllm_chat_response(manifest, 200, "{\"object\":\"not-chat\"}")
+
+        expect(result.status).to_equal("error")
+        expect(result.reason).to_equal("malformed_chat_response")
+
+    it "reports empty choices as missing readiness":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val result = llm_runtime_probe_vllm_chat_response(manifest, 200, "{\"choices\":[]}")
+
+        expect(result.status).to_equal("missing")
+        expect(result.reason).to_equal("no_choices_returned")
+        expect(result.choice_count).to_equal(0)
+
+    it "reports missing assistant content explicitly":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val body = "{\"choices\":[{\"message\":{\"role\":\"assistant\"},\"finish_reason\":\"stop\"}]}"
+        val result = llm_runtime_probe_vllm_chat_response(manifest, 200, body)
+
+        expect(result.status).to_equal("missing")
+        expect(result.reason).to_equal("missing_assistant_content")
+        expect(result.content_status).to_equal("missing")
+
+    it "rejects invalid endpoints before trusting chat response bodies":
+        val manifest = llm_runtime_manifest("base-model", "not an endpoint", "", [], "disabled")
+        val body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}"
+        val result = llm_runtime_probe_vllm_chat_response(manifest, 200, body)
+
+        expect(result.status).to_equal("missing")
+        expect(result.reason).to_equal("invalid_endpoint")
+        expect(result.endpoint_status).to_equal("invalid")

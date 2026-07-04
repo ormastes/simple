@@ -1,0 +1,101 @@
+# Render Scene Engine2D Executor — bridge from RenderScene to Engine2D backends.
+#
+# Executes a RenderScene display list through an Engine2D instance, enabling
+# GPU-accelerated rendering (CUDA, Vulkan, OpenGL) or optimized software
+# rendering through the Engine2D backend abstraction.
+#
+# This is the GPU counterpart to executor.spl (the software rasterizer).
+# Both consume the same RenderScene but render through different pipelines:
+#   executor.spl           -> flat [u32] pixel buffer (CPU-only)
+#   engine2d_executor.spl  -> Engine2D backend (GPU or software)
+
+use common.render_scene.scene.{RenderScene, SceneCommand}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+# ============================================================================
+# Execute scene through Engine2D
+# ============================================================================
+
+fn execute_scene_to_engine2d(scene: RenderScene, engine: Engine2D):
+    """Execute all scene commands through the Engine2D backend.
+
+    Maps each SceneCommand kind to the corresponding Engine2D drawing call.
+    The Engine2D backend handles clipping, alpha blending, and presentation
+    internally.
+
+    Args:
+        scene: The RenderScene containing ordered draw commands
+        engine: An initialized Engine2D instance (any backend)
+    """
+    # Clear to white background
+    engine.clear(0xFFFFFFFF)
+
+    var i: i32 = 0
+    while i < scene.commands.len():
+        val cmd = scene.commands[i]
+
+        if cmd.kind == "fill_rect":
+            engine.draw_rect_filled(cmd.x, cmd.y, cmd.width, cmd.height, cmd.color)
+
+        if cmd.kind == "stroke_rect":
+            # Engine2D draw_rect draws an outline. For multi-pixel stroke widths,
+            # draw nested outlines inward.
+            val sw = if cmd.stroke_width > 0: cmd.stroke_width else: 1
+            var s: i32 = 0
+            while s < sw:
+                engine.draw_rect(cmd.x + s, cmd.y + s, cmd.width - s * 2, cmd.height - s * 2, cmd.color)
+                s = s + 1
+
+        if cmd.kind == "text":
+            val fs = if cmd.font_size > 0: cmd.font_size else: 16
+            engine.draw_text(cmd.x, cmd.y, cmd.text_val, cmd.color, fs)
+
+        if cmd.kind == "line":
+            # SceneCommand stores end point in width/height fields (x2=width, y2=height)
+            val sw = if cmd.stroke_width > 0: cmd.stroke_width else: 1
+            engine.draw_line(cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, sw)
+
+        if cmd.kind == "circle":
+            engine.draw_circle(cmd.x, cmd.y, cmd.width, cmd.color)
+
+        if cmd.kind == "circle_filled":
+            engine.draw_circle_filled(cmd.x, cmd.y, cmd.width, cmd.color)
+
+        if cmd.kind == "rounded_rect":
+            engine.draw_rounded_rect(cmd.x, cmd.y, cmd.width, cmd.height, cmd.border_radius, cmd.color)
+
+        if cmd.kind == "gradient_rect":
+            engine.draw_gradient_rect(cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, cmd.color2)
+
+        if cmd.kind == "image":
+            engine.draw_image(cmd.x, cmd.y, cmd.width, cmd.height, cmd.pixels)
+
+        if cmd.kind == "clip_push":
+            engine.set_clip(cmd.x, cmd.y, cmd.width, cmd.height)
+
+        if cmd.kind == "clip_pop":
+            engine.clear_clip()
+
+        i = i + 1
+
+    engine.present()
+
+# ============================================================================
+# Execute scene and return pixel buffer
+# ============================================================================
+
+fn execute_scene_to_engine2d_pixels(scene: RenderScene, engine: Engine2D) -> [u32]:
+    """Execute scene through Engine2D and return the resulting pixel buffer.
+
+    Convenience wrapper that calls execute_scene_to_engine2d() and then
+    reads back the framebuffer as a flat [u32] ARGB array.
+
+    Args:
+        scene: The RenderScene to render
+        engine: An initialized Engine2D instance
+
+    Returns:
+        Flat pixel buffer (width * height u32 values, ARGB format)
+    """
+    execute_scene_to_engine2d(scene, engine)
+    return engine.read_pixels()

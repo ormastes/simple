@@ -1,0 +1,168 @@
+# codex-system-test
+"""
+# Chrome WebGPU Compute Evidence Parser
+
+## Overview
+
+These unit scenarios cover deterministic parsing for the Chrome/Electron WebGPU
+compute evidence wrapper. They verify that successful compute evidence requires
+non-fallback adapter state, a valid compute pipeline, dispatch, queue
+submission, readback, and matching output checksums.
+
+## Examples
+
+The positive example parses generated WGSL compute output for a small `u32`
+addition kernel. Negative examples keep host-unavailable evidence deterministic
+and reject empty readback or fallback-adapter reports.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/platform/webgpu_js_wasm_simple.md
+**Design:** N/A
+**Research:** doc/01_research/local/browser_wasm_webgpu_infra.md
+"""
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.chrome_webgpu_compute_evidence.{
+    ChromeWebGPUComputeEvidence,
+    chrome_webgpu_compute_evidence_from_json,
+    chrome_webgpu_parse_simple2d_fill_payload_bytes,
+    chrome_webgpu_compute_unavailable
+}
+
+describe "Chrome WebGPU compute evidence":
+    it "accepts complete Chromium WebGPU compute evidence":
+        val evidence = ChromeWebGPUComputeEvidence(status: "ok", diagnostic_text: "", backend_target: "webgpu", source_format: "wgsl", binary_format: "source", tool_hint: "browser-webgpu-host-import", entry_name: "simple_webgpu_add_u32", operation: "u32_add", source_origin: "compiler-portable-compute", source_byte_count: 320, source_checksum: 23000, payload_byte_count: 0, payload_checksum: 0, element_count: 8, adapter: true, adapter_info: "vendor=test", fallback_adapter: false, device_configured: true, shader_module_valid: true, pipeline_valid: true, bind_group_valid: true, compute_pass_count: 1, dispatch_call_count: 1, dispatched_workgroups: 1, queue_submit_count: 1, readback_byte_count: 32, readback_valid: true, result_checksum: 396, expected_checksum: 396, mismatch_count: 0, hardware_acceleration_verified: false, electron_path: "/electron", helper_path: "/helper", exit_code: 0)
+
+        expect(evidence.ok()).to_be(true)
+        expect(evidence.host_unavailable()).to_be(false)
+        expect(evidence.status).to_equal("ok")
+        expect(evidence.backend_target).to_equal("webgpu")
+        expect(evidence.source_format).to_equal("wgsl")
+        expect(evidence.binary_format).to_equal("source")
+        expect(evidence.tool_hint).to_equal("browser-webgpu-host-import")
+        expect(evidence.entry_name).to_equal("simple_webgpu_add_u32")
+        expect(evidence.operation).to_equal("u32_add")
+        expect(evidence.source_origin).to_equal("compiler-portable-compute")
+        expect(evidence.source_byte_count).to_equal(320)
+        expect(evidence.source_checksum).to_equal(23000)
+        expect(evidence.payload_byte_count).to_equal(0)
+        expect(evidence.payload_checksum).to_equal(0)
+        expect(evidence.dispatch_call_count).to_equal(1)
+        expect(evidence.dispatched_workgroups).to_equal(1)
+        expect(evidence.queue_submit_count).to_equal(1)
+        expect(evidence.readback_byte_count).to_equal(32)
+        expect(evidence.result_checksum).to_equal(396)
+        expect(evidence.expected_checksum).to_equal(396)
+        expect(evidence.mismatch_count).to_equal(0)
+        expect(evidence.hardware_acceleration_verified).to_be(false)
+        expect(evidence.summary()).to_contain("mismatches=0")
+
+    it "parses WASM Simple2D fill payload bytes as little endian count and fill value":
+        val payload = chrome_webgpu_parse_simple2d_fill_payload_bytes("8,0,0,0,210,4,0,0")
+
+        expect(payload.valid).to_be(true)
+        expect(payload.count).to_equal(8)
+        expect(payload.fill_value).to_equal(1234)
+        expect(payload.payload_byte_count).to_equal(8)
+        expect(payload.payload_checksum).to_equal(222)
+
+    it "rejects malformed WASM Simple2D fill payload bytes":
+        val payload = chrome_webgpu_parse_simple2d_fill_payload_bytes("8,0,0,0,210,4,0,300")
+
+        expect(payload.valid).to_be(false)
+        expect(payload.count).to_equal(0)
+        expect(payload.payload_byte_count).to_equal(0)
+
+    it "parses explicit host unavailable Chromium WebGPU compute JSON":
+        val evidence = chrome_webgpu_compute_evidence_from_json("{\"status\":\"host-unavailable:navigator-gpu\",\"diagnostic_text\":\"navigator.gpu missing\",\"adapter\":false,\"result_checksum\":0}", "", "/electron", "/helper", 0)
+
+        expect(evidence.ok()).to_be(false)
+        expect(evidence.host_unavailable()).to_be(true)
+        expect(evidence.status).to_equal("host-unavailable:navigator-gpu")
+        expect(evidence.diagnostic_text).to_equal("navigator.gpu missing")
+        expect(evidence.result_checksum).to_equal(0)
+
+    it "parses explicit generated WGSL source metadata from Chromium WebGPU compute JSON":
+        val evidence = chrome_webgpu_compute_evidence_from_json("{\"status\":\"ok\",\"backend_target\":\"webgpu\",\"source_format\":\"wgsl\",\"binary_format\":\"source\",\"tool_hint\":\"browser-webgpu-host-import\",\"entry_name\":\"simple_webgpu_add_u32\",\"operation\":\"u32_add\",\"source_origin\":\"compiler-portable-compute\",\"source_byte_count\":321,\"source_checksum\":23456,\"element_count\":8,\"adapter\":true,\"fallback_adapter\":false,\"device_configured\":true,\"shader_module_valid\":true,\"pipeline_valid\":true,\"bind_group_valid\":true,\"compute_pass_count\":1,\"dispatch_call_count\":1,\"dispatched_workgroups\":1,\"queue_submit_count\":1,\"readback_byte_count\":32,\"readback_valid\":true,\"result_checksum\":396,\"expected_checksum\":396,\"mismatch_count\":0,\"hardware_acceleration_verified\":false}", "", "/electron", "/helper", 0)
+
+        expect(evidence.ok()).to_be(true)
+        expect(evidence.source_origin).to_equal("compiler-portable-compute")
+        expect(evidence.source_byte_count).to_equal(321)
+        expect(evidence.source_checksum).to_equal(23456)
+        expect(evidence.entry_name).to_equal("simple_webgpu_add_u32")
+        expect(evidence.tool_hint).to_equal("browser-webgpu-host-import")
+
+    it "parses compiler emitted Simple2D fill WGSL compute metadata":
+        val evidence = chrome_webgpu_compute_evidence_from_json("{\"status\":\"ok\",\"backend_target\":\"webgpu\",\"source_format\":\"wgsl\",\"binary_format\":\"source\",\"tool_hint\":\"browser-webgpu-host-import\",\"entry_name\":\"simple_2d_fill_u32\",\"operation\":\"simple2d_fill\",\"source_origin\":\"wasm-simple2d-compute-payload\",\"source_byte_count\":4096,\"source_checksum\":345678,\"payload_byte_count\":8,\"payload_checksum\":222,\"element_count\":8,\"adapter\":true,\"fallback_adapter\":false,\"device_configured\":true,\"shader_module_valid\":true,\"pipeline_valid\":true,\"bind_group_valid\":true,\"compute_pass_count\":1,\"dispatch_call_count\":1,\"dispatched_workgroups\":1,\"queue_submit_count\":1,\"readback_byte_count\":32,\"readback_valid\":true,\"result_checksum\":9872,\"expected_checksum\":9872,\"mismatch_count\":0,\"hardware_acceleration_verified\":false}", "", "/electron", "/helper", 0)
+
+        expect(evidence.ok()).to_be(true)
+        expect(evidence.entry_name).to_equal("simple_2d_fill_u32")
+        expect(evidence.operation).to_equal("simple2d_fill")
+        expect(evidence.source_origin).to_equal("wasm-simple2d-compute-payload")
+        expect(evidence.source_byte_count).to_equal(4096)
+        expect(evidence.payload_byte_count).to_equal(8)
+        expect(evidence.payload_checksum).to_equal(222)
+        expect(evidence.element_count).to_equal(8)
+        expect(evidence.readback_byte_count).to_equal(32)
+        expect(evidence.result_checksum).to_equal(9872)
+        expect(evidence.expected_checksum).to_equal(9872)
+
+    it "accepts zero checksum Simple2D fill evidence when readback matches":
+        val evidence = chrome_webgpu_compute_evidence_from_json("{\"status\":\"ok\",\"backend_target\":\"webgpu\",\"source_format\":\"wgsl\",\"binary_format\":\"source\",\"tool_hint\":\"browser-webgpu-host-import\",\"entry_name\":\"simple_2d_fill_u32\",\"operation\":\"simple2d_fill\",\"source_origin\":\"compiler-portable-compute\",\"source_byte_count\":4096,\"source_checksum\":345678,\"element_count\":8,\"adapter\":true,\"fallback_adapter\":false,\"device_configured\":true,\"shader_module_valid\":true,\"pipeline_valid\":true,\"bind_group_valid\":true,\"compute_pass_count\":1,\"dispatch_call_count\":1,\"dispatched_workgroups\":1,\"queue_submit_count\":1,\"readback_byte_count\":32,\"readback_valid\":true,\"result_checksum\":0,\"expected_checksum\":0,\"mismatch_count\":0,\"hardware_acceleration_verified\":false}", "", "/electron", "/helper", 0)
+
+        expect(evidence.ok()).to_be(true)
+        expect(evidence.operation).to_equal("simple2d_fill")
+        expect(evidence.result_checksum).to_equal(0)
+        expect(evidence.expected_checksum).to_equal(0)
+
+    it "preserves explicit mismatch and readback counts from Chromium JSON":
+        val evidence = chrome_webgpu_compute_evidence_from_json("{\"status\":\"processing-mismatch:readback\",\"backend_target\":\"webgpu\",\"source_format\":\"wgsl\",\"binary_format\":\"source\",\"tool_hint\":\"browser-webgpu-host-import\",\"entry_name\":\"simple_2d_fill_u32\",\"operation\":\"simple2d_fill\",\"source_origin\":\"compiler-portable-compute\",\"source_byte_count\":4096,\"source_checksum\":345678,\"element_count\":8,\"adapter\":true,\"fallback_adapter\":false,\"device_configured\":true,\"shader_module_valid\":true,\"pipeline_valid\":true,\"bind_group_valid\":true,\"compute_pass_count\":1,\"dispatch_call_count\":1,\"dispatched_workgroups\":1,\"queue_submit_count\":1,\"readback_byte_count\":32,\"readback_valid\":true,\"result_checksum\":7404,\"expected_checksum\":9872,\"mismatch_count\":2,\"hardware_acceleration_verified\":false,\"output_matches\":false,\"output_count\":8}", "", "/electron", "/helper", 0)
+
+        expect(evidence.ok()).to_be(false)
+        expect(evidence.processing_failed()).to_be(true)
+        expect(evidence.host_unavailable()).to_be(false)
+        expect(evidence.mismatch_count).to_equal(2)
+        expect(evidence.readback_byte_count).to_equal(32)
+
+    it "reports post-adapter compute launch exceptions as processing failures":
+        val evidence = chrome_webgpu_compute_evidence_from_json("{\"status\":\"processing-failed:compute-launch\",\"diagnostic_text\":\"bind group layout mismatch\",\"backend_target\":\"webgpu\",\"source_format\":\"wgsl\",\"binary_format\":\"source\",\"tool_hint\":\"browser-webgpu-host-import\",\"entry_name\":\"simple_2d_fill_u32\",\"operation\":\"simple2d_fill\",\"source_origin\":\"compiler-portable-compute\",\"source_byte_count\":4096,\"source_checksum\":345678,\"element_count\":8,\"adapter\":true,\"adapter_info\":\"vendor=test\",\"fallback_adapter\":false,\"device_configured\":true,\"shader_module_valid\":true,\"pipeline_valid\":true,\"bind_group_valid\":false,\"readback_byte_count\":0,\"readback_valid\":false,\"result_checksum\":0,\"expected_checksum\":0,\"mismatch_count\":0,\"hardware_acceleration_verified\":false}", "", "/electron", "/helper", 0)
+
+        expect(evidence.ok()).to_be(false)
+        expect(evidence.processing_failed()).to_be(true)
+        expect(evidence.host_unavailable()).to_be(false)
+        expect(evidence.adapter).to_be(true)
+        expect(evidence.device_configured).to_be(true)
+
+    it "does not treat empty readback as successful compute evidence":
+        val evidence = ChromeWebGPUComputeEvidence(status: "ok", diagnostic_text: "", backend_target: "webgpu", source_format: "wgsl", binary_format: "source", tool_hint: "browser-webgpu-host-import", entry_name: "simple_webgpu_add_u32", operation: "u32_add", source_origin: "compiler-portable-compute", source_byte_count: 320, source_checksum: 23000, payload_byte_count: 0, payload_checksum: 0, element_count: 8, adapter: true, adapter_info: "vendor=test", fallback_adapter: false, device_configured: true, shader_module_valid: true, pipeline_valid: true, bind_group_valid: true, compute_pass_count: 1, dispatch_call_count: 1, dispatched_workgroups: 1, queue_submit_count: 1, readback_byte_count: 0, readback_valid: false, result_checksum: 0, expected_checksum: 396, mismatch_count: 8, hardware_acceleration_verified: false, electron_path: "/electron", helper_path: "/helper", exit_code: 0)
+
+        expect(evidence.ok()).to_be(false)
+        expect(evidence.status).to_equal("ok")
+        expect(evidence.readback_valid).to_be(false)
+        expect(evidence.readback_byte_count).to_equal(0)
+
+    it "does not treat fallback adapters as successful compute evidence":
+        val evidence = ChromeWebGPUComputeEvidence(status: "ok", diagnostic_text: "", backend_target: "webgpu", source_format: "wgsl", binary_format: "source", tool_hint: "browser-webgpu-host-import", entry_name: "simple_webgpu_add_u32", operation: "u32_add", source_origin: "compiler-portable-compute", source_byte_count: 320, source_checksum: 23000, payload_byte_count: 0, payload_checksum: 0, element_count: 8, adapter: true, adapter_info: "SwiftShader", fallback_adapter: true, device_configured: true, shader_module_valid: true, pipeline_valid: true, bind_group_valid: true, compute_pass_count: 1, dispatch_call_count: 1, dispatched_workgroups: 1, queue_submit_count: 1, readback_byte_count: 32, readback_valid: true, result_checksum: 396, expected_checksum: 396, mismatch_count: 0, hardware_acceleration_verified: false, electron_path: "/electron", helper_path: "/helper", exit_code: 0)
+
+        expect(evidence.ok()).to_be(false)
+        expect(evidence.fallback_adapter).to_be(true)
+        expect(evidence.adapter_info).to_equal("SwiftShader")
+
+    it "reports readback mismatch as processing failure not host unavailability":
+        val evidence = ChromeWebGPUComputeEvidence(status: "processing-mismatch:readback", diagnostic_text: "mismatch", backend_target: "webgpu", source_format: "wgsl", binary_format: "source", tool_hint: "browser-webgpu-host-import", entry_name: "simple_webgpu_add_u32", operation: "u32_add", source_origin: "compiler-portable-compute", source_byte_count: 320, source_checksum: 23000, payload_byte_count: 0, payload_checksum: 0, element_count: 8, adapter: true, adapter_info: "vendor=test", fallback_adapter: false, device_configured: true, shader_module_valid: true, pipeline_valid: true, bind_group_valid: true, compute_pass_count: 1, dispatch_call_count: 1, dispatched_workgroups: 1, queue_submit_count: 1, readback_byte_count: 32, readback_valid: true, result_checksum: 390, expected_checksum: 396, mismatch_count: 1, hardware_acceleration_verified: false, electron_path: "/electron", helper_path: "/helper", exit_code: 0)
+
+        expect(evidence.ok()).to_be(false)
+        expect(evidence.host_unavailable()).to_be(false)
+        expect(evidence.processing_failed()).to_be(true)
+        expect(evidence.mismatch_count).to_equal(1)
+
+    it "constructs deterministic unavailable evidence for missing compute hosts":
+        val evidence = chrome_webgpu_compute_unavailable("electron-missing", "not found", "/missing/electron", "/helper", 127)
+
+        expect(evidence.ok()).to_be(false)
+        expect(evidence.host_unavailable()).to_be(true)
+        expect(evidence.status).to_equal("host-unavailable:electron-missing")
+        expect(evidence.diagnostic_text).to_equal("not found")
+        expect(evidence.electron_path).to_equal("/missing/electron")
+        expect(evidence.helper_path).to_equal("/helper")
+        expect(evidence.exit_code).to_equal(127)

@@ -1,0 +1,185 @@
+"""
+log-lib-drivers Phase 4 spec — SPSC lite ring (no-alloc, ISR/panic-safe).
+
+Covers AC-5 (lite logger: no alloc, no blocking lock, ISR/panic-safe)
+and AC-6c (lite-log ISR-safe emission, no alloc, bounded time).
+
+EXPECTED RED PHASE: this file will FAIL TO COMPILE until Phase 5 lands
+the K-1 atomic externs (rt_atomic_fetch_add_u64, rt_atomic_load_u64,
+rt_atomic_store_u64, rt_atomic_store_u8) and the ring/facade modules.
+That is the design — see state.md §K Open Risk K-1.
+
+Phase 3 contract (locked, §C):
+  Record layout: total = 40 bytes, naturally 8-byte aligned, no padding.
+    seq:        u64 @  0   (monotonic, set by producer atomic-add)
+    ts_ns:      u64 @  8   (rt_time_now_ns at emission)
+    p0:         u64 @ 16   (numeric payload 0)
+    p1:         u64 @ 24   (numeric payload 1)
+    fmt_handle: u32 @ 32   (index into static fmt-string table)
+    subsys:     u16 @ 36
+    level:      u8  @ 38
+    flags:      u8  @ 39   (bit0 = panic_origin; bit1 = ratelimited)
+
+  NOTE — task description's offset table (`level@16`) was wrong; the
+  Phase-3 architecture-§C ordering above is the locked contract because
+  it gives natural alignment with zero padding (cardinality verified:
+  u64*4 + u32 + u16 + u8 + u8 = 40).
+
+  Capacity: power-of-two, default 1024 records (40 KiB).
+  Cap range: [64, 16384]. Mask = cap - 1.
+
+  Producer protocol:
+    - rt_atomic_fetch_add_u64(&next_seq, 1)
+    - if previous slot's seq is in (seq_local - cap, seq_local) — full,
+      atomic-add dropped, return false
+    - otherwise write fields and release-store seq
+
+  Drainer: log_drain(max) — non-IRQ poll, no locks.
+"""
+
+use std.spec
+use std.log.ring.{
+    LogRecord,
+    log_ring_init, log_ring_push, log_ring_drain, log_ring_dropped,
+    log_ring_capacity, log_ring_pending,
+    record_size_bytes, record_offset_seq, record_offset_ts_ns,
+    record_offset_p0, record_offset_p1, record_offset_fmt_handle,
+    record_offset_subsys, record_offset_level, record_offset_flags,
+    RING_CAP_DEFAULT_LOG2, RING_CAP_DEFAULT
+}
+use std.log.panic.{log_panic_flush, panic_mode_active}
+use std.log.{LOG_INFO, SUBSYS_KERN, SUBSYS_IRQ, log_register_backend, log_remove_backend}
+
+describe "log lite ring — record layout (AC-5)":
+
+    it "AC-5: LogRecord is exactly 40 bytes":
+        expect(record_size_bytes()).to_equal(40)
+
+    it "AC-5: field offsets match Phase-3 §C lock":
+        # Phase-3 ordering — task description offsets were wrong; this
+        # is the natural-alignment layout the engineer must implement.
+        expect(record_offset_seq()).to_equal(0)
+        expect(record_offset_ts_ns()).to_equal(8)
+        expect(record_offset_p0()).to_equal(16)
+        expect(record_offset_p1()).to_equal(24)
+        expect(record_offset_fmt_handle()).to_equal(32)
+        expect(record_offset_subsys()).to_equal(36)
+        expect(record_offset_level()).to_equal(38)
+        expect(record_offset_flags()).to_equal(39)
+
+
+describe "log lite ring — capacity (AC-5)":
+
+    it "AC-5: default capacity is 1024 (power of two)":
+        log_ring_init(RING_CAP_DEFAULT_LOG2)
+        expect(log_ring_capacity()).to_equal(1024)
+        expect(RING_CAP_DEFAULT).to_equal(1024)
+
+    it "AC-5: capacity is always a power of two (default mask = cap-1)":
+        log_ring_init(RING_CAP_DEFAULT_LOG2)
+        val cap = log_ring_capacity()
+        # cap & (cap - 1) == 0 for any power-of-two
+        expect(cap & (cap - 1)).to_equal(0)
+
+
+describe "log lite ring — producer/drainer ordering (AC-5, AC-6c)":
+
+    it "AC-5: producer fills ring, drainer reads back in seq order":
+        log_ring_init(6)  # 64 records — small for the test
+        # Drain anything stale.
+        log_ring_drain(1024)
+        # Push 5 records with increasing p0.
+        var i = 0
+        while i < 5:
+            log_ring_push(LOG_INFO, SUBSYS_KERN, 0, i, 0, 0)
+            i = i + 1
+        expect(log_ring_pending()).to_equal(5)
+        # Drainer pulls them; observation order matches push order.
+        val seen = drain_to_list(5)
+        expect(seen.len()).to_equal(5)
+        var j = 0
+        while j < 5:
+            expect(seen[j].p0).to_equal(j)
+            j = j + 1
+
+    it "AC-5: head wraps around at capacity boundary":
+        log_ring_init(6)  # 64 records
+        log_ring_drain(1024)
+        # Push exactly cap records and drain — no drops.
+        var k = 0
+        while k < 64:
+            log_ring_push(LOG_INFO, SUBSYS_KERN, 0, k, 0, 0)
+            k = k + 1
+        expect(log_ring_dropped()).to_equal(0)
+        expect(log_ring_drain(1024)).to_equal(64)
+
+
+describe "log lite ring — overflow drop semantics (AC-5, AC-6c)":
+
+    it "AC-6c: pushing N+1 records when ring is full drops exactly 1":
+        log_ring_init(6)  # cap = 64
+        log_ring_drain(1024)
+        # Reset dropped counter is a Phase-5 concern; capture baseline.
+        val baseline_drops = log_ring_dropped()
+        # Fill to cap WITHOUT draining.
+        var i = 0
+        while i < 64:
+            log_ring_push(LOG_INFO, SUBSYS_KERN, 0, i, 0, 0)
+            i = i + 1
+        # 65th push must increment dropped counter by 1.
+        log_ring_push(LOG_INFO, SUBSYS_KERN, 0, 999, 0, 0)
+        expect(log_ring_dropped() - baseline_drops).to_equal(1)
+
+
+describe "log lite ring — panic-mode flush (AC-5)":
+
+    it "AC-5: log_panic_flush switches all backends to sync, drains ring":
+        log_ring_init(RING_CAP_DEFAULT_LOG2)
+        val sink = ring_backend_new(64)
+        val id = log_register_backend(sink.ops)
+        ring_backend_clear(sink)
+        # Buffered emissions before panic.
+        log_ring_push(LOG_INFO, SUBSYS_KERN, 0, 1, 0, 0)
+        log_ring_push(LOG_INFO, SUBSYS_KERN, 0, 2, 0, 0)
+        # Panic flush: must drain pending + flip sync mode.
+        log_panic_flush()
+        expect(panic_mode_active()).to_equal(true)
+        expect(log_ring_pending()).to_equal(0)
+        # Subsequent emissions go direct, not through the ring.
+        log_info(SUBSYS_KERN, "post-panic direct")
+        # Direct path bypasses ring; pending stays 0.
+        expect(log_ring_pending()).to_equal(0)
+        log_remove_backend(id)
+
+
+describe "log lite ring — no-alloc contract (AC-5, AC-6c)":
+
+    """
+    "No alloc on the hot path" cannot today be machine-asserted from a
+    pure spec (Simple has no `rt_alloc_count` extern in the tree —
+    verified 2026-04-25; Phase 3 §I prescribes a g_alloc_probe harness
+    counter, see Risk K-1).
+
+    Phase 5 must:
+      1. Add a test-harness allocation probe (g_alloc_probe: i64) that
+         the global allocator increments on each `simple_alloc` call.
+      2. Provide `alloc_probe_reset()` and `alloc_probe_count()` to test
+         code only.
+      3. Verify by inspecting the release-build disassembly of
+         `log_ring_push` that no calls into `simple_alloc` /
+         `simple_realloc` are present.
+
+    The placeholder below uses a shim — `alloc_probe_count()` returns 0
+    today (stub) so the assertion is meaningful only after Phase 5 wires
+    the real probe.
+    """
+
+    it "AC-6c: log_ring_push performs zero allocations (1000 calls)":
+        log_ring_init(RING_CAP_DEFAULT_LOG2)
+        # TODO(phase-5): replace stub with real g_alloc_probe once K-1 lands.
+        alloc_probe_reset()
+        var i = 0
+        while i < 1000:
+            log_ring_push(LOG_INFO, SUBSYS_IRQ, 0, i, 0, 0)
+            i = i + 1
+        expect(alloc_probe_count()).to_equal(0)

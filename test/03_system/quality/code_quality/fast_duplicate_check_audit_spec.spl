@@ -1,0 +1,30 @@
+# fast_duplicate_check_audit_spec
+#
+# Verifies the fast duplicate gate runs as Simple code.
+
+use std.spec
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+describe "fast duplicate check audit":
+
+    it "finds exact line-window duplicates and honors max allowed":
+        val root = "/tmp/simple_fast_duplicate_check_spec"
+        val (_clean_out, _clean_err, _clean_code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + root + " && mkdir -p " + root])
+        val body =
+            "fn shared(value: i64) -> i64:\n" +
+            "    val next = value + 1\n" +
+            "    if next > 2:\n" +
+            "        return next\n" +
+            "    return value\n"
+        expect(rt_file_write_text(root + "/a.spl", body)).to_equal(true)
+        expect(rt_file_write_text(root + "/b.spl", body)).to_equal(true)
+
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/fast_duplicate_check.spl", "--", root, "--min-lines", "3", "--max-allowed", "0"])
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain("Token Duplicate Report")
+        expect(result.0).to_contain("duplicate groups")
+
+        val allowed = rt_process_run("bin/simple", ["run", "scripts/audit/fast_duplicate_check.spl", "--", root, "--min-lines", "3", "--max-allowed", "99"])
+        expect(allowed.2).to_equal(0)

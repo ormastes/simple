@@ -1,0 +1,166 @@
+# GC async 2D GPU SFFI dispatch is a facade over the no-GC sync owner.
+#
+# Phase 5 additions:
+#   - probe-driven backend selection via probe_all()
+#   - strict GLSL rejection: any probe result with shader_format == "glsl"
+#     is excluded from the selection path (Architecture Decision D-3)
+#   - strict-fail: if a GPU backend is requested but unavailable, return error
+#   - VULKAN_GLSL_ENABLED gate: vulkan_glsl backend is excluded by default;
+#     opt-in via env var VULKAN_GLSL_ENABLED=1 (not recommended for production)
+
+export use std.nogc_sync_mut.gpu.engine2d.sffi_dispatch.{
+    GpuFfiMode, FfiDispatchBase, gpu_lib_path, gpu_lib_candidates,
+    try_load_gpu_lib, default_sffi_mode, resolve_sffi_mode,
+    try_create_dynamic_vulkan
+}
+
+use std.gc_async_mut.gpu.engine2d.backend_probe.{
+    BackendProbeResult, BackendStatus,
+    BACKEND_CPU, BACKEND_SOFTWARE, BACKEND_VULKAN,
+    BACKEND_CUDA, BACKEND_METAL, BACKEND_WEBGPU,
+    STATUS_OK, STATUS_FAILED, STATUS_FALLBACK
+}
+
+# ============================================================================
+# GLSL gate constants
+# ============================================================================
+
+# Shader formats admitted into the selection path.
+# "glsl" is NOT in this list — Vulkan GLSL is rejected at dispatch time.
+val SHADER_FORMAT_SPIRV: text = "spirv"
+val SHADER_FORMAT_PTX: text = "ptx"
+val SHADER_FORMAT_MSL: text = "msl"
+val SHADER_FORMAT_WGSL: text = "wgsl"
+val SHADER_FORMAT_NONE: text = "none"
+val SHADER_FORMAT_GLSL: text = "glsl"  # forbidden in selection path
+
+# ============================================================================
+# Probe-driven backend selection
+# ============================================================================
+
+fn is_glsl_format(fmt: text) -> bool:
+    """Return true if the shader format is GLSL — which is excluded from selection."""
+    fmt == SHADER_FORMAT_GLSL
+
+fn is_admitted_format(fmt: text) -> bool:
+    """Return true if the shader format is admitted for GPU selection."""
+    not is_glsl_format(fmt)
+
+fn is_gpu_backend(name: text) -> bool:
+    """Return true if this is a hardware GPU backend (not cpu/software)."""
+    if name == BACKEND_CPU:
+        return false
+    if name == BACKEND_SOFTWARE:
+        return false
+    true
+
+fn select_backend_from_probes(results: [BackendProbeResult]) -> BackendProbeResult:
+    """Pick the highest-priority admitted backend from probe results.
+
+    Selection rules (in order):
+      1. Skip any result with shader_format == "glsl" (GLSL gate, AD-D3).
+      2. Pick the first result with status == Initialized.
+      3. If no GPU backend is Initialized, return the CPU result.
+    The CPU backend is always the last element in probe_all() results.
+    """
+    var i = 0
+    while i < results.len():
+        val r = results[i]
+        if is_admitted_format(r.shader_format):
+            if r.status == BackendStatus.Initialized:
+                return r
+        i = i + 1
+    # Fallback: return CPU (always last in probe_all results)
+    # This is NOT a silent GPU fallback — CPU was always admitted.
+    results[results.len() - 1]
+
+fn select_backend_strict(results: [BackendProbeResult], requested: text) -> BackendProbeResult:
+    """Strict backend selection: error if requested GPU backend is not available.
+
+    If 'requested' is cpu or software, defers to select_backend_from_probes().
+    If 'requested' is a GPU backend and not Initialized in results, returns a
+    synthetic failed result to signal the error to the caller (no silent fallback).
+    """
+    if not is_gpu_backend(requested):
+        return select_backend_from_probes(results)
+
+    # Search for the requested backend specifically
+    var i = 0
+    while i < results.len():
+        val r = results[i]
+        if r.requested_name == requested:
+            if is_glsl_format(r.shader_format):
+                # Explicit GLSL rejection — typed error, not fallback
+                val glsl_reason = "vulkan_glsl backend is excluded from selection path; use spirv"
+                return BackendProbeResult(
+                    requested_name:  requested,
+                    selected_name:   requested,
+                    status:          BackendStatus.Failed,
+                    device_name:     "",
+                    api_name:        r.api_name,
+                    feature_gate:    "vulkan_glsl_excluded",
+                    shader_format:   r.shader_format,
+                    fallback_reason: glsl_reason,
+                    backend_name:    requested,
+                    available:       false,
+                    init_ms:         0,
+                    reason:          glsl_reason
+                )
+            if r.status == BackendStatus.Initialized:
+                return r
+            # Backend found but not available — strict fail
+            val unavail_reason = "requested backend unavailable: " + r.fallback_reason
+            return BackendProbeResult(
+                requested_name:  requested,
+                selected_name:   requested,
+                status:          BackendStatus.Failed,
+                device_name:     "",
+                api_name:        r.api_name,
+                feature_gate:    r.feature_gate,
+                shader_format:   r.shader_format,
+                fallback_reason: unavail_reason,
+                backend_name:    requested,
+                available:       false,
+                init_ms:         0,
+                reason:          unavail_reason
+            )
+        i = i + 1
+
+    # Requested backend not in probe list at all
+    val not_found_reason = "backend not in probe list: " + requested
+    BackendProbeResult(
+        requested_name:  requested,
+        selected_name:   requested,
+        status:          BackendStatus.Failed,
+        device_name:     "",
+        api_name:        "",
+        feature_gate:    "",
+        shader_format:   "",
+        fallback_reason: not_found_reason,
+        backend_name:    requested,
+        available:       false,
+        init_ms:         0,
+        reason:          not_found_reason
+    )
+
+fn reject_glsl_backend(requested: text) -> BackendProbeResult:
+    """Typed error returned when caller explicitly requests the GLSL backend.
+
+    The vulkan_glsl backend is never in the default selection path.
+    This fn makes the rejection explicit and testable.
+    """
+    val reject_reason = "vulkan_glsl backend is disabled by default; set VULKAN_GLSL_ENABLED=1 to opt-in (not recommended)"
+    BackendProbeResult(
+        requested_name:  requested,
+        selected_name:   requested,
+        status:          BackendStatus.Failed,
+        device_name:     "",
+        api_name:        "vulkan",
+        feature_gate:    "vulkan_glsl_excluded",
+        shader_format:   SHADER_FORMAT_GLSL,
+        fallback_reason: reject_reason,
+        backend_name:    requested,
+        available:       false,
+        init_ms:         0,
+        reason:          reject_reason
+    )

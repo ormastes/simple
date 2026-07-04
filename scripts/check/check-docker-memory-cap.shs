@@ -1,0 +1,83 @@
+#!/bin/sh
+# check-docker-memory-cap.shs — guard against uncapped container launches.
+#
+# Root cause of the 2026-06-14 host OOM: a `docker create … sleep infinity`
+# in container_adapter.spl had no --memory limit, so a leaking `simple`
+# (no GC) grew to ~117 GB and triggered repeated global OOM kills, taking
+# down the agent session. See doc/08_tracking/bug/simple_runaway_oom_host_crash_2026-06-14.md
+#
+# Rule: any OWNED source file that launches a container (`docker run`/`create`,
+# `podman run`/`create`) must also reference a memory cap (`--memory`, or a
+# variable that carries one such as `resource_flags`/`*_DOCKER_MEMORY`) in the
+# nearby command-building block.
+#
+# Exit 0 = all container launchers capped; exit 1 = an uncapped launcher found.
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$repo_root"
+
+# Owned launch surfaces only — skip vendored/third-party and nested repos.
+scan_dirs="scripts src/app src/lib"
+
+# A real launcher line: a runtime token (docker/podman, or a variable like
+# {rt} / $rt / $RUNTIME holding one) immediately followed by the run|create
+# subcommand AND a real flag (--…). This skips prose ("…or docker run.") and
+# the literal-only blind spot ({rt} create, which a `docker create` regex
+# misses). Comment lines (^#) are dropped first.
+launcher_re='(docker|podman|\{rt\}|\$\{?rt\}?|\$\{?RUNTIME\}?|\$\{?runtime\}?) (run|create)'
+awk_launcher_re='(docker|podman|[{]rt[}]|[$][{]?rt[}]?|[$][{]?RUNTIME[}]?|[$][{]?runtime[}]?) (run|create)'
+
+candidates=$(grep -rIl -E "$launcher_re" \
+    --include='*.shs' --include='*.sh' --include='*.spl' \
+    $scan_dirs 2>/dev/null \
+    | grep -vE 'vendor/|/build/|\.claude/worktrees/' \
+    || true)
+
+offenders=""
+for f in $candidates; do
+    # Keep only genuine launch lines: not a comment, token+subcommand, has a flag.
+    # ponytail: 12-line window covers existing multiline shell/Simple command
+    # builders; use a parser only if this checker starts blocking real cases.
+    hits=$(awk \
+        -v launcher="$awk_launcher_re" \
+        -v cap='--memory|memory=|resource_flags|_DOCKER_MEMORY|mem_limit' '
+        { lines[NR] = $0 }
+        END {
+            for (i = 1; i <= NR; i++) {
+                line = lines[i]
+                if (line ~ /^[[:space:]]*#/) {
+                    continue
+                }
+                if (line ~ launcher && line ~ /--/) {
+                    capped = 0
+                    for (j = i; j <= i + 12 && j <= NR; j++) {
+                        if (lines[j] ~ cap) {
+                            capped = 1
+                        }
+                    }
+                    if (!capped) {
+                        print FILENAME ":" i
+                    }
+                }
+            }
+        }' "$f")
+    if [ -n "$hits" ]; then
+        offenders="$offenders $hits"
+    fi
+done
+
+if [ -n "$offenders" ]; then
+    echo "FAIL: container launcher(s) with no memory cap (--memory):" >&2
+    for f in $offenders; do
+        echo "  - $f" >&2
+    done
+    echo "" >&2
+    echo "A runaway process in an uncapped container can OOM the whole host." >&2
+    echo "Add --memory (and ideally --memory-swap=<same> --pids-limit) to the" >&2
+    echo "docker/podman run|create command. See container_adapter.spl for the pattern." >&2
+    exit 1
+fi
+
+echo "OK: all owned container launchers carry a memory cap."

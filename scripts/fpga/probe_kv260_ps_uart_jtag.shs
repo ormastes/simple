@@ -1,0 +1,115 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+VIVADO_BIN="${VIVADO_BIN:-/home/ormastes/Xilinx/2025.2/Vivado/bin}"
+HW_SERVER="${HW_SERVER:-$VIVADO_BIN/hw_server}"
+XSDB="${XSDB:-$VIVADO_BIN/xsdb}"
+OUT_DIR="${OUT_DIR:-build/kv260_ps_uart_jtag_probe_$(date +%Y%m%d_%H%M%S)}"
+BAUD="${BAUD:-115200}"
+CAPTURE_SECONDS="${CAPTURE_SECONDS:-10}"
+MARKER="${MARKER:-KV260-PS-UART-JTAG}"
+UART1_TXFIFO="${UART1_TXFIFO:-0xff010030}"
+UART1_STATUS="${UART1_STATUS:-0xff01002c}"
+HW_PORT="${HW_PORT:-3122}"
+
+if [ ! -x "$HW_SERVER" ]; then
+    echo "PS_UART_PROBE_STATUS=hw_server_missing path=$HW_SERVER"
+    exit 1
+fi
+
+if [ ! -x "$XSDB" ]; then
+    echo "PS_UART_PROBE_STATUS=xsdb_missing path=$XSDB"
+    exit 1
+fi
+
+mkdir -p "$OUT_DIR"
+
+"$HW_SERVER" -s "tcp::$HW_PORT" >"$OUT_DIR/hw_server.log" 2>&1 &
+hw_pid=$!
+trap 'kill "$hw_pid" 2>/dev/null || true' EXIT INT TERM
+sleep 3
+
+ports=""
+for link in /dev/serial/by-id/usb-Xilinx_ML_Carrier_Card_*-port0; do
+    if [ -e "$link" ]; then
+        port="$(readlink -f "$link")"
+        case " $ports " in
+            *" $port "*) ;;
+            *) ports="$ports $port" ;;
+        esac
+    fi
+done
+
+if [ -z "$ports" ]; then
+    echo "PS_UART_PROBE_STATUS=no_xilinx_serial_ports"
+    exit 1
+fi
+
+pids=""
+for port in $ports; do
+    base="$(echo "$port" | tr '/ ' '__')"
+    raw="$OUT_DIR/${base}.raw"
+    stty -F "$port" "$BAUD" cs8 -cstopb -parenb -ixon -ixoff raw -echo
+    timeout "$CAPTURE_SECONDS" dd if="$port" of="$raw" bs=1 count=4096 status=none &
+    pids="$pids $!"
+    echo "PS_UART_CAPTURE_STARTED port=$port baud=$BAUD seconds=$CAPTURE_SECONDS raw=$raw"
+done
+
+sleep 1
+tcl="$OUT_DIR/ps_uart_write.tcl"
+{
+    printf 'connect -host localhost -port %s\n' "$HW_PORT"
+    printf '%s\n' 'targets 4'
+    printf 'catch {mrd %s} before\n' "$UART1_STATUS"
+    printf '%s\n' 'puts "UART1_SR_BEFORE=$before"'
+    printf '%s' "$MARKER" | od -An -tx1 | tr ' ' '\n' | while IFS= read -r byte; do
+        if [ -n "$byte" ]; then
+            printf 'mwr %s 0x%s\n' "$UART1_TXFIFO" "$byte"
+            printf '%s\n' 'after 2'
+        fi
+    done
+    printf 'mwr %s 0x0d\n' "$UART1_TXFIFO"
+    printf 'mwr %s 0x0a\n' "$UART1_TXFIFO"
+    printf 'catch {mrd %s} after_sr\n' "$UART1_STATUS"
+    printf '%s\n' 'puts "UART1_SR_AFTER=$after_sr"'
+    printf '%s\n' 'disconnect'
+} >"$tcl"
+
+"$XSDB" "$tcl" >"$OUT_DIR/xsdb.log" 2>&1 || true
+
+for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+done
+
+status=1
+for port in $ports; do
+    base="$(echo "$port" | tr '/ ' '__')"
+    raw="$OUT_DIR/${base}.raw"
+    txt="$OUT_DIR/${base}.txt"
+    tr -cd '\11\12\15\40-\176' <"$raw" >"$txt"
+    bytes="$(wc -c <"$raw" | tr -d ' ')"
+    echo "PS_UART_CAPTURE_DONE port=$port bytes=$bytes raw=$raw text=$txt"
+    if [ "$bytes" -gt 0 ]; then
+        status=0
+        echo "PS_UART_TEXT_BEGIN port=$port"
+        sed -n '1,80p' "$txt"
+        echo "PS_UART_TEXT_END port=$port"
+    fi
+done
+
+if command -v rg >/dev/null 2>&1; then
+    rg 'UART1_SR_|Error|ERROR|Connection refused' "$OUT_DIR/xsdb.log" || true
+else
+    grep -E 'UART1_SR_|Error|ERROR|Connection refused' "$OUT_DIR/xsdb.log" || true
+fi
+
+if [ "$status" -eq 0 ]; then
+    echo "PS_UART_PROBE_STATUS=output_seen"
+else
+    echo "PS_UART_PROBE_STATUS=no_output"
+fi
+
+exit "$status"

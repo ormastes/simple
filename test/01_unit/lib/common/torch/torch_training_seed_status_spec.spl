@@ -1,0 +1,48 @@
+extern fn rt_file_read_text(path: text) -> text
+
+fn source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+# NOTE: seed `text.find` returns a BYTE offset while `text.slice` consumes a
+# CHAR offset. The library source has em-dashes (—) in comments before these
+# markers, so mixing find+slice skews extraction on this multibyte input.
+# `char_find` scans with slice so it returns a CHAR offset consistent with slice.
+fn char_find(haystack: text, needle: text) -> i64:
+    val n = haystack.len()
+    val m = needle.len()
+    if m == 0:
+        return 0
+    var i = 0
+    while i + m <= n:
+        if haystack.slice(i, i + m) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn body_after_marker(source_text: text, marker: text) -> text:
+    val start = char_find(source_text, marker)
+    if start < 0:
+        return ""
+    source_text.slice(start, source_text.len())
+
+fn assert_seed_status_surface(path: text):
+    val text = source(path)
+    val set_body = body_after_marker(text, "fn set_seed(seed: i64) -> text:")
+    val manual_body = body_after_marker(text, "fn manual_seed(seed: i64) -> text:")
+
+    expect(set_body).to_contain("fn set_seed(seed: i64) -> text:")
+    expect(set_body).to_contain("\"unsupported\"")
+    expect(set_body.contains("Currently a no-op")).to_equal(false)
+    expect(set_body.contains("No-op until rt_torch_manual_seed")).to_equal(false)
+    expect(manual_body).to_contain("fn manual_seed(seed: i64) -> text:")
+    expect(manual_body).to_contain("set_seed(seed)")
+
+describe "Torch training seed status":
+    it "makes GC async seed helpers explicitly unsupported":
+        assert_seed_status_surface("src/lib/gc_async_mut/torch/torch_training.spl")
+
+    it "makes NoGC async seed helpers explicitly unsupported":
+        assert_seed_status_surface("src/lib/nogc_async_mut/torch/torch_training.spl")
+
+    it "makes NoGC sync seed helpers explicitly unsupported":
+        assert_seed_status_surface("src/lib/nogc_sync_mut/torch/torch_training.spl")

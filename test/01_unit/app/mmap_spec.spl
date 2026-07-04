@@ -1,0 +1,66 @@
+use std.spec.*
+use nogc_sync_mut.src.app.mapped_file.{MappedFile}
+
+# ============================================================================
+# MappedFile Tests
+#
+# Note: mmap extern functions (rt_mmap_file, rt_munmap, etc.) are only
+# available in compiled mode. These tests verify the struct-level API,
+# bounds validation, and error handling. Full mmap integration tests
+# require compilation with a native target preset.
+# ============================================================================
+
+describe "MappedFile":
+    context "struct construction":
+        it "creates a valid MappedFile":
+            val mf = MappedFile(address: 12345, size: 4096, path: "/tmp/test.txt")
+            expect(mf.is_valid()).to_equal(true)
+            expect(mf.file_size()).to_equal(4096)
+            expect(mf.path).to_equal("/tmp/test.txt")
+
+        it "zero address is invalid":
+            val mf = MappedFile(address: 0, size: 0, path: "")
+            expect(mf.is_valid()).to_equal(false)
+
+    context "bounds checking":
+        it "read_bytes rejects negative offset":
+            val mf = MappedFile(address: 1000, size: 100, path: "test")
+            val result = mf.read_bytes(-1, 10)
+            expect(result.is_err()).to_equal(true)
+
+        it "read_bytes rejects negative length":
+            val mf = MappedFile(address: 1000, size: 100, path: "test")
+            val result = mf.read_bytes(0, -5)
+            expect(result.is_err()).to_equal(true)
+
+        it "read_bytes rejects read past end":
+            val mf = MappedFile(address: 1000, size: 100, path: "test")
+            val result = mf.read_bytes(90, 20)
+            expect(result.is_err()).to_equal(true)
+
+        it "read_string rejects negative offset":
+            val mf = MappedFile(address: 1000, size: 100, path: "test")
+            val result = mf.read_string(-1, 10)
+            expect(result.is_err()).to_equal(true)
+
+        it "read_string rejects offset past end":
+            val mf = MappedFile(address: 1000, size: 100, path: "test")
+            val result = mf.read_string(200, 10)
+            expect(result.is_err()).to_equal(true)
+
+    context "close":
+        it "invalidates mapping after close":
+            var mf = MappedFile(address: 1000, size: 100, path: "test")
+            expect(mf.is_valid()).to_equal(true)
+            # Note: close() calls rt_munmap which isn't available in interpreter
+            # We test the address zeroing logic by setting directly
+            mf.address = 0
+            mf.size = 0
+            expect(mf.is_valid()).to_equal(false)
+
+    context "open error handling":
+        it "returns error for non-existent file":
+            val result = MappedFile.open("/tmp/simple_mmap_nonexistent_file_12345.txt")
+            expect(result.is_err()).to_equal(true)
+            val err = result.unwrap_err()
+            expect(err).to_contain("not found")

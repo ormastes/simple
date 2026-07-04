@@ -1,0 +1,652 @@
+# Markdown Syntax-Aware Search
+#
+# Search within specific markdown block kinds (heading, paragraph,
+# code, list, table, blockquote) and group results by parent heading.
+
+use std.editor.core.path_text.*
+use std.io_runtime.{file_read, file_write}
+
+struct MdSearchMatch:
+    line: i64
+    col: i64
+    context_text: text
+    block_kind: text
+    heading_context: text
+
+struct MdVaultSearchMatch:
+    path: text
+    line: i64
+    col: i64
+    context_text: text
+    block_kind: text
+    heading_context: text
+    score: i64
+
+struct MdVaultSearchIndex:
+    root: text
+    documents: [MdWikiDocument]
+    version: i64
+    dirty: bool
+
+fn md_search(content: text, query: text) -> [MdSearchMatch]:
+    var results: [MdSearchMatch] = []
+    if query.trim() == "":
+        return results
+    if content.len() == 0:
+        return results
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line_text = lines[i]
+        val col = _md_search_case_insensitive_find(line_text, query)
+        if col >= 0:
+            val kind = _md_search_block_kind_at_line(content, i)
+            val heading = _md_search_find_parent_heading(content, i)
+            val m = MdSearchMatch(
+                line: i,
+                col: col,
+                context_text: line_text,
+                block_kind: kind,
+                heading_context: heading
+            )
+            results.push(m)
+        i = i + 1
+    results
+
+fn md_search_in_headings(content: text, query: text) -> [MdSearchMatch]:
+    var results: [MdSearchMatch] = []
+    if query.trim() == "":
+        return results
+    if content.len() == 0:
+        return results
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line_text = lines[i]
+        val trimmed = line_text.trim()
+        if trimmed.starts_with("#"):
+            val col = _md_search_case_insensitive_find(line_text, query)
+            if col >= 0:
+                val m = MdSearchMatch(
+                    line: i,
+                    col: col,
+                    context_text: line_text,
+                    block_kind: "heading",
+                    heading_context: trimmed
+                )
+                results.push(m)
+        i = i + 1
+    results
+
+fn md_search_in_code_blocks(content: text, query: text) -> [MdSearchMatch]:
+    var results: [MdSearchMatch] = []
+    if query.trim() == "":
+        return results
+    if content.len() == 0:
+        return results
+    val lines = content.split("\n")
+    var in_code = false
+    var i = 0
+    while i < lines.len():
+        val line_text = lines[i]
+        val trimmed = line_text.trim()
+        if trimmed.starts_with("```"):
+            if in_code:
+                in_code = false
+            else:
+                in_code = true
+            i = i + 1
+            continue
+        if in_code:
+            val col = _md_search_case_insensitive_find(line_text, query)
+            if col >= 0:
+                val heading = _md_search_find_parent_heading(content, i)
+                val m = MdSearchMatch(
+                    line: i,
+                    col: col,
+                    context_text: line_text,
+                    block_kind: "code",
+                    heading_context: heading
+                )
+                results.push(m)
+        i = i + 1
+    results
+
+fn md_search_in_paragraphs(content: text, query: text) -> [MdSearchMatch]:
+    var results: [MdSearchMatch] = []
+    if query.trim() == "":
+        return results
+    if content.len() == 0:
+        return results
+    val lines = content.split("\n")
+    var in_code = false
+    var i = 0
+    while i < lines.len():
+        val line_text = lines[i]
+        val trimmed = line_text.trim()
+        if trimmed.starts_with("```"):
+            if in_code:
+                in_code = false
+            else:
+                in_code = true
+            i = i + 1
+            continue
+        if in_code:
+            i = i + 1
+            continue
+        if trimmed == "":
+            i = i + 1
+            continue
+        if trimmed.starts_with("#"):
+            i = i + 1
+            continue
+        if (trimmed.starts_with("- ") or trimmed.starts_with("* ") or
+            trimmed.starts_with("+ ") or trimmed.starts_with("|") or
+            trimmed.starts_with(">") or _md_search_is_ordered_item(trimmed)):
+            i = i + 1
+            continue
+        val col = _md_search_case_insensitive_find(line_text, query)
+        if col >= 0:
+            val heading = _md_search_find_parent_heading(content, i)
+            val m = MdSearchMatch(
+                line: i,
+                col: col,
+                context_text: line_text,
+                block_kind: "paragraph",
+                heading_context: heading
+            )
+            results.push(m)
+        i = i + 1
+    results
+
+fn md_search_in_links(content: text, query: text) -> [MdSearchMatch]:
+    # Search in link text [text](url) and wikilinks [[text]]
+    var results: [MdSearchMatch] = []
+    if query.trim() == "":
+        return results
+    if content.len() == 0:
+        return results
+    val lines = content.split("\n")
+    var in_code = false
+    var i = 0
+    while i < lines.len():
+        val line_text = lines[i]
+        val trimmed = line_text.trim()
+        if trimmed.starts_with("```"):
+            if in_code:
+                in_code = false
+            else:
+                in_code = true
+            i = i + 1
+            continue
+        if in_code:
+            i = i + 1
+            continue
+        val has_match = _md_search_line_has_link_match(line_text, query)
+        if has_match:
+            val col = _md_search_case_insensitive_find(line_text, query)
+            val heading = _md_search_find_parent_heading(content, i)
+            val kind = _md_search_block_kind_at_line(content, i)
+            val m = MdSearchMatch(
+                line: i,
+                col: col,
+                context_text: line_text,
+                block_kind: kind,
+                heading_context: heading
+            )
+            results.push(m)
+        i = i + 1
+    results
+
+fn md_search_results_grouped_by_heading(matches: [MdSearchMatch]) -> [text]:
+    var output: [text] = []
+    var last_heading = ""
+    var i = 0
+    while i < matches.len():
+        val m = matches[i]
+        if m.heading_context != last_heading:
+            last_heading = m.heading_context
+            if last_heading == "":
+                output.push("(no heading)")
+            else:
+                output.push(last_heading)
+        val line_num = (m.line + 1).to_text()
+        output.push("  Line " + line_num + ": " + m.context_text.trim())
+        i = i + 1
+    output
+
+fn md_search_vault_documents(docs: [MdWikiDocument], query: text) -> [MdVaultSearchMatch]:
+    var results: [MdVaultSearchMatch] = []
+    val query_text = _md_vault_search_query_text(query)
+    if query_text == "":
+        return results
+    val path_filter = _md_vault_search_query_filter(query, "path")
+    val kind_filter = _md_vault_search_query_kind_filter(query)
+    for doc in docs:
+        if path_filter != "" and _md_search_case_insensitive_find(doc.path, path_filter) < 0:
+            continue
+        val matches = md_search(doc.content, query_text)
+        for match in matches:
+            if kind_filter != "" and match.block_kind != kind_filter:
+                continue
+            results.push(MdVaultSearchMatch(
+                path: doc.path,
+                line: match.line,
+                col: match.col,
+                context_text: match.context_text,
+                block_kind: match.block_kind,
+                heading_context: match.heading_context,
+                score: _md_vault_search_score(doc, match, query_text)
+            ))
+    md_vault_search_rank_matches(results)
+
+fn md_vault_search_rank_matches(matches: [MdVaultSearchMatch]) -> [MdVaultSearchMatch]:
+    var ranked = matches
+    var i = 0
+    while i < ranked.len():
+        var best = i
+        var j = i + 1
+        while j < ranked.len():
+            if _md_vault_search_match_before(ranked[j], ranked[best]):
+                best = j
+            j = j + 1
+        if best != i:
+            val tmp = ranked[i]
+            ranked[i] = ranked[best]
+            ranked[best] = tmp
+        i = i + 1
+    ranked
+
+fn md_vault_search_index_new(root: text, docs: [MdWikiDocument]) -> MdVaultSearchIndex:
+    MdVaultSearchIndex(root: root, documents: docs, version: 1, dirty: false)
+
+fn md_vault_search_index_refresh(index: MdVaultSearchIndex, docs: [MdWikiDocument]) -> MdVaultSearchIndex:
+    MdVaultSearchIndex(root: index.root, documents: docs, version: index.version + 1, dirty: false)
+
+fn md_vault_search_index_invalidate(index: MdVaultSearchIndex) -> MdVaultSearchIndex:
+    MdVaultSearchIndex(root: index.root, documents: index.documents, version: index.version, dirty: true)
+
+fn md_vault_search_index_update_document(index: MdVaultSearchIndex, doc: MdWikiDocument) -> MdVaultSearchIndex:
+    var docs: [MdWikiDocument] = []
+    var found = false
+    for existing in index.documents:
+        if existing.path == doc.path:
+            docs.push(doc)
+            found = true
+        else:
+            docs.push(existing)
+    if not found:
+        docs.push(doc)
+    MdVaultSearchIndex(root: index.root, documents: docs, version: index.version + 1, dirty: false)
+
+fn md_vault_search_index_remove_document(index: MdVaultSearchIndex, path: text) -> MdVaultSearchIndex:
+    var docs: [MdWikiDocument] = []
+    for existing in index.documents:
+        if existing.path != path:
+            docs.push(existing)
+    MdVaultSearchIndex(root: index.root, documents: docs, version: index.version + 1, dirty: false)
+
+fn md_vault_search_index_search(index: MdVaultSearchIndex, query: text) -> [MdVaultSearchMatch]:
+    md_search_vault_documents(index.documents, query)
+
+fn md_vault_search_query_replace_kind_filter(query: text, kind: text) -> text:
+    val normalized = kind.trim().to_lower()
+    var out = ""
+    if normalized != "" and normalized != "all":
+        out = "kind:" + normalized
+    val parts = query.split(" ")
+    for part in parts:
+        val token = part.trim()
+        if token == "":
+            continue
+        val lower = token.to_lower()
+        if lower.starts_with("kind:") or lower.starts_with("block:"):
+            continue
+        if out != "":
+            out = out + " "
+        out = out + token
+    out
+
+fn md_vault_search_query_replace_path_filter(query: text, path: text) -> text:
+    val normalized = path.trim()
+    var out = ""
+    if normalized != "" and normalized != "all":
+        out = "path:" + normalized
+    val parts = query.split(" ")
+    for part in parts:
+        val token = part.trim()
+        if token == "":
+            continue
+        val lower = token.to_lower()
+        if lower.starts_with("path:"):
+            continue
+        if out != "":
+            out = out + " "
+        out = out + token
+    out
+
+fn md_vault_search_index_matches_documents(index: MdVaultSearchIndex, docs: [MdWikiDocument]) -> bool:
+    if index.documents.len() != docs.len():
+        return false
+    for doc in docs:
+        if not _md_vault_search_has_same_document(index.documents, doc):
+            return false
+    true
+
+fn md_vault_search_index_save(index: MdVaultSearchIndex, cache_path: text) -> bool:
+    var out = "SIMPLE_MD_SEARCH_INDEX\t1\t" + _md_search_cache_escape(index.root) + "\t" + index.version.to_text() + "\n"
+    for doc in index.documents:
+        out = out + "D\t" + _md_search_cache_escape(doc.path) + "\t" + _md_search_cache_escape(doc.content) + "\n"
+    file_write(cache_path, out)
+
+fn md_vault_search_index_load(cache_path: text) -> MdVaultSearchIndex:
+    val content = file_read(cache_path) ?? ""
+    if content == "":
+        return MdVaultSearchIndex(root: "", documents: [], version: 0, dirty: true)
+    val lines = content.split("\n")
+    if lines.len() == 0:
+        return MdVaultSearchIndex(root: "", documents: [], version: 0, dirty: true)
+    val header = lines[0].split("\t")
+    if header.len() < 4 or header[0] != "SIMPLE_MD_SEARCH_INDEX" or header[1] != "1":
+        return MdVaultSearchIndex(root: "", documents: [], version: 0, dirty: true)
+    val root = _md_search_cache_unescape(header[2])
+    val version = header[3].to_i64()
+    var docs: [MdWikiDocument] = []
+    var i = 1
+    while i < lines.len():
+        val line = lines[i]
+        if line != "":
+            val fields = line.split("\t")
+            if fields.len() >= 3 and fields[0] == "D":
+                docs.push(md_wiki_document(_md_search_cache_unescape(fields[1]), _md_search_cache_unescape(fields[2])))
+        i = i + 1
+    MdVaultSearchIndex(root: root, documents: docs, version: version, dirty: false)
+
+fn md_vault_search_index_apply_file_change(index: MdVaultSearchIndex, path: text, content: text, change_type: i64) -> MdVaultSearchIndex:
+    if not _md_vault_search_path_in_root(index.root, path):
+        return index
+    if not editor_is_markdown_path(path):
+        return index
+    if change_type == 3:
+        return md_vault_search_index_remove_document(index, path)
+    md_vault_search_index_update_document(index, md_wiki_document(path, content))
+
+fn md_vault_search_index_apply_watched_changes(index: MdVaultSearchIndex, paths: [text]) -> MdVaultSearchIndex:
+    var next = index
+    for path in paths:
+        if _md_vault_search_path_in_root(next.root, path) and editor_is_markdown_path(path):
+            next = md_vault_search_index_invalidate(next)
+    next
+
+fn _md_vault_search_path_in_root(root: text, path: text) -> bool:
+    if root == "":
+        return false
+    if path == root:
+        return true
+    val prefix = if root.ends_with("/") then root else: root + "/"
+    path.starts_with(prefix)
+
+fn _md_vault_search_has_same_document(docs: [MdWikiDocument], target: MdWikiDocument) -> bool:
+    for doc in docs:
+        if doc.path == target.path and doc.content == target.content:
+            return true
+    false
+
+fn _md_vault_search_query_text(query: text) -> text:
+    if query.trim() == "":
+        return ""
+    var out = ""
+    val parts = query.split(" ")
+    for part in parts:
+        val token = part.trim()
+        if token == "":
+            continue
+        if _md_vault_search_is_filter_token(token):
+            continue
+        if out != "":
+            out = out + " "
+        out = out + token
+    out
+
+fn _md_vault_search_query_filter(query: text, name: text) -> text:
+    val prefix = name.to_lower() + ":"
+    val parts = query.split(" ")
+    for part in parts:
+        val token = part.trim()
+        val lower = token.to_lower()
+        if lower.starts_with(prefix) and token.len() > prefix.len():
+            return token.slice(prefix.len(), token.len())
+    ""
+
+fn _md_vault_search_query_kind_filter(query: text) -> text:
+    val kind = _md_vault_search_query_filter(query, "kind")
+    if kind != "":
+        return kind.to_lower()
+    _md_vault_search_query_filter(query, "block").to_lower()
+
+fn _md_vault_search_is_filter_token(token: text) -> bool:
+    val lower = token.to_lower()
+    lower.starts_with("path:") or lower.starts_with("kind:") or lower.starts_with("block:")
+
+fn _md_search_find_parent_heading(content: text, line: i64) -> text:
+    val lines = content.split("\n")
+    val total = lines.len()
+    # clamp start to valid range
+    var i = line - 1
+    if i >= total:
+        i = total - 1
+    while i >= 0:
+        val trimmed = lines[i].trim()
+        if trimmed.starts_with("#"):
+            return trimmed
+        i = i - 1
+    ""
+
+fn _md_search_block_kind_at_line(content: text, line: i64) -> text:
+    val lines = content.split("\n")
+    # scan from top to determine code fence state at target line
+    var in_code = false
+    var i = 0
+    while i < line and i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed.starts_with("```"):
+            if in_code:
+                in_code = false
+            else:
+                in_code = true
+        i = i + 1
+    if in_code:
+        return "code"
+    if line >= lines.len():
+        return "paragraph"
+    val trimmed = lines[line].trim()
+    if trimmed.starts_with("#"):
+        return "heading"
+    if trimmed.starts_with("```"):
+        return "code"
+    if trimmed.starts_with("|"):
+        return "table"
+    if (trimmed.starts_with("- ") or trimmed.starts_with("* ") or
+        trimmed.starts_with("+ ") or _md_search_is_ordered_item(trimmed)):
+        return "list"
+    if trimmed.starts_with(">"):
+        return "blockquote"
+    "paragraph"
+
+fn _md_search_case_insensitive_find(haystack: text, needle: text) -> i64:
+    val h_lower = haystack.to_lower()
+    val n_lower = needle.to_lower()
+    val h_len = h_lower.len()
+    val n_len = n_lower.len()
+    if n_len == 0 or n_len > h_len:
+        return -1
+    var pos = 0
+    while pos + n_len <= h_len:
+        val slice = h_lower.slice(pos, pos + n_len)
+        if slice == n_lower:
+            return pos
+        pos = pos + 1
+    -1
+
+fn _md_vault_search_score(doc: MdWikiDocument, match: MdSearchMatch, query: text) -> i64:
+    var score = 0
+    val title_hit = _md_search_case_insensitive_find(doc.title, query)
+    if title_hit >= 0:
+        score = score + 1000
+    val path_hit = _md_search_case_insensitive_find(doc.path, query)
+    if path_hit >= 0:
+        score = score + 500
+    if match.block_kind == "heading":
+        score = score + 300
+    elif match.block_kind == "paragraph":
+        score = score + 100
+    elif match.block_kind == "list":
+        score = score + 80
+    elif match.block_kind == "blockquote":
+        score = score + 60
+    elif match.block_kind == "table":
+        score = score + 40
+    elif match.block_kind == "code":
+        score = score + 20
+    if match.col == 0:
+        score = score + 80
+    elif match.col < 8:
+        score = score + 40
+    score = score + _md_search_count_occurrences(match.context_text, query) * 30
+    if match.line < 10:
+        score = score + (10 - match.line)
+    score
+
+fn _md_vault_search_match_before(a: MdVaultSearchMatch, b: MdVaultSearchMatch) -> bool:
+    if a.score != b.score:
+        return a.score > b.score
+    if a.path != b.path:
+        return a.path < b.path
+    if a.line != b.line:
+        return a.line < b.line
+    a.col < b.col
+
+fn _md_search_count_occurrences(haystack: text, needle: text) -> i64:
+    if needle == "":
+        return 0
+    var count = 0
+    var start = 0
+    while start < haystack.len():
+        val found = _md_search_case_insensitive_find(haystack.slice(start, haystack.len()), needle)
+        if found < 0:
+            return count
+        count = count + 1
+        start = start + found + needle.len()
+    count
+
+fn _md_search_cache_escape(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\t":
+            out = out + "\\t"
+        elif ch == "\r":
+            out = out + "\\r"
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _md_search_cache_unescape(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "\\" and i + 1 < value.len():
+            val next = value.char_at(i + 1)
+            if next == "n":
+                out = out + "\n"
+                i = i + 2
+                continue
+            if next == "t":
+                out = out + "\t"
+                i = i + 2
+                continue
+            if next == "r":
+                out = out + "\r"
+                i = i + 2
+                continue
+            if next == "\\":
+                out = out + "\\"
+                i = i + 2
+                continue
+        out = out + ch
+        i = i + 1
+    out
+
+# --- internal helpers ---
+
+fn _md_search_is_ordered_item(line: text) -> bool:
+    var i = 0
+    while i < line.len() and line.char_at(i) >= "0" and line.char_at(i) <= "9":
+        i = i + 1
+    if i == 0:
+        return false
+    if i >= line.len():
+        return false
+    val ch = line.char_at(i)
+    ch == "." or ch == ")"
+
+fn _md_search_line_has_link_match(line: text, query: text) -> bool:
+    # Check if query appears inside a [text](url) link text, URL, or [[wikilink]]
+    var i = 0
+    while i < line.len():
+        val ch = line.char_at(i)
+        if ch == "[":
+            # wikilink [[...]]
+            if i + 1 < line.len() and line.char_at(i + 1) == "[":
+                val close = _md_search_find_str(line, "]]", i + 2)
+                if close >= 0:
+                    val inner = line.slice(i + 2, close)
+                    val found = _md_search_case_insensitive_find(inner, query)
+                    if found >= 0:
+                        return true
+                    i = close + 2
+                    continue
+            # standard link [text](url) or image ![alt](url)
+            val close_bracket = _md_search_find_char(line, "]", i + 1)
+            if close_bracket > 0 and close_bracket + 1 < line.len():
+                if line.char_at(close_bracket + 1) == "(":
+                    val close_paren = _md_search_find_char(line, ")", close_bracket + 2)
+                    if close_paren > 0:
+                        val link_text = line.slice(i + 1, close_bracket)
+                        val link_url = line.slice(close_bracket + 2, close_paren)
+                        val in_text = _md_search_case_insensitive_find(link_text, query)
+                        val in_url = _md_search_case_insensitive_find(link_url, query)
+                        if in_text >= 0 or in_url >= 0:
+                            return true
+                        i = close_paren + 1
+                        continue
+        i = i + 1
+    false
+
+fn _md_search_find_char(haystack: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i < haystack.len():
+        if haystack.char_at(i) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _md_search_find_str(haystack: text, needle: text, start: i64) -> i64:
+    val h_len = haystack.len()
+    val n_len = needle.len()
+    if n_len == 0 or start + n_len > h_len:
+        return -1
+    var pos = start
+    while pos + n_len <= h_len:
+        val slice = haystack.slice(pos, pos + n_len)
+        if slice == needle:
+            return pos
+        pos = pos + 1
+    -1

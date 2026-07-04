@@ -1,0 +1,44 @@
+use std.spec
+use os.kernel.arch.arch_context.{X86Context}
+use os.kernel.arch.x86_32.trap_model.{X86_32_INT80_SIZE, x86_32_syscall_args_from_context, x86_32_apply_syscall_result}
+use os.kernel.types.syscall_types.{SyscallResult}
+
+fn make_context() -> X86Context:
+    X86Context(
+        eax: 60,
+        ebx: 10,
+        ecx: 11,
+        edx: 12,
+        esi: 13,
+        edi: 14,
+        ebp: 15,
+        esp: 0x9000,
+        eip: 0x1000,
+        eflags: 0x202,
+        cs: 0x1B,
+        ss: 0x23,
+        ds: 0x23,
+        es: 0x23,
+        fpu_state: 0
+    )
+
+describe "x86_32 trap model":
+    """Pure register marshalling contract for the future int 0x80 entry."""
+
+    it "marshals int 0x80 registers into syscall args":
+        """eax is syscall id; ebx/ecx/edx/esi/edi/ebp are args 0..5."""
+        val args = x86_32_syscall_args_from_context(make_context())
+        expect(args.id).to_equal(60)
+        expect(args.arg0).to_equal(10)
+        expect(args.arg1).to_equal(11)
+        expect(args.arg2).to_equal(12)
+        expect(args.arg3).to_equal(13)
+        expect(args.arg4).to_equal(14)
+        expect(args.arg5).to_equal(15)
+
+    it "applies syscall result to eax and advances past int 0x80":
+        """A completed syscall returns through eax and resumes after CD 80."""
+        val updated = x86_32_apply_syscall_result(make_context(), SyscallResult(value: 42))
+        expect(updated.eax).to_equal(42u32)
+        expect(updated.eip).to_equal(0x1000u32 + X86_32_INT80_SIZE)
+        expect(updated.esp).to_equal(0x9000u32)

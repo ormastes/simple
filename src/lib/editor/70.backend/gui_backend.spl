@@ -1,0 +1,783 @@
+# GUI Backend
+#
+# Integrates editor with UISession and Surface system for GUI rendering.
+# Markdown blocks render as HTML in GUI mode.
+# Provides render functions for tab bar, file tree, editor area.
+
+use std.editor.services.diagnostics.*
+use std.editor.services.md_document_decor.*
+use std.editor.services.md_wiki_index.*
+use std.editor.services.sdn_graph.*
+use std.editor.common.config.*
+use std.editor.core.session.{EditSession}
+use std.editor.core.path_text.{editor_path_basename}
+use std.editor.view.diagnostics_panel.*
+use std.editor.view.wiki_panel.*
+
+struct GuiBackendConfig:
+    window_title: text
+    initial_width: i64
+    initial_height: i64
+    theme: text
+
+fn gui_backend_default_config() -> GuiBackendConfig:
+    GuiBackendConfig(
+        window_title: "Simple Editor",
+        initial_width: 1200,
+        initial_height: 800,
+        theme: "dark"
+    )
+
+struct GuiRenderBlock:
+    block_id: i64
+    kind: text
+    html: text
+    from_line: i64
+    to_line: i64
+
+fn gui_render_markdown_block(block: RenderBlock) -> GuiRenderBlock:
+    var html = ""
+    val escaped_content = _gui_escape_html(block.content)
+    match block.kind:
+        "heading":
+            val level = _gui_heading_level(block.content)
+            val text_content = _gui_strip_heading(block.content)
+            val escaped_heading = _gui_escape_html(text_content)
+            val lv = str(level)
+            html = "<h" + lv + ">" + escaped_heading + "</h" + lv + ">"
+        "code":
+            html = "<pre><code>" + escaped_content + "</code></pre>"
+        "sdn_graph":
+            html = sdn_graph_render_html(sdn_graph_parse(_gui_fence_body(block.rendered_lines)))
+        "md_css":
+            html = "<style class=\"md-inline-css\">" + _gui_escape_html(_gui_fence_body(block.rendered_lines)) + "</style>"
+        "paragraph":
+            html = "<p>" + _gui_render_inline_markdown_media(block.content) + "</p>"
+        "list":
+            html = _gui_render_list_block(block)
+        "table":
+            html = _gui_render_table_block(block)
+        "callout":
+            html = _gui_render_callout_block(block)
+        "embed":
+            html = _gui_render_embed_block(block)
+        _:
+            html = "<div>" + escaped_content + "</div>"
+    GuiRenderBlock(block_id: block.id, kind: block.kind, html: html, from_line: block.from_line, to_line: block.to_line)
+
+fn gui_render_markdown_document(content: text) -> text:
+    val decor = md_document_decor_parse(content)
+    if decor.layout == "ppt" or decor.layout == "slides" or decor.layout == "presentation" or decor.layout == "sheet" or decor.layout == "excel" or decor.layout == "spreadsheet":
+        return md_document_render_office_html(content)
+    val body = md_document_body_without_decor(content)
+    val model = BlockModel.from_markdown(body)
+    val page_class = if decor.page_view then " page-view" else: ""
+    var html = "<div class=\"md-document" + page_class + "\" data-page-view=\"" + (if decor.page_view then "true" else: "false") + "\">"
+    if decor.css_file != "":
+        html = html + "<link rel=\"stylesheet\" href=\"" + _gui_escape_html(decor.css_file) + "\">"
+    if decor.inline_css != "":
+        html = html + "<style class=\"md-inline-css\">" + _gui_escape_html(decor.inline_css) + "</style>"
+    if decor.page_view:
+        html = html + "<article class=\"md-page-view\">"
+        if decor.header != "":
+            html = html + "<header class=\"md-page-header\">" + _gui_escape_html(decor.header) + "</header>"
+        html = html + "<main class=\"md-page-body\">"
+    var i = 0
+    while i < model.block_count():
+        val rendered = gui_render_markdown_block(model.block_at(i))
+        html = html + rendered.html
+        i = i + 1
+    if decor.page_view:
+        html = html + "</main>"
+        if decor.footer != "":
+            html = html + "<footer class=\"md-page-footer\">" + _gui_escape_html(decor.footer) + "</footer>"
+        html = html + "</article>"
+    html + "</div>"
+
+fn gui_render_markdown_block_with_wiki(block: RenderBlock, index: MdWikiIndex) -> GuiRenderBlock:
+    _gui_render_markdown_block_with_wiki_depth(block, index, 0)
+
+fn _gui_render_markdown_block_with_wiki_depth(block: RenderBlock, index: MdWikiIndex, depth: i64) -> GuiRenderBlock:
+    if block.kind == "embed":
+        val transcluded = _gui_render_embed_transclusion_block_depth(block, index, depth)
+        if transcluded != "":
+            return GuiRenderBlock(block_id: block.id, kind: block.kind, html: transcluded, from_line: block.from_line, to_line: block.to_line)
+    gui_render_markdown_block(block)
+
+fn gui_render_editor_area(buffer: EditorBuffer, language_id: text, viewport: EditorViewport) -> text:
+    var diagnostics: [EditorDiagnostic] = []
+    gui_render_editor_area_with_diagnostics(buffer, language_id, viewport, buffer.path, diagnostics)
+
+fn gui_render_editor_area_with_diagnostics(buffer: EditorBuffer, language_id: text, viewport: EditorViewport, path: text, diagnostics: [EditorDiagnostic]) -> text:
+    gui_render_editor_area_with_diagnostics_and_hover_delay(buffer, language_id, viewport, path, diagnostics, 0)
+
+fn gui_render_editor_area_with_diagnostics_and_hover_delay(buffer: EditorBuffer, language_id: text, viewport: EditorViewport, path: text, diagnostics: [EditorDiagnostic], hover_delay_ms: i64) -> text:
+    val escaped_language = _gui_escape_html(language_id)
+    var html = "<div class=\"editor-area gui-editor-source\" role=\"textbox\" contenteditable=\"true\" spellcheck=\"false\" data-language=\"" + escaped_language + "\" data-hover-delay-ms=\"" + hover_delay_ms.to_text() + "\">"
+    var row = 0
+    while row < viewport.height:
+        val file_row = buffer.visible_line_at(row)
+        if file_row >= 0 and file_row < buffer.line_count():
+            val line_content = buffer.line_with_inlay_hints(file_row)
+            val raw_line_content = buffer.line_at(file_row)
+            val line_num = str(file_row + 1)
+            val active_class = if file_row == buffer.cursor_row then " active-line" else: ""
+            val folded_class = if buffer.folded_end_line_for_header(file_row) >= 0 then " folded-header" else: if language_id == "markdown" and _gui_markdown_foldable_end_line(buffer, file_row) > file_row then " foldable-header" else: ""
+            val active_attr = if file_row == buffer.cursor_row then "true" else: "false"
+            var rendered_content = if _gui_line_has_selection(buffer, file_row) then _gui_render_line_with_selection(buffer, file_row, raw_line_content) else: if _gui_line_has_inlay_hints(buffer, file_row) then _gui_render_line_with_inlay_hints(buffer, file_row) else: _gui_render_line_with_semantic_tokens(buffer, file_row, raw_line_content)
+            if language_id == "markdown" and not _gui_line_has_selection(buffer, file_row):
+                rendered_content = _gui_render_markdown_link_targets(file_row, line_content)
+            if file_row == buffer.cursor_row and not _gui_line_has_inlay_hints(buffer, file_row) and not _gui_line_has_selection(buffer, file_row) and not _gui_line_has_semantic_tokens(buffer, file_row):
+                rendered_content = _gui_render_line_with_cursor_and_hover_targets(file_row, line_content, buffer.cursor_col)
+            val lens_html = _gui_render_code_lenses(buffer, file_row)
+            val fold_html = _gui_render_fold_badge(buffer, file_row, language_id)
+            val gutter_icon = diagnostics_gutter_icon(diagnostics, path, file_row)
+            val gutter_class = _gui_diagnostic_gutter_class(gutter_icon)
+            html = html + "<div class=\"line" + active_class + folded_class + "\" data-event=\"editor-hover\" data-value=\"" + str(file_row) + ",0\" data-line=\"" + str(file_row) + "\" data-active=\"" + active_attr + "\" data-hover-delay-ms=\"" + hover_delay_ms.to_text() + "\"><span class=\"line-num\">" + line_num + "</span><span class=\"diagnostic-gutter " + gutter_class + "\" data-diagnostic=\"" + gutter_class + "\">" + _gui_escape_html(gutter_icon) + "</span><span class=\"content\">" + rendered_content + fold_html + lens_html + "</span></div>"
+        row = row + 1
+    html = html + "</div>"
+    html
+
+fn _gui_line_has_inlay_hints(buffer: EditorBuffer, row: i64) -> bool:
+    for hint in buffer.inlay_hints:
+        if hint.row == row and hint.label != "":
+            return true
+    false
+
+fn _gui_fence_body(lines: [text]) -> text:
+    var body: [text] = []
+    var i = 1
+    while i < lines.len():
+        val line = lines[i]
+        if line.trim().starts_with("```"):
+            return body.join("\n")
+        body.push(line)
+        i = i + 1
+    body.join("\n")
+
+fn _gui_line_has_semantic_tokens(buffer: EditorBuffer, row: i64) -> bool:
+    for token in buffer.semantic_tokens:
+        if token.row == row:
+            return true
+    false
+
+fn _gui_line_has_selection(buffer: EditorBuffer, row: i64) -> bool:
+    buffer.line_has_selection(row)
+
+fn _gui_render_line_with_selection(buffer: EditorBuffer, row: i64, line: text) -> text:
+    if not _gui_line_has_selection(buffer, row):
+        return _gui_escape_html(line)
+    var html = ""
+    var col = 0
+    var selected = false
+    var segment_start = 0
+    while col <= line.len():
+        val is_selected = if col < line.len() then buffer.position_selected(row, col) else: false
+        if is_selected != selected:
+            if col > segment_start:
+                if selected:
+                    html = html + "<span class=\"selection-range\" data-selection=\"true\" data-line=\"" + row.to_text() + "\" data-start=\"" + segment_start.to_text() + "\" data-end=\"" + col.to_text() + "\">" + _gui_render_hover_target_span_range(row, line, segment_start, col) + "</span>"
+                else:
+                    html = html + _gui_render_hover_target_span_range(row, line, segment_start, col)
+            segment_start = col
+            selected = is_selected
+        col = col + 1
+    html
+
+fn _gui_render_line_with_inlay_hints(buffer: EditorBuffer, row: i64) -> text:
+    val line = buffer.line_at(row)
+    var html = ""
+    var i = 0
+    while i <= line.len():
+        for hint in buffer.inlay_hints:
+            if hint.row == row and hint.label != "":
+                var col = hint.col
+                if col < 0:
+                    col = 0
+                if col > line.len():
+                    col = line.len()
+                if col == i:
+                    html = html + "<span class=\"inlay-hint\" data-event=\"inlay-hint-click\" data-value=\"" + row.to_text() + "," + col.to_text() + "\" data-line=\"" + row.to_text() + "\" data-col=\"" + col.to_text() + "\">" + _gui_escape_html(hint.label) + "</span>"
+        if i < line.len():
+            html = html + _gui_hover_char_span(row, i, line.char_at(i))
+        i = i + 1
+    html
+
+fn _gui_render_code_lenses(buffer: EditorBuffer, row: i64) -> text:
+    var html = ""
+    for lens in buffer.code_lenses:
+        if lens.row == row and lens.label != "":
+            html = html + "<button type=\"button\" class=\"code-lens-inline\" data-event=\"code-lens-run\" data-value=\"" + _gui_escape_html(lens.command_name + "|" + lens.command_payload) + "\" data-command=\"" + _gui_escape_html(lens.command_name) + "\" data-payload=\"" + _gui_escape_html(lens.command_payload) + "\" data-args=\"" + _gui_escape_html(lens.command_payload) + "\" title=\"" + _gui_escape_html(lens.command_payload) + "\">" + _gui_escape_html(lens.label) + "</button>"
+    html
+
+fn _gui_render_fold_badge(buffer: EditorBuffer, row: i64, language_id: text) -> text:
+    val end_line = buffer.folded_end_line_for_header(row)
+    if end_line >= 0:
+        val folded_count = end_line - row
+        return "<button type=\"button\" class=\"fold-badge\" data-event=\"fold-toggle\" data-value=\"" + row.to_text() + "\" data-fold-end=\"" + end_line.to_text() + "\">+" + folded_count.to_text() + " folded</button>"
+    if language_id != "markdown":
+        return ""
+    val foldable_end = _gui_markdown_foldable_end_line(buffer, row)
+    if foldable_end <= row:
+        return ""
+    "<button type=\"button\" class=\"fold-badge fold-badge-open\" data-event=\"fold-toggle\" data-value=\"" + row.to_text() + "\" data-fold-end=\"" + foldable_end.to_text() + "\" aria-label=\"Fold section\">fold</button>"
+
+fn _gui_markdown_foldable_end_line(buffer: EditorBuffer, row: i64) -> i64:
+    val level = _gui_markdown_heading_level(buffer.line_at(row))
+    if level <= 0:
+        return -1
+    var end_line = buffer.line_count() - 1
+    var scan = row + 1
+    while scan < buffer.line_count():
+        val scan_level = _gui_markdown_heading_level(buffer.line_at(scan))
+        if scan_level > 0 and scan_level <= level:
+            return scan - 1
+        scan = scan + 1
+    end_line
+
+fn _gui_markdown_heading_level(line: text) -> i64:
+    var i = 0
+    while i < line.len() and line.char_at(i) == "#":
+        i = i + 1
+    if i == 0 or i > 6:
+        return 0
+    if i < line.len() and line.char_at(i) == " ":
+        return i
+    0
+
+fn gui_render_tab_bar_html(session: EditSession) -> text:
+    var html = "<div class=\"tab-bar\">"
+    val group_idx = session.layout.active_group_index
+    if group_idx >= 0 and group_idx < session.layout.groups.len():
+        val group = session.layout.groups[group_idx]
+        var t = 0
+        while t < group.tabs.len():
+            val tab = group.tabs[t]
+            val doc_idx = session._find_doc_index(tab.doc_id)
+            var label_text = "[No Name]"
+            if doc_idx >= 0:
+                val tab_path = session.documents[doc_idx].path()
+                if tab_path != "":
+                    label_text = editor_path_basename(tab_path)
+            val label = _gui_escape_html(label_text)
+            val active_class = if t == group.active_tab_index then " active" else: ""
+            html = html + "<div class=\"tab" + active_class + "\">" + label + "</div>"
+            t = t + 1
+    html = html + "</div>"
+    html
+
+fn gui_render_wiki_property_form_html(panel: WikiPanel) -> text:
+    gui_render_wiki_property_form_html_with_root(panel, "")
+
+fn gui_render_wiki_property_form_html_with_root(panel: WikiPanel, vault_root: text) -> text:
+    gui_render_wiki_property_form_html_with_root_and_schema(panel, vault_root, "")
+
+fn gui_render_wiki_property_form_html_with_root_and_schema(panel: WikiPanel, vault_root: text, schema_payload: text) -> text:
+    val fields = wiki_property_form_fields(panel)
+    var html = "<form class=\"wiki-property-form\" data-command=\"wiki-property-set\">"
+    var i = 0
+    while i < fields.len():
+        val field = fields[i]
+        val schema_key = _gui_property_schema_part(schema_payload, 0)
+        val required = _gui_property_schema_part(schema_payload, 1)
+        val allowed = _gui_property_schema_csv(_gui_property_schema_part(schema_payload, 2))
+        val schema_matches = schema_key == field.key
+        val selected_class = if i == panel.selected then " selected" else: ""
+        html = html + "<label class=\"wiki-property-field" + selected_class + "\" data-path=\"" + _gui_escape_html(field.path) + "\" data-line=\"" + field.line.to_text() + "\">"
+        html = html + "<span class=\"wiki-property-key\">" + _gui_escape_html(field.key) + "</span>"
+        if schema_matches and allowed.len() > 0:
+            html = html + "<select class=\"wiki-property-value schema-aware\" name=\"" + _gui_escape_html(field.key) + "\" data-required=\"" + _gui_escape_html(required) + "\" data-payload=\"" + _gui_escape_html(field.payload) + "\">"
+            var option_i = 0
+            while option_i < allowed.len():
+                val option = allowed[option_i]
+                val selected = if option == field.value then " selected" else: ""
+                html = html + "<option value=\"" + _gui_escape_html(option) + "\"" + selected + ">" + _gui_escape_html(option) + "</option>"
+                option_i = option_i + 1
+            html = html + "</select>"
+        else:
+            val required_attr = if schema_matches then " data-required=\"" + _gui_escape_html(required) + "\"" else: ""
+            html = html + "<input class=\"wiki-property-value\" name=\"" + _gui_escape_html(field.key) + "\" value=\"" + _gui_escape_html(field.value) + "\" data-payload=\"" + _gui_escape_html(field.payload) + "\"" + required_attr + ">"
+        html = html + "<button type=\"button\" class=\"wiki-property-apply\" data-event=\"wiki-property-submit\" data-payload=\"" + _gui_escape_html(field.payload) + "\">Apply</button>"
+        if vault_root != "":
+            html = html + "<button type=\"button\" class=\"wiki-property-review-vault\" data-event=\"wiki-vault-property-review\" data-payload=\"" + _gui_escape_html(vault_root + "|" + field.payload) + "\">Review vault</button>"
+            html = html + "<button type=\"button\" class=\"wiki-property-apply-vault\" data-event=\"wiki-vault-property-submit\" data-payload=\"" + _gui_escape_html(vault_root + "|" + field.payload) + "\">Apply to vault</button>"
+        html = html + "</label>"
+        i = i + 1
+    html = html + "<label class=\"wiki-property-field new\"><span class=\"wiki-property-key\">New</span><input class=\"wiki-property-key-input\" name=\"key\" value=\"\"><input class=\"wiki-property-value\" name=\"value\" value=\"\"><button type=\"button\" class=\"wiki-property-apply\" data-event=\"wiki-property-submit\">Add</button></label>"
+    html = html + "</form>"
+    html
+
+fn _gui_property_schema_part(payload: text, index: i64) -> text:
+    val parts = payload.split("|")
+    if index >= 0 and index < parts.len():
+        return parts[index].trim()
+    ""
+
+fn _gui_property_schema_csv(payload: text) -> [text]:
+    var values: [text] = []
+    val parts = payload.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed != "":
+            values.push(trimmed)
+    values
+
+fn gui_render_file_tree_html(file_tree: FileTreeState) -> text:
+    var html = "<div class=\"file-tree\">"
+    val visible = file_tree.visible_nodes()
+    var i = 0
+    while i < visible.len():
+        val node = visible[i]
+        val name = _gui_escape_html(node.name)
+        val selected_class = if i == file_tree.selected_index then " selected" else: ""
+        val icon = if node.is_dir then "folder" else: "file"
+        html = html + "<div class=\"tree-node " + icon + selected_class + "\">" + name + "</div>"
+        i = i + 1
+    html = html + "</div>"
+    html
+
+
+fn gui_render_settings_html(view: SettingsViewState, config: EditorConfig) -> text:
+    var html = "<div class=\"settings-panel\">"
+    html = html + "<input type=\"text\" class=\"settings-search\" placeholder=\"Search settings...\" value=\"" + _gui_escape_html(view.search_query) + "\">"
+    html = html + "<div class=\"settings-categories\">"
+    var ci = 0
+    while ci < view.categories.len():
+        val cat = view.categories[ci]
+        val active_class = if ci == view.category_index then " active" else: ""
+        html = html + "<button class=\"category-tab" + active_class + "\">" + _gui_escape_html(cat) + "</button>"
+        ci = ci + 1
+    html = html + "</div>"
+    html = html + "<div class=\"settings-list\">"
+    var si = 0
+    while si < view.filtered.len():
+        val setting = view.filtered[si]
+        val current_value = editor_config_get_by_key(config, setting.key)
+        val selected_class = if si == view.selected_index then " selected" else: ""
+        html = html + "<div class=\"setting-item" + selected_class + "\">"
+        html = html + "<div class=\"setting-label\">" + _gui_escape_html(setting.label) + "</div>"
+        html = html + "<div class=\"setting-description\">" + _gui_escape_html(setting.description) + "</div>"
+        if setting.setting_type == "bool":
+            val checked = if current_value == "true" then " checked" else: ""
+            html = html + "<input type=\"checkbox\"" + checked + " data-key=\"" + _gui_escape_html(setting.key) + "\">"
+        elif setting.setting_type == "i64":
+            html = html + "<input type=\"number\" value=\"" + _gui_escape_html(current_value) + "\" data-key=\"" + _gui_escape_html(setting.key) + "\">"
+        elif setting.setting_type == "enum":
+            html = html + "<select data-key=\"" + _gui_escape_html(setting.key) + "\">"
+            var oi = 0
+            while oi < setting.enum_options.len():
+                val opt = setting.enum_options[oi]
+                val selected_attr = if opt == current_value then " selected" else: ""
+                html = html + "<option" + selected_attr + ">" + _gui_escape_html(opt) + "</option>"
+                oi = oi + 1
+            html = html + "</select>"
+        else:
+            html = html + "<input type=\"text\" value=\"" + _gui_escape_html(current_value) + "\" data-key=\"" + _gui_escape_html(setting.key) + "\">"
+        html = html + "</div>"
+        si = si + 1
+    html = html + "</div>"
+    html = html + "</div>"
+    html
+
+fn _gui_escape_html(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "<":
+            result = result + "&lt;"
+        elif ch == ">":
+            result = result + "&gt;"
+        elif ch == "&":
+            result = result + "&amp;"
+        elif ch == "\"":
+            result = result + "&quot;"
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn _gui_render_callout_block(block: RenderBlock) -> text:
+    val info = _gui_parse_callout_marker(block.rendered_lines)
+    val ctype = info.0
+    val title = info.1
+    val folded = info.2
+    val folded_attr = if folded then "true" else: "false"
+    val folded_class = if folded then " folded" else: ""
+    var html = "<aside class=\"md-callout md-callout-" + _gui_escape_attr_token(ctype) + folded_class + "\" data-callout=\"" + _gui_escape_html(ctype) + "\" data-folded=\"" + folded_attr + "\" data-source-from=\"" + block.from_line.to_text() + "\" data-source-to=\"" + block.to_line.to_text() + "\">"
+    html = html + "<div class=\"md-callout-title\" data-line=\"" + block.from_line.to_text() + "\"><button type=\"button\" class=\"md-callout-fold\" data-event=\"callout-fold-toggle\" data-line=\"" + block.from_line.to_text() + "\">" + (if folded then "+" else: "-") + "</button><span class=\"md-callout-title-text\">" + _gui_escape_html(ctype.upper())
+    if title != "":
+        html = html + " " + _gui_escape_html(title)
+    html = html + "</span></div>"
+    if folded:
+        return html + "</aside>"
+    html = html + "<div class=\"md-callout-body\">"
+    var i = 1
+    while i < block.rendered_lines.len():
+        val body = _gui_strip_blockquote_prefix(block.rendered_lines[i])
+        html = html + "<p data-line=\"" + (block.from_line + i).to_text() + "\">" + _gui_escape_html(body) + "</p>"
+        i = i + 1
+    html = html + "</div></aside>"
+    html
+
+fn _gui_render_embed_block(block: RenderBlock) -> text:
+    val info = _gui_parse_embed_marker(block.rendered_lines)
+    val kind = info.0
+    val target = info.1
+    val label = info.2
+    val class_kind = if kind == "image" then "image" else: "note"
+    var html = "<figure class=\"md-embed md-embed-" + class_kind + "\" data-embed-kind=\"" + _gui_escape_html(kind) + "\" data-target=\"" + _gui_escape_html(target) + "\">"
+    if kind == "image":
+        html = html + "<img class=\"md-embed-image-preview\" src=\"" + _gui_escape_html(target) + "\" alt=\"" + _gui_escape_html(label) + "\" loading=\"lazy\">"
+        html = html + "<figcaption>" + _gui_escape_html(label)
+        if target != "" and target != label:
+            html = html + " - " + _gui_escape_html(target)
+        html = html + "</figcaption>"
+    else:
+        html = html + "<div class=\"md-embed-title\">" + _gui_escape_html(label) + "</div>"
+        if target != "" and target != label:
+            html = html + "<figcaption>" + _gui_escape_html(target) + "</figcaption>"
+    html = html + "</figure>"
+    html
+
+fn _gui_render_inline_markdown_media(line: text) -> text:
+    var html = ""
+    var pos = 0
+    while pos < line.len():
+        val img_start = _gui_find_text(line, "![", pos)
+        if img_start < 0:
+            html = html + _gui_escape_html(line.slice(pos, line.len()))
+            return html
+        html = html + _gui_escape_html(line.slice(pos, img_start))
+        val close_label = _gui_find_char(line, "]", img_start + 2)
+        if close_label < 0 or close_label + 1 >= line.len() or line.char_at(close_label + 1) != "(":
+            html = html + _gui_escape_html(line.slice(img_start, img_start + 2))
+            pos = img_start + 2
+            continue
+        val close_target = _gui_find_char(line, ")", close_label + 2)
+        if close_target < 0:
+            html = html + _gui_escape_html(line.slice(img_start, close_label + 1))
+            pos = close_label + 1
+            continue
+        val label = line.slice(img_start + 2, close_label)
+        val target = line.slice(close_label + 2, close_target)
+        html = html + "<span class=\"md-inline-image\" data-target=\"" + _gui_escape_html(target) + "\"><img class=\"md-inline-image-preview\" src=\"" + _gui_escape_html(target) + "\" alt=\"" + _gui_escape_html(label) + "\" loading=\"lazy\"><span class=\"md-inline-image-label\">" + _gui_escape_html(label) + "</span></span>"
+        pos = close_target + 1
+    html
+
+fn _gui_render_embed_transclusion_block(block: RenderBlock, index: MdWikiIndex) -> text:
+    _gui_render_embed_transclusion_block_depth(block, index, 0)
+
+fn _gui_render_embed_transclusion_block_depth(block: RenderBlock, index: MdWikiIndex, depth: i64) -> text:
+    val info = _gui_parse_embed_marker(block.rendered_lines)
+    if info.0 != "note":
+        return ""
+    if depth >= 4:
+        return ""
+    val target = info.1
+    val body = md_wiki_transclusion_content(index, target)
+    if body == "":
+        return ""
+    val label = if info.2 == "" then target else: info.2
+    var html = "<section class=\"md-embed md-embed-note md-transclusion\" data-embed-kind=\"note\" data-target=\"" + _gui_escape_html(target) + "\">"
+    html = html + "<div class=\"md-embed-title\">" + _gui_escape_html(label) + "</div>"
+    html = html + "<div class=\"md-transclusion-body\">"
+    val nested = BlockModel.from_markdown(body)
+    var i = 0
+    while i < nested.block_count():
+        val rendered = _gui_render_markdown_block_with_wiki_depth(nested.block_at(i), index, depth + 1)
+        html = html + rendered.html
+        i = i + 1
+    html = html + "</div></section>"
+    html
+
+fn _gui_render_table_block(block: RenderBlock) -> text:
+    if block.rendered_lines.len() == 0:
+        return "<table></table>"
+    var html = "<div class=\"md-table-editor\" data-block-id=\"" + block.id.to_text() + "\">"
+    html = html + "<div class=\"md-table-tools\"><button type=\"button\" data-event=\"table-row-insert\">+ row</button><button type=\"button\" data-event=\"table-column-insert\">+ column</button></div>"
+    html = html + "<table class=\"md-table\">"
+    var row = 0
+    while row < block.rendered_lines.len():
+        val line = block.rendered_lines[row]
+        if not _gui_is_table_separator(line):
+            val tag = if row == 0 then "th" else: "td"
+            html = html + "<tr data-line=\"" + (block.from_line + row).to_text() + "\">"
+            val cells = _gui_split_table_row(line)
+            var i = 0
+            while i < cells.len():
+                html = html + "<" + tag + " contenteditable=\"true\" data-event=\"table-cell-commit\" data-line=\"" + (block.from_line + row).to_text() + "\" data-col=\"" + i.to_text() + "\">" + _gui_escape_html(cells[i]) + "</" + tag + ">"
+                i = i + 1
+            html = html + "</tr>"
+        row = row + 1
+    html = html + "</table>"
+    html = html + "</div>"
+    html
+
+fn _gui_render_list_block(block: RenderBlock) -> text:
+    var html = "<ul>"
+    var i = 0
+    while i < block.rendered_lines.len():
+        val line = block.rendered_lines[i]
+        val item = line.trim()
+        val task = _gui_parse_task_item(item)
+        if task.0:
+            val checked_attr = if task.1 then " checked" else: ""
+            val done_class = if task.1 then " checked" else: ""
+            html = html + "<li class=\"md-task" + done_class + "\" data-line=\"" + str(block.from_line + i) + "\">"
+            html = html + "<input type=\"checkbox\" class=\"md-task-checkbox\" data-line=\"" + str(block.from_line + i) + "\"" + checked_attr + ">"
+            html = html + "<span class=\"md-task-label\">" + _gui_escape_html(task.2) + "</span></li>"
+        elif item.starts_with("- ") or item.starts_with("* "):
+            val li_text = _gui_escape_html(item.slice(2, item.len()))
+            html = html + "<li>" + li_text + "</li>"
+        else:
+            val li_text = _gui_escape_html(item)
+            html = html + "<li>" + li_text + "</li>"
+        i = i + 1
+    html = html + "</ul>"
+    html
+
+fn _gui_parse_task_item(item: text) -> tuple:
+    if item.starts_with("- [ ] ") or item.starts_with("* [ ] "):
+        return (true, false, item.slice(6, item.len()))
+    if item.starts_with("- [x] ") or item.starts_with("- [X] ") or item.starts_with("* [x] ") or item.starts_with("* [X] "):
+        return (true, true, item.slice(6, item.len()))
+    (false, false, item)
+
+fn _gui_split_table_row(line: text) -> [text]:
+    var cells: [text] = []
+    var current = ""
+    var i = 0
+    while i < line.len():
+        val ch = line.char_at(i)
+        if ch == "|":
+            val cell = current.trim()
+            if cells.len() > 0 or cell != "":
+                cells.push(cell)
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    val tail = current.trim()
+    if tail != "":
+        cells.push(tail)
+    cells
+
+fn _gui_is_table_separator(line: text) -> bool:
+    val trimmed = line.trim()
+    if trimmed == "":
+        return false
+    var has_dash = false
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.char_at(i)
+        if ch == "-":
+            has_dash = true
+        elif ch != "|" and ch != ":" and ch != " ":
+            return false
+        i = i + 1
+    has_dash
+
+fn _gui_parse_embed_marker(lines: [text]) -> tuple:
+    if lines.len() == 0:
+        return ("note", "", "")
+    val trimmed = lines[0].trim()
+    if trimmed.starts_with("![["):
+        val close = _gui_find_text(trimmed, "]]", 3)
+        if close > 3:
+            val raw = trimmed.slice(3, close)
+            val split = _gui_find_char(raw, "|", 0)
+            if split >= 0:
+                return ("note", raw.slice(0, split), raw.slice(split + 1, raw.len()))
+            return ("note", raw, raw)
+    if trimmed.starts_with("!["):
+        val close_label = _gui_find_char(trimmed, "]", 2)
+        if close_label > 1 and close_label + 1 < trimmed.len() and trimmed.char_at(close_label + 1) == "(":
+            val close_target = _gui_find_char(trimmed, ")", close_label + 2)
+            if close_target > close_label:
+                val label = trimmed.slice(2, close_label)
+                val target = trimmed.slice(close_label + 2, close_target)
+                return ("image", target, label)
+    ("note", trimmed, trimmed)
+
+fn _gui_parse_callout_marker(lines: [text]) -> tuple:
+    var ctype = "note"
+    var title = ""
+    var folded = false
+    if lines.len() == 0:
+        return (ctype, title, folded)
+    val trimmed = lines[0].trim()
+    if trimmed.starts_with("> [!"):
+        val close = _gui_find_char(trimmed, "]", 4)
+        if close > 4:
+            val marker = trimmed.slice(4, close)
+            ctype = marker.to_lower()
+            if marker.ends_with("+") or marker.ends_with("-"):
+                folded = marker.ends_with("-")
+                ctype = marker.slice(0, marker.len() - 1).to_lower()
+            var title_start = close + 1
+            if title_start < trimmed.len() and (trimmed.char_at(title_start) == "+" or trimmed.char_at(title_start) == "-"):
+                folded = trimmed.char_at(title_start) == "-"
+                title_start = title_start + 1
+            title = trimmed.slice(title_start, trimmed.len()).trim()
+    (ctype, title, folded)
+
+fn _gui_strip_blockquote_prefix(line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed.starts_with(">"):
+        var body = trimmed.slice(1, trimmed.len())
+        if body.starts_with(" "):
+            body = body.slice(1, body.len())
+        return body
+    line
+
+fn _gui_find_char(s: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i < s.len():
+        if s.char_at(i) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _gui_find_text(s: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i + needle.len() <= s.len():
+        if s.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _gui_escape_attr_token(value: text) -> text:
+    var out = ""
+    var i = 0
+    val lower = value.to_lower()
+    while i < lower.len():
+        val ch = lower.char_at(i)
+        if (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or ch == "-":
+            out = out + ch
+        i = i + 1
+    if out == "":
+        return "note"
+    out
+
+fn _gui_render_line_with_semantic_tokens(buffer: EditorBuffer, row: i64, line: text) -> text:
+    if buffer.semantic_tokens.len() == 0:
+        return _gui_escape_html(line)
+    var html = ""
+    var i = 0
+    var active_class = ""
+    var open = false
+    while i < line.len():
+        val cls = _gui_semantic_token_class(buffer.semantic_token_type_at(row, i))
+        if cls != active_class:
+            if open:
+                html = html + "</span>"
+                open = false
+            if cls != "":
+                html = html + "<span class=\"" + cls + "\">"
+                open = true
+            active_class = cls
+        html = html + _gui_hover_char_span(row, i, line.char_at(i))
+        i = i + 1
+    if open:
+        html = html + "</span>"
+    html
+
+fn _gui_render_markdown_link_targets(row: i64, line: text) -> text:
+    var html = ""
+    var i = 0
+    while i < line.len():
+        if i + 1 < line.len() and line.char_at(i) == "[" and line.char_at(i + 1) == "[":
+            var end_wiki = i + 2
+            while end_wiki + 1 < line.len():
+                if line.char_at(end_wiki) == "]" and line.char_at(end_wiki + 1) == "]":
+                    val raw_wiki = line.slice(i + 2, end_wiki)
+                    val label_wiki = line.slice(i, end_wiki + 2)
+                    html = html + _gui_link_span(row, i, raw_wiki, label_wiki)
+                    i = end_wiki + 2
+                    end_wiki = line.len()
+                else:
+                    end_wiki = end_wiki + 1
+            if i >= line.len():
+                return html
+        elif line.char_at(i) == "[":
+            var close_label = i + 1
+            while close_label < line.len():
+                if close_label + 1 < line.len() and line.char_at(close_label) == "]" and line.char_at(close_label + 1) == "(":
+                    var close_target = close_label + 2
+                    while close_target < line.len():
+                        if line.char_at(close_target) == ")":
+                            val raw_target = line.slice(close_label + 2, close_target)
+                            val label = line.slice(i, close_target + 1)
+                            html = html + _gui_link_span(row, i, raw_target, label)
+                            i = close_target + 1
+                            close_target = line.len()
+                            close_label = line.len()
+                        else:
+                            close_target = close_target + 1
+                else:
+                    close_label = close_label + 1
+        if i < line.len():
+            html = html + _gui_hover_char_span(row, i, line.char_at(i))
+            i = i + 1
+    html
+
+fn _gui_link_span(row: i64, col: i64, target: text, label: text) -> text:
+    "<span class=\"md-link\" data-event=\"editor-hover\" data-value=\"" + row.to_text() + "," + col.to_text() + "\" data-line=\"" + row.to_text() + "\" data-col=\"" + col.to_text() + "\" data-target=\"" + _gui_escape_html(target) + "\">" + _gui_escape_html(label) + "</span>"
+
+fn _gui_render_hover_target_span_range(row: i64, line: text, start_col: i64, end_col: i64) -> text:
+    var html = ""
+    var i = start_col
+    while i < end_col and i < line.len():
+        html = html + _gui_hover_char_span(row, i, line.char_at(i))
+        i = i + 1
+    html
+
+fn _gui_semantic_token_class(token_type: i64) -> text:
+    if token_type < 0:
+        return ""
+    "semantic-token semantic-token-" + token_type.to_text()
+
+fn _gui_render_line_with_cursor_and_hover_targets(row: i64, line: text, cursor_col: i64) -> text:
+    var safe_col = cursor_col
+    if safe_col < 0:
+        safe_col = 0
+    if safe_col > line.len():
+        safe_col = line.len()
+    var html = ""
+    var i = 0
+    while i <= line.len():
+        if i == safe_col:
+            html = html + "<span class=\"cursor\" data-cursor=\"true\"></span>"
+        if i < line.len():
+            html = html + _gui_hover_char_span(row, i, line.char_at(i))
+        i = i + 1
+    html
+
+fn _gui_hover_char_span(row: i64, col: i64, ch: text) -> text:
+    "<span class=\"hover-target\" data-event=\"editor-hover\" data-value=\"" + row.to_text() + "," + col.to_text() + "\" data-line=\"" + row.to_text() + "\" data-col=\"" + col.to_text() + "\">" + _gui_escape_html(ch) + "</span>"
+
+fn _gui_diagnostic_gutter_class(icon: text) -> text:
+    if icon == "E":
+        return "error"
+    if icon == "W":
+        return "warning"
+    if icon == "I":
+        return "info"
+    if icon == "H":
+        return "hint"
+    "none"
+
+fn _gui_heading_level(content: text) -> i64:
+    var level = 0
+    while level < content.len() and content.char_at(level) == "#":
+        level = level + 1
+    if level > 6:
+        level = 6
+    if level == 0:
+        level = 1
+    level
+
+fn _gui_strip_heading(content: text) -> text:
+    val level = _gui_heading_level(content)
+    content.slice(level, content.len()).trim()

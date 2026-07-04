@@ -1,0 +1,161 @@
+# DrawingToolApp — state machine for the drawing tool
+#
+# Holds the full application state: document, active tool,
+# brush config, selection, undo history, and viewport.
+
+use std.common.drawing.document.{DrawingDocument}
+use std.common.drawing.selection.{DrawingSelection, MutableSelection}
+use std.common.drawing.vector.{SkPoint}
+use std.common.command.history.{CommandHistory}
+use std.nogc_sync_mut.drawing.brush.{BrushConfig}
+
+# ============================================================================
+# Drawing Tool Enum
+# ============================================================================
+
+enum DrawingTool:
+    BrushTool
+    EraserTool
+    PencilTool
+    LineTool
+    RectangleTool
+    EllipseTool
+    PathTool
+    SelectionTool
+    FillTool
+    EyeDropperTool
+    TransformTool
+    TextTool
+
+impl DrawingTool:
+    fn tool_name(self) -> text:
+        """Return a human-readable name for this tool."""
+        match self:
+            case BrushTool: "Brush"
+            case EraserTool: "Eraser"
+            case PencilTool: "Pencil"
+            case LineTool: "Line"
+            case RectangleTool: "Rectangle"
+            case EllipseTool: "Ellipse"
+            case PathTool: "Path"
+            case SelectionTool: "Selection"
+            case FillTool: "Fill"
+            case EyeDropperTool: "Eye Dropper"
+            case TransformTool: "Transform"
+            case TextTool: "Text"
+
+# ============================================================================
+# Viewport State
+# ============================================================================
+
+struct ViewportState:
+    offset_x: f64
+    offset_y: f64
+    zoom: f64
+
+impl ViewportState:
+    static fn default_view() -> ViewportState:
+        ViewportState(offset_x: 0.0, offset_y: 0.0, zoom: 1.0)
+
+# ============================================================================
+# Drawing Tool App
+# ============================================================================
+
+class DrawingToolApp:
+    document: DrawingDocument
+    active_tool: DrawingTool
+    brush_config: BrushConfig
+    selection: DrawingSelection
+    command_history: CommandHistory
+    viewport: ViewportState
+    is_drawing: bool
+    dirty: bool
+
+    static fn new(width: i32, height: i32) -> DrawingToolApp:
+        """Create a new drawing app with a blank document."""
+        DrawingToolApp(
+            document: DrawingDocument.new(width, height),
+            active_tool: DrawingTool.BrushTool,
+            brush_config: BrushConfig.default_brush(),
+            selection: DrawingSelection.none_sel(),
+            command_history: CommandHistory.with_defaults(),
+            viewport: ViewportState.default_view(),
+            is_drawing: false,
+            dirty: false
+        )
+
+    static fn from_document(doc: DrawingDocument) -> DrawingToolApp:
+        """Create a drawing app from an existing document."""
+        DrawingToolApp(
+            document: doc,
+            active_tool: DrawingTool.BrushTool,
+            brush_config: BrushConfig.default_brush(),
+            selection: DrawingSelection.none_sel(),
+            command_history: CommandHistory.with_defaults(),
+            viewport: ViewportState.default_view(),
+            is_drawing: false,
+            dirty: false
+        )
+
+    me set_tool(tool: DrawingTool):
+        """Switch to a different drawing tool."""
+        self.active_tool = tool
+        # Auto-configure brush for certain tools
+        match tool:
+            case EraserTool:
+                self.brush_config = BrushConfig.default_eraser()
+            case PencilTool:
+                self.brush_config = BrushConfig.pencil()
+            case BrushTool:
+                self.brush_config = BrushConfig.default_brush()
+
+    me begin_stroke(x: f64, y: f64, pressure: f64):
+        """Begin a paint stroke at the given canvas position."""
+        self.is_drawing = true
+        self.dirty = true
+
+    me continue_stroke(x: f64, y: f64, pressure: f64):
+        """Continue a paint stroke to a new position."""
+        if not self.is_drawing:
+            return
+        self.dirty = true
+
+    me end_stroke():
+        """Finish the current paint stroke."""
+        self.is_drawing = false
+
+    me zoom_in():
+        """Zoom the viewport in by 25%."""
+        val new_zoom = self.viewport.zoom * 1.25
+        self.viewport = ViewportState(
+            offset_x: self.viewport.offset_x,
+            offset_y: self.viewport.offset_y,
+            zoom: new_zoom
+        )
+
+    me zoom_out():
+        """Zoom the viewport out by 20%."""
+        var new_zoom = self.viewport.zoom * 0.8
+        if new_zoom < 0.1:
+            new_zoom = 0.1
+        self.viewport = ViewportState(
+            offset_x: self.viewport.offset_x,
+            offset_y: self.viewport.offset_y,
+            zoom: new_zoom
+        )
+
+    me pan(dx: f64, dy: f64):
+        """Pan the viewport by the given delta."""
+        self.viewport = ViewportState(
+            offset_x: self.viewport.offset_x + dx,
+            offset_y: self.viewport.offset_y + dy,
+            zoom: self.viewport.zoom
+        )
+
+    fn is_dirty(self) -> bool:
+        """Return true if the document has unsaved changes."""
+        self.dirty
+
+    me mark_saved():
+        """Clear the dirty flag after saving."""
+        self.dirty = false

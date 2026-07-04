@@ -1,0 +1,667 @@
+"""
+# JS Transpiler
+
+Lightweight JavaScript-to-Simple transpiler for the browser engine.
+Converts common JS patterns to Simple equivalents so that standard HTML
+pages with `<script>` tags can run in the Simple browser.
+
+This is NOT a full JS engine. It handles common patterns via line-by-line
+string processing with brace-depth tracking for block conversion.
+
+Supported Conversions:
+    var/let/const       -> var / val
+    function f() {}     -> fn f():
+    =>                  -> fn():
+    ===                 -> ==
+    !==                 -> !=
+    null / undefined    -> nil
+    this.               -> me.
+    new X(...)          -> X(...)
+    // comment          -> # comment
+    /* comment */       -> (removed)
+    `${x}`              -> "{x}"
+    for (x of arr)      -> for x in arr:
+    document.querySelector()      -> document_query_selector(root, ...)
+    element.addEventListener()    -> node_add_event_listener(...)
+    console.log()                 -> console_log(buf, ...)
+    setTimeout()                  -> set_timeout(loop_ref, ...)
+    element.style.X = Y          -> node_set_style_property(node, "X", "Y")
+    element.innerHTML = X         -> node_set_inner_html(node, X)
+    element.textContent = X       -> node_set_text_content(node, X)
+    element.classList.add(X)      -> node_class_list_add(node, X)
+"""
+
+#![allow(REQC001)]
+
+# =========================================================================
+# Public API
+# =========================================================================
+
+pub fn js_transpile(source: text) -> text:
+    """Transpile JavaScript source to Simple source.
+
+    Processes the source through multiple passes:
+    1. Remove block comments
+    2. Convert line-by-line (operators, keywords, literals)
+    3. Convert braces to indentation-based blocks
+    """
+    var code = _remove_block_comments(source)
+    code = _convert_template_literals(code)
+    val lines = code.split("\n")
+    var result_lines: [text] = []
+    var i = 0
+    while i < lines.len():
+        val line = _convert_line(lines[i])
+        result_lines.push(line)
+        i = i + 1
+    var joined = _join_lines(result_lines)
+    joined = _convert_braces_to_indent(joined)
+    joined
+
+pub fn js_is_javascript(script_type: text) -> bool:
+    """Check if a script type attribute indicates JavaScript.
+
+    Returns true for:
+    - empty string (no type attribute = default JS)
+    - "text/javascript"
+    - "application/javascript"
+    - "module"
+    """
+    if script_type == "":
+        return true
+    val lower = script_type.lower()
+    if lower == "text/javascript":
+        return true
+    if lower == "application/javascript":
+        return true
+    if lower == "module":
+        return true
+    false
+
+pub fn js_is_simple(script_type: text) -> bool:
+    """Check if a script type attribute indicates Simple."""
+    val lower = script_type.lower()
+    lower == "text/simple"
+
+# =========================================================================
+# Pass 1: Remove block comments /* ... */
+# =========================================================================
+
+fn _remove_block_comments(source: text) -> text:
+    """Remove all /* ... */ block comments from source.
+
+    Respects string boundaries — does not remove comment markers
+    inside single or double quotes.
+    """
+    var result = ""
+    var i = 0
+    var in_block_comment = false
+    var in_single_quote = false
+    var in_double_quote = false
+    while i < source.len():
+        val ch = source.char_at(i)
+        if in_block_comment:
+            if ch == "*" and i + 1 < source.len():
+                val next = source.char_at(i + 1)
+                if next == "/":
+                    in_block_comment = false
+                    i = i + 2
+                    continue
+            i = i + 1
+            continue
+        # Track string boundaries
+        if ch == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            result = result + ch
+            i = i + 1
+            continue
+        if ch == "\"" and not in_single_quote:
+            in_double_quote = not in_double_quote
+            result = result + ch
+            i = i + 1
+            continue
+        # Check for block comment start
+        if (not in_single_quote and not in_double_quote and
+                ch == "/" and i + 1 < source.len()):
+            val next = source.char_at(i + 1)
+            if next == "*":
+                in_block_comment = true
+                i = i + 2
+                continue
+        result = result + ch
+        i = i + 1
+    result
+
+# =========================================================================
+# Pass 2: Convert template literals `${x}` -> "{x}"
+# =========================================================================
+
+fn _convert_template_literals(source: text) -> text:
+    """Convert JS template literals to Simple string interpolation.
+
+    `hello ${name}!` -> "hello {name}!"
+    """
+    var result = ""
+    var i = 0
+    var in_template = false
+    while i < source.len():
+        val ch = source.char_at(i)
+        if ch == "`":
+            in_template = not in_template
+            result = result + "\""
+            i = i + 1
+            continue
+        if in_template and ch == "$" and i + 1 < source.len():
+            val next = source.char_at(i + 1)
+            if next == "{":
+                result = result + "{"
+                i = i + 2
+                continue
+        result = result + ch
+        i = i + 1
+    result
+
+# =========================================================================
+# Pass 3: Line-by-line conversions
+# =========================================================================
+
+fn _convert_line(line: text) -> text:
+    """Apply all single-line conversions to a JS line."""
+    var result = line
+
+    # Convert line comments: // -> #
+    result = _convert_line_comment(result)
+
+    # Convert operators (string-aware)
+    result = _safe_replace(result, "!==", "!=")
+    result = _safe_replace(result, "===", "==")
+
+    # Convert keywords
+    result = _convert_declarations(result)
+    result = _convert_function_keyword(result)
+    result = _convert_null_undefined(result)
+    result = _convert_this(result)
+    result = _convert_new(result)
+    result = _convert_for_of(result)
+    result = _convert_return(result)
+
+    # Convert DOM API calls
+    result = _convert_dom_calls(result)
+    result = _convert_console_calls(result)
+    result = _convert_timer_calls(result)
+    result = _convert_style_assignment(result)
+    result = _convert_inner_html(result)
+    result = _convert_text_content(result)
+    result = _convert_classlist(result)
+    result = _convert_event_listener(result)
+
+    result
+
+# =========================================================================
+# Line comment conversion
+# =========================================================================
+
+fn _convert_line_comment(line: text) -> text:
+    """Convert // comments to # comments, respecting strings."""
+    var i = 0
+    var in_single = false
+    var in_double = false
+    while i < line.len():
+        val ch = line.char_at(i)
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        if ch == "\"" and not in_single:
+            in_double = not in_double
+        if (not in_single and not in_double and
+                ch == "/" and i + 1 < line.len()):
+            val next = line.char_at(i + 1)
+            if next == "/":
+                val before = line.slice(0, i)
+                val comment = line.slice(i + 2, line.len())
+                return before + "#" + comment
+        i = i + 1
+    line
+
+# =========================================================================
+# String-aware replacement
+# =========================================================================
+
+fn _safe_replace(line: text, old: text, replacement: text) -> text:
+    """Replace occurrences of old with replacement, skipping string contents."""
+    var result = ""
+    var i = 0
+    var in_single = false
+    var in_double = false
+    while i < line.len():
+        val ch = line.char_at(i)
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            result = result + ch
+            i = i + 1
+            continue
+        if ch == "\"" and not in_single:
+            in_double = not in_double
+            result = result + ch
+            i = i + 1
+            continue
+        if not in_single and not in_double and i + old.len() <= line.len():
+            val candidate = line.slice(i, i + old.len())
+            if candidate == old:
+                result = result + replacement
+                i = i + old.len()
+                continue
+        result = result + ch
+        i = i + 1
+    result
+
+# =========================================================================
+# Declaration conversions
+# =========================================================================
+
+fn _convert_declarations(line: text) -> text:
+    """Convert var/let/const declarations.
+
+    const x = ... -> val x = ...
+    let x = ...   -> var x = ...
+    var x = ...   -> var x = ...  (unchanged)
+    """
+    val trimmed = line.trim()
+    if trimmed.starts_with("const "):
+        return line.replace("const ", "val ")
+    if trimmed.starts_with("let "):
+        return line.replace("let ", "var ")
+    line
+
+fn _convert_function_keyword(line: text) -> text:
+    """Convert function declarations.
+
+    function f(a, b) { -> fn f(a, b) {
+    The opening brace is left in place for _convert_braces_to_indent to handle.
+    """
+    val trimmed = line.trim()
+    if trimmed.starts_with("function "):
+        return line.replace("function ", "fn ")
+    line
+
+fn _convert_null_undefined(line: text) -> text:
+    """Convert null and undefined to nil."""
+    var result = _safe_replace(line, "undefined", "nil")
+    result = _safe_replace(result, "null", "nil")
+    result
+
+fn _convert_this(line: text) -> text:
+    """Convert this. to me. references."""
+    _safe_replace(line, "this.", "me.")
+
+fn _convert_new(line: text) -> text:
+    """Convert new ClassName(...) to ClassName(...).
+
+    Removes the 'new ' keyword before constructor calls.
+    """
+    _safe_replace(line, "new ", "")
+
+fn _convert_for_of(line: text) -> text:
+    """Convert for (let/var/const x of arr) to for x in arr {.
+
+    Handles: for (let x of arr) { -> for x in arr {
+    The opening brace is left in place for _convert_braces_to_indent to handle.
+    """
+    val trimmed = line.trim()
+    if not trimmed.starts_with("for "):
+        return line
+    if not trimmed.contains(" of "):
+        return line
+    # Extract: for (let/var/const VARNAME of EXPR) {
+    val paren_start = trimmed.index_of("(")
+    val paren_end = trimmed.index_of(")")
+    if paren_start < 0 or paren_end < 0:
+        return line
+    val inner = trimmed.slice(paren_start + 1, paren_end).trim()
+    val of_pos = inner.index_of(" of ")
+    if of_pos < 0:
+        return line
+    var var_part = inner.slice(0, of_pos).trim()
+    val arr_part = inner.slice(of_pos + 4, inner.len()).trim()
+    # Strip let/var/const from var_part
+    if var_part.starts_with("let "):
+        var_part = var_part.slice(4, var_part.len())
+    if var_part.starts_with("var "):
+        var_part = var_part.slice(4, var_part.len())
+    if var_part.starts_with("const "):
+        var_part = var_part.slice(6, var_part.len())
+    val leading = _get_leading_whitespace(line)
+    # Check if there's a trailing { — keep it for brace-to-indent pass
+    val after_paren = trimmed.slice(paren_end + 1, trimmed.len()).trim()
+    if after_paren == "{":
+        return leading + "for " + var_part + " in " + arr_part + " {"
+    leading + "for " + var_part + " in " + arr_part
+
+fn _convert_return(line: text) -> text:
+    """Convert return statements — strip trailing semicolons."""
+    val trimmed = line.trim()
+    if trimmed.starts_with("return ") and trimmed.ends_with(";"):
+        val leading = _get_leading_whitespace(line)
+        val body = trimmed.slice(0, trimmed.len() - 1)
+        return leading + body
+    if trimmed == "return;":
+        val leading = _get_leading_whitespace(line)
+        return leading + "return"
+    line
+
+# =========================================================================
+# DOM API call conversions
+# =========================================================================
+
+fn _convert_dom_calls(line: text) -> text:
+    """Convert document.querySelector etc. to Simple function calls."""
+    var result = line
+    result = result.replace("document.querySelector(", "document_query_selector(root, ")
+    result = result.replace("document.querySelectorAll(", "document_query_selector_all(root, ")
+    result = result.replace("document.getElementById(", "document_get_element_by_id(root, ")
+    result = result.replace("document.createElement(", "document_create_element(")
+    result = result.replace("document.createTextNode(", "document_create_text_node(")
+    result
+
+fn _convert_console_calls(line: text) -> text:
+    """Convert console.log etc. to Simple function calls."""
+    var result = line
+    result = result.replace("console.log(", "console_log(buf, ")
+    result = result.replace("console.warn(", "console_warn(buf, ")
+    result = result.replace("console.error(", "console_error(buf, ")
+    result = result.replace("console.info(", "console_info(buf, ")
+    result = result.replace("console.debug(", "console_debug(buf, ")
+    result = result.replace("console.clear(", "console_clear(buf, ")
+    result
+
+fn _convert_timer_calls(line: text) -> text:
+    """Convert setTimeout/setInterval to Simple function calls."""
+    var result = line
+    result = result.replace("setTimeout(", "set_timeout(loop_ref, ")
+    result = result.replace("setInterval(", "set_interval(loop_ref, ")
+    result = result.replace("clearTimeout(", "clear_timeout(loop_ref, ")
+    result = result.replace("clearInterval(", "clear_interval(loop_ref, ")
+    result
+
+fn _convert_event_listener(line: text) -> text:
+    """Convert .addEventListener(...) to node_add_event_listener(node, ...).
+
+    Pattern: EXPR.addEventListener(ARGS) -> node_add_event_listener(EXPR, ARGS)
+    """
+    val idx = line.index_of(".addEventListener(")
+    if idx < 0:
+        return line
+    val leading = _get_leading_whitespace(line)
+    val trimmed = line.trim()
+    val dot_pos = trimmed.index_of(".addEventListener(")
+    val node_expr = trimmed.slice(0, dot_pos)
+    val args_start = dot_pos + 18
+    val rest = trimmed.slice(args_start, trimmed.len())
+    leading + "node_add_event_listener(" + node_expr + ", " + rest
+
+fn _convert_style_assignment(line: text) -> text:
+    """Convert element.style.X = Y to node_set_style_property(element, "X", Y).
+
+    Pattern: EXPR.style.PROP = VALUE;
+    """
+    val idx = line.index_of(".style.")
+    if idx < 0:
+        return line
+    val trimmed = line.trim()
+    val style_pos = trimmed.index_of(".style.")
+    if style_pos < 0:
+        return line
+    val eq_pos = trimmed.index_of("=", style_pos)
+    if eq_pos < 0:
+        return line
+    val node_expr = trimmed.slice(0, style_pos)
+    val prop_name = trimmed.slice(style_pos + 7, eq_pos).trim()
+    var value = trimmed.slice(eq_pos + 1, trimmed.len()).trim()
+    if value.ends_with(";"):
+        value = value.slice(0, value.len() - 1).trim()
+    val leading = _get_leading_whitespace(line)
+    leading + "node_set_style_property(" + node_expr + ", \"" + prop_name + "\", " + value + ")"
+
+fn _convert_inner_html(line: text) -> text:
+    """Convert .innerHTML = X to node_set_inner_html(node, X)."""
+    val idx = line.index_of(".innerHTML")
+    if idx < 0:
+        return line
+    val trimmed = line.trim()
+    val html_pos = trimmed.index_of(".innerHTML")
+    val eq_pos = trimmed.index_of("=", html_pos)
+    if eq_pos < 0:
+        return line
+    val node_expr = trimmed.slice(0, html_pos)
+    var value = trimmed.slice(eq_pos + 1, trimmed.len()).trim()
+    if value.ends_with(";"):
+        value = value.slice(0, value.len() - 1).trim()
+    val leading = _get_leading_whitespace(line)
+    leading + "node_set_inner_html(" + node_expr + ", " + value + ")"
+
+fn _convert_text_content(line: text) -> text:
+    """Convert .textContent = X to node_set_text_content(node, X)."""
+    val idx = line.index_of(".textContent")
+    if idx < 0:
+        return line
+    val trimmed = line.trim()
+    val tc_pos = trimmed.index_of(".textContent")
+    val eq_pos = trimmed.index_of("=", tc_pos)
+    if eq_pos < 0:
+        return line
+    val node_expr = trimmed.slice(0, tc_pos)
+    var value = trimmed.slice(eq_pos + 1, trimmed.len()).trim()
+    if value.ends_with(";"):
+        value = value.slice(0, value.len() - 1).trim()
+    val leading = _get_leading_whitespace(line)
+    leading + "node_set_text_content(" + node_expr + ", " + value + ")"
+
+fn _convert_classlist(line: text) -> text:
+    """Convert .classList.add/remove/toggle/contains to Simple calls."""
+    var result = line
+    val add_idx = result.index_of(".classList.add(")
+    if add_idx >= 0:
+        return _convert_classlist_method(result, ".classList.add(", "node_class_list_add")
+    val rem_idx = result.index_of(".classList.remove(")
+    if rem_idx >= 0:
+        return _convert_classlist_method(result, ".classList.remove(", "node_class_list_remove")
+    val tog_idx = result.index_of(".classList.toggle(")
+    if tog_idx >= 0:
+        return _convert_classlist_method(result, ".classList.toggle(", "node_class_list_toggle")
+    val con_idx = result.index_of(".classList.contains(")
+    if con_idx >= 0:
+        return _convert_classlist_method(result, ".classList.contains(", "node_class_list_contains")
+    result
+
+fn _convert_classlist_method(line: text, pattern: text, fn_name: text) -> text:
+    """Convert a classList method call to a Simple function call."""
+    val trimmed = line.trim()
+    val dot_pos = trimmed.index_of(pattern)
+    val node_expr = trimmed.slice(0, dot_pos)
+    val args_start = dot_pos + pattern.len()
+    val rest = trimmed.slice(args_start, trimmed.len())
+    val leading = _get_leading_whitespace(line)
+    leading + fn_name + "(" + node_expr + ", " + rest
+
+# =========================================================================
+# Pass 4: Brace-to-indent block conversion
+# =========================================================================
+
+fn _convert_braces_to_indent(source: text) -> text:
+    """Convert JS brace-delimited blocks to Simple indent-based blocks.
+
+    Tracks brace depth and converts:
+    - Opening { -> : (with colon on the preceding statement)
+    - Closing } -> (removed, indent decreases)
+    - else { -> else:
+    - } else { -> else:
+
+    Also strips trailing semicolons.
+    """
+    val lines = source.split("\n")
+    var result_lines: [text] = []
+    var depth = 0
+    var i = 0
+    while i < lines.len():
+        var line = lines[i]
+        val trimmed = line.trim()
+
+        # Skip empty lines
+        if trimmed.len() == 0:
+            result_lines.push("")
+            i = i + 1
+            continue
+
+        # Handle closing brace lines
+        if trimmed == "}":
+            if depth > 0:
+                depth = depth - 1
+            i = i + 1
+            continue
+
+        # Handle } else {
+        if trimmed == "} else {":
+            if depth > 0:
+                depth = depth - 1
+            val indent = _make_indent(depth)
+            result_lines.push(indent + "else:")
+            depth = depth + 1
+            i = i + 1
+            continue
+
+        # Handle } else if (...) {
+        if trimmed.starts_with("} else if"):
+            if depth > 0:
+                depth = depth - 1
+            val cond_start = trimmed.index_of("(")
+            val cond_end = _find_matching_paren(trimmed, cond_start)
+            if cond_start >= 0 and cond_end >= 0:
+                val cond = trimmed.slice(cond_start + 1, cond_end)
+                val indent = _make_indent(depth)
+                result_lines.push(indent + "else if " + cond + ":")
+                depth = depth + 1
+            i = i + 1
+            continue
+
+        # Strip trailing semicolons
+        if trimmed.ends_with(";"):
+            line = _get_leading_whitespace(line) + trimmed.slice(0, trimmed.len() - 1)
+
+        # Check if line ends with {
+        val retrimmed = line.trim()
+        if retrimmed.ends_with("{"):
+            val without_brace = retrimmed.slice(0, retrimmed.len() - 1).trim()
+            # Handle if (...) {
+            if without_brace.starts_with("if ") or without_brace.starts_with("if("):
+                val converted = _convert_if_header(without_brace)
+                val indent = _make_indent(depth)
+                result_lines.push(indent + converted + ":")
+                depth = depth + 1
+                i = i + 1
+                continue
+            # Handle while (...) {
+            if without_brace.starts_with("while ") or without_brace.starts_with("while("):
+                val converted = _convert_while_header(without_brace)
+                val indent = _make_indent(depth)
+                result_lines.push(indent + converted + ":")
+                depth = depth + 1
+                i = i + 1
+                continue
+            # Handle for ... in ...: (already converted from for-of)
+            if without_brace.starts_with("for ") and without_brace.contains(" in "):
+                val indent = _make_indent(depth)
+                result_lines.push(indent + without_brace + ":")
+                depth = depth + 1
+                i = i + 1
+                continue
+            # Other block openers (fn, else, etc.)
+            val indent = _make_indent(depth)
+            if without_brace.ends_with(":"):
+                result_lines.push(indent + without_brace)
+            else:
+                result_lines.push(indent + without_brace + ":")
+            depth = depth + 1
+            i = i + 1
+            continue
+
+        # Normal line — re-indent
+        val indent = _make_indent(depth)
+        result_lines.push(indent + retrimmed)
+        i = i + 1
+    _join_lines(result_lines)
+
+fn _convert_if_header(header: text) -> text:
+    """Convert if (...) to if ...: stripping parens."""
+    var body = header
+    if body.starts_with("if("):
+        body = "if (" + body.slice(3, body.len())
+    if body.starts_with("if ("):
+        val paren_start = body.index_of("(")
+        val paren_end = _find_matching_paren(body, paren_start)
+        if paren_end >= 0:
+            val cond = body.slice(paren_start + 1, paren_end)
+            return "if " + cond
+    body
+
+fn _convert_while_header(header: text) -> text:
+    """Convert while (...) to while ...: stripping parens."""
+    var body = header
+    if body.starts_with("while("):
+        body = "while (" + body.slice(6, body.len())
+    if body.starts_with("while ("):
+        val paren_start = body.index_of("(")
+        val paren_end = _find_matching_paren(body, paren_start)
+        if paren_end >= 0:
+            val cond = body.slice(paren_start + 1, paren_end)
+            return "while " + cond
+    body
+
+# =========================================================================
+# Utility Helpers
+# =========================================================================
+
+fn _get_leading_whitespace(line: text) -> text:
+    """Extract leading whitespace from a line."""
+    var i = 0
+    while i < line.len():
+        val ch = line.char_at(i)
+        if ch != " " and ch != "\t":
+            return line.slice(0, i)
+        i = i + 1
+    line
+
+fn _make_indent(depth: i32) -> text:
+    """Create indentation string for a given depth (4 spaces per level)."""
+    var result = ""
+    var i = 0
+    while i < depth:
+        result = result + "    "
+        i = i + 1
+    result
+
+fn _find_matching_paren(s: text, open_pos: i32) -> i32:
+    """Find the matching closing parenthesis for an opening one."""
+    if open_pos < 0:
+        return -1
+    var depth = 0
+    var i = open_pos
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+        if ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _join_lines(lines: [text]) -> text:
+    """Join lines with newline separator."""
+    var result = ""
+    var i = 0
+    while i < lines.len():
+        if i > 0:
+            result = result + "\n"
+        result = result + lines[i]
+        i = i + 1
+    result

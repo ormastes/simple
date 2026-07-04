@@ -1,0 +1,74 @@
+# Editor Markdown -> Draw-IR Bridge (opt-in, GPU-offloadable TUI lane)
+#
+# This module is the OPT-IN bridge that lets the TUI markdown view be dispatched
+# to the SAME Engine2D GPU draw-IR path the GUI uses. It converts a rendered TUI
+# view (a BlockModel, or pre-rendered [text] lines) into a `DrawIrComposition`
+# of TEXT draw-IR commands — one command per line, carrying (x, y) position and
+# the line's text content.
+#
+# IMPORTANT: this is a SEPARATE module from md_renderer.spl precisely so the
+# default TUI path stays dependency-free. md_renderer.spl pulls in ONLY
+# office_style_resolver (pure functions) and emits ANSI [text] lines with zero
+# draw_ir/gpu/engine2d weight. ONLY this module imports common.ui.draw_ir, and
+# it is invoked only when a caller explicitly wants the GPU-offloadable lane.
+# Once a composition is produced here it flows through the exact same
+# draw_ir composition-planning + Engine2D dispatch the GUI uses (gpu backend
+# selection via DRAW_IR_BACKEND_GPU / DRAW_IR_BACKEND_AUTO).
+
+use std.editor.render.block_model.{RenderBlock, BlockModel}
+use std.editor.render.md_renderer.{md_render_blocks}
+use std.common.ui.draw_ir.{draw_ir_text, draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, DrawIrCommand, DrawIrComposition, DRAW_IR_BACKEND_AUTO}
+
+# Default monochrome text color (opaque white, 0xRRGGBBAA) for emitted TEXT
+# commands. The TUI's color is carried in-band via ANSI; the draw-IR text
+# payload preserves the rendered line verbatim so a GPU backend can render it.
+pub val MD_DRAW_IR_TEXT_COLOR: u32 = 4294967295
+
+# Cell advance height per text line in draw-IR coordinate units (monospace row).
+pub val MD_DRAW_IR_LINE_HEIGHT: i32 = 1
+
+# Convert already-rendered TUI lines into TEXT draw-IR commands, one per line,
+# laid out as a vertical stack (y = line index * line height). Each command's
+# component_id is "<id_prefix>:line:<n>" so backends/event routing can address it.
+fn md_draw_ir_commands_from_lines(lines: [text], id_prefix: text) -> [DrawIrCommand]:
+    var cmds: [DrawIrCommand] = []
+    var i = 0
+    while i < lines.len():
+        val y = (i as i32) * MD_DRAW_IR_LINE_HEIGHT
+        val cid = "{id_prefix}:line:{i}"
+        cmds.push(draw_ir_text(cid, 0, y, lines[i], MD_DRAW_IR_TEXT_COLOR))
+        i = i + 1
+    cmds
+
+# Convert a BlockModel into TEXT draw-IR commands by first rendering it through
+# the SAME md_renderer used for the default TUI (so content + shared-cascade
+# styling are identical), then projecting each line to a TEXT command.
+fn md_draw_ir_commands(model: BlockModel, id_prefix: text) -> [DrawIrCommand]:
+    md_draw_ir_commands_from_lines(md_render_blocks(model), id_prefix)
+
+# Build a full DrawIrComposition for a rendered TUI view from pre-rendered lines.
+# backend_target selects the dispatch lane: DRAW_IR_BACKEND_GPU forces GPU,
+# DRAW_IR_BACKEND_AUTO lets the planner pick GPU when available (same as GUI).
+fn md_draw_ir_composition_from_lines(lines: [text], surface_id: text, backend_target: text) -> DrawIrComposition:
+    val cmds = md_draw_ir_commands_from_lines(lines, surface_id)
+    val embedding = draw_ir_embedding_config(surface_id, "{surface_id}:md", 0, 0, 0, (lines.len() as i32) * MD_DRAW_IR_LINE_HEIGHT, 0, 1000, false)
+    val batch = draw_ir_batch("{surface_id}:md:batch", backend_target, embedding, cmds)
+    draw_ir_composition("{surface_id}:md:composition", "{surface_id}:md:scene", backend_target, [batch])
+
+# Build a DrawIrComposition for a BlockModel-backed TUI view, GPU-offloadable.
+# This is the entry point that makes the TUI lane dispatchable to Engine2D GPU
+# backends exactly like the GUI draw-IR path.
+fn md_draw_ir_composition(model: BlockModel, surface_id: text, backend_target: text) -> DrawIrComposition:
+    md_draw_ir_composition_from_lines(md_render_blocks(model), surface_id, backend_target)
+
+# Convenience: GPU-auto composition (planner selects GPU when available).
+fn md_draw_ir_composition_auto(model: BlockModel, surface_id: text) -> DrawIrComposition:
+    md_draw_ir_composition(model, surface_id, DRAW_IR_BACKEND_AUTO)
+
+export MD_DRAW_IR_TEXT_COLOR
+export MD_DRAW_IR_LINE_HEIGHT
+export md_draw_ir_commands_from_lines
+export md_draw_ir_commands
+export md_draw_ir_composition_from_lines
+export md_draw_ir_composition
+export md_draw_ir_composition_auto

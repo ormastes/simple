@@ -1,0 +1,119 @@
+"""Bounded KERNEL32 FLS slot bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_kernel32_fls_dispatch_gate}
+
+class WineKernel32FlsSlot:
+    index: i64
+    value: text
+    callback: text
+    allocated: bool
+
+class WineKernel32FlsTable:
+    slots: [WineKernel32FlsSlot]
+    next_index: i64
+    callback_log: text
+
+class WineKernel32FlsResult:
+    ok: bool
+    error: text
+    table: WineKernel32FlsTable
+    index: i64
+    value: text
+    callback: text
+    operations: text
+
+fn _slot(index: i64, value: text, callback: text, allocated: bool) -> WineKernel32FlsSlot:
+    WineKernel32FlsSlot(index: index, value: value, callback: callback, allocated: allocated)
+
+fn _table(slots: [WineKernel32FlsSlot], next_index: i64, callback_log: text) -> WineKernel32FlsTable:
+    WineKernel32FlsTable(slots: slots, next_index: next_index, callback_log: callback_log)
+
+fn _result(ok: bool, error: text, table: WineKernel32FlsTable, index: i64, value: text, callback: text, operations: text) -> WineKernel32FlsResult:
+    WineKernel32FlsResult(ok: ok, error: error, table: table, index: index, value: value, callback: callback, operations: operations)
+
+fn _find_slot(table: WineKernel32FlsTable, index: i64) -> WineKernel32FlsSlot:
+    for slot in table.slots:
+        if slot.index == index and slot.allocated:
+            return slot
+    _slot(-1, "", "", false)
+
+fn _set_slot_value(table: WineKernel32FlsTable, index: i64, value: text) -> WineKernel32FlsTable:
+    var slots: [WineKernel32FlsSlot] = []
+    for slot in table.slots:
+        if slot.index == index and slot.allocated:
+            slots.push(_slot(slot.index, value, slot.callback, true))
+        else:
+            slots.push(slot)
+    _table(slots, table.next_index, table.callback_log)
+
+fn _remove_slot(table: WineKernel32FlsTable, index: i64) -> WineKernel32FlsTable:
+    val slot = _find_slot(table, index)
+    var slots: [WineKernel32FlsSlot] = []
+    for item in table.slots:
+        if item.index != index:
+            slots.push(item)
+    var callback_log = table.callback_log
+    if slot.callback != "" and slot.value != "":
+        callback_log = slot.callback + ":" + slot.value
+    _table(slots, table.next_index, callback_log)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_kernel32_fls_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 4:
+        return "kernel32-fls-sequence-count-mismatch"
+    if symbols[0] != "FlsAlloc":
+        return "kernel32-fls-sequence-expected:FlsAlloc"
+    if symbols[1] != "FlsSetValue":
+        return "kernel32-fls-sequence-expected:FlsSetValue"
+    if symbols[2] != "FlsGetValue":
+        return "kernel32-fls-sequence-expected:FlsGetValue"
+    if symbols[3] != "FlsFree":
+        return "kernel32-fls-sequence-expected:FlsFree"
+    "ready"
+
+pub fn wine_kernel32_fls_table_new() -> WineKernel32FlsTable:
+    _table([], 0, "")
+
+pub fn wine_kernel32_fls_alloc(table: WineKernel32FlsTable, callback: text) -> WineKernel32FlsResult:
+    val index = table.next_index
+    var slots = table.slots
+    slots.push(_slot(index, "", callback, true))
+    _result(true, "", _table(slots, index + 1, table.callback_log), index, "", callback, "FlsAlloc")
+
+pub fn wine_kernel32_fls_set_value(table: WineKernel32FlsTable, index: i64, value: text) -> WineKernel32FlsResult:
+    val slot = _find_slot(table, index)
+    if not slot.allocated:
+        return _result(false, "FlsSetValue:invalid-fls-index", table, index, value, "", "")
+    _result(true, "", _set_slot_value(table, index, value), index, value, slot.callback, "FlsSetValue")
+
+pub fn wine_kernel32_fls_get_value(table: WineKernel32FlsTable, index: i64) -> WineKernel32FlsResult:
+    val slot = _find_slot(table, index)
+    if not slot.allocated:
+        return _result(false, "FlsGetValue:invalid-fls-index", table, index, "", "", "")
+    _result(true, "", table, index, slot.value, slot.callback, "FlsGetValue")
+
+pub fn wine_kernel32_fls_free(table: WineKernel32FlsTable, index: i64) -> WineKernel32FlsResult:
+    val slot = _find_slot(table, index)
+    if not slot.allocated:
+        return _result(false, "FlsFree:invalid-fls-index", table, index, "", "", "")
+    _result(true, "", _remove_slot(table, index), index, slot.value, slot.callback, "FlsFree")
+
+pub fn wine_kernel32_execute_fls(symbols: [text], table: WineKernel32FlsTable, value: text, callback: text) -> WineKernel32FlsResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, table, -1, "", "", "")
+    val allocated = wine_kernel32_fls_alloc(table, callback)
+    if not allocated.ok:
+        return allocated
+    val set_value = wine_kernel32_fls_set_value(allocated.table, allocated.index, value)
+    if not set_value.ok:
+        return _result(false, set_value.error, set_value.table, allocated.index, value, callback, "FlsAlloc")
+    val got_value = wine_kernel32_fls_get_value(set_value.table, allocated.index)
+    if not got_value.ok:
+        return _result(false, got_value.error, got_value.table, allocated.index, value, callback, "FlsAlloc FlsSetValue")
+    val freed = wine_kernel32_fls_free(got_value.table, allocated.index)
+    if not freed.ok:
+        return _result(false, freed.error, freed.table, allocated.index, got_value.value, callback, "FlsAlloc FlsSetValue FlsGetValue")
+    _result(true, "", freed.table, allocated.index, got_value.value, callback, "FlsAlloc FlsSetValue FlsGetValue FlsFree")

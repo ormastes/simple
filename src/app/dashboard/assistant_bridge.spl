@@ -1,0 +1,152 @@
+pub class AssistantBridgePolicy:
+    source_of_truth: text
+    fresh_after_micros: i64
+    stale_after_micros: i64
+
+pub class AssistantBridgeSnapshot:
+    snapshot_id: text
+    session_id: text
+    source_of_truth: text
+    revision: i64
+    objective: text
+    status: text
+    mode: text
+    timeline_count: i64
+    task_count: i64
+    notification_count: i64
+    digest_checkpoint_id: text
+    captured_at_micros: i64
+    loaded_at_micros: i64
+    live_attachable: bool
+
+pub class AssistantBridgeFreshness:
+    state: text
+    age_micros: i64
+    should_refresh: bool
+    can_route_actions: bool
+    is_degraded: bool
+
+pub class AssistantBridgeProjection:
+    session_id: text
+    source_of_truth: text
+    objective: text
+    status: text
+    mode: text
+    read_only: bool
+    live_controls_enabled: bool
+    freshness: AssistantBridgeFreshness
+    timeline_count: i64
+    task_count: i64
+    notification_count: i64
+    digest_checkpoint_id: text
+
+pub class AssistantBridgeActionDecision:
+    action_kind: text
+    allowed: bool
+    route_target: text
+    policy_state: text
+    should_refresh: bool
+    reason: text
+
+pub fn assistant_bridge_default_policy() -> AssistantBridgePolicy:
+    AssistantBridgePolicy(
+        source_of_truth: "assistant_core",
+        fresh_after_micros: 30_000_000,
+        stale_after_micros: 120_000_000
+    )
+
+fn _bridge_freshness(age_micros: i64, policy: AssistantBridgePolicy, live_attachable: bool) -> AssistantBridgeFreshness:
+    if not live_attachable:
+        return AssistantBridgeFreshness(
+            state: "replay",
+            age_micros: age_micros,
+            should_refresh: false,
+            can_route_actions: false,
+            is_degraded: false
+        )
+    if age_micros <= policy.fresh_after_micros:
+        return AssistantBridgeFreshness(
+            state: "fresh",
+            age_micros: age_micros,
+            should_refresh: false,
+            can_route_actions: true,
+            is_degraded: false
+        )
+    if age_micros <= policy.stale_after_micros:
+        return AssistantBridgeFreshness(
+            state: "stale",
+            age_micros: age_micros,
+            should_refresh: true,
+            can_route_actions: false,
+            is_degraded: false
+        )
+    AssistantBridgeFreshness(
+        state: "degraded",
+        age_micros: age_micros,
+        should_refresh: true,
+        can_route_actions: false,
+        is_degraded: true
+    )
+
+pub fn assistant_bridge_projection_from_empty(session_id: text, policy: AssistantBridgePolicy, now_micros: i64) -> AssistantBridgeProjection:
+    val freshness = _bridge_freshness(0, policy, false)
+    AssistantBridgeProjection(
+        session_id: session_id,
+        source_of_truth: policy.source_of_truth,
+        objective: "",
+        status: "unavailable",
+        mode: "replay",
+        read_only: true,
+        live_controls_enabled: false,
+        freshness: freshness,
+        timeline_count: 0,
+        task_count: 0,
+        notification_count: 0,
+        digest_checkpoint_id: ""
+    )
+
+pub fn assistant_bridge_projection_from_snapshot(snapshot: AssistantBridgeSnapshot, policy: AssistantBridgePolicy, now_micros: i64) -> AssistantBridgeProjection:
+    var age = now_micros - snapshot.loaded_at_micros
+    if age < 0:
+        age = 0
+    val live_attachable = snapshot.live_attachable and snapshot.source_of_truth == policy.source_of_truth
+    val freshness = _bridge_freshness(age, policy, live_attachable)
+    val read_only = not freshness.can_route_actions
+    AssistantBridgeProjection(
+        session_id: snapshot.session_id,
+        source_of_truth: snapshot.source_of_truth,
+        objective: snapshot.objective,
+        status: snapshot.status,
+        mode: snapshot.mode,
+        read_only: read_only,
+        live_controls_enabled: freshness.can_route_actions,
+        freshness: freshness,
+        timeline_count: snapshot.timeline_count,
+        task_count: snapshot.task_count,
+        notification_count: snapshot.notification_count,
+        digest_checkpoint_id: snapshot.digest_checkpoint_id
+    )
+
+pub fn assistant_bridge_route_action(projection: AssistantBridgeProjection, action_kind: text) -> AssistantBridgeActionDecision:
+    if projection.live_controls_enabled and projection.freshness.can_route_actions:
+        return AssistantBridgeActionDecision(
+            action_kind: action_kind,
+            allowed: true,
+            route_target: "assistant_core",
+            policy_state: "live",
+            should_refresh: false,
+            reason: ""
+        )
+    AssistantBridgeActionDecision(
+        action_kind: action_kind,
+        allowed: false,
+        route_target: "blocked",
+        policy_state: projection.freshness.state,
+        should_refresh: projection.freshness.should_refresh,
+        reason: projection.freshness.state
+    )
+
+export AssistantBridgePolicy, AssistantBridgeSnapshot, AssistantBridgeFreshness
+export AssistantBridgeProjection, AssistantBridgeActionDecision
+export assistant_bridge_default_policy, assistant_bridge_projection_from_empty
+export assistant_bridge_projection_from_snapshot, assistant_bridge_route_action

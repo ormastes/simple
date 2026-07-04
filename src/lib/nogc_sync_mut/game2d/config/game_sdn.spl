@@ -1,0 +1,134 @@
+# std.game2d.config.game_sdn — game.sdn loader (Wave B, AC-6)
+#
+# Recognised top-level shape:
+#   game:
+#     title: "Hello"
+#     window: { width: 800, height: 600, fullscreen: false, vsync: true, pixel_scale: 1 }
+#     runtime: { fixed_step_hz: 60, deterministic: false, max_entities: 1024 }
+#     startup_scene: "main"
+
+use std.common.sdn.parser.{parse_with_spans}
+use std.common.sdn.value.{SdnValue, Span}
+use std.nogc_sync_mut.game2d.asset.error.{AssetError}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+
+class WindowConfig:
+    width: i64
+    height: i64
+    fullscreen: bool
+    vsync: bool
+    pixel_scale: i64
+
+    static fn default() -> WindowConfig:
+        WindowConfig(
+            width: 800,
+            height: 600,
+            fullscreen: false,
+            vsync: true,
+            pixel_scale: 1
+        )
+
+
+class RuntimeConfig:
+    fixed_step_hz: i64
+    deterministic: bool
+    max_entities: i64
+
+    static fn default() -> RuntimeConfig:
+        RuntimeConfig(
+            fixed_step_hz: 60,
+            deterministic: false,
+            max_entities: 1024
+        )
+
+
+class GameConfig:
+    title: text
+    window: WindowConfig
+    runtime: RuntimeConfig
+    startup_scene: text
+
+    static fn default() -> GameConfig:
+        GameConfig(
+            title: "Simple Game",
+            window: WindowConfig.default(),
+            runtime: RuntimeConfig.default(),
+            startup_scene: "main"
+        )
+
+
+fn _to_i(v: SdnValue, fallback: i64) -> i64:
+    match v:
+        case Int(i): i
+        case Float(f): f as i64
+        case _: fallback
+
+
+fn _to_b(v: SdnValue, fallback: bool) -> bool:
+    match v:
+        case Bool(b): b
+        case _: fallback
+
+
+fn _to_s(v: SdnValue, fallback: text) -> text:
+    match v:
+        case String(s): s
+        case _: fallback
+
+
+fn _parse_window(d: Dict<text, SdnValue>) -> WindowConfig:
+    var w = WindowConfig.default()
+    if d.contains("width"): w.width = _to_i(d["width"], w.width)
+    if d.contains("height"): w.height = _to_i(d["height"], w.height)
+    if d.contains("fullscreen"): w.fullscreen = _to_b(d["fullscreen"], w.fullscreen)
+    if d.contains("vsync"): w.vsync = _to_b(d["vsync"], w.vsync)
+    if d.contains("pixel_scale"): w.pixel_scale = _to_i(d["pixel_scale"], w.pixel_scale)
+    w
+
+
+fn _parse_runtime(d: Dict<text, SdnValue>) -> RuntimeConfig:
+    var r = RuntimeConfig.default()
+    if d.contains("fixed_step_hz"): r.fixed_step_hz = _to_i(d["fixed_step_hz"], r.fixed_step_hz)
+    if d.contains("deterministic"): r.deterministic = _to_b(d["deterministic"], r.deterministic)
+    if d.contains("max_entities"): r.max_entities = _to_i(d["max_entities"], r.max_entities)
+    r
+
+
+fn load_game_config(path: text) -> Result<GameConfig, AssetError>:
+    """Parse a game.sdn file. Defaults applied for any missing key."""
+    if not rt_file_exists(path):
+        return Err(AssetError.missing(Span.empty(), path, "game.sdn"))
+    val source = rt_file_read_text(path)
+    val parsed = parse_with_spans(source)
+    match parsed:
+        case Ok(pair):
+            val root = pair.0
+            var cfg = GameConfig.default()
+            var game_dict: Dict<text, SdnValue> = {}
+            match root:
+                case Dict(top):
+                    if top.contains("game"):
+                        match top["game"]:
+                            case Dict(d): game_dict = d
+                            case _: pass_do_nothing
+                    else:
+                        game_dict = top
+                case _: pass_do_nothing
+            if game_dict.contains("title"):
+                cfg.title = _to_s(game_dict["title"], cfg.title)
+            if game_dict.contains("startup_scene"):
+                cfg.startup_scene = _to_s(game_dict["startup_scene"], cfg.startup_scene)
+            if game_dict.contains("window"):
+                match game_dict["window"]:
+                    case Dict(d): cfg.window = _parse_window(d)
+                    case _: pass_do_nothing
+            if game_dict.contains("runtime"):
+                match game_dict["runtime"]:
+                    case Dict(d): cfg.runtime = _parse_runtime(d)
+                    case _: pass_do_nothing
+            Ok(cfg)
+        case Err(e):
+            Err(AssetError.parse_error(path, e.message()))

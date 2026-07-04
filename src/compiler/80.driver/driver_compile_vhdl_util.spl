@@ -1,0 +1,518 @@
+# Driver — VHDL Pure Utility Functions
+#
+# Extracted from driver_public_compile.spl. Contains:
+# - Text/character predicates (_is_decimal_digit, _is_ascii_letter, _is_decimal_literal)
+# - Numeric conversion (_simple_decimal_to_i64, _simple_decimal_digit_value)
+# - Top-level text splitting (_simple_split_top_level, _simple_find_top_level, _simple_find_matching_paren, _simple_is_wrapped_parenthesized)
+# - VHDL identifier sanitization (_simple_vhdl_identifier, _simple_param_vhdl_name)
+# - List helpers (_text_list_contains, _text_list_index, _text_list_index_from)
+# - Type mapping (_simple_type_to_vhdl, _simple_integer_width, _simple_integer_type_for_width, _simple_implicit_width_type_error, _simple_is_implicit_width_integer_type)
+# - Return stripping (_simple_strip_return)
+# - Enum helpers (_simple_enum_name_from_header, _simple_enum_variant_name, _simple_enum_variant_payload_type, _simple_skip_enum_block, _simple_enum_block_has_payload, _simple_enum_alias_type_name, _simple_enum_alias_variants, _simple_enum_alias_payloads)
+# - Unsupported parity gap detection (_simple_vhdl_unsupported_parity_gap, _simple_vhdl_line_looks_like_memory)
+# - Decorator/generic helpers (_simple_decorator_payload, _simple_entity_generic_block, _simple_generic_type_to_vhdl, _simple_generic_default_to_vhdl)
+# - Port helpers (_simple_port_name_from_decl)
+# - Clock helpers (_simple_clock_ports, _simple_clocked_assignment, _simple_clocked_labeled_assignments, _simple_clock_config, _simple_clock_token_value, _simple_reset_value)
+
+fn _is_decimal_digit(ch: text) -> bool:
+    ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"
+
+fn _is_decimal_literal(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    var i = 0
+    while i < value.len():
+        if not _is_decimal_digit(value.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+fn _is_ascii_letter(ch: text) -> bool:
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_".contains(ch)
+
+fn _simple_join_text(items: [text], sep: text) -> text:
+    var out = ""
+    var i = 0
+    while i < items.len():
+        if i > 0:
+            out = out + sep
+        out = out + items[i]
+        i = i + 1
+    out
+
+fn _simple_decimal_to_i64(value: text) -> i64:
+    var out = 0
+    var i = 0
+    while i < value.len():
+        out = out * 10 + _simple_decimal_digit_value(value.substring(i, i + 1))
+        i = i + 1
+    out
+
+fn _simple_decimal_digit_value(ch: text) -> i64:
+    match ch:
+        case "0": 0
+        case "1": 1
+        case "2": 2
+        case "3": 3
+        case "4": 4
+        case "5": 5
+        case "6": 6
+        case "7": 7
+        case "8": 8
+        case "9": 9
+        case _: 0
+
+fn _simple_split_top_level(value: text, sep: text) -> [text]:
+    var parts: [text] = []
+    var start = 0
+    var depth = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        if ch == ")":
+            depth = depth - 1
+        if depth == 0 and ch == sep:
+            parts = parts.push(value.substring(start, i))
+            start = i + 1
+        i = i + 1
+    parts.push(value.substring(start, value.len()))
+
+fn _simple_find_top_level(value: text, needle: text) -> Option<i64>:
+    var depth = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        if ch == ")":
+            depth = depth - 1
+        if depth == 0 and ch == needle:
+            return Some(i)
+        i = i + 1
+    None
+
+fn _simple_find_matching_paren(value: text, open_index: i64) -> Option<i64>:
+    var depth = 0
+    var i = open_index
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        if ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return Some(i)
+        i = i + 1
+    None
+
+fn _simple_is_wrapped_parenthesized(value: text) -> bool:
+    val trimmed = value.trim()
+    if not trimmed.starts_with("(") or not trimmed.ends_with(")"):
+        return false
+    var depth = 0
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        if ch == ")":
+            depth = depth - 1
+            if depth == 0 and i != trimmed.len() - 1:
+                return false
+        i = i + 1
+    depth == 0
+
+fn _simple_vhdl_identifier(name: text) -> text:
+    val trimmed = name.trim()
+    if trimmed == "":
+        return ""
+    var out = ""
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.substring(i, i + 1)
+        if _is_ascii_letter(ch) or _is_decimal_digit(ch):
+            out = out + ch
+        else:
+            out = out + "_"
+        i = i + 1
+    val first = out.substring(0, 1)
+    if _is_decimal_digit(first):
+        out = "out_" + out
+    out
+
+fn _simple_param_vhdl_name(name: text) -> text:
+    _simple_vhdl_identifier(name)
+
+fn _text_list_contains(items: [text], item: text) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i] == item:
+            return true
+        i = i + 1
+    false
+
+fn _text_list_index(items: [text], item: text) -> i64:
+    var i = 0
+    while i < items.len():
+        if items[i] == item:
+            return i
+        i = i + 1
+    -1
+
+fn _text_list_index_from(items: [text], item: text, start: i64) -> i64:
+    var i = start
+    while i < items.len():
+        if items[i] == item:
+            return i
+        i = i + 1
+    -1
+
+fn _simple_type_to_vhdl(type_name: text) -> text:
+    if type_name.starts_with("enum:"):
+        return _simple_enum_alias_type_name(type_name)
+    match type_name:
+        case "i8": "signed(7 downto 0)"
+        case "i16": "signed(15 downto 0)"
+        case "i32": "signed(31 downto 0)"
+        case "i64": "signed(63 downto 0)"
+        case "u8": "unsigned(7 downto 0)"
+        case "u16": "unsigned(15 downto 0)"
+        case "u32": "unsigned(31 downto 0)"
+        case "u64": "unsigned(63 downto 0)"
+        case "bool": "std_logic"
+        case _: ""
+
+fn _simple_integer_width(type_name: text) -> text:
+    match type_name:
+        case "i8": "8"
+        case "i16": "16"
+        case "i32": "32"
+        case "i64": "64"
+        case "u8": "8"
+        case "u16": "16"
+        case "u32": "32"
+        case "u64": "64"
+        case _: ""
+
+fn _simple_integer_type_for_width(signed_source: bool, width: i64) -> text:
+    if signed_source:
+        match width:
+            case 8: return "i8"
+            case 16: return "i16"
+            case 32: return "i32"
+            case 64: return "i64"
+            case _: return ""
+    match width:
+        case 8: "u8"
+        case 16: "u16"
+        case 32: "u32"
+        case 64: "u64"
+        case _: ""
+
+fn _simple_implicit_width_type_error(type_name: text, context: text) -> text:
+    val trimmed = type_name.trim()
+    if _simple_is_implicit_width_integer_type(trimmed):
+        return "VHDL Python-HDL parity gap: unsupported implicit-width integer type `{trimmed}` in source facade {context}; use explicit fixed-width i8/i16/i32/i64 or u8/u16/u32/u64"
+    ""
+
+fn _simple_is_implicit_width_integer_type(type_name: text) -> bool:
+    val lowered = type_name.trim().lower()
+    lowered == "int" or lowered == "uint" or lowered == "integer" or lowered == "usize" or lowered == "isize"
+
+fn _simple_strip_return(expr: text) -> text:
+    if expr.starts_with("return "):
+        return expr.substring(7, expr.len()).trim()
+    expr
+
+fn _simple_enum_name_from_header(line: text) -> text:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("enum "):
+        return ""
+    val after_enum = trimmed.substring(5, trimmed.len()).trim()
+    val colon_opt = after_enum.find(":")
+    if val colon_index = colon_opt:
+        return after_enum.substring(0, colon_index).trim()
+    after_enum
+
+fn _simple_enum_variant_name(line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed == "":
+        return ""
+    val paren_opt = trimmed.find("(")
+    if val paren_index = paren_opt:
+        return trimmed.substring(0, paren_index).trim()
+    val colon_opt = trimmed.find(":")
+    if val colon_index = colon_opt:
+        return trimmed.substring(0, colon_index).trim()
+    trimmed
+
+fn _simple_enum_variant_payload_type(line: text) -> text:
+    val trimmed = line.trim()
+    val open_opt = trimmed.find("(")
+    if not open_opt.? or not trimmed.ends_with(")"):
+        return ""
+    val open_index = open_opt.unwrap()
+    val inner = trimmed.substring(open_index + 1, trimmed.len() - 1).trim()
+    val sep_opt = inner.find(":")
+    if not sep_opt.?:
+        return ""
+    val sep_index = sep_opt.unwrap()
+    inner.substring(sep_index + 1, inner.len()).trim()
+
+fn _simple_skip_enum_block(lines: [text], start_index: i64) -> i64:
+    var i = start_index + 1
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == "":
+            return i + 1
+        if line.starts_with("@") or line.starts_with("fn ") or line.starts_with("type ") or line.starts_with("enum "):
+            return i
+        i = i + 1
+    i
+
+fn _simple_enum_block_has_payload(lines: [text], start_index: i64) -> bool:
+    var i = start_index + 1
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == "":
+            return false
+        if line.starts_with("@") or line.starts_with("fn ") or line.starts_with("type ") or line.starts_with("enum "):
+            return false
+        if line.contains("("):
+            return true
+        i = i + 1
+    false
+
+fn _simple_enum_alias_type_name(alias_type: text) -> text:
+    val rest = alias_type.substring(5, alias_type.len())
+    val sep_opt = rest.find(":")
+    if val sep_index = sep_opt:
+        return rest.substring(0, sep_index)
+    rest
+
+fn _simple_enum_alias_variants(alias_type: text) -> text:
+    val rest = alias_type.substring(5, alias_type.len())
+    val sep_opt = rest.find(":")
+    if val sep_index = sep_opt:
+        val variant_and_payload = rest.substring(sep_index + 1, rest.len()).trim()
+        val payload_sep = variant_and_payload.find("|")
+        if val payload_index = payload_sep:
+            return variant_and_payload.substring(0, payload_index).trim()
+        return variant_and_payload
+    ""
+
+fn _simple_enum_alias_payloads(alias_type: text) -> text:
+    val rest = alias_type.substring(5, alias_type.len())
+    val payload_sep = rest.find("|")
+    if val payload_index = payload_sep:
+        return rest.substring(payload_index + 1, rest.len()).trim()
+    ""
+
+fn _simple_vhdl_unsupported_parity_gap(source: text) -> text:
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if _simple_vhdl_line_looks_like_memory(line):
+            return "VHDL-MEM-POLICY: ROM/RAM inference requires an explicit static ROM, registered ROM, or synchronous RAM template with vendor-safe read-during-write policy before VHDL emission"
+        i = i + 1
+    ""
+
+fn _simple_vhdl_line_looks_like_memory(line: text) -> bool:
+    val trimmed = line.trim()
+    if trimmed == "" or trimmed.starts_with("#"):
+        return false
+    if trimmed.contains("= ["):
+        return true
+    if trimmed.contains(": ["):
+        return true
+    val lowered = trimmed.lower()
+    lowered.starts_with("var ram") or lowered.starts_with("val rom") or lowered.starts_with("var mem") or lowered.starts_with("val mem")
+
+fn _simple_decorator_payload(line: text, decorator_name: text) -> text:
+    val prefix = decorator_name + "("
+    val trimmed = line.trim()
+    if not trimmed.starts_with(prefix) or not trimmed.ends_with(")"):
+        return ""
+    trimmed.substring(prefix.len(), trimmed.len() - 1).trim()
+
+fn _simple_entity_generic_block(generic_text: text) -> text:
+    if generic_text.trim() == "":
+        return ""
+    val parts = _simple_split_top_level(generic_text, ",")
+    var rendered: [text] = []
+    var i = 0
+    while i < parts.len():
+        val generic_part = parts[i].trim()
+        val sep = generic_part.find(":")
+        if val sep_index = sep:
+            val name = _simple_vhdl_identifier(generic_part.substring(0, sep_index).trim())
+            var type_and_default = generic_part.substring(sep_index + 1, generic_part.len()).trim()
+            var default_text = ""
+            val default_sep = type_and_default.find("=")
+            if val default_index = default_sep:
+                default_text = type_and_default.substring(default_index + 1, type_and_default.len()).trim()
+                type_and_default = type_and_default.substring(0, default_index).trim()
+            val vhdl_type = _simple_generic_type_to_vhdl(type_and_default)
+            var line = "        {name} : {vhdl_type}"
+            if default_text != "":
+                line = line + " := " + _simple_generic_default_to_vhdl(default_text, type_and_default)
+            if i != parts.len() - 1:
+                line = line + ";"
+            rendered = rendered.push(line)
+        i = i + 1
+    if rendered.len() == 0:
+        return ""
+    "    generic (\n" + _simple_join_text(rendered, "\n") + "\n    );\n"
+
+fn _simple_generic_type_to_vhdl(type_name: text) -> text:
+    match type_name.trim():
+        case "bool": "boolean"
+        case "i8": "integer"
+        case "i16": "integer"
+        case "i32": "integer"
+        case "i64": "integer"
+        case "u8": "natural"
+        case "u16": "natural"
+        case "u32": "natural"
+        case "u64": "natural"
+        case "usize": "natural"
+        case _: type_name.trim()
+
+fn _simple_generic_default_to_vhdl(value: text, type_name: text) -> text:
+    val trimmed = value.trim()
+    if type_name.trim() == "bool":
+        if trimmed == "true":
+            return "true"
+        if trimmed == "false":
+            return "false"
+    trimmed
+
+fn _simple_port_name_from_decl(port_decl: text) -> text:
+    val trimmed = port_decl.trim()
+    val sep = trimmed.find(":")
+    if not sep.?:
+        return ""
+    val sep_index = sep.unwrap()
+    trimmed.substring(0, sep_index).trim()
+
+fn _simple_clock_ports(clocked_text: text, param_names: [text]) -> [text]:
+    val parts = _simple_split_top_level(clocked_text, ",")
+    var ports: [text] = []
+    if parts.len() >= 1:
+        val clk = parts[0].trim()
+        if clk != "" and not _text_list_contains(param_names, clk):
+            ports = ports.push("        {_simple_param_vhdl_name(clk)} : in std_logic;")
+    if parts.len() >= 2:
+        val reset_n = parts[1].trim()
+        if reset_n != "" and not _text_list_contains(param_names, reset_n):
+            ports = ports.push("        {_simple_param_vhdl_name(reset_n)} : in std_logic;")
+    ports
+
+fn _simple_clocked_assignment(clocked_text: text, out_name: text, out_type: text, expr: text) -> text:
+    val config = _simple_clock_config(clocked_text)
+    val clk = config[0]
+    val reset_name = config[1]
+    val reset_asserted = config[2]
+    val reset_mode = config[3]
+    if reset_mode == "sync":
+        var sync_out = "    process({clk})\n"
+        sync_out = sync_out + "    begin\n"
+        sync_out = sync_out + "        if rising_edge({clk}) then\n"
+        sync_out = sync_out + "            if {reset_name} = {reset_asserted} then\n"
+        sync_out = sync_out + "                {out_name} <= {_simple_reset_value(out_type)};\n"
+        sync_out = sync_out + "            else\n"
+        sync_out = sync_out + "                {out_name} <= {expr};\n"
+        sync_out = sync_out + "            end if;\n"
+        sync_out = sync_out + "        end if;\n"
+        sync_out = sync_out + "    end process;\n"
+        return sync_out
+    var out = "    process({clk}, {reset_name})\n"
+    out = out + "    begin\n"
+    out = out + "        if {reset_name} = {reset_asserted} then\n"
+    out = out + "            {out_name} <= {_simple_reset_value(out_type)};\n"
+    out = out + "        elsif rising_edge({clk}) then\n"
+    out = out + "            {out_name} <= {expr};\n"
+    out = out + "        end if;\n"
+    out = out + "    end process;\n"
+    out
+
+fn _simple_clocked_labeled_assignments(clocked_text: text, port_names: [text], return_types: [text], assignments: text) -> text:
+    val config = _simple_clock_config(clocked_text)
+    val clk = config[0]
+    val reset_name = config[1]
+    val reset_asserted = config[2]
+    val reset_mode = config[3]
+    if reset_mode == "sync":
+        var sync_out = "    process({clk})\n"
+        sync_out = sync_out + "    begin\n"
+        sync_out = sync_out + "        if rising_edge({clk}) then\n"
+        sync_out = sync_out + "            if {reset_name} = {reset_asserted} then\n"
+        var reset_i = 0
+        while reset_i < port_names.len():
+            sync_out = sync_out + "                {port_names[reset_i]} <= {_simple_reset_value(return_types[reset_i])};\n"
+            reset_i = reset_i + 1
+        sync_out = sync_out + "            else\n"
+        val sync_lines = assignments.split("\n")
+        for sync_line in sync_lines:
+            val sync_trimmed = sync_line.trim()
+            if sync_trimmed != "":
+                sync_out = sync_out + "                " + sync_trimmed + "\n"
+        sync_out = sync_out + "            end if;\n"
+        sync_out = sync_out + "        end if;\n"
+        sync_out = sync_out + "    end process;\n"
+        return sync_out
+    var out = "    process({clk}, {reset_name})\n"
+    out = out + "    begin\n"
+    out = out + "        if {reset_name} = {reset_asserted} then\n"
+    var i = 0
+    while i < port_names.len():
+        out = out + "            {port_names[i]} <= {_simple_reset_value(return_types[i])};\n"
+        i = i + 1
+    out = out + "        elsif rising_edge({clk}) then\n"
+    val lines = assignments.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed != "":
+            out = out + "            " + trimmed + "\n"
+    out = out + "        end if;\n"
+    out = out + "    end process;\n"
+    out
+
+fn _simple_clock_config(clocked_text: text) -> [text]:
+    val parts = _simple_split_top_level(clocked_text, ",")
+    val clk = if parts.len() >= 1: _simple_param_vhdl_name(parts[0].trim()) else: "clk"
+    val reset_name = if parts.len() >= 2: _simple_param_vhdl_name(parts[1].trim()) else: "reset_n"
+    var reset_asserted = "'0'"
+    var reset_mode = "async"
+    var i = 2
+    while i < parts.len():
+        val token = _simple_clock_token_value(parts[i]).lower()
+        if token == "active_high" or token == "high" or token == "reset_high":
+            reset_asserted = "'1'"
+        if token == "active_low" or token == "low" or token == "reset_low":
+            reset_asserted = "'0'"
+        if token == "sync" or token == "synchronous":
+            reset_mode = "sync"
+        if token == "async" or token == "asynchronous":
+            reset_mode = "async"
+        i = i + 1
+    [clk, reset_name, reset_asserted, reset_mode]
+
+fn _simple_clock_token_value(token: text) -> text:
+    val trimmed = token.trim()
+    val eq = trimmed.find("=")
+    if val eq_index = eq:
+        return trimmed.substring(eq_index + 1, trimmed.len()).trim()
+    trimmed
+
+fn _simple_reset_value(type_name: text) -> text:
+    if type_name.trim() == "bool":
+        return "'0'"
+    if type_name.trim().starts_with("i"):
+        return "to_signed(0, {_simple_integer_width(type_name.trim())})"
+    if type_name.trim().starts_with("u"):
+        return "to_unsigned(0, {_simple_integer_width(type_name.trim())})"
+    "'0'"

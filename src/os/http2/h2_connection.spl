@@ -1,0 +1,461 @@
+# HTTP/2 Connection State Machine — RFC 7540 / RFC 9113
+#
+# OS-level wrapper that adds connection state on top of the pure framing
+# primitives in std.http.h2.*. Reuses h2_write_frame / h2_parse_frame /
+# h2_connection_preface_bytes — no codec duplication.
+#
+# Scope (W16-O):
+# - H2Connection struct: remote/local SETTINGS, connection-level flow-control
+#   windows, stream-state map, HEADERS+CONTINUATION coalescing buffer.
+# - Stream state transitions: Idle -> Open -> HalfClosedLocal -> Closed.
+# - Convenience emit helpers: preface, SETTINGS, PING, GOAWAY, WINDOW_UPDATE.
+# - h2_feed_frame(conn, frame) -> H2FeedResult: update state + optional reply.
+# - h2_send_headers(conn, ...) -> H2SendResult: update state + frame bytes.
+#
+# Out of scope:
+# - HPACK encode/decode (header_block stays opaque [u8]).
+# - PADDED / PRIORITY-in-HEADERS sub-payloads.
+# - Server push (PUSH_PROMISE state machine).
+# - TLS / network I/O.
+#
+# Implementation note: Simple structs are value types; all state-mutating
+# functions return the updated H2Connection.
+
+use std.http.h2.h2_frame.{
+    H2Frame, H2DataFrame, H2HeadersFrame, H2RstStreamFrame,
+    H2SettingsFrame, H2Setting, H2PingFrame, H2GoawayFrame,
+    H2WindowUpdateFrame, H2ContinuationFrame,
+    H2_FLAG_END_STREAM, H2_FLAG_END_HEADERS, H2_FLAG_ACK,
+    H2_FRAME_HEADER_LEN,
+    H2_SETTINGS_HEADER_TABLE_SIZE, H2_SETTINGS_INITIAL_WINDOW_SIZE,
+    H2_SETTINGS_MAX_FRAME_SIZE, H2_SETTINGS_MAX_CONCURRENT_STREAMS,
+    H2_ERR_NO_ERROR
+}
+use std.http.h2.h2_writer.{h2_write_frame}
+use std.http.h2.h2_parser.{h2_parse_frame}
+use std.http.h2.h2_preface.{h2_connection_preface_bytes, h2_validate_preface, H2_CONNECTION_PREFACE_LEN}
+
+# ============================================================================
+# Default SETTINGS values (RFC 7540 §6.5.2)
+# ============================================================================
+
+val H2_DEFAULT_HEADER_TABLE_SIZE: i64   = 4096
+val H2_DEFAULT_INITIAL_WINDOW_SIZE: i64 = 65535
+val H2_DEFAULT_MAX_FRAME_SIZE: i64      = 16384
+
+# ============================================================================
+# Stream state machine (RFC 7540 §5.1)
+# ============================================================================
+
+enum H2StreamState:
+    """Subset of RFC 7540 §5.1 stream states required for W16-O scope."""
+    Idle
+    Open
+    HalfClosedLocal
+    HalfClosedRemote
+    Closed
+
+# ============================================================================
+# Per-stream entry
+# ============================================================================
+
+class H2StreamEntry:
+    """One entry in the connection's stream table."""
+    stream_id: i64
+    dstate: H2StreamState
+
+# ============================================================================
+# H2Connection — connection-level state
+# ============================================================================
+
+class H2Connection:
+    """
+    HTTP/2 connection state machine.
+
+    Fields:
+      local_settings        — settings we have sent to the peer.
+      remote_settings       — settings received from the peer.
+      recv_window           — connection-level receive flow-control window.
+      send_window           — connection-level send flow-control window.
+      streams               — flat list of known streams.
+      pending_hdr_stream_id — stream id awaiting CONTINUATION (0 = none).
+      pending_hdr_block     — accumulated opaque header block bytes.
+    """
+    local_settings: [H2Setting]
+    remote_settings: [H2Setting]
+    recv_window: i64
+    send_window: i64
+    streams: [H2StreamEntry]
+    pending_hdr_stream_id: i64
+    pending_hdr_block: [u8]
+
+# ============================================================================
+# Result structs (value-type return pattern for state + reply bytes)
+# ============================================================================
+
+class H2FeedResult:
+    """Result of feeding one inbound frame to the connection."""
+    conn: H2Connection
+    reply: [u8]
+
+class H2SendResult:
+    """Result of sending a frame (state updated + frame bytes to write)."""
+    conn: H2Connection
+    frame_bytes: [u8]
+
+# ============================================================================
+# Constructor
+# ============================================================================
+
+fn h2_connection_new() -> H2Connection:
+    """Create a fresh H2Connection with RFC-default SETTINGS and windows."""
+    var local_s: [H2Setting] = []
+    local_s.push(H2Setting(identifier: H2_SETTINGS_HEADER_TABLE_SIZE, value: H2_DEFAULT_HEADER_TABLE_SIZE))
+    local_s.push(H2Setting(identifier: H2_SETTINGS_INITIAL_WINDOW_SIZE, value: H2_DEFAULT_INITIAL_WINDOW_SIZE))
+    local_s.push(H2Setting(identifier: H2_SETTINGS_MAX_FRAME_SIZE, value: H2_DEFAULT_MAX_FRAME_SIZE))
+    var remote_s: [H2Setting] = []
+    var streams: [H2StreamEntry] = []
+    var empty_hdr: [u8] = []
+    return H2Connection(
+        local_settings: local_s,
+        remote_settings: remote_s,
+        recv_window: H2_DEFAULT_INITIAL_WINDOW_SIZE,
+        send_window: H2_DEFAULT_INITIAL_WINDOW_SIZE,
+        streams: streams,
+        pending_hdr_stream_id: 0,
+        pending_hdr_block: empty_hdr
+    )
+
+# ============================================================================
+# Stream state helpers
+# ============================================================================
+
+fn h2_stream_state(conn: H2Connection, stream_id: i64) -> H2StreamState:
+    """Return the current state of stream_id (Idle if not yet tracked)."""
+    var i = 0
+    val n = conn.streams.len()
+    loop:
+        if i >= n:
+            break
+        val e = conn.streams[i]
+        if e.stream_id == stream_id:
+            return e.dstate
+        i = i + 1
+    return H2StreamState.Idle
+
+fn h2_stream_state_is_open(conn: H2Connection, stream_id: i64) -> bool:
+    """Return true iff stream is in Open state."""
+    match h2_stream_state(conn, stream_id):
+        case Open: true
+        case _: false
+
+fn h2_stream_state_is_half_closed_local(conn: H2Connection, stream_id: i64) -> bool:
+    """Return true iff stream is in HalfClosedLocal state."""
+    match h2_stream_state(conn, stream_id):
+        case HalfClosedLocal: true
+        case _: false
+
+fn h2_stream_state_is_half_closed_remote(conn: H2Connection, stream_id: i64) -> bool:
+    """Return true iff stream is in HalfClosedRemote state."""
+    match h2_stream_state(conn, stream_id):
+        case HalfClosedRemote: true
+        case _: false
+
+fn h2_stream_state_is_closed(conn: H2Connection, stream_id: i64) -> bool:
+    """Return true iff stream is Closed."""
+    match h2_stream_state(conn, stream_id):
+        case Closed: true
+        case _: false
+
+fn h2_stream_state_is_idle(conn: H2Connection, stream_id: i64) -> bool:
+    """Return true iff stream is Idle (not yet seen)."""
+    match h2_stream_state(conn, stream_id):
+        case Idle: true
+        case _: false
+
+fn _upsert_stream(conn: H2Connection, stream_id: i64, new_state: H2StreamState) -> H2Connection:
+    """Return a new H2Connection with stream_id's state set to new_state."""
+    var new_streams: [H2StreamEntry] = []
+    var found = false
+    var i = 0
+    val n = conn.streams.len()
+    loop:
+        if i >= n:
+            break
+        val e = conn.streams[i]
+        if e.stream_id == stream_id:
+            new_streams.push(H2StreamEntry(stream_id: stream_id, dstate: new_state))
+            found = true
+        else:
+            new_streams.push(e)
+        i = i + 1
+    if not found:
+        new_streams.push(H2StreamEntry(stream_id: stream_id, dstate: new_state))
+    return H2Connection(
+        local_settings: conn.local_settings,
+        remote_settings: conn.remote_settings,
+        recv_window: conn.recv_window,
+        send_window: conn.send_window,
+        streams: new_streams,
+        pending_hdr_stream_id: conn.pending_hdr_stream_id,
+        pending_hdr_block: conn.pending_hdr_block
+    )
+
+# ============================================================================
+# Emit helpers — build frame bytes the caller writes to the wire
+# ============================================================================
+
+fn h2_emit_preface() -> [u8]:
+    """Return the 24-byte client connection preface."""
+    return h2_connection_preface_bytes()
+
+fn h2_emit_settings(conn: H2Connection) -> [u8]:
+    """Serialize our local SETTINGS as a SETTINGS frame."""
+    val frame = H2Frame.Settings(H2SettingsFrame(
+        flags: 0,
+        settings: conn.local_settings
+    ))
+    return h2_write_frame(frame)
+
+fn h2_emit_settings_ack() -> [u8]:
+    """Emit a SETTINGS ACK frame."""
+    var empty: [H2Setting] = []
+    val frame = H2Frame.Settings(H2SettingsFrame(
+        flags: H2_FLAG_ACK,
+        settings: empty
+    ))
+    return h2_write_frame(frame)
+
+fn h2_emit_ping(opaque_data: [u8]) -> [u8]:
+    """Emit a PING frame (no ACK flag) with the supplied 8-byte payload."""
+    val frame = H2Frame.Ping(H2PingFrame(
+        flags: 0,
+        opaque_data: opaque_data
+    ))
+    return h2_write_frame(frame)
+
+fn h2_emit_ping_ack(opaque_data: [u8]) -> [u8]:
+    """Emit a PING ACK frame echoing opaque_data."""
+    val frame = H2Frame.Ping(H2PingFrame(
+        flags: H2_FLAG_ACK,
+        opaque_data: opaque_data
+    ))
+    return h2_write_frame(frame)
+
+fn h2_emit_goaway(last_stream_id: i64, error_code: i64) -> [u8]:
+    """Emit a GOAWAY frame. debug_data is empty."""
+    var empty_debug: [u8] = []
+    val frame = H2Frame.Goaway(H2GoawayFrame(
+        last_stream_id: last_stream_id,
+        error_code: error_code,
+        debug_data: empty_debug
+    ))
+    return h2_write_frame(frame)
+
+fn h2_emit_window_update(stream_id: i64, increment: i64) -> [u8]:
+    """Emit a WINDOW_UPDATE frame for stream_id (0 = connection-level)."""
+    val frame = H2Frame.WindowUpdate(H2WindowUpdateFrame(
+        stream_id: stream_id,
+        increment: increment
+    ))
+    return h2_write_frame(frame)
+
+fn h2_emit_headers(stream_id: i64, header_block: [u8], end_headers: bool, end_stream: bool) -> [u8]:
+    """Emit a HEADERS frame. Flags are computed from the two booleans."""
+    var flags: i64 = 0
+    if end_headers:
+        flags = flags | H2_FLAG_END_HEADERS
+    if end_stream:
+        flags = flags | H2_FLAG_END_STREAM
+    val frame = H2Frame.Headers(H2HeadersFrame(
+        stream_id: stream_id,
+        flags: flags,
+        header_block: header_block
+    ))
+    return h2_write_frame(frame)
+
+fn h2_emit_continuation(stream_id: i64, header_block: [u8], end_headers: bool) -> [u8]:
+    """Emit a CONTINUATION frame."""
+    var flags: i64 = 0
+    if end_headers:
+        flags = flags | H2_FLAG_END_HEADERS
+    val frame = H2Frame.Continuation(H2ContinuationFrame(
+        stream_id: stream_id,
+        flags: flags,
+        header_block: header_block
+    ))
+    return h2_write_frame(frame)
+
+# ============================================================================
+# State-mutating send helper
+# ============================================================================
+
+fn h2_send_headers(conn: H2Connection, stream_id: i64, header_block: [u8], end_stream: bool) -> H2SendResult:
+    """
+    Send a HEADERS frame (END_HEADERS always set).
+    Transitions stream: Idle->Open or *->HalfClosedLocal if end_stream.
+    Returns H2SendResult with updated conn and frame bytes.
+    """
+    var new_conn = conn
+    if end_stream:
+        new_conn = _upsert_stream(new_conn, stream_id, H2StreamState.HalfClosedLocal)
+    else:
+        new_conn = _upsert_stream(new_conn, stream_id, H2StreamState.Open)
+    val fbytes = h2_emit_headers(stream_id, header_block, true, end_stream)
+    return H2SendResult(conn: new_conn, frame_bytes: fbytes)
+
+# ============================================================================
+# feed_frame — inbound frame processing
+# ============================================================================
+
+fn h2_feed_frame(conn: H2Connection, frame: H2Frame) -> H2FeedResult:
+    """
+    Process an inbound frame, returning updated connection state and reply bytes.
+
+    Frame handling:
+      SETTINGS (non-ACK) — store remote_settings, reply with SETTINGS ACK.
+      SETTINGS ACK       — no-op.
+      PING (non-ACK)     — reply with PING ACK echoing opaque_data.
+      PING ACK           — no-op.
+      WINDOW_UPDATE (stream 0) — increment connection send_window.
+      HEADERS            — transition stream Idle->Open or ->HalfClosedRemote
+                           depending on END_STREAM; start coalescing if no
+                           END_HEADERS.
+      CONTINUATION       — append to pending_hdr_block; finalize on END_HEADERS.
+      DATA END_STREAM    — HalfClosedLocal->Closed or Open->HalfClosedRemote.
+      All other frames   — no state change.
+    """
+    var empty_reply: [u8] = []
+    match frame:
+        case Settings(s):
+            if (s.flags & H2_FLAG_ACK) != 0:
+                return H2FeedResult(conn: conn, reply: empty_reply)
+            # Store remote settings — rebuild conn with new remote_settings.
+            val updated = H2Connection(
+                local_settings: conn.local_settings,
+                remote_settings: s.settings,
+                recv_window: conn.recv_window,
+                send_window: conn.send_window,
+                streams: conn.streams,
+                pending_hdr_stream_id: conn.pending_hdr_stream_id,
+                pending_hdr_block: conn.pending_hdr_block
+            )
+            return H2FeedResult(conn: updated, reply: h2_emit_settings_ack())
+        case Ping(pg):
+            if (pg.flags & H2_FLAG_ACK) != 0:
+                return H2FeedResult(conn: conn, reply: empty_reply)
+            return H2FeedResult(conn: conn, reply: h2_emit_ping_ack(pg.opaque_data))
+        case WindowUpdate(w):
+            if w.stream_id == 0:
+                val updated = H2Connection(
+                    local_settings: conn.local_settings,
+                    remote_settings: conn.remote_settings,
+                    recv_window: conn.recv_window,
+                    send_window: conn.send_window + w.increment,
+                    streams: conn.streams,
+                    pending_hdr_stream_id: conn.pending_hdr_stream_id,
+                    pending_hdr_block: conn.pending_hdr_block
+                )
+                return H2FeedResult(conn: updated, reply: empty_reply)
+            return H2FeedResult(conn: conn, reply: empty_reply)
+        case Headers(h):
+            if h.stream_id == 0:
+                return H2FeedResult(conn: conn, reply: empty_reply)
+            if (h.flags & H2_FLAG_END_HEADERS) != 0:
+                # Complete HEADERS — transition stream state.
+                var new_conn = conn
+                match h2_stream_state(conn, h.stream_id):
+                    case Idle:
+                        if (h.flags & H2_FLAG_END_STREAM) != 0:
+                            new_conn = _upsert_stream(conn, h.stream_id, H2StreamState.HalfClosedRemote)
+                        else:
+                            new_conn = _upsert_stream(conn, h.stream_id, H2StreamState.Open)
+                    case HalfClosedLocal:
+                        if (h.flags & H2_FLAG_END_STREAM) != 0:
+                            new_conn = _upsert_stream(conn, h.stream_id, H2StreamState.Closed)
+                        else:
+                            new_conn = conn
+                    case _:
+                        new_conn = conn
+                return H2FeedResult(conn: new_conn, reply: empty_reply)
+            else:
+                # Start HEADERS+CONTINUATION coalescing.
+                var block: [u8] = []
+                var j = 0
+                val blen = h.header_block.len()
+                loop:
+                    if j >= blen:
+                        break
+                    block.push(h.header_block[j])
+                    j = j + 1
+                val updated = H2Connection(
+                    local_settings: conn.local_settings,
+                    remote_settings: conn.remote_settings,
+                    recv_window: conn.recv_window,
+                    send_window: conn.send_window,
+                    streams: conn.streams,
+                    pending_hdr_stream_id: h.stream_id,
+                    pending_hdr_block: block
+                )
+                return H2FeedResult(conn: updated, reply: empty_reply)
+        case Continuation(c):
+            if c.stream_id == 0:
+                return H2FeedResult(conn: conn, reply: empty_reply)
+            if c.stream_id != conn.pending_hdr_stream_id:
+                return H2FeedResult(conn: conn, reply: empty_reply)
+            # Append continuation bytes.
+            var block: [u8] = []
+            var k = 0
+            val existing_len = conn.pending_hdr_block.len()
+            loop:
+                if k >= existing_len:
+                    break
+                block.push(conn.pending_hdr_block[k])
+                k = k + 1
+            var j = 0
+            val new_len = c.header_block.len()
+            loop:
+                if j >= new_len:
+                    break
+                block.push(c.header_block[j])
+                j = j + 1
+            if (c.flags & H2_FLAG_END_HEADERS) != 0:
+                # Coalescing complete — transition stream to Open, clear pending.
+                val new_conn = _upsert_stream(conn, c.stream_id, H2StreamState.Open)
+                val final_conn = H2Connection(
+                    local_settings: new_conn.local_settings,
+                    remote_settings: new_conn.remote_settings,
+                    recv_window: new_conn.recv_window,
+                    send_window: new_conn.send_window,
+                    streams: new_conn.streams,
+                    pending_hdr_stream_id: 0,
+                    pending_hdr_block: block
+                )
+                return H2FeedResult(conn: final_conn, reply: empty_reply)
+            else:
+                val updated = H2Connection(
+                    local_settings: conn.local_settings,
+                    remote_settings: conn.remote_settings,
+                    recv_window: conn.recv_window,
+                    send_window: conn.send_window,
+                    streams: conn.streams,
+                    pending_hdr_stream_id: conn.pending_hdr_stream_id,
+                    pending_hdr_block: block
+                )
+                return H2FeedResult(conn: updated, reply: empty_reply)
+        case Data(d):
+            if d.stream_id == 0:
+                return H2FeedResult(conn: conn, reply: empty_reply)
+            if (d.flags & H2_FLAG_END_STREAM) != 0:
+                var new_conn = conn
+                match h2_stream_state(conn, d.stream_id):
+                    case HalfClosedLocal:
+                        new_conn = _upsert_stream(conn, d.stream_id, H2StreamState.Closed)
+                    case Open:
+                        new_conn = _upsert_stream(conn, d.stream_id, H2StreamState.HalfClosedRemote)
+                    case _:
+                        new_conn = conn
+                return H2FeedResult(conn: new_conn, reply: empty_reply)
+            return H2FeedResult(conn: conn, reply: empty_reply)
+        case _:
+            return H2FeedResult(conn: conn, reply: empty_reply)

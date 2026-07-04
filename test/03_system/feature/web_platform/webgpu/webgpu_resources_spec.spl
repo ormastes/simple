@@ -1,0 +1,381 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
+    GPU_TEXTURE_FORMAT_RGBA8_UNORM, GPU_TEXTURE_FORMAT_DEPTH24_PLUS_STENCIL8
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
+    WebGPUResourceTable,
+    WEBGPU_BUFFER_USAGE_COPY_DST, WEBGPU_BUFFER_USAGE_UNIFORM,
+    WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_USAGE_COPY_DST,
+    WEBGPU_SHADER_STAGE_VERTEX, WEBGPU_SHADER_STAGE_FRAGMENT,
+    WEBGPU_BINDING_TYPE_READONLY_STORAGE_BUFFER, WEBGPU_BINDING_TYPE_STORAGE_TEXTURE,
+    WEBGPU_BINDING_TYPE_NON_FILTERING_SAMPLER, WEBGPU_BINDING_TYPE_COMPARISON_SAMPLER,
+    WEBGPU_TEXTURE_DIMENSION_2D, WEBGPU_TEXTURE_DIMENSION_3D, WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE,
+    GPUBindGroupLayoutEntry, GPUBindGroupEntry,
+    webgpu_validate_buffer_descriptor, webgpu_validate_texture_descriptor,
+    webgpu_validate_texture_view_descriptor, webgpu_find_texture_view,
+    webgpu_validate_extended_texture_descriptor, webgpu_validate_sampler_descriptor,
+    webgpu_validate_bind_group_layout_descriptor
+}
+
+describe "Browser WebGPU resources":
+    describe "resource handles":
+        it "allocates deterministic handles across buffer texture and sampler":
+            var resources = WebGPUResourceTable.create()
+            val buffer = resources.create_buffer("uniforms", 256, WEBGPU_BUFFER_USAGE_COPY_DST | WEBGPU_BUFFER_USAGE_UNIFORM)
+            val texture = resources.create_texture("albedo", 64, 32, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING | WEBGPU_TEXTURE_USAGE_COPY_DST)
+            val sampler = resources.create_sampler("nearest", "clamp-to-edge", "repeat", "nearest", "linear")
+            expect(buffer.valid).to_equal(true)
+            expect(buffer.id).to_equal(1)
+            expect(texture.valid).to_equal(true)
+            expect(texture.id).to_equal(2)
+            expect(sampler.valid).to_equal(true)
+            expect(sampler.id).to_equal(3)
+            expect(resources.resource_count()).to_equal(3)
+
+        it "allocates bind group layouts and bind groups after resources":
+            var resources = WebGPUResourceTable.create()
+            val buffer = resources.create_buffer("uniforms", 256, WEBGPU_BUFFER_USAGE_COPY_DST | WEBGPU_BUFFER_USAGE_UNIFORM)
+            val texture = resources.create_texture("albedo", 64, 32, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING | WEBGPU_TEXTURE_USAGE_COPY_DST)
+            val sampler = resources.create_sampler("nearest", "clamp-to-edge", "repeat", "nearest", "linear")
+            val layout = resources.create_bind_group_layout("material", [
+                GPUBindGroupLayoutEntry.buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
+                GPUBindGroupLayoutEntry.texture(1, WEBGPU_SHADER_STAGE_FRAGMENT),
+                GPUBindGroupLayoutEntry.sampler(2, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val bind_group = resources.create_bind_group("material-0", layout.id, [
+                GPUBindGroupEntry.buffer(0, buffer.id),
+                GPUBindGroupEntry.texture(1, texture.id),
+                GPUBindGroupEntry.sampler(2, sampler.id)
+            ])
+            expect(layout.valid).to_equal(true)
+            expect(layout.id).to_equal(4)
+            expect(layout.entry_count()).to_equal(3)
+            expect(bind_group.valid).to_equal(true)
+            expect(bind_group.id).to_equal(5)
+            expect(bind_group.entry_count()).to_equal(3)
+            expect(resources.resource_count()).to_equal(5)
+
+        it "allocates bind groups with texture view entries":
+            var resources = WebGPUResourceTable.create()
+            val texture = resources.create_texture_with_dimension("volume", 16, 16, 4, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_3D)
+            val view = resources.create_texture_view("volume-view", texture.id, "", WEBGPU_TEXTURE_DIMENSION_3D, 0, 1, 0, 4)
+            val layout = resources.create_bind_group_layout("sampled", [
+                GPUBindGroupLayoutEntry.texture(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val bind_group = resources.create_bind_group("sampled-0", layout.id, [
+                GPUBindGroupEntry.texture_view(0, view.id)
+            ])
+            expect(bind_group.valid).to_equal(true)
+            expect(bind_group.id).to_equal(4)
+            expect(bind_group.entries[0].texture_view_id).to_equal(view.id)
+
+        it "does not consume an id for invalid resources":
+            var resources = WebGPUResourceTable.create()
+            val rejected = resources.create_buffer("empty", 0, WEBGPU_BUFFER_USAGE_UNIFORM)
+            val accepted = resources.create_buffer("uniforms", 16, WEBGPU_BUFFER_USAGE_UNIFORM)
+            expect(rejected.valid).to_equal(false)
+            expect(rejected.id).to_equal(-1)
+            expect(accepted.id).to_equal(1)
+            expect(resources.resource_count()).to_equal(1)
+
+        it "allocates deterministic texture view handles":
+            var resources = WebGPUResourceTable.create()
+            val texture = resources.create_texture_with_mip_levels("array", 64, 64, 4, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING | WEBGPU_TEXTURE_USAGE_COPY_DST, WEBGPU_TEXTURE_DIMENSION_2D, 3)
+            val view = resources.create_texture_view("array-slice", texture.id, "", WEBGPU_TEXTURE_DIMENSION_2D, 1, 2, 1, 2)
+            val found = webgpu_find_texture_view(resources, view.id)
+            expect(texture.id).to_equal(1)
+            expect(view.valid).to_equal(true)
+            expect(view.id).to_equal(2)
+            expect(view.texture_id).to_equal(texture.id)
+            expect(view.format).to_equal(GPU_TEXTURE_FORMAT_RGBA8_UNORM)
+            expect(found.valid).to_equal(true)
+            expect(found.base_mip_level).to_equal(1)
+            expect(resources.resource_count()).to_equal(2)
+
+        it "allocates cube texture views for six square layers":
+            var resources = WebGPUResourceTable.create()
+            val texture = resources.create_texture("skybox", 128, 128, 6, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            val view = resources.create_texture_view("skybox-view", texture.id, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE, 0, 1, 0, 6)
+            expect(view.valid).to_equal(true)
+            expect(view.dimension).to_equal(WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE)
+            expect(view.array_layer_count).to_equal(6)
+
+        it "allocates 3d texture views for 3d texture handles":
+            var resources = WebGPUResourceTable.create()
+            val texture = resources.create_texture_with_dimension("volume", 32, 32, 8, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_3D)
+            val view = resources.create_texture_view("volume-view", texture.id, "", WEBGPU_TEXTURE_DIMENSION_3D, 0, 1, 0, 8)
+            expect(texture.valid).to_equal(true)
+            expect(texture.dimension).to_equal(WEBGPU_TEXTURE_DIMENSION_3D)
+            expect(view.valid).to_equal(true)
+            expect(view.dimension).to_equal(WEBGPU_TEXTURE_DIMENSION_3D)
+
+        it "allocates descriptor-complete samplers":
+            var resources = WebGPUResourceTable.create()
+            val sampler = resources.create_sampler_with_descriptor("shadow", "repeat", "mirror-repeat", "clamp-to-edge", "linear", "linear", "linear", 1.0, 8.0, "less-equal", 4)
+            expect(sampler.valid).to_equal(true)
+            expect(sampler.id).to_equal(1)
+            expect(sampler.address_mode_w).to_equal("clamp-to-edge")
+            expect(sampler.mipmap_filter).to_equal("linear")
+            expect(sampler.lod_min_clamp).to_equal(1.0)
+            expect(sampler.lod_max_clamp).to_equal(8.0)
+            expect(sampler.compare).to_equal("less-equal")
+            expect(sampler.max_anisotropy).to_equal(4)
+
+        it "allocates descriptor textures with sample counts":
+            var resources = WebGPUResourceTable.create()
+            val texture = resources.create_texture_with_descriptor("msaa-color", 64, 64, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 1, 4)
+            expect(texture.valid).to_equal(true)
+            expect(texture.sample_count).to_equal(4)
+            expect(texture.mip_level_count).to_equal(1)
+
+        it "does not consume an id for invalid texture views":
+            var resources = WebGPUResourceTable.create()
+            val texture = resources.create_texture("albedo", 64, 64, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            val rejected = resources.create_texture_view("bad", texture.id, "bgra8unorm", WEBGPU_TEXTURE_DIMENSION_2D, 0, 1, 0, 1)
+            val accepted = resources.create_texture_view("ok", texture.id, "", WEBGPU_TEXTURE_DIMENSION_2D, 0, 1, 0, 1)
+            expect(rejected.valid).to_equal(false)
+            expect(rejected.id).to_equal(-1)
+            expect(accepted.id).to_equal(2)
+            expect(resources.resource_count()).to_equal(2)
+
+    describe "descriptor validation":
+        it "rejects non-positive buffer sizes":
+            expect(webgpu_validate_buffer_descriptor(0, WEBGPU_BUFFER_USAGE_UNIFORM)).to_equal("GPUBuffer size must be positive")
+
+        it "rejects unsupported buffer usage bits":
+            expect(webgpu_validate_buffer_descriptor(64, 2048)).to_equal("GPUBuffer usage is not supported")
+
+        it "rejects non-positive texture sizes":
+            val err = webgpu_validate_texture_descriptor(16, 0, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            expect(err).to_equal("GPUTexture size must be positive")
+
+        it "rejects unsupported texture formats":
+            val err = webgpu_validate_texture_descriptor(16, 16, 1, "bc7-rgba-unorm", WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            expect(err).to_equal("GPUTexture format is not supported")
+
+        it "accepts depth-stencil texture formats":
+            val err = webgpu_validate_texture_descriptor(16, 16, 1, GPU_TEXTURE_FORMAT_DEPTH24_PLUS_STENCIL8, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            expect(err).to_equal("")
+
+        it "rejects unsupported texture usage bits":
+            val err = webgpu_validate_texture_descriptor(16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, 64)
+            expect(err).to_equal("GPUTexture usage is not supported")
+
+        it "accepts M26 texture descriptors for 3d arrays msaa and cubemaps":
+            val tex3d = webgpu_validate_extended_texture_descriptor(32, 32, 8, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_3D, 1, 1, WEBGPU_TEXTURE_DIMENSION_3D)
+            val msaa = webgpu_validate_extended_texture_descriptor(64, 64, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 1, 4, WEBGPU_TEXTURE_DIMENSION_2D)
+            val cube = webgpu_validate_extended_texture_descriptor(128, 128, 6, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 1, 1, WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE)
+            expect(tex3d).to_equal("")
+            expect(msaa).to_equal("")
+            expect(cube).to_equal("")
+
+        it "rejects invalid M26 texture descriptor combinations":
+            val bad_msaa_mips = webgpu_validate_extended_texture_descriptor(64, 64, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 2, 4, WEBGPU_TEXTURE_DIMENSION_2D)
+            val bad_msaa_layers = webgpu_validate_extended_texture_descriptor(64, 64, 2, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 1, 4, WEBGPU_TEXTURE_DIMENSION_2D)
+            val bad_cube_layers = webgpu_validate_extended_texture_descriptor(128, 128, 5, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 1, 1, WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE)
+            val bad_cube_shape = webgpu_validate_extended_texture_descriptor(128, 64, 6, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 1, 1, WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE)
+            expect(bad_msaa_mips).to_equal("GPUTexture multisampled textures must have one mip level")
+            expect(bad_msaa_layers).to_equal("GPUTexture multisampling requires one array layer")
+            expect(bad_cube_layers).to_equal("GPUTexture cube views require exactly six array layers")
+            expect(bad_cube_shape).to_equal("GPUTexture cube views require square faces")
+
+        it "rejects texture mip counts beyond descriptor dimensions":
+            val too_many_2d_mips = webgpu_validate_extended_texture_descriptor(8, 4, 12, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 5, 1, WEBGPU_TEXTURE_DIMENSION_2D)
+            val too_many_3d_mips = webgpu_validate_extended_texture_descriptor(8, 4, 2, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_3D, 5, 1, WEBGPU_TEXTURE_DIMENSION_3D)
+            val max_2d_mips = webgpu_validate_extended_texture_descriptor(8, 4, 12, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 4, 1, WEBGPU_TEXTURE_DIMENSION_2D)
+            expect(too_many_2d_mips).to_equal("GPUTexture mipLevelCount exceeds texture size")
+            expect(too_many_3d_mips).to_equal("GPUTexture mipLevelCount exceeds texture size")
+            expect(max_2d_mips).to_equal("")
+
+        it "rejects invalid texture view descriptor ranges":
+            var resources = WebGPUResourceTable.create()
+            val texture = resources.create_texture("array", 16, 16, 4, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            expect(webgpu_validate_texture_view_descriptor(texture, "", WEBGPU_TEXTURE_DIMENSION_2D, -1, 1, 0, 1)).to_equal("GPUTextureView baseMipLevel must be non-negative")
+            expect(webgpu_validate_texture_view_descriptor(texture, "", WEBGPU_TEXTURE_DIMENSION_2D, 0, 0, 0, 1)).to_equal("GPUTextureView mipLevelCount must be positive")
+            expect(webgpu_validate_texture_view_descriptor(texture, "", WEBGPU_TEXTURE_DIMENSION_2D, 4, 2, 0, 1)).to_equal("GPUTextureView mip range exceeds texture mip levels")
+            expect(webgpu_validate_texture_view_descriptor(texture, "", WEBGPU_TEXTURE_DIMENSION_2D, 0, 1, -1, 1)).to_equal("GPUTextureView baseArrayLayer must be non-negative")
+            expect(webgpu_validate_texture_view_descriptor(texture, "", WEBGPU_TEXTURE_DIMENSION_2D, 0, 1, 0, 0)).to_equal("GPUTextureView arrayLayerCount must be positive")
+            expect(webgpu_validate_texture_view_descriptor(texture, "", WEBGPU_TEXTURE_DIMENSION_2D, 0, 1, 3, 2)).to_equal("GPUTextureView array layer range exceeds texture layers")
+
+        it "rejects invalid texture view format dimension and cube descriptors":
+            var resources = WebGPUResourceTable.create()
+            val square = resources.create_texture("skybox", 64, 64, 6, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            val rectangle = resources.create_texture("bad-skybox", 64, 32, 6, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            expect(webgpu_validate_texture_view_descriptor(square, "bgra8unorm", WEBGPU_TEXTURE_DIMENSION_2D, 0, 1, 0, 1)).to_equal("GPUTextureView format must match texture format")
+            expect(webgpu_validate_texture_view_descriptor(square, "", WEBGPU_TEXTURE_DIMENSION_3D, 0, 1, 0, 1)).to_equal("GPUTextureView dimension must match texture dimension")
+            expect(webgpu_validate_texture_view_descriptor(square, "", WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE, 0, 1, 0, 5)).to_equal("GPUTextureView cube views require exactly six array layers")
+            expect(webgpu_validate_texture_view_descriptor(rectangle, "", WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE, 0, 1, 0, 6)).to_equal("GPUTextureView cube views require square faces")
+
+        it "rejects unsupported sampler modes":
+            val err = webgpu_validate_sampler_descriptor("wrap", "repeat", "clamp-to-edge", "nearest", "linear", "nearest", 0.0, 32.0, "", 1)
+            expect(err).to_equal("GPUSampler address mode is not supported")
+
+        it "rejects invalid descriptor-complete sampler fields":
+            expect(webgpu_validate_sampler_descriptor("repeat", "repeat", "repeat", "nearest", "linear", "cubic", 0.0, 32.0, "", 1)).to_equal("GPUSampler filter mode is not supported")
+            expect(webgpu_validate_sampler_descriptor("repeat", "repeat", "repeat", "nearest", "linear", "nearest", 4.0, 2.0, "", 1)).to_equal("GPUSampler lod clamp range is invalid")
+            expect(webgpu_validate_sampler_descriptor("repeat", "repeat", "repeat", "nearest", "linear", "nearest", 0.0, 32.0, "between", 1)).to_equal("GPUSampler compare function is not supported")
+            expect(webgpu_validate_sampler_descriptor("repeat", "repeat", "repeat", "nearest", "linear", "nearest", 0.0, 32.0, "", 0)).to_equal("GPUSampler maxAnisotropy must be at least 1")
+
+        it "rejects duplicate bind group layout bindings":
+            val err = webgpu_validate_bind_group_layout_descriptor([
+                GPUBindGroupLayoutEntry.buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
+                GPUBindGroupLayoutEntry.sampler(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            expect(err).to_equal("GPUBindGroupLayout bindings must be unique")
+
+        it "rejects unsupported bind group layout visibility":
+            val err = webgpu_validate_bind_group_layout_descriptor([
+                GPUBindGroupLayoutEntry.buffer(0, 16)
+            ])
+            expect(err).to_equal("GPUBindGroupLayout visibility is not supported")
+
+        it "rejects unsupported bind group layout binding type":
+            val err = webgpu_validate_bind_group_layout_descriptor([
+                GPUBindGroupLayoutEntry(binding: 0, visibility: WEBGPU_SHADER_STAGE_VERTEX, binding_type: 99, has_dynamic_offset: false)
+            ])
+            expect(err).to_equal("GPUBindGroupLayout binding type is not supported")
+
+        it "creates storage-specific bind group layout entries":
+            val readonly = GPUBindGroupLayoutEntry.readonly_storage_buffer(0, WEBGPU_SHADER_STAGE_VERTEX)
+            val storage_texture = GPUBindGroupLayoutEntry.storage_texture(1, WEBGPU_SHADER_STAGE_FRAGMENT)
+            val err = webgpu_validate_bind_group_layout_descriptor([readonly, storage_texture])
+            expect(err).to_equal("")
+            expect(readonly.binding_type).to_equal(WEBGPU_BINDING_TYPE_READONLY_STORAGE_BUFFER)
+            expect(storage_texture.binding_type).to_equal(WEBGPU_BINDING_TYPE_STORAGE_TEXTURE)
+
+        it "creates sampler layout entries for filtering non-filtering and comparison samplers":
+            val filtering = GPUBindGroupLayoutEntry.sampler(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            val nearest = GPUBindGroupLayoutEntry.non_filtering_sampler(1, WEBGPU_SHADER_STAGE_FRAGMENT)
+            val comparison = GPUBindGroupLayoutEntry.comparison_sampler(2, WEBGPU_SHADER_STAGE_FRAGMENT)
+            expect(filtering.binding_type).to_equal(6)
+            expect(nearest.binding_type).to_equal(WEBGPU_BINDING_TYPE_NON_FILTERING_SAMPLER)
+            expect(comparison.binding_type).to_equal(WEBGPU_BINDING_TYPE_COMPARISON_SAMPLER)
+
+        it "accepts dynamic offsets only for buffer layout bindings":
+            val ok = webgpu_validate_bind_group_layout_descriptor([
+                GPUBindGroupLayoutEntry.dynamic_buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
+                GPUBindGroupLayoutEntry.dynamic_storage_buffer(1, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val bad = webgpu_validate_bind_group_layout_descriptor([
+                GPUBindGroupLayoutEntry(binding: 0, visibility: WEBGPU_SHADER_STAGE_FRAGMENT, binding_type: 6, has_dynamic_offset: true)
+            ])
+            expect(ok).to_equal("")
+            expect(bad).to_equal("GPUBindGroupLayout dynamic offsets require buffer bindings")
+
+        it "rejects bind groups with missing layout bindings":
+            var resources = WebGPUResourceTable.create()
+            val buffer = resources.create_buffer("uniforms", 256, WEBGPU_BUFFER_USAGE_UNIFORM)
+            val layout = resources.create_bind_group_layout("material", [
+                GPUBindGroupLayoutEntry.buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
+                GPUBindGroupLayoutEntry.sampler(1, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val bind_group = resources.create_bind_group("bad", layout.id, [
+                GPUBindGroupEntry.buffer(0, buffer.id)
+            ])
+            expect(bind_group.valid).to_equal(false)
+            expect(bind_group.error).to_equal("GPUBindGroup entry count must match layout")
+
+        it "rejects bind group entries with duplicate bindings":
+            var resources = WebGPUResourceTable.create()
+            val buffer = resources.create_buffer("uniforms", 256, WEBGPU_BUFFER_USAGE_UNIFORM)
+            val sampler = resources.create_sampler("nearest", "clamp-to-edge", "repeat", "nearest", "linear")
+            val layout = resources.create_bind_group_layout("material", [
+                GPUBindGroupLayoutEntry.buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
+                GPUBindGroupLayoutEntry.sampler(1, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val bind_group = resources.create_bind_group("bad", layout.id, [
+                GPUBindGroupEntry.buffer(0, buffer.id),
+                GPUBindGroupEntry.sampler(0, sampler.id)
+            ])
+            expect(bind_group.valid).to_equal(false)
+            expect(bind_group.error).to_equal("GPUBindGroup bindings must be unique")
+
+        it "rejects bind group entries with negative bindings":
+            var resources = WebGPUResourceTable.create()
+            val buffer = resources.create_buffer("uniforms", 256, WEBGPU_BUFFER_USAGE_UNIFORM)
+            val layout = resources.create_bind_group_layout("material", [
+                GPUBindGroupLayoutEntry.buffer(0, WEBGPU_SHADER_STAGE_VERTEX)
+            ])
+            val bind_group = resources.create_bind_group("bad", layout.id, [
+                GPUBindGroupEntry.buffer(-1, buffer.id)
+            ])
+            expect(bind_group.valid).to_equal(false)
+            expect(bind_group.error).to_equal("GPUBindGroup binding must be non-negative")
+
+        it "rejects bind groups that bind the wrong resource class":
+            var resources = WebGPUResourceTable.create()
+            val buffer = resources.create_buffer("uniforms", 256, WEBGPU_BUFFER_USAGE_UNIFORM)
+            val layout = resources.create_bind_group_layout("material", [
+                GPUBindGroupLayoutEntry.sampler(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val bind_group = resources.create_bind_group("bad", layout.id, [
+                GPUBindGroupEntry.buffer(0, buffer.id)
+            ])
+            expect(bind_group.valid).to_equal(false)
+            expect(bind_group.error).to_equal("GPUBindGroup sampler binding must reference a sampler")
+
+        it "validates bind group buffer binding ranges":
+            var resources = WebGPUResourceTable.create()
+            val buffer = resources.create_buffer("uniforms", 256, WEBGPU_BUFFER_USAGE_UNIFORM)
+            val layout = resources.create_bind_group_layout("material", [
+                GPUBindGroupLayoutEntry.buffer(0, WEBGPU_SHADER_STAGE_VERTEX)
+            ])
+            val ok = resources.create_bind_group("ok", layout.id, [
+                GPUBindGroupEntry.buffer_range(0, buffer.id, 64, 128)
+            ])
+            val negative = resources.create_bind_group("negative", layout.id, [
+                GPUBindGroupEntry.buffer_range(0, buffer.id, -1, 16)
+            ])
+            val zero_size = resources.create_bind_group("zero-size", layout.id, [
+                GPUBindGroupEntry.buffer_range(0, buffer.id, 64, 0)
+            ])
+            val overflow = resources.create_bind_group("overflow", layout.id, [
+                GPUBindGroupEntry.buffer_range(0, buffer.id, 192, 128)
+            ])
+            expect(ok.valid).to_equal(true)
+            expect(ok.entries[0].buffer_offset).to_equal(64)
+            expect(ok.entries[0].buffer_size).to_equal(128)
+            expect(negative.valid).to_equal(false)
+            expect(negative.error).to_equal("GPUBindGroup buffer offset must be non-negative")
+            expect(zero_size.valid).to_equal(false)
+            expect(zero_size.error).to_equal("GPUBindGroup buffer binding size must be positive")
+            expect(overflow.valid).to_equal(false)
+            expect(overflow.error).to_equal("GPUBindGroup buffer binding range exceeds buffer size")
+
+        it "rejects bind groups with missing texture view resources":
+            var resources = WebGPUResourceTable.create()
+            val layout = resources.create_bind_group_layout("sampled", [
+                GPUBindGroupLayoutEntry.texture(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val bind_group = resources.create_bind_group("bad", layout.id, [
+                GPUBindGroupEntry.texture_view(0, 99)
+            ])
+            expect(bind_group.valid).to_equal(false)
+            expect(bind_group.error).to_equal("GPUBindGroup texture view resource does not exist")
+
+        it "validates sampler bindings against filtering comparison and non-filtering layout types":
+            var resources = WebGPUResourceTable.create()
+            val filtering = resources.create_sampler_with_descriptor("linear", "repeat", "repeat", "repeat", "linear", "linear", "linear", 0.0, 32.0, "", 1)
+            val nearest = resources.create_sampler_with_descriptor("nearest", "repeat", "repeat", "repeat", "nearest", "nearest", "nearest", 0.0, 32.0, "", 1)
+            val comparison = resources.create_sampler_with_descriptor("shadow", "clamp-to-edge", "clamp-to-edge", "clamp-to-edge", "linear", "linear", "linear", 0.0, 32.0, "less-equal", 1)
+            val filtering_layout = resources.create_bind_group_layout("filtering", [
+                GPUBindGroupLayoutEntry.sampler(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val nearest_layout = resources.create_bind_group_layout("nearest", [
+                GPUBindGroupLayoutEntry.non_filtering_sampler(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val comparison_layout = resources.create_bind_group_layout("comparison", [
+                GPUBindGroupLayoutEntry.comparison_sampler(0, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            expect(resources.create_bind_group("filtering-ok", filtering_layout.id, [GPUBindGroupEntry.sampler(0, filtering.id)]).valid).to_equal(true)
+            expect(resources.create_bind_group("nearest-ok", nearest_layout.id, [GPUBindGroupEntry.sampler(0, nearest.id)]).valid).to_equal(true)
+            expect(resources.create_bind_group("comparison-ok", comparison_layout.id, [GPUBindGroupEntry.sampler(0, comparison.id)]).valid).to_equal(true)
+            val bad_comparison = resources.create_bind_group("comparison-bad", comparison_layout.id, [GPUBindGroupEntry.sampler(0, filtering.id)])
+            val bad_filtering = resources.create_bind_group("filtering-bad", filtering_layout.id, [GPUBindGroupEntry.sampler(0, comparison.id)])
+            val bad_nearest = resources.create_bind_group("nearest-bad", nearest_layout.id, [GPUBindGroupEntry.sampler(0, filtering.id)])
+            expect(bad_comparison.valid).to_equal(false)
+            expect(bad_comparison.error).to_equal("GPUBindGroup comparison sampler binding requires a compare sampler")
+            expect(bad_filtering.valid).to_equal(false)
+            expect(bad_filtering.error).to_equal("GPUBindGroup filtering sampler binding cannot reference a comparison sampler")
+            expect(bad_nearest.valid).to_equal(false)
+            expect(bad_nearest.error).to_equal("GPUBindGroup non-filtering sampler binding requires nearest filters")

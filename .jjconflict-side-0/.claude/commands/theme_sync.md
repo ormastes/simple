@@ -1,1 +1,0 @@
-../skills/theme_sync.md

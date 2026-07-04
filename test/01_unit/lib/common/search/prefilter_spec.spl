@@ -1,0 +1,164 @@
+# prefilter_spec.spl — literal/trigram prefilter -> candidate -> verify (AC-4)
+#
+# Proves the core rule  prefilter -> candidate set -> verify -> result  and the
+# CRITICAL property: the prefilter NEVER drops a true match (no false negatives).
+#
+# Method (absolute oracle): for each (pattern, text) fixture the TRUE match set
+# is computed inline by a full naive scan. We then assert
+#   (1) candidate set is a SUPERSET of every true-match start (no false neg), and
+#   (2) the verified result EQUALS the true match set.
+# A selectivity fixture shows the prefilter rejects most positions.
+#
+# Iteration uses index/counter loops only (for-in over custom structs is a known
+# no-op bug). Fixtures are explicit [u8] literals.
+use std.spec
+use lib.common.search.types.{Haystack, Pattern, MatchSpan}
+use lib.common.search.prefilter.{Prefilter}
+
+# --- inline naive oracle: every start where `pat` occurs in `text` -----------
+fn naive_starts(text: [u8], pat: [u8]) -> [i64]:
+    var out: [i64] = []
+    val n = text.len()
+    val m = pat.len()
+    if m == 0:
+        return out
+    var i = 0
+    while i + m <= n:
+        var j = 0
+        var ok = true
+        while j < m:
+            if text[i + j] != pat[j]:
+                ok = false
+                j = m
+            else:
+                j = j + 1
+        if ok:
+            out.push(i)
+        i = i + 1
+    out
+
+# every value of `subset` appears somewhere in `superset`
+fn is_superset(superset: [i64], subset: [i64]) -> bool:
+    var i = 0
+    while i < subset.len():
+        val want = subset[i]
+        var found = false
+        var k = 0
+        while k < superset.len():
+            if superset[k] == want:
+                found = true
+                k = superset.len()
+            else:
+                k = k + 1
+        if not found:
+            return false
+        i = i + 1
+    true
+
+# starts of a MatchSpan result list, as plain i64s
+fn span_starts(spans: [MatchSpan]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < spans.len():
+        out.push(spans[i].start())
+        i = i + 1
+    out
+
+# two i64 lists equal as ordered sequences
+fn lists_equal(a: [i64], b: [i64]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# "abracadabra" as bytes
+fn t_abracadabra() -> [u8]:
+    [0x61u8, 0x62u8, 0x72u8, 0x61u8, 0x63u8, 0x61u8, 0x64u8, 0x61u8, 0x62u8, 0x72u8, 0x61u8]
+
+describe "Prefilter literal screen -> candidate -> verify":
+    it "pure-literal: candidates superset true matches, result equals oracle":
+        val text = t_abracadabra()
+        val patb: [u8] = [0x61u8, 0x62u8, 0x72u8]
+        val truth = naive_starts(text, patb)
+        expect(truth.len()).to_equal(2)
+        expect(truth[0]).to_equal(0)
+        expect(truth[1]).to_equal(7)
+
+        val hay = Haystack.new(text)
+        val pat = Pattern.new(patb)
+        val pf = Prefilter.literal(pat)
+
+        val cands = pf.candidates(hay)
+        expect(is_superset(cands, truth)).to_equal(true)
+
+        val result = span_starts(pf.run(hay))
+        expect(lists_equal(result, truth)).to_equal(true)
+
+    it "trigram screen on a longer pattern keeps the no-false-negative property":
+        val text = t_abracadabra()
+        val patb: [u8] = [0x63u8, 0x61u8, 0x64u8, 0x61u8, 0x62u8, 0x72u8, 0x61u8]
+        val truth = naive_starts(text, patb)
+        expect(truth.len()).to_equal(1)
+        expect(truth[0]).to_equal(4)
+
+        val hay = Haystack.new(text)
+        val pat = Pattern.new(patb)
+        val pf = Prefilter.trigram(pat, 2)
+        expect(pf.gram_len()).to_equal(3)
+        expect(pf.gram_at(0)).to_equal(0x64u8)
+
+        val cands = pf.candidates(hay)
+        expect(is_superset(cands, truth)).to_equal(true)
+
+        val result = span_starts(pf.run(hay))
+        expect(lists_equal(result, truth)).to_equal(true)
+
+    it "selectivity: prefilter rejects most positions":
+        val text = t_abracadabra()
+        val patb: [u8] = [0x61u8, 0x62u8, 0x72u8]
+        val hay = Haystack.new(text)
+        val pat = Pattern.new(patb)
+        val pf = Prefilter.literal(pat)
+
+        val cands = pf.candidates(hay)
+        val scan_positions = text.len() - patb.len() + 1
+        expect(cands.len()).to_equal(2)
+        expect(cands.len() < scan_positions).to_equal(true)
+        val rejected = scan_positions - cands.len()
+        expect(rejected > 0).to_equal(true)
+
+    it "false-positive candidate is removed by verify":
+        val text = t_abracadabra()
+        val patb: [u8] = [0x61u8, 0x62u8, 0x72u8, 0x78u8]
+        val truth = naive_starts(text, patb)
+        expect(truth.len()).to_equal(0)
+
+        val hay = Haystack.new(text)
+        val pat = Pattern.new(patb)
+        val pf = Prefilter.with_gram(pat, 0, 2)
+
+        val cands = pf.candidates(hay)
+        expect(cands.len() > 0).to_equal(true)
+        expect(is_superset(cands, truth)).to_equal(true)
+        val result = span_starts(pf.run(hay))
+        expect(result.len()).to_equal(0)
+        expect(lists_equal(result, truth)).to_equal(true)
+
+    it "no-false-negative under a repeating single-byte text":
+        val text: [u8] = [0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8]
+        val patb: [u8] = [0x61u8, 0x61u8]
+        val truth = naive_starts(text, patb)
+        expect(truth.len()).to_equal(4)
+
+        val hay = Haystack.new(text)
+        val pat = Pattern.new(patb)
+        val pf = Prefilter.literal(pat)
+
+        val cands = pf.candidates(hay)
+        expect(is_superset(cands, truth)).to_equal(true)
+        val result = span_starts(pf.run(hay))
+        expect(lists_equal(result, truth)).to_equal(true)

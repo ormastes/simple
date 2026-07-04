@@ -1,0 +1,75 @@
+# @cover src/lib/skia/feature/animation/timeline.spl 90%
+# @tag: unit, ui, animation
+"""
+# Animation Timeline Specification
+
+**Feature IDs:** W1d, G1.6
+**Category:** Stdlib | Animation
+
+## Overview
+
+Unit oracle for the tick-driven animation timeline: injected elapsed time maps
+to an eased value between two endpoints. Runs in the unit lane (expectation
+failures are not masked here) so it is the authoritative gate for the timeline
+used by the widget Draw-IR pipeline's progress/transition rendering.
+"""
+
+use std.spipe.*
+use std.skia.feature.animation.interpolate.{EasingKind}
+use std.skia.feature.animation.timeline.{timeline_new, timeline_progress, timeline_value_at, timeline_done}
+use std.common.math.{math_abs}
+
+describe "animation_timeline":
+
+    it "linear timeline maps elapsed time directly to value":
+        val tl = timeline_new(0.0, 100.0, 100.0, EasingKind.Linear)
+        assert_true(math_abs(timeline_value_at(tl, 0.0) - 0.0) < 1e-9)
+        assert_true(math_abs(timeline_value_at(tl, 25.0) - 25.0) < 1e-9)
+        assert_true(math_abs(timeline_value_at(tl, 50.0) - 50.0) < 1e-9)
+        assert_true(math_abs(timeline_value_at(tl, 100.0) - 100.0) < 1e-9)
+
+    it "progress clamps to [0,1] and saturates past the duration":
+        val tl = timeline_new(0.0, 100.0, 100.0, EasingKind.Linear)
+        assert_true(math_abs(timeline_progress(tl, -10.0) - 0.0) < 1e-9)
+        assert_true(math_abs(timeline_progress(tl, 50.0) - 0.5) < 1e-9)
+        assert_true(math_abs(timeline_progress(tl, 250.0) - 1.0) < 1e-9)
+        assert_true(math_abs(timeline_value_at(tl, 250.0) - 100.0) < 1e-9)
+
+    it "zero-duration timeline resolves immediately to the end value":
+        val tl = timeline_new(0.0, 100.0, 0.0, EasingKind.Linear)
+        assert_true(math_abs(timeline_value_at(tl, 0.0) - 100.0) < 1e-9)
+        assert_true(timeline_done(tl, 0.0))
+
+    it "ease-in-out is symmetric at the midpoint and slow at the ends":
+        val tl = timeline_new(0.0, 100.0, 100.0, EasingKind.EaseInOut)
+        val v25 = timeline_value_at(tl, 25.0)
+        val v40 = timeline_value_at(tl, 40.0)
+        val v50 = timeline_value_at(tl, 50.0)
+        val v60 = timeline_value_at(tl, 60.0)
+        val v75 = timeline_value_at(tl, 75.0)
+        # midpoint lands at 50 (symmetric curve)
+        assert_true(math_abs(v50 - 50.0) < 0.5)
+        # slow start / fast finish: below the diagonal before 50, above after
+        assert_true(v25 < 25.0)
+        assert_true(v40 < 40.0)
+        assert_true(v60 > 60.0)
+        assert_true(v75 > 75.0)
+        # the 40ms/60ms samples the widget spec renders land in fill-probe range
+        assert_true(v40 > 20.0)
+        assert_true(v60 < 80.0)
+
+    it "value is monotonically non-decreasing across ticks":
+        val tl = timeline_new(0.0, 100.0, 100.0, EasingKind.EaseInOut)
+        var prev = timeline_value_at(tl, 0.0)
+        var t = 10.0
+        while t <= 100.0:
+            val cur = timeline_value_at(tl, t)
+            assert_true(cur >= prev - 1e-9)
+            prev = cur
+            t = t + 10.0
+
+    it "endpoints and direction are honored (descending range)":
+        val tl = timeline_new(100.0, 0.0, 50.0, EasingKind.Linear)
+        assert_true(math_abs(timeline_value_at(tl, 0.0) - 100.0) < 1e-9)
+        assert_true(math_abs(timeline_value_at(tl, 25.0) - 50.0) < 1e-9)
+        assert_true(math_abs(timeline_value_at(tl, 50.0) - 0.0) < 1e-9)

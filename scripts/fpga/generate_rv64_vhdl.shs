@@ -1,0 +1,70 @@
+#!/bin/bash
+# generate_rv64_vhdl.shs — Generate all RV64GC SoC VHDL files
+#
+# Usage: bash scripts/fpga/generate_rv64_vhdl.shs [--output-dir build/vhdl/rv64]
+#
+# Calls bin/simple to run the VHDL generation pipeline:
+# 1. generate_soc_top_vhdl_rv64()  -> soc_top_rv64.vhd
+# 2. compile_to_vhdl_module()      -> per-module .vhd stubs
+# 3. Peripheral VHDL from soc_vhdl_gen pipeline
+
+set -eo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+OUTPUT_DIR="build/vhdl/rv64"
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/release/simple}"
+RV64_PAYLOAD_ELF="${RV64_PAYLOAD_ELF:-build/os/simpleos_riscv64_fpga.elf}"
+RV64_PAYLOAD_BIN="${RV64_PAYLOAD_BIN:-$OUTPUT_DIR/simpleos_riscv64_fpga.bin}"
+
+# Parse args
+for arg in "$@"; do
+    case "$arg" in
+        --output-dir=*) OUTPUT_DIR="${arg#--output-dir=}" ;;
+    esac
+done
+
+cd "$PROJECT_ROOT"
+mkdir -p "$OUTPUT_DIR"
+
+echo "=== RV64GC VHDL Generation Pipeline ==="
+echo "Output directory: $OUTPUT_DIR"
+echo ""
+
+# Step 1: Generate all VHDL via the Simple driver script
+echo "[1/1] Running VHDL generation driver..."
+"$SIMPLE_BINARY" run scripts/fpga/rv64_vhdl_driver.spl 2>&1 | tail -40
+DRIVER_EXIT=$?
+
+if [ $DRIVER_EXIT -ne 0 ]; then
+    echo "ERROR: VHDL generation driver failed (exit $DRIVER_EXIT)"
+    exit 1
+fi
+
+if [ -f "$RV64_PAYLOAD_ELF" ] && command -v riscv64-unknown-elf-readelf >/dev/null 2>&1; then
+    entry_hex="$(riscv64-unknown-elf-readelf -h "$RV64_PAYLOAD_ELF" | awk '/Entry point address:/ { print $4 }')"
+    entry_hex="${entry_hex#0x}"
+    entry_hex="$(printf '%016s' "$entry_hex" | tr ' ' '0')"
+    sed -i "s/0000000080000000/$entry_hex/g" "$OUTPUT_DIR/rv64gc_core.vhd"
+    echo "Reset PC: 0x$entry_hex from $RV64_PAYLOAD_ELF"
+else
+    echo "WARNING: RV64 ELF entry unavailable, keeping generated reset PC" >&2
+fi
+
+if [ -f "$RV64_PAYLOAD_ELF" ] && command -v riscv64-unknown-elf-objcopy >/dev/null 2>&1; then
+    riscv64-unknown-elf-objcopy -O binary "$RV64_PAYLOAD_ELF" "$RV64_PAYLOAD_BIN"
+    echo "Payload ELF: $RV64_PAYLOAD_ELF -> $RV64_PAYLOAD_BIN"
+fi
+
+# Count generated files
+VHD_COUNT=$(find "$OUTPUT_DIR" -name '*.vhd' 2>/dev/null | wc -l)
+echo ""
+echo "=== Generation Complete ==="
+echo "Generated $VHD_COUNT .vhd files in $OUTPUT_DIR"
+if [ -f "$RV64_PAYLOAD_BIN" ]; then
+    od -An -v -tx8 -w8 "$RV64_PAYLOAD_BIN" | tr -d ' ' | awk 'NF { print }' >"$OUTPUT_DIR/rv64_payload.mem"
+    echo "Preload: $OUTPUT_DIR/rv64_payload.mem words=$(wc -l <"$OUTPUT_DIR/rv64_payload.mem" | tr -d ' ')"
+else
+    echo "WARNING: RV64 payload binary missing, preload not generated: $RV64_PAYLOAD_BIN" >&2
+fi
+ls -la "$OUTPUT_DIR"/*.vhd 2>/dev/null || echo "No .vhd files found"

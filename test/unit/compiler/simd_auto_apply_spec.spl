@@ -1,0 +1,320 @@
+use std.io_runtime
+
+# ============================================================
+# Minimal inline types for SIMD auto-application tests
+# ============================================================
+
+class SimdRecipe:
+    name: text
+    legality: text
+    cost: i64
+    fast_math_sensitive: bool
+
+class RecipeSet:
+    recipes: [SimdRecipe]
+
+fn find_best_legal(rs: RecipeSet, fast_math: bool) -> text:
+    var best_name = "none"
+    var best_cost = 999999
+    var i = 0
+    while i < rs.recipes.len():
+        val r = rs.recipes[i]
+        var legal = false
+        if r.legality == "always":
+            legal = true
+        if r.legality == "fast_math_only" and fast_math:
+            legal = true
+        if legal and r.cost < best_cost:
+            best_cost = r.cost
+            best_name = r.name
+        i = i + 1
+    best_name
+
+class VectorWidth:
+    arch: text
+    feature: text
+    scalable: bool
+
+fn max_vector_bits(vw: VectorWidth) -> i64:
+    if vw.arch == "x86_64" and vw.feature == "sse2":
+        return 128
+    if vw.arch == "x86_64" and vw.feature == "avx2":
+        return 256
+    if vw.arch == "aarch64" and vw.feature == "neon":
+        return 128
+    if vw.arch == "riscv" and vw.scalable:
+        return -1
+    return 64
+
+class BitmanipTarget:
+    arch: text
+    features: [text]
+
+fn features_contain(feats: [text], f: text) -> bool:
+    var i = 0
+    while i < feats.len():
+        if feats[i] == f:
+            return true
+        i = i + 1
+    false
+
+fn lower_popcnt(bt: BitmanipTarget) -> text:
+    if bt.arch == "x86_64" and features_contain(bt.features, "popcnt"):
+        return "POPCNT"
+    return "fallback_popcnt"
+
+fn lower_clz(bt: BitmanipTarget) -> text:
+    if bt.arch == "aarch64":
+        return "CLZ"
+    return "fallback_clz"
+
+fn lower_ctz(bt: BitmanipTarget) -> text:
+    if bt.arch == "riscv" and features_contain(bt.features, "zbb"):
+        return "CTZ"
+    return "fallback_ctz"
+
+class LibCandidate:
+    name: text
+    min_width: i64
+
+fn candidate_viable(c: LibCandidate, width: i64) -> bool:
+    width >= c.min_width
+
+fn candidate_speedup(c: LibCandidate, width: i64) -> i64:
+    width / c.min_width
+
+class MatrixOp:
+    dim: i64
+    bits: i64
+    elements_per_lane: i64
+
+fn dot_product_profitable(op: MatrixOp) -> bool:
+    val total_ops = op.dim * op.dim
+    val vec_ops = op.bits / 32
+    total_ops >= vec_ops * 4
+
+fn matvec_applicable(op: MatrixOp) -> bool:
+    op.dim >= op.elements_per_lane
+
+# ============================================================
+# Recipe Infrastructure (5 tests)
+# ============================================================
+
+fn test_recipe_legal_always():
+    val r = SimdRecipe(name: "basic_add", legality: "always", cost: 10, fast_math_sensitive: false)
+    var legal = false
+    if r.legality == "always":
+        legal = true
+    if legal:
+        print("PASS: test_recipe_legal_always")
+    if legal == false:
+        print("FAIL: test_recipe_legal_always")
+
+fn test_recipe_fast_math_gated():
+    val r = SimdRecipe(name: "fma_reduce", legality: "fast_math_only", cost: 5, fast_math_sensitive: true)
+    val fast_math_off = false
+    var legal_without = false
+    if r.legality == "fast_math_only" and fast_math_off:
+        legal_without = true
+    if legal_without == false:
+        print("PASS: test_recipe_fast_math_gated")
+    if legal_without:
+        print("FAIL: test_recipe_fast_math_gated")
+
+fn test_recipe_best_cheapest():
+    val rs = RecipeSet(recipes: [
+        SimdRecipe(name: "expensive", legality: "always", cost: 100, fast_math_sensitive: false),
+        SimdRecipe(name: "cheap", legality: "always", cost: 10, fast_math_sensitive: false),
+        SimdRecipe(name: "medium", legality: "always", cost: 50, fast_math_sensitive: false)
+    ])
+    val best = find_best_legal(rs, false)
+    if best == "cheap":
+        print("PASS: test_recipe_best_cheapest")
+    if best != "cheap":
+        print("FAIL: test_recipe_best_cheapest - got " + best)
+
+fn test_fast_math_reduction_only():
+    # reduction_only policy: fast_math_sensitive=false recipes are still legal
+    val r = SimdRecipe(name: "reassociate_add", legality: "always", cost: 20, fast_math_sensitive: false)
+    var legal = false
+    if r.legality == "always":
+        legal = true
+    if legal:
+        print("PASS: test_fast_math_reduction_only")
+    if legal == false:
+        print("FAIL: test_fast_math_reduction_only")
+
+fn test_fast_math_disabled_blocks_all():
+    val rs = RecipeSet(recipes: [
+        SimdRecipe(name: "fma1", legality: "fast_math_only", cost: 5, fast_math_sensitive: true),
+        SimdRecipe(name: "fma2", legality: "fast_math_only", cost: 8, fast_math_sensitive: true)
+    ])
+    val best = find_best_legal(rs, false)
+    if best == "none":
+        print("PASS: test_fast_math_disabled_blocks_all")
+    if best != "none":
+        print("FAIL: test_fast_math_disabled_blocks_all - got " + best)
+
+# ============================================================
+# Vector Width Routing (4 tests)
+# ============================================================
+
+fn test_width_sse2_128():
+    val vw = VectorWidth(arch: "x86_64", feature: "sse2", scalable: false)
+    val bits = max_vector_bits(vw)
+    if bits == 128:
+        print("PASS: test_width_sse2_128")
+    if bits != 128:
+        print("FAIL: test_width_sse2_128 - got " + bits.to_text())
+
+fn test_width_avx2_256():
+    val vw = VectorWidth(arch: "x86_64", feature: "avx2", scalable: false)
+    val bits = max_vector_bits(vw)
+    if bits == 256:
+        print("PASS: test_width_avx2_256")
+    if bits != 256:
+        print("FAIL: test_width_avx2_256 - got " + bits.to_text())
+
+fn test_width_neon_128():
+    val vw = VectorWidth(arch: "aarch64", feature: "neon", scalable: false)
+    val bits = max_vector_bits(vw)
+    if bits == 128:
+        print("PASS: test_width_neon_128")
+    if bits != 128:
+        print("FAIL: test_width_neon_128 - got " + bits.to_text())
+
+fn test_width_rvv_scalable():
+    val vw = VectorWidth(arch: "riscv", feature: "rvv", scalable: true)
+    val bits = max_vector_bits(vw)
+    # -1 indicates scalable (any width supported)
+    if bits == -1:
+        print("PASS: test_width_rvv_scalable")
+    if bits != -1:
+        print("FAIL: test_width_rvv_scalable - got " + bits.to_text())
+
+# ============================================================
+# Bitmanip Lowering (5 tests)
+# ============================================================
+
+fn test_x86_popcnt_native():
+    val bt = BitmanipTarget(arch: "x86_64", features: ["sse2", "popcnt", "avx2"])
+    val instr = lower_popcnt(bt)
+    if instr == "POPCNT":
+        print("PASS: test_x86_popcnt_native")
+    if instr != "POPCNT":
+        print("FAIL: test_x86_popcnt_native - got " + instr)
+
+fn test_x86_popcnt_fallback():
+    val bt = BitmanipTarget(arch: "x86_64", features: ["sse2"])
+    val instr = lower_popcnt(bt)
+    if instr == "fallback_popcnt":
+        print("PASS: test_x86_popcnt_fallback")
+    if instr != "fallback_popcnt":
+        print("FAIL: test_x86_popcnt_fallback - got " + instr)
+
+fn test_arm_clz_native():
+    val bt = BitmanipTarget(arch: "aarch64", features: ["neon"])
+    val instr = lower_clz(bt)
+    if instr == "CLZ":
+        print("PASS: test_arm_clz_native")
+    if instr != "CLZ":
+        print("FAIL: test_arm_clz_native - got " + instr)
+
+fn test_riscv_ctz_with_zbb():
+    val bt = BitmanipTarget(arch: "riscv", features: ["m", "zbb"])
+    val instr = lower_ctz(bt)
+    if instr == "CTZ":
+        print("PASS: test_riscv_ctz_with_zbb")
+    if instr != "CTZ":
+        print("FAIL: test_riscv_ctz_with_zbb - got " + instr)
+
+fn test_riscv_ctz_without_zbb():
+    val bt = BitmanipTarget(arch: "riscv", features: ["m"])
+    val instr = lower_ctz(bt)
+    if instr == "fallback_ctz":
+        print("PASS: test_riscv_ctz_without_zbb")
+    if instr != "fallback_ctz":
+        print("FAIL: test_riscv_ctz_without_zbb - got " + instr)
+
+# ============================================================
+# Library Candidates (3 tests)
+# ============================================================
+
+fn test_crypto_xor_viable_128():
+    val c = LibCandidate(name: "xor_block", min_width: 128)
+    val ok = candidate_viable(c, 128)
+    if ok:
+        print("PASS: test_crypto_xor_viable_128")
+    if ok == false:
+        print("FAIL: test_crypto_xor_viable_128")
+
+fn test_compression_crc32_viable_128():
+    val c = LibCandidate(name: "crc32_update", min_width: 128)
+    val ok = candidate_viable(c, 128)
+    if ok:
+        print("PASS: test_compression_crc32_viable_128")
+    if ok == false:
+        print("FAIL: test_compression_crc32_viable_128")
+
+fn test_candidate_speedup():
+    val c = LibCandidate(name: "xor_block", min_width: 128)
+    val speedup = candidate_speedup(c, 256)
+    if speedup == 2:
+        print("PASS: test_candidate_speedup")
+    if speedup != 2:
+        print("FAIL: test_candidate_speedup - got " + speedup.to_text())
+
+# ============================================================
+# Matrix Rewrites (3 tests)
+# ============================================================
+
+fn test_dot_product_profitable_large():
+    val op = MatrixOp(dim: 64, bits: 256, elements_per_lane: 8)
+    val profitable = dot_product_profitable(op)
+    if profitable:
+        print("PASS: test_dot_product_profitable_large")
+    if profitable == false:
+        print("FAIL: test_dot_product_profitable_large")
+
+fn test_dot_product_not_profitable_small():
+    val op = MatrixOp(dim: 2, bits: 256, elements_per_lane: 8)
+    val profitable = dot_product_profitable(op)
+    if profitable == false:
+        print("PASS: test_dot_product_not_profitable_small")
+    if profitable:
+        print("FAIL: test_dot_product_not_profitable_small")
+
+fn test_matvec_applicable():
+    val op = MatrixOp(dim: 8, bits: 256, elements_per_lane: 8)
+    val ok = matvec_applicable(op)
+    if ok:
+        print("PASS: test_matvec_applicable")
+    if ok == false:
+        print("FAIL: test_matvec_applicable")
+
+# ============================================================
+# Entry point
+# ============================================================
+
+fn main():
+    test_recipe_legal_always()
+    test_recipe_fast_math_gated()
+    test_recipe_best_cheapest()
+    test_fast_math_reduction_only()
+    test_fast_math_disabled_blocks_all()
+    test_width_sse2_128()
+    test_width_avx2_256()
+    test_width_neon_128()
+    test_width_rvv_scalable()
+    test_x86_popcnt_native()
+    test_x86_popcnt_fallback()
+    test_arm_clz_native()
+    test_riscv_ctz_with_zbb()
+    test_riscv_ctz_without_zbb()
+    test_crypto_xor_viable_128()
+    test_compression_crc32_viable_128()
+    test_candidate_speedup()
+    test_dot_product_profitable_large()
+    test_dot_product_not_profitable_small()
+    test_matvec_applicable()
+    print("DONE")

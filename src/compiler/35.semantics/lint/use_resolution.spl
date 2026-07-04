@@ -1,0 +1,96 @@
+# Use Resolution Lint
+#
+# Detects `use` imports that don't resolve to existing .spl files.
+# Catches dangling imports before they cause fatal module resolution errors.
+#
+# W0407: Unresolved import — module file not found                    WARNING
+#
+# Checks both direct file (module.spl) and directory module (module/__init__.spl).
+# Derives source root from the file path being linted.
+#
+# Works with the arena-based core AST (integer-tagged nodes).
+
+use compiler.core.ast.{
+    DECL_USE,
+    decl_tag, decl_name
+}
+
+extern fn rt_file_exists(path: text) -> bool
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct UseResolutionWarning:
+    code: text
+    severity: text
+    message: text
+    module_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} — 'use {self.module_path}'"
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _dots_to_slashes(path: text) -> text:
+    """Convert dot-separated module path to slash-separated file path."""
+    val parts = path.split(".")
+    var result = parts[0]
+    var i = 1
+    while i < parts.len():
+        result = result + "/" + parts[i]
+        i = i + 1
+    result
+
+fn _derive_src_root(file_path: text) -> text:
+    """Derive the src/ root directory from a file path being linted."""
+    val parts = file_path.split("/src/")
+    if parts.len() >= 2:
+        return parts[0] + "/src/"
+    if file_path.starts_with("src/"):
+        return "src/"
+    ""
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_use_resolution(decl_indices: [i64], file_path: text) -> [UseResolutionWarning]:
+    """Check that all use imports resolve to existing .spl files.
+
+    For each use declaration, converts the module path to a file path
+    and checks if the file exists. Emits W0407 for unresolved imports.
+    """
+    var warnings: [UseResolutionWarning] = []
+
+    val src_root = _derive_src_root(file_path)
+    if src_root == "":
+        return []
+
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+
+        if tag != DECL_USE:
+            continue
+
+        val mod_path = decl_name[idx]
+        val rel_path = _dots_to_slashes(mod_path)
+        val target_file = src_root + rel_path + ".spl"
+        val dir_init = src_root + rel_path + "/__init__.spl"
+
+        if (not rt_file_exists(target_file) and not rt_file_exists(dir_init)):
+            warnings.push(UseResolutionWarning(
+                code: "W0407",
+                severity: "WARNING",
+                message: "unresolved import — module file not found",
+                module_path: mod_path
+            ))
+
+    warnings
+
+# ============================================================================
+# Exports
+# ============================================================================
+

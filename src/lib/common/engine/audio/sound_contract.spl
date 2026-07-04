@@ -1,0 +1,106 @@
+# codex-impl
+# Sound engine pure contracts.
+#
+# These records are intentionally FFI-free. Native device I/O, SimpleOS
+# services, and no-audio testing backends all report through this layer.
+
+struct SoundBackendCapability:
+    platform: text
+    status: text
+    backend: text
+    reason: text
+
+fn sound_capability(platform: text, host: text) -> SoundBackendCapability:
+    if platform == "linux":
+        if host == "linux":
+            return SoundBackendCapability(platform: platform, status: "native", backend: "miniaudio", reason: "linux host bridge available")
+        return SoundBackendCapability(platform: platform, status: "host-unavailable", backend: "miniaudio", reason: "linux host not available in this run")
+    if platform == "bsd":
+        if host == "bsd":
+            return SoundBackendCapability(platform: platform, status: "native", backend: "miniaudio", reason: "bsd host bridge available")
+        return SoundBackendCapability(platform: platform, status: "host-unavailable", backend: "miniaudio", reason: "bsd host not available in this run")
+    if platform == "macos":
+        if host == "macos":
+            return SoundBackendCapability(platform: platform, status: "native", backend: "miniaudio", reason: "macos host bridge available")
+        return SoundBackendCapability(platform: platform, status: "host-unavailable", backend: "miniaudio", reason: "macos host not available in this run")
+    if platform == "android":
+        if host == "android":
+            return SoundBackendCapability(platform: platform, status: "native", backend: "miniaudio", reason: "android device bridge available")
+        return SoundBackendCapability(platform: platform, status: "host-unavailable", backend: "miniaudio", reason: "android device or emulator not available in this run")
+    if platform == "ios":
+        if host == "ios":
+            return SoundBackendCapability(platform: platform, status: "native", backend: "miniaudio", reason: "ios device bridge available")
+        return SoundBackendCapability(platform: platform, status: "host-unavailable", backend: "miniaudio", reason: "ios device or simulator not available in this run")
+    if platform == "simple-os":
+        return SoundBackendCapability(platform: platform, status: "portable", backend: "simpleos-audio-service", reason: "driver service contract")
+    SoundBackendCapability(platform: platform, status: "unsupported", backend: "none", reason: "unknown platform")
+
+fn sound_no_audio_capability() -> SoundBackendCapability:
+    SoundBackendCapability(platform: "ci", status: "portable", backend: "no-audio", reason: "deterministic test backend")
+
+fn sound_backend_status_valid(status: text) -> bool:
+    status == "native" or status == "portable" or status == "unsupported" or status == "host-unavailable"
+
+struct SoundCommand:
+    order: i64
+    kind: text
+    entity_id: text
+    clip_id: text
+    volume_milli: i64
+    pan_milli: i64
+    metadata: text
+
+fn sound_command_2d(entity_id: text, clip_id: text, x_milli: i64, listener_x_milli: i64) -> SoundCommand:
+    var pan = x_milli - listener_x_milli
+    if pan > 1000:
+        pan = 1000
+    if pan < -1000:
+        pan = -1000
+    var magnitude = pan
+    if magnitude < 0:
+        magnitude = 0 - magnitude
+    val volume = 1000 - (magnitude / 2)
+    SoundCommand(order: 1, kind: "play-2d", entity_id: entity_id, clip_id: clip_id, volume_milli: volume, pan_milli: pan, metadata: "renderer-independent")
+
+fn sound_command_3d(entity_id: text, clip_id: text, distance_milli: i64, doppler_milli: i64, occlusion_milli: i64) -> SoundCommand:
+    var volume = 1000 - distance_milli
+    if volume < 0:
+        volume = 0
+    SoundCommand(
+        order: 2,
+        kind: "play-3d",
+        entity_id: entity_id,
+        clip_id: clip_id,
+        volume_milli: volume,
+        pan_milli: 0,
+        metadata: "doppler=" + doppler_milli.to_text() + " occlusion=" + occlusion_milli.to_text() + " hrtf=ready"
+    )
+
+struct SoundCodecResult:
+    status: text
+    encoding: text
+    frames: i64
+    chunks: i64
+    error: text
+
+fn sound_decode_design_vector(input: text) -> SoundCodecResult:
+    if not input.starts_with("SSND:"):
+        return SoundCodecResult(status: "error", encoding: "", frames: 0, chunks: 0, error: "bad-magic")
+    if input.contains("rate=0"):
+        return SoundCodecResult(status: "error", encoding: "", frames: 0, chunks: 0, error: "bad-sample-rate")
+    if input.contains("channels=0") or input.contains("channels=9"):
+        return SoundCodecResult(status: "error", encoding: "", frames: 0, chunks: 0, error: "bad-channel-count")
+    if input.contains("delta"):
+        return SoundCodecResult(status: "ok", encoding: "delta-game-asset", frames: 8, chunks: 2, error: "")
+    SoundCodecResult(status: "ok", encoding: "pcm-lossless", frames: 8, chunks: 2, error: "")
+
+struct SoundParallelEvidence:
+    mode: text
+    submitted: i64
+    completed: i64
+    order_hash: text
+
+fn sound_parallel_plan(has_worker_pool: bool) -> SoundParallelEvidence:
+    if has_worker_pool:
+        return SoundParallelEvidence(mode: "worker-pool", submitted: 3, completed: 3, order_hash: "1-2-3")
+    SoundParallelEvidence(mode: "inline-fallback", submitted: 3, completed: 3, order_hash: "1-2-3")

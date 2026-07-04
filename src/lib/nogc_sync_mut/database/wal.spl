@@ -1,0 +1,260 @@
+# Write-Ahead Log for crash recovery
+# Format: one entry per line, pipe-separated: seq|type|table|key|data|timestamp
+
+use nogc_sync_mut.database.atomic (atomic_write, atomic_read, atomic_append, get_timestamp)
+use nogc_sync_mut.database.core (SdnRow, split_sdn_row)
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_crc32_text(content: text) -> i64
+
+enum WalEntryType:
+    Insert
+    Update
+    Delete
+    Checkpoint
+
+struct WalEntry:
+    sequence: i64
+    entry_type: WalEntryType
+    table_name: text
+    row_key: text
+    data: text
+    timestamp: i64
+
+fn wal_entry_type_to_text(t: WalEntryType) -> text:
+    if t == WalEntryType.Insert:
+        "Insert"
+    elif t == WalEntryType.Update:
+        "Update"
+    elif t == WalEntryType.Delete:
+        "Delete"
+    else:
+        "Checkpoint"
+
+fn wal_entry_type_from_text(s: text) -> WalEntryType?:
+    if s == "Insert":
+        Some(WalEntryType.Insert)
+    elif s == "Update":
+        Some(WalEntryType.Update)
+    elif s == "Delete":
+        Some(WalEntryType.Delete)
+    elif s == "Checkpoint":
+        Some(WalEntryType.Checkpoint)
+    else:
+        nil
+
+fn wal_entry_to_line(entry: WalEntry) -> text:
+    val type_str = wal_entry_type_to_text(entry.entry_type)
+    val payload = "{entry.sequence}|{type_str}|{entry.table_name}|{entry.row_key}|{entry.data}|{entry.timestamp}"
+    val crc = rt_crc32_text(payload)
+    "{payload}|{crc}\n"
+
+fn wal_entry_from_line(line: text) -> WalEntry?:
+    val parts: [text] = line.split("|")
+    if parts.len() < 7:
+        if parts.len() == 6:
+            return wal_entry_from_line_v1(parts)
+        return nil
+    val stored_crc_str = parts[parts.len() - 1].trim()
+    val stored_crc = stored_crc_str.to_int() ?? -1
+    var payload_parts: [text] = []
+    var j = 0
+    while j < parts.len() - 1:
+        payload_parts.push(parts[j])
+        j = j + 1
+    val payload = payload_parts.join("|")
+    val computed_crc = rt_crc32_text(payload)
+    if stored_crc != computed_crc:
+        return nil
+    val seq = parts[0].trim().to_int() ?? 0
+    val etype = wal_entry_type_from_text(parts[1].trim())
+    val entry_type = match etype:
+        Some(value):
+            value
+        nil:
+            return nil
+    val table_name = parts[2].trim()
+    val row_key = parts[3].trim()
+    var data_parts: [text] = []
+    var i = 4
+    while i < parts.len() - 2:
+        data_parts.push(parts[i])
+        i = i + 1
+    val data = data_parts.join("|")
+    val ts = parts[parts.len() - 2].trim().to_int() ?? 0
+    Some(WalEntry(
+        sequence: seq,
+        entry_type: entry_type,
+        table_name: table_name,
+        row_key: row_key,
+        data: data,
+        timestamp: ts
+    ))
+
+fn wal_entry_from_line_v1(parts: [text]) -> WalEntry?:
+    val seq = parts[0].trim().to_int() ?? 0
+    val etype = wal_entry_type_from_text(parts[1].trim())
+    val entry_type = match etype:
+        Some(value):
+            value
+        nil:
+            return nil
+    val table_name = parts[2].trim()
+    val row_key = parts[3].trim()
+    val data = parts[4]
+    val ts = parts[5].trim().to_int() ?? 0
+    Some(WalEntry(
+        sequence: seq,
+        entry_type: entry_type,
+        table_name: table_name,
+        row_key: row_key,
+        data: data,
+        timestamp: ts
+    ))
+
+class WriteAheadLog:
+    path: text
+    entries: [WalEntry]
+    sequence_counter: i64
+    flushed_up_to: i64
+
+    static fn open(db_path: text) -> WriteAheadLog:
+        val wal_path = db_path + ".wal"
+        WriteAheadLog(
+            path: wal_path,
+            entries: [],
+            sequence_counter: 0,
+            flushed_up_to: 0
+        )
+
+    me append(entry: WalEntry) -> bool:
+        # Write version header on first append to a new WAL file
+        if not rt_file_exists(self.path):
+            atomic_write(self.path, "#wal-version:2\n")
+        self.sequence_counter = self.sequence_counter + 1
+        val e = WalEntry(
+            sequence: self.sequence_counter,
+            entry_type: entry.entry_type,
+            table_name: entry.table_name,
+            row_key: entry.row_key,
+            data: entry.data,
+            timestamp: entry.timestamp
+        )
+        var entries = self.entries
+        entries.push(e)
+        self.entries = entries
+        val line = wal_entry_to_line(e)
+        atomic_append(self.path, line)
+
+    me flush() -> bool:
+        # All writes go through atomic_append which syncs per call; nothing extra needed
+        true
+
+    me checkpoint() -> bool:
+        val ts = get_timestamp()
+        val cp = WalEntry(
+            sequence: self.sequence_counter + 1,
+            entry_type: WalEntryType.Checkpoint,
+            table_name: "",
+            row_key: "",
+            data: "",
+            timestamp: ts
+        )
+        self.sequence_counter = self.sequence_counter + 1
+        val line = wal_entry_to_line(cp)
+        val ok = atomic_write(self.path, "#wal-version:2\n" + line)
+        if ok:
+            self.flushed_up_to = self.sequence_counter
+            self.entries = []
+        ok
+
+    fn pending_entries() -> [WalEntry]:
+        var result: [WalEntry] = []
+        for e in self.entries:
+            if e.sequence > self.flushed_up_to:
+                result.push(e)
+        result
+
+    fn replay() -> [WalEntry]:
+        val content_opt = atomic_read(self.path)
+        val content = match content_opt:
+            Some(value):
+                value
+            nil:
+                return []
+        val lines: [text] = content.split("\n")
+        var result: [WalEntry] = []
+        # Check for version header; v1 WAL files (no header) are silently skipped
+        var found_header = false
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed == "":
+                continue
+            if trimmed == "#wal-version:2":
+                found_header = true
+                continue
+            # Skip comment/header lines
+            if trimmed.starts_with("#"):
+                continue
+            if not found_header:
+                # v1 WAL file without version header — no recoverable data
+                return []
+            val entry_opt = wal_entry_from_line(trimmed)
+            match entry_opt:
+                Some(entry):
+                    if entry.entry_type != WalEntryType.Checkpoint:
+                        result.push(entry)
+                nil:
+                    pass_do_nothing("skip invalid WAL entry")
+        result
+
+    me clear() -> bool:
+        self.entries = []
+        self.flushed_up_to = self.sequence_counter
+        atomic_write(self.path, "")
+
+# ============================================================================
+# WAL payload codec — serialize/deserialize SdnRow fields for WAL entries
+# ============================================================================
+
+# Quote a value for WAL payload if it contains special characters (comma, pipe, newline, or double quote).
+# WAL quoting is stricter than SDN table quoting to survive the pipe-delimited WAL line format.
+fn wal_quote_if_needed(value: text) -> text:
+    if value.contains(",") or value.contains("|") or value.contains("\n") or value.contains("\""):
+        # Escape existing double quotes by doubling them
+        var escaped = value.replace("\"", "\"\"")
+        return "\"" + escaped + "\""
+    value
+
+# Strip surrounding double quotes and unescape doubled quotes.
+fn strip_wal_quotes(value: text) -> text:
+    if value.len() >= 2 and value.starts_with('"') and value.ends_with('"'):
+        val inner = value[1..(value.len() - 1)]
+        return inner.replace("\"\"", "\"")
+    value
+
+# Serialize an SdnRow's fields into a WAL CSV payload string.
+# Columns are serialized in the given column order, values quoted if needed.
+fn row_to_wal_payload(row: SdnRow, columns: [text]) -> text:
+    var values: [text] = []
+    for col in columns:
+        val value = row.get(col) ?? ""
+        values.push(wal_quote_if_needed(value))
+    values.join(",")
+
+# Deserialize a WAL CSV payload back into an SdnRow.
+# Returns nil if the column count doesn't match.
+fn wal_payload_to_row(payload: text, columns: [text]) -> SdnRow?:
+    if payload == "" and columns.len() > 0:
+        return nil
+    val parts = split_sdn_row(payload)
+    if parts.len() != columns.len():
+        return nil
+    val row = SdnRow(fields: {}, _version: 0)
+    var i = 0
+    for col in columns:
+        val value = parts[i].trim()
+        val unquoted = strip_wal_quotes(value)
+        row.set(col, unquoted)
+        i = i + 1
+    Some(row)
