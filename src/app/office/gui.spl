@@ -297,7 +297,38 @@ fn office_gui_chart_minimal_css() -> text:
     office_gui_minimal_css() +
     ".widget-progress{flex-direction:column;margin-bottom:4px;}" +
     ".progress-track{background:#e5e7eb;height:10px;border-radius:3px;}" +
-    ".progress-bar{background:#2b579a;height:10px;border-radius:3px;}"
+    ".progress-bar{background:#2b579a;height:10px;border-radius:3px;}" +
+    # Column-chart cells (chart_gui_view's "column" kind): one solid fill
+    # class shared by every column cell (same proven solid-background CSS
+    # the cf-* classes use), plus bottom alignment for the cell row --
+    # layout_core.spl's flex pass implements align-items:flex-end (phase 5
+    # cross-axis reposition), and both the panel div and its inner
+    # .panel-content wrapper are covered so whichever level the engine
+    # treats as the flex container aligns the cells to the baseline. The
+    # text_dump contract does NOT depend on this alignment (see
+    # chart_gui_view's docstring: top-aligned is the documented fallback).
+    ".col-fill{background:#2b579a;}" +
+    "#chart_gui_cols{align-items:flex-end;}" +
+    "#chart_gui_cols .panel-content{flex-direction:row;align-items:flex-end;}" +
+    "#chart_gui_pie .panel-content{flex-direction:row;}" +
+    # Pie-chart segment palette (chart_gui_view's "pie" kind): 8 distinct
+    # solid backgrounds cycled pie-0..pie-7 (Excel's default chart series
+    # colors), one per stacked-strip segment.
+    ".pie-0{background:#4472c4;}" +
+    ".pie-1{background:#ed7d31;}" +
+    ".pie-2{background:#a5a5a5;}" +
+    ".pie-3{background:#ffc000;}" +
+    ".pie-4{background:#5b9bd5;}" +
+    ".pie-5{background:#70ad47;}" +
+    ".pie-6{background:#264478;}" +
+    ".pie-7{background:#9e480e;}"
+
+# Column-kind cell width (px) and pie-kind strip height (the panel
+# renderer's height unit) -- fixed sizes for the proportional-dimension
+# charts: a column cell's WIDTH is fixed while its height carries the
+# value; a pie segment's HEIGHT is fixed while its width carries the value.
+val CHART_GUI_COLUMN_CELL_W: i32 = 6
+val CHART_GUI_PIE_STRIP_H: i32 = 2
 
 struct ChartGuiView:
     tree: UITree
@@ -319,15 +350,36 @@ fn chart_gui_view(sheet: Sheet, chart_kind: text, value_range: text, labels_rang
     """Build a GUI chart view of `sheet`'s data (labels from labels_range,
     numbers from value_range -- same two-range shape sheet_*_chart_svg's
     chart_series_from_ranges takes, so formula cells resolve to their cached
-    computed value, not raw '=expr' text). Renders one horizontal
-    progress-bar widget per data point (bar width% = value's share of the
-    max value) under a title text widget, wrapped in a `w`x`h` container.
+    computed value, not raw '=expr' text). Three GUI-renderable kinds now
+    branch here (all through the same proven widget/CSS pixel path, no SVG):
+      - "column": a horizontal row of fixed-width cells whose HEIGHT is
+        proportional to pct-of-max (height = pct*h/100 via with_height);
+        the cell row is bottom-aligned via #chart_gui_cols align-items:
+        flex-end (implemented in layout_core.spl's flex phase 5) -- if a
+        render path ignores that rule the cells degrade to top-aligned,
+        which the text_dump contract does not depend on. Dump lines:
+        "col|<label>|<value>|<pct-of-max>".
+      - "pie": one horizontal stacked strip -- per-segment cells whose
+        WIDTH is proportional to the value's share of the TOTAL (not the
+        max), each carrying a distinct pie-0..pie-7 background class
+        (8-color cycle), with one "<label>: <value>" text line listed
+        below the strip per segment. Dump lines:
+        "pie|<label>|<value>|<share-pct-of-total>".
+      - anything else (including "bar", the default): the original
+        horizontal progress-bar rendering, byte-identical dump to the
+        pre-column/pie shape -- one progress widget per data point (bar
+        width% = value's share of the max value) under a title text
+        widget, wrapped in a `w`x`h` container, with
+        "bar|<label>|<value>|<pct-of-max>" dump lines. (Kind validity is
+        chart_session_set_kind's job, not this renderer's -- an unknown
+        kind reaching here renders as bars exactly as it always has, only
+        the "chart|<kind>|<title>" header echoing the name.)
     Returns both a UITree (for real pixel rendering through the browser
     engine) and a plain-text dump for testability without parsing HTML/
-    widget trees: "chart|<kind>|<title>" first, then one
-    "bar|<label>|<value>|<pct-of-max>" line per data point. Fail-closed (an
-    "error|<reason>" dump line, no crash) when either range is empty/
-    unparseable or the two ranges resolve to different lengths."""
+    widget trees: "chart|<kind>|<title>" first, then the per-point lines
+    above. Fail-closed (an "error|<reason>" dump line, no crash) when
+    either range is empty/unparseable or the two ranges resolve to
+    different lengths -- identical error dump for every kind."""
     val series = chart_series_from_ranges(sheet, labels_range, value_range)
     var dump_lines: [text] = ["chart|{chart_kind}|{title}"]
     if series.labels.len() == 0 or series.values.len() == 0:
@@ -336,6 +388,101 @@ fn chart_gui_view(sheet: Sheet, chart_kind: text, value_range: text, labels_rang
     if series.labels.len() != series.values.len():
         dump_lines.push("error|range-length-mismatch")
         return ChartGuiView(tree: _chart_gui_error_tree(title), text_dump: dump_lines.join("\n"))
+
+    val kind_lower = chart_kind.lower()
+
+    if kind_lower == "column":
+        # Vertical bars: fixed-width cells, height proportional to
+        # pct-of-max (same max-based scale as the bar kind). Inlined here
+        # rather than split into a helper because array fields of a struct
+        # PARAMETER read 0 under variable indexing in the interpreter
+        # (quirk ledger) -- series must stay a local.
+        var col_max = 0.0
+        for cv in series.values:
+            if cv > col_max:
+                col_max = cv
+        var col_axis = col_max
+        if col_axis <= 0.0:
+            col_axis = 1.0
+        var col_cells: [WidgetNode] = []
+        val col_n = series.values.len()
+        var ci = 0
+        while ci < col_n:
+            val cval = series.values[ci]
+            val clabel = series.labels[ci]
+            val cvlab = _chart_gui_fmt_val(cval)
+            val cpct = ((cval / col_axis) * 100.0).to_i64()
+            var cell_h = (cpct * h.to_i64()) / 100
+            if cell_h < 1:
+                # Keep every column at least 1 unit tall so a tiny-but-
+                # nonzero point stays visible; the dump carries the exact
+                # pct, so no information is lost to this floor.
+                cell_h = 1
+            var cell = column("chart_col_{ci}", [])
+            cell = with_width(cell, CHART_GUI_COLUMN_CELL_W)
+            cell = with_height(cell, cell_h.to_i32())
+            # The widget prop store is process-global and keyed by widget
+            # id (quirk ledger), so the class prop is written
+            # UNCONDITIONALLY on every build -- never inherited from a
+            # previous render of the same id.
+            cell = cell.set_prop("class", "col-fill")
+            col_cells.push(cell)
+            dump_lines.push("col|{clabel}|{cvlab}|{cpct}")
+            ci = ci + 1
+        var col_row = row("chart_gui_cols", col_cells)
+        col_row = with_width(col_row, w)
+        col_row = with_height(col_row, h)
+        val col_title = text_widget("chart_gui_title", title)
+        val col_root = column("chart_gui_root", [col_title, col_row])
+        val col_tree = build_tree_with_title(col_root, title, "light")
+        return ChartGuiView(tree: col_tree, text_dump: dump_lines.join("\n"))
+
+    if kind_lower == "pie":
+        # Stacked strip: segment width proportional to share of the TOTAL
+        # (not the max -- a pie's segments must sum to the whole), one
+        # distinct pie-<i%8> background class per segment, labels listed
+        # below the strip. Same inlining rationale as the column branch.
+        var pie_total = 0.0
+        for pv in series.values:
+            pie_total = pie_total + pv
+        var pie_denom = pie_total
+        if pie_denom <= 0.0:
+            pie_denom = 1.0
+        var pie_segs: [WidgetNode] = []
+        var pie_labels: [WidgetNode] = []
+        val pie_n = series.values.len()
+        var pi = 0
+        while pi < pie_n:
+            val pval = series.values[pi]
+            val plabel = series.labels[pi]
+            val pvlab = _chart_gui_fmt_val(pval)
+            val pshare = ((pval / pie_denom) * 100.0).to_i64()
+            var seg_w = (pshare * w.to_i64()) / 100
+            if seg_w < 1:
+                # Same minimum-visibility floor as the column branch; the
+                # dump carries the exact share.
+                seg_w = 1
+            var seg = column("chart_pie_seg_{pi}", [])
+            seg = with_width(seg, seg_w.to_i32())
+            seg = with_height(seg, CHART_GUI_PIE_STRIP_H)
+            val color_idx = pi % 8
+            # Written unconditionally -- see the column branch's
+            # process-global prop-store note.
+            seg = seg.set_prop("class", "pie-{color_idx}")
+            pie_segs.push(seg)
+            pie_labels.push(text_widget("chart_pie_label_{pi}", "{plabel}: {pvlab}"))
+            dump_lines.push("pie|{plabel}|{pvlab}|{pshare}")
+            pi = pi + 1
+        var pie_strip = row("chart_gui_pie", pie_segs)
+        pie_strip = with_width(pie_strip, w)
+        pie_strip = with_height(pie_strip, CHART_GUI_PIE_STRIP_H)
+        val pie_title = text_widget("chart_gui_title", title)
+        var pie_children: [WidgetNode] = [pie_title, pie_strip]
+        for pl in pie_labels:
+            pie_children.push(pl)
+        val pie_root = column("chart_gui_root", pie_children)
+        val pie_tree = build_tree_with_title(pie_root, title, "light")
+        return ChartGuiView(tree: pie_tree, text_dump: dump_lines.join("\n"))
 
     var max_v = 0.0
     for v in series.values:
@@ -370,12 +517,36 @@ fn chart_gui_view(sheet: Sheet, chart_kind: text, value_range: text, labels_rang
     val tree = build_tree_with_title(root, title, "light")
     ChartGuiView(tree: tree, text_dump: dump_lines.join("\n"))
 
+fn chart_gui_html(view: ChartGuiView) -> text:
+    """Build the full page HTML for a ChartGuiView tree. render_html_panel
+    has no extra-class hook (html_widgets.spl renders only its own
+    layout/title/flex props and is outside this surface's owned files), so
+    the column/pie cells' "class" props (col-fill / pie-<n>, attached by
+    chart_gui_view) land the same way sheet_gui_cf_html's cf-* classes do:
+    by rewriting the exact `class="widget-panel layout-vbox" id="<cell id>"`
+    attribute pair render_html_panel emits for that cell id. The bar kind
+    sets no class props (its progress widgets carry only value/label), so
+    its HTML passes through this loop byte-untouched. Split out from
+    office_gui_chart_pixels so specs can assert the injected classes on the
+    REAL page HTML without paying for a pixel render."""
+    val state = init_state(view.tree)
+    val root = view.tree.root_node()
+    var body = render_html_tree(root, state)
+    for row_node in root.children():
+        for cell_node in row_node.children():
+            val cell_class = cell_node.get_prop("class")
+            if cell_class != "":
+                val old_attr = "class=\"widget-panel layout-vbox\" id=\"" + cell_node.id + "\""
+                val new_attr = "class=\"widget-panel layout-vbox " + cell_class + "\" id=\"" + cell_node.id + "\""
+                body = body.replace(old_attr, new_attr)
+    "<html><head><style>" + office_gui_chart_minimal_css() + "</style></head><body>" + body + "</body></html>"
+
 fn office_gui_chart_pixels(view: ChartGuiView) -> [u32]:
     """Render a ChartGuiView's tree to ARGB pixels via the same real
-    layout/paint pixel path office_gui_frame/office_gui_sheet_pixels use."""
-    val state = init_state(view.tree)
-    val body = render_html_tree(view.tree.root_node(), state)
-    val html = "<html><head><style>" + office_gui_chart_minimal_css() + "</style></head><body>" + body + "</body></html>"
+    layout/paint pixel path office_gui_frame/office_gui_sheet_pixels use,
+    with the column/pie cell classes injected by chart_gui_html (see
+    there; a no-op for the bar kind)."""
+    val html = chart_gui_html(view)
     simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
 
 # ---------------------------------------------------------------------------
@@ -387,20 +558,20 @@ fn office_gui_chart_pixels(view: ChartGuiView) -> [u32]:
 # function's docstring above for the render/text_dump contract this reuses
 # unchanged).
 #
-# GUI-supported kind list: chart_gui_view (see above) never branches on its
-# chart_kind argument -- every data point always renders as ONE horizontal
-# progress-bar widget, regardless of what kind name is passed in (the kind
-# only ever reaches the dump's "chart|<kind>|<title>" header line). So
-# "bar" is the ONLY chart_kind whose GUI rendering genuinely matches its
-# name; chart.spl itself knows several more shapes (sheet_line_chart_svg,
-# sheet_area_chart_svg, sheet_scatter_chart_svg, sheet_pie_chart_svg,
-# sheet_stacked_bar_chart_svg, sheet_hbar_chart_svg, sheet_donut_chart_svg),
-# but this GUI cannot render any of them as anything other than the same
-# bar shape today. chart_session_set_kind below is honest about that gap:
-# it accepts only "bar" and rejects every other kind name (known-to-chart.
-# spl or not) with last_error = "kind-not-in-gui", rather than silently
-# accepting a kind whose GUI rendering would not match what the caller
-# asked for.
+# GUI-supported kind list: chart_gui_view (see above) branches on its
+# chart_kind argument for "column" (fixed-width cells with proportional
+# HEIGHT) and "pie" (one stacked strip whose segment WIDTHS are shares of
+# the total, pie-0..pie-7 color cycle), and renders every other kind name
+# as the original horizontal progress bars. So "bar", "column", and "pie"
+# are the chart_kinds whose GUI rendering genuinely matches their names;
+# chart.spl itself knows several more shapes (sheet_line_chart_svg,
+# sheet_area_chart_svg, sheet_scatter_chart_svg, sheet_stacked_bar_chart_
+# svg, sheet_hbar_chart_svg, sheet_donut_chart_svg), but this GUI cannot
+# render any of those as anything other than the bar shape today.
+# chart_session_set_kind below is honest about that gap: it accepts only
+# bar/column/pie and rejects every other kind name (known-to-chart.spl or
+# not) with last_error = "kind-not-in-gui", rather than silently accepting
+# a kind whose GUI rendering would not match what the caller asked for.
 # ---------------------------------------------------------------------------
 
 val CHART_GUI_SESSION_W: i32 = 80
@@ -415,14 +586,18 @@ struct ChartGuiSession:
     last_error: text   # "" = no error; else the reason the last op left the session unchanged
 
 fn _chart_gui_kind_is_valid(kind_lower: text) -> bool:
-    """The only chart_kind whose GUI rendering genuinely matches its name --
-    see the "Chart GUI session" comment block above for why chart_gui_view
-    cannot honestly claim to support line/area/scatter/pie/stacked_bar/
-    hbar/donut today. Mirrors _pivot_gui_agg_is_valid's role: called before
-    accepting a kind change so an unsupported-but-known chart.spl kind can
-    be rejected with an honest reason instead of silently rendering the
-    wrong shape."""
-    kind_lower == "bar"
+    """The chart_kinds whose GUI rendering genuinely matches their names
+    (bar/column/pie -- chart_gui_view's three render branches; see the
+    "Chart GUI session" comment block above for why line/area/scatter/
+    stacked_bar/hbar/donut still cannot be claimed honestly today).
+    Mirrors _pivot_gui_agg_is_valid's role: called before accepting a kind
+    change so an unsupported-but-known chart.spl kind can be rejected with
+    an honest reason instead of silently rendering the wrong shape."""
+    if kind_lower == "bar":
+        return true
+    if kind_lower == "column":
+        return true
+    kind_lower == "pie"
 
 fn chart_session_new(sheet: Sheet, chart_kind: text, value_range: text, labels_range: text, title: text) -> ChartGuiSession:
     """Start a chart GUI session over `sheet` with the given chart_kind/
@@ -444,11 +619,11 @@ fn chart_session_view(session: ChartGuiSession) -> ChartGuiView:
     chart_gui_view(session.sheet, session.chart_kind, session.value_range, session.labels_range, session.title, CHART_GUI_SESSION_W, CHART_GUI_SESSION_H)
 
 fn chart_session_set_kind(session: ChartGuiSession, kind: text) -> ChartGuiSession:
-    """Change the session's chart kind to `kind` (case-insensitive). Only
-    "bar" is GUI-supported today (see _chart_gui_kind_is_valid above) --
-    any other kind, INCLUDING ones chart.spl itself knows how to render as
-    SVG (line/area/scatter/pie/stacked_bar/hbar/donut), leaves the session
-    UNCHANGED (chart_kind untouched) except `last_error`, set to
+    """Change the session's chart kind to `kind` (case-insensitive). "bar",
+    "column", and "pie" are GUI-supported (see _chart_gui_kind_is_valid
+    above) -- any other kind, INCLUDING ones chart.spl itself knows how to
+    render as SVG (line/area/scatter/stacked_bar/hbar/donut), leaves the
+    session UNCHANGED (chart_kind untouched) except `last_error`, set to
     "kind-not-in-gui" -- documented fail-closed, honest about what this GUI
     actually renders rather than accepting a kind name it would silently
     ignore. A valid kind clears last_error back to "". Returns a NEW
@@ -493,14 +668,15 @@ struct ChartGuiStepResult:
     quit: bool
 
 fn _chart_gui_next_kind(kind_lower: text) -> text:
-    """Cycle order across the GUI-supported kind list -- today just "bar"
-    (see _chart_gui_kind_is_valid above), so this always wraps back to
-    "bar" itself. Falls back to "bar" for any kind_lower outside the
-    supported list (defensive only -- every ChartGuiSession.chart_kind
-    reaching here already passed chart_session_set_kind's validity
-    check)."""
+    """Cycle order across the GUI-supported kind list: bar -> column ->
+    pie -> bar (see _chart_gui_kind_is_valid above). Falls back to "bar"
+    for any kind_lower outside the supported list (defensive only -- every
+    ChartGuiSession.chart_kind reaching here already passed
+    chart_session_set_kind's validity check)."""
     if kind_lower == "bar":
-        return "bar"
+        return "column"
+    if kind_lower == "column":
+        return "pie"
     "bar"
 
 fn chart_gui_step(session: ChartGuiSession, key: text) -> ChartGuiStepResult:
