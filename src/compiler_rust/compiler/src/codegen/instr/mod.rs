@@ -1362,13 +1362,25 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::UnboxInt { dest, value } => {
-            // Unbox RuntimeValue to integer: value >> 3 (arithmetic shift for sign extension)
+            // Unbox RuntimeValue to integer. Task #123: runtime-tag-aware. Only a tagged
+            // native scalar (low 3 bits == TAG_INT == 0) is shifted (value >> 3, arithmetic
+            // for sign extension); a heap pointer (TAG_HEAP, low bit set), float or special
+            // passes through verbatim. This is provably safe: BoxInt always produces
+            // low3==0 so tagged scalars still shift, and heap pointers are `ptr | 1` so they
+            // never falsely shift. It fixes DEFECT A — `.unwrap()` / dict-get on an
+            // Option/enum wrapping a HEAP enum lowers to rt_enum_payload + UnboxInt, and the
+            // unconditional >>3 mangled the heap pointer (env `Dict<text,Value>` nested-heap
+            // payload nil-ed; enumdict corruption).
             let val = ctx.vreg_values.get(value).copied().unwrap_or_else(|| {
                 // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
             let three = builder.ins().iconst(types::I64, 3);
-            let unboxed = builder.ins().sshr(val, three);
+            let seven = builder.ins().iconst(types::I64, 7);
+            let tag = builder.ins().band(val, seven);
+            let is_int = builder.ins().icmp_imm(IntCC::Equal, tag, 0);
+            let shifted = builder.ins().sshr(val, three);
+            let unboxed = builder.ins().select(is_int, shifted, val);
             ctx.vreg_values.insert(*dest, unboxed);
         }
 

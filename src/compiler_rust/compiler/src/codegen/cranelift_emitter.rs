@@ -732,6 +732,10 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         Ok(())
     }
     fn emit_unbox_int(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
+        // Task #123: runtime-tag-aware unbox (mirror of the instr/mod.rs path). Only a
+        // tagged native scalar (low 3 bits == TAG_INT == 0) is shifted; a heap pointer
+        // (TAG_HEAP), float or special passes through verbatim, so `.unwrap()`/dict-get
+        // on a heap-enum Option no longer >>3-mangles the pointer (DEFECT A).
         let val = self
             .ctx
             .vreg_values
@@ -739,7 +743,14 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
             .copied()
             .unwrap_or_else(|| self.builder.ins().iconst(types::I64, 0));
         let three = self.builder.ins().iconst(types::I64, 3);
-        let unboxed = self.builder.ins().sshr(val, three);
+        let seven = self.builder.ins().iconst(types::I64, 7);
+        let tag = self.builder.ins().band(val, seven);
+        let is_int = self
+            .builder
+            .ins()
+            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, tag, 0);
+        let shifted = self.builder.ins().sshr(val, three);
+        let unboxed = self.builder.ins().select(is_int, shifted, val);
         self.ctx.vreg_values.insert(dest, unboxed);
         Ok(())
     }
