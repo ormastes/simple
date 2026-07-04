@@ -11,14 +11,14 @@ use app.office.slides.slide.{Slide, slide_count, blank_slide, add_text_box, slid
 use app.office.mail.mail_app.{MailApp}
 use app.office.planner.planner_app.{PlannerApp}
 use app.office.counter.{CounterApp}
-use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, session_scroll, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point, pivot_session_new, pivot_session_view, pivot_session_set_agg, pivot_session_swap_fields, pivot_session_field_letters, chart_session_new, chart_session_view, chart_session_set_value_range, chart_session_set_title, slide_session_new, slide_session_view, slide_gui_step, office_gui_slide_pixels, sheet_gui_view_with_formats, office_gui_sheet_cf_pixels, sheet_gui_view_full, session_edit_validated}
+use app.office.gui.{office_gui_frame, office_gui_frame_width, office_gui_frame_height, office_gui_non_background_pixel_count, sheet_gui_view, office_gui_sheet_pixels, chart_gui_view, office_gui_chart_pixels, pivot_gui_view, office_gui_pivot_pixels, SheetGuiSession, session_new, session_select, session_edit, session_click, session_key, session_scroll, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, sheet_gui_cell_click_point, pivot_session_new, pivot_session_view, pivot_session_set_agg, pivot_session_swap_fields, pivot_session_field_letters, chart_session_new, chart_session_view, chart_session_set_value_range, chart_session_set_title, slide_session_new, slide_session_view, slide_gui_step, office_gui_slide_pixels, sheet_gui_view_with_formats, office_gui_sheet_cf_pixels, sheet_gui_view_full, session_edit_validated, history_new, session_edit_undoable, session_undo, session_redo}
 use app.office.sheets.cond_format.{CondRule}
 use app.office.sheets.cell_format.{SheetFormats, empty_sheet_formats, sheet_set_number_format}
 use app.office.sheets.validation.{ValidationRules, empty_validation_rules, validation_add}
 use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_source_pane, wysiwyg_update_line_checked}
 use app.office.sheets.spreadsheet.{Sheet}
 use common.office.file_ops.{RecentFileStore}
-use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref, CellRef, col_to_letter}
+use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref, CellRef, col_to_letter, cell_display_text}
 use app.office.render_adapter.{office_render, office_render_source}
 use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv, recalculate_formula_cells}
 use app.office.slides.deck_format.{parse_deck, deck_to_text}
@@ -26,7 +26,7 @@ use app.office.odf_export.{document_to_fodt, sheet_to_fods, sheet_to_fods_format
 use app.office.office_api.{macro_parse_formats}
 use app.office.pptx_export.{deck_to_pptx_bytes, pptx_bytes_to_deck}
 use app.office.odf_ooxml.{odt_bytes_to_document, docx_bytes_to_document, document_to_odt_bytes, document_to_docx_bytes, ods_bytes_to_sheet, xlsx_bytes_to_sheet, sheet_to_ods_bytes, sheet_to_xlsx_bytes, sheet_to_xlsx_bytes_formatted}
-use app.office.interactive.{run_sheet_editor_mode, run_sheet_tui_mode, run_sheet_gui_live}
+use app.office.interactive.{run_sheet_editor_mode, run_sheet_tui_mode, run_sheet_gui_live, run_slides_gui_live}
 use app.office.word.toc.{toc_generate}
 use app.office.word.mail_merge.{merge_all_markdown, merge_all}
 use app.office.word.mail_merge_ui.{merge_fields_of, merge_preview, merge_validate}
@@ -426,6 +426,85 @@ fn _run_office_gui_sheet_fmt_command() -> i32:
         print "office-gui-fmt-rejected: {line}"
     return 0
 
+fn _office_gui_undo_cell_text(session: SheetGuiSession, ref_str: text) -> text:
+    """Display text of one cell in the session's sheet (hoisted locals --
+    no chained calls, quirk ledger item 1)."""
+    val sheet = session.sheet
+    val cell = sheet.get_cell(ref_str)
+    cell_display_text(cell)
+
+fn _office_gui_undo_print_step(op: text, session: SheetGuiSession, err: text):
+    """One "office-gui-undo:" marker line per scripted step: the operation,
+    the resulting B2/D2 display values (D2 is =B2*C2, so it proves the
+    recalculate path ran), and the outcome's last_error."""
+    val b2 = _office_gui_undo_cell_text(session, "B2")
+    val d2 = _office_gui_undo_cell_text(session, "D2")
+    print "office-gui-undo: {op} -> B2={b2} D2={d2} err={err}"
+
+fn _run_office_gui_sheet_undo_command() -> i32:
+    """`office sheet-gui-undo`: undo/redo scripted end to end over the demo
+    sheet (B2=10, D2==B2*C2=20). Script: undo on empty history (fail-closed
+    "nothing-to-undo") -> edit B2=40 (D2 recalcs to 80) -> undo (back to
+    10/20) -> redo (40/80 again) -> edit B2=50 (50/100) -> undo (40/80) ->
+    edit B2=60 (60/120, TRUNCATES the redo tail holding the 50 edit) ->
+    redo (fail-closed "nothing-to-redo", values unchanged). Every step
+    prints an "office-gui-undo:" marker with B2/D2 + err; BEFORE/FINAL
+    text_dumps bracket the run."""
+    val sheet = _build_office_gui_sheet_demo()
+    var session = session_new(sheet, "B2")
+    var history = history_new()
+    val vrules = empty_validation_rules()
+
+    val before_view = sheet_gui_view_with_selection(session, 5, 4)
+    for line in before_view.text_dump.split("\n"):
+        print "office-gui-undo-before: {line}"
+    _office_gui_undo_print_step("start", session, "")
+
+    var out = session_undo(session, history)
+    session = out.session
+    history = out.history
+    _office_gui_undo_print_step("undo-empty", session, out.last_error)
+
+    out = session_edit_undoable(session, history, "B2", "40", vrules)
+    session = out.session
+    history = out.history
+    _office_gui_undo_print_step("edit B2=40", session, out.last_error)
+
+    out = session_undo(session, history)
+    session = out.session
+    history = out.history
+    _office_gui_undo_print_step("undo", session, out.last_error)
+
+    out = session_redo(session, history)
+    session = out.session
+    history = out.history
+    _office_gui_undo_print_step("redo", session, out.last_error)
+
+    out = session_edit_undoable(session, history, "B2", "50", vrules)
+    session = out.session
+    history = out.history
+    _office_gui_undo_print_step("edit B2=50", session, out.last_error)
+
+    out = session_undo(session, history)
+    session = out.session
+    history = out.history
+    _office_gui_undo_print_step("undo", session, out.last_error)
+
+    out = session_edit_undoable(session, history, "B2", "60", vrules)
+    session = out.session
+    history = out.history
+    _office_gui_undo_print_step("edit B2=60", session, out.last_error)
+
+    out = session_redo(session, history)
+    session = out.session
+    history = out.history
+    _office_gui_undo_print_step("redo-truncated", session, out.last_error)
+
+    val final_view = sheet_gui_view_with_selection(session, 5, 4)
+    for line in final_view.text_dump.split("\n"):
+        print "office-gui-undo-final: {line}"
+    return 0
+
 fn _run_office_gui_sheet_command() -> i32:
     """Render the demo sheet's grid view through the real UI stack and
     report the same pixel-level proof line style as the counter pilot, plus
@@ -647,6 +726,33 @@ fn _run_office_gui_slides_command(args: [text]) -> i32:
             print "office-gui-slides: {step_line}"
     return 0
 
+fn _run_office_gui_slides_live_command(args: [text]) -> i32:
+    """`office slides-gui-live [deck.md]`: the live interactive slide
+    presenter -- real termios raw mode, arrow keys (right/space -> next,
+    left -> prev), n/p, digit goto, q/Ctrl-C quits, one real-pixel-path
+    frame re-rendered per keystroke. Deck loading mirrors `office
+    slides-gui` exactly: parse_deck over the named file, or the inline
+    3-slide demo deck when no file is given. The loop itself lives in
+    interactive.spl (run_slides_gui_live), which also handles the non-TTY
+    case (piped stdin prints one frame plus a notice and exits 0)."""
+    var deck: [Slide] = []
+    if args.len() > 1:
+        val deck_path = args[1]
+        if not file_exists(deck_path):
+            print "Error: deck file not found: {deck_path}"
+            return 1
+        val deck_content = read_file(deck_path)
+        deck = parse_deck(deck_content)
+    else:
+        deck = _build_office_gui_slides_demo_deck()
+    var total = 0
+    for s in deck:
+        total = total + 1
+    if total == 0:
+        print "Error: deck has no slides"
+        return 1
+    run_slides_gui_live(deck)
+
 fn run_office(args: [text]) -> i32:
     """Dispatch to the requested office app or show the launcher."""
     val cmd = if args.len() > 0: args[0] else: "launcher"
@@ -706,12 +812,16 @@ fn run_office(args: [text]) -> i32:
             return _run_office_gui_sheet_cf_command()
         "sheet-gui-fmt" =>
             return _run_office_gui_sheet_fmt_command()
+        "sheet-gui-undo" =>
+            return _run_office_gui_sheet_undo_command()
         "chart-gui" =>
             return _run_office_gui_chart_command()
         "pivot-gui" =>
             return _run_office_gui_pivot_command()
         "slides-gui" =>
             return _run_office_gui_slides_command(args)
+        "slides-gui-live" =>
+            return _run_office_gui_slides_live_command(args)
         "render" =>
             return _run_render_command(args)
         "edit-sheet" =>
@@ -755,7 +865,7 @@ fn run_office(args: [text]) -> i32:
         "erp-invoice" =>
             return _run_erp_invoice_command(args)
         case _("unsupported office app names show usage"):
-            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|sheet-gui|sheet-gui-edit|sheet-gui-click|sheet-gui-key|sheet-gui-scroll|sheet-gui-cf|chart-gui|pivot-gui|render|open|convert|toc|merge|mail-merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
+            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|sheet-gui|sheet-gui-edit|sheet-gui-click|sheet-gui-key|sheet-gui-scroll|sheet-gui-cf|sheet-gui-undo|chart-gui|pivot-gui|render|open|convert|toc|merge|mail-merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
             return 1
 
 fn _basename(path: text) -> text:

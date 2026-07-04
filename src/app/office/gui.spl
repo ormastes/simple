@@ -37,7 +37,7 @@ use common.ui.builder.{column, row, table_widget, build_tree_with_title, text_wi
 use app.ui.render.html_widgets.{render_html_tree}
 use app.office.counter.{CounterApp}
 use app.office.sheets.spreadsheet.{Sheet}
-use app.office.sheets.cell.{cell_display_text, col_to_letter, parse_cell_ref, cell_ref_to_string, CellRef, letter_to_col}
+use app.office.sheets.cell.{cell_display_text, col_to_letter, parse_cell_ref, cell_ref_to_string, CellRef, letter_to_col, CellValue}
 use app.office.sheets.cell_ref.{offset_ref, parse_range}
 use app.office.sheets.chart.{ChartSeries, chart_series_from_ranges}
 use app.office.sheets.pivot.{pivot_build}
@@ -917,6 +917,165 @@ fn session_key_validated(session: SheetGuiSession, key: text, max_rows: i32, max
         if not check_result.ok:
             return SheetEditOutcome(session: session, last_error: check_result.message)
     SheetEditOutcome(session: session_key(session, key, max_rows, max_cols, view_rows, view_cols), last_error: "")
+
+# ---------------------------------------------------------------------------
+# UNDO/REDO (core Office behavior the session previously lacked).
+#
+# Same extension rule as SheetEditOutcome above: SheetGuiSession is
+# constructed DIRECTLY in existing specs, so it gains no fields -- edit
+# history lives in a separate SheetGuiHistory value threaded through the
+# *_undoable entry points via SheetEditUndoOutcome.
+#
+# Why parallel text arrays instead of reusing common.office.undo's
+# UndoStack: UndoStack.undo/redo return Option<UndoEntry>, which fails HIR
+# lowering ("Unknown variable: Option while lowering UndoStack.undo" --
+# probe-verified 2026-07-04) and drags every importing module to the
+# interpreter. Parallel arrays + a cursor need no Option and no
+# Dict-in-struct (quirk ledger item 7), and probe clean under the
+# interpreter.
+#
+# History model: refs/old_texts/new_texts are index-aligned; `cursor`
+# points PAST the last APPLIED entry, so entries at index >= cursor are the
+# redo tail. Recording a new edit TRUNCATES that tail first (Excel parity:
+# a fresh edit after undo discards the redo branch). Undo/redo re-apply the
+# stored RAW cell text through session_edit's set+recalculate path, so
+# formula cells come back as live formula TEXT (never the cached display
+# value) and every dependent recalculates.
+# ---------------------------------------------------------------------------
+
+struct SheetGuiHistory:
+    refs: [text]        # cell ref per recorded edit ("B2")
+    old_texts: [text]   # raw content BEFORE the edit (formula TEXT, not cached value)
+    new_texts: [text]   # raw content the edit committed
+    cursor: i64         # points past the last APPLIED entry; >= cursor = redo tail
+
+fn history_new() -> SheetGuiHistory:
+    """Empty edit history: nothing to undo, nothing to redo."""
+    SheetGuiHistory(refs: [], old_texts: [], new_texts: [], cursor: 0)
+
+fn history_can_undo(h: SheetGuiHistory) -> bool:
+    h.cursor > 0
+
+fn history_can_redo(h: SheetGuiHistory) -> bool:
+    h.cursor < h.refs.len()
+
+fn history_record(h: SheetGuiHistory, ref_str: text, old_text: text, new_text: text) -> SheetGuiHistory:
+    """Append one committed edit, truncating any redo tail beyond the
+    cursor first (a new edit after undo discards the redo branch, matching
+    Excel). Returns a NEW history (copy semantics) -- callers reassign."""
+    var refs: [text] = []
+    var olds: [text] = []
+    var news: [text] = []
+    var i = 0
+    while i < h.cursor:
+        refs.push(h.refs[i])
+        olds.push(h.old_texts[i])
+        news.push(h.new_texts[i])
+        i = i + 1
+    refs.push(ref_str)
+    olds.push(old_text)
+    news.push(new_text)
+    SheetGuiHistory(refs: refs, old_texts: olds, new_texts: news, cursor: refs.len())
+
+fn _sheet_gui_cell_raw_text(sheet: Sheet, ref_str: text) -> text:
+    """Raw EDITABLE content of `ref_str` -- what you would type to recreate
+    the cell via set_value: formula cells give back "=<expr>" (the formula
+    TEXT, never the cached display value), empty cells "", everything else
+    its display text. Cells written through session_edit always carry the
+    default general style, so the display text round-trips through
+    set_value unchanged."""
+    val cell = sheet.get_cell(ref_str)
+    match cell.value:
+        CellValue.FormulaVal(expr, cached_display):
+            return "={expr}"
+        CellValue.Empty:
+            return ""
+        CellValue.TextVal(value):
+            return value
+        CellValue.NumberVal(value):
+            return cell_display_text(cell)
+        CellValue.BoolVal(value):
+            return cell_display_text(cell)
+        CellValue.ErrorVal(message):
+            return cell_display_text(cell)
+    ""
+
+struct SheetEditUndoOutcome:
+    session: SheetGuiSession
+    history: SheetGuiHistory
+    last_error: text   # "" = op applied; else message and session+history UNCHANGED
+
+fn session_edit_undoable(session: SheetGuiSession, history: SheetGuiHistory, ref_str: text, new_text: text, vrules: ValidationRules) -> SheetEditUndoOutcome:
+    """session_edit_validated with undo history: validation is still
+    enforced first, and ONLY a validly COMMITTED edit records a history
+    entry (a rejected edit changes neither session nor history, so undo
+    depth is exactly the number of real changes). The recorded old value is
+    the cell's raw text BEFORE the edit -- for a formula cell that is the
+    formula text itself, so undo restores a live formula, not its cached
+    number. Callers reassign both outcome.session and outcome.history."""
+    val old_text = _sheet_gui_cell_raw_text(session.sheet, ref_str)
+    val outcome = session_edit_validated(session, ref_str, new_text, vrules)
+    if outcome.last_error != "":
+        return SheetEditUndoOutcome(session: session, history: history, last_error: outcome.last_error)
+    val recorded = history_record(history, ref_str, old_text, new_text)
+    SheetEditUndoOutcome(session: outcome.session, history: recorded, last_error: "")
+
+fn session_undo(session: SheetGuiSession, history: SheetGuiHistory) -> SheetEditUndoOutcome:
+    """Revert the newest applied history entry by writing its OLD raw text
+    back through session_edit (the same set+recalculate path as a normal
+    edit, so every dependent formula recalculates) and moving the cursor
+    back one; the entry stays in the arrays as the redo tail. At the
+    beginning of history this is a fail-closed no-op: the outcome carries
+    the session and history UNCHANGED with last_error "nothing-to-undo"."""
+    if not history_can_undo(history):
+        return SheetEditUndoOutcome(session: session, history: history, last_error: "nothing-to-undo")
+    val idx = history.cursor - 1
+    val ref_str = history.refs[idx]
+    val old_text = history.old_texts[idx]
+    val reverted = session_edit(session, ref_str, old_text)
+    val moved = SheetGuiHistory(refs: history.refs, old_texts: history.old_texts, new_texts: history.new_texts, cursor: idx)
+    SheetEditUndoOutcome(session: reverted, history: moved, last_error: "")
+
+fn session_redo(session: SheetGuiSession, history: SheetGuiHistory) -> SheetEditUndoOutcome:
+    """Re-apply the first redo-tail entry by writing its NEW raw text back
+    through session_edit (set+recalculate, dependents update) and moving
+    the cursor forward one. At the end of history this is a fail-closed
+    no-op: session and history come back UNCHANGED with last_error
+    "nothing-to-redo"."""
+    if not history_can_redo(history):
+        return SheetEditUndoOutcome(session: session, history: history, last_error: "nothing-to-redo")
+    val idx = history.cursor
+    val ref_str = history.refs[idx]
+    val new_text = history.new_texts[idx]
+    val reapplied = session_edit(session, ref_str, new_text)
+    val moved = SheetGuiHistory(refs: history.refs, old_texts: history.old_texts, new_texts: history.new_texts, cursor: idx + 1)
+    SheetEditUndoOutcome(session: reapplied, history: moved, last_error: "")
+
+fn session_key_undoable(session: SheetGuiSession, history: SheetGuiHistory, key: text, max_rows: i32, max_cols: i32, view_rows: i32, view_cols: i32, vrules: ValidationRules) -> SheetEditUndoOutcome:
+    """session_key_validated with undo history and two extra keys:
+    "ctrl_z" runs session_undo and "ctrl_y" runs session_redo (fail-closed
+    "nothing-to-undo"/"nothing-to-redo" at the ends). "enter" with a
+    non-empty pending buffer is the ONLY key that commits cell content, so
+    it is the only key that records history -- and only when validation
+    accepts the buffer (a rejected enter keeps the buffer, sets last_error,
+    and records nothing, exactly session_key_validated's semantics). Every
+    other key delegates to session_key_validated with the history passed
+    through untouched."""
+    if key == "ctrl_z":
+        return session_undo(session, history)
+    if key == "ctrl_y":
+        return session_redo(session, history)
+    if key == "enter" and session.pending_input != "":
+        val ref_str = session.selected_ref
+        val pending = session.pending_input
+        val old_text = _sheet_gui_cell_raw_text(session.sheet, ref_str)
+        val commit_outcome = session_key_validated(session, key, max_rows, max_cols, view_rows, view_cols, vrules)
+        if commit_outcome.last_error != "":
+            return SheetEditUndoOutcome(session: commit_outcome.session, history: history, last_error: commit_outcome.last_error)
+        val recorded = history_record(history, ref_str, old_text, pending)
+        return SheetEditUndoOutcome(session: commit_outcome.session, history: recorded, last_error: "")
+    val pass_outcome = session_key_validated(session, key, max_rows, max_cols, view_rows, view_cols, vrules)
+    SheetEditUndoOutcome(session: pass_outcome.session, history: history, last_error: pass_outcome.last_error)
 
 fn _sheet_gui_selection_cell_id(ref_str: text) -> text:
     "cell_{ref_str}"

@@ -14,11 +14,18 @@ ends, slide_session_goto is 1-based and fails closed (last_error
 "bad-index") on out-of-range targets, and slide_gui_step maps presenter
 keys: "n"/"right"/"space" next, "p"/"left" prev, single digits "1".."9"
 goto, "q"/"ctrl_c"/"eof" quit.
+
+The live presenter loop (`office slides-gui-live`, interactive.spl's
+run_slides_gui_live) feeds decode_key_byte key names through the pure
+slides_live_map_key translation before slide_gui_step: right -> "n",
+left -> "p", a decoded space (" " or "space") -> "n", n/p/digits/quit keys
+pass through, anything else -> "" (no step).
 """
 
 use std.spec
 use app.office.slides.slide.{Slide, SlideElement, SlideElementKind, blank_slide, add_text_box, add_slide_element}
 use app.office.gui.{slide_gui_view, slide_session_new, slide_session_next, slide_session_prev, slide_session_goto, slide_gui_step}
+use app.office.interactive.{slides_live_map_key}
 
 fn _titled_slide(id: text, title: text) -> Slide:
     var s = blank_slide(id)
@@ -253,3 +260,39 @@ describe "slide_gui_step: key mapping":
         val res = slide_gui_step(session, "z")
         expect(res.session.current_index).to_equal(0)
         assert_false(res.quit)
+
+describe "live presenter step":
+    """slides_live_map_key translates decode_key_byte's key names into
+    slide_gui_step's presenter keys for the run_slides_gui_live loop:
+    right -> n, left -> p, decoded space -> n, digits and n/p/quit keys
+    pass through, everything else -> "" (no step, no redraw)."""
+
+    it "right maps to n (next)":
+        expect(slides_live_map_key("right")).to_equal("n")
+
+    it "left maps to p (prev)":
+        expect(slides_live_map_key("left")).to_equal("p")
+
+    it "a decoded space (the ' ' printable byte 32) maps to n":
+        expect(slides_live_map_key(" ")).to_equal("n")
+
+    it "the canonical space name also maps to n":
+        expect(slides_live_map_key("space")).to_equal("n")
+
+    it "a digit passes through for 1-based goto":
+        expect(slides_live_map_key("3")).to_equal("3")
+
+    it "n and p pass through unchanged":
+        expect(slides_live_map_key("n")).to_equal("n")
+        expect(slides_live_map_key("p")).to_equal("p")
+
+    it "q, ctrl_c, and eof pass through as quit keys":
+        expect(slides_live_map_key("q")).to_equal("q")
+        expect(slides_live_map_key("ctrl_c")).to_equal("ctrl_c")
+        expect(slides_live_map_key("eof")).to_equal("eof")
+
+    it "unknown keys map to the empty no-step key":
+        expect(slides_live_map_key("z")).to_equal("")
+        expect(slides_live_map_key("escape")).to_equal("")
+        expect(slides_live_map_key("0")).to_equal("")
+        expect(slides_live_map_key("")).to_equal("")
