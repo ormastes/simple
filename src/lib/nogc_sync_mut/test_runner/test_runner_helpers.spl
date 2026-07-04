@@ -110,6 +110,8 @@ fn extract_test_name(line: text) -> text:
 fn categorize_test_file(file_path: text) -> text:
     if file_path.contains("test/01_unit/"):
         return "Unit"
+    if file_path.contains("test/shared/"):
+        return "Shared"
     if file_path.contains("test/03_system/feature/"):
         return "Feature"
     if file_path.contains("test/02_integration/"):
@@ -222,12 +224,13 @@ fn display_call_graph_warnings():
 # Test Database Update (C5: per-test granularity, M1: categorization)
 # =========================================================================
 
-fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64):
-    var db = match load_test_db_compat():
+fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64) -> Result<TestDatabase, text>:
+    val db_result = load_test_db_compat()
+    var db = match db_result:
         case Ok(loaded): loaded
         case Err(reason):
             print "Warning: Could not load test database: {reason}"
-            return
+            return Err(reason)
     val run_id = db.start_run()
 
     for file_result in result.files:
@@ -243,10 +246,12 @@ fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64):
 
     db.complete_run(run_id, result.files.len(), result.total_passed, result.total_failed, result.total_timed_out)
     db.cleanup_stale_runs(48)
-    match db.save():
-        case Ok(_): pass
+    val save_result = db.save()
+    match save_result:
+        case Ok(_): Ok(db)
         case Err(reason):
             print "Warning: Could not save test database: {reason}"
+            Err(reason)
 
 # =========================================================================
 # M3/H6: Update feature status from test results

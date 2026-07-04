@@ -401,12 +401,15 @@ impl InterpreterBackendImpl:
 
     fn exec_stmt(stmt: HirStmt, ctx: EvalContext) -> Result<(), BackendError>:
         itrace("[ES] exec_stmt entry")
+        # Arm ORDER matters on stage4: `Expr` and `Block` are struct-shadowed
+        # variant names, so their pattern tests compile ALWAYS-TRUE (bug doc
+        # iteration 18 hazard #1) — an `Expr`-first arm swallows EVERY statement,
+        # including `Let`/`Assign`, routing them to eval_expr with a garbage
+        # payload (disc reads "Error") → "field access on nil receiver" SIGILL.
+        # Keep the sound (non-shadowed) Let/Assign arms FIRST so they are tested
+        # by a real discriminant; Expr then legitimately takes Expr stmts; Block
+        # stays last (shadowed too). Mirrors the proven 40.mono scan_stmt reorder.
         match stmt.kind:
-            case HirStmtKind.Expr(expr):
-                itrace("[ES] Expr arm")
-                self.eval_expr(expr, ctx)?
-                Ok(())
-
             case HirStmtKind.Let(symbol, _, init):
                 val value = self.eval_expr(init, ctx)?
                 ctx.env.define(symbol, value)
@@ -427,6 +430,11 @@ impl InterpreterBackendImpl:
                         Ok(())
                     case _:
                         Err(BackendError.not_implemented("assignment target not implemented"))
+
+            case HirStmtKind.Expr(expr):
+                itrace("[ES] Expr arm")
+                self.eval_expr(expr, ctx)?
+                Ok(())
 
             case HirStmtKind.Block(block):
                 self.eval_block(block, ctx)?
