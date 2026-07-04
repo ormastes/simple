@@ -52,7 +52,7 @@ the firmware":
 | P5 | `ftl_map` + `dram` | `Ftl` uses bounded LRU write-back cache; HIL/controller writes allocate a bounded DRAM arena span before programming media | **wired DRAM floor** — no full DRAM subsystem yet |
 | P6 | `firmware.service_tick` | Foreground HIL ticks and background GC ticks share an explicit FTL-map owner token | **wired cooperative floor** — no multicore/preemption |
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
-| P8 | `rain` | `ftl` (`rain_seal` / `rain_recover_channel`: a failed channel is rebuilt inside the live FTL, verified end-to-end through the normal read path) | **wired** |
+| P8 | `rain` | `ftl` (writes/GC/format maintain parity; `rain_recover_channel` rebuilds a failed channel inside the live FTL, verified end-to-end through the normal read path) | **wired** |
 | P2 | `fil_scheduler` | `fil.spl` (every valid program/read/erase queues the target block through the scheduler before the FMC command) | **wired timing floor** — channel-level parallelism is still a model the single-threaded sim cannot physically exhibit |
 | P9 | `fw_rv32/entry.spl` | bare-metal rv32 ISA (re-expresses the RAIN reconstruct array-free; `check`-clean + host-verified) | started — **build-blocked (environmental)**: rv32 LLVM native-build broken here (proven OS recipe also exits 255); boot not observed |
 
@@ -294,15 +294,14 @@ calibration knob (`ponytail:` real sensors drift; leave the knob).
 > **Wired into the live FTL (2026-06-30).** The physical address space is a clean
 > NUM_GROUPS×NUM_CHANNELS block grid (`block = group·NUM_CHANNELS + channel`), so a RAIN stripe is
 > one page per channel at a fixed (group, page). `Ftl` carries a per-stripe parity word array;
-> `me.rain_seal()` snapshots parity over the current physical contents (a RAID parity-scrub pass),
-> and `me.rain_recover_channel(c)` rebuilds a corrupted/failed channel: per NAND block it computes
-> the recovered payloads from the sealed parity XOR the surviving channels, erases the failed
-> block, and reprograms its live pages in place — the L2P ppns are unchanged, so the normal read
-> path returns the original data. Proven end-to-end by `rain_ftl_check.spl` (256 known writes →
-> seal → a whole channel made uncorrectable, confirmed via `read_status` → rebuild → every LBA
-> reads back its original value) plus `ftl_rain_selftest` in `test_fw`. **Ceiling:** parity is
-> sealed on demand, not maintained on every program/erase/GC relocation — a continuously-correct
-> live parity (updated through the GC mover) is the next step; recorded here, not silently skipped.
+> writes/GC/format maintain `rain_parity` as physical pages change, `me.rain_seal()` remains a
+> RAID parity-scrub/repair pass, and `me.rain_recover_channel(c)` rebuilds a corrupted/failed
+> channel: per NAND block it computes the recovered payloads from live parity XOR the surviving
+> channels, erases the failed block, and reprograms its live pages in place — the L2P ppns are
+> unchanged, so the normal read path returns the original data. Proven end-to-end by
+> `rain_ftl_check.spl` (256 known writes → a whole channel made uncorrectable, confirmed via
+> `read_status` → rebuild without a pre-rebuild seal → every LBA reads back its original value)
+> plus `ftl_rain_selftest` in `test_fw`.
 
 **Goal.** XOR parity stripe across channels so a die/channel failure is recoverable.
 
