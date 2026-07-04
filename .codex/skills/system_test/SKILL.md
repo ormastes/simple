@@ -111,7 +111,9 @@ describe "<Feature Name>":
   together. Do not let regenerated SPipe docs replace the manual Lean/BYL proof
   layer. If a generated evidence matrix reports readiness rows as `pass`, keep
   mission-critical release wording separate and cite the stricter release gate
-  explicitly; a readiness matrix pass is not a substitute for a strict SBY proof
+  explicitly with `sh scripts/check/check-riscv-rtl-sby-proof.shs` and
+  `sh scripts/check/check-simpleos-mission-critical-release.shs`; a readiness
+  matrix pass or missing-tool blocker is not a substitute for a strict SBY proof
   pass.
 - For broad lanes with shared interfaces, the primary/best model must define
   shared interface names, manual `step("...")` flow helper names, and
