@@ -135,7 +135,7 @@ provides the strong exported hook that prints the firmware PASS marker.
 
 #### runs the rv32 no-alloc logic reference and proves the boot hook is wired
 
-- The array-free rv32 RAIN+ECC+scheduler+map-cache+band+journal reference typechecks
+- The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal reference typechecks
    - Expected: check_code equals `0`
 - The host-runnable scalar logic reference passes
    - Expected: logic_code equals `0`
@@ -155,7 +155,7 @@ Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("The array-free rv32 RAIN+ECC+scheduler+map-cache+band+journal reference typechecks")
+step("The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal reference typechecks")
 val (check_out, check_err, check_code) = _run("bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
 expect(check_code).to_equal(0)
 
