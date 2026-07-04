@@ -263,6 +263,35 @@ grep -Fq "artifact=$ROOT_DIR/build/simpleos_formal_setup_contract/rtl-missing-ar
     exit 1
 }
 
+rtl_ready_bin="$ROOT_DIR/build/simpleos_formal_setup_contract/rtl-ready-bin"
+rtl_ready_sidecar="$ROOT_DIR/build/simpleos_formal_setup_contract/rtl-ready-sidecar.shs"
+mkdir -p "$rtl_ready_bin"
+printf '#!/bin/sh\nexec /usr/bin/dirname "$@"\n' >"$rtl_ready_bin/dirname"
+for tool in sby yosys z3; do
+    printf '#!/bin/sh\nexit 0\n' >"$rtl_ready_bin/$tool"
+    chmod +x "$rtl_ready_bin/$tool"
+done
+chmod +x "$rtl_ready_bin/dirname"
+cat >"$rtl_ready_sidecar" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+for sby_file in \
+    "$BUILD_ROOT/default/rv32/rtl/simple_rv32gc_core.sby" \
+    "$BUILD_ROOT/default/rv64/rtl/simple_rv64gc_core.sby" \
+    "$BUILD_ROOT/mlk/rv32/rtl/simple_rv32gc_core.sby" \
+    "$BUILD_ROOT/mlk/rv64/rtl/simple_rv64gc_core.sby"
+do
+    mkdir -p "$(dirname "$sby_file")"
+    : >"$sby_file"
+done
+EOF
+chmod +x "$rtl_ready_sidecar"
+PATH="$rtl_ready_bin:/bin:/usr/bin" SIDECAR_CONTRACT="$rtl_ready_sidecar" BUILD_ROOT="$ROOT_DIR/build/simpleos_formal_setup_contract/rtl-ready-build" /bin/sh "$RTL_PROOF" >/tmp/simpleos-formal-rtl-ready.out 2>/tmp/simpleos-formal-rtl-ready.err
+grep -Fq "STATUS: PASS riscv-rtl-sby-proof" /tmp/simpleos-formal-rtl-ready.out || {
+    echo "FAIL: RISC-V SBY proof fake ready stack missing pass status" >&2
+    exit 1
+}
+
 fake_ready_matrix="$ROOT_DIR/build/simpleos_formal_setup_contract/fake-matrix-release-ready.shs"
 cat >"$fake_ready_matrix" <<'EOF'
 #!/usr/bin/env sh
