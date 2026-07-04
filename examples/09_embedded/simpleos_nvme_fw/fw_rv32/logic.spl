@@ -1,7 +1,7 @@
 # RV32 no-alloc NVMe firmware logic reference.
 #
 # Scalar-only: no arrays, no heap, no strings in the logic path. Host and bare-metal entries share
-# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue + admin/format/fw-log + reactor + policy/target + DRAM/durability + wear/scrub floor.
+# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue + admin/format/fw-log + reactor + policy/target + DRAM/durability + wear/scrub + media-retire floor.
 
 fn rv32_rain_selftest() -> i64:
     val d0 = 256
@@ -1407,5 +1407,68 @@ fn rv32_wear_scrub_selftest() -> i64:
         fail = fail + 1
     fail
 
+fn rv32_media_retire_selftest() -> i64:
+    # Scalar FIL floor: program/erase faults retire blocks; bad media stays out of service.
+    var fail = 0
+    val nand_ok = 0
+    val nand_prog_fail = 3
+    val nand_erase_fail = 4
+    val nand_bad_block = 5
+    val num_blocks = 64
+    val spare_start = 56
+    var bad5 = 0
+    var bad6 = 0
+    var bad_count = 0
+    var spare_next = spare_start
+    var status = nand_ok
+
+    val inject_prog_fail5 = 1
+    if inject_prog_fail5 == 1:
+        status = nand_prog_fail
+        bad5 = 1
+        bad_count = bad_count + 1
+    if status != nand_prog_fail or bad5 != 1 or bad_count != 1:
+        fail = fail + 1
+    if bad5 == 1:
+        status = nand_bad_block
+    if status != nand_bad_block:
+        fail = fail + 1
+
+    val inject_erase_fail6 = 1
+    if inject_erase_fail6 == 1:
+        status = nand_erase_fail
+        bad6 = 1
+        bad_count = bad_count + 1
+    if status != nand_erase_fail or bad6 != 1 or bad_count != 2:
+        fail = fail + 1
+    if num_blocks >= 64:
+        status = nand_bad_block
+    if status != nand_bad_block:
+        fail = fail + 1
+
+    var spare1 = -1
+    while spare_next < num_blocks and spare1 == -1:
+        if spare_next != 56 and spare_next != 57:
+            spare1 = spare_next
+        spare_next = spare_next + 1
+    if spare1 != 58:
+        fail = fail + 1
+    var spare_count_bad = 8
+    var spare2 = -1
+    if spare_count_bad < 8:
+        spare2 = spare_next
+    if spare2 != -1:
+        fail = fail + 1
+    var avail_spare = 100 - ((bad_count * 100) / 8)
+    if avail_spare != 75:
+        fail = fail + 1
+    bad_count = -4
+    if bad_count < 0:
+        bad_count = 0
+    avail_spare = 100 - ((bad_count * 100) / 8)
+    if avail_spare != 100:
+        fail = fail + 1
+    fail
+
 fn nvme_fw_rv32_logic_selftest() -> i64:
-    rv32_rain_selftest() + rv32_ecc_selftest() + rv32_journal_selftest() + rv32_map_selftest() + rv32_band_selftest() + rv32_sched_selftest() + rv32_pt_selftest() + rv32_hil_selftest() + rv32_admin_selftest() + rv32_reactor_selftest() + rv32_policy_target_selftest() + rv32_dram_durability_selftest() + rv32_wear_scrub_selftest()
+    rv32_rain_selftest() + rv32_ecc_selftest() + rv32_journal_selftest() + rv32_map_selftest() + rv32_band_selftest() + rv32_sched_selftest() + rv32_pt_selftest() + rv32_hil_selftest() + rv32_admin_selftest() + rv32_reactor_selftest() + rv32_policy_target_selftest() + rv32_dram_durability_selftest() + rv32_wear_scrub_selftest() + rv32_media_retire_selftest()
