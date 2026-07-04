@@ -49,7 +49,7 @@ impl NvmeQueues:
     me sq_submit(c: NvmeCmd) -> bool:
         if not cid_valid(c.cid):
             return false
-        if me.sq_len == me.depth:
+        if me.sq_len < 0 or me.sq_len >= me.depth:
             return false
         val t: i64 = me.sq_tail
         if t < 0 or t >= me.depth:
@@ -65,7 +65,7 @@ impl NvmeQueues:
         true
 
     me sq_fetch() -> NvmeCmd:
-        if me.sq_len == 0:
+        if me.sq_len <= 0:
             return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val h: i64 = me.sq_head
         if h < 0 or h >= me.depth:
@@ -81,12 +81,16 @@ impl NvmeQueues:
         cmd_make(cid, op, lba, nblk, data)
 
     me sq_pending() -> i64:
+        if me.sq_len < 0:
+            return 0
+        if me.sq_len > me.depth:
+            return me.depth
         me.sq_len
 
     me cq_post(p: NvmeCpl) -> bool:
         if not cid_valid(p.cid):
             return false
-        if me.cq_len == me.depth:
+        if me.cq_len < 0 or me.cq_len >= me.depth:
             return false
         val t: i64 = me.cq_tail
         if t < 0 or t >= me.depth:
@@ -100,7 +104,7 @@ impl NvmeQueues:
         true
 
     me cq_reap() -> NvmeCpl:
-        if me.cq_len == 0:
+        if me.cq_len <= 0:
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val h: i64 = me.cq_head
         if h < 0 or h >= me.depth:
@@ -114,6 +118,10 @@ impl NvmeQueues:
         cpl_make(cid, status, data)
 
     me cq_pending() -> i64:
+        if me.cq_len < 0:
+            return 0
+        if me.cq_len > me.depth:
+            return me.depth
         me.cq_len
 
 # ── Helper: convert bool to i64 for expect_eq ────────────────────────────────
@@ -159,6 +167,15 @@ fn hil_queue_selftest() -> i64:
     failures = failures + expect_eq(bool_to_i64(q.sq_submit(cmd_make(3, OP_READ, 30, 1, 0))), 0, "invalid HIL SQ tail submit fails closed")
     failures = failures + expect_eq(q.sq_pending(), 0, "invalid HIL SQ tail leaves pending count unchanged")
     q.sq_tail = 0
+    q.sq_len = -3
+    failures = failures + expect_eq(q.sq_pending(), 0, "negative HIL SQ length pending clamps to zero")
+    failures = failures + expect_eq(bool_to_i64(q.sq_submit(cmd_make(4, OP_READ, 30, 1, 0))), 0, "negative HIL SQ length submit fails closed")
+    val neg_sq = q.sq_fetch()
+    failures = failures + expect_eq(neg_sq.nblocks, 0, "negative HIL SQ length fetch returns inert command")
+    q.sq_len = q.depth + 3
+    failures = failures + expect_eq(q.sq_pending(), q.depth, "oversized HIL SQ length pending clamps to depth")
+    failures = failures + expect_eq(bool_to_i64(q.sq_submit(cmd_make(5, OP_READ, 30, 1, 0))), 0, "oversized HIL SQ length submit fails closed")
+    q.sq_len = 0
 
     # Test 3: completion post/reap round-trip (status + data preserved)
     val cpl = cpl_make(42, SC_SUCCESS, 0x99)
@@ -184,6 +201,15 @@ fn hil_queue_selftest() -> i64:
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(43, SC_SUCCESS, 0))), 0, "invalid HIL CQ tail post fails closed")
     failures = failures + expect_eq(q.cq_pending(), 0, "invalid HIL CQ tail leaves pending count unchanged")
     q.cq_tail = 0
+    q.cq_len = -4
+    failures = failures + expect_eq(q.cq_pending(), 0, "negative HIL CQ length pending clamps to zero")
+    failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(44, SC_SUCCESS, 0))), 0, "negative HIL CQ length post fails closed")
+    val neg_cq = q.cq_reap()
+    failures = failures + expect_eq(neg_cq.status, SC_INVALID_FIELD, "negative HIL CQ length reap fails closed")
+    q.cq_len = q.depth + 4
+    failures = failures + expect_eq(q.cq_pending(), q.depth, "oversized HIL CQ length pending clamps to depth")
+    failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(45, SC_SUCCESS, 0))), 0, "oversized HIL CQ length post fails closed")
+    q.cq_len = 0
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(70000, SC_SUCCESS, 0))), 0, "reject oversized completion id")
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(-1, SC_SUCCESS, 0))), 0, "reject negative completion id")
 

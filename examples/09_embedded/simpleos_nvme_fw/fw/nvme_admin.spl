@@ -228,7 +228,7 @@ impl AdminQueue:
     me submit(c: AdminCmd) -> bool:
         if not cid_valid(c.cid):
             return false
-        if me.sq_len == me.depth:
+        if me.sq_len < 0 or me.sq_len >= me.depth:
             return false
         val t: i64 = me.sq_tail
         if t < 0 or t >= me.depth:
@@ -244,10 +244,14 @@ impl AdminQueue:
         true
 
     me pending() -> i64:
+        if me.sq_len < 0:
+            return 0
+        if me.sq_len > me.depth:
+            return me.depth
         me.sq_len
 
     me fetch() -> AdminCmd:
-        if me.sq_len == 0:
+        if me.sq_len <= 0:
             return admin_cmd_make(0, SC_INVALID_OPCODE, 0, 0, 0, 0)
         val h: i64 = me.sq_head
         if h < 0 or h >= me.depth:
@@ -265,7 +269,7 @@ impl AdminQueue:
     me cq_post(p: NvmeCpl) -> bool:
         if not cid_valid(p.cid):
             return false
-        if me.cq_len == me.depth:
+        if me.cq_len < 0 or me.cq_len >= me.depth:
             return false
         val t: i64 = me.cq_tail
         if t < 0 or t >= me.depth:
@@ -278,10 +282,14 @@ impl AdminQueue:
         true
 
     me cq_pending() -> i64:
+        if me.cq_len < 0:
+            return 0
+        if me.cq_len > me.depth:
+            return me.depth
         me.cq_len
 
     me cq_reap() -> NvmeCpl:
-        if me.cq_len == 0:
+        if me.cq_len <= 0:
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val h: i64 = me.cq_head
         if h < 0 or h >= me.depth:
@@ -347,6 +355,15 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(22, FEAT_TEMP_THRESH, 312))), 0, "invalid admin SQ tail submit fails closed")
     fail = fail + expect_eq(aq.pending(), 0, "invalid admin SQ tail submit leaves pending count unchanged")
     aq.sq_tail = 0
+    aq.sq_len = -3
+    fail = fail + expect_eq(aq.pending(), 0, "negative admin SQ length pending clamps to zero")
+    fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(23, FEAT_TEMP_THRESH, 313))), 0, "negative admin SQ length submit fails closed")
+    val neg_af: AdminCmd = aq.fetch()
+    fail = fail + expect_eq(neg_af.opcode, SC_INVALID_OPCODE, "negative admin SQ length fetch fails closed")
+    aq.sq_len = aq.depth + 3
+    fail = fail + expect_eq(aq.pending(), aq.depth, "oversized admin SQ length pending clamps to depth")
+    fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(24, FEAT_TEMP_THRESH, 314))), 0, "oversized admin SQ length submit fails closed")
+    aq.sq_len = 0
     aq.cq_post(cpl_make(21, SC_SUCCESS, 0))
     fail = fail + expect_eq(aq.cq_pending(), 1, "admin CQ pending == 1")
     val ar: NvmeCpl = aq.cq_reap()
@@ -364,6 +381,15 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(22, SC_SUCCESS, 0))), 0, "invalid admin CQ tail post fails closed")
     fail = fail + expect_eq(aq.cq_pending(), 0, "invalid admin CQ tail post leaves pending count unchanged")
     aq.cq_tail = 0
+    aq.cq_len = -4
+    fail = fail + expect_eq(aq.cq_pending(), 0, "negative admin CQ length pending clamps to zero")
+    fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(23, SC_SUCCESS, 0))), 0, "negative admin CQ length post fails closed")
+    val neg_ar: NvmeCpl = aq.cq_reap()
+    fail = fail + expect_eq(neg_ar.status, SC_INVALID_FIELD, "negative admin CQ length reap fails closed")
+    aq.cq_len = aq.depth + 4
+    fail = fail + expect_eq(aq.cq_pending(), aq.depth, "oversized admin CQ length pending clamps to depth")
+    fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(24, SC_SUCCESS, 0))), 0, "oversized admin CQ length post fails closed")
+    aq.cq_len = 0
     fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(70000, SC_SUCCESS, 0))), 0, "admin rejects oversized completion id")
     fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(-1, SC_SUCCESS, 0))), 0, "admin rejects negative completion id")
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(70000, FEAT_TEMP_THRESH, 1))), 0, "admin rejects oversized cid")
