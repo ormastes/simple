@@ -37,6 +37,22 @@ fn ftl_host_lba_valid(lba: i64) -> bool:
     lba >= 0 and lba < LBA_COUNT
 
 impl Ftl:
+    me next_seq() -> i64:
+        var high: i64 = me.seq
+        if high < me.journal.ckpt_seq:
+            high = me.journal.ckpt_seq
+        var i: i64 = 0
+        val n: i64 = me.journal.wal_len()
+        while i < n:
+            val s: i64 = me.journal.record_seq(i)
+            if s > high:
+                high = s
+            i = i + 1
+        if high < 0:
+            high = 0
+        me.seq = high + 1
+        me.seq
+
     # Write one logical block (log-structured): program a fresh physical page with OOB
     # {lba, seq}, journal the remap, update L2P, invalidate the previous version.
     me write(lba: i64, data: i64) -> i64:
@@ -47,8 +63,7 @@ impl Ftl:
         val ppn: i64 = me.band.alloc_page_host(GC_RESERVE)
         if ppn == NO_PPN:
             return SC_NS_NOT_READY
-        me.seq = me.seq + 1
-        val s: i64 = me.seq
+        val s: i64 = me.next_seq()
         val old_ppn: i64 = me.map.lookup(lba)
         val pc: i64 = me.fil.program(ppn, lba, s, data)
         if pc != NAND_OK:
@@ -112,9 +127,9 @@ impl Ftl:
         if ppn != UNMAP:
             me.band.mark_invalid(ppn)
             me.map.update(lba, UNMAP)
-            me.seq = me.seq + 1
+            val s: i64 = me.next_seq()
             me.ensure_journal_room()
-            me.journal.append(0, lba, ppn, UNMAP, me.seq)
+            me.journal.append(0, lba, ppn, UNMAP, s)
         SC_SUCCESS
 
     # Persist a checkpoint: flush the dirty map cache to the flash-resident L2P,
@@ -305,8 +320,7 @@ impl Ftl:
             # 2. erase the failed block (clears the corrupted pages so they are programmable).
             me.fil.erase(blk)
             # 3. reprogram the block's live pages in place with the recovered payload.
-            me.seq = me.seq + 1
-            val s: i64 = me.seq
+            val s: i64 = me.next_seq()
             page = 0
             while page < PAGES_PER_BLOCK:
                 val ppn: i64 = blk * PAGES_PER_BLOCK + page
@@ -378,13 +392,13 @@ impl Ftl:
                 val newp: i64 = me.band.alloc_page()
                 if newp == NO_PPN:
                     return UNMAP    # cannot relocate -> do NOT erase; block stays intact
-                me.seq = me.seq + 1
-                val pc: i64 = me.fil.program(newp, rd.lba, me.seq, rd.data)
+                val s: i64 = me.next_seq()
+                val pc: i64 = me.fil.program(newp, rd.lba, s, rd.data)
                 if pc != NAND_OK:
                     me.band.set_bad(ppn_block(newp))
                     return UNMAP    # failed relocation -> old page remains live; do NOT erase
                 me.ensure_journal_room()
-                me.journal.append(0, rd.lba, ppn, newp, me.seq)
+                me.journal.append(0, rd.lba, ppn, newp, s)
                 me.map.update(rd.lba, newp)
                 me.band.mark_valid(newp)
                 me.band.mark_invalid(ppn)
@@ -503,6 +517,11 @@ fn ftl_selftest() -> i64:
     fail = fail + expect_eq(ftl.read_disturb_count(blk10), 0, "corrupted negative read-disturb clamps to zero")
     fail = fail + expect_eq(ftl.read(10), 0xAB, "read after corrupted read-disturb counter")
     fail = fail + expect_eq(ftl.read_disturb_count(blk10), 1, "read-disturb resumes from zero after corruption")
+    val seq_before_corrupt: i64 = ftl.seq
+    ftl.seq = -9
+    fail = fail + expect_eq(ftl.write(10, 0x88), SC_SUCCESS, "write recovers corrupted negative sequence")
+    fail = fail + expect_eq(ftl.seq, seq_before_corrupt + 1, "sequence resumes after WAL max")
+    fail = fail + expect_eq(ftl.read(10), 0x88, "read after recovered sequence write")
     ftl.write(10, 0x99)
     fail = fail + expect_eq(ftl.read(10), 0x99, "overwrite lba10 (newest wins)")
 
