@@ -32,16 +32,9 @@ fn create_enum_value<M: Module>(
 ) {
     let enum_id_val = builder.ins().iconst(types::I32, enum_id);
     let disc_val = builder.ins().iconst(types::I32, discriminant);
-    // Tag scalar payloads exactly like the multi-arg / calls.rs Ok/Err path
-    // (runtime_payload_value) so that extraction — which unconditionally untags
-    // via rt_enum_payload + MIR UnboxInt — recovers the value. Storing a raw
-    // scalar here made `Ok(42)`/`Some(42)` untag to 5 (42>>3) and floats read
-    // as raw bits; #117 fixed the calls.rs Call-based Ok/Err construction but
-    // missed this dedicated MirInst::ResultOk/ResultErr/OptionSome codegen path.
-    // Heap payloads (text, structs) pass through unchanged. Task #121 / #117 / #109.
-    // Empty payload uses tagged nil (3), not raw 0.
+    // Empty payload uses tagged nil (3), not raw 0
     let payload_val = payload
-        .map(|v| super::calls::runtime_payload_value(ctx, builder, v))
+        .map(|v| get_vreg_or_default(ctx, builder, &v))
         .unwrap_or_else(|| builder.ins().iconst(types::I64, 3));
     let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id_val, disc_val, payload_val);
     ctx.vreg_values.insert(dest, result);
