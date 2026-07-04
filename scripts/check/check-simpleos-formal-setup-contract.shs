@@ -143,9 +143,28 @@ grep -Fq "simpleos_mission_critical_prereqs_next_action=run scripts/setup/setup-
     exit 1
 }
 
+broken_bin="$ROOT_DIR/build/simpleos_formal_setup_contract/broken-bin"
+mkdir -p "$broken_bin"
+for tool in sby yosys z3; do
+    printf '#!/bin/sh\nexit 17\n' >"$broken_bin/$tool"
+    chmod +x "$broken_bin/$tool"
+done
+if PATH="$broken_bin" /bin/sh "$PREREQ" >/tmp/simpleos-formal-prereq-broken.out 2>/tmp/simpleos-formal-prereq-broken.err; then
+    echo "FAIL: prereq doctor fake broken stack passed" >&2
+    exit 1
+fi
+grep -Fq "simpleos_mission_critical_prereqs_status=blocked" /tmp/simpleos-formal-prereq-broken.out || {
+    echo "FAIL: prereq doctor fake broken stack missing blocked status" >&2
+    exit 1
+}
+grep -Fq "simpleos_mission_critical_prereqs_missing=sby,yosys,smt-solver" /tmp/simpleos-formal-prereq-broken.out || {
+    echo "FAIL: prereq doctor fake broken stack missing full blocker list" >&2
+    exit 1
+}
+
 partial_bin="$ROOT_DIR/build/simpleos_formal_setup_contract/partial-bin"
 mkdir -p "$partial_bin"
-printf '#!/usr/bin/env sh\nexit 0\n' >"$partial_bin/sby"
+printf '#!/bin/sh\nexit 0\n' >"$partial_bin/sby"
 chmod +x "$partial_bin/sby"
 if PATH="$partial_bin" /bin/sh "$PREREQ" >/tmp/simpleos-formal-prereq-partial.out 2>/tmp/simpleos-formal-prereq-partial.err; then
     echo "FAIL: prereq doctor fake partial stack passed" >&2
@@ -326,7 +345,13 @@ rtl_sby_run_fail_bin="$ROOT_DIR/build/simpleos_formal_setup_contract/rtl-sby-run
 rtl_sby_run_fail_sidecar="$ROOT_DIR/build/simpleos_formal_setup_contract/rtl-sby-run-fail-sidecar.shs"
 mkdir -p "$rtl_sby_run_fail_bin"
 printf '#!/bin/sh\nexec /usr/bin/dirname "$@"\n' >"$rtl_sby_run_fail_bin/dirname"
-printf '#!/bin/sh\nexit 17\n' >"$rtl_sby_run_fail_bin/sby"
+cat >"$rtl_sby_run_fail_bin/sby" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    exit 0
+fi
+exit 17
+EOF
 for tool in yosys z3; do
     printf '#!/bin/sh\nexit 0\n' >"$rtl_sby_run_fail_bin/$tool"
     chmod +x "$rtl_sby_run_fail_bin/$tool"
