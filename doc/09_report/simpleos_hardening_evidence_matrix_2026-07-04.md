@@ -13,6 +13,9 @@
 - formal_riscv_dual_track_log: build/simpleos_hardening_evidence_matrix_current/riscv_formal_dual_track.log
 - formal_critical_concurrency: pass
 - formal_critical_concurrency_log: build/simpleos_hardening_evidence_matrix_current/critical_concurrency_formal.log
+- formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs
+- formal_critical_concurrency_scope: Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities
+- formal_critical_concurrency_evidence: resource_acquire/release capacity, work stealing, task completion idempotence, bounded-channel backpressure, closed-channel wakeup, DRF race constraints, kernel capability default-deny, memory capability unique/shared write constraints
 - formal_memory_safety: pass
 - formal_memory_safety_log: build/simpleos_hardening_evidence_matrix_current/memory_safety_formal.log
 - formal_storage_integrity: pass

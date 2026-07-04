@@ -154,6 +154,8 @@ The wrapper emits these rows:
 - `simpleos_hardening_formal_lean_proofs_status`
 - `simpleos_hardening_formal_riscv_dual_track_status`
 - `simpleos_hardening_formal_critical_concurrency_status`
+- `simpleos_hardening_formal_critical_concurrency_gate`
+- `simpleos_hardening_formal_critical_concurrency_scope`
 - `simpleos_hardening_formal_memory_safety_status`
 - `simpleos_hardening_formal_storage_integrity_status`
 - `simpleos_hardening_formal_boundary_integrity_status`
@@ -269,7 +271,7 @@ be mistaken for a completed RTL proof pass.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -287,6 +289,8 @@ expect(stdout).to_contain("simpleos_hardening_ssh_smf_exec_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_lean_proofs_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_riscv_dual_track_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_critical_concurrency_status=pass")
+expect(stdout).to_contain("simpleos_hardening_formal_critical_concurrency_gate=scripts/check/check-simpleos-critical-formal-proofs.shs")
+expect(stdout).to_contain("simpleos_hardening_formal_critical_concurrency_scope=Lean model gate: kernel_scheduler, actor_channel, memory_model_drf, kernel_capabilities, memory_capabilities")
 expect(stdout).to_contain("simpleos_hardening_formal_memory_safety_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_storage_integrity_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_boundary_integrity_status=pass")
@@ -330,6 +334,9 @@ val report = file_read(_report_path(run_id))
 expect(report).to_contain("- byl_sby_artifact_audit: pass")
 expect(report).to_contain("RISC-V generated RTL bundles pass RVFI port")
 expect(report).to_contain("readiness evidence, not an RTL proof pass")
+expect(report).to_contain("- formal_critical_concurrency_gate: scripts/check/check-simpleos-critical-formal-proofs.shs")
+expect(report).to_contain("bounded-channel backpressure")
+expect(report).to_contain("DRF race constraints")
 ```
 
 </details>
