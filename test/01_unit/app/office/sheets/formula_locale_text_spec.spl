@@ -1,0 +1,172 @@
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _eval(formula: text) -> text:
+    var sh = Sheet.new("f")
+    sh.set_value("B1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("B1"))
+
+describe "ASC function (full-width to half-width ASCII conversion)":
+    it "should convert full-width ASCII characters":
+        val result = _eval("=ASC(\"ＡＢＣ\")")
+        expect(result).to_equal("ABC")
+
+    it "should convert full-width space U+3000 to half-width space":
+        val result = _eval("=ASC(\"Ａ　Ｂ\")")
+        expect(result).to_equal("A B")
+
+    it "should convert full-width digits":
+        val result = _eval("=ASC(\"１２３\")")
+        expect(result).to_equal("123")
+
+    it "should handle mixed full-width and pass-through":
+        val result = _eval("=ASC(\"ＡＢＣ　１２３\")")
+        expect(result).to_equal("ABC 123")
+
+    it "should pass through characters outside the conversion range":
+        val result = _eval("=ASC(\"Hello\")")
+        expect(result).to_equal("Hello")
+
+describe "JIS / DBCS function (half-width to full-width ASCII conversion)":
+    it "should convert half-width ASCII to full-width":
+        val result = _eval("=JIS(\"ABC\")")
+        expect(result).to_equal("ＡＢＣ")
+
+    it "should alias DBCS to same behavior":
+        val result = _eval("=DBCS(\"ABC\")")
+        expect(result).to_equal("ＡＢＣ")
+
+    it "should convert half-width digits to full-width":
+        val result = _eval("=JIS(\"123\")")
+        expect(result).to_equal("１２３")
+
+    it "should convert half-width space to full-width space U+3000":
+        val result = _eval("=JIS(\"A B\")")
+        expect(result).to_equal("Ａ　Ｂ")
+
+    it "should pass through characters outside the conversion range":
+        val result = _eval("=JIS(\"日本語\")")
+        expect(result).to_equal("日本語")
+
+describe "BAHTTEXT function (Thai number text conversion)":
+    it "should convert whole baht amount with no satang":
+        val result = _eval("=BAHTTEXT(1234)")
+        expect(result).to_equal("หนึ่งพันสองร้อยสามสิบสี่บาทถ้วน")
+
+    it "should handle 21 with special ยี่สิบเอ็ด (not ยี่สิบหนึ่ง)":
+        val result = _eval("=BAHTTEXT(21)")
+        expect(result).to_equal("ยี่สิบเอ็ดบาทถ้วน")
+
+    it "should handle 10 as สิบ alone":
+        val result = _eval("=BAHTTEXT(10)")
+        expect(result).to_equal("สิบบาทถ้วน")
+
+    it "should handle 11 as สิบเอ็ด":
+        val result = _eval("=BAHTTEXT(11)")
+        expect(result).to_equal("สิบเอ็ดบาทถ้วน")
+
+    it "should convert satang (decimal places)":
+        val result = _eval("=BAHTTEXT(10.50)")
+        expect(result).to_equal("สิบบาทห้าสิบสตางค์")
+
+    it "should handle negative amounts with ลบ prefix":
+        val result = _eval("=BAHTTEXT(-5)")
+        expect(result).to_equal("ลบห้าบาทถ้วน")
+
+    it "should handle large millions":
+        val result = _eval("=BAHTTEXT(2000000)")
+        expect(result).to_equal("สองล้านบาทถ้วน")
+
+    it "should handle zero":
+        val result = _eval("=BAHTTEXT(0)")
+        expect(result).to_equal("ศูนย์บาทถ้วน")
+
+    it "should use เอ็ด for units 1 after hundreds (101)":
+        val result = _eval("=BAHTTEXT(101)")
+        expect(result).to_equal("หนึ่งร้อยเอ็ดบาทถ้วน")
+
+    it "should use เอ็ด for units 1 after thousands (1001)":
+        val result = _eval("=BAHTTEXT(1001)")
+        expect(result).to_equal("หนึ่งพันเอ็ดบาทถ้วน")
+
+    it "should spell multi-digit millions counts (12000000)":
+        val result = _eval("=BAHTTEXT(12000000)")
+        expect(result).to_equal("สิบสองล้านบาทถ้วน")
+
+    it "should round to 2 decimals not truncate (1.999)":
+        val result = _eval("=BAHTTEXT(1.999)")
+        expect(result).to_equal("สองบาทถ้วน")
+
+describe "PHONETIC function (returns cell display text)":
+    it "should return the referenced cell text unchanged":
+        var sh = Sheet.new("f")
+        sh.set_value("B1", "hello")
+        sh.set_value("C1", "=PHONETIC(B1)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("C1"))
+        expect(result).to_equal("hello")
+
+    it "should error with no arguments":
+        val result = _eval("=PHONETIC()")
+        expect(result).to_start_with("#ERR")
+
+describe "EUROCONVERT function (fixed legacy euro rates)":
+    it "should convert DEM to EUR correctly":
+        val result = _eval("=EUROCONVERT(100, \"DEM\", \"EUR\")")
+        # 100 / 1.95583 = 51.1291881...
+        expect(result).to_start_with("51.129")
+
+    it "should convert EUR to FRF":
+        val result = _eval("=EUROCONVERT(1, \"EUR\", \"FRF\")")
+        val num = result.to_f64()
+        # 1 / 1 * 6.55957 = 6.55957
+        assert_true(num >= 6.559 and num <= 6.560)
+
+    it "should convert DEM to FRF via triangulation":
+        val result = _eval("=EUROCONVERT(100, \"DEM\", \"FRF\")")
+        val num = result.to_f64()
+        # 100 / 1.95583 * 6.55957 = 335.3854...
+        assert_true(num >= 335.38 and num <= 335.39)
+
+    it "should be case-insensitive":
+        val result = _eval("=EUROCONVERT(1, \"eur\", \"frF\")")
+        val num = result.to_f64()
+        assert_true(num >= 6.559 and num <= 6.560)
+
+    it "should return error for unknown currency code":
+        val result = _eval("=EUROCONVERT(1, \"XXX\", \"EUR\")")
+        expect(result).to_start_with("#ERR")
+
+    it "should return error for unknown target code":
+        val result = _eval("=EUROCONVERT(1, \"EUR\", \"XXX\")")
+        expect(result).to_start_with("#ERR")
+
+    it "should convert ITL to ESP":
+        val result = _eval("=EUROCONVERT(100, \"ITL\", \"ESP\")")
+        val num = result.to_f64()
+        # 100 / 1936.27 * 166.386 = 8.5931...
+        assert_true(num >= 8.59 and num <= 8.60)
+
+    it "should require three arguments":
+        val result = _eval("=EUROCONVERT(100, \"DEM\")")
+        expect(result).to_start_with("#ERR")
+
+describe "Regression: existing text functions still work":
+    it "PROPER should still work":
+        val result = _eval("=PROPER(\"hello WORLD\")")
+        expect(result).to_equal("Hello World")
+
+    it "CLEAN should still work":
+        val result = _eval("=CLEAN(\"ABC\")")
+        expect(result).to_equal("ABC")
+
+    it "UNICHAR should still work":
+        val result = _eval("=UNICHAR(65)")
+        expect(result).to_equal("A")
+
+    it "UPPER should still work":
+        val result = _eval("=UPPER(\"hello\")")
+        expect(result).to_equal("HELLO")

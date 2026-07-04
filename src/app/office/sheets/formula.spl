@@ -514,6 +514,8 @@ fn _is_text_function(name: text) -> bool:
      name == "SUBSTITUTE" or name == "REPLACE" or name == "REPT" or
      name == "SEARCH" or name == "FIND" or name == "CHAR" or
      name == "CODE" or name == "PROPER" or name == "CLEAN" or
+     name == "ASC" or name == "JIS" or name == "DBCS" or
+     name == "BAHTTEXT" or name == "PHONETIC" or name == "EUROCONVERT" or
      name == "UNICHAR" or name == "UNICODE" or name == "DOLLAR" or
      name == "INFO" or name == "TEXTJOIN" or
      name == "DEC2BIN" or name == "BIN2DEC" or name == "DEC2HEX" or
@@ -587,8 +589,14 @@ fn _eval_text_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         val tok = tokens.get(cur_pos)
         val next_tok = if cur_pos + 1 < tokens.len(): tokens.get(cur_pos + 1) else: ""
         if tok.starts_with("\""):
-            # String literal: strip the tokenizer's surrounding quotes
-            args.push(tok.slice(1, tok.len() - 1))
+            # String literal: strip the tokenizer's surrounding quotes.
+            # slice() is codepoint-indexed but len() is byte-based, so for
+            # multibyte literals slice(1, len-1) leaves the closing quote
+            # attached — strip the trailing quote by codepoint count instead.
+            var lit = tok.slice(1, tok.len())
+            if lit.ends_with("\""):
+                lit = lit.slice(0, _text_cp_len(lit) - 1)
+            args.push(lit)
             cur_pos = cur_pos + 1
         elif (_is_cell_ref_token(tok) and next_tok == ":" and
               cur_pos + 2 < tokens.len() and _is_cell_ref_token(tokens.get(cur_pos + 2))):
@@ -1171,6 +1179,34 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
         return CellValue.TextVal(value: _proper_case(s))
     if name == "CLEAN":
         return CellValue.TextVal(value: _clean_text(s))
+    if name == "ASC":
+        return CellValue.TextVal(value: _asc_text(s))
+    if name == "JIS" or name == "DBCS":
+        return CellValue.TextVal(value: _jis_text(s))
+    if name == "BAHTTEXT":
+        val num = s.to_f64()
+        return CellValue.TextVal(value: _bahttext_convert(num))
+    if name == "PHONETIC":
+        # No furigana metadata in our cell model; return display text of
+        # referenced cell unchanged (LibreOffice-compatible behavior).
+        if args.len() > 0:
+            return CellValue.TextVal(value: args[0])
+        return CellValue.ErrorVal(message: "PHONETIC requires a cell reference")
+    if name == "EUROCONVERT":
+        # Full precision is kept throughout: no per-currency rounding of the
+        # result and no rounding of the intermediate EUR triangulation value
+        # (Excel's full_precision/triangulation_precision args not modeled).
+        if args.len() < 3:
+            return CellValue.ErrorVal(message: "EUROCONVERT requires number, from_code, to_code")
+        val num = s.to_f64()
+        val from_code = args[1].upper()
+        val to_code = args[2].upper()
+        val from_rate = _euro_rate(from_code)
+        val to_rate = _euro_rate(to_code)
+        if from_rate < 0.0 or to_rate < 0.0:
+            return CellValue.ErrorVal(message: "EUROCONVERT unknown currency code")
+        val result = num / from_rate * to_rate
+        return CellValue.NumberVal(value: result)
     if name == "DEC2BIN" or name == "DEC2OCT" or name == "DEC2HEX":
         val v = s.to_f64()
         if v != v.to_i64().to_f64() or v < 0.0:
@@ -1227,6 +1263,222 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
             return CellValue.NumberVal(value: months.to_f64())
         return CellValue.ErrorVal(message: "DATEDIF unit must be Y, M, or D")
     CellValue.ErrorVal(message: "unknown text function {name}")
+
+fn _text_cp_len(s: text) -> i32:
+    """Codepoint count of a string. len() is byte-based in this runtime while
+    slice()/char_code_at() are codepoint-indexed (probed); slicing one past
+    the last codepoint yields the empty string, which terminates the scan."""
+    var n = 0
+    while n < s.len():
+        val ch = s.slice(n, n + 1)
+        if ch.len() == 0:
+            return n
+        n = n + 1
+    n
+
+fn _asc_text(s: text) -> text:
+    """Convert full-width (zenkaku) ASCII U+FF01–U+FF5E to half-width
+    U+0021–U+007E by subtracting 0xFEE0. Full-width space U+3000 becomes
+    half-width space. Katakana conversion NOT modeled; other chars pass
+    through unchanged. Codepoint-safe: i64.chr() builds Unicode chars
+    (char_from_code is ASCII-only)."""
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch.len() == 0:
+            # Past the last codepoint (byte-based loop bound): done.
+            i = s.len()
+        else:
+            val code = ch.char_code_at(0)
+            if code >= 0xFF01 and code <= 0xFF5E:
+                # Full-width ASCII: subtract 0xFEE0 to get half-width
+                val hc = code - 0xFEE0
+                out = "{out}{hc.chr()}"
+            elif code == 0x3000:
+                # Full-width space to half-width space
+                out = "{out} "
+            else:
+                # All other characters pass through unchanged
+                out = "{out}{ch}"
+            i = i + 1
+    out
+
+fn _jis_text(s: text) -> text:
+    """Convert half-width ASCII U+0021–U+007E to full-width (zenkaku) by
+    adding 0xFEE0. Half-width space becomes U+3000. Katakana conversion NOT
+    modeled; other chars pass through unchanged. Codepoint-safe via
+    i64.chr()."""
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch.len() == 0:
+            i = s.len()
+        else:
+            val code = ch.char_code_at(0)
+            if code >= 0x0021 and code <= 0x007E:
+                # Half-width ASCII: add 0xFEE0 to get full-width
+                val fc = code + 0xFEE0
+                out = "{out}{fc.chr()}"
+            elif code == 0x0020:
+                # Half-width space to full-width space (U+3000)
+                val fsp = 0x3000
+                out = "{out}{fsp.chr()}"
+            else:
+                # All other characters pass through unchanged
+                out = "{out}{ch}"
+            i = i + 1
+    out
+
+fn _bahttext_convert(amount: f64) -> text:
+    """Convert a number to Thai text representation in baht and satang.
+    Supports up to 999,999,999.99 (multi-digit millions counts spelled via
+    ล้าน recursion). The amount is ROUNDED to 2 decimal places first, per
+    Excel: BAHTTEXT(1.999) = สองบาทถ้วน."""
+    if amount < 0.0:
+        return "ลบ{_bahttext_convert(0.0 - amount)}"
+
+    # Round to satang (2 decimals), then split into whole baht and satang
+    val total_satang = (amount * 100.0 + 0.5).to_i64()
+    val whole = total_satang / 100
+    val satang = total_satang % 100
+
+    var result = ""
+    if whole == 0:
+        result = "ศูนย์"
+    else:
+        result = _baht_number_text(whole)
+
+    result = "{result}บาท"
+
+    if satang > 0:
+        result = "{result}{_baht_number_text(satang)}สตางค์"
+    else:
+        result = "{result}ถ้วน"
+
+    result
+
+fn _baht_number_text(n: i64) -> text:
+    """Convert a number to Thai text (used for whole baht and satang parts)."""
+    if n == 0:
+        return ""
+
+    var result = ""
+
+    # Millions (ล้าน): the millions count is itself spelled with the full
+    # number-text routine (recursively), so 12,000,000 = สิบสองล้าน and
+    # 21,000,000 = ยี่สิบเอ็ดล้าน — covering the 999,999,999.99 ceiling.
+    val millions = n / 1000000
+    if millions > 0:
+        result = "{result}{_baht_number_text(millions)}ล้าน"
+
+    # Hundred-thousands (แสน)
+    val hundred_k = (n % 1000000) / 100000
+    if hundred_k > 0:
+        result = "{result}{_baht_units(hundred_k)}แสน"
+
+    # Ten-thousands (หมื่น)
+    val ten_k = (n % 100000) / 10000
+    if ten_k > 0:
+        result = "{result}{_baht_units(ten_k)}หมื่น"
+
+    # Thousands (พัน)
+    val thousands = (n % 10000) / 1000
+    if thousands > 0:
+        result = "{result}{_baht_units(thousands)}พัน"
+
+    # Hundreds (ร้อย)
+    val hundreds = (n % 1000) / 100
+    if hundreds > 0:
+        result = "{result}{_baht_units(hundreds)}ร้อย"
+
+    # Tens (สิบ) and units
+    val tens = (n % 100) / 10
+    val units = n % 10
+
+    if tens > 0:
+        if tens == 1:
+            result = "{result}สิบ"
+        else:
+            if tens == 2:
+                result = "{result}ยี่สิบ"
+            else:
+                result = "{result}{_baht_digit(tens)}สิบ"
+
+    # Units digit: 1 becomes เอ็ด whenever ANY higher place is nonzero
+    # (21 = ยี่สิบเอ็ด, 101 = หนึ่งร้อยเอ็ด, 1001 = หนึ่งพันเอ็ด); a bare 1
+    # stays หนึ่ง. With units == 1, "any higher place nonzero" is exactly
+    # n > 1.
+    if units > 0:
+        if units == 1 and n > 1:
+            result = "{result}เอ็ด"
+        else:
+            result = "{result}{_baht_digit(units)}"
+
+    result
+
+fn _baht_units(n: i64) -> text:
+    """Convert digits 1-9 to Thai text for use in position units."""
+    if n == 0:
+        return ""
+    _baht_digit(n)
+
+fn _baht_digit(n: i64) -> text:
+    """Convert a single digit 0-9 to Thai text."""
+    if n == 0:
+        return "ศูนย์"
+    if n == 1:
+        return "หนึ่ง"
+    if n == 2:
+        return "สอง"
+    if n == 3:
+        return "สาม"
+    if n == 4:
+        return "สี่"
+    if n == 5:
+        return "ห้า"
+    if n == 6:
+        return "หก"
+    if n == 7:
+        return "เจ็ด"
+    if n == 8:
+        return "แปด"
+    if n == 9:
+        return "เก้า"
+    ""
+
+fn _euro_rate(code: text) -> f64:
+    """Return the fixed exchange rate for the given currency code (per 1 EUR).
+    Returns -1.0 for unknown codes. Case-insensitive."""
+    val upper_code = code.upper()
+    if upper_code == "EUR":
+        return 1.0
+    if upper_code == "DEM":
+        return 1.95583
+    if upper_code == "FRF":
+        return 6.55957
+    if upper_code == "ITL":
+        return 1936.27
+    if upper_code == "ESP":
+        return 166.386
+    if upper_code == "PTE":
+        return 200.482
+    if upper_code == "FIM":
+        return 5.94573
+    if upper_code == "IEP":
+        return 0.787564
+    if upper_code == "LUF":
+        return 40.3399
+    if upper_code == "BEF":
+        return 40.3399
+    if upper_code == "ATS":
+        return 13.7603
+    if upper_code == "NLG":
+        return 2.20371
+    if upper_code == "GRD":
+        return 340.750
+    0.0 - 1.0
 
 fn _base_digit_char(d: i64) -> text:
     """Map a base digit 0..35 to its character ('0'..'9','A'..'Z')."""
@@ -5591,50 +5843,18 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val basis = if args.len() >= 9: _first_val(args[8]).to_i64() else: 0
                 if mat <= first_coup or first_coup <= settle or settle <= issue or basis < 0 or basis > 4 or (freq != 1 and freq != 2 and freq != 4) or rate < 0.0 or yld < 0.0 or redemption <= 0.0:
                     return CellValue.ErrorVal(message: "ODDFPRICE domain error")
-                # Short odd first period implementation only (long odd first periods not supported)
-                val odd_period_days = _daycount_num(issue, first_coup, basis)
-                val normal_period_days = 12 / freq
-                val max_period_days = if basis == 0 or basis == 4: (normal_period_days * 30).to_f64()
-                                       elif basis == 3: (normal_period_days * 365.0 / 12.0)
-                                       else: (normal_period_days * 30).to_f64()
-                if odd_period_days > max_period_days:
+                # SHORT odd first period only: issue must fall inside the one
+                # quasi-coupon period ending at first_coupon. Longer odd first
+                # periods (issue more than one quasi period before first_coupon)
+                # are rejected — this is the documented ceiling.
+                val fcc = _civil_from_serial(first_coup)
+                val fy = fcc[0]
+                val fm = fcc[1]
+                val fd = fcc[2]
+                val qstart = _sec_edate(fy, fm, fd, 0 - (12 / freq))
+                if issue < qstart:
                     return CellValue.ErrorVal(message: "ODDFPRICE long odd first not supported")
-
-                # Discount the odd first coupon and all remaining coupons
-                val n = _coup_num(settle, mat, freq).to_i64()
-                val e = _coup_days(settle, mat, freq, basis)
-                val dsc = _coup_daysnc(settle, mat, freq, basis)
-                val a = _coup_daybs(settle, mat, freq, basis)
-                val coup = 100.0 * rate / freq.to_f64()
-                val yf = yld / freq.to_f64()
-                val dsce = dsc / e
-
-                # Odd first coupon accrual fraction
-                val dfc = _daycount_num(issue, first_coup, basis)
-                val odd_frac = if basis == 0 or basis == 4: dfc.to_f64() / 360.0
-                               elif basis == 2: dfc.to_f64() / 360.0
-                               elif basis == 3: dfc.to_f64() / 365.0
-                               else: _daycount_frac(issue, first_coup, basis)
-
-                # Accrued in odd first period from settlement back to issue
-                val accrued_odd_days = _daycount_num(issue, settle, basis)
-                val accr_frac_first = if basis == 0 or basis == 4: accrued_odd_days.to_f64() / 360.0
-                                      elif basis == 2: accrued_odd_days.to_f64() / 360.0
-                                      elif basis == 3: accrued_odd_days.to_f64() / 365.0
-                                      else: _daycount_frac(issue, settle, basis)
-
-                # Odd first coupon amount (prorated)
-                val odd_coup = coup * odd_frac
-                # Discount the odd first coupon: if it's before next regular coupon, it needs special handling
-                # This is a simplified implementation of the short odd first period
-                val first_coup_discount = _powf(1.0 + yf, (n - 1).to_f64() + dsce)
-                var price = redemption / _powf(1.0 + yf, (n - 1).to_f64() + dsce)
-                var k = 1
-                while k <= n:
-                    price = price + coup / _powf(1.0 + yf, (k - 1).to_f64() + dsce)
-                    k = k + 1
-                price = price - coup * accr_frac_first * odd_frac / odd_frac
-                price
+                return CellValue.NumberVal(value: _odd_first_price(settle, mat, issue, first_coup, rate, yld, redemption, freq, basis))
             return CellValue.ErrorVal(message: "ODDFPRICE requires settle, maturity, issue, first_coupon, rate, yld, redemption, freq")
         "AMORLINC":
             if args.len() >= 6:
@@ -5645,30 +5865,27 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val period = _first_val(args[4]).to_i64()
                 val rate = _first_val(args[5])
                 val basis = if args.len() >= 7: _first_val(args[6]).to_i64() else: 0
-                if cost <= 0.0 or salvage < 0.0 or salvage >= cost or rate < 0.0 or rate > 1.0 or basis < 0 or basis > 4 or period <= 0 or first_period <= date_purch:
+                if cost <= 0.0 or salvage < 0.0 or salvage >= cost or rate <= 0.0 or rate > 1.0 or basis < 0 or basis > 4 or period < 0 or first_period <= date_purch:
                     return CellValue.ErrorVal(message: "AMORLINC domain error")
-
-                # Calculate YEARFRAC for first period
+                # French straight-line: period 0 is the prorated purchase
+                # period (cost*rate*YEARFRAC), periods 1..n are full
+                # (cost*rate), the period after the last full one gets the
+                # remainder down to salvage, later periods get 0.
                 val frac_first = _daycount_frac(date_purch, first_period, basis)
-                val book_value = cost - salvage
-                val annual_dep = book_value * rate
-
-                # First period depreciation
+                val one_rate = cost * rate
+                val f0 = frac_first * one_rate
+                val delta = cost - salvage
+                val nfull = _floor_f64((delta - f0) / one_rate).to_i64()
                 var dep = 0.0
-                if period == 1:
-                    dep = annual_dep * frac_first
-                else:
-                    # Subsequent full periods
-                    dep = annual_dep
-                    # Would need to accumulate to get the right value per period...
-
-                # For period >= 1: return the depreciation for that period
-                # Simplified: first period = annual × frac, then full period = annual
-                if period > 1:
-                    dep = annual_dep
-                if period * annual_dep > book_value:
-                    dep = 0.0
-                _round_f64(dep, 0)
+                if period == 0:
+                    dep = f0
+                elif period <= nfull:
+                    dep = one_rate
+                elif period == nfull + 1:
+                    dep = delta - one_rate * nfull.to_f64() - f0
+                # Snap float noise (2400*0.15 = 360.00000000000006 in IEEE)
+                # to 10 decimals, mirroring Excel's 15-sig-digit display.
+                return CellValue.NumberVal(value: _round_half_away(dep, 10000000000.0))
             return CellValue.ErrorVal(message: "AMORLINC requires cost, date_purchased, first_period, salvage, period, rate")
         "AMORDEGRC":
             if args.len() >= 6:
@@ -5679,41 +5896,39 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                 val period = _first_val(args[4]).to_i64()
                 val rate = _first_val(args[5])
                 val basis = if args.len() >= 7: _first_val(args[6]).to_i64() else: 0
-                if cost <= 0.0 or salvage < 0.0 or salvage >= cost or rate < 0.0 or rate > 1.0 or basis < 0 or basis > 4 or period <= 0 or first_period <= date_purch:
+                if cost <= 0.0 or salvage < 0.0 or salvage >= cost or rate <= 0.0 or rate > 1.0 or basis < 0 or basis > 4 or period < 0 or first_period <= date_purch:
                     return CellValue.ErrorVal(message: "AMORDEGRC domain error")
-
-                # Estimate life from first period start to a guess (rough: 1 year units)
+                # French degressive: coefficient from life 1/rate; period 0 is
+                # ROUND(cost*rate*coeff*YEARFRAC); each later period is
+                # ROUND(book*rate*coeff); when accumulated depreciation would
+                # pass salvage, the final requested period gets half the
+                # remaining book (Excel algorithm) and later periods get 0.
                 val life_est = 1.0 / rate
                 val coeff = _depreciation_coeff(life_est)
-
-                # Calculate YEARFRAC for first period
+                val drate = rate * coeff
                 val frac_first = _daycount_frac(date_purch, first_period, basis)
-                val book_value = cost - salvage
-                val annual_dep = book_value * rate * coeff
-
-                # Degressive depreciation: first period prorated
-                var book = cost
-                var dep = 0.0
-                if period == 1:
-                    dep = annual_dep * frac_first
-                    book = book - dep
-                else:
-                    # Accumulate through periods
-                    var p = 1
-                    while p < period and book > salvage:
-                        var period_dep = 0.0
-                        if p == 1:
-                            period_dep = annual_dep * frac_first
+                var nrate = _round_half_away(frac_first * drate * cost, 1.0)
+                if period == 0:
+                    return CellValue.NumberVal(value: nrate)
+                var book = cost - nrate
+                var rest = book - salvage
+                var result = 0.0
+                var settled = false
+                var n = 1
+                while n <= period and settled == false:
+                    nrate = _round_half_away(drate * book, 1.0)
+                    rest = rest - nrate
+                    if rest < 0.0:
+                        if n == period:
+                            result = _round_half_away(book * 0.5, 1.0)
                         else:
-                            period_dep = book * rate * coeff
-                        book = book - period_dep
-                        p = p + 1
-                    if p == period:
-                        dep = book * rate * coeff
-
-                if dep < 0.0:
-                    dep = 0.0
-                _round_f64(dep, 0)
+                            result = 0.0
+                        settled = true
+                    else:
+                        book = book - nrate
+                        result = nrate
+                    n = n + 1
+                return CellValue.NumberVal(value: result)
             return CellValue.ErrorVal(message: "AMORDEGRC requires cost, date_purchased, first_period, salvage, period, rate")
         "TRUE":
             return CellValue.BoolVal(value: true)
