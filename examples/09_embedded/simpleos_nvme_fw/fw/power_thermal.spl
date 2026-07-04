@@ -58,7 +58,15 @@ impl PowerThermal:
         # Heat in ∝ activity, scaled down in lower-power states (PS0 is hottest). The /3 is a
         # calibration knob so a throttling load equilibrates near the threshold band — not an
         # absolute device constant; real silicon needs measured tuning.
-        val heat: i64 = ops * (NUM_POWER_STATES - me.power_state) / 3
+        var safe_ops: i64 = ops
+        if safe_ops < 0:
+            safe_ops = 0
+        var ps: i64 = me.power_state
+        if ps < 0:
+            ps = 0
+        if ps >= NUM_POWER_STATES:
+            ps = NUM_POWER_STATES - 1
+        val heat: i64 = safe_ops * (NUM_POWER_STATES - ps) / 3
         me.temp_k = me.temp_k + heat
         # Cool out ∝ the excess over ambient (Newtonian): temperature reaches an equilibrium
         # under sustained load and decays back toward baseline when idle.
@@ -111,6 +119,15 @@ fn power_thermal_selftest() -> i64:
     fail = fail + expect_eq(pt.get_temperature_threshold(), 340, "pt: thermal threshold updated")
     fail = fail + expect_eq(pt.set_temperature_threshold(THERMAL_BASE_K), SC_INVALID_FIELD, "pt: invalid thermal threshold rejected")
     fail = fail + expect_eq(pt.get_temperature_threshold(), 340, "pt: invalid threshold leaves previous value")
+    pt.power_state = -1
+    pt.tick(3)
+    fail = fail + expect_eq(pt.temperature_k(), 316, "pt: negative corrupted power state clamps hot")
+    pt.temp_k = THERMAL_BASE_K
+    pt.power_state = NUM_POWER_STATES + 4
+    pt.tick(3)
+    fail = fail + expect_eq(pt.temperature_k(), THERMAL_BASE_K, "pt: oversized corrupted power state clamps cool")
+    pt.tick(-10)
+    fail = fail + expect_eq(pt.temperature_k(), THERMAL_BASE_K, "pt: negative work tick is inert")
 
     # A cool device is not throttled and runs at full budget.
     fail = fail + expect_eq(pt.is_throttled(), 0, "pt: cool device not throttled")
