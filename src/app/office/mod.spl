@@ -31,6 +31,7 @@ use app.office.sheets.data_ops.{sheet_sort_range, sheet_find}
 use app.office.sheets.pivot.{pivot_build, pivot_to_sheet}
 use app.office.sheets.cell_ref.{parse_range}
 use app.office.sheets.chart.{sheet_bar_chart_svg, sheet_line_chart_svg, sheet_pie_chart_svg, sheet_scatter_chart_svg, sheet_area_chart_svg}
+use app.office.erp_bridge.{erp_records_to_sheet, erp_invoice_from_sheet, default_invoice_template}
 
 fn _run_sheet_tui(in_path: text) -> i32:
     """Keystroke-driven full-screen editing: real termios raw mode, arrow
@@ -159,8 +160,12 @@ fn run_office(args: [text]) -> i32:
             return _run_sheet_edit_command(args)
         "slide-edit" =>
             return _run_slide_edit_command(args)
+        "erp-to-sheet" =>
+            return _run_erp_to_sheet_command(args)
+        "erp-invoice" =>
+            return _run_erp_invoice_command(args)
         case _("unsupported office app names show usage"):
-            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|render|open|convert|toc|merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit]"
+            print "Usage: simple office [launcher|word|sheets|slides|mail|planner|counter|render|open|convert|toc|merge|sort-sheet|find|find-sheet|stats|chart|pivot|md-edit|sheet-edit|slide-edit|erp-to-sheet|erp-invoice]"
             return 1
 
 fn _basename(path: text) -> text:
@@ -648,6 +653,68 @@ fn _run_pivot_command(args_in: [text]) -> i32:
         print line
         r = r + 1
     return 0
+
+fn _run_erp_to_sheet_command(args: [text]) -> i32:
+    """Parse a Simple-ERP ubslog v1 records file (sale.write events) into a
+    Sheet and write it out as CSV or XLSX.
+
+    Usage: simple office erp-to-sheet <records-file> <out.csv|out.xlsx>"""
+    if args.len() < 3:
+        print "Usage: simple office erp-to-sheet <records-file> <out.csv|out.xlsx>"
+        return 1
+    val in_path = args[1]
+    val out_path = args[2]
+    if not file_exists(in_path):
+        print "office-erp-to-sheet: rejected (missing-file: {in_path})"
+        return 2
+    val sheet = erp_records_to_sheet(read_file(in_path), _basename(in_path))
+    if out_path.ends_with(".xlsx"):
+        val bytes = sheet_to_xlsx_bytes(sheet)
+        if file_write_bytes(out_path, bytes):
+            print "office-erp-to-sheet: {in_path} -> {out_path} ({bytes.len()} bytes, xlsx)"
+            return 0
+        print "office-erp-to-sheet: failed to write {out_path}"
+        return 2
+    val csv = sheet_to_csv(sheet)
+    if write_file(out_path, csv):
+        print "office-erp-to-sheet: {in_path} -> {out_path} ({csv.len()} bytes, csv)"
+        return 0
+    print "office-erp-to-sheet: failed to write {out_path}"
+    return 2
+
+fn _run_erp_invoice_command(args: [text]) -> i32:
+    """Render one ERP Sale row from a records file into an invoice document
+    (default_invoice_template + mail-merge, app.office.erp_bridge).
+
+    Usage: simple office erp-invoice <records-file> <row> <out.md|out.docx>"""
+    if args.len() < 4:
+        print "Usage: simple office erp-invoice <records-file> <row> <out.md|out.docx>"
+        return 1
+    val in_path = args[1]
+    val row_token = args[2]
+    val out_path = args[3]
+    if not file_exists(in_path):
+        print "office-erp-invoice: rejected (missing-file: {in_path})"
+        return 2
+    if not _is_office_cli_non_negative_i32_token(row_token):
+        print "office-erp-invoice: rejected (invalid-row: {row_token})"
+        return 2
+    val row = row_token.to_i32()
+    val sheet = erp_records_to_sheet(read_file(in_path), _basename(in_path))
+    val doc = erp_invoice_from_sheet(sheet, row, default_invoice_template())
+    if out_path.ends_with(".docx"):
+        val bytes = document_to_docx_bytes(doc)
+        if file_write_bytes(out_path, bytes):
+            print "office-erp-invoice: {in_path} row={row} -> {out_path} ({bytes.len()} bytes, docx)"
+            return 0
+        print "office-erp-invoice: failed to write {out_path}"
+        return 2
+    val md = document_to_markdown(doc)
+    if write_file(out_path, md):
+        print "office-erp-invoice: {in_path} row={row} -> {out_path} ({md.len()} bytes, md)"
+        return 0
+    print "office-erp-invoice: failed to write {out_path}"
+    return 2
 
 fn _decode_office_cli_text(value: text) -> text:
     value.replace("\\n", "\n")

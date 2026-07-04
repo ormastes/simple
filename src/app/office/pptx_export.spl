@@ -469,8 +469,30 @@ fn pptx_bytes_to_deck(zip_bytes: [u8]) -> [Slide]:
             while scanning:
                 val pp = _find_at(xml, "<a:p>", pos)
                 val pc = _find_at(xml, "<p:pic>", pos)
-                if pp < 0 and pc < 0:
+                val pg = _find_at(xml, "<p:graphicFrame>", pos)
+                if pp < 0 and pc < 0 and pg < 0:
                     scanning = false
+                elif pg >= 0 and (pp < 0 or pg < pp) and (pc < 0 or pg < pc):
+                    # graphicFrame first: consume the WHOLE frame so its
+                    # inner a:tc cell paragraphs never scan as body lines
+                    val ge = _find_at(xml, "</p:graphicFrame>", pg)
+                    if ge < 0:
+                        scanning = false
+                    else:
+                        val gf_xml = xml.slice(pg, ge)
+                        val rows_text = _graphic_frame_table_rows(gf_xml)
+                        if rows_text != "":
+                            val tel = SlideElement(
+                                id: "table{bi}",
+                                kind: SlideElementKind.TableEl(rows: rows_text),
+                                x: 60,
+                                y: 220 + 90 * (bi - 1),
+                                width: 840,
+                                height: 80
+                            )
+                            s = add_slide_element(s, tel)
+                            bi = bi + 1
+                        pos = ge + 17
                 elif pp >= 0 and (pc < 0 or pp < pc):
                     val pe = _find_at(xml, "</a:p>", pp)
                     if pe < 0:

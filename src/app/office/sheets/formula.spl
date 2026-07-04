@@ -12,6 +12,10 @@ use app.office.sheets.spreadsheet.{Sheet}
 use common.office.number.{office_parse_unsigned_decimal_f64}
 use common.string_core.{char_from_code, str_repeat}
 
+# Runtime RNG (SFFI, same declaration as std core/random.spl). Inclusive on
+# both bounds — probed. Used by RAND / RANDBETWEEN only.
+extern fn rt_random_randint(min: i64, max: i64) -> i64
+
 # =========================================================================
 # Types
 # =========================================================================
@@ -421,7 +425,7 @@ fn _is_text_function(name: text) -> bool:
      name == "IMSINH" or name == "IMCOSH" or name == "IMCOT" or
      name == "IMCSC" or name == "IMSEC" or name == "IMCSCH" or
      name == "IMSECH" or name == "CONVERT" or
-     name == "DATEVALUE" or name == "TEXT" or
+     name == "DATEVALUE" or name == "TIMEVALUE" or name == "TEXT" or
      name == "FIXED" or name == "VALUE" or name == "NUMBERVALUE" or
      name == "SUBSTITUTE" or name == "REPLACE" or name == "REPT" or
      name == "SEARCH" or name == "FIND" or name == "CHAR" or
@@ -777,6 +781,43 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
         if y < 1900 or m < 1 or m > 12 or d < 1 or d > 31:
             return CellValue.ErrorVal(message: "DATEVALUE out of range")
         return CellValue.NumberVal(value: _serial_from_civil(y, m, d))
+    if name == "TIMEVALUE":
+        # Supported subset: "H:MM" and "H:MM:SS" (24-hour), each with an
+        # optional trailing AM/PM (space-separated, case-insensitive).
+        # Date-prefixed forms ("22-Aug-2011 6:35 AM") are not supported.
+        var tv = s.trim().upper()
+        var pm = false
+        var have_ampm = false
+        if tv.ends_with(" AM"):
+            have_ampm = true
+            tv = tv.substring(0, tv.len() - 3)
+        else:
+            if tv.ends_with(" PM"):
+                have_ampm = true
+                pm = true
+                tv = tv.substring(0, tv.len() - 3)
+        tv = tv.trim()
+        val tparts = tv.split(":")
+        if tparts.len() < 2 or tparts.len() > 3:
+            return CellValue.ErrorVal(message: "TIMEVALUE unrecognized time")
+        var th = tparts[0].to_f64().to_i64()
+        val tm = tparts[1].to_f64().to_i64()
+        var tsec: i64 = 0
+        if tparts.len() == 3:
+            tsec = tparts[2].to_f64().to_i64()
+        if tm < 0 or tm > 59 or tsec < 0 or tsec > 59:
+            return CellValue.ErrorVal(message: "TIMEVALUE out of range")
+        if have_ampm:
+            if th < 1 or th > 12:
+                return CellValue.ErrorVal(message: "TIMEVALUE out of range")
+            if th == 12:
+                th = 0
+            if pm:
+                th = th + 12
+        else:
+            if th < 0 or th > 23:
+                return CellValue.ErrorVal(message: "TIMEVALUE out of range")
+        return CellValue.NumberVal(value: (th * 3600 + tm * 60 + tsec).to_f64() / 86400.0)
     if name == "IMREAL":
         return CellValue.NumberVal(value: _parse_complex(s)[0])
     if name == "IMAGINARY":
@@ -3376,6 +3417,27 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                     return CellValue.NumberVal(value: _fact_i64(n) / _fact_i64(n - k))
                 return CellValue.ErrorVal(message: "PERMUT domain error")
             return CellValue.ErrorVal(message: "PERMUT requires 2 arguments")
+        "COMBINA":
+            # Combinations with repetition: C(n+k-1, k).
+            if args.len() >= 2:
+                val n = _first_val(args[0]).to_i64()
+                val k = _first_val(args[1]).to_i64()
+                if n >= 0 and k >= 0 and (n > 0 or k == 0) and n + k - 1 <= 170:
+                    if k == 0:
+                        return CellValue.NumberVal(value: 1.0)
+                    val m = n + k - 1
+                    return CellValue.NumberVal(value: _fact_i64(m) / (_fact_i64(k) * _fact_i64(m - k)))
+                return CellValue.ErrorVal(message: "COMBINA domain error")
+            return CellValue.ErrorVal(message: "COMBINA requires 2 arguments")
+        "PERMUTATIONA":
+            # Permutations with repetition: n^k.
+            if args.len() >= 2:
+                val n = _first_val(args[0]).to_i64()
+                val k = _first_val(args[1]).to_i64()
+                if n >= 0 and k >= 0:
+                    return CellValue.NumberVal(value: _pow_f64(n.to_f64(), k.to_f64()))
+                return CellValue.ErrorVal(message: "PERMUTATIONA domain error")
+            return CellValue.ErrorVal(message: "PERMUTATIONA requires 2 arguments")
         "QUOTIENT":
             if args.len() >= 2:
                 val d = _first_val(args[1])
@@ -5232,6 +5294,161 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
                         remaining = remaining - 1
                 return CellValue.NumberVal(value: d.to_f64())
             return CellValue.ErrorVal(message: "WORKDAY requires start, days")
+        "TIME":
+            # Serial day fraction (h*3600 + m*60 + s) / 86400, wrapped mod 1 day.
+            if args.len() >= 3:
+                val h = _first_val(args[0]).to_i64()
+                val mi = _first_val(args[1]).to_i64()
+                val se = _first_val(args[2]).to_i64()
+                if h < 0 or mi < 0 or se < 0:
+                    return CellValue.ErrorVal(message: "TIME requires non-negative parts")
+                val total = (h * 3600 + mi * 60 + se) % 86400
+                return CellValue.NumberVal(value: total.to_f64() / 86400.0)
+            return CellValue.ErrorVal(message: "TIME requires hour, minute, second")
+        "HOUR":
+            if flat.len() > 0 and flat[0] >= 0.0:
+                val ts = _time_total_seconds(flat[0])
+                return CellValue.NumberVal(value: ((ts / 3600) % 24).to_f64())
+            return CellValue.ErrorVal(message: "HOUR requires a non-negative serial")
+        "MINUTE":
+            if flat.len() > 0 and flat[0] >= 0.0:
+                val ts = _time_total_seconds(flat[0])
+                return CellValue.NumberVal(value: ((ts / 60) % 60).to_f64())
+            return CellValue.ErrorVal(message: "MINUTE requires a non-negative serial")
+        "SECOND":
+            if flat.len() > 0 and flat[0] >= 0.0:
+                val ts = _time_total_seconds(flat[0])
+                return CellValue.NumberVal(value: (ts % 60).to_f64())
+            return CellValue.ErrorVal(message: "SECOND requires a non-negative serial")
+        "ISOWEEKNUM":
+            # ISO-8601: the week number of the date's Thursday (Mon-start weeks).
+            if flat.len() > 0:
+                val sv = flat[0].to_i64()
+                val wd = _iso_weekday(sv)
+                val thu = sv - wd + 4
+                val tc = _civil_from_serial(thu.to_f64())
+                val ty = tc[0]
+                val jan1 = _serial_from_civil(ty, 1, 1).to_i64()
+                return CellValue.NumberVal(value: ((thu - jan1) / 7 + 1).to_f64())
+            return CellValue.ErrorVal(message: "ISOWEEKNUM requires a serial")
+        "DAYS360":
+            if args.len() >= 2:
+                val s1 = _first_val(args[0])
+                val s2 = _first_val(args[1])
+                var euro = false
+                if args.len() >= 3:
+                    euro = _first_val(args[2]) != 0.0
+                if euro:
+                    # European 30/360: both days clamped 31 -> 30 (= basis 4).
+                    return CellValue.NumberVal(value: _daycount_num(s1, s2, 4))
+                # US (NASD): start on last day of month (incl. Feb) -> 30;
+                # end day 31 -> 30 only when adjusted start is 30.
+                val c1 = _civil_from_serial(s1)
+                val c2 = _civil_from_serial(s2)
+                var d1 = c1[2]
+                var d2 = c2[2]
+                if d1 == _sec_days_in_month(c1[0], c1[1]):
+                    d1 = 30
+                if d2 == 31 and d1 == 30:
+                    d2 = 30
+                val days = 360 * (c2[0] - c1[0]) + 30 * (c2[1] - c1[1]) + (d2 - d1)
+                return CellValue.NumberVal(value: days.to_f64())
+            return CellValue.ErrorVal(message: "DAYS360 requires start, end")
+        "YEARFRAC":
+            # Thin wrapper over _daycount_frac; Excel returns the absolute fraction.
+            if args.len() >= 2:
+                var s1 = _first_val(args[0])
+                var s2 = _first_val(args[1])
+                var basis: i64 = 0
+                if args.len() >= 3:
+                    basis = _first_val(args[2]).to_i64()
+                if basis < 0 or basis > 4:
+                    return CellValue.ErrorVal(message: "YEARFRAC basis must be 0..4")
+                if s2 < s1:
+                    val tmp = s1
+                    s1 = s2
+                    s2 = tmp
+                return CellValue.NumberVal(value: _daycount_frac(s1, s2, basis))
+            return CellValue.ErrorVal(message: "YEARFRAC requires start, end")
+        "NETWORKDAYS.INTL":
+            # Weekend arg: numeric codes 1-7 (day pairs) and 11-17 (single day)
+            # only; the "0000011" string mask form is not supported yet (the
+            # numeric arg path coerces text to 0, which is rejected below).
+            if args.len() >= 2:
+                val s0 = _first_val(args[0]).to_i64()
+                val e0 = _first_val(args[1]).to_i64()
+                var wcode: i64 = 1
+                if args.len() >= 3:
+                    wcode = _first_val(args[2]).to_i64()
+                if not ((wcode >= 1 and wcode <= 7) or (wcode >= 11 and wcode <= 17)):
+                    return CellValue.ErrorVal(message: "NETWORKDAYS.INTL weekend must be 1-7 or 11-17")
+                var hols: [f64] = []
+                if args.len() >= 4:
+                    hols = args[3]
+                var lo = s0
+                var hi = e0
+                var sign = 1
+                if e0 < s0:
+                    lo = e0
+                    hi = s0
+                    sign = 0 - 1
+                var count = 0
+                var d = lo
+                while d <= hi:
+                    if not _intl_is_weekend(d, wcode):
+                        var is_hol = false
+                        var hj = 0
+                        while hj < hols.len():
+                            val hv = hols[hj]
+                            if hv.to_i64() == d:
+                                is_hol = true
+                            hj = hj + 1
+                        if not is_hol:
+                            count = count + 1
+                    d = d + 1
+                return CellValue.NumberVal(value: (count * sign).to_f64())
+            return CellValue.ErrorVal(message: "NETWORKDAYS.INTL requires start, end")
+        "WORKDAY.INTL":
+            # Same weekend-code subset as NETWORKDAYS.INTL (string mask deferred).
+            if args.len() >= 2:
+                var d = _first_val(args[0]).to_i64()
+                val days = _first_val(args[1]).to_i64()
+                var wcode: i64 = 1
+                if args.len() >= 3:
+                    wcode = _first_val(args[2]).to_i64()
+                if not ((wcode >= 1 and wcode <= 7) or (wcode >= 11 and wcode <= 17)):
+                    return CellValue.ErrorVal(message: "WORKDAY.INTL weekend must be 1-7 or 11-17")
+                var hols: [f64] = []
+                if args.len() >= 4:
+                    hols = args[3]
+                var remaining = if days < 0: 0 - days else: days
+                val step = if days < 0: 0 - 1 else: 1
+                while remaining > 0:
+                    d = d + step
+                    if not _intl_is_weekend(d, wcode):
+                        var is_hol = false
+                        var hj = 0
+                        while hj < hols.len():
+                            val hv = hols[hj]
+                            if hv.to_i64() == d:
+                                is_hol = true
+                            hj = hj + 1
+                        if not is_hol:
+                            remaining = remaining - 1
+                return CellValue.NumberVal(value: d.to_f64())
+            return CellValue.ErrorVal(message: "WORKDAY.INTL requires start, days")
+        "RAND":
+            # Uniform [0, 1). Built on the i64 SFFI (the f64 SFFI returns 0.0
+            # in this module context — probed).
+            return CellValue.NumberVal(value: rt_random_randint(0, 999999999).to_f64() / 1000000000.0)
+        "RANDBETWEEN":
+            if args.len() >= 2:
+                val lo = _first_val(args[0]).to_i64()
+                val hi = _first_val(args[1]).to_i64()
+                if hi < lo:
+                    return CellValue.ErrorVal(message: "RANDBETWEEN requires bottom <= top")
+                return CellValue.NumberVal(value: rt_random_randint(lo, hi).to_f64())
+            return CellValue.ErrorVal(message: "RANDBETWEEN requires bottom, top")
         _:
             return CellValue.ErrorVal(message: "Unknown function: {name}")
 
@@ -6816,6 +7033,32 @@ fn _is_weekday(serial: i64) -> bool:
     if wd == 0:
         wd = 7
     wd >= 2 and wd <= 6
+
+fn _iso_weekday(serial: i64) -> i64:
+    """ISO weekday Mon=1..Sun=7. serial - 25569 = days since 1970-01-01 (a Thursday)."""
+    val days = serial - 25569
+    ((days % 7) + 10) % 7 + 1
+
+fn _intl_is_weekend(serial: i64, wcode: i64) -> bool:
+    """NETWORKDAYS.INTL/WORKDAY.INTL weekend test for numeric codes.
+
+    1..7 = consecutive day pairs starting Sat/Sun (1) through Fri/Sat (7);
+    11..17 = single days Sunday (11) through Saturday (17)."""
+    val wd = _iso_weekday(serial)
+    if wcode >= 1 and wcode <= 7:
+        val first = (wcode + 4) % 7 + 1
+        val second = first % 7 + 1
+        return wd == first or wd == second
+    if wcode >= 11 and wcode <= 17:
+        val single = (wcode - 5) % 7 + 1
+        return wd == single
+    false
+
+fn _time_total_seconds(serial: f64) -> i64:
+    """Seconds-of-day from a non-negative serial's fraction, rounded to the
+    nearest second (Excel HOUR/MINUTE/SECOND behavior), wrapped mod 86400."""
+    val frac = serial - serial.to_i64().to_f64()
+    (frac * 86400.0 + 0.5).to_i64() % 86400
 
 fn _eval_display_sum(tokens: [text], sheet: Sheet, depth: i32) -> DisplayEvalResult:
     var total: i64 = 0

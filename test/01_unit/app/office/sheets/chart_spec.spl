@@ -6,7 +6,7 @@ computed formula results) from another; bars scale to the max; labels escaped.
 
 use std.spec
 use app.office.sheets.spreadsheet.{Sheet}
-use app.office.sheets.chart.{chart_series_from_ranges, render_bar_chart_svg, sheet_bar_chart_svg, sheet_line_chart_svg, sheet_pie_chart_svg, sheet_area_chart_svg, sheet_scatter_chart_svg}
+use app.office.sheets.chart.{chart_series_from_ranges, render_bar_chart_svg, sheet_bar_chart_svg, sheet_line_chart_svg, sheet_pie_chart_svg, sheet_area_chart_svg, sheet_scatter_chart_svg, sheet_stacked_bar_chart_svg, sheet_hbar_chart_svg, sheet_donut_chart_svg}
 use app.office.file_formats.{recalculate_formula_cells}
 
 fn _count(hay: text, needle: text) -> i64:
@@ -22,6 +22,19 @@ fn _chart_sheet() -> Sheet:
     sh.set_value("A3", "Profit")
     sh.set_value("B3", "=B1-B2")
     recalculate_formula_cells(sh)
+
+fn _stacked_sheet() -> Sheet:
+    # categories A1:A2; series A = B1:B2, series B = C1:C2; hbar/donut = E1:E2
+    var sh = Sheet.new("st")
+    sh.set_value("A1", "Q1")
+    sh.set_value("A2", "Q2")
+    sh.set_value("B1", "10")
+    sh.set_value("B2", "20")
+    sh.set_value("C1", "30")
+    sh.set_value("C2", "40")
+    sh.set_value("E1", "5")
+    sh.set_value("E2", "15")
+    sh
 
 fn _scatter_sheet() -> Sheet:
     var sh = Sheet.new("s")
@@ -118,4 +131,56 @@ describe "Calc charts: axis ticks, legend, area, scatter":
     it "renders a no-data placeholder for an empty scatter range":
         val sh = Sheet.new("s")
         val svg = sheet_scatter_chart_svg(sh, "C1:C1", "D1:D1", "Empty")
+        expect(svg).to_contain("<svg")
+
+describe "Calc charts: stacked bar, horizontal bar, donut":
+    it "stacks series segments with Y ticks at the max stacked total":
+        # A=[10,20], B=[30,40] -> totals 40/60 -> nice step 20 -> ticks 0/20/40/60
+        # plot_h=222: Q2 segments 20/60*222=74 and 40/60*222=148 (exactly 2:1,
+        # i.e. proportional to 20:40); Q1 segments 37 and 111.
+        val sh = _stacked_sheet()
+        val svg = sheet_stacked_bar_chart_svg(sh, "A1:A2", "B1:B2,C1:C2", "Stacked")
+        expect(_count(svg, "class=\"seg\"")).to_equal(4)
+        expect(_count(svg, "class=\"legend\"")).to_equal(2)
+        expect(svg).to_contain(">20</text>")
+        expect(svg).to_contain(">40</text>")
+        expect(svg).to_contain(">60</text>")
+        expect(svg).to_contain("height=\"74\"")
+        expect(svg).to_contain("height=\"148\"")
+        expect(svg).to_contain("height=\"37\"")
+        expect(svg).to_contain("height=\"111\"")
+        expect(svg).to_contain(">Series 1</text>")
+        expect(svg).to_contain(">Series 2</text>")
+        expect(svg).to_contain(">Q2</text>")
+
+    it "renders horizontal bars growing rightward with left labels and X ticks":
+        # values [5,15] -> ticks 0/5/10/15; plot_w=255 -> widths 85 and 255
+        # (255 = 3*85: the 15-bar is exactly 3x the 5-bar)
+        val sh = _stacked_sheet()
+        val svg = sheet_hbar_chart_svg(sh, "A1:A2", "E1:E2", "HBar")
+        expect(_count(svg, "class=\"hbar\"")).to_equal(2)
+        expect(svg).to_contain("width=\"85\"")
+        expect(svg).to_contain("width=\"255\"")
+        # the 5-bar (Q1) comes before the 15-bar (Q2) in document order
+        val parts = svg.split("width=\"85\"")
+        expect(parts[0].contains("width=\"255\"")).to_be(false)
+        # horizontal orientation: category labels sit left of the axis
+        expect(svg).to_contain("text-anchor=\"end\">Q1</text>")
+        expect(svg).to_contain("text-anchor=\"end\">Q2</text>")
+        # value ticks live on the X axis
+        expect(svg).to_contain(">15</text>")
+        expect(svg).to_contain(">10</text>")
+
+    it "renders a donut with dasharray segments and the total in the center":
+        # values [5,15] -> total 20 in the donut hole; thin stroke = big hole
+        val sh = _stacked_sheet()
+        val svg = sheet_donut_chart_svg(sh, "A1:A2", "E1:E2", "Donut")
+        expect(_count(svg, "stroke-dasharray")).to_equal(2)
+        expect(svg).to_contain("stroke-width=\"30\"")
+        expect(svg).to_contain("text-anchor=\"middle\">20</text>")
+        expect(svg).to_contain("Q2: 15")
+
+    it "renders a no-data placeholder for empty stacked ranges":
+        val sh = Sheet.new("st")
+        val svg = sheet_stacked_bar_chart_svg(sh, "A1:A1", "B1:B1", "Empty")
         expect(svg).to_contain("<svg")

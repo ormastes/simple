@@ -227,6 +227,37 @@ val weight = 5_kg                   # Mass
 val discount = 20_pct               # Percentage (stored as 0.2)
 ```
 
+### `int(text)` Semantics (Task #118)
+
+`int(text)` is a **total function** — it never errors, in interpret mode or
+compiled mode. It skips leading whitespace, an optional `+`/`-` sign, then
+parses the longest run of leading decimal digits and stops at the first
+non-digit. If no digits are found at all, the result is `0`.
+
+| Input | Result | Why |
+|-------|--------|-----|
+| `int("42")` | `42` | plain integer |
+| `int("4.2")` | `4` | parses leading digits, stops at `.` (truncation) |
+| `int("abc")` | `0` | no leading digits |
+| `int("")` | `0` | no leading digits |
+| `int(" 42 ")` | `42` | leading/trailing whitespace ignored |
+| `int("-7")` | `-7` | leading sign honored |
+
+This matrix is identical across all execution paths: the flat-AST interpreter
+(`eval_int_parse_lenient` in `eval_builtins.spl`), the Rust seed's tree-walk
+interpreter (`parse_int_lenient` in `interpreter_call/builtins.rs`), and both
+compiled backends (`cranelift_codegen_adapter.spl`'s `cl_translate_cast` and
+`codegen/instr/basic_ops.rs`), which route through the shared C-runtime
+`rt_string_to_int()` (strtoll-based). The compiled-backend assertions above
+require redeploying `bin/release/<triple>/simple` from a rebuilt bootstrap to
+take effect for the self-hosted binary; the interpreter-mode assertions are
+correct today.
+
+If you need to *detect* garbage input instead of silently coercing it to `0`,
+use the checked alternative: `text.parse_int()` returns `Option<i64>`
+(`None` on any non-numeric or partially-numeric input), typically used as
+`s.trim().parse_int() ?? -1` (see `src/lib/common/text.spl`'s `parse_i64`).
+
 ---
 
 ## Collections

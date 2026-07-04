@@ -108,7 +108,13 @@ pub fn compile_cast<M: Module>(
         // #94's `cranelift_codegen_adapter.spl` fix (`cl_translate_cast`):
         // route through the same runtime parser the interpreter uses
         // (`rt_string_to_int`, strtoll-based, returns 0 on parse failure) so
-        // int("42") == 42 instead of 52. `src_val` here is already the boxed
+        // int("42") == 42 instead of 52. This strtoll-based leading-digit-run
+        // parse (stop at first non-digit, e.g. "4.2" -> 4; 0 if no digits at
+        // all, e.g. "abc"/"" -> 0) is also the task #118 canonical `int(text)`
+        // semantics — matches eval_builtins.spl's `eval_int_parse_lenient` and
+        // interpreter_call/builtins.rs's `parse_int_lenient`; no change needed
+        // here, this path was already the reference implementation.
+        // `src_val` here is already the boxed
         // string RuntimeValue, so no rt_string_new re-boxing is needed.
         // Not every JIT compilation pre-populates `rt_string_to_int` in
         // `ctx.runtime_funcs` (unlike `rt_string_len`/`rt_string_data` used
