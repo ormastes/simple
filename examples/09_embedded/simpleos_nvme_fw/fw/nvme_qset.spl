@@ -201,6 +201,8 @@ impl QueueSet:
         me.sq_len[qid]
 
     me sq_fetch(qid: i64) -> NvmeCmd:
+        if not qid_in_range(qid) or me.sq_len[qid] == 0:
+            return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val base: i64 = qid * MAX_QUEUE_SIZE
         val slot: i64 = base + me.sq_head[qid]
         val cid:  i64 = me.sq_cid[slot]
@@ -238,6 +240,8 @@ impl QueueSet:
         me.cq_len[cqid] == me.cq_size[cqid]
 
     me cq_reap(cqid: i64) -> NvmeCpl:
+        if not qid_in_range(cqid) or me.cq_len[cqid] == 0:
+            return cpl_make(0, SC_INVALID_FIELD, 0)
         val base: i64 = cqid * MAX_QUEUE_SIZE
         val slot: i64 = base + me.cq_head[cqid]
         val cid:    i64 = me.cq_cid[slot]
@@ -293,6 +297,9 @@ fn nvme_qset_selftest() -> i64:
     fail = fail + expect_eq(fc.cid, 77, "fetched cid round-trips (x8 guard)")
     fail = fail + expect_eq(fc.lba, 13, "fetched lba round-trips")
     fail = fail + expect_eq(fc.data, 0xC3, "fetched data round-trips")
+    val empty_fetch: NvmeCmd = qs.sq_fetch(1)
+    fail = fail + expect_eq(empty_fetch.nblocks, 0, "empty SQ fetch returns inert flush")
+    fail = fail + expect_eq(qs.sq_pending(1), 0, "empty SQ fetch leaves pending count unchanged")
 
     # submit to an inactive SQ is refused
     fail = fail + expect_eq(bool_to_i64(qs.sq_submit(3, cmd_make(1, OP_READ, 0, 1, 0))), 0, "submit to inactive SQ 3 refused")
@@ -306,6 +313,9 @@ fn nvme_qset_selftest() -> i64:
     val rc: NvmeCpl = qs.cq_reap(1)
     fail = fail + expect_eq(rc.cid, 77, "reaped cid round-trips")
     fail = fail + expect_eq(rc.data, 0xC3, "reaped data round-trips")
+    val empty_reap: NvmeCpl = qs.cq_reap(1)
+    fail = fail + expect_eq(empty_reap.status, SC_INVALID_FIELD, "empty CQ reap fails closed")
+    fail = fail + expect_eq(qs.cq_pending(1), 0, "empty CQ reap leaves pending count unchanged")
 
     # cannot delete CQ 1 while SQ 1 is bound; reverse order works
     fail = fail + expect_eq(qs.delete_cq(1), SC_QUEUE_BUSY, "delete CQ 1 with bound SQ rejected")
