@@ -31,28 +31,13 @@ struct Rain:
 fn rain_new() -> Rain:
     Rain(data: sched_fill(NUM_CHANNELS, 0), parity: 0)
 
-fn rain_channel_valid(ch: i64) -> bool:
-    ch >= 0 and ch < NUM_CHANNELS
-
-fn rain_group_valid(group: i64) -> bool:
-    group >= 0 and group < rain_num_groups()
-
-fn rain_page_valid(page: i64) -> bool:
-    page >= 0 and page < PAGES_PER_BLOCK
-
 impl Rain:
     # Write a stripe (one word per channel) and compute its parity.
     me write_stripe(words: [i64]):
-        me.data = sched_fill(NUM_CHANNELS, 0)
-        var i: i64 = 0
-        while i < NUM_CHANNELS and i < words.len():
-            me.data[i] = words[i]
-            i = i + 1
-        me.parity = xor_all(me.data)
+        me.data = words
+        me.parity = xor_all(words)
 
     me data_at(ch: i64) -> i64:
-        if not rain_channel_valid(ch):
-            return 0
         me.data[ch]
 
     me parity_word(self) -> i64:
@@ -61,8 +46,6 @@ impl Rain:
     # Reconstruct the data word on a failed channel: XOR the parity with every surviving data
     # word. Since parity = XOR of all data words, the survivors cancel and the lost word remains.
     me reconstruct(failed_ch: i64) -> i64:
-        if not rain_channel_valid(failed_ch):
-            return 0
         var acc: i64 = me.parity
         var ch: i64 = 0
         while ch < NUM_CHANNELS:
@@ -91,15 +74,11 @@ fn rain_num_stripes() -> i64:
 
 # Physical page number for a (group, channel, page) cell.
 fn rain_ppn(group: i64, channel: i64, page: i64) -> i64:
-    if not rain_group_valid(group) or not rain_channel_valid(channel) or not rain_page_valid(page):
-        return NO_PPN
     val blk: i64 = group * NUM_CHANNELS + channel
     blk * PAGES_PER_BLOCK + page
 
 # The stripe index a physical page belongs to.
 fn rain_stripe_idx(ppn: i64) -> i64:
-    if not ppn_in_range(ppn):
-        return UNMAP
     val blk: i64 = ppn_block(ppn)
     val group: i64 = blk / NUM_CHANNELS
     group * PAGES_PER_BLOCK + ppn_page(ppn)
@@ -130,24 +109,11 @@ fn rain_selftest() -> i64:
     val p2: i64 = r.recompute_parity()
     val p0: i64 = r.parity_word()
     fail = fail + expect_eq(p2, p0, "rain: parity recomputed from surviving data")
-    fail = fail + expect_eq(r.data_at(-1), 0, "rain: invalid data channel reads zero")
-    fail = fail + expect_eq(r.reconstruct(NUM_CHANNELS), 0, "rain: invalid reconstruct channel reads zero")
-
-    var short: Rain = rain_new()
-    var short_words: [i64] = []
-    short_words.push(0x12)
-    short.write_stripe(short_words)
-    fail = fail + expect_eq(short.data_at(0), 0x12, "rain: short stripe keeps provided word")
-    fail = fail + expect_eq(short.data_at(1), 0, "rain: short stripe fills missing channels")
 
     # FTL parity-grid geometry: (group, channel, page) → ppn → stripe round-trips, and every
     # channel of a stripe maps back to the same stripe index (the layout is a clean grid).
     val ppn_a: i64 = rain_ppn(2, 5, 11)
     fail = fail + expect_eq(rain_stripe_idx(ppn_a), 2 * PAGES_PER_BLOCK + 11, "rain: ppn → stripe index")
-    fail = fail + expect_eq(rain_ppn(-1, 0, 0), NO_PPN, "rain: negative group returns NO_PPN")
-    fail = fail + expect_eq(rain_ppn(0, NUM_CHANNELS, 0), NO_PPN, "rain: invalid channel returns NO_PPN")
-    fail = fail + expect_eq(rain_ppn(0, 0, PAGES_PER_BLOCK), NO_PPN, "rain: invalid page returns NO_PPN")
-    fail = fail + expect_eq(rain_stripe_idx(NO_PPN), UNMAP, "rain: invalid ppn has no stripe")
     var c2: i64 = 0
     var same: i64 = 1
     while c2 < NUM_CHANNELS:

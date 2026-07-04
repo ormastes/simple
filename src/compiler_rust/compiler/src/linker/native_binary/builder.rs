@@ -158,10 +158,13 @@ impl NativeBinaryBuilder {
         };
 
         match final_result {
-            Ok(()) => Ok(NativeBinaryResult {
-                output: self.options.output.clone(),
-                size: std::fs::metadata(&self.options.output).map(|m| m.len()).unwrap_or(0),
-            }),
+            Ok(()) => {
+                self.verify_no_undefined_rt_symbols(&self.options.output)?;
+                Ok(NativeBinaryResult {
+                    output: self.options.output.clone(),
+                    size: std::fs::metadata(&self.options.output).map(|m| m.len()).unwrap_or(0),
+                })
+            }
             Err(LinkerError::LinkerFailed {
                 exit_code,
                 message,

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use object::{Object, ObjectSymbol};
 use simple_common::target::{LinkerFlavor, TargetOS};
 
 use crate::linker::builder::LinkerBuilder;
@@ -7,8 +8,58 @@ use crate::linker::error::{LinkerError, LinkerResult};
 
 use super::builder::NativeBinaryBuilder;
 use super::options::NativeBinaryOptions;
+use super::stubs::ALLOW_UNRESOLVED_RT_ENV;
 
 impl NativeBinaryBuilder {
+    /// Post-link safety net for task #97: parse the final linked artifact in-process (via the
+    /// `object` crate) and check whether any `rt_*` symbol is still genuinely undefined. Under
+    /// normal bootstrap-mode builds the auto-stub generator (see stubs.rs) already fabricates a
+    /// definition for every undefined symbol before this point, so this scan is expected to find
+    /// nothing there — it exists to catch the non-bootstrap / shared-library link paths (which
+    /// don't run the auto-stub passes) where `--unresolved-symbols=ignore-all` or a lenient
+    /// dynamic linker could otherwise let a real undefined `rt_*` symbol ship silently.
+    pub(super) fn verify_no_undefined_rt_symbols(&self, output_path: &Path) -> LinkerResult<()> {
+        let data = match std::fs::read(output_path) {
+            Ok(d) => d,
+            Err(_) => return Ok(()), // nothing to verify
+        };
+        let obj = match object::File::parse(&*data) {
+            Ok(o) => o,
+            Err(_) => return Ok(()), // not an object/executable we can parse (e.g. PE quirks) — skip
+        };
+        let mut undefined_rt: Vec<String> = obj
+            .symbols()
+            .filter(|sym| sym.is_undefined())
+            .filter_map(|sym| sym.name().ok().map(|n| n.to_string()))
+            .filter(|name| name.starts_with("rt_"))
+            .collect();
+        undefined_rt.sort();
+        undefined_rt.dedup();
+        if undefined_rt.is_empty() {
+            return Ok(());
+        }
+        let names = undefined_rt.join(", ");
+        if std::env::var(ALLOW_UNRESOLVED_RT_ENV).as_deref() == Ok("1") {
+            eprintln!(
+                "WARNING (task #97): linked artifact {} still has genuinely undefined rt_* \
+                 symbol(s) [{names}] ({env}=1 set — proceeding anyway). These will crash at call \
+                 time.",
+                output_path.display(),
+                names = names,
+                env = ALLOW_UNRESOLVED_RT_ENV,
+            );
+            return Ok(());
+        }
+        Err(LinkerError::LinkFailed(format!(
+            "native-build: linked artifact {} has genuinely undefined rt_* symbol(s) [{names}] \
+             (task #97) — calling them would jump to address 0. Fix the extern name/declaration, \
+             implement it in the runtime, or set {env}=1 to bypass at your own risk.",
+            output_path.display(),
+            names = names,
+            env = ALLOW_UNRESOLVED_RT_ENV,
+        )))
+    }
+
     pub(super) fn object_has_undefined_symbols(&self, obj_path: &Path) -> bool {
         let (nm_cmd, nm_args) = super::options::detect_nm_command(&self.options.target);
         std::process::Command::new(nm_cmd)
