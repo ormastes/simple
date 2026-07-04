@@ -430,7 +430,8 @@ fn _is_text_function(name: text) -> bool:
      name == "SUBSTITUTE" or name == "REPLACE" or name == "REPT" or
      name == "SEARCH" or name == "FIND" or name == "CHAR" or
      name == "CODE" or name == "PROPER" or name == "CLEAN" or
-     name == "TEXTJOIN" or
+     name == "UNICHAR" or name == "UNICODE" or name == "DOLLAR" or
+     name == "INFO" or name == "TEXTJOIN" or
      name == "DEC2BIN" or name == "BIN2DEC" or name == "DEC2HEX" or
      name == "HEX2DEC" or name == "DEC2OCT" or name == "OCT2DEC" or
      name == "BASE" or name == "DECIMAL" or name == "DATEDIF" or
@@ -753,6 +754,34 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
         val fv = s.to_f64()
         val fd = if args.len() > 1: _arg_int(args, 1) else: 2
         return CellValue.TextVal(value: _fmt_decimals_grouped(fv, fd, true))
+    if name == "DOLLAR":
+        # Excel DOLLAR: currency text with thousands grouping; negatives are
+        # parenthesized ("($1,234.57)"). A negative decimals rounds to the
+        # left of the decimal point: DOLLAR(-1234.567, -2) -> "($1,200)".
+        val dv = s.to_f64()
+        val dd = if args.len() > 1: _arg_int(args, 1) else: 2
+        val dneg = dv < 0.0
+        var dav = if dneg: 0.0 - dv else: dv
+        var dbody = ""
+        if dd >= 0:
+            dbody = _fmt_decimals_grouped(dav, dd, true)
+        else:
+            val dstep = _pow_f64(10.0, (0 - dd).to_f64())
+            dav = _floor_f64(dav / dstep + 0.5) * dstep
+            dbody = _fmt_decimals_grouped(dav, 0, true)
+        if dneg:
+            return CellValue.TextVal(value: "(${dbody})")
+        return CellValue.TextVal(value: "${dbody}")
+    if name == "INFO":
+        # Honest single-file, auto-recalc model (same precedent as SHEET()/
+        # SHEETS()): only "numfile" and "recalc" are meaningful; every other
+        # Excel info_type fails closed.
+        val itype = s.lower()
+        if itype == "numfile":
+            return CellValue.NumberVal(value: 1.0)
+        if itype == "recalc":
+            return CellValue.TextVal(value: "Automatic")
+        return CellValue.ErrorVal(message: "INFO type {itype} not supported")
     if name == "VALUE" or name == "NUMBERVALUE":
         return CellValue.NumberVal(value: s.trim().to_f64())
     if name == "DATEVALUE":
@@ -1029,6 +1058,23 @@ fn _dispatch_text_function(name: text, args: [text]) -> CellValue:
     if name == "CODE":
         if s.len() == 0:
             return CellValue.ErrorVal(message: "CODE requires a non-empty string")
+        return CellValue.NumberVal(value: s.char_code_at(0).to_f64())
+    if name == "UNICHAR":
+        # Runtime char_from_code covers tab/LF/CR and printable ASCII 32..126
+        # only (probed: codes >126 return ""), so UNICHAR is honest over that
+        # range and fails closed everywhere else (incl. Latin-1 128..255).
+        val ucode = _arg_int(args, 0)
+        val uok = (ucode == 9 or ucode == 10 or ucode == 13 or
+                   (ucode >= 32 and ucode <= 126))
+        if not uok:
+            return CellValue.ErrorVal(message: "UNICHAR supports codes 9/10/13 and 32..126 only")
+        return CellValue.TextVal(value: char_from_code(ucode.to_i64()))
+    if name == "UNICODE":
+        # char_code_at is codepoint-based in this runtime (probed: first char
+        # of a multibyte string yields its Unicode codepoint), so UNICODE
+        # reports the first codepoint of the text.
+        if s.len() == 0:
+            return CellValue.ErrorVal(message: "UNICODE requires a non-empty string")
         return CellValue.NumberVal(value: s.char_code_at(0).to_f64())
     if name == "PROPER":
         return CellValue.TextVal(value: _proper_case(s))
@@ -1827,7 +1873,7 @@ fn _is_info_function(name: text) -> bool:
      name == "ISBLANK" or name == "ISERROR" or name == "ISERR" or
      name == "ISNA" or name == "N" or name == "T" or
      name == "NA" or name == "SHEET" or name == "SHEETS" or
-     name == "TYPE")
+     name == "TYPE" or name == "ISNONTEXT" or name == "ISLOGICAL")
 
 fn _truthy(cv: CellValue) -> bool:
     """Excel truthiness for logical arguments: TRUE / nonzero number."""
@@ -1958,6 +2004,19 @@ fn _dispatch_info_function(name: text, args: [CellValue]) -> CellValue:
                 return _bool_cell(true)
             _:
                 return _bool_cell(false)
+    if name == "ISNONTEXT":
+        # Complement of ISTEXT: TRUE for numbers, booleans, errors, blanks.
+        match a:
+            CellValue.TextVal(value):
+                return _bool_cell(false)
+            _:
+                return _bool_cell(true)
+    if name == "ISLOGICAL":
+        match a:
+            CellValue.BoolVal(value):
+                return _bool_cell(true)
+            _:
+                return _bool_cell(false)
     if name == "ISNUMBER":
         match a:
             CellValue.NumberVal(value):
@@ -2059,6 +2118,13 @@ fn _canonical_name(name: text) -> text:
         "CHITEST": return "CHISQ.TEST"
         "TTEST": return "T.TEST"
         "FTEST": return "F.TEST"
+        # Byte-form text functions: this runtime's len()/slice() are already
+        # byte-based (probed: "é".len() == 2), i.e. the base forms implement
+        # exactly the B forms' byte semantics — pure aliases here.
+        "LENB": return "LEN"
+        "LEFTB": return "LEFT"
+        "RIGHTB": return "RIGHT"
+        "MIDB": return "MID"
         _: return name
 
 fn _is_ref_function(name: text) -> bool:
@@ -2066,7 +2132,7 @@ fn _is_ref_function(name: text) -> bool:
     formula text) rather than evaluated values."""
     (name == "ROWS" or name == "COLUMNS" or name == "ROW" or
      name == "COLUMN" or name == "ADDRESS" or name == "FORMULATEXT" or
-     name == "ISFORMULA")
+     name == "ISFORMULA" or name == "CELL")
 
 fn _consume_to_paren(tokens: [text], pos: i32) -> i32:
     """Advance past the reference argument list to just after its ')'. Reference
@@ -2142,6 +2208,53 @@ fn _ref_cell_info(name: text, ref_str: text, sheet: Sheet, end: i32) -> EvalResu
                 return EvalResult(value: CellValue.ErrorVal(message: "#N/A: FORMULATEXT target is not a formula"), next_pos: end)
     EvalResult(value: CellValue.ErrorVal(message: "unknown ref function {name}"), next_pos: end)
 
+fn _eval_cell_info(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """CELL(info_type, ref) for info_type "row" / "col" / "address" /
+    "contents" ONLY. Excel's other info_types ("format", "width", "type",
+    "protect", "filename", ...) are unimplemented and fail closed with #ERR.
+    The reference argument is required (Excel's last-changed-cell default has
+    no analog here); a range argument uses its top-left cell."""
+    val end = _consume_to_paren(tokens, pos)
+    val first = tokens.get(pos)
+    if not first.starts_with("\""):
+        return EvalResult(value: CellValue.ErrorVal(message: "CELL requires a quoted info_type"), next_pos: end)
+    val info = first.slice(1, first.len() - 1).lower()
+    if pos + 2 >= tokens.len() or tokens.get(pos + 1) != ",":
+        return EvalResult(value: CellValue.ErrorVal(message: "CELL requires a reference argument"), next_pos: end)
+    var ref_tok = tokens.get(pos + 2)
+    if not _is_cell_ref_token(ref_tok):
+        return EvalResult(value: CellValue.ErrorVal(message: "CELL requires a reference argument"), next_pos: end)
+    if (pos + 4 < tokens.len() and tokens.get(pos + 3) == ":" and
+        _is_cell_ref_token(tokens.get(pos + 4))):
+        # Range argument: act on its top-left cell (Excel behavior).
+        val a = parse_cell_ref(ref_tok)
+        val b = parse_cell_ref(tokens.get(pos + 4))
+        if a == nil or b == nil:
+            return EvalResult(value: CellValue.ErrorVal(message: "CELL bad reference"), next_pos: end)
+        val minr = if a.row < b.row: a.row else: b.row
+        val minc = if a.col < b.col: a.col else: b.col
+        ref_tok = cell_ref_to_string(CellRef(col: minc, row: minr))
+    val ref = parse_cell_ref(ref_tok)
+    if ref == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "CELL bad reference"), next_pos: end)
+    if info == "row":
+        return EvalResult(value: CellValue.NumberVal(value: (ref.row + 1).to_f64()), next_pos: end)
+    if info == "col":
+        return EvalResult(value: CellValue.NumberVal(value: (ref.col + 1).to_f64()), next_pos: end)
+    if info == "address":
+        return EvalResult(value: CellValue.TextVal(value: _format_address(ref.row + 1, ref.col + 1, 1, true)), next_pos: end)
+    if info == "contents":
+        val cell = sheet.get_cell(ref_tok)
+        match cell.value:
+            CellValue.FormulaVal(expr, cached_display):
+                return EvalResult(value: _evaluate_formula(expr, sheet, depth + 1), next_pos: end)
+            CellValue.Empty:
+                # Excel CELL("contents") reports 0 for an empty cell.
+                return EvalResult(value: CellValue.NumberVal(value: 0.0), next_pos: end)
+            _:
+                return EvalResult(value: cell.value, next_pos: end)
+    EvalResult(value: CellValue.ErrorVal(message: "CELL info_type {info} not supported"), next_pos: end)
+
 fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """ROWS/COLUMNS/ROW/COLUMN/ADDRESS/FORMULATEXT/ISFORMULA.
 
@@ -2153,6 +2266,8 @@ fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
     cell context leaves the key empty and the bare forms fail closed with #ERR."""
     if name == "ADDRESS":
         return _eval_address(tokens, pos, sheet, depth)
+    if name == "CELL":
+        return _eval_cell_info(tokens, pos, sheet, depth)
     val end = _consume_to_paren(tokens, pos)
     if (name == "ROW" or name == "COLUMN") and tokens.get(pos) == ")":
         if _formula_origin_key.len() == 0:
