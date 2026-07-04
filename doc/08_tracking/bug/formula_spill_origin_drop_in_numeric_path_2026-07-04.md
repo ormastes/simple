@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-04
 **Severity:** medium (wrong SUM/AVERAGE results over dynamic-array spill ranges)
-**Status:** open — root cause located, reviewer-confirmed repro
+**Status:** fixed — see formula_spill_origin_spec.spl
 
 ## Symptom
 
