@@ -47,7 +47,7 @@ the firmware":
 | Phase | Module | Live caller | Status |
 |-------|--------|-------------|--------|
 | P1 | `fil_fmc` | `fil.spl` (every program/read/erase routes through the FMC handshake) | **wired** |
-| P3 | `fil_ecc` + NAND OOB ECC latch | `fil.spl` reads stored ECC through `fil_fmc`, corrects one silent payload bit, and fails double-bit/OOB corruption closed | **wired SECDED floor** — not full BCH/LDPC |
+| P3 | `fil_ecc` + NAND OOB ECC latch | `fil.spl` reads stored ECC through `fil_fmc`, corrects one silent payload-window bit, and fails double-bit/OOB corruption closed | **wired SECDED payload-window floor** — not full BCH/LDPC |
 | P4 | `hil_command.prp_byte` | HIL + multi-queue NVMe writes program each LBA from a segmented PRP host byte stream | **wired segmented-PRP floor** — no full HostMem/SGL/IOMMU yet |
 | P5 | `ftl_map` + `dram` | `Ftl` uses bounded LRU write-back cache; HIL/controller writes allocate a bounded DRAM arena span before programming media | **wired DRAM floor** — no full DRAM subsystem yet |
 | P6 | `firmware.service_tick` | Foreground HIL ticks and background GC ticks share an explicit FTL-map owner token | **wired cooperative floor** — no multicore/preemption |
@@ -149,9 +149,10 @@ not nanoseconds.
 
 > Landed floor: NAND now stores a compact SECDED ECC word in OOB/spare-area state at program time,
 > the ONFI device and FMC latch that stored value on read, and `fil.read` decodes against it.
-> A silent one-bit payload error is corrected before returning data; double-bit payload corruption
-> and stored-ECC/OOB metadata corruption fail closed. Covered by `ecc_check.spl` in the system
-> spec. Full BCH/LDPC encode/decode remains open below.
+> A silent one-bit payload-window error is corrected before returning data, extending coverage beyond
+> byte 0 through bit 16; double-bit payload corruption and stored-ECC/OOB metadata corruption fail
+> closed. Covered by `ecc_check.spl` in the system spec. Full BCH/LDPC encode/decode remains open
+> below.
 
 **Goal.** Replace checksum+injected-flip with a real **BCH** codec: correct up to *t* bit
 errors per codeword, detect beyond *t*.
