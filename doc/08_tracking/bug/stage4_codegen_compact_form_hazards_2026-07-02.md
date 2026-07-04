@@ -1647,3 +1647,70 @@ already a heap RuntimeValue on dict/array store, and align single- vs multi-arg
 enum-payload boxing. Verify with `p2_add` (expect 5), `p1_valscalar` (5), AND
 #109's `scratchpad/payload_check.spl` (expect 42) on a stage4 rebuild.
 Repros: scratchpad `p1_valscalar.spl`, `p2_add.spl`; seed `target/bootstrap_task107`.
+
+## Task #117 (2026-07-04) — both #107/#109 mechanisms FIXED in seed codegen (landed a5893c615fc); gate NOT closed — residual localized to a THIRD, pre-existing corruption in `interpreter_calls.call_function`
+
+### Fixes landed (seed Rust, all three sites; swept into `a5893c615fc` by a
+parallel hourly sync together with #113's `rt_enum_discriminant`
+interpreter_extern registration — content verified at HEAD by git grep)
+1. **Dict element-type derivation, GET** (`mir/lower/lowering_expr_struct.rs`
+   `element_expr_ty`): added `HirType::Dict { value } => Some(*value)` parallel
+   to the Array arm, so scalar V unboxes and heap V passes verbatim.
+2. **Dict element-type derivation, SET** (`mir/lower/lowering_stmt.rs` index
+   assign): derive `recv_elem_ty` from `HirType::Array/Dict`; when the element
+   type is a heap type, suppress `BoxInt`/`BoxFloat`/`rt_value_bool` on the
+   value operand (was wrapping heap RuntimeValues as boxed-int → tag destroyed).
+3. **Enum single-payload boxing asymmetry** (`codegen/instr/calls.rs` 2287 and
+   Ok/Err ~2748): single-payload construction now goes through
+   `runtime_payload_value` (tags scalars) exactly like the multi-arg path.
+
+### A/B verification (stage4 from SAME HEAD: `stage4_t107base` = pre-fix #107
+seed vs `stage4_t117` = #117 seed; both 993/0)
+| gate | t107base (pre-fix) | t117 (post-fix) |
+|---|---|---|
+| p1_valscalar (want 5) | SIGSEGV core dump | rc=0, prints BLANK line |
+| p2_add (want 5) | invalid operands for + | invalid operands for + |
+| payload_check (want 42) | SIGILL nil-receiver | SIGILL nil-receiver |
+| r70_read (want 1/hi) | SIGILL nil-receiver | SIGILL nil-receiver |
+| m4 struct P(x:7) (want x=7) | SIGILL nil-receiver | SIGILL nil-receiver |
+| -c "print(1+1)" | 2 | 2 |
+| hello / twofn / lint main.spl | pass | pass |
+| cfg_min2 | silent (pre-existing) | silent (pre-existing) |
+
+**No regressions**; p1 advanced SIGSEGV→no-crash. But the #107 repros are NOT
+closed: the two fixed mechanisms were necessary but not sufficient.
+
+### Residual root (gdb, stage4_t117, `run m4.spl` — the SIMPLEST failing case:
+plain `struct P{x:i64}; P(x:7); print("x={p.x}")`, no Dict/enum in user code)
+```
+#0 backend__backend__interpreter_calls__InterpreterBackendImpl_dot_call_function  <- ud2 (+2157, nil-receiver guard)
+#1 eval_expr  #2 exec_stmt  #3 eval_block  #4 call_hir_function  #5 process_module
+```
+The stage4-compiled interpreter faults inside `call_function`
+(`src/compiler/70.backend/backend/interpreter_calls.spl`) while dispatching the
+struct-constructor call — a field access on a nil receiver, i.e. some
+Dict/struct lookup inside call_function still round-trips to nil in seed
+cranelift output. Pre-existing (identical on t107base); NOT introduced by the
+#117 fixes and NOT one of the two #107-cited sites. Next task: instrument
+`call_function`'s lookup chain (fn-name → HirFunction / struct-def dict) the
+way iteration 13 probed process_module, or gdb `x/gx` the receiver at the
+faulting FieldGet to identify which lookup returns nil.
+
+### Also discovered (interpreter-side #109 analog — SEPARATE bug)
+The SEED's own Rust interpreter (`$SEED run payload_check.spl`) and the
+deployed rolled-back stage4 BOTH print `payload=5` + `5` for `Ok(42)` — the
+`42>>3` double-untag exists in the seed INTERPRETER path too, not only in
+cranelift codegen. `payload_check` therefore cannot gate at 42 under `run`
+(interpret mode) until the interpreter-side convention is also aligned.
+
+### Standalone-harness note
+Small `native-build --source repro.spl` builds at repo root JIT/interpret the
+`.spl` native_build_worker whose closure spans src/app+src/compiler; before
+`a5893c615fc` they died on `semantic: unknown extern function:
+rt_enum_discriminant` (#113, fixed); they now fail in the worker itself
+(`semantic: undefined field 'id' on nil` / `cannot convert object to int`)
+while the FULL stage4 build (explicit --source src/{compiler,app,lib}) builds
+993/0 — use full stage4 builds, not standalone repro builds, to gate this work.
+Binaries: scratchpad `stage4_t117`, `stage4_t107base`; seed
+`src/compiler_rust/target/bootstrap_task117/bootstrap/simple` (built at HEAD
+0fae3e69bb0-era with all three fixes + #113).
