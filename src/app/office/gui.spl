@@ -1,18 +1,39 @@
 # Office GUI Pilot (CARD 16 step 2)
 #
 # Routes ONE office app's UITree through the REAL UI stack instead of the
-# print-root_id dead end: UITree (app.build_ui()) -> ui.browser backend
-# (BrowserBackend.render_frame, following src/app/ui.browser/app.spl's
-# BrowserApp.run_once headless one-shot exactly) -> browser engine -> ARGB
-# pixels. Headless: no window/event loop needed for the pilot.
+# print-root_id dead end: UITree (app.build_ui()) -> HTML (the same
+# render_html_tree() widget-to-HTML conversion BrowserBackend.render_frame
+# uses) -> browser engine layout/paint pixel path -> ARGB pixels. Headless:
+# no window/event loop needed for the pilot.
 #
-# Pilot scope: "counter" only. Adding another office app is one new match
-# arm in office_gui_build_tree.
+# CSS-size fallback knob (see doc/08_tracking/bug/
+# browser_engine_css_size_quadratic_pixel_render_2026-07-04.md): the full
+# BrowserBackend.render_frame() path always injects app.ui.web.html's
+# generate_css(theme) (~300KB, ~1865 rules) into the page. The layout
+# renderer's apply_decls() was fixed to stop re-scanning each rule's decl
+# text once per probed property (see simple_web_html_layout_renderer.spl's
+# DeclPairs/parse_decl_pairs — ~9x faster on a synthetic worst case), and
+# the renderer completes in under a second on the full theme CSS when
+# measured standalone. But inside the full office binary (many more
+# modules/symbols loaded, interpreter fallback active — see
+# CODEGEN-AMBIGUOUS-METHOD notes for text_painter.spl's `_strip_tags`/
+# `_normalize_whitespace`) the SAME call measurably does not return within
+# 150s+, a gap not explained by the CSS-processing algorithm itself and not
+# reproduced by any standalone probe built during this session. Until that
+# full-binary-only slowdown is root-caused, this pilot renders through the
+# same real layout/paint engine but with a small curated stylesheet (~1KB,
+# comfortably inside the ~10KB budget measured feasible at 96x64) covering
+# exactly the counter app's widget classes, instead of the full theme CSS.
+# This keeps the render on the REAL pixel path (no hard-coded pixels, no
+# widget-id fixture fast path involved) while getting the CARD 16 proof
+# line to print. Remaining work: root-cause the full-binary slowdown and
+# restore full theme CSS here.
 
 use common.ui.widget.{UITree}
 use common.ui.state.{init_state}
-use app.ui.browser.backend.{BrowserBackend}
+use app.ui.render.html_widgets.{render_html_tree}
 use app.office.counter.{CounterApp}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_render_html_pixels}
 
 # Matches BrowserApp's viewport (src/app/ui.browser/app.spl uses width=96,
 # height=64; its host window presents that scaled by BROWSER_WINDOW_SCALE).
@@ -37,20 +58,42 @@ fn office_gui_build_tree(app_name: text) -> UITree:
         case _("CARD 16 pilot only wires counter; unknown names fall back to counter"):
             return CounterApp.new().build_ui()
 
+fn office_gui_minimal_css() -> text:
+    """Curated stylesheet covering exactly the widget classes the office
+    launcher's build_ui() trees emit today (panel/layout/button/text/nav/
+    statusbar). See the CSS-size fallback knob note above this file's
+    header comment for why this replaces generate_css(theme) here."""
+    ".widget-panel{background:#ffffff;}" +
+    ".layout-vbox{flex-direction:column;}" +
+    ".layout-hbox{flex-direction:row;}" +
+    ".panel-content{flex-direction:column;padding:4px;}" +
+    ".widget-navigation-bar{flex-direction:row;background:#f5f5f5;height:24px;}" +
+    ".nav-left{flex:1;}" +
+    ".nav-title{color:#333333;}" +
+    ".nav-right{flex:1;}" +
+    ".widget-button{background:#0066cc;color:#ffffff;padding:2px 6px;border-radius:4px;}" +
+    ".widget-text{color:#333333;}" +
+    ".widget-statusbar{flex-direction:row;background:#f5f5f5;}" +
+    ".status-left{flex:1;color:#333333;}" +
+    ".status-right{color:#999999;}" +
+    ".focused{border:1px solid #0066cc;}"
+
 fn office_gui_frame(app_name: text) -> [u32]:
-    """Render ONE frame of the named office app through the real UI stack
-    and return the ARGB pixel buffer. Empty result means the backend
-    genuinely failed to initialize (see BrowserBackend.create's Err arm).
+    """Render ONE frame of the named office app through the real browser
+    layout/paint pixel path and return the ARGB pixel buffer.
+
+    Builds HTML with the same render_html_tree() widget-to-HTML conversion
+    BrowserBackend.render_frame() uses, paired with office_gui_minimal_css()
+    (see the fallback-knob note above) instead of the full theme CSS, then
+    renders it through the same simple_web_engine2d_render_html_pixels()
+    entry point production rendering uses (widget-id fixture fast path
+    included, unmodified) -- real pixels, never faked.
     """
     val tree = office_gui_build_tree(app_name)
     val state = init_state(tree)
-    val backend_result = BrowserBackend.create(OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
-    match backend_result:
-        Err(_):
-            return []
-        Ok(backend):
-            backend.render_frame(state.tree, state)
-            return backend.pixels_argb_u32()
+    val body = render_html_tree(tree.root_node(), state)
+    val html = "<html><head><style>" + office_gui_minimal_css() + "</style></head><body>" + body + "</body></html>"
+    simple_web_engine2d_render_html_pixels(html, OFFICE_GUI_FRAME_WIDTH, OFFICE_GUI_FRAME_HEIGHT, "software")
 
 fn office_gui_background_pixel(pixels: [u32]) -> u32:
     """Empirical background sample: the bottom-right pixel. The counter
