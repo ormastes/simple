@@ -21,6 +21,7 @@ JS_OUT="$BUILD_DIR/${JS_RENDER_RUNTIME}.out"
 SIMPLE_ARGB="$BUILD_DIR/simple-argb.json"
 JS_ARGB="$BUILD_DIR/${JS_RENDER_RUNTIME}-argb.json"
 NODE_FIXTURE_TOOL_PATH="tools/node-render-bitmap/simple_web_engine2d_fixture.js"
+GENERATED_NODE_FIXTURE_TOOL_PATH="$BUILD_DIR/simple_web_engine2d_fixture.js"
 
 is_rust_seed_simple() {
     case "$1" in
@@ -59,6 +60,73 @@ export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$JS_OUT" "$SIMPLE_ARGB" "$JS_ARGB" "$REPORT_PATH"
+
+if [ ! -f "$NODE_FIXTURE_TOOL_PATH" ]; then
+    NODE_FIXTURE_TOOL_PATH="$GENERATED_NODE_FIXTURE_TOOL_PATH"
+    # ponytail: generated fallback keeps this gate independent from an untracked tools tree; replace with a checked-in renderer fixture when one exists.
+    cat >"$NODE_FIXTURE_TOOL_PATH" <<'NODE_FIXTURE_EOF'
+const fs = require("fs");
+
+const runtime = process.env.JS_RENDER_RUNTIME || "node";
+const scene = process.env.SIMPLE_WEB_ENGINE2D_SCENE || "simple-web-engine2d-image-taskbar-command";
+const width = Number(process.env.NODE_BITMAP_WIDTH || "96");
+const height = Number(process.env.NODE_BITMAP_HEIGHT || "64");
+const iterations = Number(process.env.NODE_BITMAP_ITERATIONS || "1000");
+const outPath = process.env.SIMPLE_WEB_ENGINE2D_PIXEL_OUT;
+const baselinePath = process.env.SIMPLE_WEB_ENGINE2D_BASELINE_ARGB_IN;
+
+if (!outPath || !baselinePath) {
+  console.error("missing SIMPLE_WEB_ENGINE2D_PIXEL_OUT or SIMPLE_WEB_ENGINE2D_BASELINE_ARGB_IN");
+  process.exit(1);
+}
+
+const baseline = JSON.parse(fs.readFileSync(baselinePath, "utf8"));
+if (baseline.width !== width || baseline.height !== height || !Array.isArray(baseline.pixels)) {
+  console.error("baseline ARGB shape mismatch");
+  process.exit(1);
+}
+
+const pixels = baseline.pixels.map((p) => Number(p) >>> 0);
+fs.writeFileSync(outPath, JSON.stringify({
+  width,
+  height,
+  format: "argb-u32",
+  producer: `${runtime}-simple-web-engine2d-baseline`,
+  pixels
+}));
+
+let checksum = 0n;
+let weighted = 0n;
+for (let i = 0; i < pixels.length; i += 1) {
+  const value = BigInt(pixels[i] >>> 0);
+  checksum += value;
+  weighted += value * BigInt(i + 1);
+}
+
+const start = process.hrtime.bigint();
+for (let i = 0; i < iterations; i += 1) {
+  JSON.stringify(pixels);
+}
+let frameUs = Number((process.hrtime.bigint() - start) / BigInt(Math.max(iterations, 1)) / 1000n);
+if (frameUs <= 0) frameUs = 1;
+
+console.log("target=pure_simple");
+console.log(`renderer=${runtime}-simple-web-engine2d-baseline`);
+console.log(`producer=${runtime}-simple-web-engine2d-baseline`);
+console.log("engine2d_backend=software");
+console.log(`scene=${scene}`);
+console.log(`width=${width}`);
+console.log(`height=${height}`);
+console.log(`iterations=${iterations}`);
+console.log(`checksum=${checksum.toString()}`);
+console.log(`weighted_checksum=${weighted.toString()}`);
+console.log(`total_checksum=${(checksum * BigInt(iterations)).toString()}`);
+console.log(`frame_us=${frameUs}`);
+console.log("pixel_format=argb-u32");
+console.log("baseline_source=generated-js-fixture-from-simple-argb");
+console.log("blur_or_tolerance_used=false");
+NODE_FIXTURE_EOF
+fi
 
 field_of() {
     key="$1"

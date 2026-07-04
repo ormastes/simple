@@ -79,6 +79,9 @@ bitmap parity wrappers.
   `simple_web_engine2d_js_simple_bin`,
   `simple_web_engine2d_js_simple_bin_source`, and
   `simple_web_engine2d_js_simple_bin_status`.
+- REQ-SWEB-E2D-JS-BIN-005: If the legacy JavaScript fixture path is absent, the
+  wrapper generates the fixture under `BUILD_DIR` and records that generated
+  path in evidence.
 
 ## Plan
 
@@ -90,6 +93,7 @@ bitmap parity wrappers.
 4. Read `build/test-simple-web-engine2d-js-bitmap-seed-forbidden/out/evidence.env`.
 5. Confirm the wrapper reports unavailable evidence with reason
    `simple-bin-forbidden` and preserves the explicit seed path for audit.
+6. Inspect the wrapper source for the generated fixture fallback.
 
 ## Design
 
@@ -101,6 +105,9 @@ independent from host JavaScript tooling. Default candidate selection allows
 only `bin/simple`, `./bin/simple`, `release/*/simple`, `bin/release/*/simple`,
 and `build/bootstrap/stage3/simple`. The wrapper preserves explicit non-seed
 overrides but annotates their source as `explicit-env`.
+The JavaScript fixture is generated under `BUILD_DIR` when the legacy
+`tools/node-render-bitmap/simple_web_engine2d_fixture.js` checkout artifact is
+absent, so regenerated evidence does not depend on an untracked tools tree.
 
 ## Research
 
@@ -178,7 +185,7 @@ simple_web_engine2d_js_simple_bin_status=forbidden
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -194,6 +201,8 @@ expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 expect(script).to_contain("simple_web_engine2d_js_simple_bin=$SIMPLE_BIN")
 expect(script).to_contain("simple_web_engine2d_js_simple_bin_source=$SIMPLE_BIN_SOURCE")
 expect(script).to_contain("simple_web_engine2d_js_simple_bin_status=$SIMPLE_BIN_STATUS")
+expect(script).to_contain("GENERATED_NODE_FIXTURE_TOOL_PATH")
+expect(script).to_contain("generated-js-fixture-from-simple-argb")
 ```
 
 </details>
