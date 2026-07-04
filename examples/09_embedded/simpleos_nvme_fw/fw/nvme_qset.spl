@@ -97,6 +97,26 @@ fn qid_in_range(qid: i64) -> bool:
     qid >= 1 and qid <= MAX_IO_QUEUES
 
 impl QueueSet:
+    me cq_effective_size(qid: i64) -> i64:
+        if not qid_in_range(qid):
+            return 0
+        var size: i64 = me.cq_size[qid]
+        if size < 0:
+            return 0
+        if size > MAX_QUEUE_SIZE:
+            size = MAX_QUEUE_SIZE
+        size
+
+    me sq_effective_size(qid: i64) -> i64:
+        if not qid_in_range(qid):
+            return 0
+        var size: i64 = me.sq_size[qid]
+        if size < 0:
+            return 0
+        if size > MAX_QUEUE_SIZE:
+            size = MAX_QUEUE_SIZE
+        size
+
     me cq_is_active(qid: i64) -> bool:
         if not qid_in_range(qid):
             return false
@@ -191,11 +211,14 @@ impl QueueSet:
             return false
         if not cid_valid(c.cid):
             return false
-        if me.sq_len[qid] < 0 or me.sq_len[qid] >= me.sq_size[qid]:
+        val size: i64 = me.sq_effective_size(qid)
+        if size <= 0:
+            return false
+        if me.sq_len[qid] < 0 or me.sq_len[qid] >= size:
             return false
         val base: i64 = qid * MAX_QUEUE_SIZE
         val tail: i64 = me.sq_tail[qid]
-        if tail < 0 or tail >= me.sq_size[qid]:
+        if tail < 0 or tail >= size:
             return false
         val slot: i64 = base + tail
         me.sq_cid[slot]  = c.cid
@@ -203,25 +226,29 @@ impl QueueSet:
         me.sq_lba[slot]  = c.lba
         me.sq_nblk[slot] = c.nblocks
         me.sq_data[slot] = c.data
-        me.sq_tail[qid] = (me.sq_tail[qid] + 1) % me.sq_size[qid]
+        me.sq_tail[qid] = (me.sq_tail[qid] + 1) % size
         me.sq_len[qid] = me.sq_len[qid] + 1
         true
 
     me sq_pending(qid: i64) -> i64:
         if not me.sq_is_active(qid):
             return 0
+        val size: i64 = me.sq_effective_size(qid)
         if me.sq_len[qid] < 0:
             return 0
-        if me.sq_len[qid] > me.sq_size[qid]:
-            return me.sq_size[qid]
+        if me.sq_len[qid] > size:
+            return size
         me.sq_len[qid]
 
     me sq_fetch(qid: i64) -> NvmeCmd:
         if not me.sq_is_active(qid) or me.sq_len[qid] <= 0:
             return cmd_make(0, OP_FLUSH, 0, 0, 0)
+        val size: i64 = me.sq_effective_size(qid)
+        if size <= 0:
+            return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val base: i64 = qid * MAX_QUEUE_SIZE
         val head: i64 = me.sq_head[qid]
-        if head < 0 or head >= me.sq_size[qid]:
+        if head < 0 or head >= size:
             return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val slot: i64 = base + head
         val cid:  i64 = me.sq_cid[slot]
@@ -229,7 +256,7 @@ impl QueueSet:
         val lba:  i64 = me.sq_lba[slot]
         val nblk: i64 = me.sq_nblk[slot]
         val data: i64 = me.sq_data[slot]
-        me.sq_head[qid] = (me.sq_head[qid] + 1) % me.sq_size[qid]
+        me.sq_head[qid] = (me.sq_head[qid] + 1) % size
         me.sq_len[qid] = me.sq_len[qid] - 1
         cmd_make(cid, op, lba, nblk, data)
 
@@ -239,46 +266,56 @@ impl QueueSet:
             return false
         if not cid_valid(p.cid):
             return false
-        if me.cq_len[cqid] < 0 or me.cq_len[cqid] >= me.cq_size[cqid]:
+        val size: i64 = me.cq_effective_size(cqid)
+        if size <= 0:
+            return false
+        if me.cq_len[cqid] < 0 or me.cq_len[cqid] >= size:
             return false
         val base: i64 = cqid * MAX_QUEUE_SIZE
         val tail: i64 = me.cq_tail[cqid]
-        if tail < 0 or tail >= me.cq_size[cqid]:
+        if tail < 0 or tail >= size:
             return false
         val slot: i64 = base + tail
         me.cq_cid[slot]    = p.cid
         me.cq_status[slot] = p.status
         me.cq_data[slot]   = p.data
-        me.cq_tail[cqid] = (me.cq_tail[cqid] + 1) % me.cq_size[cqid]
+        me.cq_tail[cqid] = (me.cq_tail[cqid] + 1) % size
         me.cq_len[cqid] = me.cq_len[cqid] + 1
         true
 
     me cq_pending(cqid: i64) -> i64:
         if not me.cq_is_active(cqid):
             return 0
+        val size: i64 = me.cq_effective_size(cqid)
         if me.cq_len[cqid] < 0:
             return 0
-        if me.cq_len[cqid] > me.cq_size[cqid]:
-            return me.cq_size[cqid]
+        if me.cq_len[cqid] > size:
+            return size
         me.cq_len[cqid]
 
     me cq_is_full(cqid: i64) -> bool:
         if not me.cq_is_active(cqid):
             return true
-        me.cq_len[cqid] >= me.cq_size[cqid]
+        val size: i64 = me.cq_effective_size(cqid)
+        if size <= 0:
+            return true
+        me.cq_len[cqid] >= size
 
     me cq_reap(cqid: i64) -> NvmeCpl:
         if not me.cq_is_active(cqid) or me.cq_len[cqid] <= 0:
             return cpl_make(0, SC_INVALID_FIELD, 0)
+        val size: i64 = me.cq_effective_size(cqid)
+        if size <= 0:
+            return cpl_make(0, SC_INVALID_FIELD, 0)
         val base: i64 = cqid * MAX_QUEUE_SIZE
         val head: i64 = me.cq_head[cqid]
-        if head < 0 or head >= me.cq_size[cqid]:
+        if head < 0 or head >= size:
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val slot: i64 = base + head
         val cid:    i64 = me.cq_cid[slot]
         val status: i64 = me.cq_status[slot]
         val data:   i64 = me.cq_data[slot]
-        me.cq_head[cqid] = (me.cq_head[cqid] + 1) % me.cq_size[cqid]
+        me.cq_head[cqid] = (me.cq_head[cqid] + 1) % size
         me.cq_len[cqid] = me.cq_len[cqid] - 1
         cpl_make(cid, status, data)
 
@@ -286,6 +323,8 @@ impl QueueSet:
     me next_pending_sq() -> i64:
         var seen: i64 = 0
         var q: i64 = me.rr
+        if not qid_in_range(q):
+            q = 1
         var found: i64 = -1
         while seen < MAX_IO_QUEUES:
             if me.sq_active[q] == 1 and me.sq_len[q] > 0:
@@ -357,6 +396,15 @@ fn nvme_qset_selftest() -> i64:
     fail = fail + expect_eq(qs.sq_pending(1), MAX_QUEUE_SIZE, "oversized SQ length pending clamps to queue size")
     fail = fail + expect_eq(bool_to_i64(qs.sq_submit(1, cmd_make(80, OP_WRITE, 14, 1, 0xC4))), 0, "oversized SQ length submit fails closed")
     qs.sq_len[1] = 0
+    qs.sq_size[1] = MAX_QUEUE_SIZE + 7
+    fail = fail + expect_eq(qs.sq_effective_size(1), MAX_QUEUE_SIZE, "corrupted oversized SQ size clamps to max")
+    fail = fail + expect_eq(qs.sq_pending(1), 0, "corrupted oversized SQ size keeps pending safe")
+    qs.sq_size[1] = -1
+    fail = fail + expect_eq(qs.sq_effective_size(1), 0, "corrupted negative SQ size clamps to zero")
+    fail = fail + expect_eq(bool_to_i64(qs.sq_submit(1, cmd_make(81, OP_WRITE, 14, 1, 0xC4))), 0, "corrupted negative SQ size blocks submit")
+    val bad_sq_size_fetch: NvmeCmd = qs.sq_fetch(1)
+    fail = fail + expect_eq(bad_sq_size_fetch.nblocks, 0, "corrupted negative SQ size fetch fails closed")
+    qs.sq_size[1] = MAX_QUEUE_SIZE
 
     # submit to an inactive SQ is refused
     fail = fail + expect_eq(bool_to_i64(qs.sq_submit(3, cmd_make(1, OP_READ, 0, 1, 0))), 0, "submit to inactive SQ 3 refused")
@@ -394,6 +442,15 @@ fn nvme_qset_selftest() -> i64:
     fail = fail + expect_eq(qs.cq_pending(1), MAX_QUEUE_SIZE, "oversized CQ length pending clamps to queue size")
     fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(80, SC_SUCCESS, 0xC4))), 0, "oversized CQ length post fails closed")
     qs.cq_len[1] = 0
+    qs.cq_size[1] = MAX_QUEUE_SIZE + 9
+    fail = fail + expect_eq(qs.cq_effective_size(1), MAX_QUEUE_SIZE, "corrupted oversized CQ size clamps to max")
+    fail = fail + expect_eq(qs.cq_pending(1), 0, "corrupted oversized CQ size keeps pending safe")
+    qs.cq_size[1] = -1
+    fail = fail + expect_eq(qs.cq_effective_size(1), 0, "corrupted negative CQ size clamps to zero")
+    fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(81, SC_SUCCESS, 0xC4))), 0, "corrupted negative CQ size blocks post")
+    val bad_cq_size_reap: NvmeCpl = qs.cq_reap(1)
+    fail = fail + expect_eq(bad_cq_size_reap.status, SC_INVALID_FIELD, "corrupted negative CQ size reap fails closed")
+    qs.cq_size[1] = MAX_QUEUE_SIZE
     fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(70000, SC_SUCCESS, 0))), 0, "post rejects oversized completion id")
     fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(-1, SC_SUCCESS, 0))), 0, "post rejects negative completion id")
 
@@ -435,6 +492,7 @@ fn nvme_qset_selftest() -> i64:
     qs.sq_submit(2, cmd_make(1, OP_READ, 0, 1, 0))
     qs.sq_submit(3, cmd_make(2, OP_READ, 0, 1, 0))
     fail = fail + expect_eq(qs.active_io_queue_count(), 2, "two active IO queues")
+    qs.rr = MAX_IO_QUEUES + 4
     val r1: i64 = qs.next_pending_sq()
     val r2: i64 = qs.next_pending_sq()
     var both: i64 = 0
