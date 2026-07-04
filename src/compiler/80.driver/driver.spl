@@ -337,6 +337,17 @@ pub class CompilerDriver:
             while entry_idx < sources.len():
                 val source = sources[entry_idx]
                 if native_entry_closure or _driver_is_bootstrap_entry_source(source.path, source.module_name):
+                    # Guard (bug #110): when a specific --entry was requested (and we are
+                    # not doing a closure walk, which legitimately pulls in many reachable
+                    # files), refuse to silently accept a resolved source that isn't the
+                    # one the caller asked for — e.g. a stale hardcoded default like
+                    # bootstrap_main.spl sneaking back in as "an" entry alongside the real
+                    # one. Hard-error naming both paths instead of building the wrong thing.
+                    if native_entry != "" and not native_entry_closure:
+                        val requested_match = source.path == native_entry or source.path.ends_with("/" + native_entry)
+                        if not requested_match:
+                            self.ctx.errors.push("native-build entry mismatch: requested entry '{native_entry}' but resolver also selected '{source.path}' (module {source.module_name}) — refusing silent substitution")
+                            return false
                     if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
                         dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
                     val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
@@ -423,6 +434,13 @@ pub class CompilerDriver:
 
         log_debug("lowering modules to HIR")
         dtrace("[DRV] lac-entry sources.len={self.ctx.sources.len()} modules.len={self.ctx.modules.len()}")
+        # Shared trait registry (task #55): each module gets a FRESH HirLowering
+        # instance, but lowered_traits must survive across modules so an impl
+        # module lowered AFTER its trait's defining module can still see the
+        # trait's default methods (lower_impl in trait_impl_lowering.spl reads
+        # self.lowered_traits). Seed each new lowering from the accumulated
+        # registry and fold its result back in after lowering completes.
+        var shared_lowered_traits: Dict<text, HirTrait> = {}
         if self.ctx.sources.len() <= 0:
             dtrace("[DRV] lac-branch=modules-loop (sources<=0)")
             for module in self.ctx.modules:
@@ -432,7 +450,9 @@ pub class CompilerDriver:
                     log_error("module is nil")
                     continue
                 var lowering: HirLowering = hirlowering_for_module("", self.ctx.modules)
+                lowering.lowered_traits = shared_lowered_traits
                 val hir_module = lowering.lower_module(module)
+                shared_lowered_traits = lowering.lowered_traits
                 val (resolved_module, resolve_errors) = resolve_methods(hir_module)
                 var err_idx = 0
                 while err_idx < resolve_errors.len():
@@ -464,6 +484,7 @@ pub class CompilerDriver:
             var lowering: HirLowering = hirlowering_for_module(src_path ?? "", self.ctx.modules)
             if src_path != nil:
                 lowering.module_filename = src_path
+            lowering.lowered_traits = shared_lowered_traits
 
             # Step 1: Lower to HIR
             # Real single-file HIR lowering is the default; SIMPLE_STUB_HIR=1 is the
@@ -518,6 +539,11 @@ pub class CompilerDriver:
                     types: []
                 )
             log_trace("HIR lowered")
+
+            # Fold this module's newly-lowered traits back into the shared
+            # registry so later modules (which get their own fresh HirLowering
+            # instance) can still resolve cross-module trait default methods.
+            shared_lowered_traits = lowering.lowered_traits
 
             # Store final module directly (avoids copy-modify-reassign bug in compiled mode)
             self.ctx.hir_modules[name] = hir_module
