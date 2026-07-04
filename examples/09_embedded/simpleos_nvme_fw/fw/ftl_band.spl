@@ -46,6 +46,23 @@ fn ftl_band_new() -> BandAlloc:
 # ── Methods ───────────────────────────────────────────────────────────────────
 
 impl BandAlloc:
+    me actual_free_blocks() -> i64:
+        var fc: i64 = 0
+        var b: i64 = 0
+        while b < NUM_BLOCKS:
+            if me.blk_state[b] == BLK_FREE:
+                fc = fc + 1
+            b = b + 1
+        fc
+
+    me counted_free_blocks() -> i64:
+        val fc: i64 = me.actual_free_blocks()
+        if me.free_count < 0:
+            return 0
+        if me.free_count < fc:
+            return me.free_count
+        fc
+
     # Allocate the next physical page.
     # Opens a fresh block when there is no active block or the current one is full.
     # Returns NO_PPN if no free block is available.
@@ -85,7 +102,7 @@ impl BandAlloc:
         val blk_full:  bool = me.active_wp == PAGES_PER_BLOCK
         val need_new:  bool = (no_active or blk_full)
         if need_new:
-            if me.free_count <= reserve:
+            if me.counted_free_blocks() <= reserve:
                 return NO_PPN
         me.alloc_page()
 
@@ -93,8 +110,9 @@ impl BandAlloc:
         var pages: i64 = 0
         if me.active_blk != UNMAP and me.active_wp < PAGES_PER_BLOCK:
             pages = PAGES_PER_BLOCK - me.active_wp
-        if me.free_count > reserve:
-            pages = pages + (me.free_count - reserve) * PAGES_PER_BLOCK
+        val free: i64 = me.counted_free_blocks()
+        if free > reserve:
+            pages = pages + (free - reserve) * PAGES_PER_BLOCK
         pages
 
     # Mark a physical page as holding the current version of its LBA.
@@ -157,7 +175,7 @@ impl BandAlloc:
 
     # Number of blocks currently in BLK_FREE state.
     me free_blocks() -> i64:
-        me.free_count
+        me.counted_free_blocks()
 
     # ── Power-loss volatile-state rebuild ─────────────────────────────────────
     # The valid bitmap, per-block valid counts, lifecycle states, and the allocator
@@ -215,13 +233,7 @@ impl BandAlloc:
     # live page and not retired is free; its stale NAND contents are erased before
     # reuse, and the allocator opens a fresh free block on the next write.
     me rebuild_finalize():
-        var fc: i64 = 0
-        var b: i64 = 0
-        while b < NUM_BLOCKS:
-            if me.blk_state[b] == BLK_FREE:
-                fc = fc + 1
-            b = b + 1
-        me.free_count = fc
+        me.free_count = me.actual_free_blocks()
 
 # ── Self-test ─────────────────────────────────────────────────────────────────
 
@@ -287,8 +299,14 @@ fn ftl_band_selftest() -> i64:
     fail = fail + expect_eq(ba.free_blocks(), free_before_bad_free, "invalid rebuild_mark is inert")
 
     ba.active_wp = PAGES_PER_BLOCK - 1
-    ba.free_count = GC_RESERVE
-    fail = fail + expect_eq(ba.host_writable_pages(GC_RESERVE), 1, "host writable pages includes current open block only")
+    val reserve_all_free: i64 = ba.free_blocks()
+    fail = fail + expect_eq(ba.host_writable_pages(reserve_all_free), 1, "host writable pages includes current open block only")
+    ba.free_count = NUM_BLOCKS + 99
+    fail = fail + expect_eq(ba.free_blocks(), free_before_bad_free, "corrupted free_count readout rebuilds from block states")
+    fail = fail + expect_eq(ba.host_writable_pages(NUM_BLOCKS), 1, "corrupted free_count does not overstate host capacity")
+    ba.free_count = -7
+    fail = fail + expect_eq(ba.free_blocks(), 0, "corrupted negative free_count clamps to zero")
+    ba.free_count = free_before_bad_free
 
     # 8. free_block raises free_count and resets block state.
     var fc_before: i64 = ba.free_blocks()
