@@ -1479,3 +1479,99 @@ programs use variables and structs, which do not yet execute.
  Repros: scratchpad `p1_valscalar.spl`, `n1_declonly.spl`, `n2_assign.spl`,
  `n3_read.spl`, `c70_dictscalar.spl`, `r70_read.spl`, `r70_mutfield.spl`.
  Binary: scratchpad/stage4_t70.
+
+## Iteration 22 (2026-07-04, task #105) — @cfg spaced key=value tokenizer bug FIXED; full-scale "lowered funcs=3" gate NOT closed, entangled with #104
+
+Task #105 scope: filter @cfg-inactive fn decls before HIR lowering (pure
+Simple, `src/compiler/10.frontend` / `20.hir` only).
+
+### Real bug found + fixed: `_pp_parse_primary` only consumed the first token of a multi-token @cfg condition
+`src/compiler/10.frontend/core/parser_preprocessor.spl` `_pp_parse_primary`
+took exactly one token off `_pp_tokens` and evaluated it via `_pp_eval_atom`,
+ignoring the rest. The SPACED key/value form `@cfg(arch = "x86_64")`
+tokenizes (whitespace-delimited) as `["arch", "=", "\"x86_64\""]`; only
+`"arch"` reached `_pp_eval_atom`, which falls through every known keyword to
+`false` regardless of the real value — so a spaced `@cfg(key = value)`
+condition ALWAYS evaluated false (both matching and non-matching variants
+dropped). Fixed by reassembling one or more adjacent `"="` tokens plus the
+following value token into a single `key=value`/`key==value` atom before
+calling `_pp_eval_atom` (which already had the `cfg_eval_key_value` split
+logic for that shape). Verified via cheap seed `native-build` repros
+(`t105_frontend_probe2.spl` + `cfg_arch_dispatch_repro_spaced.spl`,
+~10s each): before fix, `@cfg(arch = "x86_64")`/`@cfg(arch = "arm64")`
+variants of `arch_name()` BOTH dropped (`module.functions.len()`==1, only
+`main`); after fix, exactly the matching variant survives
+(`module.functions.len()`==2) for both `SIMPLE_TARGET_ARCH=x86_64` and
+`=aarch64`. Landed: commit `061b99782e61` (main).
+
+### Host-arch-detection fallback is ALSO broken in this sandbox (separate, unfixed)
+`cfg_detect_arch()`'s Linux fallback reads `/proc/sys/kernel/arch` via
+`rt_file_read_text`. In this sandbox that file's `stat()` size is 0 (proc
+pseudo-files don't report real size) so the read returns `""` even though
+`cat /proc/sys/kernel/arch` and `wc -c` show real 7-byte content — a
+size-based native `rt_file_read_text` bug, NOT fixable from pure Simple.
+`rt_process_run("uname", ["-m"])` is also unusable as a substitute fallback:
+verified it silently drops ALL args (`uname -m`/`uname -s`/`echo hello
+world` all ran as bare `uname`/`echo` with no argv) — a separate native
+runtime bug. Both are out of scope for #105 (native runtime, not
+`src/compiler/**`); recorded here as a concrete follow-up, not silently
+dropped. Use `SIMPLE_TARGET_ARCH=<arch>` to force correct detection when
+testing @cfg-arch dispatch until a native-side fix lands.
+
+### The exact task #105 gate ("lowered funcs=3" -> expect 2) is NOT closed by any preprocessor-side fix
+Full self-hosted stage4 rebuild (993 modules, `native-build --backend
+cranelift`, current HEAD + the tokenizer fix above) on
+`cfg_arch_dispatch_repro_a.spl` (bare-atom `@cfg(x86_64)`/`@cfg(arm64)`
+`arch_name()` variants + `main`), `SIMPLE_UNSTUB_HIR=1
+SIMPLE_INTERP_TRACE=1`:
+- `SIMPLE_TARGET_ARCH=x86_64` -> `[DRV] lowered funcs=3` (unchanged from
+  pre-fix baseline).
+- `SIMPLE_TARGET_ARCH=aarch64` -> `[DRV] lowered funcs=3` (IDENTICAL count).
+- Spaced-form repro (`cfg_arch_dispatch_repro_spaced.spl`) -> also
+  `lowered funcs=3` at full scale, despite the SAME source producing the
+  CORRECT `functions.len()==2` on the small-scale seed-compiled probe
+  binary (`t105_frontend_probe2.spl`) with the identical `.spl` sources.
+
+This is a genuine seed-vs-stage4 divergence: the @cfg text-preprocessor is
+verifiably CORRECT (both bare-atom and, after this iteration's fix, spaced
+key=value forms) when compiled by the seed and run standalone, but produces
+an UNFILTERED result (both arch variants survive, identically regardless of
+forced arch) only on the 993-module self-hosted binary. Getting the exact
+same "3" independent of which arch is forced rules out a mere
+detection-value bug (that would change WHICH variant is kept, not whether
+BOTH survive) and points at either (a) a global same-bare-name dispatch
+collision — `preprocess_conditionals` is defined in TWO places
+(`frontend.spl`'s local unique-name wrapper AND
+`core/parser_preprocessor.spl`'s public wrapper, both delegating to
+`_pp_preprocess_conditionals`) though `core/parser.spl`'s own top-level
+entry points (`parse_module`/`parse_module_file`, NOT on the live
+`parse_and_build_module` path) call `_pp_preprocess_conditionals` directly
+so this specific double-definition was not confirmed as the live cause; or
+(b) a #104-class Dict/struct-field ANY-erasure corruption of
+`Module.functions: Dict<text, Function>`'s duplicate-key overwrite at scale
+(each `functions[fn_.name] = fn_` assignment should collapse both
+same-named `arch_name` decls to one dict entry; getting a HIR-level
+`lowered funcs=3` for main+2-duplicate-name-variants is only possible if
+that overwrite itself misbehaves at scale, independent of whether
+preprocessing blanked either declaration).
+
+Root-causing (a) vs (b) needs stage4 gdb/eprint probing inside
+`_pp_preprocess_conditionals` and `flat_ast_to_module`'s
+`functions[fn_.name] = fn_` at full scale — the same instrumentation class
+already walled by trap D (env-gated eprint probes are mute in some
+stage4-compiled modules; must use ungated eprint) and by the #104
+ANY-erasure wall this task was scoped to avoid. Handing off to the #104
+lane / a future iteration with a narrower repro
+(`scratchpad/cfg_arch_dispatch_repro_a.spl`,
+`scratchpad/cfg_arch_dispatch_repro_spaced.spl`) and this gate
+(`SIMPLE_UNSTUB_HIR=1 SIMPLE_INTERP_TRACE=1 SIMPLE_TARGET_ARCH=x86_64 <bin>
+run <repro> 2>&1 | grep 'lowered funcs'`, expect 2).
+
+### Regression matrix (full-scale stage4 rebuild with the tokenizer fix, all PASS)
+| case | result |
+|------|--------|
+| `-c "print(1+1)"` | `2` rc=0 |
+| hello | `hello` rc=0 |
+| twofn (helper + main) | `m1`/`plain-helper` rc=0 |
+| lint src/app/cli/main.spl | rc=0, "Lint passed: all files clean" |
+| cfg_arch_dispatch_repro_a (informational, gate not closed) | rc=0, `lowered funcs=3` |
