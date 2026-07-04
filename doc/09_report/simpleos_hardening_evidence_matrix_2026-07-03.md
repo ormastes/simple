@@ -12,9 +12,9 @@
 - lean_trust_surface_audit: pass
 - lean_trust_surface_audit_scope: Lean verification sources under `src/verification` contain no `sorry`, `admit`, `axiom`, `constant`, `opaque`, `unsafe`, `set_option autoImplicit true`, or `set_option maxHeartbeats 0` trust-surface bypasses
 - lean_trust_surface_audit_evidence: `rg -n '^\s*(axiom|constant|opaque|unsafe|set_option\s+autoImplicit\s+true|set_option\s+maxHeartbeats\s+0)\b' src/verification --glob '*.lean' --glob '!.lake/**'` and `rg -n '^\s*(sorry|admit)\b' src/verification --glob '*.lean' --glob '!.lake/**'` both produced no hits
-- byl_sby_artifact_audit: warn
-- byl_sby_artifact_audit_scope: checked-in non-Lean formal artifacts currently consist of one BYL surface (`src/verification/riscv_product/riscv_product.byl`) and zero checked-in SBY files; generated SBY/RVFI artifacts remain sidecar/readiness evidence, not an RTL proof pass
-- byl_sby_artifact_audit_evidence: `find . \( -path './.git' -o -path './.jj' -o -path './src/**/.lake' \) -prune -o \( -name '*.byl' -o -name '*.sby' -o -name '*formal*manifest*' -o -name '*rvfi*manifest*' \) -type f -print | sort` returned only `./src/verification/riscv_product/riscv_product.byl`; placeholder scan over `*.byl`, `*.sby`, `*formal*manifest*`, and `*rvfi*manifest*` produced no hits; `scripts/check/check-riscv-formal-dual-track.shs` is blocked in this isolated checkout because `bin/release/simple` resolves to missing `/tmp/release/x86_64-unknown-linux-gnu/simple`
+- byl_sby_artifact_audit: pass
+- byl_sby_artifact_audit_scope: checked-in non-Lean formal artifacts currently consist of one BYL surface (`src/verification/riscv_product/riscv_product.byl`) and zero checked-in SBY files; generated SBY/RVFI artifacts are validated by the RISC-V sidecar contract and remain readiness evidence, not an RTL proof pass
+- byl_sby_artifact_audit_evidence: `find . \( -path './.git' -o -path './.jj' -o -path './src/**/.lake' \) -prune -o \( -name '*.byl' -o -name '*.sby' -o -name '*formal*manifest*' -o -name '*rvfi*manifest*' \) -type f -print | sort` returned only `./src/verification/riscv_product/riscv_product.byl`; placeholder scan over `*.byl`, `*.sby`, `*formal*manifest*`, and `*rvfi*manifest*` produced no hits; with temporary `bin/simple` symlinked directly to the existing self-hosted runtime, `sh scripts/check/check-riscv-formal-dual-track.shs` reported `STATUS: PASS riscv-fpga-sidecar-contract` and `STATUS: PASS riscv-formal-dual-track`
 - executable_launch_from_fs: pass
 - ssh_shell_smf_and_exec: pass
 - shared_wm_logic: pass
