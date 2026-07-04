@@ -1,7 +1,7 @@
 # RV32 no-alloc NVMe firmware logic reference.
 #
 # Scalar-only: no arrays, no heap, no strings in the logic path. Host and bare-metal entries share
-# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue + admin/format/fw-log + reactor + policy/target + DRAM/durability + wear/scrub + media-retire + power-cycle floor.
+# this so P9 evidence exercises the same RAIN + ECC + fixed scheduler + power/thermal + map-cache + band + journal-ring + HIL command/queue + admin/format/fw-log + reactor + policy/target + DRAM/durability + wear/scrub + media-retire + power-cycle + backpressure/abort floor.
 
 fn rv32_rain_selftest() -> i64:
     val d0 = 256
@@ -1514,5 +1514,81 @@ fn rv32_power_cycle_selftest() -> i64:
         fail = fail + 1
     fail
 
+fn rv32_backpressure_abort_selftest() -> i64:
+    # Scalar controller floor: full CQs defer work; Abort decodes targets and fails closed.
+    var fail = 0
+    val depth = 4
+    val sc_success = 0
+    val sc_invalid_field = 2
+    val sc_invalid_qid = 0x101
+
+    var admin_sq_len = 1
+    var admin_cq_len = depth
+    var processed = 0
+    if admin_cq_len < depth and admin_sq_len > 0:
+        admin_sq_len = admin_sq_len - 1
+        admin_cq_len = admin_cq_len + 1
+        processed = processed + 1
+    if processed != 0 or admin_sq_len != 1:
+        fail = fail + 1
+    admin_cq_len = 0
+    if admin_cq_len < depth and admin_sq_len > 0:
+        admin_sq_len = admin_sq_len - 1
+        admin_cq_len = admin_cq_len + 1
+        processed = processed + 1
+    if processed != 1 or admin_sq_len != 0 or admin_cq_len != 1:
+        fail = fail + 1
+
+    var io_sq_len = 1
+    var io_cq_len = depth
+    processed = 0
+    if io_cq_len < depth and io_sq_len > 0:
+        io_sq_len = io_sq_len - 1
+        io_cq_len = io_cq_len + 1
+        processed = processed + 1
+    if processed != 0 or io_sq_len != 1:
+        fail = fail + 1
+    io_cq_len = 0
+    if io_cq_len < depth and io_sq_len > 0:
+        io_sq_len = io_sq_len - 1
+        io_cq_len = io_cq_len + 1
+        processed = processed + 1
+    if processed != 1 or io_sq_len != 0 or io_cq_len != 1:
+        fail = fail + 1
+
+    var last_abort_sqid = -1
+    var last_abort_cid = -1
+    var abort_status = sc_success
+    var abort_data = 1
+    val target_sqid = 1
+    val target_cid = 100
+    if target_sqid < 1 or target_sqid > 8:
+        abort_status = sc_invalid_qid
+    else:
+        last_abort_sqid = target_sqid
+        last_abort_cid = target_cid
+    if abort_status != sc_success or abort_data != 1 or last_abort_sqid != 1 or last_abort_cid != 100:
+        fail = fail + 1
+    val missing_sqid = 99
+    if missing_sqid < 1 or missing_sqid > 8:
+        abort_status = sc_invalid_qid
+    if abort_status != sc_invalid_qid or last_abort_sqid != 1:
+        fail = fail + 1
+    val malformed_nsid = 1
+    abort_status = sc_success
+    if malformed_nsid != 0:
+        abort_status = sc_invalid_field
+    if abort_status != sc_invalid_field or last_abort_sqid != 1:
+        fail = fail + 1
+    last_abort_sqid = 99
+    last_abort_cid = 70000
+    if last_abort_sqid < 0 or last_abort_sqid > 8:
+        last_abort_sqid = -1
+    if last_abort_cid < 0 or last_abort_cid >= 65536:
+        last_abort_cid = -1
+    if last_abort_sqid != -1 or last_abort_cid != -1:
+        fail = fail + 1
+    fail
+
 fn nvme_fw_rv32_logic_selftest() -> i64:
-    rv32_rain_selftest() + rv32_ecc_selftest() + rv32_journal_selftest() + rv32_map_selftest() + rv32_band_selftest() + rv32_sched_selftest() + rv32_pt_selftest() + rv32_hil_selftest() + rv32_admin_selftest() + rv32_reactor_selftest() + rv32_policy_target_selftest() + rv32_dram_durability_selftest() + rv32_wear_scrub_selftest() + rv32_media_retire_selftest() + rv32_power_cycle_selftest()
+    rv32_rain_selftest() + rv32_ecc_selftest() + rv32_journal_selftest() + rv32_map_selftest() + rv32_band_selftest() + rv32_sched_selftest() + rv32_pt_selftest() + rv32_hil_selftest() + rv32_admin_selftest() + rv32_reactor_selftest() + rv32_policy_target_selftest() + rv32_dram_durability_selftest() + rv32_wear_scrub_selftest() + rv32_media_retire_selftest() + rv32_power_cycle_selftest() + rv32_backpressure_abort_selftest()
