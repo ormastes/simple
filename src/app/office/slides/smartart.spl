@@ -1,0 +1,224 @@
+# SmartArt-style Diagrams
+#
+# A minimal PowerPoint "SmartArt" slice: a Diagram holds DiagramNodes and
+# auto-lays them out into boxes by kind ("list"/"process"/"hierarchy"),
+# then renders the boxes (+ connectors) to SVG. Kept as a pure
+# model -> layout -> SVG transform, deterministic and hand-computable.
+
+# =========================================================================
+# Core Structs
+# =========================================================================
+
+struct DiagramNode:
+    id: text
+    label: text
+    level: i32
+
+struct Diagram:
+    kind: text
+    nodes: [DiagramNode]
+
+struct _Box:
+    id: text
+    label: text
+    x: i32
+    y: i32
+    bw: i32
+    bh: i32
+    level: i32
+
+# =========================================================================
+# Constructors
+# =========================================================================
+
+fn node_new(id: text, label: text, level: i32) -> DiagramNode:
+    """Create a diagram node. `level` is the tree depth, 0 for the top."""
+    DiagramNode(id: id, label: label, level: level)
+
+fn diagram_new(kind: text) -> Diagram:
+    """Create an empty diagram. `kind` is one of "list"/"process"/"hierarchy"."""
+    Diagram(kind: kind, nodes: [])
+
+fn diagram_add(diagram: Diagram, node: DiagramNode) -> Diagram:
+    """Append a node to a diagram and return the updated diagram (nodes are
+    value types; mutating through a param is lost, so build a new list)."""
+    var new_nodes: [DiagramNode] = []
+    for n in diagram.nodes:
+        new_nodes.push(n)
+    new_nodes.push(node)
+    Diagram(kind: diagram.kind, nodes: new_nodes)
+
+fn diagram_node_count(diagram: Diagram) -> i32:
+    """Number of nodes in the diagram."""
+    diagram.nodes.len()
+
+# =========================================================================
+# Layout
+# =========================================================================
+
+fn _count_at_level(diagram: Diagram, level: i32) -> i32:
+    """How many nodes sit at exactly this depth."""
+    var count = 0
+    for node in diagram.nodes:
+        if node.level == level:
+            count = count + 1
+    count
+
+fn _max_level(diagram: Diagram) -> i32:
+    """Deepest level present in the diagram (0 if flat/empty)."""
+    var m = 0
+    for node in diagram.nodes:
+        if node.level > m:
+            m = node.level
+    m
+
+fn _layout_list(diagram: Diagram, w: i32, h: i32) -> [_Box]:
+    """Vertical stack: nodes evenly spaced top-to-bottom, full-width boxes."""
+    var boxes: [_Box] = []
+    val n = diagram.nodes.len()
+    if n == 0:
+        return boxes
+    val bh = h / n
+    var i = 0
+    for node in diagram.nodes:
+        val y = i * bh
+        boxes.push(_Box(id: node.id, label: node.label, x: 0, y: y, bw: w, bh: bh, level: node.level))
+        i = i + 1
+    boxes
+
+fn _layout_process(diagram: Diagram, w: i32, h: i32) -> [_Box]:
+    """Horizontal row: nodes left-to-right, equal-width full-height boxes."""
+    var boxes: [_Box] = []
+    val n = diagram.nodes.len()
+    if n == 0:
+        return boxes
+    val bw = w / n
+    var i = 0
+    for node in diagram.nodes:
+        val x = i * bw
+        boxes.push(_Box(id: node.id, label: node.label, x: x, y: 0, bw: bw, bh: h, level: node.level))
+        i = i + 1
+    boxes
+
+fn _layout_hierarchy(diagram: Diagram, w: i32, h: i32) -> [_Box]:
+    """Simple tree-by-level-band layout: level 0 centered at top, each
+    deeper level is a row spread across the width further down. Every box
+    uses the same width (w / widest-level count) and every row's boxes are
+    centered as a group within the full width."""
+    var boxes: [_Box] = []
+    if diagram.nodes.len() == 0:
+        return boxes
+    val max_level = _max_level(diagram)
+    var max_count = 1
+    for lvl in 0..(max_level + 1):
+        val count = _count_at_level(diagram, lvl)
+        if count > max_count:
+            max_count = count
+    val box_w = w / max_count
+    val band_h = h / (max_level + 1)
+    for lvl in 0..(max_level + 1):
+        val count = _count_at_level(diagram, lvl)
+        val row_w = count * box_w
+        val left_margin = (w - row_w) / 2
+        val y = lvl * band_h
+        var idx = 0
+        for node in diagram.nodes:
+            if node.level == lvl:
+                val x = left_margin + idx * box_w
+                boxes.push(_Box(id: node.id, label: node.label, x: x, y: y, bw: box_w, bh: band_h, level: node.level))
+                idx = idx + 1
+    boxes
+
+fn _compute_boxes(diagram: Diagram, w: i32, h: i32) -> [_Box]:
+    """Dispatch to the layout for this diagram's kind."""
+    if diagram.kind == "list":
+        return _layout_list(diagram, w, h)
+    if diagram.kind == "process":
+        return _layout_process(diagram, w, h)
+    if diagram.kind == "hierarchy":
+        return _layout_hierarchy(diagram, w, h)
+    []
+
+fn diagram_layout(diagram: Diagram, w: i32, h: i32) -> [text]:
+    """One line per node describing its computed box:
+    "<id>@<x>,<y> <bw>x<bh>: <label>"."""
+    val boxes = _compute_boxes(diagram, w, h)
+    var out: [text] = []
+    for b in boxes:
+        out.push("{b.id}@{b.x},{b.y} {b.bw}x{b.bh}: {b.label}")
+    out
+
+# =========================================================================
+# SVG Rendering
+# =========================================================================
+
+fn _svg_escape(s: text) -> text:
+    """Escape text for safe inclusion inside SVG markup/attributes."""
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result
+
+fn _box_svg(b: _Box) -> text:
+    """A `<rect>` plus centered `<text>` (label escaped) for one box."""
+    val rect = "<rect x=\"{b.x}\" y=\"{b.y}\" width=\"{b.bw}\" height=\"{b.bh}\"/>"
+    val tx = b.x + b.bw / 2
+    val ty = b.y + b.bh / 2
+    val txt = "<text x=\"{tx}\" y=\"{ty}\">{_svg_escape(b.label)}</text>"
+    "{rect}{txt}"
+
+fn _connectors_process(boxes: [_Box]) -> [text]:
+    """One `<line>` per consecutive pair, center to center: box N to N+1."""
+    var lines: [text] = []
+    var have_prev = false
+    var prev_cx = 0
+    var prev_cy = 0
+    for b in boxes:
+        val cx = b.x + b.bw / 2
+        val cy = b.y + b.bh / 2
+        if have_prev:
+            lines.push("<line x1=\"{prev_cx}\" y1=\"{prev_cy}\" x2=\"{cx}\" y2=\"{cy}\"/>")
+        prev_cx = cx
+        prev_cy = cy
+        have_prev = true
+    lines
+
+fn _connectors_hierarchy(boxes: [_Box]) -> [text]:
+    """One `<line>` from every non-root box's center to the level-0 (root)
+    box's center."""
+    var root_cx = 0
+    var root_cy = 0
+    var found_root = false
+    for b in boxes:
+        if b.level == 0:
+            root_cx = b.x + b.bw / 2
+            root_cy = b.y + b.bh / 2
+            found_root = true
+    var lines: [text] = []
+    if found_root:
+        for b in boxes:
+            if b.level != 0:
+                val cx = b.x + b.bw / 2
+                val cy = b.y + b.bh / 2
+                lines.push("<line x1=\"{root_cx}\" y1=\"{root_cy}\" x2=\"{cx}\" y2=\"{cy}\"/>")
+    lines
+
+fn diagram_to_svg(diagram: Diagram, w: i32, h: i32) -> text:
+    """Render the diagram as one `<svg>`: one `<rect>` + `<text>` per node
+    box, plus connector `<line>`s ("process": box N to N+1; "hierarchy":
+    each child to the level-0 parent; "list" has no connectors)."""
+    val boxes = _compute_boxes(diagram, w, h)
+    var parts: [text] = []
+    for b in boxes:
+        parts.push(_box_svg(b))
+    var connectors: [text] = []
+    if diagram.kind == "process":
+        connectors = _connectors_process(boxes)
+    if diagram.kind == "hierarchy":
+        connectors = _connectors_hierarchy(boxes)
+    for c in connectors:
+        parts.push(c)
+    val body = parts.join("")
+    "<svg width=\"{w}\" height=\"{h}\">{body}</svg>"
