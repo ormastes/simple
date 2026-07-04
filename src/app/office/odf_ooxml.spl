@@ -12,7 +12,7 @@
 # add run-property scanning when styled import matters.
 
 use std.common.archive.zip.{zip_extract, zip_extract_text, zip_write_stored, zip_text_file, ZipFile}
-use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, CommentDef, spans_to_plain_text}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, CommentDef, RevisionDef, revision_def_for, spans_to_plain_text}
 use app.office.odf_export.{document_to_fodt, sheet_to_fods}
 use app.office.file_formats.{parse_inline_spans, recalculate_formula_cells}
 use app.office.sheets.spreadsheet.{Sheet}
@@ -207,9 +207,12 @@ fn _docx_runs_in(region: text) -> [TextSpan]:
             break
         val run = region.slice(start, end_pos)
         val t = _find_from(run, "<w:t", 0)
-        if t >= 0:
-            val tag_end = _find_from(run, ">", t)
-            val te = _find_from(run, "</w:t>", t)
+        val dt = _find_from(run, "<w:delText", 0)
+        if t >= 0 or dt >= 0:
+            val text_start = if dt >= 0: dt else: t
+            val close_tag = if dt >= 0: "</w:delText>" else: "</w:t>"
+            val tag_end = _find_from(run, ">", text_start)
+            val te = _find_from(run, close_tag, text_start)
             if tag_end >= 0 and te > tag_end:
                 val content = _xml_unescape(run.slice(tag_end + 1, te))
                 var style = InlineStyle.Normal
@@ -235,25 +238,54 @@ fn _docx_comment_reference_run(cid: text) -> text:
     same literal to recognize and skip it) so the two can never drift apart."""
     "<w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:commentReference w:id=\"{cid}\"/></w:r>"
 
-fn _docx_para_spans(para_xml: text, rels: [_DocxRelEntry]) -> [TextSpan]:
+struct _DocxSpansResult:
+    """Result of parsing one paragraph's runs: the spans themselves, any
+    RevisionDef entries newly discovered from <w:ins>/<w:del> wrappers in
+    it, and the next fresh revision id to hand the following paragraph.
+    Ids are assigned sequentially across the whole document parse — the
+    original w:id attributes on <w:ins>/<w:del> are NOT preserved (ceiling:
+    see `docx_bytes_to_document`)."""
+    spans: [TextSpan]
+    revisions: [RevisionDef]
+    next_id: i32
+
+fn _docx_para_spans(para_xml: text, rels: [_DocxRelEntry], start_id: i32) -> _DocxSpansResult:
     """Every run in the paragraph as a styled span, resolving <w:hyperlink
     r:id="..."> wrappers to their external URL (via `rels`; unresolved ids
-    degrade to a plain, non-linked span rather than failing), and
+    degrade to a plain, non-linked span rather than failing),
     <w:commentRangeStart w:id="N"/>...<w:commentRangeEnd w:id="N"/> wrappers
     (written only around the single commented run — see `_docx_run`) to a
-    comment_id on the enclosed span. The immediately-following
+    comment_id on the enclosed span, and <w:ins>/<w:del> wrappers to a fresh
+    revision_id on every enclosed span plus one RevisionDef (author/date read
+    off the wrapper's w:author/w:date attributes, kind "insert"/"delete" from
+    which tag it was; id is freshly assigned from `start_id`, NOT the
+    original w:id — see `_DocxSpansResult`). The immediately-following
     <w:commentReference> run carries no visible text and is dropped rather
     than becoming its own span: the model attaches a comment to the
     COMMENTED span itself, not a separate marker span (mirrors
     file_formats.spl's `parse_inline_spans`, which attaches the same way at
-    the markdown layer)."""
+    the markdown layer). Ceiling: a <w:del> nested inside a <w:ins> (or vice
+    versa) is not modeled — Word can produce this for an insertion
+    subsequently deleted by another reviewer, but this scan treats whichever
+    wrapper is encountered first as the sole marker for its enclosed runs."""
     var spans: [TextSpan] = []
+    var revisions: [RevisionDef] = []
+    var next_id = start_id
     var i = 0
     while i < para_xml.len():
         val h = _find_from(para_xml, "<w:hyperlink", i)
         val cs = _find_from(para_xml, "<w:commentRangeStart", i)
-        val comment_first = cs >= 0 and (h < 0 or cs < h)
-        val marker = if comment_first: cs else: h
+        val ins_s = _find_from(para_xml, "<w:ins ", i)
+        val del_s = _find_from(para_xml, "<w:del ", i)
+        var marker = -1
+        if h >= 0:
+            marker = h
+        if cs >= 0 and (marker < 0 or cs < marker):
+            marker = cs
+        if ins_s >= 0 and (marker < 0 or ins_s < marker):
+            marker = ins_s
+        if del_s >= 0 and (marker < 0 or del_s < marker):
+            marker = del_s
         if marker < 0:
             for sp in _docx_runs_in(para_xml.slice(i, para_xml.len())):
                 spans.push(sp)
@@ -261,7 +293,41 @@ fn _docx_para_spans(para_xml: text, rels: [_DocxRelEntry]) -> [TextSpan]:
             continue
         for sp in _docx_runs_in(para_xml.slice(i, marker)):
             spans.push(sp)
-        if comment_first:
+        var is_ins = false
+        var is_del = false
+        var is_comment = false
+        if marker == ins_s and ins_s >= 0:
+            is_ins = true
+        elif marker == del_s and del_s >= 0:
+            is_del = true
+        elif marker == cs and cs >= 0:
+            is_comment = true
+        if is_ins or is_del:
+            val mark_start = if is_ins: ins_s else: del_s
+            val close_tag = if is_ins: "</w:ins>" else: "</w:del>"
+            val mark_tag_end = _find_from(para_xml, ">", mark_start)
+            if mark_tag_end < 0:
+                i = para_xml.len()
+                continue
+            val open_tag = para_xml.slice(mark_start, mark_tag_end + 1)
+            val author = _xml_unescape(_xml_attr(open_tag, "w:author"))
+            val date_ = _xml_unescape(_xml_attr(open_tag, "w:date"))
+            val mark_end = _find_from(para_xml, close_tag, mark_tag_end)
+            if mark_end < 0:
+                i = para_xml.len()
+                continue
+            val inner = para_xml.slice(mark_tag_end + 1, mark_end)
+            val rid = next_id.to_text()
+            next_id = next_id + 1
+            for sp in _docx_runs_in(inner):
+                spans.push(TextSpan(text: sp.text, style: sp.style, link_url: sp.link_url, footnote_id: sp.footnote_id, comment_id: sp.comment_id, revision_id: rid))
+            var kind_ = "insert"
+            if is_del:
+                kind_ = "delete"
+            revisions.push(RevisionDef(id: rid, author: author, kind: kind_, timestamp_text: date_))
+            i = mark_end + close_tag.len()
+            continue
+        if is_comment:
             val cs_tag_end = _find_from(para_xml, "/>", cs)
             if cs_tag_end < 0:
                 i = para_xml.len()
@@ -294,12 +360,15 @@ fn _docx_para_spans(para_xml: text, rels: [_DocxRelEntry]) -> [TextSpan]:
         i = hclose + 14
     if spans.len() == 0:
         spans.push(_span(""))
-    spans
+    _DocxSpansResult(spans: spans, revisions: revisions, next_id: next_id)
 
 fn _docx_para_text(para_xml: text, rels: [_DocxRelEntry]) -> text:
-    """Concatenate every run's text within one paragraph."""
+    """Concatenate every run's text within one paragraph. Revision ids are
+    discarded here (start_id 0, result unused past `.spans`) — this helper
+    only checks whether a paragraph has any text at all."""
     var out = ""
-    for span in _docx_para_spans(para_xml, rels):
+    val result = _docx_para_spans(para_xml, rels, 0)
+    for span in result.spans:
         out = "{out}{span.text}"
     out
 
@@ -356,6 +425,7 @@ fn _docx_drawing_image(para_xml: text, rels: [_DocxRelEntry], zip_bytes: [u8]) -
 
 fn _docx_document_xml_to_document_with_rels(document_xml: text, rels: [_DocxRelEntry], zip_bytes: [u8], title: text) -> RichDocument:
     var doc = RichDocument.new(title)
+    var next_rev_id = 1
     var i = 0
     while i < document_xml.len():
         val p = _find_from(document_xml, "<w:p ", i)
@@ -373,7 +443,11 @@ fn _docx_document_xml_to_document_with_rels(document_xml: text, rels: [_DocxRelE
         else:
             val content = _docx_para_text(para, rels)
             if content.trim() != "":
-                doc.blocks.push(DocBlock(kind: _docx_para_kind(para), spans: _docx_para_spans(para, rels)))
+                val pr = _docx_para_spans(para, rels, next_rev_id)
+                doc.blocks.push(DocBlock(kind: _docx_para_kind(para), spans: pr.spans))
+                for rd in pr.revisions:
+                    doc.revisions.push(rd)
+                next_rev_id = pr.next_id
         i = end_pos + 6
     doc
 
@@ -452,7 +526,15 @@ fn docx_bytes_to_document(zip_bytes: [u8], title: text) -> RichDocument:
     FootnoteDef blocks appended after the body's paragraphs (matching where
     footnote definitions conventionally sit in markdown source — see
     file_formats.spl's document_to_markdown), and word/comments.xml (if
-    present) into `doc.comments`."""
+    present) into `doc.comments`. Every <w:ins>/<w:del> wrapper in the body
+    becomes revision-marked spans + one `RevisionDef` in `doc.revisions`
+    (author/kind/date preserved off w:author/w:date/tag-choice — see
+    `_docx_para_spans`). Three ceilings on the revisions read-path: (1) ids
+    are freshly renumbered sequentially per import, NEVER the original
+    document's w:id values; (2) a <w:del> nested inside a <w:ins> (or vice
+    versa) is not modeled — only the outer wrapper is recognized; (3)
+    w:date is read back verbatim as free text (RevisionDef.timestamp_text),
+    no date-format validation or parsing."""
     val rels = _parse_docx_rels(zip_extract_text(zip_bytes, "word/_rels/document.xml.rels"))
     var doc = _docx_document_xml_to_document_with_rels(zip_extract_text(zip_bytes, "word/document.xml"), rels, zip_bytes, title)
     val footnotes_xml = zip_extract_text(zip_bytes, "word/footnotes.xml")
@@ -1345,7 +1427,7 @@ fn _xml_attr_escape(s: text) -> text:
     """Escape for use inside a double-quoted XML attribute value."""
     _xml_escape_d(s).replace("\"", "&quot;")
 
-fn _docx_run(span: TextSpan, rels: _DocxRels) -> _DocxBuildResult:
+fn _docx_run(span: TextSpan, rels: _DocxRels, revisions: [RevisionDef]) -> _DocxBuildResult:
     """One <w:r> (or <w:hyperlink><w:r>...</w:r></w:hyperlink> when the span
     carries a link_url), styled runs unaffected by hyperlink-wrapping. A span
     carrying footnote_id is a footnote reference marker: it renders as
@@ -1357,12 +1439,33 @@ fn _docx_run(span: TextSpan, rels: _DocxRels) -> _DocxBuildResult:
     <w:commentRangeStart/End w:id="..."/> plus a trailing
     <w:commentReference w:id="..."/> run (see `_docx_comment_reference_run`);
     comment ids are likewise local to word/comments.xml, no external
-    relationship needed on the run itself."""
+    relationship needed on the run itself.
+
+    A span carrying revision_id (looked up in `revisions`, the doc-level
+    RevisionDef list — see attributed_text.spl/track_changes.spl) is the
+    OUTERMOST wrap, after hyperlink and comment wrapping: an insert-kind
+    revision wraps the run in <w:ins w:id=".." w:author=".." w:date="..">,
+    a delete-kind revision wraps it in <w:del w:id=".." w:author=".."
+    w:date="..">, and ALSO swaps the run's content tag from <w:t> to
+    <w:delText> (OOXML requires delText inside w:del — Word rejects a plain
+    <w:t> there). w:date is the same fixed constant `_comments_xml` uses
+    ("2026-01-01T00:00:00Z"), keeping export deterministic. Ceiling: a span
+    whose revision_id doesn't resolve to a RevisionDef (dangling id) is
+    written as an ordinary, unwrapped run — same defensive-empty-value
+    contract as `revision_def_for`."""
     if span.footnote_id != "":
         val fid = _xml_attr_escape(span.footnote_id)
         val fr_run = "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference w:id=\"{fid}\"/></w:r>"
         return _DocxBuildResult(xml: fr_run, rels: rels)
-    val content = "<w:t xml:space=\"preserve\">{_xml_escape_d(span.text)}</w:t>"
+    var rd = RevisionDef(id: "", author: "", kind: "", timestamp_text: "")
+    if span.revision_id != "":
+        rd = revision_def_for(revisions, span.revision_id)
+    val is_delete_rev = rd.id != "" and rd.kind == "delete"
+    var content = ""
+    if is_delete_rev:
+        content = "<w:delText xml:space=\"preserve\">{_xml_escape_d(span.text)}</w:delText>"
+    else:
+        content = "<w:t xml:space=\"preserve\">{_xml_escape_d(span.text)}</w:t>"
     var run = ""
     match span.style:
         case Bold: run = "<w:r><w:rPr><w:b/></w:rPr>{content}</w:r>"
@@ -1377,6 +1480,13 @@ fn _docx_run(span: TextSpan, rels: _DocxRels) -> _DocxBuildResult:
     if span.comment_id != "":
         val cid = _xml_attr_escape(span.comment_id)
         xml = "<w:commentRangeStart w:id=\"{cid}\"/>{xml}<w:commentRangeEnd w:id=\"{cid}\"/>{_docx_comment_reference_run(cid)}"
+    if rd.id != "":
+        val rev_id_attr = _xml_attr_escape(rd.id)
+        val author_attr = _xml_attr_escape(rd.author)
+        if rd.kind == "delete":
+            xml = "<w:del w:id=\"{rev_id_attr}\" w:author=\"{author_attr}\" w:date=\"2026-01-01T00:00:00Z\">{xml}</w:del>"
+        else:
+            xml = "<w:ins w:id=\"{rev_id_attr}\" w:author=\"{author_attr}\" w:date=\"2026-01-01T00:00:00Z\">{xml}</w:ins>"
     _DocxBuildResult(xml: xml, rels: out_rels)
 
 fn _docx_drawing_xml(rid: text, alt: text, src: text) -> text:
@@ -1399,10 +1509,12 @@ fn _docx_image_run(alt: text, src: text, rels: _DocxRels) -> _DocxBuildResult:
         return _DocxBuildResult(xml: _docx_drawing_xml(added.rid, alt, src), rels: added.rels)
     _DocxBuildResult(xml: "<w:r><w:t xml:space=\"preserve\">{_xml_escape_d(alt)}</w:t></w:r>", rels: rels)
 
-fn _docx_para(block: DocBlock, rels: _DocxRels) -> _DocxBuildResult:
+fn _docx_para(block: DocBlock, rels: _DocxRels, revisions: [RevisionDef]) -> _DocxBuildResult:
     """One <w:p>. A block whose whole plain text is `![alt](src)` (the same
     whole-block image convention html_render.spl uses) renders as an inline
-    picture (or its alt-text fallback) instead of ordinary runs."""
+    picture (or its alt-text fallback) instead of ordinary runs. `revisions`
+    is the doc-level RevisionDef list, threaded through to `_docx_run` for
+    <w:ins>/<w:del> wrapping."""
     val img = _parse_md_image(spans_to_plain_text(block.spans))
     if img.is_image:
         val img_result = _docx_image_run(img.alt, img.src, rels)
@@ -1420,7 +1532,7 @@ fn _docx_para(block: DocBlock, rels: _DocxRels) -> _DocxBuildResult:
     var runs = ""
     var cur_rels = rels
     for span in block.spans:
-        val r = _docx_run(span, cur_rels)
+        val r = _docx_run(span, cur_rels, revisions)
         runs = "{runs}{r.xml}"
         cur_rels = r.rels
     _DocxBuildResult(xml: "<w:p>{style}{runs}</w:p>", rels: cur_rels)
@@ -1530,7 +1642,7 @@ fn _document_to_docx_bytes_core(doc: RichDocument, header_text: text, footer_tex
     for block in doc.blocks:
         if block.kind == BlockKind.FootnoteDef:
             continue
-        val result = _docx_para(block, rels)
+        val result = _docx_para(block, rels, doc.revisions)
         paras = "{paras}{result.xml}"
         rels = result.rels
     if has_footnotes:
