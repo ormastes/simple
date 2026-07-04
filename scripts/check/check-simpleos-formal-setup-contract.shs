@@ -29,11 +29,33 @@ else
 fi
 expected_prereq_status="$(sed -n 's/^simpleos_mission_critical_prereqs_status=//p' /tmp/simpleos-formal-setup-check.out | tail -n 1)"
 expected_prereq_missing="$(sed -n 's/^simpleos_mission_critical_prereqs_missing=//p' /tmp/simpleos-formal-setup-check.out | tail -n 1)"
+expected_prereq_next_action="$(sed -n 's/^simpleos_mission_critical_prereqs_next_action=//p' /tmp/simpleos-formal-setup-check.out | tail -n 1)"
 expected_prereq_status="${expected_prereq_status:-missing}"
 expected_prereq_missing="${expected_prereq_missing:-missing}"
+expected_prereq_next_action="${expected_prereq_next_action:-missing}"
 
 grep -Fq "scripts/setup/setup-simpleos-formal-env.shs --print-install" "$PREREQ" || {
     echo "FAIL: prereq doctor missing setup helper next action" >&2
+    exit 1
+}
+
+fake_bin="$ROOT_DIR/build/simpleos_formal_setup_contract/fake-bin"
+mkdir -p "$fake_bin"
+for tool in sby yosys boolector; do
+    printf '#!/usr/bin/env sh\nexit 0\n' >"$fake_bin/$tool"
+    chmod +x "$fake_bin/$tool"
+done
+PATH="$fake_bin:$PATH" sh "$PREREQ" >/tmp/simpleos-formal-prereq-ready.out 2>/tmp/simpleos-formal-prereq-ready.err
+grep -Fq "simpleos_mission_critical_prereqs_status=ready" /tmp/simpleos-formal-prereq-ready.out || {
+    echo "FAIL: prereq doctor fake installed stack missing ready status" >&2
+    exit 1
+}
+grep -Fq "simpleos_mission_critical_prereqs_missing=none" /tmp/simpleos-formal-prereq-ready.out || {
+    echo "FAIL: prereq doctor fake installed stack missing none blocker" >&2
+    exit 1
+}
+grep -Fq "simpleos_mission_critical_prereqs_next_action=none" /tmp/simpleos-formal-prereq-ready.out || {
+    echo "FAIL: prereq doctor fake installed stack missing none next action" >&2
     exit 1
 }
 
@@ -51,6 +73,10 @@ else
     }
     grep -Fq "prereq_missing=$expected_prereq_missing" /tmp/simpleos-formal-release-check.err || {
         echo "FAIL: release gate failure missing prereq blockers" >&2
+        exit 1
+    }
+    grep -Fq "prereq_next_action=$expected_prereq_next_action" /tmp/simpleos-formal-release-check.err || {
+        echo "FAIL: release gate failure missing prereq next action" >&2
         exit 1
     }
 fi
