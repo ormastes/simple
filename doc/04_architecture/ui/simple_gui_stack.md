@@ -515,25 +515,68 @@ dispatch commands and forwards them to the web adapter protocol.
 
 ## Host Shell Targets
 
-| Shell | App path | Notes |
-|---|---|---|
-| Web | `src/app/ui.web` | Primary host; web adapter protocol |
-| TUI | `src/app/ui.tui` | Terminal surfaces |
-| TUI+Web | `src/app/ui.tui_web` | TUI over web transport |
-| Standalone | `src/app/ui.standalone` | Native window, no wrapper |
-| Tauri | `src/app/ui.tauri` | Tauri webview shell |
-| Electron | `src/app/ui.electron` | Electron shell |
-| Chromium | `src/app/ui.chromium` | Chromium embedding |
-| Browser | `src/app/ui.browser` | Browser-only target |
-| VS Code | `src/app/ui.vscode` | VS Code webview extension |
-| CLI | `src/app/ui.cli` | CLI-mode UI |
-| IPC | `src/app/ui.ipc` | IPC bridge |
-| MCP | `src/app/ui.mcp` | MCP UI integration |
-| Render | `src/app/ui.render` | Headless render target |
-| Test API | `src/app/ui.test_api` | Test harness |
+| Shell | App path | Default? | Notes |
+|---|---|---|---|
+| Web | `src/app/ui.web` | **Default** | Primary host; web adapter protocol |
+| TUI | `src/app/ui.tui` | n/a (separate lane) | Terminal surfaces |
+| TUI+Web | `src/app/ui.tui_web` | n/a | TUI over web transport |
+| Standalone | `src/app/ui.standalone` | non-default | Native window, no wrapper |
+| Tauri | `src/app/ui.tauri` | non-default | Tauri webview shell |
+| Electron | `src/app/ui.electron` | non-default | Electron shell; must (target) support internal windows — currently does not, see below |
+| Chromium | `src/app/ui.chromium` | non-default | In-tree engine wearing Chromium naming (ADR-002), not a real-Chrome delegate |
+| Browser | `src/app/ui.browser` | non-default | Browser-only target |
+| VS Code | `src/app/ui.vscode` | non-default | VS Code webview extension |
+| CLI | `src/app/ui.cli` | non-default | CLI-mode UI |
+| IPC | `src/app/ui.ipc` | non-default | IPC bridge |
+| MCP | `src/app/ui.mcp` | non-default | MCP UI integration |
+| Render | `src/app/ui.render` | non-default | Headless render target |
+| Test API | `src/app/ui.test_api` | non-default | Test harness |
 
 All shells are thin — they forward input and present frames. GUI policy,
 state, layout, event routing, and Draw IR remain Simple-owned.
+
+## Backend hierarchy (2026-07-05)
+
+The maintainer's target containment tree for `ui/gui` (see
+`00_ui_architecture.md` § Target Layer Hierarchy) is:
+
+```
+gui
+├── electron wrapper + electron   # non-default; MUST support internal windows (current gap)
+├── core                          # simple gui core: internal window rendering — WM uses this
+└── web server ui                 # DEFAULT
+    └── web
+        ├── chrome wrapper + chrome   # delegates to Chrome (comparison/capture only today)
+        └── core                      # CORE simple web renderer (HTML/CSS -> layout -> paint)
+            └── simple 2d renderer (engine2d)
+                ├── cpu simd (x86, riscv, arm/aarch64)
+                ├── directx
+                ├── vulkan
+                └── metal
+```
+
+This is a containment/default-selection view, distinct from the data-flow
+"Target Stack" pipeline earlier in this document — both describe the same
+system from different axes and must agree on components.
+
+Current gaps versus this target (see `00_ui_architecture.md` for full
+status table and evidence paths):
+
+- **Electron internal windows.** `bridge.js` spawns exactly one
+  `BrowserWindow` (`mainWindow = new BrowserWindow(winOptions)`); it does not
+  render an internal (MDI-in-one-window) surface the way `gui/core` does for
+  the native WM path. `main.spl`'s `notify()` and `open_file_dialog()` are
+  dev-preview stubs (`# TODO(v4-dev-preview)`) that print and return `true`
+  rather than calling Electron's `Notification`/`dialog` APIs.
+- **Chrome delegation.** No production path switches the web renderer to a
+  live Chrome process; `tools/chrome-live-bitmap/capture_html_argb.js` and
+  the `*-render-log-compare.shs` gates are comparison/capture tooling, which
+  does satisfy the "Metal render-log capture for comparison" requirement,
+  but is not a runtime rendering backend.
+- **`simple_web_engine2d_renderer.spl` fixture-faking.** Still contains
+  fixture/heuristic discriminator branches (e.g. `"deterministic
+  compatibility fixture"`) that route known corpus/contract fixtures through
+  calibrated shortcuts instead of the generic layout path; being removed.
 
 ## Verification Requirements
 

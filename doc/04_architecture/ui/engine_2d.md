@@ -1,5 +1,16 @@
 # Engine2D QEMU Graphics Core Architecture
 
+> **Naming note (2026-07-05):** despite the shared "Engine2D" name, this
+> document is about the freestanding baremetal/QEMU graphics core
+> (`src/os/compositor/engine2d_baremetal_core.spl`), not the GUI/web
+> `simple 2d renderer` leaf of the target UI hierarchy in
+> `00_ui_architecture.md` (that one is
+> `src/lib/gc_async_mut/gpu/engine2d/*`, with cpu-simd/directx/vulkan/metal
+> backends). The two share primitive-drawing vocabulary (`clear`,
+> `draw_rect_filled`, `present`, ...) by design but are separate
+> implementations for separate targets; see "Current Blocker" below for why
+> the hosted facade cannot simply be reused here.
+
 ## Scope
 
 This document locks the Simple OS/QEMU graphics-core subset of Engine2D. The target is not the full game-engine roadmap; it is the x86_64 guest path that boots in QEMU, paints deterministic 2D primitives, supports WM-facing Simple Web smoke coverage, and supports QMP framebuffer capture.

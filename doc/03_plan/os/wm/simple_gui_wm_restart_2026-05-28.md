@@ -29,6 +29,100 @@ Related docs:
 - `doc/03_plan/wm_ui_export_plan.md`
 - `doc/03_plan/gui_renderer_restart_plan_2026-05-29.md`
 
+## 2026-07-05 Redesign Plan: Real App Process WM
+
+The current filesystem-launched showcase frame bridge is a transition proof,
+not the final WM/app contract. The redesign target is a shared GUI backend
+interface where the same app source can run in either native-host mode or
+WM-client mode without source changes. Rebuilds or script-mode launch flags are
+allowed, but the app identity stays the filesystem source/binary path and the
+WM always launches the app as a separate process on both host platforms and
+SimpleOS.
+
+### Required end state
+
+1. **Same app source, different launch backend.** A GUI app selects one backend
+   at launch: native host backend, host WM-client backend, or SimpleOS
+   WM-client backend. App code calls the same GUI API in all modes.
+2. **Separate process ownership.** The WM starts apps from filesystem paths,
+   tracks PID/app id/window ids/taskbar state, receives lifecycle messages, and
+   can terminate the child. No showcase/widget code is embedded in the WM.
+3. **Bidirectional GUI protocol.** The WM/app protocol must carry
+   `create_window`, `frame_update`/damage, `pointer_event`, `keyboard_event`,
+   `text_input`, `wheel`, `focus`, `resize`, `close`, `kill`, `theme_update`,
+   and `taskbar_update` messages. Content clicks are routed to the child with
+   window-local coordinates; chrome/taskbar clicks stay WM-owned.
+4. **Taskbar as a model object.** Taskbar rendering consumes a shared taskbar
+   object: app id, pid, title, icon/thumbnail, focused/minimized/running state,
+   progress/badge, and close/restore actions. Rect-only taskbar drawing is not
+   sufficient for completion.
+5. **Theme parity.** WM chrome and app surfaces consume the same theme token
+   source used by Simple GUI/CSS. The WM may render the theme through pixels,
+   Draw IR, HTML/CSS, or GPU commands, but the resolved colors/states must be
+   shared and testable.
+6. **Host modes.** Host WM supports three presentation modes:
+   full-screen desktop, windowed desktop, and taskbar-only/native-window mode.
+7. **SimpleOS mode.** SimpleOS uses one presentation mode for this lane:
+   full-screen WM desktop.
+
+### GPU/offload policy
+
+GUI app rendering is allowed to be offloaded to GPU in the child process. The
+WM protocol must therefore support both:
+
+- CPU/shared-memory or file-backed frame transport for bootstrap and tests.
+- GPU-backed transport where available, such as platform texture/surface
+  sharing or device-local frame handles, with typed fallback diagnostics when
+  hardware/runtime support is missing.
+
+The WM compositor may also GPU-compose child surfaces and chrome. The key rule
+is ownership, not CPU-only rendering: the child owns app rendering, the WM owns
+composition/input/taskbar/lifecycle, and the protocol carries enough
+capability metadata to choose GPU or fallback transport without changing app
+source.
+
+### Implementation phases
+
+1. **Contract first.** Define shared structs and message encoding for app
+   process lifecycle, window creation, frame updates, input events, taskbar
+   state, theme updates, capabilities, and kill/close acknowledgements.
+2. **Backend adapter.** Add a GUI backend interface that native host and
+   WM-client launch modes both implement. Existing widget/showcase source must
+   call this interface rather than branching into separate UI code.
+3. **Host process transport.** Implement host WM/app IPC with filesystem source
+   launch, child PID tracking, event forwarding, frame update acknowledgement,
+   and process kill. Use CPU frame transport first, then add GPU transport as a
+   capability-gated optimization.
+4. **Event routing.** Normalize Winit/host input into WM events, hit-test
+   chrome/taskbar/content, forward content events to the child, and require
+   updated frames after state-changing input.
+5. **Taskbar/theme polish.** Replace primitive taskbar rectangles with the
+   shared taskbar model renderer and shared theme states: focused, hover,
+   pressed, minimized, progress/badge, close/restore.
+6. **SimpleOS process transport.** Port the same protocol to SimpleOS process
+   communication using the optimized SimpleOS IPC/channel path. Keep the wire
+   model compatible with the host transport while allowing SimpleOS-specific
+   zero-copy or GPU/framebuffer optimizations below the adapter.
+7. **Final QEMU full-screen evidence.** Completion is not host-only. The final
+   acceptance lane boots SimpleOS in QEMU into full-screen WM mode, launches the
+   showcase app from the SimpleOS filesystem as a separate process, routes
+   pointer/keyboard events through the WM into the child, receives frame
+   updates, shows the shared taskbar/theme, kills/closes the child on command,
+   and captures framebuffer plus serial markers as release evidence.
+
+### System-test additions
+
+- Host native launch vs host WM-client launch proves the same app source path
+  and same GUI API entrypoint are used.
+- Host WM interaction test sends drag, click, keyboard, wheel, focus, taskbar
+  restore/minimize, close, and child-content click events; assertions must
+  include local-coordinate forwarding and child frame update evidence.
+- Taskbar/theme visual tests assert non-placeholder taskbar model fields and
+  shared theme token application.
+- GPU capability tests assert GPU transport is allowed and selected when
+  available, while CPU fallback reports typed capability diagnostics.
+- SimpleOS QEMU full-screen system test is the final gate for this redesign.
+
 ## Completed In This Session
 
 Committed fixes:

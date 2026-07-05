@@ -11,8 +11,7 @@ use compiler.backend.codegen.{CodegenPipeline, CompiledModule}
 use compiler.backend.llvm_backend.{MirToLlvm, LlvmTargetConfig}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, compile_ir_to_object}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
-use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
-use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_backend, get_effective_backend_name}
+use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_backend}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module}
@@ -225,7 +224,6 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
         return bootstrap_compile_to_native_local(ctx, backend_name, output)
     val is_release = ctx.options.release
     val opt_level = bootstrap_native_opt_level(ctx, is_release)
-    val effective_backend = get_effective_backend_name(backend_name, is_release)
     val obj_path = output + ".app.cli.bootstrap_main.o"
     if ctx.bootstrap_entry_mir.?:
         val module = ctx.bootstrap_entry_mir.unwrap()
@@ -243,33 +241,26 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
             log_phase("aot:bootstrap_native_context:copied_obj")
         else:
             return CompileResult.CodegenError("Bootstrap backend did not preserve an object file")
-    if effective_backend == "llvm" or effective_backend == "llvm-lib":
-        val llvm_opts = NativeLinkOptions(
-            debug: ctx.options.debug_info,
-            verbose: ctx.options.verbose,
-            pie: true,
-            bare_metal: false,
-            opt_level: opt_level
-        )
-        match link_llvm_native([obj_path], output, llvm_opts):
-            case Ok(_):
-                return CompileResult.Success(output)
-            case Err(e):
-                return CompileResult.CodegenError("LLVM native linking failed: {e}")
-    val link_config = NativeLinkConfig(
-        libraries: [],
-        library_paths: [],
-        runtime_path: "",
-        pie: true,
+    # Both branches above unconditionally emit the bootstrap module object via
+    # real LLVM+llc (bootstrap_emit_real_llvm_module_object /
+    # compile_bootstrap_module_with_backend), regardless of the requested
+    # --backend. The link step must follow the actual emission mode, not the
+    # outer backend flag: gating this on effective_backend let a non-LLVM
+    # backend (e.g. cranelift, as hardcoded by bootstrap-from-scratch.sh
+    # Stage 2) send an LLVM-emitted object through the generic linker, which
+    # never synthesizes the C main() entry wrapper -> "Undefined symbols: _main".
+    val llvm_opts = NativeLinkOptions(
         debug: ctx.options.debug_info,
         verbose: ctx.options.verbose,
-        extra_flags: []
+        pie: true,
+        bare_metal: false,
+        opt_level: opt_level
     )
-    match link_to_native([obj_path], output, link_config):
+    match link_llvm_native([obj_path], output, llvm_opts):
         case Ok(_):
             CompileResult.Success(output)
         case Err(e):
-            CompileResult.CodegenError("Linking failed: {e}")
+            CompileResult.CodegenError("LLVM native linking failed: {e}")
 
 pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
     """Bootstrap-local real native output path; avoids cross-module driver helper dispatch."""
@@ -287,7 +278,6 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
         return compile_bootstrap_context_to_native(next_ctx, backend_name, output)
     val is_release = ctx.options.release
     val opt_level = bootstrap_native_opt_level(ctx, is_release)
-    val effective_backend = get_effective_backend_name(backend_name, is_release)
     log_phase("aot:bootstrap_native_local_real:module")
     log_phase("aot:bootstrap_native_local_real:compile")
     val obj_path = output + ".app.cli.bootstrap_main.o"
@@ -308,30 +298,19 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
             return CompileResult.CodegenError("Bootstrap backend did not preserve an object file")
 
     log_phase("aot:bootstrap_native_local_real:link")
-    if effective_backend == "llvm" or effective_backend == "llvm-lib":
-        val llvm_opts = NativeLinkOptions(
-            debug: ctx.options.debug_info,
-            verbose: ctx.options.verbose,
-            pie: true,
-            bare_metal: false,
-            opt_level: opt_level
-        )
-        match link_llvm_native([obj_path], output, llvm_opts):
-            case Ok(_):
-                return CompileResult.Success(output)
-            case Err(e):
-                return CompileResult.CodegenError("LLVM native linking failed: {e}")
-    val link_config = NativeLinkConfig(
-        libraries: [],
-        library_paths: [],
-        runtime_path: "",
-        pie: true,
+    # Same reasoning as compile_bootstrap_context_to_native above: both
+    # branches above always emit via real LLVM+llc, so the link must always
+    # go through link_llvm_native, not the generic linker gated on
+    # effective_backend.
+    val llvm_opts = NativeLinkOptions(
         debug: ctx.options.debug_info,
         verbose: ctx.options.verbose,
-        extra_flags: []
+        pie: true,
+        bare_metal: false,
+        opt_level: opt_level
     )
-    match link_to_native([obj_path], output, link_config):
+    match link_llvm_native([obj_path], output, llvm_opts):
         case Ok(_):
             CompileResult.Success(output)
         case Err(e):
-            CompileResult.CodegenError("Linking failed: {e}")
+            CompileResult.CodegenError("LLVM native linking failed: {e}")

@@ -3,6 +3,20 @@
 **Status:** In progress (Chromium-parity renderer for Simple browser)
 **Last updated:** 2026-04-15
 
+> **Relationship to the target UI hierarchy (2026-07-05):** this
+> Skia/Blink/viz/cc pipeline is a separate, Chromium-naming-mirror research
+> lane (`src/lib/skia`, `src/lib/blink`, `src/lib/viz`, `src/lib/cc`, with
+> their own specs under `test/01_unit/lib/{skia,blink,viz}`), reached only
+> through additive bridges (e.g. `skia/bridge/engine2d_bridge.spl`) onto the
+> shared `Engine2D` backend. It is **not** the `web/core` ("CORE simple web
+> renderer") node in `00_ui_architecture.md`'s target tree — that canonical
+> role belongs to
+> `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+> per `doc/04_architecture/adr/ADR-002-canonical-browser-engine.md`, which
+> also demotes the `examples/11_advanced/browser/` maximalist tree to
+> research/test-fixtures-only. Nothing in this document should be read as
+> describing the default GUI/web rendering path.
+
 ## Overview
 
 The drawing stack is a Chromium-class rendering pipeline written in Simple,

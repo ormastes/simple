@@ -7,24 +7,46 @@
 #     examples/06_io/ui/wm_widget_showcase_gui.spl
 
 use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
 use std.io_runtime.{env_get, file_exists, file_read, file_read_bytes, dir_create_all, getpid, time_now_unix_micros}
-use app.io.mod.{process_spawn_async, process_spawn_async_env, process_kill, thread_sleep, host_os, cwd}
+use app.io.mod.{process_spawn_async, process_spawn_async_env, process_kill, host_os, cwd}
 use common.window_protocol.geometry.{Size}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
 use common.ui.wm_app_process_contract.{WIDGET_SHOWCASE_APP_SOURCE, WIDGET_SHOWCASE_TITLE, wm_fs_bridge_decode, wm_widget_showcase_client_env}
 use os.compositor.host_compositor_entry.{HostCompositor, HeadlessHostCompositorBackend, host_compositor_pointer_move, host_compositor_left_button_at, host_taskbar_dock_width, host_taskbar_item_width, host_taskbar_item_x}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
 
+extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
+extern fn rt_winit_buffer_fill_rect(buf: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
+extern fn rt_winit_buffer_blit_pixels(buf: i64, x: i64, y: i64, w: i64, h: i64, pixels: [i64]) -> bool
+extern fn rt_winit_buffer_draw_text(buf: i64, x: i64, y: i64, text_val: text, fg: i64, bg: i64) -> bool
+extern fn rt_winit_buffer_present(win: i64, buf: i64) -> bool
+extern fn rt_winit_buffer_free(buf: i64) -> bool
+
 val W: i32 = 660
 val H: i32 = 840
 val LOCATOR: u32 = 0xFFFF00FFu32
+val MUTED: u32 = 0xFF94A3B8u32
 
-fn pack(src: [u32]) -> [i64]:
+struct WmLoopState:
+    comp: HostCompositor
+    mouse_x: i32
+    mouse_y: i32
+    dirty: bool
+    running: bool
+
+fn argb(color: u32) -> i64:
+    color.to_i64()
+
+fn rgb(color: u32) -> i64:
+    color.to_i64() & 0xFFFFFF
+
+fn pack_frame(src: [u32]) -> [i64]:
     var out: [i64] = [0; src.len()]
     var i = 0
     while i < src.len():
-        out[i] = src[i].to_i64() & 0xFFFFFF
+        out[i] = rgb(src[i])
         i = i + 1
     out
 
@@ -63,49 +85,21 @@ fn resolve_repo_root() -> text:
         return here
     "."
 
-fn fill_rect(buf_in: [u32], x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
-    var buf = buf_in
-    val x0 = if x < 0: 0 else: x
-    val y0 = if y < 0: 0 else: y
-    val x1_raw = x + w
-    val y1_raw = y + h
-    val x1 = if x1_raw > W: W else: x1_raw
-    val y1 = if y1_raw > H: H else: y1_raw
-    var yy = y0
-    while yy < y1:
-        var xx = x0
-        val row = yy * W
-        while xx < x1:
-            buf[row + xx] = color
-            xx = xx + 1
-        yy = yy + 1
-    buf
+fn fill_rect_buffer(buf: i64, x: i32, y: i32, w: i32, h: i32, color: u32):
+    rt_winit_buffer_fill_rect(buf, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), argb(color))
 
-fn blit_frame(buf_in: [u32], x: i32, y: i32, frame: PpmImage) -> [u32]:
-    var buf = buf_in
-    var yy = 0
-    while yy < frame.height:
-        val dy = y + yy
-        if dy >= 0 and dy < H:
-            var xx = 0
-            while xx < frame.width:
-                val dx = x + xx
-                if dx >= 0 and dx < W:
-                    buf[dy * W + dx] = frame.pixels[yy * frame.width + xx]
-                xx = xx + 1
-        yy = yy + 1
-    buf
+fn draw_text_buffer(buf: i64, x: i32, y: i32, text_val: text, fg: u32, bg: u32):
+    rt_winit_buffer_draw_text(buf, x.to_i64(), y.to_i64(), text_val, argb(fg), argb(bg))
 
-fn draw_taskbar_pixels(buf_in: [u32], comp: HostCompositor) -> [u32]:
-    var buf = buf_in
+fn draw_taskbar_buffer(buf: i64, comp: HostCompositor):
     val theme = wm_chrome_theme()
     val count = comp.windows.len().to_i32()
     if count <= 0:
-        return buf
+        return
     val dock_w = host_taskbar_dock_width(W, count)
     val dock_x = (W - dock_w) / 2
     val dock_y = H - 62
-    buf = fill_rect(buf, dock_x, dock_y, dock_w, 44, theme.taskbar)
+    fill_rect_buffer(buf, dock_x, dock_y, dock_w, 44, theme.taskbar)
     val item_w = host_taskbar_item_width(W, count)
     var i = 0
     while i < count:
@@ -116,61 +110,85 @@ fn draw_taskbar_pixels(buf_in: [u32], comp: HostCompositor) -> [u32]:
             color = theme.accent
         elif win.minimized:
             color = theme.host_window_body
-        buf = fill_rect(buf, ix + 2, dock_y + 6, item_w - 4, 32, color)
+        fill_rect_buffer(buf, ix + 2, dock_y + 6, item_w - 4, 32, theme.command_lane)
+        fill_rect_buffer(buf, ix + 4, dock_y + 8, item_w - 8, 28, color)
+        fill_rect_buffer(buf, ix + 12, dock_y + 14, 12, 12, theme.text_primary)
+        draw_text_buffer(buf, ix + 30, dock_y + 13, win.title, theme.text_primary, color)
         if win.focused and not win.minimized:
-            buf = fill_rect(buf, ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
+            fill_rect_buffer(buf, ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
         i = i + 1
-    buf
 
-fn compose_pixels(comp: HostCompositor, frame: PpmImage) -> [u32]:
+fn compose_buffer(buf: i64, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_pixels: [i64]):
     val theme = wm_chrome_theme()
-    var pixels: [u32] = [theme.compositor_bg; W * H]
-    pixels = fill_rect(pixels, 0, 0, W, 38, theme.command_lane)
+    fill_rect_buffer(buf, 0, 0, W, H, theme.compositor_bg)
+    fill_rect_buffer(buf, 0, 0, W, 38, theme.command_lane)
+    draw_text_buffer(buf, 14, 12, "Simple WM", theme.text_primary, theme.command_lane)
+    draw_text_buffer(buf, 112, 12, "fs child: {WIDGET_SHOWCASE_APP_SOURCE}", MUTED, theme.command_lane)
     var i = 0
     while i < comp.windows.len():
         val win = comp.windows[i]
         if not win.minimized:
-            pixels = fill_rect(pixels, win.x + 7, win.y + 7, win.w, win.h, theme.window_shadow)
-            pixels = fill_rect(pixels, win.x, win.y, win.w, win.h, theme.host_window_body)
+            fill_rect_buffer(buf, win.x + 7, win.y + 7, win.w, win.h, theme.window_shadow)
+            fill_rect_buffer(buf, win.x, win.y, win.w, win.h, theme.host_window_body)
             val title_color = if win.focused: theme.accent else: theme.title_unfocused
-            pixels = fill_rect(pixels, win.x, win.y, win.w, 24, title_color)
-            pixels = fill_rect(pixels, win.x + win.w - 24, win.y, 24, 24, theme.close_button)
+            fill_rect_buffer(buf, win.x, win.y, win.w, 24, title_color)
+            draw_text_buffer(buf, win.x + 10, win.y + 7, win.title, theme.text_primary, title_color)
+            fill_rect_buffer(buf, win.x + win.w - 24, win.y, 24, 24, theme.close_button)
+            draw_text_buffer(buf, win.x + win.w - 17, win.y + 5, "X", theme.text_primary, theme.close_button)
             val cx = win.x + 4
             val cy = win.y + 28
-            pixels = blit_frame(pixels, cx, cy, frame)
+            rt_winit_buffer_blit_pixels(buf, cx.to_i64(), cy.to_i64(), frame_w.to_i64(), frame_h.to_i64(), frame_pixels)
         i = i + 1
-    pixels = draw_taskbar_pixels(pixels, comp)
-    pixels = fill_rect(pixels, 0, 0, W, 3, LOCATOR)
-    pixels = fill_rect(pixels, 0, H - 3, W, 3, LOCATOR)
-    pixels = fill_rect(pixels, 0, 0, 3, H, LOCATOR)
-    pixels = fill_rect(pixels, W - 3, 0, 3, H, LOCATOR)
-    pixels
+    draw_taskbar_buffer(buf, comp)
+    fill_rect_buffer(buf, 0, 0, W, 3, LOCATOR)
+    fill_rect_buffer(buf, 0, H - 3, W, 3, LOCATOR)
+    fill_rect_buffer(buf, 0, 0, 3, H, LOCATOR)
+    fill_rect_buffer(buf, W - 3, 0, 3, H, LOCATOR)
 
-fn render_and_present(win: WinitWindow, comp: HostCompositor, frame: PpmImage, state: text) -> bool:
-    val pixels = compose_pixels(comp, frame)
-    if pixels.len() < W * H:
-        print "[wm-showcase] present state={state} FAIL compose_short={pixels.len()} want={W * H}"
+fn render_and_present(win: WinitWindow, buf: i64, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_pixels: [i64], state: text) -> bool:
+    compose_buffer(buf, comp, frame_w, frame_h, frame_pixels)
+    val ok = rt_winit_buffer_present(win.handle, buf)
+    if not ok:
+        print "[wm-showcase] present state={state} FAIL buffer_present"
         return false
-    winit_present_rgba(win, W.to_i64(), H.to_i64(), pack(pixels))
     if state != "hold":
-        print "[wm-showcase] present state={state} dims={W}x{H} len={pixels.len()} child_frame=from-filesystem"
+        print "[wm-showcase] present state={state} dims={W}x{H} child_frame=from-filesystem renderer=winit-buffer"
     true
 
-fn apply_wm_input(comp: HostCompositor, input: WinitInput) -> HostCompositor:
-    var out = comp
+fn apply_wm_input(state: WmLoopState, input: WinitInput) -> WmLoopState:
+    var out = state.comp
+    var mx = state.mouse_x
+    var my = state.mouse_y
+    var dirty = false
+    var running = state.running
+    if should_close(input):
+        running = false
     if input.mouse_x != 0.0 or input.mouse_y != 0.0:
-        out = host_compositor_pointer_move(out, input.mouse_x.to_i32(), input.mouse_y.to_i32())
+        mx = input.mouse_x.to_i32()
+        my = input.mouse_y.to_i32()
+        val was_dragging = state.comp.dragging or state.comp.resizing
+        out = host_compositor_pointer_move(out, mx, my)
+        dirty = was_dragging or out.dragging or out.resizing
     var ci = 0
     while ci < input.click_buttons.len():
         val btn = input.click_buttons[ci]
         val pressed = input.click_pressed[ci]
         if btn == 0:
-            val fx = input.click_x[ci].to_i32()
-            val fy = input.click_y[ci].to_i32()
+            var fx = input.click_x[ci].to_i32()
+            var fy = input.click_y[ci].to_i32()
+            if fx == 0 and fy == 0:
+                fx = mx
+                fy = my
+            else:
+                mx = fx
+                my = fy
             out = host_compositor_left_button_at(out, pressed, fx, fy)
+            dirty = true
             print "[wm-showcase] input left_button pressed={pressed} x={fx} y={fy} windows={out.windows.len()} dragging={out.dragging}"
         ci = ci + 1
-    out
+    if out.windows.len() == 0:
+        running = false
+    WmLoopState(comp: out, mouse_x: mx, mouse_y: my, dirty: dirty, running: running)
 
 fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -> i64:
     var env = wm_widget_showcase_client_env(bridge_path, frame_path)
@@ -195,9 +213,11 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
         showcase_source_path
     ])
 
-fn cleanup(child_pid: i64, win: WinitWindow, lp: WinitLoop):
+fn cleanup(child_pid: i64, buf: i64, win: WinitWindow, lp: WinitLoop):
     if child_pid > 0:
         process_kill(child_pid)
+    if buf > 0:
+        rt_winit_buffer_free(buf)
     winit_window_free(win)
     winit_loop_free(lp)
 
@@ -233,6 +253,7 @@ fn main() -> i64:
         process_kill(child_pid)
         return 1
     val frame = decoded.unwrap()
+    val packed_frame = pack_frame(frame.pixels)
 
     val lp = winit_loop_new()
     if not lp.is_valid:
@@ -245,32 +266,38 @@ fn main() -> i64:
         winit_loop_free(lp)
         process_kill(child_pid)
         return 1
+    val buf = rt_winit_buffer_create(W.to_i64(), H.to_i64(), argb(wm_chrome_theme().compositor_bg))
+    if buf <= 0:
+        print "[wm-showcase] error=buffer-create-failed"
+        winit_window_free(win)
+        winit_loop_free(lp)
+        process_kill(child_pid)
+        return 1
 
     val backend = HeadlessHostCompositorBackend.new(W, H)
     var comp = HostCompositor.new(backend, Size.wh(W, H))
     comp.apply_bridge_request(1, 701, COMP_CREATE_WINDOW.to_i64(), 0, req.title, 54, 70, req.window_w, req.window_h, req.content, req.pid, req.app_id)
     print "[wm-showcase] launched source={req.source_path} child_pid={child_pid} bridge_pid={req.pid} app_id={req.app_id} windows={comp.windows.len()} taskbar_items={comp.windows.len()}"
     if comp.windows.len() != 1:
-        cleanup(child_pid, win, lp)
+        cleanup(child_pid, buf, win, lp)
         return 1
-    if not render_and_present(win, comp, frame, "launched"):
-        cleanup(child_pid, win, lp)
+    if not render_and_present(win, buf, comp, frame.width, frame.height, packed_frame, "launched"):
+        cleanup(child_pid, buf, win, lp)
         return 1
 
-    var running = true
+    var state = WmLoopState(comp: comp, mouse_x: 0, mouse_y: 0, dirty: false, running: true)
     var frames = 0
-    while running and frames < 2000000:
+    while state.running and frames < 2000000:
         val input = winit_poll_input(lp)
-        if should_close(input):
-            running = false
-        comp = apply_wm_input(comp, input)
-        if comp.windows.len() == 0:
-            running = false
-        if not render_and_present(win, comp, frame, "hold"):
-            cleanup(child_pid, win, lp)
-            return 1
-        thread_sleep(16)
+        state = apply_wm_input(state, input)
+        if state.dirty:
+            if not render_and_present(win, buf, state.comp, frame.width, frame.height, packed_frame, "hold"):
+                cleanup(child_pid, buf, win, lp)
+                return 1
+            thread_sleep(2)
+        else:
+            thread_sleep(24)
         frames = frames + 1
 
-    cleanup(child_pid, win, lp)
+    cleanup(child_pid, buf, win, lp)
     return 0
