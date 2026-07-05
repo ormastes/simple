@@ -15,15 +15,21 @@
 
   MODELLED (in scope):
     * A straight-line MIR fragment: a `List Instr` over virtual registers (Nat),
-      values are machine integers (`Int`). Instructions: `const dst v`,
-      `add dst a b`, `copy dst src` — exactly the constant-fold/copy-prop-relevant
-      subset named in the plan.
+      values are FAITHFUL 64-bit machine words (`BitVec 64`). `+` on `BitVec 64`
+      is native two's-complement addition modulo 2^64 — it WRAPS on overflow,
+      exactly like the real backend's 64-bit `add`. This closes the honesty gap
+      that an unbounded-`Int` model would leave open: because the constant-fold
+      folds `add (const a) (const b)` to `const (a + b)` using the SAME `BitVec 64`
+      `+`, the folded literal is definitionally the value the backend computes,
+      overflow included. Instructions: `const dst v`, `add dst a b`,
+      `copy dst src` — exactly the constant-fold/copy-prop-relevant subset.
     * A denotational/state-transformer semantics `eval : Mir → Env → Env`.
     * The optimization `opt` and the validator `validate`.
 
   OUT OF SCOPE (deferred per plan §(b), NOT assumed sound here): register
   allocation, multi-ISA instruction selection, the full MIR instruction set
-  (branches/calls/memory), and the interpreter execution path.
+  (branches/calls/memory), signedness/width other than 64-bit wrapping add, and
+  the interpreter execution path.
 
   All theorems proved with the Lean core library only (no Mathlib) and with no
   proof-trust bypasses — the repo's `check-lean-proofs.shs` TRUST_RE gate must
@@ -36,8 +42,9 @@ namespace MirOptTv
 /-- A virtual register is identified by a natural number. -/
 abbrev Reg : Type := Nat
 
-/-- Machine values are integers. -/
-abbrev Val : Type := Int
+/-- Machine values are 64-bit words. `+`/`*` on `BitVec 64` wrap modulo 2^64,
+    faithfully modelling the backend's overflow behaviour (see file header). -/
+abbrev Val : Type := BitVec 64
 
 /-- Straight-line MIR instructions over the constant-fold/copy-prop subset. -/
 inductive Instr where
@@ -141,7 +148,9 @@ theorem absStep_sound (σ : AbsEnv) (env : Env) (i : Instr)
           -- env a = va and env b = vb by soundness of σ; and hr : va + vb = v.
           have hva : env a = va := h a va ha
           have hvb : env b = vb := h b vb hb
-          rw [hva, hvb]; omega
+          -- After rewriting the concrete operands to their tracked constants the
+          -- goal is `va + vb = v`; `hr` is literally that (same `BitVec 64` `+`).
+          rw [hva, hvb]; exact hr
         · simp [hd] at hr ⊢; exact h r v hr
   | copy d s =>
     simp only [absStep, absUpd] at hr
@@ -412,5 +421,77 @@ theorem adv_good_is_real_rewrite : advSrc ≠ advGoodTgt := by
     program — end-to-end evidence the modelled pass does the intended work. -/
 theorem opt_advSrc : opt advSrc = advGoodTgt := by
   decide
+
+/-! ## 8. Overflow-faithfulness: the model genuinely wraps (the honesty payload)
+
+    This section is what makes the value model OVERFLOW-FAITHFUL rather than a
+    convenient over-approximation. Over unbounded `Int` a folder that computed the
+    *mathematical* sum would look correct, yet the real 64-bit backend wraps — so
+    an `Int` proof would certify a fold the hardware does not actually perform.
+    Here `Val = BitVec 64` and `+` wraps, so:
+
+      * the wrap is a THEOREM of the model (`wrap_overflow`), and
+      * the constant-fold that the validator accepts is the wrapping one — a fold
+        that "ignores wrap" disagrees with the semantics on an overflowing input
+        and is REJECTED (`ov_bad_rejected` + `ov_semantics_differ`). -/
+
+/-- The largest unsigned 64-bit word, `2^64 - 1`. -/
+def maxU64 : Val := 0xFFFFFFFFFFFFFFFF
+
+/-- **Overflow is real in this model.** `maxU64 + 1` wraps to `0`, exactly as a
+    hardware 64-bit `add` does. Under an unbounded-`Int` model this would instead
+    be `2^64`, so this equation is precisely the fact the faithful model buys us. -/
+theorem wrap_overflow : maxU64 + 1 = 0 := by decide
+
+/-- Source: r0 := maxU64; r1 := 1; r2 := r0 + r1.  The backend computes r2 = 0
+    (the add wraps). -/
+def ovSrc : Mir :=
+  [Instr.const 0 maxU64, Instr.const 1 1, Instr.add 2 0 1]
+
+/-- Correct fold: the wrapping sum `maxU64 + 1 = 0`. -/
+def ovGoodTgt : Mir :=
+  [Instr.const 0 maxU64, Instr.const 1 1, Instr.const 2 0]
+
+/-- Unsound fold that "ignores wrap": it keeps `maxU64` (as if `maxU64 + 1`
+    saturated / stayed at the max) instead of wrapping to `0`. Over unbounded
+    `Int` no single 64-bit literal can even name the true mathematical result
+    `2^64`; the honest, representable answer is `0`, and anything else is wrong. -/
+def ovBadTgt : Mir :=
+  [Instr.const 0 maxU64, Instr.const 1 1, Instr.const 2 maxU64]
+
+/-- The validator ACCEPTS the wrapping fold (its check `v = va + vb` uses the same
+    `BitVec 64` `+`). -/
+theorem ov_good_accepted : validate ovSrc ovGoodTgt = true := by decide
+
+/-- The optimizer, run on the overflowing source, produces exactly the wrapping
+    fold — end-to-end evidence the modelled pass folds with overflow semantics. -/
+theorem opt_ovSrc : opt ovSrc = ovGoodTgt := by decide
+
+/-- The validator REJECTS the wrap-ignoring fold. -/
+theorem ov_bad_rejected : validate ovSrc ovBadTgt = false := by decide
+
+/-- …and rejection is warranted: the wrap-ignoring target genuinely disagrees with
+    the source on the overflowing input (r2 = 0 vs r2 = maxU64). This is the
+    concrete overflowing witness `0xFFFFFFFFFFFFFFFF + 1` demanded by the plan. -/
+theorem ov_semantics_differ :
+    eval ovSrc (fun _ => 0) 2 ≠ eval ovBadTgt (fun _ => 0) 2 := by decide
+
+/-- Cross-check that the wrapping fold really is the semantics of the source: both
+    evaluate register 2 to `0`, i.e. the accepted fold matches the backend. -/
+theorem ov_good_matches_src :
+    eval ovSrc (fun _ => 0) 2 = eval ovGoodTgt (fun _ => 0) 2 := by decide
+
+/-! Compile-time demonstrations (evaluate in the kernel, no axioms): `maxU64 + 1`
+    wraps to 0, the source's register 2 is 0, and the wrap-ignoring target's is
+    maxU64 (0xFFFF…FFFF) — printed by the `#eval`s below. -/
+#eval (maxU64 + 1 : Val)                 -- 0x0000000000000000#64
+#eval (eval ovSrc (fun _ => 0) 2)        -- 0x0000000000000000#64
+#eval (eval ovBadTgt (fun _ => 0) 2)     -- 0xffffffffffffffff#64
+
+/-! ## 9. Disclosed axiom footprint -/
+
+#print axioms validate_sound
+#print axioms wrap_overflow
+#print axioms ov_bad_rejected
 
 end MirOptTv
