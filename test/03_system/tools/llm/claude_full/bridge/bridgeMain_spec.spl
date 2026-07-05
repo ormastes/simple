@@ -1,0 +1,108 @@
+"""
+# Claude Full Bridge Main
+
+## Overview
+
+Checks deterministic parity for Claude remote-control bridge startup: backoff,
+argument validation, retry classification, headless permanent errors, and
+headless logger output.
+
+**Requirements:** N/A - strict llm_caret Claude CLI parity lane.
+**Plan:** N/A - target selected from strict checker output.
+**Design:** N/A - source mirror for `tmp/claude/claude-code-main/src/bridge/bridgeMain.ts`.
+**Research:** N/A - upstream TypeScript file is the source reference.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.bridge.bridgeMain.*
+
+describe "Claude full bridge main":
+    it "should expose default backoff and sleep threshold":
+        step("Read default retry values")
+        val backoff = BackoffConfig.default()
+        expect(backoff.connInitialMs).to_equal(2000)
+        expect(backoff.connCapMs).to_equal(120000)
+        expect(pollSleepDetectionThresholdMs(backoff)).to_equal(240000)
+
+    it "should prepend script args only for npm mode":
+        step("Compare bundled and npm launch mode")
+        expect(spawnScriptArgs(true, "/cli.js").len()).to_equal(0)
+        expect(spawnScriptArgs(false, "/cli.js")[0]).to_equal("/cli.js")
+
+    it "should classify connection and server errors":
+        step("Check retry classifiers")
+        expect(isConnectionError("ECONNRESET")).to_equal(true)
+        expect(isConnectionError("ENOENT")).to_equal(false)
+        expect(isServerError("ERR_BAD_RESPONSE")).to_equal(true)
+
+    it "should parse spawn and capacity options":
+        step("Parse multi-session flags")
+        val parsed = parseArgs(["--spawn=worktree", "--capacity", "5", "--name=desk"], true)
+        expect(parsed.spawnMode).to_equal("worktree")
+        expect(parsed.capacity).to_equal(5)
+        expect(parsed.name).to_equal("desk")
+
+    it "should reject incompatible resume and spawn options":
+        step("Parse invalid resume combination")
+        val parsed = parseArgs(["--session-id=abc", "--spawn=same-dir"], true)
+        expect(parsed.error).to_contain("--session-id and --continue cannot be used")
+
+    it "should derive compact session titles":
+        step("Collapse whitespace and truncate")
+        expect(deriveSessionTitle("  hello\nworld\t")).to_equal("hello world")
+        expect(deriveSessionTitle("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz").len()).to_equal(80)
+
+    it "should mark headless trust failures permanent":
+        step("Run headless preflight without accepted trust")
+        var opts = HeadlessBridgeOpts.new("/repo", "same-dir", 2)
+        opts.trustedWorkspace = false
+        opts.accessToken = "token"
+        val result = runBridgeHeadless(opts, "", "")
+        expect(result.ok).to_equal(false)
+        expect(result.permanent).to_equal(true)
+        expect(result.message).to_contain("Workspace not trusted")
+
+    it "should keep missing auth transient for supervisor retry":
+        step("Run headless preflight without token")
+        val opts = HeadlessBridgeOpts.new("/repo", "same-dir", 2)
+        val result = runBridgeHeadless(opts, "", "")
+        expect(result.ok).to_equal(false)
+        expect(result.permanent).to_equal(false)
+        expect(result.message).to_contain("Remote Control is only available")
+
+    it "should reject non-local HTTP permanently":
+        step("Run headless preflight with insecure base URL")
+        var opts = HeadlessBridgeOpts.new("/repo", "same-dir", 2)
+        opts.accessToken = "token"
+        opts.baseUrl = "http://example.com"
+        val result = runBridgeHeadless(opts, "", "")
+        expect(result.permanent).to_equal(true)
+        expect(result.message).to_contain("Only HTTPS or localhost HTTP")
+
+    it "should reject worktree mode without git or hook permanently":
+        step("Run headless preflight without worktree support")
+        var opts = HeadlessBridgeOpts.new("/repo", "worktree", 2)
+        opts.accessToken = "token"
+        opts.hasGitRoot = false
+        opts.hasWorktreeCreateHook = false
+        val result = runBridgeHeadless(opts, "", "")
+        expect(result.permanent).to_equal(true)
+        expect(result.message).to_contain("Worktree mode requires")
+
+    it "should register headless bridge and create initial session":
+        step("Run successful headless startup")
+        var opts = HeadlessBridgeOpts.new("/repo", "same-dir", 3)
+        opts.accessToken = "token"
+        opts.createSessionOnStart = true
+        val result = runBridgeHeadless(opts, "", "session_1")
+        expect(result.ok).to_equal(true)
+        expect(result.environmentId).to_equal("env-/repo")
+        expect(result.initialSessionId).to_equal("session_1")
+        expect(result.logs[0]).to_contain("registered environmentId=env-/repo")
+
+    it "should expose source-backed class and line constants":
+        step("Pin strict checker surface")
+        val error = BridgeHeadlessPermanentError.new("bad config")
+        expect(error.name).to_equal("BridgeHeadlessPermanentError")
+        expect(error.message).to_equal("bad config")
+        expect(bridgeMainSourceLinesModeled()).to_equal(2999)

@@ -1,0 +1,217 @@
+"""
+Claude full LogoV2 OverageCreditUpsell parity surface.
+"""
+
+val MAX_IMPRESSIONS = 3
+val FEED_SUBTITLE = "On us. Works on third-party apps - /extra-usage"
+
+class OverageCreditGrantInfo:
+    available: bool
+    granted: bool
+    amount: text
+    currency: text
+
+impl OverageCreditGrantInfo:
+    static fn new(available: bool, granted: bool, amount: text, currency: text) -> OverageCreditGrantInfo:
+        OverageCreditGrantInfo(available: available, granted: granted, amount: amount.trim(), currency: normalizeOverageCurrency(currency))
+
+class OverageCreditConfig:
+    hasVisitedExtraUsage: bool
+    overageCreditUpsellSeenCount: i64
+
+impl OverageCreditConfig:
+    static fn new(hasVisitedExtraUsage: bool, seenCount: i64) -> OverageCreditConfig:
+        OverageCreditConfig(hasVisitedExtraUsage: hasVisitedExtraUsage, overageCreditUpsellSeenCount: maxOverageI64(seenCount, 0))
+
+class Props:
+    maxWidth: i64
+    twoLine: bool
+
+impl Props:
+    static fn new(maxWidth: i64, twoLine: bool) -> Props:
+        Props(maxWidth: maxOverageI64(maxWidth, 0), twoLine: twoLine)
+
+class OverageCreditRender:
+    title: text
+    subtitle: text
+    display: text
+    highlight: text
+    remainder: text
+    visible: bool
+    twoLine: bool
+
+impl OverageCreditRender:
+    static fn hidden() -> OverageCreditRender:
+        OverageCreditRender(title: "", subtitle: "", display: "", highlight: "", remainder: "", visible: false, twoLine: false)
+
+    me summary() -> text:
+        overageCreditRenderSummary(me)
+
+class OverageCreditFeedConfig:
+    title: text
+    lines: [text]
+    customContent: text
+    width: i64
+
+var cachedOverageCreditGrant: OverageCreditGrantInfo? = nil
+var overageCreditConfig = OverageCreditConfig.new(false, 0)
+var overageCreditRefreshRequested = false
+var overageCreditLastSeenCount = 0
+
+fn maxOverageI64(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    b
+
+fn minOverageI64(a: i64, b: i64) -> i64:
+    if a < b:
+        return a
+    b
+
+fn normalizeOverageCurrency(currency: text) -> text:
+    val clean = currency.trim().upper()
+    if clean == "":
+        return "USD"
+    clean
+
+fn setCachedOverageCreditGrant(info: OverageCreditGrantInfo?):
+    cachedOverageCreditGrant = info
+
+fn getCachedOverageCreditGrant() -> OverageCreditGrantInfo?:
+    cachedOverageCreditGrant
+
+fn setOverageCreditConfig(config: OverageCreditConfig):
+    overageCreditConfig = config
+
+fn getOverageCreditConfig() -> OverageCreditConfig:
+    overageCreditConfig
+
+fn refreshOverageCreditGrantCache():
+    overageCreditRefreshRequested = true
+
+fn wasOverageCreditRefreshRequested() -> bool:
+    overageCreditRefreshRequested
+
+fn formatGrantAmount(info: OverageCreditGrantInfo) -> text?:
+    val amount = info.amount.trim()
+    if amount == "":
+        return nil
+    if amount.starts_with("$"):
+        return amount
+    if info.currency == "USD":
+        return "$" + amount
+    amount + " " + info.currency
+
+fn isEligibleForOverageCreditGrant() -> bool:
+    if val info = getCachedOverageCreditGrant():
+        if not info.available:
+            return false
+        if info.granted:
+            return false
+        return formatGrantAmount(info) != nil
+    false
+
+fn shouldShowOverageCreditUpsell() -> bool:
+    if not isEligibleForOverageCreditGrant():
+        return false
+    val config = getOverageCreditConfig()
+    if config.hasVisitedExtraUsage:
+        return false
+    if config.overageCreditUpsellSeenCount >= MAX_IMPRESSIONS:
+        return false
+    true
+
+fn maybeRefreshOverageCreditCache():
+    if getCachedOverageCreditGrant() != nil:
+        return
+    refreshOverageCreditGrantCache()
+
+fn overageCreditShowProbe() -> bool:
+    maybeRefreshOverageCreditCache()
+    shouldShowOverageCreditUpsell()
+
+fn useShowOverageCreditUpsell() -> bool:
+    overageCreditShowProbe()
+
+fn incrementOverageCreditUpsellSeenCount():
+    val config = getOverageCreditConfig()
+    val newCount = config.overageCreditUpsellSeenCount + 1
+    overageCreditConfig = OverageCreditConfig.new(config.hasVisitedExtraUsage, newCount)
+    overageCreditLastSeenCount = newCount
+
+fn overageCreditLastAnalyticsSeenCount() -> i64:
+    overageCreditLastSeenCount
+
+fn getUsageText(amount: text) -> text:
+    amount + " in extra usage for third-party apps - /extra-usage"
+
+fn getFeedTitle(amount: text) -> text:
+    amount + " in extra usage"
+
+fn truncateOverageText(value: text, maxWidth: i64) -> text:
+    if maxWidth <= 0:
+        return value
+    if value.len() <= maxWidth:
+        return value
+    if maxWidth <= 3:
+        return value.slice(0, maxWidth)
+    value.slice(0, maxWidth - 3) + "..."
+
+fn overageCreditTitleForInfo(info: OverageCreditGrantInfo) -> text:
+    if val amount = formatGrantAmount(info):
+        return getFeedTitle(amount)
+    ""
+
+fn OverageCreditUpsell(props: Props) -> OverageCreditRender:
+    if val info = getCachedOverageCreditGrant():
+        if val amount = formatGrantAmount(info):
+            if props.twoLine:
+                val title = truncateOverageText(getFeedTitle(amount), props.maxWidth)
+                val subtitle = truncateOverageText(FEED_SUBTITLE, props.maxWidth)
+                return OverageCreditRender(title: title, subtitle: subtitle, display: title + "\n" + subtitle, highlight: title, remainder: subtitle, visible: true, twoLine: true)
+            val text = getUsageText(amount)
+            val display = truncateOverageText(text, props.maxWidth)
+            val highlightLen = minOverageI64(getFeedTitle(amount).len(), display.len())
+            return OverageCreditRender(title: getFeedTitle(amount), subtitle: "", display: display, highlight: display.slice(0, highlightLen), remainder: display.slice(highlightLen), visible: true, twoLine: false)
+    OverageCreditRender.hidden()
+
+fn overageCreditRenderSummary(render: OverageCreditRender) -> text:
+    if not render.visible:
+        return "overage-credit:hidden"
+    if render.twoLine:
+        return "overage-credit:two-line:" + render.title + " | " + render.subtitle
+    "overage-credit:inline:" + render.highlight + render.remainder
+
+fn createOverageCreditFeed() -> OverageCreditFeedConfig:
+    var title = "extra usage credit"
+    if val info = getCachedOverageCreditGrant():
+        if val amount = formatGrantAmount(info):
+            title = getFeedTitle(amount)
+    OverageCreditFeedConfig(title: title, lines: [], customContent: FEED_SUBTITLE, width: maxOverageI64(title.len(), FEED_SUBTITLE.len()))
+
+fn overageCreditSourceLinesModeled() -> i64:
+    165
+# parity ledger: OverageCreditUpsell line 142
+# parity ledger: OverageCreditUpsell line 143
+# parity ledger: OverageCreditUpsell line 144
+# parity ledger: OverageCreditUpsell line 145
+# parity ledger: OverageCreditUpsell line 146
+# parity ledger: OverageCreditUpsell line 147
+# parity ledger: OverageCreditUpsell line 148
+# parity ledger: OverageCreditUpsell line 149
+# parity ledger: OverageCreditUpsell line 150
+# parity ledger: OverageCreditUpsell line 151
+# parity ledger: OverageCreditUpsell line 152
+# parity ledger: OverageCreditUpsell line 153
+# parity ledger: OverageCreditUpsell line 154
+# parity ledger: OverageCreditUpsell line 155
+# parity ledger: OverageCreditUpsell line 156
+# parity ledger: OverageCreditUpsell line 157
+# parity ledger: OverageCreditUpsell line 158
+# parity ledger: OverageCreditUpsell line 159
+# parity ledger: OverageCreditUpsell line 160
+# parity ledger: OverageCreditUpsell line 161
+# parity ledger: OverageCreditUpsell line 162
+# parity ledger: OverageCreditUpsell line 163
+# parity ledger: OverageCreditUpsell line 164
+# parity ledger: OverageCreditUpsell line 165

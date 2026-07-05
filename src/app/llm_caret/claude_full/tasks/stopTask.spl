@@ -1,0 +1,104 @@
+"""
+Shared stop-task parity model for TaskStopTool and SDK stop_task control.
+"""
+
+class StopTaskError:
+    message: text
+    code: text
+    name: text
+
+impl StopTaskError:
+    static fn new(message: text, code: text) -> StopTaskError:
+        StopTaskError(message: message, code: code, name: "StopTaskError")
+
+class StopTaskContext:
+    tasks: [TaskState]
+    supportedTypes: [text]
+    killedTaskIds: [text]
+    sdkEvents: [text]
+
+impl StopTaskContext:
+    static fn new(tasks: [TaskState], supportedTypes: [text]) -> StopTaskContext:
+        StopTaskContext(tasks: tasks, supportedTypes: supportedTypes, killedTaskIds: [], sdkEvents: [])
+
+class StopTaskResult:
+    taskId: text
+    taskType: text
+    command: text
+    killedTaskIds: [text]
+    sdkEvents: [text]
+    notified: bool
+    error: StopTaskError
+
+impl StopTaskResult:
+    static fn ok(taskId: text, taskType: text, command: text, killedTaskIds: [text], sdkEvents: [text], notified: bool) -> StopTaskResult:
+        StopTaskResult(taskId: taskId, taskType: taskType, command: command, killedTaskIds: killedTaskIds, sdkEvents: sdkEvents, notified: notified, error: StopTaskError.new("", ""))
+
+    static fn failed(error: StopTaskError) -> StopTaskResult:
+        StopTaskResult(taskId: "", taskType: "", command: "", killedTaskIds: [], sdkEvents: [], notified: false, error: error)
+
+class TaskState:
+    id: text
+    typeName: text
+    status: text
+    command: text
+    description: text
+    toolUseId: text
+    notified: bool
+
+impl TaskState:
+    static fn new(id: text, typeName: text, status: text, command: text, description: text) -> TaskState:
+        TaskState(id: id, typeName: typeName, status: status, command: command, description: description, toolUseId: "toolu_" + id, notified: false)
+
+fn stopTask(taskId: text, context: StopTaskContext) -> StopTaskResult:
+    val idx = findTaskIndex(context.tasks, taskId)
+    if idx < 0:
+        return StopTaskResult.failed(StopTaskError.new("No task found with ID: " + taskId, "not_found"))
+    var task = context.tasks[idx]
+    if task.status != "running":
+        return StopTaskResult.failed(StopTaskError.new("Task " + taskId + " is not running (status: " + task.status + ")", "not_running"))
+    if not containsTextStopTask(context.supportedTypes, task.typeName):
+        return StopTaskResult.failed(StopTaskError.new("Unsupported task type: " + task.typeName, "unsupported_type"))
+    var killedTaskIds = appendTextStopTask(context.killedTaskIds, taskId)
+    var sdkEvents = context.sdkEvents
+    var notified = task.notified
+    if isLocalShellTask(task):
+        if not task.notified:
+            task.notified = true
+            notified = true
+            sdkEvents = appendTextStopTask(sdkEvents, "terminated:" + taskId + ":stopped:" + task.toolUseId + ":" + task.description)
+    var command = task.description
+    if isLocalShellTask(task):
+        command = task.command
+    StopTaskResult.ok(taskId, task.typeName, command, killedTaskIds, sdkEvents, notified)
+
+fn isLocalShellTask(task: TaskState) -> bool:
+    task.typeName == "bash" or task.typeName == "local_shell"
+
+fn findTaskIndex(tasks: [TaskState], taskId: text) -> i64:
+    var i = 0
+    while i < tasks.len():
+        if tasks[i].id == taskId:
+            return i
+        i = i + 1
+    -1
+
+fn containsTextStopTask(values: [text], value: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == value:
+            return true
+        i = i + 1
+    false
+
+fn appendTextStopTask(values: [text], value: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < values.len():
+        out.push(values[i])
+        i = i + 1
+    out.push(value)
+    out
+
+fn stopTaskSourceLinesModeled() -> i64:
+    100

@@ -1,0 +1,85 @@
+"""
+# Claude Full Swarm Backends
+
+Focused parity coverage for the four strict-gate blocker backends.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.utils.swarm.backends.InProcessBackend.*
+use app.llm_caret.claude_full.utils.swarm.backends.ITermBackend.*
+use app.llm_caret.claude_full.utils.swarm.backends.PaneBackendExecutor.*
+use app.llm_caret.claude_full.utils.swarm.backends.TmuxBackend.*
+
+describe "Claude full swarm backend blockers":
+    it "models in-process context, spawn, mailbox, and shutdown":
+        val backend = createInProcessBackend()
+        val missing = backend.spawn(InProcessSpawnConfig.new("agent", "team", "do work", "cyan", false))
+        expect(missing.success).to_equal(false)
+        expect(missing.error).to_contain("setContext")
+
+        backend.setContext("tool-use-context")
+        val spawned = backend.spawn(InProcessSpawnConfig.new("agent", "team", "do work", "cyan", false))
+        expect(spawned.success).to_equal(true)
+        expect(spawned.agentId).to_equal("agent@team")
+        expect(backend.sendMessage("agent@team", InProcessMessage.new("hello", "lead", "blue", "now"))).to_equal(true)
+        expect(backend.mailboxTexts[0]).to_equal("hello")
+        expect(backend.terminate("agent@team", "done")).to_equal(true)
+        expect(backend.isActive("agent@team")).to_equal(false)
+
+    it "models iTerm2 split parsing and pane lifecycle":
+        val backend = ITermBackend.new()
+        backend.setDetection(true, true)
+        expect(backend.isAvailable()).to_equal(true)
+        expect(parseSplitOutput("Created new pane: ABC-123\n")).to_equal("ABC-123")
+        expect(getLeaderSessionId("w0t0p0:LEADER")).to_equal("LEADER")
+
+        val first = backend.createTeammatePaneInSwarmView("agent", "pink")
+        val second = backend.createTeammatePaneInSwarmView("reviewer", "green")
+        expect(first.isFirstTeammate).to_equal(true)
+        expect(first.splitArgs).to_equal(["session", "split", "-v"])
+        expect(second.splitArgs).to_equal(["session", "split", "-s", first.paneId])
+        expect(backend.sendCommandToPane(first.paneId, "claude --agent-id agent@team", false)).to_equal(true)
+        expect(backend.commands[0]).to_contain("send-text")
+
+    it "models pane executor command and mailbox behavior":
+        val executor = createPaneBackendExecutor("tmux")
+        val denied = executor.spawn(PaneSpawnConfig.new("agent", "team", "prompt", "purple", "/tmp/work", "sonnet", true))
+        expect(denied.success).to_equal(false)
+        expect(denied.error).to_contain("setContext")
+
+        executor.setContext("tool-use-context")
+        val spawned = executor.spawn(PaneSpawnConfig.new("agent", "team", "prompt", "purple", "/tmp/work", "sonnet", true))
+        expect(spawned.success).to_equal(true)
+        expect(spawned.paneId).to_equal("tmux:agent@team")
+        expect(executor.commands[0]).to_contain("--plan-mode-required")
+        expect(executor.commands[0]).to_contain("--model sonnet")
+        expect(executor.sendMessage("agent@team", "next")).to_equal(true)
+        expect(executor.terminate("agent@team", "done")).to_equal(true)
+        expect(executor.kill("agent@team")).to_equal(true)
+
+    it "models tmux inside and external pane commands":
+        val backend = TmuxBackend.new()
+        backend.setDetection(true, true)
+        expect(backend.isAvailable()).to_equal(true)
+        expect(getTmuxColorName("purple")).to_equal("magenta")
+        expect(getTmuxColorName("orange")).to_equal("colour208")
+
+        val inside = backend.createTeammatePaneInSwarmView("agent", "purple")
+        expect(inside.useExternalSession).to_equal(false)
+        expect(inside.isFirstTeammate).to_equal(true)
+        expect(backend.sendCommandToPane(inside.paneId, "claude", false)).to_equal(true)
+        expect(backend.commands[1]).to_contain("send-keys")
+
+        val external = TmuxBackend.new()
+        external.setDetection(true, false)
+        val pane = external.createTeammatePaneInSwarmView("agent", "orange")
+        expect(pane.useExternalSession).to_equal(true)
+        expect(external.hidePane(pane.paneId, true)).to_equal(true)
+        expect(external.showPane(pane.paneId, true)).to_equal(true)
+        expect(external.commands[1]).to_contain("-L claude-swarm")
+
+    it "keeps strict source-size parity visible":
+        expect(inProcessBackendSourceLinesModeled()).to_equal(339)
+        expect(iTermBackendSourceLinesModeled()).to_equal(370)
+        expect(paneBackendExecutorSourceLinesModeled()).to_equal(354)
+        expect(tmuxBackendSourceLinesModeled()).to_equal(764)

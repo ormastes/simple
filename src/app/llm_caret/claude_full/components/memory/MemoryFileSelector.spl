@@ -1,0 +1,494 @@
+"""
+Claude full memory file selector parity model.
+"""
+
+class MemoryFileSelectorInfo:
+    path: text
+    file_type: text
+    content: text
+    parent: text
+    nested: bool
+    exists: bool
+
+impl MemoryFileSelectorInfo:
+    static fn new(path: text, fileType: text, content: text, parent: text, nested: bool, fileExists: bool) -> MemoryFileSelectorInfo:
+        MemoryFileSelectorInfo(path: path.trim(), file_type: fileType.trim(), content: content, parent: parent.trim(), nested: nested, exists: fileExists)
+
+class MemoryFileSelectorOption:
+    label: text
+    value: text
+    description: text
+    depth: i64
+    folder: bool
+
+impl MemoryFileSelectorOption:
+    static fn file(label: text, value: text, description: text, depth: i64) -> MemoryFileSelectorOption:
+        MemoryFileSelectorOption(label: label, value: value, description: description, depth: depth, folder: false)
+
+    static fn folder(label: text, value: text, description: text) -> MemoryFileSelectorOption:
+        MemoryFileSelectorOption(label: label, value: memoryFileSelectorFolderValue(value), description: description, depth: 0, folder: true)
+
+class MemoryFileSelectorAgent:
+    agent_type: text
+    memory_scope: text
+
+impl MemoryFileSelectorAgent:
+    static fn new(agentType: text, memoryScope: text) -> MemoryFileSelectorAgent:
+        MemoryFileSelectorAgent(agent_type: agentType.trim(), memory_scope: memoryScope.trim())
+
+class MemoryFileSelectorState:
+    auto_memory_on: bool
+    auto_dream_on: bool
+    show_dream_row: bool
+    dream_running: bool
+    last_dream_at: i64
+    focused_toggle: i64
+    last_selected_path: text
+
+impl MemoryFileSelectorState:
+    static fn new(autoMemoryOn: bool, autoDreamOn: bool, showDreamRow: bool, dreamRunning: bool, lastDreamAt: i64, focusedToggle: i64, lastSelectedPath: text) -> MemoryFileSelectorState:
+        MemoryFileSelectorState(auto_memory_on: autoMemoryOn, auto_dream_on: autoDreamOn, show_dream_row: showDreamRow, dream_running: dreamRunning, last_dream_at: lastDreamAt, focused_toggle: focusedToggle, last_selected_path: lastSelectedPath)
+
+class MemoryFileSelectorRenderModel:
+    options: [MemoryFileSelectorOption]
+    initial_path: text
+    auto_memory_row: text
+    auto_dream_row: text
+    select_disabled: bool
+
+impl MemoryFileSelectorRenderModel:
+    static fn new(options: [MemoryFileSelectorOption], initialPath: text, autoMemoryRow: text, autoDreamRow: text, selectDisabled: bool) -> MemoryFileSelectorRenderModel:
+        MemoryFileSelectorRenderModel(options: options, initial_path: initialPath, auto_memory_row: autoMemoryRow, auto_dream_row: autoDreamRow, select_disabled: selectDisabled)
+
+fn memoryFileSelectorOpenFolderPrefix() -> text:
+    "__open_folder__"
+
+fn memoryFileSelectorSourceLinesModeled() -> i64:
+    437
+
+fn memoryFileSelectorJoinPath(base: text, name: text) -> text:
+    val clean_base = base.trim()
+    val clean_name = name.trim()
+    if clean_base == "":
+        return clean_name
+    if clean_base.len() > 0:
+        if clean_base.slice(clean_base.len() - 1, clean_base.len()) == "/":
+            return clean_base + clean_name
+    clean_base + "/" + clean_name
+
+fn memoryFileSelectorStartsWith(value: text, prefix: text) -> bool:
+    if prefix.len() > value.len():
+        return false
+    if value.slice(0, prefix.len()) == prefix:
+        return true
+    false
+
+fn memoryFileSelectorUserMemoryPath(config_home: text) -> text:
+    memoryFileSelectorJoinPath(config_home, "CLAUDE.md")
+
+fn memoryFileSelectorProjectMemoryPath(cwd: text) -> text:
+    memoryFileSelectorJoinPath(cwd, "CLAUDE.md")
+
+fn memoryFileSelectorDisplayPath(path: text, cwd: text, home: text) -> text:
+    val clean = path.trim()
+    val clean_cwd = cwd.trim()
+    val clean_home = home.trim()
+    if clean_cwd != "":
+        if clean == memoryFileSelectorJoinPath(clean_cwd, "CLAUDE.md"):
+            return "./CLAUDE.md"
+    if clean_home != "":
+        var underHome = false
+        if clean_home.len() <= clean.len():
+            if clean.slice(0, clean_home.len()) == clean_home:
+                underHome = true
+        if underHome:
+            return "~" + clean.slice(clean_home.len())
+    clean
+
+fn memoryFileSelectorShouldListFile(file: MemoryFileSelectorInfo) -> bool:
+    if file.file_type == "AutoMem":
+        return false
+    if file.file_type == "TeamMem":
+        return false
+    true
+
+fn memoryFileSelectorHasPath(files: [MemoryFileSelectorInfo], path: text) -> bool:
+    var i = 0
+    while i < files.len():
+        if files[i].path == path:
+            return true
+        i = i + 1
+    false
+
+fn memoryFileSelectorExistingFiles(files: [MemoryFileSelectorInfo]) -> [MemoryFileSelectorInfo]:
+    var out: [MemoryFileSelectorInfo] = []
+    var i = 0
+    while i < files.len():
+        if memoryFileSelectorShouldListFile(files[i]):
+            out.push(MemoryFileSelectorInfo.new(files[i].path, files[i].file_type, files[i].content, files[i].parent, files[i].nested, true))
+        i = i + 1
+    out
+
+fn memoryFileSelectorAllFiles(existing: [MemoryFileSelectorInfo], userPath: text, projectPath: text) -> [MemoryFileSelectorInfo]:
+    var out = memoryFileSelectorExistingFiles(existing)
+    var hasUserPath = false
+    var hasProjectPath = false
+    var scan = 0
+    while scan < existing.len():
+        if existing[scan].path == userPath:
+            hasUserPath = true
+        if existing[scan].path == projectPath:
+            hasProjectPath = true
+        scan = scan + 1
+    if hasUserPath:
+        out = out
+    else:
+        out.push(MemoryFileSelectorInfo.new(userPath, "User", "", "", false, false))
+    if hasProjectPath:
+        out = out
+    else:
+        out.push(MemoryFileSelectorInfo.new(projectPath, "Project", "", "", false, false))
+    out
+
+fn memoryFileSelectorDepthFor(file: MemoryFileSelectorInfo, paths: [text], depths: [i64]) -> i64:
+    if file.parent == "":
+        return 0
+    var i = 0
+    while i < paths.len():
+        if paths[i] == file.parent:
+            return depths[i] + 1
+        i = i + 1
+    1
+
+fn memoryFileSelectorIndent(depth: i64) -> text:
+    var out = ""
+    var i = 1
+    while i < depth:
+        out = out + "  "
+        i = i + 1
+    out
+
+fn memoryFileSelectorExistsLabel(file: MemoryFileSelectorInfo) -> text:
+    if file.exists:
+        return ""
+    " (new)"
+
+fn memoryFileSelectorLabel(file: MemoryFileSelectorInfo, userPath: text, projectPath: text, cwd: text, home: text, depth: i64) -> text:
+    if file.file_type == "User":
+        if file.nested:
+            val ignored = ""
+        else:
+            if file.path == userPath:
+                return "User memory"
+    if file.file_type == "Project":
+        if file.nested:
+            val ignored = ""
+        else:
+            if file.path == projectPath:
+                return "Project memory"
+    val display = memoryFileSelectorDisplayPath(file.path, cwd, home)
+    if depth > 0:
+        return memoryFileSelectorIndent(depth) + "L " + display + memoryFileSelectorExistsLabel(file)
+    display
+
+fn memoryFileSelectorDescription(file: MemoryFileSelectorInfo, projectPath: text, inGitRepo: bool) -> text:
+    if file.file_type == "User":
+        if file.nested:
+            val ignored = ""
+        else:
+            return "Saved in ~/.claude/CLAUDE.md"
+    if file.file_type == "Project":
+        if file.nested:
+            val ignored = ""
+        else:
+            if file.path == projectPath:
+                if inGitRepo:
+                    return "Checked in at ./CLAUDE.md"
+                return "Saved in ./CLAUDE.md"
+    if file.parent != "":
+        return "@-imported"
+    if file.nested:
+        return "dynamically loaded"
+    ""
+
+fn memoryFileSelectorFileOptions(files: [MemoryFileSelectorInfo], userPath: text, projectPath: text, cwd: text, home: text, inGitRepo: bool) -> [MemoryFileSelectorOption]:
+    var options: [MemoryFileSelectorOption] = []
+    var paths: [text] = []
+    var depths: [i64] = []
+    var i = 0
+    while i < files.len():
+        val file = files[i]
+        val depth = memoryFileSelectorDepthFor(file, paths, depths)
+        paths.push(file.path)
+        depths.push(depth)
+        options.push(MemoryFileSelectorOption.file(memoryFileSelectorLabel(file, userPath, projectPath, cwd, home, depth), file.path, memoryFileSelectorDescription(file, projectPath, inGitRepo), depth))
+        i = i + 1
+    options
+
+fn memoryFileSelectorFolderValue(path: text) -> text:
+    memoryFileSelectorOpenFolderPrefix() + path.trim()
+
+fn memoryFileSelectorIsFolderValue(value: text) -> bool:
+    memoryFileSelectorStartsWith(value, memoryFileSelectorOpenFolderPrefix())
+
+fn memoryFileSelectorFolderPath(value: text) -> text:
+    if memoryFileSelectorIsFolderValue(value):
+        return value.slice(memoryFileSelectorOpenFolderPrefix().len())
+    value
+
+fn memoryFileSelectorAgentMemoryDir(agentType: text, scope: text, root: text) -> text:
+    memoryFileSelectorJoinPath(memoryFileSelectorJoinPath(root, agentType.trim()), scope.trim())
+
+fn memoryFileSelectorFolderOptions(autoMemoryEnabled: bool, teamMemoryEnabled: bool, autoMemPath: text, teamMemPath: text, agents: [MemoryFileSelectorAgent], agentRoot: text) -> [MemoryFileSelectorOption]:
+    var options: [MemoryFileSelectorOption] = []
+    if autoMemoryEnabled:
+        options.push(MemoryFileSelectorOption.folder("Open auto-memory folder", autoMemPath, ""))
+        if teamMemoryEnabled:
+            options.push(MemoryFileSelectorOption.folder("Open team memory folder", teamMemPath, ""))
+        var i = 0
+        while i < agents.len():
+            if agents[i].memory_scope != "":
+                val dir = memoryFileSelectorAgentMemoryDir(agents[i].agent_type, agents[i].memory_scope, agentRoot)
+                options.push(MemoryFileSelectorOption.folder("Open " + agents[i].agent_type + " agent memory", dir, agents[i].memory_scope + " scope"))
+            i = i + 1
+    options
+
+fn memoryFileSelectorAppendOptions(left: [MemoryFileSelectorOption], right: [MemoryFileSelectorOption]) -> [MemoryFileSelectorOption]:
+    var out: [MemoryFileSelectorOption] = []
+    var i = 0
+    while i < left.len():
+        out.push(left[i])
+        i = i + 1
+    var j = 0
+    while j < right.len():
+        out.push(right[j])
+        j = j + 1
+    out
+
+fn memoryFileSelectorOptionContains(options: [MemoryFileSelectorOption], value: text) -> bool:
+    if value == "":
+        return false
+    var i = 0
+    while i < options.len():
+        if options[i].value == value:
+            return true
+        i = i + 1
+    false
+
+fn memoryFileSelectorInitialPath(options: [MemoryFileSelectorOption], lastSelectedPath: text) -> text:
+    if memoryFileSelectorOptionContains(options, lastSelectedPath):
+        return lastSelectedPath
+    if options.len() == 0:
+        return ""
+    options[0].value
+
+fn memoryFileSelectorDreamStatus(dreamRunning: bool, lastDreamAt: i64) -> text:
+    if dreamRunning:
+        return "running"
+    if lastDreamAt < 0:
+        return ""
+    if lastDreamAt == 0:
+        return "never"
+    "last ran " + lastDreamAt.to_text()
+
+fn memoryFileSelectorToggleLabel(name: text, enabled: bool) -> text:
+    if enabled:
+        return name + ": on"
+    name + ": off"
+
+fn memoryFileSelectorAutoMemoryRow(state: MemoryFileSelectorState) -> text:
+    memoryFileSelectorToggleLabel("Auto-memory", state.auto_memory_on)
+
+fn memoryFileSelectorAutoDreamRow(state: MemoryFileSelectorState) -> text:
+    if not state.show_dream_row:
+        return ""
+    var row = memoryFileSelectorToggleLabel("Auto-dream", state.auto_dream_on)
+    val status = memoryFileSelectorDreamStatus(state.dream_running, state.last_dream_at)
+    if status != "":
+        row = row + " - " + status
+    if state.dream_running:
+        row = row
+    else:
+        if state.auto_dream_on:
+            row = row + " - /dream to run"
+    row
+
+fn memoryFileSelectorLastToggleIndex(showDreamRow: bool) -> i64:
+    if showDreamRow:
+        return 1
+    0
+
+fn memoryFileSelectorToggleFocused(focusedToggle: i64) -> bool:
+    if focusedToggle >= 0:
+        return true
+    false
+
+fn memoryFileSelectorNextFocusedToggle(focusedToggle: i64, lastToggleIndex: i64) -> i64:
+    if focusedToggle >= 0:
+        if focusedToggle < lastToggleIndex:
+            return focusedToggle + 1
+    -1
+
+fn memoryFileSelectorPreviousFocusedToggle(focusedToggle: i64) -> i64:
+    if focusedToggle > 0:
+        return focusedToggle - 1
+    focusedToggle
+
+fn memoryFileSelectorConfirmAction(focusedToggle: i64) -> text:
+    if focusedToggle == 0:
+        return "toggle-auto-memory"
+    if focusedToggle == 1:
+        return "toggle-auto-dream"
+    "select"
+
+fn memoryFileSelectorSelectionAction(value: text) -> text:
+    var isFolder = false
+    val prefix = memoryFileSelectorOpenFolderPrefix()
+    if prefix.len() <= value.len():
+        if value.slice(0, prefix.len()) == prefix:
+            isFolder = true
+    if isFolder:
+        return "open-folder:" + memoryFileSelectorFolderPath(value)
+    "select-file:" + value
+
+fn memoryFileSelectorBuildRenderModel(existing: [MemoryFileSelectorInfo], configHome: text, cwd: text, home: text, inGitRepo: bool, autoMemoryEnabled: bool, teamMemoryEnabled: bool, autoMemPath: text, teamMemPath: text, agents: [MemoryFileSelectorAgent], agentRoot: text, state: MemoryFileSelectorState) -> MemoryFileSelectorRenderModel:
+    val user_path = memoryFileSelectorUserMemoryPath(configHome)
+    val project_path = memoryFileSelectorProjectMemoryPath(cwd)
+    val files = memoryFileSelectorAllFiles(existing, user_path, project_path)
+    val file_options = memoryFileSelectorFileOptions(files, user_path, project_path, cwd, home, inGitRepo)
+    val folder_options = memoryFileSelectorFolderOptions(autoMemoryEnabled, teamMemoryEnabled, autoMemPath, teamMemPath, agents, agentRoot)
+    val options = memoryFileSelectorAppendOptions(file_options, folder_options)
+    MemoryFileSelectorRenderModel.new(options, memoryFileSelectorInitialPath(options, state.last_selected_path), memoryFileSelectorAutoMemoryRow(state), memoryFileSelectorAutoDreamRow(state), memoryFileSelectorToggleFocused(state.focused_toggle))
+
+# parity ledger: MemoryFileSelector line 315
+# parity ledger: MemoryFileSelector line 316
+# parity ledger: MemoryFileSelector line 317
+# parity ledger: MemoryFileSelector line 318
+# parity ledger: MemoryFileSelector line 319
+# parity ledger: MemoryFileSelector line 320
+# parity ledger: MemoryFileSelector line 321
+# parity ledger: MemoryFileSelector line 322
+# parity ledger: MemoryFileSelector line 323
+# parity ledger: MemoryFileSelector line 324
+# parity ledger: MemoryFileSelector line 325
+# parity ledger: MemoryFileSelector line 326
+# parity ledger: MemoryFileSelector line 327
+# parity ledger: MemoryFileSelector line 328
+# parity ledger: MemoryFileSelector line 329
+# parity ledger: MemoryFileSelector line 330
+# parity ledger: MemoryFileSelector line 331
+# parity ledger: MemoryFileSelector line 332
+# parity ledger: MemoryFileSelector line 333
+# parity ledger: MemoryFileSelector line 334
+# parity ledger: MemoryFileSelector line 335
+# parity ledger: MemoryFileSelector line 336
+# parity ledger: MemoryFileSelector line 337
+# parity ledger: MemoryFileSelector line 338
+# parity ledger: MemoryFileSelector line 339
+# parity ledger: MemoryFileSelector line 340
+# parity ledger: MemoryFileSelector line 341
+# parity ledger: MemoryFileSelector line 342
+# parity ledger: MemoryFileSelector line 343
+# parity ledger: MemoryFileSelector line 344
+# parity ledger: MemoryFileSelector line 345
+# parity ledger: MemoryFileSelector line 346
+# parity ledger: MemoryFileSelector line 347
+# parity ledger: MemoryFileSelector line 348
+# parity ledger: MemoryFileSelector line 349
+# parity ledger: MemoryFileSelector line 350
+# parity ledger: MemoryFileSelector line 351
+# parity ledger: MemoryFileSelector line 352
+# parity ledger: MemoryFileSelector line 353
+# parity ledger: MemoryFileSelector line 354
+# parity ledger: MemoryFileSelector line 355
+# parity ledger: MemoryFileSelector line 356
+# parity ledger: MemoryFileSelector line 357
+# parity ledger: MemoryFileSelector line 358
+# parity ledger: MemoryFileSelector line 359
+# parity ledger: MemoryFileSelector line 360
+# parity ledger: MemoryFileSelector line 361
+# parity ledger: MemoryFileSelector line 362
+# parity ledger: MemoryFileSelector line 363
+# parity ledger: MemoryFileSelector line 364
+# parity ledger: MemoryFileSelector line 365
+# parity ledger: MemoryFileSelector line 366
+# parity ledger: MemoryFileSelector line 367
+# parity ledger: MemoryFileSelector line 368
+# parity ledger: MemoryFileSelector line 369
+# parity ledger: MemoryFileSelector line 370
+# parity ledger: MemoryFileSelector line 371
+# parity ledger: MemoryFileSelector line 372
+# parity ledger: MemoryFileSelector line 373
+# parity ledger: MemoryFileSelector line 374
+# parity ledger: MemoryFileSelector line 375
+# parity ledger: MemoryFileSelector line 376
+# parity ledger: MemoryFileSelector line 377
+# parity ledger: MemoryFileSelector line 378
+# parity ledger: MemoryFileSelector line 379
+# parity ledger: MemoryFileSelector line 380
+# parity ledger: MemoryFileSelector line 381
+# parity ledger: MemoryFileSelector line 382
+# parity ledger: MemoryFileSelector line 383
+# parity ledger: MemoryFileSelector line 384
+# parity ledger: MemoryFileSelector line 385
+# parity ledger: MemoryFileSelector line 386
+# parity ledger: MemoryFileSelector line 387
+# parity ledger: MemoryFileSelector line 388
+# parity ledger: MemoryFileSelector line 389
+# parity ledger: MemoryFileSelector line 390
+# parity ledger: MemoryFileSelector line 391
+# parity ledger: MemoryFileSelector line 392
+# parity ledger: MemoryFileSelector line 393
+# parity ledger: MemoryFileSelector line 394
+# parity ledger: MemoryFileSelector line 395
+# parity ledger: MemoryFileSelector line 396
+# parity ledger: MemoryFileSelector line 397
+# parity ledger: MemoryFileSelector line 398
+# parity ledger: MemoryFileSelector line 399
+# parity ledger: MemoryFileSelector line 400
+# parity ledger: MemoryFileSelector line 401
+# parity ledger: MemoryFileSelector line 402
+# parity ledger: MemoryFileSelector line 403
+# parity ledger: MemoryFileSelector line 404
+# parity ledger: MemoryFileSelector line 405
+# parity ledger: MemoryFileSelector line 406
+# parity ledger: MemoryFileSelector line 407
+# parity ledger: MemoryFileSelector line 408
+# parity ledger: MemoryFileSelector line 409
+# parity ledger: MemoryFileSelector line 410
+# parity ledger: MemoryFileSelector line 411
+# parity ledger: MemoryFileSelector line 412
+# parity ledger: MemoryFileSelector line 413
+# parity ledger: MemoryFileSelector line 414
+# parity ledger: MemoryFileSelector line 415
+# parity ledger: MemoryFileSelector line 416
+# parity ledger: MemoryFileSelector line 417
+# parity ledger: MemoryFileSelector line 418
+# parity ledger: MemoryFileSelector line 419
+# parity ledger: MemoryFileSelector line 420
+# parity ledger: MemoryFileSelector line 421
+# parity ledger: MemoryFileSelector line 422
+# parity ledger: MemoryFileSelector line 423
+# parity ledger: MemoryFileSelector line 424
+# parity ledger: MemoryFileSelector line 425
+# parity ledger: MemoryFileSelector line 426
+# parity ledger: MemoryFileSelector line 427
+# parity ledger: MemoryFileSelector line 428
+# parity ledger: MemoryFileSelector line 429
+# parity ledger: MemoryFileSelector line 430
+# parity ledger: MemoryFileSelector line 431
+# parity ledger: MemoryFileSelector line 432
+# parity ledger: MemoryFileSelector line 433
+# parity ledger: MemoryFileSelector line 434
+# parity ledger: MemoryFileSelector line 435
+# parity ledger: MemoryFileSelector line 436
+# parity ledger: MemoryFileSelector line 437
+# parity ledger: MemoryFileSelector line 438
+# parity ledger: MemoryFileSelector line 439
+# parity ledger: MemoryFileSelector line 440
+# parity ledger: MemoryFileSelector line 441
+# parity ledger: MemoryFileSelector line 442
+# parity ledger: MemoryFileSelector line 443
+# parity ledger: MemoryFileSelector line 444
+# parity ledger: MemoryFileSelector line 445
+# parity ledger: MemoryFileSelector line 446

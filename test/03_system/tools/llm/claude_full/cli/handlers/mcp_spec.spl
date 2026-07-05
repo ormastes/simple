@@ -1,0 +1,115 @@
+"""
+# Claude Full CLI MCP Handler
+
+Checks MCP subcommand handler formatting and side-effect decisions.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.cli.handlers.mcp.{McpServerConfig, checkMcpServerHealth, mcpServeHandler, mcpRemoveHandler, mcpListHandler, mcpGetHandler, mcpAddJsonHandler, mcpAddFromDesktopHandler, mcpResetChoicesHandler, formatMcpListLine, formatMcpGetOutput, shouldSaveClientSecret, shouldCleanSecureStorage, discoveredScopes, ensureConfigScope, describeMcpConfigFilePath, getScopeLabel, mcpServeCommandName, mcpRemoveCommandName, mcpListCommandName, mcpGetCommandName, mcpAddJsonCommandName, mcpAddFromDesktopCommandName, mcpResetChoicesCommandName, mcpStartEventName, mcpDeleteEventName, mcpListEventName, mcpGetEventName, mcpAddEventName, mcpResetEventName, noServersConfiguredMessage, checkingHealthMessage, desktopNoServersMessage, resetChoicesMessage, removeSpecificScopeHint, removeServerFooter, configSourceJson, configSourceDesktop, defaultConfigScope, dynamicImportOnlyWhenCommandRuns, listUsesGracefulShutdown, getUsesGracefulShutdown, serveChecksCwdBeforeSetup, removeCleansSecureStorageBeforeExit, addJsonReadsSecretBeforeWritingConfig, desktopImportUsesKeybindingSetup, resetChoicesClearsEnabledServers, resetChoicesClearsDisabledServers, resetChoicesDisablesEnableAllFlag, connectionBatchSizeUsedForList, internalSseIdeExcludedFromList, cliOkUsedForMutationSuccess, cliErrorUsedForUserErrors, mcpHandlerSourceLinesModeled}
+
+describe "Claude full cli MCP handler":
+    it "checks server health states":
+        step("Map connection outcomes to user-visible status text")
+        expect(checkMcpServerHealth("connected", false)).to_equal("Connected")
+        expect(checkMcpServerHealth("needs-auth", false)).to_equal("Needs authentication")
+        expect(checkMcpServerHealth("failed", false)).to_equal("Failed to connect")
+        expect(checkMcpServerHealth("connected", true)).to_equal("Connection error")
+
+    it "serves only after cwd is accessible":
+        step("Inaccessible cwd returns the same CLI error shape")
+        val missing = mcpServeHandler("/gone", false, true, false, false)
+        expect(missing.exitCode).to_equal(1)
+        expect(missing.stderr).to_contain("Directory /gone does not exist")
+        val ok = mcpServeHandler("/repo", true, true, true, true)
+        expect(ok.stdout).to_contain("Started MCP server in /repo")
+        expect(ok.events).to_contain(mcpStartEventName())
+
+    it "removes scoped and unscoped servers":
+        step("Explicit scope removes directly and cleans secure storage for HTTP-like transports")
+        val scoped = mcpRemoveHandler("docs", "project", false, false, false, "http")
+        expect(scoped.stdout).to_contain("Removed MCP server docs from project config")
+        expect(scoped.modifiedFile).to_equal(describeMcpConfigFilePath("project"))
+        expect(scoped.secureStorageCleaned).to_equal(true)
+        step("No scope reports ambiguity across all discovered scopes")
+        val ambiguous = mcpRemoveHandler("docs", "", true, true, true, "stdio")
+        expect(ambiguous.exitCode).to_equal(1)
+        expect(ambiguous.stderr).to_contain("exists in multiple scopes")
+        expect(ambiguous.stderr).to_contain(removeSpecificScopeHint("docs", "local"))
+
+    it "lists configured servers with health":
+        step("Empty list prints add guidance and configured list formats by transport")
+        val empty = mcpListHandler([], [])
+        expect(empty.stdout).to_equal(noServersConfiguredMessage())
+        expect(empty.shutdownCode).to_equal(0)
+        val stdio = McpServerConfig.stdio("fs", "local", "node", ["server.js"], ["DEBUG=1"])
+        val http = McpServerConfig.http("api", "user", "https://mcp.example", [], "", "", false)
+        val listed = mcpListHandler([stdio, http], ["Connected", "Needs authentication"])
+        expect(listed.stdout).to_start_with(checkingHealthMessage())
+        expect(listed.stdout).to_contain("fs: node server.js - Connected")
+        expect(listed.stdout).to_contain("api: https://mcp.example (HTTP) - Needs authentication")
+
+    it "gets server details":
+        step("Get output includes scope, status, transport details, and remove hint")
+        val server = McpServerConfig.sse("remote", "user", "https://remote", ["Authorization: token"], "client", "7777", true)
+        val output = formatMcpGetOutput("remote", server, "Connected")
+        expect(output).to_contain("  Scope: User")
+        expect(output).to_contain("  Type: sse")
+        expect(output).to_contain("Authorization: token")
+        expect(output).to_contain("client_secret configured")
+        expect(output).to_contain(removeServerFooter("remote", "user"))
+        val missing = mcpGetHandler("missing", nil, "Failed to connect")
+        expect(missing.stderr).to_contain("No MCP server found with name: missing")
+
+    it "adds JSON and desktop imports":
+        step("JSON add stores client secret only for OAuth HTTP/SSE configs")
+        val addHttp = mcpAddJsonHandler("remote", "user", "http", "https://remote", true, true, "secret", true)
+        expect(addHttp.stdout).to_equal("Added http MCP server remote to user config\n")
+        expect(addHttp.savedClientSecret).to_equal(true)
+        val addStdio = mcpAddJsonHandler("local", "", "stdio", "", false, true, "secret", true)
+        expect(addStdio.savedClientSecret).to_equal(false)
+        val desktop = mcpAddFromDesktopHandler("project", "darwin", 0)
+        expect(desktop.stdout).to_equal(desktopNoServersMessage())
+        expect(desktop.events).to_contain("tengu_mcp_add:desktop:darwin:project")
+
+    it "resets project choices":
+        step("Reset clears approvals and tells the user they will be prompted again")
+        val result = mcpResetChoicesHandler()
+        expect(result.stdout).to_equal(resetChoicesMessage())
+        expect(result.events).to_contain(mcpResetEventName())
+
+    it "exports source-backed constants and helpers":
+        step("Pin command names and behavior flags")
+        expect(mcpServeCommandName()).to_equal("serve")
+        expect(mcpRemoveCommandName()).to_equal("remove")
+        expect(mcpListCommandName()).to_equal("list")
+        expect(mcpGetCommandName()).to_equal("get")
+        expect(mcpAddJsonCommandName()).to_equal("add-json")
+        expect(mcpAddFromDesktopCommandName()).to_equal("add-from-claude-desktop")
+        expect(mcpResetChoicesCommandName()).to_equal("reset-project-choices")
+        expect(mcpDeleteEventName()).to_equal("tengu_mcp_delete")
+        expect(mcpListEventName()).to_equal("tengu_mcp_list")
+        expect(mcpGetEventName()).to_equal("tengu_mcp_get")
+        expect(mcpAddEventName()).to_equal("tengu_mcp_add")
+        expect(configSourceJson()).to_equal("json")
+        expect(configSourceDesktop()).to_equal("desktop")
+        expect(defaultConfigScope()).to_equal("local")
+        expect(ensureConfigScope("")).to_equal("local")
+        expect(getScopeLabel("project")).to_equal("Project")
+        expect(shouldCleanSecureStorage("sse")).to_equal(true)
+        expect(shouldSaveClientSecret("sse", "https://x", true, true, "secret")).to_equal(true)
+        expect(discoveredScopes(true, false, true)).to_equal(["local", "user"])
+        expect(dynamicImportOnlyWhenCommandRuns()).to_equal(true)
+        expect(listUsesGracefulShutdown()).to_equal(true)
+        expect(getUsesGracefulShutdown()).to_equal(true)
+        expect(serveChecksCwdBeforeSetup()).to_equal(true)
+        expect(removeCleansSecureStorageBeforeExit()).to_equal(true)
+        expect(addJsonReadsSecretBeforeWritingConfig()).to_equal(true)
+        expect(desktopImportUsesKeybindingSetup()).to_equal(true)
+        expect(resetChoicesClearsEnabledServers()).to_equal(true)
+        expect(resetChoicesClearsDisabledServers()).to_equal(true)
+        expect(resetChoicesDisablesEnableAllFlag()).to_equal(true)
+        expect(connectionBatchSizeUsedForList()).to_equal(true)
+        expect(internalSseIdeExcludedFromList()).to_equal(true)
+        expect(cliOkUsedForMutationSuccess()).to_equal(true)
+        expect(cliErrorUsedForUserErrors()).to_equal(true)
+        expect(mcpHandlerSourceLinesModeled()).to_equal(361)

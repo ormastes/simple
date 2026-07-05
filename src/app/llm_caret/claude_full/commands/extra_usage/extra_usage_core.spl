@@ -1,0 +1,86 @@
+"""
+Import-safe alias for Claude full extra-usage core parity.
+"""
+
+const EXTRA_USAGE_DESCRIPTION = "Configure extra usage to keep working when limits are hit"
+const EXTRA_USAGE_ADMIN_URL = "https://claude.ai/admin-settings/usage"
+const EXTRA_USAGE_USER_URL = "https://claude.ai/settings/usage"
+
+class ExtraUsageState:
+    hasVisitedExtraUsage: bool
+    subscriptionType: text
+    hasBillingAccess: bool
+    overageProvisioningAllowed: bool
+    disableCommand: bool
+    nonInteractive: bool
+    fetchUtilizationFails: bool
+    extraUsageEnabled: bool
+    monthlyLimitUnlimited: bool
+    eligibilityCheckFails: bool
+    eligibilityAllowed: bool
+    pendingRequestCount: i64
+    createRequestFails: bool
+    browserOpenFails: bool
+    browserOpened: bool
+
+impl ExtraUsageState:
+    static fn teamMemberWithoutBilling() -> ExtraUsageState:
+        ExtraUsageState(false, "team", false, true, false, false, false, false, false, false, true, 0, false, false, true)
+
+    static fn individualWithBilling() -> ExtraUsageState:
+        ExtraUsageState(false, "pro", true, true, false, false, false, false, false, false, true, 0, false, false, true)
+
+class ExtraUsageResult:
+    typeName: text
+    value: text
+    url: text
+    opened: bool
+    visitedSaved: bool
+    cacheInvalidated: bool
+    adminRequestCreated: bool
+    requestAction: text
+
+impl ExtraUsageResult:
+    static fn message(value: text, state: ExtraUsageState, adminRequestCreated: bool, requestAction: text) -> ExtraUsageResult:
+        ExtraUsageResult("message", value, "", false, !state.hasVisitedExtraUsage, true, adminRequestCreated, requestAction)
+
+    static fn browser(url: text, opened: bool, state: ExtraUsageState) -> ExtraUsageResult:
+        ExtraUsageResult("browser-opened", "", url, opened, !state.hasVisitedExtraUsage, true, false, "")
+
+fn isTeamOrEnterprise(subscriptionType: text) -> bool:
+    subscriptionType == "team" or subscriptionType == "enterprise"
+
+fn isExtraUsageAllowed(state: ExtraUsageState) -> bool:
+    if state.disableCommand:
+        return false
+    state.overageProvisioningAllowed
+
+fn extraUsageTargetUrl(state: ExtraUsageState) -> text:
+    if isTeamOrEnterprise(state.subscriptionType):
+        return EXTRA_USAGE_ADMIN_URL
+    EXTRA_USAGE_USER_URL
+
+fn extraUsageRequestSentMessage(state: ExtraUsageState) -> text:
+    if state.extraUsageEnabled:
+        return "Request sent to your admin to increase extra usage."
+    "Request sent to your admin to enable extra usage."
+
+fn runExtraUsage(state: ExtraUsageState) -> ExtraUsageResult:
+    val teamOrEnterprise = isTeamOrEnterprise(state.subscriptionType)
+    if !state.hasBillingAccess and teamOrEnterprise:
+        if !state.fetchUtilizationFails and state.extraUsageEnabled and state.monthlyLimitUnlimited:
+            return ExtraUsageResult.message("Your organization already has unlimited extra usage. No request needed.", state, false, "")
+        if !state.eligibilityCheckFails and !state.eligibilityAllowed:
+            return ExtraUsageResult.message("Please contact your admin to manage extra usage settings.", state, false, "")
+        if state.pendingRequestCount > 0:
+            return ExtraUsageResult.message("You have already submitted a request for extra usage to your admin.", state, false, "")
+        if !state.createRequestFails:
+            return ExtraUsageResult.message(extraUsageRequestSentMessage(state), state, true, "limit_increase")
+        return ExtraUsageResult.message("Please contact your admin to manage extra usage settings.", state, false, "")
+    val url = extraUsageTargetUrl(state)
+    if state.browserOpenFails:
+        return ExtraUsageResult.message("Failed to open browser. Please visit " + url + " to manage extra usage.", state, false, "")
+    ExtraUsageResult.browser(url, state.browserOpened, state)
+
+fn extraUsageCoreSourceLinesModeled() -> i64:
+    118

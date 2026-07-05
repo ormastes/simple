@@ -1,0 +1,476 @@
+const OUTBOUND_ONLY_ERROR: text = "This session is outbound-only. Enable Remote Control locally to allow inbound control."
+const BRIDGE_REPL_PREFIX: text = "[bridge:repl]"
+
+class SDKMessage:
+    kind: text
+    uuid: text
+    content: text
+
+impl SDKMessage:
+    static fn new(kind: text, uuid: text, content: text) -> SDKMessage:
+        SDKMessage(kind: kind, uuid: uuid, content: content)
+
+class SDKControlRequest:
+    requestId: text
+    subtype: text
+    model: text
+    maxThinkingTokens: i64
+    permissionMode: text
+
+impl SDKControlRequest:
+    static fn new(requestId: text, subtype: text) -> SDKControlRequest:
+        SDKControlRequest(requestId: requestId, subtype: subtype, model: "", maxThinkingTokens: 0, permissionMode: "")
+
+    static fn setModel(requestId: text, model: text) -> SDKControlRequest:
+        SDKControlRequest(requestId: requestId, subtype: "set_model", model: model, maxThinkingTokens: 0, permissionMode: "")
+
+    static fn setMaxThinkingTokens(requestId: text, maxThinkingTokens: i64) -> SDKControlRequest:
+        SDKControlRequest(requestId: requestId, subtype: "set_max_thinking_tokens", model: "", maxThinkingTokens: maxThinkingTokens, permissionMode: "")
+
+    static fn setPermissionMode(requestId: text, mode: text) -> SDKControlRequest:
+        SDKControlRequest(requestId: requestId, subtype: "set_permission_mode", model: "", maxThinkingTokens: 0, permissionMode: mode)
+
+class SDKControlResponse:
+    subtype: text
+    requestId: text
+    error: text
+    sessionId: text
+
+impl SDKControlResponse:
+    static fn success(requestId: text, sessionId: text) -> SDKControlResponse:
+        SDKControlResponse(subtype: "success", requestId: requestId, error: "", sessionId: sessionId)
+
+    static fn failed(requestId: text, error: text, sessionId: text) -> SDKControlResponse:
+        SDKControlResponse(subtype: "error", requestId: requestId, error: error, sessionId: sessionId)
+
+    me encode() -> text:
+        if me.error != "":
+            return "control_response|" + me.subtype + "|" + me.requestId + "|" + me.sessionId + "|" + me.error
+        "control_response|" + me.subtype + "|" + me.requestId + "|" + me.sessionId
+
+class BridgeMessage:
+    msgType: text
+    subtype: text
+    isVirtual: bool
+    isMeta: bool
+    hasToolUseResult: bool
+    isCompactSummary: bool
+    originKind: text
+    content: text
+
+impl BridgeMessage:
+    static fn new(msgType: text, subtype: text, content: text) -> BridgeMessage:
+        BridgeMessage(msgType: msgType, subtype: subtype, isVirtual: false, isMeta: false, hasToolUseResult: false, isCompactSummary: false, originKind: "human", content: content)
+
+    me virtual() -> BridgeMessage:
+        BridgeMessage(msgType: me.msgType, subtype: me.subtype, isVirtual: true, isMeta: me.isMeta, hasToolUseResult: me.hasToolUseResult, isCompactSummary: me.isCompactSummary, originKind: me.originKind, content: me.content)
+
+    me meta() -> BridgeMessage:
+        BridgeMessage(msgType: me.msgType, subtype: me.subtype, isVirtual: me.isVirtual, isMeta: true, hasToolUseResult: me.hasToolUseResult, isCompactSummary: me.isCompactSummary, originKind: me.originKind, content: me.content)
+
+    me toolResult() -> BridgeMessage:
+        BridgeMessage(msgType: me.msgType, subtype: me.subtype, isVirtual: me.isVirtual, isMeta: me.isMeta, hasToolUseResult: true, isCompactSummary: me.isCompactSummary, originKind: me.originKind, content: me.content)
+
+    me compactSummary() -> BridgeMessage:
+        BridgeMessage(msgType: me.msgType, subtype: me.subtype, isVirtual: me.isVirtual, isMeta: me.isMeta, hasToolUseResult: me.hasToolUseResult, isCompactSummary: true, originKind: me.originKind, content: me.content)
+
+    me fromOrigin(originKind: text) -> BridgeMessage:
+        BridgeMessage(msgType: me.msgType, subtype: me.subtype, isVirtual: me.isVirtual, isMeta: me.isMeta, hasToolUseResult: me.hasToolUseResult, isCompactSummary: me.isCompactSummary, originKind: originKind, content: me.content)
+
+class IngressResult:
+    route: text
+    message: SDKMessage
+    response: SDKControlResponse
+    log: text
+    analytics: text
+
+impl IngressResult:
+    static fn ignored(log: text) -> IngressResult:
+        IngressResult(route: "ignored", message: SDKMessage.new("", "", ""), response: SDKControlResponse.success("", ""), log: log, analytics: "")
+
+    static fn inbound(message: SDKMessage, log: text) -> IngressResult:
+        IngressResult(route: "inbound", message: message, response: SDKControlResponse.success("", ""), log: log, analytics: "tengu_bridge_message_received")
+
+    static fn permission(response: SDKControlResponse, log: text) -> IngressResult:
+        IngressResult(route: "permission_response", message: SDKMessage.new("", "", ""), response: response, log: log, analytics: "")
+
+    static fn control(log: text) -> IngressResult:
+        IngressResult(route: "control_request", message: SDKMessage.new("", "", ""), response: SDKControlResponse.success("", ""), log: log, analytics: "")
+
+class ControlHandlers:
+    hasTransport: bool
+    sessionId: text
+    outboundOnly: bool
+    permissionModeOk: bool
+    permissionModeError: text
+
+impl ControlHandlers:
+    static fn new(sessionId: text) -> ControlHandlers:
+        ControlHandlers(hasTransport: true, sessionId: sessionId, outboundOnly: false, permissionModeOk: true, permissionModeError: "")
+
+    me withoutTransport() -> ControlHandlers:
+        ControlHandlers(hasTransport: false, sessionId: me.sessionId, outboundOnly: me.outboundOnly, permissionModeOk: me.permissionModeOk, permissionModeError: me.permissionModeError)
+
+    me outbound() -> ControlHandlers:
+        ControlHandlers(hasTransport: me.hasTransport, sessionId: me.sessionId, outboundOnly: true, permissionModeOk: me.permissionModeOk, permissionModeError: me.permissionModeError)
+
+    me permissionError(error: text) -> ControlHandlers:
+        ControlHandlers(hasTransport: me.hasTransport, sessionId: me.sessionId, outboundOnly: me.outboundOnly, permissionModeOk: false, permissionModeError: error)
+
+class ServerControlResult:
+    wrote: bool
+    response: SDKControlResponse
+    action: text
+    log: text
+
+impl ServerControlResult:
+    static fn noTransport() -> ServerControlResult:
+        ServerControlResult(wrote: false, response: SDKControlResponse.success("", ""), action: "", log: BRIDGE_REPL_PREFIX + " Cannot respond to control_request: transport not configured")
+
+    static fn wrote(response: SDKControlResponse, action: text, log: text) -> ServerControlResult:
+        ServerControlResult(wrote: true, response: response, action: action, log: log)
+
+class SDKResultSuccess:
+    msgType: text
+    subtype: text
+    durationMs: i64
+    durationApiMs: i64
+    isError: bool
+    numTurns: i64
+    result: text
+    stopReason: text
+    totalCostUsd: i64
+    sessionId: text
+    uuid: text
+
+impl SDKResultSuccess:
+    static fn new(sessionId: text, uuid: text) -> SDKResultSuccess:
+        SDKResultSuccess(msgType: "result", subtype: "success", durationMs: 0, durationApiMs: 0, isError: false, numTurns: 0, result: "", stopReason: "", totalCostUsd: 0, sessionId: sessionId, uuid: uuid)
+
+class BoundedUUIDSet:
+    capacity: i64
+    ring: [text]
+    writeIdx: i64
+
+impl BoundedUUIDSet:
+    static fn new(capacity: i64) -> BoundedUUIDSet:
+        BoundedUUIDSet(capacity: capacity, ring: [], writeIdx: 0)
+
+    me add(uuid: text) -> ():
+        if me.has(uuid):
+            return
+        if me.capacity <= 0:
+            return
+        if me.ring.len() < me.capacity:
+            me.ring = me.ring + [uuid]
+            me.writeIdx = (me.writeIdx + 1) % me.capacity
+            return
+        me.ring = replaceAt(me.ring, me.writeIdx, uuid)
+        me.writeIdx = (me.writeIdx + 1) % me.capacity
+
+    me has(uuid: text) -> bool:
+        var i = 0
+        while i < me.ring.len():
+            if me.ring[i] == uuid:
+                return true
+            i = i + 1
+        false
+
+    me clear() -> ():
+        me.ring = []
+        me.writeIdx = 0
+
+    me size() -> i64:
+        me.ring.len()
+
+fn replaceAt(values: [text], index: i64, value: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < values.len():
+        if i == index:
+            out = out + [value]
+        else:
+            out = out + [values[i]]
+        i = i + 1
+    out
+
+fn isSDKMessageKind(kind: text) -> bool:
+    kind != ""
+
+fn isSDKControlResponseKind(kind: text, hasResponse: bool) -> bool:
+    kind == "control_response" and hasResponse
+
+fn isSDKControlRequestKind(kind: text, hasRequestId: bool, hasRequest: bool) -> bool:
+    kind == "control_request" and hasRequestId and hasRequest
+
+fn isEligibleBridgeMessage(m: BridgeMessage) -> bool:
+    if (m.msgType == "user" or m.msgType == "assistant") and m.isVirtual:
+        return false
+    if m.msgType == "user" or m.msgType == "assistant":
+        return true
+    m.msgType == "system" and m.subtype == "local_command"
+
+fn extractTitleText(m: BridgeMessage) -> text:
+    if m.msgType != "user":
+        return ""
+    if m.isMeta or m.hasToolUseResult or m.isCompactSummary:
+        return ""
+    if m.originKind != "" and m.originKind != "human":
+        return ""
+    val clean = stripDisplayTagsAllowEmpty(m.content)
+    if clean == "":
+        return ""
+    clean
+
+fn stripDisplayTagsAllowEmpty(value: text) -> text:
+    var out = value
+    out = removeTag(out, "ide_opened_file")
+    out = removeTag(out, "session-start-hook")
+    out.trim()
+
+fn removeTag(value: text, tag: text) -> text:
+    val open = "<" + tag + ">"
+    val close = "</" + tag + ">"
+    if value.starts_with(open) and value.ends_with(close):
+        return ""
+    value
+
+fn handleIngressMessage(data: text, recentPostedUUIDs: BoundedUUIDSet, recentInboundUUIDs: BoundedUUIDSet) -> IngressResult:
+    val normalized = normalizeControlMessageKeys(data)
+    if normalized.starts_with("control_response|"):
+        val req = partOrEmpty(normalized.split("|"), 1)
+        return IngressResult.permission(SDKControlResponse.success(req, ""), BRIDGE_REPL_PREFIX + " Ingress message type=control_response")
+    if normalized.starts_with("control_request|"):
+        val subtype = partOrEmpty(normalized.split("|"), 2)
+        return IngressResult.control(BRIDGE_REPL_PREFIX + " Inbound control_request subtype=" + subtype)
+    if not normalized.contains("|"):
+        return IngressResult.ignored("")
+    val parts = normalized.split("|")
+    val kind = partOrEmpty(parts, 0)
+    val uuid = partOrEmpty(parts, 1)
+    val content = partOrEmpty(parts, 2)
+    if not isSDKMessageKind(kind):
+        return IngressResult.ignored("")
+    if uuid != "" and recentPostedUUIDs.has(uuid):
+        return IngressResult.ignored(BRIDGE_REPL_PREFIX + " Ignoring echo: type=" + kind + " uuid=" + uuid)
+    if uuid != "" and recentInboundUUIDs.has(uuid):
+        return IngressResult.ignored(BRIDGE_REPL_PREFIX + " Ignoring re-delivered inbound: type=" + kind + " uuid=" + uuid)
+    val log = ingressDebugLine(kind, uuid)
+    if kind == "user":
+        if uuid != "":
+            recentInboundUUIDs.add(uuid)
+        return IngressResult.inbound(SDKMessage.new(kind, uuid, content), log)
+    IngressResult.ignored(BRIDGE_REPL_PREFIX + " Ignoring non-user inbound message: type=" + kind)
+
+fn handleServerControlRequest(request: SDKControlRequest, handlers: ControlHandlers) -> ServerControlResult:
+    if not handlers.hasTransport:
+        return ServerControlResult.noTransport()
+    if handlers.outboundOnly and request.subtype != "initialize":
+        val response = SDKControlResponse.failed(request.requestId, OUTBOUND_ONLY_ERROR, handlers.sessionId)
+        return ServerControlResult.wrote(response, "outbound_only", rejectedOutboundDebugLine(request.subtype, request.requestId))
+    if request.subtype == "initialize":
+        return controlSuccess(request, handlers, "initialize")
+    if request.subtype == "set_model":
+        return controlSuccess(request, handlers, "set_model:" + request.model)
+    if request.subtype == "set_max_thinking_tokens":
+        return controlSuccess(request, handlers, "set_max_thinking_tokens:" + request.maxThinkingTokens.to_text())
+    if request.subtype == "set_permission_mode":
+        if handlers.permissionModeOk:
+            return controlSuccess(request, handlers, "set_permission_mode:" + request.permissionMode)
+        val response = SDKControlResponse.failed(request.requestId, handlers.permissionModeError, handlers.sessionId)
+        return ServerControlResult.wrote(response, "set_permission_mode_error", sentControlResponseDebugLine(request.subtype, request.requestId, "error"))
+    if request.subtype == "interrupt":
+        return controlSuccess(request, handlers, "interrupt")
+    val response = SDKControlResponse.failed(request.requestId, "REPL bridge does not handle control_request subtype: " + request.subtype, handlers.sessionId)
+    ServerControlResult.wrote(response, "unknown", sentControlResponseDebugLine(request.subtype, request.requestId, "error"))
+
+fn controlSuccess(request: SDKControlRequest, handlers: ControlHandlers, action: text) -> ServerControlResult:
+    val response = SDKControlResponse.success(request.requestId, handlers.sessionId)
+    ServerControlResult.wrote(response, action, sentControlResponseDebugLine(request.subtype, request.requestId, "success"))
+
+fn makeResultMessage(sessionId: text) -> SDKResultSuccess:
+    SDKResultSuccess.new(sessionId, deterministicUUID(sessionId))
+
+fn deterministicUUID(seed: text) -> text:
+    "uuid-" + seed
+
+fn normalizeControlMessageKeys(data: text) -> text:
+    data.replace("requestId", "request_id")
+
+fn partOrEmpty(parts: [text], index: i64) -> text:
+    if index < 0 or index >= parts.len():
+        return ""
+    parts[index]
+
+fn ingressDebugLine(kind: text, uuid: text) -> text:
+    if uuid == "":
+        return BRIDGE_REPL_PREFIX + " Ingress message type=" + kind
+    BRIDGE_REPL_PREFIX + " Ingress message type=" + kind + " uuid=" + uuid
+
+fn rejectedOutboundDebugLine(subtype: text, requestId: text) -> text:
+    BRIDGE_REPL_PREFIX + " Rejected " + subtype + " (outbound-only) request_id=" + requestId
+
+fn sentControlResponseDebugLine(subtype: text, requestId: text, result: text) -> text:
+    BRIDGE_REPL_PREFIX + " Sent control_response for " + subtype + " request_id=" + requestId + " result=" + result
+
+fn outboundOnlyError() -> text:
+    OUTBOUND_ONLY_ERROR
+
+fn bridgeReplDebugPrefix() -> text:
+    BRIDGE_REPL_PREFIX
+
+fn resultMessageType() -> text:
+    "result"
+
+fn resultSuccessSubtype() -> text:
+    "success"
+
+fn controlResponseType() -> text:
+    "control_response"
+
+fn controlRequestType() -> text:
+    "control_request"
+
+fn initializeSubtype() -> text:
+    "initialize"
+
+fn setModelSubtype() -> text:
+    "set_model"
+
+fn setMaxThinkingTokensSubtype() -> text:
+    "set_max_thinking_tokens"
+
+fn setPermissionModeSubtype() -> text:
+    "set_permission_mode"
+
+fn interruptSubtype() -> text:
+    "interrupt"
+
+fn localCommandSubtype() -> text:
+    "local_command"
+
+fn userMessageType() -> text:
+    "user"
+
+fn assistantMessageType() -> text:
+    "assistant"
+
+fn systemMessageType() -> text:
+    "system"
+
+fn bridgeMessageReceivedEventName() -> text:
+    "tengu_bridge_message_received"
+
+fn emptyUsagePromptTokens() -> i64:
+    0
+
+fn emptyUsageCompletionTokens() -> i64:
+    0
+
+fn emptyUsageTotalTokens() -> i64:
+    0
+
+fn defaultOutputStyle() -> text:
+    "normal"
+
+fn availableOutputStyles() -> [text]:
+    ["normal"]
+
+fn defaultModels() -> [text]:
+    []
+
+fn defaultCommands() -> [text]:
+    []
+
+fn unsupportedSetPermissionModeError() -> text:
+    "set_permission_mode is not supported in this context (onSetPermissionMode callback not registered)"
+
+fn controlSuccessSubtype() -> text:
+    "success"
+
+fn controlErrorSubtype() -> text:
+    "error"
+
+fn boundedUuidSetDefaultCapacity() -> i64:
+    256
+
+fn boundedUuidSetEchoPurpose() -> text:
+    "echo filtering"
+
+fn boundedUuidSetInboundPurpose() -> text:
+    "inbound replay dedup"
+
+fn outboundOnlyInitializeStillSucceeds() -> bool:
+    true
+
+fn outboundOnlyMutableRequestsError() -> bool:
+    true
+
+fn ingressControlResponseLog() -> text:
+    BRIDGE_REPL_PREFIX + " Ingress message type=control_response"
+
+fn inboundControlRequestLog(subtype: text) -> text:
+    BRIDGE_REPL_PREFIX + " Inbound control_request subtype=" + subtype
+
+fn echoIgnoredLog(kind: text, uuid: text) -> text:
+    BRIDGE_REPL_PREFIX + " Ignoring echo: type=" + kind + " uuid=" + uuid
+
+fn replayIgnoredLog(kind: text, uuid: text) -> text:
+    BRIDGE_REPL_PREFIX + " Ignoring re-delivered inbound: type=" + kind + " uuid=" + uuid
+
+fn nonUserInboundIgnoredLog(kind: text) -> text:
+    BRIDGE_REPL_PREFIX + " Ignoring non-user inbound message: type=" + kind
+
+fn parseFailureLog(message: text) -> text:
+    BRIDGE_REPL_PREFIX + " Failed to parse ingress message: " + message
+
+fn noTransportLog() -> text:
+    BRIDGE_REPL_PREFIX + " Cannot respond to control_request: transport not configured"
+
+fn initializeCapabilitiesCommandsCount() -> i64:
+    0
+
+fn initializeCapabilitiesModelsCount() -> i64:
+    0
+
+fn initializeCapabilitiesAccountIsEmpty() -> bool:
+    true
+
+fn initializeCapabilitiesIncludesPid() -> bool:
+    true
+
+fn setPermissionModeNoCallbackError() -> text:
+    unsupportedSetPermissionModeError()
+
+fn unknownControlSubtypeError(subtype: text) -> text:
+    "REPL bridge does not handle control_request subtype: " + subtype
+
+fn resultDurationMs() -> i64:
+    0
+
+fn resultDurationApiMs() -> i64:
+    0
+
+fn resultNumTurns() -> i64:
+    0
+
+fn resultTotalCostUsd() -> i64:
+    0
+
+fn resultIsError() -> bool:
+    false
+
+fn resultPermissionDenialsCount() -> i64:
+    0
+
+fn resultModelUsageIsEmpty() -> bool:
+    true
+
+fn resultStopReasonIsNullEquivalent() -> bool:
+    true
+
+fn uuidRingEvictionOrder() -> text:
+    "oldest"
+
+fn uuidRingMemoryModel() -> text:
+    "O(capacity)"

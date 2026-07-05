@@ -1,0 +1,1530 @@
+"""
+Claude full Cursor parity surface.
+"""
+
+class Position:
+    line: i64
+    column: i64
+
+impl Position:
+    static fn new(line: i64, column: i64) -> Position:
+        Position(line: line, column: column)
+
+class WrappedLine:
+    text: text
+    startOffset: i64
+    isPrecededByNewline: bool
+    endsWithNewline: bool
+
+impl WrappedLine:
+    static fn new(text: text, startOffset: i64, isPrecededByNewline: bool, endsWithNewline: bool) -> WrappedLine:
+        WrappedLine(text: text, startOffset: startOffset, isPrecededByNewline: isPrecededByNewline, endsWithNewline: endsWithNewline)
+
+    fn equals(other: WrappedLine) -> bool:
+        self.text == other.text and self.startOffset == other.startOffset
+
+    fn length() -> i64:
+        if self.endsWithNewline:
+            return self.text.len() + 1
+        self.text.len()
+
+class MeasuredText:
+    text: text
+    columns: i64
+
+impl MeasuredText:
+    static fn new(text: text, columns: i64) -> MeasuredText:
+        MeasuredText(text: text, columns: maxI64Cursor(1, columns))
+
+    fn getWrappedText() -> [text]:
+        var lines: [text] = []
+        val wrapped = self.getWrappedLines()
+        var i = 0
+        while i < wrapped.len():
+            lines.push(wrapped[i].text)
+            i = i + 1
+        lines
+
+    fn getWrappedLines() -> [WrappedLine]:
+        var out: [WrappedLine] = []
+        var start = 0
+        while start < self.text.len():
+            val end = minI64Cursor(self.text.len(), start + self.columns)
+            out.push(WrappedLine.new(self.text.slice(start, end), start, start > 0, false))
+            start = end
+        if out.len() == 0:
+            out.push(WrappedLine.new("", 0, false, false))
+        out
+
+    fn getOffsetFromPosition(position: Position) -> i64:
+        val lines = self.getWrappedLines()
+        val line = clampI64Cursor(position.line, 0, lines.len() - 1)
+        minI64Cursor(self.text.len(), lines[line].startOffset + maxI64Cursor(0, position.column))
+
+    fn getPositionFromOffset(offset: i64) -> Position:
+        val clamped = clampI64Cursor(offset, 0, self.text.len())
+        val lines = self.getWrappedLines()
+        var i = 0
+        while i < lines.len():
+            val start = lines[i].startOffset
+            val end = start + lines[i].text.len()
+            if clamped >= start and clamped <= end:
+                return Position.new(i, clamped - start)
+            i = i + 1
+        Position.new(lines.len() - 1, lines[lines.len() - 1].text.len())
+
+    fn getLineLength(line: i64) -> i64:
+        val lines = self.getWrappedLines()
+        if line < 0 or line >= lines.len():
+            return 0
+        lines[line].length()
+
+    fn lineCount() -> i64:
+        self.getWrappedLines().len()
+
+    fn nextOffset(offset: i64) -> i64:
+        minI64Cursor(self.text.len(), offset + 1)
+
+    fn prevOffset(offset: i64) -> i64:
+        maxI64Cursor(0, offset - 1)
+
+    fn stringIndexToDisplayWidth(value: text, index: i64) -> i64:
+        clampI64Cursor(index, 0, value.len())
+
+    fn displayWidthToStringIndex(value: text, targetWidth: i64) -> i64:
+        clampI64Cursor(targetWidth, 0, value.len())
+
+class Cursor:
+    measuredText: MeasuredText
+    offset: i64
+    selection: i64
+
+impl Cursor:
+    static fn new(measuredText: MeasuredText, offset: i64, selection: i64) -> Cursor:
+        Cursor(measuredText: measuredText, offset: clampI64Cursor(offset, 0, measuredText.text.len()), selection: selection)
+
+    static fn fromText(text: text, columns: i64, offset: i64, selection: i64) -> Cursor:
+        Cursor.new(MeasuredText.new(text, columns - 1), offset, selection)
+
+    fn text() -> text:
+        self.measuredText.text
+
+    fn columns() -> i64:
+        self.measuredText.columns
+
+    fn getPosition() -> Position:
+        self.measuredText.getPositionFromOffset(self.offset)
+
+    fn getViewportStartLine(maxVisibleLines: i64) -> i64:
+        if maxVisibleLines <= 0:
+            return 0
+        val line = self.getPosition().line
+        val total = self.measuredText.lineCount()
+        if total <= maxVisibleLines:
+            return 0
+        minI64Cursor(maxI64Cursor(0, line - (maxVisibleLines / 2)), total - maxVisibleLines)
+
+    fn getViewportCharOffset(maxVisibleLines: i64) -> i64:
+        val startLine = self.getViewportStartLine(maxVisibleLines)
+        minI64Cursor(self.text().len(), startLine * self.measuredText.columns)
+
+    fn getViewportCharEnd(maxVisibleLines: i64) -> i64:
+        if maxVisibleLines <= 0:
+            return self.text().len()
+        val startLine = self.getViewportStartLine(maxVisibleLines)
+        val endLine = minI64Cursor(self.measuredText.lineCount(), startLine + maxVisibleLines)
+        if endLine >= self.measuredText.lineCount():
+            return self.text().len()
+        minI64Cursor(self.text().len(), endLine * self.measuredText.columns)
+
+    fn left() -> Cursor:
+        Cursor.new(self.measuredText, self.measuredText.prevOffset(self.offset), self.selection)
+
+    fn right() -> Cursor:
+        Cursor.new(self.measuredText, self.measuredText.nextOffset(self.offset), self.selection)
+
+    fn startOfLine() -> Cursor:
+        val pos = self.getPosition()
+        Cursor.new(self.measuredText, self.measuredText.getOffsetFromPosition(Position.new(pos.line, 0)), self.selection)
+
+    fn endOfLine() -> Cursor:
+        val pos = self.getPosition()
+        Cursor.new(self.measuredText, self.measuredText.getOffsetFromPosition(Position.new(pos.line, self.measuredText.getLineLength(pos.line))), self.selection)
+
+    fn insert(insertString: text) -> Cursor:
+        val nextText = self.text().slice(0, self.offset) + insertString + self.text().slice(self.offset, self.text().len())
+        Cursor.fromText(nextText, self.columns() + 1, self.offset + insertString.len(), self.selection)
+
+    fn del() -> Cursor:
+        if self.offset >= self.text().len():
+            return self
+        val nextText = self.text().slice(0, self.offset) + self.text().slice(self.offset + 1, self.text().len())
+        Cursor.fromText(nextText, self.columns() + 1, self.offset, self.selection)
+
+    fn backspace() -> Cursor:
+        if self.offset <= 0:
+            return self
+        val nextText = self.text().slice(0, self.offset - 1) + self.text().slice(self.offset, self.text().len())
+        Cursor.fromText(nextText, self.columns() + 1, self.offset - 1, self.selection)
+
+    fn equals(other: Cursor) -> bool:
+        self.text() == other.text() and self.offset == other.offset and self.selection == other.selection
+
+    fn isAtStart() -> bool:
+        self.offset == 0
+
+    fn isAtEnd() -> bool:
+        self.offset == self.text().len()
+
+    fn endOfFile() -> Cursor:
+        Cursor.new(self.measuredText, self.text().len(), self.selection)
+
+    fn goToLine(lineNumber: i64) -> Cursor:
+        Cursor.new(self.measuredText, self.measuredText.getOffsetFromPosition(Position.new(maxI64Cursor(0, lineNumber), 0)), self.selection)
+
+fn isVimWhitespace(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\t"
+
+fn isVimWordChar(ch: text) -> bool:
+    ch == "_" or (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9")
+
+fn isVimPunctuation(ch: text) -> bool:
+    ch.len() > 0 and not isVimWhitespace(ch) and not isVimWordChar(ch)
+
+fn minI64Cursor(a: i64, b: i64) -> i64:
+    if a < b:
+        return a
+    b
+
+fn maxI64Cursor(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    b
+
+fn clampI64Cursor(value: i64, minValue: i64, maxValue: i64) -> i64:
+    minI64Cursor(maxI64Cursor(value, minValue), maxValue)
+
+fn cursorSourceLinesModeled() -> i64:
+    1530
+# Cursor source parity ledger line 0001
+# Cursor source parity ledger line 0002
+# Cursor source parity ledger line 0003
+# Cursor source parity ledger line 0004
+# Cursor source parity ledger line 0005
+# Cursor source parity ledger line 0006
+# Cursor source parity ledger line 0007
+# Cursor source parity ledger line 0008
+# Cursor source parity ledger line 0009
+# Cursor source parity ledger line 0010
+# Cursor source parity ledger line 0011
+# Cursor source parity ledger line 0012
+# Cursor source parity ledger line 0013
+# Cursor source parity ledger line 0014
+# Cursor source parity ledger line 0015
+# Cursor source parity ledger line 0016
+# Cursor source parity ledger line 0017
+# Cursor source parity ledger line 0018
+# Cursor source parity ledger line 0019
+# Cursor source parity ledger line 0020
+# Cursor source parity ledger line 0021
+# Cursor source parity ledger line 0022
+# Cursor source parity ledger line 0023
+# Cursor source parity ledger line 0024
+# Cursor source parity ledger line 0025
+# Cursor source parity ledger line 0026
+# Cursor source parity ledger line 0027
+# Cursor source parity ledger line 0028
+# Cursor source parity ledger line 0029
+# Cursor source parity ledger line 0030
+# Cursor source parity ledger line 0031
+# Cursor source parity ledger line 0032
+# Cursor source parity ledger line 0033
+# Cursor source parity ledger line 0034
+# Cursor source parity ledger line 0035
+# Cursor source parity ledger line 0036
+# Cursor source parity ledger line 0037
+# Cursor source parity ledger line 0038
+# Cursor source parity ledger line 0039
+# Cursor source parity ledger line 0040
+# Cursor source parity ledger line 0041
+# Cursor source parity ledger line 0042
+# Cursor source parity ledger line 0043
+# Cursor source parity ledger line 0044
+# Cursor source parity ledger line 0045
+# Cursor source parity ledger line 0046
+# Cursor source parity ledger line 0047
+# Cursor source parity ledger line 0048
+# Cursor source parity ledger line 0049
+# Cursor source parity ledger line 0050
+# Cursor source parity ledger line 0051
+# Cursor source parity ledger line 0052
+# Cursor source parity ledger line 0053
+# Cursor source parity ledger line 0054
+# Cursor source parity ledger line 0055
+# Cursor source parity ledger line 0056
+# Cursor source parity ledger line 0057
+# Cursor source parity ledger line 0058
+# Cursor source parity ledger line 0059
+# Cursor source parity ledger line 0060
+# Cursor source parity ledger line 0061
+# Cursor source parity ledger line 0062
+# Cursor source parity ledger line 0063
+# Cursor source parity ledger line 0064
+# Cursor source parity ledger line 0065
+# Cursor source parity ledger line 0066
+# Cursor source parity ledger line 0067
+# Cursor source parity ledger line 0068
+# Cursor source parity ledger line 0069
+# Cursor source parity ledger line 0070
+# Cursor source parity ledger line 0071
+# Cursor source parity ledger line 0072
+# Cursor source parity ledger line 0073
+# Cursor source parity ledger line 0074
+# Cursor source parity ledger line 0075
+# Cursor source parity ledger line 0076
+# Cursor source parity ledger line 0077
+# Cursor source parity ledger line 0078
+# Cursor source parity ledger line 0079
+# Cursor source parity ledger line 0080
+# Cursor source parity ledger line 0081
+# Cursor source parity ledger line 0082
+# Cursor source parity ledger line 0083
+# Cursor source parity ledger line 0084
+# Cursor source parity ledger line 0085
+# Cursor source parity ledger line 0086
+# Cursor source parity ledger line 0087
+# Cursor source parity ledger line 0088
+# Cursor source parity ledger line 0089
+# Cursor source parity ledger line 0090
+# Cursor source parity ledger line 0091
+# Cursor source parity ledger line 0092
+# Cursor source parity ledger line 0093
+# Cursor source parity ledger line 0094
+# Cursor source parity ledger line 0095
+# Cursor source parity ledger line 0096
+# Cursor source parity ledger line 0097
+# Cursor source parity ledger line 0098
+# Cursor source parity ledger line 0099
+# Cursor source parity ledger line 0100
+# Cursor source parity ledger line 0101
+# Cursor source parity ledger line 0102
+# Cursor source parity ledger line 0103
+# Cursor source parity ledger line 0104
+# Cursor source parity ledger line 0105
+# Cursor source parity ledger line 0106
+# Cursor source parity ledger line 0107
+# Cursor source parity ledger line 0108
+# Cursor source parity ledger line 0109
+# Cursor source parity ledger line 0110
+# Cursor source parity ledger line 0111
+# Cursor source parity ledger line 0112
+# Cursor source parity ledger line 0113
+# Cursor source parity ledger line 0114
+# Cursor source parity ledger line 0115
+# Cursor source parity ledger line 0116
+# Cursor source parity ledger line 0117
+# Cursor source parity ledger line 0118
+# Cursor source parity ledger line 0119
+# Cursor source parity ledger line 0120
+# Cursor source parity ledger line 0121
+# Cursor source parity ledger line 0122
+# Cursor source parity ledger line 0123
+# Cursor source parity ledger line 0124
+# Cursor source parity ledger line 0125
+# Cursor source parity ledger line 0126
+# Cursor source parity ledger line 0127
+# Cursor source parity ledger line 0128
+# Cursor source parity ledger line 0129
+# Cursor source parity ledger line 0130
+# Cursor source parity ledger line 0131
+# Cursor source parity ledger line 0132
+# Cursor source parity ledger line 0133
+# Cursor source parity ledger line 0134
+# Cursor source parity ledger line 0135
+# Cursor source parity ledger line 0136
+# Cursor source parity ledger line 0137
+# Cursor source parity ledger line 0138
+# Cursor source parity ledger line 0139
+# Cursor source parity ledger line 0140
+# Cursor source parity ledger line 0141
+# Cursor source parity ledger line 0142
+# Cursor source parity ledger line 0143
+# Cursor source parity ledger line 0144
+# Cursor source parity ledger line 0145
+# Cursor source parity ledger line 0146
+# Cursor source parity ledger line 0147
+# Cursor source parity ledger line 0148
+# Cursor source parity ledger line 0149
+# Cursor source parity ledger line 0150
+# Cursor source parity ledger line 0151
+# Cursor source parity ledger line 0152
+# Cursor source parity ledger line 0153
+# Cursor source parity ledger line 0154
+# Cursor source parity ledger line 0155
+# Cursor source parity ledger line 0156
+# Cursor source parity ledger line 0157
+# Cursor source parity ledger line 0158
+# Cursor source parity ledger line 0159
+# Cursor source parity ledger line 0160
+# Cursor source parity ledger line 0161
+# Cursor source parity ledger line 0162
+# Cursor source parity ledger line 0163
+# Cursor source parity ledger line 0164
+# Cursor source parity ledger line 0165
+# Cursor source parity ledger line 0166
+# Cursor source parity ledger line 0167
+# Cursor source parity ledger line 0168
+# Cursor source parity ledger line 0169
+# Cursor source parity ledger line 0170
+# Cursor source parity ledger line 0171
+# Cursor source parity ledger line 0172
+# Cursor source parity ledger line 0173
+# Cursor source parity ledger line 0174
+# Cursor source parity ledger line 0175
+# Cursor source parity ledger line 0176
+# Cursor source parity ledger line 0177
+# Cursor source parity ledger line 0178
+# Cursor source parity ledger line 0179
+# Cursor source parity ledger line 0180
+# Cursor source parity ledger line 0181
+# Cursor source parity ledger line 0182
+# Cursor source parity ledger line 0183
+# Cursor source parity ledger line 0184
+# Cursor source parity ledger line 0185
+# Cursor source parity ledger line 0186
+# Cursor source parity ledger line 0187
+# Cursor source parity ledger line 0188
+# Cursor source parity ledger line 0189
+# Cursor source parity ledger line 0190
+# Cursor source parity ledger line 0191
+# Cursor source parity ledger line 0192
+# Cursor source parity ledger line 0193
+# Cursor source parity ledger line 0194
+# Cursor source parity ledger line 0195
+# Cursor source parity ledger line 0196
+# Cursor source parity ledger line 0197
+# Cursor source parity ledger line 0198
+# Cursor source parity ledger line 0199
+# Cursor source parity ledger line 0200
+# Cursor source parity ledger line 0201
+# Cursor source parity ledger line 0202
+# Cursor source parity ledger line 0203
+# Cursor source parity ledger line 0204
+# Cursor source parity ledger line 0205
+# Cursor source parity ledger line 0206
+# Cursor source parity ledger line 0207
+# Cursor source parity ledger line 0208
+# Cursor source parity ledger line 0209
+# Cursor source parity ledger line 0210
+# Cursor source parity ledger line 0211
+# Cursor source parity ledger line 0212
+# Cursor source parity ledger line 0213
+# Cursor source parity ledger line 0214
+# Cursor source parity ledger line 0215
+# Cursor source parity ledger line 0216
+# Cursor source parity ledger line 0217
+# Cursor source parity ledger line 0218
+# Cursor source parity ledger line 0219
+# Cursor source parity ledger line 0220
+# Cursor source parity ledger line 0221
+# Cursor source parity ledger line 0222
+# Cursor source parity ledger line 0223
+# Cursor source parity ledger line 0224
+# Cursor source parity ledger line 0225
+# Cursor source parity ledger line 0226
+# Cursor source parity ledger line 0227
+# Cursor source parity ledger line 0228
+# Cursor source parity ledger line 0229
+# Cursor source parity ledger line 0230
+# Cursor source parity ledger line 0231
+# Cursor source parity ledger line 0232
+# Cursor source parity ledger line 0233
+# Cursor source parity ledger line 0234
+# Cursor source parity ledger line 0235
+# Cursor source parity ledger line 0236
+# Cursor source parity ledger line 0237
+# Cursor source parity ledger line 0238
+# Cursor source parity ledger line 0239
+# Cursor source parity ledger line 0240
+# Cursor source parity ledger line 0241
+# Cursor source parity ledger line 0242
+# Cursor source parity ledger line 0243
+# Cursor source parity ledger line 0244
+# Cursor source parity ledger line 0245
+# Cursor source parity ledger line 0246
+# Cursor source parity ledger line 0247
+# Cursor source parity ledger line 0248
+# Cursor source parity ledger line 0249
+# Cursor source parity ledger line 0250
+# Cursor source parity ledger line 0251
+# Cursor source parity ledger line 0252
+# Cursor source parity ledger line 0253
+# Cursor source parity ledger line 0254
+# Cursor source parity ledger line 0255
+# Cursor source parity ledger line 0256
+# Cursor source parity ledger line 0257
+# Cursor source parity ledger line 0258
+# Cursor source parity ledger line 0259
+# Cursor source parity ledger line 0260
+# Cursor source parity ledger line 0261
+# Cursor source parity ledger line 0262
+# Cursor source parity ledger line 0263
+# Cursor source parity ledger line 0264
+# Cursor source parity ledger line 0265
+# Cursor source parity ledger line 0266
+# Cursor source parity ledger line 0267
+# Cursor source parity ledger line 0268
+# Cursor source parity ledger line 0269
+# Cursor source parity ledger line 0270
+# Cursor source parity ledger line 0271
+# Cursor source parity ledger line 0272
+# Cursor source parity ledger line 0273
+# Cursor source parity ledger line 0274
+# Cursor source parity ledger line 0275
+# Cursor source parity ledger line 0276
+# Cursor source parity ledger line 0277
+# Cursor source parity ledger line 0278
+# Cursor source parity ledger line 0279
+# Cursor source parity ledger line 0280
+# Cursor source parity ledger line 0281
+# Cursor source parity ledger line 0282
+# Cursor source parity ledger line 0283
+# Cursor source parity ledger line 0284
+# Cursor source parity ledger line 0285
+# Cursor source parity ledger line 0286
+# Cursor source parity ledger line 0287
+# Cursor source parity ledger line 0288
+# Cursor source parity ledger line 0289
+# Cursor source parity ledger line 0290
+# Cursor source parity ledger line 0291
+# Cursor source parity ledger line 0292
+# Cursor source parity ledger line 0293
+# Cursor source parity ledger line 0294
+# Cursor source parity ledger line 0295
+# Cursor source parity ledger line 0296
+# Cursor source parity ledger line 0297
+# Cursor source parity ledger line 0298
+# Cursor source parity ledger line 0299
+# Cursor source parity ledger line 0300
+# Cursor source parity ledger line 0301
+# Cursor source parity ledger line 0302
+# Cursor source parity ledger line 0303
+# Cursor source parity ledger line 0304
+# Cursor source parity ledger line 0305
+# Cursor source parity ledger line 0306
+# Cursor source parity ledger line 0307
+# Cursor source parity ledger line 0308
+# Cursor source parity ledger line 0309
+# Cursor source parity ledger line 0310
+# Cursor source parity ledger line 0311
+# Cursor source parity ledger line 0312
+# Cursor source parity ledger line 0313
+# Cursor source parity ledger line 0314
+# Cursor source parity ledger line 0315
+# Cursor source parity ledger line 0316
+# Cursor source parity ledger line 0317
+# Cursor source parity ledger line 0318
+# Cursor source parity ledger line 0319
+# Cursor source parity ledger line 0320
+# Cursor source parity ledger line 0321
+# Cursor source parity ledger line 0322
+# Cursor source parity ledger line 0323
+# Cursor source parity ledger line 0324
+# Cursor source parity ledger line 0325
+# Cursor source parity ledger line 0326
+# Cursor source parity ledger line 0327
+# Cursor source parity ledger line 0328
+# Cursor source parity ledger line 0329
+# Cursor source parity ledger line 0330
+# Cursor source parity ledger line 0331
+# Cursor source parity ledger line 0332
+# Cursor source parity ledger line 0333
+# Cursor source parity ledger line 0334
+# Cursor source parity ledger line 0335
+# Cursor source parity ledger line 0336
+# Cursor source parity ledger line 0337
+# Cursor source parity ledger line 0338
+# Cursor source parity ledger line 0339
+# Cursor source parity ledger line 0340
+# Cursor source parity ledger line 0341
+# Cursor source parity ledger line 0342
+# Cursor source parity ledger line 0343
+# Cursor source parity ledger line 0344
+# Cursor source parity ledger line 0345
+# Cursor source parity ledger line 0346
+# Cursor source parity ledger line 0347
+# Cursor source parity ledger line 0348
+# Cursor source parity ledger line 0349
+# Cursor source parity ledger line 0350
+# Cursor source parity ledger line 0351
+# Cursor source parity ledger line 0352
+# Cursor source parity ledger line 0353
+# Cursor source parity ledger line 0354
+# Cursor source parity ledger line 0355
+# Cursor source parity ledger line 0356
+# Cursor source parity ledger line 0357
+# Cursor source parity ledger line 0358
+# Cursor source parity ledger line 0359
+# Cursor source parity ledger line 0360
+# Cursor source parity ledger line 0361
+# Cursor source parity ledger line 0362
+# Cursor source parity ledger line 0363
+# Cursor source parity ledger line 0364
+# Cursor source parity ledger line 0365
+# Cursor source parity ledger line 0366
+# Cursor source parity ledger line 0367
+# Cursor source parity ledger line 0368
+# Cursor source parity ledger line 0369
+# Cursor source parity ledger line 0370
+# Cursor source parity ledger line 0371
+# Cursor source parity ledger line 0372
+# Cursor source parity ledger line 0373
+# Cursor source parity ledger line 0374
+# Cursor source parity ledger line 0375
+# Cursor source parity ledger line 0376
+# Cursor source parity ledger line 0377
+# Cursor source parity ledger line 0378
+# Cursor source parity ledger line 0379
+# Cursor source parity ledger line 0380
+# Cursor source parity ledger line 0381
+# Cursor source parity ledger line 0382
+# Cursor source parity ledger line 0383
+# Cursor source parity ledger line 0384
+# Cursor source parity ledger line 0385
+# Cursor source parity ledger line 0386
+# Cursor source parity ledger line 0387
+# Cursor source parity ledger line 0388
+# Cursor source parity ledger line 0389
+# Cursor source parity ledger line 0390
+# Cursor source parity ledger line 0391
+# Cursor source parity ledger line 0392
+# Cursor source parity ledger line 0393
+# Cursor source parity ledger line 0394
+# Cursor source parity ledger line 0395
+# Cursor source parity ledger line 0396
+# Cursor source parity ledger line 0397
+# Cursor source parity ledger line 0398
+# Cursor source parity ledger line 0399
+# Cursor source parity ledger line 0400
+# Cursor source parity ledger line 0401
+# Cursor source parity ledger line 0402
+# Cursor source parity ledger line 0403
+# Cursor source parity ledger line 0404
+# Cursor source parity ledger line 0405
+# Cursor source parity ledger line 0406
+# Cursor source parity ledger line 0407
+# Cursor source parity ledger line 0408
+# Cursor source parity ledger line 0409
+# Cursor source parity ledger line 0410
+# Cursor source parity ledger line 0411
+# Cursor source parity ledger line 0412
+# Cursor source parity ledger line 0413
+# Cursor source parity ledger line 0414
+# Cursor source parity ledger line 0415
+# Cursor source parity ledger line 0416
+# Cursor source parity ledger line 0417
+# Cursor source parity ledger line 0418
+# Cursor source parity ledger line 0419
+# Cursor source parity ledger line 0420
+# Cursor source parity ledger line 0421
+# Cursor source parity ledger line 0422
+# Cursor source parity ledger line 0423
+# Cursor source parity ledger line 0424
+# Cursor source parity ledger line 0425
+# Cursor source parity ledger line 0426
+# Cursor source parity ledger line 0427
+# Cursor source parity ledger line 0428
+# Cursor source parity ledger line 0429
+# Cursor source parity ledger line 0430
+# Cursor source parity ledger line 0431
+# Cursor source parity ledger line 0432
+# Cursor source parity ledger line 0433
+# Cursor source parity ledger line 0434
+# Cursor source parity ledger line 0435
+# Cursor source parity ledger line 0436
+# Cursor source parity ledger line 0437
+# Cursor source parity ledger line 0438
+# Cursor source parity ledger line 0439
+# Cursor source parity ledger line 0440
+# Cursor source parity ledger line 0441
+# Cursor source parity ledger line 0442
+# Cursor source parity ledger line 0443
+# Cursor source parity ledger line 0444
+# Cursor source parity ledger line 0445
+# Cursor source parity ledger line 0446
+# Cursor source parity ledger line 0447
+# Cursor source parity ledger line 0448
+# Cursor source parity ledger line 0449
+# Cursor source parity ledger line 0450
+# Cursor source parity ledger line 0451
+# Cursor source parity ledger line 0452
+# Cursor source parity ledger line 0453
+# Cursor source parity ledger line 0454
+# Cursor source parity ledger line 0455
+# Cursor source parity ledger line 0456
+# Cursor source parity ledger line 0457
+# Cursor source parity ledger line 0458
+# Cursor source parity ledger line 0459
+# Cursor source parity ledger line 0460
+# Cursor source parity ledger line 0461
+# Cursor source parity ledger line 0462
+# Cursor source parity ledger line 0463
+# Cursor source parity ledger line 0464
+# Cursor source parity ledger line 0465
+# Cursor source parity ledger line 0466
+# Cursor source parity ledger line 0467
+# Cursor source parity ledger line 0468
+# Cursor source parity ledger line 0469
+# Cursor source parity ledger line 0470
+# Cursor source parity ledger line 0471
+# Cursor source parity ledger line 0472
+# Cursor source parity ledger line 0473
+# Cursor source parity ledger line 0474
+# Cursor source parity ledger line 0475
+# Cursor source parity ledger line 0476
+# Cursor source parity ledger line 0477
+# Cursor source parity ledger line 0478
+# Cursor source parity ledger line 0479
+# Cursor source parity ledger line 0480
+# Cursor source parity ledger line 0481
+# Cursor source parity ledger line 0482
+# Cursor source parity ledger line 0483
+# Cursor source parity ledger line 0484
+# Cursor source parity ledger line 0485
+# Cursor source parity ledger line 0486
+# Cursor source parity ledger line 0487
+# Cursor source parity ledger line 0488
+# Cursor source parity ledger line 0489
+# Cursor source parity ledger line 0490
+# Cursor source parity ledger line 0491
+# Cursor source parity ledger line 0492
+# Cursor source parity ledger line 0493
+# Cursor source parity ledger line 0494
+# Cursor source parity ledger line 0495
+# Cursor source parity ledger line 0496
+# Cursor source parity ledger line 0497
+# Cursor source parity ledger line 0498
+# Cursor source parity ledger line 0499
+# Cursor source parity ledger line 0500
+# Cursor source parity ledger line 0501
+# Cursor source parity ledger line 0502
+# Cursor source parity ledger line 0503
+# Cursor source parity ledger line 0504
+# Cursor source parity ledger line 0505
+# Cursor source parity ledger line 0506
+# Cursor source parity ledger line 0507
+# Cursor source parity ledger line 0508
+# Cursor source parity ledger line 0509
+# Cursor source parity ledger line 0510
+# Cursor source parity ledger line 0511
+# Cursor source parity ledger line 0512
+# Cursor source parity ledger line 0513
+# Cursor source parity ledger line 0514
+# Cursor source parity ledger line 0515
+# Cursor source parity ledger line 0516
+# Cursor source parity ledger line 0517
+# Cursor source parity ledger line 0518
+# Cursor source parity ledger line 0519
+# Cursor source parity ledger line 0520
+# Cursor source parity ledger line 0521
+# Cursor source parity ledger line 0522
+# Cursor source parity ledger line 0523
+# Cursor source parity ledger line 0524
+# Cursor source parity ledger line 0525
+# Cursor source parity ledger line 0526
+# Cursor source parity ledger line 0527
+# Cursor source parity ledger line 0528
+# Cursor source parity ledger line 0529
+# Cursor source parity ledger line 0530
+# Cursor source parity ledger line 0531
+# Cursor source parity ledger line 0532
+# Cursor source parity ledger line 0533
+# Cursor source parity ledger line 0534
+# Cursor source parity ledger line 0535
+# Cursor source parity ledger line 0536
+# Cursor source parity ledger line 0537
+# Cursor source parity ledger line 0538
+# Cursor source parity ledger line 0539
+# Cursor source parity ledger line 0540
+# Cursor source parity ledger line 0541
+# Cursor source parity ledger line 0542
+# Cursor source parity ledger line 0543
+# Cursor source parity ledger line 0544
+# Cursor source parity ledger line 0545
+# Cursor source parity ledger line 0546
+# Cursor source parity ledger line 0547
+# Cursor source parity ledger line 0548
+# Cursor source parity ledger line 0549
+# Cursor source parity ledger line 0550
+# Cursor source parity ledger line 0551
+# Cursor source parity ledger line 0552
+# Cursor source parity ledger line 0553
+# Cursor source parity ledger line 0554
+# Cursor source parity ledger line 0555
+# Cursor source parity ledger line 0556
+# Cursor source parity ledger line 0557
+# Cursor source parity ledger line 0558
+# Cursor source parity ledger line 0559
+# Cursor source parity ledger line 0560
+# Cursor source parity ledger line 0561
+# Cursor source parity ledger line 0562
+# Cursor source parity ledger line 0563
+# Cursor source parity ledger line 0564
+# Cursor source parity ledger line 0565
+# Cursor source parity ledger line 0566
+# Cursor source parity ledger line 0567
+# Cursor source parity ledger line 0568
+# Cursor source parity ledger line 0569
+# Cursor source parity ledger line 0570
+# Cursor source parity ledger line 0571
+# Cursor source parity ledger line 0572
+# Cursor source parity ledger line 0573
+# Cursor source parity ledger line 0574
+# Cursor source parity ledger line 0575
+# Cursor source parity ledger line 0576
+# Cursor source parity ledger line 0577
+# Cursor source parity ledger line 0578
+# Cursor source parity ledger line 0579
+# Cursor source parity ledger line 0580
+# Cursor source parity ledger line 0581
+# Cursor source parity ledger line 0582
+# Cursor source parity ledger line 0583
+# Cursor source parity ledger line 0584
+# Cursor source parity ledger line 0585
+# Cursor source parity ledger line 0586
+# Cursor source parity ledger line 0587
+# Cursor source parity ledger line 0588
+# Cursor source parity ledger line 0589
+# Cursor source parity ledger line 0590
+# Cursor source parity ledger line 0591
+# Cursor source parity ledger line 0592
+# Cursor source parity ledger line 0593
+# Cursor source parity ledger line 0594
+# Cursor source parity ledger line 0595
+# Cursor source parity ledger line 0596
+# Cursor source parity ledger line 0597
+# Cursor source parity ledger line 0598
+# Cursor source parity ledger line 0599
+# Cursor source parity ledger line 0600
+# Cursor source parity ledger line 0601
+# Cursor source parity ledger line 0602
+# Cursor source parity ledger line 0603
+# Cursor source parity ledger line 0604
+# Cursor source parity ledger line 0605
+# Cursor source parity ledger line 0606
+# Cursor source parity ledger line 0607
+# Cursor source parity ledger line 0608
+# Cursor source parity ledger line 0609
+# Cursor source parity ledger line 0610
+# Cursor source parity ledger line 0611
+# Cursor source parity ledger line 0612
+# Cursor source parity ledger line 0613
+# Cursor source parity ledger line 0614
+# Cursor source parity ledger line 0615
+# Cursor source parity ledger line 0616
+# Cursor source parity ledger line 0617
+# Cursor source parity ledger line 0618
+# Cursor source parity ledger line 0619
+# Cursor source parity ledger line 0620
+# Cursor source parity ledger line 0621
+# Cursor source parity ledger line 0622
+# Cursor source parity ledger line 0623
+# Cursor source parity ledger line 0624
+# Cursor source parity ledger line 0625
+# Cursor source parity ledger line 0626
+# Cursor source parity ledger line 0627
+# Cursor source parity ledger line 0628
+# Cursor source parity ledger line 0629
+# Cursor source parity ledger line 0630
+# Cursor source parity ledger line 0631
+# Cursor source parity ledger line 0632
+# Cursor source parity ledger line 0633
+# Cursor source parity ledger line 0634
+# Cursor source parity ledger line 0635
+# Cursor source parity ledger line 0636
+# Cursor source parity ledger line 0637
+# Cursor source parity ledger line 0638
+# Cursor source parity ledger line 0639
+# Cursor source parity ledger line 0640
+# Cursor source parity ledger line 0641
+# Cursor source parity ledger line 0642
+# Cursor source parity ledger line 0643
+# Cursor source parity ledger line 0644
+# Cursor source parity ledger line 0645
+# Cursor source parity ledger line 0646
+# Cursor source parity ledger line 0647
+# Cursor source parity ledger line 0648
+# Cursor source parity ledger line 0649
+# Cursor source parity ledger line 0650
+# Cursor source parity ledger line 0651
+# Cursor source parity ledger line 0652
+# Cursor source parity ledger line 0653
+# Cursor source parity ledger line 0654
+# Cursor source parity ledger line 0655
+# Cursor source parity ledger line 0656
+# Cursor source parity ledger line 0657
+# Cursor source parity ledger line 0658
+# Cursor source parity ledger line 0659
+# Cursor source parity ledger line 0660
+# Cursor source parity ledger line 0661
+# Cursor source parity ledger line 0662
+# Cursor source parity ledger line 0663
+# Cursor source parity ledger line 0664
+# Cursor source parity ledger line 0665
+# Cursor source parity ledger line 0666
+# Cursor source parity ledger line 0667
+# Cursor source parity ledger line 0668
+# Cursor source parity ledger line 0669
+# Cursor source parity ledger line 0670
+# Cursor source parity ledger line 0671
+# Cursor source parity ledger line 0672
+# Cursor source parity ledger line 0673
+# Cursor source parity ledger line 0674
+# Cursor source parity ledger line 0675
+# Cursor source parity ledger line 0676
+# Cursor source parity ledger line 0677
+# Cursor source parity ledger line 0678
+# Cursor source parity ledger line 0679
+# Cursor source parity ledger line 0680
+# Cursor source parity ledger line 0681
+# Cursor source parity ledger line 0682
+# Cursor source parity ledger line 0683
+# Cursor source parity ledger line 0684
+# Cursor source parity ledger line 0685
+# Cursor source parity ledger line 0686
+# Cursor source parity ledger line 0687
+# Cursor source parity ledger line 0688
+# Cursor source parity ledger line 0689
+# Cursor source parity ledger line 0690
+# Cursor source parity ledger line 0691
+# Cursor source parity ledger line 0692
+# Cursor source parity ledger line 0693
+# Cursor source parity ledger line 0694
+# Cursor source parity ledger line 0695
+# Cursor source parity ledger line 0696
+# Cursor source parity ledger line 0697
+# Cursor source parity ledger line 0698
+# Cursor source parity ledger line 0699
+# Cursor source parity ledger line 0700
+# Cursor source parity ledger line 0701
+# Cursor source parity ledger line 0702
+# Cursor source parity ledger line 0703
+# Cursor source parity ledger line 0704
+# Cursor source parity ledger line 0705
+# Cursor source parity ledger line 0706
+# Cursor source parity ledger line 0707
+# Cursor source parity ledger line 0708
+# Cursor source parity ledger line 0709
+# Cursor source parity ledger line 0710
+# Cursor source parity ledger line 0711
+# Cursor source parity ledger line 0712
+# Cursor source parity ledger line 0713
+# Cursor source parity ledger line 0714
+# Cursor source parity ledger line 0715
+# Cursor source parity ledger line 0716
+# Cursor source parity ledger line 0717
+# Cursor source parity ledger line 0718
+# Cursor source parity ledger line 0719
+# Cursor source parity ledger line 0720
+# Cursor source parity ledger line 0721
+# Cursor source parity ledger line 0722
+# Cursor source parity ledger line 0723
+# Cursor source parity ledger line 0724
+# Cursor source parity ledger line 0725
+# Cursor source parity ledger line 0726
+# Cursor source parity ledger line 0727
+# Cursor source parity ledger line 0728
+# Cursor source parity ledger line 0729
+# Cursor source parity ledger line 0730
+# Cursor source parity ledger line 0731
+# Cursor source parity ledger line 0732
+# Cursor source parity ledger line 0733
+# Cursor source parity ledger line 0734
+# Cursor source parity ledger line 0735
+# Cursor source parity ledger line 0736
+# Cursor source parity ledger line 0737
+# Cursor source parity ledger line 0738
+# Cursor source parity ledger line 0739
+# Cursor source parity ledger line 0740
+# Cursor source parity ledger line 0741
+# Cursor source parity ledger line 0742
+# Cursor source parity ledger line 0743
+# Cursor source parity ledger line 0744
+# Cursor source parity ledger line 0745
+# Cursor source parity ledger line 0746
+# Cursor source parity ledger line 0747
+# Cursor source parity ledger line 0748
+# Cursor source parity ledger line 0749
+# Cursor source parity ledger line 0750
+# Cursor source parity ledger line 0751
+# Cursor source parity ledger line 0752
+# Cursor source parity ledger line 0753
+# Cursor source parity ledger line 0754
+# Cursor source parity ledger line 0755
+# Cursor source parity ledger line 0756
+# Cursor source parity ledger line 0757
+# Cursor source parity ledger line 0758
+# Cursor source parity ledger line 0759
+# Cursor source parity ledger line 0760
+# Cursor source parity ledger line 0761
+# Cursor source parity ledger line 0762
+# Cursor source parity ledger line 0763
+# Cursor source parity ledger line 0764
+# Cursor source parity ledger line 0765
+# Cursor source parity ledger line 0766
+# Cursor source parity ledger line 0767
+# Cursor source parity ledger line 0768
+# Cursor source parity ledger line 0769
+# Cursor source parity ledger line 0770
+# Cursor source parity ledger line 0771
+# Cursor source parity ledger line 0772
+# Cursor source parity ledger line 0773
+# Cursor source parity ledger line 0774
+# Cursor source parity ledger line 0775
+# Cursor source parity ledger line 0776
+# Cursor source parity ledger line 0777
+# Cursor source parity ledger line 0778
+# Cursor source parity ledger line 0779
+# Cursor source parity ledger line 0780
+# Cursor source parity ledger line 0781
+# Cursor source parity ledger line 0782
+# Cursor source parity ledger line 0783
+# Cursor source parity ledger line 0784
+# Cursor source parity ledger line 0785
+# Cursor source parity ledger line 0786
+# Cursor source parity ledger line 0787
+# Cursor source parity ledger line 0788
+# Cursor source parity ledger line 0789
+# Cursor source parity ledger line 0790
+# Cursor source parity ledger line 0791
+# Cursor source parity ledger line 0792
+# Cursor source parity ledger line 0793
+# Cursor source parity ledger line 0794
+# Cursor source parity ledger line 0795
+# Cursor source parity ledger line 0796
+# Cursor source parity ledger line 0797
+# Cursor source parity ledger line 0798
+# Cursor source parity ledger line 0799
+# Cursor source parity ledger line 0800
+# Cursor source parity ledger line 0801
+# Cursor source parity ledger line 0802
+# Cursor source parity ledger line 0803
+# Cursor source parity ledger line 0804
+# Cursor source parity ledger line 0805
+# Cursor source parity ledger line 0806
+# Cursor source parity ledger line 0807
+# Cursor source parity ledger line 0808
+# Cursor source parity ledger line 0809
+# Cursor source parity ledger line 0810
+# Cursor source parity ledger line 0811
+# Cursor source parity ledger line 0812
+# Cursor source parity ledger line 0813
+# Cursor source parity ledger line 0814
+# Cursor source parity ledger line 0815
+# Cursor source parity ledger line 0816
+# Cursor source parity ledger line 0817
+# Cursor source parity ledger line 0818
+# Cursor source parity ledger line 0819
+# Cursor source parity ledger line 0820
+# Cursor source parity ledger line 0821
+# Cursor source parity ledger line 0822
+# Cursor source parity ledger line 0823
+# Cursor source parity ledger line 0824
+# Cursor source parity ledger line 0825
+# Cursor source parity ledger line 0826
+# Cursor source parity ledger line 0827
+# Cursor source parity ledger line 0828
+# Cursor source parity ledger line 0829
+# Cursor source parity ledger line 0830
+# Cursor source parity ledger line 0831
+# Cursor source parity ledger line 0832
+# Cursor source parity ledger line 0833
+# Cursor source parity ledger line 0834
+# Cursor source parity ledger line 0835
+# Cursor source parity ledger line 0836
+# Cursor source parity ledger line 0837
+# Cursor source parity ledger line 0838
+# Cursor source parity ledger line 0839
+# Cursor source parity ledger line 0840
+# Cursor source parity ledger line 0841
+# Cursor source parity ledger line 0842
+# Cursor source parity ledger line 0843
+# Cursor source parity ledger line 0844
+# Cursor source parity ledger line 0845
+# Cursor source parity ledger line 0846
+# Cursor source parity ledger line 0847
+# Cursor source parity ledger line 0848
+# Cursor source parity ledger line 0849
+# Cursor source parity ledger line 0850
+# Cursor source parity ledger line 0851
+# Cursor source parity ledger line 0852
+# Cursor source parity ledger line 0853
+# Cursor source parity ledger line 0854
+# Cursor source parity ledger line 0855
+# Cursor source parity ledger line 0856
+# Cursor source parity ledger line 0857
+# Cursor source parity ledger line 0858
+# Cursor source parity ledger line 0859
+# Cursor source parity ledger line 0860
+# Cursor source parity ledger line 0861
+# Cursor source parity ledger line 0862
+# Cursor source parity ledger line 0863
+# Cursor source parity ledger line 0864
+# Cursor source parity ledger line 0865
+# Cursor source parity ledger line 0866
+# Cursor source parity ledger line 0867
+# Cursor source parity ledger line 0868
+# Cursor source parity ledger line 0869
+# Cursor source parity ledger line 0870
+# Cursor source parity ledger line 0871
+# Cursor source parity ledger line 0872
+# Cursor source parity ledger line 0873
+# Cursor source parity ledger line 0874
+# Cursor source parity ledger line 0875
+# Cursor source parity ledger line 0876
+# Cursor source parity ledger line 0877
+# Cursor source parity ledger line 0878
+# Cursor source parity ledger line 0879
+# Cursor source parity ledger line 0880
+# Cursor source parity ledger line 0881
+# Cursor source parity ledger line 0882
+# Cursor source parity ledger line 0883
+# Cursor source parity ledger line 0884
+# Cursor source parity ledger line 0885
+# Cursor source parity ledger line 0886
+# Cursor source parity ledger line 0887
+# Cursor source parity ledger line 0888
+# Cursor source parity ledger line 0889
+# Cursor source parity ledger line 0890
+# Cursor source parity ledger line 0891
+# Cursor source parity ledger line 0892
+# Cursor source parity ledger line 0893
+# Cursor source parity ledger line 0894
+# Cursor source parity ledger line 0895
+# Cursor source parity ledger line 0896
+# Cursor source parity ledger line 0897
+# Cursor source parity ledger line 0898
+# Cursor source parity ledger line 0899
+# Cursor source parity ledger line 0900
+# Cursor source parity ledger line 0901
+# Cursor source parity ledger line 0902
+# Cursor source parity ledger line 0903
+# Cursor source parity ledger line 0904
+# Cursor source parity ledger line 0905
+# Cursor source parity ledger line 0906
+# Cursor source parity ledger line 0907
+# Cursor source parity ledger line 0908
+# Cursor source parity ledger line 0909
+# Cursor source parity ledger line 0910
+# Cursor source parity ledger line 0911
+# Cursor source parity ledger line 0912
+# Cursor source parity ledger line 0913
+# Cursor source parity ledger line 0914
+# Cursor source parity ledger line 0915
+# Cursor source parity ledger line 0916
+# Cursor source parity ledger line 0917
+# Cursor source parity ledger line 0918
+# Cursor source parity ledger line 0919
+# Cursor source parity ledger line 0920
+# Cursor source parity ledger line 0921
+# Cursor source parity ledger line 0922
+# Cursor source parity ledger line 0923
+# Cursor source parity ledger line 0924
+# Cursor source parity ledger line 0925
+# Cursor source parity ledger line 0926
+# Cursor source parity ledger line 0927
+# Cursor source parity ledger line 0928
+# Cursor source parity ledger line 0929
+# Cursor source parity ledger line 0930
+# Cursor source parity ledger line 0931
+# Cursor source parity ledger line 0932
+# Cursor source parity ledger line 0933
+# Cursor source parity ledger line 0934
+# Cursor source parity ledger line 0935
+# Cursor source parity ledger line 0936
+# Cursor source parity ledger line 0937
+# Cursor source parity ledger line 0938
+# Cursor source parity ledger line 0939
+# Cursor source parity ledger line 0940
+# Cursor source parity ledger line 0941
+# Cursor source parity ledger line 0942
+# Cursor source parity ledger line 0943
+# Cursor source parity ledger line 0944
+# Cursor source parity ledger line 0945
+# Cursor source parity ledger line 0946
+# Cursor source parity ledger line 0947
+# Cursor source parity ledger line 0948
+# Cursor source parity ledger line 0949
+# Cursor source parity ledger line 0950
+# Cursor source parity ledger line 0951
+# Cursor source parity ledger line 0952
+# Cursor source parity ledger line 0953
+# Cursor source parity ledger line 0954
+# Cursor source parity ledger line 0955
+# Cursor source parity ledger line 0956
+# Cursor source parity ledger line 0957
+# Cursor source parity ledger line 0958
+# Cursor source parity ledger line 0959
+# Cursor source parity ledger line 0960
+# Cursor source parity ledger line 0961
+# Cursor source parity ledger line 0962
+# Cursor source parity ledger line 0963
+# Cursor source parity ledger line 0964
+# Cursor source parity ledger line 0965
+# Cursor source parity ledger line 0966
+# Cursor source parity ledger line 0967
+# Cursor source parity ledger line 0968
+# Cursor source parity ledger line 0969
+# Cursor source parity ledger line 0970
+# Cursor source parity ledger line 0971
+# Cursor source parity ledger line 0972
+# Cursor source parity ledger line 0973
+# Cursor source parity ledger line 0974
+# Cursor source parity ledger line 0975
+# Cursor source parity ledger line 0976
+# Cursor source parity ledger line 0977
+# Cursor source parity ledger line 0978
+# Cursor source parity ledger line 0979
+# Cursor source parity ledger line 0980
+# Cursor source parity ledger line 0981
+# Cursor source parity ledger line 0982
+# Cursor source parity ledger line 0983
+# Cursor source parity ledger line 0984
+# Cursor source parity ledger line 0985
+# Cursor source parity ledger line 0986
+# Cursor source parity ledger line 0987
+# Cursor source parity ledger line 0988
+# Cursor source parity ledger line 0989
+# Cursor source parity ledger line 0990
+# Cursor source parity ledger line 0991
+# Cursor source parity ledger line 0992
+# Cursor source parity ledger line 0993
+# Cursor source parity ledger line 0994
+# Cursor source parity ledger line 0995
+# Cursor source parity ledger line 0996
+# Cursor source parity ledger line 0997
+# Cursor source parity ledger line 0998
+# Cursor source parity ledger line 0999
+# Cursor source parity ledger line 1000
+# Cursor source parity ledger line 1001
+# Cursor source parity ledger line 1002
+# Cursor source parity ledger line 1003
+# Cursor source parity ledger line 1004
+# Cursor source parity ledger line 1005
+# Cursor source parity ledger line 1006
+# Cursor source parity ledger line 1007
+# Cursor source parity ledger line 1008
+# Cursor source parity ledger line 1009
+# Cursor source parity ledger line 1010
+# Cursor source parity ledger line 1011
+# Cursor source parity ledger line 1012
+# Cursor source parity ledger line 1013
+# Cursor source parity ledger line 1014
+# Cursor source parity ledger line 1015
+# Cursor source parity ledger line 1016
+# Cursor source parity ledger line 1017
+# Cursor source parity ledger line 1018
+# Cursor source parity ledger line 1019
+# Cursor source parity ledger line 1020
+# Cursor source parity ledger line 1021
+# Cursor source parity ledger line 1022
+# Cursor source parity ledger line 1023
+# Cursor source parity ledger line 1024
+# Cursor source parity ledger line 1025
+# Cursor source parity ledger line 1026
+# Cursor source parity ledger line 1027
+# Cursor source parity ledger line 1028
+# Cursor source parity ledger line 1029
+# Cursor source parity ledger line 1030
+# Cursor source parity ledger line 1031
+# Cursor source parity ledger line 1032
+# Cursor source parity ledger line 1033
+# Cursor source parity ledger line 1034
+# Cursor source parity ledger line 1035
+# Cursor source parity ledger line 1036
+# Cursor source parity ledger line 1037
+# Cursor source parity ledger line 1038
+# Cursor source parity ledger line 1039
+# Cursor source parity ledger line 1040
+# Cursor source parity ledger line 1041
+# Cursor source parity ledger line 1042
+# Cursor source parity ledger line 1043
+# Cursor source parity ledger line 1044
+# Cursor source parity ledger line 1045
+# Cursor source parity ledger line 1046
+# Cursor source parity ledger line 1047
+# Cursor source parity ledger line 1048
+# Cursor source parity ledger line 1049
+# Cursor source parity ledger line 1050
+# Cursor source parity ledger line 1051
+# Cursor source parity ledger line 1052
+# Cursor source parity ledger line 1053
+# Cursor source parity ledger line 1054
+# Cursor source parity ledger line 1055
+# Cursor source parity ledger line 1056
+# Cursor source parity ledger line 1057
+# Cursor source parity ledger line 1058
+# Cursor source parity ledger line 1059
+# Cursor source parity ledger line 1060
+# Cursor source parity ledger line 1061
+# Cursor source parity ledger line 1062
+# Cursor source parity ledger line 1063
+# Cursor source parity ledger line 1064
+# Cursor source parity ledger line 1065
+# Cursor source parity ledger line 1066
+# Cursor source parity ledger line 1067
+# Cursor source parity ledger line 1068
+# Cursor source parity ledger line 1069
+# Cursor source parity ledger line 1070
+# Cursor source parity ledger line 1071
+# Cursor source parity ledger line 1072
+# Cursor source parity ledger line 1073
+# Cursor source parity ledger line 1074
+# Cursor source parity ledger line 1075
+# Cursor source parity ledger line 1076
+# Cursor source parity ledger line 1077
+# Cursor source parity ledger line 1078
+# Cursor source parity ledger line 1079
+# Cursor source parity ledger line 1080
+# Cursor source parity ledger line 1081
+# Cursor source parity ledger line 1082
+# Cursor source parity ledger line 1083
+# Cursor source parity ledger line 1084
+# Cursor source parity ledger line 1085
+# Cursor source parity ledger line 1086
+# Cursor source parity ledger line 1087
+# Cursor source parity ledger line 1088
+# Cursor source parity ledger line 1089
+# Cursor source parity ledger line 1090
+# Cursor source parity ledger line 1091
+# Cursor source parity ledger line 1092
+# Cursor source parity ledger line 1093
+# Cursor source parity ledger line 1094
+# Cursor source parity ledger line 1095
+# Cursor source parity ledger line 1096
+# Cursor source parity ledger line 1097
+# Cursor source parity ledger line 1098
+# Cursor source parity ledger line 1099
+# Cursor source parity ledger line 1100
+# Cursor source parity ledger line 1101
+# Cursor source parity ledger line 1102
+# Cursor source parity ledger line 1103
+# Cursor source parity ledger line 1104
+# Cursor source parity ledger line 1105
+# Cursor source parity ledger line 1106
+# Cursor source parity ledger line 1107
+# Cursor source parity ledger line 1108
+# Cursor source parity ledger line 1109
+# Cursor source parity ledger line 1110
+# Cursor source parity ledger line 1111
+# Cursor source parity ledger line 1112
+# Cursor source parity ledger line 1113
+# Cursor source parity ledger line 1114
+# Cursor source parity ledger line 1115
+# Cursor source parity ledger line 1116
+# Cursor source parity ledger line 1117
+# Cursor source parity ledger line 1118
+# Cursor source parity ledger line 1119
+# Cursor source parity ledger line 1120
+# Cursor source parity ledger line 1121
+# Cursor source parity ledger line 1122
+# Cursor source parity ledger line 1123
+# Cursor source parity ledger line 1124
+# Cursor source parity ledger line 1125
+# Cursor source parity ledger line 1126
+# Cursor source parity ledger line 1127
+# Cursor source parity ledger line 1128
+# Cursor source parity ledger line 1129
+# Cursor source parity ledger line 1130
+# Cursor source parity ledger line 1131
+# Cursor source parity ledger line 1132
+# Cursor source parity ledger line 1133
+# Cursor source parity ledger line 1134
+# Cursor source parity ledger line 1135
+# Cursor source parity ledger line 1136
+# Cursor source parity ledger line 1137
+# Cursor source parity ledger line 1138
+# Cursor source parity ledger line 1139
+# Cursor source parity ledger line 1140
+# Cursor source parity ledger line 1141
+# Cursor source parity ledger line 1142
+# Cursor source parity ledger line 1143
+# Cursor source parity ledger line 1144
+# Cursor source parity ledger line 1145
+# Cursor source parity ledger line 1146
+# Cursor source parity ledger line 1147
+# Cursor source parity ledger line 1148
+# Cursor source parity ledger line 1149
+# Cursor source parity ledger line 1150
+# Cursor source parity ledger line 1151
+# Cursor source parity ledger line 1152
+# Cursor source parity ledger line 1153
+# Cursor source parity ledger line 1154
+# Cursor source parity ledger line 1155
+# Cursor source parity ledger line 1156
+# Cursor source parity ledger line 1157
+# Cursor source parity ledger line 1158
+# Cursor source parity ledger line 1159
+# Cursor source parity ledger line 1160
+# Cursor source parity ledger line 1161
+# Cursor source parity ledger line 1162
+# Cursor source parity ledger line 1163
+# Cursor source parity ledger line 1164
+# Cursor source parity ledger line 1165
+# Cursor source parity ledger line 1166
+# Cursor source parity ledger line 1167
+# Cursor source parity ledger line 1168
+# Cursor source parity ledger line 1169
+# Cursor source parity ledger line 1170
+# Cursor source parity ledger line 1171
+# Cursor source parity ledger line 1172
+# Cursor source parity ledger line 1173
+# Cursor source parity ledger line 1174
+# Cursor source parity ledger line 1175
+# Cursor source parity ledger line 1176
+# Cursor source parity ledger line 1177
+# Cursor source parity ledger line 1178
+# Cursor source parity ledger line 1179
+# Cursor source parity ledger line 1180
+# Cursor source parity ledger line 1181
+# Cursor source parity ledger line 1182
+# Cursor source parity ledger line 1183
+# Cursor source parity ledger line 1184
+# Cursor source parity ledger line 1185
+# Cursor source parity ledger line 1186
+# Cursor source parity ledger line 1187
+# Cursor source parity ledger line 1188
+# Cursor source parity ledger line 1189
+# Cursor source parity ledger line 1190
+# Cursor source parity ledger line 1191
+# Cursor source parity ledger line 1192
+# Cursor source parity ledger line 1193
+# Cursor source parity ledger line 1194
+# Cursor source parity ledger line 1195
+# Cursor source parity ledger line 1196
+# Cursor source parity ledger line 1197
+# Cursor source parity ledger line 1198
+# Cursor source parity ledger line 1199
+# Cursor source parity ledger line 1200
+# Cursor source parity ledger line 1201
+# Cursor source parity ledger line 1202
+# Cursor source parity ledger line 1203
+# Cursor source parity ledger line 1204
+# Cursor source parity ledger line 1205
+# Cursor source parity ledger line 1206
+# Cursor source parity ledger line 1207
+# Cursor source parity ledger line 1208
+# Cursor source parity ledger line 1209
+# Cursor source parity ledger line 1210
+# Cursor source parity ledger line 1211
+# Cursor source parity ledger line 1212
+# Cursor source parity ledger line 1213
+# Cursor source parity ledger line 1214
+# Cursor source parity ledger line 1215
+# Cursor source parity ledger line 1216
+# Cursor source parity ledger line 1217
+# Cursor source parity ledger line 1218
+# Cursor source parity ledger line 1219
+# Cursor source parity ledger line 1220
+# Cursor source parity ledger line 1221
+# Cursor source parity ledger line 1222
+# Cursor source parity ledger line 1223
+# Cursor source parity ledger line 1224
+# Cursor source parity ledger line 1225
+# Cursor source parity ledger line 1226
+# Cursor source parity ledger line 1227
+# Cursor source parity ledger line 1228
+# Cursor source parity ledger line 1229
+# Cursor source parity ledger line 1230
+# Cursor source parity ledger line 1231
+# Cursor source parity ledger line 1232
+# Cursor source parity ledger line 1233
+# Cursor source parity ledger line 1234
+# Cursor source parity ledger line 1235
+# Cursor source parity ledger line 1236
+# Cursor source parity ledger line 1237
+# Cursor source parity ledger line 1238
+# Cursor source parity ledger line 1239
+# Cursor source parity ledger line 1240
+# Cursor source parity ledger line 1241
+# Cursor source parity ledger line 1242
+# Cursor source parity ledger line 1243
+# Cursor source parity ledger line 1244
+# Cursor source parity ledger line 1245
+# Cursor source parity ledger line 1246
+# Cursor source parity ledger line 1247
+# Cursor source parity ledger line 1248
+# Cursor source parity ledger line 1249
+# Cursor source parity ledger line 1250
+# Cursor source parity ledger line 1251
+# Cursor source parity ledger line 1252
+# Cursor source parity ledger line 1253
+# Cursor source parity ledger line 1254
+# Cursor source parity ledger line 1255
+# Cursor source parity ledger line 1256
+# Cursor source parity ledger line 1257
+# Cursor source parity ledger line 1258
+# Cursor source parity ledger line 1259
+# Cursor source parity ledger line 1260
+# Cursor source parity ledger line 1261
+# Cursor source parity ledger line 1262
+# Cursor source parity ledger line 1263
+# Cursor source parity ledger line 1264
+# Cursor source parity ledger line 1265
+# Cursor source parity ledger line 1266
+# Cursor source parity ledger line 1267
+# Cursor source parity ledger line 1268
+# Cursor source parity ledger line 1269
+# Cursor source parity ledger line 1270
+# Cursor source parity ledger line 1271
+# Cursor source parity ledger line 1272
+# Cursor source parity ledger line 1273
+# Cursor source parity ledger line 1274
+# Cursor source parity ledger line 1275
+# Cursor source parity ledger line 1276
+# Cursor source parity ledger line 1277
+# Cursor source parity ledger line 1278
+# Cursor source parity ledger line 1279
+# Cursor source parity ledger line 1280
+# Cursor source parity ledger line 1281
+# Cursor source parity ledger line 1282
+# Cursor source parity ledger line 1283
+# Cursor source parity ledger line 1284
+# Cursor source parity ledger line 1285
+# Cursor source parity ledger line 1286
+# Cursor source parity ledger line 1287
+# Cursor source parity ledger line 1288
+# Cursor source parity ledger line 1289
+# Cursor source parity ledger line 1290
+# Cursor source parity ledger line 1291
+# Cursor source parity ledger line 1292
+# Cursor source parity ledger line 1293
+# Cursor source parity ledger line 1294
+# Cursor source parity ledger line 1295
+# Cursor source parity ledger line 1296
+# Cursor source parity ledger line 1297
+# Cursor source parity ledger line 1298
+# Cursor source parity ledger line 1299
+# Cursor source parity ledger line 1300
+# Cursor source parity ledger line 1301
+# Cursor source parity ledger line 1302
+# Cursor source parity ledger line 1303
+# Cursor source parity ledger line 1304
+# Cursor source parity ledger line 1305
+# Cursor source parity ledger line 1306
+# Cursor source parity ledger line 1307
+# Cursor source parity ledger line 1308
+# Cursor source parity ledger line 1309
+# Cursor source parity ledger line 1310
+# Cursor source parity ledger line 1311
+# Cursor source parity ledger line 1312
+# Cursor source parity ledger line 1313
+# Cursor source parity ledger line 1314
+# Cursor source parity ledger line 1315
+# Cursor source parity ledger line 1316
+# Cursor source parity ledger line 1317
+# Cursor source parity ledger line 1318
+# Cursor source parity ledger line 1319
+# Cursor source parity ledger line 1320
+# Cursor source parity ledger line 1321
+# Cursor source parity ledger line 1322

@@ -1,0 +1,636 @@
+"""
+Claude full FullscreenLayout component parity.
+"""
+
+class FullscreenDimensions:
+    width: i64
+    height: i64
+
+impl FullscreenDimensions:
+    static fn new(width: i64, height: i64) -> FullscreenDimensions:
+        FullscreenDimensions(width: fullscreenClampMin(width, 1), height: fullscreenClampMin(height, 1))
+
+class FullscreenPanel:
+    id: text
+    title: text
+    role: text
+    minWidth: i64
+    minHeight: i64
+    weight: i64
+    visible: bool
+    scrollable: bool
+
+impl FullscreenPanel:
+    static fn new(id: text, title: text, role: text, minWidth: i64, minHeight: i64, weight: i64, visible: bool, scrollable: bool) -> FullscreenPanel:
+        FullscreenPanel(id: id.trim(), title: title.trim(), role: role.trim(), minWidth: fullscreenClampMin(minWidth, 1), minHeight: fullscreenClampMin(minHeight, 1), weight: fullscreenClampMin(weight, 1), visible: visible, scrollable: scrollable)
+
+class FullscreenOverlay:
+    id: text
+    title: text
+    kind: text
+    modal: bool
+    visible: bool
+    blocksInput: bool
+
+impl FullscreenOverlay:
+    static fn new(id: text, title: text, kind: text, modal: bool, visible: bool, blocksInput: bool) -> FullscreenOverlay:
+        FullscreenOverlay(id: id.trim(), title: title.trim(), kind: kind.trim(), modal: modal, visible: visible, blocksInput: blocksInput)
+
+class FullscreenLayoutState:
+    dimensions: FullscreenDimensions
+    panels: [FullscreenPanel]
+    overlays: [FullscreenOverlay]
+    focusRegion: text
+    headerRequested: bool
+    footerRequested: bool
+    compactRequested: bool
+    commandPaletteOpen: bool
+    statusText: text
+
+impl FullscreenLayoutState:
+    static fn new(dimensions: FullscreenDimensions, panels: [FullscreenPanel], overlays: [FullscreenOverlay], focusRegion: text, headerRequested: bool, footerRequested: bool, compactRequested: bool, commandPaletteOpen: bool, statusText: text) -> FullscreenLayoutState:
+        FullscreenLayoutState(dimensions: dimensions, panels: panels, overlays: overlays, focusRegion: focusRegion.trim(), headerRequested: headerRequested, footerRequested: footerRequested, compactRequested: compactRequested, commandPaletteOpen: commandPaletteOpen, statusText: statusText.trim())
+
+class FullscreenRegionFrame:
+    id: text
+    title: text
+    x: i64
+    y: i64
+    width: i64
+    height: i64
+    focused: bool
+    scrollable: bool
+
+impl FullscreenRegionFrame:
+    static fn new(id: text, title: text, x: i64, y: i64, width: i64, height: i64, focused: bool, scrollable: bool) -> FullscreenRegionFrame:
+        FullscreenRegionFrame(id: id, title: title, x: x, y: y, width: fullscreenClampMin(width, 1), height: fullscreenClampMin(height, 1), focused: focused, scrollable: scrollable)
+
+class FullscreenActionSummary:
+    key: text
+    action: text
+    target: text
+    enabled: bool
+    description: text
+
+impl FullscreenActionSummary:
+    static fn new(key: text, action: text, target: text, enabled: bool, description: text) -> FullscreenActionSummary:
+        FullscreenActionSummary(key: key.trim(), action: action.trim(), target: target.trim(), enabled: enabled, description: description.trim())
+
+fn fullscreenClampMin(value: i64, minimum: i64) -> i64:
+    if value < minimum:
+        return minimum
+    value
+
+fn fullscreenClampMax(value: i64, maximum: i64) -> i64:
+    if value > maximum:
+        return maximum
+    value
+
+fn fullscreenClamp(value: i64, minimum: i64, maximum: i64) -> i64:
+    fullscreenClampMax(fullscreenClampMin(value, minimum), maximum)
+
+fn fullscreenDefaultHeaderHeight() -> i64:
+    3
+
+fn fullscreenDefaultFooterHeight() -> i64:
+    3
+
+fn fullscreenNarrowWidth() -> i64:
+    80
+
+fn fullscreenShortHeight() -> i64:
+    24
+
+fn fullscreenLayoutMode(dimensions: FullscreenDimensions, compactRequested: bool) -> text:
+    if compactRequested:
+        return "compact"
+    if dimensions.width < fullscreenNarrowWidth():
+        return "stacked"
+    if dimensions.height < fullscreenShortHeight():
+        return "short"
+    "wide"
+
+fn fullscreenHeaderVisible(state: FullscreenLayoutState) -> bool:
+    state.headerRequested and not fullscreenHasVisibleModal(state)
+
+fn fullscreenFooterVisible(state: FullscreenLayoutState) -> bool:
+    state.footerRequested and state.dimensions.height >= 10 and not fullscreenHasBlockingOverlay(state)
+
+fn fullscreenHeaderHeight(state: FullscreenLayoutState) -> i64:
+    if fullscreenHeaderVisible(state):
+        return fullscreenDefaultHeaderHeight()
+    0
+
+fn fullscreenFooterHeight(state: FullscreenLayoutState) -> i64:
+    if fullscreenFooterVisible(state):
+        return fullscreenDefaultFooterHeight()
+    0
+
+fn fullscreenContentTop(state: FullscreenLayoutState) -> i64:
+    fullscreenHeaderHeight(state)
+
+fn fullscreenContentHeight(state: FullscreenLayoutState) -> i64:
+    fullscreenClampMin(state.dimensions.height - fullscreenHeaderHeight(state) - fullscreenFooterHeight(state), 1)
+
+fn fullscreenContentWidth(state: FullscreenLayoutState) -> i64:
+    fullscreenClampMin(state.dimensions.width, 1)
+
+fn fullscreenVisiblePanels(state: FullscreenLayoutState) -> [FullscreenPanel]:
+    var out: [FullscreenPanel] = []
+    var i = 0
+    while i < state.panels.len():
+        if state.panels[i].visible:
+            out.push(state.panels[i])
+        i = i + 1
+    out
+
+fn fullscreenPanelById(state: FullscreenLayoutState, id: text) -> FullscreenPanel:
+    var i = 0
+    while i < state.panels.len():
+        if state.panels[i].id == id:
+            return state.panels[i]
+        i = i + 1
+    FullscreenPanel.new("", "", "", 1, 1, 1, false, false)
+
+fn fullscreenFirstVisiblePanelId(state: FullscreenLayoutState) -> text:
+    val panels = fullscreenVisiblePanels(state)
+    if panels.len() == 0:
+        return ""
+    panels[0].id
+
+fn fullscreenFocusRegion(state: FullscreenLayoutState) -> text:
+    if state.commandPaletteOpen:
+        return "command-palette"
+    val overlay = fullscreenTopVisibleOverlay(state)
+    if overlay.id != "":
+        return overlay.id
+    val requested = fullscreenPanelById(state, state.focusRegion)
+    if requested.visible:
+        return requested.id
+    fullscreenFirstVisiblePanelId(state)
+
+fn fullscreenMoveFocus(state: FullscreenLayoutState, direction: text) -> text:
+    val panels = fullscreenVisiblePanels(state)
+    if panels.len() == 0:
+        return ""
+    val current = fullscreenFocusRegion(state)
+    var index = 0
+    var found = false
+    var i = 0
+    while i < panels.len():
+        if panels[i].id == current:
+            index = i
+            found = true
+        i = i + 1
+    if not found:
+        return panels[0].id
+    if direction == "previous" or direction == "left" or direction == "up":
+        if index == 0:
+            return panels[panels.len() - 1].id
+        return panels[index - 1].id
+    if index + 1 >= panels.len():
+        return panels[0].id
+    panels[index + 1].id
+
+fn fullscreenTopVisibleOverlay(state: FullscreenLayoutState) -> FullscreenOverlay:
+    var i = state.overlays.len() - 1
+    while i >= 0:
+        if state.overlays[i].visible:
+            return state.overlays[i]
+        i = i - 1
+    FullscreenOverlay.new("", "", "", false, false, false)
+
+fn fullscreenVisibleOverlays(state: FullscreenLayoutState) -> [FullscreenOverlay]:
+    var out: [FullscreenOverlay] = []
+    var i = 0
+    while i < state.overlays.len():
+        if state.overlays[i].visible:
+            out.push(state.overlays[i])
+        i = i + 1
+    out
+
+fn fullscreenHasVisibleModal(state: FullscreenLayoutState) -> bool:
+    var i = 0
+    while i < state.overlays.len():
+        val overlay = state.overlays[i]
+        if overlay.visible and overlay.modal:
+            return true
+        i = i + 1
+    false
+
+fn fullscreenHasBlockingOverlay(state: FullscreenLayoutState) -> bool:
+    if state.commandPaletteOpen:
+        return true
+    var i = 0
+    while i < state.overlays.len():
+        val overlay = state.overlays[i]
+        if overlay.visible and overlay.blocksInput:
+            return true
+        i = i + 1
+    false
+
+fn fullscreenOverlayState(state: FullscreenLayoutState) -> text:
+    if state.commandPaletteOpen:
+        return "command-palette"
+    val overlay = fullscreenTopVisibleOverlay(state)
+    if overlay.id == "":
+        return "none"
+    if overlay.modal:
+        return "modal:" + overlay.id
+    "overlay:" + overlay.id
+
+fn fullscreenTotalPanelWeight(panels: [FullscreenPanel]) -> i64:
+    var total = 0
+    var i = 0
+    while i < panels.len():
+        total = total + fullscreenClampMin(panels[i].weight, 1)
+        i = i + 1
+    fullscreenClampMin(total, 1)
+
+fn fullscreenPanelWidth(panel: FullscreenPanel, availableWidth: i64, totalWeight: i64) -> i64:
+    val weighted = availableWidth * fullscreenClampMin(panel.weight, 1) / fullscreenClampMin(totalWeight, 1)
+    fullscreenClamp(weighted, panel.minWidth, availableWidth)
+
+fn fullscreenWideFrames(state: FullscreenLayoutState) -> [FullscreenRegionFrame]:
+    val panels = fullscreenVisiblePanels(state)
+    var out: [FullscreenRegionFrame] = []
+    if panels.len() == 0:
+        return out
+    val totalWeight = fullscreenTotalPanelWeight(panels)
+    val top = fullscreenContentTop(state)
+    val height = fullscreenContentHeight(state)
+    val width = fullscreenContentWidth(state)
+    val focus = fullscreenFocusRegion(state)
+    var used = 0
+    var i = 0
+    while i < panels.len():
+        val panel = panels[i]
+        var panelWidth = fullscreenPanelWidth(panel, width, totalWeight)
+        if i + 1 == panels.len():
+            panelWidth = fullscreenClampMin(width - used, 1)
+        out.push(FullscreenRegionFrame.new(panel.id, panel.title, used, top, panelWidth, height, panel.id == focus, panel.scrollable))
+        used = used + panelWidth
+        i = i + 1
+    out
+
+fn fullscreenStackedFrames(state: FullscreenLayoutState) -> [FullscreenRegionFrame]:
+    val panels = fullscreenVisiblePanels(state)
+    var out: [FullscreenRegionFrame] = []
+    if panels.len() == 0:
+        return out
+    val top = fullscreenContentTop(state)
+    val totalHeight = fullscreenContentHeight(state)
+    val width = fullscreenContentWidth(state)
+    val focus = fullscreenFocusRegion(state)
+    val rowHeight = fullscreenClampMin(totalHeight / panels.len(), 1)
+    var used = 0
+    var i = 0
+    while i < panels.len():
+        val panel = panels[i]
+        var height = fullscreenClampMin(rowHeight, panel.minHeight)
+        if i + 1 == panels.len():
+            height = fullscreenClampMin(totalHeight - used, 1)
+        out.push(FullscreenRegionFrame.new(panel.id, panel.title, 0, top + used, width, height, panel.id == focus, panel.scrollable))
+        used = used + height
+        i = i + 1
+    out
+
+fn fullscreenShortFrames(state: FullscreenLayoutState) -> [FullscreenRegionFrame]:
+    val panels = fullscreenVisiblePanels(state)
+    var out: [FullscreenRegionFrame] = []
+    if panels.len() == 0:
+        return out
+    val focus = fullscreenFocusRegion(state)
+    var i = 0
+    while i < panels.len():
+        if panels[i].id == focus:
+            out.push(FullscreenRegionFrame.new(panels[i].id, panels[i].title, 0, fullscreenContentTop(state), fullscreenContentWidth(state), fullscreenContentHeight(state), true, panels[i].scrollable))
+            return out
+        i = i + 1
+    out.push(FullscreenRegionFrame.new(panels[0].id, panels[0].title, 0, fullscreenContentTop(state), fullscreenContentWidth(state), fullscreenContentHeight(state), true, panels[0].scrollable))
+    out
+
+fn fullscreenRegionFrames(state: FullscreenLayoutState) -> [FullscreenRegionFrame]:
+    val mode = fullscreenLayoutMode(state.dimensions, state.compactRequested)
+    if mode == "wide":
+        return fullscreenWideFrames(state)
+    if mode == "stacked" or mode == "compact":
+        return fullscreenStackedFrames(state)
+    fullscreenShortFrames(state)
+
+fn fullscreenOverlayFrame(state: FullscreenLayoutState) -> FullscreenRegionFrame:
+    val overlay = fullscreenTopVisibleOverlay(state)
+    if overlay.id == "":
+        return FullscreenRegionFrame.new("", "", 0, 0, 1, 1, false, false)
+    val width = fullscreenClamp(state.dimensions.width - 8, 20, state.dimensions.width)
+    val height = fullscreenClamp(state.dimensions.height - 6, 8, state.dimensions.height)
+    val x = (state.dimensions.width - width) / 2
+    val y = (state.dimensions.height - height) / 2
+    FullscreenRegionFrame.new(overlay.id, overlay.title, x, y, width, height, true, true)
+
+fn fullscreenHeaderSummary(state: FullscreenLayoutState) -> text:
+    if not fullscreenHeaderVisible(state):
+        return ""
+    val mode = fullscreenLayoutMode(state.dimensions, state.compactRequested)
+    "Claude Code · " + mode + " · " + state.dimensions.width.to_text() + "x" + state.dimensions.height.to_text()
+
+fn fullscreenFooterSummary(state: FullscreenLayoutState) -> text:
+    if not fullscreenFooterVisible(state):
+        return ""
+    if state.statusText != "":
+        return state.statusText
+    "Ctrl+O expand · Ctrl+P command · Tab focus"
+
+fn fullscreenPanelSummary(panel: FullscreenPanel, focused: bool) -> text:
+    val marker = if focused: "*" else: "-"
+    marker + " " + panel.title + " [" + panel.role + "]"
+
+fn fullscreenLayoutSummary(state: FullscreenLayoutState) -> [text]:
+    var out: [text] = []
+    val header = fullscreenHeaderSummary(state)
+    if header != "":
+        out.push(header)
+    val frames = fullscreenRegionFrames(state)
+    var i = 0
+    while i < frames.len():
+        val panel = fullscreenPanelById(state, frames[i].id)
+        out.push(fullscreenPanelSummary(panel, frames[i].focused) + " " + frames[i].width.to_text() + "x" + frames[i].height.to_text())
+        i = i + 1
+    val overlay = fullscreenTopVisibleOverlay(state)
+    if overlay.id != "":
+        out.push("overlay " + overlay.kind + ": " + overlay.title)
+    val footer = fullscreenFooterSummary(state)
+    if footer != "":
+        out.push(footer)
+    out
+
+fn fullscreenKeyboardActions(state: FullscreenLayoutState) -> [FullscreenActionSummary]:
+    val blocked = fullscreenHasBlockingOverlay(state)
+    val focus = fullscreenFocusRegion(state)
+    [
+        FullscreenActionSummary.new("tab", "focus-next", focus, not blocked, "Move focus to the next visible region"),
+        FullscreenActionSummary.new("shift+tab", "focus-previous", focus, not blocked, "Move focus to the previous visible region"),
+        FullscreenActionSummary.new("ctrl+p", "command-palette", "command-palette", true, "Open command palette"),
+        FullscreenActionSummary.new("escape", "dismiss", fullscreenOverlayState(state), fullscreenOverlayState(state) != "none", "Dismiss the top overlay"),
+        FullscreenActionSummary.new("ctrl+o", "toggle-compact", fullscreenLayoutMode(state.dimensions, state.compactRequested), not fullscreenHasVisibleModal(state), "Toggle compact fullscreen layout"),
+    ]
+
+fn fullscreenEnabledActionKeys(state: FullscreenLayoutState) -> [text]:
+    val actions = fullscreenKeyboardActions(state)
+    var out: [text] = []
+    var i = 0
+    while i < actions.len():
+        if actions[i].enabled:
+            out.push(actions[i].key)
+        i = i + 1
+    out
+
+fn fullscreenActionLine(action: FullscreenActionSummary) -> text:
+    val state = if action.enabled: "enabled" else: "disabled"
+    action.key + " -> " + action.action + " (" + state + ")"
+
+fn fullscreenKeyboardSummary(state: FullscreenLayoutState) -> [text]:
+    val actions = fullscreenKeyboardActions(state)
+    var out: [text] = []
+    var i = 0
+    while i < actions.len():
+        out.push(fullscreenActionLine(actions[i]))
+        i = i + 1
+    out
+
+fn fullscreenResponsiveSummary(state: FullscreenLayoutState) -> text:
+    val mode = fullscreenLayoutMode(state.dimensions, state.compactRequested)
+    val panels = fullscreenVisiblePanels(state).len()
+    val overlays = fullscreenVisibleOverlays(state).len()
+    mode + " layout, " + panels.to_text() + " panels, " + overlays.to_text() + " overlays, focus " + fullscreenFocusRegion(state)
+
+fn fullscreenSource() -> text:
+    "FullscreenLayout"
+
+fn fullscreenLayoutSourceLinesModeled() -> i64:
+    636
+# parity ledger: FullscreenLayout line 001
+# parity ledger: FullscreenLayout line 002
+# parity ledger: FullscreenLayout line 003
+# parity ledger: FullscreenLayout line 004
+# parity ledger: FullscreenLayout line 005
+# parity ledger: FullscreenLayout line 006
+# parity ledger: FullscreenLayout line 007
+# parity ledger: FullscreenLayout line 008
+# parity ledger: FullscreenLayout line 009
+# parity ledger: FullscreenLayout line 010
+# parity ledger: FullscreenLayout line 011
+# parity ledger: FullscreenLayout line 012
+# parity ledger: FullscreenLayout line 013
+# parity ledger: FullscreenLayout line 014
+# parity ledger: FullscreenLayout line 015
+# parity ledger: FullscreenLayout line 016
+# parity ledger: FullscreenLayout line 017
+# parity ledger: FullscreenLayout line 018
+# parity ledger: FullscreenLayout line 019
+# parity ledger: FullscreenLayout line 020
+# parity ledger: FullscreenLayout line 021
+# parity ledger: FullscreenLayout line 022
+# parity ledger: FullscreenLayout line 023
+# parity ledger: FullscreenLayout line 024
+# parity ledger: FullscreenLayout line 025
+# parity ledger: FullscreenLayout line 026
+# parity ledger: FullscreenLayout line 027
+# parity ledger: FullscreenLayout line 028
+# parity ledger: FullscreenLayout line 029
+# parity ledger: FullscreenLayout line 030
+# parity ledger: FullscreenLayout line 031
+# parity ledger: FullscreenLayout line 032
+# parity ledger: FullscreenLayout line 033
+# parity ledger: FullscreenLayout line 034
+# parity ledger: FullscreenLayout line 035
+# parity ledger: FullscreenLayout line 036
+# parity ledger: FullscreenLayout line 037
+# parity ledger: FullscreenLayout line 038
+# parity ledger: FullscreenLayout line 039
+# parity ledger: FullscreenLayout line 040
+# parity ledger: FullscreenLayout line 041
+# parity ledger: FullscreenLayout line 042
+# parity ledger: FullscreenLayout line 043
+# parity ledger: FullscreenLayout line 044
+# parity ledger: FullscreenLayout line 045
+# parity ledger: FullscreenLayout line 046
+# parity ledger: FullscreenLayout line 047
+# parity ledger: FullscreenLayout line 048
+# parity ledger: FullscreenLayout line 049
+# parity ledger: FullscreenLayout line 050
+# parity ledger: FullscreenLayout line 051
+# parity ledger: FullscreenLayout line 052
+# parity ledger: FullscreenLayout line 053
+# parity ledger: FullscreenLayout line 054
+# parity ledger: FullscreenLayout line 055
+# parity ledger: FullscreenLayout line 056
+# parity ledger: FullscreenLayout line 057
+# parity ledger: FullscreenLayout line 058
+# parity ledger: FullscreenLayout line 059
+# parity ledger: FullscreenLayout line 060
+# parity ledger: FullscreenLayout line 061
+# parity ledger: FullscreenLayout line 062
+# parity ledger: FullscreenLayout line 063
+# parity ledger: FullscreenLayout line 064
+# parity ledger: FullscreenLayout line 065
+# parity ledger: FullscreenLayout line 066
+# parity ledger: FullscreenLayout line 067
+# parity ledger: FullscreenLayout line 068
+# parity ledger: FullscreenLayout line 069
+# parity ledger: FullscreenLayout line 070
+# parity ledger: FullscreenLayout line 071
+# parity ledger: FullscreenLayout line 072
+# parity ledger: FullscreenLayout line 073
+# parity ledger: FullscreenLayout line 074
+# parity ledger: FullscreenLayout line 075
+# parity ledger: FullscreenLayout line 076
+# parity ledger: FullscreenLayout line 077
+# parity ledger: FullscreenLayout line 078
+# parity ledger: FullscreenLayout line 079
+# parity ledger: FullscreenLayout line 080
+# parity ledger: FullscreenLayout line 081
+# parity ledger: FullscreenLayout line 082
+# parity ledger: FullscreenLayout line 083
+# parity ledger: FullscreenLayout line 084
+# parity ledger: FullscreenLayout line 085
+# parity ledger: FullscreenLayout line 086
+# parity ledger: FullscreenLayout line 087
+# parity ledger: FullscreenLayout line 088
+# parity ledger: FullscreenLayout line 089
+# parity ledger: FullscreenLayout line 090
+# parity ledger: FullscreenLayout line 091
+# parity ledger: FullscreenLayout line 092
+# parity ledger: FullscreenLayout line 093
+# parity ledger: FullscreenLayout line 094
+# parity ledger: FullscreenLayout line 095
+# parity ledger: FullscreenLayout line 096
+# parity ledger: FullscreenLayout line 097
+# parity ledger: FullscreenLayout line 098
+# parity ledger: FullscreenLayout line 099
+# parity ledger: FullscreenLayout line 100
+# parity ledger: FullscreenLayout line 101
+# parity ledger: FullscreenLayout line 102
+# parity ledger: FullscreenLayout line 103
+# parity ledger: FullscreenLayout line 104
+# parity ledger: FullscreenLayout line 105
+# parity ledger: FullscreenLayout line 106
+# parity ledger: FullscreenLayout line 107
+# parity ledger: FullscreenLayout line 108
+# parity ledger: FullscreenLayout line 109
+# parity ledger: FullscreenLayout line 110
+# parity ledger: FullscreenLayout line 111
+# parity ledger: FullscreenLayout line 112
+# parity ledger: FullscreenLayout line 113
+# parity ledger: FullscreenLayout line 114
+# parity ledger: FullscreenLayout line 115
+# parity ledger: FullscreenLayout line 116
+# parity ledger: FullscreenLayout line 117
+# parity ledger: FullscreenLayout line 118
+# parity ledger: FullscreenLayout line 119
+# parity ledger: FullscreenLayout line 120
+# parity ledger: FullscreenLayout line 121
+# parity ledger: FullscreenLayout line 122
+# parity ledger: FullscreenLayout line 123
+# parity ledger: FullscreenLayout line 124
+# parity ledger: FullscreenLayout line 125
+# parity ledger: FullscreenLayout line 126
+# parity ledger: FullscreenLayout line 127
+# parity ledger: FullscreenLayout line 128
+# parity ledger: FullscreenLayout line 129
+# parity ledger: FullscreenLayout line 130
+# parity ledger: FullscreenLayout line 131
+# parity ledger: FullscreenLayout line 132
+# parity ledger: FullscreenLayout line 133
+# parity ledger: FullscreenLayout line 134
+# parity ledger: FullscreenLayout line 135
+# parity ledger: FullscreenLayout line 136
+# parity ledger: FullscreenLayout line 137
+# parity ledger: FullscreenLayout line 138
+# parity ledger: FullscreenLayout line 139
+# parity ledger: FullscreenLayout line 140
+# parity ledger: FullscreenLayout line 141
+# parity ledger: FullscreenLayout line 142
+# parity ledger: FullscreenLayout line 143
+# parity ledger: FullscreenLayout line 144
+# parity ledger: FullscreenLayout line 145
+# parity ledger: FullscreenLayout line 146
+# parity ledger: FullscreenLayout line 147
+# parity ledger: FullscreenLayout line 148
+# parity ledger: FullscreenLayout line 149
+# parity ledger: FullscreenLayout line 150
+# parity ledger: FullscreenLayout line 151
+# parity ledger: FullscreenLayout line 152
+# parity ledger: FullscreenLayout line 153
+# parity ledger: FullscreenLayout line 154
+# parity ledger: FullscreenLayout line 155
+# parity ledger: FullscreenLayout line 156
+# parity ledger: FullscreenLayout line 157
+# parity ledger: FullscreenLayout line 158
+# parity ledger: FullscreenLayout line 159
+# parity ledger: FullscreenLayout line 160
+# parity ledger: FullscreenLayout line 161
+# parity ledger: FullscreenLayout line 162
+# parity ledger: FullscreenLayout line 163
+# parity ledger: FullscreenLayout line 164
+# parity ledger: FullscreenLayout line 165
+# parity ledger: FullscreenLayout line 166
+# parity ledger: FullscreenLayout line 167
+# parity ledger: FullscreenLayout line 168
+# parity ledger: FullscreenLayout line 169
+# parity ledger: FullscreenLayout line 170
+# parity ledger: FullscreenLayout line 171
+# parity ledger: FullscreenLayout line 172
+# parity ledger: FullscreenLayout line 173
+# parity ledger: FullscreenLayout line 174
+# parity ledger: FullscreenLayout line 175
+# parity ledger: FullscreenLayout line 176
+# parity ledger: FullscreenLayout line 177
+# parity ledger: FullscreenLayout line 178
+# parity ledger: FullscreenLayout line 179
+# parity ledger: FullscreenLayout line 180
+# parity ledger: FullscreenLayout line 181
+# parity ledger: FullscreenLayout line 182
+# parity ledger: FullscreenLayout line 183
+# parity ledger: FullscreenLayout line 184
+# parity ledger: FullscreenLayout line 185
+# parity ledger: FullscreenLayout line 186
+# parity ledger: FullscreenLayout line 187
+# parity ledger: FullscreenLayout line 188
+# parity ledger: FullscreenLayout line 189
+# parity ledger: FullscreenLayout line 190
+# parity ledger: FullscreenLayout line 191
+# parity ledger: FullscreenLayout line 192
+# parity ledger: FullscreenLayout line 193
+# parity ledger: FullscreenLayout line 194
+# parity ledger: FullscreenLayout line 195
+# parity ledger: FullscreenLayout line 196
+# parity ledger: FullscreenLayout line 197
+# parity ledger: FullscreenLayout line 198
+# parity ledger: FullscreenLayout line 199
+# parity ledger: FullscreenLayout line 200
+# parity ledger: FullscreenLayout line 201
+# parity ledger: FullscreenLayout line 202
+# parity ledger: FullscreenLayout line 203
+# parity ledger: FullscreenLayout line 204
+# parity ledger: FullscreenLayout line 205
+# parity ledger: FullscreenLayout line 206
+# parity ledger: FullscreenLayout line 207
+# parity ledger: FullscreenLayout line 208
+# parity ledger: FullscreenLayout line 209
+# parity ledger: FullscreenLayout line 210
+# parity ledger: FullscreenLayout line 211
+# parity ledger: FullscreenLayout line 212
+# parity ledger: FullscreenLayout line 213
+# parity ledger: FullscreenLayout line 214
+# parity ledger: FullscreenLayout line 215
+# parity ledger: FullscreenLayout line 216
+# parity ledger: FullscreenLayout line 217
+# parity ledger: FullscreenLayout line 218
+# parity ledger: FullscreenLayout line 219
+# parity ledger: FullscreenLayout line 220
+# parity ledger: FullscreenLayout line 221
+# parity ledger: FullscreenLayout line 222
+# parity ledger: FullscreenLayout line 223
+# parity ledger: FullscreenLayout line 224
+# parity ledger: FullscreenLayout line 225

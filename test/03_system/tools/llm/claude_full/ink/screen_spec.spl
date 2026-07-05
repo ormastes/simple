@@ -1,0 +1,84 @@
+"""
+# Claude Full Screen Pools
+
+Checks screen interning pools and encoded style IDs.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.ink.screen.*
+
+describe "Claude full screen pools":
+    it "should intern space, spacer, ASCII, and non-ASCII characters":
+        step("Intern characters through shared CharPool")
+        val pool = charPoolNew()
+        expect(pool.get(emptyCharIndex())).to_equal(" ")
+        expect(pool.get(spacerCharIndex())).to_equal("")
+        val a = pool.intern("a")
+        expect(pool.intern("a")).to_equal(a)
+        expect(pool.asciiLookup(97)).to_equal(a)
+        val emoji = pool.intern("🙂")
+        expect(pool.intern("🙂")).to_equal(emoji)
+        expect(pool.get(999)).to_equal(" ")
+
+    it "should intern hyperlinks with zero as no-link":
+        step("Intern hyperlink strings")
+        val pool = hyperlinkPoolNew()
+        expect(pool.intern("")).to_equal(0)
+        val link = pool.intern("https://example.test")
+        expect(pool.intern("https://example.test")).to_equal(link)
+        expect(pool.get(0)).to_equal("")
+        expect(pool.get(link)).to_equal("https://example.test")
+
+    it "should encode visible-on-space styles in bit zero":
+        step("Intern foreground and inverse styles")
+        val pool = stylePoolNew()
+        val fg = pool.intern([fgCode("\u001B[31m")])
+        val inverse = pool.intern([inverseCode()])
+        expect(pool.none).to_equal(0)
+        expect(fg & 1).to_equal(0)
+        expect(inverse & 1).to_equal(1)
+        expect(pool.get(inverse)[0].endCode).to_equal("\u001B[27m")
+
+    it "should cache transitions and inverse overlays":
+        step("Compute transition and inverse style twice")
+        val pool = stylePoolNew()
+        val fg = pool.intern([fgCode("\u001B[31m")])
+        val inverse = pool.withInverse(fg)
+        expect(pool.withInverse(fg)).to_equal(inverse)
+        val transition = pool.transition(fg, inverse)
+        expect(pool.transition(fg, inverse)).to_equal(transition)
+        expect(pool.transitionKeys.len()).to_equal(1)
+
+    it "should build current match style without stacking duplicate markers":
+        step("Apply current-match overlay")
+        val pool = stylePoolNew()
+        val base = pool.intern([fgCode("\u001B[32m"), bgCode("\u001B[44m")])
+        val match = pool.withCurrentMatch(base)
+        expect(pool.withCurrentMatch(base)).to_equal(match)
+        val codes = styleKey(pool.get(match))
+        expect(codes).to_contain("\u001B[33m")
+        expect(codes).to_contain("\u001B[7m")
+        expect(codes).to_contain("\u001B[1m")
+        expect(codes).to_contain("\u001B[4m")
+
+    it "should use inverse fallback and configured selection background":
+        step("Apply selection background overlay")
+        val pool = stylePoolNew()
+        val base = pool.intern([fgCode("\u001B[32m"), bgCode("\u001B[44m"), inverseCode()])
+        val fallback = pool.withSelectionBg(base)
+        expect(fallback).to_equal(pool.withInverse(base))
+        pool.setSelectionBg(Some(bgCode("\u001B[48;5;10m")))
+        val selected = pool.withSelectionBg(base)
+        expect(pool.withSelectionBg(base)).to_equal(selected)
+        val codes = styleKey(pool.get(selected))
+        expect(codes).to_contain("\u001B[48;5;10m")
+        expect(codes).to_contain("\u001B[32m")
+
+    it "should expose packed cell constants":
+        step("Pin packed word and width constants")
+        expect(cellWidthNarrow()).to_equal(0)
+        expect(cellWidthWide()).to_equal(1)
+        expect(cellWidthSpacerTail()).to_equal(2)
+        expect(cellWidthSpacerHead()).to_equal(3)
+        expect(packWord1(3, 4, 2)).to_equal((3 << 17) | (4 << 2) | 2)
+        expect(screenPoolSourceLinesModeled()).to_equal(260)

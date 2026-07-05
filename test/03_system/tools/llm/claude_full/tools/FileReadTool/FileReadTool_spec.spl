@@ -1,0 +1,80 @@
+"""
+# Claude Full FileReadTool
+
+Checks modern FileReadTool parity for blocked paths, screenshot alternates,
+session files, schemas, token budget, text reads, PDFs, images, and listeners.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.tools.FileReadTool.FileReadTool.*
+
+describe "Claude full FileReadTool":
+    it "should block device paths and proc fd aliases":
+        expect(isBlockedDevicePath("/dev/zero")).to_equal(true)
+        expect(isBlockedDevicePath("/dev/fd/2")).to_equal(true)
+        expect(isBlockedDevicePath("/proc/123/fd/1")).to_equal(true)
+        expect(isBlockedDevicePath("/tmp/file.txt")).to_equal(false)
+
+    it "should derive alternate screenshot paths across thin-space variants":
+        val alt = getAlternateScreenshotPath("/tmp/Screenshot 2026-01-01 at 10.30.00 AM.png")
+        expect(alt).to_contain("AM.png")
+        expect(alt).to_contain(thinSpace())
+        expect(getAlternateScreenshotPath(alt)).to_contain(" AM.png")
+        expect(getAlternateScreenshotPath("/tmp/readme.md")).to_equal("")
+
+    it "should register notify and unregister file read listeners":
+        var registry = FileReadListenerRegistry.new()
+        registry = registerFileReadListener(registry, "audit")
+        registry = notifyFileRead(registry, "/tmp/a.txt", "alpha")
+        expect(registry.listeners.len()).to_equal(1)
+        expect(registry.listeners[0].calls).to_equal(1)
+        expect(registry.listeners[0].path).to_equal("/tmp/a.txt")
+        registry = unregisterFileReadListener(registry, "audit")
+        expect(registry.listeners.len()).to_equal(0)
+
+    it "should expose token-limit error message parity":
+        val err = MaxFileReadTokenExceededError.new(50000, 20000)
+        expect(err.name).to_equal("MaxFileReadTokenExceededError")
+        expect(err.message).to_contain("File content (50000 tokens) exceeds maximum allowed tokens (20000)")
+        expect(validateContentTokens(50000, 20000, true).tokenCount).to_equal(0)
+        expect(validateContentTokens(50000, 20000, false).tokenCount).to_equal(50000)
+
+    it "should detect session memory and transcript files under config dir":
+        expect(detectSessionFileType("/home/u/.claude/session-memory/project.md", "/home/u/.claude")).to_equal("session_memory")
+        expect(detectSessionFileType("/home/u/.claude/projects/p.jsonl", "/home/u/.claude")).to_equal("session_transcript")
+        expect(detectSessionFileType("/home/u/other/projects/p.jsonl", "/home/u/.claude")).to_equal("")
+
+    it "should publish input output schema and line formatting helpers":
+        expect(inputSchema()).to_contain("file_path|required")
+        expect(inputSchema()).to_contain("pages|optional")
+        expect(outputSchema()).to_contain("image(base64")
+        expect(pickLineFormatInstruction(3, 4)).to_contain("selected range")
+        expect(formatFileLines(["one", "two"], 7)).to_equal("7→one\n8→two")
+
+    it "should read text files with mitigation and memory freshness":
+        var registry = registerFileReadListener(FileReadListenerRegistry.new(), "audit")
+        val input = FileReadInput.textFile("/home/u/.claude/session-memory/project.md", "line one\nline two", "md", 2)
+        val out = callInner(input, registry, "/home/u/.claude", "claude-sonnet-4-5")
+        expect(out.typeName).to_equal("text")
+        expect(out.content).to_contain("line one")
+        expect(out.content).to_contain("cyber risk mitigation")
+        expect(out.freshnessPrefix).to_contain("Memory file last modified")
+        expect(out.numLines).to_equal(2)
+
+    it "should handle images with token budget compression and metadata":
+        val input = FileReadInput(filePath: "/tmp/pic.jpg", content: "BASE64", ext: "jpg", offset: 1, limit: 0, pages: "", maxSizeBytes: 1000000, maxTokens: 100, tokenCount: 10, totalLines: 0, mtimeMs: 0, originalSize: 1000, width: 640, height: 480, pdfPages: 0, exists: true, supportedPdf: true, emptyImage: false)
+        val out = callInner(input, FileReadListenerRegistry.new(), "/home/u/.claude", "claude-sonnet-4-5")
+        expect(out.typeName).to_equal("image")
+        expect(out.image.mediaType).to_equal("image/jpeg")
+        expect(out.image.compression).to_equal("aggressive")
+        expect(out.newMessages[0]).to_contain("640x480")
+        expect(imageFiles()).to_equal(["png", "jpg", "jpeg", "gif", "webp"])
+
+    it "should handle PDF page extraction and unsupported full PDF branch":
+        val pageInput = FileReadInput(filePath: "/tmp/a.pdf", content: "PDF", ext: "pdf", offset: 1, limit: 0, pages: "1-5", maxSizeBytes: 1000000, maxTokens: 20000, tokenCount: 10, totalLines: 0, mtimeMs: 0, originalSize: 1000, width: 0, height: 0, pdfPages: 20, exists: true, supportedPdf: false, emptyImage: false)
+        expect(callInner(pageInput, FileReadListenerRegistry.new(), "/home/u/.claude", "claude-sonnet-4-5").newMessages[0]).to_contain("pdf pages extracted")
+        val fullInput = FileReadInput(filePath: "/tmp/a.pdf", content: "PDF", ext: "pdf", offset: 1, limit: 0, pages: "", maxSizeBytes: 1000000, maxTokens: 20000, tokenCount: 10, totalLines: 0, mtimeMs: 0, originalSize: 1000, width: 0, height: 0, pdfPages: 20, exists: true, supportedPdf: false, emptyImage: false)
+        expect(callInner(fullInput, FileReadListenerRegistry.new(), "/home/u/.claude", "claude-sonnet-4-5").errorMessage).to_contain("Reading full PDFs is not supported")
+
+    it "should expose modeled source size":
+        expect(fileReadToolSourceLinesModeled()).to_equal(1183)

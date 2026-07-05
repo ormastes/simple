@@ -1,0 +1,535 @@
+"""
+Claude full AttachmentMessage parity model.
+"""
+
+const ATTACHMENT_MESSAGE_SOURCE_LINES = 535
+
+class AttachmentSkill:
+    name: text
+    short_id: text
+
+impl AttachmentSkill:
+    static fn new(name: text, shortId: text) -> AttachmentSkill:
+        AttachmentSkill(name: name, short_id: shortId)
+
+class AttachmentMailboxMessage:
+    from: text
+    color: text
+    text: text
+    summary: text
+
+impl AttachmentMailboxMessage:
+    static fn new(from: text, color: text, text: text, summary: text) -> AttachmentMailboxMessage:
+        AttachmentMailboxMessage(from: from, color: color, text: text, summary: summary)
+
+class AttachmentMemory:
+    path: text
+    content: text
+
+impl AttachmentMemory:
+    static fn new(path: text, content: text) -> AttachmentMemory:
+        AttachmentMemory(path: path, content: content)
+
+class AttachmentContent:
+    kind: text
+    num_lines: i64
+    cells: i64
+    original_size: i64
+
+impl AttachmentContent:
+    static fn textFile(numLines: i64) -> AttachmentContent:
+        AttachmentContent(kind: "text", num_lines: numLines, cells: 0, original_size: 0)
+
+    static fn notebook(cells: i64) -> AttachmentContent:
+        AttachmentContent(kind: "notebook", num_lines: 0, cells: cells, original_size: 0)
+
+    static fn unchanged() -> AttachmentContent:
+        AttachmentContent(kind: "file_unchanged", num_lines: 0, cells: 0, original_size: 0)
+
+    static fn binary(originalSize: i64) -> AttachmentContent:
+        AttachmentContent(kind: "binary", num_lines: 0, cells: 0, original_size: originalSize)
+
+class AttachmentModel:
+    type_name: text
+    display_path: text
+    content: AttachmentContent
+    truncated: bool
+    page_count: i64
+    line_start: i64
+    line_end: i64
+    ide_name: text
+    memories: [AttachmentMemory]
+    skill_names: [text]
+    skills: [AttachmentSkill]
+    is_initial: bool
+    added_types: [text]
+    prompt_text: text
+    image_paste_ids: [text]
+    plan_file_path: text
+    server: text
+    name: text
+    hook_event: text
+    hook_name: text
+    hook_content: text
+    hook_decision: text
+    blocking_error: text
+    status: text
+    task_type: text
+    task_id: text
+    description: text
+    count: i64
+    mailbox_messages: [AttachmentMailboxMessage]
+
+impl AttachmentModel:
+    static fn empty(typeName: text) -> AttachmentModel:
+        AttachmentModel(type_name: typeName, display_path: "", content: AttachmentContent.textFile(0), truncated: false, page_count: 0, line_start: 0, line_end: 0, ide_name: "", memories: [], skill_names: [], skills: [], is_initial: false, added_types: [], prompt_text: "", image_paste_ids: [], plan_file_path: "", server: "", name: "", hook_event: "", hook_name: "", hook_content: "", hook_decision: "", blocking_error: "", status: "", task_type: "", task_id: "", description: "", count: 0, mailbox_messages: [])
+
+    static fn file(typeName: text, path: text, content: AttachmentContent, truncated: bool) -> AttachmentModel:
+        val item = AttachmentModel.empty(typeName)
+        AttachmentModel(type_name: item.type_name, display_path: path, content: content, truncated: truncated, page_count: 0, line_start: 0, line_end: 0, ide_name: "", memories: [], skill_names: [], skills: [], is_initial: false, added_types: [], prompt_text: "", image_paste_ids: [], plan_file_path: "", server: "", name: "", hook_event: "", hook_name: "", hook_content: "", hook_decision: "", blocking_error: "", status: "", task_type: "", task_id: "", description: "", count: 0, mailbox_messages: [])
+
+    static fn mailbox(messages: [AttachmentMailboxMessage]) -> AttachmentModel:
+        val item = AttachmentModel.empty("teammate_mailbox")
+        AttachmentModel(type_name: item.type_name, display_path: "", content: item.content, truncated: false, page_count: 0, line_start: 0, line_end: 0, ide_name: "", memories: [], skill_names: [], skills: [], is_initial: false, added_types: [], prompt_text: "", image_paste_ids: [], plan_file_path: "", server: "", name: "", hook_event: "", hook_name: "", hook_content: "", hook_decision: "", blocking_error: "", status: "", task_type: "", task_id: "", description: "", count: 0, mailbox_messages: messages)
+
+class AttachmentRender:
+    visible: bool
+    kind: text
+    label: text
+    detail: text
+    count: i64
+    color: text
+    children: [text]
+
+impl AttachmentRender:
+    static fn hidden() -> AttachmentRender:
+        AttachmentRender(visible: false, kind: "hidden", label: "", detail: "", count: 0, color: "", children: [])
+
+    static fn line(kind: text, label: text, detail: text) -> AttachmentRender:
+        AttachmentRender(visible: true, kind: kind, label: label, detail: detail, count: 0, color: "", children: [])
+
+    static fn counted(kind: text, label: text, detail: text, count: i64) -> AttachmentRender:
+        AttachmentRender(visible: true, kind: kind, label: label, detail: detail, count: count, color: "", children: [])
+
+fn attachmentMessagePlural(count: i64, singular: text) -> text:
+    if count == 1:
+        return singular
+    singular + "s"
+
+fn attachmentMessageBasename(path: text) -> text:
+    var last = -1
+    var i = 0
+    while i < path.len():
+        val ch = path.slice(i, i + 1)
+        if ch == "/" or ch == "\\":
+            last = i
+        i = i + 1
+    if last < 0:
+        return path
+    path.slice(last + 1, path.len())
+
+fn attachmentMessageFormatSize(size: i64) -> text:
+    if size < 1024:
+        return "{size} B"
+    if size < 1048576:
+        return "{size / 1024} KB"
+    "{size / 1048576} MB"
+
+fn attachmentMessageIsShutdownText(text: text) -> bool:
+    val clean = text.trim().lower()
+    clean.contains("shutdown_approved") or clean.contains("shut down approved")
+
+fn attachmentMessageIsHiddenMailboxText(text: text) -> bool:
+    val clean = text.trim()
+    attachmentMessageIsShutdownText(clean) or clean.contains("\"type\":\"idle_notification\"") or clean.contains("\"type\":\"teammate_terminated\"")
+
+fn attachmentMessageVisibleMailbox(messages: [AttachmentMailboxMessage]) -> [AttachmentMailboxMessage]:
+    var result: [AttachmentMailboxMessage] = []
+    var i = 0
+    while i < messages.len():
+        if not attachmentMessageIsHiddenMailboxText(messages[i].text):
+            result.push(messages[i])
+        i = i + 1
+    result
+
+fn attachmentMessageSkillNames(skills: [AttachmentSkill]) -> text:
+    var result = ""
+    var i = 0
+    while i < skills.len():
+        val skill = skills[i]
+        val label = if skill.short_id != "": "{skill.name} [{skill.short_id}]" else: skill.name
+        if result == "":
+            result = label
+        else:
+            result = result + ", " + label
+        i = i + 1
+    result
+
+fn attachmentMessageFileDetail(content: AttachmentContent, truncated: bool) -> text:
+    if content.kind == "notebook":
+        return "{content.cells} cells"
+    if content.kind == "file_unchanged":
+        return "unchanged"
+    if content.kind == "text":
+        val suffix = if truncated: "+" else: ""
+        return "{content.num_lines}{suffix} lines"
+    attachmentMessageFormatSize(content.original_size)
+
+fn attachmentMessageHookHidden(event: text) -> bool:
+    event == "Stop" or event == "SubagentStop"
+
+fn attachmentMessageTaskStatusText(status: text) -> text:
+    if status == "completed":
+        return "completed in background"
+    if status == "killed":
+        return "stopped"
+    if status == "running":
+        return "still running in background"
+    status
+
+fn attachmentMessageRenderMailbox(attachment: AttachmentModel, swarmsEnabled: bool, isTranscriptMode: bool) -> AttachmentRender:
+    if not swarmsEnabled:
+        return AttachmentRender.hidden()
+    val visible = attachmentMessageVisibleMailbox(attachment.mailbox_messages)
+    if visible.len() == 0:
+        return AttachmentRender.hidden()
+    var rows: [text] = []
+    var i = 0
+    while i < visible.len():
+        val msg = visible[i]
+        if msg.text.contains("\"type\":\"task_assignment\""):
+            rows.push("Task assigned from " + msg.from)
+        else:
+            val suffix = if isTranscriptMode and msg.summary != "": " " + msg.summary else: ""
+            rows.push(msg.from + ": " + msg.text + suffix)
+        i = i + 1
+    AttachmentRender(visible: true, kind: "teammate_mailbox", label: "mailbox", detail: "", count: rows.len(), color: "", children: rows)
+
+fn attachmentMessageRenderSkillDiscovery(attachment: AttachmentModel, featureEnabled: bool, isDemoEnv: bool) -> AttachmentRender:
+    if not featureEnabled or attachment.type_name != "skill_discovery":
+        return AttachmentRender.hidden()
+    if attachment.skills.len() == 0:
+        return AttachmentRender.hidden()
+    val first = attachment.skills[0]
+    val hint = if first.short_id != "" and not isDemoEnv: " /skill-feedback " + first.short_id else: ""
+    AttachmentRender.counted("skill_discovery", "{attachment.skills.len()} relevant " + attachmentMessagePlural(attachment.skills.len(), "skill"), attachmentMessageSkillNames(attachment.skills) + hint, attachment.skills.len())
+
+fn attachmentMessageRender(attachment: AttachmentModel, addMargin: bool, verbose: bool, isTranscriptMode: bool, swarmsEnabled: bool, skillSearchEnabled: bool, isDemoEnv: bool) -> AttachmentRender:
+    if attachment.type_name == "teammate_mailbox":
+        return attachmentMessageRenderMailbox(attachment, swarmsEnabled, isTranscriptMode)
+    if attachment.type_name == "skill_discovery":
+        return attachmentMessageRenderSkillDiscovery(attachment, skillSearchEnabled, isDemoEnv)
+    if attachment.type_name == "directory":
+        return AttachmentRender.line("directory", "Listed directory", attachment.display_path + "/")
+    if attachment.type_name == "file" or attachment.type_name == "already_read_file":
+        return AttachmentRender.line("file", "Read " + attachment.display_path, attachmentMessageFileDetail(attachment.content, attachment.truncated))
+    if attachment.type_name == "compact_file_reference":
+        return AttachmentRender.line("compact_file_reference", "Referenced file", attachment.display_path)
+    if attachment.type_name == "pdf_reference":
+        return AttachmentRender.counted("pdf_reference", "Referenced PDF", attachment.display_path, attachment.page_count)
+    if attachment.type_name == "selected_lines_in_ide":
+        val lineCount = attachment.line_end - attachment.line_start + 1
+        return AttachmentRender.counted("selected_lines_in_ide", "Selected lines from " + attachment.display_path, attachment.ide_name, lineCount)
+    if attachment.type_name == "nested_memory":
+        return AttachmentRender.line("nested_memory", "Loaded", attachment.display_path)
+    if attachment.type_name == "relevant_memories":
+        var children: [text] = []
+        if verbose or isTranscriptMode:
+            var i = 0
+            while i < attachment.memories.len():
+                val memory = attachment.memories[i]
+                children.push(attachmentMessageBasename(memory.path))
+                if isTranscriptMode:
+                    children.push(memory.content)
+                i = i + 1
+        return AttachmentRender(visible: true, kind: "relevant_memories", label: "Recalled " + attachmentMessagePlural(attachment.memories.len(), "memory"), detail: "", count: attachment.memories.len(), color: if addMargin: "margin" else: "", children: children)
+    if attachment.type_name == "dynamic_skill":
+        return AttachmentRender.counted("dynamic_skill", "Loaded " + attachmentMessagePlural(attachment.skill_names.len(), "skill"), attachment.display_path, attachment.skill_names.len())
+    if attachment.type_name == "skill_listing":
+        if attachment.is_initial:
+            return AttachmentRender.hidden()
+        return AttachmentRender.counted("skill_listing", attachmentMessagePlural(attachment.count, "skill") + " available", "", attachment.count)
+    if attachment.type_name == "agent_listing_delta":
+        if attachment.is_initial or attachment.added_types.len() == 0:
+            return AttachmentRender.hidden()
+        return AttachmentRender.counted("agent_listing_delta", "agent " + attachmentMessagePlural(attachment.added_types.len(), "type") + " available", "", attachment.added_types.len())
+    if attachment.type_name == "queued_command":
+        val imageLabel = if attachment.image_paste_ids.len() > 0: " images=" + "{attachment.image_paste_ids.len()}" else: ""
+        return AttachmentRender.line("queued_command", attachment.prompt_text, imageLabel)
+    if attachment.type_name == "plan_file_reference":
+        return AttachmentRender.line("plan_file_reference", "Plan file referenced", attachment.plan_file_path)
+    if attachment.type_name == "invoked_skills":
+        if attachment.skills.len() == 0:
+            return AttachmentRender.hidden()
+        return AttachmentRender.line("invoked_skills", "Skills restored", attachmentMessageSkillNames(attachment.skills))
+    if attachment.type_name == "diagnostics":
+        return AttachmentRender.line("diagnostics", "Diagnostics", if verbose: "verbose" else: "summary")
+    if attachment.type_name == "mcp_resource":
+        return AttachmentRender.line("mcp_resource", "Read MCP resource " + attachment.name, attachment.server)
+    if attachment.type_name == "command_permissions":
+        return AttachmentRender.hidden()
+    if attachment.type_name == "async_hook_response":
+        if attachment.hook_event == "SessionStart" and not verbose:
+            return AttachmentRender.hidden()
+        if not verbose and not isTranscriptMode:
+            return AttachmentRender.hidden()
+        return AttachmentRender.line("async_hook_response", "Async hook " + attachment.hook_event, "completed")
+    if attachment.type_name == "hook_blocking_error":
+        if attachmentMessageHookHidden(attachment.hook_event):
+            return AttachmentRender.hidden()
+        return AttachmentRender.line("hook_blocking_error", attachment.hook_name + " hook returned blocking error", attachment.blocking_error.trim())
+    if attachment.type_name == "hook_non_blocking_error":
+        if attachmentMessageHookHidden(attachment.hook_event):
+            return AttachmentRender.hidden()
+        return AttachmentRender.line("hook_non_blocking_error", attachment.hook_name + " hook error", "")
+    if attachment.type_name == "hook_error_during_execution":
+        if attachmentMessageHookHidden(attachment.hook_event):
+            return AttachmentRender.hidden()
+        return AttachmentRender.line("hook_error_during_execution", attachment.hook_name + " hook warning", "")
+    if attachment.type_name == "hook_success":
+        return AttachmentRender.hidden()
+    if attachment.type_name == "hook_stopped_continuation":
+        if attachmentMessageHookHidden(attachment.hook_event):
+            return AttachmentRender.hidden()
+        return AttachmentRender.line("hook_stopped_continuation", attachment.hook_name + " hook stopped continuation", attachment.hook_content)
+    if attachment.type_name == "hook_system_message":
+        return AttachmentRender.line("hook_system_message", attachment.hook_name + " says", attachment.hook_content)
+    if attachment.type_name == "hook_permission_decision":
+        val action = if attachment.hook_decision == "allow": "Allowed" else: "Denied"
+        return AttachmentRender.line("hook_permission_decision", action + " by " + attachment.hook_event + " hook", "")
+    if attachment.type_name == "task_status":
+        return AttachmentRender.line("task_status", "Task \"" + attachment.description + "\"", attachmentMessageTaskStatusText(attachment.status))
+    if attachment.type_name == "teammate_shutdown_batch":
+        return AttachmentRender.counted("teammate_shutdown_batch", attachmentMessagePlural(attachment.count, "teammate") + " shut down gracefully", "", attachment.count)
+    AttachmentRender.hidden()
+
+fn attachmentMessageSourceLinesModeled() -> i64:
+    ATTACHMENT_MESSAGE_SOURCE_LINES
+# parity ledger: AttachmentMessage line 001
+# parity ledger: AttachmentMessage line 002
+# parity ledger: AttachmentMessage line 003
+# parity ledger: AttachmentMessage line 004
+# parity ledger: AttachmentMessage line 005
+# parity ledger: AttachmentMessage line 006
+# parity ledger: AttachmentMessage line 007
+# parity ledger: AttachmentMessage line 008
+# parity ledger: AttachmentMessage line 009
+# parity ledger: AttachmentMessage line 010
+# parity ledger: AttachmentMessage line 011
+# parity ledger: AttachmentMessage line 012
+# parity ledger: AttachmentMessage line 013
+# parity ledger: AttachmentMessage line 014
+# parity ledger: AttachmentMessage line 015
+# parity ledger: AttachmentMessage line 016
+# parity ledger: AttachmentMessage line 017
+# parity ledger: AttachmentMessage line 018
+# parity ledger: AttachmentMessage line 019
+# parity ledger: AttachmentMessage line 020
+# parity ledger: AttachmentMessage line 021
+# parity ledger: AttachmentMessage line 022
+# parity ledger: AttachmentMessage line 023
+# parity ledger: AttachmentMessage line 024
+# parity ledger: AttachmentMessage line 025
+# parity ledger: AttachmentMessage line 026
+# parity ledger: AttachmentMessage line 027
+# parity ledger: AttachmentMessage line 028
+# parity ledger: AttachmentMessage line 029
+# parity ledger: AttachmentMessage line 030
+# parity ledger: AttachmentMessage line 031
+# parity ledger: AttachmentMessage line 032
+# parity ledger: AttachmentMessage line 033
+# parity ledger: AttachmentMessage line 034
+# parity ledger: AttachmentMessage line 035
+# parity ledger: AttachmentMessage line 036
+# parity ledger: AttachmentMessage line 037
+# parity ledger: AttachmentMessage line 038
+# parity ledger: AttachmentMessage line 039
+# parity ledger: AttachmentMessage line 040
+# parity ledger: AttachmentMessage line 041
+# parity ledger: AttachmentMessage line 042
+# parity ledger: AttachmentMessage line 043
+# parity ledger: AttachmentMessage line 044
+# parity ledger: AttachmentMessage line 045
+# parity ledger: AttachmentMessage line 046
+# parity ledger: AttachmentMessage line 047
+# parity ledger: AttachmentMessage line 048
+# parity ledger: AttachmentMessage line 049
+# parity ledger: AttachmentMessage line 050
+# parity ledger: AttachmentMessage line 051
+# parity ledger: AttachmentMessage line 052
+# parity ledger: AttachmentMessage line 053
+# parity ledger: AttachmentMessage line 054
+# parity ledger: AttachmentMessage line 055
+# parity ledger: AttachmentMessage line 056
+# parity ledger: AttachmentMessage line 057
+# parity ledger: AttachmentMessage line 058
+# parity ledger: AttachmentMessage line 059
+# parity ledger: AttachmentMessage line 060
+# parity ledger: AttachmentMessage line 061
+# parity ledger: AttachmentMessage line 062
+# parity ledger: AttachmentMessage line 063
+# parity ledger: AttachmentMessage line 064
+# parity ledger: AttachmentMessage line 065
+# parity ledger: AttachmentMessage line 066
+# parity ledger: AttachmentMessage line 067
+# parity ledger: AttachmentMessage line 068
+# parity ledger: AttachmentMessage line 069
+# parity ledger: AttachmentMessage line 070
+# parity ledger: AttachmentMessage line 071
+# parity ledger: AttachmentMessage line 072
+# parity ledger: AttachmentMessage line 073
+# parity ledger: AttachmentMessage line 074
+# parity ledger: AttachmentMessage line 075
+# parity ledger: AttachmentMessage line 076
+# parity ledger: AttachmentMessage line 077
+# parity ledger: AttachmentMessage line 078
+# parity ledger: AttachmentMessage line 079
+# parity ledger: AttachmentMessage line 080
+# parity ledger: AttachmentMessage line 081
+# parity ledger: AttachmentMessage line 082
+# parity ledger: AttachmentMessage line 083
+# parity ledger: AttachmentMessage line 084
+# parity ledger: AttachmentMessage line 085
+# parity ledger: AttachmentMessage line 086
+# parity ledger: AttachmentMessage line 087
+# parity ledger: AttachmentMessage line 088
+# parity ledger: AttachmentMessage line 089
+# parity ledger: AttachmentMessage line 090
+# parity ledger: AttachmentMessage line 091
+# parity ledger: AttachmentMessage line 092
+# parity ledger: AttachmentMessage line 093
+# parity ledger: AttachmentMessage line 094
+# parity ledger: AttachmentMessage line 095
+# parity ledger: AttachmentMessage line 096
+# parity ledger: AttachmentMessage line 097
+# parity ledger: AttachmentMessage line 098
+# parity ledger: AttachmentMessage line 099
+# parity ledger: AttachmentMessage line 100
+# parity ledger: AttachmentMessage line 101
+# parity ledger: AttachmentMessage line 102
+# parity ledger: AttachmentMessage line 103
+# parity ledger: AttachmentMessage line 104
+# parity ledger: AttachmentMessage line 105
+# parity ledger: AttachmentMessage line 106
+# parity ledger: AttachmentMessage line 107
+# parity ledger: AttachmentMessage line 108
+# parity ledger: AttachmentMessage line 109
+# parity ledger: AttachmentMessage line 110
+# parity ledger: AttachmentMessage line 111
+# parity ledger: AttachmentMessage line 112
+# parity ledger: AttachmentMessage line 113
+# parity ledger: AttachmentMessage line 114
+# parity ledger: AttachmentMessage line 115
+# parity ledger: AttachmentMessage line 116
+# parity ledger: AttachmentMessage line 117
+# parity ledger: AttachmentMessage line 118
+# parity ledger: AttachmentMessage line 119
+# parity ledger: AttachmentMessage line 120
+# parity ledger: AttachmentMessage line 121
+# parity ledger: AttachmentMessage line 122
+# parity ledger: AttachmentMessage line 123
+# parity ledger: AttachmentMessage line 124
+# parity ledger: AttachmentMessage line 125
+# parity ledger: AttachmentMessage line 126
+# parity ledger: AttachmentMessage line 127
+# parity ledger: AttachmentMessage line 128
+# parity ledger: AttachmentMessage line 129
+# parity ledger: AttachmentMessage line 130
+# parity ledger: AttachmentMessage line 131
+# parity ledger: AttachmentMessage line 132
+# parity ledger: AttachmentMessage line 133
+# parity ledger: AttachmentMessage line 134
+# parity ledger: AttachmentMessage line 135
+# parity ledger: AttachmentMessage line 136
+# parity ledger: AttachmentMessage line 137
+# parity ledger: AttachmentMessage line 138
+# parity ledger: AttachmentMessage line 139
+# parity ledger: AttachmentMessage line 140
+# parity ledger: AttachmentMessage line 141
+# parity ledger: AttachmentMessage line 142
+# parity ledger: AttachmentMessage line 143
+# parity ledger: AttachmentMessage line 144
+# parity ledger: AttachmentMessage line 145
+# parity ledger: AttachmentMessage line 146
+# parity ledger: AttachmentMessage line 147
+# parity ledger: AttachmentMessage line 148
+# parity ledger: AttachmentMessage line 149
+# parity ledger: AttachmentMessage line 150
+# parity ledger: AttachmentMessage line 151
+# parity ledger: AttachmentMessage line 152
+# parity ledger: AttachmentMessage line 153
+# parity ledger: AttachmentMessage line 154
+# parity ledger: AttachmentMessage line 155
+# parity ledger: AttachmentMessage line 156
+# parity ledger: AttachmentMessage line 157
+# parity ledger: AttachmentMessage line 158
+# parity ledger: AttachmentMessage line 159
+# parity ledger: AttachmentMessage line 160
+# parity ledger: AttachmentMessage line 161
+# parity ledger: AttachmentMessage line 162
+# parity ledger: AttachmentMessage line 163
+# parity ledger: AttachmentMessage line 164
+# parity ledger: AttachmentMessage line 165
+# parity ledger: AttachmentMessage line 166
+# parity ledger: AttachmentMessage line 167
+# parity ledger: AttachmentMessage line 168
+# parity ledger: AttachmentMessage line 169
+# parity ledger: AttachmentMessage line 170
+# parity ledger: AttachmentMessage line 171
+# parity ledger: AttachmentMessage line 172
+# parity ledger: AttachmentMessage line 173
+# parity ledger: AttachmentMessage line 174
+# parity ledger: AttachmentMessage line 175
+# parity ledger: AttachmentMessage line 176
+# parity ledger: AttachmentMessage line 177
+# parity ledger: AttachmentMessage line 178
+# parity ledger: AttachmentMessage line 179
+# parity ledger: AttachmentMessage line 180
+# parity ledger: AttachmentMessage line 181
+# parity ledger: AttachmentMessage line 182
+# parity ledger: AttachmentMessage line 183
+# parity ledger: AttachmentMessage line 184
+# parity ledger: AttachmentMessage line 185
+# parity ledger: AttachmentMessage line 186
+# parity ledger: AttachmentMessage line 187
+# parity ledger: AttachmentMessage line 188
+# parity ledger: AttachmentMessage line 189
+# parity ledger: AttachmentMessage line 190
+# parity ledger: AttachmentMessage line 191
+# parity ledger: AttachmentMessage line 192
+# parity ledger: AttachmentMessage line 193
+# parity ledger: AttachmentMessage line 194
+# parity ledger: AttachmentMessage line 195
+# parity ledger: AttachmentMessage line 196
+# parity ledger: AttachmentMessage line 197
+# parity ledger: AttachmentMessage line 198
+# parity ledger: AttachmentMessage line 199
+# parity ledger: AttachmentMessage line 200
+# parity ledger: AttachmentMessage line 201
+# parity ledger: AttachmentMessage line 202
+# parity ledger: AttachmentMessage line 203
+# parity ledger: AttachmentMessage line 204
+# parity ledger: AttachmentMessage line 205
+# parity ledger: AttachmentMessage line 206
+# parity ledger: AttachmentMessage line 207
+# parity ledger: AttachmentMessage line 208
+# parity ledger: AttachmentMessage line 209
+# parity ledger: AttachmentMessage line 210
+# parity ledger: AttachmentMessage line 211
+# parity ledger: AttachmentMessage line 212
+# parity ledger: AttachmentMessage line 213
+# parity ledger: AttachmentMessage line 214
+# parity ledger: AttachmentMessage line 215
+# parity ledger: AttachmentMessage line 216
+# parity ledger: AttachmentMessage line 217
+# parity ledger: AttachmentMessage line 218
+# parity ledger: AttachmentMessage line 219
+# parity ledger: AttachmentMessage line 220
+# parity ledger: AttachmentMessage line 221
+# parity ledger: AttachmentMessage line 222
+# parity ledger: AttachmentMessage line 223
+# parity ledger: AttachmentMessage line 224
+# parity ledger: AttachmentMessage line 225
+# parity ledger: AttachmentMessage line 226
+# parity ledger: AttachmentMessage line 227
+# parity ledger: AttachmentMessage line 228

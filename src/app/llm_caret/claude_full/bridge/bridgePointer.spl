@@ -1,0 +1,225 @@
+const BRIDGE_POINTER_TTL_MS: i64 = 14400000
+const MAX_WORKTREE_FANOUT: i64 = 50
+const BRIDGE_POINTER_FILE_NAME: text = "bridge-pointer.json"
+
+class BridgePointer:
+    sessionId: text
+    environmentId: text
+    source: text
+
+impl BridgePointer:
+    static fn new(sessionId: text, environmentId: text, source: text) -> BridgePointer:
+        BridgePointer(sessionId: sessionId, environmentId: environmentId, source: source)
+
+    me valid() -> bool:
+        me.sessionId != "" and me.environmentId != "" and bridgePointerSourceValid(me.source)
+
+    me sourceStandalone() -> bool:
+        me.source == "standalone"
+
+    me sourceRepl() -> bool:
+        me.source == "repl"
+
+class StoredBridgePointer:
+    exists: bool
+    pointer: BridgePointer
+    mtimeMs: i64
+    rawValidJson: bool
+    schemaValid: bool
+
+impl StoredBridgePointer:
+    static fn missing() -> StoredBridgePointer:
+        StoredBridgePointer(exists: false, pointer: BridgePointer.new("", "", ""), mtimeMs: 0, rawValidJson: false, schemaValid: false)
+
+    static fn present(pointer: BridgePointer, mtimeMs: i64) -> StoredBridgePointer:
+        StoredBridgePointer(exists: true, pointer: pointer, mtimeMs: mtimeMs, rawValidJson: true, schemaValid: pointer.valid())
+
+    static fn corrupt(mtimeMs: i64) -> StoredBridgePointer:
+        StoredBridgePointer(exists: true, pointer: BridgePointer.new("", "", ""), mtimeMs: mtimeMs, rawValidJson: false, schemaValid: false)
+
+    static fn invalidSchema(pointer: BridgePointer, mtimeMs: i64) -> StoredBridgePointer:
+        StoredBridgePointer(exists: true, pointer: pointer, mtimeMs: mtimeMs, rawValidJson: true, schemaValid: false)
+
+class BridgePointerRead:
+    found: bool
+    pointer: BridgePointer
+    ageMs: i64
+    cleared: bool
+    reason: text
+
+impl BridgePointerRead:
+    static fn missing(reason: text) -> BridgePointerRead:
+        BridgePointerRead(found: false, pointer: BridgePointer.new("", "", ""), ageMs: 0, cleared: false, reason: reason)
+
+    static fn cleared(reason: text) -> BridgePointerRead:
+        BridgePointerRead(found: false, pointer: BridgePointer.new("", "", ""), ageMs: 0, cleared: true, reason: reason)
+
+    static fn found(pointer: BridgePointer, ageMs: i64) -> BridgePointerRead:
+        BridgePointerRead(found: true, pointer: pointer, ageMs: ageMs, cleared: false, reason: "")
+
+class WorktreePointerResult:
+    found: bool
+    pointer: BridgePointer
+    dir: text
+    ageMs: i64
+    skippedFanout: bool
+    reason: text
+
+impl WorktreePointerResult:
+    static fn missing(reason: text) -> WorktreePointerResult:
+        WorktreePointerResult(found: false, pointer: BridgePointer.new("", "", ""), dir: "", ageMs: 0, skippedFanout: false, reason: reason)
+
+    static fn skipped(reason: text) -> WorktreePointerResult:
+        WorktreePointerResult(found: false, pointer: BridgePointer.new("", "", ""), dir: "", ageMs: 0, skippedFanout: true, reason: reason)
+
+    static fn found(pointer: BridgePointer, dir: text, ageMs: i64) -> WorktreePointerResult:
+        WorktreePointerResult(found: true, pointer: pointer, dir: dir, ageMs: ageMs, skippedFanout: false, reason: "")
+
+class BridgePointerEntry:
+    dir: text
+    stored: StoredBridgePointer
+
+impl BridgePointerEntry:
+    static fn new(dir: text, stored: StoredBridgePointer) -> BridgePointerEntry:
+        BridgePointerEntry(dir: dir, stored: stored)
+
+class BridgePointerStore:
+    entries: [BridgePointerEntry]
+    projectsDir: text
+
+impl BridgePointerStore:
+    static fn new(projectsDir: text) -> BridgePointerStore:
+        BridgePointerStore(entries: [], projectsDir: projectsDir)
+
+    me write(dir: text, pointer: BridgePointer, nowMs: i64):
+        me.upsert(dir, StoredBridgePointer.present(pointer, nowMs))
+
+    me writeCorrupt(dir: text, nowMs: i64):
+        me.upsert(dir, StoredBridgePointer.corrupt(nowMs))
+
+    me writeInvalidSchema(dir: text, pointer: BridgePointer, nowMs: i64):
+        me.upsert(dir, StoredBridgePointer.invalidSchema(pointer, nowMs))
+
+    me clear(dir: text):
+        var result: [BridgePointerEntry] = []
+        for entry in me.entries:
+            if sanitizeBridgePointerPath(entry.dir) != sanitizeBridgePointerPath(dir):
+                result = result + [entry]
+        me.entries = result
+
+    me read(dir: text, nowMs: i64) -> BridgePointerRead:
+        val stored = me.find(dir)
+        if not stored.exists:
+            return BridgePointerRead.missing("missing")
+        if not stored.rawValidJson:
+            me.clear(dir)
+            return BridgePointerRead.cleared("invalid-json")
+        if not stored.schemaValid or not stored.pointer.valid():
+            me.clear(dir)
+            return BridgePointerRead.cleared("invalid-schema")
+        val age = nonNegativeAge(nowMs, stored.mtimeMs)
+        if age > BRIDGE_POINTER_TTL_MS:
+            me.clear(dir)
+            return BridgePointerRead.cleared("stale")
+        BridgePointerRead.found(stored.pointer, age)
+
+    me readAcrossWorktrees(dir: text, worktrees: [text], nowMs: i64) -> WorktreePointerResult:
+        val here = me.read(dir, nowMs)
+        if here.found:
+            return WorktreePointerResult.found(here.pointer, dir, here.ageMs)
+        if worktrees.len() <= 1:
+            return WorktreePointerResult.missing("no-worktrees")
+        if worktrees.len() > MAX_WORKTREE_FANOUT:
+            return WorktreePointerResult.skipped("fanout-cap")
+        val dirKey = sanitizeBridgePointerPath(dir)
+        var best = BridgePointerRead.missing("none")
+        var bestDir = ""
+        for wt in worktrees:
+            if sanitizeBridgePointerPath(wt) != dirKey:
+                val current = me.read(wt, nowMs)
+                if current.found and (not best.found or current.ageMs < best.ageMs):
+                    best = current
+                    bestDir = wt
+        if best.found:
+            return WorktreePointerResult.found(best.pointer, bestDir, best.ageMs)
+        WorktreePointerResult.missing("not-found")
+
+    me pathFor(dir: text) -> text:
+        getBridgePointerPath(me.projectsDir, dir)
+
+    me count() -> i64:
+        me.entries.len()
+
+    me find(dir: text) -> StoredBridgePointer:
+        val needle = sanitizeBridgePointerPath(dir)
+        for entry in me.entries:
+            if sanitizeBridgePointerPath(entry.dir) == needle:
+                return entry.stored
+        StoredBridgePointer.missing()
+
+    me upsert(dir: text, stored: StoredBridgePointer):
+        val needle = sanitizeBridgePointerPath(dir)
+        var result: [BridgePointerEntry] = []
+        var replaced = false
+        for entry in me.entries:
+            if sanitizeBridgePointerPath(entry.dir) == needle:
+                result = result + [BridgePointerEntry.new(dir, stored)]
+                replaced = true
+            else:
+                result = result + [entry]
+        if not replaced:
+            result = result + [BridgePointerEntry.new(dir, stored)]
+        me.entries = result
+
+fn getBridgePointerPath(projectsDir: text, dir: text) -> text:
+    joinBridgePointerPath(projectsDir, sanitizeBridgePointerPath(dir), BRIDGE_POINTER_FILE_NAME)
+
+fn joinBridgePointerPath(projectsDir: text, safeDir: text, fileName: text) -> text:
+    trimTrailingSlash(projectsDir) + "/" + safeDir + "/" + fileName
+
+fn sanitizeBridgePointerPath(dir: text) -> text:
+    var out = ""
+    var i = 0
+    while i < dir.len():
+        val ch = dir.substring(i, i + 1)
+        if ch == "/" or ch == "\\" or ch == ":" or ch == " ":
+            out = out + "-"
+        else:
+            out = out + ch
+        i = i + 1
+    trimDuplicateDashes(out)
+
+fn trimDuplicateDashes(value: text) -> text:
+    var out = ""
+    var prevDash = false
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        val dash = ch == "-"
+        if not dash or not prevDash:
+            out = out + ch
+        prevDash = dash
+        i = i + 1
+    out
+
+fn trimTrailingSlash(value: text) -> text:
+    if value.ends_with("/"):
+        return value.substring(0, value.len() - 1)
+    value
+
+fn bridgePointerSourceValid(source: text) -> bool:
+    source == "standalone" or source == "repl"
+
+fn nonNegativeAge(nowMs: i64, mtimeMs: i64) -> i64:
+    if nowMs < mtimeMs:
+        return 0
+    nowMs - mtimeMs
+
+fn bridgePointerTtlMs() -> i64:
+    BRIDGE_POINTER_TTL_MS
+
+fn maxWorktreeFanout() -> i64:
+    MAX_WORKTREE_FANOUT
+
+fn bridgePointerFileName() -> text:
+    BRIDGE_POINTER_FILE_NAME

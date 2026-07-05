@@ -1,0 +1,92 @@
+"""
+# Claude Full ContextVisualization
+
+Checks context usage buckets, labels, collapse status, and source grouping.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.components.ContextVisualization.{ContextCategory, ContextGridSquare, SourceItem, CollapseStatusInput, contextTokenPercentTenths, contextTokenPercentText, contextUsageStatus, contextStatusLine, visibleContextCategories, hasDeferredMcpTools, contextCategoryLabel, contextGridSymbol, freeSpaceLabel, autocompactLabel, contextTokenBuckets, groupBySource, collapseStatusSummary, collapseStatusWarning, collapseStatusLine, sourceSummaryLine, renderSourceGroups, renderContextVisualization, reservedCategoryName, contextWarningPercent, contextCriticalPercent, contextVisualizationSourceLinesModeled}
+
+describe "Claude full components ContextVisualization":
+    it "models token buckets, percentages, warning thresholds, and labels":
+        step("Compute bucket percentage and warning status from max tokens")
+        val categories = [
+            ContextCategory.new("Messages", 40000, "primary", false),
+            ContextCategory.new("MCP tools", 5000, "secondary", true),
+            ContextCategory.new("Empty", 0, "gray", false),
+            ContextCategory.new("Free space", 55000, "gray", false),
+            ContextCategory.new(reservedCategoryName(), 2000, "warning", false),
+        ]
+
+        expect(contextTokenPercentTenths(12500, 100000)).to_equal(125)
+        expect(contextTokenPercentText(12500, 100000)).to_equal("12.5%")
+        expect(contextUsageStatus(59)).to_equal("ok")
+        expect(contextUsageStatus(contextWarningPercent())).to_equal("warning")
+        expect(contextUsageStatus(contextCriticalPercent())).to_equal("critical")
+        expect(contextStatusLine("claude-sonnet", 40000, 100000, 40)).to_equal("claude-sonnet · 40.0k/100.0k tokens (40%)")
+        expect(visibleContextCategories(categories).len()).to_equal(1)
+        expect(hasDeferredMcpTools(categories)).to_equal(true)
+        expect(contextCategoryLabel(categories[0], 100000)).to_equal("filled Messages: 40.0k tokens (40.0%)")
+        expect(contextCategoryLabel(categories[1], 100000)).to_equal("  MCP tools: 5.0k tokens (N/A)")
+        expect(freeSpaceLabel(categories, 100000)).to_equal("free Free space: 55.0k (55.0%)")
+        expect(autocompactLabel(categories, 100000)).to_equal("reserved Autocompact buffer: 2.0k tokens (2.0%)")
+
+        val buckets = contextTokenBuckets(categories, 100000)
+        expect(buckets[0].label).to_equal("Messages")
+        expect(buckets[0].percentTenths).to_equal(400)
+        expect(buckets[1].deferred).to_equal(true)
+        expect(contextGridSymbol(ContextGridSquare.new("Messages", "primary", 70))).to_equal("full")
+        expect(contextGridSymbol(ContextGridSquare.new("Messages", "primary", 69))).to_equal("partial")
+        expect(contextGridSymbol(ContextGridSquare.new("Free space", "gray", 0))).to_equal("free")
+        expect(contextGridSymbol(ContextGridSquare.new(reservedCategoryName(), "warning", 0))).to_equal("reserved")
+
+    it "groups source-backed items in Claude display order with token sorting":
+        step("Project, User, Managed, Plugin, Built-in order wins over input order")
+        val items = [
+            SourceItem.new("z-plugin", "plugin", 10),
+            SourceItem.new("user-big", "user", 30),
+            SourceItem.new("project", "project", 20),
+            SourceItem.new("user-small", "user", 5),
+            SourceItem.new("builtin", "built-in", 9),
+        ]
+
+        val groups = groupBySource(items)
+        expect(groups.len()).to_equal(4)
+        expect(groups[0].sourceDisplay).to_equal("Project")
+        expect(groups[1].sourceDisplay).to_equal("User")
+        expect(groups[1].items[0].name).to_equal("user-big")
+        expect(groups[1].items[1].name).to_equal("user-small")
+        expect(groups[2].sourceDisplay).to_equal("Plugin")
+        expect(groups[3].sourceDisplay).to_equal("Built-in")
+        expect(sourceSummaryLine("Memory files", "/memory", items)).to_equal("Memory files · /memory · 5 sources")
+        expect(renderSourceGroups(items)).to_equal(["Project", "└ project: 20 tokens", "User", "└ user-big: 30 tokens", "└ user-small: 5 tokens", "Plugin", "└ z-plugin: 10 tokens", "Built-in", "└ builtin: 9 tokens"])
+
+    it "renders collapse summary, warnings, and context visualization lines":
+        step("Collapse helper mirrors summarized, staged, error, idle, and disabled states")
+        val disabled = CollapseStatusInput.disabled()
+        expect(collapseStatusLine(disabled)).to_equal("")
+
+        val waiting = CollapseStatusInput.emptyEnabled()
+        expect(collapseStatusSummary(waiting)).to_equal("waiting for first trigger")
+        expect(collapseStatusLine(waiting)).to_equal("Context strategy: collapse (waiting for first trigger)")
+
+        val active = CollapseStatusInput(enabled: true, collapsedSpans: 2, collapsedMessages: 7, stagedSpans: 1, totalSpawns: 4, totalErrors: 1, lastError: "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnop", emptySpawnWarningEmitted: false, totalEmptySpawns: 0)
+        expect(collapseStatusSummary(active)).to_equal("2 spans summarized (7 msgs), 1 staged")
+        expect(collapseStatusWarning(active)).to_contain("Collapse errors: 1/4 spawns failed")
+        expect(collapseStatusWarning(active)).to_contain("last: abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefgh")
+
+        val idle = CollapseStatusInput(enabled: true, collapsedSpans: 0, collapsedMessages: 0, stagedSpans: 0, totalSpawns: 3, totalErrors: 0, lastError: "", emptySpawnWarningEmitted: true, totalEmptySpawns: 3)
+        expect(collapseStatusSummary(idle)).to_equal("3 spawns, nothing staged yet")
+        expect(collapseStatusWarning(idle)).to_equal("Collapse idle: 3 consecutive empty runs")
+
+        val categories = [
+            ContextCategory.new("Messages", 60000, "primary", false),
+            ContextCategory.new("Free space", 40000, "gray", false),
+        ]
+        val rendered = renderContextVisualization("opus", 60000, 100000, 60, categories, waiting)
+        expect(rendered[0]).to_equal("Context Usage")
+        expect(rendered[1]).to_equal("opus · 60.0k/100.0k tokens (60%)")
+        expect(rendered).to_contain("Context strategy: collapse (waiting for first trigger)")
+        expect(rendered).to_contain("Estimated usage by category")
+        expect(rendered).to_contain("filled Messages: 60.0k tokens (60.0%)")
+        expect(contextVisualizationSourceLinesModeled()).to_equal(488)

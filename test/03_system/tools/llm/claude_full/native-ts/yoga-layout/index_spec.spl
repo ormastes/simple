@@ -1,0 +1,127 @@
+"""
+# Claude Full Native Yoga Layout
+
+Checks Yoga layout parity for Node tree/style/layout behavior used by Ink.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.native_ts.yoga_layout.index.*
+
+describe "Claude full native yoga layout":
+    it "should resolve values, edges, and axis helpers":
+        step("Resolve point, percent, and edge precedence")
+        expect(resolveValue(pointValue(10), 100)).to_equal(10)
+        expect(resolveValue(percentValue(25), 200)).to_equal(50)
+        val edges = defaultEdges()
+        edges[EDGE_HORIZONTAL] = pointValue(3)
+        edges[EDGE_ALL] = pointValue(1)
+        expect(resolveEdge(edges, EDGE_LEFT, 100, false)).to_equal(3)
+        expect(resolveEdge(edges, EDGE_TOP, 100, false)).to_equal(1)
+        expect(isRow("row")).to_equal(true)
+        expect(crossAxis("row")).to_equal("column")
+
+    it "should create config and loader surfaces":
+        step("Configure Yoga")
+        val config = createConfig()
+        config.setPointScaleFactor(2)
+        config.setErrata("classic")
+        config.setUseWebDefaults(true)
+        expect(config.pointScaleFactor).to_equal(2)
+        expect(config.getErrata()).to_equal("classic")
+        expect(loadYoga().hasNode).to_equal(true)
+
+    it "should maintain tree relationships and dirty state":
+        step("Insert and remove children")
+        val root = Node.create()
+        val child = Node.create()
+        root.markLayoutSeen()
+        root.insertChild(child, 0)
+        expect(root.getChildCount()).to_equal(1)
+        expect(root.isDirty()).to_equal(true)
+        root.reset()
+        expect(root.getChildCount()).to_equal(0)
+
+    it "should store style setters and fast flags":
+        step("Set dimensions, flex, spacing, and position")
+        val node = Node.create()
+        node.setWidth(80)
+        node.setHeightPercent(50)
+        node.setFlex(2)
+        node.setFlexDirection("row")
+        node.setMarginAuto(EDGE_LEFT)
+        node.setPadding(EDGE_TOP, 2)
+        node.setBorder(EDGE_BOTTOM, 1)
+        node.setPosition(EDGE_LEFT, 4)
+        expect(node.getWidth().value).to_equal(80)
+        expect(node.getHeight().unit).to_equal(UNIT_PERCENT)
+        expect(node.getFlexGrow()).to_equal(2)
+        expect(node.getFlexShrink()).to_equal(1)
+        expect(node._hasAutoMargin).to_equal(true)
+        expect(node._hasPadding).to_equal(true)
+        expect(node._hasBorder).to_equal(true)
+        expect(node._hasPosition).to_equal(true)
+
+    it "should calculate simple node layout":
+        step("Layout one node directly")
+        val root = Node.create()
+        root.setWidth(20)
+        root.setHeight(20)
+        root.calculateLayout(20, 20, "ltr")
+        expect(root.getComputedWidth()).to_equal(20)
+        expect(root.getComputedHeight()).to_equal(20)
+        expect(root.isDirty()).to_equal(false)
+
+    it "should calculate row layout with gap and margins":
+        step("Resolve row helpers and spacing flags")
+        val root = Node.create()
+        root.setFlexDirection("row")
+        root.setWidth(30)
+        root.setHeight(10)
+        root.setGap(0, 2)
+        val a = Node.create()
+        a.setWidth(5)
+        a.setHeight(3)
+        a.setMargin(EDGE_LEFT, 1)
+        expect(root.getFlexDirection()).to_equal("row")
+        expect(resolveGap(root, "row")).to_equal(2)
+        expect(childMarginForAxis(a, "row")).to_equal(0)
+        expect(a._hasMargin).to_equal(true)
+
+    it "should use measure functions and computed layout helpers":
+        step("Measure a leaf and read computed helpers")
+        val child = Node.create()
+        child.setMeasureFunc(7, 4)
+        child.calculateLayout(7, 4, "ltr")
+        expect(hasMeasureFuncInSubtree(child)).to_equal(true)
+        expect(child.getComputedWidth()).to_equal(7)
+        expect(child.getComputedRight()).to_equal(0)
+        expect(child.getComputedLayout()).to_contain("7")
+
+    it "should reset, free, and zero hidden layouts":
+        step("Exercise lifecycle behavior")
+        val root = Node.create()
+        val child = Node.create()
+        child.setWidth(9)
+        child.setHeight(9)
+        child.setDisplay("none")
+        root.insertChild(child, 0)
+        root.calculateLayout(10, 10, "ltr")
+        expect(child.getComputedWidth()).to_equal(0)
+        root.reset()
+        expect(root.getChildCount()).to_equal(0)
+        expect(root.getDisplay()).to_equal("flex")
+        child.free()
+        expect(child.getChildCount()).to_equal(0)
+
+    it "should expose helper functions and source constant":
+        step("Pin source-backed helpers")
+        val node = Node.create()
+        node.setWidth(10)
+        node.setHeight(10)
+        layoutNode(node, 10, 10)
+        cacheWrite(node, 10, 10)
+        commitCacheOutputs(node)
+        expect(getYogaCounters()).to_contain("cache")
+        expect(boundAxis(20, pointValue(5), pointValue(10), 100)).to_equal(10)
+        expect(physicalEdge(EDGE_ALL)).to_equal(EDGE_LEFT)
+        expect(yogaSourceLinesModeled()).to_equal(2578)
