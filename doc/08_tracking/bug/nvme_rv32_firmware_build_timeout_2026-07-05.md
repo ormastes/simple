@@ -53,6 +53,45 @@ Run the wrapper with the shortest timeout that reproduces the timeout, inspect
 `build/test-artifacts/nvme_fw_rv32_build.{out,err}`, then narrow native-build to
 the slow compile/load phase before claiming firmware runtime evidence.
 
+## Update — self-hosted phase narrowed (2026-07-05)
+
+The wrapper still fails to produce `build/nvme_fw_rv32.elf` with the production
+self-hosted compiler:
+
+```bash
+NVME_RV32_BUILD_TIMEOUT_SECS=300 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+```
+
+Observed result:
+
+```text
+NVME_RV32_BUILD_FAILED code=124 timeout=300s
+```
+
+Adding a firmware-only boot root that avoided `os_main` did not change the
+300s outcome, so the hosted OS graph is not the production blocker.
+
+The wrapper now enables `SIMPLE_COMPILER_PHASE_PROFILE=1`, a narrow phase-only
+trace separate from the noisy `SIMPLE_COMPILER_TRACE=1` parser trace. A 45s
+probe showed:
+
+```text
+[BOOTSTRAP-PHASE] compile:start
+[BOOTSTRAP-PHASE] phase1:load_sources:start
+[BOOTSTRAP-PHASE] phase1:load_sources:done
+[BOOTSTRAP-PHASE] phase2:parse:start
+```
+
+Then the process timed out. This localizes the current production timeout to
+self-hosted parse/front-end startup after the bounded entry-closure source list
+has loaded, before HIR/typecheck/MIR/codegen/link phases begin.
+
+The next production fix should make native-build consume a compiled/cacheable
+compiler front-end for this path or make the phase2 parse path incremental
+enough for self-hosted native-build to complete under the wrapper timeout. Do
+not default this wrapper to the Rust seed: it is useful differential evidence,
+but repo policy keeps the seed bootstrap-only.
+
 ## Root Cause — localized (2026-07-05)
 
 The timeout is **NOT** a compiler-pass infinite loop, and **NOT** an
