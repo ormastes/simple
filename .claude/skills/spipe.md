@@ -232,6 +232,47 @@ For GUI render-location assertions, use
 the stable id, role/kind, geometry, hit rect, parent, and computed style inside
 the SSpec case.
 
+## UI-lane specs & diagnostics
+
+`std.diag` (`src/lib/nogc_sync_mut/diag.spl`, guide
+`doc/07_guide/infra/debugging/easy_debug_infra.md`) is the shared debug
+primitive set (P0 of `doc/03_plan/ui/testing/ui_test_infra_plan.md`) that
+UI-lane specs should instrument with rather than ad-hoc `print`:
+
+```simple
+use std.diag.{dbg_stage, dbg_deadline, dbg_deadline_clear, dbg_time_begin,
+              dbg_time_end, dbg_summary, dbg_provenance, dbg_event_hop,
+              dbg_force_facet, dbg_diag_reset}
+```
+
+- `dbg_stage(component, stage)` — stage tracer, ring cap 256; `dbg_deadline(label,
+  budget_ms)` / `dbg_deadline_clear` — cooperative (thread-free) watchdog,
+  breach dumps stage history once; `dbg_time_begin/end(label)` + `dbg_summary()`
+  — aggregating timers, the quadratic-path finder; `dbg_event_hop(chain_id, hop,
+  detail)` — one line per event hop; `dbg_provenance(claimed, actual, context)`
+  — ALWAYS-ON anti-fakery assert (never gated).
+- Gate with `SIMPLE_DIAG=all|stage,watchdog,timers,events` (read once, cached).
+  Since specs run in the same process as module load, use the two test-only
+  hooks instead of env: `dbg_force_facet(facet)` to force a facet on mid-spec,
+  `dbg_diag_reset()` to clear all module state between `it` blocks.
+
+**Two interpreter landmines proved during the P0 spec work** (both documented
+in `diag.spl`'s header and `diag_spec.spl`'s header comment):
+1. `if val Some(x) = dict.get(k):` **silently never matches** — `Dict.get()`
+   returns the raw value or `nil`, NOT a `Some(..)`-tagged Option. Use
+   `dict.get(k) ?? default` or `!= nil` instead.
+2. Module globals mutated inside functions are **stale when read directly from
+   a spec `it` block** — the interpreter snapshot the `it` block sees does not
+   reflect writes made by module functions. Always assert through the module's
+   own accessor functions (e.g. `dbg_last_emit()`, `dbg_timer_stats(label)`),
+   never by reading a module-level `var` directly from the spec.
+
+**UI interaction (Playwright-like `UiTest`/`locator`) is designed, not yet
+implemented.** See `doc/05_design/ui/testing/ui_test_infra_design.md` (the
+`UiSession`/`Locator`/`Lane` API) and `doc/03_plan/ui/testing/ui_test_infra_plan.md`
+(phases P1-P6). Specs that need to click/type/snapshot a live UI should follow
+that plan rather than hand-rolling a driver against `ui.test_api`/SGTTI directly.
+
 ## Rendering Checks (`expect_draw` style)
 
 For GUI, Web, 2D, Draw IR, and WASM rendering specs, use `expect_draw`-style

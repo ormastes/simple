@@ -45,6 +45,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [tooling/mcp.md](tooling/mcp.md) | MCP server setup and usage |
 | [tooling/lint.md](tooling/lint.md) | Linter configuration and usage |
 | [tooling/logging.md](tooling/logging.md) | Production logging, debug logging, and script print policy |
+| [infra/debugging/easy_debug_infra.md](infra/debugging/easy_debug_infra.md) | `std.diag` debug primitives -- stage tracer, cooperative watchdog, aggregating timers/counters, event-chain tracer, provenance assert |
 | [app/ui/ui_access.md](app/ui/ui_access.md) | Canonical UI snapshot, act, and history workflow |
 | [app/ui/engine2d_backend_order.md](app/ui/engine2d_backend_order.md) | Engine2D GUI backend preference order and font offload lanes |
 | [app/ui/ui_render.md](app/ui/ui_render.md) | UI rendering pipeline, shared web render contract, HTML/CSS cache planning |
