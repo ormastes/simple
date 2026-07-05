@@ -1,10 +1,23 @@
 # UI browser CLI entrypoint.
-# Startup-light command planner for source-mode help and readiness probes.
+#
+# `--open` really launches the browser-engine window (via
+# `run_browser_gui_with_access_store`, the same real launch chain as the
+# `bin/simple browser` in-process subcommand). Pass `--dry-run` (or omit
+# `--open`) to only print the launch plan for source-mode help / readiness
+# probes without opening a window. See
+# doc/08_tracking/bug/ui_browser_main_open_fake_planner_2026-07-05.md for the
+# history (this file used to plan-only unconditionally regardless of
+# `--open`) and
+# doc/08_tracking/bug/browser_engine_css_size_quadratic_pixel_render_2026-07-04.md
+# for a still-open perf bug that can make a real `--open` launch take a very
+# long time to present its first frame — stage progress is logged to stderr
+# (respects `--quiet`) so that is diagnosable instead of looking like a hang.
 
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
 use os.compositor.host_compositor_entry.{HostBackendKind}
+use app.ui.browser.app.{run_browser_gui_with_access_store}
 
 val TOOL_NAME = "Simple UI Browser"
 val TOOL_VERSION = "0.1.0"
@@ -54,7 +67,15 @@ fn main() -> i64:
     val backend = browser_option_value(args, "--backend", "auto")
     val access_db = browser_option_value(args, "--ui-access-db", "")
     val open_flag = browser_has_option(args, "--open")
+    val dry_run = browser_has_option(args, "--dry-run") or browser_has_option(args, "--plan")
     val shared_wm = browser_has_option(args, "--shared-wm")
+
+    if open_flag and not dry_run:
+        # Real launch — same chain as `bin/simple browser <file> --open`
+        # (src/app/cli/browser.spl:cli_browser). Blocks until the window is
+        # closed; stage-by-stage progress goes to stderr via
+        # src/app/ui.browser/app.spl's browser_stage_log (respects --quiet).
+        return run_browser_gui_with_access_store(file_path, 0, access_db)
 
     if log_opts.log_mode == "json":
         print "{\"command\":\"ui.browser\",\"status\":\"planned\",\"file\":\"{file_path}\",\"snapshot\":\"{snapshot_path}\",\"backend\":\"{backend}\",\"ui_access_db\":\"{access_db}\",\"open\":{browser_bool_json(open_flag)},\"shared_wm\":{browser_bool_json(shared_wm)}}"
@@ -80,7 +101,8 @@ fn print_help():
     print "  -h, --help              Show this help message"
     print "  -v, --version           Show version information"
     print "  --snapshot <PATH>       Snapshot output path (default: {DEFAULT_SNAPSHOT_PATH})"
-    print "  --open                  Plan interactive browser startup"
+    print "  --open                  Launch the browser in a real window (blocks until closed)"
+    print "  --dry-run, --plan       With --open, print the launch plan instead of launching"
     print "  --backend <NAME>        Browser backend (default: auto)"
     print "  --ui-access-db <PATH>   UI access store path"
     print "  --shared-wm             Plan shared window-manager startup"
@@ -154,7 +176,7 @@ fn browser_option_has_inline_value(arg: text) -> bool:
         arg.starts_with("--ui-access-db=")
 
 fn browser_option_is_flag(arg: text) -> bool:
-    arg == "--open" or arg == "--shared-wm"
+    arg == "--open" or arg == "--shared-wm" or arg == "--dry-run" or arg == "--plan"
 
 fn browser_bool_json(value: bool) -> text:
     if value:

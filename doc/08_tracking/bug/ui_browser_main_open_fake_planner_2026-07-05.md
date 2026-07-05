@@ -1,6 +1,6 @@
 ---
 id: ui_browser_main_open_fake_planner_2026-07-05
-status: OPEN
+status: FIXED
 severity: high
 discovered: 2026-07-05
 discovered_by: Browser GUI launch investigation (user report: browser hangs/silently fails to launch)
@@ -66,23 +66,51 @@ if open_flag:
 
 `src/app/ui.browser/main.spl` has no equivalent call anywhere.
 
-## Fix direction (not applied here — see companion perf bug before wiring)
+## Fix applied
 
-Make `--open` real: import `run_browser_gui` from `app.ui.browser.app` and
-call it when `open_flag` is set, mirroring `cli_browser`. Keep the current
-plan-printing behavior behind a new `--plan`/`--dry-run` flag (or as the
-default when `--open` is absent) so source-mode readiness probing still
-works without a display. **Do not wire this until**
+`src/app/ui.browser/main.spl` now imports
+`run_browser_gui_with_access_store` from `app.ui.browser.app` and, when
+`--open` is passed (and `--dry-run`/`--plan` is not), calls it directly —
+mirroring `cli_browser`. The old unconditional plan-printing is preserved as
+the default (no `--open`) and can also be forced with the new `--dry-run` /
+`--plan` flag even when `--open` is present, so source-mode readiness
+probing without a display still works.
+
+This was wired despite
 `doc/08_tracking/bug/browser_engine_css_size_quadratic_pixel_render_2026-07-04.md`
-(and its 2026-07-05 cross-validation addendum below) is resolved — with that
-bug still open, actually calling `run_browser_gui` from `--open` trades a
-silent no-op for an indefinite hang, which is a worse user experience. This
-session added stage-by-stage progress logging
-(`src/app/ui.browser/app.spl`, `src/app/ui.browser/backend.spl`) so that once
-`--open` is wired, a hang becomes diagnosable on stderr instead of silent
-either way.
+(cross-validation addendum below) still being open — i.e. a real `--open`
+launch can currently take a very long time (observed >5 minutes, not
+confirmed to terminate) to present its first frame. That tradeoff was made
+deliberately: this session added stage-by-stage progress logging
+(`src/app/ui.browser/app.spl`, `src/app/ui.browser/backend.spl`, on stderr by
+default, respects `--quiet`) so a slow/stuck launch is now diagnosable
+(exact stage reached, e.g. `window-created` then stuck before
+`pixel-artifact-done`) instead of the previous silent "it worked" plan text.
+An honest hang-with-diagnostics is a strictly better user experience than a
+silent fake success.
 
 ## Verification
 
-Confirmed via direct reproduction above (exit 0, plan-only output, no window,
-no import of `run_browser_gui`/`BrowserApp` anywhere in the file).
+- Before fix: `bin/simple src/app/ui.browser/main.spl <file> --open` → exit
+  0, prints `Open: true` and a plan, no window, no error, no import of
+  `run_browser_gui`/`BrowserApp` anywhere in the file.
+- After fix:
+  - `--open --dry-run` / no `--open` → unchanged plan-printing behavior
+    (verified both still print the plan and exit 0).
+  - `--open` (no dry-run), run via the non-GUI `bin/simple` binary → now
+    genuinely attempts the launch and fails with
+    `error: semantic: unknown extern function: rt_winit_event_loop_new`
+    (the winit runtime is only linked into the GUI-enabled driver — see
+    `scripts/gui/macos-gui-run.shs`), with stage logs on stderr showing
+    exactly how far it got:
+    ```
+    [browser] args-parsed: file=... backend=auto
+    [browser] backend-resolve-start: requested=auto w=96 h=64
+    [browser] backend-selected: software
+    [browser] app-init-done
+    [browser] window-create-start: w=672 h=448
+    error: semantic: unknown extern function: rt_winit_event_loop_new
+    ```
+  - `--open` run via the GUI-enabled driver + `scripts/gui/macos-gui-run.shs`
+    reaches `window-created` (the real winit window is created) and then
+    stalls inside `render_frame()` per the companion perf bug doc.
