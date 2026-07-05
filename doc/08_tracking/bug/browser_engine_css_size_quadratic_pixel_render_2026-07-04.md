@@ -267,3 +267,61 @@ above is left in place in `src/app/ui.browser/{app,backend}.spl` so the next
 session working this bug (or the `--open` wiring in the companion doc) gets
 an immediate, precise stall-location readout instead of a silent multi-minute
 hang.
+
+## RESOLVED (2026-07-05, pure-Simple) — real root causes found + fixed, first frame 16s→6.6s
+
+The multi-minute hang was **not** the brace-boundary scan (that is ~2-44ms).
+Direct per-phase profiling of the real browser theme sheet
+(`generate_css("glass_dark")` = 336,358 bytes, 1990 rules) rendered at the
+browser's 96x64 software viewport (interpreter, Apple M4) pinned three real
+costs, all algorithmic and all fixed in pure Simple:
+
+| phase (extract_css + compute_styles) | before | after |
+|--------------------------------------|--------|-------|
+| `_css_collect_custom_props`          | ~6.6s  | ~1.0s |
+| rule-boundary scan                   | (was interpreted byte-loop / native extern) | ~0.04s |
+| `_css_resolve_vars`                  | ~1.4s  | ~1.4s (unchanged) |
+| `split_selector_groups` (per rule)   | ~1.1s  | ~1.1s (unchanged) |
+| `compute_styles` (buckets+node loop) | ~5.4s  | ~3.5s |
+| **RENDER total (parse+layout+paint)**| **never completed (>5min)** | **~6.6s (stable)** |
+
+### Root causes (file:line) + fixes
+
+1. **`_css_collect_custom_props` walked the ~336KB stylesheet as a byte array
+   one element at a time in interpreted Simple** (`css.bytes()` →
+   `css_bytes_find`/`css_bytes_match_close`/`_cb_chars_between`). Each
+   interpreted `cb[i]` read over 336K entries is ~1us and it made several
+   passes → ~6.6s/frame. **Fix:** locate the few `:root { }` blocks with the
+   native substring search (`find_from`) and slice only those small blocks —
+   O(occurrences), ~1.0s. (`simple_web_html_layout_renderer.spl`
+   `_css_collect_custom_props`).
+2. **The rule-boundary scan cannot use `css.substring()`/`css[a:b]` per rule:**
+   both re-collect the ENTIRE receiver string on every call under this
+   interpreter (measured ~0.7ms/call on a 262KB string → O(rules ×
+   total_css_len)). A prior session had offloaded the scan to a Rust extern
+   (`rt_css_scan_rule_bounds`) — but that only removed the scan (never the
+   bottleneck) and left extract_css at 21s. **Fix (pure Simple, extern
+   removed):** `_css_scan_rules_simple` splits the sheet ONCE on `{` (native,
+   O(n)), then splits each small segment on `}` (native, O(segment)) and only
+   ever slices those small pieces; a brace-depth stack tracks `@media`
+   wrappers. ~0.04s. (`simple_web_html_layout_renderer.spl`
+   `_css_scan_rules_simple`; the Rust `css_scan.rs` extern was deleted.)
+
+### Correctness
+
+Bit-exact preserved: `css_boxes.html` @ 320x240 metal renders to the identical
+tri-lane checksum **329775811848360** (`device_readback`, real GPU) with the
+pure-Simple scan.
+
+### Remaining debt (quantified, not blocking <10s)
+
+- `compute_styles`/`build_rule_buckets` dedups keys with a linear scan
+  (`text_key_index_count`) → O(groups × unique_keys) ≈ 2s; bucket by a hashed
+  key to drop it.
+- `_css_resolve_vars` (~1.4s) does a native `css.substring` per `var()` — fine
+  now, but O(vars × css_len); chunk it off the byte array if it regrows.
+- **Parse-artifact cache (content-hash) not yet added** — the live browser
+  re-renders every 16ms and re-parses the (constant) theme sheet each frame,
+  so it pegs a core after the first paint. Caching the parsed `Rules` keyed on
+  the CSS content hash (allowed: parse artifact, NOT final pixels) makes
+  frames 2..N instant. High-value follow-up for live smoothness.
