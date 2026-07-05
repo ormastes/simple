@@ -72,6 +72,26 @@ fn compare(name: text, cpu_px: [u32], metal_px: [u32], gpu_ok: bool):
         _failures = _failures + 1
         print("{name}: DIVERGE mismatches={mismatches}/{cpu_px.len()} gpu_ok=true first_idx={first_idx} cpu={first_cpu.to_text()} metal={first_metal.to_text()}")
 
+# Asserts every pixel in `px` equals `expected` (used to pin degenerate-dim
+# no-op scenes, where the whole buffer must stay exactly at the clear color).
+fn assert_uniform(name: text, px: [u32], expected: u32):
+    var mismatches = 0
+    var first_idx = -1
+    var first_val: u32 = 0u32
+    var i = 0
+    while i < px.len():
+        if px[i] != expected:
+            mismatches = mismatches + 1
+            if first_idx < 0:
+                first_idx = i
+                first_val = px[i]
+        i = i + 1
+    if mismatches == 0:
+        print("{name}: MATCH mismatches=0/{px.len()} expected={expected.to_text()}")
+    else:
+        _failures = _failures + 1
+        print("{name}: DIVERGE mismatches={mismatches}/{px.len()} expected={expected.to_text()} first_idx={first_idx} got={first_val.to_text()}")
+
 # ---- scene: clear ----
 fn cpu_clear(w: i32, h: i32) -> [u32]:
     var b = CpuBackend.create()
@@ -256,6 +276,75 @@ fn metal_triangles(w: i32, h: i32) -> MetalBackend:
     b.present()
     b
 
+# ---- scene: circle_filled with alpha blend (E1 regression pin) ----
+# Before the fix, kernel_draw_circle_filled wrote p.color raw (no blend),
+# so a translucent fill clobbered the background on Metal only while the
+# CPU mirror composited it via sw_hline_blend/color.blend().
+fn _draw_circle_filled_blend(b: any):
+    b.clear(0xFF102030 as u32)
+    b.draw_circle_filled(16, 16, 10, 0x80FF0000 as u32)
+
+fn cpu_circle_filled_blend(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_circle_filled_blend(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_circle_filled_blend(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_circle_filled_blend(b)
+    b.present()
+    b
+
+# ---- scene: triangle_filled with alpha blend (E2 regression pin) ----
+fn _draw_triangle_filled_blend(b: any):
+    b.clear(0xFF102030 as u32)
+    b.draw_triangle_filled(16, 4, 4, 28, 28, 28, 0x80FF0000 as u32)
+
+fn cpu_triangle_filled_blend(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_triangle_filled_blend(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_triangle_filled_blend(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_triangle_filled_blend(b)
+    b.present()
+    b
+
+# ---- scene: degenerate dims (E3/E4/E5 regression pin) ----
+# draw_rect with h < 0, draw_circle_filled with r == 0, and draw_rounded_rect
+# with w == 0 must all be complete no-ops on BOTH backends — before the fix
+# the CPU mirror still painted partial content (edges/center pixel) while
+# Metal's dispatch guard skipped the call entirely, so the two diverged from
+# each other AND from the plain clear color.
+val DEGENERATE_CLEAR: u32 = 0xFF203040 as u32
+
+fn _draw_degenerate(b: any):
+    b.clear(DEGENERATE_CLEAR)
+    b.draw_rect(10, 10, 20, -5, 0xFFFF0000 as u32)
+    b.draw_circle_filled(10, 10, 0, 0xFF00FF00 as u32)
+    b.draw_rounded_rect(5, 5, 0, 20, 3, 0xFF0000FF as u32)
+
+fn cpu_degenerate(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_degenerate(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_degenerate(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_degenerate(b)
+    b.present()
+    b
+
 fn main():
     if not _harness_is_macos():
         print("PARITY: skip reason=not-macos")
@@ -304,7 +393,21 @@ fn main():
     var m8 = metal_rounded_outline(32, 32)
     compare("rounded_rect_outline", c8, m8.read_pixels(), m8.gpu_frame_complete)
 
-    print("SCOPE: asserts clear,rect_filled,rect_outline,gradient,line,circle(+filled),rounded_rect,rounded_rect_outline,triangle (all bit-exact CPU vs Metal GPU)")
+    val c9 = cpu_circle_filled_blend(32, 32)
+    var m9 = metal_circle_filled_blend(32, 32)
+    compare("circle_filled_blend", c9, m9.read_pixels(), m9.gpu_frame_complete)
+
+    val c10 = cpu_triangle_filled_blend(32, 32)
+    var m10 = metal_triangle_filled_blend(32, 32)
+    compare("triangle_filled_blend", c10, m10.read_pixels(), m10.gpu_frame_complete)
+
+    val c11 = cpu_degenerate(32, 32)
+    var m11 = metal_degenerate(32, 32)
+    compare("degenerate_dims", c11, m11.read_pixels(), m11.gpu_frame_complete)
+    assert_uniform("degenerate_dims_cpu_unchanged", c11, DEGENERATE_CLEAR)
+    assert_uniform("degenerate_dims_metal_unchanged", m11.read_pixels(), DEGENERATE_CLEAR)
+
+    print("SCOPE: asserts clear,rect_filled,rect_outline,gradient,line,circle(+filled),rounded_rect,rounded_rect_outline,triangle,circle_filled_blend,triangle_filled_blend,degenerate_dims (all bit-exact CPU vs Metal GPU)")
     if _failures == 0:
         print("PARITY: pass")
     else:
