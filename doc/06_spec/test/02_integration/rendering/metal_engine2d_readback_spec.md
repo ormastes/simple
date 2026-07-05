@@ -119,7 +119,7 @@ else:
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/rendering/metal_engine2d_readback_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

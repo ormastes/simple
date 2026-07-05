@@ -14,6 +14,14 @@
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
 #endif
+/* On Darwin, _POSIX_C_SOURCE/_XOPEN_SOURCE alone lock the SDK headers into
+ * strict-POSIX mode at the FIRST system include (runtime.h -> <stdint.h>),
+ * hiding NSIG, _SC_NPROCESSORS_ONLN, alloca, etc. platform_macos.h defines
+ * _DARWIN_C_SOURCE too late (after runtime.h). Feature-test macros must
+ * precede every include, so define it here. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #endif
