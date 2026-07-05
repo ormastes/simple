@@ -30,7 +30,7 @@ This doc is the persistent home for the **deferred time-consuming task queue**
 | 4 | Test rigor (normal/robustness/stress/opt) | **FAIL** (for A) | Robustness breadth strong: **2209** `*_spec.spl` carry negative/robustness tokens (reject/invalid/out-of-range/fail-loud). But: opt-soundness sweep is scaffold-only and the reference gate `scratchpad/redeploy_gate.sh` is **not in-tree** (ephemeral); no sanitizer matrix (C4); no differential fuzzer (C3); seed codegen still miscompiles enum handles (wall). | A miscompilation is auto-FAIL per skill rules; full differential sweep missing. Deployed pure-Simple `bin/simple` passes known repros, so product robustness is strong. | Robustness supports D/auto-A; opt-soundness blocks A. |
 | 5 | Determinism / reproducibility | **PASS** | `238d86c1dc4` deterministic entry-shim (per-PID dir + fixed `simple_entry.c` basename); build-twice sha256 mechanism-proven. | Reproducibility gate not yet CI-wired across all targets. | PASS. |
 | 6 | Formal verification (DO-333) | **PARTIAL** | 27 Lake projects under `src/verification/`; `scripts/check/check-lean-proofs.shs` (zero `sorry`/`admit`/axiom gate via `TRUST_RE`); `scripts/rtl/check-rvfi-formal-readiness.shs`. | Codegen semantic-preservation (CompCert-style) or per-compile translation validation unproven. | Seed of a DO-333 case, not full. |
-| 7 | Tool qualification (the compiler) | **BLOCKED** | 3-stage bootstrap fixpoint (stage2==stage3) = partial self-consistency only. No ACATS/GCC-torture qualified validation suite (C7). Stage4 tag/box wall = open miscompilation (`codegen/instr/mod.rs:1305`, seed cranelift `BoxInt`). | Fix wall -> qualified validation suite -> TQL-1 / TCL3 case. | FAIL/BLOCKED. |
+| 7 | Tool qualification (the compiler) | **BLOCKED** | 3-stage bootstrap fixpoint (stage2==stage3) = partial self-consistency only. No ACATS/GCC-torture qualified validation suite (C7). Seed-built stage4 miscompiles the ANY-erased `Dict<text,Value>`/enum-payload channel (seed cranelift only; see `redeploy_selfhost_plan.md`). | Qualified validation suite runnable NOW on the clean `bin/simple`; the seed wall blocks only seed-built stage4, not the pure-Simple product. | FAIL/BLOCKED on corpus, not on the backend. |
 
 ## Overall nearest-achievable grade (today)
 
@@ -55,14 +55,21 @@ stage4 wall.
    absent or scaffold-only.
 6. **Codegen semantic-preservation proof** (Phase 6).
 
-## Root ordering constraint
+## Root ordering constraint (CORRECTED 2026-07-05)
 
-The **stage4 tag/box wall** (seed cranelift `BoxInt` mangles enum heap-handles through
-ANY-erased channels — `codegen/instr/mod.rs:1305`) is the root certification blocker:
-a miscompiling backend fails Phase-4 (optimization-soundness) and Phase-7 (tool
-qualification) **by construction**. Fix the wall first; then coverage/fuzz/sanitizer
-evidence becomes trustworthy. Pure-Simple codegen is already clean (deployed `bin/simple`
-passes all soundness repros) — the wall is seed-specific.
+The stage4 wall is **seed-cranelift-only** (mis-lowers the ANY-erased `Dict<text,Value>`/
+enum-payload channel — see `redeploy_selfhost_plan.md`; the "BoxInt" and "by-name
+struct-registry collision" hypotheses were both falsified this session). The pure-Simple
+codegen used by deployed `bin/simple` is **clean** and passes all soundness repros.
+
+**Therefore the wall does NOT block cert-evidence gathering.** MC/DC instrumentation
+(C1), optimization-soundness differential (C2), and the tool-qualification validation
+suite (C7) are all **runnable NOW on the clean `bin/simple`** — the differential's
+interpret-vs-compiled oracle validates the actual pure-Simple product. The wall blocks
+only (a) redeploying the ~130 frozen source fixes via a **seed-built** stage4 (deferred —
+use the pure-Simple self-host path in `redeploy_selfhost_plan.md`) and (b) tool
+qualification of the *seed* specifically. Do the flight-level evidence work on
+`bin/simple` first; treat redeploy as an independent deferred track.
 
 ## Deferred task queue (time-consuming — run detached / cron)
 
