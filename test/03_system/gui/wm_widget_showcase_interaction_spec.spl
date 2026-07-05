@@ -9,7 +9,7 @@ the app fails closed when launched outside a GUI environment.
 # @tag: system, gui, wm, event, taskbar, environment
 
 use std.spec.*
-use std.io_runtime.{file_read, process_run_timeout}
+use std.io_runtime.{file_read}
 use app.io.mod.{process_spawn_async, process_kill, file_exists, file_read_text, file_write, file_read_bytes, dir_create_all, getpid, time_now_unix_micros, thread_sleep}
 use common.window_protocol.geometry.{Size}
 use common.ui.wm_app_process_contract.{
@@ -78,7 +78,7 @@ describe "WM showcase live wrapper source contract":
     it "routes real Winit mouse events into the shared host compositor":
         val s = src()
         expect(s).to_contain("fn apply_wm_input")
-        expect(s).to_contain("winit_poll_input(lp)")
+        expect(s).to_contain("winit_wait_input(lp, wait_ms)")
         expect(s).to_contain("host_compositor_pointer_move")
         expect(s).to_contain("host_compositor_left_button_at")
         expect(s).to_contain("input.click_buttons")
@@ -122,6 +122,7 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("showcase_source_path")
         expect(s).to_contain("[\"run\", showcase_source_path]")
         expect(s).to_contain("wm_widget_showcase_client_env")
+        expect(s).to_contain("SHOWCASE_PPM_SCALE")
         expect(s).to_contain("process_kill(child_pid)")
 
     # codex-system-test
@@ -136,6 +137,10 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("win.y + 28")
         expect(s).to_contain("file_write")
         expect(s).to_contain("child_pointer_down")
+        expect(s).to_contain("child_drag_forwarding")
+        expect(s).to_contain("child_needs_press_stream")
+        expect(s).to_contain("x >= 134 and x < 199")
+        expect(s).to_contain("elif not pressed")
 
     # codex-system-test
     it "keeps taskbar and window chrome events on the host compositor path":
@@ -152,22 +157,23 @@ describe "WM showcase live wrapper source contract":
         expect(s.contains("fn widget_button")).to_equal(false)
         expect(s.contains("fn widget_checks")).to_equal(false)
         expect(s.contains("fn draw_showcase_content")).to_equal(false)
-        expect(s).to_contain("decode_ppm_to_argb")
-        expect(s).to_contain("rt_winit_buffer_blit_pixels")
+        expect(s).to_contain("rt_winit_buffer_blit_ppm_file")
         expect(s).to_contain("rt_winit_buffer_draw_text")
         expect(s).to_contain("rt_winit_buffer_present")
         expect(s).to_contain("WmLoopState")
         expect(s).to_contain("if fx == 0 and fy == 0")
         expect(s).to_contain("was_dragging")
         expect(s).to_contain("child_refresh_pending")
-        expect(s).to_contain("sleep_ms(120)")
+        expect(s).to_contain("child_refresh_deadline")
+        expect(s).to_contain("val wait_ms = if state.child_refresh_pending: 20 else: 80")
+        expect(s).to_contain("state.dirty = false")
 
     it "keeps native and WM-client modes in the same showcase source file":
         val s = showcase_src()
         expect(s).to_contain("fn build_frame")
         expect(s).to_contain("fn run_wm_client")
         expect(s).to_contain("wm_app_mode_is_client")
-        expect(s).to_contain("wm_widget_showcase_bridge_request")
+        expect(s).to_contain("wm_widget_showcase_bridge_request_sized")
         expect(s).to_contain("winit_window_new")
 
     # codex-system-test
@@ -177,25 +183,40 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("ShowcaseState")
         expect(s).to_contain("button_count")
         expect(s).to_contain("button_pressed")
+        expect(s).to_contain("checkbox_on")
+        expect(s).to_contain("switch_on")
         expect(s).to_contain("slider_value")
         expect(s).to_contain("last_event_seq")
         expect(s).to_contain("hit_rect(x, y, 12, 56, 60, 18)")
+        expect(s).to_contain("hit_rect(x, y, 268, 58, 120, 22)")
+        expect(s).to_contain("hit_rect(x, y, 12, 124, 78, 18)")
         expect(s).to_contain("kind == \"up\"")
         expect(s).to_contain("hit_rect(x, y, 268, 186, 130, 28)")
         expect(s).to_contain("slider_dragging")
+        expect(s).to_contain("write_wm_state")
+        expect(s).to_contain("button_count={state.button_count}")
+        expect(s).to_contain("SoftwareBackend")
+        expect(s).to_contain("frame_scale")
+        expect(s).to_contain("ev.x * coord_scale")
+        expect(s).to_contain("showcase_state_same")
+        expect(s).to_contain("coord_scale > 1")
 
     # codex-system-test
     it "refreshes child frames when bridge sequence or progress animation advances":
         val wm = src()
         expect(wm).to_contain("last_frame_seq")
         expect(wm).to_contain("req.frame_seq_path")
-        expect(wm).to_contain("load_child_frame(frame_path)")
-        expect(wm).to_contain("decode_ppm_to_argb")
+        expect(wm).to_contain("rt_winit_buffer_blit_ppm_file")
+        expect(wm).to_contain("state.dirty = true")
         expect(wm).to_contain("child_frame_refresh")
+        expect(wm).to_contain("child_frame_refresh_timeout")
+        expect(wm).to_contain("child_frame_decode_timeout")
+        expect(wm).to_contain("state.child_refresh_deadline = 0")
+        expect(wm).to_contain("write_child_pointer_event(child_event_path, state.child_event_seq, \"tick\"")
         val child = showcase_src()
         expect(child).to_contain("frame_seq")
         expect(child).to_contain("progress_value")
-        expect(child).to_contain("time_now_unix_micros")
+        expect(child).to_contain("kind == \"tick\"")
         expect(child).to_contain("build_frame(state)")
         expect(child).to_contain("file_write_bytes(frame_path")
         expect(child).to_contain("wm_fs_bridge_encode")
@@ -271,17 +292,13 @@ describe "WM showcase compositor event system":
 
 describe "WM showcase environment behavior":
 
-    it "fails closed outside a GUI environment before creating a host window":
-        val result = process_run_timeout("bin/simple", ["run", ENTRY], 30000)
-        expect(result.2).to_equal(2)
-        expect(result.0).to_contain("[wm-showcase] error=no-gui-requested")
-
     it "keeps the no-GUI gate before winit_loop_new in source order":
         val s = src()
         val gate_pos = s.index_of("SIMPLE_GUI")
         val loop_pos = s.index_of("winit_loop_new()")
         expect(gate_pos >= 0).to_equal(true)
         expect(loop_pos > gate_pos).to_equal(true)
+        expect(s).to_contain("[wm-showcase] error=no-gui-requested")
 
     it "spawns the showcase source in WM-client mode, receives bridge/frame files, and can kill it":
         dir_create_all("build/tmp")

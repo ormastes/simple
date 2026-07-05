@@ -65,14 +65,22 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
         "rt_winit_event_loop_wait_events" => {
             let event_loop_id = get_i64(args, 0, name)?;
             let timeout_ms = get_i64(args, 1, name)?;
+            #[cfg(target_os = "macos")]
+            macos_pump(event_loop_id);
             let loops = EVENT_LOOPS.lock();
             if let Some(handle) = loops.get(&event_loop_id) {
+                let timeout = std::time::Duration::from_millis(timeout_ms.max(0) as u64);
                 match handle
                     .event_rx
-                    .recv_timeout(std::time::Duration::from_millis(timeout_ms.max(0) as u64))
+                    .recv_timeout(timeout)
                 {
                     Ok(event) => Ok(int_value(event_to_handle(event))),
-                    Err(_) => Ok(int_value(0)),
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => Ok(int_value(0)),
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                        #[cfg(target_os = "macos")]
+                        std::thread::sleep(timeout);
+                        Ok(int_value(0))
+                    }
                 }
             } else {
                 set_last_error(format!("invalid event loop handle: {event_loop_id}"));

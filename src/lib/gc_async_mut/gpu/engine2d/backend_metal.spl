@@ -8,7 +8,7 @@ use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback,
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult}
 use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
-use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_u32s_from_ptr}
+use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_u32s_from_ptr, metal_write_u32s_to_ptr}
 use std.common.string_core.{char_from_code}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.gc_async_mut.env.platform.{is_macos}
@@ -557,11 +557,24 @@ impl MetalBackend:
         val host = metal_host_alloc(byte_size)
         if host == 0:
             return false
-        var i: i64 = 0
-        while i < total_pixels:
-            val v = pixels[i as i32] as i64
-            metal_host_write_i32(host, i * 4, v)
-            i = i + 1
+        # One-call pack: copy the whole [u32] block into the host buffer
+        # Rust-side. The per-pixel metal_host_write_i32 loop below costs one
+        # interpreted FFI round-trip per pixel (~480K for one 800x600 frame —
+        # minutes of pure dispatch overhead). Gated on the same
+        # SIMPLE_ONE_CALL_READBACK "modern one-call marshalling runtime" signal
+        # as read_pixels_gpu_only, since rt_write_u32s_to_raw is a hard error
+        # on runtimes built before it existed.
+        if _metal_env_flag("SIMPLE_ONE_CALL_READBACK"):
+            val wrote = metal_write_u32s_to_ptr(host, pixels)
+            if wrote < total_pixels:
+                metal_host_free(host)
+                return false
+        else:
+            var i: i64 = 0
+            while i < total_pixels:
+                val v = pixels[i as i32] as i64
+                metal_host_write_i32(host, i * 4, v)
+                i = i + 1
         val ok = self._dispatch_metal_blit(x, y, w, h, host, byte_size)
         metal_host_free(host)
         ok

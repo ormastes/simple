@@ -775,6 +775,51 @@ pub fn rt_u32s_from_raw(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(arr))
 }
 
+/// Write a `[u32]` array into a raw host pointer as `count` little-endian u32
+/// values, in one call. Inverse of `rt_u32s_from_raw`: one-call argument
+/// marshalling for GPU framebuffer uploads (draw_image / blit packing).
+///
+/// Replaces the per-pixel `rt_ptr_write_i32` loop, which under the tree-walking
+/// interpreter costs one FFI round-trip per pixel (~480K calls for one 800x600
+/// frame — minutes of pure dispatch overhead). Here the whole array is copied
+/// natively.
+///
+/// `rt_write_u32s_to_raw(ptr: i64, arr: [u32]) -> i64` — returns the number of
+/// u32 values written, or 0 on error (null ptr / non-array arg). Each element
+/// is masked to its low 32 bits and stored little-endian, matching the byte
+/// layout the per-pixel `rt_ptr_write_i32(ptr, i*4, v)` loop produced.
+pub fn rt_write_u32s_to_raw(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = match args.first() {
+        Some(Value::Int(n)) => *n,
+        _ => return Ok(Value::Int(0)),
+    };
+    if ptr == 0 {
+        return Ok(Value::Int(0));
+    }
+    let items: &[Value] = match args.get(1) {
+        Some(Value::Array(arr)) => arr,
+        Some(Value::FrozenArray(arr)) => arr,
+        Some(Value::FixedSizeArray { data, .. }) => data,
+        _ => return Ok(Value::Int(0)),
+    };
+    let dst = ptr as usize as *mut u8;
+    let mut written: i64 = 0;
+    for (i, v) in items.iter().enumerate() {
+        let word: u32 = match v {
+            Value::Int(n) => (*n as u64 & 0xFFFF_FFFF) as u32,
+            Value::UInt { value, .. } => (*value & 0xFFFF_FFFF) as u32,
+            _ => 0,
+        };
+        let bytes = word.to_le_bytes();
+        unsafe {
+            let base = dst.add(i * 4);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), base, 4);
+        }
+        written += 1;
+    }
+    Ok(Value::Int(written))
+}
+
 /// Write bytes to file
 ///
 /// Handles both `Value::Int(i)` (plain integer byte) and

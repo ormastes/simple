@@ -119,6 +119,7 @@ pub mod qmp_socket;
 pub mod host_wm_bridge;
 pub mod host_gpu_lane;
 pub mod enum_sffi;
+pub mod css_scan;
 
 // Import parent interpreter types
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -272,6 +273,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("sffi_regex_replace", regex::replace);
     insert_simple!("sffi_regex_split_n", regex::split_n);
     insert_simple!("sffi_regex_split", regex::split);
+
+    insert_simple!("rt_css_scan_rule_bounds", css_scan::scan_rule_bounds);
     insert_simple!("floor", math::floor);
     insert_simple!("format_bytes", memory::format_bytes);
     insert_simple!("input", io::input::input);
@@ -589,6 +592,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_bytes_alloc", file_io::rt_bytes_alloc);
     insert_simple!("rt_bytes_from_raw", file_io::rt_bytes_from_raw);
     insert_simple!("rt_u32s_from_raw", file_io::rt_u32s_from_raw);
+    insert_simple!("rt_write_u32s_to_raw", file_io::rt_write_u32s_to_raw);
     insert_simple!("rt_bytes_to_text", conversion::rt_bytes_to_text_fn);
     insert_simple!("rt_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
     insert_simple!("rt_bytes_u64_le_at", sffi_array::rt_bytes_u64_le_at_fn);

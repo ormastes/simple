@@ -3662,16 +3662,6 @@ fn css_bytes_match_close(cb: [i64], n: i32, open: i32) -> i32:
         i = i + 1
     -1
 
-# Byte index of the first non-whitespace char in [start, end); -1 if all blank.
-fn css_bytes_first_non_ws(cb: [i64], start: i32, end: i32) -> i32:
-    var i = start
-    while i < end:
-        val c = cb[i]
-        if c != 32 and c != 9 and c != 10 and c != 13:
-            return i
-        i = i + 1
-    -1
-
 # True if cb[start, end) trimmed of ASCII whitespace equals `target`.
 fn css_bytes_trimmed_eq(cb: [i64], start: i32, end: i32, target: text) -> bool:
     var a = start
@@ -3690,64 +3680,6 @@ fn css_bytes_trimmed_eq(cb: [i64], start: i32, end: i32, target: text) -> bool:
             return false
         i = i + 1
     true
-
-fn count_css_rules(html: text) -> i32:
-    var count = 0
-    var pos = 0
-    var guard = 0
-    while guard < 1000:
-        guard = guard + 1
-        val sp = find_from(html, "<style", pos)
-        if sp < 0:
-            break
-        val open = find_from(html, ">", sp)
-        if open < 0:
-            break
-        val close = find_from(html, "</style", open)
-        if close < 0:
-            break
-        val css = html.substring(open + 1, close)
-        val cb = css.bytes()
-        val cbn = cb.len().to_i32()
-        # Single linear pass with a brace-depth tracker (O(n)). A depth-0 non-@
-        # block is a rule; a depth-0 @-block is a wrapper whose depth-1 children
-        # are rules; deeper braces belong to a rule body. Mirrors the emission
-        # in extract_css so counts stay in lockstep.
-        var cp = 0
-        var depth = 0
-        var sel0 = 0
-        var sel1 = 0
-        var cur_at = false
-        while cp < cbn:
-            val c = cb[cp]
-            if c == 123:
-                if depth == 0:
-                    val ss = css_bytes_first_non_ws(cb, sel0, cp)
-                    cur_at = ss >= 0 and cb[ss] == 64
-                    if (not cur_at) and ss >= 0:
-                        count = count + 1
-                    depth = 1
-                    sel1 = cp + 1
-                elif depth == 1:
-                    if cur_at:
-                        val ss1 = css_bytes_first_non_ws(cb, sel1, cp)
-                        if ss1 >= 0:
-                            count = count + 1
-                    depth = 2
-                else:
-                    depth = depth + 1
-            elif c == 125:
-                if depth == 1:
-                    depth = 0
-                    sel0 = cp + 1
-                elif depth == 2:
-                    depth = 1
-                    sel1 = cp + 1
-                elif depth > 0:
-                    depth = depth - 1
-            cp = cp + 1
-        pos = close + 1
-    count
 
 # count chars (non-continuation bytes) in cb[from..to)
 fn _cb_chars_between(cb: [i64], from: i32, to: i32) -> i32:
@@ -3919,6 +3851,16 @@ fn extract_css(html: text) -> Rules:
     # Legacy entry: media blocks all apply (no viewport context).
     extract_css_vw(html, -1)
 
+# Native brace-depth rule-boundary scan — see css_scan.rs (interpreter_extern)
+# for the full rationale and algorithm. Returns 3 parallel text arrays in
+# document order: [sel_text, decl_text, wrapper_prelude] — already trimmed
+# and sliced natively (NOT offsets: `text.substring()` re-collects the whole
+# receiver string per call under this interpreter, so returning offsets and
+# slicing ~1800 times in Simple against the original ~292KB CSS text would
+# reintroduce the same O(total_css_len * rule_count) cost this extern exists
+# to eliminate). wrapper_prelude is "" for unconditional rules.
+extern fn rt_css_scan_rule_bounds(css: text) -> [[text]]
+
 fn extract_css_vw(html: text, viewport_w: i32) -> Rules:
     # First pass: collect CSS custom properties from all :root blocks
     var custom_prop_parts: [text] = [""; 100]
@@ -3943,10 +3885,8 @@ fn extract_css_vw(html: text, viewport_w: i32) -> Rules:
             custom_prop_count = custom_prop_count + 1
         pre_pos = pre_close + 1
     val custom_props = if custom_prop_count == 0: "" else: custom_prop_parts.join("")
-    val rule_count = count_css_rules(html)
-    var group_parts: [[[text]]] = [[[]]; rule_count]
-    var decls: [text] = [""; rule_count]
-    var rule_i = 0
+    var group_parts: [[[text]]] = []
+    var decls: [text] = []
     var pos = 0
     var guard = 0
     while guard < 1000:
@@ -3962,100 +3902,46 @@ fn extract_css_vw(html: text, viewport_w: i32) -> Rules:
             break
         val css_raw = html.substring(open + 1, close)
         val css = _css_resolve_vars(css_raw, custom_props)
-        # split into "selector { decls }" chunks. Structural scanning (brace find,
-        # matching-close, selector-emptiness) runs on a one-time ASCII byte array
-        # so it is O(n); only the matched selector/decl slices are materialized.
-        # @-wrapper blocks (@layer, @supports, @media) are skipped at the outer
-        # brace level — their inner rules are parsed as if the wrapper were absent.
-        # Single linear pass with a brace-depth tracker (O(n)). Each rule's
-        # selector/decl slice is materialized only at its closing brace, so the
-        # sheet is traversed once. Emission order == document order, matching the
-        # cascade the previous nested-scan produced. Depth-0 non-@ blocks and the
-        # depth-1 children of a depth-0 @-wrapper are rules; deeper braces are a
-        # rule body.
-        val cb = css.bytes()
-        val cbn = cb.len().to_i32()
-        # cp walks BYTE positions (for the byte helpers); chp mirrors it in
-        # CHAR positions because text.substring is char-indexed. A multi-byte
-        # char (e.g. content: '✓') would otherwise shift every slice
-        # after it, silently corrupting all later rules in the sheet.
-        # Continuation bytes (128..191) do not advance chp.
-        var cp = 0
-        var chp = 0
-        var depth = 0
-        var sel0 = 0
-        var sel0_ch = 0
-        var sel1 = 0
-        var sel1_ch = 0
-        var cur_at = false
-        var cur_at_active = true
-        var p0_sel_ch = 0
-        var p0_brace_ch = 0
-        var p0_emit = false
-        var p1_sel_ch = 0
-        var p1_brace_ch = 0
-        var p1_emit = false
-        while cp < cbn:
-            val c = cb[cp]
-            if c == 123:
-                if depth == 0:
-                    val ss = css_bytes_first_non_ws(cb, sel0, cp)
-                    cur_at = ss >= 0 and cb[ss] == 64
-                    cur_at_active = true
-                    if cur_at:
-                        # @media wrappers apply only when their condition holds
-                        # for the viewport; other @-wrappers (@layer, @supports)
-                        # keep emitting their children unconditionally.
-                        # (sel0..ss skips only ASCII whitespace, so the char
-                        # offset advances by the same amount.)
-                        val at_sel = css.substring(sel0_ch + (ss - sel0), chp).trim()
-                        if at_sel.lower().starts_with("@media"):
-                            cur_at_active = _media_prelude_applies(at_sel, viewport_w)
-                    p0_sel_ch = sel0_ch
-                    p0_brace_ch = chp
-                    p0_emit = (not cur_at) and ss >= 0
-                    depth = 1
-                    sel1 = cp + 1
-                    sel1_ch = chp + 1
-                elif depth == 1:
-                    if cur_at:
-                        val ss1 = css_bytes_first_non_ws(cb, sel1, cp)
-                        p1_sel_ch = sel1_ch
-                        p1_brace_ch = chp
-                        p1_emit = ss1 >= 0 and cur_at_active
-                    depth = 2
-                else:
-                    depth = depth + 1
-            elif c == 125:
-                if depth == 1:
-                    if p0_emit and rule_i < rule_count:
-                        val sel = css.substring(p0_sel_ch, p0_brace_ch).trim()
-                        val decl = css.substring(p0_brace_ch + 1, chp).trim()
-                        val rule_groups = split_selector_groups(sel)
-                        group_parts[rule_i] = split_selector_group_parts(rule_groups)
-                        decls[rule_i] = decl
-                        rule_i = rule_i + 1
-                    p0_emit = false
-                    depth = 0
-                    sel0 = cp + 1
-                    sel0_ch = chp + 1
-                elif depth == 2:
-                    if cur_at and p1_emit and rule_i < rule_count:
-                        val inner_sel = css.substring(p1_sel_ch, p1_brace_ch).trim()
-                        val inner_decl = css.substring(p1_brace_ch + 1, chp).trim()
-                        val rule_groups = split_selector_groups(inner_sel)
-                        group_parts[rule_i] = split_selector_group_parts(rule_groups)
-                        decls[rule_i] = inner_decl
-                        rule_i = rule_i + 1
-                    p1_emit = false
-                    depth = 1
-                    sel1 = cp + 1
-                    sel1_ch = chp + 1
-                elif depth > 0:
-                    depth = depth - 1
-            if c < 128 or c >= 192:
-                chp = chp + 1
-            cp = cp + 1
+        # Rule-boundary scan (brace-depth bookkeeping to find each
+        # "selector { decls }" chunk's char offsets) runs natively via
+        # rt_css_scan_rule_bounds instead of an interpreted per-character
+        # Simple loop. Measured directly: the old interpreted byte-loop cost
+        # ~300us PER CHARACTER under the tree-walking interpreter (~86s for
+        # count_css_rules alone on a ~292KB real theme stylesheet, doubled by
+        # an equivalent second pass here), which is why a realistic theme
+        # CSS payload hung the browser's first frame for minutes. The native
+        # scan is a mechanical, faithful port of the exact same brace-depth
+        # algorithm (see css_scan.rs doc comment) — no CSS semantics moved:
+        # selector-group splitting, @media condition evaluation, and CSS
+        # variable substitution all remain in Simple, unchanged, below.
+        val bounds = rt_css_scan_rule_bounds(css)
+        val b_sel_text = bounds[0]
+        val b_decl_text = bounds[1]
+        val b_wrapper = bounds[2]
+        val candidate_count = b_sel_text.len()
+        var block_group_parts: [[[text]]] = [[[]]; candidate_count]
+        var block_decls: [text] = [""; candidate_count]
+        var out_i = 0
+        var bi = 0
+        while bi < candidate_count:
+            val wrapper_prelude: text = b_wrapper[bi]
+            var include = true
+            if wrapper_prelude.len() > 0 and wrapper_prelude.lower().starts_with("@media"):
+                # @media wrappers apply only when their condition holds for
+                # the viewport; other @-wrappers (@layer, @supports) keep
+                # emitting their children unconditionally (wrapper_prelude
+                # not starting with "@media" falls through with include=true).
+                include = _media_prelude_applies(wrapper_prelude, viewport_w)
+            if include:
+                val sel: text = b_sel_text[bi]
+                val decl: text = b_decl_text[bi]
+                val rule_groups = split_selector_groups(sel)
+                block_group_parts[out_i] = split_selector_group_parts(rule_groups)
+                block_decls[out_i] = decl
+                out_i = out_i + 1
+            bi = bi + 1
+        group_parts = group_parts + group_parts_list_prefix(block_group_parts, out_i)
+        decls = decls + text_list_prefix(block_decls, out_i)
         pos = close + 1
     Rules(group_parts: group_parts, decls: decls)
 
@@ -4706,6 +4592,14 @@ fn text_key_index_count(keys: [text], key: text, key_count: i32) -> i32:
 
 fn text_list_prefix(values: [text], count: i32) -> [text]:
     var out: [text] = [""; count]
+    var i = 0
+    while i < count:
+        out[i] = values[i]
+        i = i + 1
+    out
+
+fn group_parts_list_prefix(values: [[[text]]], count: i32) -> [[[text]]]:
+    var out: [[[text]]] = [[[]]; count]
     var i = 0
     while i < count:
         out[i] = values[i]

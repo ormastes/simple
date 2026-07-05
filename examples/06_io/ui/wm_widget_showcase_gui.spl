@@ -6,10 +6,9 @@
 #   SIMPLE_GUI_RUN_SKIP_NUDGE=1 scripts/gui/macos-gui-run.shs \
 #     examples/06_io/ui/wm_widget_showcase_gui.spl
 
-use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
+use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input, winit_wait_input}
+use std.io_runtime.{env_get, file_exists, file_read, file_write, dir_create_all, getpid, time_now_unix_micros}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
-use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
-use std.io_runtime.{env_get, file_exists, file_read, file_write, file_read_bytes, dir_create_all, getpid, time_now_unix_micros}
 use app.io.mod.{process_spawn_async, process_spawn_async_env, process_kill, host_os, cwd}
 use common.window_protocol.geometry.{Size}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
@@ -20,6 +19,7 @@ use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
 extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
 extern fn rt_winit_buffer_fill_rect(buf: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
 extern fn rt_winit_buffer_blit_pixels(buf: i64, x: i64, y: i64, w: i64, h: i64, pixels: [i64]) -> bool
+extern fn rt_winit_buffer_blit_ppm_file(buf: i64, x: i64, y: i64, path: text) -> bool
 extern fn rt_winit_buffer_draw_text(buf: i64, x: i64, y: i64, text_val: text, fg: i64, bg: i64) -> bool
 extern fn rt_winit_buffer_present(win: i64, buf: i64) -> bool
 extern fn rt_winit_buffer_free(buf: i64) -> bool
@@ -34,7 +34,10 @@ struct WmLoopState:
     mouse_x: i32
     mouse_y: i32
     child_pointer_down: bool
+    child_drag_forwarding: bool
     child_event_seq: i64
+    child_refresh_pending: bool
+    child_refresh_deadline: i64
     dirty: bool
     running: bool
 
@@ -44,26 +47,17 @@ fn argb(color: u32) -> i64:
 fn rgb(color: u32) -> i64:
     color.to_i64() & 0xFFFFFF
 
-fn pack_frame(src: [u32]) -> [i64]:
-    var out: [i64] = [0; src.len()]
-    var i = 0
-    while i < src.len():
-        out[i] = rgb(src[i])
-        i = i + 1
-    out
-
-fn load_child_frame(frame_path: text) -> (bool, i32, i32, [i64]):
-    val frame_bytes = file_read_bytes(frame_path)
-    val decoded = decode_ppm_to_argb(frame_bytes)
-    if decoded.is_err():
-        return (false, 0, 0, [])
-    val frame = decoded.unwrap()
-    (true, frame.width, frame.height, pack_frame(frame.pixels))
+fn sleep_ms(ms: i64):
+    thread_sleep(ms)
 
 fn read_frame_seq(seq_path: text) -> i64:
     if seq_path == "" or not file_exists(seq_path):
         return 0
     file_read(seq_path).trim().to_i64() ?? 0
+
+fn write_wm_trace(trace_path: text, phase: text):
+    if trace_path != "":
+        file_write(trace_path, "phase={phase}\n")
 
 fn should_close(input: WinitInput) -> bool:
     if input.close:
@@ -80,7 +74,7 @@ fn wait_for_bridge(path: text, timeout_ms: i64) -> text:
             val body = file_read(path)
             if body.contains("kind=create_window"):
                 return body
-        thread_sleep(50)
+        sleep_ms(50)
     ""
 
 fn path_join(root: text, rel: text) -> text:
@@ -133,8 +127,9 @@ fn draw_taskbar_buffer(buf: i64, comp: HostCompositor):
             fill_rect_buffer(buf, ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
         i = i + 1
 
-fn compose_buffer(buf: i64, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_pixels: [i64]):
+fn compose_buffer(buf: i64, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_path: text) -> bool:
     val theme = wm_chrome_theme()
+    var frame_ok = true
     fill_rect_buffer(buf, 0, 0, W, H, theme.compositor_bg)
     fill_rect_buffer(buf, 0, 0, W, 38, theme.command_lane)
     draw_text_buffer(buf, 14, 12, "Simple WM", theme.text_primary, theme.command_lane)
@@ -152,16 +147,22 @@ fn compose_buffer(buf: i64, comp: HostCompositor, frame_w: i32, frame_h: i32, fr
             draw_text_buffer(buf, win.x + win.w - 17, win.y + 5, "X", theme.text_primary, theme.close_button)
             val cx = win.x + 4
             val cy = win.y + 28
-            rt_winit_buffer_blit_pixels(buf, cx.to_i64(), cy.to_i64(), frame_w.to_i64(), frame_h.to_i64(), frame_pixels)
+            if not rt_winit_buffer_blit_ppm_file(buf, cx.to_i64(), cy.to_i64(), frame_path):
+                frame_ok = false
+                draw_text_buffer(buf, cx + 8, cy + 8, "frame pending", theme.text_primary, theme.host_window_body)
         i = i + 1
     draw_taskbar_buffer(buf, comp)
     fill_rect_buffer(buf, 0, 0, W, 3, LOCATOR)
     fill_rect_buffer(buf, 0, H - 3, W, 3, LOCATOR)
     fill_rect_buffer(buf, 0, 0, 3, H, LOCATOR)
     fill_rect_buffer(buf, W - 3, 0, 3, H, LOCATOR)
+    frame_ok
 
-fn render_and_present(win: WinitWindow, buf: i64, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_pixels: [i64], state: text) -> bool:
-    compose_buffer(buf, comp, frame_w, frame_h, frame_pixels)
+fn render_and_present(win: WinitWindow, buf: i64, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_path: text, state: text) -> bool:
+    val frame_ok = compose_buffer(buf, comp, frame_w, frame_h, frame_path)
+    if not frame_ok:
+        print "[wm-showcase] present state={state} child_frame_blit_failed"
+        return false
     val ok = rt_winit_buffer_present(win.handle, buf)
     if not ok:
         print "[wm-showcase] present state={state} FAIL buffer_present"
@@ -194,12 +195,19 @@ fn write_child_pointer_event(event_path: text, seq: i64, kind: text, x: i32, y: 
     print "[wm-showcase] child_event_write_failed path={event_path}"
     seq
 
+fn child_needs_press_stream(x: i32, y: i32) -> bool:
+    (x >= 268 and x < 398 and y >= 186 and y < 214) or
+    (x >= 134 and x < 199 and y >= 93 and y < 107)
+
 fn apply_wm_input(state: WmLoopState, input: WinitInput, event_path: text, frame_w: i32, frame_h: i32) -> WmLoopState:
     var out = state.comp
     var mx = state.mouse_x
     var my = state.mouse_y
     var child_down = state.child_pointer_down
+    var child_drag_forwarding = state.child_drag_forwarding
     var child_seq = state.child_event_seq
+    var child_refresh_pending = state.child_refresh_pending
+    var child_refresh_deadline = state.child_refresh_deadline
     var dirty = false
     var running = state.running
     if should_close(input):
@@ -210,10 +218,14 @@ fn apply_wm_input(state: WmLoopState, input: WinitInput, event_path: text, frame
         val was_dragging = state.comp.dragging or state.comp.resizing
         out = host_compositor_pointer_move(out, mx, my)
         dirty = was_dragging or out.dragging or out.resizing
-        if child_down:
+        if child_down and child_drag_forwarding:
             val loc = child_local_at(out, mx, my, frame_w, frame_h, false)
             if loc.0:
+                val before_move_seq = child_seq
                 child_seq = write_child_pointer_event(event_path, child_seq, "move", loc.1, loc.2, 0, true)
+                if child_seq > before_move_seq:
+                    child_refresh_pending = true
+                    child_refresh_deadline = 0
     var ci = 0
     while ci < input.click_buttons.len():
         val btn = input.click_buttons[ci]
@@ -230,20 +242,31 @@ fn apply_wm_input(state: WmLoopState, input: WinitInput, event_path: text, frame
             if pressed:
                 val loc_down = child_local_at(out, fx, fy, frame_w, frame_h, true)
                 if loc_down.0:
-                    child_seq = write_child_pointer_event(event_path, child_seq, "down", loc_down.1, loc_down.2, btn, true)
+                    child_drag_forwarding = child_needs_press_stream(loc_down.1, loc_down.2)
+                    if child_drag_forwarding:
+                        val before_down_seq = child_seq
+                        child_seq = write_child_pointer_event(event_path, child_seq, "down", loc_down.1, loc_down.2, btn, true)
+                        if child_seq > before_down_seq:
+                            child_refresh_pending = true
+                            child_refresh_deadline = 0
                     child_down = true
-            elif child_down:
+            elif not pressed:
                 val loc_up = child_local_at(out, fx, fy, frame_w, frame_h, false)
                 if loc_up.0:
+                    val before_up_seq = child_seq
                     child_seq = write_child_pointer_event(event_path, child_seq, "up", loc_up.1, loc_up.2, btn, false)
+                    if child_seq > before_up_seq:
+                        child_refresh_pending = true
+                        child_refresh_deadline = 0
                 child_down = false
+                child_drag_forwarding = false
             out = host_compositor_left_button_at(out, pressed, fx, fy)
             dirty = true
             print "[wm-showcase] input left_button pressed={pressed} x={fx} y={fy} windows={out.windows.len()} dragging={out.dragging}"
         ci = ci + 1
     if out.windows.len() == 0:
         running = false
-    WmLoopState(comp: out, mouse_x: mx, mouse_y: my, child_pointer_down: child_down, child_event_seq: child_seq, dirty: dirty, running: running)
+    WmLoopState(comp: out, mouse_x: mx, mouse_y: my, child_pointer_down: child_down, child_drag_forwarding: child_drag_forwarding, child_event_seq: child_seq, child_refresh_pending: child_refresh_pending, child_refresh_deadline: child_refresh_deadline, dirty: dirty, running: running)
 
 fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -> i64:
     var env = wm_widget_showcase_client_env(bridge_path, frame_path)
@@ -252,7 +275,9 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
         env["SIMPLE_LIB"] = lib
     else:
         env["SIMPLE_LIB"] = path_join(repo_root, "src")
+    env["SHOWCASE_PPM_SCALE"] = "2"
     val simple_lib = env["SIMPLE_LIB"]
+    val showcase_scale = env["SHOWCASE_PPM_SCALE"]
     val simple_bin = path_join(repo_root, "bin/simple")
     val showcase_source_path = path_join(repo_root, WIDGET_SHOWCASE_APP_SOURCE)
     val event_path = wm_widget_showcase_event_path(frame_path)
@@ -266,6 +291,7 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
         "{WM_EVENT_FILE_ENV}={event_path}",
         "{WM_FRAME_SEQ_FILE_ENV}={seq_path}",
         "SIMPLE_WM_CLIENT_HOLD=1",
+        "SHOWCASE_PPM_SCALE={showcase_scale}",
         "SIMPLE_LIB={simple_lib}",
         simple_bin,
         "run",
@@ -292,44 +318,50 @@ fn main() -> i64:
     val stamp = "{getpid()}_{time_now_unix_micros()}"
     val bridge_path = path_join(tmp_root, "wm_widget_showcase_{stamp}.bridge")
     val frame_path = path_join(tmp_root, "wm_widget_showcase_{stamp}.ppm")
+    val trace_path = frame_path + ".trace"
     val event_path = wm_widget_showcase_event_path(frame_path)
     val seq_path = wm_widget_showcase_frame_seq_path(frame_path)
     val showcase_source_path = path_join(repo_root, WIDGET_SHOWCASE_APP_SOURCE)
+    write_wm_trace(trace_path, "start")
     print "[wm-showcase] repo_root={repo_root} child_source_fs={showcase_source_path}"
     val child_pid = launch_showcase_child(bridge_path, frame_path, repo_root)
     if child_pid <= 0:
         print "[wm-showcase] error=child-spawn-failed source={WIDGET_SHOWCASE_APP_SOURCE}"
         return 1
+    write_wm_trace(trace_path, "child_spawned")
 
     val bridge_body = wait_for_bridge(bridge_path, 120000)
     if bridge_body == "":
         print "[wm-showcase] error=child-bridge-timeout source={WIDGET_SHOWCASE_APP_SOURCE} pid={child_pid}"
         process_kill(child_pid)
         return 1
+    write_wm_trace(trace_path, "bridge_ready")
     val req = wm_fs_bridge_decode(bridge_body)
-    val loaded = load_child_frame(frame_path)
-    if not loaded.0:
-        print "[wm-showcase] error=child-frame-decode-failed path={frame_path}"
-        process_kill(child_pid)
-        return 1
-    var frame_w = loaded.1
-    var frame_h = loaded.2
-    var packed_frame = loaded.3
+    var frame_w = req.window_w - 8
+    var frame_h = req.window_h - 32
+    if frame_w <= 0:
+        frame_w = 1
+    if frame_h <= 0:
+        frame_h = 1
+    write_wm_trace(trace_path, "frame_ready")
     val child_event_path = if req.event_path != "": req.event_path else: event_path
     val child_seq_path = if req.frame_seq_path != "": req.frame_seq_path else: seq_path
     var last_frame_seq = read_frame_seq(child_seq_path)
 
+    write_wm_trace(trace_path, "before_loop_new")
     val lp = winit_loop_new()
     if not lp.is_valid:
         print "[wm-showcase] error=no-gui-runtime"
         process_kill(child_pid)
         return 1
+    write_wm_trace(trace_path, "after_loop_new")
     val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "Simple WM - Widget Showcase")
     if not win.is_valid:
         print "[wm-showcase] error=window-create-failed"
         winit_loop_free(lp)
         process_kill(child_pid)
         return 1
+    write_wm_trace(trace_path, "after_window_new")
     val buf = rt_winit_buffer_create(W.to_i64(), H.to_i64(), argb(wm_chrome_theme().compositor_bg))
     if buf <= 0:
         print "[wm-showcase] error=buffer-create-failed"
@@ -337,6 +369,7 @@ fn main() -> i64:
         winit_loop_free(lp)
         process_kill(child_pid)
         return 1
+    write_wm_trace(trace_path, "after_buffer_create")
 
     val backend = HeadlessHostCompositorBackend.new(W, H)
     var comp = HostCompositor.new(backend, Size.wh(W, H))
@@ -345,32 +378,52 @@ fn main() -> i64:
     if comp.windows.len() != 1:
         cleanup(child_pid, buf, win, lp)
         return 1
-    if not render_and_present(win, buf, comp, frame_w, frame_h, packed_frame, "launched"):
+    write_wm_trace(trace_path, "before_first_present")
+    if not render_and_present(win, buf, comp, frame_w, frame_h, frame_path, "launched"):
         cleanup(child_pid, buf, win, lp)
         return 1
+    write_wm_trace(trace_path, "loop_start")
 
-    var state = WmLoopState(comp: comp, mouse_x: 0, mouse_y: 0, child_pointer_down: false, child_event_seq: 0, dirty: false, running: true)
+    var state = WmLoopState(comp: comp, mouse_x: 0, mouse_y: 0, child_pointer_down: false, child_drag_forwarding: false, child_event_seq: 0, child_refresh_pending: false, child_refresh_deadline: 0, dirty: false, running: true)
+    var last_anim_tick = time_now_unix_micros()
     var frames = 0
     while state.running and frames < 2000000:
-        val input = winit_poll_input(lp)
+        val wait_ms = if state.child_refresh_pending: 20 else: 80
+        val input = winit_wait_input(lp, wait_ms)
         state = apply_wm_input(state, input, child_event_path, frame_w, frame_h)
-        val current_frame_seq = read_frame_seq(child_seq_path)
-        if current_frame_seq > last_frame_seq:
-            val refreshed = load_child_frame(frame_path)
-            if refreshed.0:
-                frame_w = refreshed.1
-                frame_h = refreshed.2
-                packed_frame = refreshed.3
-                last_frame_seq = current_frame_seq
-                state.dirty = true
-                print "[wm-showcase] child_frame_refresh seq={last_frame_seq} size={frame_w}x{frame_h}"
+        val now = time_now_unix_micros()
+        if state.child_refresh_pending and state.child_refresh_deadline == 0:
+            state.child_refresh_deadline = now + 250000
+        if not state.child_refresh_pending and now - last_anim_tick >= 1000000:
+            val before_tick_seq = state.child_event_seq
+            state.child_event_seq = write_child_pointer_event(child_event_path, state.child_event_seq, "tick", 0, 0, 0, false)
+            if state.child_event_seq > before_tick_seq:
+                state.child_refresh_pending = true
+                state.child_refresh_deadline = now + 250000
+                write_wm_trace(trace_path, "tick_sent:{state.child_event_seq}")
+            last_anim_tick = now
+        var current_frame_seq = last_frame_seq
+        if state.child_refresh_pending:
+            current_frame_seq = read_frame_seq(child_seq_path)
+            if current_frame_seq <= last_frame_seq:
+                if state.child_refresh_deadline > 0 and now > state.child_refresh_deadline:
+                    print "[wm-showcase] child_frame_refresh_timeout last_seq={last_frame_seq} event_seq={state.child_event_seq}"
+                    write_wm_trace(trace_path, "refresh_timeout:{state.child_event_seq}")
+                    state.child_refresh_pending = false
+                    state.child_refresh_deadline = 0
+        if state.child_refresh_pending and current_frame_seq > last_frame_seq:
+            last_frame_seq = current_frame_seq
+            state.dirty = true
+            state.child_refresh_pending = false
+            state.child_refresh_deadline = 0
+            write_wm_trace(trace_path, "frame_refresh:{last_frame_seq}")
+            print "[wm-showcase] child_frame_refresh seq={last_frame_seq} size={frame_w}x{frame_h}"
         if state.dirty:
-            if not render_and_present(win, buf, state.comp, frame_w, frame_h, packed_frame, "hold"):
+            if not render_and_present(win, buf, state.comp, frame_w, frame_h, frame_path, "hold"):
                 cleanup(child_pid, buf, win, lp)
                 return 1
-            thread_sleep(2)
-        else:
-            thread_sleep(24)
+            state.dirty = false
+            sleep_ms(16)
         frames = frames + 1
 
     cleanup(child_pid, buf, win, lp)
