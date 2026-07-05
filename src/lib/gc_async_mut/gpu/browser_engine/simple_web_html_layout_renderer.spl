@@ -3695,30 +3695,42 @@ fn _cb_chars_between(cb: [i64], from: i32, to: i32) -> i32:
 fn _css_collect_custom_props(css: text) -> text:
     # Collect --name: value pairs from :root { } blocks.
     # Returns a compact string of "--name:value\n" entries.
-    val cb = css.bytes()
-    val cbn = cb.len().to_i32()
-    var entries: [text] = [""; 200]
+    #
+    # `:root` blocks are few (theme + a handful of variants), so locate each
+    # one with the native substring search (`find_from`) instead of walking
+    # the whole ~336KB stylesheet one byte at a time in interpreted Simple —
+    # the byte-array walk cost ~6.6s per frame on a realistic theme sheet
+    # (measured), because each interpreted `cb[i]` element read over 336K
+    # entries is ~1us. Native search + a single small-body substring per
+    # `:root` block is O(occurrences), microseconds in practice. Semantics are
+    # preserved: a `:root` match counts only when the text between it and the
+    # opening brace is whitespace (a standalone `:root` selector, exactly what
+    # `css_bytes_trimmed_eq(..., ":root")` accepted before).
+    var entries: [text] = [""; 400]
     var entry_i = 0
     var pos = 0
-    var pos_ch = 0
     var guard = 0
-    while pos < cbn and guard < 200:
+    while guard < 200:
         guard = guard + 1
-        val brace = css_bytes_find(cb, cbn, 123, pos)
+        val rp = find_from(css, ":root", pos)
+        if rp < 0:
+            break
+        val brace = find_from(css, "{", rp + 5)
         if brace < 0:
             break
-        val close = css_bytes_match_close(cb, cbn, brace)
-        if close < 0:
-            break
-        # substring is char-indexed; brace/close are byte positions
-        val brace_ch = pos_ch + _cb_chars_between(cb, pos, brace)
-        val close_ch = brace_ch + _cb_chars_between(cb, brace, close)
-        if css_bytes_trimmed_eq(cb, pos, brace, ":root"):
-            val body = css.substring(brace_ch + 1, close_ch)
+        val between = css.substring(rp + 5, brace)
+        if between.trim() != "":
+            # `:root` was part of a larger selector (e.g. `:root.dark`); skip it.
+            pos = rp + 5
+        else:
+            val close = find_from(css, "}", brace)
+            if close < 0:
+                break
+            val body = css.substring(brace + 1, close)
             val body_len = body.len()
             var bp: i64 = 0
             var bg = 0
-            while bp < body_len and bg < 200:
+            while bp < body_len and bg < 400:
                 bg = bg + 1
                 val dd = find_from(body, "--", bp)
                 if dd < 0:
@@ -3736,8 +3748,7 @@ fn _css_collect_custom_props(css: text) -> text:
                     entries[entry_i] = name + ":" + prop_val + "\n"
                     entry_i = entry_i + 1
                 bp = if semi >= 0: semi + 1 else: body_len
-        pos = close + 1
-        pos_ch = close_ch + 1
+            pos = close + 1
     if entry_i == 0:
         return ""
     text_list_prefix(entries, entry_i).join("")
@@ -3851,15 +3862,70 @@ fn extract_css(html: text) -> Rules:
     # Legacy entry: media blocks all apply (no viewport context).
     extract_css_vw(html, -1)
 
-# Native brace-depth rule-boundary scan — see css_scan.rs (interpreter_extern)
-# for the full rationale and algorithm. Returns 3 parallel text arrays in
-# document order: [sel_text, decl_text, wrapper_prelude] — already trimmed
-# and sliced natively (NOT offsets: `text.substring()` re-collects the whole
-# receiver string per call under this interpreter, so returning offsets and
-# slicing ~1800 times in Simple against the original ~292KB CSS text would
-# reintroduce the same O(total_css_len * rule_count) cost this extern exists
-# to eliminate). wrapper_prelude is "" for unconditional rules.
-extern fn rt_css_scan_rule_bounds(css: text) -> [[text]]
+# Pure-Simple rule-boundary scanner. Returns 3 parallel text arrays in
+# document order: [sel_text, decl_text, wrapper_prelude] — trimmed selector /
+# declaration text per candidate rule; wrapper_prelude is "" for
+# unconditional rules or the "@media (...)" prelude for rules nested in a
+# depth-0 @-wrapper.
+#
+# It must NOT slice the ~336KB stylesheet with `css.substring()` / `css[a:b]`
+# per rule: under this interpreter both re-collect the ENTIRE receiver string
+# on every call (measured: ~0.7ms per call on a 262KB string → O(rules *
+# total_css_len), the multi-second/minute quadratic that hung the browser's
+# first frame). Instead it splits the sheet ONCE on "{" (native, O(n)), then
+# splits each small segment on "}" (native, O(segment)) and only ever slices
+# those small pieces — genuine O(total_css_len). A brace-depth stack tracks
+# @-wrappers so depth-1 rules carry their wrapper prelude, matching the
+# depth-0-rule / depth-1-child-of-@-wrapper emission the layout cascade
+# expects.
+fn _css_scan_rules_simple(css: text) -> [[text]]:
+    val cap = 6000
+    var sels: [text] = [""; cap]
+    var decls: [text] = [""; cap]
+    var wraps: [text] = [""; cap]
+    var out = 0
+    # Brace-depth stack of opener (selector / @-prelude) strings.
+    var stack: [text] = [""; 64]
+    var depth = 0
+    val parts = css.split("{")
+    val np = parts.len()
+    if np == 0:
+        return [text_list_prefix(sels, 0), text_list_prefix(decls, 0), text_list_prefix(wraps, 0)]
+    var sel_pending = parts[0]
+    var k = 1
+    while k < np:
+        val opener = sel_pending.trim()
+        # This "{" opens a block whose selector / prelude is `opener`.
+        if depth < stack.len():
+            stack[depth] = opener
+        depth = depth + 1
+        val seg = parts[k]
+        val subs = seg.split("}")
+        val nsubs = subs.len()
+        # `subs[0]` is the just-opened block's body up to its first "}". If the
+        # block is a leaf rule (opener not an @-wrapper) with a non-empty
+        # selector, emit it. Its wrapper prelude is the nearest enclosing
+        # @-ancestor, if any (depth-1 child of a depth-0 @-wrapper).
+        val is_wrapper = opener.starts_with("@")
+        if (not is_wrapper) and opener.len() > 0 and out < cap:
+            var wrapper = ""
+            if depth >= 2 and (depth - 2) < stack.len():
+                val parent = stack[depth - 2]
+                if parent.starts_with("@"):
+                    wrapper = parent
+            sels[out] = opener
+            decls[out] = subs[0].trim()
+            wraps[out] = wrapper
+            out = out + 1
+        # Each "}" in `seg` closes one open block; pop that many.
+        var closes = nsubs - 1
+        while closes > 0 and depth > 0:
+            depth = depth - 1
+            closes = closes - 1
+        # The trailing piece after the last "}" is the next block's selector.
+        sel_pending = if nsubs > 0: subs[nsubs - 1] else: ""
+        k = k + 1
+    [text_list_prefix(sels, out), text_list_prefix(decls, out), text_list_prefix(wraps, out)]
 
 fn extract_css_vw(html: text, viewport_w: i32) -> Rules:
     # First pass: collect CSS custom properties from all :root blocks
@@ -3902,19 +3968,12 @@ fn extract_css_vw(html: text, viewport_w: i32) -> Rules:
             break
         val css_raw = html.substring(open + 1, close)
         val css = _css_resolve_vars(css_raw, custom_props)
-        # Rule-boundary scan (brace-depth bookkeeping to find each
-        # "selector { decls }" chunk's char offsets) runs natively via
-        # rt_css_scan_rule_bounds instead of an interpreted per-character
-        # Simple loop. Measured directly: the old interpreted byte-loop cost
-        # ~300us PER CHARACTER under the tree-walking interpreter (~86s for
-        # count_css_rules alone on a ~292KB real theme stylesheet, doubled by
-        # an equivalent second pass here), which is why a realistic theme
-        # CSS payload hung the browser's first frame for minutes. The native
-        # scan is a mechanical, faithful port of the exact same brace-depth
-        # algorithm (see css_scan.rs doc comment) — no CSS semantics moved:
-        # selector-group splitting, @media condition evaluation, and CSS
-        # variable substitution all remain in Simple, unchanged, below.
-        val bounds = rt_css_scan_rule_bounds(css)
+        # Rule-boundary scan: split the sheet ONCE on "{"/"}" natively rather
+        # than walking it a character at a time in interpreted Simple (which
+        # cost seconds-to-minutes on a realistic theme sheet). See
+        # `_css_scan_rules_simple`. Selector-group splitting, @media condition
+        # evaluation, and CSS-variable substitution stay in Simple below.
+        val bounds = _css_scan_rules_simple(css)
         val b_sel_text = bounds[0]
         val b_decl_text = bounds[1]
         val b_wrapper = bounds[2]

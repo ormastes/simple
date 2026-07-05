@@ -95,58 +95,6 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
                 Ok(bool_value(false))
             }
         }
-        "rt_winit_buffer_blit_ppm_file" => {
-            // rt_winit_buffer_blit_ppm_file(buffer_id, x, y, path) -> bool
-            let buf_id = get_i64(args, 0, name)?;
-            let x = get_i64(args, 1, name)?;
-            let y = get_i64(args, 2, name)?;
-            let path = get_string(args, 3, name)?;
-            let bytes = match std::fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    set_last_error(format!("failed to read PPM file {path}: {err}"));
-                    return Ok(bool_value(false));
-                }
-            };
-            let (ppm_w, ppm_h, data_start, maxval) = match parse_ppm_p6_header(&bytes) {
-                Ok(parsed) => parsed,
-                Err(err) => {
-                    set_last_error(err);
-                    return Ok(bool_value(false));
-                }
-            };
-            let mut bufs = PIXEL_BUFFERS.lock();
-            if let Some(buf) = bufs.get_mut(&buf_id) {
-                let sw = buf.width as i64;
-                let sh = buf.height as i64;
-                for row in 0..ppm_h {
-                    let py = y + row as i64;
-                    if py < 0 || py >= sh {
-                        continue;
-                    }
-                    for col in 0..ppm_w {
-                        let px = x + col as i64;
-                        if px < 0 || px >= sw {
-                            continue;
-                        }
-                        let src_idx = data_start + (row * ppm_w + col) * 3;
-                        if src_idx + 2 >= bytes.len() {
-                            set_last_error(format!("PPM pixel data truncated in {path}"));
-                            return Ok(bool_value(false));
-                        }
-                        let r = scale_ppm_channel(bytes[src_idx], maxval);
-                        let g = scale_ppm_channel(bytes[src_idx + 1], maxval);
-                        let b = scale_ppm_channel(bytes[src_idx + 2], maxval);
-                        buf.pixels[(py as usize) * (sw as usize) + (px as usize)] =
-                            0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
-                    }
-                }
-                Ok(bool_value(true))
-            } else {
-                set_last_error(format!("invalid buffer handle: {buf_id}"));
-                Ok(bool_value(false))
-            }
-        }
         "rt_winit_buffer_draw_text" => {
             // rt_winit_buffer_draw_text(buffer_id, x, y, text, fg, bg) -> bool
             let buf_id = get_i64(args, 0, name)?;
@@ -557,75 +505,6 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
     }
 }
 
-fn ppm_is_ws(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
-}
-
-fn ppm_skip_ws_and_comments(data: &[u8], mut pos: usize) -> usize {
-    while pos < data.len() {
-        if ppm_is_ws(data[pos]) {
-            pos += 1;
-        } else if data[pos] == b'#' {
-            while pos < data.len() && data[pos] != b'\n' {
-                pos += 1;
-            }
-        } else {
-            break;
-        }
-    }
-    pos
-}
-
-fn ppm_read_int(data: &[u8], pos: usize) -> Result<(usize, usize), String> {
-    let mut pos = ppm_skip_ws_and_comments(data, pos);
-    let start = pos;
-    let mut value = 0usize;
-    while pos < data.len() && data[pos].is_ascii_digit() {
-        value = value
-            .checked_mul(10)
-            .and_then(|v| v.checked_add((data[pos] - b'0') as usize))
-            .ok_or_else(|| "PPM integer overflow".to_string())?;
-        pos += 1;
-    }
-    if pos == start {
-        return Err("PPM expected integer".to_string());
-    }
-    Ok((value, pos))
-}
-
-fn parse_ppm_p6_header(data: &[u8]) -> Result<(usize, usize, usize, usize), String> {
-    if data.len() < 7 || data[0] != b'P' || data[1] != b'6' {
-        return Err("PPM: not a P6 file".to_string());
-    }
-    let (width, pos) = ppm_read_int(data, 2)?;
-    let (height, pos) = ppm_read_int(data, pos)?;
-    let (maxval, pos) = ppm_read_int(data, pos)?;
-    if width == 0 || height == 0 || maxval == 0 || maxval > 255 {
-        return Err(format!("PPM: invalid header {width}x{height} max={maxval}"));
-    }
-    if pos >= data.len() || !ppm_is_ws(data[pos]) {
-        return Err("PPM: missing pixel separator".to_string());
-    }
-    let data_start = pos + 1;
-    let required = width
-        .checked_mul(height)
-        .and_then(|px| px.checked_mul(3))
-        .and_then(|bytes| bytes.checked_add(data_start))
-        .ok_or_else(|| "PPM dimensions too large".to_string())?;
-    if required > data.len() {
-        return Err("PPM: pixel data truncated".to_string());
-    }
-    Ok((width, height, data_start, maxval))
-}
-
-fn scale_ppm_channel(value: u8, maxval: usize) -> u8 {
-    if maxval == 255 {
-        value
-    } else {
-        (((value as usize) * 255) / maxval) as u8
-    }
-}
-
 fn draw_text_into_buffer(buf: &mut PixelBuffer, x: i64, y: i64, text: &str, fg: u32, bg: u32) {
     let sw = buf.width as i64;
     let sh = buf.height as i64;
@@ -740,46 +619,4 @@ mod tests {
         let _ = dispatch_buffer("rt_winit_buffer_free", &[Value::Int(id)]).unwrap();
     }
 
-    #[test]
-    fn blit_ppm_file_extern_decodes_into_buffer() {
-        let id = match dispatch_buffer(
-            "rt_winit_buffer_create",
-            &[Value::Int(3), Value::Int(2), Value::Int(0xFF000000u32 as i64)],
-        )
-        .unwrap()
-        {
-            Value::Int(id) => id,
-            other => panic!("expected buffer id, got {other:?}"),
-        };
-
-        let path = std::env::temp_dir().join(format!(
-            "simple-winit-buffer-ppm-{}-{}.ppm",
-            std::process::id(),
-            id
-        ));
-        std::fs::write(&path, b"P6\n2 1\n255\n\x11\x22\x33\x44\x55\x66").unwrap();
-
-        let ok = dispatch_buffer(
-            "rt_winit_buffer_blit_ppm_file",
-            &[
-                Value::Int(id),
-                Value::Int(1),
-                Value::Int(1),
-                Value::Str(path.to_string_lossy().to_string()),
-            ],
-        )
-        .unwrap();
-        assert_eq!(ok, Value::Bool(true));
-
-        {
-            let bufs = PIXEL_BUFFERS.lock();
-            let buf = bufs.get(&id).expect("buffer should exist");
-            assert_eq!(buf.pixels[1 * 3 + 1], 0xFF112233);
-            assert_eq!(buf.pixels[1 * 3 + 2], 0xFF445566);
-            assert_eq!(buf.pixels[0], 0xFF000000);
-        }
-
-        let _ = std::fs::remove_file(path);
-        let _ = dispatch_buffer("rt_winit_buffer_free", &[Value::Int(id)]).unwrap();
-    }
 }

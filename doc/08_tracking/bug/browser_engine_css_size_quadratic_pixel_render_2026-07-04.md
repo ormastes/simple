@@ -267,7 +267,6 @@ above is left in place in `src/app/ui.browser/{app,backend}.spl` so the next
 session working this bug (or the `--open` wiring in the companion doc) gets
 an immediate, precise stall-location readout instead of a silent multi-minute
 hang.
-
 ## RESOLVED (2026-07-05, pure-Simple) — real root causes found + fixed, first frame 16s→6.6s
 
 The multi-minute hang was **not** the brace-boundary scan (that is ~2-44ms).

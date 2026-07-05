@@ -41,7 +41,6 @@ Requires investigation of:
 - `draw_image` SFFI marshalling hot-path optimization
 - Possible loop unrolling or batch marshalling in readback
 - Whether native/JIT compilation path is acceptable as a workaround for this gate
-
 ## UPDATE (2026-07-05) — dominant cost was O(n^2) JSON build, not marshalling; 6-7min → ~4-5s
 
 Per-phase profiling of `tools/pixel_compare/render_simple_html.spl` at 320x240
