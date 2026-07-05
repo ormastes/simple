@@ -76,6 +76,8 @@ formal_coverage formal_coverage_log byl_sby_artifact_audit byl_sby_artifact_audi
 byl_sby_artifact_audit_gate byl_sby_artifact_audit_scope byl_sby_artifact_audit_evidence
 riscv_rtl_sby_proof_status riscv_rtl_sby_proof_log riscv_rtl_sby_proof_gate
 riscv_rtl_sby_proof_scope riscv_rtl_sby_proof_blocker riscv_rtl_rvfi_readiness_note
+qemu_scheduler_smp_handoff_status qemu_scheduler_smp_handoff_log qemu_scheduler_smp_handoff_gate
+qemu_scheduler_smp_handoff_scope qemu_scheduler_smp_handoff_live_env_var qemu_scheduler_smp_handoff_readiness_note
 mission_critical_release_status mission_critical_release_blockers
 mission_critical_prereqs_status mission_critical_prereqs_missing mission_critical_prereqs_next_action
 shared_wm_logic cpu_simd_engine2d_diagram cpu_simd_report llvm_port
@@ -217,6 +219,12 @@ riscv_rtl_sby_proof_gate="scripts/check/check-riscv-rtl-sby-proof.shs"
 riscv_rtl_sby_proof_scope="strict RISC-V RTL SymbiYosys proof run for generated rv32/rv64 default and mlk bundles"
 riscv_rtl_sby_proof_blocker=sby,yosys,smt-solver
 riscv_rtl_rvfi_readiness_note="RISC-V generated RTL bundles pass RVFI port, formal harness, SBY, and manifest artifact checks through scripts/check/check-riscv-fpga-sidecar-contract.shs; without sby, yosys, and an SMT solver this is RVFI/SymbiYosys readiness evidence, not an RTL proof pass"
+qemu_scheduler_smp_handoff_status=fail
+qemu_scheduler_smp_handoff_log="$BUILD_DIR/qemu_scheduler_smp_handoff.log"
+qemu_scheduler_smp_handoff_gate="test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl"
+qemu_scheduler_smp_handoff_scope="host-mode 2-CPU boot + scheduler-owned AP-carrier green-work dispatch (SMP handoff structural evidence)"
+qemu_scheduler_smp_handoff_live_env_var="SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE"
+qemu_scheduler_smp_handoff_readiness_note="Host-mode interpreter run of green_carrier_qemu_spec.spl proves scheduler/AP-carrier SMP dispatch structure; SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 gates the final live-QEMU hardware handoff proof separately and is not executed by this matrix, so this row is host-mode SMP scheduler readiness evidence, not a live-hardware handoff proof"
 mission_critical_prereqs_status=unknown
 mission_critical_prereqs_missing=unknown
 mission_critical_prereqs_next_action=unknown
@@ -366,6 +374,30 @@ elif grep -Fq "reason=sby-run-failed" "$riscv_rtl_sby_proof_log"; then
 else
     riscv_rtl_sby_proof_status=fail
     riscv_rtl_sby_proof_blocker=rtl-proof-unclassified-failure
+fi
+
+# G2: live-QEMU scheduler/SMP handoff evidence was previously invoked by no
+# gate. Run the host-mode (non-live-hardware) path here for real; do not
+# trust process exit code alone (see riscv_rtl_sby_proof / async hardening
+# evidence checkers for the same lesson) -- re-derive pass/fail from the
+# printed "Passed: N" / "Failed: N" summary instead. The live-hardware
+# handoff path (SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1) is documented
+# via qemu_scheduler_smp_handoff_readiness_note and is not executed here.
+SIMPLE_BIN="$(resolve_simple_bin)"
+set +e
+"$SIMPLE_BIN" test "$qemu_scheduler_smp_handoff_gate" --mode=interpreter --clean --timeout 120 --sequential >"$qemu_scheduler_smp_handoff_log" 2>&1
+set -e
+# Unanchored: the top-level multi-file discovery path emits these lines
+# wrapped in ANSI color codes (e.g. "\033[32mPassed: 3\033[0m"), while the
+# single-file child runner emits them plain -- match either (see the same
+# fix in scripts/check/check-async-library-hardening-evidence.shs).
+qemu_scheduler_smp_handoff_summary_passed="$(grep -h -E 'Passed: [0-9]+' "$qemu_scheduler_smp_handoff_log" 2>/dev/null | tail -n 1 | sed -E 's/^.*Passed: ([0-9]+).*$/\1/')"
+qemu_scheduler_smp_handoff_summary_failed="$(grep -h -E 'Failed: [0-9]+' "$qemu_scheduler_smp_handoff_log" 2>/dev/null | tail -n 1 | sed -E 's/^.*Failed: ([0-9]+).*$/\1/')"
+if [ -n "$qemu_scheduler_smp_handoff_summary_passed" ] \
+    && [ -n "$qemu_scheduler_smp_handoff_summary_failed" ] \
+    && [ "$qemu_scheduler_smp_handoff_summary_failed" -eq 0 ] \
+    && [ "$qemu_scheduler_smp_handoff_summary_passed" -gt 0 ]; then
+    qemu_scheduler_smp_handoff_status=pass
 fi
 
 prereq_out="$BUILD_DIR/mission_critical_prereqs.out"
@@ -731,8 +763,9 @@ add_mission_blocker() {
 
 [ "$status" = pass ] || add_mission_blocker hardening_matrix
 [ "$riscv_rtl_sby_proof_status" = pass ] || add_mission_blocker riscv_rtl_sby_proof
+[ "$qemu_scheduler_smp_handoff_status" = pass ] || add_mission_blocker qemu_scheduler_smp_handoff
 [ "$mission_critical_prereqs_status" = ready ] || add_mission_blocker mission_critical_prereqs
-if [ "$status" = fail ] || [ "$riscv_rtl_sby_proof_status" = fail ]; then
+if [ "$status" = fail ] || [ "$riscv_rtl_sby_proof_status" = fail ] || [ "$qemu_scheduler_smp_handoff_status" = fail ]; then
     mission_critical_release_status=fail
 fi
 
@@ -813,6 +846,12 @@ fi
     echo "- riscv_rtl_sby_proof_scope: $riscv_rtl_sby_proof_scope"
     echo "- riscv_rtl_sby_proof_blocker: $riscv_rtl_sby_proof_blocker"
     echo "- riscv_rtl_rvfi_readiness_note: $riscv_rtl_rvfi_readiness_note"
+    echo "- qemu_scheduler_smp_handoff_status: $qemu_scheduler_smp_handoff_status"
+    echo "- qemu_scheduler_smp_handoff_log: $qemu_scheduler_smp_handoff_log"
+    echo "- qemu_scheduler_smp_handoff_gate: $qemu_scheduler_smp_handoff_gate"
+    echo "- qemu_scheduler_smp_handoff_scope: $qemu_scheduler_smp_handoff_scope"
+    echo "- qemu_scheduler_smp_handoff_live_env_var: $qemu_scheduler_smp_handoff_live_env_var"
+    echo "- qemu_scheduler_smp_handoff_readiness_note: $qemu_scheduler_smp_handoff_readiness_note"
     echo "- shared_wm_logic: $shared_wm_status"
     echo "- cpu_simd_engine2d_diagram: $cpu_simd_status"
     echo "- cpu_simd_report: $CPU_SIMD_REPORT"
@@ -941,6 +980,9 @@ echo "simpleos_hardening_riscv_rtl_sby_proof_gate=$riscv_rtl_sby_proof_gate"
 echo "simpleos_hardening_riscv_rtl_sby_proof_scope=$riscv_rtl_sby_proof_scope"
 echo "simpleos_hardening_riscv_rtl_sby_proof_blocker=$riscv_rtl_sby_proof_blocker"
 echo "simpleos_hardening_riscv_rtl_rvfi_readiness_note=$riscv_rtl_rvfi_readiness_note"
+echo "simpleos_hardening_qemu_scheduler_smp_handoff_status=$qemu_scheduler_smp_handoff_status"
+echo "simpleos_hardening_qemu_scheduler_smp_handoff_log=$qemu_scheduler_smp_handoff_log"
+echo "simpleos_hardening_qemu_scheduler_smp_handoff_readiness_note=$qemu_scheduler_smp_handoff_readiness_note"
 echo "simpleos_hardening_shared_wm_status=$shared_wm_status"
 echo "simpleos_hardening_cpu_simd_status=$cpu_simd_status"
 echo "simpleos_hardening_cpu_simd_report=$CPU_SIMD_REPORT"
