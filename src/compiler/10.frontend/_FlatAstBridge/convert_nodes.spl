@@ -58,9 +58,10 @@ fn flat_bootstrap_function_count() -> i64:
         eprint("[flat-bridge] fn-count:start")
     var count = 0
     var i = 0
-    while i < 64:
-        val tag = flat_bridge_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
-        if tag == "1":
+    val decl_count = module_decl_count_get()
+    while i < 64 and i < decl_count:
+        val decl_idx = module_decl_at(i)
+        if decl_get_tag(decl_idx) == 1:
             count = count + 1
         i = i + 1
     if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
@@ -72,13 +73,14 @@ fn flat_bootstrap_function_at(index: i64) -> Function:
         eprint("[flat-bridge] fn-at:start {index}")
     var seen = 0
     var i = 0
-    while i < 64:
-        val tag = flat_bridge_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
-        if tag == "1":
+    val decl_count = module_decl_count_get()
+    while i < 64 and i < decl_count:
+        val decl_idx = module_decl_at(i)
+        if decl_get_tag(decl_idx) == 1:
             if seen == index:
                 if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
-                    eprint("[flat-bridge] fn-at:decl {i}")
-                val fn_ = convert_decl_fn(i)
+                    eprint("[flat-bridge] fn-at:decl {decl_idx}")
+                val fn_ = convert_decl_fn(decl_idx)
                 if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
                     eprint("[flat-bridge] fn-at:done")
                 return fn_
@@ -109,11 +111,12 @@ fn flat_bootstrap_function_at(index: i64) -> Function:
 fn flat_bootstrap_function_decl_at(index: i64) -> i64:
     var seen = 0
     var i = 0
-    while i < 64:
-        val tag = flat_bridge_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
-        if tag == "1":
+    val decl_count = module_decl_count_get()
+    while i < 64 and i < decl_count:
+        val decl_idx = module_decl_at(i)
+        if decl_get_tag(decl_idx) == 1:
             if seen == index:
-                return i
+                return decl_idx
             seen = seen + 1
         i = i + 1
     -1
@@ -615,17 +618,16 @@ fn convert_decl_fn(idx: i64) -> Function:
     val name = decl_get_name(idx)
     if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
         eprint("[flat-bridge] fn:start {name}")
-    val p_names_raw = flat_decl_field_text(idx, "PARAM_NAMES")
-    val p_types_raw = flat_decl_field_text(idx, "PARAM_TYPES")
+    val p_names = decl_get_param_names(idx)
+    val p_types = decl_get_param_types(idx)
     val span = make_span()
     var params: [Param] = []
     var pi = 0
-    val p_count = flat_text_list_count(p_names_raw)
-    while pi < p_count:
-        val p_type = flat_i64_list_at(p_types_raw, pi)
+    while pi < p_names.len():
+        val p_type = if pi < p_types.len(): p_types[pi] else: 0
         val has_t = p_type > 0
         params.push(Param(
-            name: flat_text_list_at(p_names_raw, pi),
+            name: p_names[pi],
             has_type_: has_t,
             type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
             has_default: false,
@@ -635,12 +637,11 @@ fn convert_decl_fn(idx: i64) -> Function:
         pi = pi + 1
 
     val ret = decl_get_ret_type(idx)
-    val body_raw = flat_decl_field_text(idx, "BODY")
+    val body = decl_get_body(idx)
     var stmts: [Stmt] = []
     var si = 0
-    val body_count = flat_i64_list_count(body_raw)
-    while si < body_count:
-        stmts.push(convert_flat_stmt(flat_i64_list_at(body_raw, si)))
+    while si < body.len():
+        stmts.push(convert_flat_stmt(body[si]))
         si = si + 1
 
     val visibility = convert_decl_visibility(idx)
@@ -740,17 +741,16 @@ fn convert_decl_method_fn(idx: i64, target_name: text) -> Function:
 
 fn convert_decl_extern_fn(idx: i64) -> Function:
     val name = decl_get_name(idx)
-    val p_names_raw = flat_decl_field_text(idx, "PARAM_NAMES")
-    val p_types_raw = flat_decl_field_text(idx, "PARAM_TYPES")
+    val p_names = decl_get_param_names(idx)
+    val p_types = decl_get_param_types(idx)
     val span = make_span()
     var params: [Param] = []
     var pi = 0
-    val p_count = flat_text_list_count(p_names_raw)
-    while pi < p_count:
-        val p_type = flat_i64_list_at(p_types_raw, pi)
+    while pi < p_names.len():
+        val p_type = if pi < p_types.len(): p_types[pi] else: 0
         val has_t = p_type > 0
         params.push(Param(
-            name: flat_text_list_at(p_names_raw, pi),
+            name: p_names[pi],
             has_type_: has_t,
             type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
             has_default: false,

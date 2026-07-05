@@ -453,3 +453,34 @@ before timing out at `logic_sched.spl`:
 [BOOTSTRAP-PHASE] phase2:parse:entry:done examples/.../logic_band.spl
 [BOOTSTRAP-PHASE] phase2:parse:entry examples/.../logic_sched.spl
 ```
+
+### Native declaration arena mirror reduced; wrapper advances farther (2026-07-05)
+
+`native-build` now sets `SIMPLE_NATIVE_ARENA_DECLS=1` while compiling, then
+restores the previous value before returning. In that mode declaration and
+module-declaration accessors use the in-process arenas instead of writing and
+reading `SIMPLE_BOOTSTRAP_DECL_*` / `SIMPLE_BOOTSTRAP_MODULE_DECL_*` process-env
+mirrors. The flat AST bridge was adjusted to use arena-backed declaration
+getters for tags, params, and function bodies.
+
+Focused checks:
+
+```sh
+bin/simple test test/01_unit/compiler/parser/parser_source_path_desync_spec.spl
+# PASS: 2 examples, 0 failures
+bin/simple test test/01_unit/examples/nvme_fw_rv32_entry_fail_mask_spec.spl
+# PASS: 5 examples, 0 failures
+SIMPLE_COMPILER_PHASE_PROFILE=1 timeout -k 5s 90s /usr/bin/time -f 'logic_sched_check_elapsed=%E rss=%MKB' \
+  bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_sched.spl
+# logic_sched_check_elapsed=0:05.11 rss=166896KB
+```
+
+The default 300s wrapper still times out, so this bug remains open, but the last
+marker now reaches beyond `logic_power_cycle.spl` and starts
+`logic_backpressure_abort.spl`:
+
+```text
+[BOOTSTRAP-PHASE] phase2:parse:entry:done examples/.../logic_media_retire.spl
+[BOOTSTRAP-PHASE] phase2:parse:entry:done examples/.../logic_power_cycle.spl
+[BOOTSTRAP-PHASE] phase2:parse:entry examples/.../logic_backpressure_abort.spl
+```
