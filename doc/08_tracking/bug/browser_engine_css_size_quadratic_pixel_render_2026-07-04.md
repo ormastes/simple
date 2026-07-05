@@ -184,3 +184,86 @@ to the tree — it would still fail/hang on this blocker.
    measurements above), re-run the CARD 16 acceptance
    (`office counter --gui` proof line), remove the hard-coded widget-id fast
    path, and restore the held pilot spec.
+
+## Cross-validation (2026-07-05, independent lane — `src/app/ui.browser` launch investigation)
+
+Reproduced the **same symptom class through a completely different entry
+point** (`src/app/ui.browser` real browser-launch chain, not office),
+confirming this is a general `bin/simple run <full program>` hang, not
+office-specific, and that it is **still unresolved** even though the
+`apply_decls` fix above has landed.
+
+**Repro:** a scratch driver calling `run_browser_gui()` /
+`app.ui.browser.app.BrowserApp` directly (bypassing the fake `--open`
+planner documented in
+`doc/08_tracking/bug/ui_browser_main_open_fake_planner_2026-07-05.md`), run
+via `scripts/gui/macos-gui-run.shs` (GUI-enabled driver +
+`SIMPLE_EXECUTION_MODE=interpret`) on:
+
+- `examples/06_io/ui/widget_showcase_mobile.ui.sdn` (77 widget nodes) — hangs.
+- A minimal hand-written 2-widget fixture (one `heading` + one `text`) — also
+  hangs, **>5 minutes**, killed via `timeout 300`.
+
+Added stage-by-stage progress logging (on stderr by default, respects
+`--quiet`) to `src/app/ui.browser/app.spl` and
+`src/app/ui.browser/backend.spl` to pinpoint the exact stall boundary. Tail
+of the log for the minimal 2-widget fixture (identical for the 77-widget
+fixture):
+
+```
+[browser] args-parsed: file=.../_scratch_minimal.ui.sdn port=0 backend=auto
+[browser] backend-resolve-start: requested=auto w=96 h=64
+[browser] backend-selected: software
+[browser] app-init-done
+[browser] window-create-start: w=672 h=448
+[browser] window-created: w=672 h=448
+[browser] render-frame-start: revision=10
+[browser] first-layout-done: w=96 h=64
+[browser] web-render-html-done: html_len=336789
+<... never reaches "pixel-artifact-done" / "readback", even after 5 minutes ...>
+```
+
+Key findings:
+
+- **The stall is CSS-size-driven, not widget-tree-size-driven**: a 2-widget
+  page produces `html_len=336789`, essentially identical to the 77-widget
+  page's `html_len=346701`. Nearly all of the HTML is `generate_css(theme)`
+  boilerplate (`src/app/ui.web/html.spl:248`), which is constant-ish
+  regardless of content. This matches the doc's own measurement table
+  (`full generate_css("dark"), 292,724 bytes | never completes (>200s)`)
+  almost exactly (336,789 vs 292,724 bytes — same order of magnitude, same
+  outcome) — i.e. the isolated-spec "fixed, ~900ms" result reported in the
+  Round 3 lane above does **not** hold once `BrowserApp`/`run_browser_gui`
+  is the process entry point, reproducing the "NEW finding" from that lane
+  (`bin/simple run <full office binary>` vs `bin/simple test <one spec>`
+  timing gap) via a second, unrelated program (`ui.browser`, not office).
+  This strengthens the hypothesis that the gap is in `bin/simple run`
+  itself (interpreter dispatch/GC overhead scaling with total loaded
+  module/symbol count) rather than anything office-specific.
+- **Call path confirmed**: `BrowserBackend.render_frame()`
+  (`src/app/ui.browser/backend.spl`) →
+  `WebRenderPixelArtifactCache.html_request_to_pixel_artifact()`
+  (`src/lib/gc_async_mut/ui/web_render_pixel_backend.spl:129`) →
+  `web_render_html_request_to_pixel_artifact_with_backend()` (same file,
+  line 171) → `simple_web_render_html_to_readback_with_engine2d_backend()`
+  (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl:89`) —
+  the last of these (inside the excluded/owned
+  `src/lib/gc_async_mut/gpu/browser_engine/**` tree) is where progress
+  stops; it never returns.
+- **User-visible consequence beyond the fake planner**: even once
+  `ui_browser_main_open_fake_planner_2026-07-05.md` is fixed and `--open`
+  really calls `run_browser_gui`, the browser will still appear to hang —
+  the winit host window *is* created successfully
+  (`window-created` fires, confirming `rt_winit_window_new` succeeds), but
+  it never becomes visibly registered with the macOS window server
+  (`System Events` reports `windows=0` for the process) because the event
+  loop is never reached/pumped — `render_frame()` blocks before the
+  `while self.running:` loop, so `event-loop-entered` never fires and no
+  frame is ever presented.
+
+No fix attempted here (file is inside the excluded/owned
+`gpu/browser_engine/**` subtree per this session's scope). The stage logging
+above is left in place in `src/app/ui.browser/{app,backend}.spl` so the next
+session working this bug (or the `--open` wiring in the companion doc) gets
+an immediate, precise stall-location readout instead of a silent multi-minute
+hang.
