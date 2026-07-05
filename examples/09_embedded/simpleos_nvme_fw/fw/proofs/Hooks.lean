@@ -35,7 +35,7 @@ def allowed (kind : Int) : Prop := kind = 0 ∨ kind = 1 ∨ kind = 2 ∨ kind =
 -- (2) Output validation clamps (fw/sandbox.spl clamp_priority / clamp_bool).
 def QOS_MAX : Int := 3
 def clampPriority (p : Int) : Int := if p < 0 then 0 else (if p > QOS_MAX then QOS_MAX else p)
-def clampBool (b : Int) : Int := if b ≠ 0 then 1 else 0
+def clampBool (b : Int) : Int := if b ≤ 0 then 0 else (if b ≠ 0 then 1 else 0)
 
 -- (3) GC victim selection (fw/ftl.spl policy_gc_victim): over (block, score) candidates,
 -- pick the min-score block, ties keeping the earlier (lower-index) candidate — exactly
@@ -72,7 +72,9 @@ theorem clampPriority_range (p : Int) : 0 ≤ clampPriority p ∧ clampPriority 
   · split <;> omega
 
 theorem clampBool_range (b : Int) : clampBool b = 0 ∨ clampBool b = 1 := by
-  unfold clampBool; split <;> simp
+  unfold clampBool; split
+  · simp
+  · split <;> simp
 
 -- (3) GC victim safety. The selected block is ALWAYS either the running best or a block
 -- from the candidate list — so, threaded from the first candidate, the victim is always an
