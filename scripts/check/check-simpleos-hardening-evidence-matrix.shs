@@ -43,6 +43,43 @@ if [ -z "$RV64_DISPLAY_SMOKE_REPORT" ]; then
         RV64_DISPLAY_SMOKE_REPORT="doc/09_report/rv64_display_smoke_qmp_evidence_$(date -u +%F).md"
     fi
 fi
+# G4: the dated *_REPORT files above are trusted via plain `contains` string
+# checks with no staleness signal, so a stale-but-still-worded-right report
+# would keep its row green forever. This does not flip rows to fail on age
+# (that would dishonestly redden a gate for reports that are static evidence
+# by design) -- it only makes age visible via emitted key=value lines. Age is
+# derived from the YYYY-MM-DD embedded in the report filename rather than
+# mtime: these are checked-in static reports, and a fresh checkout/rebase
+# resets mtime to checkout time, which would silently hide real staleness.
+report_age_days() {
+    report_file="$1"
+    report_date="$(basename -- "$report_file" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | tail -n 1)"
+    report_epoch=""
+    [ -n "$report_date" ] && report_epoch="$(date -u -d "$report_date" +%s 2>/dev/null)"
+    if [ -z "$report_epoch" ]; then
+        echo -1
+    else
+        echo $(( ($(date -u +%s) - report_epoch) / 86400 ))
+    fi
+}
+STALE_REPORT_AGE_DAYS_MAX=30
+stale_report_count=0
+for report_file in "$SHARED_WM_REPORT" "$CPU_SIMD_REPORT" "$LLVM_PORT_REPORT" \
+    "$GUI_RENDERDOC_REPORT" "$LAYERED_REPORT" "$PRODUCTION_GUI_PARITY_REPORT" \
+    "$SIMPLE_WEB_NODE_REPORT" "$SIMPLE_WEB_BUN_REPORT" "$QEMU_GTK_REPORT" \
+    "$RV64_DISPLAY_SMOKE_REPORT"; do
+    report_age_days_val="$(report_age_days "$report_file")"
+    echo "simpleos_hardening_report_age=$(basename -- "$report_file"):${report_age_days_val}d"
+    if [ "$report_age_days_val" -ge "$STALE_REPORT_AGE_DAYS_MAX" ] 2>/dev/null; then
+        stale_report_count=$((stale_report_count + 1))
+    fi
+done
+if [ "$stale_report_count" -eq 0 ]; then
+    echo "simpleos_hardening_stale_reports=none"
+else
+    echo "simpleos_hardening_stale_reports=$stale_report_count"
+fi
+
 GUI_ENTRY_SPEC="${GUI_ENTRY_SPEC:-test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl}"
 GUI_ENTRY_DOC="${GUI_ENTRY_DOC:-doc/06_spec/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.md}"
 if [ ! -f "$GUI_ENTRY_DOC" ] && [ -f "doc/06_spec/system/gui_entry_engine2d_wm_simple_web_spec.md" ]; then
