@@ -6,22 +6,19 @@
 #   SIMPLE_GUI_RUN_SKIP_NUDGE=1 scripts/gui/macos-gui-run.shs \
 #     examples/06_io/ui/wm_widget_showcase_gui.spl
 
-use std.gpu.engine2d.backend_metal.{MetalBackend}
 use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
 use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
 use std.io_runtime.{env_get, file_exists, file_read, file_read_bytes, dir_create_all, getpid, time_now_unix_micros}
-use app.io.mod.{process_spawn_async, process_spawn_async_env, process_kill, thread_sleep, host_os}
+use app.io.mod.{process_spawn_async, process_spawn_async_env, process_kill, thread_sleep, host_os, cwd}
 use common.window_protocol.geometry.{Size}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
 use common.ui.wm_app_process_contract.{WIDGET_SHOWCASE_APP_SOURCE, WIDGET_SHOWCASE_TITLE, wm_fs_bridge_decode, wm_widget_showcase_client_env}
 use os.compositor.host_compositor_entry.{HostCompositor, HeadlessHostCompositorBackend, host_compositor_pointer_move, host_compositor_left_button_at, host_taskbar_dock_width, host_taskbar_item_width, host_taskbar_item_x}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
 
-val W: i32 = 820
-val H: i32 = 620
+val W: i32 = 660
+val H: i32 = 840
 val LOCATOR: u32 = 0xFFFF00FFu32
-val MUTED: u32 = 0xFF94A3B8u32
-val LINE: u32 = 0xFF334155u32
 
 fn pack(src: [u32]) -> [i64]:
     var out: [i64] = [0; src.len()]
@@ -49,30 +46,66 @@ fn wait_for_bridge(path: text, timeout_ms: i64) -> text:
         thread_sleep(50)
     ""
 
-fn scale_pixels_nearest(src: [u32], src_w: i32, src_h: i32, dst_w: i32, dst_h: i32) -> [u32]:
-    if src_w <= 0 or src_h <= 0 or dst_w <= 0 or dst_h <= 0:
-        return []
-    var out: [u32] = [0u32; dst_w * dst_h]
-    var y = 0
-    while y < dst_h:
-        val sy = (y * src_h) / dst_h
-        var x = 0
-        while x < dst_w:
-            val sx = (x * src_w) / dst_w
-            out[y * dst_w + x] = src[sy * src_w + sx]
-            x = x + 1
-        y = y + 1
-    out
+fn path_join(root: text, rel: text) -> text:
+    if root.ends_with("/") or root.ends_with("\\"):
+        return root + rel
+    root + "/" + rel
 
-fn draw_taskbar(b: MetalBackend, comp: HostCompositor):
+fn resolve_repo_root() -> text:
+    val explicit = env_get("SIMPLE_REPO_ROOT") ?? ""
+    if explicit != "":
+        return explicit
+    val lib = env_get("SIMPLE_LIB") ?? ""
+    if lib.ends_with("/src") or lib.ends_with("\\src"):
+        return lib.substring(0, lib.len() - 4)
+    val here = cwd()
+    if here != "":
+        return here
+    "."
+
+fn fill_rect(buf_in: [u32], x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
+    var buf = buf_in
+    val x0 = if x < 0: 0 else: x
+    val y0 = if y < 0: 0 else: y
+    val x1_raw = x + w
+    val y1_raw = y + h
+    val x1 = if x1_raw > W: W else: x1_raw
+    val y1 = if y1_raw > H: H else: y1_raw
+    var yy = y0
+    while yy < y1:
+        var xx = x0
+        val row = yy * W
+        while xx < x1:
+            buf[row + xx] = color
+            xx = xx + 1
+        yy = yy + 1
+    buf
+
+fn blit_frame(buf_in: [u32], x: i32, y: i32, frame: PpmImage) -> [u32]:
+    var buf = buf_in
+    var yy = 0
+    while yy < frame.height:
+        val dy = y + yy
+        if dy >= 0 and dy < H:
+            var xx = 0
+            while xx < frame.width:
+                val dx = x + xx
+                if dx >= 0 and dx < W:
+                    buf[dy * W + dx] = frame.pixels[yy * frame.width + xx]
+                xx = xx + 1
+        yy = yy + 1
+    buf
+
+fn draw_taskbar_pixels(buf_in: [u32], comp: HostCompositor) -> [u32]:
+    var buf = buf_in
     val theme = wm_chrome_theme()
     val count = comp.windows.len().to_i32()
     if count <= 0:
-        return
+        return buf
     val dock_w = host_taskbar_dock_width(W, count)
     val dock_x = (W - dock_w) / 2
     val dock_y = H - 62
-    b.draw_rounded_rect(dock_x, dock_y, dock_w, 44, 8, theme.taskbar)
+    buf = fill_rect(buf, dock_x, dock_y, dock_w, 44, theme.taskbar)
     val item_w = host_taskbar_item_width(W, count)
     var i = 0
     while i < count:
@@ -83,48 +116,40 @@ fn draw_taskbar(b: MetalBackend, comp: HostCompositor):
             color = theme.accent
         elif win.minimized:
             color = theme.host_window_body
-        b.draw_rounded_rect(ix + 2, dock_y + 6, item_w - 4, 32, 5, color)
+        buf = fill_rect(buf, ix + 2, dock_y + 6, item_w - 4, 32, color)
         if win.focused and not win.minimized:
-            b.draw_rect_filled(ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
-        b.draw_text(ix + 10, dock_y + 16, win.title, theme.text_primary, 8)
+            buf = fill_rect(buf, ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
         i = i + 1
+    buf
 
-fn draw_window_frame(b: MetalBackend, comp: HostCompositor, frame: PpmImage):
+fn compose_pixels(comp: HostCompositor, frame: PpmImage) -> [u32]:
     val theme = wm_chrome_theme()
-    b.clear(theme.compositor_bg)
-    b.draw_rect_filled(0, 0, W, 38, theme.command_lane)
-    b.draw_text(14, 12, "Simple WM", theme.text_primary, 10)
-    b.draw_text(112, 12, "filesystem-launched child: {WIDGET_SHOWCASE_APP_SOURCE}", MUTED, 8)
+    var pixels: [u32] = [theme.compositor_bg; W * H]
+    pixels = fill_rect(pixels, 0, 0, W, 38, theme.command_lane)
     var i = 0
     while i < comp.windows.len():
         val win = comp.windows[i]
         if not win.minimized:
-            b.draw_rect_filled(win.x + 7, win.y + 7, win.w, win.h, theme.window_shadow)
-            b.draw_rect_filled(win.x, win.y, win.w, win.h, theme.host_window_body)
+            pixels = fill_rect(pixels, win.x + 7, win.y + 7, win.w, win.h, theme.window_shadow)
+            pixels = fill_rect(pixels, win.x, win.y, win.w, win.h, theme.host_window_body)
             val title_color = if win.focused: theme.accent else: theme.title_unfocused
-            b.draw_rect_filled(win.x, win.y, win.w, 24, title_color)
-            b.draw_text(win.x + 10, win.y + 7, win.title, theme.text_primary, 8)
-            b.draw_rect_filled(win.x + win.w - 24, win.y, 24, 24, theme.close_button)
-            b.draw_text(win.x + win.w - 17, win.y + 4, "X", theme.text_primary, theme.close_button)
+            pixels = fill_rect(pixels, win.x, win.y, win.w, 24, title_color)
+            pixels = fill_rect(pixels, win.x + win.w - 24, win.y, 24, 24, theme.close_button)
             val cx = win.x + 4
             val cy = win.y + 28
-            val cw = win.w - 8
-            val ch = win.h - 32
-            val scaled = scale_pixels_nearest(frame.pixels, frame.width, frame.height, cw, ch)
-            b.draw_image_scaled(cx, cy, cw, ch, cw, ch, scaled)
+            pixels = blit_frame(pixels, cx, cy, frame)
         i = i + 1
-    draw_taskbar(b, comp)
-    b.draw_rect_filled(0, 0, W, 3, LOCATOR)
-    b.draw_rect_filled(0, H - 3, W, 3, LOCATOR)
-    b.draw_rect_filled(0, 0, 3, H, LOCATOR)
-    b.draw_rect_filled(W - 3, 0, 3, H, LOCATOR)
-    b.present()
+    pixels = draw_taskbar_pixels(pixels, comp)
+    pixels = fill_rect(pixels, 0, 0, W, 3, LOCATOR)
+    pixels = fill_rect(pixels, 0, H - 3, W, 3, LOCATOR)
+    pixels = fill_rect(pixels, 0, 0, 3, H, LOCATOR)
+    pixels = fill_rect(pixels, W - 3, 0, 3, H, LOCATOR)
+    pixels
 
-fn render_and_present(b: MetalBackend, win: WinitWindow, comp: HostCompositor, frame: PpmImage, state: text) -> bool:
-    draw_window_frame(b, comp, frame)
-    val pixels = b.read_pixels()
+fn render_and_present(win: WinitWindow, comp: HostCompositor, frame: PpmImage, state: text) -> bool:
+    val pixels = compose_pixels(comp, frame)
     if pixels.len() < W * H:
-        print "[wm-showcase] present state={state} FAIL readback_short={pixels.len()} want={W * H}"
+        print "[wm-showcase] present state={state} FAIL compose_short={pixels.len()} want={W * H}"
         return false
     winit_present_rgba(win, W.to_i64(), H.to_i64(), pack(pixels))
     if state != "hold":
@@ -147,31 +172,32 @@ fn apply_wm_input(comp: HostCompositor, input: WinitInput) -> HostCompositor:
         ci = ci + 1
     out
 
-fn launch_showcase_child(bridge_path: text, frame_path: text) -> i64:
+fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -> i64:
     var env = wm_widget_showcase_client_env(bridge_path, frame_path)
     val lib = env_get("SIMPLE_LIB") ?? ""
     if lib != "":
         env["SIMPLE_LIB"] = lib
     else:
-        env["SIMPLE_LIB"] = "src"
+        env["SIMPLE_LIB"] = path_join(repo_root, "src")
     val simple_lib = env["SIMPLE_LIB"]
+    val simple_bin = path_join(repo_root, "bin/simple")
+    val showcase_source_path = path_join(repo_root, WIDGET_SHOWCASE_APP_SOURCE)
     if host_os().lower().contains("windows"):
-        return process_spawn_async_env("bin/simple", ["run", WIDGET_SHOWCASE_APP_SOURCE], env)
+        return process_spawn_async_env(simple_bin, ["run", showcase_source_path], env)
     process_spawn_async("env", [
         "SIMPLE_WM_APP_MODE=client",
         "SIMPLE_WM_BRIDGE_FILE={bridge_path}",
         "SIMPLE_WM_FRAME_FILE={frame_path}",
         "SIMPLE_WM_CLIENT_HOLD=1",
         "SIMPLE_LIB={simple_lib}",
-        "bin/simple",
+        simple_bin,
         "run",
-        WIDGET_SHOWCASE_APP_SOURCE
+        showcase_source_path
     ])
 
-fn cleanup(child_pid: i64, b: MetalBackend, win: WinitWindow, lp: WinitLoop):
+fn cleanup(child_pid: i64, win: WinitWindow, lp: WinitLoop):
     if child_pid > 0:
         process_kill(child_pid)
-    b.shutdown()
     winit_window_free(win)
     winit_loop_free(lp)
 
@@ -181,11 +207,15 @@ fn main() -> i64:
         print "[wm-showcase] error=no-gui-requested (launch via macos-gui-run.shs)"
         return 2
 
-    dir_create_all("build/tmp")
+    val repo_root = resolve_repo_root()
+    val tmp_root = path_join(repo_root, "build/tmp")
+    dir_create_all(tmp_root)
     val stamp = "{getpid()}_{time_now_unix_micros()}"
-    val bridge_path = "build/tmp/wm_widget_showcase_{stamp}.bridge"
-    val frame_path = "build/tmp/wm_widget_showcase_{stamp}.ppm"
-    val child_pid = launch_showcase_child(bridge_path, frame_path)
+    val bridge_path = path_join(tmp_root, "wm_widget_showcase_{stamp}.bridge")
+    val frame_path = path_join(tmp_root, "wm_widget_showcase_{stamp}.ppm")
+    val showcase_source_path = path_join(repo_root, WIDGET_SHOWCASE_APP_SOURCE)
+    print "[wm-showcase] repo_root={repo_root} child_source_fs={showcase_source_path}"
+    val child_pid = launch_showcase_child(bridge_path, frame_path, repo_root)
     if child_pid <= 0:
         print "[wm-showcase] error=child-spawn-failed source={WIDGET_SHOWCASE_APP_SOURCE}"
         return 1
@@ -216,23 +246,15 @@ fn main() -> i64:
         process_kill(child_pid)
         return 1
 
-    var b = MetalBackend.create()
-    if not b.init(W, H):
-        print "[wm-showcase] error=metal-init-failed"
-        winit_window_free(win)
-        winit_loop_free(lp)
-        process_kill(child_pid)
-        return 1
-
     val backend = HeadlessHostCompositorBackend.new(W, H)
     var comp = HostCompositor.new(backend, Size.wh(W, H))
     comp.apply_bridge_request(1, 701, COMP_CREATE_WINDOW.to_i64(), 0, req.title, 54, 70, req.window_w, req.window_h, req.content, req.pid, req.app_id)
     print "[wm-showcase] launched source={req.source_path} child_pid={child_pid} bridge_pid={req.pid} app_id={req.app_id} windows={comp.windows.len()} taskbar_items={comp.windows.len()}"
     if comp.windows.len() != 1:
-        cleanup(child_pid, b, win, lp)
+        cleanup(child_pid, win, lp)
         return 1
-    if not render_and_present(b, win, comp, frame, "launched"):
-        cleanup(child_pid, b, win, lp)
+    if not render_and_present(win, comp, frame, "launched"):
+        cleanup(child_pid, win, lp)
         return 1
 
     var running = true
@@ -244,11 +266,11 @@ fn main() -> i64:
         comp = apply_wm_input(comp, input)
         if comp.windows.len() == 0:
             running = false
-        if not render_and_present(b, win, comp, frame, "hold"):
-            cleanup(child_pid, b, win, lp)
+        if not render_and_present(win, comp, frame, "hold"):
+            cleanup(child_pid, win, lp)
             return 1
         thread_sleep(16)
         frames = frames + 1
 
-    cleanup(child_pid, b, win, lp)
+    cleanup(child_pid, win, lp)
     return 0

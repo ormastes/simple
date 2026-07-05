@@ -509,6 +509,13 @@ function weightedChecksum(pixels) {
 }
 
 const warm = renderHtmlToPixels();
+// Honesty marker: for the 6 "simple layout benchmark" scenes, this fixture
+// does not independently rasterize the HTML — it replays Simple's own ARGB
+// transport baseline (see loadSimpleLayoutTransportBaseline). Any consumer
+// diffing simple-argb.json against this pixel-out JSON for those scenes is
+// comparing Simple's output to itself, not to an independent JS renderer.
+// This field lets check scripts detect and refuse to call that a "pass".
+const baselineSource = transportBaselinePixels ? "simple-transport" : "js-fixture";
 if (pixelOut) {
   fs.writeFileSync(pixelOut, JSON.stringify({
     width,
@@ -517,6 +524,7 @@ if (pixelOut) {
     target,
     producer,
     engine2d_backend: engine2dBackend,
+    baseline_source: baselineSource,
     pixels: Array.from(warm, (px) => px >>> 0),
   }));
 }
@@ -543,5 +551,5 @@ console.log(`weighted_checksum=${warmWeighted.toString()}`);
 console.log(`total_checksum=${total.toString()}`);
 console.log(`frame_us=${frameUs > 0 ? frameUs : 1}`);
 console.log(`pixel_format=${pixelFormat}`);
-console.log(`baseline_source=${transportBaselinePixels ? "simple-layout-transport-argb" : "js-fixture"}`);
+console.log(`baseline_source=${baselineSource}`);
 console.log("blur_or_tolerance_used=false");

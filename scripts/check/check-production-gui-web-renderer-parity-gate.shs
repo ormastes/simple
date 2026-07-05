@@ -10,6 +10,10 @@ BUILD_DIR="${BUILD_DIR:-build/production_gui_web_renderer_parity_gate}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_renderer_parity_gate_$(date -u +%F).md}"
 SOURCE_ENV="${PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV:-build/production_gui_web_renderer_parity_evidence/evidence.env}"
 OUT_ENV="$BUILD_DIR/evidence.env"
+# Honesty: upstream evidence is only trustworthy for a bounded window. A
+# stale evidence.env (e.g. from a run days ago, before an unrelated code
+# change) must not silently keep this meta-gate green.
+MAX_EVIDENCE_AGE_HOURS="${MAX_EVIDENCE_AGE_HOURS:-72}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$OUT_ENV" "$REPORT_PATH"
@@ -18,6 +22,15 @@ value_of() {
     key="$1"
     file="$2"
     sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+file_mtime_epoch() {
+    file="$1"
+    if stat -f %m "$file" >/dev/null 2>&1; then
+        stat -f %m "$file"
+    else
+        stat -c %Y "$file" 2>/dev/null
+    fi
 }
 
 missing_commands() {
@@ -106,6 +119,9 @@ write_evidence() {
         echo "production_gui_web_renderer_parity_gate_source_reason=$(reason_or_missing "${source_reason:-}" "missing-production-parity-source-status")"
         echo "production_gui_web_renderer_parity_gate_source_partial_status=${source_partial_status:-}"
         echo "production_gui_web_renderer_parity_gate_source_partial_reason=${source_partial_reason:-}"
+        echo "production_gui_web_renderer_parity_gate_source_env_mtime_epoch=${source_env_mtime_epoch:-}"
+        echo "production_gui_web_renderer_parity_gate_source_env_age_hours=${source_env_age_hours:-}"
+        echo "production_gui_web_renderer_parity_gate_max_evidence_age_hours=$MAX_EVIDENCE_AGE_HOURS"
         echo "production_gui_web_renderer_parity_gate_simple_bin=${simple_bin:-}"
         echo "production_gui_web_renderer_parity_gate_simple_bin_source=${simple_bin_source:-}"
         echo "production_gui_web_renderer_parity_gate_simple_bin_status=$(status_or_missing "${simple_bin_status:-}")"
@@ -577,6 +593,15 @@ if [ ! -s "$SOURCE_ENV" ]; then
     exit 1
 fi
 
+source_env_mtime_epoch="$(file_mtime_epoch "$SOURCE_ENV")"
+now_epoch="$(date +%s)"
+if [ -n "${source_env_mtime_epoch:-}" ] && [ "$source_env_mtime_epoch" -gt 0 ] 2>/dev/null; then
+    source_env_age_seconds=$((now_epoch - source_env_mtime_epoch))
+    source_env_age_hours=$((source_env_age_seconds / 3600))
+else
+    source_env_age_hours=""
+fi
+
 source_env_status="pass"
 source_status="$(value_of production_gui_web_renderer_parity_status "$SOURCE_ENV")"
 source_reason="$(value_of production_gui_web_renderer_parity_reason "$SOURCE_ENV")"
@@ -808,6 +833,10 @@ if [ "$source_status" = "" ]; then
     fi
 elif [ "$source_status" != "pass" ]; then
     write_evidence "fail" "${source_reason:-production-parity-not-pass}"
+elif [ -z "${source_env_age_hours:-}" ]; then
+    write_evidence "fail" "production-parity-evidence-mtime-unreadable"
+elif [ "$source_env_age_hours" -gt "$MAX_EVIDENCE_AGE_HOURS" ] 2>/dev/null; then
+    write_evidence "fail" "stale-production-parity-evidence-${source_env_age_hours}h-exceeds-${MAX_EVIDENCE_AGE_HOURS}h"
 elif [ "$matrix_status" != "pass" ]; then
     write_evidence "fail" "matrix-not-pass"
 elif [ "$layout_status" != "pass" ]; then

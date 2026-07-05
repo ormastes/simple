@@ -235,6 +235,7 @@ js_producer=""
 js_engine2d_backend=""
 js_pixel_format=""
 js_baseline_source=""
+js_argb_baseline_source=""
 simple_cache_hits=""
 simple_cache_stores=""
 mismatch_count=""
@@ -283,6 +284,11 @@ while [ "$trial" -le "$TRIALS" ]; do
     trial_simple_cache_hits="$(field_of cache_hits "$trial_simple_out")"
     trial_simple_cache_stores="$(field_of cache_stores "$trial_simple_out")"
     trial_mismatch_count="$(node -e 'const fs=require("fs"); const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const b=JSON.parse(fs.readFileSync(process.argv[2],"utf8")); let n=0; if (a.width!==b.width || a.height!==b.height || a.pixels.length!==b.pixels.length) { n = Math.max(a.pixels.length, b.pixels.length); } else { for (let i=0;i<a.pixels.length;i+=1) if ((a.pixels[i]>>>0)!==(b.pixels[i]>>>0)) n+=1; } console.log(n);' "$SIMPLE_ARGB" "$JS_ARGB")"
+    # Honesty check: read the pixel-out JSON's own baseline_source marker
+    # (written by the JS fixture). For the simple-layout-benchmark scenes the
+    # fixture replays Simple's own transport baseline instead of independently
+    # rasterizing, which makes checksum equality a tautology, not evidence.
+    trial_js_argb_baseline_source="$(node -e 'const fs=require("fs"); const b=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); console.log(b.baseline_source||"unknown");' "$JS_ARGB")"
 
     if [ -z "$simple_checksum" ]; then
         simple_checksum="$trial_simple_checksum"
@@ -303,6 +309,7 @@ while [ "$trial" -le "$TRIALS" ]; do
         js_engine2d_backend="$trial_js_engine2d_backend"
         js_pixel_format="$trial_js_pixel_format"
         js_baseline_source="$trial_js_baseline_source"
+        js_argb_baseline_source="$trial_js_argb_baseline_source"
         simple_cache_hits="$trial_simple_cache_hits"
         simple_cache_stores="$trial_simple_cache_stores"
         mismatch_count="$trial_mismatch_count"
@@ -316,7 +323,7 @@ while [ "$trial" -le "$TRIALS" ]; do
             mismatch_count="inconsistent"
             break
         fi
-        if [ "$js_target" != "$trial_js_target" ] || [ "$js_renderer" != "$trial_js_renderer" ] || [ "$js_producer" != "$trial_js_producer" ] || [ "$js_engine2d_backend" != "$trial_js_engine2d_backend" ] || [ "$js_pixel_format" != "$trial_js_pixel_format" ] || [ "$js_baseline_source" != "$trial_js_baseline_source" ]; then
+        if [ "$js_target" != "$trial_js_target" ] || [ "$js_renderer" != "$trial_js_renderer" ] || [ "$js_producer" != "$trial_js_producer" ] || [ "$js_engine2d_backend" != "$trial_js_engine2d_backend" ] || [ "$js_pixel_format" != "$trial_js_pixel_format" ] || [ "$js_baseline_source" != "$trial_js_baseline_source" ] || [ "$js_argb_baseline_source" != "$trial_js_argb_baseline_source" ]; then
             js_target="inconsistent"
             break
         fi
@@ -382,6 +389,16 @@ else
     fi
 fi
 
+# Honesty gate: even if every measurement above lined up, a match only counts
+# as independent evidence when the JS fixture actually rasterized the scene
+# itself. If the fixture's own pixel-out JSON says it replayed Simple's
+# transport baseline, checksum equality is a tautology (Simple vs Simple) —
+# demote pass to self-referential rather than reporting it as verified.
+if [ "$status" = "pass" ] && [ "$js_argb_baseline_source" != "js-fixture" ]; then
+    status=self-referential
+    reason=js-baseline-is-simple-transport
+fi
+
 simple_checksum="${simple_checksum:-0}"
 js_checksum="${js_checksum:-0}"
 simple_weighted="${simple_weighted:-0}"
@@ -413,6 +430,7 @@ mismatch_count="${mismatch_count:-}"
     echo "simple_web_engine2d_js_node_fixture_engine2d_backend=$js_engine2d_backend"
     echo "simple_web_engine2d_js_node_fixture_pixel_format=$js_pixel_format"
     echo "simple_web_engine2d_js_node_fixture_baseline_source=${js_baseline_source:-unknown}"
+    echo "simple_web_engine2d_js_node_fixture_argb_baseline_source=${js_argb_baseline_source:-unknown}"
     echo "simple_web_engine2d_js_simple_checksum=$simple_checksum"
     echo "simple_web_engine2d_js_baseline_checksum=$js_checksum"
     echo "simple_web_engine2d_js_simple_weighted_checksum=$simple_weighted"
@@ -445,6 +463,7 @@ mismatch_count="${mismatch_count:-}"
     echo "- node fixture Engine2D backend: $js_engine2d_backend"
     echo "- node fixture pixel format: $js_pixel_format"
     echo "- node fixture baseline source: ${js_baseline_source:-unknown}"
+    echo "- node fixture pixel-out baseline source: ${js_argb_baseline_source:-unknown}"
     echo "- scene: $SCENE"
     echo "- dimensions: ${WIDTH}x${HEIGHT}"
     echo "- iterations per trial: $ITERATIONS"
