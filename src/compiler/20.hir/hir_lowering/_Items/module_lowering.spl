@@ -118,11 +118,24 @@ impl HirLowering:
 
         var lower_idx = 0
         if bootstrap_mode:
-            _bootstrap_hir_functions = []
             eprint("[hir-lower] functions:count:start")
             val bootstrap_function_count = flat_bootstrap_function_count()
             eprint("[hir-lower] functions:count {bootstrap_function_count}")
-            if (hir_module_env_get("SIMPLE_BOOTSTRAP_REAL_HIR") ?? "") == "1":
+            # Bug 2 fix (bootstrap_thin_driver_drops_imports): this branch used
+            # to require an extra opt-in env flag (SIMPLE_BOOTSTRAP_REAL_HIR=1)
+            # that the Rust bootstrap orchestrator never sets, so every source
+            # file silently deferred with 0 real functions and only the MIR
+            # driver's hardcoded 6-name stub list ever reached codegen.
+            # Default this walk to ON (opt OUT via "0") so plain
+            # SIMPLE_BOOTSTRAP=1 already gets real per-file HIR functions.
+            if (hir_module_env_get("SIMPLE_BOOTSTRAP_REAL_HIR") ?? "1") != "0":
+                # NOTE: do NOT reset `_bootstrap_hir_functions` here.
+                # lower_module() runs once PER SOURCE FILE under
+                # --entry-closure (driver.spl treats every source as a
+                # "bootstrap entry" once SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1),
+                # so the array must accumulate the transitive closure across
+                # every file in the entry closure, not just whichever file
+                # was processed last.
                 while lower_idx < bootstrap_function_count:
                     val decl_idx = flat_bootstrap_function_decl_at(lower_idx)
                     val name = decl_get_name(decl_idx)

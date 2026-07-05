@@ -20,7 +20,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir.*
 use compiler.hir.hir_lowering.types.{HirLowering}
-use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
@@ -48,52 +48,34 @@ fn bootstrap_mir_function_at(index: i64) -> MirFunction:
 fn bootstrap_mir_function_name_at(index: i64) -> text:
     _bootstrap_mir_function_names[index]
 
-fn bootstrap_mir_symbol_for_index(index: i64) -> SymbolId:
-    if index == 0:
-        return SymbolId(id: 1)
-    if index == 1:
-        return SymbolId(id: 2)
-    if index == 2:
-        return SymbolId(id: 3)
-    if index == 3:
-        return SymbolId(id: 4)
-    if index == 4:
-        return SymbolId(id: 5)
-    if index == 5:
-        return SymbolId(id: 6)
-    SymbolId(id: 100)
-
-fn bootstrap_mir_name_for_index(index: i64) -> text:
-    if index == 0:
-        return "bootstrap_version"
-    if index == 1:
-        return "native_build_help"
-    if index == 2:
-        return "compile_result_exit"
-    if index == 3:
-        return "run_native_build_bootstrap"
-    if index == 4:
-        return "get_cli_args"
-    if index == 5:
-        return "main"
-    ""
-
 fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
-    """Lower bootstrap HIR globals to MIR without cross-module lower_module dispatch."""
+    """Lower bootstrap HIR globals to MIR without cross-module lower_module dispatch.
+
+    Bug 2 fix (bootstrap_thin_driver_drops_imports): this used to hardcode a
+    fixed list of exactly 6 known CLI-driver function names and emit a
+    fabricated ret-0 stub body for each, completely ignoring the real,
+    already-lowered HIR -- so imported-module functions (and even the entry
+    file's own non-driver functions) never reached codegen, producing a
+    ~19KB "thin driver" binary. `bootstrap_hir_function_count()` /
+    `bootstrap_hir_function_at()` (compiler.hir.hir_lowering.items) now hold
+    the REAL transitive closure of functions accumulated across every source
+    file in the --entry-closure set (see module_lowering.spl's bootstrap
+    real-HIR walk), so lower each of those for real instead of stubbing."""
     print "[mir-lower-free] start"
     var lowering = MirLowering.new(SymbolTable.new())
     _bootstrap_mir_functions = []
     _bootstrap_mir_function_names = []
-    val bootstrap_function_count = 6
+    val bootstrap_function_count = bootstrap_hir_function_count()
     print "[mir-lower-free] functions:count {bootstrap_function_count}"
     var bootstrap_fni = 0
     while bootstrap_fni < bootstrap_function_count:
         print "[mir-lower-free] function-index {bootstrap_fni}"
-        val bootstrap_name = bootstrap_mir_name_for_index(bootstrap_fni)
+        val hir_fn = bootstrap_hir_function_at(bootstrap_fni)
+        val bootstrap_name = hir_fn.name
         if bootstrap_name != "":
             print "[mir-lower-free] function:start {bootstrap_name}"
             _bootstrap_mir_function_names.push(bootstrap_name)
-            val mir_fn = lowering.lower_bootstrap_stub_function(bootstrap_mir_symbol_for_index(bootstrap_fni), bootstrap_name)
+            val mir_fn = lowering.lower_function(hir_fn)
             _bootstrap_mir_functions.push(mir_fn)
             var bldr = lowering.builder
             var bldr_module = bldr.module
