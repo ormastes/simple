@@ -1,21 +1,24 @@
 #!/bin/sh
 # Build a bootable rv32 ELF that runs the NVMe-firmware on-device self-test (gap-closure P9).
 #
-# entry.spl exposes `nvme_fw_rv32_selftest()`; wire one call to it into
-# src/os/kernel/arch/riscv32/boot.spl `boot_main` (after riscv_noalloc_log_init), then build the
-# rv32 OS the proven way below. That reuses the proven _start/crt/UART instead of a hand-rolled
-# standalone entry.
+# The stock rv32 boot path calls a weak optional firmware hook. This wrapper
+# writes a build-only root that imports both the boot path and firmware entry,
+# then links through the boot _start while entry.spl provides the strong hook.
 #
-# STATUS (2026-07-04): the rv32 OS boot path is restored in the current lane. This wrapper still
-# builds the stock rv32 boot entry unless `boot.spl` has been wired to call
-# `nvme_fw_rv32_selftest()` and the examples source is included in the build.
+# STATUS (2026-07-05): the rv32 OS boot path contains an optional NVMe firmware hook.
+# This wrapper builds the rv32 OS image with firmware sources so entry.spl can
+# provide the strong hook and print the firmware PASS marker.
 #
 # Usage: sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
 set -e
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 OUT="build/nvme_fw_rv32.elf"
 BOOT="src/os/kernel/arch/riscv32/boot.spl"
+ENTRY_DIR="build/os/generated/os/kernel/arch/riscv32"
+ENTRY="$ENTRY_DIR/nvme_fw_boot_root.spl"
+BOOT_STUB_LINK="$ENTRY_DIR/boot"
 TIMEOUT_SECS="${NVME_RV32_BUILD_TIMEOUT_SECS:-300}"
+SIMPLE_BIN="${NVME_RV32_SIMPLE_BIN:-bin/simple}"
 LOG_DIR="build/test-artifacts"
 OUT_LOG="$LOG_DIR/nvme_fw_rv32_build.out"
 ERR_LOG="$LOG_DIR/nvme_fw_rv32_build.err"
@@ -24,23 +27,41 @@ if ! grep -q "rt_rv32_boot_optional_nvme_fw_selftest" "$BOOT"; then
   exit 2
 fi
 mkdir -p "$LOG_DIR"
+mkdir -p "$ENTRY_DIR"
+rm -rf "$BOOT_STUB_LINK"
+ln -s "$PWD/src/os/kernel/arch/riscv32/boot" "$BOOT_STUB_LINK"
+cat >"$ENTRY" <<'EOF_ENTRY'
+use os.kernel.arch.riscv32.boot
+use entry.{nvme_fw_rv32_selftest}
+
+fn main() -> i64:
+    nvme_fw_rv32_selftest()
+EOF_ENTRY
 rm -f "$OUT"
+{
+  echo "NVME_RV32_BUILD_START timeout=${TIMEOUT_SECS}s out=$OUT"
+  echo "compiler=$SIMPLE_BIN"
+  echo "sources=build/os/generated,src,examples/09_embedded/simpleos_nvme_fw/fw_rv32"
+  echo "entry=$ENTRY target=riscv32-unknown-none"
+} >"$OUT_LOG"
+: >"$ERR_LOG"
 if command -v timeout >/dev/null 2>&1; then
   BUILD_RUNNER="timeout -k 10s ${TIMEOUT_SECS}s"
 else
   BUILD_RUNNER=""
 fi
-if env SIMPLE_BOOTSTRAP=1 $BUILD_RUNNER bin/simple native-build --backend llvm \
+if env SIMPLE_BOOTSTRAP=1 $BUILD_RUNNER "$SIMPLE_BIN" native-build --backend llvm \
   --timeout "$TIMEOUT_SECS" \
-  --source src/os --source src/lib --source examples/09_embedded/simpleos_nvme_fw/fw_rv32 \
-  --entry src/os/kernel/arch/riscv32/boot.spl --entry-closure \
+  --source build/os/generated --source src --source examples/09_embedded/simpleos_nvme_fw/fw_rv32 \
+  --entry "$ENTRY" --entry-closure \
   --linker-script src/os/kernel/arch/riscv32/linker.ld \
   --target riscv32-unknown-none \
-  -o "$OUT" >"$OUT_LOG" 2>"$ERR_LOG"; then
+  -o "$OUT" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
   echo "build exit=0"
 else
   rc=$?
   echo "NVME_RV32_BUILD_FAILED code=$rc timeout=${TIMEOUT_SECS}s out=$OUT_LOG err=$ERR_LOG" >&2
+  tail -n 40 "$OUT_LOG" >&2 || true
   tail -n 40 "$ERR_LOG" >&2 || true
   exit "$rc"
 fi

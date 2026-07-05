@@ -245,6 +245,23 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
   lower-model merge/review or unreviewed done marks block PASS
 - If any AC cannot be verified, it is documented with a clear reason
 
+### Robust-SW / mission-critical lane
+
+> For flight-level / mission-critical SimpleOS lanes, Phase 7 exit is gated by
+> `doc/07_guide/app/spipe/mission_critical_robust_sw.md`, not by the hardening
+> matrix alone. Run the single release gate:
+> `sh scripts/check/check-simpleos-mission-critical-release.shs`
+> Acceptance = `matrix_status=pass release_status=pass release_blockers=none
+> prereq_status=ready prereq_missing=none` (exit 0). The hardening matrix
+> (`check-simpleos-hardening-evidence-matrix.shs`) is subordinate evidence
+> consumed by this gate — never accept it alone. Formal proofs need the
+> SymbiYosys/SMT toolchain (`sby`, `yosys`, `boolector`/`z3`; see
+> `scripts/setup/setup-simpleos-formal-env.shs --print-install`) — without it,
+> prereqs report `missing=sby,yosys,smt-solver` and the release gate is
+> BLOCKED. Concurrency claims need `check-simpleos-critical-formal-proofs.shs`
+> plus `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`, not a
+> single-interleaving test. Run all gates on the self-hosted `bin/simple`.
+
 ---
 
 ## Phase 8: Ship

@@ -24,15 +24,18 @@ For SimpleOS mission-critical release readiness:
 sh scripts/check/check-simpleos-mission-critical-release.shs
 ```
 
-Completion requires `release_blockers=none`.
+Completion requires the release gate to report `matrix_status=pass`,
+`release_status=pass`, `release_blockers=none`, and `prereq_status=ready`.
 
-For the hardening matrix handoff:
+The hardening matrix is subordinate evidence consumed by the release gate. For
+the matrix handoff:
 
 ```bash
 sh scripts/check/check-simpleos-hardening-evidence-matrix.shs
 ```
 
-The current matrix contract is:
+Latest observed matrix-output snapshot for this lane (2026-07-05; rerun the
+release gate for current evidence):
 
 - `simpleos_hardening_matrix_passed=25/25`
 - `simpleos_hardening_mission_critical_release_status=pass`
@@ -51,8 +54,8 @@ rerun the prereq and mission-critical release gates.
 
 ## Thread, Process, Coroutine Hardening
 
-Use `doc/07_guide/lib/misc/stdlib.md` as the API map. Keep `thread_spawn`,
-`cooperative_green_*`, `multicore_green_*`, `task_spawn`,
+Use `doc/07_guide/lib/misc/stdlib.md` as the API map. Keep `thread_spawn`
+variants, `cooperative_green_*`, `multicore_green_*`, `task_spawn`,
 `app.io.mod.process_spawn_async`, and coroutine behavior separate in evidence.
 
 New or changed lifecycle behavior must expose failure visibility and cleanup:
@@ -60,6 +63,15 @@ resume/join idempotence for coroutines; `process_wait`,
 `process_is_running`/`process_is_alive`, or `process_kill` evidence for child
 processes; and `used_runtime_pool()` plus counter evidence for M:N CPU-parallel
 claims through `multicore_green_spawn`.
+
+For an async-library hardening handoff, use:
+
+```bash
+sh scripts/check/check-async-library-hardening-evidence.shs
+```
+
+This is representative regression evidence for the current async surfaces, not
+a formal starvation/fairness/race proof.
 
 ## Formal Proof Gates
 

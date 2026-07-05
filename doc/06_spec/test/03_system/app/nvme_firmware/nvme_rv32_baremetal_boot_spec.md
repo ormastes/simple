@@ -27,7 +27,7 @@ nvme_rv32_baremetal_boot_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -49,7 +49,7 @@ NVMe firmware baremetal-remote boot — a Simple-compiled rv32 kernel booted on 
 | Design | N/A |
 | Research | doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md |
 | Source | `test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 NVMe firmware baremetal-remote boot — a Simple-compiled rv32 kernel booted on QEMU
@@ -63,24 +63,25 @@ virt`, its serial console is captured to a file, and the subsystem-health marker
 are asserted.
 
 This spec is FAIL-CLOSED: if `qemu-system-riscv32` is not installed, or the prebuilt
-ELF is absent, it records a clear host-unavailable / missing-media reason and asserts
-that reason instead of asserting a boot it could not perform — it never fakes a pass
-and never skips silently. Run:
+ELF is absent, it fails with a clear host-unavailable / missing-media reason instead
+of asserting a boot it could not perform — it never fakes a pass and never skips
+silently. Run:
 `bin/simple test test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl`.
 
-NOTE (2026-07-04): this asserts the prebuilt rv32 OS ELF boots. The firmware-specific P9 wrapper
-has a separate scenario below proving the boot hook is wired and the firmware entry owns the
-strong exported hook that prints the PASS marker.
+NOTE (2026-07-05): this asserts the prebuilt NVMe firmware rv32 ELF boots and
+prints the firmware PASS marker. The P9 wrapper has a separate scenario below
+proving the boot hook is wired and the firmware entry owns the strong exported
+hook.
 
 ## Scenarios
 
 ### NVMe firmware rv32 baremetal-remote boot on QEMU
 
-#### the Simple-generated rv32 binary boots on QEMU and reports subsystem health
+#### the NVMe firmware rv32 ELF boots on QEMU and reports subsystem health
 
 - Probe the host for qemu-system-riscv32 and the NVMe firmware rv32 ELF
-- qemu-system-riscv32 is not installed — record host-unavailable reason and assert it
-- The NVMe firmware rv32 ELF is absent — record missing-media reason and assert it
+- qemu-system-riscv32 is not installed — fail with host-unavailable reason
+- The NVMe firmware rv32 ELF is absent — fail with missing-media reason
 - Boot the NVMe firmware rv32 ELF on QEMU and capture the serial console
 - The serial console shows the SimpleOS RV32 banner
 - The kernel reports boot completion on the serial console
@@ -101,14 +102,14 @@ val (qout, qerr, qcode) = _probe("command -v qemu-system-riscv32 >/dev/null 2>&1
 val (eout, eerr, ecode) = _probe("test -f " + ELF + " && echo ELF_PRESENT || echo ELF_ABSENT")
 
 if qout.contains("QEMU_ABSENT"):
-    step("qemu-system-riscv32 is not installed — record host-unavailable reason and assert it")
+    step("qemu-system-riscv32 is not installed — fail with host-unavailable reason")
     val reason = "HOST-UNAVAILABLE: qemu-system-riscv32 is not installed on this host"
-    expect(reason).to_contain("HOST-UNAVAILABLE")
+    fail(reason)
 else:
     if eout.contains("ELF_ABSENT"):
-        step("The NVMe firmware rv32 ELF is absent — record missing-media reason and assert it")
+        step("The NVMe firmware rv32 ELF is absent — fail with missing-media reason")
         val reason = "MISSING-MEDIA: build/nvme_fw_rv32.elf is absent (run examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs first)"
-        expect(reason).to_contain("MISSING-MEDIA")
+        fail(reason)
     else:
         step("Boot the NVMe firmware rv32 ELF on QEMU and capture the serial console")
         val (out, err, code) = _boot()

@@ -61,3 +61,20 @@ won't link — its dir has no `boot/` for C autodiscovery — so the bootable pa
 freestanding runtime. The full 22-module no-alloc port of `../fw/` remains the larger ceiling.
 Tracked:
 `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
+
+## Current blocker (2026-07-05): self-hosted build timeout and reactor runtime stop
+
+`NVME_RV32_BUILD_TIMEOUT_SECS=60 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`
+currently exits `124` before producing `build/nvme_fw_rv32.elf`, so the QEMU
+runtime PASS marker remains blocked. This is tracked separately from the fixed
+silent-255 bug:
+`doc/08_tracking/bug/nvme_rv32_firmware_build_timeout_2026-07-05.md`.
+
+The wrapper defaults to `bin/simple`; set `NVME_RV32_SIMPLE_BIN` only for an
+explicit diagnostic compiler comparison.
+
+Diagnostic seed builds now root the firmware hook correctly: `llvm-nm` shows a
+strong `rt_rv32_boot_optional_nvme_fw_selftest`, and QEMU prints
+`RV32 NVME FW BEGIN`. The baremetal run then reaches progress markers through
+admin (`R E J M B S P H Q I F A`) and stops before reactor marker `C`, so the
+remaining firmware runtime blocker is `rv32_reactor_selftest()` on rv32.

@@ -21,6 +21,17 @@ typedef unsigned char spl_u8;
 #define RT_HEAP_ARRAY 0x02U
 #define RT_HEAP_TUPLE 0x04U
 #define RT_HEAP_ENUM 0x07U
+/* Mapped RAM window for the riscv (rv32/rv64) freestanding boot image: the
+ * kernel is loaded at 0x80000000 and the value-heap arena lives below
+ * 0x88000000 (see g_freestanding_heap_*). A real heap object -- runtime-
+ * allocated or an rt_extern_heap-wrapped C static -- is always inside this
+ * window. Any candidate header outside it is a misclassified integer, so
+ * rt_as_heap must reject it BEFORE dereferencing header->object_type,
+ * otherwise the load faults (no trap vector during early boot -> silent hang).
+ * The seed compiler routes scalar i64 ==/!= through rt_native_eq, feeding raw
+ * integer operands here; without this bound those faulted mid-selftest. */
+#define RT_RAM_WINDOW_BASE 0x80000000ULL
+#define RT_RAM_WINDOW_END 0x88000000ULL
 
 typedef struct RtHeapHeader {
     spl_u8 object_type;
@@ -191,12 +202,17 @@ static RtHeapHeader *rt_as_heap(spl_i64 value, spl_u8 kind) {
     } else {
         return (RtHeapHeader *)0;
     }
-    /* Reject null AND tiny/invalid pointers: a real heap object is never below
-     * 0x10000 (same threshold the untagged branch above already enforces). Without
-     * this, a heap-TAGGED value like 0x9 masks to header 0x8 and the
-     * header->object_type load below faults (rv32: load access fault at 0x8 during
-     * early boot, before any trap vector is installed -> silent hang). */
-    if (!header || (spl_u64)header < 0x10000ULL || header->object_type != kind) {
+    /* Reject any candidate that falls outside the mapped RAM window before the
+     * header->object_type load. A real heap object (runtime-allocated or an
+     * rt_extern_heap C static) always lives in [RT_RAM_WINDOW_BASE,
+     * RT_RAM_WINDOW_END); a misclassified integer operand (e.g. a heap-TAGGED
+     * value like 0x9 masking to header 0x8, or a raw scalar the seed's
+     * rt_native_eq lowering passes here) points elsewhere and would fault the
+     * load during early boot, before any trap vector is installed -> silent hang. */
+    if (!header ||
+        (spl_u64)header < RT_RAM_WINDOW_BASE ||
+        (spl_u64)header >= RT_RAM_WINDOW_END ||
+        header->object_type != kind) {
         return (RtHeapHeader *)0;
     }
     return header;
