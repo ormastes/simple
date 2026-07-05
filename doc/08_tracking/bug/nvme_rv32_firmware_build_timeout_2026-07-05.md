@@ -442,3 +442,14 @@ the last phase marker advances farther into the split firmware logic:
 
 A longer 900s probe was interrupted after more than 9 minutes without producing
 `build/nvme_fw_rv32.elf`, so raising the timeout is not a production fix.
+
+Follow-up parser hot-path work gates current parser/lexer token state env writes
+behind compatibility flags and computes token text lazily from offsets. Focused
+parser/lexer specs still pass, direct `logic_band.spl` check improves to about
+10.1s, and the 300s production wrapper now advances through `logic_band.spl`
+before timing out at `logic_sched.spl`:
+
+```text
+[BOOTSTRAP-PHASE] phase2:parse:entry:done examples/.../logic_band.spl
+[BOOTSTRAP-PHASE] phase2:parse:entry examples/.../logic_sched.spl
+```

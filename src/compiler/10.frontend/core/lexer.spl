@@ -250,39 +250,53 @@ fn lex_cur_kind_get_slot() -> i64:
 
 fn lex_cur_kind_set(value: i64):
     lex_cur_kind_direct[0] = value
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_KIND", "{value}")
+    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_KIND", "{value}")
 
 fn lex_cur_line_get_slot() -> i64:
     lex_cur_line_direct[0]
 
 fn lex_cur_line_set(value: i64):
     lex_cur_line_direct[0] = value
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_LINE", "{value}")
+    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_LINE", "{value}")
 
 fn lex_cur_col_get_slot() -> i64:
     lex_cur_col_direct[0]
 
 fn lex_cur_col_set(value: i64):
     lex_cur_col_direct[0] = value
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_COL", "{value}")
+    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_COL", "{value}")
 
 fn lex_cur_text_get_slot() -> text:
+    if lex_cur_kind_direct[0] == 3:
+        return lex_cur_text_direct[0]
+    if lex_cur_text_direct[0] == "" and current_core_lexer_slot != nil and current_core_lexer_slot.len() > 0:
+        val lx = current_core_lexer_slot[0]
+        val start = lex_token_start_direct[0]
+        val end = lex_token_end_direct[0]
+        val kind = lex_cur_kind_direct[0]
+        if start >= 0 and end > start and end <= lx.source.len() and kind != 180 and kind != 181 and kind != 182 and kind != 190:
+            return lx.source[start:end]
     lex_cur_text_direct[0]
 
 fn lex_cur_text_set(value: text):
     lex_cur_text_direct[0] = value
-    val nul = char_from_code(0)
-    if value.contains(nul):
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", "")
-    else:
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", value)
+    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+        val nul = char_from_code(0)
+        if value.contains(nul):
+            rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", "")
+        else:
+            rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", value)
 
 fn lex_cur_suffix_get_slot() -> text:
     lex_cur_suffix_direct[0]
 
 fn lex_cur_suffix_set(value: text):
     lex_cur_suffix_direct[0] = value
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_SUFFIX", value)
+    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_SUFFIX", value)
 
 fn lex_token_start_get() -> i64:
     if lex_token_start_direct != nil and lex_token_start_direct.len() > 0:
@@ -697,25 +711,16 @@ fn lex_next() -> i64:
     current_core_lexer_slot[0] = loaded
     current_core_lexer_save(loaded)
     lex_cur_kind_set(kind)
-    var token_text = loaded.cur_text
-    if token_text == "" and loaded.cur_start >= 0 and loaded.pos >= loaded.cur_start:
-        token_text = loaded.source[loaded.cur_start:loaded.pos]
-        if kind == 180 or kind == 181 or kind == 182 or kind == 190:
-            token_text = ""
     lex_token_start_direct[0] = loaded.cur_start
     lex_token_end_direct[0] = loaded.pos
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", "{loaded.cur_start}")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", "{loaded.pos}")
+    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", "{loaded.cur_start}")
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", "{loaded.pos}")
     if kind == 7 or kind == 8:
         lex_cur_suffix_set(rt_env_get("SIMPLE_BOOTSTRAP_CORE_TOKEN_SUFFIX") ?? "")
     else:
         lex_cur_suffix_set("")
-    lex_cur_text_direct[0] = token_text
-    val nul = char_from_code(0)
-    if token_text.contains(nul):
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", "")
-    else:
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", token_text)
+    lex_cur_text_set(loaded.cur_text)
     lex_cur_line_set(core_lexer_last_line_get())
     lex_cur_col_set(core_lexer_last_col_get())
     kind
@@ -776,7 +781,7 @@ fn lex_snapshot_save() -> ([i64], [text]):
         at_ls_i = 1
     var nums: [i64] = [lx.pos, lx.line, lx.col, lx.pending_dedents, at_ls_i, lx.paren_depth, lx.cur_start, lex_cur_kind_direct[0], lex_cur_line_direct[0], lex_cur_col_direct[0]]
     val indent_stack_text = current_core_indent_stack_format(lx.indent_stack)
-    var txts: [text] = [lex_cur_text_direct[0], indent_stack_text]
+    var txts: [text] = [lex_cur_text_direct[0], indent_stack_text, lex_cur_suffix_direct[0]]
     (nums, txts)
 
 fn lex_snapshot_restore(nums: [i64], txts: [text]):
@@ -806,10 +811,14 @@ fn lex_snapshot_restore(nums: [i64], txts: [text]):
     val saved_line = nums[8]
     val saved_col  = nums[9]
     val saved_text = txts[0]
+    var saved_suffix = ""
+    if txts.len() > 2:
+        saved_suffix = txts[2]
     lex_cur_kind_set(saved_kind)
     lex_cur_line_set(saved_line)
     lex_cur_col_set(saved_col)
     lex_cur_text_set(saved_text)
+    lex_cur_suffix_set(saved_suffix)
     # Restore the token offset env vars so parser_token_text_from_offsets works
     lex_token_start_direct[0] = nums[6]
     lex_token_end_direct[0] = nums[0]
