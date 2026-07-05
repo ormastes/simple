@@ -1,0 +1,83 @@
+#!/bin/sh
+set -eu
+
+src_root="tmp/claude/claude-code-main/src"
+trace_dir="doc/03_plan/trace"
+feature_matrix="$trace_dir/llm_caret_claude_cli_full_parity_feature_matrix.tsv"
+file_matrix="$trace_dir/llm_caret_claude_cli_full_parity_file_matrix.tsv"
+symbol_matrix="$trace_dir/llm_caret_claude_cli_full_parity_symbol_matrix.tsv"
+
+for path in "$feature_matrix" "$file_matrix" "$symbol_matrix"; do
+  if [ ! -f "$path" ]; then
+    echo "missing_matrix=$path"
+    echo "STATUS: FAIL llm-caret-full-parity-plan"
+    exit 1
+  fi
+done
+
+source_files=$(find "$src_root" -type f | wc -l | tr -d ' ')
+file_rows=$(tail -n +2 "$file_matrix" | wc -l | tr -d ' ')
+feature_rows=$(tail -n +2 "$feature_matrix" | wc -l | tr -d ' ')
+symbol_rows=$(tail -n +2 "$symbol_matrix" | wc -l | tr -d ' ')
+
+echo "claude_source_files=$source_files"
+echo "full_parity_file_rows=$file_rows"
+echo "full_parity_feature_rows=$feature_rows"
+echo "full_parity_symbol_rows=$symbol_rows"
+
+if [ "$source_files" -ne "$file_rows" ]; then
+  echo "STATUS: FAIL llm-caret-full-parity-plan"
+  exit 1
+fi
+
+awk -F '\t' '
+  NR > 1 {
+    if ($5 == "" || $8 == "" || $9 == "" || $10 == "") bad++
+    if ($6 + 0 < $2 + 0) small++
+    row = tolower($8 " " $10)
+    if (row ~ /(^|[[:space:][:punct:]])(skip|skipped|defer|deferred|n\/a|todo)([[:space:][:punct:]]|$)/) forbidden++
+  }
+  END {
+    print "file_rows_missing_required_fields=" bad + 0
+    print "file_rows_below_source_loc=" small + 0
+    print "file_rows_with_skip_markers=" forbidden + 0
+    if (bad || small || forbidden) exit 1
+  }
+' "$file_matrix" || {
+  echo "STATUS: FAIL llm-caret-full-parity-plan"
+  exit 1
+}
+
+awk -F '\t' '
+  NR > 1 {
+    if ($5 == "" || $6 == "" || $7 == "" || $8 == "" || $9 == "") bad++
+    row = tolower($8 " " $9)
+    if (row ~ /(^|[[:space:][:punct:]])(skip|skipped|defer|deferred|n\/a|todo)([[:space:][:punct:]]|$)/) forbidden++
+  }
+  END {
+    print "symbol_rows_missing_required_fields=" bad + 0
+    print "symbol_rows_with_skip_markers=" forbidden + 0
+    if (bad || forbidden) exit 1
+  }
+' "$symbol_matrix" || {
+  echo "STATUS: FAIL llm-caret-full-parity-plan"
+  exit 1
+}
+
+awk -F '\t' '
+  NR > 1 {
+    if ($1 == "" || $3 == "" || $4 == "" || $5 == "" || $6 == "" || $7 == "") bad++
+    row = tolower($6 " " $7)
+    if (row ~ /(^|[[:space:][:punct:]])(skip|skipped|defer|deferred|n\/a|todo)([[:space:][:punct:]]|$)/) forbidden++
+  }
+  END {
+    print "feature_rows_missing_required_fields=" bad + 0
+    print "feature_rows_with_skip_markers=" forbidden + 0
+    if (bad || forbidden) exit 1
+  }
+' "$feature_matrix" || {
+  echo "STATUS: FAIL llm-caret-full-parity-plan"
+  exit 1
+}
+
+echo "STATUS: PASS llm-caret-full-parity-plan"
