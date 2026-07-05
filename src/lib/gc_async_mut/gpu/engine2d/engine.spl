@@ -196,7 +196,11 @@ class Engine2D:
         if requested_backend == "directx":
             var directx = DirectXBackend.create()
             if directx.init(width, height):
-                return Ok(Engine2D(backend: directx, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx"))
+                # Stamp the backend's honest self-reported name
+                # ("directx-software-emulation"): draws are CPU-rasterized by
+                # its internal SoftwareBackend even when the D3D11/DXVK device
+                # chain initializes. "directx" stays valid as the REQUESTED key.
+                return Ok(Engine2D(backend: directx, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: directx.name()))
 
         if requested_backend == "directx-on-vulkan":
             # DirectX-on-Vulkan emulation: serve a DirectX API request through the
@@ -205,7 +209,8 @@ class Engine2D:
             # vs SoftwareBackend; primitive coverage matches VulkanBackend. The
             # selected name discloses the emulation rather than claiming native
             # DirectX. Distinct from the "directx" key, which is the CPU raster
-            # path gated by a real vkd3d/Vulkan ICD probe.
+            # path gated by a real vkd3d/Vulkan ICD probe and honestly reported
+            # as "directx-software-emulation".
             var dx_vk = VulkanBackend.create()
             if dx_vk.init(width, height):
                 return Ok(Engine2D(backend: dx_vk, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx-on-vulkan"))
@@ -337,12 +342,14 @@ class Engine2D:
 
         if requested_backend == "directx":
             var b = DirectXBackend.create()
+            # Report the backend's honest self-reported name
+            # ("directx-software-emulation"); "directx" is only the requested key.
             if b.init(width, height):
                 b.shutdown()
-                return BackendProbeResult.success("directx", "DirectX initialized")
+                return BackendProbeResult.success(b.name(), "DirectX(software-emulation raster) initialized")
             if b.last_error != "":
-                return BackendProbeResult.unavailable("directx", b.last_error)
-            return BackendProbeResult.unavailable("directx", "d3d11 device or swapchain creation failed")
+                return BackendProbeResult.unavailable(b.name(), b.last_error)
+            return BackendProbeResult.unavailable(b.name(), "d3d11 device or swapchain creation failed")
         if requested_backend == "opencl":
             var b = OpenClBackend.create()
             if b.init(width, height):

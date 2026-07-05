@@ -18,6 +18,12 @@ PRODUCTION_ENV="${PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV:-build/production_gui_w
 FRESHNESS_ENV="${GUI_WEB_2D_PLATFORM_FRESHNESS_ENV:-build/gui-web-2d-platform-freshness/evidence.env}"
 WINDOWS_VULKAN_ENV="${WINDOWS_ELECTRON_VULKAN_WEB_PARITY_ENV:-$NATIVE_ENV}"
 
+# Honesty: upstream evidence is only trustworthy for a bounded window. A
+# stale evidence.env (e.g. from a run days ago, before an unrelated code
+# change) must not silently keep this rollup green. Mirrors
+# check-production-gui-web-renderer-parity-gate.shs.
+MAX_EVIDENCE_AGE_HOURS="${MAX_EVIDENCE_AGE_HOURS:-72}"
+
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 
 value_of() {
@@ -87,12 +93,44 @@ launch_flag_present() {
     esac
 }
 
-file_state() {
-    if [ -s "$1" ]; then
-        echo pass
+file_mtime_epoch() {
+    if stat -f %m "$1" >/dev/null 2>&1; then
+        stat -f %m "$1"
     else
-        echo missing
+        stat -c %Y "$1" 2>/dev/null
     fi
+}
+
+# file_state <file> [required_key ...]
+#   missing  — file absent or empty
+#   invalid  — file exists but one of the expected key=value lines is
+#              absent or empty (corrupt/truncated evidence is not evidence)
+#   stale    — file older than MAX_EVIDENCE_AGE_HOURS (or mtime unreadable)
+#   pass     — present, schema-valid, fresh
+file_state() {
+    state_file="$1"
+    shift
+    if [ ! -s "$state_file" ]; then
+        echo missing
+        return
+    fi
+    for state_key in "$@"; do
+        if [ "$(value_of "$state_key" "$state_file")" = "" ]; then
+            echo invalid
+            return
+        fi
+    done
+    state_mtime="$(file_mtime_epoch "$state_file")"
+    if [ -z "$state_mtime" ] || ! [ "$state_mtime" -gt 0 ] 2>/dev/null; then
+        echo stale
+        return
+    fi
+    state_age_hours=$(( ( $(date +%s) - state_mtime ) / 3600 ))
+    if [ "$state_age_hours" -gt "$MAX_EVIDENCE_AGE_HOURS" ] 2>/dev/null; then
+        echo stale
+        return
+    fi
+    echo pass
 }
 
 append_list() {
@@ -108,8 +146,9 @@ append_list() {
 gate_status_from_keys() {
     file="$1"
     shift
-    if [ "$(file_state "$file")" != "pass" ]; then
-        echo missing
+    gate_file_state="$(file_state "$file" "$@")"
+    if [ "$gate_file_state" != "pass" ]; then
+        echo "$gate_file_state"
         return
     fi
     for key in "$@"; do
@@ -136,8 +175,9 @@ gate_status_from_keys() {
 }
 
 freshness_status() {
-    if [ "$(file_state "$FRESHNESS_ENV")" != "pass" ]; then
-        echo missing
+    freshness_file_state="$(file_state "$FRESHNESS_ENV" gui_web_2d_platform_freshness_status)"
+    if [ "$freshness_file_state" != "pass" ]; then
+        echo "$freshness_file_state"
         return
     fi
     for key in \
@@ -197,8 +237,9 @@ freshness_status() {
 }
 
 windows_vulkan_status() {
-    if [ "$(file_state "$WINDOWS_VULKAN_ENV")" != "pass" ]; then
-        echo missing
+    windows_vulkan_file_state="$(file_state "$WINDOWS_VULKAN_ENV" electron_vulkan_web_parity_windows_status)"
+    if [ "$windows_vulkan_file_state" != "pass" ]; then
+        echo "$windows_vulkan_file_state"
         return
     fi
     for key in \
@@ -806,12 +847,22 @@ fresh_status="$(freshness_status)"
 proven=""
 missing=""
 failed=""
+stale_gates=""
+invalid_gates=""
 record_gate() {
     gate="$1"
     gate_status="$2"
     case "$gate_status" in
         pass) proven="$(append_list "$proven" "$gate")" ;;
         missing) missing="$(append_list "$missing" "$gate")" ;;
+        stale)
+            stale_gates="$(append_list "$stale_gates" "$gate")"
+            failed="$(append_list "$failed" "$gate")"
+            ;;
+        invalid)
+            invalid_gates="$(append_list "$invalid_gates" "$gate")"
+            failed="$(append_list "$failed" "$gate")"
+            ;;
         *) failed="$(append_list "$failed" "$gate")" ;;
     esac
 }
@@ -851,7 +902,13 @@ status=pass
 reason=pass
 if [ "$failed_count" != "0" ]; then
     status=fail
-    reason=failed-live-gates
+    if [ "$failed" = "$stale_gates" ]; then
+        reason="stale-live-gates-exceed-${MAX_EVIDENCE_AGE_HOURS}h"
+    elif [ "$failed" = "$invalid_gates" ]; then
+        reason=invalid-live-gate-evidence
+    else
+        reason=failed-live-gates
+    fi
 elif [ "$missing_count" != "0" ]; then
     status=incomplete
     reason=missing-live-gates
@@ -868,6 +925,9 @@ fi
     echo "gui_web_2d_platform_evidence_bundle_proven_gates=$proven"
     echo "gui_web_2d_platform_evidence_bundle_missing_gates=$missing"
     echo "gui_web_2d_platform_evidence_bundle_failed_gates=$failed"
+    echo "gui_web_2d_platform_evidence_bundle_stale_gates=$stale_gates"
+    echo "gui_web_2d_platform_evidence_bundle_invalid_gates=$invalid_gates"
+    echo "gui_web_2d_platform_evidence_bundle_max_evidence_age_hours=$MAX_EVIDENCE_AGE_HOURS"
     echo "gui_web_2d_platform_evidence_bundle_remaining_gates=$remaining"
     echo "gui_web_2d_platform_evidence_bundle_linux_vulkan_renderdoc_status=$linux_status"
     echo "gui_web_2d_platform_evidence_bundle_macos_metal_xcode_gpu_capture_status=$macos_status"
@@ -898,12 +958,16 @@ fi
     echo "- Proven gates: $proven_count"
     echo "- Missing gates: $missing_count"
     echo "- Failed gates: $failed_count"
+    echo "- Stale gates (older than ${MAX_EVIDENCE_AGE_HOURS}h): $stale_gates"
+    echo "- Invalid (corrupt/truncated) gate evidence: $invalid_gates"
     echo "- Remaining gates: $remaining"
     echo
     echo "This checker is non-launching. It consumes env files from the platform"
     echo "render-log, mobile, retained performance, HTML/CSS, production parity, and"
     echo "freshness checkers. Missing evidence remains incomplete; failed evidence"
-    echo "remains failed."
+    echo "remains failed. Upstream env files must contain their expected keys"
+    echo "(otherwise: invalid) and be newer than MAX_EVIDENCE_AGE_HOURS=${MAX_EVIDENCE_AGE_HOURS}h"
+    echo "(otherwise: stale); both are treated as failures, never as proof."
 } >"$REPORT_PATH"
 
 cat "$OUT_ENV"

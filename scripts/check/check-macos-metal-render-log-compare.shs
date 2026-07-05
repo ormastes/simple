@@ -671,6 +671,33 @@ elif [ "$metal_expected" != "$metal_actual" ]; then
     metal_generated_checksum_reason="metal-generated-checksum-mismatch"
     add_reason "$metal_generated_checksum_reason"
 fi
+# Per-op collision-resistant gate: the per-op fields carry position-mixing
+# FNV-1a hashes over (pixel, index) computed by
+# scripts/check/metal_generated_2d_readback_harness.spl, so a swapped or
+# shifted pixel fails the gate (the old order-independent sum could not
+# detect that). Evidence files without per-op keys are still gated by the
+# aggregate comparison above.
+if [ "$metal_generated_checksum_reason" = "pass" ]; then
+    for metal_generated_op in fill copy alpha scroll; do
+        metal_generated_op_actual="$(render_log_value_of "metal_generated_2d_readback_${metal_generated_op}_checksum" "$METAL_GENERATED_2D_READBACK_ENV")"
+        metal_generated_op_expected="$(render_log_value_of "metal_generated_2d_readback_${metal_generated_op}_expected" "$METAL_GENERATED_2D_READBACK_ENV")"
+        if [ -z "$metal_generated_op_actual" ] && [ -z "$metal_generated_op_expected" ]; then
+            continue
+        fi
+        if ! render_log_is_unsigned_int "$metal_generated_op_expected"; then
+            metal_generated_checksum_reason="metal-generated-${metal_generated_op}-hash-expected-missing"
+        elif ! render_log_is_unsigned_int "$metal_generated_op_actual"; then
+            metal_generated_checksum_reason="metal-generated-${metal_generated_op}-hash-missing"
+        elif [ "$metal_generated_op_actual" != "$metal_generated_op_expected" ]; then
+            metal_generated_checksum_reason="metal-generated-${metal_generated_op}-hash-mismatch"
+        fi
+        if [ "$metal_generated_checksum_reason" != "pass" ]; then
+            [ "$compare_status" = "unavailable" ] || compare_status="fail"
+            add_reason "$metal_generated_checksum_reason"
+            break
+        fi
+    done
+fi
 if [ "$framebuffer_status" != "pass" ] || [ "$framebuffer_readback" != "true" ] || [ "$framebuffer_blur" != "false" ]; then
     [ "$compare_status" = "unavailable" ] || compare_status="fail"
     add_reason "metal-framebuffer-readback-${framebuffer_status:-missing}"

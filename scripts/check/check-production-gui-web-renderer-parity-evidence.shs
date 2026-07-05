@@ -28,6 +28,28 @@ SURFACE_MANIFEST_RESUME="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_MANIFEST_R
 SURFACE_CASE_FILTER="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_CASE_FILTER:-}"
 SURFACE_TAURI_WAIT_STEPS="${PRODUCTION_GUI_WEB_RENDERER_PARITY_TAURI_CAPTURE_WAIT_STEPS:-${TAURI_CAPTURE_WAIT_STEPS:-}}"
 
+# Honesty: a reused upstream evidence env is only trustworthy for a bounded
+# window. A stale env (from a run days ago, before an unrelated code change)
+# must not be laundered into fresh parity evidence. Mirrors
+# check-production-gui-web-renderer-parity-gate.shs.
+MAX_EVIDENCE_AGE_HOURS="${MAX_EVIDENCE_AGE_HOURS:-72}"
+
+file_mtime_epoch() {
+    if stat -f %m "$1" >/dev/null 2>&1; then
+        stat -f %m "$1"
+    else
+        stat -c %Y "$1" 2>/dev/null
+    fi
+}
+
+# Prints the file age in whole hours, or nothing when mtime is unreadable.
+file_age_hours() {
+    age_mtime="$(file_mtime_epoch "$1")"
+    if [ -n "$age_mtime" ] && [ "$age_mtime" -gt 0 ] 2>/dev/null; then
+        echo $(( ( $(date +%s) - age_mtime ) / 3600 ))
+    fi
+}
+
 current_source_revision() {
     if [ "${GUI_WEB_2D_SOURCE_REVISION:-}" != "" ]; then
         echo "$GUI_WEB_2D_SOURCE_REVISION"
@@ -345,7 +367,24 @@ run_layout_manifest() {
     mkdir -p "$case_dir"
     env_file="$case_dir/evidence.env"
     layout_reused=false
+    layout_source_env_freshness_reason=""
+    layout_source_env_age_hours=""
     if [ -n "$LAYOUT_MANIFEST_SOURCE_ENV" ] && [ -s "$LAYOUT_MANIFEST_SOURCE_ENV" ]; then
+        layout_source_env_age_hours="$(file_age_hours "$LAYOUT_MANIFEST_SOURCE_ENV")"
+        if [ -z "$layout_source_env_age_hours" ]; then
+            layout_source_env_freshness_reason="layout-manifest-source-env-mtime-unreadable"
+        elif [ "$layout_source_env_age_hours" -gt "$MAX_EVIDENCE_AGE_HOURS" ] 2>/dev/null; then
+            layout_source_env_freshness_reason="stale-layout-manifest-source-env-${layout_source_env_age_hours}h-exceeds-${MAX_EVIDENCE_AGE_HOURS}h"
+        fi
+    fi
+    if [ -n "$layout_source_env_freshness_reason" ]; then
+        # Refuse to reuse stale/unverifiable evidence — fail this lane loudly
+        # instead of laundering an old env into a fresh-looking pass.
+        : >"$env_file"
+        : >"$case_dir/stdout.env"
+        printf '%s\n' "$layout_source_env_freshness_reason" >"$case_dir/stderr.log"
+        code=1
+    elif [ -n "$LAYOUT_MANIFEST_SOURCE_ENV" ] && [ -s "$LAYOUT_MANIFEST_SOURCE_ENV" ]; then
         cp "$LAYOUT_MANIFEST_SOURCE_ENV" "$env_file"
         : >"$case_dir/stdout.env"
         : >"$case_dir/stderr.log"
@@ -398,6 +437,10 @@ run_layout_manifest() {
             fi
         fi
     fi
+    if [ -n "$layout_source_env_freshness_reason" ]; then
+        status=stale
+        reason="$layout_source_env_freshness_reason"
+    fi
     {
         echo "production_gui_web_renderer_parity_layout_manifest_exit_code=$code"
         echo "production_gui_web_renderer_parity_layout_manifest_status=$status"
@@ -406,6 +449,8 @@ run_layout_manifest() {
         echo "production_gui_web_renderer_parity_layout_manifest_timeout_secs=$LAYOUT_SUBCHECK_TIMEOUT_SECS"
         echo "production_gui_web_renderer_parity_layout_manifest_reused=$layout_reused"
         echo "production_gui_web_renderer_parity_layout_manifest_source_env=$LAYOUT_MANIFEST_SOURCE_ENV"
+        echo "production_gui_web_renderer_parity_layout_manifest_source_env_age_hours=${layout_source_env_age_hours:-}"
+        echo "production_gui_web_renderer_parity_layout_manifest_max_evidence_age_hours=$MAX_EVIDENCE_AGE_HOURS"
         echo "production_gui_web_renderer_parity_layout_manifest_case_count=$case_count"
         echo "production_gui_web_renderer_parity_layout_manifest_pass_count=$pass_count"
         echo "production_gui_web_renderer_parity_layout_manifest_tracked_count=$tracked_count"
