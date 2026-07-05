@@ -50,8 +50,8 @@ use os.toolchain_vfs_probe_contract.{
 }
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
 
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -159,12 +159,21 @@ fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
     elif _is_arm64_wm_qemu_target(target) or _is_arm_fs_exec_target(target) or _is_riscv_fs_exec_target(target) or _is_riscv64_display_smoke_target(target) or _is_riscv64_hosted_target(target):
         args.push("--timeout")
         args.push("180")
-    elif _is_riscv64_live_helper_target(target) or _is_ssh_live_target(target):
-        # The SSH live image pulls in the full network/storage/userland slice,
-        # and several reachable modules routinely exceed the default 60s
-        # per-file watchdog on cold LLVM builds even when the lane is healthy.
+    elif _is_riscv64_live_helper_target(target):
         args.push("--timeout")
         args.push("180")
+    elif _is_ssh_live_target(target):
+        # The SSH live image pulls in the full network/storage/userland slice,
+        # and several reachable modules routinely exceed short worker budgets
+        # on cold builds even when the lane is healthy.
+        val outer_timeout_secs = _os_build_timeout_ms() / 1000
+        var worker_timeout_secs = 180
+        if outer_timeout_secs > 210:
+            worker_timeout_secs = outer_timeout_secs - 30
+        elif outer_timeout_secs > 1:
+            worker_timeout_secs = outer_timeout_secs - 1
+        args.push("--timeout")
+        args.push(worker_timeout_secs.to_text())
     args.push("--entry-closure")
     args.push("--entry")
     args.push(target.entry)
@@ -179,7 +188,7 @@ fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
 fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     """Builds the OS kernel for the given target.
 
-    Runs the native-build command via rt_process_run_timeout. Returns true on success.
+    Runs the native-build command through the process facade. Returns true on success.
 
     Phase-level diagnostics are printed so a stalled build identifies which phase
     ran long rather than surfacing as a generic 'Process timed out'. The timeout
@@ -241,7 +250,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     if env_prefix != "":
         print "[build][{arch_label}] env: {env_prefix}"
     print "[build][{arch_label}] cmd: {simple_bin} {args.join(" ")}"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(simple_bin, args, timeout_ms)
+    val (stdout, stderr, exit_code) = process_run_timeout(simple_bin, args, timeout_ms)
     val elapsed_ms = _now_ms() - started_ms
     if exit_code != 0:
         _write_bootstrap_result(target, false, false, backend_name)
@@ -299,7 +308,7 @@ fn _write_native_build_stamp(target: OsTarget, content: text):
 fn _path_newer_than_output(path: text, output: text) -> bool:
     if not rt_file_exists(path):
         return false
-    val (stdout, _stderr, exit_code) = rt_process_run_timeout("find", [path, "-newer", output, "-print", "-quit"], 10000)
+    val (stdout, _stderr, exit_code) = process_run_timeout("find", [path, "-newer", output, "-print", "-quit"], 10000)
     exit_code != 0 or stdout != ""
 
 fn _native_build_inputs_newer_than_output(target: OsTarget, simple_bin: text) -> bool:
@@ -351,7 +360,7 @@ fn _simple_binary_is_valid(candidate: text) -> bool:
     """
     if not rt_file_exists(candidate):
         return false
-    val (stdout, _stderr, exit_code) = rt_process_run_timeout(candidate, ["--version"], 5000)
+    val (stdout, _stderr, exit_code) = process_run_timeout(candidate, ["--version"], 5000)
     exit_code == 0 and stdout != ""
 
 fn _simple_binary_supports_backend(candidate: text, backend_name: text) -> bool:
@@ -368,7 +377,7 @@ fn _simple_binary_supports_backend(candidate: text, backend_name: text) -> bool:
         "-o", "/tmp/simple_backend_probe.elf",
         "--linker-script", "examples/09_embedded/simple_os/arch/riscv64/linker.ld"
     ]
-    val (_stdout, stderr, _exit_code) = rt_process_run_timeout(candidate, probe_args, 5000)
+    val (_stdout, stderr, _exit_code) = process_run_timeout(candidate, probe_args, 5000)
     if stderr.contains("native backend 'llvm' is not available"):
         return false
     if stderr.contains("LLVM backend requested but 'llvm' feature not enabled"):
@@ -853,7 +862,7 @@ fn run_os_with_options(target: OsTarget, options: QemuRunOptions) -> bool:
         print "[run] GUI debug lane enabled: serial output is attached to stdio"
     print "[run] {arch_display_name(target.arch)}: {cmd_parts.join(" ")}"
     val timeout: i64 = if target.gui_mode: 600000 else: 30000
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout)
+    val (stdout, stderr, exit_code) = process_run_timeout(qemu_bin, qemu_args, timeout)
     if stdout != "":
         print "[run] serial output:\n{stdout}"
     if stderr != "":

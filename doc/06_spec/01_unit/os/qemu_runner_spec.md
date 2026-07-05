@@ -745,6 +745,28 @@ expect(os_native_build_sources(target)).to_equal(["examples/09_embedded/simple_o
 
 </details>
 
+#### gives SSH live builds the same cold-build worker timeout headroom
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val target = get_ssh_live_target()
+val args = os_native_build_args(target, "cranelift")
+expect(args).to_contain("--timeout")
+expect(args).to_contain("870")
+expect(rt_env_set("SIMPLE_OS_BUILD_TIMEOUT_MS", "120000")).to_equal(true)
+val short_args = os_native_build_args(target, "cranelift")
+expect(short_args).to_contain("--timeout")
+expect(short_args).to_contain("119")
+expect(rt_env_set("SIMPLE_OS_BUILD_TIMEOUT_MS", "")).to_equal(true)
+```
+
+</details>
+
 #### looks up RISC-V SMF scenarios by name
 
 <details>

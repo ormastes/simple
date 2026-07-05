@@ -380,6 +380,23 @@ theorem enqueue_empty_then_runOne_empty (t : GreenTask) :
     SchedState.runOne (({ ready := [] } : SchedState).enqueue t) = { ready := [] } := by
   simp [SchedState.enqueue, SchedState.runOne, SchedState.popHead]
 
+/-- Run a bounded number of scheduler ticks.  This is the finite-step view used
+    to state service latency without assuming a coinductive scheduler loop. -/
+def runOneSteps : Nat → SchedState → SchedState
+  | 0, s => s
+  | n + 1, s => runOneSteps n (SchedState.runOne s)
+
+/-- T7i: each scheduler tick consumes one queued task until the queue is empty,
+    giving a finite service bound equal to the initial ready-queue length in the
+    no-requeue model. -/
+theorem runOne_service_bound_by_ready_length (ready : List GreenTask) :
+    (runOneSteps ready.length { ready := ready }).ready = [] := by
+  induction ready with
+  | nil =>
+      simp [runOneSteps]
+  | cons t rest ih =>
+      simp [runOneSteps, SchedState.runOne, SchedState.popHead, ih]
+
 -- ============================================================
 -- § H  T8 — cpuAllowed semantics
 -- ============================================================
