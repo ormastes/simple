@@ -40,6 +40,9 @@ Resume the segfault/loader hardening work with Rust treated only as the seed/too
   - Math distribution NaN generation no longer uses semantic division by zero, and corrected distribution expectations pass.
   - `sh scripts/bootstrap/bootstrap-from-scratch.sh --deploy --no-mcp` rebuilt the Rust seed/runtime and reached Stage 4 full CLI compile, but Stage 4 stayed silent and was stopped at the bounded cap before refreshing `bin/release/x86_64-unknown-linux-gnu/simple`.
   - Stage 4 now uses the documented direct `run src/app/cli/native_build_main.spl -- ...` seed fallback and reports Stage 3's missing executable accurately. A bounded 25-minute deploy retry showed the worker stayed CPU-active with diagnostics captured, but still produced no refreshed full CLI binary before timeout.
+  - 2026-07-05 self-host evidence: an existing `bin/release/.../simple run src/app/cli/native_build_worker.spl ... --entry src/app/cli/main.spl` worker stayed CPU-bound for more than 1h33m, wrote no stdout, produced no `simple_selfhost` output, and left its `--cache-dir` empty. The Stage 4 blocker is before object/cache emission, not deploy copy or linker output.
+  - 2026-07-05 parser evidence: `SIMPLE_COMPILER_TRACE=1 SIMPLE_INTERP_TRACE=1 bin/simple native-build ... --entry-closure --entry src/app/cli/main.spl` reached `phase2:parse:entry src/app/cli/_CliMain/args_and_os_commands.spl` but did not reach `entry:done` before the bounded timeout. A focused `bin/simple check src/app/cli/_CliMain/args_and_os_commands.spl` also timed out after 30s.
+  - 2026-07-05 partial source cleanup: `args_and_os_commands.spl` used `get_qemu_target` without importing it and had one non-ASCII help string. The import is now explicit and help text is ASCII, but the 30s focused check still times out; redeploy remains blocked.
 
 ## Restart Steps
 
