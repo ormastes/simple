@@ -87,3 +87,11 @@ Use the narrow command that matches the claim:
 
 Missing `sby`, `yosys`, or an SMT solver is readiness/blocker evidence, not an
 RTL proof pass.
+
+`check-simpleos-formal-coverage.shs` also asserts a text contract: each formal
+row must have an executable wrapper gate, and `setup-simpleos-formal-env.shs`
+must keep the canonical install command (`sudo apt-get install yosys symbiyosys
+boolector z3`). Editing that setup script without preserving the literal install
+line fails the coverage audit and blocks the whole release gate even when every
+individual proof passes — aggregate coverage cannot pass by status-only
+derivation.
