@@ -255,3 +255,25 @@ NVME_RV32_BUILD_TIMEOUT_SECS=180 sh examples/09_embedded/simpleos_nvme_fw/fw_rv3
 So this bug remains open. The next blocker is the remaining native-build
 compiler-load/codegen time for the RV32 source set, not just the old worker
 entrypoint.
+
+### Full failure mask propagation fixed (2026-07-05)
+
+`fw_rv32/entry.spl` now returns and emits the full `raw_fail` mask instead of
+truncating it to 16 bits. High-stage failures (`L/Y/K/G/N`) can no longer be
+hidden behind the UART PASS marker.
+
+### RV32 wrapper stopped forcing worker fallback (2026-07-05)
+
+`fw_rv32/build.shs` no longer sets `SIMPLE_BOOTSTRAP=1` or passes `--timeout`
+into `simple native-build`; the outer shell `timeout` still bounds the build.
+This lets the wrapper use the direct native-build path instead of forcing the
+interpreted worker fallback.
+
+Verification attempt:
+
+```sh
+NVME_RV32_BUILD_TIMEOUT_SECS=120 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+# NVME_RV32_BUILD_FAILED code=124 timeout=120s
+```
+
+So the timeout remains open even on the direct wrapper path.
