@@ -1,0 +1,82 @@
+#!/bin/sh
+set -eu
+
+report="doc/09_report/llm_caret_claude_cli_traceability.md"
+src_dir="src/app/llm_caret"
+symbols_file=$(mktemp)
+trap 'rm -f "$symbols_file"' EXIT
+
+if [ ! -f "$report" ]; then
+  echo "llm_caret_trace_report=missing"
+  echo "STATUS: FAIL llm-caret-claude-cli-trace"
+  exit 1
+fi
+
+total=$(find "$src_dir" -maxdepth 1 -name '*.spl' | wc -l | tr -d ' ')
+mapped=0
+total_loc=0
+mapped_loc=0
+for file in "$src_dir"/*.spl; do
+  file_loc=$(wc -l < "$file" | tr -d ' ')
+  total_loc=$((total_loc + file_loc))
+  if grep -q "| \`$file\` |" "$report"; then
+    mapped=$((mapped + 1))
+    mapped_loc=$((mapped_loc + file_loc))
+  fi
+done
+
+percent=$((mapped * 100 / total))
+loc_percent=$((mapped_loc * 100 / total_loc))
+echo "llm_caret_source_files=$total"
+echo "llm_caret_mapped_files=$mapped"
+echo "llm_caret_mapping_percent=$percent"
+echo "llm_caret_source_loc=$total_loc"
+echo "llm_caret_mapped_loc=$mapped_loc"
+echo "llm_caret_loc_mapping_percent=$loc_percent"
+
+if [ "$percent" -lt 80 ] || [ "$loc_percent" -lt 80 ]; then
+  echo "STATUS: FAIL llm-caret-claude-cli-trace"
+  exit 1
+fi
+
+for marker in "## MDSOC+ Caret Boundary" "## Function Trace" "## Simple Symbol Trace" "## Claude Source Trace" "## Claude Key Symbol Trace" "src/entrypoints/cli.tsx" "src/QueryEngine.ts"; do
+  if ! grep -q "$marker" "$report"; then
+    echo "missing_marker=$marker"
+    echo "STATUS: FAIL llm-caret-claude-cli-trace"
+    exit 1
+  fi
+done
+
+for symbol in "function:main" "class:QueryEngine" "type:QueryEngineConfig" "type:Tool" "function:findToolByName" "function:buildTool" "type:State"; do
+  if ! grep -F -q "\`$symbol\`" "$report"; then
+    echo "missing_claude_symbol_trace=$symbol"
+    echo "STATUS: FAIL llm-caret-claude-cli-trace"
+    exit 1
+  fi
+done
+
+awk '
+/^extern fn / { name=$3; sub(/\(.*/, "", name); print "extern:" name }
+/^struct / { name=$2; sub(/:.*/, "", name); print "struct:" name }
+/^fn / { name=$2; sub(/\(.*/, "", name); print "fn:" name }
+' "$src_dir"/*.spl | sort -u > "$symbols_file"
+
+symbol_total=$(wc -l < "$symbols_file" | tr -d ' ')
+symbol_traced=0
+while IFS= read -r symbol; do
+  if grep -F -q "\`$symbol\`" "$report"; then
+    symbol_traced=$((symbol_traced + 1))
+  else
+    echo "missing_symbol_trace=$symbol"
+  fi
+done < "$symbols_file"
+
+echo "llm_caret_symbol_count=$symbol_total"
+echo "llm_caret_symbol_traced_count=$symbol_traced"
+
+if [ "$symbol_traced" -ne "$symbol_total" ]; then
+  echo "STATUS: FAIL llm-caret-claude-cli-trace"
+  exit 1
+fi
+
+echo "STATUS: PASS llm-caret-claude-cli-trace"
