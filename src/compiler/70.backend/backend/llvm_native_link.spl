@@ -22,6 +22,7 @@ extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(key: text) -> text
+extern fn rt_dir_create_all(path: text) -> bool
 
 fn llvm_link_trace_enabled() -> bool:
     (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
@@ -59,8 +60,14 @@ fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64) -> Result<text
         return Err("No C compiler found")
     val tmp_dir = _get_temp_dir()
     val ext = _obj_ext()
-    val entry_c = "{tmp_dir}/simple_entry_{pid}.c"
-    val entry_o = "{tmp_dir}/simple_entry_{pid}{ext}"
+    # Deterministic entry-shim basename for reproducible builds: the C compiler
+    # embeds the source basename (STT_FILE) into the object, so a PID in the
+    # filename would leak into the binary and break bootstrap determinism. Keep
+    # the PID in the directory (concurrency-safe) and use a fixed basename.
+    val entry_dir = "{tmp_dir}/simple_entry_{pid}"
+    rt_dir_create_all(entry_dir)
+    val entry_c = "{entry_dir}/simple_entry.c"
+    val entry_o = "{entry_dir}/simple_entry{ext}"
     var c_source = "extern void spl_init_args(int argc, char** argv);\n"
     c_source = c_source + "extern void __simple_runtime_init(void);\n"
     c_source = c_source + "extern long long __simple_main(void);\n"
