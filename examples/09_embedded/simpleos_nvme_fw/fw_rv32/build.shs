@@ -15,16 +15,33 @@ set -e
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 OUT="build/nvme_fw_rv32.elf"
 BOOT="src/os/kernel/arch/riscv32/boot.spl"
+TIMEOUT_SECS="${NVME_RV32_BUILD_TIMEOUT_SECS:-300}"
+LOG_DIR="build/test-artifacts"
+OUT_LOG="$LOG_DIR/nvme_fw_rv32_build.out"
+ERR_LOG="$LOG_DIR/nvme_fw_rv32_build.err"
 if ! grep -q "rt_rv32_boot_optional_nvme_fw_selftest" "$BOOT"; then
   echo "NVME_RV32_BOOT_NOT_WIRED: add rt_rv32_boot_optional_nvme_fw_selftest() to $BOOT before building $OUT"
   exit 2
 fi
+mkdir -p "$LOG_DIR"
 rm -f "$OUT"
-SIMPLE_BOOTSTRAP=1 bin/simple native-build --backend llvm \
+if command -v timeout >/dev/null 2>&1; then
+  BUILD_RUNNER="timeout -k 10s ${TIMEOUT_SECS}s"
+else
+  BUILD_RUNNER=""
+fi
+if env SIMPLE_BOOTSTRAP=1 $BUILD_RUNNER bin/simple native-build --backend llvm \
+  --timeout "$TIMEOUT_SECS" \
   --source src/os --source src/lib --source examples/09_embedded/simpleos_nvme_fw/fw_rv32 \
   --entry src/os/kernel/arch/riscv32/boot.spl --entry-closure \
   --linker-script src/os/kernel/arch/riscv32/linker.ld \
   --target riscv32-unknown-none \
-  -o "$OUT"
-echo "build exit=$?"
+  -o "$OUT" >"$OUT_LOG" 2>"$ERR_LOG"; then
+  echo "build exit=0"
+else
+  rc=$?
+  echo "NVME_RV32_BUILD_FAILED code=$rc timeout=${TIMEOUT_SECS}s out=$OUT_LOG err=$ERR_LOG" >&2
+  tail -n 40 "$ERR_LOG" >&2 || true
+  exit "$rc"
+fi
 ls -la "$OUT" 2>/dev/null && file "$OUT" 2>/dev/null

@@ -417,6 +417,20 @@ SPipe is the BDD (Behavior-Driven Development) test framework for Simple.
 Uses `describe`/`it`/`expect` blocks with built-in matchers. Integrated into sstack Phase 4 (spec-first, before implementation).
 Coverage markers: `# @cover src/path/to/impl.spl <pct>%`.
 
+## SSpec (Modern SSpec)
+An SSpec is an executable specification (`*_spec.spl`) run by SPipe. **Modern
+SSpec** means the spec is written manual-first so `spipe-docgen` generates a
+professional scenario manual, not a test log: user-voice `"""..."""` docstrings,
+outcome-named `it` blocks, imperative `step("...")` calls or named step helpers,
+capture evidence (tui_grid, gui_image, protocol_json/binary, bit_table with
+8/16/32-bit aligned views, statistics, or user-registered kinds), edge cases
+folded via `@manual`, sections via `@manual_section`, and `@req` traceability
+links. Quality bar: `doc/07_guide/app/spipe/scenario_manual_example.md` and
+`doc/07_guide/app/spipe/manual_examples/`. Anti-patterns:
+`doc/07_guide/infra/sspec_antipatterns.md`. Requirements: FR-1..FR-6 in
+`doc/02_requirements/feature/sspec_scenario_manual.md`; capture extension
+design: `doc/05_design/sspec_capture_extension.md`.
+
 ## Cooperative Workflow
 Multi-LLM pipeline integrated into SStack. Phases 2-3 can use Codex (`/research_codex`) and Gemini (`/gemini_ui_design`) for richer output.
 Pipeline never blocks on missing providers — every phase is self-sufficient with Claude alone.

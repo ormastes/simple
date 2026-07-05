@@ -57,8 +57,8 @@ and observed over the serial console.
 
 The only baremetal-remote mechanism that exists is booting a Simple-COMPILED rv32
 binary on QEMU and observing it over the serial console — interpreter-on-baremetal
-does not exist, so this system tier runs in compiled mode. The prebuilt rv32 kernel
-ELF (build/os/simpleos_riscv32.elf) is launched under `qemu-system-riscv32 -machine
+does not exist, so this system tier runs in compiled mode. The NVMe firmware rv32
+ELF (build/nvme_fw_rv32.elf) is launched under `qemu-system-riscv32 -machine
 virt`, its serial console is captured to a file, and the subsystem-health markers
 are asserted.
 
@@ -78,12 +78,13 @@ strong exported hook that prints the PASS marker.
 
 #### the Simple-generated rv32 binary boots on QEMU and reports subsystem health
 
-- Probe the host for qemu-system-riscv32 and the prebuilt rv32 kernel ELF
+- Probe the host for qemu-system-riscv32 and the NVMe firmware rv32 ELF
 - qemu-system-riscv32 is not installed — record host-unavailable reason and assert it
-- The prebuilt rv32 kernel ELF is absent — record missing-media reason and assert it
-- Boot the prebuilt rv32 kernel on QEMU and capture the serial console
+- The NVMe firmware rv32 ELF is absent — record missing-media reason and assert it
+- Boot the NVMe firmware rv32 ELF on QEMU and capture the serial console
 - The serial console shows the SimpleOS RV32 banner
 - The kernel reports boot completion on the serial console
+- The NVMe firmware hook reports its rv32 self-test PASS marker
 - The heap subsystem self-check reports healthy
 - The supervisor-call subsystem self-check reports healthy
 
@@ -95,7 +96,7 @@ Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Probe the host for qemu-system-riscv32 and the prebuilt rv32 kernel ELF")
+step("Probe the host for qemu-system-riscv32 and the NVMe firmware rv32 ELF")
 val (qout, qerr, qcode) = _probe("command -v qemu-system-riscv32 >/dev/null 2>&1 && echo QEMU_PRESENT || echo QEMU_ABSENT")
 val (eout, eerr, ecode) = _probe("test -f " + ELF + " && echo ELF_PRESENT || echo ELF_ABSENT")
 
@@ -105,11 +106,11 @@ if qout.contains("QEMU_ABSENT"):
     expect(reason).to_contain("HOST-UNAVAILABLE")
 else:
     if eout.contains("ELF_ABSENT"):
-        step("The prebuilt rv32 kernel ELF is absent — record missing-media reason and assert it")
-        val reason = "MISSING-MEDIA: build/os/simpleos_riscv32.elf is absent (build the rv32 kernel first)"
+        step("The NVMe firmware rv32 ELF is absent — record missing-media reason and assert it")
+        val reason = "MISSING-MEDIA: build/nvme_fw_rv32.elf is absent (run examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs first)"
         expect(reason).to_contain("MISSING-MEDIA")
     else:
-        step("Boot the prebuilt rv32 kernel on QEMU and capture the serial console")
+        step("Boot the NVMe firmware rv32 ELF on QEMU and capture the serial console")
         val (out, err, code) = _boot()
 
         step("The serial console shows the SimpleOS RV32 banner")
@@ -117,6 +118,9 @@ else:
 
         step("The kernel reports boot completion on the serial console")
         expect(out).to_contain("[BOOT] boot complete")
+
+        step("The NVMe firmware hook reports its rv32 self-test PASS marker")
+        expect(out).to_contain("ALL RV32 NVME FW CHECKS PASS")
 
         step("The heap subsystem self-check reports healthy")
         expect(out).to_contain("HEAP OK")

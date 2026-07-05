@@ -217,6 +217,26 @@ locals captured by value and communicate via return values,
 `MulticoreGreenSliceResult` state, or `green_channel`. `thread_spawn` is exempt
 because OS threads may share through Mutex.
 
+### Coroutine & Process Lifecycle Hardening
+
+Coroutines and cooperative green tasks are non-preemptive stackless state
+machines. New or changed coroutine features need SPipe checks for resume
+ordering, completion/join behavior, and post-completion idempotence. A test that
+only observes the first resume is not enough for a lifecycle claim.
+
+Starvation or fairness claims require the concurrency/resource model gate, or an
+explicit release blocker that says the claim is not proven. Do not promote a
+single interleaving, host-only simulator run, or generated artifact into a
+stronger baremetal scheduling claim.
+
+Any `process_spawn_async` path must assert cleanup through `process_wait`,
+`process_is_running`/`process_is_alive`, or `process_kill`. A spawned process
+without an observed wait, liveness check, or kill path is incomplete evidence.
+
+OS thread lifecycle evidence must prove a spawned `ThreadHandle` reaches a
+terminal state through `join()` or `free()`. Repeated terminal cleanup must stay
+a safe no-op instead of turning into a double-free or blocked join.
+
 ### Green Thread Example
 
 ```simple

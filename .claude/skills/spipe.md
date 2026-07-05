@@ -9,6 +9,14 @@ SPipe is the process layer. SSpec is the executable `.spl` scenario authoring
 surface. New manuals should be written as step-based SSpec scenarios and run or
 mirrored through SPipe.
 
+> **Modern SSpec** = a spec written *manual-first* so docgen produces a
+> professional scenario manual, not a test log: user-voice `"""..."""`
+> docstrings, outcome-named `it` blocks, imperative `step("...")` calls,
+> capture evidence, `@manual_section` grouping, and `@req` traceability. A terse
+> spec still generates a correct skeleton (screens + steps) but no explanations —
+> the generator assembles, it never invents prose. Do NOT ship the anti-patterns
+> in `doc/07_guide/infra/sspec_antipatterns.md`.
+
 > **Run specs on the pure-Simple self-hosted binary, not the Rust seed.** The
 > SPipe runner, docgen, and every `bin/simple test`/`run` invocation default to
 > the self-hosted `bin/release/<triple>/simple` (built via bootstrap), not
@@ -117,6 +125,33 @@ UI, protocol, hardware, system, and environmental tests, generated
 Run `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index` and
 revise the spec until the generated manual is usable without opening the source
 and reports `0 stubs`.
+
+**Never ship these anti-patterns** (full guide with real file:line evidence and
+BAD→GOOD fixes: [`doc/07_guide/infra/sspec_antipatterns.md`](../../doc/07_guide/infra/sspec_antipatterns.md);
+target output + worked specs:
+[`doc/07_guide/app/spipe/scenario_manual_example.md`](../../doc/07_guide/app/spipe/scenario_manual_example.md)
+and [`manual_examples/`](../../doc/07_guide/app/spipe/manual_examples/)):
+
+1. Test-speak scenario names (`it "test 1"`) — name the user-observable outcome.
+2. Assert-only bodies with zero `step()` — the manual renders one word.
+3. Placeholder docstrings ("Comprehensive branch coverage…") — say what/why/who.
+4. Magic numerics with no domain meaning (`verify(sum == 435)`).
+5. Zero captures in user-facing specs — no TUI/CLI evidence blocks.
+6. Fake system narrative — "end-to-end workflow" that is string/array math.
+7. Flat scenario dumps — no `@manual_section` folding of edge cases.
+8. Boilerplate repeated inline instead of a named `@step` helper.
+9. No troubleshooting / verification appendix metadata.
+10. Copy-paste "At a Glance" metadata with empty Feature IDs.
+11. Internal tags leaking into user output (`(slow)` on every scenario).
+12. No step vocabulary at all — neither `Given_/When_/Then_` nor `step()`.
+
+**Capture kinds (target feature set, FR-1..FR-6 — see requirements doc):**
+`tui_grid`, `gui_image`, `protocol_json`/`protocol_binary`, `bit_table` (8/16/32),
+`statistics`, and user-defined kinds via a capture registry. Design:
+[`doc/05_design/sspec_capture_extension.md`](../../doc/05_design/sspec_capture_extension.md);
+impl plan: [`doc/03_plan/sspec_modernization_plan.md`](../../doc/03_plan/sspec_modernization_plan.md);
+authoritative feature set today:
+[`doc/02_requirements/feature/sspec_scenario_manual.md`](../../doc/02_requirements/feature/sspec_scenario_manual.md).
 
 ## Test API Imports
 

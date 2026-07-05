@@ -1125,6 +1125,7 @@ fn is_stdlib_concurrency_facade_forwarder(file_path: &Path, canonical_name: &str
 
 fn concurrency_arg_matches(kind: ConcurrencyArgKind, expr: &Expr) -> bool {
     match kind {
+        ConcurrencyArgKind::Any => true,
         ConcurrencyArgKind::Closure => matches!(expr, Expr::Lambda { .. }),
         ConcurrencyArgKind::Function => matches!(expr, Expr::Lambda { .. } | Expr::Identifier(_) | Expr::Path(_)),
         ConcurrencyArgKind::Integer => {
@@ -1358,6 +1359,7 @@ fn concurrency_shared_capture_error(
 
 #[derive(Debug, Clone, Copy)]
 enum ConcurrencyArgKind {
+    Any,
     Closure,
     Function,
     Integer,
@@ -1385,6 +1387,14 @@ fn concurrency_call_rule(name: &str) -> Option<ConcurrencyCallRule> {
             second_arg: None,
             expected: "single zero-argument value closure",
             help: "pass a closure such as `\\: 1`; use thread_spawn_with_args for explicit thread arguments",
+            share_nothing_arg: None,
+        }),
+        "thread_spawn_with_args" => Some(ConcurrencyCallRule {
+            expected_arity: 3,
+            first_arg: ConcurrencyArgKind::Any,
+            second_arg: Some(ConcurrencyArgKind::Any),
+            expected: "two immutable worker arguments and a two-argument closure",
+            help: "pass data1, data2, and a worker function",
             share_nothing_arg: None,
         }),
         "green_spawn" | "cooperative_green_spawn" | "multicore_green_spawn" => Some(ConcurrencyCallRule {
@@ -2823,6 +2833,11 @@ mod tests {
             (
                 "use std.concurrent.cooperative_green.{thread_spawn}",
                 "thread_spawn",
+                "std.concurrent.thread",
+            ),
+            (
+                "use std.concurrent.cooperative_green.{thread_spawn_with_args}",
+                "thread_spawn_with_args",
                 "std.concurrent.thread",
             ),
         ] {

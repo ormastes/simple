@@ -14,6 +14,20 @@ alwaysApply: false
 - **Interpreter mode limitation:** Test runner only verifies file loading, NOT `it` block execution
 - **Live API tests:** `test/03_system/llm_caret_live_comprehensive_spec.spl` requires `CLAUDECODE=` env var (~$1-2 per run)
 
+## Modern SSpec
+
+Write specs manual-first so `spipe-docgen` generates a scenario manual, not a
+test log: user-voice `"""..."""` docstrings, outcome-named `it` blocks,
+imperative `step("...")` calls (or `@step`-named helpers), capture evidence
+(tui_grid, gui_image, protocol_json/binary, bit_table, statistics, or
+user-registered kinds), `@manual_section` groupings, and `# @req REQ-*`
+traceability comments (parsed via grep convention until FR-6 lands native
+parsing). See glossary: [SSpec (Modern SSpec)](../../doc/glossary.md),
+anti-patterns: `doc/07_guide/infra/sspec_antipatterns.md`, example manuals:
+`doc/07_guide/app/spipe/scenario_manual_example.md` +
+`doc/07_guide/app/spipe/manual_examples/`, requirements:
+`doc/02_requirements/feature/sspec_scenario_manual.md`.
+
 ## Commands
 ```bash
 bin/simple test                     # All tests

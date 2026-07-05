@@ -19,8 +19,9 @@ It also refreshes the interpreter-run SimpleOS cooperative/multicore feature spe
 and `simpleos_multicore_green_spec`) as current evidence after the green/cooperative
 SSpec-runner mismatch was closed.
 
-Boundary note: `cooperative_green_spawn` runs on the current OS thread, is not
-Go-style M:N CPU parallelism, and carries no `pool_used` runtime-pool evidence.
+Boundary note: `cooperative_green_spawn` is the cooperative current-carrier SimpleOS proof.
+It runs on the current OS thread, is not Go-style M:N CPU
+parallelism, and carries no `pool_used` runtime-pool evidence.
 Host Go-like M:N evidence remains the Pure Simple `multicore_green_spawn`
 facade over runtime-seed `rt_pool_*` support and must carry
 `used_runtime_pool()` evidence. Interpreter-run SimpleOS scheduler/carrier evidence

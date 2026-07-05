@@ -48,8 +48,8 @@ Behavior:
 - `cooperative_green_run_all` drains currently ready work.
 - Join returns a completed result or zero for not-yet-done work.
 
-Design rule: this path is lightweight and deterministic but not CPU parallel,
-preemptive, or Go M:N.
+Design rule: this path runs on the current OS thread. It is lightweight and
+deterministic but not CPU-parallel, preemptive, or Go M:N.
 
 ### Multicore Green Runtime-Pool Candidate
 

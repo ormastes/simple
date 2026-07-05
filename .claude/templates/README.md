@@ -41,6 +41,19 @@ cp .claude/templates/spipe_template.spl \
 3. **Overview** - Explain what your feature does
 4. **Test Code** - Replace placeholder tests with real test cases
 
+## Modern SSpec Conventions
+
+`spipe_template.spl` now demonstrates **Modern SSpec** authoring: a `# @req
+REQ-<FEATURE>-001` traceability comment, a commented reference block of
+planned capture helpers (tui_grid, gui_image, protocol_json/binary, bit_table
+8/16/32, statistics, user-registered kinds), and a `# @manual_section: ...`
+comment above the primary scenarios. See glossary entry
+[SSpec (Modern SSpec)](../../doc/glossary.md), requirements
+`doc/02_requirements/feature/sspec_scenario_manual.md`, anti-patterns
+`doc/07_guide/infra/sspec_antipatterns.md`, and example manuals
+`doc/07_guide/app/spipe/scenario_manual_example.md` +
+`doc/07_guide/app/spipe/manual_examples/`.
+
 ## Complete Workflow
 
 See `doc/07_guide/infra/testing.md` for full testing guide.

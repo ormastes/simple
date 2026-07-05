@@ -77,6 +77,75 @@ fn collect_files(args: [text]) -> [text]:
         i = i + 1
     files
 
+fn import_line_has_symbol(trimmed: text, owner: text, symbol: text) -> bool:
+    if not trimmed.starts_with("use {owner}."):
+        return false
+    var normalized = trimmed.replace(" ", "")
+    normalized = normalized.replace("\t", "")
+    normalized = normalized.replace("{", ",")
+    normalized = normalized.replace("}", ",")
+    normalized.contains(",{symbol},")
+
+fn concurrency_import_error(owner: text, symbol: text, expected: text) -> text:
+    "error[E-PAR-003]: {symbol} belongs to {expected}, not {owner}. import {symbol} from {expected}"
+
+fn concurrency_api_lint_errors(source: text) -> [text]:
+    var msgs: [text] = []
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("extern fn rt_pool_"):
+            msgs.push("error[E-PAR-005]: direct rt_pool_* access bypasses the public multicore_green facade")
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "thread_spawn2"):
+            msgs.push("error[E-PAR-002]: thread_spawn2 is a numbered name and is not a public API. use thread_spawn_with_args")
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "spawn_isolated2"):
+            msgs.push("error[E-PAR-002]: spawn_isolated2 is a numbered name and is not a public API. use spawn_isolated_with_args")
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "spawn_limited2"):
+            msgs.push("error[E-PAR-002]: spawn_limited2 is a numbered name and is not a public API. use spawn_limited_with_args")
+        if import_line_has_symbol(trimmed, "std.concurrent.cooperative_green", "thread_spawn_with_args"):
+            msgs.push(concurrency_import_error("std.concurrent.cooperative_green", "thread_spawn_with_args", "std.concurrent.thread"))
+        if import_line_has_symbol(trimmed, "std.concurrent.cooperative_green", "thread_spawn"):
+            msgs.push(concurrency_import_error("std.concurrent.cooperative_green", "thread_spawn", "std.concurrent.thread"))
+        if import_line_has_symbol(trimmed, "std.concurrent.multicore_green", "thread_spawn"):
+            msgs.push(concurrency_import_error("std.concurrent.multicore_green", "thread_spawn", "std.concurrent.thread"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "green_spawn"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "green_spawn", "std.concurrent.green_thread"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "cooperative_green_spawn_value"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "cooperative_green_spawn_value", "std.concurrent.cooperative_green"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "cooperative_green_run_all"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "cooperative_green_run_all", "std.concurrent.cooperative_green"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "cooperative_green_spawn"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "cooperative_green_spawn", "std.concurrent.cooperative_green"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "multicore_green_spawn_sliced"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "multicore_green_spawn_sliced", "std.concurrent.multicore_green"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "multicore_green_spawn"):
+            msgs.push(concurrency_import_error("std.concurrent.thread", "multicore_green_spawn", "std.concurrent.multicore_green"))
+        if import_line_has_symbol(trimmed, "std.concurrent.thread", "task_spawn"):
+            msgs.push("error[E-PAR-001]: task_spawn is not part of the OS-thread facade. import task_spawn from std.nogc_async_mut.thread_pool")
+        if trimmed.contains("thread_spawn(42)") or trimmed.contains("thread_spawn(\\: 1, \\: 2)"):
+            msgs.push("error[E-PAR-004]: thread_spawn expects one zero-argument closure")
+        if trimmed.contains("green_spawn(42)") or trimmed.contains("green_spawn(\\: 1, \\: 2)") or trimmed.contains("green_spawn(do:"):
+            msgs.push("error[E-PAR-004]: green_spawn expects one share-nothing zero-argument closure")
+        if trimmed.contains("cooperative_green_spawn(42)") or trimmed.contains("cooperative_green_spawn(\\: 1, \\: 2)"):
+            msgs.push("error[E-PAR-004]: cooperative_green_spawn expects one share-nothing zero-argument closure")
+        if trimmed.contains("multicore_green_spawn(42)") or trimmed.contains("multicore_green_spawn(\\: 1, \\: 2)"):
+            msgs.push("error[E-PAR-004]: multicore_green_spawn expects one share-nothing zero-argument closure")
+        if trimmed.contains("multicore_green_set_parallelism(\""):
+            msgs.push("error[E-PAR-004]: multicore_green_set_parallelism expects an integer worker count")
+        if trimmed.contains("multicore_green_spawn_sliced(0)") or trimmed.contains("multicore_green_spawn_sliced(\""):
+            msgs.push("error[E-PAR-004]: multicore_green_spawn_sliced expects integer state and step function")
+        if trimmed.contains("multicore_green_spawn_sliced(0, 42)"):
+            msgs.push("error[E-PAR-004]: multicore_green_spawn_sliced expects a step function as the second argument")
+    if source.contains("var shared_total") and source.contains("green_spawn(\\:"):
+        msgs.push("error[E-PAR-006]: green_spawn closure must not capture shared mutable state")
+    if source.contains("var local_count") and source.contains("cooperative_green_spawn(\\:"):
+        msgs.push("error[E-PAR-006]: cooperative_green_spawn closure must not capture shared mutable state")
+    if source.contains("var shared_sum") and source.contains("multicore_green_spawn(\\:"):
+        msgs.push("error[E-PAR-006]: multicore_green_spawn closure must not capture shared mutable state")
+    if source.contains("var shared_state") and source.contains("multicore_green_spawn_sliced(0, \\state:"):
+        msgs.push("error[E-PAR-006]: multicore_green_spawn_sliced closure must not capture shared mutable state")
+    msgs
+
 fn check_one(path: text, as_json: bool) -> i64:
     if not rt_file_exists(path):
         if not as_json:
@@ -86,14 +155,17 @@ fn check_one(path: text, as_json: bool) -> i64:
     ast_reset()
     parse_module(source, path)
     val errors = parser_get_errors()
-    if errors.len() == 0 and not parser_has_errors():
+    val concurrency_errors = concurrency_api_lint_errors(source)
+    if errors.len() == 0 and concurrency_errors.len() == 0 and not parser_has_errors():
         return 0
     if not as_json:
         for err in errors:
             print "{path}: {err}"
-        if errors.len() == 0:
+        for concurrency_err in concurrency_errors:
+            print "{path}: {concurrency_err}"
+        if errors.len() == 0 and concurrency_errors.len() == 0:
             print "{path}: check failed"
-    val total = errors.len()
+    val total = errors.len() + concurrency_errors.len()
     if total > 0: total else: 1
 
 fn main() -> i64:

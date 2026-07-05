@@ -5,6 +5,10 @@ Use this guide when writing SSpec scenario manuals whose generated
 scenarios are executable `.spl` specs. SPipe is the related runner/docgen
 process around those specs, not a separate `.spipe` scenario format.
 
+> For what makes a manual read as amateur — 12 real anti-patterns with
+> BAD→GOOD fixes and a modern-SSpec checklist — see
+> [`sspec_antipatterns.md`](sspec_antipatterns.md).
+
 ## Principle
 
 Executable tests are the source of truth, but the generated document is a

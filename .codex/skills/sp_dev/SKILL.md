@@ -181,7 +181,7 @@ For SimpleOS hardening work that combines Vulkan-over-2D, RenderDoc, LLVM,
 SIMD, and QEMU GPU access, use
 `scripts/check/check-simpleos-hardening-evidence-matrix.shs` as the canonical
 handoff aggregate. Current completion requires
-`simpleos_hardening_matrix_passed=18/18`,
+`simpleos_hardening_matrix_passed=25/25`,
 `simpleos_hardening_gui_renderdoc_vulkan_status=pass`,
 `simpleos_hardening_llvm_port_status=pass`,
 `simpleos_hardening_cpu_simd_status=pass`,

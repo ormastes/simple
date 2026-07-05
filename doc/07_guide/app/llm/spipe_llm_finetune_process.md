@@ -105,8 +105,6 @@ acceptance, surface-manifest hashes, and `next_action` diagnostics remain
 present. This is a setup diagnostic contract only; it keeps the current blocked
 state visible and does not promote retry7 acceptance.
 
-<<<<<<< Conflict 1 of 1
-+++++++ Contents of side #1
 Run strict ready mode only when tuned-model acceptance evidence is expected to
 exist. Strict mode also binds the consumed acceptance env to
 `llm_backed_app_server_dry_run_retry7` through
@@ -141,22 +139,6 @@ Strict ready mode requires the evidence env to contain
 training, target-eval, safety, deployment, app-handoff, or normal-review
 acceptance proof; the current retry7 dry-run should remain failed until those
 records are real.
-
-%%%%%%% Changes from base to side #2
--Run strict ready mode only when tuned-model acceptance evidence is expected to
--exist:
--
--```bash
--FINETUNE_ACCEPTANCE_EVIDENCE_ENV=build/llm_finetune_acceptance/evidence.env \
--  sh scripts/check/check-llm-finetune-guard-evidence.shs --strict-ready
--```
--
--Strict ready mode requires the evidence env to contain
--`llm_finetune_acceptance_status=pass`. The local guard pass is intentionally not
--training, target-eval, safety, deployment, app-handoff, or normal-review
--acceptance proof.
--
->>>>>>> Conflict 1 of 1 ends
 Run readiness only when upstream evidence is expected to be complete:
 
 ```bash
