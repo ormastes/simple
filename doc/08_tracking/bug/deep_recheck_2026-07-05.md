@@ -18,9 +18,9 @@ high-impact (opus); **P2** = wide/risky (fix+verify after wall); **DOC** = featu
 - (stale-binary) `?` non-propagation — already fixed at source (b7fe9071/da6c4d0d), stale in deployed binary.
 
 ## Type system — `src/compiler/30.types` + `35.semantics` + driver
-- **P1** [real] **Phase-3 type checking is a NO-OP** — the entire 30.types checker/inference engine is never invoked. `driver.spl:613`. Highest-impact.
-- **P1** [real] Generic trait-bound (`where T: Trait`) never checked; unsatisfied bounds compile. `resolve.spl:712`.
-- **P2** [real=?] Visibility/privacy enforcement has zero effect (checker never wired). `driver.spl:456`.
+- **P1** [real] **Phase-3 type checking is a NO-OP** — the entire 30.types checker/inference engine is never invoked. `driver.spl:613`. Highest-impact. **CONFIRMED + WARN-ONLY WIRED (2026-07-05):** `type_check_impl` is a documented no-op; the native path of `lower_and_check_impl` never builds `HmInferContext`; `infer_module` (`type_infer/inference_control.spl:594`) has zero callers. Landed opt-in warn-only wiring (`run_typecheck_warn_pass` gated by `SIMPLE_TYPECHECK_WARN=1`, log-only). Fatal enablement deferred — see `doc/03_plan/compiler/type_system/typecheck_burndown.md`.
+- **P1** [real] Generic trait-bound (`where T: Trait`) never checked; unsatisfied bounds compile. `resolve.spl:712`. **CONFIRMED (2026-07-05):** `resolve_methods_with_solver` is a `return (module, [])` stub. Burndown P4 in the plan doc (integrate the post-inference `TraitSolver`).
+- **P2** [real=?] Visibility/privacy enforcement has zero effect (checker never wired). `driver.spl:456`. **CONFIRMED real (2026-07-05):** `check_module_visibility` (`visibility_integration.spl:11`) is a complete checker with **zero callers**. Now invoked warn-only inside `run_typecheck_warn_pass` (same `SIMPLE_TYPECHECK_WARN=1` gate).
 
 ## Compiler frontend / HIR lowering — `10.frontend` + `20.hir`
 - **P1** [real] HIR-lowering diagnostics collected but never surfaced → unsupported constructs silently compile. `driver.spl:509`.

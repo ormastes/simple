@@ -33,6 +33,9 @@ use compiler.semantics.const_fold.{run_const_fold_pass}
 use compiler.semantics.resolve.{resolve_methods}
 use compiler.common.config.*
 use compiler.types.type_system.effect_pass.{run_effect_pass}
+# Dormant type-system checkers, wired warn-only / opt-in (deep-recheck 2026-07-05).
+use compiler.types.type_infer.{HmInferContext}
+use compiler.semantics.visibility_integration.{check_module_visibility}
 use driver_types.*
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
@@ -561,6 +564,28 @@ pub class CompilerDriver:
         log_debug("effect inference done")
 
         log_debug("HIR lowering complete")
+
+        # Phase 3 (opt-in, warn-only): HM type inference + visibility diagnostics.
+        # The 30.types inference engine (HmInferContext.infer_module) and the
+        # 35.semantics visibility checker (check_module_visibility) are fully
+        # implemented but were never wired into the pipeline — deep-recheck
+        # 2026-07-05: type_check_impl no-op (this file ~613),
+        # resolve_methods_with_solver stub (resolve.spl ~712),
+        # check_module_visibility had zero callers. They have never run over the
+        # full ~993-module set, so their true diagnostic count is unknown and
+        # enabling them fatal would very likely break the build. This pass is
+        # gated behind SIMPLE_TYPECHECK_WARN=1 and only LOGS warnings (it never
+        # pushes ctx.errors), so the default build is unaffected. Flip the flag
+        # once the stage4 wall permits a verified non-crashing build to measure
+        # the real blast — see doc/03_plan/compiler/type_system/typecheck_burndown.md
+        if (rt_env_get("SIMPLE_TYPECHECK_WARN") ?? "") == "1":
+            val tc_warnings = run_typecheck_warn_pass(self.ctx.hir_modules)
+            log_warn("typecheck warn-only pass: {tc_warnings.len()} diagnostic(s)")
+            var tcw_idx = 0
+            while tcw_idx < tc_warnings.len():
+                log_warn(tc_warnings[tcw_idx])
+                tcw_idx = tcw_idx + 1
+
         self.ctx.errors.len() == 0
 
     # --------------------------------------------------------------------------
@@ -853,3 +878,34 @@ pub fn compiler_driver_create(options: CompileOptions) -> CompilerDriver:
 
 pub fn compiler_driver_run_compile(driver: CompilerDriver) -> CompileResult:
     driver.compile()
+
+# Warn-only, opt-in type-inference + visibility diagnostic pass.
+#
+# Runs the fully-implemented but previously-unwired 30.types HM inference engine
+# (HmInferContext.infer_module) and the 35.semantics visibility checker
+# (check_module_visibility) over every lowered HIR module and returns their
+# diagnostics as formatted text. It pushes NOTHING to the compile context — the
+# caller (lower_and_check_impl) logs the result — so it can never fail a build.
+# It is only invoked when SIMPLE_TYPECHECK_WARN=1. Because these checkers have
+# never run over the full compiler source, this is the safe way to measure their
+# true diagnostic blast before any fatal wiring. See deep-recheck 2026-07-05 and
+# doc/03_plan/compiler/type_system/typecheck_burndown.md.
+pub fn run_typecheck_warn_pass(hir_modules: Dict<text, HirModule>) -> [text]:
+    var out: [text] = []
+    for name in hir_modules.keys():
+        val m = hir_modules[name]
+        # Type inference diagnostics (unification / occurs-check / mismatch).
+        var ictx = HmInferContext.with_builtins()
+        ictx.infer_module(m)
+        var e_idx = 0
+        while e_idx < ictx.errors.len():
+            out = out.push("[typecheck] {name}: " + _format_type_infer_error(ictx.errors[e_idx]))
+            e_idx = e_idx + 1
+        # Visibility diagnostics (cross-module private/friend/package access).
+        val vwarnings = check_module_visibility(m, name)
+        var v_idx = 0
+        while v_idx < vwarnings.len():
+            val vw = vwarnings[v_idx]
+            out = out.push("[visibility {vw.code}] {name}: {vw.message}")
+            v_idx = v_idx + 1
+    out
