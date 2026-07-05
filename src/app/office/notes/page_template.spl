@@ -1,0 +1,164 @@
+# Notes — OneNote-style page templates.
+#
+# A PageTemplate is just a name + PageTemplateKind. Instantiating a template
+# produces a TemplatePage: a title plus a flat list of pre-seeded lines
+# appropriate to the kind (ruled lines for "lined", section headings for
+# "meeting_notes", etc). Pure data-structure logic — no I/O, no dependency
+# on the Notebook/RichDocument page model.
+#
+# Kinds and their seeded content (matches real OneNote page templates):
+#   - Blank            -> no seeded lines
+#   - Lined             -> RULED_LINE_COUNT blank ruled lines
+#   - GridPaper         -> SQUARED_ROW_COUNT blank squared rows
+#   - ToDoList          -> an empty checklist (zero items)
+#   - MeetingNotes      -> "Attendees", "Agenda", "Action Items"
+#   - LectureNotes      -> "Topic", "Key Points", "Summary", "Questions"
+#   - ProjectOverview   -> "Objective", "Scope", "Milestones", "Risks", "Owner"
+#
+# Every mutator RETURNS the updated TemplatePage; callers must reassign
+# (aggregates pass by copy across function calls) — same convention as
+# app.office.notes.notebook.
+
+enum PageTemplateKind:
+    Blank
+    Lined
+    GridPaper
+    ToDoList
+    MeetingNotes
+    LectureNotes
+    ProjectOverview
+
+struct PageTemplate:
+    name: text
+    kind: PageTemplateKind
+
+struct TemplatePage:
+    title: text
+    kind: PageTemplateKind
+    lines: [text]
+
+val RULED_LINE_COUNT = 20
+val SQUARED_ROW_COUNT = 12
+
+fn kind_name(kind: PageTemplateKind) -> text:
+    """Display name for a template kind."""
+    match kind:
+        PageTemplateKind.Blank:
+            return "Blank"
+        PageTemplateKind.Lined:
+            return "Lined"
+        PageTemplateKind.GridPaper:
+            return "Grid"
+        PageTemplateKind.ToDoList:
+            return "To Do List"
+        PageTemplateKind.MeetingNotes:
+            return "Meeting Notes"
+        PageTemplateKind.LectureNotes:
+            return "Lecture Notes"
+        PageTemplateKind.ProjectOverview:
+            return "Project Overview"
+
+fn default_title(kind: PageTemplateKind) -> text:
+    """The starter page title used when instantiate() gets no title."""
+    match kind:
+        PageTemplateKind.Blank:
+            return "Untitled Page"
+        PageTemplateKind.Lined:
+            return "Lined Page"
+        PageTemplateKind.GridPaper:
+            return "Grid Page"
+        PageTemplateKind.ToDoList:
+            return "To Do List"
+        PageTemplateKind.MeetingNotes:
+            return "Meeting Notes"
+        PageTemplateKind.LectureNotes:
+            return "Lecture Notes"
+        PageTemplateKind.ProjectOverview:
+            return "Project Overview"
+
+fn seed_lines(kind: PageTemplateKind) -> [text]:
+    """The pre-seeded lines/sections for a template kind."""
+    var out: [text] = []
+    match kind:
+        PageTemplateKind.Blank:
+            return out
+        PageTemplateKind.Lined:
+            var i = 0
+            while i < RULED_LINE_COUNT:
+                out.push("")
+                i = i + 1
+            return out
+        PageTemplateKind.GridPaper:
+            var j = 0
+            while j < SQUARED_ROW_COUNT:
+                out.push("")
+                j = j + 1
+            return out
+        PageTemplateKind.ToDoList:
+            return out
+        PageTemplateKind.MeetingNotes:
+            out.push("Attendees")
+            out.push("Agenda")
+            out.push("Action Items")
+            return out
+        PageTemplateKind.LectureNotes:
+            out.push("Topic")
+            out.push("Key Points")
+            out.push("Summary")
+            out.push("Questions")
+            return out
+        PageTemplateKind.ProjectOverview:
+            out.push("Objective")
+            out.push("Scope")
+            out.push("Milestones")
+            out.push("Risks")
+            out.push("Owner")
+            return out
+
+fn list_templates() -> [PageTemplate]:
+    """Every built-in OneNote-style page template, one per kind."""
+    var out: [PageTemplate] = []
+    out.push(PageTemplate(name: "Blank Page", kind: PageTemplateKind.Blank))
+    out.push(PageTemplate(name: "Lined Page", kind: PageTemplateKind.Lined))
+    out.push(PageTemplate(name: "Grid Page", kind: PageTemplateKind.GridPaper))
+    out.push(PageTemplate(name: "To Do List", kind: PageTemplateKind.ToDoList))
+    out.push(PageTemplate(name: "Meeting Notes", kind: PageTemplateKind.MeetingNotes))
+    out.push(PageTemplate(name: "Lecture Notes", kind: PageTemplateKind.LectureNotes))
+    out.push(PageTemplate(name: "Project Overview", kind: PageTemplateKind.ProjectOverview))
+    out
+
+fn template_names() -> [text]:
+    """Names of every built-in template, in catalog order."""
+    var out: [text] = []
+    for t in list_templates():
+        out.push(t.name)
+    out
+
+fn find_template(name: text) -> PageTemplate:
+    """The built-in template named `name`, or a Blank fallback with an
+    empty name if none matches."""
+    for t in list_templates():
+        if t.name == name:
+            return t
+    PageTemplate(name: "", kind: PageTemplateKind.Blank)
+
+fn instantiate(template: PageTemplate, title: text) -> TemplatePage:
+    """Instantiate `template` into a brand-new page, seeded with the
+    kind's starter content. An empty `title` falls back to the template's
+    default_title()."""
+    var use_title = title
+    if use_title.len() == 0:
+        use_title = default_title(template.kind)
+    val seeded = seed_lines(template.kind)
+    TemplatePage(title: use_title, kind: template.kind, lines: seeded)
+
+fn apply_to_empty(template: PageTemplate, page: TemplatePage) -> TemplatePage:
+    """Apply `template` to `page` IN PLACE (returned) — only if `page` has
+    no lines yet. A page that already has content is returned unchanged
+    (no-op); the page's existing title is always preserved."""
+    if page.lines.len() > 0:
+        return page
+    var out = page
+    out.kind = template.kind
+    out.lines = seed_lines(template.kind)
+    out
