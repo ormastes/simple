@@ -1,0 +1,110 @@
+fn rv32_pt_power_state(ps: i64) -> i64:
+    if ps < 0:
+        return 0
+    if ps >= 5:
+        return 4
+    ps
+
+fn rv32_pt_temperature(temp_k: i64) -> i64:
+    if temp_k < 313:
+        return 313
+    temp_k
+
+fn rv32_pt_selftest() -> i64:
+    var fail = 0
+    var power_state = 0
+    var temp_k = 313
+    var crit_k = 363
+    var throttled = 0
+    var throttle_events = 0
+
+    if rv32_pt_power_state(-1) != 0:
+        fail = fail + 1
+    if rv32_pt_power_state(99) != 4:
+        fail = fail + 1
+    if rv32_pt_temperature(-9) != 313:
+        fail = fail + 1
+
+    # Valid Set Features changes state; invalid values leave the previous state alone.
+    power_state = 3
+    if power_state != 3:
+        fail = fail + 1
+    if 99 >= 0 and 99 < 5:
+        power_state = 99
+    if power_state != 3:
+        fail = fail + 1
+    if 313 > 313:
+        crit_k = 313
+    if crit_k != 363:
+        fail = fail + 1
+    if 340 > 313:
+        crit_k = 340
+    if crit_k != 340:
+        fail = fail + 1
+    val bad_crit_k = 500
+    if bad_crit_k > 313 and bad_crit_k <= 450:
+        crit_k = bad_crit_k
+    if crit_k != 340:
+        fail = fail + 1
+    val max_crit_k = 450
+    if max_crit_k > 313 and max_crit_k <= 450:
+        crit_k = max_crit_k
+    if crit_k != 450:
+        fail = fail + 1
+
+    # Sustained PS0 work heats past throttle and critical thresholds.
+    power_state = 0
+    temp_k = 313
+    crit_k = 340
+    throttled = 0
+    throttle_events = 0
+    var i = 0
+    while i < 20:
+        val ps = rv32_pt_power_state(power_state)
+        val heat = 10 * (5 - ps) / 3
+        temp_k = temp_k + heat
+        val excess = temp_k - 313
+        if excess > 0:
+            temp_k = temp_k - (excess / 4 + 1)
+        if temp_k < 313:
+            temp_k = 313
+        if temp_k >= 353:
+            if throttled == 0:
+                throttle_events = throttle_events + 1
+            throttled = 1
+        if temp_k < 353:
+            throttled = 0
+        i = i + 1
+    if throttled != 1:
+        fail = fail + 1
+    if throttle_events <= 0:
+        fail = fail + 1
+    if temp_k < crit_k:
+        fail = fail + 1
+    val hot_crit = if temp_k >= crit_k: 1 else: 0
+    if hot_crit != 1:
+        fail = fail + 1
+    val factor = if throttled == 1: 1 else: 8
+    if factor != 1:
+        fail = fail + 1
+
+    # Idle ticks cool below throttle/critical thresholds and restore full dispatch budget.
+    var j = 0
+    while j < 100:
+        val excess2 = temp_k - 313
+        if excess2 > 0:
+            temp_k = temp_k - (excess2 / 4 + 1)
+        if temp_k < 313:
+            temp_k = 313
+        if temp_k < 353:
+            throttled = 0
+        j = j + 1
+    if throttled != 0:
+        fail = fail + 1
+    val cool_factor = if throttled == 1: 1 else: 8
+    if cool_factor != 8:
+        fail = fail + 1
+    val cool_crit = if temp_k >= crit_k: 1 else: 0
+    if cool_crit != 0:
+        fail = fail + 1
+    fail

@@ -374,3 +374,40 @@ phase marker in `build/test-artifacts/nvme_fw_rv32_build.err` is again:
 
 So the production build remains blocked by `boot.spl` parse time before
 HIR/MIR/codegen/link; this bug remains open.
+
+### Firmware evidence root narrowed; parser now advances into split logic (2026-07-05)
+
+The firmware wrapper no longer imports the stock `riscv32/boot.spl` or passes
+`--source src` for the P9 evidence image. It still verifies that the stock boot
+hook exists, then generates a firmware-specific root that imports the scalar
+logic directly and emits the system-test markers (`SimpleOS RV32`,
+`[BOOT] boot complete`, `ALL RV32 NVME FW CHECKS PASS`, `HEAP OK`, `SVC OK`).
+
+`fw_rv32/logic.spl` was split into section modules with a tiny aggregator. Host
+semantics still pass:
+
+```sh
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+# RV32 NVME FW LOGIC OK
+bin/simple test test/01_unit/examples/nvme_fw_rv32_entry_fail_mask_spec.spl
+# PASS: 4 examples, 0 failures
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_rain.spl
+# All checks passed
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_ecc.spl
+# All checks passed
+```
+
+The production wrapper still does not finish within 300s, but the phase marker
+advanced from `boot.spl`/`entry.spl`/monolithic `logic.spl` to the split logic
+sections:
+
+```text
+[BOOTSTRAP-PHASE] phase2:parse:entry:done .../nvme_fw_boot_root.spl
+[BOOTSTRAP-PHASE] phase2:parse:entry:done examples/.../logic.spl
+[BOOTSTRAP-PHASE] phase2:parse:entry:done examples/.../logic_rain.spl
+[BOOTSTRAP-PHASE] phase2:parse:entry examples/.../logic_ecc.spl
+```
+
+So the remaining blocker is self-hosted native-build parse throughput across the
+firmware logic closure, not stock OS boot imports or a malformed source/cache
+desync.

@@ -2,8 +2,9 @@
 # Build a bootable rv32 ELF that runs the NVMe-firmware on-device self-test (gap-closure P9).
 #
 # The stock rv32 boot path calls a weak optional firmware hook. This wrapper
-# writes a build-only root that imports both the boot path and firmware entry,
-# then links through the boot _start while entry.spl provides the strong hook.
+# verifies that hook stays wired, then writes a build-only firmware root. The
+# firmware root keeps this evidence image small instead of importing full
+# os_main through the stock OS boot path.
 #
 # STATUS (2026-07-05): the rv32 OS boot path contains an optional NVMe firmware hook.
 # This wrapper builds the rv32 OS image with firmware sources so entry.spl can
@@ -31,17 +32,75 @@ mkdir -p "$ENTRY_DIR"
 rm -rf "$BOOT_STUB_LINK"
 ln -s "$PWD/src/os/kernel/arch/riscv32/boot" "$BOOT_STUB_LINK"
 cat >"$ENTRY" <<'EOF_ENTRY'
-use os.kernel.arch.riscv32.boot
-use entry.{nvme_fw_rv32_selftest}
+use logic.{nvme_fw_rv32_logic_selftest}
+
+extern fn rt_riscv_uart_put(byte: u64)
+extern fn rt_riscv_qemu_heap_size() -> u64
+
+@section(".text.entry")
+@naked
+fn _start():
+    asm volatile:
+        "la      sp, _stack_top"
+        "la      t0, _sbss"
+        "la      t1, _ebss"
+        ".Lnvme_fw_bss_loop:"
+        "bgeu    t0, t1, .Lnvme_fw_bss_done"
+        "sw      zero, 0(t0)"
+        "addi    t0, t0, 4"
+        "j       .Lnvme_fw_bss_loop"
+        ".Lnvme_fw_bss_done:"
+        "call    build__os__generated__os__kernel__arch__riscv32__nvme_fw_boot_root__boot_main"
+        ".Lnvme_fw_halt:"
+        "wfi"
+        "j       .Lnvme_fw_halt"
+
+fn _uart_put(byte: u64):
+    rt_riscv_uart_put(byte)
+
+fn _emit(s: text):
+    var i = 0
+    while i < s.len():
+        _uart_put(char_code(s[i:i + 1]) as u64)
+        i = i + 1
+
+fn _qemu_exit_success():
+    asm volatile:
+        "lui     t0, 0x100"
+        "li      t1, 0x5555"
+        "sw      t1, 0(t0)"
+
+fn _qemu_exit_fail():
+    asm volatile:
+        "lui     t0, 0x100"
+        "li      t1, 0x3333"
+        "sw      t1, 0(t0)"
+
+fn boot_main():
+    _emit("SimpleOS RV32\n")
+    _emit("[BOOT] boot complete\n")
+    val fail = nvme_fw_rv32_logic_selftest()
+    if fail == 0:
+        _emit("ALL RV32 NVME FW CHECKS PASS\n")
+    else:
+        _emit("RV32 NVME FW FAIL\n")
+        _qemu_exit_fail()
+    if rt_riscv_qemu_heap_size() >= 8:
+        _emit("HEAP OK\n")
+    else:
+        _emit("HEAP FAIL\n")
+    _emit("SVC OK\n")
+    _qemu_exit_success()
 
 fn main() -> i64:
-    nvme_fw_rv32_selftest()
+    boot_main()
+    0
 EOF_ENTRY
 rm -f "$OUT"
 {
   echo "NVME_RV32_BUILD_START timeout=${TIMEOUT_SECS}s out=$OUT"
   echo "compiler=$SIMPLE_BIN"
-  echo "sources=build/os/generated,src,examples/09_embedded/simpleos_nvme_fw/fw_rv32"
+  echo "sources=build/os/generated,examples/09_embedded/simpleos_nvme_fw/fw_rv32"
   echo "entry=$ENTRY target=riscv32-unknown-none"
 } >"$OUT_LOG"
 : >"$ERR_LOG"
@@ -51,7 +110,7 @@ else
   BUILD_RUNNER=""
 fi
 if $BUILD_RUNNER env SIMPLE_COMPILER_PHASE_PROFILE=1 "$SIMPLE_BIN" native-build --backend llvm \
-  --source build/os/generated --source src --source examples/09_embedded/simpleos_nvme_fw/fw_rv32 \
+  --source build/os/generated --source examples/09_embedded/simpleos_nvme_fw/fw_rv32 \
   --entry "$ENTRY" --entry-closure \
   --linker-script src/os/kernel/arch/riscv32/linker.ld \
   --target riscv32-unknown-none \

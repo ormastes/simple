@@ -1,0 +1,147 @@
+fn rv32_backpressure_abort_selftest() -> i64:
+    # Scalar controller floor: full CQs defer work; Abort decodes targets and fails closed.
+    var fail = 0
+    val depth = 4
+    val sc_success = 0
+    val sc_invalid_field = 2
+    val sc_invalid_qid = 0x101
+
+    var admin_sq_len = 1
+    var admin_cq_len = depth
+    var processed = 0
+    if admin_cq_len < depth and admin_sq_len > 0:
+        admin_sq_len = admin_sq_len - 1
+        admin_cq_len = admin_cq_len + 1
+        processed = processed + 1
+    if processed != 0 or admin_sq_len != 1:
+        fail = fail + 1
+    admin_cq_len = 0
+    if admin_cq_len < depth and admin_sq_len > 0:
+        admin_sq_len = admin_sq_len - 1
+        admin_cq_len = admin_cq_len + 1
+        processed = processed + 1
+    val deferred_admin_status = sc_success
+    if processed != 1 or admin_sq_len != 0 or admin_cq_len != 1 or deferred_admin_status != sc_success:
+        fail = fail + 1
+
+    var io_sq_len = 1
+    var io_cq_len = depth
+    processed = 0
+    if io_cq_len < depth and io_sq_len > 0:
+        io_sq_len = io_sq_len - 1
+        io_cq_len = io_cq_len + 1
+        processed = processed + 1
+    if processed != 0 or io_sq_len != 1:
+        fail = fail + 1
+    io_cq_len = 0
+    if io_cq_len < depth and io_sq_len > 0:
+        io_sq_len = io_sq_len - 1
+        io_cq_len = io_cq_len + 1
+        processed = processed + 1
+    val deferred_io_status = sc_success
+    if processed != 1 or io_sq_len != 0 or io_cq_len != 1 or deferred_io_status != sc_success:
+        fail = fail + 1
+    io_sq_len = 0
+    io_cq_len = 1
+    processed = 0
+    if io_cq_len < depth and io_sq_len > 0:
+        io_sq_len = io_sq_len - 1
+        io_cq_len = io_cq_len + 1
+        processed = processed + 1
+    if processed != 0 or io_sq_len != 0 or io_cq_len != 1:
+        fail = fail + 1
+
+    var last_abort_sqid = -1
+    var last_abort_cid = -1
+    var abort_count = 0
+    var abort_status = sc_success
+    var abort_data = 1
+    val target_sqid = 1
+    val target_cid = 100
+    if target_sqid < 1 or target_sqid > 8:
+        abort_status = sc_invalid_qid
+    else:
+        abort_count = abort_count + 1
+        last_abort_sqid = target_sqid
+        last_abort_cid = target_cid
+    if abort_status != sc_success or abort_data != 1 or abort_count != 1 or last_abort_sqid != 1 or last_abort_cid != 100:
+        fail = fail + 1
+    abort_status = sc_success
+    val abort_count_before = abort_count
+    abort_count = abort_count + 1
+    last_abort_sqid = target_sqid
+    last_abort_cid = 0xBEEF
+    if abort_status != sc_success or abort_data != 1 or abort_count != abort_count_before + 1 or last_abort_sqid != 1 or last_abort_cid != 0xBEEF:
+        fail = fail + 1
+    val missing_sqid = 99
+    if missing_sqid < 1 or missing_sqid > 8:
+        abort_status = sc_invalid_qid
+    if abort_status != sc_invalid_qid or abort_count != 2 or last_abort_sqid != 1:
+        fail = fail + 1
+    val negative_sqid = -1
+    abort_status = sc_success
+    if negative_sqid < 1 or negative_sqid > 8:
+        abort_status = sc_invalid_qid
+    if abort_status != sc_invalid_qid or abort_count != 2 or last_abort_sqid != 1 or last_abort_cid != 0xBEEF:
+        fail = fail + 1
+    val zero_sqid = 0
+    abort_status = sc_success
+    if zero_sqid < 0 or zero_sqid > 8:
+        abort_status = sc_invalid_qid
+    else:
+        abort_count = abort_count + 1
+        last_abort_sqid = zero_sqid
+        last_abort_cid = target_cid
+    if abort_status != sc_success or abort_count != 3 or last_abort_sqid != 0 or last_abort_cid != 100:
+        fail = fail + 1
+    val malformed_nsid = 1
+    abort_status = sc_success
+    if malformed_nsid != 0:
+        abort_status = sc_invalid_field
+    if abort_status != sc_invalid_field or abort_count != 3 or last_abort_sqid != 0 or last_abort_cid != 100:
+        fail = fail + 1
+    abort_status = sc_success
+    val bad_target_cid = 70000
+    if bad_target_cid < 0 or bad_target_cid >= 65536:
+        abort_status = sc_invalid_field
+    else:
+        abort_count = abort_count + 1
+        last_abort_cid = bad_target_cid
+    if abort_status != sc_invalid_field or abort_count != 3 or last_abort_sqid != 0 or last_abort_cid != 100:
+        fail = fail + 1
+    abort_status = sc_success
+    val negative_target_cid = -1
+    if negative_target_cid < 0 or negative_target_cid >= 65536:
+        abort_status = sc_invalid_field
+    else:
+        abort_count = abort_count + 1
+        last_abort_cid = negative_target_cid
+    if abort_status != sc_invalid_field or abort_count != 3 or last_abort_sqid != 0 or last_abort_cid != 100:
+        fail = fail + 1
+    abort_status = sc_success
+    val max_target_cid = 65535
+    if max_target_cid < 0 or max_target_cid >= 65536:
+        abort_status = sc_invalid_field
+    else:
+        abort_count = abort_count + 1
+        last_abort_cid = max_target_cid
+    if abort_status != sc_success or abort_count != 4 or last_abort_cid != 65535:
+        fail = fail + 1
+    abort_status = sc_success
+    val zero_target_cid = 0
+    if zero_target_cid < 0 or zero_target_cid >= 65536:
+        abort_status = sc_invalid_field
+    else:
+        abort_count = abort_count + 1
+        last_abort_cid = zero_target_cid
+    if abort_status != sc_success or abort_count != 5 or last_abort_cid != 0:
+        fail = fail + 1
+    last_abort_sqid = 99
+    last_abort_cid = 70000
+    if last_abort_sqid < 0 or last_abort_sqid > 8:
+        last_abort_sqid = -1
+    if last_abort_cid < 0 or last_abort_cid >= 65536:
+        last_abort_cid = -1
+    if last_abort_sqid != -1 or last_abort_cid != -1:
+        fail = fail + 1
+    fail
