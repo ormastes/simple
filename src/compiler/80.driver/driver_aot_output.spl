@@ -131,20 +131,18 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                         return driver_native_success_with_launch_metadata(ctx, output)
                     case Err(e):
                         return CompileResult.CodegenError("LLVM native linking failed: {e}")
-            val direct_config = NativeLinkConfig(
-                libraries: [],
-                library_paths: [],
-                runtime_path: "",
-                pie: true,
+            val hosted_opts = NativeLinkOptions(
                 debug: ctx.options.debug_info,
                 verbose: ctx.options.verbose,
-                extra_flags: []
+                pie: true,
+                bare_metal: false,
+                opt_level: driver_opt_level
             )
-            match link_to_native([obj_path], output, direct_config):
+            match link_llvm_native([obj_path], output, hosted_opts):
                 case Ok(_):
                     return driver_native_success_with_launch_metadata(ctx, output)
                 case Err(e):
-                    return CompileResult.CodegenError("Linking failed: {e}")
+                    return CompileResult.CodegenError("Hosted native linking failed: {e}")
         case Err(e):
             return CompileResult.CodegenError(e)
 
@@ -322,18 +320,21 @@ impl CompilerDriver:
                 case Err(e):
                     CompileResult.CodegenError("LLVM native linking failed: {e}")
         else:
-            # Original path for other backends
-            var link_config = NativeLinkConfig.default()
-            link_config.debug = ctx.options.debug_info
-            link_config.verbose = ctx.options.verbose
-            link_config.extra_flags = link_config.extra_flags.push("--fixed-be={effective_backend}")
-
-            match link_to_native(object_files, output, link_config):
+            # Hosted native binaries need the same runtime objects and C `main`
+            # entry shim regardless of which backend produced user objects.
+            val hosted_opts = NativeLinkOptions(
+                debug: ctx.options.debug_info,
+                verbose: ctx.options.verbose,
+                pie: true,
+                bare_metal: false,
+                opt_level: driver_opt_level
+            )
+            match link_llvm_native(object_files, output, hosted_opts):
                 case Ok(_):
                     driver_log_info(log, "Native executable written to {output} (backend: {effective_backend})")
                     driver_native_success_with_launch_metadata(ctx, output)
                 case Err(e):
-                    CompileResult.CodegenError("Linking failed: {e}")
+                    CompileResult.CodegenError("Hosted native linking failed: {e}")
 
     me compile_to_c(output: text) -> CompileResult:
         """Compile all MIR modules to C++20 source. Routes to single-file or directory mode."""

@@ -17,6 +17,9 @@ use std.gpu.engine2d.backend_metal.{MetalBackend}
 use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
 use std.common.image.ppm_decode.{encode_ppm_p6}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+use std.io_runtime.{file_write, getpid}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+use common.ui.wm_app_process_contract.{WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_CLIENT_HOLD_ENV, WIDGET_SHOWCASE_APP_SOURCE, wm_app_mode_is_client, wm_widget_showcase_bridge_request, wm_fs_bridge_encode}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -299,6 +302,32 @@ fn showcase_should_close(input: WinitInput) -> bool:
             return true
     false
 
+fn run_wm_client(pixels: [u32]) -> i64:
+    val bridge_path = env_get(WM_BRIDGE_FILE_ENV) ?? ""
+    val frame_path = env_get(WM_FRAME_FILE_ENV) ?? ""
+    if bridge_path == "" or frame_path == "":
+        print "[wm-showcase-client] error=missing-bridge-env"
+        return 2
+
+    val frame_bytes = encode_ppm_p6(W.to_u32(), H.to_u32(), pixels)
+    if frame_bytes.len() == 0 or not file_write_bytes(frame_path, frame_bytes):
+        print "[wm-showcase-client] error=frame-write-failed path={frame_path}"
+        return 1
+
+    val pid = getpid()
+    val req = wm_widget_showcase_bridge_request(pid, frame_path)
+    if not file_write(bridge_path, wm_fs_bridge_encode(req)):
+        print "[wm-showcase-client] error=bridge-write-failed path={bridge_path}"
+        return 1
+
+    print "[wm-showcase-client] source={WIDGET_SHOWCASE_APP_SOURCE} pid={pid} bridge={bridge_path} frame={frame_path}"
+    if (env_get(WM_CLIENT_HOLD_ENV) ?? "") == "1":
+        var ticks = 0
+        while ticks < 2000000:
+            thread_sleep(100)
+            ticks = ticks + 1
+    0
+
 fn main() -> i64:
     print "Widget showcase GUI — render {W}x{H} via Engine2D Metal GPU lane"
     val pixels = build_frame()
@@ -318,6 +347,9 @@ fn main() -> i64:
             print "wrote {ppm_path} ({ppm_w}x{ppm_h}, {bytes.len()} bytes)"
         else:
             print "failed to write {ppm_path}"
+
+    if wm_app_mode_is_client(env_get(WM_APP_MODE_ENV) ?? ""):
+        return run_wm_client(pixels)
 
     if (env_get("SIMPLE_GUI") ?? "") != "1":
         print "No GUI requested (use scripts/gui/macos-gui-run.shs to open a window); headless only."

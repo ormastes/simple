@@ -1,0 +1,79 @@
+# Shared app-process contract for launching the same GUI app source either as a
+# native host app or as a WM-managed child process.
+
+struct WmFsAppBridgeRequest:
+    kind: text
+    source_path: text
+    app_id: text
+    title: text
+    pid: i64
+    window_w: i32
+    window_h: i32
+    content: text
+    frame_path: text
+
+val WM_APP_MODE_ENV: text = "SIMPLE_WM_APP_MODE"
+val WM_APP_MODE_CLIENT: text = "client"
+val WM_BRIDGE_FILE_ENV: text = "SIMPLE_WM_BRIDGE_FILE"
+val WM_FRAME_FILE_ENV: text = "SIMPLE_WM_FRAME_FILE"
+val WM_CLIENT_HOLD_ENV: text = "SIMPLE_WM_CLIENT_HOLD"
+
+val WIDGET_SHOWCASE_APP_SOURCE: text = "examples/06_io/ui/widget_showcase_metal_gui.spl"
+val WIDGET_SHOWCASE_APP_ID: text = "/examples/widget-showcase"
+val WIDGET_SHOWCASE_TITLE: text = "Widget Showcase"
+val WIDGET_SHOWCASE_WINDOW_W: i32 = 708
+val WIDGET_SHOWCASE_WINDOW_H: i32 = 456
+
+fn wm_app_mode_is_client(mode: text) -> bool:
+    mode == WM_APP_MODE_CLIENT
+
+fn wm_widget_showcase_content_text(source_path: text, frame_path: text, pid: i64) -> text:
+    "source={source_path} frame={frame_path} pid={pid}"
+
+fn wm_widget_showcase_bridge_request(pid: i64, frame_path: text) -> WmFsAppBridgeRequest:
+    WmFsAppBridgeRequest(
+        kind: "create_window",
+        source_path: WIDGET_SHOWCASE_APP_SOURCE,
+        app_id: WIDGET_SHOWCASE_APP_ID,
+        title: WIDGET_SHOWCASE_TITLE,
+        pid: pid,
+        window_w: WIDGET_SHOWCASE_WINDOW_W,
+        window_h: WIDGET_SHOWCASE_WINDOW_H,
+        content: wm_widget_showcase_content_text(WIDGET_SHOWCASE_APP_SOURCE, frame_path, pid),
+        frame_path: frame_path
+    )
+
+fn wm_fs_bridge_encode(req: WmFsAppBridgeRequest) -> text:
+    "kind={req.kind}\nsource_path={req.source_path}\napp_id={req.app_id}\ntitle={req.title}\npid={req.pid}\nwindow_w={req.window_w}\nwindow_h={req.window_h}\ncontent={req.content}\nframe_path={req.frame_path}\n"
+
+fn _wm_bridge_value(doc: text, key: text) -> text:
+    val prefix = key + "="
+    val lines = doc.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.starts_with(prefix):
+            return line.substring(prefix.len(), line.len())
+        i = i + 1
+    ""
+
+fn wm_fs_bridge_decode(doc: text) -> WmFsAppBridgeRequest:
+    WmFsAppBridgeRequest(
+        kind: _wm_bridge_value(doc, "kind"),
+        source_path: _wm_bridge_value(doc, "source_path"),
+        app_id: _wm_bridge_value(doc, "app_id"),
+        title: _wm_bridge_value(doc, "title"),
+        pid: _wm_bridge_value(doc, "pid").to_i64() ?? 0,
+        window_w: (_wm_bridge_value(doc, "window_w").to_i64() ?? 0).to_i32(),
+        window_h: (_wm_bridge_value(doc, "window_h").to_i64() ?? 0).to_i32(),
+        content: _wm_bridge_value(doc, "content"),
+        frame_path: _wm_bridge_value(doc, "frame_path")
+    )
+
+fn wm_widget_showcase_client_env(bridge_path: text, frame_path: text) -> {text: text}:
+    var env: {text: text} = {}
+    env[WM_APP_MODE_ENV] = WM_APP_MODE_CLIENT
+    env[WM_BRIDGE_FILE_ENV] = bridge_path
+    env[WM_FRAME_FILE_ENV] = frame_path
+    env[WM_CLIENT_HOLD_ENV] = "1"
+    env

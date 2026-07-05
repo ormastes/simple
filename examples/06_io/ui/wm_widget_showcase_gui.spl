@@ -1,0 +1,254 @@
+# wm_widget_showcase_gui.spl — Simple WM host that launches the widget showcase
+# from the filesystem as a separate process, using the SAME source file as the
+# native showcase app.
+#
+# Launch:
+#   SIMPLE_GUI_RUN_SKIP_NUDGE=1 scripts/gui/macos-gui-run.shs \
+#     examples/06_io/ui/wm_widget_showcase_gui.spl
+
+use std.gpu.engine2d.backend_metal.{MetalBackend}
+use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
+use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
+use std.io_runtime.{env_get, file_exists, file_read, file_read_bytes, dir_create_all, getpid, time_now_unix_micros}
+use app.io.mod.{process_spawn_async, process_spawn_async_env, process_kill, thread_sleep, host_os}
+use common.window_protocol.geometry.{Size}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use common.ui.wm_app_process_contract.{WIDGET_SHOWCASE_APP_SOURCE, WIDGET_SHOWCASE_TITLE, wm_fs_bridge_decode, wm_widget_showcase_client_env}
+use os.compositor.host_compositor_entry.{HostCompositor, HeadlessHostCompositorBackend, host_compositor_pointer_move, host_compositor_left_button_at, host_taskbar_dock_width, host_taskbar_item_width, host_taskbar_item_x}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+
+val W: i32 = 820
+val H: i32 = 620
+val LOCATOR: u32 = 0xFFFF00FFu32
+val MUTED: u32 = 0xFF94A3B8u32
+val LINE: u32 = 0xFF334155u32
+
+fn pack(src: [u32]) -> [i64]:
+    var out: [i64] = [0; src.len()]
+    var i = 0
+    while i < src.len():
+        out[i] = src[i].to_i64() & 0xFFFFFF
+        i = i + 1
+    out
+
+fn should_close(input: WinitInput) -> bool:
+    if input.close:
+        return true
+    for k in input.keys:
+        if k == 27 or k == 113 or k == 81:
+            return true
+    false
+
+fn wait_for_bridge(path: text, timeout_ms: i64) -> text:
+    val deadline = time_now_unix_micros() + timeout_ms * 1000
+    while time_now_unix_micros() < deadline:
+        if file_exists(path):
+            val body = file_read(path)
+            if body.contains("kind=create_window"):
+                return body
+        thread_sleep(50)
+    ""
+
+fn scale_pixels_nearest(src: [u32], src_w: i32, src_h: i32, dst_w: i32, dst_h: i32) -> [u32]:
+    if src_w <= 0 or src_h <= 0 or dst_w <= 0 or dst_h <= 0:
+        return []
+    var out: [u32] = [0u32; dst_w * dst_h]
+    var y = 0
+    while y < dst_h:
+        val sy = (y * src_h) / dst_h
+        var x = 0
+        while x < dst_w:
+            val sx = (x * src_w) / dst_w
+            out[y * dst_w + x] = src[sy * src_w + sx]
+            x = x + 1
+        y = y + 1
+    out
+
+fn draw_taskbar(b: MetalBackend, comp: HostCompositor):
+    val theme = wm_chrome_theme()
+    val count = comp.windows.len().to_i32()
+    if count <= 0:
+        return
+    val dock_w = host_taskbar_dock_width(W, count)
+    val dock_x = (W - dock_w) / 2
+    val dock_y = H - 62
+    b.draw_rounded_rect(dock_x, dock_y, dock_w, 44, 8, theme.taskbar)
+    val item_w = host_taskbar_item_width(W, count)
+    var i = 0
+    while i < count:
+        val win = comp.windows[i]
+        val ix = host_taskbar_item_x(W, count, i)
+        var color = theme.title_unfocused
+        if win.focused and not win.minimized:
+            color = theme.accent
+        elif win.minimized:
+            color = theme.host_window_body
+        b.draw_rounded_rect(ix + 2, dock_y + 6, item_w - 4, 32, 5, color)
+        if win.focused and not win.minimized:
+            b.draw_rect_filled(ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
+        b.draw_text(ix + 10, dock_y + 16, win.title, theme.text_primary, 8)
+        i = i + 1
+
+fn draw_window_frame(b: MetalBackend, comp: HostCompositor, frame: PpmImage):
+    val theme = wm_chrome_theme()
+    b.clear(theme.compositor_bg)
+    b.draw_rect_filled(0, 0, W, 38, theme.command_lane)
+    b.draw_text(14, 12, "Simple WM", theme.text_primary, 10)
+    b.draw_text(112, 12, "filesystem-launched child: {WIDGET_SHOWCASE_APP_SOURCE}", MUTED, 8)
+    var i = 0
+    while i < comp.windows.len():
+        val win = comp.windows[i]
+        if not win.minimized:
+            b.draw_rect_filled(win.x + 7, win.y + 7, win.w, win.h, theme.window_shadow)
+            b.draw_rect_filled(win.x, win.y, win.w, win.h, theme.host_window_body)
+            val title_color = if win.focused: theme.accent else: theme.title_unfocused
+            b.draw_rect_filled(win.x, win.y, win.w, 24, title_color)
+            b.draw_text(win.x + 10, win.y + 7, win.title, theme.text_primary, 8)
+            b.draw_rect_filled(win.x + win.w - 24, win.y, 24, 24, theme.close_button)
+            b.draw_text(win.x + win.w - 17, win.y + 4, "X", theme.text_primary, theme.close_button)
+            val cx = win.x + 4
+            val cy = win.y + 28
+            val cw = win.w - 8
+            val ch = win.h - 32
+            val scaled = scale_pixels_nearest(frame.pixels, frame.width, frame.height, cw, ch)
+            b.draw_image_scaled(cx, cy, cw, ch, cw, ch, scaled)
+        i = i + 1
+    draw_taskbar(b, comp)
+    b.draw_rect_filled(0, 0, W, 3, LOCATOR)
+    b.draw_rect_filled(0, H - 3, W, 3, LOCATOR)
+    b.draw_rect_filled(0, 0, 3, H, LOCATOR)
+    b.draw_rect_filled(W - 3, 0, 3, H, LOCATOR)
+    b.present()
+
+fn render_and_present(b: MetalBackend, win: WinitWindow, comp: HostCompositor, frame: PpmImage, state: text) -> bool:
+    draw_window_frame(b, comp, frame)
+    val pixels = b.read_pixels()
+    if pixels.len() < W * H:
+        print "[wm-showcase] present state={state} FAIL readback_short={pixels.len()} want={W * H}"
+        return false
+    winit_present_rgba(win, W.to_i64(), H.to_i64(), pack(pixels))
+    if state != "hold":
+        print "[wm-showcase] present state={state} dims={W}x{H} len={pixels.len()} child_frame=from-filesystem"
+    true
+
+fn apply_wm_input(comp: HostCompositor, input: WinitInput) -> HostCompositor:
+    var out = comp
+    if input.mouse_x != 0.0 or input.mouse_y != 0.0:
+        out = host_compositor_pointer_move(out, input.mouse_x.to_i32(), input.mouse_y.to_i32())
+    var ci = 0
+    while ci < input.click_buttons.len():
+        val btn = input.click_buttons[ci]
+        val pressed = input.click_pressed[ci]
+        if btn == 0:
+            val fx = input.click_x[ci].to_i32()
+            val fy = input.click_y[ci].to_i32()
+            out = host_compositor_left_button_at(out, pressed, fx, fy)
+            print "[wm-showcase] input left_button pressed={pressed} x={fx} y={fy} windows={out.windows.len()} dragging={out.dragging}"
+        ci = ci + 1
+    out
+
+fn launch_showcase_child(bridge_path: text, frame_path: text) -> i64:
+    var env = wm_widget_showcase_client_env(bridge_path, frame_path)
+    val lib = env_get("SIMPLE_LIB") ?? ""
+    if lib != "":
+        env["SIMPLE_LIB"] = lib
+    else:
+        env["SIMPLE_LIB"] = "src"
+    val simple_lib = env["SIMPLE_LIB"]
+    if host_os().lower().contains("windows"):
+        return process_spawn_async_env("bin/simple", ["run", WIDGET_SHOWCASE_APP_SOURCE], env)
+    process_spawn_async("env", [
+        "SIMPLE_WM_APP_MODE=client",
+        "SIMPLE_WM_BRIDGE_FILE={bridge_path}",
+        "SIMPLE_WM_FRAME_FILE={frame_path}",
+        "SIMPLE_WM_CLIENT_HOLD=1",
+        "SIMPLE_LIB={simple_lib}",
+        "bin/simple",
+        "run",
+        WIDGET_SHOWCASE_APP_SOURCE
+    ])
+
+fn cleanup(child_pid: i64, b: MetalBackend, win: WinitWindow, lp: WinitLoop):
+    if child_pid > 0:
+        process_kill(child_pid)
+    b.shutdown()
+    winit_window_free(win)
+    winit_loop_free(lp)
+
+fn main() -> i64:
+    print "WM Widget Showcase GUI - launching same source from filesystem"
+    if (env_get("SIMPLE_GUI") ?? "") != "1":
+        print "[wm-showcase] error=no-gui-requested (launch via macos-gui-run.shs)"
+        return 2
+
+    dir_create_all("build/tmp")
+    val stamp = "{getpid()}_{time_now_unix_micros()}"
+    val bridge_path = "build/tmp/wm_widget_showcase_{stamp}.bridge"
+    val frame_path = "build/tmp/wm_widget_showcase_{stamp}.ppm"
+    val child_pid = launch_showcase_child(bridge_path, frame_path)
+    if child_pid <= 0:
+        print "[wm-showcase] error=child-spawn-failed source={WIDGET_SHOWCASE_APP_SOURCE}"
+        return 1
+
+    val bridge_body = wait_for_bridge(bridge_path, 120000)
+    if bridge_body == "":
+        print "[wm-showcase] error=child-bridge-timeout source={WIDGET_SHOWCASE_APP_SOURCE} pid={child_pid}"
+        process_kill(child_pid)
+        return 1
+    val req = wm_fs_bridge_decode(bridge_body)
+    val frame_bytes = file_read_bytes(frame_path)
+    val decoded = decode_ppm_to_argb(frame_bytes)
+    if decoded.is_err():
+        print "[wm-showcase] error=child-frame-decode-failed path={frame_path}"
+        process_kill(child_pid)
+        return 1
+    val frame = decoded.unwrap()
+
+    val lp = winit_loop_new()
+    if not lp.is_valid:
+        print "[wm-showcase] error=no-gui-runtime"
+        process_kill(child_pid)
+        return 1
+    val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "Simple WM - Widget Showcase")
+    if not win.is_valid:
+        print "[wm-showcase] error=window-create-failed"
+        winit_loop_free(lp)
+        process_kill(child_pid)
+        return 1
+
+    var b = MetalBackend.create()
+    if not b.init(W, H):
+        print "[wm-showcase] error=metal-init-failed"
+        winit_window_free(win)
+        winit_loop_free(lp)
+        process_kill(child_pid)
+        return 1
+
+    val backend = HeadlessHostCompositorBackend.new(W, H)
+    var comp = HostCompositor.new(backend, Size.wh(W, H))
+    comp.apply_bridge_request(1, 701, COMP_CREATE_WINDOW.to_i64(), 0, req.title, 54, 70, req.window_w, req.window_h, req.content, req.pid, req.app_id)
+    print "[wm-showcase] launched source={req.source_path} child_pid={child_pid} bridge_pid={req.pid} app_id={req.app_id} windows={comp.windows.len()} taskbar_items={comp.windows.len()}"
+    if comp.windows.len() != 1:
+        cleanup(child_pid, b, win, lp)
+        return 1
+    if not render_and_present(b, win, comp, frame, "launched"):
+        cleanup(child_pid, b, win, lp)
+        return 1
+
+    var running = true
+    var frames = 0
+    while running and frames < 2000000:
+        val input = winit_poll_input(lp)
+        if should_close(input):
+            running = false
+        comp = apply_wm_input(comp, input)
+        if comp.windows.len() == 0:
+            running = false
+        if not render_and_present(b, win, comp, frame, "hold"):
+            cleanup(child_pid, b, win, lp)
+            return 1
+        thread_sleep(16)
+        frames = frames + 1
+
+    cleanup(child_pid, b, win, lp)
+    return 0

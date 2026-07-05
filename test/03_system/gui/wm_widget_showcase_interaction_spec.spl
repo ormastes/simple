@@ -1,0 +1,248 @@
+"""
+# WM Widget Showcase Interaction System Spec
+
+Pins the live hosted-widget-showcase contract: Winit events are routed into the
+shared HostCompositor state, the taskbar uses the compositor's hit geometry, and
+the app fails closed when launched outside a GUI environment.
+"""
+
+# @tag: system, gui, wm, event, taskbar, environment
+
+use std.spec.*
+use std.io_runtime.{file_read, process_run_timeout}
+use app.io.mod.{process_spawn_async, process_wait, process_kill, file_exists, file_read_text, file_read_bytes, dir_create_all, getpid, time_now_unix_micros, thread_sleep}
+use common.window_protocol.geometry.{Size}
+use common.ui.wm_app_process_contract.{
+    WM_CLIENT_HOLD_ENV,
+    WIDGET_SHOWCASE_APP_SOURCE,
+    wm_fs_bridge_decode,
+    wm_widget_showcase_client_env,
+}
+use os.compositor.host_compositor_entry.{
+    HostCompositor,
+    HeadlessHostCompositorBackend,
+    host_compositor_pointer_move,
+    host_compositor_left_button_at,
+    host_compositor_focused_window_id,
+    host_compositor_minimize_focused,
+    host_taskbar_item_x,
+    host_taskbar_item_width,
+}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+
+val W: i32 = 820
+val H: i32 = 620
+val ENTRY: text = "examples/06_io/ui/wm_widget_showcase_gui.spl"
+val SHOWCASE_SOURCE: text = "examples/06_io/ui/widget_showcase_metal_gui.spl"
+
+fn src() -> text:
+    file_read(ENTRY)
+
+fn showcase_src() -> text:
+    file_read(SHOWCASE_SOURCE)
+
+fn _comp() -> HostCompositor:
+    val backend = HeadlessHostCompositorBackend.new(W, H)
+    val comp = HostCompositor.new(backend, Size.wh(W, H))
+    comp.apply_bridge_request(1, 701, COMP_CREATE_WINDOW.to_i64(), 0, "Widget Showcase", 54, 70, 708, 456, "showcase", 9201, "/examples/widget-showcase")
+    comp
+
+fn _two_window_comp() -> HostCompositor:
+    val backend = HeadlessHostCompositorBackend.new(W, H)
+    val comp = HostCompositor.new(backend, Size.wh(W, H))
+    comp.apply_bridge_request(1, 701, COMP_CREATE_WINDOW.to_i64(), 0, "Widget Showcase", 54, 70, 708, 456, "showcase", 9201, "/examples/widget-showcase")
+    comp.apply_bridge_request(2, 702, COMP_CREATE_WINDOW.to_i64(), 0, "Inspector", 120, 140, 360, 220, "inspect", 9202, "/examples/inspector")
+    comp
+
+fn _index_of(comp: HostCompositor, id: i64) -> i32:
+    var i = 0
+    while i < comp.windows.len():
+        if comp.windows[i].id == id:
+            return i
+        i = i + 1
+    -1
+
+fn _taskbar_click_x(comp: HostCompositor, id: i64) -> i32:
+    val count = comp.windows.len().to_i32()
+    val item_w = host_taskbar_item_width(W, count)
+    host_taskbar_item_x(W, count, _index_of(comp, id)) + item_w / 2
+
+describe "WM showcase live wrapper source contract":
+
+    it "routes real Winit mouse events into the shared host compositor":
+        val s = src()
+        expect(s).to_contain("fn apply_wm_input")
+        expect(s).to_contain("winit_poll_input(lp)")
+        expect(s).to_contain("host_compositor_pointer_move")
+        expect(s).to_contain("host_compositor_left_button_at")
+        expect(s).to_contain("input.click_buttons")
+        expect(s).to_contain("input.click_pressed")
+        expect(s).to_contain("[wm-showcase] input left_button")
+
+    it "does not discard events inside render_and_present":
+        val s = src()
+        val render_pos = s.index_of("fn render_and_present")
+        val input_pos = s.index_of("fn apply_wm_input")
+        expect(render_pos >= 0).to_equal(true)
+        expect(input_pos > render_pos).to_equal(true)
+        val render_body = s.substring(render_pos, input_pos)
+        expect(render_body.contains("winit_poll_input")).to_equal(false)
+
+    it "draws the taskbar from the shared theme and host taskbar geometry":
+        val s = src()
+        expect(s).to_contain("wm_chrome_theme()")
+        expect(s).to_contain("theme.taskbar")
+        expect(s).to_contain("theme.command_lane")
+        expect(s).to_contain("theme.accent")
+        expect(s).to_contain("theme.host_window_body")
+        expect(s).to_contain("theme.close_button")
+        expect(s).to_contain("host_taskbar_dock_width")
+        expect(s).to_contain("host_taskbar_item_width")
+        expect(s).to_contain("host_taskbar_item_x")
+
+    it "creates the child process window through COMP_CREATE_WINDOW":
+        val s = src()
+        expect(s).to_contain("HostCompositor.new")
+        expect(s).to_contain("COMP_CREATE_WINDOW.to_i64()")
+        expect(s).to_contain("req.title")
+        expect(s).to_contain("req.pid")
+        expect(s).to_contain("[wm-showcase] launched source=")
+
+    it "launches the same showcase source from the filesystem as a child process":
+        val s = src()
+        expect(s).to_contain("process_spawn_async")
+        expect(s).to_contain("bin/simple")
+        expect(s).to_contain("WIDGET_SHOWCASE_APP_SOURCE")
+        expect(s).to_contain("[\"run\", WIDGET_SHOWCASE_APP_SOURCE]")
+        expect(s).to_contain("wm_widget_showcase_client_env")
+        expect(s).to_contain("process_kill(child_pid)")
+
+    it "does not embed widget showcase drawing code inside the WM wrapper":
+        val s = src()
+        expect(s.contains("fn widget_button")).to_equal(false)
+        expect(s.contains("fn widget_checks")).to_equal(false)
+        expect(s.contains("fn draw_showcase_content")).to_equal(false)
+        expect(s).to_contain("decode_ppm_to_argb")
+        expect(s).to_contain("draw_image_scaled")
+
+    it "keeps native and WM-client modes in the same showcase source file":
+        val s = showcase_src()
+        expect(s).to_contain("fn build_frame")
+        expect(s).to_contain("fn run_wm_client")
+        expect(s).to_contain("wm_app_mode_is_client")
+        expect(s).to_contain("wm_widget_showcase_bridge_request")
+        expect(s).to_contain("winit_window_new")
+
+    it "uses the shared app source constant in contract and wrapper":
+        expect(WIDGET_SHOWCASE_APP_SOURCE).to_equal(SHOWCASE_SOURCE)
+        val s = src()
+        expect(s).to_contain("WIDGET_SHOWCASE_APP_SOURCE")
+
+describe "WM showcase compositor event system":
+
+    it "drags a hosted internal window by titlebar and releases cleanly":
+        var comp = _comp()
+        val before_x = comp.windows[0].x
+        val before_y = comp.windows[0].y
+        comp = host_compositor_pointer_move(comp, before_x + 40, before_y + 12)
+        comp = host_compositor_left_button_at(comp, true, before_x + 40, before_y + 12)
+        expect(comp.dragging).to_equal(true)
+        comp = host_compositor_pointer_move(comp, before_x + 125, before_y + 78)
+        expect(comp.windows[0].x).to_be_greater_than(before_x)
+        expect(comp.windows[0].y).to_be_greater_than(before_y)
+        comp = host_compositor_left_button_at(comp, false, before_x + 125, before_y + 78)
+        expect(comp.dragging).to_equal(false)
+
+    it "focuses an internal window when its content area is clicked":
+        var comp = _two_window_comp()
+        expect(host_compositor_focused_window_id(comp)).to_equal(2)
+        comp = host_compositor_left_button_at(comp, true, 90, 160)
+        comp = host_compositor_left_button_at(comp, false, 90, 160)
+        expect(host_compositor_focused_window_id(comp)).to_equal(1)
+
+    it "closes an internal window through the visible close button":
+        var comp = _comp()
+        val win = comp.windows[0]
+        comp = host_compositor_left_button_at(comp, true, win.x + win.w - 14, win.y + 12)
+        comp = host_compositor_left_button_at(comp, false, win.x + win.w - 14, win.y + 12)
+        expect(comp.windows.len()).to_equal(0)
+
+    it "resizes an internal window from the bottom-right grip":
+        var comp = _comp()
+        val win = comp.windows[0]
+        comp = host_compositor_pointer_move(comp, win.x + win.w - 2, win.y + win.h - 2)
+        comp = host_compositor_left_button_at(comp, true, win.x + win.w - 2, win.y + win.h - 2)
+        expect(comp.resizing).to_equal(true)
+        comp = host_compositor_pointer_move(comp, win.x + win.w + 34, win.y + win.h + 28)
+        expect(comp.windows[0].w).to_be_greater_than(win.w)
+        expect(comp.windows[0].h).to_be_greater_than(win.h)
+        comp = host_compositor_left_button_at(comp, false, win.x + win.w + 34, win.y + win.h + 28)
+        expect(comp.resizing).to_equal(false)
+
+    it "focuses a background window through its taskbar item":
+        var comp = _two_window_comp()
+        expect(host_compositor_focused_window_id(comp)).to_equal(2)
+        val cy = H - 62 + 22
+        val cx = _taskbar_click_x(comp, 1)
+        expect(comp.hit_taskbar(cx, cy)).to_equal(1)
+        comp = host_compositor_left_button_at(comp, true, cx, cy)
+        comp = host_compositor_left_button_at(comp, false, cx, cy)
+        expect(host_compositor_focused_window_id(comp)).to_equal(1)
+
+    it "restores a minimized internal window through its taskbar item":
+        var comp = _two_window_comp()
+        val cy = H - 62 + 22
+        val cx = _taskbar_click_x(comp, 1)
+        comp = host_compositor_left_button_at(comp, true, cx, cy)
+        comp = host_compositor_left_button_at(comp, false, cx, cy)
+        comp = host_compositor_minimize_focused(comp)
+        expect(comp.windows[_index_of(comp, 1)].minimized).to_equal(true)
+        comp = host_compositor_left_button_at(comp, true, cx, cy)
+        comp = host_compositor_left_button_at(comp, false, cx, cy)
+        expect(comp.windows[_index_of(comp, 1)].minimized).to_equal(false)
+        expect(host_compositor_focused_window_id(comp)).to_equal(1)
+
+describe "WM showcase environment behavior":
+
+    it "fails closed outside a GUI environment before creating a host window":
+        val result = process_run_timeout("bin/simple", ["run", ENTRY], 30000)
+        expect(result.2).to_equal(2)
+        expect(result.0).to_contain("[wm-showcase] error=no-gui-requested")
+
+    it "keeps the no-GUI gate before winit_loop_new in source order":
+        val s = src()
+        val gate_pos = s.index_of("SIMPLE_GUI")
+        val loop_pos = s.index_of("winit_loop_new()")
+        expect(gate_pos >= 0).to_equal(true)
+        expect(loop_pos > gate_pos).to_equal(true)
+
+    it "spawns the showcase source in WM-client mode, receives bridge/frame files, and can kill it":
+        dir_create_all("build/tmp")
+        val stamp = "{getpid()}_{time_now_unix_micros()}"
+        val bridge_path = "build/tmp/wm_showcase_spec_{stamp}.bridge"
+        val frame_path = "build/tmp/wm_showcase_spec_{stamp}.ppm"
+        val pid = process_spawn_async("env", [
+            "SIMPLE_WM_APP_MODE=client",
+            "SIMPLE_WM_BRIDGE_FILE={bridge_path}",
+            "SIMPLE_WM_FRAME_FILE={frame_path}",
+            "SIMPLE_WM_CLIENT_HOLD=1",
+            "SIMPLE_LIB=src",
+            "bin/simple",
+            "run",
+            SHOWCASE_SOURCE
+        ])
+        expect(pid).to_be_greater_than(0)
+        var waited = 0
+        while waited < 1200 and not file_exists(bridge_path):
+            thread_sleep(100)
+            waited = waited + 1
+        expect(file_exists(bridge_path)).to_equal(true)
+        expect(file_exists(frame_path)).to_equal(true)
+        val req = wm_fs_bridge_decode(file_read_text(bridge_path))
+        expect(req.source_path).to_equal(SHOWCASE_SOURCE)
+        expect(req.title).to_equal("Widget Showcase")
+        expect(req.pid).to_be_greater_than(0)
+        expect(file_read_bytes(frame_path).len()).to_be_greater_than(1000)
+        val killed = process_kill(pid)
+        val exit_code = process_wait(pid, 10000)
+        expect(exit_code != -2).to_equal(true)
