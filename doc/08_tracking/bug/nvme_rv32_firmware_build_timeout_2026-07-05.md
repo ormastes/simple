@@ -232,3 +232,26 @@ genuine `fail == 0` from real on-target checks.
 scenario 1 fails on exactly one expectation, `ALL RV32 NVME FW CHECKS PASS`
 (both `HEAP OK` and `SVC OK` now pass). Command:
 `bin/simple test test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl --mode=interpreter --clean --timeout 90 --sequential`.
+
+### Native-build main fast path attempted (2026-07-05)
+
+`src/app/cli/native_build_main.spl` now calls the pure Simple
+`cli_native_build(args)` implementation directly by default and keeps the old
+`native_build_worker.spl` subprocess only behind bootstrap/interpret/explicit
+`SIMPLE_NATIVE_BUILD_FORCE_WORKER` fallback guards, or when the caller passes
+`--timeout` so parent-enforced timeout semantics are preserved. This removes one
+known worker-spawn/cold-load layer from untimed `simple native-build` and is
+covered by `test/01_unit/app/cli_native_build_main_contract_spec.spl` plus the
+refreshed SimpleOS/QMP source contract.
+
+The RV32 firmware wrapper still timed out before producing
+`build/nvme_fw_rv32.elf`:
+
+```sh
+NVME_RV32_BUILD_TIMEOUT_SECS=180 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+# NVME_RV32_BUILD_FAILED code=124 timeout=180s
+```
+
+So this bug remains open. The next blocker is the remaining native-build
+compiler-load/codegen time for the RV32 source set, not just the old worker
+entrypoint.
