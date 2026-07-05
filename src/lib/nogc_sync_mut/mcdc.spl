@@ -261,6 +261,61 @@ fn get_registered_decisions() -> [Decision]:
 fn get_recorded_evaluations() -> [DecisionEval]:
     _evaluations
 
+# ---------------------------------------------------------------------------
+# Per-decision MC/DC report layer.
+#
+# analyze_mcdc() computes independence pairs but returns a flat condition list.
+# This layer buckets that analysis into an auditable report: which conditions
+# were demonstrated to independently affect the outcome (covered) and which were
+# not (uncovered), each by name AND index, plus the MC/DC percentage. This is
+# the reportable artifact required by DO-178C Level A / ISO 26262 ASIL D reviews.
+
+struct MCDCDecisionReport:
+    decision_id: i64
+    expression: text
+    condition_count: i64
+    conditions_covered: i64
+    mcdc_percent: f64
+    is_covered: bool
+    covered_conditions: [text]
+    uncovered_conditions: [text]
+    covered_indices: [i64]
+    uncovered_indices: [i64]
+    evaluation_count: i64
+
+fn build_decision_report(decision_id: i64) -> MCDCDecisionReport:
+    val analysis = analyze_mcdc(decision_id)
+    var covered_names: [text] = []
+    var uncovered_names: [text] = []
+    var covered_idx: [i64] = []
+    var uncovered_idx: [i64] = []
+    for cr in analysis.condition_results:
+        if cr.is_covered:
+            covered_names.push(cr.expression)
+            covered_idx.push(cr.condition_id)
+        else:
+            uncovered_names.push(cr.expression)
+            uncovered_idx.push(cr.condition_id)
+    MCDCDecisionReport { decision_id: analysis.decision_id, expression: analysis.expression, condition_count: analysis.condition_count, conditions_covered: analysis.conditions_covered, mcdc_percent: analysis.mcdc_percent, is_covered: analysis.is_covered, covered_conditions: covered_names, uncovered_conditions: uncovered_names, covered_indices: covered_idx, uncovered_indices: uncovered_idx, evaluation_count: analysis.evaluation_count }
+
+fn _join_names(names: [text]) -> text:
+    var out = ""
+    for i in 0..names.len():
+        if i > 0:
+            out = out + ", "
+        out = out + names[i]
+    if out == "":
+        return "(none)"
+    out
+
+fn format_decision_report(decision_id: i64) -> text:
+    val rep = build_decision_report(decision_id)
+    var s = "Decision #{rep.decision_id}: {rep.expression}\n"
+    s = s + "  MC/DC: {rep.mcdc_percent:.1f}% ({rep.conditions_covered}/{rep.condition_count}), evaluations={rep.evaluation_count}\n"
+    s = s + "  Covered:   {_join_names(rep.covered_conditions)}\n"
+    s = s + "  Uncovered: {_join_names(rep.uncovered_conditions)}\n"
+    s
+
 fn track_mcdc_and(decision_id: i64, a: bool, b: bool) -> bool:
     val result = a and b
     record_evaluation(decision_id, [a, b], [true, a], result)
