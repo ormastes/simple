@@ -1,0 +1,83 @@
+# @cover src/lib/common/ui/widget_hit.spl 80%
+"""
+# Widget Hit-Test Layout-Sharing Spec
+
+Unit coverage for the FIX-3 change to src/lib/common/ui/widget_hit.spl:
+`widget_set_pressed` and `widget_dispatch_click` now accept an optional
+precomputed `layout` (a compute_layout() result) so a caller dispatching more
+than one reducer for the same pointer event (press + click) can share one
+layout pass instead of each function recomputing it from scratch. The old
+zero-arg call form must keep working unchanged.
+"""
+
+use std.spec.{describe, it, expect}
+use common.ui.widget.{WidgetNode}
+use common.ui.builder.{column, button, checkbox}
+use common.ui.layout.{compute_layout}
+use common.ui.widget_hit.{widget_set_pressed, widget_dispatch_click, widget_hit_test}
+
+val W: i32 = 320
+val H: i32 = 240
+
+fn fixed_h(node: WidgetNode, h: i32) -> WidgetNode:
+    node.set_prop("height", "{h}")
+    node
+
+fn build_tree(p: text) -> WidgetNode:
+    val btn = fixed_h(button("{p}_btn", "Click", "act"), 40)
+    val chk = fixed_h(checkbox("{p}_chk", "Enable", false), 30)
+    column("{p}_root", [btn, chk])
+
+describe "widget_set_pressed / widget_dispatch_click — layout parameter (FIX 3)":
+
+    it "widget_set_pressed with no layout argument behaves exactly as before":
+        val root = build_tree("nolayout_press")
+        val hit = widget_set_pressed(root, W, H, 10, 10)
+        expect(hit).to_equal("nolayout_press_btn")
+        expect(WidgetNode(id: "nolayout_press_btn").get_prop("ui_pressed")).to_equal("true")
+
+    it "widget_dispatch_click with no layout argument behaves exactly as before":
+        val root = build_tree("nolayout_click")
+        val hit = widget_dispatch_click(root, W, H, 10, 45)
+        expect(hit).to_equal("nolayout_click_chk")
+        expect(WidgetNode(id: "nolayout_click_chk").get_prop("checked")).to_equal("true")
+
+    it "widget_set_pressed with a precomputed layout matches the no-layout result":
+        val root = build_tree("layout_press")
+        val layout = compute_layout(root, 0, 0, W, H)
+        val hit = widget_set_pressed(root, W, H, 10, 10, layout)
+        expect(hit).to_equal("layout_press_btn")
+        expect(WidgetNode(id: "layout_press_btn").get_prop("ui_pressed")).to_equal("true")
+
+    it "widget_dispatch_click with a precomputed layout matches the no-layout result":
+        val root = build_tree("layout_click")
+        val layout = compute_layout(root, 0, 0, W, H)
+        val hit = widget_dispatch_click(root, W, H, 10, 45, layout)
+        expect(hit).to_equal("layout_click_chk")
+        expect(WidgetNode(id: "layout_click_chk").get_prop("checked")).to_equal("true")
+
+    it "a single compute_layout() pass can drive both press and click for the same event":
+        val root = build_tree("shared_layout")
+        val layout = compute_layout(root, 0, 0, W, H)
+        val press_hit = widget_set_pressed(root, W, H, 10, 10, layout)
+        val click_hit = widget_dispatch_click(root, W, H, 10, 10, layout)
+        expect(press_hit).to_equal("shared_layout_btn")
+        expect(click_hit).to_equal("shared_layout_btn")
+        expect(WidgetNode(id: "shared_layout_btn").get_prop("ui_pressed")).to_equal("true")
+
+    it "a stale/mismatched layout still resolves purely from the rects it was given":
+        # Regression guard: the layout parameter, once provided, is used as-is
+        # (no silent recompute-and-ignore). Passing the *other* tree's layout
+        # must hit whatever is at that position in the stale rects, not the
+        # caller's actual root.
+        val root_a = build_tree("stale_a")
+        val root_b = build_tree("stale_b")
+        val layout_b = compute_layout(root_b, 0, 0, W, H)
+        val hit = widget_dispatch_click(root_a, W, H, 10, 10, layout_b)
+        expect(hit).to_equal("stale_b_btn")
+
+    it "widget_hit_test is unaffected by the widget_set_pressed/click signature change":
+        val root = build_tree("hit_test_only")
+        val hit = widget_hit_test(root, W, H, 10, 10)
+        expect(hit.found).to_equal(true)
+        expect(hit.id).to_equal("hit_test_only_btn")

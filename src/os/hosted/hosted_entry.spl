@@ -22,6 +22,7 @@ extern fn rt_winit_event_get_type(ev: i64) -> i64
 extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
 extern fn rt_winit_event_mouse_moved(ev: i64) -> (i32, i32)
 extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
+extern fn rt_winit_event_mouse_wheel(ev: i64) -> (f64, f64)
 extern fn rt_winit_event_free(ev: i64)
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
@@ -38,6 +39,7 @@ val EVT_UNFOCUS: i64 = 6
 val EVT_KEY: i64 = 10
 val EVT_MOUSE_BUTTON: i64 = 20
 val EVT_MOUSE_MOVE: i64 = 21
+val EVT_MOUSE_WHEEL: i64 = 22
 
 val KEY_ESCAPE: i64 = 27
 val KEY_TAB: i64 = 9
@@ -124,11 +126,19 @@ fn main() -> i64:
                 dirty = true
             elif kind == EVT_MOUSE_BUTTON:
                 val (button, pressed) = rt_winit_event_mouse_button(ev)
-                if button == 0:
-                    comp.handle_left_button(pressed)
-                    mouse_button_events = mouse_button_events + 1
-                    print "[hosted-wm] event mouse_button count={mouse_button_events} button={button} pressed={pressed}"
-                    dirty = true
+                # Route all buttons (0=left, 1=middle, 2=right) to the compositor,
+                # not just left. Left keeps its full chrome semantics; middle/right
+                # are recorded on the compositor (last_button/last_button_down) so
+                # the event is observable even though no chrome action consumes
+                # them yet (parity with ui.browser/app.spl's unconditional forward).
+                comp.handle_mouse_button(button, pressed)
+                mouse_button_events = mouse_button_events + 1
+                print "[hosted-wm] event mouse_button count={mouse_button_events} button={button} pressed={pressed}"
+                dirty = true
+            elif kind == EVT_MOUSE_WHEEL:
+                val (wheel_dx, wheel_dy) = rt_winit_event_mouse_wheel(ev)
+                comp.handle_mouse_wheel(wheel_dx, wheel_dy)
+                dirty = true
             elif kind == EVT_KEY:
                 val (scan_code, keycode, pressed_key) = rt_winit_event_keyboard_input(ev)
                 if pressed_key:

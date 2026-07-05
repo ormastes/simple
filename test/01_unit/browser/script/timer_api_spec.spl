@@ -11,6 +11,8 @@ use std.gc_async_mut.gpu.browser_engine.script.timer_api.{
     request_animation_frame
 }
 
+extern fn rt_time_now_unix_micros() -> i64
+
 describe "Timer API - setTimeout":
     it "schedules a one-shot timer":
         val loop_ref = EventLoop.new()
@@ -47,6 +49,39 @@ describe "Timer API - clearInterval":
         val tid = set_interval(loop_ref, 200, 100)
         clear_interval(loop_ref, tid)
         expect(loop_ref.pending_timer_count()).to_equal(0)
+
+describe "Timer API - real-clock deadline (bug fix regression)":
+    it "does not fire a 50ms timer when drained immediately":
+        val loop_ref = EventLoop.new()
+        set_timeout(loop_ref, 400, 50)
+        val now = rt_time_now_unix_micros()
+        val fired = loop_ref.drain_expired(now)
+        expect(fired.len()).to_equal(0)
+        expect(loop_ref.pending_timer_count()).to_equal(1)
+
+    it "fires a 50ms timer once the wall clock has passed its deadline":
+        val loop_ref = EventLoop.new()
+        val tid = set_timeout(loop_ref, 401, 50)
+        val now = rt_time_now_unix_micros()
+        # Simulate the passage of time by draining at a later "now" instead of
+        # sleeping — deterministic and fast. 50ms = 50_000us; use 100_000us
+        # (100ms) of simulated elapsed time so it is unambiguously past.
+        val later = now + 100000
+        val fired = loop_ref.drain_expired(later)
+        expect(fired.len()).to_equal(1)
+        expect(fired[0]).to_equal(401)
+        expect(loop_ref.pending_timer_count()).to_equal(0)
+
+    it "keeps a repeating interval's deadline on the same absolute clock basis":
+        val loop_ref = EventLoop.new()
+        set_interval(loop_ref, 500, 10)
+        val now = rt_time_now_unix_micros()
+        expect(loop_ref.drain_expired(now).len()).to_equal(0)
+        val fired = loop_ref.drain_expired(now + 50000)
+        expect(fired.len()).to_equal(1)
+        expect(fired[0]).to_equal(500)
+        # Interval re-queues itself — still pending after firing once.
+        expect(loop_ref.pending_timer_count()).to_equal(1)
 
 describe "Timer API - requestAnimationFrame":
     it "registers a rAF callback":

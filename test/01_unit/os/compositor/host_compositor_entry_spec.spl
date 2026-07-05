@@ -619,3 +619,143 @@ describe "host chrome CSS/GUI-web lane":
         expect(px[(win.y + 40) * w + (win.x + 2)]).to_equal(theme.host_window_body)
         # Desktop backdrop outside any window rasterizes to compositor_bg.
         expect(px[0]).to_equal(theme.compositor_bg)
+
+describe "hosted WM mouse wheel + non-left buttons (FIX 1)":
+
+    it "routes middle/right buttons through the compositor without touching chrome state":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "One", 40, 60, 200, 140, "", 1, "/sys/apps/one")
+        comp.handle_mouse_button(2, true)
+        expect(comp.last_button).to_equal(2)
+        expect(comp.last_button_down).to_equal(true)
+        # Right/middle have no chrome action yet: no drag/resize/focus side effect.
+        expect(comp.dragging).to_equal(false)
+        comp.handle_mouse_button(1, false)
+        expect(comp.last_button).to_equal(1)
+        expect(comp.last_button_down).to_equal(false)
+
+    it "still runs full left-button chrome semantics through handle_mouse_button(0, ...)":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Resize", 40, 70, 200, 160, "", 1, "/sys/apps/resize")
+        comp.handle_mouse_move(238, 228)
+        comp.handle_mouse_button(0, true)
+        expect(comp.resizing).to_equal(true)
+
+    it "accumulates wheel delta on the hovered window and leaves other windows untouched":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "One", 40, 60, 200, 140, "", 1, "/sys/apps/one")
+        comp.apply_bridge_request(2, 88, COMP_CREATE_WINDOW.to_i64(), 0, "Two", 300, 60, 200, 140, "", 2, "/sys/apps/two")
+        val one_id = comp.windows[0].id
+        val two_id = comp.windows[1].id
+        comp.handle_mouse_move(80, 100)
+        comp.handle_mouse_wheel(0.0, 3.0)
+        comp.handle_mouse_wheel(0.0, 2.0)
+        expect(comp.scroll_offset_for(one_id)).to_equal(5.0)
+        expect(comp.scroll_offset_for(two_id)).to_equal(0.0)
+
+    it "is a no-op when the wheel event arrives over empty desktop":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "One", 40, 60, 200, 140, "", 1, "/sys/apps/one")
+        comp.handle_mouse_move(500, 400)
+        comp.handle_mouse_wheel(0.0, 4.0)
+        expect(comp.scroll_offset_for(comp.windows[0].id)).to_equal(0.0)
+
+describe "click-on-release chrome semantics (FIX 2)":
+
+    it "does not close the window on mouse-down over the close button":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "One", 40, 60, 200, 140, "", 1, "/sys/apps/one")
+        val close_x = 40 + 200 - 12
+        val close_y = 60 + 12
+        comp.handle_mouse_move(close_x, close_y)
+        comp.handle_left_button(true)
+        expect(comp.windows.len()).to_equal(1)
+        expect(comp.armed_chrome_target).to_equal("close")
+
+    it "closes the window on release-inside the close button":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "One", 40, 60, 200, 140, "", 1, "/sys/apps/one")
+        val close_x = 40 + 200 - 12
+        val close_y = 60 + 12
+        comp.handle_mouse_move(close_x, close_y)
+        comp.handle_left_button(true)
+        comp.handle_left_button(false)
+        expect(comp.windows.len()).to_equal(0)
+
+    it "cancels the close action when the pointer drags away before release":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "One", 40, 60, 200, 140, "", 1, "/sys/apps/one")
+        val close_x = 40 + 200 - 12
+        val close_y = 60 + 12
+        comp.handle_mouse_move(close_x, close_y)
+        comp.handle_left_button(true)
+        # Drag away into the window body (still inside the window, but no
+        # longer over the 24x24 close-button corner) before releasing.
+        comp.handle_mouse_move(40 + 100, 60 + 60)
+        comp.handle_left_button(false)
+        expect(comp.windows.len()).to_equal(1)
+        expect(comp.armed_chrome_target).to_equal("")
+
+    it "does not focus a taskbar item on mouse-down, only on release-inside":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 11, COMP_CREATE_WINDOW.to_i64(), 0, "One", 20, 60, 200, 140, "", 1, "/sys/apps/one")
+        comp.apply_bridge_request(2, 22, COMP_CREATE_WINDOW.to_i64(), 0, "Two", 50, 90, 200, 140, "", 2, "/sys/apps/two")
+        val first_id = comp.windows[0].id
+        val dock_y = 480 - 62
+        val first_x = host_taskbar_item_x(640, comp.windows.len(), 0)
+        comp.handle_mouse_move(first_x + 20, dock_y + 16)
+        comp.handle_left_button(true)
+        # Still armed, not yet focused/reordered: "Two" (created last) is
+        # still the top-of-stack / focused window.
+        expect(comp.armed_chrome_target).to_equal("taskbar")
+        expect(comp.windows[comp.windows.len() - 1].id).to_not_equal(first_id)
+        comp.handle_left_button(false)
+        expect(comp.windows[comp.windows.len() - 1].id).to_equal(first_id)
+
+    it "cancels the taskbar focus action when the release lands on a different item":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 11, COMP_CREATE_WINDOW.to_i64(), 0, "One", 20, 60, 200, 140, "", 1, "/sys/apps/one")
+        comp.apply_bridge_request(2, 22, COMP_CREATE_WINDOW.to_i64(), 0, "Two", 50, 90, 200, 140, "", 2, "/sys/apps/two")
+        val first_id = comp.windows[0].id
+        val second_id = comp.windows[1].id
+        # Reorder so "One" is topmost/last (list becomes [Two, One]) — this
+        # makes a spurious unconditional-fire-on-release distinguishable from
+        # the correct release-inside-only behavior (see comments below).
+        comp.focus_window(first_id)
+        expect(comp.windows[comp.windows.len() - 1].id).to_equal(first_id)
+        val dock_y = 480 - 62
+        val one_item_x = host_taskbar_item_x(640, comp.windows.len(), 1)   # item1 == "One" (now last)
+        val two_item_x = host_taskbar_item_x(640, comp.windows.len(), 0)  # item0 == "Two"
+        # Arm on "One"'s own taskbar item (currently topmost — refocusing it
+        # would be a no-op, so this alone can't hide a bug), then release over
+        # "Two"'s item instead.
+        comp.handle_mouse_move(one_item_x + 20, dock_y + 16)
+        comp.handle_left_button(true)
+        expect(comp.armed_chrome_target).to_equal("taskbar")
+        expect(comp.armed_chrome_window_id).to_equal(first_id)
+        comp.handle_mouse_move(two_item_x + 20, dock_y + 16)
+        comp.handle_left_button(false)
+        # Release-inside failed to match the armed target ("One"), so "Two"
+        # must NOT have been focused: order stays [Two, One], "One" still last.
+        expect(comp.windows[comp.windows.len() - 1].id).to_equal(first_id)
+        expect(comp.armed_chrome_target).to_equal("")
+
+describe "resize-corner hover arming honors minimized windows (FIX 2)":
+
+    it "does not arm resize over a minimized window's stale screen rect":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "One", 40, 70, 200, 160, "", 1, "/sys/apps/resize")
+        val wid = comp.windows[0].id
+        comp.apply_bridge_request(2, 77, COMP_MINIMIZE.to_i64(), wid, "", 0, 0, 0, 0, "", 0, "/sys/apps/resize")
+        comp.handle_mouse_move(238, 228)
+        expect(comp.resize_window_id).to_equal(0)

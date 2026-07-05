@@ -188,6 +188,25 @@ class HostCompositor:
     resize_start_h: i32
     pointer_x: i32
     pointer_y: i32
+    # Last raw button code/state routed through handle_mouse_button (0=left,
+    # 1=middle, 2=right). Left keeps its full chrome semantics via
+    # handle_left_button; middle/right have no chrome action yet, so this is
+    # the observable evidence that the event reached the compositor instead of
+    # being silently dropped at the winit-dispatch layer.
+    last_button: i64
+    last_button_down: bool
+    # Wheel-delta accumulator per hosted window id, keyed by whichever window
+    # is under the pointer when a wheel event arrives. Content-level scroll
+    # rendering is owned by the (forbidden-for-this-change) content renderer,
+    # so this only tracks the delta so it is observable/testable rather than
+    # dropped; wiring it into actual content scroll is a follow-up.
+    scroll_offsets: Dict<i64, f64>
+    # Chrome-action arming for release-inside click semantics (FIX 2): a
+    # mouse-down over a chrome affordance (close button / taskbar item) arms
+    # a target instead of firing immediately; the action only fires on
+    # mouse-up if the release hit-test still resolves to the same target.
+    armed_chrome_target: text
+    armed_chrome_window_id: i64
     # Cache for the CSS/GUI-web chrome render lane (see render_frame). The key
     # is host_chrome_scene_fingerprint(); the pixels are the last full-scene
     # chrome rasterization. Empty key means "no cached chrome yet".
@@ -214,6 +233,11 @@ class HostCompositor:
             resize_start_h: 0,
             pointer_x: 0,
             pointer_y: 0,
+            last_button: -1,
+            last_button_down: false,
+            scroll_offsets: {},
+            armed_chrome_target: "",
+            armed_chrome_window_id: 0,
             _chrome_cache_key: "",
             _chrome_cache_pixels: []
         )
@@ -353,6 +377,37 @@ class HostCompositor:
         self.resize_start_y = out.resize_start_y
         self.resize_start_w = out.resize_start_w
         self.resize_start_h = out.resize_start_h
+        self.armed_chrome_target = out.armed_chrome_target
+        self.armed_chrome_window_id = out.armed_chrome_window_id
+
+    # Generic pointer-button entry point (0=left, 1=middle, 2=right). Left
+    # keeps its full chrome semantics (drag/resize/close/taskbar/focus);
+    # middle/right have no WM chrome action defined yet, so they are recorded
+    # on last_button/last_button_down instead of being silently dropped.
+    me handle_mouse_button(button: i64, down: bool):
+        self.last_button = button
+        self.last_button_down = down
+        if button == 0:
+            self.handle_left_button(down)
+
+    # Route a wheel delta to whichever hosted window the pointer currently
+    # hovers, accumulating a per-window offset. See scroll_offsets doc above
+    # for what this does and does not (yet) drive.
+    me handle_mouse_wheel(dx: f64, dy: f64):
+        var hit_idx = -1
+        var i = 0
+        while i < self.windows.len():
+            val win = self.windows[i]
+            if not win.minimized and self.pointer_x >= win.x and self.pointer_x < win.x + win.w and self.pointer_y >= win.y and self.pointer_y < win.y + win.h:
+                hit_idx = i
+            i = i + 1
+        if hit_idx >= 0:
+            val wid = self.windows[hit_idx].id
+            val current = self.scroll_offsets.get(wid) ?? 0.0
+            self.scroll_offsets[wid] = current + dy
+
+    me scroll_offset_for(window_id: i64) -> f64:
+        self.scroll_offsets.get(window_id) ?? 0.0
 
     me record_launch_failure(index: i32):
         if index < 0 or index >= self.app_processes.len():
@@ -548,13 +603,21 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
     out.pointer_x = x
     out.pointer_y = y
     if down:
+        # Clear any stale arming from a previous down whose matching up was
+        # missed (defensive; the release path below always clears its own arm).
+        out.armed_chrome_target = ""
+        out.armed_chrome_window_id = 0
         # Taskbar click: a press inside the bottom dock band that lands on a
-        # window's taskbar item focuses (and, for a minimized window, restores)
-        # that window. Checked before the window hit-test because the dock band
-        # can overlap a window that extends to the bottom of the desktop.
+        # window's taskbar item is a chrome ACTION (focus + restore-if-
+        # minimized). Arm it on down; it fires only on a release whose
+        # hit-test still resolves to the same taskbar item (release-inside).
+        # A drag-away before release cancels it (see the `else` branch below).
+        # Checked before the window hit-test because the dock band can
+        # overlap a window that extends to the bottom of the desktop.
         val tb_id = out.hit_taskbar(x, y)
         if tb_id > 0:
-            out.focus_window(tb_id)
+            out.armed_chrome_target = "taskbar"
+            out.armed_chrome_window_id = tb_id
             return out
         var hit_idx = -1
         var i = 0
@@ -566,8 +629,12 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
         if hit_idx >= 0:
             val hit = out.windows[hit_idx]
             if x >= hit.x + hit.w - 24 and y >= hit.y and y < hit.y + 24:
-                out.destroy_window(hit.id)
+                # Close button is a chrome ACTION: arm, fire on release-inside.
+                out.armed_chrome_target = "close"
+                out.armed_chrome_window_id = hit.id
                 return out
+            # Window-body focus and titlebar drag-arming are unchanged
+            # (not converted to release-based semantics).
             out.focus_window(hit.id)
             if y >= hit.y and y < hit.y + 24:
                 out.dragging = true
@@ -575,6 +642,29 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
                 out.drag_offset_x = x - hit.x
                 out.drag_offset_y = y - hit.y
                 return out
+    else:
+        # Release: fire the armed chrome action only if the release hit-test
+        # still resolves to the same target (release-inside). Moving away
+        # before release (a different taskbar item / off the close button /
+        # a different window entirely) cancels the action; the armed state is
+        # cleared unconditionally below either way.
+        if out.armed_chrome_target == "taskbar":
+            val tb_id2 = out.hit_taskbar(x, y)
+            if tb_id2 == out.armed_chrome_window_id:
+                out.focus_window(tb_id2)
+        elif out.armed_chrome_target == "close":
+            var close_target_idx = -1
+            var j = 0
+            while j < out.windows.len():
+                if out.windows[j].id == out.armed_chrome_window_id:
+                    close_target_idx = j
+                j = j + 1
+            if close_target_idx >= 0:
+                val win = out.windows[close_target_idx]
+                if not win.minimized and x >= win.x + win.w - 24 and x < win.x + win.w and y >= win.y and y < win.y + 24:
+                    out.destroy_window(win.id)
+        out.armed_chrome_target = ""
+        out.armed_chrome_window_id = 0
     val interaction = wm_lifecycle_left_button(WmPointerInteractionState(dragging: out.dragging, drag_window_id: out.drag_window_id, drag_offset_x: out.drag_offset_x, drag_offset_y: out.drag_offset_y, resizing: out.resizing, resize_window_id: out.resize_window_id, resize_start_x: out.resize_start_x, resize_start_y: out.resize_start_y, resize_start_w: out.resize_start_w, resize_start_h: out.resize_start_h), down)
     out.dragging = interaction.dragging
     out.drag_window_id = interaction.drag_window_id

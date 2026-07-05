@@ -25,7 +25,12 @@ fn _contains(rect: WidgetRect, px: i32, py: i32) -> bool:
 # Topmost widget under (px, py): the LAST rect in draw order (deepest / latest
 # sibling) that contains the point. Mirrors window_scene's top-of-stack pick.
 fn widget_hit_test(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> HitResult:
-    val rects = compute_layout(root, 0, 0, w, h)
+    _hit_test_rects(compute_layout(root, 0, 0, w, h), px, py)
+
+# Same hit-test, over an already-computed layout. Lets callers that need to
+# hit-test the same tree more than once per event (e.g. press + click) share
+# one compute_layout() pass instead of recomputing it for each call.
+fn _hit_test_rects(rects: [WidgetRect], px: i32, py: i32) -> HitResult:
     var best = ""
     for rect in rects:
         if _contains(rect, px, py):
@@ -51,8 +56,14 @@ fn _kind_of(id: text) -> text:
 # =========================================================================
 
 # Press feedback: mark the hit button pressed (for a "pressed" render frame).
-fn widget_set_pressed(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> text:
-    val hit = widget_hit_test(root, w, h, px, py)
+#
+# `layout`: an optional precomputed compute_layout() result. When the caller
+# already has one (e.g. dispatching press + click for the same pointer event),
+# pass it here to skip re-running layout. Left empty ("not provided"), this
+# computes its own layout exactly as before.
+fn widget_set_pressed(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
+    val rects = if layout.len() > 0: layout else: compute_layout(root, 0, 0, w, h)
+    val hit = _hit_test_rects(rects, px, py)
     if hit.found and _kind_of(hit.id) == "button":
         WidgetNode(id: hit.id).set_prop("ui_pressed", "true")
         return hit.id
@@ -77,8 +88,11 @@ fn widget_dispatch_hover(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> 
 
 # Click: toggle checkbox `checked`, focus text inputs (single-focus), return
 # the hit widget id (empty when nothing was hit).
-fn widget_dispatch_click(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> text:
-    val hit = widget_hit_test(root, w, h, px, py)
+#
+# `layout`: optional precomputed compute_layout() result — see widget_set_pressed.
+fn widget_dispatch_click(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
+    val rects = if layout.len() > 0: layout else: compute_layout(root, 0, 0, w, h)
+    val hit = _hit_test_rects(rects, px, py)
     if not hit.found:
         return ""
     val kind = _kind_of(hit.id)
