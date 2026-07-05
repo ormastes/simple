@@ -92,6 +92,24 @@ enough for self-hosted native-build to complete under the wrapper timeout. Do
 not default this wrapper to the Rust seed: it is useful differential evidence,
 but repo policy keeps the seed bootstrap-only.
 
+## Update — exact phase2 source narrowed (2026-07-05)
+
+The phase profile now logs each native entry-closure source before and after
+parse. A production-wrapper run with the self-hosted compiler still timed out
+at 300s, and the last phase markers were:
+
+```text
+[BOOTSTRAP-PHASE] phase2:parse:entry build/os/generated/os/kernel/arch/riscv32/nvme_fw_boot_root.spl module=build.os.generated.os.kernel.arch.riscv32.nvme_fw_boot_root
+[BOOTSTRAP-PHASE] phase2:parse:entry:done build/os/generated/os/kernel/arch/riscv32/nvme_fw_boot_root.spl
+[BOOTSTRAP-PHASE] phase2:parse:entry src/os/kernel/arch/riscv32/boot.spl module=os.kernel.arch.riscv32.boot
+```
+
+So the current self-hosted production timeout happens while parsing
+`src/os/kernel/arch/riscv32/boot.spl` in phase2, before HIR/MIR/codegen/link.
+The driver also no longer reparses native entry-closure modules during HIR
+lowering when a parsed phase2 module exists, but this run does not reach that
+later phase yet.
+
 ## Root Cause — localized (2026-07-05)
 
 The timeout is **NOT** a compiler-pass infinite loop, and **NOT** an

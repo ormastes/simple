@@ -351,11 +351,9 @@ pub class CompilerDriver:
                         if not requested_match:
                             self.ctx.errors.push("native-build entry mismatch: requested entry '{native_entry}' but resolver also selected '{source.path}' (module {source.module_name}) — refusing silent substitution")
                             return false
-                    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
-                        dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
+                    log_phase("phase2:parse:entry {source.path} module={source.module_name}")
                     val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
-                    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
-                        dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
+                    log_phase("phase2:parse:entry:done {source.path}")
                     self.ctx.modules[source.module_name] = entry_module
                     entry_sources.push(source)
                 entry_idx = entry_idx + 1
@@ -499,8 +497,12 @@ pub class CompilerDriver:
             dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
             val hir_module = if is_bootstrap_entry:
                 dtrace("[DRV] branch=bootstrap_entry")
-                val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
-                lowering.lower_module(entry_module_for_hir)
+                val entry_module_for_hir = self.ctx.modules[name]
+                if entry_module_for_hir != nil:
+                    lowering.lower_parser_module_unstub(entry_module_for_hir)
+                else:
+                    val reparsed_entry_module = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
+                    lowering.lower_parser_module_unstub(reparsed_entry_module)
             elif unstub_hir and (src.content != "") and (not self.ctx.options.low_memory):
                 # Opt-in real lowering via a fresh frontend re-parse (see caveat above).
                 # MUST call the uniquely-named lower_parser_module_unstub: a plain
