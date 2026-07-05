@@ -1065,3 +1065,69 @@ implementation-evidence-in-progress
   with `rt_index_arg(index_value)`, matching normal array indexing and allowing
   SSH helpers such as `_u8_at(data, 1)` to read returned `[u8]` arrays
   correctly. No second live QEMU probe was run after this byte-index fix.
+
+## Status Update 2026-07-05 — cross-engine widget shells GREEN + WM regression clean
+
+### Current stats (this session)
+- AC-5 cross-engine widget shells: `scripts/check/check-widget-shells-crossengine-evidence.shs`
+  is GREEN (`widget_crossengine_status=pass`). The pure-Simple web renderer
+  (layout -> engine2d -> Metal) matches BOTH real Chrome (headless) and real
+  Electron (offscreen) rendering the same production GUI-window and taskbar
+  fixtures, non-text pixels only (Chrome DOM text-mask excludes glyphs),
+  per-channel tol 8, no blur:
+  - GUI window: `97.17%` Simple/Chrome, `97.18%` Simple/Electron.
+  - Taskbar: `92.37%` Simple/Chrome, `94.29%` Simple/Electron.
+  - Cross-real sanity: Chrome/Electron `99.96%` (window), `99.93%` (taskbar).
+  - Panel band edges within `1px` on both fixtures (threshold 2px).
+  - All above clear the gate's own thresholds (>=80% Simple-vs-real,
+    >=95% Chrome-vs-Electron, band edges <=2px). The comparator and thresholds
+    (`scripts/check/compare-widget-crossengine.js`) were NOT weakened.
+- Node bitmap lane stayed bit-exact after every renderer change:
+  `simple_web_engine2d_js_mismatch_count=0` (`b026x1s7p`).
+- Root cause of the earlier false "54-58% ceiling": a corrupted CSS cascade,
+  not compositing math. `content: '✓'` (multi-byte UTF-8) shifted every
+  char-indexed CSS rule slice by 2 chars in `extract_css`, killing ~1400/1595
+  rules. Fixed by mirroring char positions during the byte-scan
+  (`extract_css_vw`). Additional parity fixes landed: radial-gradient layer
+  stack (`fb_background_radial_stack_clip`), gaussian box-shadow
+  (`fb_soft_box_shadow` per-axis Phi CDF), full-corner gradient rows
+  (`fb_rounded_rect_row_span_opacity_clip`), `@media` viewport evaluation,
+  interaction-state pseudo rejection, flex viewport-stretch bottom-inset, and
+  min-content/min-width floors.
+- Gate driver hardening: `_write_argb` rewritten to a preallocated parts array
+  + single `parts.join(",")` (was per-pixel StringBuilder push = O(n^2) ->
+  simple-render-timeout on 64k-pixel dumps).
+- All renderer + gate + restored capture-tool changes are landed on
+  `origin/main` and verified present (sentinels `fb_rounded_rect_row_span_opacity_clip`,
+  `extract_css_vw`, `parts.join`), diff-zero vs origin across subsequent
+  concurrent-agent force-pushes.
+
+### WM regression — clean after renderer changes
+- 5 WM specs pass: `host_compositor_entry_spec` (3841ms),
+  `simpleos_gui_shared_wm_adapter_spec` (2177ms),
+  `wm_multiapp_taskbar_spec` (1626ms), `wm_gui_window_drawing_spec` (268ms),
+  `wm_chrome_theme_spec` (1711ms).
+- WM drawing evidence gate passes floors with the documented seed-driver opt-in
+  (`WM_ALLOW_SEED_DRIVER=1`; the deployed `bin/simple` lacks `rt_u32s_from_raw`
+  that `SIMPLE_ONE_CALL_READBACK=1` pins): `wm_gui_window_drawing_status=pass`,
+  css scene `render_ms=33815`/`max_glyph_run_px=7`, windows scene
+  `render_ms=262362`/`glyph=13`, host compositor `render_ms=23732`/`glyph=14`,
+  all above the `4000` non-bg / `50` ink / `200` accent floors.
+
+### Remaining (unchanged blockers, non-regressions)
+- Stage-2 bootstrap repair is the gating item: it would deliver the CONST_NAMES
+  scoping fix AND `rt_u32s_from_raw` into the deployed `bin/simple`, removing
+  the `WM_ALLOW_SEED_DRIVER=1` opt-in for the WM drawing gate. Blocked, not
+  started (needs explicit go).
+- Proportional glyph metrics (Simple's 5x7 bitmap font differs from Chromium
+  rasterization) keep the text-heavy `simple-web-layout-*` Electron lane
+  scoped-out / Linux-only; the cross-engine widget gate deliberately compares
+  non-text pixels to stay honest about this.
+- Interpreter root causes still worked-around (documented, not fixed): me->me
+  receiver clone, single-line `if ... or ... : return`.
+- Prior open lanes remain as listed above: GUI/Web/2D Vulkan browser-backing
+  (Electron `vulkan=disabled_off` on host; pixel parity passes, backing
+  fail-closed), live QEMU WM capture + QEMU-side GTK perf (no `QEMU_QMP_SOCKET`),
+  strict Tauri iOS/WKWebView Metal render-log, broader Node/Bun/Electron scene
+  matrix, and the famous-site corpus (6 failing scenarios, real Chrome text
+  parity incomplete).
