@@ -119,21 +119,26 @@ impl HirLowering:
         var lower_idx = 0
         if bootstrap_mode:
             _bootstrap_hir_functions = []
-            eprint("[hir-lower] functions:count:start")
-            val bootstrap_function_count = flat_bootstrap_function_count()
-            eprint("[hir-lower] functions:count {bootstrap_function_count}")
-            if (hir_module_env_get("SIMPLE_BOOTSTRAP_REAL_HIR") ?? "") == "1":
-                while lower_idx < bootstrap_function_count:
-                    val decl_idx = flat_bootstrap_function_decl_at(lower_idx)
-                    val name = decl_get_name(decl_idx)
-                    eprint("[hir-lower] function:start {name}")
-                    val hir_fn = self.lower_bootstrap_flat_function(decl_idx)
-                    functions[hir_fn.symbol] = hir_fn
-                    _bootstrap_hir_functions.push(hir_fn)
-                    eprint("[hir-lower] function:done {name}")
-                    lower_idx = lower_idx + 1
-            else:
-                eprint("[hir-lower] bootstrap-functions:deferred")
+            # Lower the REAL parsed functions of the entry module. They are held
+            # in `module.functions` (populated by the flat-AST bridge at parse
+            # time — see parse_and_build_module). The prior implementation re-read
+            # the fragile SIMPLE_BOOTSTRAP_DECL_TAG_* environment (overwritten by
+            # every later module parse, so at this point it reflected some other
+            # module) and, unless SIMPLE_BOOTSTRAP_REAL_HIR=1, deferred to ZERO
+            # functions — which produced an all-stub bootstrap binary that linked
+            # cleanly but did nothing (bug
+            # bootstrap_stage2_empty_mir_bodies_2026-07-05).
+            val bootstrap_module_functions = module.functions
+            val bootstrap_function_keys = bootstrap_module_functions.keys()
+            eprint("[hir-lower] functions:count {bootstrap_function_keys.len()}")
+            while lower_idx < bootstrap_function_keys.len():
+                val bootstrap_fn: Function = bootstrap_module_functions[bootstrap_function_keys[lower_idx]]
+                eprint("[hir-lower] function:start {bootstrap_fn.name}")
+                val hir_fn = self.lower_function(bootstrap_fn)
+                functions[hir_fn.symbol] = hir_fn
+                _bootstrap_hir_functions.push(hir_fn)
+                eprint("[hir-lower] function:done {bootstrap_fn.name}")
+                lower_idx = lower_idx + 1
         else:
             val lower_module_functions = module.functions
             val lower_function_keys = lower_module_functions.keys()

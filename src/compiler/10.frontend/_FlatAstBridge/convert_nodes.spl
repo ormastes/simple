@@ -45,7 +45,13 @@ fn flat_bridge_trace_enabled() -> bool:
     (flat_bridge_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
 fn flat_is_bootstrap_entry_path(path: text) -> bool:
-    path.ends_with("/src/app/cli/bootstrap_main.spl") or path == "./src/app/cli/bootstrap_main.spl"
+    # Match the bootstrap entry regardless of how the path is spelled by the
+    # caller. The native-build driver passes it as `src/app/cli/bootstrap_main.spl`
+    # (no leading `/` or `./`), which the previous `/src/...` / `./src/...`
+    # patterns missed — so flat_ast_to_module returned an empty module and the
+    # entry's real functions never reached HIR/MIR lowering (bug
+    # bootstrap_stage2_empty_mir_bodies_2026-07-05).
+    path.ends_with("bootstrap_main.spl")
 
 fn flat_bootstrap_function_count() -> i64:
     if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
@@ -299,8 +305,6 @@ fn convert_flat_expr(idx: i64) -> Expr:
         return Expr(kind: ExprKind.Ident(expr_get_str(idx)), span: span)
     elif tag == EXPR_CALL:
         val callee = convert_flat_expr(expr_get_left(idx))
-        if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            return Expr(kind: ExprKind.Call(callee, []), span: span)
         val arg_indices = expr_get_args(idx)
         var args: [CallArg] = []
         var ai = 0
@@ -329,8 +333,6 @@ fn convert_flat_expr(idx: i64) -> Expr:
     elif tag == EXPR_METHOD_CALL:
         val obj = convert_flat_expr(expr_get_left(idx))
         val method_name = expr_get_str(idx)
-        if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            return Expr(kind: ExprKind.MethodCall(obj, method_name, []), span: span)
         val m_arg_indices = expr_get_args(idx)
         var m_args: [CallArg] = []
         var mai = 0
