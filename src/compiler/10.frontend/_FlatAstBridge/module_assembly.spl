@@ -6,7 +6,7 @@ use compiler.frontend.flat_ast_bridge.*
 # Module shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
-use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path}
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_lex_source_gen_bump}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
@@ -27,6 +27,7 @@ use compiler.frontend.lexer_types.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
 
 fn flat_module_env_get(key: text) -> text:
     rt_env_get(key)
@@ -446,6 +447,8 @@ fn flat_ast_to_module(path: text) -> Module:
     built_module
 
 fn parse_and_build_module(source: text, path: text) -> Module:
+    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     parser_init_with_path(source, path)
     parse_module_body()
     if parser_has_errors():
@@ -454,4 +457,8 @@ fn parse_and_build_module(source: text, path: text) -> Module:
         while ei < errors.len():
             print "  {errors[ei]}"
             ei = ei + 1
-    flat_ast_to_module(path)
+    val built_module = flat_ast_to_module(path)
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    parser_lex_source_gen_bump()
+    built_module

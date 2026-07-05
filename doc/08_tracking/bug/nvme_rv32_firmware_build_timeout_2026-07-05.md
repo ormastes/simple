@@ -334,3 +334,43 @@ NVME_RV32_BUILD_TIMEOUT_SECS=120 sh examples/09_embedded/simpleos_nvme_fw/fw_rv3
 ```
 
 So the timeout remains open even on the direct wrapper path.
+
+### Parser source/cache desync fixed; boot.spl parse timeout remains (2026-07-05)
+
+The self-hosted flat-AST parser path had a cross-source token-text hazard:
+`lex_init_with_path(source, path)` could tokenize a disk reread from `path`
+while `parser_token_text_from_offsets()` sliced token text from
+`SIMPLE_BOOTSTRAP_LEX_SOURCE`, which still held the caller-supplied source. In
+repeated `parse_full_frontend()` / `parse_and_build_module()` entry-closure
+parses, this surfaced as malformed integer literal diagnostics whose token
+snippets belonged to a different generated root source.
+
+Fix landed in `src/compiler/10.frontend/core/lexer.spl` and
+`src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl`: the active lexer
+and parser source cache now share the same source buffer, and the flat bridge
+restores/bump-invalidates parser source env at the parse boundary.
+
+Regression coverage:
+
+```sh
+bin/simple test test/01_unit/compiler/parser/parser_source_path_desync_spec.spl
+# PASS: 2 examples, 0 failures
+```
+
+Production wrapper probe after the fix:
+
+```sh
+timeout -k 5s 300s /usr/bin/time -f 'rv32_build_elapsed=%E rss=%MKB' \
+  sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+# code=124 at 300s
+```
+
+The malformed-token symptom did not recur in this stock wrapper probe. The last
+phase marker in `build/test-artifacts/nvme_fw_rv32_build.err` is again:
+
+```text
+[BOOTSTRAP-PHASE] phase2:parse:entry src/os/kernel/arch/riscv32/boot.spl module=os.kernel.arch.riscv32.boot
+```
+
+So the production build remains blocked by `boot.spl` parse time before
+HIR/MIR/codegen/link; this bug remains open.

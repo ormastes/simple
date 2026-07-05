@@ -103,17 +103,14 @@ fn lex_init_with_path(source: text, source_path: text):
         lex_cur_col_direct = [0]
     if lex_cur_suffix_direct == nil:
         lex_cur_suffix_direct = [""]
-    # Always keep the caller-supplied source text as the source of truth for
-    # the parser's offset-based token-text cache (parser_token_text_from_offsets
-    # / parser_lex_source_cached). Previously this cleared the inline source
-    # whenever a non-empty path was given, on the assumption a re-read from
-    # disk via SIMPLE_BOOTSTRAP_LEX_PATH would always succeed -- but callers
-    # that parse in-memory source under a synthetic/virtual path (e.g. test
-    # fixtures like "testdata/foo.spl" that don't exist on disk) got an empty
-    # source back from that re-read, so every par_text_get() during that parse
-    # silently returned "" (see bitfield declaration parser bug: empty name +
-    # mis-resolved backing type, traced to this exact fallback failing).
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", source)
+    # Keep the active lexer and parser's offset-based token-text cache on the
+    # exact same source buffer. Rereading a non-empty caller source from disk can
+    # desync lexer offsets from parser_lex_source_cached() when the caller passed
+    # preprocessed or generated text under a real path.
+    var core_source = source
+    if core_source == "" and source_path != "":
+        core_source = rt_file_read_text(source_path) ?? ""
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", core_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", source_path)
     # Perf signal: bump the source generation so the parser's whole-source cache
     # (parser_lex_source_cached) refetches for this new source. See parser.spl.
@@ -144,16 +141,6 @@ fn lex_init_with_path(source: text, source_path: text):
     lex_cur_line_set(0)
     lex_cur_col_set(0)
     lex_cur_suffix_set("")
-    # Prefer re-reading from disk when a real file backs the path (large
-    # sources avoid the env round-trip), but never discard a caller-supplied
-    # source: when the path does not resolve (in-memory parse labeled with a
-    # virtual path), the old unconditional reread produced an EMPTY source and
-    # the parse silently no-opped (errors=false, decls=0).
-    var core_source = source
-    if source_path != "":
-        val reread = rt_file_read_text(source_path) ?? ""
-        if reread != "":
-            core_source = reread
     current_core_lexer_slot = [make_core_lexer(core_source)]
     current_core_lexer_reset_file()
 
