@@ -10,13 +10,19 @@ the app fails closed when launched outside a GUI environment.
 
 use std.spec.*
 use std.io_runtime.{file_read, process_run_timeout}
-use app.io.mod.{process_spawn_async, process_kill, file_exists, file_read_text, file_read_bytes, dir_create_all, getpid, time_now_unix_micros, thread_sleep}
+use app.io.mod.{process_spawn_async, process_kill, file_exists, file_read_text, file_write, file_read_bytes, dir_create_all, getpid, time_now_unix_micros, thread_sleep}
 use common.window_protocol.geometry.{Size}
 use common.ui.wm_app_process_contract.{
     WM_CLIENT_HOLD_ENV,
+    WM_EVENT_FILE_ENV,
+    WM_FRAME_SEQ_FILE_ENV,
     WIDGET_SHOWCASE_APP_SOURCE,
+    wm_fs_app_event,
+    wm_fs_app_event_encode,
     wm_fs_bridge_decode,
     wm_widget_showcase_client_env,
+    wm_widget_showcase_event_path,
+    wm_widget_showcase_frame_seq_path,
 }
 use os.compositor.host_compositor_entry.{
     HostCompositor,
@@ -118,6 +124,29 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("wm_widget_showcase_client_env")
         expect(s).to_contain("process_kill(child_pid)")
 
+    # codex-system-test
+    it "forwards child-content pointer events through the shared filesystem bridge":
+        val s = src()
+        expect(s).to_contain("WM_EVENT_FILE_ENV")
+        expect(s).to_contain("wm_fs_app_event_encode")
+        expect(s).to_contain("write_child_pointer_event")
+        expect(s).to_contain("child_event_seq")
+        expect(s).to_contain("child_local_at")
+        expect(s).to_contain("win.x + 4")
+        expect(s).to_contain("win.y + 28")
+        expect(s).to_contain("file_write")
+        expect(s).to_contain("child_pointer_down")
+
+    # codex-system-test
+    it "keeps taskbar and window chrome events on the host compositor path":
+        val s = src()
+        expect(s).to_contain("host_compositor_pointer_move")
+        expect(s).to_contain("host_compositor_left_button_at")
+        expect(s).to_contain("win.x + win.w - 24")
+        expect(s).to_contain("draw_taskbar_buffer")
+        expect(s).to_contain("host_taskbar_item_x")
+        expect(s).to_contain("state.dirty")
+
     it "does not embed widget showcase drawing code inside the WM wrapper":
         val s = src()
         expect(s.contains("fn widget_button")).to_equal(false)
@@ -139,6 +168,34 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("wm_app_mode_is_client")
         expect(s).to_contain("wm_widget_showcase_bridge_request")
         expect(s).to_contain("winit_window_new")
+
+    # codex-system-test
+    it "records and consumes WM child button and slider events in client mode":
+        val s = showcase_src()
+        expect(s).to_contain("wm_fs_app_event_decode")
+        expect(s).to_contain("ShowcaseState")
+        expect(s).to_contain("button_count")
+        expect(s).to_contain("slider_value")
+        expect(s).to_contain("last_event_seq")
+        expect(s).to_contain("hit_rect(x, y, 12, 56, 60, 18)")
+        expect(s).to_contain("hit_rect(x, y, 268, 186, 130, 28)")
+        expect(s).to_contain("slider_dragging")
+
+    # codex-system-test
+    it "refreshes child frames when bridge sequence or progress animation advances":
+        val wm = src()
+        expect(wm).to_contain("last_frame_seq")
+        expect(wm).to_contain("req.frame_seq_path")
+        expect(wm).to_contain("load_child_frame(frame_path)")
+        expect(wm).to_contain("decode_ppm_to_argb")
+        expect(wm).to_contain("child_frame_refresh")
+        val child = showcase_src()
+        expect(child).to_contain("frame_seq")
+        expect(child).to_contain("progress_value")
+        expect(child).to_contain("time_now_unix_micros")
+        expect(child).to_contain("build_frame(state)")
+        expect(child).to_contain("file_write_bytes(frame_path")
+        expect(child).to_contain("wm_fs_bridge_encode")
 
     it "uses the shared app source constant in contract and wrapper":
         expect(WIDGET_SHOWCASE_APP_SOURCE).to_equal(SHOWCASE_SOURCE)
@@ -228,10 +285,14 @@ describe "WM showcase environment behavior":
         val stamp = "{getpid()}_{time_now_unix_micros()}"
         val bridge_path = "build/tmp/wm_showcase_spec_{stamp}.bridge"
         val frame_path = "build/tmp/wm_showcase_spec_{stamp}.ppm"
+        val event_path = wm_widget_showcase_event_path(frame_path)
+        val seq_path = wm_widget_showcase_frame_seq_path(frame_path)
         val pid = process_spawn_async("env", [
             "SIMPLE_WM_APP_MODE=client",
             "SIMPLE_WM_BRIDGE_FILE={bridge_path}",
             "SIMPLE_WM_FRAME_FILE={frame_path}",
+            "{WM_EVENT_FILE_ENV}={event_path}",
+            "{WM_FRAME_SEQ_FILE_ENV}={seq_path}",
             "SIMPLE_WM_CLIENT_HOLD=1",
             "SIMPLE_LIB=src",
             "bin/simple",
@@ -245,9 +306,22 @@ describe "WM showcase environment behavior":
             waited = waited + 1
         expect(file_exists(bridge_path)).to_equal(true)
         expect(file_exists(frame_path)).to_equal(true)
+        expect(file_exists(seq_path)).to_equal(true)
         val req = wm_fs_bridge_decode(file_read_text(bridge_path))
         expect(req.source_path).to_equal(SHOWCASE_SOURCE)
         expect(req.title).to_equal("Widget Showcase")
         expect(req.pid).to_be_greater_than(0)
+        expect(req.event_path).to_equal(event_path)
+        expect(req.frame_seq_path).to_equal(seq_path)
         expect(file_read_bytes(frame_path).len()).to_be_greater_than(1000)
+        val seq_before = file_read_text(seq_path).trim().to_i64() ?? 0
+        expect(seq_before).to_be_greater_than(0)
+        file_write(event_path, wm_fs_app_event_encode(wm_fs_app_event(seq_before + 10, "down", 36, 60, 0, true)))
+        var refresh_wait = 0
+        var seq_after = seq_before
+        while refresh_wait < 400 and seq_after <= seq_before:
+            thread_sleep(50)
+            seq_after = file_read_text(seq_path).trim().to_i64() ?? 0
+            refresh_wait = refresh_wait + 1
+        expect(seq_after).to_be_greater_than(seq_before)
         process_kill(pid)

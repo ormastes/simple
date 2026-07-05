@@ -522,7 +522,7 @@ dispatch commands and forwards them to the web adapter protocol.
 | TUI+Web | `src/app/ui.tui_web` | n/a | TUI over web transport |
 | Standalone | `src/app/ui.standalone` | non-default | Native window, no wrapper |
 | Tauri | `src/app/ui.tauri` | non-default | Tauri webview shell |
-| Electron | `src/app/ui.electron` | non-default | Electron shell; must (target) support internal windows — currently does not, see below |
+| Electron | `src/app/ui.electron` | non-default | Electron shell; renders internal windows (MDI-in-one-window) inside its single `BrowserWindow`, verified 2026-07-05 — see below |
 | Chromium | `src/app/ui.chromium` | non-default | In-tree engine wearing Chromium naming (ADR-002), not a real-Chrome delegate |
 | Browser | `src/app/ui.browser` | non-default | Browser-only target |
 | VS Code | `src/app/ui.vscode` | non-default | VS Code webview extension |
@@ -542,7 +542,7 @@ The maintainer's target containment tree for `ui/gui` (see
 
 ```
 gui
-├── electron wrapper + electron   # non-default; MUST support internal windows (current gap)
+├── electron wrapper + electron   # non-default; supports internal windows (verified 2026-07-05)
 ├── core                          # simple gui core: internal window rendering — WM uses this
 └── web server ui                 # DEFAULT
     └── web
@@ -562,12 +562,24 @@ system from different axes and must agree on components.
 Current gaps versus this target (see `00_ui_architecture.md` for full
 status table and evidence paths):
 
-- **Electron internal windows.** `bridge.js` spawns exactly one
-  `BrowserWindow` (`mainWindow = new BrowserWindow(winOptions)`); it does not
-  render an internal (MDI-in-one-window) surface the way `gui/core` does for
-  the native WM path. `main.spl`'s `notify()` and `open_file_dialog()` are
-  dev-preview stubs (`# TODO(v4-dev-preview)`) that print and return `true`
-  rather than calling Electron's `Notification`/`dialog` APIs.
+- **Electron internal windows — resolved 2026-07-05.** `bridge.js` still
+  spawns exactly one top-level `BrowserWindow`, but it now renders internal
+  windows *inside* it as positioned `.wm-window`/`.wm-titlebar` DOM elements
+  (`electronWmInitScript`/`receiveElectronMessage` in `bridge.js`), the same
+  class contract `window_scene_draw_ir.spl` (`WM_DRAW_IR_DESKTOP_SURFACE =
+  "wm-desktop"`) and the web lane use for `gui/core`. Verified with a real
+  4-window screenshot + JSON proof (drag, click/input/key routing,
+  minimize/maximize/close, taskbar) via
+  `scripts/check/check-electron-mdi-evidence.shs` +
+  `scripts/check/validate-electron-mdi-proof.js`. `main.spl`'s `notify()` was
+  already wired to Electron's real `Notification` API; `open_file_dialog()`
+  previously printed a `fileDialog` request `bridge.js` had no handler for —
+  `bridge.js` now calls the real `dialog.showOpenDialog`/`showSaveDialog` and
+  round-trips the result back to `open_file_dialog()` over stdin as a
+  `fileDialogResult` message. Remaining gap: the gate script only runs under
+  Linux+Xvfb (`xvfb-run`) and its `SIMPLE_BIN` auto-detect glob prefers a
+  Linux binary path even on macOS, so it must be invoked with `SIMPLE_BIN`
+  set explicitly there; this backend is still dev-preview-only and not in CI.
 - **Chrome delegation.** No production path switches the web renderer to a
   live Chrome process; `tools/chrome-live-bitmap/capture_html_argb.js` and
   the `*-render-log-compare.shs` gates are comparison/capture tooling, which

@@ -9,11 +9,11 @@
 use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
-use std.io_runtime.{env_get, file_exists, file_read, file_read_bytes, dir_create_all, getpid, time_now_unix_micros}
+use std.io_runtime.{env_get, file_exists, file_read, file_write, file_read_bytes, dir_create_all, getpid, time_now_unix_micros}
 use app.io.mod.{process_spawn_async, process_spawn_async_env, process_kill, host_os, cwd}
 use common.window_protocol.geometry.{Size}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
-use common.ui.wm_app_process_contract.{WIDGET_SHOWCASE_APP_SOURCE, WIDGET_SHOWCASE_TITLE, wm_fs_bridge_decode, wm_widget_showcase_client_env}
+use common.ui.wm_app_process_contract.{WIDGET_SHOWCASE_APP_SOURCE, WIDGET_SHOWCASE_TITLE, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, wm_fs_bridge_decode, wm_widget_showcase_client_env, wm_widget_showcase_event_path, wm_widget_showcase_frame_seq_path, wm_fs_app_event, wm_fs_app_event_encode}
 use os.compositor.host_compositor_entry.{HostCompositor, HeadlessHostCompositorBackend, host_compositor_pointer_move, host_compositor_left_button_at, host_taskbar_dock_width, host_taskbar_item_width, host_taskbar_item_x}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
 
@@ -33,6 +33,8 @@ struct WmLoopState:
     comp: HostCompositor
     mouse_x: i32
     mouse_y: i32
+    child_pointer_down: bool
+    child_event_seq: i64
     dirty: bool
     running: bool
 
@@ -49,6 +51,19 @@ fn pack_frame(src: [u32]) -> [i64]:
         out[i] = rgb(src[i])
         i = i + 1
     out
+
+fn load_child_frame(frame_path: text) -> (bool, i32, i32, [i64]):
+    val frame_bytes = file_read_bytes(frame_path)
+    val decoded = decode_ppm_to_argb(frame_bytes)
+    if decoded.is_err():
+        return (false, 0, 0, [])
+    val frame = decoded.unwrap()
+    (true, frame.width, frame.height, pack_frame(frame.pixels))
+
+fn read_frame_seq(seq_path: text) -> i64:
+    if seq_path == "" or not file_exists(seq_path):
+        return 0
+    file_read(seq_path).trim().to_i64() ?? 0
 
 fn should_close(input: WinitInput) -> bool:
     if input.close:
@@ -155,10 +170,36 @@ fn render_and_present(win: WinitWindow, buf: i64, comp: HostCompositor, frame_w:
         print "[wm-showcase] present state={state} dims={W}x{H} child_frame=from-filesystem renderer=winit-buffer"
     true
 
-fn apply_wm_input(state: WmLoopState, input: WinitInput) -> WmLoopState:
+fn child_local_at(comp: HostCompositor, fx: i32, fy: i32, frame_w: i32, frame_h: i32, require_inside: bool) -> (bool, i32, i32):
+    var i = comp.windows.len() - 1
+    while i >= 0:
+        val win = comp.windows[i]
+        if not win.minimized:
+            val lx = fx - (win.x + 4)
+            val ly = fy - (win.y + 28)
+            val inside = lx >= 0 and ly >= 0 and lx < frame_w and ly < frame_h
+            if inside or not require_inside:
+                return (true, lx, ly)
+        i = i - 1
+    (false, 0, 0)
+
+fn write_child_pointer_event(event_path: text, seq: i64, kind: text, x: i32, y: i32, button: i64, pressed: bool) -> i64:
+    if event_path == "":
+        return seq
+    val next_seq = seq + 1
+    val ev = wm_fs_app_event(next_seq, kind, x, y, button, pressed)
+    if file_write(event_path, wm_fs_app_event_encode(ev)):
+        print "[wm-showcase] child_event kind={kind} seq={next_seq} x={x} y={y} pressed={pressed}"
+        return next_seq
+    print "[wm-showcase] child_event_write_failed path={event_path}"
+    seq
+
+fn apply_wm_input(state: WmLoopState, input: WinitInput, event_path: text, frame_w: i32, frame_h: i32) -> WmLoopState:
     var out = state.comp
     var mx = state.mouse_x
     var my = state.mouse_y
+    var child_down = state.child_pointer_down
+    var child_seq = state.child_event_seq
     var dirty = false
     var running = state.running
     if should_close(input):
@@ -169,6 +210,10 @@ fn apply_wm_input(state: WmLoopState, input: WinitInput) -> WmLoopState:
         val was_dragging = state.comp.dragging or state.comp.resizing
         out = host_compositor_pointer_move(out, mx, my)
         dirty = was_dragging or out.dragging or out.resizing
+        if child_down:
+            val loc = child_local_at(out, mx, my, frame_w, frame_h, false)
+            if loc.0:
+                child_seq = write_child_pointer_event(event_path, child_seq, "move", loc.1, loc.2, 0, true)
     var ci = 0
     while ci < input.click_buttons.len():
         val btn = input.click_buttons[ci]
@@ -182,13 +227,23 @@ fn apply_wm_input(state: WmLoopState, input: WinitInput) -> WmLoopState:
             else:
                 mx = fx
                 my = fy
+            if pressed:
+                val loc_down = child_local_at(out, fx, fy, frame_w, frame_h, true)
+                if loc_down.0:
+                    child_seq = write_child_pointer_event(event_path, child_seq, "down", loc_down.1, loc_down.2, btn, true)
+                    child_down = true
+            elif child_down:
+                val loc_up = child_local_at(out, fx, fy, frame_w, frame_h, false)
+                if loc_up.0:
+                    child_seq = write_child_pointer_event(event_path, child_seq, "up", loc_up.1, loc_up.2, btn, false)
+                child_down = false
             out = host_compositor_left_button_at(out, pressed, fx, fy)
             dirty = true
             print "[wm-showcase] input left_button pressed={pressed} x={fx} y={fy} windows={out.windows.len()} dragging={out.dragging}"
         ci = ci + 1
     if out.windows.len() == 0:
         running = false
-    WmLoopState(comp: out, mouse_x: mx, mouse_y: my, dirty: dirty, running: running)
+    WmLoopState(comp: out, mouse_x: mx, mouse_y: my, child_pointer_down: child_down, child_event_seq: child_seq, dirty: dirty, running: running)
 
 fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -> i64:
     var env = wm_widget_showcase_client_env(bridge_path, frame_path)
@@ -200,12 +255,16 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
     val simple_lib = env["SIMPLE_LIB"]
     val simple_bin = path_join(repo_root, "bin/simple")
     val showcase_source_path = path_join(repo_root, WIDGET_SHOWCASE_APP_SOURCE)
+    val event_path = wm_widget_showcase_event_path(frame_path)
+    val seq_path = wm_widget_showcase_frame_seq_path(frame_path)
     if host_os().lower().contains("windows"):
         return process_spawn_async_env(simple_bin, ["run", showcase_source_path], env)
     process_spawn_async("env", [
         "SIMPLE_WM_APP_MODE=client",
         "SIMPLE_WM_BRIDGE_FILE={bridge_path}",
         "SIMPLE_WM_FRAME_FILE={frame_path}",
+        "{WM_EVENT_FILE_ENV}={event_path}",
+        "{WM_FRAME_SEQ_FILE_ENV}={seq_path}",
         "SIMPLE_WM_CLIENT_HOLD=1",
         "SIMPLE_LIB={simple_lib}",
         simple_bin,
@@ -233,6 +292,8 @@ fn main() -> i64:
     val stamp = "{getpid()}_{time_now_unix_micros()}"
     val bridge_path = path_join(tmp_root, "wm_widget_showcase_{stamp}.bridge")
     val frame_path = path_join(tmp_root, "wm_widget_showcase_{stamp}.ppm")
+    val event_path = wm_widget_showcase_event_path(frame_path)
+    val seq_path = wm_widget_showcase_frame_seq_path(frame_path)
     val showcase_source_path = path_join(repo_root, WIDGET_SHOWCASE_APP_SOURCE)
     print "[wm-showcase] repo_root={repo_root} child_source_fs={showcase_source_path}"
     val child_pid = launch_showcase_child(bridge_path, frame_path, repo_root)
@@ -246,14 +307,17 @@ fn main() -> i64:
         process_kill(child_pid)
         return 1
     val req = wm_fs_bridge_decode(bridge_body)
-    val frame_bytes = file_read_bytes(frame_path)
-    val decoded = decode_ppm_to_argb(frame_bytes)
-    if decoded.is_err():
+    val loaded = load_child_frame(frame_path)
+    if not loaded.0:
         print "[wm-showcase] error=child-frame-decode-failed path={frame_path}"
         process_kill(child_pid)
         return 1
-    val frame = decoded.unwrap()
-    val packed_frame = pack_frame(frame.pixels)
+    var frame_w = loaded.1
+    var frame_h = loaded.2
+    var packed_frame = loaded.3
+    val child_event_path = if req.event_path != "": req.event_path else: event_path
+    val child_seq_path = if req.frame_seq_path != "": req.frame_seq_path else: seq_path
+    var last_frame_seq = read_frame_seq(child_seq_path)
 
     val lp = winit_loop_new()
     if not lp.is_valid:
@@ -281,17 +345,27 @@ fn main() -> i64:
     if comp.windows.len() != 1:
         cleanup(child_pid, buf, win, lp)
         return 1
-    if not render_and_present(win, buf, comp, frame.width, frame.height, packed_frame, "launched"):
+    if not render_and_present(win, buf, comp, frame_w, frame_h, packed_frame, "launched"):
         cleanup(child_pid, buf, win, lp)
         return 1
 
-    var state = WmLoopState(comp: comp, mouse_x: 0, mouse_y: 0, dirty: false, running: true)
+    var state = WmLoopState(comp: comp, mouse_x: 0, mouse_y: 0, child_pointer_down: false, child_event_seq: 0, dirty: false, running: true)
     var frames = 0
     while state.running and frames < 2000000:
         val input = winit_poll_input(lp)
-        state = apply_wm_input(state, input)
+        state = apply_wm_input(state, input, child_event_path, frame_w, frame_h)
+        val current_frame_seq = read_frame_seq(child_seq_path)
+        if current_frame_seq > last_frame_seq:
+            val refreshed = load_child_frame(frame_path)
+            if refreshed.0:
+                frame_w = refreshed.1
+                frame_h = refreshed.2
+                packed_frame = refreshed.3
+                last_frame_seq = current_frame_seq
+                state.dirty = true
+                print "[wm-showcase] child_frame_refresh seq={last_frame_seq} size={frame_w}x{frame_h}"
         if state.dirty:
-            if not render_and_present(win, buf, state.comp, frame.width, frame.height, packed_frame, "hold"):
+            if not render_and_present(win, buf, state.comp, frame_w, frame_h, packed_frame, "hold"):
                 cleanup(child_pid, buf, win, lp)
                 return 1
             thread_sleep(2)

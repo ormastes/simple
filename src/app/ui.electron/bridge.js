@@ -65,6 +65,11 @@ function handleSimpleMessageLine(line, win = mainWindow) {
                 message: msg.message || ''
             });
             return { handled: true, kind: 'dialog' };
+        } else if (msg.type === 'fileDialog' && win) {
+            runFileDialog(win, msg.dialogType || 'open', msg.filters || '')
+                .then(result => sendToSimple({ type: 'fileDialogResult', canceled: result.canceled, paths: result.canceled ? '' : result.paths }))
+                .catch(err => sendToSimple({ type: 'fileDialogResult', canceled: true, paths: '', error: String(err && err.message ? err.message : err) }));
+            return { handled: true, kind: 'fileDialog' };
         } else if (msg.type === 'notification') {
             new Notification({ title: msg.title, body: msg.body }).show();
             return { handled: true, kind: 'notification' };
@@ -80,6 +85,35 @@ function handleSimpleMessageLine(line, win = mainWindow) {
         return { handled: false, kind: 'parse_error' };
     }
     return { handled: false, kind: 'unknown' };
+}
+
+// Parse the comma-separated extension list the Simple side sends for
+// open/save dialogs (e.g. "spl,txt") into Electron's `filters` shape.
+// Empty input means "no filter" (all files).
+function parseDialogFilters(filters) {
+    const extensions = String(filters || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (extensions.length === 0) {
+        return [];
+    }
+    return [{ name: 'Files', extensions }];
+}
+
+// Invoke the real Electron file dialog (open or save) and normalize the
+// result to { canceled, paths } — `paths` is newline-joined selected
+// path(s), empty when the user cancels. Never returns success without
+// actually calling dialog.showOpenDialog/showSaveDialog.
+function runFileDialog(win, dialogType, filters) {
+    const filterSpec = parseDialogFilters(filters);
+    if (dialogType === 'save') {
+        return dialog.showSaveDialog(win, { filters: filterSpec }).then(result => ({
+            canceled: !!result.canceled,
+            paths: result.canceled || !result.filePath ? '' : result.filePath
+        }));
+    }
+    return dialog.showOpenDialog(win, { properties: ['openFile'], filters: filterSpec }).then(result => ({
+        canceled: !!result.canceled,
+        paths: result.canceled ? '' : (result.filePaths || []).join('\n')
+    }));
 }
 
 function bitmapEvidence(bitmap) {

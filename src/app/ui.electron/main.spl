@@ -31,11 +31,17 @@ use app.ui.electron.backend.{ElectronBackend}
 use app.ui.ipc.protocol.{
     build_ipc_window_control,
     build_ipc_file_dialog,
-    build_ipc_notification}
+    build_ipc_notification,
+    parse_ipc_message}
+use common.ui.widget.{UIEvent}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_ELECTRON}
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
+
+extern fn rt_stdin_read_line() -> text?
+
+val FILE_DIALOG_RESULT_PREFIX: text = "file_dialog_result:"
 
 # =========================================================================
 # ElectronMain — owns BrowserWindow + compositor backend wiring
@@ -133,20 +139,43 @@ class ElectronMain:
     # ---- ui.ipc bridges (filesystem + notifications) ----
 
     me notify(title: text, body: text) -> bool:
-        """Forward a native notification request through ui.ipc."""
-        # TODO(v4-dev-preview): the renderer relays this to the OS
-        # notification center via Electron's Notification API.
+        """Show a native OS notification.
+
+        Emits the stdout JSON line that `tools/electron-shell/bridge.js`
+        reads and turns into a real `new Notification(...).show()` call
+        (see the `msg.type === 'notification'` handler there). Returns
+        true once that request has actually been dispatched — the OS
+        notification API itself is fire-and-forget, so there is nothing
+        further to await."""
         val msg = build_ipc_notification(title, body)
         print msg
         return true
 
-    me open_file_dialog(kind: text, filters: text) -> bool:
-        """Forward an open/save dialog request through ui.ipc."""
-        # TODO(v4-dev-preview): bridge to Electron dialog.showOpenDialog /
-        # dialog.showSaveDialog in the main process.
+    me open_file_dialog(kind: text, filters: text) -> text:
+        """Open a native file dialog and return the real selection.
+
+        Emits the stdout JSON line that `bridge.js` turns into a real
+        `dialog.showOpenDialog`/`dialog.showSaveDialog` call, then blocks
+        on stdin for the `fileDialogResult` round-trip the dialog handler
+        sends back (see `runFileDialog` in bridge.js). Returns the
+        newline-joined selected path(s), or "" if the user canceled — it
+        never fabricates a result without the dialog actually running."""
         val msg = build_ipc_file_dialog(kind, filters)
         print msg
-        return true
+        while true:
+            val line = rt_stdin_read_line()
+            if line == nil:
+                return ""
+            if line == "":
+                continue
+            val event = parse_ipc_message(line)
+            if event != nil:
+                match event:
+                    UIEvent.Action(name):
+                        if name.starts_with(FILE_DIALOG_RESULT_PREFIX):
+                            return name.substring(FILE_DIALOG_RESULT_PREFIX.len(), name.len())
+                    _:
+                        pass_dn
 
     # ---- Introspection (used by the smoke spec) ----
 
