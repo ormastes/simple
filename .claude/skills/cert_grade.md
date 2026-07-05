@@ -78,9 +78,11 @@ Coverage is measured on **requirements-based tests** (not tests written to chase
 | Decision/Branch | every branch taken T and F | aero-B, auto-C |
 | **MC/DC** | each **condition** independently shown to affect the decision outcome (unique-cause or masking) | **aero-A, auto-D, space-A** |
 
-- MC/DC for a decision with N conditions needs **N+1 well-chosen test cases** minimum, each condition toggled while holding others fixed to prove independent effect.
-- **Coverage gaps are analyzed, not deleted**: an uncovered branch is either tested, justified as deactivated/defensive code, or removed.
-- Simple infra: `bin/simple` coverage instrumentation (see Phase-8 infra). Until MC/DC instrumentation lands, record the gap — do NOT claim MC/DC from statement coverage.
+- MC/DC for a decision with N conditions needs **N+1 well-chosen test cases** minimum, each condition toggled while holding others fixed to prove independent effect (unique-cause or masking MC/DC; masking must be justified for optimizer short-circuited code).
+- **Standard nuance (opus-verified):** DO-178C requires MC/DC **only at Level A**. ISO 26262-6:2018 (Table 9) *recommends* MC/DC across **all** ASILs, *highly recommended* only at **ASIL D** — so MC/DC evidence should not be omitted even at ASIL A/B. Statement coverage is HR at ASIL A/B; branch is HR from ASIL B.
+- **Coverage is measured on the EXECUTABLE OBJECT CODE, not source estimates** (DO-178C §6.4.4.2). At **aero-A/B** also cover **data + control coupling** (Table A-7). Table A-7 **Obj.9 "additional code"** is compiler-critical: object code with no 1:1 source mapping — optimizer-restructured control flow (loop unroll, jump thread, dead-branch elim, tail-merge), **generic monomorphization**, enum/panic paths, runtime init — must be separately analyzed/exercised, else optimizations must be constrained. This is why an optimizing, monomorphizing compiler like Simple verifies at object-code level — and why the wall (miscompiled enum handles) is disqualifying.
+- **Coverage gaps are analyzed, not deleted**: an uncovered branch is tested, justified as deactivated/defensive code (§6.4.4.3), or removed.
+- Simple infra: the **`std.mcdc` analysis library already exists** (`src/lib/**/mcdc.spl`, two tiers) — C1 is "wire it into codegen at object-code level", not build-from-scratch. Until wired, record the gap — do NOT claim MC/DC from statement coverage.
 
 ### Phase 4 — Test Rigor (normal + robustness + stress + optimization)
 
@@ -107,7 +109,13 @@ Certified builds must be **bit-reproducible** (same source + toolchain → ident
 
 ### Phase 7 — Tool Qualification (the compiler itself)
 
-Assess the Simple compiler as a tool: does an error in it go undetected into safety code? If yes → **TQL-1/2** (DO-330) or ISO 26262 **TCL3 + qualification**. Requires: tool operational requirements, tool verification, a **qualified validation test suite** (ACATS/GCC-torture analog), and known-problem reporting. The self-hosted bootstrap's 3-stage fixpoint (stage2==stage3) is partial evidence of self-consistency but **not** correctness proof.
+Assess the Simple compiler as a tool: does an error in it go undetected into safety code? It is a DO-330 **Criterion 1** development tool.
+
+**The default industrial path is NOT to qualify the compiler** — it is to argue it *down* by verifying its output: full requirements-based testing + **structural coverage (incl. MC/DC) measured on the EXECUTABLE OBJECT CODE**, plus **diverse/double compilation** (compile with two independent toolchains/back-ends and diff — Simple already has interp vs cranelift vs llvm, which is exactly this). In ISO 26262 terms this is establishing **TD1** (high confidence tool errors are detected downstream) → **TCL1**, no tool qualification needed. This is the pragmatic route for Simple: fix the wall, then object-code coverage + differential compilation is the evidence — *not* a DO-330 qualification kit.
+
+Formal qualification (TQL-1/2 · TCL3) is the alternative when downstream verification is infeasible: tool operational requirements, tool verification, a **qualified validation test suite** (ACATS/GCC-torture analog, C7), and known-problem reporting.
+
+**Prior art for a self-hosted verified compiler:** **CakeML** — a formally-verified, *bootstrapped self-hosting* compiler proven in HOL4 (semantic preservation down to machine code). This is the single most relevant precedent for Simple and a far stronger endpoint than differential testing; Simple's 27 zero-sorry Lean projects are the seed of an analogous verified-compilation case. **CompCert** (verified C compiler in Coq, used in DO-178C settings) is the other reference. The self-hosted bootstrap's 3-stage fixpoint (stage2==stage3) is self-consistency evidence only — **not** correctness proof.
 
 ---
 
