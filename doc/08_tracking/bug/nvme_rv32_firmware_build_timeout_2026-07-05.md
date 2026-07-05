@@ -411,3 +411,34 @@ sections:
 So the remaining blocker is self-hosted native-build parse throughput across the
 firmware logic closure, not stock OS boot imports or a malformed source/cache
 desync.
+
+### Parser env hot-path reduced; production build still blocked (2026-07-05)
+
+Parser and lexer hot paths now prefer in-process slots over env roundtrips for
+current parser kind/line/column and lexer token offsets. `lex_next()` also no
+longer saves the whole core lexer position to env on every token unless
+`SIMPLE_BOOTSTRAP_LEX_ENV_SAVE=1` is explicitly set.
+
+Measured local improvement:
+
+```sh
+SIMPLE_COMPILER_PHASE_PROFILE=1 timeout -k 5s 90s /usr/bin/time -f 'logic_ecc_check_elapsed=%E rss=%MKB' \
+  bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_ecc.spl
+# before: logic_ecc_check_elapsed=0:30.39 rss=171556KB
+# after:  logic_ecc_check_elapsed=0:09.94 rss=171580KB
+```
+
+The wrapper also removes stale generated `build/os/generated/logic*.spl` files
+before source collection; otherwise abandoned bundle prototypes can be parsed
+as extra entry-closure sources.
+
+Production wrapper status remains **OPEN**. The 300s build still times out, but
+the last phase marker advances farther into the split firmware logic:
+
+```text
+[BOOTSTRAP-PHASE] phase2:parse:entry:done examples/.../logic_map.spl
+[BOOTSTRAP-PHASE] phase2:parse:entry examples/.../logic_band.spl
+```
+
+A longer 900s probe was interrupted after more than 9 minutes without producing
+`build/nvme_fw_rv32.elf`, so raising the timeout is not a production fix.
