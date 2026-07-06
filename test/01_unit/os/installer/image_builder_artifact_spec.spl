@@ -1,9 +1,10 @@
 use std.spec
-use os.installer.image_builder.{build_install_image, build_install_image_with_rootfs, build_usb_installer_image}
+use os.installer.image_builder.{build_install_image_with_simple_binary, build_install_image_with_rootfs, build_usb_installer_image}
 use os.tools.pkg.pkg_format.{PkgArch}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn _reset_dir(path: text):
@@ -14,7 +15,9 @@ describe "Image builder artifacts":
         val dir = "build/test-artifacts/image-builder"
         _reset_dir(dir)
         val output = "{dir}/simpleos-x86_64.img"
-        val result = build_install_image(PkgArch.X86_64, "", "", output, 64)
+        val simple_payload = "{dir}/simple-target.smf"
+        expect(rt_file_write_text(simple_payload, "SMF_FAKE_TARGET_SIMPLE\n")).to_equal(true)
+        val result = build_install_image_with_simple_binary(PkgArch.X86_64, "", "", output, 64, simple_payload)
         expect(result.is_ok()).to_equal(true)
         expect(rt_file_exists(output)).to_equal(true)
         expect(rt_file_exists("{output}.manifest.sdn")).to_equal(true)
@@ -32,15 +35,26 @@ describe "Image builder artifacts":
         expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/llvm/hello.ll")).to_equal(true)
         expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/clang/hello.c")).to_equal(true)
         expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/rust/hello.rs")).to_equal(true)
+        expect(rt_file_exists("{output}.contents/rootfs/bin/simple")).to_equal(true)
+        expect(rt_file_exists("{output}.contents/rootfs/bin/simple.smf")).to_equal(true)
+        expect(rt_file_exists("{output}.contents/rootfs/usr/bin/simple")).to_equal(true)
+        expect(rt_file_exists("{output}.contents/rootfs/usr/bin/simple.smf")).to_equal(true)
+        expect(rt_file_exists("{output}.contents/rootfs/sys/apps/simple_compiler")).to_equal(true)
+        expect(rt_file_exists("{output}.contents/rootfs/sys/apps/simple_interpreter")).to_equal(true)
+        expect(rt_file_exists("{output}.contents/rootfs/sys/apps/simple_loader")).to_equal(true)
+        expect(rt_file_exists("{output}.contents/rootfs/SYS/SIMPLETOOL.SDN")).to_equal(true)
         val llvm_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/LLVMMAN.TXT")
         val clang_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/CLANGMAN.TXT")
         val rust_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/RUSTMAN.TXT")
+        val simple_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/SIMPLETOOL.SDN")
         expect(llvm_manifest).to_contain("mode=native-filesystem-app")
         expect(llvm_manifest).to_contain("status=standalone-required")
         expect(clang_manifest).to_contain("mode=native-filesystem-app")
         expect(clang_manifest).to_contain("status=standalone-required")
         expect(rust_manifest).to_contain("mode=native-filesystem-app")
         expect(rust_manifest).to_contain("status=standalone-required")
+        expect(simple_manifest).to_contain("runtime_source = \"simpleos-filesystem\"")
+        expect(simple_manifest).to_contain("role = \"/usr/bin/simple\"")
 
     it "writes installer-media staging for non-x86 architectures":
         val dir = "build/test-artifacts/image-builder-installer"

@@ -135,6 +135,16 @@ not create, rewrite, or weaken SPipe after verification.
     commands. Treat `sidecar-contract-failed`, `missing-artifact`, and
     `sby-run-failed` as release-failing RTL evidence problems, not missing-tool
     blockers.
+- SimpleOS compiler-in-filesystem verification requires a target-native Simple
+  payload embedded in the install image at `/usr/bin/simple(.smf)`,
+  `/bin/simple(.smf)`, `/sys/apps/simple(.smf)`,
+  `/sys/apps/simple_compiler(.smf)`, `/sys/apps/simple_interpreter(.smf)`,
+  `/sys/apps/simple_loader(.smf)`, and `/SYS/SIMPLETOOL.SDN`, then in-guest
+  `/usr/bin/simple --version` and compile/run `hello world` evidence from the
+  mounted SimpleOS filesystem. Host `bin/simple`, placeholder marker apps,
+  host-side compile/run, and QEMU fixed-command SSH responses are FAIL. Board
+  claims additionally need board identity, boot/download path, and serial or
+  SSH transcript.
 - Core/MCP regression gate for compiler/core/lib or MCP/LSP changes:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`

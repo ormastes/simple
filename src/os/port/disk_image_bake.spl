@@ -30,6 +30,12 @@ use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_env_get(key: text) -> text?
+
+class SimpleRolePayloadSpec:
+    name83: text
+    guest_path: text
+    label: text
 
 fn _load_payload(path: text, name83: text) -> Result<PayloadEntry, text>:
     """Read a file and wrap as a FAT32 8.3 directory entry (flat root placement)."""
@@ -96,6 +102,40 @@ fn _fat83_to_filename(name83: text) -> text:
         return base
     base + "." + ext
 
+fn _simpleos_compiler_payload_path() -> text:
+    val override = rt_env_get("SIMPLEOS_SIMPLE_BINARY") ?? ""
+    if override != "":
+        return override
+    val candidates: [text] = [
+        "build/bootstrap/stage3/simple_simpleos",
+        "bin/release/x86_64-unknown-simpleos/simple",
+        "bin/release/x86_64-simpleos/simple",
+    ]
+    for candidate in candidates:
+        if io.file_exists(candidate):
+            return candidate
+    ""
+
+fn _simple_payload_required() -> bool:
+    io.file_exists("build/os/.bake_include_toolchain") or io.file_exists("build/os/.bake_include_simple_compiler")
+
+fn _simple_role_payload_specs() -> [SimpleRolePayloadSpec]:
+    [
+        SimpleRolePayloadSpec(name83: "SIMPLSTCSMF", guest_path: "", label: "/SIMPLSTC.SMF"),
+        SimpleRolePayloadSpec(name83: "SIMPLE     ", guest_path: "/sys/apps/simple", label: "/sys/apps/simple"),
+        SimpleRolePayloadSpec(name83: "SIMPLE  SMF", guest_path: "/sys/apps/simple.smf", label: "/sys/apps/simple.smf"),
+        SimpleRolePayloadSpec(name83: "USIMPLE    ", guest_path: "/usr/bin/simple", label: "/usr/bin/simple"),
+        SimpleRolePayloadSpec(name83: "USIMPLE SMF", guest_path: "/usr/bin/simple.smf", label: "/usr/bin/simple.smf"),
+        SimpleRolePayloadSpec(name83: "BSIMPLE    ", guest_path: "/bin/simple", label: "/bin/simple"),
+        SimpleRolePayloadSpec(name83: "BSIMPLE SMF", guest_path: "/bin/simple.smf", label: "/bin/simple.smf"),
+        SimpleRolePayloadSpec(name83: "SCOMPSMFSMF", guest_path: "/sys/apps/simple_compiler.smf", label: "/sys/apps/simple_compiler.smf"),
+        SimpleRolePayloadSpec(name83: "SCOMPILER  ", guest_path: "/sys/apps/simple_compiler", label: "/sys/apps/simple_compiler"),
+        SimpleRolePayloadSpec(name83: "SINTSMF SMF", guest_path: "/sys/apps/simple_interpreter.smf", label: "/sys/apps/simple_interpreter.smf"),
+        SimpleRolePayloadSpec(name83: "SINTERP    ", guest_path: "/sys/apps/simple_interpreter", label: "/sys/apps/simple_interpreter"),
+        SimpleRolePayloadSpec(name83: "SLOADSMFSMF", guest_path: "/sys/apps/simple_loader.smf", label: "/sys/apps/simple_loader.smf"),
+        SimpleRolePayloadSpec(name83: "SLOADER    ", guest_path: "/sys/apps/simple_loader", label: "/sys/apps/simple_loader"),
+    ]
+
 fn _bake_via_mkfs_fat(out_disk: text, payloads: [PayloadEntry], size_mb: u64) -> Result<(), text>:
     """Fast path: stage payloads to a temp dir then invoke scripts/bake_disk_via_mkfs.shs.
 
@@ -110,7 +150,7 @@ fn _bake_via_mkfs_fat(out_disk: text, payloads: [PayloadEntry], size_mb: u64) ->
     # directory tree under staging/ so mcopy -s picks it up at the right location.
     # Entries without a guest_path land at flat root as before.
     for entry in payloads:
-        var dest: text
+        var dest = ""
         if entry.guest_path.length > 0:
             # guest_path must start with / (e.g. /sys/apps/simple).
             # Stage at staging/sys/apps/simple so mcopy -s picks it up.
@@ -145,7 +185,7 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     val hello_c_path       = "/tmp/hello_c.o"
     val clang_static_path  = "build/os/clang_static/bin/clang_static"
     val rustc_static_path  = "build/os/rust_static/bin/rustc_static"
-    val simple_path        = "bin/release/x86_64-unknown-linux-gnu/simple"
+    val simple_path        = _simpleos_compiler_payload_path()
 
     # --- Step 1: load hello_rs ---
     val rs_entry = match _load_payload(hello_rs_path, "HELLORS    "):
@@ -199,36 +239,19 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
                 payloads.push(e)
             case Err(e):
                 return Err(e)
-        if io.file_exists(simple_path):
+        if _simple_payload_required():
+            if simple_path == "":
+                return Err("bake: SimpleOS compiler payload requested but missing; set SIMPLEOS_SIMPLE_BINARY or build build/bootstrap/stage3/simple_simpleos")
             val simple_size = io.file_size(simple_path)
-            # Root entry /SIMPLSTC.SMF — vfs_init reader reads this path at boot.
-            match _load_payload(simple_path, "SIMPLSTCSMF"):
-                case Ok(e):
-                    print "bake: loaded simple -> /SIMPLSTC.SMF (" + simple_size.to_text() + " bytes)"
-                    payloads.push(e)
-                case Err(_):
-                    print "bake: simple root entry failed (skipped)"
-            # /sys/apps/simple — legacy mount-probe path.
-            match _load_payload_at(simple_path, "SIMPLSTCSMF", "/sys/apps/simple"):
-                case Ok(e):
-                    print "bake: loaded simple -> /sys/apps/simple"
-                    payloads.push(e)
-                case Err(_):
-                    print "bake: simple /sys/apps entry failed (skipped)"
-            # /sys/apps/simple.smf — launcher tile and desktop command path.
-            match _load_payload_at(simple_path, "SIMPLSTCSMF", "/sys/apps/simple.smf"):
-                case Ok(e):
-                    print "bake: loaded simple -> /sys/apps/simple.smf"
-                    payloads.push(e)
-                case Err(_):
-                    print "bake: simple /sys/apps .smf entry failed (skipped)"
-            # /usr/bin/simple — shell PATH lookup (PATH=/usr/bin:/sys/apps).
-            match _load_payload_at(simple_path, "SIMPLSTCSMF", "/usr/bin/simple"):
-                case Ok(e):
-                    print "bake: loaded simple -> /usr/bin/simple"
-                    payloads.push(e)
-                case Err(_):
-                    print "bake: simple /usr/bin entry failed (skipped)"
+            for spec in _simple_role_payload_specs():
+                match _load_payload_at(simple_path, spec.name83, spec.guest_path):
+                    case Ok(e):
+                        print "bake: loaded Simple payload -> " + spec.label + " (" + simple_size.to_text() + " bytes)"
+                        payloads.push(e)
+                    case Err(e):
+                        return Err(e)
+        else:
+            print "bake: Simple compiler payload skipped (set SIMPLEOS_SIMPLE_BINARY and touch build/os/.bake_include_simple_compiler to embed)"
     else:
         print "bake: toolchain skipped (touch build/os/.bake_include_toolchain to embed)"
 

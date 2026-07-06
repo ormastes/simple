@@ -52,6 +52,19 @@ complete when workflow/tooling behavior changed and the matching guide, skill,
 agent, command, or generated/manual spec docs are still stale. Update the docs
 first, then run focused verification evidence once.
 
+For SimpleOS compiler-in-filesystem lanes, completion requires the Simple
+compiler/interpreter/loader payload to be embedded in the SimpleOS install image
+and executed from the SimpleOS filesystem. SPipe specs must prove the target
+payload is SimpleOS-native, not host `bin/simple`, and that the image contains
+`/usr/bin/simple(.smf)`, `/bin/simple(.smf)`, `/sys/apps/simple(.smf)`,
+`/sys/apps/simple_compiler(.smf)`, `/sys/apps/simple_interpreter(.smf)`,
+`/sys/apps/simple_loader(.smf)`, and `/SYS/SIMPLETOOL.SDN`. A PASS claim also
+needs in-guest evidence for `/usr/bin/simple --version` plus compiling and
+running a small `hello world` from the mounted filesystem. QEMU fixed-command
+stubs, host-side compiles, and placeholder marker apps are blockers, not proof.
+Physical-board claims additionally need board identity, boot/download path, and
+serial or SSH transcript; otherwise record QEMU-only or source-present status.
+
 For recent unfinished-plan cleanup lanes, use
 `doc/07_guide/infra/recent_plan_cleanup.md`. Keep the cleanup matrix under
 `doc/03_plan/agent_tasks/` with sidecar lanes/`N/A`, merge owner, and final

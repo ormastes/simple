@@ -15,9 +15,12 @@ use os.tools.pkg.pkg_format.{
 }
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_env_get(key: text) -> text?
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_write_bytes(path: text, content: [u8]) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
 
@@ -60,6 +63,21 @@ val _ROOT_LAYOUT = [
     "/home"
 ]
 
+val _SIMPLE_TOOLCHAIN_ROLE_PATHS: [text] = [
+    "/bin/simple",
+    "/bin/simple.smf",
+    "/usr/bin/simple",
+    "/usr/bin/simple.smf",
+    "/sys/apps/simple",
+    "/sys/apps/simple.smf",
+    "/sys/apps/simple_compiler",
+    "/sys/apps/simple_compiler.smf",
+    "/sys/apps/simple_interpreter",
+    "/sys/apps/simple_interpreter.smf",
+    "/sys/apps/simple_loader",
+    "/sys/apps/simple_loader.smf",
+]
+
 struct ImageConfig:
     arch: PkgArch
     output_path: text
@@ -67,6 +85,7 @@ struct ImageConfig:
     kernel_path: text
     bootloader_config: text
     package_dir: text
+    simple_binary: text
     include_installer: bool
 
 struct PartitionLayout:
@@ -170,6 +189,31 @@ impl ImageBuilder:
         for pkg in packages:
             manifest = manifest + self._deploy_package(rootfs_root, pkg)
 
+        manifest = manifest + self._stage_simple_toolchain_payload(rootfs_root)
+        manifest
+
+    fn _stage_simple_toolchain_payload(rootfs_root: text) -> text:
+        val simple_binary = _effective_simple_binary(self.config)
+        if simple_binary == "":
+            return ""
+        if not rt_file_exists(simple_binary):
+            return _manifest_file("/SYS/SIMPLETOOL.SDN", "simple-toolchain-missing", "simpleos-tools")
+
+        val payload = rt_file_read_bytes(simple_binary) ?? []
+        if payload.len() == 0:
+            return _manifest_file("/SYS/SIMPLETOOL.SDN", "simple-toolchain-empty", "simpleos-tools")
+
+        var manifest = ""
+        for guest_path in _SIMPLE_TOOLCHAIN_ROLE_PATHS:
+            val target_path = "{rootfs_root}{guest_path}"
+            _ensure_parent_dirs(rootfs_root, guest_path)
+            val ok = rt_file_write_bytes(target_path, payload)
+            if ok:
+                manifest = manifest + _manifest_file(guest_path, "simple-toolchain-role", "simpleos-tools")
+
+        _ensure_dir("{rootfs_root}/SYS")
+        write_text("{rootfs_root}/SYS/SIMPLETOOL.SDN", _simple_toolchain_manifest_payload(simple_binary))
+        manifest = manifest + _manifest_file("/SYS/SIMPLETOOL.SDN", "simple-toolchain-manifest", "simpleos-tools")
         manifest
 
     fn _populate_install_media(rootfs_root: text) -> text:
@@ -216,10 +260,8 @@ impl ImageBuilder:
     fn _materialize_primary_artifact(rootfs_root: text, manifest_path: text) -> Result<bool, text>:
         if self.config.arch == PkgArch.X86_64 and not self.config.include_installer:
             val args = [
-                "scripts/os/make_os_disk.shs",
-                self.config.image_size_mb.to_text(),
-                self.config.output_path,
-                rootfs_root
+                "-c",
+                _make_os_disk_command(self.config, rootfs_root)
             ]
             val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", args, 120000)
             if stdout != "":
@@ -246,6 +288,7 @@ fn build_usb_installer_image(
         kernel_path: kernel_path,
         bootloader_config: _installer_bootloader_config(arch),
         package_dir: package_dir,
+        simple_binary: "",
         include_installer: true
     )
     _image_builder_rootfs_backend = "fat32"
@@ -266,6 +309,7 @@ fn build_usb_installer_image_with_rootfs(
         kernel_path: kernel_path,
         bootloader_config: _installer_bootloader_config(arch),
         package_dir: package_dir,
+        simple_binary: "",
         include_installer: true
     )
     _image_builder_rootfs_backend = _normalized_rootfs_backend(rootfs_backend)
@@ -285,6 +329,28 @@ fn build_install_image(
         kernel_path: kernel_path,
         bootloader_config: "",
         package_dir: package_dir,
+        simple_binary: "",
+        include_installer: false
+    )
+    _image_builder_rootfs_backend = "fat32"
+    ImageBuilder.new(config).build()
+
+fn build_install_image_with_simple_binary(
+    arch: PkgArch,
+    kernel_path: text,
+    package_dir: text,
+    output_path: text,
+    size_mb: u64,
+    simple_binary: text
+) -> Result<text, text>:
+    val config = ImageConfig(
+        arch: arch,
+        output_path: output_path,
+        image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
+        kernel_path: kernel_path,
+        bootloader_config: "",
+        package_dir: package_dir,
+        simple_binary: simple_binary,
         include_installer: false
     )
     _image_builder_rootfs_backend = "fat32"
@@ -305,6 +371,7 @@ fn build_install_image_with_rootfs(
         kernel_path: kernel_path,
         bootloader_config: "",
         package_dir: package_dir,
+        simple_binary: "",
         include_installer: false
     )
     _image_builder_rootfs_backend = _normalized_rootfs_backend(rootfs_backend)
@@ -319,6 +386,7 @@ fn _print_image_usage():
     print "  --size=SIZE       Image size in MB (default: 512)"
     print "  --kernel=PATH     Path to kernel ELF binary"
     print "  --packages=DIR    Directory containing .spk packages"
+    print "  --simple-binary=PATH  Target-native SimpleOS Simple ELF/SMF payload"
     print "  --rootfs=NAME     Runtime rootfs backend marker (fat32, dbfs, nvfs)"
     print "  --installer       Build install-media artifact"
     print "  -h                Show this help"
@@ -337,6 +405,7 @@ fn run_image_builder(args: [text]) -> i32:
     var size_mb: u64 = DEFAULT_IMAGE_SIZE_MB
     var kernel = ""
     var packages = ""
+    var simple_binary = ""
     var installer = false
     var rootfs_backend = "fat32"
 
@@ -353,6 +422,8 @@ fn run_image_builder(args: [text]) -> i32:
             kernel = arg.slice(9, arg.len())
         else if arg.starts_with("--packages="):
             packages = arg.slice(11, arg.len())
+        else if arg.starts_with("--simple-binary="):
+            simple_binary = arg.slice(16, arg.len())
         else if arg.starts_with("--rootfs="):
             rootfs_backend = arg.slice(9, arg.len())
         else if arg == "--installer":
@@ -366,9 +437,31 @@ fn run_image_builder(args: [text]) -> i32:
     val arch = arch_result.unwrap()
 
     val result = if installer:
-        build_usb_installer_image_with_rootfs(arch, kernel, packages, output, size_mb, rootfs_backend)
+        val config = ImageConfig(
+            arch: arch,
+            output_path: output,
+            image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
+            kernel_path: kernel,
+            bootloader_config: _installer_bootloader_config(arch),
+            package_dir: packages,
+            simple_binary: simple_binary,
+            include_installer: true
+        )
+        _image_builder_rootfs_backend = _normalized_rootfs_backend(rootfs_backend)
+        ImageBuilder.new(config).build()
     else:
-        build_install_image_with_rootfs(arch, kernel, packages, output, size_mb, rootfs_backend)
+        val config = ImageConfig(
+            arch: arch,
+            output_path: output,
+            image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
+            kernel_path: kernel,
+            bootloader_config: "",
+            package_dir: packages,
+            simple_binary: simple_binary,
+            include_installer: false
+        )
+        _image_builder_rootfs_backend = _normalized_rootfs_backend(rootfs_backend)
+        ImageBuilder.new(config).build()
 
     if val Ok(path) = result:
         print "Artifact created: {path}"
@@ -415,11 +508,15 @@ fn _ensure_dir(path: text):
         return
     val parts = path.split("/")
     var current = ""
+    val absolute = path.starts_with("/")
     for raw in parts:
         val part = raw.trim()
         if part == "":
             continue
-        current = current + "/" + part
+        if current == "":
+            current = if absolute: "/" + part else: part
+        else:
+            current = current + "/" + part
         mkdir(current)
 
 fn _ensure_parent_dirs(rootfs_root: text, file_path: text):
@@ -564,6 +661,45 @@ fn _effective_bootloader_config(config: ImageConfig) -> text:
     if config.bootloader_config != "":
         return config.bootloader_config
     _default_bootloader_config(config.arch)
+
+fn _effective_simple_binary(config: ImageConfig) -> text:
+    if config.simple_binary != "":
+        return config.simple_binary
+    val env_path = rt_env_get("SIMPLEOS_SIMPLE_BINARY") ?? ""
+    if env_path != "":
+        return env_path
+    val candidates: [text] = [
+        "build/bootstrap/stage3/simple_simpleos",
+        "bin/release/x86_64-unknown-simpleos/simple",
+        "bin/release/x86_64-simpleos/simple",
+    ]
+    for candidate in candidates:
+        if rt_file_exists(candidate):
+            return candidate
+    ""
+
+fn _simple_toolchain_manifest_payload(simple_binary: text) -> text:
+    var out = "[simple_toolchain]\n"
+    out = out + "status = \"embedded\"\n"
+    out = out + "host_payload = \"{simple_binary}\"\n"
+    out = out + "runtime_source = \"simpleos-filesystem\"\n"
+    for role_path in _SIMPLE_TOOLCHAIN_ROLE_PATHS:
+        out = out + "role = \"{role_path}\"\n"
+    out
+
+fn _shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+fn _make_os_disk_command(config: ImageConfig, rootfs_root: text) -> text:
+    val simple_binary = _effective_simple_binary(config)
+    var command = ""
+    if simple_binary != "":
+        command = command + "SIMPLEOS_SIMPLE_BINARY=" + _shell_quote(simple_binary) + " "
+    command = command + "sh scripts/os/make_os_disk.shs "
+    command = command + _shell_quote(config.image_size_mb.to_text()) + " "
+    command = command + _shell_quote(config.output_path) + " "
+    command = command + _shell_quote(rootfs_root) + " "
+    command + "x86_64"
 
 fn _kernel_payload(kernel_path: text, arch: PkgArch) -> text:
     if kernel_path != "":

@@ -56,6 +56,16 @@
     explicitly recorded as `N/A`. Stale process docs fail verification; do not
     mark the agent goal or SPipe lane complete before this gate passes. SimpleOS
     mission-critical release PASS requires `release_blockers=none`.
+    SimpleOS compiler-in-filesystem lanes additionally require install-image
+    evidence for the target-native Simple payload at `/usr/bin/simple(.smf)`,
+    `/bin/simple(.smf)`, `/sys/apps/simple(.smf)`,
+    `/sys/apps/simple_compiler(.smf)`, `/sys/apps/simple_interpreter(.smf)`,
+    `/sys/apps/simple_loader(.smf)`, and `/SYS/SIMPLETOOL.SDN`, plus in-guest
+    `/usr/bin/simple --version` and compile/run `hello world` evidence from the
+    mounted SimpleOS filesystem. Host `bin/simple`, placeholder marker apps,
+    host-side compile/run, and QEMU fixed-command SSH responses fail this gate.
+    Physical-board completion also requires board identity, boot/download path,
+    and serial or SSH transcript; without that, record QEMU-only/source-present.
 12. Verify the `## Cooperative Review` plan from the state file was completed:
     lower-model sidecar lanes are either reviewed/merged or explicitly `N/A`,
     and the normal/highest-capability review accepted broad findings,

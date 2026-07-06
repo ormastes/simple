@@ -1,0 +1,45 @@
+# @tag:system
+
+use std.spec
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn run_shell(cmd: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", cmd])
+
+describe "SimpleOS deploy image Simple toolchain payload":
+    it "bakes a supplied target Simple payload into compiler interpreter and loader roles":
+        val root = "build/tmp/simpleos_deploy_image_simple_toolchain"
+        dir_create_all(root)
+        val payload = root + "/simple-target.smf"
+        val image = root + "/simpleos-disk.img"
+        expect(rt_file_write_text(payload, "SMF_FAKE_TARGET_SIMPLE\nrole=compiler-interpreter-loader\n")).to_equal(true)
+
+        val (out, err, code) = run_shell(
+            "SIMPLEOS_SIMPLE_BINARY='" + payload + "' " +
+            "sh scripts/os/make_os_disk.shs 64 '" + image + "' '' x86_64 >/tmp/simpleos-deploy-image-toolchain.out 2>/tmp/simpleos-deploy-image-toolchain.err"
+        )
+        if code != 0:
+            print out
+            print err
+            val logs = run_shell("cat /tmp/simpleos-deploy-image-toolchain.out /tmp/simpleos-deploy-image-toolchain.err 2>/dev/null || true")
+            print logs.0
+        expect(code).to_equal(0)
+
+        val (scan_out, scan_err, scan_code) = run_shell(
+            "grep -a -q 'SMF_FAKE_TARGET_SIMPLE' '" + image + "' && " +
+            "grep -a -q 'SIMPLSTC' '" + image + "' && " +
+            "grep -a -q 'SCOMPSMF' '" + image + "' && " +
+            "grep -a -q 'SINTSMF' '" + image + "' && " +
+            "grep -a -q 'SLOADSMF' '" + image + "' && " +
+            "grep -a -q '/usr/bin/simple status=standalone-required' '" + image + "' && " +
+            "grep -a -q '/sys/apps/simple_compiler status=standalone-required' '" + image + "' && " +
+            "grep -a -q '/sys/apps/simple_interpreter status=standalone-required' '" + image + "' && " +
+            "grep -a -q '/sys/apps/simple_loader status=standalone-required' '" + image + "'"
+        )
+        if scan_code != 0:
+            print scan_out
+            print scan_err
+        expect(scan_code).to_equal(0)

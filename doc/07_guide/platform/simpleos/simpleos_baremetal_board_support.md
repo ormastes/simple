@@ -72,6 +72,45 @@ Serial symlinks show the Xilinx ML Carrier card on `/dev/ttyUSB2`, `/dev/ttyUSB4
 | Filesystem boot | Source-present in `src/os/kernel/boot/boot_fs*.spl`, VFS boot init, FS exec spawn modules, and `scripts/os/run_simpleos_qemu.shs` FAT32 disk image path. Not run here. |
 | Bootloader/OS download | Source-present and partially locally checkable. K26 uses FT4232H/JTAG and Vivado/OpenOCD/openFPGALoader. RA4M1 uses CMSIS-DAP/OpenOCD SWD. STM32U585 uses ST-Link/OpenOCD/stm32prog. |
 
+## Simple Compiler Install-Image Contract
+
+SimpleOS compiler support is a filesystem deployment contract, not QEMU magic.
+The target-native Simple payload must be embedded in the SimpleOS install image
+and launched from the SimpleOS filesystem on QEMU or a physical board.
+
+Required filesystem roles:
+
+- `/usr/bin/simple` and `/usr/bin/simple.smf` for shell/PATH execution.
+- `/bin/simple` and `/bin/simple.smf` for early boot and minimal shell paths.
+- `/sys/apps/simple` and `/sys/apps/simple.smf` for app registry launch.
+- `/sys/apps/simple_compiler(.smf)`, `/sys/apps/simple_interpreter(.smf)`, and
+  `/sys/apps/simple_loader(.smf)` for desktop/toolchain role resolution.
+- `/SYS/SIMPLETOOL.SDN` describing the payload and role paths.
+
+Payload rules:
+
+- Use a SimpleOS-target ELF or SMF payload, supplied explicitly by
+  `SIMPLEOS_SIMPLE_BINARY` or produced as `build/bootstrap/stage3/simple_simpleos`.
+- Do not embed host `bin/simple` unless it is actually built for the SimpleOS
+  target. A macOS/Linux host compiler in the image is a packaging bug.
+- Placeholder marker apps prove catalog placement only; they do not prove the
+  Simple compiler runs.
+
+Completion evidence:
+
+1. Build the install image and prove the staged filesystem or FAT image contains
+   every required role path plus `/SYS/SIMPLETOOL.SDN`.
+2. Boot QEMU or a physical board from that image.
+3. From inside SimpleOS, run `/usr/bin/simple --version`.
+4. From inside SimpleOS, compile and run a small `hello world` source from the
+   mounted filesystem.
+
+Fixed SSH command responses, host-side compilation, or a QEMU-only hardcoded
+`simple --check` response are not enough. For board claims, record the board,
+download/boot path, serial or SSH transcript, and the exact in-guest
+`/usr/bin/simple` commands. If no board is attached, keep the status at
+**Source-present** or **QEMU-verified**, not **Verified here**.
+
 ## Commands Used
 
 Hardware and tool inventory:

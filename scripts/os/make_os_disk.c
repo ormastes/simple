@@ -19,10 +19,10 @@
 
 enum {
     SECTOR_SIZE = 512,
-    TOTAL_SECTORS = 8192,
+    TOTAL_SECTORS = 131072,
     RESERVED_SECTORS = 32,
     FAT_COUNT = 1,
-    FAT_SIZE_SECTORS = 64,
+    FAT_SIZE_SECTORS = 256,
     SECTORS_PER_CLUSTER = 8,
     ROOT_CLUSTER = 2,
 };
@@ -34,6 +34,7 @@ struct bytes {
 
 static unsigned char *g_image;
 static uint32_t *g_fat;
+static size_t g_image_size;
 static int g_next_cluster = 3;
 
 static const int DATA_START_SECTOR = RESERVED_SECTORS + FAT_COUNT * FAT_SIZE_SECTORS;
@@ -105,6 +106,8 @@ static int alloc_clusters(const unsigned char *data, size_t len)
         size_t chunk = len > start ? len - start : 0;
         if (chunk > (size_t)CLUSTER_SIZE)
             chunk = (size_t)CLUSTER_SIZE;
+        if (cluster_offset(cluster) + chunk > g_image_size)
+            die("disk image too small for payload set");
         if (chunk > 0)
             memcpy(g_image + cluster_offset(cluster), data + start, chunk);
     }
@@ -167,6 +170,42 @@ static struct bytes read_cfat4k_baseline(void)
     if (override && override[0] != '\0')
         return read_file(override);
     return read_file("build/os/perf/CFAT4K.TXT");
+}
+
+static struct bytes read_simpleos_simple_payload(void)
+{
+    const char *override = getenv("SIMPLEOS_SIMPLE_BINARY");
+    if (override && override[0] != '\0')
+        return read_file(override);
+    struct bytes stage3 = read_file("build/bootstrap/stage3/simple_simpleos");
+    if (stage3.len)
+        return stage3;
+    struct bytes release_triple = read_file("bin/release/x86_64-unknown-simpleos/simple");
+    if (release_triple.len)
+        return release_triple;
+    return read_file("bin/release/x86_64-simpleos/simple");
+}
+
+static bool is_elf_payload(struct bytes payload)
+{
+    return payload.len >= 4 &&
+        payload.data[0] == 0x7f &&
+        payload.data[1] == 'E' &&
+        payload.data[2] == 'L' &&
+        payload.data[3] == 'F';
+}
+
+static bool is_smf_payload(struct bytes payload)
+{
+    if (payload.len >= 128) {
+        size_t off = payload.len - 128;
+        if (payload.data[off] == 'S' && payload.data[off + 1] == 'M' && payload.data[off + 2] == 'F')
+            return true;
+    }
+    return payload.len >= 3 &&
+        payload.data[0] == 'S' &&
+        payload.data[1] == 'M' &&
+        payload.data[2] == 'F';
 }
 
 static void put_dir_entry(unsigned char *entries, int *count, const char *name, int cluster, size_t size, unsigned char attr)
@@ -297,6 +336,22 @@ static struct bytes app_elf(const char *platform, const char *suffix)
     return smf(platform_elf(platform, marker));
 }
 
+static struct bytes simple_role_payload(const char *platform, const char *fallback_suffix, struct bytes simple_payload)
+{
+    if (simple_payload.len) {
+        const char *override = getenv("SIMPLEOS_SIMPLE_BINARY");
+        if (!is_elf_payload(simple_payload) && !is_smf_payload(simple_payload)) {
+            if (override && override[0] != '\0')
+                die("SIMPLEOS_SIMPLE_BINARY must point to a SimpleOS ELF or SMF payload");
+            return app_elf(platform, fallback_suffix);
+        }
+        if (is_smf_payload(simple_payload))
+            return simple_payload;
+        return smf(simple_payload);
+    }
+    return app_elf(platform, fallback_suffix);
+}
+
 static void mkdir_p(const char *path)
 {
     char tmp[2048];
@@ -359,6 +414,7 @@ int main(int argc, char **argv)
     const char *lane = lane_for_platform(platform);
 
     size_t image_size = (size_t)TOTAL_SECTORS * SECTOR_SIZE;
+    g_image_size = image_size;
     g_image = (unsigned char *)xcalloc(image_size, 1);
     g_fat = (uint32_t *)xcalloc((size_t)FAT_SIZE_SECTORS * SECTOR_SIZE / 4, sizeof(uint32_t));
     g_fat[0] = 0x0ffffff8U;
@@ -384,6 +440,7 @@ int main(int argc, char **argv)
 
     struct bytes kernel_file = read_file(kernel_path);
     struct bytes bootloader_file = read_file(getenv("SIMPLEOS_UEFI_BOOTLOADER"));
+    struct bytes simple_payload = read_simpleos_simple_payload();
     struct bytes cfat4k = read_cfat4k_baseline();
     struct bytes kernel = kernel_file.len ? kernel_file : text_bytes("SIMPLEOS_UEFI_KERNEL_MISSING\n");
     struct bytes bootloader = bootloader_file.len ? bootloader_file : text_bytes("SIMPLEOS_UEFI_BOOTLOADER_MISSING\n");
@@ -394,16 +451,16 @@ int main(int argc, char **argv)
     struct bytes nvfs = textf("nvfs-image-version=1\nplatform=%s\nlane=%s\n", platform, lane);
     struct bytes toolset = textf("lane = \"%s\"\nmode=native-filesystem-app\nstatus=standalone-required\n", lane);
     struct bytes markers = textf(
-        "\nHELLOSMF\nBROWSMF\nSBROWSMF\nSMUXSMF\nSCOMPSMF\nSINTSMF\nSLOADSMF\nLLVMSMF\nCLANGSMF\nRUSTSMF\nSTEAM204SMF\n"
+        "\nHELLOSMF\nBROWSMF\nSBROWSMF\nSMUXSMF\nSCOMPSMF\nSINTSMF\nSLOADSMF\nSIMPLSTC\nLLVMSMF\nCLANGSMF\nRUSTSMF\nSTEAM204SMF\n"
         "[steam-2048-demo] source=2048\n[game-port] profile=steamos-rebuild-v1 source=2048\nrebuild_target=simpleos-native\n"
         "steam_facade=simple-steam-sffi-v1\nport_required_capabilities=8\nruntime=SteamLinuxRuntime/soldier\nnetwork=true\nachievement=true\ndrm=true\n"
         "steam_backend_ready=false\nsteam_backend_blocker=missing_authenticated_steam_client\nsteam_backend_required_symbols=20\nsteam_backend_required_os_capabilities=11\n"
         "SMF\n/sys/apps/hello_world\n/sys/apps/simple_browser\n/sys/apps/smux\nSIMPLEOS_DISK_HELLO_ELF\nbrowser_demo_remote_main\nhello_world_remote_main\n"
         "file_manager_remote_main\nshell_remote_main\neditor_remote_main\nsmux_remote_main\ninfo|src/app/info/main.spl|smoke|staged\nlist|src/app/list/main.spl|smoke|staged\n"
-        "stats|src/app/stats/main.spl|smoke|staged\nentry_app=/sys/apps/simple_compiler\nentry_app=/sys/apps/simple_loader\nentry_app=/sys/apps/llvm\nentry_app=/sys/apps/clang\nentry_app=/sys/apps/rust\n"
+        "stats|src/app/stats/main.spl|smoke|staged\nentry_app=/sys/apps/simple\nentry_app=/usr/bin/simple\nentry_app=/sys/apps/simple_compiler\nentry_app=/sys/apps/simple_interpreter\nentry_app=/sys/apps/simple_loader\nentry_app=/sys/apps/llvm\nentry_app=/sys/apps/clang\nentry_app=/sys/apps/rust\n"
         "lane=%s\nlane = \"%s\"\nelf-machine=%s\nmode=native-filesystem-app\nstatus=standalone-required\npipeline=compile-pipeline-step\npipeline=build-pipeline-step\n"
         "proof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step\nproof_pipeline=/usr/share/simpleos/toolchain/clang/pipeline.step\nproof_pipeline=/usr/share/simpleos/toolchain/rust/pipeline.step\n"
-        "/usr/share/simpleos/toolchain/llvm/hello.ll\n/sys/apps/simple_compiler status=standalone-required\n/sys/apps/simple_loader status=standalone-required\n/sys/apps/llvm status=standalone-required\n"
+        "/usr/share/simpleos/toolchain/llvm/hello.ll\n/usr/bin/simple status=standalone-required\n/sys/apps/simple status=standalone-required\n/sys/apps/simple_compiler status=standalone-required\n/sys/apps/simple_interpreter status=standalone-required\n/sys/apps/simple_loader status=standalone-required\n/sys/apps/llvm status=standalone-required\n"
         "/sys/apps/clang status=standalone-required\n/sys/apps/rust status=standalone-required\nSimpleOS LLVM standalone app v1\nclang version 20.0.0\nSimpleOS Rust standalone app v1\n"
         "/usr/share/simpleos/toolchain/llvm/pipeline.step\n/usr/share/simpleos/toolchain/clang/pipeline.step\n/usr/share/simpleos/toolchain/rust/pipeline.step\n",
         lane, lane, platform);
@@ -427,9 +484,10 @@ int main(int argc, char **argv)
 
     struct bytes hello = smf(platform_elf(platform, hello_marker));
     struct bytes browser = smf(platform_elf(platform, gui_marker));
-    struct bytes simple_compiler = app_elf(platform, "SIMPLE_COMPILER");
-    struct bytes simple_interpreter = app_elf(platform, "SIMPLE_INTERPRETER");
-    struct bytes simple_loader = app_elf(platform, "SIMPLE_LOADER");
+    struct bytes simple_cli = simple_role_payload(platform, "SIMPLE", simple_payload);
+    struct bytes simple_compiler = simple_role_payload(platform, "SIMPLE_COMPILER", simple_payload);
+    struct bytes simple_interpreter = simple_role_payload(platform, "SIMPLE_INTERPRETER", simple_payload);
+    struct bytes simple_loader = simple_role_payload(platform, "SIMPLE_LOADER", simple_payload);
     struct bytes llvm_app = app_elf(platform, "LLVM");
     struct bytes clang_app = app_elf(platform, "CLANG");
     struct bytes rust_app = app_elf(platform, "RUST");
@@ -464,6 +522,7 @@ int main(int argc, char **argv)
     int compiler_cluster = alloc_clusters(simple_compiler.data, simple_compiler.len);
     int interpreter_cluster = alloc_clusters(simple_interpreter.data, simple_interpreter.len);
     int loader_cluster = alloc_clusters(simple_loader.data, simple_loader.len);
+    int simple_cluster = alloc_clusters(simple_cli.data, simple_cli.len);
     int llvm_cluster = alloc_clusters(llvm_app.data, llvm_app.len);
     int clang_cluster = alloc_clusters(clang_app.data, clang_app.len);
     int rust_cluster = alloc_clusters(rust_app.data, rust_app.len);
@@ -505,6 +564,7 @@ int main(int argc, char **argv)
     put_dir_entry(apps, &apps_n, "SCOMPSMFSMF", compiler_cluster, simple_compiler.len, 0x20);
     put_dir_entry(apps, &apps_n, "SINTSMF SMF", interpreter_cluster, simple_interpreter.len, 0x20);
     put_dir_entry(apps, &apps_n, "SLOADSMFSMF", loader_cluster, simple_loader.len, 0x20);
+    put_dir_entry(apps, &apps_n, "SIMPLSTCSMF", simple_cluster, simple_cli.len, 0x20);
     put_dir_entry(apps, &apps_n, "LLVMSMF SMF", llvm_cluster, llvm_app.len, 0x20);
     put_dir_entry(apps, &apps_n, "CLANGSMFSMF", clang_cluster, clang_app.len, 0x20);
     put_dir_entry(apps, &apps_n, "RUSTSMF SMF", rust_cluster, rust_app.len, 0x20);

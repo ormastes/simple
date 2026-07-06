@@ -162,6 +162,16 @@ Scan for stub patterns — any match is a **FAIL**:
   commands. Treat `sidecar-contract-failed`, `missing-artifact`, and
   `sby-run-failed` as release-failing RTL evidence problems, not missing-tool
   blockers.
+- **SimpleOS compiler-in-filesystem gate:** require a target-native Simple
+  payload embedded in the install image at `/usr/bin/simple(.smf)`,
+  `/bin/simple(.smf)`, `/sys/apps/simple(.smf)`,
+  `/sys/apps/simple_compiler(.smf)`, `/sys/apps/simple_interpreter(.smf)`,
+  `/sys/apps/simple_loader(.smf)`, and `/SYS/SIMPLETOOL.SDN`. PASS also needs
+  in-guest `/usr/bin/simple --version` and compile/run `hello world` evidence
+  from the mounted SimpleOS filesystem. Host `bin/simple`, placeholder marker
+  apps, host-side compile/run, and QEMU fixed-command SSH responses are FAIL.
+  Physical-board claims additionally need board identity, boot/download path,
+  and serial or SSH transcript.
 - **GUI/MDI evidence gates:** wrappers that claim live visual/event proof must
   fail when requested evidence is unavailable, times out, or only proves file
   existence. For Electron, Tauri mobile/iOS, hosted WM, QEMU/GTK WM, and pure WM

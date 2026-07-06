@@ -12,10 +12,16 @@
 ##   bin/simple run src/os/port/initramfs_pack.spl -- build --payload /usr/bin/clang:/usr/bin/clang
 ##   bin/simple run src/os/port/initramfs_pack.spl -- validate build/os/initramfs.img.zst
 
-use std.fs
 use std.process
 use std.text
-use std.cli
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.ffi.io.{
+    file_exists,
+    file_size,
+    file_write_text,
+    dir_exists,
+    dir_create_all,
+}
 
 val DEFAULT_SIMPLE_BINARY = "build/bootstrap/stage3/simple_simpleos"
 val DEFAULT_LLVM_PREFIX = "build/os/llvm/cross/bin"
@@ -24,6 +30,21 @@ val DEFAULT_SOURCE_TREE = "src"
 val DEFAULT_OUTPUT = "build/os/initramfs.img.zst"
 val DEFAULT_STAGING = "build/os/initramfs-staging"
 val CLANG_RESOURCE_VER = "19"  # clang resource dir version
+
+val SIMPLE_TOOLCHAIN_ROLE_PATHS: [text] = [
+    "/bin/simple",
+    "/bin/simple.smf",
+    "/usr/bin/simple",
+    "/usr/bin/simple.smf",
+    "/sys/apps/simple",
+    "/sys/apps/simple.smf",
+    "/sys/apps/simple_compiler",
+    "/sys/apps/simple_compiler.smf",
+    "/sys/apps/simple_interpreter",
+    "/sys/apps/simple_interpreter.smf",
+    "/sys/apps/simple_loader",
+    "/sys/apps/simple_loader.smf",
+]
 
 val LLVM_TOOLS: [text] = [
     "clang", "lld", "llvm-ar", "llvm-nm",
@@ -64,7 +85,7 @@ fn usage():
     print "  --payload HOST:GUEST     Inject host file/dir at GUEST path (repeatable)"
     print "                           If HOST is a directory, it is copied recursively."
 
-fn parse_args(args: List<text>) -> (text, PackConfig, text):
+fn parse_args(args: [text]) -> (text, PackConfig, text):
     """Return (command, config, validate_arg)."""
     var command = ""
     var validate_arg = ""
@@ -116,7 +137,7 @@ fn parse_args(args: List<text>) -> (text, PackConfig, text):
                 process.exit(2)
             val host_path = spec.slice(0, colon_idx)
             val guest_path = spec.slice(colon_idx + 1, spec.len())
-            val is_dir = fs.dir_exists(host_path)
+            val is_dir = dir_exists(host_path)
             payloads.push(PayloadEntry(host_path: host_path, guest_path: guest_path, is_dir: is_dir))
         i = i + 1
 
@@ -137,19 +158,43 @@ fn parse_args(args: List<text>) -> (text, PackConfig, text):
     (command, config, validate_arg)
 
 fn ensure_dir(path: text):
-    if not fs.dir_exists(path):
-        fs.create_dir_all(path)
+    if not dir_exists(path):
+        dir_create_all(path)
+
+fn parent_path(path: text) -> text:
+    val slash = path.last_index_of("/") ?? -1
+    if slash <= 0:
+        return "."
+    path.slice(0, slash)
+
+fn absolute_path(path: text) -> text:
+    if path.starts_with("/"):
+        return path
+    val pwd = process.run("pwd", [])
+    if pwd.exit_code != 0:
+        return path
+    val cwd = pwd.stdout.trim()
+    if cwd == "":
+        return path
+    "{cwd}/{path}"
+
+fn run_checked(cmd: text, args: [text]):
+    val result = process.run(cmd, args)
+    if result.exit_code != 0:
+        print "error: command failed: {cmd}"
+        print result.stderr
+        process.exit(result.exit_code)
 
 fn stage_file(src: text, dst: text, optional: bool):
     """Copy a single file into the staging tree. If optional=true and
     src is missing, skip with a warning."""
-    if not fs.exists(src):
+    if not file_exists(src):
         if optional:
             print "[pack]   skip (missing): {src}"
             return
         print "error: required file missing: {src}"
         process.exit(1)
-    ensure_dir(fs.parent(dst))
+    ensure_dir(parent_path(dst))
     val result = process.run("cp", [src, dst])
     if result.exit_code != 0:
         print "error: failed to copy {src} -> {dst}"
@@ -158,13 +203,13 @@ fn stage_file(src: text, dst: text, optional: bool):
 
 fn stage_tree(src: text, dst: text, optional: bool):
     """Recursively copy a directory tree into the staging area."""
-    if not fs.dir_exists(src):
+    if not dir_exists(src):
         if optional:
             print "[pack]   skip (missing dir): {src}"
             return
         print "error: required directory missing: {src}"
         process.exit(1)
-    ensure_dir(fs.parent(dst))
+    ensure_dir(parent_path(dst))
     val result = process.run("cp", ["-a", src, dst])
     if result.exit_code != 0:
         print "error: failed to copy tree {src} -> {dst}"
@@ -203,6 +248,32 @@ fn add_payload_dir(staging: text, host_dir: text, guest_dir: text):
     print "[pack] payload dir: {host_dir} -> /{rel}"
     stage_tree(src: host_dir, dst: dst, optional: false)
 
+fn stage_simple_toolchain_roles(config: PackConfig):
+    """Stage the same target-native Simple payload under every role path the
+    SimpleOS loader, shell, desktop catalog, and SSH surface know how to resolve.
+    The payload must be a SimpleOS-runnable binary/SMF supplied by the caller."""
+    var i = 0
+    while i < SIMPLE_TOOLCHAIN_ROLE_PATHS.len():
+        val guest_path = SIMPLE_TOOLCHAIN_ROLE_PATHS[i]
+        var rel = guest_path
+        if rel.starts_with("/"):
+            rel = rel.slice(1, rel.len())
+        stage_file(src: config.simple_binary, dst: "{config.staging}/{rel}", optional: false)
+        i = i + 1
+
+fn write_simple_toolchain_manifest(path: text, simple_binary: text):
+    ensure_dir(parent_path(path))
+    var body = "simple_toolchain {\n"
+    body = body + "  host_payload: \"{simple_binary}\"\n"
+    body = body + "  guest_roles: [\n"
+    var i = 0
+    while i < SIMPLE_TOOLCHAIN_ROLE_PATHS.len():
+        body = body + "    \"{SIMPLE_TOOLCHAIN_ROLE_PATHS[i]}\"\n"
+        i = i + 1
+    body = body + "  ]\n"
+    body = body + "}\n"
+    file_write_text(path, body)
+
 ## compress_zstd compresses data in memory by piping it through the host
 ## `zstd` binary at level -19. Returns the compressed bytes.
 ##
@@ -220,14 +291,14 @@ fn compress_zstd(data: [u8]) -> [u8]:
 
 fn write_stub_init(path: text):
     """Write a tiny /sbin/init placeholder (shell stub)."""
-    ensure_dir(fs.parent(path))
+    ensure_dir(parent_path(path))
     val body = "#!/bin/sh\n# SimpleOS init placeholder\nexec /bin/simple run /src/app/simpleos/init.spl\n"
-    fs.write_text(path, body)
-    process.run_checked("chmod", ["+x", path])
+    file_write_text(path, body)
+    run_checked("chmod", ["+x", path])
 
 fn write_hello_c(path: text):
-    ensure_dir(fs.parent(path))
-    fs.write_text(path, "int main(void) { return 0; }\n")
+    ensure_dir(parent_path(path))
+    file_write_text(path, "int main(void) { return 0; }\n")
 
 fn populate_staging(config: PackConfig):
     """Copy all desired payloads into the staging directory."""
@@ -235,13 +306,15 @@ fn populate_staging(config: PackConfig):
     print "[pack] populating staging dir: {s}"
 
     # Clean + recreate
-    if fs.dir_exists(s):
-        process.run_checked("rm", ["-rf", s])
+    if dir_exists(s):
+        run_checked("rm", ["-rf", s])
     ensure_dir(s)
 
-    # /bin/simple  +  /usr/bin/simple (so compiler is reachable via both paths)
-    stage_file(src: config.simple_binary, dst: "{s}/bin/simple", optional: false)
-    stage_file(src: config.simple_binary, dst: "{s}/usr/bin/simple", optional: false)
+    # Simple compiler/interpreter/loader roles. The deploy image intentionally
+    # carries one target-native Simple payload under every canonical app/shell
+    # path so the OS loader does not depend on host-only aliases.
+    stage_simple_toolchain_roles(config)
+    write_simple_toolchain_manifest("{s}/SYS/SIMPLETOOL.SDN", config.simple_binary)
 
     # /usr/bin/<llvm tools>
     for tool in LLVM_TOOLS:
@@ -294,8 +367,8 @@ fn populate_staging(config: PackConfig):
 fn run_cpio(staging: text, cpio_path: text):
     """Invoke cpio via sh -c so we can pipe `find`. The shell is used
     only for the pipeline; no logic lives here."""
-    ensure_dir(fs.parent(cpio_path))
-    val abs_cpio = fs.absolute(cpio_path)
+    ensure_dir(parent_path(cpio_path))
+    val abs_cpio = absolute_path(cpio_path)
     val cmd = "cd \"{staging}\" && find . -print0 | cpio --null -o -H newc > \"{abs_cpio}\""
     print "[pack] running cpio: {cmd}"
     val result = process.run("sh", ["-c", cmd])
@@ -315,7 +388,7 @@ fn run_zstd(cpio_path: text, zst_path: text):
 fn emit_manifest(staging: text, output: text):
     """Emit <output>.sdn listing every staged entry with its size."""
     val manifest = "{output}.sdn"
-    ensure_dir(fs.parent(manifest))
+    ensure_dir(parent_path(manifest))
     val cmd = "cd \"{staging}\" && find . -type f -printf \"%p %s\\n\""
     val result = process.run("sh", ["-c", cmd])
     if result.exit_code != 0:
@@ -335,7 +408,7 @@ fn emit_manifest(staging: text, output: text):
                 text = text + "    { path: \"{path}\", size: {size} }\n"
     text = text + "  ]\n"
     text = text + "}\n"
-    fs.write_text(manifest, text)
+    file_write_text(manifest, text)
     print "[pack] manifest: {manifest}"
 
 fn cmd_build(config: PackConfig):
@@ -355,8 +428,8 @@ fn cmd_build(config: PackConfig):
     run_zstd(cpio_path: cpio_path, zst_path: config.output)
     emit_manifest(staging: config.staging, output: config.output)
 
-    if fs.exists(config.output):
-        val size = fs.size(config.output)
+    if file_exists(config.output):
+        val size = file_size(config.output)
         print "[pack] image size: {size} bytes"
     else:
         print "error: output file missing after pack"
@@ -364,10 +437,10 @@ fn cmd_build(config: PackConfig):
     print "=== initramfs build complete ==="
 
 fn validate_image(image: text) -> bool:
-    if not fs.exists(image):
+    if not file_exists(image):
         print "validate: FAIL — image missing: {image}"
         return false
-    val size = fs.size(image)
+    val size = file_size(image)
     if size == 0:
         print "validate: FAIL — image is empty: {image}"
         return false
@@ -383,7 +456,24 @@ fn validate_image(image: text) -> bool:
 
     val listing = result.stdout
     var ok = true
-    val required: [text] = ["bin/simple", "usr/bin/clang", "src"]
+    val required: [text] = [
+        "bin/simple",
+        "bin/simple.smf",
+        "usr/bin/simple",
+        "usr/bin/simple.smf",
+        "sys/apps/simple",
+        "sys/apps/simple.smf",
+        "sys/apps/simple_compiler",
+        "sys/apps/simple_compiler.smf",
+        "sys/apps/simple_interpreter",
+        "sys/apps/simple_interpreter.smf",
+        "sys/apps/simple_loader",
+        "sys/apps/simple_loader.smf",
+        "SYS/SIMPLETOOL.SDN",
+        "usr/bin/clang",
+        "src",
+        "src/compiler/99.loader",
+    ]
     for entry in required:
         if not listing.contains(entry):
             print "validate: FAIL — missing entry: {entry}"
@@ -394,7 +484,7 @@ fn validate_image(image: text) -> bool:
     ok
 
 fn main():
-    val raw_args = cli.args()
+    val raw_args = get_cli_args()
     val (command, config, validate_arg) = parse_args(raw_args)
 
     if command == "build":

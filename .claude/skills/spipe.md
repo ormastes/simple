@@ -88,6 +88,18 @@ Mission-critical SimpleOS release SPipe evidence must also cite
 If the hardening matrix reports `reason=stale-static-reports`, refresh the
 named reports until `simpleos_hardening_stale_reports=none` before accepting
 the lane.
+SimpleOS compiler-in-filesystem lanes must prove install-image deployment and
+in-guest execution. The target-native Simple payload must be embedded in the
+SimpleOS filesystem under `/usr/bin/simple(.smf)`, `/bin/simple(.smf)`,
+`/sys/apps/simple(.smf)`, `/sys/apps/simple_compiler(.smf)`,
+`/sys/apps/simple_interpreter(.smf)`, `/sys/apps/simple_loader(.smf)`, and
+`/SYS/SIMPLETOOL.SDN`. Host `bin/simple`, placeholder marker apps, host-side
+compile/run evidence, or QEMU fixed-command SSH responses are not PASS evidence.
+Require a QEMU or physical-board transcript that runs `/usr/bin/simple
+--version` and compiles/runs a small `hello world` from the mounted SimpleOS
+filesystem. For physical-board claims, also record board identity,
+download/boot path, and serial or SSH transcript; otherwise classify the lane as
+QEMU-only or source-present.
 Starvation, fairness, race-condition, scheduler, channel, lock, or
 resource-lifecycle claims require a concurrency/resource model gate or an
 explicit blocker; a single interleaving test is not formal evidence.
@@ -115,6 +127,7 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`doc/07_guide/app/spipe/mission_critical_robust_sw.md`](../../doc/07_guide/app/spipe/mission_critical_robust_sw.md) — flight-level / mission-critical robust-software gate contract
 - [`doc/07_guide/infra/sspec_scenario_manual.md`](../../doc/07_guide/infra/sspec_scenario_manual.md) — SSpec scenario manual, capture, inline/previous scenario, and environmental-test guidance
 - [`doc/07_guide/platform/simpleos/qemu_system_tests.md`](../../doc/07_guide/platform/simpleos/qemu_system_tests.md) — **System tests over QEMU**: per-arch live-boot SSpec specs (`test/03_system/os/qemu/`), `qemu_systest_contract.spl` descriptors, pass/missing-media/boot-fail classification (fail-closed, never `skip()`), and `scripts/check/qemu-storage-audit.shs`
+- [`doc/07_guide/platform/simpleos/simpleos_baremetal_board_support.md`](../../doc/07_guide/platform/simpleos/simpleos_baremetal_board_support.md) — SimpleOS board support and the Simple compiler install-image/filesystem contract
 
 ## Scenario Manual Quality
 
