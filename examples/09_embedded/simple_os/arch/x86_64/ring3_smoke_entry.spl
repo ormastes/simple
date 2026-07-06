@@ -29,13 +29,12 @@ use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
 use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
 use os.kernel.memory.vmm.{vmm_init}
 use os.kernel.memory.vmm_address_space.{
-    create_user_address_space, vmm_map_page_in,
+    create_user_address_space, vmm_map_page_in, vmm_copy_bytes_to_phys,
     vmm_clone_kernel_low_identity
 }
 use os.kernel.types.memory_types.{VmFlags, VirtAddr, PhysAddr}
 use os.kernel.types.task_types.{TaskContext, AddressSpace}
 use os.kernel.arch.x86_64.context.{arch_x86_64_enter_user_task}
-use os.kernel.boot.mmio.{mmio_write64}
 
 # User virtual layout — placed in PML4[1] (>= 512GB) so the fresh USER page
 # chain never collides with the shared kernel identity subtree in PML4[0].
@@ -45,25 +44,17 @@ use os.kernel.boot.mmio.{mmio_write64}
 # reads garbage at runtime (observed: RIP=0xc35d... non-canonical -> triple
 # fault before user code executes).
 
-fn _write_hello_code(dst_phys: u64):
-    """Write the freestanding x86-64 user machine code (35 bytes) to `dst_phys`
-    as five little-endian u64 words via mmio_write64 (hhdm=0: phys==virt).
-
-    Byte stream: 66 BA F8 03 (mov dx,0x3F8/COM1) then for each byte of
-    "USEROK\n": B0 <ch> EE (mov al,ch / out dx,al); then 66 BA F4 00 B0 00 EE
-    (dx=0xF4, al=0, out -> isa-debug-exit, QEMU exits code 1); F4 EB FD
-    (hlt; jmp $-3 guard).
-
-    Written as u64 literals instead of a `[u8]` array literal: under
-    freestanding cranelift native-build the array literal's data pointer is
-    garbage (code[0] read 0x30 instead of 0x66 and vmm_copy_bytes_to_phys
-    copied nothing, leaving the page zeroed -> ring-3 executed 00 00 and
-    faulted with CR2=0)."""
-    mmio_write64(dst_phys,      0xB0EE55B003F8BA66)  # 66 BA F8 03 B0 55 EE B0
-    mmio_write64(dst_phys + 8,  0xEE52B0EE45B0EE53)  # 53 EE B0 45 EE B0 52 EE
-    mmio_write64(dst_phys + 16, 0x0AB0EE4BB0EE4FB0)  # B0 4F EE B0 4B EE B0 0A
-    mmio_write64(dst_phys + 24, 0xEE00B000F4BA66EE)  # EE 66 BA F4 00 B0 00 EE
-    mmio_write64(dst_phys + 32, 0x0000000000FDEBF4)  # F4 EB FD 00 00 00 00 00
+fn _hello_code() -> [u8]:
+    """Freestanding x86-64 machine code: dx=0x3F8 (COM1); for each byte of
+    "USEROK\n" do mov al,byte / out dx,al; then dx=0xF4, al=0, out (isa-debug-exit
+    -> QEMU exits with code 1); hlt; jmp $-1 guard (never reached)."""
+    [
+        0x66, 0xBA, 0xF8, 0x03, 0xB0, 0x55, 0xEE, 0xB0,
+        0x53, 0xEE, 0xB0, 0x45, 0xEE, 0xB0, 0x52, 0xEE,
+        0xB0, 0x4F, 0xEE, 0xB0, 0x4B, 0xEE, 0xB0, 0x0A,
+        0xEE, 0x66, 0xBA, 0xF4, 0x00, 0xB0, 0x00, 0xEE,
+        0xF4, 0xEB, 0xFD
+    ]
 
 fn spl_start():
     serial_println("")
@@ -99,8 +90,9 @@ fn spl_start():
     vmm_clone_kernel_low_identity(space.phys_root)
     serial_println("[ring3] user AS ready root={space.phys_root}")
 
-    # 4. Map the user code page (rx) and a user stack page (rw), writing the
-    #    machine code into the freshly-allocated code frame word-by-word.
+    # 4. Map the user code page (rx) and a user stack page (rw), copying the
+    #    machine code into the freshly-allocated code frame.
+    val code = _hello_code()
     val code_phys = pmm_alloc_page_raw()
     val stack_phys = pmm_alloc_page_raw()
     if code_phys == 0 or stack_phys == 0:
@@ -108,7 +100,7 @@ fn spl_start():
         serial_println("TEST FAILED")
         rt_debug_exit_success()
         return
-    _write_hello_code(code_phys)
+    vmm_copy_bytes_to_phys(code_phys, code, 0, code.len().to_u64())
     val mapped_code = vmm_map_page_in(space, VirtAddr(addr: USER_CODE_VA), PhysAddr(addr: code_phys), VmFlags.user_rx())
     val mapped_stack = vmm_map_page_in(space, VirtAddr(addr: USER_STACK_VA), PhysAddr(addr: stack_phys), VmFlags.user_rw())
     if not mapped_code or not mapped_stack:
