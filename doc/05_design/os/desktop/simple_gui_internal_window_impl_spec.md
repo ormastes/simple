@@ -84,6 +84,95 @@ or evidence-only window renderers.
   change when image/motion providers land later — only
   `shared_wm_scene_resolve_background` gains a new `if` branch.
 
+## Phase-2 Provider Design (image / motion) — 2026-07-07
+
+Companion plan: `doc/03_plan/os/desktop/wm_window_render_api_hardening_plan.md`.
+This section extends the existing loud-fail contract to the two reserved
+background providers and to the borderless-window content path, without changing
+the `kind:"color"` semantics that already ship.
+
+### Executor extension points (verified anchors)
+
+- Background resolution is the single point `shared_wm_scene_resolve_background`
+  (`src/lib/common/ui/window_scene.spl:71`). It currently reads only `.kind`/`.color`
+  and returns `SharedWmBackgroundResolution` (`:60`) with `resolved`, `color: u32`
+  (`:62`), `error_message`. Providers extend this function with new `if` branches
+  only — callers using `shared_wm_background_color` (`:57`) are unaffected.
+- The executor draws the resolved background before chrome inside
+  `shared_wm_scene_render_to_backend` (`window_scene_draw_ir.spl:445-446`); a
+  decoded provider surface is blitted here.
+- Borderless content already routes through `_shared_wm_scene_window_content_rect`
+  (`window_scene_draw_ir.spl:431-433`, full-window rect for borderless) and
+  `shared_wm_scene_render_app_content` (`:385`).
+
+### Provider signatures (Simple)
+
+```simple
+# window_scene.spl — extend BackgroundSpec + resolution
+struct BackgroundSpec:
+    kind: text          # "color" | "image" | "motion"
+    color: u32
+    source: text        # image/motion content reference (was already declared, :51)
+    fit: text           # NEW: "cover" | "contain" | "stretch" | "tile" (default "cover")
+
+struct SharedWmBackgroundResolution:
+    resolved: bool
+    color: u32
+    surface: BackgroundSurface?   # NEW: decoded RGBA + intrinsic w/h; nil for color
+    stale: bool                   # NEW: true when serving last-good after a resolve error
+    error_message: text
+
+trait BackgroundImageProvider:
+    fn resolve(self, source: text, target_w: i32, target_h: i32, fit: text) -> BackgroundResolveOutcome
+
+trait MotionBackgroundSource:
+    fn frame_for_time(self, t_micros: i64) -> BackgroundSurface
+    fn next_frame_due_micros(self) -> i64
+```
+
+The `common.ui` executor never decodes and never touches the filesystem: a
+provider is injected (host provides an fs-backed one; SimpleOS provides an
+in-image pre-decoded one). This preserves the baremetal-lane boundary already
+documented in `shared_wm_renderer_unification.md` (no `rt_file_exists`/theme
+reads on the freestanding path).
+
+### Invariant table
+
+| # | Invariant | Enforced by |
+|---|---|---|
+| I1 | `kind:"color"` behavior is byte-identical to today | `shared_wm_scene_resolve_background:72-73` branch unchanged |
+| I2 | Unknown/unimplemented `kind` returns the loud `0xFFFF00FF` marker, never a silent fill | `:76` marker path (`WM_BACKGROUND_UNRESOLVED_MARKER_COLOR:69`) |
+| I3 | Executor stays stateless (takes `scene`, returns stats); all caching lives on the compositor, not `common.ui` | executor `:443` signature; cache in `src/os/compositor/**` |
+| I4 | No per-pixel FFI to draw a background; scale via `backend.blit_pixels` / `Engine2D.draw_image` | `display_backend.spl:17`, `compositor_engine2d.spl:100` |
+| I5 | Cache key = `(content_hash(source_bytes), target_w, target_h, fit)` | mirrors `WebRenderPixelArtifactCache` (`web_render_pixel_backend.spl:111`) |
+| I6 | Stale-serve returns last-good surface + `stale:true` + diagnostic; loud marker only when there is NO prior good surface | provider + resolution `stale` field |
+| I7 | Background must not mask chrome/title-glyph evidence | `check-simpleos-wm-visible-display-evidence.shs` still asserts glyphs on top |
+| I8 | Motion source advances by wall-clock; background-only advance does NOT re-raster windows/chrome | present-loop cadence gate (dirty region = background only) |
+
+### Error semantics (extends the loud-fail contract)
+
+- **No provider injected but `kind:"image"`/`"motion"`** → loud `0xFFFF00FF` marker
+  (`resolved:false`), same as an unknown kind. Providers are additive; absence is
+  a visible failure, not a silent fallback.
+- **Resolve/decode hard-fail, no prior good surface** → loud marker + `error_message`.
+- **Resolve/decode fail after a prior success** → serve last-good surface,
+  `resolved:true`, `stale:true`, emit diagnostic (no wallpaper flash on a transient
+  read error, but the staleness is observable).
+- **Motion source over budget** → drop frames (source-side), never stall the input
+  path; the present loop keeps its dirty-gated cadence (GUI-5a) intact.
+
+### Lane-parity requirements
+
+- Host and SimpleOS differ only in the injected provider (fs-backed vs in-image)
+  and backend config — not in scene shape, resolution branch, or invariants
+  (the source-ownership boundary of `shared_wm_renderer_unification.md`).
+- SimpleOS end-to-end visual proof of image/motion is **blocked** by the
+  freestanding module-init/primitive-global fault
+  (`doc/08_tracking/bug/freestanding_wrapper_profile_i32_global_var_shifted_2026-07-02.md`,
+  P2 OPEN; memory `project_simpleos_gui_boot_2026-05-28.md`). Until it lands, the
+  host lane is the visual-proof vehicle; the SimpleOS lane keeps its worked-around
+  chrome/text evidence. See plan item D.
+
 ## Verification
 
 Run after implementation:

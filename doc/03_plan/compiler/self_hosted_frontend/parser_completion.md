@@ -735,3 +735,26 @@ Full sweep (after M12):
 docker run --rm simple-stage4 \
   bash -c 'for f in $(find src/lib -name "*.spl" | sort); do bin/simple check "$f" || echo "FAIL $f"; done | grep FAIL | wc -l'
 ```
+
+---
+
+## 2026-07-07 — Current full-CLI-redeploy blocker gaps (Task #21)
+
+Three surface-form gaps still block a working full-CLI self-host, all reproduced on
+the deployed binary 2026-07-07. Detailed grammar/parser/HIR designs and acceptance
+criteria live in the design pair
+`doc/05_design/compiler/parsing/frontend_parser_gaps_and_lazy_closure_design.md` §2;
+the tracked execution plan is
+`doc/03_plan/compiler/self_hosted_frontend/full_cli_redeploy_and_browser_startup_plan.md`
+(Track A). Root-cause evidence:
+`doc/08_tracking/bug/bootstrap_stage4_graph_load_timeout_2026-07-05.md` §4.
+
+| # | Gap | Verified failing file:line | Parser error | Parser area |
+|---|-----|----------------------------|--------------|-------------|
+| A1 | array-repeat **expression** `[v; n]` (the value form; the `[T; N]` **type** form is already handled at `core/parser.spl:523`) | `src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl:257,265`; `src/lib/common/ui/window_scene_draw_ir.spl:148,232` | `expected ], got ; ';'` | `core/_ParserPrimary/primary_expr.spl:503-513` — add `;`-repeat branch (non-literal counts require a repeat AST node, not parse-time expansion) |
+| A2 | `mut` parameters (74 files) | `src/compiler/mir_opt/mir_opt/pattern_dispatch.spl:193` | `expected ), got Ident` | `parser_types.spl:139` `struct Param` has no `is_mut`; add field + consume leading `mut` in param parser |
+| A3 | irrefutable destructuring `val PAT = EXPR` (226 files) | `src/std/nogc_sync_mut/env/variables.spl:358` | self-host: `expected =, got (`; interpreter parses but HIR let-lowering rejects (`complex patterns not yet supported in let bindings`) | `val`/`var` stmt parser + HIR let-lowering (reuse the `match` pattern parser/lowering — largest change, land last) |
+
+Divergence note: A2/A3 are cases where the interpreter parser accepts more than the
+self-hosted `parse_full_frontend`; the fix makes **both** accept the same grammar, not
+the self-hosted parser reject less. Verify each with BOTH `simple run` and `simple check`.

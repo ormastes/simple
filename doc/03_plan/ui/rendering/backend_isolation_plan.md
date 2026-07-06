@@ -1,7 +1,70 @@
 # Backend-Isolation Plan — App → Facade → Engine2D → Backend → `rt_*`
 
-**Status:** DRAFT (2026-07-06) · **Owner:** UI/rendering · **Scope:** enforce the
+**Status:** GATE LIVE, GAPS OPEN (2026-07-07) · **Owner:** UI/rendering · **Scope:** enforce the
 three-facade rendering architecture across `src/app/**` and `examples/**`.
+
+## Current state (verified 2026-07-07)
+
+**Gate is live and wired.** `scripts/check/check-ui-backend-isolation.shs` (134 lines) greps for
+(a) `\brt_[a-z0-9_]+` extern/call tokens and (b) direct
+`MetalBackend|VulkanBackend|DirectXBackend|SoftwareBackend(` construction, over
+`src/app examples src/lib/*/ui`, excluding `**/vendor/**`, `**/node_modules/**`,
+`src/app/interpreter/ffi/**`, `src/lib/nogc_sync_mut/ui/**`, ratcheted against
+`scripts/check/ui_backend_isolation_baseline.txt`. Live gate output:
+
+```
+ui_backend_isolation_baseline_stale=RT:src/app/ui.browser/backend.spl
+ui_backend_isolation_baselined=537
+ui_backend_isolation_current=536
+ui_backend_isolation_new=0
+ui_backend_isolation_ok=true
+```
+
+- **Baseline 537, current 536, new 0** — burn-down is monotone; one baseline entry
+  (`RT:src/app/ui.browser/backend.spl`) is **stale** (no longer reproduces) → first ratchet target.
+- **Wiring: both places.** Pre-commit hook `scripts/hooks/pre-commit:19`
+  (`sh scripts/check/check-ui-backend-isolation.shs`); lint aggregator
+  `src/app/io/_CliCommands/run_commands.spl:218` inside `cli_run_lint` (folds `iso_exit` into
+  the overall exit code).
+- **Known inert lane (bug record).**
+  `doc/08_tracking/bug/build_lint_routes_to_rust_clippy_not_cli_run_lint_2026-07-06.md`:
+  `bin/simple build lint` routes to Rust-driver clippy (`misc_commands.rs:126,181` → `cargo
+  clippy`), so pure-Simple `cli_run_lint` never runs — **the isolation gate is inert on the
+  `build lint` lane**. It runs correctly via pre-commit and any direct `cli_run_lint` invocation.
+  Until that bug is fixed, do not rely on `build lint` to enforce this gate; the pre-commit hook is
+  the load-bearing path. (This is a wiring bug to fix, not a reason to duplicate the gate.)
+
+**Gaps B–F re-verified present (2026-07-07)** — anchors refreshed against source:
+- Gap B: `web_render_backend(` defined `web_render_backend.spl:222`, **zero callers** in
+  `src/app`/`src/os`; no `--web-engine` flag in `src/app/ui.browser`; `BrowserBackend`
+  (`ui.browser/backend.spl`) hardcodes `WEB_RENDER_TARGET_PURE_SIMPLE` at ~11 sites
+  (`:34,361,440,514,618,632,649,653,656,665,1075`).
+- Gap C: `render_html_to_pixels` (`web_render_backend.spl:164`) still passes `"auto"` at `:167`;
+  no `engine2d_backend` param.
+- Gap D: `WatchdogManager` **does not exist** anywhere in `src/`;
+  `src/app/interpreter/core/watchdog.spl` still declares `extern rt_watchdog_start`/`_stop`
+  (`:19,:20`, called `:31,:35`).
+- Gap E: `WebRenderBackend` (`web_render_backend.spl:152`) exposes only pixel methods —
+  `create:158`, `name:161`, `render_html_to_pixels:164`, `render_html_file_to_pixels:169`,
+  `show_live_window:177`; no `render_html_to_draw_ir`/software method.
+- Gap F seams present: `Engine2D.create_with_backend_fast` (`engine.spl:156`);
+  `MetalBackend.use_gpu_only` (`backend_metal.spl:588`, called from `engine.spl:179` — **note:
+  the "Perf invariant" section below cites `:492`; the verified line is `:588`**);
+  `simd_fill_row` → runtime extern `rt_simd_fill_row_u32` (`simd.rs:1427`);
+  `WebRenderPixelArtifactCache` (`web_render_pixel_backend.spl:111`, used `ui.browser/backend.spl:337`).
+
+## Baseline-shrink ratchet plan
+
+The gate ratchets down, never up. Order of shrinks:
+1. **Remove the stale entry** `RT:src/app/ui.browser/backend.spl` from
+   `scripts/check/ui_backend_isolation_baseline.txt` (537 → the current 536 becomes the new
+   ceiling). Do this first — it is free and proves the ratchet.
+2. **Each P1/P3 wave** re-runs the gate and lowers the baseline to the new `current`; a wave may
+   never raise it. `new=0` must hold on every commit (pre-commit enforces).
+3. **Fix the `build lint` clippy-routing bug** (record above) so the gate is enforced on that lane
+   too; until then keep the pre-commit path authoritative.
+4. **Final target `= 0`** once P3 gaps A–F land and every `src/app/**`/`examples/**` site routes
+   through a facade.
 
 **Reads-with:**
 - Architecture: [`doc/04_architecture/ui/rendering/backend_isolation_architecture.md`](../../../04_architecture/ui/rendering/backend_isolation_architecture.md)

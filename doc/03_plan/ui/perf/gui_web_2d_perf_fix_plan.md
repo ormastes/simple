@@ -1,8 +1,26 @@
-<!-- opus perf-triage 2026-07-06 -->
+<!-- opus perf-triage 2026-07-06 · wave-1 landed 2026-07-07 -->
 # GUI / Web / 2D Rendering Perf-Fix Plan
 
-**Status:** READY-TO-DISPATCH (2026-07-06) · **Scope:** ranked, measured, disjoint-file fix items
+**Status:** WAVE-1 LANDED (2026-07-07) · **Scope:** ranked, measured, disjoint-file fix items
 across the three render lanes (GUI present loop, web HTML render, engine2d software rasterizer).
+
+## Wave-1 status (LANDED / REJECTED) — 2026-07-07
+
+Verified against git + bug records. The "Fix agents" section below is the wave-1 dispatch
+record (historical); the "Next wave" section is now the live backlog.
+
+| Item | Outcome | Commit / evidence | Verified number |
+|---|---|---|---|
+| **WEB-2** `build_rule_buckets` dedup (linear scan → dict insert-or-get) | **LANDED** | `b65e52a9` — `perf(web): build_rule_buckets dedup O(rules×keys) linear scan → dict insert-or-get`; +18/-6 on `simple_web_html_layout_renderer.spl` | `compute_styles_ms` at 3000 distinct-class rules **9328 → 5899 ms (~1.6x)** (`doc/08_tracking/bug/web_compute_styles_residual_quadratic_2026-07-06.md`). The dedup contributor is gone; the pipeline is **still superlinear** — see next-wave item N1. |
+| **2D-1** inline `color_r/g/b/a` in `emu_draw_blur_rect` tap loop | **LANDED** | `7f549df2` — `perf(2d): inline channel math in emu_draw_blur_rect tap loop`; +11/-5 on `backend_emu_adv.spl` | **~12M interpreted dispatches removed** for one 160×90 r=6 blur (commit body). The plan's "~3.4x" multiplier is **not stated in the commit** — treat the dispatch count as the verified figure. Parity harness rows stayed `== 0`. |
+| **GUI-1** persistent `Engine2D` (create once, `clear`+redraw per frame) + **GUI-5a** present-only-on-dirty | **LANDED** (via task #17) | `a7b57550` — `feat(2d/wm): persistent Engine2D GPU sessions`; showcase + `compositor_engine2d.spl` + `hosted_entry.spl` + `backend_metal.spl` | Raster-bound **176x–684x** vs per-frame create+shutdown (`doc/00_llm_process/feature_expert/wm_gui_window_drawing/skill.md:300-307`). Gates `engine2d_gpu_offload_contract_spec` 11/11, `engine2d_shared_raster_parity_spec` 21/21. |
+| **GUI-2** drop startup 64×64 probe `Engine2D` in `emit_renderer_log` | **REJECTED** | no landing commit; rationale in this plan only | Micro-win (one startup construct+shutdown); superseded by GUI-1 making per-frame engine churn the real cost. Not worth a separate change; fold into any future showcase cleanup if that file is touched. |
+| **2D-5** cache `glyph_rows_for_char` per-glyph bitmap | **REJECTED** | no landing commit; rationale in this plan only | Deferred: `glyph_bitmap_5x7.spl` is shared by engine2d + browser paint; the safe output-preserving version needs a one-time packed-table read that risked colliding with concurrent D2 work. Re-open as a next-wave item only if text-heavy frames are shown to dominate a real workload. |
+
+> Anchor correction: the brief cited a "#17 report … ~8% WM composite" figure. The **176-684x**
+> raster number is real (commit `a7b57550` + skill file). The **~8% WM-composite share** figure
+> is **not present anywhere in the tree** (doc/09_report, git bodies, evidence spl) and has been
+> dropped rather than guessed.
 
 **Sources:** three read-only measurement passes —
 `scratchpad/perf_gui.md`, `scratchpad/perf_web.md`, `scratchpad/perf_2d.md` (all numbers below are
@@ -97,18 +115,148 @@ No file appears in two rows. None overlap the excluded task-#25 / `#15` / D2-hot
 
 ---
 
-## Next wave (deferred, with the gate that must clear first)
+## Next wave (live backlog — fully specified)
 
-| Item | Source | Gate before it can be picked up |
-|---|---|---|
-| **Separable box blur** (true 2-pass, ~6× more on top of 2D-1) | 2D Rank 1 (3) | Pixel-changing (integer-division rounding differs) → must update the D2 canonical reference + flip the parity harness assertion; land only after the D2 consolidation task settles on `backend_emu.spl`/parity spec. |
-| **Region readback for blur** (`read_pixels_region(x,y,w,h)`) — removes the ~0.86s full-canvas floor | 2D Rank 1 (1) | Adds a trait method → touches `backend.spl` + `backend_software.spl` (D2-hot). Sequence after D2. |
-| **`draw_gradient_rect` one-pass** (6.16× per-px vs plain fill) | 2D Rank 4 | Lands on `backend_emu.spl` (D2-hot) and/or reverses the just-landed sw→emu delegation; needs a D2-aligned decision (shared one-pass vs documented sw override, mirroring the `draw_line` exception). |
-| **`clear`/`read_pixels` bulk memset** (50-200× at HD) + real `cpu_simd` backend | 2D Rank 2/3 | Blocked on the mutable-array-extern bridge (runtime/seed). Tracked in `cpu_simd_mutable_array_extern_wiring_2026-05-31.md`. |
-| **Metal one-call upload/readback** (2.3-4.2×, grows with viewport) | Web Rank 1 | Blocked on wiring `rt_write_u32s_to_raw`/`rt_u32s_from_raw` runtime externs (seed), then verify bit-exact vs per-pixel path before flipping `SIMPLE_ONE_CALL_READBACK` default-on. |
-| **`compositor_engine2d.present_rect` honoring its rect args** + dirty-tile readback | GUI Rank 3 | `backend_software.spl` (D2-hot) + `compositor_engine2d.spl`; sequence after D2, run parity harness after. |
-| **Winit `[u32]` FFI signature** (halves marshalled bytes) | GUI Rank 5b | Rust extern change (seed). |
-| **Web parse-artifact cache** re-evaluation | Web Rank 3 | Only if a non-identical-but-reparseable workload is demonstrated (identical-content already covered by the landed `#15` pixel cache). |
+Each item: motivation+evidence · files · steps · specs · gates · size (S/M/L) · deps · risk+rollback.
+D2 reference: `doc/05_design/ui/rendering/draw_ir_multibackend_design.md` §D2 —
+`SharedRaster`/`backend_emu` is the parity oracle; any pixel-changing edit must flip the assertion
+through `test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl`.
+
+### N1 — Residual `compute_styles` superlinear (post-WEB-2)
+
+- **Motivation + evidence.** WEB-2 removed the `build_rule_buckets` dedup quadratic but
+  `compute_styles` is still superlinear: 3000 distinct-class rules cost ~3.8× the time for 4.3×
+  the rules *after* the fix (`doc/08_tracking/bug/web_compute_styles_residual_quadratic_2026-07-06.md`).
+  A standalone probe verified `Dict<text,i32>` itself is linear, so the residual is elsewhere.
+  Named suspects in the bug doc: `style_rule_candidates`
+  (`simple_web_html_layout_renderer.spl:4924`) and the per-node matching loop in `compute_styles`
+  (`:5259`).
+- **Files.** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+  (owned by the `fix-web` lane — still disjoint from other agents).
+- **Steps.** (1) Instrument the two suspects to attribute the residual (per-node candidate count ×
+  rule count). (2) If `style_rule_candidates` rescans all rules per node, index candidates by the
+  node's id/class/tag through the bucket structure WEB-2 already builds (reuse `entry_*` arrays)
+  so each node consults only matching buckets. (3) Confirm cascade order preserved.
+- **Specs.** Keep green: `test/02_integration/rendering/simple_web_css_cascade_spec.spl`,
+  `test/01_unit/app/ui/browser_backend_pixel_paths_spec.spl` (both lock cascade order); re-run the
+  distinct-class scaling probe → `compute_styles_ms` linear.
+- **Gates.** Those two specs; `check-ui-backend-isolation.shs` (no new `rt_*`).
+- **Size:** M. **Deps:** none (WEB-2 landed). **Risk+rollback:** cascade-order regression → the two
+  specs catch it; rollback = revert to the post-WEB-2 state (still correct, just superlinear).
+
+### N2 — Separable box blur (2-pass)
+
+- **Motivation + evidence.** ~6× on top of 2D-1 for large radii (2D Rank 1 (3)). Pixel-changing:
+  integer-division rounding of a true 2-pass differs from the current single-pass tap sum.
+- **Files.** `backend_emu.spl` (D2-hot) + the D2 canonical reference + parity spec.
+- **Steps.** (1) Wait for the D2 consolidation to settle on `backend_emu.spl`/parity spec. (2)
+  Implement 2-pass; (3) regenerate the D2 canonical reference; (4) **flip** the parity-harness blur
+  assertion to the new reference (this is the one place a pixel change is sanctioned).
+- **Specs.** `engine2d_shared_raster_parity_spec.spl` blur rows updated (not `== 0` — new
+  reference); perf assertion (single large-radius blur under a wall-clock ceiling).
+- **Gates.** Parity spec (post-update), `check-engine2d-gpu-offload-evidence.shs`.
+- **Size:** M. **Deps:** D2 settled; sequence after N-region (N3) if both land, to share the
+  read_pixels floor removal. **Risk+rollback:** parity drift on other ops if the reference regen is
+  too broad → regen only blur/shadow rows; rollback = revert to single-pass (2D-1 state).
+
+### N3 — Region / dirty-rect readback
+
+- **Motivation + evidence.** `read_pixels()` is a full-canvas floor (~0.86s in the 2D-1 blur case;
+  also the WM present path). `read_pixels_region(x,y,w,h)` removes it; also unblocks the WM
+  dirty-tile present and item B (motion background) in the WM plan.
+- **Files.** `src/lib/gc_async_mut/gpu/engine2d/backend.spl` (`RenderBackend` trait, add
+  `read_pixels_region`), `backend_software.spl` (D2-hot), `src/os/compositor/compositor_engine2d.spl`
+  (`present_rect` honoring its rect args + region readback), `display_backend.spl`
+  (`CompositorBackend.present_rect` already exists `:19` — make it real).
+- **Steps.** (1) Add `read_pixels_region` to `RenderBackend` + software impl (after D2). (2) Make
+  `Engine2dCompositorBackend.present_rect` (`compositor_engine2d.spl`) honor rect args instead of
+  full present. (3) Compositor marks dirty regions; present loop reads back only dirty tiles.
+- **Specs.** Parity harness stays `== 0` for full-frame; add a region-readback correctness spec
+  (region == corresponding sub-rect of full read). WM: `check-hosted-wm-capture-evidence.shs`.
+- **Gates.** Parity spec, hosted-WM capture, offload evidence.
+- **Size:** L. **Deps:** D2 settled; ties into WM plan item B/E (this is the method most likely to
+  force the CompositorBackend/RenderBackend decision in that plan's item E). **Risk+rollback:**
+  trait addition touches every backend impl → add as a defaulted method (full-frame fallback) so
+  non-updated backends still compile; rollback = fallback path is the current behavior.
+
+### N4 — `draw_gradient_rect` one-pass
+
+- **Motivation + evidence.** 6.16× per-px vs a plain fill (2D Rank 4).
+- **Files.** `backend_emu.spl` (D2-hot); may reverse the just-landed sw→emu delegation.
+- **Steps.** D2-aligned decision first: shared one-pass in `backend_emu` **or** a documented
+  software override (mirroring the `draw_line` exception in the D2 design). Then implement +
+  parity.
+- **Specs.** Parity harness gradient rows (`== 0` if output-preserving; else flip like N2).
+- **Gates.** Parity spec. **Size:** M. **Deps:** D2 decision. **Risk+rollback:** reversing sw→emu
+  delegation could regress other callers → gate on the parity spec; rollback = revert to delegation.
+
+### N5 — Bulk `clear`/`read_pixels` memset/memcpy + real `cpu_simd` backend
+
+- **Motivation + evidence.** 50-200× at HD for bulk clear/readback (2D Rank 2/3). **Blocked** on
+  the mutable-array-extern bridge: the interpreter extern bridge cannot mutate `Value::Array`
+  in place, so `rt_array_fill_u32` / `rt_engine2d_simd_*` cannot write back
+  (`doc/08_tracking/bug/cpu_simd_mutable_array_extern_wiring_2026-05-31.md`, OPEN). The **same bug
+  doc** records a 2026-07-06 honesty audit: today's `cpu_simd` backend is a **plain alias of scalar
+  `cpu`** with no live SIMD dispatch — see N6.
+- **Files (for the seed owner).** The interpreter extern bridge (mutable-array write-back),
+  `rt_array_fill_u32`/`rt_engine2d_simd_*` runtime externs; Simple side afterwards in
+  `backend_software.spl` / a real `cpu_simd` backend.
+- **Steps.** (1) Seed: land the mutable-array-extern write-back bridge. (2) Wire bulk clear/readback
+  through it. (3) Only then a real `cpu_simd` backend (N6).
+- **Specs.** Parity harness `clear`/`read_pixels` rows stay `== 0`; perf assertion HD clear/readback
+  under a ceiling.
+- **Gates.** Parity spec. **Size:** L (seed). **Deps:** mutable-array-extern bridge (seed).
+  **Risk+rollback:** none until the bridge lands (item is parked); rollback = scalar path (current).
+
+### N6 — Real SIMD backend honesty (fake-counter removal)
+
+- **Motivation + evidence.** The 2026-07-06 audit in
+  `cpu_simd_mutable_array_extern_wiring_2026-05-31.md` found `cpu_simd` is an alias of scalar `cpu`
+  — it must not advertise SIMD it does not run (project rule: no fake evidence / no greenwashed
+  counters). NEON/SSE2 row kernels DO exist for the real path (`simd_fill_row` →
+  `rt_simd_fill_row_u32`, per backend-isolation anchors), but the `cpu_simd` *backend selector*
+  does not dispatch to them.
+- **Files.** The `cpu_simd` backend selection path + any SIMD-usage counter it exposes.
+- **Steps.** (1) Until N5's bridge lands, make `cpu_simd` **either** dispatch to the real
+  `simd_fill_row` kernels where the extern already supports it **or** report honestly that it is
+  scalar (no fake SIMD counter). (2) After N5, wire the genuine SIMD span ops.
+- **Specs.** A spec asserting the reported backend/counter matches the code path actually taken
+  (no "SIMD used" when scalar). **Gates.** Parity spec; the honesty spec. **Size:** S (honesty) /
+  M (real dispatch). **Deps:** real dispatch depends on N5. **Risk+rollback:** low; rollback =
+  keep the honest-scalar report.
+
+### N7 — Metal default-on criteria
+
+- **Motivation + evidence.** Metal is not default-on. The persistent-session raster win is large
+  (**176x-684x**, commit `a7b57550`; skill `:300-307`), but that is the CPU raster path, not proof
+  Metal should be the default backend. Two criteria must be met before flipping the default:
+  1. **Universal one-call upload/readback** — the `rt_write_u32s_to_raw`/`rt_u32s_from_raw` runtime
+     externs must be wired (currently `SIMPLE_ONE_CALL_READBACK=1` crashes: `unknown extern
+     function: rt_write_u32s_to_raw`), then bit-exact vs the per-pixel path, before flipping
+     `SIMPLE_ONE_CALL_READBACK` default-on. Without it, per-primitive marshalling makes Metal lose
+     to CPU on small frames. (Seed/runtime-extern change — off the pure-Simple path.)
+  2. **WM content lane no longer the dominant cost** — Metal default-on is only worth it once the
+     composite/content lane, not the backend, bounds the frame. (The specific "~8% WM composite"
+     share once cited for this is **not recorded in-repo** and must be re-measured before it can
+     gate anything.)
+- **Files (seed).** `rt_write_u32s_to_raw`/`rt_u32s_from_raw` runtime externs; then the default
+  backend selector.
+- **Steps.** (1) Seed wires the one-call externs. (2) Bit-exact verify vs per-pixel. (3) Re-measure
+  the WM composite share (replace the missing ~8% figure with a real number). (4) Only if both
+  criteria pass, flip the default + add a regression gate.
+- **Specs.** Bit-exact one-call vs per-pixel readback spec; the four perf non-regression seams
+  (Metal no-mirror, batched Metal FFI, NEON/SSE2 kernels, `WebRenderPixelArtifactCache`) stay
+  green. **Gates.** Parity spec; `check-engine2d-gpu-offload-evidence.shs`. **Size:** L (seed +
+  measurement). **Deps:** one-call externs (seed). **Risk+rollback:** flipping the default could
+  regress small-frame/idle cases → gate on the re-measured composite share + bit-exact proof;
+  rollback = keep Metal opt-in (`SIMPLE_GUI_BACKEND`).
+
+### N8 — Winit `[u32]` FFI signature / Web parse-artifact cache (parked)
+
+- **Winit `[u32]` FFI** (GUI Rank 5b): halves marshalled bytes; Rust extern change (seed). Parked.
+- **Web parse-artifact cache** (Web Rank 3): re-evaluate only if a non-identical-but-reparseable
+  workload is demonstrated (identical-content is already covered by the landed `#15`
+  `WebRenderPixelArtifactCache`). Parked.
 
 ---
 
