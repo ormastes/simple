@@ -44,6 +44,17 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             val real_bootstrap = (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LLVM") ?? "") == "1"
             val bootstrap_function_count = bootstrap_mir_function_count()
+            if real_bootstrap:
+                var bootstrap_return_i = 0
+                while bootstrap_return_i < bootstrap_function_count:
+                    val name = bootstrap_mir_function_name_at(bootstrap_return_i)
+                    val fn_name = if name == "main": "__simple_main" else: name
+                    val bootstrap_fn = bootstrap_mir_function_at(bootstrap_return_i)
+                    val body = MirBody.from_function(bootstrap_fn)
+                    val ret_ty = self.llvm_type_text(body.return_ty)
+                    self.remember_function_return_type(name, ret_ty)
+                    self.remember_function_return_type(fn_name, ret_ty)
+                    bootstrap_return_i = bootstrap_return_i + 1
             var bootstrap_fni = 0
             while bootstrap_fni < bootstrap_function_count:
                 print "[llvm-translate] body"
@@ -62,6 +73,12 @@ impl MirTextCodegen for MirToLlvm:
                 print "[llvm-translate] function-done"
                 bootstrap_fni = bootstrap_fni + 1
         else:
+            for fn_ in module.functions.values():
+                val body = MirBody.from_function(fn_)
+                val fn_name = if fn_.name == "main": "__simple_main" else: fn_.name
+                val ret_ty = self.llvm_type_text(body.return_ty)
+                self.remember_function_return_type(fn_.name, ret_ty)
+                self.remember_function_return_type(fn_name, ret_ty)
             for fn_ in module.functions.values():
                 val body = MirBody.from_function(fn_)
                 self.translate_function(fn_.name, body)
@@ -168,6 +185,8 @@ impl MirTextCodegen for MirToLlvm:
         # Rename 'main' to '__simple_main' for entry point linkage
         val fn_name = if name == "main": "__simple_main" else: name
         self.defined_func_names[fn_name] = true
+        self.remember_function_return_type(name, ret_ty)
+        self.remember_function_return_type(fn_name, ret_ty)
 
         self.builder.start_function_opt(fn_name, params, ret_ty, is_readonly, is_small)
         if bootstrap_debug:
@@ -284,6 +303,11 @@ impl MirTextCodegen for MirToLlvm:
         if ret_ty.len() == 3 and ret_ty.starts_with("ptr") and value.len() == 1 and value.starts_with("0"):
             return "null"
         value
+
+    me remember_function_return_type(name: text, ret_ty: text):
+        if ret_ty == nil or ret_ty == "nil" or ret_ty == "":
+            return
+        self.function_return_types[name] = ret_ty
 
     me translate_terminator(term: MirTerminator):
         """Translate a block terminator."""
@@ -585,8 +609,16 @@ impl MirTextCodegen for MirToLlvm:
         val args_str = arg_parts.join(", ")
         match dest_name:
             Some(name):
-                val maybe_ret_ty = self.get_local_type(dest_id)
-                val ret_ty = if maybe_ret_ty == nil: self.native_int() else: maybe_ret_ty
+                var ret_ty = self.get_local_type(dest_id)
+                val known_ret_ty = self.lookup_function_return_type(func_name)
+                if known_ret_ty != "" and known_ret_ty != "nil" and known_ret_ty != "void":
+                    ret_ty = known_ret_ty
+                    self.local_types[dest_id] = ret_ty
+                    if ret_ty == "ptr":
+                        self.ptr_locals[dest_id] = true
+                    if ret_ty == "i1":
+                        self.bool_locals[dest_id] = true
+                ret_ty = self.valid_llvm_type(ret_ty)
                 self.builder.emit("  {name} = call {ret_ty} {func_name}({args_str})")
             nil:
                 val ret_ty = "void"
@@ -606,15 +638,17 @@ impl MirTextCodegen for MirToLlvm:
             case Const(value, type_):
                 # For function references, return @name directly
                 match type_.kind:
-                    case FuncPtr(_):
+                    case FuncPtr(signature):
                         match value:
                             case Str(name):
+                                self.remember_function_return_type(name, self.llvm_type_text(signature.return_type))
                                 self.unknown_func_decls[name] = true
                                 "@{name}"
                             case _: self.translate_const_value(value)
-                    case Function(_, _):
+                    case Function(_, ret):
                         match value:
                             case Str(name):
+                                self.remember_function_return_type(name, self.llvm_type_text(ret))
                                 self.unknown_func_decls[name] = true
                                 "@{name}"
                             case _: self.translate_const_value(value)
@@ -655,6 +689,26 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     ty
             case nil: self.native_int()
+
+    fn lookup_function_return_type(func_name: text) -> text:
+        match self.function_return_types.get(func_name):
+            case Some(ty):
+                if ty == nil or ty == "nil":
+                    ""
+                else:
+                    ty
+            case nil:
+                if func_name.starts_with("@"):
+                    val bare = func_name[1:]
+                    match self.function_return_types.get(bare):
+                        case Some(bare_ty):
+                            if bare_ty == nil or bare_ty == "nil":
+                                ""
+                            else:
+                                bare_ty
+                        case nil: ""
+                else:
+                    ""
 
     fn valid_llvm_type(ty: text) -> text:
         if ty == nil or ty == "nil":
