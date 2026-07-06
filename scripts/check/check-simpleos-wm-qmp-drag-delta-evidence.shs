@@ -147,6 +147,8 @@ reason=not-run
 changed_bytes=0
 source_region_changed=0
 target_region_changed=0
+before_raw_bytes=0
+after_raw_bytes=0
 before_sha256=
 after_sha256=
 guest_input_contract_status=not-run
@@ -154,6 +156,14 @@ guest_input_contract_reason=not-run
 guest_entry_mouse_poll_status=not-run
 guest_entry_keyboard_poll_status=not-run
 injection_protocol=hmp-mouse-events
+guest_shared_pointer_event_status=not-run
+guest_shared_pointer_event_reason=not-run
+guest_mouse_packet_status=not-run
+guest_mouse_packet_reason=not-run
+framebuffer_delta_status=not-run
+framebuffer_delta_reason=not-run
+event_evidence_status=not-run
+event_evidence_reason=not-run
 
 emit_simple_bin_failure() {
     reason="$1"
@@ -273,7 +283,7 @@ f.readline()
 write_qmp(f, {"execute": "qmp_capabilities"})
 
 mem0 = pmem(f, before_raw, before_ppm)
-hmp(f, "mouse_move 360 190")
+hmp(f, "mouse_move 360 132")
 time.sleep(0.05)
 hmp(f, "mouse_button 1")
 time.sleep(0.08)
@@ -302,9 +312,65 @@ PY
     changed_bytes="$(printf '%s\n' "$drag_line" | sed -n 's/.* changed_bytes=\([0-9][0-9]*\).*/\1/p')"
     source_region_changed="$(printf '%s\n' "$drag_line" | sed -n 's/.* source_region_changed=\([0-9][0-9]*\).*/\1/p')"
     target_region_changed="$(printf '%s\n' "$drag_line" | sed -n 's/.* target_region_changed=\([0-9][0-9]*\).*/\1/p')"
+    before_raw_bytes="$(printf '%s\n' "$drag_line" | sed -n 's/.* before_raw_bytes=\([0-9][0-9]*\).*/\1/p')"
+    after_raw_bytes="$(printf '%s\n' "$drag_line" | sed -n 's/.* after_raw_bytes=\([0-9][0-9]*\).*/\1/p')"
     before_sha256="$(printf '%s\n' "$drag_line" | sed -n 's/.* before_sha256=\([^ ]*\).*/\1/p')"
     after_sha256="$(printf '%s\n' "$drag_line" | sed -n 's/.* after_sha256=\([^ ]*\).*/\1/p')"
+    changed_bytes="${changed_bytes:-0}"
+    source_region_changed="${source_region_changed:-0}"
+    target_region_changed="${target_region_changed:-0}"
+    before_raw_bytes="${before_raw_bytes:-0}"
+    after_raw_bytes="${after_raw_bytes:-0}"
+    if [ -f "$serial_log" ] && grep -Fq "[mdi-demo] qemu-shared-pointer-event source=wm_lifecycle_pointer_move action=drag" "$serial_log"; then
+        guest_shared_pointer_event_status=pass
+        guest_shared_pointer_event_reason=pass
+    else
+        guest_shared_pointer_event_status=fail
+        guest_shared_pointer_event_reason=missing-shared-pointer-event-marker
+    fi
+    if [ -f "$serial_log" ] && grep -Fq "[mdi-demo] qemu-mouse-packet left=1" "$serial_log"; then
+        guest_mouse_packet_status=pass
+        guest_mouse_packet_reason=pass
+    else
+        guest_mouse_packet_status=fail
+        guest_mouse_packet_reason=missing-decoded-left-mouse-packet
+    fi
     if [ "$drag_code" -eq 0 ]; then
+        framebuffer_delta_status=pass
+        framebuffer_delta_reason=pass
+    elif [ "$before_raw_bytes" -ne 3145728 ] || [ "$after_raw_bytes" -ne 3145728 ]; then
+        framebuffer_delta_status=fail
+        framebuffer_delta_reason=missing-framebuffer-captures
+    elif [ "$changed_bytes" -le 2048 ]; then
+        framebuffer_delta_status=fail
+        framebuffer_delta_reason=insufficient-framebuffer-byte-delta
+    elif [ "$source_region_changed" -le 100 ]; then
+        framebuffer_delta_status=fail
+        framebuffer_delta_reason=insufficient-source-region-delta
+    elif [ "$target_region_changed" -le 100 ]; then
+        framebuffer_delta_status=fail
+        framebuffer_delta_reason=insufficient-target-region-delta
+    elif [ -z "$before_sha256" ] || [ "$before_sha256" = "$after_sha256" ]; then
+        framebuffer_delta_status=fail
+        framebuffer_delta_reason=framebuffer-sha-unchanged
+    else
+        framebuffer_delta_status=fail
+        framebuffer_delta_reason=qmp-drag-delta-not-proven
+    fi
+    if [ "$guest_mouse_packet_status" != "pass" ]; then
+        event_evidence_status=fail
+        event_evidence_reason="$guest_mouse_packet_reason"
+    elif [ "$guest_shared_pointer_event_status" != "pass" ]; then
+        event_evidence_status=fail
+        event_evidence_reason="$guest_shared_pointer_event_reason"
+    elif [ "$framebuffer_delta_status" != "pass" ]; then
+        event_evidence_status=fail
+        event_evidence_reason="$framebuffer_delta_reason"
+    else
+        event_evidence_status=pass
+        event_evidence_reason=pass
+    fi
+    if [ "$event_evidence_status" = "pass" ]; then
         status=pass
         reason=pass
     elif [ "$guest_input_contract_status" != "pass" ] && [ "${changed_bytes:-0}" = "0" ]; then
@@ -312,7 +378,7 @@ PY
         reason="$guest_input_contract_reason"
     else
         status=fail
-        reason=qmp-drag-delta-not-proven
+        reason="$event_evidence_reason"
     fi
 else
     reason="${launcher_reason:-wm-qmp-launch-failed}"
@@ -340,6 +406,14 @@ fi
     echo "qemu_wm_drag_delta_guest_input_contract_reason=$guest_input_contract_reason"
     echo "qemu_wm_drag_delta_guest_entry_mouse_poll_status=$guest_entry_mouse_poll_status"
     echo "qemu_wm_drag_delta_guest_entry_keyboard_poll_status=$guest_entry_keyboard_poll_status"
+    echo "qemu_wm_drag_delta_guest_shared_pointer_event_status=$guest_shared_pointer_event_status"
+    echo "qemu_wm_drag_delta_guest_shared_pointer_event_reason=$guest_shared_pointer_event_reason"
+    echo "qemu_wm_drag_delta_guest_mouse_packet_status=$guest_mouse_packet_status"
+    echo "qemu_wm_drag_delta_guest_mouse_packet_reason=$guest_mouse_packet_reason"
+    echo "qemu_wm_drag_delta_framebuffer_delta_status=$framebuffer_delta_status"
+    echo "qemu_wm_drag_delta_framebuffer_delta_reason=$framebuffer_delta_reason"
+    echo "qemu_wm_drag_delta_event_evidence_status=$event_evidence_status"
+    echo "qemu_wm_drag_delta_event_evidence_reason=$event_evidence_reason"
     echo "qemu_wm_drag_delta_changed_bytes=${changed_bytes:-0}"
     echo "qemu_wm_drag_delta_source_region_changed=${source_region_changed:-0}"
     echo "qemu_wm_drag_delta_target_region_changed=${target_region_changed:-0}"
@@ -381,6 +455,10 @@ fi
     echo "- guest input contract: $guest_input_contract_status ($guest_input_contract_reason)"
     echo "- guest mouse polling: $guest_entry_mouse_poll_status"
     echo "- guest keyboard polling: $guest_entry_keyboard_poll_status"
+    echo "- guest shared pointer event: $guest_shared_pointer_event_status ($guest_shared_pointer_event_reason)"
+    echo "- guest decoded mouse packet: $guest_mouse_packet_status ($guest_mouse_packet_reason)"
+    echo "- framebuffer delta: $framebuffer_delta_status ($framebuffer_delta_reason)"
+    echo "- event evidence: $event_evidence_status ($event_evidence_reason)"
     echo "- changed bytes: ${changed_bytes:-0}"
     echo "- source region changed pixels: ${source_region_changed:-0}"
     echo "- target region changed pixels: ${target_region_changed:-0}"

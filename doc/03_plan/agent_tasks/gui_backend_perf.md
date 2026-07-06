@@ -61,6 +61,26 @@ Acceptance:
 
 ## Completed (already pushed)
 
+- this slice -- SimpleOS/QEMU shared WM renderer startup fix: removed the host
+  Simple Web renderer dependency from `shared_mdi_framebuffer_scene.spl` so the
+  QEMU baremetal path no longer calls `default_theme_id()` / `rt_file_exists`
+  while rendering the shared MDI scene. Evidence:
+  `check-simpleos-wm-fullscreen-evidence.shs` passed with
+  `renderer=shared_mdi_framebuffer_scene` and `TEST PASSED`.
+- this slice -- shared framebuffer hot-path cleanup: clipped glyph rendering
+  and backend blits before the inner loops, removed per-pixel source bounds
+  checks for valid blit rows, avoided the fresh-buffer clear pass, and reduced
+  `qemu_capture_ppm_spec.spl` unit viewport cost from about 96s to about 38s
+  while preserving the same assertions.
+- this slice -- Worker 2 host/SimpleOS divergence evidence: added
+  `doc/09_report/host_simpleos_renderer_event_divergence_2026-07-06.md` to
+  record the current shared-renderer/shared-event boundary and the remaining
+  adapter-local divergence. The same slice tightened
+  `shared_mdi_framebuffer_scene_spec.spl` with source-level assertions for QEMU
+  display-surface evidence markers (`source=shared_mdi_framebuffer_scene`,
+  `direct-mmio-commit`, `html-renderable`) and PS/2 mouse demux evidence
+  (`_poll_qemu_mouse_input`, decoded left-button packet) without touching
+  runtime source, the x86_64 QEMU entry, or the QMP drag evidence script.
 - `2dc841a399` -- font offload backend selection: added
   `engine2d_font_offload_backend_order()` and
   `engine2d_backend_lane_preferred_font_offload_candidate(...)` so vector and

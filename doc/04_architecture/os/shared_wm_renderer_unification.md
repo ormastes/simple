@@ -4,7 +4,14 @@ Date: 2026-05-29
 
 ## Status
 
-Current implementation is a staged unification. The shared web render API and Engine2D backend files exist; WM service/core convergence remains the main architectural gap.
+Current implementation is a staged unification with the renderer/event boundary
+mostly shared. `HostCompositor` and the SimpleOS QEMU WM evidence path both use
+`shared_mdi_framebuffer_scene.spl` for chrome/layout-level MDI rendering, and
+host plus SimpleOS-style bridge paths use `wm_action_applier.spl` for lifecycle
+and pointer state. Remaining divergence is adapter-owned: host process/window
+effects, host cached Simple Web content pixels, QEMU framebuffer presentation,
+and the current x86_64 QEMU evidence entry's direct use of shared renderer and
+pointer helpers instead of instantiating `SimpleOsGuiAdapter`.
 
 ## Concrete API Files
 
@@ -106,6 +113,41 @@ This boundary is part of the architecture, not an untracked workaround:
 - `test/01_unit/os/desktop/shell_baremetal_backend_spec.spl` is the guardrail for
   this boundary: it proves `_draw_baremetal_overlay(...)` accepts a generic
   `CompositorBackend` and renders without requiring raw Engine2D access.
+
+## 2026-07-06 QEMU Shared Renderer Status
+
+The x86_64 SimpleOS QEMU WM evidence lane now uses
+`src/os/compositor/shared_mdi_framebuffer_scene.spl` for the normal desktop
+scene. That shared scene owns WM chrome, taskbar layout, app-window layout, and
+freestanding Simple Web-style app content through `CompositorBackend`
+primitives. It must not import the host Simple Web pixel renderer, theme package
+file loader, host env probes, or raw Engine2D APIs.
+
+Host WM adapters may still use richer host-only content rendering and cached
+web pixel artifacts in `host_compositor_entry.spl`, but that is an adapter
+effect below the shared WM boundary. SimpleOS/QEMU must keep using the same
+shared renderer source and differ only by presentation backend/config. The
+remaining direct-MMIO optimization is tracked separately in
+`doc/08_tracking/bug/shared_wm_qemu_direct_mmio_backend_perf_2026-07-06.md`.
+
+Renderer/event boundary audit from lightweight `rg` checks:
+
+- Shared renderer source: `host_compositor_entry.spl` imports
+  `render_shared_mdi_desktop_chrome(...)`, `draw_shared_mdi_window_chrome(...)`,
+  and `draw_shared_mdi_taskbar(...)`; the QEMU entry imports
+  `render_shared_mdi_framebuffer_scene(...)` and
+  `render_shared_mdi_framebuffer_scene_for_lifecycle_windows(...)`.
+- Shared lifecycle/input source: `HostCompositor` routes bridge actions through
+  `wm_action_from_bridge_request(...)` and
+  `apply_wm_action_to_lifecycle_windows(...)`, and pointer events through
+  `wm_lifecycle_pointer_move(...)`/`wm_lifecycle_left_button(...)`. The QEMU
+  evidence path imports the same pointer helpers for drag evidence.
+- Adapter boundary still differs: `SimpleOsGuiAdapter` wraps `HostCompositor`
+  for SimpleOS-style bridge requests and framebuffer presentation in the tested
+  adapter path, while the x86_64 QEMU evidence entry currently calls the shared
+  framebuffer scene and pointer helpers directly. Host-only cached Simple Web
+  content rendering and native process/event-loop plumbing remain below the
+  adapter boundary.
 
 ## Qt Size Baseline
 

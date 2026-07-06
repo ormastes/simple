@@ -2,8 +2,10 @@
 
 use std.spec.{describe, it, expect}
 use std.io_runtime.{file_read}
-use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiFramebufferBackend, render_shared_mdi_framebuffer_scene_limited}
+use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiFramebufferBackend, draw_shared_mdi_taskbar, render_shared_mdi_framebuffer_scene_limited, render_shared_mdi_framebuffer_scene_for_lifecycle_windows, shared_mdi_lifecycle_seed_windows, shared_mdi_seed_windows}
 use os.compositor.shared_mdi_setup.{shared_mdi_surfaces}
+use os.compositor.wm_action_applier.{wm_taskbar_item_x}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
 
 describe "shared MDI framebuffer scene":
 
@@ -41,10 +43,39 @@ describe "shared MDI framebuffer scene":
         expect(white_pixels).to_be_greater_than(0)
         expect(accent_pixels).to_be_greater_than(0)
 
+    it "draws taskbar item bodies instead of only the taskbar band":
+        val theme = wm_chrome_theme()
+        val backend = SharedMdiFramebufferBackend.create(320, 240, theme.compositor_bg)
+        val windows = shared_mdi_seed_windows()
+        draw_shared_mdi_taskbar(backend, windows, 320, 240, theme)
+        val first_item_x = wm_taskbar_item_x(320, 5, 0) + 10
+        val focused_item_x = wm_taskbar_item_x(320, 5, 4) + 10
+        val item_y = 196
+        expect(backend.pixels[item_y * 320 + first_item_x]).to_equal(theme.title_unfocused)
+        expect(backend.pixels[item_y * 320 + focused_item_x]).to_equal(theme.accent)
+
     it "keeps the x86_64 QEMU entry on the shared renderer instead of a dummy rectangle scene":
         val src = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl")
         expect(src).to_contain("render_shared_mdi_framebuffer_scene")
+        expect(src).to_contain("wm_lifecycle_pointer_move")
+        expect(src).to_contain("qemu-shared-pointer-event source=wm_lifecycle_pointer_move")
         expect(src).to_contain("source=shared_mdi_framebuffer_scene")
         expect(src).to_contain("renderer=shared_mdi_framebuffer_scene")
+        expect(src).to_contain("present=direct-mmio-commit source=shared_mdi_framebuffer_scene")
+        expect(src).to_contain("html-renderable window=browser renderer=shared_mdi_framebuffer_scene")
+        expect(src).to_contain("_poll_qemu_mouse_input")
+        expect(src).to_contain("qemu-mouse-packet left=1")
         expect(src.contains("simple-web-qemu-panel-contract")).to_equal(false)
         expect(src.contains("baremetal-direct-mdi-surface-render")).to_equal(false)
+
+    it "renders lifecycle-mutated windows through the same shared framebuffer renderer":
+        var windows = shared_mdi_lifecycle_seed_windows()
+        var editor = windows[1]
+        editor.x = 76
+        editor.y = 68
+        editor.focused = true
+        windows[1] = editor
+        val scene = render_shared_mdi_framebuffer_scene_for_lifecycle_windows(320, 240, "unit-shared-lifecycle", windows)
+        expect(scene.surface_count).to_equal(5)
+        expect(scene.web_pixel_count).to_be_greater_than(0)
+        expect(scene.pixels.len()).to_equal(320 * 240)
