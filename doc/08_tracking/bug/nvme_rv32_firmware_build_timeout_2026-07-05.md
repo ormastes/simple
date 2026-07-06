@@ -848,6 +848,34 @@ Release remains blocked:
 
 No commit, rebase, or push was performed.
 
+### Current continuation probe: default wrapper timeout reproduced (2026-07-06)
+
+After the `main` rebase/push, the default production wrapper was rerun from
+`bin/simple` and timed out at the wrapper's 300s internal cap:
+
+```text
+timeout -k 10s 420s sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+rv32_build_exit=124
+NVME_RV32_BUILD_FAILED code=124 timeout=300s
+```
+
+The generated-media proof is therefore still not production-green in this
+workspace. The non-target command-floor pieces passed when split out:
+
+```text
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_main.spl
+# ALL NVME CONTROLLER E2E CHECKS PASS
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/base_spec_check.spl
+# NVME BASE SPEC CHECKS PASS
+bin/simple test test/01_unit/examples/nvme_fw_rv32_entry_fail_mask_spec.spl --mode=interpreter --fail-fast
+# PASS: 10 examples, 0 failures
+```
+
+`test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl` timed out
+once in the SPipe runner during this continuation, while its two subprocesses
+passed directly. Keep this bug open until the default wrapper builds the ELF and
+the rv32 boot spec proves the generated media.
+
 ### RV32 firmware QEMU boot proof passes with bootstrap wrapper (2026-07-05)
 
 Follow-up fixes:
