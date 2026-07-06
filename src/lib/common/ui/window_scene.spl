@@ -41,39 +41,111 @@ struct SharedWmRect:
     height: i32
 
 # BackgroundSpec is a provider contract for the scene background, not a
-# hardcoded fill. kind: "color" is implemented now; "image" and "motion" are
-# reserved for later providers and must not be silently treated as "color" —
-# callers that only need a solid fill today will not need to change when
-# image/motion providers land later.
+# hardcoded fill. kind: "color" is implemented now; "image" is implemented via
+# an injected BackgroundImageProvider (see below); "motion" remains reserved
+# and must not be silently treated as "color" — callers that only need a
+# solid fill today will not need to change now that image/motion providers
+# are landing.
 struct BackgroundSpec:
     kind: text
     color: u32
     source: text
+    fit: text
 
 val WM_BACKGROUND_KIND_COLOR: text = "color"
 val WM_BACKGROUND_KIND_IMAGE: text = "image"
 val WM_BACKGROUND_KIND_MOTION: text = "motion"
 
+# fit values for kind:"image": "cover" (default, uniform scale + center-crop),
+# "contain" (uniform scale + letterbox to the desktop-chrome fill color),
+# "stretch" (non-uniform scale to exactly fill target), "tile" (repeat the
+# intrinsic-size image, no scaling).
+val WM_BACKGROUND_FIT_COVER: text = "cover"
+val WM_BACKGROUND_FIT_CONTAIN: text = "contain"
+val WM_BACKGROUND_FIT_STRETCH: text = "stretch"
+val WM_BACKGROUND_FIT_TILE: text = "tile"
+
 fn shared_wm_background_color(color: u32) -> BackgroundSpec:
-    BackgroundSpec(kind: WM_BACKGROUND_KIND_COLOR, color: color, source: "")
+    BackgroundSpec(kind: WM_BACKGROUND_KIND_COLOR, color: color, source: "", fit: WM_BACKGROUND_FIT_COVER)
+
+# Decoded RGBA (as ARGB u32) surface already resampled to the requested
+# target_w x target_h per the requested fit policy — the common.ui executor
+# never decodes/resamples itself, it only blits this buffer.
+struct BackgroundSurface:
+    width: i32
+    height: i32
+    pixels: [u32]
 
 struct SharedWmBackgroundResolution:
     resolved: bool
     color: u32
+    surface: BackgroundSurface?
+    stale: bool
     error_message: text
 
-# Resolves a BackgroundSpec to a paintable color. Unknown/unimplemented kinds
+# Outcome returned by a BackgroundImageProvider.resolve(...) call — the
+# provider's raw report before shared_wm_scene_resolve_background wraps it
+# into a SharedWmBackgroundResolution.
+struct BackgroundResolveOutcome:
+    ok: bool
+    surface: BackgroundSurface?
+    stale: bool
+    error_message: text
+
+# The common.ui executor never decodes and never touches the filesystem: a
+# provider is injected (host provides an fs-backed implementation; SimpleOS
+# provides an in-image pre-decoded one). This preserves the baremetal-lane
+# boundary documented in shared_wm_renderer_unification.md (no direct
+# filesystem-existence-check or theme-package reads on the freestanding
+# path) — this trait definition and its registration hook are the only
+# things common.ui knows about image providers.
+trait BackgroundImageProvider:
+    me resolve(source: text, target_w: i32, target_h: i32, fit: text) -> BackgroundResolveOutcome
+
+var _wm_background_image_provider: BackgroundImageProvider? = nil
+
+# Registers (or clears, with nil) the single process-wide image-background
+# provider. Host wiring registers an fs-backed provider at startup; SimpleOS
+# wiring registers an in-image pre-decoded provider; tests register a fake
+# and must unregister (nil) when done so global state does not leak across
+# spec files sharing this process.
+fn shared_wm_scene_register_background_image_provider(provider: BackgroundImageProvider?):
+    _wm_background_image_provider = provider
+
+# Resolves a BackgroundSpec to paintable pixels. Unknown/unimplemented kinds
+# (including "image" with no provider registered, and the reserved "motion")
 # never silently fall back to a default fill: they log a diagnostic and
 # report resolved=false with a loud marker color so callers can detect and
 # surface the failure instead of masking it.
 val WM_BACKGROUND_UNRESOLVED_MARKER_COLOR: u32 = 0xFFFF00FFu32
 
-fn shared_wm_scene_resolve_background(background: BackgroundSpec) -> SharedWmBackgroundResolution:
-    if background.kind == WM_BACKGROUND_KIND_COLOR:
-        return SharedWmBackgroundResolution(resolved: true, color: background.color, error_message: "")
-    val message = "shared_wm_scene_resolve_background: unsupported background kind '{background.kind}' (only '{WM_BACKGROUND_KIND_COLOR}' is implemented); refusing silent fallback"
+# Loud unresolved-marker path shared by: a truly unknown kind, "motion"
+# (still reserved), and "image" with no provider registered — the error
+# semantics extension in the design doc states the no-provider case is
+# "the same as an unknown kind", so it reuses this exact message shape
+# (existing callers/specs asserting on "unsupported background kind" keep
+# passing unchanged).
+fn _shared_wm_scene_unresolved_background(background: BackgroundSpec) -> SharedWmBackgroundResolution:
+    val message = "shared_wm_scene_resolve_background: unsupported background kind '{background.kind}' (only '{WM_BACKGROUND_KIND_COLOR}' is implemented, or '{WM_BACKGROUND_KIND_IMAGE}' with a registered BackgroundImageProvider); refusing silent fallback"
     print(message)
-    SharedWmBackgroundResolution(resolved: false, color: WM_BACKGROUND_UNRESOLVED_MARKER_COLOR, error_message: message)
+    SharedWmBackgroundResolution(resolved: false, color: WM_BACKGROUND_UNRESOLVED_MARKER_COLOR, surface: nil, stale: false, error_message: message)
+
+fn _shared_wm_scene_image_resolve_failed(background: BackgroundSpec, provider_message: text) -> SharedWmBackgroundResolution:
+    val message = "shared_wm_scene_resolve_background: image provider resolve failed: {provider_message} (kind='{background.kind}', source='{background.source}'); refusing silent fallback"
+    print(message)
+    SharedWmBackgroundResolution(resolved: false, color: WM_BACKGROUND_UNRESOLVED_MARKER_COLOR, surface: nil, stale: false, error_message: message)
+
+fn shared_wm_scene_resolve_background(background: BackgroundSpec, target_w: i32 = 0, target_h: i32 = 0) -> SharedWmBackgroundResolution:
+    if background.kind == WM_BACKGROUND_KIND_COLOR:
+        return SharedWmBackgroundResolution(resolved: true, color: background.color, surface: nil, stale: false, error_message: "")
+    if background.kind == WM_BACKGROUND_KIND_IMAGE:
+        if val provider = _wm_background_image_provider:
+            val outcome = provider.resolve(background.source, target_w, target_h, background.fit)
+            if outcome.ok:
+                return SharedWmBackgroundResolution(resolved: true, color: background.color, surface: outcome.surface, stale: outcome.stale, error_message: outcome.error_message)
+            return _shared_wm_scene_image_resolve_failed(background, outcome.error_message)
+        return _shared_wm_scene_unresolved_background(background)
+    _shared_wm_scene_unresolved_background(background)
 
 struct SharedWmChrome:
     background_color: text

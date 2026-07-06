@@ -389,6 +389,45 @@ Hard-won lessons for this live lane (each cost hours):
   in the guest on a clean HEAD (freestanding module-init blocker, unrelated
   to this feature).
 
+- **LANDED 2026-07-07 — `BackgroundSpec kind:"image"` implemented (PPM
+  decode only; PNG deferred):** `BackgroundImageProvider` trait
+  (`src/lib/common/ui/window_scene.spl`) is a single injected seam — the
+  `common.ui` executor never decodes an image or touches the filesystem
+  itself, preserving the baremetal-lane boundary. A new provider
+  implementation, [src/os/compositor/background_image_provider.spl](../../../../src/os/compositor/background_image_provider.spl),
+  decodes PPM (P6) via `src/lib/common/image/ppm_decode.spl`, supports
+  `cover`/`contain`/`stretch`/`tile` fit modes, and keeps a content-hash
+  keyed cache with stale-serve-on-decode-failure (returns the last-good
+  surface rather than falling to the loud marker if a previously-decoded
+  image later fails to re-read). Registration is via
+  `shared_wm_scene_register_background_image_provider(provider)`, wired at
+  host startup in `init_host_wm`
+  (`src/os/compositor/host_compositor_entry.spl`); SimpleOS has no
+  registration yet (no provider → loud `0xFFFF00FF` marker, same as any
+  unrecognized kind, which is correct/intentional per the executor's
+  fail-loud contract above). The reserved `"motion"` kind and the
+  `WM_BACKGROUND_KIND_MOTION` constant are unchanged and still loud-fail;
+  the never-implemented `MotionBackgroundSource` trait (zero implementers/
+  references) was deleted as dead code during review — motion support, if
+  ever built, needs a fresh contract, not this removed trait.
+  Gate coverage: `test/01_unit/os/desktop/wm_background_image_provider_spec.spl`
+  (8/8 — decode success, fit modes, content-hash cache hit, stale-serve on
+  bad re-read, missing-file loud marker), plus the existing executor/
+  compositor gates above (unaffected, still green).
+  **Two interpreter bugs found during this work (not fixed, workarounds
+  applied — see the bug docs for repro/detail):**
+  `doc/08_tracking/bug/interp_fs_class_statics_return_result_despite_optional_types_2026-07-07.md`
+  (`fs.File` statics declared `Optional`/`bool` actually return runtime
+  `Result::Ok`/`Err`; `if val` on an `Err` is truthy; `File.delete` crashes
+  on a stray `.path`-on-`String` access — worked around via explicit
+  `match Ok/Err` and the free `file_delete` extern) and
+  `doc/08_tracking/bug/interp_trait_slot_receiver_reboxed_per_call_mutation_loss_2026-07-07.md`
+  (a `me`-mutating trait method called through a re-read `Trait?`-typed
+  module slot gets a freshly re-boxed receiver each call, losing field
+  mutations — worked around by keeping cache/stale-serve state in
+  module-level `var`s, the same convention already used by the
+  `_*_compositor_override_*` pattern elsewhere in this file).
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,

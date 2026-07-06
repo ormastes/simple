@@ -1,5 +1,7 @@
 use common.window_protocol.geometry.{Size}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB}
+use common.ui.window_scene.{shared_wm_scene_register_background_image_provider}
+use os.compositor.background_image_provider.{HostBackgroundImageProvider}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
@@ -586,7 +588,21 @@ fn _create_backend_for_kind(kind: HostBackendKind, w: i32, h: i32, title: text) 
         return nil
     HeadlessHostCompositorBackend.new(w, h)
 
+# Registers the fs-backed BackgroundImageProvider once per process so
+# BackgroundSpec kind:"image" resolves for real on the host lane instead of
+# falling through to the loud unresolved marker for lack of a provider (see
+# common.ui.window_scene.shared_wm_scene_resolve_background). Guarded so
+# repeated init_host_wm calls (e.g. across tests in one process) do not churn
+# the provider's cache/last-good state.
+var _host_background_image_provider_registered: bool = false
+
+fn ensure_host_background_image_provider_registered():
+    if not _host_background_image_provider_registered:
+        shared_wm_scene_register_background_image_provider(HostBackgroundImageProvider.create())
+        _host_background_image_provider_registered = true
+
 fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
+    ensure_host_background_image_provider_registered()
     if cfg.backend == HostBackendKind.Tui:
         return nil
     val event_loop_id = 1

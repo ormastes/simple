@@ -40,6 +40,23 @@ next hardening wave on top of the landed window-render executor.
 
 ## A — BackgroundSpec image provider
 
+**Status: LANDED 2026-07-07 (PPM decode only; PNG deferred).** Implemented as
+designed below: `BackgroundImageProvider` trait on `window_scene.spl`, host
+provider + content-hash cache + stale-serve in the new
+`src/os/compositor/background_image_provider.spl`, registered via
+`shared_wm_scene_register_background_image_provider` in `init_host_wm`
+(`host_compositor_entry.spl`). Decodes PPM (P6) via
+`src/lib/common/image/ppm_decode.spl`; PNG decode is NOT implemented (out of
+scope for this landing — track separately if wallpaper assets need PNG).
+`fit` supports `cover`/`contain`/`stretch`/`tile`. SimpleOS/freestanding has
+no registered provider yet (loud marker on `kind:"image"` there, matching the
+documented no-provider contract). See feature-expert skill
+`doc/00_llm_process/feature_expert/wm_gui_window_drawing/skill.md` for gate
+coverage and the two interpreter bugs found during this work. Dead
+`MotionBackgroundSource` trait (unused scaffolding, zero implementers) was
+deleted during review; item B below is unaffected (still open, no contract
+landed).
+
 **Motivation + evidence.** `BackgroundSpec.source` already exists as `text`
 (`window_scene.spl:51`) and is written `""` by `shared_wm_background_color` (`:58`), but no
 resolver consumes it: `shared_wm_scene_resolve_background` reads only `.kind`/`.color`
@@ -300,7 +317,7 @@ every backend; default to option 1 and only escalate on a proven need. Rollback 
 
 | Item | Size | Blocks / blocked-by | Lane |
 |---|---|---|---|
-| A image provider | M | — | UI (pure-Simple) |
+| A image provider | M | — | UI (pure-Simple) — **LANDED 2026-07-07 (PPM only)** |
 | B motion provider | L | needs A + region-dirty (perf plan) | UI |
 | C borderless taskbar | M | optional; borderless landed | UI |
 | D SimpleOS module-init fix | L | blocks SimpleOS proof of A/B | **seed owner** |
