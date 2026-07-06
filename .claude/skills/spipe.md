@@ -537,6 +537,30 @@ observe a pass:
   `kernel void` + `[[thread_position_in_grid]]`, WebGPU `@compute @workgroup_size`.
   See `gpu_compute_algorithm_kernels_spec.spl`.
 
+### GPU / drawing / event honest backend baseline (2026-07-06)
+
+Before writing GPU-processing, 2D-drawing, or event specs, read the intensive
+test plan `doc/03_plan/ui/testing/gpu_draw_event_intensive_tests.md` (+ `_tldr`)
+and the coverage guide `doc/07_guide/testing/gpu_rendering_tests_gap_analysis.md`.
+The plan is: **shared portable bodies (Linux CI) + system-specific device
+checkpoints** across processing {vulkan, metal, cuda, hip} × drawing {metal,
+vulkan, directx}, with `read_pixels()`→PPM as the absolute oracle. Honest state a
+spec must not paper over:
+- GPU compute (`std.compute`/ExecTarget) is a **payload-gated simulation** — it
+  reports GPU provenance but runs a CPU reference; real device execution is proven
+  only on Metal. Assert value == CPU oracle in BOTH branches + the provenance flag.
+- **Vulkan** `line`/`circle_outline`/`rounded_rect` dispatch a validated EMPTY
+  shader (zero pixels); **Metal** `clip` is a no-op; **cpu_simd** is an honest
+  alias of `cpu` (no live SIMD). A drawing spec must catch these, not match a
+  same-code-path tautology.
+- The GPU job/event scheduler (`host_gpu_event_queue.spl`,
+  `draw_ir_runtime_queue.spl`) is real (EMPTY→QUEUED→SUBMITTED→COMPLETED); the
+  debug-log feature instruments it with `std.diag` (`dbg_event_hop`/`dbg_stage`/
+  `dbg_provenance`, `SIMPLE_DIAG=events,stage`) — never re-introduce a fabricated
+  `estimated_ms` speedup.
+- HTML/CSS Draw-IR boxes now render borders/gradients/radius/shadow (not flat
+  fill); `<img>` remains blocked (`engine2d_draw_ir_image_path_no_resolver_2026-07-06`).
+
 ## Startup-Sensitive Specs
 
 If a SPipe change touches `simple run`, direct file argv parsing,

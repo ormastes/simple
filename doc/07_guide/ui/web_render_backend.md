@@ -87,6 +87,18 @@ Use two **independently produced** artifacts + an absolute oracle, never hard-co
 captured pixels. Gate: `scripts/check/check-electron-simple-web-engine2d-bitmap-evidence.shs`
 (pure-Simple Engine2D vs real Chromium OSR → `mismatch_count=0`).
 
+**Draw-IR structured items (2026-07-06).** The optimized Engine2D Draw-IR
+executor (`draw_ir_adv.spl`) now renders HTML/CSS box structure — box-shadow,
+background (solid or linear-gradient), corner-radius, and per-side borders — via
+the existing backend primitives, instead of collapsing each box to one flat
+`draw_rect_filled`. Transparent-bg boxes that have a border or shadow now paint.
+`<img>`/background-image is still not emitted as an image op (blocked:
+`doc/08_tracking/bug/engine2d_draw_ir_image_path_no_resolver_2026-07-06.md`).
+Honest backend caveats a comparison must respect: Vulkan `line`/`circle_outline`/
+`rounded_rect` are empty-shader no-ops, Metal `clip` is a no-op, and `cpu_simd`
+is an alias of `cpu` (no live SIMD). Coverage plan +
+baseline: `doc/03_plan/ui/testing/gpu_draw_event_intensive_tests.md`.
+
 For GUI/web/2D Vulkan verification on macOS, run the stronger comparison through
 the RenderDoc setup wrapper. This top-level runbook is macOS-only until Windows
 and Linux get separate host notes. It exercises the same fixture across

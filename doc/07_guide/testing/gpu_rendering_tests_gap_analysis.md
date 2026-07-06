@@ -1,6 +1,6 @@
 # GPU Rendering Tests: Gap Analysis & Implementation Status
 
-**Last Updated:** 2026-07-02
+**Last Updated:** 2026-07-06
 **Status:** Implemented — Core functional tests complete; current Linux `.rdc` evidence linked
 
 ## Executive Summary
@@ -22,6 +22,47 @@ Current Linux RenderDoc/Vulkan evidence is tracked separately in
 | **Cross-Backend Comparison** | ✅ Wired | RenderLogCapture.alignment_percentage() for CPU-Vulkan parity (8 tests) |
 | **GUI Item Combinations** | ✅ Tested | Multi-item rendering patterns (buttons, forms, containers) |
 | **Screen Update Tests** | ✅ Documented | Clear pattern: render-before → clear → re-render → verify-pixels |
+
+---
+
+## 2026-07-06 Update — Honesty Fixes + Intensive Test Plan
+
+Three render/event honesty defects were audited and fixed (on `main`), and an
+intensive coverage plan was written. Full plan + honest backend baseline:
+**`doc/03_plan/ui/testing/gpu_draw_event_intensive_tests.md`** (+ `_tldr`).
+
+**Landed fixes:**
+- **HTML/CSS Draw-IR boxes now render structured items.** The optimized Engine2D
+  executor (`draw_ir_adv.spl`) previously collapsed every box to one flat
+  `draw_rect_filled`, dropping borders/gradients/corner-radius/box-shadow. It now
+  dispatches to the existing `draw_shadow_rect` / `draw_gradient_rect` /
+  `draw_rounded_rect*` / border primitives; transparent-bg boxes with a
+  border/shadow no longer vanish. (Updates the "Styling: borders, shadows,
+  gradients" row below — no longer 0.) `<img>`/background-image is still blocked:
+  `doc/08_tracking/bug/engine2d_draw_ir_image_path_no_resolver_2026-07-06.md`.
+- **`cpu_simd` is now honestly an alias of `cpu`** (no live SIMD dispatch on any
+  arch — the `CpuSimdSession` is orphaned; x86 SSE2/AVX2 externs exist but are
+  unused). Probe text corrected; wiring gap tracked in
+  `cpu_simd_mutable_array_extern_wiring_2026-05-31.md`.
+- **Dishonest GPU-event-offload scaffolding removed**: fabricated `baseline_ms/2`
+  2× "speedup", a dead `hit_test_batch` label, and a `gpu_batched`-based
+  false-completion flag. Event handling is honestly CPU-side (hit-test + reducers).
+
+**Honest backend status (still open, not yet fixed):**
+- **Vulkan** `line` / `circle_outline` / `rounded_rect` dispatch a *validated
+  EMPTY shader* (zero pixels) — the real shaders exist but are unimported.
+- **Metal** `clip` is a no-op.
+- **GPU compute** (`std.compute`/ExecTarget) is a payload-gated *simulation*
+  (reports GPU provenance, computes CPU reference); real device execution is
+  proven only on Metal. Kernel *emission* (per-backend markers) is real + portable.
+
+**Planned intensive coverage** (shared portable bodies runnable on Linux CI +
+system-specific device checkpoints, fail-closed `host-unavailable`): kernel
+emission per backend, offload payload-gating (no-payload/matching/corrupt),
+scheduler state-machine + `std.diag` debug-log, per-primitive framebuffer
+readback (absolute oracle), Draw-IR item dispatch, hit-test semantics, and the
+CPU↔GPU `rt_host_gpu_queue_*` round-trip — across processing {vulkan, metal,
+cuda, hip} × drawing {metal, vulkan, directx}.
 
 ---
 
@@ -176,7 +217,7 @@ describe "Event Handling":
 | **Images & Media** | img, picture, video, audio, canvas | 1* | ⚠️ |
 | **Tables** | table, tr, td, th, thead, tbody, tfoot | 0 | ❌ |
 | **Layout** | grid, flexbox, float, position | 0 | ❌ |
-| **Styling** | borders, shadows, gradients, transforms | 0 | ❌ |
+| **Styling** | borders, shadows, gradients, transforms | 1* | ⚠️ |
 | **Interactions** | hover, active, focus, disabled states | 0 | ❌ |
 
 *Web rendering has image test, but not combinations with other items
