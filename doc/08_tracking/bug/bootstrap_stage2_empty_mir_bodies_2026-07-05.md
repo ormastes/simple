@@ -284,3 +284,43 @@ The remaining blocker is narrower: the same-module `Var(symbol)` call to
 resolution recover the symbol table name for `Var(symbol)` bootstrap calls,
 then use the bootstrap return-type table for that name. Do not keep retrying the
 same Stage 2 probe until that source change exists.
+
+## 2026-07-06 Side Research: current fix plan and non-fixes
+
+Latest local bootstrap evidence still splits into two independent problems:
+
+1. **Correctness blocker:** Stage 2 is still blocked before a clean
+   self-hosted compiler exists. The bounded probe reaches real bootstrap bodies
+   (`functions:count 6`) and then fails in LLVM lowering with invalid direct-call
+   IR (`call i64 0()` / wrong return type for same-module helper calls). The next
+   source fix remains the narrow one above: make bootstrap `Var(symbol)` direct
+   calls recover the callee's function name and return type instead of lowering
+   through numeric const operands.
+2. **Performance blocker:** `--threads`/`--jobs` are now wired through the shell
+   script and CLI, but native module compilation is still effectively serial.
+   `driver_aot_output.spl` calls `ParallelBuilder.build(...)`; that method marks
+   a chunk as in-progress and then calls `compile_fn(build_unit.path)` in a
+   normal loop. A live `ps -L` check showed one hot `simple-main` thread while
+   service threads were idle. The shell script is not the parallel bottleneck.
+
+Do **not** treat `--threads` plumbing as a bootstrap speed fix. It is only a
+resource policy surface until the driver has a real parallel backend.
+
+### Fix order
+
+1. Fix `Var(symbol)` bootstrap call lowering in
+   `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` so
+   same-module calls to `get_cli_args`, `bootstrap_output_from_args`, and sibling
+   helpers lower as named function-pointer calls with the bootstrap return-type
+   table. Add/extend the focused MIR lowering spec before rerunning Stage 2.
+2. Rerun one bounded Stage 2 probe. If it reaches a new `llc` diagnostic, record
+   the preserved IR path and fix that next diagnostic. Stop after one new
+   diagnostic; repeated identical probes waste time.
+3. Only after Stage 2 produces a real binary, address speed. The safe parallel
+   route is process-level work with serialized per-module inputs/outputs. The
+   existing `build_parallel(spawn_fn, collect_fn)` cannot be used by simply
+   passing the current in-memory `_compile_one_module(ctx, ...)` closure across
+   processes. In-process `thread_spawn` around the shared driver context is not
+   accepted until the compiler/backend state is proven thread-safe.
+4. Re-enable full bootstrap/redeploy only after Stage 2 and Stage 3 both produce
+   executable artifacts and the redeploy gate passes on the candidate binary.

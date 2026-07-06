@@ -54,6 +54,24 @@ runs, and is there any self-host **feature gap**? If the full build is tractable
 (< ~40 min) and gate-passes, redeploy is one clean build away. If it's perf-blocked,
 the deferred task is to make `bin/simple` native-build fast enough (caching/perf).
 
+### 2026-07-06 update: fix correctness before speed
+
+Current local research shows the redeploy path is blocked by correctness first,
+not by the shell script scheduler. `bootstrap-from-scratch.sh` now passes
+`--threads`, but Stage 2 still fails before producing a compiler, then Stage 3
+has no executable and Stage 4 falls back to the seed. The active Stage 2 fix is
+tracked in `doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md`:
+bootstrap same-module `Var(symbol)` calls must lower to named function-pointer
+calls with the correct bootstrap return types instead of invalid numeric callees.
+
+The observed speed issue is real but separate. `ParallelBuilder.build()` still
+executes each ready chunk item serially inside one native-build worker, so
+`--threads 16` leaves one hot `simple-main` thread and idle service threads.
+Do not spend more time tuning `--jobs` until Stage 2 is green. After correctness
+is fixed, parallelism should be implemented as process-level per-module work
+with serialized inputs/outputs; do not wrap the current shared driver context in
+threads without proving backend state safety.
+
 ## Gate hygiene
 `scratchpad/payload_check.spl` / `qmark_check.spl` were restored to use **custom
 enums** (`enum Payload{Present(int),Absent}` etc.) — built-in `Result`/`Ok`/`Err`/`?`
