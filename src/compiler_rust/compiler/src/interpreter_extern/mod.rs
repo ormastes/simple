@@ -475,6 +475,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_array_new", sffi_array::rt_array_new_fn);
     insert_simple!("rt_array_new_with_cap", sffi_array::rt_array_new_with_cap_fn);
     insert_simple!("rt_array_new_with_cap_text", sffi_array::rt_array_new_with_cap_fn);
+    insert_simple!("rt_array_new_with_cap_u64", sffi_array::rt_array_new_with_cap_fn);
     insert_simple!("rt_array_pop", sffi_array::rt_array_pop_fn);
     insert_simple!("rt_array_push", sffi_array::rt_array_push_fn);
     insert_simple!("rt_array_repeat", sffi_array::rt_array_repeat_fn);

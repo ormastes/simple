@@ -19,6 +19,7 @@ use common.ui.wm_app_process_contract.{
     WIDGET_SHOWCASE_APP_SOURCE,
     wm_fs_app_event,
     wm_fs_app_event_encode,
+    wm_fs_app_event_seq_path,
     wm_fs_bridge_decode,
     wm_widget_showcase_client_env,
     wm_widget_showcase_event_path,
@@ -78,7 +79,8 @@ describe "WM showcase live wrapper source contract":
     it "routes real Winit mouse events into the shared host compositor":
         val s = src()
         expect(s).to_contain("fn apply_wm_input")
-        expect(s).to_contain("winit_wait_input(lp, wait_ms)")
+        expect(s).to_contain("winit_poll_input(lp)")
+        expect(s).to_contain("idle_sleep_ms")
         expect(s).to_contain("host_compositor_pointer_move")
         expect(s).to_contain("host_compositor_left_button_at")
         expect(s).to_contain("input.click_buttons")
@@ -130,6 +132,7 @@ describe "WM showcase live wrapper source contract":
         val s = src()
         expect(s).to_contain("WM_EVENT_FILE_ENV")
         expect(s).to_contain("wm_fs_app_event_encode")
+        expect(s).to_contain("wm_fs_app_event_seq_path")
         expect(s).to_contain("write_child_pointer_event")
         expect(s).to_contain("child_event_seq")
         expect(s).to_contain("child_local_at")
@@ -139,7 +142,7 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("child_pointer_down")
         expect(s).to_contain("child_drag_forwarding")
         expect(s).to_contain("child_needs_press_stream")
-        expect(s).to_contain("x >= 134 and x < 199")
+        expect(s).to_contain("child_needs_press_stream_at_scale")
         expect(s).to_contain("elif not pressed")
 
     # codex-system-test
@@ -157,7 +160,8 @@ describe "WM showcase live wrapper source contract":
         expect(s.contains("fn widget_button")).to_equal(false)
         expect(s.contains("fn widget_checks")).to_equal(false)
         expect(s.contains("fn draw_showcase_content")).to_equal(false)
-        expect(s).to_contain("rt_winit_buffer_blit_ppm_file")
+        expect(s).to_contain("decode_ppm_to_argb")
+        expect(s).to_contain("rt_winit_buffer_blit_pixels")
         expect(s).to_contain("rt_winit_buffer_draw_text")
         expect(s).to_contain("rt_winit_buffer_present")
         expect(s).to_contain("WmLoopState")
@@ -165,7 +169,10 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("was_dragging")
         expect(s).to_contain("child_refresh_pending")
         expect(s).to_contain("child_refresh_deadline")
-        expect(s).to_contain("val wait_ms = if state.child_refresh_pending: 20 else: 80")
+        expect(s).to_contain("load_child_frame(frame_path")
+        expect(s).to_contain("decode_ppm_to_argb")
+        expect(s).to_contain("rt_winit_buffer_blit_pixels")
+        expect(s).to_contain("val idle_sleep_ms = if state.child_refresh_pending: 8 else: 24")
         expect(s).to_contain("state.dirty = false")
 
     it "keeps native and WM-client modes in the same showcase source file":
@@ -174,6 +181,7 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("fn run_wm_client")
         expect(s).to_contain("wm_app_mode_is_client")
         expect(s).to_contain("wm_widget_showcase_bridge_request_sized")
+        expect(s).to_contain("W + 8, H + 32")
         expect(s).to_contain("winit_window_new")
 
     # codex-system-test
@@ -195,18 +203,19 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("slider_dragging")
         expect(s).to_contain("write_wm_state")
         expect(s).to_contain("button_count={state.button_count}")
-        expect(s).to_contain("SoftwareBackend")
         expect(s).to_contain("frame_scale")
         expect(s).to_contain("ev.x * coord_scale")
         expect(s).to_contain("showcase_state_same")
         expect(s).to_contain("coord_scale > 1")
+        expect(s).to_contain("while drained < 32")
 
     # codex-system-test
     it "refreshes child frames when bridge sequence or progress animation advances":
         val wm = src()
         expect(wm).to_contain("last_frame_seq")
         expect(wm).to_contain("req.frame_seq_path")
-        expect(wm).to_contain("rt_winit_buffer_blit_ppm_file")
+        expect(wm).to_contain("rt_winit_buffer_blit_pixels")
+        expect(wm).to_contain("load_child_frame")
         expect(wm).to_contain("state.dirty = true")
         expect(wm).to_contain("child_frame_refresh")
         expect(wm).to_contain("child_frame_refresh_timeout")
@@ -336,7 +345,10 @@ describe "WM showcase environment behavior":
         expect(file_read_bytes(frame_path).len()).to_be_greater_than(1000)
         val seq_before = file_read_text(seq_path).trim().to_i64() ?? 0
         expect(seq_before).to_be_greater_than(0)
-        file_write(event_path, wm_fs_app_event_encode(wm_fs_app_event(seq_before + 10, "up", 36, 60, 0, false)))
+        val event_seq = seq_before + 10
+        val event_body = wm_fs_app_event_encode(wm_fs_app_event(event_seq, "up", 36, 60, 0, false))
+        file_write(wm_fs_app_event_seq_path(event_path, event_seq), event_body)
+        file_write(event_path, event_body)
         var refresh_wait = 0
         var seq_after = seq_before
         while refresh_wait < 400 and seq_after <= seq_before:
