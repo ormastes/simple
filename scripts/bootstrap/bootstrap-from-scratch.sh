@@ -442,6 +442,7 @@ else
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
+    --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \

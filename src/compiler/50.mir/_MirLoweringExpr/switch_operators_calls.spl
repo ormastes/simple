@@ -398,6 +398,13 @@ impl MirLowering:
             return self.bootstrap_call_return_type(call_name)
         self.resolved_call_return_type(symbol)
 
+    me bootstrap_resolved_call_name(symbol: SymbolId) -> text:
+        val sym = self.symbols.get_symbol(symbol)
+        val symbol_name = if sym.?: sym.name else: ""
+        if symbol_name != "":
+            return symbol_name
+        self.bootstrap_symbol_name(symbol)
+
     me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
         """Lower function call.
 
@@ -439,8 +446,14 @@ impl MirLowering:
         match callee.kind:
             case Var(symbol):
                 # Direct call - use Call instruction
-                val func_operand = self.symbol_to_operand(symbol)
-                val return_type = self.bootstrap_resolved_call_return_type(symbol, "")
+                var func_operand = self.symbol_to_operand(symbol)
+                val call_name = if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1": self.bootstrap_resolved_call_name(symbol) else: ""
+                val return_type = self.bootstrap_resolved_call_return_type(symbol, call_name)
+                if call_name != "":
+                    func_operand = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str(call_name),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: return_type, is_variadic: false)))
+                    ))
                 var b = self.builder
                 val result = b.emit_call(func_operand, arg_operands, return_type)
                 if val result_local = result:
@@ -452,11 +465,11 @@ impl MirLowering:
                     temp
 
             case NamedVar(symbol, callee_name):
+                val return_type = self.bootstrap_resolved_call_return_type(symbol, callee_name)
                 val func_operand = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str(callee_name),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: return_type, is_variadic: false)))
                 ))
-                val return_type = self.bootstrap_resolved_call_return_type(symbol, callee_name)
                 var b = self.builder
                 val result = b.emit_call(func_operand, arg_operands, return_type)
                 if val result_local = result:
