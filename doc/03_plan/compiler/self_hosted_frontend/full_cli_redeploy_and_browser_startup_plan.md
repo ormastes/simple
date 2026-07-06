@@ -41,6 +41,59 @@ acceptance → `spec` regression → interpreter parity. **Acceptance gate per f
 `bin/simple check <currently-failing file>` emits zero `[parser_error]` lines** (the
 warnings that follow are unrelated lint noise and do not fail the file).
 
+### Status (2026-07-07)
+
+- **A1 LANDED** — array-repeat expression `[value; count]` (count may be
+  non-literal). New AST node `EXPR_ARRAY_REPEAT` / `ExprKind.ArrayRepeat(Expr,
+  Expr)` (not desugared to a fill loop — kept as a first-class node so later HIR
+  lowering can choose per-target codegen). `bin/simple check` is clean on
+  `backend_metal.spl` and `window_scene_draw_ir.spl`. Regression:
+  `test/unit/compiler/parser_gap_array_repeat_mut_param_spec.spl` (7/7).
+- **A2 LANDED, peek-guarded** — `mut` parameters (`fn f(mut buf: [u8], ...)`).
+  Opus review of the first patch proved a hardening gap: `mut` lexes as a plain
+  identifier (kind 6), not a reserved word, so `fn f(mut: i32)` (a param literally
+  named `mut`) parsed at base but was silently rejected by an unconditional
+  text-match skip. Fixed in `parser_skip_mut_if_present`
+  (`src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl`) with a
+  one-token peek: save parser+lexer state (`parser_tok_save`/`lex_snapshot_save`,
+  the same idiom `parser_stmts.spl`'s `me`-disambiguation and
+  `parser_expr.spl`'s `try_skip_ident_generic_args` use), advance past `mut`,
+  check whether the *following* token is itself a valid parameter-name token
+  (identifier or `self`), then restore and only actually consume `mut` when that
+  holds. Verified both directions: `fn f(mut: i32)` parses (base behavior
+  restored) and `fn g(mut buf: [u8], ...)` still parses (patch's original goal).
+  `bin/simple check` is clean on `backend_metal.spl`, `window_scene_draw_ir.spl`,
+  and `pattern_dispatch.spl`.
+- **A3 DEFERRED — corrected premise.** Originally scoped as "parser accepts
+  destructuring `val`, add HIR let-lowering." The corrected finding: this is
+  *not* parser-only — irrefutable destructuring `val PATTERN = EXPR` already
+  parses fine today (interpreter path), and **still fails downstream** with HIR
+  reporting "complex patterns not yet supported in let bindings." So even a
+  parser-side fix would not unblock a native-build; the real gap is end-to-end
+  pattern-let lowering, which needs (per the implementer's report):
+  1. Extend the HIR let-binding lowering to accept irrefutable enum/struct/tuple
+     patterns (not just plain identifiers), expanding `val PATTERN = EXPR` into a
+     temp bind plus per-field/positional extraction statements.
+  2. Thread the extracted bindings' types through the existing type-inference
+     pass so downstream uses of the destructured names type-check.
+  3. Handle nested patterns (tuple-of-struct, struct-of-enum) recursively rather
+     than a single flat level, since real call sites (e.g.
+     `src/std/nogc_sync_mut/env/variables.spl:358`) nest.
+  4. Add interpreter-vs-self-hosted parity spec(s) asserting both `run` and
+     `check`/`native-build` accept and lower the same construct identically
+     (Track A's stated trap: divergence, not "parser is stricter").
+  - **Reviewer's broader lowering-gap note (all future Track B items, not just
+    A3):** the array-repeat node landed in A1 is presently **LOUD-unsupported**
+    in the native-build HIR path (it moves the failure from parse-time to
+    HIR-time — `native-build` still cannot compile a file using `[v; n]`, it just
+    fails later and more clearly). Separately, a silent-`NilLit`-substitution
+    gap exists only in the dead `compile_c_entry` stub (not on any live path),
+    and `ArrayRepeat` is absent from the self-hosted `eval.spl` interpreter
+    dispatch table entirely. None of these block A1's stated acceptance gate
+    (`check` clean), but all three are concrete Track B follow-ups: HIR lowering
+    for `ArrayRepeat`, removal/fix of the dead stub, and an `eval.spl` dispatch
+    arm, tracked here so they are not lost.
+
 Each gap is currently reproducible on the deployed binary (2026-07-07):
 
 | Gap | Failing file (verified) | Parser error | Design section |
