@@ -35,7 +35,9 @@ fn emu_draw_image_scaled(mut core: RenderBackend, dst_x: i32, dst_y: i32, dst_w:
     core.draw_image(dst_x, dst_y, dst_w, dst_h, result)
 
 # ============================================================================
-# Box Blur — Separable convolution on framebuffer region
+# Box Blur — full O((2*radius+1)^2) 2D convolution on framebuffer region
+# (NOT separable: each output pixel re-sums the full square tap window rather
+# than a horizontal pass followed by a vertical pass)
 # ============================================================================
 
 fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, radius: i32):
@@ -62,10 +64,14 @@ fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, r
                     val fy = y + py + ky
                     if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
                         val p = fb[fy * fb_w + fx]
-                        sr = sr + color_r(p)
-                        sg = sg + color_g(p)
-                        sb = sb + color_b(p)
-                        sa = sa + color_a(p)
+                        # Inlined color_r/g/b/a (2D-1 perf fix): the tap loop runs
+                        # O((2r+1)^2) times per call, so 4 free-fn dispatches per
+                        # tap add up fast in the interpreter. Same bit math as
+                        # color_r/g/b/a in color.spl, output-identical.
+                        sr = sr + (((p >> 16) & 0xFFu32) as i32)
+                        sg = sg + (((p >> 8) & 0xFFu32) as i32)
+                        sb = sb + ((p & 0xFFu32) as i32)
+                        sa = sa + (((p >> 24) & 0xFFu32) as i32)
                         cnt = cnt + 1
                     kx = kx + 1
                 ky = ky + 1
