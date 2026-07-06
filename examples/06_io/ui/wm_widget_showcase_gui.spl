@@ -27,6 +27,7 @@ extern fn rt_winit_buffer_free(buf: i64) -> bool
 val W: i32 = 660
 val H: i32 = 840
 val ANIM_TICK_INTERVAL_US: i64 = 5000000
+val CHILD_REFRESH_TIMEOUT_US: i64 = 5000000
 val LOCATOR: u32 = 0xFFFF00FFu32
 val MUTED: u32 = 0xFF94A3B8u32
 
@@ -85,6 +86,22 @@ fn read_frame_seq(seq_path: text) -> i64:
     if seq_path == "" or not file_exists(seq_path):
         return 0
     file_read(seq_path).trim().to_i64() ?? 0
+
+fn read_state_value(state_path: text, key: text) -> text:
+    if state_path == "" or not file_exists(state_path):
+        return ""
+    val prefix = key + "="
+    val lines = file_read(state_path).split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.starts_with(prefix):
+            return line.substring(prefix.len(), line.len())
+        i = i + 1
+    ""
+
+fn read_child_state_event_seq(state_path: text) -> i64:
+    read_state_value(state_path, "event_seq").to_i64() ?? -1
 
 fn write_wm_trace(trace_path: text, phase: text):
     if trace_path != "":
@@ -293,8 +310,10 @@ fn apply_wm_input(state: WmLoopState, input: WinitInput, event_path: text, frame
                 my = fy
             if pressed:
                 val loc_down = child_local_at(out, fx, fy, frame_w, frame_h, true)
+                print "[wm-showcase] route_down screen={fx},{fy} child_hit={loc_down.0} local={loc_down.1},{loc_down.2}"
                 if loc_down.0:
                     child_drag_forwarding = child_needs_press_stream(loc_down.1, loc_down.2)
+                    print "[wm-showcase] route_down_stream local={loc_down.1},{loc_down.2} stream={child_drag_forwarding}"
                     if child_drag_forwarding:
                         val before_down_seq = child_seq
                         child_seq = write_child_pointer_event(event_path, child_seq, "down", loc_down.1, loc_down.2, btn, true)
@@ -304,6 +323,7 @@ fn apply_wm_input(state: WmLoopState, input: WinitInput, event_path: text, frame
                     child_down = true
             elif not pressed:
                 val loc_up = child_local_at(out, fx, fy, frame_w, frame_h, false)
+                print "[wm-showcase] route_up screen={fx},{fy} child_hit={loc_up.0} local={loc_up.1},{loc_up.2}"
                 if loc_up.0:
                     val before_up_seq = child_seq
                     child_seq = write_child_pointer_event(event_path, child_seq, "up", loc_up.1, loc_up.2, btn, false)
@@ -412,6 +432,7 @@ fn main() -> i64:
     write_wm_trace(trace_path, "frame_ready")
     val child_event_path = if req.event_path != "": req.event_path else: event_path
     val child_seq_path = if req.frame_seq_path != "": req.frame_seq_path else: seq_path
+    val child_state_path = frame_path + ".state"
     var last_frame_seq = read_frame_seq(child_seq_path)
 
     write_wm_trace(trace_path, "before_loop_new")
@@ -459,25 +480,26 @@ fn main() -> i64:
         state = apply_wm_input(state, input, child_event_path, frame_w, frame_h)
         val now = time_now_unix_micros()
         if state.child_refresh_pending and state.child_refresh_deadline == 0:
-            state.child_refresh_deadline = now + 250000
+            state.child_refresh_deadline = now + CHILD_REFRESH_TIMEOUT_US
         if not state.child_refresh_pending and now - last_anim_tick >= ANIM_TICK_INTERVAL_US:
             val before_tick_seq = state.child_event_seq
             state.child_event_seq = write_child_pointer_event(child_event_path, state.child_event_seq, "tick", 0, 0, 0, false)
             if state.child_event_seq > before_tick_seq:
                 state.child_refresh_pending = true
-                state.child_refresh_deadline = now + 250000
+                state.child_refresh_deadline = now + CHILD_REFRESH_TIMEOUT_US
                 write_wm_trace(trace_path, "tick_sent:{state.child_event_seq}")
             last_anim_tick = now
         var current_frame_seq = last_frame_seq
+        var child_state_event_seq: i64 = -1
         if state.child_refresh_pending:
             current_frame_seq = read_frame_seq(child_seq_path)
-            if current_frame_seq <= last_frame_seq:
+            child_state_event_seq = read_child_state_event_seq(child_state_path)
+            if current_frame_seq <= last_frame_seq or child_state_event_seq < state.child_event_seq:
                 if state.child_refresh_deadline > 0 and now > state.child_refresh_deadline:
-                    print "[wm-showcase] child_frame_refresh_timeout last_seq={last_frame_seq} event_seq={state.child_event_seq}"
-                    write_wm_trace(trace_path, "refresh_timeout:{state.child_event_seq}")
-                    state.child_refresh_pending = false
-                    state.child_refresh_deadline = 0
-        if state.child_refresh_pending and current_frame_seq > last_frame_seq:
+                    print "[wm-showcase] refresh_wait target_event={state.child_event_seq} child_event={child_state_event_seq} frame_seq={current_frame_seq} last_frame_seq={last_frame_seq}"
+                    write_wm_trace(trace_path, "refresh_wait:{state.child_event_seq}:{child_state_event_seq}:{current_frame_seq}")
+                    state.child_refresh_deadline = now + CHILD_REFRESH_TIMEOUT_US
+        if state.child_refresh_pending and current_frame_seq > last_frame_seq and child_state_event_seq >= state.child_event_seq:
             val refreshed = load_child_frame(frame_path, req.window_w - 8, req.window_h - 32)
             if refreshed.0:
                 frame_w = refreshed.1
@@ -488,13 +510,11 @@ fn main() -> i64:
                 state.child_refresh_pending = false
                 state.child_refresh_deadline = 0
                 write_wm_trace(trace_path, "frame_refresh:{last_frame_seq}")
-                print "[wm-showcase] child_frame_refresh seq={last_frame_seq} size={frame_w}x{frame_h}"
+                print "[wm-showcase] refresh_load frame_seq={last_frame_seq} target_event={state.child_event_seq} child_event={child_state_event_seq} size={frame_w}x{frame_h}"
             elif state.child_refresh_deadline > 0 and now > state.child_refresh_deadline:
-                print "[wm-showcase] child_frame_decode_timeout seq={current_frame_seq} last_seq={last_frame_seq}"
+                print "[wm-showcase] child_frame_decode_wait seq={current_frame_seq} last_seq={last_frame_seq} target_event={state.child_event_seq} child_event={child_state_event_seq}"
                 write_wm_trace(trace_path, "decode_timeout:{current_frame_seq}")
-                last_frame_seq = current_frame_seq
-                state.child_refresh_pending = false
-                state.child_refresh_deadline = 0
+                state.child_refresh_deadline = now + CHILD_REFRESH_TIMEOUT_US
         if state.dirty:
             if not render_and_present(win, buf, state.comp, frame_w, frame_h, frame_pixels, "hold"):
                 cleanup(child_pid, buf, win, lp)
