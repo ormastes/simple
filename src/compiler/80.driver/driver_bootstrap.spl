@@ -45,6 +45,15 @@ pub fn bootstrap_llvm_opt_level(opt_level_i64: i64) -> OptimizationLevel:
     else:
         OptimizationLevel.Aggressive
 
+pub fn bootstrap_llvm_ir_path_from_object_path(obj_path: text) -> text:
+    if obj_path.ends_with(".o"):
+        obj_path.slice(0, obj_path.len() - 1) + "ll"
+    else:
+        obj_path + ".ll"
+
+pub fn bootstrap_llvm_phase_message(phase: text, subject: text, detail: text) -> text:
+    "Bootstrap LLVM {phase} failed ({subject}): {detail}"
+
 pub fn bootstrap_symbol_for_name(name: text) -> SymbolId:
     if name == "bootstrap_version":
         return SymbolId(id: 1)
@@ -164,6 +173,8 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
     """Emit LLVM for bootstrap MIR functions from the local driver module instance."""
     log_phase("aot:bootstrap_real_llvm:start")
     val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
+    val temp_obj = llvm_bootstrap_last_object_path()
+    val temp_ir = bootstrap_llvm_ir_path_from_object_path(temp_obj)
     var translator = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
     translator.builder.emit_module_header()
     translator.emit_runtime_declarations()
@@ -183,13 +194,19 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
     val result = compile_ir_to_object(llvm_ir, config, bootstrap_llvm_opt_level(opt_level_i64))
     if result.is_err():
         val err = result.unwrap_err()
-        return CompileResult.CodegenError("Bootstrap real LLVM compile failed: {err}")
-    val bootstrap_obj = llvm_bootstrap_last_object_path()
+        return CompileResult.CodegenError(bootstrap_llvm_phase_message("llc", "ir={temp_ir} obj={temp_obj}", err))
+    val bootstrap_obj = temp_obj
     val obj_path = output + ".app.cli.bootstrap_main.o"
     if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
         log_phase("aot:bootstrap_real_llvm:copied_obj")
         return CompileResult.Success(obj_path)
-    CompileResult.CodegenError("Bootstrap real LLVM did not preserve an object file")
+    CompileResult.CodegenError(
+        bootstrap_llvm_phase_message(
+            "object",
+            "source={bootstrap_obj} dest={obj_path}",
+            "Bootstrap real LLVM did not preserve an object file"
+        )
+    )
 
 pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, opt_level_i64: i64) -> CompileResult:
     """Emit LLVM for the bootstrap MIR module returned through CompileContext."""
@@ -197,6 +214,8 @@ pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, o
     if module.functions.len() == 0:
         return CompileResult.CodegenError("Bootstrap module LLVM has no MIR functions")
     val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
+    val temp_obj = llvm_bootstrap_last_object_path()
+    val temp_ir = bootstrap_llvm_ir_path_from_object_path(temp_obj)
     var translator = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
     translator.builder.emit_module_header()
     translator.emit_runtime_declarations()
@@ -219,13 +238,19 @@ pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, o
     val result = compile_ir_to_object(llvm_ir, config, bootstrap_llvm_opt_level(opt_level_i64))
     if result.is_err():
         val err = result.unwrap_err()
-        return CompileResult.CodegenError("Bootstrap module LLVM compile failed: {err}")
-    val bootstrap_obj = llvm_bootstrap_last_object_path()
+        return CompileResult.CodegenError(bootstrap_llvm_phase_message("llc", "ir={temp_ir} obj={temp_obj}", err))
+    val bootstrap_obj = temp_obj
     val obj_path = output + ".app.cli.bootstrap_main.o"
     if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
         log_phase("aot:bootstrap_real_llvm_module:copied_obj")
         return CompileResult.Success(obj_path)
-    CompileResult.CodegenError("Bootstrap module LLVM did not preserve an object file")
+    CompileResult.CodegenError(
+        bootstrap_llvm_phase_message(
+            "object",
+            "source={bootstrap_obj} dest={obj_path}",
+            "Bootstrap module LLVM did not preserve an object file"
+        )
+    )
 
 pub fn bootstrap_emit_driver_stub_llvm_object(output: text, opt_level_i64: i64) -> CompileResult:
     """Fail closed: bootstrap LLVM stubs are not valid compiler artifacts."""
@@ -254,12 +279,20 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
         val compiled = compile_bootstrap_module_with_backend(backend_name, is_release, opt_level)
         if compiled.is_err():
             val err = compiled.unwrap_err()
-            return CompileResult.CodegenError("Bootstrap native compile error: {err}")
+            return CompileResult.CodegenError(
+                bootstrap_llvm_phase_message("worker", "backend={backend_name} output={obj_path}", err.message)
+            )
         val bootstrap_obj = llvm_bootstrap_last_object_path()
         if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
             log_phase("aot:bootstrap_native_context:copied_obj")
         else:
-            return CompileResult.CodegenError("Bootstrap backend did not preserve an object file")
+            return CompileResult.CodegenError(
+                bootstrap_llvm_phase_message(
+                    "object",
+                    "source={bootstrap_obj} dest={obj_path}",
+                    "Bootstrap backend did not preserve an object file"
+                )
+            )
     # Both branches above unconditionally emit the bootstrap module object via
     # real LLVM+llc (bootstrap_emit_real_llvm_module_object /
     # compile_bootstrap_module_with_backend), regardless of the requested
@@ -279,7 +312,9 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
         case Ok(_):
             CompileResult.Success(output)
         case Err(e):
-            CompileResult.CodegenError("LLVM native linking failed: {e}")
+            CompileResult.CodegenError(
+                bootstrap_llvm_phase_message("link", "input={obj_path} output={output}", e)
+            )
 
 pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
     """Bootstrap-local real native output path; avoids cross-module driver helper dispatch."""
@@ -309,12 +344,20 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
         val compiled = compile_bootstrap_module_with_backend(backend_name, is_release, opt_level)
         if compiled.is_err():
             val err = compiled.unwrap_err()
-            return CompileResult.CodegenError("Bootstrap native compile error: {err}")
+            return CompileResult.CodegenError(
+                bootstrap_llvm_phase_message("worker", "backend={backend_name} output={obj_path}", err.message)
+            )
         val bootstrap_obj = llvm_bootstrap_last_object_path()
         if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
             log_phase("aot:bootstrap_native_local_real:copied_obj")
         else:
-            return CompileResult.CodegenError("Bootstrap backend did not preserve an object file")
+            return CompileResult.CodegenError(
+                bootstrap_llvm_phase_message(
+                    "object",
+                    "source={bootstrap_obj} dest={obj_path}",
+                    "Bootstrap backend did not preserve an object file"
+                )
+            )
 
     log_phase("aot:bootstrap_native_local_real:link")
     # Same reasoning as compile_bootstrap_context_to_native above: both
@@ -332,4 +375,6 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
         case Ok(_):
             CompileResult.Success(output)
         case Err(e):
-            CompileResult.CodegenError("LLVM native linking failed: {e}")
+            CompileResult.CodegenError(
+                bootstrap_llvm_phase_message("link", "input={obj_path} output={output}", e)
+            )

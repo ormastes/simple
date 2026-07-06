@@ -645,7 +645,9 @@ impl Linter:
     me check_llvm_backend_type_safety(path: String, content: String):
         if not path.contains("src/compiler/70.backend/backend/"):
             return
-        if not path.contains("MirToLlvm") and not path.contains("mir_to_llvm_instructions.spl"):
+        val is_text_llvm = path.contains("MirToLlvm") or path.contains("mir_to_llvm_instructions.spl")
+        val is_llvm_lib = path.contains("llvm_lib_translate")
+        if not is_text_llvm and not is_llvm_lib:
             return
         val lines = content.split("\n")
         var line_num = 1
@@ -656,5 +658,19 @@ impl Linter:
                 val lint = Lint.new("LLVM001", LintLevel.Deny, LintCategory.Correctness,
                     "LLVM result type is read from local metadata without valid_llvm_type guard")
                     .with_fix("Wrap the local type in valid_llvm_type before emitting LLVM call/phi/result text")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+            val maps_raw_signature_return = (trimmed.contains("llvm_type_text(sig.return_type)") or trimmed.contains("type_mapper.map_type(sig.return_type)") or trimmed.contains("tm.map_type(sig.return_type)"))
+            val missing_signature_nil_guard = not trimmed.contains("sig.return_type == nil")
+            val missing_text_llvm_guard = is_text_llvm and not trimmed.contains("valid_llvm_type(")
+            if maps_raw_signature_return and (missing_signature_nil_guard or missing_text_llvm_guard):
+                val lint = Lint.new("LLVM001", LintLevel.Deny, LintCategory.Correctness,
+                    "LLVM signature return type is mapped without an explicit nil/valid type guard")
+                    .with_fix("Guard nil signature returns explicitly and validate mapped LLVM result types")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+            val maps_raw_bootstrap_result = (trimmed.contains("llvm_type_text(body.return_ty)") or trimmed.contains("llvm_type_text(signature.return_type)") or trimmed.contains("llvm_type_text(ret)"))
+            if is_text_llvm and maps_raw_bootstrap_result:
+                val lint = Lint.new("LLVM001", LintLevel.Deny, LintCategory.Correctness,
+                    "LLVM result type metadata is mapped without an explicit nil/valid type guard")
+                    .with_fix("Guard nil result types explicitly and validate mapped LLVM result types")
                 self.results.push(LintResult.new(path, line_num, 0, lint))
             line_num = line_num + 1

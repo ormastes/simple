@@ -118,7 +118,9 @@ bin/simple test && bin/simple build lint
 
 For compiler backend changes, add or refresh focused lint/spec coverage for
 invalid target text such as `call nil`, `phi nil`, `getelementptr nil`, and raw
-LLVM result type metadata. `LLVM001` must stay clean in LLVM emitter files.
+LLVM result type metadata. `LLVM001` must stay clean in LLVM emitter files. If
+changing indirect-call/function-signature lowering, add a focused guard proving
+`sig.return_type == nil` is not mapped through a backend type mapper.
 
 ### Phase 15: Verify + VCS Sync
 - Run `verify` skill — must show STATUS: PASS

@@ -164,7 +164,10 @@ user?.name ?? "Anonymous"      # Optional chaining + nil coalescing
 Compiler backend code must treat `nil` metadata as invalid output. Do not emit
 or cache `nil` as a target type. For LLVM result positions, wrap local/type
 metadata with `valid_llvm_type(...)`; `simple lint` reports `LLVM001` for raw
-`ret_ty`/`phi_ty = self.get_local_type(...)` in LLVM emitters.
+`ret_ty`/`phi_ty = self.get_local_type(...)` in LLVM emitters. For backend
+function signatures, guard `sig.return_type == nil` before mapping it; use the
+destination local type when a call has a destination and explicit `void`/backend
+void only for no-result calls.
 
 ### Operators
 
