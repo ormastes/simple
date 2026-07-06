@@ -1,0 +1,227 @@
+#!/bin/sh
+set -eu
+
+# Differential FUZZER + oracle (cert task C3 — DO-178C/DO-330/DO-333).
+#
+# Generates N random VALID Simple programs over the SOUND language subset (see
+# test/cert/fuzz/fuzz_gen.spl) and, for each, compares the stdout of the
+# tree-walking INTERPRETER (the reference oracle) against the default COMPILED
+# backend on the SAME single binary:
+#     interpret : SIMPLE_EXECUTION_MODE=interpret  <bin> run PROG
+#     compiled  :                                   <bin> run PROG   (default)
+# Every generated program prints a fixed, deterministic value sequence, so ANY
+# stdout divergence is a codegen / optimization defect (a genuine finding). This
+# is a differential oracle: the expected value is never pinned — the interpreter
+# supplies ground truth. Only stdout is compared; stderr (JIT-fallback [INFO],
+# warnings) is discarded.
+#
+# A divergent program is SHRUNK (greedy line-removal that preserves the
+# divergence) and the minimized repro is saved under test/cert/fuzz/repros/.
+#
+# The generator is ALWAYS run under interpret mode: the deployed compiled
+# backend has frozen int()/str() bugs that would corrupt the emitted program
+# text. That corruption is a backend defect but is out of scope for the sound
+# subset under test, so we sidestep it by rendering the program via the oracle.
+#
+# This is NOT stage-4-wall gated (the wall is seed-only); the deployed
+# pure-Simple binary is clean enough for its interpreter to serve as oracle.
+#
+# Usage:
+#   sh scripts/check/cert/fuzz-diff.shs [N] [START_SEED]   # fuzz N programs
+#   sh scripts/check/cert/fuzz-diff.shs --self-test        # prove oracle works
+#   sh scripts/check/cert/fuzz-diff.shs --help
+#
+# Defaults: N=200, START_SEED=1 (deterministic: seed k always yields program k).
+#
+# Exit status:
+#   0  no divergence found over the batch (or self-test passed)
+#   1  at least one interpret-vs-compiled divergence found (a defect), or
+#      self-test failed
+#
+# Env knobs:
+#   SIMPLE_BIN  compiler binary
+#               (default: /home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple)
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
+
+SIMPLE_BIN="${SIMPLE_BIN:-/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple}"
+GEN="$REPO_ROOT/test/cert/fuzz/fuzz_gen.spl"
+REPRO_DIR="$REPO_ROOT/test/cert/fuzz/repros"
+
+usage() { sed -n '3,49p' "$0"; exit 0; }
+
+# generate SEED OUTFILE -> write a random program (interpret mode renders it).
+generate() {
+    SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_BIN" run "$GEN" "$1" 2>/dev/null > "$2"
+}
+
+# run_mode MODE PROG -> prints program stdout (stderr discarded; crash => empty).
+run_mode() {
+    if [ "$1" = interpret ]; then
+        SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_BIN" run "$2" 2>/dev/null || true
+    else
+        env -u SIMPLE_EXECUTION_MODE "$SIMPLE_BIN" run "$2" 2>/dev/null || true
+    fi
+}
+
+# diverges PROG -> 0 (true) iff interpret != compiled AND interpret produced
+# non-empty output (a program that fails in BOTH modes is NOT a divergence — it
+# is an invalid/empty case and must not be counted as a defect).
+INTERP_OUT=""
+COMPILED_OUT=""
+diverges() {
+    INTERP_OUT=$(run_mode interpret "$1")
+    COMPILED_OUT=$(run_mode compiled "$1")
+    [ -n "$INTERP_OUT" ] || return 1
+    [ "$INTERP_OUT" != "$COMPILED_OUT" ]
+}
+
+# shrink PROG_IN PROG_OUT -> greedy line-removal minimizer that keeps only
+# reductions which still diverge (and still run in interpret). Sound: it can
+# never turn a non-divergent program into a "divergent" repro.
+shrink() {
+    _in="$1"; _out="$2"
+    cp "$_in" "$_out"
+    _n=$(wc -l < "$_out")
+    _changed=1
+    while [ "$_changed" -eq 1 ]; do
+        _changed=0
+        _i=1
+        _n=$(wc -l < "$_out")
+        while [ "$_i" -le "$_n" ]; do
+            _cand=$(mktemp)
+            sed "${_i}d" "$_out" > "$_cand"
+            if diverges "$_cand"; then
+                mv "$_cand" "$_out"
+                _changed=1
+                _n=$(wc -l < "$_out")
+            else
+                rm -f "$_cand"
+                _i=$((_i + 1))
+            fi
+        done
+    done
+}
+
+# ---- fuzz batch --------------------------------------------------------------
+run_batch() {
+    _n="${1:-200}"
+    _start="${2:-1}"
+    _tmp=$(mktemp -d)
+    trap 'rm -rf "$_tmp"' EXIT
+
+    printf '== differential fuzzer (interpret oracle vs compiled backend) ==\n'
+    printf 'binary : %s\n' "$SIMPLE_BIN"
+    printf 'gen    : %s\n' "$GEN"
+    printf 'batch  : %d programs, seeds %d..%d\n\n' "$_n" "$_start" "$((_start + _n - 1))"
+
+    _found=0
+    _ran=0
+    _empty=0
+    _seed="$_start"
+    _end=$((_start + _n))
+    while [ "$_seed" -lt "$_end" ]; do
+        _prog="$_tmp/p_$_seed.spl"
+        generate "$_seed" "$_prog"
+        if [ ! -s "$_prog" ]; then
+            _empty=$((_empty + 1))
+            _seed=$((_seed + 1))
+            continue
+        fi
+        if diverges "$_prog"; then
+            _found=$((_found + 1))
+            printf 'DIVERGE   seed=%d\n' "$_seed"
+            printf '  interp  | %s\n' "$(printf '%s' "$INTERP_OUT" | tr '\n' ';')"
+            printf '  compiled| %s\n' "$(printf '%s' "$COMPILED_OUT" | tr '\n' ';')"
+            mkdir -p "$REPRO_DIR"
+            _raw="$REPRO_DIR/diverge_seed_${_seed}.spl"
+            cp "$_prog" "$_raw"
+            _min="$REPRO_DIR/diverge_seed_${_seed}.min.spl"
+            shrink "$_prog" "$_min"
+            printf '  saved   : %s\n' "$_raw"
+            printf '  shrunk  : %s (%d lines)\n' "$_min" "$(wc -l < "$_min")"
+        fi
+        _ran=$((_ran + 1))
+        _seed=$((_seed + 1))
+    done
+
+    printf '\n-- summary: %d generated, %d ran, %d empty/invalid, %d DIVERGENCE(S) --\n' \
+        "$_n" "$_ran" "$_empty" "$_found"
+    if [ "$_found" -ne 0 ]; then
+        printf 'RESULT: DIVERGENCE FOUND (codegen defect(s); repros in %s)\n' "$REPRO_DIR"
+        return 1
+    fi
+    printf 'RESULT: no divergence over batch (interpret == compiled on all ran programs)\n'
+    return 0
+}
+
+# ---- self test ---------------------------------------------------------------
+# Proves the oracle DISCRIMINATES: it must FLAG a program with a known
+# interpret-vs-compiled divergence, must NOT flag an agreeing program, and must
+# NOT count a both-modes-fail program as a divergence.
+self_test() {
+    _tmp=$(mktemp -d)
+    trap 'rm -rf "$_tmp"' EXIT
+    _fail=0
+
+    # (1) agreeing program: both modes print 42 -> must NOT be flagged.
+    _ok="$_tmp/ok.spl"
+    printf 'fn main():\n    print(21 + 21)\n' > "$_ok"
+    printf '== self-test 1: agreeing program (must NOT be flagged) ==\n'
+    if diverges "$_ok"; then
+        printf 'BAD  agreement wrongly flagged (interp=%s compiled=%s)\n\n' "$INTERP_OUT" "$COMPILED_OUT"; _fail=1
+    else
+        printf 'OK   not flagged (interp=%s compiled=%s)\n\n' "$INTERP_OUT" "$COMPILED_OUT"
+    fi
+
+    # (2) KNOWN divergence: built-in Result.unwrap() is frozen-buggy in the
+    #     compiled backend (interp=42, compiled=0.00...). The oracle MUST flag
+    #     it. NOTE: if a redeploy fixes that bug this case stops diverging and
+    #     the self-test FAILS loudly here, signalling the fixture must refresh.
+    _div="$_tmp/div.spl"
+    printf 'fn main():\n    val r = Ok(42)\n    print(r.unwrap())\n' > "$_div"
+    printf '== self-test 2: KNOWN divergence Ok(42).unwrap() (must be flagged) ==\n'
+    if diverges "$_div"; then
+        printf 'OK   flagged (interp=%s compiled=%s)\n\n' "$INTERP_OUT" "$COMPILED_OUT"
+    else
+        printf 'BAD  known divergence NOT detected (interp=%s compiled=%s)\n' "$INTERP_OUT" "$COMPILED_OUT"
+        printf '     -> the deployed backend may have been fixed; refresh this oracle case.\n\n'; _fail=1
+    fi
+
+    # (3) both-modes-fail program: undefined symbol -> empty in both modes ->
+    #     must NOT be counted as a divergence (false-positive guard).
+    _crash="$_tmp/crash.spl"
+    printf 'fn main():\n    print(undefined_symbol_xyz)\n' > "$_crash"
+    printf '== self-test 3: both-modes-fail (must NOT be flagged) ==\n'
+    if diverges "$_crash"; then
+        printf 'BAD  mutual failure wrongly flagged as divergence\n\n'; _fail=1
+    else
+        printf 'OK   mutual failure not flagged (interp empty => skipped)\n\n'
+    fi
+
+    # (4) shrinker soundness: shrink the known-divergent case and confirm the
+    #     minimized output STILL diverges.
+    printf '== self-test 4: shrinker preserves the divergence ==\n'
+    _min="$_tmp/div.min.spl"
+    shrink "$_div" "$_min"
+    if diverges "$_min"; then
+        printf 'OK   shrunk repro still diverges (%d lines)\n\n' "$(wc -l < "$_min")"
+    else
+        printf 'BAD  shrinker destroyed the divergence\n\n'; _fail=1
+    fi
+
+    if [ "$_fail" -ne 0 ]; then
+        printf 'SELF-TEST: FAIL (oracle does not discriminate correctly)\n'
+        return 1
+    fi
+    printf 'SELF-TEST: PASS (flags known divergence, ignores agreement + mutual failure, shrinker sound)\n'
+    return 0
+}
+
+# ---- dispatch ----------------------------------------------------------------
+case "${1:-}" in
+    --help|-h) usage ;;
+    --self-test) self_test ;;
+    *) run_batch "${1:-200}" "${2:-1}" ;;
+esac
