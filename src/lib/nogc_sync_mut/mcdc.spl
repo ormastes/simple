@@ -128,8 +128,14 @@ fn record_evaluation(decision_id: i64, condition_values: [bool], condition_evalu
         return
     var cond_evals: [ConditionEval] = []
     for i in 0..condition_values.len():
-        val mask = if condition_evaluated[i]: -1 else: 0
-        val cond_eval = ConditionEval { condition_id: i, value: condition_values[i], evaluated: condition_evaluated[i], masked_by: mask }
+        # A bool read directly from an array element is (in the current
+        # compiler) always truthy in an if/not context; comparing `== true`
+        # recovers the real value. Normalize on the way into the struct so
+        # every downstream reader sees a correct bool.
+        val v = condition_values[i] == true
+        val ev = condition_evaluated[i] == true
+        val mask = if ev: -1 else: 0
+        val cond_eval = ConditionEval { condition_id: i, value: v, evaluated: ev, masked_by: mask }
         cond_evals.push(cond_eval)
     val eval = DecisionEval { decision_id: decision_id, test_id: _current_test_id, conditions: cond_evals, outcome: outcome, timestamp: 0 }
     _evaluations.push(eval)
@@ -138,7 +144,10 @@ fn analyze_mcdc(decision_id: i64) -> DecisionMCDCResult:
     val decision = get_decision(decision_id)
     if decision == nil:
         return DecisionMCDCResult { decision_id: decision_id, expression: "unknown", location: SourceLoc { file: "", line: 0, column: 0 }, condition_count: 0, conditions_covered: 0, mcdc_percent: 0.0, is_covered: false, condition_results: [], evaluation_count: 0 }
-    val evals = _evaluations.filter(_.decision_id == decision_id)
+    var evals: [DecisionEval] = []
+    for ev in _evaluations:
+        if ev.decision_id == decision_id:
+            evals.push(ev)
     val condition_count = decision.conditions.len()
     var condition_results: [ConditionMCDCResult] = []
     var conditions_covered = 0
@@ -159,36 +168,47 @@ fn _find_independence_pair(cond_idx: i64, evals: [DecisionEval]) -> Independence
         for j in (i+1)..evals.len():
             val eval_a = evals[i]
             val eval_b = evals[j]
-            if eval_a.outcome == eval_b.outcome:
-                continue
-            var only_target_differs = true
-            var target_differs = false
-            for k in 0..eval_a.conditions.len():
-                val cond_a = eval_a.conditions[k]
-                val cond_b = eval_b.conditions[k]
-                if k == cond_idx:
-                    if cond_a.evaluated and cond_b.evaluated:
-                        if cond_a.value != cond_b.value:
-                            target_differs = true
+            # Outcomes must differ for an independence pair. Use an inverted
+            # guard rather than `continue`: the frozen interpreter does not
+            # advance the loop counter on `continue`, which hangs the loop.
+            if eval_a.outcome != eval_b.outcome:
+                var only_target_differs = true
+                var target_differs = false
+                for k in 0..eval_a.conditions.len():
+                    val cond_a = eval_a.conditions[k]
+                    val cond_b = eval_b.conditions[k]
+                    if k == cond_idx:
+                        if cond_a.evaluated and cond_b.evaluated:
+                            if cond_a.value != cond_b.value:
+                                target_differs = true
+                            else:
+                                only_target_differs = false
+                                break
                         else:
-                            only_target_differs = false
-                            break
+                            target_differs = true
                     else:
-                        target_differs = true
-                else:
-                    if cond_a.evaluated and cond_b.evaluated:
-                        if cond_a.value != cond_b.value:
-                            only_target_differs = false
-                            break
-            if only_target_differs and target_differs:
-                return IndependencePair { condition_id: cond_idx, eval_a_idx: i, eval_b_idx: j, condition_values_a: eval_a.conditions.map(_.value), condition_values_b: eval_b.conditions.map(_.value), outcome_a: eval_a.outcome, outcome_b: eval_b.outcome }
+                        if cond_a.evaluated and cond_b.evaluated:
+                            if cond_a.value != cond_b.value:
+                                only_target_differs = false
+                                break
+                if only_target_differs and target_differs:
+                    var vals_a: [bool] = []
+                    for ce in eval_a.conditions:
+                        vals_a.push(ce.value)
+                    var vals_b: [bool] = []
+                    for ce in eval_b.conditions:
+                        vals_b.push(ce.value)
+                    return IndependencePair { condition_id: cond_idx, eval_a_idx: i, eval_b_idx: j, condition_values_a: vals_a, condition_values_b: vals_b, outcome_a: eval_a.outcome, outcome_b: eval_b.outcome }
     nil
 
 fn check_mcdc_coverage(pattern: text, minimum: f64 = 100.0) -> MCDCCoverageResult:
     _validate_mcdc_access()
     if _mcdc_last_error != "":
         return MCDCCoverageResult { passed: false, threshold: minimum, overall_percent: 0.0, decisions_total: 0, decisions_covered: 0, conditions_total: 0, conditions_covered: 0, details: [], files_matched: 0 }
-    val matched = _decisions.filter(_match_pattern(pattern, _.location.file))
+    var matched: [Decision] = []
+    for d in _decisions:
+        if _match_pattern(pattern, d.location.file):
+            matched.push(d)
     if matched.len() == 0:
         _mcdc_error("NoDecisionsMatchedException")
         return MCDCCoverageResult { passed: false, threshold: minimum, overall_percent: 0.0, decisions_total: 0, decisions_covered: 0, conditions_total: 0, conditions_covered: 0, details: [], files_matched: 0 }
@@ -238,7 +258,7 @@ fn mcdc_it(name: text, block: fn()):
 fn print_mcdc_report(pattern: text):
     enable_mcdc_tag()
     val result = check_mcdc_coverage(pattern, minimum: 0.0)
-    print "MC/DC: {result.overall_percent:.1f}% ({result.conditions_covered}/{result.conditions_total})"
+    print "MC/DC: {_mcdc_pct_int(result.conditions_covered, result.conditions_total)}% ({result.conditions_covered}/{result.conditions_total})"
     disable_mcdc_tag()
     clear_mcdc_error()
 
@@ -247,7 +267,7 @@ fn get_mcdc_summary() -> text:
     val result = check_mcdc_coverage("**/*.spl", minimum: 0.0)
     disable_mcdc_tag()
     clear_mcdc_error()
-    "MC/DC: {result.overall_percent:.1f}%"
+    "MC/DC: {_mcdc_pct_int(result.conditions_covered, result.conditions_total)}%"
 
 fn clear_mcdc_data():
     _decisions = []
@@ -298,6 +318,14 @@ fn build_decision_report(decision_id: i64) -> MCDCDecisionReport:
             uncovered_idx.push(cr.condition_id)
     MCDCDecisionReport { decision_id: analysis.decision_id, expression: analysis.expression, condition_count: analysis.condition_count, conditions_covered: analysis.conditions_covered, mcdc_percent: analysis.mcdc_percent, is_covered: analysis.is_covered, covered_conditions: covered_names, uncovered_conditions: uncovered_names, covered_indices: covered_idx, uncovered_indices: uncovered_idx, evaluation_count: analysis.evaluation_count }
 
+# Integer MC/DC percentage. The `:.1f` f64 format specifier currently prints
+# garbage bits, so certification reports render an exact integer percentage
+# derived from the covered/total condition counts instead.
+fn _mcdc_pct_int(covered: i64, total: i64) -> i64:
+    if total <= 0:
+        return 100
+    (covered * 100) / total
+
 fn _join_names(names: [text]) -> text:
     var out = ""
     for i in 0..names.len():
@@ -311,7 +339,7 @@ fn _join_names(names: [text]) -> text:
 fn format_decision_report(decision_id: i64) -> text:
     val rep = build_decision_report(decision_id)
     var s = "Decision #{rep.decision_id}: {rep.expression}\n"
-    s = s + "  MC/DC: {rep.mcdc_percent:.1f}% ({rep.conditions_covered}/{rep.condition_count}), evaluations={rep.evaluation_count}\n"
+    s = s + "  MC/DC: {_mcdc_pct_int(rep.conditions_covered, rep.condition_count)}% ({rep.conditions_covered}/{rep.condition_count}), evaluations={rep.evaluation_count}\n"
     s = s + "  Covered:   {_join_names(rep.covered_conditions)}\n"
     s = s + "  Uncovered: {_join_names(rep.uncovered_conditions)}\n"
     s
@@ -335,3 +363,106 @@ fn track_mcdc_or3(decision_id: i64, a: bool, b: bool, c: bool) -> bool:
     val result = a or b or c
     record_evaluation(decision_id, [a, b, c], [true, not a, not a and not b], result)
     result
+
+# ---------------------------------------------------------------------------
+# Auto-instrumentation runtime.
+#
+# The hand-written track_mcdc_* helpers above only cover fixed 2/3-condition
+# and/or shapes. To make MC/DC MEASURABLE on real programs automatically, an
+# instrumenter (scripts/check/cert/mcdc_instrument.spl) parses each decision's
+# boolean structure into an operator tree, registers it once via
+# register_decision_tree(), and rewrites the decision site to a single
+# mcdc_eval(id, [atom0, atom1, ...]) call. mcdc_eval() replays short-circuit
+# evaluation over the registered tree to derive BOTH the outcome and the
+# per-condition `evaluated` (masking) vector, then records the evaluation.
+#
+# Node kinds: 0 = atom, 1 = not, 2 = and, 3 = or. For atom nodes `atom_index`
+# selects the value; for not/and/or `left`/`right` are node indices (right = -1
+# for `not`). The tree root is the LAST node in the array. Atom order matches
+# the source left-to-right order, which is the order the instrumented call site
+# supplies values in.
+#
+# NOTE: mcdc_eval evaluates all atom values eagerly at the call site, so the
+# masking vector is exact only when the conditions are side-effect free (the
+# normal MC/DC assumption). Coupled conditions are handled via masking MC/DC,
+# identical to the hand-written helpers.
+
+struct MCDCNode:
+    kind: i64
+    atom_index: i64
+    left: i64
+    right: i64
+
+fn mcdc_atom(atom_index: i64) -> MCDCNode:
+    MCDCNode { kind: 0, atom_index: atom_index, left: -1, right: -1 }
+
+fn mcdc_not(child: i64) -> MCDCNode:
+    MCDCNode { kind: 1, atom_index: -1, left: child, right: -1 }
+
+fn mcdc_and(left: i64, right: i64) -> MCDCNode:
+    MCDCNode { kind: 2, atom_index: -1, left: left, right: right }
+
+fn mcdc_or(left: i64, right: i64) -> MCDCNode:
+    MCDCNode { kind: 3, atom_index: -1, left: left, right: right }
+
+var _mcdc_trees: [[MCDCNode]] = []
+# Atom indices that were actually reached (evaluated) during the current
+# mcdc_eval walk. Accumulated by push only: neither array element assignment
+# nor a scratch-buffer index write persists reliably across the interpreter and
+# compiled execution paths, so the reached set is collected as a list instead.
+var _mcdc_reached: [i64] = []
+
+fn register_decision_tree(expression: text, conditions: [text], operator: text, file: text, line: i64, nodes: [MCDCNode]) -> i64:
+    val id = register_decision(expression, conditions, operator, file, line)
+    # Pad with empty trees so nodes lands at index `id`, then push. Only push is
+    # used (element assignment `_mcdc_trees[id] = nodes` does not persist in the
+    # compiled path).
+    while _mcdc_trees.len() < id:
+        _mcdc_trees.push([])
+    _mcdc_trees.push(nodes)
+    id
+
+# Fully traverses the tree (no early return). `reached` marks whether this
+# subtree is actually evaluated under left-to-right short-circuit; only reached
+# atoms are recorded, giving the masking vector. Returned bool is the subtree's
+# logical value; a masked subtree's value is never used by its parent.
+fn _walk_mcdc_node(nodes: [MCDCNode], idx: i64, values: [bool], reached: bool) -> bool:
+    val node = nodes[idx]
+    if node.kind == 0:
+        if reached:
+            _mcdc_reached.push(node.atom_index)
+        # `== true` normalizes an array-bool read (always-truthy bug workaround).
+        return values[node.atom_index] == true
+    if node.kind == 1:
+        val c = _walk_mcdc_node(nodes, node.left, values, reached)
+        return not c
+    if node.kind == 2:
+        val l = _walk_mcdc_node(nodes, node.left, values, reached)
+        val r = _walk_mcdc_node(nodes, node.right, values, reached and l)
+        return l and r
+    # kind == 3 (or)
+    val l = _walk_mcdc_node(nodes, node.left, values, reached)
+    val r = _walk_mcdc_node(nodes, node.right, values, reached and (not l))
+    return l or r
+
+fn mcdc_eval(decision_id: i64, atom_values: [bool]) -> bool:
+    if decision_id < 0 or decision_id >= _mcdc_trees.len():
+        return false
+    val nodes = _mcdc_trees[decision_id]
+    if nodes.len() == 0:
+        return false
+    _mcdc_reached = []
+    val outcome = _walk_mcdc_node(nodes, nodes.len() - 1, atom_values, true)
+    var mask: [bool] = []
+    for i in 0..atom_values.len():
+        var found = false
+        for r in _mcdc_reached:
+            if r == i:
+                found = true
+        mask.push(found)
+    record_evaluation(decision_id, atom_values, mask, outcome)
+    outcome
+
+fn clear_mcdc_trees():
+    _mcdc_trees = []
+    _mcdc_reached = []
