@@ -14,9 +14,10 @@
 - marker state: probe:true web:true backend:true present:true mdi:true windows:true top:true taskbar:true html:true render:true
 - QMP capture: pass (pass; method=human-monitor-command)
 - PPM validation: pass (pass)
-- PPM: build/simpleos_wm_visible_display_goal_20260706_knowncodes/qmp-visible-display.ppm 1024x768, nonblack=778810, unique_colors=20
+- PPM: build/simpleos_wm_visible_display_simple_gui_shared/qmp-visible-display.ppm 1024x768, nonblack=778810, unique_colors=20
 - taskbar/item pixels: colored=17388, runs=7, sampled_regions=5
+- readable text glyph matches: 1956 / 1988
 - cleanup: pass (pass; qemu=terminated, qmp_socket=absent)
-- serial log: build/simpleos_wm_visible_display_goal_20260706_knowncodes/serial.log
-- QEMU stderr: build/simpleos_wm_visible_display_goal_20260706_knowncodes/qemu.stderr.log
-- command: `qemu-system-x86_64 -no-user-config -monitor none -net none -machine q35 -cpu qemu64 -m 2G -serial file:build/simpleos_wm_visible_display_goal_20260706_knowncodes/serial.log -display cocoa -no-reboot -kernel build/os/simpleos_wm_simple_web_check_32.elf -vga std -device isa-debug-exit,iobase=0xf4,iosize=0x04 -qmp unix:/tmp/simpleos_wm_visible_9433_qmp.sock,server,nowait`
+- serial log: build/simpleos_wm_visible_display_simple_gui_shared/serial.log
+- QEMU stderr: build/simpleos_wm_visible_display_simple_gui_shared/qemu.stderr.log
+- command: `qemu-system-x86_64 -no-user-config -monitor none -net none -machine q35 -cpu qemu64 -m 2G -serial file:build/simpleos_wm_visible_display_simple_gui_shared/serial.log -display cocoa -no-reboot -kernel build/os/simpleos_wm_simple_web_check_32.elf -vga std -device isa-debug-exit,iobase=0xf4,iosize=0x04 -qmp unix:/tmp/simpleos_wm_visible_52704_qmp.sock,server,nowait`

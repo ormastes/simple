@@ -1,6 +1,8 @@
 # Simple GUI Internal Window Implementation Spec
 
-Status: handoff for next WM/SimpleOS agent, 2026-07-06.
+Status: bridge implemented, 2026-07-06. A fuller Draw IR executor can replace
+the current framebuffer executor later without changing the Simple GUI scene
+contract.
 
 ## Goal
 
@@ -8,29 +10,26 @@ The WM must use the Simple GUI core for internal windows. Host WM and SimpleOS
 WM must differ only in backend/config glue; they must not keep separate dummy
 or evidence-only window renderers.
 
-## Current Handoff
+## Implemented Bridge
 
 - `src/lib/common/ui/window_scene.spl` now exposes:
   - `simple_gui_internal_window(...)`
   - `simple_gui_internal_window_scene(...)`
   - `simple_gui_internal_window_renderer_handoff_marker()`
-- The marker is intentionally a handoff marker, not the final renderer API.
-- `src/os/compositor/shared_mdi_framebuffer_scene.spl` still owns too much
-  scene/window drawing logic. The next change should make it consume
-  `SharedWmScene` from `common.ui.window_scene`.
+- `src/os/compositor/shared_mdi_framebuffer_scene.spl` now converts MDI seed and
+  lifecycle windows through `SharedWmScene` before rendering framebuffer pixels.
+- Existing host and QEMU callers can keep using the legacy
+  `SharedMdiRenderWindow` entrypoints while the internal boundary is
+  `common.ui.window_scene`.
 
-## Required Implementation
+## Follow-up Implementation
 
-1. Add a Simple GUI drawing facade for internal windows under `common.ui`, or
-   extend `window_scene_draw_ir.spl` with a framebuffer/CompositorBackend
-   executor if that fits the existing Draw IR path.
-2. Convert `shared_mdi_seed_windows()` to create `SharedWmWindow` values through
-   `simple_gui_internal_window(...)`.
-3. Convert `render_shared_mdi_framebuffer_scene_for_windows(...)` and lifecycle
-   rendering to consume `SharedWmScene` through the Simple GUI facade.
-4. Keep QEMU SimpleOS fullscreen and host WM evidence on the same scene/render
+1. Move more chrome/content drawing out of
+   `shared_mdi_framebuffer_scene.spl` into a `common.ui` framebuffer or Draw IR
+   executor when that layer can depend on a backend-neutral draw target.
+2. Keep QEMU SimpleOS fullscreen and host WM evidence on the same scene/render
    model.
-5. Preserve current readable-text evidence. Do not replace it with a fake,
+3. Preserve current readable-text evidence. Do not replace it with a fake,
    smaller framebuffer, dummy window labels, or reduced-resolution shortcut.
 
 ## Verification
