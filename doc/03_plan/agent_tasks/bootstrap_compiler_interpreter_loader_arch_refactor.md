@@ -10,6 +10,22 @@ interpreter load path, and loader/SMF path. This is an architecture and
 ownership lane first; code edits should stay in their lane-specific plans until
 interfaces are agreed.
 
+Current status, 2026-07-06:
+
+- Bootstrap policy is documented in
+  `doc/02_requirements/app/build/bootstrap.md`.
+- `scripts/bootstrap/bootstrap-from-scratch.sh` already defaults to `dynload`,
+  accepts only `dynload` and `one-binary`, and gates cargo behind
+  `--full-bootstrap`.
+- Dependency tracing is conservative rather than precise: it invalidates the
+  native cache on compiler/app/lib source hashes plus AOP, MDSOC/weaving,
+  loader, interpreter, execution, library, and native-build `SIMPLE_*` knobs.
+- Remaining architecture work is Track B-D below: public compiler layer
+  facades, interpreter loader alignment, and shared loader/SMF contracts.
+- Current known bootstrap blocker remains stage 2/3 self-host verification
+  instability, tracked in
+  `doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md`.
+
 Primary areas:
 
 - `scripts/bootstrap/`
@@ -44,6 +60,8 @@ Primary areas:
   monolithic mode.
 - Dependency tracing must be conservative around AOP/MDSOC weaving, loader ABI,
   interpreter adapters, compiler ABI, and runtime-family boundary changes.
+- Rust seed tooling must identify itself with a `WARNING` on direct use and
+  must not become the default tool path.
 
 ## Work Split
 

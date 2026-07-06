@@ -13,12 +13,6 @@ fn seed_warning_suppressed_with_env(args: &[String], rust_seed_warning: Option<&
     if bootstrap == Some("1") {
         return true;
     }
-    if matches!(
-        args.first().map(String::as_str),
-        Some("-h" | "--help" | "-v" | "--version")
-    ) {
-        return true;
-    }
     args.iter().any(|arg| arg == "--seed-ok" || arg == "--rust-seed-ok")
 }
 
@@ -36,11 +30,9 @@ mod tests {
     }
 
     #[test]
-    fn suppresses_seed_warning_for_bootstrap_help_version_and_ack_flags() {
+    fn suppresses_seed_warning_for_bootstrap_and_ack_flags() {
         assert!(seed_warning_suppressed_with_env(&args(&["check"]), Some("0"), None));
         assert!(seed_warning_suppressed_with_env(&args(&["check"]), None, Some("1")));
-        assert!(seed_warning_suppressed_with_env(&args(&["--help"]), None, None));
-        assert!(seed_warning_suppressed_with_env(&args(&["--version"]), None, None));
         assert!(seed_warning_suppressed_with_env(
             &args(&["check", "--rust-seed-ok"]),
             None,
@@ -55,5 +47,7 @@ mod tests {
             None,
             None
         ));
+        assert!(!seed_warning_suppressed_with_env(&args(&["--help"]), None, None));
+        assert!(!seed_warning_suppressed_with_env(&args(&["--version"]), None, None));
     }
 }

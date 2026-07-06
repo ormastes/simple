@@ -138,6 +138,7 @@ Direct commands behind the wrapper:
 
 ```bash
 scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
+scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary
 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
 sha256sum bootstrap/simple_stage2 bootstrap/simple_stage3
 ```

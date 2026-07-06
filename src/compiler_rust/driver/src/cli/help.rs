@@ -1,7 +1,5 @@
 //! Help and version information for the Simple CLI.
 
-use crate::seed_warning::print_seed_warning;
-
 /// Version from VERSION file (set by build.rs), falls back to Cargo.toml
 const VERSION: &str = match option_env!("SIMPLE_VERSION") {
     Some(v) if !v.is_empty() => v,
@@ -9,8 +7,6 @@ const VERSION: &str = match option_env!("SIMPLE_VERSION") {
 };
 
 pub fn print_help() {
-    print_seed_warning();
-    eprintln!();
     eprintln!("Simple Language v{}", VERSION);
     eprintln!();
     eprintln!("Usage:");
@@ -338,7 +334,6 @@ mod tests {
 }
 
 pub fn print_version() {
-    print_seed_warning();
     println!("Simple Language v{}", VERSION);
 }
 

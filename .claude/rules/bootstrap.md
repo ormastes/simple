@@ -32,7 +32,7 @@ bootstrap). The Rust seed (`src/compiler_rust/target/bootstrap/simple`) is
 - **`bin/release/simple` is fully self-sufficient** — in-process compilation, no subprocess calls
 - External tool calls: `clang`/`clang++`/`cl.exe`, `gcc`, `mold`/`lld`/`link.exe`, `llc`, `uname`/`cmd`, `which`/`where`
 
-## Incremental: rebuild ONLY pure-Simple
+## Incremental: Rebuild Only Pure-Simple
 Normal bootstrap is pure-Simple-only. It reuses the existing Rust seed/runtime
 and does not run cargo, even when Rust source hashes changed:
 ```bash
@@ -46,9 +46,17 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   a Rust feature the seed lacks — rerun with `--full-bootstrap`.
 - Combine with `--deploy` to swap `bin/release/<triple>/simple` (same smoke gate).
 - Pure-Simple build modes:
-  - `dynload` (default): reuse `.simple/native_cache` unless compiler/AOP/loader
+  - `dynload` (default): reuse `build/bootstrap/native_cache` unless compiler/AOP/loader
     inputs changed; native-build emits native plus SMF cache where supported.
   - `one-binary`: clear native cache and build the monolithic native executable.
+- Dependency tracing intentionally over-invalidates around AOP/MDSOC weaving,
+  loader ABI, interpreter adapters, execution mode, library path, and
+  native-build environment knobs. Do not narrow this to import edges until the
+  AOP and loader contracts expose stable cache keys.
+- Direct Rust seed execution prints a `WARNING`; suppress it only for bootstrap
+  automation (`SIMPLE_BOOTSTRAP=1`), explicit seed maintenance
+  (`SIMPLE_RUST_SEED_WARNING=0`), or an acknowledged seed command
+  (`--seed-ok` / `--rust-seed-ok`).
 
 ## Bootstrap Commands
 ```bash

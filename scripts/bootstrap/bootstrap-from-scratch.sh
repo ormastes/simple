@@ -429,6 +429,11 @@ echo "  platform: ${PLATFORM}"
 echo "  backend:  ${backend}"
 echo "  ps-mode:  ${bootstrap_mode}"
 echo "  output:   ${output_dir}"
+if [ "${full_bootstrap}" -eq 1 ]; then
+  echo "  rust:     full-bootstrap enabled; seed/runtime may be rebuilt"
+else
+  echo "  rust:     seed/runtime reuse only; cargo disabled"
+fi
 
 if [ "${can_full_bootstrap}" -eq 1 ]; then
   # Full CLI available — use high-level staged bootstrap
