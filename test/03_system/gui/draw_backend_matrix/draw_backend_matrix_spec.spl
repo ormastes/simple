@@ -56,6 +56,8 @@ use std.spec.*
 use std.io_runtime.{env_set}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.color.{rgba}
+use std.gc_async_mut.gpu.engine2d.backend_directx.{DirectXBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use test.helpers.gpu_draw_event_shared.{assert_color_eq, read_pixels_ppm}
 
 val CANVAS_W: i32 = 32
@@ -92,6 +94,83 @@ fn draw_apply_and_verify(eng: Engine2D):
     expect(ppm[1]).to_equal(54u8)
 
     eng.shutdown()
+
+# ---------------------------------------------------------------------------
+# Extended-primitive parity body (DirectX/Vulkan drawing-op parity with the
+# checked Metal surface): rounded_rect outline, gradient linear-H, radial
+# gradient, shadow, and scaled/transform image. Coordinates are picked from
+# the shared backend_emu.spl/backend_emu_adv.spl per-pixel algorithms so every
+# assertion is an EXACT absolute oracle, not a "some pixel changed" proxy:
+#   - gradient_rect_h: column 0 == left_color exactly, last column ==
+#     right_color exactly (backend_emu.spl:585-590, lerp reaches the endpoint
+#     exactly at col=0 and col=w-1).
+#   - radial_gradient: center pixel (dist=0) == center_color exactly
+#     (backend_emu.spl:613-621).
+#   - shadow_rect with blur_r=0: a flat offset rect_filled, interior == color
+#     exactly, and the un-offset corner stays background (backend_emu_adv.spl
+#     emu_draw_shadow_rect).
+#   - image_scaled / image_transform with a uniform source block: every
+#     covered destination pixel == that source color exactly.
+val EXT_W: i32 = 40
+val EXT_H: i32 = 30
+val EXT_BG: u32 = rgba(2, 2, 2, 255)
+val EXT_A: u32 = rgba(200, 0, 0, 255)
+val EXT_B: u32 = rgba(0, 0, 200, 255)
+val EXT_C: u32 = rgba(0, 200, 0, 255)
+val EXT_D: u32 = rgba(220, 220, 0, 255)
+val EXT_E: u32 = rgba(0, 220, 220, 255)
+
+fn assert_directx_extended_ops():
+    var b = DirectXBackend.create()
+    if not b.init(EXT_W, EXT_H):
+        step("host-unavailable(directx): fail-closed checkpoint, not a silent skip")
+        expect(b.last_error.len()).to_be_greater_than(0)
+        return
+    b.clear(EXT_BG)
+    b.draw_rounded_rect_outline(2, 2, 10, 8, 2, EXT_A, 1)
+    b.draw_gradient_rect_h(14, 2, 8, 6, EXT_A, EXT_B)
+    b.draw_radial_gradient(28, 5, 4, EXT_C, EXT_B)
+    b.draw_shadow_rect(2, 14, 6, 6, 1, 1, 0, EXT_D)
+    b.draw_image_scaled(10, 14, 4, 4, 2, 2, [EXT_E, EXT_E, EXT_E, EXT_E])
+    b.draw_image_transform(20, 14, 2, 2, 256, 0, 0, 256, 0, 0, [EXT_D, EXT_D, EXT_D, EXT_D])
+    b.present()
+    val px = b.read_pixels()
+    assert_color_eq(px_at(px, EXT_W, 6, 2), EXT_A)            # rounded_rect_outline straight top edge
+    assert_color_eq(px_at(px, EXT_W, 7, 6), EXT_BG)           # interior stays background (outline only)
+    assert_color_eq(px_at(px, EXT_W, 14, 4), EXT_A)           # gradient_h left column == left_color exactly
+    assert_color_eq(px_at(px, EXT_W, 21, 4), EXT_B)           # gradient_h right column == right_color exactly
+    assert_color_eq(px_at(px, EXT_W, 28, 5), EXT_C)           # radial gradient center == center_color exactly
+    assert_color_eq(px_at(px, EXT_W, 5, 17), EXT_D)           # shadow interior (offset by 1,1)
+    assert_color_eq(px_at(px, EXT_W, 2, 14), EXT_BG)          # pre-offset corner stays background
+    assert_color_eq(px_at(px, EXT_W, 11, 15), EXT_E)          # image_scaled uniform block
+    assert_color_eq(px_at(px, EXT_W, 21, 15), EXT_D)          # image_transform identity-mapped pixel
+    b.shutdown()
+
+fn assert_vulkan_extended_ops():
+    var b = VulkanBackend.create()
+    if not b.init(EXT_W, EXT_H):
+        step("host-unavailable(vulkan): fail-closed checkpoint, not a silent skip")
+        expect(b.last_error.len()).to_be_greater_than(0)
+        return
+    b.clear(EXT_BG)
+    b.draw_rounded_rect_outline(2, 2, 10, 8, 2, EXT_A, 1)
+    b.draw_gradient_rect_h(14, 2, 8, 6, EXT_A, EXT_B)
+    b.draw_radial_gradient(28, 5, 4, EXT_C, EXT_B)
+    b.draw_shadow_rect(2, 14, 6, 6, 1, 1, 0, EXT_D)
+    b.draw_image_scaled(10, 14, 4, 4, 2, 2, [EXT_E, EXT_E, EXT_E, EXT_E])
+    b.draw_image_transform(20, 14, 2, 2, 256, 0, 0, 256, 0, 0, [EXT_D, EXT_D, EXT_D, EXT_D])
+    b.present()
+    val px = b.read_pixels()
+    assert_color_eq(px_at(px, EXT_W, 6, 2), EXT_A)
+    assert_color_eq(px_at(px, EXT_W, 7, 6), EXT_BG)
+    assert_color_eq(px_at(px, EXT_W, 14, 4), EXT_A)
+    assert_color_eq(px_at(px, EXT_W, 21, 4), EXT_B)
+    assert_color_eq(px_at(px, EXT_W, 28, 5), EXT_C)
+    assert_color_eq(px_at(px, EXT_W, 5, 17), EXT_D)
+    assert_color_eq(px_at(px, EXT_W, 2, 14), EXT_BG)
+    assert_color_eq(px_at(px, EXT_W, 11, 15), EXT_E)
+    assert_color_eq(px_at(px, EXT_W, 21, 15), EXT_D)
+    b.shutdown()
 
 # ---------------------------------------------------------------------------
 # Shared per-backend lane: probe -> (host-unavailable checkpoint) or
@@ -141,6 +220,19 @@ describe "Draw backend matrix — per-combination system-specific checkpoints":
         # checkpoint behavior the plan asks for. On macOS it would report
         # Initialized and the shared body runs the real GPU draw-apply path.
         run_backend_lane("metal", "metal")
+
+    it "directx: extended drawing-op parity with checked Metal surface (rounded_rect outline, gradient linear/radial, shadow, scaled+transform image) — absolute pixel oracle (or host-unavailable)":
+        # Confirms DirectXBackend forwards these extended ops to the same
+        # honest internal SoftwareBackend that already rasterizes its base
+        # RenderBackend ops, closing the delta against Metal's inherent-method
+        # surface (see backend_directx.spl impl Engine2DExtended).
+        assert_directx_extended_ops()
+
+    it "vulkan: extended drawing-op parity with checked Metal surface (rounded_rect outline, gradient linear/radial, shadow, scaled+transform image) — absolute pixel oracle (or host-unavailable)":
+        # Confirms VulkanBackend's existing emu-composed extended ops (already
+        # present pre-change) produce the same exact pixels as the shared
+        # backend_emu.spl/backend_emu_adv.spl algorithm DirectX/software use.
+        assert_vulkan_extended_ops()
 
     it "SIMPLE_2D_BACKEND override selects software when it initializes (model: engine2d_env_backend_select_spec)":
         step("set SIMPLE_2D_BACKEND=software and confirm auto-detect honors it")
