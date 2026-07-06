@@ -400,3 +400,69 @@ overflows the seed worker stack while HIR-lowering the first statement of
 Next work: inspect the HIR lowering path for that `Val` initializer and the
 recursive `bootstrap_output_from_args(...)` call expression. Do not rerun the
 bounded Stage 2 probe until that source path changes.
+
+## 2026-07-06 Progress: Stage 2 links; next blocker is inert bootstrap semantics
+
+The stack-overflow path was avoided by simplifying the bootstrap-only fallback
+entry instead of lowering local-heavy argument parsing in `bootstrap_main.spl`:
+
+- `run_native_build_bootstrap(...)` no longer calls the recursive
+  `bootstrap_output_from_args(...)` or `eprint`.
+- `get_cli_args()` is reduced to the bootstrap `get_args()` builtin.
+- `main()` no longer stores CLI state in locals before branching.
+
+The MIR real-body guard was also corrected: a function with only real
+terminators is not the same as an empty stub. The guard now counts non-
+`Unreachable` terminators as real body operations. The driver bootstrap context
+path now prefers freshly lowered `_bootstrap_mir_functions` over the stale
+`ctx.bootstrap_entry_mir` stub module when those functions exist.
+
+Focused evidence:
+
+```text
+PASS test/01_unit/compiler/hir/hir_stmt_dispatch_source_spec.spl
+PASS test/01_unit/compiler/mir/bootstrap_real_body_guard_source_spec.spl
+PASS test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl
+bin/simple check src/app/cli/bootstrap_main.spl
+bin/simple check src/compiler/50.mir/_MirLowering/bootstrap_globals.spl
+```
+
+The driver file check did not complete inside the bounded window; it printed
+only existing warnings before timeout/termination.
+
+Latest bounded Stage 2 probe:
+
+```text
+stage2_after_fresh_global_mir_preferred_rc=0
+[mir-lower-free] functions:count 6
+[mir-lower-free] done instr-total=0 term-total=24
+[bootstrap-real-llvm] count 6
+[bootstrap-real-llvm] function native_build_help
+[bootstrap-real-llvm] function run_native_build_bootstrap
+[bootstrap-real-llvm] function get_cli_args
+[bootstrap-real-llvm] function bootstrap_version
+[bootstrap-real-llvm] function main
+[bootstrap-real-llvm] function bootstrap_output_from_args
+build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple
+```
+
+Smoke result is not acceptable yet:
+
+```text
+build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple --version
+# no output, rc=0
+build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple native-build
+# no output, rc=0
+```
+
+Current blocker: the Stage 2 artifact links, but the bootstrap MIR/LLVM semantics
+are still inert. The preserved IR shows `get_cli_args()` lowering to `ret ptr
+null`, `bootstrap_version()` to `ret ptr null`, `run_native_build_bootstrap()` to
+`ret i64 0`, and `__simple_main` branches over `undef` values. This is no longer
+an LLVM/link blocker; it is a bootstrap lowering semantics blocker for builtins,
+return values, and print/error output.
+
+Next work: make the bootstrap lowering preserve enough semantics for
+`--version` to print a banner and for `native-build` to fail closed with a
+non-zero result. Do not treat the linked Stage 2 artifact as production proof
+until those smoke checks pass.

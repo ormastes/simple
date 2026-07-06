@@ -1192,3 +1192,31 @@ RV32 firmware production proof remains blocked on deploying a self-hosted
 `bin/simple`. Do not rerun the full bootstrap/deploy or firmware build loop
 until the `run_native_build_bootstrap` HIR-lowering stack overflow has a source
 fix.
+
+### Latest bootstrap progress: Stage 2 links but is semantically inert (2026-07-06)
+
+The stack-overflow blocker moved: a bounded Stage 2 probe now links an executable
+through the fresh bootstrap MIR path.
+
+```text
+stage2_after_fresh_global_mir_preferred_rc=0
+[mir-lower-free] functions:count 6
+[mir-lower-free] done instr-total=0 term-total=24
+[bootstrap-real-llvm] count 6
+build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple
+```
+
+This is **not** firmware production evidence yet. The generated Stage 2 binary
+is inert:
+
+```text
+build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple --version
+# no output, rc=0
+build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple native-build
+# no output, rc=0
+```
+
+Current compiler gate for NVMe RV32 firmware proof: bootstrap MIR/LLVM lowering
+must preserve enough semantics for the Stage 2 binary to print `--version` and
+fail closed for `native-build` with a non-zero result. Only after that should
+the full bootstrap/deploy and RV32 firmware build loops be retried.
