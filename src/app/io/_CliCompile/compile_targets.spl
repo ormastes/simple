@@ -368,6 +368,7 @@ fn cli_native_build(args: [text]) -> i64:
             print "  -o <path>            Output binary path"
             print "  --entry <file>       Entry file"
             print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
+            print "  --mode <name>        Build mode: dynload (default) or one-binary"
             print "  --release            Release build (standard optimization profile)"
             print "  --release-optimized  Max optimization: -O3 + x86-64-v3 + ThinLTO"
             cli_print_shared_opt_level_help()
@@ -445,6 +446,7 @@ fn cli_native_build(args: [text]) -> i64:
         var release = true
         var opt_level = cli_native_default_opt_level()
         var native_target = ""
+        var build_mode = "dynload"
         var optimization_requested = false
         var j = 0
         # Skip "native-build" command name
@@ -496,6 +498,16 @@ fn cli_native_build(args: [text]) -> i64:
                 emit_smf = true
             elif a == "--emit-object":
                 emit_object = true
+            elif a == "--mode" or a == "--build-mode":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --mode requires dynload or one-binary")
+                    return 1
+                j = j + 1
+                build_mode = args[j]
+            elif a.starts_with("--mode="):
+                build_mode = a.substring(7)
+            elif a.starts_with("--build-mode="):
+                build_mode = a.substring(13)
             elif a.starts_with("--target="):
                 native_target = a.substring(9)
             elif a == "--target":
@@ -580,6 +592,10 @@ fn cli_native_build(args: [text]) -> i64:
                 entry_point = a
             j = j + 1
 
+        if build_mode != "dynload" and build_mode != "one-binary":
+            _cli_eprint("Error: invalid --mode '{build_mode}' (expected dynload or one-binary)")
+            return 1
+
         if entry_point == "":
             _cli_eprint("Error: No entry point specified for native-build backend")
             _cli_eprint("Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]...")
@@ -658,7 +674,10 @@ fn cli_native_build(args: [text]) -> i64:
                 _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
             options.mode = CompileMode.Aot
             options.output_file = Some(output)
-            options.output_format = driver_output_format_native()
+            if build_mode == "dynload" and not emit_object:
+                options.output_format = driver_output_format_both()
+            else:
+                options.output_format = driver_output_format_native()
             options.backend = backend
             options.release = release
             options.opt_level = opt_level

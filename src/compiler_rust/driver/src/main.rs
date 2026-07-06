@@ -98,6 +98,24 @@ use simple_driver::cli::qualify_ignore::{handle_qualify_ignore, parse_qualify_ig
 // Import our new command modules
 use simple_driver::cli::commands::*;
 
+fn warn_seed_binary(args: &[String]) {
+    if std::env::var("SIMPLE_RUST_SEED_WARNING").as_deref() == Ok("0") {
+        return;
+    }
+    if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
+        return;
+    }
+    if matches!(args.first().map(String::as_str), Some("-h" | "--help" | "-v" | "--version")) {
+        return;
+    }
+    if args.iter().any(|arg| arg == "--seed-ok" || arg == "--rust-seed-ok") {
+        return;
+    }
+    eprintln!(
+        "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool. Build and use the pure-Simple bin/simple instead."
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Table-driven command dispatch
 // ---------------------------------------------------------------------------
@@ -1019,6 +1037,7 @@ fn real_main() {
         .iter()
         .map(|s| s.to_string_lossy().to_string())
         .collect();
+    warn_seed_binary(&args);
 
     // Parse global flags
     let global_flags = GlobalFlags::parse(&args);

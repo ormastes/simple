@@ -27,7 +27,7 @@ native_build_smf_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,7 +43,7 @@ Tests that the native-build command with --emit-smf flag produces both a native 
 | Category | Application |
 | Status | In Progress |
 | Source | `test/03_system/feature/app/native_build_smf_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-06 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -56,7 +56,7 @@ pipeline correctly generates paired compilation artifacts.
 
 ### Native build output format selection
 
-#### defaults to native-only format
+#### defaults to dynload Both format
 
 <details>
 <summary>Executable SSpec</summary>
@@ -66,6 +66,22 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val config = mock_output_config("bin/app", false)
+val format = mock_select_format(config)
+expect(format).to_equal(MOCK_FORMAT_BOTH)
+```
+
+</details>
+
+#### selects native-only format with one-binary mode
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val config = mock_output_config_mode("bin/app", false, "one-binary")
 val format = mock_select_format(config)
 expect(format).to_equal(MOCK_FORMAT_NATIVE)
 ```

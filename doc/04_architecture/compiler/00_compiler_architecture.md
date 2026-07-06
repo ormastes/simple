@@ -33,6 +33,7 @@ source files
 |------|------------|-------|
 | MDSOC layers | `compiler/mdsoc/mdsoc_architecture_tobe.md` | Numbered compiler layer map and shared tree-node rules |
 | Backend sharing | `compiler/backend/unified_backend_architecture.md` | Shared parser, FFI, and backend interface contracts |
+| Bootstrap build modes | `compiler/bootstrap_build_modes.md` | Pure-Simple `dynload`/`one-binary`, Rust seed warning, dependency invalidation |
 | Runtime-family backend audit | `compiler/backend/runtime_backend_completion_audit.md` | Facade/runtime-family ownership and smoke evidence |
 | Optimization | `compiler/optimization/`, `compiler/perf/` | Compile-time and artifact-size improvement lanes |
 | SIMD | `compiler/simd/` | Fixed/scalable vector and strict emit architecture |
@@ -46,6 +47,10 @@ source files
   tools report stable file/line/column locations.
 - Backend artifacts must carry enough metadata for startup and test runners to
   avoid guessing launch mode, runtime family, target ABI, or dependency needs.
+- Normal bootstrap must reuse the Rust seed/runtime and rebuild only
+  pure-Simple stages; Rust rebuilds are explicit `--full-bootstrap` work.
+- Entry-closure and native cache reuse are conservative around AOP/MDSOC,
+  interpreter, loader, and compiler ABI changes.
 - Runtime-family restrictions and no-allocation policies must be enforced at
   compiler entrypoints before target-specific native or SimpleOS execution.
 
@@ -55,4 +60,3 @@ source files
 - Testing: `../test/00_test_architecture.md`
 - UI: `../ui/00_ui_architecture.md`
 - Web framework/UI web: `../ui/web/00_web_framework_architecture.md`
-

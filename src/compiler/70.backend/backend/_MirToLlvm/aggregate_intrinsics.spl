@@ -25,50 +25,19 @@ extern fn rt_env_get(key: text) -> text
 
 impl MirToLlvm:
     me translate_gep(dest: LocalId, base: MirOperand, indices: [MirOperand]):
-        val dest_id = self.local_id_value(dest)
-        val dest_name = self.get_local(dest_id)
+        val dest_name = self.get_local(dest.id)
         val base_val = self.translate_operand(base)
-        val base_input_ty = self.valid_llvm_type(self.llvm_value_type(base_val, self.get_operand_type(base)))
-        var base_ptr = if base_input_ty == "ptr" and base_val == "0": "null" else: base_val
-        if base_input_ty != "ptr":
-            base_ptr = self.builder.fresh_local()
-            self.builder.emit("  {base_ptr} = inttoptr {base_input_ty} {base_val} to ptr")
         var index_vals: [text] = []
         for idx in indices:
-            val idx_val = self.translate_operand(idx)
-            val idx_ty = self.valid_llvm_type(self.get_operand_type(idx))
-            val idx_cast = self.cast_value_if_needed(idx_val, idx_ty, self.native_int())
-            index_vals = index_vals.push("{self.native_int()} {idx_cast}")
-        val base_ty = if base_input_ty == "ptr": self.native_int() else: base_input_ty
-        self.emitted_local_types[dest_id] = "ptr"
-        self.ptr_locals[dest_id] = true
-        self.builder.emit_gep(dest_name, base_ty, base_ptr, index_vals)
+            index_vals = index_vals.push(self.translate_operand(idx))
+        val base_ty = self.get_operand_type(base)
+        self.builder.emit_gep(dest_name, base_ty, base_val, index_vals)
 
     # === Overrides: aggregates ===
 
     me translate_aggregate(dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
-        val dest_id = self.local_id_value(dest)
-        val dest_name = self.get_local(dest_id)
-        val agg_ty = self.valid_llvm_type(self.get_local_type(dest_id))
-        self.emitted_local_types[dest_id] = agg_ty
-        var has_first_operand = false
-        var first_operand = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))
-        for operand in operands:
-            if not has_first_operand:
-                first_operand = operand
-                has_first_operand = true
-        if (agg_ty == "i64" or agg_ty == "i32" or agg_ty == "i16" or agg_ty == "i8" or agg_ty == "i1" or agg_ty == "ptr") and has_first_operand:
-            val first_val = self.translate_operand(first_operand)
-            val first_ty = self.valid_llvm_type(self.get_operand_type(first_operand))
-            val copied = self.cast_value_if_needed(first_val, first_ty, agg_ty)
-            if copied == first_val:
-                if agg_ty == "ptr":
-                    self.builder.emit("  {dest_name} = getelementptr i8, ptr {first_val}, i64 0  ; aggregate scalar")
-                else:
-                    self.builder.emit("  {dest_name} = add {agg_ty} {first_val}, 0  ; aggregate scalar")
-            else:
-                self.builder.emit("  {dest_name} = add {agg_ty} {copied}, 0  ; aggregate scalar")
-            return
+        val dest_name = self.get_local(dest.id)
+        val agg_ty = self.get_local_type(dest.id)
         val agg_ptr = self.builder.fresh_local()
         self.builder.emit_alloca(agg_ptr, agg_ty)
         for i in 0..operands.len():
@@ -80,25 +49,19 @@ impl MirToLlvm:
         self.builder.emit_load(dest_name, agg_ty, agg_ptr)
 
     me translate_get_field(dest: LocalId, base: MirOperand, field: i64):
-        val dest_id = self.local_id_value(dest)
-        val dest_name = self.get_local(dest_id)
+        val dest_name = self.get_local(dest.id)
         val base_val = self.translate_operand(base)
-        val base_ty = self.valid_llvm_type(self.get_operand_type(base))
-        val base_ptr = self.cast_value_if_needed(base_val, base_ty, "ptr")
         val nit = self.native_int()
-        self.emitted_local_types[dest_id] = nit
         val field_ptr = self.builder.fresh_local()
-        self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_ptr}, i32 {field}")
+        self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
         self.builder.emit_load(dest_name, nit, field_ptr)
 
     me translate_set_field(base: MirOperand, field: i64, value: MirOperand):
         val base_val = self.translate_operand(base)
-        val base_ty = self.valid_llvm_type(self.get_operand_type(base))
-        val base_ptr = self.cast_value_if_needed(base_val, base_ty, "ptr")
         val value_val = self.translate_operand(value)
         val nit = self.native_int()
         val field_ptr = self.builder.fresh_local()
-        self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_ptr}, i32 {field}")
+        self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
         self.builder.emit_store(nit, value_val, field_ptr)
 
     # === Overrides: casts ===
@@ -106,44 +69,16 @@ impl MirToLlvm:
     me translate_cast(dest: LocalId, operand: MirOperand, target: MirType):
         val dest_name = self.get_local(dest.id)
         val operand_val = self.translate_operand(operand)
-        val src_ty = self.valid_llvm_type(self.llvm_value_type(operand_val, self.get_operand_type(operand)))
-        val target_ty = self.valid_llvm_type(self.llvm_type_text(target))
-        self.local_types[self.local_id_value(dest)] = target_ty
-        self.local_types[dest.id] = target_ty
-        self.emitted_local_types[self.local_id_value(dest)] = target_ty
-        if target_ty == "ptr":
-            self.ptr_locals[self.local_id_value(dest)] = true
-        else:
-            self.ptr_locals.remove(self.local_id_value(dest))
-        if src_ty == target_ty:
-            if is_float_type(target_ty):
-                self.builder.emit("  {dest_name} = fadd {target_ty} {operand_val}, 0.0  ; cast")
-            elif target_ty == "ptr":
-                val nit = self.native_int()
-                self.builder.emit("  {dest_name} = getelementptr i8, ptr {operand_val}, {nit} 0  ; cast")
-            else:
-                self.builder.emit("  {dest_name} = add {target_ty} {operand_val}, 0  ; cast")
-        else:
-            val casted = self.cast_value_if_needed(operand_val, src_ty, target_ty)
-            if is_float_type(target_ty):
-                self.builder.emit("  {dest_name} = fadd {target_ty} {casted}, 0.0  ; cast copy")
-            elif target_ty == "ptr":
-                self.builder.emit("  {dest_name} = getelementptr i8, ptr {casted}, {self.native_int()} 0  ; cast copy")
-            else:
-                self.builder.emit("  {dest_name} = add {target_ty} {casted}, 0  ; cast copy")
+        val src_ty = self.get_operand_type(operand)
+        val target_ty = self.llvm_type_text(target)
+        val cast_inst = self.select_cast_instruction(src_ty, target_ty)
+        self.builder.emit("  {dest_name} = {cast_inst} {src_ty} {operand_val} to {target_ty}")
 
     me translate_bitcast(dest: LocalId, operand: MirOperand, target: MirType):
         val dest_name = self.get_local(dest.id)
         val operand_val = self.translate_operand(operand)
-        val src_ty = self.valid_llvm_type(self.llvm_value_type(operand_val, self.get_operand_type(operand)))
-        val target_ty = self.valid_llvm_type(self.llvm_type_text(target))
-        self.local_types[self.local_id_value(dest)] = target_ty
-        self.local_types[dest.id] = target_ty
-        self.emitted_local_types[self.local_id_value(dest)] = target_ty
-        if target_ty == "ptr":
-            self.ptr_locals[self.local_id_value(dest)] = true
-        else:
-            self.ptr_locals.remove(self.local_id_value(dest))
+        val src_ty = self.get_operand_type(operand)
+        val target_ty = self.llvm_type_text(target)
         self.builder.emit("  {dest_name} = bitcast {src_ty} {operand_val} to {target_ty}")
 
     # === Overrides: indirect calls / intrinsics ===
@@ -154,11 +89,8 @@ impl MirToLlvm:
             case nil: nil
         val ptr_val = self.translate_operand(ptr)
         var arg_vals: [text] = []
-        var arg_i = 0
         for arg in args:
-            val arg_ty = if arg_i < sig.params.len(): self.valid_llvm_type(self.llvm_type_text(sig.params[arg_i])) else: self.valid_llvm_type(self.get_operand_type(arg))
-            arg_vals = arg_vals.push("{arg_ty} {self.translate_operand(arg)}")
-            arg_i = arg_i + 1
+            arg_vals = arg_vals.push(self.translate_operand(arg))
         val ret_ty = self.llvm_type_text(sig.return_type)
         self.builder.emit_call_indirect(dest_name, ret_ty, ptr_val, arg_vals)
 
@@ -187,43 +119,10 @@ impl MirToLlvm:
                             Some(else_id):
                                 val dest_id = self.local_id_value(dest_local)
                                 val dest_name = self.get_local(dest_id)
+                                val phi_ty = self.get_local_type(dest_id)
                                 val then_val = self.translate_operand(args[1])
                                 val else_val = self.translate_operand(args[3])
-                                val then_ty = self.valid_llvm_type(self.llvm_value_type(then_val, self.get_operand_type(args[1])))
-                                val else_ty = self.valid_llvm_type(self.llvm_value_type(else_val, self.get_operand_type(args[3])))
-                                if then_ty == "void" and else_ty == "void":
-                                    self.local_types[dest_id] = "void"
-                                    self.local_types[dest_local.id] = "void"
-                                    self.emitted_local_types[dest_id] = "void"
-                                    self.ptr_locals.remove(dest_id)
-                                    return true
-                                if then_ty != else_ty:
-                                    val fallback_ty = if then_ty == "void": else_ty else: then_ty
-                                    self.local_types[dest_id] = fallback_ty
-                                    self.local_types[dest_local.id] = fallback_ty
-                                    self.emitted_local_types[dest_id] = fallback_ty
-                                    if fallback_ty == "ptr":
-                                        self.ptr_locals[dest_id] = true
-                                    else:
-                                        self.ptr_locals.remove(dest_id)
-                                    # ponytail: mismatched if-result phi; emit zero until MIR carries a typed unit/value distinction.
-                                    if fallback_ty == "ptr":
-                                        self.builder.emit("  {dest_name} = inttoptr i64 0 to ptr  ; phi fallback")
-                                    elif is_float_type(fallback_ty):
-                                        self.builder.emit("  {dest_name} = fadd {fallback_ty} 0.0, 0.0  ; phi fallback")
-                                    elif is_integer_type(fallback_ty) or fallback_ty == "i1":
-                                        self.builder.emit("  {dest_name} = add {fallback_ty} 0, 0  ; phi fallback")
-                                    else:
-                                        self.builder.emit("  {dest_name} = add i64 0, 0  ; phi fallback")
-                                    return true
-                                self.local_types[dest_id] = then_ty
-                                self.local_types[dest_local.id] = then_ty
-                                self.emitted_local_types[dest_id] = then_ty
-                                if then_ty == "ptr":
-                                    self.ptr_locals[dest_id] = true
-                                else:
-                                    self.ptr_locals.remove(dest_id)
-                                self.builder.emit("  {dest_name} = phi {then_ty} [ {then_val}, %bb{then_id} ], [ {else_val}, %bb{else_id} ]")
+                                self.builder.emit("  {dest_name} = phi {phi_ty} [ {then_val}, %bb{then_id} ], [ {else_val}, %bb{else_id} ]")
                                 true
                             nil:
                                 false
@@ -268,7 +167,6 @@ impl MirToLlvm:
                         val dest_id = self.local_id_value(dest_local)
                         val dest_name = self.get_local(dest_id)
                         val ret_ty = self.get_local_type(dest_id)
-                        self.emitted_local_types[dest_id] = ret_ty
                         self.builder.emit("  {dest_name} = call {ret_ty} @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
                     nil:
                         self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")

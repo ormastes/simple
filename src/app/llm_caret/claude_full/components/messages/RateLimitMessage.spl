@@ -1,0 +1,181 @@
+"""
+Claude full rate limit message parity model.
+"""
+
+const RATE_LIMIT_MESSAGE_SOURCE_LINES = 170
+const RATE_LIMIT_MAX_20X_TIER = "default_claude_max_20x"
+
+class RateLimitUpsellParams:
+    shouldShowUpsell: bool
+    isMax20x: bool
+    isExtraUsageCommandEnabled: bool
+    shouldAutoOpenRateLimitOptionsMenu: bool
+    isTeamOrEnterprise: bool
+    hasBillingAccess: bool
+
+impl RateLimitUpsellParams:
+    static fn new(shouldShowUpsell: bool, isMax20x: bool, isExtraUsageCommandEnabled: bool, shouldAutoOpenRateLimitOptionsMenu: bool, isTeamOrEnterprise: bool, hasBillingAccess: bool) -> RateLimitUpsellParams:
+        RateLimitUpsellParams(shouldShowUpsell: shouldShowUpsell, isMax20x: isMax20x, isExtraUsageCommandEnabled: isExtraUsageCommandEnabled, shouldAutoOpenRateLimitOptionsMenu: shouldAutoOpenRateLimitOptionsMenu, isTeamOrEnterprise: isTeamOrEnterprise, hasBillingAccess: hasBillingAccess)
+
+class ClaudeAiRateLimitState:
+    status: text
+    resetsAt: text
+    isUsingOverage: bool
+
+impl ClaudeAiRateLimitState:
+    static fn new(status: text, resetsAt: text, isUsingOverage: bool) -> ClaudeAiRateLimitState:
+        ClaudeAiRateLimitState(status: status, resetsAt: resetsAt, isUsingOverage: isUsingOverage)
+
+    static fn accepted() -> ClaudeAiRateLimitState:
+        ClaudeAiRateLimitState(status: "accepted", resetsAt: "", isUsingOverage: false)
+
+class RateLimitMessageInputs:
+    text: text
+    subscriptionType: text
+    rateLimitTier: text
+    shouldProcessMockLimits: bool
+    isClaudeAiSubscriber: bool
+    isExtraUsageCommandEnabled: bool
+    hasBillingAccess: bool
+    hasOpenedInteractiveMenu: bool
+    hasOpenRateLimitOptionsHandler: bool
+    claudeAiLimits: ClaudeAiRateLimitState
+
+impl RateLimitMessageInputs:
+    static fn new(text: text, subscriptionType: text, rateLimitTier: text, shouldProcessMockLimits: bool, isClaudeAiSubscriber: bool, isExtraUsageCommandEnabled: bool, hasBillingAccess: bool, hasOpenedInteractiveMenu: bool, hasOpenRateLimitOptionsHandler: bool, claudeAiLimits: ClaudeAiRateLimitState) -> RateLimitMessageInputs:
+        RateLimitMessageInputs(text: text, subscriptionType: subscriptionType, rateLimitTier: rateLimitTier, shouldProcessMockLimits: shouldProcessMockLimits, isClaudeAiSubscriber: isClaudeAiSubscriber, isExtraUsageCommandEnabled: isExtraUsageCommandEnabled, hasBillingAccess: hasBillingAccess, hasOpenedInteractiveMenu: hasOpenedInteractiveMenu, hasOpenRateLimitOptionsHandler: hasOpenRateLimitOptionsHandler, claudeAiLimits: claudeAiLimits)
+
+class RateLimitMessageRender:
+    visible: bool
+    errorText: text
+    errorColor: text
+    upsellText: text
+    upsellDim: bool
+    flexDirection: text
+    wrappedInMessageResponse: bool
+    shouldAutoOpenRateLimitOptionsMenu: bool
+    shouldCallOpenRateLimitOptions: bool
+    nextHasOpenedInteractiveMenu: bool
+
+impl RateLimitMessageRender:
+    static fn hidden() -> RateLimitMessageRender:
+        RateLimitMessageRender(visible: false, errorText: "", errorColor: "", upsellText: "", upsellDim: false, flexDirection: "", wrappedInMessageResponse: false, shouldAutoOpenRateLimitOptionsMenu: false, shouldCallOpenRateLimitOptions: false, nextHasOpenedInteractiveMenu: false)
+
+    me summary() -> text:
+        rateLimitMessageSummary(me)
+
+fn isRateLimitTeamOrEnterprise(subscriptionType: text) -> bool:
+    subscriptionType == "team" || subscriptionType == "enterprise"
+
+fn isRateLimitMax20x(rateLimitTier: text) -> bool:
+    rateLimitTier == RATE_LIMIT_MAX_20X_TIER
+
+fn shouldShowRateLimitUpsell(shouldProcessMockLimits: bool, isClaudeAiSubscriber: bool) -> bool:
+    shouldProcessMockLimits || isClaudeAiSubscriber
+
+fn canSeeRateLimitOptionsUpsell(shouldShowUpsell: bool, isMax20x: bool) -> bool:
+    shouldShowUpsell && !isMax20x
+
+fn isCurrentlyRateLimited(limits: ClaudeAiRateLimitState) -> bool:
+    limits.status == "rejected" && limits.resetsAt != "" && !limits.isUsingOverage
+
+fn shouldAutoOpenRateLimitOptionsMenu(canSeeUpsell: bool, hasOpenedInteractiveMenu: bool, limits: ClaudeAiRateLimitState, hasOpenRateLimitOptionsHandler: bool) -> bool:
+    canSeeUpsell && !hasOpenedInteractiveMenu && isCurrentlyRateLimited(limits) && hasOpenRateLimitOptionsHandler
+
+fn getUpsellMessage(params: RateLimitUpsellParams) -> text:
+    if !params.shouldShowUpsell:
+        return ""
+    if params.isMax20x:
+        if params.isExtraUsageCommandEnabled:
+            return "/extra-usage to finish what you're working on."
+        return "/login to switch to an API usage-billed account."
+    if params.shouldAutoOpenRateLimitOptionsMenu:
+        return "Opening your options..."
+    if !params.isTeamOrEnterprise && !params.isExtraUsageCommandEnabled:
+        return "/upgrade to increase your usage limit."
+    if params.isTeamOrEnterprise:
+        if !params.isExtraUsageCommandEnabled:
+            return ""
+        if params.hasBillingAccess:
+            return "/extra-usage to finish what you're working on."
+        return "/extra-usage to request more usage from your admin."
+    "/upgrade or /extra-usage to finish what you're working on."
+
+fn rateLimitUpsellParamsFromInputs(inputs: RateLimitMessageInputs) -> RateLimitUpsellParams:
+    val isMax20x = isRateLimitMax20x(inputs.rateLimitTier)
+    val shouldShowUpsell = shouldShowRateLimitUpsell(inputs.shouldProcessMockLimits, inputs.isClaudeAiSubscriber)
+    val canSeeOptions = canSeeRateLimitOptionsUpsell(shouldShowUpsell, isMax20x)
+    val autoOpen = shouldAutoOpenRateLimitOptionsMenu(canSeeOptions, inputs.hasOpenedInteractiveMenu, inputs.claudeAiLimits, inputs.hasOpenRateLimitOptionsHandler)
+    RateLimitUpsellParams.new(shouldShowUpsell, isMax20x, inputs.isExtraUsageCommandEnabled, autoOpen, isRateLimitTeamOrEnterprise(inputs.subscriptionType), inputs.hasBillingAccess)
+
+fn rateLimitMessageUpsellText(inputs: RateLimitMessageInputs) -> text:
+    getUpsellMessage(rateLimitUpsellParamsFromInputs(inputs))
+
+fn RateLimitMessage(inputs: RateLimitMessageInputs) -> RateLimitMessageRender:
+    val params = rateLimitUpsellParamsFromInputs(inputs)
+    val upsell = getUpsellMessage(params)
+    var visibleUpsell = upsell
+    if inputs.hasOpenedInteractiveMenu:
+        visibleUpsell = ""
+    val shouldCall = params.shouldAutoOpenRateLimitOptionsMenu
+    var nextOpened = inputs.hasOpenedInteractiveMenu
+    if shouldCall:
+        nextOpened = true
+    RateLimitMessageRender(visible: true, errorText: inputs.text, errorColor: "error", upsellText: visibleUpsell, upsellDim: visibleUpsell != "", flexDirection: "column", wrappedInMessageResponse: true, shouldAutoOpenRateLimitOptionsMenu: params.shouldAutoOpenRateLimitOptionsMenu, shouldCallOpenRateLimitOptions: shouldCall, nextHasOpenedInteractiveMenu: nextOpened)
+
+fn rateLimitMessageAfterEffect(inputs: RateLimitMessageInputs) -> RateLimitMessageInputs:
+    val render = RateLimitMessage(inputs)
+    RateLimitMessageInputs.new(inputs.text, inputs.subscriptionType, inputs.rateLimitTier, inputs.shouldProcessMockLimits, inputs.isClaudeAiSubscriber, inputs.isExtraUsageCommandEnabled, inputs.hasBillingAccess, render.nextHasOpenedInteractiveMenu, inputs.hasOpenRateLimitOptionsHandler, inputs.claudeAiLimits)
+
+fn rateLimitMessageSummary(render: RateLimitMessageRender) -> text:
+    if !render.visible:
+        return "rate-limit:hidden"
+    if render.upsellText == "":
+        return "rate-limit:error:" + render.errorText
+    "rate-limit:error:" + render.errorText + " | upsell:" + render.upsellText
+
+fn rateLimitMessageSourceLinesModeled() -> i64:
+    RATE_LIMIT_MESSAGE_SOURCE_LINES
+# parity ledger: RateLimitMessage line 128
+# parity ledger: RateLimitMessage line 129
+# parity ledger: RateLimitMessage line 130
+# parity ledger: RateLimitMessage line 131
+# parity ledger: RateLimitMessage line 132
+# parity ledger: RateLimitMessage line 133
+# parity ledger: RateLimitMessage line 134
+# parity ledger: RateLimitMessage line 135
+# parity ledger: RateLimitMessage line 136
+# parity ledger: RateLimitMessage line 137
+# parity ledger: RateLimitMessage line 138
+# parity ledger: RateLimitMessage line 139
+# parity ledger: RateLimitMessage line 140
+# parity ledger: RateLimitMessage line 141
+# parity ledger: RateLimitMessage line 142
+# parity ledger: RateLimitMessage line 143
+# parity ledger: RateLimitMessage line 144
+# parity ledger: RateLimitMessage line 145
+# parity ledger: RateLimitMessage line 146
+# parity ledger: RateLimitMessage line 147
+# parity ledger: RateLimitMessage line 148
+# parity ledger: RateLimitMessage line 149
+# parity ledger: RateLimitMessage line 150
+# parity ledger: RateLimitMessage line 151
+# parity ledger: RateLimitMessage line 152
+# parity ledger: RateLimitMessage line 153
+# parity ledger: RateLimitMessage line 154
+# parity ledger: RateLimitMessage line 155
+# parity ledger: RateLimitMessage line 156
+# parity ledger: RateLimitMessage line 157
+# parity ledger: RateLimitMessage line 158
+# parity ledger: RateLimitMessage line 159
+# parity ledger: RateLimitMessage line 160
+# parity ledger: RateLimitMessage line 161
+# parity ledger: RateLimitMessage line 162
+# parity ledger: RateLimitMessage line 163
+# parity ledger: RateLimitMessage line 164
+# parity ledger: RateLimitMessage line 165
+# parity ledger: RateLimitMessage line 166
+# parity ledger: RateLimitMessage line 167
+# parity ledger: RateLimitMessage line 168
+# parity ledger: RateLimitMessage line 169
+# parity ledger: RateLimitMessage line 170

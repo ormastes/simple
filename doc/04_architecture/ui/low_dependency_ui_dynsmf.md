@@ -74,8 +74,9 @@ The manifest registry declares stable ids for precompiled SMF artifacts:
 - `web_renderer`
 - `gui_renderer`
 - `tui_renderer`
+- `ui_html`
 
-All six entries carry `precompiled_smf` artifact metadata, a source module, an
+All seven entries carry `precompiled_smf` artifact metadata, a source module, an
 SMF artifact path, ABI version, exports, default-autoload policy, and a
 deterministic `bin/simple compile <source> -o build/dynsmf/<id>.smf` build
 plan. The runtime artifact gate reads each enabled artifact, requires the
@@ -146,7 +147,7 @@ are treated as shared app-root startup options so `--no-dynsmf` and
   per-id disable, stale symbol evidence, and reload generation at the system
   boundary.
 - `scripts/check/check-low-dependency-dynsmf-build-plans.shs` materializes the
-  six planned `build/dynsmf/*.smf` artifacts and records package-build
+  seven planned `build/dynsmf/*.smf` artifacts and records package-build
   evidence.
 
 ## Follow-Up Migration

@@ -31,11 +31,12 @@ Output: <output>/stage{1,2,3}/<arch>-<vendor>-<os>-<abi>/simple
 Options:
   --backend=<name>   Backend for stage2/stage3/stage4 (default: llvm-lib)
   --output=<dir>     Output directory for bootstrap artifacts (default: build/bootstrap)
-  --pure-simple      Incremental: reuse the existing Rust seed and rebuild ONLY
-                     the pure-Simple stages (no cargo / Rust rebuild). Use when
-                     only .spl sources changed. The seed's ability to compile the
-                     changed pure-Simple is proven by Stage 2 — if Stage 2 fails,
-                     drop --pure-simple and run a full (Rust + Simple) bootstrap.
+  --full-bootstrap   Rebuild the Rust seed/runtime when missing or stale, then
+                     rebuild the pure-Simple stages. Without this flag bootstrap
+                     never runs cargo and reuses the existing Rust seed.
+  --pure-simple      Compatibility alias for the default no-Rust rebuild mode.
+  --mode=<name>      Pure-Simple build mode: dynload or one-binary
+                     (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
   --verbose          Accepted for compatibility
@@ -55,6 +56,8 @@ target=""
 verbose=0
 jobs=""
 pure_simple=0
+full_bootstrap=0
+bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -73,8 +76,23 @@ while [ "$#" -gt 0 ]; do
     --deploy)
       deploy=1
       ;;
+    --full-bootstrap)
+      full_bootstrap=1
+      ;;
     --pure-simple)
       pure_simple=1
+      ;;
+    --mode=*)
+      bootstrap_mode=${1#*=}
+      ;;
+    --mode)
+      shift
+      if [ "$#" -eq 0 ]; then
+        echo "error: --mode requires dynload or one-binary" >&2
+        usage >&2
+        exit 1
+      fi
+      bootstrap_mode=$1
       ;;
     --verbose)
       verbose=1
@@ -96,6 +114,19 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+case "${bootstrap_mode}" in
+  dynload|one-binary) ;;
+  *)
+    echo "error: unknown --mode '${bootstrap_mode}' (expected dynload or one-binary)" >&2
+    exit 1
+    ;;
+esac
+
+if [ "${pure_simple}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ]; then
+  echo "error: --pure-simple and --full-bootstrap conflict" >&2
+  exit 1
+fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
@@ -157,6 +188,36 @@ echo "Platform: ${PLATFORM}"
 
 log_dir="${output_dir}/logs/${PLATFORM}"
 mkdir -p "${log_dir}"
+
+native_cache_dir=".simple/native_cache"
+native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
+
+bootstrap_wide_inputs_hash() {
+  {
+    find src/compiler -name '*.spl' -print0 2>/dev/null | LC_ALL=C sort -z \
+      | xargs -0 sha256sum 2>/dev/null
+  } | sha256sum | awk '{print $1}'
+}
+
+prepare_native_cache() {
+  label=$1
+  if [ "${bootstrap_mode}" = "one-binary" ] || [ "${full_bootstrap}" -eq 1 ]; then
+    echo "  ${label}: clearing native cache (${bootstrap_mode}, full_bootstrap=${full_bootstrap})"
+    rm -rf "${native_cache_dir}/"
+    return
+  fi
+
+  mkdir -p "${native_cache_dir}"
+  current_hash=$(bootstrap_wide_inputs_hash)
+  if [ ! -f "${native_cache_stamp}" ] || [ "$(cat "${native_cache_stamp}" 2>/dev/null)" != "${current_hash}" ]; then
+    echo "  ${label}: clearing native cache (compiler/AOP/loader/interpreter inputs changed)"
+    rm -rf "${native_cache_dir}/"
+    mkdir -p "${native_cache_dir}"
+    printf '%s\n' "${current_hash}" > "${native_cache_stamp}"
+  else
+    echo "  ${label}: reusing native cache (dynload mode)"
+  fi
+}
 
 run_logged() {
   label=$1
@@ -247,30 +308,32 @@ fi
 if [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
   if [ ! -f "${seed_stamp}" ] || [ "$(cat "${seed_stamp}" 2>/dev/null)" != "$(seed_inputs_hash)" ]; then
     seed_stale=1
-    echo "Seed/runtime stale (Rust source content changed since last build). Rebuilding..."
+    if [ "${full_bootstrap}" -eq 1 ]; then
+      echo "Seed/runtime stale (Rust source content changed since last build). Full bootstrap will rebuild Rust."
+    else
+      echo "WARNING: Seed/runtime stale, but this is not --full-bootstrap; reusing the existing Rust seed."
+    fi
   else
     echo "Seed/runtime current (input content hash matches); skipping Rust rebuild."
   fi
 fi
 
-if [ "${pure_simple}" -eq 1 ]; then
-  # Pure-Simple incremental rebuild: reuse the existing Rust seed and runtime
-  # library, never invoke cargo. Use this when only pure-Simple (.spl) sources
-  # changed. Whether the existing seed CAN build the changed pure-Simple is
-  # proven by Stage 2 below: if the new .spl needs a Rust feature the seed lacks,
-  # Stage 2 fails — drop --pure-simple and run a full (Rust + Simple) bootstrap.
+if [ "${full_bootstrap}" -eq 0 ]; then
+  # Default/pure-Simple rebuild: reuse the existing Rust seed and runtime
+  # library, never invoke cargo. Whether the existing seed CAN build the changed
+  # pure-Simple is proven by Stage 2 below: if the new .spl needs a Rust feature
+  # the seed lacks, Stage 2 fails — rerun with --full-bootstrap.
   if [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ]; then
-    echo "error: --pure-simple needs an existing Rust seed and runtime library:" >&2
+    echo "error: bootstrap needs an existing Rust seed and runtime library:" >&2
     echo "  seed:    ${seed_bin}" >&2
     echo "  runtime: ${native_all_lib}" >&2
-    echo "Build them once with a full bootstrap, then re-run with --pure-simple:" >&2
-    echo "  cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all" >&2
+    echo "Normal bootstrap does not rebuild Rust. Re-run with --full-bootstrap to build them." >&2
     exit 1
   fi
   if [ "${seed_stale}" -eq 1 ]; then
-    echo "Note: Rust sources changed but --pure-simple was given; reusing the existing seed and skipping the Rust rebuild."
+    echo "WARNING: Rust sources changed; reusing the existing seed because --full-bootstrap was not given."
   fi
-  echo "Pure-Simple mode: reusing Rust seed, rebuilding only the pure-Simple stages."
+  echo "Pure-Simple mode: ${bootstrap_mode}; reusing Rust seed, rebuilding only pure-Simple stages."
 elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}" -eq 1 ]; then
   echo "Building Rust seed compiler + runtime library..."
   # Split into two cargo invocations to defeat feature unification:
@@ -298,6 +361,7 @@ echo "Running bootstrap pipeline..."
 echo "  runtime:  ${SIMPLE_RUNTIME_PATH}"
 echo "  platform: ${PLATFORM}"
 echo "  backend:  ${backend}"
+echo "  ps-mode:  ${bootstrap_mode}"
 echo "  output:   ${output_dir}"
 
 if [ "${can_full_bootstrap}" -eq 1 ]; then
@@ -322,7 +386,7 @@ else
   # cranelift the seed uses its Rust handle_native_build directly.
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
-  rm -rf .simple/native_cache/
+  prepare_native_cache stage2
   # Stage 2 failure is tolerated (loud warning + seed fallback for stage 4):
   # the self-hosting frontend now fails closed instead of linking a ret-0 stub
   # (doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md), so a
@@ -332,6 +396,7 @@ else
     --backend cranelift \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
+    --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output_dir}/stage2/${PLATFORM}/simple" \
@@ -350,7 +415,7 @@ else
   # symbol conflicts). When stage3 fails, we fall back to the seed for stage4.
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
-  rm -rf .simple/native_cache/
+  prepare_native_cache stage3
 
   stage3_ok=0
   set +e
@@ -361,6 +426,7 @@ else
     --backend "${backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
+    --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output_dir}/stage3/${PLATFORM}/simple" \
@@ -437,7 +503,7 @@ fi
 echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
-rm -rf .simple/native_cache/
+prepare_native_cache stage4
 if [ "${stage4_is_seed}" -eq 1 ]; then
   # ponytail: seed native-build can hang in the worker wrapper; call the same
   # entrypoint directly until the wrapper path is proven fixed.
@@ -447,6 +513,7 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
     --backend "${stage4_backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
+    --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${full_dir}/simple"
@@ -457,6 +524,7 @@ else
     --backend "${stage4_backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
+    --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${full_dir}/simple"
@@ -496,7 +564,7 @@ if [ "${build_mcp}" -eq 1 ]; then
     mcp_log="stage5${mcp_stage}-mcp-native-build"
 
     echo "  Stage 5${mcp_stage}: ${mcp_name}"
-    rm -rf .simple/native_cache/
+    prepare_native_cache "stage5${mcp_stage}"
     set +e
     env RUST_LOG="${RUST_LOG:-error}" \
       LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
@@ -504,6 +572,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       --backend "${stage4_backend}" \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure \
+      --mode "${bootstrap_mode}" \
       --entry "${mcp_spl}" \
       --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
       -o "${full_dir}/${mcp_name}" \
@@ -551,7 +620,7 @@ if [ "${deploy}" -eq 1 ]; then
     done
     if [ -z "${seed_src}" ]; then
       echo "ERROR: deploy refused — no working seed driver for ${seed_delegate}." >&2
-      echo "  Build one first: cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all" >&2
+      echo "  Build one first: scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy" >&2
       exit 1
     fi
     install -m755 "${seed_src}" "${seed_delegate}"

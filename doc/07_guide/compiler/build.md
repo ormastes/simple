@@ -209,9 +209,19 @@ hosted linker returns. The normalizer zeroes the COFF `TimeDateStamp` and PE
 optional-header `CheckSum` fields so repeated stripped native-build and
 bootstrap outputs can be compared by SHA256.
 
-The older `scripts/bootstrap/bootstrap-from-scratch.sh` and
-`scripts/bootstrap/bootstrap-windows.sh` wrappers are not present in this tree.
-Use `simple build bootstrap` directly unless those wrappers are restored.
+Use `scripts/bootstrap/bootstrap-from-scratch.sh` for the host bootstrap wrapper.
+Normal runs reuse the existing Rust seed/runtime and rebuild only the
+pure-Simple stages. Rust seed/runtime rebuilds happen only with
+`--full-bootstrap`.
+
+```bash
+scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
+scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary
+scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
+```
+
+`dynload` is the default fast-iteration mode. `one-binary` clears the native
+cache and builds the conservative monolithic native executable path.
 
 Bootstrap output uses `<arch>-<vendor>-<os>-<abi>` target triples:
 

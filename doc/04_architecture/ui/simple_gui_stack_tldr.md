@@ -64,8 +64,9 @@ Host input
   import `app.ui.render.html_widgets` directly.
 - CSS is component-scoped: adapters call `css_for_components([...])` for only
   the style payloads their surface needs.
-- Startup dynSMF: file IO, net IO, render2d, web renderer, GUI renderer, and
-  TUI renderer use checked `build/dynsmf/*.smf` autoload with arg/env opt-outs
+- Startup dynSMF: file IO, net IO, render2d, web renderer, GUI renderer,
+  TUI renderer, and UI HTML use checked `build/dynsmf/*.smf` autoload with
+  arg/env opt-outs
   and session unload/reload evidence.
 - Preferred next refactor: typed GUI AST -> WebRender IR -> Draw IR; resolve
   GUI/HTML AST and CSS before Draw IR, then keep source kind/id and style

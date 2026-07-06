@@ -10,9 +10,33 @@ must route to pure Simple entrypoints by default. The Rust compiler under
 `src/compiler_rust/` is a seed/bootstrap implementation only. It must not be
 used as a fallback for migrated public tools.
 
+Rust-built seed tools must print a `WARNING` that they are bootstrap-only and
+that users should build/use the pure-Simple `bin/simple` instead. Bootstrap
+internals may suppress that warning with `SIMPLE_BOOTSTRAP=1`; normal users
+should see it when they run `src/compiler_rust/target/bootstrap/simple`.
+
 When a migrated tool is slow, flaky, or resource-heavy, fix the pure Simple
 implementation in `src/compiler`, `src/lib`, or `src/app`, or record a concrete
 bug. Do not re-enable a Rust escape hatch.
+
+## Bootstrap Build Modes
+
+`scripts/bootstrap/bootstrap-from-scratch.sh` is pure-Simple-only by default and
+does not rebuild Rust. Use `--full-bootstrap` for the rare Rust seed/runtime
+rebuild.
+
+Pure-Simple rebuilds use two mode names:
+
+- `dynload` (default): faster iteration; keep reusable native cache entries
+  unless compiler/AOP/loader/interpreter inputs changed, and have native-build
+  emit native plus SMF cache artifacts where supported.
+- `one-binary`: conservative monolithic native executable; clear the native
+  cache before stages.
+
+Dependency tracing is conservative around AOP/MDSOC weaving. Textual entry
+closure is only a reducer; changes under `src/compiler` that can affect weaving,
+the loader, the interpreter, or compiler ABI invalidate broadly instead of
+pretending only the changed source file needs rebuilding.
 
 ## Test Runner Daemon
 

@@ -137,10 +137,14 @@ bin/simple build bootstrap
 Direct commands behind the wrapper:
 
 ```bash
-src/compiler_rust/target/bootstrap/simple --version
-bin/simple build bootstrap
+scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
+scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
 sha256sum bootstrap/simple_stage2 bootstrap/simple_stage3
 ```
+
+`src/compiler_rust/target/bootstrap/simple` is a bootstrap seed only and prints
+a `WARNING` when run directly. Use the pure-Simple `bin/simple` for normal
+build/test/tooling work.
 
 See [doc/02_requirements/app/build/bootstrap.md](doc/02_requirements/app/build/bootstrap.md) and [doc/03_plan/compiler/bootstrap/pure_simple_bootstrap_stage2_remaining_2026-05-04.md](doc/03_plan/compiler/bootstrap/pure_simple_bootstrap_stage2_remaining_2026-05-04.md) for the current bootstrap flow and remaining pure-Simple self-hosting notes.
 

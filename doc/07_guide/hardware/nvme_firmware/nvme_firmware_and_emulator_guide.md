@@ -265,13 +265,8 @@ session**, and never the Simple firmware running on rv32.
   and the wired-vs-shelf "Integration status" table in
   `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md`.
 - Emulator: `examples/09_embedded/simpleos_nvme_fw/emu/README.md`, `.spipe/nvme_emu/state.md`.
-- Base-spec command floor: `doc/03_plan/sys_test/nvme_base_spec_commands.md`,
-  `test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl`, and
-  `doc/06_spec/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.md`.
 - Research: `doc/01_research/hardware/nvme_firmware/`.
 - Build plans (and what is done vs. future): `doc/03_plan/hardware/nvme_fw_baremetal_parallel_agent_plan.md`,
   `doc/03_plan/hardware/nvme_fw_emulated_nand_plan.md`.
 - rv32 native-build blocker: `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
-- Current production wrapper timeout / MCP native-build deferral:
-  `doc/08_tracking/bug/nvme_rv32_firmware_build_timeout_2026-07-05.md`.
 - Newtype + Lean caveats: `doc/08_tracking/bug/newtype_run_path_and_enforcement_gaps_2026-06-29.md`.

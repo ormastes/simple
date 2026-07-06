@@ -5,6 +5,7 @@ use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirModule};
 use crate::optimizations::NativeOptimizationLevel;
 use simple_common::target::{Target, TargetArch, TargetCpu, TargetOS};
+use std::cell::RefCell;
 
 #[cfg(feature = "llvm")]
 use inkwell::attributes::{Attribute, AttributeLoc};
@@ -24,8 +25,6 @@ use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue};
 #[cfg(feature = "llvm")]
 use inkwell::OptimizationLevel;
-#[cfg(feature = "llvm")]
-use std::cell::RefCell;
 
 /// LLVM-based code generator
 ///

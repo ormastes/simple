@@ -1,10 +1,9 @@
 #!/bin/sh
 # Build a bootable rv32 ELF that runs the NVMe-firmware on-device self-test (gap-closure P9).
 #
-# The stock rv32 boot path calls a weak optional firmware hook. This wrapper
-# verifies that hook stays wired, then writes a build-only firmware root. The
-# firmware root keeps this evidence image small instead of importing full
-# os_main through the stock OS boot path.
+# The stock rv32 boot path calls an optional firmware hook. This wrapper verifies
+# that hook stays wired, then writes a tiny build-only root that pulls the stock
+# boot module and the firmware strong hook into the native-build entry closure.
 #
 # STATUS (2026-07-05): the rv32 OS boot path contains an optional NVMe firmware hook.
 # This wrapper builds the rv32 OS image with firmware sources so entry.spl can
@@ -23,13 +22,14 @@ SIMPLE_BIN="${NVME_RV32_SIMPLE_BIN:-bin/simple}"
 LOG_DIR="build/test-artifacts"
 OUT_LOG="$LOG_DIR/nvme_fw_rv32_build.out"
 ERR_LOG="$LOG_DIR/nvme_fw_rv32_build.err"
+
 if ! grep -q "rt_rv32_boot_optional_nvme_fw_selftest" "$BOOT"; then
   echo "NVME_RV32_BOOT_NOT_WIRED: add rt_rv32_boot_optional_nvme_fw_selftest() to $BOOT before building $OUT"
   exit 2
 fi
+
 mkdir -p "$LOG_DIR"
 mkdir -p "$ENTRY_DIR"
-rm -f build/os/generated/logic.spl build/os/generated/logic_bundle_*.spl
 rm -f "$ENTRY_DIR"/logic*.spl
 for logic_src in examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic*.spl; do
   ln -s "$PWD/$logic_src" "$ENTRY_DIR/$(basename "$logic_src")"
@@ -37,245 +37,18 @@ done
 rm -rf "$BOOT_STUB_LINK"
 ln -s "$PWD/src/os/kernel/arch/riscv32/boot" "$BOOT_STUB_LINK"
 cat >"$ENTRY" <<'EOF_ENTRY'
-use logic.{nvme_fw_rv32_logic_selftest}
-
-extern fn rt_riscv_uart_put(byte: u64)
-extern fn rt_riscv_qemu_heap_size() -> u64
-
-@section(".text.entry")
-@naked
-fn _start():
-    asm volatile:
-        "la      sp, _stack_top"
-        "la      t0, _sbss"
-        "la      t1, _ebss"
-        ".Lnvme_fw_bss_loop:"
-        "bgeu    t0, t1, .Lnvme_fw_bss_done"
-        "sw      zero, 0(t0)"
-        "addi    t0, t0, 4"
-        "j       .Lnvme_fw_bss_loop"
-        ".Lnvme_fw_bss_done:"
-        "call    nvme_fw_boot_root__boot_main"
-        ".Lnvme_fw_halt:"
-        "wfi"
-        "j       .Lnvme_fw_halt"
-
-fn _uart_put(byte: u64):
-    rt_riscv_uart_put(byte)
-
-fn _emit_simpleos():
-    # ponytail: first UART call in these tiny helpers currently lowers as zero on rv32; duplicate the first byte until call-arg lowering is fixed.
-    rt_riscv_uart_put(83)
-    rt_riscv_uart_put(83)
-    rt_riscv_uart_put(105)
-    rt_riscv_uart_put(109)
-    rt_riscv_uart_put(112)
-    rt_riscv_uart_put(108)
-    rt_riscv_uart_put(101)
-    rt_riscv_uart_put(79)
-    rt_riscv_uart_put(83)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(82)
-    rt_riscv_uart_put(86)
-    rt_riscv_uart_put(51)
-    rt_riscv_uart_put(50)
-    rt_riscv_uart_put(10)
-
-fn _emit_boot():
-    rt_riscv_uart_put(91)
-    rt_riscv_uart_put(91)
-    rt_riscv_uart_put(66)
-    rt_riscv_uart_put(79)
-    rt_riscv_uart_put(79)
-    rt_riscv_uart_put(84)
-    rt_riscv_uart_put(93)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(98)
-    rt_riscv_uart_put(111)
-    rt_riscv_uart_put(111)
-    rt_riscv_uart_put(116)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(99)
-    rt_riscv_uart_put(111)
-    rt_riscv_uart_put(109)
-    rt_riscv_uart_put(112)
-    rt_riscv_uart_put(108)
-    rt_riscv_uart_put(101)
-    rt_riscv_uart_put(116)
-    rt_riscv_uart_put(101)
-    rt_riscv_uart_put(10)
-
-fn _emit_pass():
-    rt_riscv_uart_put(65)
-    rt_riscv_uart_put(65)
-    rt_riscv_uart_put(76)
-    rt_riscv_uart_put(76)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(82)
-    rt_riscv_uart_put(86)
-    rt_riscv_uart_put(51)
-    rt_riscv_uart_put(50)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(78)
-    rt_riscv_uart_put(86)
-    rt_riscv_uart_put(77)
-    rt_riscv_uart_put(69)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(70)
-    rt_riscv_uart_put(87)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(67)
-    rt_riscv_uart_put(72)
-    rt_riscv_uart_put(69)
-    rt_riscv_uart_put(67)
-    rt_riscv_uart_put(75)
-    rt_riscv_uart_put(83)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(80)
-    rt_riscv_uart_put(65)
-    rt_riscv_uart_put(83)
-    rt_riscv_uart_put(83)
-    rt_riscv_uart_put(10)
-
-fn _emit_fail():
-    rt_riscv_uart_put(82)
-    rt_riscv_uart_put(82)
-    rt_riscv_uart_put(86)
-    rt_riscv_uart_put(51)
-    rt_riscv_uart_put(50)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(78)
-    rt_riscv_uart_put(86)
-    rt_riscv_uart_put(77)
-    rt_riscv_uart_put(69)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(70)
-    rt_riscv_uart_put(87)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(70)
-    rt_riscv_uart_put(65)
-    rt_riscv_uart_put(73)
-    rt_riscv_uart_put(76)
-    rt_riscv_uart_put(10)
-
-fn _emit_heap_ok():
-    rt_riscv_uart_put(72)
-    rt_riscv_uart_put(72)
-    rt_riscv_uart_put(69)
-    rt_riscv_uart_put(65)
-    rt_riscv_uart_put(80)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(79)
-    rt_riscv_uart_put(75)
-    rt_riscv_uart_put(10)
-
-fn _emit_heap_fail():
-    rt_riscv_uart_put(72)
-    rt_riscv_uart_put(72)
-    rt_riscv_uart_put(69)
-    rt_riscv_uart_put(65)
-    rt_riscv_uart_put(80)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(70)
-    rt_riscv_uart_put(65)
-    rt_riscv_uart_put(73)
-    rt_riscv_uart_put(76)
-    rt_riscv_uart_put(10)
-
-fn _emit_svc():
-    rt_riscv_uart_put(83)
-    rt_riscv_uart_put(83)
-    rt_riscv_uart_put(86)
-    rt_riscv_uart_put(67)
-    rt_riscv_uart_put(32)
-    rt_riscv_uart_put(79)
-    rt_riscv_uart_put(75)
-    rt_riscv_uart_put(10)
-
-fn _emit_fail_mask(mask: i64):
-    if (mask & 1) != 0:
-        rt_riscv_uart_put(82)
-    if (mask & 2) != 0:
-        rt_riscv_uart_put(69)
-    if (mask & 4) != 0:
-        rt_riscv_uart_put(74)
-    if (mask & 8) != 0:
-        rt_riscv_uart_put(77)
-    if (mask & 16) != 0:
-        rt_riscv_uart_put(66)
-    if (mask & 32) != 0:
-        rt_riscv_uart_put(83)
-    if (mask & 64) != 0:
-        rt_riscv_uart_put(80)
-    if (mask & 128) != 0:
-        rt_riscv_uart_put(72)
-    if (mask & 256) != 0:
-        rt_riscv_uart_put(81)
-    if (mask & 512) != 0:
-        rt_riscv_uart_put(73)
-    if (mask & 1024) != 0:
-        rt_riscv_uart_put(70)
-    if (mask & 2048) != 0:
-        rt_riscv_uart_put(65)
-    if (mask & 4096) != 0:
-        rt_riscv_uart_put(67)
-    if (mask & 8192) != 0:
-        rt_riscv_uart_put(84)
-    if (mask & 16384) != 0:
-        rt_riscv_uart_put(68)
-    if (mask & 32768) != 0:
-        rt_riscv_uart_put(87)
-    if (mask & 65536) != 0:
-        rt_riscv_uart_put(76)
-    if (mask & 131072) != 0:
-        rt_riscv_uart_put(89)
-    if (mask & 262144) != 0:
-        rt_riscv_uart_put(75)
-    if (mask & 524288) != 0:
-        rt_riscv_uart_put(71)
-    if (mask & 1048576) != 0:
-        rt_riscv_uart_put(78)
-    rt_riscv_uart_put(10)
-
-fn _qemu_exit_success():
-    asm volatile:
-        "lui     t0, 0x100"
-        "li      t1, 0x5555"
-        "sw      t1, 0(t0)"
-
-fn _qemu_exit_fail():
-    asm volatile:
-        "lui     t0, 0x100"
-        "li      t1, 0x3333"
-        "sw      t1, 0(t0)"
-
-@export("C", name: "nvme_fw_boot_main")
-fn boot_main():
-    _emit_simpleos()
-    _emit_boot()
-    val fail = nvme_fw_rv32_logic_selftest()
-    if fail == 0:
-        _emit_pass()
-    else:
-        _emit_fail_mask(fail)
-        _emit_fail()
-        _qemu_exit_fail()
-    if rt_riscv_qemu_heap_size() >= 8:
-        _emit_heap_ok()
-    else:
-        _emit_heap_fail()
-    _emit_svc()
-    _qemu_exit_success()
+use os.kernel.arch.riscv32.boot.{boot_main}
+use entry.{rt_rv32_boot_optional_nvme_fw_selftest}
 
 fn main() -> i64:
-    boot_main()
     0
 EOF_ENTRY
+
 rm -f "$OUT"
 {
   echo "NVME_RV32_BUILD_START timeout=${TIMEOUT_SECS}s out=$OUT"
   echo "compiler=$SIMPLE_BIN"
-  echo "sources=build/os/generated,examples/09_embedded/simpleos_nvme_fw/fw_rv32"
+  echo "sources=build/os/generated,src,examples/09_embedded/simpleos_nvme_fw/fw_rv32"
   echo "entry=$ENTRY target=riscv32-unknown-none"
 } >"$OUT_LOG"
 : >"$ERR_LOG"
@@ -284,13 +57,8 @@ if command -v timeout >/dev/null 2>&1; then
 else
   BUILD_RUNNER=""
 fi
-if [ "$(basename "$SIMPLE_BIN")" = "simple" ] && echo "$SIMPLE_BIN" | grep -q "src/compiler_rust/target/bootstrap/simple"; then
-  BUILD_CMD="$SIMPLE_BIN run src/app/cli/native_build_main.spl --"
-else
-  BUILD_CMD="$SIMPLE_BIN native-build"
-fi
-if $BUILD_RUNNER env SIMPLE_LIB=src SIMPLE_COMPILER_PHASE_PROFILE=1 $BUILD_CMD --backend llvm \
-  --source build/os/generated --source examples/09_embedded/simpleos_nvme_fw/fw_rv32 \
+if $BUILD_RUNNER env SIMPLE_COMPILER_PHASE_PROFILE=1 "$SIMPLE_BIN" native-build --backend llvm \
+  --source build/os/generated --source src --source examples/09_embedded/simpleos_nvme_fw/fw_rv32 \
   --entry "$ENTRY" --entry-closure \
   --linker-script src/os/kernel/arch/riscv32/linker.ld \
   --target riscv32-unknown-none \

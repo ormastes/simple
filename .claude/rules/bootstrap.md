@@ -33,33 +33,31 @@ bootstrap). The Rust seed (`src/compiler_rust/target/bootstrap/simple`) is
 - External tool calls: `clang`/`clang++`/`cl.exe`, `gcc`, `mold`/`lld`/`link.exe`, `llc`, `uname`/`cmd`, `which`/`where`
 
 ## Incremental: rebuild ONLY pure-Simple
-When you changed **only `.spl` sources** (src/compiler, src/lib, src/app) and the
-Rust seed is unchanged, skip the cargo/Rust rebuild and re-run only the
-pure-Simple stages:
+Normal bootstrap is pure-Simple-only. It reuses the existing Rust seed/runtime
+and does not run cargo, even when Rust source hashes changed:
 ```bash
-scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple
+scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
 ```
 - Reuses the existing `src/compiler_rust/target/bootstrap/simple` seed + runtime
-  lib; **never runs cargo** (even if it detects stale Rust sources — it prints a
-  note and proceeds). Errors out if no seed exists yet (build one with a full
-  bootstrap first).
+  lib; **never runs cargo** unless `--full-bootstrap` is passed. Errors out if
+  no seed exists yet.
 - "If the Rust seed can build the changed pure-Simple" is enforced by Stage 2: the
   seed recompiles the changed `.spl`. If Stage 2 fails, the new pure-Simple needs
-  a Rust feature the seed lacks — drop `--pure-simple` and run a full bootstrap.
+  a Rust feature the seed lacks — rerun with `--full-bootstrap`.
 - Combine with `--deploy` to swap `bin/release/<triple>/simple` (same smoke gate).
+- Pure-Simple build modes:
+  - `dynload` (default): reuse `.simple/native_cache` unless compiler/AOP/loader
+    inputs changed; native-build emits native plus SMF cache where supported.
+  - `one-binary`: clear native cache and build the monolithic native executable.
 
 ## Bootstrap Commands
 ```bash
-# Full bootstrap (recommended):
+# Normal pure-Simple bootstrap:
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
-# WARNING: --deploy replaces bin/release/<triple>/simple with the STAGE4 CLI
-# without any smoke gate. Verified broken 2026-06-11 (lint coredumps, test
-# silent no-op, -c exit 1). After --deploy, ALWAYS smoke-test:
-#   setsid timeout 30 bin/simple -c "print(1+1)"   # expect 2
-#   bin/simple lint <any .spl>                      # must not core dump
-# If broken, restore the working seed:
-#   cp src/compiler_rust/target/release/simple bin/release/<triple>/simple.new \
-#     && mv bin/release/<triple>/simple.new bin/release/<triple>/simple
+
+# Full Rust + pure-Simple bootstrap:
+scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
+
 # Windows:
 scripts/bootstrap/bootstrap-windows.sh --deploy
 # Manual stages:

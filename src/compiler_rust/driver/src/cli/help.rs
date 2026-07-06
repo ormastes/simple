@@ -7,6 +7,9 @@ const VERSION: &str = match option_env!("SIMPLE_VERSION") {
 };
 
 pub fn print_help() {
+    eprintln!("WARNING: this Rust-built Simple binary is a bootstrap seed only.");
+    eprintln!("Use the pure-Simple bin/simple for normal build/test/tooling work.");
+    eprintln!();
     eprintln!("Simple Language v{}", VERSION);
     eprintln!();
     eprintln!("Usage:");
@@ -334,6 +337,7 @@ mod tests {
 }
 
 pub fn print_version() {
+    eprintln!("WARNING: this Rust-built Simple binary is a bootstrap seed only; use pure-Simple bin/simple.");
     println!("Simple Language v{}", VERSION);
 }
 

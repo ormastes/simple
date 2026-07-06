@@ -16,11 +16,10 @@
 use std.gpu.engine2d.backend_metal.{MetalBackend}
 use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
 use std.common.image.ppm_decode.{encode_ppm_p6}
-use std.common.image.array_alloc.{u32_array_with_length}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
 use std.io_runtime.{file_write, file_exists, file_read, getpid, time_now_unix_micros}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
-use common.ui.wm_app_process_contract.{WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, WM_CLIENT_HOLD_ENV, WIDGET_SHOWCASE_APP_SOURCE, wm_app_mode_is_client, wm_widget_showcase_bridge_request_sized, wm_fs_bridge_encode, wm_widget_showcase_event_path, wm_widget_showcase_frame_seq_path, wm_fs_app_event_decode, wm_fs_app_event_seq_path}
+use common.ui.wm_app_process_contract.{WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, WM_CLIENT_HOLD_ENV, WIDGET_SHOWCASE_APP_SOURCE, wm_app_mode_is_client, wm_widget_showcase_bridge_request_sized, wm_fs_bridge_encode, wm_widget_showcase_event_path, wm_widget_showcase_frame_seq_path, wm_fs_app_event_decode}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -427,14 +426,14 @@ fn downsample_nearest(src: [u32], src_w: i32, src_h: i32, scale: i32) -> [u32]:
         return src
     val dst_w = src_w / scale
     val dst_h = src_h / scale
-    var out: [u32] = u32_array_with_length((dst_w * dst_h).to_i64())
+    var out: [u32] = []
     var y = 0
     while y < dst_h:
         var x = 0
         val sy = y * scale
         while x < dst_w:
             val sx = x * scale
-            out[y * dst_w + x] = src[sy * src_w + sx]
+            out.push(src[sy * src_w + sx])
             x = x + 1
         y = y + 1
     out
@@ -478,43 +477,20 @@ fn write_wm_state(state_path: text, state: ShowcaseState, event_seq: i64, frame_
         "slider_value={state.slider_value}\n" +
         "progress_value={state.progress_value}\n")
 
-fn consume_wm_event(event_path: text, last_seq: i64, state: ShowcaseState, coord_scale: i32) -> (ShowcaseState, i64, bool, bool):
+fn consume_wm_event(event_path: text, last_seq: i64, state: ShowcaseState, coord_scale: i32) -> (ShowcaseState, i64, bool):
     if event_path == "" or not file_exists(event_path):
-        return (state, last_seq, false, false)
-    var out = state
-    var seq = last_seq
-    var dirty = false
-    var needs_full_render = false
-    var drained = 0
-    while drained < 32:
-        var body = ""
-        val next_path = wm_fs_app_event_seq_path(event_path, seq + 1)
-        if file_exists(next_path):
-            body = file_read(next_path)
-        elif drained == 0:
-            body = file_read(event_path)
-        if body == "":
-            return (out, seq, dirty, needs_full_render)
-        val ev = wm_fs_app_event_decode(body)
-        if ev.seq <= seq:
-            return (out, seq, dirty, needs_full_render)
-        if ev.kind != "tick":
-            needs_full_render = true
-        val before_clicks = out.button_count
-        val before_checkbox = out.checkbox_on
-        val before_switch = out.switch_on
-        val before_slider = out.slider_value
-        print "[wm-showcase-client] consume_event seq={ev.seq} kind={ev.kind} local={ev.x},{ev.y} pressed={ev.pressed} before_clicks={before_clicks} before_checkbox={before_checkbox} before_switch={before_switch} before_slider={before_slider}"
-        val raw_next = showcase_on_pointer(out, ev.kind, ev.x, ev.y, ev.pressed)
-        if coord_scale > 1 and showcase_state_same(raw_next, out):
-            out = showcase_on_pointer(out, ev.kind, ev.x * coord_scale, ev.y * coord_scale, ev.pressed)
-        else:
-            out = raw_next
-        print "[wm-showcase-client] event_state seq={ev.seq} clicks={out.button_count} checkbox={out.checkbox_on} switch={out.switch_on} slider={out.slider_value} progress={out.progress_value} full_render={needs_full_render}"
-        seq = ev.seq
-        dirty = true
-        drained = drained + 1
-    (out, seq, dirty, needs_full_render)
+        return (state, last_seq, false)
+    val body = file_read(event_path)
+    if body == "":
+        return (state, last_seq, false)
+    val ev = wm_fs_app_event_decode(body)
+    if ev.seq <= last_seq:
+        return (state, last_seq, false)
+    val scaled_next = showcase_on_pointer(state, ev.kind, ev.x * coord_scale, ev.y * coord_scale, ev.pressed)
+    if coord_scale > 1 and showcase_state_same(scaled_next, state):
+        return (showcase_on_pointer(state, ev.kind, ev.x, ev.y, ev.pressed), ev.seq, true)
+    val next = scaled_next
+    (next, ev.seq, true)
 
 fn run_wm_client() -> i64:
     val bridge_path = env_get(WM_BRIDGE_FILE_ENV) ?? ""
@@ -531,7 +507,7 @@ fn run_wm_client() -> i64:
     val frame_scale = showcase_ppm_scale()
     val frame_w = W / frame_scale
     val frame_h = H / frame_scale
-    var base_pixels = build_frame(state)
+    val base_pixels = build_frame(state)
     val pixels = patch_showcase_state(base_pixels, state)
     val wm_pixels = if frame_scale > 1: downsample_nearest(pixels, W, H, frame_scale) else: pixels
     if wm_pixels.len() < frame_w * frame_h or not write_wm_frame(frame_path, seq_path, frame_seq, frame_w, frame_h, wm_pixels):
@@ -540,7 +516,7 @@ fn run_wm_client() -> i64:
     write_wm_state(state_path, state, 0, frame_seq, frame_scale)
 
     val pid = getpid()
-    val req = wm_widget_showcase_bridge_request_sized(pid, frame_path, W + 8, H + 32)
+    val req = wm_widget_showcase_bridge_request_sized(pid, frame_path, frame_w + 8, frame_h + 32)
     if not file_write(bridge_path, wm_fs_bridge_encode(req)):
         print "[wm-showcase-client] error=bridge-write-failed path={bridge_path}"
         return 1
@@ -550,28 +526,21 @@ fn run_wm_client() -> i64:
         var ticks = 0
         var last_event_seq = 0
         while ticks < 2000000:
-            val (event_state, event_seq, event_dirty, event_needs_full_render) = consume_wm_event(event_path, last_event_seq, state, frame_scale)
+            val (event_state, event_seq, event_dirty) = consume_wm_event(event_path, last_event_seq, state, frame_scale)
             if event_dirty:
                 state = event_state
                 last_event_seq = event_seq
             var dirty = event_dirty
             if dirty:
                 frame_seq = frame_seq + 1
-                var next_pixels: [u32] = []
-                if event_needs_full_render:
-                    base_pixels = build_frame(state)
-                else:
-                    next_pixels = patch_showcase_state(base_pixels, state)
-                if event_needs_full_render:
-                    next_pixels = base_pixels
+                val next_pixels = patch_showcase_state(base_pixels, state)
                 val next_wm_pixels = if frame_scale > 1: downsample_nearest(next_pixels, W, H, frame_scale) else: next_pixels
                 if next_wm_pixels.len() < frame_w * frame_h or not write_wm_frame(frame_path, seq_path, frame_seq, frame_w, frame_h, next_wm_pixels):
                     print "[wm-showcase-client] error=frame-refresh-failed path={frame_path}"
                     return 1
                 write_wm_state(state_path, state, last_event_seq, frame_seq, frame_scale)
                 print "[wm-showcase-client] frame seq={frame_seq} event_seq={last_event_seq} clicks={state.button_count} checkbox={state.checkbox_on} switch={state.switch_on} slider={state.slider_value} progress={state.progress_value}"
-            val poll_sleep_ms = if dirty: 16 else: 32
-            thread_sleep(poll_sleep_ms)
+            thread_sleep(60)
             ticks = ticks + 1
     0
 

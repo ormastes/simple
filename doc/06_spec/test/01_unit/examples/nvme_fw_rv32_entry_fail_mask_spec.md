@@ -79,12 +79,12 @@ expect(source).to_not_contain("fail = fail + rv32_")
 
 </details>
 
-#### keeps the build wrapper on the direct native-build path
+#### keeps the build wrapper on the stock rv32 boot-hook path
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -93,15 +93,12 @@ val source = rt_file_read_text("examples/09_embedded/simpleos_nvme_fw/fw_rv32/bu
 expect(source).to_contain("$SIMPLE_BIN\" native-build --backend llvm")
 expect(source).to_contain("SIMPLE_COMPILER_PHASE_PROFILE=1")
 expect(source).to_contain("timeout -k 10s")
-expect(source).to_contain("use logic.")
-expect(source).to_contain("nvme_fw_rv32_logic_selftest")
-expect(source).to_contain("fn _start():")
-expect(source).to_contain("fn _qemu_exit_fail():")
-expect(source).to_contain("_qemu_exit_fail()")
-expect(source).to_contain("rm -f build/os/generated/logic.spl build/os/generated/logic_bundle_*.spl")
-expect(source).to_contain("--source build/os/generated --source examples/09_embedded/simpleos_nvme_fw/fw_rv32")
-expect(source).to_not_contain("--source src")
-expect(source).to_not_contain("use os.kernel.arch.riscv32.boot")
+expect(source).to_contain("use os.kernel.arch.riscv32.boot")
+expect(source).to_contain("use entry.")
+expect(source).to_contain("rt_rv32_boot_optional_nvme_fw_selftest")
+expect(source).to_contain("--source build/os/generated --source src --source examples/09_embedded/simpleos_nvme_fw/fw_rv32")
+expect(source).to_not_contain("fn _start():")
+expect(source).to_not_contain("fn _qemu_exit_fail():")
 expect(source).to_not_contain("SIMPLE_BOOTSTRAP=1")
 expect(source).to_not_contain("--timeout \"$TIMEOUT_SECS\"")
 ```

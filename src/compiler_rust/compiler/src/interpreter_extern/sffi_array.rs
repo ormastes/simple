@@ -49,17 +49,8 @@ pub fn rt_array_new_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// Returns `Value::Array` so that Simple-land method dispatch (`.len()`, `.push()`, etc.)
 /// works correctly on the returned value.  The capacity hint is accepted and ignored;
 /// the interpreter uses a Vec which grows on demand.
-pub fn rt_array_new_with_cap_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let capacity = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_array_new_with_cap expects 1 argument".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
-    Ok(Value::array(Vec::with_capacity(capacity.max(0) as usize)))
+pub fn rt_array_new_with_cap_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::array(vec![]))
 }
 
 /// Create a typed byte array for interpreter mode.

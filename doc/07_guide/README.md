@@ -54,7 +54,6 @@ User-facing guides for the Simple programming language. For specifications see `
 | [tooling/treesitter.md](tooling/treesitter.md) | Tree-sitter integration |
 | [tooling/dashboard.md](tooling/dashboard.md) | Dashboard CLI, CI/CD |
 | [tooling/duplicate_check.md](tooling/duplicate_check.md) | Code duplication detection |
-| [app/ui/wm_app_process_bridge.md](app/ui/wm_app_process_bridge.md) | Simple WM app-process bridge, ordered events, and frame/perf rules |
 | [app/ui/wm_compare.md](app/ui/wm_compare.md) | WM screenshot capture and compare harness |
 | [app/ui/wm_ui_snapshot.md](app/ui/wm_ui_snapshot.md) | WM/UI HTML snapshot export, PNG generation, Stitch handoff |
 | [tooling/script_layout_policy.md](tooling/script_layout_policy.md) | `scripts/` vs `bin/` policy, `.shs` rule, ignore list |

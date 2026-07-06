@@ -190,10 +190,6 @@ describe "<Feature Name>":
   and computed style.
 - Environmental tests should capture command/API/protocol/binary/log evidence
   when that is more meaningful than a screenshot.
-- Hardware firmware SPipe specs may split command-floor evidence from target
-  boot evidence only when the generated manual names the open blocker. Do not
-  let host/scalar PASS markers imply rv32/FPGA/board production proof unless
-  the target artifact was built and run.
 - MCP command-line server specs should use a reusable helper that launches the
   actual wrapper command, sends `initialize`, `notifications/initialized`, and
   `tools/list`, and asserts readiness JSON, exit code, elapsed time, JSON-RPC

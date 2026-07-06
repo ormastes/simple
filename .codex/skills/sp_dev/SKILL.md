@@ -433,6 +433,9 @@ text: generated Lean/BYL/RTL artifacts prove regeneration shape, while manual
 constraint/theorem files prove the property claim. A future regeneration must
 be able to replace generated files without deleting the cited manual proof
 entry point.
+For flight-level or mission-critical robust-software lanes, use
+`doc/07_guide/app/spipe/mission_critical_robust_sw.md` as the operator-facing
+gate contract before accepting release or hardening evidence.
 For SimpleOS mission-critical RISC-V evidence, also cite
 `sh scripts/check/check-riscv-rtl-sby-proof.shs` and
 `sh scripts/check/check-simpleos-mission-critical-release.shs`; release evidence

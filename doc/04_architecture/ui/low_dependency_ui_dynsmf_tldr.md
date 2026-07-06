@@ -9,7 +9,7 @@
   renderer boundaries without importing HTML/CSS implementations.
 - Render adapters use `css_for_components([...])` to request only needed
   component styles.
-- All six stdlib-like ids are default-autoload precompiled dynSMF manifest
+- All seven stdlib-like ids are default-autoload precompiled dynSMF manifest
   entries and route checked loads through `smf_dlopen_checked`; compatibility
   loads and symbol/close operations use `smf_dlopen`/`smf_dlsym`/`smf_dlclose`.
 - Checked autoload validates generated `.smf` artifacts exist and start with

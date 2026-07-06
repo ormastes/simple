@@ -19,6 +19,8 @@
 //!   --backend <name>    Compilation backend (cranelift, llvm)
 //!   --cpu <name>        CPU profile: default, native, x86-64-v1..v4
 //!   --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap)
+//!   --mode <name>       Pure-Simple build mode name accepted for bootstrap compatibility:
+//!                        dynload or one-binary (seed still emits native bootstrap artifacts)
 //!   --emit-archive      Emit a static archive from Simple objects instead of linking an executable
 //!   --entry-closure     Compile only modules reachable from --entry
 //!   --help              Show help
@@ -92,6 +94,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut target_triple: Option<String> = None;
     let mut linker_script: Option<PathBuf> = None;
     let mut opt_level = NativeOptimizationLevel::default_for_native_executable();
+    let mut build_mode = String::from("dynload");
 
     // Parse arguments
     let mut i = 1; // Skip "native-build"
@@ -256,6 +259,23 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 runtime_bundle = other.strip_prefix("--runtime-bundle=").unwrap_or("auto").to_string();
                 i += 1;
             }
+            "--mode" | "--build-mode" => {
+                if i + 1 < args.len() {
+                    build_mode = args[i + 1].clone();
+                    i += 2;
+                } else {
+                    eprintln!("error: --mode requires dynload or one-binary");
+                    return 1;
+                }
+            }
+            other if other.starts_with("--mode=") => {
+                build_mode = other.strip_prefix("--mode=").unwrap_or("dynload").to_string();
+                i += 1;
+            }
+            other if other.starts_with("--build-mode=") => {
+                build_mode = other.strip_prefix("--build-mode=").unwrap_or("dynload").to_string();
+                i += 1;
+            }
             "--entry-closure" => {
                 entry_closure = true;
                 entry_closure_explicit = true;
@@ -327,6 +347,11 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 i += 1;
             }
         }
+    }
+
+    if build_mode != "dynload" && build_mode != "one-binary" {
+        eprintln!("error: invalid --mode '{}'. Expected dynload or one-binary", build_mode);
+        return 1;
     }
 
     if !is_valid_runtime_bundle(&runtime_bundle) {
@@ -595,6 +620,7 @@ fn print_help() {
     println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
     println!("  --list-optimizations Print implemented optimization groups and levels");
     println!("  --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap)");
+    println!("  --mode <name>       Pure-Simple build mode: dynload or one-binary");
     println!("  --emit-archive     Emit a static archive from Simple objects instead of linking an executable");
     println!("  --entry-closure     Compile only modules reachable from --entry");
     println!("  --help, -h          Show this help");

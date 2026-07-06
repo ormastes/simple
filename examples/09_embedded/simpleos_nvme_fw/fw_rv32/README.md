@@ -77,9 +77,10 @@ silent-255 bug:
 The wrapper defaults to `bin/simple`; set `NVME_RV32_SIMPLE_BIN` only for an
 explicit diagnostic compiler comparison.
 
-Diagnostic seed builds now produce `build/nvme_fw_rv32.elf` through the
-generated root, symlinked logic modules, and byte-wise UART output. QEMU reaches
-the firmware logic and fails closed with section mask `EJMBSPHQIFACTDWLYKGN`,
-while host `logic_check.spl` still prints `RV32 NVME FW LOGIC OK`. The remaining
-runtime blocker is a live rv32 baremetal logic/runtime mismatch, not wrapper
-coverage or RV64 self-test plumbing.
+Diagnostic seed builds now produce `build/nvme_fw_rv32.elf` by rooting the stock
+rv32 boot module plus `entry.spl`'s strong firmware hook. QEMU reaches the real
+boot path (`LOG OK`, `MEM OK`, `PMM OK`, `HEAP OK`, `SVC OK`, `BOOT OK`) and the
+firmware hook, then fails closed with section mask `EJMBSPHQIFACTDWLYKGN`; host
+`logic_check.spl` still prints `RV32 NVME FW LOGIC OK`. The remaining runtime
+blocker is a live rv32 baremetal logic/codegen mismatch, not wrapper coverage,
+boot plumbing, heap/service init, or RV64 self-test plumbing.

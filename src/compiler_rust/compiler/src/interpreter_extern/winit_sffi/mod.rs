@@ -286,13 +286,12 @@ pub(super) fn get_pixels(args: &[Value], index: usize, func: &str) -> Result<Vec
             for item in items.iter() {
                 match item {
                     Value::Int(v) => out.push(*v as u32),
-                    Value::UInt { value, .. } => out.push(*value as u32),
-                    _ => return Err(wrong_arg_type(func, index, "[i64]/[u32]")),
+                    _ => return Err(wrong_arg_type(func, index, "[i64]")),
                 }
             }
             Ok(out)
         }
-        _ => Err(wrong_arg_type(func, index, "[i64]/[u32]")),
+        _ => Err(wrong_arg_type(func, index, "[i64]")),
     }
 }
 

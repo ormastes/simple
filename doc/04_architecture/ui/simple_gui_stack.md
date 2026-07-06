@@ -430,7 +430,7 @@ safe for loop-hoisting and bounds-check work.
 
 The low-dependency lane treats standard library-like capabilities as
 precompiled dynSMF entries: `file_io`, `net_io`, `render2d`, `web_renderer`,
-`gui_renderer`, and `tui_renderer`. Startup constructs a session through
+`gui_renderer`, `tui_renderer`, and `ui_html`. Startup constructs a session through
 `src/app/startup/dynsmf_autoload.spl`, applies `--no-dynsmf`,
 `--disable-dynsmf=<ids>`, `SIMPLE_DYNSMF=0`, and
 `SIMPLE_DYNSMF_DISABLE=<ids>`, validates generated `build/dynsmf/*.smf`

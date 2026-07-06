@@ -146,9 +146,6 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if is_simpleos_riscv64_link(user_objects, output):
         return link_simpleos_riscv64(user_objects, output, verbose)
 
-    if is_simpleos_riscv32_link(user_objects, output):
-        return link_simpleos_riscv32(user_objects, output, verbose)
-
     # Step 1: Compile C runtime to object files
     if trace:
         print "[LLVM-LINK] step 1: compile_runtime_objects..."
@@ -225,18 +222,6 @@ fn is_simpleos_riscv64_link(user_objects: [text], output: text) -> bool:
         if obj.contains("simpleos_riscv64") or obj.contains("riscv64"):
             return true
     false
-
-fn is_simpleos_riscv32_link(user_objects: [text], output: text) -> bool:
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-    if target == "riscv32-unknown-none" or target == "riscv32-unknown-none-elf":
-        return true
-    if output.contains("simpleos_riscv32"):
-        return true
-    var has_nvme_boot_root = false
-    for obj in user_objects:
-        if obj.contains("nvme_fw_boot_root") or obj.contains("build.os.generated.os.kernel.arch.riscv32"):
-            has_nvme_boot_root = true
-    output.contains("nvme_fw_rv32") and has_nvme_boot_root
 
 fn is_simpleos_x86_64_link(user_objects: [text], output: text) -> bool:
     val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
@@ -430,81 +415,6 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     val (stdout, stderr, code) = rt_process_run("ld.lld", args)
     if code != 0:
         return Err("SimpleOS RISC-V link failed: {stdout}{stderr}")
-    Ok(output)
-
-fn link_simpleos_riscv32(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
-    val pid = getpid()
-    val entry_s = "build/os/simpleos_riscv32_entry_{pid}.S"
-    val entry_o = "build/os/simpleos_riscv32_entry_{pid}.o"
-    val stub_c = "build/os/simpleos_riscv32_link_stubs_{pid}.c"
-    val stub_o = "build/os/simpleos_riscv32_link_stubs_{pid}.o"
-    var entry_src = ".section .text.entry,\"ax\",@progbits\n"
-    entry_src = entry_src + ".globl __simple_riscv32_entry\n"
-    entry_src = entry_src + "__simple_riscv32_entry:\n"
-    entry_src = entry_src + "  la sp, _stack_top\n"
-    entry_src = entry_src + "  la t0, _sbss\n"
-    entry_src = entry_src + "  la t1, _ebss\n"
-    entry_src = entry_src + "1:\n"
-    entry_src = entry_src + "  bgeu t0, t1, 2f\n"
-    entry_src = entry_src + "  sw zero, 0(t0)\n"
-    entry_src = entry_src + "  addi t0, t0, 4\n"
-    entry_src = entry_src + "  j 1b\n"
-    entry_src = entry_src + "2:\n"
-    entry_src = entry_src + "  call boot_main\n"
-    entry_src = entry_src + "3:\n"
-    entry_src = entry_src + "  wfi\n"
-    entry_src = entry_src + "  j 3b\n"
-    if not rt_file_write_text(entry_s, entry_src):
-        return Err("SimpleOS RISC-V32 entry write failed: {entry_s}")
-    val (entry_out, entry_err, entry_code) = rt_process_run("riscv64-unknown-elf-gcc", [
-        "-c", "-march=rv32imafdc", "-mabi=ilp32d", "-ffreestanding", "-nostdlib",
-        "-o", entry_o, entry_s
-    ])
-    rt_file_delete(entry_s)
-    if entry_code != 0:
-        return Err("SimpleOS RISC-V32 entry compilation failed: {entry_out}{entry_err}")
-
-    var stub_src = "#define UART0 ((volatile unsigned char*)0x10000000UL)\n"
-    stub_src = stub_src + "void rt_riscv_uart_put(unsigned long long b){while(!(UART0[5]&0x20)){} UART0[0]=(unsigned char)b;}\n"
-    stub_src = stub_src + "unsigned long long rt_riscv_qemu_heap_size(void){return 8ULL*1024ULL*1024ULL;}\n"
-    if not rt_file_write_text(stub_c, stub_src):
-        return Err("SimpleOS RISC-V32 stub write failed: {stub_c}")
-    val (stub_out, stub_err, stub_code) = rt_process_run("riscv64-unknown-elf-gcc", [
-        "-c", "-march=rv32imafdc", "-mabi=ilp32d", "-ffreestanding", "-nostdlib",
-        "-o", stub_o, stub_c
-    ])
-    rt_file_delete(stub_c)
-    if stub_code != 0:
-        return Err("SimpleOS RISC-V32 stub compilation failed: {stub_out}{stub_err}")
-
-    val (libgcc_out, _libgcc_err, libgcc_code) = rt_process_run("riscv64-unknown-elf-gcc", [
-        "-march=rv32imafdc", "-mabi=ilp32d", "-print-libgcc-file-name"
-    ])
-    val libgcc = libgcc_out.trim()
-
-    var args: [text] = [
-        "-m", "elf32lriscv",
-        "--no-relax",
-        "-nostdlib",
-        "-T", "src/os/kernel/arch/riscv32/linker.ld",
-        "--entry=__simple_riscv32_entry",
-        entry_o
-    ]
-    for obj in user_objects:
-        args = args.push(obj)
-    args = args.push(stub_o)
-    if libgcc_code == 0 and libgcc != "":
-        args = args.push(libgcc)
-    args = args.push("-o")
-    args = args.push(output)
-
-    if verbose:
-        print "[llvm-link] SimpleOS RISC-V32 link: ld.lld {args.join(\" \")}"
-    val (stdout, stderr, code) = rt_process_run("ld.lld", args)
-    rt_file_delete(entry_o)
-    rt_file_delete(stub_o)
-    if code != 0:
-        return Err("SimpleOS RISC-V32 link failed: {stdout}{stderr}")
     Ok(output)
 
 # ============================================================================

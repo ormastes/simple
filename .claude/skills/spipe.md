@@ -736,11 +736,10 @@ Exception: safety-critical guards in process/signal paths (e.g. `pid <= 0` check
 before `kill()`/`waitpid()`) belong in the seed runtime too — a failed spawn's
 `-1` reaching `kill(-1)` SIGTERMs every user process (tmux + all SSH sessions +
 `systemd --user`). Such seed changes only take effect after a seed rebuild
-(`cargo build`) + `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`.
-Caveat: `--deploy` ships the stage4 CLI with no smoke gate (verified broken
-2026-06-11 — lint coredumps, silent test no-op); always smoke-test `bin/simple`
-afterwards and, if broken, atomically restore the fresh seed from
-`src/compiler_rust/target/release/simple` (see `.claude/rules/bootstrap.md`).
+through `scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`.
+Normal bootstrap reuses the Rust seed and never runs cargo. The wrapper has a
+`-c 'print(1+1)'` deploy smoke gate; still run focused post-deploy smoke before
+claiming the pure-Simple toolchain is healthy (see `.claude/rules/bootstrap.md`).
 See `doc/07_guide/runtime/process_kill_safety.md`.
 
 For memory-perspective work (gc/nogc boundary, leak checks, alloc enforcement):
