@@ -1173,7 +1173,10 @@ impl<M: Module> CodegenBackend<M> {
                 // via use_map (per-module imports) or import_map (global unique names).
                 let use_hit = self.use_map.get(name.as_str());
                 let import_hit = self.import_map.get(name.as_str());
-                if use_hit.is_none() && import_hit.is_none() {
+                if use_hit.is_none()
+                    && import_hit.is_none()
+                    && std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_none()
+                {
                     eprintln!(
                         "[DEBUG declare_globals fallback] name={} module_prefix={:?}",
                         name, self.module_prefix
