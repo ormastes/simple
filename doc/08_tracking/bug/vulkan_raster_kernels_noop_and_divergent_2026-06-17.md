@@ -187,6 +187,30 @@ untouched).
    unrelated to kernel wiring). Apply the same verified gradient wiring once the
    `init_with_session` blocker is resolved.
 
+## NO-OP symptom resolved via emu composition (2026-07-06)
+
+The user-visible **NO-OP** half of this bug — `draw_line`, `draw_circle`
+(outline), and `draw_rounded_rect` dispatching a validated *empty* SPIR-V shader
+and writing ZERO pixels while still setting `dirty=true` — is fixed in
+`backend_vulkan.spl`. Those three methods no longer dispatch their no-op
+pipeline; they now render **real device pixels** by composing GPU
+`draw_rect_filled` dispatches through the bit-exact `emu_draw_line` (Bresenham),
+`emu_draw_circle` (midpoint outline), and `emu_draw_rounded_rect`
+(`backend_emu.spl`). Those emu helpers implement exactly the standard
+Metal-bit-exact algorithms `SoftwareBackend` uses, so the Vulkan output is now
+bit-exact with the CPU reference — no `SoftwareBackend` change, no SPIR-V
+authoring, no runtime/seed rebuild. The `pipe_line`/`pipe_circle_outline`/
+`pipe_rounded_rect`/`pipe_blit` pipelines are still compiled/validated/destroyed
+(uniform lifecycle) but are no longer dispatched.
+
+This does NOT resolve "Still open" #1-3: reconciling the dedicated GPU SPIR-V
+blobs (`spirv_line` truncating-DDA, `spirv_circle_outline` distance-ring,
+`spirv_rounded_rect` fill-vs-outline) with the engine contract — a
+Bresenham-class SPIR-V rewrite or a per-primitive semantics decision — remains
+the open work if single-dispatch GPU raster (vs the current multi-dispatch emu
+composition) is desired for these three primitives. #4 (`blit`) and #5
+(`vulkan_session.spl`) are likewise unchanged.
+
 ## Related
 - `web_render_gpu_backend_provenance_fabricated_2026-06-17.md`
 - `rt_vulkan_only_executes_under_classic_interpret_2026-06-17.md`
