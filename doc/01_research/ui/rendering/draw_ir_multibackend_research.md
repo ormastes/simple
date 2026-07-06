@@ -81,10 +81,14 @@ paper but is unenforceable and unused. This is the single biggest coherence liab
 
 ### 3a. Two shared reference implementations coexist (redundancy)
 
-1. **`backend_emu.spl`** — stateless. 34 `emu_draw_*` functions, each composes the target op
+1. **`backend_emu.spl` + `backend_emu_adv.spl`** — stateless. **Corrected count (verified
+   2026-07-06): 28 `emu_draw_*` functions total — 23 in `backend_emu.spl`, 5 in
+   `backend_emu_adv.spl`** (an earlier "~34" estimate was wrong). Each composes the target op
    from `core.draw_rect_filled` (rect outline = 4 fills, backend_emu.spl:42; Bresenham line :54;
-   midpoint circle :96; scanline triangle :199; gradient row-lerp :249; src-over blend :642 via
-   `_emu_blend_over`). This is a clean, backend-agnostic **software reference**.
+   midpoint circle :96; scanline triangle :199; gradient row-lerp :249; src-over blend call site
+   `emu_draw_rect_blend` at backend_emu.spl:642, which delegates to `_emu_blend_over` **defined at
+   `backend_emu_math.spl:33`**, not at backend_emu.spl:642 as previously stated — that line is only
+   the call site). This is a clean, backend-agnostic **software reference**.
 2. **`backend_software.spl`** — stateful (30 KB). Owns a pixel buffer, has its own fills, and
    wires **SIMD hooks** (`record_simd_fill_hit` at :137/:202/:685, `record_simd_copy_hit`,
    `record_simd_alpha_hit`) via `simd_provider`. This is a *second*, richer reference rasterizer.
@@ -95,11 +99,15 @@ unified design must pick **one canonical parity oracle** and make the other a st
 
 ### 3b. Who delegates to shared logic vs who re-implements
 
-**Delegate to `backend_emu`** (import it, ~30 `emu_draw_*` call sites each): vulkan, rocm, intel,
-opencl, opengl, qualcomm, virtio_gpu, webgpu, software, baremetal. But delegation is **manual
-per-method forwarding boilerplate** — each backend hand-writes ~30 wrapper methods
-`me draw_circle_filled(...): emu_draw_circle_filled(self, ...)`. ~30 methods × ~10 backends ≈
-**300 forwarding stubs** that exist only because the Core/Adv "free Adv" contract is not wired.
+**Delegate to `backend_emu`** (import it): vulkan, rocm, intel, opencl, opengl, qualcomm,
+virtio_gpu, webgpu, software, baremetal. Delegation is **manual per-method forwarding
+boilerplate** — each backend hand-writes wrapper methods that call the shared **free function**
+with an explicit `self`: `me draw_circle_filled(...): emu_draw_circle_filled(self, ...)`. There is
+**no `emu` field** on any backend struct — an earlier reading that implied a method call of the
+shape `self.emu.draw_circle_filled(...)` was wrong; the call site is always the plain free
+function. **Corrected count (verified 2026-07-06): ~191 forwarding stubs, not ~300** — 19 "Adv" ops
+(from `backend_emu_adv.spl`) × 9 delegating backends, plus 20 stubs in `software`, ≈ 191. The
+boilerplate-reduction benefit of eliminating these stubs was previously **overstated by ~57%**.
 
 **Do NOT import `backend_emu`** (reimplement locally): cpu, cuda, directx, metal, accel_*.
 Breaking that down:
@@ -211,3 +219,78 @@ model and a single-oracle consolidation — this is assembly, not invention.
   formal seam for adding a backend.
 
 These gaps are the agenda for the Design and Plan documents.
+
+---
+
+## 9. Honesty & Coherence debt (2026-07-06 audit)
+
+A follow-up backend coherence audit (read-only, file:line verified) found additional issues beyond
+§4/§8 that the unification design/plan must account for. Each is filed as a bug record in
+`doc/08_tracking/bug/` (dated 2026-07-06) so it survives independently of this design effort.
+
+- **WebGPU is a *live* dishonest backend, same class as the already-fixed DirectX case** —
+  `init()` unconditionally returns `true` even when `webgpu_sffi_is_available()`/`create_surface`
+  fail (backend_webgpu.spl:227-252); `name()` always reports `"webgpu"` with no DirectX-style
+  honest fallback; `Engine2D.probe_backend()`'s webgpu branch (engine.spl:382-387) checks only
+  `init()`, never `gpu_ready`, so `detect_best_backend()`/`list_backends()` report "WebGPU
+  Initialized" on any host regardless of a real adapter; `read_pixels_with_source()` always returns
+  the CPU buffer tagged `"cpu_mirror"` (backend_webgpu.spl:531-532), so even a real successful GPU
+  dispatch is invisible on readback. See
+  `doc/08_tracking/bug/webgpu_backend_dishonest_always_initialized_cpu_mirror_2026-07-06.md`.
+- **Intel and OpenGL are vaporware, not dishonest** — both have real-looking, well-structured
+  per-primitive dispatch code (backend_intel.spl:146-361, backend_opengl.spl:108-243) but their
+  backing `rt_oneapi_*`/`rt_opengl_*` externs have **zero registration anywhere in
+  `compiler_rust`** — any call hard-errors via `common::unknown_function` rather than degrading
+  gracefully. OpenGL additionally has a latent honesty bug: `read_pixels_with_source()` doesn't
+  check `opengl_read_pixels()`'s boolean return before tagging the result `"device_readback"`
+  (backend_opengl.spl:234-243). Both sit in the auto-detect priority order
+  (helpers_availability.spl:104-136) ahead of webgpu/cpu_simd/software, so a full priority scan can
+  reach them. See
+  `doc/08_tracking/bug/engine2d_vaporware_backends_intel_opengl_unregistered_externs_2026-07-06.md`.
+- **`cpu_simd` is a bare alias for `cpu`, no real SIMD in the hot path** — selecting `"cpu_simd"`
+  instantiates the byte-identical `CpuBackend.create()` as plain `"cpu"` (engine.spl:271-279),
+  differing only in the `selected_backend_name` string. Genuine NEON/AVX2 kernels **do** exist
+  (`nogc_sync_mut/gpu/engine2d/simd_kernels.spl:333-378`, real `extern`-backed C intrinsics; also
+  `rt_engine2d_simd_*`) but are never called from `backend_software.spl`/`backend_cpu.spl` — their
+  only confirmed consumer is an unrelated `cpu_simd_session.spl` API. The only "SIMD" signal on the
+  live hot path is `record_simd_fill_hit()` et al. (simd_provider.spl), a telemetry counter with no
+  vector dispatch behind it — **this counter is not proof of vectorization** and must not be
+  accepted as such by any future gate. See
+  `doc/08_tracking/bug/cpu_simd_backend_is_bare_alias_no_real_simd_2026-07-06.md`.
+- **Orphaned fabricated-FFI files sit unquarantined beside the real backends** —
+  `backend_accel_{cuda,metal,vulkan}.spl` fabricate data in `init()` (e.g. hardcoded device pointer
+  `0x10000000`, backend_accel_cuda.spl:143-151, zero FFI calls) and do not implement
+  `RenderBackend`; `backend_cuda_proof.spl`/`backend_webgpu_proof(.spl/_runtime_ops.spl)` declare
+  `extern fn` symbols that mostly don't exist in the Rust runtime, and where a symbol does exist it
+  has a different signature than the real backend's. None of this is wired into `engine.spl`'s
+  backend selection or the Draw-IR executor; the only "coverage" is two spec files that inline-copy
+  the fake classes rather than exercising the real ones — the same class of risk as the
+  already-deleted `backend_metal_proof` files. See
+  `doc/08_tracking/bug/engine2d_orphaned_fake_accel_and_proof_files_2026-07-06.md`.
+- **`RenderBackend` naming collision + three dead shared-interface attempts** — the pixel-level
+  `RenderBackend` (engine2d/backend.spl:21-44) and a *different*, same-named widget-tree trait
+  (`common/ui/backend.spl:22-40`, implemented by `fb_backend.spl`/`browser_backend.spl`) share a
+  name with no distinguishing namespace, a hazard for anyone grepping during unification. Separately,
+  three independent attempts at "one shared backend interface" are dead: `RenderBackendCore`/
+  `RenderBackendAdv` (zero implementations, §2 above), `ComputeSession` (backend_session.spl:78-95,
+  zero implementations), and a third **textual copy** of the entire `RenderBackend` trait in
+  `nogc_async_mut/gpu/engine2d/backend.spl` (byte-for-byte match, separate nominal type, no facade
+  re-export — will silently drift the moment either side adds a method). See
+  `doc/08_tracking/bug/engine2d_rendbackend_naming_collision_and_dead_traits_2026-07-06.md`.
+- **`Engine2D` facade's dead 3-way branch + two disagreeing backend-selection paths** — ~35 drawing
+  methods repeat an `if val Some(vg) ... elif val Some(bm) ... else self.backend...` branch
+  (e.g. `clear` engine.spl:534-541) even though every constructor sets `backend`/`baremetal_backend`/
+  `virtio_gpu_backend` to the identical object — the branch is provably dead. Separately,
+  `compute_dispatch.spl`'s `BackendProber`/`_strict_probe_backend` (backend_probe.spl:107-148) has
+  no branch for cuda/opencl and a permanent `Unavailable` for rocm, never probing vulkan/metal/
+  webgpu — while `Engine2D.probe_backend()` (engine.spl:323-412) does real per-class probes for the
+  same names. The two paths can permanently disagree on the same backend's availability; a
+  companion miswiring (`probe_cpu_simd_x86()` hitting the generic always-true branch instead of the
+  real NEON/AVX-detecting one, backend_probe.spl:109 vs :128-136) means CPU-SIMD detection in that
+  path is itself mislabeled. See
+  `doc/08_tracking/bug/engine2d_facade_dead_3way_branch_and_drawir_gaps_2026-07-06.md` (this record
+  also covers the `scene_blur_rect` drop and missing triangle/mask IR kinds from §6 above).
+
+These findings do not change the overall synthesis (§7) but add concrete cleanup/honesty work to
+the Design and Plan documents beyond D1-D4 (see design's Verification record and plan's P1/P2/P3
+additions).

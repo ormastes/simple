@@ -9,6 +9,26 @@ and delegation only (repo rule). No parallel trait — we rationalize the existi
 
 ---
 
+## Verification record (2026-07-06)
+
+Two independent checks — an adversarial verification pass and a separate backend coherence audit —
+reviewed this design against the actual source. Outcome: **D1, D2, D4 reviewed and
+APPROVED_WITH_CHANGE**; **P1 is GO, gated on a new bit-exact harness prerequisite** (§3b); **mixin
+stub-elimination is deferred to a new feature, FR-RENDER-MIXIN** (§3a) — both probes confirmed the
+shipped compiler does not auto-forward trait/mixin methods today, so eliminating the ~191
+hand-written forwarding stubs is not a free refactor. Corrected facts folded in below: the shared
+reference is **28** `emu_draw_*` functions (23 in `backend_emu.spl` + 5 in `backend_emu_adv.spl`,
+not "~34"); forwarding boilerplate is **~191** stubs (not "~300"), and the boilerplate-reduction
+case for the mixin was overstated by ~57%; the blend reference `_emu_blend_over` is defined at
+`backend_emu_math.spl:33` (backend_emu.spl:642 is only the call site). A deeper coherence audit
+also surfaced honesty/dedup debt not previously captured here — see research §9 and plan
+P1/P2/P3 — covering a live-dishonest WebGPU backend, vaporware Intel/OpenGL, the `cpu_simd` bare
+alias, orphaned fabricated-FFI files, a `RenderBackend` naming collision plus three dead
+shared-interface attempts, and the `Engine2D` facade's dead 3-way branch with its two disagreeing
+backend-selection paths.
+
+---
+
 ## 1. Canonical layering (target)
 
 ```
@@ -39,7 +59,7 @@ Interface: trait RenderBackend  (ONE interface — §2)
 ## 2. ONE interface (resolve the three-trait drift)
 
 **Decision D1 — collapse to a single trait `RenderBackend` + a capability descriptor; retire the
-Core/Adv split as *dead code*.**
+Core/Adv split as *dead code*. Status (2026-07-06): APPROVED_WITH_CHANGE.**
 
 Rationale (from research §2): every backend already implements the flat `RenderBackend`; **nothing**
 implements `RenderBackendCore`/`RenderBackendAdv`; the "implement Core, get Adv free" promise is
@@ -57,6 +77,16 @@ un-enforced. Rather than keep three traits and hope, we encode the same idea *co
    call-forwarding layer. `Engine2DExtended` (`draw_text_bg`) folds into `RenderBackend` as an
    ordinary op with a shared body.
 
+**Change folded in (coherence audit, research §9):** `RenderBackendCore`/`RenderBackendAdv` are not
+the only dead shared-interface attempts to retire — `ComputeSession` (backend_session.spl:78-95,
+zero implementations) and the textual copy of the whole `RenderBackend` trait in
+`nogc_async_mut/gpu/engine2d/backend.spl` (byte-for-byte duplicate, separate nominal type, no
+facade re-export) should be retired/reconciled in the same pass (plan P1). Also note: this pixel-level
+`RenderBackend` shares its name with an unrelated widget-tree trait in `common/ui/backend.spl:22-40`
+(implemented by `fb_backend.spl`/`browser_backend.spl`) — the naming collision must be resolved
+(one side renamed) before/early in the unification work so greps and refactors during P1-P6 are
+unambiguous (plan P1).
+
 **Method surface of the unified `RenderBackend`** = current `RenderBackend` (backend.spl:21-44)
 **plus** `capability() -> BackendCapability` (§4) **plus** the IR-completeness ops the executor must
 be able to call (`draw_triangle_filled` already present; add `push_clip`/`pop_clip` stack form,
@@ -70,7 +100,9 @@ backends nothing.
 
 **Decision D2 — `backend_emu.spl` becomes THE canonical software reference (`SharedRaster`); it is
 the single bit-exact parity oracle. `backend_software.spl` is refactored to *be* that reference
-plus SIMD span overrides — it stops being a second, independently-drifting implementation.**
+plus SIMD span overrides — it stops being a second, independently-drifting implementation. Status
+(2026-07-06): APPROVED_WITH_CHANGE — promotion to oracle is gated on the bit-exact harness in §3b,
+and the mixin-based stub elimination in §3a is deferred (see below).**
 
 ### 3a. Shape (composition, not inheritance)
 
@@ -86,19 +118,42 @@ and re-parented from the flat trait onto the minimal core surface:
   blur/shadow, polygons) has a `SharedRaster` reference body composed from that core surface —
   already written in `backend_emu.spl` + `backend_emu_adv.spl`.
 
-A backend gets shared behavior by a **`shared_dispatch` mixin**: for each non-core op the backend
-does not accelerate, its method body is a one-line delegation to the `SharedRaster` free function
-(`me draw_circle_filled(...): shared_draw_circle_filled(self, ...)`). To kill the ~300 forwarding
-stubs (research §3b), we provide a **`SharedRasterMixin` composition helper** that a backend
-`include`s to auto-supply all non-accelerated methods; the backend then only overrides the handful
-it accelerates. (If the language's mixin/`include` cannot yet auto-forward trait methods, the
-fallback is a generated forwarding block — one macro/codegen source, not hand-written per backend —
-recorded as **FR-RENDER-MIXIN** rather than silently tolerating the boilerplate, per repo rule.)
+A backend gets shared behavior by delegating: for each non-core op the backend does not accelerate,
+its method body is a one-line call to the `SharedRaster` **free function**, passing `self` as the
+first argument — `me draw_circle_filled(...): shared_draw_circle_filled(self, ...)`. There is no
+`emu`/`shared` field on the backend struct; this is a plain free-function call, not a method call
+through a composed object.
+
+**Mixin auto-forwarding is confirmed infeasible with today's shipped compiler — this is a critical
+change from the original design intent, not a stylistic detail.** Two independent empirical probes
+verified: the alias/mixin desugar pipeline (`src/app/desugar/forwarding.spl`, a five-pass text-level
+rewrite: forwarding-alias generation, static-constant/method extraction, enum-constructor
+generation, call-site rewriting — `src/app/desugar/mod.spl:1-16`) is exposed only as an **explicit,
+manually-invoked CLI subcommand** (`bin/simple desugar <file>`, `file_delegation` to
+`app/desugar/mod.spl`, wired at `main_and_help.spl:312`) — it is **not** wired into the normal
+build/compile pipeline: `create_default_services()` (`compiler_services.spl:200-247`) wires every
+real build's `desugarer:` port to `_make_noop_desugarer()`/`_noop_desugar` (`compiler_services.spl:157`,
+docstring: "Wiring to real pipeline stages is done incrementally... Phase 2 of MDSoC migration"),
+and there is no other `desugarer:` override anywhere in `src/`. So an `alias`/mixin `include`
+declaration written in ordinary backend source is **not** expanded by `bin/simple build`/`test`/
+`run` — a developer would have to manually pre-run `bin/simple desugar` per file, per edit, which
+is not "free" and does not match the composition-helper workflow this section originally described.
+The originally-proposed **`SharedRasterMixin` composition helper does not exist and cannot be made
+to auto-forward trait methods today.** Eliminating the ~191 hand-written forwarding stubs (research
+§9, corrected count) is therefore **removed from P1** and re-filed as a separate feature,
+**FR-RENDER-MIXIN**: wire `src/app/desugar` into the compiler front-end (not just the standalone
+CLI subcommand); the offline desugar as it stands today **drops return-type annotations** during
+its rewrite, which would silently break a strictly-typed native backend — the fix must **preserve**
+them; add an end-to-end test using `alias` with **zero hand-written stubs** as proof the wiring
+works. FR-RENDER-MIXIN is a **prerequisite for a later stub-cleanup phase**, not part of P1 (plan
+P1 note). Until it lands, backends keep hand-writing the ~191 forwarding stubs shown above —
+unchanged from today, just no longer mis-costed as free.
 
 ### 3b. Bit-exact contract (the oracle)
 
 The shared reference defines the **canonical pixel math**; every backend's accelerated path must
-match it bit-for-bit on readback. The blend primitive is `_emu_blend_over` (backend_emu.spl:642,
+match it bit-for-bit on readback. The blend primitive is `_emu_blend_over`, **defined at
+`backend_emu_math.spl:33`** (backend_emu.spl:642 is only the call site, `emu_draw_rect_blend`,
 straight src-over on ARGB u32). The contract, restated as an acceptance invariant:
 
 > For any scene S and any backend B, `B.read_pixels(S)` **==** `SharedRaster.read_pixels(S)`
@@ -109,14 +164,35 @@ This makes the shared reference the **single oracle**: parity gates compare ever
 `SharedRaster`, not against each other, so there is exactly one truth. Any op a backend does not
 accelerate trivially passes (it *is* the oracle). Accelerated GPU ops must be validated against it.
 
+**Duplicate blend implementation to unify:** `color.spl`'s `blend()` and `backend_emu_math`'s
+`_emu_blend_over` are **byte-identical duplicate src-over copies**, independently confirmed against
+the same anchor (`0x01020304` over `0x10203040` == `0x101F2F3F`). Promoting `_emu_blend_over` to
+canonical means deleting `color.spl`'s copy and routing both consumers through the one reference —
+do not leave two source-identical implementations that can drift apart on a future edit to only one
+of them.
+
+**Prerequisite gate before promoting `backend_emu` to the oracle (critical addition, not optional):**
+`backend_software.spl`'s ~9 core ops (`rect`, `line`, `circle`, `circle_filled`, `rounded_rect`,
+`triangle_filled`, `gradient_rect`, `text`, `text_bg` — e.g. `draw_circle` at
+backend_software.spl:227) are **independently hand-written**, not derived from or previously proven
+equal to `backend_emu`'s reference math. Promoting `backend_emu` to *the* `SharedRaster` oracle is
+therefore **not automatically behavior-preserving** for any backend (including `software` itself)
+that currently ships its own core-op bodies. Before any core op is switched to delegate to
+`SharedRaster`, a **bit-exact validation harness** (emu vs. software, per op) must pass; where the
+two diverge, the design does not presume `backend_emu` wins by default — pick the canonical
+algorithm **per op** based on the harness result. This harness is being built now at
+`test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` and is a **prerequisite gate
+in plan P1**, ahead of any core-op delegation switch.
+
 ### 3c. Consolidating the two references
 
 `backend_software.spl` today re-derives fills and owns SIMD hooks. Under D2 it becomes:
 `SoftwareBackend` supplies the **core surface** (owns the framebuffer, implements `draw_rect_filled`,
-`draw_image`, clip, mask) with **SIMD span kernels** on the hot core ops; it inherits all
-higher-level ops from `SharedRaster`. There is then **one** algorithm for circle/triangle/gradient
-(in `SharedRaster`), fed by either scalar or SIMD `draw_rect_filled`/span fills underneath. No
-second oracle.
+`draw_image`, clip, mask, subject to the §3b harness gate above) with **SIMD span kernels** on the
+hot core ops; higher-level ops delegate to `SharedRaster` via the same free-function calls every
+other backend uses (no inheritance — composition only, per repo rule). There is then **one**
+algorithm for circle/triangle/gradient (in `SharedRaster`), fed by either scalar or SIMD
+`draw_rect_filled`/span fills underneath. No second oracle.
 
 ---
 
@@ -138,7 +214,10 @@ class BackendCapability:
 Rules enforced by the shared base:
 - `name` **must** disclose emulation when `class_ == "software-emulation"` (directx already does —
   backend_directx.spl:22; generalize to cpu, and any GPU backend that failed to open a device and
-  fell back).
+  fell back). **Concrete case to fix (research §9):** WebGPU's `init()` unconditionally returns
+  `true` and `name()` always reports `"webgpu"`, with `probe_backend()` checking only `init()` and
+  never `gpu_ready` (backend_webgpu.spl:227-252, engine.spl:382-387) — the same class of bug
+  DirectX had before its fix, currently live. Bring WebGPU under this rule (plan P2).
 - `readback_source` is set by the **actual** path taken (GPU present-then-readback vs shared-fb
   copy), not asserted. `Engine2DReadback.source` (backend.spl:5) is populated from it, closing the
   "claimed GPU while software fell back" hole (MEMORY 06-10).
@@ -157,10 +236,26 @@ Rules enforced by the shared base:
 
 **Decision D4 — SIMD-CPU is the `SoftwareBackend` core surface with SIMD-accelerated span kernels;
 it is selected as `cpu-simd` and declares `accelerated_ops = [fill spans, copy, alpha-blend]`. It
-does not fork the higher-level raster logic.**
+does not fork the higher-level raster logic. Status (2026-07-06): APPROVED_WITH_CHANGE.**
+
+**Change folded in (research §9):** today `"cpu_simd"` is a **bare alias** for `"cpu"` —
+`engine.spl:271-279` instantiates the byte-identical `CpuBackend.create()` for both, and the only
+"SIMD" signal on the hot path is `record_simd_*_hit()` telemetry counters with no vector dispatch
+behind them. Genuine NEON/AVX2 kernels **already exist**
+(`nogc_sync_mut/gpu/engine2d/simd_kernels.spl:333-378`, real `extern`-backed C intrinsics; also
+`rt_engine2d_simd_*`) but are unwired from `backend_software.spl`/`backend_cpu.spl`. D4 is therefore
+**not** "write new SIMD kernels" — it is **"wire the existing real kernels into the hot path, and
+fix the gate so it isn't NEON-only"** (the current arch-detection gate must also engage AVX2 on x86
+hosts rather than falling through to scalar). Proof of execution must observe the **real vector
+kernel actually running** (e.g. an instrumented call-count or return-value check on the
+`simd_kernels.spl`/`rt_engine2d_simd_*` entry points) — **`record_simd_*_hit` counters are
+explicitly discredited as proof**: they are exactly the fake-evidence pattern this project has hit
+before (a counter increments with no vectorized code behind it) and must not be accepted as
+sufficient by the plan's gate (plan P3).
 
 - The hot kernels are `draw_rect_filled` (span fill), `draw_image` (copy), and alpha blend — exactly
-  where `backend_software` already records `record_simd_{fill,copy,alpha}_hit` (research §5).
+  where `backend_software` already records `record_simd_{fill,copy,alpha}_hit` (research §5), which
+  is telemetry only, not the acceptance evidence (see above).
 - Arch dispatch (x86 SSE/AVX, arm NEON — genuine per MEMORY 06-03, riscv RVV) routes through the
   existing `simd_provider` probes; scalar fallback when no ISA span kernel is available.
 - Because circle/triangle/gradient/text all funnel through `draw_rect_filled`/spans in
@@ -188,7 +283,8 @@ frame (research §6). Keep the single struct (no numbered splits); add kinds/fie
 
 The **executor stays the single dispatch point**; every new kind routes there. Default background
 `clear` should be a scene command, not the hardcoded white (engine2d_executor.spl:31), so headless
-replay is deterministic.
+replay is deterministic. (This gap, plus the `scene_blur_rect`-dropped-by-executor gap below, is
+tracked in `doc/08_tracking/bug/engine2d_facade_dead_3way_branch_and_drawir_gaps_2026-07-06.md`.)
 
 ---
 
@@ -196,15 +292,20 @@ replay is deterministic.
 
 To add backend `Foo`, an implementer:
 1. Implements the **core surface** (§3a): `clear`, `draw_rect_filled`, `draw_image`, clip, mask,
-   present, `read_pixels`, `width`, `height`.
-2. Includes the **`SharedRasterMixin`** — every non-core op now works via the oracle. Foo is
-   already correct and passes the parity gate at this point.
+   present, `read_pixels`, `width`, `height` — validated against the §3b bit-exact harness.
+2. **Today (until FR-RENDER-MIXIN lands):** hand-writes the forwarding stub for each non-core op it
+   does not accelerate, one line each, calling the `SharedRaster` free function with `self` — the
+   same ~191-stub pattern every current backend uses (§3a). **Once FR-RENDER-MIXIN lands:** includes
+   the mixin instead and gets these for free. Either way, Foo is correct and passes the parity gate
+   at this point.
 3. Declares a **`BackendCapability`** (name, class, device_present probe, `accelerated_ops=[]`).
 4. **Optionally** overrides individual ops with native kernels, adding each to `accelerated_ops`;
    each override must pass the bit-exact gate against `SharedRaster`.
 
-"Implement 9 core methods + a capability descriptor, get a complete honest backend free; accelerate
-incrementally." That is the whole onboarding cost.
+"Implement 9 core methods + a capability descriptor, get a complete honest backend correct;
+accelerate incrementally." That is the whole onboarding cost — **"free" applies to correctness**
+(no per-op math to re-derive); the forwarding-stub *typing* cost is still hand-written today and
+only becomes literally free once FR-RENDER-MIXIN lands (§3a).
 
 - **DirectX/Vulkan/Metal/CUDA/etc.** each map their `accelerated_ops` to native kernels; everything
   else → `SharedRaster`. Metal/Vulkan (real GPU) keep their present+readback path and set
@@ -232,15 +333,31 @@ stops being a special path:
 
 - **Reuse the existing `src/lib/gc_async_mut/gpu/engine2d/` directory** — no new numbered split, no
   `engine2d_v2` (repo rule). Files evolve in place:
-  - `backend_emu.spl` → promoted to `SharedRaster` canonical reference (add `SharedRasterMixin`).
-  - `backend_core.spl` defines the **core surface** the mixin needs; `backend_adv.spl` deleted or
-    reduced to a doc pointer once the mixin lands.
+  - `backend_emu.spl` (23 ops) + `backend_emu_adv.spl` (5 ops) → promoted to `SharedRaster`
+    canonical reference; forwarding stays hand-written (~191 stubs) until **FR-RENDER-MIXIN** lands
+    (§3a) — do not assume a `SharedRasterMixin` `include` exists yet.
+  - `backend_core.spl` defines the **core surface** the (future) mixin needs; `backend_adv.spl`,
+    `backend_session.spl`'s `ComputeSession`, and the textually-duplicated `RenderBackend` trait in
+    `nogc_async_mut/gpu/engine2d/backend.spl` are retired/reconciled together (research §9, plan P1)
+    once §2/§3 land — three dead attempts at this exact problem, not one.
   - New `backend_capability.spl` — the `BackendCapability` type + honesty helpers.
-  - `backend_software.spl` → core-surface + SIMD spans only (higher ops from `SharedRaster`).
-  - `backend.spl` — unified `RenderBackend` (+`capability()`), `Engine2DExtended` folded in.
+  - `backend_software.spl` → core-surface + SIMD spans only (higher ops from `SharedRaster`), gated
+    on the §3b bit-exact harness before any core op switches to delegate.
+  - `backend.spl` — unified `RenderBackend` (+`capability()`), `Engine2DExtended` folded in; resolve
+    the naming collision with `common/ui/backend.spl`'s unrelated `RenderBackend` (plan P1, research
+    §9) before/early in this work.
+  - The dead 3-way `if val Some(vg) ... elif val Some(bm) ... else backend` branch across ~35
+    `engine.spl` methods (e.g. `clear` :534-541) collapses to a single `self.backend` call — every
+    constructor already sets all three fields to the identical object, so no behavior changes
+    (plan P1). `backend_accel_{cuda,metal,vulkan}.spl` and `backend_{cuda,webgpu}_proof*.spl` are
+    orphaned, fabricated-FFI files with no wiring into selection or the executor — quarantine/delete
+    them rather than carry them forward (plan P2, same precedent as the earlier `backend_metal_proof`
+    deletions).
 - **Draw-IR** stays in `common/render_scene/` (pure, dependency-light — correct MDSOC layer).
 - **Executor** stays in `gc_async_mut/render_scene/` as the single dispatch point (mirror the
-  `gc_sync_mut` variant).
+  `gc_sync_mut` variant). Unify the two disagreeing backend-selection paths
+  (`Engine2D.probe_backend()` vs. `compute_dispatch.spl`'s `BackendProber`) into one source of truth
+  (plan P1, research §9).
 - **MDSOC+**: rendering is a userland service surface → MDSOC outer facade (`Engine2D`) + the
   backend set as the business/driver layer; `baremetal`/`virtio_gpu` stay MDSOC-only (kernel/driver)
   and simply implement the same core surface — they get `SharedRaster` for free like everyone else.
@@ -250,19 +367,36 @@ stops being a special path:
 ## 10. Honesty — exists / designed / deferred
 
 **Exists (reused as-is):** `RenderBackend` trait, `SceneCommand`/executor single dispatch,
-`backend_emu` reference bodies, `backend_software` SIMD hooks, directx honest naming, metal
-`gpu_frame_complete`, `Engine2DReadback.source`, `SIMPLE_2D_BACKEND`/`cpu_simd` selection.
+`backend_emu` reference bodies (28 ops: 23 in `backend_emu.spl` + 5 in `backend_emu_adv.spl`),
+`backend_software` SIMD hooks, directx honest naming, metal `gpu_frame_complete`,
+`Engine2DReadback.source`, `SIMPLE_2D_BACKEND`/`cpu_simd` selection.
 
-**Designed here (new):** single-trait consolidation + retirement of Core/Adv (D1); `SharedRaster`
-as the one parity oracle with the `SharedRasterMixin` to kill forwarding boilerplate (D2);
-`BackendCapability` + uniform readback/`gpu_frame_complete` in the shared base (D3); SIMD-CPU as
-span-override of the software core, not a fork (D4); IR-completeness additions (masks, stops,
-transforms, glyph runs, triangle/polygon, blend modes, executor replay of blur); the add-a-backend
-seam; web-lane fold-in.
+**Designed here (new):** single-trait consolidation + retirement of Core/Adv **plus** the two other
+dead shared-interface attempts, `ComputeSession` and the `nogc_async_mut` textual trait copy (D1);
+`SharedRaster` as the one parity oracle, gated on the §3b bit-exact harness, with forwarding stubs
+(~191, corrected count) staying hand-written until FR-RENDER-MIXIN lands (D2 — **not** a free mixin
+kill today); `BackendCapability` + uniform readback/`gpu_frame_complete` in the shared base,
+explicitly closing the live WebGPU dishonesty case (D3); SIMD-CPU as span-override of the software
+core wiring the **existing** unwired NEON/AVX2 kernels rather than writing new ones, proof-gated on
+observing real kernel execution rather than `record_simd_*_hit` counters (D4); IR-completeness
+additions (masks, stops, transforms, glyph runs, triangle/polygon, blend modes, executor replay of
+blur, the `scene_blur_rect` drop); the add-a-backend seam; web-lane fold-in; the `Engine2D` facade's
+dead 3-way branch collapse and the two disagreeing backend-selection paths unified into one; the
+`RenderBackend` naming collision resolved; Intel/OpenGL vaporware either registered or de-listed
+from selection priority; orphaned `backend_accel_*`/`*_proof*.spl` files quarantined/deleted.
 
-**Deferred / risks:** if language mixin/`include` cannot auto-forward trait methods, the boilerplate
-kill needs codegen (**FR-RENDER-MIXIN**) — not silent tolerance. Real GPU parity for
-transform/glyph-run may lag the reference (accelerate later; correctness via `SharedRaster`
-meanwhile). Known blockers to respect in the plan: **engine2d drift** (line/circle CPU↔GPU,
-MEMORY 06-03), **metal readback** falling back to software silently (MEMORY 06-10), **JIT-render
-crash** on some winit/graphics apps (needs `SIMPLE_EXECUTION_MODE=interpret`, MEMORY 06-06).
+**Decisions (2026-07-06):** D1, D2, D4 reviewed and **APPROVED_WITH_CHANGE** (changes folded in
+above); **P1 is GO**, gated on the §3b bit-exact harness landing first; **mixin stub-elimination is
+deferred to FR-RENDER-MIXIN**, filed as a prerequisite for a future stub-cleanup phase, not part of
+P1.
+
+**Deferred / risks:** mixin/`include` auto-forwarding is **confirmed infeasible** with the shipped
+compiler (not a hypothetical "if") — the boilerplate kill needs the FR-RENDER-MIXIN codegen/wiring
+work, which must also **preserve return-type annotations** the offline desugar currently drops.
+Real GPU parity for transform/glyph-run may lag the reference (accelerate later; correctness via
+`SharedRaster` meanwhile). Known blockers to respect in the plan: **engine2d drift** (line/circle
+CPU↔GPU, MEMORY 06-03), **metal readback** falling back to software silently (MEMORY 06-10),
+**JIT-render crash** on some winit/graphics apps (needs `SIMPLE_EXECUTION_MODE=interpret`, MEMORY
+06-06), plus the newly-filed **honesty & coherence debt** (research §9): live WebGPU dishonesty,
+Intel/OpenGL vaporware, the `cpu_simd` bare alias, orphaned fabricated-FFI files, the
+`RenderBackend` naming collision, and the dead facade branch / dual selection paths.
