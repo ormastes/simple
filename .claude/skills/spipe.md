@@ -91,6 +91,10 @@ the lane.
 Starvation, fairness, race-condition, scheduler, channel, lock, or
 resource-lifecycle claims require a concurrency/resource model gate or an
 explicit blocker; a single interleaving test is not formal evidence.
+For flight-level or mission-critical robust-software lanes, use
+`doc/07_guide/app/spipe/mission_critical_robust_sw.md` as the operator-facing
+contract before claiming Simple compiler, SimpleOS baremetal, NVMe firmware, or
+thread/process/coroutine hardening evidence.
 
 Check or install that wiring with:
 
@@ -108,6 +112,7 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`.claude/skills/lib/spipe_phases.md`](lib/spipe_phases.md) — phase map
 - [`.claude/skills/lib/spipe_diagrams.md`](lib/spipe_diagrams.md) — diagram & concision rules (≤30 lines + ≥1 SDN diagram)
 - [`.claude/skills/lib/spipe_ui.md`](lib/spipe_ui.md) — **UI skill**: the 3 main GUI check apps + framebuffer capture/verify & backend-parity gates
+- [`doc/07_guide/app/spipe/mission_critical_robust_sw.md`](../../doc/07_guide/app/spipe/mission_critical_robust_sw.md) — flight-level / mission-critical robust-software gate contract
 - [`doc/07_guide/infra/sspec_scenario_manual.md`](../../doc/07_guide/infra/sspec_scenario_manual.md) — SSpec scenario manual, capture, inline/previous scenario, and environmental-test guidance
 - [`doc/07_guide/platform/simpleos/qemu_system_tests.md`](../../doc/07_guide/platform/simpleos/qemu_system_tests.md) — **System tests over QEMU**: per-arch live-boot SSpec specs (`test/03_system/os/qemu/`), `qemu_systest_contract.spl` descriptors, pass/missing-media/boot-fail classification (fail-closed, never `skip()`), and `scripts/check/qemu-storage-audit.shs`
 
@@ -690,17 +695,20 @@ done
 ```
 
 For concurrency perf work, do not collapse the Simple APIs into one "thread"
-bucket. `thread_spawn` is the OS-thread primitive, `green_spawn` in
-`std.concurrent.green_thread` is the implemented cooperative green-thread queue
-on the current OS thread, and `task_spawn` is the pool-backed native task path
-when `rt_pool_*` links. Keep `doc/07_guide/lib/misc/stdlib.md`,
-`doc/07_guide/compiler/check_perf.md`, and `.codex/skills/coding/SKILL.md`
-updated when those surfaces change.
+bucket. `thread_spawn` is the OS-thread primitive,
+`cooperative_green_spawn` / `cooperative_green_spawn_value` in
+`std.concurrent.cooperative_green` are cooperative queue APIs on the current OS
+thread, `multicore_green_spawn` is the Pure Simple bounded-worker facade that
+must prove `used_runtime_pool()` for M:N claims, and `task_spawn` is the
+pool-backed native task path when `rt_pool_*` links. Keep
+`doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and
+`.codex/skills/coding/SKILL.md` updated when those surfaces change.
 
 Concurrency API misuse is enforced by `simple check` as the E-PAR rule family
 (E-PAR-001..005: facade/alias/surface/call-shape/rt_pool rules; E-PAR-006:
-green-spawn closures are share-nothing — no module-level mutable `var` reads,
-no captured `var` writes; `thread_spawn` exempt). Both compilers implement the
+cooperative/multicore green closures are share-nothing — no module-level
+mutable `var` reads, no captured `var` writes; `thread_spawn` exempt). Both
+compilers implement the
 rules: the Rust seed in `driver/src/cli/check.rs`, the pure-Simple lints in
 `src/compiler/35.semantics/lint/concurrency_{api_misuse,share_nothing}.spl`
 wired into `src/app/cli/check.spl`. The self-hosted E-PAR-006 lane is fully
