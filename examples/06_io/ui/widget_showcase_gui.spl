@@ -29,6 +29,7 @@ use common.ui.wm_app_process_contract.{WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_F
 
 val W: i32 = 520
 val H: i32 = 660
+val WM_CLIENT_DRAIN_LIMIT: i32 = 64
 
 # Palette
 val BG: u32 = 0xFF14141Cu32
@@ -461,14 +462,15 @@ fn downsample_nearest(src: [u32], src_w: i32, src_h: i32, scale: i32) -> [u32]:
         return src
     val dst_w = src_w / scale
     val dst_h = src_h / scale
-    var out: [u32] = []
+    val dst_count = dst_w * dst_h
+    var out: [u32] = [0u32 for fill_idx in 0..dst_count]
     var y = 0
     while y < dst_h:
         var x = 0
         val sy = y * scale
         while x < dst_w:
             val sx = x * scale
-            out.push(src[sy * src_w + sx])
+            out[y * dst_w + x] = src[sy * src_w + sx]
             x = x + 1
         y = y + 1
     out
@@ -777,10 +779,10 @@ fn consume_wm_event(event_path: text, last_seq: i64, state: ShowcaseState, coord
     val ev = wm_fs_app_event_decode(body)
     if ev.seq <= last_seq:
         return (state, last_seq, false)
-    val scaled_next = showcase_on_pointer(state, ev.kind, ev.x * coord_scale, ev.y * coord_scale, ev.pressed)
-    if coord_scale > 1 and showcase_state_same(scaled_next, state):
-        return (showcase_on_pointer(state, ev.kind, ev.x, ev.y, ev.pressed), ev.seq, true)
-    (scaled_next, ev.seq, true)
+    var next_state = showcase_on_pointer(state, ev.kind, ev.x * coord_scale, ev.y * coord_scale, ev.pressed)
+    if coord_scale > 1 and showcase_state_same(next_state, state):
+        next_state = showcase_on_pointer(state, ev.kind, ev.x, ev.y, ev.pressed)
+    (next_state, ev.seq, not showcase_state_same(next_state, state))
 
 fn build_wm_pixels(w: i32, h: i32, state: ShowcaseState, frame_scale: i32) -> [u32]:
     val full = build_frame_state(w, h, state)
@@ -810,7 +812,7 @@ fn run_wm_client() -> i64:
     val frame_w = W / frame_scale
     val frame_h = H / frame_scale
     val base_pixels = build_frame_state(W, H, showcase_state_default())
-    val pixels = build_wm_pixels_from_base(base_pixels, W, H, state, frame_scale)
+    val pixels = if frame_scale > 1: downsample_nearest(base_pixels, W, H, frame_scale) else: base_pixels
     if pixels.len() < frame_w * frame_h or not write_wm_frame(frame_path, seq_path, frame_seq, frame_w, frame_h, pixels):
         print "[wm-showcase-client] error=frame-write-failed path={frame_path}"
         return 1
@@ -825,18 +827,31 @@ fn run_wm_client() -> i64:
         var ticks = 0
         var last_event_seq = 0
         while ticks < 2000000:
-            val (event_state, event_seq, event_dirty) = consume_wm_event(event_path, last_event_seq, state, frame_scale)
-            if event_dirty:
-                state = event_state
-                last_event_seq = event_seq
+            var drain = 0
+            var consumed_event = false
+            var render_dirty = false
+            while drain < WM_CLIENT_DRAIN_LIMIT:
+                val (event_state, event_seq, event_dirty) = consume_wm_event(event_path, last_event_seq, state, frame_scale)
+                if event_seq <= last_event_seq:
+                    drain = WM_CLIENT_DRAIN_LIMIT
+                else:
+                    consumed_event = true
+                    last_event_seq = event_seq
+                    if event_dirty:
+                        state = event_state
+                        render_dirty = true
+                    drain = drain + 1
+            if render_dirty:
                 frame_seq = frame_seq + 1
                 val next_pixels = build_wm_pixels_from_base(base_pixels, W, H, state, frame_scale)
                 if next_pixels.len() < frame_w * frame_h or not write_wm_frame(frame_path, seq_path, frame_seq, frame_w, frame_h, next_pixels):
                     print "[wm-showcase-client] error=frame-refresh-failed path={frame_path}"
                     return 1
                 write_wm_state(state_path, state, last_event_seq, frame_seq, frame_scale)
-                print "[wm-showcase-client] frame seq={frame_seq} event_seq={last_event_seq} clicks={state.button_count} checkbox={state.checkbox_on} switch={state.switch_on} slider={state.slider_value} progress={state.progress_value}"
-            thread_sleep(30)
+                if (env_get("SIMPLE_WM_DEBUG") ?? "") == "1":
+                    print "[wm-showcase-client] frame seq={frame_seq} event_seq={last_event_seq} clicks={state.button_count} checkbox={state.checkbox_on} switch={state.switch_on} slider={state.slider_value} progress={state.progress_value}"
+            if not consumed_event:
+                thread_sleep(15)
             ticks = ticks + 1
     0
 
