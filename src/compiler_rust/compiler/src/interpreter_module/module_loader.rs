@@ -219,6 +219,9 @@ fn enforce_gc_boundary_policy(
         if strict {
             return Err(CompileError::Runtime(message.replace("[gc-warning]", "[gc-error]")));
         }
+        if std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_some() {
+            return Ok(());
+        }
         eprintln!("{message}");
     }
     Ok(())

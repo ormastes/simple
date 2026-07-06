@@ -190,6 +190,13 @@ arch="${PLATFORM_ARCH}"
 os="${PLATFORM_OS}"
 echo "Platform: ${PLATFORM}"
 
+if [ -n "${LLVM_PREFIX:-}" ] && [ -d "${LLVM_PREFIX}/bin" ]; then
+  case ":${PATH}:" in
+    *":${LLVM_PREFIX}/bin:"*) ;;
+    *) export PATH="${LLVM_PREFIX}/bin:${PATH}" ;;
+  esac
+fi
+
 log_dir="${output_dir}/logs/${PLATFORM}"
 mkdir -p "${log_dir}"
 
@@ -437,7 +444,9 @@ else
   # (doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md), so a
   # stage-2 build error must not abort the whole pipeline.
   set +e
-  env RUST_LOG="${RUST_LOG:-error}" "${seed_bin}" native-build \
+  env RUST_LOG="${RUST_LOG:-error}" \
+    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    "${seed_bin}" native-build \
     --backend cranelift \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
@@ -468,6 +477,7 @@ else
   set +e
   [ -x "${output_dir}/stage2/${PLATFORM}/simple" ] && \
   env RUST_LOG="${RUST_LOG:-error}" \
+    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     "${output_dir}/stage2/${PLATFORM}/simple" native-build \
     --backend "${backend}" \
@@ -556,6 +566,7 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
   # ponytail: seed native-build can hang in the worker wrapper; call the same
   # entrypoint directly until the wrapper path is proven fixed.
   run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
+    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     "${stage_for_build}" run src/app/cli/native_build_main.spl -- \
     --backend "${stage4_backend}" \
@@ -568,6 +579,7 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
     -o "${full_dir}/simple"
 else
   run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
+    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     "${stage_for_build}" native-build \
     --backend "${stage4_backend}" \
@@ -617,6 +629,7 @@ if [ "${build_mcp}" -eq 1 ]; then
     prepare_native_cache "stage5${mcp_stage}"
     set +e
     env RUST_LOG="${RUST_LOG:-error}" \
+      SIMPLE_NO_DEPRECATED_WARNINGS=1 \
       LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
       "${stage_for_build}" native-build \
       --backend "${stage4_backend}" \

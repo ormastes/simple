@@ -195,9 +195,13 @@ impl ExecCore {
         if hints.is_empty() {
             return;
         }
+        let suppress_non_errors = std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_some();
 
         // Display hints to stderr
         for hint in hints {
+            if suppress_non_errors && !matches!(hint.level, ErrorHintLevel::Error) {
+                continue;
+            }
             let level_str = match hint.level {
                 ErrorHintLevel::Error => "\x1b[31merror\x1b[0m",     // red
                 ErrorHintLevel::Warning => "\x1b[33mwarning\x1b[0m", // yellow
