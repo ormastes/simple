@@ -700,7 +700,7 @@ bucket. `thread_spawn` is the OS-thread primitive,
 `std.concurrent.cooperative_green` are cooperative queue APIs on the current OS
 thread, `multicore_green_spawn` is the Pure Simple bounded-worker facade that
 must prove `used_runtime_pool()` for M:N claims, and `task_spawn` is the
-pool-backed native task path when `rt_pool_*` links. Keep
+lower-level task facade over `multicore_green_spawn`. Keep
 `doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and
 `.codex/skills/coding/SKILL.md` updated when those surfaces change.
 

@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-05
 **Area:** lib/nogc_async_mut task_spawn, interpreter semantics
-**Status:** OPEN
+**Status:** CLOSED
 
 ## Symptom
 
@@ -32,3 +32,11 @@ struct (arrays and structs are value types — see
 `.claude/memory/feedback_arrays_value_types.md` pattern) or whether the
 interpreter mis-types the runtime-pool object. Fix spec or interpreter at root
 cause, then add this spec back to the async hardening evidence list.
+
+## Resolution
+
+`task_spawn` now uses the same owner-facade `rt_pool_*` boundary as
+`multicore_green_spawn`: it tries `rt_pool_submit`, joins native handles through
+`rt_pool_join`, and keeps the interpreter fallback inline with recorded
+`TaskHandle` results. The spec was added back to
+`scripts/check/check-async-library-hardening-evidence.shs`.

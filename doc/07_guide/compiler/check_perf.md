@@ -231,7 +231,7 @@ release-blocking M:N comparison gates.
 | Simple (native) | AOT (LLVM/Cranelift) | Shows AOT ceiling |
 | Simple `cooperative_green_spawn` / `cooperative_green_spawn_value` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
 | Simple `multicore_green_spawn` / `multicore_green_spawn_sliced` / `multicore_green_safepoint` | Bounded runtime worker pool through runtime-seed `rt_pool_*` support | Current Pure Simple M:N candidate row for CPU-heavy comparisons uses `multicore_green_spawn`; `multicore_green_spawn_sliced` is the explicit scalar-state fairness API for long hosted work; `multicore_green_safepoint` is an explicit runtime/compiler poll hook and not automatic plain-closure preemption. Profile workloads set and print hosted parallelism plus a fail-closed `queue_model=work_stealing` marker and fail if value or sliced handles report `used_runtime_pool()` as false. Public `multicore_green_*_count` helpers are runtime-pool progress evidence, not ordinary-closure preemption evidence |
-| Simple `task_spawn` | Runtime worker pool when `rt_pool_*` links | Lower-level pool-backed task API with focused API/native evidence; not the named cross-language M:N profile row |
+| Simple `task_spawn` | Lower-level task facade over `multicore_green_spawn` | Focused task API evidence uses the approved multicore-green runtime-pool facade and inline fallback; not the named cross-language M:N profile row |
 | C (gcc -O2) | AOT native | Absolute performance floor |
 | Go | AOT + goroutines | Low-overhead concurrency |
 | Python | CPython bytecode | Common scripting baseline |
