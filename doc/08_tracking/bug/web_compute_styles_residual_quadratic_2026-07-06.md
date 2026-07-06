@@ -2,9 +2,19 @@
 
 - **Date:** 2026-07-06
 - **Area:** web / browser_engine (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`)
-- **Status:** open — root cause not yet localized past `build_rule_buckets`
+- **Status:** partially addressed 2026-07-07 — the candidate-lookup scan named as a suspect below
+  (`style_rule_candidates`, `:4924`) was fixed (N1: carried `id_key_dict`/`class_key_dict`/
+  `tag_key_dict` through `RuleBuckets`, replacing the linear `text_key_index` scan with O(1) dict
+  lookup; component cost now negligible, ~0.03–0.05 ms/node). **Root cause re-attributed**: the
+  end-to-end `compute_styles_ms` / `parse_html_ms` numbers did not improve — the actual dominant
+  cost is the runtime `text.substring()` primitive scaling with start offset (O(offset) per call),
+  making `parse_html` quadratic and leaving a residual superlinearity in `compute_styles` via the
+  same lazily-substring-backed node fields. See
+  `doc/08_tracking/bug/text_substring_o_offset_parse_html_quadratic_2026-07-07.md` for the full
+  measurement and fix direction.
 - **Related fix:** `b65e52a909` "perf(web): build_rule_buckets dedup O(rules×keys) linear
-  scan → dict insert-or-get (11.5s→linear at 3000 rules)" (WEB-2)
+  scan → dict insert-or-get (11.5s→linear at 3000 rules)" (WEB-2); N1 dict-lookup fix landed
+  2026-07-07 (this commit).
 
 ## Summary
 
