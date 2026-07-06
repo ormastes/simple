@@ -33,13 +33,20 @@ Pure-Simple rebuilds use two mode names:
 - `one-binary`: conservative monolithic native executable; clear the native
   cache before stages.
 
+Native-build cache artifacts default to `build/native_cache`. Bootstrap
+overrides that to `build/bootstrap/native_cache` so staged compiler artifacts
+stay under the bootstrap build tree. Use bootstrap `--fresh-cache` when you
+want a clean dynload cache without rebuilding the Rust seed/runtime; use
+`--full-bootstrap` only when Rust seed/runtime inputs must be rebuilt.
+
 Dependency tracing is conservative around AOP/MDSOC weaving. Textual entry
 closure is only a reducer; changes under `src/compiler` that can affect weaving,
 the loader, the interpreter, or compiler ABI invalidate broadly instead of
 pretending only the changed source file needs rebuilding.
 Bootstrap script cache stamps also include `src/app`, `src/lib`, and
-AOP/MDSOC/weaving environment knobs because those inputs can change emitted
-CLI/runtime behavior even when the compiler layer itself is unchanged.
+AOP/MDSOC/weaving/loader/interpreter/native-build environment knobs because
+those inputs can change emitted CLI/runtime behavior even when the compiler
+layer itself is unchanged.
 
 ## Test Runner Daemon
 

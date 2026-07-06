@@ -37,6 +37,7 @@ Options:
   --pure-simple      Compatibility alias for the default no-Rust rebuild mode.
   --mode=<name>      Pure-Simple build mode: dynload or one-binary
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
+  --fresh-cache      Clear the dynload native cache once before rebuilding
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
   --verbose          Accepted for compatibility
@@ -58,6 +59,7 @@ verbose=0
 jobs=""
 pure_simple=0
 full_bootstrap=0
+fresh_cache=0
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 
 while [ "$#" -gt 0 ]; do
@@ -82,6 +84,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --pure-simple)
       pure_simple=1
+      ;;
+    --fresh-cache|--no-cache)
+      fresh_cache=1
       ;;
     --mode=*)
       bootstrap_mode=${1#*=}
@@ -241,26 +246,35 @@ echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus})"
 
 native_cache_dir="${output_dir}/native_cache"
 native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
+native_cache_freshened=0
 
 bootstrap_wide_inputs_hash() {
   {
     find src/compiler src/app src/lib -name '*.spl' -print0 2>/dev/null | LC_ALL=C sort -z \
       | xargs -0 sha256sum 2>/dev/null
     printf 'backend=%s mode=%s\n' "${backend}" "${bootstrap_mode}"
-    env | LC_ALL=C sort | awk '/^SIMPLE_.*(AOP|MDSOC|WEAV)/ { print }'
+    env | LC_ALL=C sort | awk '/^SIMPLE_.*(AOP|MDSOC|WEAV|LOAD|INTERPRET|EXECUTION|LIB|NATIVE_BUILD)/ { print }'
   } | sha256sum | awk '{print $1}'
 }
 
 prepare_native_cache() {
   label=$1
-  if [ "${bootstrap_mode}" = "one-binary" ] || [ "${full_bootstrap}" -eq 1 ]; then
-    echo "  ${label}: clearing native cache (${bootstrap_mode}, full_bootstrap=${full_bootstrap})"
+  if [ "${bootstrap_mode}" = "one-binary" ]; then
+    echo "  ${label}: clearing native cache (one-binary mode)"
     rm -rf "${native_cache_dir}/"
     return
   fi
 
   mkdir -p "${native_cache_dir}"
   current_hash=$(bootstrap_wide_inputs_hash)
+  if [ "${fresh_cache}" -eq 1 ] && [ "${native_cache_freshened}" -eq 0 ]; then
+    echo "  ${label}: clearing native cache (--fresh-cache)"
+    rm -rf "${native_cache_dir}/"
+    mkdir -p "${native_cache_dir}"
+    printf '%s\n' "${current_hash}" > "${native_cache_stamp}"
+    native_cache_freshened=1
+    return
+  fi
   if [ ! -f "${native_cache_stamp}" ] || [ "$(cat "${native_cache_stamp}" 2>/dev/null)" != "${current_hash}" ]; then
     echo "  ${label}: clearing native cache (compiler/AOP/loader/interpreter inputs changed)"
     rm -rf "${native_cache_dir}/"
@@ -443,6 +457,9 @@ else
   # the self-hosting frontend now fails closed instead of linking a ret-0 stub
   # (doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md), so a
   # stage-2 build error must not abort the whole pipeline.
+  stage2_bin="${output_dir}/stage2/${PLATFORM}/simple"
+  stage3_bin="${output_dir}/stage3/${PLATFORM}/simple"
+  rm -f "${stage2_bin}" "${stage3_bin}"
   set +e
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
@@ -455,7 +472,7 @@ else
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-    -o "${output_dir}/stage2/${PLATFORM}/simple" \
+    -o "${stage2_bin}" \
     >"${log_dir}/stage2-native-build.log" 2>&1
   stage2_status=$?
   set -e
@@ -474,20 +491,22 @@ else
   prepare_native_cache stage3
 
   stage3_ok=0
+  rm -f "${stage3_bin}"
   set +e
-  [ -x "${output_dir}/stage2/${PLATFORM}/simple" ] && \
+  [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ] && \
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-    "${output_dir}/stage2/${PLATFORM}/simple" native-build \
+    "${stage2_bin}" native-build \
     --backend "${backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
+    --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-    -o "${output_dir}/stage3/${PLATFORM}/simple" \
+    -o "${stage3_bin}" \
     >"${log_dir}/stage3-native-build.log" 2>&1
   stage3_status=$?
   set -e
@@ -573,6 +592,7 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
+    --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
@@ -586,6 +606,7 @@ else
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
+    --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
@@ -628,19 +649,37 @@ if [ "${build_mcp}" -eq 1 ]; then
     echo "  Stage 5${mcp_stage}: ${mcp_name}"
     prepare_native_cache "stage5${mcp_stage}"
     set +e
-    env RUST_LOG="${RUST_LOG:-error}" \
-      SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-      LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-      "${stage_for_build}" native-build \
-      --backend "${stage4_backend}" \
-      --source src/compiler --source src/app --source src/lib \
-      --entry-closure \
-      --threads "${jobs}" \
-      --mode "${bootstrap_mode}" \
-      --entry "${mcp_spl}" \
-      --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-      -o "${full_dir}/${mcp_name}" \
-      >"${log_dir}/${mcp_log}.log" 2>&1
+    if [ "${stage4_is_seed}" -eq 1 ]; then
+      env RUST_LOG="${RUST_LOG:-error}" \
+        SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+        LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+        "${stage_for_build}" run src/app/cli/native_build_main.spl -- \
+        --backend "${stage4_backend}" \
+        --source src/compiler --source src/app --source src/lib \
+        --entry-closure \
+        --threads "${jobs}" \
+        --cache-dir "${native_cache_dir}" \
+        --mode "${bootstrap_mode}" \
+        --entry "${mcp_spl}" \
+        --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+        -o "${full_dir}/${mcp_name}" \
+        >"${log_dir}/${mcp_log}.log" 2>&1
+    else
+      env RUST_LOG="${RUST_LOG:-error}" \
+        SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+        LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+        "${stage_for_build}" native-build \
+        --backend "${stage4_backend}" \
+        --source src/compiler --source src/app --source src/lib \
+        --entry-closure \
+        --threads "${jobs}" \
+        --cache-dir "${native_cache_dir}" \
+        --mode "${bootstrap_mode}" \
+        --entry "${mcp_spl}" \
+        --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+        -o "${full_dir}/${mcp_name}" \
+        >"${log_dir}/${mcp_log}.log" 2>&1
+    fi
     mcp_status=$?
     set -e
     echo "  ${mcp_log} log: ${log_dir}/${mcp_log}.log"

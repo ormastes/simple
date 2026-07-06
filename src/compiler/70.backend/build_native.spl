@@ -24,6 +24,8 @@ use compiler.backend.entry_point.{generate_entry_point_ir}
 use compiler.mir.mir_data.{MirModule}
 use compiler.backend.linker.linker_wrapper.{link_to_native as lw_link_to_native, NativeLinkConfig}
 use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakerConfig, ObjTakeResult, objtaker_new, objtaker_with_defaults, objtakerconfig_default, objtaker_take_object}
+use compiler.driver.cache.cache_validator.{source_to_cache_path}
+use compiler.driver.driver_build.incremental.{FileFingerprint, native_build_cache_scope_key}
 
 # Import from split modules
 use build_native_types.{BuildOutputFormat, BuildLinkConfig, BuildLinkStats, BuildLinkResult, BuildLinkError, BuildLinker, build_link_native, BuildConfig, BuildResult, BuildStats}
@@ -33,6 +35,7 @@ use build_native_pipeline.{discover_dependencies, source_to_smf_path, source_to_
 extern fn rt_time_now_unix_millis() -> i64
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_env_get(key: text) -> text
 
 # ============================================================================
 # Cache-Aware Build
@@ -41,15 +44,28 @@ extern fn rt_mkdir_p(path: text) -> bool
 fn build_native_from_cache(config: BuildConfig) -> BuildResult:
     """Build a native binary using pre-compiled SMF cache.
 
-    Checks build/smf/ for cached SMF files first. On cache miss,
-    compiles to SMF on demand. Then links via the standard pipeline.
+    Checks the selected native-build cache root for cached SMF files first.
+    Cache entries are scoped by source content and native build options so
+    backend/target/optimization changes do not reuse stale artifacts.
     """
     val start_time = current_time_ms()
-    val cache_dir = "build/smf"
+    val cache_dir_env = rt_env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR")
+    val cache_dir = if cache_dir_env == "":
+        "build/smf"
+    else:
+        cache_dir_env
+    val cache_scope = native_build_cache_scope_key(
+        config.backend,
+        config.target_cpu,
+        config.target_features,
+        config.optimization
+    )
+    rt_mkdir_p(cache_dir)
 
     if config.verbose:
         print "[build-cache] Starting cache-aware native build"
         print "[build-cache] Cache dir: {cache_dir}"
+        print "[build-cache] Cache scope: {cache_scope}"
 
     # 1. Collect all source files
     var source_files: [text] = [config.entry_point]
@@ -62,19 +78,9 @@ fn build_native_from_cache(config: BuildConfig) -> BuildResult:
     var cache_misses = 0
 
     for source in source_files:
-        # Check if cached SMF exists
-        val base_no_ext = source.replace(".spl", "")
-        val base = base_no_ext.replace("/", "_")
-        val cache_path = "{cache_dir}/{base}.smf"
-
-        if rt_file_exists(cache_path):
-            cache_hits = cache_hits + 1
-            smf_files = smf_files.push(cache_path)
-            if config.verbose:
-                print "[build-cache] Cache hit: {source} -> {cache_path}"
-        else:
+        val fingerprint = FileFingerprint.from_file(source)
+        if not fingerprint.?:
             cache_misses = cache_misses + 1
-            # Compile on demand to standard artifacts location
             val smf_path = source_to_smf_path(source)
             if config.verbose:
                 print "[build-cache] Cache miss: {source} -> {smf_path}"
@@ -86,6 +92,29 @@ fn build_native_from_cache(config: BuildConfig) -> BuildResult:
                     message: compile_result.unwrap_err()
                 )
             smf_files = smf_files.push(smf_path)
+        else:
+            val cache_source = "{source}/{cache_scope}/{fingerprint.unwrap().content_hash}"
+            val cache_path = source_to_cache_path(cache_source, cache_dir, ".smf")
+
+            if rt_file_exists(cache_path):
+                cache_hits = cache_hits + 1
+                smf_files = smf_files.push(cache_path)
+                if config.verbose:
+                    print "[build-cache] Cache hit: {source} -> {cache_path}"
+            else:
+                cache_misses = cache_misses + 1
+                # Compile on demand to cache-scoped artifacts location
+                val smf_path = cache_path
+                if config.verbose:
+                    print "[build-cache] Cache miss: {source} -> {smf_path}"
+
+                val compile_result = compile_to_smf(source, smf_path)
+                if compile_result.is_err():
+                    return BuildResult.CompileError(
+                        file: source,
+                        message: compile_result.unwrap_err()
+                    )
+                smf_files = smf_files.push(smf_path)
 
     val compile_time = current_time_ms() - start_time
 

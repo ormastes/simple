@@ -17,6 +17,9 @@ fn forbidden_bootstrap_marker(src: text) -> text:
         return "ret i64 0"
     "ok"
 
+fn shell_var(name: text) -> text:
+    "$" + "{" + name + "}"
+
 describe "bootstrap seed fallback policy":
     it "keeps bootstrap_main free of seed-wrapper fallback generation":
         val src = file_read("src/app/cli/bootstrap_main.spl")
@@ -62,6 +65,12 @@ describe "bootstrap seed fallback policy":
         expect(native_entry).to_contain("native_build_entry_args")
         expect(native_entry).to_contain("Build mode: dynload (default) or one-binary")
         expect(native_targets).to_contain("var build_mode = \"dynload\"")
+        expect(native_targets).to_contain("var cache_dir = \"build/native_cache\"")
+        expect(native_targets).to_contain("SIMPLE_NATIVE_BUILD_CACHE_DIR")
+        expect(driver_incremental).to_contain("val entry = self.entries[src]")
+        val driver_src = file_read("src/compiler/80.driver/driver.spl")
+        expect(driver_src).to_contain("fn native_build_cache_dir() -> text:")
+        expect(driver_src).to_contain("\"build/native_cache\"")
         expect(native_targets).to_contain("if build_mode == \"\":")
         expect(native_targets).to_contain("SIMPLE_NATIVE_BUILD_THREADS")
         expect(native_targets).to_contain("native_threads = args[j].to_i64() ?? 0")
@@ -81,6 +90,7 @@ describe "bootstrap seed fallback policy":
         expect(bootstrap_script).to_contain("native_cache_dir=")
         expect(bootstrap_script).to_contain("/native_cache")
         expect(bootstrap_script).to_contain("--cache-dir")
+        expect(bootstrap_script).to_contain("--fresh-cache")
         expect(bootstrap_script).to_contain("--threads")
         expect(bootstrap_script).to_contain("dynload|one-binary")
         expect(bootstrap_script).to_contain("Normal bootstrap does not rebuild Rust. Re-run with --full-bootstrap")
@@ -89,7 +99,7 @@ describe "bootstrap seed fallback policy":
         expect(bootstrap_script).to_contain("--mode")
         expect(bootstrap_script).to_contain("bootstrap_mode")
         expect(bootstrap_script).to_contain("find src/compiler src/app src/lib -name '*.spl'")
-        expect(bootstrap_script).to_contain("SIMPLE_.*(AOP|MDSOC|WEAV)")
+        expect(bootstrap_script).to_contain("SIMPLE_.*(AOP|MDSOC|WEAV|LOAD|INTERPRET|EXECUTION|LIB|NATIVE_BUILD)")
         expect(cli_dispatch).to_contain("fn native_build_requests_simple_llvm(args: [text]) -> bool:")
         expect(cli_dispatch).to_contain("return cli_native_build(args)")
         expect(cli_dispatch).to_contain("return run_native_build_bootstrap(args)")
@@ -119,7 +129,17 @@ describe "bootstrap seed fallback policy":
         expect(driver_api_interpret).to_contain("use compiler.driver.{compiler_driver_create, compiler_driver_run_compile}")
         expect(driver_api_interpret).to_contain("compiler_driver_create(options)")
         expect(driver_api_interpret).to_contain("compiler_driver_run_compile(driver)")
-        expect(driver_incremental).to_contain("val entry = self.entries[src]")
         expect(sdn_shim).to_contain("fn parse_file(path: text) -> Result<SdnValue, text>:")
         expect(sdn_shim).to_contain("fn render_value(value: SdnValue, indent: i64) -> text:")
         expect(module_resolver).to_contain("test_resolve_file_module_before_same_name_package")
+
+    it "keeps staged bootstrap fallback policy from reusing stale artifacts":
+        val bootstrap_script = file_read("scripts/bootstrap/bootstrap-from-scratch.sh")
+        expect(bootstrap_script).to_contain("if [ \"" + shell_var("bootstrap_mode") + "\" = \"one-binary\" ]; then")
+        expect(bootstrap_script.contains("full_bootstrap=" + shell_var("full_bootstrap"))).to_equal(false)
+        expect(bootstrap_script).to_contain("stage2_bin=")
+        expect(bootstrap_script).to_contain("stage3_bin=")
+        expect(bootstrap_script).to_contain("rm -f \"" + shell_var("stage2_bin") + "\" \"" + shell_var("stage3_bin") + "\"")
+        expect(bootstrap_script).to_contain("[ \"" + shell_var("stage2_status") + "\" -eq 0 ] && [ -x \"" + shell_var("stage2_bin") + "\" ]")
+        expect(bootstrap_script).to_contain("if [ \"" + shell_var("stage4_is_seed") + "\" -eq 1 ]; then")
+        expect(bootstrap_script).to_contain("\"" + shell_var("stage_for_build") + "\" run src/app/cli/native_build_main.spl --")

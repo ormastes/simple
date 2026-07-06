@@ -122,6 +122,7 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     // Bootstrap driver bridge
     "compiler__driver__driver__compiler_driver_create",
     "compiler__driver__driver__CompilerDriver_dot_compile",
+    "rt_enum_discriminant",
     // Host/GPU lane marker runtime bridge
     "rt_host_gpu_lane_event",
     "rt_host_gpu_lane_reset",

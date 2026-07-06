@@ -116,6 +116,7 @@ impl MirTextCodegen for MirToLlvm:
         self.current_function_name = name
         self.defined_func_names[name] = true
         self.local_types = {}
+        self.defined_locals = {}
         self.return_locals = {}
         self.bool_locals = {}
         self.ptr_locals = {}
@@ -125,6 +126,10 @@ impl MirTextCodegen for MirToLlvm:
             val llvm_ty = self.llvm_type_text(local.type_)
             val local_id = self.local_id_value(local.id)
             self.local_types[local_id] = llvm_ty
+            if llvm_ty == "ptr":
+                self.ptr_locals[local_id] = true
+            if llvm_ty == "i1":
+                self.bool_locals[local_id] = true
             match local.kind:
                 case Return:
                     self.return_locals[local_id] = true
@@ -141,9 +146,10 @@ impl MirTextCodegen for MirToLlvm:
                 match local.kind:
                     case Arg(index):
                         if index == arg_i:
-                            val local_id = local.id.id
+                            val local_id = self.local_id_value(local.id)
                             val maybe_param_ty = self.get_local_type(local_id)
                             val param_ty = if maybe_param_ty == nil: self.native_int() else: maybe_param_ty
+                            self.defined_locals[local_id] = true
                             params = params.push("{param_ty} {self.get_local(local_id)}")
                     case _:
                         ()
@@ -298,6 +304,18 @@ impl MirTextCodegen for MirToLlvm:
             case DebugValue(_, _): ()
             case Nop: ()
             case _: self.translate_unsupported(inst)
+        self.mark_instruction_dest_defined(inst)
+
+    me mark_instruction_dest_defined(inst: MirInst):
+        match inst.kind:
+            case Const(dest, _, _) | Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | CheckedBinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Alloc(dest, _) | Load(dest, _) | GetElementPtr(dest, _, _) | Aggregate(dest, _, _) | GetField(dest, _, _) | Cast(dest, _, _) | Bitcast(dest, _, _) | PipeForward(dest, _, _) | Compose(dest, _, _, _) | Parallel(dest, _) | LayerConnect(dest, _, _) | Ref(dest, _, _) | CreatePromise(dest, _, _) | Await(dest, _) | Spawn(dest, _, _) | Receive(dest, _) | GpuSharedAlloc(dest, _, _) | GpuAtomicOp(dest, _, _, _) | GpuAtomicCas(dest, _, _, _):
+                self.defined_locals[self.local_id_value(dest)] = true
+            case Call(dest, _, _) | CallIndirect(dest, _, _, _) | Intrinsic(dest, _, _):
+                match dest:
+                    Some(dest_local): self.defined_locals[self.local_id_value(dest_local)] = true
+                    nil: ()
+            case _:
+                ()
 
     fn ret_value_for_type(ret_ty: text, value: text) -> text:
         if ret_ty.len() == 3 and ret_ty.starts_with("ptr") and value.len() == 1 and value.starts_with("0"):
@@ -355,6 +373,10 @@ impl MirTextCodegen for MirToLlvm:
                 if cond_ty == "i1":
                     # Already boolean, use directly
                     self.builder.emit_cond_br(cond_val, "bb{self.block_id_value(then_)}", "bb{self.block_id_value(else_)}")
+                elif cond_ty == "ptr":
+                    val i1_cond = self.builder.fresh_local()
+                    self.builder.emit("  {i1_cond} = icmp ne ptr {cond_val}, null")
+                    self.builder.emit_cond_br(i1_cond, "bb{self.block_id_value(then_)}", "bb{self.block_id_value(else_)}")
                 else:
                     val i1_cond = self.builder.fresh_local()
                     self.builder.emit("  {i1_cond} = icmp ne {cond_ty} {cond_val}, 0")
@@ -406,7 +428,7 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
         val dest_id = self.local_id_value(dest)
-        val dest_name = self.get_local(dest.id)
+        val dest_name = self.get_local(dest_id)
         val llvm_ty = self.valid_llvm_type(self.llvm_type_text(ty))
         self.local_types[dest_id] = llvm_ty
 
@@ -457,7 +479,7 @@ impl MirTextCodegen for MirToLlvm:
         val dest_id = self.local_id_value(dest)
         val src_id = self.local_id_value(src)
         val dest_name = self.get_local(dest_id)
-        val src_name = self.get_local(src_id)
+        val src_name = self.local_value_text(src_id)
         var ty = self.valid_llvm_type(self.get_local_type(src_id))
         if self.ptr_locals.has(src_id):
             ty = "ptr"
@@ -487,10 +509,11 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
         """Translate binary operation. Uses nsw for signed int arithmetic."""
-        val dest_name = self.get_local(dest.id)
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
         val left_val = self.translate_operand(left)
         val right_val = self.translate_operand(right)
-        val ty = self.get_local_type(dest.id)
+        val ty = self.get_local_type(dest_id)
 
         match op:
             case Add:
@@ -580,9 +603,10 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand):
         """Translate unary operation."""
-        val dest_name = self.get_local(dest.id)
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
-        val ty = self.get_local_type(dest.id)
+        val ty = self.get_local_type(dest_id)
 
         match op:
             case Neg:
@@ -591,7 +615,9 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit_neg(dest_name, ty, operand_val)
             case Not:
-                self.builder.emit_icmp_eq(dest_name, ty, operand_val, "0")
+                val cmp_ty = self.valid_llvm_type(self.get_operand_type(operand))
+                val rhs = if cmp_ty == "ptr": "null" else: "0"
+                self.builder.emit_icmp_eq(dest_name, cmp_ty, operand_val, rhs)
             case BitNot: self.builder.emit_not(dest_name, ty, operand_val)
             case Transpose:
                 self.emit_unsupported_panic("LLVM backend does not support Transpose lowering")
@@ -649,10 +675,10 @@ impl MirTextCodegen for MirToLlvm:
         match operand.kind:
             case Copy(local):
                 val local_id = self.local_id_value(local)
-                if local_id == 0: "0" else: self.get_local(local_id)
+                self.local_value_text(local_id)
             case Move(local):
                 val local_id = self.local_id_value(local)
-                if local_id == 0: "0" else: self.get_local(local_id)
+                self.local_value_text(local_id)
             case Const(value, type_):
                 # For function references, return @name directly
                 match type_.kind:
@@ -700,8 +726,19 @@ impl MirTextCodegen for MirToLlvm:
         """Get LLVM local name for MIR local."""
         "%l{id}"
 
+    fn local_value_text(id: i64) -> text:
+        """Return a defined LLVM local name or `undef` for missing locals."""
+        if self.defined_locals.has(id):
+            return self.get_local(id)
+        # ponytail: malformed MIR lowers to `undef` so LLVM stays valid.
+        "undef"
+
     fn get_local_type(id: i64) -> text:
         """Get LLVM type for a local variable, falling back to native int type."""
+        if self.ptr_locals.has(id):
+            return "ptr"
+        if self.bool_locals.has(id):
+            return "i1"
         match self.local_types.get(id):
             case Some(ty):
                 if ty == nil or ty == "nil":

@@ -68,6 +68,16 @@ fn driver_native_build_threads() -> i64:
         return 0
     parsed
 
+fn driver_native_build_cache_dir() -> text:
+    val dir = rt_env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+    if dir == "":
+        "build/native_cache"
+    else:
+        dir
+
+fn driver_native_build_cache_path(cache_dir: text) -> text:
+    rt_path_join(cache_dir, "build_cache.sdn")
+
 fn _extract_driver_ctx(driver: CompilerDriver) -> CompileContext:
     driver.ctx
 
@@ -170,7 +180,10 @@ impl CompilerDriver:
             print "[NATIVE] effective_backend={effective_backend}"
 
         # Load build cache
-        val cache_path = ".build/build_cache.sdn"
+        val cache_dir = driver_native_build_cache_dir()
+        rt_dir_create(cache_dir, true)
+        val cache_path = driver_native_build_cache_path(cache_dir)
+        val object_base = rt_path_join(cache_dir, "object")
         var build_cache: BuildCache = BuildCache.load(cache_path)
         var cache_hit_count: i64 = 0
         var cache_miss_count: i64 = 0
@@ -224,7 +237,7 @@ impl CompilerDriver:
         if uncached_names.len() > 0:
             if uncached_names.len() == 1:
                 val name = uncached_names[0]
-                val direct_result = _compile_one_module(ctx, backend_name, is_release, driver_opt_level, output, name)
+                val direct_result = _compile_one_module(ctx, backend_name, is_release, driver_opt_level, object_base, name)
                 match direct_result:
                     case Ok(_):
                         cache_miss_count = 1
@@ -242,7 +255,7 @@ impl CompilerDriver:
                 for name in uncached_names:
                     builder.add_unit(name, [])
 
-                val build_result = builder.build(_compile_one_module(ctx, backend_name, is_release, driver_opt_level, output, _1))
+                val build_result = builder.build(_compile_one_module(ctx, backend_name, is_release, driver_opt_level, object_base, _1))
                 cache_miss_count = build_result.stats.completed + build_result.stats.failed
 
                 if not build_result.success:
@@ -255,15 +268,15 @@ impl CompilerDriver:
             # objects at this stable path, so reconstruct from uncached_names.
             var reconstructed_outputs: [text] = []
             for name in uncached_names:
-                val obj_path = "{output}.{name}.o"
+                val obj_path = "{object_base}.{name}.o"
                 if rt_file_exists(obj_path):
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
-            object_files = reconstructed_outputs
+                    object_files = object_files.push(obj_path)
             for obj_path in reconstructed_outputs:
                 val obj_fp = FileFingerprint.from_file(obj_path)
                 if obj_fp.?:
-                    # Extract module name from obj_path: "{output}.{name}.o"
-                    val prefix = output + "."
+                    # Extract module name from obj_path: "{object_base}.{name}.o"
+                    val prefix = object_base + "."
                     var mod_name = obj_path
                     if obj_path.starts_with(prefix):
                         mod_name = obj_path[prefix.len():obj_path.len() - 2]

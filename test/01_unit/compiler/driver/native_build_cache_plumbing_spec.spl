@@ -1,0 +1,51 @@
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.driver.driver_build.incremental.{native_build_cache_scope_key}
+
+describe "native-build cache plumbing policy":
+    it "routes AOT cache metadata and objects through SIMPLE_NATIVE_BUILD_CACHE_DIR":
+        val src = file_read("src/compiler/80.driver/driver_aot_output.spl")
+        expect(src).to_contain("SIMPLE_NATIVE_BUILD_CACHE_DIR")
+        expect(src).to_contain("rt_path_join(cache_dir, \"build_cache.sdn\")")
+        expect(src).to_contain("val object_base = rt_path_join(cache_dir, \"object\")")
+        expect(src).to_contain("BuildCache.load(cache_path)")
+        expect(src).to_contain("object_files = object_files.push(obj_path)")
+        expect(src.contains("object_files = reconstructed_outputs")).to_equal(false)
+
+    it "saves SMF manifests next to the selected SMF cache output":
+        val src = file_read("src/compiler/80.driver/watcher/smf_manifest.spl")
+        expect(src).to_contain("fn smf_manifest_path_for_smf(smf_path: text) -> text:")
+        expect(src).to_contain("path_dir(smf_path)")
+        expect(src).to_contain("/manifest.sdn")
+        expect(src).to_contain("var manifest = load_smf_manifest(manifest_path)")
+        expect(src).to_contain("save_smf_manifest(manifest, manifest_path)")
+
+    it "documents native-build cache-dir on the lightweight entrypoint":
+        val src = file_read("src/app/cli/native_build_main.spl")
+        expect(src).to_contain("--cache-dir <dir>")
+
+    it "allows compiler enum discriminant runtime helper in native analysis":
+        val src = file_read("src/compiler/80.driver/compilability.spl")
+        val seed_src = file_read("src/compiler_rust/compiler/src/interpreter_eval.rs")
+        expect(src).to_contain("\"rt_enum_discriminant\"")
+        expect(seed_src).to_contain("\"rt_enum_discriminant\"")
+
+    it "changes the cache scope when backend, target, or optimization changes":
+        val base = native_build_cache_scope_key(nil, nil, [], 0)
+        val backend = native_build_cache_scope_key(Some("llvm"), nil, [], 0)
+        val target = native_build_cache_scope_key(nil, Some("x86-64-v3"), ["+avx2"], 0)
+        val opt = native_build_cache_scope_key(nil, nil, [], 2)
+        expect(base).to_contain("backend=smf")
+        expect(base).to_contain("cpu=native")
+        expect(base).to_contain("opt=0")
+        expect(backend).to_contain("backend=llvm")
+        expect(target).to_contain("cpu=x86-64-v3")
+        expect(target).to_contain("features=+avx2")
+        expect(opt).to_contain("opt=2")
+
+    it "no longer hardcodes build/smf in the cache-aware native builder":
+        val src = file_read("src/compiler/70.backend/build_native.spl")
+        expect(src).to_contain("SIMPLE_NATIVE_BUILD_CACHE_DIR")
+        expect(src).to_contain("native_build_cache_scope_key")
+        expect(src).to_contain("source_to_cache_path(cache_source, cache_dir, \".smf\")")
+        expect(src.contains("val cache_dir = \"build/smf\"")).to_equal(false)
