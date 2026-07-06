@@ -104,13 +104,13 @@ class BrowserApp:
     file_change_poll_ticks: i32
     file_change_poll_interval_ticks: i32
 
-    static fn new(file_path: text, port: i32, gpu_backend: text) -> Result<BrowserApp, text>:
-        return BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, "")
+    static fn new(file_path: text, port: i32, gpu_backend: text, web_engine: text = "pure_simple") -> Result<BrowserApp, text>:
+        return BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, "", web_engine)
 
     static fn file_poll_interval_ticks() -> i32:
         FILE_CHANGE_POLL_INTERVAL_TICKS
 
-    static fn new_with_access_store_path(file_path: text, port: i32, gpu_backend: text, access_db_path: text) -> Result<BrowserApp, text>:
+    static fn new_with_access_store_path(file_path: text, port: i32, gpu_backend: text, access_db_path: text, web_engine: text = "pure_simple") -> Result<BrowserApp, text>:
         dbg_stage("browser", "parse_start")
         val tree_result = parse_ui_to_tree(file_path)
         match tree_result:
@@ -127,7 +127,7 @@ class BrowserApp:
                 val width: i32 = 96
                 val height: i32 = 64
                 dbg_stage("browser", "backend_create_start")
-                val backend_result = BrowserBackend.create(width, height, gpu_backend)
+                val backend_result = BrowserBackend.create(width, height, gpu_backend, web_engine)
                 match backend_result:
                     Err(e):
                         return Err(e)
@@ -341,8 +341,9 @@ fn run_browser_gui_with_access_store(file_path: text, port: i32, access_db_path:
     dbg_stage("browser", "file_checked")
 
     val gpu_backend = parse_backend_flag()
+    val web_engine = parse_web_engine_flag()
 
-    val app_result = BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, access_db_path)
+    val app_result = BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, access_db_path, web_engine)
     match app_result:
         Err(e):
             print "Error: {e}"
@@ -364,3 +365,21 @@ fn parse_backend_flag() -> text:
             return arg[10:]
         i = i + 1
     return "auto"
+
+fn parse_web_engine_flag() -> text:
+    """Parse --web-engine flag from CLI args (Gap B: WebRenderer facade engine
+    selector, distinct from --backend which selects the Engine2D backend).
+    Defaults to "pure_simple" — no flag/env means unchanged default behavior.
+    An unrecognized value is passed through unvalidated here; BrowserBackend.create
+    loud-fails (Result::Err) rather than silently normalizing it, so callers see
+    an honest error instead of a silent fallback to the default engine."""
+    val raw_args = get_args()
+    var i = 0
+    while i < raw_args.len():
+        val arg = raw_args[i]
+        if arg == "--web-engine" and i + 1 < raw_args.len():
+            return raw_args[i + 1]
+        elif arg.starts_with("--web-engine="):
+            return arg[13:]
+        i = i + 1
+    return "pure_simple"

@@ -254,13 +254,23 @@ to `HeadlessHostCompositorBackend`. **Build** a `GuiRenderer.create(name, …)` 
 existing `tools/electron-shell` launcher. Do **not** invent a third renderer. Migrate
 `ui.browser/app.spl`'s 11 `rt_winit_*` externs + 18 calls onto it. **Depends on Task #15.**
 
-### Gap B — **WebRenderer facade has zero callers** (chrome/core unreachable from apps)
-`WebRenderBackend` exists but nothing imports it; `BrowserBackend` (`ui.browser/backend.spl`)
-hardcodes `WEB_RENDER_TARGET_PURE_SIMPLE` at 11 sites and `bin/simple browser --backend=X` only
-selects the **Engine2D** backend, never chrome/core. **Wire** `BrowserBackend` through
-`web_render_backend(name,w,h)` — preserving the `WebRenderPixelArtifactCache` cache-first path
-(`backend.spl:561` → `web_render_pixel_backend.spl:129`) for the `pure_simple` side — and add a
-`--web-engine=chrome|core` CLI selector distinct from `--backend`.
+### Gap B — **WebRenderer facade has zero callers** (chrome/core unreachable from apps) — **LANDED (2026-07-07)**
+`BrowserBackend.create(w, h, backend, web_engine = "pure_simple")` now threads a `--web-engine`
+selector (accepts `--web-engine <name>` and `--web-engine=<name>` in `cli_browser`) through
+`web_render_backend(name,w,h)`. Default (`pure_simple`) preserves the `WebRenderPixelArtifactCache`
+cache-first path unchanged (byte-identical, perf anchor intact — Gap F). `chromium` renders via the
+real `WebRenderBackend` facade and tags the artifact with honest provenance (`compatibility_renderer`
+status, `chromium` backend). Unknown engine names loud-fail at construction (`Err`), never silently
+default.
+
+**Known caveat — chromium lane is native/compiled-mode only.** Under
+`SIMPLE_EXECUTION_MODE=interpret`, the first render call on the chromium lane crashes loudly with
+`error[E1002] function 'web_backend_env_get' not found` — a pre-existing interpreter module-alias
+resolution gap in `web_render_backend.spl` (`mod_stub -> env_ops` re-export chain), not a Gap B
+regression and not a silent fallback. See
+`doc/08_tracking/bug/web_backend_env_get_alias_unresolved_interpret_2026-07-07.md`. Pinned by
+`test/03_system/gui/ui_browser/backend_isolation_chromium_env_get_gap_b_spec.spl`, which documents
+the flip to a real-pixels assertion once the facade bug is fixed.
 
 ### Gap C — **`WebRenderBackend` cannot select the Engine2D backend for the core path**
 `render_html_to_pixels` hardcodes `"auto"` (`web_render_backend.spl:167`), so an app cannot request

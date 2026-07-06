@@ -15,14 +15,36 @@ use common.ui.semantic_contract.{SEMANTIC_UI_STAGE_RENDERER, SEMANTIC_UI_STATUS_
 use common.ui.semantic_contract.{semantic_ui_snapshot_transport_json}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DrawIrCommand, DrawIrStyleProp, draw_ir_batch_with_source, draw_ir_embedding_config, draw_ir_image_command, draw_ir_rect, draw_ir_rect_bounds, draw_ir_source_gui_ast, draw_ir_style_prop, draw_ir_text, draw_ir_box_with_style}
 use common.ui.web_render_api.{WEB_RENDER_ENGINE2D_STATUS_NOT_REQUESTED, WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED, WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderArtifact, WebRenderHostWindowCommand, WebRenderPatchEnvelope, WebRenderSnapshotEnvelope, web_render_adapter_request, web_render_artifact_with_runtime_dispatch_payload, web_render_body_html, web_render_full_html, web_render_capabilities_for_target, web_render_host_window_command_to_json, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_ipc_json_with_html_and_semantic, web_render_patch_envelope_to_json, web_render_snapshot_envelope_to_json, web_render_optimization_profile}
+use common.ui.web_render_api.{WebRenderRequest, web_render_pixel_artifact, web_render_engine2d_compatibility_artifact}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.html.{generate_css}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache, web_render_resolved_engine2d_backend_name}
+use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend, web_render_backend_names}
 use std.nogc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{engine2d_draw_ir_payload_summary}
 use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
 use std.io_runtime.{write_file, time_now_unix_micros}
+
+# Gap B (backend_isolation_plan.md): WebRenderer facade selector, distinct
+# from the Engine2D `--backend` selector above. "pure_simple" (default)
+# keeps routing through the WebRenderPixelArtifactCache cache-first path
+# (unchanged perf anchor); "chromium" routes html through the
+# WebRenderBackend facade's real offscreen-Chromium engine instead.
+pub val WEB_RENDER_ENGINE_PURE_SIMPLE: text = "pure_simple"
+pub val WEB_RENDER_ENGINE_CHROMIUM: text = "chromium"
+
+pub fn web_render_engine_is_known(name: text) -> bool:
+    """Loud-fail gate for `--web-engine`: only the two real WebRenderBackend
+    engines are accepted here (no silent alias-to-default normalization like
+    the facade's own internal `_normalize_web_backend` does)."""
+    val names = web_render_backend_names()
+    var i = 0
+    while i < names.len():
+        if names[i] == name:
+            return true
+        i = i + 1
+    false
 
 fn browser_backend_time_us() -> i64:
     time_now_unix_micros()
@@ -161,6 +183,28 @@ fn browser_backend_layout_draw_ir_commands(root_node: WidgetNode, layout: Layout
         return [draw_ir_rect("browser-layout-empty", 0, 0, 1, 1, 0xff20262du32)]
     commands
 
+fn browser_backend_chromium_pixel_artifact(req: WebRenderRequest, width: i32, height: i32, full_html: text) -> WebRenderArtifact:
+    """Gap B chromium lane: render through the real WebRenderBackend facade
+    (offscreen Chromium) instead of the pure_simple Engine2D cache path, and
+    tag the resulting artifact with honest engine2d provenance — status
+    "compatibility_renderer" (not Engine2D-backed) and backend "chromium" —
+    so callers can tell which engine actually rendered the frame.
+
+    KNOWN LIMITATION (interpret mode): this lane currently requires the
+    native/compiled lane. Under `SIMPLE_EXECUTION_MODE=interpret` it fails
+    LOUDLY with error[E1002] "function `web_backend_env_get` not found" from
+    inside web_render_backend.spl (mod_stub -> env_ops re-export/alias chain
+    the interpreter does not resolve) — it does NOT silently fall back to a
+    zero-length pixel buffer or to the pure_simple output. See
+    doc/08_tracking/bug/web_backend_env_get_alias_unresolved_interpret_2026-07-07.md
+    for the repro and fix direction."""
+    val chromium_pixels = web_render_backend(WEB_RENDER_ENGINE_CHROMIUM, width, height).render_html_to_pixels(full_html)
+    web_render_engine2d_compatibility_artifact(
+        web_render_pixel_artifact(req, chromium_pixels),
+        WEB_RENDER_ENGINE_CHROMIUM,
+        "rendered via WebRenderBackend facade (chromium engine, not Engine2D)"
+    )
+
 fn browser_backend_dispatch_prepared_draw_ir(artifact: WebRenderArtifact, root_node: WidgetNode, layout: LayoutBox, width: i32, height: i32, revision: i64) -> WebRenderArtifact:
     if artifact.queue_backend_handle <= 0:
         return artifact
@@ -266,6 +310,7 @@ class BrowserBackend:
     event_queue: [UIEvent]
     layout_cache: [LayoutEntry]
     initialized: bool
+    web_render_engine: text
     web_render_target: text
     last_artifact_html: text
     last_artifact_capabilities: text
@@ -342,11 +387,18 @@ class BrowserBackend:
     last_render_framebuffer_copy_us: i64
     last_render_state_store_us: i64
 
-    static fn create(w: i32, h: i32, backend: text) -> Result<BrowserBackend, text>:
+    static fn create(w: i32, h: i32, backend: text, web_engine: text = WEB_RENDER_ENGINE_PURE_SIMPLE) -> Result<BrowserBackend, text>:
         """Create a BrowserBackend with the specified GPU backend.
 
         backend: "cuda", "vulkan", "cpu", "software", or "auto" (auto-detect).
+        web_engine: WebRenderer facade engine name — "pure_simple" (default,
+        cache-first Engine2D pipeline) or "chromium" (real offscreen Chromium
+        via the WebRenderBackend facade). Unknown names loud-fail (Err) rather
+        than silently falling back to the default engine.
         """
+        if not web_render_engine_is_known(web_engine):
+            val known = web_render_backend_names().join(", ")
+            return Err("BrowserBackend.create: unknown --web-engine '{web_engine}' (known: {known})")
         val resolved = resolve_gpu_backend(backend)
         val fb = Framebuffer.create(w, h)
 
@@ -358,6 +410,7 @@ class BrowserBackend:
             event_queue: [],
             layout_cache: [],
             initialized: true,
+            web_render_engine: web_engine,
             web_render_target: WEB_RENDER_TARGET_PURE_SIMPLE,
             last_artifact_html: "",
             last_artifact_capabilities: "",
@@ -547,7 +600,21 @@ class BrowserBackend:
                 self.static_shell_html_stores = self.static_shell_html_stores + 1
         self.last_render_html_us = browser_backend_time_us() - html_start_us
         val pixel_start_us = browser_backend_time_us()
-        var artifact = self.web_render_pixel_cache.html_request_to_pixel_artifact(req, full_html)
+        # Gap B: engine selection happens here, through the WebRenderer facade
+        # shape. Default ("pure_simple") keeps calling the cache-first
+        # WebRenderPixelArtifactCache path unchanged (perf anchor, byte-
+        # identical output). "chromium" instead renders through the real
+        # WebRenderBackend facade and reports honest provenance (engine2d
+        # status "compatibility_renderer" + backend "chromium"). KNOWN
+        # LIMITATION: under interpret mode this currently crashes loudly with
+        # error[E1002] "function `web_backend_env_get` not found" (pre-
+        # existing alias-resolution gap in web_render_backend.spl, not a
+        # silent fallback) — see
+        # doc/08_tracking/bug/web_backend_env_get_alias_unresolved_interpret_2026-07-07.md
+        var artifact = if self.web_render_engine == WEB_RENDER_ENGINE_CHROMIUM:
+            browser_backend_chromium_pixel_artifact(req, self.width, self.height, full_html)
+        else:
+            self.web_render_pixel_cache.html_request_to_pixel_artifact(req, full_html)
         self.last_render_pixel_artifact_us = browser_backend_time_us() - pixel_start_us
         val dispatch_start_us = browser_backend_time_us()
         artifact = browser_backend_dispatch_prepared_draw_ir(artifact, root_node, layout, self.width, self.height, revision)

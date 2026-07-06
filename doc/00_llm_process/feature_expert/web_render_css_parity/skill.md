@@ -168,3 +168,25 @@ Chromium), and per-row gradient painting that carries the full rect geometry
 so border-radius corners on gradient backgrounds render round (square accent
 corners were the last panel-band-bottom miss). Remaining residuals are glyph
 metrics (bitmap vs Inter), excluded by design via the Chrome DOM text mask.
+
+## 2026-07-07: backend-isolation Gap B landed — `--web-engine` facade selector
+
+`BrowserBackend.create(w, h, backend, web_engine = "pure_simple")` and
+`cli_browser` now accept `--web-engine <name>` / `--web-engine=<name>`
+(space and equals forms both parsed), threading engine selection through
+`web_render_backend(name, w, h)` — the shared facade this parity work
+already exercises via `simple_web_render_html_to_pixels_with_engine2d_backend`.
+Default (`pure_simple`) keeps the cache-first `WebRenderPixelArtifactCache`
+path byte-identical (perf anchor unaffected); `chromium` tags provenance as
+`compatibility_renderer`/`chromium` and never silently substitutes
+`pure_simple` pixels; unknown names loud-fail (`Err`) at construction.
+
+**Caveat (interpret mode):** the `chromium` lane's first render call crashes
+with `error[E1002] function 'web_backend_env_get' not found` under
+`SIMPLE_EXECUTION_MODE=interpret` — a pre-existing interpreter module-alias
+resolution gap (`mod_stub -> env_ops` re-export chain), reproduced
+facade-only with zero browser code. Chromium rendering is native/compiled-
+mode only until that alias-resolution gap is fixed. See
+`doc/08_tracking/bug/web_backend_env_get_alias_unresolved_interpret_2026-07-07.md`
+and the honest-contract pin at
+`test/03_system/gui/ui_browser/backend_isolation_chromium_env_get_gap_b_spec.spl`.

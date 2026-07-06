@@ -14,7 +14,8 @@ use app.ui.web.backend.{WebBackend, web_render_patch_transport_json, web_render_
 use app.ui.web.html.{generate_css}
 use app.ui.electron.backend.{ElectronBackend, electron_render_ipc_json}
 use app.ui.tauri.backend.{TauriBackend, tauri_render_ipc_json}
-use app.ui.browser.backend.{BrowserBackend}
+use app.ui.browser.backend.{BrowserBackend, WEB_RENDER_ENGINE_PURE_SIMPLE, WEB_RENDER_ENGINE_CHROMIUM, web_render_engine_is_known}
+use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend_names}
 use app.ui.tui_web.backend.{TuiWebBackend}
 use app.ui.ipc.async_handler.{ipc_writer_message}
 use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_default_page_html as web_render_pixel_default_page_html, web_render_html_request_to_pixel_artifact, web_render_pixel_artifact_cache, web_render_resolved_engine2d_backend_name, web_render_request_to_pixel_artifact, web_render_url_to_request}
@@ -319,3 +320,47 @@ describe "web render backends use the shared common API":
         expect(queued.queue_drain_status).to_equal("completed")
         expect(queued.queue_packet_id).to_equal(9)
         expect(queued.queue_drained).to_equal(1)
+
+# Note: the cache-first pure_simple pixel path itself (unchanged perf
+# anchor) is covered by test/01_unit/app/ui/browser_backend_pixel_paths_spec.spl
+# and the pre-existing render_frame assertions above in this file — this
+# describe block only covers the new Gap B facade-selection wiring
+# (construction-time engine choice, default, loud-fail).
+describe "backend-isolation Gap B: BrowserBackend wired through the WebRenderer facade":
+    it "recognizes exactly the WebRenderBackend facade's real engine names":
+        expect(web_render_engine_is_known("pure_simple")).to_equal(true)
+        expect(web_render_engine_is_known("chromium")).to_equal(true)
+        expect(web_render_engine_is_known("bogus-engine")).to_equal(false)
+        expect(web_render_engine_is_known("")).to_equal(false)
+        expect(web_render_backend_names()).to_equal(["pure_simple", "chromium"])
+
+    it "defaults to pure_simple with no web_engine arg (pre-existing 3-arg call sites unaffected)":
+        # No web_engine arg at all — the 4th BrowserBackend.create param must
+        # default so every pre-existing 3-arg call site keeps working
+        # unchanged (requirement: default behavior unchanged).
+        val default_backend = BrowserBackend.create(64, 48, "software").unwrap()
+        val explicit_backend = BrowserBackend.create(64, 48, "software", "pure_simple").unwrap()
+        expect(default_backend.web_render_engine).to_equal(WEB_RENDER_ENGINE_PURE_SIMPLE)
+        expect(explicit_backend.web_render_engine).to_equal(default_backend.web_render_engine)
+        expect(explicit_backend.gpu_backend()).to_equal(default_backend.gpu_backend())
+
+    it "loud-fails on an unknown --web-engine name instead of silently defaulting":
+        val result = BrowserBackend.create(32, 24, "software", "not-a-real-engine")
+        val is_err = match result:
+            Err(_message): true
+            Ok(_backend): false
+        expect(is_err).to_equal(true)
+        match result:
+            Err(message):
+                expect(message).to_contain("unknown --web-engine")
+                expect(message).to_contain("not-a-real-engine")
+            Ok(_backend):
+                pass
+
+    it "accepts the chromium engine name at construction time (facade selection wired)":
+        # Real Chromium rendering needs an Electron install and is covered by
+        # the chromium-tier fixtures; here we only assert the facade
+        # selection itself is wired (construction succeeds, field recorded)
+        # without spawning a browser process in this fast unit spec.
+        val chromium_backend = BrowserBackend.create(32, 24, "software", "chromium").unwrap()
+        expect(chromium_backend.web_render_engine).to_equal(WEB_RENDER_ENGINE_CHROMIUM)
