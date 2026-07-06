@@ -503,6 +503,68 @@ pub extern "C" fn rt_winit_window_staging_ptr(win: i64, w: i64, h: i64) -> i64 {
     })
 }
 
+#[no_mangle]
+pub extern "C" fn rt_winit_window_stage_clear(win: i64, w: i64, h: i64, color: i64) -> i64 {
+    PUMP.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(ps) = borrow.as_mut() else {
+            return 0;
+        };
+        let Some(slot) = ps.inner.windows.get_mut(&win) else {
+            return 0;
+        };
+        let want_w = w.max(1) as u32;
+        let want_h = h.max(1) as u32;
+        let want = want_w as usize * want_h as usize;
+        if slot.staging.len() != want {
+            slot.staging = vec![0u32; want];
+        }
+        slot.staging_w = want_w;
+        slot.staging_h = want_h;
+        slot.staging.fill(color as u32);
+        1
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_window_stage_fill_rect(
+    win: i64,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    color: i64,
+) -> i64 {
+    PUMP.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(ps) = borrow.as_mut() else {
+            return 0;
+        };
+        let Some(slot) = ps.inner.windows.get_mut(&win) else {
+            return 0;
+        };
+        if slot.staging.is_empty() || slot.staging_w == 0 || slot.staging_h == 0 {
+            return 0;
+        }
+        let sw = slot.staging_w as i64;
+        let sh = slot.staging_h as i64;
+        let x0 = x.max(0).min(sw);
+        let y0 = y.max(0).min(sh);
+        let x1 = (x + w).max(0).min(sw);
+        let y1 = (y + h).max(0).min(sh);
+        if x1 <= x0 || y1 <= y0 {
+            return 1;
+        }
+        let c = color as u32;
+        for yy in y0 as usize..y1 as usize {
+            let start = yy * slot.staging_w as usize + x0 as usize;
+            let end = yy * slot.staging_w as usize + x1 as usize;
+            slot.staging[start..end].fill(c);
+        }
+        1
+    })
+}
+
 /// Blit the staging buffer (staging_w x staging_h) into the window surface,
 /// nearest-neighbour upscaling to the current window size, and present.
 #[no_mangle]

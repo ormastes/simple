@@ -5,7 +5,7 @@ use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
 use os.compositor.simple_web_window_renderer.{render_simple_web_app_content_cached, content_paint_full_height}
-use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, render_shared_mdi_desktop_chrome, draw_shared_mdi_window_chrome, draw_shared_mdi_taskbar}
+use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows, shared_mdi_render_windows_from_simple_gui_scene, render_shared_mdi_desktop_chrome, draw_shared_mdi_window_chrome, draw_shared_mdi_taskbar}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
 use common.color.convert.{int_to_hex}
@@ -363,21 +363,33 @@ class HostCompositor:
         while i < window_count:
             val win = self.windows[i]
             val scroll = self.scroll_offset_for(win.id).to_i32()
-            val shared_win = host_window_to_shared_mdi_render_window(win, scroll)
-            shared_windows.push(shared_win)
+            shared_windows.push(host_window_to_shared_mdi_render_window(win, scroll))
+            i = i + 1
+        # Route host WM chrome/taskbar through the shared Simple GUI internal-
+        # window scene projection. Host-only content composition below keeps
+        # its scroll/cache state, but chrome/taskbar geometry and metadata come
+        # from the same SharedWmScene boundary used by SimpleOS framebuffer
+        # rendering.
+        val simple_gui_scene = shared_mdi_scene_from_render_windows(self.width, self.height, "host-compositor", shared_windows)
+        val simple_gui_windows = shared_mdi_render_windows_from_simple_gui_scene(simple_gui_scene)
+        i = 0
+        while i < window_count:
+            val win = self.windows[i]
             if not win.minimized:
-                draw_shared_mdi_window_chrome(self.backend, shared_win, theme)
+                val scene_win = if i < simple_gui_windows.len(): simple_gui_windows[i] else: shared_windows[i]
+                draw_shared_mdi_window_chrome(self.backend, scene_win, theme)
                 val cx = win.x + 4
                 val cy = win.y + 32
                 val cw = win.w - 8
                 val ch = win.h - 36
+                val scroll = self.scroll_offset_for(win.id).to_i32()
                 val full_h = content_paint_full_height(ch, scroll)
                 val cache = self._content_cache_for(win.id, cw, full_h, "auto")
                 render_simple_web_app_content_cached(cache, self.backend, win.title, cx, cy, cw, ch, win.content, scroll)
                 # See the matching write-back comment in the fast chrome lane above.
                 self.content_caches.set(win.id, cache)
             i = i + 1
-        draw_shared_mdi_taskbar(self.backend, shared_windows, self.width, self.height, theme)
+        draw_shared_mdi_taskbar(self.backend, simple_gui_windows, self.width, self.height, theme)
         self.backend.present()
 
     me apply_bridge_request(seq: i64, owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text):

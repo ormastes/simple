@@ -9,7 +9,7 @@
 - launcher reason: pass
 - launcher target: wm-simple-web
 - launcher entry: examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl
-- qmp socket: /tmp/simpleos_desktop_qmp_80794_1783337166612503.sock
+- qmp socket: /tmp/simpleos_desktop_qmp_17060_1783341865355198.sock
 - marker state: probe:true wm:true engine:true web:true mdi:true top:true taskbar:true html:true
 - injection protocol: hmp-mouse-events
 - guest input contract: pass (pass)
@@ -24,14 +24,14 @@
 - target region changed pixels: 9682
 - before sha256: dc595bb2ef53d2516faa2dc8ca72577e3ec590584544e69d4de66d884eade0cc
 - after sha256: 0647ffeef4dc7c42d815b77849baff6cc3b0fe7b70e025bf6c0d53f86cfda567
-- before ppm: build/simpleos_wm_qmp_drag_delta_simple_gui_shared/before-drag.ppm (2359312 bytes)
-- before raw: build/simpleos_wm_qmp_drag_delta_simple_gui_shared/before-drag.ppm.raw (3145728 bytes; pass)
+- before ppm: build/simpleos_wm_qmp_drag_delta_gui_renderer/before-drag.ppm (2359312 bytes)
+- before raw: build/simpleos_wm_qmp_drag_delta_gui_renderer/before-drag.ppm.raw (3145728 bytes; pass)
 - before ppm status: pass; magic pass
-- after ppm: build/simpleos_wm_qmp_drag_delta_simple_gui_shared/after-drag.ppm (2359312 bytes)
-- after raw: build/simpleos_wm_qmp_drag_delta_simple_gui_shared/after-drag.ppm.raw (3145728 bytes; pass)
+- after ppm: build/simpleos_wm_qmp_drag_delta_gui_renderer/after-drag.ppm (2359312 bytes)
+- after raw: build/simpleos_wm_qmp_drag_delta_gui_renderer/after-drag.ppm.raw (3145728 bytes; pass)
 - after ppm status: pass; magic pass
-- serial log: build/os/simpleos_desktop_qmp_80794_1783337166612503.log (1607 bytes)
-- stderr log: build/os/simpleos_desktop_qmp_80794_1783337166612503.log.stderr (0 bytes)
+- serial log: build/os/simpleos_desktop_qmp_17060_1783341865355198.log (1607 bytes)
+- stderr log: build/os/simpleos_desktop_qmp_17060_1783341865355198.log.stderr (0 bytes)
 
 This wrapper launches the exact WM + Simple Web + Engine2D target in a
 separate QEMU process, captures the BGA framebuffer with QMP

@@ -4,7 +4,7 @@
 # Proves the Simple WM (hosted compositor) can LAUNCH MULTIPLE GUI apps as
 # internal windows through Simple GUI, that the TASKBAR reflects them and WORKS
 # (clicking a taskbar item focuses/restores its window), in a real on-screen
-# winit window, and captures binding evidence.
+# GuiRenderer window, and captures binding evidence.
 #
 # Launches examples/06_io/ui/wm_multiapp_taskbar_gui.spl for real via a throwaway
 # .app bundle (LaunchServices registers the process with the macOS window server
@@ -20,7 +20,7 @@
 #     - `[wm-multiapp] final_state_ready .. all_visible=true`
 #   CAPTURES: the SimpleGui content window per state (launched-all / minimized /
 #     final), captured DIRECTLY by its CGWindowID via `screencapture -l<id>`
-#     (Space/foreground-independent — a background winit window is otherwise not
+#     (Space/foreground-independent — a background host window is otherwise not
 #     capturable by `-x`, which only shows the current Space). The id is resolved
 #     by window title via CGWindowListCopyWindowInfo (JXA).
 #   PIXEL CHECKS (binding, on the final capture; via
@@ -66,7 +66,8 @@ HOST_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
 STATUS=fail
 REASON=unknown
-GUI_BIN=""
+GUI_BIN="${SIMPLE_BIN:-}"
+SFFI_LIB=""
 CAPTURE_METHOD="cgwindowid-screencapture-l"
 LAUNCH_COUNT=0
 TASKBAR_COUNT=0
@@ -145,17 +146,34 @@ fail() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# --- locate a winit GUI driver (only a `--features gui` build has the runtime) ---
-for _c in \
-    "src/compiler_rust/target/gui/debug/simple" \
-    "src/compiler_rust/target/gui/release/simple"
-do
-    if [ -x "$_c" ] && LC_ALL=C grep -aq "rt_winit_window_new" "$_c"; then
-        GUI_BIN="$_c"
-        break
-    fi
-done
-[ -z "$GUI_BIN" ] && fail "gui-driver-missing-or-stale (needs --features gui build with rt_winit_window_new)"
+# --- locate self-hosted Simple and the GuiRenderer SFFI sibling library ---
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "$GUI_BIN" ]; then
+    for _c in "bin/simple" "./bin/simple" "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple"; do
+        if [ -x "$_c" ]; then
+            GUI_BIN="$_c"
+            break
+        fi
+    done
+fi
+[ -z "$GUI_BIN" ] && fail "self-hosted-simple-missing"
+is_rust_seed_simple "$GUI_BIN" && fail "rust-seed-simple-bin-forbidden"
+
+case "$(uname -s)" in
+    Darwin) SFFI_LIB="$ROOT_DIR/build/sffi/libspl_winit.dylib" ;;
+    Linux) SFFI_LIB="$ROOT_DIR/build/sffi/libspl_winit.so" ;;
+    *) SFFI_LIB="$ROOT_DIR/build/sffi/libspl_winit.dll" ;;
+esac
+if [ ! -s "$SFFI_LIB" ]; then
+    sh scripts/build/build_spl_winit.shs >/dev/null 2>"$BUILD_DIR/build_spl_winit.err" || fail "spl-winit-sffi-build-failed"
+fi
+[ -s "$SFFI_LIB" ] || fail "spl-winit-sffi-missing"
 [ -f "$APP_SPL" ] || fail "missing-app-spl"
 [ -f "$VALIDATOR" ] || fail "missing-validator"
 
@@ -193,6 +211,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>SIMPLE_TIMEOUT_SECONDS</key><string>0</string>
     <key>SIMPLE_EXECUTION_LIMIT</key><string>0</string>
     <key>SIMPLE_ONE_CALL_READBACK</key><string>1</string>
+    <key>SIMPLE_SPL_WINIT_PATH</key><string>${SFFI_LIB}</string>
     <key>OSTYPE</key><string>${OSTYPE:-darwin}</string>
   </dict>
 </dict></plist>
@@ -207,11 +226,11 @@ open -n --stdout "$APP_LOG" --stderr "$APP_ERR" "$APP_DIR" --args run "$ABS_SPL"
 
 # We capture the window DIRECTLY by its CGWindowID with
 # `screencapture -l<id>`, which is Space-independent and needs no activation.
-# The window id is found via CGWindowListCopyWindowInfo (JXA/ObjC bridge). winit
-# owns several windows for the process (the content window, a full-width menu-bar
-# window, and blank metal/helper layers) whose sizes are not reliable
+# The window id is found via CGWindowListCopyWindowInfo (JXA/ObjC bridge). The
+# host runtime can own several windows for the process (the content window, a
+# full-width menu-bar window, and blank metal/helper layers) whose sizes are not reliable
 # discriminators, so we select by the content window's TITLE — the exact string
-# passed to winit_window_new ("Simple WM — Multi-App"). Window names require
+# passed to GuiRenderer.create ("Simple WM — Multi-App"). Window names require
 # Screen Recording permission, which the driving Terminal already holds.
 JXA_WID="$BUILD_DIR/_getwid.js"
 cat > "$JXA_WID" <<'JXA'

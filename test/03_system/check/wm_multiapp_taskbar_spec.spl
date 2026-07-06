@@ -9,8 +9,8 @@ Pins the contract of the multi-app taskbar capture gate
 `scripts/check/measure_wm_multiapp_taskbar.spl`), which proves the Simple WM
 (hosted compositor) can LAUNCH MULTIPLE GUI apps as internal windows through
 Simple GUI, that a TASKBAR reflects them and WORKS (a taskbar click
-focuses/restores its window), in a real on-screen winit window on the Metal
-engine2d lane, and captures binding pixel evidence (per-window titlebar bands
+focuses/restores its window), in a real on-screen GuiRenderer window, and
+captures binding pixel evidence (per-window titlebar bands
 differ from the desktop backdrop; the taskbar shows >= N colored segments).
 
 This spec exercises TWO things deterministically, without paying for the live
@@ -160,20 +160,33 @@ describe "WM multi-app taskbar gate fail-closed contract":
         expect(val_src).to_contain("taskbar_lit_segments")
         expect(val_src).to_contain("windows_ok")
 
-    it "uses the shared hosted winit backend without full-frame pixel widening":
+    it "uses the shared hosted GuiRenderer backend without exposing raw winit":
         val app = file_read("examples/06_io/ui/wm_multiapp_taskbar_gui.spl")
-        expect(app).to_contain("HostedWinitBufferBackend.create")
-        expect(app).not_to_contain("class WinitCompositorBackend")
-        expect(app).to_contain("fn apply_live_input")
+        expect(app).to_contain("GuiRenderer.create")
+        expect(app).to_contain("HostedGuiRendererBackend.create")
+        expect_not(app.contains("std.io.window_winit"))
+        expect_not(app.contains("winit_window_new"))
+        expect_not(app.contains("class WinitCompositorBackend"))
+        expect(app).to_contain("fn apply_live_event")
         expect(app).to_contain("comp.handle_mouse_move")
         expect(app).to_contain("comp.handle_mouse_button")
-        expect(app).to_contain("render_and_present(lp, comp, state)")
+        expect(app).to_contain("render_and_present(comp, state)")
 
-        val backend = file_read("src/os/compositor/hosted_backend_winit.spl")
+        val backend = file_read("src/os/compositor/hosted_backend_gui_renderer.spl")
         expect(backend).to_contain("pixels: [u32]")
-        expect(backend).to_contain("rt_winit_buffer_blit_pixels(self.buffer_id, x, y, w, h, pixels)")
-        expect(backend).not_to_contain("var runtime_pixels: [i64]")
-        expect(backend).not_to_contain("runtime_pixels.push")
+        expect(backend).to_contain("self.renderer.present_staged")
+        expect_not(backend.contains("var runtime_pixels: [i64]"))
+        expect_not(backend.contains("std.io.window_winit"))
+        expect_not(backend.contains("rt_winit_window_new"))
+
+    it "launches the live gate through self-hosted Simple plus the SFFI facade":
+        val gate = file_read("scripts/check/check-wm-multiapp-taskbar-evidence.shs")
+        expect(gate).to_contain("is_rust_seed_simple")
+        expect(gate).to_contain("rust-seed-simple-bin-forbidden")
+        expect(gate).to_contain("build/sffi/libspl_winit")
+        expect(gate).to_contain("SIMPLE_SPL_WINIT_PATH")
+        expect_not(gate.contains("target/gui/debug/simple"))
+        expect_not(gate.contains("rt_winit_window_new"))
 
     it "documents that performance work must not reduce resolution or DPI":
         val design = file_read("doc/05_design/os/desktop/shared_wm_renderer_unification.md")
