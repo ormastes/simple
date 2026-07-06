@@ -506,6 +506,9 @@ with the target backend guard (for LLVM, `valid_llvm_type(...)`) before emitting
 call, phi, cast, load/store result, or serialized MIR text. `simple lint` reports
 `LLVM001` when LLVM result type metadata is read with raw `get_local_type(...)`
 in known result-type positions.
+LLVM pointer-producing instructions must also mark the destination through
+`mark_ptr_local(...)`, so later `Copy`/`Move` lowering preserves pointer IR
+instead of falling back to integer arithmetic.
 
 ```simple
 # Returns T? (value if present, nil if absent)

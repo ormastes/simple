@@ -86,16 +86,22 @@ impl MirTextCodegen for MirToLlvm:
                 val ge_pred = if is_float_type(ge_cmp_ty): "oge" else: "sge"
                 self.emit_comparison(dest_name, ty, ge_pred, ge_cmp_ty, left_val, right_val)
             case MatMul:
+                self.mark_ptr_local(dest.id)
                 self.builder.emit("  {dest_name} = call ptr @__simple_runtime_matmul(ptr {left_val}, ptr {right_val})  ; matrix multiply (@)")
             case BroadcastAdd:
+                self.mark_ptr_local(dest.id)
                 self.builder.emit("  {dest_name} = call ptr @__simple_runtime_broadcast_add(ptr {left_val}, ptr {right_val})  ; broadcast add (.+)")
             case BroadcastSub:
+                self.mark_ptr_local(dest.id)
                 self.builder.emit("  {dest_name} = call ptr @__simple_runtime_broadcast_sub(ptr {left_val}, ptr {right_val})  ; broadcast sub (.-)")
             case BroadcastMul:
+                self.mark_ptr_local(dest.id)
                 self.builder.emit("  {dest_name} = call ptr @__simple_runtime_broadcast_mul(ptr {left_val}, ptr {right_val})  ; broadcast mul (.*)")
             case BroadcastDiv:
+                self.mark_ptr_local(dest.id)
                 self.builder.emit("  {dest_name} = call ptr @__simple_runtime_broadcast_div(ptr {left_val}, ptr {right_val})  ; broadcast div (./)")
             case BroadcastPow:
+                self.mark_ptr_local(dest.id)
                 self.builder.emit("  {dest_name} = call ptr @__simple_runtime_broadcast_pow(ptr {left_val}, ptr {right_val})  ; broadcast pow (.^)")
             case Offset:
                 val nit = self.native_int()
@@ -119,6 +125,7 @@ impl MirTextCodegen for MirToLlvm:
                 self.builder.emit_icmp_eq(dest_name, ty, operand_val, "0")
             case BitNot: self.builder.emit_not(dest_name, ty, operand_val)
             case Transpose:
+                self.mark_ptr_local(dest.id)
                 self.builder.emit("  {dest_name} = call ptr @__simple_runtime_transpose(ptr {operand_val})  ; transpose (')")
 
     me translate_call(dest: LocalId?, func: MirOperand, args: [MirOperand]):
@@ -163,14 +170,19 @@ impl MirTextCodegen for MirToLlvm:
     # === Overrides: memory ===
 
     me translate_alloc(dest: LocalId, ty: MirType):
-        val dest_name = self.get_local(dest.id)
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
         val llvm_ty = self.type_mapper.map_type(ty)
+        self.mark_ptr_local(dest_id)
         self.builder.emit_alloca(dest_name, llvm_ty)
 
     me translate_load(dest: LocalId, ptr: MirOperand):
-        val dest_name = self.get_local(dest.id)
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
         val ptr_val = self.translate_operand(ptr)
-        val load_ty = self.get_local_type(dest.id)
+        val load_ty = self.get_local_type(dest_id)
+        if load_ty == "ptr":
+            self.mark_ptr_local(dest_id)
         self.builder.emit_load_tbaa(dest_name, load_ty, ptr_val)
 
     me translate_store(ptr: MirOperand, value: MirOperand):
@@ -180,12 +192,14 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit_store_tbaa(store_ty, value_val, ptr_val)
 
     me translate_gep(dest: LocalId, base: MirOperand, indices: [MirOperand]):
-        val dest_name = self.get_local(dest.id)
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
         val base_val = self.translate_operand(base)
         var index_vals: [text] = []
         for idx in indices:
             index_vals = index_vals.push(self.translate_operand(idx))
         val base_ty = self.get_operand_type(base)
+        self.mark_ptr_local(dest_id)
         self.builder.emit_gep(dest_name, base_ty, base_val, index_vals)
 
     # === Overrides: aggregates ===
@@ -335,17 +349,20 @@ impl MirTextCodegen for MirToLlvm:
         val f_val = self.translate_operand(f)
         val g_val = self.translate_operand(g)
         val dir = if forward: "forward" else: "backward"
+        self.mark_ptr_local(dest.id)
         self.builder.emit("  {dest_name} = call ptr @__simple_runtime_compose(ptr {f_val}, ptr {g_val})  ; compose ({dir})")
 
     me translate_parallel(dest: LocalId, funcs: [MirOperand]):
         val dest_name = self.get_local(dest.id)
         val count = funcs.len()
+        self.mark_ptr_local(dest.id)
         self.builder.emit("  {dest_name} = call ptr @__simple_runtime_parallel(i64 {count})  ; parallel ({count} functions)")
 
     me translate_layer_connect(dest: LocalId, l1: MirOperand, l2: MirOperand):
         val dest_name = self.get_local(dest.id)
         val l1_val = self.translate_operand(l1)
         val l2_val = self.translate_operand(l2)
+        self.mark_ptr_local(dest.id)
         self.builder.emit("  {dest_name} = call ptr @__simple_runtime_layer_connect(ptr {l1_val}, ptr {l2_val})  ; layer connect")
 
     # === Overrides: borrow checking ===
@@ -361,6 +378,7 @@ impl MirTextCodegen for MirToLlvm:
     me translate_create_promise(dest: LocalId, body: LocalId, result_type: MirType):
         eprint("ERROR: [LLVM] async operation not supported in LLVM backend, producing stub")
         val dest_name = self.get_local(dest.id)
+        self.mark_ptr_local(dest.id)
         self.builder.emit("  {dest_name} = call ptr @__simple_runtime_create_promise(ptr null)  ; CreatePromise (async)")
 
     me translate_await(dest: LocalId, promise: MirOperand):
@@ -382,6 +400,7 @@ impl MirTextCodegen for MirToLlvm:
         eprint("ERROR: [LLVM] async operation not supported in LLVM backend, producing stub")
         val dest_name = self.get_local(dest.id)
         val handler_val = self.translate_operand(handler)
+        self.mark_ptr_local(dest.id)
         self.builder.emit("  {dest_name} = call ptr @__simple_runtime_spawn(ptr {handler_val})  ; Spawn")
 
     me translate_send(target: MirOperand, message: MirOperand):
@@ -446,6 +465,7 @@ impl MirTextCodegen for MirToLlvm:
     me translate_gpu_shared_alloc(dest: LocalId, type_: MirType, size: i64):
         eprint("ERROR: [LLVM] GPU operation not supported in text LLVM backend, producing stub")
         val dest_name = self.get_local(dest.id)
+        self.mark_ptr_local(dest.id)
         self.builder.emit("  {dest_name} = alloca i8, i64 {size}  ; GpuSharedAlloc (stub)")
 
     me translate_gpu_atomic_op(dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand):

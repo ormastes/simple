@@ -405,9 +405,10 @@ impl MirTextCodegen for MirToLlvm:
     # === Required: per-category instruction methods ===
 
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
+        val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest.id)
         val llvm_ty = self.valid_llvm_type(self.llvm_type_text(ty))
-        self.local_types[self.local_id_value(dest)] = llvm_ty
+        self.local_types[dest_id] = llvm_ty
 
         match value:
             case Int(v):
@@ -417,18 +418,19 @@ impl MirTextCodegen for MirToLlvm:
                 self.builder.emit("  {dest_name} = fadd {llvm_ty} {fv}, 0.0  ; const float")
             case Bool(v):
                 val bval = if v: "1" else: "0"
-                self.bool_locals[self.local_id_value(dest)] = true
+                self.bool_locals[dest_id] = true
                 self.builder.emit("  {dest_name} = add {llvm_ty} {bval}, 0  ; const bool")
             case Str(v):
                 val global_name = self.add_string_global(v)
                 val str_len = escaped_string_byte_len(v) + 1
                 val nit = self.native_int()
-                self.ptr_locals[self.local_id_value(dest)] = true
+                self.mark_ptr_local(dest_id)
                 self.builder.emit("  {dest_name} = getelementptr inbounds [{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; string const")
             case Zero:
                 if is_float_type(llvm_ty):
                     self.builder.emit("  {dest_name} = fadd {llvm_ty} 0.0, 0.0  ; const zero")
                 elif llvm_ty == "ptr":
+                    self.mark_ptr_local(dest_id)
                     val nit = self.native_int()
                     self.builder.emit("  {dest_name} = inttoptr {nit} 0 to ptr  ; const null")
                 elif llvm_ty == "void":
@@ -728,6 +730,10 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     ""
 
+    fn mark_ptr_local(id: i64):
+        self.local_types[id] = "ptr"
+        self.ptr_locals[id] = true
+
     fn valid_llvm_type(ty: text) -> text:
         if ty == nil or ty == "nil":
             self.native_int()
@@ -762,14 +768,16 @@ impl MirTextCodegen for MirToLlvm:
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val llvm_ty = self.valid_llvm_type(self.llvm_type_text(ty))
-        self.local_types[dest_id] = "ptr"
-        self.ptr_locals[dest_id] = true
+        self.mark_ptr_local(dest_id)
         self.builder.emit_alloca(dest_name, llvm_ty)
 
     me translate_load(dest: LocalId, ptr: MirOperand):
-        val dest_name = self.get_local(self.local_id_value(dest))
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
         val ptr_val = self.translate_operand(ptr)
-        val load_ty = self.valid_llvm_type(self.get_local_type(self.local_id_value(dest)))
+        val load_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+        if load_ty == "ptr":
+            self.mark_ptr_local(dest_id)
         self.builder.emit_load(dest_name, load_ty, ptr_val)
 
     me translate_store(ptr: MirOperand, value: MirOperand):
