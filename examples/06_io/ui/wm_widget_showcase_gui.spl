@@ -6,7 +6,8 @@
 #   SIMPLE_GUI_RUN_SKIP_NUDGE=1 scripts/gui/macos-gui-run.shs \
 #     examples/06_io/ui/wm_widget_showcase_gui.spl
 
-use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_wait_input}
+use std.gpu.engine2d.backend_metal.{MetalBackend}
+use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input, winit_wait_input}
 use std.common.image.ppm_decode.{decode_ppm_to_argb}
 use std.io_runtime.{env_get, file_exists, file_read, file_write, file_read_bytes, dir_create_all, getpid, time_now_unix_micros}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
@@ -16,13 +17,6 @@ use common.ui.wm_chrome_theme.{wm_chrome_theme}
 use common.ui.wm_app_process_contract.{WIDGET_SHOWCASE_APP_SOURCE, WIDGET_SHOWCASE_TITLE, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, wm_fs_bridge_decode, wm_widget_showcase_client_env, wm_widget_showcase_event_path, wm_widget_showcase_frame_seq_path, wm_fs_app_event, wm_fs_app_event_encode, wm_fs_app_event_seq_path}
 use os.compositor.host_compositor_entry.{HostCompositor, HeadlessHostCompositorBackend, host_compositor_pointer_move, host_compositor_left_button_at, host_taskbar_dock_width, host_taskbar_item_width, host_taskbar_item_x}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
-
-extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
-extern fn rt_winit_buffer_fill_rect(buf: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
-extern fn rt_winit_buffer_blit_pixels(buf: i64, x: i64, y: i64, w: i64, h: i64, pixels: [u32]) -> bool
-extern fn rt_winit_buffer_draw_text(buf: i64, x: i64, y: i64, text_val: text, fg: i64, bg: i64) -> bool
-extern fn rt_winit_buffer_present(win: i64, buf: i64) -> bool
-extern fn rt_winit_buffer_free(buf: i64) -> bool
 
 val W: i32 = 660
 val H: i32 = 840
@@ -42,12 +36,6 @@ struct WmLoopState:
     child_refresh_deadline: i64
     dirty: bool
     running: bool
-
-fn argb(color: u32) -> i64:
-    color.to_i64()
-
-fn rgb(color: u32) -> i64:
-    color.to_i64() & 0xFFFFFF
 
 fn sleep_ms(ms: i64):
     thread_sleep(ms)
@@ -142,13 +130,13 @@ fn resolve_repo_root() -> text:
         return here
     "."
 
-fn fill_rect_buffer(buf: i64, x: i32, y: i32, w: i32, h: i32, color: u32):
-    rt_winit_buffer_fill_rect(buf, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), argb(color))
+fn fill_rect_metal(b: MetalBackend, x: i32, y: i32, w: i32, h: i32, color: u32):
+    b.draw_rect_filled(x, y, w, h, color)
 
-fn draw_text_buffer(buf: i64, x: i32, y: i32, text_val: text, fg: u32, bg: u32):
-    rt_winit_buffer_draw_text(buf, x.to_i64(), y.to_i64(), text_val, argb(fg), argb(bg))
+fn draw_text_metal(b: MetalBackend, x: i32, y: i32, text_val: text, fg: u32):
+    b.draw_text(x, y, text_val, fg, 8)
 
-fn draw_taskbar_buffer(buf: i64, comp: HostCompositor):
+fn draw_taskbar_metal(b: MetalBackend, comp: HostCompositor):
     val theme = wm_chrome_theme()
     val count = comp.windows.len().to_i32()
     if count <= 0:
@@ -156,7 +144,7 @@ fn draw_taskbar_buffer(buf: i64, comp: HostCompositor):
     val dock_w = host_taskbar_dock_width(W, count)
     val dock_x = (W - dock_w) / 2
     val dock_y = H - 62
-    fill_rect_buffer(buf, dock_x, dock_y, dock_w, 44, theme.taskbar)
+    fill_rect_metal(b, dock_x, dock_y, dock_w, 44, theme.taskbar)
     val item_w = host_taskbar_item_width(W, count)
     var i = 0
     while i < count:
@@ -167,56 +155,70 @@ fn draw_taskbar_buffer(buf: i64, comp: HostCompositor):
             color = theme.accent
         elif win.minimized:
             color = theme.host_window_body
-        fill_rect_buffer(buf, ix + 2, dock_y + 6, item_w - 4, 32, theme.command_lane)
-        fill_rect_buffer(buf, ix + 4, dock_y + 8, item_w - 8, 28, color)
-        fill_rect_buffer(buf, ix + 12, dock_y + 14, 12, 12, theme.text_primary)
-        draw_text_buffer(buf, ix + 30, dock_y + 13, win.title, theme.text_primary, color)
+        fill_rect_metal(b, ix + 2, dock_y + 6, item_w - 4, 32, theme.command_lane)
+        fill_rect_metal(b, ix + 4, dock_y + 8, item_w - 8, 28, color)
+        fill_rect_metal(b, ix + 12, dock_y + 14, 12, 12, theme.text_primary)
+        draw_text_metal(b, ix + 30, dock_y + 13, win.title, theme.text_primary)
         if win.focused and not win.minimized:
-            fill_rect_buffer(buf, ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
+            fill_rect_metal(b, ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
         i = i + 1
 
-fn compose_buffer(buf: i64, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_pixels: [u32]) -> bool:
+fn compose_metal(b: MetalBackend, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_pixels: [u32]) -> bool:
     val theme = wm_chrome_theme()
     var frame_ok = true
-    fill_rect_buffer(buf, 0, 0, W, H, theme.compositor_bg)
-    fill_rect_buffer(buf, 0, 0, W, 38, theme.command_lane)
-    draw_text_buffer(buf, 14, 12, "Simple WM", theme.text_primary, theme.command_lane)
-    draw_text_buffer(buf, 112, 12, "fs child: {WIDGET_SHOWCASE_APP_SOURCE}", MUTED, theme.command_lane)
+    b.clear(theme.compositor_bg)
+    fill_rect_metal(b, 0, 0, W, 38, theme.command_lane)
+    draw_text_metal(b, 14, 12, "Simple WM", theme.text_primary)
+    draw_text_metal(b, 112, 12, "fs child: {WIDGET_SHOWCASE_APP_SOURCE}", MUTED)
     var i = 0
     while i < comp.windows.len():
         val win = comp.windows[i]
         if not win.minimized:
-            fill_rect_buffer(buf, win.x + 7, win.y + 7, win.w, win.h, theme.window_shadow)
-            fill_rect_buffer(buf, win.x, win.y, win.w, win.h, theme.host_window_body)
+            fill_rect_metal(b, win.x + 7, win.y + 7, win.w, win.h, theme.window_shadow)
+            fill_rect_metal(b, win.x, win.y, win.w, win.h, theme.host_window_body)
             val title_color = if win.focused: theme.accent else: theme.title_unfocused
-            fill_rect_buffer(buf, win.x, win.y, win.w, 24, title_color)
-            draw_text_buffer(buf, win.x + 10, win.y + 7, win.title, theme.text_primary, title_color)
-            fill_rect_buffer(buf, win.x + win.w - 24, win.y, 24, 24, theme.close_button)
-            draw_text_buffer(buf, win.x + win.w - 17, win.y + 5, "X", theme.text_primary, theme.close_button)
+            fill_rect_metal(b, win.x, win.y, win.w, 24, title_color)
+            draw_text_metal(b, win.x + 10, win.y + 7, win.title, theme.text_primary)
+            fill_rect_metal(b, win.x + win.w - 24, win.y, 24, 24, theme.close_button)
+            draw_text_metal(b, win.x + win.w - 17, win.y + 5, "X", theme.text_primary)
             val cx = win.x + 4
             val cy = win.y + 28
-            if not rt_winit_buffer_blit_pixels(buf, cx.to_i64(), cy.to_i64(), frame_w.to_i64(), frame_h.to_i64(), frame_pixels):
+            if frame_pixels.len() < frame_w * frame_h:
                 frame_ok = false
-                draw_text_buffer(buf, cx + 8, cy + 8, "frame pending", theme.text_primary, theme.host_window_body)
+                draw_text_metal(b, cx + 8, cy + 8, "frame pending", theme.text_primary)
+            else:
+                b.draw_image(cx, cy, frame_w, frame_h, frame_pixels)
         i = i + 1
-    draw_taskbar_buffer(buf, comp)
-    fill_rect_buffer(buf, 0, 0, W, 3, LOCATOR)
-    fill_rect_buffer(buf, 0, H - 3, W, 3, LOCATOR)
-    fill_rect_buffer(buf, 0, 0, 3, H, LOCATOR)
-    fill_rect_buffer(buf, W - 3, 0, 3, H, LOCATOR)
+    draw_taskbar_metal(b, comp)
+    fill_rect_metal(b, 0, 0, W, 3, LOCATOR)
+    fill_rect_metal(b, 0, H - 3, W, 3, LOCATOR)
+    fill_rect_metal(b, 0, 0, 3, H, LOCATOR)
+    fill_rect_metal(b, W - 3, 0, 3, H, LOCATOR)
     frame_ok
 
-fn render_and_present(win: WinitWindow, buf: i64, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_pixels: [u32], state: text) -> bool:
-    val frame_ok = compose_buffer(buf, comp, frame_w, frame_h, frame_pixels)
+fn render_and_present(b: MetalBackend, win: WinitWindow, lp: WinitLoop, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_pixels: [u32], state: text) -> bool:
+    val frame_ok = compose_metal(b, comp, frame_w, frame_h, frame_pixels)
     if not frame_ok:
         print "[wm-showcase] present state={state} child_frame_blit_failed"
         return false
-    val ok = rt_winit_buffer_present(win.handle, buf)
-    if not ok:
-        print "[wm-showcase] present state={state} FAIL buffer_present"
+    b.present()
+    val frame_complete = b.gpu_frame_complete
+    val pixels = b.read_pixels_gpu_only()
+    if not frame_complete:
+        print "[wm-showcase] present state={state} FAIL metal_frame_incomplete"
         return false
+    if pixels.len() < W * H:
+        print "[wm-showcase] present state={state} FAIL metal_readback_short={pixels.len()} want={W * H}"
+        return false
+    var packed: [i64] = []
+    var i = 0
+    while i < pixels.len():
+        packed.push(pixels[i].to_i64() & 0xFFFFFF)
+        i = i + 1
+    winit_present_rgba(win, W.to_i64(), H.to_i64(), packed)
+    val ignored_pump = winit_poll_input(lp)
     if state != "hold":
-        print "[wm-showcase] present state={state} dims={W}x{H} child_frame=from-filesystem renderer=winit-buffer"
+        print "[wm-showcase] present state={state} dims={W}x{H} child_frame=from-filesystem renderer=metal-sffi gpu_frame_complete={frame_complete}"
     true
 
 fn child_local_at(comp: HostCompositor, fx: i32, fy: i32, frame_w: i32, frame_h: i32, require_inside: bool) -> (bool, i32, i32):
@@ -376,11 +378,10 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
         showcase_source_path
     ])
 
-fn cleanup(child_pid: i64, buf: i64, win: WinitWindow, lp: WinitLoop):
+fn cleanup(child_pid: i64, b: MetalBackend, win: WinitWindow, lp: WinitLoop):
     if child_pid > 0:
         process_kill(child_pid)
-    if buf > 0:
-        rt_winit_buffer_free(buf)
+    b.shutdown()
     winit_window_free(win)
     winit_loop_free(lp)
 
@@ -449,13 +450,14 @@ fn main() -> i64:
         process_kill(child_pid)
         return 1
     write_wm_trace(trace_path, "after_window_new")
-    val buf = rt_winit_buffer_create(W.to_i64(), H.to_i64(), argb(wm_chrome_theme().compositor_bg))
-    if buf <= 0:
-        print "[wm-showcase] error=buffer-create-failed"
+    var b = MetalBackend.create()
+    if not b.init(W, H):
+        print "[wm-showcase] error=metal-init-failed"
         winit_window_free(win)
         winit_loop_free(lp)
         process_kill(child_pid)
         return 1
+    b.use_gpu_only()
     write_wm_trace(trace_path, "after_buffer_create")
 
     val backend = HeadlessHostCompositorBackend.new(W, H)
@@ -463,11 +465,11 @@ fn main() -> i64:
     comp.apply_bridge_request(1, 701, COMP_CREATE_WINDOW.to_i64(), 0, req.title, 54, 70, req.window_w, req.window_h, req.content, req.pid, req.app_id)
     print "[wm-showcase] launched source={req.source_path} child_pid={child_pid} bridge_pid={req.pid} app_id={req.app_id} windows={comp.windows.len()} taskbar_items={comp.windows.len()}"
     if comp.windows.len() != 1:
-        cleanup(child_pid, buf, win, lp)
+        cleanup(child_pid, b, win, lp)
         return 1
     write_wm_trace(trace_path, "before_first_present")
-    if not render_and_present(win, buf, comp, frame_w, frame_h, frame_pixels, "launched"):
-        cleanup(child_pid, buf, win, lp)
+    if not render_and_present(b, win, lp, comp, frame_w, frame_h, frame_pixels, "launched"):
+        cleanup(child_pid, b, win, lp)
         return 1
     write_wm_trace(trace_path, "loop_start")
 
@@ -516,11 +518,11 @@ fn main() -> i64:
                 write_wm_trace(trace_path, "decode_timeout:{current_frame_seq}")
                 state.child_refresh_deadline = now + CHILD_REFRESH_TIMEOUT_US
         if state.dirty:
-            if not render_and_present(win, buf, state.comp, frame_w, frame_h, frame_pixels, "hold"):
-                cleanup(child_pid, buf, win, lp)
+            if not render_and_present(b, win, lp, state.comp, frame_w, frame_h, frame_pixels, "hold"):
+                cleanup(child_pid, b, win, lp)
                 return 1
             state.dirty = false
         frames = frames + 1
 
-    cleanup(child_pid, buf, win, lp)
+    cleanup(child_pid, b, win, lp)
     return 0
