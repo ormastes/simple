@@ -1,6 +1,6 @@
 # Bug: `--open` window startup regressed 51s → >18min after `app.spl` gained host-WM imports (module-closure growth)
 
-- **Status:** OPEN
+- **Status:** FIXED — `use lazy` on `app.spl:17-18` host-WM/compositor imports; measured `--open` window in 14s (2026-07-07), down from >18m28s, restoring parity with the 51s pre-regression baseline.
 - **Discovered:** 2026-07-07
 - **Domain:** app / ui.browser
 - **Related:** `doc/08_tracking/bug/bootstrap_stage4_graph_load_timeout` (task #21, interpreted-frontend architecture)
