@@ -1,8 +1,10 @@
 # Simple GUI Internal Window Implementation Spec
 
-Status: bridge implemented, 2026-07-06. A fuller Draw IR executor can replace
-the current framebuffer executor later without changing the Simple GUI scene
-contract.
+Status: bridge implemented (2026-07-06); chrome/content/taskbar drawing moved
+into a common.ui CompositorBackend executor, plus chrome-kind (titled /
+borderless) and background-provider support (2026-07-07). A fuller Draw IR
+executor can replace the current framebuffer executor later without changing
+the Simple GUI scene contract.
 
 ## Goal
 
@@ -28,15 +30,59 @@ or evidence-only window renderers.
   `spl_winit` SFFI library. App code must not import raw
   `std.io.window_winit` or call raw `rt_winit_*` externs for this lane.
 
-## Follow-up Implementation
+## Follow-up Implementation (2026-07-07 update)
 
-1. Move more chrome/content drawing out of
-   `shared_mdi_framebuffer_scene.spl` into a `common.ui` framebuffer or Draw IR
-   executor when that layer can depend on a backend-neutral draw target.
-2. Keep QEMU SimpleOS fullscreen and host WM evidence on the same scene/render
-   model.
+1. **Done.** Chrome/content/taskbar drawing moved out of
+   `shared_mdi_framebuffer_scene.spl` into a `common.ui` executor:
+   `common.ui.window_scene_draw_ir.shared_wm_scene_render_to_backend(backend,
+   scene)` renders a `SharedWmScene` directly against any
+   `os.compositor.display_backend.CompositorBackend` draw target (desktop
+   chrome, per-window chrome/content, taskbar). `shared_mdi_framebuffer_scene.spl`
+   is now glue: it builds the `SharedWmScene` (as before) and calls the
+   executor; the legacy `SharedMdiRenderWindow`-shaped entrypoints
+   (`render_shared_mdi_desktop_chrome`, `draw_shared_mdi_window_chrome`,
+   `draw_shared_mdi_taskbar`, `render_shared_mdi_app_content`,
+   `render_shared_mdi_windows_to_backend`) still exist and delegate to the
+   executor, unchanged for existing callers (e.g.
+   `os.compositor.host_compositor_entry.spl`). Taskbar item geometry
+   (`wm_taskbar_item_width`/`wm_taskbar_dock_width`/`wm_taskbar_item_x`) moved
+   from `os.compositor.wm_action_applier` into `common.ui.window_scene_draw_ir`
+   (pure math, no os dependency needed by the executor); `wm_action_applier`
+   re-exports the same names so its callers are unaffected.
+2. **Done.** The x86_64 QEMU entry (`gui_entry_engine2d.spl`) and the host WM
+   capture-evidence path both call the same
+   `render_shared_mdi_framebuffer_scene*` functions in
+   `shared_mdi_framebuffer_scene.spl`, which now both route through the one
+   `shared_wm_scene_render_to_backend` executor. No changes were needed in
+   either lane entry file — the signature-compatible glue refactor made both
+   lanes share the executor automatically.
 3. Preserve current readable-text evidence. Do not replace it with a fake,
    smaller framebuffer, dummy window labels, or reduced-resolution shortcut.
+   (Still true; unchanged by this update — see
+   `check-simpleos-wm-visible-display-evidence.shs`.)
+
+## Chrome-Kind and Background Extension Contract (2026-07-07)
+
+- `SharedWmWindow.chrome_kind` (`common.ui.window_scene`) is `"titled"`
+  (default, standard title bar + border) or `"borderless"` (pure content
+  surface for taskbar-like windows and plain drawn objects — no titlebar
+  chrome pixels; z-order/focus/hit-test bounds are unchanged). Every
+  `SharedWmWindow` construction site sets it explicitly or gets it via
+  `simple_gui_internal_window(...)`'s default, so existing callers/bridges are
+  unaffected. The executor gates the title bar/border draw call on this field
+  only; content-area geometry also widens to the full window bounds for
+  borderless windows (no chrome inset).
+- `SharedWmScene.background: BackgroundSpec` (`kind`, `color`, `source`) is a
+  provider contract, not a hardcoded fill. `kind: "color"` is implemented;
+  `"image"` and `"motion"` are reserved names for later providers.
+  `shared_wm_scene_resolve_background(...)` is the single resolution point:
+  unknown/unimplemented kinds never silently fall back to a default fill —
+  they log a diagnostic and return `resolved: false` plus the loud
+  `WM_BACKGROUND_UNRESOLVED_MARKER_COLOR` (`0xFFFF00FF`) so a caller/executor
+  visibly shows the failure instead of masking it. Callers that only need a
+  solid color today (`shared_wm_background_color(color)`) do not need to
+  change when image/motion providers land later — only
+  `shared_wm_scene_resolve_background` gains a new `if` branch.
 
 ## Verification
 

@@ -25,12 +25,55 @@ struct SharedWmWindow:
     minimized: bool
     focused: bool
     z_index: i32
+    chrome_kind: text
+
+# chrome_kind values: "titled" draws the standard title bar + border chrome;
+# "borderless" renders the window as a pure content surface (taskbar-like
+# windows and plain drawn objects) with z-order/focus/hit-test bounds
+# unchanged. Default is "titled" so existing callers keep current chrome.
+val WM_CHROME_KIND_TITLED: text = "titled"
+val WM_CHROME_KIND_BORDERLESS: text = "borderless"
 
 struct SharedWmRect:
     x: i32
     y: i32
     width: i32
     height: i32
+
+# BackgroundSpec is a provider contract for the scene background, not a
+# hardcoded fill. kind: "color" is implemented now; "image" and "motion" are
+# reserved for later providers and must not be silently treated as "color" —
+# callers that only need a solid fill today will not need to change when
+# image/motion providers land later.
+struct BackgroundSpec:
+    kind: text
+    color: u32
+    source: text
+
+val WM_BACKGROUND_KIND_COLOR: text = "color"
+val WM_BACKGROUND_KIND_IMAGE: text = "image"
+val WM_BACKGROUND_KIND_MOTION: text = "motion"
+
+fn shared_wm_background_color(color: u32) -> BackgroundSpec:
+    BackgroundSpec(kind: WM_BACKGROUND_KIND_COLOR, color: color, source: "")
+
+struct SharedWmBackgroundResolution:
+    resolved: bool
+    color: u32
+    error_message: text
+
+# Resolves a BackgroundSpec to a paintable color. Unknown/unimplemented kinds
+# never silently fall back to a default fill: they log a diagnostic and
+# report resolved=false with a loud marker color so callers can detect and
+# surface the failure instead of masking it.
+val WM_BACKGROUND_UNRESOLVED_MARKER_COLOR: u32 = 0xFFFF00FFu32
+
+fn shared_wm_scene_resolve_background(background: BackgroundSpec) -> SharedWmBackgroundResolution:
+    if background.kind == WM_BACKGROUND_KIND_COLOR:
+        return SharedWmBackgroundResolution(resolved: true, color: background.color, error_message: "")
+    val message = "shared_wm_scene_resolve_background: unsupported background kind '{background.kind}' (only '{WM_BACKGROUND_KIND_COLOR}' is implemented); refusing silent fallback"
+    print(message)
+    SharedWmBackgroundResolution(resolved: false, color: WM_BACKGROUND_UNRESOLVED_MARKER_COLOR, error_message: message)
 
 struct SharedWmChrome:
     background_color: text
@@ -47,6 +90,7 @@ struct SharedWmScene:
     height: i32
     backend: text
     windows: [SharedWmWindow]
+    background: BackgroundSpec
 
 struct SharedWmDispatchResult:
     action: text
@@ -79,6 +123,9 @@ struct SharedWmEventTargetTranslationResult:
     cache: SharedWmEventTargetTranslationCache
 
 fn simple_gui_internal_window(surface_id: text, window_id: text, process_id: u64, app_id: text, title: text, x: i32, y: i32, width: i32, height: i32, html: text, minimized: bool, focused: bool, z_index: i32) -> SharedWmWindow:
+    simple_gui_internal_window_with_chrome_kind(surface_id, window_id, process_id, app_id, title, x, y, width, height, html, minimized, focused, z_index, WM_CHROME_KIND_TITLED)
+
+fn simple_gui_internal_window_with_chrome_kind(surface_id: text, window_id: text, process_id: u64, app_id: text, title: text, x: i32, y: i32, width: i32, height: i32, html: text, minimized: bool, focused: bool, z_index: i32, chrome_kind: text) -> SharedWmWindow:
     SharedWmWindow(
         surface_id: surface_id,
         window_id: window_id,
@@ -94,11 +141,12 @@ fn simple_gui_internal_window(surface_id: text, window_id: text, process_id: u64
         html: html,
         minimized: minimized,
         focused: focused,
-        z_index: z_index
+        z_index: z_index,
+        chrome_kind: chrome_kind
     )
 
 fn simple_gui_internal_window_scene(width: i32, height: i32, backend: text, windows: [SharedWmWindow]) -> SharedWmScene:
-    SharedWmScene(width: width, height: height, backend: backend, windows: windows)
+    SharedWmScene(width: width, height: height, backend: backend, windows: windows, background: shared_wm_background_color(wm_chrome_theme().compositor_bg))
 
 fn simple_gui_internal_window_renderer_handoff_marker() -> text:
     "implemented: WM framebuffer rendering can consume common.ui simple_gui_internal_window_scene"
@@ -121,7 +169,8 @@ fn _project_window(window: ManagedWindow, registry: UiWindowSurfaceRegistry) -> 
             html: window.html,
             minimized: window.minimized,
             focused: window.focused,
-            z_index: window.z_index
+            z_index: window.z_index,
+            chrome_kind: WM_CHROME_KIND_TITLED
         )
     return SharedWmWindow(
         surface_id: window.surface_id,
@@ -138,19 +187,21 @@ fn _project_window(window: ManagedWindow, registry: UiWindowSurfaceRegistry) -> 
         html: window.html,
         minimized: window.minimized,
         focused: window.focused,
-        z_index: window.z_index
+        z_index: window.z_index,
+        chrome_kind: WM_CHROME_KIND_TITLED
     )
 
 fn shared_wm_scene_from_window_manager(manager: WindowManager, registry: UiWindowSurfaceRegistry, width: i32, height: i32) -> SharedWmScene:
     val window_count = manager.windows.len()
+    val default_background = shared_wm_background_color(wm_chrome_theme().compositor_bg)
     if window_count == 0:
-        return SharedWmScene(width: width, height: height, backend: manager.current_backend(), windows: [])
+        return SharedWmScene(width: width, height: height, backend: manager.current_backend(), windows: [], background: default_background)
     var windows: [SharedWmWindow] = []
     var idx = 0
     while idx < window_count:
         windows.push(_project_window(manager.windows[idx], registry))
         idx = idx + 1
-    SharedWmScene(width: width, height: height, backend: manager.current_backend(), windows: windows)
+    SharedWmScene(width: width, height: height, backend: manager.current_backend(), windows: windows, background: default_background)
 
 fn shared_wm_visible_windows(scene: SharedWmScene) -> [SharedWmWindow]:
     var visible_count = 0
@@ -226,7 +277,7 @@ fn shared_wm_drag_window(scene: SharedWmScene, surface_id: text, dx: i32, dy: i3
     val min_y = chrome.content_area.y
     val window_count = scene.windows.len()
     if window_count == 0:
-        return SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: [])
+        return SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: [], background: scene.background)
     var moved: [SharedWmWindow] = []
     var idx = 0
     while idx < window_count:
@@ -249,17 +300,18 @@ fn shared_wm_drag_window(scene: SharedWmScene, surface_id: text, dx: i32, dy: i3
                 html: window.html,
                 minimized: window.minimized,
                 focused: true,
-                z_index: window.z_index
+                z_index: window.z_index,
+                chrome_kind: window.chrome_kind
             ))
         else:
             moved.push(window)
         idx = idx + 1
-    SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: moved)
+    SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: moved, background: scene.background)
 
 fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) -> SharedWmScene:
     val window_count = scene.windows.len()
     if window_count == 0:
-        return SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: [])
+        return SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: [], background: scene.background)
     var focused: [SharedWmWindow] = []
     var idx = 0
     while idx < window_count:
@@ -280,7 +332,8 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
                 html: window.html,
                 minimized: false,
                 focused: true,
-                z_index: window.z_index
+                z_index: window.z_index,
+                chrome_kind: window.chrome_kind
             ))
         else:
             focused.push(SharedWmWindow(
@@ -298,10 +351,11 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
                 html: window.html,
                 minimized: window.minimized,
                 focused: false,
-                z_index: window.z_index
+                z_index: window.z_index,
+                chrome_kind: window.chrome_kind
             ))
         idx = idx + 1
-    SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: focused)
+    SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: focused, background: scene.background)
 
 fn _shared_wm_dispatch_result(action: text, target_id: text, app_id: text, window_id: text, scene: SharedWmScene) -> SharedWmDispatchResult:
     SharedWmDispatchResult(action: action, target_id: target_id, app_id: app_id, window_id: window_id, scene: scene)

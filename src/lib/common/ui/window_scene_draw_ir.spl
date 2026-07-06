@@ -20,8 +20,17 @@ use common.ui.draw_ir.{
     draw_ir_text
 }
 use common.ui.taskbar_model.{TaskbarModel}
-use common.ui.window_scene.{SharedWmScene, SharedWmWindow, shared_wm_scene_chrome, shared_wm_scene_layout_key}
-use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use common.ui.window_scene.{
+    SharedWmScene,
+    SharedWmWindow,
+    SharedWmRect,
+    WM_CHROME_KIND_BORDERLESS,
+    shared_wm_scene_chrome,
+    shared_wm_scene_layout_key,
+    shared_wm_scene_resolve_background
+}
+use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
+use os.compositor.display_backend.{CompositorBackend}
 
 val WM_DRAW_IR_COMPOSITION_ID: text = "wm-composite"
 val WM_DRAW_IR_DESKTOP_SURFACE: text = "wm-desktop"
@@ -239,3 +248,209 @@ fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarMod
             compact_batch_idx = compact_batch_idx + 1
         return draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, shared_wm_scene_layout_key(scene), backend_target, compact_batches)
     draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, shared_wm_scene_layout_key(scene), backend_target, batches)
+
+# =========================================================================
+# Taskbar item geometry (pure math)
+#
+# Single source of truth for taskbar dock/item layout. Historically lived in
+# os.compositor.wm_action_applier; moved here so the backend-neutral
+# SharedWmScene executor below can compute taskbar item bounds without a
+# common.ui -> os dependency. os.compositor.wm_action_applier re-exports
+# these under the same names so its existing callers are unaffected.
+# =========================================================================
+
+fn wm_taskbar_item_width(screen_width: i32, count: i32) -> i32:
+    if count <= 0:
+        return 0
+    val available = screen_width - 80
+    val fit = available / count
+    if fit < 104: fit else: 104
+
+fn wm_taskbar_dock_width(screen_width: i32, count: i32) -> i32:
+    if count <= 0:
+        return 0
+    wm_taskbar_item_width(screen_width, count) * count + 20
+
+fn wm_taskbar_item_x(screen_width: i32, count: i32, index: i32) -> i32:
+    val dock_w = wm_taskbar_dock_width(screen_width, count)
+    val start = (screen_width - dock_w) / 2 + 10
+    start + index * wm_taskbar_item_width(screen_width, count)
+
+# =========================================================================
+# SharedWmScene -> CompositorBackend executor
+#
+# Renders a SharedWmScene (as built by common.ui.window_scene, e.g. via
+# simple_gui_internal_window_scene) directly against a backend-neutral
+# CompositorBackend draw target: desktop/command-lane/taskbar chrome, then
+# each visible window's chrome (titled only; borderless windows render as
+# pure content surfaces per chrome_kind) + app content, then the taskbar
+# item row. os.compositor.shared_mdi_framebuffer_scene.spl is glue: it builds
+# a SharedWmScene and calls shared_wm_scene_render_to_backend — it no longer
+# owns chrome/content/taskbar pixel-drawing logic itself. Both the host WM
+# capture-evidence lane and the SimpleOS QEMU fullscreen lane call that same
+# glue, so they share this exact render model; only backend/config differs.
+# =========================================================================
+
+struct SharedWmSceneRenderStats:
+    content_pixel_count: i64
+
+fn _shared_wm_scene_ascii_codes(value: text) -> [i32]:
+    if value == "Terminal": return [84, 101, 114, 109, 105, 110, 97, 108]
+    if value == "Editor": return [69, 100, 105, 116, 111, 114]
+    if value == "Browser": return [66, 114, 111, 119, 115, 101, 114]
+    if value == "File Manager": return [70, 105, 108, 101, 32, 77, 97, 110, 97, 103, 101, 114]
+    if value == "Calculator": return [67, 97, 108, 99, 117, 108, 97, 116, 111, 114]
+    if value == "X": return [88]
+    if value == "$ simple$ build check --live": return [36, 32, 115, 105, 109, 112, 108, 101, 36, 32, 98, 117, 105, 108, 100, 32, 99, 104, 101, 99, 107, 32, 45, 45, 108, 105, 118, 101]
+    if value == "src/ test/ main.spl": return [115, 114, 99, 47, 32, 116, 101, 115, 116, 47, 32, 109, 97, 105, 110, 46, 115, 112, 108]
+    if value == "SimpleOS shell via Simple Web": return [83, 105, 109, 112, 108, 101, 79, 83, 32, 115, 104, 101, 108, 108, 32, 118, 105, 97, 32, 83, 105, 109, 112, 108, 101, 32, 87, 101, 98]
+    if value == "main.spl": return [109, 97, 105, 110, 46, 115, 112, 108]
+    if value == "fn main():": return [102, 110, 32, 109, 97, 105, 110, 40, 41, 58]
+    if value == "    print Hello SimpleOS": return [32, 32, 32, 32, 112, 114, 105, 110, 116, 32, 72, 101, 108, 108, 111, 32, 83, 105, 109, 112, 108, 101, 79, 83]
+    if value == "# rendered by Simple Web": return [35, 32, 114, 101, 110, 100, 101, 114, 101, 100, 32, 98, 121, 32, 83, 105, 109, 112, 108, 101, 32, 87, 101, 98]
+    if value == "/home/simple": return [47, 104, 111, 109, 101, 47, 115, 105, 109, 112, 108, 101]
+    if value == "Desktop": return [68, 101, 115, 107, 116, 111, 112]
+    if value == "Documents": return [68, 111, 99, 117, 109, 101, 110, 116, 115]
+    if value == "Downloads": return [68, 111, 119, 110, 108, 111, 97, 100, 115]
+    if value == "state: home": return [115, 116, 97, 116, 101, 58, 32, 104, 111, 109, 101]
+    if value == "0": return [48]
+    if value == "7 8 9 /": return [55, 32, 56, 32, 57, 32, 47]
+    if value == "4 5 6 *": return [52, 32, 53, 32, 54, 32, 42]
+    if value == "1 2 3 -": return [49, 32, 50, 32, 51, 32, 45]
+    if value == "about:network": return [97, 98, 111, 117, 116, 58, 110, 101, 116, 119, 111, 114, 107]
+    if value == "Simple Web": return [83, 105, 109, 112, 108, 101, 32, 87, 101, 98]
+    if value == "GET /status 200": return [71, 69, 84, 32, 47, 115, 116, 97, 116, 117, 115, 32, 50, 48, 48]
+    if value == "Simple Web app surface": return [83, 105, 109, 112, 108, 101, 32, 87, 101, 98, 32, 97, 112, 112, 32, 115, 117, 114, 102, 97, 99, 101]
+    []
+
+fn _draw_shared_wm_scene_text_fit(backend: CompositorBackend, x: i32, y: i32, text_value: text, fg: u32, bg: u32, max_chars: i32):
+    val codes = _shared_wm_scene_ascii_codes(text_value)
+    var count = codes.len()
+    if max_chars > 0 and count > max_chars:
+        count = max_chars
+    var i = 0
+    var cx = x
+    while i < count:
+        backend.draw_char_8x16(cx, y, codes[i].to_u8(), fg, bg)
+        cx = cx + 12
+        i = i + 1
+
+fn shared_wm_scene_render_desktop_chrome(backend: CompositorBackend, width: i32, height: i32, theme: WmChromeColors, background_color: u32):
+    backend.clear(background_color)
+    backend.fill_rect(0, 0, width, 44, theme.command_lane)
+    backend.fill_rect(0, 42, width, 2, theme.accent)
+    backend.fill_rect(0, height - 56, width, 56, theme.taskbar)
+    backend.fill_rect(0, height - 56, width, 2, theme.accent)
+
+fn shared_wm_scene_draw_window_chrome(backend: CompositorBackend, window: SharedWmWindow, theme: WmChromeColors):
+    if window.minimized:
+        return
+    val title_color = if window.focused: theme.accent else: theme.title_unfocused
+    backend.fill_rect(window.x + 5, window.y + 6, window.width, window.height, theme.window_shadow)
+    backend.fill_rect(window.x, window.y, window.width, window.height, theme.host_window_body)
+    backend.fill_rect(window.x, window.y, window.width, 28, title_color)
+    backend.fill_rect(window.x + 12, window.y + 9, 10, 10, 0xFFE74C3Cu32)
+    backend.fill_rect(window.x + 30, window.y + 9, 10, 10, 0xFFF1C40Fu32)
+    backend.fill_rect(window.x + 48, window.y + 9, 10, 10, 0xFF27AE60u32)
+    _draw_shared_wm_scene_text_fit(backend, window.x + 66, window.y + 6, window.title, theme.text_primary, title_color, if window.width > 92: (window.width - 92) / 12 else: 0)
+    backend.fill_rect(window.x + window.width - 24, window.y + 2, 20, 20, theme.close_button)
+    _draw_shared_wm_scene_text_fit(backend, window.x + window.width - 18, window.y + 4, "X", theme.text_primary, theme.close_button, 1)
+
+fn shared_wm_scene_render_taskbar(backend: CompositorBackend, windows: [SharedWmWindow], width: i32, height: i32, theme: WmChromeColors):
+    val count = windows.len()
+    if count <= 0:
+        return
+    val dock_w = wm_taskbar_dock_width(width, count)
+    val dock_x = (width - dock_w) / 2
+    val dock_y = height - 62
+    val item_w = wm_taskbar_item_width(width, count)
+    backend.fill_rect(dock_x, dock_y, dock_w, 44, theme.taskbar)
+    var i = 0
+    while i < count:
+        val win = windows[i]
+        val ix = wm_taskbar_item_x(width, count, i)
+        var item_color = theme.title_unfocused
+        if win.focused and not win.minimized:
+            item_color = theme.accent
+        elif win.minimized:
+            item_color = theme.host_window_body
+        backend.fill_rect(ix + 2, dock_y + 4, item_w - 4, 36, item_color)
+        _draw_shared_wm_scene_text_fit(backend, ix + 8, dock_y + 14, win.title, theme.text_primary, item_color, if item_w > 16: (item_w - 16) / 12 else: 0)
+        i = i + 1
+
+fn _shared_wm_scene_content_line(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, line_index: i32, text_value: text, fg: u32, bg: u32):
+    val y = cy + 34 + line_index * 22
+    _draw_shared_wm_scene_text_fit(backend, cx + 10, y, text_value, fg, bg, if cw > 20: (cw - 20) / 12 else: 0)
+
+fn shared_wm_scene_render_app_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
+    if cw <= 0 or ch <= 0:
+        return
+    val bg = 0xFF182230u32
+    val header = 0xFF2050A0u32
+    val text_primary = 0xFFE5E7EBu32
+    val accent = 0xFF2563EBu32
+    val success = 0xFF22C55Eu32
+    val warning = 0xFFF59E0Bu32
+    val muted = 0xFF94A3B8u32
+    backend.fill_rect(cx, cy, cw, ch, bg)
+    backend.fill_rect(cx, cy, cw, 24, header)
+    _draw_shared_wm_scene_text_fit(backend, cx + 8, cy + 4, title, text_primary, header, if cw > 16: (cw - 16) / 12 else: 0)
+    if title == "Terminal":
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "$ " + state_text, success, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 1, "src/ test/ main.spl", accent, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 2, "SimpleOS shell via Simple Web", success, bg)
+        return
+    if title == "Editor" or title == "Hello World":
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "main.spl", muted, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 1, "fn main():", warning, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 2, "    print Hello SimpleOS", accent, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 3, "# rendered by Simple Web", success, bg)
+        return
+    if title == "File Manager" or title == "Finder":
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "/home/simple", accent, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 1, "Desktop", text_primary, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 2, "Documents", text_primary, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 3, "Downloads", text_primary, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 4, "state: " + state_text, muted, bg)
+        return
+    if title == "Calculator":
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "0", accent, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 1, "7 8 9 /", text_primary, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 2, "4 5 6 *", text_primary, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 3, "1 2 3 -", text_primary, bg)
+        return
+    if title == "Browser" or title == "Simple Browser":
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "about:network", accent, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 1, "Simple Web", success, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 2, "GET /status 200", text_primary, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 3, state_text, muted, bg)
+        return
+    _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "Simple Web app surface", text_primary, bg)
+
+fn _shared_wm_scene_window_content_rect(window: SharedWmWindow) -> SharedWmRect:
+    if window.chrome_kind == WM_CHROME_KIND_BORDERLESS:
+        return SharedWmRect(x: window.x, y: window.y, width: window.width, height: window.height)
+    SharedWmRect(x: window.x + 4, y: window.y + 32, width: window.width - 8, height: window.height - 36)
+
+fn _shared_wm_scene_window_content_pixel_count(window: SharedWmWindow) -> i64:
+    if window.minimized:
+        return 0
+    val content = _shared_wm_scene_window_content_rect(window)
+    if content.width > 0 and content.height > 0:
+        return content.width.to_i64() * content.height.to_i64()
+    0
+
+fn shared_wm_scene_render_to_backend(backend: CompositorBackend, scene: SharedWmScene) -> SharedWmSceneRenderStats:
+    val theme = wm_chrome_theme()
+    val resolved_background = shared_wm_scene_resolve_background(scene.background)
+    shared_wm_scene_render_desktop_chrome(backend, scene.width, scene.height, theme, resolved_background.color)
+    var content_pixel_count: i64 = 0
+    for window in scene.windows:
+        if not window.minimized:
+            if window.chrome_kind != WM_CHROME_KIND_BORDERLESS:
+                shared_wm_scene_draw_window_chrome(backend, window, theme)
+            val content = _shared_wm_scene_window_content_rect(window)
+            shared_wm_scene_render_app_content(backend, window.title, content.x, content.y, content.width, content.height, window.html)
+            content_pixel_count = content_pixel_count + _shared_wm_scene_window_content_pixel_count(window)
+    shared_wm_scene_render_taskbar(backend, scene.windows, scene.width, scene.height, theme)
+    SharedWmSceneRenderStats(content_pixel_count: content_pixel_count)

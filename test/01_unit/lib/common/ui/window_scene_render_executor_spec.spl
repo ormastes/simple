@@ -1,0 +1,204 @@
+# @cover src/lib/common/ui/window_scene_draw_ir.spl 80%
+# @tag: unit, ui, wm, executor
+
+"""
+The SharedWmScene -> CompositorBackend executor (common.ui.window_scene_draw_ir)
+renders chrome, content, and taskbar pixels for a scene built by
+common.ui.window_scene, against any backend-neutral CompositorBackend draw
+target. os.compositor.shared_mdi_framebuffer_scene.spl is glue: it builds the
+scene and calls this executor instead of owning pixel-drawing logic itself.
+This spec exercises the executor directly against a minimal in-memory
+CompositorBackend test double, so it stays independent of the heavier
+os.compositor/wm_action_applier dependency graph.
+
+This spec pins three contracts (spec item 5a/5b/5c):
+  - borderless windows (chrome_kind="borderless") render as pure content
+    surfaces with no titlebar chrome pixels, while titled windows keep the
+    title bar band;
+  - the scene background is a resolvable provider: "color" paints the desktop
+    fill, and an unknown/unimplemented kind fails loudly with a marker color
+    instead of silently falling back;
+  - the same SharedWmScene renders identical pixels through the executor
+    regardless of which backend instance (simulating different lane
+    configs) it is rendered into.
+"""
+
+use std.spec.{describe, it, expect, step, assert_not_equal}
+use common.ui.window_scene.{
+    SharedWmScene,
+    SharedWmWindow,
+    WM_CHROME_KIND_TITLED,
+    WM_CHROME_KIND_BORDERLESS,
+    WM_BACKGROUND_KIND_IMAGE,
+    WM_BACKGROUND_UNRESOLVED_MARKER_COLOR,
+    BackgroundSpec,
+    shared_wm_background_color,
+    shared_wm_scene_resolve_background,
+    simple_gui_internal_window_with_chrome_kind,
+    simple_gui_internal_window_scene
+}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_render_to_backend}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+
+# Minimal in-memory CompositorBackend test double (no glyph rasterization, no
+# host/QEMU wiring) — the executor only needs a backend-neutral draw target,
+# so glyph pixels are irrelevant to the chrome/background/parity assertions
+# below and are intentionally left untouched by draw_text/draw_char_8x16.
+class TestPixelBackend:
+    w: i32
+    h: i32
+    pixels: [u32]
+
+    static fn create(width: i32, height: i32, fill: u32) -> TestPixelBackend:
+        val total = if width > 0 and height > 0: width * height else: 0
+        var pixels: [u32] = []
+        var i = 0
+        while i < total:
+            pixels.push(fill)
+            i = i + 1
+        TestPixelBackend(w: width, h: height, pixels: pixels)
+
+impl CompositorBackend for TestPixelBackend:
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        var i = 0
+        while i < self.pixels.len():
+            self.pixels[i] = color
+            i = i + 1
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        var x0 = if x < 0: 0 else: x
+        var y0 = if y < 0: 0 else: y
+        var x1 = x + w
+        var y1 = y + h
+        if x1 > self.w:
+            x1 = self.w
+        if y1 > self.h:
+            y1 = self.h
+        if x1 <= x0 or y1 <= y0:
+            return
+        var yy = y0
+        while yy < y1:
+            var idx = yy * self.w + x0
+            var xx = x0
+            while xx < x1:
+                self.pixels[idx] = color
+                idx = idx + 1
+                xx = xx + 1
+            yy = yy + 1
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        pass_do_nothing
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        pass_do_nothing
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.w or y >= self.h:
+            return
+        val idx = y * self.w + x
+        if idx >= 0 and idx < self.pixels.len():
+            self.pixels[idx] = color
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        pass_do_nothing
+
+    me present():
+        pass_do_nothing
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        pass_do_nothing
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+# Canvases below are kept small (tens of thousands of pixels, not hundreds of
+# thousands) so the whole file's fill_rect work stays fast under the
+# interpreter — the contracts under test (chrome-kind gating, background
+# resolution, lane-independent parity) do not depend on canvas size.
+
+fn _window_with_chrome(chrome_kind: text) -> SharedWmWindow:
+    simple_gui_internal_window_with_chrome_kind(
+        "surf-probe", "win-probe", 1u64, "app.probe", "",
+        10, 10, 100, 70, "", false, false, 0, chrome_kind
+    )
+
+fn _one_window_scene(chrome_kind: text) -> SharedWmScene:
+    simple_gui_internal_window_scene(140, 140, "executor-spec", [_window_with_chrome(chrome_kind)])
+
+describe "SharedWmScene render executor (common.ui.window_scene_draw_ir)":
+
+    it "fills the titlebar band with title chrome for a titled window":
+        step("Render a single titled window through the shared executor")
+        val theme = wm_chrome_theme()
+        val backend = TestPixelBackend.create(140, 140, 0u32)
+        shared_wm_scene_render_to_backend(backend, _one_window_scene(WM_CHROME_KIND_TITLED))
+        step("Sample a pixel inside the window's titlebar band (y in [10,38)), clear of the traffic-light dots and close button")
+        val probe = backend.pixels[20 * 140 + 75]
+        expect(probe).to_equal(theme.title_unfocused)
+
+    it "renders no titlebar chrome pixels in the titlebar band for a borderless window":
+        step("Render the same geometry as a borderless (pure content surface) window")
+        val theme = wm_chrome_theme()
+        val backend = TestPixelBackend.create(140, 140, 0u32)
+        shared_wm_scene_render_to_backend(backend, _one_window_scene(WM_CHROME_KIND_BORDERLESS))
+        step("The same probe pixel must not be titlebar chrome")
+        val probe = backend.pixels[20 * 140 + 75]
+        assert_not_equal(probe, theme.title_unfocused)
+        assert_not_equal(probe, theme.accent)
+
+    it "paints the desktop background from the scene's color BackgroundSpec":
+        step("Build a windowless scene with a custom color BackgroundSpec")
+        val custom_color: u32 = 0xFF112233u32
+        val scene = SharedWmScene(width: 100, height: 150, backend: "executor-spec", windows: [], background: shared_wm_background_color(custom_color))
+        val backend = TestPixelBackend.create(100, 150, 0u32)
+        shared_wm_scene_render_to_backend(backend, scene)
+        step("A desktop-area pixel (outside the fixed command-lane/taskbar bands) is the custom color")
+        val probe = backend.pixels[70 * 100 + 50]
+        expect(probe).to_equal(custom_color)
+
+    it "fails loudly with the unresolved marker color for an unknown background kind":
+        step("Build a BackgroundSpec with the reserved 'image' kind (not yet implemented)")
+        val unresolved = BackgroundSpec(kind: WM_BACKGROUND_KIND_IMAGE, color: 0xFF00FF00u32, source: "")
+        step("shared_wm_scene_resolve_background reports resolved=false with a loud marker, not the requested color")
+        val resolution = shared_wm_scene_resolve_background(unresolved)
+        expect(resolution.resolved).to_equal(false)
+        expect(resolution.color).to_equal(WM_BACKGROUND_UNRESOLVED_MARKER_COLOR)
+        expect(resolution.error_message).to_contain("unsupported background kind")
+        step("The executor paints the same loud marker color, never silently falling back to the requested color")
+        val scene = SharedWmScene(width: 100, height: 150, backend: "executor-spec", windows: [], background: unresolved)
+        val backend = TestPixelBackend.create(100, 150, 0u32)
+        shared_wm_scene_render_to_backend(backend, scene)
+        val probe = backend.pixels[70 * 100 + 50]
+        expect(probe).to_equal(WM_BACKGROUND_UNRESOLVED_MARKER_COLOR)
+        assert_not_equal(probe, unresolved.color)
+
+    it "renders identical pixels for the same scene regardless of lane/backend config":
+        step("Build one scene with a titled and a borderless window")
+        val windows = [
+            _window_with_chrome(WM_CHROME_KIND_TITLED),
+            simple_gui_internal_window_with_chrome_kind("surf-2", "win-2", 2u64, "app.two", "", 90, 15, 55, 45, "", false, true, 1, WM_CHROME_KIND_BORDERLESS)
+        ]
+        val scene = simple_gui_internal_window_scene(160, 120, "lane-a", windows)
+        val scene_lane_b = SharedWmScene(width: scene.width, height: scene.height, backend: "lane-b", windows: scene.windows, background: scene.background)
+        step("Render into two independently-created backends with different initial fills (simulating different lane configs)")
+        val backend_a = TestPixelBackend.create(160, 120, 0xFF000000u32)
+        val backend_b = TestPixelBackend.create(160, 120, 0xFFFFFFFFu32)
+        shared_wm_scene_render_to_backend(backend_a, scene)
+        shared_wm_scene_render_to_backend(backend_b, scene_lane_b)
+        step("Pixel arrays are byte-for-byte identical: only the scene, not the lane, drives pixels")
+        expect(backend_a.pixels.len()).to_equal(backend_b.pixels.len())
+        var i = 0
+        var mismatch = false
+        while i < backend_a.pixels.len():
+            if backend_a.pixels[i] != backend_b.pixels[i]:
+                mismatch = true
+            i = i + 1
+        expect(mismatch).to_equal(false)

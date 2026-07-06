@@ -356,6 +356,39 @@ Hard-won lessons for this live lane (each cost hours):
   stdlib module, and for the general interpret-mode-extern /
   baked-module-table constraints behind it.
 
+- **Common.ui window-scene render executor is now the single render funnel
+  for host + SimpleOS internal windows (task #27):**
+  `src/lib/common/ui/window_scene.spl` gained a `shared_wm_scene_render_to_backend`
+  executor path (backed by the Draw IR builder in
+  `src/lib/common/ui/window_scene_draw_ir.spl`) that both the host compositor
+  lane (`os.compositor.host_compositor_entry`, via the
+  `shared_mdi_scene_from_render_windows` /
+  `shared_mdi_render_windows_from_simple_gui_scene` bridge functions in
+  `src/os/compositor/shared_mdi_framebuffer_scene.spl`) and SimpleOS's
+  internal-window rendering now funnel through, instead of each lane building
+  its own titlebar/background paint logic. Per-window `chrome_kind` is
+  `"titled"` (default, paints the titlebar band) or `"borderless"` (no
+  titlebar chrome pixels — for taskbar-like or frameless windows). Background
+  painting goes through a `BackgroundSpec` provider: `kind: "color"` is
+  implemented today; `"image"` / `"motion"` are reserved for later and any
+  unrecognized kind fails loudly by painting the `0xFFFF00FF` marker color
+  rather than silently falling back — this is intentional, not a bug, so
+  don't "fix" it by adding a silent default. Gate coverage:
+  `test/01_unit/lib/common/ui/window_scene_render_executor_spec.spl` (5/5,
+  titled-chrome / borderless-no-chrome / color-background /
+  unknown-kind-marker / cross-lane pixel-identity cases),
+  `test/01_unit/os/compositor/shared_mdi_framebuffer_scene_spec.spl` (7/7),
+  `test/01_unit/lib/common/ui/window_scene_draw_ir_layer_order_spec.spl`
+  (2/2), and `test/03_system/check/shared_wm_renderer_unification_simple_bin_spec.spl`
+  (5/5 — this spec asserts the three bridge-function symbols exist by name,
+  so don't rename them without updating it).
+  **Pre-existing, not touched by this landing:** `bin/simple check` on
+  `window_scene_draw_ir.spl` still fails on `[x; count]` array-repeat literal
+  syntax (parser gap; same failure on a clean checkout before this patch;
+  also feeds bug #21). The QEMU visible-display gate still faults identically
+  in the guest on a clean HEAD (freestanding module-init blocker, unrelated
+  to this feature).
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,
