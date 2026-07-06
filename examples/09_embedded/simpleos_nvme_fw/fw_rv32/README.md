@@ -66,7 +66,7 @@ freestanding runtime. The full 22-module no-alloc port of `../fw/` remains the l
 Tracked:
 `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
 
-## Current blocker (2026-07-05): self-hosted build timeout and reactor runtime stop
+## Current blocker (2026-07-06): self-hosted build timeout and live baremetal logic mismatch
 
 `NVME_RV32_BUILD_TIMEOUT_SECS=60 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`
 currently exits `124` before producing `build/nvme_fw_rv32.elf`, so the QEMU
@@ -77,8 +77,9 @@ silent-255 bug:
 The wrapper defaults to `bin/simple`; set `NVME_RV32_SIMPLE_BIN` only for an
 explicit diagnostic compiler comparison.
 
-Diagnostic seed builds now root the firmware hook correctly: `llvm-nm` shows a
-strong `rt_rv32_boot_optional_nvme_fw_selftest`, and QEMU prints
-`RV32 NVME FW BEGIN`. The baremetal run then reaches progress markers through
-admin (`R E J M B S P H Q I F A`) and stops before reactor marker `C`, so the
-remaining firmware runtime blocker is `rv32_reactor_selftest()` on rv32.
+Diagnostic seed builds now produce `build/nvme_fw_rv32.elf` through the
+generated root, symlinked logic modules, and byte-wise UART output. QEMU reaches
+the firmware logic and fails closed with section mask `EJMBSPHQIFACTDWLYKGN`,
+while host `logic_check.spl` still prints `RV32 NVME FW LOGIC OK`. The remaining
+runtime blocker is a live rv32 baremetal logic/runtime mismatch, not wrapper
+coverage or RV64 self-test plumbing.

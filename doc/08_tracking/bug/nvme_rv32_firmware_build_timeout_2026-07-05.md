@@ -484,3 +484,43 @@ marker now reaches beyond `logic_power_cycle.spl` and starts
 [BOOTSTRAP-PHASE] phase2:parse:entry:done examples/.../logic_power_cycle.spl
 [BOOTSTRAP-PHASE] phase2:parse:entry examples/.../logic_backpressure_abort.spl
 ```
+
+### Diagnostic root made deterministic; live boot still fails closed (2026-07-06)
+
+The RV32 wrapper now generates a root-level `build/os/generated/nvme_fw_boot_root.spl`,
+symlinks the `fw_rv32/logic*.spl` modules into that generated source root, avoids
+freestanding `char_code`, and calls the actual generated `nvme_fw_boot_root__boot_main`
+symbol from `_start`. This removes stale generated-module dependence and lets the
+diagnostic seed build link again:
+
+```sh
+NVME_RV32_SIMPLE_BIN=src/compiler_rust/target/bootstrap/simple \
+NVME_RV32_BUILD_TIMEOUT_SECS=90 \
+sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+# build/nvme_fw_rv32.elf produced
+```
+
+The production default still uses `bin/simple` and remains covered by the
+self-hosted native-build timeout above. The seed-built ELF is diagnostic only.
+
+QEMU now reaches the generated firmware root and fails closed with a broad section
+mask instead of hanging at the previous stale reactor note:
+
+```text
+SimpleOS RV32
+[BOOT] boot complete
+EJMBSPHQIFACTDWLYKGN
+RV32 NVME FW FAIL
+```
+
+Host logic still passes:
+
+```sh
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+# RV32 NVME FW LOGIC OK
+```
+
+So the remaining live evidence gap is two-part: the production self-hosted build
+still times out before producing media, and the diagnostic media exposes a live
+rv32 baremetal logic/runtime mismatch. Do not fake the PASS marker or switch the
+wrapper default to the seed.
