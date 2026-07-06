@@ -161,7 +161,7 @@ impl ImageBuilder:
         write_text(manifest_path, deploy_manifest)
         write_text(_sidecar_manifest_path(self.config.output_path), deploy_manifest)
 
-        val artifact_result = self._materialize_primary_artifact(rootfs_root, manifest_path)
+        val artifact_result = self._materialize_primary_artifact(manifest_path)
         if val Err(e) = artifact_result:
             return Result.Err(e)
 
@@ -341,11 +341,11 @@ impl ImageBuilder:
         manifest = manifest + _manifest_file("/var/db/pkg/installed/{pkg.base.name}.sdn", "pkg-db", pkg.base.name)
         manifest
 
-    fn _materialize_primary_artifact(rootfs_root: text, manifest_path: text) -> Result<bool, text>:
+    fn _materialize_primary_artifact(manifest_path: text) -> Result<bool, text>:
         if self.config.arch == PkgArch.X86_64 and not self.config.include_installer:
             val args = [
                 "-c",
-                _make_os_disk_command(self.config, rootfs_root)
+                _make_os_disk_command(self.config)
             ]
             val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", args, 120000)
             if stdout != "":
@@ -487,7 +487,10 @@ fn run_image_builder(args: [text]) -> i32:
     var arch_str = "x86_64"
     var output = "simpleos.img"
     var size_mb: u64 = DEFAULT_IMAGE_SIZE_MB
-    var kernel = ""
+    # NOTE: local must not be named `kernel` — a local shadowed by the
+    # `os.kernel` module name fails HIR lowering / interp semantic analysis.
+    # See doc/08_tracking/bug/local_var_kernel_shadowed_by_module_2026-07-06.md
+    var kernel_elf = ""
     var packages = ""
     var simple_binary = ""
     var installer = false
@@ -503,7 +506,7 @@ fn run_image_builder(args: [text]) -> i32:
         else if arg.starts_with("--size="):
             size_mb = arg.slice(7, arg.len()).to_u64()
         else if arg.starts_with("--kernel="):
-            kernel = arg.slice(9, arg.len())
+            kernel_elf = arg.slice(9, arg.len())
         else if arg.starts_with("--packages="):
             packages = arg.slice(11, arg.len())
         else if arg.starts_with("--simple-binary="):
@@ -525,7 +528,7 @@ fn run_image_builder(args: [text]) -> i32:
             arch: arch,
             output_path: output,
             image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
-            kernel_path: kernel,
+            kernel_path: kernel_elf,
             bootloader_config: _installer_bootloader_config(arch),
             package_dir: packages,
             simple_binary: simple_binary,
@@ -538,7 +541,7 @@ fn run_image_builder(args: [text]) -> i32:
             arch: arch,
             output_path: output,
             image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
-            kernel_path: kernel,
+            kernel_path: kernel_elf,
             bootloader_config: "",
             package_dir: packages,
             simple_binary: simple_binary,
@@ -862,7 +865,11 @@ fn detect_iso_tool() -> text:
 fn _shell_quote(value: text) -> text:
     "'" + value.replace("'", "'\\''") + "'"
 
-fn _make_os_disk_command(config: ImageConfig, rootfs_root: text) -> text:
+# make_os_disk.shs argv: SIZE_BITS IMAGE [KERNEL] [PLATFORM]. The KERNEL slot
+# must be the host kernel ELF path (may be empty -> missing-kernel marker);
+# passing a directory there makes make_os_disk die("file read failed") and
+# forces the descriptor fallback.
+fn _make_os_disk_command(config: ImageConfig) -> text:
     val simple_binary = _effective_simple_binary(config)
     var command = ""
     if simple_binary != "":
@@ -870,7 +877,7 @@ fn _make_os_disk_command(config: ImageConfig, rootfs_root: text) -> text:
     command = command + "sh scripts/os/make_os_disk.shs "
     command = command + _shell_quote(config.image_size_mb.to_text()) + " "
     command = command + _shell_quote(config.output_path) + " "
-    command = command + _shell_quote(rootfs_root) + " "
+    command = command + _shell_quote(config.kernel_path) + " "
     command + "x86_64"
 
 fn _kernel_payload(kernel_path: text, arch: PkgArch) -> text:
