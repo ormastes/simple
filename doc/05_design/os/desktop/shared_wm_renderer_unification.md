@@ -150,10 +150,17 @@ backend configuration.
 methods into shared WM lifecycle actions, `deliver_pointer_move(...)` and
 `deliver_left_button(...)` use the same pointer helpers, and
 `render_framebuffer_frame(...)` presents through the shared host compositor
-render path. The x86_64 QEMU evidence entry currently bypasses that wrapper and
-uses `shared_mdi_framebuffer_scene.spl` plus `wm_lifecycle_pointer_move(...)`
-and `wm_lifecycle_left_button(...)` directly; that is the remaining adapter
-shape divergence to close if QEMU should exercise the identical adapter object.
+render path. The x86_64 QEMU evidence entry is deliberately thinner than that
+host-side wrapper because the baremetal lane has no host window/event loop, but
+it still enters the same Simple GUI internal-window scene before framebuffer
+drawing: lifecycle windows are converted by
+`render_shared_mdi_framebuffer_scene_for_lifecycle_windows(...)` to render
+windows, then to `simple_gui_internal_window_scene(...)` through
+`render_shared_mdi_framebuffer_scene_for_windows(...)` and
+`render_shared_mdi_framebuffer_scene_for_simple_gui_scene(...)`. This is the
+required shared rendering contract; host and SimpleOS may differ in adapter
+effects and backend configuration, not in WM policy or internal-window scene
+shape.
 
 ## Baremetal Overlay Design Boundary
 
