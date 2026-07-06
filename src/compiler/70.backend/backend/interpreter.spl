@@ -331,6 +331,44 @@ impl InterpreterBackendImpl:
                     values = values.push(v)
                 Ok(Value.Tuple(values))
 
+            case HirExprKind.Index(base, index):
+                itrace("[EE] Index arm")
+                # Task #112 (class-in-array): reading a CLASS element out of an
+                # array yields the element's `Value.Object(handle)` verbatim.
+                # Copying the int handle aliases the one shared ObjectStore record
+                # (see objects.spl / env.spl), so a later `arr[i].f = v` or an
+                # alias var's field mutation is observed through every holder —
+                # reference semantics. The array itself keeps value semantics;
+                # only the CLASS element shares (STRUCT elements stay inline value
+                # copies). Without this arm `arr[0]` fell through to the catch-all
+                # `not_implemented`, so the whole class-in-array repro could not run
+                # on the interpret-mode engine (CompileMode.Interpret ->
+                # InterpreterBackendImpl, driver_types.spl).
+                #
+                # Typed rebinds: `base`/`index` erase to ANY on stage4; passing an
+                # ANY receiver straight to eval_expr misreads its kind (iters 9/18).
+                val idx_base_e: HirExpr = base
+                val idx_key_e: HirExpr = index
+                val idx_base_v = self.eval_expr(idx_base_e, ctx)?
+                val idx_key_v = self.eval_expr(idx_key_e, ctx)?
+                match idx_base_v:
+                    case Value.Array(arr_elems):
+                        val ae: [Value] = arr_elems
+                        match idx_key_v:
+                            case Value.Int(iv):
+                                if iv < 0 or iv >= ae.len():
+                                    Err(BackendError.runtime_error("array index out of bounds", Some(expr.span)))
+                                else:
+                                    Ok(ae[iv])
+                            case _:
+                                Err(BackendError.type_error("array index must be an integer", Some(expr.span)))
+                    # ponytail: only Array indexing is needed for the #112
+                    # class-in-array repro. Dict/Tuple/string indexing and
+                    # Index-as-assignment-target (`arr[i] = v`) are intentionally
+                    # left out until a concrete case needs them.
+                    case _:
+                        Err(BackendError.type_error("indexing requires an array", Some(expr.span)))
+
             case HirExprKind.DictLit(entries, _, _):
                 itrace("[EE] DictLit arm")
                 var dict: Dict<text, Value> = {}
