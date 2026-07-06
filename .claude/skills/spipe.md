@@ -574,6 +574,28 @@ spec must not paper over:
 - HTML/CSS Draw-IR boxes now render borders/gradients/radius/shadow (not flat
   fill); `<img>` remains blocked (`engine2d_draw_ir_image_path_no_resolver_2026-07-06`).
 
+### Backend isolation in UI specs (2026-07-06)
+
+Specs for **app-level** UI behavior must drive a **facade**, never a backend or
+`rt_*` extern directly — the spec exercises the same isolated path the app ships:
+
+- 2D: `Engine2D.create_requested_backend(w,h,name)`; HTML→pixels:
+  `web_render_backend(name,w,h).render_html_to_pixels(html)` (`name` =
+  `pure_simple`|`chromium`); windows/sessions: `GuiRenderer` once it lands
+  (P3 Gap A). Never construct `MetalBackend`/`SoftwareBackend`… or call
+  `simple_web_engine2d_render_html_pixels`/`simple_web_layout_render_html_*`
+  from a spec that stands in for app code.
+- Parity/readback specs assert **provenance**, not just pixels — check the
+  `ReadbackSource`/backend name the facade reports (e.g. metal vs software) so a
+  silent software fallback (MEMORY 06-10) fails the spec instead of green-washing.
+  Equality-to-CPU-oracle alone is a same-path tautology; see § "Equality is not
+  correctness".
+- Backend-engine or `rt_*` calls belong only in `src/lib/**/gpu/**` and the
+  designated `io`/`ffi` facades. A spec that must touch those directly is a
+  backend/library spec, not an app spec — place it accordingly.
+- Full rules, allowlist, per-lane call patterns, and the source-contract gate:
+  [`doc/07_guide/ui/rendering/backend_isolation_guide.md`](../../doc/07_guide/ui/rendering/backend_isolation_guide.md).
+
 ## Startup-Sensitive Specs
 
 If a SPipe change touches `simple run`, direct file argv parsing,

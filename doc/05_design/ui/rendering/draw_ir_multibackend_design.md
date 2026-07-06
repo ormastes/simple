@@ -515,3 +515,74 @@ CPU↔GPU, MEMORY 06-03), **metal readback** falling back to software silently (
 06-06), plus the newly-filed **honesty & coherence debt** (research §9): live WebGPU dishonesty,
 Intel/OpenGL vaporware, the `cpu_simd` bare alias, orphaned fabricated-FFI files, the
 `RenderBackend` naming collision, and the dead facade branch / dual selection paths.
+
+---
+
+## Layering: app-level backend isolation (2026-07-06)
+
+This design governs Engine2D's *internal* multi-backend dispatch. A companion effort governs the
+*external* boundary — that apps reach any renderer only through a named facade, never a backend or
+`rt_*` extern directly. Full spec: plan
+[`doc/03_plan/ui/rendering/backend_isolation_plan.md`](../../../03_plan/ui/rendering/backend_isolation_plan.md),
+architecture
+[`doc/04_architecture/ui/rendering/backend_isolation_architecture.md`](../../../04_architecture/ui/rendering/backend_isolation_architecture.md),
+dev guide
+[`doc/07_guide/ui/rendering/backend_isolation_guide.md`](../../../07_guide/ui/rendering/backend_isolation_guide.md).
+
+### Rule
+
+Apps, examples, and UI libraries call **only facades**; a facade may compose down onto Engine2D
+(this design). Only backend implementations (`src/lib/**/gpu/**`) and the designated `io`/`ffi`
+facades may declare or call `rt_*` externs. `extern rt_*` in `src/app/**` (outside
+`src/app/interpreter/ffi`) or an unwrapped `simple_web_*` backend-engine call is a violation.
+
+### Three facades, one shape
+
+| Facade | Engines (by name) | Core engine resolves to |
+|---|---|---|
+| `Simple2D` (`Engine2D`) | metal · vulkan · directx · software · cpu_simd · … | *is* the reference oracle in this design |
+| `WebRenderer` (`WebRenderBackend`) | chromium · pure_simple | `pure_simple` → Engine2D (`create_requested_backend`) |
+| `GuiRenderer` (P3 gap — not built) | electron · gui_renderer_core | `gui_renderer_core` → native `CompositorBackend`/`hosted_entry` |
+
+`WebRenderer.pure_simple` and `GuiRenderer.gui_renderer_core` **compose onto** the Simple2D / native
+core — they do not duplicate a renderer. This is the "do not reinvent the GUI" invariant applied to
+the facade layer.
+
+### Allowlist (dirs where `rt_*` / backend-engine calls are legitimate)
+
+```
+src/lib/**/gpu/**   src/lib/**/io/**   src/lib/nogc_sync_mut/**
+src/app/interpreter/ffi/**   src/os/compositor/**   src/os/hosted/**
+```
+
+Everything else under `src/app/**` and all of `examples/**` is forbidden. Enforced by
+`scripts/check/check-backend-isolation-source-contract.shs` (plan P2), modeled on
+`check-shared-wm-renderer-unification-evidence.shs`.
+
+### Rationale
+
+Splitting *what to draw* (app), *which engine* (facade name), and *how it reaches hardware*
+(backend + `rt_*`) lets this design evolve Engine2D's backend roster and the dual-selection collapse
+(D2) without touching a single app call site, and lets chrome/electron engines be selected by name
+without an app learning a second API. It also makes the seam gate-able by a source-contract grep
+rather than a bitmap diff.
+
+### Perf non-regression anchors (facade must route *through*, never around)
+
+The facade boundary is a naming boundary, not a data-copy boundary. These backend-internal fast
+paths from this design are reached unchanged through the facades:
+
+- Metal no-mirror fast path: `Engine2D.create_with_backend_fast` (`engine.spl:156`) →
+  `MetalBackend.use_gpu_only()` (`backend_metal.spl:492`) — a facade must not downgrade the metal
+  case to `create_with_backend`.
+- Batched Metal buffer FFI: `rt_metal_buffer_upload/_download/set_bytes`
+  (`backend_metal_runtime_ops.spl:2-4`) — one FFI shot per frame.
+- NEON/SSE2 row kernels: `simd_fill_row` (`simd_kernels.spl:11`) →
+  `fill_row_neon`/`copy_row_neon` (`engine2d_simd_ops.rs:95,161`).
+- Browser pixel cache: `WebRenderPixelArtifactCache` (`web_render_pixel_backend.spl:111`) →
+  `SimpleWebEngine2DStaticPixelCache.pixels_for_html` (`simple_web_engine2d_renderer.spl:66`) —
+  `BrowserBackend.render_frame` calls the cache first (`backend.spl:561`).
+
+The `SimpleWebHeuristicSurface` micro-fast-path (`simple_web_engine2d_renderer.spl:808`) is a known
+intentional Engine2D bypass in the backend layer; the isolation lint special-cases it (it is not an
+app-layer violation).
