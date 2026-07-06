@@ -48,6 +48,8 @@ ppm_unique_colors=0
 ppm_taskbar_item_colored_pixels=0
 ppm_taskbar_item_runs=0
 ppm_taskbar_sampled_item_regions=0
+ppm_readable_text_matches=0
+ppm_readable_text_expected=0
 ppm_sha256=
 marker_state="probe:false web:false backend:false present:false mdi:false windows:false top:false taskbar:false html:false render:false"
 qemu_command=
@@ -228,6 +230,8 @@ write_outputs() {
         echo "simpleos_wm_visible_display_ppm_taskbar_item_colored_pixels=$ppm_taskbar_item_colored_pixels"
         echo "simpleos_wm_visible_display_ppm_taskbar_item_runs=$ppm_taskbar_item_runs"
         echo "simpleos_wm_visible_display_ppm_taskbar_sampled_item_regions=$ppm_taskbar_sampled_item_regions"
+        echo "simpleos_wm_visible_display_ppm_readable_text_matches=$ppm_readable_text_matches"
+        echo "simpleos_wm_visible_display_ppm_readable_text_expected=$ppm_readable_text_expected"
         echo "simpleos_wm_visible_display_ppm_sha256=$ppm_sha256"
         echo "simpleos_wm_visible_display_cleanup_status=$cleanup_status"
         echo "simpleos_wm_visible_display_cleanup_reason=$cleanup_reason"
@@ -255,6 +259,7 @@ write_outputs() {
         echo "- PPM validation: $ppm_validation_status ($ppm_validation_reason)"
         echo "- PPM: $PPM_PATH ${ppm_width}x${ppm_height}, nonblack=$ppm_nonblack_pixels, unique_colors=$ppm_unique_colors"
         echo "- taskbar/item pixels: colored=$ppm_taskbar_item_colored_pixels, runs=$ppm_taskbar_item_runs, sampled_regions=$ppm_taskbar_sampled_item_regions"
+        echo "- readable text glyph matches: $ppm_readable_text_matches / $ppm_readable_text_expected"
         echo "- cleanup: $cleanup_status ($cleanup_reason; qemu=$cleanup_qemu_process, qmp_socket=$cleanup_qmp_socket)"
         echo "- serial log: $SERIAL_LOG"
         echo "- QEMU stderr: $QEMU_STDERR_LOG"
@@ -551,6 +556,74 @@ def parse_ppm(path):
 def near(rgb, target, tol=10):
     return all(abs(rgb[i] - target[i]) <= tol for i in range(3))
 
+FONT_ROWS_PACKED = [
+    18842895918, 32801094206, 15620129326, 32801080894, 33840200223, 17734072863, 15621407278, 18842451505,
+    15170932878, 13507823687, 18879369809, 33840185872, 18842572657, 18842507057, 15621211694, 17734518334,
+    14585218606, 18879563326, 32247333391, 4433514655, 15621211697, 4648912433, 19182306865, 18593485137,
+    4433514833, 33831389247, 15629733422, 15170933124, 33831454254, 15604060255, 2247698626, 15603923487,
+    15621636358, 8866891839, 15621113390, 12953568814, 0, 4294967296, 8724152320, 134217856,
+    8724152448, 4295102596, 4299295278, 1015808, 33285996544, 2290360450, 8726317192, 15309480206,
+    15101659214, 17456826433, 1143087376, 8324, 10570, 139432064, 32537600, 368389098,
+    120853337, 455782988, 487282222, 5014436516, 2290622594, 8726284424, 521635264, 1025047056,
+    487080384, 521714721, 487572928, 277117190, 471320032, 588839440, 474099716, 421599234,
+    625758800, 474091660, 588961600, 588826560, 488162752, 554649536, 35112416, 554197696,
+    1008157152, 211035080, 456705568, 145278496, 358270496, 581052960, 471320096, 1048710112,
+]
+
+def glyph_index_for_code(code):
+    if 65 <= code <= 90:
+        return code - 65
+    if 48 <= code <= 57:
+        return 26 + (code - 48)
+    mapping = {32: 36, 46: 37, 44: 38, 58: 39, 59: 40, 33: 41, 63: 42, 45: 43,
+               95: 44, 40: 45, 41: 46, 91: 47, 93: 48, 47: 49, 92: 50,
+               39: 51, 34: 52, 43: 53, 61: 54, 35: 55, 37: 56, 38: 57,
+               64: 58, 42: 59, 60: 60, 62: 61}
+    if code in mapping:
+        return mapping[code]
+    if 97 <= code <= 122:
+        return 62 + (code - 97)
+    return -1
+
+def glyph_row_bits(gi, row):
+    packed = FONT_ROWS_PACKED[gi] if 0 <= gi < len(FONT_ROWS_PACKED) else 33874822719
+    return (packed >> (row * 5)) & 31
+
+def is_bright_text(rgb):
+    return rgb[0] > 210 and rgb[1] > 210 and rgb[2] > 210
+
+def rgb_at(pix, width, height, x, y):
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return (0, 0, 0)
+    off = (y * width + x) * 3
+    return (pix[off], pix[off + 1], pix[off + 2])
+
+def count_expected_title_glyph_matches(pix, width, height):
+    title_runs = [
+        (58 + 66, 76 + 6, "Terminal"),
+        (276 + 66, 120 + 6, "Editor"),
+        (150 + 66, 256 + 6, "Browser"),
+        (486 + 66, 250 + 6, "File Manager"),
+        (642 + 66, 82 + 6, "Calculator"),
+    ]
+    expected = 0
+    matches = 0
+    for base_x, base_y, text in title_runs:
+        cx = base_x
+        for ch in text:
+            gi = glyph_index_for_code(ord(ch))
+            for row in range(7):
+                bits = glyph_row_bits(gi, row)
+                for col in range(5):
+                    if bits & (1 << (4 - col)):
+                        for dy in range(2):
+                            for dx in range(2):
+                                expected += 1
+                                if is_bright_text(rgb_at(pix, width, height, cx + col * 2 + dx, base_y + row * 2 + 1 + dy)):
+                                    matches += 1
+            cx += 12
+    return matches, expected
+
 def validate_ppm(path):
     width, height, pix, sha = parse_ppm(path)
     total = width * height
@@ -617,6 +690,7 @@ def validate_ppm(path):
                         colored += 1
             if colored >= max(32, area // 5):
                 sampled_regions += 1
+    text_matches, text_expected = count_expected_title_glyph_matches(pix, width, height)
 
     reasons = []
     if width < 320 or height < 200:
@@ -631,6 +705,8 @@ def validate_ppm(path):
         reasons.append("taskbar-item-colored-pixels-missing")
     if sampled_regions < 3 and runs < 3:
         reasons.append("taskbar-item-runs-missing")
+    if text_expected < 200 or text_matches * 100 < text_expected * 60:
+        reasons.append("readable-title-glyphs-missing")
 
     emit("ppm_width", width)
     emit("ppm_height", height)
@@ -640,6 +716,8 @@ def validate_ppm(path):
     emit("ppm_taskbar_item_colored_pixels", item_pixels)
     emit("ppm_taskbar_item_runs", runs)
     emit("ppm_taskbar_sampled_item_regions", sampled_regions)
+    emit("ppm_readable_text_matches", text_matches)
+    emit("ppm_readable_text_expected", text_expected)
     emit("ppm_sha256", sha)
     if reasons:
         emit("ppm_validation_status", "fail")

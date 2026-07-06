@@ -3,9 +3,9 @@
 - date: 2026-07-06
 - status: pass
 - reason: pass
-- Simple binary: /Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple
+- Simple binary: bin/simple
 - Simple binary resolved: /Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple
-- no Rust seed fallback: pass (selected-simple-binary-not-under-src-compiler-rust; source=repo-self-hosted:/Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple; status=pass)
+- no Rust seed fallback: pass (selected-simple-binary-not-under-src-compiler-rust; source=explicit-env; status=pass)
 - display backend: cocoa (macos-cocoa-preferred)
 - real display surface: pass (real-display-backend-cocoa)
 - kernel: build/os/simpleos_wm_simple_web_check_32.elf
@@ -14,9 +14,9 @@
 - marker state: probe:true web:true backend:true present:true mdi:true windows:true top:true taskbar:true html:true render:true
 - QMP capture: pass (pass; method=human-monitor-command)
 - PPM validation: pass (pass)
-- PPM: build/simpleos_wm_visible_display_evidence/qmp-visible-display.ppm 1024x768, nonblack=778426, unique_colors=20
-- taskbar/item pixels: colored=18312, runs=7, sampled_regions=5
+- PPM: build/simpleos_wm_visible_display_goal_20260706_knowncodes/qmp-visible-display.ppm 1024x768, nonblack=778810, unique_colors=20
+- taskbar/item pixels: colored=17388, runs=7, sampled_regions=5
 - cleanup: pass (pass; qemu=terminated, qmp_socket=absent)
-- serial log: build/simpleos_wm_visible_display_evidence/serial.log
-- QEMU stderr: build/simpleos_wm_visible_display_evidence/qemu.stderr.log
-- command: `qemu-system-x86_64 -no-user-config -monitor none -net none -machine q35 -cpu qemu64 -m 2G -serial file:build/simpleos_wm_visible_display_evidence/serial.log -display cocoa -no-reboot -kernel build/os/simpleos_wm_simple_web_check_32.elf -vga std -device isa-debug-exit,iobase=0xf4,iosize=0x04 -qmp unix:/tmp/simpleos_wm_visible_25273_qmp.sock,server,nowait`
+- serial log: build/simpleos_wm_visible_display_goal_20260706_knowncodes/serial.log
+- QEMU stderr: build/simpleos_wm_visible_display_goal_20260706_knowncodes/qemu.stderr.log
+- command: `qemu-system-x86_64 -no-user-config -monitor none -net none -machine q35 -cpu qemu64 -m 2G -serial file:build/simpleos_wm_visible_display_goal_20260706_knowncodes/serial.log -display cocoa -no-reboot -kernel build/os/simpleos_wm_simple_web_check_32.elf -vga std -device isa-debug-exit,iobase=0xf4,iosize=0x04 -qmp unix:/tmp/simpleos_wm_visible_9433_qmp.sock,server,nowait`

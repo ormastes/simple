@@ -1,8 +1,7 @@
 # Deterministic first-frame capture for the shared hosted WM renderer.
 
 use os.compositor.backend_evidence.{GuiBackendEvidence, make_gui_backend_evidence}
-use os.compositor.shared_mdi_setup.{shared_mdi_surfaces}
-use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
+use os.compositor.shared_mdi_framebuffer_scene.{render_shared_mdi_framebuffer_scene}
 
 extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 extern fn rt_env_get(key: text) -> text?
@@ -14,89 +13,6 @@ val HOSTED_WM_CROP_Y: i32 = 68
 val HOSTED_WM_CROP_WIDTH: i32 = 270
 val HOSTED_WM_CROP_HEIGHT: i32 = 150
 val HOSTED_WM_BACKGROUND: u32 = 0xFF0F172Au32
-val HOSTED_WEB_RENDER_TARGET_SIMPLE_WEB: text = "simple_web"
-
-class HostedWebRenderRequest:
-    target: text
-    title: text
-    body_html: text
-    css: text
-    viewport_w: i32
-    viewport_h: i32
-    wants_pixels: bool
-
-    me with_pixel_output() -> HostedWebRenderRequest:
-        HostedWebRenderRequest(
-            target: self.target,
-            title: self.title,
-            body_html: self.body_html,
-            css: self.css,
-            viewport_w: self.viewport_w,
-            viewport_h: self.viewport_h,
-            wants_pixels: true
-        )
-
-class HostedCaptureFramebuffer:
-    width: i32
-    height: i32
-    pixels: [u32]
-
-    static fn with_color(width: i32, height: i32, color: u32) -> HostedCaptureFramebuffer:
-        var pixels: [u32] = []
-        var i: i32 = 0
-        while i < width * height:
-            pixels.push(color)
-            i = i + 1
-        HostedCaptureFramebuffer(width: width, height: height, pixels: pixels)
-
-    me put_pixel(x: i32, y: i32, color: u32):
-        if x < 0 or y < 0 or x >= self.width or y >= self.height:
-            return
-        self.pixels[y * self.width + x] = color
-
-    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
-        var row: i32 = 0
-        while row < h:
-            var col: i32 = 0
-            while col < w:
-                self.put_pixel(x + col, y + row, color)
-                col = col + 1
-            row = row + 1
-
-    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
-        val glyph = get_glyph_8x16(ch)
-        var row: i32 = 0
-        while row < 16:
-            val bits = glyph[row]
-            var col: i32 = 0
-            while col < 8:
-                val mask = (0x80u8 >> col.to_u8())
-                val color = if (bits & mask) != 0u8: fg else: bg
-                self.put_pixel(x + col, y + row, color)
-                col = col + 1
-            row = row + 1
-
-    me draw_text(x: i32, y: i32, text_value: text, fg: u32, bg: u32):
-        var cx = x
-        for ch in text_value:
-            self.draw_char_8x16(cx, y, ch.char_code_at(0).to_u8(), fg, bg)
-            cx = cx + 8
-
-    me blit_pixels(x: i32, y: i32, w: i32, h: i32, source: [u32]):
-        var row: i32 = 0
-        while row < h:
-            var col: i32 = 0
-            while col < w:
-                val source_index = row * w + col
-                if source_index >= 0 and source_index < source.len():
-                    self.put_pixel(x + col, y + row, source[source_index])
-                col = col + 1
-            row = row + 1
-
-class HostedWebRenderPixels:
-    pixels: [u32]
-    width: i32
-    height: i32
 
 class HostedWmCaptureMetrics:
     width: i32
@@ -190,58 +106,18 @@ fn _crop_min3(a: i64, b: i64, c: i64) -> i64:
         m = c
     m
 
-fn simple_web_capture_request(title: text, state_text: text, viewport_w: i32, viewport_h: i32) -> HostedWebRenderRequest:
-    val app_css = ":root { --glass-accent: #60a5fa; --glass-success: #22c55e; --glass-warning: #f59e0b; --glass-text-secondary: #94a3b8; } body { margin: 0; overflow: hidden; background: #182230; } #app { min-height: 100vh; padding: 0; } .wm-app-container { min-height: 100vh; background: #182230; } .wm-app-titlebar { height: 24px; background: #2050a0; color: #fff; } .wm-app-content { min-height: calc(100vh - 24px); background: #182230; color: #e5e7eb; } .simple-web-line { height: 22px; padding: 0 10px; } .simple-web-accent { color: var(--glass-accent); } .simple-web-success { color: var(--glass-success); } .simple-web-warning { color: var(--glass-warning); } .simple-web-muted { color: var(--glass-text-secondary); }"
-    val body = "<div class='wm-app-container'><div class='wm-app-titlebar'>" + title + "</div><div class='wm-app-content'><div class='simple-web-line simple-web-success'>$ " + state_text + "</div><div class='simple-web-line simple-web-accent'>src/ test/ main.spl</div><div class='simple-web-line simple-web-warning'>rendered by Simple Web</div><div class='simple-web-line simple-web-muted'>WebRenderArtifact pixels</div></div></div>"
-    HostedWebRenderRequest(
-        target: HOSTED_WEB_RENDER_TARGET_SIMPLE_WEB,
-        title: title,
-        body_html: body,
-        css: app_css,
-        viewport_w: viewport_w,
-        viewport_h: viewport_h,
-        wants_pixels: false
-    ).with_pixel_output()
-
-fn local_simple_web_request_pixels(req: HostedWebRenderRequest, state_text: text) -> HostedWebRenderPixels:
-    val fb = HostedCaptureFramebuffer.with_color(req.viewport_w, req.viewport_h, 0xFF182230u32)
-    fb.fill_rect(0, 0, req.viewport_w, 24, 0xFF2050A0u32)
-    fb.draw_text(8, 4, req.title, 0xFFFFFFFFu32, 0xFF2050A0u32)
-    fb.fill_rect(0, 24, req.viewport_w, req.viewport_h - 24, 0xFF182230u32)
-    fb.draw_text(10, 34, "$ " + state_text, 0xFF22C55Eu32, 0xFF182230u32)
-    fb.draw_text(10, 56, "src/ test/ main.spl", 0xFF60A5FAu32, 0xFF182230u32)
-    fb.draw_text(10, 78, "rendered by Simple Web", 0xFFF59E0Bu32, 0xFF182230u32)
-    fb.draw_text(10, 100, "MDI events taskbar ok", 0xFFFFFFFFu32, 0xFF182230u32)
-    HostedWebRenderPixels(pixels: fb.pixels, width: req.viewport_w, height: req.viewport_h)
-
-fn render_shared_mdi_frame(fb: HostedCaptureFramebuffer):
-    fb.fill_rect(0, 0, fb.width, fb.height, HOSTED_WM_BACKGROUND)
-    val surfaces = shared_mdi_surfaces()
-    val surface = surfaces[0]
-    fb.fill_rect(surface.x, surface.y, surface.w, surface.h, 0xFF1E293Bu32)
-    fb.fill_rect(surface.x, surface.y, surface.w, 24, 0xFF2563EBu32)
-    fb.draw_text(surface.x + 8, surface.y + 4, surface.title, 0xFFFFFFFFu32, 0xFF2563EBu32)
-    fb.fill_rect(surface.x + surface.w - 24, surface.y, 24, 24, 0xFFCC3333u32)
-    fb.draw_text(surface.x + surface.w - 17, surface.y + 4, "X", 0xFFFFFFFFu32, 0xFFCC3333u32)
-    val cw = surface.w - 8
-    val ch = surface.h - 32
-    val req = simple_web_capture_request(surface.title, surface.content, cw, ch)
-    val artifact = local_simple_web_request_pixels(req, surface.content)
-    fb.blit_pixels(surface.x + 4, surface.y + 28, cw, ch, artifact.pixels)
-
 fn capture_shared_hosted_wm_frame(path: text) -> HostedWmCaptureMetrics:
-    val fb = HostedCaptureFramebuffer.with_color(HOSTED_WM_CAPTURE_WIDTH, HOSTED_WM_CAPTURE_HEIGHT, HOSTED_WM_BACKGROUND)
-    render_shared_mdi_frame(fb)
+    val scene = render_shared_mdi_framebuffer_scene(HOSTED_WM_CAPTURE_WIDTH, HOSTED_WM_CAPTURE_HEIGHT, "hosted-shared-mdi-local-raster")
     val elapsed: i64 = 0
-    val capture = render_crop_ppm_with_metrics(path, HOSTED_WM_CAPTURE_WIDTH, HOSTED_WM_CROP_X, HOSTED_WM_CROP_Y, HOSTED_WM_CROP_WIDTH, HOSTED_WM_CROP_HEIGHT, fb.pixels)
+    val capture = render_crop_ppm_with_metrics(path, scene.width, HOSTED_WM_CROP_X, HOSTED_WM_CROP_Y, HOSTED_WM_CROP_WIDTH, HOSTED_WM_CROP_HEIGHT, scene.pixels)
     val metrics = capture.metrics
     val ok = capture.write_ok
     val evidence = make_gui_backend_evidence(
         "macos_metal",
-        "simple_web_request_local_raster_readback",
-        "Metal submit/readback is not wired for this hosted evidence probe; using verified local pixels from WebRenderRequest.with_pixel_output content",
+        "shared_mdi_framebuffer_scene_local_raster",
+        "Metal submit/readback is not wired for this hosted evidence probe; using the shared MDI framebuffer scene pixels used by QEMU evidence",
         elapsed,
-        "verified:webrender-request-local-pixels"
+        "verified:shared-mdi-framebuffer-scene-pixels"
     )
     HostedWmCaptureMetrics(
         width: HOSTED_WM_CROP_WIDTH,

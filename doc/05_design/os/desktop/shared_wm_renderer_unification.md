@@ -93,6 +93,23 @@ Host native window command JSON uses `WebRenderHostWindowCommand` and `web_rende
 
 `src/os/services/wm/wm_service.spl` and `src/os/compositor/wm_core.spl` are the shared WM authority targets. `src/os/compositor/host_compositor_entry.spl` now uses the real `WmService` as its lifecycle handle and converts host bridge messages plus pointer-driven drag/resize into shared `WmAction` lifecycle operations. `src/os/desktop/shell.spl` routes remote create, create-web, destroy, focus, resize, move, set-title, minimize, maximize, restore, and update-tree compositor mutation through `apply_wm_action_to_compositor(...)` and keeps shell-owned side effects local. `src/os/compositor/wm_action_applier.spl` owns the shared remote update-tree materialization and the lifecycle/pointer helpers used by both `HostCompositor` and the SimpleOS QEMU WM evidence path. `src/os/compositor/simple_web_window_renderer.spl` remains the richer host-capable Simple Web content renderer; `src/os/compositor/shared_mdi_framebuffer_scene.spl` is the shared framebuffer-safe chrome/layout/content renderer for host direct-draw chrome and QEMU evidence. Remaining divergence is adapter-owned: host cached web pixels and native event/process plumbing, QEMU framebuffer backend/config, and the QEMU entry's direct use of shared scene/pointer helpers instead of constructing `SimpleOsGuiAdapter`.
 
+### Resolution And DPI Contract
+
+WM performance work must preserve output quality. A change is not an acceptable
+optimization if it lowers logical size, physical pixel size, DPI, text
+readability, theme fidelity, animation semantics, or renderer feature coverage.
+Host and SimpleOS WM targets must be designed for 8K-class desktops and higher
+(7680x4320 and above) and for at least 300 DPI content. Evidence may use smaller
+smoke fixtures only when explicitly labeled as smoke coverage; completion and
+performance claims must keep the requested target resolution and pixel density.
+
+Allowed optimizations remove real overhead: avoiding duplicate full-frame
+copies, avoiding per-pixel FFI, using retained/dirty rendering, batching spans,
+and sharing renderer/lifecycle code. Forbidden optimizations include shrinking
+the framebuffer, rendering fewer pixels than requested, replacing text with
+markers, bypassing CSS/theme application when the lane claims CSS coverage, or
+using hardcoded/dummy WM rectangles as completion evidence.
+
 The host adapter uses `HostedWindow` only as the platform projection of
 `WmLifecycleWindowState`. Conversion helpers
 `host_windows_to_lifecycle_state(...)` and

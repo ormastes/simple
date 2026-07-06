@@ -13,7 +13,8 @@
 # drawing layer and the Simple Web rendering library in the same frame.
 
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiFramebufferScene, render_shared_mdi_framebuffer_scene, render_shared_mdi_framebuffer_scene_for_lifecycle_windows, shared_mdi_lifecycle_seed_windows}
-use os.compositor.wm_action_applier.{WmPointerInteractionState, wm_lifecycle_left_button, wm_lifecycle_pointer_move}
+use os.compositor.wm_action_applier.{WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_lifecycle_left_button, wm_lifecycle_pointer_move}
+use os.services.wm.wm_world.{WmAction}
 
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
@@ -295,6 +296,9 @@ fn _blit_shared_scene_to_fb(fb_addr: u64, stride: i32, input_repaint: u64):
     var scene = render_shared_mdi_framebuffer_scene(_fb_w(), _fb_h(), "qemu-framebuffer-cpu-simd")
     if input_repaint == 1:
         scene = _shared_mdi_event_scene()
+    _blit_scene_to_fb(fb_addr, stride, scene)
+
+fn _blit_scene_to_fb(fb_addr: u64, stride: i32, scene: SharedMdiFramebufferScene):
     g_last_shared_scene_pixels = scene.web_pixel_count
     g_last_shared_scene_checksum = _shared_scene_sample_checksum(scene.pixels, scene.width, scene.height)
     val pixel_count = scene.pixels.len()
@@ -318,9 +322,16 @@ fn _blit_shared_scene_to_fb(fb_addr: u64, stride: i32, input_repaint: u64):
 
 fn _present_mdi_scene_direct_fb(fb_addr: u64, stride: i32, win0_fullscreen: u64, input_repaint: u64):
     if win0_fullscreen == 1:
-        _fill_rect_fb(fb_addr, stride, 0, 0, _fb_w(), _fb_h(), 0xFF1E293B)
-        _fill_rect_fb(fb_addr, stride, 0, 0, _fb_w(), 32, 0xFF2050A0)
-        _fill_rect_fb(fb_addr, stride, _fb_w() - 30, 4, 22, 22, 0xFFCC3333)
+        var windows = shared_mdi_lifecycle_seed_windows()
+        val maximized = apply_wm_action_to_lifecycle_windows(
+            windows,
+            (windows.len() + 1).to_i64(),
+            _fb_w(),
+            _fb_h(),
+            WmAction(kind: "maximize", window_id: 1, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: 0)
+        )
+        val scene = render_shared_mdi_framebuffer_scene_for_lifecycle_windows(_fb_w(), _fb_h(), "qemu-framebuffer-cpu-simd", maximized.windows)
+        _blit_scene_to_fb(fb_addr, stride, scene)
         return
     _blit_shared_scene_to_fb(fb_addr, stride, input_repaint)
     if input_repaint == 0:

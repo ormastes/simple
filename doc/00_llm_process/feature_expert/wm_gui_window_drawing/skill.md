@@ -180,29 +180,35 @@ parsed as size), not a general WM feature area.
 
 ## Multi-App Launch + Working Taskbar (live GPU capture lane)
 
-A sibling, LIVE (on-screen winit + Metal GPU) capture lane proves the Simple WM
+A sibling, LIVE (on-screen winit-buffer backend) capture lane proves the Simple WM
 can launch MULTIPLE GUI apps as internal windows and that the TASKBAR works
 (clicking a taskbar item focuses/restores its window). Distinct from the
-headless PPM lanes above — it runs a real fullscreen window and screencaptures
+headless PPM lanes above — it runs a real host window and screencaptures
 it.
 
 - Demo: [examples/06_io/ui/wm_multiapp_taskbar_gui.spl](../../../../examples/06_io/ui/wm_multiapp_taskbar_gui.spl)
-  — opens a winit window, `MetalBackend` (engine2d Metal GPU), a `HostCompositor`
-  (state model over `HeadlessHostCompositorBackend`), launches Terminal/Editor/
-  File Manager/Calculator via `apply_bridge_request(COMP_CREATE_WINDOW)`, goes
-  fullscreen, renders each WM frame on the GPU (512x384 buffer, upscaled to the
-  fullscreen window), and drives taskbar interactions on the REAL compositor.
+  — opens a 512x384 winit window, creates the common
+  `HostedWinitBufferBackend`, constructs a real `HostCompositor`, launches
+  Terminal/Editor/File Manager/Calculator via
+  `apply_bridge_request(COMP_CREATE_WINDOW)`, renders frames through the shared
+  compositor backend, and drives taskbar interactions on the REAL compositor.
 - Check script: [scripts/check/check-wm-multiapp-taskbar-evidence.shs](../../../../scripts/check/check-wm-multiapp-taskbar-evidence.shs)
   (output dir `build/wm_multiapp_taskbar/` — distinct from `build/wm_gui_window_drawing/`).
 - Pixel validator: [scripts/check/measure_wm_multiapp_taskbar.spl](../../../../scripts/check/measure_wm_multiapp_taskbar.spl)
-  — locates the WM window in a full-screen BMP via a magenta locator frame,
-  self-calibrates logical->physical scale, checks each window's titlebar band
-  differs from the desktop backdrop and the taskbar shows >= N colored segments,
-  writes per-window crops.
+  — validates the captured WM client frame, self-calibrates logical->physical
+  scale from the actual capture, checks each window's titlebar band, title text,
+  close button, and taskbar item, and writes per-window crops.
 - Contract spec: [test/03_system/check/wm_multiapp_taskbar_spec.spl](../../../../test/03_system/check/wm_multiapp_taskbar_spec.spl)
   — exercises the pure compositor state machine (launch grows count; taskbar
   click focuses a background window; minimize + taskbar-restore) plus the gate's
   fail-closed contract.
+
+Resolution/performance rule: never speed up this lane by shrinking the window,
+lowering physical pixels, reducing DPI, dropping text, replacing widgets with
+markers, or bypassing theme/rendering quality. WM targets must be engineered for
+8K-class and larger desktops plus at least 300 DPI readable output. Acceptable
+optimizations remove real overhead only: duplicate full-frame copies, per-pixel
+FFI, avoidable allocations, missing dirty-state, or scalar hot loops.
 
 Hard-won lessons for this live lane (each cost hours):
 

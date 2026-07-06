@@ -1,19 +1,15 @@
 # wm_multiapp_taskbar_gui.spl — Multi-app launch + working taskbar on the live
-# Simple WM (hosted compositor) in a real on-screen winit window, rendered on the
-# Metal GPU engine2d lane.
+# Simple WM (hosted compositor) in a real on-screen winit window.
 #
 # Proves the Simple WM can LAUNCH MULTIPLE distinct GUI apps as internal windows
 # through the real HostCompositor, that a TASKBAR reflects them and WORKS
 # (clicking a taskbar item focuses/restores its window), and holds each state so
 # an external gate can screencapture the live window.
 #
-#   - Opens a real 512x384 winit window and a MetalBackend (engine2d Metal GPU
-#     lane); every WM frame is drawn with GPU rect/text calls (fast FFI — a CPU
-#     per-pixel compositor blocks the winit event loop long enough that macOS
-#     kills the unresponsive app), read back GPU-only, and presented 1:1 to the
-#     window. gpu_frame_complete is reported per frame.
-#   - Creates a HostCompositor (state model) over a HeadlessHostCompositorBackend
-#     and LAUNCHES apps one at a time via apply_bridge_request(COMP_CREATE_WINDOW):
+#   - Opens a real 512x384 winit window and presents HostCompositor frames
+#     through the common winit-buffer CompositorBackend facade.
+#   - Creates a HostCompositor over the live winit backend and LAUNCHES apps one
+#     at a time via apply_bridge_request(COMP_CREATE_WINDOW):
 #     Terminal, Editor, File Manager, Calculator. Each launch adds a HostedWindow;
 #     the taskbar item count grows. Emits `[wm-multiapp] launched app=..
 #     windows=N taskbar_items=N`.
@@ -32,11 +28,11 @@
 #
 # Driven end-to-end by scripts/check/check-wm-multiapp-taskbar-evidence.shs
 
-use std.gpu.engine2d.backend_metal.{MetalBackend}
-use std.io.window_winit.{WinitLoop, WinitWindow, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input, winit_window_get_size, winit_window_scale_factor}
+use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_poll_input, winit_window_get_size, winit_window_scale_factor}
 use std.io_runtime.{env_get}
 use common.window_protocol.geometry.{Size}
-use os.compositor.host_compositor_entry.{HostCompositor, HeadlessHostCompositorBackend, host_compositor_left_button_at, host_compositor_focused_window_id, host_compositor_minimize_focused, host_taskbar_item_x, host_taskbar_item_width, host_taskbar_dock_width}
+use os.compositor.hosted_backend_winit.{HostedWinitBufferBackend}
+use os.compositor.host_compositor_entry.{HostCompositor, host_wm_force_direct_chrome, host_compositor_left_button_at, host_compositor_focused_window_id, host_compositor_minimize_focused, host_taskbar_item_x, host_taskbar_item_width}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
 
 extern fn rt_time_now_unix_micros() -> i64
@@ -44,120 +40,52 @@ extern fn rt_time_now_unix_micros() -> i64
 val W: i32 = 512
 val H: i32 = 384
 val BG: u32 = 0xFF0F172Au32
-# Distinctive locator frame drawn at the extreme window edges. Magenta
-# (255,0,255) essentially never occurs in normal desktop UI, so the gate's
-# validator finds this frame's bounding box in a FULL-SCREEN capture to locate
-# the WM window and self-calibrate the logical->physical scale — no reliance on
-# the macOS Accessibility API (winit windows are not always AX-enumerable).
-val LOCATOR: u32 = 0xFFFF00FFu32
-val LOCATOR_PX: i32 = 4
 
-# Distinct saturated ARGB accent per taskbar slot / app, so the capture shows N
-# separately-colored taskbar segments and each window titlebar is non-background.
-fn app_palette(index: i32) -> u32:
-    val i = index % 5
-    if i == 0: return 0xFF2D6CDFu32   # blue
-    if i == 1: return 0xFF33B26Bu32   # green
-    if i == 2: return 0xFFD9822Bu32   # orange
-    if i == 3: return 0xFFB55CE0u32   # purple
-    0xFFE5533Du32                     # red
-
-fn build_scene_pixels(comp: HostCompositor) -> [u32]:
-    var rx: [i32] = []
-    var ry: [i32] = []
-    var rw: [i32] = []
-    var rh: [i32] = []
-    var rc: [u32] = []
-    var pixels: [u32] = []
-    var pi = 0
-    while pi < W * H:
-        pixels.push(BG)
-        pi = pi + 1
-    var i = 0
-    while i < comp.windows.len():
-        val w = comp.windows[i]
-        if not w.minimized:
-            rx.push(w.x); ry.push(w.y); rw.push(w.w); rh.push(w.h); rc.push(0xFF1E2836u32)
-            rx.push(w.x); ry.push(w.y); rw.push(w.w); rh.push(22); rc.push(app_palette(i))
-        i = i + 1
-    val count = comp.windows.len().to_i32()
-    if count > 0:
-        val dock_w = host_taskbar_dock_width(W, count)
-        val dock_x = (W - dock_w) / 2
-        val dock_y = H - 62
-        rx.push(dock_x); ry.push(dock_y); rw.push(dock_w); rh.push(44); rc.push(0xFF10151Fu32)
-        val item_w = host_taskbar_item_width(W, count)
-        var ti = 0
-        while ti < count:
-            val win = comp.windows[ti]
-            val ix = host_taskbar_item_x(W, count, ti)
-            var color = app_palette(ti)
-            if not win.focused:
-                color = 0xFF000000u32 | ((color & 0xFEFEFEu32) >> 1u32)
-            rx.push(ix + 2); ry.push(dock_y + 5); rw.push(item_w - 4); rh.push(34); rc.push(color)
-            if win.focused:
-                rx.push(ix + 2); ry.push(dock_y + 40); rw.push(item_w - 4); rh.push(3); rc.push(0xFFFFFFFFu32)
-            ti = ti + 1
-    # Locator frame LAST so it is never occluded (marks logical (0,0)-(W,H)).
-    rx.push(0); ry.push(0); rw.push(W); rh.push(LOCATOR_PX); rc.push(LOCATOR)
-    rx.push(0); ry.push(H - LOCATOR_PX); rw.push(W); rh.push(LOCATOR_PX); rc.push(LOCATOR)
-    rx.push(0); ry.push(0); rw.push(LOCATOR_PX); rh.push(H); rc.push(LOCATOR)
-    rx.push(W - LOCATOR_PX); ry.push(0); rw.push(LOCATOR_PX); rh.push(H); rc.push(LOCATOR)
-    var ri = 0
-    while ri < rx.len():
-        var x0 = if rx[ri] < 0: 0 else: rx[ri]
-        var y0 = if ry[ri] < 0: 0 else: ry[ri]
-        var x1 = rx[ri] + rw[ri]
-        var y1 = ry[ri] + rh[ri]
-        if x1 > W: x1 = W
-        if y1 > H: y1 = H
-        var yy = y0
-        while yy < y1:
-            var idx = yy * W + x0
-            var xx = x0
-            while xx < x1:
-                pixels[idx] = rc[ri]
-                idx = idx + 1
-                xx = xx + 1
-            yy = yy + 1
-        ri = ri + 1
-    pixels
-
-# Draw one WM frame from the REAL compositor window state, then upload the full
-# scene to Metal as one blit. This avoids dozens of synchronous per-primitive
-# Metal command-buffer waits in the interpreted live GUI driver.
-fn draw_scene(b: MetalBackend, comp: HostCompositor):
-    val pixels = build_scene_pixels(comp)
-    b.clear(BG)
-    b.draw_image(0, 0, W, H, pixels)
-    b.present()
-
-# Read back the GPU frame, pack to the [i64] form winit_present_rgba expects, and
-# present 1:1 to the live window. Returns whether the GPU frame completed.
-fn render_and_present(b: MetalBackend, win: WinitWindow, lp: WinitLoop, comp: HostCompositor, state: text) -> bool:
-    draw_scene(b, comp)
-    val poll0 = winit_poll_input(lp)
-    val frame_complete = b.gpu_frame_complete
-    val pixels = b.read_pixels_gpu_only()
-    if pixels.len() < W * H:
-        print "[wm-multiapp] present state={state} FAIL readback_short={pixels.len()} want={W * H} gpu_frame_complete={frame_complete}"
-        return false
-    var packed: [i64] = []
-    var i = 0
-    while i < pixels.len():
-        packed.push(pixels[i].to_i64() & 0xFFFFFF)
-        i = i + 1
-    winit_present_rgba(win, W.to_i64(), H.to_i64(), packed)
-    val poll1 = winit_poll_input(lp)
-    print "[wm-multiapp] present state={state} dims={W}x{H} len={packed.len()} gpu_frame_complete={frame_complete}"
+fn render_and_present(lp: WinitLoop, comp: HostCompositor, state: text) -> bool:
+    print "[wm-multiapp] render_stage={state}:begin"
+    comp.render_frame()
+    print "[wm-multiapp] present state={state} dims={W}x{H} backend=host-compositor-winit-buffer"
     return true
+
+fn apply_live_input(comp: HostCompositor, input: WinitInput) -> bool:
+    var dirty = false
+    if input.mouse_x != 0.0 or input.mouse_y != 0.0:
+        val mx = input.mouse_x.to_i32()
+        val my = input.mouse_y.to_i32()
+        val was_dragging = comp.dragging or comp.resizing
+        comp.handle_mouse_move(mx, my)
+        dirty = true
+        if was_dragging or comp.dragging or comp.resizing:
+            print "[wm-multiapp] input mouse_move x={mx} y={my} dragging={comp.dragging} resizing={comp.resizing}"
+    var ci = 0
+    while ci < input.click_buttons.len():
+        val button = input.click_buttons[ci]
+        val pressed = input.click_pressed[ci]
+        var fx = input.click_x[ci].to_i32()
+        var fy = input.click_y[ci].to_i32()
+        if fx == 0 and fy == 0:
+            fx = comp.pointer_x
+            fy = comp.pointer_y
+        else:
+            comp.handle_mouse_move(fx, fy)
+        comp.handle_mouse_button(button, pressed)
+        dirty = true
+        print "[wm-multiapp] input mouse_button button={button} pressed={pressed} x={fx} y={fy} dragging={comp.dragging} resizing={comp.resizing} focused={host_compositor_focused_window_id(comp)}"
+        ci = ci + 1
+    if input.scroll_y != 0.0:
+        comp.handle_mouse_wheel(0.0, input.scroll_y)
+        dirty = true
+        print "[wm-multiapp] input scroll_y={input.scroll_y}"
+    dirty
 
 # Hold the presented frame ~secs seconds, pumping the loop so the window stays
 # live for the external screencapture.
-fn hold(lp: WinitLoop, secs: i64):
+fn hold(lp: WinitLoop, comp: HostCompositor, secs: i64, state: text):
     val until = rt_time_now_unix_micros() + secs * 1000000
     while rt_time_now_unix_micros() < until:
-        val poll = winit_poll_input(lp)
+        val input = winit_poll_input(lp)
+        if apply_live_input(comp, input):
+            render_and_present(lp, comp, state)
 
 # Index of the window with `id` in the compositor's current window list, or -1.
 fn window_index_of(comp: HostCompositor, id: i64) -> i32:
@@ -180,42 +108,34 @@ fn launch_app(comp: HostCompositor, seq: i64, owner_port: i64, title: text, x: i
     print "[wm-multiapp] launched app={title} windows={comp.windows.len()} taskbar_items={comp.windows.len()}"
 
 fn main() -> i64:
-    print "WM Multi-App Taskbar GUI — launch apps + working taskbar on live Simple WM (Metal)"
+    print "WM Multi-App Taskbar GUI — launch apps + working taskbar on live Simple WM (winit buffer)"
 
     if (env_get("SIMPLE_GUI") ?? "") != "1":
         print "[wm-multiapp] error=no-gui-requested (launch via the gate)"
         return 2
 
-    print "[wm-multiapp] stage=metal-create"
-    var b = MetalBackend.create()
-    print "[wm-multiapp] stage=metal-init-begin"
-    if not b.init(W, H):
-        print "[wm-multiapp] error=metal-init-failed"
-        return 1
-    print "[wm-multiapp] stage=metal-init-ready"
-    b.use_gpu_only()
-    print "[wm-multiapp] stage=metal-gpu-only-ready"
-
     val lp = winit_loop_new()
     if not lp.is_valid:
         print "[wm-multiapp] error=no-gui-runtime"
-        b.shutdown()
         return 1
     print "[wm-multiapp] stage=winit-loop-ready"
     val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "Simple WM — Multi-App")
     if not win.is_valid:
         print "[wm-multiapp] error=window-create-failed"
         winit_loop_free(lp)
-        b.shutdown()
         return 1
     print "[wm-multiapp] stage=winit-window-ready"
+    val backend_opt = HostedWinitBufferBackend.create(win.handle, W, H, BG)
+    if not backend_opt.?:
+        print "[wm-multiapp] error=buffer-create-failed"
+        winit_window_free(win)
+        winit_loop_free(lp)
+        return 1
+    val backend = backend_opt ?? HostedWinitBufferBackend.new(0, 0, W, H)
+    print "[wm-multiapp] stage=winit-buffer-ready"
 
-    print "[wm-multiapp] stage=state-backend-create"
-    # This live evidence app uses HostCompositor as the authoritative WM state
-    # model, but draws the frame directly through Metal below. A 1x1 headless
-    # backend avoids allocating/copying an unused 512x384 software framebuffer
-    # on the interpreter hot path while preserving the compositor logical size.
-    val backend = HeadlessHostCompositorBackend.new(1, 1)
+    print "[wm-multiapp] stage=winit-compositor-backend-create"
+    host_wm_force_direct_chrome(true)
     # comp is `var`: launch_app mutates it in place (class params pass by
     # reference, so `me` apply_bridge_request persists), but the interaction free
     # functions (host_compositor_left_button_at / minimize) return a MODIFIED
@@ -235,6 +155,7 @@ fn main() -> i64:
 
     if comp.windows.len() != 4:
         print "[wm-multiapp] error=expected-4-windows got={comp.windows.len()}"
+        backend.free()
         winit_window_free(win)
         winit_loop_free(lp)
         return 1
@@ -250,15 +171,15 @@ fn main() -> i64:
     # The window stays a normal 512x384 window. The gate captures it directly by
     # its CGWindowID (`screencapture -l`), which is Space/foreground-independent —
     # so there is no need to go fullscreen or fight macOS Space switching. The
-    # magenta locator frame the scene draws lets the gate's validator find the WM
-    # content region within that window capture and self-calibrate the scale.
-    if not render_and_present(b, win, lp, comp, "launched-all"):
+    # gate validates the real captured frame size and compositor pixels.
+    if not render_and_present(lp, comp, "launched-all"):
         print "[wm-multiapp] error=present-failed-launched-all"
+        backend.free()
         winit_window_free(win)
         winit_loop_free(lp)
         return 1
     print "[wm-multiapp] state_ready=launched-all windows={comp.windows.len()}"
-    hold(lp, 5)
+    hold(lp, comp, 2, "launched-all-live")
 
     # -----------------------------------------------------------------------
     # (a) Taskbar click focuses a BACKGROUND window. Calculator (last launched)
@@ -275,6 +196,7 @@ fn main() -> i64:
     print "[wm-multiapp] taskbar_focus item_index={fidx} app=Terminal before={focus_before} after={focus_after}"
     if focus_after != terminal_id:
         print "[wm-multiapp] error=taskbar-focus-did-not-change (want {terminal_id} got {focus_after})"
+        backend.free()
         winit_window_free(win)
         winit_loop_free(lp)
         return 1
@@ -288,16 +210,18 @@ fn main() -> i64:
     print "[wm-multiapp] minimized id={terminal_id} app=Terminal minimized={terminal_minimized} focused_now={host_compositor_focused_window_id(comp)}"
     if not terminal_minimized:
         print "[wm-multiapp] error=minimize-failed"
+        backend.free()
         winit_window_free(win)
         winit_loop_free(lp)
         return 1
-    if not render_and_present(b, win, lp, comp, "minimized"):
+    if not render_and_present(lp, comp, "minimized"):
         print "[wm-multiapp] error=present-failed-minimized"
+        backend.free()
         winit_window_free(win)
         winit_loop_free(lp)
         return 1
     print "[wm-multiapp] state_ready=minimized windows_visible={comp.windows.len() - 1}"
-    hold(lp, 5)
+    hold(lp, comp, 2, "minimized-live")
 
     val restore_before = host_compositor_focused_window_id(comp)
     val cx_b = taskbar_click_x(comp, terminal_id)
@@ -309,6 +233,7 @@ fn main() -> i64:
     print "[wm-multiapp] taskbar_restore restored_id={terminal_id} before={restore_before} after={restore_after} minimized_now={comp.windows[ridx].minimized}"
     if not terminal_restored or restore_after != terminal_id:
         print "[wm-multiapp] error=taskbar-restore-failed (minimized_now={comp.windows[ridx].minimized} focus={restore_after})"
+        backend.free()
         winit_window_free(win)
         winit_loop_free(lp)
         return 1
@@ -322,8 +247,9 @@ fn main() -> i64:
         val fw = comp.windows[fg]
         print "[wm-multiapp] final_geom id={fw.id} app={fw.title} x={fw.x} y={fw.y} w={fw.w} h={fw.h} minimized={fw.minimized}"
         fg = fg + 1
-    if not render_and_present(b, win, lp, comp, "final"):
+    if not render_and_present(lp, comp, "final"):
         print "[wm-multiapp] error=present-failed-final"
+        backend.free()
         winit_window_free(win)
         winit_loop_free(lp)
         return 1
@@ -333,13 +259,13 @@ fn main() -> i64:
     # Re-present a few times across the long hold so the window keeps a live frame
     # while the gate enforces frontmost and screencaptures.
     var hh = 0
-    while hh < 6:
-        val ok = render_and_present(b, win, lp, comp, "final-hold")
-        hold(lp, 6)
+    while hh < 3:
+        val ok = render_and_present(lp, comp, "final-hold")
+        hold(lp, comp, 3, "final-live")
         hh = hh + 1
 
     print "[wm-multiapp] done windows={comp.windows.len()}"
-    b.shutdown()
+    backend.free()
     winit_window_free(win)
     winit_loop_free(lp)
     return 0

@@ -24,22 +24,21 @@
 #     capturable by `-x`, which only shows the current Space). The id is resolved
 #     by window title via CGWindowListCopyWindowInfo (JXA).
 #   PIXEL CHECKS (binding, on the final capture; via
-#     scripts/check/measure_wm_multiapp_taskbar.spl which locates the WM content
-#     by its magenta locator frame and self-calibrates the logical->physical
-#     scale):
+#     scripts/check/measure_wm_multiapp_taskbar.spl which validates the real
+#     captured WM frame and self-calibrates the logical->physical scale):
 #     - each internal window's titlebar band differs from the desktop backdrop,
 #     - the bottom taskbar shows >= 4 colored item segments,
 #     - per-window crops written to app_<name>.png.
 #
 # Without Screen Recording permission the window capture / window names are
-# unavailable; the pixel checks then fail closed (calibration finds no locator).
+# unavailable; the pixel checks then fail closed.
 #
 # Writes build/wm_multiapp_taskbar/report.md (key=value lines).
 # Exit 0 = PASS (or non-macOS skip), non-zero = FAIL.
 #
 # `set -u` (nounset) only, NOT `set -e`: this gate deliberately continues past
 # non-fatal command failures (a missing capture, a validator that finds no
-# locator, etc.) and classifies them into a fail-closed REASON at the end via
+# capture/validation errors) and classifies them into a fail-closed REASON via
 # classify()/write_report — an errexit abort would instead leave NO report.
 # All fatal preconditions are checked explicitly with fail().
 set -u
@@ -85,6 +84,8 @@ CAP_FINAL=missing
 CALIB=""
 TASKBAR_LIT=0
 WINDOWS_OK=0
+TITLE_TEXT_OK=0
+CLOSE_BUTTONS_OK=0
 CROPS=""
 
 FINAL_PNG="$BUILD_DIR/state_final.png"
@@ -117,6 +118,8 @@ write_report() {
         echo "wm_multiapp_taskbar_calibration=$CALIB"
         echo "wm_multiapp_taskbar_lit_segments=$TASKBAR_LIT"
         echo "wm_multiapp_taskbar_windows_titlebar_ok=$WINDOWS_OK"
+        echo "wm_multiapp_taskbar_title_text_ok=$TITLE_TEXT_OK"
+        echo "wm_multiapp_taskbar_close_buttons_ok=$CLOSE_BUTTONS_OK"
         echo "wm_multiapp_taskbar_crops=$CROPS"
         echo "wm_multiapp_taskbar_final_png=$FINAL_PNG"
         echo "wm_multiapp_taskbar_launched_png=$LAUNCHED_PNG"
@@ -202,10 +205,7 @@ ABS_SPL="$ROOT_DIR/$APP_SPL"
 echo "launching $APP_SPL via $APP_DIR (driver: $GUI_BIN) ..."
 open -n --stdout "$APP_LOG" --stderr "$APP_ERR" "$APP_DIR" --args run "$ABS_SPL"
 
-# The demo window is fullscreen and lives on its own macOS Space; `screencapture
-# -x` (current Space) photographs the desktop, not the app, and a background
-# `open -n` app is never foreground so no activation reliably switches Spaces in
-# CI. Instead we capture the window DIRECTLY by its CGWindowID with
+# We capture the window DIRECTLY by its CGWindowID with
 # `screencapture -l<id>`, which is Space-independent and needs no activation.
 # The window id is found via CGWindowListCopyWindowInfo (JXA/ObjC bridge). winit
 # owns several windows for the process (the content window, a full-width menu-bar
@@ -306,10 +306,12 @@ if [ -s "$FINAL_PNG" ]; then
             SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
             SIMPLE_EXECUTION_LIMIT=0 OSTYPE=darwin \
             "$GUI_BIN" run "$VALIDATOR" --mode=interpreter 2>/dev/null)"
-        echo "$VAL_OUT" | grep -E '^(capture_dims|calib|bg_ref|window |window_crop |taskbar_item |taskbar_lit_segments|windows_ok|measure_error)' || true
+        echo "$VAL_OUT" | grep -E '^(capture_dims|calib|bg_ref|window |window_crop |taskbar_item |taskbar_lit_segments|windows_ok|title_text_ok|close_buttons_ok|measure_error)' || true
         CALIB="$(printf '%s' "$VAL_OUT" | sed -n 's/^calib //p' | head -1)"
         TASKBAR_LIT="$(printf '%s' "$VAL_OUT" | sed -n 's/^taskbar_lit_segments=\([0-9]*\).*/\1/p' | tail -1)"
         WINDOWS_OK="$(printf '%s' "$VAL_OUT" | sed -n 's/^windows_ok=\([0-9]*\).*/\1/p' | tail -1)"
+        TITLE_TEXT_OK="$(printf '%s' "$VAL_OUT" | sed -n 's/^title_text_ok=\([0-9]*\).*/\1/p' | tail -1)"
+        CLOSE_BUTTONS_OK="$(printf '%s' "$VAL_OUT" | sed -n 's/^close_buttons_ok=\([0-9]*\).*/\1/p' | tail -1)"
         # Convert per-window crop PPMs to PNG.
         for ppm in "$BUILD_DIR"/app_*.ppm; do
             [ -e "$ppm" ] || continue
@@ -328,6 +330,8 @@ fi
 if [ -z "$TASKBAR_COUNT" ]; then TASKBAR_COUNT=0; fi
 if [ -z "$TASKBAR_LIT" ]; then TASKBAR_LIT=0; fi
 if [ -z "$WINDOWS_OK" ]; then WINDOWS_OK=0; fi
+if [ -z "$TITLE_TEXT_OK" ]; then TITLE_TEXT_OK=0; fi
+if [ -z "$CLOSE_BUTTONS_OK" ]; then CLOSE_BUTTONS_OK=0; fi
 
 classify() {
     if grep -q "\[wm-multiapp\] error=" "$APP_LOG" 2>/dev/null; then
@@ -340,8 +344,10 @@ classify() {
     [ "$RESTORED" = "true" ] || { REASON="taskbar-restore-not-observed(min_now=$RESTORE_MIN_NOW)"; return; }
     [ "$FINAL_READY" = "true" ] || { REASON="final-state-not-reached"; return; }
     [ "$CAP_FINAL" = "captured" ] || { REASON="final-capture-missing"; return; }
-    [ -n "$CALIB" ] || { REASON="pixel-calibration-failed(no-desktop-backdrop;screen-recording-permission?)"; return; }
+    [ -n "$CALIB" ] || { REASON="pixel-calibration-failed(screen-recording-permission?)"; return; }
     [ "$WINDOWS_OK" -ge "$EXPECT_APPS" ] || { REASON="window-titlebars-differ-from-bg-only-$WINDOWS_OK-of-$EXPECT_APPS"; return; }
+    [ "$TITLE_TEXT_OK" -ge "$EXPECT_APPS" ] || { REASON="window-title-text-visible-only-$TITLE_TEXT_OK-of-$EXPECT_APPS"; return; }
+    [ "$CLOSE_BUTTONS_OK" -ge "$EXPECT_APPS" ] || { REASON="close-buttons-recognizable-only-$CLOSE_BUTTONS_OK-of-$EXPECT_APPS"; return; }
     [ "$TASKBAR_LIT" -ge "$EXPECT_APPS" ] || { REASON="taskbar-lit-segments-$TASKBAR_LIT-lt-$EXPECT_APPS"; return; }
     STATUS=pass
     REASON=pass

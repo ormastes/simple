@@ -78,6 +78,31 @@ struct SharedWmEventTargetTranslationResult:
     translation: SharedWmEventTargetTranslation
     cache: SharedWmEventTargetTranslationCache
 
+fn simple_gui_internal_window(surface_id: text, window_id: text, process_id: u64, app_id: text, title: text, x: i32, y: i32, width: i32, height: i32, html: text, minimized: bool, focused: bool, z_index: i32) -> SharedWmWindow:
+    SharedWmWindow(
+        surface_id: surface_id,
+        window_id: window_id,
+        surface_kind: UI_SURFACE_KIND_LEGACY,
+        process_id: process_id,
+        app_id: app_id,
+        title: title,
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        tree: nil,
+        html: html,
+        minimized: minimized,
+        focused: focused,
+        z_index: z_index
+    )
+
+fn simple_gui_internal_window_scene(width: i32, height: i32, backend: text, windows: [SharedWmWindow]) -> SharedWmScene:
+    SharedWmScene(width: width, height: height, backend: backend, windows: windows)
+
+fn simple_gui_internal_window_renderer_handoff_marker() -> text:
+    "pending: route WM framebuffer rendering through common.ui simple_gui_internal_window_scene"
+
 fn _project_window(window: ManagedWindow, registry: UiWindowSurfaceRegistry) -> SharedWmWindow:
     val binding = registry.for_surface(window.surface_id)
     if binding != nil:
@@ -120,10 +145,10 @@ fn shared_wm_scene_from_window_manager(manager: WindowManager, registry: UiWindo
     val window_count = manager.windows.len()
     if window_count == 0:
         return SharedWmScene(width: width, height: height, backend: manager.current_backend(), windows: [])
-    var windows: [SharedWmWindow] = [_project_window(manager.windows[0], registry); window_count]
+    var windows: [SharedWmWindow] = []
     var idx = 0
     while idx < window_count:
-        windows[idx] = _project_window(manager.windows[idx], registry)
+        windows.push(_project_window(manager.windows[idx], registry))
         idx = idx + 1
     SharedWmScene(width: width, height: height, backend: manager.current_backend(), windows: windows)
 
@@ -134,21 +159,10 @@ fn shared_wm_visible_windows(scene: SharedWmScene) -> [SharedWmWindow]:
             visible_count = visible_count + 1
     if visible_count == 0:
         return []
-    var visible: [SharedWmWindow] = [scene.windows[0]; visible_count]
-    var write_idx = 0
+    var visible: [SharedWmWindow] = []
     for window in scene.windows:
         if not window.minimized:
-            visible[write_idx] = window
-            write_idx = write_idx + 1
-    if write_idx != visible_count:
-        if write_idx == 0:
-            return []
-        var compact: [SharedWmWindow] = [visible[0]; write_idx]
-        var compact_idx = 0
-        while compact_idx < write_idx:
-            compact[compact_idx] = visible[compact_idx]
-            compact_idx = compact_idx + 1
-        return compact
+            visible.push(window)
     return visible
 
 fn shared_wm_focused_window_id(scene: SharedWmScene) -> text:
@@ -163,12 +177,12 @@ fn shared_wm_focused_window_id(scene: SharedWmScene) -> text:
 
 fn shared_wm_scene_layout_key(scene: SharedWmScene) -> text:
     val window_count = scene.windows.len()
-    var parts: [text] = [""; 1 + window_count]
-    parts[0] = "w={scene.width};h={scene.height};backend={scene.backend};count={window_count}"
+    var parts: [text] = []
+    parts.push("w={scene.width};h={scene.height};backend={scene.backend};count={window_count}")
     var idx = 0
     while idx < window_count:
         val window = scene.windows[idx]
-        parts[idx + 1] = "{window.surface_id}:{window.window_id}:{window.x},{window.y},{window.width},{window.height}:z{window.z_index}:min{window.minimized}:focus{window.focused}"
+        parts.push("{window.surface_id}:{window.window_id}:{window.x},{window.y},{window.width},{window.height}:z{window.z_index}:min{window.minimized}:focus{window.focused}")
         idx = idx + 1
     parts.join(";")
 
@@ -213,14 +227,14 @@ fn shared_wm_drag_window(scene: SharedWmScene, surface_id: text, dx: i32, dy: i3
     val window_count = scene.windows.len()
     if window_count == 0:
         return SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: [])
-    var moved: [SharedWmWindow] = [scene.windows[0]; window_count]
+    var moved: [SharedWmWindow] = []
     var idx = 0
     while idx < window_count:
         val window = scene.windows[idx]
         if window.surface_id == surface_id and not window.minimized:
             val max_x = _shared_wm_nonnegative(chrome.content_area.x + chrome.content_area.width - window.width)
             val max_y = _shared_wm_nonnegative(chrome.content_area.y + chrome.content_area.height - window.height)
-            moved[idx] = SharedWmWindow(
+            moved.push(SharedWmWindow(
                 surface_id: window.surface_id,
                 window_id: window.window_id,
                 surface_kind: window.surface_kind,
@@ -236,9 +250,9 @@ fn shared_wm_drag_window(scene: SharedWmScene, surface_id: text, dx: i32, dy: i3
                 minimized: window.minimized,
                 focused: true,
                 z_index: window.z_index
-            )
+            ))
         else:
-            moved[idx] = window
+            moved.push(window)
         idx = idx + 1
     SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: moved)
 
@@ -246,12 +260,12 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
     val window_count = scene.windows.len()
     if window_count == 0:
         return SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: [])
-    var focused: [SharedWmWindow] = [scene.windows[0]; window_count]
+    var focused: [SharedWmWindow] = []
     var idx = 0
     while idx < window_count:
         val window = scene.windows[idx]
         if window.window_id == window_id:
-            focused[idx] = SharedWmWindow(
+            focused.push(SharedWmWindow(
                 surface_id: window.surface_id,
                 window_id: window.window_id,
                 surface_kind: window.surface_kind,
@@ -267,9 +281,9 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
                 minimized: false,
                 focused: true,
                 z_index: window.z_index
-            )
+            ))
         else:
-            focused[idx] = SharedWmWindow(
+            focused.push(SharedWmWindow(
                 surface_id: window.surface_id,
                 window_id: window.window_id,
                 surface_kind: window.surface_kind,
@@ -285,7 +299,7 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
                 minimized: window.minimized,
                 focused: false,
                 z_index: window.z_index
-            )
+            ))
         idx = idx + 1
     SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: focused)
 

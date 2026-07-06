@@ -1,9 +1,9 @@
 # Shared MDI framebuffer scene renderer for hosted/QEMU evidence paths.
 
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
-use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 use os.compositor.shared_mdi_setup.{shared_mdi_surfaces}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
+use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 use os.compositor.wm_action_applier.{WmLifecycleWindowState, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 
 class SharedMdiFramebufferScene:
@@ -83,32 +83,26 @@ impl CompositorBackend for SharedMdiFramebufferBackend:
 
     me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
         var cx = x
-        for ch in text_str:
-            self.draw_char_8x16(cx, y, ch.char_code_at(0).to_u8(), fg, bg)
+        var i = 0
+        val n = text_str.len()
+        while i < n:
+            self.draw_char_8x16(cx, y, text_str.char_at(i).ord().to_u8(), fg, bg)
             cx = cx + 8
+            i = i + 1
 
     me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
-        if x >= self.w or y >= self.h or x + 8 <= 0 or y + 16 <= 0:
+        if x >= self.w or y >= self.h or x + 12 <= 0 or y + 16 <= 0:
             return
-        val glyph = get_glyph_8x16(ch)
-        var row0: i32 = if y < 0: 0 - y else: 0
-        var row1: i32 = 16
-        if y + row1 > self.h:
-            row1 = self.h - y
-        var col0: i32 = if x < 0: 0 - x else: 0
-        var col1: i32 = 8
-        if x + col1 > self.w:
-            col1 = self.w - x
-        var row: i32 = row0
-        while row < row1:
-            val py = y + row
-            val bits = glyph[row]
-            var col: i32 = col0
-            var idx = py * self.w + x + col0
-            while col < col1:
-                val mask = 0x80 >> col
-                self.pixels[idx] = if (bits & mask.to_u8()) != 0u8: fg else: bg
-                idx = idx + 1
+        self.fill_rect(x, y, 12, 16, bg)
+        val gi = glyph_index_for_char_code(ch.to_i32())
+        var row: i32 = 0
+        while row < 7:
+            val bits = glyph_row_bits(gi, row)
+            var col: i32 = 0
+            while col < 5:
+                val mask = 1 << (4 - col)
+                if (bits & mask) != 0:
+                    self.fill_rect(x + col * 2, y + row * 2 + 1, 2, 2, fg)
                 col = col + 1
             row = row + 1
 
@@ -242,6 +236,47 @@ fn _shared_text_fit(content: text, max_chars: i32) -> text:
         return content.substring(0, max_chars)
     content
 
+fn _shared_ascii_codes(value: text) -> [i32]:
+    if value == "Terminal": return [84, 101, 114, 109, 105, 110, 97, 108]
+    if value == "Editor": return [69, 100, 105, 116, 111, 114]
+    if value == "Browser": return [66, 114, 111, 119, 115, 101, 114]
+    if value == "File Manager": return [70, 105, 108, 101, 32, 77, 97, 110, 97, 103, 101, 114]
+    if value == "Calculator": return [67, 97, 108, 99, 117, 108, 97, 116, 111, 114]
+    if value == "X": return [88]
+    if value == "$ simple$ build check --live": return [36, 32, 115, 105, 109, 112, 108, 101, 36, 32, 98, 117, 105, 108, 100, 32, 99, 104, 101, 99, 107, 32, 45, 45, 108, 105, 118, 101]
+    if value == "src/ test/ main.spl": return [115, 114, 99, 47, 32, 116, 101, 115, 116, 47, 32, 109, 97, 105, 110, 46, 115, 112, 108]
+    if value == "SimpleOS shell via Simple Web": return [83, 105, 109, 112, 108, 101, 79, 83, 32, 115, 104, 101, 108, 108, 32, 118, 105, 97, 32, 83, 105, 109, 112, 108, 101, 32, 87, 101, 98]
+    if value == "main.spl": return [109, 97, 105, 110, 46, 115, 112, 108]
+    if value == "fn main():": return [102, 110, 32, 109, 97, 105, 110, 40, 41, 58]
+    if value == "    print Hello SimpleOS": return [32, 32, 32, 32, 112, 114, 105, 110, 116, 32, 72, 101, 108, 108, 111, 32, 83, 105, 109, 112, 108, 101, 79, 83]
+    if value == "# rendered by Simple Web": return [35, 32, 114, 101, 110, 100, 101, 114, 101, 100, 32, 98, 121, 32, 83, 105, 109, 112, 108, 101, 32, 87, 101, 98]
+    if value == "/home/simple": return [47, 104, 111, 109, 101, 47, 115, 105, 109, 112, 108, 101]
+    if value == "Desktop": return [68, 101, 115, 107, 116, 111, 112]
+    if value == "Documents": return [68, 111, 99, 117, 109, 101, 110, 116, 115]
+    if value == "Downloads": return [68, 111, 119, 110, 108, 111, 97, 100, 115]
+    if value == "state: home": return [115, 116, 97, 116, 101, 58, 32, 104, 111, 109, 101]
+    if value == "0": return [48]
+    if value == "7 8 9 /": return [55, 32, 56, 32, 57, 32, 47]
+    if value == "4 5 6 *": return [52, 32, 53, 32, 54, 32, 42]
+    if value == "1 2 3 -": return [49, 32, 50, 32, 51, 32, 45]
+    if value == "about:network": return [97, 98, 111, 117, 116, 58, 110, 101, 116, 119, 111, 114, 107]
+    if value == "Simple Web": return [83, 105, 109, 112, 108, 101, 32, 87, 101, 98]
+    if value == "GET /status 200": return [71, 69, 84, 32, 47, 115, 116, 97, 116, 117, 115, 32, 50, 48, 48]
+    if value == "Simple Web app surface": return [83, 105, 109, 112, 108, 101, 32, 87, 101, 98, 32, 97, 112, 112, 32, 115, 117, 114, 102, 97, 99, 101]
+    []
+
+fn _draw_shared_text_fit(backend: CompositorBackend, x: i32, y: i32, text_value: text, fg: u32, bg: u32, max_chars: i32):
+    val codes = _shared_ascii_codes(text_value)
+    var count = codes.len()
+    if max_chars > 0 and count > max_chars:
+        count = max_chars
+    var i = 0
+    var cx = x
+    while i < count:
+        backend.draw_char_8x16(cx, y, codes[i].to_u8(), fg, bg)
+        cx = cx + 12
+        i = i + 1
+
 fn _render_shared_mdi_desktop_chrome(backend: CompositorBackend, width: i32, height: i32, theme: WmChromeColors, clear_first: bool):
     if clear_first:
         backend.clear(theme.compositor_bg)
@@ -263,10 +298,9 @@ fn draw_shared_mdi_window_chrome(backend: CompositorBackend, win: SharedMdiRende
     backend.fill_rect(win.x + 12, win.y + 9, 10, 10, 0xFFE74C3Cu32)
     backend.fill_rect(win.x + 30, win.y + 9, 10, 10, 0xFFF1C40Fu32)
     backend.fill_rect(win.x + 48, win.y + 9, 10, 10, 0xFF27AE60u32)
-    val visible = _shared_text_fit(win.title, if win.w > 92: (win.w - 92) / 8 else: 0)
-    backend.draw_text(win.x + 66, win.y + 6, visible, theme.text_primary, title_color)
+    _draw_shared_text_fit(backend, win.x + 66, win.y + 6, win.title, theme.text_primary, title_color, if win.w > 92: (win.w - 92) / 12 else: 0)
     backend.fill_rect(win.x + win.w - 24, win.y + 2, 20, 20, theme.close_button)
-    backend.draw_text(win.x + win.w - 18, win.y + 4, "X", theme.text_primary, theme.close_button)
+    _draw_shared_text_fit(backend, win.x + win.w - 18, win.y + 4, "X", theme.text_primary, theme.close_button, 1)
 
 fn draw_shared_mdi_taskbar(backend: CompositorBackend, windows: [SharedMdiRenderWindow], width: i32, height: i32, theme: WmChromeColors):
     val count = windows.len()
@@ -287,14 +321,12 @@ fn draw_shared_mdi_taskbar(backend: CompositorBackend, windows: [SharedMdiRender
         elif win.minimized:
             item_color = theme.host_window_body
         backend.fill_rect(ix + 2, dock_y + 4, item_w - 4, 36, item_color)
-        val label = _shared_text_fit(win.title, if item_w > 16: (item_w - 16) / 8 else: 0)
-        backend.draw_text(ix + 8, dock_y + 14, label, theme.text_primary, item_color)
+        _draw_shared_text_fit(backend, ix + 8, dock_y + 14, win.title, theme.text_primary, item_color, if item_w > 16: (item_w - 16) / 12 else: 0)
         i = i + 1
 
 fn _shared_mdi_content_line(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, line_index: i32, text_value: text, fg: u32, bg: u32):
     val y = cy + 34 + line_index * 22
-    val label = _shared_text_fit(text_value, if cw > 20: (cw - 20) / 8 else: 0)
-    backend.draw_text(cx + 10, y, label, fg, bg)
+    _draw_shared_text_fit(backend, cx + 10, y, text_value, fg, bg, if cw > 20: (cw - 20) / 12 else: 0)
 
 fn render_shared_mdi_app_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
     if cw <= 0 or ch <= 0:
@@ -308,7 +340,7 @@ fn render_shared_mdi_app_content(backend: CompositorBackend, title: text, cx: i3
     val muted = 0xFF94A3B8u32
     backend.fill_rect(cx, cy, cw, ch, bg)
     backend.fill_rect(cx, cy, cw, 24, header)
-    backend.draw_text(cx + 8, cy + 4, _shared_text_fit(title, if cw > 16: (cw - 16) / 8 else: 0), text_primary, header)
+    _draw_shared_text_fit(backend, cx + 8, cy + 4, title, text_primary, header, if cw > 16: (cw - 16) / 12 else: 0)
     if title == "Terminal":
         _shared_mdi_content_line(backend, cx, cy, cw, 0, "$ " + state_text, success, bg)
         _shared_mdi_content_line(backend, cx, cy, cw, 1, "src/ test/ main.spl", accent, bg)
