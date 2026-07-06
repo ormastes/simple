@@ -7,6 +7,10 @@ Independent-oracle evidence for the pure-Simple self-hosted compiler
 Runner: `scripts/check/cert/run-tool-qual-corpus.shs`
 (`--self-test`, `--help`, exits non-zero on any defect).
 
+Freeze tool: `scripts/check/cert/freeze-tool-qual-golden.shs` — writes a NEW
+`.expected` golden for a `positive/` case from a caller-supplied value; refuses
+to overwrite an existing golden unless `--force` (`--help` for usage).
+
 ## Why this corpus exists
 
 The 3-stage bootstrap proves `stage2 == stage3` (byte-identical): the compiler
@@ -45,16 +49,22 @@ runner never writes goldens.
 ## Layout
 
 ```
-positive/   9 cases, one per language-construct family, each with a .expected golden
+positive/   17 cases, one per language-construct family, each with a .expected golden
               arithmetic/precedence, structs+fields, custom enum+match+payload,
               closures, generics, recursion, integer/bitwise ops, text ops,
-              booleans/short-circuit
-negative/   4 cases that MUST be rejected
-              undefined symbol, unknown struct field, parse error, undefined function
-known_defects/  OPEN tool defects (silent-accepts the deployed binary currently
-              exhibits). NOT walked by the runner's gate — see its README. These
-              are documented, reproducible findings, seeding the plan's
-              `known_problem/` category, not a pass/fail gate.
+              booleans/short-circuit, trait+default-method (override path),
+              struct-field composition, type-qualified static calls,
+              closure composition (sibling closures), bounded generics,
+              tuples/multi-return, string interpolation, array/list ops
+negative/   8 cases that MUST be rejected
+              undefined symbol, unknown struct field, parse error (unclosed
+              paren), undefined function, undefined struct type, undefined
+              module import, reserved keyword as identifier, parse error
+              (missing colon)
+known_defects/  OPEN tool defects (silent-accepts / crashes the deployed binary
+              currently exhibits). NOT walked by the runner's gate — see its
+              README. These are documented, reproducible findings, seeding the
+              plan's `known_problem/` category, not a pass/fail gate.
 ```
 
 Custom enums are used (not built-in `Result`/`Ok`/`Err`/`?`, which are
@@ -63,10 +73,38 @@ exercised without masking by that known frozen path.
 
 ## Scope (honest)
 
-This is the **initial** corpus (plan §5 step 1–4 partial): it covers the core
-value-computing construct families and the three reject classes named in the
-plan. It does **not** yet cover traits/mixins/modules/actors/async/ffi/memory-
-tiers positives, the full diagnostic-code matrix, or the `meta/` tool-property
-tests (determinism / opt-invariance). Those remain future work. The corpus is
-runnable **now** on the clean deployed binary and is GREEN; the discovered
-silent-accept defects are recorded under `known_defects/` rather than hidden.
+This corpus (plan §5 step 1–4, expanded) covers the core value-computing
+construct families, a first pass at traits/composition/module-qualified-calls/
+generics-with-bounds/tuples/string-interpolation/array-ops, and eight reject
+classes. It does **not** cover actors/async/ffi/memory-tiers positives, the
+full diagnostic-code matrix, or the `meta/` tool-property tests (determinism /
+opt-invariance). Those remain future work. The corpus is runnable **now** on
+the clean deployed binary and is GREEN; the discovered silent-accept/crash
+defects are recorded under `known_defects/` rather than hidden.
+
+Several constructs in the requested breadth were **skipped from `positive/`**
+because they misbehave on the deployed binary (an unsound "positive" case
+would defeat the point of an independent oracle); each is instead a
+reproducible `known_defects/` entry:
+- Calling a trait **default** method that is inherited (NOT overridden in the
+  `impl`) segfaults — `known_defects/trait_default_method_inherited_segfault.spl`.
+  `positive/10_traits_default_methods.spl` covers only the explicit-override
+  path, which is sound.
+- `mixin`-based composition (`use SomeMixin` inside `class` or `struct`) is
+  broken both ways: on `class` it silently runs (exit 0) and prints garbage
+  values (`known_defects/mixin_class_use_garbage_value.spl`); on `struct` it
+  silently runs (exit 0) and leaks a fabricated error string to stdout
+  (`known_defects/mixin_struct_use_runtime_error.spl`).
+  `positive/11_composition.spl` uses plain struct-field composition +
+  explicit delegation instead, which is sound and is the documented
+  no-inheritance idiom.
+- A closure **lexically nested** inside another closure's body, reading a
+  variable captured by the *enclosing* closure, silently computes the wrong
+  value (`known_defects/nested_closure_capture_wrong_value.spl`) — matches the
+  known "nested closure capture" runtime limitation, but even the *read-only*
+  path is unsound, not just the write path.
+- A closure that captures a function parameter and is **returned across the
+  function boundary** prints an invalid-heap-pointer tag when later called
+  (`known_defects/closure_return_across_function_boundary_invalid_heap.spl`).
+  `positive/13_closures_compose.spl` uses two sibling closures at the same
+  scope instead, which is sound.
