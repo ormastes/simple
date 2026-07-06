@@ -256,6 +256,59 @@ body plus sw's `r<=0` guard**; `draw_line` (thick) is **deferred pending a desig
 canonical winner exists yet — see the matrix row above). This rule is what an implementer should
 apply mechanically when routing each divergent op through `SharedRaster` in the next increment.
 
+### D2 executed (2026-07-06)
+
+Applied the canonical-winner rule above op-by-op. The parity harness
+(`test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl`) stayed green
+throughout (21 examples), with assertions flipped only where the fix was pixel-changing.
+
+**Consolidated (behavior-preserving; harness assertion stayed `== 0`):**
+- `draw_rect` (opaque outline) — `SoftwareBackend.draw_rect` now delegates to
+  `emu_draw_rect(self, ...)`, same idiom as the existing `draw_rounded_rect` delegation.
+- `draw_gradient_rect` (opaque) — `SoftwareBackend.draw_gradient_rect` now delegates to
+  `emu_draw_gradient_rect(self, ...)`.
+- `draw_gradient_rect_h`, `draw_rect_blend`, `draw_image_blend` were found already
+  consolidated (sw already delegates to the emu free function) — no action needed.
+- `clear` / `draw_rect_filled` / `draw_image` have no independent emu reimplementation to
+  consolidate against (emu builds ON these core primitives) — no action possible or needed.
+- `draw_line` (thin, thickness<=1) — **left unconsolidated, by design**: emu's per-point body
+  re-enters `core.draw_rect_filled(cx, cy, 1, 1, color)` for every Bresenham step (full
+  clip/mask/dirty-span overhead per pixel), whereas sw's `sw_bresenham` uses the lean
+  single-guard `sw_set_pixel` primitive. Consolidating would multiply per-pixel cost on long
+  lines for zero behavior change, so this stays a documented exception (see comment at
+  `backend_software.spl` `draw_line`).
+
+**Reconciled toward the named canonical (pixel-changing; harness assertion flipped `> 0` → `== 0`):**
+- `draw_rect` (alpha<255 outline) → **EMU**: came for free from the `draw_rect` consolidation
+  above, since `emu_draw_rect` routes all four edges through `core.draw_rect_filled`, which
+  already alpha-blends; sw's old hand-written edges wrote raw color and never blended.
+- `draw_circle` (outline) → **EMU body + SW `r<=0` guard**: changed `SoftwareBackend.draw_circle`'s
+  midpoint decision-variable test from `d <= 0` to `d < 0` (matching emu's textbook tie-break) for
+  the `r > 0` loop only; the `r <= 0` no-op guard is untouched and stays sw-canonical (still
+  diverges from emu's stray-center-pixel stamp — that sub-case was intentionally out of scope,
+  see below).
+- `draw_circle_filled` → **SW**: replaced `emu_draw_circle_filled`'s midpoint-scanline body with
+  sw's per-row exact distance test (`_emu_isqrt(r*r - dy*dy)` half-width per row), Metal-exact;
+  the `r <= 0` stray-center-pixel behavior in emu is untouched (also out of scope, see below).
+- `draw_triangle_filled` (incl. the collinear `d==0` case) → **SW**: replaced
+  `emu_draw_triangle_filled`'s y-sorted scanline algorithm with sw's integer barycentric
+  bounding-box fill (Metal-exact), including sw's `d==0` no-op guard the old scanline algorithm
+  lacked. Both the main-triangle and collinear-degenerate harness assertions flipped together
+  since they share the one fix.
+
+**Skipped, left divergent (unchanged):**
+- `draw_line` (thick) — per guide: design decision pending, no canonical winner yet.
+- `draw_circle` (`r<=0`) and `draw_circle_filled` (`r<=0`) — these two guard-only sub-cases were
+  **not** in this increment's reconciliation list (only the `r>0` bodies were); emu still stamps a
+  stray center pixel there vs sw's no-op. Left as their own tracked divergence for a future pass.
+
+Files touched: `src/lib/gc_async_mut/gpu/engine2d/backend_software.spl`,
+`src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl`,
+`test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl`. (`gc_sync_mut`'s
+`backend_software.spl`/`backend_emu.spl` are pure re-export facades onto the `gc_async_mut`
+originals — no mirrored edit needed. `nogc_async_mut`/`nogc_sync_mut` have no copies of these
+files.)
+
 ---
 
 ## 4. Capability + honesty model

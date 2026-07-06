@@ -121,30 +121,28 @@ fn emu_draw_circle(mut core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32
             d = d + 2 * (y - x) + 1
 
 # ============================================================================
-# Circle Filled — Horizontal scanline spans
+# Circle Filled — Per-row exact distance test (Metal-exact)
 # ============================================================================
 
 fn emu_draw_circle_filled(mut core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32):
+    # r <= 0 stays a stray-center-pixel stamp here (unchanged, still diverges
+    # from sw's no-op guard by design — not part of the D2 reconciliation).
     if r <= 0:
         core.draw_rect_filled(cx, cy, 1, 1, color)
         return
 
-    var x: i32 = r
-    var y: i32 = 0
-    var d: i32 = 1 - r
-
-    while x >= y:
-        core.draw_rect_filled(cx - x, cy + y, 2 * x + 1, 1, color)
-        core.draw_rect_filled(cx - x, cy - y, 2 * x + 1, 1, color)
-        core.draw_rect_filled(cx - y, cy + x, 2 * y + 1, 1, color)
-        core.draw_rect_filled(cx - y, cy - x, 2 * y + 1, 1, color)
-
-        y = y + 1
-        if d < 0:
-            d = d + 2 * y + 1
-        else:
-            x = x - 1
-            d = d + 2 * (y - x) + 1
+    # Body reconciled to canonical SW (backend_software.spl draw_circle_filled):
+    # per-row exact distance test (dx*dx + dy*dy <= r*r, half-width =
+    # floor(sqrt(r*r - dy*dy))) instead of the old midpoint scanline — matches
+    # the Metal kernel_draw_circle_filled distance test bit-for-bit. Alpha
+    # blending is handled inside core.draw_rect_filled, same as sw's
+    # has_alpha branch. reconciled to canonical sw 2026-07-06 (D2)
+    val r_sq = r * r
+    var dy: i32 = 0 - r
+    while dy <= r:
+        val half = _emu_isqrt(r_sq - dy * dy)
+        core.draw_rect_filled(cx - half, cy + dy, 2 * half + 1, 1, color)
+        dy = dy + 1
 
 # ============================================================================
 # Rounded Rectangle — rect body + 4 corner arcs
@@ -194,54 +192,50 @@ fn _emu_corner_arc(mut core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32
             d = d + 2 * (py - px) + 1
 
 # ============================================================================
-# Triangle Filled — Scanline fill
+# Triangle Filled — Integer barycentric (Metal-exact)
 # ============================================================================
 
 fn emu_draw_triangle_filled(mut core: RenderBackend, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
-    var ay = y1
-    var ax = x1
-    var by = y2
-    var bx = x2
-    var cy = y3
-    var ccx = x3
+    # Reconciled to canonical SW (backend_software.spl draw_triangle_filled):
+    # integer barycentric (edge-function / 2x-area) bounding-box fill instead
+    # of the old sort-and-scanline algorithm — matches the Metal
+    # kernel_draw_triangle_filled bit-for-bit, including the collinear
+    # (determinant d == 0) no-op guard the old scanline algorithm lacked
+    # (it used to fill a degenerate line instead of no-op'ing). Alpha
+    # blending is handled inside core.draw_rect_filled, same as sw's
+    # has_alpha branch. reconciled to canonical sw 2026-07-06 (D2)
+    val d = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+    if d == 0:
+        return
+    var min_x = x1
+    if x2 < min_x: min_x = x2
+    if x3 < min_x: min_x = x3
+    var max_x = x1
+    if x2 > max_x: max_x = x2
+    if x3 > max_x: max_x = x3
+    var min_y = y1
+    if y2 < min_y: min_y = y2
+    if y3 < min_y: min_y = y3
+    var max_y = y1
+    if y2 > max_y: max_y = y2
+    if y3 > max_y: max_y = y3
 
-    if ay > by:
-        var t = ay
-        ay = by
-        by = t
-        t = ax
-        ax = bx
-        bx = t
-    if ay > cy:
-        var t = ay
-        ay = cy
-        cy = t
-        t = ax
-        ax = ccx
-        ccx = t
-    if by > cy:
-        var t = by
-        by = cy
-        cy = t
-        t = bx
-        bx = ccx
-        ccx = t
-
-    var row = ay
-    while row <= cy:
-        var left = ax + (bx - ax) * (row - ay) / _emu_max(by - ay, 1)
-        var right = ax + (ccx - ax) * (row - ay) / _emu_max(cy - ay, 1)
-
-        if row >= by:
-            left = bx + (ccx - bx) * (row - by) / _emu_max(cy - by, 1)
-
-        if left > right:
-            val t = left
-            left = right
-            right = t
-
-        core.draw_rect_filled(left, row, right - left + 1, 1, color)
-        row = row + 1
+    var py = min_y
+    while py <= max_y:
+        var px = min_x
+        while px <= max_x:
+            val w1 = (y2 - y3) * (px - x3) + (x3 - x2) * (py - y3)
+            val w2 = (y3 - y1) * (px - x3) + (x1 - x3) * (py - y3)
+            val w3 = d - w1 - w2
+            var inside = false
+            if d > 0:
+                inside = w1 >= 0 and w2 >= 0 and w3 >= 0
+            else:
+                inside = w1 <= 0 and w2 <= 0 and w3 <= 0
+            if inside:
+                core.draw_rect_filled(px, py, 1, 1, color)
+            px = px + 1
+        py = py + 1
 
 # ============================================================================
 # Gradient Rectangle — Row-by-row color interpolation
