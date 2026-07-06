@@ -1220,3 +1220,35 @@ Current compiler gate for NVMe RV32 firmware proof: bootstrap MIR/LLVM lowering
 must preserve enough semantics for the Stage 2 binary to print `--version` and
 fail closed for `native-build` with a non-zero result. Only after that should
 the full bootstrap/deploy and RV32 firmware build loops be retried.
+
+### Latest bootstrap progress: real MIR instructions, invalid SSA blocker (2026-07-06)
+
+The Stage 2 gate moved from inert terminator-only MIR to real bootstrap
+instructions after fixing bootstrap HIR block `has` propagation:
+
+```text
+stage2_hir_has_rc=1
+[mir-lower-free] done instr-total=26 term-total=39
+```
+
+After simplifying the bootstrap entry and disabling discardable
+`readonly alwaysinline` attributes for bootstrap-emitted functions, the preserved
+IR contains a plain `define i64 @__simple_main() nounwind`. The current bounded
+probe still fails before producing a usable Stage 2 binary:
+
+```text
+stage2_plain_functions_rc=1
+[mir-lower-free] done instr-total=12 term-total=24
+error: LLVM native linking failed: undefined symbol: __simple_main
+```
+
+Direct `llc` on the preserved IR reports the underlying verifier failure:
+
+```text
+Instruction does not dominate all uses!
+llc: error: input module cannot be verified
+```
+
+Firmware proof remains blocked until bootstrap MIR-to-LLVM emits valid SSA for
+conditional merge values in `__simple_main` and the `llc` object helper refuses
+empty/non-object outputs.

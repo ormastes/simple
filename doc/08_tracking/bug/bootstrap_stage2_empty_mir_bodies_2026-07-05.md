@@ -466,3 +466,55 @@ Next work: make the bootstrap lowering preserve enough semantics for
 `--version` to print a banner and for `native-build` to fail closed with a
 non-zero result. Do not treat the linked Stage 2 artifact as production proof
 until those smoke checks pass.
+
+## 2026-07-06 Progress: tail values survive; next blocker is invalid SSA
+
+Bootstrap HIR block lowering now sets `has: true` when it extracts a tail value.
+That moved the fresh Stage 2 MIR path from terminator-only bodies to real
+instructions:
+
+```text
+stage2_hir_has_rc=1
+[mir-lower-free] done instr-total=26 term-total=39
+```
+
+The bootstrap entry was then simplified to keep the current smoke target small:
+`bootstrap_output_from_args(...)` returns `"a.out"` and
+`run_native_build_bootstrap(...)` returns literal `1`. The following focused
+checks passed:
+
+```text
+PASS test/01_unit/compiler/hir/bootstrap_block_value_has_source_spec.spl
+PASS test/01_unit/compiler/backend/bootstrap_llvm_entry_symbol_source_spec.spl
+bin/simple check src/app/cli/bootstrap_main.spl
+```
+
+Bootstrap LLVM emission now uses plain function definitions in bootstrap mode
+instead of `readonly alwaysinline`, so entry definitions are present in the
+preserved IR.
+
+Current bounded Stage 2 probe:
+
+```text
+stage2_plain_functions_rc=1
+[mir-lower-free] done instr-total=12 term-total=24
+[llvm-tools] llc-object
+error: LLVM native linking failed: undefined symbol: __simple_main
+```
+
+Direct `llc` on the preserved IR shows the real backend failure hidden by the
+object helper:
+
+```text
+Instruction does not dominate all uses!
+  %l0 = add i64 undef, 0
+  %1 = icmp ne i64 %l0, 0
+llc: error: input module cannot be verified
+```
+
+Current blocker: bootstrap MIR-to-LLVM emits invalid SSA for values assigned
+inside conditional blocks and reused after merges in `__simple_main`. The helper
+currently treats the failed `llc` object as success and leaves an empty object,
+which then links as missing `__simple_main`. Next work should fix the SSA merge
+value lowering and make `compile_ir_to_object` fail loudly when `llc` leaves an
+empty/non-object output.
