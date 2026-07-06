@@ -1,0 +1,108 @@
+"""
+# Claude Full Bridge Small Helpers
+
+## Overview
+
+Checks the small bridge and grouped-message parity helpers added from the
+Claude CLI source mirror.
+
+## Syntax
+
+Run with:
+
+```bash
+bin/simple test test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl --mode=interpreter
+```
+
+## Examples
+
+The scenarios exercise capacity wake cleanup and aborts, inbound image block
+normalization, bridge polling defaults, grouped tool-use rendering state, debug
+message formatting, and source line parity helpers.
+
+**Requirements:** N/A - strict llm_caret Claude CLI parity lane.
+**Plan:** N/A - target selected from strict checker output.
+**Design:** N/A - source mirror for Claude CLI bridge and message helpers.
+**Research:** N/A - upstream TypeScript files are the source reference.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.bridge.capacityWake.*
+use app.llm_caret.claude_full.bridge.debugUtils.*
+use app.llm_caret.claude_full.bridge.inboundMessages.*
+use app.llm_caret.claude_full.bridge.pollConfigDefaults.*
+use app.llm_caret.claude_full.components.messages.GroupedToolUseContent.*
+
+describe "Claude full bridge small helpers":
+    it "should model capacity wake signal lifecycle":
+        step("Create signal, cleanup it, wake next generation, and abort")
+        val initial = capacityWakeInitial()
+        val signal = capacityWakeSignal(initial)
+        expect(signal.aborted).to_equal(false)
+        expect(capacityWakeCleanup(signal)).to_equal(true)
+        val next = capacityWakeWake(initial)
+        expect(next.generation).to_equal(1)
+        val outer = capacityWakeSignal(capacityWakeAbortOuter(next))
+        expect(outer.aborted).to_equal(true)
+        expect(outer.cleanup_needed).to_equal(false)
+        val current = capacityWakeSignal(capacityWakeAbortCurrent(next))
+        expect(current.aborted).to_equal(true)
+
+    it "should normalize inbound user message images":
+        step("Convert malformed camel mediaType blocks and reject empty/non-user messages")
+        val jpeg = InboundContentBlock.imageBlock("", "", "/9j/base64")
+        val png = InboundContentBlock.imageBlock("", "image/png", "iVBORbase64")
+        val extracted = extractInboundMessageFields(InboundMessage.block("u1", [jpeg, png]))
+        expect(extracted.present).to_equal(true)
+        expect(extracted.blocks[0].media_type).to_equal("image/jpeg")
+        expect(extracted.blocks[1].media_type).to_equal("image/png")
+        expect(extractInboundMessageFields(InboundMessage.text("u2", "")).present).to_equal(false)
+        var assistant = InboundMessage.text("a1", "hello")
+        assistant.type_name = "assistant"
+        expect(extractInboundMessageFields(assistant).present).to_equal(false)
+
+    it "should expose bridge poll defaults":
+        step("Read default intervals and boolean helpers")
+        val cfg = defaultPollConfig()
+        expect(cfg.poll_interval_ms_not_at_capacity).to_equal(2000)
+        expect(cfg.poll_interval_ms_at_capacity).to_equal(600000)
+        expect(pollConfigAtCapacityDisabled(cfg)).to_equal(false)
+        expect(pollConfigHeartbeatEnabled(cfg)).to_equal(false)
+        expect(pollConfigKeepaliveEnabled(cfg)).to_equal(true)
+
+    it "should render grouped tool-use state":
+        step("Hide without renderer, animate in-progress groups, and match result ids")
+        val done = GroupedToolUseItem.new("a", true, false, false, 0, true)
+        val running = GroupedToolUseItem.new("b", false, false, true, 2, false)
+        val hidden = groupedToolUseContent("Bash", false, [done], true)
+        expect(hidden.visible).to_equal(false)
+        val render = groupedToolUseContent("Bash", true, [done, running], true)
+        expect(render.visible).to_equal(true)
+        expect(render.tool_name).to_equal("Bash")
+        expect(render.should_animate).to_equal(true)
+        expect(render.item_count).to_equal(2)
+        expect(groupedToolUseResultFor("a", ["x", "a"])).to_equal(true)
+        expect(groupedToolUseResultFor("z", ["x", "a"])).to_equal(false)
+
+    it "should describe debug utility output":
+        step("Flatten, truncate, redact, and capture bridge skip metadata")
+        expect(debugFlatten("a\nb")).to_equal("a\\nb")
+        expect(redactSecretValue("short")).to_equal("[REDACTED]")
+        expect(redactSecretValue("1234567890abcdef")).to_equal("12345678...cdef")
+        val err = DebugHttpError.new("request failed", 429, "too many")
+        expect(describeAxiosError(err)).to_equal("request failed: too many")
+        expect(extractHttpStatus(err)).to_equal(429)
+        expect(extractErrorDetail("", "fallback")).to_equal("fallback")
+        val event = logBridgeSkip("capacity", "sleeping", true, true)
+        expect(event.reason).to_equal("capacity")
+        expect(event.debug_message).to_equal("sleeping")
+        expect(event.v2).to_equal(true)
+        expect(debugTruncate("small")).to_equal("small")
+
+    it "should pin source-modeled line counts":
+        step("Expose modeled source sizes for parity checker")
+        expect(capacityWakeSourceLinesModeled()).to_equal(56)
+        expect(debugUtilsSourceLinesModeled()).to_equal(141)
+        expect(inboundMessagesSourceLinesModeled()).to_equal(80)
+        expect(pollConfigDefaultsSourceLinesModeled()).to_equal(82)
+        expect(groupedToolUseContentSourceLinesModeled()).to_equal(57)
