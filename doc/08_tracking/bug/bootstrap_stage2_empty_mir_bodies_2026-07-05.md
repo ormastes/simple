@@ -227,3 +227,60 @@ functions in this run:
 Next work: fix why the Stage 2 source-loading/flat-AST/HIR path presents
 `app.cli.bootstrap_main` with zero `module.functions` even though the source
 contains real entry functions.
+
+## 2026-07-06 Progress: Stage 2 reaches LLVM, next blocker is direct call callee IR
+
+After restoring the bootstrap arena/decl-count bridge fix, the bounded Stage 2
+probe moved past the empty-HIR/MIR blocker:
+
+```text
+[mir-lower-free] functions:count 6
+[hir-lower] bootstrap-functions:count 6
+```
+
+The run now reaches LLVM and fails in `llc`:
+
+```text
+error: Bootstrap module LLVM compile failed: llc failed during bootstrap
+llc: /tmp/simple_llvm_1942949.ll:8:18: error: integer constant must have integer type
+  %l0 = call i64 0()
+                 ^
+```
+
+Preserved evidence:
+
+- build log: `build/stage2_after_arena_fix.log`
+- IR: `/tmp/simple_llvm_1942949.ll`
+- manual repro: `llc /tmp/simple_llvm_1942949.ll -filetype=obj`
+
+Current fix direction: keep bootstrap `get_args()` as a named HIR builtin under
+`SIMPLE_BOOTSTRAP=1`, so MIR direct-call lowering keeps a symbol callee instead
+of losing the name and producing a numeric indirect call. Focused coverage:
+
+```text
+PASS test/01_unit/compiler/mir/mir_lowering_new_spec.spl
+PASS test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl
+```
+
+This is not a production pass yet. Follow-up fixes in this lane removed the
+first numeric direct callees, changed `get_args` / same-entry helper definitions
+to pointer/void/int return types as appropriate, and guarded LLVM GEP/aggregate
+lowering from emitting invalid `nil` element types.
+
+Latest bounded probe:
+
+```text
+stage2_after_mir_return_type_fix_rc=1
+[mir-lower-free] functions:count 6
+[hir-lower] bootstrap-functions:count 6
+llc: /tmp/simple_llvm_2155269.ll:80:32: error: '%l1' defined with type 'i64' but expected 'ptr'
+  %l8 = getelementptr i64, ptr %l1, %l7
+                               ^
+```
+
+The remaining blocker is narrower: the same-module `Var(symbol)` call to
+`get_cli_args()` still emits `call i64 @get_cli_args()` even though
+`@get_cli_args` is now defined as `ptr`. The next fix should make MIR return
+resolution recover the symbol table name for `Var(symbol)` bootstrap calls,
+then use the bootstrap return-type table for that name. Do not keep retrying the
+same Stage 2 probe until that source change exists.

@@ -379,6 +379,25 @@ impl MirLowering:
             case _:
                 MirType.i64()  # Default to i64
 
+    me bootstrap_call_return_type(name: text) -> MirType:
+        if name == "get_args" or name == "get_cli_args":
+            return MirType.ptr(MirType.i64(), false)
+        if name == "bootstrap_version" or name == "bootstrap_output_from_args":
+            return MirType.ptr(MirType.i64(), false)
+        if name == "eprint":
+            return MirType.unit()
+        MirType.i64()
+
+    me bootstrap_resolved_call_return_type(symbol: SymbolId, name: text) -> MirType:
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            return self.resolved_call_return_type(symbol)
+        var call_name = name
+        if call_name == "":
+            call_name = self.bootstrap_symbol_name(symbol)
+        if call_name != "":
+            return self.bootstrap_call_return_type(call_name)
+        self.resolved_call_return_type(symbol)
+
     me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
         """Lower function call.
 
@@ -421,7 +440,7 @@ impl MirLowering:
             case Var(symbol):
                 # Direct call - use Call instruction
                 val func_operand = self.symbol_to_operand(symbol)
-                val return_type = self.resolved_call_return_type(symbol)
+                val return_type = self.bootstrap_resolved_call_return_type(symbol, "")
                 var b = self.builder
                 val result = b.emit_call(func_operand, arg_operands, return_type)
                 if val result_local = result:
@@ -437,7 +456,7 @@ impl MirLowering:
                     MirConstValue.Str(callee_name),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
                 ))
-                val return_type = self.resolved_call_return_type(symbol)
+                val return_type = self.bootstrap_resolved_call_return_type(symbol, callee_name)
                 var b = self.builder
                 val result = b.emit_call(func_operand, arg_operands, return_type)
                 if val result_local = result:

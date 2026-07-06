@@ -28,6 +28,41 @@ fn is_interp_builtin_fn(name: text) -> bool:
      name == "file_read" or name == "file_write" or name == "file_delete" or
      name == "env_get" or name == "env_set")
 
+fn is_bootstrap_builtin_fn(name: text) -> bool:
+    name == "get_args" or
+    name == "eprint" or
+    name == "bootstrap_version" or
+    name == "native_build_help" or
+    name == "compile_result_exit" or
+    name == "bootstrap_output_from_args" or
+    name == "run_native_build_bootstrap" or
+    name == "get_cli_args" or
+    name == "main"
+
+fn hir_bootstrap_i64_type(span: Span) -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: span)
+
+fn hir_bootstrap_text_type(span: Span) -> HirType:
+    HirType(kind: HirTypeKind.Str, span: span)
+
+fn hir_bootstrap_text_array_type(span: Span) -> HirType:
+    HirType(kind: HirTypeKind.Array(hir_bootstrap_text_type(span), nil), span: span)
+
+fn hir_bootstrap_unit_type(span: Span) -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: span)
+
+fn bootstrap_builtin_return_type(name: text, span: Span) -> HirType:
+    if name == "get_args" or name == "get_cli_args":
+        return hir_bootstrap_text_array_type(span)
+    if name == "bootstrap_version" or name == "bootstrap_output_from_args":
+        return hir_bootstrap_text_type(span)
+    if name == "eprint":
+        return hir_bootstrap_unit_type(span)
+    hir_bootstrap_i64_type(span)
+
+fn bootstrap_builtin_signature(name: text, span: Span) -> HirType:
+    HirType(kind: HirTypeKind.Function([], bootstrap_builtin_return_type(name, span), []), span: span)
+
 # Expression Lowering
 # ============================================================================
 
@@ -115,8 +150,12 @@ impl HirLowering:
         them on first use and emit NamedVar so the HIR interpreter can
         dispatch by name (process_module registers every table symbol as a
         global Function value). Everything else stays an error."""
-        if is_interp_builtin_fn(name):
-            val bsym = self.symbols.define(name, SymbolKind.Function, nil, span, false, false, nil)
+        val is_bootstrap_builtin = (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and is_bootstrap_builtin_fn(name)
+        if is_interp_builtin_fn(name) or is_bootstrap_builtin:
+            var symbol_type: HirType? = nil
+            if is_bootstrap_builtin:
+                symbol_type = bootstrap_builtin_signature(name, span)
+            val bsym = self.symbols.define(name, SymbolKind.Function, symbol_type, span, false, false, nil)
             HirExprKind.NamedVar(bsym, name)
         else:
             self.error("unresolved name: {name}", span)

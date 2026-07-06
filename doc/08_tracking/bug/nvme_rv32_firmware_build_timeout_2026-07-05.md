@@ -264,6 +264,44 @@ and boot proceeds — the serial prints all 21 stage letters, then `MEM OK`,
 `PMM OK`, **`HEAP OK`**, **`SVC OK`**, `BOOT OK`. Two of the three required
 markers (`HEAP OK`, `SVC OK`) now pass.
 
+## Update — bootstrap compiler proof moved to LLVM direct-call blocker (2026-07-06)
+
+The self-hosted firmware build remains blocked by the broader Stage 2 compiler
+production proof, not by the NVMe OpenSSD firmware sources themselves. The
+latest bounded Stage 2 probe now sees real bootstrap bodies:
+
+```text
+[mir-lower-free] functions:count 6
+[hir-lower] bootstrap-functions:count 6
+```
+
+It fails later in LLVM object compilation on malformed direct-call IR:
+
+```text
+%l0 = call i64 0()
+llc: error: integer constant must have integer type
+```
+
+Evidence: `build/stage2_after_arena_fix.log`, preserved IR
+`/tmp/simple_llvm_1942949.ll`.
+
+Current narrow compiler progress: bootstrap `get_args()` / `eprint()` and known
+entry helpers now stay named through HIR/MIR, direct string function operands
+render as `@symbol`, and LLVM GEP/aggregate lowering no longer emits invalid
+`nil` element types. This does not claim firmware runtime PASS.
+
+Latest remaining compiler blocker:
+
+```text
+llc: /tmp/simple_llvm_2155269.ll:80:32: error: '%l1' defined with type 'i64' but expected 'ptr'
+  %l8 = getelementptr i64, ptr %l1, %l7
+                               ^
+```
+
+So the next compiler fix is still upstream of firmware: MIR must resolve
+same-module bootstrap `Var(symbol)` call return types by recovered symbol name
+so `get_cli_args()` is called as `ptr`, not `i64`.
+
 **Fault 2 (STILL OPEN, blocks `ALL RV32 NVME FW CHECKS PASS`): seed rv32 `i64`
 codegen miscompiles the selftest value-flow.** With the hang gone, the selftest
 completes but reports **every** stage failing (`_emit_fail_mask` prints all of
