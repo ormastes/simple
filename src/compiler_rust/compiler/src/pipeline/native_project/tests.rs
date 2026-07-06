@@ -2339,6 +2339,36 @@ fn test_freestanding_qualified_to_bare_alias_bridges_export_symbol() {
     );
 }
 
+#[test]
+fn test_freestanding_spl_main_is_entry_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let main_c = temp.path().join("main.c");
+    let main_o = temp.path().join("main.o");
+
+    std::fs::write(
+        &main_c,
+        r#"
+        int spl_main(void) { return 7; }
+        "#,
+    )
+    .unwrap();
+
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&main_c)
+        .arg("-o")
+        .arg(&main_o)
+        .status()
+        .unwrap()
+        .success());
+
+    let mut symbol_cache = std::collections::HashMap::new();
+    let entry = NativeProjectBuilder::freestanding_simple_main_entry_symbol(&[main_o], &mut symbol_cache).unwrap();
+
+    assert_eq!(entry, Some("spl_main".to_string()));
+}
+
 /// Regression test for a suspected cache hit/miss mix bug (issue #64): when an
 /// incremental native-project build has some modules served from the object
 /// cache and others freshly compiled (because only one module's source

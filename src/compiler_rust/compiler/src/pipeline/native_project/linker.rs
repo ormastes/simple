@@ -11,6 +11,31 @@ use super::tools::{
 };
 
 impl NativeProjectBuilder {
+    fn simpleos_sysroot_dir() -> PathBuf {
+        std::env::var("SIMPLEOS_SYSROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("build/os/sysroot"))
+    }
+
+    fn simpleos_user_runtime_paths(
+        cross_target: simple_common::target::Target,
+    ) -> Option<(PathBuf, PathBuf, PathBuf)> {
+        if cross_target.os != simple_common::target::TargetOS::SimpleOS
+            || cross_target.arch != simple_common::target::TargetArch::X86_64
+        {
+            return None;
+        }
+        let sysroot = Self::simpleos_sysroot_dir();
+        let crt0 = sysroot.join("lib").join("crt0.o");
+        let runtime = sysroot.join("lib").join("libsimple_runtime.a");
+        let libc = sysroot.join("lib").join("libsimpleos_c.a");
+        if crt0.exists() && runtime.exists() && libc.exists() {
+            Some((crt0, runtime, libc))
+        } else {
+            None
+        }
+    }
+
     fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
         let output = std::process::Command::new("nm")
             .arg("-g")
@@ -515,6 +540,24 @@ impl NativeProjectBuilder {
         cache
             .get(&key)
             .ok_or_else(|| format!("missing symbol cache entry for {}", obj.display()))
+    }
+
+    pub(crate) fn freestanding_simple_main_entry_symbol(
+        object_paths: &[PathBuf],
+        symbol_cache: &mut HashMap<PathBuf, Vec<String>>,
+    ) -> Result<Option<String>, String> {
+        let mut qualified_candidate: Option<String> = None;
+        for obj in object_paths {
+            for sym in Self::cached_global_symbols(symbol_cache, obj)? {
+                if sym == "spl_main" {
+                    return Ok(Some("spl_main".to_string()));
+                }
+                if sym.ends_with("__spl_main") && qualified_candidate.is_none() {
+                    qualified_candidate = Some(sym.to_string());
+                }
+            }
+        }
+        Ok(qualified_candidate)
     }
 
     /// Compile the C++ main stub to an object file.
@@ -1245,6 +1288,7 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
         let cc = find_c_compiler();
 
         let compiler_rt_builtins = find_compiler_rt_builtins(triple);
+        let simpleos_user_runtime = Self::simpleos_user_runtime_paths(cross_target);
 
         let mut boot_objects: Vec<PathBuf> = Vec::new();
         let mut boot_compile_failures: usize = 0;
@@ -1571,6 +1615,9 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                 c.arg(format!("--defsym={}={}", raw, target));
             }
             c.arg("-o").arg(&self.output);
+            if let Some((ref crt0, _, _)) = simpleos_user_runtime {
+                c.arg(crt0);
+            }
             for boot_obj in &boot_objects {
                 c.arg(boot_obj);
             }
@@ -1585,6 +1632,10 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
             }
             if let Some(ref stub_o) = freestanding_stub_obj {
                 c.arg(stub_o);
+            }
+            if let Some((_, ref runtime, ref libc)) = simpleos_user_runtime {
+                c.arg(runtime);
+                c.arg(libc);
             }
             c
         } else {
@@ -1610,6 +1661,9 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                 c.arg(format!("-Wl,--defsym={}={}", raw, target));
             }
             c.arg("-o").arg(&self.output);
+            if let Some((ref crt0, _, _)) = simpleos_user_runtime {
+                c.arg(crt0);
+            }
             for boot_obj in &boot_objects {
                 c.arg(boot_obj);
             }
@@ -1624,6 +1678,10 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
             }
             if let Some(ref stub_o) = freestanding_stub_obj {
                 c.arg(stub_o);
+            }
+            if let Some((_, ref runtime, ref libc)) = simpleos_user_runtime {
+                c.arg(runtime);
+                c.arg(libc);
             }
             c
         };
@@ -1724,17 +1782,34 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
             }
             let raw_start_alias = best_raw_start.clone().or(fallback_raw_start.clone());
             let spl_start_alias = best_spl_start.clone().or(fallback_spl_start.clone());
+            let simple_main_alias = if !has_boot_entry32 && raw_start_alias.is_none() && spl_start_alias.is_none() {
+                Self::freestanding_simple_main_entry_symbol(object_paths, &mut symbol_cache)?
+            } else {
+                None
+            };
+            let primary_entry_alias = raw_start_alias.clone().or(simple_main_alias.clone());
+            let has_simpleos_crt0 = simpleos_user_runtime.is_some();
 
             if !has_boot_entry32 {
-                if let Some(sym) = raw_start_alias.clone() {
-                    if use_direct_lld.is_some() {
+                if let Some(sym) = primary_entry_alias.clone() {
+                    if has_simpleos_crt0 {
+                        if use_direct_lld.is_some() {
+                            cmd.arg(format!("--defsym=main={}", sym));
+                            cmd.arg("--entry=_start");
+                        } else {
+                            cmd.arg(format!("-Wl,--defsym=main={}", sym));
+                            cmd.arg("-Wl,--entry=_start");
+                        }
+                    } else if use_direct_lld.is_some() {
                         cmd.arg(format!("--defsym=_start={}", sym));
+                        cmd.arg("--entry=_start");
                     } else {
                         cmd.arg(format!("-Wl,--defsym=_start={}", sym));
+                        cmd.arg("-Wl,--entry=_start");
                     }
                 }
             }
-            if let Some(sym) = raw_start_alias.clone().or(spl_start_alias.clone()) {
+            if let Some(sym) = primary_entry_alias.clone().or(spl_start_alias.clone()) {
                 if use_direct_lld.is_some() {
                     cmd.arg(format!("--defsym=__simple_entry_start={}", sym));
                 } else {
