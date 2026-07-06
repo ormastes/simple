@@ -207,6 +207,7 @@ impl Linter:
         self.check_param_tag_spl(path, content)
         self.check_stale_md_diagrams(path, content)
         self.check_accessor_and_parent_names(path, content)
+        self.check_llvm_backend_type_safety(path, content)
 
         # Run shared EasyFix rules and attach as lint results
         val shared_fixes = check_all_rules(content, path)
@@ -639,4 +640,21 @@ impl Linter:
                             "SDN diagram has placeholder hash — run 'simple md-diagram-update'")
                             .with_fix("Run: simple md-diagram-update " + path)
                         self.results.push(LintResult.new(path, line_num, 0, lint))
+            line_num = line_num + 1
+
+    me check_llvm_backend_type_safety(path: String, content: String):
+        if not path.contains("src/compiler/70.backend/backend/"):
+            return
+        if not path.contains("MirToLlvm") and not path.contains("mir_to_llvm_instructions.spl"):
+            return
+        val lines = content.split("\n")
+        var line_num = 1
+        for line in lines:
+            val trimmed = line.trim()
+            val returns_raw_type = (trimmed.contains("ret_ty = self.get_local_type(") or trimmed.contains("phi_ty = self.get_local_type("))
+            if returns_raw_type and not trimmed.contains("valid_llvm_type("):
+                val lint = Lint.new("LLVM001", LintLevel.Deny, LintCategory.Correctness,
+                    "LLVM result type is read from local metadata without valid_llvm_type guard")
+                    .with_fix("Wrap the local type in valid_llvm_type before emitting LLVM call/phi/result text")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
             line_num = line_num + 1

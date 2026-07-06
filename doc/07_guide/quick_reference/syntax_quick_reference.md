@@ -500,6 +500,13 @@ The `.?` operator checks if a value is **present** (not nil AND not empty).
 It returns `T?` — the value itself if present, `nil` if absent. This enables
 pattern binding with `if val`:
 
+Compiler/backend note: `nil` means missing metadata. Backend emitters must not
+stringify it as a target type or symbol. Normalize optional compiler metadata
+with the target backend guard (for LLVM, `valid_llvm_type(...)`) before emitting
+call, phi, cast, load/store result, or serialized MIR text. `simple lint` reports
+`LLVM001` when LLVM result type metadata is read with raw `get_local_type(...)`
+in known result-type positions.
+
 ```simple
 # Returns T? (value if present, nil if absent)
 opt.?                         # T?:    pass-through (already optional)

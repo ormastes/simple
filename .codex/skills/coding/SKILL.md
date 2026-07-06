@@ -161,6 +161,11 @@ user?.name ?? "Anonymous"      # Optional chaining + nil coalescing
 
 `nil` is absence, like an empty `Option`, not a showable value. Use `if val x = maybe_value`, `.?`, `?.`, or `??` before field access, method calls, or user-facing output.
 
+Compiler backend code must treat `nil` metadata as invalid output. Do not emit
+or cache `nil` as a target type. For LLVM result positions, wrap local/type
+metadata with `valid_llvm_type(...)`; `simple lint` reports `LLVM001` for raw
+`ret_ty`/`phi_ty = self.get_local_type(...)` in LLVM emitters.
+
 ### Operators
 
 ```simple

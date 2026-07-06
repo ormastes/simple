@@ -116,6 +116,10 @@ Skip if exist. See `design` skill for details.
 bin/simple test && bin/simple build lint
 ```
 
+For compiler backend changes, add or refresh focused lint/spec coverage for
+invalid target text such as `call nil`, `phi nil`, `getelementptr nil`, and raw
+LLVM result type metadata. `LLVM001` must stay clean in LLVM emitter files.
+
 ### Phase 15: Verify + VCS Sync
 - Run `verify` skill — must show STATUS: PASS
 - For GUI/web/2D RenderDoc+Vulkan implementation work, use

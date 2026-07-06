@@ -31,6 +31,10 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
 14: Full Test Suite (`bin/simple test && bin/simple build lint`)
 15: Run $verify + final smoke checks + VCS Sync
 
+For compiler backend changes, add focused lint/spec coverage for invalid target
+text such as `call nil`, `phi nil`, `getelementptr nil`, and raw LLVM result
+type metadata. `LLVM001` must stay clean in LLVM emitter files.
+
 ## Rules
 
 - All code in `.spl` — no Python, no Bash
