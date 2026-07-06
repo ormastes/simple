@@ -295,6 +295,58 @@ Hard-won lessons for this live lane (each cost hours):
 - Related bug record filed alongside this change:
   `doc/08_tracking/bug/interp_enum_match_class_name_collision_2026-07-06.md`.
 
+## Handoff Notes (2026-07-06, GPU-offload landing)
+
+- **Persistent Engine2D GPU sessions (task #17) + hosted-WM engine2d raster
+  lane adoption (task #28-A) landed together.** `Engine2D.create_with_backend_fast`
+  is the session constructor to reuse across a redraw loop (widget showcase
+  `main()`, `HostCompositor`'s `Engine2dCompositorBackend`) instead of the old
+  create/shutdown-per-frame pattern — for Metal this keeps the GPU
+  device/queue/framebuffer alive across frames instead of re-initializing it
+  every redraw (raster-bound speedup measured 176x-684x vs. per-frame
+  create+shutdown, see `test/02_integration/rendering/engine2d_gpu_offload_evidence.spl`).
+- **Env knobs:** `SIMPLE_GUI_BACKEND` selects the Engine2D backend key (e.g.
+  `metal`/`software`/`vulkan`); `SIMPLE_WM_RASTER=engine2d` opts the live hosted
+  WM lane (`src/os/hosted/hosted_entry.spl`) into the persistent
+  `Engine2dCompositorBackend` instead of the default `HostedWinitBufferBackend`
+  — unset/any-other-value keeps the historical default lane byte-identical;
+  `SIMPLE_ONE_CALL_UPLOAD` gates the single-native-call Metal upload path
+  (mirrors the existing `SIMPLE_ONE_CALL_READBACK` split — see
+  `backend_metal.spl`'s `_dispatch_metal_image`).
+- **Frame handoff pattern for the engine2d raster lane:** the compositor draws
+  into its own Engine2D session (`comp.backend`), then
+  `comp.backend.get_pixel_buffer()` is blitted into a plain winit buffer
+  (`rt_winit_buffer_blit_pixels`) and presented (`rt_winit_buffer_present`) —
+  the winit buffer is NOT wrapped in `CompositorBackend`, it is only a present
+  sink for the already-composed frame. Provenance
+  (`comp.backend.frame_provenance()`) is logged every frame and must show
+  `source=device_readback` on Metal, never a silent `cpu_mirror` fallback
+  presented as GPU rendering; `comp.backend.shutdown()` on every exit path.
+- **`device_readback` provenance gate:** `test/03_system/gui/engine2d_gpu_offload_contract_spec.spl`
+  pins both the showcase and hosted-WM adoption sites as source contracts
+  (`hosted_entry.spl` is a real winit `fn main()` entry, so it's pinned by
+  content-grep rather than imported+run headless), plus a content pin (not
+  just length) on `HostCompositor.render_frame()`'s pixel buffer — a
+  zeroed/garbage readback fails the corner+centre color check where a bare
+  `len() == w*h` assertion would silently pass. Gate script:
+  `scripts/check/check-engine2d-gpu-offload-evidence.shs` (checks for
+  `device_readback` provenance in the evidence harness output).
+- **GUI present-loop change (GUI-5a):** `examples/06_io/ui/widget_showcase_gui.spl`'s
+  native present loop moved `winit_present_rgba` out of the top of every
+  `while running` iteration (which re-presented an unchanged frame every
+  ~30ms tick) to (a) one present just before the loop starts and (b) one
+  present inside the `if dirty:` branch, right after repacking the redrawn
+  pixels — presents now happen only when the frame actually changed.
+  `engine.shutdown()` on the loop's error-return path and after the loop is
+  unchanged by this move.
+- **Known follow-up, not yet fixed:** `as_glass_capable` on the Engine2D
+  session returns nil under the interpreter (pre-existing Option-marshalling
+  bug, not introduced by this landing) — `CompositorGlassCapable` impl should
+  be restored once that interpreter bug is fixed; until then the glass-capable
+  path is unexercised by this lane. The spec runner's metal-skip path (when no
+  Metal device is available on a host) prints a `SKIP:` line rather than
+  failing — keep that visibility when extending the contract spec.
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,

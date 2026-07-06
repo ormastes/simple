@@ -564,11 +564,16 @@ impl MetalBackend:
         # One-call pack: copy the whole [u32] block into the host buffer
         # Rust-side. The per-pixel metal_host_write_i32 loop below costs one
         # interpreted FFI round-trip per pixel (~480K for one 800x600 frame —
-        # minutes of pure dispatch overhead). Gated on the same
-        # SIMPLE_ONE_CALL_READBACK "modern one-call marshalling runtime" signal
-        # as read_pixels_gpu_only, since rt_write_u32s_to_raw is a hard error
-        # on runtimes built before it existed.
-        if _metal_env_flag("SIMPLE_ONE_CALL_READBACK"):
+        # minutes of pure dispatch overhead). Gated on its OWN opt-in flag
+        # (SIMPLE_ONE_CALL_UPLOAD), NOT on SIMPLE_ONE_CALL_READBACK: the
+        # download extern (rt_u32s_from_raw) and the upload extern
+        # (rt_write_u32s_to_raw) were added to the runtime at different times,
+        # and a deployed runtime can export the first without the second (bit-
+        # verified 2026-07-06: readback one-call works while draw_image upload
+        # hard-errors "unknown extern function: rt_write_u32s_to_raw" mid-
+        # frame). Unknown externs are a hard error at call time, so each fast
+        # path must be gated by a flag that pins exactly its own extern.
+        if _metal_env_flag("SIMPLE_ONE_CALL_UPLOAD"):
             val wrote = metal_write_u32s_to_ptr(host, pixels)
             if wrote < total_pixels:
                 metal_host_free(host)

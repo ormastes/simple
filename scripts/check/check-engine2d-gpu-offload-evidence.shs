@@ -1,0 +1,113 @@
+#!/bin/sh
+# GPU-offload evidence gate: live GUI paint -> Engine2D Metal dispatch.
+#
+# Runs test/02_integration/rendering/engine2d_gpu_offload_evidence.spl
+# (parity + WM composite stages), which renders identical GUI scenes on the
+# CPU software backend and the Metal GPU backend with ONE persistent session,
+# asserts pixel-exact equality, and requires the Metal readback source to be
+# device_readback (a cpu_mirror source = silent software fallback = FAIL).
+# On non-macOS the harness reports skip; a skip is not verified evidence and
+# must not be reported as a pass.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_SOURCE=auto-self-hosted
+    for _cand in bin/simple ./bin/simple release/*/simple bin/release/*/simple build/bootstrap/stage3/simple; do
+        if [ -x "$_cand" ]; then
+            SIMPLE_BIN="$_cand"
+            break
+        fi
+    done
+fi
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+fi
+
+TIMEOUT_SECS="${ENGINE2D_GPU_OFFLOAD_TIMEOUT_SECS:-600}"
+WORK_DIR="${BUILD_DIR:-build/engine2d-gpu-offload-evidence}"
+HARNESS="test/02_integration/rendering/engine2d_gpu_offload_evidence.spl"
+LOG="$WORK_DIR/offload.log"
+mkdir -p "$WORK_DIR"
+rm -f "$LOG"
+
+emit() {
+    echo "engine2d_gpu_offload_status=$STATUS"
+    echo "engine2d_gpu_offload_reason=$REASON"
+    echo "engine2d_gpu_offload_simple_bin=$SIMPLE_BIN"
+    echo "engine2d_gpu_offload_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "engine2d_gpu_offload_primitives=${PRIM_LINE:-none}"
+    echo "engine2d_gpu_offload_text=${TEXT_LINE:-none}"
+    echo "engine2d_gpu_offload_wm_composite=${WM_LINE:-none}"
+    echo "engine2d_gpu_offload_provenance_wm=${PROV_WM:-none}"
+    echo "engine2d_gpu_offload_policy=exact-bitmap-no-blur-no-tolerance+device-readback-required"
+    echo "engine2d_gpu_offload_harness=$HARNESS"
+    echo "engine2d_gpu_offload_log=$LOG"
+}
+
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    STATUS=fail
+    REASON="simple-bin-$SIMPLE_BIN_STATUS"
+    emit
+    exit 1
+fi
+
+have() { command -v "$1" >/dev/null 2>&1; }
+run_with_timeout() {
+    if have timeout; then timeout "$TIMEOUT_SECS" "$@"; else "$@"; fi
+}
+
+# Parity + WM stages only (the perf stages are report evidence, not a gate).
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=parity \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >"$LOG" 2>&1 || true
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=wm \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
+
+PRIM_LINE="$(grep -E '^primitives: ' "$LOG" | tail -n 1)"
+TEXT_LINE="$(grep -E '^text: ' "$LOG" | tail -n 1)"
+WM_LINE="$(grep -E '^wm_composite: ' "$LOG" | tail -n 1)"
+PROV_WM="$(grep -E '^PROVENANCE wm_composite ' "$LOG" | tail -n 1)"
+SKIP_LINE="$(grep -E '^GPU_OFFLOAD: skip' "$LOG" | tail -n 1)"
+
+STATUS=fail
+REASON=unknown
+if [ -n "$SKIP_LINE" ]; then
+    STATUS=skip
+    REASON=metal-unavailable
+elif echo "$PRIM_LINE" | grep -q 'MATCH' \
+    && echo "$TEXT_LINE" | grep -q 'MATCH' \
+    && echo "$WM_LINE" | grep -q 'MATCH' \
+    && echo "$WM_LINE" | grep -q 'source=device_readback' \
+    && echo "$PROV_WM" | grep -q 'source=device_readback'; then
+    STATUS=pass
+    REASON=cpu-metal-bitexact-device-readback
+elif [ -z "$PRIM_LINE" ] && [ -z "$WM_LINE" ]; then
+    REASON=no-verdict-emitted
+else
+    REASON=pixel-divergence-or-fallback
+fi
+
+emit
+echo "engine2d-gpu-offload: $STATUS ($REASON)"
+[ "$STATUS" = "pass" ] || exit 1

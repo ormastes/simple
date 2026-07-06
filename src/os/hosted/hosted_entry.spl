@@ -14,6 +14,7 @@ use os.compositor.host_compositor_entry.{
 }
 use os.compositor.hosted_backend_winit.{HostedWinitBufferBackend}
 use os.compositor.shared_mdi_host_seed.{seed_host_compositor_shared_mdi}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
@@ -28,6 +29,24 @@ extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_env_get(key: text) -> text?
+
+# Engine2D raster-lane present sink: a raw winit buffer used only to blit the
+# Engine2D-composed frame onto the window when SIMPLE_WM_RASTER=engine2d is
+# set. It is NOT wrapped in CompositorBackend — the compositor draws into the
+# Engine2D session (comp.backend), and this buffer only carries the final
+# pixels to the OS window each frame.
+extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
+extern fn rt_winit_buffer_blit_pixels(buf: i64, x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> bool
+extern fn rt_winit_buffer_present(win: i64, buf: i64) -> bool
+extern fn rt_winit_buffer_free(buf: i64) -> bool
+
+# SIMPLE_WM_RASTER=engine2d opts the live WM lane into the persistent Engine2D
+# compositor backend (src/os/compositor/compositor_engine2d.spl) instead of
+# the default HostedWinitBufferBackend. Unset/any-other-value keeps the
+# historical default lane byte-identical. See
+# doc/08_tracking/bug/ (task #28-A) for the adoption rationale.
+fn _engine2d_raster_mode() -> bool:
+    (rt_env_get("SIMPLE_WM_RASTER") ?? "") == "engine2d"
 
 val WINDOW_WIDTH: i32 = 1024
 val WINDOW_HEIGHT: i32 = 720
@@ -81,15 +100,36 @@ fn main() -> i64:
         return 1
     print "[hosted-wm] window-created backend=winit mode=windowed fullscreen=false width={WINDOW_WIDTH} height={WINDOW_HEIGHT} title={WINDOW_TITLE}"
 
-    val backend = HostedWinitBufferBackend.create(win, WINDOW_WIDTH, WINDOW_HEIGHT, 0xFF0F172Au32)
-    if backend == nil:
-        print "ERROR: hosted winit backend creation failed"
-        rt_winit_window_free(win)
-        rt_winit_event_loop_free(el)
-        return 1
+    val engine2d_raster = _engine2d_raster_mode()
+    if engine2d_raster:
+        val e2d_backend = Engine2dCompositorBackend.create_from_env(WINDOW_WIDTH, WINDOW_HEIGHT)
+        val present_sink = rt_winit_buffer_create(WINDOW_WIDTH.to_i64(), WINDOW_HEIGHT.to_i64(), 0xFF0F172A)
+        if present_sink <= 0:
+            print "ERROR: hosted engine2d present-sink buffer creation failed"
+            e2d_backend.shutdown()
+            rt_winit_window_free(win)
+            rt_winit_event_loop_free(el)
+            return 1
+        print "[hosted-wm] raster-backend=engine2d {e2d_backend.frame_provenance()}"
+        val comp = HostCompositor.new(e2d_backend, Size(width: WINDOW_WIDTH.to_u64(), height: WINDOW_HEIGHT.to_u64()))
+        return _run_hosted_wm(comp, el, win, true, present_sink, nil)
+    else:
+        val backend = HostedWinitBufferBackend.create(win, WINDOW_WIDTH, WINDOW_HEIGHT, 0xFF0F172Au32)
+        if backend == nil:
+            print "ERROR: hosted winit backend creation failed"
+            rt_winit_window_free(win)
+            rt_winit_event_loop_free(el)
+            return 1
+        val comp = HostCompositor.new(backend, Size(width: WINDOW_WIDTH.to_u64(), height: WINDOW_HEIGHT.to_u64()))
+        return _run_hosted_wm(comp, el, win, false, 0, backend)
 
+# Shared event loop + render/present + shutdown for both raster lanes. `comp`
+# arrives already backed by either HostedWinitBufferBackend (default) or
+# Engine2dCompositorBackend (SIMPLE_WM_RASTER=engine2d); `present_sink` and
+# `winit_backend` carry whichever lane-specific handle needs freeing on exit.
+fn _run_hosted_wm(comp_in: HostCompositor, el: i64, win: i64, engine2d_raster: bool, present_sink: i64, winit_backend: HostedWinitBufferBackend?) -> i64:
+    var comp = comp_in
     val live_proof = _live_proof_mode()
-    var comp = HostCompositor.new(backend, Size(width: WINDOW_WIDTH.to_u64(), height: WINDOW_HEIGHT.to_u64()))
     if live_proof:
         comp = _seed_live_proof_surface(comp)
         print "[hosted-wm] live-proof-mode enabled=true"
@@ -97,7 +137,13 @@ fn main() -> i64:
         comp = seed_host_compositor_shared_mdi(comp)
     print "[hosted-wm] windows-ready count={comp.windows.len()}"
     comp.render_frame()
-    print "[hosted-wm] frame-presented renderer=simple-web host=linux-windowed width={WINDOW_WIDTH} height={WINDOW_HEIGHT}"
+    if engine2d_raster:
+        val pixels0 = comp.backend.get_pixel_buffer()
+        rt_winit_buffer_blit_pixels(present_sink, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, pixels0)
+        rt_winit_buffer_present(win, present_sink)
+        print "[hosted-wm] frame-presented renderer=simple-web host=linux-windowed width={WINDOW_WIDTH} height={WINDOW_HEIGHT} raster=engine2d provenance={comp.backend.frame_provenance()}"
+    else:
+        print "[hosted-wm] frame-presented renderer=simple-web host=linux-windowed width={WINDOW_WIDTH} height={WINDOW_HEIGHT} raster=winit"
     print "Frame presented: shared lifecycle windows + Simple Web MDI content"
 
     var running = true
@@ -161,12 +207,23 @@ fn main() -> i64:
             ev = rt_winit_event_loop_poll_events(el, 1)
         if dirty or warmup_frames < 12:
             comp.render_frame()
+            if engine2d_raster:
+                val pixels = comp.backend.get_pixel_buffer()
+                rt_winit_buffer_blit_pixels(present_sink, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, pixels)
+                rt_winit_buffer_present(win, present_sink)
             if warmup_frames < 12:
                 warmup_frames = warmup_frames + 1
                 if warmup_frames == 12:
                     print "[hosted-wm] warmup-frames-presented count={warmup_frames}"
+                    if engine2d_raster:
+                        print "[hosted-wm] frame-provenance {comp.backend.frame_provenance()}"
 
-    backend.free()
+    if engine2d_raster:
+        print "[hosted-wm] frame-provenance-final {comp.backend.frame_provenance()}"
+        comp.backend.shutdown()
+        rt_winit_buffer_free(present_sink)
+    elif val wb = winit_backend:
+        wb.free()
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
     print "SimpleOS shared hosted WM closed"

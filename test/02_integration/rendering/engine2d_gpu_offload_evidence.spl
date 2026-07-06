@@ -1,0 +1,394 @@
+# GPU-offload evidence harness: live-GUI paint -> Engine2D Metal dispatch.
+#
+# Proves, with honest provenance, that the GUI raster work (the same primitive
+# ops the widget showcase and WM compositor issue) can be offloaded to a single
+# PERSISTENT Metal session reused across frames, and reports an honest per-
+# resolution perf verdict (CPU software vs Metal, with a draw/readback phase
+# breakdown) plus the session-reuse-vs-per-frame-create delta.
+#
+# Not an SSpec: the engine2d GPU module graph segfaults the test runner on
+# import (same reason engine2d_cpu_metal_parity_run.spl is a `run` harness), so
+# this is driven via `bin/simple run ... --mode=interpreter` by the check gate
+# scripts/check/check-engine2d-gpu-offload-evidence.shs.
+#
+# Honesty gates (guarding this area's history of false-greens):
+#   - Metal readback source MUST be device_readback (gpu_frame_complete==true);
+#     a CPU-mirror readback is reported as such and FAILS the parity gate.
+#   - CPU and Metal frames are produced by independent backends, never one
+#     renderer compared to itself.
+#   - Perf uses the checksum-free read_pixels() so the O(n) interpreted checksum
+#     loop does not distort the numbers; provenance uses read_pixels_with_source
+#     once at a small resolution.
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+use std.env.variables.{env_get}
+use os.compositor.host_compositor_entry.{HostCompositor, HostedWindow, host_wm_force_direct_chrome}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use common.window_protocol.geometry.{Size}
+
+var _failures = 0
+
+# ---------------------------------------------------------------------------
+# Canonical GUI paint scenes (shared by CPU and Metal so the scene is identical)
+# ---------------------------------------------------------------------------
+
+# Primitive-only scene (clear/rect/rect_filled/line/circle/circle_filled/
+# triangle_filled/gradient) — every op here is already proven bit-exact CPU vs
+# Metal by engine2d_cpu_metal_parity_run.spl. Deliberately excludes draw_text
+# (measured separately) and draw_rounded_rect (a known software-outline bug,
+# D2 matrix line 227). Tiles a 130px cell across the surface so op-count scales
+# with resolution the way a real GUI frame does.
+fn paint_primitives(b: Engine2D, w: i32, h: i32):
+    b.clear(0xFF0F172A as u32)
+    val tile = 130
+    var ty = 0
+    while (ty + tile) <= h:
+        var tx = 0
+        while (tx + tile) <= w:
+            b.draw_rect_filled(tx + 5, ty + 5, 100, 60, 0xFF2563EB as u32)
+            b.draw_rect(tx + 5, ty + 5, 100, 60, 0xFFFFFFFF as u32)
+            b.draw_line(tx + 5, ty + 75, tx + 105, ty + 75, 0xFF64748B as u32, 2)
+            b.draw_circle(tx + 20, ty + 100, 14, 0xFF22C55E as u32)
+            b.draw_circle_filled(tx + 60, ty + 100, 10, 0xFFF59E0B as u32)
+            b.draw_triangle_filled(tx + 80, ty + 85, tx + 105, ty + 85, tx + 92, ty + 120, 0xFFEF4444 as u32)
+            b.draw_gradient_rect(tx + 5, ty + 118, 100, 8, 0xFF111111 as u32, 0xFF999999 as u32)
+            tx = tx + tile
+        ty = ty + tile
+
+# Text scene — a few strings at the showcase's font size. draw_text on Metal
+# renders each lit 5x7 glyph pixel as an individual rect dispatch; this scene
+# exists to measure text parity + text dispatch cost honestly and separately.
+fn paint_text(b: Engine2D, w: i32, h: i32):
+    b.clear(0xFF000000 as u32)
+    b.draw_text(10, 10, "Hello GPU", 0xFFFFFFFF as u32, 14)
+    b.draw_text(10, 40, "Widget Showcase", 0xFF22C55E as u32, 14)
+    b.draw_text(10, 70, "Metal Offload", 0xFFF59E0B as u32, 14)
+
+# ---------------------------------------------------------------------------
+# Single-frame renders (one backend each)
+# ---------------------------------------------------------------------------
+
+fn cpu_primitives(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend(w, h, "software")
+    paint_primitives(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+fn metal_primitives(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend_fast(w, h, "metal")
+    paint_primitives(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+fn cpu_text(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend(w, h, "software")
+    paint_text(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+fn metal_text(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend_fast(w, h, "metal")
+    paint_text(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+# ---------------------------------------------------------------------------
+# Parity comparison (honest: requires device_readback source on the Metal side)
+# ---------------------------------------------------------------------------
+
+fn compare_exact(name: text, cpu_rb: Engine2DReadback, metal_rb: Engine2DReadback):
+    val cpu_px = cpu_rb.pixels
+    val metal_px = metal_rb.pixels
+    print "{name}: cpu_source={cpu_rb.source} metal_source={metal_rb.source} cpu_checksum={cpu_rb.checksum} metal_checksum={metal_rb.checksum}"
+    if metal_rb.source != "device_readback":
+        _failures = _failures + 1
+        print "{name}: DIVERGE reason=metal-not-device-readback source={metal_rb.source}"
+        return
+    if cpu_px.len() != metal_px.len():
+        _failures = _failures + 1
+        print "{name}: DIVERGE reason=length cpu={cpu_px.len()} metal={metal_px.len()}"
+        return
+    var mism = 0
+    var first = -1
+    var i = 0
+    val n = cpu_px.len()
+    while i < n:
+        if cpu_px[i] != metal_px[i]:
+            mism = mism + 1
+            if first < 0:
+                first = i
+        i = i + 1
+    if mism == 0:
+        print "{name}: MATCH pixels={n} source={metal_rb.source}"
+    else:
+        _failures = _failures + 1
+        val fc = cpu_px[first]
+        val fm = metal_px[first]
+        print "{name}: DIVERGE mism={mism}/{n} first={first} cpu={fc.to_text()} metal={fm.to_text()} source={metal_rb.source}"
+
+# ---------------------------------------------------------------------------
+# Perf helpers
+# ---------------------------------------------------------------------------
+
+# median of a list, ignoring index 0 (warmup frame). Small N; simple selection.
+fn median_tail(times: [i64]) -> i64:
+    var vals: [i64] = []
+    var i = 1
+    while i < times.len():
+        vals.push(times[i])
+        i = i + 1
+    if vals.len() == 0:
+        return -1
+    # insertion sort
+    var a = 0
+    while a < vals.len():
+        var b = a + 1
+        while b < vals.len():
+            if vals[b] < vals[a]:
+                val tmp = vals[a]
+                vals[a] = vals[b]
+                vals[b] = tmp
+            b = b + 1
+        a = a + 1
+    vals[vals.len() / 2]
+
+# CPU perf: reuse one software Engine2D across frames. Returns (draw_us, readback_us) medians.
+fn perf_cpu(w: i32, h: i32, frames: i64) -> (i64, i64):
+    var e = Engine2D.create_with_backend(w, h, "software")
+    var draws: [i64] = []
+    var reads: [i64] = []
+    var f = 0
+    while f < frames:
+        val t0 = time_now_micros()
+        paint_primitives(e, w, h)
+        e.present()
+        val t1 = time_now_micros()
+        val px = e.read_pixels()
+        val t2 = time_now_micros()
+        draws.push(t1 - t0)
+        reads.push(t2 - t1)
+        f = f + 1
+    e.shutdown()
+    (median_tail(draws), median_tail(reads))
+
+# Metal perf, PERSISTENT session: create once, reuse across frames.
+fn perf_metal_persistent(w: i32, h: i32, frames: i64) -> (i64, i64, text):
+    var e = Engine2D.create_with_backend_fast(w, h, "metal")
+    var draws: [i64] = []
+    var reads: [i64] = []
+    var src = "unknown"
+    var f = 0
+    while f < frames:
+        val t0 = time_now_micros()
+        paint_primitives(e, w, h)
+        e.present()
+        val t1 = time_now_micros()
+        val px = e.read_pixels()
+        val t2 = time_now_micros()
+        draws.push(t1 - t0)
+        reads.push(t2 - t1)
+        f = f + 1
+    val rb = e.read_pixels_with_source()
+    src = rb.source
+    e.shutdown()
+    (median_tail(draws), median_tail(reads), src)
+
+# Metal perf, PER-FRAME CREATE: create+shutdown a fresh session every frame
+# (the anti-pattern the "gpu process" fix eliminates). Returns median total_us.
+fn perf_metal_per_frame(w: i32, h: i32, frames: i64) -> i64:
+    var totals: [i64] = []
+    var f = 0
+    while f < frames:
+        val t0 = time_now_micros()
+        var e = Engine2D.create_with_backend_fast(w, h, "metal")
+        paint_primitives(e, w, h)
+        e.present()
+        val px = e.read_pixels()
+        e.shutdown()
+        val t1 = time_now_micros()
+        totals.push(t1 - t0)
+        f = f + 1
+    median_tail(totals)
+
+fn report_perf(label: text, w: i32, h: i32, frames: i64):
+    val cpu = perf_cpu(w, h, frames)
+    val cpu_draw = cpu.0
+    val cpu_read = cpu.1
+    val mp = perf_metal_persistent(w, h, frames)
+    val m_draw = mp.0
+    val m_read = mp.1
+    val m_src = mp.2
+    val m_pf = perf_metal_per_frame(w, h, frames)
+    val cpu_total = cpu_draw + cpu_read
+    val m_total = m_draw + m_read
+    print "PERF[{label}] res={w}x{h} frames={frames}"
+    print "PERF[{label}] cpu_draw_us={cpu_draw} cpu_readback_us={cpu_read} cpu_total_us={cpu_total}"
+    print "PERF[{label}] metal_persistent_draw_us={m_draw} metal_persistent_readback_us={m_read} metal_persistent_total_us={m_total} metal_source={m_src}"
+    print "PERF[{label}] metal_per_frame_create_total_us={m_pf}"
+    val reuse_delta = m_pf - m_total
+    print "PERF[{label}] session_reuse_saves_us={reuse_delta} (per_frame_create_total - persistent_total)"
+    var verdict = "metal-wins"
+    if m_total > cpu_total:
+        verdict = "cpu-wins"
+    print "PERF[{label}] verdict={verdict} (lower total_us is better)"
+
+# ---------------------------------------------------------------------------
+# WM compositor composite-frame lane (HostCompositor.render_frame through
+# Engine2dCompositorBackend, direct-draw chrome pinned for determinism —
+# the fast CSS chrome lane has its own cache/gates owned elsewhere).
+# ---------------------------------------------------------------------------
+
+fn _wm_test_window(id: i64, title: text, x: i32, y: i32, w: i32, h: i32, focused: bool) -> HostedWindow:
+    HostedWindow(
+        id: id,
+        owner_port: 0,
+        title: title,
+        x: x,
+        y: y,
+        w: w,
+        h: h,
+        content: "count=1",
+        process_id: 0,
+        app_id: "gpu-offload-evidence",
+        minimized: false,
+        focused: focused
+    )
+
+# Render ONE composed WM frame (chrome + two app windows + taskbar) on the
+# named Engine2D backend and return the COMPOSITOR: pixels must be read
+# through comp.backend, NOT a local backend binding — mutations through
+# comp.backend do not write back into the local copy (value semantics; same
+# trap documented in wm_gui_window_drawing_evidence.spl).
+fn wm_composite_frame(w: i32, h: i32, backend_name: text) -> HostCompositor:
+    val backend = Engine2dCompositorBackend.create_named(w, h, backend_name)
+    var comp = HostCompositor.new(backend, Size(width: w.to_u64(), height: h.to_u64()))
+    comp.windows = [
+        _wm_test_window(1, "Alpha", 24, 20, 200, 160, false),
+        _wm_test_window(2, "Beta", 140, 96, 220, 170, true)
+    ]
+    comp.render_frame()
+    comp
+
+fn wm_parity(w: i32, h: i32):
+    host_wm_force_direct_chrome(true)
+    val t0 = time_now_micros()
+    var cpu_comp = wm_composite_frame(w, h, "software")
+    val t1 = time_now_micros()
+    print "stage-time wm_cpu_frame_us={t1 - t0}"
+    var metal_comp = wm_composite_frame(w, h, "metal")
+    val t2 = time_now_micros()
+    print "stage-time wm_metal_frame_us={t2 - t1}"
+    val cpu_rb = cpu_comp.backend.engine.read_pixels_with_source()
+    val metal_rb = metal_comp.backend.engine.read_pixels_with_source()
+    compare_exact("wm_composite", cpu_rb, metal_rb)
+    print "PROVENANCE wm_composite backend=metal source={metal_rb.source}"
+    cpu_comp.backend.shutdown()
+    metal_comp.backend.shutdown()
+    host_wm_force_direct_chrome(false)
+
+# WM composite perf: persistent compositor+session reused across frames
+# (render_frame per frame; content web-layout cost is backend-independent and
+# identical in both lanes — the delta isolates the raster backend).
+fn wm_perf(w: i32, h: i32, frames: i64, backend_name: text) -> i64:
+    host_wm_force_direct_chrome(true)
+    val backend = Engine2dCompositorBackend.create_named(w, h, backend_name)
+    var comp = HostCompositor.new(backend, Size(width: w.to_u64(), height: h.to_u64()))
+    comp.windows = [
+        _wm_test_window(1, "Alpha", 24, 20, 200, 160, false),
+        _wm_test_window(2, "Beta", 140, 96, 220, 170, true)
+    ]
+    var times: [i64] = []
+    var f = 0
+    while f < frames:
+        val t0 = time_now_micros()
+        comp.render_frame()
+        val px = comp.backend.engine.read_pixels()
+        val t1 = time_now_micros()
+        times.push(t1 - t0)
+        f = f + 1
+    comp.backend.shutdown()
+    host_wm_force_direct_chrome(false)
+    median_tail(times)
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+fn _is_macos() -> bool:
+    val ostype = (env_get("OSTYPE") ?? "").lower()
+    ostype.contains("darwin") or ostype.contains("mac")
+
+fn main() -> i64:
+    # macOS-only: native Metal. Non-macOS reports skip (not a pass).
+    val uname_probe = env_get("SIMPLE_GPU_OFFLOAD_FORCE") ?? ""
+    if uname_probe == "":
+        # cheap platform check via a probe engine's backend name
+        var probe = Engine2D.create_with_backend_fast(8, 8, "metal")
+        val pname = probe.backend_name()
+        probe.shutdown()
+        if pname != "metal":
+            print "GPU_OFFLOAD: skip reason=metal-unavailable backend={pname}"
+            return 2
+
+    val stage = env_get("GPU_OFFLOAD_STAGE") ?? "all"
+    val frames = (env_get("GPU_OFFLOAD_FRAMES") ?? "4").parse_i64() ?? 4
+
+    if stage == "all" or stage == "parity":
+        print "=== GPU offload evidence: parity ==="
+        # Parity at a modest resolution where a full pixel-exact compare is feasible.
+        val pw = 256
+        val ph = 192
+        val t0 = time_now_micros()
+        val cpu_prim = cpu_primitives(pw, ph)
+        val t1 = time_now_micros()
+        print "stage-time cpu_primitives_us={t1 - t0}"
+        val metal_prim = metal_primitives(pw, ph)
+        val t2 = time_now_micros()
+        print "stage-time metal_primitives_us={t2 - t1}"
+        compare_exact("primitives", cpu_prim, metal_prim)
+
+        val t3 = time_now_micros()
+        val cpu_txt = cpu_text(pw, ph)
+        val t4 = time_now_micros()
+        print "stage-time cpu_text_us={t4 - t3}"
+        val metal_txt = metal_text(pw, ph)
+        val t5 = time_now_micros()
+        print "stage-time metal_text_us={t5 - t4}"
+        compare_exact("text", cpu_txt, metal_txt)
+
+        print "PROVENANCE primitives backend=metal source={metal_prim.source}"
+        print "PROVENANCE text backend=metal source={metal_txt.source}"
+
+    if stage == "all" or stage == "wm":
+        print "=== GPU offload evidence: WM composite parity (direct-draw chrome) ==="
+        wm_parity(480, 360)
+        val wm_cpu_us = wm_perf(480, 360, frames, "software")
+        val wm_metal_us = wm_perf(480, 360, frames, "metal")
+        print "PERF[wm-480x360] cpu_frame_us={wm_cpu_us} metal_frame_us={wm_metal_us}"
+        var wm_verdict = "metal-wins"
+        if wm_metal_us > wm_cpu_us:
+            wm_verdict = "cpu-wins"
+        print "PERF[wm-480x360] verdict={wm_verdict}"
+
+    if stage == "all" or stage == "perf-small":
+        print "=== GPU offload evidence: perf 520x660 ==="
+        report_perf("showcase-520x660", 520, 660, frames)
+    if stage == "all" or stage == "perf-big":
+        print "=== GPU offload evidence: perf 1280x720 ==="
+        report_perf("wm-1280x720", 1280, 720, frames)
+
+    if _failures == 0:
+        print "GPU_OFFLOAD: pass"
+        return 0
+    print "GPU_OFFLOAD: fail failures={_failures}"
+    1

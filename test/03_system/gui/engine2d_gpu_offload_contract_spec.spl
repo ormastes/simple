@@ -1,0 +1,161 @@
+# GPU-offload wiring contract for the live GUI lanes (showcase + WM compositor).
+#
+# The pixel-level proof (bit-exact CPU-vs-Metal parity, device_readback
+# provenance, perf medians incl. session-reuse-vs-per-frame-create) lives in
+# the run harness test/02_integration/rendering/engine2d_gpu_offload_evidence.spl
+# driven by scripts/check/check-engine2d-gpu-offload-evidence.shs — it cannot be
+# an SSpec because importing the engine2d GPU module graph segfaults the test
+# runner (same reason engine2d_cpu_metal_parity_run.spl is a run harness).
+#
+# This spec pins the SOURCE contract of that wiring so a regression that
+# silently unhooks the GPU lane (or flips the default lane away from CPU)
+# fails fast in the normal test suite:
+#   (a) the metal lane must surface typed device_readback provenance,
+#   (b) parity is asserted against the CPU lane by the evidence harness,
+#   (c) the DEFAULT lane stays CPU ("software") when no flag/env is set.
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.host_compositor_entry.{HostCompositor, host_wm_force_direct_chrome}
+use common.window_protocol.geometry.{Size}
+
+val SHOWCASE_SRC = "examples/06_io/ui/widget_showcase_gui.spl"
+val COMPOSITOR_BACKEND_SRC = "src/os/compositor/compositor_engine2d.spl"
+val EVIDENCE_SRC = "test/02_integration/rendering/engine2d_gpu_offload_evidence.spl"
+val METAL_MSL_SRC = "src/lib/gc_async_mut/gpu/engine2d/backend_metal_msl.spl"
+val METAL_BACKEND_SRC = "src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl"
+val HOSTED_ENTRY_SRC = "src/os/hosted/hosted_entry.spl"
+
+describe "GPU offload wiring contract (showcase + WM compositor)":
+
+    it "keeps CPU as the showcase default lane and honors --backend/env selection":
+        val src = file_read(SHOWCASE_SRC)
+        # default is software when no flag/env is set
+        expect(src).to_contain("return \"software\"")
+        # selection hooks: CLI flag first, then env
+        expect(src).to_contain("--backend=")
+        expect(src).to_contain("SIMPLE_GUI_BACKEND")
+
+    it "renders the showcase through ONE persistent session reused across frames":
+        val src = file_read(SHOWCASE_SRC)
+        # persistent session created once via the fast (GPU-only for metal) path
+        expect(src).to_contain("Engine2D.create_with_backend_fast(w, h, showcase_backend_key())")
+        # redraw loop paints into the existing engine, no per-frame create
+        expect(src).to_contain("build_frame_state_into(engine, fw, fh, state)")
+        # explicit shutdown on exit paths
+        expect(src).to_contain("engine.shutdown()")
+
+    it "surfaces honest frame provenance in the showcase frame log":
+        val src = file_read(SHOWCASE_SRC)
+        expect(src).to_contain("read_pixels_with_source()")
+        # brace-free needle: the print template itself contains interpolation
+        # braces which a literal here would re-interpolate
+        expect(src).to_contain("showcase_frame_backend=")
+
+    it "wires the WM compositor raster lane through Engine2dCompositorBackend by name":
+        val src = file_read(COMPOSITOR_BACKEND_SRC)
+        # trait conformance so HostCompositor can compose through Engine2D ops
+        expect(src).to_contain("impl CompositorBackend for Engine2dCompositorBackend:")
+        # backend-by-name factory with ONE persistent session + explicit shutdown
+        expect(src).to_contain("static fn create_named(width: i32, height: i32, backend_name: text) -> Engine2dCompositorBackend:")
+        expect(src).to_contain("Engine2D.create_with_backend_fast(width, height, backend_name)")
+        expect(src).to_contain("me shutdown():")
+        # CPU default when no env is set
+        expect(src).to_contain("return \"software\"")
+        # honest provenance accessor
+        expect(src).to_contain("fn frame_provenance() -> text:")
+
+    it "asserts device_readback provenance and CPU-vs-Metal parity in the evidence harness":
+        val src = file_read(EVIDENCE_SRC)
+        # (a) metal lane must be device_readback — cpu_mirror fails the gate
+        expect(src).to_contain("if metal_rb.source != \"device_readback\":")
+        # (b) bit-exact pixel compare of independently produced CPU/Metal frames
+        expect(src).to_contain("compare_exact(\"primitives\", cpu_prim, metal_prim)")
+        expect(src).to_contain("compare_exact(\"wm_composite\", cpu_rb, metal_rb)")
+
+    it "keeps the Metal circle-outline kernel on the canonical d<0 midpoint tie-break":
+        val src = file_read(METAL_MSL_SRC)
+        # kernel_draw_circle replays the CPU midpoint loop; the tie-break must
+        # stay `d < 0` (D2-canonical, matches backend_software/backend_emu) —
+        # `d <= 0` diverges by 16 ring pixels at midpoint-tie radii (r=4, r=14)
+        expect(src).to_contain("midpoint-tie radii")
+
+    it "gates the one-call draw_image upload on its own runtime capability flag":
+        val src = file_read(METAL_BACKEND_SRC)
+        # upload extern (rt_write_u32s_to_raw) is newer than the download
+        # extern; sharing the readback flag hard-errors mid-frame on runtimes
+        # that export only the download side
+        expect(src).to_contain("SIMPLE_ONE_CALL_UPLOAD")
+
+# Task #28-A: live WM lane adoption of the persistent Engine2D compositor
+# backend (src/os/hosted/hosted_entry.spl). hosted_entry.spl is a winit-
+# windowed `fn main()` entry (real OS window + event loop) so it cannot be
+# imported and run headless in-process here; its opt-in gate and present
+# seam are pinned as a source contract (same pattern as the showcase/WM
+# checks above), while the underlying Engine2dCompositorBackend construction
+# + provenance API it calls into IS imported and exercised for real below.
+describe "Hosted WM engine2d raster-lane adoption (task #28-A)":
+
+    it "keeps the default hosted WM lane on the existing backend when SIMPLE_WM_RASTER is unset":
+        val src = file_read(HOSTED_ENTRY_SRC)
+        # opt-in gate: only "engine2d" flips the lane, any other/unset value
+        # (including "") keeps the historical HostedWinitBufferBackend path
+        expect(src).to_contain("(rt_env_get(\"SIMPLE_WM_RASTER\") ?? \"\") == \"engine2d\"")
+        expect(src).to_contain("HostedWinitBufferBackend.create(win, WINDOW_WIDTH, WINDOW_HEIGHT")
+
+    it "adopts Engine2dCompositorBackend via create_from_env and presents through a winit blit sink":
+        val src = file_read(HOSTED_ENTRY_SRC)
+        expect(src).to_contain("Engine2dCompositorBackend.create_from_env(WINDOW_WIDTH, WINDOW_HEIGHT)")
+        # frame handoff: engine2d draws into its own session; the pixel buffer
+        # is blitted into a plain winit buffer and presented to the OS window
+        expect(src).to_contain("comp.backend.get_pixel_buffer()")
+        expect(src).to_contain("rt_winit_buffer_blit_pixels(present_sink")
+        expect(src).to_contain("rt_winit_buffer_present(win, present_sink)")
+        # provenance surfaced in the WM frame log, and shutdown on exit
+        expect(src).to_contain("comp.backend.frame_provenance()")
+        expect(src).to_contain("comp.backend.shutdown()")
+
+    it "produces a software-provenance frame through the same Engine2dCompositorBackend seam hosted_entry adopts":
+        # Pin the direct-draw chrome path (same as the evidence harness's
+        # wm_composite lane) — the fast CSS/GUI-web chrome lane spins up its
+        # own internal Engine2D session for the HTML chrome, which is not the
+        # thing under test here.
+        host_wm_force_direct_chrome(true)
+        val backend = Engine2dCompositorBackend.create_named(64, 48, "software")
+        var comp = HostCompositor.new(backend, Size(width: 64u64, height: 48u64))
+        comp.render_frame()
+        val pixels = comp.backend.get_pixel_buffer()
+        expect(pixels.len()).to_equal(64 * 48)
+        # Content pin (not just length): an empty compositor renders its WM
+        # slate background opaquely and uniformly, so both a corner and the
+        # centre must carry the same non-zero color after render_frame. This
+        # proves get_pixel_buffer() returns the Engine2D session's rendered
+        # framebuffer — a zeroed/garbage readback (or a get_pixel_buffer that
+        # returns an all-zero allocation of the right length) fails here, where
+        # a bare length==w*h check would silently pass. Value is the composited
+        # opaque slate (alpha=0xFF -> >= 0xFF000000).
+        expect(pixels[0]).to_equal(4279573024u32)
+        expect(pixels[64 * 24 + 32]).to_equal(pixels[0])
+        val prov = comp.backend.frame_provenance()
+        expect(prov).to_contain("backend=software")
+        expect(prov).to_contain("source=")
+        comp.backend.shutdown()
+        host_wm_force_direct_chrome(false)
+
+    it "reports device_readback provenance when the metal raster backend is available":
+        # frame_provenance() reports cpu_mirror until a frame has actually been
+        # drawn+presented (gpu_frame_complete gate) — render_frame() first so a
+        # genuinely-unavailable Metal device (reported via backend_name, not a
+        # premature cpu_mirror read) is what triggers the skip below.
+        host_wm_force_direct_chrome(true)
+        val backend = Engine2dCompositorBackend.create_named(64, 48, "metal")
+        var comp = HostCompositor.new(backend, Size(width: 64u64, height: 48u64))
+        comp.render_frame()
+        val prov = comp.backend.frame_provenance()
+        if not prov.contains("backend=metal"):
+            print "SKIP: metal raster backend unavailable on this host ({prov})"
+        else:
+            expect(prov).to_contain("source=device_readback")
+        comp.backend.shutdown()
+        host_wm_force_direct_chrome(false)

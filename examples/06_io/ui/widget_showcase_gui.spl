@@ -19,7 +19,7 @@ use std.gpu.engine2d.engine.{Engine2D}
 use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
 use std.common.image.ppm_decode.{encode_ppm_p6}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
-use std.io_runtime.{file_write, file_exists, file_read, getpid}
+use std.io_runtime.{file_write, file_exists, file_read, getpid, get_args}
 use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
@@ -415,14 +415,45 @@ fn draw_g1_1_frame(b: Engine2D, w: i32, h: i32, st: ShowcaseState):
     b.draw_rect_filled(0, h - 14, w, 14, CARD)
     b.draw_text(6, h - 11, "Ready", MUTED, 6)
 
-# Rendering backend key. SIMPLE_GUI_BACKEND selects the Engine2D backend
-# (e.g. "vulkan"); default "software" keeps the historical CPU-lane behavior
-# byte-for-byte (Engine2D "software" delegates to SoftwareBackend).
+# Rendering backend key. `--backend=<name>` CLI flag wins, then the
+# SIMPLE_GUI_BACKEND env (e.g. "metal", "vulkan"); default "software" keeps the
+# historical CPU-lane behavior byte-for-byte (Engine2D "software" delegates to
+# SoftwareBackend). CPU stays the default until GPU parity + perf are proven
+# per resolution — see test/02_integration/rendering/engine2d_gpu_offload_evidence.spl.
 fn showcase_backend_key() -> text:
+    val args = get_args()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--backend="):
+            val flag = arg.substring(10, arg.len()).trim()
+            if flag != "":
+                return flag
+        i = i + 1
     val raw = (env_get("SIMPLE_GUI_BACKEND") ?? "").trim()
     if raw == "":
         return "software"
     raw
+
+# Create the showcase render engine. For "metal" this is the persistent
+# GPU-only fast session (1x1 CPU mirror, device framebuffer is the source of
+# truth, single-hop readback); for every other backend
+# create_with_backend_fast() transparently falls back to the regular
+# create_with_backend() path, keeping the CPU default lane unchanged.
+fn showcase_engine_create(w: i32, h: i32) -> Engine2D:
+    Engine2D.create_with_backend_fast(w, h, showcase_backend_key())
+
+# Paint one showcase frame into an EXISTING engine (no per-frame session
+# create/shutdown — the persistent-session "gpu process" fix). draw_frame
+# starts with clear(), which re-arms gpu_frame_complete for the Metal
+# GPU-only lane each frame.
+fn build_frame_state_into(b: Engine2D, w: i32, h: i32, st: ShowcaseState) -> [u32]:
+    if (env_get("SHOWCASE_G1_1_COMPACT") ?? "") == "1":
+        draw_g1_1_frame(b, w, h, st)
+    else:
+        draw_frame(b, w, h, st)
+    b.present()
+    b.read_pixels()
 
 # One greppable renderer-provenance line proving which backend + device rendered
 # the frame. For vulkan, includes the physical-device diagnostic (lavapipe under
@@ -438,13 +469,8 @@ fn emit_renderer_log(key: text, w: i32, h: i32):
     print "showcase_renderer_backend={name};requested={key};vulkan_device={device}"
 
 fn build_frame_state(w: i32, h: i32, st: ShowcaseState) -> [u32]:
-    var b = Engine2D.create_with_backend(w, h, showcase_backend_key())
-    if (env_get("SHOWCASE_G1_1_COMPACT") ?? "") == "1":
-        draw_g1_1_frame(b, w, h, st)
-    else:
-        draw_frame(b, w, h, st)
-    b.present()
-    val pixels = b.read_pixels()
+    var b = showcase_engine_create(w, h)
+    val pixels = build_frame_state_into(b, w, h, st)
     b.shutdown()
     pixels
 
@@ -831,12 +857,23 @@ fn main() -> i64:
         print "Widget showcase GUI — synthetic event mode {fw}x{fh}"
         return run_showcase_events(fw, fh, events_raw)
 
-    print "Widget showcase GUI — render {fw}x{fh} via Engine2D CPU lane"
+    print "Widget showcase GUI — render {fw}x{fh} via Engine2D {showcase_backend_key()} lane"
     var state = showcase_state_default()
     val _tree = showcase_ui_tree(state)
-    val pixels = build_frame_state(fw, fh, state)
+    # ONE persistent render session for the app's whole lifetime (created once,
+    # reused across every redraw, shut down on every exit path) — never a
+    # per-frame create. For metal this keeps the GPU device/queue/framebuffer
+    # alive across frames.
+    var engine = showcase_engine_create(fw, fh)
+    val pixels = build_frame_state_into(engine, fw, fh, state)
     if pixels.len() < fw * fh:
+        engine.shutdown()
         return 1
+    # Honest frame provenance (one line, greppable): for metal this must say
+    # source=device_readback — a cpu_mirror source means the GPU lane silently
+    # fell back and must not be presented as GPU rendering.
+    val prov = engine.read_pixels_with_source()
+    print "showcase_frame_backend={engine.backend_name()};source={prov.source};checksum={prov.checksum}"
     print "rendered {pixels.len()} px (24 widget types)"
 
     # Capture the framebuffer to a P6 PPM (absolute oracle) when SHOWCASE_PPM is set.
@@ -854,15 +891,18 @@ fn main() -> i64:
 
     if (env_get("SIMPLE_GUI") ?? "") != "1":
         print "No GUI requested (use scripts/gui/macos-gui-run.shs to open a window); headless only."
+        engine.shutdown()
         return 0
 
     val lp = winit_loop_new()
     if not lp.is_valid:
         print "No GUI runtime available."
+        engine.shutdown()
         return 1
     val win = winit_window_new(lp, fw.to_i64(), fh.to_i64(), "Simple Widget Showcase (CPU lane)")
     if not win.is_valid:
         winit_loop_free(lp)
+        engine.shutdown()
         return 1
 
     var packed = pack(pixels)
@@ -871,8 +911,10 @@ fn main() -> i64:
     var mouse_x = 0
     var mouse_y = 0
     var last_tick = time_now_micros()
+    # GUI-5a: present once up front so the initial frame is shown, then only
+    # on dirty — avoids presenting the unchanged frame on every ~30ms tick.
+    winit_present_rgba(win, fw.to_i64(), fh.to_i64(), packed)
     while running and iters < 2000000:
-        winit_present_rgba(win, fw.to_i64(), fh.to_i64(), packed)
         val input = winit_poll_input(lp)
         val (next_state, next_mx, next_my, input_dirty, next_running) = apply_native_input(input, mouse_x, mouse_y, state)
         state = next_state
@@ -886,14 +928,20 @@ fn main() -> i64:
             last_tick = now
             dirty = true
         if dirty:
-            val next_pixels = build_frame_state(fw, fh, state)
+            # Repaint into the SAME persistent session (no create/shutdown per
+            # redraw — the session-reuse delta is measured in the gpu-offload
+            # evidence harness).
+            val next_pixels = build_frame_state_into(engine, fw, fh, state)
             if next_pixels.len() < fw * fh:
                 winit_window_free(win)
                 winit_loop_free(lp)
+                engine.shutdown()
                 return 1
             packed = pack(next_pixels)
+            winit_present_rgba(win, fw.to_i64(), fh.to_i64(), packed)
         thread_sleep(30)
         iters = iters + 1
     winit_window_free(win)
     winit_loop_free(lp)
+    engine.shutdown()
     return 0
