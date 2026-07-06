@@ -1,41 +1,89 @@
-# --entry-closure baremetal builds FAULT on imported class instantiation, forcing procedural WM duplication
+# Bug: Baremetal --entry-closure imported-class instantiation FAULT
 
-## Status
-Open.
+- **Status:** INVESTIGATING (root-cause candidates verified in binary artifacts; fix pending probe confirmation)
+- **Date:** 2026-07-06
+- **Where seen:** `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl:14-17` — instantiating a class imported from a shared module (e.g. `os.gui.shortcut.ShortcutHandler`) inside an x86_64 `--entry-closure` baremetal kernel faults at runtime. Workaround so far: procedural duplication (the 3603-line WM), factory free-functions in the defining module (`create_fb_engine`), and integer action codes instead of shared enums (arm64 `wm_entry_io`).
+- **Impact:** blocks sharing `src/os/compositor` classes (`HostCompositor`, `CompositorBackend` trait impls) into the QEMU guest WM.
 
-## Severity
-Medium-High — blocks code reuse between the baremetal guest WM and the hosted-mode compositor stack; no functional regression today because the guest WM avoids the faulting path entirely, but the workaround costs ~3600 duplicated lines per architecture.
+## Repro
 
-## Summary
-In native builds compiled with `--entry-closure` for baremetal targets, instantiating an imported class FAULTs at runtime (class instantiation fails). This is documented as a source comment rather than a tracked bug at `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl:14-17`:
+- Probe entry: `examples/09_embedded/simple_os/arch/x86_64/class_fault_probe_entry.spl`
+  (serial markers S1..S5/CLASSOK; commit d99740bcff13)
+- Probe shared module: `src/os/gui/class_probe.spl` (scalar + heap-typed module
+  globals + class with text field, modeled on `os.compositor.display_backend`)
+- Build (same flow as `scripts/check/check-simpleos-wm-fullscreen-evidence.shs:192-202`):
 
 ```
-# === Input handling ===
-# Shared modules exist at os.gui.input_event + os.gui.shortcut but
-# using imported classes in --entry-closure baremetal builds causes
-# FAULT (class instantiation fails). Using local scancode mapping
-# with matching action code convention from the shared modules.
+SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$PWD/src SIMPLE_OS_LOG_MODE=off \
+SIMPLE_ALLOW_FREESTANDING_STUBS=1 PATH=/usr/lib/llvm-18/bin:$PATH \
+bin/release/x86_64-unknown-linux-gnu/simple native-build \
+  --source build/os/generated --source src/os --source src/lib \
+  --source examples/09_embedded/simple_os/arch/x86_64 \
+  --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+  --entry-closure --entry examples/09_embedded/simple_os/arch/x86_64/class_fault_probe_entry.spl \
+  --target x86_64-unknown-none -o build/os/class_fault_probe.elf \
+  --linker-script examples/09_embedded/simple_os/arch/x86_64/linker.ld --mode=dynload
+qemu-system-x86_64 -no-user-config -monitor none -net none -machine q35 -cpu qemu64 \
+  -m 2G -serial file:serial.log -display none -no-reboot -kernel build/os/class_fault_probe.elf \
+  -vga std -device isa-debug-exit,iobase=0xf4,iosize=0x04
 ```
 
-Because of this, the guest window managers cannot import and instantiate the shared compositor classes (`HostCompositor` in `src/os/compositor/host_compositor_entry.spl:172`, `Compositor` in `src/os/compositor/compositor.spl:23`, or the `CompositorBackend`/`display_backend.spl` trait family) and instead re-implement window-manager lifecycle, input handling, and rendering procedurally, in-file:
+Note: trailing `--mode=dynload` is required — `run_native_build_worker`
+(src/app/cli/native_build_main.spl:198) injects `--mode=interpreter` into the
+worker argv, which `cli_native_build` rejects
+(src/app/io/_CliCompile/compile_targets.spl:595-597). Last-wins parsing makes
+the explicit flag override it. This is a separate worker-arg regression.
 
-- `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl` — 3603 lines, self-contained glass WM (BGA framebuffer, PCI BAR scan, PS/2 input, window chrome) with no dependency on `src/os/compositor/*` classes.
-- `examples/09_embedded/simple_os/arch/arm64/wm_entry.spl` — 589 lines, same pattern (the arm64 variant is smaller but still procedural rather than class-based).
+## Verified findings (binary evidence)
 
-## Evidence
-- **wm_entry.spl:14-17 (x86_64)**: source comment above is the only record of the fault; no bug ticket, no repro script, no compiler-side error capture.
-- **src/os/compositor/host_compositor_entry.spl:172**: `HostCompositor` class — the shared lifecycle type used successfully by the *hosted* entry (`src/os/hosted/hosted_entry.spl`, which runs through the normal interpreted/native hosted path, not `--entry-closure` baremetal).
-- **src/os/compositor/compositor.spl:23**: `Compositor` class — the baremetal-facing compositor abstraction that the guest WMs would need in order to share logic with the host.
-- **src/os/compositor/display_backend.spl**: `CompositorBackend` / `CompositorGlassCapable` traits — the backend abstraction (`HostedWinitBufferBackend` in `src/os/compositor/hosted_backend_winit.spl` implements it for the hosted path) that a baremetal framebuffer backend would need to implement to plug into the shared `HostCompositor`/`Compositor` classes.
-- No other `--entry-closure` baremetal entry in `examples/09_embedded/simple_os/` imports and instantiates a class from a separate module; all baremetal WM entries (`wm_entry.spl` x86_64/arm64, `wm_entry_glass.spl`, `wm_entry_prim.spl`) use local structs/functions or inline state instead.
+Checked `build/os/simpleos_wm_simple_web_check_32.elf` (real WM kernel built by
+the evidence-script flow) with llvm-nm:
 
-## Failure Scenario
-Any attempt to `use os.compositor.host_compositor_entry.{HostCompositor}` (or `os.compositor.compositor.{Compositor}`) and call `HostCompositor.new(...)` / `Compositor.new(...)` from a `--entry-closure` baremetal native build FAULTs at runtime during class instantiation, even though the identical class works when the same code path runs hosted (non-`--entry-closure`). This means the SimpleOS baremetal guest WM cannot share the `HostCompositor` lifecycle, dirty-rect rendering, or window chrome logic that the hosted WM (`src/os/hosted/hosted_entry.spl` + `src/os/compositor/hosted_backend_winit.spl`) already exercises, blocking a fullscreen-mode guest WM from reusing host-mode code and keeping the two WM implementations (host vs. guest, and x86_64 vs. arm64) permanently forked and manually kept in sync.
+1. **Module initializers never run in x86_64 baremetal kernels.**
+   - `examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s:305-311` calls
+     `__simple_call_module_inits` through a `.weak` reference and jz-skips when
+     unresolved.
+   - In the kernel ELF the symbol is `w` (weak, undefined) and there are ZERO
+     `__module_init_*` symbols → the skip branch is always taken.
+   - The pure-Simple backend never emits per-module inits nor the aggregator:
+     the only body in `src/compiler/70.backend` is the EMPTY riscv64 stub
+     `void __simple_call_module_inits(void){}` at
+     `src/compiler/70.backend/backend/llvm_native_link.spl:352`. The real
+     emitter exists only in the Rust seed
+     (`src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs:322-371`,
+     generate_init_caller).
+   - Consequence: module globals land in BSS (`llvm-nm` shows e.g. `_auth_db`,
+     `_channel_count` as `b`) and stay ZERO at runtime; only const-foldable
+     `val`s are materialized (e.g. `_aes_sbox` in rodata).
 
-## Impact
-- Blocks SimpleOS-fullscreen WM sharing host-mode compositor code (host/guest shared-mode convergence).
-- `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl` (~3600 lines) and `arch/arm64/wm_entry.spl` (~600 lines, but same procedural pattern) each independently re-implement window lifecycle, hit-testing, and rendering that already exists as classes in `src/os/compositor/`.
-- Any future compositor feature (resize handling, glass effects, dirty-rect diffing) must be hand-ported into both baremetal WMs separately instead of being inherited from the shared `HostCompositor`/`Compositor` classes.
+2. **Unresolved cross-module class methods are silently bound to NIL stubs.**
+   - `examples/09_embedded/simple_os/arch/x86_64/boot/auto_stubs.c` (1.1 MB,
+     checked in) defines weak `Class_dot_method` stubs returning NIL (0x3)
+     "so execution continues past unresolved cross-module refs".
+   - A ctor bound to such a stub returns NIL; the following method call on the
+     NIL object faults.
 
-## Next Step
-Root-cause the `--entry-closure` baremetal native-build codegen path for class instantiation (constructor/vtable/heap-handle setup under the entry-closure calling convention) and produce a minimal repro (e.g. a trivial class imported into a `--entry-closure` baremetal entry). Once fixed, migrate `wm_entry.spl` (x86_64, arm64) to instantiate `Compositor`/`HostCompositor` plus a baremetal `CompositorBackend` implementation instead of the current procedural duplication.
+3. **Two coexisting method-symbol manglings in the same kernel:** bare
+   (`KLogEntry_dot_from_bytes`) and module-qualified
+   (`os__services__vfs__vfs_boot_init__VfsFileSize_dot_to_i64`). A call/def
+   scheme mismatch binds the call to the weak NIL stub (finding 2).
+
+4. **Per-module MIR lowering with shared, order-dependent class metadata:**
+   under `--entry-closure` each module is lowered separately
+   (`src/compiler/80.driver/driver_pipeline.spl:331-384`) sharing one
+   `MirLowering.field_map` built per module before its functions
+   (`src/compiler/50.mir/_MirLowering/module_lowering.spl:277-303`), so a
+   module lowered before the defining module of a class it instantiates sees
+   no field layout for it.
+
+## Root-cause candidates (to be discriminated by probe markers)
+
+- Fault at S2 (simple imported ctor) → symbol-binding/mangling (findings 2+3)
+  or field-map ordering (finding 4).
+- S2-S4 pass, fault at S5 (heap-typed module global) → missing module inits
+  (finding 1).
+
+## Next steps
+
+- Probe build in progress (full + minimal source-set variants).
+- Fix at root cause in pure-Simple compiler; then re-verify CLASSOK marker.
