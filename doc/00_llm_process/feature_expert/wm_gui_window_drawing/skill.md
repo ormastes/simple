@@ -268,6 +268,33 @@ Hard-won lessons for this live lane (each cost hours):
   display+button grid), NOT `app_content.render_app_content` — the latter is the
   CPU per-pixel path above and is infeasible live under the interpreter.
 
+## Handoff Notes (2026-07-06)
+
+- **NEW — GuiRenderer facade + `spl_winit` SFFI cdylib (real interactive
+  `--open` window)**: `src/app/ui.browser/app.spl` no longer declares raw
+  `rt_winit_*`-style externs; its `browser_winit_*` wrapper functions
+  (`browser_winit_event_loop_new`, `browser_winit_window_new`,
+  `browser_winit_event_loop_poll_events`, `browser_winit_event_get_type`,
+  `browser_winit_event_keyboard_input`, `browser_winit_event_mouse_moved`,
+  `browser_winit_event_mouse_button`, `browser_winit_window_present_rgba`,
+  `browser_winit_window_free`, `browser_winit_event_loop_free`) now delegate to
+  a single `_host_gui: GuiRenderer` instance
+  ([src/lib/nogc_sync_mut/ui/gui_renderer.spl](../../../../src/lib/nogc_sync_mut/ui/gui_renderer.spl)).
+  `GuiRenderer` dlopens a standalone sibling cdylib built from
+  [src/runtime/spl_winit/src/lib.rs](../../../../src/runtime/spl_winit/src/lib.rs)
+  (winit 0.30 + softbuffer; no seed/bootstrap rebuild — see
+  `feedback_no_bootstrap_rebuild.md`). Build it with
+  `scripts/build/build_spl_winit.shs`, which stages
+  `build/sffi/libspl_winit.<dylib|so|dll>`; the facade resolution order is
+  `$SIMPLE_SPL_WINIT_PATH` override, then that staged path. Drag/click/close
+  proven live on macOS with a real interactive window.
+- This removed `RT:src/app/ui.browser/app.spl` from
+  `scripts/check/ui_backend_isolation_baseline.txt` (app.spl now goes through
+  the facade only, per `doc/04_architecture/ui/rendering/backend_isolation_architecture.md`).
+  `RT:src/app/ui.browser/backend.spl` remains baselined and unaffected.
+- Related bug record filed alongside this change:
+  `doc/08_tracking/bug/interp_enum_match_class_name_collision_2026-07-06.md`.
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,

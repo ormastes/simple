@@ -9,6 +9,7 @@ use common.ui.widget.{UIEvent}
 use nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}
 use nogc_sync_mut.ui.session.{UISession}
 use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open_with_override}
+use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GuiEvent, GUI_EVT_NONE}
 use app.ui.browser.backend.{BrowserBackend}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event}
 use std.io_runtime.{file_exists, get_args, read_file, time_now_unix_micros}
@@ -16,50 +17,58 @@ use std.diag.{dbg_stage}
 use common.window_protocol.geometry.{Size}
 use os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
 
-extern fn rt_winit_event_loop_new() -> i64
-extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
-extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
-extern fn rt_winit_event_get_type(ev: i64) -> i64
-extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
-extern fn rt_winit_event_mouse_moved(ev: i64) -> (f64, f64)
-extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
-extern fn rt_winit_event_free(ev: i64)
-extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
-extern fn rt_winit_window_free(win: i64)
-extern fn rt_winit_event_loop_free(el: i64)
+# Host window state — backed by the GuiRenderer facade (backend-isolation
+# Gap A: no raw winit extern declarations in the app layer; the facade dlopens the
+# spl_winit sibling cdylib instead). The browser_winit_* wrappers keep their
+# original handle-style signatures so the main loop below is unchanged.
+var _host_gui: GuiRenderer = GuiRenderer.empty()
+var _host_gui_event: GuiEvent = GuiEvent.none()
 
 fn browser_winit_event_loop_new() -> i64:
-    rt_winit_event_loop_new()
+    # The facade creates the native event loop together with the window in
+    # browser_winit_window_new; report readiness with a placeholder token.
+    1
 
 fn browser_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64:
-    rt_winit_window_new(el, w, h, title)
+    val created = GuiRenderer.create("auto", w.to_i32(), h.to_i32(), title)
+    match created:
+        case Some(g):
+            _host_gui = g
+            1
+        case None:
+            0
 
 fn browser_winit_event_loop_poll_events(el: i64, max: i64) -> i64:
-    rt_winit_event_loop_poll_events(el, max)
+    val e = _host_gui.poll_event()
+    _host_gui_event = e
+    if e.kind == GUI_EVT_NONE:
+        return 0
+    1
 
 fn browser_winit_event_get_type(ev: i64) -> i64:
-    rt_winit_event_get_type(ev)
+    _host_gui_event.kind
 
 fn browser_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool):
-    rt_winit_event_keyboard_input(ev)
+    (_host_gui_event.scancode, _host_gui_event.keycode, _host_gui_event.pressed)
 
 fn browser_winit_event_mouse_moved(ev: i64) -> (f64, f64):
-    rt_winit_event_mouse_moved(ev)
+    (_host_gui_event.x, _host_gui_event.y)
 
 fn browser_winit_event_mouse_button(ev: i64) -> (i64, bool):
-    rt_winit_event_mouse_button(ev)
+    (_host_gui_event.btn, _host_gui_event.pressed)
 
 fn browser_winit_event_free(ev: i64):
-    rt_winit_event_free(ev)
+    _host_gui_event = GuiEvent.none()
 
 fn browser_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64]):
-    rt_winit_window_present_rgba(win, w, h, pixels)
+    _host_gui.present_rgba(w, h, pixels)
 
 fn browser_winit_window_free(win: i64):
-    rt_winit_window_free(win)
+    _host_gui.close()
 
 fn browser_winit_event_loop_free(el: i64):
-    rt_winit_event_loop_free(el)
+    _host_gui.close()
+    _host_gui = GuiRenderer.empty()
 
 fn browser_time_now_unix_micros() -> i64:
     time_now_unix_micros()
