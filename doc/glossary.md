@@ -728,3 +728,17 @@ Three tiers, increasing strictness:
 **Supersedes** the rejected "High-robustness mode" (`simple_language_comparison.md:31`): instead of an unprovable monolithic guarantee, `reliable` is the configurable strict-lint + `@deny(non_exhaustive_match)` + proof-coverage realization that doc prescribed, dialed by context.
 
 See also: Stdlib Memory Tiers (`src/lib/` — `nogc_sync_mut`/`nogc_async_mut`/`gc_async_mut`/`nogc_async_mut_noalloc`; see `.claude/rules/structure.md`) (the memory/runtime axis — do not conflate).
+
+## SimpleOS LLVM/Clang Toolchain
+The LLVM→SimpleOS cross toolchain is **already built** but easy to lose. The
+cross clang/lld that emit `x86_64-unknown-simpleos` code live at
+`build/os/llvm/cross-x86_64-unknown-simpleos/bin/` (`clang-20`, `ld.lld`,
+`llvm-nm`); the LLVM/Clang 20 **source** is at `/home/ormastes/llvm-project`
+(outside the repo); the sysroot (`crt0.o`, `libsimpleos_c.a`, `simpleos.ld`) is
+`build/os/sysroot/`. Compile+link of a SimpleOS ELF works today; **in-guest
+execution is blocked** (kernel exec handoff / P0-C QEMU smoke, and the missing
+guest-native `build/os/clang_static/bin/clang_static`). Build driver
+`src/os/port/llvm/build.spl`; gate `bin/simple run src/os/port/deploy_toolchains.spl -- --status`.
+
+Full guide (locations + verified hello-world commands): `doc/07_guide/os/simpleos_llvm_toolchain.md`.
+Blocker detail: `doc/08_tracking/bug/simpleos_in_guest_toolchain_execution.md`.

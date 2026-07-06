@@ -56,8 +56,17 @@ use app.llm_caret.claude_full.components.messages.UserLocalCommandOutputMessage.
 use app.llm_caret.claude_full.components.messages.UserMemoryInputMessage.*
 use app.llm_caret.claude_full.components.messages.UserPlanMessage.*
 use app.llm_caret.claude_full.components.messages.UserPromptMessage.*
+use app.llm_caret.claude_full.components.messages.UserResourceUpdateMessage.*
+use app.llm_caret.claude_full.components.messages.UserTeammateMessage.*
+use app.llm_caret.claude_full.components.messages.UserTextMessage.*
 use app.llm_caret.claude_full.components.messages.UserToolResultMessage.RejectedPlanMessage.*
 use app.llm_caret.claude_full.components.messages.UserToolResultMessage.RejectedToolUseMessage.*
+use app.llm_caret.claude_full.components.messages.UserToolResultMessage.UserToolCanceledMessage.*
+use app.llm_caret.claude_full.components.messages.UserToolResultMessage.UserToolErrorMessage.*
+use app.llm_caret.claude_full.components.messages.UserToolResultMessage.UserToolRejectMessage.*
+use app.llm_caret.claude_full.components.messages.UserToolResultMessage.UserToolResultMessage.*
+use app.llm_caret.claude_full.components.messages.UserToolResultMessage.UserToolSuccessMessage.*
+use app.llm_caret.claude_full.components.messages.UserToolResultMessage.utils.*
 use app.llm_caret.claude_full.components.messages.teamMemCollapsed.*
 use app.llm_caret.claude_full.components.messages.teamMemSaved.*
 use app.llm_caret.claude_full.components.messages.nullRenderingAttachments.*
@@ -370,7 +379,10 @@ describe "Claude full bridge small helpers":
         expect(formatTeammateMessageContent("{\"type\":\"idle_notification\",\"completedTaskId\":\"42\",\"completedStatus\":\"done\",\"summary\":\"Waiting\"}")).to_equal("Agent idle · Task 42 done · Last DM: Waiting")
 
     it "should render rejected tool-use messages":
-        step("Match the fixed dim response shown for rejected tool use")
+        step("Match fixed tool result render states and lookup helpers")
+        val canceled = userToolCanceledMessage()
+        expect(canceled.interrupted_by_user).to_equal(true)
+        expect(canceled.response_height).to_equal(1)
         val rejected = rejectedToolUseMessage()
         expect(rejected.text).to_equal("Tool use rejected")
         expect(rejected.dim).to_equal(true)
@@ -380,6 +392,36 @@ describe "Claude full bridge small helpers":
         expect(rejectedPlan.plan).to_equal("1. Build\n2. Test")
         expect(rejectedPlan.border_color).to_equal("planMode")
         expect(rejectedPlan.overflow).to_equal("hidden")
+        val found = getToolFromMessages("tu1", [UserToolLookupTool.new("Bash", "Run shell")], [UserToolLookupToolUse.new("tu1", "Bash")])
+        expect(found.found).to_equal(true)
+        expect(found.tool_name).to_equal("Bash")
+        expect(found.tool_description).to_equal("Run shell")
+        expect(getToolFromMessages("missing", [], []).found).to_equal(false)
+        val success = userToolSuccessMessage(true, true, true, "done", "Bash", true, "safe command", true, "auto", true, false, true)
+        expect(success.visible).to_equal(true)
+        expect(success.width_constrained).to_equal(true)
+        expect(success.bash_classifier_text).to_equal("Auto-approved - matched \"safe command\"")
+        expect(success.transcript_classifier_text).to_equal("Allowed by auto mode classifier")
+        expect(success.is_brief_only).to_equal(true)
+        expect(userToolSuccessMessage(false, true, true, "done", "Bash", false, "", false, "", false, false, false).visible).to_equal(false)
+        val reject = userToolRejectMessage(true, true, true, "Denied", 100, "default", "dark", true)
+        expect(reject.fallback).to_equal(false)
+        expect(reject.rendered).to_equal("Denied")
+        expect(reject.progress_messages_filtered).to_equal(true)
+        expect(userToolRejectMessage(false, true, true, "Denied", 100, "default", "dark", false).fallback).to_equal(true)
+        expect(userToolErrorMessage("[Request interrupted by user for tool use]", [], nil, false, false, false).kind).to_equal("interrupted")
+        val customError = userToolErrorMessage("bad", [UserToolErrorProgressMessage.new("progress"), UserToolErrorProgressMessage.new("hook_progress")], UserToolErrorTool.new("Bash", true), true, true, false)
+        expect(customError.kind).to_equal("custom-tool-error")
+        expect(customError.filtered_progress_count).to_equal(1)
+        expect(userToolErrorMessage("Permission for this action has been denied. Reason: nope", [], nil, false, false, true).kind).to_equal("classifier-denial")
+        expect(userToolErrorMessage("plain", [], UserToolErrorTool.new("Bash", false), false, false, false).used_fallback_renderer).to_equal(true)
+        val routeTools = [UserToolLookupTool.new("Bash", "Run shell")]
+        val routeUses = [UserToolLookupToolUse.new("tu1", "Bash")]
+        expect(userToolResultMessage(UserToolResultParam.new("tu1", "tool_use_cancelled by user", false), routeTools, routeUses).kind).to_equal("canceled")
+        expect(userToolResultMessage(UserToolResultParam.new("tu1", "tool_use_rejected nope", false), routeTools, routeUses).kind).to_equal("rejected")
+        expect(userToolResultMessage(UserToolResultParam.new("tu1", "bad", true), routeTools, routeUses).kind).to_equal("error")
+        expect(userToolResultMessage(UserToolResultParam.new("tu1", "ok", false), routeTools, routeUses).kind).to_equal("success")
+        expect(userToolResultMessage(UserToolResultParam.new("missing", "ok", false), routeTools, routeUses).visible).to_equal(false)
 
     it "should render channel, memory, local command, and prompt user messages":
         step("Cover worker-added message helpers")
@@ -408,6 +450,28 @@ describe "Claude full bridge small helpers":
         expect(prompt.use_brief_layout).to_equal(true)
         expect(prompt.timestamp).to_equal("10:00")
         expect(userPromptMessage("", false, false, "", false, false, false, false, false, false, "", false).logged_error).to_equal("No content found in user prompt message")
+
+    it "should route user text messages":
+        step("Choose message renderer kind from tags and feature gates")
+        expect(userTextMessage("(no content)", false, false, "", false, "", false, false, false, false, false, false).visible).to_equal(false)
+        expect(userTextMessage("raw", true, false, "plan", false, "10:00", false, false, false, false, false, false).kind).to_equal("plan")
+        expect(userTextMessage("<bash-input>ls</bash-input>", false, false, "", false, "", false, false, false, false, false, false).kind).to_equal("bash-input")
+        expect(userTextMessage("<teammate-message from=\"Ada\">hi</teammate-message>", false, false, "", false, "", true, false, false, false, false, false).kind).to_equal("teammate")
+        expect(userTextMessage("<channel source=\"mcp:x\">hi</channel>", false, false, "", false, "", false, false, false, false, true, false).kind).to_equal("channel")
+        expect(userTextMessage("hello", false, false, "", false, "", false, false, false, false, false, false).kind).to_equal("prompt")
+        val resource = userResourceUpdateMessage("<mcp-resource-update server=\"fs\" uri=\"file:///tmp/readme.md\"><reason>changed</reason></mcp-resource-update>", true)
+        expect(resource.visible).to_equal(true)
+        expect(resource.margin_top).to_equal(1)
+        expect(resource.rows[0].server).to_equal("fs")
+        expect(formatUserResourceUpdateUri(resource.rows[0].target)).to_equal("readme.md")
+        expect(resource.rows[0].reason).to_equal("changed")
+        val teammate = userTeammateMessage("<teammate-message teammate_id=\"ada\" color=\"cyan\" summary=\"heads up\">Hello</teammate-message>", true, true)
+        expect(teammate.visible).to_equal(true)
+        expect(teammate.entries[0].header).to_equal("@ada>")
+        expect(teammate.entries[0].body).to_equal("Hello")
+        expect(teammate.entries[0].transcript_body).to_equal(true)
+        val taskDone = userTeammateMessage("<teammate-message teammate_id=\"ada\">{\"type\":\"task_completed\",\"taskId\":\"42\",\"taskSubject\":\"Review\"}</teammate-message>", false, false)
+        expect(taskDone.entries[0].kind).to_equal("task-completed")
 
     it "should render system API error retry messages":
         step("Hide early retries, truncate non-verbose errors, and include timeout hint")
@@ -489,6 +553,15 @@ describe "Claude full bridge small helpers":
         expect(userMemoryInputMessageSourceLinesModeled()).to_equal(74)
         expect(userPlanMessageSourceLinesModeled()).to_equal(41)
         expect(userPromptMessageSourceLinesModeled()).to_equal(79)
+        expect(userResourceUpdateMessageSourceLinesModeled()).to_equal(120)
+        expect(userTeammateMessageSourceLinesModeled()).to_equal(205)
+        expect(userTextMessageSourceLinesModeled()).to_equal(274)
         expect(rejectedPlanMessageSourceLinesModeled()).to_equal(30)
         expect(rejectedToolUseMessageSourceLinesModeled()).to_equal(15)
+        expect(userToolCanceledMessageSourceLinesModeled()).to_equal(15)
+        expect(userToolErrorMessageSourceLinesModeled()).to_equal(102)
+        expect(userToolRejectMessageSourceLinesModeled()).to_equal(94)
+        expect(userToolResultMessageSourceLinesModeled()).to_equal(105)
+        expect(userToolSuccessMessageSourceLinesModeled()).to_equal(103)
+        expect(userToolResultUtilsSourceLinesModeled()).to_equal(43)
         expect(groupedToolUseContentSourceLinesModeled()).to_equal(57)

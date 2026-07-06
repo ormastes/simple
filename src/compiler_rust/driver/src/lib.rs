@@ -22,6 +22,7 @@ pub mod prefetch;
 pub mod repl_runner_sffi;
 pub mod resource_manager;
 pub mod runner;
+pub mod seed_warning;
 pub mod signature;
 pub mod simple_test;
 pub mod startup_metrics;

@@ -1,5 +1,7 @@
 //! Help and version information for the Simple CLI.
 
+use crate::seed_warning::print_seed_warning;
+
 /// Version from VERSION file (set by build.rs), falls back to Cargo.toml
 const VERSION: &str = match option_env!("SIMPLE_VERSION") {
     Some(v) if !v.is_empty() => v,
@@ -7,8 +9,7 @@ const VERSION: &str = match option_env!("SIMPLE_VERSION") {
 };
 
 pub fn print_help() {
-    eprintln!("WARNING: this Rust-built Simple binary is a bootstrap seed only.");
-    eprintln!("Use the pure-Simple bin/simple for normal build/test/tooling work.");
+    print_seed_warning();
     eprintln!();
     eprintln!("Simple Language v{}", VERSION);
     eprintln!();
@@ -337,7 +338,7 @@ mod tests {
 }
 
 pub fn print_version() {
-    eprintln!("WARNING: this Rust-built Simple binary is a bootstrap seed only; use pure-Simple bin/simple.");
+    print_seed_warning();
     println!("Simple Language v{}", VERSION);
 }
 

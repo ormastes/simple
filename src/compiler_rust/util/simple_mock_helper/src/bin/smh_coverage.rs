@@ -82,6 +82,7 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    simple_mock_helper::warn_rust_seed_tool("smh_coverage");
     let cli = Cli::parse();
 
     match cli.command {

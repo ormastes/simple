@@ -858,7 +858,9 @@ expect(formatTeammateMessageContent("{\"type\":\"idle_notification\",\"completed
 
 #### should render rejected tool-use messages
 
-- Match the fixed dim response shown for rejected tool use
+- Match fixed tool result render states and lookup helpers
+   - Expected: canceled.interrupted_by_user is true
+   - Expected: canceled.response_height equals `1`
    - Expected: rejected.text equals `Tool use rejected`
    - Expected: rejected.dim is true
    - Expected: rejected.response_height equals `1`
@@ -866,16 +868,38 @@ expect(formatTeammateMessageContent("{\"type\":\"idle_notification\",\"completed
    - Expected: rejectedPlan.plan equals `1. Build\n2. Test`
    - Expected: rejectedPlan.border_color equals `planMode`
    - Expected: rejectedPlan.overflow equals `hidden`
+   - Expected: found.found is true
+   - Expected: found.tool_name equals `Bash`
+   - Expected: found.tool_description equals `Run shell`
+   - Expected: getToolFromMessages("missing", [], []).found is false
+   - Expected: success.visible is true
+   - Expected: success.width_constrained is true
+   - Expected: success.bash_classifier_text equals `Auto-approved - matched "safe command"`
+   - Expected: success.transcript_classifier_text equals `Allowed by auto mode classifier`
+   - Expected: success.is_brief_only is true
+   - Expected: userToolSuccessMessage(false, true, true, "done", "Bash", false, "", false, "", false, false, false).visible is false
+   - Expected: reject.fallback is false
+   - Expected: reject.rendered equals `Denied`
+   - Expected: reject.progress_messages_filtered is true
+   - Expected: userToolRejectMessage(false, true, true, "Denied", 100, "default", "dark", false).fallback is true
+   - Expected: userToolErrorMessage("[Request interrupted by user for tool use]", [], nil, false, false, false).kind equals `interrupted`
+   - Expected: customError.kind equals `custom-tool-error`
+   - Expected: customError.filtered_progress_count equals `1`
+   - Expected: userToolErrorMessage("Permission for this action has been denied. Reason: nope", [], nil, false, false, true).kind equals `classifier-denial`
+   - Expected: userToolErrorMessage("plain", [], UserToolErrorTool.new("Bash", false), false, false, false).used_fallback_renderer is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Match the fixed dim response shown for rejected tool use")
+step("Match fixed tool result render states and lookup helpers")
+val canceled = userToolCanceledMessage()
+expect(canceled.interrupted_by_user).to_equal(true)
+expect(canceled.response_height).to_equal(1)
 val rejected = rejectedToolUseMessage()
 expect(rejected.text).to_equal("Tool use rejected")
 expect(rejected.dim).to_equal(true)
@@ -885,6 +909,29 @@ expect(rejectedPlan.title).to_equal("User rejected Claude's plan:")
 expect(rejectedPlan.plan).to_equal("1. Build\n2. Test")
 expect(rejectedPlan.border_color).to_equal("planMode")
 expect(rejectedPlan.overflow).to_equal("hidden")
+val found = getToolFromMessages("tu1", [UserToolLookupTool.new("Bash", "Run shell")], [UserToolLookupToolUse.new("tu1", "Bash")])
+expect(found.found).to_equal(true)
+expect(found.tool_name).to_equal("Bash")
+expect(found.tool_description).to_equal("Run shell")
+expect(getToolFromMessages("missing", [], []).found).to_equal(false)
+val success = userToolSuccessMessage(true, true, true, "done", "Bash", true, "safe command", true, "auto", true, false, true)
+expect(success.visible).to_equal(true)
+expect(success.width_constrained).to_equal(true)
+expect(success.bash_classifier_text).to_equal("Auto-approved - matched \"safe command\"")
+expect(success.transcript_classifier_text).to_equal("Allowed by auto mode classifier")
+expect(success.is_brief_only).to_equal(true)
+expect(userToolSuccessMessage(false, true, true, "done", "Bash", false, "", false, "", false, false, false).visible).to_equal(false)
+val reject = userToolRejectMessage(true, true, true, "Denied", 100, "default", "dark", true)
+expect(reject.fallback).to_equal(false)
+expect(reject.rendered).to_equal("Denied")
+expect(reject.progress_messages_filtered).to_equal(true)
+expect(userToolRejectMessage(false, true, true, "Denied", 100, "default", "dark", false).fallback).to_equal(true)
+expect(userToolErrorMessage("[Request interrupted by user for tool use]", [], nil, false, false, false).kind).to_equal("interrupted")
+val customError = userToolErrorMessage("bad", [UserToolErrorProgressMessage.new("progress"), UserToolErrorProgressMessage.new("hook_progress")], UserToolErrorTool.new("Bash", true), true, true, false)
+expect(customError.kind).to_equal("custom-tool-error")
+expect(customError.filtered_progress_count).to_equal(1)
+expect(userToolErrorMessage("Permission for this action has been denied. Reason: nope", [], nil, false, false, true).kind).to_equal("classifier-denial")
+expect(userToolErrorMessage("plain", [], UserToolErrorTool.new("Bash", false), false, false, false).used_fallback_renderer).to_equal(true)
 ```
 
 </details>
@@ -1103,13 +1150,18 @@ expect(debugTruncate("small")).to_equal("small")
    - Expected: userPromptMessageSourceLinesModeled() equals `79`
    - Expected: rejectedPlanMessageSourceLinesModeled() equals `30`
    - Expected: rejectedToolUseMessageSourceLinesModeled() equals `15`
+   - Expected: userToolCanceledMessageSourceLinesModeled() equals `15`
+   - Expected: userToolErrorMessageSourceLinesModeled() equals `102`
+   - Expected: userToolRejectMessageSourceLinesModeled() equals `94`
+   - Expected: userToolSuccessMessageSourceLinesModeled() equals `103`
+   - Expected: userToolResultUtilsSourceLinesModeled() equals `43`
    - Expected: groupedToolUseContentSourceLinesModeled() equals `57`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1146,6 +1198,11 @@ expect(userPlanMessageSourceLinesModeled()).to_equal(41)
 expect(userPromptMessageSourceLinesModeled()).to_equal(79)
 expect(rejectedPlanMessageSourceLinesModeled()).to_equal(30)
 expect(rejectedToolUseMessageSourceLinesModeled()).to_equal(15)
+expect(userToolCanceledMessageSourceLinesModeled()).to_equal(15)
+expect(userToolErrorMessageSourceLinesModeled()).to_equal(102)
+expect(userToolRejectMessageSourceLinesModeled()).to_equal(94)
+expect(userToolSuccessMessageSourceLinesModeled()).to_equal(103)
+expect(userToolResultUtilsSourceLinesModeled()).to_equal(43)
 expect(groupedToolUseContentSourceLinesModeled()).to_equal(57)
 ```
 

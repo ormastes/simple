@@ -6,6 +6,19 @@ pub mod fluent;
 pub mod mock_policy;
 pub mod test_check;
 
+pub fn warn_rust_seed_tool(tool_name: &str) {
+    if std::env::var("SIMPLE_RUST_SEED_WARNING").as_deref() == Ok("0") {
+        return;
+    }
+    if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
+        return;
+    }
+    eprintln!(
+        "WARNING: {tool_name} is a Rust-built bootstrap/support seed tool; do not use it as normal Simple tooling."
+    );
+    eprintln!("Build and use the pure-Simple bin/simple path instead.");
+}
+
 // Re-export commonly used items
 pub use api_scanner::{generate_yaml, merge_with_existing, scan_directory, write_yaml, ScannedApi, ScannedType};
 pub use coverage::{

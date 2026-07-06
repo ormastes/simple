@@ -65,6 +65,7 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
+    simple_mock_helper::warn_rust_seed_tool("coverage_gen");
     let cli = Cli::parse();
 
     match cli.command {

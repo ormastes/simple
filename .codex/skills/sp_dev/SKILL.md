@@ -551,3 +551,12 @@ For SPipe LLM-backed app/server work, use the fine-tune registry commands under
 record the failed eval, create or link the retry attempt, and file remaining
 retry/verification/safety/deployment work in `doc/08_tracking/todo/todo_db.sdn`
 and `doc/08_tracking/feature/` before reporting the handoff state.
+
+## Reference: SimpleOS LLVM/Clang toolchain
+
+Building a C/C++ "hello world" for SimpleOS with clang? The LLVM→SimpleOS port
+is already built (easy to lose): cross clang/lld at
+`build/os/llvm/cross-x86_64-unknown-simpleos/bin/`, source at
+`/home/ormastes/llvm-project`, sysroot at `build/os/sysroot/`. Compile+link
+works; in-guest exec is blocked. Full guide + verified commands:
+`doc/07_guide/os/simpleos_llvm_toolchain.md`.

@@ -94,26 +94,15 @@ use simple_driver::cli::doc_gen::{
     run_traceability_check, run_tracking,
 };
 use simple_driver::cli::qualify_ignore::{handle_qualify_ignore, parse_qualify_ignore_args};
+use simple_driver::seed_warning::{print_seed_warning, seed_warning_suppressed};
 
 // Import our new command modules
 use simple_driver::cli::commands::*;
 
 fn warn_seed_binary(args: &[String]) {
-    if std::env::var("SIMPLE_RUST_SEED_WARNING").as_deref() == Ok("0") {
-        return;
+    if !seed_warning_suppressed(args) {
+        print_seed_warning();
     }
-    if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
-        return;
-    }
-    if matches!(args.first().map(String::as_str), Some("-h" | "--help" | "-v" | "--version")) {
-        return;
-    }
-    if args.iter().any(|arg| arg == "--seed-ok" || arg == "--rust-seed-ok") {
-        return;
-    }
-    eprintln!(
-        "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool. Build and use the pure-Simple bin/simple instead."
-    );
 }
 
 // ---------------------------------------------------------------------------
