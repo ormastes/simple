@@ -121,6 +121,25 @@ impl LlvmBackend {
         }
     }
 
+    #[cfg(feature = "llvm")]
+    fn is_native_scalar_equality_type(ty: crate::hir::TypeId) -> bool {
+        use crate::hir::TypeId;
+        matches!(
+            ty,
+            TypeId::BOOL
+                | TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::CHAR
+                | TypeId::NIL
+        )
+    }
+
     /// Compile a binary operation
     ///
     /// `lhs_signed` indicates whether the left operand has a signed type.
@@ -136,6 +155,7 @@ impl LlvmBackend {
         module: &Module<'static>,
         lhs_signed: Option<bool>,
         lhs_type: Option<crate::hir::TypeId>,
+        rhs_type: Option<crate::hir::TypeId>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
         use crate::hir::{BinOp, TypeId};
 
@@ -176,6 +196,9 @@ impl LlvmBackend {
                     r
                 };
 
+                let native_scalar_eq = lhs_type.zip(rhs_type).is_some_and(|(lhs, rhs)| {
+                    Self::is_native_scalar_equality_type(lhs) && Self::is_native_scalar_equality_type(rhs)
+                });
                 let result = match op {
                     BinOp::Add => builder
                         .build_int_add(l, r, "add")
@@ -190,41 +213,53 @@ impl LlvmBackend {
                         .build_int_signed_div(l, r, "div")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_int_signed_div", &e))?,
                     BinOp::Eq => {
-                        // Use rt_native_eq for safe equality (handles mixed raw int / tagged string)
-                        let rt_func = module.get_function("rt_native_eq").unwrap_or_else(|| {
-                            let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                            module.add_function("rt_native_eq", fn_type, None)
-                        });
-                        let call_site = builder
-                            .build_call(rt_func, &[l.into(), r.into()], "eq")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_eq", &e))?;
-                        let raw = call_site
-                            .try_as_basic_value()
-                            .left()
-                            .unwrap_or_else(|| i64_type.const_int(0, false).into())
-                            .into_int_value();
-                        let cmp = builder
-                            .build_int_compare(IntPredicate::NE, raw, i64_type.const_zero(), "eq_bool")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
+                        let cmp = if native_scalar_eq {
+                            builder
+                                .build_int_compare(IntPredicate::EQ, l, r, "eq")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
+                        } else {
+                            // Use rt_native_eq for safe equality (handles mixed raw int / tagged string)
+                            let rt_func = module.get_function("rt_native_eq").unwrap_or_else(|| {
+                                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                                module.add_function("rt_native_eq", fn_type, None)
+                            });
+                            let call_site = builder
+                                .build_call(rt_func, &[l.into(), r.into()], "eq")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_eq", &e))?;
+                            let raw = call_site
+                                .try_as_basic_value()
+                                .left()
+                                .unwrap_or_else(|| i64_type.const_int(0, false).into())
+                                .into_int_value();
+                            builder
+                                .build_int_compare(IntPredicate::NE, raw, i64_type.const_zero(), "eq_bool")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
+                        };
                         self.tagged_bool_from_i1(cmp, builder)?
                     }
                     BinOp::NotEq => {
-                        // Use rt_native_neq for safe inequality
-                        let rt_func = module.get_function("rt_native_neq").unwrap_or_else(|| {
-                            let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                            module.add_function("rt_native_neq", fn_type, None)
-                        });
-                        let call_site = builder
-                            .build_call(rt_func, &[l.into(), r.into()], "neq")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_neq", &e))?;
-                        let raw = call_site
-                            .try_as_basic_value()
-                            .left()
-                            .unwrap_or_else(|| i64_type.const_int(0, false).into())
-                            .into_int_value();
-                        let cmp = builder
-                            .build_int_compare(IntPredicate::NE, raw, i64_type.const_zero(), "neq_bool")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
+                        let cmp = if native_scalar_eq {
+                            builder
+                                .build_int_compare(IntPredicate::NE, l, r, "neq")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
+                        } else {
+                            // Use rt_native_neq for safe inequality
+                            let rt_func = module.get_function("rt_native_neq").unwrap_or_else(|| {
+                                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                                module.add_function("rt_native_neq", fn_type, None)
+                            });
+                            let call_site = builder
+                                .build_call(rt_func, &[l.into(), r.into()], "neq")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_neq", &e))?;
+                            let raw = call_site
+                                .try_as_basic_value()
+                                .left()
+                                .unwrap_or_else(|| i64_type.const_int(0, false).into())
+                                .into_int_value();
+                            builder
+                                .build_int_compare(IntPredicate::NE, raw, i64_type.const_zero(), "neq_bool")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
+                        };
                         self.tagged_bool_from_i1(cmp, builder)?
                     }
                     BinOp::Is => {
@@ -993,6 +1028,54 @@ mod tests {
         assert!(ir.contains("i64 2, label %case_two"));
         assert!(ir.contains("label %default"));
 
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn rv32_scalar_eq_neq_use_native_compare() {
+        let target = Target::new(TargetArch::Riscv32, TargetOS::SimpleOS);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("rv32_scalar_eq_neq").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let rv_type = backend.runtime_int_type();
+            let fn_type = rv_type.fn_type(&[rv_type.into(), rv_type.into()], false);
+
+            for (name, op) in [
+                ("eq_scalar", crate::hir::BinOp::Eq),
+                ("neq_scalar", crate::hir::BinOp::NotEq),
+            ] {
+                let function = module.add_function(name, fn_type, None);
+                let entry = backend.context_ref().append_basic_block(function, "entry");
+                builder.position_at_end(entry);
+                let left = function.get_nth_param(0).unwrap();
+                let right = function.get_nth_param(1).unwrap();
+                let result = backend
+                    .compile_binop(
+                        op,
+                        left,
+                        right,
+                        builder,
+                        module,
+                        None,
+                        Some(crate::hir::TypeId::I64),
+                        Some(crate::hir::TypeId::I64),
+                    )
+                    .unwrap()
+                    .into_int_value();
+                builder.build_return(Some(&result)).unwrap();
+            }
+        }
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("icmp eq i32"));
+        assert!(ir.contains("icmp ne i32"));
+        assert!(!ir.contains("rt_native_eq"));
+        assert!(!ir.contains("rt_native_neq"));
         backend.verify().unwrap();
     }
 }

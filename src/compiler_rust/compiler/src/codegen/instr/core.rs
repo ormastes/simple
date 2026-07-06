@@ -825,8 +825,7 @@ pub(crate) fn compile_interp_call<M: Module>(
         let is_extern_bridge = func_name.starts_with("rt_") || func_name.starts_with("spl_");
         let keep_boxed_result = boxed_result || interp_call_keeps_boxed_result(func_name);
         let value = if !keep_boxed_result
-            && (ctx.vreg_types.get(d).copied() == Some(TypeId::F64)
-                || interp_call_returns_f64(func_name))
+            && (ctx.vreg_types.get(d).copied() == Some(TypeId::F64) || interp_call_returns_f64(func_name))
         {
             call_runtime_1(ctx, builder, "rt_value_as_float", result)
         } else if !keep_boxed_result && (is_extern_bridge || vreg_is_native_equality_scalar(ctx, *d)) {

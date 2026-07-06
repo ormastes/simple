@@ -2,9 +2,10 @@
 
 **Date:** 2026-06-11  
 **ID:** selfhosted_parser_lambda_gap_2026-06-11  
-**Severity:** HIGH — blocks E-PAR-006 share-nothing lint from firing in self-hosted lane
+**Status:** Closed 2026-06-11
+**Severity:** Was HIGH — blocked E-PAR-006 share-nothing lint from firing in the self-hosted lane
 
-## Symptom
+## Historical Symptom
 
 All closure/lambda forms that produce `EXPR_LAMBDA` nodes fail to parse when used as
 call arguments in the self-hosted parser. Tested forms and results:

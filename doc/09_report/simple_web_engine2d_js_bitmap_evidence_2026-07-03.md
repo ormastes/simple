@@ -37,526 +37,526 @@
 -    |
 - 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
 -    |                        ^
-- 
+-
 - Use angle brackets: cb<...> instead of cb[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
 -    |
 - 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
 -    |
 - 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
 -    |
 - 4684 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
 -    |
 - 4687 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
 -    |
 - 4711 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
 -    |
 - 4714 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
 -    |
 - 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
 -    |                                                                              ^
-- 
+-
 - Use angle brackets: nodes<...> instead of nodes[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
 -    |
 -  89 |     while i < slen and is_whitespace_char(s[i]):
 -    |                                            ^
-- 
+-
 - Use angle brackets: s<...> instead of s[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.time_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
 -    |
 -   3 | export use nogc_sync_mut.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.env.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.metal_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
 -    |
 -   3 | export use std.gc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.env_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.process_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3698:24
 -    |
 - 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
 -    |                        ^
-- 
+-
 - Use angle brackets: cb<...> instead of cb[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
 -    |
 - 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
 -    |
 - 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
 -    |
 - 4684 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
 -    |
 - 4687 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
 -    |
 - 4711 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
 -    |
 - 4714 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
 -    |
 - 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
 -    |                                                                              ^
-- 
+-
 - Use angle brackets: nodes<...> instead of nodes[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
 -    |
 -  89 |     while i < slen and is_whitespace_char(s[i]):
 -    |                                            ^
-- 
+-
 - Use angle brackets: s<...> instead of s[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.time_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
 -    |
 -   3 | export use nogc_sync_mut.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.env.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.metal_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
 -    |
 -   3 | export use std.gc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.env_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.process_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
@@ -644,526 +644,526 @@
 -    |
 - 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
 -    |                        ^
-- 
+-
 - Use angle brackets: cb<...> instead of cb[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
 -    |
 - 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
 -    |
 - 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
 -    |
 - 4684 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
 -    |
 - 4687 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
 -    |
 - 4711 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
 -    |
 - 4714 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
 -    |
 - 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
 -    |                                                                              ^
-- 
+-
 - Use angle brackets: nodes<...> instead of nodes[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
 -    |
 -  89 |     while i < slen and is_whitespace_char(s[i]):
 -    |                                            ^
-- 
+-
 - Use angle brackets: s<...> instead of s[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.time_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
 -    |
 -   3 | export use nogc_sync_mut.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.env.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.metal_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
 -    |
 -   3 | export use std.gc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.env_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.process_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3698:24
 -    |
 - 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
 -    |                        ^
-- 
+-
 - Use angle brackets: cb<...> instead of cb[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
 -    |
 - 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
 -    |
 - 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
 -    |
 - 4684 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
 -    |
 - 4687 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
 -    |
 - 4711 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
 -    |
 - 4714 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
 -    |
 - 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
 -    |                                                                              ^
-- 
+-
 - Use angle brackets: nodes<...> instead of nodes[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
 -    |
 -  89 |     while i < slen and is_whitespace_char(s[i]):
 -    |                                            ^
-- 
+-
 - Use angle brackets: s<...> instead of s[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.time_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
 -    |
 -   3 | export use nogc_sync_mut.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.env.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.metal_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
 -    |
 -   3 | export use std.gc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.env_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.process_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
@@ -1251,526 +1251,526 @@
 -    |
 - 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
 -    |                        ^
-- 
+-
 - Use angle brackets: cb<...> instead of cb[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
 -    |
 - 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
 -    |
 - 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
 -    |
 - 4684 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
 -    |
 - 4687 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
 -    |
 - 4711 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
 -    |
 - 4714 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
 -    |
 - 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
 -    |                                                                              ^
-- 
+-
 - Use angle brackets: nodes<...> instead of nodes[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
 -    |
 -  89 |     while i < slen and is_whitespace_char(s[i]):
 -    |                                            ^
-- 
+-
 - Use angle brackets: s<...> instead of s[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.time_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
 -    |
 -   3 | export use nogc_sync_mut.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.env.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.metal_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
 -    |
 -   3 | export use std.gc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.env_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.process_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3698:24
 -    |
 - 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
 -    |                        ^
-- 
+-
 - Use angle brackets: cb<...> instead of cb[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
 -    |
 - 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
 -    |
 - 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
 -    |                                                          ^
-- 
+-
 - Use angle brackets: left<...> instead of left[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
 -    |
 - 4684 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
 -    |
 - 4687 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
 -    |
 - 4711 |             while pos < rule_count and has_last and rules[pos] == last:
 -    |                                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
 -    |
 - 4714 |             if pos < rule_count and rules[pos] < min_rule:
 -    |                                          ^
-- 
+-
 - Use angle brackets: rules<...> instead of rules[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
 -    |
 - 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
 -    |                                                                              ^
-- 
+-
 - Use angle brackets: nodes<...> instead of nodes[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
 -    |
 -  89 |     while i < slen and is_whitespace_char(s[i]):
 -    |                                            ^
-- 
+-
 - Use angle brackets: s<...> instead of s[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.time_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
 -    |
 -   3 | export use nogc_sync_mut.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.env.platform.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Deprecated syntax for type parameters
 -   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
 -    |
 - 142 |         if c < bp.len() and pp[c] == bp[c]:
 -    |                               ^
-- 
+-
 - Use angle brackets: pp<...> instead of pp[...]
-- 
+-
 - Run `simple migrate --fix-generics` to automatically update your code
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.metal_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
 -    |
 -   3 | export use std.gc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
 -    |
 -   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.env_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
 -    |
 -   7 | export use std.nogc_async_mut.io.process_ops.*
 -    | ^
-- 
+-
 - Use explicit exports instead
-- 
+-
 - Example: export use module.{A, B, C} or export A, B from module
-- 
+-
 - [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
 -   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
 -    |
 -   1 | #[runtime_intrinsics]
 -    | ^
-- 
+-
 - Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
-- 
+-
 - [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)

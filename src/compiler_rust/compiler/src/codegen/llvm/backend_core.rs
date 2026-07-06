@@ -58,6 +58,8 @@ pub struct LlvmBackend {
     pub(super) data_exports: std::sync::Arc<std::collections::HashSet<String>>,
     /// Per-module use map from `use` statements
     pub(super) use_map: std::collections::HashMap<String, String>,
+    /// Return types for functions declared in the current MIR module.
+    pub(super) function_return_types: RefCell<std::collections::HashMap<String, crate::hir::TypeId>>,
     /// Module symbol prefix, used to name the per-module `__module_init_<prefix>`
     /// function so the linker's init-caller aggregator can discover it. Mirrors
     /// the cranelift backend's `module_prefix` (common_backend.rs).
@@ -175,6 +177,7 @@ impl LlvmBackend {
                 import_map: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 use_map: std::collections::HashMap::new(),
+                function_return_types: RefCell::new(std::collections::HashMap::new()),
                 module_prefix: None,
             })
         }
@@ -1118,6 +1121,7 @@ impl NativeBackend for LlvmBackend {
 
         // First pass: forward-declare all function signatures
         // This is necessary so that functions can call each other regardless of compilation order
+        self.function_return_types.borrow_mut().clear();
         for func in &module.functions {
             let has_body = !func.blocks.is_empty();
             if !has_body && !referenced_function_names.contains(func.name.as_str()) {
@@ -1147,6 +1151,12 @@ impl NativeBackend for LlvmBackend {
                 .or_else(|| self.import_map.get(&func.name))
                 .map(|s| s.as_str())
                 .unwrap_or(&func.name);
+            self.function_return_types
+                .borrow_mut()
+                .insert(resolved_name.to_string(), func.return_type);
+            self.function_return_types
+                .borrow_mut()
+                .insert(func.name.clone(), func.return_type);
             self.declare_function_with_linkage(resolved_name, &param_types, &func.return_type, has_body)?;
             #[cfg(feature = "llvm")]
             if has_body {

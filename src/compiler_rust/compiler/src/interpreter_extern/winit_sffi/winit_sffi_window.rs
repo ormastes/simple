@@ -70,10 +70,7 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
             let loops = EVENT_LOOPS.lock();
             if let Some(handle) = loops.get(&event_loop_id) {
                 let timeout = std::time::Duration::from_millis(timeout_ms.max(0) as u64);
-                match handle
-                    .event_rx
-                    .recv_timeout(timeout)
-                {
+                match handle.event_rx.recv_timeout(timeout) {
                     Ok(event) => Ok(int_value(event_to_handle(event))),
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => Ok(int_value(0)),
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {

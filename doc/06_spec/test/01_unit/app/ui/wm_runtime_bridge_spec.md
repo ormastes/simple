@@ -153,7 +153,7 @@ expect(marker).to_contain("backend=cpu")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/wm_runtime_bridge_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

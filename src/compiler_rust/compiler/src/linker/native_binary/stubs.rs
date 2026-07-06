@@ -433,8 +433,14 @@ int main(int argc, char** argv) {
     fn real_runtime_defined_symbols(&self) -> Option<HashSet<String>> {
         let runtime_dir = NativeBinaryOptions::find_runtime_library_path_for_target(&self.options.target)?;
         let candidates = [
-            runtime_dir.join(NativeBinaryOptions::static_lib_name("simple_runtime", &self.options.target)),
-            runtime_dir.join(NativeBinaryOptions::static_lib_name("simple_compiler", &self.options.target)),
+            runtime_dir.join(NativeBinaryOptions::static_lib_name(
+                "simple_runtime",
+                &self.options.target,
+            )),
+            runtime_dir.join(NativeBinaryOptions::static_lib_name(
+                "simple_compiler",
+                &self.options.target,
+            )),
         ];
         let mut set = HashSet::new();
         let mut found_any = false;

@@ -170,7 +170,17 @@ cleanup_auto_qmp() {
         wait "$AUTO_QMP_PID" >/dev/null 2>&1 || true
     fi
 }
-trap cleanup_auto_qmp EXIT INT TERM
+on_int() {
+    cleanup_auto_qmp
+    exit 130
+}
+on_term() {
+    cleanup_auto_qmp
+    exit 143
+}
+trap cleanup_auto_qmp EXIT
+trap on_int INT
+trap on_term TERM
 
 qemu_display_gtk_supported=false
 qemu_display_reason=missing-qemu-bin
@@ -373,6 +383,7 @@ elif [ -n "${QEMU_QMP_SOCKET:-}" ]; then
     set +e
     RUN_ELECTRON_LIVE_SMOKE=0 \
     RUN_QEMU_LIVE_CAPTURE=1 \
+	    RUN_WM_CONTRACT_AND_SPECS=0 \
 	    STRICT_LIVE_CAPTURE=0 \
 	    STRICT_QEMU_CAPTURE=1 \
 	    REPORT_PATH="$WM_REPORT_PATH" \
@@ -396,7 +407,13 @@ elif [ -n "${QEMU_QMP_SOCKET:-}" ]; then
     qemu_live_sample_matches="${qemu_live_sample_matches:-0}"
     qemu_live_sample_mismatches="${qemu_live_sample_mismatches:-0}"
     qemu_live_scene_mismatches="${qemu_live_scene_mismatches:-0}"
-    if [ "$wm_exit_code" -eq 0 ] && grep -q '^wm_launch_capture_evidence_status=pass' "$BUILD_DIR/wm.out"; then
+    if [ "$wm_exit_code" -ge 128 ]; then
+        status=fail
+        reason=wm-live-capture-interrupted
+        perf_status=fail
+        perf_reason="$reason"
+        perf_release_blocker="$reason"
+    elif [ "$wm_exit_code" -eq 0 ] && grep -q '^wm_launch_capture_evidence_status=pass' "$BUILD_DIR/wm.out"; then
         status=pass
         reason=pass
         perf_status=unavailable

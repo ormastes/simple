@@ -68,7 +68,10 @@ fn try_const_float_eval(expr: &Expr) -> Option<f64> {
         Expr::TypedFloat(val, _) => Some(*val),
         Expr::Integer(val) => Some(*val as f64),
         Expr::TypedInteger(val, _) => Some(*val as f64),
-        Expr::Unary { op: ast::UnaryOp::Neg, operand } => Some(-try_const_float_eval(operand)?),
+        Expr::Unary {
+            op: ast::UnaryOp::Neg,
+            operand,
+        } => Some(-try_const_float_eval(operand)?),
         Expr::Binary { op, left, right } => {
             let l = try_const_float_eval(left)?;
             let r = try_const_float_eval(right)?;

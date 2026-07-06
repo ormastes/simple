@@ -147,6 +147,10 @@ For the SimpleOS desktop/GTK lane, prefer
 captures. That wrapper now owns the canonical real-QEMU QMP screendump plus
 host GTK/GL exact-scene evidence and writes the release-auditable report under
 `doc/09_report/`.
+When that wrapper already has a live QMP socket, it calls
+`check-wm-launch-capture-evidence.shs` with
+`RUN_WM_CONTRACT_AND_SPECS=0` so the live screendump probe is not delayed by
+unrelated host WM contract/spec checks.
 
 ---
 

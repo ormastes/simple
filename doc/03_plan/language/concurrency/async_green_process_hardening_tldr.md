@@ -13,9 +13,11 @@ flow:
   w2: E-PAR share-nothing rule | green_thread deglobal | await crash guard
 ```
 
-State found: std.async runtime broken (write-only wakers, no-op sleep/yield,
-hollow specs); `async fn`+`await` SIGSEGV in interpreter; greenprocess ~90%
-done but isolation enforced nowhere; process_set file-IPC racy (security).
+Initial state found: std.async runtime broken (write-only wakers, no-op
+sleep/yield, hollow specs); `async fn`+`await` SIGSEGV in interpreter;
+greenprocess ~90% done with no share-nothing enforcement; process_set file-IPC
+racy (security). Current handoff state: E-PAR-006 share-nothing enforcement is
+live in the self-hosted `simple check` path, including lambda call arguments.
 
 Wave 1 (easy/parallel): repair async/runtime.spl + wakers + combinators;
 atomic IPC + reaping + kill guards; refresh stale check binary + submodule;

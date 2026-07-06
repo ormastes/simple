@@ -847,9 +847,18 @@ mod tests {
     #[test]
     fn erased_receiver_ambiguity_falls_through() {
         assert!(erased_receiver_should_fall_through_ambiguous_method(None, "to_string"));
-        assert!(erased_receiver_should_fall_through_ambiguous_method(Some(TypeId::ANY), "to_string"));
-        assert!(!erased_receiver_should_fall_through_ambiguous_method(Some(TypeId::ANY), "push"));
-        assert!(!erased_receiver_should_fall_through_ambiguous_method(Some(TypeId::I64), "to_string"));
+        assert!(erased_receiver_should_fall_through_ambiguous_method(
+            Some(TypeId::ANY),
+            "to_string"
+        ));
+        assert!(!erased_receiver_should_fall_through_ambiguous_method(
+            Some(TypeId::ANY),
+            "push"
+        ));
+        assert!(!erased_receiver_should_fall_through_ambiguous_method(
+            Some(TypeId::I64),
+            "to_string"
+        ));
     }
 }
 

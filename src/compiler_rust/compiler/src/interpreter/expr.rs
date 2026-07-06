@@ -109,7 +109,8 @@ fn get_field_value(val: &Value, field: &str) -> Result<Value, CompileError> {
                 if std::env::var("SIMPLE_DBG_COLLISION").is_ok() {
                     eprintln!(
                         "[DBG GETFIELD] class={} missing_field={} actual_fields=[{}]",
-                        class, field,
+                        class,
+                        field,
                         fields.keys().map(|s| s.as_str()).collect::<Vec<_>>().join(",")
                     );
                 }

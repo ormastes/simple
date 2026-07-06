@@ -522,8 +522,7 @@ impl<'a> MirLowerer<'a> {
                                             | TypeId::U32
                                             | TypeId::U64
                                     );
-                                let needs_float_boxing =
-                                    !elem_is_heap && matches!(value.ty, TypeId::F32 | TypeId::F64);
+                                let needs_float_boxing = !elem_is_heap && matches!(value.ty, TypeId::F32 | TypeId::F64);
                                 let needs_bool_boxing =
                                     !elem_is_heap && (value.ty == TypeId::BOOL || value.ty == TypeId::I8);
                                 if needs_int_boxing {

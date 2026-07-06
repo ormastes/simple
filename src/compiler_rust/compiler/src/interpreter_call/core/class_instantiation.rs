@@ -95,7 +95,12 @@ pub(crate) fn instantiate_class(
             "[DBG INST] call_name={} picked_def={} def_fields=[{}] args=[{}]",
             class_name,
             class_def.name,
-            class_def.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(","),
+            class_def
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
             args.iter().filter_map(|a| a.name.clone()).collect::<Vec<_>>().join(",")
         );
     }
@@ -292,8 +297,15 @@ pub(crate) fn instantiate_class(
                 if std::env::var("SIMPLE_DBG_COLLISION").is_ok() {
                     eprintln!(
                         "[DBG CONSTRUCT-ERR] call_name={} picked_def={} missing_field={} def_fields=[{}]",
-                        class_name, class_def.name, name,
-                        class_def.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(",")
+                        class_name,
+                        class_def.name,
+                        name,
+                        class_def
+                            .fields
+                            .iter()
+                            .map(|f| f.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
                     );
                 }
                 return Err(CompileError::semantic_with_context(

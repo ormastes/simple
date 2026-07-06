@@ -47,7 +47,7 @@ The WM launch capture wrapper aggregates host WM, SimpleOS WM, Electron, and QEM
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/wm_launch_capture_simple_bin_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-07-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -109,7 +109,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_launch_capture_simple_bin
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -183,7 +183,7 @@ expect(electron_code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

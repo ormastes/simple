@@ -128,10 +128,7 @@ fn is_current_module_candidate(func: &Arc<FunctionDef>) -> bool {
     let current = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
     let owner = function_module_owner(func);
     if debug_overload_select() {
-        println!(
-            "[module-tie] fn={} current={:?} owner={:?}",
-            func.name, current, owner
-        );
+        println!("[module-tie] fn={} current={:?} owner={:?}", func.name, current, owner);
     }
     match (current, owner) {
         (Some(cur), Some(owner)) => cur == owner,

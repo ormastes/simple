@@ -229,9 +229,12 @@ explicit release blocker that says the claim is not proven. Do not promote a
 single interleaving, host-only simulator run, or generated artifact into a
 stronger baremetal scheduling claim.
 
-Any `process_spawn_async` path must assert cleanup through `process_wait`,
-`process_is_running`/`process_is_alive`, or `process_kill`. A spawned process
-without an observed wait, liveness check, or kill path is incomplete evidence.
+Any `process_spawn_async` or `process_spawn_async_env` path must assert cleanup
+through `process_wait`, `process_is_running`/`process_is_alive`, or
+`process_kill`. Lifecycle evidence must call the `app.io.mod.process_*`
+facades; raw `rt_process_*` only proves runtime-owner behavior. A spawned
+process without an observed wait, liveness check, or kill path is incomplete
+evidence.
 
 OS thread lifecycle evidence must prove a spawned `ThreadHandle` reaches a
 terminal state through `join()` or `free()`. Repeated terminal cleanup must stay

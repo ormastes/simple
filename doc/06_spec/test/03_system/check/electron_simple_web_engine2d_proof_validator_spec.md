@@ -47,7 +47,7 @@ Validates the Electron Simple Web Engine2D bitmap proof validator. The wrapper c
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/electron_simple_web_engine2d_proof_validator_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-07-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -135,7 +135,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -157,6 +157,8 @@ expect(evidence).to_contain("electron_simple_web_engine2d_proof_source=tools/ele
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_file_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_size_bytes=")
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_actual_size_bytes=")
+expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_file_reason=pass")
+expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_artifact_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_capture_backend=electron-offscreen-capture-page")
 expect(evidence).to_contain("electron_simple_web_engine2d_compositor_mode=offscreen-osr-exact-srgb")
 expect(evidence).to_contain("electron_simple_web_engine2d_browser_engine=chromium")
@@ -180,6 +182,8 @@ expect(evidence).to_contain("electron_simple_web_engine2d_capture_downsampled=fa
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_path=captured.json")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_written=true")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_status=pass")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_reason=pass")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_artifact_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_hardlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_format=argb-u32")
@@ -235,13 +239,15 @@ expect(scene).to_contain("electron_simple_web_engine2d_validation_reason=unexpec
 
 #### rejects proof when the live Electron Engine2D capture source artifact is missing
 
+-  proof command
+   - Expected: code equals `1`
 - Confirm Engine2D proof source marker is bound to the producer source file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -260,19 +266,23 @@ expect(evidence).to_contain("electron_simple_web_engine2d_proof_source=tools/ele
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_file_status=missing")
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_size_bytes=")
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_actual_size_bytes=")
+expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_file_reason=missing")
+expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_artifact_status=fail")
 ```
 
 </details>
 
 #### rejects substituted Electron Engine2D proof source artifacts
 
+-  proof command
+   - Expected: code equals `0`
 - Confirm Engine2D proof source evidence cannot be hardlinked, non-regular, or markerless
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -297,13 +307,19 @@ expect(hardlink).to_contain("electron_simple_web_engine2d_validation_status=fail
 expect(hardlink).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source-file-hardlink")
 expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_file_status=hardlink")
 expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_actual_size_bytes=")
+expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_file_reason=hardlink")
+expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_artifact_status=fail")
 expect(directory).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(directory).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source-file-not-regular")
 expect(directory).to_contain("electron_simple_web_engine2d_proof_source_file_status=not-regular")
+expect(directory).to_contain("electron_simple_web_engine2d_proof_source_file_reason=not-regular")
+expect(directory).to_contain("electron_simple_web_engine2d_proof_source_artifact_status=fail")
 expect(markerless).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(markerless).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source-file-marker-missing")
 expect(markerless).to_contain("electron_simple_web_engine2d_proof_source_file_status=marker-missing")
 expect(markerless).to_contain("electron_simple_web_engine2d_proof_source_actual_size_bytes=")
+expect(markerless).to_contain("electron_simple_web_engine2d_proof_source_file_reason=marker-missing")
+expect(markerless).to_contain("electron_simple_web_engine2d_proof_source_artifact_status=fail")
 ```
 
 </details>
@@ -413,7 +429,7 @@ expect(chrome_version).to_contain("electron_simple_web_engine2d_chrome_process_v
 -  proof command
 -  proof command
    - Expected: code equals `1`
-   - Expected: evidence does not contain `electron_simple_web_engine2d_electron_frame_us=not-a-number`
+- expect not
 
 
 <details>
@@ -515,7 +531,7 @@ expect(provenance).to_contain("electron_simple_web_engine2d_validation_reason=mi
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -533,10 +549,14 @@ val empty = file_read(root + "/empty.env")
 expect(missing).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(missing).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb-file")
 expect(missing).to_contain("electron_simple_web_engine2d_captured_argb_file_status=missing")
+expect(missing).to_contain("electron_simple_web_engine2d_captured_argb_file_reason=missing")
+expect(missing).to_contain("electron_simple_web_engine2d_captured_argb_artifact_status=fail")
 expect(missing).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=")
 expect(empty).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(empty).to_contain("electron_simple_web_engine2d_validation_reason=empty-captured-argb-file")
 expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_file_status=empty")
+expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_file_reason=empty")
+expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_artifact_status=fail")
 expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=0")
 ```
 
@@ -552,7 +572,7 @@ expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -569,6 +589,8 @@ expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail
 expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb-file")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_path=proof.json")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_status=missing")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_reason=missing")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_artifact_status=fail")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=")
 ```
 
@@ -585,7 +607,7 @@ expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_size_byt
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -604,6 +626,8 @@ expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail
 expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb-file")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_path=captured.json")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_status=missing")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_reason=missing")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_artifact_status=fail")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=")
 ```
 
@@ -620,7 +644,7 @@ expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_size_byt
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -646,6 +670,8 @@ expect(argb).to_contain("electron_simple_web_engine2d_validation_reason=captured
 expect(argb).to_contain("electron_simple_web_engine2d_proof_symlink_status=pass")
 expect(argb).to_contain("electron_simple_web_engine2d_proof_hardlink_status=pass")
 expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_file_status=symlink")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_file_reason=symlink")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_artifact_status=fail")
 expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status=fail")
 expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_hardlink_status=pass")
 ```
@@ -663,7 +689,7 @@ expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_hardlink_sta
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -689,6 +715,8 @@ expect(argb).to_contain("electron_simple_web_engine2d_validation_reason=captured
 expect(argb).to_contain("electron_simple_web_engine2d_proof_symlink_status=pass")
 expect(argb).to_contain("electron_simple_web_engine2d_proof_hardlink_status=pass")
 expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_file_status=hardlink")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_file_reason=hardlink")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_artifact_status=fail")
 expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status=pass")
 expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_hardlink_status=fail")
 expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=")
@@ -800,11 +828,11 @@ expect(mismatch).to_contain("electron_simple_web_engine2d_capture_native_height=
 -  proof command
    - Expected: code equals `1`
 - Confirm live Electron Engine2D numeric proof cannot be stringified
-   - Expected: requested does not contain `electron_simple_web_engine2d_requested_height=64`
-   - Expected: argb does not contain `electron_simple_web_engine2d_captured_argb_height=64`
-   - Expected: native does not contain `electron_simple_web_engine2d_capture_native_height=64`
-   - Expected: iterations does not contain `electron_simple_web_engine2d_proof_iterations=5`
-   - Expected: timing does not contain `electron_simple_web_engine2d_electron_frame_us=1250`
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
 
 
 <details>
@@ -866,10 +894,10 @@ expect_not(timing.contains("electron_simple_web_engine2d_electron_frame_us=1250"
 -  proof command
    - Expected: code equals `1`
 - Confirm string booleans remain malformed Electron Engine2D diagnostics
-   - Expected: capture does not contain `electron_simple_web_engine2d_captured_argb_written=true`
-   - Expected: capture does not contain `electron_simple_web_engine2d_captured_argb_written=false`
-   - Expected: downsampled does not contain `electron_simple_web_engine2d_capture_downsampled=false`
-   - Expected: blur does not contain `electron_simple_web_engine2d_blur_or_tolerance_used=false`
+- expect not
+- expect not
+- expect not
+- expect not
 
 
 <details>
@@ -917,8 +945,8 @@ expect_not(blur.contains("electron_simple_web_engine2d_blur_or_tolerance_used=fa
 -  proof command
 -  proof command
    - Expected: code equals `1`
-   - Expected: mismatch does not contain `electron_simple_web_engine2d_mismatch_count=bad`
-   - Expected: string_zero does not contain `electron_simple_web_engine2d_mismatch_count=0`
+- expect not
+- expect not
 
 
 <details>
@@ -1036,7 +1064,7 @@ expect(weighted).to_contain("electron_simple_web_engine2d_captured_argb_weighted
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 75 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1062,6 +1090,10 @@ expect(script).to_contain("electron_simple_web_engine2d_proof_source")
 expect(script).to_contain("electron_simple_web_engine2d_proof_source_file_status")
 expect(script).to_contain("electron_simple_web_engine2d_proof_source_size_bytes")
 expect(script).to_contain("electron_simple_web_engine2d_proof_source_actual_size_bytes")
+expect(script).to_contain("electron_simple_web_engine2d_proof_source_file_reason")
+expect(script).to_contain("electron_simple_web_engine2d_proof_source_artifact_status")
+expect(script).to_contain("proof source file reason:")
+expect(script).to_contain("proof source artifact status:")
 expect(script).to_contain("num_at_least \"$proof_source_size_bytes\" 1")
 expect(script).to_contain("num_at_least \"$proof_source_actual_size_bytes\" 1")
 expect(script).to_contain("proof-source-size-mismatch")
@@ -1071,8 +1103,13 @@ expect(script).to_contain("proof-source-file-status-not-pass")
 expect(script).to_contain("electron_simple_web_engine2d_proof_iterations")
 expect(script).to_contain("electron_simple_web_engine2d_estimated_fps_floor")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_file_status")
+expect(script).to_contain("electron_simple_web_engine2d_captured_argb_file_reason")
+expect(script).to_contain("electron_simple_web_engine2d_captured_argb_artifact_status")
+expect(script).to_contain("captured ARGB file reason:")
+expect(script).to_contain("captured ARGB artifact status:")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_hardlink_status")
+expect(script).to_contain("captured-argb-artifact-status-not-pass")
 expect(script).to_contain("captured-argb-symlink-status-not-pass")
 expect(script).to_contain("captured-argb-hardlink-status-not-pass")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_format")

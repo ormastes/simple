@@ -75,9 +75,9 @@ concurrency/resource formal gate, and the focused memory-safety formal gate.
 - Lean formal proof projects build through the shared proof checker and reject
   proof-trust bypasses.
 - RISC-V generated RTL sidecars, BYL model facts, and manual Lean constraints
-  pass the dual-track formal gate, while generated SBY/RVFI artifacts are
-  reported as readiness evidence rather than claimed as an RTL proof pass when
-  `sby` is unavailable.
+  pass the dual-track formal gate. Generated SBY/RVFI artifacts are still
+  reported as readiness evidence, and the strict RTL/SBY proof row must pass
+  when the SymbiYosys toolchain is present.
 - Scheduler resource lifecycle, actor/channel backpressure, memory DRF,
   kernel-capability, and memory-capability theorem surfaces pass the focused
   critical formal gate.
@@ -115,6 +115,9 @@ concurrency/resource formal gate, and the focused memory-safety formal gate.
   QMP capture spec.
 - The RV64 display-smoke QMP report must prove the 320x240 virtio-gpu
   framebuffer, nonblack pixels, and all five WM anchor samples.
+- Async/thread/process/coroutine regression evidence must be surfaced as a
+  counted matrix row with the async hardening wrapper total, passed, failed,
+  and missing counts.
 
 ## Examples
 
@@ -151,6 +154,23 @@ SIMPLE_LIB=src src/compiler_rust/target/release/simple test \
 
 The wrapper emits these rows:
 
+- `simpleos_hardening_mission_critical_release_status`
+- `simpleos_hardening_mission_critical_release_blockers`
+- `simpleos_hardening_mission_critical_prereqs_status`
+- `simpleos_hardening_mission_critical_prereqs_missing`
+- `simpleos_hardening_mission_critical_prereqs_next_action`
+- `simpleos_hardening_nvme_baremetal_wrapper_coverage_status`
+- `simpleos_hardening_nvme_baremetal_wrapper_coverage_blockers`
+- `simpleos_hardening_nvme_baremetal_wrapper_rv32_self_test`
+- `simpleos_hardening_nvme_baremetal_wrapper_rv32_spec_status`
+- `simpleos_hardening_nvme_baremetal_wrapper_rv64_self_test`
+- `simpleos_hardening_nvme_baremetal_wrapper_rv64_spec_status`
+- `simpleos_hardening_async_library_hardening_status`
+- `simpleos_hardening_async_library_hardening_gate`
+- `simpleos_hardening_async_library_hardening_total`
+- `simpleos_hardening_async_library_hardening_passed`
+- `simpleos_hardening_async_library_hardening_failed`
+- `simpleos_hardening_async_library_hardening_missing`
 - `simpleos_hardening_exec_launch_fs_status`
 - `simpleos_hardening_ssh_smf_exec_status`
 - `simpleos_hardening_formal_lean_proofs_status`
@@ -203,7 +223,7 @@ The wrapper emits these rows:
 - `simpleos_hardening_rv64_display_smoke_qmp_status`
 - `simpleos_hardening_qemu_virtio_gpu_access_status`
 
-The readiness matrix passes only when all twenty-five rows are `pass` and the
+The readiness matrix passes only when all twenty-six rows are `pass` and the
 required guest-side QEMU performance release gate is `pass`. Mission-critical
 release is a stricter gate: it still requires
 `scripts/check/check-simpleos-mission-critical-release.shs` to pass, including
@@ -232,19 +252,22 @@ be mistaken for a completed RTL proof pass.
 - UI/policy/resource rows run
   `scripts/check/check-simpleos-ui-policy-formal-proofs.shs`.
 - Formal coverage rows run `scripts/check/check-simpleos-formal-coverage.shs`.
+- Async hardening rows run `scripts/check/check-async-library-hardening-evidence.shs`;
+  scenario runs may provide `ASYNC_LIBRARY_HARDENING_LOG` to reuse the wrapper
+  summary while direct matrix runs execute the wrapper.
 - Shared WM reads
-  `doc/09_report/shared_wm_renderer_unification_evidence_2026-06-04.md`.
+  `doc/09_report/shared_wm_renderer_unification_evidence_2026-07-05.md`.
 - CPU SIMD reads `doc/09_report/cpu_simd_engine2d_evidence_current_2026-07-02.md`.
 - LLVM port reads `doc/09_report/simpleos_llvm_port_evidence_current_2026-07-02.md`.
 - GUI/Web/2D Vulkan RenderDoc reads
   `doc/09_report/gui_renderdoc_feature_coverage_status_2026-07-03.md`.
 - Layered WebRenderer and Simple GUI rows read
-  `doc/09_report/layered_simple_gui_web_engine2d_bitmap_evidence_2026-06-05.md`.
+  `doc/09_report/layered_simple_gui_web_engine2d_bitmap_evidence_2026-07-05.md`.
 - The explicit sample-page WebRenderer row also reads
-  `doc/09_report/simple_web_engine2d_js_bitmap_evidence_2026-06-02.md` and
-  `doc/09_report/bun_simple_web_engine2d_js_bitmap_evidence_2026-06-02.md`.
+  `doc/09_report/simple_web_engine2d_js_bitmap_evidence_2026-07-03.md` and
+  `doc/09_report/bun_simple_web_engine2d_js_bitmap_evidence_2026-07-05.md`.
 - Host/QEMU counterpart evidence reads
-  `doc/09_report/qemu_gtk_wm_capture_evidence_2026-06-05.md`.
+  `doc/09_report/qemu_gtk_wm_capture_evidence_2026-07-05.md`.
 - Production GUI/WebRenderer parity evidence reads the latest existing
   `doc/09_report/production_gui_web_renderer_parity_evidence_*.md` report
   unless `PRODUCTION_GUI_PARITY_REPORT` is set.
@@ -288,9 +311,8 @@ be mistaken for a completed RTL proof pass.
   matrix row.
 - Before release, run this readiness matrix together with the individual source
   gates that changed in the current branch, then run
-  `scripts/check/check-simpleos-mission-critical-release.shs`. Do not promote a
-  readiness pass into mission-critical release evidence while the strict SBY
-  proof lane is blocked or any release blocker remains; the final gate requires
+  `scripts/check/check-simpleos-mission-critical-release.shs`. Mission-critical
+  release evidence requires the strict SBY proof lane to pass and
   `release_blockers=none`.
 
 **Requirements:** .spipe/gui_hardening_current_plan/state.md
@@ -302,7 +324,7 @@ be mistaken for a completed RTL proof pass.
 
 ### SimpleOS hardening evidence matrix
 
-#### passes when evidence rows and guest performance are wired
+#### passes the hardening matrix and mission-critical release gate with RTL/SBY prerequisites
 
 <details>
 <summary>Executable SSpec</summary>
@@ -317,13 +339,32 @@ val stdout = result[0]
 val stderr = result[1]
 val code = result[2]
 expect(code).to_equal(0)
+expect(stdout).to_contain("simpleos_hardening_stale_reports=none")
+expect(stdout).to_contain("simpleos_hardening_stale_report_names=none")
+expect(stdout).to_contain("qemu_gtk_wm_capture_evidence_2026-07-05.md")
 expect(stdout).to_contain("simpleos_hardening_matrix_status=pass")
 expect(stdout).to_contain("simpleos_hardening_matrix_reason=pass")
-expect(stdout).to_contain("simpleos_hardening_mission_critical_release_status=blocked")
-expect(stdout).to_contain("simpleos_hardening_mission_critical_release_blockers=riscv_rtl_sby_proof,mission_critical_prereqs")
-expect(stdout).to_contain("simpleos_hardening_mission_critical_prereqs_status=blocked")
-expect(stdout).to_contain("simpleos_hardening_mission_critical_prereqs_missing=sby,yosys,smt-solver")
-expect(stdout).to_contain("simpleos_hardening_matrix_passed=25/25")
+expect(stdout).to_contain("simpleos_hardening_mission_critical_release_status=pass")
+expect(stdout).to_contain("simpleos_hardening_mission_critical_release_blockers=none")
+expect(stdout).to_contain("simpleos_hardening_mission_critical_prereqs_status=ready")
+expect(stdout).to_contain("simpleos_hardening_mission_critical_prereqs_missing=none")
+expect(stdout).to_contain("simpleos_hardening_mission_critical_prereqs_next_action=none")
+expect(stdout).to_contain("simpleos_hardening_nvme_baremetal_wrapper_coverage_status=pass")
+expect(stdout).to_contain("simpleos_hardening_nvme_baremetal_wrapper_coverage_blockers=none")
+expect(stdout).to_contain("simpleos_hardening_nvme_baremetal_wrapper_rv32_self_test=pass")
+expect(stdout).to_contain("simpleos_hardening_nvme_baremetal_wrapper_rv32_spec_status=pass")
+expect(stdout).to_contain("simpleos_hardening_nvme_baremetal_wrapper_rv64_self_test=pass")
+expect(stdout).to_contain("simpleos_hardening_nvme_baremetal_wrapper_rv64_spec_status=pass")
+expect(stdout).to_contain("simpleos_hardening_async_library_hardening_status=pass")
+expect(stdout).to_contain("simpleos_hardening_async_library_hardening_gate=scripts/check/check-async-library-hardening-evidence.shs")
+expect(stdout).to_contain("simpleos_hardening_async_library_hardening_scope=regression gate for async primitives")
+expect(stdout).to_contain("simpleos_hardening_async_library_hardening_evidence=19 async/thread/process/coroutine specs pass")
+expect(stdout).to_contain("simpleos_hardening_async_library_hardening_total=19")
+expect(stdout).to_contain("simpleos_hardening_async_library_hardening_passed=19")
+expect(stdout).to_contain("simpleos_hardening_async_library_hardening_failed=0")
+expect(stdout).to_contain("simpleos_hardening_async_library_hardening_missing=0")
+expect(stdout).to_contain("simpleos_hardening_matrix_passed=26/26")
+expect(stdout).to_contain("simpleos_hardening_matrix_blocked_rows=")
 expect(stdout).to_contain("simpleos_hardening_exec_launch_fs_status=pass")
 expect(stdout).to_contain("simpleos_hardening_ssh_smf_exec_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_lean_proofs_status=pass")
@@ -362,17 +403,17 @@ expect(stdout).to_contain("simpleos_hardening_formal_ui_policy_scope=Lean model 
 expect(stdout).to_contain("simpleos_hardening_formal_ui_policy_evidence=damage add preserves the new rect")
 expect(stdout).to_contain("simpleos_hardening_formal_coverage_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_coverage_gate=scripts/check/check-simpleos-formal-coverage.shs")
-expect(stdout).to_contain("simpleos_hardening_formal_coverage_scope=Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, process/resource lifecycle, coroutine/resource bounds, compiler/language, and UI policy")
-expect(stdout).to_contain("simpleos_hardening_formal_coverage_evidence=all SimpleOS hardening formal rows have executable wrapper gates")
+expect(stdout).to_contain("simpleos_hardening_formal_coverage_scope=Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, process/resource lifecycle, coroutine/resource bounds, compiler/language, async-library hardening, and UI policy")
+expect(stdout).to_contain("simpleos_hardening_formal_coverage_evidence=all SimpleOS hardening formal rows have executable wrapper gates, executed proof-checker, RISC-V dual-track, RTL/SBY, release-wrapper, NVMe baremetal wrapper coverage audit, async-library hardening wrapper, process/coroutine/resource theorem-wrapper self-tests, and matrix gate/scope fields; aggregate coverage cannot pass by status-only derivation")
 expect(stdout).to_contain("simpleos_hardening_byl_sby_artifact_audit_status=pass")
 expect(stdout).to_contain("simpleos_hardening_byl_sby_artifact_audit_gate=scripts/check/check-simpleos-byl-sby-artifacts.shs")
 expect(stdout).to_contain("simpleos_hardening_byl_sby_artifact_audit_scope=checked-in non-Lean formal artifacts consist of the RISC-V BYL surface")
 expect(stdout).to_contain("simpleos_hardening_byl_sby_artifact_audit_evidence=src/verification/riscv_product/riscv_product.byl")
-expect(stdout).to_contain("simpleos_hardening_riscv_rtl_sby_proof_status=blocked-missing-formal-prereqs")
+expect(stdout).to_contain("simpleos_hardening_riscv_rtl_sby_proof_status=pass")
 expect(stdout).to_contain("simpleos_hardening_riscv_rtl_sby_proof_log=")
 expect(stdout).to_contain("simpleos_hardening_riscv_rtl_sby_proof_gate=scripts/check/check-riscv-rtl-sby-proof.shs")
 expect(stdout).to_contain("simpleos_hardening_riscv_rtl_sby_proof_scope=strict RISC-V RTL SymbiYosys proof run for generated rv32/rv64 default and mlk bundles")
-expect(stdout).to_contain("simpleos_hardening_riscv_rtl_sby_proof_blocker=sby,yosys,smt-solver")
+expect(stdout).to_contain("simpleos_hardening_riscv_rtl_sby_proof_blocker=none")
 expect(stdout).to_contain("simpleos_hardening_riscv_rtl_rvfi_readiness_note=RISC-V generated RTL bundles pass RVFI port, formal harness, SBY, and manifest artifact checks through scripts/check/check-riscv-fpga-sidecar-contract.shs; without sby, yosys, and an SMT solver this is RVFI/SymbiYosys readiness evidence, not an RTL proof pass")
 expect(stdout).to_contain("simpleos_hardening_shared_wm_status=pass")
 expect(stdout).to_contain("simpleos_hardening_cpu_simd_status=pass")
@@ -408,13 +449,35 @@ expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_anchor_matc
 expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_ppm_bytes=2359312")
 expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_raw_bytes=3145728")
 val report = file_read(_report_path(run_id))
-expect(report).to_contain("- mission_critical_release_status: blocked")
-expect(report).to_contain("- mission_critical_release_blockers: riscv_rtl_sby_proof,mission_critical_prereqs")
+expect(report).to_contain("- status: pass")
+expect(report).to_contain("- mission_critical_release_status: pass")
+expect(report).to_contain("- mission_critical_release_blockers: none")
+expect(report).to_contain("- reason: pass")
+expect(report).to_contain("- blocked_rows:")
+expect(report).to_contain("- stale_reports: none")
+expect(report).to_contain("- stale_report_names: none")
+expect(report).to_contain("- qemu_host_counterpart_bitmap: pass")
+expect(report).to_contain("- qemu_guest_perf_release_gate_status: pass")
+expect(report).to_contain("- qemu_guest_perf_release_blocker: none")
 expect(report).to_contain("- mission_critical_release_gate: scripts/check/check-simpleos-mission-critical-release.shs")
-expect(report).to_contain("- mission_critical_prereqs_gate: scripts/check/check-simpleos-mission-critical-prereqs.shs")
-expect(report).to_contain("- mission_critical_prereqs_status: blocked")
-expect(report).to_contain("- mission_critical_prereqs_missing: sby,yosys,smt-solver")
-expect(report).to_contain("- mission_critical_prereqs_next_action: run scripts/setup/setup-simpleos-formal-env.shs --print-install, install the SymbiYosys stack, then rerun scripts/check/check-simpleos-mission-critical-release.shs")
+expect(report).to_contain("- mission_critical_release_prereq_gate: scripts/check/check-simpleos-mission-critical-prereqs.shs")
+expect(report).to_contain("- mission_critical_prereqs_status: ready")
+expect(report).to_contain("- mission_critical_prereqs_missing: none")
+expect(report).to_contain("- mission_critical_prereqs_next_action: none")
+expect(report).to_contain("- nvme_baremetal_wrapper_coverage: pass")
+expect(report).to_contain("- nvme_baremetal_wrapper_coverage_blockers: none")
+expect(report).to_contain("- nvme_baremetal_wrapper_rv32_self_test: pass")
+expect(report).to_contain("- nvme_baremetal_wrapper_rv32_spec_status: pass")
+expect(report).to_contain("- nvme_baremetal_wrapper_rv64_self_test: pass")
+expect(report).to_contain("- nvme_baremetal_wrapper_rv64_spec_status: pass")
+expect(report).to_contain("- async_library_hardening: pass")
+expect(report).to_contain("- async_library_hardening_gate: scripts/check/check-async-library-hardening-evidence.shs")
+expect(report).to_contain("- async_library_hardening_scope: regression gate for async primitives")
+expect(report).to_contain("- async_library_hardening_evidence: 19 async/thread/process/coroutine specs pass")
+expect(report).to_contain("- async_library_hardening_total: 19")
+expect(report).to_contain("- async_library_hardening_passed: 19")
+expect(report).to_contain("- async_library_hardening_failed: 0")
+expect(report).to_contain("- async_library_hardening_missing: 0")
 expect(report).to_contain("- byl_sby_artifact_audit: pass")
 expect(report).to_contain("- byl_sby_artifact_audit_gate: scripts/check/check-simpleos-byl-sby-artifacts.shs")
 expect(report).to_contain("- byl_sby_artifact_audit_scope: checked-in non-Lean formal artifacts consist of the RISC-V BYL surface")
@@ -422,7 +485,8 @@ expect(report).to_contain("- byl_sby_artifact_audit_evidence: src/verification/r
 expect(report).to_contain("- riscv_rtl_sby_proof_log: ")
 expect(report).to_contain("- riscv_rtl_sby_proof_gate: scripts/check/check-riscv-rtl-sby-proof.shs")
 expect(report).to_contain("- riscv_rtl_sby_proof_scope: strict RISC-V RTL SymbiYosys proof run for generated rv32/rv64 default and mlk bundles")
-expect(report).to_contain("- riscv_rtl_sby_proof_blocker: sby,yosys,smt-solver")
+expect(report).to_contain("- riscv_rtl_sby_proof: pass")
+expect(report).to_contain("- riscv_rtl_sby_proof_blocker: none")
 expect(report).to_contain("- riscv_rtl_rvfi_readiness_note: RISC-V generated RTL bundles pass RVFI port, formal harness, SBY, and manifest artifact checks through scripts/check/check-riscv-fpga-sidecar-contract.shs; without sby, yosys, and an SMT solver this is RVFI/SymbiYosys readiness evidence, not an RTL proof pass")
 expect(report).to_contain("- formal_lean_proofs: pass")
 expect(report).to_contain("- formal_lean_proofs_log: ")
@@ -476,8 +540,8 @@ expect(report).to_contain("- formal_ui_policy_evidence: damage add preserves the
 expect(report).to_contain("recursive paint-order flatten")
 expect(report).to_contain("- formal_coverage_log: ")
 expect(report).to_contain("- formal_coverage_gate: scripts/check/check-simpleos-formal-coverage.shs")
-expect(report).to_contain("- formal_coverage_scope: Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, process/resource lifecycle, coroutine/resource bounds, compiler/language, and UI policy")
-expect(report).to_contain("- formal_coverage_evidence: all SimpleOS hardening formal rows have executable wrapper gates and matrix gate/scope fields; aggregate coverage cannot pass by status-only derivation")
+expect(report).to_contain("- formal_coverage_scope: Formal coverage audit: Lean global gate, RISC-V dual track, critical concurrency/resource, memory safety, storage, boundary, process/resource lifecycle, coroutine/resource bounds, compiler/language, async-library hardening, and UI policy")
+expect(report).to_contain("- formal_coverage_evidence: all SimpleOS hardening formal rows have executable wrapper gates, executed proof-checker, RISC-V dual-track, RTL/SBY, release-wrapper, NVMe baremetal wrapper coverage audit, async-library hardening wrapper, process/coroutine/resource theorem-wrapper self-tests, and matrix gate/scope fields; aggregate coverage cannot pass by status-only derivation")
 ```
 
 </details>
@@ -553,7 +617,7 @@ expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_release_gate_statu
 
 </details>
 
-#### passes the combined GUI SMF artifact row only when QEMU macOS and guest perf evidence all pass
+#### keeps the combined GUI SMF artifact row passing while stale reports block release
 
 - process run timeout
    - Expected: code equals `0`
@@ -600,11 +664,12 @@ expect(file_write(qemu_report,
 val result = _run_matrix_with_qemu_report(run_id, qemu_report)
 val stdout = result[0]
 val code = result[2]
-expect(code).to_equal(0)
-expect(stdout).to_contain("simpleos_hardening_matrix_status=pass")
-expect(stdout).to_contain("simpleos_hardening_matrix_reason=pass")
-expect(stdout).to_contain("simpleos_hardening_matrix_passed=25/25")
-expect(stdout).to_contain("simpleos_hardening_matrix_blocked_rows=")
+expect(code).to_equal(1)
+expect(stdout).to_contain("simpleos_hardening_matrix_status=blocked")
+expect(stdout).to_contain("simpleos_hardening_matrix_reason=stale-static-reports")
+expect(stdout).to_contain("simpleos_hardening_stale_report_names=")
+expect(stdout).to_contain("simpleos_hardening_matrix_passed=26/26")
+expect(stdout).to_contain("simpleos_hardening_matrix_blocked_rows=stale_static_reports")
 expect(stdout).to_contain("simpleos_hardening_qemu_host_counterpart_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_lean_proofs_status=pass")
 expect(stdout).to_contain("simpleos_hardening_formal_riscv_dual_track_status=pass")

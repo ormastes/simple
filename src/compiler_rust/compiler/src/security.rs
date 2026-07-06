@@ -484,10 +484,7 @@ pub fn infer_security_coordinate(path: &Path) -> SecurityCoordinate {
 }
 
 fn path_feature_parts(parts: &[String]) -> Vec<String> {
-    let end = if parts
-        .last()
-        .is_some_and(|part| part.rsplit_once('.').is_some())
-    {
+    let end = if parts.last().is_some_and(|part| part.rsplit_once('.').is_some()) {
         parts.len().saturating_sub(1)
     } else {
         parts.len()

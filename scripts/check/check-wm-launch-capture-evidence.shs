@@ -47,6 +47,7 @@ RUN_ELECTRON_LIVE_SMOKE="${RUN_ELECTRON_LIVE_SMOKE:-1}"
 ELECTRON_LIVE_SMOKE_SCRIPT="${WM_LAUNCH_CAPTURE_ELECTRON_LIVE_SMOKE_SCRIPT:-scripts/check/check-electron-live-smoke.shs}"
 RUN_ELECTRON_MDI_EVIDENCE="${RUN_ELECTRON_MDI_EVIDENCE:-1}"
 RUN_QEMU_LIVE_CAPTURE="${RUN_QEMU_LIVE_CAPTURE:-1}"
+RUN_WM_CONTRACT_AND_SPECS="${RUN_WM_CONTRACT_AND_SPECS:-1}"
 STRICT_LIVE_CAPTURE="${STRICT_LIVE_CAPTURE:-1}"
 STRICT_QEMU_CAPTURE="${STRICT_QEMU_CAPTURE:-$RUN_QEMU_LIVE_CAPTURE}"
 QEMU_QMP_SOCKET="${QEMU_QMP_SOCKET:-}"
@@ -101,11 +102,12 @@ num_positive_at_most() {
 }
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$CONTRACT_LOG" "$SPEC_LOG" "$ELECTRON_LOG" "$ELECTRON_MDI_LOG" "$QEMU_LOG" "$REPORT_PATH"
+rm -f "$CONTRACT_LOG" "$SPEC_LOG" "$ELECTRON_LOG" "$ELECTRON_MDI_LOG" "$QEMU_LOG" "$REPORT_PATH" "$QEMU_SCREENDUMP_PATH" "$QEMU_SRC"
 
 echo "check=wm_launch_capture_evidence"
 echo "strict_live_capture=$STRICT_LIVE_CAPTURE"
 echo "strict_qemu_capture=$STRICT_QEMU_CAPTURE"
+echo "run_wm_contract_and_specs=$RUN_WM_CONTRACT_AND_SPECS"
 echo "simple_bin=$SIMPLE_BIN"
 echo "simple_bin_source=$SIMPLE_BIN_SOURCE"
 echo "simple_bin_status=$SIMPLE_BIN_STATUS"
@@ -138,6 +140,7 @@ if [ "$SIMPLE_BIN_STATUS" != "pass" ] || [ ! -x "$SIMPLE_BIN" ]; then
     exit 1
 fi
 
+if [ "$RUN_WM_CONTRACT_AND_SPECS" = "1" ]; then
 cat >"$CONTRACT_SRC" <<'SIMPLE'
 use app.ui.web.wm_runtime_bridge.{host_wm_apply_pointer, host_wm_event_loop_marker}
 use common.ui.builder.{column, label, build_tree_with_title}
@@ -273,6 +276,14 @@ spec_reason=specs-passed
 if [ "$spec_code" -ne 0 ]; then
     spec_status=fail
     spec_reason=specs-failed
+fi
+else
+    : >"$CONTRACT_LOG"
+    : >"$SPEC_LOG"
+    contract_status=skipped
+    contract_reason=RUN_WM_CONTRACT_AND_SPECS=0
+    spec_status=skipped
+    spec_reason=RUN_WM_CONTRACT_AND_SPECS=0
 fi
 
 electron_live_status=unavailable
@@ -451,10 +462,13 @@ fi
 
 status=pass
 reason=wm-launch-capture-contract-verified
-if [ "$contract_status" != "pass" ]; then
+if [ "$RUN_WM_CONTRACT_AND_SPECS" != "1" ]; then
+    reason=wm-contract-and-specs-skipped
+fi
+if [ "$RUN_WM_CONTRACT_AND_SPECS" = "1" ] && [ "$contract_status" != "pass" ]; then
     status=fail
     reason="$contract_reason"
-elif [ "$spec_status" != "pass" ]; then
+elif [ "$RUN_WM_CONTRACT_AND_SPECS" = "1" ] && [ "$spec_status" != "pass" ]; then
     status=fail
     reason="$spec_reason"
 elif [ "$STRICT_LIVE_CAPTURE" = "1" ] && [ "$RUN_ELECTRON_LIVE_SMOKE" = "1" ] && [ "$electron_live_status" != "pass" ]; then
@@ -470,6 +484,8 @@ elif [ "$STRICT_LIVE_CAPTURE" = "1" ] && [ "$RUN_ELECTRON_MDI_EVIDENCE" = "1" ] 
 elif [ "$STRICT_QEMU_CAPTURE" = "1" ] && [ "$qemu_live_status" != "pass" ]; then
     status=fail
     reason=qemu-live-capture-unavailable
+elif [ "$RUN_WM_CONTRACT_AND_SPECS" != "1" ] && [ "$qemu_live_status" = "pass" ]; then
+    reason=qemu-live-capture-probe-verified
 fi
 
 {
@@ -516,6 +532,7 @@ echo "wm_launch_capture_evidence_reason=$reason"
 echo "wm_launch_capture_simple_bin=$SIMPLE_BIN"
 echo "wm_launch_capture_simple_bin_source=$SIMPLE_BIN_SOURCE"
 echo "wm_launch_capture_simple_bin_status=$SIMPLE_BIN_STATUS"
+echo "wm_launch_capture_run_wm_contract_and_specs=$RUN_WM_CONTRACT_AND_SPECS"
 echo "wm_launch_capture_contract_status=$contract_status"
 echo "wm_launch_capture_spec_status=$spec_status"
 echo "wm_launch_capture_electron_live_status=$electron_live_status"

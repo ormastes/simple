@@ -464,22 +464,21 @@ impl<'a> MirLowerer<'a> {
                 // No exact type match (args may have inferred as Any): if the
                 // arity singles out one candidate, that is still unambiguous.
                 let by_arity = || {
-                    let mut same_arity = candidates.iter().filter(|(param_tys, _)| param_tys.len() == arg_tys.len());
+                    let mut same_arity = candidates
+                        .iter()
+                        .filter(|(param_tys, _)| param_tys.len() == arg_tys.len());
                     match (same_arity.next(), same_arity.next()) {
                         (Some(only), None) => Some(only),
                         _ => None,
                     }
                 };
-                exact
-                    .or_else(by_arity)
-                    .map(|(_, mangled)| mangled.clone())
-                    .or_else(|| {
-                        if self.extern_fn_name_set.contains(name.as_str()) {
-                            None // keep bare name → extern import
-                        } else {
-                            candidates.last().map(|(_, mangled)| mangled.clone())
-                        }
-                    })
+                exact.or_else(by_arity).map(|(_, mangled)| mangled.clone()).or_else(|| {
+                    if self.extern_fn_name_set.contains(name.as_str()) {
+                        None // keep bare name → extern import
+                    } else {
+                        candidates.last().map(|(_, mangled)| mangled.clone())
+                    }
+                })
             });
             let call_target_name = if let Some(mangled) = dup_resolved.as_deref() {
                 mangled

@@ -26,9 +26,13 @@ The scalar logic is `bin/simple check`-clean and host-verified:
    `riscv_noalloc_log_init()`.
 2. Build the rv32 OS ELF: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`.
 3. Boot + check the marker: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs <elf>`.
+4. Check the boot wrapper fail-closed contract without QEMU:
+   `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --self-test`.
 
 `build.shs` fails closed with `NVME_RV32_BOOT_NOT_WIRED` if the boot hook is removed, so a stock
-rv32 OS image cannot be mistaken for P9 firmware evidence.
+rv32 OS image cannot be mistaken for P9 firmware evidence. `boot.shs --self-test`
+uses a fake QEMU in a temp `PATH` and proves the wrapper accepts only the PASS
+marker without any serial `FAIL` line.
 
 (No standalone `@naked _start` is hand-written here — the proven `_start`/crt/UART live in
 `boot.spl`; reusing them is more reliable than an untestable hand-rolled entry.)

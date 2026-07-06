@@ -254,7 +254,9 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 > Acceptance = `matrix_status=pass release_status=pass release_blockers=none
 > prereq_status=ready prereq_missing=none` (exit 0). The hardening matrix
 > (`check-simpleos-hardening-evidence-matrix.shs`) is subordinate evidence
-> consumed by this gate — never accept it alone. Formal proofs need the
+> consumed by this gate — never accept it alone. If the matrix reports
+> `reason=stale-static-reports`, refresh the named reports until
+> `simpleos_hardening_stale_reports=none`. Formal proofs need the
 > SymbiYosys/SMT toolchain (`sby`, `yosys`, `boolector`/`z3`; see
 > `scripts/setup/setup-simpleos-formal-env.shs --print-install`) — without it,
 > prereqs report `missing=sby,yosys,smt-solver` and the release gate is

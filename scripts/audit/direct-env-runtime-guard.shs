@@ -9,11 +9,11 @@ MODE="${1:---all}"
 
 usage() {
     cat <<'EOF'
-Usage: sh scripts/audit/direct-env-runtime-guard.shs [--all|--working|--staged]
+Usage: sh scripts/audit/direct-env-runtime-guard.shs [--all|--working|--staged|--self-test]
 
-Blocks direct rt_env_get/cwd and direct process run/spawn/lifecycle calls in
-production app leaf code and gc_async_mut lib code outside runtime owner
-modules. Use app/std/gc env and process facades instead.
+Blocks direct rt_env_get/cwd and direct process run/spawn/lifecycle calls or
+imports in production app leaf code and gc_async_mut lib code outside runtime
+owner modules. Use app/std/gc env and process facades instead.
 
 Scope is intentionally src/app plus src/lib/gc_async_mut. Examples, tests,
 compiler/bootstrap modules, and lower runtime owner layers are audited/fixed in
@@ -23,14 +23,51 @@ EOF
 }
 
 case "$MODE" in
-    --all|--working|--staged) ;;
+    --all|--working|--staged|--self-test) ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
 esac
 
+FORBIDDEN_DIRECT_ENV_PROCESS_RE='extern fn rt_env_(get|cwd)[[:space:]]*\(|rt_env_(get|cwd)[[:space:]]*\(|extern fn rt_process_(run(_timeout)?|spawn_async|wait|is_running|is_alive|kill)[[:space:]]*\(|rt_process_(run(_timeout)?|spawn_async|wait|is_running|is_alive|kill)[[:space:]]*\(|^(use|import|from|export[[:space:]]+use)[[:space:]].*rt_env_(get|cwd)([^[:alnum:]_]|$)|^(use|import|from|export[[:space:]]+use)[[:space:]].*rt_process_(run(_timeout)?|spawn_async|wait|is_running|is_alive|kill)([^[:alnum:]_]|$)'
+
+self_test() {
+    tmp_dir="${TMPDIR:-/tmp}/direct-env-runtime-guard.$$"
+    mkdir -p "$tmp_dir"
+    trap 'rm -rf "$tmp_dir"' EXIT
+    printf '%s\n' 'use std.env.types.{rt_process_run}' >"$tmp_dir/raw_import.spl"
+    printf '%s\n' 'use app.io.mod.{process_run_timeout}' >"$tmp_dir/facade_import.spl"
+    printf '%s\n' 'val result = rt_process_spawn_async("sh", ["-c", "true"])' >"$tmp_dir/raw_call.spl"
+    printf '%s\n' 'extern fn rt_env_get_var(env_handle: i64, name: text) -> auto' >"$tmp_dir/env_handle_owner.spl"
+
+    grep -nE "$FORBIDDEN_DIRECT_ENV_PROCESS_RE" "$tmp_dir/raw_import.spl" >/dev/null || {
+        echo "STATUS: FAIL direct-env-runtime-guard self-test raw import not detected" >&2
+        exit 1
+    }
+    grep -nE "$FORBIDDEN_DIRECT_ENV_PROCESS_RE" "$tmp_dir/raw_call.spl" >/dev/null || {
+        echo "STATUS: FAIL direct-env-runtime-guard self-test raw call not detected" >&2
+        exit 1
+    }
+    if grep -nE "$FORBIDDEN_DIRECT_ENV_PROCESS_RE" "$tmp_dir/facade_import.spl" >/dev/null; then
+        echo "STATUS: FAIL direct-env-runtime-guard self-test facade import rejected" >&2
+        exit 1
+    fi
+    if grep -nE "$FORBIDDEN_DIRECT_ENV_PROCESS_RE" "$tmp_dir/env_handle_owner.spl" >/dev/null; then
+        echo "STATUS: FAIL direct-env-runtime-guard self-test env handle owner rejected" >&2
+        exit 1
+    fi
+
+    echo "STATUS: PASS direct-env-runtime-guard self-test"
+}
+
+if [ "$MODE" = "--self-test" ]; then
+    self_test
+    exit 0
+fi
+
 is_allowed_owner() {
     case "$1" in
         src/app/io/*) return 0 ;;
+        src/app/ffi_gen.specs/*) return 0 ;;
         src/lib/nogc_sync_mut/io/env_ops.spl) return 0 ;;
     esac
     return 1
@@ -67,7 +104,7 @@ failures=""
 for path in $(paths_for_mode | sort -u); do
     [ -f "$path" ] || continue
     is_allowed_owner "$path" && continue
-    if grep -nE 'extern fn rt_env_(get|cwd)|rt_env_(get|cwd)[[:space:]]*\(|extern fn rt_process_(run(_timeout)?|spawn_async|wait|is_running|is_alive|kill)|rt_process_(run(_timeout)?|spawn_async|wait|is_running|is_alive|kill)[[:space:]]*\(' "$path" >/tmp/direct-env-runtime-guard.$$ 2>/dev/null; then
+    if grep -nE "$FORBIDDEN_DIRECT_ENV_PROCESS_RE" "$path" >/tmp/direct-env-runtime-guard.$$ 2>/dev/null; then
         while IFS= read -r line; do
             failures="${failures}${path}:${line}
 "

@@ -120,7 +120,7 @@ match result:
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/host_wm_runtime_loop_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

@@ -35,9 +35,10 @@ fn reinterpret_float_bit_args<M: Module>(
         .into_iter()
         .enumerate()
         .map(|(i, v)| {
-            if args.get(i).is_some_and(|vreg| {
-                matches!(ctx.vreg_types.get(vreg).copied(), Some(TypeId::F64) | Some(TypeId::F32))
-            }) && builder.func.dfg.value_type(v) == types::I64
+            if args
+                .get(i)
+                .is_some_and(|vreg| matches!(ctx.vreg_types.get(vreg).copied(), Some(TypeId::F64) | Some(TypeId::F32)))
+                && builder.func.dfg.value_type(v) == types::I64
             {
                 builder.ins().bitcast(types::F64, MemFlags::new(), v)
             } else {

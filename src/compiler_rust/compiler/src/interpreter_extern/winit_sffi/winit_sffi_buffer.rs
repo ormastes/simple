@@ -618,5 +618,4 @@ mod tests {
 
         let _ = dispatch_buffer("rt_winit_buffer_free", &[Value::Int(id)]).unwrap();
     }
-
 }

@@ -364,7 +364,11 @@ pub fn rt_thread_join(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     // Retrieve stored result
-    let result = THREAD_RESULTS.lock().unwrap().remove(&handle_id).unwrap_or(Value::Int(0));
+    let result = THREAD_RESULTS
+        .lock()
+        .unwrap()
+        .remove(&handle_id)
+        .unwrap_or(Value::Int(0));
 
     Ok(result)
 }

@@ -123,6 +123,10 @@ else:
         step("The NVMe firmware hook reports its rv32 self-test PASS marker")
         expect(out).to_contain("ALL RV32 NVME FW CHECKS PASS")
 
+        step("The serial console contains no failure markers")
+        if out.contains("FAIL"):
+            fail("SERIAL-FAIL: rv32 boot printed a failure marker")
+
         step("The heap subsystem self-check reports healthy")
         expect(out).to_contain("HEAP OK")
 
@@ -145,6 +149,9 @@ provides the strong exported hook that prints the firmware PASS marker.
 - The host-runnable scalar logic reference passes
    - Expected: logic_code equals `0`
    - Expected: logic_out contains `RV32 NVME FW LOGIC OK`
+- The rv32 boot wrapper fail-closed self-test rejects missing PASS and serial FAIL markers
+   - Expected: wrapper_code equals `0`
+   - Expected: wrapper_out contains `STATUS: PASS nvme-rv32-boot self-test`
 - The stock rv32 boot path calls the optional NVMe firmware self-test hook
    - Expected: boot_code equals `0`
 - The firmware rv32 entry exports the strong hook that prints the PASS marker
@@ -156,7 +163,7 @@ provides the strong exported hook that prints the firmware PASS marker.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -168,6 +175,11 @@ step("The host-runnable scalar logic reference passes")
 val (logic_out, logic_err, logic_code) = _run("bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl")
 expect(logic_code).to_equal(0)
 expect(logic_out).to_contain("RV32 NVME FW LOGIC OK")
+
+step("The rv32 boot wrapper fail-closed self-test rejects missing PASS and serial FAIL markers")
+val (wrapper_out, wrapper_err, wrapper_code) = _run("sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --self-test")
+expect(wrapper_code).to_equal(0)
+expect(wrapper_out).to_contain("STATUS: PASS nvme-rv32-boot self-test")
 
 step("The stock rv32 boot path calls the optional NVMe firmware self-test hook")
 val (boot_out, boot_err, boot_code) = _run("rg -n 'rt_rv32_boot_optional_nvme_fw_selftest\\(\\)' src/os/kernel/arch/riscv32/boot.spl")

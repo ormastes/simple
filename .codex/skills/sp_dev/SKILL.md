@@ -181,7 +181,11 @@ For SimpleOS hardening work that combines Vulkan-over-2D, RenderDoc, LLVM,
 SIMD, and QEMU GPU access, use
 `scripts/check/check-simpleos-hardening-evidence-matrix.shs` as the canonical
 handoff aggregate. Current completion requires
-`simpleos_hardening_matrix_passed=25/25`,
+`simpleos_hardening_mission_critical_release_status=pass`,
+`simpleos_hardening_mission_critical_release_blockers=none`,
+`simpleos_hardening_mission_critical_prereqs_status=ready`,
+`simpleos_hardening_matrix_passed=26/26`,
+`simpleos_hardening_riscv_rtl_sby_proof_status=pass`,
 `simpleos_hardening_gui_renderdoc_vulkan_status=pass`,
 `simpleos_hardening_llvm_port_status=pass`,
 `simpleos_hardening_cpu_simd_status=pass`,
@@ -190,9 +194,28 @@ handoff aggregate. Current completion requires
 `simpleos_hardening_formal_critical_concurrency_status=pass`,
 `simpleos_hardening_formal_memory_safety_status=pass`, and
 `simpleos_hardening_formal_storage_integrity_status=pass`, plus
-`simpleos_hardening_qemu_virtio_gpu_access_status=pass`; update the generated
+`simpleos_hardening_qemu_virtio_gpu_access_status=pass` and
+`simpleos_hardening_stale_reports=none`; update the generated
 manual for `test/03_system/gui/simpleos_hardening_evidence_matrix_spec.spl`
-when that row contract changes.
+when that row contract changes. If `reason=stale-static-reports`, refresh the
+named source reports before claiming completion. If mission-critical prereq or
+RTL/SBY wrappers change, require their `--self-test` forms, and treat missing
+strict RVFI readiness as a completion blocker rather than a formal proof pass.
+
+For RV32/RV64 baremetal compiler/firmware lanes, keep runtime-value ABI fixes at
+the compiler/runtime owner boundary: do not paper over `rv_type` width bugs with
+firmware-local `rt_*` shims or broad all-`i64` predeclares. Add the smallest IR
+regression that proves the failing scalar shape (for example RV32 call-result
+`!=` literal emits `icmp`, not `rt_native_neq`) and verify both the wrapper
+result marker and any subsystem serial `FAIL` lines separately. For the RV32
+NVMe firmware boot wrapper, run
+`sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --self-test` when
+marker handling changes so fake-QEMU evidence proves missing PASS and serial
+`FAIL` paths fail closed. Use
+`sh scripts/check/check-nvme-baremetal-wrapper-coverage.shs` to expose RV32/RV64
+wrapper coverage status; run `--strict` before any completion or release claim
+so missing RV64 wrapper/spec coverage remains a blocker instead of becoming a
+silent gap.
 
 For Tauri2 mobile renderer parity, use
 `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`. It must pass
@@ -282,8 +305,8 @@ solve an SPipe failure by adding `rt_*` plumbing must also add or cite a focused
 gate proving the facade/codegen/runtime boundary, not just the feature output.
 
 Before handoff, run `sh scripts/audit/direct-env-runtime-guard.shs --working`
-for runtime-adjacent lanes and treat any new raw env/process/runtime access
-outside owner modules as a fix-before-done issue.
+for runtime-adjacent app/gc lanes and treat any new raw env/process runtime
+imports or calls outside owner modules as a fix-before-done issue.
 
 Before touching runtime-adjacent code in an existing lane, read that lane's
 recorded `rejected_shortcuts` first; do not retry a rejected `rt_*`, fixture
@@ -413,11 +436,15 @@ entry point.
 For SimpleOS mission-critical RISC-V evidence, also cite
 `sh scripts/check/check-riscv-rtl-sby-proof.shs` and
 `sh scripts/check/check-simpleos-mission-critical-release.shs`; release evidence
-requires `release_blockers=none`. A missing `sby`, `yosys`, or SMT solver is a
-blocked prerequisite state, not a proof pass.
+requires `release_blockers=none`. When changing the release wrapper, run
+`sh scripts/check/check-simpleos-mission-critical-release.shs --self-test`. A
+missing `sby`, `yosys`, or SMT solver is a blocked prerequisite state, not a
+proof pass.
 Starvation, fairness, race-condition, scheduler, channel, lock, or
 resource-lifecycle claims require a concurrency/resource model gate or an
-explicit blocker; a single interleaving test is not formal evidence.
+explicit blocker; a single interleaving test is not formal evidence. Wrapper
+self-tests for process/coroutine/resource rows must strip at least one
+row-backed theorem instead of only checking unrelated formal rows.
 The SPipe manual and lane state must name the model scope, generated artifact,
 durable theorem/constraint file, and exact command or wrapper that checked the
 claim after regeneration. If any one of those is missing, report the lane as

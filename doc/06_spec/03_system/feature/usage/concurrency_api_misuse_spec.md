@@ -84,7 +84,7 @@ bootstrap enforcement, not a separate user-facing API source.
 Run the misuse gate:
 
 ```sh
-SIMPLE_BIN=src/compiler_rust/target/debug/simple bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --mode=interpreter --clean
+SIMPLE_BIN=bin/simple bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --mode=interpreter --clean
 ```
 
 ## Examples
@@ -157,8 +157,8 @@ Failed: 0
   filenames and generated manual coverage.
 - The fixture count is part of the release-visible contract; changing it means
   the tracking row, system plan, and generated manual must change together.
-- Docker-isolated runs should pass `SIMPLE_BIN` explicitly when the checkout
-  does not contain a local compiler build artifact.
+- The default `SIMPLE_BIN` is `bin/simple`; Docker-isolated runs should pass it
+  explicitly when the checkout does not contain a local compiler build artifact.
 - A stale release wrapper must not be used as proof that a fixture passed or
   failed; the selected compiler must be executable in the test process.
 - Compile-error assertions must check both the diagnostic code and the user
@@ -171,7 +171,7 @@ Failed: 0
 #### covers every checked-in misuse fixture
 
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `29`
+   - Expected: fixture_count() equals `30`
 
 
 <details>
@@ -182,7 +182,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(29)
+expect(fixture_count()).to_equal(30)
 ```
 
 </details>
@@ -236,8 +236,8 @@ expect(output).to_contain("public_multicore_green_sliced_result=19 used_runtime_
 expect(output).to_contain("positive_fixtures=6")
 expect(output).to_contain("fixtures=11")
 expect(output).to_contain("misuse_fixtures=11")
-expect(output).to_contain("checked_in_misuse_fixtures=29")
-expect(output).to_contain("total_misuse_fixtures=40")
+expect(output).to_contain("checked_in_misuse_fixtures=30")
+expect(output).to_contain("total_misuse_fixtures=41")
 ```
 
 </details>
@@ -276,9 +276,9 @@ expect_compile_error("thread_spawn_wrong_surface_import.spl", "E-PAR-003", "thre
 step("Reject thread_spawn_with_args imported from the cooperative-green surface")
 expect_compile_error("thread_spawn_with_args_wrong_surface_import.spl", "E-PAR-003", "thread_spawn_with_args belongs to std.concurrent.thread")
 step("Reject thread_spawn called with too many arguments")
-expect_compile_error("thread_spawn_wrong_arity.spl", "E-PAR-004", "pass a closure")
+expect_compile_error("thread_spawn_wrong_arity.spl", "E-PAR-004", "thread_spawn expects one zero-argument closure")
 step("Reject thread_spawn called with a non-closure argument")
-expect_compile_error("thread_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
+expect_compile_error("thread_spawn_bad_arg.spl", "E-PAR-004", "thread_spawn expects one zero-argument closure")
 step("Reject task_spawn imported from the OS-thread surface")
 expect_compile_error("task_spawn_wrong_surface_import.spl", "E-PAR-001", "task_spawn is not part of the OS-thread facade")
 ```
@@ -311,15 +311,15 @@ Reproduction: this block contains the complete executable scenario source.
 step("Reject cooperative_green_spawn imported from the OS-thread surface")
 expect_compile_error("cooperative_green_wrong_surface_import.spl", "E-PAR-003", "cooperative_green_spawn belongs to std.concurrent.cooperative_green")
 step("Reject cooperative_green_spawn called with too many arguments")
-expect_compile_error("cooperative_green_wrong_arity.spl", "E-PAR-004", "pass a closure")
+expect_compile_error("cooperative_green_wrong_arity.spl", "E-PAR-004", "cooperative_green_spawn expects one share-nothing zero-argument closure")
 step("Reject cooperative_green_spawn called with a non-closure argument")
-expect_compile_error("cooperative_green_bad_arg.spl", "E-PAR-004", "pass a closure")
+expect_compile_error("cooperative_green_bad_arg.spl", "E-PAR-004", "cooperative_green_spawn expects one share-nothing zero-argument closure")
 step("Reject green_spawn imported from the OS-thread surface")
 expect_compile_error("green_spawn_wrong_surface_import.spl", "E-PAR-003", "green_spawn belongs to std.concurrent.green_thread")
 step("Reject green_spawn called with too many arguments")
-expect_compile_error("green_spawn_wrong_arity.spl", "E-PAR-004", "pass a closure")
+expect_compile_error("green_spawn_wrong_arity.spl", "E-PAR-004", "green_spawn expects one share-nothing zero-argument closure")
 step("Reject green_spawn called with a non-closure argument")
-expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
+expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "green_spawn expects one share-nothing zero-argument closure")
 ```
 
 </details>
@@ -334,9 +334,9 @@ expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 - expect compile error
 - Reject multicore_green_set_parallelism called with text
 - expect compile error
-- Reject direct access to internal runtime-pool symbols
+- Reject direct rt_pool_* access that bypasses the public multicore_green facade
 - expect compile error
-- Reject direct access to internal runtime-pool counter symbols
+- Reject direct rt_pool_* counter access that bypasses the public multicore_green facade
 - expect compile error
 - Reject multicore_green_spawn_sliced imported from the OS-thread surface
 - expect compile error
@@ -358,23 +358,23 @@ Reproduction: this block contains the complete executable scenario source.
 step("Reject multicore_green_spawn imported from the OS-thread surface")
 expect_compile_error("multicore_green_wrong_surface_import.spl", "E-PAR-003", "multicore_green_spawn belongs to std.concurrent.multicore_green")
 step("Reject multicore_green_spawn called with too many arguments")
-expect_compile_error("multicore_green_wrong_arity.spl", "E-PAR-004", "pass a closure")
+expect_compile_error("multicore_green_wrong_arity.spl", "E-PAR-004", "multicore_green_spawn expects one share-nothing zero-argument closure")
 step("Reject multicore_green_spawn called with a non-closure argument")
-expect_compile_error("multicore_green_bad_arg.spl", "E-PAR-004", "pass a closure")
+expect_compile_error("multicore_green_bad_arg.spl", "E-PAR-004", "multicore_green_spawn expects one share-nothing zero-argument closure")
 step("Reject multicore_green_set_parallelism called with text")
 expect_compile_error("multicore_green_parallelism_bad_arg.spl", "E-PAR-004", "integer worker count")
-step("Reject direct access to internal runtime-pool symbols")
-expect_compile_error("multicore_green_direct_rt_pool_access.spl", "E-PAR-005", "internal runtime-pool symbol")
-step("Reject direct access to internal runtime-pool counter symbols")
-expect_compile_error("multicore_green_direct_rt_pool_counter_access.spl", "E-PAR-005", "internal runtime-pool symbol")
+step("Reject direct rt_pool_* access that bypasses the public multicore_green facade")
+expect_compile_error("multicore_green_direct_rt_pool_access.spl", "E-PAR-005", "direct rt_pool_* access bypasses the public multicore_green facade")
+step("Reject direct rt_pool_* counter access that bypasses the public multicore_green facade")
+expect_compile_error("multicore_green_direct_rt_pool_counter_access.spl", "E-PAR-005", "direct rt_pool_* access bypasses the public multicore_green facade")
 step("Reject multicore_green_spawn_sliced imported from the OS-thread surface")
 expect_compile_error("multicore_green_sliced_wrong_surface_import.spl", "E-PAR-003", "multicore_green_spawn_sliced belongs to std.concurrent.multicore_green")
 step("Reject multicore_green_spawn_sliced called with too few arguments")
-expect_compile_error("multicore_green_sliced_wrong_arity.spl", "E-PAR-004", "initial integer state and step function")
+expect_compile_error("multicore_green_sliced_wrong_arity.spl", "E-PAR-004", "multicore_green_spawn_sliced expects integer state and step function")
 step("Reject multicore_green_spawn_sliced called with non-integer initial state")
-expect_compile_error("multicore_green_sliced_bad_state_arg.spl", "E-PAR-004", "initial integer state and step function")
+expect_compile_error("multicore_green_sliced_bad_state_arg.spl", "E-PAR-004", "multicore_green_spawn_sliced expects integer state and step function")
 step("Reject multicore_green_spawn_sliced called with non-function step argument")
-expect_compile_error("multicore_green_sliced_bad_step_arg.spl", "E-PAR-004", "initial integer state and step function")
+expect_compile_error("multicore_green_sliced_bad_step_arg.spl", "E-PAR-004", "multicore_green_spawn_sliced expects a step function as the second argument")
 ```
 
 </details>
@@ -399,13 +399,13 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Reject green_spawn closures that read module-level mutable variables")
-expect_compile_error("green_spawn_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'shared_total'")
+expect_compile_error("green_spawn_shared_var_capture.spl", "E-PAR-006", "green_spawn closure must not capture shared mutable state")
 step("Reject cooperative_green_spawn closures that mutate captured variables")
-expect_compile_error("cooperative_green_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'local_count'")
+expect_compile_error("cooperative_green_shared_var_capture.spl", "E-PAR-006", "cooperative_green_spawn closure must not capture shared mutable state")
 step("Reject multicore_green_spawn closures that read module-level mutable variables")
-expect_compile_error("multicore_green_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'shared_sum'")
+expect_compile_error("multicore_green_shared_var_capture.spl", "E-PAR-006", "multicore_green_spawn closure must not capture shared mutable state")
 step("Reject multicore_green_spawn_sliced inline step lambdas that mutate shared variables")
-expect_compile_error("multicore_green_sliced_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'shared_state'")
+expect_compile_error("multicore_green_sliced_shared_var_capture.spl", "E-PAR-006", "multicore_green_spawn_sliced closure must not capture shared mutable state")
 ```
 
 </details>

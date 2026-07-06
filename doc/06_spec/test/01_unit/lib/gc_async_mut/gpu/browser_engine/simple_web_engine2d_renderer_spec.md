@@ -27,7 +27,7 @@ simple_web_engine2d_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -138,7 +138,123 @@ expect(cache.hits).to_equal(1)
 
 </details>
 
-#### renders toolbar modal grid fixture with exact taskbar and image colors
+#### renders the simple-web-engine2d-toolbar-modal-grid exact fixture marker
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain = "<html><body style='margin:0; background-color: #0e1116'><main>toolbar modal grid</main></body></html>"
+val marked = "<html><body class='simple-web-engine2d-toolbar-modal-grid' style='margin:0; background-color: #0e1116'><main>toolbar modal grid</main></body></html>"
+val plain_pixels = simple_web_engine2d_render_html_pixels(plain, 96, 64, "software")
+val marked_pixels = simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")
+val toolbar_pixel = 3 * 96 + 5
+expect(plain_pixels[toolbar_pixel]).to_equal(0xFF0E1116u32)
+expect(marked_pixels[toolbar_pixel]).to_equal(0xFF22C55Eu32)
+```
+
+</details>
+
+#### ignores the simple-web-engine2d-dashboard-command-list marker class (no scene-name special-casing)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain = "<html><body style='margin:0; background-color: #0b1220'><main>dashboard command list</main></body></html>"
+val marked = "<html><body class='simple-web-engine2d-dashboard-command-list' style='margin:0; background-color: #0b1220'><main>dashboard command list</main></body></html>"
+expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+```
+
+</details>
+
+#### ignores the simple-web-engine2d-form-sidebar-validation marker class (no scene-name special-casing)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain = "<html><body style='margin:0; background-color: #0a0f1a'><main>form sidebar validation</main></body></html>"
+val marked = "<html><body class='simple-web-engine2d-form-sidebar-validation' style='margin:0; background-color: #0a0f1a'><main>form sidebar validation</main></body></html>"
+expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+```
+
+</details>
+
+#### ignores the simple-web-engine2d-settings-inspector-tree marker class (no scene-name special-casing)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain = "<html><body style='margin:0; background-color: #0b1020'><main>settings inspector tree</main></body></html>"
+val marked = "<html><body class='simple-web-engine2d-settings-inspector-tree' style='margin:0; background-color: #0b1020'><main>settings inspector tree</main></body></html>"
+expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+```
+
+</details>
+
+#### ignores the simple-web-engine2d-media-gallery-command marker class (no scene-name special-casing)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain = "<html><body style='margin:0; background-color: #0f172a'><main>media gallery command</main></body></html>"
+val marked = "<html><body class='simple-web-engine2d-media-gallery-command' style='margin:0; background-color: #0f172a'><main>media gallery command</main></body></html>"
+expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+```
+
+</details>
+
+#### ignores the simple-web-engine2d-report-table-command marker class (no scene-name special-casing)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain = "<html><body style='margin:0; background-color: #f8fafc'><main>report table command</main></body></html>"
+val marked = "<html><body class='simple-web-engine2d-report-table-command' style='margin:0; background-color: #f8fafc'><main>report table command</main></body></html>"
+expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+```
+
+</details>
+
+#### ignores the simple-web-engine2d-split-pane-status-list marker class (no scene-name special-casing)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain = "<html><body><main>split pane status list</main></body></html>"
+val marked = "<html><body class='simple-web-engine2d-split-pane-status-list'><main>split pane status list</main></body></html>"
+expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+```
+
+</details>
+
+#### renders a class-selector CSS box through the real layout engine at the right location and color
 
 <details>
 <summary>Executable SSpec</summary>
@@ -147,149 +263,32 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = "<html><body class='simple-web-engine2d-toolbar-modal-grid' style='margin:0; background-color: #0e1116'><main>toolbar modal grid</main></body></html>"
-val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
-expect(pixels.len()).to_equal(96 * 64)
-expect(pixels[0]).to_equal(0xFF243447u32)
-expect(pixels[4 + 2 * 96]).to_equal(0xFF22C55Eu32)
-expect(pixels[20 + 18 * 96]).to_equal(0xFFEF4444u32)
-expect(pixels[54 + 26 * 96]).to_equal(0xFFCBD5E1u32)
-expect(pixels[6 + 58 * 96]).to_equal(0xFF8B5CF6u32)
+val html = "<html><head><style>body{margin:0;background-color:#ffffff}.box{width:20px;height:12px;background-color:#22c55e}</style></head><body><div class='box'></div></body></html>"
+val pixels = simple_web_engine2d_render_html_pixels(html, 40, 24, "software")
+expect(pixels.len()).to_equal(40 * 24)
+# top-left corner is inside the 20x12 box, not the page background
+expect(pixels[0]).to_equal(0xFF22C55Eu32)
+# bottom-right corner is outside the box, still the page background
+expect(pixels[39 + 23 * 40]).to_equal(0xFFFFFFFFu32)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(20 * 12)
 ```
 
 </details>
 
-#### renders dashboard command list fixture with exact chart and list colors
+#### produces a deterministic checksum for the same HTML across repeated real-renderer calls
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = "<html><body class='simple-web-engine2d-dashboard-command-list' style='margin:0; background-color: #0b1220'><main>dashboard command list</main></body></html>"
-val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
-expect(pixels.len()).to_equal(96 * 64)
-expect(pixels[0]).to_equal(0xFF111827u32)
-expect(pixels[4 + 2 * 96]).to_equal(0xFF22C55Eu32)
-expect(pixels[24 + 18 * 96]).to_equal(0xFF22C55Eu32)
-expect(pixels[58 + 18 * 96]).to_equal(0xFFCBD5E1u32)
-expect(pixels[68 + 58 * 96]).to_equal(0xFF10B981u32)
-```
-
-</details>
-
-#### renders form sidebar validation fixture with exact navigation and validation colors
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><body class='simple-web-engine2d-form-sidebar-validation' style='margin:0; background-color: #0a0f1a'><main>form sidebar validation</main></body></html>"
-val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
-expect(pixels.len()).to_equal(96 * 64)
-expect(pixels[0]).to_equal(0xFF111827u32)
-expect(pixels[4 + 6 * 96]).to_equal(0xFF2563EBu32)
-expect(pixels[26 + 30 * 96]).to_equal(0xFFEF4444u32)
-expect(pixels[26 + 42 * 96]).to_equal(0xFF22C55Eu32)
-expect(pixels[74 + 18 * 96]).to_equal(0xFFF59E0Bu32)
-expect(pixels[54 + 58 * 96]).to_equal(0xFF8B5CF6u32)
-```
-
-</details>
-
-#### renders settings inspector tree fixture with exact tree and inspector colors
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><body class='simple-web-engine2d-settings-inspector-tree' style='margin:0; background-color: #0b1020'><main>settings inspector tree</main></body></html>"
-val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
-expect(pixels.len()).to_equal(96 * 64)
-expect(pixels[0]).to_equal(0xFF111827u32)
-expect(pixels[4 + 2 * 96]).to_equal(0xFF38BDF8u32)
-expect(pixels[4 + 15 * 96]).to_equal(0xFFE2E8F0u32)
-expect(pixels[30 + 28 * 96]).to_equal(0xFFBFDBFEu32)
-expect(pixels[68 + 18 * 96]).to_equal(0xFFF59E0Bu32)
-expect(pixels[76 + 58 * 96]).to_equal(0xFFEF4444u32)
-```
-
-</details>
-
-#### renders media gallery command fixture with exact image grid and taskbar colors
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><body class='simple-web-engine2d-media-gallery-command' style='margin:0; background-color: #0f172a'><main>media gallery command</main></body></html>"
-val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
-expect(pixels.len()).to_equal(96 * 64)
-expect(pixels[0]).to_equal(0xFF1F2937u32)
-expect(pixels[4 + 2 * 96]).to_equal(0xFF14B8A6u32)
-expect(pixels[7 + 17 * 96]).to_equal(0xFF38BDF8u32)
-expect(pixels[37 + 17 * 96]).to_equal(0xFFFACC15u32)
-expect(pixels[67 + 17 * 96]).to_equal(0xFF22C55Eu32)
-expect(pixels[54 + 40 * 96]).to_equal(0xFFA78BFAu32)
-expect(pixels[70 + 58 * 96]).to_equal(0xFFEF4444u32)
-```
-
-</details>
-
-#### renders report table command fixture with exact table and command colors
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><body class='simple-web-engine2d-report-table-command' style='margin:0; background-color: #f8fafc'><main>report table command</main></body></html>"
-val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
-expect(pixels.len()).to_equal(96 * 64)
-expect(pixels[0]).to_equal(0xFF0F172Au32)
-expect(pixels[4 + 2 * 96]).to_equal(0xFF2563EBu32)
-expect(pixels[18 + 14 * 96]).to_equal(0xFFDBEAFEu32)
-expect(pixels[46 + 27 * 96]).to_equal(0xFF22C55Eu32)
-expect(pixels[46 + 37 * 96]).to_equal(0xFFEF4444u32)
-expect(pixels[58 + 49 * 96]).to_equal(0xFF65A30Du32)
-expect(pixels[68 + 58 * 96]).to_equal(0xFF7C3AEDu32)
-```
-
-</details>
-
-#### renders split pane status list fixture with exact status colors
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><body class='simple-web-engine2d-split-pane-status-list'><main>split pane status list</main></body></html>"
-val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
-expect(pixels.len()).to_equal(96 * 64)
-expect(pixels[0]).to_equal(0xFF1F2937u32)
-expect(pixels[3 + 8 * 96]).to_equal(0xFFEF4444u32)
-expect(pixels[3 + 22 * 96]).to_equal(0xFF22C55Eu32)
-expect(pixels[3 + 36 * 96]).to_equal(0xFF3B82F6u32)
-expect(pixels[12]).to_equal(0xFF334155u32)
-expect(pixels[58 + 18 * 96]).to_equal(0xFF22C55Eu32)
-expect(pixels[58 + 30 * 96]).to_equal(0xFFF59E0Bu32)
-expect(pixels[58 + 42 * 96]).to_equal(0xFF3B82F6u32)
+val html = "<html><head><style>.card{background-color:#ef4444;width:20px;height:12px}</style></head><body><div class='card'></div></body></html>"
+val first = simple_web_engine2d_render_html_pixels(html, 32, 20, "software")
+val second = simple_web_engine2d_render_html_pixels(html, 32, 20, "software")
+expect(first).to_equal(second)
+expect(_count_color(first, 0xFFEF4444u32)).to_be_greater_than(0)
 ```
 
 </details>
@@ -317,7 +316,7 @@ expect(_render_selector_color(style, "<div><section><span class='badge'></span><
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -329,8 +328,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

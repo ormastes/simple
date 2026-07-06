@@ -85,6 +85,9 @@ BYL export consumed by that manual layer.
 Mission-critical SimpleOS release SPipe evidence must also cite
 `sh scripts/check/check-simpleos-mission-critical-release.shs` and keep
 `release_blockers=none`; matrix readiness alone is not release evidence.
+If the hardening matrix reports `reason=stale-static-reports`, refresh the
+named reports until `simpleos_hardening_stale_reports=none` before accepting
+the lane.
 Starvation, fairness, race-condition, scheduler, channel, lock, or
 resource-lifecycle claims require a concurrency/resource model gate or an
 explicit blocker; a single interleaving test is not formal evidence.

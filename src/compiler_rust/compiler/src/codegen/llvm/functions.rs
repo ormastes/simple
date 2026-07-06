@@ -63,7 +63,10 @@ fn binop_result_type(op: crate::hir::BinOp, lhs_ty: Option<crate::hir::TypeId>) 
 }
 
 #[cfg(feature = "llvm")]
-fn build_vreg_types(func: &MirFunction) -> VRegTypes {
+fn build_vreg_types(
+    func: &MirFunction,
+    function_return_types: &std::collections::HashMap<String, crate::hir::TypeId>,
+) -> VRegTypes {
     use crate::hir::{TypeId, UnaryOp};
     use crate::mir::MirInst;
 
@@ -119,6 +122,16 @@ fn build_vreg_types(func: &MirFunction) -> VRegTypes {
                 MirInst::FieldGet { dest, field_type, .. } => {
                     types_map.insert(*dest, *field_type);
                 }
+                MirInst::Call {
+                    dest: Some(dest),
+                    target,
+                    ..
+                } => {
+                    if let Some(ty) = function_return_types.get(target.name()) {
+                        types_map.insert(*dest, *ty);
+                    }
+                }
+                MirInst::Call { dest: None, .. } => {}
                 MirInst::IndirectCall {
                     dest: Some(dest),
                     return_type,
@@ -388,7 +401,8 @@ impl LlvmBackend {
 
         // Map virtual registers to LLVM values (used within each block)
         let mut vreg_map: VRegMap = HashMap::new();
-        let vreg_types = build_vreg_types(func);
+        let function_return_types = self.function_return_types.borrow();
+        let vreg_types = build_vreg_types(func, &function_return_types);
 
         // ======================================================================
         // Pre-allocate allocas for ALL vregs at the entry block.
@@ -759,6 +773,7 @@ impl LlvmBackend {
                 let left_val = self.get_vreg(left, vreg_map)?;
                 let right_val = self.get_vreg(right, vreg_map)?;
                 let lhs_ty = vreg_types.get(left).copied();
+                let rhs_ty = vreg_types.get(right).copied();
                 let result = self.compile_binop(
                     *op,
                     left_val,
@@ -767,6 +782,7 @@ impl LlvmBackend {
                     module,
                     vreg_is_signed(vreg_types, *left),
                     lhs_ty,
+                    rhs_ty,
                 )?;
                 vreg_map.insert(*dest, result);
             }
@@ -2795,7 +2811,144 @@ impl LlvmBackend {
 #[cfg(all(test, feature = "llvm"))]
 mod tests {
     use super::*;
+    use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
+    use std::collections::HashMap;
+
+    #[test]
+    fn direct_call_dest_uses_callee_return_type() {
+        let mut func = MirFunction::new(
+            "caller".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Private,
+        );
+        func.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(VReg(0)),
+            target: CallTarget::from_name("callee"),
+            args: vec![],
+        });
+
+        let mut returns = HashMap::new();
+        returns.insert("callee".to_string(), crate::hir::TypeId::I64);
+
+        let types = build_vreg_types(&func, &returns);
+        assert_eq!(types.get(&VReg(0)).copied(), Some(crate::hir::TypeId::I64));
+    }
+
+    #[test]
+    fn rv32_call_return_scalar_compare_uses_native_compare() {
+        let target = Target::new(TargetArch::Riscv32, TargetOS::SimpleOS);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("rv32_call_return_compare").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let rv_type = backend.runtime_int_type();
+            let callee_type = rv_type.fn_type(&[], false);
+            let callee = module.add_function("callee", callee_type, None);
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let entry = backend.context_ref().append_basic_block(callee, "entry");
+            builder.position_at_end(entry);
+            builder.build_return(Some(&rv_type.const_int(1, false))).unwrap();
+        }
+
+        backend
+            .function_return_types
+            .borrow_mut()
+            .insert("callee".to_string(), crate::hir::TypeId::I64);
+
+        let mut func = MirFunction::new(
+            "caller".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Private,
+        );
+        func.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(VReg(0)),
+            target: CallTarget::from_name("callee"),
+            args: vec![],
+        });
+        func.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(1),
+            value: 1,
+        });
+        func.blocks[0].instructions.push(MirInst::BinOp {
+            dest: VReg(2),
+            op: crate::hir::BinOp::NotEq,
+            left: VReg(0),
+            right: VReg(1),
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+
+        backend.compile_function(&func).unwrap();
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i32 @callee()"));
+        assert!(ir.contains("icmp ne i32"));
+        assert!(!ir.contains("rt_native_neq"));
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn rv32_param_guard_branch_uses_runtime_parameter() {
+        let target = Target::new(TargetArch::Riscv32, TargetOS::SimpleOS);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("rv32_param_guard_branch").unwrap();
+
+        let mut func = MirFunction::new(
+            "heap_init_shape".to_string(),
+            crate::hir::TypeId::BOOL,
+            simple_parser::ast::Visibility::Private,
+        );
+        func.params.push(MirLocal {
+            name: "heap_start".to_string(),
+            ty: crate::hir::TypeId::U64,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        func.params.push(MirLocal {
+            name: "heap_size".to_string(),
+            ty: crate::hir::TypeId::U64,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        let fail = func.new_block();
+        let ok = func.new_block();
+        func.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(2),
+            value: 8,
+        });
+        func.blocks[0].instructions.push(MirInst::BinOp {
+            dest: VReg(3),
+            op: crate::hir::BinOp::Lt,
+            left: VReg(1),
+            right: VReg(2),
+        });
+        func.blocks[0].terminator = Terminator::Branch {
+            cond: VReg(3),
+            then_block: fail,
+            else_block: ok,
+        };
+        func.block_mut(fail).unwrap().instructions.push(MirInst::ConstBool {
+            dest: VReg(4),
+            value: false,
+        });
+        func.block_mut(fail).unwrap().terminator = Terminator::Return(Some(VReg(4)));
+        func.block_mut(ok).unwrap().instructions.push(MirInst::ConstBool {
+            dest: VReg(5),
+            value: true,
+        });
+        func.block_mut(ok).unwrap().terminator = Terminator::Return(Some(VReg(5)));
+
+        backend.compile_function(&func).unwrap();
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("define i32 @heap_init_shape(i32 %0, i32 %1)"));
+        assert!(ir.contains("icmp slt i32"));
+        assert!(ir.contains("br i1"));
+        backend.verify().unwrap();
+    }
 
     #[test]
     fn test_riscv32_float_boxing_uses_runtime_helpers() {

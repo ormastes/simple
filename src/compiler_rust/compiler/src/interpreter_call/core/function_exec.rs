@@ -5,8 +5,8 @@ use super::async_support::{is_async_function, wrap_in_promise};
 use super::macros::*;
 use crate::error::CompileError;
 use crate::interpreter::{
-    exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS,
-    CURRENT_EXEC_MODULE, FUNCTION_MODULE_OWNER,
+    exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS, CURRENT_EXEC_MODULE,
+    FUNCTION_MODULE_OWNER,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;

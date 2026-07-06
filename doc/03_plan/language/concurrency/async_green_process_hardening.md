@@ -166,15 +166,16 @@ Per-rule semantics extracted from check.rs:
   Message: "<name> is an internal runtime-pool symbol and is not a public API"
 
 Closed item: `check_concurrency_api_misuse` is wired into the self-hosted lint
-runner and now runs at `bin/simple check` time. The separate remaining gap is
-the E-PAR-006 lambda-parser boundary described below.
+runner and now runs at `bin/simple check` time, including the E-PAR-006
+share-nothing lambda path.
 
 Update (wiring, 2026-06-11): `_concurrency_lint_errors` is now wired into
 `src/app/cli/check.spl::_check_path` (commit d3feeb84dd) — E-PAR-001..005 run
 live in the self-hosted `simple check` path (verified: E-PAR-001 fires on the
-task_spawn fixture through the real lint). The E-PAR-006 AST lint is wired but
-inert: the self-hosted parser cannot parse any lambda form as a call argument
-(`\:`, `\x:`, `fn():` all fail) — recorded in
+task_spawn fixture through the real lint). Follow-up parser fixes closed the
+E-PAR-006 lambda boundary: expression and block-body lambdas in call arguments
+parse, and all checked-in share-nothing misuse fixtures fire E-PAR-006 through
+the self-hosted path. See
 doc/08_tracking/bug/selfhosted_parser_lambda_gap_2026-06-11.md. The lint's
 arena access was also fixed (direct cross-module array reads crashed OOB on
 real parses; now uses decl_get_/expr_get_/stmt_get_ accessors).

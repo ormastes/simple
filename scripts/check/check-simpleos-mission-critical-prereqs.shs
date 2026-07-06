@@ -17,6 +17,63 @@ tool_runs() {
     "$@" >/dev/null 2>&1
 }
 
+if [ "${1:-}" = "--self-test" ]; then
+    tmp_dir="$(mktemp -d)"
+    trap '/bin/rm -rf "$tmp_dir"' EXIT
+
+    write_tool() {
+        dir="$1"
+        tool="$2"
+        mkdir -p "$dir"
+        {
+            printf '%s\n' '#!/bin/sh'
+            printf '%s\n' 'exit 0'
+        } >"$dir/$tool"
+        chmod +x "$dir/$tool"
+    }
+
+    write_stack() {
+        dir="$1"
+        shift
+        for tool in "$@"; do
+            write_tool "$dir" "$tool"
+        done
+    }
+
+    assert_missing_stack() {
+        name="$1"
+        expected="$2"
+        shift 2
+        bin="$tmp_dir/$name-bin"
+        write_stack "$bin" "$@"
+        if PATH="$bin" /bin/sh "$0" >"$tmp_dir/$name.out" 2>&1; then
+            echo "STATUS: FAIL simpleos-mission-critical-prereqs self-test: missing $expected accepted" >&2
+            exit 1
+        fi
+        /bin/grep -Fq "simpleos_mission_critical_prereqs_missing=$expected" "$tmp_dir/$name.out" || {
+            echo "STATUS: FAIL simpleos-mission-critical-prereqs self-test: missing $expected not classified" >&2
+            exit 1
+        }
+    }
+
+    ready_bin="$tmp_dir/ready-bin"
+    write_stack "$ready_bin" sby yosys z3
+
+    PATH="$ready_bin" /bin/sh "$0" >"$tmp_dir/ready.out" 2>&1 || {
+        echo "STATUS: FAIL simpleos-mission-critical-prereqs self-test: ready tools rejected" >&2
+        exit 1
+    }
+    /bin/grep -Fq "simpleos_mission_critical_prereqs_status=ready" "$tmp_dir/ready.out" || {
+        echo "STATUS: FAIL simpleos-mission-critical-prereqs self-test: ready status missing" >&2
+        exit 1
+    }
+    assert_missing_stack missing-sby sby yosys z3
+    assert_missing_stack missing-yosys yosys,smt-solver sby
+    assert_missing_stack missing-solver smt-solver sby yosys
+    echo "STATUS: PASS simpleos-mission-critical-prereqs self-test"
+    exit 0
+fi
+
 test -f "$SETUP_HELPER" || {
     echo "simpleos_mission_critical_prereqs_status=blocked"
     echo "simpleos_mission_critical_prereqs_missing=setup-helper"

@@ -369,7 +369,9 @@ pub(super) fn eval_call_expr(
                         };
                         eprintln!(
                             "[DBG PROP-ACCESS-ERR] class={} missing_field={} recv={} actual_fields=[{}]",
-                            class, field, recv_desc,
+                            class,
+                            field,
+                            recv_desc,
                             available_fields.join(",")
                         );
                     }
