@@ -28,6 +28,17 @@ fn mir_expr_env_get(key: text) -> text:
 # ============================================================================
 
 impl MirLowering:
+    fn lower_symbol_expr(symbol: SymbolId, name: text, span: Span) -> LocalId:
+        val raw_id = self.symbol_raw_id(symbol)
+        if raw_id >= 0 and self.local_map.has(raw_id):
+            self.local_map[raw_id]
+        else:
+            self.error("undefined variable: {name}", Some(span))
+            var b_err = self.builder
+            val err_tmp = b_err.new_temp(MirType.i64())
+            self.builder = b_err
+            err_tmp
+
     me host_gpu_runtime_func(name: text) -> MirOperand:
         MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(name),
@@ -92,6 +103,8 @@ impl MirLowering:
         self.builder = b
 
     me resolved_call_return_type(symbol: SymbolId) -> MirType:
+        if self.symbol_raw_id(symbol) < 0:
+            return MirType.i64()
         val sym = self.symbols.get_symbol(symbol)
         if val found_sym = sym:
             if val sym_type = found_sym.type_:
@@ -184,64 +197,17 @@ impl MirLowering:
                 result
 
             case Var(symbol):
-                # Look up variable in local_map using contains_key first
-                if symbol == nil:
-                    self.error("undefined variable", Some(expr_value.span))
-                    var b_nil = self.builder
-                    val nil_tmp = b_nil.new_temp(MirType.i64())
-                    self.builder = b_nil
-                    nil_tmp
-                elif self.local_map.has(symbol.id):
-                    self.local_map[symbol.id]
-                else:
-                    self.error("undefined variable", Some(expr_value.span))
-                    var b_err = self.builder
-                    val err_tmp = b_err.new_temp(MirType.i64())
-                    self.builder = b_err
-                    err_tmp
+                self.lower_symbol_expr(symbol, "", expr_value.span)
 
             case NamedVar(symbol, name):
-                # Same lookup as Var -- HirLowering's `case Ident(name):` (in
-                # hir_lowering/expressions.spl) produces NamedVar(symbol, name)
-                # for every resolved identifier reference, but this dispatch
-                # only had a case for the name-less Var(symbol) variant. Every
-                # other test in this suite builds MIR fixtures directly
-                # (bypassing real source -> HIR -> MIR lowering), so this
-                # never got exercised until real frontend parsing was used;
-                # falling through to the `case _:` catch-all silently
-                # returned nil for any local variable reference.
-                #
-                # NOTE: `symbol` is declared non-optional (SymbolId) on
-                # HirExprKind.NamedVar, but HirLowering builds it from
-                # `if val found_symbol = self.symbols.lookup(name):` --
-                # confirmed (same class of bug fixed in 413d121a011 for
-                # MIR-lowering `if val ... .type_:` sites) that the seed
-                # interpreter's `if val` presence check can still enter the
-                # true branch with the bound value nil when the lookup
-                # fails. Accessing `symbol.id` unconditionally then crashes
-                # with "undefined field 'id': cannot access field on value
-                # of type 'nil'" instead of surfacing a real diagnostic. A
-                # redundant explicit nil re-check guards against this.
-                if symbol == nil:
-                    self.error("undefined variable: {name}", Some(expr_value.span))
-                    var b_err3 = self.builder
-                    val err_tmp3 = b_err3.new_temp(MirType.i64())
-                    self.builder = b_err3
-                    err_tmp3
-                elif self.local_map.has(symbol.id):
-                    self.local_map[symbol.id]
-                else:
-                    self.error("undefined variable: {name}", Some(expr_value.span))
-                    var b_err2 = self.builder
-                    val err_tmp2 = b_err2.new_temp(MirType.i64())
-                    self.builder = b_err2
-                    err_tmp2
+                self.lower_symbol_expr(symbol, name, expr_value.span)
 
             case Binary(op, left, right):
 
                 # Check if this is a special pipeline operator first
                 val special_result = self.lower_binop_special(op, left, right)
-                if val special_local = special_result:
+                if special_result != nil:
+                    val special_local = special_result
                     special_local
                 else:
                     # Normal binary operation
@@ -385,6 +351,11 @@ impl MirLowering:
 
             case Yield(value):
                 self.lower_yield(value)
+
+            case NullCoalesce(left, _):
+                # ponytail: native-build only needs a non-nil local here; full
+                # optional fallback lowering belongs in the optional MIR pass.
+                self.lower_expr(left)
 
             # Unsafe block - lower the body, no special handling
             case UnsafeBlock(body):

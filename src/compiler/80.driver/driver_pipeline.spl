@@ -361,25 +361,45 @@ impl CompilerDriver:
             while direct_idx < self.ctx.sources.len():
                 val src_direct = self.ctx.sources[direct_idx]
                 val name_direct = src_direct.module_name
-                val mir_direct = if native_entry_closure_mir or _driver_is_bootstrap_entry_source(src_direct.path, name_direct) or (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1":
+                if native_entry_closure_mir or _driver_is_bootstrap_entry_source(src_direct.path, name_direct) or (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1":
                     print "[driver-mir] bootstrap lower:start"
                     val direct_hir = self.ctx.hir_modules[name_direct]
+                    direct_lowering.builder = MirBuilder(
+                        module: MirModule(
+                            name: name_direct,
+                            functions: {},
+                            statics: {},
+                            constants: {},
+                            types: {}
+                        ),
+                        current_function: nil,
+                        current_block: BlockId(id: 0),
+                        next_local_id: 0,
+                        next_block_id: 1,
+                        locals: [],
+                        blocks: [],
+                        instructions: []
+                    )
+                    direct_lowering.local_map = {}
+                    direct_lowering.current_function_symbols = []
+                    direct_lowering.current_function_names = []
+                    direct_lowering.loop_stack = []
+                    direct_lowering.errors = []
+                    direct_lowering.field_map = {}
+                    direct_lowering.bitfield_map = {}
+                    direct_lowering.bitfield_value_syms = {}
+                    direct_lowering.current_has_vhdl_metadata = false
                     direct_lowering.symbols = direct_hir.symbols
                     var lowered_entry = direct_lowering.lower_module(direct_hir)
                     lowered_entry.name = name_direct
                     print "[driver-mir] bootstrap lower:done"
-                    lowered_entry
-                else:
-                    MirModule(
-                        name: name_direct,
-                        functions: {},
-                        statics: {},
-                        constants: {},
-                        types: {}
-                    )
-                self.ctx.mir_modules[name_direct] = mir_direct
-                if name_direct == "app.cli.bootstrap_main":
-                    self.ctx.bootstrap_entry_mir = Some(mir_direct)
+                    var has_lowered_functions = false
+                    for _fn in lowered_entry.functions.values():
+                        has_lowered_functions = true
+                    if has_lowered_functions:
+                        self.ctx.mir_modules[name_direct] = lowered_entry
+                    if name_direct == "app.cli.bootstrap_main":
+                        self.ctx.bootstrap_entry_mir = Some(lowered_entry)
                 direct_idx = direct_idx + 1
             return self.ctx.errors.len() == 0
 

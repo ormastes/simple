@@ -63,6 +63,12 @@ impl MirTextCodegen for MirToLlvm:
                 bootstrap_fni = bootstrap_fni + 1
         else:
             for fn_ in module.functions.values():
+                var param_types: [text] = []
+                for param_ty in fn_.signature.params:
+                    param_types = param_types.push(self.valid_llvm_type(self.llvm_type_text(param_ty)))
+                self.func_param_types[fn_.name] = param_types
+                self.func_return_types[fn_.name] = self.valid_llvm_type(self.llvm_type_text(fn_.signature.return_type))
+            for fn_ in module.functions.values():
                 val body = MirBody.from_function(fn_)
                 self.translate_function(fn_.name, body)
 
@@ -95,13 +101,15 @@ impl MirTextCodegen for MirToLlvm:
         self.current_function_name = name
         self.defined_func_names[name] = true
         self.local_types = {}
+        self.emitted_local_types = {}
+        self.local_aliases = {}
         self.return_locals = {}
         self.bool_locals = {}
         self.ptr_locals = {}
         var local_i = 0
         while local_i < body.locals.len():
             val local = body.locals[local_i]
-            val llvm_ty = self.llvm_type_text(local.type_)
+            val llvm_ty = self.valid_llvm_type(self.llvm_type_text(local.type_))
             val local_id = self.local_id_value(local.id)
             self.local_types[local_id] = llvm_ty
             match local.kind:
@@ -114,15 +122,19 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] function:locals {name}"
 
         var params: [text] = []
+        val known_fn_param_types = if self.func_param_types.has(name): self.func_param_types[name] else: []
         var arg_i = 0
         while arg_i < body.arg_count:
             for local in body.locals:
                 match local.kind:
                     case Arg(index):
                         if index == arg_i:
-                            val local_id = local.id.id
+                            val local_id = self.local_id_value(local.id)
                             val maybe_param_ty = self.get_local_type(local_id)
-                            val param_ty = if maybe_param_ty == nil: self.native_int() else: maybe_param_ty
+                            val local_param_ty = if maybe_param_ty == nil: self.native_int() else: maybe_param_ty
+                            val param_ty = if arg_i < known_fn_param_types.len(): known_fn_param_types[arg_i] else: local_param_ty
+                            self.local_types[local_id] = param_ty
+                            self.emitted_local_types[local_id] = param_ty
                             params = params.push("{param_ty} {self.get_local(local_id)}")
                     case _:
                         ()
@@ -130,7 +142,8 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] function:params {name}"
 
-        val ret_ty = self.llvm_type_text(body.return_ty)
+        val body_ret_ty = self.llvm_type_text(body.return_ty)
+        val ret_ty = if self.func_return_types.has(name): self.func_return_types[name] else: body_ret_ty
         self.current_return_type = ret_ty
         if bootstrap_debug:
             print "[mir-to-llvm] function:return {name}"
@@ -181,6 +194,7 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_block(block: MirBlock):
         """Translate a MIR basic block."""
+        self.local_aliases = {}
         self.builder.emit_label("bb{block.id.id}")
         for inst in block.instructions:
             self.translate_instruction(inst)
@@ -305,7 +319,8 @@ impl MirTextCodegen for MirToLlvm:
                         val val_str = self.translate_operand(ret_operand)
                         val maybe_ret_ty = self.get_operand_type(ret_operand)
                         val ret_ty = if maybe_ret_ty == nil: self.native_int() else: maybe_ret_ty
-                        self.builder.emit_ret(ret_ty, val_str)
+                        val final_ret_val = self.cast_value_if_needed(val_str, ret_ty, self.current_return_type)
+                        self.builder.emit_ret(self.current_return_type, final_ret_val)
                     nil:
                         if self.current_return_type == "void":
                             self.builder.emit_ret_void()
@@ -347,7 +362,8 @@ impl MirTextCodegen for MirToLlvm:
                 val func_val = self.translate_operand(func)
                 var arg_vals: [text] = []
                 for arg in args:
-                    arg_vals = arg_vals.push(self.translate_operand(arg))
+                    val arg_ty = self.valid_llvm_type(self.get_operand_type(arg))
+                    arg_vals = arg_vals.push("{arg_ty} {self.translate_operand(arg)}")
                 val args_str = arg_vals.join(", ")
                 match dest:
                     Some(dest_local):
@@ -356,16 +372,16 @@ impl MirTextCodegen for MirToLlvm:
                         val ret_ty = self.get_local_type(dest_id)
                         match unwind:
                             Some(unwind_block):
-                                self.builder.emit("  {dest_name} = invoke {ret_ty} @{func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{self.block_id_value(unwind_block)}")
+                                self.builder.emit("  {dest_name} = invoke {ret_ty} {func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{self.block_id_value(unwind_block)}")
                             nil:
-                                self.builder.emit("  {dest_name} = call {ret_ty} @{func_val}({args_str})")
+                                self.builder.emit("  {dest_name} = call {ret_ty} {func_val}({args_str})")
                                 self.builder.emit_br("bb{self.block_id_value(normal)}")
                     nil:
                         match unwind:
                             Some(unwind_block):
-                                self.builder.emit("  invoke void @{func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{self.block_id_value(unwind_block)}")
+                                self.builder.emit("  invoke void {func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{self.block_id_value(unwind_block)}")
                             nil:
-                                self.builder.emit("  call void @{func_val}({args_str})")
+                                self.builder.emit("  call void {func_val}({args_str})")
                                 self.builder.emit_br("bb{self.block_id_value(normal)}")
 
     # === Required: per-category instruction methods ===
@@ -374,6 +390,8 @@ impl MirTextCodegen for MirToLlvm:
         val dest_name = self.get_local(dest.id)
         val llvm_ty = self.valid_llvm_type(self.llvm_type_text(ty))
         self.local_types[self.local_id_value(dest)] = llvm_ty
+        self.local_types[dest.id] = llvm_ty
+        self.emitted_local_types[self.local_id_value(dest)] = llvm_ty
 
         match value:
             case Int(v):
@@ -418,10 +436,20 @@ impl MirTextCodegen for MirToLlvm:
                 self.builder.emit_load(dest_name, llvm_ty, tmp)
 
     me translate_copy_move(dest: LocalId, src: LocalId, is_move: bool):
-        val dest_name = self.get_local(self.local_id_value(dest))
-        val src_name = self.get_local(self.local_id_value(src))
-        val ty = self.valid_llvm_type(self.get_local_type(self.local_id_value(src)))
+        val dest_id = self.local_id_value(dest)
+        val dest_name = if self.emitted_local_types.has(dest_id): self.builder.fresh_local() else: self.get_local(dest_id)
+        val src_id = self.local_id_value(src)
+        val src_name = if self.local_aliases.has(src_id): self.local_aliases[src_id] else: if self.emitted_local_types.has(src_id): self.get_local(src_id) else: "0"
+        val ty = self.valid_llvm_type(if self.ptr_locals.has(src_id): "ptr" else: if self.emitted_local_types.has(src_id): self.emitted_local_types[src_id] else: self.get_local_type(src_id))
         val comment = if is_move: "move" else: "copy"
+        self.local_types[dest_id] = ty
+        self.local_types[dest.id] = ty
+        self.emitted_local_types[dest_id] = ty
+        self.local_aliases[dest_id] = dest_name
+        if ty == "ptr":
+            self.ptr_locals[dest_id] = true
+        else:
+            self.ptr_locals.remove(dest_id)
 
         if is_float_type(ty):
             self.builder.emit("  {dest_name} = fadd {ty} {src_name}, 0.0  ; {comment}")
@@ -444,40 +472,47 @@ impl MirTextCodegen for MirToLlvm:
         val dest_name = self.get_local(dest.id)
         val left_val = self.translate_operand(left)
         val right_val = self.translate_operand(right)
-        val ty = self.get_local_type(dest.id)
+        val ty = self.valid_llvm_type(self.get_local_type(dest.id))
+        self.local_types[self.local_id_value(dest)] = ty
+        self.local_types[dest.id] = ty
+        self.emitted_local_types[self.local_id_value(dest)] = ty
+        val left_ty = self.valid_llvm_type(self.llvm_value_type(left_val, self.get_operand_type(left)))
+        val right_ty = self.valid_llvm_type(self.llvm_value_type(right_val, self.get_operand_type(right)))
+        val left_num = self.cast_value_if_needed(left_val, left_ty, ty)
+        val right_num = self.cast_value_if_needed(right_val, right_ty, ty)
 
         match op:
             case Add:
                 if is_float_type(ty):
-                    self.builder.emit_fadd(dest_name, ty, left_val, right_val)
+                    self.builder.emit_fadd(dest_name, ty, left_num, right_num)
                 elif is_signed_int_type(ty):
-                    self.builder.emit_add_nsw(dest_name, ty, left_val, right_val)
+                    self.builder.emit_add_nsw(dest_name, ty, left_num, right_num)
                 else:
-                    self.builder.emit_add(dest_name, ty, left_val, right_val)
+                    self.builder.emit_add(dest_name, ty, left_num, right_num)
             case Sub:
                 if is_float_type(ty):
-                    self.builder.emit_fsub(dest_name, ty, left_val, right_val)
+                    self.builder.emit_fsub(dest_name, ty, left_num, right_num)
                 elif is_signed_int_type(ty):
-                    self.builder.emit_sub_nsw(dest_name, ty, left_val, right_val)
+                    self.builder.emit_sub_nsw(dest_name, ty, left_num, right_num)
                 else:
-                    self.builder.emit_sub(dest_name, ty, left_val, right_val)
+                    self.builder.emit_sub(dest_name, ty, left_num, right_num)
             case Mul:
                 if is_float_type(ty):
-                    self.builder.emit_fmul(dest_name, ty, left_val, right_val)
+                    self.builder.emit_fmul(dest_name, ty, left_num, right_num)
                 elif is_signed_int_type(ty):
-                    self.builder.emit_mul_nsw(dest_name, ty, left_val, right_val)
+                    self.builder.emit_mul_nsw(dest_name, ty, left_num, right_num)
                 else:
-                    self.builder.emit_mul(dest_name, ty, left_val, right_val)
+                    self.builder.emit_mul(dest_name, ty, left_num, right_num)
             case Div:
                 if is_float_type(ty):
-                    self.builder.emit_fdiv(dest_name, ty, left_val, right_val)
+                    self.builder.emit_fdiv(dest_name, ty, left_num, right_num)
                 else:
-                    self.builder.emit_div(dest_name, ty, left_val, right_val)
+                    self.builder.emit_div(dest_name, ty, left_num, right_num)
             case Rem:
                 if is_float_type(ty):
-                    self.builder.emit_frem(dest_name, ty, left_val, right_val)
+                    self.builder.emit_frem(dest_name, ty, left_num, right_num)
                 else:
-                    self.builder.emit_rem(dest_name, ty, left_val, right_val)
+                    self.builder.emit_rem(dest_name, ty, left_num, right_num)
             case Pow:
                 if is_float_type(ty):
                     val fsuffix = if ty == "double": "f64" else: "f32"
@@ -485,35 +520,47 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     val nit = self.native_int()
                     self.builder.emit("  {dest_name} = call {nit} @__simple_pow({nit} {left_val}, {nit} {right_val})")
-            case BitAnd: self.builder.emit_and(dest_name, ty, left_val, right_val)
-            case BitOr: self.builder.emit_or(dest_name, ty, left_val, right_val)
-            case BitXor: self.builder.emit_xor(dest_name, ty, left_val, right_val)
-            case Shl: self.builder.emit_shl(dest_name, ty, left_val, right_val)
-            case Shr: self.builder.emit_ashr(dest_name, ty, left_val, right_val)
+            case BitAnd: self.builder.emit_and(dest_name, ty, left_num, right_num)
+            case BitOr: self.builder.emit_or(dest_name, ty, left_num, right_num)
+            case BitXor: self.builder.emit_xor(dest_name, ty, left_num, right_num)
+            case Shl: self.builder.emit_shl(dest_name, ty, left_num, right_num)
+            case Shr: self.builder.emit_ashr(dest_name, ty, left_num, right_num)
             case Eq:
-                val eq_cmp_ty = self.get_operand_type(left)
+                val eq_cmp_ty = self.common_llvm_value_type(left_ty, right_ty)
                 val eq_pred = if is_float_type(eq_cmp_ty): "oeq" else: "eq"
-                self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, left_val, right_val)
+                val eq_left = self.cast_value_if_needed(left_val, left_ty, eq_cmp_ty)
+                val eq_right = self.cast_value_if_needed(right_val, right_ty, eq_cmp_ty)
+                self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, eq_left, eq_right)
             case Ne:
-                val ne_cmp_ty = self.get_operand_type(left)
+                val ne_cmp_ty = self.common_llvm_value_type(left_ty, right_ty)
                 val ne_pred = if is_float_type(ne_cmp_ty): "one" else: "ne"
-                self.emit_comparison(dest_name, ty, ne_pred, ne_cmp_ty, left_val, right_val)
+                val ne_left = self.cast_value_if_needed(left_val, left_ty, ne_cmp_ty)
+                val ne_right = self.cast_value_if_needed(right_val, right_ty, ne_cmp_ty)
+                self.emit_comparison(dest_name, ty, ne_pred, ne_cmp_ty, ne_left, ne_right)
             case Lt:
-                val lt_cmp_ty = self.get_operand_type(left)
+                val lt_cmp_ty = self.common_llvm_value_type(left_ty, right_ty)
                 val lt_pred = if is_float_type(lt_cmp_ty): "olt" else: "slt"
-                self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, left_val, right_val)
+                val lt_left = self.cast_value_if_needed(left_val, left_ty, lt_cmp_ty)
+                val lt_right = self.cast_value_if_needed(right_val, right_ty, lt_cmp_ty)
+                self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, lt_left, lt_right)
             case Le:
-                val le_cmp_ty = self.get_operand_type(left)
+                val le_cmp_ty = self.common_llvm_value_type(left_ty, right_ty)
                 val le_pred = if is_float_type(le_cmp_ty): "ole" else: "sle"
-                self.emit_comparison(dest_name, ty, le_pred, le_cmp_ty, left_val, right_val)
+                val le_left = self.cast_value_if_needed(left_val, left_ty, le_cmp_ty)
+                val le_right = self.cast_value_if_needed(right_val, right_ty, le_cmp_ty)
+                self.emit_comparison(dest_name, ty, le_pred, le_cmp_ty, le_left, le_right)
             case Gt:
-                val gt_cmp_ty = self.get_operand_type(left)
+                val gt_cmp_ty = self.common_llvm_value_type(left_ty, right_ty)
                 val gt_pred = if is_float_type(gt_cmp_ty): "ogt" else: "sgt"
-                self.emit_comparison(dest_name, ty, gt_pred, gt_cmp_ty, left_val, right_val)
+                val gt_left = self.cast_value_if_needed(left_val, left_ty, gt_cmp_ty)
+                val gt_right = self.cast_value_if_needed(right_val, right_ty, gt_cmp_ty)
+                self.emit_comparison(dest_name, ty, gt_pred, gt_cmp_ty, gt_left, gt_right)
             case Ge:
-                val ge_cmp_ty = self.get_operand_type(left)
+                val ge_cmp_ty = self.common_llvm_value_type(left_ty, right_ty)
                 val ge_pred = if is_float_type(ge_cmp_ty): "oge" else: "sge"
-                self.emit_comparison(dest_name, ty, ge_pred, ge_cmp_ty, left_val, right_val)
+                val ge_left = self.cast_value_if_needed(left_val, left_ty, ge_cmp_ty)
+                val ge_right = self.cast_value_if_needed(right_val, right_ty, ge_cmp_ty)
+                self.emit_comparison(dest_name, ty, ge_pred, ge_cmp_ty, ge_left, ge_right)
             case MatMul:
                 self.emit_unsupported_panic("LLVM backend does not support MatMul lowering")
             case BroadcastAdd:
@@ -532,21 +579,75 @@ impl MirTextCodegen for MirToLlvm:
                 self.builder.emit("  {offset_ptr} = getelementptr i8, ptr {left_val}, {nit} {right_val}")
                 self.builder.emit("  {dest_name} = ptrtoint ptr {offset_ptr} to {nit}")
 
+    fn common_llvm_value_type(left_ty: text, right_ty: text) -> text:
+        if left_ty == right_ty:
+            return left_ty
+        if left_ty == "double" or right_ty == "double":
+            return "double"
+        if left_ty == "float" or right_ty == "float":
+            return "float"
+        if left_ty == "ptr" or right_ty == "ptr":
+            return "ptr"
+        if left_ty == "i64" or right_ty == "i64":
+            return "i64"
+        if left_ty == "i32" or right_ty == "i32":
+            return "i32"
+        if left_ty == "i16" or right_ty == "i16":
+            return "i16"
+        if left_ty == "i8" or right_ty == "i8":
+            return "i8"
+        left_ty
+
+    me cast_value_if_needed(value: text, src_ty: text, target_ty: text) -> text:
+        val actual_src_ty = self.llvm_value_type(value, src_ty)
+        if actual_src_ty == target_ty:
+            return value
+        if actual_src_ty == "void" or target_ty == "void":
+            return value
+        if actual_src_ty == "ptr" and value == "0":
+            val null_tmp = self.builder.fresh_local()
+            self.builder.emit("  {null_tmp} = ptrtoint ptr null to {target_ty}")
+            return null_tmp
+        if target_ty == "ptr" and value == "0":
+            return "null"
+        val cast_inst = self.select_cast_instruction(actual_src_ty, target_ty)
+        val tmp = self.builder.fresh_local()
+        self.builder.emit("  {tmp} = {cast_inst} {actual_src_ty} {value} to {target_ty}")
+        tmp
+
+    fn llvm_value_type(value: text, fallback: text) -> text:
+        if value.starts_with("%l"):
+            val raw = value.substring(2)
+            val id = raw.to_i64() ?? -1
+            if id >= 0 and self.ptr_locals.has(id):
+                return "ptr"
+            if id >= 0 and self.emitted_local_types.has(id):
+                return self.emitted_local_types[id]
+        fallback
+
     me translate_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand):
         """Translate unary operation."""
         val dest_name = self.get_local(dest.id)
         val operand_val = self.translate_operand(operand)
-        val ty = self.get_local_type(dest.id)
+        val ty = self.valid_llvm_type(self.get_local_type(dest.id))
+        val operand_ty = self.valid_llvm_type(self.llvm_value_type(operand_val, self.get_operand_type(operand)))
+        val numeric_operand_val = self.cast_value_if_needed(operand_val, operand_ty, ty)
+        val result_ty = match op:
+            case Not: "i1"
+            case _: ty
+        self.local_types[self.local_id_value(dest)] = result_ty
+        self.local_types[dest.id] = result_ty
+        self.emitted_local_types[self.local_id_value(dest)] = result_ty
 
         match op:
             case Neg:
                 if is_float_type(ty):
-                    self.builder.emit_fneg(dest_name, ty, operand_val)
+                    self.builder.emit_fneg(dest_name, ty, numeric_operand_val)
                 else:
-                    self.builder.emit_neg(dest_name, ty, operand_val)
+                    self.builder.emit_neg(dest_name, ty, numeric_operand_val)
             case Not:
-                self.builder.emit_icmp_eq(dest_name, ty, operand_val, "0")
-            case BitNot: self.builder.emit_not(dest_name, ty, operand_val)
+                self.builder.emit_icmp_eq(dest_name, ty, numeric_operand_val, "0")
+            case BitNot: self.builder.emit_not(dest_name, ty, numeric_operand_val)
             case Transpose:
                 self.emit_unsupported_panic("LLVM backend does not support Transpose lowering")
 
@@ -558,11 +659,15 @@ impl MirTextCodegen for MirToLlvm:
             case Some(_): Some(self.get_local(dest_id))
             case nil: nil
         val func_name = self.translate_operand(func)
+        val known_func_name = self.known_call_name(func)
         var arg_parts: [text] = []
+        val known_param_types = if self.func_param_types.has(known_func_name): self.func_param_types[known_func_name] else: []
+        var arg_i = 0
         for arg in args:
             val arg_val = self.translate_operand(arg)
             val maybe_arg_ty = self.get_operand_type(arg)
             var arg_ty = if maybe_arg_ty == nil: self.native_int() else: maybe_arg_ty
+            val target_arg_ty = if arg_i < known_param_types.len(): known_param_types[arg_i] else: arg_ty
             match arg.kind:
                 case Copy(local) | Move(local):
                     if self.bool_locals.has(self.local_id_value(local)):
@@ -571,28 +676,45 @@ impl MirTextCodegen for MirToLlvm:
                         arg_ty = "ptr"
                 case _:
                     ()
-            arg_parts = arg_parts.push("{arg_ty} {arg_val}")
+            val cast_arg_val = self.cast_value_if_needed(arg_val, arg_ty, target_arg_ty)
+            val final_arg_val = if target_arg_ty == "ptr" and cast_arg_val == "0": "null" else: cast_arg_val
+            arg_parts = arg_parts.push("{target_arg_ty} {final_arg_val}")
+            arg_i = arg_i + 1
         val args_str = arg_parts.join(", ")
         match dest_name:
             Some(name):
                 val maybe_ret_ty = self.get_local_type(dest_id)
-                val ret_ty = if maybe_ret_ty == nil: self.native_int() else: maybe_ret_ty
-                self.builder.emit("  {name} = call {ret_ty} {func_name}({args_str})")
+                val local_ret_ty = if maybe_ret_ty == nil: self.native_int() else: maybe_ret_ty
+                val ret_ty = if self.func_return_types.has(known_func_name): self.func_return_types[known_func_name] else: local_ret_ty
+                self.local_types[dest_id] = ret_ty
+                self.emitted_local_types[dest_id] = ret_ty
+                if ret_ty == "void":
+                    self.builder.emit("  call void {func_name}({args_str})")
+                else:
+                    self.builder.emit("  {name} = call {ret_ty} {func_name}({args_str})")
             nil:
                 val ret_ty = "void"
                 self.builder.emit("  call {ret_ty} {func_name}({args_str})")
 
     # === Required: helpers ===
 
+    fn known_call_name(func: MirOperand) -> text:
+        match func.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name): name
+                    case _: ""
+            case _: ""
+
     me translate_operand(operand: MirOperand) -> text:
         """Translate MIR operand to LLVM value."""
         match operand.kind:
             case Copy(local):
                 val local_id = self.local_id_value(local)
-                if local_id == 0: "0" else: self.get_local(local_id)
+                if local_id == 0: "0" else: if self.local_aliases.has(local_id): self.local_aliases[local_id] else: if self.emitted_local_types.has(local_id): self.get_local(local_id) else: "0"
             case Move(local):
                 val local_id = self.local_id_value(local)
-                if local_id == 0: "0" else: self.get_local(local_id)
+                if local_id == 0: "0" else: if self.local_aliases.has(local_id): self.local_aliases[local_id] else: if self.emitted_local_types.has(local_id): self.get_local(local_id) else: "0"
             case Const(value, type_):
                 # For function references, return @name directly
                 match type_.kind:
@@ -640,15 +762,15 @@ impl MirTextCodegen for MirToLlvm:
         """Get LLVM type for a local variable, falling back to native int type."""
         match self.local_types.get(id):
             case Some(ty):
-                if ty == nil or ty == "nil":
-                    self.native_int()
+                if ty == nil or ty == "" or ty == "nil" or ty == "object" or ty == "any":
+                    "i64"
                 else:
                     ty
-            case nil: self.native_int()
+            case nil: "i64"
 
     fn valid_llvm_type(ty: text) -> text:
-        if ty == nil or ty == "nil":
-            self.native_int()
+        if ty == nil or ty == "" or ty == "nil" or ty == "object" or ty == "any":
+            "i64"
         else:
             ty
 
@@ -656,9 +778,15 @@ impl MirTextCodegen for MirToLlvm:
         """Get the LLVM type string for an operand."""
         match operand.kind:
             case Copy(local):
-                self.get_local_type(self.local_id_value(local))
+                val local_id = self.local_id_value(local)
+                if self.ptr_locals.has(local_id):
+                    return "ptr"
+                if self.emitted_local_types.has(local_id): self.emitted_local_types[local_id] else: self.get_local_type(local_id)
             case Move(local):
-                self.get_local_type(self.local_id_value(local))
+                val local_id = self.local_id_value(local)
+                if self.ptr_locals.has(local_id):
+                    return "ptr"
+                if self.emitted_local_types.has(local_id): self.emitted_local_types[local_id] else: self.get_local_type(local_id)
             case Const(value, type_):
                 self.llvm_type_text(type_)
             case _:
@@ -677,18 +805,22 @@ impl MirTextCodegen for MirToLlvm:
     # === Overrides: memory ===
 
     me translate_alloc(dest: LocalId, ty: MirType):
-        val dest_name = self.get_local(self.local_id_value(dest))
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
         val llvm_ty = self.valid_llvm_type(self.llvm_type_text(ty))
+        self.emitted_local_types[dest_id] = "ptr"
         self.builder.emit_alloca(dest_name, llvm_ty)
 
     me translate_load(dest: LocalId, ptr: MirOperand):
-        val dest_name = self.get_local(self.local_id_value(dest))
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
         val ptr_val = self.translate_operand(ptr)
-        val load_ty = self.valid_llvm_type(self.get_local_type(self.local_id_value(dest)))
+        val load_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+        self.emitted_local_types[dest_id] = load_ty
         self.builder.emit_load(dest_name, load_ty, ptr_val)
 
     me translate_store(ptr: MirOperand, value: MirOperand):
         val ptr_val = self.translate_operand(ptr)
         val value_val = self.translate_operand(value)
-        val store_ty = self.valid_llvm_type(self.get_operand_type(value))
+        val store_ty = self.valid_llvm_type(self.llvm_value_type(value_val, self.get_operand_type(value)))
         self.builder.emit_store(store_ty, value_val, ptr_val)

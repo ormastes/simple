@@ -17,6 +17,69 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 # ============================================================================
 
 impl MirLowering:
+    fn symbol_raw_id(symbol: SymbolId) -> i64:
+        match symbol:
+            case SymbolId(raw_id): raw_id
+            case _: -1
+
+    fn local_raw_id(local: LocalId) -> i64:
+        match local:
+            case LocalId(raw_id): raw_id
+            case _: -1
+
+    fn lower_let_to_symbol(symbol: SymbolId, span: Span, type_: HirType?, init: HirExpr?):
+        val raw_id = self.symbol_raw_id(symbol)
+        if raw_id < 0:
+            self.error("let binding has no resolved symbol", Some(span))
+            return
+        # NOTE: avoid Option.map()/.unwrap() here -- the seed interpreter
+        # mishandles .map() on a "present" struct optional.
+        val mir_type = if type_.?: self.lower_type(type_) else: MirType.i64()
+
+        var has_init = false
+        var init_local = LocalId(id: 0)
+        if val init_expr = init:
+            init_local = self.lower_expr(init_expr)
+            has_init = true
+
+        val bf_sym = if has_init:
+            self.bitfield_value_syms.get(init_local.id)
+        else:
+            nil
+        if bf_sym != nil:
+            self.local_map[raw_id] = init_local
+        else:
+            var b = self.builder
+            val local = b.new_local(nil, mir_type, LocalKind.Var)
+            self.builder = b
+            self.local_map[raw_id] = local
+            if has_init:
+                var b2 = self.builder
+                b2.emit_copy(local, init_local)
+                self.builder = b2
+
+    fn lower_assign_to_symbol(symbol: SymbolId, name: text, span: Span, op: HirAssignOp?, value_local: LocalId):
+        val raw_id = self.symbol_raw_id(symbol)
+        if raw_id < 0:
+            self.error("assignment target has no resolved symbol: {name}", Some(span))
+            return
+        if self.local_map.has(raw_id):
+            val local = self.local_map[raw_id]
+            if val assign_op = op:
+                val current = mir_operand_copy(local)
+                val new_val = mir_operand_copy(value_local)
+                val mir_op = self.lower_assign_op(assign_op)
+                var b = self.builder
+                val result = b.emit_binop(mir_op, current, new_val, MirType.i64())
+                b.emit_copy(local, result)
+                self.builder = b
+            else:
+                var b = self.builder
+                b.emit_copy(local, value_local)
+                self.builder = b
+        else:
+            self.error("assignment target is not local: {name}", Some(span))
+
     me lower_stmt(stmt: HirStmt):
         """Lower HIR statement to MIR."""
         # NOTE: previously declared `val stmt_kind: HirStmtKind` / `val
@@ -38,54 +101,7 @@ impl MirLowering:
                         self.lower_expr(expr)
 
                     case Let(symbol, type_, init):
-                        if symbol == nil:
-                            self.error("let binding has no resolved symbol", Some(span))
-                            return
-                        # NOTE: avoid Option.map()/.unwrap() here -- the seed
-                        # interpreter mishandles .map() on a "present" struct
-                        # optional (see declaration_lowering.spl lower_function
-                        # and function_lowering.spl lower_function for the
-                        # same documented workaround). type_ is nil for any
-                        # `val x = ...` without an explicit type annotation;
-                        # .map() was calling lower_type(_) with that nil
-                        # payload instead of short-circuiting, producing
-                        # "undefined field 'kind': cannot access field on
-                        # value of type 'nil'" the first time a real
-                        # (non-flat-bootstrap) function body reached this path.
-                        val mir_type = if type_.?: self.lower_type(type_) else: MirType.i64()
-
-                        # Lower the initializer first so a bitfield-construct
-                        # pass-through can be aliased directly, without first
-                        # materializing an intermediate I64 local.
-                        var has_init = false
-                        var init_local = LocalId(id: 0)
-                        if val init_expr = init:
-                            init_local = self.lower_expr(init_expr)
-                            has_init = true
-
-                        # Bitfield construction (`val inst = BitfieldType(raw)`)
-                        # is a bit-identical identity pass-through: alias the
-                        # binding straight to the source local instead of
-                        # emitting a fresh I64 temp + Copy, so downstream slices
-                        # read the source signal directly (imem_rdata(6 downto 0),
-                        # not sig_N(6 downto 0)). bitfield_value_syms is only
-                        # populated for real bitfield types, so non-bitfield
-                        # code always takes the ordinary new_local + Copy path.
-                        val bf_sym = if has_init:
-                            self.bitfield_value_syms.get(init_local.id)
-                        else:
-                            nil
-                        if bf_sym != nil:
-                            self.local_map[symbol.id] = init_local
-                        else:
-                            var b = self.builder
-                            val local = b.new_local(nil, mir_type, LocalKind.Var)
-                            self.builder = b
-                            self.local_map[symbol.id] = local
-                            if has_init:
-                                var b2 = self.builder
-                                b2.emit_copy(local, init_local)
-                                self.builder = b2
+                        self.lower_let_to_symbol(symbol, span, type_, init)
 
                     case Assign(target, op, value):
                         val value_local = self.lower_expr(value)
@@ -104,23 +120,10 @@ impl MirLowering:
         """Lower assignment."""
         match target.kind:
             case Var(symbol):
-                if symbol == nil:
-                    self.error("assignment target has no resolved symbol", Some(target.span))
-                elif self.local_map.has(symbol.id):
-                    val local = self.local_map[symbol.id]
-                    if val assign_op = op:
-                        # Compound assignment
-                        val current = mir_operand_copy(local)
-                        val new_val = mir_operand_copy(value_local)
-                        val mir_op = self.lower_assign_op(assign_op)
-                        var b = self.builder
-                        val result = b.emit_binop(mir_op, current, new_val, MirType.i64())
-                        b.emit_copy(local, result)
-                        self.builder = b
-                    else:
-                        var b = self.builder
-                        b.emit_copy(local, value_local)
-                        self.builder = b
+                self.lower_assign_to_symbol(symbol, "", target.span, op, value_local)
+
+            case NamedVar(symbol, name):
+                self.lower_assign_to_symbol(symbol, name, target.span, op, value_local)
 
             case Field(base, field, resolved):
                 # Field assignment: obj.field = value
@@ -333,8 +336,6 @@ impl MirLowering:
         self.builder = b2
         val then_result = self.lower_block(then_)
         var b3 = self.builder
-        if val then_local = then_result:
-            b3.emit_copy(result, then_local)
         b3.terminate_goto(merge_block)
         self.builder = b3
 
@@ -342,11 +343,10 @@ impl MirLowering:
         var b4 = self.builder
         b4.switch_to_block(else_block)
         self.builder = b4
+        var else_result: LocalId? = nil
         if val else_block_value = else_:
-            val else_result = self.lower_block(else_block_value)
+            else_result = self.lower_block(else_block_value)
             var b5 = self.builder
-            if val else_local = else_result:
-                b5.emit_copy(result, else_local)
             b5.terminate_goto(merge_block)
             self.builder = b5
         else:
@@ -357,6 +357,45 @@ impl MirLowering:
         # Merge block
         var b6 = self.builder
         b6.switch_to_block(merge_block)
+        var emitted_phi = false
+        if then_result.? and else_result.?:
+            match then_result:
+                Some(then_local):
+                    match else_result:
+                        Some(else_local):
+                            val then_id = self.local_raw_id(then_local)
+                            val else_id = self.local_raw_id(else_local)
+                            var then_is_unit = false
+                            var else_is_unit = false
+                            var local_i = 0
+                            while local_i < b6.locals.len():
+                                val local = b6.locals[local_i]
+                                val local_id = self.local_raw_id(local.id)
+                                if local_id == then_id:
+                                    then_is_unit = local.type_.kind == MirTypeKind.Unit
+                                if local_id == else_id:
+                                    else_is_unit = local.type_.kind == MirTypeKind.Unit
+                                local_i = local_i + 1
+                            if not then_is_unit and not else_is_unit:
+                                b6.emit(MirInst(
+                                    kind: MirInstKind.Intrinsic(Some(result), "__simple_ssa_phi", [
+                                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(then_block.id), MirType.i64())),
+                                        mir_operand_copy(then_local),
+                                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(else_block.id), MirType.i64())),
+                                        mir_operand_copy(else_local)
+                                    ]),
+                                    span: nil
+                                ))
+                                emitted_phi = true
+                        nil:
+                            nil
+                nil:
+                    nil
+        if not emitted_phi:
+            b6.emit(MirInst(
+                kind: MirInstKind.Const(result, MirConstValue.Int(0), MirType.i64()),
+                span: nil
+            ))
         self.builder = b6
 
         result

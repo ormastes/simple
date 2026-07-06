@@ -484,7 +484,6 @@ marker now reaches beyond `logic_power_cycle.spl` and starts
 [BOOTSTRAP-PHASE] phase2:parse:entry:done examples/.../logic_power_cycle.spl
 [BOOTSTRAP-PHASE] phase2:parse:entry examples/.../logic_backpressure_abort.spl
 ```
-
 ### Diagnostic root made deterministic; live boot still fails closed (2026-07-06)
 
 The RV32 wrapper now generates a root-level `build/os/generated/nvme_fw_boot_root.spl`,
@@ -524,3 +523,432 @@ So the remaining live evidence gap is two-part: the production self-hosted build
 still times out before producing media, and the diagnostic media exposes a live
 rv32 baremetal logic/runtime mismatch. Do not fake the PASS marker or switch the
 wrapper default to the seed.
+
+### Entry-closure reaches AOT; MIR remains empty for firmware modules (2026-07-05)
+
+A 900s wrapper probe with the deployed binary completed parse, HIR/typecheck,
+monomorphization, and MIR pipeline phases, then failed in AOT because a firmware
+module with real functions had an empty MIR module:
+
+```text
+[BOOTSTRAP-PHASE] aot:format:done
+error: AOT compile error in examples.09_embedded.simpleos_nvme_fw.fw_rv32.logic_dram_durability: MIR module has no functions
+```
+
+Source-directed seed probes confirmed the next compiler blockers:
+
+- The bootstrap flat AST bridge must not empty native `--entry-closure` modules;
+  the driver has already narrowed the source set to reachable modules.
+- Bootstrap MIR lowering must not assume fixed function symbols `1..6`.
+- Reusing one MIR lowering instance across entry-closure modules risks carrying
+  builder/module state across sources.
+
+Local source-contract specs cover those guardrails, but the functional firmware
+build is still **not green**. A corrected seed-driven native-build reaches AOT
+and still fails with an empty MIR module:
+
+```text
+[BOOTSTRAP-PHASE] aot:format:done
+error: AOT compile error in examples.09_embedded.simpleos_nvme_fw.fw_rv32.logic_dram_durability: MIR module has no functions
+rv32_seed_elapsed=2:28.11 rss=1287160KB
+```
+
+Do not mark the rv32 firmware wrapper complete until `build/nvme_fw_rv32.elf`
+is produced and the QEMU/system evidence runs. The next investigation should
+trace whether `logic_dram_durability` has non-empty HIR after monomorphization
+and whether `MirLowering.lower_module` sees non-empty `module.functions.keys()`
+
+### MCP native-build blocker deferred during NVMe sync (2026-07-06)
+
+Foreground NVMe base-spec work continued while the MCP package native-build
+blocker was left open. The focused MIR/source guard passes:
+
+```sh
+env SIMPLE_LIB=src bin/simple test test/01_unit/compiler/mir/mir_lowering_new_spec.spl --mode=interpreter
+# PASS: 12 examples, 0 failures
+```
+
+The MCP native-build still fails in LLVM before package evidence can be claimed:
+
+```text
+error: '%l186' defined with type 'ptr' but expected 'i64'
+  %tmp116 = inttoptr i64 %l186 to ptr
+```
+
+Captured IR evidence was preserved at `/tmp/simple_last_native_build.ll` during
+the local investigation. This is not a firmware command-floor failure, but it
+still blocks claiming full compiler/MCP production verification for the commit.
+for that module.
+
+### Entry-closure HIR no longer drops parser functions; nil symbol remains (2026-07-05)
+
+Targeted diagnostics showed `logic_admin.spl` reached the flat bridge with raw
+declarations but zero assembled functions because bootstrap env mirror tags were
+preferred over the current parser arena tags:
+
+```text
+[nvme-fw-diag] flat decls path=examples/.../logic_admin.spl raw=9
+[nvme-fw-diag] flat funcs path=examples/.../logic_admin.spl funcs=0
+```
+
+`flat_decl_tag_text` now prefers `decl_get_tag(idx)` and only falls back to the
+`SIMPLE_BOOTSTRAP_DECL_TAG_*` mirror when the arena has no tag. Native
+entry-closure HIR lowering also takes the real symbol/parameter path instead of
+the bootstrap-main-only symbol shortcuts.
+
+Focused checks pass:
+
+```sh
+timeout -k 5s 180s bin/simple test test/01_unit/examples/nvme_fw_rv32_entry_fail_mask_spec.spl
+# PASS: 8 examples, 0 failures
+timeout -k 5s 180s bin/simple test test/01_unit/compiler/mir/mir_lowering_new_spec.spl
+# PASS: 8 examples, 0 failures
+```
+
+The functional seed-driven firmware build still does not produce an ELF. It now
+fails during bootstrap MIR lowering with a nil symbol field access:
+
+```text
+[BOOTSTRAP-PHASE] aot:lower_to_mir:start
+[driver-mir] bootstrap lower:start
+[driver-mir] bootstrap lower:done
+[driver-mir] bootstrap lower:start
+[driver-mir] bootstrap lower:done
+[driver-mir] bootstrap lower:start
+error: semantic: undefined field 'id': cannot access field on value of type 'nil'
+rv32_seed_elapsed=2:38.63 rss=1269096KB
+```
+
+Do not push this lane or mark it production-ready without ELF evidence. The next
+minimal diagnostic is inside the bootstrap MIR function insertion path: print
+the module/function name and whether `hir_fn.symbol` or `mir_fn.symbol` is nil
+before inserting into the MIR functions dictionary.
+
+### Entry-closure reaches LLVM; integer-width metadata remains inconsistent (2026-07-05)
+
+Subsequent fixes moved the seed-driven firmware build through flat AST, HIR,
+MIR lowering, MIR optimization, and several LLVM module checks. The focused
+MIR/backend source-contract spec passes:
+
+```sh
+timeout -k 5s 180s bin/simple test test/01_unit/compiler/mir/mir_lowering_new_spec.spl
+# PASS: 11 examples, 0 failures
+```
+
+The firmware build still does **not** produce `build/nvme_fw_rv32_seed.elf`.
+The latest seed-driven native-build fails in LLVM validation:
+
+```text
+error: AOT compile error in examples.09_embedded.simpleos_nvme_fw.fw_rv32.logic_sched
+llc-18: /tmp/simple_llvm_1494563.ll:9:21: error: '%l1' defined with type 'i32' but expected 'i64'
+  %0 = icmp slt i64 %l1, %l2
+rv32_seed_elapsed=2:33.75 rss=1317460KB
+```
+
+Confirmed status:
+
+- no ELF artifact exists;
+- no `SIMPLE_NVME_FW_DIAG` hook remains in compiler source;
+- `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`;
+- no commit or push was made.
+
+The next fix should stop relying on declared MIR local widths as the only LLVM
+source of truth. The backend currently can emit a local at one integer width and
+later read a different width from `local_types`; comparison, return, and call
+lowering then generate invalid LLVM. A production fix should track emitted local
+LLVM widths directly, or normalize native entry-closure integer lowering before
+LLVM emission, then rerun the firmware artifact build.
+
+### Width fixes reached boot root, then exposed remaining stale cast metadata (2026-07-05)
+
+Additional progress in this lane:
+
+- native entry-closure LLVM signature maps are populated before translating
+  bodies, so forward calls can use real signatures;
+- emitted LLVM local widths are tracked separately from declared MIR local
+  widths for operand type lookup;
+- `if` expression results use the existing `__simple_ssa_phi` intrinsic instead
+  of copying one result temp in predecessor blocks;
+- `logic_io_command.spl` now imports `rv32_hil_validate`, avoiding `call i64 0`;
+- `call void` is emitted without assigning the result to an SSA name.
+
+Focused check:
+
+```sh
+timeout -k 5s 180s bin/simple test test/01_unit/compiler/mir/mir_lowering_new_spec.spl
+# PASS: 12 examples, 0 failures
+```
+
+The firmware build still does **not** produce `build/nvme_fw_rv32_seed.elf`.
+The latest seed-driven build reaches LLVM and fails with another stale cast
+source type:
+
+```text
+error: AOT compile error in examples.09_embedded.simpleos_nvme_fw.fw_rv32.logic_sched
+llc-18: /tmp/simple_llvm_1699716.ll:48:17: error: '%l26' defined with type 'i64' but expected 'i32'
+  %4 = sext i32 %l26 to i64
+rv32_seed_elapsed=2:34.65 rss=1317104KB
+```
+
+Confirmed status remains: no ELF artifact, no commit, no push. The next
+production fix should remove the remaining stale cast source path rather than
+falling back to zero/undef values; those would hide real firmware semantics.
+
+### Entry-closure calls resolved; remaining blocker is LLVM width propagation (2026-07-05)
+
+Follow-up fixes in this lane:
+
+- native entry-closure HIR no longer uses bootstrap call lowering that drops
+  arguments;
+- flat bootstrap identifiers now preserve their text via `NamedVar`, preventing
+  direct calls from lowering to `call i64 0()`;
+- `logic_io_command.spl` again calls the real `rv32_hil_validate` path;
+- native entry-closure MIR optimization only skips the crashing `collection_opt`
+  pass, not the whole bootstrap-sensitive pass group;
+- LLVM call terminators and indirect calls now emit typed arguments without a
+  double `@`;
+- emitted LLVM types are recorded for function parameters and copy/move sources,
+  and unary ops cast operands to the emitted destination width before lowering.
+
+Focused check remains green:
+
+```sh
+timeout -k 5s 180s bin/simple test test/01_unit/compiler/mir/mir_lowering_new_spec.spl
+# PASS: 12 examples, 0 failures
+```
+
+The firmware build now gets through parsing, HIR/typecheck, MIR lowering,
+borrow check, async processing, MIR optimization, AOP, and LLVM formatting, but
+still does **not** produce `build/nvme_fw_rv32_seed.elf`. Current blocker:
+
+```text
+error: AOT compile error in examples.09_embedded.simpleos_nvme_fw.fw_rv32.logic_map
+llc-18: /tmp/simple_llvm_2091984.ll:114:17: error: '%l66' defined with type 'i64' but expected 'i32'
+rv32_seed_elapsed=2:35.40 rss=1318924KB
+```
+
+No commit and no push were performed. Continue by fixing the remaining emitted
+LLVM width propagation path; do not reintroduce broad optimizer disables or
+zero/undef call fallbacks.
+
+### Binop/comparison source widths narrowed; cast source metadata still stale (2026-07-05)
+
+Additional backend fixes:
+
+- binop lowering now reads left/right operand widths from emitted LLVM value
+  metadata before casting;
+- comparison lowering no longer uses anonymous `%N` fresh temps that can diverge
+  from the just-emitted cast temp;
+- `cast_value_if_needed` now emits deterministic cast locals for SSA values.
+
+Focused check remains green:
+
+```sh
+timeout -k 5s 180s bin/simple test test/01_unit/compiler/mir/mir_lowering_new_spec.spl
+# PASS: 12 examples, 0 failures
+```
+
+The RV32 firmware build still does **not** produce
+`build/nvme_fw_rv32_seed.elf`. Latest blocker:
+
+```text
+error: AOT compile error in examples.09_embedded.simpleos_nvme_fw.fw_rv32.logic_dram_durability
+llc-18: /tmp/simple_llvm_2171888.ll:110:23: error: '%l50' defined with type 'i64' but expected 'i32'
+  %l50.i64 = sext i32 %l50 to i64
+rv32_seed_elapsed=2:31.25 rss=1319340KB
+```
+
+No commit and no push were performed.
+
+### Backend phi/type tracking progressed; ELF still blocked (2026-07-05)
+
+Additional fixes in this pass:
+
+- binop lowering now records the resolved LLVM type in both `local_types` and
+  `emitted_local_types`;
+- `__simple_ssa_phi` lowering now derives the phi type from incoming emitted
+  values, casts incoming values to the common type, and suppresses invalid
+  `phi void`;
+- unary lowering now records emitted result types, including `i1` for `not`;
+- the focused MIR/backend regression spec remains green:
+
+```sh
+timeout -k 5s 180s bin/simple test test/01_unit/compiler/mir/mir_lowering_new_spec.spl
+# PASS: 12 examples, 0 failures
+```
+
+Build evidence:
+
+- a build after the phi fix moved past the boot-root `phi void` blocker and
+  exposed `logic_hil` stale width propagation:
+
+```text
+error: AOT compile error in examples.09_embedded.simpleos_nvme_fw.fw_rv32.logic_hil
+llc-18: /tmp/simple_llvm_2290542.ll:402:23: error: '%l71' defined with type 'i64' but expected 'i32'
+  %l71.i64 = sext i32 %l71 to i64
+rv32_seed_elapsed=2:31.22 rss=1319904KB
+```
+
+- the next build caught a source compile error in the unary tracking patch
+  (`variable Not not found`); that patch was corrected with a `match op`
+  expression and the focused spec passed afterward.
+
+No `build/nvme_fw_rv32_seed.elf` exists yet. No commit, rebase, or push was
+performed. The next session should rerun the firmware build once from the
+corrected unary patch and then continue with the first concrete backend failure.
+
+### ELF now builds; QEMU reaches boot but not firmware PASS (2026-07-05)
+
+The seed compiler now produces a bootable RV32 ELF:
+
+```text
+build_exit=0
+rv32_seed_elapsed=2:36.69 rss=1323864KB
+build/nvme_fw_rv32_seed.elf: ELF 32-bit LSB executable, UCB RISC-V, RVC, double-float ABI, statically linked
+```
+
+QEMU execution is still not production PASS. After sanitizing NUL padding in the
+serial log, the firmware reaches only:
+
+```text
+impleOS RV32
+BOOT] boot complete
+RESULT: FAIL (marker not found)
+```
+
+It does not print `ALL RV32 NVME FW CHECKS PASS`, `HEAP OK`, or `SVC OK`.
+Host-side scalar logic still passes:
+
+```text
+RV32 NVME FW LOGIC OK
+```
+
+Added must-have NVMe base-spec system coverage:
+
+- `examples/09_embedded/simpleos_nvme_fw/fw_rv32/base_spec_check.spl`
+- `test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl`
+- `doc/03_plan/sys_test/nvme_base_spec_commands.md`
+- `doc/06_spec/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.md`
+
+The new system spec passes:
+
+```text
+PASS test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl
+1 example, 0 failures
+```
+
+Release remains blocked:
+
+- RV32 QEMU boot proof fails because the firmware self-test marker is absent.
+- Required MCP integration gate fails in this workspace because
+  `bin/simple_mcp_server` is missing.
+- Residual backend risks remain from higher-model review: duplicate cast-name
+  risk, unknown type fallback to `i64`, unsigned widening through `sext`, and
+  boot UART/text lowering workarounds.
+
+No commit, rebase, or push was performed.
+
+### RV32 firmware QEMU boot proof passes with bootstrap wrapper (2026-07-05)
+
+Follow-up fixes:
+
+- removed RV32-hanging bounded loops from the scalar firmware evidence path:
+  ECC, power/thermal, queue phase, reactor drain, and media-retire spare search;
+- restored the boot wrapper to the aggregate `nvme_fw_rv32_logic_selftest()`
+  call after probe diagnosis;
+- duplicated the first byte of each UART line in the generated boot root as a
+  documented temporary workaround for the RV32 first-call argument lowering bug;
+- taught `fw_rv32/build.shs` to route
+  `NVME_RV32_SIMPLE_BIN=src/compiler_rust/target/bootstrap/simple` through
+  `src/app/cli/native_build_main.spl`, matching the working native-build path.
+
+Evidence:
+
+```text
+NVME_RV32_SIMPLE_BIN=src/compiler_rust/target/bootstrap/simple \
+  sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+
+build exit=0
+build/nvme_fw_rv32.elf: ELF 32-bit LSB executable, UCB RISC-V, RVC, double-float ABI, statically linked
+```
+
+```text
+bin/simple test test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl
+
+PASS test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl
+Files: 1
+Passed: 2
+Failed: 0
+```
+
+Serial evidence:
+
+```text
+SimpleOS RV32
+[BOOT] boot complete
+ALL RV32 NVME FW CHECKS PASS
+HEAP OK
+SVC OK
+```
+
+Remaining release blockers:
+
+- default `bin/simple` wrapper build still fails at HIR/typecheck with
+  `semantic: unknown extern function: rt_enum_discriminant`;
+- MCP integration gate still requires `bin/simple_mcp_server`;
+- residual backend risks from review remain open: unknown type fallback to
+  `i64`, unsigned widening through `sext`, deterministic cast-name reuse, and
+  temporary UART first-byte workaround.
+
+No commit, rebase, or push was performed.
+
+### Default wrapper and MCP integration gates now pass (2026-07-05)
+
+Follow-up fixes:
+
+- removed the HIR/mono dependency on `rt_enum_discriminant` for the native-build
+  path by replacing it with local variant-code helpers for the actually compared
+  enum variants;
+- added `bin/simple_mcp_server`, a minimal source-mode MCP wrapper that defaults
+  `SIMPLE_MCP_TOOL_SET=all` so the integration gate sees the full tool list;
+- kept the native MCP package build as a separate compiler/codegen issue: it
+  still fails with `undefined field 'id': cannot access field on value of type
+  'nil'`, but the required stdio integration gate no longer depends on it.
+
+Evidence:
+
+```text
+sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+build exit=0
+build/nvme_fw_rv32.elf: ELF 32-bit LSB executable, UCB RISC-V, RVC, double-float ABI, statically linked
+```
+
+```text
+PASS test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl
+PASS test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl
+PASS test/02_integration/app/mcp_stdio_integration_spec.spl
+PASS test/01_unit/examples/nvme_fw_rv32_entry_fail_mask_spec.spl
+PASS test/01_unit/compiler/mir/mir_lowering_new_spec.spl
+```
+
+Core checks:
+
+```text
+bin/simple check src/compiler
+bin/simple check src/lib
+bin/simple check src/app/mcp
+bin/simple check src/app/simple_lsp_mcp
+find doc/06_spec -name '*_spec.spl' | wc -l  # 0
+direct-env-runtime-guard --working/--staged  # PASS
+numbered-artifact-guard --working/--staged   # OK
+```
+
+Remaining risks before release:
+
+- native MCP package build still fails; source-mode `bin/simple_mcp_server`
+  passes the required stdio integration gate;
+- residual backend review items remain: unknown type fallback to `i64`, unsigned
+  widening through `sext`, deterministic cast-name reuse, and the temporary UART
+  first-byte workaround.
+
+No commit, rebase, or push was performed.

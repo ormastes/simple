@@ -79,13 +79,15 @@ impl HirLowering:
         self.lowered_impl_functions = {}
         # Pass 0: pre-register imported type names so explicit `use` paths win
         # over module load order when two modules export the same short name.
-        if not bootstrap_mode:
+        val native_entry_closure_hir = (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val bootstrap_main_only = bootstrap_mode and not native_entry_closure_hir
+        if not bootstrap_main_only:
             self.resolve_import_symbols(module)
 
         # First pass: declare all top-level symbols
         if bootstrap_mode:
             eprint("[hir-lower] declare:start")
-        if not bootstrap_mode:
+        if not bootstrap_main_only:
             self.declare_module_symbols(module)
         if bootstrap_mode:
             eprint("[hir-lower] declare:done")
@@ -117,7 +119,7 @@ impl HirLowering:
         var constants: Dict<SymbolId, HirConst> = {}
 
         var lower_idx = 0
-        if bootstrap_mode:
+        if bootstrap_main_only:
             _bootstrap_hir_functions = []
             # Lower the REAL parsed functions of the entry module. They are held
             # in `module.functions` (populated by the flat-AST bridge at parse
@@ -135,7 +137,8 @@ impl HirLowering:
                 val bootstrap_fn: Function = bootstrap_module_functions[bootstrap_function_keys[lower_idx]]
                 eprint("[hir-lower] function:start {bootstrap_fn.name}")
                 val hir_fn = self.lower_function(bootstrap_fn)
-                functions[hir_fn.symbol] = hir_fn
+                val fn_key: SymbolId = SymbolId(id: lower_idx)
+                functions[fn_key] = hir_fn
                 _bootstrap_hir_functions.push(hir_fn)
                 eprint("[hir-lower] function:done {bootstrap_fn.name}")
                 lower_idx = lower_idx + 1
@@ -153,10 +156,10 @@ impl HirLowering:
                 # top-level function in a module — the seed's
                 # `Dict<text, SymbolId>.get()` yields the LAST-defined struct for
                 # all names (struct-value corruption, Layer-5 family). As a Dict
-                # KEY those identical structs collide, so `functions[hir_fn.symbol]
-                # = hir_fn` for a second function OVERWRITES the first, collapsing
-                # a 2+-function module to a single entry and silently dropping
-                # `main` (multi-fn run files no-op, rc=0 — bug
+                # KEY those identical structs collide, so keying by the original
+                # function symbol overwrites earlier functions, collapsing a 2+
+                # function module to a single entry and silently dropping `main`
+                # (multi-fn run files no-op, rc=0 — bug
                 # stage4_unstub_multifn_silent_noop_2026-07-03, iteration 19). The
                 # real symbol ids ARE distinct in the table (next_symbol_id
                 # advances per `define`); only the looked-up struct handle is
@@ -168,7 +171,7 @@ impl HirLowering:
                 functions[fn_key] = hir_fn
                 lower_idx = lower_idx + 1
 
-        if bootstrap_mode:
+        if bootstrap_main_only:
             eprint("[hir-lower] bootstrap-functions:count {_bootstrap_hir_functions.len()}")
             return HirModule(
                 name: "app.cli.bootstrap_main",
@@ -329,7 +332,7 @@ impl HirLowering:
         )
 
     me declare_module_symbols(module: ParserModule):
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") != "1":
             return
         # Pass module filename for visibility tracking
         val mod_name = nil
@@ -486,7 +489,7 @@ impl HirLowering:
             val found = self.symbols.lookup(name)
             if val found_symbol = found:
                 sym = found_symbol
-            return HirExpr(kind: HirExprKind.Var(sym), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+            return HirExpr(kind: HirExprKind.NamedVar(sym, name), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_BINARY:
             return HirExpr(kind: HirExprKind.Binary(self.bootstrap_hir_bin_op(expr_get_int(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_right(expr_idx))), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_CALL:

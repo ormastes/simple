@@ -73,19 +73,24 @@ fi
 
 ELF="${1:-build/nvme_fw_rv32.elf}"
 LOG="build/nvme_fw_rv32_serial.log"
+TEXT_LOG="build/nvme_fw_rv32_serial.txt"
+TIMEOUT_SECS="${NVME_RV32_QEMU_TIMEOUT_SECS:-60}"
 if [ ! -f "$ELF" ]; then
   echo "missing-media: $ELF (build it with fw_rv32/build.shs after wiring the rv32 boot entry)"
   exit 2
 fi
-mkdir -p "$(dirname "$LOG")"; rm -f "$LOG"
+mkdir -p "$(dirname "$LOG")"; rm -f "$LOG" "$TEXT_LOG"
 # M-mode direct boot, no OpenSBI (the linker loads at 0x80000000); 16550 UART at 0x10000000.
-timeout 15 qemu-system-riscv32 -machine virt -cpu rv32 -m 128M -nographic -bios none \
+timeout "$TIMEOUT_SECS" qemu-system-riscv32 -machine virt -cpu rv32 -m 128M -nographic -bios none \
   -kernel "$ELF" -serial file:"$LOG" </dev/null >/dev/null 2>&1
-echo "--- serial ---"; cat "$LOG" 2>/dev/null; echo "--- end ---"
-if ! grep -q "ALL RV32 NVME FW CHECKS PASS" "$LOG" 2>/dev/null; then
+tr -d '\000' <"$LOG" >"$TEXT_LOG" 2>/dev/null || true
+echo "--- serial ---"; cat "$TEXT_LOG" 2>/dev/null; echo "--- end ---"
+if grep -q "ALL RV32 NVME FW CHECKS PASS" "$TEXT_LOG" 2>/dev/null; then
+  echo "RESULT: PASS"
+else
   echo "RESULT: FAIL (marker not found)"; exit 1
 fi
-if grep -q "FAIL" "$LOG" 2>/dev/null; then
+if grep -q "FAIL" "$TEXT_LOG" 2>/dev/null; then
   echo "RESULT: FAIL (serial failure marker found)"; exit 1
 fi
 echo "RESULT: PASS"

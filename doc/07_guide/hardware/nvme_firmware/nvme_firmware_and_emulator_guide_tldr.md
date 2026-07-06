@@ -28,6 +28,13 @@ ELF is stale; boot NOT observed). See
 P9 artifact: `fw_rv32/entry.spl` — a scalar/array-free re-expression of the RAIN reconstruct
 (check-clean + host-verified, but build-environmentally-blocked on rv32 per the bug above).
 
+Base-spec system evidence is now split from the boot blocker:
+`test/03_system/app/nvme_firmware/nvme_base_spec_commands_spec.spl` runs the
+host controller lifecycle plus `fw_rv32/base_spec_check.spl` for Identify,
+queue lifecycle, Read, Write Zeroes, DSM Trim, Flush, Features, namespace guards,
+logs, Format NVM, firmware command guards, and Abort/backpressure markers. The
+rv32 ELF/QEMU proof still depends on the open native-build blocker.
+
 <!-- sdn-diagram:id=nvme_fw_emu_tldr -->
 ```
   fw/   host SQ/CQ ─► [nvme_admin+qset+controller] ─► HIL ─► FTL ─► FIL ─► ONFI NAND device

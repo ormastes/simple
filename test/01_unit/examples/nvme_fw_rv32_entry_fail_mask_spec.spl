@@ -23,7 +23,9 @@ describe "NVMe rv32 entry fail mask":
     it "keeps the build wrapper on the direct native-build path":
         val source = rt_file_read_text("examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs") ?? ""
 
-        expect(source).to_contain("$SIMPLE_BIN\" native-build --backend llvm")
+        expect(source).to_contain("BUILD_CMD=\"$SIMPLE_BIN native-build\"")
+        expect(source).to_contain("BUILD_CMD=\"$SIMPLE_BIN run src/app/cli/native_build_main.spl --\"")
+        expect(source).to_contain("$BUILD_CMD --backend llvm")
         expect(source).to_contain("SIMPLE_COMPILER_PHASE_PROFILE=1")
         expect(source).to_contain("timeout -k 10s")
         expect(source).to_contain("use logic.")
@@ -44,6 +46,18 @@ describe "NVMe rv32 entry fail mask":
         expect(source).to_contain("SIMPLE_COMPILER_PHASE_PROFILE")
         expect(source).to_contain("SIMPLE_COMPILER_TRACE")
 
+    it "routes rv32 firmware objects through the freestanding rv32 linker":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+
+        expect(source).to_contain("is_simpleos_riscv32_link")
+        expect(source).to_contain("link_simpleos_riscv32")
+        expect(source).to_contain("\"-m\", \"elf32lriscv\"")
+        expect(source).to_contain("\"-march=rv32imafdc\"")
+        expect(source).to_contain("\"-mabi=ilp32d\"")
+        expect(source).to_contain("__simple_riscv32_entry")
+        expect(source).to_contain("call boot_main")
+        expect(source).to_not_contain("nvme_fw_rv32_seed.elf is incompatible with elf64-x86-64")
+
     it "keeps native-build declaration arenas off process-env mirrors":
         val cli_source = rt_file_read_text("src/app/io/_CliCompile/compile_targets.spl") ?? ""
         val decl_source = rt_file_read_text("src/compiler/10.frontend/core/_Ast/decl_nodes.spl") ?? ""
@@ -59,3 +73,33 @@ describe "NVMe rv32 entry fail mask":
         expect(source).to_contain("val entry_module_for_hir = self.ctx.modules[name]")
         expect(source).to_contain("lowering.lower_parser_module_unstub(entry_module_for_hir)")
         expect(source).to_contain("val reparsed_entry_module = parse_full_frontend")
+
+    it "allows bootstrap flat bridge to lower native entry closures":
+        val source = rt_file_read_text("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl") ?? ""
+
+        expect(source).to_contain("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        expect(source).to_contain("return true")
+        expect(source).to_contain("SIMPLE_NATIVE_BUILD_ENTRY")
+
+    it "prefers current parser arena tags over stale bootstrap env mirrors":
+        val source = rt_file_read_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl") ?? ""
+
+        val arena_pos = source.find("val tag = decl_get_tag(idx)")
+        val env_pos = source.find("val direct = flat_module_env_get(\"SIMPLE_BOOTSTRAP_DECL_TAG_\"")
+        expect(arena_pos).to_be_greater_than(-1)
+        expect(env_pos).to_be_greater_than(-1)
+        expect(arena_pos).to_be_less_than(env_pos)
+
+    it "uses real HIR symbols and parameters for native entry-closure firmware modules":
+        val module_source = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+        val decl_source = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl") ?? ""
+
+        expect(module_source).to_contain("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        expect(module_source).to_contain("val bootstrap_main_only = bootstrap_mode and not native_entry_closure_hir")
+        expect(module_source).to_contain("if not bootstrap_main_only:")
+        expect(module_source).to_contain("if bootstrap_main_only:")
+        expect(decl_source).to_contain("val native_entry_closure_hir")
+        expect(decl_source).to_contain("and not native_entry_closure_hir")
+        expect(decl_source).to_contain("or native_entry_closure_hir")
+        expect(decl_source).to_contain("if found_symbol != nil:")
+        expect(decl_source).to_not_contain("if val found_symbol = fn_symbol_lookup")
