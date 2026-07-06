@@ -36,6 +36,18 @@ struct WmLoopState:
     dirty: bool
     running: bool
 
+struct ChildFrame:
+    ok: bool
+    pixels: [u32]
+    w: i32
+    h: i32
+    reason: text
+
+struct ChildLocalHit:
+    ok: bool
+    x: i32
+    y: i32
+
 fn argb(color: u32) -> i64:
     color.to_i64()
 
@@ -149,22 +161,106 @@ fn compose_engine(b: Engine2D, comp: HostCompositor):
     fill_rect_engine(b, 0, 0, 3, H, LOCATOR)
     fill_rect_engine(b, W - 3, 0, 3, H, LOCATOR)
 
-fn load_child_frame(frame_path: text) -> (bool, [u32], i32, i32, text):
+fn fill_rect_pixels(pixels: [u32], x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
+    var out = pixels
+    var yy = 0
+    while yy < h:
+        val dy = y + yy
+        if dy >= 0 and dy < H:
+            var xx = 0
+            while xx < w:
+                val dx = x + xx
+                if dx >= 0 and dx < W:
+                    out[dy * W + dx] = color
+                xx = xx + 1
+        yy = yy + 1
+    out
+
+fn draw_taskbar_pixels(pixels: [u32], comp: HostCompositor) -> [u32]:
+    var out = pixels
+    val theme = wm_chrome_theme()
+    val count = comp.windows.len().to_i32()
+    if count <= 0:
+        return out
+    val dock_w = host_taskbar_dock_width(W, count)
+    val dock_x = (W - dock_w) / 2
+    val dock_y = H - 62
+    out = fill_rect_pixels(out, dock_x, dock_y, dock_w, 44, theme.taskbar)
+    val item_w = host_taskbar_item_width(W, count)
+    var i = 0
+    while i < count:
+        val win = comp.windows[i]
+        val ix = host_taskbar_item_x(W, count, i)
+        var color = theme.title_unfocused
+        if win.focused and not win.minimized:
+            color = theme.accent
+        elif win.minimized:
+            color = theme.host_window_body
+        out = fill_rect_pixels(out, ix + 2, dock_y + 6, item_w - 4, 32, theme.command_lane)
+        out = fill_rect_pixels(out, ix + 4, dock_y + 8, item_w - 8, 28, color)
+        out = fill_rect_pixels(out, ix + 12, dock_y + 14, 12, 12, theme.text_primary)
+        if win.focused and not win.minimized:
+            out = fill_rect_pixels(out, ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
+        i = i + 1
+    out
+
+fn compose_pixels(comp: HostCompositor, trace_path: text) -> [u32]:
+    write_wm_trace(trace_path, "compose_theme_start")
+    val theme = wm_chrome_theme()
+    write_wm_trace(trace_path, "compose_alloc_start")
+    val pixel_count = W * H
+    var out: [u32] = [0u32 for fill_idx in 0..pixel_count]
+    write_wm_trace(trace_path, "compose_bg_start")
+    out = fill_rect_pixels(out, 0, 0, W, H, theme.compositor_bg)
+    write_wm_trace(trace_path, "compose_windows_start")
+    out = fill_rect_pixels(out, 0, 0, W, 38, theme.command_lane)
+    var i = 0
+    while i < comp.windows.len():
+        val win = comp.windows[i]
+        if not win.minimized:
+            out = fill_rect_pixels(out, win.x + 7, win.y + 7, win.w, win.h, theme.window_shadow)
+            out = fill_rect_pixels(out, win.x, win.y, win.w, win.h, theme.host_window_body)
+            val title_color = if win.focused: theme.accent else: theme.title_unfocused
+            out = fill_rect_pixels(out, win.x, win.y, win.w, 24, title_color)
+            out = fill_rect_pixels(out, win.x + win.w - 24, win.y, 24, 24, theme.close_button)
+            out = fill_rect_pixels(out, win.x + win.w - 17, win.y + 7, 10, 10, theme.text_primary)
+            out = fill_rect_pixels(out, win.x + 4, win.y + 28, win.w - 8, win.h - 32, theme.compositor_bg)
+        i = i + 1
+    write_wm_trace(trace_path, "compose_taskbar_start")
+    out = draw_taskbar_pixels(out, comp)
+    write_wm_trace(trace_path, "compose_locator_start")
+    out = fill_rect_pixels(out, 0, 0, W, 3, LOCATOR)
+    out = fill_rect_pixels(out, 0, H - 3, W, 3, LOCATOR)
+    out = fill_rect_pixels(out, 0, 0, 3, H, LOCATOR)
+    out = fill_rect_pixels(out, W - 3, 0, 3, H, LOCATOR)
+    out
+
+fn load_child_frame(frame_path: text) -> ChildFrame:
     if frame_path == "" or not file_exists(frame_path):
-        return (false, [], 0, 0, "missing")
+        return ChildFrame(ok: false, pixels: [], w: 0, h: 0, reason: "missing")
+    var ok = false
+    var pixels: [u32] = []
+    var frame_w = 0
+    var frame_h = 0
+    var reason = ""
     val bytes_opt = file_read_bytes(frame_path)
     match bytes_opt:
         Some(bytes):
             if bytes.len() == 0:
-                return (false, [], 0, 0, "empty")
-            val decoded = decode_ppm_to_argb(bytes)
-            match decoded:
-                Ok(img):
-                    return (true, img.pixels, img.width, img.height, "")
-                Err(msg):
-                    return (false, [], 0, 0, msg)
+                reason = "empty"
+            else:
+                val decoded = decode_ppm_to_argb(bytes)
+                match decoded:
+                    Ok(img):
+                        ok = true
+                        pixels = img.pixels
+                        frame_w = img.width
+                        frame_h = img.height
+                    Err(msg):
+                        reason = msg
         nil:
-            return (false, [], 0, 0, "read_failed")
+            reason = "read_failed"
+    ChildFrame(ok: ok, pixels: pixels, w: frame_w, h: frame_h, reason: reason)
 
 fn blit_child_frame_pixels(base_pixels: [u32], comp: HostCompositor, child_pixels: [u32], child_w: i32, child_h: i32) -> [u32]:
     var out = base_pixels
@@ -198,30 +294,32 @@ fn pack_pixels(pixels: [u32]) -> [i64]:
         i = i + 1
     packed
 
-fn render_and_present(engine: Engine2D, win: WinitWindow, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_path: text, state: text, trace_path: text) -> bool:
+fn render_and_present(win: WinitWindow, comp: HostCompositor, frame_w: i32, frame_h: i32, frame_path: text, state: text, trace_path: text) -> bool:
     write_wm_trace(trace_path, "render_compose_start")
-    compose_engine(engine, comp)
-    engine.present()
-    write_wm_trace(trace_path, "render_readback_start")
-    val base_pixels = engine.read_pixels()
+    val base_pixels = compose_pixels(comp, trace_path)
+    write_wm_trace(trace_path, "render_compose_done")
     if base_pixels.len() < W * H:
-        print "[wm-showcase] present state={state} FAIL readback_short={base_pixels.len()} want={W * H}"
+        print "[wm-showcase] present state={state} FAIL compose_short={base_pixels.len()} want={W * H}"
         return false
+    write_wm_trace(trace_path, "render_child_load_start")
     val child = load_child_frame(frame_path)
+    write_wm_trace(trace_path, "render_child_load_done")
     var present_pixels = base_pixels
-    if child.0:
-        present_pixels = blit_child_frame_pixels(base_pixels, comp, child.1, child.2, child.3)
+    if child.ok:
+        present_pixels = blit_child_frame_pixels(base_pixels, comp, child.pixels, child.w, child.h)
     else:
-        print "[wm-showcase] child_frame_decode_timeout reason={child.4}"
+        print "[wm-showcase] child_frame_decode_timeout reason={child.reason}"
+    write_wm_trace(trace_path, "render_pack_start")
     val packed = pack_pixels(present_pixels)
+    write_wm_trace(trace_path, "render_pack_done")
     write_wm_trace(trace_path, "render_winit_present_start")
     winit_present_rgba(win, W.to_i64(), H.to_i64(), packed)
     write_wm_trace(trace_path, "render_winit_present_done")
     if state != "hold":
-        print "[wm-showcase] present state={state} dims={W}x{H} child_frame=from-filesystem renderer=engine2d-facade backend={engine.backend_name()} requested_child={frame_w}x{frame_h}"
+        print "[wm-showcase] present state={state} dims={W}x{H} child_frame=from-filesystem renderer=wm-pixel-compositor requested_child={frame_w}x{frame_h}"
     true
 
-fn child_local_at(comp: HostCompositor, fx: i32, fy: i32, frame_w: i32, frame_h: i32, require_inside: bool) -> (bool, i32, i32):
+fn child_local_at(comp: HostCompositor, fx: i32, fy: i32, frame_w: i32, frame_h: i32, require_inside: bool) -> ChildLocalHit:
     var i = comp.windows.len() - 1
     while i >= 0:
         val win = comp.windows[i]
@@ -230,9 +328,9 @@ fn child_local_at(comp: HostCompositor, fx: i32, fy: i32, frame_w: i32, frame_h:
             val ly = fy - (win.y + 28)
             val inside = lx >= 0 and ly >= 0 and lx < frame_w and ly < frame_h
             if inside or not require_inside:
-                return (true, lx, ly)
+                return ChildLocalHit(ok: true, x: lx, y: ly)
         i = i - 1
-    (false, 0, 0)
+    ChildLocalHit(ok: false, x: 0, y: 0)
 
 fn write_child_pointer_event(event_path: text, seq: i64, kind: text, x: i32, y: i32, button: i64, pressed: bool) -> i64:
     if event_path == "":
@@ -272,9 +370,9 @@ fn apply_wm_input(state: WmLoopState, input: WinitInput, event_path: text, frame
         dirty = was_dragging or out.dragging or out.resizing
         if child_down and child_drag_forwarding:
             val loc = child_local_at(out, mx, my, frame_w, frame_h, false)
-            if loc.0:
+            if loc.ok:
                 val before_move_seq = child_seq
-                child_seq = write_child_pointer_event(event_path, child_seq, "move", loc.1, loc.2, 0, true)
+                child_seq = write_child_pointer_event(event_path, child_seq, "move", loc.x, loc.y, 0, true)
                 if child_seq > before_move_seq:
                     child_refresh_pending = true
                     child_refresh_deadline = 0
@@ -293,20 +391,20 @@ fn apply_wm_input(state: WmLoopState, input: WinitInput, event_path: text, frame
                 my = fy
             if pressed:
                 val loc_down = child_local_at(out, fx, fy, frame_w, frame_h, true)
-                if loc_down.0:
-                    child_drag_forwarding = child_needs_press_stream(loc_down.1, loc_down.2)
+                if loc_down.ok:
+                    child_drag_forwarding = child_needs_press_stream(loc_down.x, loc_down.y)
                     if child_drag_forwarding:
                         val before_down_seq = child_seq
-                        child_seq = write_child_pointer_event(event_path, child_seq, "down", loc_down.1, loc_down.2, btn, true)
+                        child_seq = write_child_pointer_event(event_path, child_seq, "down", loc_down.x, loc_down.y, btn, true)
                         if child_seq > before_down_seq:
                             child_refresh_pending = true
                             child_refresh_deadline = 0
                     child_down = true
             elif not pressed:
                 val loc_up = child_local_at(out, fx, fy, frame_w, frame_h, false)
-                if loc_up.0:
+                if loc_up.ok:
                     val before_up_seq = child_seq
-                    child_seq = write_child_pointer_event(event_path, child_seq, "up", loc_up.1, loc_up.2, btn, false)
+                    child_seq = write_child_pointer_event(event_path, child_seq, "up", loc_up.x, loc_up.y, btn, false)
                     if child_seq > before_up_seq:
                         child_refresh_pending = true
                         child_refresh_deadline = 0
@@ -350,10 +448,9 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
         showcase_source_path
     ])
 
-fn cleanup(child_pid: i64, engine: Engine2D, win: WinitWindow, lp: WinitLoop):
+fn cleanup(child_pid: i64, win: WinitWindow, lp: WinitLoop):
     if child_pid > 0:
         process_kill(child_pid)
-    engine.shutdown()
     winit_window_free(win)
     winit_loop_free(lp)
 
@@ -413,19 +510,18 @@ fn main() -> i64:
         process_kill(child_pid)
         return 1
     write_wm_trace(trace_path, "after_window_new")
-    var engine = Engine2D.create_with_backend(W, H, "software")
-    write_wm_trace(trace_path, "after_engine2d_create:{engine.backend_name()}")
+    write_wm_trace(trace_path, "after_pixel_compositor_create")
 
     val backend = HeadlessHostCompositorBackend.new(W, H)
     var comp = HostCompositor.new(backend, Size.wh(W, H))
     comp.apply_bridge_request(1, 701, COMP_CREATE_WINDOW.to_i64(), 0, req.title, 54, 70, req.window_w, req.window_h, req.content, req.pid, req.app_id)
     print "[wm-showcase] launched source={req.source_path} child_pid={child_pid} bridge_pid={req.pid} app_id={req.app_id} windows={comp.windows.len()} taskbar_items={comp.windows.len()}"
     if comp.windows.len() != 1:
-        cleanup(child_pid, engine, win, lp)
+        cleanup(child_pid, win, lp)
         return 1
     write_wm_trace(trace_path, "before_first_present")
-    if not render_and_present(engine, win, comp, frame_w, frame_h, frame_path, "launched", trace_path):
-        cleanup(child_pid, engine, win, lp)
+    if not render_and_present(win, comp, frame_w, frame_h, frame_path, "launched", trace_path):
+        cleanup(child_pid, win, lp)
         return 1
     write_wm_trace(trace_path, "loop_start")
 
@@ -464,12 +560,12 @@ fn main() -> i64:
             write_wm_trace(trace_path, "frame_refresh:{last_frame_seq}")
             print "[wm-showcase] child_frame_refresh seq={last_frame_seq} size={frame_w}x{frame_h}"
         if state.dirty:
-            if not render_and_present(engine, win, state.comp, frame_w, frame_h, frame_path, "hold", trace_path):
-                cleanup(child_pid, engine, win, lp)
+            if not render_and_present(win, state.comp, frame_w, frame_h, frame_path, "hold", trace_path):
+                cleanup(child_pid, win, lp)
                 return 1
             state.dirty = false
             sleep_ms(16)
         frames = frames + 1
 
-    cleanup(child_pid, engine, win, lp)
+    cleanup(child_pid, win, lp)
     return 0
