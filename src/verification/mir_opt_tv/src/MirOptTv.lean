@@ -488,10 +488,302 @@ theorem ov_good_matches_src :
 #eval (eval ovSrc (fun _ => 0) 2)        -- 0x0000000000000000#64
 #eval (eval ovBadTgt (fun _ => 0) 2)     -- 0xffffffffffffffff#64
 
-/-! ## 9. Disclosed axiom footprint -/
+/-! ## 9. Structured control flow (the DO-333 scope extension)
+
+    The sections above prove TV soundness for STRAIGHT-LINE fragments only. The
+    biggest named scope gap is control flow. We now lift the whole development to
+    a STRUCTURED-control-flow representation `Program`:
+
+      * `block b`   — a straight-line basic block (`b : Mir`),
+      * `seq p q`   — sequential composition,
+      * `ite c t e` — branch on register `c` (nonzero = take `t`, zero = take `e`).
+
+    We keep it STRUCTURED (no arbitrary goto/CFG) for tractability. `While` is
+    deliberately OUT OF SCOPE for this pass (see honest_scope) — the branch-aware
+    optimization we target (dead-branch elimination) needs only `ite`. Every
+    straight-line theorem above (`validate_sound`, `opt_sound`, the overflow and
+    adversarial lemmas) is untouched and still holds; this section is purely
+    additive. -/
+
+/-- Structured control-flow program over the straight-line MIR blocks. -/
+inductive Program where
+  /-- A straight-line basic block. -/
+  | block : Mir → Program
+  /-- Sequential composition: run `p`, then `q`. -/
+  | seq   : Program → Program → Program
+  /-- Branch on register `c`: nonzero → `t`, zero → `e`. -/
+  | ite   : Reg → Program → Program → Program
+  deriving DecidableEq
+
+/-- Control-flow semantics: a total state transformer over the SAME `BitVec 64`
+    wrapping value model. `ite` branches on whether register `c` is nonzero. It is
+    total without any fuel because `Program` has no loops. -/
+def evalP : Program → Env → Env
+  | .block b, env => b.foldl evalInstr env
+  | .seq p q, env => evalP q (evalP p env)
+  | .ite c t e, env => if env c ≠ 0 then evalP t env else evalP e env
+
+/-! ## 10. Abstract transfer over control flow
+
+    To validate across control flow we thread the known-constant environment
+    (`AbsEnv`) through the structure. After a branch we conservatively KNOW
+    NOTHING (`absTop`): this is a sound over-approximation (it only makes the
+    validator accept fewer rewrites, never more), and it keeps the join trivial. -/
+
+/-- Fold the abstract transfer function across a straight-line block. -/
+def absStepP (σ : AbsEnv) : Program → AbsEnv
+  | .block b => b.foldl absStep σ
+  | .seq p q => absStepP (absStepP σ p) q
+  | .ite _ _ _ => absTop
+
+/-- Soundness of the block-level abstract fold (iterated `absStep_sound`). -/
+theorem absFold_sound : ∀ (b : Mir) (σ : AbsEnv) (env : Env),
+    absSound σ env → absSound (b.foldl absStep σ) (b.foldl evalInstr env) := by
+  intro b
+  induction b with
+  | nil => intro σ env h; simpa using h
+  | cons i is ih =>
+    intro σ env h
+    simp only [List.foldl_cons]
+    exact ih (absStep σ i) (evalInstr env i) (absStep_sound σ env i h)
+
+/-- The program-level abstract transfer preserves soundness across `evalP`. -/
+theorem absStepP_sound : ∀ (p : Program) (σ : AbsEnv) (env : Env),
+    absSound σ env → absSound (absStepP σ p) (evalP p env) := by
+  intro p
+  induction p with
+  | block b => intro σ env h; simp only [absStepP, evalP]; exact absFold_sound b σ env h
+  | seq p q ihp ihq =>
+    intro σ env h
+    simp only [absStepP, evalP]
+    exact ihq (absStepP σ p) (evalP p env) (ihp σ env h)
+  | ite c t e _ _ =>
+    intro σ env h
+    simp only [absStepP]
+    exact absTop_sound _
+
+/-! ## 11. The control-flow validator
+
+    `validateP σ src tgt` decides whether rewriting `src` into `tgt` is justified
+    under the known constants `σ`:
+
+      * `block`/`block`     — reuse the straight-line `validateAux`,
+      * `seq`/`seq`         — validate componentwise, threading `absStepP`,
+      * `ite …` with a KNOWN-CONSTANT condition — **dead-branch elimination**:
+        `tgt` may validate against the TAKEN branch alone (the other arm is dead),
+      * `ite`/`ite` with an unknown condition — validate the two arms structurally
+        (no cross-branch rewrite; same condition register required).
+
+    Crucially, dropping a branch is accepted ONLY when `σ` proves the condition
+    folds to a literal — this is what makes the adversarial "drop a non-constant
+    branch" rewrite REJECTED below. -/
+def validateP (σ : AbsEnv) : Program → Program → Bool
+  | .block b1, tgt =>
+      match tgt with
+      | .block b2 => validateAux σ b1 b2
+      | _ => false
+  | .seq p1 q1, tgt =>
+      match tgt with
+      | .seq p2 q2 => validateP σ p1 p2 && validateP (absStepP σ p1) q1 q2
+      | _ => false
+  | .ite c t e, tgt =>
+      match σ c with
+      | some v => if v ≠ 0 then validateP σ t tgt else validateP σ e tgt
+      | none =>
+          match tgt with
+          | .ite c' t' e' => decide (c = c') && validateP σ t t' && validateP σ e e'
+          | _ => false
+
+/-- The control-flow translation validator: validate from the empty abstract env. -/
+def validateProg (src tgt : Program) : Bool := validateP absTop src tgt
+
+/-! ## 12. Control-flow soundness -/
+
+/-- Core soundness over `Program`: an accepted rewrite preserves `evalP`. -/
+theorem validateP_sound : ∀ (src : Program) (σ : AbsEnv) (tgt : Program) (env : Env),
+    absSound σ env → validateP σ src tgt = true → evalP src env = evalP tgt env := by
+  intro src
+  induction src with
+  | block b1 =>
+    intro σ tgt env hσ h
+    cases tgt with
+    | block b2 =>
+      simp only [evalP]
+      exact validateAux_sound σ b1 b2 env hσ (by simpa only [validateP] using h)
+    | seq _ _ => simp [validateP] at h
+    | ite _ _ _ => simp [validateP] at h
+  | seq p1 q1 ihp ihq =>
+    intro σ tgt env hσ h
+    cases tgt with
+    | block _ => simp [validateP] at h
+    | ite _ _ _ => simp [validateP] at h
+    | seq p2 q2 =>
+      simp only [validateP, Bool.and_eq_true] at h
+      obtain ⟨h1, h2⟩ := h
+      simp only [evalP]
+      have e1 : evalP p1 env = evalP p2 env := ihp σ p2 env hσ h1
+      have hσ' : absSound (absStepP σ p1) (evalP p1 env) := absStepP_sound p1 σ env hσ
+      have e2 : evalP q1 (evalP p1 env) = evalP q2 (evalP p1 env) :=
+        ihq (absStepP σ p1) q2 (evalP p1 env) hσ' h2
+      rw [e2, e1]
+  | ite c t e iht ihe =>
+    intro σ tgt env hσ h
+    cases hc : σ c with
+    | some v =>
+      simp only [validateP, hc] at h
+      have hev : env c = v := hσ c v hc
+      by_cases hv : v = 0
+      · rw [if_neg (fun hne => hne hv)] at h
+        simp only [evalP, hev]
+        rw [if_neg (fun hne => hne hv)]
+        exact ihe σ tgt env hσ h
+      · rw [if_pos hv] at h
+        simp only [evalP, hev]
+        rw [if_pos hv]
+        exact iht σ tgt env hσ h
+    | none =>
+      simp only [validateP, hc] at h
+      cases tgt with
+      | block _ => simp at h
+      | seq _ _ => simp at h
+      | ite c' t' e' =>
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at h
+        obtain ⟨⟨hcc, ht⟩, he⟩ := h
+        subst hcc
+        simp only [evalP]
+        have et : evalP t env = evalP t' env := iht σ t' env hσ ht
+        have ee : evalP e env = evalP e' env := ihe σ e' env hσ he
+        rw [et, ee]
+
+/-- **Main control-flow TV soundness theorem.** Any control-flow rewrite the
+    validator accepts preserves the whole-program semantics on every input. -/
+theorem validateProg_sound (src tgt : Program) (h : validateProg src tgt = true) :
+    ∀ env, evalP src env = evalP tgt env := by
+  intro env
+  exact validateP_sound src absTop tgt env (absTop_sound env) h
+
+/-! ## 13. Dead-branch elimination, and its non-vacuity
+
+    The branch-aware optimization: when `σ` proves the `ite` condition folds to a
+    literal, REPLACE the whole `ite` with the taken branch (the other arm is
+    provably dead), recursing into the taken branch. Otherwise recurse into both
+    arms. Straight-line blocks are optimized by the existing `optAux`. -/
+def optP (σ : AbsEnv) : Program → Program
+  | .block b => .block (optAux σ b)
+  | .seq p q => .seq (optP σ p) (optP (absStepP σ p) q)
+  | .ite c t e =>
+      match σ c with
+      | some v => if v ≠ 0 then optP σ t else optP σ e
+      | none   => .ite c (optP σ t) (optP σ e)
+
+/-- Whole-program optimization from the empty abstract environment. -/
+def optProg (p : Program) : Program := optP absTop p
+
+/-- The control-flow validator accepts everything the optimizer produces. -/
+theorem validateP_optP : ∀ (p : Program) (σ : AbsEnv),
+    validateP σ p (optP σ p) = true := by
+  intro p
+  induction p with
+  | block b => intro σ; simp only [optP, validateP]; exact validateAux_optAux σ b
+  | seq p q ihp ihq =>
+    intro σ
+    simp only [optP, validateP, Bool.and_eq_true]
+    exact ⟨ihp σ, ihq (absStepP σ p)⟩
+  | ite c t e iht ihe =>
+    intro σ
+    cases hc : σ c with
+    | some v =>
+      by_cases hv : v = 0
+      · have e1 : optP σ (Program.ite c t e) = optP σ e := by
+          simp only [optP, hc]; exact if_neg (fun hne => hne hv)
+        have e2 : validateP σ (Program.ite c t e) (optP σ e)
+                    = validateP σ e (optP σ e) := by
+          simp only [validateP, hc]; exact if_neg (fun hne => hne hv)
+        rw [e1, e2]; exact ihe σ
+      · have e1 : optP σ (Program.ite c t e) = optP σ t := by
+          simp only [optP, hc]; exact if_pos hv
+        have e2 : validateP σ (Program.ite c t e) (optP σ t)
+                    = validateP σ t (optP σ t) := by
+          simp only [validateP, hc]; exact if_pos hv
+        rw [e1, e2]; exact iht σ
+    | none =>
+      have e1 : optP σ (Program.ite c t e)
+                  = Program.ite c (optP σ t) (optP σ e) := by
+        simp only [optP, hc]
+      rw [e1]
+      simp only [validateP, hc, Bool.and_eq_true, decide_eq_true_eq]
+      exact ⟨⟨trivial, iht σ⟩, ihe σ⟩
+
+/-- **Non-vacuity.** The optimizer's output always passes the control-flow
+    validator, so `validateProg_sound` is not vacuous. -/
+theorem optProg_validates (p : Program) : validateProg p (optProg p) = true :=
+  validateP_optP p absTop
+
+/-- **Corollary: dead-branch elimination is semantics-preserving.** -/
+theorem optProg_sound (p : Program) : ∀ env, evalP p env = evalP (optProg p) env :=
+  validateProg_sound p (optProg p) (optProg_validates p)
+
+/-! ## 14. Adversarial control-flow counter-examples
+
+    Two deliberately UNSOUND branch rewrites, each proved REJECTED by the
+    validator AND semantics-changing on a concrete input — demonstrating the
+    validator is discriminating, not accept-everything. -/
+
+/-- (a) DROP A NON-CONSTANT BRANCH. Source branches on register 0, whose value is
+    an unknown INPUT (never assigned a constant), so neither arm is dead. The bad
+    target keeps only the then-arm (`r1 := 7`), dropping the else-arm. -/
+def dropSrc : Program :=
+  .ite 0 (.block [Instr.const 1 7]) (.block [Instr.const 1 9])
+
+def dropBadTgt : Program := .block [Instr.const 1 7]
+
+/-- The validator rejects dropping a branch whose condition is not constant. -/
+theorem drop_rejected : validateProg dropSrc dropBadTgt = false := by decide
+
+/-- …and rejection is warranted: on input `r0 = 0` the source takes the ELSE arm
+    (`r1 = 9`) but the bad target unconditionally gives `r1 = 7`. -/
+theorem drop_semantics_differ :
+    evalP dropSrc (fun _ => 0) 1 ≠ evalP dropBadTgt (fun _ => 0) 1 := by decide
+
+/-- (b) ELIMINATE THE WRONG ARM. Here the condition (r5) IS a known constant `1`
+    (set by the preceding block), so the condition is TRUE and the correct
+    dead-branch fold keeps the THEN arm (`r1 := 7`). The bad target keeps the ELSE
+    arm (`r1 := 9`) instead. -/
+def wrongArmSrc : Program :=
+  .seq (.block [Instr.const 5 1])
+       (.ite 5 (.block [Instr.const 1 7]) (.block [Instr.const 1 9]))
+
+def wrongArmBadTgt : Program :=
+  .seq (.block [Instr.const 5 1]) (.block [Instr.const 1 9])
+
+/-- The validator rejects taking the wrong (untaken) arm. -/
+theorem wrong_arm_rejected : validateProg wrongArmSrc wrongArmBadTgt = false := by decide
+
+/-- …and it genuinely changes the result: the taken arm gives `r1 = 7`, the bad
+    target `r1 = 9`. -/
+theorem wrong_arm_semantics_differ :
+    evalP wrongArmSrc (fun _ => 0) 1 ≠ evalP wrongArmBadTgt (fun _ => 0) 1 := by decide
+
+/-- Sanity / end-to-end: the CORRECT dead-branch fold of `wrongArmSrc` is exactly
+    what the optimizer produces, it is validator-accepted, and it is a genuine
+    rewrite (the `ite` is gone). -/
+def wrongArmGoodTgt : Program :=
+  .seq (.block [Instr.const 5 1]) (.block [Instr.const 1 7])
+
+theorem wrong_arm_good_accepted : validateProg wrongArmSrc wrongArmGoodTgt = true := by decide
+
+theorem opt_wrongArmSrc : optProg wrongArmSrc = wrongArmGoodTgt := by decide
+
+theorem wrong_arm_good_is_real_rewrite : wrongArmSrc ≠ wrongArmGoodTgt := by decide
+
+/-! ## 15. Disclosed axiom footprint -/
 
 #print axioms validate_sound
 #print axioms wrap_overflow
 #print axioms ov_bad_rejected
+#print axioms validateProg_sound
+#print axioms optProg_sound
+#print axioms drop_rejected
+#print axioms wrong_arm_rejected
 
 end MirOptTv
