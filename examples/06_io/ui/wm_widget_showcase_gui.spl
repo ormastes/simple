@@ -6,7 +6,6 @@
 #   SIMPLE_GUI_RUN_SKIP_NUDGE=1 scripts/gui/macos-gui-run.shs \
 #     examples/06_io/ui/wm_widget_showcase_gui.spl
 
-use std.gpu.engine2d.engine.{Engine2D}
 use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_wait_input}
 use std.io_runtime.{env_get, file_exists, file_read, file_read_bytes, file_write, dir_create_all, getpid, time_now_unix_micros}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
@@ -101,66 +100,6 @@ fn resolve_repo_root() -> text:
         return here
     "."
 
-fn fill_rect_engine(b: Engine2D, x: i32, y: i32, w: i32, h: i32, color: u32):
-    b.draw_rect_filled(x, y, w, h, color)
-
-fn draw_text_engine(b: Engine2D, x: i32, y: i32, text_val: text, fg: u32):
-    b.draw_text(x, y, text_val, fg, 7)
-
-fn draw_taskbar_engine(b: Engine2D, comp: HostCompositor):
-    val theme = wm_chrome_theme()
-    val count = comp.windows.len().to_i32()
-    if count <= 0:
-        return
-    val dock_w = host_taskbar_dock_width(W, count)
-    val dock_x = (W - dock_w) / 2
-    val dock_y = H - 62
-    fill_rect_engine(b, dock_x, dock_y, dock_w, 44, theme.taskbar)
-    val item_w = host_taskbar_item_width(W, count)
-    var i = 0
-    while i < count:
-        val win = comp.windows[i]
-        val ix = host_taskbar_item_x(W, count, i)
-        var color = theme.title_unfocused
-        if win.focused and not win.minimized:
-            color = theme.accent
-        elif win.minimized:
-            color = theme.host_window_body
-        fill_rect_engine(b, ix + 2, dock_y + 6, item_w - 4, 32, theme.command_lane)
-        fill_rect_engine(b, ix + 4, dock_y + 8, item_w - 8, 28, color)
-        fill_rect_engine(b, ix + 12, dock_y + 14, 12, 12, theme.text_primary)
-        draw_text_engine(b, ix + 30, dock_y + 13, win.title, theme.text_primary)
-        if win.focused and not win.minimized:
-            fill_rect_engine(b, ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
-        i = i + 1
-
-fn compose_engine(b: Engine2D, comp: HostCompositor):
-    val theme = wm_chrome_theme()
-    b.clear(theme.compositor_bg)
-    fill_rect_engine(b, 0, 0, W, 38, theme.command_lane)
-    draw_text_engine(b, 14, 12, "Simple WM", theme.text_primary)
-    draw_text_engine(b, 112, 12, "fs child: {WIDGET_SHOWCASE_APP_SOURCE}", MUTED)
-    var i = 0
-    while i < comp.windows.len():
-        val win = comp.windows[i]
-        if not win.minimized:
-            fill_rect_engine(b, win.x + 7, win.y + 7, win.w, win.h, theme.window_shadow)
-            fill_rect_engine(b, win.x, win.y, win.w, win.h, theme.host_window_body)
-            val title_color = if win.focused: theme.accent else: theme.title_unfocused
-            fill_rect_engine(b, win.x, win.y, win.w, 24, title_color)
-            draw_text_engine(b, win.x + 10, win.y + 7, win.title, theme.text_primary)
-            fill_rect_engine(b, win.x + win.w - 24, win.y, 24, 24, theme.close_button)
-            draw_text_engine(b, win.x + win.w - 17, win.y + 5, "X", theme.text_primary)
-            val cx = win.x + 4
-            val cy = win.y + 28
-            draw_text_engine(b, cx + 8, cy + 8, "frame pending", theme.text_primary)
-        i = i + 1
-    draw_taskbar_engine(b, comp)
-    fill_rect_engine(b, 0, 0, W, 3, LOCATOR)
-    fill_rect_engine(b, 0, H - 3, W, 3, LOCATOR)
-    fill_rect_engine(b, 0, 0, 3, H, LOCATOR)
-    fill_rect_engine(b, W - 3, 0, 3, H, LOCATOR)
-
 fn fill_rect_pixels(pixels: [u32], x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
     var out = pixels
     var yy = 0
@@ -243,23 +182,24 @@ fn load_child_frame(frame_path: text) -> ChildFrame:
     var frame_w = 0
     var frame_h = 0
     var reason = ""
-    val bytes_opt = file_read_bytes(frame_path)
-    match bytes_opt:
-        Some(bytes):
-            if bytes.len() == 0:
-                reason = "empty"
-            else:
-                val decoded = decode_ppm_to_argb(bytes)
-                match decoded:
-                    Ok(img):
-                        ok = true
-                        pixels = img.pixels
-                        frame_w = img.width
-                        frame_h = img.height
-                    Err(msg):
-                        reason = msg
-        nil:
-            reason = "read_failed"
+    val bytes = file_read_bytes(frame_path)
+    if bytes.len() == 0:
+        reason = "empty"
+    else:
+        val decoded = decode_ppm_to_argb(bytes)
+        match decoded:
+            Ok(img):
+                if img.pixels.len() > 0 and img.width > 0 and img.height > 0:
+                    ok = true
+                    pixels = img.pixels
+                    frame_w = img.width
+                    frame_h = img.height
+                else:
+                    reason = "decoded-empty"
+            Err(msg):
+                reason = msg
+    if not ok and reason == "":
+        reason = "decode-no-result"
     ChildFrame(ok: ok, pixels: pixels, w: frame_w, h: frame_h, reason: reason)
 
 fn blit_child_frame_pixels(base_pixels: [u32], comp: HostCompositor, child_pixels: [u32], child_w: i32, child_h: i32) -> [u32]:
@@ -426,6 +366,8 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
     else:
         env["SIMPLE_LIB"] = path_join(repo_root, "src")
     env["SHOWCASE_PPM_SCALE"] = "2"
+    env["SIMPLE_TIMEOUT_SECONDS"] = "0"
+    env["SIMPLE_EXECUTION_LIMIT"] = "0"
     val simple_lib = env["SIMPLE_LIB"]
     val showcase_scale = env["SHOWCASE_PPM_SCALE"]
     val simple_bin = path_join(repo_root, "bin/simple")
@@ -442,6 +384,8 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
         "{WM_FRAME_SEQ_FILE_ENV}={seq_path}",
         "SIMPLE_WM_CLIENT_HOLD=1",
         "SHOWCASE_PPM_SCALE={showcase_scale}",
+        "SIMPLE_TIMEOUT_SECONDS=0",
+        "SIMPLE_EXECUTION_LIMIT=0",
         "SIMPLE_LIB={simple_lib}",
         simple_bin,
         "run",

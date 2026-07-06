@@ -1,0 +1,77 @@
+# Task #15 remainder item 1 — content scroll wiring.
+#
+# HostCompositor.scroll_offsets was tracked (wheel deltas accumulate per
+# hosted window) but never applied to the actual content paint. This proves
+# render_simple_web_app_content_with_scroll (called from
+# HostCompositor.render_frame via scroll_offset_for(window.id)) translates
+# the content layer by exactly the scroll offset: the pixel row shown at
+# viewport row R when scrolled by K is bit-identical to the pixel row shown
+# at document row (R+K) of the same document rendered unscrolled and tall
+# enough to contain it — i.e. paint-time clip-window translation, not a
+# no-op and not a resample.
+
+use std.spec.*
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.compositor.simple_web_window_renderer.{
+    render_simple_web_app_content_with_scroll, render_simple_web_app_content,
+    simple_web_app_pixel_artifact_with_theme
+}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
+
+val CW = 96
+val CH = 44
+val SCROLL_PX = 22
+
+describe "content-scroll paint-time translation (task #15 remainder item 1)":
+
+    it "shows the same document, shifted by exactly SCROLL_PX rows, when scrolled":
+        val theme = default_theme_id()
+        # Ground truth: the same "Editor" document rendered tall enough
+        # (CH + SCROLL_PX) to contain everything the scrolled viewport
+        # would reveal, unscrolled.
+        val tall = simple_web_app_pixel_artifact_with_theme(theme, "Editor", CW, CH + SCROLL_PX, "state")
+        expect(tall.pixels.len()).to_equal(CW * (CH + SCROLL_PX))
+
+        # Scrolled paint: renders through the real HostCompositor content
+        # path (render_simple_web_app_content_with_scroll), landing in a
+        # backend pixel buffer at (cx, cy).
+        val cx = 3
+        val cy = 5
+        var scrolled_backend = BrowserCompositorBackend.with_color(CW + 20, CH + 20, 0xFF000000u32)
+        render_simple_web_app_content_with_scroll(scrolled_backend, "Editor", cx, cy, CW, CH, "state", SCROLL_PX)
+        val scrolled_pixels = scrolled_backend.get_pixel_buffer()
+        val scrolled_stride = CW + 20
+
+        var row = 0
+        while row < CH:
+            var col = 0
+            while col < CW:
+                val got = scrolled_pixels[(cy + row) * scrolled_stride + (cx + col)]
+                val want = tall.pixels[(row + SCROLL_PX) * CW + col]
+                expect(got).to_equal(want)
+                col = col + 16
+            row = row + 4
+
+    it "differs from the unscrolled paint whenever the shifted-past content differs":
+        var unscrolled_backend = BrowserCompositorBackend.with_color(CW + 20, CH + 20, 0xFF000000u32)
+        render_simple_web_app_content(unscrolled_backend, "Editor", 0, 0, CW, CH, "state")
+        val unscrolled_pixels = unscrolled_backend.get_pixel_buffer()
+
+        var scrolled_backend = BrowserCompositorBackend.with_color(CW + 20, CH + 20, 0xFF000000u32)
+        render_simple_web_app_content_with_scroll(scrolled_backend, "Editor", 0, 0, CW, CH, "state", SCROLL_PX)
+        val scrolled_pixels = scrolled_backend.get_pixel_buffer()
+
+        var any_diff = false
+        var i = 0
+        while i < CH * CW:
+            if unscrolled_pixels[i] != scrolled_pixels[i]:
+                any_diff = true
+            i = i + 1
+        expect(any_diff).to_equal(true)
+
+    it "is a no-op (identical output) when scroll offset is zero":
+        var a = BrowserCompositorBackend.with_color(CW + 20, CH + 20, 0xFF000000u32)
+        render_simple_web_app_content(a, "Editor", 2, 2, CW, CH, "state")
+        var b = BrowserCompositorBackend.with_color(CW + 20, CH + 20, 0xFF000000u32)
+        render_simple_web_app_content_with_scroll(b, "Editor", 2, 2, CW, CH, "state", 0)
+        expect(a.get_pixel_buffer()).to_equal(b.get_pixel_buffer())

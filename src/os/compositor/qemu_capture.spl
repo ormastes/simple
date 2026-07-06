@@ -1,6 +1,7 @@
 
 use os.compositor.electron_capture.{CaptureResult, capture_error}
 use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
+use os.compositor.shared_mdi_framebuffer_scene.{render_shared_mdi_framebuffer_scene}
 use std.common.image.ppm_decode.{decode_ppm_to_argb}
 use std.nogc_sync_mut.qemu.qmp_client.{QmpClient, qmp_connect, qmp_disconnect, qmp_screendump}
 
@@ -93,16 +94,18 @@ fn probe_qemu_vm_screendump(qmp_socket: text, out_path: text) -> QemuScreendumpP
             nonblack = nonblack + 1
         idx = idx + 1
 
-    val s0 = _qemu_probe_sample(pixels, cap.width, cap.height, 100, 40, 26u32, 26u32, 46u32)
-    val s1 = _qemu_probe_sample(pixels, cap.width, cap.height, 200, 750, 56u32, 189u32, 248u32)
-    val s2 = _qemu_probe_sample(pixels, cap.width, cap.height, 10, 750, 52u32, 152u32, 219u32)
-    val s3 = _qemu_probe_sample(pixels, cap.width, cap.height, 130, 90, 79u32, 70u32, 229u32)
-    val s4 = _qemu_probe_sample(pixels, cap.width, cap.height, 470, 130, 22u32, 160u32, 133u32)
-    val s5 = _qemu_probe_sample(pixels, cap.width, cap.height, 150, 132, 226u32, 232u32, 240u32)
-    val s6 = _qemu_probe_sample(pixels, cap.width, cap.height, 300, 132, 245u32, 158u32, 11u32)
-    val s7 = _qemu_probe_sample(pixels, cap.width, cap.height, 150, 180, 37u32, 99u32, 235u32)
-    val s8 = _qemu_probe_sample(pixels, cap.width, cap.height, 500, 180, 100u32, 116u32, 139u32)
-    val s9 = _qemu_probe_sample(pixels, cap.width, cap.height, 860, 750, 34u32, 197u32, 94u32)
+    val expected_scene = render_shared_mdi_framebuffer_scene(cap.width, cap.height, "qemu-framebuffer-cpu-simd")
+    val expected = expected_scene.pixels
+    val s0 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 100, 40)
+    val s1 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 200, 750)
+    val s2 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 10, 750)
+    val s3 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 130, 90)
+    val s4 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 470, 130)
+    val s5 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 150, 132)
+    val s6 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 300, 132)
+    val s7 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 150, 180)
+    val s8 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 500, 180)
+    val s9 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 860, 750)
     val matches = s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8 + s9
     val mismatches = 10 - matches
     val checksum = _qemu_probe_checksum(pixels, cap.width, cap.height)
@@ -115,8 +118,8 @@ fn probe_qemu_vm_screendump(qmp_socket: text, out_path: text) -> QemuScreendumpP
         var x: i32 = 0
         while x < cap.width:
             val offset = (y.to_i64() * cap.width.to_i64() + x.to_i64()).to_i64()
-            val expected = _qemu_expected_scene_rgb(x, y)
-            if (pixels[offset] & 0x00FFFFFFu32) != expected:
+            val expected_rgb = _qemu_expected_shared_scene_rgb(expected, cap.width, cap.height, x, y)
+            if (pixels[offset] & 0x00FFFFFFu32) != expected_rgb:
                 scene_mismatches = scene_mismatches + 1
                 if first_x < 0:
                     first_x = x.to_i64()
@@ -142,13 +145,14 @@ fn probe_qemu_vm_screendump(qmp_socket: text, out_path: text) -> QemuScreendumpP
 fn _qemu_probe_error(error: text) -> QemuScreendumpProbeResult:
     QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, non_black_count: 0, sample_match_count: 0, sample_mismatch_count: 0, sample_checksum: 0, scene_mismatch_count: 0, first_mismatch_x: -1, first_mismatch_y: -1, error: error)
 
-fn _qemu_probe_sample(pixels: [u32], width: i32, height: i32, x: i32, y: i32, r: u32, g: u32, b: u32) -> i64:
+fn _qemu_probe_sample_expected(pixels: [u32], expected: [u32], width: i32, height: i32, x: i32, y: i32) -> i64:
     if x < 0 or y < 0 or x >= width or y >= height:
         return 0
     val offset = (y.to_i64() * width.to_i64() + x.to_i64()).to_i64()
     if offset < 0 or offset >= pixels.len().to_i64():
         return 0
-    if _qemu_rgb(r, g, b) == (pixels[offset] & 0x00FFFFFFu32):
+    val expected_rgb = _qemu_expected_shared_scene_rgb(expected, width, height, x, y)
+    if expected_rgb == (pixels[offset] & 0x00FFFFFFu32):
         return 1
     0
 
@@ -174,47 +178,33 @@ fn _qemu_probe_checksum_sample(seed: i64, pixels: [u32], width: i32, height: i32
             got_sum = (((px >> 16) & 0xFFu32) + ((px >> 8) & 0xFFu32) + (px & 0xFFu32)).to_i64()
     ((seed * 131 + x.to_i64() * 31 + y.to_i64() * 17 + got_sum) % 922337203685477)
 
-fn _qemu_expected_scene_rgb(x: i32, y: i32) -> u32:
-    var c = _qemu_rgb(26u32, 26u32, 46u32)
-    if y < 32:
-        c = _qemu_rgb(36u32, 52u32, 71u32)
-    if y >= 736:
-        c = _qemu_rgb(18u32, 26u32, 36u32)
-    if y >= 736 and x < 96:
-        c = _qemu_rgb(52u32, 152u32, 219u32)
-    if x >= 120 and x < 420 and y >= 80 and y < 300:
-        c = _qemu_rgb(32u32, 38u32, 58u32)
-    if x >= 120 and x < 420 and y >= 80 and y < 108:
-        c = _qemu_rgb(79u32, 70u32, 229u32)
-    if x >= 136 and x < 404 and y >= 122 and y < 148:
-        c = _qemu_rgb(15u32, 23u32, 42u32)
-    if x >= 146 and x < 274 and y >= 130 and y < 140:
-        c = _qemu_rgb(226u32, 232u32, 240u32)
-    if x >= 286 and x < 372 and y >= 126 and y < 144:
-        c = _qemu_rgb(245u32, 158u32, 11u32)
-    if x >= 140 and x < 204 and y >= 170 and y < 224:
-        c = _qemu_rgb(37u32, 99u32, 235u32)
-    if x >= 214 and x < 278 and y >= 170 and y < 224:
-        c = _qemu_rgb(16u32, 185u32, 129u32)
-    if x >= 288 and x < 352 and y >= 170 and y < 224:
-        c = _qemu_rgb(244u32, 63u32, 94u32)
-    if x >= 460 and x < 720 and y >= 120 and y < 300:
-        c = _qemu_rgb(24u32, 36u32, 48u32)
-    if x >= 460 and x < 720 and y >= 120 and y < 144:
-        c = _qemu_rgb(22u32, 160u32, 133u32)
-    if x >= 476 and x < 580 and y >= 160 and y < 242:
-        c = _qemu_rgb(100u32, 116u32, 139u32)
-    if x >= 596 and x < 692 and y >= 162 and y < 174:
-        c = _qemu_rgb(248u32, 250u32, 252u32)
-    if x >= 596 and x < 674 and y >= 184 and y < 194:
-        c = _qemu_rgb(148u32, 163u32, 184u32)
-    if x >= 596 and x < 706 and y >= 206 and y < 216:
-        c = _qemu_rgb(203u32, 213u32, 225u32)
-    if x >= 116 and x < 244 and y >= 744 and y < 760:
-        c = _qemu_rgb(56u32, 189u32, 248u32)
-    if x >= 842 and x < 924 and y >= 744 and y < 760:
-        c = _qemu_rgb(34u32, 197u32, 94u32)
-    c
+fn _qemu_cursor_overlay_hit(x: i32, y: i32, cx: i32, cy: i32) -> bool:
+    if x >= cx and x < cx + 2 and y >= cy and y < cy + 22:
+        return true
+    if x >= cx + 2 and x < cx + 4 and y >= cy + 2 and y < cy + 20:
+        return true
+    if x >= cx + 4 and x < cx + 6 and y >= cy + 4 and y < cy + 18:
+        return true
+    if x >= cx + 6 and x < cx + 8 and y >= cy + 6 and y < cy + 16:
+        return true
+    if x >= cx + 8 and x < cx + 10 and y >= cy + 8 and y < cy + 14:
+        return true
+    if x >= cx + 5 and x < cx + 15 and y >= cy + 16 and y < cy + 18:
+        return true
+    if x >= cx + 8 and x < cx + 16 and y >= cy + 18 and y < cy + 20:
+        return true
+    if x >= cx + 12 and x < cx + 18 and y >= cy + 20 and y < cy + 22:
+        return true
+    false
 
-fn _qemu_rgb(r: u32, g: u32, b: u32) -> u32:
-    ((r & 0xFFu32) << 16) | ((g & 0xFFu32) << 8) | (b & 0xFFu32)
+fn _qemu_expected_shared_scene_rgb(expected: [u32], width: i32, height: i32, x: i32, y: i32) -> u32:
+    if y == 0 and x >= 0 and x < 32:
+        return 0x00FF0000u32
+    if _qemu_cursor_overlay_hit(x, y, 360, 190):
+        return 0x00FFFFFFu32
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return 0u32
+    val offset = (y.to_i64() * width.to_i64() + x.to_i64()).to_i64()
+    if offset < 0 or offset >= expected.len().to_i64():
+        return 0u32
+    expected[offset] & 0x00FFFFFFu32

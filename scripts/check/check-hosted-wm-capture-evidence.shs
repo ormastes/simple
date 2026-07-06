@@ -17,10 +17,36 @@ is_rust_seed_simple() {
         *) return 1 ;;
     esac
 }
+is_host_compatible_simple() {
+    path="$1"
+    [ -x "$path" ] || return 1
+    if ! command -v file >/dev/null 2>&1; then
+        return 0
+    fi
+    description="$(file "$path" 2>/dev/null || true)"
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Darwin)
+            case "$description" in
+                *ELF*|*PE32*) return 1 ;;
+            esac
+            ;;
+        Linux|FreeBSD)
+            case "$description" in
+                *Mach-O*|*PE32*) return 1 ;;
+            esac
+            ;;
+        CYGWIN*|MINGW*|MSYS*|Windows_NT)
+            case "$description" in
+                *ELF*|*Mach-O*) return 1 ;;
+            esac
+            ;;
+    esac
+    return 0
+}
 if [ "${SIMPLE_BIN:-}" = "" ]; then
     SIMPLE_BIN_SOURCE="missing-self-hosted"
     for candidate in "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple" "bin/simple" "./bin/simple"; do
-        if [ -x "$candidate" ]; then
+        if is_host_compatible_simple "$candidate"; then
             SIMPLE_BIN="$candidate"
             SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
             break
@@ -42,6 +68,9 @@ elif is_rust_seed_simple "$SIMPLE_BIN"; then
 elif [ ! -x "$SIMPLE_BIN" ]; then
     SIMPLE_BIN_STATUS=missing
     SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+elif ! is_host_compatible_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=incompatible
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-host-incompatible"
 fi
 export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 TIMEOUT_SECS="${HOSTED_WM_CAPTURE_TIMEOUT_SECS:-45}"

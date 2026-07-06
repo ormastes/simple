@@ -3,7 +3,8 @@
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 use os.compositor.shared_mdi_setup.{shared_mdi_surfaces}
-use os.compositor.simple_web_window_renderer.{render_simple_web_app_content}
+use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
+use os.compositor.wm_action_applier.{wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 
 class SharedMdiFramebufferScene:
     width: i32
@@ -15,6 +16,20 @@ class SharedMdiFramebufferScene:
     fallback_reason: text
     readback_status: text
 
+class SharedMdiRenderWindow:
+    id: i64
+    title: text
+    app_id: text
+    content: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    process_id: i64
+    minimized: bool
+    focused: bool
+    scroll_y: i32
+
 class SharedMdiFramebufferBackend:
     w: i32
     h: i32
@@ -23,7 +38,12 @@ class SharedMdiFramebufferBackend:
 
     static fn create(width: i32, height: i32, fill: u32) -> SharedMdiFramebufferBackend:
         val total = if width > 0 and height > 0: width * height else: 0
-        SharedMdiFramebufferBackend(w: width, h: height, pixels: [fill; total], web_pixel_count: 0)
+        var pixels: [u32] = []
+        var i = 0
+        while i < total:
+            pixels.push(fill)
+            i = i + 1
+        SharedMdiFramebufferBackend(w: width, h: height, pixels: pixels, web_pixel_count: 0)
 
 impl CompositorBackend for SharedMdiFramebufferBackend:
 
@@ -34,19 +54,32 @@ impl CompositorBackend for SharedMdiFramebufferBackend:
         self.h
 
     me clear(color: u32):
+        val total = self.pixels.len()
         var i = 0
-        while i < self.pixels.len():
+        while i < total:
             self.pixels[i] = color
             i = i + 1
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
-        var y0 = y
-        while y0 < y + h:
-            var x0 = x
-            while x0 < x + w:
-                self.put_pixel(x0, y0, color)
-                x0 = x0 + 1
-            y0 = y0 + 1
+        var x0 = if x < 0: 0 else: x
+        var y0 = if y < 0: 0 else: y
+        var x1 = x + w
+        var y1 = y + h
+        if x1 > self.w:
+            x1 = self.w
+        if y1 > self.h:
+            y1 = self.h
+        if x1 <= x0 or y1 <= y0:
+            return
+        var yy = y0
+        while yy < y1:
+            var idx = yy * self.w + x0
+            var xx = x0
+            while xx < x1:
+                self.pixels[idx] = color
+                idx = idx + 1
+                xx = xx + 1
+            yy = yy + 1
 
     me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
         var cx = x
@@ -58,12 +91,15 @@ impl CompositorBackend for SharedMdiFramebufferBackend:
         val glyph = get_glyph_8x16(ch)
         var row: i32 = 0
         while row < 16:
+            val py = y + row
             val bits = glyph[row]
             var col: i32 = 0
             while col < 8:
-                val mask = 0x80 >> col
-                val color = if (bits & mask.to_u8()) != 0u8: fg else: bg
-                self.put_pixel(x + col, y + row, color)
+                val px = x + col
+                if px >= 0 and py >= 0 and px < self.w and py < self.h:
+                    val mask = 0x80 >> col
+                    val idx = py * self.w + px
+                    self.pixels[idx] = if (bits & mask.to_u8()) != 0u8: fg else: bg
                 col = col + 1
             row = row + 1
 
@@ -76,14 +112,28 @@ impl CompositorBackend for SharedMdiFramebufferBackend:
 
     me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         self.web_pixel_count = self.web_pixel_count + pixels.len().to_i64()
+        val src_len = pixels.len()
         var row = 0
         while row < h:
-            var col = 0
-            while col < w:
+            val dy = y + row
+            if dy >= 0 and dy < self.h:
+                var col0 = if x < 0: 0 - x else: 0
+                var col1 = w
+                if x + col1 > self.w:
+                    col1 = self.w - x
+                if col1 <= col0:
+                    row = row + 1
+                    continue
+                var col = col0
                 val src_idx = row * w + col
-                if src_idx >= 0 and src_idx < pixels.len():
-                    self.put_pixel(x + col, y + row, pixels[src_idx])
-                col = col + 1
+                var src = src_idx
+                var dst = dy * self.w + x + col0
+                while col < col1:
+                    if src >= 0 and src < src_len:
+                        self.pixels[dst] = pixels[src]
+                    src = src + 1
+                    dst = dst + 1
+                    col = col + 1
             row = row + 1
 
     me present():
@@ -95,43 +145,196 @@ impl CompositorBackend for SharedMdiFramebufferBackend:
     fn as_glass_capable() -> CompositorGlassCapable?:
         nil
 
-fn _draw_shared_window_chrome(backend: SharedMdiFramebufferBackend, x: i32, y: i32, w: i32, h: i32, focused: bool):
-    val title_color = if focused: 0xFF2050A0u32 else: 0xFF243447u32
-    backend.fill_rect(x + 5, y + 6, w, h, 0x66000000u32)
-    backend.fill_rect(x, y, w, h, 0xFF1E293Bu32)
-    backend.fill_rect(x, y, w, 28, title_color)
-    backend.fill_rect(x + 12, y + 9, 10, 10, 0xFFE74C3Cu32)
-    backend.fill_rect(x + 30, y + 9, 10, 10, 0xFFF1C40Fu32)
-    backend.fill_rect(x + 48, y + 9, 10, 10, 0xFF27AE60u32)
+fn shared_mdi_render_window(id: i64, title: text, app_id: text, content: text, x: i32, y: i32, w: i32, h: i32, process_id: i64, minimized: bool, focused: bool, scroll_y: i32) -> SharedMdiRenderWindow:
+    SharedMdiRenderWindow(id: id, title: title, app_id: app_id, content: content, x: x, y: y, w: w, h: h, process_id: process_id, minimized: minimized, focused: focused, scroll_y: scroll_y)
+
+fn shared_mdi_seed_windows() -> [SharedMdiRenderWindow]:
+    val surfaces = shared_mdi_surfaces()
+    val count = surfaces.len()
+    var windows: [SharedMdiRenderWindow] = []
+    var i = 0
+    while i < count:
+        val surface = surfaces[i]
+        windows.push(shared_mdi_render_window(
+            (i + 1).to_i64(),
+            surface.title,
+            surface.app_id,
+            surface.content,
+            surface.x,
+            surface.y,
+            surface.w,
+            surface.h,
+            surface.process_id,
+            false,
+            i == count - 1,
+            0
+        ))
+        i = i + 1
+    windows
+
+fn _shared_text_fit(content: text, max_chars: i32) -> text:
+    if max_chars <= 0:
+        return ""
+    if content.len().to_i32() > max_chars:
+        return content.substring(0, max_chars)
+    content
+
+fn _render_shared_mdi_desktop_chrome(backend: CompositorBackend, width: i32, height: i32, theme: WmChromeColors, clear_first: bool):
+    if clear_first:
+        backend.clear(theme.compositor_bg)
+    backend.fill_rect(0, 0, width, 44, theme.command_lane)
+    backend.fill_rect(0, 42, width, 2, theme.accent)
+    backend.fill_rect(0, height - 56, width, 56, theme.taskbar)
+    backend.fill_rect(0, height - 56, width, 2, theme.accent)
+
+fn render_shared_mdi_desktop_chrome(backend: CompositorBackend, width: i32, height: i32, theme: WmChromeColors):
+    _render_shared_mdi_desktop_chrome(backend, width, height, theme, true)
+
+fn draw_shared_mdi_window_chrome(backend: CompositorBackend, win: SharedMdiRenderWindow, theme: WmChromeColors):
+    if win.minimized:
+        return
+    val title_color = if win.focused: theme.accent else: theme.title_unfocused
+    backend.fill_rect(win.x + 5, win.y + 6, win.w, win.h, theme.window_shadow)
+    backend.fill_rect(win.x, win.y, win.w, win.h, theme.host_window_body)
+    backend.fill_rect(win.x, win.y, win.w, 28, title_color)
+    backend.fill_rect(win.x + 12, win.y + 9, 10, 10, 0xFFE74C3Cu32)
+    backend.fill_rect(win.x + 30, win.y + 9, 10, 10, 0xFFF1C40Fu32)
+    backend.fill_rect(win.x + 48, win.y + 9, 10, 10, 0xFF27AE60u32)
+    val visible = _shared_text_fit(win.title, if win.w > 92: (win.w - 92) / 8 else: 0)
+    backend.draw_text(win.x + 66, win.y + 6, visible, theme.text_primary, title_color)
+    backend.fill_rect(win.x + win.w - 24, win.y + 2, 20, 20, theme.close_button)
+    backend.draw_text(win.x + win.w - 18, win.y + 4, "X", theme.text_primary, theme.close_button)
+
+fn draw_shared_mdi_taskbar(backend: CompositorBackend, windows: [SharedMdiRenderWindow], width: i32, height: i32, theme: WmChromeColors):
+    val count = windows.len().to_i32()
+    if count <= 0:
+        return
+    val dock_w = wm_taskbar_dock_width(width, count)
+    val dock_x = (width - dock_w) / 2
+    val dock_y = height - 62
+    val item_w = wm_taskbar_item_width(width, count)
+    backend.fill_rect(dock_x, dock_y, dock_w, 44, theme.taskbar)
+    var i = 0
+    while i < count:
+        val win = windows[i]
+        val ix = wm_taskbar_item_x(width, count, i)
+        var item_color = theme.title_unfocused
+        if win.focused and not win.minimized:
+            item_color = theme.accent
+        elif win.minimized:
+            item_color = theme.host_window_body
+        backend.fill_rect(ix + 2, dock_y + 4, item_w - 4, 36, item_color)
+        val label = _shared_text_fit(win.title, if item_w > 16: (item_w - 16) / 8 else: 0)
+        backend.draw_text(ix + 8, dock_y + 14, label, theme.text_primary, item_color)
+        i = i + 1
+
+fn _shared_mdi_content_line(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, line_index: i32, text_value: text, fg: u32, bg: u32):
+    val y = cy + 34 + line_index * 22
+    val label = _shared_text_fit(text_value, if cw > 20: (cw - 20) / 8 else: 0)
+    backend.draw_text(cx + 10, y, label, fg, bg)
+
+fn render_shared_mdi_app_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
+    if cw <= 0 or ch <= 0:
+        return
+    val bg = 0xFF182230u32
+    val header = 0xFF2050A0u32
+    val text_primary = 0xFFE5E7EBu32
+    val accent = 0xFF2563EBu32
+    val success = 0xFF22C55Eu32
+    val warning = 0xFFF59E0Bu32
+    val muted = 0xFF94A3B8u32
+    backend.fill_rect(cx, cy, cw, ch, bg)
+    backend.fill_rect(cx, cy, cw, 24, header)
+    backend.draw_text(cx + 8, cy + 4, _shared_text_fit(title, if cw > 16: (cw - 16) / 8 else: 0), text_primary, header)
+    if title == "Terminal":
+        _shared_mdi_content_line(backend, cx, cy, cw, 0, "$ " + state_text, success, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 1, "src/ test/ main.spl", accent, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 2, "SimpleOS shell via Simple Web", success, bg)
+        return
+    if title == "Editor" or title == "Hello World":
+        _shared_mdi_content_line(backend, cx, cy, cw, 0, "main.spl", muted, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 1, "fn main():", warning, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 2, "    print Hello SimpleOS", accent, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 3, "# rendered by Simple Web", success, bg)
+        return
+    if title == "File Manager" or title == "Finder":
+        _shared_mdi_content_line(backend, cx, cy, cw, 0, "/home/simple", accent, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 1, "Desktop", text_primary, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 2, "Documents", text_primary, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 3, "Downloads", text_primary, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 4, "state: " + state_text, muted, bg)
+        return
+    if title == "Calculator":
+        _shared_mdi_content_line(backend, cx, cy, cw, 0, "0", accent, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 1, "7 8 9 /", text_primary, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 2, "4 5 6 *", text_primary, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 3, "1 2 3 -", text_primary, bg)
+        return
+    if title == "Browser" or title == "Simple Browser":
+        _shared_mdi_content_line(backend, cx, cy, cw, 0, "about:network", accent, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 1, "Simple Web", success, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 2, "GET /status 200", text_primary, bg)
+        _shared_mdi_content_line(backend, cx, cy, cw, 3, state_text, muted, bg)
+        return
+    _shared_mdi_content_line(backend, cx, cy, cw, 0, "Simple Web app surface", text_primary, bg)
+
+fn _shared_mdi_content_pixel_count(windows: [SharedMdiRenderWindow]) -> i64:
+    var count: i64 = 0
+    val window_count = windows.len()
+    var i = 0
+    while i < window_count:
+        val win = windows[i]
+        if not win.minimized:
+            val cw = win.w - 8
+            val ch = win.h - 36
+            if cw > 0 and ch > 0:
+                count = count + (cw.to_i64() * ch.to_i64())
+        i = i + 1
+    count
+
+fn _render_shared_mdi_windows_to_backend(backend: CompositorBackend, windows: [SharedMdiRenderWindow], width: i32, height: i32, theme: WmChromeColors, clear_first: bool):
+    _render_shared_mdi_desktop_chrome(backend, width, height, theme, clear_first)
+    val count = windows.len()
+    var i = 0
+    while i < count:
+        val win = windows[i]
+        if not win.minimized:
+            draw_shared_mdi_window_chrome(backend, win, theme)
+            val cx = win.x + 4
+            val cy = win.y + 32
+            val cw = win.w - 8
+            val ch = win.h - 36
+            render_shared_mdi_app_content(backend, win.title, cx, cy, cw, ch, win.content)
+        i = i + 1
+    draw_shared_mdi_taskbar(backend, windows, width, height, theme)
+
+fn render_shared_mdi_windows_to_backend(backend: CompositorBackend, windows: [SharedMdiRenderWindow], width: i32, height: i32):
+    _render_shared_mdi_windows_to_backend(backend, windows, width, height, wm_chrome_theme(), true)
 
 fn render_shared_mdi_framebuffer_scene(width: i32, height: i32, backend_kind: text) -> SharedMdiFramebufferScene:
     render_shared_mdi_framebuffer_scene_limited(width, height, backend_kind, 0, 0)
 
 fn render_shared_mdi_framebuffer_scene_limited(width: i32, height: i32, backend_kind: text, max_surface_w: i32, max_surface_h: i32) -> SharedMdiFramebufferScene:
-    val backend = SharedMdiFramebufferBackend.create(width, height, 0xFF0A2540u32)
-    backend.fill_rect(0, 0, width, 44, 0xFF101820u32)
-    backend.fill_rect(0, 42, width, 2, 0xFF3498DBu32)
-    backend.fill_rect(0, height - 56, width, 56, 0xFF101820u32)
-    backend.fill_rect(0, height - 56, width, 2, 0xFF3498DBu32)
-    val surfaces = shared_mdi_surfaces()
+    val theme = wm_chrome_theme()
+    val backend = SharedMdiFramebufferBackend.create(width, height, theme.compositor_bg)
+    var windows = shared_mdi_seed_windows()
+    val count = windows.len()
     var i = 0
-    while i < surfaces.len():
-        val surface = surfaces[i]
-        val focused = i == surfaces.len() - 1
-        val sw = if max_surface_w > 0 and surface.w > max_surface_w: max_surface_w else: surface.w
-        val sh = if max_surface_h > 0 and surface.h > max_surface_h: max_surface_h else: surface.h
-        _draw_shared_window_chrome(backend, surface.x, surface.y, sw, sh, focused)
-        val cx = surface.x + 4
-        val cy = surface.y + 32
-        val cw = sw - 8
-        val ch = sh - 36
-        render_simple_web_app_content(backend, surface.title, cx, cy, cw, ch, surface.content)
+    while i < count:
+        var win = windows[i]
+        if max_surface_w > 0 and win.w > max_surface_w:
+            win.w = max_surface_w
+        if max_surface_h > 0 and win.h > max_surface_h:
+            win.h = max_surface_h
+        windows[i] = win
         i = i + 1
+    _render_shared_mdi_windows_to_backend(backend, windows, width, height, theme, false)
+    backend.web_pixel_count = _shared_mdi_content_pixel_count(windows)
     SharedMdiFramebufferScene(
         width: width,
         height: height,
         pixels: backend.pixels,
-        surface_count: surfaces.len(),
+        surface_count: windows.len(),
         web_pixel_count: backend.web_pixel_count,
         backend_kind: backend_kind,
         fallback_reason: "",

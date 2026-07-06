@@ -4,7 +4,9 @@ use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
-use os.compositor.simple_web_window_renderer.{render_simple_web_app_content}
+use os.compositor.simple_web_window_renderer.{render_simple_web_app_content_cached, content_paint_full_height}
+use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, render_shared_mdi_desktop_chrome, draw_shared_mdi_window_chrome, draw_shared_mdi_taskbar}
+use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
 use common.color.convert.{int_to_hex}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d, engine2d_fast_metal_available}
@@ -68,6 +70,22 @@ class HostedWindow:
     minimized: bool
     focused: bool
 
+fn host_window_to_shared_mdi_render_window(win: HostedWindow, scroll_y: i32) -> SharedMdiRenderWindow:
+    shared_mdi_render_window(
+        win.id,
+        win.title,
+        win.app_id,
+        win.content,
+        win.x,
+        win.y,
+        win.w,
+        win.h,
+        win.process_id,
+        win.minimized,
+        win.focused,
+        scroll_y
+    )
+
 class HeadlessHostCompositorBackend:
     w: i32
     h: i32
@@ -76,10 +94,15 @@ class HeadlessHostCompositorBackend:
 
     static fn new(width: i32, height: i32) -> HeadlessHostCompositorBackend:
         val total = if width > 0 and height > 0: width * height else: 0
+        var pixels: [u32] = []
+        var i = 0
+        while i < total:
+            pixels.push(0u32)
+            i = i + 1
         HeadlessHostCompositorBackend(
             w: width,
             h: height,
-            pixels: [0u32; total],
+            pixels: pixels,
             present_count: 0
         )
 
@@ -196,10 +219,12 @@ class HostCompositor:
     last_button: i64
     last_button_down: bool
     # Wheel-delta accumulator per hosted window id, keyed by whichever window
-    # is under the pointer when a wheel event arrives. Content-level scroll
-    # rendering is owned by the (forbidden-for-this-change) content renderer,
-    # so this only tracks the delta so it is observable/testable rather than
-    # dropped; wiring it into actual content scroll is a follow-up.
+    # is under the pointer when a wheel event arrives. render_frame() reads
+    # this back via scroll_offset_for(window.id) and threads it into
+    # render_simple_web_app_content_cached(), which translates the content
+    # layer by that many pixels at paint time (renders `scroll_y` extra rows
+    # of the same document, then windows the visible slice — see
+    # os.compositor.simple_web_window_renderer._window_scrolled_pixels).
     scroll_offsets: Dict<i64, f64>
     # Chrome-action arming for release-inside click semantics (FIX 2): a
     # mouse-down over a chrome affordance (close button / taskbar item) arms
@@ -212,6 +237,14 @@ class HostCompositor:
     # chrome rasterization. Empty key means "no cached chrome yet".
     _chrome_cache_key: text
     _chrome_cache_pixels: [u32]
+    # Task #15 remainder item 4 (S1 perf): per-window content pixel cache.
+    # Keyed by hosted window id so each window's cache tracks its own
+    # (width, height, backend) identity independently — see
+    # _content_cache_for, which replaces a window's cache whenever that
+    # identity changes (resize/rescroll/backend change) and otherwise reuses
+    # it so WebRenderPixelArtifactCache's own content-hash (HTML-equality)
+    # check can skip re-rendering unchanged window content every frame.
+    content_caches: Dict<i64, WebRenderPixelArtifactCache>
 
     static fn new(backend: CompositorBackend, size: Size) -> HostCompositor:
         HostCompositor(
@@ -239,8 +272,23 @@ class HostCompositor:
             armed_chrome_target: "",
             armed_chrome_window_id: 0,
             _chrome_cache_key: "",
-            _chrome_cache_pixels: []
+            _chrome_cache_pixels: [],
+            content_caches: {}
         )
+
+    # Returns the WebRenderPixelArtifactCache for `window_id`, creating (or
+    # replacing) it when there is none yet or its (width, height,
+    # backend_name) identity no longer matches what this frame needs. A
+    # replacement starts with an empty last-rendered-HTML slot, so the very
+    # next content render after a resize/rescroll/backend change is
+    # correctly a miss+store, not a stale hit.
+    me _content_cache_for(window_id: i64, cw: i32, full_h: i32, backend_name: text) -> WebRenderPixelArtifactCache:
+        val existing = self.content_caches.get(window_id)
+        if existing != nil and existing.width == cw and existing.height == full_h and existing.backend_name == backend_name:
+            return existing
+        val fresh = web_render_pixel_artifact_cache(cw, full_h, backend_name)
+        self.content_caches.set(window_id, fresh)
+        fresh
 
     me resize(width: i32, height: i32):
         self.width = width
@@ -289,7 +337,18 @@ class HostCompositor:
                         val fcy = fwin.y + 28
                         val fcw = fwin.w - 8
                         val fch = fwin.h - 32
-                        render_simple_web_app_content(self.backend, fwin.title, fcx, fcy, fcw, fch, fwin.content)
+                        val fscroll = self.scroll_offset_for(fwin.id).to_i32()
+                        val ffull_h = content_paint_full_height(fch, fscroll)
+                        val fcache = self._content_cache_for(fwin.id, fcw, ffull_h, "auto")
+                        render_simple_web_app_content_cached(fcache, self.backend, fwin.title, fcx, fcy, fcw, fch, fwin.content, fscroll)
+                        # Dict.get()/.set() copy class values in this interpreter (no
+                        # shared-reference semantics for dict-stored class instances),
+                        # so the mutations request_to_pixel_artifact() just made inside
+                        # fcache (hit/store counters, last-rendered HTML) live only on
+                        # this local copy until explicitly written back — otherwise the
+                        # very next frame's _content_cache_for() lookup would see a
+                        # stale, still-empty cache and never observe a hit.
+                        self.content_caches.set(fwin.id, fcache)
                     fi = fi + 1
                 self.backend.present()
                 return
@@ -297,24 +356,28 @@ class HostCompositor:
         # chrome. BYTE-IDENTICAL to the historical host compositor chrome contract
         # (plus the taskbar dock, which the hit-test always honored but no
         # render path ever drew).
-        self.backend.clear(theme.compositor_bg)
+        render_shared_mdi_desktop_chrome(self.backend, self.width, self.height, theme)
+        var shared_windows: [SharedMdiRenderWindow] = []
+        val window_count = self.windows.len()
         var i = 0
-        while i < self.windows.len():
+        while i < window_count:
             val win = self.windows[i]
+            val scroll = self.scroll_offset_for(win.id).to_i32()
+            val shared_win = host_window_to_shared_mdi_render_window(win, scroll)
+            shared_windows.push(shared_win)
             if not win.minimized:
-                val bar_color = if win.focused: theme.accent else: theme.title_unfocused
-                self.backend.fill_rect(win.x, win.y, win.w, win.h, theme.host_window_body)
-                self.backend.fill_rect(win.x, win.y, win.w, 24, bar_color)
-                self.backend.draw_text(win.x + 8, win.y + 4, win.title, theme.text_primary, bar_color)
-                self.backend.fill_rect(win.x + win.w - 24, win.y, 24, 24, theme.close_button)
-                self.backend.draw_text(win.x + win.w - 17, win.y + 4, "X", theme.text_primary, theme.close_button)
+                draw_shared_mdi_window_chrome(self.backend, shared_win, theme)
                 val cx = win.x + 4
-                val cy = win.y + 28
+                val cy = win.y + 32
                 val cw = win.w - 8
-                val ch = win.h - 32
-                render_simple_web_app_content(self.backend, win.title, cx, cy, cw, ch, win.content)
+                val ch = win.h - 36
+                val full_h = content_paint_full_height(ch, scroll)
+                val cache = self._content_cache_for(win.id, cw, full_h, "auto")
+                render_simple_web_app_content_cached(cache, self.backend, win.title, cx, cy, cw, ch, win.content, scroll)
+                # See the matching write-back comment in the fast chrome lane above.
+                self.content_caches.set(win.id, cache)
             i = i + 1
-        host_compositor_draw_taskbar(self.backend, self.windows, self.width, self.height, theme)
+        draw_shared_mdi_taskbar(self.backend, shared_windows, self.width, self.height, theme)
         self.backend.present()
 
     me apply_bridge_request(seq: i64, owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text):

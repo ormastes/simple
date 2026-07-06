@@ -324,6 +324,14 @@ val GRID_HEADER: i32 = 46
 val GRID_FOOTER: i32 = 14
 val GRID_STEP: i32 = 66
 val GRID_CELLS: i32 = 18
+val WM_CLIENT_DRAIN_LIMIT: i32 = 64
+
+fn wm_client_log_enabled() -> bool:
+    (env_get("SIMPLE_WM_CLIENT_LOG") ?? "") == "1"
+
+fn wm_client_log(msg: text):
+    if wm_client_log_enabled():
+        print msg
 
 # (rows, col_w) for a given viewport — must match draw_frame's grid.
 fn grid_params(w: i32, h: i32) -> (i32, i32):
@@ -693,10 +701,10 @@ fn consume_wm_event(event_path: text, last_seq: i64, state: ShowcaseState, coord
     val ev = wm_fs_app_event_decode(body)
     if ev.seq <= last_seq:
         return (state, last_seq, false)
-    val scaled_next = showcase_on_pointer(state, ev.kind, ev.x * coord_scale, ev.y * coord_scale, ev.pressed)
-    if coord_scale > 1 and showcase_state_same(scaled_next, state):
-        return (showcase_on_pointer(state, ev.kind, ev.x, ev.y, ev.pressed), ev.seq, true)
-    (scaled_next, ev.seq, true)
+    var next_state = showcase_on_pointer(state, ev.kind, ev.x * coord_scale, ev.y * coord_scale, ev.pressed)
+    if coord_scale > 1 and showcase_state_same(next_state, state):
+        next_state = showcase_on_pointer(state, ev.kind, ev.x, ev.y, ev.pressed)
+    (next_state, ev.seq, not showcase_state_same(next_state, state))
 
 fn build_wm_pixels(w: i32, h: i32, state: ShowcaseState, frame_scale: i32) -> [u32]:
     val full = build_frame_state(w, h, state)
@@ -729,23 +737,39 @@ fn run_wm_client() -> i64:
     if not file_write(bridge_path, wm_fs_bridge_encode(req)):
         print "[wm-showcase-client] error=bridge-write-failed path={bridge_path}"
         return 1
-    print "[wm-showcase-client] source={WIDGET_SHOWCASE_APP_SOURCE} pid={pid} bridge={bridge_path} frame={frame_path} event={event_path} seq={seq_path}"
+    wm_client_log("[wm-showcase-client] source={WIDGET_SHOWCASE_APP_SOURCE} pid={pid} bridge={bridge_path} frame={frame_path} event={event_path} seq={seq_path}")
     if (env_get(WM_CLIENT_HOLD_ENV) ?? "") == "1":
         var ticks = 0
         var last_event_seq = 0
         while ticks < 2000000:
-            val (event_state, event_seq, event_dirty) = consume_wm_event(event_path, last_event_seq, state, frame_scale)
-            if event_dirty:
-                state = event_state
-                last_event_seq = event_seq
+            var drain = 0
+            var consumed_event = false
+            var render_dirty = false
+            while drain < WM_CLIENT_DRAIN_LIMIT:
+                val (event_state, event_seq, event_dirty) = consume_wm_event(event_path, last_event_seq, state, frame_scale)
+                if event_seq <= last_event_seq:
+                    drain = WM_CLIENT_DRAIN_LIMIT
+                else:
+                    consumed_event = true
+                    last_event_seq = event_seq
+                    if event_dirty:
+                        state = event_state
+                        render_dirty = true
+                    drain = drain + 1
+            if render_dirty:
                 frame_seq = frame_seq + 1
                 val next_pixels = build_wm_pixels(W, H, state, frame_scale)
                 if next_pixels.len() < frame_w * frame_h or not write_wm_frame(frame_path, seq_path, frame_seq, frame_w, frame_h, next_pixels):
                     print "[wm-showcase-client] error=frame-refresh-failed path={frame_path}"
                     return 1
                 write_wm_state(state_path, state, last_event_seq, frame_seq, frame_scale)
-                print "[wm-showcase-client] frame seq={frame_seq} event_seq={last_event_seq} clicks={state.button_count} checkbox={state.checkbox_on} switch={state.switch_on} slider={state.slider_value} progress={state.progress_value}"
-            thread_sleep(30)
+                wm_client_log("[wm-showcase-client] frame seq={frame_seq} event_seq={last_event_seq} clicks={state.button_count} checkbox={state.checkbox_on} switch={state.switch_on} slider={state.slider_value} progress={state.progress_value}")
+            elif consumed_event:
+                write_wm_state(state_path, state, last_event_seq, frame_seq, frame_scale)
+            if consumed_event:
+                thread_sleep(1)
+            else:
+                thread_sleep(30)
             ticks = ticks + 1
     0
 

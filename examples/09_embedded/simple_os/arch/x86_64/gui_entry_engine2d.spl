@@ -11,6 +11,8 @@
 # Engine2D core so the demo boots reliably while still exercising the 2D
 # drawing layer and the Simple Web rendering library in the same frame.
 
+use os.compositor.shared_mdi_framebuffer_scene.{render_shared_mdi_framebuffer_scene}
+
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_port_inb(port: u64) -> u64
@@ -82,6 +84,52 @@ fn _qemu_bga_init():
     _bga_write(3, 32)
     _bga_write(6, _fb_w().to_u64())
     _bga_write(4, 0x41)
+
+fn _ps2_wait_write():
+    var i: u64 = 0
+    while i < 100000:
+        if (rt_port_inb(0x64) & 2) == 0:
+            return
+        i = i + 1
+
+fn _ps2_wait_read():
+    var i: u64 = 0
+    while i < 100000:
+        if (rt_port_inb(0x64) & 1) != 0:
+            return
+        i = i + 1
+
+fn _ps2_flush():
+    var i: u64 = 0
+    while i < 16:
+        if (rt_port_inb(0x64) & 1) != 0:
+            rt_port_inb(0x60)
+        i = i + 1
+
+fn _ps2_mouse_cmd(cmd: u8):
+    _ps2_wait_write()
+    rt_port_outb(0x64, 0xD4)
+    _ps2_wait_write()
+    rt_port_outb(0x60, cmd)
+    _ps2_wait_read()
+    rt_port_inb(0x60)
+
+fn _ps2_mouse_init():
+    _ps2_flush()
+    _ps2_wait_write()
+    rt_port_outb(0x64, 0xA8)
+    _ps2_wait_write()
+    rt_port_outb(0x64, 0x20)
+    _ps2_wait_read()
+    val config = rt_port_inb(0x60)
+    _ps2_wait_write()
+    rt_port_outb(0x64, 0x60)
+    _ps2_wait_write()
+    rt_port_outb(0x60, ((config | 2) & 0xDF).to_u8())
+    _ps2_mouse_cmd(0xF6)
+    _ps2_mouse_cmd(0xF4)
+    _ps2_flush()
+    serial_println("[mdi-demo] qemu-mouse-ready")
 
 fn _capture_wait_iters() -> u64:
     100000000
@@ -175,28 +223,32 @@ fn _draw_mouse_cursor_fb(fb_addr: u64, stride: i32, x: i32, y: i32):
     _fill_rect_fb(fb_addr, stride, x + 8, y + 18, 8, 2, 0xFFFFFFFF)
     _fill_rect_fb(fb_addr, stride, x + 12, y + 20, 6, 2, 0xFFFFFFFF)
 
+fn _blit_shared_scene_to_fb(fb_addr: u64, stride: i32):
+    val scene = render_shared_mdi_framebuffer_scene(_fb_w(), _fb_h(), "qemu-framebuffer-cpu-simd")
+    var y: i32 = 0
+    while y < scene.height and y < _fb_h():
+        var x: i32 = 0
+        while x < scene.width and x < stride:
+            val idx = y * scene.width + x
+            if idx >= 0 and idx < scene.pixels.len():
+                val offset = ((y * stride + x) * 4).to_u64()
+                _mmio_write32(fb_addr + offset, scene.pixels[idx])
+            x = x + 1
+        y = y + 1
+
 fn _present_mdi_scene_direct_fb(fb_addr: u64, stride: i32, win0_fullscreen: u64, input_repaint: u64):
-    _fill_rect_fb(fb_addr, stride, 0, 0, _fb_w(), _fb_h(), 0xFF0A2540)
-    _fill_rect_fb(fb_addr, stride, 0, 0, _fb_w(), 44, 0xFF101820)
-    _fill_rect_fb(fb_addr, stride, 0, _fb_h() - 56, _fb_w(), 56, 0xFF101820)
-    if input_repaint == 0:
-        _fill_rect_fb(fb_addr, stride, 32, 8, 96, 28, 0xFF2050A0)
-        _fill_rect_fb(fb_addr, stride, 480, 34, 96, 18, 0xFF3498DB)
-        _fill_rect_fb(fb_addr, stride, 860, 8, 132, 28, 0xFF1F2937)
-        _fill_rect_fb(fb_addr, stride, 450, 728, 240, 28, 0xFF17202A)
-        _fill_rect_fb(fb_addr, stride, 320, 736, 64, 28, 0xFF3498DB)
-        _fill_rect_fb(fb_addr, stride, 880, 736, 96, 28, 0xFF243447)
-        _fill_rect_fb(fb_addr, stride, 320, 140, 150, 100, 0xFF2050A0)
-        _fill_rect_fb(fb_addr, stride, 320, 184, 150, 56, 0xFF182230)
-        _fill_rect_fb(fb_addr, stride, 320, 240, 170, 70, 0xFF1F2937)
-        _fill_rect_fb(fb_addr, stride, 120, 60, 180, 130, 0xFF1E293B)
-        _draw_mouse_cursor_fb(fb_addr, stride, 360, 190)
-    else:
-        _fill_rect_fb(fb_addr, stride, 320, 140, 150, 100, 0xFF16A085)
-        _fill_rect_fb(fb_addr, stride, 120, 60, 180, 130, 0xFFE67E22)
-        _draw_mouse_cursor_fb(fb_addr, stride, 160, 80)
     if win0_fullscreen == 1:
         _fill_rect_fb(fb_addr, stride, 0, 0, _fb_w(), _fb_h(), 0xFF1E293B)
+        _fill_rect_fb(fb_addr, stride, 0, 0, _fb_w(), 32, 0xFF2050A0)
+        _fill_rect_fb(fb_addr, stride, _fb_w() - 30, 4, 22, 22, 0xFFCC3333)
+        return
+    _blit_shared_scene_to_fb(fb_addr, stride)
+    if input_repaint == 0:
+        _draw_mouse_cursor_fb(fb_addr, stride, 360, 190)
+    else:
+        _fill_rect_fb(fb_addr, stride, 70, 52, 220, 28, 0xFF16A085)
+        _fill_rect_fb(fb_addr, stride, 70, 82, 220, 18, 0xFFE67E22)
+        _draw_mouse_cursor_fb(fb_addr, stride, 160, 80)
 
 fn spl_start():
     serial_println("SimpleOS x86_64 GUI boot (Engine2D + WM + Simple Web)")
@@ -205,6 +257,7 @@ fn spl_start():
     serial_println("[BOOT] Initializing BGA framebuffer (1024x768x32)...")
     _qemu_bga_init()
     serial_println("[BOOT] BGA framebuffer ready")
+    _ps2_mouse_init()
 
     rt_gui_set_fb(_fb_addr(), _fb_w().to_u64())
     serial_println("[GUI] framebuffer bound")
@@ -223,15 +276,15 @@ fn spl_start():
     val web_pixel_count = _web_panel_pixel_count(248, 118) + _web_panel_pixel_count(270, 114)
     val web_checksum = _web_panel_checksum(248, 118) + _web_panel_checksum(270, 114)
     serial_println("[web-demo] pixels-ready expected={web_pixel_count}")
-    serial_println("[web-demo] renderer=simple-web-qemu-panel-contract html=about:engine2d-wm checksum={web_checksum}")
-    serial_println("[backend-evidence] selected=qemu-framebuffer-cpu-simd fallback=baremetal-direct-mdi-surface-render frame_time_ms=unmeasured readback=unavailable:qemu-framebuffer-write-only")
+    serial_println("[web-demo] renderer=shared_mdi_framebuffer_scene html=about:engine2d-wm checksum={web_checksum}")
+    serial_println("[backend-evidence] selected=qemu-framebuffer-cpu-simd renderer=shared_mdi_framebuffer_scene fallback=none frame_time_ms=unmeasured readback=unavailable:qemu-framebuffer-write-only")
 
     _present_mdi_scene_direct_fb(fb_addr, _fb_w(), 0, 0)
-    serial_println("[backend-evidence] present=direct-mmio-commit source=engine2d-mdi-fb")
+    serial_println("[backend-evidence] present=direct-mmio-commit source=shared_mdi_framebuffer_scene")
     serial_println("[mdi-demo] shared-mdi-ready surfaces={_surface_count()}")
     serial_println("[mdi-demo] top-command-lane-ready")
     serial_println("[mdi-demo] taskbar-ready")
-    serial_println("[mdi-demo] html-renderable window=browser renderer=simple-web-qemu-panel-contract pixels={web_pixel_count} checksum={web_checksum}")
+    serial_println("[mdi-demo] html-renderable window=browser renderer=shared_mdi_framebuffer_scene pixels={web_pixel_count} checksum={web_checksum}")
     serial_println("[mdi-demo] windows-ready count={_surface_count()}")
 
     # WM fullscreen: maximize window 0 to cover the full framebuffer, hold

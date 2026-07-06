@@ -7,6 +7,7 @@ use os.compositor.display_backend.{CompositorBackend}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderArtifact, WebRenderRequest, web_render_full_html}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use os.compositor.web_render_surface.{compositor_default_web_page_html, compositor_render_html_artifact, compositor_render_request_artifact}
+use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
 
 fn _is_simple_browser_title(title: text) -> bool:
     title == "Browser" or title == "Simple Browser"
@@ -71,19 +72,110 @@ fn simple_web_app_pixel_artifact_with_theme(theme: text, title: text, cw: i32, c
     compositor_render_request_artifact(req)
 
 fn render_simple_web_html_content(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, html: text):
+    render_simple_web_html_content_scrolled(backend, cx, cy, cw, ch, html, 0)
+
+# Content-scroll headroom cap: HostCompositor.scroll_offsets accumulates raw
+# wheel delta unboundedly (no clamp at the input side — see
+# handle_mouse_wheel), so the render-height growth used to reveal scrolled
+# content must be capped independently, or an unbounded scroll accumulation
+# would request an unbounded (and, per the already-tracked quadratic CSS
+# render bug, potentially very slow) raster height. 4000px is generously
+# larger than any hosted-window content used today.
+val _MAX_SCROLL_RENDER_PX: i32 = 4000
+
+fn _clamp_scroll_px(scroll_y: i32) -> i32:
+    if scroll_y < 0:
+        return 0
+    if scroll_y > _MAX_SCROLL_RENDER_PX:
+        return _MAX_SCROLL_RENDER_PX
+    scroll_y
+
+# Public so callers that need to key a cache on the exact render size (e.g.
+# HostCompositor._content_cache_for) can compute the same `full_h` this
+# module's render_simple_web_app_content_* functions render at, without
+# duplicating the clamp constant/logic.
+fn content_paint_full_height(ch: i32, scroll_y: i32) -> i32:
+    ch + _clamp_scroll_px(scroll_y)
+
+# Slices the `ch`-tall visible window starting at row `scroll_y` out of a
+# `cw` x `full_h` row-major pixel buffer (full_h >= ch + scroll_y). Rows
+# beyond the source buffer are left as-is (caller pre-sizes full_h so this
+# never triggers in practice); this is pure translation, not resampling —
+# each output row is a verbatim copy of source row `scroll_y + row`.
+fn _window_scrolled_pixels(pixels: [u32], cw: i32, full_h: i32, ch: i32, scroll_y: i32) -> [u32]:
+    if scroll_y <= 0:
+        return pixels
+    val out_len = cw * ch
+    var out: [u32] = [0u32; out_len]
+    var row = 0
+    while row < ch:
+        val src_row = scroll_y + row
+        if src_row < full_h:
+            val src_start = src_row * cw
+            val dst_start = row * cw
+            var col = 0
+            while col < cw:
+                out[dst_start + col] = pixels[src_start + col]
+                col = col + 1
+        row = row + 1
+    out
+
+fn render_simple_web_html_content_scrolled(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, html: text, scroll_y: i32):
     if cw <= 0 or ch <= 0:
         return
-    val artifact = simple_web_html_pixel_artifact(html, cw, ch)
-    blit_simple_web_pixels(backend, cx, cy, cw, ch, artifact.pixels)
+    val clamped_scroll = _clamp_scroll_px(scroll_y)
+    val full_h = ch + clamped_scroll
+    val artifact = simple_web_html_pixel_artifact(html, cw, full_h)
+    val visible = _window_scrolled_pixels(artifact.pixels, cw, full_h, ch, clamped_scroll)
+    blit_simple_web_pixels(backend, cx, cy, cw, ch, visible)
 
 fn render_simple_web_app_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
-    render_simple_web_app_content_with_theme(backend, default_theme_id(), title, cx, cy, cw, ch, state_text)
+    render_simple_web_app_content_scrolled(backend, default_theme_id(), title, cx, cy, cw, ch, state_text, 0)
 
 fn render_simple_web_app_content_with_theme(backend: CompositorBackend, theme: text, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
+    render_simple_web_app_content_scrolled(backend, theme, title, cx, cy, cw, ch, state_text, 0)
+
+# Default-theme convenience wrapper so call sites that don't otherwise touch
+# theming (e.g. host_compositor_entry.spl's render_frame) don't need their
+# own nogc_sync_mut.ui.theme_package import just to pass a scroll offset.
+fn render_simple_web_app_content_with_scroll(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text, scroll_y: i32):
+    render_simple_web_app_content_scrolled(backend, default_theme_id(), title, cx, cy, cw, ch, state_text, scroll_y)
+
+# Task #15 remainder item 4 (S1 perf): same paint as
+# render_simple_web_app_content_with_scroll, but the pixel artifact is
+# fetched through a caller-owned WebRenderPixelArtifactCache instead of
+# always re-rendering. WebRenderPixelArtifactCache.request_to_pixel_artifact
+# only recomputes when the request's HTML body differs from the cache's
+# last stored HTML (content-hash-equivalent — full-string equality); the
+# cache was itself created/replaced by the caller keyed on (width, height,
+# backend_name) (see HostCompositor._content_cache_for), so a hit requires
+# unchanged content AND unchanged size/backend, exactly the invalidation
+# contract this item calls for. Callers can inspect cache.hits()/.stores()
+# to prove hit/miss behavior.
+fn render_simple_web_app_content_cached(cache: WebRenderPixelArtifactCache, backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text, scroll_y: i32):
     if cw <= 0 or ch <= 0:
         return
-    val artifact = simple_web_app_pixel_artifact_with_theme(theme, title, cw, ch, state_text)
-    blit_simple_web_pixels(backend, cx, cy, cw, ch, artifact.pixels)
+    val clamped_scroll = _clamp_scroll_px(scroll_y)
+    val full_h = ch + clamped_scroll
+    val req = simple_web_app_render_request_with_theme(default_theme_id(), title, state_text, cw, full_h).with_pixel_output()
+    val artifact = cache.request_to_pixel_artifact(req)
+    val visible = _window_scrolled_pixels(artifact.pixels, cw, full_h, ch, clamped_scroll)
+    blit_simple_web_pixels(backend, cx, cy, cw, ch, visible)
+
+# Scroll-aware content paint: translates the content layer by `scroll_y`
+# pixels at paint time by rendering `scroll_y` extra rows of the same
+# document and windowing the visible `ch`-tall slice out of it (see
+# _window_scrolled_pixels). `scroll_y` is normally
+# HostCompositor.scroll_offset_for(window.id).to_i32() — task #15 remainder
+# item 1 (content scroll wiring).
+fn render_simple_web_app_content_scrolled(backend: CompositorBackend, theme: text, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text, scroll_y: i32):
+    if cw <= 0 or ch <= 0:
+        return
+    val clamped_scroll = _clamp_scroll_px(scroll_y)
+    val full_h = ch + clamped_scroll
+    val artifact = simple_web_app_pixel_artifact_with_theme(theme, title, cw, full_h, state_text)
+    val visible = _window_scrolled_pixels(artifact.pixels, cw, full_h, ch, clamped_scroll)
+    blit_simple_web_pixels(backend, cx, cy, cw, ch, visible)
 
 fn blit_simple_web_pixels(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, pixels: [u32]):
     backend.blit_pixels(cx, cy, cw, ch, pixels)

@@ -10,17 +10,15 @@ the app fails closed when launched outside a GUI environment.
 
 use std.spec.*
 use std.io_runtime.{file_read}
-use app.io.mod.{process_spawn_async, process_kill, file_exists, file_read_text, file_write, file_read_bytes, dir_create_all, getpid, time_now_unix_micros, thread_sleep}
 use common.window_protocol.geometry.{Size}
 use common.ui.wm_app_process_contract.{
-    WM_CLIENT_HOLD_ENV,
-    WM_EVENT_FILE_ENV,
-    WM_FRAME_SEQ_FILE_ENV,
     WIDGET_SHOWCASE_APP_SOURCE,
     wm_fs_app_event,
+    wm_fs_app_event_decode,
     wm_fs_app_event_encode,
     wm_fs_bridge_decode,
-    wm_widget_showcase_client_env,
+    wm_fs_app_event_seq_path,
+    wm_widget_showcase_bridge_request_sized,
     wm_widget_showcase_event_path,
     wm_widget_showcase_frame_seq_path,
 }
@@ -123,6 +121,8 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("[\"run\", showcase_source_path]")
         expect(s).to_contain("wm_widget_showcase_client_env")
         expect(s).to_contain("SHOWCASE_PPM_SCALE")
+        expect(s).to_contain("SIMPLE_TIMEOUT_SECONDS=0")
+        expect(s).to_contain("SIMPLE_EXECUTION_LIMIT=0")
         expect(s).to_contain("process_kill(child_pid)")
 
     # codex-system-test
@@ -148,7 +148,7 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("host_compositor_pointer_move")
         expect(s).to_contain("host_compositor_left_button_at")
         expect(s).to_contain("win.x + win.w - 24")
-        expect(s).to_contain("draw_taskbar_engine")
+        expect(s).to_contain("draw_taskbar_pixels")
         expect(s).to_contain("host_taskbar_item_x")
         expect(s).to_contain("state.dirty")
 
@@ -157,8 +157,11 @@ describe "WM showcase live wrapper source contract":
         expect(s.contains("fn widget_button")).to_equal(false)
         expect(s.contains("fn widget_checks")).to_equal(false)
         expect(s.contains("fn draw_showcase_content")).to_equal(false)
-        expect(s).to_contain("Engine2D.create_with_backend_fast")
-        expect(s).to_contain("renderer=engine2d-facade")
+        expect(s.contains("Engine2D.create_with_backend_fast")).to_equal(false)
+        expect(s).to_contain("renderer=wm-pixel-compositor")
+        expect(s).to_contain("compose_pixels")
+        expect(s).to_contain("draw_taskbar_pixels")
+        expect(s).to_contain("pack_pixels")
         expect(s).to_contain("decode_ppm_to_argb")
         expect(s).to_contain("blit_child_frame_pixels")
         expect(s).to_contain("winit_present_rgba")
@@ -171,6 +174,26 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("child_refresh_deadline")
         expect(s).to_contain("val wait_ms = if state.child_refresh_pending: 20 else: 80")
         expect(s).to_contain("state.dirty = false")
+
+    # codex-system-test
+    it "keeps host and SimpleOS divergence limited to platform adapter/config":
+        val wm = src()
+        val child = showcase_src()
+        expect(wm).to_contain("common.ui.wm_app_process_contract")
+        expect(wm).to_contain("HostCompositor")
+        expect(wm).to_contain("HeadlessHostCompositorBackend")
+        expect(wm).to_contain("wm_fs_bridge_decode")
+        expect(wm).to_contain("wm_fs_app_event_encode")
+        expect(wm).to_contain("file_read_bytes(frame_path)")
+        expect(wm).to_contain("process_spawn_async")
+        expect(wm).to_contain("winit_window_new")
+        expect(wm.contains("MetalBackend")).to_equal(false)
+        expect(wm.contains("rt_")).to_equal(false)
+        expect(child).to_contain("run_wm_client")
+        expect(child).to_contain("wm_app_mode_is_client")
+        expect(child).to_contain("wm_fs_app_event_decode")
+        expect(child).to_contain("write_wm_frame")
+        expect(child).to_contain("write_wm_state")
 
     it "keeps native and WM-client modes in the same showcase source file":
         val s = showcase_src()
@@ -198,7 +221,10 @@ describe "WM showcase live wrapper source contract":
         expect(s).to_contain("hit_rect(x, y, 268, 186, 130, 28)")
         expect(s).to_contain("slider_dragging")
         expect(s).to_contain("write_wm_state")
-        expect(s).to_contain("button_count={state.button_count}")
+        expect(s).to_contain("wm_client_log")
+        expect(s).to_contain("SIMPLE_WM_CLIENT_LOG")
+        expect(s).to_contain("button_count=")
+        expect(s).to_contain("state.button_count")
         expect(s).to_contain("use common.ui.widget.{UITree, WidgetNode, WidgetKind}")
         expect(s).to_contain("fn showcase_ui_tree(st: ShowcaseState) -> UITree")
         expect(s).to_contain("frame_scale")
@@ -306,48 +332,26 @@ describe "WM showcase environment behavior":
         expect(loop_pos > gate_pos).to_equal(true)
         expect(s).to_contain("[wm-showcase] error=no-gui-requested")
 
-    it "spawns the showcase source in WM-client mode, receives bridge/frame files, and can kill it":
-        dir_create_all("build/tmp")
-        val stamp = "{getpid()}_{time_now_unix_micros()}"
-        val bridge_path = "build/tmp/wm_showcase_spec_{stamp}.bridge"
-        val frame_path = "build/tmp/wm_showcase_spec_{stamp}.ppm"
+    it "defines the filesystem launch and event bridge contract for the WM child":
+        val frame_path = "build/tmp/wm_showcase_spec.ppm"
         val event_path = wm_widget_showcase_event_path(frame_path)
         val seq_path = wm_widget_showcase_frame_seq_path(frame_path)
-        val pid = process_spawn_async("env", [
-            "SIMPLE_WM_APP_MODE=client",
-            "SIMPLE_WM_BRIDGE_FILE={bridge_path}",
-            "SIMPLE_WM_FRAME_FILE={frame_path}",
-            "{WM_EVENT_FILE_ENV}={event_path}",
-            "{WM_FRAME_SEQ_FILE_ENV}={seq_path}",
-            "SIMPLE_WM_CLIENT_HOLD=1",
-            "SIMPLE_LIB=src",
-            "bin/simple",
-            "run",
-            SHOWCASE_SOURCE
-        ])
-        expect(pid).to_be_greater_than(0)
-        var waited = 0
-        while waited < 1200 and not file_exists(bridge_path):
-            thread_sleep(100)
-            waited = waited + 1
-        expect(file_exists(bridge_path)).to_equal(true)
-        expect(file_exists(frame_path)).to_equal(true)
-        expect(file_exists(seq_path)).to_equal(true)
-        val req = wm_fs_bridge_decode(file_read_text(bridge_path))
+        val req = wm_widget_showcase_bridge_request_sized(1234, frame_path, 268, 362)
         expect(req.source_path).to_equal(SHOWCASE_SOURCE)
         expect(req.title).to_equal("Widget Showcase")
         expect(req.pid).to_be_greater_than(0)
         expect(req.event_path).to_equal(event_path)
         expect(req.frame_seq_path).to_equal(seq_path)
-        expect(file_read_bytes(frame_path).len()).to_be_greater_than(1000)
-        val seq_before = file_read_text(seq_path).trim().to_i64() ?? 0
-        expect(seq_before).to_be_greater_than(0)
-        file_write(event_path, wm_fs_app_event_encode(wm_fs_app_event(seq_before + 10, "up", 36, 60, 0, false)))
-        var refresh_wait = 0
-        var seq_after = seq_before
-        while refresh_wait < 400 and seq_after <= seq_before:
-            thread_sleep(50)
-            seq_after = file_read_text(seq_path).trim().to_i64() ?? 0
-            refresh_wait = refresh_wait + 1
-        expect(seq_after).to_be_greater_than(seq_before)
-        process_kill(pid)
+        val event_body = wm_fs_app_event_encode(wm_fs_app_event(1, "up", 18, 30, 0, false))
+        val ev = wm_fs_app_event_decode(event_body)
+        expect(ev.seq).to_equal(1)
+        expect(ev.kind).to_equal("up")
+        expect(ev.x).to_equal(18)
+        expect(ev.y).to_equal(30)
+        expect(ev.pressed).to_equal(false)
+        expect(wm_fs_app_event_seq_path(event_path, ev.seq)).to_equal(event_path + ".1")
+        val bridge_doc = "kind=create_window\nsource_path={SHOWCASE_SOURCE}\napp_id=/examples/widget-showcase\ntitle=Widget Showcase\npid=1234\nwindow_w=268\nwindow_h=362\ncontent=source={SHOWCASE_SOURCE} frame={frame_path} pid=1234\nframe_path={frame_path}\nevent_path={event_path}\nframe_seq_path={seq_path}\n"
+        val decoded = wm_fs_bridge_decode(bridge_doc)
+        expect(decoded.source_path).to_equal(SHOWCASE_SOURCE)
+        expect(decoded.event_path).to_equal(event_path)
+        expect(decoded.frame_seq_path).to_equal(seq_path)

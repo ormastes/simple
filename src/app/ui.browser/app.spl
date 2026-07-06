@@ -12,6 +12,9 @@ use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open_with_override}
 use app.ui.browser.backend.{BrowserBackend}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event}
 use std.io_runtime.{file_exists, get_args, read_file, time_now_unix_micros}
+use std.diag.{dbg_stage}
+use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
 
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
@@ -99,11 +102,13 @@ class BrowserApp:
         FILE_CHANGE_POLL_INTERVAL_TICKS
 
     static fn new_with_access_store_path(file_path: text, port: i32, gpu_backend: text, access_db_path: text) -> Result<BrowserApp, text>:
+        dbg_stage("browser", "parse_start")
         val tree_result = parse_ui_to_tree(file_path)
         match tree_result:
             Err(e):
                 return Err(e)
             Ok(tree):
+                dbg_stage("browser", "parse_done")
                 var session = UISession.new(tree)
                 session.set_active_backend("browser")
                 if access_db_path != "":
@@ -112,11 +117,13 @@ class BrowserApp:
                         session.attach_access_store(store)
                 val width: i32 = 96
                 val height: i32 = 64
+                dbg_stage("browser", "backend_create_start")
                 val backend_result = BrowserBackend.create(width, height, gpu_backend)
                 match backend_result:
                     Err(e):
                         return Err(e)
                     Ok(backend):
+                        dbg_stage("browser", "backend_create_done")
                         val content = if file_exists(file_path):
                             read_file(file_path) ?? ""
                         else:
@@ -163,9 +170,12 @@ class BrowserApp:
             browser_winit_event_loop_free(event_loop)
             self.backend.shutdown()
             return
+        dbg_stage("browser", "window_created")
 
         val initial_state = self.session.current_state()
+        dbg_stage("browser", "first_frame_start")
         self.backend.render_frame(initial_state.tree, initial_state)
+        dbg_stage("browser", "first_frame_done")
         self.present_host_window(window)
 
         var next_present_at = browser_time_now_unix_micros() + 16000
@@ -284,11 +294,42 @@ class BrowserApp:
 fn run_browser_gui(file_path: text, port: i32) -> i64:
     return run_browser_gui_with_access_store(file_path, port, "")
 
-fn run_browser_gui_with_access_store(file_path: text, port: i32, access_db_path: text) -> i64:
+# Pure config builder split out from run_shared_wm_browser so the shared-WM
+# handoff shape is unit-testable without entering HostWmHandle.tick_forever's
+# blocking loop (mirrors why shared_wm_entrypoints_spec.spl avoids calling
+# run_shared_wm_* directly).
+fn browser_shared_wm_config(title: text) -> HostWmConfig:
+    HostWmConfig(
+        backend: HostBackendKind.Browser,
+        initial_size: Size.wh(1280, 800),
+        title: title
+    )
+
+# Joins the shared host WM (os.compositor.host_compositor_entry) as a
+# Browser-backend hosted window instead of spawning a standalone winit
+# window. Mirrors run_shared_wm_electron/_tauri/_tui in the sibling
+# ui.electron/ui.tauri/ui.tui async_app.spl entrypoints.
+fn run_shared_wm_browser(title: text) -> i64:
+    dbg_stage("browser", "shared_wm_init_start")
+    val config = browser_shared_wm_config(title)
+    val handle = init_host_wm(config)
+    if handle == nil:
+        print "Error: failed to initialise shared WM (Browser backend)"
+        return 1
+    dbg_stage("browser", "shared_wm_init_done")
+    handle.tick_forever()
+    return 0
+
+fn run_browser_gui_with_access_store(file_path: text, port: i32, access_db_path: text, shared_wm: bool = false) -> i64:
     """Start browser-engine mode for a .ui.sdn file."""
+    dbg_stage("browser", "launch_start")
+    if shared_wm:
+        return run_shared_wm_browser("Simple Browser")
+
     if not file_exists(file_path):
         print "Error: File not found: {file_path}"
         return 1
+    dbg_stage("browser", "file_checked")
 
     val gpu_backend = parse_backend_flag()
 
@@ -298,6 +339,7 @@ fn run_browser_gui_with_access_store(file_path: text, port: i32, access_db_path:
             print "Error: {e}"
             return 1
         Ok(app):
+            dbg_stage("browser", "app_created")
             app.run()
             return 0
 

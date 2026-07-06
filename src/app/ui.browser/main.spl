@@ -11,11 +11,19 @@
 # doc/08_tracking/bug/browser_engine_css_size_quadratic_pixel_render_2026-07-04.md
 # for a still-open perf bug that can make a real `--open` launch take a very
 # long time to present its first frame — stage progress is logged to stderr
-# (respects `--quiet`) so that is diagnosable instead of looking like a hang.
+# via std.diag's `dbg_stage("browser", ...)` tracer (env-gated by
+# SIMPLE_DIAG=stage, default-off) so that is diagnosable instead of looking
+# like a hang. See doc/08_tracking/bug/ui_browser_stage_logs_lost_comment_lies_2026-07-05.md
+# for the history of the previous (removed) ad-hoc instrumentation.
+# `--shared-wm` (or SIMPLE_UI_BROWSER_SHARED_WM=1) makes a real `--open`
+# launch join the shared host WM (os.compositor.host_compositor_entry)
+# instead of spawning its own winit window — see
+# doc/08_tracking/bug/ui_browser_shared_wm_flag_dropped_2026-07-05.md.
 
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
+use app.io.env_ops.{env_get}
 use os.compositor.host_compositor_entry.{HostBackendKind}
 use app.ui.browser.app.{run_browser_gui_with_access_store}
 
@@ -68,14 +76,16 @@ fn main() -> i64:
     val access_db = browser_option_value(args, "--ui-access-db", "")
     val open_flag = browser_has_option(args, "--open")
     val dry_run = browser_has_option(args, "--dry-run") or browser_has_option(args, "--plan")
-    val shared_wm = browser_has_option(args, "--shared-wm")
+    val shared_wm = shared_wm_requested_browser(args, env_get("SIMPLE_UI_BROWSER_SHARED_WM"))
 
     if open_flag and not dry_run:
         # Real launch — same chain as `bin/simple browser <file> --open`
         # (src/app/cli/browser.spl:cli_browser). Blocks until the window is
-        # closed; stage-by-stage progress goes to stderr via
-        # src/app/ui.browser/app.spl's browser_stage_log (respects --quiet).
-        return run_browser_gui_with_access_store(file_path, 0, access_db)
+        # closed; stage-by-stage progress goes to stderr via std.diag's
+        # dbg_stage("browser", ...) tracer (respects SIMPLE_DIAG facet
+        # gating, independent of --quiet). `shared_wm` joins the shared host
+        # WM instead of spawning a standalone winit window.
+        return run_browser_gui_with_access_store(file_path, 0, access_db, shared_wm)
 
     if log_opts.log_mode == "json":
         print "{\"command\":\"ui.browser\",\"status\":\"planned\",\"file\":\"{file_path}\",\"snapshot\":\"{snapshot_path}\",\"backend\":\"{backend}\",\"ui_access_db\":\"{access_db}\",\"open\":{browser_bool_json(open_flag)},\"shared_wm\":{browser_bool_json(shared_wm)}}"

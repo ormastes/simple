@@ -103,16 +103,33 @@ set -e
 if [ "$check_code" -eq 0 ]; then
     logic_check_status=pass
 fi
-if [ "$test_code" -eq 0 ] && grep -Fq '"success": true' "$BUILD_DIR/test.out"; then
-    logic_test_status=pass
+# `simple test --format json` is requested above, but the runner emits its
+# human-readable summary regardless of the flag (a BDD "N examples, M
+# failures" line plus a "Test Summary" block with "Passed: N" / "Failed: N"),
+# so a JSON-only parser always reads zero counts here and the gate falsely
+# reports RED on a passing run. Try the JSON markers first (so a runner build
+# that does honor the flag still works), then fall back to the human-format
+# summary line -- mirrors the same defensive pattern used in
+# check-async-library-hardening-evidence.shs. Do not trust exit code alone
+# (interpreter-mode `simple test` has been observed to exit 0 despite a
+# failure in the printed summary), and a zero-example parse must not read as
+# a pass.
+logic_passed="$(sed -n 's/.*"total_passed": *\([0-9][0-9]*\).*/\1/p' "$BUILD_DIR/test.out" | tail -n 1)"
+logic_failed="$(sed -n 's/.*"total_failed": *\([0-9][0-9]*\).*/\1/p' "$BUILD_DIR/test.out" | tail -n 1)"
+if [ -z "$logic_passed" ] || [ -z "$logic_failed" ]; then
+    # Human-format fallback. Match either the plain single-file form
+    # ("Passed: N") or the ANSI-colored multi-file discovery form.
+    logic_passed="$(grep -h -E 'Passed: [0-9]+' "$BUILD_DIR/test.out" | tail -n 1 | sed -E 's/^.*Passed: ([0-9]+).*$/\1/')"
+    logic_failed="$(grep -h -E 'Failed: [0-9]+' "$BUILD_DIR/test.out" | tail -n 1 | sed -E 's/^.*Failed: ([0-9]+).*$/\1/')"
 fi
-logic_passed="$(sed -n 's/.*"total_passed": \([0-9][0-9]*\).*/\1/p' "$BUILD_DIR/test.out" | tail -n 1)"
-logic_failed="$(sed -n 's/.*"total_failed": \([0-9][0-9]*\).*/\1/p' "$BUILD_DIR/test.out" | tail -n 1)"
 if [ -z "$logic_passed" ]; then
     logic_passed=0
 fi
 if [ -z "$logic_failed" ]; then
     logic_failed=0
+fi
+if [ "$test_code" -eq 0 ] && [ "$logic_failed" -eq 0 ] && [ "$logic_passed" -gt 0 ]; then
+    logic_test_status=pass
 fi
 
 if grep -Fq 'fn host_compositor_apply_lifecycle_action(comp: HostCompositor, action: WmAction) -> HostCompositor:' "$HOST_SOURCE" \
