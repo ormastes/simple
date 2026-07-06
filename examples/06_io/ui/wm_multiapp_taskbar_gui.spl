@@ -62,85 +62,74 @@ fn app_palette(index: i32) -> u32:
     if i == 3: return 0xFFB55CE0u32   # purple
     0xFFE5533Du32                     # red
 
-# Distinct GPU content per app (each draw_rect_filled is one fast FFI dispatch).
-fn draw_app_content(b: MetalBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32):
-    b.draw_rect_filled(cx, cy, cw, ch, 0xFF10161Fu32)
-    if title == "Terminal":
-        b.draw_rect_filled(cx + 6, cy + 8, cw - 12, 6, 0xFF33B26Bu32)
-        b.draw_rect_filled(cx + 6, cy + 22, (cw - 12) * 3 / 4, 6, 0xFFB8C4D8u32)
-        b.draw_rect_filled(cx + 6, cy + 36, (cw - 12) / 2, 6, 0xFFB8C4D8u32)
-        b.draw_rect_filled(cx + 6, cy + 50, cw - 12, 6, 0xFF33B26Bu32)
-    else if title == "Editor":
-        b.draw_rect_filled(cx, cy, 16, ch, 0xFF1B2740u32)
-        b.draw_rect_filled(cx + 24, cy + 8, cw - 32, 6, 0xFFE5C33Du32)
-        b.draw_rect_filled(cx + 24, cy + 22, cw - 58, 6, 0xFF5CC0E0u32)
-        b.draw_rect_filled(cx + 38, cy + 36, cw - 72, 6, 0xFFB8C4D8u32)
-        b.draw_rect_filled(cx + 24, cy + 50, cw - 88, 6, 0xFF5CC0E0u32)
-    else if title == "File Manager":
-        b.draw_rect_filled(cx, cy, cw / 3, ch, 0xFF17202Eu32)
-        var r = 0
-        while r < 4:
-            b.draw_rect_filled(cx + cw / 3 + 8, cy + 8 + r * 14, cw * 2 / 3 - 16, 8, 0xFFB8C4D8u32)
-            r = r + 1
-    else if title == "Calculator":
-        b.draw_rect_filled(cx + 6, cy + 6, cw - 12, 14, 0xFF223A2Au32)
-        var rr = 0
-        while rr < 3:
-            var cc = 0
-            while cc < 4:
-                b.draw_rect_filled(cx + 6 + cc * ((cw - 12) / 4), cy + 26 + rr * 13, (cw - 12) / 4 - 3, 9, 0xFFD9822Bu32)
-                cc = cc + 1
-            rr = rr + 1
-    else:
-        b.draw_rect_filled(cx + 6, cy + 8, cw - 12, 6, 0xFFB8C4D8u32)
-
-# Bottom taskbar dock: one colored segment per window (ALL windows, incl.
-# minimized, exactly as host_taskbar_item_x / hit_taskbar enumerate them), the
-# focused item brightened + underlined. Geometry mirrors wm_lifecycle_hit_taskbar:
-# dock_y = H-62, band height 44.
-fn draw_taskbar(b: MetalBackend, comp: HostCompositor):
-    val count = comp.windows.len().to_i32()
-    if count <= 0:
-        return
-    val dock_w = host_taskbar_dock_width(W, count)
-    val dock_x = (W - dock_w) / 2
-    val dock_y = H - 62
-    b.draw_rect_filled(dock_x, dock_y, dock_w, 44, 0xFF10151Fu32)
-    val item_w = host_taskbar_item_width(W, count)
-    var i = 0
-    while i < count:
-        val win = comp.windows[i]
-        val ix = host_taskbar_item_x(W, count, i)
-        var color = app_palette(i)
-        if not win.focused:
-            # Dim unfocused items so the focused one is visibly distinct, but keep
-            # them saturated enough to read as a colored segment in the capture.
-            color = 0xFF000000u32 | ((color & 0xFEFEFEu32) >> 1u32)
-        b.draw_rect_filled(ix + 2, dock_y + 5, item_w - 4, 34, color)
-        if win.focused:
-            b.draw_rect_filled(ix + 2, dock_y + 40, item_w - 4, 3, 0xFFFFFFFFu32)
-        b.draw_text(ix + 8, dock_y + 12, win.title, 0xFFFFFFFFu32, 10)
-        i = i + 1
-
-# Draw one WM frame on the GPU from the REAL compositor window state.
-fn draw_scene(b: MetalBackend, comp: HostCompositor):
-    b.clear(BG)
+fn build_scene_pixels(comp: HostCompositor) -> [u32]:
+    var rx: [i32] = []
+    var ry: [i32] = []
+    var rw: [i32] = []
+    var rh: [i32] = []
+    var rc: [u32] = []
+    var pixels: [u32] = []
+    var pi = 0
+    while pi < W * H:
+        pixels.push(BG)
+        pi = pi + 1
     var i = 0
     while i < comp.windows.len():
         val w = comp.windows[i]
         if not w.minimized:
-            b.draw_rect_filled(w.x, w.y, w.w, w.h, 0xFF1E2836u32)
-            b.draw_rect_filled(w.x, w.y, w.w, 22, app_palette(i))
-            b.draw_text(w.x + 6, w.y + 5, w.title, 0xFFFFFFFFu32, 10)
-            b.draw_rect_filled(w.x + w.w - 20, w.y + 4, 14, 14, 0xFFE5533Du32)
-            draw_app_content(b, w.title, w.x + 4, w.y + 26, w.w - 8, w.h - 30)
+            rx.push(w.x); ry.push(w.y); rw.push(w.w); rh.push(w.h); rc.push(0xFF1E2836u32)
+            rx.push(w.x); ry.push(w.y); rw.push(w.w); rh.push(22); rc.push(app_palette(i))
         i = i + 1
-    draw_taskbar(b, comp)
+    val count = comp.windows.len().to_i32()
+    if count > 0:
+        val dock_w = host_taskbar_dock_width(W, count)
+        val dock_x = (W - dock_w) / 2
+        val dock_y = H - 62
+        rx.push(dock_x); ry.push(dock_y); rw.push(dock_w); rh.push(44); rc.push(0xFF10151Fu32)
+        val item_w = host_taskbar_item_width(W, count)
+        var ti = 0
+        while ti < count:
+            val win = comp.windows[ti]
+            val ix = host_taskbar_item_x(W, count, ti)
+            var color = app_palette(ti)
+            if not win.focused:
+                color = 0xFF000000u32 | ((color & 0xFEFEFEu32) >> 1u32)
+            rx.push(ix + 2); ry.push(dock_y + 5); rw.push(item_w - 4); rh.push(34); rc.push(color)
+            if win.focused:
+                rx.push(ix + 2); ry.push(dock_y + 40); rw.push(item_w - 4); rh.push(3); rc.push(0xFFFFFFFFu32)
+            ti = ti + 1
     # Locator frame LAST so it is never occluded (marks logical (0,0)-(W,H)).
-    b.draw_rect_filled(0, 0, W, LOCATOR_PX, LOCATOR)
-    b.draw_rect_filled(0, H - LOCATOR_PX, W, LOCATOR_PX, LOCATOR)
-    b.draw_rect_filled(0, 0, LOCATOR_PX, H, LOCATOR)
-    b.draw_rect_filled(W - LOCATOR_PX, 0, LOCATOR_PX, H, LOCATOR)
+    rx.push(0); ry.push(0); rw.push(W); rh.push(LOCATOR_PX); rc.push(LOCATOR)
+    rx.push(0); ry.push(H - LOCATOR_PX); rw.push(W); rh.push(LOCATOR_PX); rc.push(LOCATOR)
+    rx.push(0); ry.push(0); rw.push(LOCATOR_PX); rh.push(H); rc.push(LOCATOR)
+    rx.push(W - LOCATOR_PX); ry.push(0); rw.push(LOCATOR_PX); rh.push(H); rc.push(LOCATOR)
+    var ri = 0
+    while ri < rx.len():
+        var x0 = if rx[ri] < 0: 0 else: rx[ri]
+        var y0 = if ry[ri] < 0: 0 else: ry[ri]
+        var x1 = rx[ri] + rw[ri]
+        var y1 = ry[ri] + rh[ri]
+        if x1 > W: x1 = W
+        if y1 > H: y1 = H
+        var yy = y0
+        while yy < y1:
+            var idx = yy * W + x0
+            var xx = x0
+            while xx < x1:
+                pixels[idx] = rc[ri]
+                idx = idx + 1
+                xx = xx + 1
+            yy = yy + 1
+        ri = ri + 1
+    pixels
+
+# Draw one WM frame from the REAL compositor window state, then upload the full
+# scene to Metal as one blit. This avoids dozens of synchronous per-primitive
+# Metal command-buffer waits in the interpreted live GUI driver.
+fn draw_scene(b: MetalBackend, comp: HostCompositor):
+    val pixels = build_scene_pixels(comp)
+    b.clear(BG)
+    b.draw_image(0, 0, W, H, pixels)
     b.present()
 
 # Read back the GPU frame, pack to the [i64] form winit_present_rgba expects, and
@@ -153,10 +142,10 @@ fn render_and_present(b: MetalBackend, win: WinitWindow, lp: WinitLoop, comp: Ho
     if pixels.len() < W * H:
         print "[wm-multiapp] present state={state} FAIL readback_short={pixels.len()} want={W * H} gpu_frame_complete={frame_complete}"
         return false
-    var packed: [i64] = [0; pixels.len()]
+    var packed: [i64] = []
     var i = 0
     while i < pixels.len():
-        packed[i] = pixels[i].to_i64() & 0xFFFFFF
+        packed.push(pixels[i].to_i64() & 0xFFFFFF)
         i = i + 1
     winit_present_rgba(win, W.to_i64(), H.to_i64(), packed)
     val poll1 = winit_poll_input(lp)
@@ -197,29 +186,43 @@ fn main() -> i64:
         print "[wm-multiapp] error=no-gui-requested (launch via the gate)"
         return 2
 
+    print "[wm-multiapp] stage=metal-create"
+    var b = MetalBackend.create()
+    print "[wm-multiapp] stage=metal-init-begin"
+    if not b.init(W, H):
+        print "[wm-multiapp] error=metal-init-failed"
+        return 1
+    print "[wm-multiapp] stage=metal-init-ready"
+    b.use_gpu_only()
+    print "[wm-multiapp] stage=metal-gpu-only-ready"
+
     val lp = winit_loop_new()
     if not lp.is_valid:
         print "[wm-multiapp] error=no-gui-runtime"
+        b.shutdown()
         return 1
+    print "[wm-multiapp] stage=winit-loop-ready"
     val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "Simple WM — Multi-App")
     if not win.is_valid:
         print "[wm-multiapp] error=window-create-failed"
         winit_loop_free(lp)
+        b.shutdown()
         return 1
-    var b = MetalBackend.create()
-    if not b.init(W, H):
-        print "[wm-multiapp] error=metal-init-failed"
-        winit_window_free(win)
-        winit_loop_free(lp)
-        return 1
-    b.use_gpu_only()
+    print "[wm-multiapp] stage=winit-window-ready"
 
-    val backend = HeadlessHostCompositorBackend.new(W, H)
+    print "[wm-multiapp] stage=state-backend-create"
+    # This live evidence app uses HostCompositor as the authoritative WM state
+    # model, but draws the frame directly through Metal below. A 1x1 headless
+    # backend avoids allocating/copying an unused 512x384 software framebuffer
+    # on the interpreter hot path while preserving the compositor logical size.
+    val backend = HeadlessHostCompositorBackend.new(1, 1)
     # comp is `var`: launch_app mutates it in place (class params pass by
     # reference, so `me` apply_bridge_request persists), but the interaction free
     # functions (host_compositor_left_button_at / minimize) return a MODIFIED
     # compositor by value — their result must be captured back into comp.
+    print "[wm-multiapp] stage=host-compositor-create"
     var comp = HostCompositor.new(backend, Size.wh(W, H))
+    print "[wm-multiapp] stage=host-compositor-ready"
 
     # -----------------------------------------------------------------------
     # Launch four distinct GUI apps one at a time (markers show the taskbar count
