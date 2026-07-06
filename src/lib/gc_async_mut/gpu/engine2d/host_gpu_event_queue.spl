@@ -14,6 +14,7 @@ use std.gc_async_mut.gpu.engine2d.backend_lane.{
     ENGINE2D_HOST_GPU_LANE_HOST,
     Engine2dHostGpuLaneResult
 }
+use std.diag.{dbg_stage, dbg_stage_on, dbg_event_hop, dbg_events_on, dbg_count, dbg_counter_value}
 
 val ENGINE2D_HOST_GPU_RUNTIME_LANE_HOST: i64 = 1
 val ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU: i64 = 2
@@ -317,7 +318,13 @@ fn engine2d_host_gpu_event_submit_to_runtime_payload_text(queue: Engine2dHostGpu
     if decision.event.packet_bytes > queue.max_packet_bytes:
         return Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: "packet_too_large", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: 0, packet_bytes: decision.event.packet_bytes, payload_summary: "", diagnostic: "packet exceeds runtime queue limit")
     val packet_id = engine2d_host_gpu_runtime_emit_payload_text(ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU, ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR, decision.event.packet_bytes, queue.backend_handle, payload_hash, payload_text)
-    Engine2dHostGpuRuntimeSubmitResult(submitted: packet_id > 0, status: if packet_id > 0: "submitted" else: "emit_failed", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: packet_id, packet_bytes: decision.event.packet_bytes, payload_summary: "", diagnostic: decision.reason)
+    val emit_result = Engine2dHostGpuRuntimeSubmitResult(submitted: packet_id > 0, status: if packet_id > 0: "submitted" else: "emit_failed", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: packet_id, packet_bytes: decision.event.packet_bytes, payload_summary: "", diagnostic: decision.reason)
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "queued")
+        dbg_event_hop(decision.event.event_id, "enqueue", "status={emit_result.status} packet_id={packet_id} bytes={decision.event.packet_bytes}")
+    if emit_result.submitted:
+        dbg_count("host_gpu.queued", 1)
+    emit_result
 
 fn engine2d_host_gpu_runtime_submit_with_payload(result: Engine2dHostGpuRuntimeSubmitResult, payload_summary: text) -> Engine2dHostGpuRuntimeSubmitResult:
     Engine2dHostGpuRuntimeSubmitResult(submitted: result.submitted, status: result.status, queue_handle: result.queue_handle, event_id: result.event_id, packet_id: result.packet_id, packet_bytes: result.packet_bytes, payload_summary: payload_summary, diagnostic: result.diagnostic)
@@ -345,6 +352,11 @@ fn engine2d_host_gpu_runtime_submit_pending(queue: Engine2dHostGpuRuntimeQueue, 
         return Engine2dHostGpuRuntimePhaseResult(count: 0, status: "empty", queue_handle: queue.queue_handle, in_flight_count: engine2d_host_gpu_runtime_in_flight_count(), submitted_count: engine2d_host_gpu_runtime_submitted_count(), completed_count: engine2d_host_gpu_runtime_completed_count(), last_status_code: engine2d_host_gpu_runtime_last_status(), diagnostic: "no packets requested")
     val submitted = engine2d_host_gpu_runtime_submit(max_packets)
     val last_status = engine2d_host_gpu_runtime_last_status()
+    val submit_in_flight = engine2d_host_gpu_runtime_in_flight_count()
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "submitted")
+        dbg_event_hop("queue", "submit", "submitted={submitted} in_flight={submit_in_flight}")
+    dbg_count("host_gpu.submitted", submitted)
     Engine2dHostGpuRuntimePhaseResult(count: submitted, status: if submitted > 0: engine2d_host_gpu_runtime_status_name(last_status) else: "empty", queue_handle: queue.queue_handle, in_flight_count: engine2d_host_gpu_runtime_in_flight_count(), submitted_count: engine2d_host_gpu_runtime_submitted_count(), completed_count: engine2d_host_gpu_runtime_completed_count(), last_status_code: last_status, diagnostic: if submitted > 0: "submitted runtime queue" else: "runtime queue empty")
 
 fn engine2d_host_gpu_runtime_complete_pending(queue: Engine2dHostGpuRuntimeQueue, max_packets: i64) -> Engine2dHostGpuRuntimePhaseResult:
@@ -354,6 +366,11 @@ fn engine2d_host_gpu_runtime_complete_pending(queue: Engine2dHostGpuRuntimeQueue
         return Engine2dHostGpuRuntimePhaseResult(count: 0, status: "empty", queue_handle: queue.queue_handle, in_flight_count: engine2d_host_gpu_runtime_in_flight_count(), submitted_count: engine2d_host_gpu_runtime_submitted_count(), completed_count: engine2d_host_gpu_runtime_completed_count(), last_status_code: engine2d_host_gpu_runtime_last_status(), diagnostic: "no packets requested")
     val completed = engine2d_host_gpu_runtime_complete(max_packets)
     val last_status = engine2d_host_gpu_runtime_last_status()
+    val complete_in_flight = engine2d_host_gpu_runtime_in_flight_count()
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "completed")
+        dbg_event_hop("queue", "complete", "completed={completed} in_flight={complete_in_flight}")
+    dbg_count("host_gpu.completed", completed)
     Engine2dHostGpuRuntimePhaseResult(count: completed, status: if completed > 0: engine2d_host_gpu_runtime_status_name(last_status) else: "empty", queue_handle: queue.queue_handle, in_flight_count: engine2d_host_gpu_runtime_in_flight_count(), submitted_count: engine2d_host_gpu_runtime_submitted_count(), completed_count: engine2d_host_gpu_runtime_completed_count(), last_status_code: last_status, diagnostic: if completed > 0: "completed runtime queue" else: "runtime queue empty")
 
 fn engine2d_host_gpu_runtime_drain(queue: Engine2dHostGpuRuntimeQueue, max_packets: i64) -> Engine2dHostGpuRuntimeDrainResult:
@@ -364,6 +381,10 @@ fn engine2d_host_gpu_runtime_drain(queue: Engine2dHostGpuRuntimeQueue, max_packe
     val drained = engine2d_host_gpu_runtime_drain_packets(max_packets)
     val last_status = engine2d_host_gpu_runtime_last_status()
     val status = if drained <= 0: "empty" else: engine2d_host_gpu_runtime_status_name(last_status)
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "drain")
+        dbg_event_hop("queue", "drain", "drained={drained} status={status}")
+    dbg_count("host_gpu.drained", drained)
     Engine2dHostGpuRuntimeDrainResult(drained: drained, status: status, queue_handle: queue.queue_handle, last_backend_handle: if drained > 0: engine2d_host_gpu_runtime_last_backend_handle() else: 0, last_payload_size: if drained > 0: engine2d_host_gpu_runtime_last_payload_size() else: 0, last_payload_hash: if drained > 0: engine2d_host_gpu_runtime_last_payload_hash() else: 0, last_payload_text: if drained > 0: engine2d_host_gpu_runtime_last_payload_text() else: "", submitted_count: engine2d_host_gpu_runtime_submitted_count(), completed_count: engine2d_host_gpu_runtime_completed_count(), last_status_code: last_status, diagnostic: if drained > 0: "drained runtime queue" else: "runtime queue empty")
 
 fn engine2d_host_gpu_runtime_drain_summary(result: Engine2dHostGpuRuntimeDrainResult) -> text:
@@ -388,6 +409,18 @@ fn engine2d_host_gpu_runtime_dispatch_draw_ir(queue: Engine2dHostGpuRuntimeQueue
 
 fn engine2d_host_gpu_runtime_dispatch_summary(result: Engine2dHostGpuRuntimeDispatchResult) -> text:
     "dispatched={result.dispatched};status={result.status};backend={result.backend_name};queue_handle={result.queue_handle};backend_handle={result.backend_handle};payload_size={result.payload_size};payload_hash={result.payload_hash};diagnostic={result.diagnostic}"
+
+# Debug accessor: reads the std.diag queue counters through accessor functions
+# (module globals are only visible via accessors in the interpreter). Counters
+# only accumulate when the `timers` diag facet is enabled; otherwise this is a
+# zeroed snapshot. Honest counts only — no fabricated timing.
+fn engine2d_host_gpu_diag_summary() -> text:
+    val queued = dbg_counter_value("host_gpu.queued")
+    val submitted = dbg_counter_value("host_gpu.submitted")
+    val completed = dbg_counter_value("host_gpu.completed")
+    val drained = dbg_counter_value("host_gpu.drained")
+    val dispatched = dbg_counter_value("host_gpu.dispatched")
+    "queued={queued};submitted={submitted};completed={completed};drained={drained};dispatched={dispatched}"
 
 export Engine2dHostGpuEvent
 export Engine2dHostGpuHandlerDecision
@@ -438,3 +471,4 @@ export engine2d_host_gpu_runtime_drain
 export engine2d_host_gpu_runtime_drain_summary
 export engine2d_host_gpu_runtime_dispatch_draw_ir
 export engine2d_host_gpu_runtime_dispatch_summary
+export engine2d_host_gpu_diag_summary
