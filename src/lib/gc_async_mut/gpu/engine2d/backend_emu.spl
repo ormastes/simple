@@ -20,6 +20,7 @@ Usage:
 
 use std.gpu.engine2d.backend.{RenderBackend}
 use std.gpu.engine2d.glyph.{glyph_data, glyph_width, glyph_height, glyph_advance}
+use std.gpu.engine2d.helpers_text.{text_aa_blit_buffer}
 use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
 use std.gpu.engine2d.backend_emu_math.{
     _emu_abs, _emu_min, _emu_max, _emu_isqrt, _emu_blend_over,
@@ -274,42 +275,28 @@ fn emu_draw_gradient_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i3
 # ============================================================================
 
 fn emu_draw_text(mut core: RenderBackend, x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-    val gh = glyph_height()
-    var scale = font_size / gh
-    if scale < 1:
-        scale = 1
-    val advance = glyph_advance(scale)
-
-    var cursor_x = x
-    var i: i32 = 0
-    val text_len = text_val.len()
-    while i < text_len:
-        val ch = text_val.char_at(i)
-        if ch != " ":
-            core.draw_rect_filled(cursor_x, y, 3 * scale, scale, color)
-            core.draw_rect_filled(cursor_x, y + 3 * scale, 3 * scale, scale, color)
-            core.draw_rect_filled(cursor_x, y + 6 * scale, 3 * scale, scale, color)
-            core.draw_rect_filled(cursor_x, y, scale, 7 * scale, color)
-            core.draw_rect_filled(cursor_x + 4 * scale, y, scale, 7 * scale, color)
-
-        cursor_x = cursor_x + advance
-        i = i + 1
+    # Delegate to the real backend's 5x7 glyph blit. draw_text is a RenderBackend
+    # trait method, so this renders genuine glyphs byte-identical to the backend's
+    # own draw_text. Previously stamped an identical placeholder box for every
+    # character (a fake). See
+    # doc/08_tracking/bug/engine2d_emu_draw_text_placeholder_box_stub_2026-07-06.md
+    core.draw_text(x, y, text_val, color, font_size)
 
 # ============================================================================
 # Text with Background — bg fill + text overlay
 # ============================================================================
 
 fn emu_draw_text_bg(mut core: RenderBackend, x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
-    val gh = glyph_height()
-    var scale = font_size / gh
-    if scale < 1:
-        scale = 1
-    val advance = glyph_advance(scale)
-    val text_w = text_val.len().to_i32() * advance
-    val text_h = gh * scale
-
-    core.draw_rect_filled(x, y, text_w, text_h, bg)
-    emu_draw_text(core, x, y, text_val, fg, font_size)
+    # Delegate to the real anti-aliased text-on-background blit, byte-identical
+    # to SoftwareBackend.draw_text_bg. Previously stamped a placeholder box per
+    # glyph over a bg fill (a fake). A naive bg-rect + non-AA core.draw_text does
+    # NOT match the AA path (payload height max(font_size, glyph_px) + coverage-
+    # blended edges), so we build the same AA payload and blit it via draw_image.
+    # doc/08_tracking/bug/engine2d_emu_draw_text_placeholder_box_stub_2026-07-06.md
+    val text_buf = text_aa_blit_buffer(text_val, fg, bg, font_size)
+    if text_buf.is_empty():
+        return
+    core.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
 
 # ============================================================================
 # Ellipse Outline — Midpoint ellipse algorithm
