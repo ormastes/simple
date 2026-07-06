@@ -1053,3 +1053,60 @@ Stage 4: compiling full CLI (main.spl) with bootstrap compiler...
 Do not rerun the same deploy command without first fixing the Stage 2 bootstrap
 LLVM failure or changing the bootstrap path; it currently falls back to the slow
 seed Stage 4 and times out before producing a deployable `bin/simple`.
+
+### Latest bootstrap progress: pointer null return fixed (2026-07-06)
+
+The first preserved Stage 2 LLVM failure was narrowed and fixed:
+
+```text
+llc /tmp/simple_llvm_953643.ll -filetype=obj
+# error: integer constant must have integer type
+#   ret ptr 0
+```
+
+MIR-to-LLVM return lowering now emits `ret ptr null` for pointer-typed zero
+returns. Focused evidence:
+
+```text
+PASS test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl
+llc accepts a minimal `ret ptr null` module
+```
+
+Manually applying that substitution to the preserved Stage 2 IR moves `llc` to
+the next blocker:
+
+```text
+error: use of undefined value '@.str.0'
+```
+
+Follow-up source change mirrors string globals into a text accumulator and
+flushes that accumulator for the bootstrap MIR-to-LLVM path. Next proof step is
+a bounded Stage 2 probe to see whether `llc` moves past the undefined `@.str.0`
+diagnostic.
+
+### Latest bootstrap progress: Stage 2 now blocked by empty entry HIR/MIR (2026-07-06)
+
+The corrected Stage 2-only probe uses `--mode dynload` instead of the invalid
+`--mode leaf`. Focused evidence is green:
+
+```text
+PASS test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl
+3 examples, 0 failures
+```
+
+That spec now covers textual LLVM pointer returns, bootstrap string-global
+flushing, and the sibling libLLVM pointer-zero constant path.
+
+The bounded Stage 2 probe moved past the previous `ret ptr 0` and undefined
+`@.str.0` LLVM failures. It now stops at the already tracked fail-closed guard:
+
+```text
+[hir-lower] functions:count 0
+[hir-lower] bootstrap-functions:count 0
+error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)
+error: refusing to emit a stub-only bootstrap binary; real Simple lowering produced no bodies
+```
+
+RV32 firmware production proof therefore remains open. Do not rerun the full
+bootstrap/deploy loop until the bootstrap entry source-loading/HIR path
+produces real functions in Stage 2.

@@ -73,7 +73,11 @@ impl MirTextCodegen for MirToLlvm:
                 if not self.defined_func_names.has(unknown_name):
                     self.builder.emit("declare i64 @{unknown_name}(...)")
 
-        if self.string_globals.len() > 0:
+        if self.string_global_text.len() > 0:
+            self.builder.emit("")
+            self.builder.emit("; String constants")
+            self.builder.emit(self.string_global_text)
+        elif self.string_globals.len() > 0:
             self.builder.emit("")
             self.builder.emit("; String constants")
             for global_decl in self.string_globals:
@@ -276,6 +280,11 @@ impl MirTextCodegen for MirToLlvm:
             case Nop: ()
             case _: self.translate_unsupported(inst)
 
+    fn ret_value_for_type(ret_ty: text, value: text) -> text:
+        if ret_ty.len() == 3 and ret_ty.starts_with("ptr") and value.len() == 1 and value.starts_with("0"):
+            return "null"
+        value
+
     me translate_terminator(term: MirTerminator):
         """Translate a block terminator."""
         match term:
@@ -287,7 +296,8 @@ impl MirTextCodegen for MirToLlvm:
                                 case Const(const_value, const_type):
                                     match const_value:
                                         case Int(v):
-                                            self.builder.emit_ret(self.llvm_type_text(const_type), "{v}")
+                                            val const_ret_ty = self.llvm_type_text(const_type)
+                                            self.builder.emit_ret(const_ret_ty, self.ret_value_for_type(const_ret_ty, "{v}"))
                                             return
                                 case _:
                                     ()
@@ -298,19 +308,19 @@ impl MirTextCodegen for MirToLlvm:
                                     self.builder.emit("  unreachable")
                                     return
                                 if self.return_locals.has(return_local_id) or not self.local_types.has(return_local_id):
-                                    self.builder.emit_ret(self.current_return_type, "0")
+                                    self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
                                     return
                             case _:
                                 ()
                         val val_str = self.translate_operand(ret_operand)
                         val maybe_ret_ty = self.get_operand_type(ret_operand)
                         val ret_ty = if maybe_ret_ty == nil: self.native_int() else: maybe_ret_ty
-                        self.builder.emit_ret(ret_ty, val_str)
+                        self.builder.emit_ret(ret_ty, self.ret_value_for_type(ret_ty, val_str))
                     nil:
                         if self.current_return_type == "void":
                             self.builder.emit_ret_void()
                         else:
-                            self.builder.emit_ret(self.current_return_type, "0")
+                            self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
 
             case Goto(target):
                 self.builder.emit_br("bb{self.block_id_value(target)}")

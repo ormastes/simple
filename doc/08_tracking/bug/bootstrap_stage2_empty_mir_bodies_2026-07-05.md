@@ -140,3 +140,90 @@ rm -rf .simple/native_cache/
 intended fail-closed behavior, but callers that previously tolerated the empty
 stage-2 binary (and fell back to the seed for stage 4 per LIM-010) will now see a
 hard stage-2 error until the Remaining Work above is completed.
+
+## 2026-07-06 Progress: pointer null return IR fixed
+
+The preserved Stage 2 IR failed first on invalid opaque-pointer return syntax:
+
+```text
+llc /tmp/simple_llvm_953643.ll -filetype=obj
+llc: /tmp/simple_llvm_953643.ll:8:11: error: integer constant must have integer type
+  ret ptr 0
+          ^
+```
+
+Fix: MIR-to-LLVM return lowering now formats pointer-typed zero returns as
+`ret ptr null`, including the bootstrap const-return fast path and default
+return fallbacks.
+
+Focused evidence:
+
+```text
+PASS test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl
+llc_null_rc=0  # for a minimal `ret ptr null` module
+```
+
+Applying the equivalent substitution to `/tmp/simple_llvm_953643.ll` moves `llc`
+to the next bootstrap IR blocker:
+
+```text
+llc: /tmp/simple_llvm_953643_nullfix.ll:16:47: error: use of undefined value '@.str.0'
+  %l3 = getelementptr inbounds [73 x i8], ptr @.str.0, i64 0, i64 0
+                                              ^
+```
+
+Follow-up fix: MIR-to-LLVM now mirrors string global declarations into a plain
+text accumulator and flushes that text before `llc`, avoiding the compiled
+bootstrap path that advanced `string_counter` but lost the array-backed
+`string_globals` collection.
+
+Focused evidence:
+
+```text
+PASS test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl
+```
+
+Next work: rerun the bounded Stage 2 bootstrap probe and record the next `llc`
+diagnostic, if any.
+
+## 2026-07-06 Progress: bounded Stage 2 probe moved past pointer/string LLVM blockers
+
+Corrected the Stage 2-only probe to use a valid native-build mode:
+`--mode dynload` (`leaf` is not accepted; valid modes are `dynload` and
+`one-binary`).
+
+Focused fixes now covered by
+`test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl`:
+
+```text
+PASS test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl
+3 examples, 0 failures
+```
+
+The three checks cover:
+
+- textual LLVM `ret ptr null` instead of `ret ptr 0`;
+- bootstrap-safe string global text mirroring before object compilation;
+- libLLVM pointer-typed integer zero constants using the LLVM null path.
+
+The corrected bounded Stage 2 probe no longer reports the prior preserved
+`llc` diagnostics for `ret ptr 0` or undefined `@.str.0`. It now fails earlier
+on the existing real-body guard:
+
+```text
+error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)
+error: refusing to emit a stub-only bootstrap binary; real Simple lowering produced no bodies
+error: native-build worker exited with code 1 (no binary produced).
+```
+
+Latest log context shows the bootstrap HIR lowering path still sees zero entry
+functions in this run:
+
+```text
+[hir-lower] functions:count 0
+[hir-lower] bootstrap-functions:count 0
+```
+
+Next work: fix why the Stage 2 source-loading/flat-AST/HIR path presents
+`app.cli.bootstrap_main` with zero `module.functions` even though the source
+contains real entry functions.
