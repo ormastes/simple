@@ -269,11 +269,21 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 }
             }
             other if other.starts_with("--mode=") => {
-                build_mode = other.strip_prefix("--mode=").unwrap_or("dynload").to_string();
+                let value = other.strip_prefix("--mode=").unwrap_or("");
+                build_mode = if value.is_empty() {
+                    "dynload".to_string()
+                } else {
+                    value.to_string()
+                };
                 i += 1;
             }
             other if other.starts_with("--build-mode=") => {
-                build_mode = other.strip_prefix("--build-mode=").unwrap_or("dynload").to_string();
+                let value = other.strip_prefix("--build-mode=").unwrap_or("");
+                build_mode = if value.is_empty() {
+                    "dynload".to_string()
+                } else {
+                    value.to_string()
+                };
                 i += 1;
             }
             "--entry-closure" => {
@@ -620,7 +630,7 @@ fn print_help() {
     println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
     println!("  --list-optimizations Print implemented optimization groups and levels");
     println!("  --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap)");
-    println!("  --mode <name>       Pure-Simple build mode: dynload or one-binary");
+    println!("  --mode <name>       Pure-Simple build mode: dynload (default) or one-binary");
     println!("  --emit-archive     Emit a static archive from Simple objects instead of linking an executable");
     println!("  --entry-closure     Compile only modules reachable from --entry");
     println!("  --help, -h          Show this help");

@@ -40,7 +40,8 @@ Options:
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
   --verbose          Accepted for compatibility
-  --jobs=<n>         Accepted for compatibility
+  --jobs=<n|full|half|min|auto>
+                     Native build workers (default: half CPUs locally, 2 on GitHub Actions)
   --no-mcp           Skip MCP server builds (Stage 5)
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs
@@ -84,6 +85,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --mode=*)
       bootstrap_mode=${1#*=}
+      if [ -z "${bootstrap_mode}" ]; then
+        bootstrap_mode=dynload
+      fi
       ;;
     --mode)
       shift
@@ -189,7 +193,46 @@ echo "Platform: ${PLATFORM}"
 log_dir="${output_dir}/logs/${PLATFORM}"
 mkdir -p "${log_dir}"
 
-native_cache_dir=".simple/native_cache"
+host_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 2)
+case "${host_cpus}" in
+  ''|*[!0-9]*) host_cpus=2 ;;
+esac
+case "${jobs}" in
+  ""|auto)
+    jobs=""
+    ;;
+  full)
+    jobs="${host_cpus}"
+    ;;
+  half)
+    jobs=$((host_cpus / 2))
+    if [ "${jobs}" -lt 1 ]; then
+      jobs=1
+    fi
+    ;;
+  min|minimal|minimum)
+    jobs=1
+    ;;
+esac
+if [ -z "${jobs}" ]; then
+  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    jobs=2
+  else
+    jobs=$((host_cpus / 2))
+    if [ "${jobs}" -lt 1 ]; then
+      jobs=1
+    fi
+  fi
+fi
+case "${jobs}" in
+  ''|*[!0-9]*|0)
+    echo "error: --jobs must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus})"
+
+native_cache_dir="${output_dir}/native_cache"
 native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
 
 bootstrap_wide_inputs_hash() {
@@ -398,6 +441,7 @@ else
     --backend cranelift \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
+    --threads "${jobs}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
@@ -428,6 +472,7 @@ else
     --backend "${backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
+    --threads "${jobs}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
@@ -515,6 +560,7 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
     --backend "${stage4_backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
+    --threads "${jobs}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
@@ -526,6 +572,7 @@ else
     --backend "${stage4_backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
+    --threads "${jobs}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
@@ -574,6 +621,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       --backend "${stage4_backend}" \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure \
+      --threads "${jobs}" \
       --mode "${bootstrap_mode}" \
       --entry "${mcp_spl}" \
       --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \

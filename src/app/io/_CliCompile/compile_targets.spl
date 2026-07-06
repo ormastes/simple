@@ -377,6 +377,8 @@ fn cli_native_build(args: [text]) -> i64:
             print "  --emit-object        Emit relocatable object output instead of linking executable"
             print "  --runtime-bundle <mode> Runtime lane: auto, simple-core, core-c-bootstrap"
             print "  --entry-closure      Compile only modules reachable from --entry"
+            print "  --threads <n>        Native build workers"
+            print "  --jobs <n>, -j <n>   Alias for --threads"
             print "  --log <on|off>       Compile normal SimpleOS logging in or out"
             print "  --verbose, -v        Verbose output"
             return 0
@@ -447,6 +449,7 @@ fn cli_native_build(args: [text]) -> i64:
         var opt_level = cli_native_default_opt_level()
         var native_target = ""
         var build_mode = "dynload"
+        var native_threads = 0
         var optimization_requested = false
         var j = 0
         # Skip "native-build" command name
@@ -498,6 +501,25 @@ fn cli_native_build(args: [text]) -> i64:
                 emit_smf = true
             elif a == "--emit-object":
                 emit_object = true
+            elif a == "--threads" or a == "--jobs" or a == "-j":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: {a} requires a positive integer")
+                    return 1
+                j = j + 1
+                native_threads = args[j].to_i64() ?? 0
+                if native_threads <= 0:
+                    _cli_eprint("Error: {a} requires a positive integer")
+                    return 1
+            elif a.starts_with("--threads="):
+                native_threads = a.substring(10).to_i64() ?? 0
+                if native_threads <= 0:
+                    _cli_eprint("Error: --threads requires a positive integer")
+                    return 1
+            elif a.starts_with("--jobs="):
+                native_threads = a.substring(7).to_i64() ?? 0
+                if native_threads <= 0:
+                    _cli_eprint("Error: --jobs requires a positive integer")
+                    return 1
             elif a == "--mode" or a == "--build-mode":
                 if j + 1 >= args.len():
                     _cli_eprint("Error: --mode requires dynload or one-binary")
@@ -506,8 +528,12 @@ fn cli_native_build(args: [text]) -> i64:
                 build_mode = args[j]
             elif a.starts_with("--mode="):
                 build_mode = a.substring(7)
+                if build_mode == "":
+                    build_mode = "dynload"
             elif a.starts_with("--build-mode="):
                 build_mode = a.substring(13)
+                if build_mode == "":
+                    build_mode = "dynload"
             elif a.starts_with("--target="):
                 native_target = a.substring(9)
             elif a == "--target":
@@ -609,15 +635,20 @@ fn cli_native_build(args: [text]) -> i64:
         val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
         val old_emit_object = env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? ""
         val old_native_arena_decls = env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_native_threads = env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? ""
         if not env_set("SIMPLE_OS_LOG_MODE", log_mode):
             _cli_eprint("Error: could not export SIMPLE_OS_LOG_MODE={log_mode}")
             return 1
         env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", if emit_object: "1" else: "")
+        if native_threads > 0:
+            env_set("SIMPLE_NATIVE_BUILD_THREADS", "{native_threads}")
         env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")
         if not env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_point):
             env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
             env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
             env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+            if native_threads > 0:
+                env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
             _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_ENTRY={entry_point}")
             return 1
         env_set("SIMPLE_NATIVE_BUILD_TARGET", native_target)
@@ -699,6 +730,8 @@ fn cli_native_build(args: [text]) -> i64:
                     env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                     env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
                     env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                    if native_threads > 0:
+                        env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
                     _cli_eprint("error: native-build reported success but produced no output binary: {output}")
                     _cli_eprint("  (compiler driver returned Success without writing the expected file -- treating as a hard failure, not a silent success)")
                     return 1
@@ -709,11 +742,15 @@ fn cli_native_build(args: [text]) -> i64:
                     env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                     env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
                     env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                    if native_threads > 0:
+                        env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
                     _cli_eprint("Error: failed to write launch metadata sidecar: {metadata_path}")
                     return 1
                 env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
                 env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                if native_threads > 0:
+                    env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
                 if verbose:
                     _cli_eprint("[native-build] Build successful: {output}")
                     _cli_eprint("[native-build] Launch metadata: {metadata_path}")
@@ -722,6 +759,8 @@ fn cli_native_build(args: [text]) -> i64:
                 env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
                 env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                if native_threads > 0:
+                    env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
                 val errors = result.get_errors()
                 if errors.len() == 0:
                     _cli_eprint("error: native-build failed without diagnostics")
