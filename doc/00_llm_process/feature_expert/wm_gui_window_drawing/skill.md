@@ -346,6 +346,15 @@ Hard-won lessons for this live lane (each cost hours):
   path is unexercised by this lane. The spec runner's metal-skip path (when no
   Metal device is available on a host) prints a `SKIP:` line rather than
   failing — keep that visibility when extending the contract spec.
+- **Bulk GPU pixel upload for the deployed binary (task #28-B):** opt-in
+  `SIMPLE_BULK_UPLOAD=cdylib` mode in `backend_metal.spl`'s
+  `bulk_upload_u32s` stages pixels through the sibling `spl_gpu_transfer`
+  cdylib (16 px/FFI call) instead of the one-call `SIMPLE_ONE_CALL_UPLOAD`
+  path, because the deployed binary lacks `rt_write_u32s_to_raw`. See
+  `doc/08_tracking/bug/deployed_binary_interp_extern_and_module_table_constraints_2026-07-07.md`
+  for why this had to be a cdylib + inline module wiring rather than a new
+  stdlib module, and for the general interpret-mode-extern /
+  baked-module-table constraints behind it.
 
 ## Update Rule
 

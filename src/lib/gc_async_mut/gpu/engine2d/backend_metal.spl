@@ -26,6 +26,98 @@ extern fn rt_free(ptr: i64) -> i64
 extern fn rt_ptr_write_i32(ptr: i64, offset: i64, value: i64) -> i64
 extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
 
+# SFFI sibling-cdylib bridge for the bulk pixel-upload path (SIMPLE_BULK_UPLOAD
+# =cdylib). These externs ARE registered on the deployed self-hosted binary
+# (verified 2026-07-06); the one-call upload extern rt_write_u32s_to_raw is NOT,
+# which is why draw_image degrades to one FFI round-trip per pixel by default.
+extern fn spl_dlopen(path: text) -> i64
+extern fn spl_dlsym(handle: i64, name: text) -> i64
+extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+
+# Lazy process-global cache for the spl_gpu_transfer cdylib. -2 = not yet
+# attempted, -1 = attempted and failed, >= 0 = loaded dlopen handle. The
+# interpreter is single-threaded during a frame paint, so this state is
+# race-free. (Kept inline in this module — the deployed binary only discovers
+# stdlib modules baked in at its build time, so a fresh sibling module would be
+# invisible; a new file inside an already-known module is fine.)
+var _bulk_handle: i64 = -2
+var _bulk_begin: i64 = 0
+var _bulk_write8: i64 = 0
+var _bulk_write1: i64 = 0
+
+fn _bulk_candidate_paths() -> [text]:
+    var out: [text] = []
+    val override = env_get("SIMPLE_SPL_GPU_TRANSFER_PATH") ?? ""
+    if override != "":
+        out.push(override)
+    out.push("build/sffi/libspl_gpu_transfer.dylib")
+    out.push("build/sffi/libspl_gpu_transfer.so")
+    out.push("build/sffi/libspl_gpu_transfer.dll")
+    out
+
+fn _bulk_ensure_loaded() -> bool:
+    if _bulk_handle == -1:
+        return false
+    if _bulk_handle >= 0:
+        return true
+    var h: i64 = 0
+    val paths = _bulk_candidate_paths()
+    var pi = 0
+    while pi < paths.len() and h == 0:
+        h = spl_dlopen(paths[pi])
+        pi = pi + 1
+    if h == 0:
+        _bulk_handle = -1
+        return false
+    val fb = spl_dlsym(h, "spl_gpu_stage_begin")
+    val fw8 = spl_dlsym(h, "spl_gpu_stage_write8")
+    val fw1 = spl_dlsym(h, "spl_gpu_stage_write1")
+    if fb == 0 or fw8 == 0 or fw1 == 0:
+        _bulk_handle = -1
+        return false
+    _bulk_handle = h
+    _bulk_begin = fb
+    _bulk_write8 = fw8
+    _bulk_write1 = fw1
+    true
+
+# Copy `count` u32 pixels from `pixels` into host byte buffer `host` (little-
+# endian, pixel i at host+i*4) via the spl_gpu_transfer cdylib, 16 pixels per
+# FFI call. Byte layout is identical to the per-pixel metal_host_write_i32 loop
+# (a packed i64 carries two pixels as lo | (hi << 32), stored little-endian), so
+# the result is bit-exact. Returns false if the cdylib is unavailable — the
+# caller raises a loud error rather than silently falling back per-pixel.
+fn bulk_upload_u32s(host: i64, pixels: [u32], count: i64) -> bool:
+    if not _bulk_ensure_loaded():
+        return false
+    spl_wffi_call_i64(_bulk_begin, [host], 1)
+    val n = count.to_i32()
+    val n16 = (n / 16) * 16
+    var j = 0
+    while j < n16:
+        val a = pixels[j].to_i64() | (pixels[j + 1].to_i64() << 32)
+        val b = pixels[j + 2].to_i64() | (pixels[j + 3].to_i64() << 32)
+        val c = pixels[j + 4].to_i64() | (pixels[j + 5].to_i64() << 32)
+        val d = pixels[j + 6].to_i64() | (pixels[j + 7].to_i64() << 32)
+        val e = pixels[j + 8].to_i64() | (pixels[j + 9].to_i64() << 32)
+        val f = pixels[j + 10].to_i64() | (pixels[j + 11].to_i64() << 32)
+        val g = pixels[j + 12].to_i64() | (pixels[j + 13].to_i64() << 32)
+        val hh = pixels[j + 14].to_i64() | (pixels[j + 15].to_i64() << 32)
+        spl_wffi_call_i64(_bulk_write8, [a, b, c, d, e, f, g, hh], 8)
+        j = j + 16
+    while j < n:
+        if j + 1 < n:
+            val v = pixels[j].to_i64() | (pixels[j + 1].to_i64() << 32)
+            spl_wffi_call_i64(_bulk_write1, [(j * 4).to_i64(), v], 2)
+        else:
+            # Lone trailing pixel (odd total_pixels): spl_gpu_stage_write1
+            # always performs an 8-byte store, which would write 4 bytes past
+            # the end of a host buffer sized exactly total_pixels*4 bytes.
+            # Use the existing 4-byte-safe path for this final pixel instead.
+            metal_host_write_i32(host, j * 4, pixels[j].to_i64())
+        j = j + 2
+    true
+
 # High-resolution (antialiased) text uses the VGA 8x16 glyph provider — the same
 # glyph source the shared font rasterizer uses — as a coverage field that is
 # bilinearly upsampled to the target pixel size (smooth glyph edges), instead of
@@ -577,6 +669,15 @@ impl MetalBackend:
             val wrote = metal_write_u32s_to_ptr(host, pixels)
             if wrote < total_pixels:
                 metal_host_free(host)
+                return false
+        elif (env_get("SIMPLE_BULK_UPLOAD") ?? "") == "cdylib":
+            # Sibling-cdylib bulk staging (16 px per FFI call) — works on the
+            # DEPLOYED binary, which lacks the rt_write_u32s_to_raw one-call
+            # upload extern. Loud error (not a silent per-pixel fallback) if the
+            # cdylib is missing while the mode is explicitly requested.
+            if not bulk_upload_u32s(host, pixels, total_pixels):
+                metal_host_free(host)
+                print "backend_metal: SIMPLE_BULK_UPLOAD=cdylib requested but libspl_gpu_transfer could not be loaded — build it with: sh scripts/build/build_spl_gpu_transfer.shs (or set SIMPLE_SPL_GPU_TRANSFER_PATH)"
                 return false
         else:
             var i: i64 = 0
