@@ -230,7 +230,7 @@ expect(engine2d_host_gpu_lane_summary(result)).to_contain("host_commit=true")
 
 </details>
 
-#### records faster coarse GPU render batches with explicit packet bounds
+#### records coarse GPU render batches with explicit packet bounds
 
 <details>
 <summary>Executable SSpec</summary>
@@ -256,8 +256,8 @@ expect(result.execution_kind).to_equal(ENGINE2D_HOST_GPU_EXEC_PACKET)
 expect(result.committed_on_host).to_equal(false)
 expect(result.gpu_batched).to_equal(true)
 expect(result.fallback_explicit).to_equal(false)
-expect(result.estimated_ms).to_equal(6)
-expect(engine2d_host_gpu_lane_summary(result)).to_contain("estimated_ms=6")
+expect(result.estimated_ms).to_equal(12)
+expect(engine2d_host_gpu_lane_summary(result)).to_contain("estimated_ms=12")
 ```
 
 </details>

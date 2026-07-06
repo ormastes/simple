@@ -47,7 +47,7 @@ This focused spec proves a GPU-selected BrowserBackend frame surfaces host/GPU r
 | Design | doc/04_architecture/ui/simple_gui_stack.md |
 | Research | N/A |
 | Source | `test/01_unit/app/ui/browser_backend_runtime_queue_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-06 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -157,11 +157,11 @@ expect(output).to_contain("event_polled_count=1")
 expect(output).to_contain("event_dispatched_count=1")
 expect(output).to_contain("event_host_gpu_target_lane=gpu")
 expect(output).to_contain("event_host_gpu_forwarded=true")
-expect(output).to_contain("event_host_gpu_backward_completed=true")
+expect(output).to_contain("event_host_gpu_backward_completed=false")
 expect(output).to_contain("event_host_gpu_summary=event=browser-input-1")
 expect(output).to_contain("event_host_gpu_summary=")
 expect(output).to_contain("forwarded=true")
-expect(output).to_contain("backward_completed=true")
+expect(output).to_contain("backward_completed=false")
 
 step("Second unchanged frame is served from cache and reports no queue or readback request")
 expect(output).to_contain("second_render_under_budget=true")

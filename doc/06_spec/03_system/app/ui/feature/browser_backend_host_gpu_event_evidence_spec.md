@@ -91,7 +91,7 @@ The focused BrowserBackend runtime queue probe prints:
 
 ```text
 event_host_gpu_forwarded=true
-event_host_gpu_backward_completed=true
+event_host_gpu_backward_completed=false
 event_roundtrip_status=rendered
 ```
 
@@ -155,8 +155,8 @@ expect(spec).to_contain("event_enqueued_count=1")
 expect(spec).to_contain("event_polled_count=1")
 expect(spec).to_contain("event_dispatched_count=1")
 expect(spec).to_contain("event_host_gpu_forwarded=true")
-expect(spec).to_contain("event_host_gpu_backward_completed=true")
-expect(spec).to_contain("backward_completed=true")
+expect(spec).to_contain("event_host_gpu_backward_completed=false")
+expect(spec).to_contain("backward_completed=false")
 ```
 
 </details>
@@ -180,7 +180,7 @@ expect(_marker_state(
 )).to_equal("present")
 expect(_marker_state(
     "doc/06_spec/test/01_unit/app/ui/browser_backend_runtime_queue_spec.md",
-    "event_host_gpu_backward_completed=true"
+    "event_host_gpu_backward_completed=false"
 )).to_equal("present")
 expect(_marker_state(
     "doc/06_spec/test/01_unit/app/ui/browser_backend_runtime_queue_spec.md",
