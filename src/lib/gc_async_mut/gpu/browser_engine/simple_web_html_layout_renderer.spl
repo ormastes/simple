@@ -3636,6 +3636,14 @@ class RuleBuckets:
     tag_keys: [text]
     tag_rules: [[i32]]
     fallback_rules: [i32]
+    # O(1) key->index lookups for style_rule_candidates. build_rule_buckets already
+    # builds these dicts while bucketing rules; without carrying them forward,
+    # style_rule_candidates fell back to text_key_index's O(distinct-keys) linear
+    # scan per node lookup, reproducing the same quadratic shape build_rule_buckets
+    # itself was fixed for (WEB-2) -- O(nodes x distinct-keys) overall.
+    id_key_dict: Dict<text, i32>
+    class_key_dict: Dict<text, i32>
+    tag_key_dict: Dict<text, i32>
 
 # Byte-array CSS structural scanners. The embedded stylesheet is ~290 KB, so
 # char_at-based scanning was O(n^2) (each char_at is O(index) on UTF-8 text).
@@ -4633,15 +4641,6 @@ fn selector_bucket_value_from_base(base: text) -> text:
         return base.substring(dot + 1, base.len())
     base
 
-fn text_key_index(keys: [text], key: text) -> i32:
-    var i = 0
-    val key_count = keys.len()
-    while i < key_count:
-        if keys[i] == key:
-            return i
-        i = i + 1
-    -1
-
 fn text_key_index_count(keys: [text], key: text, key_count: i32) -> i32:
     var i = 0
     while i < key_count:
@@ -4919,12 +4918,17 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
         else:
             fallback_rules[bucket_idx] = rule_idx
         entry_i = entry_i + 1
-    RuleBuckets(id_keys: id_keys, id_rules: id_rules, class_keys: class_keys, class_rules: class_rules, tag_keys: tag_keys, tag_rules: tag_rules, fallback_rules: fallback_rules)
+    RuleBuckets(id_keys: id_keys, id_rules: id_rules, class_keys: class_keys, class_rules: class_rules, tag_keys: tag_keys, tag_rules: tag_rules, fallback_rules: fallback_rules, id_key_dict: id_key_dict, class_key_dict: class_key_dict, tag_key_dict: tag_key_dict)
+
+fn dict_key_index(d: Dict<text, i32>, key: text) -> i32:
+    if d.has(key):
+        return d[key]
+    -1
 
 fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
     val class_count = node.class_words.len()
     if class_count == 0 and node.id_attr.len() == 0:
-        val tag_idx = text_key_index(buckets.tag_keys, node.tag)
+        val tag_idx = dict_key_index(buckets.tag_key_dict, node.tag)
         if tag_idx < 0:
             return buckets.fallback_rules
         return merge_two_sorted_rule_lists_unique(buckets.fallback_rules, buckets.tag_rules[tag_idx])
@@ -4933,11 +4937,11 @@ fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
     lists[list_count] = buckets.fallback_rules
     list_count = list_count + 1
     if node.id_attr.len() > 0:
-        val id_idx = text_key_index(buckets.id_keys, node.id_attr)
+        val id_idx = dict_key_index(buckets.id_key_dict, node.id_attr)
         if id_idx >= 0:
             lists[list_count] = buckets.id_rules[id_idx]
             list_count = list_count + 1
-    val tag_idx = text_key_index(buckets.tag_keys, node.tag)
+    val tag_idx = dict_key_index(buckets.tag_key_dict, node.tag)
     if tag_idx >= 0:
         lists[list_count] = buckets.tag_rules[tag_idx]
         list_count = list_count + 1
@@ -4946,7 +4950,7 @@ fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
         val cls = node.class_words[i]
         if cls.len() > 0:
             if class_count <= 1 or not text_seen_before(node.class_words, i, cls):
-                val class_idx = text_key_index(buckets.class_keys, cls)
+                val class_idx = dict_key_index(buckets.class_key_dict, cls)
                 if class_idx >= 0:
                     lists[list_count] = buckets.class_rules[class_idx]
                     list_count = list_count + 1
