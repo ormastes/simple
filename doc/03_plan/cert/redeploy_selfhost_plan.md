@@ -59,3 +59,24 @@ the deferred task is to make `bin/simple` native-build fast enough (caching/perf
 enums** (`enum Payload{Present(int),Absent}` etc.) — built-in `Result`/`Ok`/`Err`/`?`
 are themselves broken on the deployed binary (the frozen `938a4eb` fix), so they
 cannot be used as gate discriminators until after redeploy.
+
+### CUSTODY BLOCKER — gate + fixtures are UNTRACKED (must fix before redeploy)
+`redeploy_gate.sh` (14 checks) and **all** the `.spl` fixtures it runs live only
+in this session's ephemeral `/tmp` scratchpad — none are committed to git. If
+redeploy happens in a fresh session, the go/no-go gate is GONE. Before running a
+redeploy, migrate the gate into a tracked location (proposed
+`scripts/check/cert/redeploy_gate/`, renamed `.shs` per repo convention) together
+with its fixture set, and fix the two hardcoded absolute paths (`/tmp/twofn_min.spl`,
+`/tmp/cfg_min2.spl`) to be `$SP`-relative. Fixtures the gate needs:
+`p1_valscalar.spl`, `p2_add.spl` (or `t35a/p2_add.spl`), `payload_check.spl`,
+`cfg_arch_dispatch_repro_a.spl`, `cfg_arch_dispatch_repro_b.spl`, `r70_read.spl`,
+`qmark_check.spl`, plus `twofn_min.spl` + `cfg_min2.spl` (currently /tmp-absolute).
+
+### Missing checks (from #45/#99 readiness pass, 2026-07-06)
+Both fixes are PRESENT in source at HEAD (#45: `frontend.spl` delegates to the
+uniquely-named `_pp_preprocess_conditionals`; #99: `try_construct_struct`,
+name-keyed env, Field disc-dispatch all in `interpreter.spl`). But the gate lacks
+two checks these tasks call for: **`cfg lowered-funcs=2`** (count-based: prove the
+non-host arch variant was actually stripped, not just that the host one resolved)
+and **`struct copy isolation`** (struct value-semantics regression: mutate a copy,
+original unchanged). Add both when migrating the gate.
