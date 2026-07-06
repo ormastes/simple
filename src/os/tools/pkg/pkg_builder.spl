@@ -16,7 +16,29 @@ use os.tools.pkg.pkg_format.{
 }
 use os.tools.pkg.pkg_manifest.{PackageManifest, PackageVersion}
 use os.tools.archive.tar_tool.{tar_create, TarHeader, TarEntry, BLOCK_SIZE, TYPE_FILE, TYPE_DIR}
-use os.userlib.fs.{read_text, write_text, stat, readdir, mkdir}
+
+# Host-side filesystem access. Package building runs on the BUILD HOST; the
+# previous os.userlib.fs import was the guest userland library (VFS IPC over
+# SimpleOS raw syscalls) whose Result-based API this file never handled — and
+# merely loading it poisoned the interpreter's global function registry so
+# image_builder's read_text/write_text resolved into guest VFS calls
+# (rt_x86_syscall) and crashed host release builds.
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+
+fn read_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn write_text(path: text, content: text):
+    val _ok = rt_file_write_text(path, content)
+
+fn mkdir(path: text):
+    val _ok = rt_dir_create_all(path)
+
+fn readdir(path: text) -> [text]:
+    rt_dir_list(path) ?? []
 
 # === Build Context ===
 
