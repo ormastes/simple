@@ -5,7 +5,19 @@ use os.tools.pkg.pkg_format.{PkgArch, pkg_arch_from_text, pkg_arch_to_text}
 use os.packages.os_packages.{list_all_packages, os_version}
 use os.tools.pkg.pkg_builder.{build_meta_package}
 use os.installer.image_builder.{build_usb_installer_image, build_install_image, detect_iso_tool}
-use os.userlib.fs.{mkdir, write_text}
+
+# Host-side filesystem access. The release pipeline runs on the BUILD HOST,
+# so it must use the host runtime externs — os.userlib.fs is the guest
+# userland library (VFS IPC over SimpleOS raw syscalls) and cannot run here.
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+
+fn _mkdir_p(path: text):
+    val _ok = rt_dir_create_all(path)
+
+fn _write_file(path: text, content: text):
+    val _ok = rt_file_write_text(path, content)
 
 struct ReleaseConfig:
     arch: PkgArch
@@ -23,10 +35,10 @@ fn release_all(config: ReleaseConfig) -> Result<bool, text>:
     val pkg_dir = "{release_dir}/packages"
     val img_dir = "{release_dir}/images"
 
-    mkdir(config.output_dir)
-    mkdir(release_dir)
-    mkdir(pkg_dir)
-    mkdir(img_dir)
+    _mkdir_p(config.output_dir)
+    _mkdir_p(release_dir)
+    _mkdir_p(pkg_dir)
+    _mkdir_p(img_dir)
 
     print "[1/5] Kernel..."
     # NOTE: local must not be named `kernel` — a local shadowed by the
@@ -37,7 +49,7 @@ fn release_all(config: ReleaseConfig) -> Result<bool, text>:
         kernel_elf = _locate_kernel(config.arch)
         if kernel_elf == "":
             kernel_elf = "{release_dir}/kernel.elf"
-            write_text(kernel_elf, "# Placeholder kernel — build with: bin/simple os build --arch={arch_name}\n")
+            _write_file(kernel_elf, "# Placeholder kernel — build with: bin/simple os build --arch={arch_name}\n")
         else:
             print "  Using kernel: {kernel_elf}"
 
@@ -79,8 +91,8 @@ fn release_all(config: ReleaseConfig) -> Result<bool, text>:
 
 fn release_packages(config: ReleaseConfig) -> Result<i32, text>:
     val pkg_dir = "{config.output_dir}/packages"
-    mkdir(config.output_dir)
-    mkdir(pkg_dir)
+    _mkdir_p(config.output_dir)
+    _mkdir_p(pkg_dir)
     val packages = list_all_packages(config.arch)
     var count = 0
     for pkg in packages:
@@ -93,8 +105,8 @@ fn release_packages(config: ReleaseConfig) -> Result<i32, text>:
 
 fn release_usb(config: ReleaseConfig) -> Result<text, text>:
     val pkg_dir = "{config.output_dir}/packages"
-    mkdir(config.output_dir)
-    mkdir(pkg_dir)
+    _mkdir_p(config.output_dir)
+    _mkdir_p(pkg_dir)
     val pkg_result = release_packages(config)
     if val Err(e) = pkg_result:
         return Result.Err(e)
@@ -204,8 +216,7 @@ fn _locate_kernel(arch: PkgArch) -> text:
         "examples/09_embedded/simple_os/build/{arch_name}/kernel.elf"
     ]
     for path in candidates:
-        val content = os.userlib.fs.read_text(path)
-        if content != "":
+        if rt_file_exists(path):
             return path
     ""
 
@@ -223,5 +234,5 @@ fn _write_release_manifest(release_dir: text, config: ReleaseConfig, pkg_count: 
     content = content + "disk_image = \"{release_dir}/images/simpleos-{ver}-{arch_name}.img\"\n"
     content = content + "installer_iso = \"{release_dir}/images/simpleos-{ver}-{arch_name}-installer.iso\"\n"
     content = content + "deploy_manifest = \"{release_dir}/images/simpleos-{ver}-{arch_name}.img.manifest.sdn\"\n"
-    write_text(path, content)
+    _write_file(path, content)
     path
