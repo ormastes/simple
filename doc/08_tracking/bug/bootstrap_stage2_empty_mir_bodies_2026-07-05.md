@@ -324,3 +324,79 @@ resource policy surface until the driver has a real parallel backend.
    accepted until the compiler/backend state is proven thread-safe.
 4. Re-enable full bootstrap/redeploy only after Stage 2 and Stage 3 both produce
    executable artifacts and the redeploy gate passes on the candidate binary.
+
+## 2026-07-06 Progress: same-module bootstrap call typing fixed; next blocker is HIR stack overflow
+
+Mini-review split:
+
+- One read-only mini review confirmed the old decl-count slot path is covered
+  for the public API, but recommended a future poisoned-count `flat_ast_to_module`
+  assembly test if the probe regresses to `functions:count 0`.
+- One read-only mini review confirmed the bounded evidence protocol: run focused
+  source specs, then one Stage 2 probe, and do not rerun the same failing probe
+  without a source change.
+- One read-only mini review focused on the older empty-HIR entry-selection lane;
+  that lane is not the current blocker because the latest probe still reaches
+  six bootstrap functions.
+
+Source fixes in this iteration:
+
+- `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` now resolves
+  same-module bootstrap `Var(symbol)` callees through a shared
+  `bootstrap_resolved_call_name(...)`, emits the callee operand with that name,
+  and uses the bootstrap return-type table for the call destination.
+- The bootstrap return-type table now distinguishes text, text-array pointers,
+  text pointers, unit, and i64 fallback, and the temporary `[dbg-varcall]` probe
+  is removed.
+- `src/compiler/20.hir/hir_lowering/statements.spl` now covers the current
+  parser `StmtKind` variants in `hir_stmt_kind_disc(...)` instead of only the
+  legacy subset.
+
+Focused evidence:
+
+```text
+PASS test/01_unit/compiler/mir/mir_lowering_new_spec.spl
+PASS test/01_unit/compiler/hir/hir_stmt_dispatch_source_spec.spl
+PASS test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl
+```
+
+The file-level check did not complete in the bounded window:
+
+```text
+timeout -k 10s 120s bin/simple check src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+... warnings only before timeout/termination
+```
+
+Latest bounded Stage 2 probe after these fixes:
+
+```text
+stage2_after_hir_stmt_disc_fix_rc=134
+[hir-lower] functions:count 6
+[hir-lower] function:start run_native_build_bootstrap
+[hir-lower] lower_function:start run_native_build_bootstrap
+[hir-lower] lower_function:scope run_native_build_bootstrap
+[hir-lower] lower_function:type_params run_native_build_bootstrap
+[hir-lower] lower_function:params run_native_build_bootstrap
+[hir-lower] lower_function:return_type run_native_build_bootstrap
+[hir-lower] lower_block:start
+[hir-lower] lower_block:stmt 0
+[hir-lower] lower_stmt:start
+[hir-lower] lower_stmt:kind
+thread 'simple-main' (...) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+error: native-build worker exited with code 134.
+```
+
+Preserved logs:
+
+- `build/mini_builds/stage2_after_bootstrap_call_name_fix.log`
+- `build/mini_builds/stage2_after_hir_stmt_disc_fix.log`
+
+Current blocker: Stage 2 no longer shows the old empty-HIR signature and did not
+reach the previous `llc` `call i64 @get_cli_args` mismatch in this run. It now
+overflows the seed worker stack while HIR-lowering the first statement of
+`run_native_build_bootstrap` (`val output = bootstrap_output_from_args(args, 0)`).
+
+Next work: inspect the HIR lowering path for that `Val` initializer and the
+recursive `bootstrap_output_from_args(...)` call expression. Do not rerun the
+bounded Stage 2 probe until that source path changes.

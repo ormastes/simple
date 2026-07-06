@@ -379,21 +379,36 @@ impl MirLowering:
             case _:
                 MirType.i64()  # Default to i64
 
+    me bootstrap_text_type() -> MirType:
+        MirType(kind: MirTypeKind.Opaque("str"))
+
+    me bootstrap_text_array_type() -> MirType:
+        MirType(kind: MirTypeKind.Array(self.bootstrap_text_type(), 0))
+
     me bootstrap_call_return_type(name: text) -> MirType:
         if name == "get_args" or name == "get_cli_args":
-            return MirType.ptr(MirType.i64(), false)
-        if name == "bootstrap_version" or name == "bootstrap_output_from_args":
-            return MirType.ptr(MirType.i64(), false)
+            return MirType.ptr(self.bootstrap_text_array_type(), false)
+        if name == "bootstrap_version":
+            return self.bootstrap_text_type()
+        if name == "bootstrap_output_from_args":
+            return MirType.ptr(self.bootstrap_text_type(), false)
         if name == "eprint":
             return MirType.unit()
         MirType.i64()
+
+    me bootstrap_resolved_call_name(symbol: SymbolId) -> text:
+        val sym = self.symbols.get_symbol(symbol)
+        if val found_sym = sym:
+            if found_sym != nil:
+                return found_sym.name
+        self.bootstrap_symbol_name(symbol)
 
     me bootstrap_resolved_call_return_type(symbol: SymbolId, name: text) -> MirType:
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             return self.resolved_call_return_type(symbol)
         var call_name = name
         if call_name == "":
-            call_name = self.bootstrap_symbol_name(symbol)
+            call_name = self.bootstrap_resolved_call_name(symbol)
         if call_name != "":
             return self.bootstrap_call_return_type(call_name)
         self.resolved_call_return_type(symbol)
@@ -439,17 +454,21 @@ impl MirLowering:
         match callee.kind:
             case Var(symbol):
                 # Direct call - use Call instruction
-                val func_operand = self.symbol_to_operand(symbol)
                 # Recover the callee's bare name so the bootstrap return-type table
                 # (get_cli_args/get_args/bootstrap_* -> ptr) types the call-result
                 # local correctly. bootstrap_symbol_name(symbol) can miss it, which
                 # defaults the dest local to i64 and emits `call i64 @get_cli_args()`
                 # against a `ptr`-returning definition; the i64 copy then feeds a
                 # `getelementptr ... ptr %lN` and llc rejects the type mismatch.
-                val var_call_sym = self.symbols.get_symbol(symbol)
-                val var_call_name = if var_call_sym.?: var_call_sym.name else: ""
-                val return_type = self.bootstrap_resolved_call_return_type(symbol, var_call_name)
-                eprint("[dbg-varcall] name={var_call_name} rt_is_ptr={return_type.kind == MirTypeKind.Ptr(MirType.i64(), false)}")
+                val call_name = self.bootstrap_resolved_call_name(symbol)
+                val return_type = self.bootstrap_resolved_call_return_type(symbol, call_name)
+                val func_operand = if call_name != "":
+                    MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str(call_name),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: return_type, is_variadic: false)))
+                    ))
+                else:
+                    self.symbol_to_operand(symbol)
                 var b = self.builder
                 val result = b.emit_call(func_operand, arg_operands, return_type)
                 if val result_local = result:

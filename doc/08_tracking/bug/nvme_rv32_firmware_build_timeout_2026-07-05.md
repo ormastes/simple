@@ -1148,3 +1148,47 @@ error: refusing to emit a stub-only bootstrap binary; real Simple lowering produ
 RV32 firmware production proof therefore remains open. Do not rerun the full
 bootstrap/deploy loop until the bootstrap entry source-loading/HIR path
 produces real functions in Stage 2.
+
+### Latest bootstrap progress: Stage 2 reaches six functions, now stack-overflows in HIR (2026-07-06)
+
+The empty-HIR diagnosis above is stale after the bootstrap arena and entry
+bridge fixes. The latest bounded Stage 2 probe reaches the real bootstrap entry
+functions:
+
+```text
+stage2_after_hir_stmt_disc_fix_rc=134
+[hir-lower] functions:count 6
+[hir-lower] function:start run_native_build_bootstrap
+```
+
+The same iteration fixed same-module bootstrap `Var(symbol)` call naming and
+return typing in MIR lowering, and added full current-parser variant coverage to
+`hir_stmt_kind_disc(...)`. Focused evidence:
+
+```text
+PASS test/01_unit/compiler/mir/mir_lowering_new_spec.spl
+PASS test/01_unit/compiler/hir/hir_stmt_dispatch_source_spec.spl
+PASS test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl
+```
+
+Current blocker for the self-hosted compiler proof is now a seed worker stack
+overflow while HIR-lowering the first statement of `run_native_build_bootstrap`:
+
+```text
+[hir-lower] lower_block:stmt 0
+[hir-lower] lower_stmt:start
+[hir-lower] lower_stmt:kind
+thread 'simple-main' (...) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+error: native-build worker exited with code 134.
+```
+
+Preserved evidence:
+
+- `build/mini_builds/stage2_after_bootstrap_call_name_fix.log`
+- `build/mini_builds/stage2_after_hir_stmt_disc_fix.log`
+
+RV32 firmware production proof remains blocked on deploying a self-hosted
+`bin/simple`. Do not rerun the full bootstrap/deploy or firmware build loop
+until the `run_native_build_bootstrap` HIR-lowering stack overflow has a source
+fix.
