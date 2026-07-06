@@ -227,3 +227,39 @@ functions in this run:
 Next work: fix why the Stage 2 source-loading/flat-AST/HIR path presents
 `app.cli.bootstrap_main` with zero `module.functions` even though the source
 contains real entry functions.
+
+## 2026-07-06 Progress: bootstrap AST arena count/tag handoff fixed
+
+Bounded Stage 2 diagnostics showed the parser did append declarations for
+`src/app/cli/bootstrap_main.spl`, but the flat bridge skipped every declaration:
+
+```text
+[module-state] module_add_decl count=0 decl=0
+...
+[module-state] module_add_decl count=6 decl=6
+[flat-bridge] decl_count 7
+[flat-bridge] decl:start 0 idx 0 tag nil
+...
+[flat-bridge] functions_count 0
+```
+
+Root causes fixed:
+
+- declaration and module-declaration counts were env-only; they are now
+  array-slot backed with env as a mirror;
+- `flat_module_env_get` returned raw missing env values as `nil`, so
+  `flat_decl_tag_text` treated a missing `SIMPLE_BOOTSTRAP_DECL_TAG_*` mirror as
+  a literal `nil` tag instead of falling back to `decl_get_tag`.
+
+Focused evidence:
+
+```text
+PASS test/01_unit/compiler/frontend/bootstrap_decl_count_slot_spec.spl
+2 examples, 0 failures
+```
+
+The follow-up Stage 2 proof run was inconclusive: the process exited 137 before
+frontend tracing started, while multiple unrelated long native-build jobs were
+active on the host. Do not mark RV32 firmware production proof complete until a
+fresh bounded Stage 2 probe, run without competing heavy jobs, shows nonzero
+HIR/MIR functions or records the next blocker.
