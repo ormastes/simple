@@ -104,6 +104,111 @@ fn _engine2d_draw_ir_text_font_size(style: [DrawIrStyleProp]) -> i32:
                 return value
     12
 
+# Look up a computed-style value by key. Style props are emitted by the browser
+# layout renderer as packed key/value pairs (colors/widths as decimal strings,
+# `background-image` as `linear-gradient(<from>,<to>)`, `box-shadow` as
+# `<x>px <y>px <color>`). Returns "" when the key is absent.
+fn _engine2d_draw_ir_style_value(props: [DrawIrStyleProp], key: text) -> text:
+    for prop in props:
+        if prop.key == key:
+            return prop.value
+    ""
+
+# Scan the nth (0-based) signed integer token out of a free-form value string.
+# Accumulate in i64 so packed u32 color words (up to 4294967295) do not overflow
+# an i32 mid-scan. Returns `fallback` when the nth token is absent.
+fn _engine2d_draw_ir_nth_int(value: text, n: i32, fallback: i64) -> i64:
+    var count = 0
+    var idx: i64 = 0
+    val length = value.len()
+    while idx < length:
+        val ch0 = value.char_code_at(idx).to_i32()
+        val is_digit = ch0 >= 48 and ch0 <= 57
+        var sign_ok = false
+        if (ch0 == 45 or ch0 == 43) and idx + 1 < length:
+            val nxt = value.char_code_at(idx + 1).to_i32()
+            sign_ok = nxt >= 48 and nxt <= 57
+        if is_digit or sign_ok:
+            val negative = ch0 == 45
+            if ch0 == 45 or ch0 == 43:
+                idx = idx + 1
+            var acc: i64 = 0
+            while idx < length:
+                val ch = value.char_code_at(idx).to_i32()
+                if ch >= 48 and ch <= 57:
+                    acc = acc * 10 + ((ch - 48) as i64)
+                    idx = idx + 1
+                else:
+                    break
+            if negative:
+                acc = 0 - acc
+            if count == n:
+                return acc
+            count = count + 1
+        else:
+            idx = idx + 1
+    fallback
+
+# Paint the per-side borders of a box. Emits a uniform rounded-border outline
+# when a corner radius plus four equal, same-colored, non-zero sides are present;
+# otherwise paints per-side slivers with `draw_rect_filled`. Engine2D is
+# value-copied across this free-function boundary, so the caller MUST reassign
+# from the returned engine.
+fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], x: i32, y: i32, w: i32, h: i32, radius: i32) -> Engine2D:
+    var eng = engine
+    val top_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-top-width"), 0, 0) as i32
+    val right_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-right-width"), 0, 0) as i32
+    val bottom_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-bottom-width"), 0, 0) as i32
+    val left_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-left-width"), 0, 0) as i32
+    val top_c = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-top-color"), 0, 0) as u32
+    val right_c = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-right-color"), 0, 0) as u32
+    val bottom_c = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-bottom-color"), 0, 0) as u32
+    val left_c = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-left-color"), 0, 0) as u32
+    val uniform = top_w == right_w and right_w == bottom_w and bottom_w == left_w and top_w > 0 and top_c == right_c and right_c == bottom_c and bottom_c == left_c
+    if radius > 0 and uniform and _engine2d_draw_ir_opaque(top_c):
+        eng.draw_rounded_rect_outline(x, y, w, h, radius, top_c, top_w)
+        return eng
+    if top_w > 0 and _engine2d_draw_ir_opaque(top_c):
+        eng.draw_rect_filled(x, y, w, top_w, top_c)
+    if bottom_w > 0 and _engine2d_draw_ir_opaque(bottom_c):
+        eng.draw_rect_filled(x, y + h - bottom_w, w, bottom_w, bottom_c)
+    if left_w > 0 and _engine2d_draw_ir_opaque(left_c):
+        eng.draw_rect_filled(x, y, left_w, h, left_c)
+    if right_w > 0 and _engine2d_draw_ir_opaque(right_c):
+        eng.draw_rect_filled(x + w - right_w, y, right_w, h, right_c)
+    eng
+
+# Render a single HTML/CSS box honestly instead of collapsing it to one flat
+# fill: box-shadow first (behind), then background (linear-gradient beats a solid
+# fill; a corner radius routes the solid fill to a rounded rect), then per-side
+# borders. Each sub-feature is checked independently so a transparent-background
+# box that still has a border or shadow paints instead of vanishing. Engine2D is
+# value-copied across this free-function boundary, so the caller MUST reassign
+# from the returned engine.
+fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32) -> Engine2D:
+    var eng = engine
+    val style = command.computed_style
+    val shadow = _engine2d_draw_ir_style_value(style, "box-shadow")
+    if shadow != "" and shadow != "none":
+        val sx = _engine2d_draw_ir_nth_int(shadow, 0, 0) as i32
+        val sy = _engine2d_draw_ir_nth_int(shadow, 1, 0) as i32
+        val scolor = _engine2d_draw_ir_nth_int(shadow, 2, 0) as u32
+        if _engine2d_draw_ir_opaque(scolor):
+            eng.draw_shadow_rect(x, y, w, h, sx, sy, 0, scolor)
+    val radius = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-radius"), 0, 0) as i32
+    val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
+    if bg_image.starts_with("linear-gradient("):
+        val g_from = _engine2d_draw_ir_nth_int(bg_image, 0, 0) as u32
+        val g_to = _engine2d_draw_ir_nth_int(bg_image, 1, 0) as u32
+        eng.draw_gradient_rect(x, y, w, h, g_from, g_to)
+    elif _engine2d_draw_ir_opaque(command.color):
+        if radius > 0:
+            eng.draw_rounded_rect(x, y, w, h, radius, command.color)
+        else:
+            eng.draw_rect_filled(x, y, w, h, command.color)
+    eng = _engine2d_draw_ir_render_borders(eng, style, x, y, w, h, radius)
+    eng
+
 fn engine2d_resolved_draw_ir_image(image_uri: text, width: i32, height: i32, pixels: [u32]) -> Engine2dResolvedDrawIrImage:
     Engine2dResolvedDrawIrImage(image_uri: image_uri, width: width, height: height, pixels: pixels)
 
@@ -178,8 +283,7 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, 
         val x = batch.embedding.x + command.x
         val y = batch.embedding.y + command.y
         if command.kind == DRAW_IR_COMMAND_RECT:
-            if _engine2d_draw_ir_opaque(command.color):
-                engine.draw_rect_filled(x, y, command.width, command.height, command.color)
+            engine = _engine2d_draw_ir_render_box(engine, command, x, y, command.width, command.height)
             rendered = rendered + 1
         elif command.kind == DRAW_IR_COMMAND_TEXT:
             engine.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
@@ -260,8 +364,7 @@ fn engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: D
             val x = batch.embedding.x + command.x
             val y = batch.embedding.y + command.y
             if command.kind == DRAW_IR_COMMAND_RECT:
-                if _engine2d_draw_ir_opaque(command.color):
-                    engine.draw_rect_filled(x, y, command.width, command.height, command.color)
+                engine = _engine2d_draw_ir_render_box(engine, command, x, y, command.width, command.height)
                 rendered = rendered + 1
             elif command.kind == DRAW_IR_COMMAND_TEXT:
                 engine.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
