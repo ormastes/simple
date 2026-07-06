@@ -29,7 +29,7 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_module(module: MirModule) -> text:
         """Translate MIR module to LLVM IR."""
-        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[llvm-translate] header"
         self.builder.emit_module_header()
@@ -110,7 +110,7 @@ impl MirTextCodegen for MirToLlvm:
         Renames 'main' to '__simple_main' so the entry point wrapper
         (entry_point.spl) can call it with proper runtime init/shutdown.
         """
-        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] function:start {name}"
         self.current_function_name = name
@@ -452,9 +452,19 @@ impl MirTextCodegen for MirToLlvm:
                 self.builder.emit_load(dest_name, llvm_ty, tmp)
 
     me translate_copy_move(dest: LocalId, src: LocalId, is_move: bool):
-        val dest_name = self.get_local(self.local_id_value(dest))
-        val src_name = self.get_local(self.local_id_value(src))
-        val ty = self.valid_llvm_type(self.get_local_type(self.local_id_value(src)))
+        val dest_id = self.local_id_value(dest)
+        val src_id = self.local_id_value(src)
+        val dest_name = self.get_local(dest_id)
+        val src_name = self.get_local(src_id)
+        var ty = self.valid_llvm_type(self.get_local_type(src_id))
+        if self.ptr_locals.has(src_id):
+            ty = "ptr"
+            self.local_types[dest_id] = "ptr"
+            self.ptr_locals[dest_id] = true
+        if self.bool_locals.has(src_id):
+            ty = "i1"
+            self.local_types[dest_id] = "i1"
+            self.bool_locals[dest_id] = true
         val comment = if is_move: "move" else: "copy"
 
         if is_float_type(ty):
@@ -610,7 +620,13 @@ impl MirTextCodegen for MirToLlvm:
         match dest_name:
             Some(name):
                 var ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
-                val known_ret_ty = self.lookup_function_return_type(func_name)
+                var known_ret_ty = self.lookup_function_return_type(func_name)
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    val bare_func_name = if func_name.starts_with("@"): func_name[1:] else: func_name
+                    if bare_func_name == "get_args" or bare_func_name == "get_cli_args" or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args":
+                        known_ret_ty = "ptr"
+                    elif bare_func_name == "eprint":
+                        known_ret_ty = "void"
                 if known_ret_ty != "" and known_ret_ty != "nil" and known_ret_ty != "void":
                     ret_ty = known_ret_ty
                     self.local_types[dest_id] = ret_ty

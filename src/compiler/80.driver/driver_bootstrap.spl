@@ -25,6 +25,9 @@ extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(key: text) -> text
 
+fn bootstrap_trace_enabled() -> bool:
+    (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+
 pub fn bootstrap_native_opt_level(ctx: CompileContext, is_release: bool) -> i64:
     if ctx.options.opt_level.?:
         return ctx.options.opt_level ?? 0
@@ -74,7 +77,8 @@ pub fn bootstrap_emit_seed_wrapper(output: text) -> CompileResult:
 
 pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, bool):
     """Bootstrap MIR lowering as a free function to avoid Stage1 method dispatch instability."""
-    print "[driver-mir] bootstrap free:start"
+    if bootstrap_trace_enabled():
+        print "[driver-mir] bootstrap free:start"
     var next_ctx = ctx
     # Hand the real HIR module for the entry (produced by the HIR phase from the
     # freshly-parsed Module.functions) to the MIR free path so it lowers real
@@ -85,7 +89,8 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
     var bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module()
     next_ctx.bootstrap_entry_mir = Some(bootstrap_mir)
     next_ctx.mir_modules["app.cli.bootstrap_main"] = bootstrap_mir
-    print "[driver-mir] bootstrap free:done"
+    if bootstrap_trace_enabled():
+        print "[driver-mir] bootstrap free:done"
     (next_ctx, next_ctx.errors.len() == 0)
 
 pub fn bootstrap_empty_hir_module() -> HirModule:
@@ -196,9 +201,17 @@ pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, o
     translator.builder.emit_module_header()
     translator.emit_runtime_declarations()
     val fn_count = module.functions.len()
-    print "[bootstrap-real-llvm-module] count {fn_count}"
+    if bootstrap_trace_enabled():
+        print "[bootstrap-real-llvm-module] count {fn_count}"
     for fn_ in module.functions.values():
-        print "[bootstrap-real-llvm-module] function {fn_.name}"
+        val body = MirBody.from_function(fn_)
+        val name = if fn_.name == "main": "__simple_main" else: fn_.name
+        val ret_ty = translator.llvm_type_text(body.return_ty)
+        translator.remember_function_return_type(fn_.name, ret_ty)
+        translator.remember_function_return_type(name, ret_ty)
+    for fn_ in module.functions.values():
+        if bootstrap_trace_enabled():
+            print "[bootstrap-real-llvm-module] function {fn_.name}"
         val body = MirBody.from_function(fn_)
         translator.translate_function(if fn_.name == "main": "__simple_main" else: fn_.name, body)
     val llvm_ir = translator.builder.build()
