@@ -22,7 +22,7 @@ use compiler.driver.cache.compile_options_hash.{
     compile_options_hash_validate, compile_options_hash_from_bytes,
     compile_options_hash_zero, compile_options_hash_is_zero
 }
-use std.nogc_sync_mut.io.file_ops.{file_modified_time}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time, file_read_bytes}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -197,32 +197,27 @@ struct CacheDependency:
 fn read_smf_reserved_bytes(smf_path: text) -> [u8]:
     # Read the reserved[0..16] bytes from SMF header for CompileOptionsHash
     # SMF v1.1: header is at EOF-128, reserved starts at offset 88 within header
-    extern fn rt_file_size(path: text) -> i64
-    extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
-
-    val file_size = rt_file_size(smf_path)
-    if file_size < 128:
+    val data = file_read_bytes(smf_path)
+    if data.len() < 128:
         return []
 
     # Header is at EOF-128, reserved field starts at offset 88
-    val header_start = file_size - 128
+    val header_start = data.len() - 128
     val reserved_offset = header_start + 88
-    rt_file_read_bytes_range(smf_path, reserved_offset, 16)
+    cache_i64_slice_to_u8(data, reserved_offset, 16)
 
 fn read_smf_source_hash(smf_path: text) -> i64:
-    # Read source_hash from SMF header (at offset 80 within 128-byte header)
-    # Hashing section: module_hash(8 bytes) + source_hash(8 bytes) at header offset 76
-    extern fn rt_file_size(path: text) -> i64
-    extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
-
-    val file_size = rt_file_size(smf_path)
-    if file_size < 128:
+    # Read source_hash from SMF v1.1 trailer header.
+    # Canonical layout in smf_header.spl:
+    #   module_hash at header offset 60
+    #   source_hash at header offset 68
+    val data = file_read_bytes(smf_path)
+    if data.len() < 128:
         return 0
 
-    val header_start = file_size - 128
-    # source_hash is at header offset 84 (after module_hash at 76)
-    val source_hash_offset = header_start + 84
-    val bytes = rt_file_read_bytes_range(smf_path, source_hash_offset, 8)
+    val header_start = data.len() - 128
+    val source_hash_offset = header_start + 68
+    val bytes = cache_i64_slice_to_u8(data, source_hash_offset, 8)
     if bytes.len() < 8:
         return 0
 
@@ -247,26 +242,23 @@ fn read_smf_dependencies(smf_path: text) -> [CacheDependency]:
     reads its data, and deserializes into CacheDependency entries.
     Returns empty list if section not found (backward compatible).
     """
-    extern fn rt_file_size(path: text) -> i64
-    extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
-
-    val file_size = rt_file_size(smf_path)
-    if file_size < 128:
+    val data = file_read_bytes(smf_path)
+    if data.len() < 128:
         return []
 
     # Read header at EOF-128
-    val header_start = file_size - 128
+    val header_start = data.len() - 128
 
     # section_count is at header offset 12 (u32, after magic+version+platform+arch+flags)
     # Actually: 8 (identification) + 4 (flags u32) + 1 (compression) + 1 (compression_level) + 2 (reserved_compression) = 16
     # Then section_count at offset 16 (u32)
-    val section_count_bytes = rt_file_read_bytes_range(smf_path, header_start + 16, 4)
+    val section_count_bytes = cache_i64_slice_to_u8(data, header_start + 16, 4)
     if section_count_bytes.len() < 4:
         return []
     val section_count = read_u32_le(section_count_bytes, 0)
 
     # section_table_offset at header offset 20 (u64)
-    val sto_bytes = rt_file_read_bytes_range(smf_path, header_start + 20, 8)
+    val sto_bytes = cache_i64_slice_to_u8(data, header_start + 20, 8)
     if sto_bytes.len() < 8:
         return []
     val section_table_offset = read_u64_le(sto_bytes, 0)
@@ -276,7 +268,7 @@ fn read_smf_dependencies(smf_path: text) -> [CacheDependency]:
     var i = 0
     while i < section_count:
         val entry_offset = section_table_offset + (i * section_entry_size)
-        val entry_bytes = rt_file_read_bytes_range(smf_path, entry_offset, section_entry_size)
+        val entry_bytes = cache_i64_slice_to_u8(data, entry_offset, section_entry_size)
         if entry_bytes.len() < section_entry_size:
             i = i + 1
             continue
@@ -294,7 +286,7 @@ fn read_smf_dependencies(smf_path: text) -> [CacheDependency]:
                 val sec_offset = read_u64_le(entry_bytes, 8)
                 val sec_size = read_u64_le(entry_bytes, 16)
                 if sec_size > 0:
-                    val dep_data = rt_file_read_bytes_range(smf_path, sec_offset, sec_size)
+                    val dep_data = cache_i64_slice_to_u8(data, sec_offset, sec_size)
                     return deserialize_deps(dep_data)
         i = i + 1
 
@@ -346,6 +338,19 @@ fn read_u32_le(data: [u8], offset: i64) -> i64:
     val b3 = data[offset + 3] as i64
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 
+fn cache_i64_slice_to_u8(data: [i64], offset: i64, count: i64) -> [u8]:
+    var out: [u8] = []
+    if offset < 0 or count < 0 or offset + count > data.len():
+        return out
+    var i = 0
+    while i < count:
+        out.push((data[offset + i] & 0xFF) as u8)
+        i = i + 1
+    out
+
+fn cache_file_u8_slice(path: text, offset: i64, count: i64) -> [u8]:
+    cache_i64_slice_to_u8(file_read_bytes(path), offset, count)
+
 fn read_u64_le(data: [u8], offset: i64) -> i64:
     val b0 = data[offset] as i64
     val b1 = data[offset + 1] as i64
@@ -382,14 +387,12 @@ fn get_shb_interface_hash(module_path: text) -> i64:
     SHB header layout: first 64 bytes, interface_hash at offset 16 (8 bytes, LE).
     Returns 0 if SHB file doesn't exist (triggers STALE in validate_dependencies).
     """
-    extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
-
     val shb_dir = ".build/headers"
     val shb_path = source_to_cache_path(module_path, shb_dir, ".shb")
     if not rt_file_exists(shb_path):
         return 0
 
-    val bytes = rt_file_read_bytes_range(shb_path, 16, 8)
+    val bytes = cache_file_u8_slice(shb_path, 16, 8)
     if bytes.len() < 8:
         return 0
 

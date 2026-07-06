@@ -17,7 +17,9 @@ consume compiler artifacts but do not own compiler policy.
 source files
   -> 00.common diagnostics/config/effects
   -> 10.frontend parser + AST + tokens
+  -> 15.blocks domain blocks and block adapters
   -> 20.hir / 25.traits / 30.types / 35.semantics
+  -> 40.mono monomorphization and template materialization
   -> 50.mir / 55.borrow / 60.mir_opt
   -> 70.backend
        -> C / LLVM / Cranelift / WASM / CUDA / Vulkan / native artifacts
@@ -53,6 +55,16 @@ source files
   interpreter, loader, and compiler ABI changes.
 - Runtime-family restrictions and no-allocation policies must be enforced at
   compiler entrypoints before target-specific native or SimpleOS execution.
+
+## Bootstrap / Interpreter / Loader Boundary
+
+The coordinated refactor lane is
+`doc/03_plan/agent_tasks/bootstrap_compiler_interpreter_loader_arch_refactor.md`.
+Bootstrap owns staged build policy and cache invalidation, the compiler driver
+owns pipeline contracts, the interpreter owns execution/session state, and the
+loader owns resolver/SMF materialization. Shared contracts belong in common
+compiler layers or explicit facades; sibling layers must not import each
+other's private subtrees to shortcut the refactor.
 
 ## Related Entrypoints
 

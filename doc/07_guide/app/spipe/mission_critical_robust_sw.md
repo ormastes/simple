@@ -91,6 +91,14 @@ resume/join idempotence for coroutines; `process_wait`,
 processes; and `used_runtime_pool()` plus counter evidence for M:N CPU-parallel
 claims through `multicore_green_spawn`.
 
+Process/signal hardening must also prove every kill or wait path rejects
+`pid <= 0` before signaling or reaping. This is release-blocking for
+mission-critical lanes because `kill(-1)` can terminate every user-owned
+process. Use `doc/07_guide/runtime/process_kill_safety.md` as the rule and
+remember that Rust/C seed-runtime guard changes require
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy` before
+they affect deployed binaries.
+
 For an async-library hardening handoff, use:
 
 ```bash

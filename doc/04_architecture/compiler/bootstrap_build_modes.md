@@ -33,6 +33,16 @@ weaving, module resolution, interpreter adapters, loader ABI, or compiler ABI
 must invalidate broadly. Script-level dependency tracing must never claim more
 precision than the compiler resolver can prove.
 
+## Refactor Invalidation Boundary
+
+The broader refactor lane is
+`doc/03_plan/agent_tasks/bootstrap_compiler_interpreter_loader_arch_refactor.md`.
+Until resolver-backed cache keys include source hash, options hash, dependency
+interface hashes, and AOP/MDSOC configuration hash, `dynload` cache reuse stays
+conservative: bootstrap scripts clear cache on changes under `src/compiler`,
+`src/app`, or `src/lib`, and any AOP/MDSOC/weaving environment change is treated
+as a broad invalidation.
+
 ## Rust Seed Warning
 
 Rust-built `src/compiler_rust/target/bootstrap/simple` prints `WARNING` when run

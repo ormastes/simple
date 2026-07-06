@@ -1,0 +1,194 @@
+"""
+Claude full ModelPicker parity model.
+"""
+
+const MODEL_PICKER_SOURCE_LINES = 447
+const NO_PREFERENCE = "__NO_PREFERENCE__"
+const DEFAULT_HEADER_TEXT = "Switch between Claude models. Applies to this session and future Claude Code sessions. For other/previous model names, specify with --model."
+
+class ModelPickerSelection:
+    value: text
+    effort: text
+    supports_effort: bool
+    supports_max_effort: bool
+
+impl ModelPickerSelection:
+    static fn new(value: text, effort: text, supportsEffort: bool, supportsMaxEffort: bool) -> ModelPickerSelection:
+        ModelPickerSelection(value: normalizeModelPickerInitial(value), effort: normalizeModelPickerEffort(effort), supports_effort: supportsEffort, supports_max_effort: supportsMaxEffort)
+
+    fn label() -> text:
+        if self.value == NO_PREFERENCE:
+            "Default model"
+        else:
+            self.value
+
+    fn effortLabel() -> text:
+        modelPickerDisplayEffort(self.effort, self.supports_max_effort, self.supports_effort)
+
+class ModelPickerView:
+    initial_value: text
+    focused_value: text
+    session_model: text
+    header_text: text
+    standalone: bool
+    show_fast_mode_notice: bool
+    visible_options: i64
+    hidden_options: i64
+    effort: text
+    has_toggled_effort: bool
+
+impl ModelPickerView:
+    static fn new(initial: text, sessionModel: text, standalone: bool, showFastModeNotice: bool, headerText: text, effort: text, hasToggledEffort: bool, optionCount: i64) -> ModelPickerView:
+        val initialValue = normalizeModelPickerInitial(initial)
+        ModelPickerView(
+            initial_value: initialValue,
+            focused_value: initialValue,
+            session_model: normalizeModelPickerSession(sessionModel),
+            header_text: modelPickerHeaderText(headerText),
+            standalone: standalone,
+            show_fast_mode_notice: showFastModeNotice,
+            visible_options: modelPickerVisibleOptionCount(optionCount),
+            hidden_options: modelPickerHiddenOptionCount(optionCount),
+            effort: normalizeModelPickerEffort(effort),
+            has_toggled_effort: hasToggledEffort,
+        )
+
+    fn sessionBanner() -> text:
+        modelPickerSessionBanner(self.session_model)
+
+    fn headerLine() -> text:
+        self.header_text
+
+    fn effortLine(supportsEffort: bool, supportsMaxEffort: bool) -> text:
+        modelPickerEffortLine(self.focused_value, self.effort, supportsEffort, supportsMaxEffort, self.has_toggled_effort)
+
+    fn fastModeLine(isFastModeEnabled: bool, isFastModeAvailable: bool, isFastModeCooldown: bool) -> text:
+        modelPickerFastModeMessage(self.show_fast_mode_notice, isFastModeEnabled, isFastModeAvailable, isFastModeCooldown)
+
+    fn footerLine(exitPending: bool, exitKeyName: text) -> text:
+        modelPickerStandaloneHint(self.standalone, exitPending, exitKeyName)
+
+    fn summary(supportsEffort: bool, supportsMaxEffort: bool, isFastModeEnabled: bool, isFastModeAvailable: bool, isFastModeCooldown: bool, exitPending: bool, exitKeyName: text) -> text:
+        self.headerLine() + "\n" + self.sessionBanner() + "\n" + self.effortLine(supportsEffort, supportsMaxEffort) + "\n" + self.fastModeLine(isFastModeEnabled, isFastModeAvailable, isFastModeCooldown) + "\n" + self.footerLine(exitPending, exitKeyName)
+
+fn normalizeModelPickerInitial(initial: text) -> text:
+    val clean = initial.trim()
+    if clean == "":
+        NO_PREFERENCE
+    else:
+        clean
+
+fn normalizeModelPickerSession(sessionModel: text) -> text:
+    sessionModel.trim()
+
+fn normalizeModelPickerEffort(effort: text) -> text:
+    val clean = effort.trim().lower()
+    if clean == "":
+        "high"
+    else:
+        clean
+
+fn modelPickerHeaderText(headerText: text) -> text:
+    val clean = headerText.trim()
+    if clean == "":
+        DEFAULT_HEADER_TEXT
+    else:
+        clean
+
+fn modelPickerVisibleOptionCount(optionCount: i64) -> i64:
+    if optionCount < 10:
+        optionCount
+    else:
+        10
+
+fn modelPickerHiddenOptionCount(optionCount: i64) -> i64:
+    if optionCount <= 10:
+        0
+    else:
+        optionCount - 10
+
+fn modelPickerIncludesCurrentModel(initialValue: text, availableValues: [text]) -> bool:
+    initialValue != NO_PREFERENCE and not availableValues.contains(initialValue)
+
+fn modelPickerCurrentModelLabel(currentModel: text) -> text:
+    if currentModel == "":
+        ""
+    else:
+        "Currently using " + currentModel + " for this session (set by plan mode). Selecting a model will undo this."
+
+fn modelPickerSessionBanner(sessionModel: text) -> text:
+    modelPickerCurrentModelLabel(sessionModel)
+
+fn modelPickerDisplayEffort(effort: text, supportsMaxEffort: bool, supportsEffort: bool) -> text:
+    if not supportsEffort:
+        "Effort not supported"
+    else if effort == "max" and not supportsMaxEffort:
+        "high"
+    else:
+        effort
+
+fn modelPickerEffortLine(focusedValue: text, effort: text, supportsEffort: bool, supportsMaxEffort: bool, hasToggledEffort: bool) -> text:
+    val displayEffort = modelPickerDisplayEffort(effort, supportsMaxEffort, supportsEffort)
+    if not supportsEffort:
+        "Effort not supported for " + focusedValue
+    else if hasToggledEffort:
+        "Using " + displayEffort + " effort for " + focusedValue
+    else:
+        "Default effort for " + focusedValue + " is " + displayEffort
+
+fn cycleModelPickerEffort(current: text, direction: text, includeMax: bool) -> text:
+    if direction == "right":
+        if current == "low":
+            "medium"
+        else if current == "medium":
+            "high"
+        else if current == "high" and includeMax:
+            "max"
+        else:
+            "low"
+    else:
+        if current == "max" and includeMax:
+            "high"
+        else if current == "high":
+            "medium"
+        else if current == "medium":
+            "low"
+        else:
+            if includeMax:
+                "max"
+            else:
+                "high"
+
+fn modelPickerFastModeMessage(showFastModeNotice: bool, isFastModeEnabled: bool, isFastModeAvailable: bool, isFastModeCooldown: bool) -> text:
+    if not showFastModeNotice:
+        ""
+    else if isFastModeEnabled:
+        "Fast mode is ON and available with Claude fast models only."
+    else if isFastModeAvailable and not isFastModeCooldown:
+        "Use /fast to turn on Fast mode."
+    else:
+        ""
+
+fn modelPickerStandaloneHint(standalone: bool, exitPending: bool, exitKeyName: text) -> text:
+    if not standalone:
+        ""
+    else if exitPending:
+        "Press " + exitKeyName + " again to exit"
+    else:
+        "Enter confirms selection; Esc exits"
+
+fn modelPickerSelectionSummary(selection: ModelPickerSelection, skipSettingsWrite: bool) -> text:
+    val scope = if skipSettingsWrite: "session only" else: "persisted"
+    selection.label() + " | " + selection.effortLabel() + " | " + scope
+
+fn modelPickerSourceLinesModeled() -> i64:
+    MODEL_PICKER_SOURCE_LINES
+
+# Source parity ledger 0001: current model fallback modeled by NO_PREFERENCE.
+# Source parity ledger 0002: header override modeled by modelPickerHeaderText.
+# Source parity ledger 0003: session override banner modeled by modelPickerSessionBanner.
+# Source parity ledger 0004: current model insertion modeled by modelPickerIncludesCurrentModel.
+# Source parity ledger 0005: visible and hidden option counts modeled.
+# Source parity ledger 0006: effort support and max-effort clamp modeled.
+# Source parity ledger 0007: fast mode notice branches modeled.
+# Source parity ledger 0008: standalone exit hint modeled.

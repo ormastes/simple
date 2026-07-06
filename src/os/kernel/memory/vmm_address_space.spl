@@ -87,6 +87,26 @@ fn create_user_address_space() -> AddressSpace:
     g_next_as_id = g_next_as_id + 1
     AddressSpace(phys_root: phys, id: id)
 
+fn vmm_clone_kernel_low_identity(user_phys_root: u64):
+    """Copy PML4 entry 0 (low identity, kernel image + stacks < 512GB) from the
+    kernel PML4 into a user PML4.
+
+    The x86_64 kernel runs identity-mapped in the lower half (hhdm=0, loaded at
+    1MB), so it lives in PML4[0]. `create_user_address_space` only clones the
+    upper half (256..511). Without this, the `mov cr3` inside
+    `rt_x86_enter_user_first` would unmap the running kernel code, GDT, TSS,
+    syscall-entry trampoline and kernel stack — an instant triple-fault. Cloning
+    PML4[0] shares the kernel's low identity PDPT unchanged; user pages are mapped
+    at PML4[1]+ (>= 512GB) so they never write into this shared subtree."""
+    if user_phys_root == 0 or user_phys_root == 1:
+        return
+    if g_vmm.pml4_phys == 0:
+        return
+    val kernel_pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+    val user_pml4_virt = _phys_to_virt(user_phys_root)
+    val entry = _read_pte(kernel_pml4_virt, 0)
+    _write_pte(user_pml4_virt, 0, entry)
+
 fn vmm_cow_clone_pages(pml4_phys: u64) -> u64:
     """Shallow COW clone of a user address space (wave-4b scaffold).
 

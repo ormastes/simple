@@ -103,15 +103,19 @@ Override with `SIMPLE_LINKER=<name>` environment variable.
 ## Building from Source
 
 ```bash
-# Install Rust (if not already installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Normal bootstrap: rebuild pure-Simple stages, do not rebuild Rust
+scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload --deploy
 
-# Build the Rust seed bootstrap
-cd src/compiler_rust
-cargo build --profile bootstrap -p simple-driver
+# Conservative monolithic pure-Simple output
+scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary --deploy
 
-# Use the seed to compile the full Simple compiler
+# Explicit Rust seed/runtime rebuild, then pure-Simple stages
+scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
 ```
+
+The Rust compiler under `src/compiler_rust/` is a seed only. Normal source
+builds reuse the existing seed/runtime and must not run cargo; use
+`--full-bootstrap` when the seed/runtime itself must be rebuilt.
 
 ### Cross-Compilation
 

@@ -28,7 +28,7 @@ bridge_small_helpers_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 27 | 27 | 0 | 0 |
+| 38 | 38 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -553,6 +553,524 @@ expect(isHiddenModelVisibleFeature("ordinary-user-message")).to_equal(false)
 
 </details>
 
+#### should model ask-user-question preview box sizing and truncation
+
+- Apply default limits, truncate overlong previews, pad short previews, and retain source line parity
+   - Expected: previewBoxSourceLinesModeled() equals `228`
+   - Expected: preview.content_lines.len() equals `3`
+   - Expected: preview.visible_lines.len() equals `2`
+   - Expected: preview.is_truncated is true
+   - Expected: preview.hidden_count equals `1`
+   - Expected: preview.padding_needed equals `0`
+   - Expected: preview.box_width equals `10`
+   - Expected: preview.inner_width equals `6`
+   - Expected: preview.top_border equals `"┌────────┐")`
+   - Expected: preview.bottom_border equals `"└────────┘")`
+   - Expected: preview.highlight_enabled is false
+   - Expected: paddedPreview.is_truncated is false
+   - Expected: paddedPreview.padding_needed equals `2`
+   - Expected: paddedPreview.visible_lines.len() equals `3`
+   - Expected: paddedPreview.visible_lines[0].display equals `wide-con`
+   - Expected: paddedPreview.visible_lines[0].padding_width equals `0`
+   - Expected: paddedPreview.highlight_enabled is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Apply default limits, truncate overlong previews, pad short previews, and retain source line parity")
+val preview = previewBox("line1\nline2\nline3", 2, 4, 6, 20, 80, true)
+expect(previewBoxSourceLinesModeled()).to_equal(228)
+expect(preview.content_lines.len()).to_equal(3)
+expect(preview.visible_lines.len()).to_equal(2)
+expect(preview.is_truncated).to_equal(true)
+expect(preview.hidden_count).to_equal(1)
+expect(preview.padding_needed).to_equal(0)
+expect(preview.box_width).to_equal(10)
+expect(preview.inner_width).to_equal(6)
+expect(preview.top_border).to_equal("┌────────┐")
+expect(preview.bottom_border).to_equal("└────────┘")
+expect(preview.truncation_bar).to_contain("1 lines hidden")
+expect(preview.highlight_enabled).to_equal(false)
+val paddedPreview = previewBox("wide-content", 0, 3, 4, 12, 80, false)
+expect(paddedPreview.is_truncated).to_equal(false)
+expect(paddedPreview.padding_needed).to_equal(2)
+expect(paddedPreview.visible_lines.len()).to_equal(3)
+expect(paddedPreview.visible_lines[0].display).to_equal("wide-con")
+expect(paddedPreview.visible_lines[0].padding_width).to_equal(0)
+expect(paddedPreview.highlight_enabled).to_equal(true)
+```
+
+</details>
+
+#### should model small top-level component render gates
+
+- Freeze offscreen content and gate assistant transcript timestamps
+   - Expected: frozen.rendered equals `old`
+   - Expected: frozen.updated_cache is false
+   - Expected: visibleFreeze.rendered equals `new`
+   - Expected: visibleFreeze.updated_cache is true
+   - Expected: virtualFreeze.rendered equals `newer`
+   - Expected: virtualFreeze.in_virtual_list is true
+   - Expected: timestamp.visible is true
+   - Expected: timestamp.text equals `10:00 AM`
+   - Expected: timestamp.min_width equals `8`
+   - Expected: timestamp.dim is true
+   - Expected: messageTimestamp(false, "2026-07-06T10:00:00Z", "assistant", [MessageTimestampBlock.new("text")], "10:00 AM").visible is false
+   - Expected: messageTimestamp(true, "2026-07-06T10:00:00Z", "user", [MessageTimestampBlock.new("text")], "10:00 AM").visible is false
+   - Expected: messageTimestamp(true, "2026-07-06T10:00:00Z", "assistant", [MessageTimestampBlock.new("tool")], "10:00 AM").visible is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Freeze offscreen content and gate assistant transcript timestamps")
+val frozen = offscreenFreeze("new", "old", false, false)
+expect(frozen.rendered).to_equal("old")
+expect(frozen.updated_cache).to_equal(false)
+val visibleFreeze = offscreenFreeze("new", "old", true, false)
+expect(visibleFreeze.rendered).to_equal("new")
+expect(visibleFreeze.updated_cache).to_equal(true)
+val virtualFreeze = offscreenFreeze("newer", "old", false, true)
+expect(virtualFreeze.rendered).to_equal("newer")
+expect(virtualFreeze.in_virtual_list).to_equal(true)
+val timestamp = messageTimestamp(true, "2026-07-06T10:00:00Z", "assistant", [MessageTimestampBlock.new("tool"), MessageTimestampBlock.new("text")], "10:00 AM")
+expect(timestamp.visible).to_equal(true)
+expect(timestamp.text).to_equal("10:00 AM")
+expect(timestamp.min_width).to_equal(8)
+expect(timestamp.dim).to_equal(true)
+expect(messageTimestamp(false, "2026-07-06T10:00:00Z", "assistant", [MessageTimestampBlock.new("text")], "10:00 AM").visible).to_equal(false)
+expect(messageTimestamp(true, "2026-07-06T10:00:00Z", "user", [MessageTimestampBlock.new("text")], "10:00 AM").visible).to_equal(false)
+expect(messageTimestamp(true, "2026-07-06T10:00:00Z", "assistant", [MessageTimestampBlock.new("tool")], "10:00 AM").visible).to_equal(false)
+```
+
+</details>
+
+#### should model updater and notebook rejection components
+
+- Render updater messages and rejected notebook edit summaries
+   - Expected: packageManagerAutoUpdaterHasUpdate(packageState) is true
+   - Expected: packageManagerAutoUpdaterCommand("winget") equals `winget upgrade Anthropic.ClaudeCode`
+   - Expected: packageManagerAutoUpdaterMessage(packageState) equals `currentVersion: 1.0.0\nUpdate available! Run: brew upgrade claude-code`
+   - Expected: nativeAutoUpdaterShouldRender(native) is true
+   - Expected: nativeAutoUpdaterStatusMessage(native) equals `"current: 1.0.0 · stable: 2.0.0\nChecking for updates")`
+   - Expected: nativeAutoUpdaterErrorType("Checksum mismatch") equals `checksum_mismatch`
+   - Expected: nativeAutoUpdaterShouldRender(NativeAutoUpdaterState.new(true, "1.0.0", "2.0.0", "", "", "", true, false, true, "stable")) is false
+   - Expected: notebookEditToolUseRejectedDisplayPath(notebook) equals `nb.ipynb`
+   - Expected: notebookEditToolUseRejectedHeader(notebook) equals `User rejected replace cell in nb.ipynb at cell A1`
+   - Expected: notebookEditToolUseRejectedDisplayPath(markdown) equals `/repo/nb.ipynb`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render updater messages and rejected notebook edit summaries")
+val packageState = PackageManagerAutoUpdateState.new(true, "2.0.0", "", "1.0.0", "homebrew", true)
+expect(packageManagerAutoUpdaterHasUpdate(packageState)).to_equal(true)
+expect(packageManagerAutoUpdaterCommand("winget")).to_equal("winget upgrade Anthropic.ClaudeCode")
+expect(packageManagerAutoUpdaterMessage(packageState)).to_equal("currentVersion: 1.0.0\nUpdate available! Run: brew upgrade claude-code")
+val native = NativeAutoUpdaterState.new(true, "1.0.0", "2.0.0", "", "", "", false, false, true, "stable")
+expect(nativeAutoUpdaterShouldRender(native)).to_equal(true)
+expect(nativeAutoUpdaterStatusMessage(native)).to_equal("current: 1.0.0 · stable: 2.0.0\nChecking for updates")
+expect(nativeAutoUpdaterErrorType("Checksum mismatch")).to_equal("checksum_mismatch")
+expect(nativeAutoUpdaterShouldRender(NativeAutoUpdaterState.new(true, "1.0.0", "2.0.0", "", "", "", true, false, true, "stable"))).to_equal(false)
+val notebook = NotebookEditToolUseRejectedMessageState.new("/repo/nb.ipynb", "A1", "print(1)", "code", "replace", false, "/repo")
+expect(notebookEditToolUseRejectedDisplayPath(notebook)).to_equal("nb.ipynb")
+expect(notebookEditToolUseRejectedHeader(notebook)).to_equal("User rejected replace cell in nb.ipynb at cell A1")
+expect(notebookEditToolUseRejectedRenderSummary(notebook)).to_contain("file.py")
+val markdown = NotebookEditToolUseRejectedMessageState.new("/repo/nb.ipynb", "B2", "# title", "markdown", "insert", true, "/repo")
+expect(notebookEditToolUseRejectedDisplayPath(markdown)).to_equal("/repo/nb.ipynb")
+expect(notebookEditToolUseRejectedRenderSummary(markdown)).to_contain("file.md")
+```
+
+</details>
+
+#### should model picker, passes, and question navigation components
+
+- Map options, sort guest passes, and mark answered question tabs
+   - Expected: options[0].label equals `Default`
+   - Expected: options[0].description equals `Concise`
+   - Expected: options[1].description equals `Claude completes coding tasks efficiently and provides concise responses`
+- var picker = OutputStylePickerView new
+- picker finish load
+- picker select
+   - Expected: picker.is_loading is false
+   - Expected: picker.selected_value equals `custom`
+   - Expected: outputStylePickerHideChrome(false) is true
+   - Expected: passRender.title equals `"Guest passes · 2 left")`
+   - Expected: passRender.sorted_passes[0].is_available is true
+   - Expected: passRender.sorted_passes[2].is_available is false
+   - Expected: passRender.terms_url equals `https://support.claude.com/en/articles/13456702-claude-code-guest-passes`
+   - Expected: passRender.exit_hint equals `"Enter to copy link · Esc to cancel")`
+   - Expected: passesCopyReferral("https://ref") equals `Referral link copied to clipboard!`
+   - Expected: passesRender(true, false, [], "", false, "", false, "Esc").body equals `Loading guest pass information...`
+   - Expected: nav.left_arrow_active is true
+   - Expected: nav.right_arrow_active is true
+   - Expected: nav.tabs[0].answered is true
+   - Expected: nav.tabs[1].selected is true
+   - Expected: nav.submit_visible is true
+   - Expected: submit.title equals `Review your answers`
+   - Expected: submit.warning equals `"⚠ You have not answered all questions")`
+   - Expected: submit.answer_lines[0].answer equals `No`
+   - Expected: submit.options[0].value equals `submit`
+   - Expected: submit.nav.tabs[1].selected is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Map options, sort guest passes, and mark answered question tabs")
+val options = mapConfigsToOutputStyleOptions(["default", "custom"], [OutputStyleConfig.new("Default", "Concise"), OutputStyleConfig.new("", "")])
+expect(options[0].label).to_equal("Default")
+expect(options[0].description).to_equal("Concise")
+expect(options[1].description).to_equal("Claude completes coding tasks efficiently and provides concise responses")
+var picker = OutputStylePickerView.new("default", true)
+picker.finish_load(options)
+picker.select("custom")
+expect(picker.is_loading).to_equal(false)
+expect(picker.selected_value).to_equal("custom")
+expect(outputStylePickerHideChrome(false)).to_equal(true)
+val passRender = passesRender(false, true, passesBuildStatuses([false, true, false], 3), "https://ref", true, "$20", false, "Esc")
+expect(passRender.title).to_equal("Guest passes · 2 left")
+expect(passRender.sorted_passes[0].is_available).to_equal(true)
+expect(passRender.sorted_passes[2].is_available).to_equal(false)
+expect(passRender.terms_url).to_equal("https://support.claude.com/en/articles/13456702-claude-code-guest-passes")
+expect(passRender.exit_hint).to_equal("Enter to copy link · Esc to cancel")
+expect(passesCopyReferral("https://ref")).to_equal("Referral link copied to clipboard!")
+expect(passesRender(true, false, [], "", false, "", false, "Esc").body).to_equal("Loading guest pass information...")
+val questions = [QuestionNavQuestion.new("Use prod?", "Prod"), QuestionNavQuestion.new("Reason?", "Reason")]
+val answers = [QuestionNavAnswer.new("Use prod?", "No")]
+val nav = questionNavigationBar(questions, 1, answers, 80, false)
+expect(nav.left_arrow_active).to_equal(true)
+expect(nav.right_arrow_active).to_equal(true)
+expect(nav.tabs[0].answered).to_equal(true)
+expect(nav.tabs[1].selected).to_equal(true)
+expect(nav.submit_visible).to_equal(true)
+val submit = submitQuestionsView(questions, 1, answers, false, "ask", 4, 80)
+expect(submit.title).to_equal("Review your answers")
+expect(submit.warning).to_equal("⚠ You have not answered all questions")
+expect(submit.answer_lines[0].answer).to_equal("No")
+expect(submit.options[0].value).to_equal("submit")
+expect(submit.nav.tabs[1].selected).to_equal(true)
+```
+
+</details>
+
+#### should model model picker and onboarding state
+
+- Normalize model selection state and advance onboarding flow
+   - Expected: modelView.initial_value equals `__NO_PREFERENCE__`
+   - Expected: modelView.visible_options equals `10`
+   - Expected: modelView.hidden_options equals `2`
+   - Expected: modelView.effortLine(true, false) equals `Default effort for __NO_PREFERENCE__ is high`
+   - Expected: modelView.fastModeLine(false, true, false) equals `Use /fast to turn on Fast mode.`
+   - Expected: modelView.footerLine(true, "Esc") equals `Press Esc again to exit`
+   - Expected: modelPickerSelectionSummary(selection, false) equals `opus | medium | persisted`
+   - Expected: cycleModelPickerEffort("high", "right", true) equals `max`
+- var onboarding = OnboardingFlowState new
+   - Expected: onboardingStepCount(onboarding) equals `6`
+   - Expected: onboardingCurrentStepId(onboarding) equals `preflight`
+- onboarding = onboardingAdvance
+   - Expected: onboardingCurrentStepId(onboarding) equals `theme`
+- onboarding = onboardingSelectTheme
+   - Expected: onboarding.theme_selected is true
+   - Expected: onboardingCurrentStepId(onboarding) equals `api-key`
+- onboarding = onboardingApproveApiKey
+   - Expected: onboarding.skip_oauth is true
+   - Expected: onboardingSummary(onboarding) equals `oauth:3`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Normalize model selection state and advance onboarding flow")
+val modelView = ModelPickerView.new("", "claude-session", true, true, "", "max", false, 12)
+expect(modelView.initial_value).to_equal("__NO_PREFERENCE__")
+expect(modelView.visible_options).to_equal(10)
+expect(modelView.hidden_options).to_equal(2)
+expect(modelView.sessionBanner()).to_contain("Currently using claude-session")
+expect(modelView.effortLine(true, false)).to_equal("Default effort for __NO_PREFERENCE__ is high")
+expect(modelView.fastModeLine(false, true, false)).to_equal("Use /fast to turn on Fast mode.")
+expect(modelView.footerLine(true, "Esc")).to_equal("Press Esc again to exit")
+val selection = ModelPickerSelection.new("opus", "medium", true, true)
+expect(modelPickerSelectionSummary(selection, false)).to_equal("opus | medium | persisted")
+expect(cycleModelPickerEffort("high", "right", true)).to_equal("max")
+var onboarding = OnboardingFlowState.new(true, true, true)
+expect(onboardingStepCount(onboarding)).to_equal(6)
+expect(onboardingCurrentStepId(onboarding)).to_equal("preflight")
+onboarding = onboardingAdvance(onboarding)
+expect(onboardingCurrentStepId(onboarding)).to_equal("theme")
+onboarding = onboardingSelectTheme(onboarding)
+expect(onboarding.theme_selected).to_equal(true)
+expect(onboardingCurrentStepId(onboarding)).to_equal("api-key")
+onboarding = onboardingApproveApiKey(onboarding, true)
+expect(onboarding.skip_oauth).to_equal(true)
+expect(onboardingSummary(onboarding)).to_equal("oauth:3")
+```
+
+</details>
+
+#### should build bash permission select options
+
+- Prefer editable prefixes, fall back to suggestions, and suppress duplicates
+   - Expected: editable[0].type_name equals `input`
+   - Expected: editable[0].value equals `yes`
+   - Expected: editable[1].value equals `yes-prefix-edited`
+   - Expected: editable[1].initial_value equals `npm run:*`
+   - Expected: editable[2].value equals `no`
+   - Expected: editable[2].prompt_text equals `and tell Claude what to do differently`
+   - Expected: fallback[1].value equals `yes-apply-suggestions`
+   - Expected: fallback.len() equals `3`
+   - Expected: noAlways.len() equals `2`
+   - Expected: stripBashRedirections("npm test > out.txt") equals `npm test`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Prefer editable prefixes, fall back to suggestions, and suppress duplicates")
+val suggestions = [BashPermissionSuggestion.new("addRules", "Bash", "Yes, and don't ask again for npm run")]
+val editable = bashToolUseOptions(suggestions, true, true, true, "npm run:*", true, true, true, "allow npm run", false, [], "")
+expect(editable[0].type_name).to_equal("input")
+expect(editable[0].value).to_equal("yes")
+expect(editable[1].value).to_equal("yes-prefix-edited")
+expect(editable[1].initial_value).to_equal("npm run:*")
+expect(editable[2].value).to_equal("no")
+expect(editable[2].prompt_text).to_equal("and tell Claude what to do differently")
+val fallback = bashToolUseOptions(suggestions, true, false, false, "", false, true, true, "allow npm run", false, ["ALLOW NPM RUN   "], "")
+expect(fallback[1].value).to_equal("yes-apply-suggestions")
+expect(fallback.len()).to_equal(3)
+val noAlways = bashToolUseOptions(suggestions, false, false, false, "", false, false, false, "", false, [], "")
+expect(noAlways.len()).to_equal(2)
+expect(stripBashRedirections("npm test > out.txt")).to_equal("npm test")
+```
+
+</details>
+
+#### should model computer-use approval panels and responses
+
+- Route TCC permissions separately from app allowlist grants
+   - Expected: tcc.panel equals `tcc`
+   - Expected: tcc.title equals `Computer Use needs macOS permissions`
+   - Expected: tcc.accessibility_status equals `not granted`
+   - Expected: tcc.options[0].value equals `open_accessibility`
+   - Expected: tcc.options[1].value equals `retry`
+- ComputerUseAppRequest resolvedApp
+- ComputerUseAppRequest resolvedApp
+- ComputerUseAppRequest unresolved
+   - Expected: render.panel equals `app_list`
+   - Expected: render.reason equals `Automate setup`
+   - Expected: render.app_rows[0].state equals `checked`
+   - Expected: render.app_rows[0].sentinel_warning equals `equivalent to shell access`
+   - Expected: render.app_rows[1].state equals `already_granted`
+   - Expected: render.app_rows[2].state equals `not_installed`
+   - Expected: render.requested_flag_keys.len() equals `2`
+   - Expected: render.options[0].label equals `Allow for this session (1 app)`
+   - Expected: approvedResponse.granted.len() equals `1`
+   - Expected: approvedResponse.granted[0].bundle_id equals `com.apple.Terminal`
+   - Expected: approvedResponse.denied[0].reason equals `not_installed`
+   - Expected: approvedResponse.flags.system_key_combos is true
+   - Expected: computerUseApprovalResponse(request, false).granted.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Route TCC permissions separately from app allowlist grants")
+val tcc = computerUseApproval(ComputerUseRequest.tcc(ComputerUseTccState.new(false, true)))
+expect(tcc.panel).to_equal("tcc")
+expect(tcc.title).to_equal("Computer Use needs macOS permissions")
+expect(tcc.accessibility_status).to_equal("not granted")
+expect(tcc.options[0].value).to_equal("open_accessibility")
+expect(tcc.options[1].value).to_equal("retry")
+val apps = [
+    ComputerUseAppRequest.resolvedApp("Terminal", "com.apple.Terminal", "Terminal", false),
+    ComputerUseAppRequest.resolvedApp("Notes", "com.apple.Notes", "Notes", true),
+    ComputerUseAppRequest.unresolved("MissingApp"),
+]
+val request = ComputerUseRequest.appList(apps, ComputerUseGrantFlags.new(true, false, true), "Automate setup", 2)
+val render = computerUseApproval(request)
+expect(render.panel).to_equal("app_list")
+expect(render.reason).to_equal("Automate setup")
+expect(render.app_rows[0].state).to_equal("checked")
+expect(render.app_rows[0].sentinel_warning).to_equal("equivalent to shell access")
+expect(render.app_rows[1].state).to_equal("already_granted")
+expect(render.app_rows[2].state).to_equal("not_installed")
+expect(render.requested_flag_keys.len()).to_equal(2)
+expect(render.options[0].label).to_equal("Allow for this session (1 app)")
+val approvedResponse = computerUseApprovalResponse(request, true)
+expect(approvedResponse.granted.len()).to_equal(1)
+expect(approvedResponse.granted[0].bundle_id).to_equal("com.apple.Terminal")
+expect(approvedResponse.denied[0].reason).to_equal("not_installed")
+expect(approvedResponse.flags.system_key_combos).to_equal(true)
+expect(computerUseApprovalResponse(request, false).granted.len()).to_equal(0)
+```
+
+</details>
+
+#### should model enter-plan-mode permission response state
+
+- Render plan-mode copy and map yes/no responses to tool callbacks
+   - Expected: render.title equals `Enter plan mode?`
+   - Expected: render.color equals `planMode`
+   - Expected: render.worker_badge equals `worker-1`
+   - Expected: render.options[0].value equals `yes`
+   - Expected: render.options[1].label equals `No, start implementing now`
+   - Expected: yes.done is true
+   - Expected: yes.rejected is false
+   - Expected: yes.transition_mode equals `plan`
+   - Expected: yes.permission_update_type equals `setMode`
+   - Expected: yes.analytics_event equals `tengu_plan_enter`
+   - Expected: yes.interview_phase_enabled is true
+   - Expected: cancel.rejected is true
+   - Expected: cancel.value equals `no`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render plan-mode copy and map yes/no responses to tool callbacks")
+val render = enterPlanModePermissionRequest("worker-1")
+expect(render.title).to_equal("Enter plan mode?")
+expect(render.color).to_equal("planMode")
+expect(render.worker_badge).to_equal("worker-1")
+expect(render.options[0].value).to_equal("yes")
+expect(render.options[1].label).to_equal("No, start implementing now")
+val yes = enterPlanModePermissionResponse("yes", true)
+expect(yes.done).to_equal(true)
+expect(yes.rejected).to_equal(false)
+expect(yes.transition_mode).to_equal("plan")
+expect(yes.permission_update_type).to_equal("setMode")
+expect(yes.analytics_event).to_equal("tengu_plan_enter")
+expect(yes.interview_phase_enabled).to_equal(true)
+val cancel = enterPlanModePermissionCancel(false)
+expect(cancel.rejected).to_equal(true)
+expect(cancel.value).to_equal("no")
+```
+
+</details>
+
+#### should model fallback permission request options and responses
+
+- Strip MCP display suffixes, truncate descriptions, and map allow/reject choices
+   - Expected: render.user_facing_name equals `Filesystem`
+   - Expected: render.description equals `line1\nline2\nline3`
+   - Expected: render.options.len() equals `3`
+   - Expected: render.options[1].value equals `yes-dont-ask-again`
+   - Expected: render.options[1].label equals `Yes, and don't ask again for Filesystem commands in /repo`
+   - Expected: always.done is true
+   - Expected: always.rejected is false
+   - Expected: always.allow_rule_tool_name equals `mcp__fs__read`
+   - Expected: always.feedback equals `ok`
+   - Expected: fallbackPermissionRequestResponse(request, "yes", "").event equals `accept`
+   - Expected: fallbackPermissionRequestCancel(request).rejected is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Strip MCP display suffixes, truncate descriptions, and map allow/reject choices")
+val request = FallbackPermissionRequest.new("mcp__fs__read", "Filesystem (MCP)", "Read file", "line1\nline2\nline3\nline4", "Requires approval", "worker-2", "/repo", true, true)
+val render = fallbackPermissionRequest(request)
+expect(render.user_facing_name).to_equal("Filesystem")
+expect(render.description).to_equal("line1\nline2\nline3")
+expect(render.options.len()).to_equal(3)
+expect(render.options[1].value).to_equal("yes-dont-ask-again")
+expect(render.options[1].label).to_equal("Yes, and don't ask again for Filesystem commands in /repo")
+val always = fallbackPermissionRequestResponse(request, "yes-dont-ask-again", "ok")
+expect(always.done).to_equal(true)
+expect(always.rejected).to_equal(false)
+expect(always.allow_rule_tool_name).to_equal("mcp__fs__read")
+expect(always.feedback).to_equal("ok")
+expect(fallbackPermissionRequestResponse(request, "yes", "").event).to_equal("accept")
+expect(fallbackPermissionRequestCancel(request).rejected).to_equal(true)
+```
+
+</details>
+
+#### should model exit-plan-mode approval options and responses
+
+- Handle empty-plan confirmation, clear-context choices, and Ultraplan rejection
+   - Expected: empty.title equals `Exit plan mode?`
+   - Expected: empty.editor_hint equals `worker-3`
+   - Expected: empty.options[0].value equals `yes`
+   - Expected: ready.title equals `Ready to code?`
+   - Expected: ready.plan equals `Plan body`
+   - Expected: ready.options[0].value equals `yes-auto-clear-context`
+   - Expected: ready.options[3].value equals `ultraplan`
+   - Expected: autoResponse.clear_context is true
+   - Expected: autoResponse.permission_mode equals `auto`
+   - Expected: keep.keep_context is true
+   - Expected: keep.permission_mode equals `bypassPermissions`
+   - Expected: exitPlanModePermissionResponse("ultraplan", false, false).launch_ultraplan is true
+   - Expected: exitPlanModePermissionCancel(false, false).rejected is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Handle empty-plan confirmation, clear-context choices, and Ultraplan rejection")
+val empty = exitPlanModePermissionRequest(true, false, false, "worker-3", "", "", false, false)
+expect(empty.title).to_equal("Exit plan mode?")
+expect(empty.editor_hint).to_equal("worker-3")
+expect(empty.options[0].value).to_equal("yes")
+val ready = exitPlanModePermissionRequest(false, true, true, "", "Plan body", "edit", true, false)
+expect(ready.title).to_equal("Ready to code?")
+expect(ready.plan).to_equal("Plan body")
+expect(ready.options[0].value).to_equal("yes-auto-clear-context")
+expect(ready.options[3].value).to_equal("ultraplan")
+val autoResponse = exitPlanModePermissionResponse("yes-auto-clear-context", false, false)
+expect(autoResponse.clear_context).to_equal(true)
+expect(autoResponse.permission_mode).to_equal("auto")
+val keep = exitPlanModePermissionResponse("yes-accept-edits-keep-context", false, true)
+expect(keep.keep_context).to_equal(true)
+expect(keep.permission_mode).to_equal("bypassPermissions")
+expect(exitPlanModePermissionResponse("ultraplan", false, false).launch_ultraplan).to_equal(true)
+expect(exitPlanModePermissionCancel(false, false).rejected).to_equal(true)
+```
+
+</details>
+
 #### should format rate-limit upsell state
 
 - Select upsell copy and auto-open callback state from explicit inputs
@@ -887,12 +1405,17 @@ expect(formatTeammateMessageContent("{\"type\":\"idle_notification\",\"completed
    - Expected: customError.filtered_progress_count equals `1`
    - Expected: userToolErrorMessage("Permission for this action has been denied. Reason: nope", [], nil, false, false, true).kind equals `classifier-denial`
    - Expected: userToolErrorMessage("plain", [], UserToolErrorTool.new("Bash", false), false, false, false).used_fallback_renderer is true
+   - Expected: userToolResultMessage(UserToolResultParam.new("tu1", "tool_use_cancelled by user", false), routeTools, routeUses).kind equals `canceled`
+   - Expected: userToolResultMessage(UserToolResultParam.new("tu1", "tool_use_rejected nope", false), routeTools, routeUses).kind equals `rejected`
+   - Expected: userToolResultMessage(UserToolResultParam.new("tu1", "bad", true), routeTools, routeUses).kind equals `error`
+   - Expected: userToolResultMessage(UserToolResultParam.new("tu1", "ok", false), routeTools, routeUses).kind equals `success`
+   - Expected: userToolResultMessage(UserToolResultParam.new("missing", "ok", false), routeTools, routeUses).visible is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -932,6 +1455,13 @@ expect(customError.kind).to_equal("custom-tool-error")
 expect(customError.filtered_progress_count).to_equal(1)
 expect(userToolErrorMessage("Permission for this action has been denied. Reason: nope", [], nil, false, false, true).kind).to_equal("classifier-denial")
 expect(userToolErrorMessage("plain", [], UserToolErrorTool.new("Bash", false), false, false, false).used_fallback_renderer).to_equal(true)
+val routeTools = [UserToolLookupTool.new("Bash", "Run shell")]
+val routeUses = [UserToolLookupToolUse.new("tu1", "Bash")]
+expect(userToolResultMessage(UserToolResultParam.new("tu1", "tool_use_cancelled by user", false), routeTools, routeUses).kind).to_equal("canceled")
+expect(userToolResultMessage(UserToolResultParam.new("tu1", "tool_use_rejected nope", false), routeTools, routeUses).kind).to_equal("rejected")
+expect(userToolResultMessage(UserToolResultParam.new("tu1", "bad", true), routeTools, routeUses).kind).to_equal("error")
+expect(userToolResultMessage(UserToolResultParam.new("tu1", "ok", false), routeTools, routeUses).kind).to_equal("success")
+expect(userToolResultMessage(UserToolResultParam.new("missing", "ok", false), routeTools, routeUses).visible).to_equal(false)
 ```
 
 </details>
@@ -994,6 +1524,58 @@ expect(prompt.visible).to_equal(true)
 expect(prompt.use_brief_layout).to_equal(true)
 expect(prompt.timestamp).to_equal("10:00")
 expect(userPromptMessage("", false, false, "", false, false, false, false, false, false, "", false).logged_error).to_equal("No content found in user prompt message")
+```
+
+</details>
+
+#### should route user text messages
+
+- Choose message renderer kind from tags and feature gates
+   - Expected: userTextMessage("(no content)", false, false, "", false, "", false, false, false, false, false, false).visible is false
+   - Expected: userTextMessage("raw", true, false, "plan", false, "10:00", false, false, false, false, false, false).kind equals `plan`
+   - Expected: userTextMessage("<bash-input>ls</bash-input>", false, false, "", false, "", false, false, false, false, false, false).kind equals `bash-input`
+   - Expected: userTextMessage("<teammate-message from=\"Ada\">hi</teammate-message>", false, false, "", false, "", true, false, false, false, false, false).kind equals `teammate`
+   - Expected: userTextMessage("<channel source=\"mcp:x\">hi</channel>", false, false, "", false, "", false, false, false, false, true, false).kind equals `channel`
+   - Expected: userTextMessage("hello", false, false, "", false, "", false, false, false, false, false, false).kind equals `prompt`
+   - Expected: resource.visible is true
+   - Expected: resource.margin_top equals `1`
+   - Expected: resource.rows[0].server equals `fs`
+   - Expected: formatUserResourceUpdateUri(resource.rows[0].target) equals `readme.md`
+   - Expected: resource.rows[0].reason equals `changed`
+   - Expected: teammate.visible is true
+   - Expected: teammate.entries[0].header equals `@ada>`
+   - Expected: teammate.entries[0].body equals `Hello`
+   - Expected: teammate.entries[0].transcript_body is true
+   - Expected: taskDone.entries[0].kind equals `task-completed`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Choose message renderer kind from tags and feature gates")
+expect(userTextMessage("(no content)", false, false, "", false, "", false, false, false, false, false, false).visible).to_equal(false)
+expect(userTextMessage("raw", true, false, "plan", false, "10:00", false, false, false, false, false, false).kind).to_equal("plan")
+expect(userTextMessage("<bash-input>ls</bash-input>", false, false, "", false, "", false, false, false, false, false, false).kind).to_equal("bash-input")
+expect(userTextMessage("<teammate-message from=\"Ada\">hi</teammate-message>", false, false, "", false, "", true, false, false, false, false, false).kind).to_equal("teammate")
+expect(userTextMessage("<channel source=\"mcp:x\">hi</channel>", false, false, "", false, "", false, false, false, false, true, false).kind).to_equal("channel")
+expect(userTextMessage("hello", false, false, "", false, "", false, false, false, false, false, false).kind).to_equal("prompt")
+val resource = userResourceUpdateMessage("<mcp-resource-update server=\"fs\" uri=\"file:///tmp/readme.md\"><reason>changed</reason></mcp-resource-update>", true)
+expect(resource.visible).to_equal(true)
+expect(resource.margin_top).to_equal(1)
+expect(resource.rows[0].server).to_equal("fs")
+expect(formatUserResourceUpdateUri(resource.rows[0].target)).to_equal("readme.md")
+expect(resource.rows[0].reason).to_equal("changed")
+val teammate = userTeammateMessage("<teammate-message teammate_id=\"ada\" color=\"cyan\" summary=\"heads up\">Hello</teammate-message>", true, true)
+expect(teammate.visible).to_equal(true)
+expect(teammate.entries[0].header).to_equal("@ada>")
+expect(teammate.entries[0].body).to_equal("Hello")
+expect(teammate.entries[0].transcript_body).to_equal(true)
+val taskDone = userTeammateMessage("<teammate-message teammate_id=\"ada\">{\"type\":\"task_completed\",\"taskId\":\"42\",\"taskSubject\":\"Review\"}</teammate-message>", false, false)
+expect(taskDone.entries[0].kind).to_equal("task-completed")
 ```
 
 </details>
@@ -1124,6 +1706,22 @@ expect(debugTruncate("small")).to_equal("small")
    - Expected: codeSessionApiSourceLinesModeled() equals `168`
    - Expected: debugUtilsSourceLinesModeled() equals `141`
    - Expected: envLessBridgeConfigSourceLinesModeled() equals `165`
+   - Expected: messageTimestampSourceLinesModeled() equals `62`
+   - Expected: modelPickerSourceLinesModeled() equals `447`
+   - Expected: nativeAutoUpdaterSourceLinesModeled() equals `192`
+   - Expected: notebookEditToolUseRejectedSourceLinesModeled() equals `91`
+   - Expected: offscreenFreezeSourceLinesModeled() equals `43`
+   - Expected: onboardingSourceLinesModeled() equals `243`
+   - Expected: outputStylePickerSourceLinesModeled() equals `111`
+   - Expected: packageManagerAutoUpdaterSourceLinesModeled() equals `103`
+   - Expected: passesSourceLinesModeled() equals `183`
+   - Expected: questionNavigationBarSourceLinesModeled() equals `177`
+   - Expected: submitQuestionsViewSourceLinesModeled() equals `143`
+   - Expected: bashToolUseOptionsSourceLinesModeled() equals `146`
+   - Expected: computerUseApprovalSourceLinesModeled() equals `440`
+   - Expected: enterPlanModePermissionRequestSourceLinesModeled() equals `121`
+   - Expected: exitPlanModePermissionRequestSourceLinesModeled() equals `767`
+   - Expected: fallbackPermissionRequestSourceLinesModeled() equals `332`
    - Expected: highlightedThinkingTextSourceLinesModeled() equals `161`
    - Expected: hookProgressMessageSourceLinesModeled() equals `115`
    - Expected: inboundAttachmentsSourceLinesModeled() equals `175`
@@ -1148,11 +1746,15 @@ expect(debugTruncate("small")).to_equal("small")
    - Expected: userMemoryInputMessageSourceLinesModeled() equals `74`
    - Expected: userPlanMessageSourceLinesModeled() equals `41`
    - Expected: userPromptMessageSourceLinesModeled() equals `79`
+   - Expected: userResourceUpdateMessageSourceLinesModeled() equals `120`
+   - Expected: userTeammateMessageSourceLinesModeled() equals `205`
+   - Expected: userTextMessageSourceLinesModeled() equals `274`
    - Expected: rejectedPlanMessageSourceLinesModeled() equals `30`
    - Expected: rejectedToolUseMessageSourceLinesModeled() equals `15`
    - Expected: userToolCanceledMessageSourceLinesModeled() equals `15`
    - Expected: userToolErrorMessageSourceLinesModeled() equals `102`
    - Expected: userToolRejectMessageSourceLinesModeled() equals `94`
+   - Expected: userToolResultMessageSourceLinesModeled() equals `105`
    - Expected: userToolSuccessMessageSourceLinesModeled() equals `103`
    - Expected: userToolResultUtilsSourceLinesModeled() equals `43`
    - Expected: groupedToolUseContentSourceLinesModeled() equals `57`
@@ -1161,7 +1763,7 @@ expect(debugTruncate("small")).to_equal("small")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1172,6 +1774,22 @@ expect(capacityWakeSourceLinesModeled()).to_equal(56)
 expect(codeSessionApiSourceLinesModeled()).to_equal(168)
 expect(debugUtilsSourceLinesModeled()).to_equal(141)
 expect(envLessBridgeConfigSourceLinesModeled()).to_equal(165)
+expect(messageTimestampSourceLinesModeled()).to_equal(62)
+expect(modelPickerSourceLinesModeled()).to_equal(447)
+expect(nativeAutoUpdaterSourceLinesModeled()).to_equal(192)
+expect(notebookEditToolUseRejectedSourceLinesModeled()).to_equal(91)
+expect(offscreenFreezeSourceLinesModeled()).to_equal(43)
+expect(onboardingSourceLinesModeled()).to_equal(243)
+expect(outputStylePickerSourceLinesModeled()).to_equal(111)
+expect(packageManagerAutoUpdaterSourceLinesModeled()).to_equal(103)
+expect(passesSourceLinesModeled()).to_equal(183)
+expect(questionNavigationBarSourceLinesModeled()).to_equal(177)
+expect(submitQuestionsViewSourceLinesModeled()).to_equal(143)
+expect(bashToolUseOptionsSourceLinesModeled()).to_equal(146)
+expect(computerUseApprovalSourceLinesModeled()).to_equal(440)
+expect(enterPlanModePermissionRequestSourceLinesModeled()).to_equal(121)
+expect(exitPlanModePermissionRequestSourceLinesModeled()).to_equal(767)
+expect(fallbackPermissionRequestSourceLinesModeled()).to_equal(332)
 expect(highlightedThinkingTextSourceLinesModeled()).to_equal(161)
 expect(hookProgressMessageSourceLinesModeled()).to_equal(115)
 expect(inboundAttachmentsSourceLinesModeled()).to_equal(175)
@@ -1196,11 +1814,15 @@ expect(userLocalCommandOutputMessageSourceLinesModeled()).to_equal(166)
 expect(userMemoryInputMessageSourceLinesModeled()).to_equal(74)
 expect(userPlanMessageSourceLinesModeled()).to_equal(41)
 expect(userPromptMessageSourceLinesModeled()).to_equal(79)
+expect(userResourceUpdateMessageSourceLinesModeled()).to_equal(120)
+expect(userTeammateMessageSourceLinesModeled()).to_equal(205)
+expect(userTextMessageSourceLinesModeled()).to_equal(274)
 expect(rejectedPlanMessageSourceLinesModeled()).to_equal(30)
 expect(rejectedToolUseMessageSourceLinesModeled()).to_equal(15)
 expect(userToolCanceledMessageSourceLinesModeled()).to_equal(15)
 expect(userToolErrorMessageSourceLinesModeled()).to_equal(102)
 expect(userToolRejectMessageSourceLinesModeled()).to_equal(94)
+expect(userToolResultMessageSourceLinesModeled()).to_equal(105)
 expect(userToolSuccessMessageSourceLinesModeled()).to_equal(103)
 expect(userToolResultUtilsSourceLinesModeled()).to_equal(43)
 expect(groupedToolUseContentSourceLinesModeled()).to_equal(57)
@@ -1212,8 +1834,8 @@ expect(groupedToolUseContentSourceLinesModeled()).to_equal(57)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 27 |
-| Active scenarios | 27 |
+| Total scenarios | 38 |
+| Active scenarios | 38 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

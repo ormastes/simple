@@ -60,8 +60,10 @@ scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
 
 # Windows:
 scripts/bootstrap/bootstrap-windows.sh --deploy
-# Manual stages:
-cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all
+# Manual full-bootstrap seed/runtime rebuild:
+scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
+
+# Internal stage replay after a full-bootstrap seed exists:
 SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple native-build \
   --source src/compiler --source src/lib --source src/app \
   --entry src/app/cli/bootstrap_main.spl -o build/bootstrap/stage2/<triple>/simple

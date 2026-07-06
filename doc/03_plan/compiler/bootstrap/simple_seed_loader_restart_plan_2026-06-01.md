@@ -70,6 +70,13 @@ Resume the segfault/loader hardening work with Rust treated only as the seed/too
 8. Get `sh scripts/bootstrap/bootstrap-from-scratch.sh --deploy --no-mcp` past Stage 4 and confirm `bin/simple --version` resolves to the refreshed pure Simple deployed bootstrap.
 9. Confirm `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
 
+## Agent Refactor Handoff
+
+Use `doc/03_plan/agent_tasks/bootstrap_compiler_interpreter_loader_arch_refactor.md`
+for the broader bootstrap / compiler / interpreter / loader architecture lane.
+This restart plan remains the bounded loader/bootstrap recovery checklist; do
+not fold unrelated interpreter or compiler-layer refactors into this lane.
+
 ## Important Constraint
 
 Do not continue expanding Rust fixes unless required for seed/tooling diagnostics. The product fix belongs in Simple code.

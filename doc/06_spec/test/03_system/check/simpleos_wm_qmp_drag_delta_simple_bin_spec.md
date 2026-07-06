@@ -48,7 +48,7 @@ The live drag-delta check requires QEMU and a running SimpleOS desktop target, b
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/simpleos_wm_qmp_drag_delta_simple_bin_spec.spl` |
-| Updated | 2026-07-02 |
+| Updated | 2026-07-06 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -103,7 +103,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/simpleos_wm_qmp_drag_delta_s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -132,13 +132,17 @@ expect(native_build_main).to_contain("[\"run\", \"src/app/cli/native_build_worke
 expect(native_build_main).to_contain("worker_args.push(\"--mode=interpreter\")")
 expect(native_build_main).to_contain("env_set(\"SIMPLE_EXECUTION_MODE\", \"interpret\")")
 val runner_targets = file_read("src/os/_QemuRunner/runner_targets.spl")
-expect(runner_targets).to_contain("if target.output == \"build/os/simpleos_wm_simple_web_check_32.elf\":")
+expect(runner_targets).to_contain("fn _os_build_backend_for_target(target: OsTarget) -> text:")
+expect(runner_targets).to_contain("output: \"build/os/simpleos_wm_simple_web_check_32.elf\"")
 expect(runner_targets).to_contain("return \"llvm\"")
 val compile_targets = file_read("src/app/io/_CliCompile/compile_targets.spl")
-expect(compile_targets).to_contain("linker_script = args[j]")
-expect(compile_targets).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_LINKER_SCRIPT\", linker_script)")
-expect(compile_targets).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_LINKER_SCRIPT\", old_linker_script)")
-expect(compile_targets).to_contain("elif a == \"--cpu\"")
+expect(compile_targets).to_contain("var build_mode = \"dynload\"")
+expect(compile_targets).to_contain("if build_mode != \"dynload\" and build_mode != \"one-binary\"")
+expect(compile_targets).to_contain("options.output_format = driver_output_format_both()")
+expect(compile_targets).to_contain("options.output_format = driver_output_format_native()")
+expect(compile_targets).to_contain("fn _native_build_entry_closure")
+expect(compile_targets).to_contain("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+expect(compile_targets).to_contain("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE")
 val native_build_worker = file_read("src/app/cli/native_build_worker.spl")
 expect(native_build_worker).to_contain("use app.io._CliCompile.compile_targets.")
 expect(native_build_worker).to_contain("cli_native_build")

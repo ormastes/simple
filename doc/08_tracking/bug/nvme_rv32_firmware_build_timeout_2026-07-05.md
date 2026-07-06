@@ -1110,28 +1110,3 @@ error: refusing to emit a stub-only bootstrap binary; real Simple lowering produ
 RV32 firmware production proof therefore remains open. Do not rerun the full
 bootstrap/deploy loop until the bootstrap entry source-loading/HIR path
 produces real functions in Stage 2.
-
-### Latest bootstrap progress: AST arena count/tag bridge fixed (2026-07-06)
-
-The Stage 2 empty-HIR investigation found that `bootstrap_main.spl` was parsed
-and declarations were appended, but the flat bridge still built an empty module.
-Trace evidence showed seven entry declarations followed by `tag nil` for every
-declaration, leaving `functions_count 0`.
-
-Fixes landed in the compiler frontend:
-
-- declaration counts now use array-backed slots instead of env-only counters;
-- the flat bridge normalizes missing bootstrap env mirrors to empty text so
-  arena fallback (`decl_get_tag`) works when tag mirrors are absent.
-
-Focused evidence:
-
-```text
-PASS test/01_unit/compiler/frontend/bootstrap_decl_count_slot_spec.spl
-2 examples, 0 failures
-```
-
-The post-fix Stage 2 proof run exited 137 before frontend trace output, with
-several unrelated native-build jobs active on the host. Firmware production
-proof remains open until Stage 2 is rerun under a quiet build host and shows
-real HIR/MIR entry functions or the next concrete blocker.

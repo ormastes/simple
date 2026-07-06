@@ -320,6 +320,11 @@ gate proving the facade/codegen/runtime boundary, not just the feature output.
 Before handoff, run `sh scripts/audit/direct-env-runtime-guard.shs --working`
 for runtime-adjacent app/gc lanes and treat any new raw env/process runtime
 imports or calls outside owner modules as a fix-before-done issue.
+For process/signal hardening, also require the
+`doc/07_guide/runtime/process_kill_safety.md` rule: every kill/wait path rejects
+`pid <= 0` before signaling or reaping. Seed runtime changes to that guard need
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy` before
+they affect deployed binaries.
 
 Before touching runtime-adjacent code in an existing lane, read that lane's
 recorded `rejected_shortcuts` first; do not retry a rejected `rt_*`, fixture

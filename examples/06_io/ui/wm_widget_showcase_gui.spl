@@ -23,8 +23,6 @@ val W: i32 = 660
 val H: i32 = 840
 val LOCATOR: u32 = 0xFFFF00FFu32
 val MUTED: u32 = 0xFF94A3B8u32
-val ANIM_TICK_INTERVAL_US: i64 = 5000000
-val CHILD_REFRESH_TIMEOUT_US: i64 = 5000000
 
 struct WmLoopState:
     comp: HostCompositor
@@ -71,16 +69,8 @@ fn wait_for_bridge(path: text, timeout_ms: i64) -> text:
             val body = file_read(path)
             if body.contains("kind=create_window"):
                 return body
-        sleep_ms(10)
+        sleep_ms(50)
     ""
-
-fn wait_for_frame_seq(seq_path: text, previous_seq: i64, timeout_ms: i64) -> i64:
-    val deadline = time_now_unix_micros() + timeout_ms * 1000
-    var seq = read_frame_seq(seq_path)
-    while seq <= previous_seq and time_now_unix_micros() < deadline:
-        sleep_ms(10)
-        seq = read_frame_seq(seq_path)
-    seq
 
 fn path_join(root: text, rel: text) -> text:
     if root.ends_with("/") or root.ends_with("\\"):
@@ -337,12 +327,8 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
         env["SIMPLE_LIB"] = lib
     else:
         env["SIMPLE_LIB"] = path_join(repo_root, "src")
-    env["SIMPLE_TIMEOUT_SECONDS"] = env_get("SIMPLE_TIMEOUT_SECONDS") ?? "0"
-    env["SIMPLE_EXECUTION_LIMIT"] = env_get("SIMPLE_EXECUTION_LIMIT") ?? "0"
     env["SHOWCASE_PPM_SCALE"] = "2"
     val simple_lib = env["SIMPLE_LIB"]
-    val timeout_seconds = env["SIMPLE_TIMEOUT_SECONDS"]
-    val execution_limit = env["SIMPLE_EXECUTION_LIMIT"]
     val showcase_scale = env["SHOWCASE_PPM_SCALE"]
     val simple_bin = path_join(repo_root, "bin/simple")
     val showcase_source_path = path_join(repo_root, WIDGET_SHOWCASE_APP_SOURCE)
@@ -358,8 +344,6 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
         "{WM_FRAME_SEQ_FILE_ENV}={seq_path}",
         "SIMPLE_WM_CLIENT_HOLD=1",
         "SHOWCASE_PPM_SCALE={showcase_scale}",
-        "SIMPLE_TIMEOUT_SECONDS={timeout_seconds}",
-        "SIMPLE_EXECUTION_LIMIT={execution_limit}",
         "SIMPLE_LIB={simple_lib}",
         simple_bin,
         "run",
@@ -413,7 +397,7 @@ fn main() -> i64:
     write_wm_trace(trace_path, "frame_ready")
     val child_event_path = if req.event_path != "": req.event_path else: event_path
     val child_seq_path = if req.frame_seq_path != "": req.frame_seq_path else: seq_path
-    var last_frame_seq = wait_for_frame_seq(child_seq_path, 0, 5000)
+    var last_frame_seq = read_frame_seq(child_seq_path)
 
     write_wm_trace(trace_path, "before_loop_new")
     val lp = winit_loop_new()
@@ -449,31 +433,21 @@ fn main() -> i64:
     var last_anim_tick = time_now_unix_micros()
     var frames = 0
     while state.running and frames < 2000000:
-        var current_frame_seq = last_frame_seq
-        if state.child_refresh_pending:
-            current_frame_seq = read_frame_seq(child_seq_path)
-        if state.child_refresh_pending and current_frame_seq > last_frame_seq:
-            last_frame_seq = current_frame_seq
-            state.dirty = true
-            state.child_refresh_pending = false
-            state.child_refresh_deadline = 0
-            write_wm_trace(trace_path, "frame_refresh:{last_frame_seq}")
-            print "[wm-showcase] child_frame_refresh seq={last_frame_seq} size={frame_w}x{frame_h}"
-        val wait_ms = if state.child_refresh_pending: 5 else: 80
+        val wait_ms = if state.child_refresh_pending: 20 else: 80
         val input = winit_wait_input(lp, wait_ms)
         state = apply_wm_input(state, input, child_event_path, frame_w, frame_h)
         val now = time_now_unix_micros()
         if state.child_refresh_pending and state.child_refresh_deadline == 0:
-            state.child_refresh_deadline = now + CHILD_REFRESH_TIMEOUT_US
-        if not state.child_refresh_pending and now - last_anim_tick >= ANIM_TICK_INTERVAL_US:
+            state.child_refresh_deadline = now + 250000
+        if not state.child_refresh_pending and now - last_anim_tick >= 1000000:
             val before_tick_seq = state.child_event_seq
             state.child_event_seq = write_child_pointer_event(child_event_path, state.child_event_seq, "tick", 0, 0, 0, false)
             if state.child_event_seq > before_tick_seq:
                 state.child_refresh_pending = true
-                state.child_refresh_deadline = now + CHILD_REFRESH_TIMEOUT_US
+                state.child_refresh_deadline = now + 250000
                 write_wm_trace(trace_path, "tick_sent:{state.child_event_seq}")
             last_anim_tick = now
-        current_frame_seq = last_frame_seq
+        var current_frame_seq = last_frame_seq
         if state.child_refresh_pending:
             current_frame_seq = read_frame_seq(child_seq_path)
             if current_frame_seq <= last_frame_seq:
@@ -494,6 +468,7 @@ fn main() -> i64:
                 cleanup(child_pid, engine, win, lp)
                 return 1
             state.dirty = false
+            sleep_ms(16)
         frames = frames + 1
 
     cleanup(child_pid, engine, win, lp)

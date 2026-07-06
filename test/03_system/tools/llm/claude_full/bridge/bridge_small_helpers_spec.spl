@@ -70,6 +70,23 @@ use app.llm_caret.claude_full.components.messages.UserToolResultMessage.utils.*
 use app.llm_caret.claude_full.components.messages.teamMemCollapsed.*
 use app.llm_caret.claude_full.components.messages.teamMemSaved.*
 use app.llm_caret.claude_full.components.messages.nullRenderingAttachments.*
+use app.llm_caret.claude_full.components.MessageTimestamp.*
+use app.llm_caret.claude_full.components.ModelPicker.*
+use app.llm_caret.claude_full.components.NativeAutoUpdater.*
+use app.llm_caret.claude_full.components.NotebookEditToolUseRejectedMessage.*
+use app.llm_caret.claude_full.components.OffscreenFreeze.*
+use app.llm_caret.claude_full.components.Onboarding.*
+use app.llm_caret.claude_full.components.OutputStylePicker.*
+use app.llm_caret.claude_full.components.PackageManagerAutoUpdater.*
+use app.llm_caret.claude_full.components.Passes.Passes.*
+use app.llm_caret.claude_full.components.permissions.AskUserQuestionPermissionRequest.PreviewBox.*
+use app.llm_caret.claude_full.components.permissions.AskUserQuestionPermissionRequest.QuestionNavigationBar.*
+use app.llm_caret.claude_full.components.permissions.AskUserQuestionPermissionRequest.SubmitQuestionsView.*
+use app.llm_caret.claude_full.components.permissions.BashPermissionRequest.bashToolUseOptions.*
+use app.llm_caret.claude_full.components.permissions.ComputerUseApproval.ComputerUseApproval.*
+use app.llm_caret.claude_full.components.permissions.EnterPlanModePermissionRequest.EnterPlanModePermissionRequest.*
+use app.llm_caret.claude_full.components.permissions.ExitPlanModePermissionRequest.ExitPlanModePermissionRequest.*
+use app.llm_caret.claude_full.components.permissions.FallbackPermissionRequest.*
 
 describe "Claude full bridge small helpers":
     it "should model capacity wake signal lifecycle":
@@ -261,6 +278,231 @@ describe "Claude full bridge small helpers":
             expect(isHiddenModelVisibleFeature(features[i].name)).to_equal(true)
             i = i + 1
         expect(isHiddenModelVisibleFeature("ordinary-user-message")).to_equal(false)
+
+    it "should model ask-user-question preview box sizing and truncation":
+        step("Apply default limits, truncate overlong previews, pad short previews, and retain source line parity")
+        val preview = previewBox("line1\nline2\nline3", 2, 4, 6, 20, 80, true)
+        expect(previewBoxSourceLinesModeled()).to_equal(228)
+        expect(preview.content_lines.len()).to_equal(3)
+        expect(preview.visible_lines.len()).to_equal(2)
+        expect(preview.is_truncated).to_equal(true)
+        expect(preview.hidden_count).to_equal(1)
+        expect(preview.padding_needed).to_equal(0)
+        expect(preview.box_width).to_equal(10)
+        expect(preview.inner_width).to_equal(6)
+        expect(preview.top_border).to_equal("┌────────┐")
+        expect(preview.bottom_border).to_equal("└────────┘")
+        expect(preview.truncation_bar).to_contain("1 lines hidden")
+        expect(preview.highlight_enabled).to_equal(false)
+        val paddedPreview = previewBox("wide-content", 0, 3, 4, 12, 80, false)
+        expect(paddedPreview.is_truncated).to_equal(false)
+        expect(paddedPreview.padding_needed).to_equal(2)
+        expect(paddedPreview.visible_lines.len()).to_equal(3)
+        expect(paddedPreview.visible_lines[0].display).to_equal("wide-con")
+        expect(paddedPreview.visible_lines[0].padding_width).to_equal(0)
+        expect(paddedPreview.highlight_enabled).to_equal(true)
+
+    it "should model small top-level component render gates":
+        step("Freeze offscreen content and gate assistant transcript timestamps")
+        val frozen = offscreenFreeze("new", "old", false, false)
+        expect(frozen.rendered).to_equal("old")
+        expect(frozen.updated_cache).to_equal(false)
+        val visibleFreeze = offscreenFreeze("new", "old", true, false)
+        expect(visibleFreeze.rendered).to_equal("new")
+        expect(visibleFreeze.updated_cache).to_equal(true)
+        val virtualFreeze = offscreenFreeze("newer", "old", false, true)
+        expect(virtualFreeze.rendered).to_equal("newer")
+        expect(virtualFreeze.in_virtual_list).to_equal(true)
+        val timestamp = messageTimestamp(true, "2026-07-06T10:00:00Z", "assistant", [MessageTimestampBlock.new("tool"), MessageTimestampBlock.new("text")], "10:00 AM")
+        expect(timestamp.visible).to_equal(true)
+        expect(timestamp.text).to_equal("10:00 AM")
+        expect(timestamp.min_width).to_equal(8)
+        expect(timestamp.dim).to_equal(true)
+        expect(messageTimestamp(false, "2026-07-06T10:00:00Z", "assistant", [MessageTimestampBlock.new("text")], "10:00 AM").visible).to_equal(false)
+        expect(messageTimestamp(true, "2026-07-06T10:00:00Z", "user", [MessageTimestampBlock.new("text")], "10:00 AM").visible).to_equal(false)
+        expect(messageTimestamp(true, "2026-07-06T10:00:00Z", "assistant", [MessageTimestampBlock.new("tool")], "10:00 AM").visible).to_equal(false)
+
+    it "should model updater and notebook rejection components":
+        step("Render updater messages and rejected notebook edit summaries")
+        val packageState = PackageManagerAutoUpdateState.new(true, "2.0.0", "", "1.0.0", "homebrew", true)
+        expect(packageManagerAutoUpdaterHasUpdate(packageState)).to_equal(true)
+        expect(packageManagerAutoUpdaterCommand("winget")).to_equal("winget upgrade Anthropic.ClaudeCode")
+        expect(packageManagerAutoUpdaterMessage(packageState)).to_equal("currentVersion: 1.0.0\nUpdate available! Run: brew upgrade claude-code")
+        val native = NativeAutoUpdaterState.new(true, "1.0.0", "2.0.0", "", "", "", false, false, true, "stable")
+        expect(nativeAutoUpdaterShouldRender(native)).to_equal(true)
+        expect(nativeAutoUpdaterStatusMessage(native)).to_equal("current: 1.0.0 · stable: 2.0.0\nChecking for updates")
+        expect(nativeAutoUpdaterErrorType("Checksum mismatch")).to_equal("checksum_mismatch")
+        expect(nativeAutoUpdaterShouldRender(NativeAutoUpdaterState.new(true, "1.0.0", "2.0.0", "", "", "", true, false, true, "stable"))).to_equal(false)
+        val notebook = NotebookEditToolUseRejectedMessageState.new("/repo/nb.ipynb", "A1", "print(1)", "code", "replace", false, "/repo")
+        expect(notebookEditToolUseRejectedDisplayPath(notebook)).to_equal("nb.ipynb")
+        expect(notebookEditToolUseRejectedHeader(notebook)).to_equal("User rejected replace cell in nb.ipynb at cell A1")
+        expect(notebookEditToolUseRejectedRenderSummary(notebook)).to_contain("file.py")
+        val markdown = NotebookEditToolUseRejectedMessageState.new("/repo/nb.ipynb", "B2", "# title", "markdown", "insert", true, "/repo")
+        expect(notebookEditToolUseRejectedDisplayPath(markdown)).to_equal("/repo/nb.ipynb")
+        expect(notebookEditToolUseRejectedRenderSummary(markdown)).to_contain("file.md")
+
+    it "should model picker, passes, and question navigation components":
+        step("Map options, sort guest passes, and mark answered question tabs")
+        val options = mapConfigsToOutputStyleOptions(["default", "custom"], [OutputStyleConfig.new("Default", "Concise"), OutputStyleConfig.new("", "")])
+        expect(options[0].label).to_equal("Default")
+        expect(options[0].description).to_equal("Concise")
+        expect(options[1].description).to_equal("Claude completes coding tasks efficiently and provides concise responses")
+        var picker = OutputStylePickerView.new("default", true)
+        picker.finish_load(options)
+        picker.select("custom")
+        expect(picker.is_loading).to_equal(false)
+        expect(picker.selected_value).to_equal("custom")
+        expect(outputStylePickerHideChrome(false)).to_equal(true)
+        val passRender = passesRender(false, true, passesBuildStatuses([false, true, false], 3), "https://ref", true, "$20", false, "Esc")
+        expect(passRender.title).to_equal("Guest passes · 2 left")
+        expect(passRender.sorted_passes[0].is_available).to_equal(true)
+        expect(passRender.sorted_passes[2].is_available).to_equal(false)
+        expect(passRender.terms_url).to_equal("https://support.claude.com/en/articles/13456702-claude-code-guest-passes")
+        expect(passRender.exit_hint).to_equal("Enter to copy link · Esc to cancel")
+        expect(passesCopyReferral("https://ref")).to_equal("Referral link copied to clipboard!")
+        expect(passesRender(true, false, [], "", false, "", false, "Esc").body).to_equal("Loading guest pass information...")
+        val questions = [QuestionNavQuestion.new("Use prod?", "Prod"), QuestionNavQuestion.new("Reason?", "Reason")]
+        val answers = [QuestionNavAnswer.new("Use prod?", "No")]
+        val nav = questionNavigationBar(questions, 1, answers, 80, false)
+        expect(nav.left_arrow_active).to_equal(true)
+        expect(nav.right_arrow_active).to_equal(true)
+        expect(nav.tabs[0].answered).to_equal(true)
+        expect(nav.tabs[1].selected).to_equal(true)
+        expect(nav.submit_visible).to_equal(true)
+        val submit = submitQuestionsView(questions, 1, answers, false, "ask", 4, 80)
+        expect(submit.title).to_equal("Review your answers")
+        expect(submit.warning).to_equal("⚠ You have not answered all questions")
+        expect(submit.answer_lines[0].answer).to_equal("No")
+        expect(submit.options[0].value).to_equal("submit")
+        expect(submit.nav.tabs[1].selected).to_equal(true)
+
+    it "should model model picker and onboarding state":
+        step("Normalize model selection state and advance onboarding flow")
+        val modelView = ModelPickerView.new("", "claude-session", true, true, "", "max", false, 12)
+        expect(modelView.initial_value).to_equal("__NO_PREFERENCE__")
+        expect(modelView.visible_options).to_equal(10)
+        expect(modelView.hidden_options).to_equal(2)
+        expect(modelView.sessionBanner()).to_contain("Currently using claude-session")
+        expect(modelView.effortLine(true, false)).to_equal("Default effort for __NO_PREFERENCE__ is high")
+        expect(modelView.fastModeLine(false, true, false)).to_equal("Use /fast to turn on Fast mode.")
+        expect(modelView.footerLine(true, "Esc")).to_equal("Press Esc again to exit")
+        val selection = ModelPickerSelection.new("opus", "medium", true, true)
+        expect(modelPickerSelectionSummary(selection, false)).to_equal("opus | medium | persisted")
+        expect(cycleModelPickerEffort("high", "right", true)).to_equal("max")
+        var onboarding = OnboardingFlowState.new(true, true, true)
+        expect(onboardingStepCount(onboarding)).to_equal(6)
+        expect(onboardingCurrentStepId(onboarding)).to_equal("preflight")
+        onboarding = onboardingAdvance(onboarding)
+        expect(onboardingCurrentStepId(onboarding)).to_equal("theme")
+        onboarding = onboardingSelectTheme(onboarding)
+        expect(onboarding.theme_selected).to_equal(true)
+        expect(onboardingCurrentStepId(onboarding)).to_equal("api-key")
+        onboarding = onboardingApproveApiKey(onboarding, true)
+        expect(onboarding.skip_oauth).to_equal(true)
+        expect(onboardingSummary(onboarding)).to_equal("oauth:3")
+
+    it "should build bash permission select options":
+        step("Prefer editable prefixes, fall back to suggestions, and suppress duplicates")
+        val suggestions = [BashPermissionSuggestion.new("addRules", "Bash", "Yes, and don't ask again for npm run")]
+        val editable = bashToolUseOptions(suggestions, true, true, true, "npm run:*", true, true, true, "allow npm run", false, [], "")
+        expect(editable[0].type_name).to_equal("input")
+        expect(editable[0].value).to_equal("yes")
+        expect(editable[1].value).to_equal("yes-prefix-edited")
+        expect(editable[1].initial_value).to_equal("npm run:*")
+        expect(editable[2].value).to_equal("no")
+        expect(editable[2].prompt_text).to_equal("and tell Claude what to do differently")
+        val fallback = bashToolUseOptions(suggestions, true, false, false, "", false, true, true, "allow npm run", false, ["ALLOW NPM RUN   "], "")
+        expect(fallback[1].value).to_equal("yes-apply-suggestions")
+        expect(fallback.len()).to_equal(3)
+        val noAlways = bashToolUseOptions(suggestions, false, false, false, "", false, false, false, "", false, [], "")
+        expect(noAlways.len()).to_equal(2)
+        expect(stripBashRedirections("npm test > out.txt")).to_equal("npm test")
+
+    it "should model computer-use approval panels and responses":
+        step("Route TCC permissions separately from app allowlist grants")
+        val tcc = computerUseApproval(ComputerUseRequest.tcc(ComputerUseTccState.new(false, true)))
+        expect(tcc.panel).to_equal("tcc")
+        expect(tcc.title).to_equal("Computer Use needs macOS permissions")
+        expect(tcc.accessibility_status).to_equal("not granted")
+        expect(tcc.options[0].value).to_equal("open_accessibility")
+        expect(tcc.options[1].value).to_equal("retry")
+        val apps = [
+            ComputerUseAppRequest.resolvedApp("Terminal", "com.apple.Terminal", "Terminal", false),
+            ComputerUseAppRequest.resolvedApp("Notes", "com.apple.Notes", "Notes", true),
+            ComputerUseAppRequest.unresolved("MissingApp"),
+        ]
+        val request = ComputerUseRequest.appList(apps, ComputerUseGrantFlags.new(true, false, true), "Automate setup", 2)
+        val render = computerUseApproval(request)
+        expect(render.panel).to_equal("app_list")
+        expect(render.reason).to_equal("Automate setup")
+        expect(render.app_rows[0].state).to_equal("checked")
+        expect(render.app_rows[0].sentinel_warning).to_equal("equivalent to shell access")
+        expect(render.app_rows[1].state).to_equal("already_granted")
+        expect(render.app_rows[2].state).to_equal("not_installed")
+        expect(render.requested_flag_keys.len()).to_equal(2)
+        expect(render.options[0].label).to_equal("Allow for this session (1 app)")
+        val approvedResponse = computerUseApprovalResponse(request, true)
+        expect(approvedResponse.granted.len()).to_equal(1)
+        expect(approvedResponse.granted[0].bundle_id).to_equal("com.apple.Terminal")
+        expect(approvedResponse.denied[0].reason).to_equal("not_installed")
+        expect(approvedResponse.flags.system_key_combos).to_equal(true)
+        expect(computerUseApprovalResponse(request, false).granted.len()).to_equal(0)
+
+    it "should model enter-plan-mode permission response state":
+        step("Render plan-mode copy and map yes/no responses to tool callbacks")
+        val render = enterPlanModePermissionRequest("worker-1")
+        expect(render.title).to_equal("Enter plan mode?")
+        expect(render.color).to_equal("planMode")
+        expect(render.worker_badge).to_equal("worker-1")
+        expect(render.options[0].value).to_equal("yes")
+        expect(render.options[1].label).to_equal("No, start implementing now")
+        val yes = enterPlanModePermissionResponse("yes", true)
+        expect(yes.done).to_equal(true)
+        expect(yes.rejected).to_equal(false)
+        expect(yes.transition_mode).to_equal("plan")
+        expect(yes.permission_update_type).to_equal("setMode")
+        expect(yes.analytics_event).to_equal("tengu_plan_enter")
+        expect(yes.interview_phase_enabled).to_equal(true)
+        val cancel = enterPlanModePermissionCancel(false)
+        expect(cancel.rejected).to_equal(true)
+        expect(cancel.value).to_equal("no")
+
+    it "should model fallback permission request options and responses":
+        step("Strip MCP display suffixes, truncate descriptions, and map allow/reject choices")
+        val request = FallbackPermissionRequest.new("mcp__fs__read", "Filesystem (MCP)", "Read file", "line1\nline2\nline3\nline4", "Requires approval", "worker-2", "/repo", true, true)
+        val render = fallbackPermissionRequest(request)
+        expect(render.user_facing_name).to_equal("Filesystem")
+        expect(render.description).to_equal("line1\nline2\nline3")
+        expect(render.options.len()).to_equal(3)
+        expect(render.options[1].value).to_equal("yes-dont-ask-again")
+        expect(render.options[1].label).to_equal("Yes, and don't ask again for Filesystem commands in /repo")
+        val always = fallbackPermissionRequestResponse(request, "yes-dont-ask-again", "ok")
+        expect(always.done).to_equal(true)
+        expect(always.rejected).to_equal(false)
+        expect(always.allow_rule_tool_name).to_equal("mcp__fs__read")
+        expect(always.feedback).to_equal("ok")
+        expect(fallbackPermissionRequestResponse(request, "yes", "").event).to_equal("accept")
+        expect(fallbackPermissionRequestCancel(request).rejected).to_equal(true)
+
+    it "should model exit-plan-mode approval options and responses":
+        step("Handle empty-plan confirmation, clear-context choices, and Ultraplan rejection")
+        val empty = exitPlanModePermissionRequest(true, false, false, "worker-3", "", "", false, false)
+        expect(empty.title).to_equal("Exit plan mode?")
+        expect(empty.editor_hint).to_equal("worker-3")
+        expect(empty.options[0].value).to_equal("yes")
+        val ready = exitPlanModePermissionRequest(false, true, true, "", "Plan body", "edit", true, false)
+        expect(ready.title).to_equal("Ready to code?")
+        expect(ready.plan).to_equal("Plan body")
+        expect(ready.options[0].value).to_equal("yes-auto-clear-context")
+        expect(ready.options[3].value).to_equal("ultraplan")
+        val autoResponse = exitPlanModePermissionResponse("yes-auto-clear-context", false, false)
+        expect(autoResponse.clear_context).to_equal(true)
+        expect(autoResponse.permission_mode).to_equal("auto")
+        val keep = exitPlanModePermissionResponse("yes-accept-edits-keep-context", false, true)
+        expect(keep.keep_context).to_equal(true)
+        expect(keep.permission_mode).to_equal("bypassPermissions")
+        expect(exitPlanModePermissionResponse("ultraplan", false, false).launch_ultraplan).to_equal(true)
+        expect(exitPlanModePermissionCancel(false, false).rejected).to_equal(true)
 
     it "should format rate-limit upsell state":
         step("Select upsell copy and auto-open callback state from explicit inputs")
@@ -529,6 +771,22 @@ describe "Claude full bridge small helpers":
         expect(codeSessionApiSourceLinesModeled()).to_equal(168)
         expect(debugUtilsSourceLinesModeled()).to_equal(141)
         expect(envLessBridgeConfigSourceLinesModeled()).to_equal(165)
+        expect(messageTimestampSourceLinesModeled()).to_equal(62)
+        expect(modelPickerSourceLinesModeled()).to_equal(447)
+        expect(nativeAutoUpdaterSourceLinesModeled()).to_equal(192)
+        expect(notebookEditToolUseRejectedSourceLinesModeled()).to_equal(91)
+        expect(offscreenFreezeSourceLinesModeled()).to_equal(43)
+        expect(onboardingSourceLinesModeled()).to_equal(243)
+        expect(outputStylePickerSourceLinesModeled()).to_equal(111)
+        expect(packageManagerAutoUpdaterSourceLinesModeled()).to_equal(103)
+        expect(passesSourceLinesModeled()).to_equal(183)
+        expect(questionNavigationBarSourceLinesModeled()).to_equal(177)
+        expect(submitQuestionsViewSourceLinesModeled()).to_equal(143)
+        expect(bashToolUseOptionsSourceLinesModeled()).to_equal(146)
+        expect(computerUseApprovalSourceLinesModeled()).to_equal(440)
+        expect(enterPlanModePermissionRequestSourceLinesModeled()).to_equal(121)
+        expect(exitPlanModePermissionRequestSourceLinesModeled()).to_equal(767)
+        expect(fallbackPermissionRequestSourceLinesModeled()).to_equal(332)
         expect(highlightedThinkingTextSourceLinesModeled()).to_equal(161)
         expect(hookProgressMessageSourceLinesModeled()).to_equal(115)
         expect(inboundAttachmentsSourceLinesModeled()).to_equal(175)

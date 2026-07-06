@@ -2,6 +2,13 @@
 
 Feature: `FR-COMPILER-011`
 
+## Related Architecture Refactor Lane
+
+Bootstrap, compiler, interpreter, and loader ownership work is tracked in
+`doc/03_plan/agent_tasks/bootstrap_compiler_interpreter_loader_arch_refactor.md`.
+This loader plan remains the Track D implementation lane for shared loader/SMF
+contracts and must not expand into unrelated bootstrap or interpreter rewrites.
+
 ## Scope
 
 Refactor the compatibility loader and lifecycle-aware runtime loader so they
@@ -39,7 +46,7 @@ Primary tests:
   - reload preserves post-reload resolvability for persisted JIT symbols
   - global-symbol rebuild is deterministic after unload
 - Output:
-  - update `doc/05_design/loader_shared_core_refactor.md`
+  - update `doc/05_design/compiler/architecture/loader_shared_core_refactor.md`
 
 ### Track B — Shared Helper Extraction
 
@@ -108,7 +115,8 @@ Status after the 2026-04-27 shared-helper and lifecycle-coverage passes:
 
 - Done:
   - feature request filed as `FR-COMPILER-011`
-  - design seed written in `doc/05_design/loader_shared_core_refactor.md`
+  - design seed written in
+    `doc/05_design/compiler/architecture/loader_shared_core_refactor.md`
   - first shared seam landed:
     `src/compiler/99.loader/metadata_symbols.spl`
   - shared unload-bookkeeping helpers landed:

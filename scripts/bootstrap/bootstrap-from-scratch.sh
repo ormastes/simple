@@ -194,8 +194,10 @@ native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
 
 bootstrap_wide_inputs_hash() {
   {
-    find src/compiler -name '*.spl' -print0 2>/dev/null | LC_ALL=C sort -z \
+    find src/compiler src/app src/lib -name '*.spl' -print0 2>/dev/null | LC_ALL=C sort -z \
       | xargs -0 sha256sum 2>/dev/null
+    printf 'backend=%s mode=%s\n' "${backend}" "${bootstrap_mode}"
+    env | LC_ALL=C sort | awk '/^SIMPLE_.*(AOP|MDSOC|WEAV)/ { print }'
   } | sha256sum | awk '{print $1}'
 }
 
@@ -375,7 +377,7 @@ else
   echo "  mode:     manual (seed → bootstrap_main → bootstrap_main)"
   if [ ! -x "${seed_bin}" ]; then
     echo "error: Rust seed required for manual bootstrap (${seed_bin})" >&2
-    echo "Run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver" >&2
+    echo "Run: scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap" >&2
     exit 1
   fi
 

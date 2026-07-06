@@ -15,6 +15,7 @@
 extern fn rt_lgdt(gdtr_addr: u64)
 extern fn rt_ltr(selector: u16)
 extern fn rt_reload_segments()
+extern fn unsafe_addr_of(ref: any) -> u64
 
 # --- Segment Selectors (byte offsets into GDT) ---
 
@@ -83,9 +84,18 @@ struct GdtPtr:
 
 # GDT: 6 normal entries (8 bytes each) + 1 TSS entry (16 bytes) = 64 bytes.
 # Slot 5 is the 64-bit user CS required by SYSRET64 and TaskContext CS=0x2B.
-var gdt_entries: [GdtEntry; 8]
-var tss: TssEntry
-var gdt_pointer: GdtPtr
+var gdt_entries: [GdtEntry; 8] = [
+    GdtEntry(limit_low: 0, base_low: 0, base_mid: 0, access: 0, granularity: 0, base_high: 0),
+    GdtEntry(limit_low: 0, base_low: 0, base_mid: 0, access: 0, granularity: 0, base_high: 0),
+    GdtEntry(limit_low: 0, base_low: 0, base_mid: 0, access: 0, granularity: 0, base_high: 0),
+    GdtEntry(limit_low: 0, base_low: 0, base_mid: 0, access: 0, granularity: 0, base_high: 0),
+    GdtEntry(limit_low: 0, base_low: 0, base_mid: 0, access: 0, granularity: 0, base_high: 0),
+    GdtEntry(limit_low: 0, base_low: 0, base_mid: 0, access: 0, granularity: 0, base_high: 0),
+    GdtEntry(limit_low: 0, base_low: 0, base_mid: 0, access: 0, granularity: 0, base_high: 0),
+    GdtEntry(limit_low: 0, base_low: 0, base_mid: 0, access: 0, granularity: 0, base_high: 0)
+]
+var tss: TssEntry = TssEntry(reserved0: 0, rsp0: 0, rsp1: 0, rsp2: 0, reserved1: 0, ist1: 0, ist2: 0, ist3: 0, ist4: 0, ist5: 0, ist6: 0, ist7: 0, reserved2: 0, reserved3: 0, iomap_base: 0)
+var gdt_pointer: GdtPtr = GdtPtr(limit: 0, base: 0)
 
 # --- Internal Helpers ---
 
@@ -172,7 +182,7 @@ fn gdt_init():
     gdt_entries[5] = _make_code_entry(ACCESS_DPL3)    # User 64-bit CS
 
     # TSS descriptor (16 bytes = 2 GdtEntry slots)
-    val tss_addr = &tss as u64
+    val tss_addr = unsafe_addr_of(tss)
     val tss_limit = 103 as u32    # sizeof(TssEntry) - 1
     gdt_entries[6] = _make_tss_low(tss_addr, tss_limit)
     gdt_entries[7] = _make_tss_high(tss_addr)
@@ -180,7 +190,7 @@ fn gdt_init():
     # Set up GDTR pointer
     gdt_pointer = GdtPtr(
         limit: 63,    # 8 * 8 - 1 = 63 bytes
-        base: &gdt_entries as u64
+        base: unsafe_addr_of(gdt_entries)
     )
 
     # Load GDT register
@@ -219,7 +229,7 @@ fn gdt_reload_segments():
 
 fn _gdt_load():
     """Execute lgdt instruction to load the GDT register."""
-    rt_lgdt(&gdt_pointer as u64)
+    rt_lgdt(unsafe_addr_of(gdt_pointer))
 
 fn _tss_load():
     """Execute ltr instruction to load the TSS selector."""

@@ -77,15 +77,22 @@ expect(forbidden_bootstrap_marker(src)).to_equal("ok")
 
 #### routes llvm-lib native-build to the full Simple CLI
 
+Manual contract note: this executable scenario also verifies the Pure-Simple
+bootstrap/native-build policy: `dynload` is the default mode, only `dynload`
+and `one-binary` are accepted, `dynload` maps to native+SMF output, `one-binary`
+maps to native-only output, normal bootstrap does not rebuild Rust, bootstrap
+forwards `--mode`, and cache invalidation includes `src/compiler`, `src/app`,
+`src/lib`, and AOP/MDSOC/weaving environment knobs.
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val rust_dispatch = file_read("src/compiler_rust/driver/src/main.rs")
-val cli_dispatch = file_read("src/app/cli/main_part2.spl")
+val cli_dispatch = file_read("src/app/cli/_CliMain/main_and_help.spl")
 val native_entry = file_read("src/app/cli/native_build_main.spl")
 val parser_types = file_read("src/compiler/10.frontend/parser_types.spl")
 val flat_bridge = file_read("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
@@ -125,11 +132,14 @@ expect(stmt_lowering).to_contain("extern_fn_names.insert")
 expect(stmt_lowering).to_contain("self.load_imported_types(&use_stmt.path, &use_stmt.target)")
 expect(import_loader).to_contain("loaded_import_targets")
 expect(cache_types).to_contain("fn cache_check_result_stale")
-expect(bootstrap_api).to_contain("use lazy compiler.driver.driver")
-expect(driver_api_compile).to_contain("CompilerDriver.run_compile(driver)")
-expect(driver_api_interpret).to_contain("use lazy compiler.driver.driver (CompilerDriver)")
-expect(driver_api_interpret).to_contain("CompilerDriver.create(options)")
-expect(driver_incremental).to_contain("val entry: DependencyEntry = self.entries[key]")
+expect(bootstrap_api).to_contain("use compiler.driver.{compiler_driver_create, compiler_driver_run_compile}")
+expect(bootstrap_api).to_contain("compiler_driver_create(options)")
+expect(bootstrap_api).to_contain("compiler_driver_run_compile(driver)")
+expect(driver_api_compile).to_contain("compiler_driver_run_compile(driver)")
+expect(driver_api_interpret).to_contain("use compiler.driver.{compiler_driver_create, compiler_driver_run_compile}")
+expect(driver_api_interpret).to_contain("compiler_driver_create(options)")
+expect(driver_api_interpret).to_contain("compiler_driver_run_compile(driver)")
+expect(driver_incremental).to_contain("val entry = self.entries[src]")
 expect(sdn_shim).to_contain("fn parse_file(path: text) -> Result<SdnValue, text>:")
 expect(sdn_shim).to_contain("fn render_value(value: SdnValue, indent: i64) -> text:")
 expect(module_resolver).to_contain("test_resolve_file_module_before_same_name_package")
@@ -144,7 +154,7 @@ expect(module_resolver).to_contain("test_resolve_file_module_before_same_name_pa
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/02_integration/os/port/bootstrap_seed_fallback_policy_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-06 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

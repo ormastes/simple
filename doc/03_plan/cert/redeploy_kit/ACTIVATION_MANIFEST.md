@@ -76,50 +76,6 @@ honesty. Lane-1 branched from `6adff817`; `mcdc.spl` is byte-identical between
 - **Design:** `doc/03_plan/cert/redeploy_kit/01_print_array_value_based.md`
   through `05_nested_closure_capture.md` + `README.md`.
 
-### Patch 3 — class reference model (class-in-array `Index` read + object-handle)
-- **Lane commit:** `5f52474c04d1` (worktree `.claude/worktrees/agent-ad78d112959250811`;
-  amended once to embed this sha, so the integrating HEAD may carry a later sha —
-  cherry-pick the worktree HEAD, whose content is identical to `5f52474c04d1`).
-- **Depends on:** the ObjectStore class-reference model already on main
-  (commit `19cd165d238`, "feat(interp-obj): class reference model in 70.backend
-  HIR interpreter (#112)"): `Value.Object{class_name, handle}`, `objects.spl`
-  `ObjectStore`, `env.store`, and store-routed field read/assign. Patch 3 is the
-  remaining piece that model needs to actually exercise the array repro.
-- **Frozen source:** `src/compiler/70.backend/backend/interpreter.spl` — adds the
-  missing `case HirExprKind.Index(base, index)` read arm to `eval_expr` (Array +
-  Int index, bounds-checked). Returns the element verbatim; a CLASS element is a
-  `Value.Object(handle)`, so reading it out of an array shares the one ObjectStore
-  record (reference semantics fall out for free). Before this, `arr[0]` fell
-  through to the catch-all `not_implemented`, so the class-in-array repro could
-  not run under interpret mode (`CompileMode.Interpret` -> `InterpreterBackendImpl`,
-  `driver_types.spl:52`). No other source file changes; struct/value paths untouched.
-- **Fixes:** tasks #99(d) / #112 — interpret mode dropped mutations to a class
-  instance read out of an array (printed `42`; default/JIT printed `777`). See
-  `doc/08_tracking/bug/jit_class_mutation_drop_characterization_2026-07-04.md`.
-- **Staged tests:** `test/cert/redeploy_pending/class_reference/` —
-  `class_in_array_mutation.spl` (expect `777`), `shared_alias_mutation.spl`
-  (`777`), `struct_value_copy.spl` (`42`), plus `README.md`.
-- **Verify post-redeploy** (run against the redeployed self-hosted binary):
-  1. `SIMPLE_EXECUTION_MODE=interpret bin/release/x86_64-unknown-linux-gnu/simple run test/cert/redeploy_pending/class_reference/class_in_array_mutation.spl` -> prints `777` (was `42`).
-  2. `SIMPLE_EXECUTION_MODE=interpret bin/release/x86_64-unknown-linux-gnu/simple run test/cert/redeploy_pending/class_reference/shared_alias_mutation.spl` -> `777`.
-  3. `bin/release/x86_64-unknown-linux-gnu/simple run test/cert/redeploy_pending/class_reference/struct_value_copy.spl` -> `42`.
-  4. Re-run 1-2 under default `bin/simple run` (no env var) -> `777` (must stay correct; default/JIT already handled classes — this is the no-regression check).
-  5. `bin/simple lint src/compiler/70.backend/backend/interpreter.spl` -> rc=0.
-- **Honest scope / known adjacent gaps (NOT fixed here — do not treat as regressions):**
-  - Struct field assignment is still unimplemented in the interpret-mode
-    70.backend engine (field-assign routes only class `Object`s through the
-    store); `struct_value_copy.spl` is therefore verified under DEFAULT mode.
-    Tracked separately.
-  - `Index`-as-assignment-target (`arr[i] = v`) and Dict/Tuple/string indexing
-    are intentionally out of scope (`ponytail:` note in the arm); the repro needs
-    only Array read.
-  - The prior #112 lane also added ACTIVE-suite specs
-    (`test/01_unit/compiler/interp_object_store_ref_model_spec.spl` and "Task 112"
-    blocks in `test/03_system/interpreter/interp_value_semantics_b35_spec.spl`)
-    that fail on the frozen binary; the coordinator should relocate them here or
-    remove them from the active suite at integration (out of this lane's scope to
-    rewrite another lane's committed tests).
-
 ## Why these are staged, not landed
 `test/cert/redeploy_pending/**` is intentionally excluded from the normal test
 suite (a perpetually-red gate is not the goal) and the frozen source patches

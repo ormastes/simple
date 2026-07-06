@@ -160,7 +160,8 @@ The Simple compiler is self-hosted. To build from scratch, a bootstrap process p
 
 ```
 Stage 1: Rust Seed Binary
-  cargo build --profile bootstrap -p simple-driver
+  scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
+  # internally rebuilds the Rust seed/runtime only for full bootstrap
   -> src/compiler_rust/target/bootstrap/simple
   -> Backend: Cranelift (hardcoded)
 
@@ -174,35 +175,45 @@ Stage 3: Self-Hosted (compiled by Stage 2)
   -> build/bootstrap/stage3/<triple>/simple
   -> Backend: llvm-lib (default)
 
-Stage 4: Full CLI (compiled by verified stage)
+Stage 4: Full CLI (compiled by verified stage when available)
   stage3 native-build --entry main.spl
   -> build/bootstrap/full/<triple>/simple
   -> Backend: llvm-lib (default)
 ```
 
+Current implementation note: Stage 2/Stage 3 are fail-closed while
+`bootstrap_main.spl` self-host lowering is still being repaired. When Stage 3
+is unavailable, the wrapper may use the Rust seed for Stage 4 and report the
+fallback instead of claiming a verified pure self-host pass. Treat that state as
+incomplete Pure-Simple bootstrap evidence, not release-ready convergence.
+
 ### Quick Bootstrap
 
-The canonical entrypoint in the current tree is the Rust driver command:
+The canonical entrypoint is the host bootstrap wrapper. Normal runs do not
+rebuild Rust; they reuse the existing seed/runtime and rebuild only
+pure-Simple stages.
 
 ```bash
-# Use the default seed compiler discovered by the driver
-bin/simple build bootstrap
+# Default fast path: dynload pure-Simple stages, no cargo
+scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
 
-# Use an explicit seed and output directory
-bin/simple build bootstrap --seed=src/compiler_rust/target/debug/simple --output=build/bootstrap
+# Conservative monolithic pure-Simple output, no cargo
+scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary
+
+# Explicit Rust seed/runtime rebuild plus pure-Simple stages
+scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
 ```
 
-On Windows, pass the `.exe` seed path:
+On Windows, use the Windows bootstrap wrapper:
 
 ```powershell
-.\src\compiler_rust\target\debug\simple.exe build bootstrap --seed=src\compiler_rust\target\debug\simple.exe --output=build\bootstrap
+.\scripts\bootstrap\bootstrap-windows.sh --deploy
 ```
 
 Windows stage outputs are executable paths (`simple_stage1.exe`,
-`simple_stage2.exe`, `simple_stage3.exe`). The Rust-driver bootstrap lane
-builds those stages with `native-build --strip --threads 1 --timeout 180` so the
-verification step compares release-like binaries and avoids uncontrolled worker
-fan-out during bootstrap.
+`simple_stage2.exe`, `simple_stage3.exe`). Normal Windows bootstrap uses the
+same policy: rebuild pure-Simple stages by default, and rebuild the Rust
+seed/runtime only in an explicit full-bootstrap lane.
 
 On Windows, stripped native links normalize volatile PE metadata after the
 hosted linker returns. The normalizer zeroes the COFF `TimeDateStamp` and PE

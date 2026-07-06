@@ -6,8 +6,9 @@ validated before artifacts reach startup or tests.
 
 ```text
 Source
-  -> Frontend(AST)
+  -> Frontend(AST) + Blocks
   -> HIR + Types + Semantics
+  -> Monomorphization
   -> MIR + Borrow + MIR Opt
   -> Backend(C/LLVM/Cranelift/WASM/GPU)
   -> Driver artifacts + metadata

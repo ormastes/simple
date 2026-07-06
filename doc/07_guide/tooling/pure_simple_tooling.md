@@ -28,8 +28,8 @@ rebuild.
 Pure-Simple rebuilds use two mode names:
 
 - `dynload` (default): faster iteration; keep reusable native cache entries
-  unless compiler/AOP/loader/interpreter inputs changed, and have native-build
-  emit native plus SMF cache artifacts where supported.
+  unless compiler/app/lib/AOP/loader/interpreter inputs changed, and have
+  native-build emit native plus SMF cache artifacts where supported.
 - `one-binary`: conservative monolithic native executable; clear the native
   cache before stages.
 
@@ -37,6 +37,9 @@ Dependency tracing is conservative around AOP/MDSOC weaving. Textual entry
 closure is only a reducer; changes under `src/compiler` that can affect weaving,
 the loader, the interpreter, or compiler ABI invalidate broadly instead of
 pretending only the changed source file needs rebuilding.
+Bootstrap script cache stamps also include `src/app`, `src/lib`, and
+AOP/MDSOC/weaving environment knobs because those inputs can change emitted
+CLI/runtime behavior even when the compiler layer itself is unchanged.
 
 ## Test Runner Daemon
 
