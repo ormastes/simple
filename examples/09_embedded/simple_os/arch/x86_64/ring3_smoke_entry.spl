@@ -2,57 +2,60 @@
 #
 # Boots via Multiboot1 on q35, brings PMM/VMM online, builds a user address
 # space, maps a tiny freestanding user program, and iretq's into CPL 3. The
-# user program writes "USEROK\n" one byte at a time DIRECTLY to COM1 (port
-# 0x3F8) via `out` (enabled by IOPL=3 in the ring-3 RFLAGS), then exits QEMU by
-# writing to the isa-debug-exit port 0xf4 — all from ring 3.
+# user program issues syscall 60 (debug_write) for each byte of "USEROK\n" then
+# syscall 0 (exit). A "USEROK" line on serial is emitted FROM ring 3 and is the
+# ground-truth proof that a userspace binary executes in-guest.
 #
-# Ring-3 proof on serial: "USEROK" is produced by `out` instructions that can
-# only run when CPL <= IOPL, i.e. genuinely from the ring-3 task. A subsequent
-# clean QEMU exit (code 1) driven by the ring-3 `out 0xf4` confirms control
-# reached and left ring 3 deterministically.
-#
-# The ring-3 user CS/DS/SS selectors (0x28/0x20 DPL3) come from the GDT that
-# crt0.s already loaded at boot, so no new GDT is installed here. (The Simple
-# gdt_init() in os.kernel.interrupts.gdt would install a GDT+TSS, but that whole
-# `interrupts` package is dead code that does not currently compile under
-# native-build; wiring it is tracked separately.)
-#
-# No syscalls / VFS / FAT32 / SMF / ELF parsing: the user machine code is an
-# embedded raw byte buffer so the only thing under test is the ring-3 handoff
-# mechanism (per-process paging + iretq).
+# No VFS / FAT32 / SMF / ELF parsing: the user machine code is embedded as a raw
+# byte buffer so the only thing under test is the ring-3 handoff mechanism
+# (GDT/TSS, syscall MSRs, per-process paging, iretq).
 
 extern fn serial_println(msg: text)
 extern fn rt_debug_exit_success()
 extern fn pmm_alloc_page_raw() -> u64
 
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
+use os.kernel.interrupts.gdt.{gdt_init, gdt_set_kernel_stack}
 use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
 use os.kernel.memory.vmm.{vmm_init}
 use os.kernel.memory.vmm_address_space.{
     create_user_address_space, vmm_map_page_in, vmm_copy_bytes_to_phys,
     vmm_clone_kernel_low_identity
 }
+use os.kernel.abi.syscall_shim.{shim_init}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
 use os.kernel.types.memory_types.{VmFlags, VirtAddr, PhysAddr}
 use os.kernel.types.task_types.{TaskContext, AddressSpace}
 use os.kernel.arch.x86_64.context.{arch_x86_64_enter_user_task}
+use os.kernel.boot.mmio.{mmio_read64}
 
 # User virtual layout — placed in PML4[1] (>= 512GB) so the fresh USER page
 # chain never collides with the shared kernel identity subtree in PML4[0].
-# NOTE: these are computed as function-local `val`s inside `spl_start` (see
-# below), not module-level `val`s: freestanding native-build does not run
-# module-level `val` initializers, so a top-level `val USER_CODE_VA = 0x80...`
-# reads garbage at runtime (observed: RIP=0xc35d... non-canonical -> triple
-# fault before user code executes).
+val USER_CODE_VA: u64  = 0x8000000000
+val USER_STACK_VA: u64 = 0x8000100000
 
 fn _hello_code() -> [u8]:
-    """Freestanding x86-64 machine code: dx=0x3F8 (COM1); for each byte of
-    "USEROK\n" do mov al,byte / out dx,al; then dx=0xF4, al=0, out (isa-debug-exit
-    -> QEMU exits with code 1); hlt; jmp $-1 guard (never reached)."""
+    """Freestanding x86-64 machine code: write "USEROK\n" one byte at a time via
+    syscall 60 (a0=byte), then exit via syscall 0. Ends in hlt;jmp $ as a guard."""
     [
-        0x66, 0xBA, 0xF8, 0x03, 0xB0, 0x55, 0xEE, 0xB0,
-        0x53, 0xEE, 0xB0, 0x45, 0xEE, 0xB0, 0x52, 0xEE,
-        0xB0, 0x4F, 0xEE, 0xB0, 0x4B, 0xEE, 0xB0, 0x0A,
-        0xEE, 0x66, 0xBA, 0xF4, 0x00, 0xB0, 0x00, 0xEE,
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, 0x48,
+        0xC7, 0xC7, 0x55, 0x00, 0x00, 0x00, 0x0F, 0x05,
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, 0x48,
+        0xC7, 0xC7, 0x53, 0x00, 0x00, 0x00, 0x0F, 0x05,
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, 0x48,
+        0xC7, 0xC7, 0x45, 0x00, 0x00, 0x00, 0x0F, 0x05,
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, 0x48,
+        0xC7, 0xC7, 0x52, 0x00, 0x00, 0x00, 0x0F, 0x05,
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, 0x48,
+        0xC7, 0xC7, 0x4F, 0x00, 0x00, 0x00, 0x0F, 0x05,
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, 0x48,
+        0xC7, 0xC7, 0x4B, 0x00, 0x00, 0x00, 0x0F, 0x05,
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, 0x48,
+        0xC7, 0xC7, 0x0A, 0x00, 0x00, 0x00, 0x0F, 0x05,
+        0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x48,
+        0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x05,
         0xF4, 0xEB, 0xFD
     ]
 
@@ -60,17 +63,18 @@ fn spl_start():
     serial_println("")
     serial_println("=== SimpleOS x86_64 ring-3 smoke ===")
 
-    # User virtual layout (function-local: module-level `val` initializers do
-    # not run under freestanding native-build). PML4[1] (>= 512GB).
-    val USER_CODE_VA: u64  = 0x8000000000
-    val USER_STACK_VA: u64 = 0x8000100000
-
-    # 1. Early arch init (rich fault hook so any unexpected ring-3 fault prints a
-    #    CS RPL=3 register frame; also programs the SYSCALL MSRs, unused here).
+    # 1. Early arch init: rich fault hook (so a ring-3 fault prints a frame with
+    #    CS RPL=3), percpu, topology, and the SYSCALL MSRs (LSTAR/STAR/SFMASK).
     arch_x86_64_early_init()
     serial_println("[ring3] arch-init done")
 
-    # 2. Bring PMM + VMM online (identity, hhdm=0). Same recipe as desktop-e2e.
+    # 2. GDT with user CS/DS (0x28/0x20) and a 64-bit TSS, loaded via lgdt+ltr.
+    #    Kernel CS/DS stay 0x08/0x10 (identical to crt0), so the segment reload
+    #    does not fault.
+    gdt_init()
+    serial_println("[ring3] gdt loaded")
+
+    # 3. Bring PMM + VMM online (identity, hhdm=0). Same recipe as desktop-e2e.
     if not pmm_init_identity_range(0x20000000, 0x100000, 0x14000000):
         serial_println("[ring3] FAIL pmm_init")
         serial_println("TEST FAILED")
@@ -79,7 +83,23 @@ fn spl_start():
     vmm_init(g_pmm, 0)
     serial_println("[ring3] pmm+vmm online")
 
-    # 3. Fresh user address space + clone the kernel low identity so the running
+    # 4. Kernel stack for CPL3->CPL0 traps (page faults). SYSCALL uses its own
+    #    LSTAR stack, but an exception without a valid TSS.RSP0 triple-faults.
+    val kstack_phys = pmm_alloc_page_raw()
+    if kstack_phys == 0:
+        serial_println("[ring3] FAIL kstack alloc")
+        serial_println("TEST FAILED")
+        rt_debug_exit_success()
+        return
+    gdt_set_kernel_stack(kstack_phys + 0x1000)
+    serial_println("[ring3] tss.rsp0 set")
+
+    # 5. Scheduler shims so syscall 0 (exit) has a live scheduler/klog. debug_write
+    #    (syscall 60) needs none of this — it is pure COM1 port I/O.
+    shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(256))
+    serial_println("[ring3] shim init done")
+
+    # 6. Fresh user address space + clone the kernel low identity so the running
     #    kernel survives the CR3 swap inside the iretq trampoline.
     val space = create_user_address_space()
     if space.phys_root == 0 or space.phys_root == 1:
@@ -90,7 +110,7 @@ fn spl_start():
     vmm_clone_kernel_low_identity(space.phys_root)
     serial_println("[ring3] user AS ready root={space.phys_root}")
 
-    # 4. Map the user code page (rx) and a user stack page (rw), copying the
+    # 7. Map the user code page (rx) and a user stack page (rw), copying the
     #    machine code into the freshly-allocated code frame.
     val code = _hello_code()
     val code_phys = pmm_alloc_page_raw()
@@ -110,9 +130,8 @@ fn spl_start():
         return
     serial_println("[ring3] user pages mapped code_va=0x{USER_CODE_VA} stack_va=0x{USER_STACK_VA}")
 
-    # 5. Build the ring-3 iret frame and jump. User CS=0x2b (0x28|3), SS=0x23
-    #    (0x20|3) from crt0's GDT. RFLAGS=0x3002: IOPL=3 (ring-3 `out` allowed),
-    #    IF cleared (no timer interrupt), reserved bit 1 set.
+    # 8. Build the ring-3 iret frame and jump. User CS=0x2b (0x28|3), SS=0x23
+    #    (0x20|3), RFLAGS=0x2 (IF cleared, so no timer interrupt fires).
     val user_rsp = USER_STACK_VA + 0x1000 - 16
     val ctx = TaskContext(
         rax: 0, rbx: 0, rcx: 0, rdx: 0,
@@ -120,12 +139,12 @@ fn spl_start():
         r8: 0, r9: 0, r10: 0, r11: 0,
         r12: 0, r13: 0, r14: 0, r15: 0,
         rip: USER_CODE_VA,
-        rflags: 0x3002,
+        rflags: 0x2,
         cs: 0x2b,
         ss: 0x23,
         fpu_state: 0
     )
-    serial_println("[ring3] entering user cs=0x2b iopl=3 rip=0x{USER_CODE_VA}")
+    serial_println("[ring3] entering user cs=0x2b rip=0x{USER_CODE_VA}")
     arch_x86_64_enter_user_task(ctx, space.phys_root)
 
     # Only reached if the trampoline returns (it should not).
