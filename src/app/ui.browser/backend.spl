@@ -510,15 +510,10 @@ class BrowserBackend:
             self.finish_event_render_roundtrip()
             return
 
-        print "DBGPROBE: before render_html_tree"
         val body = render_html_tree(tree.root_node(), state)
-        print "DBGPROBE: after render_html_tree, body len={body.len()}"
         val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "", "", body, generate_css(state.tree.theme_name()), "", self.width, self.height)
-        print "DBGPROBE: after web_render_adapter_request"
         self.last_semantic_snapshot_json = semantic_ui_snapshot_to_json(browser_semantic_snapshot(state))
-        print "DBGPROBE: after semantic_snapshot"
         val profile = web_render_optimization_profile(req)
-        print "DBGPROBE: after optimization_profile"
         if profile.cacheable_static_shell and self.static_shell_cache_key == profile.cache_key and self.render_cached_static_frame():
             self.reset_runtime_queue_diagnostics()
             self.finish_event_render_roundtrip()
@@ -528,16 +523,13 @@ class BrowserBackend:
         val dom_layout_start_us = browser_backend_time_us()
         val root_node = tree.root_node()
         val dom = widget_to_dom(root_node)
-        print "DBGPROBE: after widget_to_dom"
 
         # Step 2: Compute layout (block layout)
         val layout = compute_layout(dom, self.width, self.height)
-        print "DBGPROBE: after compute_layout"
 
         # Step 3: Cache layout for hit testing
         self.layout_cache = collect_layout_entries(layout, [])
         self.last_render_dom_layout_us = browser_backend_time_us() - dom_layout_start_us
-        print "DBGPROBE: after collect_layout_entries"
 
         # Step 4: Render the generated UI HTML through the shared SimpleWeb
         # Engine2D pixel path, then mirror those pixels into this backend's
@@ -553,19 +545,15 @@ class BrowserBackend:
                 self.static_shell_cache_key = profile.cache_key
                 self.static_shell_full_html = full_html
                 self.static_shell_html_stores = self.static_shell_html_stores + 1
-        print "DBGPROBE: after web_render_full_html, full_html len={full_html.len()}"
         self.last_render_html_us = browser_backend_time_us() - html_start_us
         val pixel_start_us = browser_backend_time_us()
         var artifact = self.web_render_pixel_cache.html_request_to_pixel_artifact(req, full_html)
-        print "DBGPROBE: after html_request_to_pixel_artifact"
         self.last_render_pixel_artifact_us = browser_backend_time_us() - pixel_start_us
         val dispatch_start_us = browser_backend_time_us()
         artifact = browser_backend_dispatch_prepared_draw_ir(artifact, root_node, layout, self.width, self.height, revision)
-        print "DBGPROBE: after dispatch_prepared_draw_ir"
         self.last_render_draw_ir_dispatch_us = browser_backend_time_us() - dispatch_start_us
         val framebuffer_start_us = browser_backend_time_us()
         self.framebuffer = framebuffer_from_argb_pixels(self.width, self.height, artifact.pixels)
-        print "DBGPROBE: after framebuffer_from_argb_pixels"
         self.present_pixels_cache_valid = false
         self.last_render_framebuffer_copy_us = browser_backend_time_us() - framebuffer_start_us
         self.web_render_target = artifact.target
@@ -596,6 +584,10 @@ class BrowserBackend:
         self.last_artifact_readback_reason = artifact.readback_reason
         self.last_artifact_gpu_readback_source = artifact.gpu_readback_source
         if self.last_input_event_roundtrip_status == "dispatched" and self.last_input_event_correlation_id != "":
+            # Honest forward evidence: the event's GPU forwarding is only real
+            # once the runtime Draw IR dispatch receipt confirms an actual
+            # submission on this frame, not from lane classification alone.
+            self.last_input_event_host_gpu_forwarded = artifact.queue_dispatch_status == "dispatched"
             self.last_artifact_event_correlation_id = self.last_input_event_correlation_id
             self.last_artifact_event_correlation_queue_packet = artifact.queue_packet_id
             self.last_artifact_event_correlation_readback_source = artifact.gpu_readback_source
@@ -646,8 +638,11 @@ class BrowserBackend:
         self.last_input_event_correlation_id = "browser-input-{self.input_event_dispatched_count}"
         val flow = engine2d_host_gpu_draw_ir_event_flow(self.last_input_event_correlation_id, "frame_batch", envelope_json.len().to_i64(), 4096, true, false, false, false, true, 16)
         self.last_input_event_host_gpu_target_lane = flow.decision.target_lane
-        self.last_input_event_host_gpu_forwarded = flow.forward.forwarded
-        self.last_input_event_host_gpu_backward_completed = flow.backward.completed
+        # `forwarded` stays false at classification time: the event-flow only
+        # plans a GPU lane. It is set true in render_frame only when the real
+        # runtime Draw IR dispatch receipt confirms an actual submission.
+        self.last_input_event_host_gpu_forwarded = false
+        self.last_input_event_host_gpu_backward_completed = flow.receipt.committed_on_host
         self.last_input_event_host_gpu_summary = engine2d_host_gpu_draw_ir_event_flow_summary(flow)
 
     fn input_envelope_json(surface_id: text, event: UIEvent) -> text:
