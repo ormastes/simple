@@ -4,7 +4,7 @@
 use os.tools.pkg.pkg_format.{PkgArch, pkg_arch_from_text, pkg_arch_to_text}
 use os.packages.os_packages.{list_all_packages, os_version}
 use os.tools.pkg.pkg_builder.{build_meta_package}
-use os.installer.image_builder.{build_usb_installer_image, build_install_image}
+use os.installer.image_builder.{build_usb_installer_image, build_install_image, detect_iso_tool}
 use os.userlib.fs.{mkdir, write_text}
 
 struct ReleaseConfig:
@@ -29,14 +29,17 @@ fn release_all(config: ReleaseConfig) -> Result<bool, text>:
     mkdir(img_dir)
 
     print "[1/5] Kernel..."
-    var kernel = config.kernel_path
-    if kernel == "":
-        kernel = _locate_kernel(config.arch)
-        if kernel == "":
-            kernel = "{release_dir}/kernel.elf"
-            write_text(kernel, "# Placeholder kernel — build with: bin/simple os build --arch={arch_name}\n")
+    # NOTE: local must not be named `kernel` — a local shadowed by the
+    # `os.kernel` module name fails HIR lowering / interp semantic analysis.
+    # See doc/08_tracking/bug/local_var_kernel_shadowed_by_module_2026-07-06.md
+    var kernel_elf = config.kernel_path
+    if kernel_elf == "":
+        kernel_elf = _locate_kernel(config.arch)
+        if kernel_elf == "":
+            kernel_elf = "{release_dir}/kernel.elf"
+            write_text(kernel_elf, "# Placeholder kernel — build with: bin/simple os build --arch={arch_name}\n")
         else:
-            print "  Using kernel: {kernel}"
+            print "  Using kernel: {kernel_elf}"
 
     print "\n[2/5] Building packages..."
     val packages = list_all_packages(config.arch)
@@ -51,18 +54,23 @@ fn release_all(config: ReleaseConfig) -> Result<bool, text>:
 
     print "\n[3/5] Creating installer ISO..."
     val iso_path = "{img_dir}/simpleos-{ver_str}-{arch_name}-installer.iso"
-    val iso_result = build_usb_installer_image(config.arch, kernel, pkg_dir, iso_path, config.image_size_mb)
+    val iso_tool = detect_iso_tool()
+    if iso_tool == "iso-tool-missing":
+        print "  [iso] no ISO authoring tool (xorriso/mkisofs/genisoimage) on host — staging bootable rootfs tree only"
+    else:
+        print "  [iso] authoring tool available: {iso_tool}"
+    val iso_result = build_usb_installer_image(config.arch, kernel_elf, pkg_dir, iso_path, config.image_size_mb)
     if val Err(e) = iso_result:
         return Result.Err("Installer ISO failed: {e}")
 
     print "\n[4/5] Creating disk image..."
     val disk_path = "{img_dir}/simpleos-{ver_str}-{arch_name}.img"
-    val disk_result = build_install_image(config.arch, kernel, pkg_dir, disk_path, config.image_size_mb)
+    val disk_result = build_install_image(config.arch, kernel_elf, pkg_dir, disk_path, config.image_size_mb)
     if val Err(e) = disk_result:
         return Result.Err("Disk image failed: {e}")
 
     print "\n[5/5] Writing release manifest..."
-    val manifest = _write_release_manifest(release_dir, config, pkg_count)
+    val manifest = _write_release_manifest(release_dir, config, pkg_count, iso_tool)
     print "  Release manifest: {manifest}"
     print "  Installer ISO: {iso_path}"
     print "  Disk image: {disk_path}"
@@ -201,7 +209,7 @@ fn _locate_kernel(arch: PkgArch) -> text:
             return path
     ""
 
-fn _write_release_manifest(release_dir: text, config: ReleaseConfig, pkg_count: i32) -> text:
+fn _write_release_manifest(release_dir: text, config: ReleaseConfig, pkg_count: i32, iso_tool: text) -> text:
     val arch_name = pkg_arch_to_text(config.arch)
     val ver = os_version().to_text()
     val path = "{release_dir}/release.sdn"
@@ -209,6 +217,7 @@ fn _write_release_manifest(release_dir: text, config: ReleaseConfig, pkg_count: 
     content = content + "version = \"{ver}\"\n"
     content = content + "arch = \"{arch_name}\"\n"
     content = content + "packages = {pkg_count}\n"
+    content = content + "iso_tool = \"{iso_tool}\"\n"
     content = content + "image_size_mb = {config.image_size_mb}\n"
     content = content + "kernel = \"{config.kernel_path}\"\n"
     content = content + "disk_image = \"{release_dir}/images/simpleos-{ver}-{arch_name}.img\"\n"
