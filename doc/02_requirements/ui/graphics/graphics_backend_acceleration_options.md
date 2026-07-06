@@ -81,3 +81,22 @@ Select Option B2 first. Use measured gaps to drive Option D cleanup.
 - REQ-GFX-PERF-007: OpenCL generated-kernel evidence records ICD/platform,
   artifact format, program build status, kernel submit status, sync/readback
   status, and fallback reason separately from CUDA evidence.
+
+## Session-Managed Backend Requirements
+
+Covered by `test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl`:
+
+- REQ-GFX-001: the graphics backend capability model reports backend kind
+  and target architecture, and rejects unknown backend kinds.
+- REQ-GFX-002: legacy no-session constructors map to `LegacyNoSession` mode
+  and never enable managed caches.
+- REQ-GFX-003: managed and perf-isolated sessions reject mutable resource
+  sharing across modes while still allowing immutable capability-table sharing.
+- REQ-GFX-004: a single backend policy binds across 2D, 2D game, 3D, web
+  renderer, GUI, and WM surfaces.
+- REQ-GFX-005: optimization provider state is keyed by provider, backend,
+  and policy hash, and stays isolated between managed and perf-exclusive state.
+- REQ-GFX-006: the public API is a Pure Simple / C ABI native boundary that
+  rejects a Rust runtime backend requirement.
+- REQ-GFX-007: capability records cover ARM32, ARM64, RISC-V32, and RISC-V64
+  targets.

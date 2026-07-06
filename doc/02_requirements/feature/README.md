@@ -11,7 +11,7 @@ Feature answers: **How does the user experience the requirement?**
 | Content | Description |
 |---------|-------------|
 | **Auto-generated** | `feature.md`, `pending_feature.md` — updated by test runner every run |
-| **Feature Specifications** | BDD narrative docs linking REQ-NNN to test scenarios |
+| **Feature Specifications** | BDD narrative docs linking requirement IDs to test scenarios |
 
 **Do not edit `feature.md` or `pending_feature.md` manually** — they are overwritten on every test run.
 
@@ -106,7 +106,7 @@ Examples:
 ## Cross-References
 
 Feature specs should link to:
-- `doc/02_requirements/` — the REQ-NNN statements driving this feature
+- `doc/02_requirements/` — the requirement statements driving this feature
 - `doc/03_plan/` — the plan for implementation
 - `doc/05_design/` — the technical design
 - `test/*_spec.spl` — the BDD test files that verify it

@@ -662,7 +662,7 @@ suspension and freed after the coroutine resumes and drops explicitly.
 
 ## Appendix: Coverage Mapping
 
-| Checklist ID | REQ-CONC | Status Change |
+| Checklist ID | Concurrency requirement | Status Change |
 |---|---|---|
 | S-3 | REQ-CONC-001 | UNCOVERED → PROPOSED |
 | S-4 | REQ-CONC-002 | UNCOVERED → PROPOSED |

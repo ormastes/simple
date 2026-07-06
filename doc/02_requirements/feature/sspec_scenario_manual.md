@@ -63,12 +63,13 @@ golden and emits it as a md table into the generated doc.
 
 ## FR-6: Structured traceability — requirement ↔ sspec ↔ generated doc, auto-updated
 
-Today REQ-IDs are free text (grep conventions: `# @req REQ-*`, IDs inside `it "..."`
-strings; checker `scripts/check/cert/check-req-traceability.shs` is on-demand and
-its matrix is gitignored). Nothing updates links automatically per test run.
+Today requirement IDs are free text (grep conventions: `# @req REQ-*`, IDs
+inside `it "..."` strings; checker `scripts/check/cert/check-req-traceability.shs`
+is on-demand and its matrix is gitignored). Nothing updates links automatically
+per test run.
 
-- First-class `@req("REQ-XXX-001", ...)` scenario annotation, parsed by the spec
-  framework (not grep) — same mechanism as `@manual_section` in FR-4.
+- First-class `@req(id, ...)` scenario annotation (e.g. `@req("REQ-CFG-001", ...)`),
+  parsed by the spec framework (not grep) — same mechanism as `@manual_section` in FR-4.
 - `test_db.sdn` gains a structured req-id column (today the ID is embedded in the
   description string, e.g. `"... (REQ-F5-001)"`).
 - Every `bin/simple test` run regenerates a traceability matrix
@@ -76,7 +77,7 @@ its matrix is gitignored). Nothing updates links automatically per test run.
   requirement → covering scenarios → last result → generated-doc section.
   Same auto-update mechanism as `feature.md`.
 - Generated docs get bidirectional links: each manual/spec scenario section lists
-  its REQ-IDs; the matrix links back to the doc anchor. Links never hand-edited.
+  its requirement IDs; the matrix links back to the doc anchor. Links never hand-edited.
 - `check-req-traceability.shs` reads the structured DB instead of grepping;
   `--strict` (orphan requirement / dangling REQ ref / stale doc link) joins
   `bin/simple build check`.
