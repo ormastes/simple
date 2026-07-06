@@ -1,7 +1,19 @@
 # Tar Tool — Archive Management
 # MDSOC: feature dimension, apps layer
 
-use os.userlib.fs.{read_text, write_text, stat, readdir}
+# Host-side filesystem access. The tar tool call sites treat read_text/
+# write_text as plain-text host APIs; the previous os.userlib.fs import was
+# the guest VFS-IPC library (rt_x86_syscall) which cannot run on the build
+# host and poisoned the interpreter's global function registry.
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn read_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn write_text(path: text, content: text):
+    val _ok = rt_file_write_text(path, content)
 
 export tar_create, TarHeader, TarEntry, BLOCK_SIZE, TYPE_FILE, TYPE_DIR
 
@@ -105,8 +117,7 @@ fn tar_create(files: [text]) -> Result<text, text>:
     """Create a tar archive from files. Returns serialized archive."""
     var archive = ""
     for path in files:
-        val file_stat = stat(path)
-        if file_stat.? == false:
+        if not rt_file_exists(path):
             return Result.Err("File not found: {path}")
         val content = read_text(path)
         val header = TarHeader(
