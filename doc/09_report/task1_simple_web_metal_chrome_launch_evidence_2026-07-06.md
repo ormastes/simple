@@ -110,3 +110,36 @@ SIMPLE_EXECUTION_MODE=interpret sh scripts/check/check-macos-metal-browser-backi
 - The `--mode=interpreter` FLAG works for this buffer-render (non-window) path; the env var
   `SIMPLE_EXECUTION_MODE=interpret` was also exported. The window-lane crash is an extern-registry
   gap, unrelated to the Cranelift ARM64 far-branch mode issue.
+
+## Follow-up: WM showcase event handling lesson
+
+The hosted WM showcase count-up path works when the app is treated as a real child process, not
+as embedded WM code:
+
+- The WM launches `examples/06_io/ui/widget_showcase_gui.spl` from the filesystem through
+  `bin/simple run ...` with WM bridge environment variables.
+- The WM converts host pointer input into filesystem event records with monotonically increasing
+  `seq` values (`down`, `up`, `move`, and `tick`) and writes both the current event file and the
+  per-sequence event file.
+- The child app drains queued event records in order, applies them through the same Simple UI
+  state transition used by the native showcase (`showcase_on_pointer` / `showcase_on_tick`), then
+  writes a new PPM frame, state file, and frame sequence.
+- The WM watches the frame sequence and presents only when a new child frame is available or WM
+  chrome changed. This is why `button_count` now increments: the click is no longer only a host
+  drag/titlebar event; it reaches the child app state machine and is followed by a child frame
+  refresh.
+
+Architecture rules from the fix:
+
+- Keep the app source identical. Native launch and WM launch may use different compile/run
+  configuration, but the GUI app must remain a normal Simple UI app.
+- Do not expose Metal or `rt_*` backend details to the app. The WM and app should use the common
+  Simple UI/runtime facades; backend-specific SFFI remains behind the renderer/runtime layer.
+- The WM may use a host-present adapter, but it must retain the last good child frame. A transient
+  partial PPM read while the child rewrites the frame must not clear the app content area.
+- Event forwarding must be sequenced and drainable. One event per poll leaves button/toggle
+  interactions feeling hung; draining bounded batches lets click down/up and slider/toggle changes
+  settle into one redraw.
+- Performance-sensitive WM drawing should avoid full-screen readback loops and repeated large
+  array-copy helper returns. Compose chrome and child blits through retained pixel buffers or a
+  common backend facade, then present once per dirty frame.
