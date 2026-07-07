@@ -1463,3 +1463,49 @@ Status split:
   markers.
 - Production self-hosted wrapper rebuild: still open/postponed because
   bootstrap `native-build` dispatch is not implemented yet.
+
+### Non-bootstrap firmware system gates rechecked (2026-07-07)
+
+Additional non-bootstrap firmware gates were checked while bootstrap work
+remained postponed.
+
+Green:
+
+```text
+PASS test/03_system/app/nvme_firmware/nvme_firmware_simulation_spec.spl
+PASS test/03_system/app/nvme_firmware/nvme_emulator_seam_spec.spl
+PASS test/03_system/app/nvme_firmware/nvme_baremetal_wrapper_coverage_spec.spl
+PASS test/03_system/app/nvme_firmware/nvme_rv64_baremetal_boot_spec.spl
+PASS test/03_system/app/nvme_firmware/nvme_nand_capture_spec.spl
+PASS test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl
+PASS test/03_system/app/nvme_firmware/nvme_jtag_baremetal_board_spec.spl
+```
+
+The Cosmos/OpenSSD spec required rebuilding its local ARM32 ELF with
+`sh src/os/kernel/arch/arm32/cosmos/build.shs`; the resulting QEMU Zynq boot
+passed.
+
+Harness fix:
+
+- `nvme_firmware_simulation_spec.spl` now gives the nested
+  `gc_safety_check.spl` subprocess `SIMPLE_TIMEOUT_SECONDS=60` and stores its
+  full output under `build/test-artifacts/nvme_gc_safety.out`. The GC program
+  itself remains unchanged and still prints `GC SAFETY OK`.
+
+Still blocked outside firmware logic:
+
+```text
+FAIL test/03_system/app/nvme_firmware/nvme_rv32_smp_boot_spec.spl
+missing-media: build/os/simpleos_riscv32.elf not built
+
+FAIL test/03_system/app/nvme_firmware/nvme_rv32_fpga_boot_spec.spl
+missing-media: build/os/simpleos_riscv32_fpga.elf not built
+
+bin/simple os build --arch=riscv32
+bin/simple os build --scenario=riscv32-fpga-mmode
+error: native backend 'llvm' is not available in this build
+```
+
+Next non-bootstrap prerequisite is an LLVM-enabled selected Simple compiler for
+RISC-V OS image generation. That is separate from the postponed bootstrap
+`run_native_build_bootstrap` work.
