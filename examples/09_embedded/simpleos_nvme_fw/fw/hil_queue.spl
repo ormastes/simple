@@ -121,6 +121,8 @@ impl NvmeQueues:
         if h < 0 or h >= me.depth:
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val cid:    i64 = me.cq_cid[h]
+        if not cid_valid(cid):
+            return cpl_make(0, SC_INVALID_FIELD, 0)
         val status: i64 = me.cq_status[h]
         val data:   i64 = me.cq_data[h]
         val next_h: i64 = me.cq_head + 1
@@ -249,6 +251,18 @@ fn hil_queue_selftest() -> i64:
     failures = failures + expect_eq(q.cq_pending(), q.depth, "oversized HIL CQ length pending clamps to depth")
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(45, SC_SUCCESS, 0))), 0, "oversized HIL CQ length post fails closed")
     q.cq_len = 0
+    q.cq_head = 0
+    q.cq_tail = 0
+    q.cq_post(cpl_make(46, SC_SUCCESS, 0x66))
+    val bad_cq_cid_slot: i64 = q.cq_head
+    val saved_cq_cid: i64 = q.cq_cid[bad_cq_cid_slot]
+    q.cq_cid[bad_cq_cid_slot] = 70000
+    val bad_cq_cid = q.cq_reap()
+    failures = failures + expect_eq(bad_cq_cid.status, SC_INVALID_FIELD, "invalid HIL CQ head cid reap fails closed")
+    failures = failures + expect_eq(q.cq_pending(), 1, "invalid HIL CQ head cid preserves pending completion")
+    q.cq_cid[bad_cq_cid_slot] = saved_cq_cid
+    val repaired_cq_cid = q.cq_reap()
+    failures = failures + expect_eq(repaired_cq_cid.cid, 46, "repaired HIL CQ head cid completion remains reapable")
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(70000, SC_SUCCESS, 0))), 0, "reject oversized completion id")
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(-1, SC_SUCCESS, 0))), 0, "reject negative completion id")
 

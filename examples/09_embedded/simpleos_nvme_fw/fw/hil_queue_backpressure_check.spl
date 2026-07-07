@@ -52,6 +52,18 @@ fn main():
     val cc: NvmeCpl = h.reap()
     fail = fail + expect_eq(cc.status, SC_SUCCESS, "SQ-cid-repaired HIL command completes")
 
+    h.submit(cmd_make(5, OP_READ, 0, 1, 0))
+    fail = fail + expect_eq(h.run(), 1, "HIL command posts completion before CQ cid corruption")
+    val bad_cq_cid_slot: i64 = h.q.cq_head
+    val saved_cq_cid: i64 = h.q.cq_cid[bad_cq_cid_slot]
+    h.q.cq_cid[bad_cq_cid_slot] = 70000
+    val bad_reap: NvmeCpl = h.reap()
+    fail = fail + expect_eq(bad_reap.status, SC_INVALID_FIELD, "HIL reap fails closed on invalid CQ head cid")
+    fail = fail + expect_eq(h.q.cq_pending(), 1, "HIL completion remains pending behind invalid CQ head cid")
+    h.q.cq_cid[bad_cq_cid_slot] = saved_cq_cid
+    val repaired_reap: NvmeCpl = h.reap()
+    fail = fail + expect_eq(repaired_reap.status, SC_SUCCESS, "HIL completion reaps after CQ cid repair")
+
     if fail == 0:
         print "HIL QUEUE BACKPRESSURE OK"
     else:
