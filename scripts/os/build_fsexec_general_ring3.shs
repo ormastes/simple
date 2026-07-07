@@ -2,15 +2,16 @@
 # build_fsexec_general_ring3.shs — Task #23 verification lane.
 #
 # Proves the GENERAL spawn control-transfer handoff: build a kernel from
-# fs_exec_general_ring3_entry.spl (which runs build_user_process_image_unchecked
-# — the general image builder — then x86_64_fs_exec_enter_image_ring3 — the new
-# handoff), embedding a small known ELF (build/os/elfexec/fsexec_hello.elf) as a
-# .rodata blob, and boot it under QEMU q35. No FAT/NVMe disk and no LLVM/rustc
-# rebuild are needed: the payload writes "FDR\n" via `out` (ring-3 proof) then
-# "FSEXEC_OK rc=42\n" via syscall 60, then exits QEMU via out 0xf4.
+# fs_exec_general_ring3_entry.spl (which reads /FSEXEC.ELF off the FAT32/NVMe
+# disk — the proven byte source, NOT an embedded blob — then runs
+# build_user_process_image_unchecked, the general image builder, then
+# x86_64_fs_exec_enter_image_ring3, the handoff), and boot it under QEMU q35
+# with the FAT32-fsexec disk attached as an NVMe namespace. The payload writes
+# "FDR\n" via `out` (ring-3 proof) then "FSEXEC_OK rc=42\n" via syscall 60,
+# then exits QEMU via out 0xf4.
 #
 # Env knobs: SKIP_KERNEL=1 (reuse kernel), QEMU_MEM (default 512M),
-#            QEMU_TIMEOUT (default 40s).
+#            QEMU_TIMEOUT (default 40s), FSEXEC_DISK (default fat32-fsexec.img).
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -21,40 +22,21 @@ ENTRY="examples/09_embedded/simple_os/arch/x86_64/fs_exec_general_ring3_entry.sp
 LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
 OUT_DIR="build/os/elfexec"
 KERNEL_OUTPUT="$OUT_DIR/fsexec_general_ring3.elf"
-PAYLOAD_ELF="$OUT_DIR/fsexec_hello.elf"
-# The blob C must live under the entry's arch dir tree — native-build only
-# auto-compiles/links .c found there (proven: boot/*.c). A .c dropped in a
-# generic --source like build/os/generated is NOT compiled and its symbols get
-# auto-stubbed to 0 by SIMPLE_ALLOW_FREESTANDING_STUBS (observed: blob len=0).
-BLOB_C="examples/09_embedded/simple_os/arch/x86_64/boot/fsexec_hello_blob.c"
+# FAT32 disk image holding /FSEXEC.ELF (built by build/os/elfexec/build-fsexec-img.spl).
+FSEXEC_DISK="${FSEXEC_DISK:-$OUT_DIR/fat32-fsexec.img}"
+NVME_SERIAL="fsexecnvme0"
+NVME_DRIVE_ID="nvme0"
 SERIAL_LOG="$OUT_DIR/general_ring3_run.log"
 QEMU_MEM="${QEMU_MEM:-512M}"
 QEMU_TIMEOUT="${QEMU_TIMEOUT:-40}"
 
 mkdir -p "$OUT_DIR" build/os/generated/generated
 
-[ -f "$PAYLOAD_ELF" ] || { echo "[gen-ring3] missing payload ELF: $PAYLOAD_ELF (run scripts/os build_user_hello or fsexec build first)"; exit 1; }
-
-# ---- 0. Embed the payload ELF as a kernel .rodata blob --------------------
-rm -f build/os/generated/fsexec_hello_blob.c   # remove stale, uncompiled copy
-echo "[gen-ring3] embedding $PAYLOAD_ELF -> $BLOB_C"
-PAYLOAD_SIZE="$(stat -c%s "$PAYLOAD_ELF")"
-{
-    # The array + len MUST be `static` (file-local): a GLOBAL const array symbol
-    # gets mis-resolved by native-build's freestanding "weak boot alias override"
-    # (observed: byte 0 read back as 0xF8 instead of 0x7F). A static array (the
-    # proven embedded_ssh_host_rsa.h pattern) is not an external symbol and is
-    # placed/read correctly. Only the accessor functions are external.
-    printf 'static const unsigned char fsexec_hello_blob[] = {\n'
-    od -An -v -tu1 "$PAYLOAD_ELF" | awk '{ for (i = 1; i <= NF; i++) printf "%s,", $i }'
-    printf '\n};\n'
-    printf 'static const unsigned long fsexec_hello_blob_len = %s;\n' "$PAYLOAD_SIZE"
-    printf 'unsigned long fsexec_hello_blob_size(void) { return fsexec_hello_blob_len; }\n'
-    printf 'unsigned char fsexec_hello_blob_byte(unsigned long i) { return (i < fsexec_hello_blob_len) ? fsexec_hello_blob[i] : 0; }\n'
-} > "$BLOB_C"
-echo "[gen-ring3] blob size=$PAYLOAD_SIZE bytes"
+[ -f "$FSEXEC_DISK" ] || { echo "[gen-ring3] missing FAT32 disk: $FSEXEC_DISK (run: $SEED $OUT_DIR/build-fsexec-img.spl)"; exit 1; }
 
 # ---- 1. Kernel -----------------------------------------------------------
+# The NVMe/FAT32 C reader (boot/baremetal_stubs.c) lives under the entry's arch
+# dir tree, so native-build auto-compiles + links it. No blob C is embedded.
 if [ "${SKIP_KERNEL:-0}" != "1" ]; then
     cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
 val SIMPLEOS_LOG_COMPILED: bool = false
@@ -88,14 +70,16 @@ fi
 
 # ---- 2. Run --------------------------------------------------------------
 rm -f "$SERIAL_LOG"
-echo "[gen-ring3] launching QEMU (mem=$QEMU_MEM timeout=${QEMU_TIMEOUT}s)"
+echo "[gen-ring3] launching QEMU (mem=$QEMU_MEM timeout=${QEMU_TIMEOUT}s disk=$FSEXEC_DISK)"
 set +e
 timeout "$QEMU_TIMEOUT" qemu-system-x86_64 \
     -no-user-config -monitor none -net none -nographic -no-reboot \
     -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
     -kernel "$KERNEL_OUTPUT" \
     -serial "file:$SERIAL_LOG" \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$FSEXEC_DISK,if=none,id=$NVME_DRIVE_ID,format=raw" \
+    -device nvme,drive="$NVME_DRIVE_ID",serial="$NVME_SERIAL"
 RC=$?
 set -e
 echo "[gen-ring3] qemu exit rc=$RC"
