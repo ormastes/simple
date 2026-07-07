@@ -3,6 +3,15 @@ extern fn rt_file_read_text(path: text) -> text
 fn mir_to_llvm_core_source() -> text:
     rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
 
+fn driver_bootstrap_source() -> text:
+    rt_file_read_text("src/compiler/80.driver/driver_bootstrap.spl") ?? ""
+
+fn linker_native_source() -> text:
+    rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl") ?? ""
+
+fn llvm_backend_tools_source() -> text:
+    rt_file_read_text("src/compiler/70.backend/backend/llvm_backend_tools.spl") ?? ""
+
 describe "bootstrap LLVM entry symbol source":
     it "uses plain function definitions for bootstrap objects":
         val source = mir_to_llvm_core_source()
@@ -10,3 +19,33 @@ describe "bootstrap LLVM entry symbol source":
         expect(source).to_contain("(rt_env_get(\"SIMPLE_BOOTSTRAP\") ?? \"\") == \"1\"")
         expect(source).to_contain("self.builder.start_function(fn_name, params, ret_ty)")
         expect(source).to_contain("self.builder.start_function_opt(fn_name, params, ret_ty, is_readonly, is_small)")
+
+    it "keeps bootstrap branch locals block scoped until phi support exists":
+        val source = mir_to_llvm_core_source()
+
+        expect(source).to_contain("self.block_defined_locals = {}")
+        expect(source).to_contain("self.mark_local_defined(self.local_id_value(dest))")
+        expect(source).to_contain("bootstrap lacks phi insertion")
+        expect(source).to_contain("self.current_block_id == 0")
+
+    it "links bootstrap LLVM with runtime argv and non-pie objects":
+        val source = mir_to_llvm_core_source()
+        val driver = driver_bootstrap_source()
+        val linker = linker_native_source()
+        val tools = llvm_backend_tools_source()
+
+        expect(source).to_contain("func_name == \"@get_args\"")
+        expect(source).to_contain("func_name = \"@rt_get_args\"")
+        expect(source).to_contain("bare_func_name == \"rt_get_args\"")
+        expect(driver).to_contain("pie: false")
+        expect(linker).to_contain("args.push(\"-no-pie\")")
+        expect(tools).to_contain("--relocation-model=pic --function-sections --data-sections")
+        expect(tools).to_contain("if llc_code != 0:")
+
+    it "keeps the bootstrap stage2 smoke entry alive":
+        val source = mir_to_llvm_core_source()
+
+        expect(source).to_contain("temporary Stage2 smoke entry")
+        expect(source).to_contain("declare i32 @puts(ptr)")
+        expect(source).to_contain("simple-bootstrap 1.0.0-beta")
+        expect(source).to_contain("self.builder.emit_ret(\"i64\", \"1\")")

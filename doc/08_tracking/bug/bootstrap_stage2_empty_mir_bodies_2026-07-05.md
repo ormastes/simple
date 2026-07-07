@@ -518,3 +518,46 @@ currently treats the failed `llc` object as success and leaves an empty object,
 which then links as missing `__simple_main`. Next work should fix the SSA merge
 value lowering and make `compile_ir_to_object` fail loudly when `llc` leaves an
 empty/non-object output.
+
+## 2026-07-06 Progress: Stage 2 links and smoke entry is alive
+
+The invalid-SSA/linker chain moved forward:
+
+- bootstrap MIR-to-LLVM now scopes bootstrap branch locals per block unless
+  they are defined in the entry block, avoiding invalid cross-branch SSA reuse
+  while real phi insertion is still missing;
+- bootstrap `get_args` calls are remapped to the runtime `rt_get_args` symbol;
+- bootstrap LLVM object emission uses PIC `llc` flags and checks `llc_code`
+  before accepting an object file;
+- bootstrap LLVM link requests non-PIE for this bootstrap path and the cc
+  fallback passes `-no-pie`;
+- `__simple_main` has a temporary straight-line smoke entry that prints the
+  banner and returns `1`.
+
+Focused evidence:
+
+```text
+PASS test/01_unit/compiler/backend/bootstrap_llvm_entry_symbol_source_spec.spl
+stage2_smoke_entry_rc=0
+[mir-lower-free] done instr-total=12 term-total=24
+[llvm-tools] llc-object
+```
+
+Smoke evidence:
+
+```text
+build/mini_builds/stage2_after_bootstrap_smoke_entry --version
+simple-bootstrap 1.0.0-beta
+version_rc=1
+
+build/mini_builds/stage2_after_bootstrap_smoke_entry native-build
+simple-bootstrap 1.0.0-beta
+native_build_rc=1
+```
+
+Current blocker: Stage 2 is now linkable and visibly alive, but it is not a
+production CLI yet. The smoke entry intentionally returns `1` for every command
+and bypasses real bootstrap `if`/print lowering. Next work is to replace the
+temporary smoke entry with real `main` lowering: proper condition values, phi
+or stack-slot merge handling, and real print lowering so `--version` can return
+0 while `native-build` remains fail-closed.

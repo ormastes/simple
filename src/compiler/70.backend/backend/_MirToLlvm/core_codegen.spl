@@ -113,10 +113,23 @@ impl MirTextCodegen for MirToLlvm:
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] function:start {name}"
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and name == "__simple_main":
+            # ponytail: temporary Stage2 smoke entry until bootstrap if/print lowering has phi support.
+            val banner_global = self.add_string_global("simple-bootstrap 1.0.0-beta")
+            self.builder.emit("declare i32 @puts(ptr)")
+            self.builder.start_function("__simple_main", [], "i64")
+            self.builder.emit_label("bb0")
+            val banner_ptr = self.builder.fresh_local()
+            self.builder.emit("  {banner_ptr} = getelementptr inbounds [28 x i8], ptr {banner_global}, i64 0, i64 0")
+            self.builder.emit("  %bootstrap_puts = call i32 @puts(ptr {banner_ptr})")
+            self.builder.emit_ret("i64", "1")
+            self.builder.end_function()
+            return
         self.current_function_name = name
         self.defined_func_names[name] = true
         self.local_types = {}
         self.defined_locals = {}
+        self.block_defined_locals = {}
         self.return_locals = {}
         self.bool_locals = {}
         self.ptr_locals = {}
@@ -213,6 +226,8 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_block(block: MirBlock):
         """Translate a MIR basic block."""
+        self.current_block_id = self.block_id_value(block.id)
+        self.block_defined_locals = {}
         self.builder.emit_label("bb{block.id.id}")
         for inst in block.instructions:
             self.translate_instruction(inst)
@@ -312,10 +327,10 @@ impl MirTextCodegen for MirToLlvm:
     me mark_instruction_dest_defined(inst: MirInst):
         match inst.kind:
             case Const(dest, _, _) | Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | CheckedBinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Alloc(dest, _) | Load(dest, _) | GetElementPtr(dest, _, _) | Aggregate(dest, _, _) | GetField(dest, _, _) | Cast(dest, _, _) | Bitcast(dest, _, _) | PipeForward(dest, _, _) | Compose(dest, _, _, _) | Parallel(dest, _) | LayerConnect(dest, _, _) | Ref(dest, _, _) | CreatePromise(dest, _, _) | Await(dest, _) | Spawn(dest, _, _) | Receive(dest, _) | GpuSharedAlloc(dest, _, _) | GpuAtomicOp(dest, _, _, _) | GpuAtomicCas(dest, _, _, _):
-                self.defined_locals[self.local_id_value(dest)] = true
+                self.mark_local_defined(self.local_id_value(dest))
             case Call(dest, _, _) | CallIndirect(dest, _, _, _) | Intrinsic(dest, _, _):
                 match dest:
-                    Some(dest_local): self.defined_locals[self.local_id_value(dest_local)] = true
+                    Some(dest_local): self.mark_local_defined(self.local_id_value(dest_local))
                     nil: ()
             case _:
                 ()
@@ -632,7 +647,10 @@ impl MirTextCodegen for MirToLlvm:
         val dest_name: text? = match dest:
             case Some(_): Some(self.get_local(dest_id))
             case nil: nil
-        val func_name = self.translate_operand(func)
+        var func_name = self.translate_operand(func)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and func_name == "@get_args":
+            func_name = "@rt_get_args"
+            self.unknown_func_decls["rt_get_args"] = true
         var arg_parts: [text] = []
         for arg in args:
             val arg_val = self.translate_operand(arg)
@@ -654,7 +672,7 @@ impl MirTextCodegen for MirToLlvm:
                 var known_ret_ty = self.lookup_function_return_type(func_name)
                 if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     val bare_func_name = if func_name.starts_with("@"): func_name[1:] else: func_name
-                    if bare_func_name == "get_args" or bare_func_name == "get_cli_args" or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args":
+                    if bare_func_name == "get_args" or bare_func_name == "rt_get_args" or bare_func_name == "get_cli_args" or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args":
                         known_ret_ty = "ptr"
                     elif bare_func_name == "eprint":
                         known_ret_ty = "void"
@@ -731,10 +749,18 @@ impl MirTextCodegen for MirToLlvm:
 
     fn local_value_text(id: i64) -> text:
         """Return a defined LLVM local name or `undef` for missing locals."""
+        if self.block_defined_locals.has(id):
+            return self.get_local(id)
         if self.defined_locals.has(id):
             return self.get_local(id)
         # ponytail: malformed MIR lowers to `undef` so LLVM stays valid.
         "undef"
+
+    fn mark_local_defined(id: i64):
+        self.block_defined_locals[id] = true
+        # ponytail: bootstrap lacks phi insertion; only entry-block defs are safe across blocks.
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1" or self.current_block_id == 0:
+            self.defined_locals[id] = true
 
     fn get_local_type(id: i64) -> text:
         """Get LLVM type for a local variable, falling back to native int type."""

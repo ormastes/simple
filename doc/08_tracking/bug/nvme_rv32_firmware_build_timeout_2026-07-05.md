@@ -1252,3 +1252,28 @@ llc: error: input module cannot be verified
 Firmware proof remains blocked until bootstrap MIR-to-LLVM emits valid SSA for
 conditional merge values in `__simple_main` and the `llc` object helper refuses
 empty/non-object outputs.
+
+### Latest bootstrap progress: Stage 2 links and prints smoke banner (2026-07-06)
+
+The Stage 2 compiler artifact now links through the fresh bootstrap MIR/LLVM
+path and executes:
+
+```text
+stage2_smoke_entry_rc=0
+[mir-lower-free] done instr-total=12 term-total=24
+[llvm-tools] llc-object
+
+build/mini_builds/stage2_after_bootstrap_smoke_entry --version
+simple-bootstrap 1.0.0-beta
+version_rc=1
+
+build/mini_builds/stage2_after_bootstrap_smoke_entry native-build
+simple-bootstrap 1.0.0-beta
+native_build_rc=1
+```
+
+This is still not firmware production proof. The Stage 2 entry is a temporary
+straight-line smoke entry that proves the binary is alive and keeps
+`native-build` fail-closed. RV32 firmware proof remains blocked until real
+bootstrap CLI lowering replaces the smoke entry and the full bootstrap/deploy
+loop produces a self-hosted `bin/simple`.
