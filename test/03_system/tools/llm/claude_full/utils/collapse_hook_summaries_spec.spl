@@ -1,0 +1,52 @@
+"""
+# Claude Full collapse hook summaries
+
+Pure Simple coverage for consecutive hook summary collapsing.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.utils.collapseHookSummaries.*
+
+describe "Claude full collapse hook summaries":
+    it "collapses consecutive labeled summaries":
+        step("Check aggregate fields")
+        val messages = [
+            hookSummaryMessage("system", "stop_hook_summary", "PostToolUse", 2, ["a"], ["e1"], false, true, 10),
+            hookSummaryMessage("system", "stop_hook_summary", "PostToolUse", 3, ["b"], ["e2"], true, false, 25),
+        ]
+        val out = collapseHookSummaries(messages)
+        expect(out.len()).to_equal(1)
+        expect(out[0].hookCount).to_equal(5)
+        expect(out[0].hookInfos).to_equal(["a", "b"])
+        expect(out[0].hookErrors).to_equal(["e1", "e2"])
+        expect(out[0].preventedContinuation).to_equal(true)
+        expect(out[0].hasOutput).to_equal(true)
+        expect(out[0].totalDurationMs).to_equal(25)
+
+    it "keeps a single labeled summary unchanged":
+        step("Check single item path")
+        val out = collapseHookSummaries([hookSummaryMessage("system", "stop_hook_summary", "PreToolUse", 1, ["a"], [], false, false, 7)])
+        expect(out.len()).to_equal(1)
+        expect(out[0].hookCount).to_equal(1)
+        expect(out[0].hookInfos).to_equal(["a"])
+
+    it "only collapses consecutive matching labels":
+        step("Check label boundary")
+        val out = collapseHookSummaries([
+            hookSummaryMessage("system", "stop_hook_summary", "A", 1, ["a1"], [], false, false, 1),
+            hookSummaryMessage("system", "stop_hook_summary", "B", 1, ["b"], [], false, false, 2),
+            hookSummaryMessage("system", "stop_hook_summary", "A", 1, ["a2"], [], false, false, 3),
+        ])
+        expect(out.len()).to_equal(3)
+        expect(out[0].hookInfos).to_equal(["a1"])
+        expect(out[2].hookInfos).to_equal(["a2"])
+
+    it "preserves unlabeled and non-hook messages":
+        step("Check non-summary path")
+        val out = collapseHookSummaries([
+            hookSummaryMessage("system", "stop_hook_summary", "", 1, ["empty"], [], false, false, 1),
+            hookSummaryMessage("assistant", "stop_hook_summary", "A", 1, ["assistant"], [], false, false, 2),
+        ])
+        expect(out.len()).to_equal(2)
+        expect(isLabeledHookSummary(out[0])).to_equal(false)
+        expect(out[1].typeName).to_equal("assistant")
