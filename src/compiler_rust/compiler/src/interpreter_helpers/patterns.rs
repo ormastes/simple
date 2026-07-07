@@ -12,6 +12,7 @@ use super::super::{
     CONST_NAMES, MODULE_GLOBALS,
 };
 
+use super::args::{eval_arg, eval_arg_usize};
 use super::collections::bind_sequence_pattern;
 use super::method_dispatch::call_method_on_value;
 use crate::value::{OptionVariant, ResultVariant};
@@ -119,6 +120,68 @@ pub(crate) fn handle_functional_update(
 /// Array methods that mutate and should update the binding
 /// Note: sort, sorted, reverse, reversed, concat all return NEW arrays and are NOT mutating
 const ARRAY_MUTATING_METHODS: &[&str] = &["append", "push", "pop", "insert", "remove", "extend", "clear"];
+
+/// Apply an array mutating method to a `&mut Vec<Value>` in place.
+///
+/// This is the single mutation kernel shared by BOTH the ownership-gated in-place
+/// fast path (uniquely-owned array — `Arc::get_mut`) and the clone-then-mutate slow
+/// path (aliased array — `arr.to_vec()`), so the two paths are provably byte-for-byte
+/// identical in semantics; only *where* the `Vec` lives differs. The behaviour of each
+/// arm mirrors `interpreter_method/collections.rs::handle_array_methods` exactly.
+///
+/// Returns `Ok(Some(elem))` for `pop` (the popped element to yield as the expression
+/// result; the pre-existing lvalue path already special-cased this), and `Ok(None)` for
+/// every other method (whose expression result is the array itself). `extend` with a
+/// non-array argument returns the same `TYPE_MISMATCH` error `handle_array_methods` does.
+fn apply_array_mutation_in_place(
+    method: &str,
+    vec: &mut Vec<Value>,
+    item: Option<Value>,
+    idx: Option<usize>,
+    second: Option<Value>,
+) -> Result<Option<Value>, CompileError> {
+    match method {
+        "push" | "append" => {
+            vec.push(item.unwrap_or(Value::Nil));
+            Ok(None)
+        }
+        "pop" => Ok(Some(vec.pop().unwrap_or(Value::Nil))),
+        "insert" => {
+            let i = idx.unwrap_or(0);
+            if i <= vec.len() {
+                vec.insert(i, second.unwrap_or(Value::Nil));
+            }
+            Ok(None)
+        }
+        "remove" => {
+            let i = idx.unwrap_or(0);
+            if i < vec.len() {
+                vec.remove(i);
+            }
+            Ok(None)
+        }
+        "extend" => {
+            match item {
+                Some(Value::Array(other)) => vec.extend(other.iter().cloned()),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("concat/extend/merge expects an array argument");
+                    return Err(CompileError::semantic_with_context(
+                        "concat/extend/merge expects array argument",
+                        ctx,
+                    ));
+                }
+            }
+            Ok(None)
+        }
+        "clear" => {
+            vec.clear();
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
 
 /// Handle method call on object with self-update tracking
 /// Returns (result, optional_updated_self) where updated_self is the object with mutations
@@ -464,24 +527,97 @@ pub(crate) fn handle_method_call_with_self_update(
                             ctx,
                         ));
                     }
-                    // pop is special: it returns the REMOVED ELEMENT (or Nil if
-                    // empty) while trimming the bound array. The generic branch
-                    // below returns the mutated array as the result, which is
-                    // correct for push/insert/remove/clear but wrong for pop
-                    // (parity with native rt_array_pop, which returns the element).
-                    if method == "pop" {
-                        if let Some(Value::Array(arr)) = env.get(obj_name) {
-                            let mut new_arr = arr.to_vec();
-                            let popped = new_arr.pop().unwrap_or(Value::Nil);
-                            return Ok((popped, Some((obj_name.clone(), Value::array(new_arr)))));
+
+                    // Evaluate the method's argument(s) exactly ONCE, up front. This mirrors the
+                    // index-store fast path (interpreter/node_exec.rs:906-937), which evaluates its
+                    // RHS/index operands before branching on ownership. The values are consumed by
+                    // the single mutation call below, so an aliased array is never double-evaluated
+                    // (no duplicated argument side effects) — the previous path re-entered
+                    // `evaluate_expr`, which re-cloned the whole backing Vec on every call.
+                    let m = method.as_str();
+                    let item = match m {
+                        "push" | "append" => {
+                            Some(eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?)
                         }
-                    }
-                    // Evaluate the method call - it returns the new array
-                    let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
-                    if let Value::Array(new_arr) = &result {
-                        // Return both the new array as result AND the update for self-mutation
-                        let new_array_val = Value::Array(new_arr.clone());
-                        return Ok((new_array_val.clone(), Some((obj_name.clone(), new_array_val))));
+                        "extend" => Some(eval_arg(
+                            args,
+                            0,
+                            Value::array(vec![]),
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?),
+                        _ => None,
+                    };
+                    let (idx, second) = match m {
+                        "insert" => (
+                            Some(eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?),
+                            Some(eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?),
+                        ),
+                        "remove" => (
+                            Some(eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?),
+                            None,
+                        ),
+                        _ => (None, None),
+                    };
+
+                    // Ownership-gated IN-PLACE mutation — the durable fix for the O(N)-per-call
+                    // whole-array clone that made `arr.push(x)` list-building O(N^2). `Arc::make_mut`
+                    // on the binding's Arc:
+                    //   * uniquely owned (Arc strong_count == 1) → mutates the backing Vec IN PLACE,
+                    //     O(1) amortized — this is the new fast path;
+                    //   * aliased (strong_count > 1) → clones the Vec and mutates the copy, leaving
+                    //     every other binding/alias untouched — value semantics preserved exactly,
+                    //     identical to the index-store slow path at node_exec.rs:951.
+                    // `Value::Array` Arcs are never `Arc::downgrade`d anywhere in the interpreter, so
+                    // weak_count is always 0 and make_mut's `strong_count == 1` test coincides with
+                    // the index-store fast path's `strong_count == 1 && weak_count == 0` gate.
+                    // NB: the array is re-read via `env.get_mut` AFTER argument evaluation, so an
+                    // argument that itself retained a reference to this array (e.g. `a.push(a)`)
+                    // bumps the refcount and correctly forces the clone branch.
+                    //
+                    // Weak-count invariant (adversarial-review note): `Arc::make_mut` below mutates
+                    // in place whenever `strong_count == 1`, *regardless* of `weak_count` — unlike
+                    // the sibling index-store fast path, which explicitly gates on both
+                    // `strong_count == 1 && weak_count == 0` (`node_exec.rs:917`, `Arc::get_mut`,
+                    // gated by the check at `node_exec.rs:907`). The two paths coincide ONLY because
+                    // no `Value::Array` Arc is ever `Arc::downgrade`d anywhere in the interpreter
+                    // today (verified: zero call sites), so `weak_count` is always 0 here. If a
+                    // `Weak<Vec<Value>>` on an array Arc is ever introduced (e.g. a future weak-ref
+                    // language feature), this call MUST switch from `Arc::make_mut` to `Arc::get_mut`
+                    // (falling through to the clone branch on `None`) to stay safe, exactly like
+                    // index-store does.
+                    //
+                    // Eval-order edge case (accepted, unreachable in-tree): argument(s) are evaluated
+                    // above, BEFORE the receiver array is re-read via `env.get_mut` here. A
+                    // self-referential, trimming-mutating argument expression on the SAME array —
+                    // e.g. `a.push(a.pop())`, where evaluating the argument mutates `a` as a side
+                    // effect before the outer `push` re-reads it — would therefore observe a
+                    // different intermediate state than re-entering `evaluate_expr` per call did
+                    // pre-fix, i.e. this is a genuine ordering divergence from stock, not merely an
+                    // aliasing one. It is accepted as-is because: (1) it is UNREACHABLE in-tree today
+                    // (zero occurrences of the same-variable-receiver-equals-argument-receiver shape,
+                    // grepped across src/ and test/); the real in-tree idiom, `args.push(self.pop())`
+                    // (e.g. `src/lib/common/js/engine/vm.spl`), is cross-variable (`args` vs `self`)
+                    // and does NOT hit this edge; (2) the case is ill-defined in stock semantics too
+                    // — there is no independently "correct" answer for what a self-mutating argument
+                    // to a self-mutating receiver method should observe, in this or most languages;
+                    // and (3) it is consistent with the index-store fast path's own live-read
+                    // semantics (index and RHS operands are likewise evaluated before the ownership
+                    // check there). Not a regression to fix; documented so a future reader doesn't
+                    // mistake it for an oversight.
+                    if let Some(Value::Array(arc)) = env.get_mut(obj_name) {
+                        let popped = {
+                            let vec = Arc::make_mut(arc);
+                            apply_array_mutation_in_place(m, vec, item, idx, second)?
+                        };
+                        // Hand the (already-mutated) Arc back as both the binding update and, for
+                        // non-`pop` methods, the expression result — an O(1) refcount bump, not a copy.
+                        let new_array_val = Value::Array(Arc::clone(arc));
+                        let result_val = popped.unwrap_or_else(|| new_array_val.clone());
+                        return Ok((result_val, Some((obj_name.clone(), new_array_val))));
                     }
                 }
             }

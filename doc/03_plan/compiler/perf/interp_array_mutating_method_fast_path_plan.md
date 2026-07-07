@@ -29,6 +29,53 @@ section — do not conflate fixes across them.
 
 ## TRACK A — durable fix: extend the `case1_unique` fast path to mutating methods (seed change)
 
+**Status: IMPLEMENTED + VERIFIED (2026-07-07).** Landed entirely in
+`src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs` (the lvalue
+self-update write-back branch) via `Arc::make_mut` gated implicitly on
+`strong_count == 1` (uniquely-owned → in-place mutation; aliased → clone),
+mirroring the index-store fast path (`node_exec.rs:906-937`). See
+`doc/08_tracking/bug/interp_array_mutating_methods_clone_whole_array_2026-07-08.md`
+for the full verification writeup. Summary:
+
+- **Aliasing clean:** 15 hand-written aliasing scenarios plus the full 153-file
+  regression corpus produced byte-identical output stock-vs-patched — value
+  semantics preserved exactly for every aliased-array case.
+- **Perf win confirmed, not just predicted:** O(N²) → O(N), ~104× at N=16000 and
+  ~200× at N=40000 versus the pre-fix whole-array-clone path.
+- **Scope:** interpret-mode only (`SIMPLE_EXECUTION_MODE=interpret`) — this is
+  the Rust seed interpreter's dispatch path; compiled/JIT/native-build paths are
+  unaffected and out of scope.
+- **Fix-site correction vs. this plan's original "Where" list:** the "Proposed
+  shape" section above named `interpreter_method/collections.rs:50-66` as
+  needing a gate. The landed fix does NOT touch `collections.rs` — that file
+  only ever receives a borrowed slice/already-resolved arguments in this call
+  path and stays pristine; the entire fast path (argument evaluation, the
+  ownership-gated `Arc::make_mut`, and the mutation kernel) lives in
+  `patterns.rs`'s lvalue self-update branch, which is the sole call site that
+  had both the receiver binding and the write-back responsibility needed to
+  gate correctly. Treat this plan's original `collections.rs` citation as
+  superseded by the actual landed fix-site.
+- **One documented, accepted edge case (not a regression):** argument
+  evaluation happens before the receiver array is re-read via `env.get_mut`, so
+  a self-referential, trimming-mutating argument on the SAME array (e.g.
+  `a.push(a.pop())`) would observe different intermediate state than the
+  pre-fix path did. This is UNREACHABLE in-tree today (0 occurrences of that
+  shape across `src/` and `test/`; the real in-tree idiom,
+  `args.push(self.pop())` in `src/lib/common/js/engine/vm.spl`, is
+  cross-variable and does not hit it) and the case is ill-defined in stock
+  semantics too — accepted as documented behavior, consistent with the
+  index-store fast path's own live-read-before-check semantics. See the
+  in-source comment at the fix site for the full argument.
+- **Weak-count invariant (forward-looking note):** `Arc::make_mut` mutates in
+  place whenever `strong_count == 1` regardless of `weak_count`, unlike the
+  sibling index-store gate which explicitly checks
+  `strong_count == 1 && weak_count == 0` (`node_exec.rs:907`/`:917`). The two
+  coincide only because no `Value::Array` Arc is ever `Arc::downgrade`d
+  anywhere in the interpreter today. If a weak-ref-on-array feature is ever
+  introduced, this call must switch from `Arc::make_mut` to `Arc::get_mut`
+  (falling through to clone on `None`) like index-store does — flagged
+  in-source so it isn't missed.
+
 **What:** add an ownership-gated in-place fast path to the array-mutating-method dispatch,
 mirroring the index-store fast path that already exists and is proven safe in
 `src/compiler_rust/compiler/src/interpreter/node_exec.rs:906-937`.
@@ -142,7 +189,10 @@ Track A rather than hand-rolling a growth strategy in Simple.
    that work has landed and this plan is revisited.
 2. **Land Track A as a deliberate, scheduled full-bootstrap** when the tree is quiet (per
    `.claude/rules/bootstrap.md` — not bundled incidentally into unrelated work). Run the full
-   verification protocol above before deploy.
+   verification protocol above before deploy. **DONE (2026-07-07)** — see the Track A status
+   update above; source committed and `bin/simple` redeploy handled as its own careful,
+   independently-verified step (pre-swap equivalence check against the currently deployed binary,
+   backup kept for instant revert).
 3. **After Track A lands,** the remaining Track B victims (#5–#8, and any repo-wide `push`-in-loop
    sites outside this ranked list — including `simple_web_html_layout_renderer.spl` once
    unblocked) become optional micro-opts, not required fixes — Track A retires the whole O(N²)

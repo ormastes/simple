@@ -7,8 +7,8 @@
   `src/compiler_rust/compiler/src/interpreter_method/collections.rs`,
   `src/compiler_rust/compiler/src/interpreter_method/mod.rs`. Contrast:
   `src/compiler_rust/compiler/src/interpreter/node_exec.rs` (index-store, already fast).
-- **Status:** open — root-caused and measured; fix plan filed (see
-  `doc/03_plan/compiler/perf/interp_array_mutating_method_fast_path_plan.md`).
+- **Status:** Track A IMPLEMENTED + VERIFIED (2026-07-07) — see "Fix landed (Track A)" below.
+  Fix plan: `doc/03_plan/compiler/perf/interp_array_mutating_method_fast_path_plan.md`.
 - **Source sweep:** this record is the corrected write-up of Task #33's completed sweep,
   `/private/tmp/claude-501/-Users-ormastes-simple/7597a415-f0b0-4c3f-822d-107292b34bec/scratchpad/bare_array_param_sweep.md`
   (full characterization table, repro files, mechanism). Independently cross-checked against
@@ -176,6 +176,57 @@ for i in 0..n { a.push(i) }   # or: a = a.push(i)
 # /tmp/fast.spl (param-read O(1)), /tmp/alias.spl (aliased index-assign O(N)/op),
 # /tmp/buildcost.spl (push O(N^2) across element types) — see sweep report for exact contents.
 ```
+
+## Fix landed (Track A) — 2026-07-07
+
+Implemented and verified. Landed entirely in
+`src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs` (the lvalue self-update
+write-back branch that recognizes `name.push(...)`/etc. on a bound identifier): arguments are
+now evaluated exactly once up front, then the receiver's `Arc<Vec<Value>>` is re-read via
+`env.get_mut` and mutated through `Arc::make_mut` — in place when uniquely owned
+(`strong_count == 1`), cloned when aliased (`strong_count > 1`) — mirroring the index-store fast
+path already shipped at `interpreter/node_exec.rs:906-937`. `collections.rs` (the generic
+per-type method handler) is untouched by this fix — it only ever receives already-resolved
+arguments/a borrowed slice in this call path and stays pristine; the original fix plan's mention
+of gating `collections.rs:50-66` is superseded (see the plan doc's Track A status update for the
+full correction).
+
+**Verification performed:**
+- **Aliasing:** 15 hand-written aliasing scenarios (two bindings to the same array,
+  `mut` params retained by the caller, module globals, captured closure vars) plus the full
+  153-file regression corpus — all byte-identical stock-vs-patched output. Value semantics
+  preserved exactly; no observed case where an alias saw a mutation it shouldn't have (or vice
+  versa).
+- **Perf:** O(N²) → O(N) confirmed by direct measurement, not just predicted — ~104× faster at
+  N=16000, ~200× faster at N=40000, versus the pre-fix whole-array-clone path. Closes the 84× gap
+  vs. `a[i]=`-into-preallocated-local reported above (now roughly at parity, as the fix plan's
+  verification protocol required).
+- **Scope:** interpret-mode only (`SIMPLE_EXECUTION_MODE=interpret`) — the Rust seed
+  interpreter's dispatch path. Compiled/JIT/native-build execution is unaffected.
+
+**One documented, accepted edge case (adversarial review finding, not a regression):**
+arguments are evaluated *before* the receiver is re-read via `env.get_mut`, so a self-referential,
+trimming-mutating argument on the SAME array — e.g. `a.push(a.pop())`, where evaluating the
+argument mutates `a` as a side effect before the outer call re-reads it — observes different
+intermediate state than the pre-fix path (which re-entered `evaluate_expr` per call) did. This is
+**unreachable in-tree**: a grep across `src/` and `test/` for the same-variable-receiver-equals-
+argument-receiver shape returns 0 occurrences; the actual in-tree idiom, `args.push(self.pop())`
+(e.g. `src/lib/common/js/engine/vm.spl:197,213`, `:272`), is cross-variable (`args` vs. `self`)
+and does not hit this edge. The case is also ill-defined in stock semantics — there is no
+independently "correct" answer for what a self-mutating argument to a self-mutating receiver
+method should observe. Accepted as documented behavior, consistent with the index-store fast
+path's own live-read-before-check semantics (its index/RHS operands are likewise evaluated before
+the ownership check). Documented in-source at the fix site so a future reader doesn't mistake it
+for an oversight.
+
+**Weak-count invariant (forward-looking note):** the fix uses `Arc::make_mut`, which mutates in
+place whenever `strong_count == 1` *regardless* of `weak_count` — this coincides with the sibling
+index-store fast path (`node_exec.rs:917`, `Arc::get_mut`, gated by the `strong_count == 1 &&
+weak_count == 0` check at `:907`) **only** because no `Value::Array` Arc is ever
+`Arc::downgrade`d anywhere in the interpreter today (verified: zero call sites), so
+`weak_count` is always 0. If a `Weak` reference on an array Arc is ever introduced, this call
+must switch from `Arc::make_mut` to `Arc::get_mut` (falling through to the clone branch on
+`None`) to stay safe, exactly like index-store does. Flagged in-source at the fix site.
 
 ## Fix plan
 
