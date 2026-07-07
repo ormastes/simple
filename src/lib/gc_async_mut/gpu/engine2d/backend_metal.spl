@@ -9,7 +9,7 @@ use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult}
 use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, glyph_atlas_dense_values, glyph_atlas_index_for_char_code}
 use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_u32s_from_ptr, metal_write_u32s_to_ptr, gpu_lut_pack_dense, gpu_lut_free, gpu_lut_dense_byte_len}
-use std.gpu.engine2d.backend_capability.{BackendCapability, Engine2dBackendKind, backend_capability_default, OP_INDEXED_FILL, OP_GLYPH_ATLAS_BLIT, OP_DRAW_GRADIENT_RECT}
+use std.gpu.engine2d.backend_capability.{BackendCapability, Engine2dBackendKind, backend_capability_default, OP_INDEXED_FILL, OP_GLYPH_ATLAS_BLIT, OP_DRAW_GRADIENT_RECT, OP_DRAW_ROUNDED_RECT}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.gc_async_mut.env.platform.{is_macos}
 use std.env.variables.{env_get}
@@ -601,6 +601,11 @@ impl MetalBackend:
             # signal, not a bookkeeping-only add.
             if self.session.pipe_gradient != 0:
                 ops.push(OP_DRAW_GRADIENT_RECT)
+            # Rounded-rect FILL parity fix (2026-07-07): kernel_draw_rounded_rect
+            # is likewise a plain kernel, no GpuLut — same "pipeline actually
+            # compiled" honesty signal as gradient above.
+            if self.session.pipe_rounded_rect != 0:
+                ops.push(OP_DRAW_ROUNDED_RECT)
             if ops.len() > 0:
                 return BackendCapability(kind: Engine2dBackendKind.RealGpu, device_present: true, accelerated_ops: ops)
         backend_capability_default()
@@ -1121,14 +1126,12 @@ impl MetalBackend:
         metal_host_write_i32(params, 20, color as i64)
         metal_host_write_i32(params, 24, self.w as i64)
         metal_host_write_i32(params, 28, self.h as i64)
-        # Outline kernel: 1D, thread k covers edge pixel k and corner-arc
-        # iteration k. max(w, h) threads covers both edge spans and the arc
-        # (radius <= min(w,h)/2), with extra threads self-culling.
-        var threads = w
-        if h > threads:
-            threads = h
+        # Fill kernel: 2D dispatch over the [0,w) x [0,h) bounding box; each
+        # pixel runs the band/corner-arc membership test. Bit-exact with the
+        # CPU emu_draw_rounded_rect reference (same idiom as
+        # _dispatch_metal_rounded_rect_outline below).
         val pipeline = self.session.pipe_rounded_rect
-        val ok = self._dispatch_metal_1d(pipeline, threads as i64, 256, params, 32)
+        val ok = self._dispatch_metal_2d(pipeline, w, h, params, 32)
         metal_host_free(params)
         ok
 

@@ -16,7 +16,12 @@
 # doc/03_plan/ui/rendering/cpu_gpu_dual_algorithm_plan.md) — the plain
 # kernel_draw_gradient_rect dispatch (no GpuLut) proven bit-exact vs the
 # CPU-lane integer-lerp oracle on h=1, off-edge-clip, and alpha-channel-lerp
-# edge cases.
+# edge cases. The rounded_rect row is the 2026-07-07 CPU-vs-Metal parity fix
+# (doc/08_tracking/bug/engine2d_metal_rounded_rect_kernel_stale_outline_2026-07-07.md)
+# — kernel_draw_rounded_rect rebuilt as a FILL (band + corner-arc membership
+# test) to match the CPU-lane fill oracle (emu_draw_rounded_rect), proven
+# bit-exact on a radius==min(w,h)/2 clamp, an off-framebuffer-edge clip, and
+# an alpha-blended fill.
 # On non-macOS the harness reports skip; a skip is not verified evidence and
 # must not be reported as a pass.
 set -eu
@@ -69,10 +74,12 @@ emit() {
     echo "engine2d_gpu_offload_wm_composite=${WM_LINE:-none}"
     echo "engine2d_gpu_offload_indexed_fill=${IF_LINE:-none}"
     echo "engine2d_gpu_offload_gradient_rect=${GR_LINE:-none}"
+    echo "engine2d_gpu_offload_rounded_rect=${RR_LINE:-none}"
     echo "engine2d_gpu_offload_text_edge=${TE_LINE:-none}"
     echo "engine2d_gpu_offload_provenance_wm=${PROV_WM:-none}"
     echo "engine2d_gpu_offload_provenance_indexed_fill=${PROV_IF:-none}"
     echo "engine2d_gpu_offload_provenance_gradient_rect=${PROV_GR:-none}"
+    echo "engine2d_gpu_offload_provenance_rounded_rect=${PROV_RR:-none}"
     echo "engine2d_gpu_offload_provenance_text_edge=${PROV_TE:-none}"
     echo "engine2d_gpu_offload_policy=exact-bitmap-no-blur-no-tolerance+device-readback-required"
     echo "engine2d_gpu_offload_harness=$HARNESS"
@@ -120,16 +127,26 @@ SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
     SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
     OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=gradient_rect \
     run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
+# 2026-07-07 parity fix: prove draw_rounded_rect (kernel_draw_rounded_rect
+# rebuilt as a FILL) bit-exact vs the CPU-lane fill oracle through genuine
+# device_readback (see doc/08_tracking/bug/
+# engine2d_metal_rounded_rect_kernel_stale_outline_2026-07-07.md).
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=rounded_rect \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
 
 PRIM_LINE="$(grep -E '^primitives: ' "$LOG" | tail -n 1)"
 TEXT_LINE="$(grep -E '^text: ' "$LOG" | tail -n 1)"
 WM_LINE="$(grep -E '^wm_composite: ' "$LOG" | tail -n 1)"
 IF_LINE="$(grep -E '^indexed_fill: ' "$LOG" | tail -n 1)"
 GR_LINE="$(grep -E '^gradient_rect: ' "$LOG" | tail -n 1)"
+RR_LINE="$(grep -E '^rounded_rect: ' "$LOG" | tail -n 1)"
 TE_LINE="$(grep -E '^text_edge: ' "$LOG" | tail -n 1)"
 PROV_WM="$(grep -E '^PROVENANCE wm_composite ' "$LOG" | tail -n 1)"
 PROV_IF="$(grep -E '^PROVENANCE indexed_fill ' "$LOG" | tail -n 1)"
 PROV_GR="$(grep -E '^PROVENANCE gradient_rect ' "$LOG" | tail -n 1)"
+PROV_RR="$(grep -E '^PROVENANCE rounded_rect ' "$LOG" | tail -n 1)"
 PROV_TE="$(grep -E '^PROVENANCE text_edge ' "$LOG" | tail -n 1)"
 SKIP_LINE="$(grep -E '^GPU_OFFLOAD: skip' "$LOG" | tail -n 1)"
 
@@ -149,6 +166,9 @@ elif echo "$PRIM_LINE" | grep -q 'MATCH' \
     && echo "$GR_LINE" | grep -q 'MATCH' \
     && echo "$GR_LINE" | grep -q 'source=device_readback' \
     && echo "$PROV_GR" | grep -q 'source=device_readback' \
+    && echo "$RR_LINE" | grep -q 'MATCH' \
+    && echo "$RR_LINE" | grep -q 'source=device_readback' \
+    && echo "$PROV_RR" | grep -q 'source=device_readback' \
     && echo "$TE_LINE" | grep -q 'MATCH' \
     && echo "$TE_LINE" | grep -q 'source=device_readback' \
     && echo "$PROV_TE" | grep -q 'source=device_readback'; then

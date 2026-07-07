@@ -30,7 +30,7 @@ fn _engine2d_msl() -> text:
     - kernel_draw_circle_filled: Fill a circle (distance check)
     - kernel_draw_circle: Draw circle outline
     - kernel_draw_line: Bresenham line on GPU (1 thread per step)
-    - kernel_draw_rounded_rect: Rounded-rect outline (edges + corner arcs)
+    - kernel_draw_rounded_rect: Rounded-rect FILL (body + 4 filled corner arcs)
     - kernel_draw_triangle_filled: Barycentric triangle fill
     - kernel_draw_gradient_rect: Vertical gradient fill
     - kernel_blit_image: Copy source pixels to framebuffer region
@@ -377,68 +377,109 @@ kernel void kernel_draw_circle_filled(
 
 // ---- kernel_draw_rounded_rect ----
 
-// Rounded-rect OUTLINE (matches CPU draw_rounded_rect: straight edges + four
-// midpoint corner arcs). 1D dispatch; thread k covers edge pixel k on each side
-// (when in range) and corner-arc iteration k (replayed midpoint) on all four
-// corners. Bit-exact with the CPU reference.
+// Per-pixel replica of ONE _emu_corner_arc(cx,cy,rad,dx_sign,dy_sign) call's
+// span coverage + blend, for absolute-local pixel (lx, ly). Replays the
+// exact midpoint-circle recurrence backend_emu.spl _emu_corner_arc uses
+// (decision boundary is `d < 0`, NOT `d <= 0` — that is a *different*
+// corner-arc algorithm used by sw_corner_arc/_rr_ring_hit for the OUTLINE
+// path) and blends `color` over `dst` once per iteration whose span-1 or
+// span-2 covers (lx, ly) — i.e. once per core.draw_rect_filled call CPU
+// would issue that touches this pixel, in the same order.
+//
+// NOT a plain membership test: CPU's emu_draw_rounded_rect issues SEVEN
+// core.draw_rect_filled calls (3 band rects + 4 corner arcs, each doing up
+// to r+1 midpoint iterations x 2 spans), and their pixel footprints OVERLAP
+// AT THE SEAMS — e.g. a corner arc's first iteration (py=0) draws its span
+// at the arc-center row, which is the adjoining side band's OWN first row,
+// so that row gets blended by BOTH the band rect and the corner arc. For an
+// opaque color that is a harmless redundant overwrite; for alpha<255 each
+// blend RE-COMPOSITES over the prior result — not idempotent. A
+// per-region-exclusive kernel (classify each pixel into exactly one of
+// middle-band/side-band/corner-arc, blend once) was tried first and
+// diverged from the CPU oracle on alpha<255 fills (confirmed via the
+// Simple-level replica in engine2d_shared_raster_parity_spec.spl before
+// this kernel was fixed) — bit-exactness requires literally replaying every
+// one of the seven primitives, in CPU's exact order, blending every hit.
+inline uint _rr_corner_arc_blend(int cx, int cy, int rad, int dx_sign, int dy_sign, int lx, int ly, uint color, uint dst) {
+    int px = rad;
+    int py = 0;
+    int d = 1 - rad;
+    while (px >= py) {
+        int row1 = cy + dy_sign * py;
+        int col_a = cx;
+        int col_b1 = cx + dx_sign * px;
+        int lo1 = (col_a < col_b1) ? col_a : col_b1;
+        int hi1 = (col_a < col_b1) ? col_b1 : col_a;
+        if (ly == row1 && lx >= lo1 && lx <= hi1) {
+            dst = blend_src_over(color, dst);
+        }
+        int row2 = cy + dy_sign * px;
+        int col_b2 = cx + dx_sign * py;
+        int lo2 = (col_a < col_b2) ? col_a : col_b2;
+        int hi2 = (col_a < col_b2) ? col_b2 : col_a;
+        if (ly == row2 && lx >= lo2 && lx <= hi2) {
+            dst = blend_src_over(color, dst);
+        }
+        py += 1;
+        if (d < 0) {
+            d += 2 * py + 1;
+        } else {
+            px -= 1;
+            d += 2 * (py - px) + 1;
+        }
+    }
+    return dst;
+}
+
+// Rounded-rect FILL. Matches CPU emu_draw_rounded_rect (backend_emu.spl,
+// the canonical reference SoftwareBackend.draw_rounded_rect now delegates
+// to as of the 2026-07-06 outline-vs-fill fix): a full-height middle band
+// (cols [x+r, x+w-1-r]), two side bands (rows [y+r, y+h-1-r]), and four
+// FILLED corner arcs, replayed in the SAME order CPU issues them (see
+// _rr_corner_arc_blend's comment — this order/replay, not a per-region
+// membership test, is required for alpha<255 bit-exactness). 2D dispatch
+// over the [0,w) x [0,h) bounding box. Formerly this kernel drew the stale
+// pre-fix CPU OUTLINE behavior (edges + arc rings), which is why
+// CPU-vs-Metal parity diverged after the CPU fill fix landed — see
+// doc/08_tracking/bug/engine2d_metal_rounded_rect_kernel_stale_outline_2026-07-07.md
 kernel void kernel_draw_rounded_rect(
     device uint* fb                  [[buffer(0)]],
     constant RoundedRectParams& p    [[buffer(1)]],
-    uint tid                         [[thread_position_in_grid]]
+    uint2 tid                        [[thread_position_in_grid]]
 ) {
-    int k = (int)tid;
-    int x = p.x;
-    int y = p.y;
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
     int w = p.w;
     int h = p.h;
     int r = p.radius;
     if (r > w / 2) r = w / 2;
     if (r > h / 2) r = h / 2;
 
-    // Top/bottom straight edges: cols [x+r, x+w-1-r]  (CPU sw_hline length w-2r)
-    if (k < w - 2 * r) {
-        int col = x + r + k;
-        plot(fb, col, y, p.fb_w, p.fb_h, p.color);
-        plot(fb, col, y + h - 1, p.fb_w, p.fb_h, p.color);
-    }
-    // Left/right straight edges: rows [y+r, y+h-1-r]  (CPU sw_vline length h-2r)
-    if (k < h - 2 * r) {
-        int row = y + r + k;
-        plot(fb, x, row, p.fb_w, p.fb_h, p.color);
-        plot(fb, x + w - 1, row, p.fb_w, p.fb_h, p.color);
-    }
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    int idx = py * p.fb_w + px;
 
-    // Corner arcs: replay CPU sw_corner_arc midpoint loop to iteration k.
-    int px = r;
-    int py = 0;
-    int d = 1 - r;
-    for (int q = 0; q < k; q++) {
-        py += 1;
-        if (d <= 0) {
-            d += 2 * py + 1;
-        } else {
-            px -= 1;
-            d += 2 * py - 2 * px + 1;
-        }
+    uint dst = fb[idx];
+    // Middle band, left band, right band — same order as CPU emu_draw_rounded_rect.
+    if (lx >= r && lx < w - r) {
+        dst = blend_src_over(p.color, dst);
     }
-    if (px >= py) {
-        int tlx = x + r;
-        int tly = y + r;
-        int trx = x + w - 1 - r;
-        int bry = y + h - 1 - r;
-        // top-left (sx=-1, sy=-1)
-        plot(fb, tlx - px, tly - py, p.fb_w, p.fb_h, p.color);
-        plot(fb, tlx - py, tly - px, p.fb_w, p.fb_h, p.color);
-        // top-right (sx=+1, sy=-1)
-        plot(fb, trx + px, tly - py, p.fb_w, p.fb_h, p.color);
-        plot(fb, trx + py, tly - px, p.fb_w, p.fb_h, p.color);
-        // bottom-left (sx=-1, sy=+1)
-        plot(fb, tlx - px, bry + py, p.fb_w, p.fb_h, p.color);
-        plot(fb, tlx - py, bry + px, p.fb_w, p.fb_h, p.color);
-        // bottom-right (sx=+1, sy=+1)
-        plot(fb, trx + px, bry + py, p.fb_w, p.fb_h, p.color);
-        plot(fb, trx + py, bry + px, p.fb_w, p.fb_h, p.color);
+    if (lx < r && ly >= r && ly < h - r) {
+        dst = blend_src_over(p.color, dst);
     }
+    if (lx >= w - r && ly >= r && ly < h - r) {
+        dst = blend_src_over(p.color, dst);
+    }
+    // Four corner arcs — same (cx, cy, dx_sign, dy_sign) call order as CPU.
+    dst = _rr_corner_arc_blend(r, r, r, -1, -1, lx, ly, p.color, dst);
+    dst = _rr_corner_arc_blend(w - r - 1, r, r, 1, -1, lx, ly, p.color, dst);
+    dst = _rr_corner_arc_blend(r, h - r - 1, r, -1, 1, lx, ly, p.color, dst);
+    dst = _rr_corner_arc_blend(w - r - 1, h - r - 1, r, 1, 1, lx, ly, p.color, dst);
+
+    fb[idx] = dst;
 }
 
 // ---- kernel_draw_rounded_rect_outline ----

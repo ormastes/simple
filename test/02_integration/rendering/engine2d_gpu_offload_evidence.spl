@@ -246,6 +246,52 @@ fn metal_gradient_rect(w: i32, h: i32) -> Engine2DReadback:
     rb
 
 # ---------------------------------------------------------------------------
+# rounded_rect FILL dual-algorithm parity (bug fix 2026-07-07):
+# kernel_draw_rounded_rect (2D band/corner-arc-membership dispatch,
+# backend_metal_msl.spl) vs the CPU-lane fill oracle (emu_draw_rounded_rect,
+# backend_emu.spl) — the same reference SoftwareBackend.draw_rounded_rect now
+# delegates to as of the 2026-07-06 outline-vs-fill fix (the Metal kernel was
+# stale, still replaying the pre-fix CPU OUTLINE algorithm, which is why this
+# op diverged 512/1024 mismatches on engine2d_cpu_metal_parity_run.spl).
+# draw_rounded_rect IS a RenderBackend trait op, so this lane drives it
+# through Engine2D directly (paint_primitives deliberately excludes it — see
+# the comment above), isolating edge cases the composite scene does not
+# cover: a corner-radius-dominated shape (radius == min(w,h)/2 clamp, i.e. a
+# full "stadium" corner), an off-framebuffer-edge rect the kernel's px/py
+# bounds guard must clip, and a non-opaque fill color so the alpha channel's
+# blend_src_over is proven too, not just RGB.
+# ---------------------------------------------------------------------------
+
+fn _rounded_rect_scene(b: Engine2D, w: i32, h: i32):
+    b.clear(0xFF000000 as u32)
+    b.draw_rounded_rect(2, 2, 30, 24, 6, 0xFFFF3355 as u32)
+    b.draw_rounded_rect(w - 20, 4, 16, 16, 8, 0xFF33CC88 as u32)
+    b.draw_rounded_rect(w - 14, h - 10, 20, 16, 6, 0xFF4488FF as u32)
+    b.draw_rounded_rect(4, h - 14, 40, 12, 5, 0x80FFFFFF as u32)
+
+fn cpu_rounded_rect(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend(w, h, "software")
+    _rounded_rect_scene(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+fn metal_rounded_rect(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend_fast(w, h, "metal")
+    if not e.capability.is_accelerated("draw_rounded_rect"):
+        # Honest capability under-report would mean the D3 self-description
+        # lied about the GPU dispatch below; surfaced (not silently ignored)
+        # so a regression in capability() is visible in the log even though
+        # compare_exact's device_readback check is the actual gate.
+        print "rounded_rect: WARN draw_rounded_rect missing from metal accelerated_ops (capability() under-report)"
+    _rounded_rect_scene(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+# ---------------------------------------------------------------------------
 # Parity comparison (honest: requires device_readback source on the Metal side)
 # ---------------------------------------------------------------------------
 
@@ -542,6 +588,20 @@ fn main() -> i64:
         print "stage-time metal_gradient_rect_us={tg2 - tg1}"
         compare_exact("gradient_rect", cpu_gr, metal_gr)
         print "PROVENANCE gradient_rect backend=metal source={metal_gr.source}"
+
+    if stage == "all" or stage == "rounded_rect":
+        print "=== GPU offload evidence: draw_rounded_rect (fill dual-algorithm) parity ==="
+        val rw = 64
+        val rh = 48
+        val tr0 = time_now_micros()
+        val cpu_rr = cpu_rounded_rect(rw, rh)
+        val tr1 = time_now_micros()
+        print "stage-time cpu_rounded_rect_us={tr1 - tr0}"
+        val metal_rr = metal_rounded_rect(rw, rh)
+        val tr2 = time_now_micros()
+        print "stage-time metal_rounded_rect_us={tr2 - tr1}"
+        compare_exact("rounded_rect", cpu_rr, metal_rr)
+        print "PROVENANCE rounded_rect backend=metal source={metal_rr.source}"
 
     if stage == "all" or stage == "text_edge":
         print "=== GPU offload evidence: draw_text edge cases (GPU-dict glyph atlas) parity ==="

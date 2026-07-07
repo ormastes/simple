@@ -482,6 +482,119 @@ fn _cmp_gradient_kernel_formula(w: i32, h: i32, top: u32, bottom: u32, bg: u32) 
     mism
 
 # ============================================================================
+# Rounded-rect FILL parity fix (2026-07-07) — kernel_draw_rounded_rect
+# GPU-kernel formula oracle.
+#
+# The real Metal-vs-CPU device-readback proof lives in the run harness
+# test/02_integration/rendering/engine2d_gpu_offload_evidence.spl
+# (`rounded_rect` row — Metal's module graph is not safe to import into an
+# SSpec, see that file's header). Here, an INDEPENDENT Simple-level replica
+# of kernel_draw_rounded_rect's per-pixel membership test (middle/side band
+# ranges, plus _rr_fill_hit's exact midpoint-circle corner-span replay,
+# backend_metal_msl.spl) is pinned against SoftwareBackend.draw_rounded_rect
+# (which delegates to the canonical emu_draw_rounded_rect) — the same
+# two-independent-implementations pattern the W3 gradient replica above uses.
+# Before this fix the kernel replayed the stale pre-2026-07-06 CPU OUTLINE
+# algorithm (edges + thin corner rings) instead of a FILL, diverging
+# 512/1024 pixels on engine2d_cpu_metal_parity_run.spl's rounded_rect scene.
+# ============================================================================
+
+# NOT a plain per-region membership test: CPU's emu_draw_rounded_rect issues
+# SEVEN core.draw_rect_filled calls in a fixed order (middle band, left band,
+# right band, then four _emu_corner_arc calls each doing up to r+1
+# midpoint-circle iterations x 2 spans), and these seven primitives' pixel
+# footprints OVERLAP AT THE SEAMS — e.g. a corner arc's first iteration
+# (py=0) draws its span at the arc-center row, which is the side band's
+# OWN first row, so that row gets blended by BOTH the band rect AND the
+# corner arc. For opaque color that's a harmless redundant overwrite; for
+# alpha<255 each blend re-composites over the prior result (not idempotent).
+# A per-region-exclusive model (blend once per pixel) was tried first and
+# diverged on the alpha case below (72, then 52 mismatches after a first
+# partial fix) — the only bit-exact approach is to literally replay all
+# seven primitives in CPU's exact order, blending every hit, matching
+# kernel_draw_rounded_rect's per-pixel thread doing the equivalent replay.
+fn _rr_rect_hit(lx: i32, ly: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool:
+    lx >= rx and lx < rx + rw and ly >= ry and ly < ry + rh
+
+# Independent replica of _emu_corner_arc's per-iteration span coverage test,
+# reused by the MSL kernel's corner-arc replay. Decision boundary is `d < 0`
+# (matching backend_emu.spl _emu_corner_arc's own midpoint loop) — DIFFERENT
+# from the `d <= 0` boundary the sw_corner_arc/_rr_ring_hit OUTLINE algorithm
+# uses; draw_rounded_rect and draw_rounded_rect_outline are independent
+# corner-arc algorithms.
+fn _rr_corner_arc_blend(cx: i32, cy: i32, rad: i32, dx_sign: i32, dy_sign: i32, lx: i32, ly: i32, color: u32, bg: u32) -> u32:
+    var px = rad
+    var py = 0
+    var d = 1 - rad
+    var dst = bg
+    while px >= py:
+        val row1 = cy + dy_sign * py
+        val col_a1 = cx
+        val col_b1 = cx + dx_sign * px
+        var lo1 = col_a1
+        var hi1 = col_b1
+        if col_b1 < col_a1:
+            lo1 = col_b1
+            hi1 = col_a1
+        if ly == row1 and lx >= lo1 and lx <= hi1:
+            dst = _gradient_blend_src_over_ref(color, dst)
+        val row2 = cy + dy_sign * px
+        val col_b2 = cx + dx_sign * py
+        var lo2 = col_a1
+        var hi2 = col_b2
+        if col_b2 < col_a1:
+            lo2 = col_b2
+            hi2 = col_a1
+        if ly == row2 and lx >= lo2 and lx <= hi2:
+            dst = _gradient_blend_src_over_ref(color, dst)
+        py = py + 1
+        if d < 0:
+            d = d + 2 * py + 1
+        else:
+            px = px - 1
+            d = d + 2 * (py - px) + 1
+    dst
+
+# Independent replica of kernel_draw_rounded_rect's whole per-pixel formula:
+# literally replays emu_draw_rounded_rect's seven primitive draws, in the
+# same order, blending every one that covers (lx, ly).
+fn _rr_kernel_pixel_ref(lx: i32, ly: i32, w: i32, h: i32, radius: i32, color: u32, bg: u32) -> u32:
+    var r = radius
+    if r > w / 2:
+        r = w / 2
+    if r > h / 2:
+        r = h / 2
+    var dst = bg
+    if _rr_rect_hit(lx, ly, r, 0, w - 2 * r, h):
+        dst = _gradient_blend_src_over_ref(color, dst)
+    if _rr_rect_hit(lx, ly, 0, r, r, h - 2 * r):
+        dst = _gradient_blend_src_over_ref(color, dst)
+    if _rr_rect_hit(lx, ly, w - r, r, r, h - 2 * r):
+        dst = _gradient_blend_src_over_ref(color, dst)
+    dst = _rr_corner_arc_blend(r, r, r, -1, -1, lx, ly, color, dst)
+    dst = _rr_corner_arc_blend(w - r - 1, r, r, 1, -1, lx, ly, color, dst)
+    dst = _rr_corner_arc_blend(r, h - r - 1, r, -1, 1, lx, ly, color, dst)
+    dst = _rr_corner_arc_blend(w - r - 1, h - r - 1, r, 1, 1, lx, ly, color, dst)
+    dst
+
+fn _cmp_rounded_rect_kernel_formula(w: i32, h: i32, radius: i32, color: u32, bg: u32) -> i32:
+    var sw = _fresh_fill(bg)
+    sw.draw_rounded_rect(0, 0, w, h, radius, color)
+    val got = sw.read_pixels()
+    var mism = 0
+    var ly = 0
+    while ly < h:
+        var lx = 0
+        while lx < w:
+            val want = _rr_kernel_pixel_ref(lx, ly, w, h, radius, color, bg)
+            val fb_idx = ly * 48 + lx
+            if got[fb_idx] != want:
+                mism = mism + 1
+            lx = lx + 1
+        ly = ly + 1
+    mism
+
+# ============================================================================
 # Specification
 # ============================================================================
 
@@ -647,3 +760,29 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
 
         it "matches the lerp+blend formula when only one endpoint is transparent (asymmetric alpha)":
             expect(_cmp_gradient_kernel_formula(16, 12, 0x00FFFFFFu32, 0xFFFF0000u32, 0xFF303030u32)).to_equal(0)
+
+    context "Rounded-rect FILL parity fix (2026-07-07) — draw_rounded_rect GPU-kernel formula oracle":
+        # SoftwareBackend.draw_rounded_rect (delegates to the canonical
+        # emu_draw_rounded_rect fill, the 2026-07-06 outline-vs-fill fix) vs an
+        # independent Simple replica of kernel_draw_rounded_rect's band/corner
+        # membership formula. The real Metal device-readback proof is in the
+        # offload evidence run harness (`rounded_rect` row, Metal's module
+        # graph is unsafe to import here). Before the 2026-07-07 fix the
+        # kernel replayed the stale pre-fix CPU OUTLINE algorithm instead of a
+        # FILL — these rows pin the corner-radius clamp, the plain-radius
+        # case, and an alpha-blended fill.
+
+        it "matches the band/corner formula on the original bug-doc fixture (radius=6, well inside the corner-radius range)":
+            expect(_cmp_rounded_rect_kernel_formula(30, 24, 6, 0xFFFF0000u32, 0xFF000000u32)).to_equal(0)
+
+        it "matches the band/corner formula when radius == min(w,h)/2 (full corner-radius clamp, a 'stadium' shape)":
+            expect(_cmp_rounded_rect_kernel_formula(16, 16, 8, 0xFF33CC88u32, 0xFF000000u32)).to_equal(0)
+
+        it "matches the band/corner formula on a narrow strip (h < 2*radius forces the radius clamp on h, not w)":
+            expect(_cmp_rounded_rect_kernel_formula(40, 12, 8, 0xFF4488FFu32, 0xFF101010u32)).to_equal(0)
+
+        it "matches the band/corner-fill+blend formula on a semi-transparent fill over a non-black destination":
+            expect(_cmp_rounded_rect_kernel_formula(30, 20, 6, 0x80FFFFFFu32, 0xFF202020u32)).to_equal(0)
+
+        it "matches the band/corner formula at radius=0 (plain rect, no corner-arc dispatch)":
+            expect(_cmp_rounded_rect_kernel_formula(20, 14, 0, 0xFF00FF00u32, 0xFF000000u32)).to_equal(0)
