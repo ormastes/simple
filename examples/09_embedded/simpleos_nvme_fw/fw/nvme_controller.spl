@@ -24,6 +24,7 @@ use fw_pool.*
 use ftl.*
 use power_thermal.*
 use dram.*
+use openssd_config.*
 
 # Result of dispatching one admin command. `post` is false only for an Async Event
 # Request held outstanding (its completion is posted later, when an event is raised).
@@ -35,6 +36,7 @@ struct AdminResult:
 struct NvmeController:
     aq:       AdminQueue
     qset:     QueueSet
+    target:   OpenSsdConfig
     features: FeatureStore
     ftl:      Ftl
     pool:     TaskPool
@@ -61,7 +63,10 @@ struct NvmeController:
     wb:           DramWriteBuffer # fixed DRAM write buffer staged before FTL program
 
 fn nvme_controller_new() -> NvmeController:
-    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, dirty_since_checkpoint: false, fw_slot: 0, last_abort_sqid: -1, last_abort_cid: -1, pt: power_thermal_new(), wb: dram_write_buffer_new())
+    nvme_controller_new_for_target(TARGET_SIMPLE_SIM)
+
+fn nvme_controller_new_for_target(target_id: i64) -> NvmeController:
+    NvmeController(aq: admin_queue_new(), qset: queue_set_new(), target: nvme_fw_target_config(target_id), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, dirty_since_checkpoint: false, fw_slot: 0, last_abort_sqid: -1, last_abort_cid: -1, pt: power_thermal_new(), wb: dram_write_buffer_new())
 
 impl NvmeController:
     # ── Admin path ───────────────────────────────────────────────────────────
@@ -270,6 +275,11 @@ impl NvmeController:
             if cmd.nsid != 0:
                 return SC_INVALID_FIELD
             me.last_id = build_identify_controller()
+            me.last_id.target_id = me.target.target_id
+            me.last_id.channels = me.target.channels
+            me.last_id.ways_per_channel = me.target.ways_per_channel
+            me.last_id.nvme_blocks_per_slice = me.target.nvme_blocks_per_slice
+            me.last_id.cpu_cores = me.target.cpu_cores
             return SC_SUCCESS
         if cns == CNS_NAMESPACE:
             if cmd.nsid != 1:
@@ -445,6 +455,17 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(ic.status, SC_SUCCESS, "identify controller ok")
     val id: IdentifyData = c.last_identify()
     fail = fail + expect_eq(id.max_queues, MAX_IO_QUEUES, "identify reports max IO queues")
+    var hw: NvmeController = nvme_controller_new_for_target(TARGET_OPENSSD_8CH8WAY)
+    hw.admin_submit(admin_identify_cmd(2, CNS_CONTROLLER))
+    hw.admin_process()
+    val hwc: NvmeCpl = hw.admin_reap()
+    fail = fail + expect_eq(hwc.status, SC_SUCCESS, "identify OpenSSD controller ok")
+    val hwi: IdentifyData = hw.last_identify()
+    fail = fail + expect_eq(hwi.target_id, TARGET_OPENSSD_8CH8WAY, "identify reports OpenSSD target id")
+    fail = fail + expect_eq(hwi.channels, NUM_CHANNELS, "identify reports OpenSSD channels")
+    fail = fail + expect_eq(hwi.ways_per_channel, 8, "identify reports OpenSSD ways")
+    fail = fail + expect_eq(hwi.nvme_blocks_per_slice, 4, "identify reports OpenSSD slice geometry")
+    fail = fail + expect_eq(hwi.cpu_cores, 2, "identify reports OpenSSD core count")
     val badcidr: AdminResult = c.admin_exec(admin_identify_cmd(70000, CNS_CONTROLLER))
     fail = fail + expect_eq(badcidr.status, SC_INVALID_FIELD, "admin dispatch rejects invalid command id")
     c.admin_submit(admin_identify_ns_cmd(18, 99))
