@@ -93,7 +93,7 @@ impl BandAlloc:
             me.active_blk = next_blk
             me.blk_state[next_blk] = BLK_OPEN
             me.active_wp  = 0
-            me.free_count = me.free_count - 1
+            me.free_count = me.actual_free_blocks()
         val ppn: i64 = block_first_ppn(me.active_blk) + me.active_wp
         me.active_wp = me.active_wp + 1
         ppn
@@ -184,7 +184,7 @@ impl BandAlloc:
             me.active_wp = 0
         me.blk_state[blk] = BLK_FREE
         me.blk_valid[blk] = 0
-        me.free_count = me.free_count + 1
+        me.free_count = me.actual_free_blocks()
 
     # Number of blocks currently in BLK_FREE state.
     me free_blocks() -> i64:
@@ -243,6 +243,7 @@ impl BandAlloc:
             p = p + 1
         me.blk_valid[blk] = 0
         me.blk_state[blk] = BLK_BAD
+        me.free_count = me.actual_free_blocks()
 
     # Recovery: recompute free_count after rebuild_mark/set_bad. A block holding no
     # live page and not retired is free; its stale NAND contents are erased before
@@ -326,6 +327,11 @@ fn ftl_band_selftest() -> i64:
     fail = fail + expect_eq(ba.host_writable_pages(NUM_BLOCKS), 1, "corrupted free_count does not overstate host capacity")
     ba.free_count = -7
     fail = fail + expect_eq(ba.free_blocks(), 0, "corrupted negative free_count clamps to zero")
+    ba.active_blk = UNMAP
+    ba.active_wp = 0
+    val corrupt_alloc_ppn: i64 = ba.alloc_page()
+    fail = fail + expect_eq(if ppn_in_range(corrupt_alloc_ppn): 1 else: 0, 1, "corrupted negative free_count still allocates from block state")
+    fail = fail + expect_eq(ba.free_blocks(), ba.actual_free_blocks(), "alloc recovers corrupted negative free_count from block state")
     ba.free_count = free_before_bad_free
     ba.valid = []
     fail = fail + expect_eq(if ba.is_valid(p0): 1 else: 0, 0, "truncated valid bitmap fails closed")
@@ -356,6 +362,13 @@ fn ftl_band_selftest() -> i64:
     fail = fail + expect_eq(ba.blk_state[0],  BLK_FREE,      "block 0 BLK_FREE after free_block")
     fail = fail + expect_eq(ba.blk_valid[0],  0,             "blk_valid[0]==0 after free_block")
     fail = fail + expect_eq(if ba.is_valid(p0): 1 else: 0, 0, "free_block clears page valid bit")
+    ba.free_count = -9
+    ba.blk_state[3] = BLK_CLOSED
+    ba.free_block(3)
+    fail = fail + expect_eq(ba.free_blocks(), ba.actual_free_blocks(), "free_block recovers corrupted negative free_count from block state")
+    ba.free_count = NUM_BLOCKS + 99
+    ba.set_bad(4)
+    fail = fail + expect_eq(ba.free_blocks(), ba.actual_free_blocks(), "set_bad recovers corrupted oversized free_count from block state")
     ba.free_block(1)
     fail = fail + expect_eq(ba.active_blk, UNMAP, "free_block clears active block")
     fail = fail + expect_eq(ba.active_wp, 0, "free_block clears active write pointer")
