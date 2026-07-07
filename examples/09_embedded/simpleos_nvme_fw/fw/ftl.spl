@@ -30,6 +30,8 @@ struct Ftl:
     hooks:     PolicyHooks  # sandboxed dynamic policy hooks (req 7)
     rain_parity: [i64]     # one XOR parity word per RAIN stripe (gap-closure P8), maintained live
 
+val FTL_MAX_SEQ: i64 = 9223372036854775806
+
 fn ftl_new() -> Ftl:
     Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new(), rain_parity: ftl_fill(rain_num_stripes(), 0))
 
@@ -50,7 +52,10 @@ impl Ftl:
             i = i + 1
         if high < 0:
             high = 0
-        me.seq = high + 1
+        if high >= FTL_MAX_SEQ:
+            me.seq = FTL_MAX_SEQ
+        else:
+            me.seq = high + 1
         me.seq
 
     # Write one logical block (log-structured): program a fresh physical page with OOB
@@ -576,6 +581,10 @@ fn ftl_selftest() -> i64:
     fail = fail + expect_eq(ftl.write(10, 0x88), SC_SUCCESS, "write recovers corrupted negative sequence")
     fail = fail + expect_eq(ftl.seq, seq_before_corrupt + 1, "sequence resumes after WAL max")
     fail = fail + expect_eq(ftl.read(10), 0x88, "read after recovered sequence write")
+    ftl.seq = FTL_MAX_SEQ
+    fail = fail + expect_eq(ftl.write(10, 0x89), SC_SUCCESS, "write survives corrupted saturated sequence")
+    fail = fail + expect_eq(ftl.seq, FTL_MAX_SEQ, "saturated sequence does not wrap negative")
+    fail = fail + expect_eq(ftl.read(10), 0x89, "read after saturated sequence write")
     ftl.write(10, 0x99)
     fail = fail + expect_eq(ftl.read(10), 0x99, "overwrite lba10 (newest wins)")
 
