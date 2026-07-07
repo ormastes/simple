@@ -272,18 +272,41 @@ regression and not a silent fallback. See
 `test/03_system/gui/ui_browser/backend_isolation_chromium_env_get_gap_b_spec.spl`, which documents
 the flip to a real-pixels assertion once the facade bug is fixed.
 
-### Gap C — **`WebRenderBackend` cannot select the Engine2D backend for the core path**
-`render_html_to_pixels` hardcodes `"auto"` (`web_render_backend.spl:167`), so an app cannot request
-`cpu_simd`/`metal` for the `pure_simple` engine. **Add** an optional `engine2d_backend` param
-(default `"auto"`) plumbed into `simple_web_render_html_to_pixels_with_engine2d_backend`. Unblocks
-full migration of `md_wysiwyg_gui.spl`/`md_wysiwyg_ppm.spl` (Class D note 2). Must preserve the
-Metal no-mirror fast path when the resolved backend is `metal`.
+### Gap C — **`WebRenderBackend` cannot select the Engine2D backend for the core path** — **LANDED (2026-07-08)**
+`render_html_to_pixels`/`render_html_file_to_pixels` (`web_render_backend.spl:164,176`) now take an
+optional `engine2d_backend: text = "auto"` param plumbed straight into
+`simple_web_render_html_to_pixels_with_engine2d_backend`; the default preserves prior behavior
+byte-for-byte (pinned by `simple_web_renderer_spec.spl`'s new "backend-isolation Gap C" case —
+default vs explicit `"auto"` byte-identical, explicit `"software"` matches
+`SimpleWebRenderer.create_with_backend(..., "software")`). Unblocks full migration of
+`md_wysiwyg_gui.spl`/`md_wysiwyg_ppm.spl` (Class D note 2) — tracked as the follow-up item below,
+not yet migrated.
 
-### Gap D — **WatchdogManager facade does not exist** (blocks Class C: `rt_watchdog_*`)
-No watchdog facade in `src/lib`. **Build** `WatchdogManager` in the execution layer
-(`src/lib/nogc_async_mut_noalloc/execution/` or `nogc_sync_mut/execution/`) owning the
-`rt_watchdog_start/stop` externs, exposing `WatchdogManager.start()/stop()`. Migrate
-`interpreter/core/watchdog.spl` onto it.
+### Gap D — **WatchdogManager facade does not exist** (blocks Class C: `rt_watchdog_*`) — **LANDED (2026-07-08)**
+`WatchdogManager` (`src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl`) now owns the
+`rt_watchdog_start`/`rt_watchdog_stop` externs and exposes `WatchdogManager.start()/stop()`.
+`src/app/interpreter/core/watchdog.spl` is migrated onto it (`start_watchdog`/`stop_watchdog` call
+`WatchdogManager.start`/`.stop`; the public app-layer API — `start_watchdog`, `stop_watchdog`,
+`check_timeout` — is unchanged). Baseline (`scripts/check/ui_backend_isolation_baseline.txt`) drops
+537→536 for this entry. Pinned by the new `watchdog_manager_spec.spl` source-contract spec.
+
+**Caveat — dead-or-dormant, not wired to a real implementation.** `rt_watchdog_start`/`rt_watchdog_stop`
+have no native FFI registration anywhere in the Rust runtime, and neither `watchdog.spl`'s API nor
+`WatchdogManager` has any caller repo-wide — true before and after this migration (this is a
+mechanical isolation-ratchet move with zero behavior change, not a functional fix). See
+`doc/08_tracking/bug/watchdog_externs_unregistered_module_uncalled_2026-07-08.md` for the full
+finding; owner to decide delete-vs-wire-up. (The Rust driver's own `start_watchdog`/`stop_watchdog`
+in `src/compiler_rust/compiler/src/watchdog.rs` is a *different* mechanism, called directly from
+Rust, unrelated to these externs.)
+
+### Follow-up — **`office/*.spl` direct-call cleanup** (mechanical, P1-shaped)
+Now that Gap C is landed, `WebRenderBackend` can express every call shape the remaining direct
+callers need — but `md_wysiwyg_gui.spl`, `md_wysiwyg_ppm.spl`, `gui.spl`, and `gui_apps.spl` (all
+under `src/app/office/`) still call `simple_web_render_html_to_pixels_with_engine2d_backend` /
+`simple_web_engine2d_render_html_pixels` directly instead of through the facade
+(`web_render_backend(...).render_html_to_pixels(html, engine2d_backend)`). This is the remaining
+Class D violation set from the P0 inventory (§ Import table) — a mechanical P1-shaped wave, not
+blocked by any further facade gap.
 
 ### Gap E — **No facade for draw-IR / software-only readback**
 `WebRenderBackend` exposes only `render_html_to_pixels`; `wm_compare` probes call
