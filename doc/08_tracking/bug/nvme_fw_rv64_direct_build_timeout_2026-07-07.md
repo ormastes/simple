@@ -301,3 +301,32 @@ Terminated
 ```
 
 The next source-shape choke point is `logic_journal_count_cases.spl`.
+
+## Update — journal count support now parses quickly
+
+`logic_journal_core.spl` was reduced to a public facade, with count helpers and
+record/checkpoint helpers split into dedicated support modules. The scalar host
+logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but it now gets through journal count cases and stops
+at journal record cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_ecc_core.spl chars=532
+[BOOTSTRAP-PHASE] ... logic_ecc_core.spl
+[BOOTSTRAP-PHASE] ... logic_journal_count_cases.spl chars=682
+[BOOTSTRAP-PHASE] ... logic_journal_count_cases.spl
+[BOOTSTRAP-PHASE] ... logic_journal_record_cases.spl chars=958
+Terminated
+```
+
+The next source-shape choke point is `logic_journal_record_cases.spl`.
