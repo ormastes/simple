@@ -292,6 +292,64 @@ fn metal_rounded_rect(w: i32, h: i32) -> Engine2DReadback:
     rb
 
 # ---------------------------------------------------------------------------
+# draw_image (blit) dual-algorithm parity-COVERAGE close (2026-07-07 sweep):
+# kernel_blit_image (backend_metal_msl.spl) — a plain data-parallel kernel,
+# raw src->fb copy with a px/py bounds clip, no blend, no GpuLut — has had a
+# real Metal dispatch path since the GPU-offload work landed
+# (backend_metal.spl draw_image(), gated on session.pipe_blit != 0) but was
+# never exercised by any parity harness. This is a verification GAP, not a
+# reported divergence: ad hoc reproduction (2026-07-07 parity sweep) already
+# found CPU vs Metal bit-exact for it, which is expected — SoftwareBackend.
+# draw_image (backend_software.spl) is the same "clip then raw copy, no
+# blend" formula the kernel implements. This lane closes the coverage gap so
+# a future regression in either side is caught. draw_image IS a RenderBackend
+# trait op, so this lane drives it through Engine2D directly, isolating edge
+# cases the composite scenes do not cover: a fully on-surface blit, a rect
+# straddling the right/bottom framebuffer edge (kernel's px/py >= fb bounds
+# guard must clip exactly like the CPU bounds-clipped row loop), and a rect
+# straddling the left/top edge (negative start_x/start_y src-offset clip).
+# ---------------------------------------------------------------------------
+
+fn _image_src(w: i32, h: i32) -> [u32]:
+    # Varied per-pixel colors (not a solid fill) so a transposition/stride
+    # bug in either the kernel or the CPU row-loop would show up as a
+    # mismatch rather than being masked by a uniform source.
+    var px: [u32] = [0u32; w * h]
+    var i = 0
+    while i < w * h:
+        px[i] = (0xFF000000 as u32) + ((i * 2654435761u32) & 0x00FFFFFFu32)
+        i = i + 1
+    px
+
+fn _image_scene(b: Engine2D, w: i32, h: i32):
+    b.clear(0xFF0F172A as u32)
+    b.draw_image(4, 4, 10, 8, _image_src(10, 8))               # fully on-surface
+    b.draw_image(w - 6, h - 6, 12, 12, _image_src(12, 12))     # straddles right/bottom edge
+    b.draw_image(-5, -3, 10, 10, _image_src(10, 10))           # straddles left/top edge
+
+fn cpu_image(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend(w, h, "software")
+    _image_scene(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+fn metal_image(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend_fast(w, h, "metal")
+    if not e.capability.is_accelerated("draw_image"):
+        # Honest capability under-report would mean the D3 self-description
+        # lied about the GPU dispatch below; surfaced (not silently ignored)
+        # so a regression in capability() is visible in the log even though
+        # compare_exact's device_readback check is the actual gate.
+        print "image: WARN draw_image missing from metal accelerated_ops (capability() under-report)"
+    _image_scene(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+# ---------------------------------------------------------------------------
 # Parity comparison (honest: requires device_readback source on the Metal side)
 # ---------------------------------------------------------------------------
 
@@ -602,6 +660,20 @@ fn main() -> i64:
         print "stage-time metal_rounded_rect_us={tr2 - tr1}"
         compare_exact("rounded_rect", cpu_rr, metal_rr)
         print "PROVENANCE rounded_rect backend=metal source={metal_rr.source}"
+
+    if stage == "all" or stage == "image":
+        print "=== GPU offload evidence: draw_image (blit dual-algorithm) parity ==="
+        val iw2 = 64
+        val ih2 = 48
+        val tim0 = time_now_micros()
+        val cpu_im = cpu_image(iw2, ih2)
+        val tim1 = time_now_micros()
+        print "stage-time cpu_image_us={tim1 - tim0}"
+        val metal_im = metal_image(iw2, ih2)
+        val tim2 = time_now_micros()
+        print "stage-time metal_image_us={tim2 - tim1}"
+        compare_exact("image", cpu_im, metal_im)
+        print "PROVENANCE image backend=metal source={metal_im.source}"
 
     if stage == "all" or stage == "text_edge":
         print "=== GPU offload evidence: draw_text edge cases (GPU-dict glyph atlas) parity ==="

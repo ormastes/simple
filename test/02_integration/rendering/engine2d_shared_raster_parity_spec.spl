@@ -595,6 +595,58 @@ fn _cmp_rounded_rect_kernel_formula(w: i32, h: i32, radius: i32, color: u32, bg:
     mism
 
 # ============================================================================
+# draw_image (blit) parity-sweep coverage close (2026-07-07) — kernel_blit_image
+# GPU-kernel formula oracle.
+#
+# The real Metal-vs-CPU device-readback proof lives in the run harness
+# test/02_integration/rendering/engine2d_gpu_offload_evidence.spl (`image`
+# row, added by this same 2026-07-07 parity sweep — Metal's module graph is
+# not safe to import into an SSpec, see that file's header). Here, an
+# INDEPENDENT Simple-level replica of kernel_blit_image's per-thread formula
+# (a raw, UNBLENDED src->fb copy with a px/py framebuffer-bounds clip — no
+# GpuLut, no blend_src_over, unlike the gradient_rect/rounded_rect kernels
+# above) is pinned against SoftwareBackend.draw_image's row-clipped copy
+# loop. Unlike the two ops above this was NOT a divergence: reproduction
+# (2026-07-07 sweep) found CPU vs Metal already bit-exact for draw_image,
+# which is expected — both sides implement the identical "clip then raw
+# copy" formula. This closes a real verification GAP (the op had a genuine
+# Metal dispatch path, backend_metal.spl draw_image() gated on
+# session.pipe_blit != 0, but zero parity coverage anywhere before this
+# sweep) rather than pinning a fix for an actual bug.
+# ============================================================================
+
+fn _img_varied(w: i32, h: i32) -> [u32]:
+    # Per-pixel-varied (non-solid) source so a transposition/stride bug in
+    # either the kernel or the CPU row-loop would show up as a mismatch
+    # rather than being masked by a uniform fill.
+    var px: [u32] = [0u32; w * h]
+    var i = 0
+    while i < w * h:
+        px[i] = (0xFF000000u32) + (((i as u32) * 2654435761u32) & 0x00FFFFFFu32)
+        i = i + 1
+    px
+
+fn _cmp_blit_kernel_formula(fb_w: i32, fb_h: i32, x: i32, y: i32, w: i32, h: i32, src: [u32], bg: u32) -> i32:
+    var sw = _fresh_fill(bg)
+    sw.draw_image(x, y, w, h, src)
+    val got = sw.read_pixels()
+    var mism = 0
+    var ly = 0
+    while ly < h:
+        var lx = 0
+        while lx < w:
+            val px_ = x + lx
+            val py_ = y + ly
+            if px_ >= 0 and px_ < fb_w and py_ >= 0 and py_ < fb_h:
+                val want = src[ly * w + lx]
+                val fb_idx = py_ * fb_w + px_
+                if got[fb_idx] != want:
+                    mism = mism + 1
+            lx = lx + 1
+        ly = ly + 1
+    mism
+
+# ============================================================================
 # Specification
 # ============================================================================
 
@@ -786,3 +838,24 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
 
         it "matches the band/corner formula at radius=0 (plain rect, no corner-arc dispatch)":
             expect(_cmp_rounded_rect_kernel_formula(20, 14, 0, 0xFF00FF00u32, 0xFF000000u32)).to_equal(0)
+
+    context "draw_image (blit) parity-sweep coverage close (2026-07-07) — kernel_blit_image GPU-kernel formula oracle":
+        # SoftwareBackend.draw_image vs an independent Simple replica of
+        # kernel_blit_image's raw-copy-with-clip formula. The real Metal
+        # device-readback proof is in the offload evidence run harness
+        # (`image` row, Metal's module graph is unsafe to import here). These
+        # rows cover a fully on-surface blit and both directions of
+        # off-framebuffer-edge clipping (kernel's px/py bounds guard must
+        # clip exactly like the CPU bounds-clipped row loop).
+
+        it "matches the raw-copy formula on a fully on-surface blit":
+            expect(_cmp_blit_kernel_formula(48, 48, 10, 10, 16, 12, _img_varied(16, 12), 0xFF000000u32)).to_equal(0)
+
+        it "matches the raw-copy formula on a blit straddling the right/bottom framebuffer edge":
+            expect(_cmp_blit_kernel_formula(48, 48, 40, 40, 16, 16, _img_varied(16, 16), 0xFF101820u32)).to_equal(0)
+
+        it "matches the raw-copy formula on a blit straddling the left/top framebuffer edge (negative origin)":
+            expect(_cmp_blit_kernel_formula(48, 48, -6, -4, 16, 16, _img_varied(16, 16), 0xFF203040u32)).to_equal(0)
+
+        it "matches the raw-copy formula on a blit entirely off-surface (fully clipped, complete no-op)":
+            expect(_cmp_blit_kernel_formula(48, 48, -20, -20, 8, 8, _img_varied(8, 8), 0xFF556677u32)).to_equal(0)

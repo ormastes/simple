@@ -345,6 +345,41 @@ fn metal_degenerate(w: i32, h: i32) -> MetalBackend:
     b.present()
     b
 
+# ---- scene: draw_image blit (2026-07-07 parity-sweep coverage close) ----
+# kernel_blit_image (raw src->fb copy, px/py bounds clip, no blend) had a
+# real Metal dispatch path since the GPU-offload work landed
+# (backend_metal.spl draw_image(), gated on session.pipe_blit != 0) but was
+# never exercised by this harness. Covers a fully on-surface blit plus both
+# left/top and right/bottom off-framebuffer-edge clips, with a varied
+# (non-solid) source buffer so a transposition/stride bug would show.
+fn _image_src(w: i32, h: i32) -> [u32]:
+    var px: [u32] = [0u32; w * h]
+    var i = 0
+    while i < w * h:
+        px[i] = (0xFF000000 as u32) + ((i as u32) * 2654435761u32 & 0x00FFFFFFu32)
+        i = i + 1
+    px
+
+fn _draw_image_scene(b: any):
+    b.clear(0xFF0F172A as u32)
+    b.draw_image(4, 4, 10, 8, _image_src(10, 8))
+    b.draw_image(24, 24, 12, 12, _image_src(12, 12))
+    b.draw_image(-5, -3, 10, 10, _image_src(10, 10))
+
+fn cpu_image(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_image_scene(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_image(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_image_scene(b)
+    b.present()
+    b
+
 fn main():
     if not _harness_is_macos():
         print("PARITY: skip reason=not-macos")
@@ -407,7 +442,11 @@ fn main():
     assert_uniform("degenerate_dims_cpu_unchanged", c11, DEGENERATE_CLEAR)
     assert_uniform("degenerate_dims_metal_unchanged", m11.read_pixels(), DEGENERATE_CLEAR)
 
-    print("SCOPE: asserts clear,rect_filled,rect_outline,gradient,line,circle(+filled),rounded_rect,rounded_rect_outline,triangle,circle_filled_blend,triangle_filled_blend,degenerate_dims (all bit-exact CPU vs Metal GPU)")
+    val c12 = cpu_image(32, 32)
+    var m12 = metal_image(32, 32)
+    compare("image", c12, m12.read_pixels(), m12.gpu_frame_complete)
+
+    print("SCOPE: asserts clear,rect_filled,rect_outline,gradient,line,circle(+filled),rounded_rect,rounded_rect_outline,triangle,circle_filled_blend,triangle_filled_blend,degenerate_dims,image (all bit-exact CPU vs Metal GPU)")
     if _failures == 0:
         print("PARITY: pass")
     else:
