@@ -94,6 +94,8 @@ impl NvmeQueues:
             return false
         if me.sq_head < 0 or me.sq_head >= me.depth:
             return false
+        if not cid_valid(me.sq_cid[me.sq_head]):
+            return false
         true
 
     me cq_post(p: NvmeCpl) -> bool:
@@ -198,6 +200,18 @@ fn hil_queue_selftest() -> i64:
     failures = failures + expect_eq(bool_to_i64(q.sq_can_fetch()), 0, "oversized HIL SQ length blocks dispatch")
     failures = failures + expect_eq(bool_to_i64(q.sq_submit(cmd_make(5, OP_READ, 30, 1, 0))), 0, "oversized HIL SQ length submit fails closed")
     q.sq_len = 0
+    q.sq_head = 0
+    q.sq_tail = 0
+    q.sq_submit(cmd_make(6, OP_READ, 31, 1, 0))
+    val bad_cid_slot: i64 = q.sq_head
+    val saved_sq_cid: i64 = q.sq_cid[bad_cid_slot]
+    q.sq_cid[bad_cid_slot] = 70000
+    failures = failures + expect_eq(bool_to_i64(q.sq_can_fetch()), 0, "invalid HIL SQ head cid blocks dispatch")
+    failures = failures + expect_eq(q.sq_pending(), 1, "invalid HIL SQ head cid preserves pending command")
+    q.sq_cid[bad_cid_slot] = saved_sq_cid
+    failures = failures + expect_eq(bool_to_i64(q.sq_can_fetch()), 1, "repaired HIL SQ head cid re-enables dispatch")
+    val cid_repaired = q.sq_fetch()
+    failures = failures + expect_eq(cid_repaired.cid, 6, "repaired HIL SQ head cid command remains fetchable")
 
     # Test 3: completion post/reap round-trip (status + data preserved)
     val cpl = cpl_make(42, SC_SUCCESS, 0x99)

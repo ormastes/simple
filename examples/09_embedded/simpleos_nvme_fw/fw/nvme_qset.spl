@@ -245,6 +245,22 @@ impl QueueSet:
             return size
         me.sq_len[qid]
 
+    me sq_can_fetch(qid: i64) -> bool:
+        if not me.sq_is_active(qid):
+            return false
+        val size: i64 = me.sq_effective_size(qid)
+        if size <= 0:
+            return false
+        if me.sq_len[qid] <= 0 or me.sq_len[qid] > size:
+            return false
+        val head: i64 = me.sq_head[qid]
+        if head < 0 or head >= size:
+            return false
+        val slot: i64 = qid * MAX_QUEUE_SIZE + head
+        if not cid_valid(me.sq_cid[slot]):
+            return false
+        true
+
     me sq_fetch(qid: i64) -> NvmeCmd:
         if not me.sq_is_active(qid) or me.sq_len[qid] <= 0:
             return cmd_make(0, OP_FLUSH, 0, 0, 0)
@@ -340,7 +356,7 @@ impl QueueSet:
             q = 1
         var found: i64 = -1
         while seen < MAX_IO_QUEUES:
-            if me.sq_active[q] == 1 and me.sq_pending(q) > 0:
+            if me.sq_can_fetch(q):
                 found = q
                 seen = MAX_IO_QUEUES
             else:
@@ -408,6 +424,7 @@ fn nvme_qset_selftest() -> i64:
     fail = fail + expect_eq(neg_sq_fetch.nblocks, 0, "negative SQ length fetch returns inert command")
     qs.sq_len[1] = MAX_QUEUE_SIZE + 3
     fail = fail + expect_eq(qs.sq_pending(1), MAX_QUEUE_SIZE, "oversized SQ length pending clamps to queue size")
+    fail = fail + expect_eq(bool_to_i64(qs.sq_can_fetch(1)), 0, "oversized SQ length blocks dispatch")
     fail = fail + expect_eq(bool_to_i64(qs.sq_submit(1, cmd_make(80, OP_WRITE, 14, 1, 0xC4))), 0, "oversized SQ length submit fails closed")
     qs.sq_len[1] = 0
     qs.sq_size[1] = MAX_QUEUE_SIZE + 7
@@ -423,6 +440,19 @@ fn nvme_qset_selftest() -> i64:
     fail = fail + expect_eq(qs.delete_sq(1), SC_QUEUE_BUSY, "delete SQ with hidden raw pending command rejected")
     qs.sq_len[1] = 0
     qs.sq_size[1] = MAX_QUEUE_SIZE
+    qs.sq_head[1] = 0
+    qs.sq_tail[1] = 0
+    qs.sq_submit(1, cmd_make(82, OP_WRITE, 15, 1, 0xC5))
+    val bad_io_cid_slot: i64 = 1 * MAX_QUEUE_SIZE + qs.sq_head[1]
+    val saved_io_cid: i64 = qs.sq_cid[bad_io_cid_slot]
+    qs.sq_cid[bad_io_cid_slot] = 70000
+    fail = fail + expect_eq(bool_to_i64(qs.sq_can_fetch(1)), 0, "invalid SQ head cid blocks dispatch")
+    fail = fail + expect_eq(qs.next_pending_sq(), -1, "invalid SQ head cid is skipped by round-robin")
+    fail = fail + expect_eq(qs.sq_pending(1), 1, "invalid SQ head cid preserves pending command")
+    qs.sq_cid[bad_io_cid_slot] = saved_io_cid
+    fail = fail + expect_eq(bool_to_i64(qs.sq_can_fetch(1)), 1, "repaired SQ head cid re-enables dispatch")
+    val cid_repaired_fetch: NvmeCmd = qs.sq_fetch(1)
+    fail = fail + expect_eq(cid_repaired_fetch.cid, 82, "repaired SQ head cid command remains fetchable")
 
     # submit to an inactive SQ is refused
     fail = fail + expect_eq(bool_to_i64(qs.sq_submit(3, cmd_make(1, OP_READ, 0, 1, 0))), 0, "submit to inactive SQ 3 refused")

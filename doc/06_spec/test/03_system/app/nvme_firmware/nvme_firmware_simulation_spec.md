@@ -517,11 +517,11 @@ expect(out).to_contain("QSET DELETE OK")
 
 </details>
 
-#### backs off instead of dropping work when a completion queue pointer is corrupted
+#### backs off instead of dropping work when a queue pointer or command id is corrupted
 
-- Run the focused admin/IO completion-queue backpressure regression check
+- Run the focused admin/IO queue backpressure regression check
    - Expected: code equals `0`
-- Both admin and IO commands remain pending until the completion queue pointer is repaired
+- Both admin and IO commands remain pending until the corrupted queue field is repaired
 
 
 <details>
@@ -531,20 +531,20 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Run the focused admin/IO completion-queue backpressure regression check")
+step("Run the focused admin/IO queue backpressure regression check")
 val (out, err, code) = _run(FW + "/queue_tail_backpressure_check.spl")
 expect(code).to_equal(0)
-step("Both admin and IO commands remain pending until the completion queue pointer is repaired")
+step("Both admin and IO commands remain pending until the corrupted queue field is repaired")
 expect(out).to_contain("QUEUE BACKPRESSURE OK")
 ```
 
 </details>
 
-#### preserves legacy HIL work when a completion queue pointer is corrupted
+#### preserves legacy HIL work when a queue pointer or command id is corrupted
 
-- Run the focused legacy HIL completion-queue backpressure regression check
+- Run the focused legacy HIL queue backpressure regression check
    - Expected: code equals `0`
-- The HIL command remains pending until the completion queue pointer is repaired
+- The HIL command remains pending until the corrupted queue field is repaired
 
 
 <details>
@@ -554,10 +554,10 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Run the focused legacy HIL completion-queue backpressure regression check")
+step("Run the focused legacy HIL queue backpressure regression check")
 val (out, err, code) = _run(FW + "/hil_queue_backpressure_check.spl")
 expect(code).to_equal(0)
-step("The HIL command remains pending until the completion queue pointer is repaired")
+step("The HIL command remains pending until the corrupted queue field is repaired")
 expect(out).to_contain("HIL QUEUE BACKPRESSURE OK")
 ```
 
@@ -794,9 +794,9 @@ step("Reject stale self-test assertion counts in operator docs")
 val docs = "examples/09_embedded/simpleos_nvme_fw/fw/README.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide_tldr.md"
 val (stale_out, stale_err, stale_code) = _shell("! rg -n '526 (checks|asserts|assertions)' " + docs)
 expect(stale_code).to_equal(0)
-val (count_out, count_err, count_code) = _shell("rg -n '1038 (checks|asserts|assertions)' " + docs)
+val (count_out, count_err, count_code) = _shell("rg -n '1053 (checks|asserts|assertions)' " + docs)
 expect(count_code).to_equal(0)
-expect(count_out).to_contain("1038")
+expect(count_out).to_contain("1053")
 ```
 
 </details>

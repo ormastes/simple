@@ -269,6 +269,18 @@ impl AdminQueue:
             return depth
         me.sq_len
 
+    me sq_can_fetch() -> bool:
+        val depth: i64 = me.effective_depth()
+        if depth <= 0:
+            return false
+        if me.sq_len <= 0 or me.sq_len > depth:
+            return false
+        if me.sq_head < 0 or me.sq_head >= depth:
+            return false
+        if not cid_valid(me.sq_cid[me.sq_head]):
+            return false
+        true
+
     me fetch() -> AdminCmd:
         if me.sq_len <= 0:
             return admin_cmd_make(0, SC_INVALID_OPCODE, 0, 0, 0, 0)
@@ -406,6 +418,7 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(neg_af.opcode, SC_INVALID_OPCODE, "negative admin SQ length fetch fails closed")
     aq.sq_len = aq.depth + 3
     fail = fail + expect_eq(aq.pending(), aq.depth, "oversized admin SQ length pending clamps to depth")
+    fail = fail + expect_eq(bool_to_i64(aq.sq_can_fetch()), 0, "oversized admin SQ length blocks dispatch")
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(24, FEAT_TEMP_THRESH, 314))), 0, "oversized admin SQ length submit fails closed")
     aq.sq_len = 0
     aq.depth = MAX_QUEUE_SIZE + 5
@@ -417,6 +430,19 @@ fn nvme_admin_selftest() -> i64:
     val bad_depth_af: AdminCmd = aq.fetch()
     fail = fail + expect_eq(bad_depth_af.opcode, SC_INVALID_OPCODE, "negative admin queue depth fetch fails closed")
     aq.depth = MAX_QUEUE_SIZE
+    aq.sq_len = 0
+    aq.sq_head = 0
+    aq.sq_tail = 0
+    aq.submit(admin_set_feature_cmd(26, FEAT_TEMP_THRESH, 316))
+    val bad_admin_cid_slot: i64 = aq.sq_head
+    val saved_admin_cid: i64 = aq.sq_cid[bad_admin_cid_slot]
+    aq.sq_cid[bad_admin_cid_slot] = 70000
+    fail = fail + expect_eq(bool_to_i64(aq.sq_can_fetch()), 0, "invalid admin SQ head cid blocks dispatch")
+    fail = fail + expect_eq(aq.pending(), 1, "invalid admin SQ head cid preserves pending command")
+    aq.sq_cid[bad_admin_cid_slot] = saved_admin_cid
+    fail = fail + expect_eq(bool_to_i64(aq.sq_can_fetch()), 1, "repaired admin SQ head cid re-enables dispatch")
+    val cid_repaired_af: AdminCmd = aq.fetch()
+    fail = fail + expect_eq(cid_repaired_af.cid, 26, "repaired admin SQ head cid command remains fetchable")
     aq.cq_post(cpl_make(21, SC_SUCCESS, 0))
     fail = fail + expect_eq(aq.cq_pending(), 1, "admin CQ pending == 1")
     val ar: NvmeCpl = aq.cq_reap()

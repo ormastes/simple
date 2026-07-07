@@ -1,10 +1,11 @@
 """
-queue_tail_backpressure_check — corrupted CQ pointers must not drop admin or IO work.
+queue_tail_backpressure_check — corrupted queue pointers or CIDs must not drop admin or IO work.
 
 Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/queue_tail_backpressure_check.spl
 """
 
 use nvme_types.*
+use nvme_admin_types.*
 use nvme_admin.*
 use nvme_controller.*
 
@@ -30,6 +31,17 @@ fn main():
     val ah: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(ah.status, SC_SUCCESS, "admin command completes after CQ head repair")
 
+    c.admin_submit(admin_identify_cmd(7, CNS_CONTROLLER))
+    val bad_admin_cid_slot: i64 = c.aq.sq_head
+    val saved_admin_cid: i64 = c.aq.sq_cid[bad_admin_cid_slot]
+    c.aq.sq_cid[bad_admin_cid_slot] = 70000
+    fail = fail + expect_eq(c.admin_process(), 0, "admin dispatch backs off on invalid SQ head cid")
+    fail = fail + expect_eq(c.aq.pending(), 1, "admin command remains pending behind invalid SQ head cid")
+    c.aq.sq_cid[bad_admin_cid_slot] = saved_admin_cid
+    c.admin_process()
+    val ach: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(ach.status, SC_SUCCESS, "admin command completes after SQ cid repair")
+
     c.admin_submit(admin_create_cq_cmd(2, 1, 64))
     c.admin_submit(admin_create_sq_cmd(3, 1, 64, 1))
     c.admin_process()
@@ -52,6 +64,17 @@ fn main():
     c.io_process()
     val ih: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(ih.status, SC_SUCCESS, "IO command completes after CQ head repair")
+
+    c.io_submit(1, cmd_make(8, OP_READ, 0, 1, 0))
+    val bad_io_cid_slot: i64 = 1 * MAX_QUEUE_SIZE + c.qset.sq_head[1]
+    val saved_io_cid: i64 = c.qset.sq_cid[bad_io_cid_slot]
+    c.qset.sq_cid[bad_io_cid_slot] = 70000
+    fail = fail + expect_eq(c.io_process(), 0, "IO dispatch backs off on invalid SQ head cid")
+    fail = fail + expect_eq(c.qset.sq_pending(1), 1, "IO command remains pending behind invalid SQ head cid")
+    c.qset.sq_cid[bad_io_cid_slot] = saved_io_cid
+    c.io_process()
+    val ich: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(ich.status, SC_SUCCESS, "IO command completes after SQ cid repair")
 
     if fail == 0:
         print "QUEUE BACKPRESSURE OK"
