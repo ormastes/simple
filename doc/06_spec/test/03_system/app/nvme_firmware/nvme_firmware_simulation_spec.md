@@ -794,9 +794,9 @@ step("Reject stale self-test assertion counts in operator docs")
 val docs = "examples/09_embedded/simpleos_nvme_fw/fw/README.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide_tldr.md"
 val (stale_out, stale_err, stale_code) = _shell("! rg -n '526 (checks|asserts|assertions)' " + docs)
 expect(stale_code).to_equal(0)
-val (count_out, count_err, count_code) = _shell("rg -n '1119 (checks|asserts|assertions)' " + docs)
+val (count_out, count_err, count_code) = _shell("rg -n '1120 (checks|asserts|assertions)' " + docs)
 expect(count_code).to_equal(0)
-expect(count_out).to_contain("1119")
+expect(count_out).to_contain("1120")
 ```
 
 </details>
