@@ -4,6 +4,7 @@ set -e
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 
 OUT="build/nvme_fw_rv32_minimal.elf"
+OBJ="build/test-artifacts/nvme_fw_rv32_minimal.o"
 ENTRY_DIR="build/os/generated"
 SRC_DIR="$ENTRY_DIR/nvme_fw_rv32_minimal_src"
 ENTRY="$SRC_DIR/nvme_fw_minimal_root.spl"
@@ -12,13 +13,36 @@ BUILD_OUT="build/test-artifacts/nvme_fw_rv32_minimal_build.out"
 BUILD_ERR="build/test-artifacts/nvme_fw_rv32_minimal_build.err"
 TIMEOUT_SECS="${NVME_RV32_BUILD_TIMEOUT_SECS:-90}"
 SIMPLE_BIN="${NVME_RV32_SIMPLE_BIN:-bin/simple}"
+SECTION_LIMIT="${NVME_RV32_MINIMAL_SECTIONS:-}"
 
 mkdir -p "$ENTRY_DIR" "$SRC_DIR" build/test-artifacts
 rm -f "$SRC_DIR"/*.spl
 for src in examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic*.spl; do
   sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$src" >"$SRC_DIR/$(basename "$src")"
 done
-cat >"$ENTRY" <<'EOF_ENTRY'
+
+if [ "$SECTION_LIMIT" = "0" ]; then
+  cat >"$ENTRY" <<'EOF_ENTRY'
+fn selftest():
+    pass_dn
+
+@section(".text.entry")
+@naked
+fn _start():
+    asm volatile:
+        "la      sp, _stack_top"
+        "call    nvme_fw_minimal_root__selftest"
+        "lui     t0, 0x100"
+        "li      t1, 0x5555"
+        "sw      t1, 0(t0)"
+        "1: wfi"
+        "j 1b"
+
+fn main() -> i32:
+    0i32
+EOF_ENTRY
+else
+  cat >"$ENTRY" <<'EOF_ENTRY'
 extern fn rt_riscv_uart_put(byte: u64)
 use logic.{nvme_fw_rv32_logic_selftest}
 
@@ -86,15 +110,25 @@ fn _start():
 fn main() -> i64:
     0
 EOF_ENTRY
+fi
 
-rm -f "$OUT" "$LOG" "$BUILD_OUT" "$BUILD_ERR"
+rm -f "$OUT" "$OBJ" "$LOG" "$BUILD_OUT" "$BUILD_ERR"
 set +e
-timeout -k 10s "$TIMEOUT_SECS" env SIMPLE_COMPILER_PHASE_PROFILE=1 "$SIMPLE_BIN" native-build --backend llvm \
-  --source "$SRC_DIR" \
-  --entry "$ENTRY" --entry-closure \
-  --linker-script src/os/kernel/arch/riscv32/linker.ld \
-  --target riscv32-unknown-none \
-  -o "$OUT" >"$BUILD_OUT" 2>"$BUILD_ERR"
+if [ "$SECTION_LIMIT" = "0" ]; then
+  timeout -k 10s "$TIMEOUT_SECS" env SIMPLE_COMPILER_PHASE_PROFILE=1 RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}" "$SIMPLE_BIN" native-build --backend llvm \
+    --source "$SRC_DIR" \
+    --entry "$ENTRY" --entry-closure \
+    --target riscv32-unknown-none \
+    --emit-object \
+    -o "$OBJ" >"$BUILD_OUT" 2>"$BUILD_ERR"
+else
+  timeout -k 10s "$TIMEOUT_SECS" env SIMPLE_COMPILER_PHASE_PROFILE=1 "$SIMPLE_BIN" native-build --backend llvm \
+    --source "$SRC_DIR" \
+    --entry "$ENTRY" --entry-closure \
+    --linker-script src/os/kernel/arch/riscv32/linker.ld \
+    --target riscv32-unknown-none \
+    -o "$OUT" >"$BUILD_OUT" 2>"$BUILD_ERR"
+fi
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
@@ -102,6 +136,16 @@ if [ "$rc" -ne 0 ]; then
   tail -n 40 "$BUILD_OUT" || true
   tail -n 40 "$BUILD_ERR" || true
   exit "$rc"
+fi
+
+if [ "$SECTION_LIMIT" = "0" ]; then
+  if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$OBJ" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
+    echo "STATUS: FAIL nvme-rv32-minimal-live link out=$BUILD_OUT err=$BUILD_ERR"
+    tail -n 40 "$BUILD_ERR" || true
+    exit 1
+  fi
+  echo "STATUS: PASS nvme-rv32-minimal-live-root-build diagnostic_only=true"
+  exit 0
 fi
 
 timeout 15 qemu-system-riscv32 -machine virt -cpu rv32 -m 128M -nographic -bios none \
