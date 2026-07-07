@@ -15,7 +15,23 @@ Each work item is agent-executable: files · steps · specs · gates · size · 
 
 ## First wave (recommended — no seed dependency)
 
-### W1 — GPU-dict pilot: `indexed_fill` palette LUT (Metal) **← lead item**
+### W1 — GPU-dict pilot: `indexed_fill` palette LUT (Metal) **← ✅ LANDED + GPU-PROVEN (2026-07-07)**
+
+> **Status: LANDED — GPU path PROVEN bit-exact via genuine `device_readback`.**
+> `MetalSession.init()` creates the `kernel_indexed_fill` compute pipeline on the
+> deployed 2026-07-05 self-hosted binary (`init=true pipe_indexed_fill=15
+> pipe_clear=4 pipe_blit=14 err_code=0`, 5/5 runs). Metal palette `indexed_fill`
+> via the buffer-backed LUT is proven **bit-exact vs the CPU oracle**
+> (`SoftwareBackend.indexed_fill`) on the same palette+indices — including
+> out-of-range → `0xFFFFFFFF` sentinel misses — read back through real
+> `device_readback`: `indexed_fill: MATCH pixels=3072 source=device_readback`,
+> **checksum `1413576747` on both backends**. Proof lives in a dedicated row of
+> `scripts/check/check-engine2d-gpu-offload-evidence.shs` /
+> `test/02_integration/rendering/engine2d_gpu_offload_evidence.spl` (gate
+> `pass (cpu-metal-bitexact-device-readback)`). Parity spec 24/24;
+> `engine2d_gpu_offload_contract_spec` 12/12. The one-time "new kernel not found"
+> report was **non-reproducing/transient** (see
+> `doc/08_tracking/bug/engine2d_metal_new_kernel_pipeline_not_found_2026-07-07.md`).
 
 - **Motivation.** Establishes the buffer-backed GPU dict end-to-end on the deployed interpret-mode
   binary with **no new extern** (upload-only via `rt_metal_buffer_upload`; research §2). Proves the

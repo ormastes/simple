@@ -241,6 +241,20 @@ add it to the pre-commit hook list alongside `check-workspace-root-guard.shs`. E
 **P2 acceptance:** gate reproduces the P0 baseline on `main`; after each P1 wave the reported count
 is strictly ≤ prior; final target `backend_isolation_violations=0` once P3 gaps land.
 
+**Follow-up — scan-root coverage gap (found 2026-07-07, GPU-dict pilot W1).** The live gate
+`scripts/check/check-ui-backend-isolation.shs` scans only `src/app examples src/lib/*/ui`, so
+`src/lib/**/gpu/engine2d/**` — where backend implementations legitimately hold `rt_*` — is **not
+scanned at all**. That is correct for *forbidding* app-side leakage, but it means the gate cannot
+assert the **positive** backend-side property the pilot relies on: that a new GPU-dict op stays
+**upload-only** (no *new* `extern rt_*` beyond the allowlisted buffer-upload/dispatch surface). W1's
+upload-only property was therefore **hand-verified this pass**, not machine-checked. Follow-up: add
+an allowlist-delta check over `src/lib/**/gpu/**` (assert the `extern rt_*` set is a subset of a
+pinned baseline, so a future GPU-dict op adding a *new* extern trips a gate) — cheaper than
+widening the forbidding scan, and closes the exact gap the pilot walked around. (Independent note:
+the current gate reports `new=5` on 2026-07-07, all from origin `src/app/llm_caret/**` and
+`examples/09_embedded/simple_os/**` — **zero from W1**, precisely because W1 lives in the unscanned
+`gpu/engine2d` dir. Baseline refresh for those 5 is the owning authors' item, not W1's.)
+
 ---
 
 ## P3 — Facade gaps to build (no API may be invented in the P1 recipe until these land)
