@@ -193,24 +193,8 @@ loud marker.
   animation via the real wrapper call chain, and the sentinel regression
   guard.
 
-*Deferred, and why:*
-- **Hosted-chrome lane background consumption.** `host_compositor_entry.render_frame()`
-  (the interactive hosted-WM chrome path) still direct-draws chrome via
-  `render_shared_mdi_desktop_chrome` / per-window `render_simple_web_app_content_cached`
-  and never calls `shared_wm_scene_resolve_background` at all — it does not
-  paint a motion background today, by design of this fix round (explicitly
-  out of scope per review: "do not attempt full hosted render_frame
-  background consumption"). It is blocked on the region-dirty dependency
-  below: painting a motion frame here without region-dirty tracking would
-  force a full CSS/chrome re-render (~1.4s lane, see
-  `project_stage4_deploy_blocker_rootcause_2026-07-06.md`-adjacent chrome
-  cache) on every due frame, which is not an acceptable interactive cost.
-- **Design invariant I8 (background-only region dirty) is not met.** The
-  seam's `dirty = true` triggers the loop's existing FULL-frame redraw path
-  (windows + chrome), identical to any other dirty trigger — there is no
-  region-dirty mechanism yet to mark only the background rect. This is this
-  item's already-declared dependency (region/dirty-rect work, perf plan
-  next-wave), not a new gap.
+*Deferred at the 2026-07-07 fix-round checkpoint (see follow-up 1/2 below for
+what has since landed):*
 - **SimpleOS lane** has no motion wiring — tracked under item D (SimpleOS
   visual-proof lane is blocked independently by the freestanding
   module-init/primitive-global fault, see the design doc's Lane-parity
@@ -219,28 +203,71 @@ loud marker.
   explicitly restricts motion sources to an ordered PPM frame list; decoding
   a real video container was never part of this item's contract.
 
-*Follow-up work items (acceptance criteria):*
-1. **I8 region-dirty** — land the region/dirty-rect wave (perf plan
-   next-wave dependency), then change the seam to mark only the background
-   rect dirty instead of the whole frame; re-verify wm_background_motion_provider_spec.spl
-   still passes and add a spec asserting windows/chrome pixels are
-   byte-identical across a background-only advance. Fold in: stall catch-up
-   currently replays N fires after an N-interval stall (bounded, converges;
-   probe-verified) — consider switching `consume_due(motion_due)` to
-   `consume_due(now)` as part of this same region-dirty pass so a stall
-   collapses to a single fire instead of a bounded replay burst.
-2. **Hosted-lane consumption** — once I8 lands, wire
-   `host_compositor_entry.render_frame()` to resolve and blit a `"motion"`
-   background (reusing the shared-MDI resolver path already threaded here),
-   gated so the no-motion-configured lane stays byte-identical
-   (`SIMPLE_WM_MOTION_MANIFEST` unset ⇒ unchanged capture checksum, same
-   contract `ensure_host_motion_background_source_registered` already keeps).
-3. **PNG/video sources** — explicitly future/optional, not committed: if
-   ever pursued, requires a new `MotionBackgroundSource` implementation
+**Status update (2026-07-07, follow-up 1+2 LANDED):**
+
+1. **I8 region-dirty — LANDED.** `HostCompositor.render_background_only(t_micros)
+   -> bool` (`host_compositor_entry.spl`) presents a due background advance
+   without re-rastering windows/chrome: `host_background_visible_rects`
+   computes the desktop rect minus the union of every visible (non-minimized)
+   window rect via axis-aligned rectangle subtraction
+   (`_host_rect_subtract_one`, 0-4 pieces per window), returning
+   `HostBackgroundRegion{rects, computed}`; `computed:false` (a rect-count
+   safety cap, `HOST_BACKGROUND_REGION_DIRTY_MAX_RECTS=256`) is the
+   correctness escape hatch — `render_background_only` returns `false` and
+   the caller falls back to a full `render_frame()` rather than risking an
+   incorrect partial paint on a pathological window layout. Only the
+   background-visible sub-rects are touched (`blit_pixels`/`fill_rect` per
+   rect, cropped from the resolved `BackgroundSurface` by
+   `host_background_crop_surface`), so window/chrome pixels drawn by the
+   prior full render are left byte-exact — proven by a spec that samples a
+   window-body pixel across two background-only advances
+   (`wm_background_motion_hosted_consumption_spec.spl`). `hosted_entry.spl`'s
+   present loop now tracks `other_dirty` (input/warmup — forces the existing
+   full path) separately from `motion_dirty` (background-only trigger only —
+   takes `render_background_only`, falling back to `render_frame()` on a
+   `false` return).
+2. **Hosted-lane consumption — LANDED.** `HostCompositor` gained a
+   `background: BackgroundSpec` field (default: a plain color matching the
+   historical hardcoded `theme.compositor_bg` fill) + `set_background(spec)`
+   + `_resolve_background(theme, t_micros)`, which re-reads the LIVE
+   `theme.compositor_bg` for `kind:"color"` (so a runtime theme change stays
+   honored exactly as before this field existed) and passes `kind:"image"`/
+   `"motion"` straight to `shared_wm_scene_resolve_background` — the SAME
+   resolver the shared-MDI production lane already uses.
+   `render_frame()`'s direct-draw fallback lane calls `_resolve_background`
+   before `shared_wm_scene_render_desktop_chrome` instead of hardcoding
+   `theme.compositor_bg`; the fast CSS/GUI-web lane's gate now additionally
+   requires `self.background.kind == WM_BACKGROUND_KIND_COLOR` (that lane
+   rasterizes one opaque flat-color backdrop with no image/motion
+   compositing seam, so `kind:"image"`/`"motion"` always routes through the
+   direct-draw lane instead — the fast lane is otherwise untouched and stays
+   byte-identical for the default/unset-motion case, confirmed by
+   `engine2d_gpu_offload_contract_spec.spl`'s exact-pixel assertion).
+   `ensure_host_motion_background_source_registered` (env-gated on
+   `SIMPLE_WM_MOTION_MANIFEST`) now also latches the manifest/fit on success
+   (`_host_motion_background_manifest_ok`/`_fit_ok`) via
+   `host_motion_background_registered_spec()`, and `init_host_wm` calls
+   `comp.set_background(...)` with it — so the SAME manifest that registers
+   the process-wide `MotionBackgroundSource` also becomes the compositor's
+   resolvable `BackgroundSpec`, with the unset-env lane staying byte-identical
+   (kind stays `"color"`, nothing new is reachable).
+   New spec: `test/01_unit/os/desktop/wm_background_motion_hosted_consumption_spec.spl`
+   (6 examples) — two absolute-time samples through `render_background_only`
+   resolve different frames; a background-only advance leaves a window-body
+   pixel untouched across two frame advances (I8); an unregistered motion
+   source paints the loud `WM_BACKGROUND_UNRESOLVED_MARKER_COLOR` at the
+   hosted-consumption layer (never a silent stale/default); `render_frame()`'s
+   direct-draw lane resolves a configured (single-frame, deterministic)
+   motion background; plus 2 pure rectangle-math examples for
+   `host_background_visible_rects`.
+3. **PNG/video sources** — still explicitly future/optional, not committed:
+   if ever pursued, requires a new `MotionBackgroundSource` implementation
    (e.g., video-decode-backed) behind the same trait; the manifest/PPM-list
    source stays the baseline, host-only implementation.
 
-Do not close item B as fully complete until follow-up (1) and (2) land.
+Item B is now complete per follow-up (1) and (2); only follow-up (3)
+(PNG/video, optional/future) and the SimpleOS lane (item D dependency)
+remain open.
 
 ---
 

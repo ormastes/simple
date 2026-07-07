@@ -1,6 +1,18 @@
 use common.window_protocol.geometry.{Size}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB}
-use common.ui.window_scene.{shared_wm_scene_register_background_image_provider, shared_wm_scene_register_motion_background_source}
+use common.ui.window_scene.{
+    BackgroundSpec,
+    BackgroundSurface,
+    SharedWmBackgroundResolution,
+    SharedWmRect,
+    WM_BACKGROUND_KIND_COLOR,
+    WM_BACKGROUND_KIND_MOTION,
+    shared_wm_background_color,
+    shared_wm_scene_register_background_image_provider,
+    shared_wm_scene_register_motion_background_source,
+    shared_wm_scene_resolve_background
+}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_render_desktop_chrome}
 use os.compositor.background_image_provider.{HostBackgroundImageProvider}
 use os.compositor.background_motion_provider.{HostMotionBackgroundSource}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
@@ -8,7 +20,7 @@ use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
 use os.compositor.simple_web_window_renderer.{render_simple_web_app_content_cached, content_paint_full_height}
-use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows, shared_mdi_render_windows_from_simple_gui_scene, render_shared_mdi_desktop_chrome, draw_shared_mdi_window_chrome, draw_shared_mdi_taskbar}
+use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows, shared_mdi_render_windows_from_simple_gui_scene, draw_shared_mdi_window_chrome, draw_shared_mdi_taskbar}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
 use common.color.convert.{int_to_hex}
@@ -250,6 +262,14 @@ class HostCompositor:
     # it so WebRenderPixelArtifactCache's own content-hash (HTML-equality)
     # check can skip re-rendering unchanged window content every frame.
     content_caches: Dict<i64, WebRenderPixelArtifactCache>
+    # Scene background this compositor resolves at render time (color/image/
+    # motion, see common.ui.window_scene.BackgroundSpec). Defaults to a plain
+    # color matching the historical hardcoded compositor_bg fill so a
+    # compositor that never calls set_background renders byte-identically to
+    # before this field existed; see _resolve_background, which re-reads the
+    # LIVE theme.compositor_bg for the color kind on every call instead of
+    # trusting this stored default (the theme can change after construction).
+    background: BackgroundSpec
 
     static fn new(backend: CompositorBackend, size: Size) -> HostCompositor:
         HostCompositor(
@@ -278,7 +298,8 @@ class HostCompositor:
             armed_chrome_window_id: 0,
             _chrome_cache_key: "",
             _chrome_cache_pixels: [],
-            content_caches: {}
+            content_caches: {},
+            background: shared_wm_background_color(0xFF0F172Au32)
         )
 
     # Returns the WebRenderPixelArtifactCache for `window_id`, creating (or
@@ -298,6 +319,61 @@ class HostCompositor:
     me resize(width: i32, height: i32):
         self.width = width
         self.height = height
+
+    me set_background(spec: BackgroundSpec):
+        """Configure the scene background (color/image/motion) this
+        compositor resolves at render time. init_host_wm calls this once at
+        startup when ensure_host_motion_background_source_registered
+        succeeded (SIMPLE_WM_MOTION_MANIFEST configured); specs may also call
+        it directly to exercise a background without going through env-var
+        wiring."""
+        self.background = spec
+
+    # Resolves self.background against the LIVE theme: a kind:"color"
+    # background always tracks the current theme.compositor_bg (byte-identical
+    # to the historical hardcoded fill when no image/motion background has
+    # been configured — see the `background` field doc above), so a runtime
+    # theme change is still honored exactly like before this field existed.
+    # kind:"image"/"motion" pass straight to the one shared resolution point
+    # (shared_wm_scene_resolve_background) the shared-MDI production lane
+    # already uses. `wall_clock_micros` is only read by a kind:"motion"
+    # background (see shared_wm_scene_resolve_background's t_micros doc).
+    me _resolve_background(theme: WmChromeColors, wall_clock_micros: i64) -> SharedWmBackgroundResolution:
+        val effective = if self.background.kind == WM_BACKGROUND_KIND_COLOR:
+            shared_wm_background_color(theme.compositor_bg)
+        else:
+            self.background
+        val t_micros = if effective.kind == WM_BACKGROUND_KIND_MOTION: wall_clock_micros else: 0
+        shared_wm_scene_resolve_background(effective, self.width, self.height, t_micros)
+
+    # I8 region-dirty: presents a due background advance WITHOUT re-rastering
+    # windows or chrome. Only the desktop sub-rects NOT covered by a
+    # currently-visible (non-minimized) window are touched, so window/chrome
+    # pixels drawn by the last full render_frame() are left byte-exact — this
+    # is the literal invariant I8 asks for ("background-only advance does NOT
+    # re-raster windows/chrome"), not just a perf shortcut: blindly
+    # re-blitting the full desktop rect here would stomp window pixels drawn
+    # on top of it by the previous full render. Correctness fallback: if the
+    # exact non-overlapping region can't be computed cheaply
+    # (host_background_visible_rects hits its rect-count safety cap), this
+    # returns false and the caller (hosted_entry.spl's present loop) falls
+    # back to a full render_frame() instead of risking an incorrect partial
+    # paint.
+    me render_background_only(t_micros: i64) -> bool:
+        val theme = wm_chrome_theme()
+        val region = host_background_visible_rects(self.windows, self.width, self.height)
+        if not region.computed:
+            return false
+        val resolved = self._resolve_background(theme, t_micros)
+        for rect in region.rects:
+            if val surface = resolved.surface:
+                self.backend.blit_pixels(rect.x, rect.y, rect.width, rect.height, host_background_crop_surface(surface, rect, self.width))
+            else:
+                self.backend.fill_rect(rect.x, rect.y, rect.width, rect.height, resolved.color)
+        if region.rects.len() > 0:
+            val bounds = host_background_bounding_rect(region.rects)
+            self.backend.present_rect(bounds.x, bounds.y, bounds.width, bounds.height)
+        true
 
     me render_frame():
         val theme = wm_chrome_theme()
@@ -324,7 +400,14 @@ class HostCompositor:
         # (unusably slow for a 60fps interaction). While self.dragging /
         # self.resizing is set we therefore skip the fast lane and direct-draw the
         # chrome; the CSS chrome re-renders once on the next settled frame.
-        if total > 0 and not _host_chrome_force_direct and not self.dragging and not self.resizing and engine2d_fast_metal_available():
+        # kind:"image"/"motion" backgrounds always route through the
+        # direct-draw lane below instead: the CSS/GUI-web lane rasterizes ONE
+        # opaque flat-color backdrop element with no image/motion compositing
+        # seam, so there is no way to blit a resolved background surface
+        # underneath it without redesigning that raster path (out of scope
+        # here). Gating on kind:"color" (the only kind this lane ever handled)
+        # keeps the unset/color-background lane byte-identical.
+        if total > 0 and not _host_chrome_force_direct and not self.dragging and not self.resizing and self.background.kind == WM_BACKGROUND_KIND_COLOR and engine2d_fast_metal_available():
             val fp = host_chrome_scene_fingerprint(self.windows, self.width, self.height)
             if fp != self._chrome_cache_key or self._chrome_cache_pixels.len() != total:
                 val html = host_chrome_scene_html(self.windows, self.width, self.height)
@@ -361,7 +444,17 @@ class HostCompositor:
         # chrome. BYTE-IDENTICAL to the historical host compositor chrome contract
         # (plus the taskbar dock, which the hit-test always honored but no
         # render path ever drew).
-        render_shared_mdi_desktop_chrome(self.backend, self.width, self.height, theme)
+        # Resolve the configured background (color/image/motion) before
+        # drawing chrome — the SAME one-stop resolver the shared-MDI
+        # production lane uses (shared_wm_scene_render_to_backend). For the
+        # default kind:"color" background this resolves to
+        # (theme.compositor_bg, nil surface), which
+        # shared_wm_scene_render_desktop_chrome renders via backend.clear(...)
+        # — byte-identical to the historical hardcoded
+        # render_shared_mdi_desktop_chrome(self.backend, ..., theme) call this
+        # replaces.
+        val resolved_bg = self._resolve_background(theme, rt_time_now_unix_micros())
+        shared_wm_scene_render_desktop_chrome(self.backend, self.width, self.height, theme, resolved_bg.color, resolved_bg.surface)
         var shared_windows: [SharedMdiRenderWindow] = []
         val window_count = self.windows.len()
         var i = 0
@@ -499,6 +592,133 @@ class HostCompositor:
         self.next_window_id = self.next_window_id + 1
         self.windows.push(HostedWindow(id: id, owner_port: 0, title: proc.title + " failed", x: 40, y: 80, w: 360, h: 180, content: "failed to create a window for " + proc.app_id, process_id: proc.pid, app_id: proc.app_id, minimized: false, focused: true))
 
+# ============================================================================
+# I8 region-dirty background math (plan item B follow-up 1,
+# doc/03_plan/os/desktop/wm_window_render_api_hardening_plan.md). Pure
+# rectangle arithmetic — no backend/FFI calls — computing exactly which
+# desktop sub-rects a background-only redraw is allowed to touch without
+# corrupting window content a prior full render_frame() drew on top of it.
+# ============================================================================
+
+# Safety cap on the rect-subtraction fan-out (each window can split an
+# existing rect into up to 4 pieces). Real hosted-WM window counts are small
+# (single digits); this cap only guards a pathological layout from doing
+# unbounded work — see host_background_visible_rects' `computed: false`
+# escape hatch.
+val HOST_BACKGROUND_REGION_DIRTY_MAX_RECTS: i32 = 256
+
+struct HostBackgroundRegion:
+    rects: [SharedWmRect]
+    computed: bool
+
+# Splits `a` into the axis-aligned pieces NOT covered by `b` (0-4 pieces):
+# top/bottom strips spanning the full width of `a`, then left/right strips
+# spanning only the vertical span where `a` and `b` actually overlap. No
+# overlap -> `a` is returned unchanged.
+fn _host_rect_subtract_one(a: SharedWmRect, b: SharedWmRect) -> [SharedWmRect]:
+    val ax0 = a.x
+    val ay0 = a.y
+    val ax1 = a.x + a.width
+    val ay1 = a.y + a.height
+    val bx0 = b.x
+    val by0 = b.y
+    val bx1 = b.x + b.width
+    val by1 = b.y + b.height
+    if bx1 <= ax0 or bx0 >= ax1 or by1 <= ay0 or by0 >= ay1:
+        return [a]
+    var out: [SharedWmRect] = []
+    if by0 > ay0:
+        out.push(SharedWmRect(x: ax0, y: ay0, width: ax1 - ax0, height: by0 - ay0))
+    if by1 < ay1:
+        out.push(SharedWmRect(x: ax0, y: by1, width: ax1 - ax0, height: ay1 - by1))
+    var my0 = ay0
+    if by0 > ay0:
+        my0 = by0
+    var my1 = ay1
+    if by1 < ay1:
+        my1 = by1
+    if bx0 > ax0:
+        out.push(SharedWmRect(x: ax0, y: my0, width: bx0 - ax0, height: my1 - my0))
+    if bx1 < ax1:
+        out.push(SharedWmRect(x: bx1, y: my0, width: ax1 - bx1, height: my1 - my0))
+    out
+
+# Desktop rect minus the union of every visible (non-minimized) window rect —
+# the exact set of pixels a background-only redraw may touch. `computed:
+# false` is the correctness escape hatch: a pathological window layout that
+# blows the rect-count safety cap aborts the computation rather than
+# returning a partial (and therefore wrong) region — render_background_only
+# treats that as "region can't be cheaply computed" and its caller falls back
+# to a full render_frame().
+fn host_background_visible_rects(windows: [HostedWindow], width: i32, height: i32) -> HostBackgroundRegion:
+    if width <= 0 or height <= 0:
+        return HostBackgroundRegion(rects: [], computed: true)
+    var rects: [SharedWmRect] = [SharedWmRect(x: 0, y: 0, width: width, height: height)]
+    for win in windows:
+        if not win.minimized and win.w > 0 and win.h > 0:
+            val hole = SharedWmRect(x: win.x, y: win.y, width: win.w, height: win.h)
+            var next_rects: [SharedWmRect] = []
+            for r in rects:
+                for piece in _host_rect_subtract_one(r, hole):
+                    if piece.width > 0 and piece.height > 0:
+                        next_rects.push(piece)
+            if next_rects.len() > HOST_BACKGROUND_REGION_DIRTY_MAX_RECTS:
+                return HostBackgroundRegion(rects: [], computed: false)
+            rects = next_rects
+    HostBackgroundRegion(rects: rects, computed: true)
+
+# Smallest rect containing every rect in `rects` — used to give
+# backend.present_rect a single bounding invalidation rect for a
+# background-only frame instead of one call per sub-rect.
+fn host_background_bounding_rect(rects: [SharedWmRect]) -> SharedWmRect:
+    var min_x = rects[0].x
+    var min_y = rects[0].y
+    var max_x = rects[0].x + rects[0].width
+    var max_y = rects[0].y + rects[0].height
+    for r in rects:
+        if r.x < min_x:
+            min_x = r.x
+        if r.y < min_y:
+            min_y = r.y
+        val rx1 = r.x + r.width
+        val ry1 = r.y + r.height
+        if rx1 > max_x:
+            max_x = rx1
+        if ry1 > max_y:
+            max_y = ry1
+    SharedWmRect(x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y)
+
+# Crops the (full-desktop-sized) resolved background surface down to `rect`'s
+# sub-window so blit_pixels only writes the region host_background_visible_rects
+# said is safe. Out-of-range reads (should not happen — the surface is sized
+# to the same width/height the resolver was called with) degrade to opaque
+# black rather than indexing out of bounds.
+fn host_background_crop_surface(surface: BackgroundSurface, rect: SharedWmRect, full_width: i32) -> [u32]:
+    # Pre-size once + index-store per pixel — NOT per-pixel `out.push`. Index
+    # assignment hits the interpreter's strong_count==1 in-place fast path
+    # (O(1)/element), whereas `arr.push` clones the whole growing array on
+    # every call (O(N^2) — the measured CPU-lane anti-pattern). This runs on
+    # the background-only motion path over the (large) desktop-minus-windows
+    # region, so the quadratic form would dominate an animated frame. Default
+    # fill is opaque black for the (should-not-happen) out-of-range reads.
+    val n = rect.width * rect.height
+    if n <= 0:
+        return []
+    var out: [u32] = [0xFF000000u32; n]
+    val total = surface.pixels.len()
+    var row = 0
+    while row < rect.height:
+        val row_start = (rect.y + row) * full_width + rect.x
+        val out_row = row * rect.width
+        var col = 0
+        while col < rect.width:
+            val idx = row_start + col
+            if idx >= 0 and idx < total:
+                out[out_row + col] = surface.pixels[idx]
+            col = col + 1
+        row = row + 1
+    out
+
 class HostWmHandle:
     compositor: HostCompositor
     wm: WmService
@@ -615,6 +835,13 @@ fn ensure_host_background_image_provider_registered():
 # "succeeded") is what is latched: a bad manifest is reported once, not
 # re-spammed on every init_host_wm call in the same process.
 var _host_motion_background_source_attempted: bool = false
+# Latched on a SUCCESSFUL registration only (empty otherwise, including the
+# never-configured and configured-but-failed cases). init_host_wm reads these
+# via host_motion_background_registered_spec() to decide whether the
+# HostCompositor it just constructed should adopt a kind:"motion"
+# BackgroundSpec — see that function's doc.
+var _host_motion_background_manifest_ok: text = ""
+var _host_motion_background_fit_ok: text = ""
 
 fn ensure_host_motion_background_source_registered(target_w: i32, target_h: i32):
     if _host_motion_background_source_attempted:
@@ -638,9 +865,26 @@ fn ensure_host_motion_background_source_registered(target_w: i32, target_h: i32)
             # (content-hash-cached) warm frame, not a cold decode.
             source.frame_for_time(rt_time_now_unix_micros())
             shared_wm_scene_register_motion_background_source(source)
+            _host_motion_background_manifest_ok = manifest
+            _host_motion_background_fit_ok = fit
             print "[host-wm] motion-background source registered manifest={manifest} fit={fit} frames={source.frame_paths.len()} interval_micros={source.frame_interval_micros}"
         Err(message):
             print "[host-wm] motion-background source registration FAILED: {message}"
+
+# Returns the BackgroundSpec the hosted compositor should adopt at startup
+# when ensure_host_motion_background_source_registered() above successfully
+# registered a source (nil when motion was never configured OR configured but
+# failed — both keep the default kind:"color" lane byte-identical, per that
+# function's `attempted` latch). init_host_wm calls this once, right after
+# constructing HostCompositor, so the SAME manifest/fit that registered the
+# process-wide MotionBackgroundSource also becomes this compositor's
+# resolvable BackgroundSpec (see HostCompositor._resolve_background /
+# render_background_only) — the "reuse the shared-MDI resolver path already
+# threaded here" wiring the plan's follow-up item 2 calls for.
+fn host_motion_background_registered_spec() -> BackgroundSpec?:
+    if _host_motion_background_manifest_ok == "":
+        return nil
+    BackgroundSpec(kind: WM_BACKGROUND_KIND_MOTION, color: 0xFF000000u32, source: _host_motion_background_manifest_ok, fit: _host_motion_background_fit_ok)
 
 fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
     ensure_host_background_image_provider_registered()
@@ -658,6 +902,8 @@ fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
     if backend == nil:
         return nil
     val comp = HostCompositor.new(backend, cfg.initial_size)
+    if val motion_bg = host_motion_background_registered_spec():
+        comp.set_background(motion_bg)
     val wm = WmService.new()
     wm.running = true
     HostWmHandle(
