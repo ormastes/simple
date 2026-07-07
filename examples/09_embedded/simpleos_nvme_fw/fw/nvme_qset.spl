@@ -11,7 +11,7 @@ This deliberately avoids arrays-of-structs.
 
 Semantics enforced (NVMe-faithful):
   * a CQ must exist before an SQ can bind to it (else SC_CQ_INVALID);
-  * a CQ with a live SQ bound to it cannot be deleted (else SC_QUEUE_BUSY);
+  * a CQ with a live SQ or pending completion cannot be deleted (else SC_QUEUE_BUSY);
   * qid must be in range and not already in use (else SC_INVALID_QID);
   * requested size must fit the device max (else SC_INVALID_QSIZE).
 """
@@ -189,6 +189,8 @@ impl QueueSet:
                 bound = 1
             s = s + 1
         if bound == 1:
+            return SC_QUEUE_BUSY
+        if me.cq_pending(qid) > 0:
             return SC_QUEUE_BUSY
         me.cq_active[qid] = 0
         me.cq_head[qid] = 0
@@ -479,10 +481,11 @@ fn nvme_qset_selftest() -> i64:
 
     qs.create_cq(5, 64)
     qs.cq_post(5, cpl_make(89, SC_SUCCESS, 0x44))
-    fail = fail + expect_eq(qs.delete_cq(5), SC_SUCCESS, "delete CQ 5 with pending completion")
-    fail = fail + expect_eq(qs.cq_pending(5), 0, "deleted CQ hides stale completions")
-    val deleted_cq_reap: NvmeCpl = qs.cq_reap(5)
-    fail = fail + expect_eq(deleted_cq_reap.status, SC_INVALID_FIELD, "deleted CQ reap fails closed")
+    fail = fail + expect_eq(qs.delete_cq(5), SC_QUEUE_BUSY, "delete CQ 5 with pending completion rejected")
+    fail = fail + expect_eq(qs.cq_pending(5), 1, "rejected CQ delete preserves pending completion")
+    val pending_cq_reap: NvmeCpl = qs.cq_reap(5)
+    fail = fail + expect_eq(pending_cq_reap.status, SC_SUCCESS, "pending completion remains reapable")
+    fail = fail + expect_eq(qs.delete_cq(5), SC_SUCCESS, "delete CQ 5 after draining completion")
 
     # round-robin across two live queues
     qs.create_cq(2, 64)
