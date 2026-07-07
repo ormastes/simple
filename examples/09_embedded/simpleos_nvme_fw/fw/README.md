@@ -22,7 +22,7 @@ Built layer-by-layer with parallel agents (Sonnet builders + Opus review gates),
 
 ```bash
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/sim_main.spl   # single-queue end-to-end demo
-bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # full self-test suite (1013 checks)
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # full self-test suite (1014 checks)
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_main.spl  # NVMe admin/multi-IO-queue controller e2e
 ```
 
@@ -93,7 +93,7 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 | **FTL** | `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `ftl`, `rain` (XOR-parity die/channel resilience, gap-closure P8 — **wired**: the FTL maintains parity on writes/GC/format and rebuilds a failed channel in place via `rain_recover_channel`; `rain_seal` remains the scrub/repair pass) |
 | **HIL + core** | `hil_queue`, `hil_command`, `fw_pool`, `hil`, `firmware` |
 | **NVMe controller front end** | `nvme_admin_types`, `nvme_admin` (admin queue: Identify, Create/Delete IO SQ/CQ, Get/Set Features, Get Log Page), `nvme_qset` (multi IO queue, round-robin), `nvme_controller`, `power_thermal` (power states + thermal throttling, gap-closure P7 — **wired**: the controller IO path drives it and SMART reports its live composite temperature) |
-| Tests | `test_fw` (all self-tests, 1013 checks), `sim_main` (single-queue e2e), `nvme_main` (controller e2e) |
+| Tests | `test_fw` (all self-tests, 1014 checks), `sim_main` (single-queue e2e), `nvme_main` (controller e2e) |
 
 > **Integration status (wired vs. shelf).** The authoritative wired-vs-shelf accounting is
 > `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status — wired vs. shelf" —
