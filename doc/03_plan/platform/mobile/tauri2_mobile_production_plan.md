@@ -160,6 +160,52 @@ to production)` → `P3 (iOS device AOT, gated on Task #21)` + `P4 (release lane
 - **Gate:** a `lifecycle_resume_status=pass` row: after backgrounding + foregrounding, a fresh
   `[tauri-shell] render, html_len=` marker appears and the screenshot is nonblank. **Size:** M.
   **Deps:** P0.1. **Risk:** platform-specific event names; rollback = no-op resume (re-render always).
+- **Progress 2026-07-07 (partial — resume-render mechanism landed and unit-tested; live
+  background→foreground on-device/on-sim proof still open):** implemented lifecycle tracking via
+  `tauri::WindowEvent::Focused(bool)` in `lib.rs`'s `.on_window_event` — the same event on every
+  platform (there is no `#[cfg(desktop)]`-only API involved, so this works identically for
+  desktop/iOS/Android; desktop-only APIs like `minimize`/`close` were never needed here). A new
+  `APP_BACKGROUNDED: AtomicBool` + pure `lifecycle_focus_transition(was_backgrounded, now_focused)`
+  function (4 cases: backgrounded, resumed-from-background, no-op-refocus, no-op-blur-while-already-
+  backgrounded) decides the action; `handle_window_focus_change` applies it. On resume, it reuses the
+  **existing** `send_resize` IPC message (extracted into `resize_shell_message`, unchanged wire shape)
+  with the window's current `inner_size()` — i.e. it re-sends the *same* width/height already in
+  effect. This is not a new IPC message type: `TauriApp.run()` (`src/app/ui.tauri/app.spl:74-84`)
+  already calls `send_render()` unconditionally after any non-Quit event including `UIEvent.Resize`,
+  so a same-size resize is exactly "re-emit the last render envelope, renderer is idempotent" using a
+  mechanism proven to work end-to-end before this change — no edit to the Simple-side event loop,
+  IPC protocol, or session/dispatch code was needed or made. Real, greppable log markers on every
+  branch: `[tauri-shell] lifecycle: backgrounded`, `[tauri-shell] lifecycle: foregrounded, requesting
+  resume render`, `lifecycle_resume_status=pass width=… height=…` / `lifecycle_resume_status=fail
+  reason=inner_size_error error=…`.
+  **What was deliberately not done:** actually pausing the Simple subprocess on backgrounding. It
+  blocks on `rt_stdin_read_line()` when idle (confirmed by reading `TauriApp.run()`/`poll_ipc()`) —
+  it is not spinning a CPU-hungry loop while backgrounded, so there is no correctness or battery
+  problem the "pause" half of the gate was actually protecting against once the subprocess I/O model
+  was read directly; implementing an explicit suspend/resume IPC message would have required a new
+  message type on both the Rust and Simple sides for a case that is already a no-op. The plan's own
+  risk register explicitly allows this: "rollback = no-op resume (re-render always)."
+  **Verification:** `cargo check` and `cargo test --lib` pass (17/18; the 1 failure,
+  `tauri_mdi_bootstrap_has_drag_and_desktop_root`, is the pre-existing, already-filed
+  `doc/08_tracking/bug/tauri_shell_mdi_bootstrap_css_inset_assertion_stale_2026-07-07.md` — re-confirmed
+  failing identically on the unmodified base commit via `git stash`/re-run, not a regression from this
+  change). 3 new tests: `lifecycle_focus_transition_covers_all_four_cases` (pure decision-table
+  coverage), `resize_shell_message_is_a_same_shape_resize_input_event` (wire-shape parity with
+  `send_resize`, cross-checked against `src/app/ui.ipc/protocol.spl:199-218`'s parser expectations),
+  `lifecycle_hook_is_wired_into_on_window_event` (confirms the real call sites and log markers exist
+  in source, not just in an isolated helper never wired up). **Not yet reconfirmed live**: a real
+  build+install+background+foreground+screenshot cycle on iOS sim/Android emulator was not run this
+  session — the iOS-sim lane hits the same pre-existing "no bundled iOS-sim Simple runtime" packaging
+  gap already documented under P1.2 (no live subprocess to resume in that build), and a desktop
+  `cargo run` smoke reached a real `[tauri-shell] window created` but the demo `.ui.sdn` subprocess
+  crashed on an unrelated pre-existing runtime limit (`Module count limit (800) exceeded loading
+  ".../src/app/ui/cli.spl"`) before a focus-toggle could be driven, and this sandboxed session could
+  not get macOS to hand real window focus to the un-bundled dev binary (`System Events` reports zero
+  windows for the raw, non-`.app`-bundled process — likely needs a proper `.app` bundle/activation
+  policy to be focus-toggleable, which `cargo tauri dev`/a signed bundle would provide but a bare
+  `cargo run` binary does not). Recommend the next session pick this up either via a bundled desktop
+  `.app` (for a real focus-toggle proof, independent of the mobile runtime-blob gap) or via the
+  bundled-iOS-sim-runtime build step already tracked under P1.2/P0.2.
 
 ---
 

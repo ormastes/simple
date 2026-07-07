@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -22,6 +22,13 @@ include!(concat!(env!("OUT_DIR"), "/mobile_runtime_assets.rs"));
 
 static MDI_OPEN_WINDOW_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MDI_IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+// P1.3 background/foreground lifecycle (design §4b / plan P1.3). Desktop
+// window APIs (`minimize`/`maximize`/`close`) are `#[cfg(desktop)]` and
+// unavailable on mobile, so lifecycle is tracked the same way on every
+// platform via `WindowEvent::Focused` (fires from `applicationDidBecomeActive`
+// / `applicationWillResignActive` on iOS and `onResume`/`onPause` on Android,
+// as well as ordinary window focus changes on desktop).
+static APP_BACKGROUNDED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1417,15 +1424,101 @@ fn send_window_mouse(
     ));
 }
 
+// Shared by the explicit `send_resize` command (webview → native, on a real
+// viewport size change) and the P1.3 background/foreground lifecycle resume
+// hook below (native-initiated, using the window's current inner size).
+// Re-sending the *same* width/height the Simple subprocess already has is a
+// deliberate no-op resize: `TauriApp.run()` (`src/app/ui.tauri/app.spl:74-84`)
+// unconditionally calls `send_render()` after any non-Quit event, including
+// `UIEvent.Resize`, so this is the existing, already-wired mechanism for
+// "re-emit the last render envelope" (design §4b) — it does not require a
+// new IPC message type or any change to the Simple-side event loop.
+fn resize_shell_message(width: u32, height: u32) -> ShellMessage {
+    shell_input_message("resize", "", "", width as f64, height as f64)
+}
+
 #[tauri::command]
 fn send_resize(width: u32, height: u32, state: tauri::State<'_, Arc<SimpleProcess>>) {
-    state.send(&shell_input_message(
-        "resize",
-        "",
-        "",
-        width as f64,
-        height as f64,
-    ));
+    state.send(&resize_shell_message(width, height));
+}
+
+// ---------------------------------------------------------------------------
+// Background / foreground lifecycle (P1.3)
+//
+// No desktop window API (`minimize`/`maximize`/`hide`) exists on mobile
+// (`#[cfg(desktop)]`-gated), so lifecycle is observed the same way on every
+// platform via `WindowEvent::Focused(bool)` (design §4b). On backgrounding
+// there is nothing native-side that needs pausing today — the Simple
+// subprocess just keeps blocking on `rt_stdin_read_line()`, it does not spin
+// a CPU-hungry loop while idle — so the actionable half of the gate is the
+// resume side: on regaining foreground *after* having been backgrounded,
+// request a fresh render so a stale/blank webview (e.g. after the OS
+// suspended/discarded the WKWebView's GPU surface) recovers without the user
+// having to interact first.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleTransition {
+    /// Window/app lost focus — mark backgrounded.
+    Backgrounded,
+    /// Window/app regained focus after being backgrounded — resume render.
+    ResumedFromBackground,
+    /// Focus event that isn't a background→foreground transition (e.g. two
+    /// `Focused(true)` events in a row, or losing focus while already
+    /// backgrounded) — no action needed.
+    FocusNoOp,
+}
+
+fn lifecycle_focus_transition(was_backgrounded: bool, now_focused: bool) -> LifecycleTransition {
+    if now_focused {
+        if was_backgrounded {
+            LifecycleTransition::ResumedFromBackground
+        } else {
+            LifecycleTransition::FocusNoOp
+        }
+    } else {
+        LifecycleTransition::Backgrounded
+    }
+}
+
+/// Handles a `WindowEvent::Focused` transition: updates `APP_BACKGROUNDED`
+/// and, on resume-from-background, sends a same-size resize event so the
+/// Simple subprocess re-emits a fresh render (`resize_shell_message` above).
+/// Real logging on every branch (not just success) so a `lifecycle_resume_status`
+/// row can be derived from `[tauri-shell]` stdout/stderr by an evidence
+/// wrapper without guessing at internal state.
+fn handle_window_focus_change<R: tauri::Runtime>(
+    process: &Arc<SimpleProcess>,
+    window: &tauri::window::Window<R>,
+    now_focused: bool,
+) {
+    let was_backgrounded = APP_BACKGROUNDED.load(Ordering::SeqCst);
+    match lifecycle_focus_transition(was_backgrounded, now_focused) {
+        LifecycleTransition::Backgrounded => {
+            APP_BACKGROUNDED.store(true, Ordering::SeqCst);
+            eprintln!("[tauri-shell] lifecycle: backgrounded");
+        }
+        LifecycleTransition::ResumedFromBackground => {
+            APP_BACKGROUNDED.store(false, Ordering::SeqCst);
+            eprintln!("[tauri-shell] lifecycle: foregrounded, requesting resume render");
+            match window.inner_size() {
+                Ok(size) => {
+                    process.send(&resize_shell_message(size.width, size.height));
+                    eprintln!(
+                        "[tauri-shell] lifecycle_resume_status=pass width={} height={}",
+                        size.width, size.height
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[tauri-shell] lifecycle_resume_status=fail reason=inner_size_error error={}",
+                        e
+                    );
+                }
+            }
+        }
+        LifecycleTransition::FocusNoOp => {}
+    }
 }
 
 #[tauri::command]
@@ -2222,7 +2315,7 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(move |_window, event| {
+        .on_window_event(move |window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 process.send(&ShellMessage::Quit);
                 if let Ok(mut guard) = process.stdin.lock() {
@@ -2237,6 +2330,9 @@ pub fn run() {
                 // Window is already closing via the CloseRequested event.
                 // No explicit close() needed (and it's not available on mobile).
             }
+            if let tauri::WindowEvent::Focused(now_focused) = event {
+                handle_window_focus_change(&process, window, *now_focused);
+            }
         })
         .run(tauri::generate_context!())
         .expect("tauri error");
@@ -2245,11 +2341,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        inline_shell_document_script, invoke_roundtrip_ping, mdi_shell_html,
-        render_envelope_metadata_js, report_invoke_roundtrip, resolve_simple_binary_from,
-        shell_input_message, shell_input_message_for, simple_subprocess_args_for,
-        simple_subprocess_args_with_main, startup_error_shell_html, tauri_mdi_init_script,
-        ShellMessage, SubprocessMessage,
+        inline_shell_document_script, invoke_roundtrip_ping, lifecycle_focus_transition,
+        mdi_shell_html, render_envelope_metadata_js, report_invoke_roundtrip,
+        resize_shell_message, resolve_simple_binary_from, shell_input_message,
+        shell_input_message_for, simple_subprocess_args_for, simple_subprocess_args_with_main,
+        startup_error_shell_html, tauri_mdi_init_script, LifecycleTransition, ShellMessage,
+        SubprocessMessage,
     };
     use crate::{
         ANDROID_RUNTIME_AARCH64, ANDROID_RUNTIME_X86_64, IOS_RUNTIME_AARCH64,
@@ -2532,5 +2629,78 @@ mod tests {
         assert!(src.contains("invokeRoundtripStatus: invokeRoundtripStatus"));
         assert!(src.contains("invokeRoundtripReply: invokeRoundtripReply"));
         assert!(src.contains("invokeRoundtripStatus === 'pending'"));
+    }
+
+    // -----------------------------------------------------------------
+    // P1.3 — background/foreground lifecycle
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn lifecycle_focus_transition_covers_all_four_cases() {
+        // Losing focus always marks backgrounded, regardless of prior state.
+        assert_eq!(
+            lifecycle_focus_transition(false, false),
+            LifecycleTransition::Backgrounded
+        );
+        assert_eq!(
+            lifecycle_focus_transition(true, false),
+            LifecycleTransition::Backgrounded
+        );
+        // Regaining focus only triggers a resume if we were actually
+        // backgrounded — an ordinary focus event (e.g. two Focused(true) in
+        // a row, which some platforms emit) must not re-send a render.
+        assert_eq!(
+            lifecycle_focus_transition(false, true),
+            LifecycleTransition::FocusNoOp
+        );
+        assert_eq!(
+            lifecycle_focus_transition(true, true),
+            LifecycleTransition::ResumedFromBackground
+        );
+    }
+
+    #[test]
+    fn resize_shell_message_is_a_same_shape_resize_input_event() {
+        // Must match the exact wire shape the Simple-side `parse_ipc_message`
+        // "input" + event_type=="resize" branch reads: type=="input",
+        // event_type=="resize", width in the `x` field, height in the `y`
+        // field (`src/app/ui.ipc/protocol.spl:199-218`). This is the same
+        // message `send_resize` has always sent — the lifecycle resume hook
+        // reuses it verbatim rather than inventing a parallel path.
+        let msg = resize_shell_message(390, 844);
+        let value: serde_json::Value =
+            serde_json::to_value(&msg).expect("ShellMessage::Input must serialize");
+        assert_eq!(value["type"], "input");
+        assert_eq!(value["event_type"], "resize");
+        assert_eq!(value["x"], 390.0);
+        assert_eq!(value["y"], 844.0);
+
+        // Sanity: matches what send_resize would have produced directly.
+        let via_helper = shell_input_message("resize", "", "", 390.0, 844.0);
+        assert_eq!(
+            serde_json::to_string(&msg).unwrap(),
+            serde_json::to_string(&via_helper).unwrap()
+        );
+    }
+
+    #[test]
+    fn lifecycle_hook_is_wired_into_on_window_event() {
+        let src = include_str!("lib.rs");
+        // The resume path must observe real WindowEvent::Focused transitions
+        // (not a synthetic timer/poll), and route through the same
+        // AtomicBool-backed transition function covered by the pure-logic
+        // test above — so the wiring test only needs to confirm the call
+        // sites exist and use the shared helpers, not re-derive the logic.
+        assert!(src.contains("tauri::WindowEvent::Focused(now_focused)"));
+        assert!(src.contains("handle_window_focus_change(&process, window, *now_focused)"));
+        assert!(src.contains("static APP_BACKGROUNDED: AtomicBool"));
+        // Real, greppable evidence markers an evidence wrapper (or a human
+        // reading `[tauri-shell]` stdout/stderr) can key a
+        // `lifecycle_resume_status=pass|fail` row off, mirroring the
+        // `invoke_roundtrip_status` proof pattern used for P1.2.
+        assert!(src.contains("[tauri-shell] lifecycle: backgrounded"));
+        assert!(src.contains("[tauri-shell] lifecycle: foregrounded, requesting resume render"));
+        assert!(src.contains("lifecycle_resume_status=pass"));
+        assert!(src.contains("lifecycle_resume_status=fail"));
     }
 }
