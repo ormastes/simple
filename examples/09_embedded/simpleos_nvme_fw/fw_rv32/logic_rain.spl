@@ -1,4 +1,89 @@
 # RV32 no-alloc NVMe firmware logic reference.
 
+fn _rv32_rain_parity(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64:
+    a ^ b ^ c ^ d ^ e ^ f ^ g ^ h
+
+fn _rv32_rain_recover_channel(parity: i64, failed: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64:
+    if failed < 0:
+        return -1
+    if failed >= 8:
+        return -1
+    var acc: i64 = parity
+    if failed != 0:
+        acc = acc ^ a
+    if failed != 1:
+        acc = acc ^ b
+    if failed != 2:
+        acc = acc ^ c
+    if failed != 3:
+        acc = acc ^ d
+    if failed != 4:
+        acc = acc ^ e
+    if failed != 5:
+        acc = acc ^ f
+    if failed != 6:
+        acc = acc ^ g
+    if failed != 7:
+        acc = acc ^ h
+    acc
+
+fn _rv32_rain_ppn(group: i64, channel: i64, page: i64) -> i64:
+    if group < 0:
+        return -1
+    if group >= 8:
+        return -1
+    if channel < 0:
+        return -1
+    if channel >= 8:
+        return -1
+    if page < 0:
+        return -1
+    if page >= 64:
+        return -1
+    ((group * 8) + channel) * 64 + page
+
+fn _rv32_rain_stripe_idx(ppn: i64) -> i64:
+    if ppn < 0:
+        return -1
+    if ppn >= 4096:
+        return -1
+    val block: i64 = ppn / 64
+    val group: i64 = block / 8
+    val page: i64 = ppn - (block * 64)
+    group * 64 + page
+
 fn rv32_rain_selftest() -> i32:
-    return 0
+    val a: i64 = 256
+    val b: i64 = 263
+    val c: i64 = 270
+    val d: i64 = 277
+    val e: i64 = 284
+    val f: i64 = 291
+    val g: i64 = 298
+    val h: i64 = 305
+    val parity: i64 = _rv32_rain_parity(a, b, c, d, e, f, g, h)
+    if _rv32_rain_recover_channel(parity, 0, a, b, c, d, e, f, g, h) != a:
+        return 1
+    if _rv32_rain_recover_channel(parity, 3, a, b, c, d, e, f, g, h) != d:
+        return 1
+    if _rv32_rain_recover_channel(parity, 7, a, b, c, d, e, f, g, h) != h:
+        return 1
+    if _rv32_rain_recover_channel(parity, -1, a, b, c, d, e, f, g, h) != -1:
+        return 1
+    if _rv32_rain_recover_channel(parity, 8, a, b, c, d, e, f, g, h) != -1:
+        return 1
+    if _rv32_rain_ppn(2, 5, 11) != 1355:
+        return 1
+    if _rv32_rain_stripe_idx(_rv32_rain_ppn(2, 5, 11)) != 139:
+        return 1
+    if _rv32_rain_ppn(-1, 0, 0) != -1:
+        return 1
+    if _rv32_rain_ppn(8, 0, 0) != -1:
+        return 1
+    if _rv32_rain_ppn(0, 8, 0) != -1:
+        return 1
+    if _rv32_rain_ppn(0, 0, 64) != -1:
+        return 1
+    if _rv32_rain_stripe_idx(4096) != -1:
+        return 1
+    0
