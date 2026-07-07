@@ -765,6 +765,35 @@ Terminated
 
 The current measured timeout is now around `logic_namespace_guard.spl`.
 
+## Update — namespace invalid cases split, probe reaches ECC compute
+
+`logic_namespace_guard_invalid_cases.spl` was reduced to a small case facade,
+with namespace/header failures and range/end failures moved into separate case
+modules. The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but this run got through namespace guard, target, and
+RAIN cases before stopping at ECC compute cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_namespace_guard.spl chars=120
+[BOOTSTRAP-PHASE] ... logic_namespace_guard.spl
+[BOOTSTRAP-PHASE] ... logic_target.spl chars=105
+[BOOTSTRAP-PHASE] ... logic_rain_cases.spl chars=264
+[BOOTSTRAP-PHASE] ... logic_ecc_compute_cases.spl chars=276
+Terminated
+```
+
+The current measured timeout is now around `logic_ecc_compute_cases.spl`.
+
 ## Update — namespace guard cases split
 
 `logic_namespace_guard_cases.spl` was reduced to a small case facade, with
