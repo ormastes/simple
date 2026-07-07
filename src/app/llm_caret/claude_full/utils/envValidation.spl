@@ -1,0 +1,133 @@
+class EnvVarValidationResult:
+    effective: i64
+    status: text
+    message: Option<text>
+    debugMessage: Option<text>
+
+impl EnvVarValidationResult:
+    static fn valid(effective: i64) -> EnvVarValidationResult:
+        EnvVarValidationResult(effective: effective, status: "valid", message: nil, debugMessage: nil)
+
+    static fn capped(name: text, effective: i64, parsedText: text, upperLimit: i64) -> EnvVarValidationResult:
+        val message = "Capped from " + parsedText + " to " + upperLimit.to_text()
+        EnvVarValidationResult(
+            effective: effective,
+            status: "capped",
+            message: Some(message),
+            debugMessage: Some(name + " " + message)
+        )
+
+    static fn invalid(name: text, defaultValue: i64, value: text) -> EnvVarValidationResult:
+        val message = "Invalid value \"" + value + "\" (using default: " + defaultValue.to_text() + ")"
+        EnvVarValidationResult(
+            effective: defaultValue,
+            status: "invalid",
+            message: Some(message),
+            debugMessage: Some(name + " " + message)
+        )
+
+fn validateBoundedIntEnvVar(name: text, value: Option<text>, defaultValue: i64, upperLimit: i64) -> EnvVarValidationResult:
+    if val raw = value:
+        if raw == "":
+            return EnvVarValidationResult.valid(defaultValue)
+        val parsed = parseLeadingBase10Int(raw, upperLimit)
+        if parsed.valid and parsed.positive:
+            if parsed.capped:
+                return EnvVarValidationResult.capped(name, upperLimit, parsed.textValue, upperLimit)
+            return EnvVarValidationResult.valid(parsed.value)
+        return EnvVarValidationResult.invalid(name, defaultValue, raw)
+    EnvVarValidationResult.valid(defaultValue)
+
+class ParsedBoundedInt:
+    valid: bool
+    positive: bool
+    capped: bool
+    value: i64
+    textValue: text
+
+impl ParsedBoundedInt:
+    static fn invalid() -> ParsedBoundedInt:
+        ParsedBoundedInt(valid: false, positive: false, capped: false, value: 0, textValue: "")
+
+    static fn nonPositive(value: i64, textValue: text) -> ParsedBoundedInt:
+        ParsedBoundedInt(valid: true, positive: false, capped: false, value: value, textValue: textValue)
+
+    static fn value(value: i64, textValue: text) -> ParsedBoundedInt:
+        ParsedBoundedInt(valid: true, positive: true, capped: false, value: value, textValue: textValue)
+
+    static fn capped(textValue: text) -> ParsedBoundedInt:
+        ParsedBoundedInt(valid: true, positive: true, capped: true, value: 0, textValue: textValue)
+
+fn parseLeadingBase10Int(value: text, upperLimit: i64) -> ParsedBoundedInt:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return ParsedBoundedInt.invalid()
+
+    var i = 0
+    var sign = 1
+    if trimmed.slice(0, 1) == "-":
+        sign = -1
+        i = 1
+    else if trimmed.slice(0, 1) == "+":
+        i = 1
+
+    var digits = ""
+    while i < trimmed.len():
+        val ch = trimmed.slice(i, i + 1)
+        if ch < "0" or ch > "9":
+            if digits == "":
+                return ParsedBoundedInt.invalid()
+            return finishParsedInt(sign, digits, upperLimit)
+        digits = digits + ch
+        i = i + 1
+
+    if digits == "":
+        return ParsedBoundedInt.invalid()
+    finishParsedInt(sign, digits, upperLimit)
+
+fn finishParsedInt(sign: i64, digits: text, upperLimit: i64) -> ParsedBoundedInt:
+    val normalized = trimLeadingZeroDigits(digits)
+    val display = normalized
+    if normalized == "":
+        return ParsedBoundedInt.nonPositive(0, "0")
+    if sign < 0:
+        if val parsedNegative = normalized.to_i64():
+            return ParsedBoundedInt.nonPositive(parsedNegative * -1, "-" + display)
+        return ParsedBoundedInt.nonPositive(-1, "-" + display)
+    if isDigitStringGreaterThanI64(normalized):
+        return ParsedBoundedInt.capped(jsNumberTextForLargePositiveInteger(normalized))
+    if val parsed = normalized.to_i64():
+        if parsed > upperLimit:
+            return ParsedBoundedInt.capped(display)
+        return ParsedBoundedInt.value(parsed, display)
+    ParsedBoundedInt.invalid()
+
+fn trimLeadingZeroDigits(digits: text) -> text:
+    var i = 0
+    while i < digits.len() and digits.slice(i, i + 1) == "0":
+        i = i + 1
+    digits.slice(i, digits.len())
+
+fn isDigitStringGreaterThanI64(digits: text) -> bool:
+    val maxI64 = "9223372036854775807"
+    if digits.len() > maxI64.len():
+        return true
+    if digits.len() < maxI64.len():
+        return false
+    digits > maxI64
+
+fn jsNumberTextForLargePositiveInteger(digits: text) -> text:
+    val asFloatText = digits.to_f64().to_text()
+    if asFloatText.len() >= 22:
+        return roundedScientificPositiveInteger(asFloatText)
+    asFloatText
+
+fn roundedScientificPositiveInteger(digits: text) -> text:
+    val first = digits.slice(0, 1)
+    val second = digits.slice(1, 2)
+    val exponent = digits.len() - 1
+    if second >= "5":
+        if first == "9":
+            return "1e+" + (exponent + 1).to_text()
+        return (first.to_i64() + 1).to_text() + "e+" + exponent.to_text()
+    first + "e+" + exponent.to_text()
