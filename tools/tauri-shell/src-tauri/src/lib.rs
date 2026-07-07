@@ -56,6 +56,16 @@ struct MdiProof {
     animation_frame_available: bool,
     animation_frame_count: usize,
     css_animation_probe: bool,
+    // Two-way invoke() round-trip proof (P1.2): a real command call/return,
+    // not a fire-and-forget `invoke(...).catch(...)`. See
+    // `invoke_roundtrip_ping` / `report_invoke_roundtrip` below.
+    // `#[serde(default)]` keeps this additive: any producer that predates
+    // this field (there is only one today, this module's injected JS) still
+    // deserializes fine.
+    #[serde(default)]
+    invoke_roundtrip_status: String,
+    #[serde(default)]
+    invoke_roundtrip_reply: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -724,6 +734,27 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                 var animationFrameCount = 0;
                 var proofRetryCount = 0;
                 var cssAnimationProbe = false;
+                var invokeFn = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke
+                    ? window.__TAURI__.core.invoke
+                    : (window.__TAURI__ && window.__TAURI__.tauri && window.__TAURI__.tauri.invoke
+                        ? window.__TAURI__.tauri.invoke
+                        : (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke ? window.__TAURI_INTERNALS__.invoke : null));
+                var invokeRoundtripSeq = Date.now() % 100000;
+                var invokeRoundtripStatus = invokeFn ? 'pending' : 'unavailable';
+                var invokeRoundtripReply = '';
+                if (invokeFn) {
+                    try {
+                        invokeFn('invoke_roundtrip_ping', { seq: invokeRoundtripSeq }).then(function(reply) {
+                            invokeRoundtripReply = String(reply);
+                            invokeRoundtripStatus = invokeRoundtripReply === ('pong:' + (invokeRoundtripSeq * 2 + 1)) ? 'pass' : 'mismatch';
+                            invokeFn('report_invoke_roundtrip', { seq: invokeRoundtripSeq, reply: invokeRoundtripReply }).catch(function() {});
+                        }).catch(function() {
+                            invokeRoundtripStatus = 'fail';
+                        });
+                    } catch (_rtErr) {
+                        invokeRoundtripStatus = 'fail';
+                    }
+                }
                 var viewportWidth = Math.max(document.documentElement ? document.documentElement.clientWidth : 0, window.innerWidth || 0);
                 var viewportHeight = Math.max(document.documentElement ? document.documentElement.clientHeight : 0, window.innerHeight || 0);
                 var devicePixelRatio = typeof window.devicePixelRatio === 'number' ? window.devicePixelRatio : 0;
@@ -860,7 +891,9 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                         inputToPaintMs: inputToPaintMs,
                         animationFrameAvailable: animationFrameAvailable,
                         animationFrameCount: animationFrameCount,
-                        cssAnimationProbe: cssAnimationProbe
+                        cssAnimationProbe: cssAnimationProbe,
+                        invokeRoundtripStatus: invokeRoundtripStatus,
+                        invokeRoundtripReply: invokeRoundtripReply
                     };
                     var proofIncomplete = (
                         proof.count < 4 ||
@@ -870,7 +903,8 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                         proof.taskbarIconCount < 4 ||
                         !proof.hasDesktop ||
                         !proof.hasSimpleSmokeText ||
-                        !proof.htmlRenderable
+                        !proof.htmlRenderable ||
+                        invokeRoundtripStatus === 'pending'
                     );
                     if (proofIncomplete) {
                         if (proofRetryCount < 20) {
@@ -968,6 +1002,8 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             animation_frame_available: false,
             animation_frame_count: 0,
             css_animation_probe: false,
+            invoke_roundtrip_status: "unavailable".to_string(),
+            invoke_roundtrip_reply: String::new(),
         };
         if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
             let _ = fs::write(path, serde_json::to_string(&proof).unwrap_or_default());
@@ -1155,6 +1191,19 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
 
                         if (!window._evtBound) {{
                             window._evtBound = true;
+                            var _rtInvoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke
+                                ? window.__TAURI__.core.invoke
+                                : (window.__TAURI__ && window.__TAURI__.tauri && window.__TAURI__.tauri.invoke
+                                    ? window.__TAURI__.tauri.invoke
+                                    : (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke ? window.__TAURI_INTERNALS__.invoke : null));
+                            if (_rtInvoke) {{
+                                try {{
+                                    var _rtSeq = Date.now() % 100000;
+                                    _rtInvoke('invoke_roundtrip_ping', {{ seq: _rtSeq }}).then(function(reply) {{
+                                        _rtInvoke('report_invoke_roundtrip', {{ seq: _rtSeq, reply: reply }}).catch(function() {{}});
+                                    }}).catch(function() {{}});
+                                }} catch (_rtErr) {{}}
+                            }}
                             window._simpleTargetId = function(el) {{
                                 if (!el) return '';
                                 return el.getAttribute('data-target-id') || el.getAttribute('data-widget-id') || el.getAttribute('data-id') || el.id || el.name || '';
@@ -1383,6 +1432,38 @@ fn send_resize(width: u32, height: u32, state: tauri::State<'_, Arc<SimpleProces
 fn report_mdi_proof(proof: MdiProof, app: AppHandle) {
     let proof_json = serde_json::to_string(&proof).unwrap_or_default();
     record_mdi_proof_json(proof_json, Some(&app));
+}
+
+// ---------------------------------------------------------------------------
+// invoke() two-way round-trip proof (P1.2)
+//
+// Every other command above is fire-and-forget: the webview calls `invoke`
+// and never uses the resolved value. That leaves the native->webview return
+// path unproven on mobile (design doc §3b). `invoke_roundtrip_ping` computes
+// a value that depends on the caller-supplied `seq` (never a constant, so a
+// stale/cached reply cannot pass), returns it to the webview's `invoke()`
+// promise, and the webview reports what it actually received back via
+// `report_invoke_roundtrip` so the match is provable from native-side logs
+// (and, for the MDI lane, from the proof JSON) instead of trusting the JS.
+// ---------------------------------------------------------------------------
+
+fn invoke_roundtrip_reply_for(seq: u32) -> String {
+    format!("pong:{}", seq.wrapping_mul(2).wrapping_add(1))
+}
+
+#[tauri::command]
+fn invoke_roundtrip_ping(seq: u32) -> String {
+    eprintln!("[tauri-shell] invoke_roundtrip_ping called: seq={}", seq);
+    invoke_roundtrip_reply_for(seq)
+}
+
+#[tauri::command]
+fn report_invoke_roundtrip(seq: u32, reply: String) {
+    let matched = reply == invoke_roundtrip_reply_for(seq);
+    eprintln!(
+        "[tauri-shell] invoke_roundtrip: seq={} reply={} matched={}",
+        seq, reply, matched
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1986,6 +2067,8 @@ pub fn run() {
             send_window_mouse,
             send_resize,
             report_mdi_proof,
+            invoke_roundtrip_ping,
+            report_invoke_roundtrip,
         ])
         .setup(move |app| {
             let url = if let Some(ref ext_url) = external_url {
@@ -2162,10 +2245,11 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        inline_shell_document_script, mdi_shell_html, render_envelope_metadata_js,
-        resolve_simple_binary_from, shell_input_message, shell_input_message_for,
-        simple_subprocess_args_for, simple_subprocess_args_with_main, startup_error_shell_html,
-        tauri_mdi_init_script, ShellMessage, SubprocessMessage,
+        inline_shell_document_script, invoke_roundtrip_ping, mdi_shell_html,
+        render_envelope_metadata_js, report_invoke_roundtrip, resolve_simple_binary_from,
+        shell_input_message, shell_input_message_for, simple_subprocess_args_for,
+        simple_subprocess_args_with_main, startup_error_shell_html, tauri_mdi_init_script,
+        ShellMessage, SubprocessMessage,
     };
     use crate::{
         ANDROID_RUNTIME_AARCH64, ANDROID_RUNTIME_X86_64, IOS_RUNTIME_AARCH64,
@@ -2400,5 +2484,53 @@ mod tests {
         assert!(src.contains(r#".env("SIMPLE_UI_BACKEND", "tauri")"#));
         assert!(src.contains("SIMPLE_EXECUTION_MODE"));
         assert!(src.contains("SIMPLE_TIMEOUT_SECONDS"));
+    }
+
+    // -----------------------------------------------------------------
+    // P1.2 — invoke() two-way round-trip proof
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn invoke_roundtrip_ping_computes_a_seq_dependent_reply() {
+        // The reply must be a function of the caller-supplied seq, not a
+        // hardcoded constant — otherwise a JS-side fake ("pong") would pass
+        // without ever actually reaching the native command.
+        assert_eq!(invoke_roundtrip_ping(0), "pong:1");
+        assert_eq!(invoke_roundtrip_ping(5), "pong:11");
+        assert_eq!(invoke_roundtrip_ping(1000), "pong:2001");
+        assert_ne!(invoke_roundtrip_ping(1), invoke_roundtrip_ping(2));
+    }
+
+    #[test]
+    fn report_invoke_roundtrip_accepts_the_matching_reply_shape() {
+        // report_invoke_roundtrip has no return value to assert on (it only
+        // logs), but it must at least accept the exact (seq, reply) pair
+        // invoke_roundtrip_ping produces for the same seq without panicking —
+        // this is the shape the webview round-trips back over invoke().
+        report_invoke_roundtrip(42, invoke_roundtrip_ping(42));
+        report_invoke_roundtrip(0, "not-a-real-reply".to_string());
+    }
+
+    #[test]
+    fn invoke_roundtrip_commands_are_registered_and_wired_from_both_js_paths() {
+        let src = include_str!("lib.rs");
+        // Registered as real Tauri commands (not just free functions).
+        assert!(src.contains("invoke_roundtrip_ping,"));
+        assert!(src.contains("report_invoke_roundtrip,"));
+        // Wired into the always-on render bootstrap (fires on every real
+        // desktop/mobile render, exercising the two-way path in production,
+        // not just in the MDI evidence harness). Uses the same defensive
+        // three-bridge invoke detection as the MDI proof path below (plain
+        // `window.__TAURI_INTERNALS__.invoke` alone was empirically found to
+        // be unavailable in the desktop initial-data-URL webview lane).
+        assert!(src.contains("_rtInvoke('invoke_roundtrip_ping', {{ seq: _rtSeq }})"));
+        assert!(src.contains("_rtInvoke('report_invoke_roundtrip', {{ seq: _rtSeq, reply: reply }})"));
+        // Wired into the MDI proof object (P1.2 gate: "MDI proof gains an
+        // invoke_roundtrip_status=pass field ... backed by a real returned
+        // value"), gating the existing proofIncomplete retry loop so the
+        // proof is not finalized before the round trip resolves.
+        assert!(src.contains("invokeRoundtripStatus: invokeRoundtripStatus"));
+        assert!(src.contains("invokeRoundtripReply: invokeRoundtripReply"));
+        assert!(src.contains("invokeRoundtripStatus === 'pending'"));
     }
 }

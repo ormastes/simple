@@ -77,7 +77,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_log_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={count:4,imageCount:1,taskbarItemCount:4,taskbarIconCount:4,viewportWidth:390,viewportHeight:844,devicePixelRatio:3,screenOrientation:\"portrait\",performanceNowAvailable:true,performanceNowDeltaMs:1.25,inputToPaintMs:2.5,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true,hasDesktop:true,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,eventSequence:[\"window_drag:move\",\"app_action:body_click\",\"app_input:body_input\",\"app_key:body_key\"],taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true};" + mutation + ";fs.writeFileSync(process.argv[1],\"[tauri-shell] mdi proof: \"+JSON.stringify(p)+\"\\n\");' " + path
+    "node -e 'const fs=require(\"fs\");const p={count:4,imageCount:1,taskbarItemCount:4,taskbarIconCount:4,viewportWidth:390,viewportHeight:844,devicePixelRatio:3,screenOrientation:\"portrait\",performanceNowAvailable:true,performanceNowDeltaMs:1.25,inputToPaintMs:2.5,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true,hasDesktop:true,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,eventSequence:[\"window_drag:move\",\"app_action:body_click\",\"app_input:body_input\",\"app_key:body_key\"],taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true,invokeRoundtripStatus:\"pass\",invokeRoundtripReply:\"pong:1\"};" + mutation + ";fs.writeFileSync(process.argv[1],\"[tauri-shell] mdi proof: \"+JSON.stringify(p)+\"\\n\");' " + path
 
 describe "Tauri mobile MDI proof validator":
 
@@ -103,8 +103,8 @@ describe "Tauri mobile MDI proof validator":
         expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
         expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
         expect(evidence).to_contain("ios_mdi_proof_marker_source_path=" + root + "/device.log")
-        expect(evidence).to_contain("ios_mdi_proof_marker_source_size_bytes=759")
-        expect(evidence).to_contain("ios_mdi_proof_marker_source_actual_size_bytes=759")
+        expect(evidence).to_contain("ios_mdi_proof_marker_source_size_bytes=822")
+        expect(evidence).to_contain("ios_mdi_proof_marker_source_actual_size_bytes=822")
         expect(evidence).to_contain("ios_mdi_proof_marker_source_file_status=pass")
         expect(evidence).to_contain("ios_mdi_proof_marker_source_file_reason=pass")
         expect(evidence).to_contain("ios_mdi_proof_window_count=4")
@@ -141,6 +141,8 @@ describe "Tauri mobile MDI proof validator":
         expect(evidence).to_contain("ios_mdi_animation_frame_available=true")
         expect(evidence).to_contain("ios_mdi_animation_frame_count=2")
         expect(evidence).to_contain("ios_mdi_css_animation_probe=true")
+        expect(evidence).to_contain("ios_mdi_invoke_roundtrip_status=pass")
+        expect(evidence).to_contain("ios_mdi_invoke_roundtrip_reply=pong:1")
 
     it "rejects missing requested mobile MDI proof log source paths":
         val root = "build/test-tauri-mobile-mdi-validator-missing-source"
@@ -813,6 +815,37 @@ describe "Tauri mobile MDI proof validator":
         expect(anim).to_contain("android_mdi_animation_status=fail")
         expect(anim).to_contain("android_mdi_animation_frame_available=false")
         expect(anim).to_contain("android_mdi_animation_frame_count=2")
+
+    it "rejects missing pending mismatched or unavailable invoke() round-trip proof":
+        val root = "build/test-tauri-mobile-mdi-validator-invoke-roundtrip"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_log_command(root + "/missing.log", "delete p.invokeRoundtripStatus") +
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/missing.json " + root + "/missing.log > " + root + "/missing.env; " +
+            _proof_log_command(root + "/pending.log", "p.invokeRoundtripStatus=\"pending\"") +
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/pending.json " + root + "/pending.log > " + root + "/pending.env; " +
+            _proof_log_command(root + "/mismatch.log", "p.invokeRoundtripStatus=\"mismatch\";p.invokeRoundtripReply=\"pong:999\"") +
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/mismatch.json " + root + "/mismatch.log > " + root + "/mismatch.env; " +
+            _proof_log_command(root + "/unavailable.log", "p.invokeRoundtripStatus=\"unavailable\";p.invokeRoundtripReply=\"\"") +
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/unavailable.json " + root + "/unavailable.log > " + root + "/unavailable.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val pending = file_read(root + "/pending.env")
+        val mismatch = file_read(root + "/mismatch.env")
+        val unavailable = file_read(root + "/unavailable.env")
+        step("Confirm the two-way invoke() return path must be proven with a real matching value, not just eval OK")
+        expect(missing).to_contain("ios_mdi_proof_status=fail")
+        expect(missing).to_contain("ios_mdi_invoke_roundtrip_status=fail")
+        expect(missing).to_contain("ios_mdi_render_status=pass")
+        expect(missing).to_contain("ios_mdi_event_status=pass")
+        expect(pending).to_contain("android_mdi_proof_status=fail")
+        expect(pending).to_contain("android_mdi_invoke_roundtrip_status=fail")
+        expect(mismatch).to_contain("ios_mdi_proof_status=fail")
+        expect(mismatch).to_contain("ios_mdi_invoke_roundtrip_status=fail")
+        expect(mismatch).to_contain("ios_mdi_invoke_roundtrip_reply=pong:999")
+        expect(unavailable).to_contain("android_mdi_proof_status=fail")
+        expect(unavailable).to_contain("android_mdi_invoke_roundtrip_status=fail")
 
     it "rejects mobile MDI proof logs with runtime failure markers":
         val root = "build/test-tauri-mobile-mdi-validator-failure-marker"

@@ -99,14 +99,57 @@ to production)` → `P3 (iOS device AOT, gated on Task #21)` + `P4 (release lane
 - **Motivation/evidence:** two-way `invoke()` needs an `app://` custom-scheme build (project memory
   2026-06-04); no in-repo mobile proof (design §3b, App. B). Today's live mode is stdio one-way + DOM
   events back over stdin — works on sim/emulator but the native-command return path is unproven on mobile.
-- **Files:** `tools/tauri-shell/src-tauri/src/app.rs` (command handlers + custom protocol),
-  `dist/inline-shell.html` (invoke calls), `src/app/ui.ipc/*`.
+- **Files:** `tools/tauri-shell/src-tauri/src/lib.rs` (command handlers, invoke registration, both
+  injected-JS paths) — **correction:** `src/app.rs` is dead/orphaned source, not compiled into the
+  crate (no `mod app;` anywhere); the real shared entry for desktop+mobile is `lib.rs::run()`.
+  `scripts/check/validate-tauri-mobile-mdi-proof.js`,
+  `test/03_system/check/tauri_mobile_mdi_proof_validator_spec.spl`.
 - **Steps:** build with the `app://` scheme; add a round-trip command (webview `invoke("ping")` →
   native → value back); capture the returned value in the MDI proof JSON.
 - **Gate:** MDI proof gains an `invoke_roundtrip_status=pass` field on both lanes, backed by a real
   returned value (not `eval OK`). **Size:** M. **Deps:** P0.1. **Risk:** if `app://` regresses ATS/asset
   loading on iOS, keep the `tauri://` asset path (`tauri_mobile_guide.md:72-77`); rollback = drop the
   command, keep one-way IPC.
+- **Progress 2026-07-07 (partial — code + tests done, on-device proof blocked on a separate packaging
+  gap):** implemented `invoke_roundtrip_ping(seq) -> String` (reply = deterministic `pong:{seq*2+1}`,
+  never a constant, so a stale/faked reply can't pass) + `report_invoke_roundtrip(seq, reply)`
+  (native-side log of the value the webview actually received back), registered in
+  `generate_handler![...]`. Wired into **both** JS paths: (1) the always-on render bootstrap
+  (`_evtBound`, fires on every real desktop/mobile render — the architecturally significant fix, not
+  just an evidence-harness stub) and (2) `maybe_write_tauri_mdi_proof`'s JS, adding
+  `invokeRoundtripStatus`/`invokeRoundtripReply` fields to the `MdiProof` struct (`#[serde(default)]`,
+  additive) and gating the existing `proofIncomplete` retry loop on round-trip completion.
+  `scripts/check/validate-tauri-mobile-mdi-proof.js` now requires `invokeRoundtripStatus === "pass"`
+  as part of `detailPass` and emits `{prefix}_mdi_invoke_roundtrip_status/_reply`.
+  `tauri_mobile_mdi_proof_validator_spec.spl` extended with a dedicated test for
+  missing/pending/mismatched/unavailable round-trip proof (30/30 examples pass); `cargo test --lib` in
+  `src-tauri` covers the deterministic reply function + the JS/registration wiring (all new tests pass;
+  one **pre-existing, unrelated** failure found and filed —
+  `doc/08_tracking/bug/tauri_shell_mdi_bootstrap_css_inset_assertion_stale_2026-07-07.md`).
+  Along the way, found and fixed a real defensive gap in the new code itself: the first version keyed
+  the round-trip only off `window.__TAURI_INTERNALS__`, and a synchronous throw from calling `invoke`
+  would have silently aborted the rest of the `_evtBound` block (breaking click/input/keydown wiring on
+  that render) — now uses the same defensive 3-bridge `invoke` lookup as `maybe_write_tauri_mdi_proof`
+  and wraps the call in `try/catch`.
+  **Verification:** `cargo check`/`cargo test --lib` pass (desktop, host triple). Real iOS simulator
+  run via `scripts/check/check-tauri-ios-mobile-renderer-evidence.shs`: **`** BUILD SUCCEEDED **`**,
+  app installs and launches on a booted iPhone 17 Pro sim, real window created via the production
+  `WebviewUrl::App("inline-shell.html")` lane (`ios renderer context: backend=WKWebView`, `inline shell
+  eval OK`) — but no live render fires because this build has **no bundled iOS-sim Simple runtime**
+  (`SIMPLE_IOS_RUNTIME_AARCH64_SIM` unset for this build → `"mobile mode has no bundled Simple binary;
+  live MDI subprocess/event bridge unavailable"`), a pre-existing packaging gap unrelated to this
+  change (cross-compiling `simple` for `aarch64-apple-ios-sim` is a separate, heavier task). A desktop
+  `cargo run` smoke (multi-window MDI source, `SIMPLE_TAURI_MDI_PROOF_PATH` set) reached
+  `mdi proof eval requested count=4` / `mdi proof eval OK` but never emitted a `[tauri-shell] mdi
+  proof:` line — desktop live-render always uses `WebviewUrl::External(data:...)` (the WM mockup
+  branch fires for *any* non-empty entry, not just `.ui.sdn`), and it remains unconfirmed whether that
+  specific lane exposes `window.__TAURI__`/`__TAURI_INTERNALS__` at all; the mobile-only
+  `WebviewUrl::App` lane is `#[cfg(mobile)]`-gated and structurally cannot be exercised from a desktop
+  build. **Not yet reconfirmed end-to-end with a real returned value on-device** — that requires either
+  (a) a working `aarch64-apple-ios-sim`/Android-arch bundled runtime for a live on-device render, or
+  (b) resolving whether desktop's `data:`-URL lane has a `invoke()` bridge at all (open question, filed
+  as follow-up rather than guessed). Recommend the next session pick up with either the bundled-runtime
+  build step or the desktop invoke-availability question before claiming the P1.2 gate green.
 
 ### P1.3 — Background/foreground lifecycle
 - **Motivation/evidence:** no evidence lifecycle is handled; desktop window APIs are `#[cfg(desktop)]`

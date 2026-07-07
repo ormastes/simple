@@ -370,7 +370,13 @@ const animationPass =
   proof.animationFrameAvailable === true &&
   jsonIntegerAtLeast(proof.animationFrameCount, 2) &&
   proof.cssAnimationProbe === true;
-const detailPass = eventPass && renderPass && capturePass && performancePass && interactionLatencyPass && animationPass;
+// P1.2: the invoke() native->webview return path must be proven with a real
+// returned value (not `eval OK`), so require the deterministic seq*2+1 reply
+// the webview actually received back over invoke() to match what the native
+// command computed. See invoke_roundtrip_ping/report_invoke_roundtrip in
+// tools/tauri-shell/src-tauri/src/lib.rs.
+const invokeRoundtripPass = proof.invokeRoundtripStatus === "pass";
+const detailPass = eventPass && renderPass && capturePass && performancePass && interactionLatencyPass && animationPass && invokeRoundtripPass;
 const status = !failureMarker && detailPass ? "pass" : "fail";
 const reason = failureMarker
   ? "mobile-mdi-failure-marker"
@@ -417,6 +423,8 @@ emit("mdi_animation_status", animationPass ? "pass" : "fail");
 emit("mdi_animation_frame_available", jsonBoolTextOrBlank(proof.animationFrameAvailable));
 emit("mdi_animation_frame_count", jsonIntegerTextOrBlank(proof.animationFrameCount));
 emit("mdi_css_animation_probe", jsonBoolTextOrBlank(proof.cssAnimationProbe));
+emit("mdi_invoke_roundtrip_status", invokeRoundtripPass ? "pass" : "fail");
+emit("mdi_invoke_roundtrip_reply", clean(proof.invokeRoundtripReply));
 
 if (status !== "pass") {
   process.exit(1);
