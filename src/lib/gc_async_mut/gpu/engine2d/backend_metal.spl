@@ -8,7 +8,8 @@ use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback,
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult}
 use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
-use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_u32s_from_ptr, metal_write_u32s_to_ptr}
+use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_u32s_from_ptr, metal_write_u32s_to_ptr, gpu_lut_pack_dense, gpu_lut_free, gpu_lut_dense_byte_len}
+use std.gpu.engine2d.backend_capability.{BackendCapability, BackendKind, backend_capability_default, OP_INDEXED_FILL}
 use std.common.string_core.{char_from_code}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.gc_async_mut.env.platform.{is_macos}
@@ -295,6 +296,13 @@ fn probe_metal() -> BackendProbeResult:
     fail.shader_format = "msl"
     fail
 
+# GPU-dict pilot (design §3.4 loud-fail): a palette this large is refused —
+# indexed_fill falls through to the CPU-lane mirror instead of silently
+# truncating or wrapping the LUT. 65536 entries is far beyond any real
+# palette use (8-bit index space tops out at 256) and keeps the device
+# buffer bounded.
+val GPU_LUT_MAX_ENTRIES: i32 = 65536
+
 class MetalBackend:
     mirror: SoftwareBackend
     session: MetalSession
@@ -307,6 +315,9 @@ class MetalBackend:
     gpu_frame_complete: bool
     last_probe: BackendProbeResult
     last_error: text
+    lut_buffer: i64     # device buffer handle for the uploaded palette GpuLut
+    lut_version: i64    # caller-supplied version of the currently-uploaded LUT; -1 = none
+    lut_count: i32      # entry count of the currently-uploaded LUT (size-change detection)
 
     static fn create() -> MetalBackend:
         make_metal_backend()
@@ -323,7 +334,10 @@ fn make_metal_backend():
         initialized: false,
         gpu_frame_complete: false,
         last_probe: BackendProbeResult.unavailable("metal", "not probed"),
-        last_error: ""
+        last_error: "",
+        lut_buffer: 0,
+        lut_version: -1,
+        lut_count: 0
     )
 
 impl RenderBackend for MetalBackend:
@@ -391,6 +405,11 @@ impl RenderBackend for MetalBackend:
         if self.d_framebuffer != 0:
             metal_sffi_free_buffer(self.d_framebuffer)
             self.d_framebuffer = 0
+        if self.lut_buffer != 0:
+            metal_sffi_free_buffer(self.lut_buffer)
+            self.lut_buffer = 0
+        self.lut_version = -1
+        self.lut_count = 0
         self.session.release()
         self.command_queue = 0
         self.w = 0
@@ -537,6 +556,164 @@ impl MetalBackend:
     # of truth and clip/readback decisions must go through it, not the mirror.
     fn _gpu_only_mode() -> bool:
         (self.initialized and self.d_framebuffer != 0 and (self.w * self.h) > 1 and self.mirror.width() <= 1 and self.mirror.height() <= 1)
+
+    # Honest self-description (D3/backend_capability.spl): indexed_fill is only
+    # advertised as accelerated when the device is present AND its compute
+    # pipeline actually compiled. A backend that lists an op in
+    # accelerated_ops while its bind/dispatch fails at runtime would be a
+    # honesty violation (design §3.4) — see indexed_fill() below, which flips
+    # gpu_frame_complete false rather than claim success on failure.
+    fn capability() -> BackendCapability:
+        if self.initialized and self.session.pipe_indexed_fill != 0:
+            return BackendCapability(kind: BackendKind.RealGpu, device_present: true, accelerated_ops: [OP_INDEXED_FILL])
+        backend_capability_default()
+
+    # GPU-dict pilot (design §3/§4): buffer-backed palette LUT `indexed_fill`.
+    # `idx` is a row-major w*h byte buffer of palette indices; `palette` is the
+    # ARGB color table; `palette_version` is the caller's version tag for the
+    # LUT upload/invalidation contract (design §3.3) — re-upload only happens
+    # when the version (or entry count) changes, never per-primitive/per-frame.
+    me indexed_fill(x: i32, y: i32, w: i32, h: i32, idx: [u8], palette: [u32], palette_version: i64):
+        # CPU-lane mirror: the SoftwareBackend oracle body, always runs so the
+        # mirror stays a valid fallback/readback source (same pattern every
+        # other draw op in this file follows).
+        self.mirror.indexed_fill(x, y, w, h, idx, palette)
+        if w <= 0 or h <= 0:
+            return
+        if not self.initialized or self.d_framebuffer == 0 or self.session.pipe_indexed_fill == 0:
+            # Loud fall-through (design §3.4): no device/pipeline — capability()
+            # already reports indexed_fill as unaccelerated, so this is the
+            # normal D2 CPU-lane path, not a special case. Do NOT flip
+            # gpu_frame_complete for the "gpu-only mode, clip is a no-op" style
+            # exception below — indexed_fill has no such prior exception, so a
+            # miss here means read_pixels() correctly falls back to the mirror.
+            self.gpu_frame_complete = false
+            return
+        val count = palette.len().to_i32()
+        if count > GPU_LUT_MAX_ENTRIES:
+            # Loud fall-through: an oversized LUT is refused outright rather
+            # than silently truncated/wrapped (design §3.4). The mirror above
+            # already has the correct pixels; this print makes the refusal
+            # observable instead of a silent wrong-pixel GPU write.
+            print "backend_metal: indexed_fill palette has {count} entries > GPU_LUT_MAX_ENTRIES={GPU_LUT_MAX_ENTRIES}; refusing GPU dispatch (CPU-lane result stands)"
+            self.gpu_frame_complete = false
+            return
+        if not self._ensure_lut_uploaded(palette, palette_version):
+            self.gpu_frame_complete = false
+            return
+        val ok = self._dispatch_metal_indexed_fill(x, y, w, h, idx)
+        self.gpu_frame_complete = self.gpu_frame_complete and ok
+        self.dirty = true
+
+    # Upload/invalidation contract (design §3.3): re-upload only when the
+    # caller's version (or the palette's entry count) differs from what is
+    # currently bound. Persistent-session idiom — never rebuilds/re-uploads
+    # per primitive or per frame when unchanged.
+    me _ensure_lut_uploaded(palette: [u32], version: i64) -> bool:
+        val count = palette.len().to_i32()
+        if self.lut_buffer != 0 and self.lut_version == version and self.lut_count == count:
+            return true
+        val byte_len = gpu_lut_dense_byte_len(count)
+        val host = gpu_lut_pack_dense(palette)
+        if host == 0:
+            return false
+        if self.lut_buffer != 0:
+            metal_sffi_free_buffer(self.lut_buffer)
+            self.lut_buffer = 0
+        val dev_buf = metal_sffi_alloc_buffer(self.session.device, byte_len)
+        if dev_buf == 0:
+            gpu_lut_free(host)
+            return false
+        val uploaded = metal_buffer_upload_ptr(dev_buf, host, byte_len)
+        gpu_lut_free(host)
+        if uploaded == 0:
+            metal_sffi_free_buffer(dev_buf)
+            return false
+        self.lut_buffer = dev_buf
+        self.lut_version = version
+        self.lut_count = count
+        true
+
+    # Uploads the per-call index framebuffer (buffer 2) and dispatches
+    # kernel_indexed_fill with the persistent LUT bound as buffer 3.
+    me _dispatch_metal_indexed_fill(x: i32, y: i32, w: i32, h: i32, idx: [u8]) -> bool:
+        val total = w * h
+        if idx.len() < total:
+            return false
+        val total_i64 = _metal_i64(total)
+        val idx_buf = metal_sffi_alloc_buffer(self.session.device, total_i64)
+        if idx_buf == 0:
+            return false
+        # Host staging buffer is rounded up to a 4-byte multiple so every
+        # packing write below can safely store a full i32 word (rt_ptr_write_i32
+        # always writes 4 bytes) without overrunning the allocation on a
+        # non-multiple-of-4 total; only the real `total_i64` bytes are then
+        # uploaded to the device buffer (which IS sized exactly `total_i64`),
+        # so the pad bytes never reach the GPU.
+        val padded_len = _metal_i64(((total + 3) / 4) * 4)
+        val host = metal_host_alloc(padded_len)
+        if host == 0:
+            metal_sffi_free_buffer(idx_buf)
+            return false
+        # Pack 4 indices per host write (one rt_ptr_write_i32 call per 4 bytes)
+        # rather than one FFI call per byte — the same "avoid a per-element
+        # FFI hop" idiom the rest of this file follows for host-buffer packing.
+        var i = 0
+        while i < total:
+            val b0 = idx[i].to_i64()
+            var b1: i64 = 0
+            var b2: i64 = 0
+            var b3: i64 = 0
+            if i + 1 < total:
+                b1 = idx[i + 1].to_i64()
+            if i + 2 < total:
+                b2 = idx[i + 2].to_i64()
+            if i + 3 < total:
+                b3 = idx[i + 3].to_i64()
+            val word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+            metal_host_write_i32(host, _metal_i64(i), word)
+            i = i + 4
+        if metal_buffer_upload_ptr(idx_buf, host, total_i64) == 0:
+            metal_host_free(host)
+            metal_sffi_free_buffer(idx_buf)
+            return false
+        metal_host_free(host)
+        val params = metal_host_alloc(24)
+        if params == 0:
+            metal_sffi_free_buffer(idx_buf)
+            return false
+        metal_host_write_i32(params, 0, x as i64)
+        metal_host_write_i32(params, 4, y as i64)
+        metal_host_write_i32(params, 8, w as i64)
+        metal_host_write_i32(params, 12, h as i64)
+        metal_host_write_i32(params, 16, self.w as i64)
+        metal_host_write_i32(params, 20, self.h as i64)
+        val q = self.command_queue
+        val fb = self.d_framebuffer
+        val lut = self.lut_buffer
+        val pipeline = self.session.pipe_indexed_fill
+        val cmd = metal_sffi_create_command_buffer(q)
+        var ok = cmd != 0
+        if ok:
+            val encoder = metal_sffi_create_compute_encoder(cmd)
+            if encoder == 0:
+                ok = false
+            else:
+                metal_sffi_set_buffer(encoder, fb, 0, 0)
+                metal_set_bytes_ptr(encoder, params, 24, 1)
+                metal_sffi_set_buffer(encoder, idx_buf, 0, 2)
+                metal_sffi_set_buffer(encoder, lut, 0, 3)
+                val bx = 16
+                val by = 16
+                val gx = ((_metal_i64(w) + bx - 1) / bx) * bx
+                val gy = ((_metal_i64(h) + by - 1) / by) * by
+                metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
+                metal_sffi_end_compute_encoder(encoder)
+                metal_sffi_commit_command_buffer(cmd)
+                metal_sffi_wait_completed(cmd)
+        metal_host_free(params)
+        metal_sffi_free_buffer(idx_buf)
+        ok
 
     me read_pixels_gpu_only() -> [u32]:
         if not self.initialized or self.d_framebuffer == 0:

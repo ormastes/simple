@@ -22,6 +22,8 @@
 
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 use std.env.variables.{env_get}
 use os.compositor.host_compositor_entry.{HostCompositor, HostedWindow, host_wm_force_direct_chrome}
@@ -97,6 +99,52 @@ fn cpu_text(w: i32, h: i32) -> Engine2DReadback:
 fn metal_text(w: i32, h: i32) -> Engine2DReadback:
     var e = Engine2D.create_with_backend_fast(w, h, "metal")
     paint_text(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+# ---------------------------------------------------------------------------
+# GPU-dict pilot — indexed_fill palette-LUT parity (design
+# doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md §3/§4).
+#
+# indexed_fill is a backend method (NOT an Engine2D op — it is not a
+# RenderBackend trait requirement), so this lane drives MetalBackend and
+# SoftwareBackend directly, exactly the two independent implementations the
+# parity oracle pins. The scene deliberately includes out-of-range indices
+# (keys >= palette.len()) so the 0xFFFFFFFF dense-miss sentinel path (design
+# §3.2/§3.4) is proven bit-exact on the GPU too, not just the in-range gather.
+# ---------------------------------------------------------------------------
+
+fn _indexed_palette() -> [u32]:
+    # 8 vivid ARGB entries; every key >= 8 is an out-of-range miss.
+    [0xFF0F172Au32, 0xFF2563EBu32, 0xFFFFFFFFu32, 0xFF22C55Eu32,
+     0xFFF59E0Bu32, 0xFFEF4444u32, 0xFF64748Bu32, 0xFF111111u32]
+
+fn _indexed_idx(w: i32, h: i32) -> [u8]:
+    var idx: [u8] = [0u8; w * h]
+    var i = 0
+    while i < w * h:
+        idx[i] = (i % 10).to_u8()   # 0..9 over an 8-entry palette: 8,9 miss -> sentinel
+        i = i + 1
+    idx
+
+fn cpu_indexed_fill(w: i32, h: i32) -> Engine2DReadback:
+    var sw = SoftwareBackend.create()
+    sw.init(w, h)
+    sw.clear(0xFF000000 as u32)
+    sw.indexed_fill(0, 0, w, h, _indexed_idx(w, h), _indexed_palette())
+    sw.read_pixels_with_source()
+
+fn metal_indexed_fill(w: i32, h: i32) -> Engine2DReadback:
+    var e = MetalBackend.create()
+    if not e.init(w, h):
+        # Metal unavailable: report a cpu_mirror-source readback so compare_exact
+        # fails loudly on the non-device source (never a silent skip-as-pass).
+        return e.read_pixels_with_source()
+    e.use_gpu_only()
+    e.clear(0xFF000000 as u32)            # opens the GPU frame (gpu_frame_complete=true)
+    e.indexed_fill(0, 0, w, h, _indexed_idx(w, h), _indexed_palette(), 1)
     e.present()
     val rb = e.read_pixels_with_source()
     e.shutdown()
@@ -368,6 +416,23 @@ fn main() -> i64:
 
         print "PROVENANCE primitives backend=metal source={metal_prim.source}"
         print "PROVENANCE text backend=metal source={metal_txt.source}"
+
+    if stage == "all" or stage == "indexed_fill":
+        print "=== GPU offload evidence: indexed_fill (GPU-dict palette LUT) parity ==="
+        # Small surface where a full pixel-exact compare is cheap; indexed_fill
+        # covers the whole surface so every pixel is a table lookup (no reliance
+        # on the initial framebuffer contents).
+        val iw = 64
+        val ih = 48
+        val ti0 = time_now_micros()
+        val cpu_if = cpu_indexed_fill(iw, ih)
+        val ti1 = time_now_micros()
+        print "stage-time cpu_indexed_fill_us={ti1 - ti0}"
+        val metal_if = metal_indexed_fill(iw, ih)
+        val ti2 = time_now_micros()
+        print "stage-time metal_indexed_fill_us={ti2 - ti1}"
+        compare_exact("indexed_fill", cpu_if, metal_if)
+        print "PROVENANCE indexed_fill backend=metal source={metal_if.source}"
 
     if stage == "all" or stage == "wm":
         print "=== GPU offload evidence: WM composite parity (direct-draw chrome) ==="

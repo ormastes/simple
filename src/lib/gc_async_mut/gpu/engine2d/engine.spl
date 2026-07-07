@@ -47,6 +47,7 @@ use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gpu.engine2d.compute_dispatch.{ComputeDispatchResult, compute_dispatch_auto, compute_dispatch_for_backend}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_default_priority_order}
 use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_counters, tick_once}
+use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_default}
 use std.gc_async_mut.io.mod_stub.{env_get}
 
 # ============================================================================
@@ -96,6 +97,15 @@ class Engine2D:
     """
 
     backend: RenderBackend
+    # Capability wiring (GPU-dict pilot, design cpu_gpu_dual_algorithm_design.md
+    # §1/§7): the concrete backend's honest self-description, captured at
+    # construction time (before the concrete instance is boxed into the
+    # `backend: RenderBackend` trait field) since `capability()` is NOT a
+    # RenderBackend trait requirement — adding one would force every backend to
+    # implement it at once (backend_capability.spl convention). Backends that
+    # do not yet populate a real capability() report the honest
+    # software-emulation/no-accelerated-ops default.
+    capability: BackendCapability
     baremetal_backend: BaremetalBackend?
     virtio_gpu_backend: VirtioGpuBackend?
     w: i32
@@ -151,7 +161,7 @@ class Engine2D:
             Err(_):
                 var sw = SoftwareBackend.create()
                 sw.init(width, height)
-                Engine2D(backend: sw, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+                Engine2D(backend: sw, capability: sw.capability(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
     static fn create_with_backend_fast(width: i32, height: i32, backend_name: text) -> Engine2D:
         """Create an engine in native-only ("no mirror") fast mode.
@@ -177,7 +187,7 @@ class Engine2D:
             var metal = MetalBackend.create()
             if metal.init(width, height):
                 metal.use_gpu_only()
-                return Engine2D(backend: metal, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal")
+                return Engine2D(backend: metal, capability: metal.capability(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal")
         Engine2D.create_with_backend(width, height, backend_name)
 
     static fn create_requested_backend(width: i32, height: i32, backend_name: text) -> Result<Engine2D, text>:
@@ -186,12 +196,12 @@ class Engine2D:
         if requested_backend == "cuda":
             var cuda = CudaBackend.create()
             if cuda.init(width, height):
-                return Ok(Engine2D(backend: cuda, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda"))
+                return Ok(Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda"))
 
         if requested_backend == "vulkan":
             var vulkan = VulkanBackend.create()
             if vulkan.init(width, height):
-                return Ok(Engine2D(backend: vulkan, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan"))
+                return Ok(Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan"))
 
         if requested_backend == "directx":
             var directx = DirectXBackend.create()
@@ -200,7 +210,7 @@ class Engine2D:
                 # ("directx-software-emulation"): draws are CPU-rasterized by
                 # its internal SoftwareBackend even when the D3D11/DXVK device
                 # chain initializes. "directx" stays valid as the REQUESTED key.
-                return Ok(Engine2D(backend: directx, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: directx.name()))
+                return Ok(Engine2D(backend: directx, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: directx.name()))
 
         if requested_backend == "directx-on-vulkan":
             # DirectX-on-Vulkan emulation: serve a DirectX API request through the
@@ -213,22 +223,22 @@ class Engine2D:
             # as "directx-software-emulation".
             var dx_vk = VulkanBackend.create()
             if dx_vk.init(width, height):
-                return Ok(Engine2D(backend: dx_vk, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx-on-vulkan"))
+                return Ok(Engine2D(backend: dx_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx-on-vulkan"))
 
         if requested_backend == "opencl":
             var opencl = OpenClBackend.create()
             if opencl.init(width, height):
-                return Ok(Engine2D(backend: opencl, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl"))
+                return Ok(Engine2D(backend: opencl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl"))
 
         if requested_backend == "opengl":
             var opengl = OpenGLBackend.create()
             if opengl.init(width, height):
-                return Ok(Engine2D(backend: opengl, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opengl"))
+                return Ok(Engine2D(backend: opengl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opengl"))
 
         if requested_backend == "metal":
             var metal = MetalBackend.create()
             if metal.init(width, height):
-                return Ok(Engine2D(backend: metal, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal"))
+                return Ok(Engine2D(backend: metal, capability: metal.capability(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal"))
             # Metal-on-Vulkan emulation: native Metal is macOS-only, so on other
             # platforms serve the Metal API request through the real Vulkan
             # backend instead of silently dropping to CPU. Pixels are genuinely
@@ -237,32 +247,32 @@ class Engine2D:
             # Metal. Verified bit-exact vs SoftwareBackend in the oracle spec.
             var metal_vk = VulkanBackend.create()
             if metal_vk.init(width, height):
-                return Ok(Engine2D(backend: metal_vk, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal-on-vulkan"))
+                return Ok(Engine2D(backend: metal_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal-on-vulkan"))
 
         if requested_backend == "rocm":
             var rocm = RocmBackend.create()
             if rocm.init(width, height):
-                return Ok(Engine2D(backend: rocm, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm"))
+                return Ok(Engine2D(backend: rocm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm"))
 
         if requested_backend == "intel":
             var intel = IntelBackend.create()
             if intel.init(width, height):
-                return Ok(Engine2D(backend: intel, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "intel"))
+                return Ok(Engine2D(backend: intel, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "intel"))
 
         if requested_backend == "qualcomm":
             var qualcomm = QualcommBackend.create()
             if qualcomm.init(width, height):
-                return Ok(Engine2D(backend: qualcomm, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "qualcomm"))
+                return Ok(Engine2D(backend: qualcomm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "qualcomm"))
 
         if requested_backend == "webgpu":
             var webgpu = WebGpuBackend.create()
             if webgpu.init(width, height):
-                return Ok(Engine2D(backend: webgpu, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu"))
+                return Ok(Engine2D(backend: webgpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu"))
 
         if requested_backend == "software":
             var sw = SoftwareBackend.create()
             if sw.init(width, height):
-                return Ok(Engine2D(backend: sw, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software"))
+                return Ok(Engine2D(backend: sw, capability: sw.capability(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software"))
 
         # Note: "baremetal" is NOT auto-detected. It requires a pre-initialized
         # FramebufferDriver and must be created via create_with_baremetal_backend().
@@ -271,12 +281,12 @@ class Engine2D:
         if requested_backend == "cpu_simd":
             var cpu_simd = CpuBackend.create()
             cpu_simd.init(width, height)
-            return Ok(Engine2D(backend: cpu_simd, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd"))
+            return Ok(Engine2D(backend: cpu_simd, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd"))
 
         if requested_backend == "cpu":
             var cpu = CpuBackend.create()
             cpu.init(width, height)
-            return Ok(Engine2D(backend: cpu, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu"))
+            return Ok(Engine2D(backend: cpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu"))
 
         Err("backend unavailable: " + requested_backend)
 
@@ -302,11 +312,11 @@ class Engine2D:
         remains an unused placeholder on this path, so it must not allocate
         or initialize any pixel buffer.
         """
-        Engine2D(backend: backend, baremetal_backend: Some(backend), virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
 
     static fn create_with_virtio_gpu_backend(backend: VirtioGpuBackend) -> Engine2D:
         """Create engine with a pre-initialized VirtioGpuBackend."""
-        Engine2D(backend: backend, baremetal_backend: nil, virtio_gpu_backend: Some(backend), w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: Some(backend), w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
 
     static fn create_with_backend_strict(width: i32, height: i32, backend_name: text) -> Result<Engine2D, BackendProbeResult>:
         """Create engine with a specific backend, returning diagnostics on failure.

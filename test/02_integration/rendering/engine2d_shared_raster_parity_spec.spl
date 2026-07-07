@@ -259,6 +259,62 @@ fn cmp_text_bg() -> i32:
     _mism(a.read_pixels(), b.read_pixels())
 
 # ============================================================================
+# GPU-dict pilot — indexed_fill CPU-lane oracle (design
+# doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md §3/§4).
+#
+# The real Metal-vs-CPU device-readback proof lives in the run harness
+# test/02_integration/rendering/engine2d_gpu_offload_evidence.spl (Metal's
+# module graph is not safe to import into an SSpec — see that file's header).
+# Here, the CPU-lane oracle (SoftwareBackend.indexed_fill) is pinned against
+# `_dense_lut_lookup_ref`, an INDEPENDENT Simple-level replica of the design's
+# dense-kind lut_lookup formula (§3.2: `key < count ? palette[key] :
+# 0xFFFFFFFF`) — the same two-independent-implementations pattern the rest of
+# this harness uses (sw vs emu), applied to the new op.
+# ============================================================================
+
+fn _dense_lut_lookup_ref(palette: [u32], key: i32) -> u32:
+    if key >= 0 and key < palette.len():
+        return palette[key]
+    0xFFFFFFFFu32
+
+fn _cmp_indexed_fill(w: i32, h: i32, palette: [u32]) -> i32:
+    var idx: [u8] = [0u8; w * h]
+    var i = 0
+    while i < w * h:
+        idx[i] = (i % 257).to_u8()   # 0..255 byte sweep (to_u8 caps at 255, so it never exceeds a 256-entry palette): out-of-range sentinel misses arise only when the palette passed is smaller than 256 — the 1-entry row below exercises the sentinel through this helper; the 256-entry row keeps every key in range. The dedicated out-of-range assertion is the explicit [250u8] row.
+        i = i + 1
+    var sw = _fresh()
+    sw.indexed_fill(0, 0, w, h, idx, palette)
+    var want: [u32] = [0u32; w * h]
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            want[y * w + x] = _dense_lut_lookup_ref(palette, idx[y * w + x].to_i32())
+            x = x + 1
+        y = y + 1
+    val got = sw.read_pixels()
+    var mism = 0
+    var py = 0
+    while py < h:
+        var px = 0
+        while px < w:
+            val fb_idx = py * 48 + px
+            if got[fb_idx] != want[py * w + px]:
+                mism = mism + 1
+            px = px + 1
+        py = py + 1
+    mism
+
+fn _palette_256() -> [u32]:
+    var p: [u32] = [0u32; 256]
+    var i = 0
+    while i < 256:
+        p[i] = (0xFF000000u32) | (i.to_u32() * 0x00010101u32)
+        i = i + 1
+    p
+
+# ============================================================================
 # Specification
 # ============================================================================
 
@@ -364,3 +420,22 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
             print("draw_text_bg         | EQUAL   | mism={cmp_text_bg()}   | de-faked: emu delegates to AA blit (canonical=sw)")
             print("=== END MATRIX ===")
             expect(true).to_equal(true)
+
+    context "GPU-dict pilot — indexed_fill CPU-lane oracle (design cpu_gpu_dual_algorithm)":
+        # SoftwareBackend.indexed_fill (the design's CPU-lane oracle body,
+        # `palette[idx]` per pixel) vs an independent Simple replica of the
+        # dense-kind GpuLut lookup formula. Row D2-extension of this harness;
+        # the Metal device-readback proof is in the offload evidence run
+        # harness (Metal's module graph is unsafe to import here).
+
+        it "matches the dense-lut formula on a full 256-entry palette (byte 0..255 sweep)":
+            expect(_cmp_indexed_fill(16, 16, _palette_256())).to_equal(0)
+
+        it "matches the dense-lut formula on a minimal 1-entry palette (every non-zero key is an out-of-range miss)":
+            expect(_cmp_indexed_fill(8, 8, [0xFF445566u32])).to_equal(0)
+
+        it "resolves an out-of-range index to the SAME 0xFFFFFFFF sentinel the design's lut_lookup dense-miss path returns":
+            var idx: [u8] = [250u8]
+            var sw = _fresh()
+            sw.indexed_fill(0, 0, 1, 1, idx, [0xFF010203u32, 0xFF040506u32])
+            expect(sw.read_pixels()[0]).to_equal(0xFFFFFFFFu32)

@@ -614,6 +614,41 @@ impl Engine2DExtended for SoftwareBackend:
 
 impl SoftwareBackend:
 
+    # GPU-dict pilot (design doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md
+    # §3/§4): the CPU-lane oracle for `indexed_fill`. `idx` is a row-major w*h
+    # byte buffer of palette indices; the body is a plain host array index
+    # `palette[idx]` per pixel — no per-pixel FFI, this IS the bulk/native
+    # CPU-lane idiom for a data-dependent gather (there is no memset-style bulk
+    # form for a per-pixel table lookup). Out-of-range indices resolve to the
+    # SAME 0xFFFFFFFF sentinel the Metal `lut_lookup` dense path returns on a
+    # miss (design §3.2/§3.4) so the CPU and GPU stay bit-exact on the edge
+    # case too — a defined, loud value, never a silent wrong pixel.
+    # cpu-lane-loop-ok: gather-lookup (W2 lint, not yet wired — see plan W2)
+    me indexed_fill(x: i32, y: i32, w: i32, h: i32, idx: [u8], palette: [u32]):
+        if w <= 0 or h <= 0:
+            return
+        val count = palette.len()
+        var ly = 0
+        while ly < h:
+            val py = y + ly
+            if py >= 0 and py < self.h:
+                var start_x = -1
+                var lx = 0
+                while lx < w:
+                    val px = x + lx
+                    if px >= 0 and px < self.w:
+                        val key = idx[ly * w + lx].to_i32()
+                        var c: u32 = 0xFFFFFFFFu32
+                        if key >= 0 and key < count:
+                            c = palette[key]
+                        self.buf[py * self.w + px] = c
+                        if start_x < 0:
+                            start_x = px
+                    lx = lx + 1
+                if start_x >= 0:
+                    self.mark_span_dirty(start_x, py, w)
+            ly = ly + 1
+
     me mark_dirty(tx: i32, ty: i32):
         """Mark a tile as dirty."""
         val idx = ty * self.tiles_x + tx

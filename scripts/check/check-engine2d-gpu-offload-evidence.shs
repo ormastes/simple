@@ -2,10 +2,13 @@
 # GPU-offload evidence gate: live GUI paint -> Engine2D Metal dispatch.
 #
 # Runs test/02_integration/rendering/engine2d_gpu_offload_evidence.spl
-# (parity + WM composite stages), which renders identical GUI scenes on the
-# CPU software backend and the Metal GPU backend with ONE persistent session,
-# asserts pixel-exact equality, and requires the Metal readback source to be
-# device_readback (a cpu_mirror source = silent software fallback = FAIL).
+# (parity + WM composite + indexed_fill palette-LUT stages), which renders
+# identical GUI scenes on the CPU software backend and the Metal GPU backend
+# with ONE persistent session, asserts pixel-exact equality, and requires the
+# Metal readback source to be device_readback (a cpu_mirror source = silent
+# software fallback = FAIL). The indexed_fill row is the GPU-dict pilot's
+# buffer-backed palette LUT proven bit-exact vs the CPU oracle (design
+# doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md §3/§4).
 # On non-macOS the harness reports skip; a skip is not verified evidence and
 # must not be reported as a pass.
 set -eu
@@ -56,7 +59,9 @@ emit() {
     echo "engine2d_gpu_offload_primitives=${PRIM_LINE:-none}"
     echo "engine2d_gpu_offload_text=${TEXT_LINE:-none}"
     echo "engine2d_gpu_offload_wm_composite=${WM_LINE:-none}"
+    echo "engine2d_gpu_offload_indexed_fill=${IF_LINE:-none}"
     echo "engine2d_gpu_offload_provenance_wm=${PROV_WM:-none}"
+    echo "engine2d_gpu_offload_provenance_indexed_fill=${PROV_IF:-none}"
     echo "engine2d_gpu_offload_policy=exact-bitmap-no-blur-no-tolerance+device-readback-required"
     echo "engine2d_gpu_offload_harness=$HARNESS"
     echo "engine2d_gpu_offload_log=$LOG"
@@ -83,11 +88,19 @@ SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
     SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
     OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=wm \
     run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
+# GPU-dict pilot: prove indexed_fill (Metal palette LUT) bit-exact vs the CPU
+# oracle through genuine device_readback (design cpu_gpu_dual_algorithm §3/§4).
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=indexed_fill \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
 
 PRIM_LINE="$(grep -E '^primitives: ' "$LOG" | tail -n 1)"
 TEXT_LINE="$(grep -E '^text: ' "$LOG" | tail -n 1)"
 WM_LINE="$(grep -E '^wm_composite: ' "$LOG" | tail -n 1)"
+IF_LINE="$(grep -E '^indexed_fill: ' "$LOG" | tail -n 1)"
 PROV_WM="$(grep -E '^PROVENANCE wm_composite ' "$LOG" | tail -n 1)"
+PROV_IF="$(grep -E '^PROVENANCE indexed_fill ' "$LOG" | tail -n 1)"
 SKIP_LINE="$(grep -E '^GPU_OFFLOAD: skip' "$LOG" | tail -n 1)"
 
 STATUS=fail
@@ -99,7 +112,10 @@ elif echo "$PRIM_LINE" | grep -q 'MATCH' \
     && echo "$TEXT_LINE" | grep -q 'MATCH' \
     && echo "$WM_LINE" | grep -q 'MATCH' \
     && echo "$WM_LINE" | grep -q 'source=device_readback' \
-    && echo "$PROV_WM" | grep -q 'source=device_readback'; then
+    && echo "$PROV_WM" | grep -q 'source=device_readback' \
+    && echo "$IF_LINE" | grep -q 'MATCH' \
+    && echo "$IF_LINE" | grep -q 'source=device_readback' \
+    && echo "$PROV_IF" | grep -q 'source=device_readback'; then
     STATUS=pass
     REASON=cpu-metal-bitexact-device-readback
 elif [ -z "$PRIM_LINE" ] && [ -z "$WM_LINE" ]; then
