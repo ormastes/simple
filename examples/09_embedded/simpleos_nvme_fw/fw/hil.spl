@@ -36,6 +36,8 @@ impl Hil:
         val pend: i64 = me.q.sq_pending()
         if pend == 0:
             return 0
+        if me.q.cq_is_full():
+            return 0
         val cmd: NvmeCmd = me.q.sq_fetch()
         var status: i64 = cmd_validate(cmd)
         var rdata: i64 = 0
@@ -86,8 +88,10 @@ impl Hil:
         var n: i64 = 0
         var pend: i64 = me.q.sq_pending()
         while pend > 0:
-            me.tick()
-            n = n + 1
+            val handled: i64 = me.tick()
+            if handled == 0:
+                return n
+            n = n + handled
             pend = me.q.sq_pending()
         n
 
@@ -190,6 +194,24 @@ fn hil_selftest() -> i64:
     hil.run()
     val c28: NvmeCpl = hil.reap()
     fail = fail + expect_eq(c28.data, 0, "media-capacity rejection leaves first LBA untouched")
+
+    val saved_hil_cq_tail: i64 = hil.q.cq_tail
+    hil.q.cq_tail = hil.q.depth
+    hil.submit(cmd_make(34, OP_READ, 30, 1, 0))
+    fail = fail + expect_eq(hil.tick(), 0, "HIL tick backs off on invalid CQ tail")
+    fail = fail + expect_eq(hil.pending(), 1, "HIL preserves command behind invalid CQ tail")
+    hil.q.cq_tail = saved_hil_cq_tail
+    fail = fail + expect_eq(hil.run(), 1, "HIL drains command after CQ tail repair")
+    hil.reap()
+
+    val saved_hil_cq_head: i64 = hil.q.cq_head
+    hil.q.cq_head = hil.q.depth
+    hil.submit(cmd_make(35, OP_READ, 30, 1, 0))
+    fail = fail + expect_eq(hil.run(), 0, "HIL run backs off on invalid CQ head")
+    fail = fail + expect_eq(hil.pending(), 1, "HIL preserves command behind invalid CQ head")
+    hil.q.cq_head = saved_hil_cq_head
+    fail = fail + expect_eq(hil.run(), 1, "HIL drains command after CQ head repair")
+    hil.reap()
 
     # out-of-range write is rejected by validation
     hil.submit(cmd_make(3, OP_WRITE, LBA_COUNT + 5, 1, 0))

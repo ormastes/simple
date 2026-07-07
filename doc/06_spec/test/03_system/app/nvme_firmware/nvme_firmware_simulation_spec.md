@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 28 | 28 | 0 | 0 |
+| 29 | 29 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -540,6 +540,29 @@ expect(out).to_contain("QUEUE BACKPRESSURE OK")
 
 </details>
 
+#### preserves legacy HIL work when a completion queue pointer is corrupted
+
+- Run the focused legacy HIL completion-queue backpressure regression check
+   - Expected: code equals `0`
+- The HIL command remains pending until the completion queue pointer is repaired
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the focused legacy HIL completion-queue backpressure regression check")
+val (out, err, code) = _run(FW + "/hil_queue_backpressure_check.spl")
+expect(code).to_equal(0)
+step("The HIL command remains pending until the completion queue pointer is repaired")
+expect(out).to_contain("HIL QUEUE BACKPRESSURE OK")
+```
+
+</details>
+
 ### NVMe firmware: Lean4 formal verification of the FTL invariants
 
 #### verifies the allocator and GC-reserve safety (Alloc.lean)
@@ -771,9 +794,9 @@ step("Reject stale self-test assertion counts in operator docs")
 val docs = "examples/09_embedded/simpleos_nvme_fw/fw/README.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide_tldr.md"
 val (stale_out, stale_err, stale_code) = _shell("! rg -n '526 (checks|asserts|assertions)' " + docs)
 expect(stale_code).to_equal(0)
-val (count_out, count_err, count_code) = _shell("rg -n '1024 (checks|asserts|assertions)' " + docs)
+val (count_out, count_err, count_code) = _shell("rg -n '1033 (checks|asserts|assertions)' " + docs)
 expect(count_code).to_equal(0)
-expect(count_out).to_contain("1024")
+expect(count_out).to_contain("1033")
 ```
 
 </details>
@@ -810,8 +833,8 @@ _expect_no_fail_marker(out, "Cosmos+ OpenSSD platform descriptor")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 28 |
-| Active scenarios | 28 |
+| Total scenarios | 29 |
+| Active scenarios | 29 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

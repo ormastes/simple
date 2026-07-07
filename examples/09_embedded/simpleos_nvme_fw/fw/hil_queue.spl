@@ -124,6 +124,17 @@ impl NvmeQueues:
             return me.depth
         me.cq_len
 
+    me cq_is_full() -> bool:
+        if me.depth <= 0:
+            return true
+        if me.cq_len < 0 or me.cq_len > me.depth:
+            return true
+        if me.cq_head < 0 or me.cq_head >= me.depth:
+            return true
+        if me.cq_tail < 0 or me.cq_tail >= me.depth:
+            return true
+        me.cq_len >= me.depth
+
 # ── Helper: convert bool to i64 for expect_eq ────────────────────────────────
 fn bool_to_i64(b: bool) -> i64:
     if b:
@@ -195,14 +206,17 @@ fn hil_queue_selftest() -> i64:
     val bad_cq_head = q.cq_reap()
     failures = failures + expect_eq(bad_cq_head.status, SC_INVALID_FIELD, "invalid HIL CQ head reap fails closed")
     failures = failures + expect_eq(q.cq_pending(), 1, "invalid HIL CQ head leaves pending count unchanged")
+    failures = failures + expect_eq(bool_to_i64(q.cq_is_full()), 1, "invalid HIL CQ head blocks dispatch")
     q.cq_len = 0
     q.cq_head = 0
     q.cq_tail = q.depth
+    failures = failures + expect_eq(bool_to_i64(q.cq_is_full()), 1, "invalid HIL CQ tail blocks dispatch")
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(43, SC_SUCCESS, 0))), 0, "invalid HIL CQ tail post fails closed")
     failures = failures + expect_eq(q.cq_pending(), 0, "invalid HIL CQ tail leaves pending count unchanged")
     q.cq_tail = 0
     q.cq_len = -4
     failures = failures + expect_eq(q.cq_pending(), 0, "negative HIL CQ length pending clamps to zero")
+    failures = failures + expect_eq(bool_to_i64(q.cq_is_full()), 1, "negative HIL CQ length blocks dispatch")
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(44, SC_SUCCESS, 0))), 0, "negative HIL CQ length post fails closed")
     val neg_cq = q.cq_reap()
     failures = failures + expect_eq(neg_cq.status, SC_INVALID_FIELD, "negative HIL CQ length reap fails closed")
