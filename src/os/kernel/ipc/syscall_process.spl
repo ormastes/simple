@@ -21,7 +21,7 @@ use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.loader_api.{loader_dynopen_bytes, loader_dynsym, loader_dynclose}
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.memory.vmm.{vmm_new_process_space, vmm_teardown_user_space, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_bytes_from_space, vmm_copy_string_vector_result_ok, vmm_copy_string_vector_result_errno, vmm_copy_string_vector_result_values}
+use os.kernel.memory.vmm.{vmm_new_process_space, vmm_teardown_user_space, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_packed_string_vector, vmm_copyin_bytes_from_space, vmm_copy_string_vector_result_ok, vmm_copy_string_vector_result_errno, vmm_copy_string_vector_result_values}
 use os.kernel.boot.mmio.{mmio_read16, mmio_read32, mmio_write16, mmio_write32}
 use os.kernel.ipc.capability.{register_task_vmspace, task_vmspace_of}
 use os.kernel.pipe_compat.{posix_pipe}
@@ -598,7 +598,10 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
     Args:
       arg0: userspace pointer to path bytes
       arg1: path length
-      arg2: priority
+      arg2: argv packed-buffer base, or legacy priority
+      arg3: envp packed-buffer base
+      arg4: argv pointer-table offset
+      arg5: envp pointer-table offset
     """
     log_raw_println("[syscall13] handle_spawn_binary enter")
     if args.arg0 == 0 or args.arg1 == 0:
@@ -620,11 +623,34 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
         var log = klog
         klog_write(log, 3, 1, 0, "spawn_binary rejected unknown binary: {path}")
         return SyscallResult(value: -2)
-    val _sp_argv: [text] = []
-    val _sp_envp: [text] = []
-    val image_result = build_user_process_image(path, bytes_result.unwrap(), arch, _sp_argv, _sp_envp)
+    var sp_argv: [text] = []
+    var sp_envp: [text] = []
+    var priority_raw = args.arg2
+    if args.arg4 != 0:
+        val argv_result = vmm_copyin_packed_string_vector(
+            args.arg2,
+            args.arg4,
+            MAX_EXEC_ARG_COUNT,
+            MAX_EXEC_STRING_LEN,
+            MAX_EXEC_TOTAL_STRING_BYTES
+        )
+        if not vmm_copy_string_vector_result_ok(argv_result):
+            return SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(argv_result) as i64)
+        val envp_result = vmm_copyin_packed_string_vector(
+            args.arg3,
+            args.arg5,
+            MAX_EXEC_ENV_COUNT,
+            MAX_EXEC_STRING_LEN,
+            MAX_EXEC_TOTAL_STRING_BYTES
+        )
+        if not vmm_copy_string_vector_result_ok(envp_result):
+            return SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(envp_result) as i64)
+        sp_argv = vmm_copy_string_vector_result_values(argv_result)
+        sp_envp = vmm_copy_string_vector_result_values(envp_result)
+        priority_raw = 0
+    val image_result = build_user_process_image(path, bytes_result.unwrap(), arch, sp_argv, sp_envp)
     if image_result.is_ok():
-        val priority = _u64_to_priority(args.arg2)
+        val priority = _u64_to_priority(priority_raw)
         val caps = CapabilitySet.full()
         var sched = scheduler
         val before_next_task_id = g_scheduler_next_task_id

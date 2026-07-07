@@ -4,7 +4,7 @@ use os.userlib.syscall_raw
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use os.kernel.types.syscall_types(SignalKind)
 use os.kernel.types.syscall_types.{new_task_info_buf}
-use os.sosix.process.{sosix_marshal_string_vector}
+use os.sosix.process.{sosix_marshal_string_vector, sosix_string_vector_table_offset}
 
 class ProcessEntry:
     pid: u64
@@ -119,13 +119,10 @@ fn spawn_path(path: text, argv: [text], envp: [text]) -> Result<u32, i32>:
     Syscall 13 ABI:
       arg0 = path_ptr
       arg1 = path_len
-      arg2 = argv_ptr (marshaled string vector, or 0)
-      arg3 = envp_ptr (marshaled string vector, or 0)
-
-    The current kernel handler only reads arg0/arg1/arg2-as-priority.
-    A future kernel ABI update will consume arg2/arg3 as argv/envp
-    pointers. Until then the marshaled buffers are prepared but the
-    kernel ignores them.
+      arg2 = argv packed-buffer base, or 0
+      arg3 = envp packed-buffer base, or 0
+      arg4 = argv pointer-table offset
+      arg5 = envp pointer-table offset
 
     Returns Ok(pid) on success, Err(errno) on failure.
     """
@@ -148,10 +145,12 @@ fn spawn_path(path: text, argv: [text], envp: [text]) -> Result<u32, i32>:
     val path_ptr = rt_string_data(path) as u64
     val path_len = path.len() as u64
 
-    # Syscall 13: arg0=path_ptr, arg1=path_len, arg2=argv_ptr, arg3=envp_ptr
+    # Syscall 13: arg0=path_ptr, arg1=path_len, arg2/3=vector bases, arg4/5=table offsets.
     val argv_ptr = if argv_buf.len() > 0: argv_buf.ptr() as u64 else: 0u64
     val envp_ptr = if envp_buf.len() > 0: envp_buf.ptr() as u64 else: 0u64
-    val result = syscall(13, path_ptr, path_len, argv_ptr, envp_ptr, 0)
+    val argv_table = if argv_buf.len() > 0: sosix_string_vector_table_offset(effective_argv) else: 0u64
+    val envp_table = if envp_buf.len() > 0: sosix_string_vector_table_offset(envp) else: 0u64
+    val result = syscall(13, path_ptr, path_len, argv_ptr, envp_ptr, argv_table, envp_table)
     if result < 0:
         return Err(result as i32)
     Ok(result as u32)
