@@ -161,15 +161,25 @@ fn _tool_result_message(call: ToolCall, result: ToolResult) -> text:
     prefix = prefix + "]\n"
     prefix + wrap_untrusted("tool:" + call.name, redact(result.content))
 
-# Surface each tool call + a short result summary to the user.
-fn _emit_tool(call: ToolCall, result: ToolResult):
-    var status = "ok"
+# Tool status/summary derivation, shared by the plain print path and the TUI
+# renderer seam so both surface identical text for the same tool result.
+fn tool_call_status(result: ToolResult) -> text:
     if result.is_error:
-        status = "error"
+        return "error"
+    "ok"
+
+fn tool_call_summary(result: ToolResult) -> text:
     var summary = redact(result.content)
     if summary.len() > 200:
         summary = summary.substring(0, 200) + "..."
-    print "  -> tool " + call.name + " [" + status + "]: " + summary
+    summary
+
+# Surface each tool call + a short result summary to the user. This is the
+# PLAIN (raw print) renderer, used headless / when stdout is not a tty. The
+# TUI passes its own renderer (chat_tui.tui_tool_renderer) into
+# run_agent_loop_rendered instead.
+fn _emit_tool(call: ToolCall, result: ToolResult):
+    print "  -> tool " + call.name + " [" + tool_call_status(result) + "]: " + tool_call_summary(result)
 
 # Run the agent loop. The `responder` is the model seam: given the running
 # transcript it returns a ModelResponse (assistant text + any tool_use calls).
@@ -178,6 +188,15 @@ fn _emit_tool(call: ToolCall, result: ToolResult):
 # ungated. The loop is hard-capped so a model that never stops asking for tools
 # cannot run forever.
 fn run_agent_loop(policy: PermissionPolicy, initial: [Message], responder: fn([Message]) -> ModelResponse, max_iterations: i64) -> AgentResult:
+    # Backward-compatible entry: uses the plain print renderer. Existing callers
+    # (tools_spec.spl, headless CLI) keep working unchanged.
+    run_agent_loop_rendered(policy, initial, responder, max_iterations, _emit_tool)
+
+# Renderer-seam variant. `on_tool` is called for every gated tool result; the
+# headless path passes `_emit_tool` (print), the TUI passes a renderer that
+# appends a styled line to the transcript. Everything else is identical - every
+# tool call still traverses run_tool (the permission gate).
+fn run_agent_loop_rendered(policy: PermissionPolicy, initial: [Message], responder: fn([Message]) -> ModelResponse, max_iterations: i64, on_tool: fn(ToolCall, ToolResult)) -> AgentResult:
     var cap = max_iterations
     if cap <= 0:
         cap = AGENT_MAX_ITERATIONS
@@ -196,6 +215,6 @@ fn run_agent_loop(policy: PermissionPolicy, initial: [Message], responder: fn([M
         for call in resp.tool_calls:
             val result = run_tool(policy, call)
             tool_count = tool_count + 1
-            _emit_tool(call, result)
+            on_tool(call, result)
             transcript = transcript + [Message(role: "user", content: _tool_result_message(call, result))]
     AgentResult(final_text: final_text, iterations: iters, stopped_reason: "max_iterations", tool_calls_made: tool_count)

@@ -181,6 +181,30 @@ Each dimension: target architecture in the shipped path, disposition of existing
 - **Acceptance:** it-block test asserts one dispatch emits a structured event
   with latency, outcome, retry count, and token/cost fields.
 
+### 11. UI — Simple TUI  (P1)  [updated 2026-07-07, user directive]
+
+- **Directive:** the interactive UI uses Simple's own **pure-Simple** TUI
+  framework (`std.tui`, ANSI-based, no ncurses / no FFI terminal lib) in most
+  cases — not raw `print`, not a GUI, not a third-party dep. Prefer pure-Simple
+  infrastructure wherever a stdlib module already covers the need.
+- **Target:** A `chat_tui.spl` chat shell built on `std.tui` widgets
+  (`BoxWidget` transcript panel, `ListWidget` scrollback, `InputWidget` prompt
+  line, `TextWidget`/`style.*` for user-vs-assistant styling), following the
+  proven render-loop pattern in `src/app/editor/tui_shell.spl`. The existing raw
+  `print` at `chat.spl:172` (`_emit_tool`) is replaced by a `render_tool_call`
+  widget line through a renderer seam on `run_agent_loop`.
+- **"In most cases" nuance:** TUI is the default for an interactive TTY; when
+  stdout is not a tty (piped / CI / MCP-server mode) the renderer seam falls back
+  to the plain `print` path, so headless/JSON usage is unchanged.
+- **claude_full disposition:** the island's `ink/`, `screens/`, `components/` UI
+  is a React/Ink-style port that does NOT run and is NOT pure-Simple-TUI —
+  ignore; build on `std.tui` fresh.
+- **Acceptance:** it-block tests assert the pure formatting helpers (turn line,
+  tool-call line, user-vs-assistant style) produce the expected strings, and that
+  the renderer seam selects TUI vs plain correctly given a tty/flag input.
+- **Known gap:** no incremental/streaming re-render in `std.tui` yet — assistant
+  replies render after completion; streaming token render is the upgrade path.
+
 ---
 
 ## Design Principles
@@ -192,3 +216,7 @@ Each dimension: target architecture in the shipped path, disposition of existing
 - `claude_full/` is a parts bin: each module is either wired in, rewritten, or
   deleted per the dispositions above — it is not shipped wholesale and its LOC is
   not counted as parity.
+- **Pure-Simple infrastructure first.** Reach for a Simple stdlib module before
+  any FFI/C/Rust or external dependency (UI → `std.tui`; JSON → `json_helpers`;
+  process/fs/net → owner facades). Drop to `extern`/runtime only when no
+  pure-Simple path exists, and record why.

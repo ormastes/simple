@@ -53,7 +53,14 @@ Design reference: `doc/05_design/llm_caret_claude_cli_full_parity.md`
 
 ## Phase 1 — P0s (safety and reliability of the shipped path)
 
-- **1.1 Real tool execution + permission gating.**
+**Status (2026-07-07): DONE.** 1.1 `tools.spl` (28/28), 1.2 `retry.spl` (29/29),
+1.3 `redact.spl` (20/20). Plus a JSON response-parsing correctness fix
+(`json_find`/`_digit_val` in `json_helpers.spl`) that root-caused a cross-module
+`char.to_i64`/`Option<i64>` tag-box miscompilation — all 9 shipped modules
+rewired; full llm_caret unit suite 273 pass / 0 fail. Landed at origin
+`d90b9c3f`. See bug `llm_caret_index_of_optioni64_tagbox_2026-07-07`.
+
+- **1.1 Real tool execution + permission gating.**  ✅ DONE
   - Scope: `run_tool(name,input)` dispatch + single `permission_gate` all calls
     traverse; real executors (process spawn, FS read/write/edit, WebFetch).
   - Files: new dispatch/gate module under `src/app/llm_caret/`; rewrite/port from
@@ -62,7 +69,7 @@ Design reference: `doc/05_design/llm_caret_claude_cli_full_parity.md`
   - Acceptance (it-block): denied Bash does NOT spawn (spawn spy); allowed does;
     `ask` routes to responder; no tool executes ungated.
   - Exit: every tool path is gated and really executes.
-- **1.2 Retry/backoff/timeout.**
+- **1.2 Retry/backoff/timeout.**  ✅ DONE
   - Scope: `with_retry` around `dispatch_send`; per-attempt timeout on every
     `rt_http_request`/`rt_process_run`; retryable-vs-terminal error type.
   - Files: `provider.spl`, `claude_api.spl`, `claude_cli.spl`, `openai_api.spl`.
@@ -70,7 +77,7 @@ Design reference: `doc/05_design/llm_caret_claude_cli_full_parity.md`
     persistent-500 exhausts and returns terminal error; hung subprocess killed at
     timeout.
   - Exit: no transient failure surfaces raw; no unbounded subprocess wait.
-- **1.3 Secret redaction + injection defense.**
+- **1.3 Secret redaction + injection defense.**  ✅ DONE
   - Scope: redaction pass before any log/JSONL persist; tag/wrap untrusted tool
     output before it re-enters history.
   - Files: `provider.spl`, `chat.spl`, WebFetch/file-read executors.
@@ -109,6 +116,21 @@ Design reference: `doc/05_design/llm_caret_claude_cli_full_parity.md`
   - Acceptance: it-block spawns one subagent running a gated tool; parent history
     holds the synthesized result. If deferred, DESCOPE explicitly in docs.
   - Exit: single-subagent loop works, or subagents are documented out of scope.
+- **2.6 Chat UI on Simple TUI (pure-Simple).**  [added 2026-07-07, user directive]
+  - Scope: interactive chat shell built on `std.tui` (pure-Simple, ANSI, no
+    ncurses/FFI): `BoxWidget` transcript, `ListWidget` scrollback, `InputWidget`
+    prompt, `style.*` user-vs-assistant. Replace the raw `print` at `chat.spl:172`
+    (`_emit_tool`) with a `render_tool_call` widget line via a renderer seam on
+    `run_agent_loop`. Default to TUI on an interactive tty; fall back to plain
+    `print` when non-tty (piped/CI/server) — "Simple TUI in most cases".
+  - Files: new `src/app/llm_caret/chat_tui.spl`; edit `chat.spl` (renderer seam),
+    `mod.spl` (exports); pattern from `src/app/editor/tui_shell.spl`.
+  - Acceptance (it-block): pure formatting helpers produce expected turn/tool-line
+    strings and distinct user/assistant styling; renderer seam selects TUI vs
+    plain by tty/flag; a fake-model loop iteration calls `render_tool_call` (not
+    `print`) in TUI mode.
+  - Exit: interactive `llm_caret` chats through a `std.tui` UI; headless/JSON
+    paths unchanged. Streaming token re-render is a documented upgrade path.
 
 ## Phase 3 — P2s + observability + live gates
 
