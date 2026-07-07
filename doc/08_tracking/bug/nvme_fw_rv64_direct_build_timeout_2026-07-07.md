@@ -678,3 +678,31 @@ Terminated
 ```
 
 The current measured timeout is now around `logic_band_alloc_cases.spl`.
+
+## Update — media retire cases split, probe reaches scheduler
+
+`logic_media_retire_cases.spl` was reduced to a small case facade, with
+block/spare validation and retire/program result assertions moved into separate
+case modules. The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but this run got through band allocation cases and
+stopped at scheduler cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_band_geometry_cases.spl
+[BOOTSTRAP-PHASE] ... logic_band_alloc_cases.spl chars=335
+[BOOTSTRAP-PHASE] ... logic_band_alloc_cases.spl
+[BOOTSTRAP-PHASE] ... logic_sched_cases.spl chars=328
+Terminated
+```
+
+The current measured timeout is now around `logic_sched_cases.spl`.
