@@ -97,7 +97,7 @@ impl TaskPool:
         me.t_newppn[slot] = UNMAP
         me.t_seq[slot] = 0
         me.t_status[slot] = SC_SUCCESS
-        me.live = me.live + 1
+        me.live = me.live_count() + 1
         Handle(pool: 0, index: slot, generation: me.gen[slot])
 
     # valid: true iff the handle references a live slot with matching generation.
@@ -184,10 +184,14 @@ impl TaskPool:
     me release(h: Handle):
         val v = me.valid(h)
         if v:
+            val live: i64 = me.live_count()
             me.used[h.index] = 0
             val og = me.gen[h.index]
             me.gen[h.index] = og + 1
-            me.live = me.live - 1
+            if live > 0:
+                me.live = live - 1
+            else:
+                me.live = 0
 
     me live_count() -> i64:
         me.counted_live()
@@ -240,6 +244,11 @@ fn fw_pool_selftest() -> i64:
     fail = fail + expect_eq(lc2, 2, "second acquire: live=2")
     p.live = -4
     fail = fail + expect_eq(p.live_count(), 0, "corrupted negative pool live clamps to zero")
+    val hneg = p.acquire(21, 201, 1, 55)
+    fail = fail + expect_eq(if p.valid(hneg): 1 else: 0, 1, "corrupted negative pool live still allows acquire")
+    fail = fail + expect_eq(p.live_count(), 1, "corrupted negative pool live increments from zero")
+    p.release(hneg)
+    fail = fail + expect_eq(p.live_count(), 0, "release after corrupted negative pool live stays nonnegative")
     p.live = POOL_CAP + 99
     fail = fail + expect_eq(p.live_count(), 2, "corrupted oversized pool live counts slots")
     p.live = 2
