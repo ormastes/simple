@@ -77,3 +77,60 @@ threads without proving backend state safety.
 enums** (`enum Payload{Present(int),Absent}` etc.) — built-in `Result`/`Ok`/`Err`/`?`
 are themselves broken on the deployed binary (the frozen `938a4eb` fix), so they
 cannot be used as gate discriminators until after redeploy.
+
+**2026-07-06 supersession:** the gate + fixtures were migrated from ephemeral
+/tmp to **tracked** `scripts/check/cert/redeploy_gate/` (runner
+`redeploy_gate.shs` + 10 fixtures, 12 checks, pushed to origin). The tracked
+fixtures target the *candidate rebuilt* binary, so `Ok(42)→42` IS the correct
+#109 discriminator there (the broken deployed binary prints 5); the custom-enum
+caveat above only applied to gating the *frozen deployed* binary.
+
+### 2026-07-06/07 update: stage-4 failure taxonomy — all four classes root-caused
+
+Chronology of stage-4 CLI build failures, each with evidence and disposition:
+
+| # | Error class | Count | Root cause | Status |
+|---|-------------|-------|-----------|--------|
+| 1 | LLVM IR "Incorrect number of arguments" on `mcall_direct` | 545× | seed llvm-lib method-call lowering mis-counts self param | **FIXED** — functions.rs indirect-call fallback (on main, `ba387415d7f`); post-fix logs read 0 |
+| 2 | LLVM IR "Call parameter type does not match" (`rt_dir_create`) | 25× | extern C-ABI signature registration mismatch | **FIXED** — same commit, forced C-ABI indirect call; post-fix logs read 0 |
+| 3 | "Use explicit exports instead" on `export use module.*` | 60 sites | **RED HERRING** — `ErrorHintLevel::Warning`, exit 0 (module_system.rs:563 + passing unit test). Never fatal | no action; do NOT "fix" |
+| 4 | Silent death mid-build, no error line | 3+ runs over 2 days | **RC=134 SIGABRT: `thread 'simple-main' has overflowed its stack`** after parser errors at `src/compiler/backend/target_presets.spl:318:101` — seed parser fails on `mut` **parameter** syntax (`fn f(preset: T, mut options: CompileOptions) -> ...`), then error-recovery recurses unboundedly | **OPEN — the actual redeploy wall.** Fix design: `doc/05_design/compiler/bootstrap/stage4_redeploy_failure_and_fix_design.md` |
+
+Evidence for class 4 (first instrumented run, 2026-07-06 11:58→14:08, RC
+captured; prior runs died without recording an exit code):
+`[parser_error] line 318:101: unexpected token in expression: ':'` on the
+`-> CompileOptions:` tail of a `mut`-param fn signature, followed by
+`fatal runtime error: stack overflow, aborting`. `mut` params appear in ≥5
+compiler .spl files (60.mir_opt ×3, 70.backend ×2), so skipping one file is not
+a fix. Secondary hazard found: BOTH `src/compiler/backend/target_presets.spl`
+(failing path) and `src/compiler/70.backend/target_presets.spl` exist —
+duplicate-module risk (see #41 class), must be reconciled during the fix.
+
+Operational hazards confirmed while diagnosing (all can kill a 2h stage-4 run):
+- `kill_simple_monitor` kills `native_build_main` at **RSS ≥ 24 GB** (3 kills
+  06:33–07:00 @30 GB). Mitigation: `--threads 8`, watch RSS.
+- Un-instrumented runs die silently (no RC, no signal in logs). Mandate: every
+  stage-4 run wraps in `sh -c '...; echo RC=$?'` with stderr preserved.
+
+### Execution plan (2026-07-07, per user directive)
+
+1. **Docs first** (this update + the design doc) — DONE with this commit.
+2. **Fix BOTH sides in an isolated worktree** (do not disturb main WC):
+   - Rust seed: bound parser error-recovery recursion (fail gracefully with
+     file:line context, never SIGABRT); accept `mut` param syntax if cheap.
+   - Pure-Simple: make the 5+ `mut`-param signatures seed-compatible
+     (mechanical `var` local rebind) ONLY if seed-side `mut`-param support is
+     not cheap; language-level `mut` params stay valid for the self-hosted
+     compiler. Reconcile the duplicate target_presets.spl.
+3. **Bootstrap pure-Simple only** (`bootstrap-from-scratch.sh`, NO
+   `--full-bootstrap` — reuse the existing fixed seed; per user, a passing
+   seed+full bootstrap was already achieved by another lane).
+4. **Gate**: `scripts/check/cert/redeploy_gate/redeploy_gate.shs <candidate>` —
+   12 behavioral checks; deploy consideration only on GATE all-PASS.
+5. **Deploy** (user go-ahead required): backup current
+   `bin/release/x86_64-unknown-linux-gnu/simple` → `.bak-<date>`, swap via
+   `cp` to `.new` + `mv` (avoids "Text file busy"), immediate smoke + gate on
+   the deployed path, instant rollback on any regression.
+6. **Close-out**: #45/#99/#112 verify on the redeployed binary (gate checks
+   cfg-arch-dispatch-a/b, class-in-array-mutation=777 interpret-mode,
+   enum-payload=42); update ACTIVATION_MANIFEST + this doc.
