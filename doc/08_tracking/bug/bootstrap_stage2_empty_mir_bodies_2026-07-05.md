@@ -635,3 +635,35 @@ branches on `icmp ne i64 undef` and returns `1`. The next blocker is bootstrap
 HIR/MIR lowering for the real main expression forms: condition values from
 method calls, indexing, string equality, and print. Runtime helper shims are not
 the right next fix.
+
+## 2026-07-07 Progress: bootstrap call args preserved, real-main still undef
+
+Two source-level bootstrap lowering gaps were closed:
+
+- bootstrap HIR expression lowering now preserves call and method-call
+  arguments instead of constructing empty calls in `SIMPLE_BOOTSTRAP=1`;
+- untyped bootstrap `.len()` calls now route through `rt_array_len` rather than
+  returning an uninitialized temporary.
+
+Focused evidence:
+
+```text
+PASS test/01_unit/compiler/hir/bootstrap_expr_args_source_spec.spl
+PASS test/01_unit/compiler/mir/bootstrap_len_fallback_source_spec.spl
+real_main_hir_args_rc=0
+[mir-lower-free] done instr-total=12 term-total=24
+[llvm-tools] llc-object
+```
+
+The full real-main artifact is still not usable:
+
+```text
+build/mini_builds/stage2_real_main_hir_args --version
+version_rc=1
+stdout/stderr empty
+```
+
+The latest preserved IR still shows `__simple_main` branching on
+`icmp ne i64 undef`. That means the remaining blocker is before or at HIR
+condition expression lowering: the `if` conditions reach MIR as error/no-op
+locals before method-call/index/string equality lowering can define them.

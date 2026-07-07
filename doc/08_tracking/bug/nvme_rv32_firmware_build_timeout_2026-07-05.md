@@ -1331,3 +1331,29 @@ stdout/stderr, and the preserved IR branches on `icmp ne i64 undef`.
 Firmware production proof remains blocked on real bootstrap HIR/MIR expression
 lowering for method-call conditions, argv indexing, string equality, and print.
 Do not add more bootstrap runtime shims for this lane; fix the lowering gap.
+
+### Latest bootstrap progress: call args preserved, condition values still undef (2026-07-07)
+
+Bootstrap HIR lowering now preserves call/method-call arguments in bootstrap
+mode, and bootstrap `.len()` has a fail-closed array runtime fallback instead
+of producing an uninitialized temp. Focused checks pass:
+
+```text
+PASS test/01_unit/compiler/hir/bootstrap_expr_args_source_spec.spl
+PASS test/01_unit/compiler/mir/bootstrap_len_fallback_source_spec.spl
+```
+
+The bounded real-main shard still links but does not run as a CLI:
+
+```text
+real_main_hir_args_rc=0
+[mir-lower-free] done instr-total=12 term-total=24
+[llvm-tools] llc-object
+version_rc=1
+stdout/stderr empty
+```
+
+RV32 firmware proof remains blocked until real bootstrap `if` condition
+expressions lower to defined MIR locals. The current IR still branches on
+`icmp ne i64 undef`, so the next fix should target HIR condition expression
+lowering before string/index/print behavior.
