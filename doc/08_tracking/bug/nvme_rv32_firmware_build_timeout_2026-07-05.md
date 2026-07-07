@@ -1357,3 +1357,45 @@ RV32 firmware proof remains blocked until real bootstrap `if` condition
 expressions lower to defined MIR locals. The current IR still branches on
 `icmp ne i64 undef`, so the next fix should target HIR condition expression
 lowering before string/index/print behavior.
+
+### Latest bootstrap progress: real-main CLI branches execute (2026-07-07)
+
+The `icmp ne i64 undef` blocker is fixed for the bounded real-main shard.
+Source regression now covers:
+
+- normal bootstrap binary operators bypass the optional special-op nil path;
+- untyped bootstrap indexes default to text values;
+- `lower_if` preserves explicit `return` terminators instead of overwriting
+  branch blocks with `goto merge`;
+- pointer/text CLI comparisons lower through typed `rt_strcmp`;
+- direct `get_cli_args()[i]` lowers through `spl_get_arg(i)` instead of raw
+  `getelementptr` on the runtime array handle.
+
+Evidence:
+
+```text
+PASS test/01_unit/compiler/mir/bootstrap_binary_lowering_source_spec.spl
+real_main_order_fix_rc=0
+version_rc=0
+noargs_rc=0
+native_build_rc=1
+```
+
+The generated IR contains:
+
+```text
+call ptr @spl_get_arg(i64 ...)
+call i64 @rt_strcmp(ptr ..., ptr ...)
+declare ptr @spl_get_arg(i64)
+declare i64 @rt_strcmp(ptr, ptr)
+```
+
+Firmware production proof remains blocked, but the blocker has moved: the
+bootstrap CLI now matches real command branches, while `native-build` still
+returns `1` because `run_native_build_bootstrap` is still a stub and print /
+string interpolation are still not emitted visibly.
+
+Review follow-up before commit narrowed the string-compare change so arbitrary
+pointer equality remains pointer equality. `rt_strcmp` is used only for
+bootstrap string-derived operands tracked in LLVM lowering, and index lowering
+again evaluates `base` before `index`.

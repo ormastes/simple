@@ -239,20 +239,25 @@ impl MirLowering:
 
             case Binary(op, left, right):
 
-                # Check if this is a special pipeline operator first
-                val special_result = self.lower_binop_special(op, left, right)
-                if val special_local = special_result:
-                    special_local
-                else:
-                    # Normal binary operation
-                    val left_local = self.lower_expr(left)
-                    val right_local = self.lower_expr(right)
-                    val mir_op = self.lower_binop(op)
-                    val result_type = self.infer_binop_type(op)
-                    var b = self.builder
-                    val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_local), mir_operand_copy(right_local), result_type)
-                    self.builder = b
-                    binop_result
+                match op:
+                    case PipeForward | Compose | ComposeBack | Parallel | LayerConnect:
+                        val special_result = self.lower_binop_special(op, left, right)
+                        if val special_local = special_result:
+                            special_local
+                        else:
+                            var b_special = self.builder
+                            val temp = b_special.new_temp(MirType.i64())
+                            self.builder = b_special
+                            temp
+                    case _:
+                        val left_local = self.lower_expr(left)
+                        val right_local = self.lower_expr(right)
+                        val mir_op = self.lower_binop(op)
+                        val result_type = self.infer_binop_type(op)
+                        var b = self.builder
+                        val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_local), mir_operand_copy(right_local), result_type)
+                        self.builder = b
+                        binop_result
 
             case Unary(op, operand):
 
@@ -280,8 +285,12 @@ impl MirLowering:
                 # Array indexing: arr[i] -> bounds_check + GEP + Load
                 val base_local = self.lower_expr(base)
                 val index_local = self.lower_expr(index)
+                if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):
+                    return cli_arg_local
                 self.emit_bounds_check_for_index(base.type_, base_local, index_local)
                 var result_type = MirType.i64()
+                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    result_type = self.bootstrap_text_type()
                 if val expr_type = expr_value.type_:
                     result_type = self.lower_type(expr_type)
                 var b = self.builder

@@ -88,7 +88,12 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.emit("; External call declarations")
             for unknown_name in self.unknown_func_decls.keys():
                 if not self.defined_func_names.has(unknown_name):
-                    self.builder.emit("declare i64 @{unknown_name}(...)")
+                    if unknown_name == "spl_get_arg":
+                        self.builder.emit("declare ptr @spl_get_arg(i64)")
+                    elif unknown_name == "rt_strcmp":
+                        self.builder.emit("declare i64 @rt_strcmp(ptr, ptr)")
+                    else:
+                        self.builder.emit("declare i64 @{unknown_name}(...)")
 
         if self.string_global_text.len() > 0:
             self.builder.emit("")
@@ -162,6 +167,7 @@ impl MirTextCodegen for MirToLlvm:
         self.return_locals = {}
         self.bool_locals = {}
         self.ptr_locals = {}
+        self.string_locals = {}
         var local_i = 0
         while local_i < body.locals.len():
             val local = body.locals[local_i]
@@ -494,6 +500,7 @@ impl MirTextCodegen for MirToLlvm:
                 val str_len = escaped_string_byte_len(v) + 1
                 val nit = self.native_int()
                 self.mark_ptr_local(dest_id)
+                self.string_locals[dest_id] = true
                 self.builder.emit("  {dest_name} = getelementptr inbounds [{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; string const")
             case Zero:
                 if is_float_type(llvm_ty):
@@ -532,6 +539,8 @@ impl MirTextCodegen for MirToLlvm:
             ty = "ptr"
             self.local_types[dest_id] = "ptr"
             self.ptr_locals[dest_id] = true
+        if self.string_locals.has(src_id):
+            self.string_locals[dest_id] = true
         if self.bool_locals.has(src_id):
             ty = "i1"
             self.local_types[dest_id] = "i1"
@@ -608,12 +617,24 @@ impl MirTextCodegen for MirToLlvm:
             case Shr: self.builder.emit_ashr(dest_name, ty, left_val, right_val)
             case Eq:
                 val eq_cmp_ty = self.get_operand_type(left)
-                val eq_pred = if is_float_type(eq_cmp_ty): "oeq" else: "eq"
-                self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, left_val, right_val)
+                if eq_cmp_ty == "ptr" and self.should_use_bootstrap_strcmp(left, right):
+                    self.unknown_func_decls["rt_strcmp"] = true
+                    val strcmp_result = self.builder.fresh_local()
+                    self.builder.emit("  {strcmp_result} = call i64 @rt_strcmp(ptr {left_val}, ptr {right_val})")
+                    self.emit_comparison(dest_name, ty, "eq", "i64", strcmp_result, "0")
+                else:
+                    val eq_pred = if is_float_type(eq_cmp_ty): "oeq" else: "eq"
+                    self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, left_val, right_val)
             case Ne:
                 val ne_cmp_ty = self.get_operand_type(left)
-                val ne_pred = if is_float_type(ne_cmp_ty): "one" else: "ne"
-                self.emit_comparison(dest_name, ty, ne_pred, ne_cmp_ty, left_val, right_val)
+                if ne_cmp_ty == "ptr" and self.should_use_bootstrap_strcmp(left, right):
+                    self.unknown_func_decls["rt_strcmp"] = true
+                    val strcmp_result = self.builder.fresh_local()
+                    self.builder.emit("  {strcmp_result} = call i64 @rt_strcmp(ptr {left_val}, ptr {right_val})")
+                    self.emit_comparison(dest_name, ty, "ne", "i64", strcmp_result, "0")
+                else:
+                    val ne_pred = if is_float_type(ne_cmp_ty): "one" else: "ne"
+                    self.emit_comparison(dest_name, ty, ne_pred, ne_cmp_ty, left_val, right_val)
             case Lt:
                 val lt_cmp_ty = self.get_operand_type(left)
                 val lt_pred = if is_float_type(lt_cmp_ty): "olt" else: "slt"
@@ -647,6 +668,24 @@ impl MirTextCodegen for MirToLlvm:
                 val offset_ptr = self.builder.fresh_local()
                 self.builder.emit("  {offset_ptr} = getelementptr i8, ptr {left_val}, {nit} {right_val}")
                 self.builder.emit("  {dest_name} = ptrtoint ptr {offset_ptr} to {nit}")
+
+    me should_use_bootstrap_strcmp(left: MirOperand, right: MirOperand) -> bool:
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            return false
+        self.is_string_operand(left) or self.is_string_operand(right)
+
+    me is_string_operand(operand: MirOperand) -> bool:
+        match operand.kind:
+            case Const(value, _):
+                match value:
+                    case Str(_):
+                        true
+                    case _:
+                        false
+            case Copy(local) | Move(local):
+                self.string_locals.has(self.local_id_value(local))
+            case _:
+                false
 
     me translate_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand):
         """Translate unary operation."""
@@ -701,7 +740,7 @@ impl MirTextCodegen for MirToLlvm:
                 var known_ret_ty = self.lookup_function_return_type(func_name)
                 if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     val bare_func_name = if func_name.starts_with("@"): func_name[1:] else: func_name
-                    if bare_func_name == "get_args" or bare_func_name == "rt_get_args" or bare_func_name == "get_cli_args" or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args":
+                    if bare_func_name == "get_args" or bare_func_name == "rt_get_args" or bare_func_name == "get_cli_args" or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args" or bare_func_name == "spl_get_arg":
                         known_ret_ty = "ptr"
                     elif bare_func_name == "eprint":
                         known_ret_ty = "void"
@@ -710,6 +749,8 @@ impl MirTextCodegen for MirToLlvm:
                     self.local_types[dest_id] = ret_ty
                     if ret_ty == "ptr":
                         self.ptr_locals[dest_id] = true
+                        if func_name == "@spl_get_arg":
+                            self.string_locals[dest_id] = true
                     if ret_ty == "i1":
                         self.bool_locals[dest_id] = true
                 ret_ty = self.valid_llvm_type(ret_ty)

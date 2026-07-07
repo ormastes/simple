@@ -667,3 +667,60 @@ The latest preserved IR still shows `__simple_main` branching on
 `icmp ne i64 undef`. That means the remaining blocker is before or at HIR
 condition expression lowering: the `if` conditions reach MIR as error/no-op
 locals before method-call/index/string equality lowering can define them.
+
+## 2026-07-07 Progress: real-main branch conditions and argv compares defined
+
+The bounded real-main bootstrap shard now lowers normal binary operators,
+bootstrap argv indexes, branch returns, and CLI text comparisons without the
+previous `undef`/raw-array-pointer failures.
+
+Focused regression:
+
+```text
+PASS test/01_unit/compiler/mir/bootstrap_binary_lowering_source_spec.spl
+4 examples, 0 failures
+```
+
+Bounded build evidence:
+
+```text
+real_main_namedvar_cli_arg_fix_rc=0
+[llvm-tools] llc-object
+```
+
+The preserved LLVM IR now contains defined condition values, preserves return
+terminators in branch blocks, and lowers argv comparisons through the runtime C
+argv accessor:
+
+```text
+%l10 = call ptr @spl_get_arg(i64 %l9)
+%0 = call i64 @rt_strcmp(ptr %l10, ptr %l11)
+%l14 = icmp eq i64 %0, 0
+declare i64 @rt_strcmp(ptr, ptr)
+declare ptr @spl_get_arg(i64)
+```
+
+Smoke evidence:
+
+```text
+build/mini_builds/stage2_real_main_order_fix --version
+version_rc=0
+
+build/mini_builds/stage2_real_main_order_fix
+noargs_rc=0
+
+build/mini_builds/stage2_real_main_order_fix native-build
+native_build_rc=1
+```
+
+Sidecar review caught two risks before commit: broad pointer equality rewriting
+and reversed index evaluation order. The final patch narrows `rt_strcmp` to
+bootstrap string-derived operands tracked through `string_locals`, and restores
+ordinary `base`-before-`index` lowering before the CLI argv fast path.
+
+Remaining blockers are now narrower:
+
+- bootstrap `print` / interpolation still does not emit visible CLI output;
+- `run_native_build_bootstrap` remains a stub returning `1`;
+- full production firmware proof still needs the real native-build path to
+  execute instead of only matching CLI command branches.

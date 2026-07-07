@@ -1,0 +1,59 @@
+extern fn rt_file_read_text(path: text) -> text
+
+fn expr_dispatch_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+
+fn mir_lowering_stmts_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/mir_lowering_stmts.spl") ?? ""
+
+fn switch_operators_calls_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
+
+fn mir_to_llvm_core_source() -> text:
+    rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
+
+describe "bootstrap MIR binary lowering source":
+    it "lowers normal binary operators without optional special-op nil checks":
+        val source = expr_dispatch_source()
+
+        expect(source).to_contain("case PipeForward | Compose | ComposeBack | Parallel | LayerConnect:")
+        expect(source).to_contain("case _:")
+        expect(source).to_contain("val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_local), mir_operand_copy(right_local), result_type)")
+
+    it "types unannotated bootstrap indexes as text values":
+        val source = expr_dispatch_source()
+
+        expect(source).to_contain("if (mir_expr_env_get(\"SIMPLE_BOOTSTRAP\") ?? \"\") == \"1\":")
+        expect(source).to_contain("result_type = self.bootstrap_text_type()")
+        expect(source).to_contain("val base_local = self.lower_expr(base)")
+        expect(source).to_contain("if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):")
+        expect(source).to_contain("return cli_arg_local")
+
+        val helper_source = switch_operators_calls_source()
+        expect(helper_source).to_contain("MirSignature(params: [MirType.i64()], return_type: self.bootstrap_text_type(), is_variadic: false)")
+
+    it "preserves explicit branch terminators in lowered if blocks":
+        val source = mir_lowering_stmts_source()
+
+        expect(source).to_contain("if not b3.current_block_has_explicit_terminator():")
+        expect(source).to_contain("if not b5.current_block_has_explicit_terminator():")
+        expect(source).to_contain("b3.terminate_goto(merge_block)")
+        expect(source).to_contain("b5.terminate_goto(merge_block)")
+
+    it "lowers pointer text equality through runtime string compare":
+        val source = mir_to_llvm_core_source()
+
+        expect(source).to_contain("if eq_cmp_ty == \"ptr\" and self.should_use_bootstrap_strcmp(left, right):")
+        expect(source).to_contain("if ne_cmp_ty == \"ptr\" and self.should_use_bootstrap_strcmp(left, right):")
+        expect(source).to_contain("self.unknown_func_decls[\"rt_strcmp\"] = true")
+        expect(source).to_contain("self.should_use_bootstrap_strcmp(left, right)")
+        expect(source).to_contain("me should_use_bootstrap_strcmp(left: MirOperand, right: MirOperand) -> bool:")
+        expect(source).to_contain("self.is_string_operand(left) or self.is_string_operand(right)")
+        expect(source).to_contain("self.string_locals[dest_id] = true")
+        expect(source).to_contain("self.string_locals.has(self.local_id_value(local))")
+        expect(source).to_contain("call i64 @rt_strcmp(ptr")
+        expect(source).to_contain("declare ptr @spl_get_arg(i64)")
+        expect(source).to_contain("declare i64 @rt_strcmp(ptr, ptr)")
+        expect(source).to_contain("bare_func_name == \"spl_get_arg\"")
+        expect(source).to_contain("self.emit_comparison(dest_name, ty, \"eq\", \"i64\", strcmp_result, \"0\")")
+        expect(source).to_contain("self.emit_comparison(dest_name, ty, \"ne\", \"i64\", strcmp_result, \"0\")")
