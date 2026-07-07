@@ -19,6 +19,7 @@ step count, tested directly.
 use nvme_types.*
 
 val NUM_CHANNELS: i64 = 8
+val SCHED_COUNTER_MAX: i64 = 1000000000000000000
 
 # The channel a block lives on — a derived view over the existing geometry (no PPN change).
 fn channel_of(blk: i64) -> i64:
@@ -34,6 +35,13 @@ fn sched_fill(n: i64, v: i64) -> [i64]:
         a.push(v)
         i = i + 1
     a
+
+fn sched_counter_next(v: i64) -> i64:
+    if v < 0:
+        return 1
+    if v >= SCHED_COUNTER_MAX:
+        return SCHED_COUNTER_MAX
+    v + 1
 
 struct ChannelSched:
     pending: [i64]      # per-channel queued op count
@@ -51,7 +59,7 @@ impl ChannelSched:
         val ch: i64 = channel_of(blk)
         if me.pending[ch] < 0:
             me.pending[ch] = 0
-        me.pending[ch] = me.pending[ch] + 1
+        me.pending[ch] = sched_counter_next(me.pending[ch])
 
     me queue_depth(ch: i64) -> i64:
         if ch < 0 or ch >= NUM_CHANNELS:
@@ -83,11 +91,11 @@ impl ChannelSched:
             while ch < NUM_CHANNELS:
                 if me.pending[ch] > 0:
                     me.pending[ch] = me.pending[ch] - 1
-                    me.done = me.done + 1
+                    me.done = sched_counter_next(me.done)
                     dispatched = dispatched + 1
                 ch = ch + 1
             if dispatched > 0:
-                me.steps = me.steps + 1
+                me.steps = sched_counter_next(me.steps)
             guard = guard + 1
         me.steps
 
@@ -140,5 +148,17 @@ fn fil_scheduler_selftest() -> i64:
     fail = fail + expect_eq(s2.completed(), 9, "sched: run recovers negative completed count")
     fail = fail + expect_eq(steps2, 8, "sched: same-channel batch serializes (no parallelism)")
     fail = fail + expect_eq(s2.completed(), 9, "sched: all 9 ops completed")
+
+    var s3: ChannelSched = channel_sched_new()
+    s3.pending[0] = SCHED_COUNTER_MAX
+    s3.submit(0)
+    fail = fail + expect_eq(s3.queue_depth(0), SCHED_COUNTER_MAX, "sched: pending counter saturates")
+
+    var s4: ChannelSched = channel_sched_new()
+    s4.pending[0] = 1
+    s4.done = SCHED_COUNTER_MAX
+    s4.steps = SCHED_COUNTER_MAX
+    fail = fail + expect_eq(s4.run(), SCHED_COUNTER_MAX, "sched: step counter saturates")
+    fail = fail + expect_eq(s4.completed(), SCHED_COUNTER_MAX, "sched: completed counter saturates")
 
     fail
