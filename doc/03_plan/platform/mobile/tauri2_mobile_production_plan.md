@@ -58,6 +58,13 @@ to production)` → `P3 (iOS device AOT, gated on Task #21)` + `P4 (release lane
 - **Gate:** either all §7 design gates pass **fresh today**, or the failing lane is filed as a bug in
   `doc/08_tracking/bug/` with the exact validator row that failed. No green claim without today's run.
 - **Size:** S. **Deps:** P0.1 (needs a buildable shell). **Risk:** emulator/SDK drift; rollback n/a.
+- **Partial re-verify 2026-07-08:** direct (non-wrapper) build+install+launch+capture check —
+  see `doc/09_report/mobile_p0_lane_reverification_2026-07-08.md`. iOS sim and Android emulator
+  builds both `BUILD SUCCEEDED`/APK+AAB produced, install+launch clean, render pipeline fires
+  (`[tauri-shell] render, html_len=336705` + `eval OK` on **both** platforms), but the captured
+  screen is **blank white** on both — not the styled dark showcase the retained evidence claims.
+  The aggregate wrapper itself was not run (out of timebox). Treat the 07-02 retained "pass" as
+  **not reconfirmed**; recommend filing a blank-paint regression bug before P1.2/P1.3 proceed.
 
 ---
 
