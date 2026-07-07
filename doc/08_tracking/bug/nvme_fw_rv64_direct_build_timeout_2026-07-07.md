@@ -736,6 +736,35 @@ Terminated
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
 
+## Update — flush dirty cases split, probe reaches namespace guard
+
+`logic_flush_dirty_cases.spl` was reduced to a small case facade, with valid
+flush dirty-state assertions and dirty clamp assertions moved into separate
+case modules. The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but this run got through flush, admin, reactor, and
+later small logic facades before stopping at namespace guard:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_flush.spl chars=90
+[BOOTSTRAP-PHASE] ... logic_flush.spl
+[BOOTSTRAP-PHASE] ... logic_admin.spl chars=90
+[BOOTSTRAP-PHASE] ... logic_reactor.spl chars=96
+[BOOTSTRAP-PHASE] ... logic_namespace_guard.spl chars=120
+Terminated
+```
+
+The current measured timeout is now around `logic_namespace_guard.spl`.
+
 ## Update — namespace guard cases split
 
 `logic_namespace_guard_cases.spl` was reduced to a small case facade, with
