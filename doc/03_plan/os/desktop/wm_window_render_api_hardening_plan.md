@@ -163,6 +163,85 @@ background-only invalidation efficient — without it, motion re-rasters the who
 **Risk + rollback:** perpetual-dirty regressing idle CPU; rollback = `kind:"motion"` returns the
 loud marker.
 
+**Status (fix-round, 2026-07-07): I8 staged-deferred.**
+
+*Landed:*
+- `MotionBackgroundSource` trait + `"motion"` resolver branch
+  (`src/lib/common/ui/window_scene.spl`), fs-backed `HostMotionBackgroundSource`
+  (`src/os/compositor/background_motion_provider.spl`), executor threading of
+  `t_micros` (`window_scene_draw_ir.spl`, `shared_mdi_framebuffer_scene.spl`).
+- `next_frame_due_micros()` dirty-trigger fold + the pure
+  `shared_wm_motion_dirty_due` predicate, plus a self-re-arming present-loop
+  seam (`hosted_entry.spl`, `shared_wm_motion_background_consume_due`) that
+  advances next-due itself instead of depending on render-side consumption.
+- **The shared-MDI production lane animates with real time threading**:
+  `render_shared_mdi_framebuffer_scene_for_windows` /
+  `_for_simple_gui_scene` (`shared_mdi_framebuffer_scene.spl`) now forward a
+  caller-supplied `t_micros` all the way to the resolver — a registered
+  motion source genuinely advances frames through this real production
+  entry point, not only through direct `SharedWmScene` construction in
+  tests.
+- Not-yet-scheduled `-1` sentinel (was `0`, which caused a spurious dirty
+  fire at process start before any frame had ever been selected) plus
+  registration-time seeding of the real first due
+  (`ensure_host_motion_background_source_registered`).
+- Specced end-to-end in `wm_background_motion_provider_spec.spl` (10
+  examples): construction loud-fail matrix, pure time-based frame advance +
+  frame-drop, dirty-trigger once-per-due-value + self-re-arm across
+  intervals, single-frame static degrade, image-cache reuse, resolve-time
+  loud-fail (no source / unreadable frame, no stale-serve), production-lane
+  animation via the real wrapper call chain, and the sentinel regression
+  guard.
+
+*Deferred, and why:*
+- **Hosted-chrome lane background consumption.** `host_compositor_entry.render_frame()`
+  (the interactive hosted-WM chrome path) still direct-draws chrome via
+  `render_shared_mdi_desktop_chrome` / per-window `render_simple_web_app_content_cached`
+  and never calls `shared_wm_scene_resolve_background` at all — it does not
+  paint a motion background today, by design of this fix round (explicitly
+  out of scope per review: "do not attempt full hosted render_frame
+  background consumption"). It is blocked on the region-dirty dependency
+  below: painting a motion frame here without region-dirty tracking would
+  force a full CSS/chrome re-render (~1.4s lane, see
+  `project_stage4_deploy_blocker_rootcause_2026-07-06.md`-adjacent chrome
+  cache) on every due frame, which is not an acceptable interactive cost.
+- **Design invariant I8 (background-only region dirty) is not met.** The
+  seam's `dirty = true` triggers the loop's existing FULL-frame redraw path
+  (windows + chrome), identical to any other dirty trigger — there is no
+  region-dirty mechanism yet to mark only the background rect. This is this
+  item's already-declared dependency (region/dirty-rect work, perf plan
+  next-wave), not a new gap.
+- **SimpleOS lane** has no motion wiring — tracked under item D (SimpleOS
+  visual-proof lane is blocked independently by the freestanding
+  module-init/primitive-global fault, see the design doc's Lane-parity
+  section).
+- **Video/codec sources are out of scope**, not deferred — the design
+  explicitly restricts motion sources to an ordered PPM frame list; decoding
+  a real video container was never part of this item's contract.
+
+*Follow-up work items (acceptance criteria):*
+1. **I8 region-dirty** — land the region/dirty-rect wave (perf plan
+   next-wave dependency), then change the seam to mark only the background
+   rect dirty instead of the whole frame; re-verify wm_background_motion_provider_spec.spl
+   still passes and add a spec asserting windows/chrome pixels are
+   byte-identical across a background-only advance. Fold in: stall catch-up
+   currently replays N fires after an N-interval stall (bounded, converges;
+   probe-verified) — consider switching `consume_due(motion_due)` to
+   `consume_due(now)` as part of this same region-dirty pass so a stall
+   collapses to a single fire instead of a bounded replay burst.
+2. **Hosted-lane consumption** — once I8 lands, wire
+   `host_compositor_entry.render_frame()` to resolve and blit a `"motion"`
+   background (reusing the shared-MDI resolver path already threaded here),
+   gated so the no-motion-configured lane stays byte-identical
+   (`SIMPLE_WM_MOTION_MANIFEST` unset ⇒ unchanged capture checksum, same
+   contract `ensure_host_motion_background_source_registered` already keeps).
+3. **PNG/video sources** — explicitly future/optional, not committed: if
+   ever pursued, requires a new `MotionBackgroundSource` implementation
+   (e.g., video-decode-backed) behind the same trait; the manifest/PPM-list
+   source stays the baseline, host-only implementation.
+
+Do not close item B as fully complete until follow-up (1) and (2) land.
+
 ---
 
 ## C — Borderless adoption for the taskbar dock

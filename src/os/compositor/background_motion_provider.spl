@@ -1,0 +1,145 @@
+# Host MotionBackgroundSource — fs-backed BackgroundSpec kind:"motion" source.
+#
+# Implements the Phase-2 provider design (plan item B,
+# doc/03_plan/os/desktop/wm_window_render_api_hardening_plan.md;
+# doc/05_design/os/desktop/simple_gui_internal_window_impl_spec.md
+# "Phase-2 Provider Design"): a "motion" background is a directory-of-PPM-
+# frames + a frame-interval, described by a small deterministic manifest
+# (plain text: first non-blank line = frame_interval_micros, remaining
+# non-blank lines = ordered frame file paths). No video codec is attempted —
+# per the plan, video decode is explicitly out of scope.
+#
+# Each frame is resolved through the SAME fs-backed HostBackgroundImageProvider
+# used by kind:"image" (background_image_provider.spl), so a motion frame
+# goes through the identical content-hash cache + fit-resampling machinery —
+# repeated frames (a common case: short loops) are real cache hits, not
+# re-decodes.
+#
+# Frame selection is a pure function of the caller-supplied wall-clock
+# `t_micros`: `raw_index = t_micros / frame_interval_micros`,
+# `frame = frames[raw_index % frame_count]`. Because the index is recomputed
+# directly from absolute time rather than incremented one-at-a-time per call,
+# a caller that is slow to ask for the next frame (falls behind by several
+# intervals) automatically drops the intervening frames instead of stalling
+# to "catch up" — this is the plan's frame-drop-under-budget policy.
+#
+# `next_frame_due_micros()` cannot be derived from `self` fields alone the
+# way `frame_for_time` reads them, because a value returned by
+# `frame_for_time` needs to be remembered *across* the call for the next
+# `next_frame_due_micros()` read — and per the trait-slot re-boxing bug
+# (interp_trait_slot_receiver_reboxed_per_call_mutation_loss_2026-07-07.md),
+# `me` methods reached through a `MotionBackgroundSource?`-typed module slot
+# get a freshly re-boxed receiver on every call, so a `self.field = ...`
+# write inside `frame_for_time` would not be visible from the next
+# `next_frame_due_micros()` call. Following the same module-level-`var`
+# workaround `background_image_provider.spl` already uses, the "next due"
+# bookkeeping lives in a bare module `var`, not an instance field. Reads of
+# the source's own configuration (frame list, interval, target size, fit) are
+# unaffected by the bug — those fields are never mutated after construction,
+# so every re-boxed copy carries the same values.
+
+use common.ui.window_scene.{MotionBackgroundSource, BackgroundSurface}
+use common.text.{parse_i64}
+use os.compositor.background_image_provider.{HostBackgroundImageProvider}
+# File.read (the class static) crashes at runtime with the known
+# .path-on-String Result-unwrap bug
+# (interp_fs_class_statics_return_result_despite_optional_types_2026-07-07.md)
+# even when the caller matches Ok/Err, so the manifest is read via the free
+# extern-backed file_exists + file_read_text pair instead. file_read_text on
+# a missing file returns an empty-text value rather than nil, hence the
+# explicit file_exists guard for a typed "unreadable" error.
+use std.fs.{file_exists, file_read_text}
+
+# Sentinel "never due" horizon used for a single-frame set (documented static-
+# image degrade: with one frame there is no next frame to become due).
+val _MOTION_NEVER_DUE_MICROS: i64 = 9223372036854775807
+
+# Sentinel "not yet scheduled" value. Distinct from _MOTION_NEVER_DUE_MICROS:
+# this source HAS a next frame, it just has not been asked for one yet, so
+# there is no real due timestamp to report. Using 0 here used to be read by
+# the present loop as "due at the epoch", which is always <= any real
+# wall-clock `now`, so the very first seam evaluation after registration
+# fired a spurious dirty trigger before any frame had ever actually been
+# selected. -1 fails the seam's `due_micros >= 0` gate (same value
+# shared_wm_motion_background_next_due_micros() already uses for "no source
+# registered"), so the trigger stays quiet until a real due timestamp is
+# established by the first frame_for_time() call (see
+# ensure_host_motion_background_source_registered() in
+# host_compositor_entry.spl, which seeds it once at registration).
+val _MOTION_NOT_YET_SCHEDULED_MICROS: i64 = -1
+
+var _motion_next_due_micros: i64 = _MOTION_NOT_YET_SCHEDULED_MICROS
+
+# Test/diagnostic hook mirroring host_background_image_provider_reset(): reset
+# the next-due bookkeeping so specs get a clean slate per `it` block.
+fn host_motion_background_provider_reset():
+    _motion_next_due_micros = _MOTION_NOT_YET_SCHEDULED_MICROS
+
+fn host_motion_background_provider_next_due_micros() -> i64:
+    _motion_next_due_micros
+
+# Splits manifest text into non-blank, trimmed lines.
+fn _motion_manifest_lines(text_value: text) -> [text]:
+    var out: [text] = []
+    for raw_line in text_value.split("\n"):
+        val line = raw_line.trim()
+        if line.len() > 0:
+            out.push(line)
+    out
+
+struct HostMotionBackgroundSource:
+    frame_paths: [text]
+    frame_interval_micros: i64
+    target_w: i32
+    target_h: i32
+    fit: text
+
+impl HostMotionBackgroundSource:
+    # Loud-fail factory: a missing/unreadable manifest, an empty frame list,
+    # or a non-positive frame interval is reported as Err, never silently
+    # defaulted — matching the "missing/empty frame set -> typed error"
+    # requirement. A single-frame manifest is accepted and degrades to a
+    # static image (documented on frame_for_time/next_frame_due_micros).
+    static fn create(manifest_path: text, target_w: i32, target_h: i32, fit: text) -> Result<HostMotionBackgroundSource, text>:
+        if not file_exists(manifest_path):
+            return Err("motion manifest unreadable: {manifest_path} (file does not exist)")
+        val manifest_text = file_read_text(manifest_path) ?? ""
+        val lines = _motion_manifest_lines(manifest_text)
+        if lines.len() < 1:
+            return Err("motion manifest '{manifest_path}' is empty (need frame_interval_micros on line 1)")
+        val interval = parse_i64(lines[0])
+        if interval <= 0:
+            return Err("motion manifest '{manifest_path}' has an invalid frame_interval_micros '{lines[0]}' (must be a positive integer)")
+        var frame_paths: [text] = []
+        var i = 1
+        while i < lines.len():
+            frame_paths.push(lines[i])
+            i = i + 1
+        if frame_paths.len() < 1:
+            return Err("motion manifest '{manifest_path}' declares no frame paths (empty frame set)")
+        if target_w <= 0 or target_h <= 0:
+            return Err("motion manifest '{manifest_path}': invalid target size {target_w}x{target_h}")
+        Ok(HostMotionBackgroundSource(frame_paths: frame_paths, frame_interval_micros: interval, target_w: target_w, target_h: target_h, fit: fit))
+
+impl MotionBackgroundSource for HostMotionBackgroundSource:
+    me frame_for_time(t_micros: i64) -> BackgroundSurface:
+        val frame_count = self.frame_paths.len()
+        if frame_count < 1:
+            return BackgroundSurface(width: 0, height: 0, pixels: [])
+        val t = if t_micros < 0: 0 else: t_micros
+        val raw_index = t / self.frame_interval_micros
+        if frame_count == 1:
+            _motion_next_due_micros = _MOTION_NEVER_DUE_MICROS
+        else:
+            _motion_next_due_micros = (raw_index + 1) * self.frame_interval_micros
+        val index = (raw_index % frame_count.to_i64()).to_i32()
+        val frame_path = self.frame_paths[index]
+        val provider = HostBackgroundImageProvider.create()
+        val outcome = provider.resolve(frame_path, self.target_w, self.target_h, self.fit)
+        if outcome.ok:
+            if val surface = outcome.surface:
+                return surface
+        BackgroundSurface(width: 0, height: 0, pixels: [])
+
+    me next_frame_due_micros() -> i64:
+        _motion_next_due_micros

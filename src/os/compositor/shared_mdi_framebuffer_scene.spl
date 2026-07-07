@@ -335,13 +335,27 @@ fn render_shared_mdi_windows_to_backend(backend: CompositorBackend, windows: [Sh
 fn render_shared_mdi_framebuffer_scene(width: i32, height: i32, backend_kind: text) -> SharedMdiFramebufferScene:
     render_shared_mdi_framebuffer_scene_limited(width, height, backend_kind, 0, 0)
 
-fn render_shared_mdi_framebuffer_scene_for_windows(width: i32, height: i32, backend_kind: text, windows: [SharedMdiRenderWindow]) -> SharedMdiFramebufferScene:
-    render_shared_mdi_framebuffer_scene_for_simple_gui_scene(_shared_mdi_scene_from_render_windows(width, height, backend_kind, windows))
+# `t_micros` (default 0) is threaded straight through to
+# render_shared_mdi_framebuffer_scene_for_simple_gui_scene: it is only
+# consumed if the scene's background resolves to kind:"motion" (see
+# common.ui.window_scene_draw_ir / shared_wm_scene_resolve_background), so
+# every existing caller that never passes a real wall-clock value keeps
+# byte-identical output. This is the ONE production (non-test) entry point
+# that turns render windows into a rasterized shared-MDI framebuffer, so a
+# hardcoded 0 here would make kind:"motion" backgrounds structurally unable
+# to animate through this API no matter what a future caller wired up
+# upstream — a caller with real time access must be able to reach the
+# resolver, not just tests constructing a SharedWmScene directly.
+fn render_shared_mdi_framebuffer_scene_for_windows(width: i32, height: i32, backend_kind: text, windows: [SharedMdiRenderWindow], t_micros: i64 = 0) -> SharedMdiFramebufferScene:
+    render_shared_mdi_framebuffer_scene_for_simple_gui_scene(_shared_mdi_scene_from_render_windows(width, height, backend_kind, windows), t_micros)
 
-fn render_shared_mdi_framebuffer_scene_for_simple_gui_scene(scene: SharedWmScene) -> SharedMdiFramebufferScene:
+# `t_micros` (default 0) is consumed only by a kind:"motion" scene background
+# (common.ui.window_scene_draw_ir / shared_wm_scene_resolve_background); every
+# existing caller keeps byte-identical output.
+fn render_shared_mdi_framebuffer_scene_for_simple_gui_scene(scene: SharedWmScene, t_micros: i64 = 0) -> SharedMdiFramebufferScene:
     val theme = wm_chrome_theme()
     val backend = SharedMdiFramebufferBackend.create(scene.width, scene.height, theme.compositor_bg)
-    val stats = shared_wm_scene_render_to_backend(backend, scene)
+    val stats = shared_wm_scene_render_to_backend(backend, scene, t_micros)
     backend.web_pixel_count = stats.content_pixel_count
     SharedMdiFramebufferScene(
         width: scene.width,

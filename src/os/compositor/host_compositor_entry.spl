@@ -1,7 +1,8 @@
 use common.window_protocol.geometry.{Size}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB}
-use common.ui.window_scene.{shared_wm_scene_register_background_image_provider}
+use common.ui.window_scene.{shared_wm_scene_register_background_image_provider, shared_wm_scene_register_motion_background_source}
 use os.compositor.background_image_provider.{HostBackgroundImageProvider}
+use os.compositor.background_motion_provider.{HostMotionBackgroundSource}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
@@ -18,6 +19,8 @@ use os.services.wm.wm_world.{WmAction}
 use os.userlib.ipc_protocol.{COMP_MINIMIZE, COMP_RESTORE}
 
 extern fn rt_sleep_ms(ms: i64)
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_time_now_unix_micros() -> i64
 
 val HOST_WM_IDLE_SLEEP_MS: i32 = 16
 
@@ -601,8 +604,47 @@ fn ensure_host_background_image_provider_registered():
         shared_wm_scene_register_background_image_provider(HostBackgroundImageProvider.create())
         _host_background_image_provider_registered = true
 
+# Registers the fs-backed MotionBackgroundSource once per process, but ONLY
+# when explicitly configured via SIMPLE_WM_MOTION_MANIFEST (a PPM frame-list
+# manifest path; optional SIMPLE_WM_MOTION_FIT selects the per-frame fit
+# policy, default "cover"). Unset env keeps the no-motion default lane
+# byte-identical (capture-evidence checksum unchanged). A configured-but-bad
+# manifest is reported loudly (typed Err from the factory, printed here) and
+# leaves no source registered, so kind:"motion" then hits the documented loud
+# unresolved marker instead of a silent fallback. `attempted` (not
+# "succeeded") is what is latched: a bad manifest is reported once, not
+# re-spammed on every init_host_wm call in the same process.
+var _host_motion_background_source_attempted: bool = false
+
+fn ensure_host_motion_background_source_registered(target_w: i32, target_h: i32):
+    if _host_motion_background_source_attempted:
+        return
+    _host_motion_background_source_attempted = true
+    val manifest = rt_env_get("SIMPLE_WM_MOTION_MANIFEST") ?? ""
+    if manifest == "":
+        return
+    val fit = rt_env_get("SIMPLE_WM_MOTION_FIT") ?? "cover"
+    match HostMotionBackgroundSource.create(manifest, target_w, target_h, fit):
+        Ok(source):
+            # Seed the real first due timestamp at registration time (the
+            # source's next-due bookkeeping starts at the "not yet scheduled"
+            # sentinel per background_motion_provider.spl and only a
+            # frame_for_time() call establishes a real due). Registering
+            # without this would leave the seam's due permanently at the
+            # sentinel — never due — until whatever first consumes a frame,
+            # which is not guaranteed to happen promptly. Consuming the
+            # current wall-clock frame here also means the very first
+            # kind:"motion" resolve after registration is already a
+            # (content-hash-cached) warm frame, not a cold decode.
+            source.frame_for_time(rt_time_now_unix_micros())
+            shared_wm_scene_register_motion_background_source(source)
+            print "[host-wm] motion-background source registered manifest={manifest} fit={fit} frames={source.frame_paths.len()} interval_micros={source.frame_interval_micros}"
+        Err(message):
+            print "[host-wm] motion-background source registration FAILED: {message}"
+
 fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
     ensure_host_background_image_provider_registered()
+    ensure_host_motion_background_source_registered(cfg.initial_size.width.to_i32(), cfg.initial_size.height.to_i32())
     if cfg.backend == HostBackendKind.Tui:
         return nil
     val event_loop_id = 1

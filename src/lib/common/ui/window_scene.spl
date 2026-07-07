@@ -112,6 +112,92 @@ var _wm_background_image_provider: BackgroundImageProvider? = nil
 fn shared_wm_scene_register_background_image_provider(provider: BackgroundImageProvider?):
     _wm_background_image_provider = provider
 
+# Motion (moving-image) background provider (plan item B,
+# doc/03_plan/os/desktop/wm_window_render_api_hardening_plan.md; design
+# doc/05_design/os/desktop/simple_gui_internal_window_impl_spec.md 'Phase-2
+# Provider Design'). A MotionBackgroundSource yields the frame surface that is
+# current for a caller-supplied wall-clock timestamp — the executor/resolver
+# never owns a clock itself (common.ui never touches an extern time source;
+# the compositor/present-loop layer supplies t_micros), and never decodes: the
+# source has already resolved+resampled the frame to paintable pixels by the
+# time frame_for_time returns.
+#
+# next_frame_due_micros() lets the present loop (hosted_entry.spl) fold "a
+# motion frame is due" into its existing dirty-gated redraw decision without
+# converting the loop into a busy-poll: it is a plain field read, not a wait.
+#
+# Loud-fail note: this trait's return type is a plain BackgroundSurface (no
+# Result/Outcome channel), matching the signature the design doc specifies.
+# A concrete source that cannot produce a real frame (unreadable frame file,
+# decode failure with no prior good frame) returns the documented sentinel
+# BackgroundSurface(width: 0, height: 0, pixels: []) instead of throwing or
+# fabricating pixels; shared_wm_scene_resolve_background below treats a
+# non-positive-area surface as "no frame available" and falls through to the
+# same loud WM_BACKGROUND_UNRESOLVED_MARKER_COLOR path used for an unknown
+# kind / no-provider case. Missing/empty frame sets are caught earlier, at
+# source construction (loud Result-returning factory on the concrete
+# provider), so this call-time sentinel only covers a frame going bad after
+# construction (e.g. a frame file deleted mid-run).
+trait MotionBackgroundSource:
+    me frame_for_time(t_micros: i64) -> BackgroundSurface
+    me next_frame_due_micros() -> i64
+
+var _wm_motion_background_source: MotionBackgroundSource? = nil
+
+# Registers (or clears, with nil) the single process-wide motion-background
+# source. Same lifecycle contract as
+# shared_wm_scene_register_background_image_provider: host wiring registers
+# an fs-backed frame-list source at startup; SimpleOS would register an
+# in-image pre-decoded one (not implemented yet — SimpleOS visual proof of
+# motion is blocked the same way image is, per plan item D); tests register a
+# fake and must unregister (nil) when done.
+fn shared_wm_scene_register_motion_background_source(source: MotionBackgroundSource?):
+    _wm_motion_background_source = source
+
+# Present-loop seam: returns the absolute wall-clock micros at which the next
+# motion-background frame becomes due, or -1 if no motion source is
+# registered (never due). hosted_entry.spl's dirty-gated event loop reads
+# this once per already-scheduled poll iteration and folds
+# "now >= due" into its existing `dirty` decision — this does not introduce
+# any new polling/sleeping, it only adds a condition to a loop that already
+# runs on a fixed cadence.
+fn shared_wm_motion_background_next_due_micros() -> i64:
+    if val source = _wm_motion_background_source:
+        return source.next_frame_due_micros()
+    -1
+
+# Pure fire decision for the present loop's motion-dirty trigger: fire exactly
+# once per due timestamp (`due != last_fired_due`), and only once that
+# timestamp has arrived (`now >= due`). `due < 0` means "no motion source
+# registered / never due". The once-per-due-value guard is what keeps the
+# present loop dirty-gated (GUI-5a) instead of perpetually dirty: consuming a
+# frame (frame_for_time during render) advances the source's next-due,
+# producing a NEW due value that re-arms the trigger for the next frame; if
+# the due value does not advance (e.g. a render lane that does not consume
+# motion frames), the trigger fires once and then stays quiet rather than
+# degenerating into an unconditional re-present every loop iteration.
+fn shared_wm_motion_dirty_due(now_micros: i64, due_micros: i64, last_fired_due_micros: i64) -> bool:
+    due_micros >= 0 and due_micros != last_fired_due_micros and now_micros >= due_micros
+
+# Present-loop seam: self-re-arm the motion trigger for the timestamp that
+# just fired. Per shared_wm_motion_dirty_due's contract, a due value only
+# re-arms the trigger once frame_for_time() advances next-due to a NEW value
+# — normally that happens as a side effect of render actually consuming the
+# motion frame. Today only the shared-MDI production lane
+# (shared_mdi_framebuffer_scene.render_shared_mdi_framebuffer_scene_for_windows,
+# threaded from this same seam) renders a resolved kind:"motion" background;
+# the hosted chrome lane (host_compositor_entry.render_frame) still direct-
+# draws chrome and does not resolve scene backgrounds at all (deferred,
+# gated on the region-dirty work design invariant I8 needs — see plan item B
+# dependency note). Calling this at the seam right after
+# shared_wm_motion_dirty_due fires means the "due advances" half of the
+# contract holds even on iterations where no render call happens to reach
+# the motion source, so the seam re-arms itself instead of firing once and
+# then going permanently stale.
+fn shared_wm_motion_background_consume_due(t_micros: i64):
+    if val source = _wm_motion_background_source:
+        source.frame_for_time(t_micros)
+
 # Resolves a BackgroundSpec to paintable pixels. Unknown/unimplemented kinds
 # (including "image" with no provider registered, and the reserved "motion")
 # never silently fall back to a default fill: they log a diagnostic and
@@ -135,7 +221,18 @@ fn _shared_wm_scene_image_resolve_failed(background: BackgroundSpec, provider_me
     print(message)
     SharedWmBackgroundResolution(resolved: false, color: WM_BACKGROUND_UNRESOLVED_MARKER_COLOR, surface: nil, stale: false, error_message: message)
 
-fn shared_wm_scene_resolve_background(background: BackgroundSpec, target_w: i32 = 0, target_h: i32 = 0) -> SharedWmBackgroundResolution:
+fn _shared_wm_scene_motion_frame_unavailable(background: BackgroundSpec) -> SharedWmBackgroundResolution:
+    val message = "shared_wm_scene_resolve_background: motion source returned no frame (kind='{background.kind}', source='{background.source}'); refusing silent fallback"
+    print(message)
+    SharedWmBackgroundResolution(resolved: false, color: WM_BACKGROUND_UNRESOLVED_MARKER_COLOR, surface: nil, stale: false, error_message: message)
+
+# `t_micros` is the caller-supplied wall-clock time used only by kind:"motion"
+# (default 0 keeps every existing kind:"color"/kind:"image" call site
+# byte-identical — those branches never read it). common.ui does not read a
+# clock itself; the compositor/present-loop layer (which already has extern
+# time access) is the one that must pass a real `t_micros` for a motion
+# background to advance.
+fn shared_wm_scene_resolve_background(background: BackgroundSpec, target_w: i32 = 0, target_h: i32 = 0, t_micros: i64 = 0) -> SharedWmBackgroundResolution:
     if background.kind == WM_BACKGROUND_KIND_COLOR:
         return SharedWmBackgroundResolution(resolved: true, color: background.color, surface: nil, stale: false, error_message: "")
     if background.kind == WM_BACKGROUND_KIND_IMAGE:
@@ -144,6 +241,13 @@ fn shared_wm_scene_resolve_background(background: BackgroundSpec, target_w: i32 
             if outcome.ok:
                 return SharedWmBackgroundResolution(resolved: true, color: background.color, surface: outcome.surface, stale: outcome.stale, error_message: outcome.error_message)
             return _shared_wm_scene_image_resolve_failed(background, outcome.error_message)
+        return _shared_wm_scene_unresolved_background(background)
+    if background.kind == WM_BACKGROUND_KIND_MOTION:
+        if val source = _wm_motion_background_source:
+            val surface = source.frame_for_time(t_micros)
+            if surface.width > 0 and surface.height > 0:
+                return SharedWmBackgroundResolution(resolved: true, color: background.color, surface: surface, stale: false, error_message: "")
+            return _shared_wm_scene_motion_frame_unavailable(background)
         return _shared_wm_scene_unresolved_background(background)
     _shared_wm_scene_unresolved_background(background)
 

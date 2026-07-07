@@ -15,6 +15,7 @@ use os.compositor.host_compositor_entry.{
 use os.compositor.hosted_backend_winit.{HostedWinitBufferBackend}
 use os.compositor.shared_mdi_host_seed.{seed_host_compositor_shared_mdi}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use common.ui.window_scene.{shared_wm_motion_background_next_due_micros, shared_wm_motion_dirty_due, shared_wm_motion_background_consume_due}
 
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
@@ -152,9 +153,55 @@ fn _run_hosted_wm(comp_in: HostCompositor, el: i64, win: i64, engine2d_raster: b
     var mouse_button_events: i64 = 0
     var focus_events: i64 = 0
     var key_events: i64 = 0
+    # Motion-background cadence seam (plan item B): the loop stays dirty-gated
+    # (GUI-5a) — a due motion frame is just one more dirty *trigger*, evaluated
+    # by the pure shared_wm_motion_dirty_due predicate on the loop's existing
+    # iteration cadence (no new polling/sleeping is introduced). With no
+    # motion source registered the seam reads -1 ("never due") and this loop
+    # is byte-for-byte the old dirty decision.
+    #
+    # Self-re-arm: the trigger's once-per-due-value contract needs the
+    # source's next-due to advance to a NEW value after it fires, which
+    # normally happens as a side effect of render consuming the frame. This
+    # hosted chrome lane's render_frame() still direct-draws chrome and does
+    # NOT resolve scene backgrounds (kind:"motion" included) — that consumer
+    # side is not wired here, so relying on render to advance next-due would
+    # leave the trigger firing once and then going permanently stale. Calling
+    # shared_wm_motion_background_consume_due() right after the trigger fires
+    # advances the source's bookkeeping directly at the seam, so the loop
+    # re-arms itself every interval independent of what render_frame() does.
+    #
+    # What animates today vs. what is wired: the shared-MDI production lane
+    # (shared_mdi_framebuffer_scene.render_shared_mdi_framebuffer_scene_for_windows)
+    # has the capability to resolve and blit a kind:"motion" background when
+    # one is registered, and that capability is spec-proven. But no
+    # production caller threads a non-default wall-clock t through it yet —
+    # today's callers (render_shared_mdi_framebuffer_scene_for_lifecycle_windows
+    # and render_shared_mdi_framebuffer_scene_limited, see
+    # shared_mdi_framebuffer_scene.spl) use the default t, so live motion
+    # playback on that lane is future wiring, not current behavior. This
+    # hosted chrome lane only keeps the dirty-trigger cadence honest; it does
+    # not itself paint a motion frame.
+    #
+    # Design invariant I8 (background-only region dirty — see
+    # doc/05_design/os/desktop/simple_gui_internal_window_impl_spec.md and
+    # the plan item B dependency note in
+    # doc/03_plan/os/desktop/wm_window_render_api_hardening_plan.md) is NOT
+    # met by this seam: `dirty = true` below re-renders the WHOLE frame
+    # (windows + chrome), not just the background region. Region-dirty
+    # tracking is staged, deferred work (blocked on the perf-plan region/
+    # dirty-rect wave); until it lands, a due motion frame costs a full
+    # re-raster same as any other dirty trigger.
+    var last_motion_fired_due: i64 = -1
     val end_at = rt_time_now_unix_micros() + 300000000
     while running and rt_time_now_unix_micros() < end_at:
         var dirty = false
+        val now_micros = rt_time_now_unix_micros()
+        val motion_due = shared_wm_motion_background_next_due_micros()
+        if shared_wm_motion_dirty_due(now_micros, motion_due, last_motion_fired_due):
+            dirty = true
+            last_motion_fired_due = motion_due
+            shared_wm_motion_background_consume_due(motion_due)
         var ev = rt_winit_event_loop_poll_events(el, 1)
         while ev != 0:
             val kind = rt_winit_event_get_type(ev)

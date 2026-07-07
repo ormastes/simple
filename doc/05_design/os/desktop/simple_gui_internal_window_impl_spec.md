@@ -136,6 +136,88 @@ in-image pre-decoded one). This preserves the baremetal-lane boundary already
 documented in `shared_wm_renderer_unification.md` (no `rt_file_exists`/theme
 reads on the freestanding path).
 
+### Motion provider — as-built (fix-round, 2026-07-07)
+
+The `MotionBackgroundSource` host implementation
+(`src/os/compositor/background_motion_provider.spl`, `HostMotionBackgroundSource`)
+and the present-loop seam (`src/os/hosted/hosted_entry.spl`) landed as follows;
+this subsection documents exactly what exists, not an aspiration.
+
+- **Manifest source format.** A "motion" background is a plain-text manifest:
+  line 1 = `frame_interval_micros` (positive integer), each remaining
+  non-blank line = an ordered PPM frame path. No video codec — frames are
+  plain images reused through the `kind:"image"` provider's content-hash
+  cache + fit resampling (`HostBackgroundImageProvider`).
+- **Frame selection is a pure function of absolute time**, not an
+  incrementing counter: `raw_index = t_micros / frame_interval_micros`,
+  `frame = frames[raw_index % frame_count]`. A caller that falls behind by
+  several intervals lands on the frame current for that timestamp and drops
+  the intervening frames rather than stalling to catch up (frame-drop, not
+  backlog-replay).
+- **Dirty-trigger contract.** `shared_wm_motion_background_next_due_micros()`
+  exposes the absolute wall-clock micros at which the next frame becomes due
+  (`-1` when no source is registered or none has been established yet — see
+  sentinel below). `shared_wm_motion_dirty_due(now_micros, due_micros,
+  last_fired_due_micros)` is a pure predicate that fires exactly once per due
+  timestamp (`due != last_fired_due and now >= due`), keeping the present
+  loop dirty-gated (GUI-5a) instead of perpetually dirty.
+- **Self-re-arming seam.** The once-per-due-value contract requires next-due
+  to advance to a NEW value after the trigger fires; that normally happens as
+  a side effect of `frame_for_time` being called during render. No production
+  render lane in the hosted chrome path (`host_compositor_entry.render_frame`)
+  resolves scene backgrounds at all (it direct-draws chrome — see I8 below),
+  so relying on render-side consumption alone would leave the trigger firing
+  once and then going permanently stale. `shared_wm_motion_background_consume_due(t_micros)`
+  (`window_scene.spl`) lets the seam itself call `frame_for_time` right after
+  the trigger fires, so `hosted_entry.spl`'s loop re-arms the cadence every
+  interval independent of what any render lane does.
+- **Not-yet-scheduled sentinel.** `_motion_next_due_micros` (module-level
+  `var`, see below) starts at `-1` ("not yet scheduled"), the same value the
+  seam already uses for "no source registered". Before this fix it started at
+  `0`, which the seam read as "due at the epoch" — always `<=` any real
+  wall-clock `now`, causing a spurious dirty fire on the very first iteration
+  after registration, before any frame had ever actually been selected. `-1`
+  fails the seam's `due_micros >= 0` gate, so the trigger stays quiet until a
+  real due timestamp exists. `host_compositor_entry.ensure_host_motion_background_source_registered`
+  seeds the real first due once, at registration time, by calling
+  `frame_for_time(rt_time_now_unix_micros())` before registering the source.
+- **Single-frame degrade.** A manifest with exactly one frame is accepted
+  (not an error) and behaves as a static image: `frame_for_time` always
+  returns that frame and sets next-due to the sentinel horizon
+  `9223372036854775807` (`_MOTION_NEVER_DUE_MICROS`), so the dirty trigger
+  can never fire again for it.
+- **Loud-fail matrix (construction, `HostMotionBackgroundSource.create`):**
+  missing/unreadable manifest, empty manifest (no `frame_interval_micros`
+  line), non-positive/non-numeric interval, and zero frame paths are all
+  typed `Err`, never a silent default. At resolve time, a frame that cannot
+  be decoded (deleted mid-run, corrupt) returns the sentinel
+  `BackgroundSurface(width: 0, height: 0, pixels: [])`, which
+  `shared_wm_scene_resolve_background` maps to the same loud `0xFFFF00FF`
+  marker used for an unknown kind — **motion has no stale-serve**: I6's
+  "serve last-good on transient error" behavior is a `kind:"image"`-provider
+  property only; a bad motion frame is always loud, never a silently-served
+  stale frame.
+- **Cache reuse.** Each frame is resolved through the same fs-backed
+  `HostBackgroundImageProvider` instance kind:"image" uses, so the cache key
+  is the same `(content_hash(source_bytes), target_w, target_h, fit)` (I5) —
+  a short loop's repeated frames are real cache hits, not re-decodes.
+- **Module-level state rationale.** `next_frame_due_micros()` cannot be
+  derived from `self` fields alone (unlike `frame_for_time`, which reads only
+  immutable construction-time fields): a value produced by `frame_for_time`
+  must be remembered *across* the call for the next `next_frame_due_micros()`
+  read. Per the trait-slot re-boxing bug
+  (`interp_trait_slot_receiver_reboxed_per_call_mutation_loss_2026-07-07.md`),
+  `me` methods reached through the `MotionBackgroundSource?`-typed module
+  slot get a freshly re-boxed receiver on every call, so a `self.field = ...`
+  write inside `frame_for_time` would not be visible from the next call. The
+  "next due" bookkeeping therefore lives in a bare module `var`
+  (`_motion_next_due_micros`), the same workaround `background_image_provider.spl`
+  already uses.
+- **Env wiring.** `host_compositor_entry.ensure_host_motion_background_source_registered`
+  registers a motion source once per process, gated on `SIMPLE_WM_MOTION_MANIFEST`
+  (manifest path; unset keeps the no-motion lane byte-identical) and an
+  optional `SIMPLE_WM_MOTION_FIT` (default `"cover"`).
+
 ### Invariant table
 
 | # | Invariant | Enforced by |
@@ -145,9 +227,9 @@ reads on the freestanding path).
 | I3 | Executor stays stateless (takes `scene`, returns stats); all caching lives on the compositor, not `common.ui` | executor `:443` signature; cache in `src/os/compositor/**` |
 | I4 | No per-pixel FFI to draw a background; scale via `backend.blit_pixels` / `Engine2D.draw_image` | `display_backend.spl:17`, `compositor_engine2d.spl:100` |
 | I5 | Cache key = `(content_hash(source_bytes), target_w, target_h, fit)` | mirrors `WebRenderPixelArtifactCache` (`web_render_pixel_backend.spl:111`) |
-| I6 | Stale-serve returns last-good surface + `stale:true` + diagnostic; loud marker only when there is NO prior good surface | provider + resolution `stale` field |
+| I6 | Stale-serve returns last-good surface + `stale:true` + diagnostic; loud marker only when there is NO prior good surface | provider + resolution `stale` field (`kind:"image"` only — motion has no stale-serve, see above) |
 | I7 | Background must not mask chrome/title-glyph evidence | `check-simpleos-wm-visible-display-evidence.shs` still asserts glyphs on top |
-| I8 | Motion source advances by wall-clock; background-only advance does NOT re-raster windows/chrome | present-loop cadence gate (dirty region = background only) |
+| I8 | Motion source advances by wall-clock; background-only advance does NOT re-raster windows/chrome | **STAGED-DEFERRED.** `next_frame_due_micros` + `shared_wm_motion_dirty_due` + the self-re-arming seam are landed and specced, but the seam's `dirty = true` triggers the loop's existing FULL-frame path (windows + chrome), not a background-only region. Region-dirty tracking (this invariant's remaining half) is gated on the perf-plan region/dirty-rect wave — see plan item B. |
 
 ### Error semantics (extends the loud-fail contract)
 

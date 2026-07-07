@@ -428,6 +428,63 @@ Hard-won lessons for this live lane (each cost hours):
   module-level `var`s, the same convention already used by the
   `_*_compositor_override_*` pattern elsewhere in this file).
 
+- **LANDED 2026-07-07 — `BackgroundSpec kind:"motion"` implemented (manifest
+  frame source, absolute-time frame selection):** `MotionBackgroundSource`
+  trait (`src/lib/common/ui/window_scene.spl`) is the injected seam,
+  mirroring the `kind:"image"` provider's boundary — the `common.ui` executor
+  never reads a manifest or decodes a frame itself. The concrete
+  implementation, [src/os/compositor/background_motion_provider.spl](../../../../src/os/compositor/background_motion_provider.spl)
+  (`HostMotionBackgroundSource`), reads a small deterministic manifest (line 1
+  = `frame_interval_micros`, remaining non-blank lines = ordered PPM frame
+  paths), selects the current frame as a pure function of an injected
+  absolute `t_micros` (no wall-clock reads inside the source — testable with
+  fake time), degrades a single-frame manifest to a static image, and routes
+  each resolved frame through the same content-hash cache + fit resampling
+  the `kind:"image"` provider already uses (`cover`/`contain`/`stretch`/`tile`
+  fit modes). Loud-fail contract matches the image provider: missing/empty
+  manifest, bad interval, or empty frame set all fail construction; an
+  unreadable frame with no prior good decode fails loudly at resolve time
+  rather than silently falling back.
+  Registration: `ensure_host_motion_background_source_registered(target_w,
+  target_h)` in `src/os/compositor/host_compositor_entry.spl` gates
+  registration on the env var `SIMPLE_WM_MOTION_MANIFEST` (a manifest path;
+  unset ⇒ no motion source registered, no behavior change, same
+  no-motion-configured contract the image provider follows) with an optional
+  `SIMPLE_WM_MOTION_FIT` (defaults to `"cover"`).
+  **Dirty-cadence seam:** `src/os/hosted/hosted_entry.spl`'s present loop
+  calls `next_frame_due`/`shared_wm_motion_background_consume_due` to mark
+  the frame dirty exactly once per due value (never per-tick) and to
+  self-re-arm the source's next-due bookkeeping directly at the seam — this
+  hosted chrome lane keeps the cadence honest but does **not** itself paint a
+  motion frame (its `render_frame()` still direct-draws chrome only).
+  **What actually animates:** the shared-MDI production lane
+  (`shared_mdi_framebuffer_scene.render_shared_mdi_framebuffer_scene_for_windows`)
+  has the capability, spec-proven, to resolve and blit a `kind:"motion"`
+  background — but no production caller threads a non-default wall-clock `t`
+  through it yet (today's callers use the default `t`), so live motion
+  playback on that lane is staged future wiring, not current behavior.
+  Hosted-chrome background consumption and I8 region-dirty (background-only
+  re-raster instead of full-frame) are both explicitly deferred — see
+  `doc/03_plan/os/desktop/wm_window_render_api_hardening_plan.md` item B
+  follow-ups (1) I8 region-dirty, (2) hosted-lane consumption — and
+  `doc/05_design/os/desktop/simple_gui_internal_window_impl_spec.md` for the
+  I8 invariant definition.
+  Gate coverage: `test/01_unit/os/desktop/wm_background_motion_provider_spec.spl`
+  (10/10 — construction loud-fails, absolute-time frame advance, exactly-once
+  dirty per due value, single-frame degrade-to-static, content-hash cache
+  reuse, resolve-time loud-fail, executor-level pixel-diff across `t`,
+  production-wrapper pixel-diff across `t`, no-spurious-epoch-fire, self-
+  re-arm across 2 intervals), plus the existing image/executor/compositor
+  gates above (unaffected, still green: image 8/8, executor 5/5, shared-MDI
+  7/7, `shared_wm_renderer_unification_simple_bin_spec.spl` 5/5).
+  **New interpreter bug found during this work (not fixed, workaround
+  applied):**
+  `doc/08_tracking/bug/interp_expect_inline_equality_arg_misevaluates_2026-07-07.md`
+  — `expect(a == b).to_equal(false)` on two distinct `u32`s reports "expected
+  A to equal B" instead of evaluating the `==` to a bool first (same family
+  as the chained-methods landmine); worked around with an intermediate
+  `val eq = a == b` before the `expect`.
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,
