@@ -213,3 +213,31 @@ Terminated
 
 The next source-shape choke point is `logic_dram_durability.spl`; the preceding
 `logic_policy_target.spl` also remains a large parse-cost file.
+
+## Update — policy and DRAM wrappers now parse quickly
+
+`logic_policy_target.spl` and `logic_dram_durability.spl` were split into tiny
+public wrappers plus core/case files. The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but it now gets through policy and DRAM durability
+and stops at wear/scrub parsing:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_policy_target.spl chars=114
+[BOOTSTRAP-PHASE] ... logic_policy_target.spl
+[BOOTSTRAP-PHASE] ... logic_dram_durability.spl chars=120
+[BOOTSTRAP-PHASE] ... logic_dram_durability.spl
+[BOOTSTRAP-PHASE] ... logic_wear_scrub.spl chars=1830
+Terminated
+```
+
+The next source-shape choke point is `logic_wear_scrub.spl`.
