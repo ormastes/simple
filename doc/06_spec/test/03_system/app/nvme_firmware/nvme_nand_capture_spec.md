@@ -49,7 +49,7 @@ NVMe NAND data-change capture — emulated NAND write/read + FTL block migration
 | Design | N/A |
 | Research | doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md |
 | Source | `test/03_system/app/nvme_firmware/nvme_nand_capture_spec.spl` |
-| Updated | 2026-07-05 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 NVMe NAND data-change capture — emulated NAND write/read + FTL block migration.
@@ -85,16 +85,17 @@ shows. Run:
    - Expected: code equals `0`
 - Before the write, the target NAND page words are all zero
 - After the write, the same NAND page words hold the written data
-- capture bit table
+   - Expected: capture_bit_table("nand_page0_after_write", [161, 178, 195, 212], "bits16", ["w0", "w1", "w2", "w3"]) is true
 - Reading the LBA back returns exactly the written NAND words
 - The demo confirms the NAND data change was captured
 - The end-to-end capture scenario reports overall PASS
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -107,7 +108,8 @@ expect(out).to_contain("NAND-BEFORE ppn=0 words=0,0,0,0")
 
 step("After the write, the same NAND page words hold the written data")
 expect(out).to_contain("NAND-AFTER ppn=0 words=161,178,195,212")
-capture_bit_table("nand_page0_after_write", [161, 178, 195, 212], "bits16", ["w0", "w1", "w2", "w3"])
+expect(capture_bit_table("nand_page0_after_write", [161, 178, 195, 212], "bits16", ["w0", "w1", "w2", "w3"])).to_equal(true)
+expect(capture_text("nand_page0_after_write")).to_contain("bytes: 0xa1 0xb2 0xc3 0xd4")
 
 step("Reading the LBA back returns exactly the written NAND words")
 expect(out).to_contain("NAND-READBACK lba=5 words=161,178,195,212")
@@ -117,6 +119,7 @@ expect(out).to_contain("NAND DATA CHANGE CAPTURED")
 
 step("The end-to-end capture scenario reports overall PASS")
 expect(out).to_contain("NVME NAND CAPTURE PASS")
+_expect_no_fail_marker(out, "NAND data-change capture demo")
 ```
 
 </details>
@@ -128,16 +131,17 @@ expect(out).to_contain("NVME NAND CAPTURE PASS")
 - Run the NAND FTL block-migration capture demo through the CLI
    - Expected: code equals `0`
 - Before migration, the LBA lives in its original physical NAND block (source phase)
-- capture bit table
+   - Expected: capture_bit_table("ftl_lba100_before_migration", [171], "bits8", ["nand_block"]) is true
 - After migration, the LBA has moved to a different physical NAND block (destination phase)
 - The demo confirms the FTL block migration was captured
 - The end-to-end migration scenario reports overall PASS
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -147,7 +151,8 @@ expect(code).to_equal(0)
 
 step("Before migration, the LBA lives in its original physical NAND block (source phase)")
 expect(out).to_contain("MIGRATE-BEFORE lba=100 block=0 nand=171")
-capture_bit_table("ftl_lba100_before_migration", [171], "bits8", ["nand_block"])
+expect(capture_bit_table("ftl_lba100_before_migration", [171], "bits8", ["nand_block"])).to_equal(true)
+expect(capture_text("ftl_lba100_before_migration")).to_contain("bytes: 0xab")
 
 step("After migration, the LBA has moved to a different physical NAND block (destination phase)")
 expect(out).to_contain("MIGRATE-AFTER lba=100 block=")
@@ -157,6 +162,7 @@ expect(out).to_contain("NAND FTL BLOCK MIGRATION CAPTURED")
 
 step("The end-to-end migration scenario reports overall PASS")
 expect(out).to_contain("NAND MIGRATION CAPTURE PASS")
+_expect_no_fail_marker(out, "NAND migration capture demo")
 ```
 
 </details>
