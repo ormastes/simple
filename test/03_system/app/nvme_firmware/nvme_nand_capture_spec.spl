@@ -55,15 +55,11 @@ fn run_ftl_migration_demo() -> (text, text, i64):
 
 
 # ============================================================================
-# Capture Helpers (planned bit_table capture)
+# Capture Helpers
 # ============================================================================
-# TODO(REQ-SSPEC-MODERN): replace with std.spec bit_table capture (FR-3/bit_table)
-# once the Capture trait / BitTableCapture lands
-# (doc/05_design/sspec_capture_extension.md). Trivial stand-in for now: hexdump
-# the already-asserted words to build/spec_captures/<name>.txt so the
-# demonstration compiles and leaves evidence on disk; returns false if the
-# write fails. `view`/`fields` describe the intended aligned-column rendering
-# ("bits8"/"bits16"/"bits32") that the real BitTableCapture will honor.
+# Write the already-asserted words to build/spec_captures/<name>.txt so the
+# generated manual has a concrete NAND-state artifact; fail closed if the
+# artifact cannot be written.
 
 fn _hex_nibble(v: i64) -> text:
     if v < 10:
@@ -100,7 +96,13 @@ fn _hexdump_words(words: [i64]) -> text:
         i = i + 1
     line
 
+fn _ensure_capture_dir() -> bool:
+    val (out, err, code) = process_run("/bin/sh", ["-c", "mkdir -p build/spec_captures"])
+    code == 0
+
 fn capture_bit_table(name: text, words: [i64], view: text, fields: [text]) -> bool:
+    if not _ensure_capture_dir():
+        return false
     val body = "capture: " + name + "\n" +
         "view: " + view + "\n" +
         "fields: " + _join_fields(fields) + "\n" +
@@ -130,7 +132,7 @@ describe "NVMe NAND emulation: data change captured on write and read":
 
         step("After the write, the same NAND page words hold the written data")
         expect(out).to_contain("NAND-AFTER ppn=0 words=161,178,195,212")
-        capture_bit_table("nand_page0_after_write", [161, 178, 195, 212], "bits16", ["w0", "w1", "w2", "w3"])
+        expect(capture_bit_table("nand_page0_after_write", [161, 178, 195, 212], "bits16", ["w0", "w1", "w2", "w3"])).to_equal(true)
 
         step("Reading the LBA back returns exactly the written NAND words")
         expect(out).to_contain("NAND-READBACK lba=5 words=161,178,195,212")
@@ -155,7 +157,7 @@ describe "NVMe NAND emulation: FTL block migration captured":
 
         step("Before migration, the LBA lives in its original physical NAND block (source phase)")
         expect(out).to_contain("MIGRATE-BEFORE lba=100 block=0 nand=171")
-        capture_bit_table("ftl_lba100_before_migration", [171], "bits8", ["nand_block"])
+        expect(capture_bit_table("ftl_lba100_before_migration", [171], "bits8", ["nand_block"])).to_equal(true)
 
         step("After migration, the LBA has moved to a different physical NAND block (destination phase)")
         expect(out).to_contain("MIGRATE-AFTER lba=100 block=")
