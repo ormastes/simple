@@ -292,6 +292,13 @@ impl Ftl:
             return
         me.rd_disturb[blk] = me.read_disturb_count(blk) + 1
 
+    me clear_read_disturb(blk: i64):
+        if not block_in_range(blk):
+            return
+        if blk >= me.rd_disturb.len():
+            return
+        me.rd_disturb[blk] = 0
+
     # test hook: inject NAND read bit-errors at a physical page (forwarded to FIL).
     me inject_read_bitflip(ppn: i64, n: i64):
         me.fil.inject_read_bitflip(ppn, n)
@@ -446,11 +453,11 @@ impl Ftl:
         val er: i64 = me.fil.erase(blk)
         if er != NAND_OK:
             me.band.set_bad(blk)
-            me.rd_disturb[blk] = 0
+            me.clear_read_disturb(blk)
             return UNMAP
         me.rain_note_erased_block(blk, old_words)
         me.band.free_block(blk)
-        me.rd_disturb[blk] = 0      # erased -> read-disturb accumulation cleared
+        me.clear_read_disturb(blk)  # erased -> read-disturb accumulation cleared
         blk
 
     # Garbage-collect one victim. The victim is chosen by the (sandboxed) GC-scoring
@@ -599,11 +606,14 @@ fn ftl_selftest() -> i64:
     while i < PAGES_PER_BLOCK - 4:        # overwrite most of block 0 -> stale
         ftl.write(100 + i, 111)
         i = i + 1
+    ftl.rd_disturb = []
     val victim: i64 = ftl.gc_once()
     var reclaimed: i64 = 0
     if victim != UNMAP:
         reclaimed = 1
     fail = fail + expect_eq(reclaimed, 1, "gc reclaimed a victim block")
+    fail = fail + expect_eq(ftl.read_disturb_count(victim), 0, "gc survives truncated read-disturb table")
+    ftl.rd_disturb = ftl_fill(NUM_BLOCKS, 0)
     # logical view preserved across GC (relocated live pages still read correctly)
     fail = fail + expect_eq(ftl.read(100), 111, "post-GC read overwritten lba100")
     fail = fail + expect_eq(ftl.read(163), 263, "post-GC read relocated lba163")
