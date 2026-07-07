@@ -1428,3 +1428,38 @@ This removes the print/interpolation visibility blocker for the simple
 bootstrap CLI by using literal bootstrap text. Firmware production proof still
 waits on replacing the `run_native_build_bootstrap` stub so the matched
 `native-build` branch invokes the real native-build pipeline.
+
+### Non-bootstrap runtime evidence green; bootstrap build lane postponed (2026-07-07)
+
+Per user direction, bootstrap/native-build work is postponed and the remaining
+non-bootstrap firmware checks were re-run first.
+
+Evidence from the existing `build/nvme_fw_rv32.elf`:
+
+```text
+serial:
+SimpleOS RV32
+[BOOT] boot complete
+ALL RV32 NVME FW CHECKS PASS
+HEAP OK
+SVC OK
+
+PASS test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl
+Files: 1
+Passed: 2
+Failed: 0
+```
+
+The host scalar logic reference also remains green:
+
+```text
+RV32 NVME FW LOGIC OK
+```
+
+Status split:
+
+- Runtime/QEMU firmware behavior: green for the current ELF.
+- System spec coverage: green for the required RV32 firmware, heap, and SVC
+  markers.
+- Production self-hosted wrapper rebuild: still open/postponed because
+  bootstrap `native-build` dispatch is not implemented yet.
