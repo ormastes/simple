@@ -272,3 +272,32 @@ Terminated
 
 The next source-shape choke point is the split case/core set, starting at
 `logic_rain_cases.spl`.
+
+## Update — rain cases and ECC facade now parse quickly
+
+`logic_rain_cases.spl` was split into recovery/address case files, and
+`logic_ecc_core.spl` was reduced to a facade over bit, compute, check, and
+correction helpers. The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but it now gets through rain cases and ECC core, then
+stops at journal count cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_rain_cases.spl chars=264
+[BOOTSTRAP-PHASE] ... logic_rain_cases.spl
+[BOOTSTRAP-PHASE] ... logic_ecc_core.spl chars=532
+[BOOTSTRAP-PHASE] ... logic_ecc_core.spl
+[BOOTSTRAP-PHASE] ... logic_journal_count_cases.spl chars=682
+Terminated
+```
+
+The next source-shape choke point is `logic_journal_count_cases.spl`.
