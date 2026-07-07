@@ -81,6 +81,13 @@ fn fw_download_next_bytes(current: i64, dwords: i64) -> i64:
         return -1
     current + add
 
+fn identify_cap(v: i64, cap: i64) -> i64:
+    if v < 0:
+        return 0
+    if v > cap:
+        return cap
+    v
+
 impl NvmeController:
     # ── Admin path ───────────────────────────────────────────────────────────
     me admin_submit(c: AdminCmd) -> bool:
@@ -325,11 +332,11 @@ impl NvmeController:
             if cmd.nsid != 0:
                 return SC_INVALID_FIELD
             me.last_id = build_identify_controller()
-            me.last_id.target_id = me.target.target_id
-            me.last_id.channels = me.target.channels
-            me.last_id.ways_per_channel = me.target.ways_per_channel
-            me.last_id.nvme_blocks_per_slice = me.target.nvme_blocks_per_slice
-            me.last_id.cpu_cores = me.target.cpu_cores
+            me.last_id.target_id = identify_cap(me.target.target_id, TARGET_OPENSSD_8CH8WAY)
+            me.last_id.channels = identify_cap(me.target.channels, NUM_CHANNELS)
+            me.last_id.ways_per_channel = identify_cap(me.target.ways_per_channel, 8)
+            me.last_id.nvme_blocks_per_slice = identify_cap(me.target.nvme_blocks_per_slice, MDTS_BLOCKS)
+            me.last_id.cpu_cores = identify_cap(me.target.cpu_cores, 2)
             return SC_SUCCESS
         if cns == CNS_NAMESPACE:
             if cmd.nsid != 1:
@@ -521,6 +528,21 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(hwi.ways_per_channel, 8, "identify reports OpenSSD ways")
     fail = fail + expect_eq(hwi.nvme_blocks_per_slice, 4, "identify reports OpenSSD slice geometry")
     fail = fail + expect_eq(hwi.cpu_cores, 2, "identify reports OpenSSD core count")
+    hw.target.target_id = 99
+    hw.target.channels = -3
+    hw.target.ways_per_channel = 99
+    hw.target.nvme_blocks_per_slice = 99
+    hw.target.cpu_cores = -2
+    hw.admin_submit(admin_identify_cmd(68, CNS_CONTROLLER))
+    hw.admin_process()
+    hw.admin_reap()
+    val hwic: IdentifyData = hw.last_identify()
+    fail = fail + expect_eq(hwic.target_id, TARGET_OPENSSD_8CH8WAY, "corrupted target id clamps to known profile range")
+    fail = fail + expect_eq(hwic.channels, 0, "corrupted negative channel count fails closed")
+    fail = fail + expect_eq(hwic.ways_per_channel, 8, "corrupted way count clamps to supported max")
+    fail = fail + expect_eq(hwic.nvme_blocks_per_slice, MDTS_BLOCKS, "corrupted slice geometry clamps to MDTS")
+    fail = fail + expect_eq(hwic.cpu_cores, 0, "corrupted negative CPU core count fails closed")
+    hw.target = openssd_8ch8way_config()
     hw.target.lbas = LBA_COUNT - 7
     hw.target.nvme_block_bytes = 8192
     hw.admin_submit(admin_identify_ns_cmd(62, 1))
