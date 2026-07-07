@@ -168,6 +168,79 @@ A source-contract gate, modeled on the backend-isolation lint
   `src/lib/**/gpu`", to avoid flagging the legitimately-scalar `r<=0` guards and the GPU kernel
   strings themselves.
 
+### 6.1 Implementation (W2, landed)
+
+- **Script:** `scripts/check/check-cpu-hotloop-idiom.shs` — modeled on
+  `check-ui-backend-isolation.shs` (grep-based, `--update-baseline`, machine-readable
+  `cpu_lane_hotloop_*=` status lines, `cpu_lane_hotloop_ok=true|false`, exit 1 on new hits). Adds a
+  `--file-list <path>` override (scan a fixture set) and a `--baseline <path>` override (ratchet
+  against a fixture baseline in isolation).
+- **Designated file set:** `scripts/check/cpu_lane_hotpath_files.txt` (checked-in, explicit list per
+  the scope-discipline bullet above) — the real CPU per-pixel/per-glyph hot paths: the engine2d
+  rasteriser core (`backend_software.spl`, `backend_emu.spl`, `backend_emu_adv.spl`,
+  `backend_cpu.spl`, `compositor.spl`, `helpers_text.spl`), the web CPU render path
+  (`simple_web_html_layout_renderer.spl`, `famous_site_glyph_compositor.spl`), and the SimpleOS
+  compositor surfaces (`src/os/compositor/{compositor,compositor_engine2d,browser_compositor_backend}.spl`).
+  All under `gc_async_mut`/`src/os`; the `gc_sync_mut` siblings are re-export facades and `engine3d`
+  is out of the 2D scope, so neither is scanned. `backend_cpu.spl`/`compositor_engine2d.spl` carry 0
+  hits today but stay in the set to guard future edits.
+- **Four violation classes, each a documented structural grep pattern:**
+  - `LOOP` — a `while`/`for` loop header, whether the `:` is on the same line (single-line) or on a
+    later continuation line (the multi-line parenthesised-condition form `while (a and\n …):`; the
+    multi-line set is computed as *all loop-keyword headers minus the single-line matches*, so no
+    double-count and no fragile "does-not-end-in-colon" regex). Every loop in these files is presumed
+    a per-pixel/per-element/per-character body.
+  - `BYTE` — a two-pass heuristic: collect names declared `name: [u8]` in the file, then flag any
+    `name[...]` index read/write elsewhere in the file (e.g. `backend.mask_buf[mi] == 0u8`).
+  - `SUBSTR` — `.substring(pos|i|idx|j, …)` calls (research §4 CPU DON'T: per-position substring
+    instead of a bulk scan).
+  - `CHAIN` — an idiomatic per-element iterator escape (`.for_each(`, `.map(`, `.each(` call chains,
+    matched in **call form** so a field named `map` (`self.map[i]`) is not a false positive). On the
+    interpreted CPU lane these are per-element closures — the same cost as an inline loop body — so
+    they must not be a silent escape route past the `LOOP` rule.
+- **Known grep-blind spots (documented, not pretended):** (1) tail/self **recursion** used as an
+  element walk has no structural line pattern and is out of scope for this gate; it is covered
+  instead by the D2 parity/perf harness. (2) The `BYTE` heuristic only recognises `[u8]` names
+  declared as a **field** (`name: [u8]` at line start) or the **first parameter** (`(name: [u8]`);
+  a `[u8]` declared as a *later* parameter (e.g. `indexed_fill(…, idx: [u8], …)`) is not collected,
+  so its element reads are not flagged. The `LOOP` rule still covers the surrounding loop, so a hot
+  per-pixel body is not missed wholesale — only the finer `BYTE` signal is. The gate does not claim
+  to catch either case.
+- **Annotation:** `# cpu-lane-loop-ok: <reason>` on the same line as the flagged construct — for a
+  loop, the loop **header** line — or the line immediately above it, exempts the hit permanently (it
+  is never keyed, never baselined, never fails). A function-level annotation on the `def` line does
+  **not** reach loops nested below it; a GPU CPU-lane reference body (e.g. `indexed_fill`, whose
+  per-pixel loop is the parity oracle) must carry the annotation on each loop header.
+- **Baseline (content-keyed, ratcheted):** `scripts/check/cpu_lane_hotloop_baseline.txt`. Each entry
+  is `COUNT<TAB>CLASS<TAB>file<TAB>trimmed-content` — keyed by *(class, file, normalised source
+  text)* with a per-key **count**, **not** by line number. Trimming expands tabs, strips ends and
+  collapses internal whitespace runs, applied identically at generate- and check-time. Because the
+  key carries no line number, inserting or deleting lines above a baselined loop shifts no key and
+  re-flags nothing (verified: a +7-line insertion above the designated loops keeps `new=0`). The gate
+  ratchets on counts: for each key only `max(0, current_count − baseline_count)` is new (a genuinely
+  added loop matching an existing key still counts). Today's seed: **245 keys / 393 instances (367
+  `LOOP`, 20 `BYTE`, 6 `SUBSTR`)**, the known scalar hot loops tracked as perf items N2/N5/N6.
+- **Wiring (enforcement).** Authoritative lane: **`.github/workflows/repo-hygiene.yml`** runs
+  `sh scripts/check/check-cpu-hotloop-idiom.shs` on every push/PR — no self-hosted rebuild, not
+  bypassable by jj. Also wired into `scripts/hooks/pre-commit` (best-effort; jj bypasses git hooks)
+  and into `bin/simple lint` via `src/app/io/_CliCommands/run_commands.spl` `cli_run_lint`, beside
+  `check-ui-backend-isolation.shs`. The CLI lane shares two honest caveats with the isolation gate:
+  the deployed `bin/release` binary is built from an older tree (so it fires only after the next
+  self-hosted rebuild), and `simple lint` currently prefers a frontend-delegate binary when
+  configured (interim, `main_and_help.spl` `"lint"` branch) which bypasses `cli_run_lint`. **Not**
+  wired into `bin/simple build lint` — that lane routes to a Rust clippy shim inert for this repo
+  (`build_lint_routes_to_rust_clippy`, task #34), so a gate wired only there would silently never
+  run. Gate behaviour is proven by direct `sh` invocation, not a CLI round-trip through a stale
+  binary.
+- **Spec:** `test/03_system/app/ui/feature/cpu_hotloop_gate_spec.spl` asserts the script/baseline/
+  file-list exist and document the four classes, that the baseline is content-keyed (no `:LINE:`),
+  then executes the gate via `std.process.run`: a known-offender fixture, a `.for_each` CHAIN
+  fixture, and a multi-line-condition fixture must each flag `new=1`; an annotated-header fixture and
+  a `def`-line-annotated fixture prove header-vs-def annotation reach; a content-keyed shift fixture
+  proves line-shift survival; and a ratchet-math check against the real designated set asserts
+  `new=0`. (Interpret-mode runs only load-check specs, so behaviour is additionally verified by
+  direct shell runs — see the W2 report.)
+
 ## 7. Honesty — exists / designed / deferred
 
 **Exists (reused):** `BackendCapability.accelerated_ops` per-op fork (`backend_capability.spl`);

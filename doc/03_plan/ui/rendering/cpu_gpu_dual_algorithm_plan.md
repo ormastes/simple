@@ -55,7 +55,20 @@ Each work item is agent-executable: files · steps · specs · gates · size · 
   path in the spec; rollback = drop `indexed_fill` from `accelerated_ops` (op reverts to host
   variant, still correct).
 
-### W2 — Per-element-loop hot-path lint gate
+### W2 — Per-element-loop hot-path lint gate **← ✅ LANDED (2026-07-07)**
+
+> **Status: LANDED — first real CI-enforced gate in this repo (task #34,
+> gates-vestigial-under-jj, partially addressed).** `scripts/check/check-cpu-hotloop-idiom.shs`
+> (content-keyed baseline ratchet, 245 keys / 393 instances) is wired into
+> **`.github/workflows/repo-hygiene.yml`** as a push/PR step — CI is now the
+> **authoritative, non-bypassable** enforcement lane, since `jj` bypasses git hooks
+> (see `doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md` §6.1). Also wired
+> into `src/app/io/_CliCommands/run_commands.spl` `cli_run_lint` beside the sibling
+> `check-ui-backend-isolation.shs` call — code-correct, but this lane only fires after
+> the next self-hosted rebuild (deployed `bin/release` binary predates the change), and
+> `bin/simple build lint` still routes to the inert Rust clippy shim
+> (`build_lint_routes_to_rust_clippy`) so a gate wired only there would never run.
+> Spec `test/03_system/app/ui/feature/cpu_hotloop_gate_spec.spl` 15/15.
 
 - **Motivation.** Makes the CPU-lane "no per-element loop" contract (design §6) enforceable so the
   dual-algorithm discipline does not regress.
