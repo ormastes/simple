@@ -29,11 +29,13 @@ section — do not conflate fixes across them.
 
 ## TRACK A — durable fix: extend the `case1_unique` fast path to mutating methods (seed change)
 
-**Status: IMPLEMENTED + VERIFIED (2026-07-07).** Landed entirely in
+**Status: SOURCE IMPLEMENTED + VERIFIED + COMMITTED (2026-07-07); binary redeploy
+DEFERRED (see "Redeploy mechanism" below).** Landed entirely in
 `src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs` (the lvalue
 self-update write-back branch) via `Arc::make_mut` gated implicitly on
 `strong_count == 1` (uniquely-owned → in-place mutation; aliased → clone),
-mirroring the index-store fast path (`node_exec.rs:906-937`). See
+mirroring the index-store fast path (`node_exec.rs:906-937`). Committed to
+`main` (origin commit `632bdca45e8c`). See
 `doc/08_tracking/bug/interp_array_mutating_methods_clone_whole_array_2026-07-08.md`
 for the full verification writeup. Summary:
 
@@ -75,6 +77,66 @@ for the full verification writeup. Summary:
   introduced, this call must switch from `Arc::make_mut` to `Arc::get_mut`
   (falling through to clone on `None`) like index-store does — flagged
   in-source so it isn't missed.
+
+### Redeploy mechanism (how the committed fix reaches the live `bin/simple`) — DEFERRED, run deliberately
+
+**Why the source commit is not yet live, and why that is fine.** The fix is a
+**Rust-seed source change** (`src/compiler_rust/compiler/src/…`, crate
+`simple-compiler`). The live `bin/simple` →
+`bin/release/<triple>/simple` (on this host `aarch64-apple-darwin-macho`, a
+**19.7 MB** binary) is the **pure-Simple self-hosted native-build CLI**, not the
+Rust seed — per `.claude/rules/bootstrap.md` (*"NEVER copy Rust bootstrap binary
+to `bin/release/simple`"*). It is `gitignored` (never add it to git). The
+interpret-mode dispatch path in that self-hosted binary is nonetheless the Rust
+interpreter, because the binary is **linked against `libsimple_native_all.a`**
+(from `src/compiler_rust/target/bootstrap/`, via `SIMPLE_RUNTIME_PATH`), and
+crate `simple-native-all` depends on `simple-compiler` (`native_all/Cargo.toml`)
+— so `patterns.rs` is compiled into that runtime lib. That is the mechanism by
+which this fix reaches the deployed binary.
+
+**A plain `cargo build` is NOT a deploy and must never be swapped in.** A
+`cargo build -p simple-driver --release` produces
+`src/compiler_rust/target/release/simple` (**32.7 MB**) — the *Rust seed
+driver*, a different artifact class **and** a different profile from what the
+bootstrap uses (`--profile bootstrap`, which yields the 127 MB
+`target/bootstrap/simple`). Copying either seed artifact over the 19.7 MB
+self-hosted `bin/release/<triple>/simple` is exactly the regression the
+bootstrap rule forbids (falls the whole host's default tooling back to the
+seed). A one-off `cargo build` is only useful here as a **compile check** of the
+patch (it did pass, exit 0, 2 pre-existing warnings) — nothing more.
+
+**Canonical redeploy command (a full bootstrap — required because this is a Rust
+change):**
+
+```bash
+scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
+```
+
+`--full-bootstrap` is **mandatory** for this fix: a normal (pure-Simple)
+bootstrap *"never invokes cargo … reuses the existing Rust seed and runtime
+library"* and only rebuilds the pure-Simple stages — it would ship the **stale**
+`libsimple_native_all.a` and silently omit the interpreter fix (the script even
+warns *"reusing the existing seed because --full-bootstrap was not given"*). The
+full-bootstrap run: (1) cargo-rebuilds the seed **and** `libsimple_native_all.a`
+from the now-fixed `patterns.rs` (`--profile bootstrap`, `-p simple-driver` +
+`-p simple-native-all`); (2) runs stage2/stage3 self-host; (3) native-builds the
+self-hosted CLI linked against the fixed runtime; (4) `--deploy` snapshots the
+current binary to `simple.pre_deploy`, installs the new one, runs a **post-swap
+smoke** (`-c 'print(1+1)'` must print `2`) and **auto-restores** the previous
+binary on smoke failure. Built-in safety: seed-delegate gate + post-swap smoke +
+auto-restore.
+
+**Why DEFERRED (2026-07-07), not run now:** `--full-bootstrap` is a ~46-min
+heavy op (cargo + 3 self-host stages), disk headroom is ~20 GB, and peer agent
+sessions were observed actively building/editing this same working copy during
+this task — rushing a shared-binary swap under contention risks breaking the
+default tooling for every running agent. The **source fix is already landed on
+`origin/main` (`632bdca45e8c`)**, so it is captured durably and will be picked
+up automatically by the **next deliberate `--full-bootstrap --deploy`** (whether
+run for this fix specifically or as part of any other scheduled full bootstrap).
+No partial/seed swap was performed; the live 19.7 MB self-hosted binary is
+untouched (a pre-swap backup was also kept at
+`…/scratchpad/simple_deployed_backup`, md5 `6e40f9d9dd38f67417617d37f83434c2`).
 
 **What:** add an ownership-gated in-place fast path to the array-mutating-method dispatch,
 mirroring the index-store fast path that already exists and is proven safe in
@@ -189,10 +251,13 @@ Track A rather than hand-rolling a growth strategy in Simple.
    that work has landed and this plan is revisited.
 2. **Land Track A as a deliberate, scheduled full-bootstrap** when the tree is quiet (per
    `.claude/rules/bootstrap.md` — not bundled incidentally into unrelated work). Run the full
-   verification protocol above before deploy. **DONE (2026-07-07)** — see the Track A status
-   update above; source committed and `bin/simple` redeploy handled as its own careful,
-   independently-verified step (pre-swap equivalence check against the currently deployed binary,
-   backup kept for instant revert).
+   verification protocol above before deploy. **SOURCE COMMITTED (2026-07-07, `632bdca45e8c`);
+   BINARY REDEPLOY DEFERRED** — see the "Redeploy mechanism" subsection above for the canonical
+   deferred command (`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`),
+   why `--full-bootstrap` is mandatory (Rust-seed change → the runtime lib must be
+   cargo-rebuilt), and why it was deferred (heavy ~46-min op under active peer-build contention;
+   fix is already durable on origin and picked up by the next deliberate full bootstrap). A plain
+   `cargo build` seed artifact was explicitly NOT swapped over the self-hosted binary.
 3. **After Track A lands,** the remaining Track B victims (#5–#8, and any repo-wide `push`-in-loop
    sites outside this ranked list — including `simple_web_html_layout_renderer.spl` once
    unblocked) become optional micro-opts, not required fixes — Track A retires the whole O(N²)
