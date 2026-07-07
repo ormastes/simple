@@ -1,5 +1,10 @@
 # Tauri 2 + Simple Integration Status
 
+> **Superseded for production planning (2026-07-07):** see
+> [`mobile/tauri2_mobile_production_design.md`](mobile/tauri2_mobile_production_design.md) and
+> [`doc/03_plan/platform/mobile/tauri2_mobile_production_plan.md`](../../03_plan/platform/mobile/tauri2_mobile_production_plan.md).
+> The mobile IPC-gap / `#[cfg(desktop)]` / WebSocket-transport notes below remain accurate context.
+
 **Date:** 2026-03-23
 **Status:** Desktop verified, Android APK verified, iOS source/generated project verified on Linux; simulator/device proof needs macOS
 **Previous:** [2026-03-22 status](tauri_simple_integration_status_2026-03-22.md)

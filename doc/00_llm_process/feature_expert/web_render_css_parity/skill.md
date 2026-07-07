@@ -12,6 +12,11 @@ excluded via the Chrome DOM text mask). This is a *visual-fidelity* feature area
 distinct from the WM-drawing regression gate (`wm_gui_window_drawing`), which is
 a consumer of the same renderer.
 
+**Mobile consumer:** the Tauri 2 iOS/Android lanes render through this same
+`render_html_tree`/`generate_css` pipeline — see
+`doc/05_design/platform/mobile/tauri2_mobile_production_design.md` (production design)
+and `doc/03_plan/platform/mobile/tauri2_mobile_production_plan.md` (plan).
+
 ## Pipeline Links
 
 - [research](../../skill_command/skills/pipe/research/skill.md)

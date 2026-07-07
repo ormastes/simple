@@ -1,5 +1,10 @@
 # Tauri Mobile Guide — Simple GUI on iOS & Android
 
+> **Production design + plan:** [`doc/05_design/platform/mobile/tauri2_mobile_production_design.md`](../../../05_design/platform/mobile/tauri2_mobile_production_design.md)
+> and [`doc/03_plan/platform/mobile/tauri2_mobile_production_plan.md`](../../../03_plan/platform/mobile/tauri2_mobile_production_plan.md)
+> cover runtime strategy (Android subprocess vs iOS-device AOT static-link), signing/release lanes,
+> perf gates, and the shell-source-not-in-git blocker (Phase 0). This guide is the current how-to.
+
 How to render a Simple GUI (`.ui.sdn`) layout as a native iOS / Android app via
 the Tauri v2 shell (`tools/tauri-shell`). Two modes: the **embedded static page**
 (§1, renders once) and the **live source-bundle** mode (§1b, the default on
