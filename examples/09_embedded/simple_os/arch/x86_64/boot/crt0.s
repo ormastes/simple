@@ -144,6 +144,24 @@ _entry32:
     decl %ecx
     jnz .fill_high_pd
 
+    /* ALSO map the NVMe BAR at the higher-half VA 0xFFFFC00000000000
+     * (PML4[384], PDPT[0], PD[0]) -> phys 0xC000000000, reusing boot_high_pd.
+     * The C NVMe driver (NVME_BAR_VIRT_BASE) and vmm_map_nvme_bar_high() use
+     * this higher-half VA so the BAR is inherited into every user AS via the
+     * PML4[256..511] clone (the PML4[1] identity map above is NOT cloned).
+     * Reuses boot_high_pdpt: its [0] is unused; [256] serves the PML4[1] map.
+     * KEEP VA/phys in sync with baremetal_stubs.c NVME_BAR_VIRT_BASE and
+     * src/os/kernel/memory/vmm_address_space.spl vmm_map_nvme_bar_high(). */
+    movl $boot_high_pdpt, %edi
+    movl $boot_high_pd, %eax
+    orl  $0x03, %eax
+    movl %eax, 0(%edi)          /* PDPT[0] -> boot_high_pd (for PML4[384]) */
+
+    movl $boot_pml4, %edi
+    movl $boot_high_pdpt, %eax
+    orl  $0x03, %eax
+    movl %eax, 3072(%edi)       /* PML4[384] = 384*8 -> boot_high_pdpt */
+
     /* ------------------------------------------------------------------
      * Enable long mode
      * ------------------------------------------------------------------ */
