@@ -9,6 +9,7 @@ use os.kernel.loader.process_image.{build_user_process_image_unchecked}
 use os.kernel.loader.x86_64_fs_exec_ring3.{x86_64_fs_exec_enter_image_ring3}
 
 extern fn serial_println(msg: text)
+extern fn simpleos_fat32_path_read_buffer_addr() -> u64
 
 var g_x86_64_fs_exec_next_pid: i64 = 1
 
@@ -92,17 +93,21 @@ fn _x86_64_try_fat32_exec_alias(path: text) -> [u8]:
             return root_bytes
     []
 
-fn _x86_64_read_spawn_bytes(path: text) -> [u8]:
+fn _x86_64_read_spawn_bytes_and_blob(path: text) -> ([u8], u64):
     val static_bytes = _x86_64_try_static_fat32_exec(path)
     if static_bytes.len() > 0:
-        return static_bytes
-    val cached = _x86_64_try_cached_exec(path)
-    if cached.len() > 0:
-        return cached
+        return (static_bytes, simpleos_fat32_path_read_buffer_addr())
     val alias_bytes = _x86_64_try_fat32_exec_alias(path)
     if alias_bytes.len() > 0:
-        return alias_bytes
-    g_vfs_read_executable_bytes(path)
+        return (alias_bytes, simpleos_fat32_path_read_buffer_addr())
+    val cached = _x86_64_try_cached_exec(path)
+    if cached.len() > 0:
+        return (cached, 0.to_u64())
+    val bytes = g_vfs_read_executable_bytes(path)
+    (bytes, 0.to_u64())
+
+pub fn x86_64_fs_exec_handoff_blob_ready(byte_len: i64, raw_blob: u64) -> bool:
+    byte_len > 4 and raw_blob != 0.to_u64()
 
 pub fn x86_64_fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     """Spawn an x86_64 executable from the filesystem (kernel-origin caller)."""
@@ -121,7 +126,7 @@ pub fn x86_64_fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [tex
     serial_println("[fs-exec] spawn:resolve path={path}")
     if path == "/sys/apps/wine_hello" or path == "/sys/apps/wine_hello.smf":
         return _x86_64_spawn_static_seeded(path, argv, envp)
-    val bytes = _x86_64_read_spawn_bytes(path)
+    val (bytes, raw_blob) = _x86_64_read_spawn_bytes_and_blob(path)
     serial_println("[fs-exec] spawn:bytes path={path} len={bytes.len()}")
     if bytes.len() <= 4:
         val static_pid = _x86_64_spawn_static_seeded(path, argv, envp)
@@ -159,17 +164,16 @@ pub fn x86_64_fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [tex
     # map+enter sequence proven by the FS-exec smoke, lifted into the general
     # spawn. Does not return on success: the process runs at ring 3 and exits.
     val image = build_user_process_image_unchecked(path, bytes, Architecture.X86_64, argv, envp)
-    # blob=0: this VFS/cache path has no guaranteed resident raw ELF buffer (bytes
-    # come from g_vfs_read_fat32_path_bytes / app_registry cache), so the handoff's
-    # blob==0 guard fails cleanly rather than parsing a stale FAT buffer and iretq'ing
-    # to a garbage entry. Giving general spawn its own resident raw buffer is a
-    # separate follow-up (the resident-buffer path is exercised by the general entry).
-    val handoff_rc = x86_64_fs_exec_enter_image_ring3(image, 0)
+    val handoff_rc = if x86_64_fs_exec_handoff_blob_ready(bytes.len(), raw_blob):
+        x86_64_fs_exec_enter_image_ring3(image, raw_blob)
+    else:
+        -5
     serial_println("[fs-exec] x86_64:handoff-return path={path} rc={handoff_rc}")
     # The handoff only RETURNS on failure (on success it iretq's to ring 3 and the
     # process exits). Reaching here means it did NOT execute — surface the failure
     # (docstring: "negative errno on failure") instead of a phantom-success pid. The
-    # blob=0 production path always lands here until it gets its own resident buffer.
+    # blob=0 cache-only paths still fail closed; FAT-backed paths pass the exact
+    # resident read buffer that produced `bytes`.
     if handoff_rc < 0:
         return handoff_rc
     pid

@@ -1,7 +1,7 @@
 # SimpleOS Process-Backed & FS-Loaded Apps
 
 **Version:** 1.0.0
-**Status:** Code complete; runtime integration pending (FR-SOS-024)
+**Status:** Code complete; FAT-backed raw-buffer handoff wired; live QEMU evidence still required for release claims
 
 ---
 
@@ -223,7 +223,8 @@ The main entry point for loading and spawning filesystem-backed processes.
 |----------|---------|
 | `x86_64_fs_exec_spawn(path, argv, envp)` | Main spawn: read bytes, extract SMF, emit markers, return PID |
 | `x86_64_fs_exec_spawn_hello_world_smf()` | Backward-compat wrapper |
-| `_x86_64_read_spawn_bytes(path)` | Read executable (static -> cache -> alias -> VFS fallback) |
+| `_x86_64_read_spawn_bytes_and_blob(path)` | Read executable and return the raw FAT buffer address when the byte source is FAT-backed |
+| `x86_64_fs_exec_handoff_blob_ready(byte_len, raw_blob)` | Fail-closed gate: ring-3 handoff requires nonempty bytes and a resident raw buffer |
 | `_x86_64_try_static_fat32_exec(path)` | Read from static FAT32 |
 | `_x86_64_try_cached_exec(path)` | Try app registry cache |
 | `_x86_64_try_fat32_exec_alias(path)` | Try FAT32 alias resolution |
@@ -234,9 +235,13 @@ The main entry point for loading and spawning filesystem-backed processes.
 
 **Byte resolution order:**
 1. Static FAT32 exec (compiled-in)
-2. App registry cache
-3. FAT32 alias resolution
+2. FAT32 alias resolution
+3. App registry cache
 4. VFS file read (live filesystem)
+
+Only the FAT-backed cases pass `simpleos_fat32_path_read_buffer_addr()` into
+`x86_64_fs_exec_enter_image_ring3`. Cache-only or generic VFS array reads keep
+`raw_blob=0` and fail closed rather than entering ring 3 from stale bytes.
 
 ---
 
@@ -270,7 +275,7 @@ The `src/os/qemu_runner.spl` serial contract expects these markers for each tool
 
 | ID | Issue | Impact |
 |----|-------|--------|
-| FR-SOS-024 | Syscall 13 direct-spawn return-path fault | Apps fall back to resident manifest |
+| FR-SOS-024 | Syscall 13 direct-spawn return-path fault | FAT-backed x86_64 spawn now passes the resident raw buffer to ring-3 handoff; rerun QEMU acceptance before removing this blocker |
 | VFS-LIFETIME | `g_vfs_read_file_bytes()` C array lifetime corruption | VFS reads may return corrupt bytes |
 | ELF-IMAGE | User-process image construction incomplete | Stack, auxv, entry, memory mappings |
 
