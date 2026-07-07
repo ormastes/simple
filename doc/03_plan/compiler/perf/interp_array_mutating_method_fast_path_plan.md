@@ -114,16 +114,15 @@ bug). Apply the same two-shapes-of-fix to the ranked victims from the sweep, in 
 
 | Rank | Site | Pattern today | Fix shape |
 |---|---|---|---|
-| 1 | `simple_web_html_layout_renderer.spl:8766` `ops = ops.push(scene_fill_rect(...))` | functional-reassign push, per-frame paint-op list | two-pass: count ops first, then `[default; count]` + index-assign; or count is already known from node/rect counts |
-| 2 | `browser_renderer.spl:87` `out = out.push(SceneCommand.stroke_rect(...))` | functional-reassign push, per-render scene-command list | same two-pass shape |
-| 3 | `html_tokenizer.spl` (17 push sites) | token list built per char/token, grows with document length | two-pass (pre-count tokens) or `Vec`-like growth amortization if a two-pass count isn't cheap; compounds with the separate `text.substring()` O(offset) bug — do not conflate fixes |
-| 4 | `html_tree_builder.spl` (16 push sites) | node/stack lists per token | same shape, size ~ # nodes |
-| 5 | `style_block_parse.spl` (12), `style_block.spl` (14) | decl/rule lists per token, size ~ CSS size | same shape; feeds `compute_styles` |
-| 6 | `layout_paint.spl` (13), `layout_core.spl` (11) | draw-op/box lists per node, per frame | same shape |
-| 7 | `webgl_context.spl` (124 sites), `webgpu_commands.spl` (26) | GL/GPU command buffers | same shape; only matters under `SIMPLE_EXECUTION_MODE=interpret` |
-| 8 | engine2d executors (`gc_sync_mut`/`gc_async_mut/render_scene/engine2d_executor.spl`) | scene-op decode/build per op | same shape |
-| 9 | `widget_to_dom.spl` (7), `dom_visual_effects.spl` (7) | DOM/effect lists per widget | same shape |
-| — | **`simple_web_html_layout_renderer.spl`'s other push sites** | — | **NOT for now** — this file is contended by concurrent work; do not touch beyond the already-ranked #1 site above without coordinating first |
+| 1 | `browser_renderer.spl:87` `out = out.push(SceneCommand.stroke_rect(...))` | functional-reassign push, per-render scene-command list | two-pass: count ops first, then `[default; count]` + index-assign; or count is already known from node/rect counts |
+| 2 | `html_tokenizer.spl` (17 push sites) | token list built per char/token, grows with document length | two-pass (pre-count tokens) or `Vec`-like growth amortization if a two-pass count isn't cheap; compounds with the separate `text.substring()` O(offset) bug — do not conflate fixes |
+| 3 | `html_tree_builder.spl` (16 push sites) | node/stack lists per token | same shape, size ~ # nodes |
+| 4 | `style_block_parse.spl` (12), `style_block.spl` (14) | decl/rule lists per token, size ~ CSS size | same shape; feeds `compute_styles` |
+| 5 | `layout_paint.spl` (13), `layout_core.spl` (11) | draw-op/box lists per node, per frame | same shape |
+| 6 | `webgl_context.spl` (124 sites), `webgpu_commands.spl` (26) | GL/GPU command buffers | same shape; only matters under `SIMPLE_EXECUTION_MODE=interpret` |
+| 7 | engine2d executors (`gc_sync_mut`/`gc_async_mut/render_scene/engine2d_executor.spl`) | scene-op decode/build per op | same shape |
+| 8 | `widget_to_dom.spl` (7), `dom_visual_effects.spl` (7) | DOM/effect lists per widget | same shape |
+| — | **`simple_web_html_layout_renderer.spl` (ALL push sites, incl. `:8766` `ops = ops.push(scene_fill_rect(...))`)** | — | **NOT for now, the whole file** — this file is contended by concurrent work; do not touch ANY push site in it, ranked or not, without coordinating first |
 
 For sites where the final size isn't known up front, use a two-pass count-then-fill (cheap count
 loop, then `[default; count]` + index-assign) rather than growing a `Vec`-equivalent by hand —
@@ -132,19 +131,23 @@ Track A rather than hand-rolling a growth strategy in Simple.
 
 ## Sequencing
 
-1. **Now, unblocked:** apply Track B to ranked victims #1–#5 (paint/scene-op builders + parsers) —
-   these are the highest render-visible impact and need no seed rebuild. Re-measure the
-   700/1500/3000-rule `compute_styles`/`parse_html` timing points used in the adjacent
-   `text_substring_o_offset_parse_html_quadratic_2026-07-07.md` and
+1. **Now, unblocked:** apply Track B to ranked victims #1–#4 (scene-op builder + parsers) —
+   these are the highest render-visible impact among the sites NOT excluded below and need no
+   seed rebuild. Re-measure the 700/1500/3000-rule `compute_styles`/`parse_html` timing points
+   used in the adjacent `text_substring_o_offset_parse_html_quadratic_2026-07-07.md` and
    `web_compute_styles_residual_quadratic_2026-07-06.md` records to confirm improvement without
-   regressing those already-tracked numbers.
+   regressing those already-tracked numbers. **Explicitly excluded from "now":**
+   `simple_web_html_layout_renderer.spl` in its entirety (every push site in that file, including
+   the would-be-rank-1 `:8766` site) — it is contended by concurrent work; do not touch it until
+   that work has landed and this plan is revisited.
 2. **Land Track A as a deliberate, scheduled full-bootstrap** when the tree is quiet (per
    `.claude/rules/bootstrap.md` — not bundled incidentally into unrelated work). Run the full
    verification protocol above before deploy.
-3. **After Track A lands,** the remaining Track B victims (#6–#9, and any repo-wide `push`-in-loop
-   sites outside this ranked list) become optional micro-opts, not required fixes — Track A
-   retires the whole O(N²) class in one change. Do not invest further per-site refactor effort
-   once Track A is verified and deployed.
+3. **After Track A lands,** the remaining Track B victims (#5–#8, and any repo-wide `push`-in-loop
+   sites outside this ranked list — including `simple_web_html_layout_renderer.spl` once
+   unblocked) become optional micro-opts, not required fixes — Track A retires the whole O(N²)
+   class in one change. Do not invest further per-site refactor effort once Track A is verified
+   and deployed.
 
 ## Verification Gates (rollup)
 
