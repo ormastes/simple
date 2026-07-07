@@ -13,6 +13,40 @@ Each work item is agent-executable: files · steps · specs · gates · size · 
 
 ---
 
+## STATUS ROLL-UP (2026-07-08) — real-kernel surface is COMPLETE + bit-exact
+
+Every engine2d op with a genuine Metal compute pipeline is now proven bit-exact CPU↔Metal via
+`device_readback` (`cpu_checksum == metal_checksum`), gated by
+`scripts/check/check-engine2d-gpu-offload-evidence.shs` (per-op MATCH + `source=device_readback`
+required) and `check-engine2d-cpu-metal-parity-evidence.shs` (0 mismatches). A 3× harness
+reproduction found **zero DIVERGE** across clear/line/circle(+filled)/gradient/rect(+outline)/
+rounded_rect(+outline)/triangle/indexed_fill/glyph_atlas/blit_image — the old "line/circle diverge"
+note is STALE (fixed by prior D2 op-consolidation).
+
+- **W1 (indexed_fill GPU-dict) — LANDED** (device_readback bit-exact).
+- **W2 (CPU hot-loop lint gate) — LANDED** (CI-enforced, task #34).
+- **W3 (draw_gradient_rect parity) — LANDED** (commit 7e5532ff): kernel wrote `fb[idx]=c` raw →
+  diverged on alpha<255; fixed to `blend_src_over`. Also restored the GPU-offload evidence gate
+  that was silently dead on origin (`BackendKind` vs `Engine2dBackendKind` after a peer rename).
+- **W4 (glyph-atlas GPU-dict draw_text) — LANDED** (device_readback bit-exact).
+- **rounded_rect parity — LANDED** (commit 661c6951, not originally a W-item): Metal kernel was
+  STALE (replicated the pre-07-06 CPU OUTLINE algo; CPU was fixed to FILL). Rewrote to replay
+  `emu_draw_rounded_rect`'s exact 7 overlapping primitives per pixel — alpha blends are NOT
+  idempotent, so a blend-once-per-region kernel diverges at seams.
+- **draw_image parity — LANDED** (commit 13bf2cf5): coverage gap (both sides identical clipped
+  raw row-copy), closed with a device_readback stage + `OP_DRAW_IMAGE` capability.
+
+**Remaining (all non-trivial, not chase-worthy without their unblock):** W5 (blur) — D2-gated, no
+equality-matrix decision exists; W6 (bulk clear/read_pixels) — seed-blocked (mutable-array extern
+bridge); W7 (`cpu_simd` honesty) — CPU-only, no device_readback counterpart, ~10 dependent specs.
+CPU-only ops (ellipse/arc/bezier/polygon/blur_rect/shadow_rect etc.) delegate to `self.mirror` —
+single-algorithm by construction, OUT of the dual-algorithm parity class (do not force-add kernels).
+
+See memory `project_engine2d_dual_algorithm_complete_2026-07-07` for the add-an-op pattern +
+the alpha-non-idempotency gotcha.
+
+---
+
 ## First wave (recommended — no seed dependency)
 
 ### W1 — GPU-dict pilot: `indexed_fill` palette LUT (Metal) **← ✅ LANDED + GPU-PROVEN (2026-07-07)**
