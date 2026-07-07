@@ -1,7 +1,7 @@
 # NVMe FW — Gap-Closure Implementation Plan (simulation → hardware-faithful), with tests
 
-> **Status (2026-06-30): PLANNED.** This plan closes the gap between the current
-> simulation (`examples/09_embedded/simpleos_nvme_fw/fw/`, ~5K LOC pure-Simple, run-green)
+> **Status (2026-07-07): WIRED SIMULATION FLOORS.** This plan tracks the closed simulation
+> floors between `examples/09_embedded/simpleos_nvme_fw/fw/` (~5K LOC pure-Simple, run-green)
 > and a real hardware-facing NVMe SSD firmware, as measured against the open comparators
 > Cosmos+ OpenSSD GreedyFTL (runs on FPGA+ARM, NVMe 1.2/PCIe) and FEMU (QEMU NVMe emulator),
 > and against commercial firmware ("millions of LOC, a miniature OS").
@@ -54,7 +54,7 @@ the firmware":
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
 | P8 | `rain` | `ftl` (writes/GC/format maintain parity; `rain_recover_channel` rebuilds a failed channel inside the live FTL, verified end-to-end through the normal read path) | **wired** |
 | P2 | `fil_scheduler` | `fil.spl` (every valid program/read/erase queues the target block through the scheduler before the FMC command) | **wired timing floor** — channel-level parallelism is still a model the single-threaded sim cannot physically exhibit |
-| P9 | `fw_rv32/entry.spl` | bare-metal rv32 ISA reference (re-expresses RAIN, ECC, fixed scheduler, fixed power/thermal, fixed map-cache, fixed band, fixed journal-ring, fixed HIL, fixed queue-phase, fixed io-opcode-read-zero-trim-flush, fixed admin/format/fw-log, fixed reactor, fixed policy/target, fixed DRAM/durability, fixed wear/scrub, fixed media-retire, fixed power-cycle, fixed backpressure/abort, fixed feature-guard, and fixed namespace-guard floors array-free; `check`-clean + host-verified) | reference wired through rv32 boot hook; full 22-module no-alloc firmware port remains the ceiling |
+| P9 | `fw_rv32/entry.spl` | bare-metal rv32 scalar firmware floor (re-expresses RAIN, ECC, fixed scheduler, fixed power/thermal, fixed map-cache, fixed band, fixed journal-ring, fixed HIL, fixed queue-phase, fixed io-opcode-read-zero-trim-flush, fixed admin/format/fw-log, fixed reactor, fixed policy/target, fixed DRAM/durability, fixed wear/scrub, fixed media-retire, fixed power-cycle, fixed backpressure/abort, fixed feature/namespace guards, and the Cosmos+ OpenSSD target profile array-free; `check`-clean + host-verified) | wired through rv32 boot hook; full no-alloc firmware port remains the ceiling |
 
 Adding more standalone modules (full P4 HostMem/PRP lists, full P5 DRAM refresh/ECC/bandwidth, multicore P6 beyond the cooperative token, or full BCH/LDPC beyond the P3 floor) widens the shelf without closing the gap. Prefer
 wiring an existing verified module into the live path over landing a new disconnected one.
