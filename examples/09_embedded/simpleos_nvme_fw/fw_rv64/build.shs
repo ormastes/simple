@@ -1,0 +1,170 @@
+#!/bin/sh
+# Build a bootable RV64 ELF for the NVMe-firmware direct smoke.
+set -e
+cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+
+OUT="build/nvme_fw_rv64.elf"
+OBJ="build/test-artifacts/nvme_fw_rv64.o"
+START_OBJ="build/test-artifacts/nvme_fw_rv64_start.o"
+START_ASM="build/test-artifacts/nvme_fw_rv64_start.S"
+ENTRY_DIR="build/os/generated"
+DIRECT_ENTRY="$ENTRY_DIR/nvme_fw_rv64_direct_entry.spl"
+TIMEOUT_SECS="${NVME_RV64_BUILD_TIMEOUT_SECS:-300}"
+SIMPLE_BIN="${NVME_RV64_SIMPLE_BIN:-bin/simple}"
+LOG_DIR="build/test-artifacts"
+OUT_LOG="$LOG_DIR/nvme_fw_rv64_build.out"
+ERR_LOG="$LOG_DIR/nvme_fw_rv64_build.err"
+
+mkdir -p "$LOG_DIR" "$ENTRY_DIR"
+rm -f "$DIRECT_ENTRY" "$OUT" "$OBJ" "$START_OBJ" "$START_ASM"
+
+cat >"$DIRECT_ENTRY" <<'EOF_DIRECT_ENTRY'
+use logic.{nvme_fw_rv32_logic_selftest}
+
+@export("C", name: "rt_rv64_boot_optional_nvme_fw_selftest")
+fn rt_rv64_boot_optional_nvme_fw_selftest() -> i64:
+    nvme_fw_rv32_logic_selftest() as i64
+
+fn main() -> i64:
+    nvme_fw_rv32_logic_selftest() as i64
+EOF_DIRECT_ENTRY
+
+{
+  echo "NVME_RV64_BUILD_START timeout=${TIMEOUT_SECS}s out=$OUT"
+  echo "compiler=$SIMPLE_BIN"
+  echo "sources=build/os/generated,examples/09_embedded/simpleos_nvme_fw/fw_rv32"
+  echo "entry=$DIRECT_ENTRY target=riscv64-unknown-none mode=direct_firmware"
+} >"$OUT_LOG"
+: >"$ERR_LOG"
+
+if command -v timeout >/dev/null 2>&1; then
+  BUILD_RUNNER="timeout -k 10s ${TIMEOUT_SECS}s"
+else
+  BUILD_RUNNER=""
+fi
+
+cat >"$START_ASM" <<'EOF_START'
+    .section .text.entry, "ax"
+    .globl _start
+_start:
+    la      sp, _stack_top
+    call    rt_rv64_boot_optional_nvme_fw_selftest
+    bnez    a0, fail
+    lui     t0, 0x10000
+.macro putc byte
+    li      t2, \byte
+1:  lbu     t1, 5(t0)
+    andi    t1, t1, 0x20
+    beqz    t1, 1b
+    sb      t2, 0(t0)
+.endm
+    putc 83
+    putc 105
+    putc 109
+    putc 112
+    putc 108
+    putc 101
+    putc 79
+    putc 83
+    putc 32
+    putc 82
+    putc 86
+    putc 54
+    putc 52
+    putc 10
+    putc 91
+    putc 66
+    putc 79
+    putc 79
+    putc 84
+    putc 93
+    putc 32
+    putc 98
+    putc 111
+    putc 111
+    putc 116
+    putc 32
+    putc 99
+    putc 111
+    putc 109
+    putc 112
+    putc 108
+    putc 101
+    putc 116
+    putc 101
+    putc 10
+    putc 65
+    putc 76
+    putc 76
+    putc 32
+    putc 82
+    putc 86
+    putc 54
+    putc 52
+    putc 32
+    putc 78
+    putc 86
+    putc 77
+    putc 69
+    putc 32
+    putc 70
+    putc 87
+    putc 32
+    putc 67
+    putc 72
+    putc 69
+    putc 67
+    putc 75
+    putc 83
+    putc 32
+    putc 80
+    putc 65
+    putc 83
+    putc 83
+    putc 10
+    j done
+fail:
+    lui     t0, 0x10000
+    putc 70
+    putc 65
+    putc 73
+    putc 76
+    putc 10
+done:
+    lui     t0, 0x100
+    li      t1, 0x5555
+    sw      t1, 0(t0)
+1:  wfi
+    j       1b
+EOF_START
+
+if ! riscv64-unknown-elf-gcc -march=rv64imafdc -mabi=lp64d -c "$START_ASM" -o "$START_OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
+  echo "NVME_RV64_BUILD_FAILED start-stub out=$OUT_LOG err=$ERR_LOG" >&2
+  tail -n 40 "$ERR_LOG" >&2 || true
+  exit 1
+fi
+
+set +e
+$BUILD_RUNNER env SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 "$SIMPLE_BIN" native-build --backend llvm \
+  --source build/os/generated --source examples/09_embedded/simpleos_nvme_fw/fw_rv32 \
+  --entry "$DIRECT_ENTRY" --entry-closure \
+  --target riscv64-unknown-none \
+  --emit-object -o "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"
+rc=$?
+set -e
+if [ "$rc" -ne 0 ]; then
+  echo "NVME_RV64_BUILD_FAILED code=$rc timeout=${TIMEOUT_SECS}s out=$OUT_LOG err=$ERR_LOG" >&2
+  tail -n 40 "$OUT_LOG" >&2 || true
+  tail -n 40 "$ERR_LOG" >&2 || true
+  exit "$rc"
+fi
+
+llvm-objcopy --redefine-sym _start=__simple_unused_start "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG" || true
+if ! ld.lld -m elf64lriscv -T src/os/kernel/arch/riscv64/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
+  echo "NVME_RV64_BUILD_FAILED link out=$OUT_LOG err=$ERR_LOG" >&2
+  tail -n 40 "$ERR_LOG" >&2 || true
+  exit 1
+fi
+
+echo "build exit=0"
+ls -la "$OUT" 2>/dev/null && file "$OUT" 2>/dev/null

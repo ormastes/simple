@@ -27,7 +27,7 @@ nvme_rv64_baremetal_boot_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -57,10 +57,37 @@ cases are rejected.
 
 ### NVMe firmware rv64 baremetal wrapper
 
+#### has an explicit RV64 firmware ELF build recipe
+
+- The RV64 direct firmware build script is shell-parseable
+   - Expected: code equals `0`
+- The RV64 boot wrapper tells operators how to create missing boot media
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("The RV64 direct firmware build script is shell-parseable")
+val (out, err, code) = _run("sh -n examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs")
+expect(code).to_equal(0)
+
+step("The RV64 boot wrapper tells operators how to create missing boot media")
+val (hint_out, hint_err, hint_code) = _run("sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs")
+expect(hint_out).to_contain("missing-media: build/nvme_fw_rv64.elf")
+expect(hint_out).to_contain("fw_rv64/build.shs")
+```
+
+</details>
+
 #### boots the RV64 NVMe firmware ELF on QEMU and reports subsystem health
 
 - Run boot.shs for the RV64 NVMe firmware wrapper against the real ELF
 - The serial console shows the RV64 boot and firmware PASS markers
+- verdict = "missing-media: build/nvme fw rv64 elf not built
    - Expected: verdict equals `pass`
 
 
@@ -77,7 +104,7 @@ val (out, err, code) = _run("sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/bo
 step("The serial console shows the RV64 boot and firmware PASS markers")
 var verdict: text = "pass"
 if out.contains("missing-media:"):
-    verdict = "missing-media: build/nvme_fw_rv64.elf not built"
+    verdict = "missing-media: build/nvme_fw_rv64.elf not built (run fw_rv64/build.shs)"
 else:
     if not out.contains("SimpleOS RV64"):
         verdict = "boot-fail: SimpleOS RV64 banner absent"
@@ -125,8 +152,8 @@ _expect_no_fail_marker(out, "rv64 boot wrapper self-test")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
