@@ -10,7 +10,8 @@
 @layout dag
 @direction LR
 
-openai_api_spec
+openai_api_spec -> std
+openai_api_spec -> app
 ```
 
 </details>
@@ -220,14 +221,12 @@ expect(json).to_contain("How are you?")
 
 #### parses success response
 
-1. var raw =  LB
-2. raw = raw +  Q
-3. raw = raw +  Q
-4. raw = raw +  Q
-5. raw = raw +  Q
-6. raw = raw +  Q
-7. raw = raw +  Q
-8. raw = raw +  RB
+- jp
+- jp
+- jp
+- jp
+- jp
+- jp
    - Expected: resp.content equals `Hi there!`
    - Expected: resp.model equals `gpt-4o`
    - Expected: resp.finish_reason equals `stop`
@@ -244,14 +243,14 @@ Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var raw = _LB()
-raw = raw + _Q() + "content" + _Q() + ":" + _Q() + "Hi there!" + _Q() + ","
-raw = raw + _Q() + "model" + _Q() + ":" + _Q() + "gpt-4o" + _Q() + ","
-raw = raw + _Q() + "finish_reason" + _Q() + ":" + _Q() + "stop" + _Q() + ","
-raw = raw + _Q() + "prompt_tokens" + _Q() + ":50,"
-raw = raw + _Q() + "completion_tokens" + _Q() + ":25,"
-raw = raw + _Q() + "total_tokens" + _Q() + ":75"
-raw = raw + _RB()
+val raw = jo6(
+    jp("content", js("Hi there!")),
+    jp("model", js("gpt-4o")),
+    jp("finish_reason", js("stop")),
+    jp("prompt_tokens", "50"),
+    jp("completion_tokens", "25"),
+    jp("total_tokens", "75")
+)
 val resp = parse_openai_response(raw)
 expect(resp.content).to_equal("Hi there!")
 expect(resp.model).to_equal("gpt-4o")
@@ -282,22 +281,14 @@ expect(resp.error).to_equal("empty response")
 
 #### defaults finish reason to stop
 
-1. var raw =  LB
-2. raw = raw +  Q
-3. raw = raw +  RB
-   - Expected: resp.finish_reason equals `stop`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var raw = _LB()
-raw = raw + _Q() + "content" + _Q() + ":" + _Q() + "Hello" + _Q()
-raw = raw + _RB()
+val raw = jo1(jp("content", js("Hello")))
 val resp = parse_openai_response(raw)
 expect(resp.finish_reason).to_equal("stop")
 ```
@@ -306,22 +297,14 @@ expect(resp.finish_reason).to_equal("stop")
 
 #### preserves raw response
 
-1. var raw =  LB
-2. raw = raw +  Q
-3. raw = raw +  RB
-   - Expected: resp.raw equals `raw`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var raw = _LB()
-raw = raw + _Q() + "content" + _Q() + ":" + _Q() + "test" + _Q()
-raw = raw + _RB()
+val raw = jo1(jp("content", js("test")))
 val resp = parse_openai_response(raw)
 expect(resp.raw).to_equal(raw)
 ```
@@ -330,23 +313,14 @@ expect(resp.raw).to_equal(raw)
 
 #### handles zero token counts
 
-1. var raw =  LB
-2. raw = raw +  Q
-3. raw = raw +  RB
-   - Expected: resp.prompt_tokens equals `0`
-   - Expected: resp.completion_tokens equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var raw = _LB()
-raw = raw + _Q() + "content" + _Q() + ":" + _Q() + "Hi" + _Q()
-raw = raw + _RB()
+val raw = jo1(jp("content", js("Hi")))
 val resp = parse_openai_response(raw)
 expect(resp.prompt_tokens).to_equal(0)
 expect(resp.completion_tokens).to_equal(0)
@@ -361,7 +335,7 @@ expect(resp.completion_tokens).to_equal(0)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_caret/openai_api_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

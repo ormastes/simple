@@ -10,7 +10,8 @@
 @layout dag
 @direction LR
 
-claude_api_spec
+claude_api_spec -> std
+claude_api_spec -> app
 ```
 
 </details>
@@ -235,13 +236,13 @@ expect(json).to_contain("\\\"hi\\\"")
 
 #### parses success response
 
-1. var raw =  LB
-2. raw = raw +  Q
-3. raw = raw +  Q
-4. raw = raw +  Q
-5. raw = raw +  Q
-6. raw = raw +  Q
-7. raw = raw +  RB
+- var raw = LB
+- raw = raw + Q
+- raw = raw + Q
+- raw = raw + Q
+- raw = raw + Q
+- raw = raw + Q
+- raw = raw + RB
    - Expected: resp.content equals `Hello!`
    - Expected: resp.model equals `claude-sonnet-4-20250514`
    - Expected: resp.stop_reason equals `end_turn`
@@ -257,13 +258,13 @@ Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var raw = _LB()
-raw = raw + _Q() + "text" + _Q() + ":" + _Q() + "Hello!" + _Q() + ","
-raw = raw + _Q() + "model" + _Q() + ":" + _Q() + "claude-sonnet-4-20250514" + _Q() + ","
-raw = raw + _Q() + "stop_reason" + _Q() + ":" + _Q() + "end_turn" + _Q() + ","
-raw = raw + _Q() + "input_tokens" + _Q() + ":100,"
-raw = raw + _Q() + "output_tokens" + _Q() + ":50"
-raw = raw + _RB()
+var raw = LB()
+raw = raw + Q() + "text" + Q() + ":" + Q() + "Hello!" + Q() + ","
+raw = raw + Q() + "model" + Q() + ":" + Q() + "claude-sonnet-4-20250514" + Q() + ","
+raw = raw + Q() + "stop_reason" + Q() + ":" + Q() + "end_turn" + Q() + ","
+raw = raw + Q() + "input_tokens" + Q() + ":100,"
+raw = raw + Q() + "output_tokens" + Q() + ":50"
+raw = raw + RB()
 val resp = parse_claude_api_response(raw)
 expect(resp.content).to_equal("Hello!")
 expect(resp.model).to_equal("claude-sonnet-4-20250514")
@@ -277,10 +278,10 @@ expect(resp.is_error).to_equal(false)
 
 #### parses error response
 
-1. var raw =  LB
-2. raw = raw +  Q
-3. raw = raw +  Q
-4. raw = raw +  RB
+- var raw = LB
+- raw = raw + Q
+- raw = raw + Q
+- raw = raw + RB
    - Expected: resp.is_error is true
    - Expected: resp.error equals `Invalid API key`
 
@@ -292,10 +293,10 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var raw = _LB()
-raw = raw + _Q() + "type" + _Q() + ":" + _Q() + "error" + _Q() + ","
-raw = raw + _Q() + "message" + _Q() + ":" + _Q() + "Invalid API key" + _Q()
-raw = raw + _RB()
+var raw = LB()
+raw = raw + Q() + "type" + Q() + ":" + Q() + "error" + Q() + ","
+raw = raw + Q() + "message" + Q() + ":" + Q() + "Invalid API key" + Q()
+raw = raw + RB()
 val resp = parse_claude_api_response(raw)
 expect(resp.is_error).to_equal(true)
 expect(resp.error).to_equal("Invalid API key")
@@ -321,9 +322,9 @@ expect(resp.error).to_equal("empty response")
 
 #### defaults stop reason to end_turn
 
-1. var raw =  LB
-2. raw = raw +  Q
-3. raw = raw +  RB
+- var raw = LB
+- raw = raw + Q
+- raw = raw + RB
    - Expected: resp.stop_reason equals `end_turn`
 
 
@@ -334,9 +335,9 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var raw = _LB()
-raw = raw + _Q() + "text" + _Q() + ":" + _Q() + "Hi" + _Q()
-raw = raw + _RB()
+var raw = LB()
+raw = raw + Q() + "text" + Q() + ":" + Q() + "Hi" + Q()
+raw = raw + RB()
 val resp = parse_claude_api_response(raw)
 expect(resp.stop_reason).to_equal("end_turn")
 ```
@@ -345,9 +346,9 @@ expect(resp.stop_reason).to_equal("end_turn")
 
 #### preserves raw response
 
-1. var raw =  LB
-2. raw = raw +  Q
-3. raw = raw +  RB
+- var raw = LB
+- raw = raw + Q
+- raw = raw + RB
    - Expected: resp.raw equals `raw`
 
 
@@ -358,9 +359,9 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var raw = _LB()
-raw = raw + _Q() + "text" + _Q() + ":" + _Q() + "test" + _Q()
-raw = raw + _RB()
+var raw = LB()
+raw = raw + Q() + "text" + Q() + ":" + Q() + "test" + Q()
+raw = raw + RB()
 val resp = parse_claude_api_response(raw)
 expect(resp.raw).to_equal(raw)
 ```
@@ -369,9 +370,9 @@ expect(resp.raw).to_equal(raw)
 
 #### parses zero token counts
 
-1. var raw =  LB
-2. raw = raw +  Q
-3. raw = raw +  RB
+- var raw = LB
+- raw = raw + Q
+- raw = raw + RB
    - Expected: resp.input_tokens equals `0`
    - Expected: resp.output_tokens equals `0`
 
@@ -383,9 +384,9 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var raw = _LB()
-raw = raw + _Q() + "text" + _Q() + ":" + _Q() + "Hi" + _Q()
-raw = raw + _RB()
+var raw = LB()
+raw = raw + Q() + "text" + Q() + ":" + Q() + "Hi" + Q()
+raw = raw + RB()
 val resp = parse_claude_api_response(raw)
 expect(resp.input_tokens).to_equal(0)
 expect(resp.output_tokens).to_equal(0)
@@ -400,7 +401,7 @@ expect(resp.output_tokens).to_equal(0)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_caret/claude_api_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

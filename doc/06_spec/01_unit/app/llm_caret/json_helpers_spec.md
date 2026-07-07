@@ -10,7 +10,8 @@
 @layout dag
 @direction LR
 
-json_helpers_spec
+json_helpers_spec -> std
+json_helpers_spec -> app
 ```
 
 </details>
@@ -377,7 +378,7 @@ expect(result).to_contain("\"assistant\"")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_caret/json_helpers_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

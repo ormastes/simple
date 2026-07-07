@@ -10,7 +10,7 @@
 @layout dag
 @direction LR
 
-provider_spec
+provider_spec -> app
 ```
 
 </details>
@@ -27,7 +27,7 @@ provider_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -48,7 +48,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val providers = list_providers()
-expect(providers.len()).to_equal(5)
+expect(providers.len()).to_equal(6)
 ```
 
 </details>
@@ -66,6 +66,25 @@ val providers = list_providers()
 var found = false
 for p in providers:
     if p == "claude_cli":
+        found = true
+expect(found).to_equal(true)
+```
+
+</details>
+
+#### includes opencode_cli
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val providers = list_providers()
+var found = false
+for p in providers:
+    if p == "opencode_cli":
         found = true
 expect(found).to_equal(true)
 ```
@@ -160,6 +179,20 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(is_valid_provider("claude_cli")).to_equal(true)
+```
+
+</details>
+
+#### validates opencode_cli
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(is_valid_provider("opencode_cli")).to_equal(true)
 ```
 
 </details>
@@ -276,7 +309,7 @@ expect(resp.content).to_equal("")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_caret/provider_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -290,8 +323,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

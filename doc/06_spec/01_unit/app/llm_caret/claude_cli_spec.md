@@ -10,7 +10,8 @@
 @layout dag
 @direction LR
 
-claude_cli_spec
+claude_cli_spec -> app
+claude_cli_spec -> std
 ```
 
 </details>
@@ -272,7 +273,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val schema = _LB() + _Q() + "type" + _Q() + ":" + _Q() + "object" + _Q() + _RB()
+val schema = LB() + Q() + "type" + Q() + ":" + Q() + "object" + Q() + RB()
 val args = build_claude_args("Hi", "", "", "", "", 0, 0, schema, [], [], false)
 expect(args_get_flag_value(args, "--json-schema")).to_equal(schema)
 ```
@@ -563,10 +564,10 @@ expect(resp.error).to_equal("empty response")
 
 #### handles missing model field
 
-1. var json =  LB
-2. json = json +  Q
-3. json = json +  Q
-4. json = json +  RB
+- var json = LB
+- json = json + Q
+- json = json + Q
+- json = json + RB
    - Expected: resp.content equals `Hello`
    - Expected: resp.model equals ``
 
@@ -578,10 +579,10 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var json = _LB()
-json = json + _Q() + "result" + _Q() + ":" + _Q() + "Hello" + _Q() + ","
-json = json + _Q() + "is_error" + _Q() + ":false"
-json = json + _RB()
+var json = LB()
+json = json + Q() + "result" + Q() + ":" + Q() + "Hello" + Q() + ","
+json = json + Q() + "is_error" + Q() + ":false"
+json = json + RB()
 val resp = parse_claude_json_response(json)
 expect(resp.content).to_equal("Hello")
 expect(resp.model).to_equal("")
@@ -591,10 +592,10 @@ expect(resp.model).to_equal("")
 
 #### defaults stop reason to end_turn
 
-1. var json =  LB
-2. json = json +  Q
-3. json = json +  Q
-4. json = json +  RB
+- var json = LB
+- json = json + Q
+- json = json + Q
+- json = json + RB
    - Expected: resp.stop_reason equals `end_turn`
 
 
@@ -605,10 +606,10 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var json = _LB()
-json = json + _Q() + "result" + _Q() + ":" + _Q() + "Done" + _Q() + ","
-json = json + _Q() + "is_error" + _Q() + ":false"
-json = json + _RB()
+var json = LB()
+json = json + Q() + "result" + Q() + ":" + Q() + "Done" + Q() + ","
+json = json + Q() + "is_error" + Q() + ":false"
+json = json + RB()
 val resp = parse_claude_json_response(json)
 expect(resp.stop_reason).to_equal("end_turn")
 ```
@@ -652,10 +653,10 @@ expect(evt.content).to_equal("Hello ")
 
 #### parses message_stop
 
-1. var line =  LB
-2. line = line +  Q
-3. line = line +  Q
-4. line = line +  RB
+- var line = LB
+- line = line + Q
+- line = line + Q
+- line = line + RB
    - Expected: evt.event_type equals `message_stop`
    - Expected: evt.stop_reason equals `end_turn`
 
@@ -667,10 +668,10 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var line = _LB()
-line = line + _Q() + "type" + _Q() + ":" + _Q() + "message_stop" + _Q() + ","
-line = line + _Q() + "stop_reason" + _Q() + ":" + _Q() + "end_turn" + _Q()
-line = line + _RB()
+var line = LB()
+line = line + Q() + "type" + Q() + ":" + Q() + "message_stop" + Q() + ","
+line = line + Q() + "stop_reason" + Q() + ":" + Q() + "end_turn" + Q()
+line = line + RB()
 val evt = parse_claude_stream_line(line)
 expect(evt.event_type).to_equal("message_stop")
 expect(evt.stop_reason).to_equal("end_turn")
@@ -680,10 +681,10 @@ expect(evt.stop_reason).to_equal("end_turn")
 
 #### parses message_start with model
 
-1. var line =  LB
-2. line = line +  Q
-3. line = line +  Q
-4. line = line +  RB
+- var line = LB
+- line = line + Q
+- line = line + Q
+- line = line + RB
    - Expected: evt.event_type equals `message_start`
    - Expected: evt.model equals `claude-sonnet-4-20250514`
 
@@ -695,10 +696,10 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var line = _LB()
-line = line + _Q() + "type" + _Q() + ":" + _Q() + "message_start" + _Q() + ","
-line = line + _Q() + "model" + _Q() + ":" + _Q() + "claude-sonnet-4-20250514" + _Q()
-line = line + _RB()
+var line = LB()
+line = line + Q() + "type" + Q() + ":" + Q() + "message_start" + Q() + ","
+line = line + Q() + "model" + Q() + ":" + Q() + "claude-sonnet-4-20250514" + Q()
+line = line + RB()
 val evt = parse_claude_stream_line(line)
 expect(evt.event_type).to_equal("message_start")
 expect(evt.model).to_equal("claude-sonnet-4-20250514")
@@ -723,9 +724,9 @@ expect(evt.event_type).to_equal("empty")
 
 #### handles unknown type
 
-1. var line =  LB
-2. line = line +  Q
-3. line = line +  RB
+- var line = LB
+- line = line + Q
+- line = line + RB
    - Expected: evt.event_type equals `unknown`
 
 
@@ -736,9 +737,9 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var line = _LB()
-line = line + _Q() + "data" + _Q() + ":" + _Q() + "something" + _Q()
-line = line + _RB()
+var line = LB()
+line = line + Q() + "data" + Q() + ":" + Q() + "something" + Q()
+line = line + RB()
 val evt = parse_claude_stream_line(line)
 expect(evt.event_type).to_equal("unknown")
 ```
@@ -752,7 +753,7 @@ expect(evt.event_type).to_equal("unknown")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_caret/claude_cli_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

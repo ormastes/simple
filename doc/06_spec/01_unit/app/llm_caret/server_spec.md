@@ -10,7 +10,8 @@
 @layout dag
 @direction LR
 
-server_spec
+server_spec -> std
+server_spec -> app
 ```
 
 </details>
@@ -365,9 +366,9 @@ expect(resp).to_contain("messages required")
 
 #### returns 501 for valid chat request
 
-1. var body =  LB
-2. body = body +  Q
-3. body = body +  RB
+- var body = LB
+- body = body + Q
+- body = body + RB
 
 
 <details>
@@ -377,9 +378,9 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var body = _LB()
-body = body + _Q() + "content" + _Q() + ":" + _Q() + "Hello" + _Q()
-body = body + _RB()
+var body = LB()
+body = body + Q() + "content" + Q() + ":" + Q() + "Hello" + Q()
+body = body + RB()
 val resp = handle_route("POST", "/v1/chat/completions", body)
 expect(resp).to_contain("501")
 ```
@@ -393,7 +394,7 @@ expect(resp).to_contain("501")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_caret/server_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
