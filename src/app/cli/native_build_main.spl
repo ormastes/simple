@@ -196,6 +196,14 @@ fn eprint_bounded(output: text):
     eprint "[stderr truncated by native-build entry]"
     eprint output[output.len() - tail_len:output.len()]
 
+fn native_build_output_has_nil_field_id(stdout: text, stderr: text) -> bool:
+    stdout.contains("undefined field 'id'") or stderr.contains("undefined field 'id'")
+
+fn native_build_print_failure_hints(stdout: text, stderr: text):
+    if native_build_output_has_nil_field_id(stdout, stderr):
+        eprint "hint: nil `.id` field access usually lost the MIR/HIR context above."
+        eprint "      Rerun with SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1 to print phase and function names."
+
 fn run_native_build_worker(args: [text]) -> i64:
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
     val mode = env_get("SIMPLE_EXECUTION_MODE")
@@ -208,7 +216,10 @@ fn run_native_build_worker(args: [text]) -> i64:
     # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
     # an empty one.
     env_set("SIMPLE_BINARY", simple_bin)
+    val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+    env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
     val (stdout, stderr, code) = process_run_timeout(simple_bin, worker_args, native_build_timeout_ms(args))
+    env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     print_bounded(stdout)
     val output_path = output_path_arg(args)
     if code == 0 and output_path != "" and not rt_file_exists(output_path):
@@ -218,11 +229,13 @@ fn run_native_build_worker(args: [text]) -> i64:
         # here immediately instead of letting the caller silently proceed with a
         # stale/missing binary.
         eprint_bounded(stderr)
+        native_build_print_failure_hints(stdout, stderr)
         eprint "error: native-build worker exited 0 but produced no output binary: {output_path}"
         eprint "  Treating a successful-looking exit with a missing output file as a hard failure."
         return 1
     if code != 0:
         eprint_bounded(stderr)
+        native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
         if code == -1:
             val secs = native_build_timeout_ms(args) / 1000

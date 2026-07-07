@@ -41,15 +41,26 @@ use compiler.mir.mir_lowering_ml.*
 var _bootstrap_mir_functions: [MirFunction] = []
 var _bootstrap_mir_function_names: [text] = []
 
-# The real HIR module for the bootstrap entry (app.cli.bootstrap_main), set by
-# the driver (bootstrap_lower_to_mir_context) from ctx.hir_modules before MIR
-# lowering. Carrying it through a module global avoids changing the no-arg
-# signature of bootstrap_lower_hir_globals_to_mir_module (called from several
-# sites). When nil, the free path lowers to nothing and the loud guard fires.
+fn bootstrap_mir_functions_reset():
+    _bootstrap_mir_functions = []
+    _bootstrap_mir_function_names = []
+
+fn bootstrap_mir_functions_add(name: text, fn_: MirFunction):
+    _bootstrap_mir_function_names = _bootstrap_mir_function_names.push(name)
+    _bootstrap_mir_functions = _bootstrap_mir_functions.push(fn_)
+
+# The real HIR module for the bootstrap entry, set by the driver
+# (bootstrap_lower_to_mir_context) from ctx.hir_modules before MIR lowering.
+# Carrying it through a module global avoids changing the no-arg signature of
+# bootstrap_lower_hir_globals_to_mir_module (called from several sites). When
+# nil, the free path lowers to nothing and the loud guard fires.
 var _bootstrap_entry_hir_module: HirModule? = nil
 
 fn bootstrap_set_entry_hir_module(m: HirModule):
     _bootstrap_entry_hir_module = Some(m)
+
+fn bootstrap_clear_entry_hir_module():
+    _bootstrap_entry_hir_module = nil
 
 fn bootstrap_mir_function_count() -> i64:
     _bootstrap_mir_functions.len()
@@ -91,8 +102,7 @@ fn bootstrap_mir_name_for_index(index: i64) -> text:
     ""
 
 fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
-    """Lower the bootstrap entry (bootstrap_main.spl) to MIR with REAL function
-    bodies.
+    """Lower the bootstrap entry to MIR with REAL function bodies.
 
     The real HIR module for the entry is produced by the driver's HIR phase
     (lower_and_check -> HirLowering.lower_module over the freshly-parsed
@@ -102,42 +112,46 @@ fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
     A prior implementation emitted ret-0 stub bodies here
     (lower_bootstrap_stub_function), so the linked stage-2 binary printed
     nothing on `--version` (bug bootstrap_stage2_empty_mir_bodies_2026-07-05)."""
-    print "[mir-lower-free] start"
-    _bootstrap_mir_functions = []
-    _bootstrap_mir_function_names = []
+    val trace_enabled = mir_lower_trace_enabled()
+    if trace_enabled:
+        print "[mir-lower-free] start"
+    bootstrap_mir_functions_reset()
     var real_instr_total = 0
     if val hir_module = _bootstrap_entry_hir_module:
         var lowering = MirLowering.new(hir_module.symbols)
         var lowered_module = lowering.builder.module
-        lowered_module.name = "app.cli.bootstrap_main"
+        lowered_module.name = hir_module.name
         val entry_functions = hir_module.functions
         val fn_keys = entry_functions.keys()
-        print "[mir-lower-free] functions:count {fn_keys.len()}"
+        if trace_enabled:
+            print "[mir-lower-free] functions:count {fn_keys.len()}"
         var fki = 0
         while fki < fn_keys.len():
             val hir_fn: HirFunction = entry_functions[fn_keys[fki]]
             val bootstrap_name = hir_fn.name
             if bootstrap_name != "":
-                print "[mir-lower-free] function:start {bootstrap_name}"
-                _bootstrap_mir_function_names.push(bootstrap_name)
+                if trace_enabled:
+                    print "[mir-lower-free] function:start {bootstrap_name}"
                 lowering.symbols = hir_module.symbols
                 val mir_fn = lowering.lower_function(hir_fn)
-                _bootstrap_mir_functions.push(mir_fn)
+                bootstrap_mir_functions_add(bootstrap_name, mir_fn)
                 var blk_i = 0
                 while blk_i < mir_fn.blocks.len():
                     real_instr_total = real_instr_total + mir_fn.blocks[blk_i].instructions.len()
                     blk_i = blk_i + 1
                 var bldr = lowering.builder
                 lowered_module = bldr.module
-                lowered_module.name = "app.cli.bootstrap_main"
+                lowered_module.name = hir_module.name
                 var functions = lowered_module.functions
                 functions[mir_fn.symbol] = mir_fn
                 lowered_module.functions = functions
                 bldr.module = lowered_module
                 lowering.builder = bldr
-                print "[mir-lower-free] function:added"
+                if trace_enabled:
+                    print "[mir-lower-free] function:added"
             fki = fki + 1
-        print "[mir-lower-free] done instr-total={real_instr_total}"
+        if trace_enabled:
+            print "[mir-lower-free] done instr-total={real_instr_total}"
         # Loud-failure guard: the bootstrap entry must never lower to an all-stub
         # (ret-0, zero-instruction) module. Emitting such a module produced a
         # link-clean but non-functional stage-2 binary that silently shipped.
@@ -150,4 +164,4 @@ fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
     eprint("error: bootstrap entry HIR module was not set before MIR lowering\n")
     eprint("error: refusing to emit a stub-only bootstrap binary\n")
     rt_exit(1)
-    MirModule(name: "app.cli.bootstrap_main", functions: {}, statics: {}, constants: {}, types: {})
+    MirModule(name: "", functions: {}, statics: {}, constants: {}, types: {})

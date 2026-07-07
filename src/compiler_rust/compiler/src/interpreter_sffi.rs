@@ -564,6 +564,19 @@ pub fn clear_expr_registry() {
     });
 }
 
+/// Plain interpreter extern names that may be routed through rt_interp_call.
+fn interp_call_uses_extern_dispatch(name: &str) -> bool {
+    matches!(
+        name,
+        "print" | "print_raw" | "eprint" | "eprint_raw" | "dprint" | "println" | "eprintln"
+    )
+}
+
+fn interp_error_diag_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SIMPLE_BOOTSTRAP_DIAG").is_some())
+}
+
 /// Internal handler for rt_interp_call.
 ///
 /// This is registered with the runtime via `init_interpreter_handlers()`.
@@ -690,7 +703,7 @@ unsafe extern "C" fn interp_call_handler(
                     impl_methods,
                 ),
             }
-        } else if name.starts_with("rt_") || name.starts_with("spl_") {
+        } else if name.starts_with("rt_") || name.starts_with("spl_") || interp_call_uses_extern_dispatch(name) {
             // Extern declarations routed through InterpCall by the hybrid
             // transform (e.g. JIT-unresolvable rt_torch_* in torch-less
             // builds) dispatch to the interpreter's extern handlers.
@@ -721,6 +734,9 @@ unsafe extern "C" fn interp_call_handler(
         Ok(value) => value_to_runtime(&value),
         Err(e) => {
             tracing::error!("rt_interp_call error: {:?}", e);
+            if interp_error_diag_enabled() {
+                eprintln!("[interp-call-error] name={name} argc={} error={e:?}", args.len());
+            }
             simple_runtime::RuntimeValue::NIL
         }
     }
@@ -815,6 +831,23 @@ mod tests {
 
         unregister_compiled_fn("test_fn");
         assert!(!is_function_compiled("test_fn"));
+    }
+
+    #[test]
+    fn interp_call_dispatches_plain_io_externs() {
+        for name in ["print", "print_raw", "eprint", "eprint_raw", "dprint", "println", "eprintln"] {
+            assert!(interp_call_uses_extern_dispatch(name), "{name}");
+        }
+        assert!(!interp_call_uses_extern_dispatch("user_function"));
+        assert!(!interp_call_uses_extern_dispatch("rt_env_get"));
+    }
+
+    #[test]
+    fn interp_error_diag_follows_bootstrap_diag_env() {
+        assert_eq!(
+            interp_error_diag_enabled(),
+            std::env::var_os("SIMPLE_BOOTSTRAP_DIAG").is_some()
+        );
     }
 
     #[test]

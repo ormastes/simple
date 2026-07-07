@@ -39,20 +39,12 @@ use compiler.mir.mir_lowering_expr.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
 
-fn mir_lower_trace_enabled_part2() -> bool:
-    val trace = rt_env_get("SIMPLE_COMPILER_TRACE") ?? ""
-    val phase = rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
-    val diag = rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
-    if trace == "1":
-        return true
-    if phase == "1":
-        return true
-    diag == "1"
-
 impl MirLowering:
     me lower_function(fn_: HirFunction) -> MirFunction:
         """Lower HIR function to MIR."""
-        if mir_lower_trace_enabled_part2():
+        val trace_enabled = mir_lower_trace_enabled()
+        val bootstrap_trace = trace_enabled and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        if trace_enabled:
             print "[mir-lower] lower_function:start {fn_.name}"
         # NOTE: This path formerly short-circuited every bootstrap function to a
         # ret-0 / hardcoded stub (gated on SIMPLE_BOOTSTRAP_REAL_LOWER, plus
@@ -62,13 +54,13 @@ impl MirLowering:
         # bootstrap_stage2_empty_mir_bodies_2026-07-05). Real HIR->MIR lowering
         # now runs for all bootstrap functions.
         self.local_map = {}
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+        if bootstrap_trace:
             print "[mir-lower] real-lower:start {fn_.name}"
 
         # Build signature
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+        if bootstrap_trace:
             print "[mir-lower] real-lower:params {fn_.name}"
-        if mir_lower_trace_enabled_part2():
+        if trace_enabled:
             print "[mir-lower] lower_function:params {fn_.name}"
         var params: [MirType] = []
         var pmi = 0
@@ -76,15 +68,15 @@ impl MirLowering:
             params = params.push(self.lower_type(fn_.params[pmi].type_))
             pmi = pmi + 1
 
-        if mir_lower_trace_enabled_part2():
+        if trace_enabled:
             print "[mir-lower] lower_function:return-type-start {fn_.name}"
         val return_type = if fn_.return_type.?:
             self.lower_type(fn_.return_type)
         else:
             MirType(kind: MirTypeKind.Unit)
-        if mir_lower_trace_enabled_part2():
+        if trace_enabled:
             print "[mir-lower] lower_function:return-type-done {fn_.name}"
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+        if bootstrap_trace:
             print "[mir-lower] real-lower:return-type {fn_.name}"
         val signature = MirSignature(
             params: params,
@@ -93,24 +85,24 @@ impl MirLowering:
         )
 
         # Begin function (copy-modify-reassign for interpreter)
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+        if bootstrap_trace:
             print "[mir-lower] real-lower:begin {fn_.name}"
-        if mir_lower_trace_enabled_part2():
+        if trace_enabled:
             print "[mir-lower] lower_function:begin-function {fn_.name}"
         var bldr = self.builder
         bldr.begin_function(fn_.symbol, fn_.name, signature, fn_.span)
-        if mir_lower_trace_enabled_part2():
+        if trace_enabled:
             print "[mir-lower] lower_function:begin-function-done {fn_.name}"
         self.builder = bldr
 
         # Map parameters to locals
         var arg_locals: Dict<i64, LocalId> = {}
-        if mir_lower_trace_enabled_part2():
+        if trace_enabled:
             print "[mir-lower] lower_function:locals-start {fn_.name} count={self.builder.locals.len()}"
         var lmi = 0
         while lmi < self.builder.locals.len():
             val local = self.builder.locals[lmi]
-            if mir_lower_trace_enabled_part2():
+            if trace_enabled:
                 print "[mir-lower] lower_function:local {fn_.name} idx={lmi}"
             match local.kind:
                 case Arg(index):
@@ -118,11 +110,11 @@ impl MirLowering:
                 case _:
                     ()
             lmi = lmi + 1
-        if mir_lower_trace_enabled_part2():
+        if trace_enabled:
             print "[mir-lower] lower_function:locals-done {fn_.name}"
 
         var pli = 0
-        if mir_lower_trace_enabled_part2():
+        if trace_enabled:
             print "[mir-lower] lower_function:param-map-start {fn_.name} count={fn_.params.len()}"
         while pli < fn_.params.len():
             val param = fn_.params[pli]
@@ -130,36 +122,40 @@ impl MirLowering:
                 arg_locals[pli]
             else:
                 LocalId(id: pli + 1)
-            if param.symbol == nil:
-                self.error("function parameter has no resolved symbol", Some(param.span))
+            # `if val` can still bind nil in this interpreter; re-check before `.id`.
+            if val found_symbol = param.symbol:
+                if found_symbol == nil:
+                    self.error("function parameter has no resolved symbol", Some(param.span))
+                else:
+                    self.local_map[found_symbol.id] = local
             else:
-                self.local_map[param.symbol.id] = local
+                self.error("function parameter has no resolved symbol", Some(param.span))
             # Thread the real HIR parameter name onto the (nameless) MIR arg
             # local so backends render actual port names, not arg0/arg1/arg2.
             var name_bldr = self.builder
             name_bldr.set_local_name(local, param.name)
             self.builder = name_bldr
             pli = pli + 1
-        if mir_lower_trace_enabled_part2():
+        if trace_enabled:
             print "[mir-lower] lower_function:param-map-done {fn_.name}"
 
         val previous_has_vhdl_metadata = self.current_has_vhdl_metadata
         self.current_has_vhdl_metadata = fn_.has_vhdl_metadata
 
         # Lower body
-        if mir_lower_trace_enabled_part2():
+        if trace_enabled:
             print "[mir-lower] lower_function:body-start {fn_.name}"
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+        if bootstrap_trace:
             print "[mir-lower] real-lower:body {fn_.name}"
         val result = self.lower_block(fn_.body)
-        if mir_lower_trace_enabled_part2():
+        if trace_enabled:
             print "[mir-lower] lower_function:body-done {fn_.name}"
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+        if bootstrap_trace:
             print "[mir-lower] real-lower:body-done {fn_.name}"
         self.current_has_vhdl_metadata = previous_has_vhdl_metadata
 
         # Return result (copy-modify-reassign for interpreter)
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+        if bootstrap_trace:
             print "[mir-lower] real-lower:return {fn_.name}"
         var bldr2 = self.builder
         if not bldr2.current_block_has_explicit_terminator():
@@ -170,11 +166,11 @@ impl MirLowering:
         self.builder = bldr2
 
         var bldr3 = self.builder
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+        if bootstrap_trace:
             print "[mir-lower] real-lower:end {fn_.name}"
         var fn_result = bldr3.end_function()
         self.builder = bldr3
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+        if bootstrap_trace:
             print "[mir-lower] real-lower:done {fn_.name}"
 
         # Propagate function-level codegen attributes from HIR.
@@ -324,48 +320,50 @@ impl MirLowering:
         # stmts + has(bool) + value, so read them directly and avoid the antipattern
         # (and the .unwrap() on a struct optional, which also fails interp-side).
         val block_stmts = block.stmts
-        if mir_lower_trace_enabled_part2():
+        val trace_enabled = mir_lower_trace_enabled()
+        val bootstrap_trace = trace_enabled and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        if trace_enabled:
             print "[mir-lower] block:start stmts={block_stmts.len()} has={block.has}"
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+        if bootstrap_trace:
             print "[mir-lower] block:start"
             print "[mir-lower] block:stmts {block_stmts.len()}"
         var blk_i = 0
         while blk_i < block_stmts.len():
-            if mir_lower_trace_enabled_part2():
+            if trace_enabled:
                 print "[mir-lower] block:stmt {blk_i}"
-            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+            if bootstrap_trace:
                 print "[mir-lower] block:stmt {blk_i}"
             val stmt = block_stmts[blk_i]
             self.lower_stmt(stmt)
-            if mir_lower_trace_enabled_part2():
+            if trace_enabled:
                 print "[mir-lower] block:stmt-done {blk_i}"
-            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+            if bootstrap_trace:
                 print "[mir-lower] block:stmt-done {blk_i}"
             blk_i = blk_i + 1
 
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+        if bootstrap_trace:
             print "[mir-lower] block:value-check"
         if block.has:
-            if mir_lower_trace_enabled_part2():
+            if trace_enabled:
                 print "[mir-lower] block:value-present"
-            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+            if bootstrap_trace:
                 print "[mir-lower] block:value-present"
             val value = block.value
-            if mir_lower_trace_enabled_part2():
+            if trace_enabled:
                 print "[mir-lower] block:value-read"
-            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+            if bootstrap_trace:
                 print "[mir-lower] block:value-unwrapped"
             if val actual_value = value:
                 val local = self.lower_expr(actual_value)
-                if mir_lower_trace_enabled_part2():
+                if trace_enabled:
                     print "[mir-lower] block:value-lowered"
-                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+                if bootstrap_trace:
                     print "[mir-lower] block:value-lowered"
                 Some(local)
             else:
                 nil
         else:
-            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and mir_lower_trace_enabled_part2():
+            if bootstrap_trace:
                 print "[mir-lower] block:no-value"
             nil
 
