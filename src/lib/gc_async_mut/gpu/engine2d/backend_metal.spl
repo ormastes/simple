@@ -7,10 +7,9 @@
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_handle, ReadbackSource, readback_source_label}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult}
-use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
+use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, glyph_atlas_dense_values, glyph_atlas_index_for_char_code}
 use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_u32s_from_ptr, metal_write_u32s_to_ptr, gpu_lut_pack_dense, gpu_lut_free, gpu_lut_dense_byte_len}
-use std.gpu.engine2d.backend_capability.{BackendCapability, BackendKind, backend_capability_default, OP_INDEXED_FILL}
-use std.common.string_core.{char_from_code}
+use std.gpu.engine2d.backend_capability.{BackendCapability, BackendKind, backend_capability_default, OP_INDEXED_FILL, OP_GLYPH_ATLAS_BLIT}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.gc_async_mut.env.platform.{is_macos}
 use std.env.variables.{env_get}
@@ -318,6 +317,10 @@ class MetalBackend:
     lut_buffer: i64     # device buffer handle for the uploaded palette GpuLut
     lut_version: i64    # caller-supplied version of the currently-uploaded LUT; -1 = none
     lut_count: i32      # entry count of the currently-uploaded LUT (size-change detection)
+    glyph_lut_buffer: i64  # device buffer handle for the glyph atlas GpuLut (design W4);
+                           # uploaded once at init — the 5x7 font table never changes, so
+                           # unlike lut_buffer/lut_version above it carries no per-call
+                           # version/count (init-time upload IS the invalidation contract)
 
     static fn create() -> MetalBackend:
         make_metal_backend()
@@ -337,7 +340,8 @@ fn make_metal_backend():
         last_error: "",
         lut_buffer: 0,
         lut_version: -1,
-        lut_count: 0
+        lut_count: 0,
+        glyph_lut_buffer: 0
     )
 
 impl RenderBackend for MetalBackend:
@@ -398,6 +402,15 @@ impl RenderBackend for MetalBackend:
         self.last_probe.api_name = "metal"
         self.last_probe.feature_gate = "metal_runtime"
         self.last_probe.shader_format = "msl"
+        # GPU-dict use case #2 (design W4): upload the glyph atlas exactly
+        # once per backend lifetime — the 5x7 font table is a compile-time
+        # constant, so init-time upload IS the version/invalidation contract
+        # (design §3.3). A compile/upload failure here must not fail the rest
+        # of Metal init (loud fall-through, §3.4): draw_text() checks
+        # glyph_lut_buffer directly and falls through to the CPU-lane mirror
+        # when it is 0.
+        if self.session.pipe_glyph_atlas_blit != 0:
+            self.glyph_lut_buffer = self._upload_glyph_atlas()
         self.initialized
 
     me shutdown():
@@ -410,6 +423,9 @@ impl RenderBackend for MetalBackend:
             self.lut_buffer = 0
         self.lut_version = -1
         self.lut_count = 0
+        if self.glyph_lut_buffer != 0:
+            metal_sffi_free_buffer(self.glyph_lut_buffer)
+            self.glyph_lut_buffer = 0
         self.session.release()
         self.command_queue = 0
         self.w = 0
@@ -485,8 +501,15 @@ impl RenderBackend for MetalBackend:
             self.gpu_frame_complete = false
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         self.mirror.draw_text(x, y, text_val, color, font_size)
-        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
-            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_text(x, y, text_val, color, font_size)
+        # GPU-dict use case #2 (design W4): one kernel_glyph_atlas_blit
+        # dispatch for the whole string, gated on the atlas pipeline AND the
+        # uploaded buffer — no other fallback path. A missing pipeline/buffer
+        # is the normal D2 CPU-lane fallthrough (design §3.4): the mirror
+        # above already holds the correct pixels, so read_pixels() falls back
+        # to it. (Deliberately NOT gated on pipe_rect_filled — the former
+        # per-lit-glyph-pixel rect_filled dispatch path is retired.)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_glyph_atlas_blit != 0 and self.glyph_lut_buffer != 0:
+            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_glyph_atlas_blit(x, y, text_val, color, font_size)
             self.dirty = true
         else:
             self.gpu_frame_complete = false
@@ -557,15 +580,22 @@ impl MetalBackend:
     fn _gpu_only_mode() -> bool:
         (self.initialized and self.d_framebuffer != 0 and (self.w * self.h) > 1 and self.mirror.width() <= 1 and self.mirror.height() <= 1)
 
-    # Honest self-description (D3/backend_capability.spl): indexed_fill is only
+    # Honest self-description (D3/backend_capability.spl): an op is only
     # advertised as accelerated when the device is present AND its compute
-    # pipeline actually compiled. A backend that lists an op in
+    # pipeline actually compiled (and, for glyph_atlas_blit, its persistent
+    # buffer actually uploaded). A backend that lists an op in
     # accelerated_ops while its bind/dispatch fails at runtime would be a
-    # honesty violation (design §3.4) — see indexed_fill() below, which flips
-    # gpu_frame_complete false rather than claim success on failure.
+    # honesty violation (design §3.4) — see indexed_fill()/draw_text() below,
+    # which flip gpu_frame_complete false rather than claim success on failure.
     fn capability() -> BackendCapability:
-        if self.initialized and self.session.pipe_indexed_fill != 0:
-            return BackendCapability(kind: BackendKind.RealGpu, device_present: true, accelerated_ops: [OP_INDEXED_FILL])
+        if self.initialized:
+            var ops: [text] = []
+            if self.session.pipe_indexed_fill != 0:
+                ops.push(OP_INDEXED_FILL)
+            if self.session.pipe_glyph_atlas_blit != 0 and self.glyph_lut_buffer != 0:
+                ops.push(OP_GLYPH_ATLAS_BLIT)
+            if ops.len() > 0:
+                return BackendCapability(kind: BackendKind.RealGpu, device_present: true, accelerated_ops: ops)
         backend_capability_default()
 
     # GPU-dict pilot (design §3/§4): buffer-backed palette LUT `indexed_fill`.
@@ -633,6 +663,29 @@ impl MetalBackend:
         self.lut_version = version
         self.lut_count = count
         true
+
+    # GPU-dict use case #2 (design W4): upload the glyph atlas dense GpuLut
+    # exactly once (called from init() only, guarded by pipe_glyph_atlas_blit
+    # != 0). Reuses gpu_lut_pack_dense unchanged — same dense kind=0/
+    # value_stride=1 layout as the indexed_fill palette LUT, just with row-bit
+    # values keyed by glyph_index*glyph_height()+row (glyph.spl
+    # glyph_atlas_dense_values()) instead of ARGB colors keyed by palette index.
+    me _upload_glyph_atlas() -> i64:
+        val values = glyph_atlas_dense_values()
+        val byte_len = gpu_lut_dense_byte_len(values.len().to_i32())
+        val host = gpu_lut_pack_dense(values)
+        if host == 0:
+            return 0
+        val dev_buf = metal_sffi_alloc_buffer(self.session.device, byte_len)
+        if dev_buf == 0:
+            gpu_lut_free(host)
+            return 0
+        val uploaded = metal_buffer_upload_ptr(dev_buf, host, byte_len)
+        gpu_lut_free(host)
+        if uploaded == 0:
+            metal_sffi_free_buffer(dev_buf)
+            return 0
+        dev_buf
 
     # Uploads the per-call index framebuffer (buffer 2) and dispatches
     # kernel_indexed_fill with the persistent LUT bound as buffer 3.
@@ -1151,32 +1204,83 @@ impl MetalBackend:
         metal_host_free(params)
         ok
 
-    me _dispatch_metal_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> bool:
+    # GPU-dict use case #2 (design W4): ONE kernel_glyph_atlas_blit dispatch
+    # for the whole string, replacing the former N-dispatch (one
+    # kernel_draw_rect_filled per lit glyph pixel) path. Uploads the small
+    # per-call codepoint->atlas-index buffer (buffer 2) and binds the
+    # PERSISTENT glyph atlas GpuLut (buffer 3, uploaded once at init by
+    # _upload_glyph_atlas()).
+    me _dispatch_metal_glyph_atlas_blit(x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> bool:
         val gh = glyph_height()
         var scale = font_size / gh
         if scale < 1:
             scale = 1
         val advance = glyph_advance(scale)
-        var ok = true
-        var i: i64 = 0
-        var cursor_x = x
         val text_len = text_val.len()
+        val text_len_i32 = text_len.to_i32()
+        if text_len_i32 <= 0:
+            return true
+        val text_w = text_len_i32 * advance
+        val text_h = gh * scale
+        if text_w <= 0 or text_h <= 0:
+            return true
+        val cp_bytes = _metal_i64(text_len_i32) * 4
+        val cp_host = metal_host_alloc(cp_bytes)
+        if cp_host == 0:
+            return false
+        var i: i64 = 0
         while i < text_len:
             val code = text_val.char_code_at(i)
-            val ch = char_from_code(code)
-            val bitmap = glyph_data(ch)
-            var gy = 0
-            while gy < gh:
-                val row_data = bitmap[gy]
-                var gx = 0
-                while gx < 5:
-                    val bit = (row_data >> (4 - gx)) & 1
-                    if bit != 0:
-                        ok = ok and self._dispatch_metal_rect_filled(cursor_x + gx * scale, y + gy * scale, scale, scale, color)
-                    gx = gx + 1
-                gy = gy + 1
-            cursor_x = cursor_x + advance
+            val gi = glyph_atlas_index_for_char_code(code)
+            metal_host_write_i32(cp_host, i * 4, gi.to_i64())
             i = i + 1
+        val cp_buf = metal_sffi_alloc_buffer(self.session.device, cp_bytes)
+        if cp_buf == 0:
+            metal_host_free(cp_host)
+            return false
+        if metal_buffer_upload_ptr(cp_buf, cp_host, cp_bytes) == 0:
+            metal_host_free(cp_host)
+            metal_sffi_free_buffer(cp_buf)
+            return false
+        metal_host_free(cp_host)
+        val params = metal_host_alloc(36)
+        if params == 0:
+            metal_sffi_free_buffer(cp_buf)
+            return false
+        metal_host_write_i32(params, 0, x as i64)
+        metal_host_write_i32(params, 4, y as i64)
+        metal_host_write_i32(params, 8, text_len_i32 as i64)
+        metal_host_write_i32(params, 12, scale as i64)
+        metal_host_write_i32(params, 16, advance as i64)
+        metal_host_write_i32(params, 20, gh as i64)
+        metal_host_write_i32(params, 24, color as i64)
+        metal_host_write_i32(params, 28, self.w as i64)
+        metal_host_write_i32(params, 32, self.h as i64)
+        val q = self.command_queue
+        val fb = self.d_framebuffer
+        val atlas = self.glyph_lut_buffer
+        val pipeline = self.session.pipe_glyph_atlas_blit
+        val cmd = metal_sffi_create_command_buffer(q)
+        var ok = cmd != 0
+        if ok:
+            val encoder = metal_sffi_create_compute_encoder(cmd)
+            if encoder == 0:
+                ok = false
+            else:
+                metal_sffi_set_buffer(encoder, fb, 0, 0)
+                metal_set_bytes_ptr(encoder, params, 36, 1)
+                metal_sffi_set_buffer(encoder, cp_buf, 0, 2)
+                metal_sffi_set_buffer(encoder, atlas, 0, 3)
+                val bx = 16
+                val by = 16
+                val gx = ((_metal_i64(text_w) + bx - 1) / bx) * bx
+                val gy = ((_metal_i64(text_h) + by - 1) / by) * by
+                metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
+                metal_sffi_end_compute_encoder(encoder)
+                metal_sffi_commit_command_buffer(cmd)
+                metal_sffi_wait_completed(cmd)
+        metal_host_free(params)
+        metal_sffi_free_buffer(cp_buf)
         ok
 
     me _dispatch_metal_1d(pipeline: i64, threads: i64, block_x: i64, params: i64, params_len: i64) -> bool:

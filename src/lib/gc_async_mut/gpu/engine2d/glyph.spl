@@ -13,7 +13,7 @@
 #   use std.gpu.engine2d.glyph.{glyph_data, render_glyph_to_buffer, render_text_to_buffer}
 
 use std.common.string_core.{char_from_code}
-use common.ui.glyph_bitmap_5x7.{glyph_rows_for_char}
+use common.ui.glyph_bitmap_5x7.{glyph_rows_for_char, glyph_index_for_char_code, glyph_row_bits}
 
 # ============================================================================
 # Glyph Constants
@@ -45,6 +45,51 @@ fn glyph_data(ch: text) -> [i32]:
     the shared unknown box outline.
     """
     glyph_rows_for_char(ch)
+
+# ============================================================================
+# Glyph Atlas — GPU-dict use case #2 (design
+# doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md, W4). Flattens
+# the shared 5x7 table into a single dense [u32] array so a Metal backend can
+# upload it ONCE as a buffer-backed GpuLut and look glyph rows up on-device,
+# instead of dispatching one compute kernel per lit glyph pixel.
+# ============================================================================
+
+fn glyph_atlas_unknown_index() -> i32:
+    """Atlas slot for characters outside the charset — the GPU-lane sibling of
+    glyph_rows_for_char's CPU-lane `gi < 0` fallback to the unknown box."""
+    88
+
+fn glyph_atlas_glyph_count() -> i32:
+    """Total glyph slots in the atlas: 88 charset glyphs + 1 unknown fallback."""
+    89
+
+fn glyph_atlas_index_for_char_code(code: i32) -> i32:
+    """Codepoint -> atlas glyph index. Unknown codepoints map to the unknown
+    slot (glyph_atlas_unknown_index()) rather than a negative/out-of-range
+    key, so the dense GpuLut lookup never misses on a valid character."""
+    val gi = glyph_index_for_char_code(code)
+    if gi < 0:
+        return glyph_atlas_unknown_index()
+    gi
+
+fn glyph_atlas_dense_values() -> [u32]:
+    """Flatten the glyph table into a dense GpuLut-compatible [u32] array:
+    key = glyph_index * glyph_height() + row, value = that row's 5-bit mask.
+    Same dense (kind=0, value_stride=1) layout the indexed_fill palette LUT
+    uses, so the existing MSL lut_lookup needs no changes. The table is a
+    compile-time constant, built once (at Metal backend init) and uploaded
+    via gpu_lut_pack_dense — never rebuilt per draw_text call."""
+    val glyphs = glyph_atlas_glyph_count()
+    val rows = glyph_height()
+    var out: [u32] = [0u32; glyphs * rows]
+    var gi = 0
+    while gi < glyphs:
+        var row = 0
+        while row < rows:
+            out[gi * rows + row] = glyph_row_bits(gi, row).to_u32()
+            row = row + 1
+        gi = gi + 1
+    out
 
 # ============================================================================
 # Glyph Rendering

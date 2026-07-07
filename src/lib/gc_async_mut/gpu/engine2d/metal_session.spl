@@ -57,6 +57,7 @@ class MetalSession:
     pipe_gradient: i64        # Compute pipeline: gradient rect
     pipe_blit: i64            # Compute pipeline: image blit
     pipe_indexed_fill: i64    # Compute pipeline: GPU-dict pilot indexed_fill (design cpu_gpu_dual_algorithm)
+    pipe_glyph_atlas_blit: i64  # Compute pipeline: GPU-dict glyph atlas draw_text accelerator (design cpu_gpu_dual_algorithm W4)
     ref_count: i64            # Live reference count (i64 matches CUDA/Vulkan/CPU)
     is_initialized: bool      # True after a successful init() (matches CUDA/Vulkan/CPU naming)
     generation: i64           # Stale-resource detection; incremented on init and cleanup
@@ -80,6 +81,7 @@ class MetalSession:
             pipe_gradient: 0,
             pipe_blit: 0,
             pipe_indexed_fill: 0,
+            pipe_glyph_atlas_blit: 0,
             ref_count: 0,
             is_initialized: false,
             generation: 0,
@@ -134,6 +136,10 @@ class MetalSession:
         # indexed_fill as unaccelerated (normal D2 CPU-lane fallthrough) when
         # it is 0, instead of failing the whole session.
         self.pipe_indexed_fill = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_indexed_fill")
+        # GPU-dict use case #2 (design W4): same loud-fallthrough discipline —
+        # MetalBackend.draw_text() checks pipe_glyph_atlas_blit directly and
+        # falls through to the CPU-lane mirror when it is 0.
+        self.pipe_glyph_atlas_blit = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_glyph_atlas_blit")
         self.ref_count = 1
         self.is_initialized = true
         self.last_error = 0
@@ -205,6 +211,8 @@ class MetalSession:
             metal_sffi_destroy_pipeline(self.pipe_blit)
         if self.pipe_indexed_fill != 0:
             metal_sffi_destroy_pipeline(self.pipe_indexed_fill)
+        if self.pipe_glyph_atlas_blit != 0:
+            metal_sffi_destroy_pipeline(self.pipe_glyph_atlas_blit)
         if self.shader_lib != 0:
             metal_sffi_destroy_shader(self.shader_lib)
         if self.command_queue != 0:
@@ -223,6 +231,7 @@ class MetalSession:
         self.pipe_gradient = 0
         self.pipe_blit = 0
         self.pipe_indexed_fill = 0
+        self.pipe_glyph_atlas_blit = 0
         self.shader_lib = 0
         self.command_queue = 0
         self.device = 0

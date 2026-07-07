@@ -16,9 +16,12 @@ fn _engine2d_msl() -> text:
     Buffer layout:
     - buffer(0): device uint* framebuffer
     - buffer(1): constant params (push constants via setBytes)
-    - buffer(2): device uint* source (blit only) / device const uchar* index buffer (indexed_fill only)
-    - buffer(3): device const uint* GpuLut (indexed_fill only — buffer-backed lookup
-      table, design doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md §3.1)
+    - buffer(2): device uint* source (blit only) / device const uchar* index buffer
+      (indexed_fill only) / device const uint* codepoints (glyph_atlas_blit only —
+      one atlas glyph-index per character, uploaded fresh per draw_text call)
+    - buffer(3): device const uint* GpuLut (indexed_fill / glyph_atlas_blit only —
+      buffer-backed lookup table, design
+      doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md §3.1)
 
     Kernel list:
     - kernel_clear: Fill entire framebuffer with a color
@@ -32,6 +35,9 @@ fn _engine2d_msl() -> text:
     - kernel_draw_gradient_rect: Vertical gradient fill
     - kernel_blit_image: Copy source pixels to framebuffer region
     - kernel_indexed_fill: GPU-dict pilot — per-pixel `lut_lookup(palette, idx)`
+    - kernel_glyph_atlas_blit: GPU-dict use case #2 — one data-parallel dispatch
+      per draw_text call (`lut_lookup(atlas, glyph_index*rows+row)`), replacing
+      the former one-dispatch-per-lit-glyph-pixel path
     """
     r"""
 #include <metal_stdlib>
@@ -138,6 +144,18 @@ struct IndexedFillParams {
     int y;
     int w;
     int h;
+    int fb_w;
+    int fb_h;
+};
+
+struct TextBlitParams {
+    int x;
+    int y;
+    int text_len;
+    int scale;
+    int advance;
+    int gh;
+    uint color;
     int fb_w;
     int fb_h;
 };
@@ -671,5 +689,49 @@ kernel void kernel_indexed_fill(
 
     int dst_idx = py * p.fb_w + px;
     fb[dst_idx] = val;
+}
+
+// kernel_glyph_atlas_blit: GPU-dict use case #2 (design W4). Replaces
+// draw_text's former one-`kernel_draw_rect_filled`-dispatch-per-lit-glyph-pixel
+// path with ONE data-parallel dispatch over the whole text bounding box.
+// buffer(2) is the per-call codepoint array (one atlas glyph-index per
+// character, uploaded fresh per draw_text call — small, like indexed_fill's
+// idx_buf). buffer(3) is the PERSISTENT glyph atlas GpuLut (uploaded once at
+// backend init — the 5x7 font table never changes — dense kind=0/stride=1,
+// key = glyph_index*gh + row, reusing lut_lookup unchanged). Raw (unblended)
+// writes match the CPU oracle exactly: SoftwareBackend.draw_text's
+// sw_set_pixel does `buf[idx] = color`, never a blend.
+kernel void kernel_glyph_atlas_blit(
+    device uint* fb                      [[buffer(0)]],
+    constant TextBlitParams& p           [[buffer(1)]],
+    device const uint* codepoints        [[buffer(2)]],
+    device const uint* atlas             [[buffer(3)]],
+    uint2 tid                            [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    int text_w = p.text_len * p.advance;
+    int text_h = p.gh * p.scale;
+    if (lx >= text_w || ly >= text_h) return;
+
+    int char_index = lx / p.advance;
+    if (char_index >= p.text_len) return;
+    int within_x = lx - char_index * p.advance;
+    int glyph_col = within_x / p.scale;
+    if (glyph_col >= 5) return;
+    int glyph_row = ly / p.scale;
+    if (glyph_row >= p.gh) return;
+
+    uint gi = codepoints[char_index];
+    uint key = gi * (uint)p.gh + (uint)glyph_row;
+    uint row_bits = lut_lookup(atlas, key);
+    if (row_bits == 0xFFFFFFFFu) return;
+    uint bit = (row_bits >> (uint)(4 - glyph_col)) & 1u;
+    if (bit == 0u) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    fb[py * p.fb_w + px] = p.color;
 }
 """

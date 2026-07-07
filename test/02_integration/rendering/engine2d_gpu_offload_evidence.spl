@@ -60,8 +60,11 @@ fn paint_primitives(b: Engine2D, w: i32, h: i32):
         ty = ty + tile
 
 # Text scene — a few strings at the showcase's font size. draw_text on Metal
-# renders each lit 5x7 glyph pixel as an individual rect dispatch; this scene
-# exists to measure text parity + text dispatch cost honestly and separately.
+# dispatches ONE kernel_glyph_atlas_blit per call (GPU-dict use case #2,
+# design doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md W4) —
+# formerly one kernel_draw_rect_filled dispatch PER LIT GLYPH PIXEL. This
+# scene exists to measure text parity + text dispatch cost honestly and
+# separately from the primitive scene.
 fn paint_text(b: Engine2D, w: i32, h: i32):
     b.clear(0xFF000000 as u32)
     b.draw_text(10, 10, "Hello GPU", 0xFFFFFFFF as u32, 14)
@@ -103,6 +106,56 @@ fn metal_text(w: i32, h: i32) -> Engine2DReadback:
     val rb = e.read_pixels_with_source()
     e.shutdown()
     rb
+
+# ---------------------------------------------------------------------------
+# GPU-dict use case #2 — glyph_atlas_blit draw_text EDGE-CASE parity (design
+# doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md W4).
+#
+# paint_text above only exercises in-charset glyphs at scale=2, fully
+# on-surface. This scene deliberately covers the edges the atlas lookup
+# formula and the kernel's bounds guards must get exactly right:
+#   - out-of-charset codepoints (`~`, `$`) -> atlas UNKNOWN slot (index 88,
+#     glyph_atlas_unknown_index() in glyph.spl) must resolve to the SAME
+#     FONT_UNKNOWN_PACKED box outline the CPU-lane's gi<0 path draws.
+#   - scale=1 (font_size <= glyph_height()==7) -> advance=5, no per-pixel
+#     scale block, exercises the glyph_col/glyph_row div-by-1 path.
+#   - text positioned to run off the right/bottom framebuffer edge -> the
+#     kernel's px/py bounds check must clip exactly like the CPU's
+#     sw_set_pixel bounds guard (backend_software.spl).
+fn paint_text_edge(b: Engine2D, w: i32, h: i32):
+    b.clear(0xFF000000 as u32)
+    b.draw_text(2, 2, "~$Zz09", 0xFFFFFFFF as u32, 7)
+    b.draw_text(w - 10, h - 10, "EDGE", 0xFF22C55E as u32, 14)
+
+fn cpu_text_edge(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend(w, h, "software")
+    paint_text_edge(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+fn metal_text_edge(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend_fast(w, h, "metal")
+    paint_text_edge(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+# Heavy-volume text scene (perf evidence only, not a parity gate on its own —
+# parity is already proven bit-exact by paint_text/paint_text_edge above at
+# the SAME per-op granularity). 24 lines x ~40 chars exercises a text volume
+# where the former one-dispatch-per-lit-glyph-pixel path (perf plan 2D-5,
+# design cpu_gpu_dual_algorithm.md W4 motivation) issued thousands of GPU
+# command-buffer round trips; kernel_glyph_atlas_blit issues exactly one
+# dispatch per draw_text call (24 here) regardless of how many pixels are lit.
+fn paint_text_heavy(b: Engine2D, w: i32, h: i32):
+    b.clear(0xFF000000 as u32)
+    var line = 0
+    while line < 24:
+        b.draw_text(4, 4 + line * 16, "The quick brown fox jumps over lazy", 0xFFFFFFFF as u32, 14)
+        line = line + 1
 
 # ---------------------------------------------------------------------------
 # GPU-dict pilot — indexed_fill palette-LUT parity (design
@@ -433,6 +486,46 @@ fn main() -> i64:
         print "stage-time metal_indexed_fill_us={ti2 - ti1}"
         compare_exact("indexed_fill", cpu_if, metal_if)
         print "PROVENANCE indexed_fill backend=metal source={metal_if.source}"
+
+    if stage == "all" or stage == "text_edge":
+        print "=== GPU offload evidence: draw_text edge cases (GPU-dict glyph atlas) parity ==="
+        val ew = 64
+        val eh = 48
+        val te0 = time_now_micros()
+        val cpu_te = cpu_text_edge(ew, eh)
+        val te1 = time_now_micros()
+        print "stage-time cpu_text_edge_us={te1 - te0}"
+        val metal_te = metal_text_edge(ew, eh)
+        val te2 = time_now_micros()
+        print "stage-time metal_text_edge_us={te2 - te1}"
+        compare_exact("text_edge", cpu_te, metal_te)
+        print "PROVENANCE text_edge backend=metal source={metal_te.source}"
+
+    if stage == "all" or stage == "text_heavy":
+        print "=== GPU offload evidence: draw_text heavy-volume perf (GPU-dict glyph atlas) ==="
+        # Perf-only: parity for this op is already proven bit-exact by the
+        # text/text_edge stages above. This isolates the win the plan/design
+        # motivate W4 with — dispatch count no longer scales with lit-pixel
+        # count, only with draw_text CALL count (24 lines = 24 dispatches here,
+        # vs the former per-lit-pixel dispatch storm).
+        val hw = 400
+        val hh = 400
+        val th0 = time_now_micros()
+        var cpu_h = Engine2D.create_with_backend(hw, hh, "software")
+        paint_text_heavy(cpu_h, hw, hh)
+        cpu_h.present()
+        val cpu_h_px = cpu_h.read_pixels()
+        cpu_h.shutdown()
+        val th1 = time_now_micros()
+        print "stage-time cpu_text_heavy_us={th1 - th0}"
+        var metal_h = Engine2D.create_with_backend_fast(hw, hh, "metal")
+        paint_text_heavy(metal_h, hw, hh)
+        metal_h.present()
+        val metal_h_rb = metal_h.read_pixels_with_source()
+        metal_h.shutdown()
+        val th2 = time_now_micros()
+        print "stage-time metal_text_heavy_us={th2 - th1}"
+        print "PROVENANCE text_heavy backend=metal source={metal_h_rb.source}"
 
     if stage == "all" or stage == "wm":
         print "=== GPU offload evidence: WM composite parity (direct-draw chrome) ==="

@@ -42,13 +42,20 @@ describe "Metal Engine2D framebuffer readback":
             else:
                 expect(is_macos()).to_equal(false)
 
-        it "falls back after CPU-only text rendering invalidates GPU completeness":
+        it "stays GPU-complete after draw_text via the glyph-atlas kernel (GPU-dict use case #2, W4)":
             if is_macos():
                 var b = MetalBackend.create()
                 expect(b.init(16, 16)).to_equal(true)
                 b.clear(0x10203040 as u32)
+                # draw_text now dispatches ONE kernel_glyph_atlas_blit (design
+                # cpu_gpu_dual_algorithm W4) instead of the former per-lit-pixel
+                # rect path, so it is a genuine GPU op that keeps the frame
+                # GPU-complete. Parity vs the CPU oracle is proven bit-exact in
+                # engine2d_gpu_offload_evidence.spl (text/text_edge rows,
+                # device_readback). (The old expectation here — gpu_frame_complete
+                # == false, from the pre-GPU-text era — was already failing.)
                 b.draw_text(1, 1, "A", 0x01020304 as u32, 8)
-                expect(b.gpu_frame_complete).to_equal(false)
+                expect(b.gpu_frame_complete).to_equal(true)
                 val pixels = b.read_pixels()
                 expect(pixels.len()).to_equal(256)
                 b.shutdown()
