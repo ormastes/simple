@@ -8,6 +8,7 @@
 #   - claude_cli_send: calls process_run
 
 use app.io.mod.{process_run}
+use app.llm_caret.redact.{redact}
 
 # ============================================================================
 # JSON helpers (inlined to avoid import issues)
@@ -212,6 +213,9 @@ fn parse_claude_json_response(raw: text) -> CliResponse:
         final_stop = "end_turn"
     if is_err:
         final_stop = "error"
+    # Redact secrets from anything that is display/log-shaped (error text,
+    # raw CLI output echoed back for debugging) -- never from fields used
+    # only internally for further parsing (already extracted above).
     CliResponse(
         content: result_text,
         model: model_text,
@@ -219,9 +223,9 @@ fn parse_claude_json_response(raw: text) -> CliResponse:
         stop_reason: final_stop,
         input_tokens: final_in_tok,
         output_tokens: final_out_tok,
-        error: error_text,
+        error: redact(error_text),
         is_error: is_err,
-        raw: raw
+        raw: redact(raw)
     )
 
 # ============================================================================
@@ -289,6 +293,8 @@ fn claude_cli_send(cli_path: text, prompt: text, model: text, system_prompt: tex
         var err_msg = "claude CLI exited with code " + exit_code.to_text()
         if stderr != "":
             err_msg = err_msg + ": " + stderr
+        # stderr can echo request headers/config/env on CLI failure --
+        # redact before it reaches CliResponse.error (logged/displayed).
         return CliResponse(
             content: "",
             model: "",
@@ -296,9 +302,9 @@ fn claude_cli_send(cli_path: text, prompt: text, model: text, system_prompt: tex
             stop_reason: "error",
             input_tokens: 0,
             output_tokens: 0,
-            error: err_msg,
+            error: redact(err_msg),
             is_error: true,
-            raw: stdout
+            raw: redact(stdout)
         )
     parse_claude_json_response(stdout)
 
@@ -307,12 +313,16 @@ fn claude_cli_stream(cli_path: text, prompt: text, model: text, system_prompt: t
     val args = build_claude_args(prompt, model, "stream-json", system_prompt, session_id, max_turns, 0, "", [], [], false)
     val result = process_run(cli_path, args)
     val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
     val exit_code = result.2
     var events: [CliStreamEvent] = []
     if exit_code != 0:
+        var err_msg = "claude CLI exited with code " + exit_code.to_text()
+        if stderr != "":
+            err_msg = err_msg + ": " + stderr
         events = events + [CliStreamEvent(
             event_type: "error",
-            content: "claude CLI exited with code " + exit_code.to_text(),
+            content: redact(err_msg),
             session_id: "",
             model: "",
             stop_reason: "error",

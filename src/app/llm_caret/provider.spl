@@ -5,6 +5,7 @@
 
 use app.io.mod.{process_run}
 use app.llm_caret.opencode_cli.{opencode_cli_send}
+use app.llm_caret.retry.{retry_policy_from_env, with_retry}
 
 extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
 
@@ -293,11 +294,14 @@ fn _dispatch_claude_api(api_key: text, base_url: text, model: text, messages_jso
     hdr_parts.append("anthropic-version: 2023-06-01")
     hdr_parts.append("content-type: application/json")
     val headers = hdr_parts.join("\n")
-    val result = rt_http_request("POST", url, headers, body)
-    val resp_body = result.1 ?? ""
-    val http_error = result.2 ?? ""
-    if http_error != "":
-        return new_llm_error("claude_api", "HTTP error: " + http_error)
+    val policy = retry_policy_from_env()
+    val outcome = with_retry(policy, fn(attempt: i64) -> (i64, text, text, i64):
+        val result = rt_http_request("POST", url, headers, body)
+        (result.0, result.1 ?? "", result.2 ?? "", 0)
+    )
+    val resp_body = outcome.body
+    if outcome.error != "":
+        return new_llm_error("claude_api", "HTTP error: " + outcome.error)
     val content = _extract_json_string(resp_body, "text")
     val resp_model = _extract_json_string(resp_body, "model")
     val in_tok = _extract_json_int(resp_body, "input_tokens")
@@ -349,11 +353,14 @@ fn _dispatch_openai(api_key: text, base_url: text, model: text, messages_json: t
     hdr_parts.append("Authorization: Bearer " + api_key)
     hdr_parts.append("Content-Type: application/json")
     val headers = hdr_parts.join("\n")
-    val result = rt_http_request("POST", url, headers, body)
-    val resp_body = result.1 ?? ""
-    val http_error = result.2 ?? ""
-    if http_error != "":
-        return new_llm_error("openai", "HTTP error: " + http_error)
+    val policy = retry_policy_from_env()
+    val outcome = with_retry(policy, fn(attempt: i64) -> (i64, text, text, i64):
+        val result = rt_http_request("POST", url, headers, body)
+        (result.0, result.1 ?? "", result.2 ?? "", 0)
+    )
+    val resp_body = outcome.body
+    if outcome.error != "":
+        return new_llm_error("openai", "HTTP error: " + outcome.error)
     val content = _extract_json_string(resp_body, "content")
     val resp_model = _extract_json_string(resp_body, "model")
     LLMResponse(
@@ -398,11 +405,14 @@ fn _dispatch_compat(base_url: text, api_key: text, model: text, messages_json: t
         hdr_parts.append("Authorization: Bearer " + api_key)
     hdr_parts.append("Content-Type: application/json")
     val headers = hdr_parts.join("\n")
-    val result = rt_http_request("POST", url, headers, body)
-    val resp_body = result.1 ?? ""
-    val http_error = result.2 ?? ""
-    if http_error != "":
-        return new_llm_error("openai_compat", "HTTP error: " + http_error)
+    val policy = retry_policy_from_env()
+    val outcome = with_retry(policy, fn(attempt: i64) -> (i64, text, text, i64):
+        val result = rt_http_request("POST", url, headers, body)
+        (result.0, result.1 ?? "", result.2 ?? "", 0)
+    )
+    val resp_body = outcome.body
+    if outcome.error != "":
+        return new_llm_error("openai_compat", "HTTP error: " + outcome.error)
     val content = _extract_json_string(resp_body, "content")
     val resp_model = _extract_json_string(resp_body, "model")
     LLMResponse(

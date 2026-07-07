@@ -10,12 +10,38 @@ feature
 Define and enforce a SPipe robust-software lane for flight-level Simple compiler, SimpleOS baremetal, NVMe firmware, and thread/process/coroutine hardening evidence, with formal-verification gates that cannot be satisfied by generated artifacts or single interleaving tests alone.
 
 ## Acceptance Criteria
-- AC-1: The SPipe lane state lists the robust-software scope across compiler, SimpleOS baremetal, NVMe firmware, and concurrency/runtime surfaces.
-- AC-2: SPipe skill and guide guidance require mission-critical SimpleOS release evidence through `sh scripts/check/check-simpleos-mission-critical-release.shs` with `release_blockers=none`, not only the hardening matrix.
-- AC-3: Formal evidence guidance distinguishes generated Lean/BYL/RTL artifacts from durable manual proof entry points and requires a post-regeneration gate.
-- AC-4: Thread/process/coroutine starvation, fairness, race-condition, scheduler, channel, lock, or resource-lifecycle claims require a concurrency/resource model gate or an explicit blocker.
-- AC-5: NVMe firmware and baremetal work cites the current in-repo example/research lanes and does not claim real hardware, QEMU, or formal proof coverage unless the matching gate exists and passes.
-- AC-6: Broad findings from Spark/other lower-model sidecars are treated as input only; a normal/high-capability reviewer owns final acceptance.
+- AC-1: The SPipe lane state lists the robust-software scope across Simple
+  compiler, SimpleOS baremetal, NVMe firmware, and thread/process/coroutine
+  runtime surfaces, and every claim is tagged as `host-simulation`,
+  `QEMU/emulator`, `real-hardware`, `generated-artifact`, `manual-proof`, or
+  `release-gate`.
+- AC-2: SPipe skill, `$sp_dev`, SPipe dev-agent, and operator-guide guidance
+  require mission-critical SimpleOS release evidence through
+  `sh scripts/check/check-simpleos-mission-critical-release.shs` with
+  `matrix_status=pass`, `release_status=pass`, `release_blockers=none`,
+  `prereq_status=ready`, and no stale static reports; the hardening matrix alone
+  is subordinate evidence, not release evidence.
+- AC-3: Simple compiler flight-level claims treat the compiler as a safety
+  development tool. Trusted-core readiness requires measured self-hosted
+  structural coverage or a durable formal gate; Rust-seed-only probes,
+  statement coverage, percentage-only MC/DC, or interpreter-only passes may
+  satisfy at most `smoke`.
+- AC-4: Formal evidence guidance distinguishes generated Lean/BYL/RTL artifacts
+  from durable manual theorem/constraint entry points and requires a
+  post-regeneration gate such as `lake build`, `simple gen-lean verify`,
+  `simple verify check`, or the matching SimpleOS/RISC-V wrapper self-test.
+- AC-5: Thread/process/coroutine starvation, fairness, race-condition,
+  scheduler, channel, lock, or resource-lifecycle claims require a
+  concurrency/resource model gate or an explicit blocker; single interleaving
+  specs remain `smoke`.
+- AC-6: NVMe firmware and baremetal work separates host emulator, QEMU wrapper,
+  and physical-board evidence. Completion claims require RV32/RV64 wrapper
+  coverage (`check-nvme-baremetal-wrapper-coverage.shs --strict`) and
+  fail-closed self-tests; live rv32 firmware PASS remains blocked until the boot
+  wrapper prints `ALL RV32 NVME FW CHECKS PASS`.
+- AC-7: Broad findings from Spark or other lower-model sidecars are treated as
+  audit input only. A normal/high-capability reviewer owns final acceptance for
+  broad exclusions, generated-manual quality, and any `pass` status upgrade.
 
 ## Cooperative Review
 - Sidecars: Codex Spark for broad local scans of compiler, SimpleOS, NVMe firmware, and concurrency evidence; mini sidecars only when Spark quota blocks progress.
@@ -24,11 +50,146 @@ Define and enforce a SPipe robust-software lane for flight-level Simple compiler
 - Shared checker names: `check-simpleos-mission-critical-release.shs`, `check-simpleos-mission-critical-prereqs.shs`, `concurrency_api_contract_test.shs`, `nvme_rv32_baremetal_boot_spec.spl`.
 - Fail-fast policy: missing proof tools, missing firmware media, or sidecar-only findings remain explicit blockers.
 
+## Current Evidence Classification
+
+- Simple compiler trusted-core flight-level evidence: `blocked`. The staged
+  MC/DC plan exists, but self-hosted MC/DC instrumentation and independence-pair
+  reporting are not proven complete.
+- SimpleOS mission-critical release evidence: `pass` only on hosts where the
+  documented formal toolchain or OSS CAD Suite environment is active; otherwise
+  `blocked` on missing `sby`, `yosys`, or SMT solver prerequisites.
+- NVMe firmware evidence: wrapper coverage is `pass` for the recorded RV32/RV64
+  wrapper/spec checks. Bootstrap-wrapper QEMU proof has printed
+  `ALL RV32 NVME FW CHECKS PASS`, but production proof remains `blocked` until
+  the self-hosted `bin/simple` bootstrap/deploy path produces a current
+  `build/nvme_fw_rv32.elf` and the rv32 boot spec passes from that artifact.
+- Thread/process/coroutine lifecycle evidence: `smoke` to `pass` only for the
+  named lifecycle/regression checks in the log. Fairness, starvation, race, and
+  scheduler proof claims remain `blocked` without a model/formal gate.
+- Spark usage: `blocked` by quota in the current environment; mini/other
+  sidecars can collect input, but cannot replace final normal/high-capability
+  review.
+
 ## Phase
 dev-in-progress
 
 ## Log
+- compiler: MIR-to-LLVM now spills `Copy`/`Move` destinations written outside
+  the first MIR block into entry allocas. This fixes the preserved Stage 2
+  invalid-SSA shape where `%l0` was defined in one branch and later read after
+  a join, producing `Instruction does not dominate all uses!`.
+- evidence: source assertion reported `llvm_branch_copy_spill_source=pass`;
+  transforming the preserved failing `/tmp/simple_llvm_696017.ll` with the same
+  alloca/store/load shape made `llc` pass
+  (`llvm_branch_copy_spill_llc_probe=pass`); `git diff --check` passed for the
+  edited MIR-to-LLVM helper.
+- blocker: `bin/simple check src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`
+  was attempted with the default run and with `timeout -k 10s 120s`; both were
+  terminated during dependency loading after frontend warning output and before
+  a file result. Full bootstrap/deploy and RV32 production firmware proof remain
+  unrun after this fix.
+- compiler: `compile_ir_to_object` now checks the `llc` exit code before
+  accepting an existing bootstrap object path, deletes stale objects on failure,
+  and rejects empty or non-object-magic outputs. This closes the false-progress
+  part of the RV32 production blocker without claiming the broader invalid-SSA
+  bootstrap bug is fixed.
+- evidence: `bin/simple check src/compiler/70.backend/backend/llvm_backend_tools.spl`
+  passed; source assertion reported `llvm_object_fail_closed_source=pass`;
+  `git diff --check` passed for the edited compiler helper.
+- blocker: `bin/simple test test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl`
+  and a smaller object-magic spec both failed before reaching this change
+  because the current worktree parser reports
+  `src/compiler/50.mir/_MirLowering/bootstrap_globals.spl: Unexpected token:
+  expected Indent, found Dedent`. That is separate from this helper change.
+- gate: Added `scripts/check/check-spipe-flight-level-robust-sw-state.shs`
+  to fail closed when the lane state, SPipe skill, `$sp_dev`, SPipe dev agent,
+  or mission-critical guide lose evidence-tier, Simple compiler
+  tool-qualification, SimpleOS release, NVMe strict-wrapper, Spark-sidecar, or
+  concurrency model-gate wording.
+- evidence: `sh scripts/check/check-spipe-flight-level-robust-sw-state.shs --self-test`
+  passed; `sh scripts/check/check-spipe-flight-level-robust-sw-state.shs`
+  passed with `spipe_flight_level_state_status=pass` and
+  `spipe_flight_level_state_missing=none`.
+- blocker: The new state gate verifies evidence-contract wiring only. It does
+  not upgrade compiler MC/DC, live RV32 NVMe firmware, physical-board, or
+  fairness/starvation/race claims beyond the blockers listed in Current
+  Evidence Classification.
+- dev-refresh: Tightened ACs to require explicit evidence tiers, compiler
+  tool-qualification handling, SimpleOS release-gate fields, NVMe wrapper/live
+  boot separation, concurrency model gates, and final high-capability review.
 - sidecar: Codex Spark broad audits were quota-blocked until 09:37; this lane used narrow mini sidecars and still requires normal/high-capability review before acceptance.
+- compiler: Resolved four literal parser blockers that prevented the bounded
+  Stage 2 bootstrap probe from reaching the MIR/LLVM dominance fix:
+  `src/compiler/20.hir/hir_lowering/expressions.spl`,
+  `src/compiler/50.mir/_MirLowering/bootstrap_globals.spl`,
+  `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`, and
+  `src/compiler/35.semantics/resolve.spl`.
+- evidence: conflict-marker scans for those files are clean; targeted
+  `git diff --check` is clean; `bin/simple check
+  src/compiler/50.mir/_MirLowering/bootstrap_globals.spl` passed; `bin/simple
+  check src/compiler/35.semantics/resolve.spl` passed.
+- blocker: `bin/simple check
+  src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` was bounded
+  to 120s and terminated during dependency loading warnings without a file-level
+  result. The last bounded Stage 2 probe before the `resolve.spl` cleanup was
+  `build/mini_builds/stage2_probe_after_switch_calls_resolve/stage2-native-build.log`
+  and failed at the now-fixed `resolve.spl` parser error. Per the runaway guard,
+  Stage 2 was not reprobed again in this session.
+- compiler: Stage 2 now builds and runs after the parser cleanup,
+  branch-local copy spill, `get_cli_args` pointer-signature fix, and
+  `bootstrap_main.spl` argv dispatch cleanup.
+- evidence: `build/mini_builds/stage2_probe_after_bootstrap_argv_fix/stage2-native-build.log`
+  reports `stage2_probe_after_bootstrap_argv_fix_rc=0`,
+  `[mir-lower-free] done instr-total=200 term-total=54`, and
+  `[llvm-tools] llc-object`; the produced Stage 2 binary reports
+  `simple-bootstrap 1.0.0-beta` for `--version` and prints help with rc 0.
+- blocker: full bootstrap/deploy was attempted once with
+  `timeout -k 20s 1200s sh scripts/bootstrap/bootstrap-from-scratch.sh
+  --pure-simple --no-mcp --deploy` and timed out with rc 124 after Stage 3
+  failed and the script fell back to slow seed Stage 4. Stage 3 failed because
+  Stage 2 `native-build` still routes to `run_native_build_bootstrap(args)`,
+  which returns literal `1`; `stage3-native-build.log` is empty.
+- verification: `sh scripts/audit/direct-env-runtime-guard.shs --working`
+  passed. `--staged` failed on unrelated staged
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_engine2d_presenter.spl`
+  raw `rt_env_get`; this lane did not modify that file.
+- rejected_shortcut: Directly changing `bootstrap_main.spl`
+  `run_native_build_bootstrap(args)` to call raw `rt_native_build(args)` was
+  tested and reverted. Stage 2 then failed link with `undefined symbol:
+  rt_native_build` because the current bootstrap native-build runtime does not
+  link `libsimple_native_all.a`; the owner fix must be in native-build runtime
+  selection or bootstrap script flow, not an unbacked source extern.
+- evidence: after reverting that shortcut,
+  `build/mini_builds/stage2_probe_after_rt_native_build_revert/stage2-native-build.log`
+  reports `stage2_probe_after_rt_native_build_revert_rc=0`,
+  `[mir-lower-free] done instr-total=200 term-total=54`, and
+  `[llvm-tools] llc-object`; the produced Stage 2 binary still prints
+  `simple-bootstrap 1.0.0-beta` for `--version` and returns rc 1 for the known
+  `native-build` stub.
+- rejected_shortcut: Replacing the seed fallback's `run
+  src/app/cli/native_build_main.spl -- ...` with direct
+  `src/compiler_rust/target/bootstrap/simple native-build ...` for the full
+  Stage 4 CLI was probed once at
+  `build/mini_builds/stage4_direct_seed_native_build_probe/stage4-direct-seed-native-build.log`.
+  It timed out at 20 minutes with rc 124, produced no output binary, and logged
+  only dependency warnings before timeout. Do not patch the bootstrap script to
+  this direct seed fallback; it does not fix the deploy blocker.
+- bootstrap: `scripts/bootstrap/bootstrap-from-scratch.sh` now fails fast when
+  Stage 3 exits nonzero before writing any native-build diagnostics, which is
+  the current bootstrap-stub failure mode. It refuses the slow seed Stage 4
+  fallback until `run_native_build_bootstrap` or the bootstrap native-build
+  owner path is fixed.
+- evidence: `timeout -k 20s 900s sh
+  scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple --no-mcp --deploy`
+  now exits `bootstrap_failfast_stage3_stub_rc=1` after Stage 3 with the explicit
+  diagnostic `refusing slow seed stage4 fallback; fix run_native_build_bootstrap
+  or the bootstrap native-build owner path first`.
+- verification: Replaced the staged raw `rt_env_get` in
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_engine2d_presenter.spl`
+  with the existing `std.gc_async_mut.io.mod_stub.env_get` facade. `bin/simple
+  check` for that file passed, and both
+  `sh scripts/audit/direct-env-runtime-guard.shs --working` and `--staged`
+  now report `STATUS: PASS`.
 - dev: Created SPipe state with 6 acceptance criteria and Spark sidecar plan for the flight-level robust software lane.
 - guide: Added `doc/07_guide/app/spipe/mission_critical_robust_sw.md` so SPipe robust-software lanes have an operator-facing gate contract.
 - evidence: Mission-critical formal prerequisites checked with `sh scripts/check/check-simpleos-mission-critical-prereqs.shs`; result blocked with missing `sby,yosys,smt-solver`.
@@ -105,3 +266,6 @@ dev-in-progress
 - sidecars: Six parallel lanes audited the remaining gaps. Results: NVMe wrapper patch restored the stock rv32 boot hook path; RV32 scalar/codegen likely needs a tiny i64 literal/binop QEMU smoke before compiler repair; async G3/G5 are closed, but G2 live QEMU hardware-handoff evidence is only partially closed and must not support final hardware claims until run with `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` / `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1`; mission-critical/formal gates are green when OSS CAD is sourced, but fresh hosts still need `sby`, `yosys`, and an SMT solver; `$sp_dev` now routes robust-SW lanes to the mission-critical guide.
 - nvme: `examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs` now generates a tiny root that imports `os.kernel.arch.riscv32.boot` plus `entry.{rt_rv32_boot_optional_nvme_fw_selftest}`. `llvm-nm build/nvme_fw_rv32.elf` shows stock `_start`, `os__kernel__arch__riscv32__boot__boot_main`, strong `rt_rv32_boot_optional_nvme_fw_selftest`, and `entry__nvme_fw_rv32_selftest`.
 - evidence: `NVME_RV32_SIMPLE_BIN=src/compiler_rust/target/bootstrap/simple NVME_RV32_BUILD_TIMEOUT_SECS=90 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs` produced `build/nvme_fw_rv32.elf`; `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs build/nvme_fw_rv32.elf` failed closed after real boot init (`LOG OK`, `MEM OK`, `PMM OK`, `HEAP OK`, `SVC OK`, `BOOT OK`) with section mask `EJMBSPHQIFACTDWLYKGN`. Live firmware PASS remains blocked by rv32 baremetal logic/codegen mismatch, not wrapper or boot plumbing.
+- 2026-07-07 non-bootstrap-first update: per user request, bootstrap native-build work is postponed and `src/app/cli/bootstrap_main.spl` is restored to the known `run_native_build_bootstrap(args) -> 1` stub. Current non-bootstrap evidence: `bin/simple check src/app/cli/bootstrap_main.spl` passed; `sh scripts/check/check-async-library-hardening-evidence.shs` passed 19/19; `sh scripts/check/check-nvme-baremetal-wrapper-coverage.shs --strict` passed with blockers `none`; `sh scripts/check/check-simpleos-mission-critical-release.shs` with OSS CAD Suite sourced timed out at 300s with no status output, so no SimpleOS release PASS is claimed from this run.
+- 2026-07-07 SimpleOS release wrapper typing/test update: `scripts/check/check-simpleos-mission-critical-release.shs` now runs its matrix under `MATRIX_TIMEOUT_SECS` and reports `matrix_status=matrix-timeout` plus `matrix_out`/`matrix_err` instead of hanging silently. Evidence: `sh -n scripts/check/check-simpleos-mission-critical-release.shs` passed; `sh scripts/check/check-simpleos-mission-critical-release.shs --self-test` passed; `MATRIX_TIMEOUT_SECS=5 sh scripts/check/check-simpleos-mission-critical-release.shs` with OSS CAD Suite sourced failed closed with `matrix_status=matrix-timeout`.
+- 2026-07-07 non-bootstrap SimpleOS matrix update: `scripts/check/check-simpleos-hardening-evidence-matrix.shs` now bounds formal/QEMU executable rows with `SIMPLEOS_HARDENING_GATE_TIMEOUT_SECS` and emits `simpleos_hardening_gate_start/status` trace lines. `scripts/check/check-simpleos-formal-coverage.shs` now audits the bounded `run_gate ...` calls. The green-carrier QEMU spec removes stale `build/os/simpleos_green_carrier_probe.elf` before current-source builds and only boots QEMU when the build succeeds, so failed current-source links cannot be masked by stale ELF output. Evidence: `sh scripts/check/check-simpleos-formal-coverage.shs` passed; `bin/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean --timeout 60 --sequential` passed the default non-live lane; `bin/simple spipe-docgen test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --output doc/06_spec --no-index` generated 1 complete manual with 0 stubs; with OSS CAD Suite sourced, `SIMPLEOS_HARDENING_GATE_TIMEOUT_SECS=90 MATRIX_TIMEOUT_SECS=240 sh scripts/check/check-simpleos-mission-critical-release.shs` now completes with `matrix_status=pass`, `prereq_status=ready`, and release blockers exactly `qemu_scheduler_smp_handoff,qemu_scheduler_hw_handoff`. The blocker logs show current-source freestanding link failure on missing runtime symbols such as `rt_array_data_ptr_u8`, `rt_dict_remove`, `rt_string_to_int_lenient`, and `rt_simd_*`; LLVM backend is unavailable in this build.

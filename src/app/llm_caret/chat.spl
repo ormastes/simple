@@ -1,7 +1,11 @@
 # LLM Caret - Chat Session Management
 #
 # Maintains conversation history in module-level state.
-# Provides add, clear, truncate operations.
+# Provides add, clear, truncate operations, plus the tool-using agent loop.
+
+use app.llm_caret.types.{Message}
+use app.llm_caret.tools.{PermissionPolicy, ToolCall, ToolResult, ModelResponse, run_tool}
+use app.llm_caret.redact.{redact, wrap_untrusted}
 
 # ============================================================================
 # JSON helpers (inlined)
@@ -136,3 +140,62 @@ fn chat_last_role() -> text:
     if CHAT_ROLES.len() == 0:
         return ""
     CHAT_ROLES[CHAT_ROLES.len() - 1]
+
+# ============================================================================
+# Agent loop (tool_use -> gate -> execute -> tool_result -> re-call model)
+# ============================================================================
+
+val AGENT_MAX_ITERATIONS = 25
+
+struct AgentResult:
+    final_text: text
+    iterations: i64
+    stopped_reason: text     # "end_turn" | "max_iterations"
+    tool_calls_made: i64
+
+# Format a tool_result the way it re-enters the transcript for the model.
+fn _tool_result_message(call: ToolCall, result: ToolResult) -> text:
+    var prefix = "[tool_result " + call.name + " id=" + result.tool_use_id
+    if result.is_error:
+        prefix = prefix + " error"
+    prefix = prefix + "]\n"
+    prefix + wrap_untrusted("tool:" + call.name, redact(result.content))
+
+# Surface each tool call + a short result summary to the user.
+fn _emit_tool(call: ToolCall, result: ToolResult):
+    var status = "ok"
+    if result.is_error:
+        status = "error"
+    var summary = redact(result.content)
+    if summary.len() > 200:
+        summary = summary.substring(0, 200) + "..."
+    print "  -> tool " + call.name + " [" + status + "]: " + summary
+
+# Run the agent loop. The `responder` is the model seam: given the running
+# transcript it returns a ModelResponse (assistant text + any tool_use calls).
+# Providers parse their wire format into ModelResponse; tests inject a fake.
+# Every tool call traverses run_tool (the permission gate) - nothing executes
+# ungated. The loop is hard-capped so a model that never stops asking for tools
+# cannot run forever.
+fn run_agent_loop(policy: PermissionPolicy, initial: [Message], responder: fn([Message]) -> ModelResponse, max_iterations: i64) -> AgentResult:
+    var cap = max_iterations
+    if cap <= 0:
+        cap = AGENT_MAX_ITERATIONS
+    var transcript = initial
+    var iters = 0
+    var tool_count = 0
+    var final_text = ""
+    while iters < cap:
+        iters = iters + 1
+        val resp = responder(transcript)
+        final_text = resp.text
+        if resp.text != "":
+            transcript = transcript + [Message(role: "assistant", content: resp.text)]
+        if resp.tool_calls.len() == 0:
+            return AgentResult(final_text: final_text, iterations: iters, stopped_reason: "end_turn", tool_calls_made: tool_count)
+        for call in resp.tool_calls:
+            val result = run_tool(policy, call)
+            tool_count = tool_count + 1
+            _emit_tool(call, result)
+            transcript = transcript + [Message(role: "user", content: _tool_result_message(call, result))]
+    AgentResult(final_text: final_text, iterations: iters, stopped_reason: "max_iterations", tool_calls_made: tool_count)

@@ -65,6 +65,12 @@ extern size_t strlen(const char *s);
 extern void serial_puts(const char *s);
 extern void serial_putchar(char c);
 
+__attribute__((weak, aligned(16))) uint8_t gdt64_tss_desc[16];
+
+__attribute__((weak)) void spl_x86_on_user_fault(void) {
+    serial_puts("[fault] user fault hook missing\r\n");
+}
+
 /* serial_puthex is `static` in baremetal_stubs.c and not linkable from here.
  * The rt_tuple_/rt_closure_ diagnostic prints below are debug-only, so stub
  * them out locally rather than teaching the other TU to export the helper.
@@ -85,6 +91,8 @@ extern RuntimeValue rt_array_len(RuntimeValue arr);
 extern RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
 extern RuntimeValue rt_enum_new(RuntimeValue eid, RuntimeValue disc, RuntimeValue payload);
 extern RuntimeValue rt_print(RuntimeValue val);
+extern RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
+extern RuntimeValue rt_map_remove(RuntimeValue map, RuntimeValue key);
 
 /* Helper: decode to RuntimeString */
 static RuntimeString *_decode_str(RuntimeValue v) {
@@ -289,6 +297,47 @@ RuntimeValue rt_value_dict_new(void) {
 RuntimeValue rt_value_to_ptr(RuntimeValue v) {
     if (IS_HEAP(v)) return (RuntimeValue)(uintptr_t)DECODE_PTR(v);
     return (RuntimeValue)v;
+}
+
+RuntimeValue rt_array_data_ptr_u8(RuntimeValue arr) {
+    RuntimeArray *a = _decode_arr(arr);
+    if (!a) return ENCODE_INT(0);
+    return ENCODE_INT((int64_t)(uintptr_t)a->items);
+}
+
+RuntimeValue rt_string_to_int_lenient(RuntimeValue value) {
+    RuntimeString *s = _decode_str(value);
+    if (!s) return ENCODE_INT(0);
+    uint32_t i = 0;
+    while (i < s->len) {
+        char c = s->data[i];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') break;
+        i++;
+    }
+    int64_t sign = 1;
+    if (i < s->len && s->data[i] == '-') {
+        sign = -1;
+        i++;
+    } else if (i < s->len && s->data[i] == '+') {
+        i++;
+    }
+    int64_t out = 0;
+    while (i < s->len) {
+        char c = s->data[i++];
+        if (c < '0' || c > '9') break;
+        out = out * 10 + (int64_t)(c - '0');
+    }
+    return ENCODE_INT(sign * out);
+}
+
+RuntimeValue kernel__scheduler__scheduler_types___scheduler_mapped_entry(
+    RuntimeValue user_as,
+    RuntimeValue file_bytes,
+    RuntimeValue entry
+) {
+    (void)user_as;
+    (void)file_bytes;
+    return entry;
 }
 
 
@@ -1497,7 +1546,14 @@ RuntimeValue rt_hostname(void) { return rt_string_from_cstr("simpleos"); }
 RuntimeValue rt_native_build(RuntimeValue args) { (void)args; return NIL_VALUE; }
 RuntimeValue rt_dyn_torch_tensor_from_bits_1d(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; return NIL_VALUE; }
 
-RuntimeValue rt_dict_insert(RuntimeValue d, RuntimeValue k, RuntimeValue v) { (void)d; (void)k; (void)v; return NIL_VALUE; }
+RuntimeValue rt_dict_insert(RuntimeValue d, RuntimeValue k, RuntimeValue v) {
+    RuntimeValue out = rt_map_set(d, k, v);
+    return IS_NIL(out) ? FALSE_VALUE : TRUE_VALUE;
+}
+
+RuntimeValue rt_dict_remove(RuntimeValue d, RuntimeValue k) {
+    return IS_NIL(rt_map_remove(d, k)) ? FALSE_VALUE : TRUE_VALUE;
+}
 RuntimeValue rt_ensure_dir(RuntimeValue path) { (void)path; return NIL_VALUE; }
 RuntimeValue rt_exec(RuntimeValue cmd) { (void)cmd; return NIL_VALUE; }
 RuntimeValue rt_shell(RuntimeValue cmd, RuntimeValue args, RuntimeValue env) { (void)cmd; (void)args; (void)env; return NIL_VALUE; }
@@ -2462,11 +2518,28 @@ NOP2(rt_simd_add_f32x8)
 NOP2(rt_simd_add_f64x2)
 NOP2(rt_simd_add_f64x4)
 NOP2(rt_simd_add_i32x4)
+NOP2(rt_simd_add_i64x4)
+NOP2(rt_simd_add_u32x4)
+NOP2(rt_simd_and_i32x4)
+NOP2(rt_simd_and_i32x8)
+NOP2(rt_simd_and_u32x4)
+NOP2(rt_simd_or_i32x4)
+NOP2(rt_simd_or_i32x8)
+NOP2(rt_simd_or_u32x4)
+NOP2(rt_simd_shl_i32x4)
+NOP2(rt_simd_shl_i32x8)
+NOP2(rt_simd_shr_i32x4)
+NOP2(rt_simd_shr_i32x8)
 NOP2(rt_simd_sub_f32x4)
 NOP2(rt_simd_sub_f32x8)
 NOP2(rt_simd_sub_f64x2)
 NOP2(rt_simd_sub_f64x4)
 NOP2(rt_simd_sub_i32x4)
+NOP2(rt_simd_sub_i64x4)
+NOP2(rt_simd_sub_u32x4)
+NOP2(rt_simd_xor_i32x4)
+NOP2(rt_simd_xor_i32x8)
+NOP2(rt_simd_xor_u32x4)
 NOP2(rt_simd_mul_f32x4)
 NOP2(rt_simd_mul_f32x8)
 NOP2(rt_simd_mul_f64x2)

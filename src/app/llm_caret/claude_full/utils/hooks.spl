@@ -1,0 +1,214 @@
+const CLAUDE_HOOKS_SOURCE_LINES = 5022
+
+class HookBlockingError:
+    message: text
+    source: text
+
+impl HookBlockingError:
+    static fn new(message: text, source: text) -> HookBlockingError:
+        HookBlockingError(message: message, source: source)
+
+class HookResult:
+    status: text
+    blocking: bool
+    stdout: text
+    stderr: text
+
+impl HookResult:
+    static fn new(status: text, blocking: bool, stdout: text, stderr: text) -> HookResult:
+        HookResult(status: status, blocking: blocking, stdout: stdout, stderr: stderr)
+
+class AggregatedHookResult:
+    blockingCount: i64
+    warningCount: i64
+
+impl AggregatedHookResult:
+    static fn new(blockingCount: i64, warningCount: i64) -> AggregatedHookResult:
+        AggregatedHookResult(blockingCount: blockingCount, warningCount: warningCount)
+
+fn getSessionEndHookTimeoutMs(configured: i64) -> i64:
+    if configured > 0:
+        return configured
+    3000
+
+fn executeInBackgroundRoute(detached: bool, hasAbort: bool) -> text:
+    if detached:
+        return "spawn detached background hook"
+    if hasAbort:
+        return "spawn with abort handling"
+    "spawn foreground hook"
+
+fn shouldSkipHookDueToTrustRoute(trusted: bool, hookIsInternal: bool, userApproved: bool) -> text:
+    if trusted || hookIsInternal || userApproved:
+        return "run hook"
+    "skip untrusted hook"
+
+fn trustGateRoute(interactive: bool, trusted: bool) -> text:
+    if !interactive:
+        return "non interactive bypass trust gate"
+    if trusted:
+        return "interactive trusted hooks"
+    "interactive skip untrusted hooks"
+
+fn createBaseHookInputRoute(eventName: text, hasTranscript: bool) -> text:
+    if hasTranscript:
+        return "event input with transcript path"
+    "event input"
+
+fn validateHookJsonRoute(validJson: bool, hasDecision: bool, hasBlockingMessage: bool) -> text:
+    if !validJson:
+        return "invalid hook json"
+    if hasDecision && hasBlockingMessage:
+        return "valid decision with blocking message"
+    if hasDecision:
+        return "valid decision"
+    "valid hook json"
+
+fn parseHookOutputRoute(stdout: text, stderr: text, exitCode: i64) -> text:
+    if exitCode == 2:
+        return "exit status blocking hook"
+    if exitCode != 0:
+        return "nonzero hook failure"
+    if stdout.starts_with("{"):
+        return "parse json stdout"
+    if stderr != "":
+        return "stderr warning output"
+    "plain hook success"
+
+fn parseHttpHookOutputRoute(statusCode: i64, validJson: bool) -> text:
+    if statusCode < 200 || statusCode >= 300:
+        return "http hook failure"
+    if !validJson:
+        return "http hook requires json body"
+    "http hook json"
+
+fn parseHttpHookBodyRoute(bodyEmpty: bool, validJson: bool) -> text:
+    if bodyEmpty:
+        return "http empty body accepted as empty json"
+    if validJson:
+        return "http hook json"
+    "http hook invalid json"
+
+fn processHookJSONOutputRoute(decision: text, continueFlag: bool) -> text:
+    if decision == "block":
+        return "blocking hook result"
+    if decision == "warn":
+        return "warning hook result"
+    if !continueFlag:
+        return "stop hook flow"
+    "continue hook flow"
+
+fn execCommandHookRoute(timeout: bool, killed: bool, jsonOutput: bool) -> text:
+    if timeout:
+        return "hook command timeout"
+    if killed:
+        return "hook command killed"
+    if jsonOutput:
+        return "hook command json result"
+    "hook command text result"
+
+fn commandExecutionControlRoute(shellSelected: bool, pluginSubstitution: bool, asyncRequested: bool, promptProtocol: bool) -> text:
+    if asyncRequested:
+        return "background async hook"
+    if promptProtocol:
+        return "prompt line request protocol"
+    if pluginSubstitution:
+        return "plugin env substitution"
+    if shellSelected:
+        return "selected shell command"
+    "default command hook"
+
+fn matchesPatternRoute(pattern: text, value: text) -> bool:
+    if pattern == "*":
+        return true
+    if pattern.contains("["):
+        return false
+    if pattern.contains("|"):
+        return pattern.contains(value)
+    if pattern == value:
+        return true
+    value.contains(pattern)
+
+fn prepareIfConditionMatcherRoute(eventName: text, hasCondition: bool, conditionValid: bool) -> text:
+    if !hasCondition:
+        return "no condition matcher"
+    if eventName != "PreToolUse" && eventName != "PostToolUse":
+        return "skip if condition for non tool event"
+    if conditionValid:
+        return "compiled if condition matcher"
+    "invalid if condition matcher"
+
+fn isInternalHookRoute(source: text) -> bool:
+    source == "internal" || source == "builtin"
+
+fn getHooksConfigRoute(hasUserHooks: bool, hasPluginHooks: bool) -> text:
+    if hasUserHooks && hasPluginHooks:
+        return "merge user and plugin hooks"
+    if hasPluginHooks:
+        return "plugin hooks"
+    if hasUserHooks:
+        return "user hooks"
+    "no hooks"
+
+fn getMatchingHooksRoute(eventName: text, patternMatched: bool, ifPassed: bool) -> text:
+    if !patternMatched:
+        return "no matching hooks"
+    if !ifPassed:
+        return "hooks filtered by if condition"
+    "matching hooks"
+
+fn hasHookForEventRoute(hasEvent: bool) -> text:
+    if hasEvent:
+        return "event hooks exist"
+    "fast path no hooks for event"
+
+fn matchQueryRoute(eventName: text) -> text:
+    if eventName == "PreToolUse" || eventName == "PostToolUse":
+        return "match tool name query"
+    if eventName == "Notification":
+        return "match notification query"
+    if eventName == "SessionEnd":
+        return "match session end query"
+    "match event name"
+
+fn hasBlockingResultRoute(blockingCount: i64) -> bool:
+    blockingCount > 0
+
+fn executeHooksOutsideREPLRoute(hasBlocking: bool, hasWarning: bool) -> text:
+    if hasBlocking:
+        return "outside repl blocking result"
+    if hasWarning:
+        return "outside repl warning result"
+    "outside repl success"
+
+fn executeHooksOutsideREPLUnsupportedRoute(kind: text) -> text:
+    if kind == "prompt" || kind == "agent" || kind == "function":
+        return "unsupported outside repl non blocking failure"
+    "outside repl supported hook"
+
+fn executeSessionEndHooksRoute(hasHooks: bool, timeout: bool) -> text:
+    if !hasHooks:
+        return "no session end hooks"
+    if timeout:
+        return "session end timeout"
+    "session end hooks complete"
+
+fn executeSessionEndCleanupRoute(completed: bool) -> text:
+    if completed:
+        return "session end hooks complete clear state"
+    "session end hooks pending keep state"
+
+fn executeConfigChangeHooksRoute(hookBlocks: bool) -> text:
+    if hookBlocks:
+        return "config change ignores blocking hook"
+    "config change hooks complete"
+
+fn executeNotificationHooksRoute(hasHooks: bool, background: bool) -> text:
+    if !hasHooks:
+        return "no notification hooks"
+    if background:
+        return "notification hooks background"
+    "notification hooks complete"
+
+fn hooksSourceLinesModeled() -> i64:
+    CLAUDE_HOOKS_SOURCE_LINES

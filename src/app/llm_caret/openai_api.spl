@@ -3,6 +3,8 @@
 # Builds HTTP requests for the OpenAI Chat Completions API.
 # Pure functions for request/response JSON building/parsing.
 
+use app.llm_caret.retry.{retry_policy_from_env, with_retry}
+
 extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
 
 # ============================================================================
@@ -242,11 +244,12 @@ fn openai_send(api_key: text, base_url: text, model: text, messages_json: text, 
     val url = base_url + "/v1/chat/completions"
     val headers = build_openai_headers(api_key)
     val body = build_openai_body(model, messages_json, max_tokens, temperature)
-    val result = rt_http_request("POST", url, headers, body)
-    val status_code = result.0
-    val resp_body = result.1 ?? ""
-    val http_error = result.2 ?? ""
-    if http_error != "":
+    val policy = retry_policy_from_env()
+    val outcome = with_retry(policy, fn(attempt: i64) -> (i64, text, text, i64):
+        val result = rt_http_request("POST", url, headers, body)
+        (result.0, result.1 ?? "", result.2 ?? "", 0)
+    )
+    if outcome.error != "":
         return OpenAIResponse(
             content: "",
             model: "",
@@ -254,8 +257,8 @@ fn openai_send(api_key: text, base_url: text, model: text, messages_json: text, 
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
-            error: "HTTP error: " + http_error,
+            error: "HTTP error: " + outcome.error,
             is_error: true,
-            raw: resp_body
+            raw: outcome.body
         )
-    parse_openai_response(resp_body)
+    parse_openai_response(outcome.body)
