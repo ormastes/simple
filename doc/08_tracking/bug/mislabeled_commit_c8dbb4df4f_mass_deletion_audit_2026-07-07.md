@@ -1,11 +1,81 @@
 # Deletion audit: mislabeled commit `c8dbb4df4f` (394 files / 56,398 lines) — still-absent inventory
 
-- **Status:** OPEN (audit only — no restores performed in this pass except `tools/tauri-shell`, done separately)
+- **Status:** RECOVERY ROUND 2 COMPLETE — 170 of 244 in-scope files restored;
+  remaining 74 confirmed obsolete-by-design (no action needed). `tools/tauri-shell`
+  was restored separately (see Related).
 - **Priority:** P1
 - **Date:** 2026-07-07
 - **Area:** repo-wide (compiler variant overlays, dev tooling, one src edit)
 - **Related:** `doc/08_tracking/bug/tauri_shell_source_untracked_unreproducible_2026-07-07.md` (RECOVERED),
   `doc/09_report/tauri_shell_source_recovery_investigation_2026-07-07.md`
+
+## Recovery round 2 (2026-07-07) — commits
+
+All restored `git checkout c8756fe7cc -- <path>` verbatim, then committed with `jj commit` scoped per group:
+
+| Group | Files | Commit |
+|---|---:|---|
+| `variants/**` | 8 | `2e13bd4022d6` — fix(recovery): restore variants/** module-variant overlays deleted by mislabeled c8dbb4df4f |
+| `tools/claude-plugin/**` + `tools/mcp-registry/**` + `tools/lsp-mcp-registry/{README.md,package.json,server.json}` | 121 | `2cdc4b5237c8` — fix(recovery): restore tools/claude-plugin + tools/mcp-registry + tools/lsp-mcp-registry metadata (canonical per code-style rules) |
+| GUI/render tooling batch (`gui_perf_bench`, `tauri-live-bitmap`, `electron-wasm-gui-exec`, `docker` Dockerfiles, `web-render-backend` chromium-webgpu subdirs, `pixel_compare` remainder, `electron-live-bitmap` remainder, `electron-shell` famous-site scripts) | 40 | `596e8e56c281` — fix(recovery): restore GUI/render tooling dirs deleted by mislabeled c8dbb4df4f |
+| `tools/pixel_compare/render_and_save_simple.spl` (gap in this audit's own recovery command reference — table said 5, commands only listed 4) | 1 | `f8217c17` — fix(recovery): restore tools/pixel_compare/render_and_save_simple.spl missed by round-2 batch |
+
+**Total restored: 170 files.** All groups verified: 8/8, 121/121, 40/40 + 1
+file counts matched the audit table exactly (the `pixel_compare` group's
+command-reference gap is called out and closed above); every restored
+`.json` parsed cleanly; every base-file/guide/bug reference named in the
+"Still-absent groups" table below now resolves against a real file
+(spot-checked:
+`.claude/rules/code-style.md` claude-plugin/mcp-registry lines,
+`src/lib/nogc_sync_mut/target_ext.spl:7`,
+`src/lib/gc_async_mut/gpu/engine2d/renderer_select.spl:11`,
+`doc/08_tracking/bug/var_overlay_os_paths_runtime_host_not_buildtime_2026-06-29.md`,
+`doc/07_guide/platform/gui_perf_benchmark_comparison.md`,
+`doc/07_guide/ui/pixel_comparison_guide.md`,
+`doc/07_guide/ui/web_render_backend.md`,
+`doc/07_guide/tooling/renderdoc_capture_infra.md:1478`).
+
+Proof run per group:
+- `variants/**`: `test/01_unit/lib/gc_async_mut/gpu/engine2d/renderer_select_spec.spl` → 4/4 PASS.
+  `test/01_unit/lib/nogc_sync_mut/target_ext_spec.spl` → 1/2 PASS; the one
+  failure (`lib_ext` expects `.so`, host returns `.dylib`) is a pre-existing
+  Linux-vs-macOS host-detection assumption in the spec itself, unrelated to
+  the restored overlay files (which only apply for explicit non-default
+  `platform:` targets) — not introduced by this recovery, not fixed here.
+- `tools/claude-plugin` + registries: every restored `.json` (`plugin.json`,
+  `marketplace.json`, `.lsp.json`, `.mcp.json`, `package.json`, `server.json`)
+  parses via `python3 -c "json.load(...)"` with zero failures.
+- GUI/render tooling: guide-reference grep spot-check per subdir (all resolve,
+  listed above).
+
+Manifests extended (per `.claude/rules/structure.md` FILE.md convention):
+root `FILE.md` gained a `variants` root entry + `variants/FILE.md` child-manifest
+row + 7 new `tools/` subdirectory rows; `tools/FILE.md` gained the same 7 rows;
+new `variants/FILE.md` created declaring `__init__.spl`/`platform`/`ui`.
+`sh scripts/check-workspace-root-guard.shs` → `OK`; `--strict` audit shows zero
+*new* violations from any restored/added path (only pre-existing repo-wide
+strict-mode debt remains, e.g. `doc/06_spec/FILE.md` gaps, `.spipe/host-cpu-runtime-variants`
+— out of scope for this recovery).
+`sh scripts/check/check-ui-backend-isolation.shs` → `ui_backend_isolation_new=0`
+(536 current vs 537 baselined; no new violations introduced by the restore).
+
+**Confirmed-obsolete (no action, unchanged from initial audit):**
+`tools/tls_test_server/target/**` (68, cargo build cache),
+`var/lib/**` (3, runtime state/WAL snapshots),
+`unit/app/ui/async_tui/summary.txt` (1, unreferenced auto-generated artifact),
+`Fri` (1, stray/anomalous path, no corresponding source). Total: 73.
+
+170 restored + 73 confirmed-obsolete = 243, one short of 244 — the
+remaining 1 is `tools/lsp-mcp-registry/native/simple_lsp_mcp_server`, the
+stale compiled binary deliberately **deferred** (not restored, not
+obsolete): regenerating it via a fresh build is higher-value than restoring
+a stale artifact, per the original audit's own recommendation. This fully
+accounts for the original 244 (the 7 net-trim `M` files were never in the
+244 count — they still exist and were only trimmed, not deleted).
+
+No restored file conflicted with any current-work file at the same path —
+all target paths were confirmed absent from the working tree immediately
+before each `git checkout c8756fe7cc --` invocation.
 
 ## Summary
 
