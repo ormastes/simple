@@ -128,35 +128,39 @@ impl NvmeController:
         if cmd.opcode == ADMIN_SET_FEATURES:
             if cmd.nsid != 0 or cmd.cdw12 != 0 or cmd.cdw10 != admin_fid(cmd.cdw10):
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
-            if admin_fid(cmd.cdw10) == FEAT_POWER_MGMT:
+            val fid: i64 = admin_fid(cmd.cdw10)
+            if fid != FEAT_POWER_MGMT and fid != FEAT_TEMP_THRESH and fid != FEAT_VOLATILE_WC and fid != FEAT_NUM_QUEUES:
+                return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
+            if fid == FEAT_POWER_MGMT:
                 val ps_status: i64 = me.pt.set_power_state(cmd.cdw11)
                 if ps_status != SC_SUCCESS:
                     return AdminResult(status: ps_status, data: 0, post: true)
-            if admin_fid(cmd.cdw10) == FEAT_TEMP_THRESH:
+            if fid == FEAT_TEMP_THRESH:
                 val tt_status: i64 = me.pt.set_temperature_threshold(cmd.cdw11)
                 if tt_status != SC_SUCCESS:
                     return AdminResult(status: tt_status, data: 0, post: true)
-            if admin_fid(cmd.cdw10) == FEAT_VOLATILE_WC:
+            if fid == FEAT_VOLATILE_WC:
                 if cmd.cdw11 < 0 or cmd.cdw11 > 1:
                     return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
-            if admin_fid(cmd.cdw10) == FEAT_NUM_QUEUES:
+            if fid == FEAT_NUM_QUEUES:
                 val ncqr: i64 = cmd.cdw11 & 0xFFFF
                 val nsqr: i64 = (cmd.cdw11 >> 16) & 0xFFFF
                 if cmd.cdw11 != ((nsqr << 16) | ncqr) or ncqr < 0 or nsqr < 0 or ncqr >= MAX_IO_QUEUES or nsqr >= MAX_IO_QUEUES:
                     return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
-            if not me.features.set(admin_fid(cmd.cdw10), cmd.cdw11):
+            if not me.features.set(fid, cmd.cdw11):
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             return AdminResult(status: SC_SUCCESS, data: cmd.cdw11, post: true)
         if cmd.opcode == ADMIN_GET_FEATURES:
             if cmd.nsid != 0 or cmd.cdw11 != 0 or cmd.cdw12 != 0 or cmd.cdw10 != admin_fid(cmd.cdw10):
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
-            if admin_fid(cmd.cdw10) < 0 or admin_fid(cmd.cdw10) >= FEAT_MAX:
+            val fid: i64 = admin_fid(cmd.cdw10)
+            if fid != FEAT_POWER_MGMT and fid != FEAT_TEMP_THRESH and fid != FEAT_VOLATILE_WC and fid != FEAT_NUM_QUEUES:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
-            if admin_fid(cmd.cdw10) == FEAT_POWER_MGMT:
+            if fid == FEAT_POWER_MGMT:
                 return AdminResult(status: SC_SUCCESS, data: me.pt.get_power_state(), post: true)
-            if admin_fid(cmd.cdw10) == FEAT_TEMP_THRESH:
+            if fid == FEAT_TEMP_THRESH:
                 return AdminResult(status: SC_SUCCESS, data: me.pt.get_temperature_threshold(), post: true)
-            return AdminResult(status: SC_SUCCESS, data: me.features.get(admin_fid(cmd.cdw10)), post: true)
+            return AdminResult(status: SC_SUCCESS, data: me.features.get(fid), post: true)
         if cmd.opcode == ADMIN_GET_LOG:
             return me.do_get_log(cmd)
         if cmd.opcode == ADMIN_ABORT:
@@ -676,6 +680,13 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(snq.status, SC_SUCCESS, "set number-of-queues at advertised max accepted")
     fail = fail + expect_eq(bnq.status, SC_INVALID_FIELD, "set number-of-queues above advertised max rejected")
     fail = fail + expect_eq(gnq.data, ((MAX_IO_QUEUES - 1) << 16) | (MAX_IO_QUEUES - 1), "failed number-of-queues set leaves previous value")
+    c.admin_submit(admin_set_feature_cmd(57, FEAT_ARBITRATION, 1))
+    c.admin_submit(admin_get_feature_cmd(58, FEAT_ERROR_RECOVERY))
+    c.admin_process()
+    val usf: NvmeCpl = c.admin_reap()
+    val ugf: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(usf.status, SC_INVALID_FIELD, "set unsupported feature rejected")
+    fail = fail + expect_eq(ugf.status, SC_INVALID_FIELD, "get unsupported feature rejected")
     c.admin_submit(admin_set_feature_cmd(6, FEAT_MAX, 1))
     c.admin_submit(admin_get_feature_cmd(7, FEAT_MAX))
     c.admin_process()
