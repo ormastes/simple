@@ -40,14 +40,16 @@ rm -f build/os/generated/fsexec_hello_blob.c   # remove stale, uncompiled copy
 echo "[gen-ring3] embedding $PAYLOAD_ELF -> $BLOB_C"
 PAYLOAD_SIZE="$(stat -c%s "$PAYLOAD_ELF")"
 {
-    printf 'const unsigned char fsexec_hello_blob[] = {\n'
+    # The array + len MUST be `static` (file-local): a GLOBAL const array symbol
+    # gets mis-resolved by native-build's freestanding "weak boot alias override"
+    # (observed: byte 0 read back as 0xF8 instead of 0x7F). A static array (the
+    # proven embedded_ssh_host_rsa.h pattern) is not an external symbol and is
+    # placed/read correctly. Only the accessor functions are external.
+    printf 'static const unsigned char fsexec_hello_blob[] = {\n'
     od -An -v -tu1 "$PAYLOAD_ELF" | awk '{ for (i = 1; i <= NF; i++) printf "%s,", $i }'
     printf '\n};\n'
-    printf 'const unsigned long fsexec_hello_blob_len = %s;\n' "$PAYLOAD_SIZE"
-    printf 'unsigned long fsexec_hello_blob_addr(void) { return (unsigned long) fsexec_hello_blob; }\n'
+    printf 'static const unsigned long fsexec_hello_blob_len = %s;\n' "$PAYLOAD_SIZE"
     printf 'unsigned long fsexec_hello_blob_size(void) { return fsexec_hello_blob_len; }\n'
-    # Per-byte accessor: C indexes its own array (no MMIO / no addr translation),
-    # so the materialised [u8] is guaranteed to be the real ELF bytes.
     printf 'unsigned char fsexec_hello_blob_byte(unsigned long i) { return (i < fsexec_hello_blob_len) ? fsexec_hello_blob[i] : 0; }\n'
 } > "$BLOB_C"
 echo "[gen-ring3] blob size=$PAYLOAD_SIZE bytes"
