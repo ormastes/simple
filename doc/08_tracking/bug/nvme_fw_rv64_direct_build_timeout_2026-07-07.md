@@ -391,3 +391,32 @@ Terminated
 ```
 
 The next source-shape choke point is `logic_map_cases.spl`.
+
+## Update — map cases now parse quickly
+
+`logic_map_cases.spl` was reduced to a small case facade, with validation,
+update, and flush/crash assertions moved into separate case modules. The scalar
+host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but it now gets through map cases and band geometry
+cases before stopping at band allocation cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_map_cases.spl chars=316
+[BOOTSTRAP-PHASE] ... logic_map_cases.spl
+[BOOTSTRAP-PHASE] ... logic_band_geometry_cases.spl chars=650
+[BOOTSTRAP-PHASE] ... logic_band_geometry_cases.spl
+[BOOTSTRAP-PHASE] ... logic_band_alloc_cases.spl chars=1093
+Terminated
+```
+
+The next source-shape choke point is `logic_band_alloc_cases.spl`.
