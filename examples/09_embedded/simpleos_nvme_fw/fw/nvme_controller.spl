@@ -68,6 +68,9 @@ fn nvme_controller_new() -> NvmeController:
 fn nvme_controller_new_for_target(target_id: i64) -> NvmeController:
     NvmeController(aq: admin_queue_new(), qset: queue_set_new(), target: nvme_fw_target_config(target_id), features: feature_store_new(), ftl: ftl_new(), pool: task_pool_new(), last_id: identify_empty(), smart: smart_empty(), reads: 0, writes: 0, power_cycles: 0, abort_count: 0, format_count: 0, aer_held_cid: -1, aer_event: 0, fw_revision: 1, fw_dl_bytes: 0, media_errors: 0, unsafe_shutdowns: 0, error_count: 0, last_error: 0, dirty_since_checkpoint: false, fw_slot: 0, last_abort_sqid: -1, last_abort_cid: -1, pt: power_thermal_new(), wb: dram_write_buffer_new())
 
+fn aer_event_valid(evt: i64) -> bool:
+    evt == AER_SMART_HEALTH
+
 impl NvmeController:
     # ── Admin path ───────────────────────────────────────────────────────────
     me admin_submit(c: AdminCmd) -> bool:
@@ -87,6 +90,9 @@ impl NvmeController:
 
     me complete_pending_aer() -> bool:
         if me.aer_event == 0:
+            return false
+        if not aer_event_valid(me.aer_event):
+            me.aer_event = 0
             return false
         if not cid_valid(me.aer_held_cid):
             return false
@@ -241,9 +247,12 @@ impl NvmeController:
         if cmd.cdw10 != 0 or cmd.cdw11 != 0 or cmd.cdw12 != 0 or cmd.nsid != 0:
             return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
         if me.aer_event != 0:
-            val evt: i64 = me.aer_event
-            me.aer_event = 0
-            return AdminResult(status: SC_SUCCESS, data: evt, post: true)
+            if not aer_event_valid(me.aer_event):
+                me.aer_event = 0
+            else:
+                val evt: i64 = me.aer_event
+                me.aer_event = 0
+                return AdminResult(status: SC_SUCCESS, data: evt, post: true)
         if me.aer_held_cid == -1:
             me.aer_held_cid = cmd.cid
             return AdminResult(status: SC_SUCCESS, data: 0, post: false)
@@ -252,6 +261,8 @@ impl NvmeController:
     # Raise an asynchronous event: complete a held AER now, or remember it for the
     # next AER the host posts.
     me raise_async_event(evt: i64):
+        if not aer_event_valid(evt):
+            return
         if me.aer_held_cid != -1:
             if cid_valid(me.aer_held_cid):
                 me.aer_event = evt
@@ -826,6 +837,18 @@ fn nvme_controller_selftest() -> i64:
     c.admin_process()
     val caerc: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(caerc.data, AER_SMART_HEALTH, "corrupted AER held cid preserves event for next request")
+    c.aer_event = -7
+    c.admin_submit(admin_async_event_cmd(62))
+    c.admin_process()
+    fail = fail + expect_eq(c.admin_completions(), 0, "corrupted stored AER event posts no completion")
+    fail = fail + expect_eq(c.aer_outstanding(), 1, "corrupted stored AER event becomes clean held request")
+    c.raise_async_event(999)
+    fail = fail + expect_eq(c.admin_completions(), 0, "invalid raised AER event posts no completion")
+    fail = fail + expect_eq(c.aer_outstanding(), 1, "invalid raised AER event keeps request outstanding")
+    c.raise_async_event(AER_SMART_HEALTH)
+    fail = fail + expect_eq(c.admin_completions(), 1, "valid AER still completes after invalid events")
+    val cleaned_aer: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(cleaned_aer.data, AER_SMART_HEALTH, "AER data is sanitized after invalid events")
 
     # Firmware Download + Commit advances the active firmware revision.
     val rev0: i64 = c.firmware_revision()
