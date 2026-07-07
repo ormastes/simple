@@ -35,6 +35,10 @@ fn _lean(file: text) -> (text, text, i64):
 fn _shell(cmd: text) -> (text, text, i64):
     process_run("/bin/sh", ["-c", cmd])
 
+fn _expect_no_fail_marker(out: text, label: text):
+    if out.contains("FAIL"):
+        fail(label + " printed a failure marker")
+
 describe "NVMe firmware: layered smoke (Firmware / HIL / FTL / FIL)":
     """
     A short smoke entrypoint covers the live Firmware -> HIL -> FTL -> FIL path
@@ -46,6 +50,7 @@ describe "NVMe firmware: layered smoke (Firmware / HIL / FTL / FIL)":
         val (out, err, code) = _run(FW + "/fw_layer_smoke.spl")
         expect(code).to_equal(0)
         expect(out).to_contain("FW LAYER SMOKE PASS")
+        _expect_no_fail_marker(out, "layered firmware smoke")
 
 describe "NVMe firmware: end-to-end SSD lifecycle":
     """
@@ -75,6 +80,7 @@ describe "NVMe firmware: end-to-end SSD lifecycle":
         expect(out).to_contain("LBA 50 survives power cycle")
         expect(out).to_contain("trimmed LBA 7 stays trimmed after recovery")
         expect(out).to_contain("ALL END-TO-END CHECKS PASS")
+        _expect_no_fail_marker(out, "end-to-end SSD simulation")
 
 describe "NVMe firmware: admin queue + multiple IO queues (controller front end)":
     """
@@ -115,6 +121,7 @@ describe "NVMe firmware: admin queue + multiple IO queues (controller front end)
         expect(out).to_contain("SMART shows writes occurred")
         expect(out).to_contain("LBA 200 survives power cycle")
         expect(out).to_contain("ALL NVME CONTROLLER E2E CHECKS PASS")
+        _expect_no_fail_marker(out, "controller end-to-end demo")
 
 describe "NVMe firmware: production-hardening regressions":
     """
@@ -139,6 +146,7 @@ describe "NVMe firmware: production-hardening regressions":
         expect(code).to_equal(0)
         step("Recovery restores committed writes and 600 writes survive a full WAL")
         expect(out).to_contain("DURABILITY OK")
+        _expect_no_fail_marker(out, "durability check")
 
     it "relocates data safely during wear-leveling and read-disturb scrub":
         step("Run the static wear-leveling and read-disturb scrub check")
@@ -146,6 +154,7 @@ describe "NVMe firmware: production-hardening regressions":
         expect(code).to_equal(0)
         step("Both passes reclaim the targeted block with all data preserved")
         expect(out).to_contain("WEAR/SCRUB OK")
+        _expect_no_fail_marker(out, "wear scrub check")
 
     it "preserves the bad-block table and wear history across a Format NVM":
         step("Retire a block + accrue wear, then Format NVM")
@@ -153,6 +162,7 @@ describe "NVMe firmware: production-hardening regressions":
         expect(code).to_equal(0)
         step("Format erases user data but the retired block and erase counts survive (wear accrues, never resets)")
         expect(out).to_contain("FORMAT OK")
+        _expect_no_fail_marker(out, "format check")
 
     it "sandboxes dynamic policy hooks so a malicious hook cannot corrupt the FTL (req 7)":
         step("Install custom + evil + over-fuel GC policy hooks and exercise the install gate")
@@ -160,6 +170,7 @@ describe "NVMe firmware: production-hardening regressions":
         expect(code).to_equal(0)
         step("A custom hook changes GC selection but loses no data; forbidden installs are rejected; over-fuel votes are discarded")
         expect(out).to_contain("POLICY HOOKS OK")
+        _expect_no_fail_marker(out, "policy hooks check")
 
     it "corrects one silent payload bit and fails double-bit corruption closed (gap-closure P3)":
         step("Program a NAND page, corrupt one payload bit under stored OOB ECC, and read through FIL")
@@ -167,6 +178,7 @@ describe "NVMe firmware: production-hardening regressions":
         expect(code).to_equal(0)
         step("The FIL caller receives corrected data for one bit; two silent payload bits report media failure")
         expect(out).to_contain("ECC OK")
+        _expect_no_fail_marker(out, "ECC check")
 
     it "moves multi-block host data through segmented PRP descriptors (gap-closure P4)":
         step("Submit a write whose simulated host buffer crosses from PRP segment 1 to PRP segment 2")
@@ -174,6 +186,7 @@ describe "NVMe firmware: production-hardening regressions":
         expect(code).to_equal(0)
         step("The HIL writes bytes from both PRP segments in LBA order")
         expect(out).to_contain("HOST TRANSPORT OK")
+        _expect_no_fail_marker(out, "host transport check")
 
     it "bounds host writes behind a DRAM arena span with no partial media update (gap-closure P5)":
         step("Fill a DRAM arena span, then submit one write larger than the DRAM budget")
@@ -181,6 +194,7 @@ describe "NVMe firmware: production-hardening regressions":
         expect(code).to_equal(0)
         step("The oversized write is rejected before any LBA is programmed")
         expect(out).to_contain("DRAM BUFFER OK")
+        _expect_no_fail_marker(out, "DRAM buffer check")
 
     it "schedules NAND ops across channels in parallel with per-channel serialization (gap-closure P2)":
         step("Stripe a write batch across the channels and drain the multi-channel scheduler")
@@ -188,6 +202,7 @@ describe "NVMe firmware: production-hardening regressions":
         expect(code).to_equal(0)
         step("A striped batch drains in ceil(n/channels) parallel steps; an unbalanced batch is bounded by its deepest channel")
         expect(out).to_contain("PARALLELISM OK")
+        _expect_no_fail_marker(out, "parallelism check")
 
     it "reconstructs a failed channel from XOR parity with no data loss (RAIN, gap-closure P8)":
         step("Write a parity stripe across the channels, then fail a channel and reconstruct")
@@ -195,6 +210,7 @@ describe "NVMe firmware: production-hardening regressions":
         expect(code).to_equal(0)
         step("Any single channel (data or parity) is recovered exactly from the survivors")
         expect(out).to_contain("RAIN OK")
+        _expect_no_fail_marker(out, "RAIN check")
 
     it "rebuilds a failed channel inside the live FTL with no logical data loss (RAIN wired, P8)":
         step("Write known data through the FTL, fail a whole channel, then rebuild it from live parity")
@@ -202,6 +218,7 @@ describe "NVMe firmware: production-hardening regressions":
         expect(code).to_equal(0)
         step("Every LBA reads back its original value through the normal FTL read path after the rebuild")
         expect(out).to_contain("RAIN-FTL OK")
+        _expect_no_fail_marker(out, "RAIN FTL check")
 
     it "throttles under sustained thermal load and recovers when cool (gap-closure P7)":
         step("Drive sustained load until the device throttles and raises the SMART critical warning, then cool it")
@@ -209,6 +226,7 @@ describe "NVMe firmware: production-hardening regressions":
         expect(code).to_equal(0)
         step("The throttle engages over the threshold and releases once the device cools — no crash")
         expect(out).to_contain("THERMAL OK")
+        _expect_no_fail_marker(out, "thermal check")
 
 describe "NVMe firmware: Lean4 formal verification of the FTL invariants":
     """
@@ -225,36 +243,42 @@ describe "NVMe firmware: Lean4 formal verification of the FTL invariants":
         val (out, err, code) = _lean(FW + "/proofs/Alloc.lean")
         expect(code).to_equal(0)
         expect(out).to_contain("LEAN_OK")
+        _expect_no_fail_marker(out, "Alloc.lean")
 
     it "verifies that recovery preserves the committed prefix (Recover.lean)":
         step("Check proofs/Recover.lean with the Lean toolchain")
         val (out, err, code) = _lean(FW + "/proofs/Recover.lean")
         expect(code).to_equal(0)
         expect(out).to_contain("LEAN_OK")
+        _expect_no_fail_marker(out, "Recover.lean")
 
     it "verifies the garbage-collection data-loss guard (Gc.lean)":
         step("Check proofs/Gc.lean with the Lean toolchain")
         val (out, err, code) = _lean(FW + "/proofs/Gc.lean")
         expect(code).to_equal(0)
         expect(out).to_contain("LEAN_OK")
+        _expect_no_fail_marker(out, "Gc.lean")
 
     it "verifies the sandboxed policy-hook safety properties (Hooks.lean, req 7)":
         step("Check proofs/Hooks.lean with the Lean toolchain")
         val (out, err, code) = _lean(FW + "/proofs/Hooks.lean")
         expect(code).to_equal(0)
         expect(out).to_contain("LEAN_OK")
+        _expect_no_fail_marker(out, "Hooks.lean")
 
     it "verifies the flash-controller status state machine (Fmc.lean, gap-closure P1)":
         step("Check proofs/Fmc.lean with the Lean toolchain")
         val (out, err, code) = _lean(FW + "/proofs/Fmc.lean")
         expect(code).to_equal(0)
         expect(out).to_contain("LEAN_OK")
+        _expect_no_fail_marker(out, "Fmc.lean")
 
     it "verifies XOR-parity channel reconstruction (Rain.lean, gap-closure P8)":
         step("Check proofs/Rain.lean with the Lean toolchain")
         val (out, err, code) = _lean(FW + "/proofs/Rain.lean")
         expect(code).to_equal(0)
         expect(out).to_contain("LEAN_OK")
+        _expect_no_fail_marker(out, "Rain.lean")
 
 describe "NVMe firmware: production documentation hygiene":
     """

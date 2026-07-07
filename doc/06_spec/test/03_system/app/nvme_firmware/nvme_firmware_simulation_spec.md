@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -49,7 +49,7 @@ NVMe SSD firmware (HIL/FTL/FIL + admin/IO-queue controller) — system scenario.
 | Design | N/A |
 | Research | doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md |
 | Source | `test/03_system/app/nvme_firmware/nvme_firmware_simulation_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 NVMe SSD firmware (HIL/FTL/FIL + admin/IO-queue controller) — system scenario.
@@ -71,12 +71,13 @@ evidence. Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_firmware_s
 
 - Run the short layered firmware smoke
    - Expected: code equals `0`
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -84,6 +85,7 @@ step("Run the short layered firmware smoke")
 val (out, err, code) = _run(FW + "/fw_layer_smoke.spl")
 expect(code).to_equal(0)
 expect(out).to_contain("FW LAYER SMOKE PASS")
+_expect_no_fail_marker(out, "layered firmware smoke")
 ```
 
 </details>
@@ -99,12 +101,13 @@ expect(out).to_contain("FW LAYER SMOKE PASS")
 - Garbage collection reclaims a stale block while the logical view is preserved
 - Trim deallocates an LBA (a later read returns zero)
 - After a power-fail + recovery, committed data survives and trims stay trimmed
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -128,6 +131,7 @@ step("After a power-fail + recovery, committed data survives and trims stay trim
 expect(out).to_contain("LBA 50 survives power cycle")
 expect(out).to_contain("trimmed LBA 7 stays trimmed after recovery")
 expect(out).to_contain("ALL END-TO-END CHECKS PASS")
+_expect_no_fail_marker(out, "end-to-end SSD simulation")
 ```
 
 </details>
@@ -145,12 +149,13 @@ expect(out).to_contain("ALL END-TO-END CHECKS PASS")
 - Negative: deleting a completion queue with a live bound submission queue is rejected
 - Reverse-order teardown deletes the submission queue then the completion queue
 - The SMART log reflects the IO, and committed data survives a power cycle
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -184,6 +189,7 @@ step("The SMART log reflects the IO, and committed data survives a power cycle")
 expect(out).to_contain("SMART shows writes occurred")
 expect(out).to_contain("LBA 200 survives power cycle")
 expect(out).to_contain("ALL NVME CONTROLLER E2E CHECKS PASS")
+_expect_no_fail_marker(out, "controller end-to-end demo")
 ```
 
 </details>
@@ -193,8 +199,8 @@ expect(out).to_contain("ALL NVME CONTROLLER E2E CHECKS PASS")
 #### guards garbage collection against data loss and the write-cliff
 
 - Drive the device to the host-write boundary and run GC under pressure
-   - Expected: code equals `0`
 - The reserve is held back, GC reclaims safely, and writes resume (no cliff / no loss)
+   - Expected: code equals `0`
 
 
 <details>
@@ -205,10 +211,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Drive the device to the host-write boundary and run GC under pressure")
-val (out, err, code) = _run(FW + "/gc_safety_check.spl")
-expect(code).to_equal(0)
+# ponytail: keep this one noisy nested run out of process_run capture; the full log stays as an artifact.
+val (out, err, code) = _shell("mkdir -p build/test-artifacts; SIMPLE_TIMEOUT_SECONDS=60 bin/simple run " + FW + "/gc_safety_check.spl > build/test-artifacts/nvme_gc_safety.out 2> build/test-artifacts/nvme_gc_safety.err && grep -F 'GC SAFETY OK' build/test-artifacts/nvme_gc_safety.out")
 step("The reserve is held back, GC reclaims safely, and writes resume (no cliff / no loss)")
-expect(out).to_contain("GC SAFETY OK")
+expect(code).to_equal(0)
 ```
 
 </details>
@@ -218,12 +224,13 @@ expect(out).to_contain("GC SAFETY OK")
 - Run the power-loss durability check (volatile loss + recovery + WAL overflow)
    - Expected: code equals `0`
 - Recovery restores committed writes and 600 writes survive a full WAL
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -232,6 +239,7 @@ val (out, err, code) = _run(FW + "/durability_check.spl")
 expect(code).to_equal(0)
 step("Recovery restores committed writes and 600 writes survive a full WAL")
 expect(out).to_contain("DURABILITY OK")
+_expect_no_fail_marker(out, "durability check")
 ```
 
 </details>
@@ -241,12 +249,13 @@ expect(out).to_contain("DURABILITY OK")
 - Run the static wear-leveling and read-disturb scrub check
    - Expected: code equals `0`
 - Both passes reclaim the targeted block with all data preserved
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -255,6 +264,7 @@ val (out, err, code) = _run(FW + "/wear_scrub_check.spl")
 expect(code).to_equal(0)
 step("Both passes reclaim the targeted block with all data preserved")
 expect(out).to_contain("WEAR/SCRUB OK")
+_expect_no_fail_marker(out, "wear scrub check")
 ```
 
 </details>
@@ -264,12 +274,13 @@ expect(out).to_contain("WEAR/SCRUB OK")
 - Retire a block + accrue wear, then Format NVM
    - Expected: code equals `0`
 - Format erases user data but the retired block and erase counts survive (wear accrues, never resets)
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -278,6 +289,7 @@ val (out, err, code) = _run(FW + "/format_check.spl")
 expect(code).to_equal(0)
 step("Format erases user data but the retired block and erase counts survive (wear accrues, never resets)")
 expect(out).to_contain("FORMAT OK")
+_expect_no_fail_marker(out, "format check")
 ```
 
 </details>
@@ -287,12 +299,13 @@ expect(out).to_contain("FORMAT OK")
 - Install custom + evil + over-fuel GC policy hooks and exercise the install gate
    - Expected: code equals `0`
 - A custom hook changes GC selection but loses no data; forbidden installs are rejected; over-fuel votes are discarded
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -301,6 +314,7 @@ val (out, err, code) = _run(FW + "/policy_hooks_check.spl")
 expect(code).to_equal(0)
 step("A custom hook changes GC selection but loses no data; forbidden installs are rejected; over-fuel votes are discarded")
 expect(out).to_contain("POLICY HOOKS OK")
+_expect_no_fail_marker(out, "policy hooks check")
 ```
 
 </details>
@@ -310,12 +324,13 @@ expect(out).to_contain("POLICY HOOKS OK")
 - Program a NAND page, corrupt one payload bit under stored OOB ECC, and read through FIL
    - Expected: code equals `0`
 - The FIL caller receives corrected data for one bit; two silent payload bits report media failure
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -324,6 +339,7 @@ val (out, err, code) = _run(FW + "/ecc_check.spl")
 expect(code).to_equal(0)
 step("The FIL caller receives corrected data for one bit; two silent payload bits report media failure")
 expect(out).to_contain("ECC OK")
+_expect_no_fail_marker(out, "ECC check")
 ```
 
 </details>
@@ -333,12 +349,13 @@ expect(out).to_contain("ECC OK")
 - Submit a write whose simulated host buffer crosses from PRP segment 1 to PRP segment 2
    - Expected: code equals `0`
 - The HIL writes bytes from both PRP segments in LBA order
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -347,6 +364,7 @@ val (out, err, code) = _run(FW + "/host_transport_check.spl")
 expect(code).to_equal(0)
 step("The HIL writes bytes from both PRP segments in LBA order")
 expect(out).to_contain("HOST TRANSPORT OK")
+_expect_no_fail_marker(out, "host transport check")
 ```
 
 </details>
@@ -356,12 +374,13 @@ expect(out).to_contain("HOST TRANSPORT OK")
 - Fill a DRAM arena span, then submit one write larger than the DRAM budget
    - Expected: code equals `0`
 - The oversized write is rejected before any LBA is programmed
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -370,6 +389,7 @@ val (out, err, code) = _run(FW + "/dram_buffer_check.spl")
 expect(code).to_equal(0)
 step("The oversized write is rejected before any LBA is programmed")
 expect(out).to_contain("DRAM BUFFER OK")
+_expect_no_fail_marker(out, "DRAM buffer check")
 ```
 
 </details>
@@ -379,12 +399,13 @@ expect(out).to_contain("DRAM BUFFER OK")
 - Stripe a write batch across the channels and drain the multi-channel scheduler
    - Expected: code equals `0`
 - A striped batch drains in ceil(n/channels) parallel steps; an unbalanced batch is bounded by its deepest channel
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -393,6 +414,7 @@ val (out, err, code) = _run(FW + "/parallelism_check.spl")
 expect(code).to_equal(0)
 step("A striped batch drains in ceil(n/channels) parallel steps; an unbalanced batch is bounded by its deepest channel")
 expect(out).to_contain("PARALLELISM OK")
+_expect_no_fail_marker(out, "parallelism check")
 ```
 
 </details>
@@ -402,12 +424,13 @@ expect(out).to_contain("PARALLELISM OK")
 - Write a parity stripe across the channels, then fail a channel and reconstruct
    - Expected: code equals `0`
 - Any single channel (data or parity) is recovered exactly from the survivors
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -416,29 +439,32 @@ val (out, err, code) = _run(FW + "/rain_check.spl")
 expect(code).to_equal(0)
 step("Any single channel (data or parity) is recovered exactly from the survivors")
 expect(out).to_contain("RAIN OK")
+_expect_no_fail_marker(out, "RAIN check")
 ```
 
 </details>
 
 #### rebuilds a failed channel inside the live FTL with no logical data loss (RAIN wired, P8)
 
-- Write known data through the FTL, seal parity, fail a whole channel, then rebuild it
+- Write known data through the FTL, fail a whole channel, then rebuild it from live parity
    - Expected: code equals `0`
 - Every LBA reads back its original value through the normal FTL read path after the rebuild
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Write known data through the FTL, seal parity, fail a whole channel, then rebuild it")
+step("Write known data through the FTL, fail a whole channel, then rebuild it from live parity")
 val (out, err, code) = _run(FW + "/rain_ftl_check.spl")
 expect(code).to_equal(0)
 step("Every LBA reads back its original value through the normal FTL read path after the rebuild")
 expect(out).to_contain("RAIN-FTL OK")
+_expect_no_fail_marker(out, "RAIN FTL check")
 ```
 
 </details>
@@ -448,12 +474,13 @@ expect(out).to_contain("RAIN-FTL OK")
 - Drive sustained load until the device throttles and raises the SMART critical warning, then cool it
    - Expected: code equals `0`
 - The throttle engages over the threshold and releases once the device cools — no crash
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -462,6 +489,7 @@ val (out, err, code) = _run(FW + "/thermal_check.spl")
 expect(code).to_equal(0)
 step("The throttle engages over the threshold and releases once the device cools — no crash")
 expect(out).to_contain("THERMAL OK")
+_expect_no_fail_marker(out, "thermal check")
 ```
 
 </details>
@@ -472,12 +500,13 @@ expect(out).to_contain("THERMAL OK")
 
 - Check proofs/Alloc.lean with the Lean toolchain
    - Expected: code equals `0`
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -485,6 +514,7 @@ step("Check proofs/Alloc.lean with the Lean toolchain")
 val (out, err, code) = _lean(FW + "/proofs/Alloc.lean")
 expect(code).to_equal(0)
 expect(out).to_contain("LEAN_OK")
+_expect_no_fail_marker(out, "Alloc.lean")
 ```
 
 </details>
@@ -493,12 +523,13 @@ expect(out).to_contain("LEAN_OK")
 
 - Check proofs/Recover.lean with the Lean toolchain
    - Expected: code equals `0`
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -506,6 +537,7 @@ step("Check proofs/Recover.lean with the Lean toolchain")
 val (out, err, code) = _lean(FW + "/proofs/Recover.lean")
 expect(code).to_equal(0)
 expect(out).to_contain("LEAN_OK")
+_expect_no_fail_marker(out, "Recover.lean")
 ```
 
 </details>
@@ -514,12 +546,13 @@ expect(out).to_contain("LEAN_OK")
 
 - Check proofs/Gc.lean with the Lean toolchain
    - Expected: code equals `0`
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -527,6 +560,7 @@ step("Check proofs/Gc.lean with the Lean toolchain")
 val (out, err, code) = _lean(FW + "/proofs/Gc.lean")
 expect(code).to_equal(0)
 expect(out).to_contain("LEAN_OK")
+_expect_no_fail_marker(out, "Gc.lean")
 ```
 
 </details>
@@ -535,12 +569,13 @@ expect(out).to_contain("LEAN_OK")
 
 - Check proofs/Hooks.lean with the Lean toolchain
    - Expected: code equals `0`
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -548,6 +583,7 @@ step("Check proofs/Hooks.lean with the Lean toolchain")
 val (out, err, code) = _lean(FW + "/proofs/Hooks.lean")
 expect(code).to_equal(0)
 expect(out).to_contain("LEAN_OK")
+_expect_no_fail_marker(out, "Hooks.lean")
 ```
 
 </details>
@@ -556,12 +592,13 @@ expect(out).to_contain("LEAN_OK")
 
 - Check proofs/Fmc.lean with the Lean toolchain
    - Expected: code equals `0`
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -569,6 +606,7 @@ step("Check proofs/Fmc.lean with the Lean toolchain")
 val (out, err, code) = _lean(FW + "/proofs/Fmc.lean")
 expect(code).to_equal(0)
 expect(out).to_contain("LEAN_OK")
+_expect_no_fail_marker(out, "Fmc.lean")
 ```
 
 </details>
@@ -577,12 +615,13 @@ expect(out).to_contain("LEAN_OK")
 
 - Check proofs/Rain.lean with the Lean toolchain
    - Expected: code equals `0`
+-  expect no fail marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -590,13 +629,12 @@ step("Check proofs/Rain.lean with the Lean toolchain")
 val (out, err, code) = _lean(FW + "/proofs/Rain.lean")
 expect(code).to_equal(0)
 expect(out).to_contain("LEAN_OK")
+_expect_no_fail_marker(out, "Rain.lean")
 ```
 
 </details>
 
 ### NVMe firmware: production documentation hygiene
-
-Production-facing firmware docs must not carry unresolved merge conflict markers.
 
 #### has no conflict markers in the firmware status docs
 
@@ -618,12 +656,40 @@ expect(code).to_equal(0)
 
 </details>
 
+#### keeps rv32 P9 production docs aligned with the hardened scalar floor
+
+- Reject stale wording that narrows the rv32 firmware floor back to RAIN-only
+   - Expected: stale_code equals `0`
+- Require the production docs to name the rv32 scalar firmware floor and OpenSSD target profile
+   - Expected: floor_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Reject stale wording that narrows the rv32 firmware floor back to RAIN-only")
+val (stale_out, stale_err, stale_code) = _shell("! rg -n 'Status \\(2026-06-30\\): PLANNED|rv32 RAIN self-test/reference|rv32 RAIN reference|bare-metal \\*\\*rv32\\*\\* RAIN' examples/09_embedded/simpleos_nvme_fw/fw/README.md examples/09_embedded/simpleos_nvme_fw/fw/BUILD_STATUS.md examples/09_embedded/simpleos_nvme_fw/fw/PRODUCTION_STATUS.md doc/03_plan/hardware/nvme_fw_gap_closure_plan.md")
+expect(stale_code).to_equal(0)
+
+step("Require the production docs to name the rv32 scalar firmware floor and OpenSSD target profile")
+val (floor_out, floor_err, floor_code) = _shell("rg -n 'rv32 scalar firmware floor|Cosmos\\+ OpenSSD target profile' examples/09_embedded/simpleos_nvme_fw/fw/README.md examples/09_embedded/simpleos_nvme_fw/fw/BUILD_STATUS.md examples/09_embedded/simpleos_nvme_fw/fw/PRODUCTION_STATUS.md doc/03_plan/hardware/nvme_fw_gap_closure_plan.md")
+expect(floor_code).to_equal(0)
+expect(floor_out).to_contain("rv32 scalar firmware floor")
+expect(floor_out).to_contain("Cosmos+ OpenSSD target profile")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
