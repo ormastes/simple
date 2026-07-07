@@ -39,6 +39,11 @@ fn target_cap(v: i64, cap: i64) -> i64:
         return cap
     v
 
+fn counter_next(v: i64) -> i64:
+    if v < 0:
+        return 1
+    v + 1
+
 impl Firmware:
     me submit(c: NvmeCmd) -> bool:
         me.hil.submit(c)
@@ -110,18 +115,18 @@ impl Firmware:
     # One cooperative scheduler tick: at most one foreground command, then at most
     # one background GC step. The owner token serializes FTL-map access.
     me service_tick() -> i64:
-        me.ticks = me.ticks + 1
+        me.ticks = counter_next(me.ticks)
         var processed: i64 = 0
         if me.acquire_map_owner(MAP_OWNER_FG):
             processed = me.hil.tick()
             if processed > 0:
-                me.fg_ticks = me.fg_ticks + 1
+                me.fg_ticks = counter_next(me.fg_ticks)
             me.release_map_owner(MAP_OWNER_FG)
         if me.hil.free_blocks() < GC_LOW_WATERMARK:
             if me.acquire_map_owner(MAP_OWNER_BG):
                 val v: i64 = me.hil.gc()
                 if v != UNMAP:
-                    me.bg_ticks = me.bg_ticks + 1
+                    me.bg_ticks = counter_next(me.bg_ticks)
                 me.release_map_owner(MAP_OWNER_BG)
         processed
 
@@ -156,7 +161,7 @@ impl Firmware:
                     k = GC_SWEEP_MAX
                 else:
                     reclaimed = reclaimed + 1
-                    me.bg_ticks = me.bg_ticks + 1
+                    me.bg_ticks = counter_next(me.bg_ticks)
                     k = k + 1
                 me.release_map_owner(MAP_OWNER_BG)
             else:
@@ -221,6 +226,12 @@ fn firmware_selftest() -> i64:
     fail = fail + expect_eq(tick_fw.service(), 1, "service drains remaining foreground command")
     fail = fail + expect_eq(tick_fw.completions(), 2, "two completions after service drain")
     fail = fail + expect_eq(tick_fw.fg_ticks, 2, "foreground ticks counted")
+    tick_fw.ticks = -5
+    tick_fw.fg_ticks = -4
+    tick_fw.submit(cmd_make(94, OP_WRITE, 94, 1, 0x64))
+    fail = fail + expect_eq(tick_fw.service_tick(), 1, "corrupted negative tick counters still allow foreground")
+    fail = fail + expect_eq(tick_fw.ticks, 1, "corrupted negative total ticks resume from one")
+    fail = fail + expect_eq(tick_fw.fg_ticks, 1, "corrupted negative foreground ticks resume from one")
 
     fw.submit(cmd_make(1, OP_WRITE, 5, 1, 0x42))
     fw.service()
