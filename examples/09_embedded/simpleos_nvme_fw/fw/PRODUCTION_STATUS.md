@@ -20,7 +20,9 @@ silicon. The simulation boundary is deliberate and unchanged:
   HIL/queue, IO/admin/flush, reactor, policy/target, DRAM/durability, wear/scrub, media-retire,
   power-cycle, backpressure/abort, feature/namespace guards, and the Cosmos+ OpenSSD target
   profile; the full no-alloc firmware port is not wired into that boot path yet (see also
-  `BUILD_STATUS.md`).
+  `BUILD_STATUS.md`). The sibling rv64 lane has a direct-build recipe and fail-closed real-boot
+  SSpec, but the current build attempt terminates before `build/nvme_fw_rv64.elf`; see
+  `doc/08_tracking/bug/nvme_fw_rv64_direct_build_timeout_2026-07-07.md`.
 
 ## Acceptance bar (the goal is met when every box is checked) — ✅ MET
 
@@ -101,12 +103,14 @@ channel-level parallelism; **P3 has a wired SECDED payload-window stored-ECC sim
 wired segmented-PRP host-byte floor** (not full HostMem/SGL/IOMMU); **P5 has a wired bounded-map-cache
 and fixed arena/free-list floor** (not a full DRAM subsystem); **P6 has a wired cooperative-owner floor** (not
 multicore/preemptive); and **P9** has a host-verified rv32 scalar firmware floor wired through the
-boot hook while the full no-alloc firmware port remains pending (see the silicon boundary below).
+boot hook plus an rv64 direct-build recipe whose ELF output is still blocked, while the full
+no-alloc firmware port remains pending (see the silicon boundary below).
 
 **Silicon boundary (unchanged).** Real BCH/Reed–Solomon/LDPC hardware ECC (the sim keeps a
 stored SECDED payload-window ECC + injected-bit-error model), real register MMIO / PCIe transport, full PRP/SGL DMA,
 real DRAM refresh/ECC/bandwidth, true multicore/preemptive concurrency, a persistent backing store, and multi-channel NAND timing remain out of scope; the bare-metal **rv32** scalar firmware floor is
-written + host-verified, but the full no-alloc firmware port has not been wired into rv32 boot yet.
+written + host-verified, rv64 direct-build/real-boot evidence is still missing an ELF, and the
+full no-alloc firmware port has not been wired into the boot paths yet.
 "Production level" here = production-grade *logic and NVMe protocol compliance, simulation-validated*.
 
 **Policy-hook sandbox boundary (req 7).** The real silicon trust boundary for dynamically loaded

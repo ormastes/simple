@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -684,12 +684,35 @@ expect(floor_out).to_contain("Cosmos+ OpenSSD target profile")
 
 </details>
 
+#### keeps rv64 P9 production docs honest about the missing real-boot ELF
+
+- Require production docs to name the rv64 direct-build recipe and current ELF blocker
+   - Expected: rv64_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Require production docs to name the rv64 direct-build recipe and current ELF blocker")
+val (rv64_out, rv64_err, rv64_code) = _shell("rg -n 'fw_rv64/build.shs|rv64 direct-build|build/nvme_fw_rv64\\.elf|nvme_fw_rv64_direct_build_timeout_2026-07-07' examples/09_embedded/simpleos_nvme_fw/fw/README.md examples/09_embedded/simpleos_nvme_fw/fw/BUILD_STATUS.md examples/09_embedded/simpleos_nvme_fw/fw/PRODUCTION_STATUS.md doc/03_plan/hardware/nvme_fw_gap_closure_plan.md")
+expect(rv64_code).to_equal(0)
+expect(rv64_out).to_contain("fw_rv64/build.shs")
+expect(rv64_out).to_contain("build/nvme_fw_rv64.elf")
+expect(rv64_out).to_contain("nvme_fw_rv64_direct_build_timeout_2026-07-07")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

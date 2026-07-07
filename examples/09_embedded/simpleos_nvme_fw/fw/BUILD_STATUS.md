@@ -80,6 +80,10 @@ P9 — bare-metal **rv32** scalar firmware floor: `fw_rv32/entry.spl` is written
 re-expression of the RAIN reconstruct, SECDED ECC floor, fixed scheduler, fixed power/thermal model, fixed map cache, fixed band allocator, fixed journal ring, fixed HIL command/queue, fixed queue-phase handling, fixed io-opcode-read-zero-trim-flush handling, fixed admin/format/fw-log handling, fixed reactor handling, fixed policy/target handling, fixed DRAM/durability handling, fixed wear/scrub handling, fixed media-retire handling, fixed power-cycle handling, fixed backpressure/abort handling, fixed feature-guard handling, and fixed namespace-guard handling, `bin/simple check`-clean, host-verified, and wired through
 the rv32 boot hook (`rt_rv32_boot_optional_nvme_fw_selftest`). The full 22-module no-alloc firmware
 has not been ported into that boot path yet. P9 is therefore **reference-wired, full-port pending**.
+The sibling **rv64** lane now has `fw_rv64/build.shs` and a fail-closed QEMU boot SSpec, but
+`NVME_RV64_BUILD_TIMEOUT_SECS=120 sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs`
+currently terminates before `build/nvme_fw_rv64.elf`; see
+`doc/08_tracking/bug/nvme_fw_rv64_direct_build_timeout_2026-07-07.md`.
 
 ## Production hardening — DONE (run-green, on origin/main)
 
@@ -135,7 +139,7 @@ channel-level parallelism is a model a single-threaded sim cannot physically exh
 scope); P4 has a **wired segmented-PRP host-byte floor** (full HostMem/SGL/IOMMU remains out of scope);
 P5 has a **wired bounded-map-cache + fixed arena/free-list floor** (full DRAM subsystem remains out of scope);
 P6 has a **wired cooperative-owner floor** (true multicore/preemption remains out of scope);
-P9 is **reference-wired, full-port pending** (rv32 note above).
+P9 is **reference-wired, full-port pending** (rv32 note above; rv64 recipe present, ELF output blocked).
 
 Silicon-only pieces remain out of scope (real BCH/RS/LDPC hardware ECC, MMIO/PCIe, full PRP/SGL DMA, real DRAM refresh/ECC/bandwidth, multicore/preemptive scheduling, persistent backing
 store) — see `PRODUCTION_STATUS.md` § Silicon boundary. This is a hardware-FAITHFUL **simulation**,

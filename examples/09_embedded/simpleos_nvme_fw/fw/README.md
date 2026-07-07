@@ -15,6 +15,8 @@ Built layer-by-layer with parallel agents (Sonnet builders + Opus review gates),
 > DRAM/durability, wear/scrub, media-retire, power-cycle, backpressure/abort,
 > feature/namespace guards, and the Cosmos+ OpenSSD target profile. The full no-alloc firmware
 > port is still the ceiling, so the "simulation only" scope above is unchanged.
+> The sibling `../fw_rv64/` lane now has an explicit direct-build recipe and fail-closed
+> QEMU boot SSpec; the real boot remains red until `build/nvme_fw_rv64.elf` is produced.
 
 ## Run it
 
@@ -97,7 +99,8 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 > `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status — wired vs. shelf" —
 > P1/P2/P7/P8 are **wired**, P3/P4/P5/P6 have wired simulation floors, and P9
 > (`../fw_rv32/entry.spl`) is the host-verified rv32 scalar firmware floor wired through the rv32
-> boot hook; the full no-alloc firmware port remains the ceiling.
+> boot hook. The rv64 sibling has a build recipe plus missing-media gate, but native-build
+> currently terminates before ELF output; the full no-alloc firmware port remains the ceiling.
 
 ## Requirements coverage (from the research report)
 

@@ -54,7 +54,7 @@ the firmware":
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
 | P8 | `rain` | `ftl` (writes/GC/format maintain parity; `rain_recover_channel` rebuilds a failed channel inside the live FTL, verified end-to-end through the normal read path) | **wired** |
 | P2 | `fil_scheduler` | `fil.spl` (every valid program/read/erase queues the target block through the scheduler before the FMC command) | **wired timing floor** — channel-level parallelism is still a model the single-threaded sim cannot physically exhibit |
-| P9 | `fw_rv32/entry.spl` | bare-metal rv32 scalar firmware floor (re-expresses RAIN, ECC, fixed scheduler, fixed power/thermal, fixed map-cache, fixed band, fixed journal-ring, fixed HIL, fixed queue-phase, fixed io-opcode-read-zero-trim-flush, fixed admin/format/fw-log, fixed reactor, fixed policy/target, fixed DRAM/durability, fixed wear/scrub, fixed media-retire, fixed power-cycle, fixed backpressure/abort, fixed feature/namespace guards, and the Cosmos+ OpenSSD target profile array-free; `check`-clean + host-verified) | wired through rv32 boot hook; full no-alloc firmware port remains the ceiling |
+| P9 | `fw_rv32/entry.spl`, `fw_rv64/build.shs` | bare-metal rv32 scalar firmware floor (re-expresses RAIN, ECC, fixed scheduler, fixed power/thermal, fixed map-cache, fixed band, fixed journal-ring, fixed HIL, fixed queue-phase, fixed io-opcode-read-zero-trim-flush, fixed admin/format/fw-log, fixed reactor, fixed policy/target, fixed DRAM/durability, fixed wear/scrub, fixed media-retire, fixed power-cycle, fixed backpressure/abort, fixed feature/namespace guards, and the Cosmos+ OpenSSD target profile array-free; `check`-clean + host-verified); rv64 direct-build recipe plus fail-closed real-boot SSpec | rv32 wired through boot hook; rv64 ELF output blocked by native-build termination; full no-alloc firmware port remains the ceiling |
 
 Adding more standalone modules (full P4 HostMem/PRP lists, full P5 DRAM refresh/ECC/bandwidth, multicore P6 beyond the cooperative token, or full BCH/LDPC beyond the P3 floor) widens the shelf without closing the gap. Prefer
 wiring an existing verified module into the live path over landing a new disconnected one.
@@ -332,6 +332,11 @@ whole-unit erasure.
 > That is useful P9 direct-smoke evidence, not the full firmware port. The full 22-module
 > no-alloc firmware (`ftl_fill`/dict-map/journal-ring -> fixed-capacity) still has to replace the
 > smoke path in the rv32 boot flow before P9 is complete.
+>
+> RV64 status (2026-07-07): `examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs`
+> now mirrors the direct-smoke recipe and the RV64 SSpec is fail-closed on missing
+> `build/nvme_fw_rv64.elf`. The current build attempt terminates before ELF output;
+> see `doc/08_tracking/bug/nvme_fw_rv64_direct_build_timeout_2026-07-07.md`.
 
 **Goal.** Port the FTL/HIL/FIL to `nogc_async_mut_noalloc` (no heap, fixed arrays, no `.push`)
 and boot on `qemu-system-riscv32 -bios none`, joining the existing C NAND demo that already
