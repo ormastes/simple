@@ -43,6 +43,7 @@ use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_read64, mmio
 
 extern fn serial_println(msg: text)
 extern fn pmm_alloc_page_raw() -> u64
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # Little-endian scalar reads straight off the identity-mapped RAW file buffer.
 # The [u8] channel (byte_utils/read_*_le over image.file_bytes) reads boxed
@@ -53,6 +54,114 @@ fn _rd8(base: u64, off: u64)  -> u64: (mmio_read8(base + off)) as u64
 fn _rd16(base: u64, off: u64) -> u64: (mmio_read16(base + off)) as u64
 fn _rd32(base: u64, off: u64) -> u64: (mmio_read32(base + off)) as u64
 fn _rd64(base: u64, off: u64) -> u64: mmio_read64(base + off)
+
+fn _wr64(addr: u64, value: u64):
+    var i: u64 = 0
+    while i < 8:
+        mmio_write8(addr + i, ((value >> (i * 8)) & 0xFF) as u8)
+        i = i + 1
+
+fn _stack_phys_for_vaddr(stk_phys: [u64], stack_top: u64, stack_base: u64, vaddr: u64) -> u64:
+    val PAGE: u64 = 4096
+    if vaddr < stack_base or vaddr >= stack_top:
+        return 0
+    val page_index = (stack_top - 1 - vaddr) / PAGE
+    if page_index >= stk_phys.len().to_u64():
+        return 0
+    val page_base = stack_top - ((page_index + 1) * PAGE)
+    stk_phys[page_index.to_i64()] + (vaddr - page_base)
+
+fn _stack_write8(stk_phys: [u64], stack_top: u64, stack_base: u64, vaddr: u64, value: u8) -> bool:
+    val phys = _stack_phys_for_vaddr(stk_phys, stack_top, stack_base, vaddr)
+    if phys == 0:
+        return false
+    mmio_write8(phys, value)
+    true
+
+fn _stack_write64(stk_phys: [u64], stack_top: u64, stack_base: u64, vaddr: u64, value: u64) -> bool:
+    val phys = _stack_phys_for_vaddr(stk_phys, stack_top, stack_base, vaddr)
+    if phys == 0:
+        return false
+    _wr64(phys, value)
+    true
+
+fn _stack_write_cstr(stk_phys: [u64], stack_top: u64, stack_base: u64, vaddr: u64, s: text) -> bool:
+    val raw = rt_text_to_bytes(s)
+    var i: i64 = 0
+    while i < raw.len():
+        if not _stack_write8(stk_phys, stack_top, stack_base, vaddr + i.to_u64(), raw[i]):
+            return false
+        i = i + 1
+    _stack_write8(stk_phys, stack_top, stack_base, vaddr + raw.len().to_u64(), 0 as u8)
+
+fn _build_sysv_stack_frame(stk_phys: [u64], stack_top: u64, stack_base: u64, binary_path: text, argv: [text], envp: [text]) -> u64:
+    val AT_NULL: u64 = 0
+    var effective_argv: [text] = []
+    if argv.len() == 0:
+        effective_argv.push(binary_path)
+    else:
+        var ai: i64 = 0
+        while ai < argv.len():
+            effective_argv.push(argv[ai])
+            ai = ai + 1
+
+    var top = stack_top
+    var argv_addrs: [u64] = []
+    var a: i64 = 0
+    while a < effective_argv.len():
+        val raw = rt_text_to_bytes(effective_argv[a])
+        top = top - (raw.len().to_u64() + 1)
+        if top < stack_base or not _stack_write_cstr(stk_phys, stack_top, stack_base, top, effective_argv[a]):
+            return 0
+        argv_addrs.push(top)
+        a = a + 1
+
+    var envp_addrs: [u64] = []
+    var e: i64 = 0
+    while e < envp.len():
+        val raw2 = rt_text_to_bytes(envp[e])
+        top = top - (raw2.len().to_u64() + 1)
+        if top < stack_base or not _stack_write_cstr(stk_phys, stack_top, stack_base, top, envp[e]):
+            return 0
+        envp_addrs.push(top)
+        e = e + 1
+
+    val fixed_slots = 1.to_u64() + argv_addrs.len().to_u64() + 1.to_u64() + envp_addrs.len().to_u64() + 1.to_u64() + 2.to_u64()
+    var rsp = top - (fixed_slots * 8)
+    rsp = rsp & (~(15.to_u64()))
+    if rsp < stack_base:
+        return 0
+
+    var slot = rsp
+    if not _stack_write64(stk_phys, stack_top, stack_base, slot, argv_addrs.len().to_u64()):
+        return 0
+    slot = slot + 8
+    var ap: i64 = 0
+    while ap < argv_addrs.len():
+        if not _stack_write64(stk_phys, stack_top, stack_base, slot, argv_addrs[ap]):
+            return 0
+        slot = slot + 8
+        ap = ap + 1
+    if not _stack_write64(stk_phys, stack_top, stack_base, slot, AT_NULL):
+        return 0
+    slot = slot + 8
+
+    var ep: i64 = 0
+    while ep < envp_addrs.len():
+        if not _stack_write64(stk_phys, stack_top, stack_base, slot, envp_addrs[ep]):
+            return 0
+        slot = slot + 8
+        ep = ep + 1
+    if not _stack_write64(stk_phys, stack_top, stack_base, slot, 0):
+        return 0
+    slot = slot + 8
+
+    if not _stack_write64(stk_phys, stack_top, stack_base, slot, 0):
+        return 0
+    slot = slot + 8
+    if not _stack_write64(stk_phys, stack_top, stack_base, slot, 0):
+        return 0
+    rsp
 
 # Map every PT_LOAD of the ELF held in the raw buffer `blob` into `space` at its
 # p_vaddr, page by page (one frame per page, so segments sharing a page are mapped
@@ -138,18 +247,18 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, file_len: u64) -> i64:
                 val sv = _rd64(blob, ph + 16)
                 val foff = _rd64(blob, ph + 8)
                 val fsz = _rd64(blob, ph + 32)
-                var cs = va
-                if cs < sv:
-                    cs = sv
-                var ce = va + PAGE
+                var copy_start = va
+                if copy_start < sv:
+                    copy_start = sv
+                var copy_end = va + PAGE
                 val sfe = sv + fsz
-                if ce > sfe:
-                    ce = sfe
-                if cs < ce:
+                if copy_end > sfe:
+                    copy_end = sfe
+                if copy_start < copy_end:
                     var t: u64 = 0
-                    val clen = ce - cs
+                    val clen = copy_end - copy_start
                     while t < clen:
-                        mmio_write8(phys + (cs - va) + t, mmio_read8(blob + foff + (cs - sv) + t))
+                        mmio_write8(phys + (copy_start - va) + t, mmio_read8(blob + foff + (copy_start - sv) + t))
                         t = t + 1
             k = k + 1
 
@@ -158,7 +267,7 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, file_len: u64) -> i64:
     serial_println("[spawn] PT_LOAD segments mapped")
     1
 
-pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64) -> i64:
+pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64, argv: [text], envp: [text]) -> i64:
     """Map a general-built UserProcessImage into a fresh user AS and enter ring 3.
 
     Reuses the ring3_smoke primitive sequence. Does not return on success (the
@@ -221,6 +330,8 @@ pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64) -> i
     val PAGE: i64 = 4096
     val STACK_TOP: i64 = 0x8000200000
     val STACK_PAGES: i64 = 32
+    val STACK_BASE: i64 = STACK_TOP - (STACK_PAGES * PAGE)
+    var stk_phys: [u64] = []
     var p: i64 = 0
     while p < STACK_PAGES:
         val sva = STACK_TOP - ((p + 1) * PAGE)
@@ -232,8 +343,13 @@ pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64) -> i
         if not vmm_map_page_in(space, VirtAddr(addr: sva.to_u64()), PhysAddr(addr: sph), VmFlags.user_rw()):
             serial_println("[spawn] FAIL stack map p={p}")
             return -4
+        stk_phys.push(sph)
         p = p + 1
-    val user_rsp: i64 = STACK_TOP - 16
+    val user_rsp_u = _build_sysv_stack_frame(stk_phys, STACK_TOP.to_u64(), STACK_BASE.to_u64(), image.binary_path, argv, envp)
+    if user_rsp_u == 0:
+        serial_println("[spawn] FAIL stack argv frame")
+        return -6
+    val user_rsp: i64 = user_rsp_u as i64
     serial_println("[spawn] user stack mapped top=0x{STACK_TOP} pages={STACK_PAGES} rsp=0x{user_rsp}")
 
     val ctx = TaskContext(

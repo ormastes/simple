@@ -69,9 +69,11 @@ concurrency/resource formal gate, and the focused memory-safety formal gate.
 
 ## Acceptance Criteria
 
-- Executable launch from the SimpleOS filesystem is proven by the SSH transcript
-  for `/usr/bin/simple`.
-- SSH server and shell launch both `/usr/bin/simple.smf` and `/usr/bin/simple`.
+- Executable launch from the SimpleOS filesystem is proven by SSH serial and
+  session transcript evidence for `/usr/bin/simple`, including listener,
+  password auth, and exec-command markers.
+- SSH server and shell launch both `/usr/bin/simple.smf` and `/usr/bin/simple`
+  from the SimpleOS filesystem alias rather than a host fixed-command stub.
 - Lean formal proof projects build through the shared proof checker and reject
   proof-trust bypasses.
 - RISC-V generated RTL sidecars, BYL model facts, and manual Lean constraints
@@ -109,7 +111,8 @@ concurrency/resource formal gate, and the focused memory-safety formal gate.
   artifact rows preserve their evidence fields.
 - The live QEMU Simple GUI/MDI artifact has the expected 1024x768 PPM and raw
   pmemsave byte sizes, while the executable spec/manual require the canonical
-  MDI serial markers and framebuffer anchor checks.
+  WM service-ready, integrated render-ready, MDI serial markers, input capture,
+  and framebuffer anchor checks.
 - The latest live QEMU Simple GUI/MDI PPM is parsed directly and must satisfy
   the same probe, header, body, top-lane, and taskbar pixel anchors as the live
   QMP capture spec.
@@ -235,7 +238,8 @@ be mistaken for a completed RTL proof pass.
 
 ## Evidence Sources
 
-- SSH rows read `build/os/x64-ssh-live.session-smf.txt` and
+- SSH rows read `build/os/x64-ssh-live.serial.log`,
+  `build/os/x64-ssh-live.session-smf.txt`, and
   `build/os/x64-ssh-live.session-exec.txt`.
 - Formal proof rows run `scripts/check/check-lean-proofs.shs`.
 - RISC-V/BYL formal rows run `scripts/check/check-riscv-formal-dual-track.shs`.
