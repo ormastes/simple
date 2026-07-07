@@ -32,6 +32,13 @@ fn firmware_new_for_target(target_id: i64) -> Firmware:
     Firmware(hil: hil_new(), ticks: 0, target: nvme_fw_target_config(target_id),
         map_owner: MAP_OWNER_NONE, fg_ticks: 0, bg_ticks: 0, owner_conflicts: 0)
 
+fn target_cap(v: i64, cap: i64) -> i64:
+    if v < 0:
+        return 0
+    if v > cap:
+        return cap
+    v
+
 impl Firmware:
     me submit(c: NvmeCmd) -> bool:
         me.hil.submit(c)
@@ -40,19 +47,19 @@ impl Firmware:
         me.hil.completions()
 
     me target_id() -> i64:
-        me.target.target_id
+        target_cap(me.target.target_id, TARGET_OPENSSD_8CH8WAY)
 
     me target_channels() -> i64:
-        me.target.channels
+        target_cap(me.target.channels, NUM_CHANNELS)
 
     me target_ways_per_channel() -> i64:
-        me.target.ways_per_channel
+        target_cap(me.target.ways_per_channel, 8)
 
     me target_nvme_blocks_per_slice() -> i64:
-        me.target.nvme_blocks_per_slice
+        target_cap(me.target.nvme_blocks_per_slice, 8)
 
     me target_cpu_cores() -> i64:
-        me.target.cpu_cores
+        target_cap(me.target.cpu_cores, 2)
 
     me hardware_target() -> i64:
         openssd_target_is_hardware(me.target)
@@ -177,6 +184,16 @@ fn firmware_selftest() -> i64:
     fail = fail + expect_eq(hw.target_ways_per_channel(), 8, "firmware OpenSSD target exposes ways per channel")
     fail = fail + expect_eq(hw.target_nvme_blocks_per_slice(), 4, "firmware OpenSSD target exposes slice geometry")
     fail = fail + expect_eq(hw.target_cpu_cores(), 2, "firmware OpenSSD target exposes Cortex-A9 core count")
+    hw.target.target_id = 99
+    hw.target.channels = -4
+    hw.target.ways_per_channel = 99
+    hw.target.nvme_blocks_per_slice = 99
+    hw.target.cpu_cores = -2
+    fail = fail + expect_eq(hw.target_id(), TARGET_OPENSSD_8CH8WAY, "firmware corrupted target id clamps to known profile range")
+    fail = fail + expect_eq(hw.target_channels(), 0, "firmware corrupted negative channel count fails closed")
+    fail = fail + expect_eq(hw.target_ways_per_channel(), 8, "firmware corrupted way count clamps to supported max")
+    fail = fail + expect_eq(hw.target_nvme_blocks_per_slice(), 8, "firmware corrupted slice geometry clamps to MDTS floor")
+    fail = fail + expect_eq(hw.target_cpu_cores(), 0, "firmware corrupted negative CPU core count fails closed")
 
     var lock_fw: Firmware = firmware_new()
     lock_fw.map_owner = MAP_OWNER_BG
