@@ -139,6 +139,11 @@ impl NvmeController:
             if admin_fid(cmd.cdw10) == FEAT_VOLATILE_WC:
                 if cmd.cdw11 < 0 or cmd.cdw11 > 1:
                     return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
+            if admin_fid(cmd.cdw10) == FEAT_NUM_QUEUES:
+                val ncqr: i64 = cmd.cdw11 & 0xFFFF
+                val nsqr: i64 = (cmd.cdw11 >> 16) & 0xFFFF
+                if cmd.cdw11 != ((nsqr << 16) | ncqr) or ncqr < 0 or nsqr < 0 or ncqr >= MAX_IO_QUEUES or nsqr >= MAX_IO_QUEUES:
+                    return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             if not me.features.set(admin_fid(cmd.cdw10), cmd.cdw11):
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             return AdminResult(status: SC_SUCCESS, data: cmd.cdw11, post: true)
@@ -661,6 +666,16 @@ fn nvme_controller_selftest() -> i64:
     val rfg: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(rsf.status, SC_INVALID_FIELD, "set feature with reserved fid bits rejected")
     fail = fail + expect_eq(rfg.status, SC_INVALID_FIELD, "get feature with reserved fid bits rejected")
+    c.admin_submit(admin_set_feature_cmd(54, FEAT_NUM_QUEUES, ((MAX_IO_QUEUES - 1) << 16) | (MAX_IO_QUEUES - 1)))
+    c.admin_submit(admin_set_feature_cmd(55, FEAT_NUM_QUEUES, (MAX_IO_QUEUES << 16) | MAX_IO_QUEUES))
+    c.admin_submit(admin_get_feature_cmd(56, FEAT_NUM_QUEUES))
+    c.admin_process()
+    val snq: NvmeCpl = c.admin_reap()
+    val bnq: NvmeCpl = c.admin_reap()
+    val gnq: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(snq.status, SC_SUCCESS, "set number-of-queues at advertised max accepted")
+    fail = fail + expect_eq(bnq.status, SC_INVALID_FIELD, "set number-of-queues above advertised max rejected")
+    fail = fail + expect_eq(gnq.data, ((MAX_IO_QUEUES - 1) << 16) | (MAX_IO_QUEUES - 1), "failed number-of-queues set leaves previous value")
     c.admin_submit(admin_set_feature_cmd(6, FEAT_MAX, 1))
     c.admin_submit(admin_get_feature_cmd(7, FEAT_MAX))
     c.admin_process()
