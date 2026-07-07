@@ -284,7 +284,7 @@ impl NvmeController:
         if cns == CNS_NAMESPACE:
             if cmd.nsid != 1:
                 return SC_INVALID_FIELD
-            me.last_id = build_identify_namespace(cmd.nsid)
+            me.last_id = build_identify_namespace_for_target(cmd.nsid, me.target.lbas, me.target.nvme_block_bytes)
             return SC_SUCCESS
         SC_INVALID_FIELD
 
@@ -466,6 +466,16 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(hwi.ways_per_channel, 8, "identify reports OpenSSD ways")
     fail = fail + expect_eq(hwi.nvme_blocks_per_slice, 4, "identify reports OpenSSD slice geometry")
     fail = fail + expect_eq(hwi.cpu_cores, 2, "identify reports OpenSSD core count")
+    hw.target.lbas = LBA_COUNT - 7
+    hw.target.nvme_block_bytes = 8192
+    hw.admin_submit(admin_identify_ns_cmd(62, 1))
+    hw.admin_process()
+    val hwns_cpl: NvmeCpl = hw.admin_reap()
+    val hwns: IdentifyData = hw.last_identify()
+    fail = fail + expect_eq(hwns_cpl.status, SC_SUCCESS, "identify OpenSSD namespace ok")
+    fail = fail + expect_eq(hwns.ns_size, hw.target.lbas, "identify namespace reports target LBA count")
+    fail = fail + expect_eq(hwns.ns_cap, hw.target.lbas, "identify namespace reports target capacity")
+    fail = fail + expect_eq(hwns.lba_bytes, hw.target.nvme_block_bytes, "identify namespace reports target LBA bytes")
     val badcidr: AdminResult = c.admin_exec(admin_identify_cmd(70000, CNS_CONTROLLER))
     fail = fail + expect_eq(badcidr.status, SC_INVALID_FIELD, "admin dispatch rejects invalid command id")
     c.admin_submit(admin_identify_ns_cmd(18, 99))
