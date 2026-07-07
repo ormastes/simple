@@ -1,0 +1,62 @@
+"""
+# Claude Full grouped tool uses
+
+Pure Simple coverage for grouped tool-use rendering decisions.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.utils.groupToolUses.*
+
+fn assistantTool(uuid: text, messageId: text, toolUseId: text, toolName: text) -> ToolUseRenderMessage:
+    ToolUseRenderMessage(typeName: "assistant_tool_use", uuid: uuid, timestamp: 10, messageId: messageId, toolUseId: toolUseId, toolName: toolName, toolResultIds: [])
+
+fn userResult(uuid: text, ids: [text]) -> ToolUseRenderMessage:
+    ToolUseRenderMessage(typeName: "user_tool_result", uuid: uuid, timestamp: 11, messageId: "", toolUseId: "", toolName: "", toolResultIds: ids)
+
+fn textMessage(uuid: text) -> ToolUseRenderMessage:
+    ToolUseRenderMessage(typeName: "text", uuid: uuid, timestamp: 12, messageId: "", toolUseId: "", toolName: "", toolResultIds: [])
+
+describe "Claude full grouped tool uses":
+    it "returns original message order in verbose mode":
+        step("Check verbose bypass")
+        val result = applyToolUseGrouping([assistantTool("a1", "m1", "u1", "Read"), assistantTool("a2", "m1", "u2", "Read")], ["Read"], true)
+        expect(result.renderUuids).to_equal(["a1", "a2"])
+        expect(result.groups.len()).to_equal(0)
+
+    it "groups two supported tool uses from the same assistant message":
+        step("Check grouped assistant tools")
+        val result = applyToolUseGrouping([assistantTool("a1", "m1", "u1", "Read"), assistantTool("a2", "m1", "u2", "Read")], ["Read"], false)
+        expect(result.renderUuids).to_equal(["grouped-a1"])
+        expect(result.renderTypes).to_equal(["grouped_tool_use"])
+        expect(result.groups.len()).to_equal(1)
+        expect(result.groups[0].uuid).to_equal("grouped-a1")
+        expect(result.groups[0].messageIds).to_equal(["a1", "a2"])
+
+    it "does not group a single tool use or unsupported tool":
+        step("Check unsupported and singleton")
+        val result = applyToolUseGrouping([assistantTool("a1", "m1", "u1", "Read"), assistantTool("b1", "m2", "u2", "Write"), assistantTool("b2", "m2", "u3", "Write")], ["Read"], false)
+        expect(result.renderUuids).to_equal(["a1", "b1", "b2"])
+        expect(result.groups.len()).to_equal(0)
+
+    it "does not group the same tool name across different assistant messages":
+        step("Check message id boundary")
+        val result = applyToolUseGrouping([assistantTool("a1", "m1", "u1", "Read"), assistantTool("a2", "m2", "u2", "Read")], ["Read"], false)
+        expect(result.renderUuids).to_equal(["a1", "a2"])
+        expect(result.groups.len()).to_equal(0)
+
+    it "attaches matching results and skips grouped result-only user messages":
+        step("Check grouped results")
+        val result = applyToolUseGrouping([assistantTool("a1", "m1", "u1", "Read"), assistantTool("a2", "m1", "u2", "Read"), userResult("r1", ["u1"]), userResult("r2", ["u2"])], ["Read"], false)
+        expect(result.renderUuids).to_equal(["grouped-a1"])
+        expect(result.groups[0].resultIds).to_equal(["r1", "r2"])
+
+    it "keeps mixed user result messages that include ungrouped results":
+        step("Check mixed user result")
+        val result = applyToolUseGrouping([assistantTool("a1", "m1", "u1", "Read"), assistantTool("a2", "m1", "u2", "Read"), userResult("r1", ["u1", "other"])], ["Read"], false)
+        expect(result.renderUuids).to_equal(["grouped-a1", "r1"])
+        expect(result.groups[0].resultIds).to_equal(["r1"])
+
+    it "emits grouped messages at their first assistant position":
+        step("Check ordered render stream")
+        val result = applyToolUseGrouping([textMessage("before"), assistantTool("a1", "m1", "u1", "Read"), assistantTool("a2", "m1", "u2", "Read"), textMessage("after")], ["Read"], false)
+        expect(result.renderUuids).to_equal(["before", "grouped-a1", "after"])
