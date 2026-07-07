@@ -17,10 +17,10 @@ board through JTAG. This is the baremetal-remote counterpart to nvme_rv32_bareme
 **Research:** doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md
 
 FAIL-CLOSED (never a silent skip, never a false pass): the test is classified into exactly
-one status, and the spec passes on every status EXCEPT a genuine board failure:
+one status, and the spec passes only when the live board marker is seen:
   * board-pass        — the JTAG marker was injected and seen on serial (the real board ran the test)
   * host-prep-required — the FT4232H JTAG channel is still bound to ftdi_sio (needs a root unbind:
-                         `sh scripts/fpga/jtag-ftdi-unbind.shs`) — host prep, recorded, not a failure
+                         `sh scripts/fpga/jtag-ftdi-unbind.shs`) — fails until host prep is done
   * host-unavailable  — no FT4232H adapter / harness / board artifacts present on this host
   * board-fail        — the marker was injected over JTAG but NOT observed on serial -> the spec FAILS
 
@@ -46,22 +46,23 @@ fn _jtag_classify() -> (text, text, i64):
         "  else S='board-fail:marker-injected-but-not-seen'; fi; " +
         "fi; " +
         "echo \"JTAG_STATUS=$S\"; " +
-        "case \"$S\" in board-fail*) echo 'JTAG_RESULT=fail' ;; *) echo 'JTAG_RESULT=ok' ;; esac"])
+        "case \"$S\" in board-pass*) echo 'JTAG_RESULT=ok' ;; *) echo 'JTAG_RESULT=fail' ;; esac"])
 
 describe "NVMe firmware on a baremetal board over JTAG (KV260)":
     """
     The live KV260 JTAG transport test, wired fail-closed: it runs the real board test when
-    the adapter is present and the JTAG channel is free, and otherwise records a precise
-    host-unavailable / prep-required reason. A genuine board failure (marker injected over
-    JTAG but not observed on serial) fails the spec.
+    the adapter is present and the JTAG channel is free. Host-unavailable, prep-required,
+    and genuine board failures all fail the spec with a precise status instead of passing
+    as production evidence.
     """
 
-    it "runs the live JTAG board test, or records a fail-closed reason":
+    it "requires the live JTAG board marker to pass":
         step("Classify the JTAG board path (adapter / channel-free / harness) and run the live test when ready")
         val (out, err, code) = _jtag_classify()
 
         step("A single classification status was produced (never a silent skip)")
         expect(out).to_contain("JTAG_STATUS=")
 
-        step("The board path is operational (marker seen over JTAG) or a documented host-unavailable / prep state — never a real board failure")
+        step("The live board path is operational: marker was injected over JTAG and seen on serial")
+        expect(out).to_contain("JTAG_STATUS=board-pass")
         expect(out).to_contain("JTAG_RESULT=ok")
