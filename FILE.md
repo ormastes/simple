@@ -45,6 +45,7 @@ FILE.md files) are allowed.
 | `.vscode` | VS Code settings |
 | `build` | Build output (mutable, includes target/ and bootstrap/) |
 | `tmp` | Temporary files (mutable) |
+| `variants` | Module-variant-override overlays (platform/renderer seams selected by explicit `variant:` build config) |
 
 **No other files at root.**
 
@@ -61,6 +62,7 @@ FILE.md files) are allowed.
 | `bin/FILE.md` | `bin/` directory |
 | `examples/FILE.md` | `examples/` directory |
 | `tools/FILE.md` | `tools/` directory |
+| `variants/FILE.md` | `variants/` directory |
 
 ## src/
 
@@ -200,12 +202,19 @@ FILE.md files) are allowed.
 | Entry | Description |
 |---|---|
 | `tools/chrome-live-bitmap` | Chrome-based live bitmap capture harness |
+| `tools/claude-plugin` | Claude Code plugins (codex-research, dev, gemini-ui-design, sstack, verify-agent, marketplace + cmm-lsp/obsidian-search manifests) |
+| `tools/docker` | Dockerfiles for cross-language perf and test-isolation containers |
 | `tools/electron-live-bitmap` | Electron-based live bitmap capture harness |
 | `tools/electron-shell` | Electron desktop shell |
+| `tools/electron-wasm-gui-exec` | Electron WASM GUI execution harness |
+| `tools/gui_perf_bench` | Cross-toolkit GUI perf benchmark harness (GTK/JS/Python) |
 | `tools/jupyter` | Jupyter integration |
+| `tools/lsp-mcp-registry` | LSP MCP server registry metadata |
+| `tools/mcp-registry` | MCP server registry metadata |
 | `tools/node-render-bitmap` | Node.js render-to-bitmap harness |
 | `tools/pixel_compare` | Pixel comparison tool |
 | `tools/ref_crypto` | Reference crypto implementations |
+| `tools/tauri-live-bitmap` | Tauri live-bitmap capture harness (WKWebView snapshot backend) |
 | `tools/tauri-shell` | Tauri 2 mobile/desktop shell (iOS + Android + desktop) |
 | `tools/web-render-backend` | Web rendering backend harness |
 | `tools/FILE.md` | Tools manifest |
