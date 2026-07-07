@@ -15,6 +15,7 @@ val GC_SWEEP_MAX: i64 = 3        # bounded GC passes per maintenance sweep
 val MAP_OWNER_NONE: i64 = 0
 val MAP_OWNER_FG: i64 = 1
 val MAP_OWNER_BG: i64 = 2
+val FIRMWARE_COUNTER_MAX: i64 = 1000000000000000000
 
 struct Firmware:
     hil:   Hil
@@ -42,6 +43,8 @@ fn target_cap(v: i64, cap: i64) -> i64:
 fn counter_next(v: i64) -> i64:
     if v < 0:
         return 1
+    if v >= FIRMWARE_COUNTER_MAX:
+        return FIRMWARE_COUNTER_MAX
     v + 1
 
 impl Firmware:
@@ -93,7 +96,7 @@ impl Firmware:
         if me.map_owner == MAP_OWNER_NONE:
             me.map_owner = owner
             return true
-        me.owner_conflicts = me.conflict_count() + 1
+        me.owner_conflicts = counter_next(me.owner_conflicts)
         false
 
     me release_map_owner(owner: i64):
@@ -213,6 +216,9 @@ fn firmware_selftest() -> i64:
     lock_fw.map_owner = MAP_OWNER_BG
     fail = fail + expect_eq(if lock_fw.acquire_map_owner(MAP_OWNER_FG): 1 else: 0, 0, "corrupted negative owner conflicts still blocks contended owner")
     fail = fail + expect_eq(lock_fw.conflict_count(), 1, "corrupted negative owner conflicts increments from zero")
+    lock_fw.owner_conflicts = FIRMWARE_COUNTER_MAX
+    fail = fail + expect_eq(if lock_fw.acquire_map_owner(MAP_OWNER_FG): 1 else: 0, 0, "saturated owner conflicts still blocks contended owner")
+    fail = fail + expect_eq(lock_fw.conflict_count(), FIRMWARE_COUNTER_MAX, "owner conflict counter saturates")
     lock_fw.map_owner = -9
     lock_fw.submit(cmd_make(93, OP_WRITE, 93, 1, 0x63))
     fail = fail + expect_eq(lock_fw.service_tick(), 1, "corrupted owner token is recovered for foreground")
@@ -232,6 +238,13 @@ fn firmware_selftest() -> i64:
     fail = fail + expect_eq(tick_fw.service_tick(), 1, "corrupted negative tick counters still allow foreground")
     fail = fail + expect_eq(tick_fw.ticks, 1, "corrupted negative total ticks resume from one")
     fail = fail + expect_eq(tick_fw.fg_ticks, 1, "corrupted negative foreground ticks resume from one")
+    tick_fw.ticks = FIRMWARE_COUNTER_MAX
+    tick_fw.fg_ticks = FIRMWARE_COUNTER_MAX
+    tick_fw.submit(cmd_make(95, OP_WRITE, 95, 1, 0x65))
+    fail = fail + expect_eq(tick_fw.service_tick(), 1, "saturated tick counters still allow foreground")
+    fail = fail + expect_eq(tick_fw.ticks, FIRMWARE_COUNTER_MAX, "total tick counter saturates")
+    fail = fail + expect_eq(tick_fw.fg_ticks, FIRMWARE_COUNTER_MAX, "foreground tick counter saturates")
+    fail = fail + expect_eq(counter_next(FIRMWARE_COUNTER_MAX), FIRMWARE_COUNTER_MAX, "shared firmware counter helper saturates")
 
     fw.submit(cmd_make(1, OP_WRITE, 5, 1, 0x42))
     fw.service()
