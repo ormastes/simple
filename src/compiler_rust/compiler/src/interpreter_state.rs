@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use simple_common::actor::{Message, ThreadSpawner};
 use simple_parser::ast::{BitfieldDef, Block, EnumDef, MacroDef, NewtypeDef, Type};
@@ -472,11 +472,18 @@ pub(crate) fn debug_call_stack_snapshot() -> Vec<String> {
     DEBUG_CALL_STACK.with(|cell| cell.borrow().clone())
 }
 
+pub(crate) fn field_access_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("SIMPLE_DEBUG_FIELD_ACCESS").is_some() || std::env::var_os("SIMPLE_BOOTSTRAP_DIAG").is_some()
+    })
+}
+
 /// Push call depth and check for stack overflow.
 /// Returns a guard that auto-decrements on drop.
 #[inline]
 pub fn push_call_depth(function_name: &str) -> Result<RecursionGuard, crate::error::CompileError> {
-    let stack_active = std::env::var_os("SIMPLE_DEBUG_FIELD_ACCESS").is_some();
+    let stack_active = field_access_debug_enabled();
     if stack_active {
         DEBUG_CALL_STACK.with(|cell| {
             cell.borrow_mut().push(function_name.to_string());

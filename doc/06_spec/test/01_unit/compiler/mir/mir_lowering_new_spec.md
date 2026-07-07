@@ -27,7 +27,7 @@ mir_lowering_new_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -193,6 +193,40 @@ expect(source).to_contain("var expr_value = nil_expr")
 expect(source).to_contain("if expr != nil:")
 expect(source).to_contain("expr_value = expr")
 expect(source).to_contain("match expr_value.kind:")
+```
+
+</details>
+
+#### keeps bootstrap diagnostics contextual and opt-in
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val driver_log = read_mir_source("src/compiler/80.driver/driver_log_helpers.spl")
+val driver_pipeline = read_mir_source("src/compiler/80.driver/driver_pipeline.spl")
+val hir_module = read_mir_source("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+val hir_decl = read_mir_source("src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl")
+val mir_module = read_mir_source("src/compiler/50.mir/_MirLowering/module_lowering.spl")
+val mir_function = read_mir_source("src/compiler/50.mir/_MirLowering/function_lowering.spl")
+val rust_state = read_mir_source("src/compiler_rust/compiler/src/interpreter_state.rs")
+val rust_calls = read_mir_source("src/compiler_rust/compiler/src/interpreter/expr/calls.rs")
+
+expect(driver_log).to_contain("SIMPLE_COMPILER_PHASE_PROFILE")
+expect(driver_pipeline).to_contain("MIR lowering missing HIR module for {name_direct} ({src_direct.path})")
+expect(driver_pipeline).to_contain("aot:lower_to_mir:module:start idx={direct_idx} module={name_direct} path={src_direct.path}")
+expect(hir_module).to_contain("fn hir_module_diag_enabled() -> bool:")
+expect(hir_module).to_contain("lower_module:start module={module.name} path={module.path}")
+expect(hir_decl).to_contain("fn hir_lower_diag_enabled() -> bool:")
+expect(mir_module).to_contain("lower_module:start module={module.name} functions={module.functions.len()}")
+expect(mir_function).to_contain("SIMPLE_BOOTSTRAP_DIAG")
+expect(rust_state).to_contain("OnceLock<bool>")
+expect(rust_state).to_contain("fn field_access_debug_enabled() -> bool")
+expect(rust_calls).to_contain("field_access_debug_enabled()")
+expect(rust_calls).to_contain("hint=set SIMPLE_BOOTSTRAP_DIAG=1 or SIMPLE_DEBUG_FIELD_ACCESS=1")
 ```
 
 </details>

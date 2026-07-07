@@ -536,9 +536,16 @@ pub(crate) fn handle_method_call_with_self_update(
                     // `evaluate_expr`, which re-cloned the whole backing Vec on every call.
                     let m = method.as_str();
                     let item = match m {
-                        "push" | "append" => {
-                            Some(eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?)
-                        }
+                        "push" | "append" => Some(eval_arg(
+                            args,
+                            0,
+                            Value::Nil,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?),
                         "extend" => Some(eval_arg(
                             args,
                             0,
@@ -553,11 +560,38 @@ pub(crate) fn handle_method_call_with_self_update(
                     };
                     let (idx, second) = match m {
                         "insert" => (
-                            Some(eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?),
-                            Some(eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?),
+                            Some(eval_arg_usize(
+                                args,
+                                0,
+                                0,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                            Some(eval_arg(
+                                args,
+                                1,
+                                Value::Nil,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
                         ),
                         "remove" => (
-                            Some(eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?),
+                            Some(eval_arg_usize(
+                                args,
+                                0,
+                                0,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
                             None,
                         ),
                         _ => (None, None),

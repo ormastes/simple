@@ -30,8 +30,18 @@ fn hir_module_env_get(key: text) -> text:
     rt_env_get(key)
 
 fn hir_module_phase_probe(msg: text):
-    if (hir_module_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1":
+    if hir_module_diag_enabled():
         eprint("[BOOTSTRAP-PHASE] " + msg)
+
+fn hir_module_diag_enabled() -> bool:
+    val phase = hir_module_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
+    val trace = hir_module_env_get("SIMPLE_COMPILER_TRACE") ?? ""
+    val diag = hir_module_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
+    if phase == "1":
+        return true
+    if trace == "1":
+        return true
+    diag == "1"
 
 impl HirLowering:
     me register_imported_symbol(imported_mod: any, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
@@ -126,8 +136,9 @@ impl HirLowering:
     me lower_module(module: Module) -> HirModule:
         # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
         val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-        if bootstrap_mode:
-            eprint("[hir-lower] lower_module:start")
+        val bootstrap_diag = bootstrap_mode and hir_module_diag_enabled()
+        if bootstrap_diag:
+            eprint("[hir-lower] lower_module:start module={module.name} path={module.path}")
         self.lowered_impl_functions = {}
         # Pass 0: pre-register imported type names so explicit `use` paths win
         # over module load order when two modules export the same short name.
@@ -137,39 +148,39 @@ impl HirLowering:
             hir_module_phase_probe("phase3:hir:imports:done {module.name}")
 
         # First pass: declare all top-level symbols
-        if bootstrap_mode:
-            eprint("[hir-lower] declare:start")
+        if bootstrap_diag:
+            eprint("[hir-lower] declare:start module={module.name}")
         if not bootstrap_mode:
             hir_module_phase_probe("phase3:hir:declare:start {module.name}")
             self.declare_module_symbols(module)
             hir_module_phase_probe("phase3:hir:declare:done {module.name}")
-        if bootstrap_mode:
-            eprint("[hir-lower] declare:done")
+        if bootstrap_diag:
+            eprint("[hir-lower] declare:done module={module.name}")
 
         # Second pass: lower definitions
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] locals:functions:init")
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:functions:init module={module.name}")
         var functions: Dict<SymbolId, HirFunction> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] locals:classes:init")
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:classes:init module={module.name}")
         var classes: Dict<SymbolId, HirClass> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] locals:structs:init")
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:structs:init module={module.name}")
         var structs: Dict<SymbolId, HirStruct> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] locals:enums:init")
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:enums:init module={module.name}")
         var enums: Dict<SymbolId, HirEnum> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] locals:bitfields:init")
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:bitfields:init module={module.name}")
         var bitfields: Dict<SymbolId, HirBitfield> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] locals:traits:init")
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:traits:init module={module.name}")
         var traits: Dict<SymbolId, HirTrait> = {}
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] locals:impls:init")
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:impls:init module={module.name}")
         var impls: [HirImpl] = []
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] locals:constants:init")
+        if bootstrap_diag:
+            eprint("[hir-lower] locals:constants:init module={module.name}")
         var constants: Dict<SymbolId, HirConst> = {}
 
         var lower_idx = 0
@@ -186,14 +197,17 @@ impl HirLowering:
             # bootstrap_stage2_empty_mir_bodies_2026-07-05).
             val bootstrap_module_functions = module.functions
             val bootstrap_function_keys = bootstrap_module_functions.keys()
-            eprint("[hir-lower] functions:count {bootstrap_function_keys.len()}")
+            if bootstrap_diag:
+                eprint("[hir-lower] functions:count module={module.name} count={bootstrap_function_keys.len()}")
             while lower_idx < bootstrap_function_keys.len():
                 val bootstrap_fn: Function = bootstrap_module_functions[bootstrap_function_keys[lower_idx]]
-                eprint("[hir-lower] function:start {bootstrap_fn.name}")
+                if bootstrap_diag:
+                    eprint("[hir-lower] function:start module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
                 val hir_fn = self.lower_function(bootstrap_fn)
                 functions[hir_fn.symbol] = hir_fn
                 _bootstrap_hir_functions.push(hir_fn)
-                eprint("[hir-lower] function:done {bootstrap_fn.name}")
+                if bootstrap_diag:
+                    eprint("[hir-lower] function:done module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
                 lower_idx = lower_idx + 1
         else:
             val lower_module_functions = module.functions
@@ -227,7 +241,8 @@ impl HirLowering:
                 lower_idx = lower_idx + 1
 
         if bootstrap_mode:
-            eprint("[hir-lower] bootstrap-functions:count {_bootstrap_hir_functions.len()}")
+            if bootstrap_diag:
+                eprint("[hir-lower] bootstrap-functions:count module={module.name} count={_bootstrap_hir_functions.len()}")
             return HirModule(
                 name: "app.cli.bootstrap_main",
                 path: "",

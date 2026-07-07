@@ -312,12 +312,16 @@ impl CompilerDriver:
             return self.ctx.errors.len() == 0
 
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            print "[driver-mir] bootstrap fixed:start"
             val bootstrap_hir = self.ctx.hir_modules["app.cli.bootstrap_main"]
+            if bootstrap_hir == nil:
+                self.ctx.errors.push("MIR lowering missing HIR module for app.cli.bootstrap_main during bootstrap")
+                log_phase("aot:lower_to_mir:missing_hir module=app.cli.bootstrap_main")
+                return false
+            log_phase("aot:bootstrap_fixed:start module=app.cli.bootstrap_main functions={bootstrap_hir.functions.len()}")
             var bootstrap_lowering = MirLowering.new(bootstrap_hir.symbols)
             var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
-            print "[driver-mir] bootstrap fixed:done"
+            log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()}")
             return self.ctx.errors.len() == 0
 
         if self.ctx.sources.len() > 0:
@@ -362,12 +366,16 @@ impl CompilerDriver:
                 val src_direct = self.ctx.sources[direct_idx]
                 val name_direct = src_direct.module_name
                 val mir_direct = if native_entry_closure_mir or _driver_is_bootstrap_entry_source(src_direct.path, name_direct) or (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1":
-                    print "[driver-mir] bootstrap lower:start"
+                    log_phase("aot:lower_to_mir:module:start idx={direct_idx} module={name_direct} path={src_direct.path}")
                     val direct_hir = self.ctx.hir_modules[name_direct]
+                    if direct_hir == nil:
+                        self.ctx.errors.push("MIR lowering missing HIR module for {name_direct} ({src_direct.path})")
+                        log_phase("aot:lower_to_mir:missing_hir idx={direct_idx} module={name_direct} path={src_direct.path}")
+                        return false
                     direct_lowering.symbols = direct_hir.symbols
                     var lowered_entry = direct_lowering.lower_module(direct_hir)
                     lowered_entry.name = name_direct
-                    print "[driver-mir] bootstrap lower:done"
+                    log_phase("aot:lower_to_mir:module:done idx={direct_idx} module={name_direct} functions={lowered_entry.functions.len()}")
                     lowered_entry
                 else:
                     MirModule(

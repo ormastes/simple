@@ -873,7 +873,7 @@ pub(super) fn eval_call_expr(
                     }
                 }
                 _ => {
-                    if std::env::var_os("SIMPLE_DEBUG_FIELD_ACCESS").is_some() {
+                    if crate::interpreter::field_access_debug_enabled() {
                         let receiver_expr = format!("{receiver:?}");
                         let receiver_value = recv_val.to_debug_string();
                         let stack = crate::interpreter::debug_call_stack_snapshot();
@@ -886,7 +886,7 @@ pub(super) fn eval_call_expr(
                             .collect::<Vec<_>>()
                             .join(" -> ");
                         eprintln!(
-                            "[field-access-error] field={field} recv_type={} recv={} expr={} stack={}",
+                            "[field-access-error] field={field} recv_type={} recv={} expr={} stack={} hint=set SIMPLE_BOOTSTRAP_DIAG=1 or SIMPLE_DEBUG_FIELD_ACCESS=1 before process start",
                             recv_val.type_name(),
                             receiver_value.chars().take(500).collect::<String>(),
                             receiver_expr.chars().take(500).collect::<String>(),
