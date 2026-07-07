@@ -637,7 +637,7 @@ expect(trimmed).to_equal("hello")
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/semantics/uncovered_branches_spec.spl` |
-| Updated | 2026-07-06 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

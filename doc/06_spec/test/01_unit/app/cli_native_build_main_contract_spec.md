@@ -43,7 +43,7 @@ cli_native_build_main_contract_spec -> std
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -60,6 +60,8 @@ expect(source).to_contain("SIMPLE_BOOTSTRAP")
 expect(source).to_contain("native_build_has_timeout(args)")
 expect(source).to_contain("return run_native_build_worker(args)")
 expect(source).to_contain("cli_native_build(args)")
+expect(source).to_contain("return abs_if_needed(from_binary)")
+expect(source).to_contain("return abs_if_needed(from_bin)")
 expect(source).to_contain("env_set(\"SIMPLE_BINARY\", simple_bin)")
 ```
 

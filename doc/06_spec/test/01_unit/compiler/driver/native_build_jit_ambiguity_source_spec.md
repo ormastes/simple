@@ -253,16 +253,15 @@ expect(loading_src.contains("\n                result.push(s)")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val src = file_read("src/app/cli/native_build_main.spl")
 expect(src).to_contain("args = args.push(raw_args[i])")
-expect(src).to_contain("worker_args = worker_args.push(\"--mode=interpreter\")")
+expect(src.contains("worker_args = worker_args.push(\"--mode=interpreter\")")).to_equal(false)
 expect(src).to_contain("worker_args = worker_args.push(arg)")
 expect(src.contains("\n        args.push(raw_args[i])")).to_equal(false)
-expect(src.contains("\n    worker_args.push(\"--mode=interpreter\")")).to_equal(false)
 expect(src.contains("\n        worker_args.push(arg)")).to_equal(false)
 ```
 

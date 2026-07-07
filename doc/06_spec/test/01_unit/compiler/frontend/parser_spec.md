@@ -27,7 +27,7 @@ parser_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 35 | 35 | 0 | 0 |
+| 36 | 36 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -42,7 +42,7 @@ parser_spec
 | Category | Compiler \| Frontend \| Parser |
 | Status | Implemented |
 | Source | `test/01_unit/compiler/frontend/parser_spec.spl` |
-| Updated | 2026-07-06 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Scenarios
@@ -291,6 +291,24 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val name = "world"
 check("hello {name}" == "hello world")
+```
+
+</details>
+
+#### parse escaped string literal
+
+- check
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = "line1\nline2"
+check(s.len() == 11)
 ```
 
 </details>
@@ -762,8 +780,8 @@ check(pairs.len() == 3)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 35 |
-| Active scenarios | 35 |
+| Total scenarios | 36 |
+| Active scenarios | 36 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -63,10 +63,7 @@ impl MirLowering:
                             nil
                     val let_type = match stmt_kind_value:
                         case HirStmtKind.Let(_, type_, _):
-                            if type_ != nil:
-                                Some(type_)
-                            else:
-                                nil
+                            type_
                         case _:
                             nil
                     val let_init = match stmt_kind_value:
@@ -80,10 +77,11 @@ impl MirLowering:
                         if symbol_value == nil:
                             self.error("let binding has no resolved symbol", Some(span))
                             return
-                        val mir_type = if let_type.?:
-                            self.lower_type(let_type ?? fallback_type)
-                        else:
-                            MirType.i64()
+                        val mir_type = match let_type:
+                            case Some(type_value):
+                                self.lower_type(type_value)
+                            case nil:
+                                MirType.i64()
 
                         val init_local = self.lower_expr(let_init)
                         val bf_sym = self.bitfield_value_syms.get(init_local.id)
@@ -109,18 +107,17 @@ impl MirLowering:
                         if symbol == nil:
                             self.error("let binding has no resolved symbol", Some(span))
                             return
-                        # NOTE: avoid Option.map()/.unwrap() here -- the seed
-                        # interpreter mishandles .map() on a "present" struct
-                        # optional (see declaration_lowering.spl lower_function
-                        # and function_lowering.spl lower_function for the
-                        # same documented workaround). type_ is nil for any
+                        # NOTE: avoid Option.map()/.unwrap() and `if val ...`
+                        # here -- the seed interpreter mishandles both on a
+                        # "present" struct optional. `type_` is nil for any
                         # `val x = ...` without an explicit type annotation;
-                        # .map() was calling lower_type(_) with that nil
-                        # payload instead of short-circuiting, producing
-                        # "undefined field 'kind': cannot access field on
-                        # value of type 'nil'" the first time a real
-                        # (non-flat-bootstrap) function body reached this path.
-                        val mir_type = if type_.?: self.lower_type(type_) else: MirType.i64()
+                        # the direct match keeps that nil from reaching
+                        # lower_type and tripping a `.kind` read on nil.
+                        val mir_type = match type_:
+                            case Some(type_value):
+                                self.lower_type(type_value)
+                            case nil:
+                                MirType.i64()
 
                         # Lower the initializer first so a bitfield-construct
                         # pass-through can be aliased directly, without first
@@ -542,11 +539,17 @@ impl MirLowering:
         # This preserves u64 (and other non-i64 integer) counter types end-to-end.
         var loop_ty = MirType.i64()
         if val end_expr = end:
-            if val end_type = end_expr.type_:
-                loop_ty = self.lower_type(end_type)
+            match end_expr.type_:
+                case Some(end_type):
+                    loop_ty = self.lower_type(end_type)
+                case nil:
+                    ()
         elif val start_expr = start:
-            if val start_type = start_expr.type_:
-                loop_ty = self.lower_type(start_type)
+            match start_expr.type_:
+                case Some(start_type):
+                    loop_ty = self.lower_type(start_type)
+                case nil:
+                    ()
 
         # Lower start value (default to typed 0)
         var start_local: LocalId = 0
@@ -662,8 +665,11 @@ impl MirLowering:
         val collection_local = self.lower_expr(iter)
         var element_type = MirType.i64()
         if val loop_symbol = self.symbols.get_symbol(var_):
-            if val loop_symbol_type = loop_symbol.type_:
-                element_type = self.lower_type(loop_symbol_type)
+            match loop_symbol.type_:
+                case Some(loop_symbol_type):
+                    element_type = self.lower_type(loop_symbol_type)
+                case nil:
+                    ()
 
         # Step 2: Call iter() on the collection to get an iterator
         val iter_func_operand = MirOperand(kind: MirOperandKind.Const(

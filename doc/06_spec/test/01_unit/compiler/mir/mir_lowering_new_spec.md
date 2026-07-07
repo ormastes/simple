@@ -27,7 +27,7 @@ mir_lowering_new_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -129,8 +129,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
 
-expect(source).to_contain("case Function(_, ret, _):")
-expect(source).to_contain("ret_type = self.lower_type(ret)")
+expect(source).to_contain("if val callee_type = callee.type_:")
+expect(source).to_contain("ret_type = self.lower_type(callee_type)")
 ```
 
 </details>
@@ -150,6 +150,49 @@ expect(source).to_contain("if type_ == nil:")
 expect(source).to_contain("missing HIR type during MIR lowering")
 expect(source).to_contain("return MirType(kind: MirTypeKind.I64)")
 expect(source).to_contain("match type_.kind:")
+```
+
+</details>
+
+#### keeps MIR expression lowering from passing nil HIR types to lower_type
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+
+expect(source).to_contain("val maybe_receiver_type_for_call = receiver.type_")
+expect(source).to_contain("if found_receiver_type != nil:")
+expect(source).to_contain("receiver_type = self.lower_type(found_receiver_type)")
+expect(source).to_contain("len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)")
+expect(source).to_contain("if type_ == nil:")
+expect(source).to_contain("return \"\"")
+expect(source).to_contain("val maybe_elem_type = elem.type_")
+expect(source).to_contain("if elem_type != nil:")
+expect(source).to_contain("elem_ty = self.lower_type(elem_type)")
+```
+
+</details>
+
+#### keeps MIR expression lowering from matching kind on nil input
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+
+expect(source).to_contain("var expr_value = nil_expr")
+expect(source).to_contain("if expr != nil:")
+expect(source).to_contain("expr_value = expr")
+expect(source).to_contain("match expr_value.kind:")
 ```
 
 </details>
@@ -360,8 +403,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
