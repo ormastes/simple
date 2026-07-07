@@ -1,0 +1,121 @@
+#!/bin/sh
+# build_clang_disk.shs — Stage C: run clang_static (--version) INSIDE SimpleOS.
+#
+# 1. Build the FS-exec kernel (fs_elf_exec_smoke_entry.spl) with the Rust seed
+#    native-build (freestanding x86_64-unknown-none).
+# 2. Build a FAT32 NVMe image whose /FSEXEC.ELF is the 119 MB static
+#    clang_static: fsexec_mkimg_big.spl writes the structural prefix, then this
+#    script appends the raw ELF payload (at cluster 3, contiguous) and truncates
+#    to the full image size.
+# 3. Boot QEMU q35 with the image on NVMe, capture serial. The kernel streams
+#    the ELF into ring-3 user pages and iretq's to clang's _start@0x10000000.
+#
+# Env knobs: SKIP_KERNEL=1 (reuse kernel), SKIP_IMG=1 (reuse image),
+#            QEMU_MEM (default 4G), QEMU_TIMEOUT (default 180s).
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SEED="src/compiler_rust/target/release/simple"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/fs_elf_exec_smoke_entry.spl"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+OUT_DIR="build/os/elfexec"
+KERNEL_OUTPUT="$OUT_DIR/fsexec_smoke.elf"
+CLANG_BIN="build/os/clang_static/bin/clang_static"
+IMG="$OUT_DIR/fat32-clang.img"
+PREFIX="$OUT_DIR/fat32-clang-prefix.bin"
+SERIAL_LOG="$OUT_DIR/clang_run.log"
+QEMU_MEM="${QEMU_MEM:-4G}"
+QEMU_TIMEOUT="${QEMU_TIMEOUT:-180}"
+
+mkdir -p "$OUT_DIR" build/os/generated/generated
+
+# ---- 1. Kernel -----------------------------------------------------------
+if [ "${SKIP_KERNEL:-0}" != "1" ]; then
+    cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+    OBJCOPY_PREFIX=""
+    for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /usr/local/opt/llvm/bin; do
+        [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+    done
+    echo "[clang-disk] building kernel -> $KERNEL_OUTPUT"
+    rm -f "$KERNEL_OUTPUT"   # never run a stale kernel if this link fails
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$SEED" native-build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os/arch/x86_64 \
+        --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+        --entry-closure --entry "$ENTRY" \
+        --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
+        --linker-script "$LINKER_SCRIPT" 2>&1 | tail -8
+    [ -f "$KERNEL_OUTPUT" ] || { echo "[clang-disk] KERNEL BUILD FAILED"; exit 1; }
+fi
+
+# ---- 2. Image ------------------------------------------------------------
+if [ "${SKIP_IMG:-0}" != "1" ]; then
+    [ -f "$CLANG_BIN" ] || { echo "[clang-disk] missing $CLANG_BIN"; exit 1; }
+    # Stage D: place a small C source (HELLO.C) on the FAT image for `clang -cc1`.
+    mkdir -p "$OUT_DIR/stageD"
+    printf 'int main(void){ return 7; }\n' > "$OUT_DIR/stageD/hello.c"
+    SIZE="$(stat -c%s "$CLANG_BIN")"
+    echo "$SIZE" > "$OUT_DIR/payload_size.txt"
+    echo "[clang-disk] clang_static size=$SIZE bytes; writing FAT32 prefix"
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SEED" run scripts/os/fsexec_mkimg_big.spl 2>&1 | grep -E 'fsexec_mkimg_big' || true
+    [ -f "$PREFIX" ] || { echo "[clang-disk] prefix build FAILED"; exit 1; }
+    TOTAL="$(cat "$OUT_DIR/fat32-clang-total.txt")"
+    echo "[clang-disk] assembling image: prefix + payload -> $IMG (total=$TOTAL)"
+    cat "$PREFIX" "$CLANG_BIN" > "$IMG"
+    truncate -s "$TOTAL" "$IMG"
+    echo "[clang-disk] image size=$(stat -c%s "$IMG")"
+fi
+
+# ---- 3. Run --------------------------------------------------------------
+rm -f "$SERIAL_LOG"
+echo "[clang-disk] launching QEMU (mem=$QEMU_MEM timeout=${QEMU_TIMEOUT}s)"
+set +e
+timeout "$QEMU_TIMEOUT" qemu-system-x86_64 \
+    -no-user-config -monitor none -net none -nographic -no-reboot \
+    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+    -kernel "$KERNEL_OUTPUT" \
+    -serial "file:$SERIAL_LOG" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$IMG,if=none,id=nvme0ns1,format=raw" \
+    -device "nvme,id=nvme0,serial=SIMPLEOSCLANG" \
+    -device "nvme-ns,drive=nvme0ns1,bus=nvme0,nsid=1"
+RC=$?
+set -e
+echo "[clang-disk] qemu exit rc=$RC"
+echo "===== serial tail ====="
+tail -60 "$SERIAL_LOG" 2>/dev/null || echo "(no serial log)"
+
+# ---- 4. Reconstruct + verify the RAM-dumped .o ---------------------------
+RECON="$OUT_DIR/stageD/hello_recon.o"
+if grep -q '\[oo-b64\]' "$SERIAL_LOG" 2>/dev/null; then
+    echo "===== Stage D: reconstructing .o from serial base64 dump ====="
+    # Strip CR, take lines strictly between [oo-b64] and [oo-end], base64-decode.
+    tr -d '\r' < "$SERIAL_LOG" \
+        | sed -n '/^\[oo-b64\]$/,/^\[oo-end\]$/p' \
+        | sed '1d;$d' \
+        | base64 -d > "$RECON" 2>/dev/null || true
+    echo "[clang-disk] reconstructed $RECON size=$(stat -c%s "$RECON" 2>/dev/null || echo 0)"
+    if command -v readelf >/dev/null 2>&1; then
+        echo "----- readelf -h $RECON -----"
+        readelf -h "$RECON" 2>&1 | grep -E 'Class|Type|Machine' || echo "(readelf failed: not a valid ELF)"
+        echo "----- main symbol -----"
+        readelf -s "$RECON" 2>/dev/null | grep -iE '\bmain\b' || echo "(no main symbol found)"
+    fi
+else
+    echo "[clang-disk] no [oo-b64] output dump found in serial log"
+fi

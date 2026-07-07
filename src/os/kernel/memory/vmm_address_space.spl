@@ -107,6 +107,116 @@ fn vmm_clone_kernel_low_identity(user_phys_root: u64):
     val entry = _read_pte(kernel_pml4_virt, 0)
     _write_pte(user_pml4_virt, 0, entry)
 
+fn _clone_table(src_virt: u64) -> u64:
+    """Allocate a fresh table page and copy all 512 entries from src_virt.
+    Returns the new table's PHYSICAL address, or 0 on allocation failure."""
+    val new_phys = _alloc_table_page()
+    if new_phys == 0:
+        return 0
+    val new_virt = _phys_to_virt(new_phys)
+    var i: u64 = 0
+    while i < ENTRIES_PER_TABLE:
+        _write_pte(new_virt, i, _read_pte(src_virt, i))
+        i = i + 1
+    new_phys
+
+fn vmm_clone_kernel_low_private(user_phys_root: u64) -> bool:
+    """Like vmm_clone_kernel_low_identity, but gives the user AS a PRIVATE
+    PML4[0] PDPT (copy of the kernel's low-identity PDPT). The copied PDPT
+    entries still point at the SHARED kernel PDs — vmm_map_user_low_page
+    privatizes deeper levels copy-on-map. This keeps the kernel image, GDT,
+    TSS and syscall trampoline mapped after `mov cr3` while letting user
+    PT_LOADs at low VAs (e.g. clang_static at 0x10000000, PML4[0]) install
+    private 4K user mappings without corrupting the kernel's page tables."""
+    if user_phys_root == 0 or user_phys_root == 1:
+        return false
+    if g_vmm.pml4_phys == 0:
+        return false
+    val kernel_pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+    val kentry = _read_pte(kernel_pml4_virt, 0)
+    if not _pte_is_present(kentry):
+        return false
+    val kpdpt_virt = _phys_to_virt(_pte_phys_addr(kentry))
+    val new_pdpt_phys = _clone_table(kpdpt_virt)
+    if new_pdpt_phys == 0:
+        return false
+    val user_pml4_virt = _phys_to_virt(user_phys_root)
+    _write_pte(user_pml4_virt, 0, new_pdpt_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER)
+    true
+
+fn _privatize_entry(table_virt: u64, index: u64) -> u64:
+    """Ensure table_virt[index] points at a PRIVATE next-level table this AS
+    owns, privatizing shared kernel structure copy-on-map:
+      - not present            -> allocate fresh (zeroed) table
+      - present, US=0, not PS  -> shared kernel table: clone all 512 entries
+      - present, US=0, PS set  -> kernel 2MiB identity page: split into a
+                                  private PT of 512 4K kernel-perm entries
+      - present, US=1          -> already private (created by this walk)
+    Returns the next-level table's VIRTUAL address, or 0 on failure.
+    Convention: private intermediate entries carry PTE_USER; boot/kernel
+    structure never does (crt0.s builds tables with P|W only)."""
+    val entry = _read_pte(table_virt, index)
+    if not _pte_is_present(entry):
+        val new_phys = _alloc_table_page()
+        if new_phys == 0:
+            return 0
+        _write_pte(table_virt, index, new_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER)
+        return _phys_to_virt(new_phys)
+    if (entry & PTE_USER) != 0:
+        return _phys_to_virt(_pte_phys_addr(entry))
+    if (entry & PTE_HUGE_PAGE) != 0:
+        # Split a kernel 2MiB identity page into a private PT: 512 4K entries
+        # reproducing the identity mapping with the kernel's P|W perms (US=0),
+        # so CPL0 access through this AS is unchanged until pages are overridden.
+        val PAGE: u64 = 4096
+        val base = entry & 0x000FFFFFFFE00000
+        val pt_phys = _alloc_table_page()
+        if pt_phys == 0:
+            return 0
+        val pt_virt = _phys_to_virt(pt_phys)
+        var j: u64 = 0
+        while j < ENTRIES_PER_TABLE:
+            _write_pte(pt_virt, j, (base + (j * PAGE)) | PTE_PRESENT | PTE_WRITABLE)
+            j = j + 1
+        _write_pte(table_virt, index, pt_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER)
+        return pt_virt
+    # Shared kernel table (US=0, not huge): clone it.
+    val src_virt = _phys_to_virt(_pte_phys_addr(entry))
+    val clone_phys = _clone_table(src_virt)
+    if clone_phys == 0:
+        return 0
+    _write_pte(table_virt, index, clone_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER)
+    _phys_to_virt(clone_phys)
+
+fn vmm_map_user_low_page(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map a 4KB user page in an explicit AS, privatizing any shared kernel
+    low-half structure (and splitting 2MiB identity pages) along the walk.
+    Requires the AS was prepared with vmm_clone_kernel_low_private. Safe for
+    user-half VAs too (fresh tables, no privatization triggers), so exec
+    loaders can use it for every user mapping regardless of VA."""
+    if space.phys_root == 0 or space.phys_root == 1:
+        return false
+    val vaddr = virt_addr_value(virt)
+    val paddr = phys_addr_value(phys)
+    # W^X: never map a writable page executable (same rule as vmm_map_page_in).
+    var safe_flags = flags
+    if flags.writable() and not flags.no_execute():
+        safe_flags = VmFlags(bits: flags.bits | VM_NO_EXECUTE)
+
+    val pml4_virt = _phys_to_virt(space.phys_root)
+    val pdpt_virt = _privatize_entry(pml4_virt, _pml4_index(vaddr))
+    if pdpt_virt == 0:
+        return false
+    val pd_virt = _privatize_entry(pdpt_virt, _pdpt_index(vaddr))
+    if pd_virt == 0:
+        return false
+    val pt_virt = _privatize_entry(pd_virt, _pd_index(vaddr))
+    if pt_virt == 0:
+        return false
+    val pte_flags = _flags_to_pte_bits(safe_flags)
+    _write_pte(pt_virt, _pt_index(vaddr), (paddr & PTE_ADDR_MASK) | pte_flags)
+    true
+
 fn vmm_cow_clone_pages(pml4_phys: u64) -> u64:
     """Shallow COW clone of a user address space (wave-4b scaffold).
 
@@ -179,6 +289,33 @@ fn vmm_map_framebuffer(fb_phys: PhysAddr, fb_virt: VirtAddr, size: u64):
         i = i + 1
 
     log_raw_println("[VMM] Mapped framebuffer: {page_count} pages at virt 0x{virt_addr_value(fb_virt)}")
+
+fn vmm_map_nvme_bar_high():
+    """Install the NVMe MMIO BAR at an EXCLUSIVE higher-half slot in the kernel
+    PML4 (g_vmm): VA 0xFFFFC00000000000 (PML4[384]) -> phys 0xC000000000.
+
+    The 64-bit q35 NVMe BAR is boot-mapped in boot_pml4[1] (crt0.s) at its
+    physical 0xC000000000, but PML4[1] is never cloned into user address spaces
+    (vmm_create_address_space copies only PML4[256..511] + PML4[0]). So under a
+    user cr3 the BAR is not-present and a ring-0 NVMe access faults. Mapping it
+    at a higher-half slot here makes create_user_address_space carry the entry
+    into every user AS FOR FREE via the existing PML4[256..511] copy loop — no
+    new per-AS copy logic. Call once after vmm_init and before the first
+    create_user_address_space.
+
+    KEEP VA/phys in sync with crt0.s (boot_pml4[384]) and baremetal_stubs.c
+    (_nvme.bar0 + syscall-83 MapBar, NVME_BAR_VIRT_BASE / NVME_BAR_PHYS_BASE)."""
+    val phys_base: u64 = 0xC000000000
+    val virt_base: u64 = 0xFFFFC00000000000
+    val map_len: u64 = 0x10000          # 64 KiB: covers CAP/CC/CSTS + doorbells
+    val flags = VmFlags.mmio()
+    var off: u64 = 0
+    while off < map_len:
+        val virt = VirtAddr(addr: virt_base + off)
+        val phys = PhysAddr(addr: phys_base + off)
+        val _ok = vmm_map_page(virt, phys, flags)
+        off = off + PAGE_SIZE
+    log_raw_println("[VMM] NVMe BAR mapped at higher-half 0x{virt_base} -> phys 0x{phys_base} (PML4[384])")
 
 # ============================================================================
 # VMM Query Interface
