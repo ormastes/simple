@@ -162,6 +162,22 @@ fn admin_cpl_status_valid(status: i64) -> bool:
 struct FeatureStore:
     vals: [i64]
 
+fn feature_num_queues_default() -> i64:
+    ((MAX_IO_QUEUES - 1) << 16) | (MAX_IO_QUEUES - 1)
+
+fn feature_value_safe(fid: i64, value: i64) -> i64:
+    if fid == FEAT_VOLATILE_WC:
+        if value == 0 or value == 1:
+            return value
+        return 0
+    if fid == FEAT_NUM_QUEUES:
+        val ncqr: i64 = value & 0xFFFF
+        val nsqr: i64 = (value >> 16) & 0xFFFF
+        if value == ((nsqr << 16) | ncqr) and ncqr >= 0 and nsqr >= 0 and ncqr < MAX_IO_QUEUES and nsqr < MAX_IO_QUEUES:
+            return value
+        return feature_num_queues_default()
+    value
+
 fn feature_store_new() -> FeatureStore:
     var vals: [i64] = []
     var i: i64 = 0
@@ -170,7 +186,7 @@ fn feature_store_new() -> FeatureStore:
         i = i + 1
     var fs: FeatureStore = FeatureStore(vals: vals)
     # default: report (MAX-1) IO queues available, 0's-based per NVMe (NCQR/NSQR)
-    fs.set(FEAT_NUM_QUEUES, ((MAX_IO_QUEUES - 1) << 16) | (MAX_IO_QUEUES - 1))
+    fs.set(FEAT_NUM_QUEUES, feature_num_queues_default())
     fs.set(FEAT_VOLATILE_WC, 1)
     fs
 
@@ -184,7 +200,7 @@ impl FeatureStore:
     me get(fid: i64) -> i64:
         if fid < 0 or fid >= FEAT_MAX:
             return 0
-        me.vals[fid]
+        feature_value_safe(fid, me.vals[fid])
 
 # ── AdminQueue — qid-0 submission + completion rings ──────────────────────────
 struct AdminQueue:
@@ -401,6 +417,8 @@ fn nvme_admin_selftest() -> i64:
     fs.set(FEAT_TEMP_THRESH, 358)
     fail = fail + expect_eq(fs.get(FEAT_TEMP_THRESH), 358, "feature set/get round-trips (x8 guard)")
     fail = fail + expect_eq(fs.get(FEAT_VOLATILE_WC), 1, "volatile write cache default on")
+    fs.vals[FEAT_NUM_QUEUES] = 999999
+    fail = fail + expect_eq(fs.get(FEAT_NUM_QUEUES), feature_num_queues_default(), "corrupted queue count feature returns advertised max")
 
     # AdminQueue submit/fetch preserves cid + all dwords
     var aq: AdminQueue = admin_queue_new()
