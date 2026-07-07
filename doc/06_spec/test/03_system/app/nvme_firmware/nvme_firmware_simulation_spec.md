@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -707,6 +707,31 @@ expect(rv64_out).to_contain("nvme_fw_rv64_direct_build_timeout_2026-07-07")
 
 </details>
 
+#### keeps firmware self-test assertion counts current in production docs
+
+- Reject stale self-test assertion counts in operator docs
+   - Expected: stale_code equals `0`
+   - Expected: count_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Reject stale self-test assertion counts in operator docs")
+val docs = "examples/09_embedded/simpleos_nvme_fw/fw/README.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide_tldr.md"
+val (stale_out, stale_err, stale_code) = _shell("! rg -n '526 (checks|asserts|assertions)' " + docs)
+expect(stale_code).to_equal(0)
+val (count_out, count_err, count_code) = _shell("rg -n '998 (checks|asserts|assertions)' " + docs)
+expect(count_code).to_equal(0)
+expect(count_out).to_contain("998")
+```
+
+</details>
+
 #### keeps the Cosmos+ OpenSSD platform descriptor executable and honest
 
 - Run the Zynq-7000 / Cosmos+ platform descriptor
@@ -739,8 +764,8 @@ _expect_no_fail_marker(out, "Cosmos+ OpenSSD platform descriptor")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
