@@ -18,3 +18,8 @@ Date: 2026-07-05
   replaces this strict size gate with stronger generated behavioral evidence.
 - REQ-LLM-CARET-FULL-006: No feature is out of scope for the full-parity lane;
   phased implementation is allowed, skipped completion is not.
+- REQ-LLM-CARET-FULL-007: Progress and completion reports must include the
+  count and percentage of original Claude `*.ts`/`*.tsx` files whose mapped
+  Simple target is at least 80% of the original file LOC. The 2026-07-07
+  baseline is 551/1884 files at or above 80%, with 1333/1884 not yet at that
+  threshold.

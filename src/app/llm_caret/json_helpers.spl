@@ -101,16 +101,37 @@ fn ja(items: [text]) -> text:
 # JSON Parsing Helpers
 # ============================================================================
 
-fn _unwrap_idx(opt) -> i64:
-    match opt:
-        Some(i): return i
-        nil: return -1
+# Substring search returning a bare index (-1 if absent).
+# ponytail: hand-written scan, not text.index_of — the seed's int-boxing
+# mangles certain Option<i64> results (e.g. index 3 returns nil) via the
+# tag-box wall; see doc/08_tracking/bug/llm_caret_index_of_optioni64_tagbox_2026-07-07.md
+fn json_find(s: text, needle: text) -> i64:
+    val nlen = needle.len()
+    if nlen == 0:
+        return 0
+    val slen = s.len()
+    if nlen > slen:
+        return -1
+    var i = 0
+    val last = slen - nlen
+    while i <= last:
+        var j = 0
+        var matched = true
+        while j < nlen:
+            if s[i + j] != needle[j]:
+                matched = false
+                break
+            j = j + 1
+        if matched:
+            return i
+        i = i + 1
+    -1
 
 # Extract a string value for a given key from JSON
 fn extract_json_string(json: text, key: text) -> text:
     val quote = "\""
     val search = quote + key + quote + ":"
-    val idx = _unwrap_idx(json.index_of(search))
+    val idx = json_find(json, search)
     if idx < 0:
         return ""
     val slen = search.len()
@@ -136,7 +157,7 @@ fn extract_json_string(json: text, key: text) -> text:
 # Extract a raw value (number, boolean, null) for a given key from JSON
 fn extract_json_value(json: text, key: text) -> text:
     val search = Q() + key + Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
+    val idx = json_find(json, search)
     if idx < 0:
         return "null"
     val slen = search.len()
@@ -151,12 +172,45 @@ fn extract_json_value(json: text, key: text) -> text:
         end = end + 1
     trimmed.substring(0, end).trim()
 
+# Digit value of a single-char string, or -1 if not 0-9.
+# ponytail: explicit compare, NOT ch.to_i64() — the seed boxes char.to_i64()
+# across module boundaries (returns <value:0xN>/digit-value instead of the code
+# point), so any to_i64-based digit loop mis-parses when called cross-module.
+# See doc/08_tracking/bug/llm_caret_index_of_optioni64_tagbox_2026-07-07.md
+fn _digit_val(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    -1
+
+# Parse a decimal integer from text (bounded, boxing-free).
+fn json_parse_int(s: text) -> i64:
+    var n = 0
+    var i = 0
+    var neg = false
+    if s.len() > 0 and s[0] == "-":
+        neg = true
+        i = 1
+    while i < s.len():
+        val d = _digit_val(s[i])
+        if d >= 0:
+            n = n * 10 + d
+        i = i + 1
+    if neg: -n else: n
+
 # Extract integer value for a given key
 fn extract_json_int(json: text, key: text) -> i64:
     val raw = extract_json_value(json, key)
     if raw == "null" or raw == "":
         return 0
-    int(raw)
+    json_parse_int(raw)
 
 # Extract boolean value for a given key
 fn extract_json_bool(json: text, key: text) -> bool:
@@ -166,7 +220,7 @@ fn extract_json_bool(json: text, key: text) -> bool:
 # Extract a nested string value: outer_key -> inner_key
 fn extract_nested_string(json: text, outer_key: text, inner_key: text) -> text:
     val search = Q() + outer_key + Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
+    val idx = json_find(json, search)
     if idx < 0:
         return ""
     val slen = search.len()
