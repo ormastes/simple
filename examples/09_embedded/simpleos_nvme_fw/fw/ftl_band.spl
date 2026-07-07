@@ -55,6 +55,9 @@ impl BandAlloc:
     me block_pages_ready(blk: i64) -> bool:
         me.block_ready(blk) and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.valid.len()
 
+    me active_ready() -> bool:
+        me.block_pages_ready(me.active_blk) and me.blk_state[me.active_blk] == BLK_OPEN
+
     me actual_free_blocks() -> i64:
         var fc: i64 = 0
         var b: i64 = 0
@@ -76,7 +79,7 @@ impl BandAlloc:
     # Opens a fresh block when there is no active block or the current one is full.
     # Returns NO_PPN if no free block is available.
     me alloc_page() -> i64:
-        val no_active: bool = me.active_blk == UNMAP or not me.block_pages_ready(me.active_blk) or me.active_wp < 0 or me.active_wp > PAGES_PER_BLOCK
+        val no_active: bool = me.active_blk == UNMAP or not me.active_ready() or me.active_wp < 0 or me.active_wp > PAGES_PER_BLOCK
         val blk_full:  bool = me.active_wp == PAGES_PER_BLOCK
         val need_new:  bool = (no_active or blk_full)
         if need_new:
@@ -107,7 +110,7 @@ impl BandAlloc:
     # forward progress — the host write path therefore stops (NO_PPN -> SC_NS_NOT_READY)
     # before the device reaches a state where stale space exists but GC cannot reclaim it.
     me alloc_page_host(reserve: i64) -> i64:
-        val no_active: bool = me.active_blk == UNMAP or not me.block_pages_ready(me.active_blk) or me.active_wp < 0 or me.active_wp > PAGES_PER_BLOCK
+        val no_active: bool = me.active_blk == UNMAP or not me.active_ready() or me.active_wp < 0 or me.active_wp > PAGES_PER_BLOCK
         val blk_full:  bool = me.active_wp == PAGES_PER_BLOCK
         val need_new:  bool = (no_active or blk_full)
         if need_new:
@@ -117,7 +120,7 @@ impl BandAlloc:
 
     me host_writable_pages(reserve: i64) -> i64:
         var pages: i64 = 0
-        if me.block_ready(me.active_blk) and me.active_wp >= 0 and me.active_wp < PAGES_PER_BLOCK:
+        if me.active_ready() and me.active_wp >= 0 and me.active_wp < PAGES_PER_BLOCK:
             pages = PAGES_PER_BLOCK - me.active_wp
         val free: i64 = me.counted_free_blocks()
         if free > reserve:
@@ -325,6 +328,11 @@ fn ftl_band_selftest() -> i64:
     ba.active_wp = PAGES_PER_BLOCK - 1
     val reserve_all_free: i64 = ba.free_blocks()
     fail = fail + expect_eq(ba.host_writable_pages(reserve_all_free), 1, "host writable pages includes current open block only")
+    val saved_active: i64 = ba.active_blk
+    ba.blk_state[saved_active] = BLK_CLOSED
+    fail = fail + expect_eq(ba.host_writable_pages(reserve_all_free), 0, "corrupted closed active block is not host writable")
+    fail = fail + expect_eq(ba.alloc_page_host(reserve_all_free), NO_PPN, "corrupted closed active block cannot bypass GC reserve")
+    ba.blk_state[saved_active] = BLK_OPEN
     ba.active_wp = -5
     fail = fail + expect_eq(ba.host_writable_pages(reserve_all_free), 0, "corrupted negative active write pointer does not overstate host capacity")
     fail = fail + expect_eq(ba.alloc_page_host(reserve_all_free), NO_PPN, "corrupted negative active write pointer cannot bypass GC reserve")
