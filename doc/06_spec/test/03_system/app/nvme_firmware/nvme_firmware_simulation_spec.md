@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 26 | 26 | 0 | 0 |
+| 27 | 27 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -494,6 +494,29 @@ _expect_no_fail_marker(out, "thermal check")
 
 </details>
 
+#### rejects IO queue deletion while commands or completions are still pending
+
+- Run the focused queue-set delete regression check
+   - Expected: code equals `0`
+- Rejected deletes preserve pending SQ/CQ work until the host drains it
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the focused queue-set delete regression check")
+val (out, err, code) = _run(FW + "/qset_delete_check.spl")
+expect(code).to_equal(0)
+step("Rejected deletes preserve pending SQ/CQ work until the host drains it")
+expect(out).to_contain("QSET DELETE OK")
+```
+
+</details>
+
 ### NVMe firmware: Lean4 formal verification of the FTL invariants
 
 #### verifies the allocator and GC-reserve safety (Alloc.lean)
@@ -764,8 +787,8 @@ _expect_no_fail_marker(out, "Cosmos+ OpenSSD platform descriptor")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 27 |
+| Active scenarios | 27 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
