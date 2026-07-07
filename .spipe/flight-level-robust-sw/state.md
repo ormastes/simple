@@ -60,12 +60,14 @@ Define and enforce a SPipe robust-software lane for flight-level Simple compiler
   still need `sby`, `yosys`, and an SMT solver before the release gate can pass.
 - NVMe firmware evidence: wrapper coverage is `pass` for the recorded RV32/RV64
   wrapper/spec checks. Live RV32 minimal firmware is now `pass` through the
-  bounded pure-Simple RV32 QEMU checker for the section-4, section-5, and
-  section-7 slices
+  bounded pure-Simple RV32 QEMU checker for all 21 registered minimal slices
   (`check-nvme-rv32-minimal-live.shs`, serial marker `ALL RV32 NVME FW CHECKS
   PASS`). Full self-hosted bootstrap/deploy remains `blocked`: the Stage 4
   native build timed out after 1800s without producing a refreshed
-  `bin/simple`.
+  `bin/simple`. The executable SSpec coverage is
+  `test/03_system/app/nvme_firmware/nvme_rv32_minimal_live_spec.spl`, with the
+  generated manual in
+  `doc/06_spec/test/03_system/app/nvme_firmware/nvme_rv32_minimal_live_spec.md`.
 - Thread/process/coroutine lifecycle evidence: representative hardening checks
   are `pass` for the named lifecycle/regression specs in the log. Broader
   fairness, starvation, race, and scheduler proof claims remain `blocked`
@@ -99,9 +101,15 @@ dev-in-progress
   bootstrap bug is fixed.
 - nvme-fw: fixed the LLVM unary-op lowering path used by the RV32 firmware
   checker so normalized local ids and non-`nil` destination types are used for
-  `Neg`/`Not`/`BitNot`/`Transpose`. Evidence: section-4, section-5, and
-  section-7 minimal live checks produced RV32 objects/ELF and QEMU serial output
-  `ALL RV32 NVME FW CHECKS PASS`.
+  `Neg`/`Not`/`BitNot`/`Transpose`. Evidence now extends to the 21-section
+  minimal live checker, which produced RV32 object/ELF output and QEMU serial
+  output `ALL RV32 NVME FW CHECKS PASS`.
+- nvme-fw: the minimal live checker now has bounded emitters for all registered
+  prefix slices through namespace guard, preventing the section-15 one-file
+  parse timeout. Evidence: direct `NVME_RV32_MINIMAL_SECTIONS=21 ...` checker
+  passed, and `bin/simple test
+  test/03_system/app/nvme_firmware/nvme_rv32_minimal_live_spec.spl
+  --mode=interpreter --clean --timeout 180 --sequential` passed 1/1.
 - evidence: `bin/simple check src/compiler/70.backend/backend/llvm_backend_tools.spl`
   passed; source assertion reported `llvm_object_fail_closed_source=pass`;
   `git diff --check` passed for the edited compiler helper.
@@ -448,3 +456,107 @@ dev-in-progress
 - blocker: N=7 remains diagnostic prefix coverage only. The real
   power/thermal implementation and later sections are still not live-proven
   with active `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=8 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal checker now shapes the HIL section for prefix
+  diagnostics with a small `i32` command/queue/PRP identity instead of the real
+  parse-heavy host-interface model. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=8 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=8 remains diagnostic prefix coverage only. The real HIL
+  implementation and later sections are still not live-proven with active
+  `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=9 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal checker now shapes the queue phase section for prefix
+  diagnostics with a small `i32` queue-wrap/phase identity instead of the real
+  loop/mutation ring model. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=9 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=9 remains diagnostic prefix coverage only. The real queue phase
+  implementation and later sections are still not live-proven with active
+  `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=10 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal checker now shapes the IO command section for prefix
+  diagnostics with a small `i32` opcode/status identity instead of the real
+  mutation-heavy command model. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=10 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=10 remains diagnostic prefix coverage only. The real IO command
+  implementation and later sections are still not live-proven with active
+  `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=11 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal checker now shapes the Flush section for prefix
+  diagnostics with a small `i32` clean/commit/bad-namespace identity instead
+  of the real mutation-heavy flush model. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=11 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=11 remains diagnostic prefix coverage only. The real Flush
+  implementation and later sections are still not live-proven with active
+  `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=12 diagnostic PASS: bootstrap/deploy remains
+  postponed. The existing Admin diagnostic shaper covers the prefix slice with
+  a small `i32` admin/status identity instead of the real mutation-heavy admin
+  model. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=12 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=12 remains diagnostic prefix coverage only. The real Admin
+  implementation and later sections are still not live-proven with active
+  `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=13 diagnostic PASS: bootstrap/deploy remains
+  postponed. The existing Reactor diagnostic shaper covers the prefix slice
+  with a small `i32` task/owner identity instead of the real mutation-heavy
+  reactor model. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=13 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=13 remains diagnostic prefix coverage only. The real Reactor
+  implementation and later sections are still not live-proven with active
+  `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=14 diagnostic PASS: bootstrap/deploy remains
+  postponed. The existing Policy/Target diagnostic shaper covers the prefix
+  slice with a small `i32` policy/geometry identity instead of the real
+  branch-heavy target model. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=14 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=14 remains diagnostic prefix coverage only. The real
+  Policy/Target implementation and later sections are still not live-proven
+  with active `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=15 diagnostic PASS: bootstrap/deploy remains
+  postponed. The existing DRAM durability diagnostic shaper covers the prefix
+  slice with a small `i32` arena/durability identity instead of the real
+  mutation-heavy durability model. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=15 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=15 remains diagnostic prefix coverage only. The real DRAM
+  durability implementation and later sections are still not live-proven with
+  active `bin/simple`; no full RV32 firmware PASS is claimed.
