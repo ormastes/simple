@@ -92,6 +92,55 @@ enough for self-hosted native-build to complete under the wrapper timeout. Do
 not default this wrapper to the Rust seed: it is useful differential evidence,
 but repo policy keeps the seed bootstrap-only.
 
+## Update — minimal live checker reaches HIR stack overflow (2026-07-07)
+
+The smaller diagnostic wrapper `scripts/check/check-nvme-rv32-minimal-live.shs`
+now has two useful modes:
+
+```bash
+NVME_RV32_MINIMAL_SECTIONS=0 NVME_RV32_BUILD_TIMEOUT_SECS=120 \
+  sh scripts/check/check-nvme-rv32-minimal-live.shs
+```
+
+passes as a root-only RV32 object/link diagnostic:
+
+```text
+STATUS: PASS nvme-rv32-minimal-live-root-build diagnostic_only=true
+```
+
+The first real firmware section still fails before producing a bootable ELF:
+
+```bash
+NVME_RV32_MINIMAL_SECTIONS=1 NVME_RV32_BUILD_TIMEOUT_SECS=120 \
+  sh scripts/check/check-nvme-rv32-minimal-live.shs
+```
+
+Observed failure:
+
+```text
+[BOOTSTRAP-PHASE] phase3:hir:function:start ...rv32_rain_recover7
+thread 'simple-main' has overflowed its stack
+fatal runtime error: stack overflow, aborting
+```
+
+This narrows the current blocker from the full rv32 boot wrapper timeout to a
+compiler HIR-lowering stack overflow on the generated minimal firmware root.
+The root-only path proves the RV32 object/link skeleton can be built; the first
+real RAIN section proves the firmware logic still cannot be lowered by the
+self-hosted HIR path.
+
+Dead-end checks already tried:
+
+- Flattening the RAIN XOR expression into a helper with wide scalar parameters
+  moved the overflow to the helper.
+- Splitting recovery into tiny no-argument scalar functions moved the overflow
+  to one of those recovery functions.
+- Converting recovery temporaries from `var` reassignment to `val` chains still
+  overflowed in HIR lowering.
+
+So the next fix should target HIR lowering stack use for this generated
+firmware-root shape, not further cosmetic rewrites of the RAIN algorithm.
+
 ## Update — exact phase2 source narrowed (2026-07-05)
 
 The phase profile now logs each native entry-closure source before and after
