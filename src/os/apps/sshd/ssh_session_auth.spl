@@ -7,6 +7,7 @@ use os.apps.sshd.ssh_session.{SshSession, SessionState}
 use os.apps.sshd.ssh_hex.{format_hex, format_hex_width}
 use os.apps.sshd.ssh_transport.{SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_service_accept, ssh_build_disconnect}
 use os.apps.sshd.ssh_auth.{SshUserDb, MAX_AUTH_ATTEMPTS, ssh_build_auth_success}
+use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
 use os.apps.sshd.ssh_session_helpers.{_u8_at, _bytes_to_hex, _read_text_field_fast, _payload_field_is_ssh_connection, _payload_field_is_none, _payload_field_is_password, _password_only_auth_failure_payload, _is_ssh_userauth_service_request}
 use os.kernel.log.klog_api.{log_info}
 
@@ -25,20 +26,33 @@ fn _payload_field_is_root(payload: [u8], field_offset: u64) -> bool:
         _u8_at(payload, field_offset + 7) == 0x74
 
 fn _payload_field_is_simpleos(payload: [u8], field_offset: u64) -> bool:
+    """Constant-time match of the length-prefixed secret root password.
+    The length guard uses only the non-secret payload length; all 12 field
+    bytes are always visited (diff accumulation, no short-circuit) so the
+    match time does not reveal how many password bytes were correct
+    (plan A3 timing-side-channel hardening)."""
     if field_offset + 12 > payload.len():
         return false
-    _u8_at(payload, field_offset) == 0 and
-        _u8_at(payload, field_offset + 1) == 0 and
-        _u8_at(payload, field_offset + 2) == 0 and
-        _u8_at(payload, field_offset + 3) == 8 and
-        _u8_at(payload, field_offset + 4) == 0x73 and
-        _u8_at(payload, field_offset + 5) == 0x69 and
-        _u8_at(payload, field_offset + 6) == 0x6D and
-        _u8_at(payload, field_offset + 7) == 0x70 and
-        _u8_at(payload, field_offset + 8) == 0x6C and
-        _u8_at(payload, field_offset + 9) == 0x65 and
-        _u8_at(payload, field_offset + 10) == 0x6F and
-        _u8_at(payload, field_offset + 11) == 0x73
+    val expected: [u8] = [0, 0, 0, 8, 0x73, 0x69, 0x6D, 0x70, 0x6C, 0x65, 0x6F, 0x73]
+    var diff: u8 = 0
+    var i: u64 = 0
+    while i < 12:
+        diff = diff | (_u8_at(payload, field_offset + i) ^ expected[i])
+        i = i + 1
+    diff == 0
+
+fn _ct_bytes_equal(a: [u8], b: [u8]) -> bool:
+    """Constant-time byte comparison. Length mismatch returns false early
+    (length is not secret); equal-length inputs always visit every byte so
+    the compare time does not reveal which byte differs (plan A3)."""
+    if a.len() != b.len():
+        return false
+    var diff: u8 = 0
+    var i: u64 = 0
+    while i < a.len():
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    diff == 0
 
 fn _payload_is_live_root_none_auth(payload: [u8]) -> bool:
     payload.len() >= 35 and
@@ -111,7 +125,8 @@ impl SshSession:
 
         while attempts < MAX_AUTH_ATTEMPTS:
             val payload = self.recv_packet_payload()
-            serial_println("[sshd-session] auth payload len={payload.len()} payload={_bytes_to_hex(payload)}")
+            # Do not log payload bytes: auth payloads embed the password.
+            serial_println("[sshd-session] auth payload len={payload.len()}")
             if payload.len() == 0:
                 self.state = SessionState.Closed
                 return false
@@ -122,8 +137,15 @@ impl SshSession:
                 self.send_packet(fail)
                 val password_payload = self.recv_packet_payload()
                 val password_hex = _bytes_to_hex(password_payload)
-                serial_println("[sshd-session] auth payload len={password_payload.len()} payload={password_hex}")
-                if password_hex == "3200000004726f6f740000000e7373682d636f6e6e656374696f6e0000000870617373776f7264000000000873696d706c656f73":
+                # Do not log payload bytes: this payload embeds the password.
+                serial_println("[sshd-session] auth payload len={password_payload.len()}")
+                # Constant-time compare of the hex-encoded auth payload (which
+                # embeds the secret password) to avoid a timing side-channel on
+                # an early-exit text `==` (plan A3).
+                val expected_auth_hex = "3200000004726f6f740000000e7373682d636f6e6e656374696f6e0000000870617373776f7264000000000873696d706c656f73"
+                val got_auth_bytes = ssh_ascii_text_to_bytes(password_hex)
+                val expected_auth_bytes = ssh_ascii_text_to_bytes(expected_auth_hex)
+                if _ct_bytes_equal(got_auth_bytes, expected_auth_bytes):
                     self.authenticated_user = "root"
                     val success = ssh_build_auth_success()
                     self.send_packet(success)
@@ -249,3 +271,7 @@ impl SshSession:
         # Too many failed attempts
         self.disconnect(14, "too many authentication failures")
         false
+
+# Exported for constant-time-compare unit coverage (plan A3). These are pure
+# comparison helpers with no session/socket state.
+export _ct_bytes_equal, _payload_field_is_simpleos
