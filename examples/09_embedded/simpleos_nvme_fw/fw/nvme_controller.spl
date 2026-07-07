@@ -71,6 +71,16 @@ fn nvme_controller_new_for_target(target_id: i64) -> NvmeController:
 fn aer_event_valid(evt: i64) -> bool:
     evt == AER_SMART_HEALTH
 
+fn fw_download_next_bytes(current: i64, dwords: i64) -> i64:
+    if current < 0 or dwords <= 0:
+        return -1
+    if dwords > 2305843009213693951:
+        return -1
+    val add: i64 = dwords * 4
+    if current > 9223372036854775807 - add:
+        return -1
+    current + add
+
 impl NvmeController:
     # ── Admin path ───────────────────────────────────────────────────────────
     me admin_submit(c: AdminCmd) -> bool:
@@ -216,7 +226,10 @@ impl NvmeController:
                 me.fw_dl_bytes = 0
             if cmd.cdw11 != me.fw_dl_bytes / 4:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
-            me.fw_dl_bytes = me.fw_dl_bytes + cmd.cdw10 * 4   # NUMD dwords accumulated
+            val next_bytes: i64 = fw_download_next_bytes(me.fw_dl_bytes, cmd.cdw10)
+            if next_bytes < 0:
+                return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
+            me.fw_dl_bytes = next_bytes   # NUMD dwords accumulated
             return AdminResult(status: SC_SUCCESS, data: 0, post: true)
         if cmd.opcode == ADMIN_FW_COMMIT:
             val fw_slot: i64 = admin_fw_slot(cmd.cdw10)       # cdw10 bits 0..2
@@ -895,6 +908,12 @@ fn nvme_controller_selftest() -> i64:
     val fcneg: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(fdneg.status, SC_SUCCESS, "fw download recovers corrupted negative byte count")
     fail = fail + expect_eq(fcneg.status, SC_SUCCESS, "fw commit accepts recovered replacement image")
+    c.fw_dl_bytes = 9223372036854775800
+    c.admin_submit(admin_fw_download_cmd(63, 4, 2305843009213693950))
+    c.admin_process()
+    val fdovf: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(fdovf.status, SC_INVALID_FIELD, "fw download byte counter overflow rejected")
+    fail = fail + expect_eq(c.fw_dl_bytes, 9223372036854775800, "fw download overflow leaves byte counter unchanged")
     # Invalid firmware image lengths and reserved commit actions fail closed.
     c.admin_submit(admin_fw_download_cmd(38, 0, 0))
     c.admin_submit(admin_fw_commit_cmd(39, 1, 4))
