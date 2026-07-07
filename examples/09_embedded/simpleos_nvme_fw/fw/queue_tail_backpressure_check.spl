@@ -1,0 +1,41 @@
+"""
+queue_tail_backpressure_check — corrupted CQ tail must not drop admin or IO work.
+
+Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/queue_tail_backpressure_check.spl
+"""
+
+use nvme_types.*
+use nvme_admin.*
+use nvme_controller.*
+
+fn main():
+    var fail: i64 = 0
+    var c: NvmeController = nvme_controller_new()
+
+    c.aq.cq_tail = MAX_QUEUE_SIZE
+    c.admin_submit(admin_identify_cmd(1, CNS_CONTROLLER))
+    fail = fail + expect_eq(c.admin_process(), 0, "admin dispatch backs off on invalid CQ tail")
+    fail = fail + expect_eq(c.aq.pending(), 1, "admin command remains pending")
+    c.aq.cq_tail = 0
+    c.admin_process()
+    val ac: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(ac.status, SC_SUCCESS, "admin command completes after CQ tail repair")
+
+    c.admin_submit(admin_create_cq_cmd(2, 1, 64))
+    c.admin_submit(admin_create_sq_cmd(3, 1, 64, 1))
+    c.admin_process()
+    c.admin_reap()
+    c.admin_reap()
+    c.qset.cq_tail[1] = MAX_QUEUE_SIZE
+    c.io_submit(1, cmd_make(4, OP_READ, 0, 1, 0))
+    fail = fail + expect_eq(c.io_process(), 0, "IO dispatch backs off on invalid CQ tail")
+    fail = fail + expect_eq(c.qset.sq_pending(1), 1, "IO command remains pending")
+    c.qset.cq_tail[1] = 0
+    c.io_process()
+    val ic: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(ic.status, SC_SUCCESS, "IO command completes after CQ tail repair")
+
+    if fail == 0:
+        print "QUEUE TAIL BACKPRESSURE OK"
+    else:
+        print "QUEUE TAIL BACKPRESSURE FAIL ({fail})"
