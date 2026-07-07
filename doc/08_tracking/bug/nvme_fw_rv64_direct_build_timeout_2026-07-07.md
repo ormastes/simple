@@ -910,3 +910,32 @@ Terminated
 ```
 
 The current measured timeout is now around `logic_flush_cases.spl`.
+
+## Update — flush cases split
+
+`logic_flush_cases.spl` was reduced to a small case facade, with flush command
+validation and dirty-state assertions moved into separate case modules. The
+scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`. This run stopped earlier in total parse order at I/O
+command cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_hil_cases.spl chars=228
+[BOOTSTRAP-PHASE] ... logic_queue_phase_cases.spl chars=332
+[BOOTSTRAP-PHASE] ... logic_queue_phase_cases.spl
+[BOOTSTRAP-PHASE] ... logic_io_command_cases.spl chars=263
+Terminated
+```
+
+Keep this split as total parse-load reduction, but do not count this probe as
+forward RV64 direct-build evidence.
