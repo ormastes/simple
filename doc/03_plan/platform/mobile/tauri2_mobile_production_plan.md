@@ -14,7 +14,18 @@ to production)` → `P3 (iOS device AOT, gated on Task #21)` + `P4 (release lane
 
 ## Phase 0 — Recover state / stop the bleeding (do first)
 
-### P0.1 — Recover & commit the Tauri shell source **[BLOCKER]**
+### P0.1 — Recover & commit the Tauri shell source **[BLOCKER]** — DONE (2026-07-07)
+- **Resolution:** restored via `git checkout c8756fe7cc -- tools/tauri-shell` (last
+  commit with the complete tree, root-caused in
+  `doc/09_report/tauri_shell_source_recovery_investigation_2026-07-07.md` as
+  deleted by mislabeled commit `c8dbb4df4f`, 36s later). 132 files recovered.
+  Reconciled against the untracked sibling checkout `simple-renderer-main`
+  found during investigation — diff showed git's tree was already a strict
+  superset (has the sibling's MDI-proof fields/functions *and* the
+  `libc::signal(SIGPIPE, SIG_IGN)` fix *and* the `libc` dep the sibling
+  lacks), so no porting was required. `cargo check` in `src-tauri` compiles
+  clean (host target). See the bug record's "Recovery" section for the full
+  diff evidence and the correction to the investigation's Lane 3 claim.
 - **Motivation/evidence:** `git ls-files tools/tauri-shell` = **14 files, all `gen/**` scaffolding**.
   The production shell (`src-tauri/src/{app,main,lib}.rs`, `Cargo.toml`, `build.rs`, top-level
   `tauri.conf.json`, `dist/*.html`, `scripts/build-ui-bundle.shs`) is **untracked and absent from the

@@ -1,11 +1,52 @@
 # Tauri mobile shell source is untracked and absent from disk — app not reproducible from a clean checkout
 
-- **Status:** OPEN
+- **Status:** RECOVERED (2026-07-07)
 - **Priority:** P0
 - **Date:** 2026-07-07
 - **Area:** `tools/tauri-shell/` (Tauri 2 mobile shell — iOS + Android)
 - **Severity:** Critical (the shipped mobile app cannot be rebuilt from `main`; all prior "verified" evidence is unreproducible)
 - **Found while:** integrating the Tauri 2 mobile production design/plan docs and sanity-checking the P0.1 claim in `doc/03_plan/platform/mobile/tauri2_mobile_production_plan.md`.
+
+## Recovery (2026-07-07)
+
+Restored via `git checkout c8756fe7cc -- tools/tauri-shell` (last commit with the
+complete tree before it was deleted 36 seconds later by `c8dbb4df4f`, per
+`doc/09_report/tauri_shell_source_recovery_investigation_2026-07-07.md`). 132
+files came back (118 previously-untracked + 14 already-tracked `gen/**`
+scaffolding, unchanged).
+
+**Correction to the investigation's Lane 3 finding:** the investigation
+suspected the untracked sibling checkout `/Users/ormastes/simple-renderer-main`
+(mtimes 2026-07-02) held *newer* MDI-proof fields/functions than git and that
+git was missing the `libc::signal(SIGPIPE, SIG_IGN)` fix. Direct diff of both
+sources after the restore shows the opposite: `c8756fe7cc`'s tree (git) is a
+strict superset. It already contains every field/function the sibling has
+(`event_sequence`, `device_pixel_ratio`, `screen_orientation`,
+`source_window_count`, `has_simple_smoke_text`, `js_string_or_null`,
+`mdi_proof_value`, the extended `build.rs` `string_include_line_with_file_default`
+helpers) **and** the `libc::signal(SIGPIPE, SIG_IGN)` fix **and** the `libc = "0.2"`
+`Cargo.toml`/`Cargo.lock` dependency entry that the sibling lacks. `main.rs` and
+`app.rs` are byte-identical between the two sources; `tauri.conf.json` is
+byte-identical. The sibling checkout is an older/abandoned snapshot (frozen
+before several `test(gui): ...` MDI-proof commits landed on the git side on
+2026-07-03), not a divergent-newer source. **No porting was needed or
+performed** — the restored git tree was used as-is.
+
+- **Build verify:** `cargo check` inside `tools/tauri-shell/src-tauri` (host
+  target, macOS, default toolchain) compiles clean — 1 pre-existing `dead_code`
+  warning (`simple_subprocess_args_for` unused) and 5 pre-existing
+  `unused_unsafe` warnings in the vendored `tauri-runtime-wry-2.10.1` patch, no
+  errors. Full `cargo tauri android/ios build` (mobile SDKs) was not
+  attempted — out of scope for this bounded check.
+- **Guard:** `git check-ignore -v` on all 5 previously-missing paths returns
+  no match (exit 1) — confirmed never gitignored, consistent with the
+  investigation. Added `tools/FILE.md` (declaring all `tools/*` depth-2
+  entries, including `tools/tauri-shell`) and wired it into the root
+  `FILE.md`'s `## Child Manifests` / new `## tools/` section, closing the
+  `WRG002` gap for `tools/*` under `--strict` mode (the default non-strict
+  guard already passed via grandfathering).
+- **Restore commit:** see VCS log for
+  `fix(mobile): restore tauri-shell source deleted by mislabeled c8dbb4df4f`.
 
 ## Summary
 

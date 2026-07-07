@@ -60,6 +60,7 @@ FILE.md files) are allowed.
 | `test/FILE.md` | `test/` directory |
 | `bin/FILE.md` | `bin/` directory |
 | `examples/FILE.md` | `examples/` directory |
+| `tools/FILE.md` | `tools/` directory |
 
 ## src/
 
@@ -193,3 +194,18 @@ FILE.md files) are allowed.
 | `bin/codex_chrome_devtools_mcp.cmd` | Codex Chrome DevTools MCP |
 | `bin/codex_stitch_mcp.cmd` | Codex Stitch MCP |
 | `bin/FILE.md` | Bin manifest |
+
+## tools/
+
+| Entry | Description |
+|---|---|
+| `tools/chrome-live-bitmap` | Chrome-based live bitmap capture harness |
+| `tools/electron-live-bitmap` | Electron-based live bitmap capture harness |
+| `tools/electron-shell` | Electron desktop shell |
+| `tools/jupyter` | Jupyter integration |
+| `tools/node-render-bitmap` | Node.js render-to-bitmap harness |
+| `tools/pixel_compare` | Pixel comparison tool |
+| `tools/ref_crypto` | Reference crypto implementations |
+| `tools/tauri-shell` | Tauri 2 mobile/desktop shell (iOS + Android + desktop) |
+| `tools/web-render-backend` | Web rendering backend harness |
+| `tools/FILE.md` | Tools manifest |
