@@ -279,6 +279,16 @@ through `test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl`.
   regress small-frame/idle cases → gate on the re-measured composite share + bit-exact proof;
   rollback = keep Metal opt-in (`SIMPLE_GUI_BACKEND`).
 
+### N9 — CPU/GPU dual-algorithm mechanism + GPU-dict pilot (cross-ref)
+
+- Per-op two-algorithm-set selection (CPU bulk-idiom variant vs GPU kernel) and a buffer-backed GPU
+  dictionary primitive are specified in
+  `doc/03_plan/ui/rendering/cpu_gpu_dual_algorithm_plan.md`
+  (research `doc/01_research/ui/rendering/cpu_gpu_dual_algorithm_research.md`, design
+  `doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md`). Its W6/W7 are this plan's
+  N5/N6; its W1 (upload-only Metal palette LUT) is a new no-seed first-wave item; its W2 lint
+  enforces the "no per-element loop on CPU hot paths" contract these measurements motivate.
+
 ### N8 — Winit `[u32]` FFI signature / Web parse-artifact cache (parked)
 
 - **Winit `[u32]` FFI** (GUI Rank 5b): halves marshalled bytes; Rust extern change (seed). Parked.

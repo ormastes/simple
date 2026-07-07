@@ -444,6 +444,17 @@ stops being a special path:
 
 ---
 
+## 8b. CPU/GPU dual-algorithm mechanism & GPU dictionary (cross-ref)
+
+The per-op fork this design introduces via `BackendCapability.accelerated_ops` (§4) is extended into
+an explicit **two-algorithm-set** mechanism (CPU bulk-idiom variant vs GPU data-parallel kernel,
+selected per-op / per-`SIMPLE_2D_BACKEND` / per-`variants.ui.renderer`) plus a buffer-backed **GPU
+dictionary** primitive (`lut_lookup` MSL fn + upload-only `GpuLut`, no new extern) in
+`doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md` (research
+`doc/01_research/ui/rendering/cpu_gpu_dual_algorithm_research.md`, plan
+`doc/03_plan/ui/rendering/cpu_gpu_dual_algorithm_plan.md`). New accelerated ops (`indexed_fill`,
+`glyph_atlas_blit`) inherit this section's parity oracle and add rows to the §D2 harness.
+
 ## 9. MDSOC+ placement & module layout
 
 - **Reuse the existing `src/lib/gc_async_mut/gpu/engine2d/` directory** — no new numbered split, no
