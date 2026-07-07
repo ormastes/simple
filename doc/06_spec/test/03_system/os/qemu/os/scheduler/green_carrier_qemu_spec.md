@@ -48,7 +48,7 @@ This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl` |
-| Updated | 2026-07-06 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -237,8 +237,8 @@ else:
         expect(serial.contains(GREEN_USER_ENTRY_BRIDGE_READY_MARKER)).to_equal(true)
         expect(serial.contains(GREEN_USER_SYSCALL_BRIDGE_READY_MARKER)).to_equal(true)
         expect(serial.contains(GREEN_USER_CR3_READY_MARKER)).to_equal(true)
-    step("Do not use final hardware handoff markers as the scheduler-row pass condition")
-    expect(_has_required_markers(serial)).to_equal(true)
+        step("Do not use final hardware handoff markers as the scheduler-row pass condition")
+        expect(_has_required_markers(serial)).to_equal(true)
 ```
 
 </details>
@@ -250,7 +250,6 @@ else:
 - Skip final hardware handoff execution on hosts without qemu-system-x86_64
    - Expected: _qemu_available() is false
 - Build the SimpleOS green carrier guest probe for final handoff evidence
--  run shell
    - Expected: built is true
 - Boot the two-CPU guest probe under QEMU
    - TUI capture: after_step
@@ -262,7 +261,7 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -275,8 +274,7 @@ elif not _qemu_available():
 else:
     step("Build the SimpleOS green carrier guest probe for final handoff evidence")
     val output_path = "build/os/simpleos_green_carrier_probe.elf"
-    _run_shell("rm -f " + output_path)
-    val built = _build_probe(output_path, "cranelift") or _build_probe(output_path, "llvm")
+    val built = rt_file_exists(output_path) or _build_probe(output_path, "cranelift") or _build_probe(output_path, "llvm")
     expect(built).to_equal(true)
     if built == true:
         step("Boot the two-CPU guest probe under QEMU")

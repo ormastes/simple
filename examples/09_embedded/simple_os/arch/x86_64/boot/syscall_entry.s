@@ -116,10 +116,16 @@ kernel_syscall_entry_asm:
     jmpq    *%rcx
 
 .Lkse_ring3_return:
-    /* Standard ring-3 return path: hardware restores CS/SS from STAR,
-     * RFLAGS from r11, RIP from rcx. */
-    movq    _kernel_syscall_scratch_rsp(%rip), %rsp
-    sysretq
+    /* Ring-3 return path. Use iretq instead of sysretq so the probe gets a
+     * normal fault frame if return state is wrong, and so user return does not
+     * depend on SYSRET's stricter canonical-address and RFLAGS behavior. */
+    movq    _kernel_syscall_scratch_rsp(%rip), %rdx
+    pushq   $0x23            /* user SS */
+    pushq   %rdx             /* user RSP */
+    pushq   %r11             /* user RFLAGS */
+    pushq   $0x2b            /* user 64-bit CS */
+    pushq   %rcx             /* user RIP */
+    iretq
     .size kernel_syscall_entry_asm, . - kernel_syscall_entry_asm
 
 /* C-callable helper so Simple code can fetch the trampoline address

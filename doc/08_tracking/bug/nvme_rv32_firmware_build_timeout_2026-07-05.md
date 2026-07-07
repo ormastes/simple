@@ -888,7 +888,7 @@ switch the wrapper default to the seed.
  1 example, 0 failures
  ```
  
- Release remains blocked:
+Release remains blocked:
  
  - RV32 QEMU boot proof fails because the firmware self-test marker is absent.
  - Required MCP integration gate fails in this workspace because
@@ -1031,6 +1031,49 @@ switch the wrapper default to the seed.
    first-byte workaround.
  
 No commit, rebase, or push was performed.
+
+### Minimal pure-Simple live reproducer added (2026-07-07)
+
+Added `scripts/check/check-nvme-rv32-minimal-live.shs` so this blocker no longer
+requires the full stock SimpleOS boot graph to reproduce. The script writes a
+tiny rv32 `_start`, strips comments/blank lines from the existing firmware
+sources into `build/os/generated/nvme_fw_rv32_minimal_src`, builds with
+production `bin/simple`, boots QEMU, and requires
+`ALL RV32 NVME FW CHECKS PASS` with no `FAIL` marker.
+
+Current production result:
+
+```sh
+NVME_RV32_BUILD_TIMEOUT_SECS=90 sh scripts/check/check-nvme-rv32-minimal-live.shs
+# STATUS: FAIL nvme-rv32-minimal-live build_rc=124 timeout=90s
+```
+
+The narrowed source set is 24 files and excludes the full OS boot graph, but
+phase2 parse still dominates:
+
+```text
+[BOOTSTRAP-PHASE] phase1:load_sources:done n_sources=24
+[BOOTSTRAP-PHASE] phase2:parse:file:done .../entry.spl          +20.5s
+[BOOTSTRAP-PHASE] phase2:parse:file:done .../logic.spl          +34.3s
+[BOOTSTRAP-PHASE] phase2:parse:file:done .../logic_rain.spl     +43.0s
+[BOOTSTRAP-PHASE] phase2:parse:file:done .../logic_ecc.spl      +59.7s
+[BOOTSTRAP-PHASE] phase2:parse:file:done .../logic_journal.spl  +76.9s
+[BOOTSTRAP-PHASE] phase2:parse:file:start .../logic_map.spl
+```
+
+This confirms the remaining production media blocker is pure-Simple
+native-build parse/front-end throughput across the firmware closure, not stock
+rv32 boot imports.
+
+Rust diagnostic compilers are not an acceptable fallback. Current
+`src/compiler_rust/target/bootstrap/simple` and `target/debug/simple` both print
+the bootstrap-seed warning and fail this wrapper because LLVM is not available:
+
+```text
+WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
+Build and use the pure-Simple bin/simple instead.
+error: native backend 'llvm' is not available in this build
+```
 
 ### Latest status: source fast path fixed, deployed wrapper not yet reproven (2026-07-06)
 

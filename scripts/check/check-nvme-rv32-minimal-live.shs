@@ -1,0 +1,113 @@
+#!/bin/sh
+# Minimal RV32 live check for the NVMe firmware hook logic.
+set -e
+cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+
+OUT="build/nvme_fw_rv32_minimal.elf"
+ENTRY_DIR="build/os/generated"
+SRC_DIR="$ENTRY_DIR/nvme_fw_rv32_minimal_src"
+ENTRY="$SRC_DIR/nvme_fw_minimal_root.spl"
+LOG="build/test-artifacts/nvme_fw_rv32_minimal_serial.log"
+BUILD_OUT="build/test-artifacts/nvme_fw_rv32_minimal_build.out"
+BUILD_ERR="build/test-artifacts/nvme_fw_rv32_minimal_build.err"
+TIMEOUT_SECS="${NVME_RV32_BUILD_TIMEOUT_SECS:-90}"
+SIMPLE_BIN="${NVME_RV32_SIMPLE_BIN:-bin/simple}"
+
+mkdir -p "$ENTRY_DIR" "$SRC_DIR" build/test-artifacts
+rm -f "$SRC_DIR"/*.spl
+for src in examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic*.spl; do
+  sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$src" >"$SRC_DIR/$(basename "$src")"
+done
+cat >"$ENTRY" <<'EOF_ENTRY'
+extern fn rt_riscv_uart_put(byte: u64)
+use logic.{nvme_fw_rv32_logic_selftest}
+
+fn _put(byte: i64):
+    rt_riscv_uart_put(byte as u64)
+
+fn _pass():
+    _put(65)
+    _put(76)
+    _put(76)
+    _put(32)
+    _put(82)
+    _put(86)
+    _put(51)
+    _put(50)
+    _put(32)
+    _put(78)
+    _put(86)
+    _put(77)
+    _put(69)
+    _put(32)
+    _put(70)
+    _put(87)
+    _put(32)
+    _put(67)
+    _put(72)
+    _put(69)
+    _put(67)
+    _put(75)
+    _put(83)
+    _put(32)
+    _put(80)
+    _put(65)
+    _put(83)
+    _put(83)
+    _put(10)
+
+fn _fail():
+    _put(70)
+    _put(65)
+    _put(73)
+    _put(76)
+    _put(10)
+
+fn _selftest() -> i64:
+    val fail = nvme_fw_rv32_logic_selftest()
+    if fail == 0:
+        _pass()
+    else:
+        _fail()
+    fail
+
+@section(".text.entry")
+@naked
+fn _start():
+    asm volatile:
+        "la      sp, _stack_top"
+        "call    nvme_fw_minimal_root___selftest"
+        "lui     t0, 0x100"
+        "li      t1, 0x5555"
+        "sw      t1, 0(t0)"
+        "1: wfi"
+        "j 1b"
+
+fn main() -> i64:
+    0
+EOF_ENTRY
+
+rm -f "$OUT" "$LOG" "$BUILD_OUT" "$BUILD_ERR"
+set +e
+timeout -k 10s "$TIMEOUT_SECS" env SIMPLE_COMPILER_PHASE_PROFILE=1 "$SIMPLE_BIN" native-build --backend llvm \
+  --source "$SRC_DIR" \
+  --entry "$ENTRY" --entry-closure \
+  --linker-script src/os/kernel/arch/riscv32/linker.ld \
+  --target riscv32-unknown-none \
+  -o "$OUT" >"$BUILD_OUT" 2>"$BUILD_ERR"
+rc=$?
+set -e
+if [ "$rc" -ne 0 ]; then
+  echo "STATUS: FAIL nvme-rv32-minimal-live build_rc=$rc timeout=${TIMEOUT_SECS}s out=$BUILD_OUT err=$BUILD_ERR"
+  tail -n 40 "$BUILD_OUT" || true
+  tail -n 40 "$BUILD_ERR" || true
+  exit "$rc"
+fi
+
+timeout 15 qemu-system-riscv32 -machine virt -cpu rv32 -m 128M -nographic -bios none \
+  -kernel "$OUT" -serial file:"$LOG" </dev/null >/dev/null 2>&1 || true
+
+cat "$LOG"
+grep -q "ALL RV32 NVME FW CHECKS PASS" "$LOG"
+! grep -q "FAIL" "$LOG"
+echo "STATUS: PASS nvme-rv32-minimal-live"

@@ -1,0 +1,215 @@
+# x86_64 filesystem-exec ring-3 control-transfer handoff.
+#
+# The GENERAL spawn (x86_64_fs_exec_spawn_as -> fs_exec_prepare_spawn_from_bytes
+# -> build_user_process_image_unchecked) builds a UserProcessImage but never maps
+# its segments into a live address space and never transfers control to ring 3 —
+# only the one-shot smoke kernel did that, for a hardcoded blob. This module is
+# the missing handoff: it maps a general-built UserProcessImage into a fresh user
+# address space and iretq's to CPL3, reusing the ring-3 primitives that are
+# actually present and proven in this checkout (create_user_address_space +
+# vmm_clone_kernel_low_identity + vmm_map_page_in + vmm_copy_bytes_to_phys +
+# arch_x86_64_enter_user_task — the same set ring3_smoke_entry.spl uses).
+#
+# Freestanding discipline (native-build does NOT run module-level `val`
+# initializers — see ring3_smoke_entry.spl and the module-val note below):
+#   * every constant here is FUNCTION-LOCAL,
+#   * zero-arg accessors are always called with explicit parens,
+#   * no `[u8]` array literals,
+#   * PT_LOAD segments + the entry point are parsed INLINE from image.file_bytes
+#     (a plain [u8] copy of the ELF that is always valid) via the module-val-free
+#     byte_utils readers.
+#
+# Why not image.segments / image.entry / image.initial_sp directly? The shared
+# elf_loader.spl (parse), stack_builder.spl (SysV frame) and process_image.spl
+# (X86_64_USER_STACK_TOP) chains all key on module-level `val`s that read garbage
+# under freestanding native-build, so those STRUCTURED fields are unreliable here.
+# `image.file_bytes` is the reliable channel; the structured fields are logged for
+# diagnosis but not trusted. Fixing that freestanding module-val bug so the whole
+# general path is usable freestanding is tracked as a separate blocker.
+
+use os.kernel.memory.vmm_address_space.{
+    create_user_address_space, vmm_map_page_in, vmm_copy_bytes_to_phys,
+    vmm_clone_kernel_low_identity, vmm_zero_phys_range
+}
+use os.kernel.types.memory_types.{VmFlags, VirtAddr, PhysAddr}
+use os.kernel.types.task_types.{
+    TaskContext, AddressSpace, UserProcessImage,
+    user_process_image_entry, user_process_image_segment_count,
+    user_process_image_file_bytes, user_process_image_initial_sp,
+    user_process_image_stack_top, user_process_image_initial_stack_bytes
+}
+use os.kernel.arch.x86_64.context.{arch_x86_64_enter_user_task}
+use os.kernel.loader.byte_utils.{read_u16_le, read_u32_le, read_u64_le}
+
+extern fn serial_println(msg: text)
+extern fn pmm_alloc_page_raw() -> u64
+
+# Map every PT_LOAD of the ELF held in `fb` into `space` at its p_vaddr, page by
+# page (one frame per page, so segments sharing a page are mapped once with the
+# UNION of their perms). Each frame is zeroed (BSS) before the file-backed range
+# of every covering segment is copied in from `fb`. Per-page perms: user_rw if any
+# covering PT_LOAD is writable, else user_rx. Returns 1 on success, 0 on failure.
+fn _map_pt_loads(space: AddressSpace, fb: [u8]) -> i64:
+    val PAGE: i64 = 4096
+    val PT_LOAD: i64 = 1
+    val PF_X: i64 = 1
+    val PF_W: i64 = 2
+
+    val phoff = read_u64_le(fb, 32)
+    val phentsize = read_u16_le(fb, 54)
+    val phnum = read_u16_le(fb, 56)
+    serial_println("[spawn] phoff={phoff} phentsize={phentsize} phnum={phnum}")
+    if phnum <= 0:
+        serial_println("[spawn] FAIL no program headers")
+        return 0
+
+    var lo: i64 = 0x7FFFFFFFFFFFFFFF
+    var hi: i64 = 0
+    var i: i64 = 0
+    while i < phnum:
+        val ph = phoff + (i * phentsize)
+        if read_u32_le(fb, ph) == PT_LOAD:
+            val sv = read_u64_le(fb, ph + 16)
+            val se = sv + read_u64_le(fb, ph + 40)
+            if sv < lo:
+                lo = sv
+            if se > hi:
+                hi = se
+        i = i + 1
+    if hi == 0:
+        serial_println("[spawn] FAIL no PT_LOAD segments")
+        return 0
+
+    val lo_page = lo & (~(PAGE - 1))
+    val hi_page = (hi + PAGE - 1) & (~(PAGE - 1))
+    serial_println("[spawn] image span lo=0x{lo_page} hi=0x{hi_page}")
+
+    var va: i64 = lo_page
+    while va < hi_page:
+        val phys = pmm_alloc_page_raw()
+        if phys == 0:
+            serial_println("[spawn] FAIL frame alloc va=0x{va}")
+            return 0
+        vmm_zero_phys_range(phys, PAGE.to_u64())
+
+        var writable = false
+        var executable = false
+        var j: i64 = 0
+        while j < phnum:
+            val ph = phoff + (j * phentsize)
+            if read_u32_le(fb, ph) == PT_LOAD:
+                val sv = read_u64_le(fb, ph + 16)
+                val se = sv + read_u64_le(fb, ph + 40)
+                val overlaps = (sv < (va + PAGE)) and (se > va)
+                if overlaps:
+                    val fl = read_u32_le(fb, ph + 4)
+                    if (fl & PF_W) != 0:
+                        writable = true
+                    if (fl & PF_X) != 0:
+                        executable = true
+            j = j + 1
+
+        val flags = if writable: VmFlags.user_rw() else: VmFlags.user_rx()
+        if not vmm_map_page_in(space, VirtAddr(addr: va.to_u64()), PhysAddr(addr: phys), flags):
+            serial_println("[spawn] FAIL map page va=0x{va}")
+            return 0
+
+        var k: i64 = 0
+        while k < phnum:
+            val ph = phoff + (k * phentsize)
+            if read_u32_le(fb, ph) == PT_LOAD:
+                val sv = read_u64_le(fb, ph + 16)
+                val foff = read_u64_le(fb, ph + 8)
+                val fsz = read_u64_le(fb, ph + 32)
+                var cs = va
+                if cs < sv:
+                    cs = sv
+                var ce = va + PAGE
+                val sfe = sv + fsz
+                if ce > sfe:
+                    ce = sfe
+                if cs < ce:
+                    vmm_copy_bytes_to_phys(
+                        phys + (cs - va).to_u64(),
+                        fb,
+                        (foff + (cs - sv)).to_u64(),
+                        (ce - cs).to_u64()
+                    )
+            k = k + 1
+
+        va = va + PAGE
+
+    serial_println("[spawn] PT_LOAD segments mapped")
+    1
+
+pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage) -> i64:
+    """Map a general-built UserProcessImage into a fresh user AS and enter ring 3.
+
+    Reuses the ring3_smoke primitive sequence. Does not return on success (the
+    program runs at CPL3 and exits QEMU); returns a negative code on failure.
+    """
+    val fb = user_process_image_file_bytes(image)
+    val img_entry = user_process_image_entry(image)
+    val seg_count = user_process_image_segment_count(image)
+    val builder_sp = user_process_image_initial_sp(image)
+    val builder_top = user_process_image_stack_top(image)
+    val stk_bytes = user_process_image_initial_stack_bytes(image)
+
+    # Required acceptance marker: REAL segment count from the general image, plus
+    # the builder-reported fields (so a freestanding-broken builder is visible).
+    serial_println("[spawn] image path={image.binary_path} entry=0x{img_entry} segments={seg_count} builder_top=0x{builder_top} builder_sp=0x{builder_sp} stk_bytes={stk_bytes.len()} file_len={fb.len()}")
+
+    # Trustworthy entry: ELF e_entry @ offset 24, read straight from file_bytes.
+    val entry = read_u64_le(fb, 24)
+    serial_println("[spawn] parsed entry=0x{entry}")
+
+    val space = create_user_address_space()
+    if space.phys_root == 0 or space.phys_root == 1:
+        serial_println("[spawn] FAIL user-AS synthetic root={space.phys_root}")
+        return -1
+    vmm_clone_kernel_low_identity(space.phys_root)
+    serial_println("[spawn] user AS ready root={space.phys_root}")
+
+    if _map_pt_loads(space, fb) == 0:
+        serial_println("[spawn] FAIL segment mapping")
+        return -2
+
+    # User stack: a small RW region growing down from a FUNCTION-LOCAL literal top
+    # (the builder's stack_top is module-val-bound and unreliable freestanding).
+    # The SysV argv frame (build_initial_stack) is likewise unreliable here; the
+    # verification payload ignores argv, so a valid mapped stack + a 16-aligned
+    # rsp is the ring-3 contract.
+    val PAGE: i64 = 4096
+    val STACK_TOP: i64 = 0x00007FFFFFFFF000
+    val STACK_PAGES: i64 = 32
+    var p: i64 = 0
+    while p < STACK_PAGES:
+        val sva = STACK_TOP - ((p + 1) * PAGE)
+        val sph = pmm_alloc_page_raw()
+        if sph == 0:
+            serial_println("[spawn] FAIL stack alloc p={p}")
+            return -3
+        vmm_zero_phys_range(sph, PAGE.to_u64())
+        if not vmm_map_page_in(space, VirtAddr(addr: sva.to_u64()), PhysAddr(addr: sph), VmFlags.user_rw()):
+            serial_println("[spawn] FAIL stack map p={p}")
+            return -4
+        p = p + 1
+    val user_rsp: i64 = STACK_TOP - 16
+    serial_println("[spawn] user stack mapped top=0x{STACK_TOP} pages={STACK_PAGES} rsp=0x{user_rsp}")
+
+    val ctx = TaskContext(
+        rax: 0, rbx: 0, rcx: 0, rdx: 0,
+        rsi: 0, rdi: 0, rbp: 0, rsp: user_rsp.to_u64(),
+        r8: 0, r9: 0, r10: 0, r11: 0,
+        r12: 0, r13: 0, r14: 0, r15: 0,
+        rip: entry.to_u64(),
+        rflags: 0x3002,
+        cs: 0x2b,
+        ss: 0x23,
+        fpu_state: 0
+    )
+    serial_println("[spawn] entering user cs=0x2b iopl=3 rip=0x{entry} rsp=0x{user_rsp}")
+    arch_x86_64_enter_user_task(ctx, space.phys_root)
+
+    serial_println("[spawn] returned from user (unexpected)")
+    -9

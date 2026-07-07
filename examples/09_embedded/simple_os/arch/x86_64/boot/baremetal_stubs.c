@@ -71,6 +71,18 @@ static inline void io_wait(void)
      uint32_t hi = (uint32_t)(value >> 32);
      __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
  }
+
+ uint64_t get_kernel_syscall_entry_addr(void);
+
+ uint64_t rt_x86_install_syscall_entry_raw(void)
+ {
+     uint64_t efer = rt_read_msr(0xC0000080u);
+     rt_write_msr(0xC0000080u, efer | 1u);
+     rt_write_msr(0xC0000081u, ((uint64_t)0x1B << 48) | ((uint64_t)0x08 << 32));
+     rt_write_msr(0xC0000082u, get_kernel_syscall_entry_addr());
+     rt_write_msr(0xC0000084u, 0x200u);
+     return get_kernel_syscall_entry_addr();
+ }
  
  /* rt_x86_syscall — C-ABI wrapper that actually emits the `syscall`
   * instruction. The Simple-side asm-volatile block in

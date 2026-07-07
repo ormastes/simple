@@ -222,6 +222,7 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     # guest compiler payloads, not a silently skipped placeholder.
     # To enable: `touch build/os/.bake_include_toolchain` before running bake.
     # 100+ MB binaries through interpreter take 5+ min (BUG-INTERPRETER-PERF).
+    var nested_payloads: [PayloadEntry] = []
     if io.file_exists("build/os/.bake_include_toolchain"):
         if not io.file_exists(clang_static_path):
             return Err("bake: toolchain marker set but clang_static missing: " + clang_static_path)
@@ -229,6 +230,17 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
             case Ok(e):
                 print "bake: loaded clang_static (" + io.file_size(clang_static_path).to_text() + " bytes)"
                 payloads.push(e)
+            case Err(e):
+                return Err(e)
+        # clang_as_general_fs_exec (task 1): also place clang_static at the
+        # general nested path /usr/bin/clang as a REAL FAT32 file (real /usr
+        # and /usr/bin subdirectories), reachable via Fat32Core.resolve_path --
+        # not just the /sys/apps/clang SMF stub or the flat-root CLANGSTC.SMF
+        # slot above. Additive: does not change the flat-root placement.
+        match _load_payload_at(clang_static_path, "clang_static (nested)", "/usr/bin/clang"):
+            case Ok(e):
+                print "bake: loaded clang_static -> /usr/bin/clang (nested, " + io.file_size(clang_static_path).to_text() + " bytes)"
+                nested_payloads.push(e)
             case Err(e):
                 return Err(e)
         if not io.file_exists(rustc_static_path):
@@ -256,17 +268,25 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
         print "bake: toolchain skipped (touch build/os/.bake_include_toolchain to embed)"
 
     val size_mb: u64 = 32u64
-    val cfg = DiskImageConfig(size_mb: size_mb, payloads: payloads)
+    val cfg = DiskImageConfig(size_mb: size_mb, payloads: payloads, nested_payloads: nested_payloads)
 
     # --- Opt-in fast path via mkfs.fat + mcopy (BUG-FAT32-BAKE-FATSIZE-TOO-SMALL) ---
     # Gate: marker file exists AND both host tools are on PATH.
     # If any gate fails, fall through to the interpreter builder unchanged.
+    # mcopy -s already stages guest_path recursively (see _bake_via_mkfs_fat),
+    # so nested_payloads is merged into the same staged set here.
+    var mkfs_payloads: [PayloadEntry] = []
+    for p in payloads:
+        mkfs_payloads.push(p)
+    for p in nested_payloads:
+        mkfs_payloads.push(p)
+
     var used_fast_path = false
     if io.file_exists("build/os/.bake_use_mkfs_fat"):
         if _host_tool_available("mkfs.fat"):
             if _host_tool_available("mcopy"):
                 print "bake: using mkfs.fat+mcopy fast path (build/os/.bake_use_mkfs_fat present)"
-                match _bake_via_mkfs_fat(out_disk, payloads, size_mb):
+                match _bake_via_mkfs_fat(out_disk, mkfs_payloads, size_mb):
                     case Ok(()):
                         used_fast_path = true
                     case Err(e):
