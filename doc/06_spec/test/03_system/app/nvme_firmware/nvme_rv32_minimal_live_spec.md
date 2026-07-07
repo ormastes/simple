@@ -94,12 +94,13 @@ tiny RV32 start stub, boot the ELF under `qemu-system-riscv32`, and print both
 - Run the 21-section RV32 minimal live checker
    - Expected: code equals `0`
 - The checker reports the RV32 firmware serial PASS marker
+- The checker output contains no failure marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -111,6 +112,10 @@ expect(code).to_equal(0)
 step("The checker reports the RV32 firmware serial PASS marker")
 expect(out).to_contain("ALL RV32 NVME FW CHECKS PASS")
 expect(out).to_contain("STATUS: PASS nvme-rv32-minimal-live")
+
+step("The checker output contains no failure marker")
+if out.contains("FAIL"):
+    fail("SERIAL-FAIL: minimal live checker printed a failure marker")
 ```
 
 </details>
