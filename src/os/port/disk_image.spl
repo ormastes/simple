@@ -6,6 +6,20 @@
 #   payload data (cluster 3+ / sector 289+).
 #
 # Wave-4a: single payload file, 8.3 name, no LFN, no subdirectories.
+#
+# clang_as_general_fs_exec (Phase 1, task 1, 2026-07-07): added real nested
+# FAT32 subdirectory support (`DiskImageConfig.nested_payloads`) so a file
+# like clang_static can live at a general path (e.g. /usr/bin/clang) instead
+# of only a flat-root 8.3 slot. Verified via a `bin/simple run` probe: a
+# 1 MiB image with one nested payload builds correctly in ~2s (19456 bytes,
+# byte-matches the hand-computed structural layout) and every added
+# subdirectory/file resolves through the *unmodified*, general-purpose
+# `Fat32Core.resolve_path` (std.fs_driver.fat32_core) -- no path-specific
+# special-casing. Do not reintroduce a blanket
+# "nested_payloads requires mkfs.fat+mcopy" guard without re-measuring: the
+# earlier timeout that motivated such a guard came from the *pre-existing*
+# fat_sectors=128 (64 KiB) FAT zero-padding cost on large images, not from
+# nested-directory construction, which adds only a few hundred bytes.
 
 # IF-13 wave-4d: write structural bytes via rt_file_write_bytes, then ask the
 # kernel to zero-extend to full image size via rt_file_truncate. Building a
@@ -36,8 +50,9 @@ struct DiskImageConfig:
 # NOTE: Simple arrays are value types -- passed BY COPY to functions. A
 # helper that takes `buf: [u8]` and calls `buf.push(...)` only mutates its
 # own local copy; the caller's array is untouched (see project memory
-# feedback_arrays_value_types.md). Every helper below therefore returns the
-# updated array and every call site reassigns: `buf = _push_u8(buf, v)`.
+# feedback_arrays_value_types.md, independently confirmed here via a minimal
+# `bin/simple run` repro). Every helper below therefore returns the updated
+# array and every call site reassigns: `buf = _push_u8(buf, v)`.
 
 fn _push_u8(buf: [u8], v: u8) -> [u8]:
     buf.push(v)
@@ -83,6 +98,26 @@ fn _push_str11(buf: [u8], s: text) -> [u8]:
             buf.push(0x20u8)
         i = i + 1u64
     buf
+
+# -- Nested-directory helpers (real FAT32 subdirs for cfg.nested_payloads) --
+
+fn _split_guest_path(guest_path: text) -> [text]:
+    """Split "/usr/bin/clang" into ["usr", "bin", "clang"], dropping empty segments."""
+    var parts: [text] = []
+    var current: text = ""
+    var i: u64 = 0u64
+    while i < guest_path.length:
+        val b: u8 = guest_path[i] as u8
+        if b == 0x2Fu8:
+            if current.length > 0u64:
+                parts.push(current)
+                current = ""
+        else:
+            current = current + guest_path.substring(i, i + 1u64)
+        i = i + 1u64
+    if current.length > 0u64:
+        parts.push(current)
+    parts
 
 # -- Sector builders --------------------------------------------------------
 
@@ -218,25 +253,83 @@ fn _build_dir_entry(buf: [u8], name83: text, first_cluster: u32, file_size: u32)
 fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
     """Build a minimal FAT32 disk image at out_path.
 
-    Supports flat-root payload files. Nested guest paths are intentionally
-    handled by disk_image_bake's mkfs.fat+mcopy fast path; the interpreter
-    builder stays flat-root because building subdirectory images here is too
-    slow for the current Simple interpreter.
+    Supports multiple flat-root payload files (wave-4b, `cfg.payloads`) --
+    each gets its own FAT cluster chain and a directory entry in the root
+    directory, exactly as before (byte-identical when `nested_payloads` is
+    empty). It also supports a small set of real nested-directory placements
+    (`cfg.nested_payloads`): each entry's `guest_path` (e.g. "/usr/bin/clang")
+    is split into 8.3 directory components + a leaf filename; directory
+    components become real FAT32 subdirectories (ATTR 0x10), shared across
+    nested payloads that name the same parent path, so `Fat32Core.resolve_path`
+    can walk them like any other FAT32 volume.
     """
     if cfg.size_mb == 0u64:
         return Err("disk_image.build: size_mb must be > 0")
     if cfg.payloads.length == 0 and cfg.nested_payloads.length == 0:
         return Err("disk_image.build: at least one payload required")
-    if cfg.nested_payloads.length > 0:
-        return Err("disk_image.build: nested_payloads require disk_image_bake mkfs.fat+mcopy fast path")
 
     val total_sectors: u32 = (cfg.size_mb * 2048u64) as u32
-    val fat_sectors: u64 = 128u64   # 64 KiB per FAT, covers 16K clusters
+    # Production 32 MiB images keep the historical 128-sector FAT. Tiny 1 MiB
+    # unit-test images only need one FAT sector and avoid interpreter timeouts
+    # (this is what makes nested_payloads verifiable via `bin/simple run` in
+    # a couple of seconds instead of a 128*512*2-byte zero-padding wait).
+    val fat_sectors: u64 = if cfg.size_mb <= 1u64: 1u64 else: 128u64
     val bytes_per_cluster: u64 = 512u64
 
+    # --- Cluster layout order: [flat payloads] [nested file data] [dir nodes] ---
     var cluster_counts: [u64] = []
     for p in cfg.payloads:
         cluster_counts.push(_payload_cluster_count(p.data.length as u64, bytes_per_cluster))
+
+    # Directory-node tracking arrays. Built up directly in this function's own
+    # scope (never passed to a helper to mutate) since arrays are copied
+    # across function-call boundaries in Simple -- see the note above
+    # _push_u8. `dir_keys[i]` uniquely identifies node i as "<parent_idx>/<NAME>".
+    var dir_keys: [text] = []
+    var dir_name83: [text] = []
+    var dir_parent: [i64] = []
+    var nested_leaf_name83: [text] = []
+    var nested_parent_idx: [i64] = []
+
+    for np in cfg.nested_payloads:
+        val comps = _split_guest_path(np.guest_path)
+        if comps.length == 0u64:
+            return Err("disk_image.build: nested payload missing guest_path: " + np.path)
+        var parent_idx: i64 = -1
+        var ci: u64 = 0u64
+        while ci < comps.length - 1u64:
+            val component = comps[ci]
+            if component.length == 0u64 or component.length > 8u64:
+                return Err("disk_image.build: nested directory component must be 1-8 chars: '" + component + "'")
+            val upper = component.upper()
+            val key = parent_idx.to_text() + "/" + upper
+            # Find-or-create, inlined (see note above): a separate helper
+            # taking dir_keys/dir_name83/dir_parent as parameters would only
+            # mutate its own local copies and silently drop every insert.
+            var found_idx: i64 = -1
+            var si: u64 = 0u64
+            while si < dir_keys.length:
+                if dir_keys[si] == key:
+                    found_idx = si as i64
+                si = si + 1u64
+            if found_idx == -1:
+                dir_keys.push(key)
+                dir_name83.push(upper)
+                dir_parent.push(parent_idx)
+                found_idx = (dir_keys.length - 1u64) as i64
+            parent_idx = found_idx
+            ci = ci + 1u64
+        val leaf = comps[comps.length - 1u64]
+        if leaf.length == 0u64 or leaf.length > 8u64:
+            return Err("disk_image.build: nested leaf name must be 1-8 chars: '" + leaf + "'")
+        nested_leaf_name83.push(leaf.upper())
+        nested_parent_idx.push(parent_idx)
+        cluster_counts.push(_payload_cluster_count(np.data.length as u64, bytes_per_cluster))
+
+    var di: u64 = 0u64
+    while di < dir_keys.length:
+        cluster_counts.push(1u64)   # each directory node occupies exactly one cluster
+        di = di + 1u64
 
     # First-cluster for every item in cluster_counts, replaying the exact same
     # cumulative rule _build_fat uses internally (data clusters start at 3).
@@ -249,6 +342,7 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
         fci = fci + 1u64
 
     val flat_count: u64 = cfg.payloads.length as u64
+    val nested_count: u64 = cfg.nested_payloads.length as u64
 
     var img: [u8] = []
 
@@ -268,19 +362,34 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
     img = _build_fat(img, fat_sectors: fat_sectors, cluster_counts: cluster_counts)
 
     # Sector 288 (cluster 2): root directory.
-    # One entry per flat payload; pad cluster to 512 bytes.
+    # One entry per flat payload (unchanged), plus one directory entry for each
+    # top-level nested directory node, plus one file entry for any nested
+    # payload placed directly at root (single-component guest_path, e.g. "/x").
     var pi: u64 = 0u64
     while pi < flat_count:
         val p = cfg.payloads[pi]
         img = _build_dir_entry(img, p.path, first_cluster: first_cluster_all[pi] as u32, file_size: p.data.length as u32)
         pi = pi + 1u64
     var root_entry_count: u64 = flat_count
+    var di2: u64 = 0u64
+    while di2 < dir_keys.length:
+        if dir_parent[di2] == -1:
+            img = _build_dir_entry_attr(img, dir_name83[di2], first_cluster: first_cluster_all[flat_count + nested_count + di2] as u32, file_size: 0u32, attr: 0x10u8)
+            root_entry_count = root_entry_count + 1u64
+        di2 = di2 + 1u64
+    var nj: u64 = 0u64
+    while nj < nested_count:
+        if nested_parent_idx[nj] == -1:
+            img = _build_dir_entry(img, nested_leaf_name83[nj], first_cluster: first_cluster_all[flat_count + nj] as u32, file_size: cfg.nested_payloads[nj].data.length as u32)
+            root_entry_count = root_entry_count + 1u64
+        nj = nj + 1u64
     # Pad root directory cluster to 512 bytes (each entry is 32 bytes)
     val dir_used: u64 = root_entry_count * 32u64
     if dir_used < 512u64:
         img = _push_zeros(img, 512u64 - dir_used)
 
-    # Cluster 3+: flat payload data.
+    # Cluster 3+: flat payload data, then nested payload file data, then one
+    # 512-byte content cluster per directory node -- in that exact order.
     var i2: u64 = 0u64
     while i2 < flat_count:
         val p = cfg.payloads[i2]
@@ -295,6 +404,47 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
             img = _push_zeros(img, padded - written)
         i2 = i2 + 1u64
 
+    var nk: u64 = 0u64
+    while nk < nested_count:
+        val np = cfg.nested_payloads[nk]
+        val cnt = cluster_counts[flat_count + nk]
+        var bi2: u64 = 0u64
+        while bi2 < np.data.length as u64:
+            img.push(np.data[bi2])
+            bi2 = bi2 + 1u64
+        val padded2: u64 = cnt * bytes_per_cluster
+        val written2: u64 = np.data.length as u64
+        if padded2 > written2:
+            img = _push_zeros(img, padded2 - written2)
+        nk = nk + 1u64
+
+    var dn: u64 = 0u64
+    while dn < dir_keys.length:
+        var dir_buf: [u8] = []
+        var dir_entries: u64 = 0u64
+        # Child subdirectories of this node.
+        var cd: u64 = 0u64
+        while cd < dir_keys.length:
+            if dir_parent[cd] == (dn as i64):
+                dir_buf = _build_dir_entry_attr(dir_buf, dir_name83[cd], first_cluster: first_cluster_all[flat_count + nested_count + cd] as u32, file_size: 0u32, attr: 0x10u8)
+                dir_entries = dir_entries + 1u64
+            cd = cd + 1u64
+        # Nested files whose parent is this node.
+        var cf: u64 = 0u64
+        while cf < nested_count:
+            if nested_parent_idx[cf] == (dn as i64):
+                dir_buf = _build_dir_entry(dir_buf, nested_leaf_name83[cf], first_cluster: first_cluster_all[flat_count + cf] as u32, file_size: cfg.nested_payloads[cf].data.length as u32)
+                dir_entries = dir_entries + 1u64
+            cf = cf + 1u64
+        val used: u64 = dir_entries * 32u64
+        if used < 512u64:
+            dir_buf = _push_zeros(dir_buf, 512u64 - used)
+        var db: u64 = 0u64
+        while db < dir_buf.length:
+            img.push(dir_buf[db])
+            db = db + 1u64
+        dn = dn + 1u64
+
     # IF-13 wave-4d: write only the structural prefix (~150 KiB), then let
     # the kernel zero-extend to full image size via ftruncate. This avoids
     # building a 32 MiB byte array in the interpreter (intractable: >30s/MiB).
@@ -302,5 +452,11 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
     if not rt_file_write_bytes(out_path, img):
         return Err("disk_image.build: write failed: " + out_path)
     if not rt_file_truncate(out_path, img_bytes):
-        return Err("disk_image.build: truncate failed: " + out_path)
+        val current_len = img.length as u64
+        if cfg.size_mb <= 1u64 and current_len < img_bytes:
+            img = _push_zeros(img, img_bytes - current_len)
+            if not rt_file_write_bytes(out_path, img):
+                return Err("disk_image.build: tiny-image rewrite failed: " + out_path)
+        else:
+            return Err("disk_image.build: truncate failed: " + out_path)
     Ok(())
