@@ -71,3 +71,35 @@ Terminated
 So the current blocker is still parse/native-build throughput or external
 termination; the fake-QEMU boot wrapper remains fail-closed and must not be
 relaxed.
+
+## Update — journal/map/band wrappers now parse quickly
+
+`logic_journal.spl`, `logic_map.spl`, and `logic_band.spl` were split into
+small public wrappers plus core/case files. The scalar host logic gate remains
+green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but it now gets through the previously blocking
+journal/map/band wrappers and stops at scheduler parsing:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_journal.spl chars=240
+[BOOTSTRAP-PHASE] ... logic_journal.spl
+[BOOTSTRAP-PHASE] ... logic_map.spl chars=84
+[BOOTSTRAP-PHASE] ... logic_map.spl
+[BOOTSTRAP-PHASE] ... logic_band.spl chars=229
+[BOOTSTRAP-PHASE] ... logic_band.spl
+[BOOTSTRAP-PHASE] ... logic_sched.spl chars=1342
+Terminated
+```
+
+The RV64 real-boot proof is still incomplete until the ELF is produced and
+`fw_rv64/boot.shs` passes against real QEMU media.
