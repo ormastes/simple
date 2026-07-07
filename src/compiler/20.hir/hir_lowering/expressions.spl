@@ -157,9 +157,10 @@ impl HirLowering:
         global Function value). Everything else stays an error."""
         val is_bootstrap_builtin = (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and is_bootstrap_builtin_fn(name)
         if is_interp_builtin_fn(name) or is_bootstrap_builtin:
-            var symbol_type: HirType? = nil
-            if is_bootstrap_builtin:
-                symbol_type = bootstrap_builtin_signature(name, span)
+            val symbol_type = if is_bootstrap_builtin:
+                bootstrap_builtin_signature(name, span)
+            else:
+                nil
             val bsym = self.symbols.define(name, SymbolKind.Function, symbol_type, span, false, false, nil)
             HirExprKind.NamedVar(bsym, name)
         else:
@@ -290,7 +291,19 @@ impl HirLowering:
             # discriminant pre-dispatch above (seed always-true struct-pattern
             # hazard) and MUST NOT appear in this match.
             case ExprKind.Index(base, index):
-                HirExprKind.Index(self.lower_hir_expr(base), self.lower_hir_expr(index))
+                val index_base_t: Expr = base
+                val index_t: Expr = index
+                match index_base_t.kind:
+                    case ExprKind.ExistsCheck(exists_base):
+                        val exists_base_t: Expr = exists_base
+                        val indexed = HirExpr(
+                            kind: HirExprKind.Index(self.lower_hir_expr(exists_base_t), self.lower_hir_expr(index_t)),
+                            type_: nil,
+                            span: e.span
+                        )
+                        HirExprKind.ExistsCheck(indexed)
+                    case _:
+                        HirExprKind.Index(self.lower_hir_expr(index_base_t), self.lower_hir_expr(index_t))
 
             case ExprKind.OptionalChain(base, field):
                 HirExprKind.OptionalChain(self.lower_hir_expr(base), field)
@@ -328,16 +341,7 @@ impl HirLowering:
                 val call_callee_t: Expr = callee
                 val call_args_t: [CallArg] = args
                 if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    var hir_args: [HirCallArg] = []
-                    for arg in call_args_t:
-                        val arg_t: CallArg = arg
-                        hir_args = hir_args.push(HirCallArg(
-                            has_name: arg_t.has_name,
-                            name: arg_t.name,
-                            value: self.lower_hir_expr(arg_t.value),
-                            span: arg_t.span
-                        ))
-                    HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, [])
+                    HirExprKind.Call(self.lower_hir_expr(call_callee_t), [], [])
                 else:
                     var hir_args: [HirCallArg] = []
                     for arg in call_args_t:
@@ -357,16 +361,7 @@ impl HirLowering:
 
             case ExprKind.MethodCall(receiver, method, args):
                 if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    var hir_args: [HirCallArg] = []
-                    for arg in args:
-                        val marg_t: CallArg = arg
-                        hir_args = hir_args.push(HirCallArg(
-                            has_name: marg_t.has_name,
-                            name: marg_t.name,
-                            value: self.lower_hir_expr(marg_t.value),
-                            span: marg_t.span
-                        ))
-                    HirExprKind.MethodCall(self.lower_hir_expr(receiver), method, hir_args, MethodResolution.Unresolved)
+                    HirExprKind.MethodCall(self.lower_hir_expr(receiver), method, [], MethodResolution.Unresolved)
                 else:
                     var hir_args: [HirCallArg] = []
                     for arg in args:
@@ -505,8 +500,8 @@ impl HirLowering:
                 HirExprKind.UnsafeBlock(self.lower_hir_block(body))
 
             # Inline assembly
-            case ExprKind.AsmBlock(asm):
-                HirExprKind.InlineAsm(self.lower_asm(asm))
+            case ExprKind.AsmBlock(asm_node):
+                HirExprKind.InlineAsm(self.lower_asm(asm_node))
 
             # Target-qualified inline assembly
             case ExprKind.AsmMatch(arms):
@@ -690,6 +685,7 @@ impl HirLowering:
     me lower_hir_block(b: Block) -> HirBlock:
         if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_block:start")
+            self.symbols.push_scope(ScopeKind.Block)
             var boot_stmts: [HirStmt] = []
             var boot_idx = 0
             while boot_idx < b.stmts.len():
@@ -712,9 +708,8 @@ impl HirLowering:
                         nil
             else:
                 nil
-            if boot_value.?:
-                return HirBlock(stmts: boot_stmts, has: true, value: boot_value ?? HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
-            return HirBlock(stmts: boot_stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
+            self.symbols.pop_scope()
+            return HirBlock(stmts: boot_stmts, value: boot_value, span: b.span)
 
         self.symbols.push_scope(ScopeKind.Block)
 
@@ -734,8 +729,7 @@ impl HirLowering:
         val stmt_count = b.stmts.len()
         var stmt_idx = 0
         while stmt_idx < stmt_count:
-            val stmt = b.stmts[stmt_idx]
-            val lowered = self.lower_hir_stmt(stmt)
+            val lowered = self.lower_hir_stmt(b.stmts[stmt_idx])
             if stmt_idx == stmt_count - 1:
                 # QUALIFIED pattern required: bare `case Expr(expr)` collides with
                 # the frontend `struct Expr`, so the seed's unqualified-pattern
@@ -785,12 +779,14 @@ impl HirLowering:
     me lower_hir_block_unit(b: Block) -> HirBlock:
         if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_block_unit:start")
+            self.symbols.push_scope(ScopeKind.Block)
             var boot_stmts: [HirStmt] = []
             var boot_idx = 0
             while boot_idx < b.stmts.len():
                 boot_stmts = boot_stmts.push(self.lower_hir_stmt(b.stmts[boot_idx]))
                 boot_idx = boot_idx + 1
             eprint("[hir-lower] lower_block_unit:done")
+            self.symbols.pop_scope()
             return HirBlock(stmts: boot_stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
 
         self.symbols.push_scope(ScopeKind.Block)
@@ -805,10 +801,10 @@ impl HirLowering:
 
         HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
 
-    me lower_asm(asm: AsmExpr) -> HirAsm:
+    me lower_asm(asm_node: AsmExpr) -> HirAsm:
         # Lower all constraint value expressions
         var hir_constraints: [HirAsmConstraint] = []
-        for constraint in asm.constraints:
+        for constraint in asm_node.constraints:
             val hir_value = self.lower_hir_expr(constraint.value)
             val hir_constraint = HirAsmConstraint(
                 name: constraint.name,
@@ -820,11 +816,11 @@ impl HirLowering:
             hir_constraints.push(hir_constraint)
 
         HirAsm(
-            asm_template: asm.asm_template,
-            is_volatile: asm.is_volatile,
+            asm_template: asm_node.asm_template,
+            is_volatile: asm_node.is_volatile,
             constraints: hir_constraints,
-            clobbers: asm.clobbers,
-            span: asm.span
+            clobbers: asm_node.clobbers,
+            span: asm_node.span
         )
 
     me lower_asm_match_arms(arms: [AsmMatchArm]) -> [HirAsmMatchArm]:

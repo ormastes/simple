@@ -27,7 +27,7 @@ bootstrap_seed_fallback_policy_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,7 +80,7 @@ expect(forbidden_bootstrap_marker(src)).to_equal("ok")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 71 lines folded for reproduction.
+Runnable source: 95 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -88,6 +88,7 @@ val rust_dispatch = file_read("src/compiler_rust/driver/src/main.rs")
 val cli_dispatch = file_read("src/app/cli/_CliMain/main_and_help.spl")
 val native_entry = file_read("src/app/cli/native_build_main.spl")
 val native_targets = file_read("src/app/io/_CliCompile/compile_targets.spl")
+val rust_native_build = file_read("src/compiler_rust/driver/src/cli/native_build.rs")
 val bootstrap_script = file_read("scripts/bootstrap/bootstrap-from-scratch.sh")
 val parser_types = file_read("src/compiler/10.frontend/parser_types.spl")
 val flat_bridge = file_read("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
@@ -100,6 +101,7 @@ val parser_utils = file_read("src/compiler/10.frontend/parser_types_utils.spl")
 val parser_expr = file_read("src/compiler/10.frontend/parser_types_expr.spl")
 val cache_types = file_read("src/compiler/80.driver/cache/cache_types.spl")
 val bootstrap_api = file_read("src/compiler/80.driver/bootstrap_api.spl")
+val driver_aot_output = file_read("src/compiler/80.driver/driver_aot_output.spl")
 val driver_api_compile = file_read("src/compiler/80.driver/driver_api_compile_single.spl")
 val driver_api_interpret = file_read("src/compiler/80.driver/driver_api_interpret.spl")
 val driver_incremental = file_read("src/compiler/80.driver/driver/incremental.spl")
@@ -110,13 +112,33 @@ expect(native_entry).to_contain("cli_native_build")
 expect(native_entry).to_contain("native_build_entry_args")
 expect(native_entry).to_contain("Build mode: dynload (default) or one-binary")
 expect(native_targets).to_contain("var build_mode = \"dynload\"")
+expect(native_targets).to_contain("var cache_dir = \"build/native_cache\"")
+expect(native_targets).to_contain("SIMPLE_NATIVE_BUILD_CACHE_DIR")
+expect(driver_incremental).to_contain("val entry = self.entries[src]")
+val driver_src = file_read("src/compiler/80.driver/driver.spl")
+expect(driver_src).to_contain("fn native_build_cache_dir() -> text:")
+expect(driver_src).to_contain("\"build/native_cache\"")
+expect(native_targets).to_contain("if build_mode == \"\":")
+expect(native_targets).to_contain("SIMPLE_NATIVE_BUILD_THREADS")
+expect(native_targets).to_contain("native_threads = args[j].to_i64() ?? 0")
 expect(native_targets).to_contain("Error: invalid --mode")
 expect(native_targets).to_contain("(expected dynload or one-binary)")
 expect(native_targets).to_contain("if build_mode == \"dynload\" and not emit_object:")
+expect(rust_native_build).to_contain("let mut build_mode = String::from(\"dynload\")")
+expect(rust_native_build).to_contain("value.is_empty()")
+expect(rust_native_build).to_contain("\"dynload\".to_string()")
 expect(native_targets).to_contain("options.output_format = driver_output_format_both()")
 expect(native_targets).to_contain("options.output_format = driver_output_format_native()")
 expect(bootstrap_script).to_contain("bootstrap_mode=")
 expect(bootstrap_script).to_contain("SIMPLE_BOOTSTRAP_MODE:-dynload")
+expect(bootstrap_script).to_contain("if [ -z ")
+expect(bootstrap_script).to_contain("bootstrap_mode=dynload")
+expect(bootstrap_script).to_contain("GITHUB_ACTIONS")
+expect(bootstrap_script).to_contain("native_cache_dir=")
+expect(bootstrap_script).to_contain("/native_cache")
+expect(bootstrap_script).to_contain("--cache-dir")
+expect(bootstrap_script).to_contain("--fresh-cache")
+expect(bootstrap_script).to_contain("--threads")
 expect(bootstrap_script).to_contain("dynload|one-binary")
 expect(bootstrap_script).to_contain("Normal bootstrap does not rebuild Rust. Re-run with --full-bootstrap")
 expect(bootstrap_script).to_contain("Pure-Simple mode:")
@@ -124,7 +146,7 @@ expect(bootstrap_script).to_contain("reusing Rust seed, rebuilding only pure-Sim
 expect(bootstrap_script).to_contain("--mode")
 expect(bootstrap_script).to_contain("bootstrap_mode")
 expect(bootstrap_script).to_contain("find src/compiler src/app src/lib -name '*.spl'")
-expect(bootstrap_script).to_contain("SIMPLE_.*(AOP|MDSOC|WEAV)")
+expect(bootstrap_script).to_contain("SIMPLE_.*(AOP|MDSOC|WEAV|LOAD|INTERPRET|EXECUTION|LIB|NATIVE_BUILD)")
 expect(cli_dispatch).to_contain("fn native_build_requests_simple_llvm(args: [text]) -> bool:")
 expect(cli_dispatch).to_contain("return cli_native_build(args)")
 expect(cli_dispatch).to_contain("return run_native_build_bootstrap(args)")
@@ -147,14 +169,38 @@ expect(cache_types).to_contain("fn cache_check_result_stale")
 expect(bootstrap_api).to_contain("use compiler.driver.{compiler_driver_create, compiler_driver_run_compile}")
 expect(bootstrap_api).to_contain("compiler_driver_create(options)")
 expect(bootstrap_api).to_contain("compiler_driver_run_compile(driver)")
+expect(driver_aot_output).to_contain("fn driver_native_build_threads() -> i64:")
+expect(driver_aot_output).to_contain("SIMPLE_NATIVE_BUILD_THREADS")
+expect(driver_aot_output).to_contain("num_threads: driver_native_build_threads()")
 expect(driver_api_compile).to_contain("compiler_driver_run_compile(driver)")
 expect(driver_api_interpret).to_contain("use compiler.driver.{compiler_driver_create, compiler_driver_run_compile}")
 expect(driver_api_interpret).to_contain("compiler_driver_create(options)")
 expect(driver_api_interpret).to_contain("compiler_driver_run_compile(driver)")
-expect(driver_incremental).to_contain("val entry = self.entries[src]")
 expect(sdn_shim).to_contain("fn parse_file(path: text) -> Result<SdnValue, text>:")
 expect(sdn_shim).to_contain("fn render_value(value: SdnValue, indent: i64) -> text:")
 expect(module_resolver).to_contain("test_resolve_file_module_before_same_name_package")
+```
+
+</details>
+
+#### keeps staged bootstrap fallback policy from reusing stale artifacts
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val bootstrap_script = file_read("scripts/bootstrap/bootstrap-from-scratch.sh")
+expect(bootstrap_script).to_contain("if [ \"" + shell_var("bootstrap_mode") + "\" = \"one-binary\" ]; then")
+expect(bootstrap_script.contains("full_bootstrap=" + shell_var("full_bootstrap"))).to_equal(false)
+expect(bootstrap_script).to_contain("stage2_bin=")
+expect(bootstrap_script).to_contain("stage3_bin=")
+expect(bootstrap_script).to_contain("rm -f \"" + shell_var("stage2_bin") + "\" \"" + shell_var("stage3_bin") + "\"")
+expect(bootstrap_script).to_contain("[ \"" + shell_var("stage2_status") + "\" -eq 0 ] && [ -x \"" + shell_var("stage2_bin") + "\" ]")
+expect(bootstrap_script).to_contain("if [ \"" + shell_var("stage4_is_seed") + "\" -eq 1 ]; then")
+expect(bootstrap_script).to_contain("\"" + shell_var("stage_for_build") + "\" run src/app/cli/native_build_main.spl --")
 ```
 
 </details>
@@ -178,8 +224,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

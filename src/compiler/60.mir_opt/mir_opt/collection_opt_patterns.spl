@@ -65,6 +65,7 @@ me colopt_optimize_concat_block(self: CollectionOptimization, block: MirBlock, f
         return block
 
     var new_insts: [MirInst] = []
+    var changed = false
     var i = 0
 
     while i < count:
@@ -74,6 +75,7 @@ me colopt_optimize_concat_block(self: CollectionOptimization, block: MirBlock, f
             if matched.?:
                 new_insts.push(matched.unwrap())
                 self.concat_replaced = self.concat_replaced + 1
+                changed = true
                 i = i + 3
                 continue
 
@@ -83,11 +85,15 @@ me colopt_optimize_concat_block(self: CollectionOptimization, block: MirBlock, f
             if str_matched.?:
                 new_insts.push(str_matched.unwrap())
                 self.str_append_replaced = self.str_append_replaced + 1
+                changed = true
                 i = i + 2
                 continue
 
         new_insts.push(insts[i])
         i = i + 1
+
+    if not changed:
+        return block
 
     MirBlock(
         id: block.id,
@@ -140,9 +146,9 @@ fn colopt_match_single_element_aggregate(inst: MirInst) -> LocalId?:
                 case Array(_):
                     if operands.len() == 1:
                         return dest
-                    nil
-                case _: nil
-        case _: nil
+                    return nil
+                case _: return nil
+        case _: return nil
 
 fn colopt_match_add_call(self: CollectionOptimization, inst: MirInst, agg_local: LocalId) -> bool?:
     match inst.kind:
@@ -155,8 +161,8 @@ fn colopt_match_add_call(self: CollectionOptimization, inst: MirInst, agg_local:
                     val second = args[1]
                     if colopt_operand_refs_local(second, agg_local):
                         return true
-            nil
-        case _: nil
+            return nil
+        case _: return nil
 
 fn colopt_match_copy_back(self: CollectionOptimization, inst: MirInst, call_inst: MirInst) -> bool?:
     match inst.kind:
@@ -166,29 +172,29 @@ fn colopt_match_copy_back(self: CollectionOptimization, inst: MirInst, call_inst
             if call_dest.?:
                 if src.id == call_dest.unwrap().id:
                     return true
-            nil
-        case _: nil
+            return nil
+        case _: return nil
 
 fn colopt_get_aggregate_element(inst: MirInst) -> MirOperand?:
     match inst.kind:
         case Aggregate(_, _, operands):
             if operands.len() == 1:
                 return operands[0]
-            nil
-        case _: nil
+            return nil
+        case _: return nil
 
 fn colopt_get_call_first_arg(inst: MirInst) -> MirOperand?:
     match inst.kind:
         case Call(_, _, args):
             if args.len() >= 1:
                 return args[0]
-            nil
-        case _: nil
+            return nil
+        case _: return nil
 
 fn colopt_get_call_dest(inst: MirInst) -> LocalId?:
     match inst.kind:
-        case Call(dest, _, _): dest
-        case _: nil
+        case Call(dest, _, _): return dest
+        case _: return nil
 
 fn colopt_operand_refs_local(op: MirOperand, target: LocalId) -> bool:
     match op.kind:
@@ -227,10 +233,10 @@ fn colopt_match_str_concat_pattern(self: CollectionOptimization, inst1: MirInst,
                                     kind: MirInstKind.Call(copy_dest, append_func, [left, right]),
                                     span: inst1.span
                                 )
-                            nil
-                        case _: nil
-                case _: nil
-        case _: nil
+                            return nil
+                        case _: return nil
+                case _: return nil
+        case _: return nil
 
 fn colopt_local_is_text(local_id: LocalId, func: MirFunction) -> bool:
     # Text is represented as Ptr(I8, false) in MIR
@@ -262,7 +268,8 @@ me colopt_hoist_pure_calls(self: CollectionOptimization, blocks: [MirBlock], loo
             for inst in block.instructions:
                 val dest = self.inst_dest(inst)
                 if dest.?:
-                    loop_defs[dest.id] = true
+                    val found_dest = dest
+                    loop_defs[found_dest.id] = true
     val loop_has_collection_mutation = colopt_loop_has_collection_state_mutation(self, blocks, loop_set)
 
     # Find hoistable pure calls
@@ -276,7 +283,8 @@ me colopt_hoist_pure_calls(self: CollectionOptimization, blocks: [MirBlock], loo
                     to_hoist.push(inst)
                     val dest = self.inst_dest(inst)
                     if dest.?:
-                        hoisted_ids[dest.id] = true
+                        val found_dest = dest
+                        hoisted_ids[found_dest.id] = true
 
     if to_hoist.len() == 0:
         return blocks
@@ -484,10 +492,10 @@ fn colopt_detect_linear_scan_guard(header: MirBlock) -> ColoptLinearScanGuard?:
                                 index_var_id: idx.unwrap(),
                                 arr_local_id: arr.unwrap()
                             )
-                        nil
-                    case _: nil
-            case _: nil
-    nil
+                        ()
+                    case _: ()
+            case _: ()
+    return nil
 
 fn colopt_block_increments_index(block: MirBlock, index_var_id: i64) -> bool:
     for inst in block.instructions:
@@ -500,9 +508,9 @@ fn colopt_block_increments_index(block: MirBlock, index_var_id: i64) -> bool:
                             if src.?:
                                 if src.unwrap() == index_var_id:
                                     return true
-                        nil
-                    case _: nil
-            case _: nil
+                        ()
+                    case _: ()
+            case _: ()
     false
 
 fn colopt_block_has_conditional_return(block: MirBlock) -> text?:
@@ -514,12 +522,12 @@ fn colopt_block_has_conditional_return(block: MirBlock) -> text?:
             case BinOp(_, op, _, _):
                 match op:
                     case Eq: return Some("field")
-                    case _: nil
-            case _: nil
-    nil
+                    case _: ()
+            case _: ()
+    return nil
 
 fn colopt_operand_to_local_id(op: MirOperand) -> i64?:
     match op.kind:
         case Copy(local): Some(local.id)
         case Move(local): Some(local.id)
-        case _: nil
+        case _: return nil

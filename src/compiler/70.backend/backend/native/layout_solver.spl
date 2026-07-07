@@ -11,7 +11,6 @@
 
 use compiler.mir.mir_data.{MirModule, MirFunction}
 use compiler.mir.mir_types.{LayoutPhase}
-use std.array.{array_sort_by}
 
 # ============================================================================
 # Data Structures
@@ -36,7 +35,7 @@ struct LayoutFunctionInfo:
     name: text
     symbol_id: i64
     estimated_size: i64
-    hotness_score: f64
+    hotness_score: i64
     phase: LayoutPhase
 
 struct HotnessProfile:
@@ -120,7 +119,10 @@ fn extract_function_info(
     val hotness = calculate_hotness(func.name, profile)
 
     # Determine phase (from attribute or heuristics)
-    val phase = func.layout_phase ?? infer_phase(func)
+    val phase = if func.layout_phase.?:
+        func.layout_phase.unwrap()
+    else:
+        infer_phase(func)
 
     LayoutFunctionInfo(
         name: func.name,
@@ -139,32 +141,31 @@ fn estimate_function_size(func: MirFunction) -> i64:
 
     estimated_instructions * bytes_per_instruction
 
-fn calculate_hotness(name: text, profile: HotnessProfile?) -> f64:
+fn calculate_hotness(name: text, profile: HotnessProfile?) -> i64:
     """Calculate hotness score for function."""
     if not profile.?:
         return default_hotness(name)
 
-    val prof = profile.unwrap()
+    val prof = profile
 
     # Get call count and execution count
-    val call_count = prof.call_counts.get(name) ?? 0
-    val exec_count = prof.execution_counts.get(name) ?? 0
+    val call_count = prof.call_counts[name] ?? 0
+    val exec_count = prof.execution_counts[name] ?? 0
 
-    # Weighted score: 70% execution, 30% calls
-    val score = (exec_count * 0.7) + (call_count * 0.3)
-    score.to_f64()
+    # Integer weighted score: 70% execution, 30% calls.
+    exec_count * 7 + call_count * 3
 
-fn default_hotness(name: text) -> f64:
+fn default_hotness(name: text) -> i64:
     """Default hotness when no profile data available."""
     # Heuristics based on function name
     if name.starts_with("main") or name.starts_with("init"):
-        return 100.0  # Very hot
+        return 100  # Very hot
     elif name.starts_with("error_") or name.starts_with("panic_"):
-        return 1.0    # Very cold
+        return 1    # Very cold
     elif name.starts_with("test_"):
-        return 0.1    # Extremely cold
+        return 0    # Extremely cold
     else:
-        return 50.0   # Medium
+        return 50   # Medium
 
 fn infer_phase(func: MirFunction) -> LayoutPhase:
     """Infer layout phase from function characteristics."""
@@ -251,11 +252,23 @@ fn group_by_phase(funcs: [LayoutFunctionInfo]) -> [LayoutGroup]:
 
 fn sort_by_hotness(funcs: [LayoutFunctionInfo]) -> [LayoutFunctionInfo]:
     """Sort functions by hotness score (descending)."""
-    array_sort_by(funcs, \a, b:
-        if a.hotness_score > b.hotness_score: -1
-        elif a.hotness_score < b.hotness_score: 1
-        else: 0
-    )
+    var sorted = funcs
+    var n = sorted.len()
+
+    var i = 0
+    while i < n:
+        var j = 0
+        while j < n - i - 1:
+            val left = sorted[j]
+            val right = sorted[j + 1]
+            if left.hotness_score < right.hotness_score or
+               (left.hotness_score == right.hotness_score and left.symbol_id > right.symbol_id):
+                sorted[j] = right
+                sorted[j + 1] = left
+            j = j + 1
+        i = i + 1
+
+    sorted
 
 fn calculate_group_size(funcs: [LayoutFunctionInfo]) -> i64:
     """Calculate total size of function group."""
@@ -360,3 +373,6 @@ fn format_phase(phase: LayoutPhase) -> text:
 # ============================================================================
 # Exports
 # ============================================================================
+
+export LayoutPlan, LayoutGroup, LayoutFunctionInfo, HotnessProfile
+export solve_layout, format_layout_plan

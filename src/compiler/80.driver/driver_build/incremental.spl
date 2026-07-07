@@ -4,6 +4,8 @@
 # Tracks file fingerprints, dependency relationships, and provides
 # a build cache with integrity checking.
 
+use std.common.sdn.parser (parse)
+use std.common.sdn.value.{SdnValue}
 
 # ============================================================================
 # File Fingerprinting
@@ -25,6 +27,9 @@ fn incremental_file_size(path: text) -> i64:
 fn incremental_file_read_text(path: text) -> text:
     rt_file_read_text(path)
 
+fn incremental_parse_file(path: text):
+    parse(incremental_file_read_text(path))
+
 fn incremental_hash_text(content: text) -> i64:
     rt_hash_text(content)
 
@@ -43,6 +48,22 @@ fn incremental_mkdir_p(path: text) -> bool:
 
 fn incremental_file_write_text(path: text, content: text) -> bool:
     rt_file_write_text(path, content)
+
+fn incremental_parent_dir(path: text) -> text:
+    val slash = path.last_index_of("/") ?? -1
+    if slash <= 0:
+        return ""
+    path.substring(0, slash)
+
+fn incremental_sdn_escape(value: text) -> text:
+    val slash_escaped = value.replace("\\", "\\\\")
+    slash_escaped.replace("\"", "\\\"")
+
+fn incremental_sdn_text_array(values: [text]) -> text:
+    var items: [text] = []
+    for value in values:
+        items = items.push("\"{incremental_sdn_escape(value)}\"")
+    "[" + items.join(", ") + "]"
 
 struct FileFingerprint:
     """Content hash + metadata for a source file."""
@@ -121,16 +142,20 @@ enum ChangeKind:
     Deleted
     DependencyChanged
 
+struct IncrChange:
+    path: text
+    kind: ChangeKind
+
 struct IncrChangeSet:
     """Set of changes detected since last build."""
-    changes: [(text, ChangeKind)]
+    changes: [IncrChange]
 
 impl IncrChangeSet:
     static fn empty() -> IncrChangeSet:
         IncrChangeSet(changes: [])
 
     fn add(path: text, kind: ChangeKind) -> IncrChangeSet:
-        IncrChangeSet(changes: self.changes.push((path, kind)))
+        IncrChangeSet(changes: self.changes.push(IncrChange(path: path, kind: kind)))
 
     fn is_empty() -> bool:
         self.changes.len() == 0
@@ -138,33 +163,33 @@ impl IncrChangeSet:
     fn changed_files() -> [text]:
         var out: [text] = []
         for item in self.changes:
-            val path = item[0]
-            out = out.push(path)
+            out = out.push(item.path)
         out
 
     fn added() -> [text]:
         var out: [text] = []
         for item in self.changes:
-            val kind = item[1]
-            if kind == ChangeKind.Added:
-                out = out.push(item[0])
+            if item.kind == ChangeKind.Added:
+                out = out.push(item.path)
         out
 
     fn modified() -> [text]:
         var out: [text] = []
         for item in self.changes:
-            val kind = item[1]
-            if kind == ChangeKind.Modified:
-                out = out.push(item[0])
+            if item.kind == ChangeKind.Modified:
+                out = out.push(item.path)
         out
 
     fn deleted() -> [text]:
         var out: [text] = []
         for item in self.changes:
-            val kind = item[1]
-            if kind == ChangeKind.Deleted:
-                out = out.push(item[0])
+            if item.kind == ChangeKind.Deleted:
+                out = out.push(item.path)
         out
+
+struct IncrementalCompileResult:
+    files: [text]
+    changes: IncrChangeSet
 
 # ============================================================================
 # Build Cache
@@ -190,13 +215,12 @@ impl BuildCache:
         if not incremental_file_exists(cache_path):
             return BuildCache.empty(cache_path)
 
-        use std.sdn.{parse_file, SdnValue}
-
-        match parse_file(cache_path):
+        match incremental_parse_file(cache_path):
             case Ok(sdn_value):
                 val ver = sdn_value.get("version")
                 var version: i64 = 0
-                if val ver_value = ver:
+                if val ver_value_raw = ver:
+                    val ver_value: SdnValue = ver_value_raw
                     val v = ver_value.as_i64()
                     if val parsed_version = v:
                         version = parsed_version
@@ -205,13 +229,16 @@ impl BuildCache:
                 var fingerprints: {text: FileFingerprint} = {}
 
                 val entries_val = sdn_value.get("entries")
-                if val entries_value = entries_val:
+                if val entries_value_raw = entries_val:
+                    val entries_value: SdnValue = entries_value_raw
                     val arr = entries_value.as_array()
                     if val entries_array = arr:
-                        for item in entries_array:
+                        for item_raw in entries_array:
+                            val item: SdnValue = item_raw
                             val src = item.get("source")
-                            var source_value = item
-                            if val source_entry = src:
+                            var source_value: SdnValue = item
+                            if val source_entry_raw = src:
+                                val source_entry: SdnValue = source_entry_raw
                                 source_value = source_entry
                             else:
                                 continue
@@ -227,19 +254,23 @@ impl BuildCache:
                             var fp_size: i64 = 0
                             var fp_mtime: i64 = 0
                             val fp_val = item.get("fingerprint")
-                            if val fp_obj = fp_val:
+                            if val fp_obj_raw = fp_val:
+                                val fp_obj: SdnValue = fp_obj_raw
                                 val h = fp_obj.get("hash")
-                                if val hash_value = h:
+                                if val hash_value_raw = h:
+                                    val hash_value: SdnValue = hash_value_raw
                                     val hs = hash_value.as_str()
                                     if val hash_text = hs:
                                         fp_hash = hash_text
                                 val s = fp_obj.get("size")
-                                if val size_value = s:
+                                if val size_value_raw = s:
+                                    val size_value: SdnValue = size_value_raw
                                     val si = size_value.as_i64()
                                     if val parsed_size = si:
                                         fp_size = parsed_size
                                 val m = fp_obj.get("modified_time")
-                                if val mtime_value = m:
+                                if val mtime_value_raw = m:
+                                    val mtime_value: SdnValue = mtime_value_raw
                                     val mi = mtime_value.as_i64()
                                     if val parsed_mtime = mi:
                                         fp_mtime = parsed_mtime
@@ -251,10 +282,12 @@ impl BuildCache:
                             # Parse dependencies
                             var deps: [text] = []
                             val deps_val = item.get("dependencies")
-                            if val deps_value = deps_val:
+                            if val deps_value_raw = deps_val:
+                                val deps_value: SdnValue = deps_value_raw
                                 val deps_arr = deps_value.as_array()
                                 if val dep_items = deps_arr:
-                                    for d in dep_items:
+                                    for d_raw in dep_items:
+                                        val d: SdnValue = d_raw
                                         val ds = d.as_str()
                                         if val dep_text = ds:
                                             deps = deps.push(dep_text)
@@ -262,10 +295,12 @@ impl BuildCache:
                             # Parse outputs
                             var outs: [text] = []
                             val outs_val = item.get("outputs")
-                            if val outs_value = outs_val:
+                            if val outs_value_raw = outs_val:
+                                val outs_value: SdnValue = outs_value_raw
                                 val outs_arr = outs_value.as_array()
                                 if val out_items = outs_arr:
-                                    for o in out_items:
+                                    for o_raw in out_items:
+                                        val o: SdnValue = o_raw
                                         val os = o.as_str()
                                         if val out_text = os:
                                             outs = outs.push(out_text)
@@ -283,9 +318,24 @@ impl BuildCache:
 
     me save():
         """Persist cache to disk."""
-        # Cache persistence is optional. Keep native-build self-hostable even
-        # while SDN enum constructor lowering is unavailable on this path.
-        return
+        val dir = incremental_parent_dir(self.cache_path)
+        if dir != "":
+            incremental_mkdir_p(dir)
+        var lines: [text] = [
+            "version: {self.version + 1}",
+            "entries: ["
+        ]
+        for source in self.entries.keys():
+            val entry = self.entries[source]
+            val fp = entry.fingerprint
+            val source_text = incremental_sdn_escape(entry.source)
+            val hash_text = incremental_sdn_escape(fp.content_hash)
+            val deps_text = incremental_sdn_text_array(entry.dependencies)
+            val outputs_text = incremental_sdn_text_array(entry.outputs)
+            val fp_text = "{" + " hash: \"" + hash_text + "\", size: {fp.size}, modified_time: {fp.modified_time} " + "}"
+            lines = lines.push("  " + "{" + " source: \"" + source_text + "\", fingerprint: " + fp_text + ", dependencies: " + deps_text + ", outputs: " + outputs_text + " " + "}")
+        lines = lines.push("]")
+        incremental_file_write_text(self.cache_path, lines.join("\n"))
 
     me update_entry(source: text, fingerprint: FileFingerprint,
                     dependencies: [text], outputs: [text]):
@@ -358,8 +408,9 @@ impl BuildCache:
                 changes = changes.add(path, ChangeKind.Deleted)
 
         # Check transitive dependencies
-        for (path, kind) in changes.changes:
-            match kind:
+        for change in changes.changes:
+            val path = change.path
+            match change.kind:
                 case Added | Modified:
                     # Find all files that depend on this one
                     # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
@@ -405,7 +456,7 @@ impl IncrementalCompiler:
         IncrementalCompiler(cache: cache, source_root: source_root,
                             symbol_hashes: {}, cached_mir_index: {})
 
-    me compile_incremental(source_files: [text]) -> ([text], IncrChangeSet):
+    me compile_incremental(source_files: [text]) -> IncrementalCompileResult:
         """Determine which files need recompilation.
 
         Returns (files_to_compile, change_set).
@@ -413,10 +464,10 @@ impl IncrementalCompiler:
         val changes = self.cache.detect_changes(source_files)
 
         if changes.is_empty():
-            return ([], changes)
+            return IncrementalCompileResult(files: [], changes: changes)
 
         val to_compile = changes.changed_files()
-        (to_compile, changes)
+        IncrementalCompileResult(files: to_compile, changes: changes)
 
     me record_compilation(source: text, dependencies: [text], outputs: [text]):
         """Record a successful compilation."""

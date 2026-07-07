@@ -12,6 +12,7 @@ use compiler.hir.hir_lowering.expressions.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_payload(value: StmtKind) -> Expr
 
 fn hir_stmt_env_get(key: text) -> text:
     rt_env_get(key)
@@ -52,6 +53,8 @@ fn hir_stmt_kind_disc(k: StmtKind) -> i64:
             15
         case StmtKind.GpuLaunch(_, _):
             16
+        case _:
+            -1
 
 # Statement Lowering
 # ============================================================================
@@ -104,39 +107,49 @@ impl HirLowering:
         # every non-Expr statement) lowered to Error and SIGILL'd the interpreter;
         # only Expr-statement bodies (print(...)) were ever exercised on the
         # unstub path. Pre-dispatch by discriminant + isolated single-arm
-        # extraction (same idiom as lower_type). Compare the local tag values
-        # directly: constructing dummy StmtKind values here makes the seed inspect
-        # payloads and can stack-overflow when a Val initializer is a Call.
+        # extraction (same idiom as lower_type). Reference discs come from freshly
+        # constructed values (construction is always correct on stage4).
         val sk_disc: i64 = hir_stmt_kind_disc(stmt_kind_value)
         val sk_dummy: Expr = Expr(kind: ExprKind.NilLit, span: s.span)
-        if sk_disc == 1:
-            var v_name: text = ""
-            var v_type: Type? = nil
-            var v_init: Expr = sk_dummy
-            match stmt_kind_value:
-                case StmtKind.Val(vname, vtype, vinit):
-                    v_name = vname
-                    v_type = vtype
-                    v_init = vinit
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", nil, sk_dummy)):
+            val v_name = match stmt_kind_value:
+                case StmtKind.Val(vname, _, _):
+                    vname
                 case _:
-                    pass
-            # stage4 can corrupt the optional type payload after a Call initializer;
-            # let inference recover the type instead of touching v_type here.
-            val v_hir_type: HirType? = nil
+                    ""
+            val v_type = match stmt_kind_value:
+                case StmtKind.Val(_, vtype, _):
+                    vtype
+                case _:
+                    nil
+            val v_init = match stmt_kind_value:
+                case StmtKind.Val(_, _, vinit):
+                    vinit
+                case _:
+                    sk_dummy
+            val v_hir_type = if v_type.?:
+                Some(self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span)))
+            else:
+                nil
             val v_hir_init = self.lower_hir_expr(v_init)
             val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_hir_type, s.span, false, false, nil)
             return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type, v_hir_init), span: s.span)
-        if sk_disc == 2:
-            var vr_name: text = ""
-            var vr_type: Type? = nil
-            var vr_init: Expr? = nil
-            match stmt_kind_value:
-                case StmtKind.Var(vrname, vrtype, vrinit):
-                    vr_name = vrname
-                    vr_type = vrtype
-                    vr_init = vrinit
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
+            val vr_name = match stmt_kind_value:
+                case StmtKind.Var(vrname, _, _):
+                    vrname
                 case _:
-                    pass
+                    ""
+            val vr_type = match stmt_kind_value:
+                case StmtKind.Var(_, vrtype, _):
+                    vrtype
+                case _:
+                    nil
+            val vr_init = match stmt_kind_value:
+                case StmtKind.Var(_, _, vrinit):
+                    vrinit
+                case _:
+                    nil
             val vr_hir_type = if vr_type.?:
                 Some(self.lower_type(vr_type ?? Type(kind: TypeKind.Infer, span: s.span)))
             else:
@@ -147,29 +160,33 @@ impl HirLowering:
                 HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
             val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_hir_type, s.span, false, true, nil)
             return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_hir_type, vr_hir_init), span: s.span)
-        if sk_disc == 11:
-            var rt_val: Expr? = nil
-            match stmt_kind_value:
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Return(nil)):
+            val rt_val = match stmt_kind_value:
                 case StmtKind.Return(rval):
-                    rt_val = rval
+                    rval
                 case _:
-                    pass
+                    nil
             val rt_hir = if rt_val.?:
                 Some(self.lower_hir_expr(rt_val ?? sk_dummy))
             else:
                 nil
             return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(rt_hir), type_: nil, span: s.span)), span: s.span)
-        if sk_disc == 5:
-            var as_target: Expr = sk_dummy
-            var as_op: AssignOp? = nil
-            var as_value: Expr = sk_dummy
-            match stmt_kind_value:
-                case StmtKind.Assign(atarget, aop, avalue):
-                    as_target = atarget
-                    as_op = aop
-                    as_value = avalue
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Assign(sk_dummy, nil, sk_dummy)):
+            val as_target = match stmt_kind_value:
+                case StmtKind.Assign(atarget, _, _):
+                    atarget
                 case _:
-                    pass
+                    sk_dummy
+            val as_op = match stmt_kind_value:
+                case StmtKind.Assign(_, aop, _):
+                    aop
+                case _:
+                    nil
+            val as_value = match stmt_kind_value:
+                case StmtKind.Assign(_, _, avalue):
+                    avalue
+                case _:
+                    sk_dummy
             val as_hir_op = self.lower_hir_assign_op_opt(as_op)
             return HirStmt(kind: HirStmtKind.Assign(self.lower_hir_expr(as_target), as_hir_op, self.lower_hir_expr(as_value)), span: s.span)
 

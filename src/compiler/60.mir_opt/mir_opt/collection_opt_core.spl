@@ -103,10 +103,11 @@ impl CollectionOptimization:
     fn capacity_array_alloc_dest_id(inst: MirInst) -> i64:
         match inst.kind:
             case Call(dest, func, args):
-                if not dest.? or args.len() != 1:
+                if args.len() != 1:
                     return -1
-                if self.is_capacity_array_alloc(self.get_func_name(func)):
-                    return dest.id
+                if val dest_local = dest:
+                    if self.is_capacity_array_alloc(self.get_func_name(func)):
+                        return dest_local.id
                 -1
             case _: -1
 
@@ -131,8 +132,8 @@ impl CollectionOptimization:
                 if not self.is_dead_array_write_call_name(self.get_func_name(func)):
                     return -1
                 match args[0].kind:
-                    case Copy(local): local.id
-                    case Move(local): local.id
+                    case Copy(local): self.local_id_or_invalid(local)
+                    case Move(local): self.local_id_or_invalid(local)
                     case _: -1
             case _: -1
 
@@ -184,13 +185,13 @@ impl CollectionOptimization:
             val query = self.collection_pure_call_key(inst)
             if query != "":
                 val dest = self.inst_dest(inst)
-                if dest.?:
+                if val dest_local = dest:
                     if seen.has(query):
-                        new_insts.push(MirInst(kind: MirInstKind.Copy(dest, LocalId(id: seen[query])), span: inst.span))
+                        new_insts.push(MirInst(kind: MirInstKind.Copy(dest_local, LocalId(id: seen[query])), span: inst.span))
                         self.pure_queries_reused = self.pure_queries_reused + 1
                         changed = true
                     else:
-                        seen[query] = dest.id
+                        seen[query] = dest_local.id
                         new_insts.push(inst)
                 else:
                     new_insts.push(inst)
@@ -219,7 +220,10 @@ impl CollectionOptimization:
                     return ""
                 var key = fname
                 for arg in args:
-                    key = key + ":" + self.collection_operand_key(arg)
+                    val arg_key = self.collection_operand_key(arg)
+                    if arg_key == "":
+                        return ""
+                    key = key + ":" + arg_key
                 key
             case _:
                 ""
@@ -271,11 +275,12 @@ impl CollectionOptimization:
                         val use_count = uses[dest.id] ?? 0
                         if use_count == 1:
                             val rewritten = self.rewrite_single_use_len_consumer(insts[i + 1], dest, canonical)
-                            if val rewritten_inst = rewritten:
-                                new_insts.push(rewritten_inst)
-                            else:
-                                new_insts.push(MirInst(kind: MirInstKind.Copy(dest, canonical), span: insts[i].span))
-                                new_insts.push(insts[i + 1])
+                            match rewritten:
+                                case Some(rewritten_inst):
+                                    new_insts.push(rewritten_inst)
+                                case _:
+                                    new_insts.push(MirInst(kind: MirInstKind.Copy(dest, canonical), span: insts[i].span))
+                                    new_insts.push(insts[i + 1])
                             self.len_queries_reused = self.len_queries_reused + 1
                             changed = true
                             i = i + 2
@@ -306,18 +311,23 @@ impl CollectionOptimization:
     fn collection_len_call_dest_id(inst: MirInst) -> i64:
         match inst.kind:
             case Call(dest, func, args):
-                if not dest.? or args.len() != 1:
+                if args.len() != 1:
                     return -1
                 val fname = self.get_func_name(func)
                 if not self.is_collection_len_runtime(fname):
                     return -1
-                return dest.id
+                if val dest_local = dest:
+                    return dest_local.id
+                return -1
             case _: -1
 
     fn collection_len_call_key(inst: MirInst) -> text:
         match inst.kind:
             case Call(_, func, args):
-                "{self.get_func_name(func)}:{self.collection_operand_key(args[0])}"
+                val arg_key = self.collection_operand_key(args[0])
+                if arg_key == "":
+                    return ""
+                "{self.get_func_name(func)}:{arg_key}"
             case _:
                 ""
 
@@ -363,17 +373,18 @@ impl CollectionOptimization:
                 if self.get_func_name(callee) != "rt_index_get" or args.len() != 2:
                     return nil
                 val array_local = self.operand_local_id(args[0])
-                if not array_local.?:
-                    return nil
-                if not self.local_is_array(array_local, func):
+                if val array_local_id = array_local:
+                    if not self.local_is_array(array_local_id, func):
+                        return nil
+                else:
                     return nil
                 val array_get_func = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_array_get"),
                     MirType.unit()
                 ))
-                MirInst(kind: MirInstKind.Call(dest, array_get_func, args), span: inst.span)
+                return MirInst(kind: MirInstKind.Call(dest, array_get_func, args), span: inst.span)
             case _:
-                nil
+                return nil
 
     # ========================================================================
     # Len consumer rewriting helpers
@@ -385,44 +396,50 @@ impl CollectionOptimization:
                 val rewritten_left = self.replace_operand_local_value(left, duplicate_len, canonical_len)
                 val rewritten_right = self.replace_operand_local_value(right, duplicate_len, canonical_len)
                 if rewritten_left.1 or rewritten_right.1:
-                    Some(MirInst(kind: MirInstKind.BinOp(dest, op, rewritten_left.0, rewritten_right.0), span: inst.span))
+                    return Some(MirInst(kind: MirInstKind.BinOp(dest, op, rewritten_left.0, rewritten_right.0), span: inst.span))
                 else:
-                    nil
+                    return nil
             case CheckedBinOp(dest, op, left, right):
                 val rewritten_left = self.replace_operand_local_value(left, duplicate_len, canonical_len)
                 val rewritten_right = self.replace_operand_local_value(right, duplicate_len, canonical_len)
                 if rewritten_left.1 or rewritten_right.1:
-                    Some(MirInst(kind: MirInstKind.CheckedBinOp(dest, op, rewritten_left.0, rewritten_right.0), span: inst.span))
+                    return Some(MirInst(kind: MirInstKind.CheckedBinOp(dest, op, rewritten_left.0, rewritten_right.0), span: inst.span))
                 else:
-                    nil
+                    return nil
             case Intrinsic(dest, name, args):
                 if name != "bounds_check" or args.len() < 2:
                     return nil
                 val rewritten_args = self.replace_operand_local(args, duplicate_len, canonical_len)
                 if rewritten_args.1:
-                    Some(MirInst(kind: MirInstKind.Intrinsic(dest, name, rewritten_args.0), span: inst.span))
+                    return Some(MirInst(kind: MirInstKind.Intrinsic(dest, name, rewritten_args.0), span: inst.span))
                 else:
-                    nil
+                    return nil
             case Call(dest, func, args):
                 val fname = self.get_func_name(func)
                 if fname != "bounds_check" and fname != "array_bounds_check" and fname != "rt_bounds_check" and fname != "__simple_bounds_check":
                     return nil
                 val rewritten_args = self.replace_operand_local(args, duplicate_len, canonical_len)
                 if rewritten_args.1:
-                    Some(MirInst(kind: MirInstKind.Call(dest, func, rewritten_args.0), span: inst.span))
+                    return Some(MirInst(kind: MirInstKind.Call(dest, func, rewritten_args.0), span: inst.span))
                 else:
-                    nil
-            case _: nil
+                    return nil
+            case _: return nil
 
     fn replace_operand_local_value(arg: MirOperand, from: LocalId, to: LocalId) -> (MirOperand, bool):
         match arg.kind:
             case Copy(local):
-                if local.id == from.id:
+                val local_id = self.local_id_or_invalid(local)
+                if local_id < 0:
+                    return (arg, false)
+                if local_id == from.id:
                     (mir_operand_copy(to), true)
                 else:
                     (arg, false)
             case Move(local):
-                if local.id == from.id:
+                val local_id = self.local_id_or_invalid(local)
+                if local_id < 0:
+                    return (arg, false)
+                if local_id == from.id:
                     (mir_operand_move(to), true)
                 else:
                     (arg, false)
@@ -502,8 +519,11 @@ impl CollectionOptimization:
     fn count_terminator_uses(term: MirTerminator, mut counts: Dict<i64, i64>):
         match term:
             case Ret(value):
-                if val ret_value = value:
-                    self.count_operand_use(ret_value, counts)
+                match value:
+                    case Some(ret_value):
+                        self.count_operand_use(ret_value, counts)
+                    case _:
+                        ()
             case If(cond, _, _):
                 self.count_operand_use(cond, counts)
             case Switch(value, _, _):
@@ -525,7 +545,10 @@ impl CollectionOptimization:
                 ()
 
     fn count_local_use(local: LocalId, mut counts: Dict<i64, i64>):
-        counts[local.id] = (counts[local.id] ?? 0) + 1
+        val id = self.local_id_or_invalid(local)
+        if id < 0:
+            return
+        counts[id] = (counts[id] ?? 0) + 1
 
     fn inst_uses_local_id(inst: MirInst, local_id: i64) -> bool:
         match inst.kind:
@@ -566,8 +589,9 @@ impl CollectionOptimization:
             case Bitcast(dest, operand, _):
                 dest.id == local_id or self.operand_uses_local_id(operand, local_id)
             case Call(dest, func, args):
-                if dest.? and dest.id == local_id:
-                    return true
+                if val dest_local = dest:
+                    if dest_local.id == local_id:
+                        return true
                 if self.operand_uses_local_id(func, local_id):
                     return true
                 for arg in args:
@@ -575,8 +599,9 @@ impl CollectionOptimization:
                         return true
                 false
             case CallIndirect(dest, ptr, args, _):
-                if dest.? and dest.id == local_id:
-                    return true
+                if val dest_local = dest:
+                    if dest_local.id == local_id:
+                        return true
                 if self.operand_uses_local_id(ptr, local_id):
                     return true
                 for arg in args:
@@ -584,8 +609,9 @@ impl CollectionOptimization:
                         return true
                 false
             case Intrinsic(dest, _, args):
-                if dest.? and dest.id == local_id:
-                    return true
+                if val dest_local = dest:
+                    if dest_local.id == local_id:
+                        return true
                 for arg in args:
                     if self.operand_uses_local_id(arg, local_id):
                         return true
@@ -610,17 +636,19 @@ impl CollectionOptimization:
     fn terminator_uses_local_id(term: MirTerminator, local_id: i64) -> bool:
         match term:
             case Ret(value):
-                if val ret_value = value:
-                    self.operand_uses_local_id(ret_value, local_id)
-                else:
-                    false
+                match value:
+                    case Some(ret_value):
+                        self.operand_uses_local_id(ret_value, local_id)
+                    case _:
+                        false
             case If(cond, _, _):
                 self.operand_uses_local_id(cond, local_id)
             case Switch(value, _, _):
                 self.operand_uses_local_id(value, local_id)
             case CallTerminator(dest, func, args, _, _):
-                if dest.? and dest.id == local_id:
-                    return true
+                if val dest_local = dest:
+                    if dest_local.id == local_id:
+                        return true
                 if self.operand_uses_local_id(func, local_id):
                     return true
                 for arg in args:
@@ -632,17 +660,23 @@ impl CollectionOptimization:
     fn operand_uses_local_id(op: MirOperand, local_id: i64) -> bool:
         match op.kind:
             case Copy(local):
-                local.id == local_id
+                self.local_id_or_invalid(local) == local_id
             case Move(local):
-                local.id == local_id
+                self.local_id_or_invalid(local) == local_id
             case _: false
 
     fn collection_operand_key(op: MirOperand) -> text:
         match op.kind:
             case Copy(local):
-                "copy:{local.id}"
+                val local_id = self.local_id_or_invalid(local)
+                if local_id < 0:
+                    return ""
+                "copy:{local_id}"
             case Move(local):
-                "move:{local.id}"
+                val local_id = self.local_id_or_invalid(local)
+                if local_id < 0:
+                    return ""
+                "move:{local_id}"
             case Const(value, _):
                 "const:{self.collection_const_key(value)}"
 
@@ -667,13 +701,32 @@ impl CollectionOptimization:
 
     fn operand_local_id(op: MirOperand) -> LocalId?:
         match op.kind:
-            case Copy(local): local
-            case Move(local): local
-            case _: nil
+            case Copy(local):
+                return self.local_or_nil(local)
+            case Move(local):
+                return self.local_or_nil(local)
+            case _: return nil
+
+    fn local_id_or_invalid(local: LocalId) -> i64:
+        match local:
+            case LocalId(id):
+                id
+            case nil:
+                -1
+
+    fn local_or_nil(local: LocalId) -> LocalId?:
+        match local:
+            case LocalId(_):
+                return local
+            case nil:
+                return nil
 
     fn local_is_array(local_id: LocalId, func: MirFunction) -> bool:
+        val id = self.local_id_or_invalid(local_id)
+        if id < 0:
+            return false
         for loc in func.locals:
-            if loc.id.id == local_id.id:
+            if loc.id.id == id:
                 match loc.type_.kind:
                     case Array(_, _): return true
                     case _: return false
@@ -742,25 +795,27 @@ impl CollectionOptimization:
 
     fn inst_dest(inst: MirInst) -> LocalId?:
         match inst.kind:
-            case Const(dest, _, _): dest
-            case BinOp(dest, _, _, _): dest
-            case UnaryOp(dest, _, _): dest
-            case Copy(dest, _): dest
-            case Bitcast(dest, _, _): dest
-            case Call(dest, _, _): dest
-            case Aggregate(dest, _, _): dest
-            case _: nil
+            case Const(dest, _, _): return dest
+            case BinOp(dest, _, _, _): return dest
+            case UnaryOp(dest, _, _): return dest
+            case Copy(dest, _): return dest
+            case Bitcast(dest, _, _): return dest
+            case Call(dest, _, _): return dest
+            case Aggregate(dest, _, _): return dest
+            case _: return nil
 
     fn inst_in_list(inst: MirInst, list: [MirInst]) -> bool:
         val d1 = self.inst_dest(inst)
-        if not d1.?:
-            return false
-        val d1_id = d1.id
-        for other in list:
-            val d2 = self.inst_dest(other)
-            if d2.? and d2.id == d1_id:
-                return true
-        false
+        if val d1_local = d1:
+            val d1_id = d1_local.id
+            for other in list:
+                val d2 = self.inst_dest(other)
+                if val d2_local = d2:
+                    if d2_local.id == d1_id:
+                        return true
+            false
+        else:
+            false
 
     fn stats_summary() -> text:
         "CollectionOpt: {self.concat_replaced} concat->push, {self.str_append_replaced} str->append, {self.calls_hoisted} calls hoisted, {self.scalar_ops_hoisted} scalar ops hoisted, {self.len_queries_reused} len queries reused, {self.pure_queries_reused} pure queries reused, {self.dead_append_arrays_elided} dead append arrays elided"

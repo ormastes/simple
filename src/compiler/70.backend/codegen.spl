@@ -153,7 +153,7 @@ impl Codegen:
     # Function Compilation
     # ========================================================================
 
-    me compile_function(fn_: MirFunction) -> bool:
+    me compile_cranelift_function(fn_: MirFunction) -> bool:
         """Compile a MIR function to native code."""
         self.local_values = {}
         self.block_map = {}
@@ -265,7 +265,7 @@ impl Codegen:
             self.compile_inst(inst)
 
         # Compile terminator
-        self.compile_terminator(block.terminator)
+        self.compile_cranelift_terminator(block.terminator)
 
         cranelift_seal_block(self.current_ctx, cl_block)
 
@@ -278,26 +278,26 @@ impl Codegen:
         self.track_host_gpu_lane_body_instruction(inst)
         match inst.kind:
             case Const(dest, value, type_):
-                val cl_value = self.compile_const(value, type_)
+                val cl_value = self.compile_cranelift_const(value, type_)
                 self.local_values[dest.id] = cl_value
 
             case Copy(dest, src):
-                val src_value = self.get_local(src)
+                val src_value = self.get_cranelift_local(src)
                 self.local_values[dest.id] = src_value
 
             case Move(dest, src):
-                val src_value = self.get_local(src)
+                val src_value = self.get_cranelift_local(src)
                 self.local_values[dest.id] = src_value
 
             case BinOp(dest, op, left, right):
                 val lv = self.compile_operand(left)
                 val rv = self.compile_operand(right)
-                val result = self.compile_binop(op, lv, rv)
+                val result = self.compile_cranelift_binop(op, lv, rv)
                 self.local_values[dest.id] = result
 
             case UnaryOp(dest, op, operand):
                 val v = self.compile_operand(operand)
-                val result = self.compile_unaryop(op, v)
+                val result = self.compile_cranelift_unaryop(op, v)
                 self.local_values[dest.id] = result
 
             case Load(dest, ptr):
@@ -441,7 +441,7 @@ impl Codegen:
                     pass
         4096
 
-    me compile_const(value: MirConstValue, type_: MirType) -> i64:
+    me compile_cranelift_const(value: MirConstValue, type_: MirType) -> i64:
         """Compile a constant value."""
         match value:
             case Int(v):
@@ -466,7 +466,7 @@ impl Codegen:
         """Compile an operand to a Cranelift value."""
         match operand.kind:
             case Copy(local) | Move(local):
-                self.get_local(local)
+                self.get_cranelift_local(local)
             case Const(value, type_):
                 # Check if this is a function pointer (symbol ID encoded as int)
                 match type_.kind:
@@ -476,15 +476,15 @@ impl Codegen:
                             case Int(symbol_id):
                                 self.resolve_function_symbol(symbol_id)
                             case _:
-                                self.compile_const(value, type_)
+                                self.compile_cranelift_const(value, type_)
                     case _:
-                        self.compile_const(value, type_)
+                        self.compile_cranelift_const(value, type_)
 
-    me get_local(local: LocalId) -> i64:
+    me get_cranelift_local(local: LocalId) -> i64:
         """Get Cranelift value for a local."""
         self.local_values[local.id] ?? 0
 
-    me compile_binop(op: MirBinOp, left: i64, right: i64) -> i64:
+    me compile_cranelift_binop(op: MirBinOp, left: i64, right: i64) -> i64:
         """Compile binary operation."""
         match op:
             case Add:
@@ -523,7 +523,7 @@ impl Codegen:
                 self.error("unsupported codegen binary operator: {op}", nil)
                 0
 
-    me compile_unaryop(op: MirUnaryOp, operand: i64) -> i64:
+    me compile_cranelift_unaryop(op: MirUnaryOp, operand: i64) -> i64:
         """Compile unary operation."""
         match op:
             case Neg:
@@ -557,7 +557,7 @@ impl Codegen:
     # Terminator Compilation
     # ========================================================================
 
-    me compile_terminator(term: MirTerminator):
+    me compile_cranelift_terminator(term: MirTerminator):
         """Compile a block terminator."""
         match term:
             case Goto(target):
@@ -686,7 +686,7 @@ impl CodegenPipeline:
 
         # Compile all functions
         for fn_ in mir.functions.values():
-            if not codegen.compile_function(fn_):
+            if not codegen.compile_cranelift_function(fn_):
                 if codegen.errors.len() > 0:
                     return Err(codegen.errors[0])
                 return Err(CodegenError(message: "failed to compile function", span: nil))

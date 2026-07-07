@@ -139,8 +139,10 @@ fn optional_let_binding(pattern: &Pattern, value: &Value) -> LetBind {
             payload,
         } if enum_name == "Option" => {
             if variant == "Some" {
-                let inner = payload.as_ref().map(|b| (**b).clone()).unwrap_or(Value::Nil);
-                LetBind::Bind(name, inner)
+                match payload.as_ref().map(|b| &**b) {
+                    Some(Value::Nil) | None => LetBind::Skip,
+                    Some(inner) => LetBind::Bind(name, inner.clone()),
+                }
             } else {
                 LetBind::Skip
             }
@@ -150,6 +152,22 @@ fn optional_let_binding(pattern: &Pattern, value: &Value) -> LetBind {
         Value::Enum { .. } => LetBind::NotApplicable,
         // Any other present value binds as-is.
         other => LetBind::Bind(name, other.clone()),
+    }
+}
+
+#[cfg(test)]
+mod optional_let_binding_tests {
+    use super::*;
+
+    #[test]
+    fn skips_some_nil_optional_binding() {
+        let pattern = Pattern::Identifier("value".to_string());
+        let value = Value::some(Value::Nil);
+
+        match optional_let_binding(&pattern, &value) {
+            LetBind::Skip => {}
+            _ => panic!("if val must not bind nil payloads"),
+        }
     }
 }
 

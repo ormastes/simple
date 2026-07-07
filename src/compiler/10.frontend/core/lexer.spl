@@ -17,7 +17,7 @@ use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, 
 use compiler.core.lexer_types.{Token, Span, lex_span_new, lex_token_new, lex_token_eof}
 use std.string_core.{char_code, char_from_code}
 use compiler.frontend.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
-use compiler.frontend.core.lexer_struct.{core_lexer_last_text_get, core_lexer_last_line_get, core_lexer_last_col_get}
+use compiler.frontend.core.lexer_struct.{core_lexer_last_text_get, core_lexer_last_line_get, core_lexer_last_col_get, core_lexer_last_suffix_get, core_token_env_save_set}
 use compiler.core.ast.{module_get_path}
 use compiler.core.ast.{lexer_core_pos_get, lexer_core_pos_set, lexer_core_line_get, lexer_core_line_set}
 use compiler.core.ast.{lexer_core_col_get, lexer_core_col_set, lexer_core_pending_dedents_get, lexer_core_pending_dedents_set}
@@ -50,6 +50,7 @@ var lex_source_char_count_slot: [i64] = [0]
 var lex_source_code_base_slot: [i64] = [0]
 var lex_source_codes: [i64] = []
 var current_core_lexer_slot: [CoreLexer] = []
+var lex_env_save_enabled: [bool] = [false]
 var lex_cur_kind_direct: [i64] = [0]
 var lex_cur_text_direct: [text] = [""]
 var lex_cur_line_direct: [i64] = [0]
@@ -95,6 +96,8 @@ fn lex_init_with_path(source: text, source_path: text):
         lex_source_codes = []
     if current_core_lexer_slot == nil:
         current_core_lexer_slot = []
+    if lex_env_save_enabled == nil:
+        lex_env_save_enabled = [false]
     if lex_cur_kind_direct == nil:
         lex_cur_kind_direct = [0]
     if lex_cur_text_direct == nil:
@@ -109,6 +112,8 @@ fn lex_init_with_path(source: text, source_path: text):
         lex_token_start_direct = [0]
     if lex_token_end_direct == nil:
         lex_token_end_direct = [0]
+    lex_env_save_enabled[0] = (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1"
+    core_token_env_save_set(lex_env_save_enabled[0])
     # Keep the active lexer and parser's offset-based token-text cache on the
     # exact same source buffer. Rereading a non-empty caller source from disk can
     # desync lexer offsets from parser_lex_source_cached() when the caller passed
@@ -250,7 +255,7 @@ fn lex_cur_kind_get_slot() -> i64:
 
 fn lex_cur_kind_set(value: i64):
     lex_cur_kind_direct[0] = value
-    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+    if lex_env_save_enabled[0]:
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_KIND", "{value}")
 
 fn lex_cur_line_get_slot() -> i64:
@@ -258,7 +263,7 @@ fn lex_cur_line_get_slot() -> i64:
 
 fn lex_cur_line_set(value: i64):
     lex_cur_line_direct[0] = value
-    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+    if lex_env_save_enabled[0]:
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_LINE", "{value}")
 
 fn lex_cur_col_get_slot() -> i64:
@@ -266,7 +271,7 @@ fn lex_cur_col_get_slot() -> i64:
 
 fn lex_cur_col_set(value: i64):
     lex_cur_col_direct[0] = value
-    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+    if lex_env_save_enabled[0]:
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_COL", "{value}")
 
 fn lex_cur_text_get_slot() -> text:
@@ -283,7 +288,7 @@ fn lex_cur_text_get_slot() -> text:
 
 fn lex_cur_text_set(value: text):
     lex_cur_text_direct[0] = value
-    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+    if lex_env_save_enabled[0]:
         val nul = char_from_code(0)
         if value.contains(nul):
             rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", "")
@@ -295,7 +300,7 @@ fn lex_cur_suffix_get_slot() -> text:
 
 fn lex_cur_suffix_set(value: text):
     lex_cur_suffix_direct[0] = value
-    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+    if lex_env_save_enabled[0]:
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_SUFFIX", value)
 
 fn lex_token_start_get() -> i64:
@@ -452,7 +457,7 @@ fn current_core_lexer_load() -> CoreLexer:
     lexer
 
 fn current_core_lexer_save(lexer: CoreLexer):
-    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") != "1":
+    if not lex_env_save_enabled[0]:
         return
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_POS", "{lexer.pos}")
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_LINE", "{lexer.line}")
@@ -710,19 +715,32 @@ fn lex_next() -> i64:
     val kind = loaded.cur_kind
     current_core_lexer_slot[0] = loaded
     current_core_lexer_save(loaded)
-    lex_cur_kind_set(kind)
+    val env_save = lex_env_save_enabled[0]
+    if env_save:
+        lex_cur_kind_set(kind)
+        if kind == 7 or kind == 8:
+            lex_cur_suffix_set(core_lexer_last_suffix_get())
+        else:
+            lex_cur_suffix_set("")
+    else:
+        lex_cur_kind_direct[0] = kind
+        if kind == 7 or kind == 8:
+            lex_cur_suffix_direct[0] = core_lexer_last_suffix_get()
+        else:
+            lex_cur_suffix_direct[0] = ""
     lex_token_start_direct[0] = loaded.cur_start
     lex_token_end_direct[0] = loaded.pos
-    if (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1":
+    if env_save:
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", "{loaded.cur_start}")
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", "{loaded.pos}")
-    if kind == 7 or kind == 8:
-        lex_cur_suffix_set(rt_env_get("SIMPLE_BOOTSTRAP_CORE_TOKEN_SUFFIX") ?? "")
+    if env_save:
+        lex_cur_text_set(loaded.cur_text)
+        lex_cur_line_set(core_lexer_last_line_get())
+        lex_cur_col_set(core_lexer_last_col_get())
     else:
-        lex_cur_suffix_set("")
-    lex_cur_text_set(loaded.cur_text)
-    lex_cur_line_set(core_lexer_last_line_get())
-    lex_cur_col_set(core_lexer_last_col_get())
+        lex_cur_text_direct[0] = loaded.cur_text
+        lex_cur_line_direct[0] = core_lexer_last_line_get()
+        lex_cur_col_direct[0] = core_lexer_last_col_get()
     kind
 
 fn lex_token_kind() -> i64:
@@ -822,8 +840,9 @@ fn lex_snapshot_restore(nums: [i64], txts: [text]):
     # Restore the token offset env vars so parser_token_text_from_offsets works
     lex_token_start_direct[0] = nums[6]
     lex_token_end_direct[0] = nums[0]
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", "{nums[6]}")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", "{nums[0]}")
+    if lex_env_save_enabled[0]:
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", "{nums[6]}")
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", "{nums[0]}")
 
 # ===== Convenience: Tokenize All =====
 # Tokenizes entire source and returns arrays of token data.

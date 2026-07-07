@@ -175,18 +175,22 @@ fn infer_expr_type_from_parse(expr_id: i64) -> i64:
 fn parse_block() -> [i64]:
     var stmts: [i64] = []
     parser_skip_newlines()
-    if par_kind_get() == 181:
+    var kind = par_kind_get()
+    if kind == 181:
         # Multi-line indented block
         parser_advance()
         for i in 0..100000:
             parser_skip_newlines()
-            if par_kind_get() == 182:
+            kind = par_kind_get()
+            if kind == 182:
                 parser_advance()
                 break
-            if par_kind_get() == 190:
+            if kind == 190:
                 break
             if parser_stmt_trace_line_enabled():
-                eprint("[parser-block] stmt:start i={i} kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
+                val trace_kind = kind
+                val trace_text = par_text_get()
+                eprint("[parser-block] stmt:start i={i} kind={trace_kind} text={trace_text} line={par_line_get()} col={par_col_get()}")
             val s = parse_statement()
             stmts.push(s)
             parser_skip_newlines_and_semicolons()
@@ -273,26 +277,27 @@ fn parse_extern_fn_stmt_inline() -> i64:
     stmt_expr_stmt(expr_pass(0), 0)
 
 fn parse_statement() -> i64:
-    if par_kind_get() == 21:
+    var kind = par_kind_get()
+    if kind == 21:
         return parse_val_decl_stmt()
 
-    if par_kind_get() == 194:
+    if kind == 194:
         parser_advance()
         return parse_lazy_val_decl_stmt()
 
-    if par_kind_get() == 22:
+    if kind == 22:
         return parse_var_decl_stmt()
 
     # use statement inside function body: consume tokens, return pass (no-op)
     # Avoids circular dep with parser_decls_use.spl (which imports parse_block from here).
-    if par_kind_get() == 27:
+    if kind == 27:
         return parse_use_stmt_inline()
 
     # extern fn declaration inside a function body
-    if par_kind_get() == 25:
+    if kind == 25:
         return parse_extern_fn_stmt_inline()
 
-    if par_kind_get() == 49:
+    if kind == 49:
         parser_advance()
         val is_nl = par_kind_get() == 180
         val is_ded = par_kind_get() == 182
@@ -302,34 +307,36 @@ fn parse_statement() -> i64:
         val ret_val = parse_expr()
         return stmt_return_stmt(ret_val, 0)
 
-    if par_kind_get() == 40:
+    if kind == 40:
         return parse_if_stmt()
 
     # Labeled loop: 'label: for/while
-    if par_kind_get() == 192:
+    if kind == 192:
         val loop_label = par_text_get()
         parser_advance()
         # Expect colon after label
         parser_expect(161)
         # Then parse the loop and wrap in labeled_loop stmt
-        if par_kind_get() == 45:
+        kind = par_kind_get()
+        if kind == 45:
             val for_s = parse_for_stmt()
             return stmt_labeled_loop(loop_label, for_s, 0)
-        if par_kind_get() == 46:
+        if kind == 46:
             val while_s = parse_while_stmt()
             return stmt_labeled_loop(loop_label, while_s, 0)
         # Fallthrough: ignore label if not followed by loop
         return parse_statement()
 
-    if par_kind_get() == 45:
+    if kind == 45:
         return parse_for_stmt()
 
-    if par_kind_get() == 201:
+    if kind == 201:
         return parse_static_for_stmt()
 
-    if par_kind_get() == 202:
+    if kind == 202:
         parser_advance()
-        if par_kind_get() == 161:
+        kind = par_kind_get()
+        if kind == 161:
             parser_advance()
             val ct_body = parse_block()
             return stmt_comptime_block(ct_body, 0)
@@ -337,37 +344,43 @@ fn parse_statement() -> i64:
         val ct_expr = parse_expr()
         return stmt_expr_stmt(ct_expr, 0)
 
-    if par_kind_get() == 46:
+    if kind == 46:
         return parse_while_stmt()
 
-    if par_kind_get() == 43:
+    if kind == 43:
         # G33: `match` may be an identifier (var match = true; match = false).
         # After consuming `match`, a token that cannot start an expression
         # means identifier usage. Tradeoff: scrutinees starting with -, (
         # still route to match-stmt (their kinds can start expressions).
         parser_advance()
-        if g33_kw_ident_follow(par_kind_get()):
+        kind = par_kind_get()
+        if g33_kw_ident_follow(kind):
             var mleft = parse_postfix_on(expr_ident("match", 0))
             mleft = parse_binary_from(mleft)
-            if par_kind_get() == 100 or par_kind_get() == 106:
+            kind = par_kind_get()
+            if kind == 100 or kind == 106:
                 parser_advance()
                 return stmt_expr_stmt(expr_assign(mleft, parse_expr(), 0), 0)
-            if par_kind_get() == 101:
+            kind = par_kind_get()
+            if kind == 101:
                 parser_advance()
                 return stmt_expr_stmt(expr_compound_assign(60, mleft, parse_expr(), 0), 0)
-            if par_kind_get() == 102:
+            kind = par_kind_get()
+            if kind == 102:
                 parser_advance()
                 return stmt_expr_stmt(expr_compound_assign(61, mleft, parse_expr(), 0), 0)
-            if par_kind_get() == 103:
+            kind = par_kind_get()
+            if kind == 103:
                 parser_advance()
                 return stmt_expr_stmt(expr_compound_assign(62, mleft, parse_expr(), 0), 0)
-            if par_kind_get() == 104:
+            kind = par_kind_get()
+            if kind == 104:
                 parser_advance()
                 return stmt_expr_stmt(expr_compound_assign(63, mleft, parse_expr(), 0), 0)
             return stmt_expr_stmt(mleft, 0)
         return parse_match_stmt_tail()
 
-    if par_kind_get() == 47:
+    if kind == 47:
         parser_advance()
         # Check for labeled break: break 'label
         if par_kind_get() == 192:
@@ -376,7 +389,7 @@ fn parse_statement() -> i64:
             return stmt_break_labeled(lbl, 0)
         return stmt_break_stmt(0)
 
-    if par_kind_get() == 48:
+    if kind == 48:
         parser_advance()
         # Check for labeled continue: continue 'label
         if par_kind_get() == 192:
@@ -385,32 +398,32 @@ fn parse_statement() -> i64:
             return stmt_continue_labeled(lbl, 0)
         return stmt_continue_stmt(0)
 
-    if par_kind_get() == 206:
+    if kind == 206:
         parser_advance()
         return parse_receive_stmt()
 
-    if par_kind_get() == 204:
+    if kind == 204:
         parser_advance()
         return parse_bind_stmt()
 
-    if par_kind_get() == 186:
+    if kind == 186:
         parser_advance()
         val deferred = parse_expr()
         return stmt_defer_stmt(deferred, 0)
 
-    if par_kind_get() == 187:
+    if kind == 187:
         parser_advance()
         val err_deferred = parse_expr()
         return stmt_errdefer_stmt(err_deferred, 0)
 
-    if par_kind_get() == 52:
+    if kind == 52:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
             return stmt_expr_stmt(expr_pass(0), 0)
         return stmt_expr_stmt(expr_pass_with_msg(msg, 0), 0)
 
-    if par_kind_get() == 183:
+    if kind == 183:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
@@ -419,7 +432,7 @@ fn parse_statement() -> i64:
             print "[debug:pass] {msg}"
         return stmt_expr_stmt(expr_pass_todo(msg, 0), 0)
 
-    if par_kind_get() == 184:
+    if kind == 184:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
@@ -428,7 +441,7 @@ fn parse_statement() -> i64:
             print "[debug:pass] {msg}"
         return stmt_expr_stmt(expr_pass_do_nothing(msg, 0), 0)
 
-    if par_kind_get() == 185:
+    if kind == 185:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
@@ -437,22 +450,19 @@ fn parse_statement() -> i64:
             print "[debug:pass] {msg}"
         return stmt_expr_stmt(expr_pass_dn(msg, 0), 0)
 
-    if par_kind_get() == 6:
-        if par_text_get() == "todo":
+    if kind == TOK_IDENT:
+        val ident_text = par_text_get()
+        if ident_text == "todo":
             parser_advance()
             val msg = parse_optional_rationale_args()
             if msg == "":
                 parser_warn("REQC003: todo requires two strings: todo(\"what remains\", \"hint or issue\")")
             return stmt_expr_stmt(expr_pass_todo(msg, 0), 0)
 
-    # Handle gpu_launch(grid: (...), block: (...)): body
-    if par_kind_get() == 6:
-        if par_text_get() == "gpu_launch":
+        if ident_text == "gpu_launch":
             return parse_gpu_launch_stmt()
 
-    # Handle bare 'print' keyword (print expr -- no parens)
-    if par_kind_get() == 6:
-        if par_text_get() == "print":
+        if ident_text == "print":
             parser_warn_print_if_needed()
             parser_advance()
             val is_nl = par_kind_get() == 180
@@ -472,17 +482,13 @@ fn parse_statement() -> i64:
             val call1 = expr_call(callee1, args1, 0)
             return stmt_expr_stmt(call1, 0)
 
-    # `assert cond [, msg]` — `assert` lexes as a plain Ident in the stage4
-    # CoreLexer, so without this the optional `, msg` tail derails the
-    # enclosing arm/statement. Cond becomes an expression statement; the
-    # message is parsed and dropped (no assert node at this stage).
-    if par_kind_get() == TOK_IDENT and par_text_get() == "assert":
-        parser_advance()
-        val assert_cond = parse_expr()
-        if par_kind_get() == 160:
+        if ident_text == "assert":
             parser_advance()
-            val _assert_msg = parse_expr()
-        return stmt_expr_stmt(assert_cond, 0)
+            val assert_cond = parse_expr()
+            if par_kind_get() == 160:
+                parser_advance()
+                val _assert_msg = parse_expr()
+            return stmt_expr_stmt(assert_cond, 0)
 
     # `me NAME(...) [-> T]: body` in statement position (a class's methods
     # written at fn-body indent, e.g. semantics/resolve.spl) — same desugar
@@ -490,7 +496,7 @@ fn parse_statement() -> i64:
     # Only when an identifier follows: `me` is also the self-alias in
     # expressions (`me.backend.move_cursor(...)` in office/editor code),
     # which must fall through to the expression path — backtrack then.
-    if par_kind_get() == 34:
+    if kind == 34:
         val (me_snap_nums, me_snap_txts) = lex_snapshot_save()
         val (me_tok_nums, me_tok_text) = parser_tok_save()
         parser_advance()  # consume me
@@ -515,9 +521,10 @@ fn parse_statement() -> i64:
     # but self-recursive calls fail seed-wide ("function X not found" — the
     # seed never pre-binds the name before evaluating the body). This
     # desugar matches that: it supports the non-recursive case only.
-    if par_kind_get() == TOK_KW_FN:
+    if kind == TOK_KW_FN:
         parser_advance()  # consume fn
-        if par_kind_get() == TOK_IDENT:
+        kind = par_kind_get()
+        if kind == TOK_IDENT:
             val nested_fn_name = par_text_get()
             parser_advance()  # consume name
             val nested_lambda = parse_fn_lambda_after_kw()
@@ -531,13 +538,17 @@ fn parse_statement() -> i64:
     # G31: tuple assignment (a, b) = expr is handled naturally:
     #   G29 makes (a, b) a tuple expr; parse_assignment sees = and builds expr_assign.
     if parser_stmt_trace_line_enabled():
-        eprint("[parser-block] expr-branch:start kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
+        val trace_kind = kind
+        val trace_text = par_text_get()
+        eprint("[parser-block] expr-branch:start kind={trace_kind} text={trace_text} line={par_line_get()} col={par_col_get()}")
     val expression = parse_expr()
-    if par_kind_get() == TOK_IDENT:
+    kind = par_kind_get()
+    if kind == TOK_IDENT:
         val lane_name = par_text_get()
         if lane_name == "gpu" or lane_name == "host":
             parser_advance()
-            if par_kind_get() == TOK_BACKSLASH:
+            kind = par_kind_get()
+            if kind == TOK_BACKSLASH:
                 parser_advance()
             parser_expect(TOK_COLON)
             val lane_body = parse_block()
@@ -889,15 +900,17 @@ fn parse_match_stmt_tail() -> i64:
     parser_expect(181)
 
     var arm_indices: [i64] = []
+    var kind = par_kind_get()
     for i in 0..1000:
         parser_skip_newlines()
-        if par_kind_get() == 182:
+        kind = par_kind_get()
+        if kind == 182:
             parser_advance()
             break
-        if par_kind_get() == 190:
+        if kind == 190:
             break
 
-        if par_kind_get() == 44:
+        if kind == 44:
             parser_advance()
 
             # Support multi-pattern: case X | Y | Z:
@@ -908,32 +921,38 @@ fn parse_match_stmt_tail() -> i64:
             # Check for pipe separator and collect additional patterns
             # Support multi-line patterns by skipping newlines/indents before pipes
             for skip_idx in 0..100:
-                val is_nl = par_kind_get() == 180
-                val is_indent = par_kind_get() == 181
+                kind = par_kind_get()
+                val is_nl = kind == 180
+                val is_indent = kind == 181
                 val should_skip = is_nl or is_indent
                 if not should_skip:
                     break
                 parser_advance()
 
-            while par_kind_get() == 121:
+            kind = par_kind_get()
+            while kind == 121:
                 parser_advance()
                 # Skip newlines/indents after pipe
                 for skip_idx in 0..100:
-                    val is_nl = par_kind_get() == 180
-                    val is_indent = par_kind_get() == 181
+                    kind = par_kind_get()
+                    val is_nl = kind == 180
+                    val is_indent = kind == 181
                     val should_skip = is_nl or is_indent
                     if not should_skip:
                         break
                     parser_advance()
                 patterns.push(parse_expr())
+                kind = par_kind_get()
                 # Skip newlines/indents after pattern
                 for skip_idx in 0..100:
-                    val is_nl = par_kind_get() == 180
-                    val is_indent = par_kind_get() == 181
+                    kind = par_kind_get()
+                    val is_nl = kind == 180
+                    val is_indent = kind == 181
                     val should_skip = is_nl or is_indent
                     if not should_skip:
                         break
                     parser_advance()
+                kind = par_kind_get()
 
             # Check for guard clause: case X if guard_expr:
             var guard_expr_idx: i64 = -1
@@ -1009,15 +1028,17 @@ fn parse_receive_stmt() -> i64:
     var timeout_expr: i64 = -1
     var timeout_body_idx: i64 = -1
 
+    var kind = par_kind_get()
     for i in 0..1000:
         parser_skip_newlines()
-        if par_kind_get() == 182:
+        kind = par_kind_get()
+        if kind == 182:
             parser_advance()
             break
-        if par_kind_get() == 190:
+        if kind == 190:
             break
 
-        if par_kind_get() == 207:
+        if kind == 207:
             # after TIMEOUT: body -- timeout arm
             parser_advance()
             timeout_expr = parse_expr()
@@ -1025,26 +1046,30 @@ fn parse_receive_stmt() -> i64:
             val after_body = parse_block()
             val after_body_stmt_idx = stmt_block_stmt(after_body, 0)
             timeout_body_idx = after_body_stmt_idx
-        elif par_kind_get() == 44:
+        elif kind == 44:
             parser_advance()
             var patterns: [i64] = []
             patterns.push(parse_expr())
             for skip_idx in 0..100:
-                val is_nl = par_kind_get() == 180
-                val is_indent = par_kind_get() == 181
+                kind = par_kind_get()
+                val is_nl = kind == 180
+                val is_indent = kind == 181
                 val should_skip = is_nl or is_indent
                 if not should_skip:
                     break
                 parser_advance()
-            while par_kind_get() == 121:
+            kind = par_kind_get()
+            while kind == 121:
                 parser_advance()
                 for skip_idx in 0..100:
-                    val is_nl = par_kind_get() == 180
-                    val is_indent = par_kind_get() == 181
+                    kind = par_kind_get()
+                    val is_nl = kind == 180
+                    val is_indent = kind == 181
                     val should_skip = is_nl or is_indent
                     if not should_skip:
                         break
                     parser_advance()
+                kind = par_kind_get()
                 patterns.push(parse_expr())
             var guard_expr_idx: i64 = -1
             if par_kind_get() == 40:

@@ -838,12 +838,15 @@ fn parse_postfix_on(base_expr: i64) -> i64:
         try_skip_ident_generic_args()
     var base = base_expr
     for i in 0..1000:
-        if par_kind_get() == 164 or par_kind_get() == 162:
+        val kind = par_kind_get()
+        if kind == 164 or kind == 162:
             # G34: kind 162 (::) is treated identically to kind 164 (.) for member/variant access
             parser_advance()
+            val member_kind = par_kind_get()
+            val member_text = par_text_get()
 
             # --- .FILE -> __traits("module_file", "dotted.path") ---
-            if par_kind_get() == 6 and par_text_get() == "FILE":
+            if member_kind == 6 and member_text == "FILE":
                 val ppo_dotted = extract_dotted_path(base)
                 if ppo_dotted != "":
                     parser_advance()
@@ -855,7 +858,7 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                     continue
 
             # --- .class -> __traits("class_info", "TypeName") ---
-            if par_kind_get() == 31:
+            if member_kind == 31:
                 val ppo_type_name = extract_dotted_path(base)
                 if ppo_type_name != "":
                     parser_advance()
@@ -867,7 +870,7 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                     continue
 
             # --- .* -> __traits("module_wildcard", "dotted.prefix") ---
-            if par_kind_get() == 62:
+            if member_kind == 62:
                 val ppo_prefix = extract_dotted_path(base)
                 if ppo_prefix != "":
                     parser_advance()
@@ -879,45 +882,51 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                     continue
 
             # Numeric tuple-field access: pair.0, pair.1
-            if par_kind_get() == 1:
-                val ppo_idx_name = par_text_get()
+            if member_kind == 1:
+                val ppo_idx_name = member_text
                 parser_advance()
                 base = expr_field_access(base, ppo_idx_name, 0)
                 continue
             # G25: accept keyword tokens as member names (e.g. .new, .type)
-            var field_name = par_text_get()
-            val ppo_kw_name = tok_kind_name(par_kind_get())
-            val ppo_is_kw = keyword_lookup(ppo_kw_name) == par_kind_get()
-            if par_kind_get() != 6 and not ppo_is_kw:
+            var field_name = member_text
+            val ppo_kw_name = tok_kind_name(member_kind)
+            val ppo_is_kw = keyword_lookup(ppo_kw_name) == member_kind
+            if member_kind != 6 and not ppo_is_kw:
                 parser_error("expected field name after '.'")
                 break
-            if ppo_is_kw and par_kind_get() != 6:
+            if ppo_is_kw and member_kind != 6:
                 field_name = ppo_kw_name
             parser_advance()
-            if par_kind_get() == 140:
+            var ppo_after_member = par_kind_get()
+            if ppo_after_member == 140:
                 parser_advance()
                 var call_args: [i64] = []
-                if par_kind_get() != 141:
+                var ppo_after_lparen = par_kind_get()
+                if ppo_after_lparen != 141:
                     call_args.push(parse_call_arg())
+                    ppo_after_lparen = par_kind_get()
                     for j in 0..10000:
-                        if par_kind_get() != 160:
+                        if ppo_after_lparen != 160:
                             break
                         parser_advance()
-                        if par_kind_get() == 141:
+                        ppo_after_lparen = par_kind_get()
+                        if ppo_after_lparen == 141:
                             break
                         call_args.push(parse_call_arg())
+                        ppo_after_lparen = par_kind_get()
                 parser_expect(141)
                 base = expr_method_call(base, field_name, call_args, 0)
             else:
                 base = expr_field_access(base, field_name, 0)
-        elif (par_kind_get() == 142 and
+        elif (kind == 142 and
               (expr_get_tag(base) == 6 or expr_get_tag(base) == 11)):
             # Struct literal: Ident { field: value, ... } (numeric tags 6/11 =
             # EXPR_IDENT/EXPR_FIELD_ACCESS dodge stage4 imported-const compares)
             base = parse_struct_lit_tail(base)
-        elif par_kind_get() == 144:
+        elif kind == 144:
             parser_advance()
-            if par_kind_get() == 161:
+            val ppo_after_lbracket = par_kind_get()
+            if ppo_after_lbracket == 161:
                 parser_advance()
                 val end_idx = parse_expr()
                 if not validate_bracket_expr(end_idx, "slice end"): return base
@@ -926,10 +935,12 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                 base = expr_slice(base, zero, end_idx, 0)
             else:
                 val index_expr = parse_expr()
-                if par_kind_get() == 161:
+                val ppo_after_idx = par_kind_get()
+                if ppo_after_idx == 161:
                     if not validate_bracket_expr(index_expr, "slice start"): return base
                     parser_advance()
-                    if par_kind_get() == 145:
+                    val ppo_after_slice_colon = par_kind_get()
+                    if ppo_after_slice_colon == 145:
                         parser_advance()
                         val neg1 = expr_int_lit(-1, 0)
                         base = expr_slice(base, index_expr, neg1, 0)
@@ -942,34 +953,38 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                     if not validate_bracket_expr(index_expr, "index expression"): return base
                     parser_expect(145)
                     base = expr_index(base, index_expr, 0)
-        elif par_kind_get() == 140:
+        elif kind == 140:
             parser_advance()
             var call_args: [i64] = []
-            if par_kind_get() != 141:
+            var ppo_after_lparen = par_kind_get()
+            if ppo_after_lparen != 141:
                 call_args.push(parse_call_arg())
+                ppo_after_lparen = par_kind_get()
                 for j in 0..10000:
-                    if par_kind_get() != 160:
+                    if ppo_after_lparen != 160:
                         break
                     parser_advance()
-                    if par_kind_get() == 141:
+                    ppo_after_lparen = par_kind_get()
+                    if ppo_after_lparen == 141:
                         break
                     call_args.push(parse_call_arg())
+                    ppo_after_lparen = par_kind_get()
             parser_expect(141)
             base = expr_call(base, call_args, 0)
-        elif par_kind_get() == 131:
+        elif kind == 131:
             parser_advance()
             val field_name = par_text_get()
             parser_expect(6)
             base = expr_field_access(base, field_name, 0)
-        elif par_kind_get() == 130:
+        elif kind == 130:
             # Try/unwrap operator: expr? — propagate Err / None
             parser_advance()
             base = expr_try(base, 0)
-        elif par_kind_get() == 133:
+        elif kind == 133:
             # Standalone existence check: expr.?
             parser_advance()
             base = expr_exists_check(base, 0)
-        elif par_kind_get() == 57 and par_text_get() == "!":
+        elif kind == 57 and par_text_get() == "!":
             # G44: postfix `!` force-unwrap (expr!, expr!.field). Pervasive
             # (loc!./func!. etc.). In postfix position a `!` after a primary is
             # always force-unwrap (prefix-not is handled before the primary).
@@ -1004,12 +1019,15 @@ fn parse_postfix() -> i64:
         (par_kind_get() == 82 or par_kind_get() == 86)):
         try_skip_ident_generic_args()
     for i in 0..1000:
-        if par_kind_get() == 164 or par_kind_get() == 162:
+        val kind = par_kind_get()
+        if kind == 164 or kind == 162:
             # G34: kind 162 (::) is treated identically to kind 164 (.) for member/variant access
             parser_advance()
+            val member_kind = par_kind_get()
+            val member_text = par_text_get()
 
             # --- .FILE -> __traits("module_file", "dotted.path") ---
-            if par_kind_get() == 6 and par_text_get() == "FILE":
+            if member_kind == 6 and member_text == "FILE":
                 val pp_dotted = extract_dotted_path(base)
                 if pp_dotted != "":
                     parser_advance()
@@ -1021,7 +1039,7 @@ fn parse_postfix() -> i64:
                     continue
 
             # --- .class -> __traits("class_info", "TypeName") ---
-            if par_kind_get() == 31:
+            if member_kind == 31:
                 val pp_type_name = extract_dotted_path(base)
                 if pp_type_name != "":
                     parser_advance()
@@ -1033,7 +1051,7 @@ fn parse_postfix() -> i64:
                     continue
 
             # --- .* -> __traits("module_wildcard", "dotted.prefix") ---
-            if par_kind_get() == 62:
+            if member_kind == 62:
                 val pp_prefix = extract_dotted_path(base)
                 if pp_prefix != "":
                     parser_advance()
@@ -1045,47 +1063,53 @@ fn parse_postfix() -> i64:
                     continue
 
             # Numeric tuple-field access: pair.0, pair.1
-            if par_kind_get() == 1:
-                val pp_idx_name = par_text_get()
+            if member_kind == 1:
+                val pp_idx_name = member_text
                 parser_advance()
                 base = expr_field_access(base, pp_idx_name, 0)
                 continue
             # G25: accept keyword tokens as member names (e.g. .new, .type)
-            var field_name = par_text_get()
-            val pp_kw_name = tok_kind_name(par_kind_get())
-            val pp_is_kw = keyword_lookup(pp_kw_name) == par_kind_get()
-            if par_kind_get() != 6 and not pp_is_kw:
+            var field_name = member_text
+            val pp_kw_name = tok_kind_name(member_kind)
+            val pp_is_kw = keyword_lookup(pp_kw_name) == member_kind
+            if member_kind != 6 and not pp_is_kw:
                 parser_error("expected field name after '.'")
                 break
-            if pp_is_kw and par_kind_get() != 6:
+            if pp_is_kw and member_kind != 6:
                 field_name = pp_kw_name
             parser_advance()
             # Check for method call: obj.method(args)
-            if par_kind_get() == 140:
+            var pp_after_member = par_kind_get()
+            if pp_after_member == 140:
                 parser_advance()
                 var call_args: [i64] = []
-                if par_kind_get() != 141:
+                var pp_after_lparen = par_kind_get()
+                if pp_after_lparen != 141:
                     call_args.push(parse_call_arg())
+                    pp_after_lparen = par_kind_get()
                     for j in 0..10000:
-                        if par_kind_get() != 160:
+                        if pp_after_lparen != 160:
                             break
                         parser_advance()
-                        if par_kind_get() == 141:
+                        pp_after_lparen = par_kind_get()
+                        if pp_after_lparen == 141:
                             break
                         call_args.push(parse_call_arg())
+                        pp_after_lparen = par_kind_get()
                 parser_expect(141)
                 base = expr_method_call(base, field_name, call_args, 0)
             else:
                 base = expr_field_access(base, field_name, 0)
-        elif (par_kind_get() == 142 and
+        elif (kind == 142 and
               (expr_get_tag(base) == 6 or expr_get_tag(base) == 11)):
             # Struct literal: Ident { field: value, ... } (numeric tags 6/11 =
             # EXPR_IDENT/EXPR_FIELD_ACCESS dodge stage4 imported-const compares)
             base = parse_struct_lit_tail(base)
-        elif par_kind_get() == 144:
+        elif kind == 144:
             parser_advance()
             # Check for slice: a[start:end]
-            if par_kind_get() == 161:
+            val pp_after_lbracket = par_kind_get()
+            if pp_after_lbracket == 161:
                 parser_advance()
                 val end_idx = parse_expr()
                 if not validate_bracket_expr(end_idx, "slice end"): return base
@@ -1094,11 +1118,13 @@ fn parse_postfix() -> i64:
                 base = expr_slice(base, zero, end_idx, 0)
             else:
                 val index_expr = parse_expr()
-                if par_kind_get() == 161:
+                val pp_after_idx = par_kind_get()
+                if pp_after_idx == 161:
                     # Slice: a[start:end]
                     if not validate_bracket_expr(index_expr, "slice start"): return base
                     parser_advance()
-                    if par_kind_get() == 145:
+                    val pp_after_slice_colon = par_kind_get()
+                    if pp_after_slice_colon == 145:
                         # a[start:] -- open-ended
                         parser_advance()
                         val neg1 = expr_int_lit(-1, 0)
@@ -1112,40 +1138,44 @@ fn parse_postfix() -> i64:
                     if not validate_bracket_expr(index_expr, "index expression"): return base
                     parser_expect(145)
                     base = expr_index(base, index_expr, 0)
-        elif par_kind_get() == 140:
+        elif kind == 140:
             # Function call: f(args)
             if parser_expr_trace_line_enabled():
                 eprint("[parser-expr] call:start callee={expr_get_str(base)} line={par_line_get()} col={par_col_get()}")
             parser_advance()
             var call_args: [i64] = []
-            if par_kind_get() != 141:
+            var pp_after_lparen = par_kind_get()
+            if pp_after_lparen != 141:
                 call_args.push(parse_call_arg())
+                pp_after_lparen = par_kind_get()
                 for j in 0..10000:
-                    if par_kind_get() != 160:
+                    if pp_after_lparen != 160:
                         break
                     parser_advance()
-                    if par_kind_get() == 141:
+                    pp_after_lparen = par_kind_get()
+                    if pp_after_lparen == 141:
                         break
                     call_args.push(parse_call_arg())
+                    pp_after_lparen = par_kind_get()
             parser_expect(141)
             base = expr_call(base, call_args, 0)
             if parser_expr_trace_line_enabled():
                 eprint("[parser-expr] call:done callee={expr_get_str(base)} argc={call_args.len()}")
-        elif par_kind_get() == 131:
+        elif kind == 131:
             # Optional chaining: x?.field
             parser_advance()
             val field_name = par_text_get()
             parser_expect(6)
             base = expr_field_access(base, field_name, 0)
-        elif par_kind_get() == 130:
+        elif kind == 130:
             # Try/unwrap operator: expr? — propagate Err / None
             parser_advance()
             base = expr_try(base, 0)
-        elif par_kind_get() == 57 and par_text_get() == "!":
+        elif kind == 57 and par_text_get() == "!":
             # G44: postfix `!` force-unwrap (expr!, expr!.field) — see parse_postfix.
             parser_advance()
             base = expr_force_unwrap(base, 0)
-        elif par_kind_get() == 133:
+        elif kind == 133:
             # Standalone existence check: expr.?
             parser_advance()
             base = expr_exists_check(base, 0)

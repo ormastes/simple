@@ -17,9 +17,9 @@ use compiler.mir.mir_lowering.*
 # - mir_lowering_ml.spl: ML blocks, async/await, custom blocks
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instructions.{MirModule, MirFunction, MirTerminator, mir_operand_const_int}
-use compiler.hir.hir.*
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_exit(code: i64)
@@ -28,7 +28,7 @@ use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
-use compiler.core.types.{custom_primitive_underlying_type_tag_by_symbol}
+use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 
 # Import struct definitions from types module
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
@@ -106,7 +106,6 @@ fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
     _bootstrap_mir_functions = []
     _bootstrap_mir_function_names = []
     var real_instr_total = 0
-    var real_term_total = 0
     if val hir_module = _bootstrap_entry_hir_module:
         var lowering = MirLowering.new(hir_module.symbols)
         var lowered_module = lowering.builder.module
@@ -127,11 +126,6 @@ fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
                 var blk_i = 0
                 while blk_i < mir_fn.blocks.len():
                     real_instr_total = real_instr_total + mir_fn.blocks[blk_i].instructions.len()
-                    match mir_fn.blocks[blk_i].terminator:
-                        case MirTerminator.Unreachable:
-                            pass
-                        case _:
-                            real_term_total = real_term_total + 1
                     blk_i = blk_i + 1
                 var bldr = lowering.builder
                 lowered_module = bldr.module
@@ -143,13 +137,13 @@ fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
                 lowering.builder = bldr
                 print "[mir-lower-free] function:added"
             fki = fki + 1
-        print "[mir-lower-free] done instr-total={real_instr_total} term-total={real_term_total}"
+        print "[mir-lower-free] done instr-total={real_instr_total}"
         # Loud-failure guard: the bootstrap entry must never lower to an all-stub
         # (ret-0, zero-instruction) module. Emitting such a module produced a
         # link-clean but non-functional stage-2 binary that silently shipped.
         # Fail closed instead (policy: stub fallbacks intentionally rejected).
-        if real_instr_total == 0 and real_term_total == 0:
-            eprint("error: bootstrap entry lowered to 0 MIR body operations (ret-0 stub module)\n")
+        if real_instr_total == 0:
+            eprint("error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)\n")
             eprint("error: refusing to emit a stub-only bootstrap binary; real Simple lowering produced no bodies\n")
             rt_exit(1)
         return lowering.builder.module

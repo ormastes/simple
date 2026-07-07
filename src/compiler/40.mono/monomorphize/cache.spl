@@ -6,7 +6,44 @@
 #
 # Port of rust/compiler/src/monomorphize/cache.rs (100+ lines)
 
-use std.sdn.{SdnValue, parse_file, render_value}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser (parse)
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn mono_cache_file_read_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn mono_cache_parse_file(path: text) -> Result<SdnValue, text>:
+    parse(mono_cache_file_read_text(path))
+
+fn mono_cache_render_value(value: SdnValue, indent: i64) -> text:
+    match value:
+        case Null:
+            "null"
+        case Bool(b):
+            if b: "true" else: "false"
+        case Int(i):
+            i.to_text()
+        case Float(f):
+            f.to_text()
+        case String(s):
+            "\"" + s + "\""
+        case Array(items):
+            var parts: [text] = []
+            for item in items:
+                parts = parts.push(mono_cache_render_value(item, indent + 2))
+            "[" + parts.join(", ") + "]"
+        case Dict(entries):
+            var parts: [text] = []
+            for key in entries.keys():
+                parts = parts.push(key + ": " + mono_cache_render_value(entries[key], indent + 2))
+            "{ " + parts.join(", ") + " }"
+        case Table(_, _):
+            "[]"
 
 # ============================================================================
 # Configuration
@@ -146,9 +183,6 @@ impl MonoCache:
         if not self.config.persist_to_disk:
             return
 
-        extern fn rt_mkdir_p(path: text) -> bool
-        extern fn rt_file_write_text(path: text, content: text) -> bool
-
         rt_mkdir_p(cache_dir)
 
         var sdn_entries: [SdnValue] = []
@@ -168,21 +202,19 @@ impl MonoCache:
             "entries": SdnValue.Array(sdn_entries)
         })
 
-        val sdn_text = render_value(sdn_doc, 0)
+        val sdn_text = mono_cache_render_value(sdn_doc, 0)
         val index_path = "{cache_dir}/mono_cache_index.sdn"
         rt_file_write_text(index_path, sdn_text)
 
     static fn load_from_disk(cache_dir: text) -> MonoCache:
         """Load a persistent mono cache from disk."""
-        extern fn rt_file_exists(path: text) -> bool
-
         val config = MonoCacheConfig.persistent(cache_dir)
         val index_path = "{cache_dir}/mono_cache_index.sdn"
 
         if not rt_file_exists(index_path):
             return MonoCache.create(config)
 
-        match parse_file(index_path):
+        match mono_cache_parse_file(index_path):
             case Ok(sdn_value):
                 var cache = MonoCache.create(config)
 

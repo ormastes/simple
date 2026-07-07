@@ -75,6 +75,7 @@ thread_local! {
         RefCell::new(Arc::new(ConcurrentProviderRegistry::default()));
     /// Command line arguments passed to the Simple interpreter
     pub(crate) static INTERPRETER_ARGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    pub(crate) static DEBUG_CALL_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Current file being evaluated (for module resolution)
     pub(crate) static CURRENT_FILE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     /// Interface bindings for static polymorphism (trait_name -> impl_type_name)
@@ -450,6 +451,7 @@ pub fn is_execution_limit_enabled() -> bool {
 /// RAII guard that decrements recursion depth on drop (only if it incremented).
 pub struct RecursionGuard {
     active: bool,
+    stack_active: bool,
 }
 
 impl Drop for RecursionGuard {
@@ -458,28 +460,54 @@ impl Drop for RecursionGuard {
         if self.active {
             RECURSION_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
+        if self.stack_active {
+            DEBUG_CALL_STACK.with(|cell| {
+                cell.borrow_mut().pop();
+            });
+        }
     }
+}
+
+pub(crate) fn debug_call_stack_snapshot() -> Vec<String> {
+    DEBUG_CALL_STACK.with(|cell| cell.borrow().clone())
 }
 
 /// Push call depth and check for stack overflow.
 /// Returns a guard that auto-decrements on drop.
 #[inline]
 pub fn push_call_depth(function_name: &str) -> Result<RecursionGuard, crate::error::CompileError> {
+    let stack_active = std::env::var_os("SIMPLE_DEBUG_FIELD_ACCESS").is_some();
+    if stack_active {
+        DEBUG_CALL_STACK.with(|cell| {
+            cell.borrow_mut().push(function_name.to_string());
+        });
+    }
     if !is_stack_overflow_detection_enabled() {
-        return Ok(RecursionGuard { active: false });
+        return Ok(RecursionGuard {
+            active: false,
+            stack_active,
+        });
     }
     let depth = RECURSION_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let limit = MAX_RECURSION_DEPTH.load(std::sync::atomic::Ordering::Relaxed) as usize;
     if depth >= limit {
         // Undo the increment since we're about to error
         RECURSION_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        if stack_active {
+            DEBUG_CALL_STACK.with(|cell| {
+                cell.borrow_mut().pop();
+            });
+        }
         return Err(crate::error::CompileError::StackOverflow {
             depth: depth as u64,
             limit: limit as u64,
             function_name: function_name.to_string(),
         });
     }
-    Ok(RecursionGuard { active: true })
+    Ok(RecursionGuard {
+        active: true,
+        stack_active,
+    })
 }
 
 // Delegate to simple_common::fault_detection for cross-crate compatibility.

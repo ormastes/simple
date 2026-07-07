@@ -9,9 +9,20 @@
 
 use compiler.frontend.ast.{AstModule, Node}
 use compiler.common.dependency.visibility.{Visibility}
-use compiler.module_resolver.types.{ModuleResolver, DirectoryManifest, ChildModule}
+use compiler.loader.module_resolver.types.{ModuleResolver, DirectoryManifest, ChildModule, Capability}
 use compiler.common.error.{CompileError}
 use compiler.common.gc_config.{GcMode, GcConfig}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_read(path: text) -> text?:
+    if not rt_file_exists(path):
+        return nil
+    Some(rt_file_read_text(path) ?? "")
 
 # ============================================================================
 # Manifest Loading
@@ -49,10 +60,7 @@ impl ModuleResolver:
         val source = match file_read(init_path):
             Some(content): content
             nil:
-                return CompileError.io_error(
-                    "failed to read file: {init_path}",
-                    ErrorCode.FILE_READ_ERROR
-                )
+                return CompileError.io("failed to read file: {init_path}")
 
         val manifest = self.parse_manifest(source, dir_path)?
 
@@ -91,9 +99,7 @@ impl ModuleResolver:
             val parent_caps = parent_capabilities.map(&:name).join(", ")
 
             return CompileError.semantic(
-                "capability violation in module `{manifest.name}`",
-                ErrorCode.CAPABILITY_VIOLATION,
-                "child capabilities [{child_caps}] must be subset of parent [{parent_caps}]"
+                "capability violation in module `{manifest.name}`: child capabilities [{child_caps}] must be subset of parent [{parent_caps}]"
             ).with_note("child modules can only restrict capabilities, not expand them")
 
         Ok(manifest)
@@ -117,10 +123,7 @@ impl ModuleResolver:
         val module = match parser.parse():
             Ok(m): m
             Err(err):
-                return CompileError.parse_error(
-                    "failed to parse __init__.spl: {err.message}",
-                    ErrorCode.PARSE_ERROR
-                )
+                return CompileError.parse("failed to parse __init__.spl")
 
         self.extract_manifest(module, dir_path)
 

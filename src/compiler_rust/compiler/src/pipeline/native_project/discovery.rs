@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 
 use simple_common::target::TargetArch;
 
-use super::{collect_spl_files_recursive, safe_canonicalize, same_file_path, NativeProjectBuilder};
+use super::{
+    collect_spl_files_recursive, native_project_rust_trace_enabled, safe_canonicalize, same_file_path,
+    NativeProjectBuilder,
+};
 
 /// Resolve a `@cfg(...)` condition name to an architecture, if it names one.
 ///
@@ -146,6 +149,13 @@ impl NativeProjectBuilder {
         entry_file: &Path,
     ) -> Result<Vec<(PathBuf, String)>, String> {
         let canonical_entry = safe_canonicalize(entry_file);
+        let rust_trace = native_project_rust_trace_enabled();
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] entry-closure discovery start entry={}",
+                canonical_entry.display()
+            );
+        }
 
         // Build one resolver per source dir so imports can cross source boundaries.
         let mut resolvers: Vec<crate::module_resolver::ModuleResolver> = self
@@ -198,6 +208,9 @@ impl NativeProjectBuilder {
             if !seen.insert(canonical.clone()) {
                 continue;
             }
+            if rust_trace {
+                eprintln!("[native-rust-trace] discover visit {}", canonical.display());
+            }
 
             if canonical.extension().is_some_and(|e| e == "smf") {
                 continue;
@@ -220,6 +233,19 @@ impl NativeProjectBuilder {
                 for dep in extract_reachable_module_paths(&module, &canonical, resolver) {
                     let dep_canonical = safe_canonicalize(&dep);
                     found_deps.insert(dep_canonical);
+                }
+            }
+            if rust_trace && !found_deps.is_empty() {
+                eprintln!(
+                    "[native-rust-trace] discover deps {} count={}",
+                    canonical.display(),
+                    found_deps.len()
+                );
+                for dep in found_deps.iter().take(8) {
+                    eprintln!("  dep={}", dep.display());
+                }
+                if found_deps.len() > 8 {
+                    eprintln!("  dep_more={}", found_deps.len() - 8);
                 }
             }
 

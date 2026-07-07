@@ -35,6 +35,20 @@ Goal: produce the requested Simple executable without throwing away useful cache
 6. Rerun the main build with the same main cache.
 7. Stop when `build/native_probe/simple` or the requested deployed `bin/simple` exists.
 
+## Patterns
+
+- If `--entry-closure` is CPU-bound before HIR/driver debug output, inspect the
+  closure queue first. Shared imports need a queued-set as well as `seen`;
+  checking only processed files can enqueue the same module many times.
+- If LLVM reaches `llc` or link with an undefined runtime helper, fix the call
+  name and declaration together. For example, `get_args`/`get_cli_args` should
+  lower to the exported runtime symbol `rt_get_args`, and every text/lib LLVM
+  declaration list must include that symbol.
+- If a bootstrap fast path mirrors a normal lowering path, preserve the normal
+  scope and state side effects (`push_scope`/`pop_scope`, `has` flags, call-frame
+  snapshots). Fast paths may avoid fragile payload extraction, but not semantic
+  state.
+
 ## Error Triage
 
 Use:

@@ -33,12 +33,11 @@ fn _simple_join_text(items: [text], sep: text) -> text:
 
 fn _compile_simple_vhdl_subset(path: text, output: text) -> CompileResult:
     val source = rt_file_read_text(path) ?? ""
-    val vhdl = match _simple_vhdl_source_to_text(source):
-        case Ok(value):
-            value
-        case Err(err):
-            _delete_simple_vhdl_outputs(output)
-            return CompileResult.RuntimeError(err)
+    val vhdl_result = _simple_vhdl_source_to_text(source)
+    if vhdl_result.is_err():
+        _delete_simple_vhdl_outputs(output)
+        return CompileResult.RuntimeError(vhdl_result.unwrap_err())
+    val vhdl = vhdl_result.unwrap()
     if rt_file_write_text(output, vhdl):
         _write_simple_vhdl_source_map(path, output, source, vhdl)
         CompileResult.Success(output)
@@ -73,11 +72,10 @@ fn _simple_vhdl_entities_for_source_map(vhdl: text, source: text) -> text:
         if line.starts_with("entity ") and line.contains(" is"):
             val rest = line.substring(7, line.len())
             val end_opt = rest.find(" ")
-            val name = match end_opt:
-                case Some(end_index):
-                    rest.substring(0, end_index)
-                case nil:
-                    rest
+            val name = if end_opt.?:
+                rest.substring(0, end_opt.unwrap())
+            else:
+                rest
             val source_line = _simple_vhdl_source_entity_line(source, name)
             var entry = "{\"name\":\"" + _json_escape(name) + "\",\"line\":" + line_no.to_text()
             entry = entry + ",\"hwirId\":\"" + _json_escape(_simple_vhdl_hwir_node_id("entity", name, line_no)) + "\""
@@ -102,25 +100,23 @@ fn _simple_vhdl_ports_for_source_map(vhdl: text, source: text) -> text:
         val line = raw.trim()
         if (line.contains(" : in ") or line.contains(" : out ")) and not line.starts_with("signal "):
             val sep = line.find(":")
-            match sep:
-                case Some(sep_index):
-                    val original_name = line.substring(0, sep_index).trim()
-                    val name = if original_name.ends_with(";"): original_name.substring(0, original_name.len() - 1) else: original_name
-                    var source_index = _text_list_index_from(sanitized_names, name, source_cursor)
-                    if source_index < 0:
-                        source_index = _text_list_index(sanitized_names, name)
-                    val source_original = if source_index >= 0 and source_index < original_names.len(): original_names[source_index] else: name
-                    val source_line = if source_index >= 0 and source_index < source_lines.len(): _text_to_i64(source_lines[source_index]) else: 0
-                    var entry = "{\"name\":\"" + _json_escape(name) + "\",\"originalName\":\"" + _json_escape(source_original) + "\",\"sanitizedName\":\"" + _json_escape(name) + "\",\"line\":" + line_no.to_text()
-                    entry = entry + ",\"hwirId\":\"" + _json_escape(_simple_vhdl_hwir_node_id("port", name, line_no)) + "\""
-                    if source_line > 0:
-                        entry = entry + ",\"sourceLine\":" + source_line.to_text()
-                    entry = entry + "}"
-                    entries = entries.push(entry)
-                    if source_index >= 0:
-                        source_cursor = source_index + 1
-                case nil:
-                    pass
+            if sep.?:
+                val sep_index = sep.unwrap()
+                val original_name = line.substring(0, sep_index).trim()
+                val name = if original_name.ends_with(";"): original_name.substring(0, original_name.len() - 1) else: original_name
+                var source_index = _text_list_index_from(sanitized_names, name, source_cursor)
+                if source_index < 0:
+                    source_index = _text_list_index(sanitized_names, name)
+                val source_original = if source_index >= 0 and source_index < original_names.len(): original_names[source_index] else: name
+                val source_line = if source_index >= 0 and source_index < source_lines.len(): _text_to_i64(source_lines[source_index]) else: 0
+                var entry = "{\"name\":\"" + _json_escape(name) + "\",\"originalName\":\"" + _json_escape(source_original) + "\",\"sanitizedName\":\"" + _json_escape(name) + "\",\"line\":" + line_no.to_text()
+                entry = entry + ",\"hwirId\":\"" + _json_escape(_simple_vhdl_hwir_node_id("port", name, line_no)) + "\""
+                if source_line > 0:
+                    entry = entry + ",\"sourceLine\":" + source_line.to_text()
+                entry = entry + "}"
+                entries = entries.push(entry)
+                if source_index >= 0:
+                    source_cursor = source_index + 1
         line_no = line_no + 1
     _simple_join_text(entries, ", ")
 
@@ -132,13 +128,11 @@ fn _simple_vhdl_source_entity_line(source: text, entity_name: text) -> i64:
         if line.starts_with("fn "):
             val after_fn = line.substring(3).trim()
             val name_end = after_fn.find("(")
-            match name_end:
-                case Some(name_end_index):
-                    val fn_name = after_fn.substring(0, name_end_index).trim()
-                    if _simple_vhdl_identifier(fn_name) == entity_name:
-                        return line_no
-                case nil:
-                    pass
+            if name_end.?:
+                val name_end_index = name_end.unwrap()
+                val fn_name = after_fn.substring(0, name_end_index).trim()
+                if _simple_vhdl_identifier(fn_name) == entity_name:
+                    return line_no
         line_no = line_no + 1
     0
 
@@ -186,20 +180,14 @@ fn _simple_source_signature_parts(line: text) -> [text]:
     val ret_start_opt = after_fn.find("->")
     if not name_end_opt.? or not ret_start_opt.?:
         return []
-    val name_end = match name_end_opt:
-        case Some(value): value
-        case nil: return []
+    val name_end = name_end_opt.unwrap()
     val params_end_opt = _simple_find_matching_paren(after_fn, name_end)
     if not params_end_opt.?:
         return []
-    val params_end = match params_end_opt:
-        case Some(value): value
-        case nil: return []
+    val params_end = params_end_opt.unwrap()
     val fn_name = after_fn.substring(0, name_end).trim()
     val params_text = after_fn.substring(name_end + 1, params_end).trim()
-    val ret_start = match ret_start_opt:
-        case Some(value): value
-        case nil: return []
+    val ret_start = ret_start_opt.unwrap()
     var return_type = after_fn.substring(ret_start + 2, after_fn.len()).trim()
     if return_type.ends_with(":"):
         return_type = return_type.substring(0, return_type.len() - 1).trim()
@@ -214,22 +202,20 @@ fn _simple_source_port_names_from_params(params_text: text, source_line: i64, al
         for part in parts:
             val param = part.trim()
             val type_sep_opt = _simple_find_top_level(param, ":")
-            match type_sep_opt:
-                case Some(type_sep):
-                    val param_name = param.substring(0, type_sep).trim()
-                    val param_type = param.substring(type_sep + 1, param.len()).trim()
-                    if _simple_is_labeled_tuple_type_alias(param_type, alias_names, alias_types):
-                        val flattened = _simple_flatten_source_tuple_port_names(param_name, param_type, alias_names, alias_types)
-                        for name in flattened:
-                            originals = originals.push(name)
-                            sanitized = sanitized.push(_simple_param_vhdl_name(name))
-                            lines = lines.push(source_line.to_text())
-                    else:
-                        originals = originals.push(param_name)
-                        sanitized = sanitized.push(_simple_param_vhdl_name(param_name))
+            if type_sep_opt.?:
+                val type_sep = type_sep_opt.unwrap()
+                val param_name = param.substring(0, type_sep).trim()
+                val param_type = param.substring(type_sep + 1, param.len()).trim()
+                if _simple_is_labeled_tuple_type_alias(param_type, alias_names, alias_types):
+                    val flattened = _simple_flatten_source_tuple_port_names(param_name, param_type, alias_names, alias_types)
+                    for name in flattened:
+                        originals = originals.push(name)
+                        sanitized = sanitized.push(_simple_param_vhdl_name(name))
                         lines = lines.push(source_line.to_text())
-                case nil:
-                    pass
+                else:
+                    originals = originals.push(param_name)
+                    sanitized = sanitized.push(_simple_param_vhdl_name(param_name))
+                    lines = lines.push(source_line.to_text())
     [originals, sanitized, lines]
 
 fn _simple_flatten_source_tuple_port_names(prefix: text, tuple_type: text, alias_names: [text], alias_types: [text]) -> [text]:
@@ -483,15 +469,13 @@ fn _simple_type_aliases_for_source(source: text) -> [[text]]:
         val line = lines[i].trim()
         if line.starts_with("type "):
             val eq_opt = line.find("=")
-            match eq_opt:
-                case Some(eq_index):
-                    val alias_name = line.substring(5, eq_index).trim()
-                    val alias_type = line.substring(eq_index + 1, line.len()).trim()
-                    if alias_name != "" and alias_type != "":
-                        names = names.push(alias_name)
-                        types = types.push(alias_type)
-                case nil:
-                    pass
+            if eq_opt.?:
+                val eq_index = eq_opt.unwrap()
+                val alias_name = line.substring(5, eq_index).trim()
+                val alias_type = line.substring(eq_index + 1, line.len()).trim()
+                if alias_name != "" and alias_type != "":
+                    names = names.push(alias_name)
+                    types = types.push(alias_type)
         elif line.starts_with("enum "):
             val name_result = _simple_enum_name_from_header(line)
             if name_result != "":

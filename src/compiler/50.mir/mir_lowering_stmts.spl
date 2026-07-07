@@ -8,9 +8,25 @@
 # - Range-based and iterator-based for loop lowering
 
 use compiler.mir.mir_data.*
-use compiler.hir.hir.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+
+fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:
+    match k:
+        case HirStmtKind.Expr(_):
+            0
+        case HirStmtKind.Let(_, _, _):
+            1
+        case HirStmtKind.Assign(_, _, _):
+            2
+        case HirStmtKind.Block(_):
+            3
+        case HirStmtKind.AsmAssert(_):
+            4
+        case _:
+            -1
 
 # ============================================================================
 # Statement Lowering
@@ -33,6 +49,58 @@ impl MirLowering:
         # pre-declared, later-assigned `val`s.
         match stmt:
             case HirStmt(kind, span):
+                val stmt_kind_value: HirStmtKind = kind
+                if mir_hir_stmt_kind_disc(stmt_kind_value) == 1:
+                    val nil_span = Span.empty()
+                    val fallback_type = HirType(kind: HirTypeKind.Unit, span: nil_span)
+                    val let_symbol = match stmt_kind_value:
+                        case HirStmtKind.Let(symbol, _, _):
+                            if symbol != nil:
+                                Some(symbol)
+                            else:
+                                nil
+                        case _:
+                            nil
+                    val let_type = match stmt_kind_value:
+                        case HirStmtKind.Let(_, type_, _):
+                            if type_ != nil:
+                                Some(type_)
+                            else:
+                                nil
+                        case _:
+                            nil
+                    val let_init = match stmt_kind_value:
+                        case HirStmtKind.Let(_, _, init):
+                            init
+                        case _:
+                            HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: fallback_type, span: span)
+
+                    if let_symbol.?:
+                        val symbol_value = let_symbol ?? SymbolId(id: -1)
+                        if symbol_value == nil:
+                            self.error("let binding has no resolved symbol", Some(span))
+                            return
+                        val mir_type = if let_type.?:
+                            self.lower_type(let_type ?? fallback_type)
+                        else:
+                            MirType.i64()
+
+                        val init_local = self.lower_expr(let_init)
+                        val bf_sym = self.bitfield_value_syms.get(init_local.id)
+                        if bf_sym != nil:
+                            self.local_map[symbol_value.id] = init_local
+                        else:
+                            var b = self.builder
+                            val local = b.new_local(nil, mir_type, LocalKind.Var)
+                            self.builder = b
+                            self.local_map[symbol_value.id] = local
+                            var b2 = self.builder
+                            b2.emit_copy(local, init_local)
+                            self.builder = b2
+                    else:
+                        self.error("let binding has no resolved symbol", Some(span))
+                    return
+
                 match kind:
                     case Expr(expr):
                         self.lower_expr(expr)

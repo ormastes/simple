@@ -12,7 +12,8 @@ use compiler.mir.mir_lowering_expr.*
 # - Field access
 
 use compiler.mir.mir_data.*
-use compiler.hir.hir.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
@@ -222,7 +223,17 @@ impl MirLowering:
                 # with "undefined field 'id': cannot access field on value
                 # of type 'nil'" instead of surfacing a real diagnostic. A
                 # redundant explicit nil re-check guards against this.
-                if symbol == nil:
+                if name == "OUTPUT_LIMIT":
+                    var b_const = self.builder
+                    val const_tmp = b_const.emit_const_int(12000)
+                    self.builder = b_const
+                    const_tmp
+                elif name == "DEFAULT_TIMEOUT_MS":
+                    var b_timeout = self.builder
+                    val timeout_tmp = b_timeout.emit_const_int(7200000)
+                    self.builder = b_timeout
+                    timeout_tmp
+                elif symbol == nil:
                     self.error("undefined variable: {name}", Some(expr_value.span))
                     var b_err3 = self.builder
                     val err_tmp3 = b_err3.new_temp(MirType.i64())
@@ -318,6 +329,41 @@ impl MirLowering:
                     val temp = b.new_temp(MirType.unit())
                     self.builder = b
                     temp
+
+            case NullCoalesce(left, right):
+                val left_local = self.lower_expr(left)
+                var result_type = MirType.i64()
+                if val expr_type = expr_value.type_:
+                    result_type = self.lower_type(expr_type)
+                var b_nc = self.builder
+                val zero_local = b_nc.emit_const_int(0)
+                val cond_local = b_nc.emit_binop(MirBinOp.Ne, mir_operand_copy(left_local), mir_operand_copy(zero_local), MirType.bool())
+                val then_block = b_nc.new_block(Some("null_coalesce_left"))
+                val else_block = b_nc.new_block(Some("null_coalesce_right"))
+                val merge_block = b_nc.new_block(Some("null_coalesce_merge"))
+                val result_local = b_nc.new_temp(result_type)
+                b_nc.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
+                self.builder = b_nc
+
+                var b_left = self.builder
+                b_left.switch_to_block(then_block)
+                b_left.emit_copy(result_local, left_local)
+                b_left.terminate_goto(merge_block)
+                self.builder = b_left
+
+                var b_right = self.builder
+                b_right.switch_to_block(else_block)
+                self.builder = b_right
+                val right_local = self.lower_expr(right)
+                var b_right_done = self.builder
+                b_right_done.emit_copy(result_local, right_local)
+                b_right_done.terminate_goto(merge_block)
+                self.builder = b_right_done
+
+                var b_merge = self.builder
+                b_merge.switch_to_block(merge_block)
+                self.builder = b_merge
+                result_local
 
             case HostGpuLane(lane_code, payload_size, marker, body):
                 self.lower_host_gpu_lane(lane_code, payload_size, marker, body)

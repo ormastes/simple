@@ -16,10 +16,33 @@ use simple_parser::ast::{
 };
 use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Instant;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
+
+static INTERPRETER_CALL_TRACE: LazyLock<Option<String>> =
+    LazyLock::new(|| std::env::var("SIMPLE_INTERPRETER_CALL_TRACE").ok());
+
+fn trace_interpreter_call_enter(name: &str) -> Option<Instant> {
+    let filter = INTERPRETER_CALL_TRACE.as_deref()?;
+    if filter == "1" || filter == "all" || name.contains(filter) {
+        eprintln!("[interp-call] enter {name}");
+        Some(Instant::now())
+    } else {
+        None
+    }
+}
+
+fn trace_interpreter_call_exit(start: Option<Instant>, name: &str, status: &str) {
+    if let Some(start) = start {
+        eprintln!(
+            "[interp-call] exit {name} status={status} elapsed_ms={}",
+            start.elapsed().as_millis()
+        );
+    }
+}
 
 fn is_driver_stub_expr(expr: &Expr) -> bool {
     match expr {
@@ -495,6 +518,8 @@ fn exec_function_inner(
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
 ) -> Result<Value, CompileError> {
+    let trace_start = trace_interpreter_call_enter(&func.name);
+
     // Layout recording for 4KB page locality optimization
     crate::layout_recorder::record_function_call(&func.name);
 
@@ -708,6 +733,8 @@ fn exec_function_inner(
         crate::runtime_profile::record_full_return(None);
     }
 
+    trace_interpreter_call_exit(trace_start, &func.name, if result.is_ok() { "ok" } else { "err" });
+
     result
 }
 
@@ -720,6 +747,8 @@ fn exec_function_with_values_inner(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    let trace_start = trace_interpreter_call_enter(&func.name);
+
     // Layout recording for 4KB page locality optimization
     crate::layout_recorder::record_function_call(&func.name);
 
@@ -769,6 +798,8 @@ fn exec_function_with_values_inner(
     if crate::runtime_profile::is_profiling_active() {
         crate::runtime_profile::record_full_return(None);
     }
+
+    trace_interpreter_call_exit(trace_start, &func.name, if result.is_ok() { "ok" } else { "err" });
 
     result
 }

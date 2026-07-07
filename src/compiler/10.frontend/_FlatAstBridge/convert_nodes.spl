@@ -286,6 +286,55 @@ fn flat_if_branch_block(branch_idx: i64, span: Span) -> Block:
     single.push(Stmt(kind: StmtKind.Expr(convert_flat_expr(branch_idx)), span: span))
     return Block(stmts: single, span: span)
 
+fn flat_copy_text_list(values: [text]) -> [text]:
+    var out: [text] = []
+    for value in values:
+        out.push(value)
+    out
+
+fn flat_asm_expr(asm_template_text: text, span: Span) -> AsmExpr:
+    AsmExpr(
+        asm_template: asm_template_text,
+        is_volatile: true,
+        constraints: [],
+        clobbers: [],
+        span: span
+    )
+
+fn flat_asm_spec_from_arm(arm_idx: i64, span: Span) -> AsmTargetSpec:
+    var versions: [AsmVersionConstraint] = []
+    val ops = asm_arm_ver_ops[arm_idx]
+    val vals = asm_arm_ver_vals[arm_idx]
+    var vi = 0
+    while vi < ops.len() and vi < vals.len():
+        versions.push(AsmVersionConstraint(op: ops[vi], version: vals[vi]))
+        vi = vi + 1
+    AsmTargetSpec(
+        archs: flat_copy_text_list(asm_arm_archs[arm_idx]),
+        has_os: asm_arm_os[arm_idx] != "",
+        os: asm_arm_os[arm_idx],
+        has_abi: asm_arm_abi[arm_idx] != "",
+        abi: asm_arm_abi[arm_idx],
+        has_backend: asm_arm_backend[arm_idx] != "",
+        backend: asm_arm_backend[arm_idx],
+        version_constraints: versions,
+        span: span
+    )
+
+fn flat_asm_match_arm(arm_idx: i64, span: Span) -> AsmMatchArm:
+    val is_compile_error = asm_arm_is_compile_error[arm_idx]
+    val wildcard = asm_arm_is_wildcard[arm_idx]
+    AsmMatchArm(
+        has_spec: not wildcard,
+        spec: flat_asm_spec_from_arm(arm_idx, span),
+        is_wildcard: wildcard,
+        has_asm_body: not is_compile_error,
+        asm_body: flat_asm_expr(asm_arm_asm_text[arm_idx], span),
+        is_compile_error: is_compile_error,
+        error_message: asm_arm_error_msg[arm_idx],
+        span: span
+    )
+
 fn convert_flat_expr(idx: i64) -> Expr:
     if idx < 0:
         return Expr(kind: ExprKind.NilLit, span: make_span())
@@ -461,6 +510,16 @@ fn convert_flat_expr(idx: i64) -> Expr:
         val cast_operand = convert_flat_expr(expr_get_left(idx))
         val cast_type = convert_flat_type(expr_get_int(idx))
         return Expr(kind: ExprKind.Cast(cast_operand, cast_type), span: span)
+    elif tag == EXPR_ASM:
+        return Expr(kind: ExprKind.AsmBlock(flat_asm_expr(expr_get_str(idx), span)), span: span)
+    elif tag == EXPR_ASM_MATCH:
+        var arms: [AsmMatchArm] = []
+        val arm_indices = expr_get_args(idx)
+        var ai = 0
+        while ai < arm_indices.len():
+            arms.push(flat_asm_match_arm(arm_indices[ai], span))
+            ai = ai + 1
+        return Expr(kind: ExprKind.AsmMatch(arms), span: span)
     elif tag == EXPR_ASSIGN:
         # `target = value` -- the flat parser emits assignment as an
         # EXPRESSION statement (stmt_expr_stmt(expr_assign(...))), never

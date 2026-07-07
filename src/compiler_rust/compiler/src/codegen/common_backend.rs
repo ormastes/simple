@@ -1423,25 +1423,46 @@ impl<M: Module> CodegenBackend<M> {
 
     /// Compile all functions from a MIR module (with outlining expansion)
     pub fn compile_all_functions(&mut self, mir: &MirModule) -> BackendResult<Vec<MirFunction>> {
+        let native_trace = std::env::var("SIMPLE_NATIVE_BUILD_RUST_TRACE").ok().as_deref() == Some("1");
+        if native_trace {
+            eprintln!(
+                "[rust-jit] compile_all expand start input_functions={}",
+                mir.functions.len()
+            );
+        }
         // Expand with outlined functions for body_block users
         let functions = expand_with_outlined(mir);
+        if native_trace {
+            eprintln!(
+                "[rust-jit] compile_all dedupe start expanded_functions={}",
+                functions.len()
+            );
+        }
 
         // Check for duplicate function names and deduplicate
-        let mut unique_functions = Vec::new();
+        let mut unique_functions: Vec<MirFunction> = Vec::new();
+        let mut unique_function_indexes: HashMap<String, usize> = HashMap::new();
         for func in functions {
-            if let Some(index) = unique_functions
-                .iter()
-                .position(|existing: &MirFunction| existing.name == func.name)
-            {
+            if let Some(&index) = unique_function_indexes.get(&func.name) {
                 let existing = &mut unique_functions[index];
                 if existing.blocks.is_empty() && !func.blocks.is_empty() {
                     *existing = func;
                 }
             } else {
+                unique_function_indexes.insert(func.name.clone(), unique_functions.len());
                 unique_functions.push(func);
             }
         }
+        if native_trace {
+            eprintln!(
+                "[rust-jit] compile_all inline start unique_functions={}",
+                unique_functions.len()
+            );
+        }
         let functions = inline_small_pure_functions(mir, unique_functions);
+        if native_trace {
+            eprintln!("[rust-jit] compile_all references start functions={}", functions.len());
+        }
         let referenced_names = referenced_call_names(&functions);
         let locally_defined_names: HashSet<String> = functions
             .iter()
@@ -1449,6 +1470,12 @@ impl<M: Module> CodegenBackend<M> {
             .map(|func| func.name.clone())
             .collect();
         if !Self::can_omit_runtime_imports(mir, &functions) {
+            if native_trace {
+                eprintln!(
+                    "[rust-jit] compile_all runtime declarations start referenced={}",
+                    referenced_names.len()
+                );
+            }
             self.ensure_runtime_functions_declared(&referenced_names, &locally_defined_names)?;
         }
 
@@ -1456,7 +1483,16 @@ impl<M: Module> CodegenBackend<M> {
         // Functions must be declared first so that declare_globals can detect
         // globals that correspond to function references and initialize their
         // BSS slots with the function address (instead of zero).
+        if native_trace {
+            eprintln!("[rust-jit] compile_all declare functions start");
+        }
         self.declare_functions(&functions, &referenced_names)?;
+        if native_trace {
+            eprintln!(
+                "[rust-jit] compile_all declare globals start globals={}",
+                mir.globals.len()
+            );
+        }
         let mut runtime_init_globals = HashSet::new();
         runtime_init_globals.extend(mir.global_init_strings.keys().cloned());
         runtime_init_globals.extend(mir.global_init_arrays.keys().cloned());
@@ -1469,6 +1505,9 @@ impl<M: Module> CodegenBackend<M> {
             &mir.local_globals,
             &runtime_init_globals,
         )?;
+        if native_trace {
+            eprintln!("[rust-jit] compile_all vtables start impls={}", mir.vtable_impls.len());
+        }
 
         // Vtable pass: emit one static data object per impl Trait for Struct.
         // Each data object is N * 8 bytes (one pointer per vtable slot).
@@ -1476,6 +1515,9 @@ impl<M: Module> CodegenBackend<M> {
         // The struct_name entry in vtable_data_ids is used by compile_struct_init
         // to write vtable_ptr at offset 0.
         self.emit_vtable_data_objects(&mir.vtable_impls)?;
+        if native_trace {
+            eprintln!("[rust-jit] compile_all function bodies start");
+        }
 
         // Second pass: compile function bodies
         // Track functions that fail compilation so we can create stubs
@@ -1484,9 +1526,17 @@ impl<M: Module> CodegenBackend<M> {
         // name contains <filter> (or all functions when filter is "1").
         let dump_mir_filter: Option<String> = std::env::var("SIMPLE_DUMP_MIR").ok();
         let mut failed_functions: Vec<&MirFunction> = Vec::new();
-        for func in &functions {
+        for (idx, func) in functions.iter().enumerate() {
             if func.blocks.is_empty() {
                 continue;
+            }
+            if native_trace && (idx == 0 || idx % 250 == 0) {
+                eprintln!(
+                    "[rust-jit] compile function {}/{} {}",
+                    idx + 1,
+                    functions.len(),
+                    func.name
+                );
             }
             if let Some(ref filter) = dump_mir_filter {
                 if filter == "1" || func.name.contains(filter.as_str()) {
@@ -1547,6 +1597,9 @@ impl<M: Module> CodegenBackend<M> {
                     self.module.clear_context(&mut self.ctx);
                 }
             }
+        }
+        if native_trace {
+            eprintln!("[rust-jit] compile functions done failed={}", failed_functions.len());
         }
 
         // Default: hard-fail when any function body failed to compile.

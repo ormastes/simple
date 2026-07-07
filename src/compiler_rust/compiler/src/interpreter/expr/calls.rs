@@ -873,6 +873,26 @@ pub(super) fn eval_call_expr(
                     }
                 }
                 _ => {
+                    if std::env::var_os("SIMPLE_DEBUG_FIELD_ACCESS").is_some() {
+                        let receiver_expr = format!("{receiver:?}");
+                        let receiver_value = recv_val.to_debug_string();
+                        let stack = crate::interpreter::debug_call_stack_snapshot();
+                        let stack_tail = stack
+                            .iter()
+                            .rev()
+                            .take(12)
+                            .rev()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" -> ");
+                        eprintln!(
+                            "[field-access-error] field={field} recv_type={} recv={} expr={} stack={}",
+                            recv_val.type_name(),
+                            receiver_value.chars().take(500).collect::<String>(),
+                            receiver_expr.chars().take(500).collect::<String>(),
+                            stack_tail
+                        );
+                    }
                     let ctx = ErrorContext::new()
                         .with_code(codes::UNDEFINED_FIELD)
                         .with_help("field access requires an object, array, dict, or enum value");

@@ -89,6 +89,12 @@ fn _cli_dir_create_impl(path: text, recursive: bool) -> bool:
 fn _cli_eprint(msg: text):
     eprint(msg)
 
+fn _cli_is_current_exe(path: text) -> bool:
+    if path == "" or _cli_is_windows_platform():
+        return false
+    val same = _cli_shell("test /proc/self/exe -ef '{path}'")
+    same.exit_code == 0
+
 pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
     var resolved_cmd = cmd
     if _cli_is_windows_platform():
@@ -117,19 +123,15 @@ pub fn _cli_driver_binary() -> text:
         # Self-exec guard: an inherited override that points at THIS binary
         # would delegate to ourselves recursively without bound (simple.bak
         # fork bomb OOM-killed the user session, 2026-06-12).
-        if not _cli_is_windows_platform():
-            val override_pid = rt_getpid()
-            val override_same = _cli_shell("test /proc/{override_pid}/exe -ef '{override}'")
-            if override_same.exit_code == 0:
-                return ""
+        if _cli_is_current_exe(override):
+            return ""
         return override
 
     # Sibling seed staged next to our own executable (post-deploy layout:
     # bin/release/<triple>/simple is the self-hosted CLI, simple_seed is the
     # Rust seed it delegates to). Absolute path, so this works from any cwd.
     if not _cli_is_windows_platform():
-        val my_pid = rt_getpid()
-        val exe_result = _cli_shell("readlink -f /proc/{my_pid}/exe")
+        val exe_result = _cli_shell("readlink -f /proc/self/exe")
         val exe_path = exe_result.stdout.trim()
         if exe_path != "":
             val dir_result = _cli_shell("dirname '{exe_path}'")
@@ -137,8 +139,7 @@ pub fn _cli_driver_binary() -> text:
             if exe_dir != "":
                 val seed_sibling = "{exe_dir}/simple_seed"
                 if _cli_file_exists_impl(seed_sibling):
-                    val sibling_same = _cli_shell("test /proc/{my_pid}/exe -ef '{seed_sibling}'")
-                    if sibling_same.exit_code != 0:
+                    if not _cli_is_current_exe(seed_sibling):
                         return seed_sibling
 
     val ext = if _cli_is_windows_platform(): ".exe" else: ""
@@ -149,11 +150,8 @@ pub fn _cli_driver_binary() -> text:
     # CLI deployed as the release binary), delegating to the driver spawns
     # ourselves recursively without bound (fork bomb, 2026-06-10). Return ""
     # so callers take their in-process fallback instead.
-    if not _cli_is_windows_platform():
-        val pid = rt_getpid()
-        val same = _cli_shell("test /proc/{pid}/exe -ef '{candidate}'")
-        if same.exit_code == 0:
-            return ""
+    if _cli_is_current_exe(candidate):
+        return ""
     candidate
 
 pub fn _cli_frontend_delegate_binary() -> text:
@@ -166,12 +164,7 @@ pub fn _cli_frontend_delegate_binary() -> text:
     val override = cli_env_get("SIMPLE_FRONTEND_DELEGATE") ?? ""
     if override != "":
         if _cli_file_exists_impl(override):
-            if not _cli_is_windows_platform():
-                val pid = rt_getpid()
-                val same = _cli_shell("test /proc/{pid}/exe -ef '{override}'")
-                if same.exit_code != 0:
-                    return override
-            else:
+            if _cli_is_windows_platform() or not _cli_is_current_exe(override):
                 return override
         return ""
 
@@ -182,8 +175,7 @@ pub fn _cli_frontend_delegate_binary() -> text:
 
     # Sibling seed: look for simple_seed next to our own executable.
     if not _cli_is_windows_platform():
-        val pid = rt_getpid()
-        val exe_result = _cli_shell("readlink -f /proc/{pid}/exe")
+        val exe_result = _cli_shell("readlink -f /proc/self/exe")
         val exe_path = exe_result.stdout.trim()
         if exe_path != "":
             val dir_result = _cli_shell("dirname '{exe_path}'")
@@ -191,8 +183,7 @@ pub fn _cli_frontend_delegate_binary() -> text:
             if dir != "":
                 val seed_candidate = "{dir}/simple_seed"
                 if _cli_file_exists_impl(seed_candidate):
-                    val same = _cli_shell("test /proc/{pid}/exe -ef '{seed_candidate}'")
-                    if same.exit_code != 0:
+                    if not _cli_is_current_exe(seed_candidate):
                         return seed_candidate
 
     ""

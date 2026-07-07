@@ -35,6 +35,13 @@ use simple_runtime::value::{
     rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_new, rt_tuple_set, RuntimeValue,
 };
 
+fn native_build_rust_trace_enabled() -> bool {
+    matches!(
+        std::env::var("SIMPLE_NATIVE_BUILD_RUST_TRACE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+    )
+}
+
 fn is_valid_runtime_bundle(value: &str) -> bool {
     matches!(
         value,
@@ -536,6 +543,44 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         std::env::set_var("SIMPLE_BACKEND", &backend);
     }
     std::env::set_var("SIMPLE_OS_LOG_MODE", &log_mode);
+
+    if native_build_rust_trace_enabled() {
+        eprintln!("[native-rust-trace] parsed native-build args:");
+        eprintln!("  project_root={}", project_root.display());
+        eprintln!("  output={}", output.display());
+        eprintln!(
+            "  entry_file={}",
+            entry_file
+                .as_ref()
+                .map_or("<none>".to_string(), |p| p.display().to_string())
+        );
+        eprintln!(
+            "  source_dirs={}",
+            source_dirs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        eprintln!("  entry_closure={}", entry_closure);
+        eprintln!("  backend={}", backend);
+        eprintln!(
+            "  cache_dir={}",
+            config
+                .cache_dir
+                .as_ref()
+                .map_or("<default>".to_string(), |p| p.display().to_string())
+        );
+        eprintln!("  clean={} incremental={} threads={:?}", clean, incremental, threads);
+        eprintln!(
+            "  env SIMPLE_NATIVE_BUILD_ENTRY={}",
+            std::env::var("SIMPLE_NATIVE_BUILD_ENTRY").unwrap_or_else(|_| "<unset>".to_string())
+        );
+        eprintln!(
+            "  env SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE={}",
+            std::env::var("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE").unwrap_or_else(|_| "<unset>".to_string())
+        );
+    }
 
     let mut builder = NativeProjectBuilder::new(project_root, output).config(config);
     if let Some(entry) = entry_file {

@@ -18,10 +18,29 @@
 use ...monomorphize.note_sdn (NoteSdnMetadata, PossibleInstantiationEntry, InstantiationEntry, InstantiationStatus)
 use ..linker.smf_reader (SmfReaderImpl, SmfHeader)
 use ..linker.smf_header (SMF_HEADER_SIZE)
-# mmap functions not yet available in app.io.mod; memory-mapped file support pending
-# When available, uncomment: use app.io.mod (mmap_file, munmap, mmap_read_bytes, mmap_read_string, file_size_for_mmap, get_page_size, madvise, msync)
+use .smf_mmap_native.{native_mmap_file, native_munmap, native_mmap_read_bytes, native_mmap_read_string, native_madvise}
 use std.sdn.parser (parse)
 use std.sdn.value (SdnValue)
+
+extern fn rt_file_size(path: text) -> i64
+
+fn file_size_for_mmap(path: text) -> i64:
+    rt_file_size(path)
+
+fn mmap_file(path: text, prot: i32, flags: i32, offset: i64, length: i64) -> (i64, i64):
+    native_mmap_file(path, prot as i64, flags as i64, offset, length)
+
+fn munmap(address: i64, size: i64) -> bool:
+    native_munmap(address, size)
+
+fn mmap_read_bytes(address: i64, offset: i64, length: i64) -> [u8]:
+    native_mmap_read_bytes(address, offset, length)
+
+fn mmap_read_string(address: i64, offset: i64, max_length: i64) -> text:
+    native_mmap_read_string(address, offset, max_length)
+
+fn madvise(address: i64, size: i64, advice: i32) -> bool:
+    native_madvise(address, size, advice as i64)
 
 # ============================================================================
 # Constants
@@ -47,6 +66,7 @@ struct MappedSmf:
     address: i64                    # Base address of mapped memory
     size: i64                       # Size of mapped region
     header: SmfHeader               # Parsed SMF header
+    section_count: i32
     note_sdn: NoteSdnMetadata?      # Cached note.sdn metadata
     template_section_offset: i64    # Offset to TemplateCode section
     note_sdn_section_offset: i64    # Offset to note.sdn section
@@ -77,7 +97,7 @@ impl MappedSmf:
 
         # Parse header (simplified - full implementation would use SmfHeader.from_bytes)
         # For now, create minimal header
-        val header = parse_header_minimal(header_bytes)
+        val header: SmfHeader = parse_header_minimal(header_bytes)
 
         # Parse section table to find TemplateCode and note.sdn offsets
         # Section table format: 64-byte entries starting at header.section_table_offset
@@ -85,7 +105,7 @@ impl MappedSmf:
         val section_table_offset = bytes_to_u32(header_bytes[16..20]) as i64
         val section_table_high = bytes_to_u32(header_bytes[20..24]) as i64
         val full_section_table_offset = section_table_offset | (section_table_high << 32)
-        val num_sections = header.section_count
+        val num_sections = bytes_to_u32(header_bytes[12..16]) as i32
 
         var template_offset = 0i64
         var note_sdn_offset = 0i64
@@ -115,6 +135,7 @@ impl MappedSmf:
             address: address,
             size: mapped_size,
             header: header,
+            section_count: num_sections,
             note_sdn: nil,
             template_section_offset: template_offset,
             note_sdn_section_offset: note_sdn_offset,
@@ -200,7 +221,7 @@ impl MappedSmf:
         if self.section_table_offset == 0:
             return Err("No section table found in SMF file")
 
-        val section_count = self.header.section_count
+        val section_count = self.section_count
         if section_index < 0 or section_index >= section_count:
             return Err("Section index {section_index} out of range (0..{section_count})")
 
@@ -625,7 +646,7 @@ fn validated_smf_load(smf_path: text, source_path: text, backend: text, opt_leve
         compile_options_hash_from_bytes, compile_options_hash_validate,
         compile_options_hash_is_zero
     }
-    use compiler.driver.cache.cache_types.{CACHE_FRESH}
+    use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
 
     # Compute current options hash
     val current_hash = compile_options_hash_compute(backend, opt_level, release, debug_info, gc_off, profile, allowed_families)
@@ -647,7 +668,7 @@ fn validated_smf_load(smf_path: text, source_path: text, backend: text, opt_leve
         return Ok(mapped)
 
     # Validate options match
-    val validation = compile_options_hash_validate(stored_hash, current_hash)
+    val validation: CacheCheckResult = compile_options_hash_validate(stored_hash, current_hash)
     if validation.status != CACHE_FRESH:
         eprint("WARNING: SMF backend mismatch for {smf_path}: {validation.detail}")
         eprint("  Stored: backend={stored_hash.backend_kind}, opt={stored_hash.opt_level}")

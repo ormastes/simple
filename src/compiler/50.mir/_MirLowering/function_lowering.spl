@@ -18,15 +18,15 @@ use compiler.mir.mir_lowering.*
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
-use compiler.hir.hir.*
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
-use compiler.core.types.{custom_primitive_underlying_type_tag_by_symbol}
+use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.semantics.gpu_checker.{parse_gpu_kernel_target}
 use compiler.common.attributes.{FunctionAttr}
 use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata}
@@ -189,6 +189,7 @@ impl MirLowering:
         # Propagate @driver/@native_lib manifest metadata for backend registry
         # synthesis and manifest emission.
         if fn_.has_driver_manifest_attr:
+            fn_result.has_driver_manifest_attr = true
             fn_result.driver_manifest_attr = fn_.driver_manifest_attr
             fn_result = apply_synthetic_driver_codegen(fn_, fn_result, self.symbols)
 
@@ -237,6 +238,9 @@ impl MirLowering:
 
     me lower_type(type_: HirType) -> MirType:
         """Lower HIR type to MIR type."""
+        if type_ == nil:
+            self.error("missing HIR type during MIR lowering", nil)
+            return MirType(kind: MirTypeKind.I64)
         match type_.kind:
             case Int(bits, signed):
                 if signed:
@@ -412,7 +416,7 @@ impl MirLowering:
 # Inline Assembly Lowering
 # ============================================================================
 
-    me lower_inline_asm(asm: HirAsm) -> LocalId:
+    me lower_inline_asm(asm_node: HirAsm) -> LocalId:
         """Lower inline assembly from HIR to MIR.
 
         Converts HIR inline assembly constraints to MIR operands.
@@ -421,7 +425,7 @@ impl MirLowering:
         var inputs: [MirAsmOperand] = []
         var outputs: [MirAsmOperand] = []
 
-        for constraint in asm.constraints:
+        for constraint in asm_node.constraints:
             # Lower the HIR expression to a local
             val value_local = self.lower_expr(constraint.value)
             val mir_operand = mir_operand_copy(value_local)
@@ -447,13 +451,13 @@ impl MirLowering:
         # Emit inline assembly instruction
         self.builder.emit(MirInst(
             kind: MirInstKind.InlineAsm(
-                asm_template: asm.asm_template,
-                is_volatile: asm.is_volatile,
+                asm_template: asm_node.asm_template,
+                is_volatile: asm_node.is_volatile,
                 inputs: inputs,
                 outputs: outputs,
-                clobbers: asm.clobbers
+                clobbers: asm_node.clobbers
             ),
-            span: Some(asm.span)
+            span: Some(asm_node.span)
         ))
 
         # Return a unit value (inline asm doesn't produce a value directly)

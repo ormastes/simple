@@ -34,14 +34,18 @@ use compiler.semantics.resolve.{resolve_methods}
 use compiler.common.config.*
 use compiler.types.type_system.effect_pass.{run_effect_pass}
 # Dormant type-system checkers, wired warn-only / opt-in (deep-recheck 2026-07-05).
-use compiler.types.type_infer.{HmInferContext}
+use compiler.types.type_infer.*
+use compiler.types.type_infer_types.{HmInferContext}
 use compiler.semantics.visibility_integration.{check_module_visibility}
 use driver_types.*
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module}
 use compiler.driver.driver_aot_output.*
-use compiler.driver.watcher.watcher_client.{check_shb_freshness}
+use compiler.driver.watcher.watcher_client.{check_shb_freshness, check_smf_freshness}
+use compiler.driver.watcher.watcher_client as nb_watcher_client
+use compiler.driver.cache.cache_validator.{source_to_cache_path}
+use compiler.driver.driver_build.incremental.{BuildCache}
 # driver_pipeline.spl extends CompilerDriver via `impl CompilerDriver:`
 # (lower_to_mir, jit_compile_and_run, weave_aop, apply_debug_trace, ...). It was
 # imported by nothing, so the interpreter never loaded it and those methods were
@@ -71,7 +75,7 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_append_text(path: text, content: text) -> bool
 extern fn rt_hash_text(s: text) -> i64
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_run(cmd: text, args: [text]) -> (stdout: text, stderr: text, exit_code: i64)
 extern fn rt_env_get(key: text) -> text
 
 fn native_build_cache_dir() -> text:
@@ -108,6 +112,96 @@ class CheckBackendImpl(Backend):
     fn exec_stmt(stmt: HirStmt, env: Environment) -> Result<Value, text>:
         Ok(Value.Nil)
 
+# --------------------------------------------------------------------------
+# Native pre-parse cache skip (prototype)
+# --------------------------------------------------------------------------
+
+struct NativePreParseReadiness:
+    ok: bool
+    reason: text
+
+fn native_pre_parse_skip_diagnostic(path: text, reason: text) -> text:
+    if reason == "":
+        "[native-pre-parse] {path}"
+    else:
+        "[native-pre-parse] not implemented for {path}: {reason}"
+
+fn native_pre_parse_cache_requested() -> bool:
+    (rt_env_get("SIMPLE_NATIVE_BUILD_SKIP_PRE_PARSE") ?? "") == "1"
+
+fn native_pre_parse_is_dynload_path(ctx: CompileContext) -> bool:
+    driver_output_format_is_both(ctx.options.output_format) or (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+
+fn native_pre_parse_entry_source(ctx: CompileContext) -> text:
+    var i = 0
+    while i < ctx.options.input_files.len():
+        val candidate = ctx.options.input_files[i]
+        if candidate.ends_with(".spl"):
+            return candidate
+        i = i + 1
+    if ctx.options.input_files.len() > 0:
+        return ctx.options.input_files[0]
+    ""
+
+fn native_pre_parse_cache_only(ctx: CompileContext) -> bool:
+    ctx.config.has("native_pre_parse_cache_only") and ctx.config["native_pre_parse_cache_only"] == "1"
+
+fn native_pre_parse_cache_source(ctx: CompileContext) -> text:
+    if ctx.config.has("native_pre_parse_smf_source"):
+        ctx.config["native_pre_parse_smf_source"]
+    else:
+        native_pre_parse_entry_source(ctx)
+
+fn native_pre_parse_cache_ready(ctx: CompileContext) -> NativePreParseReadiness:
+    if not native_pre_parse_cache_requested():
+        return NativePreParseReadiness(ok: false, reason: "SIMPLE_NATIVE_BUILD_SKIP_PRE_PARSE is not set")
+    if ctx.options.mode != CompileMode.Aot:
+        return NativePreParseReadiness(ok: false, reason: "AOT mode required")
+    if not native_pre_parse_is_dynload_path(ctx):
+        return NativePreParseReadiness(ok: false, reason: "dynload/entry-closure indicators are not active")
+    if ctx.sources.len() == 0:
+        return NativePreParseReadiness(ok: false, reason: "no sources loaded for pre-parse cache check")
+
+    # SHB freshness check ensures source and interface signatures are still valid.
+    for src in ctx.sources:
+        val status = check_shb_freshness(src.path, ".build/headers")
+        if status.status != CACHE_FRESH:
+            return NativePreParseReadiness(ok: false, reason: "SHB stale for source {src.path}: {status.detail}")
+
+    # Verify cached object outputs exist for every source/module in this invocation.
+    val cache_dir = native_build_cache_dir()
+    val cache_path = cache_dir + "/build_cache.sdn"
+    var build_cache = BuildCache.load(cache_path)
+    for src in ctx.sources:
+        val source_path = src.path
+        val module_name = src.module_name
+        var cache_hits = 0
+        if build_cache.get_entry(source_path).?:
+            cache_hits = cache_hits + 1
+        if build_cache.get_entry(module_name).?:
+            cache_hits = cache_hits + 1
+        if cache_hits == 0:
+            return NativePreParseReadiness(
+                ok: false,
+                reason: "no native object cache entry for {source_path} (module {module_name})"
+            )
+
+    # If dynload output is requested, require a fresh SMF cache artifact for the
+    # entry source in this run (fresh source hash + options + deps).
+    if driver_output_format_is_both(ctx.options.output_format):
+        val smf_source = native_pre_parse_entry_source(ctx)
+        if smf_source == "":
+            return NativePreParseReadiness(ok: false, reason: "no .spl source available for SMF pre-parse check")
+        val smf_opts = compute_options_hash(ctx.options)
+        val smf_status = check_smf_freshness(smf_source, cache_dir, smf_opts)
+        if smf_status.status != CACHE_FRESH:
+            return NativePreParseReadiness(
+                ok: false,
+                reason: "SMF not fresh for {smf_source}: {smf_status.detail}"
+            )
+
+    NativePreParseReadiness(ok: true, reason: "")
+
 # ------------------------------------------------------------------------------
 # Compiler Driver
 # ------------------------------------------------------------------------------
@@ -135,6 +229,15 @@ pub class CompilerDriver:
         if not self.load_sources_impl():
             log_error("phase 1 FAILED")
             return CompileResult.ParseError(self.ctx.errors)
+        if self.ctx.options.mode == CompileMode.Aot:
+            val pre_parse = native_pre_parse_cache_ready(self.ctx)
+            if pre_parse.ok:
+                self.ctx.config["native_pre_parse_cache_only"] = "1"
+                self.ctx.config["native_pre_parse_smf_source"] = native_pre_parse_entry_source(self.ctx)
+                if pre_parse.reason == "":
+                    log_debug("phase1:pre_parse_cache_ready")
+            else if native_pre_parse_cache_requested():
+                log_warn(native_pre_parse_skip_diagnostic("aot preparse", pre_parse.reason))
         log_phase("phase1:load_sources:done n_sources={self.ctx.sources.len()}")
 
         # Phase 2: Parse all sources
@@ -274,8 +377,24 @@ pub class CompilerDriver:
         # Start with user-provided roots
         var i = 0
         var has_project_source = false
-        val input_len = self.ctx.options.input_files.len()
-        val source_trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+        var driver_inputs: [text] = []
+        if self.ctx.options.bootstrap_input_count > 0 and self.ctx.options.bootstrap_input_count <= 6:
+            if self.ctx.options.bootstrap_input_count > 0:
+                driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_0]
+            if self.ctx.options.bootstrap_input_count > 1:
+                driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_1]
+            if self.ctx.options.bootstrap_input_count > 2:
+                driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_2]
+            if self.ctx.options.bootstrap_input_count > 3:
+                driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_3]
+            if self.ctx.options.bootstrap_input_count > 4:
+                driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_4]
+            if self.ctx.options.bootstrap_input_count > 5:
+                driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_5]
+        else:
+            driver_inputs = self.ctx.options.input_files
+        val input_len = driver_inputs.len()
+        val source_trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"
         if source_trace:
             print "[load_sources] inputs {input_len}"
         if input_len <= 0:
@@ -291,13 +410,13 @@ pub class CompilerDriver:
                 print "[load_sources] direct modules loaded"
             return self.ctx.errors.len() == 0
         while i < input_len:
-            val input_path = self.ctx.options.input_files[i]
+            val input_path = driver_inputs[i]
             val loaded = _driver_collect_sources(input_path)
             for s in loaded:
                 val source_key = s.path + "::" + s.module_name
                 if not seen_sources.contains(source_key):
                     seen_sources[source_key] = true
-                    all_sources.push(s)
+                    all_sources = all_sources.push(s)
             if input_path.starts_with("src/"):
                 has_project_source = true
             i = i + 1
@@ -314,7 +433,7 @@ pub class CompilerDriver:
                     val source_key = s.path + "::" + s.module_name
                     if not seen_sources.contains(source_key):
                         seen_sources[source_key] = true
-                        all_sources.push(s)
+                        all_sources = all_sources.push(s)
             else:
                 for p in paths:
                     val loaded = _driver_collect_sources(p)
@@ -322,7 +441,7 @@ pub class CompilerDriver:
                         val source_key = s.path + "::" + s.module_name
                         if not seen_sources.contains(source_key):
                             seen_sources[source_key] = true
-                            all_sources.push(s)
+                            all_sources = all_sources.push(s)
 
         # Single assignment avoids chained push issue
         self.ctx.sources = all_sources
@@ -346,7 +465,8 @@ pub class CompilerDriver:
             var entry_idx = 0
             while entry_idx < sources.len():
                 val source = sources[entry_idx]
-                if native_entry_closure or _driver_is_bootstrap_entry_source(source.path, source.module_name):
+                val requested_entry_match = native_entry != "" and (source.path == native_entry or source.path.ends_with("/" + native_entry))
+                if native_entry_closure or requested_entry_match or _driver_is_bootstrap_entry_source(source.path, source.module_name):
                     # Guard (bug #110): when a specific --entry was requested (and we are
                     # not doing a closure walk, which legitimately pulls in many reachable
                     # files), refuse to silently accept a resolved source that isn't the
@@ -354,19 +474,18 @@ pub class CompilerDriver:
                     # bootstrap_main.spl sneaking back in as "an" entry alongside the real
                     # one. Hard-error naming both paths instead of building the wrong thing.
                     if native_entry != "" and not native_entry_closure:
-                        val requested_match = source.path == native_entry or source.path.ends_with("/" + native_entry)
-                        if not requested_match:
+                        if not requested_entry_match:
                             self.ctx.errors.push("native-build entry mismatch: requested entry '{native_entry}' but resolver also selected '{source.path}' (module {source.module_name}) — refusing silent substitution")
                             return false
-                    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+                    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
                         dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
                     log_phase("phase2:parse:file:start {source.path} chars={source.content.len()}")
                     val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
                     log_phase("phase2:parse:file:done {source.path}")
-                    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+                    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
                         dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
                     self.ctx.modules[source.module_name] = entry_module
-                    entry_sources.push(source)
+                    entry_sources = entry_sources.push(source)
                 entry_idx = entry_idx + 1
             self.ctx.sources = entry_sources
             if entry_sources.len() == 0:
@@ -745,11 +864,6 @@ pub class CompilerDriver:
         if has_result:
             return CompileResult.Success(last_result)
         CompileResult.Success(BackendResult.Unit)
-
-    fn run_module(backend: Backend, module: HirModule) -> CompileResult:
-        match backend.process_module(module):
-            case Ok(value): CompileResult.Success(value)
-            case Err(e): CompileResult.RuntimeError(e)
 
     # --------------------------------------------------------------------------
     # Mode: AOT Compile

@@ -33,7 +33,7 @@ extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_path_parent(path: text) -> text
 extern fn rt_env_get(key: text) -> text
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_run(cmd: text, args: [text]) -> (stdout: text, stderr: text, exit_code: i64)
 extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_file_size(path: text) -> i64
 
@@ -78,6 +78,12 @@ fn driver_native_build_cache_dir() -> text:
 fn driver_native_build_cache_path(cache_dir: text) -> text:
     rt_path_join(cache_dir, "build_cache.sdn")
 
+fn native_pre_parse_skip_diagnostic(path: text, reason: text) -> text:
+    if reason == "":
+        "[native-pre-parse] skip cache path={path}"
+    else:
+        "[native-pre-parse] not implemented for {path}: {reason}"
+
 fn _extract_driver_ctx(driver: CompilerDriver) -> CompileContext:
     driver.ctx
 
@@ -106,7 +112,7 @@ fn driver_render_smf_launch_metadata(ctx: CompileContext) -> text:
         "  mmap_hint: true\n"
 
 fn driver_native_launch_metadata_trailer(ctx: CompileContext) -> [u8]:
-    val payload = driver_render_native_launch_metadata(ctx).to_bytes()
+    val payload = driver_render_native_launch_metadata(ctx).bytes()
     var out: [u8] = []
     out = out.concat(payload)
     out = out.concat(u64_to_bytes(payload.len()))
@@ -338,7 +344,7 @@ impl CompilerDriver:
             match link_llvm_native(object_files, output, llvm_opts):
                 case Ok(_):
                     driver_log_info(log, "Native executable written to {output} (backend: LLVM)")
-                    driver_native_success_with_launch_metadata(ctx, output)
+                    return driver_native_success_with_launch_metadata(ctx, output)
                 case Err(e):
                     CompileResult.CodegenError("LLVM native linking failed: {e}")
         else:
@@ -627,7 +633,7 @@ impl CompilerDriver:
         # Collect dependency interface hashes for staleness tracking
         val deps = collect_dependency_hashes(ctx)
         val driver_manifest_bytes = collect_driver_manifest_bytes(ctx.mir_modules)
-        val launch_metadata_bytes = driver_render_smf_launch_metadata(ctx).to_bytes()
+        val launch_metadata_bytes = driver_render_smf_launch_metadata(ctx).bytes()
 
         # Wrap object code into SMF format
         val target = Target.host()
@@ -767,7 +773,7 @@ fn encode_driver_manifest_record(name: text, attr: DriverManifestAttr) -> [u8]:
 
 fn fixed_ascii_bytes(value: text, width: i64) -> [u8]:
     var out: [u8] = []
-    val raw = value.to_bytes()
+    val raw = value.bytes()
     var i: i64 = 0
     while i < width:
         if i < raw.len():

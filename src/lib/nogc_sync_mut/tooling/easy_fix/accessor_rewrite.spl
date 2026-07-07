@@ -5,7 +5,7 @@
 
 use std.tooling.easy_fix.accessor_core.*
 
-struct AccFixStats:
+pub struct AccFixStats:
     files_changed: i64
     defs_removed: i64
     calls_rewritten: i64    # tier-1 (cross-file, any receiver)
@@ -31,8 +31,11 @@ struct AccTier2:
 
 val ACC_IDENT_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
 
+fn acc_has(hay: text, needle: text) -> bool:
+    hay.find(needle) >= 0
+
 fn acc_is_ident_char(c: text) -> bool:
-    ACC_IDENT_CHARS.contains(c)
+    acc_has(ACC_IDENT_CHARS, c)
 
 fn acc_boundary_before(line: text, idx: i64) -> bool:
     if idx == 0:
@@ -91,7 +94,7 @@ fn acc_is_statement_setter(line: text, dot: i64, close: i64) -> bool:
 # source — their wrapper defs must NOT be deleted (the call cannot be rewritten).
 fn acc_unsafe_setter_names(source: text) -> [text]:
     var unsafe: [text] = []
-    if not source.contains(".set_"):
+    if not acc_has(source, ".set_"):
         return unsafe
     for line in source.split("\n"):
         var i = 0
@@ -123,11 +126,21 @@ fn acc_unsafe_setter_names(source: text) -> [text]:
                 p = p + 1
             if close < 0:
                 # multi-line / unbalanced call — treat as unsafe
-                if not unsafe.contains(name):
+                var seen = false
+                for existing in unsafe:
+                    if existing == name:
+                        seen = true
+                        break
+                if not seen:
                     unsafe.push(name)
                 break
             if not acc_is_statement_setter(line, dot, close):
-                if not unsafe.contains(name):
+                var seen = false
+                for existing in unsafe:
+                    if existing == name:
+                        seen = true
+                        break
+                if not seen:
                     unsafe.push(name)
             i = close + 1
     unsafe
@@ -276,10 +289,10 @@ fn acc_process_file(
             idx = idx + 1
             continue
         var line = lines[idx]
-        if line.contains("("):
+        if acc_has(line, "("):
             # tier-1: any receiver, only names that appear on the line
             for name in unamb_names:
-                if line.contains(name):
+                if acc_has(line, name):
                     val kind = kind_of[name]
                     val field = field_of[name]
                     if kind == "set":
@@ -293,7 +306,7 @@ fn acc_process_file(
             # tier-2: self/me only, within the defining class
             if include_tier2:
                 for a in amb:
-                    if idx >= a.class_start and idx < a.class_end and line.contains(a.name):
+                    if idx >= a.class_start and idx < a.class_end and acc_has(line, a.name):
                         if a.kind == "set":
                             var (sl, sn) = rewrite_set_in_line(line, a.name, a.field, true)
                             line = sl
@@ -313,7 +326,7 @@ fn acc_process_file(
 # Top-level: apply fixes across a {file: source} map
 # ============================================================================
 
-fn apply_accessor_fixes(sources: Dict<text, text>, include_tier2: bool) -> (Dict<text, text>, AccFixStats):
+pub fn apply_accessor_fixes(sources: Dict<text, text>, include_tier2: bool) -> (Dict<text, text>, AccFixStats):
     val records = collect_dummy_records(sources)
     val poison = collect_poisoned_names(sources)
 

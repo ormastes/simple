@@ -40,6 +40,29 @@ extern fn rt_env_set(key: text, value: text) -> bool
 var core_last_token_text_slot: [text] = [""]
 var core_last_token_line_slot: [i64] = [0]
 var core_last_token_col_slot: [i64] = [0]
+var core_last_token_suffix_slot: [text] = [""]
+var core_token_env_save_slot: [bool] = [false]
+
+fn core_token_env_save_set(enabled: bool):
+    if core_token_env_save_slot == nil:
+        core_token_env_save_slot = [false]
+    core_token_env_save_slot[0] = enabled
+
+fn core_token_env_save_enabled() -> bool:
+    if core_token_env_save_slot == nil:
+        return false
+    core_token_env_save_slot[0]
+
+fn core_token_text_save(value: text):
+    if core_token_env_save_enabled():
+        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", value)
+
+fn core_token_suffix_save(value: text):
+    if core_last_token_suffix_slot == nil:
+        core_last_token_suffix_slot = [""]
+    core_last_token_suffix_slot[0] = value
+    if core_token_env_save_enabled():
+        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_SUFFIX", value)
 
 fn core_token_capture(tok_text: text, line: i64, col: i64):
     if core_last_token_text_slot == nil:
@@ -48,9 +71,12 @@ fn core_token_capture(tok_text: text, line: i64, col: i64):
         core_last_token_line_slot = [0]
     if core_last_token_col_slot == nil:
         core_last_token_col_slot = [0]
+    if core_last_token_suffix_slot == nil:
+        core_last_token_suffix_slot = [""]
     core_last_token_text_slot[0] = tok_text
     core_last_token_line_slot[0] = line
     core_last_token_col_slot[0] = col
+    core_last_token_suffix_slot[0] = ""
 
 fn core_lexer_last_text_get() -> text:
     if core_last_token_text_slot == nil:
@@ -66,6 +92,11 @@ fn core_lexer_last_col_get() -> i64:
     if core_last_token_col_slot == nil:
         return 0
     core_last_token_col_slot[0]
+
+fn core_lexer_last_suffix_get() -> text:
+    if core_last_token_suffix_slot == nil:
+        return ""
+    core_last_token_suffix_slot[0]
 
 # ===== CoreLexer Struct =====
 
@@ -168,11 +199,12 @@ impl CoreLexer:
         core_token_capture(tok_text, start_line, start_col)
         val nul = char_from_code(0)
         if tok_text.contains(nul):
-            rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "")
+            core_token_text_save("")
         else:
-            rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", tok_text)
-        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_LINE", "{start_line}")
-        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_COL", "{start_col}")
+            core_token_text_save(tok_text)
+        if core_token_env_save_enabled():
+            rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_LINE", "{start_line}")
+            rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_COL", "{start_col}")
 
     me make_simple(kind: i64, tok_text: text):
         val sl: i64 = self.line
@@ -199,138 +231,160 @@ impl CoreLexer:
         val start_col: i64 = self.col
         self.cur_start = start
         var is_float: bool = false
+        val src: text = self.source
+        val src_len: i64 = src.len()
+        var pos: i64 = self.pos
 
         # Check for hex, binary, octal prefix
-        val first: text = self.peek()
+        val first: text = if pos < src_len then src[pos:pos + 1] else ""
         if first == "0":
-            val second: text = self.peek_next()
+            val second: text = if pos + 1 < src_len then src[pos + 1:pos + 2] else ""
             if second == "x":
                 # Hex literal
-                self.advance()
-                self.advance()
-                var hex_start: i64 = self.pos
+                pos = pos + 2
                 for i in 0..64:
-                    val hc: text = self.peek()
+                    if pos >= src_len:
+                        break
+                    val hc: text = src[pos:pos + 1]
                     if hc == "_":
-                        self.advance()
+                        pos = pos + 1
                     elif is_hex_digit(hc):
-                        self.advance()
+                        pos = pos + 1
                     else:
                         break
-                var num_text: text = self.source[start:self.pos]
+                var num_text: text = self.source[start:pos]
                 # Type suffix: 0x10000000u64 / 0x1234_u64 (decimal parity;
                 # the hex-digit loop already stopped at the non-hex alpha).
                 var hex_suffix: text = ""
                 val hxlen: i64 = num_text.len()
-                if is_alpha(self.peek()):
+                val after_hex: text = if pos < src_len then src[pos:pos + 1] else ""
+                if is_alpha(after_hex):
                     if hxlen > 0 and num_text[hxlen - 1:hxlen] == "_":
                         num_text = num_text[0:hxlen - 1]
-                    var hsuf_start: i64 = self.pos
+                    var hsuf_start: i64 = pos
                     for si in 0..1000:
-                        if is_ident_char(self.peek()):
-                            self.advance()
+                        if pos >= src_len:
+                            break
+                        if is_ident_char(src[pos:pos + 1]):
+                            pos = pos + 1
                         else:
                             break
-                    hex_suffix = self.source[hsuf_start:self.pos]
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_SUFFIX", hex_suffix)
+                    hex_suffix = self.source[hsuf_start:pos]
+                core_token_suffix_save(hex_suffix)
                 if hex_suffix != "":
+                    self.pos = pos
+                    self.col = self.col + (pos - start)
                     self.make_token(7, num_text, start_line, start_col)
                 else:
+                    self.pos = pos
+                    self.col = self.col + (pos - start)
                     self.make_token(1, num_text, start_line, start_col)
                 self.cur_text = num_text
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", num_text)
+                core_token_text_save(num_text)
                 return
             if second == "b":
                 # Binary literal
-                self.advance()
-                self.advance()
+                pos = pos + 2
                 for i in 0..64:
-                    val bc: text = self.peek()
+                    if pos >= src_len:
+                        break
+                    val bc: text = src[pos:pos + 1]
                     val is_bin: bool = bc == "0"
                     val is_bin1: bool = bc == "1"
                     val is_under: bool = bc == "_"
                     val is_bin_char: bool = is_bin or is_bin1
                     val valid: bool = is_bin_char or is_under
                     if valid:
-                        self.advance()
+                        pos = pos + 1
                     else:
                         break
-                val num_text: text = self.source[start:self.pos]
+                val num_text: text = self.source[start:pos]
+                self.pos = pos
+                self.col = self.col + (pos - start)
                 self.make_token(1, num_text, start_line, start_col)
                 self.cur_text = num_text
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", num_text)
+                core_token_text_save(num_text)
                 return
             if second == "o":
                 # Octal literal
-                self.advance()
-                self.advance()
+                pos = pos + 2
                 for i in 0..64:
-                    val oc: text = self.peek()
+                    if pos >= src_len:
+                        break
+                    val oc: text = src[pos:pos + 1]
                     val is_oct: bool = is_digit(oc)
                     val is_under: bool = oc == "_"
                     val valid: bool = is_oct or is_under
                     if valid:
-                        self.advance()
+                        pos = pos + 1
                     else:
                         break
-                val num_text: text = self.source[start:self.pos]
+                val num_text: text = self.source[start:pos]
+                self.pos = pos
+                self.col = self.col + (pos - start)
                 self.make_token(1, num_text, start_line, start_col)
                 self.cur_text = num_text
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", num_text)
+                core_token_text_save(num_text)
                 return
 
         # Decimal number
         for i in 0..100:
-            val dc: text = self.peek()
+            if pos >= src_len:
+                break
+            val dc: text = src[pos:pos + 1]
             val is_d: bool = is_digit(dc)
             val is_u: bool = dc == "_"
             val valid: bool = is_d or is_u
             if valid:
-                self.advance()
+                pos = pos + 1
             else:
                 break
 
         # Check for float
-        val maybe_dot: text = self.peek()
-        val after_dot: text = self.peek_next()
+        val maybe_dot: text = if pos < src_len then src[pos:pos + 1] else ""
+        val after_dot: text = if pos + 1 < src_len then src[pos + 1:pos + 2] else ""
         val dot_then_digit: bool = maybe_dot == "."
         if dot_then_digit:
             val is_next_dig: bool = is_digit(after_dot)
             if is_next_dig:
                 is_float = true
-                self.advance()
+                pos = pos + 1
                 for i in 0..100:
-                    val fc: text = self.peek()
+                    if pos >= src_len:
+                        break
+                    val fc: text = src[pos:pos + 1]
                     val is_fd: bool = is_digit(fc)
                     val is_fu: bool = fc == "_"
                     val fvalid: bool = is_fd or is_fu
                     if fvalid:
-                        self.advance()
+                        pos = pos + 1
                     else:
                         break
 
         # Check for exponent
-        val exp_c: text = self.peek()
+        val exp_c: text = if pos < src_len then src[pos:pos + 1] else ""
         val is_exp_e: bool = exp_c == "e"
         val is_exp_E: bool = exp_c == "E"
         val has_exp: bool = is_exp_e or is_exp_E
         if has_exp:
             is_float = true
-            self.advance()
-            val sign: text = self.peek()
+            pos = pos + 1
+            val sign: text = if pos < src_len then src[pos:pos + 1] else ""
             val is_plus: bool = sign == "+"
             val is_minus: bool = sign == "-"
             val has_sign: bool = is_plus or is_minus
             if has_sign:
-                self.advance()
+                pos = pos + 1
             for i in 0..100:
-                val ec: text = self.peek()
+                if pos >= src_len:
+                    break
+                val ec: text = src[pos:pos + 1]
                 if is_digit(ec):
-                    self.advance()
+                    pos = pos + 1
                 else:
                     break
 
-        var num_text: text = self.source[start:self.pos]
+        var num_text: text = self.source[start:pos]
 
         # Unit/type suffix: `10_u8` (underscore form) or `10u8`/`5ms` (direct
         # alpha, seed lexer parity — an alpha run glued to a number can only
@@ -339,18 +393,22 @@ impl CoreLexer:
         # alpha follower. Suffix travels via the CORE_TOKEN_SUFFIX env channel.
         var suffix: text = ""
         val nlen: i64 = num_text.len()
-        val next_ch: text = self.peek()
+        val next_ch: text = if pos < src_len then src[pos:pos + 1] else ""
         if is_alpha(next_ch):
             if nlen > 0 and num_text[nlen - 1:nlen] == "_":
                 num_text = num_text[0:nlen - 1]
-            var suf_start: i64 = self.pos
+            var suf_start: i64 = pos
             for i in 0..1000:
-                if is_ident_char(self.peek()):
-                    self.advance()
+                if pos >= src_len:
+                    break
+                if is_ident_char(src[pos:pos + 1]):
+                    pos = pos + 1
                 else:
                     break
-            suffix = self.source[suf_start:self.pos]
-        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_SUFFIX", suffix)
+            suffix = self.source[suf_start:pos]
+        core_token_suffix_save(suffix)
+        self.pos = pos
+        self.col = self.col + (pos - start)
         if suffix != "":
             if is_float:
                 self.make_token(8, num_text, start_line, start_col)
@@ -361,7 +419,7 @@ impl CoreLexer:
         else:
             self.make_token(1, num_text, start_line, start_col)
         self.cur_text = num_text
-        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", num_text)
+        core_token_text_save(num_text)
 
     # ----- String Scanning -----
 
@@ -406,9 +464,9 @@ impl CoreLexer:
             self.cur_text = content
             val nul3 = char_from_code(0)
             if content.contains(nul3):
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "")
+                core_token_text_save("")
             else:
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", content)
+                core_token_text_save(content)
             return
 
         var parts: [text] = []
@@ -550,9 +608,9 @@ impl CoreLexer:
         # has_nul flag, not contains(): NUL-bearing text breaks contains()
         # (C-string truncation) — proven by rt_env_set panics on "\033" files.
         if has_nul:
-            rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "")
+            core_token_text_save("")
         else:
-            rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", result)
+            core_token_text_save(result)
 
     # ----- Raw String Scanning (r"...") -----
 
@@ -582,7 +640,7 @@ impl CoreLexer:
         val raw_result: text = raw_parts.join("")
         self.make_token(3, raw_result, start_line, start_col)
         self.cur_text = raw_result
-        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", raw_result)
+        core_token_text_save(raw_result)
 
     # ----- Identifier/Keyword Scanning -----
 
@@ -591,21 +649,29 @@ impl CoreLexer:
         val start_line: i64 = self.line
         val start_col: i64 = self.col
         self.cur_start = start
+        val src: text = self.source
+        val src_len: i64 = src.len()
+        var pos: i64 = self.pos
 
         for i in 0..1000:
-            val c: text = self.peek()
+            if pos >= src_len:
+                break
+            val c: text = src[pos:pos + 1]
             if is_ident_char(c):
-                self.advance()
+                pos = pos + 1
             else:
                 break
 
-        val ident_text: text = self.source[start:self.pos]
+        self.pos = pos
+        # identifiers never contain newlines
+        self.col = self.col + (pos - start)
+        val ident_text: text = src[start:pos]
 
         # G36: r"..." raw string — backslashes are literal, no escape processing.
         # Matches Rust seed scan_raw_double_string semantics: read until closing "
         # (cannot span newlines). Emits kind 3 (StringLit) with raw content.
         if ident_text == "r":
-            val next_ch: text = self.peek()
+            val next_ch: text = if pos < src_len then src[pos:pos + 1] else ""
             if next_ch == "\"":
                 self.scan_raw_string(start_line, start_col)
                 return
@@ -617,29 +683,29 @@ impl CoreLexer:
             if kw_kind == 58:
                 self.make_token(4, "true", start_line, start_col)
                 self.cur_text = "true"
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "true")
+                core_token_text_save("true")
             elif kw_kind == 59:
                 self.make_token(4, "false", start_line, start_col)
                 self.cur_text = "false"
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "false")
+                core_token_text_save("false")
             elif kw_kind == 5:
                 self.make_token(5, "nil", start_line, start_col)
                 self.cur_text = "nil"
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "nil")
+                core_token_text_save("nil")
             else:
                 self.make_token(kw_kind, ident_text, start_line, start_col)
                 self.cur_text = ident_text
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", ident_text)
+                core_token_text_save(ident_text)
         else:
             # Check for underscore-only as special token
             if ident_text == "_":
                 self.make_token(169, "_", start_line, start_col)
                 self.cur_text = "_"
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "_")
+                core_token_text_save("_")
             else:
                 self.make_token(6, ident_text, start_line, start_col)
                 self.cur_text = ident_text
-                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", ident_text)
+                core_token_text_save(ident_text)
 
     # ----- Indentation Handling -----
 
@@ -1081,4 +1147,4 @@ fn core_lexer_token_line(lexer: CoreLexer) -> i64:
 fn core_lexer_token_col(lexer: CoreLexer) -> i64:
     lexer.token_col()
 
-export core_lexer_last_text_get, core_lexer_last_line_get, core_lexer_last_col_get
+export core_lexer_last_text_get, core_lexer_last_line_get, core_lexer_last_col_get, core_lexer_last_suffix_get, core_token_env_save_set

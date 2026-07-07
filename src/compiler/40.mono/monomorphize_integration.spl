@@ -11,14 +11,6 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.type_subst.*
-fn mono_expr_disc(k: HirExprKind) -> i64:
-    match k:
-        case HirExprKind.Block(_):
-            1138084884  # hash("Block")
-        case HirExprKind.Field(_, _, _):
-            21232742  # hash("Field")
-        case _:
-            0
 
 fn mono_arg_value(a: HirCallArg) -> HirExpr:
     """Typed-parameter accessor for HirCallArg.value (stage4 ANY-erasure
@@ -236,32 +228,17 @@ impl MonomorphizationPass:
         # trapping ("field access on nil receiver", iteration 10).
         if expr == nil:
             return
-        # SEED PATTERN HAZARD (bug doc iteration 18): a variant pattern whose
-        # name is shadowed by a struct/class ANYWHERE in the program (`struct
-        # Block`/`struct Field` in the frontend AST) compiles as an ALWAYS-TRUE
-        # struct-pattern test — the Block arm below swallowed a NamedVar and
-        # SEGV'd in scan_block. Pre-dispatch those variants by explicit
-        # discriminant (DefaultHasher(name) u32) and keep them OUT of the match.
-        val mse_disc: i64 = mono_expr_disc(expr.kind)
-        if mse_disc == 1138084884:  # hash("Block")
-            match expr.kind:
-                case HirExprKind.Block(block):
-                    val blk_t: HirBlock = block
-                    self.scan_block(blk_t)
-                case _:
-                    pass
-            return
-        if mse_disc == 21232742:  # hash("Field")
-            match expr.kind:
-                case HirExprKind.Field(base, _, _):
-                    val fld_base_t: HirExpr = base
-                    self.scan_expr(fld_base_t)
-                case _:
-                    pass
-            return
         # Typed rebinds on every extracted payload before use (stage4
         # extracted-ANY-payload misread hazard, bug doc iteration 18).
         match expr.kind:
+            case HirExprKind.Block(block):
+                val block_t: HirBlock = block
+                self.scan_block(block_t)
+
+            case HirExprKind.Field(base, _, _):
+                val field_base_t: HirExpr = base
+                self.scan_expr(field_base_t)
+
             # Direct function calls with type arguments
             case HirExprKind.Call(callee, args, type_args):
                 val call_callee_t: HirExpr = callee
@@ -327,10 +304,6 @@ impl MonomorphizationPass:
             case HirExprKind.Lambda(_, body, _):
                 self.scan_expr(body)
 
-            # NOTE: HirExprKind.Block and HirExprKind.Field are handled by the
-            # discriminant pre-dispatch above (always-true struct-pattern
-            # hazard) and MUST NOT appear in this match.
-
             # Binary/Unary
             case HirExprKind.Binary(_, left, right):
                 val bin_left_t: HirExpr = left
@@ -356,7 +329,6 @@ impl MonomorphizationPass:
                     self.scan_expr(k)
                     self.scan_expr(v)
 
-            # Field access handled by the discriminant pre-dispatch above.
             case HirExprKind.Index(base, index):
                 self.scan_expr(base)
                 self.scan_expr(index)

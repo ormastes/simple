@@ -236,14 +236,20 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
                 case Some(trait_type):
                     match self.type_checker.get_type_symbol(impl_.type_):
                         case Some(type_symbol):
-                            val type_id = type_symbol.id
-                            match self.type_checker.get_type_symbol(trait_type):
-                                case Some(trait_symbol):
-                                    if not self.trait_impls[type_id].?:
-                                        self.trait_impls[type_id] = []
-                                    self.trait_impls[type_id] = self.trait_impls[type_id].push(trait_symbol)
-                                case nil:
-                                    pass
+                            if type_symbol == nil:
+                                pass
+                            else:
+                                val type_id = type_symbol.id
+                                match self.type_checker.get_type_symbol(trait_type):
+                                    case Some(trait_symbol):
+                                        if trait_symbol == nil:
+                                            pass
+                                        else:
+                                            if not self.trait_impls[type_id].?:
+                                                self.trait_impls[type_id] = []
+                                            self.trait_impls[type_id] = self.trait_impls[type_id].push(trait_symbol)
+                                    case nil:
+                                        pass
                         case nil:
                             pass
                 case nil:
@@ -330,6 +336,7 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
 
     me resolve_expr(expr: HirExpr) -> HirExpr:
         """Resolve method calls in an expression."""
+        var resolved_type = expr.type_
         val kind = match expr.kind:
             # Method calls - the main target
             case MethodCall(receiver, method, args, resolution):
@@ -347,6 +354,7 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
                 else:
                     self.resolve_method(resolved_receiver, method, resolved_args)
 
+                resolved_type = self.resolve_call_result_type(new_resolution, expr.type_)
                 HirExprKind.MethodCall(resolved_receiver, method, resolved_args, new_resolution)
 
             # Regular function calls - resolve arguments, then fill omitted
@@ -593,7 +601,35 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
             # Error
             case Error: expr.kind
 
-        HirExpr(kind: kind, type_: expr.type_, span: expr.span)
+        HirExpr(kind: kind, has_type_: expr.has_type_, type_: resolved_type, span: expr.span)
+
+    me resolve_call_result_type(resolution: MethodResolution, fallback: HirType?) -> HirType?:
+        """Use the resolved callee's return type when available."""
+        match resolution.get_symbol_id():
+            case Some(symbol_id):
+                val sym = self.symbols.get_symbol(symbol_id)
+                match sym:
+                    case Some(found_sym):
+                        if found_sym == nil:
+                            pass
+                        else:
+                            match found_sym.type_:
+                                case Some(sym_type):
+                                    if sym_type == nil:
+                                        pass
+                                    else:
+                                        match sym_type.kind:
+                                            case Function(_, ret, _):
+                                                return Some(ret)
+                                            case _:
+                                                pass
+                                case nil:
+                                    pass
+                    case nil:
+                        pass
+                fallback
+            case nil:
+                fallback
 
     me resolve_call_args(args: [HirCallArg]) -> [HirCallArg]:
         """Resolve method calls in call arguments."""

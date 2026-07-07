@@ -655,8 +655,8 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
     // Check if non-fatal parser hints should be suppressed. Bootstrap native
     // rebuilds parse hundreds of modules under the interpreter; formatting
     // every warning dominates the run and hides the first real failure.
-    let suppress_non_errors = std::env::var("SIMPLE_ALLOW_DEPRECATED").is_ok()
-        || std::env::var("SIMPLE_NO_DEPRECATED_WARNINGS").is_ok();
+    let suppress_non_errors =
+        std::env::var("SIMPLE_ALLOW_DEPRECATED").is_ok() || std::env::var("SIMPLE_NO_DEPRECATED_WARNINGS").is_ok();
 
     // Display hints to stderr
     for hint in hints {

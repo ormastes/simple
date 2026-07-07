@@ -58,32 +58,9 @@ fn process_run(cmd: text, args: [text]) -> (text, text, i64):
     result
 
 fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    """Unix implementation: still uses `timeout <secs> <cmd> <args>` to
-    enforce the wall-clock deadline, but spawns it asynchronously with
-    output redirected to temp files and reaps it with a single blocking
-    rt_process_wait, instead of rt_process_run's popen()/fgets() loop.
-
-    That loop reads the child's stdout/stderr through a PIPE and only
-    returns on pipe EOF. If the wrapped command spawned a grandchild (e.g. a
-    helper worker process) that inherited the write end of that pipe and
-    outlived the direct child, the parent hung forever -- `timeout` only
-    kills the process IT launched, not any orphaned grandchildren still
-    holding the pipe open. See
-    doc/08_tracking/bug/native_build_worker_zombie_parent_hang_2026-07-03.md.
-
-    Waiting on the wrapper's actual process exit (rather than pipe EOF)
-    sidesteps this: `timeout` (with --kill-after as a belt-and-suspenders
-    against a SIGTERM-ignoring child) guarantees the wrapper process itself
-    terminates at the deadline regardless of what any descendant is still
-    doing, and reading the redirected output files afterward never blocks
-    on some other process's open file descriptor the way a pipe read would.
-
-    Note: rt_process_wait is called with a timeout of 0 (block until the
-    wrapper exits) rather than passing timeout_ms through -- the interpreter
-    build of rt_process_wait ignores a timeout argument and always blocks
-    until the process exits, so the actual deadline enforcement must come
-    from `timeout` itself, not from rt_process_wait's second parameter.
-    """
+    # Unix timeout wrapper: use `timeout` plus temp files so orphaned
+    # grandchildren cannot keep stdout/stderr pipes open forever.
+    # See doc/08_tracking/bug/native_build_worker_zombie_parent_hang_2026-07-03.md.
     val timeout_secs = if timeout_ms <= 0:
         120
     else:
@@ -130,7 +107,7 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         (stdout, stderr, wrapper_code)
 
 fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    """Windows implementation using async spawn + temp files"""
+    # Windows implementation using async spawn + temp files.
     val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
 
     var temp_dir = rt_env_get("TEMP")
@@ -175,28 +152,14 @@ fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (tex
         (stdout, stderr, exit_code)
 
 fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    """Platform-agnostic timeout wrapper"""
+    # Platform-agnostic timeout wrapper.
     if _is_windows_platform():
         process_run_timeout_windows(cmd, args, timeout_ms)
     else:
         process_run_timeout_unix(cmd, args, timeout_ms)
 
 fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> ProcessResult:
-    """
-    Execute a process with resource limits enforced via ulimit.
-
-    Args:
-        cmd: Command to execute
-        args: Command arguments
-        timeout_ms: Wall-clock timeout in milliseconds
-        memory_bytes: Virtual memory limit in bytes
-        cpu_seconds: CPU time limit in seconds
-        max_fds: Maximum file descriptors
-        max_procs: Maximum processes
-
-    Returns:
-        ProcessResult with limit violation detection
-    """
+    # Execute a process with resource limits enforced via ulimit.
     if _is_windows_platform():
         eprint("[WARNING] Resource limits not supported on Windows - using timeout only")
         val effective_timeout = if timeout_ms <= 0: 0 else: timeout_ms
@@ -368,52 +331,21 @@ fn shell_int(command: text, default: i64) -> i64:
 # ============================================================================
 
 fn process_spawn_async(cmd: text, args: [text]) -> i64:
-    """
-    Spawn a process asynchronously (non-blocking).
-
-    Returns: Process ID (pid) on success, -1 on failure.
-
-    Example:
-        val pid = process_spawn_async("sleep", ["10"])
-        # ... do other work ...
-        val exit_code = process_wait(pid, 0)  # Wait for completion
-    """
+    # Spawn a process asynchronously (non-blocking).
     rt_process_spawn_async(cmd, args)
 
 fn process_wait(pid: i64, timeout_ms: i64) -> i64:
-    """
-    Wait for a process to complete.
-
-    Args:
-        pid: Process ID from process_spawn_async
-        timeout_ms: Timeout in milliseconds (0 = wait forever)
-
-    Returns:
-        Exit code on success
-        -1 on error
-        -2 on timeout
-    """
+    # Wait for a process to complete.
     if pid <= 0:
         return -1
     rt_process_wait(pid, timeout_ms)
 
 fn process_is_running(pid: i64) -> bool:
-    """
-    Check if a process is still running.
-
-    Returns: true if running, false if exited or invalid pid
-    """
+    # Check if a process is still running.
     rt_process_is_running(pid)
 
 fn process_kill(pid: i64) -> bool:
-    """
-    Terminate a running process.
-
-    Sends SIGTERM (Unix) or TerminateProcess (Windows).
-    On Unix, escalates to SIGKILL if process doesn't exit.
-
-    Returns: true on success, false on failure
-    """
+    # Terminate a running process.
     if pid <= 1:
         return false
     rt_process_kill(pid)

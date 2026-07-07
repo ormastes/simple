@@ -12,9 +12,10 @@ use compiler.backend.c_type_mapper.{CTypeMapper}
 use compiler.backend.error_conversion.{is_result_type, is_result_type_name, map_result_type, emit_error_type_header_declarations, emit_result_function_declaration}
 use compiler.backend.callback_trampoline.{is_callback_type, build_callback_typedef, emit_callback_typedef, CallbackTypedef}
 use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_c_static_asserts, generate_c_struct_def}
-use hir_definitions.{HirField}
-use hir_types.{HirType}
+use compiler.hir.hir_definitions.{HirField}
+use compiler.hir.hir_types.{HirType}
 use compiler.tools.header_gen.header_utils.{to_guard_name, sanitize_c_name}
+use std.array.{array_sort_by}
 
 # ============================================================================
 # C Header Emission
@@ -79,7 +80,7 @@ fn emit_c_header(lib_name: text, exported_fns: [MirFunction], exported_types: [M
             val rt_type = exported_types[rti]
             val rt_c_name = sanitize_c_name(rt_type.name)
             val rt_method_prefix = r"__simple_" + rt_c_name + r"_"
-            for _sym, func in module.functions:
+            for func in module.functions.values():
                 if func.name.starts_with(rt_method_prefix):
                     if is_result_type(func.signature.return_type):
                         has_result_fns = true
@@ -230,7 +231,7 @@ fn _emit_type_declarations(type_def: MirTypeDef, module: MirModule) -> [text]:
 
     # Method declarations — find functions matching this class
     val method_prefix_str = r"__simple_" + c_name + r"_"
-    for _sym, func in module.functions:
+    for func in module.functions.values():
         if func.name.starts_with(method_prefix_str):
             val method_name = func.name.replace(method_prefix_str, "")
             if method_name != "" and method_name != "new" and method_name != "drop":
@@ -344,7 +345,7 @@ fn _emit_layout_asserts(type_def: MirTypeDef) -> text:
             val c_name = sanitize_c_name(type_def.name)
 
             # Sort fields alphabetically by name for deterministic _Static_assert order
-            val sorted_fields = fields.sort_by(\a, b:
+            val sorted_fields = array_sort_by(fields, \a, b:
                 if a.name < b.name: -1
                 elif a.name > b.name: 1
                 else: 0
@@ -436,7 +437,7 @@ fn _collect_callback_typedefs(exported_fns: [MirFunction], exported_types: [MirT
         val type_def = exported_types[ti]
         val c_name = sanitize_c_name(type_def.name)
         val method_prefix = r"__simple_" + c_name + r"_"
-        for _sym, func in module.functions:
+        for func in module.functions.values():
             if func.name.starts_with(method_prefix):
                 var mpi = 1  # Skip self
                 while mpi < _mir_function_param_count(func):

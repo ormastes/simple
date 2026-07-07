@@ -36,6 +36,13 @@ use crate::optimizations::NativeOptimizationLevel;
 use crate::security::build_security_inventory;
 use crate::stdlib_variant::active_simd_tier_name;
 
+pub(crate) fn native_project_rust_trace_enabled() -> bool {
+    matches!(
+        std::env::var("SIMPLE_NATIVE_BUILD_RUST_TRACE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+    )
+}
+
 /// Initialize the rayon global thread pool with appropriate stack size and
 /// thread count for compilation workloads.
 ///
@@ -454,6 +461,29 @@ impl NativeProjectBuilder {
     pub fn build(self) -> Result<NativeBuildResult, String> {
         crate::codegen::inline_asm::clear_inline_asm_blocks();
 
+        let rust_trace = native_project_rust_trace_enabled();
+        if rust_trace {
+            eprintln!("[native-rust-trace] builder start:");
+            eprintln!("  project_root={}", self.project_root.display());
+            eprintln!("  source_root={}", self.source_root.display());
+            eprintln!(
+                "  source_dirs={}",
+                self.source_dirs
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            eprintln!(
+                "  entry_file={}",
+                self.entry_file
+                    .as_ref()
+                    .map_or("<none>".to_string(), |p| p.display().to_string())
+            );
+            eprintln!("  entry_closure={}", self.config.entry_closure);
+            eprintln!("  cache_dir={}", self.cache_dir().display());
+        }
+
         // 0. Initialize rayon thread pool with compilation-appropriate stack
         //    size and thread count. This must happen before any par_iter usage.
         if self.config.parallel {
@@ -486,6 +516,15 @@ impl NativeProjectBuilder {
         };
         if files.is_empty() {
             return Err("No .spl files found in source directories".to_string());
+        }
+        if rust_trace {
+            eprintln!("[native-rust-trace] discovered {} file(s)", files.len());
+            for (idx, path) in files.iter().take(12).enumerate() {
+                eprintln!("  discovered[{idx}]={}", path.display());
+            }
+            if files.len() > 12 {
+                eprintln!("  discovered_more={}", files.len() - 12);
+            }
         }
         if self.config.verbose {
             eprintln!("Found {0} .spl files", files.len());
@@ -576,6 +615,17 @@ impl NativeProjectBuilder {
         }
 
         let cached_count = cached_objects.len();
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] dirty set: cached={} to_compile={} use_incremental={}",
+                cached_count,
+                to_compile.len(),
+                use_incremental
+            );
+            for (idx, path, _) in to_compile.iter().take(12) {
+                eprintln!("  compile[{idx}]={}", path.display());
+            }
+        }
         if self.config.verbose && use_incremental {
             eprintln!("Incremental: {cached_count} cached, {} to compile", to_compile.len());
         }

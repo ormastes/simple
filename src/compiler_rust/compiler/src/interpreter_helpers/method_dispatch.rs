@@ -55,6 +55,16 @@ pub(crate) fn call_method_on_value(
                 }
                 return Ok(Value::Bool(false));
             }
+            "replace" => {
+                let old = _args.first().map(Value::to_key_string).unwrap_or_default();
+                let new = _args.get(1).map(Value::to_key_string).unwrap_or_default();
+                return Ok(Value::Str(s.replace(&old, &new)));
+            }
+            "replace_first" => {
+                let old = _args.first().map(Value::to_key_string).unwrap_or_default();
+                let new = _args.get(1).map(Value::to_key_string).unwrap_or_default();
+                return Ok(Value::Str(s.replacen(&old, &new, 1)));
+            }
             "index_of" => {
                 if let Some(Value::Str(needle)) = _args.first() {
                     if let Some(idx) = s.find(needle) {
@@ -900,6 +910,46 @@ pub(crate) fn find_and_exec_method(
         enums,
         impl_methods,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_string_replace_dispatches_on_temporary_string() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let first = call_method_on_value(
+            Value::Str("hello".to_string()),
+            "replace",
+            &[Value::Str("h".to_string()), Value::Str("H".to_string())],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("first replace should dispatch");
+
+        let chained = call_method_on_value(
+            first,
+            "replace",
+            &[Value::Str("e".to_string()), Value::Str("E".to_string())],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained replace should dispatch");
+
+        assert_eq!(chained, Value::Str("HEllo".to_string()));
+    }
 }
 
 /// Try to call method_missing hook on a class/struct object.

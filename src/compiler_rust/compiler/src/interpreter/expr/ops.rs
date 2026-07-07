@@ -96,14 +96,14 @@ fn division_by_zero_error(message: &'static str, help: &'static str) -> CompileE
 
 fn fast_int_binop(op: &BinOp, left: i64, right: i64) -> Result<Option<Value>, CompileError> {
     let value = match op {
-        BinOp::Add => Value::Int(left + right),
-        BinOp::Sub => Value::Int(left - right),
-        BinOp::Mul | BinOp::MatMul => Value::Int(left * right),
+        BinOp::Add => Value::Int(left.wrapping_add(right)),
+        BinOp::Sub => Value::Int(left.wrapping_sub(right)),
+        BinOp::Mul | BinOp::MatMul => Value::Int(left.wrapping_mul(right)),
         BinOp::Div => {
             if right == 0 {
                 return Err(division_by_zero_error("division by zero", "cannot divide by zero"));
             }
-            Value::Int(left / right)
+            Value::Int(left.wrapping_div(right))
         }
         BinOp::Mod => {
             if right == 0 {
@@ -112,7 +112,7 @@ fn fast_int_binop(op: &BinOp, left: i64, right: i64) -> Result<Option<Value>, Co
                     "cannot perform modulo by zero",
                 ));
             }
-            Value::Int(left % right)
+            Value::Int(left.wrapping_rem(right))
         }
         BinOp::Lt => Value::Bool(left < right),
         BinOp::Gt => Value::Bool(left > right),
@@ -130,13 +130,13 @@ fn fast_int_binop(op: &BinOp, left: i64, right: i64) -> Result<Option<Value>, Co
                     ctx,
                 ));
             }
-            Value::Int(left.pow(right as u32))
+            Value::Int(left.wrapping_pow(right as u32))
         }
         BinOp::BitAnd => Value::Int(left & right),
         BinOp::BitOr => Value::Int(left | right),
         BinOp::BitXor => Value::Int(left ^ right),
-        BinOp::ShiftLeft => Value::Int(left << right),
-        BinOp::ShiftRight => Value::Int(left >> right),
+        BinOp::ShiftLeft => Value::Int(left.wrapping_shl(right as u32)),
+        BinOp::ShiftRight => Value::Int(left.wrapping_shr(right as u32)),
         _ => return Ok(None),
     };
     Ok(Some(value))
@@ -2023,6 +2023,18 @@ mod tests {
         assert!(fast_int_binop(&BinOp::Mod, 1, 0).is_err());
         assert!(fast_int_binop(&BinOp::Pow, 2, -1).is_err());
         assert_eq!(fast_value(BinOp::Pow, 2, 10), Value::Int(1024));
+    }
+
+    #[test]
+    fn fast_int_binop_wraps_integer_overflow_in_debug_builds() {
+        assert_eq!(fast_value(BinOp::Add, i64::MAX, 1), Value::Int(i64::MIN));
+        assert_eq!(fast_value(BinOp::Sub, i64::MIN, 1), Value::Int(i64::MAX));
+        assert_eq!(fast_value(BinOp::Mul, i64::MAX, 2), Value::Int(-2));
+        assert_eq!(fast_value(BinOp::MatMul, i64::MAX, 2), Value::Int(-2));
+        assert_eq!(fast_value(BinOp::Div, i64::MIN, -1), Value::Int(i64::MIN));
+        assert_eq!(fast_value(BinOp::Mod, i64::MIN, -1), Value::Int(0));
+        assert_eq!(fast_value(BinOp::Pow, i64::MAX, 2), Value::Int(1));
+        assert_eq!(fast_value(BinOp::ShiftLeft, 1, 65), Value::Int(2));
     }
 
     #[test]

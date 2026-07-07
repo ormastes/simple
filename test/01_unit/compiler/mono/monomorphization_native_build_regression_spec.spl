@@ -4,14 +4,20 @@ use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTab
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.diagnostics.span.{Span}
 
+extern fn rt_file_read_text(path: text) -> text
+
 fn empty_span() -> Span:
     Span.default()
 
 fn unit_type() -> HirType:
     HirType(kind: HirTypeKind.Unit, span: empty_span())
 
+fn generic_call_expr() -> HirExpr:
+    val callee = HirExpr(kind: HirExprKind.Var(SymbolId(id: 10)), has_type_: false, type_: unit_type(), span: empty_span())
+    HirExpr(kind: HirExprKind.Call(callee, [], [unit_type()]), has_type_: false, type_: unit_type(), span: empty_span())
+
 fn field_expr() -> HirExpr:
-    val base = HirExpr(kind: HirExprKind.Var(SymbolId(id: 1)), has_type_: false, type_: unit_type(), span: empty_span())
+    val base = generic_call_expr()
     HirExpr(kind: HirExprKind.Field(base, "value", nil), has_type_: false, type_: unit_type(), span: empty_span())
 
 fn nested_block_expr() -> HirExpr:
@@ -84,10 +90,22 @@ fn module_with_generic_function() -> HirModule:
     )
 
 describe "monomorphization native-build regression":
-    it "runs the scan path without rt_enum_discriminant":
+    it "scans block and field expressions without rt_enum_discriminant":
         val input = module_with_generic_function()
         val (output, stats) = run_monomorphization({"mono.regression": input})
 
         expect(output.len()).to_equal(1)
         expect(stats.generic_functions_found).to_equal(1)
-        expect(stats.call_sites_found).to_equal(0)
+        expect(stats.call_sites_found).to_equal(1)
+
+    it "keeps direct mono compiles off root std.sdn and relative HIR imports":
+        val cache_source = rt_file_read_text("src/compiler/40.mono/monomorphize/cache.spl") ?? ""
+        val hot_reload_source = rt_file_read_text("src/compiler/40.mono/monomorphize/hot_reload.spl") ?? ""
+        val engine_source = rt_file_read_text("src/compiler/40.mono/monomorphize/engine.spl") ?? ""
+
+        expect(cache_source.contains("use std.sdn.")).to_equal(false)
+        expect(hot_reload_source.contains("use std.sdn.")).to_equal(false)
+        expect(engine_source.contains("use hir_types.*")).to_equal(false)
+        expect(engine_source.contains("use hir_definitions.*")).to_equal(false)
+        expect(cache_source).to_contain("use std.common.sdn.parser (parse)")
+        expect(engine_source).to_contain("use compiler.hir.hir_types.*")

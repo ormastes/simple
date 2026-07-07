@@ -18,16 +18,34 @@ use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
 use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metadata_sidecar_path, render_launch_metadata_sidecar}
 
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
 fn cli_native_build_is_entry_arg(arg: text) -> bool:
     arg == "--entry" or arg.starts_with("--entry=")
 
-fn compile_simpleos(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
-    """Compile for SimpleOS targets (bare-metal ELF with SimpleOS conventions).
+fn cli_native_build_add_bootstrap_input(options: CompileOptions, input_path: text) -> CompileOptions:
+    var result = options
+    val slot = result.bootstrap_input_count
+    if slot == 0:
+        result.bootstrap_input_0 = input_path
+    elif slot == 1:
+        result.bootstrap_input_1 = input_path
+    elif slot == 2:
+        result.bootstrap_input_2 = input_path
+    elif slot == 3:
+        result.bootstrap_input_3 = input_path
+    elif slot == 4:
+        result.bootstrap_input_4 = input_path
+    elif slot == 5:
+        result.bootstrap_input_5 = input_path
+    result.bootstrap_input_count = slot + 1
+    result
 
-    Supported target strings:
-    - x86_64-simpleos, x86_64-unknown-simpleos, simpleos  -> x86_64-unknown-none-elf
-    """
+
+fn compile_simpleos(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
+    # Compile for SimpleOS targets (bare-metal ELF with SimpleOS conventions).
+    # Supported: x86_64-simpleos, x86_64-unknown-simpleos, simpleos.
     # Parse architecture from target string
     val arch = if target == "simpleos" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos":
         "x86_64"
@@ -243,6 +261,32 @@ fn _nb_basename(path: text) -> text:
         return path
     parts[parts.len() - 1]
 
+fn _nb_trim_trailing_slashes(path: text) -> text:
+    var p = path
+    while p.len() > 1 and p.ends_with("/"):
+        p = p.substring(0, p.len() - 1)
+    p
+
+fn _nb_source_dirs_cover_workspace(source_dirs: [text]) -> bool:
+    source_dirs.contains("src/app") and source_dirs.contains("src/lib") and source_dirs.contains("src/compiler")
+
+fn _nb_normalize_source_dirs(source_dirs: [text]) -> [text]:
+    # Drop duplicate roots and redundant bare `src` when explicit workspace
+    # roots already cover app, lib, and compiler imports.
+    var normalized: [text] = []
+    for raw_dir in source_dirs:
+        val dir = _nb_trim_trailing_slashes(raw_dir)
+        if dir == "" or normalized.contains(dir):
+            continue
+        normalized = normalized.push(dir)
+    var result: [text] = []
+    val workspace_covered = _nb_source_dirs_cover_workspace(normalized)
+    for candidate in normalized:
+        if workspace_covered and candidate == "src":
+            continue
+        result = result.push(candidate)
+    result
+
 fn _nb_module_path_from_use(line_in: text) -> text:
     # Dotted module path of a single-line use/import statement, else "".
     val line = line_in.trim()
@@ -273,44 +317,52 @@ fn _nb_module_path_from_use(line_in: text) -> text:
         path_text = path_text[0:path_text.len() - 1]
     path_text.trim()
 
+fn _nb_resolve_under_root(root: text, segs: [text]) -> text:
+    if segs.len() == 0:
+        return ""
+    val rel = segs.join("/")
+    val p1 = "{root}/{rel}.spl"
+    if rt_file_exists(p1):
+        return p1
+    val p2 = "{root}/{rel}/mod.spl"
+    if rt_file_exists(p2):
+        return p2
+    val p3 = "{root}/{rel}/__init__.spl"
+    if rt_file_exists(p3):
+        return p3
+    ""
+
 fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
     # Resolve a module segment list to an .spl file under a --source root.
     # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
     # the root's dir name. Returns "" if unresolved.
     for root in source_dirs:
         val dir_name = _nb_basename(root)
-        var cand_lists: [[text]] = [segs]
         if segs.len() > 0 and segs[0] == dir_name:
             var stripped: [text] = []
             var si = 1
             while si < segs.len():
                 stripped = stripped.push(segs[si])
                 si = si + 1
-            cand_lists = [stripped, segs]
-        for cl in cand_lists:
-            if cl.len() == 0:
-                continue
-            val rel = cl.join("/")
-            val p1 = "{root}/{rel}.spl"
-            if _cli_file_exists_impl(p1):
-                return p1
-            val p2 = "{root}/{rel}/mod.spl"
-            if _cli_file_exists_impl(p2):
-                return p2
-            val p3 = "{root}/{rel}/__init__.spl"
-            if _cli_file_exists_impl(p3):
-                return p3
-    if segs.len() > 0:
-        val rel = segs.join("/")
-        val p1 = "src/{rel}.spl"
-        if _cli_file_exists_impl(p1):
-            return p1
-        val p2 = "src/{rel}/mod.spl"
-        if _cli_file_exists_impl(p2):
-            return p2
-        val p3 = "src/{rel}/__init__.spl"
-        if _cli_file_exists_impl(p3):
-            return p3
+            val stripped_path = _nb_resolve_under_root(root, stripped)
+            if stripped_path != "":
+                return stripped_path
+        val direct_path = _nb_resolve_under_root(root, segs)
+        if direct_path != "":
+            return direct_path
+    if segs.len() > 0 and not _nb_source_dirs_cover_workspace(source_dirs):
+        val src_path = _nb_resolve_under_root("src", segs)
+        if src_path != "":
+            return src_path
+    ""
+
+fn _nb_resolve_cache_get(cache: [[text]], key: text) -> text:
+    var ci = 0
+    while ci < cache.len():
+        val entry = cache[ci]
+        if entry.len() > 1 and entry[0] == key:
+            return entry[1]
+        ci = ci + 1
     ""
 
 fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
@@ -318,39 +370,65 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # modules (one `main`), not every file in the --source dirs. Over-approximates
     # safely: an unresolved `use` is skipped; a genuinely missing import still
     # errors in the compile phase.
+    val trace_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
     var queue: [text] = [entry]
-    var seen: [text] = []
+    var discovered: [text] = [entry]
     var result: [text] = []
+    var resolve_cache: [[text]] = []
+    val closure_source_dirs = _nb_normalize_source_dirs(source_dirs)
     var qi = 0
     while qi < queue.len():
         val f = queue[qi]
         qi = qi + 1
-        if seen.contains(f):
-            continue
-        seen = seen.push(f)
         result = result.push(f)
-        if not _cli_file_exists_impl(f):
+        if not rt_file_exists(f):
+            if trace_closure and f == entry:
+                _cli_eprint("[native-build] closure entry missing {f}")
             continue
-        val content = _cli_file_read_impl(f)
+        val content = rt_file_read_text(f) ?? ""
+        if trace_closure and f == entry:
+            _cli_eprint("[native-build] closure entry read len={content.len()}")
+        if trace_closure and result.len() % 25 == 0:
+            _cli_eprint("[native-build] closure visited {result.len()} queued={queue.len()} file={f}")
         for raw in content.split("\n"):
-            val mp = _nb_module_path_from_use(raw)
+            var import_line = raw
+            if raw == "":
+                continue
+            val first = raw.substring(0, 1)
+            if first != "u" and first != "e" and first != "i" and first != " " and first != "\t":
+                continue
+            if first == " " or first == "\t":
+                import_line = raw.trim()
+            if not import_line.starts_with("use ") and not import_line.starts_with("use lazy ") and not import_line.starts_with("export use ") and not import_line.starts_with("import "):
+                continue
+            val mp = _nb_module_path_from_use(import_line)
             if mp == "":
                 continue
             val segs = mp.split(".")
-            val rp = _nb_resolve_segs(segs, source_dirs)
-            if (rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1" and f == entry:
+            val seg_key = segs.join("/")
+            var rp = _nb_resolve_cache_get(resolve_cache, seg_key)
+            if rp == "":
+                rp = _nb_resolve_segs(segs, closure_source_dirs)
+                resolve_cache = resolve_cache.push([seg_key, rp])
+            if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
-            if rp != "" and not seen.contains(rp):
+            if rp != "" and not discovered.contains(rp):
                 queue = queue.push(rp)
+                discovered = discovered.push(rp)
             if rp == "" and segs.len() > 1 and not raw.contains("{"):
                 var drop: [text] = []
                 var di = 0
                 while di < segs.len() - 1:
                     drop = drop.push(segs[di])
                     di = di + 1
-                val drop_rp = _nb_resolve_segs(drop, source_dirs)
-                if drop_rp != "" and not seen.contains(drop_rp):
+                val drop_key = drop.join("/")
+                var drop_rp = _nb_resolve_cache_get(resolve_cache, drop_key)
+                if drop_rp == "":
+                    drop_rp = _nb_resolve_segs(drop, closure_source_dirs)
+                    resolve_cache = resolve_cache.push([drop_key, drop_rp])
+                if drop_rp != "" and not discovered.contains(drop_rp):
                     queue = queue.push(drop_rp)
+                    discovered = discovered.push(drop_rp)
     result
 
 fn cli_native_build(args: [text]) -> i64:
@@ -655,8 +733,16 @@ fn cli_native_build(args: [text]) -> i64:
         if not env_set("SIMPLE_OS_LOG_MODE", log_mode):
             _cli_eprint("Error: could not export SIMPLE_OS_LOG_MODE={log_mode}")
             return 1
+        if not _cli_dir_create_impl(cache_dir, true):
+            env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+            _cli_eprint("Error: could not create native-build cache directory {cache_dir}")
+            return 1
         env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", if emit_object: "1" else: "")
-        env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", cache_dir)
+        if not env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", cache_dir):
+            env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+            env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+            _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_CACHE_DIR={cache_dir}")
+            return 1
         if native_threads > 0:
             env_set("SIMPLE_NATIVE_BUILD_THREADS", "{native_threads}")
         env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")
@@ -691,10 +777,13 @@ fn cli_native_build(args: [text]) -> i64:
             if effective_entry_closure:
                 for cf in _native_build_entry_closure(entry_point, source_dirs):
                     native_inputs = native_inputs.push(cf)
+                    options = cli_native_build_add_bootstrap_input(options, cf)
             else:
                 for source_dir in source_dirs:
                     native_inputs = native_inputs.push(source_dir)
+                    options = cli_native_build_add_bootstrap_input(options, source_dir)
                 native_inputs = native_inputs.push(entry_point)
+                options = cli_native_build_add_bootstrap_input(options, entry_point)
             options.input_files = native_inputs
             if verbose and effective_entry_closure:
                 _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
@@ -707,17 +796,25 @@ fn cli_native_build(args: [text]) -> i64:
             options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
             val driver = compiler_driver_create(options)
-            compiler_driver_run_compile(driver)
+            if verbose:
+                _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
+            val driver_result = compiler_driver_run_compile(driver)
+            if verbose:
+                _cli_eprint("[native-build] Driver finished")
+            driver_result
         else:
             var options = CompileOptions.default()
             var native_inputs: [text] = []
             if effective_entry_closure:
                 for cf in _native_build_entry_closure(entry_point, source_dirs):
                     native_inputs = native_inputs.push(cf)
+                    options = cli_native_build_add_bootstrap_input(options, cf)
             else:
                 for source_dir in source_dirs:
                     native_inputs = native_inputs.push(source_dir)
+                    options = cli_native_build_add_bootstrap_input(options, source_dir)
                 native_inputs = native_inputs.push(entry_point)
+                options = cli_native_build_add_bootstrap_input(options, entry_point)
             options.input_files = native_inputs
             if verbose and effective_entry_closure:
                 _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
@@ -733,7 +830,12 @@ fn cli_native_build(args: [text]) -> i64:
             options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
             val driver = compiler_driver_create(options)
-            compiler_driver_run_compile(driver)
+            if verbose:
+                _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
+            val driver_result = compiler_driver_run_compile(driver)
+            if verbose:
+                _cli_eprint("[native-build] Driver finished")
+            driver_result
         match result:
             case CompileResult.Success(_):
                 # Root-cause guard for the exit-0-with-no-binary hang
@@ -783,6 +885,8 @@ fn cli_native_build(args: [text]) -> i64:
                 env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
                 if native_threads > 0:
                     env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
+                if verbose:
+                    _cli_eprint("[native-build] failed backend={backend} mode={build_mode} cache-dir={cache_dir} threads={native_threads} entry={entry_point} output={output}")
                 val errors = result.get_errors()
                 if errors.len() == 0:
                     _cli_eprint("error: native-build failed without diagnostics")
@@ -799,37 +903,35 @@ fn cli_native_build(args: [text]) -> i64:
         return 1
 
 fn cli_normalize_runtime_bundle_aliases(args: [text]) -> [text]:
-    """Map semantic Simple/C runtime lane names onto legacy driver values.
-
-    Delegation must not revive the removed Rust-hosted lane or collapse pure
-    Simple and C-bootstrap lanes into the legacy `runtime` value.
-    """
+    # Map semantic Simple/C runtime lane names onto legacy driver values.
+    # Delegation must not revive the removed Rust-hosted lane or collapse pure
+    # Simple and C-bootstrap lanes into the legacy `runtime` value.
     var normalized: [text] = []
     var i = 0
     while i < args.len():
         val arg = args[i]
         if arg == "--runtime-bundle" and i + 1 < args.len():
-            normalized.push(arg)
+            normalized = normalized.push(arg)
             val value = args[i + 1]
             if value == "simple_core":
-                normalized.push("simple-core")
+                normalized = normalized.push("simple-core")
             elif value == "core_c_bootstrap":
-                normalized.push("core-c-bootstrap")
+                normalized = normalized.push("core-c-bootstrap")
             else:
-                normalized.push(value)
+                normalized = normalized.push(value)
             i = i + 2
             continue
         elif arg.starts_with("--runtime-bundle="):
             val value = arg.substring(17)
             if value == "simple_core":
-                normalized.push("--runtime-bundle=simple-core")
+                normalized = normalized.push("--runtime-bundle=simple-core")
             elif value == "core_c_bootstrap":
-                normalized.push("--runtime-bundle=core-c-bootstrap")
+                normalized = normalized.push("--runtime-bundle=core-c-bootstrap")
             else:
-                normalized.push(arg)
+                normalized = normalized.push(arg)
             i = i + 1
             continue
-        normalized.push(arg)
+        normalized = normalized.push(arg)
         i = i + 1
     return normalized
 

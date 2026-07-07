@@ -169,17 +169,21 @@ impl MethodResolver:
         if not type_sym.?:
             return nil
 
-        val type_id = match type_sym:
-            case Some(symbol): symbol.id
-            case nil: return nil
+        val resolved_type_id = match type_sym:
+            case Some(type_id):
+                if type_id == nil:
+                    return nil
+                type_id.id
+            case nil:
+                return nil
 
         # LEGACY PATH: Use simple trait_impls map as fallback
         # This handles impls that were registered before TraitSolver integration
-        if not self.trait_impls[type_id].?:
+        if not self.trait_impls[resolved_type_id].?:
             # Try enhanced TraitSolver path for generic impls
             return self.try_trait_method_with_solver(receiver_type, method)
 
-        val traits = self.trait_impls[type_id]
+        val traits = self.trait_impls[resolved_type_id]
         for trait_id in traits:
             val method_sym = self.symbols.lookup_trait_method(trait_id, method)
             if val Some(symbol) = method_sym:
@@ -246,25 +250,18 @@ impl MethodResolver:
         if not func_sym_id.?:
             return nil
 
-        val resolved_lookup_id = match func_sym_id:
-            case Some(symbol): symbol
-            case nil: return nil
+        val resolved_lookup_id = func_sym_id
 
         val func_sym = self.symbols.get_symbol(resolved_lookup_id)
         if not func_sym.?:
             return nil
 
         # Check if the function's first parameter is compatible with receiver type
-        val func = match func_sym:
-            case Some(symbol): symbol
-            case nil: return nil
+        val func = func_sym
         val func_type = func.type_
         if not func_type.?:
             return nil
-
-        val resolved_func_type = match func_type:
-            case Some(ty): ty
-            case nil: return nil
+        val resolved_func_type = func_type
 
         match resolved_func_type.kind:
             case Function(params, _, _):
@@ -274,9 +271,14 @@ impl MethodResolver:
                 val first_param_type = params[0]
                 if self.type_checker.is_compatible(receiver_type, first_param_type):
                     val resolved_id = resolved_lookup_id
-                    if (self.current_fn_sym.? and
-                        self.current_fn_sym.id == resolved_id.id):
-                        return nil
+                    match self.current_fn_sym:
+                        Some(current_fn_sym):
+                            if current_fn_sym == nil:
+                                pass
+                            elif current_fn_sym.id == resolved_id.id:
+                                return nil
+                        nil:
+                            pass
                     Some(MethodResolution.FreeFunction(resolved_id))
                 else:
                     nil
@@ -294,9 +296,12 @@ impl MethodResolver:
                 # Check if this symbol is a type (Struct, Class, Enum, or imported type)
                 val sym = self.symbols.get_symbol(symbol)
                 if val Some(symbol) = sym:
-                    match symbol.kind:
-                        case Class | Struct | Enum | Import: true
-                        case _: false
+                    if symbol == nil:
+                        false
+                    else:
+                        match symbol.kind:
+                            case Class | Struct | Enum | Import: true
+                            case _: false
                 else:
                     false
             case _:
@@ -317,14 +322,7 @@ impl MethodResolver:
             )
             return MethodResolution.Unresolved
 
-        val type_id = match type_sym_id:
-            case Some(symbol): symbol
-            case nil:
-                self.add_error(
-                    "internal error: is_static_method_call returned true but receiver is not a type reference",
-                    receiver.span
-                )
-                return MethodResolution.Unresolved
+        val type_id = type_sym_id
 
         # Look for static method in the type's definition
         val method_sym = self.symbols.lookup_static_method(type_id, method)

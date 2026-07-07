@@ -1,0 +1,42 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_definitions.{HirCallArg}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolKind, SymbolTable}
+use compiler.semantics.resolve.{MethodResolver}
+
+describe "MethodResolver nil guards":
+    it "keeps UFCS working when current_fn_sym is Some(nil)":
+        var symbols = SymbolTable.new()
+        val i64_type = HirType.named("i64")
+        val ping_type = HirType(
+            kind: HirTypeKind.Function([i64_type], i64_type, []),
+            span: Span.empty()
+        )
+        symbols.define(
+            "ping",
+            SymbolKind.Function,
+            Some(ping_type),
+            Span.empty(),
+            Visibility.Public,
+            false,
+            nil
+        )
+
+        var resolver = MethodResolver.new(symbols)
+        resolver.current_fn_sym = Some(nil)
+
+        val args: [HirCallArg] = []
+        val result = resolver.try_ufcs(i64_type, "ping", args)
+
+        expect(result.?).to_equal(true)
+
+    it "keeps UFCS optional bindings visible to HIR lowering":
+        val source = file_read("src/compiler/35.semantics/resolve_strategies.spl")
+
+        expect(source.contains("if val resolved_lookup_id = func_sym_id")).to_equal(false)
+        expect(source).to_contain("val resolved_lookup_id = func_sym_id")
+        expect(source.contains("if val type_id = type_sym_id")).to_equal(false)
+        expect(source).to_contain("val type_id = type_sym_id")

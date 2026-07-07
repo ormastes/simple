@@ -1267,6 +1267,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_run_with_limits", &[I64, I64, I64, I64, I64], &[I64]),
     // rt_process_exists(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_exists", &[I64], &[I64]),
+    // rt_getpid() -> process id
+    RuntimeFuncSpec::new("rt_getpid", &[], &[I64]),
     // =========================================================================
     // CLI SFFI functions (for Simple-based CLI)
     // =========================================================================
@@ -1674,6 +1676,17 @@ mod tests {
             let _tier = tier_of(spec.name);
             // Just ensure it doesn't panic
         }
+    }
+
+    #[test]
+    fn rt_getpid_is_registered() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_getpid")
+            .expect("rt_getpid must be registered for native codegen");
+        assert!(spec.params.is_empty());
+        assert_eq!(spec.returns, [I64]);
+        assert_eq!(tier_of(spec.name), RuntimeFuncTier::Sys);
     }
 
     #[test]

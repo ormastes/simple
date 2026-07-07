@@ -60,7 +60,7 @@ expect(pending_reason.len()).to_be_greater_than(0)
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/semantics/borrow_check_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-06 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

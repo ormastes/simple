@@ -377,7 +377,7 @@ expect(content.contains("pub fn kind_is_mutable")).to_equal(true)
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/semantics/borrow_check_conflict_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-06 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

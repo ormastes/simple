@@ -22,6 +22,13 @@ use compiler.backend.linker.lazy_instantiator.*
 use compiler.backend.linker.smf_reader.*
 use compiler.backend.linker.mold.*
 
+fn _linker_remove_text(items: [text], value: text) -> [text]:
+    var kept: [text] = []
+    for item in items:
+        if item != value:
+            kept = kept.push(item)
+    kept
+
 # ============================================================================
 # Link Configuration
 # ============================================================================
@@ -126,7 +133,7 @@ struct Linker:
     # Collected symbols (name -> (reader_index, symbol))
     symbols: Dict<text, (i32, SmfSymbol)>
     # Unresolved symbols
-    unresolved: Set<text>
+    unresolved: [text]
     # Errors accumulated during linking
     errors: [LinkError]
     # Configuration
@@ -276,7 +283,8 @@ impl Linker:
     me collect_symbols():
         """Collect all exported symbols from inputs."""
         for (idx, reader) in self.readers.enumerate():
-            for symbol in reader.exported_symbols():
+            val smf_reader: SmfReaderImpl = reader
+            for symbol in smf_reader.exported_symbols():
                 if self.symbols.has(symbol.name):
                     # Duplicate symbol - check binding
                     val (existing_idx, existing) = self.symbols[symbol.name]
@@ -299,8 +307,8 @@ impl Linker:
             for symbol in symbols:
                 if symbol.section_index < 0:
                     # Check if this symbol is defined in our merged table
-                    if not self.symbols.has(symbol.name):
-                        self.unresolved.push(symbol.name)
+                    if not self.symbols.has(symbol.name) and not self.unresolved.contains(symbol.name):
+                        self.unresolved = self.unresolved.push(symbol.name)
 
     fn collect_deferred_hints() -> [DeferredHints]:
         """Collect all deferred type hints from all modules."""
@@ -377,8 +385,7 @@ impl Linker:
 
     me generate_instantiations() -> Result<(), text>:
         """Generate instantiations for unresolved generic symbols."""
-        val unresolved_list = self.unresolved.to_list()
-        val results = self.lazy_inst.instantiate_all_missing(unresolved_list)
+        val results = self.lazy_inst.instantiate_all_missing(self.unresolved)
 
         for result in results:
             match result:
@@ -395,7 +402,7 @@ impl Linker:
                         template_param_count: 0,
                         template_offset: 0
                     ))
-                    self.unresolved = self.unresolved.remove(symbol)
+                    self.unresolved = _linker_remove_text(self.unresolved, symbol)
 
                 case Error(msg):
                     self.errors = self.errors.push(LinkError(

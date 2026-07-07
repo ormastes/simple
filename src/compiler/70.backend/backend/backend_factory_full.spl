@@ -4,7 +4,9 @@
 # Eliminates scattered match statements throughout the codebase.
 
 use compiler.backend.backend_api.*
-use compiler.mir_opt.mod.{TargetOptContext, target_opt_context_default}
+use compiler.backend.backend.backend_types.{compileoptions_backend_kind, compileoptions_mode}
+use compiler.mir_opt.mir_opt.mod.{TargetOptContext, target_opt_context_default}
+use compiler.backend.backend_helpers.{backend_for_name}
 use compiler.backend.lua_backend.{LuaBackend}
 use std.log.{debug}
 
@@ -34,8 +36,13 @@ class BackendFactory:
         """
 
         # User override
-        if options.backend_kind.?:
-            val override_kind = options.backend_kind.unwrap()
+        val backend_name = compileoptions_backend_kind(options)
+        if backend_name.?:
+            val override_name = backend_name.unwrap()
+            val parsed_override = backend_for_name(override_name)
+            if not parsed_override.?:
+                error("Unknown backend kind {override_name}")
+            val override_kind = parsed_override.unwrap()
             debug("backend", "User override: backend={override_kind}")
             return Self.create_specific(override_kind, target, options)
 
@@ -45,9 +52,13 @@ class BackendFactory:
             return Self.create_specific(BackendKind.IrTc, target, options)
 
         # Auto-select based on target and build mode
-        val kind = Self.auto_select(target, options.build_mode)
-        debug("backend", "Auto-selected backend={kind} for target={target}, mode={options.build_mode}")
+        val mode = Self.mode_from_options(options)
+        val kind = Self.auto_select(target, mode)
+        debug("backend", "Auto-selected backend={kind} for target={target}, mode={mode}")
         Self.create_specific(kind, target, options)
+
+    static fn mode_from_options(options: CompileOptions) -> BuildMode:
+        compileoptions_mode(options)
 
     static fn auto_select(target: CodegenTarget, mode: BuildMode) -> BackendKind:
         """
@@ -141,10 +152,14 @@ class BackendFactory:
         Try to create backend, returning error instead of panicking.
         Useful for graceful error handling.
         """
-        val kind = if options.backend_kind.?:
-            options.backend_kind.unwrap()
-        else:
-            Self.auto_select(target, options.build_mode)
+        var kind = Self.auto_select(target, Self.mode_from_options(options))
+        val backend_name = compileoptions_backend_kind(options)
+        if backend_name.?:
+            val override_name = backend_name.unwrap()
+            val parsed_override = backend_for_name(override_name)
+            if not parsed_override.?:
+                return Err(BackendError.NotSupported("Unknown backend kind {override_name}", nil))
+            kind = parsed_override.unwrap()
 
         if not Self.supports_target(kind, target):
             return Err(BackendError.NotSupported(
@@ -161,7 +176,7 @@ class BackendFactory:
         Create backend with fallback strategy.
         If LLVM not available, fall back to Cranelift (64-bit only).
         """
-        val preferred = Self.auto_select(target, options.build_mode)
+        val preferred = Self.auto_select(target, Self.mode_from_options(options))
         debug("backend", "create_with_fallback: preferred={preferred}, llvm_available={llvm_available}")
 
         # If preferred is LLVM but not available, try fallback

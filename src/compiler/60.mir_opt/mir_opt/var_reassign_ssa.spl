@@ -4,6 +4,9 @@ use compiler.interp.execution.tiered_jit.{JitHotspotSpecializationProvider, jit_
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{OptimizerBackendKind, optimization_backend_kind_from_text, optimization_backend_kind_name}
 use compiler.mir_opt.mir_opt.var_reassign_analysis.{
     analyze_var_reassign_blocks,
+    local_count_index,
+    local_list_contains,
+    local_list_push_unique,
     var_reassign_analysis_hotspot_facts,
     var_reassign_operand_local,
     var_reassign_written_local
@@ -45,33 +48,6 @@ struct SsaPhiLoweringPolicy:
     lowering_kind: SsaPhiLoweringKind
     can_lower: bool
     reason: text
-
-fn ssa_phi_lowering_kind_name(kind: SsaPhiLoweringKind) -> text:
-    match kind:
-        case CraneliftBlockParam: "cranelift_block_param"
-        case LlvmPhiNode: "llvm_phi_node"
-        case InterpreterFallback: "interpreter_fallback"
-        case Unsupported: "unsupported"
-
-fn ssa_phi_normalize_backend_name(backend_name: text) -> text:
-    val kind = optimization_backend_kind_from_text(backend_name)
-    if kind == OptimizerBackendKind.Any:
-        backend_name
-    else:
-        optimization_backend_kind_name(kind)
-
-fn ssa_phi_lowering_policy_for_backend(backend_name: text) -> SsaPhiLoweringPolicy:
-    val normalized = ssa_phi_normalize_backend_name(backend_name)
-    if normalized == "cranelift":
-        return SsaPhiLoweringPolicy(normalized, SsaPhiLoweringKind.CraneliftBlockParam, true, "lower_to_block_params")
-    if normalized == "llvm":
-        return SsaPhiLoweringPolicy(normalized, SsaPhiLoweringKind.LlvmPhiNode, true, "lower_to_phi_nodes")
-    if normalized == "interpreter":
-        return SsaPhiLoweringPolicy(normalized, SsaPhiLoweringKind.InterpreterFallback, true, "execute_pseudo_intrinsic_fallback")
-    SsaPhiLoweringPolicy(normalized, SsaPhiLoweringKind.Unsupported, false, "backend_must_reject_pseudo_phi")
-
-fn ssa_phi_backend_can_lower(backend_name: text) -> bool:
-    ssa_phi_lowering_policy_for_backend(backend_name).can_lower
 
 fn ssa_phi_lowering_kind_name(kind: SsaPhiLoweringKind) -> text:
     match kind:
@@ -164,7 +140,8 @@ fn ssa_replace_operand_local(operand: MirOperand, original_id: i64, replacement_
 
 fn ssa_max_local_from_operand(current: i64, operand: MirOperand) -> i64:
     val local = var_reassign_operand_local(operand)
-    if val local_id = local:
+    if local.?:
+        val local_id = local.unwrap()
         if local_id > current:
             local_id
         else:
@@ -175,7 +152,8 @@ fn ssa_max_local_from_operand(current: i64, operand: MirOperand) -> i64:
 fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
     var max_id = current
     val written = var_reassign_written_local(inst)
-    if val written_id = written:
+    if written.?:
+        val written_id = written.unwrap()
         if written_id > max_id:
             max_id = written_id
     match inst.kind:
@@ -228,7 +206,8 @@ fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
 fn ssa_max_local_from_term(current: i64, term: MirTerminator) -> i64:
     match term:
         case Ret(value):
-            if val ret_value = value:
+            if value.?:
+                val ret_value = value.unwrap()
                 ssa_max_local_from_operand(current, ret_value)
             else:
                 current
@@ -238,7 +217,8 @@ fn ssa_max_local_from_term(current: i64, term: MirTerminator) -> i64:
             ssa_max_local_from_operand(current, value)
         case CallTerminator(dest, func, args, _, _):
             var max_id = current
-            if val term_dest = dest:
+            if dest.?:
+                val term_dest = dest.unwrap()
                 if term_dest.id > max_id:
                     max_id = term_dest.id
             max_id = ssa_max_local_from_operand(max_id, func)
@@ -337,7 +317,8 @@ fn ssa_rewrite_inst(inst: MirInst, keys: [i64], values: [i64], next_local_id: i6
 fn ssa_rewrite_term(term: MirTerminator, keys: [i64], values: [i64]) -> MirTerminator:
     match term:
         case Ret(value):
-            if val ret_value = value:
+            if value.?:
+                val ret_value = value.unwrap()
                 MirTerminator.Ret(Some(ssa_rewrite_operand(ret_value, keys, values)))
             else:
                 term
@@ -470,7 +451,8 @@ fn ssa_replace_inst_operands_for_local(inst: MirInst, original_id: i64, replacem
 fn ssa_replace_term_operands_for_local(term: MirTerminator, original_id: i64, replacement_id: i64) -> MirTerminator:
     match term:
         case Ret(value):
-            if val ret_value = value:
+            if value.?:
+                val ret_value = value.unwrap()
                 MirTerminator.Ret(Some(ssa_replace_operand_local(ret_value, original_id, replacement_id)))
             else:
                 term
@@ -491,7 +473,8 @@ fn ssa_block_written_locals(block: MirBlock) -> [i64]:
     var locals: [i64] = []
     for inst in block.instructions:
         val written = var_reassign_written_local(inst)
-        if val written_id = written:
+        if written.?:
+            val written_id = written.unwrap()
             locals = local_list_push_unique(locals, written_id)
     locals
 
@@ -510,8 +493,10 @@ fn ssa_phi_required_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
         case If(_, then_block, else_block):
             val then_opt = ssa_block_by_id(blocks, then_block.id)
             val else_opt = ssa_block_by_id(blocks, else_block.id)
-            if val then_body = then_opt:
-                if val else_body = else_opt:
+            if then_opt.?:
+                val then_body = then_opt.unwrap()
+                if else_opt.?:
+                    val else_body = else_opt.unwrap()
                     match then_body.terminator:
                         case Goto(then_join):
                             match else_body.terminator:
@@ -546,8 +531,10 @@ fn ssa_phi_plans_for_blocks(blocks: [MirBlock]) -> [SsaPhiPlan]:
         case If(_, then_block, else_block):
             val then_opt = ssa_block_by_id(blocks, then_block.id)
             val else_opt = ssa_block_by_id(blocks, else_block.id)
-            if val then_body = then_opt:
-                if val else_body = else_opt:
+            if then_opt.?:
+                val then_body = then_opt.unwrap()
+                if else_opt.?:
+                    val else_body = else_opt.unwrap()
                     match then_body.terminator:
                         case Goto(then_join):
                             match else_body.terminator:

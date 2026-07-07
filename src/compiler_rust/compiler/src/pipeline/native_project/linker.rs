@@ -17,9 +17,7 @@ impl NativeProjectBuilder {
             .unwrap_or_else(|_| PathBuf::from("build/os/sysroot"))
     }
 
-    fn simpleos_user_runtime_paths(
-        cross_target: simple_common::target::Target,
-    ) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    fn simpleos_user_runtime_paths(cross_target: simple_common::target::Target) -> Option<(PathBuf, PathBuf, PathBuf)> {
         if cross_target.os != simple_common::target::TargetOS::SimpleOS
             || cross_target.arch != simple_common::target::TargetArch::X86_64
         {
@@ -1165,6 +1163,11 @@ int main(int argc, char** argv) {
                 imports,
             )?;
             cmd.arg(&stubs_o);
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            if let Some((runtime_lib, _)) = selected_runtime.as_ref() {
+                // ponytail: ELF archives resolve left-to-right; stubs may reference runtime helpers.
+                cmd.arg(runtime_lib);
+            }
         }
         #[cfg(target_os = "windows")]
         if !is_msvc && !is_clang_cl {

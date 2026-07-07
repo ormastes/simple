@@ -58,19 +58,23 @@ fn run_native_build_bootstrap(args: [text]) -> i64:
     _cli_eprint("The Rust seed is bootstrap-only; legacy CLI native-build fallback is disabled.")
     return 1
 
+fn native_build_backend_supported(backend: text) -> bool:
+    str_eq(backend, "llvm-lib") or str_eq(backend, "llvmlib") or str_eq(backend, "llvm") or str_eq(backend, "cranelift")
+
 fn native_build_requests_simple_llvm(args: [text]) -> bool:
     var saw_backend = false
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg == "--backend" and i + 1 < args.len():
+        if str_eq(arg, "--backend"):
             saw_backend = true
-            val backend = args[i + 1]
-            return backend == "llvm-lib" or backend == "llvmlib" or backend == "llvm" or backend == "cranelift"
+            if i + 1 < args.len():
+                return native_build_backend_supported(args[i + 1])
+            return false
         elif arg.starts_with("--backend="):
             saw_backend = true
             val backend = arg.substring(10)
-            return backend == "llvm-lib" or backend == "llvmlib" or backend == "llvm" or backend == "cranelift"
+            return native_build_backend_supported(backend)
         i = i + 1
     not saw_backend
 
@@ -122,6 +126,14 @@ fn filter_internal_flags(args: [text]) -> [text]:
                 result.push(arg)
     result
 
+fn _cli_args_from(args: [text], start_idx: i64) -> [text]:
+    var tail: [text] = []
+    var i = start_idx
+    while i < args.len():
+        tail.push(args[i])
+        i = i + 1
+    tail
+
 
 fn main() -> i64:
     val raw_args = get_cli_args()
@@ -147,13 +159,14 @@ fn main() -> i64:
 
     val flags = parse_global_flags(args)
     apply_fault_detection(flags)
-    apply_jit_env_vars(flags)
 
     # native-build: pass raw args directly (bypass filter_internal_flags)
-    if args.len() > 0 and args[0].starts_with("native-build"):
+    if args.len() > 0 and str_eq(args[0], "native-build"):
         if native_build_requests_simple_llvm(args):
             return cli_native_build(args)
         return run_native_build_bootstrap(args)
+
+    apply_jit_env_vars(flags)
 
     val filtered_args = filter_internal_flags(args)
 
@@ -189,9 +202,9 @@ fn main() -> i64:
         return cli_handle_web(filtered_args)
     elif str_eq(first, "watch"):
         if filtered_args.len() >= 2 and str_eq(filtered_args[1], "--daemon"):
-            val daemon_args = if filtered_args.len() > 2: filtered_args[2:] else: ["start"]
+            val daemon_args = if filtered_args.len() > 2: _cli_args_from(filtered_args, 2) else: ["start"]
             return cli_watch_daemon(daemon_args)
-        val watch_args = filtered_args[1:]
+        val watch_args = _cli_args_from(filtered_args, 1)
         return cli_run_file("src/app/watch/main.spl", watch_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "test"):
         # Recursion guard: refuse nested `bin/simple test` invocations.
@@ -205,12 +218,12 @@ fn main() -> i64:
             print "  A spec or script is calling `bin/simple test` from inside a test run."
             return 1
         env_set("SIMPLE_TEST_DEPTH", "{_depth + 1}")
-        val test_args = filtered_args[1:]
+        val test_args = _cli_args_from(filtered_args, 1)
         return cli_run_tests(test_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "test-daemon"):
-        return cli_test_daemon(filtered_args[1:])
+        return cli_test_daemon(_cli_args_from(filtered_args, 1))
     elif str_eq(first, "watch-daemon"):
-        return cli_watch_daemon(filtered_args[1:])
+        return cli_watch_daemon(_cli_args_from(filtered_args, 1))
     elif str_eq(first, "lex"):
         if filtered_args.len() < 2:
             print_error("lex requires a source file")
@@ -229,25 +242,25 @@ fn main() -> i64:
     elif str_eq(first, "fmt"):
         return cli_run_fmt(filtered_args)
     elif str_eq(first, "check"):
-        val check_args = filtered_args[1:]
+        val check_args = _cli_args_from(filtered_args, 1)
         # Delegation is interim until self-hosted parser completion (doc/03_plan/compiler/self_hosted_frontend/parser_completion.md).
         val check_delegate = _cli_frontend_delegate_binary()
         if check_delegate != "":
             return _cli_run_frontend_delegate(check_delegate, filtered_args)
         return run_check(check_args)
     elif str_eq(first, "doc-coverage"):
-        return run_doc_coverage(filtered_args[1:])
+        return run_doc_coverage(_cli_args_from(filtered_args, 1))
     elif str_eq(first, "check-arch"):
-        val arch_args = filtered_args[1:]
+        val arch_args = _cli_args_from(filtered_args, 1)
         return run_arch_check(arch_args)
     elif str_eq(first, "check-dbs"):
-        val check_db_args = filtered_args[1:]
+        val check_db_args = _cli_args_from(filtered_args, 1)
         return run_check_dbs(check_db_args)
     elif str_eq(first, "fix-dbs"):
-        val fix_db_args = filtered_args[1:]
+        val fix_db_args = _cli_args_from(filtered_args, 1)
         return run_fix_dbs(fix_db_args)
     elif str_eq(first, "grammar-doc"):
-        val grammar_args = filtered_args[1:]
+        val grammar_args = _cli_args_from(filtered_args, 1)
         return cli_run_file("src/app/grammar_doc/mod.spl", grammar_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "i18n"):
         return cli_run_i18n(filtered_args)
@@ -258,7 +271,7 @@ fn main() -> i64:
     elif str_eq(first, "lsp"):
         return cli_run_lsp(filtered_args)
     elif str_eq(first, "dap"):
-        return cli_run_file("src/lib/nogc_sync_mut/dap/main.spl", filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_run_file("src/lib/nogc_sync_mut/dap/main.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "diff"):
         return cli_run_diff(filtered_args)
     elif str_eq(first, "constr"):
@@ -270,9 +283,9 @@ fn main() -> i64:
     elif str_eq(first, "spec-coverage"):
         return cli_run_spec_coverage(filtered_args)
     elif str_eq(first, "traceability-check"):
-        return cli_run_file("src/app/traceability/main.spl", filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_run_file("src/app/traceability/main.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "tracking"):
-        return cli_run_file("src/app/tracking/main.spl", filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_run_file("src/app/tracking/main.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "replay"):
         return cli_replay(filtered_args)
     elif str_eq(first, "gen-lean"):
@@ -290,7 +303,7 @@ fn main() -> i64:
     elif str_eq(first, "todo-scan"):
         return cli_todo_scan(filtered_args)
     elif str_eq(first, "deps"):
-        return cli_run_file("src/app/deps/main.spl", filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_run_file("src/app/deps/main.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "todo-gen"):
         return cli_run_todo_gen(filtered_args)
     elif str_eq(first, "bug-add"):
@@ -302,26 +315,26 @@ fn main() -> i64:
     elif str_eq(first, "brief"):
         return cli_run_brief(filtered_args)
     elif str_eq(first, "stats"):
-        run_stats(filtered_args[1:])
+        run_stats(_cli_args_from(filtered_args, 1))
         return 0
     elif str_eq(first, "ffi-gen"):
         return cli_run_sffi_gen(filtered_args)
     elif str_eq(first, "wrapper-gen"):
         return cli_run_file("src/app/wrapper_gen/mod.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "launch-meta"):
-        return cli_run_file("src/app/startup/launch_meta_check.spl", filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_run_file("src/app/startup/launch_meta_check.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "plugin"):
         return cli_run_file("src/app/plugin/main.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "desugar"):
         return cli_run_file("src/app/desugar/mod.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "dashboard"):
-        return run_dashboard(filtered_args[1:])
+        return run_dashboard(_cli_args_from(filtered_args, 1))
     elif str_eq(first, "agents"):
-        return run_llm_dashboard(filtered_args[1:])
+        return run_llm_dashboard(_cli_args_from(filtered_args, 1))
     elif str_eq(first, "llm-runtime-control"):
         return cli_run_file("src/app/llm_runtime/control_cli.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "ios"):
-        val ios_tail = filtered_args[1:]
+        val ios_tail = _cli_args_from(filtered_args, 1)
         var ios_args: [text] = ["--ios"]
         var j = 0
         while j < ios_tail.len():
@@ -331,16 +344,16 @@ fn main() -> i64:
             j = j + 1
         return run_llm_dashboard(ios_args)
     elif str_eq(first, "office"):
-        val office_args = filtered_args[1:]
+        val office_args = _cli_args_from(filtered_args, 1)
         return cli_run_file("src/app/office/mod.spl", office_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "verify"):
         return cli_run_verify(filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "md-diagram-update"):
-        return cli_run_file("src/app/md_diagram_update/main.spl", filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_run_file("src/app/md_diagram_update/main.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "diagram"):
         return cli_handle_diagram(filtered_args)
     elif str_eq(first, "build"):
-        val build_args = filtered_args[1:]
+        val build_args = _cli_args_from(filtered_args, 1)
         return handle_build(build_args)
     elif str_eq(first, "init"):
         return handle_init(filtered_args)
@@ -367,41 +380,41 @@ fn main() -> i64:
     elif str_eq(first, "cache"):
         return cli_run_file("src/app/cache/main.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "scv"):
-        return cli_run_file("src/app/scv/main.spl", filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_run_file("src/app/scv/main.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "env"):
         return cli_run_file("src/app/env/main.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "lock"):
         return cli_run_file("src/app/lock/main.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "run"):
-        return cli_handle_run(filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_handle_run(_cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "os"):
-        val os_args = filtered_args[1:]
+        val os_args = _cli_args_from(filtered_args, 1)
         return handle_os(os_args)
     elif str_eq(first, "sim"):
-        return cli_run_file("src/app/sim/main.spl", filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_run_file("src/app/sim/main.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "play"):
-        return cli_run_file("src/app/play/main.spl", filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_run_file("src/app/play/main.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "log"):
-        return cli_run_file("src/app/log/main.spl", filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_run_file("src/app/log/main.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "task-daemon"):
-        return cli_run_file("src/app/task_daemon/main.spl", filtered_args[1:], flags.gc_log, flags.gc_off)
+        return cli_run_file("src/app/task_daemon/main.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "leak-check"):
         return run_leak_check()
     elif str_eq(first, "js"):
         return cli_run_file("src/app/js/main.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "jj"):
-        val jj_args = filtered_args[1:]
+        val jj_args = _cli_args_from(filtered_args, 1)
         return handle_jj(jj_args)
     elif str_eq(first, "itf"):
-        val itf_args = filtered_args[1:]
+        val itf_args = _cli_args_from(filtered_args, 1)
         return handle_itf(itf_args)
     elif str_eq(first, "debug-ui"):
-        val debug_ui_args = filtered_args[1:]
+        val debug_ui_args = _cli_args_from(filtered_args, 1)
         return cli_debug_ui(debug_ui_args)
     elif str_eq(first, "browser"):
-        return cli_browser(filtered_args[1:])
+        return cli_browser(_cli_args_from(filtered_args, 1))
     elif str_eq(first, "theme-sync"):
-        val theme_sync_args = filtered_args[1:]
+        val theme_sync_args = _cli_args_from(filtered_args, 1)
         return cli_theme_sync(theme_sync_args)
     elif str_eq(first, "optimize"):
         return cli_run_file("src/app/optimize/main.spl", filtered_args, flags.gc_log, flags.gc_off)

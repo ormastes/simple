@@ -599,6 +599,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_thread_is_done_limited",
     "rt_thread_id_limited",
     "rt_thread_free_limited",
+    "rt_memory_barrier",
+    "rt_load_barrier",
+    "rt_store_barrier",
     "rt_actor_spawn",
     "rt_actor_send",
     "rt_actor_recv",
@@ -628,6 +631,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_stderr_flush",
     "rt_print_value",
     "rt_println_value",
+    "rt_value_print",
+    "rt_value_println",
     "rt_eprint_value",
     "rt_eprintln_value",
     "rt_capture_stdout_start",
@@ -703,6 +708,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_terminal_enable_raw_mode",
     "rt_terminal_disable_raw_mode",
     "rt_stdin_read_byte",
+    "stdin_read_char",
     "rt_cli_get_args",
     "rt_cli_print_help",
     "rt_cli_print_version",
@@ -1301,6 +1307,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_pool_busy_count",
     "rt_pool_blocked_count",
     "rt_clear_args",
+    "rt_get_args",
     "rt_cli_handle_add",
     "rt_cli_handle_build",
     "rt_cli_handle_cache",
@@ -1523,6 +1530,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_is_none",
     "rt_is_some",
     "rt_log_clear_scope_levels",
+    "SCOPE_LEVELS_dot_has",
     "rt_log_debug",
     "rt_log_emit",
     "rt_log_emit_rv",
@@ -1954,6 +1962,14 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_len"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_time_now_unix_micros"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_memory_barrier"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_load_barrier"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_store_barrier"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_get_args"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_value_print"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_value_println"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"SCOPE_LEVELS_dot_has"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"stdin_read_char"));
     }
 
     #[test]

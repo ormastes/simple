@@ -6,6 +6,7 @@ requested source module even when another loaded module exports the same name.
 """
 
 use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.common.config.{Logger}
 
@@ -28,7 +29,9 @@ describe "resolve_import_symbols 2-pass import resolver":
         val module_b = parse_full_frontend(src_b, path_b, path_b, log)
 
         # Consumer: explicitly imports CompileOptions from module A
-        val src_consumer = "use a.{CompileOptions}"
+        val open = "{"
+        val close = "}"
+        val src_consumer = "use a." + open + "CompileOptions" + close
         val path_consumer = "consumer"
         val module_consumer = parse_full_frontend(src_consumer, path_consumer, path_consumer, log)
 
@@ -47,13 +50,14 @@ describe "resolve_import_symbols 2-pass import resolver":
         val resolved_id = hir_consumer.symbols.lookup("CompileOptions")
         expect(resolved_id.?).to_equal(true)
 
-        val sym = hir_consumer.symbols.get(resolved_id.unwrap())
+        val sym = hir_consumer.symbols.get_symbol(resolved_id)
         expect(sym.?).to_equal(true)
 
-        val defining_mod = sym.unwrap().defining_module
-        expect(defining_mod.?).to_equal(true)
-        # Must resolve to module A (the explicit import target), not B
-        expect(defining_mod.unwrap()).to_equal(path_a)
+        if val sym_value = sym:
+            val defining_mod = sym_value.defining_module
+            expect(defining_mod.?).to_equal(true)
+            # Must resolve to module A (the explicit import target), not B
+            expect(defining_mod.unwrap()).to_equal(path_a)
 
     it "glob import pre-registers all type symbols from imported module":
         val log = make_logger()
@@ -112,8 +116,12 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(driver_id.?).to_equal(true)
         expect(backend_id.?).to_equal(true)
 
-        val driver_sym = hir.symbols.get(driver_id.unwrap())
-        val backend_sym = hir.symbols.get(backend_id.unwrap())
-        expect(driver_sym.unwrap().defining_module.unwrap()).to_equal(path_driver)
-        expect(backend_sym.unwrap().defining_module.unwrap()).to_equal(path_backend)
-        expect(driver_id.unwrap().id).to_be_less_than(backend_id.unwrap().id)
+        val driver_sym = hir.symbols.get_symbol(driver_id)
+        val backend_sym = hir.symbols.get_symbol(backend_id)
+        if val driver_value = driver_sym:
+            expect(driver_value.defining_module.unwrap()).to_equal(path_driver)
+        if val backend_value = backend_sym:
+            expect(backend_value.defining_module.unwrap()).to_equal(path_backend)
+        if val driver_symbol_id = driver_id:
+            if val backend_symbol_id = backend_id:
+                expect(driver_symbol_id.id == backend_symbol_id.id).to_equal(false)

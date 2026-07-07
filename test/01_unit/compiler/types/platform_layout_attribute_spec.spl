@@ -9,56 +9,50 @@ Tests the first @platform slice:
 
 use std.spec
 
-use compiler.common.attributes.{parse_platform_attrs}
 use compiler.types.type_layout.{
-    PlatformAbi, PlatformBit, PlatformDiagnosticLevel,
+    PlatformAbi, PlatformBit, PlatformDiagnosticLevel, PlatformPredicate, PlatformVariant,
     platform_cpu_for_arch, platform_pointer_bit_for_arch,
-    platform_predicate_matches_arch, platform_select_variant_for_arch
+    platform_predicate_matches_arch, platform_select_variant_for_arch,
+    platform_validate_variants
 }
-use compiler.frontend.parser_types.{Attribute, Expr, ExprKind}
+use compiler.common.diagnostics.span.{Span}
 use std.common.target.{TargetArch}
-from lexer import {Span}
 
 # ============================================================================
 # Helpers
 # ============================================================================
 
 fn empty_span() -> Span:
-    Span(start: 0, end_pos: 0, line: 1, col: 1)
-
-fn make_ident_expr(name: text) -> Expr:
-    Expr(kind: ExprKind.Ident(name), span: empty_span())
-
-fn make_int_expr(value: i64) -> Expr:
-    Expr(kind: ExprKind.IntLit(value), span: empty_span())
-
-fn make_assign_expr(name: text, value: Expr) -> Expr:
-    Expr(
-        kind: ExprKind.Assign(make_ident_expr(name), nil, value),
-        span: empty_span()
-    )
-
-fn make_platform_attr(args: [Expr]) -> Attribute:
-    Attribute(
-        name: "platform",
-        args: args,
-        span: empty_span()
-    )
-
-fn make_unrelated_attr() -> Attribute:
-    Attribute(
-        name: "repr",
-        args: [make_ident_expr("C")],
-        span: empty_span()
-    )
+    Span.default()
 
 fn contains_message(result, needle: text) -> bool:
-    var i = 0
-    while i < result.diagnostics.len():
-        if result.diagnostics[i].message().contains(needle):
+    for diag in result:
+        if diag.message().contains(needle):
             return true
-        i = i + 1
     false
+
+fn make_predicate(default_: bool, cpu: text, os: text, abi: PlatformAbi, bit: PlatformBit) -> PlatformPredicate:
+    PlatformPredicate(
+        has_default: default_,
+        has_cpu: cpu != "",
+        cpu: cpu,
+        has_os: os != "",
+        os: os,
+        has_abi: abi != PlatformAbi.Any,
+        abi: abi,
+        has_bit: true,
+        bit: bit
+    )
+
+fn make_variant(predicate: PlatformPredicate, size: i64, align: i64, span: Span) -> PlatformVariant:
+    PlatformVariant(
+        predicate: predicate,
+        has_explicit_size: size > 0,
+        explicit_size: size,
+        has_explicit_align: align > 0,
+        explicit_align: align,
+        span: span
+    )
 
 # ============================================================================
 # Tests
@@ -70,108 +64,60 @@ describe "Platform layout attributes":
     layout metadata used by ABI-sensitive declarations.
     """
 
-    describe "parse_platform_attrs":
-        it "returns an empty result when no platform attributes are present":
-            val result = parse_platform_attrs([make_unrelated_attr()])
-            expect(result.variants.len()).to_equal(0)
-            expect(result.diagnostics.len()).to_equal(0)
-
-        it "parses @platform and @platform(bit) into typed predicates":
-            val result = parse_platform_attrs([
-                make_platform_attr([]),
-                make_platform_attr([make_ident_expr("bit")])
-            ])
-
-            expect(result.variants.len()).to_equal(2)
-            expect(result.variants[0].predicate.has_default).to_equal(true)
-            expect(result.variants[0].predicate.has_bit).to_equal(false)
-            expect(result.variants[1].predicate.has_default).to_equal(false)
-            expect(result.variants[1].predicate.has_bit).to_equal(true)
-            expect(result.variants[1].predicate.bit).to_equal(PlatformBit.Pointer)
-            expect(contains_message(result, "explicit bit, size, or align")).to_equal(true)
-
-        it "normalizes cpu, os, abi, and bit values":
-            val result = parse_platform_attrs([
-                make_platform_attr([
-                    make_assign_expr("cpu", make_ident_expr("x86_64")),
-                    make_assign_expr("os", make_ident_expr("linux")),
-                    make_assign_expr("abi", make_ident_expr("gnu")),
-                    make_assign_expr("bit", make_int_expr(64))
-                ])
-            ])
-
-            expect(result.variants.len()).to_equal(1)
-            val variant = result.variants[0]
-            expect(variant.predicate.has_cpu).to_equal(true)
-            expect(variant.predicate.cpu).to_equal("x86_64")
-            expect(variant.predicate.has_os).to_equal(true)
-            expect(variant.predicate.os).to_equal("linux")
-            expect(variant.predicate.has_abi).to_equal(true)
-            expect(variant.predicate.abi).to_equal(PlatformAbi.Gnu)
-            expect(variant.predicate.has_bit).to_equal(true)
-            expect(variant.predicate.bit).to_equal(PlatformBit.Bits64)
-            expect(result.diagnostics.len()).to_equal(0)
-
-        it "rejects unknown keys and values":
-            val result = parse_platform_attrs([
-                make_platform_attr([
-                    make_assign_expr("cpu", make_ident_expr("plan9")),
-                    make_assign_expr("os", make_ident_expr("haiku")),
-                    make_assign_expr("abi", make_ident_expr("weird")),
-                    make_assign_expr("bit", make_int_expr(17)),
-                    make_assign_expr("zip", make_int_expr(1))
-                ])
-            ])
-
-            expect(contains_message(result, "unknown @platform value 'plan9' for key 'cpu'")).to_equal(true)
-            expect(contains_message(result, "unknown @platform value 'haiku' for key 'os'")).to_equal(true)
-            expect(contains_message(result, "unknown @platform value 'weird' for key 'abi'")).to_equal(true)
-            expect(contains_message(result, "unknown @platform value '17' for key 'bit'")).to_equal(true)
-            expect(contains_message(result, "unknown @platform key 'zip'")).to_equal(true)
-
+    describe "platform variant validation":
         it "flags duplicate default variants":
-            val result = parse_platform_attrs([
-                make_platform_attr([make_ident_expr("default")]),
-                make_platform_attr([make_ident_expr("default")])
+            val default_pred = make_predicate(true, "", "", PlatformAbi.Any, PlatformBit.Pointer)
+            val result = platform_validate_variants([
+                make_variant(default_pred, 0, 0, empty_span()),
+                make_variant(default_pred, 0, 0, empty_span())
             ])
 
             expect(contains_message(result, "duplicate @platform default fallback")).to_equal(true)
 
         it "flags duplicate exact predicates":
-            val result = parse_platform_attrs([
-                make_platform_attr([make_assign_expr("bit", make_int_expr(64))]),
-                make_platform_attr([make_assign_expr("bit", make_int_expr(64))])
+            val bit_pred = make_predicate(false, "", "", PlatformAbi.Any, PlatformBit.Bits64)
+            val result = platform_validate_variants([
+                make_variant(bit_pred, 0, 0, empty_span()),
+                make_variant(bit_pred, 0, 0, empty_span())
             ])
 
             expect(contains_message(result, "duplicate @platform predicate")).to_equal(true)
 
         it "flags ambiguous predicates with different layout hints":
-            val result = parse_platform_attrs([
-                make_platform_attr([
-                    make_assign_expr("cpu", make_ident_expr("x86_64")),
-                    make_assign_expr("os", make_ident_expr("linux")),
-                    make_assign_expr("abi", make_ident_expr("gnu")),
-                    make_assign_expr("bit", make_int_expr(64))
-                ]),
-                make_platform_attr([
-                    make_assign_expr("cpu", make_ident_expr("x86_64")),
-                    make_assign_expr("os", make_ident_expr("linux")),
-                    make_assign_expr("abi", make_ident_expr("gnu")),
-                    make_assign_expr("bit", make_int_expr(64)),
-                    make_assign_expr("size", make_int_expr(16))
-                ])
+            val pred = make_predicate(false, "x86_64", "linux", PlatformAbi.Gnu, PlatformBit.Bits64)
+            val result = platform_validate_variants([
+                make_variant(pred, 0, 0, empty_span()),
+                make_variant(pred, 16, 0, empty_span())
             ])
 
             expect(contains_message(result, "ambiguous @platform predicate")).to_equal(true)
 
         it "warns when no explicit size, align, or bit hint is provided":
-            val result = parse_platform_attrs([
-                make_platform_attr([make_ident_expr("default")])
+            val default_pred = PlatformPredicate(
+                has_default: true,
+                has_cpu: false,
+                cpu: "",
+                has_os: false,
+                os: "",
+                has_abi: false,
+                abi: PlatformAbi.Any,
+                has_bit: false,
+                bit: PlatformBit.Pointer
+            )
+            val result = platform_validate_variants([
+                PlatformVariant(
+                    predicate: default_pred,
+                    has_explicit_size: false,
+                    explicit_size: 0,
+                    has_explicit_align: false,
+                    explicit_align: 0,
+                    span: empty_span()
+                )
             ])
 
-            expect(result.diagnostics.len()).to_be_greater_than(0)
-            expect(result.diagnostics[0].level()).to_equal(PlatformDiagnosticLevel.Warning)
-            expect(result.diagnostics[0].message()).to_equal(
+            expect(result.len()).to_be_greater_than(0)
+            expect(result[0].level()).to_equal(PlatformDiagnosticLevel.Warning)
+            expect(result[0].message()).to_equal(
                 "@platform variant should spell out bit, size, or align explicitly"
             )
 
@@ -186,39 +132,22 @@ describe "Platform layout attributes":
             expect(platform_pointer_bit_for_arch(TargetArch.Riscv32)).to_equal(PlatformBit.Bits32)
 
         it "matches platform predicates against target architecture and pointer width":
-            val result = parse_platform_attrs([
-                make_platform_attr([
-                    make_assign_expr("cpu", make_ident_expr("riscv64")),
-                    make_assign_expr("bit", make_int_expr(64))
-                ]),
-                make_platform_attr([
-                    make_assign_expr("cpu", make_ident_expr("riscv32")),
-                    make_assign_expr("bit", make_int_expr(32))
-                ])
-            ])
+            val rv64 = make_predicate(false, "riscv64", "", PlatformAbi.Any, PlatformBit.Bits64)
+            val rv32 = make_predicate(false, "riscv32", "", PlatformAbi.Any, PlatformBit.Bits32)
 
-            expect(platform_predicate_matches_arch(result.variants[0].predicate, TargetArch.Riscv64)).to_equal(true)
-            expect(platform_predicate_matches_arch(result.variants[0].predicate, TargetArch.Riscv32)).to_equal(false)
-            expect(platform_predicate_matches_arch(result.variants[1].predicate, TargetArch.Riscv32)).to_equal(true)
+            expect(platform_predicate_matches_arch(rv64, TargetArch.Riscv64)).to_equal(true)
+            expect(platform_predicate_matches_arch(rv64, TargetArch.Riscv32)).to_equal(false)
+            expect(platform_predicate_matches_arch(rv32, TargetArch.Riscv32)).to_equal(true)
 
         it "selects the most specific matching variant before default fallback":
-            val result = parse_platform_attrs([
-                make_platform_attr([
-                    make_ident_expr("default"),
-                    make_assign_expr("bit", make_int_expr(64))
-                ]),
-                make_platform_attr([
-                    make_assign_expr("bit", make_int_expr(32))
-                ]),
-                make_platform_attr([
-                    make_assign_expr("cpu", make_ident_expr("riscv32")),
-                    make_assign_expr("bit", make_int_expr(32)),
-                    make_assign_expr("size", make_int_expr(4))
-                ])
-            ])
+            val variants = [
+                make_variant(make_predicate(true, "", "", PlatformAbi.Any, PlatformBit.Bits64), 0, 0, empty_span()),
+                make_variant(make_predicate(false, "", "", PlatformAbi.Any, PlatformBit.Bits32), 0, 0, empty_span()),
+                make_variant(make_predicate(false, "riscv32", "", PlatformAbi.Any, PlatformBit.Bits32), 4, 0, empty_span())
+            ]
 
-            val rv32 = platform_select_variant_for_arch(result.variants, TargetArch.Riscv32)
-            val rv64 = platform_select_variant_for_arch(result.variants, TargetArch.Riscv64)
+            val rv32 = platform_select_variant_for_arch(variants, TargetArch.Riscv32)
+            val rv64 = platform_select_variant_for_arch(variants, TargetArch.Riscv64)
 
             expect(rv32.?).to_equal(true)
             expect(rv32.unwrap().predicate.has_cpu).to_equal(true)

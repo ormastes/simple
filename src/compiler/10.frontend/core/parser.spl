@@ -336,14 +336,16 @@ fn parser_warnings_clear():
 
 fn parser_skip_newlines():
     for i in 0..10000:
-        if par_kind_get() != 180:
+        val kind = par_kind_get()
+        if kind != 180:
             break
         parser_advance()
 
 fn parser_skip_newlines_and_semicolons():
     for i in 0..10000:
-        val is_nl = par_kind_get() == 180
-        val is_semi = par_kind_get() == 163
+        val kind = par_kind_get()
+        val is_nl = kind == 180
+        val is_semi = kind == 163
         val should_skip = is_nl or is_semi
         if not should_skip:
             break
@@ -356,22 +358,26 @@ fn parser_skip_newlines_and_semicolons():
 # shorthand (which is inlined in the named branch below). Returns TYPE_OPTION
 # when a suffix is present, else the base type unchanged.
 fn parser_absorb_optional_suffix(base: i64) -> i64:
-    if par_kind_get() != 130 and par_kind_get() != 132:
+    var kind = par_kind_get()
+    if kind != 130 and kind != 132:
         return base
     for _qi in 0..12:
-        if par_kind_get() == 130 or par_kind_get() == 132:
+        if kind == 130 or kind == 132:
             parser_advance()
+            kind = par_kind_get()
         else:
             break
     TYPE_OPTION
 
 fn parser_parse_type() -> i64:
     # dyn Trait -- dynamic dispatch type (parsed as named type)
-    if par_kind_get() == 199:
+    var kind = par_kind_get()
+    if kind == 199:
         parser_advance()
         # Parse the trait name
         val dyn_name = par_text_get()
-        if par_kind_get() == 6:
+        kind = par_kind_get()
+        if kind == 6:
             parser_advance()
         # Return as named type (interpreter uses structural subtyping anyway)
         val dyn_id = named_type_find(dyn_name)
@@ -379,7 +385,7 @@ fn parser_parse_type() -> i64:
             return TYPE_NAMED_BASE + dyn_id
         return TYPE_ANY
     var type_name = par_text_get()
-    if par_kind_get() == 6:
+    if kind == 6:
         parser_advance()
         # G35: absorb dotted path segments: json.Value  or  json::Value
         for _gi35 in 0..20:
@@ -399,8 +405,9 @@ fn parser_parse_type() -> i64:
             parser_advance()
             type_name = type_name + "." + seg_name
         # Check for generic type: Option<T>, Result<T, E>, Dict<K,V>, etc.
-        val has_lt: bool = par_kind_get() == 82
-        val has_lt_gen: bool = par_kind_get() == 86
+        kind = par_kind_get()
+        val has_lt: bool = kind == 82
+        val has_lt_gen: bool = kind == 86
         val has_generic: bool = has_lt or has_lt_gen
         if has_generic:
             parser_advance()
@@ -435,8 +442,10 @@ fn parser_parse_type() -> i64:
                 return TYPE_NAMED_BASE + gid
             return TYPE_VOID
         # Check for postfix ? for Option shorthand: i64? -> Option<i64>
-        if par_kind_get() == 130:
+        kind = par_kind_get()
+        if kind == 130:
             parser_advance()
+            kind = par_kind_get()
             # Check for additional ? marks (i64?? = Option<Option<i64>>)
             var opt_result = TYPE_OPTION
             if type_name == "i64":
@@ -449,25 +458,30 @@ fn parser_parse_type() -> i64:
                 opt_result = TYPE_OPTION_BOOL
             # Loop for additional ? marks (i64?? or i64???)
             for qi in 0..10:
-                if par_kind_get() == 130:
+                if kind == 130:
                     parser_advance()
+                    kind = par_kind_get()
                     opt_result = TYPE_OPTION
-                elif par_kind_get() == 132:
+                elif kind == 132:
                     parser_advance()
+                    kind = par_kind_get()
                     opt_result = TYPE_OPTION
                 else:
                     break
             return opt_result
         # Check for ?? as double optional shorthand: i64?? -> Option<Option<i64>>
-        if par_kind_get() == 132:
+        if kind == 132:
             parser_advance()
+            kind = par_kind_get()
             # i64?? = Option<Option<i64>>, treat as TYPE_OPTION (nested)
             # Check for additional ? marks
             for qi in 0..10:
-                if par_kind_get() == 130:
+                if kind == 130:
                     parser_advance()
-                elif par_kind_get() == 132:
+                    kind = par_kind_get()
+                elif kind == 132:
                     parser_advance()
+                    kind = par_kind_get()
                 else:
                     break
             return TYPE_OPTION
@@ -516,13 +530,14 @@ fn parser_parse_type() -> i64:
         if primitive_integer_bit_width_from_name(type_name) > 0:
             return TYPE_I64
         return TYPE_VOID
-    if par_kind_get() == 144:
+    if kind == 144:
         # Array type: [i64], [text], etc.
         parser_advance()
         val elem_type = parser_parse_type()
         # Sized array type: [T; N] — accept and drop the size expression
         # (stage4 arrays are dynamic; N is a literal or const ident).
-        if par_kind_get() == 163:
+        kind = par_kind_get()
+        if kind == 163:
             parser_advance()
             for _si in 0..50:
                 if par_kind_get() == 145 or par_kind_get() == 190:
@@ -594,15 +609,17 @@ fn parser_parse_type() -> i64:
 # Parses a type that may be a union: A | B | C
 fn parser_parse_type_with_union() -> i64:
     val base = parser_parse_type()
-    if par_kind_get() != 121:
+    var kind = par_kind_get()
+    if kind != 121:
         return base
     # Check that the pipe isn't a |> pipe-forward
     var members: [i64] = []
     members.push(base)
-    while par_kind_get() == 121:
+    while kind == 121:
         parser_advance()
         val next = parser_parse_type()
         members.push(next)
+        kind = par_kind_get()
     union_type_register(members)
 
 # ===== Top-Level Module Entry Points =====

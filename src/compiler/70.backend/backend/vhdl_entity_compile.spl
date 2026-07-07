@@ -9,7 +9,7 @@ use compiler.backend.backend_api.*
 use compiler.backend.vhdl_type_mapper.VhdlTypeMapper
 use compiler.backend.vhdl.vhdl_builder.{VhdlBuilder}
 use .vhdl.vhdl_builder.{VhdlBuilder}
-use compiler.backend.vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure}
+use .vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure}
 use compiler.backend.vhdl.vhdl_memory_templates.{VhdlConstrainedSignalMemoryTemplate, render_constrained_signal_memory_template, VhdlMemoryTemplateDiagnostic}
 use .vhdl.vhdl_memory_templates.{VhdlMemoryTemplateDiagnostic}
 use compiler.hir.hir_types.{SymbolId}
@@ -46,13 +46,13 @@ impl VhdlBackend:
         self.active_return_abi = return_abi_result.unwrap()
 
         for block in func.blocks:
-            self.active_blocks = self.active_blocks.set(block.id.id, block)
+            self.active_blocks[block.id.id] = block
 
         for local in func.locals:
             val resolved_name = self.default_local_name(local)
-            self.active_local_names = self.active_local_names.set(local.id.id, resolved_name)
-            self.active_local_types = self.active_local_types.set(local.id.id, local.type_)
-            self.active_local_kinds = self.active_local_kinds.set(local.id.id, local.kind)
+            self.active_local_names[local.id.id] = resolved_name
+            self.active_local_types[local.id.id] = local.type_
+            self.active_local_kinds[local.id.id] = local.kind
 
         # Pick single-use side-effect-free temps to inline into their consumer
         # (must run after names/types are resolved above).
@@ -225,7 +225,7 @@ impl VhdlBackend:
                     val diagnostic: VhdlMemoryTemplateDiagnostic = template_result.unwrap_err()
                     return Err(self.memory_template_error(diagnostic.code, diagnostic.message))
                 builder.emit_raw(template_result.unwrap().declarations)
-                self.active_local_memory_type_names = self.active_local_memory_type_names.set(local.id.id, type_name)
+                self.active_local_memory_type_names[local.id.id] = type_name
             case _:
                 val vhdl_type_result = self.mir_type_to_vhdl_at(local.type_, span)
                 if vhdl_type_result.is_err():
@@ -445,17 +445,17 @@ impl VhdlBackend:
             for inst in block.instructions:
                 val d = self.inst_def_id(inst)
                 if d >= 0:
-                    def_count = def_count.set(d, (def_count.get(d) ?? 0) + 1)
+                    def_count[d] = (def_count.get(d) ?? 0) + 1
                 for u in self.inst_used_ids(inst):
                     if u >= 0:
-                        use_count = use_count.set(u, (use_count.get(u) ?? 0) + 1)
+                        use_count[u] = (use_count.get(u) ?? 0) + 1
             if block.terminator != nil:
                 for u in self.terminator_used_ids(block.terminator):
                     if u >= 0:
-                        use_count = use_count.set(u, (use_count.get(u) ?? 0) + 1)
+                        use_count[u] = (use_count.get(u) ?? 0) + 1
         var local_by_id: Dict<i64, MirLocal> = {}
         for local in func.locals:
-            local_by_id = local_by_id.set(local.id.id, local)
+            local_by_id[local.id.id] = local
         # Populate in program order: a def always precedes its use, so any
         # inlinable operand this expression references is already resolved.
         for block in func.blocks:
@@ -475,7 +475,7 @@ impl VhdlBackend:
                     continue
                 match self.inlinable_inst_expr(inst):
                     case Ok(expr):
-                        self.active_inline_exprs = self.active_inline_exprs.set(d, expr)
+                        self.active_inline_exprs[d] = expr
                     case Err(_):
                         ()
 
@@ -506,4 +506,3 @@ impl VhdlBackend:
                 has_target_instructions
             case _:
                 false
-

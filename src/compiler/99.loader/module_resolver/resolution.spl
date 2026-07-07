@@ -8,7 +8,7 @@
 
 use compiler.frontend.ast.{Node}
 use compiler.common.dependency.visibility.{Visibility}
-use compiler.module_resolver.types.{ModuleResolver, ResolvedModule, DirectoryManifest}
+use compiler.loader.module_resolver.types.{ModuleResolver, ResolvedModule, DirectoryManifest, ModulePath}
 use compiler.common.error.{CompileError}
 use std.log.{debug}
 
@@ -29,11 +29,7 @@ impl ModuleResolver:
         self.resolve_count = self.resolve_count + 1
 
         if segments.is_empty():
-            return CompileError.semantic(
-                "empty module path",
-                ErrorCode.MODULE_NOT_FOUND,
-                "provide at least one module path segment"
-            )
+            return CompileError.semantic("empty module path: provide at least one module path segment")
 
         # Check resolution cache. The active variant fingerprint is part of the
         # key so a `--var-profile` change cannot reuse a stale resolved path.
@@ -45,11 +41,7 @@ impl ModuleResolver:
                 val cached_path = cached ?? ""
                 return Ok(ResolvedModule.file(cached_path, path.clone()))
             else:
-                return CompileError.semantic(
-                    "cannot resolve import: module not found (cached)",
-                    ErrorCode.UNRESOLVED_IMPORT,
-                    "module path was previously unresolvable"
-                )
+                return CompileError.semantic("cannot resolve import: module not found (cached); module path was previously unresolvable")
 
         # Determine base directory
         val (base_dir, remaining) = if segments[0] == "crate":
@@ -204,11 +196,7 @@ impl ModuleResolver:
         - Returns detailed error messages
         """
         if segments.is_empty():
-            return CompileError.semantic(
-                "empty module path segments",
-                ErrorCode.MODULE_NOT_FOUND,
-                "module path must contain at least one segment"
-            )
+            return CompileError.semantic("empty module path segments: module path must contain at least one segment")
 
         debug("resolver", "Resolving from base={base} segments={segments}")
         var current = base.clone()
@@ -233,9 +221,7 @@ impl ModuleResolver:
                 else:
                     # E1034 - Unresolved Import
                     return CompileError.semantic(
-                        "cannot resolve import: module path segment `{segment}` not found",
-                        ErrorCode.UNRESOLVED_IMPORT,
-                        "check that the module exists at {direct}"
+                        "cannot resolve import: module path segment `{segment}` not found; check that the module exists at {direct}"
                     ).with_note("ensure the module file or __init__.spl exists")
 
         # Resolve the last segment
@@ -252,9 +238,7 @@ impl ModuleResolver:
         # File and directory forms for the same module path are ambiguous.
         if dir_exists and file_exists_direct:
             return CompileError.semantic(
-                "ambiguous import: module `{last}` resolves to both a file and a directory module",
-                ErrorCode.UNRESOLVED_IMPORT,
-                "choose one of {file_path} or {init_path}"
+                "ambiguous import: module `{last}` resolves to both a file and a directory module; choose one of {file_path} or {init_path}"
             ).with_note("rename or remove one form so the module path is unambiguous")
 
         if dir_exists:
@@ -293,9 +277,7 @@ impl ModuleResolver:
 
         # E1034 - Unresolved Import
         CompileError.semantic(
-            "cannot resolve import: module `{last}` not found",
-            ErrorCode.UNRESOLVED_IMPORT,
-            "create either {file_path} or {init_path}"
+            "cannot resolve import: module `{last}` not found; create either {file_path} or {init_path}"
         ).with_note("check for typos in the import path")
 
     fn get_exports(resolved: ResolvedModule) -> [text] | CompileError:
@@ -310,35 +292,10 @@ impl ModuleResolver:
         - Returns public child modules
         - For non-directory modules, parses file and extracts export statements
         """
-        if val Some(manifest) = resolved.manifest:
+        if resolved.is_directory and resolved.has_manifest:
+            val manifest = resolved.manifest
             var exports: [text] = []
 
-            # Add re-exported symbols
-            for exported_item in manifest.exports:
-                match exported_item.target:
-                    ImportTarget.Single(name):
-                        exports.push(name)
-
-                    ImportTarget.Aliased(name, alias):
-                        exports.push(alias)
-
-                    ImportTarget.Group(targets):
-                        for target in targets:
-                            match target:
-                                ImportTarget.Single(name):
-                                    exports.push(name)
-                                ImportTarget.Aliased(_, alias):
-                                    exports.push(alias)
-                                _:
-                                    pass
-
-                    ImportTarget.Glob:
-                        # Glob re-export: expose all public child modules
-                        for child in manifest.child_modules:
-                            if child.visibility == Visibility.Public:
-                                exports.push(child.name)
-
-            # Add public child modules
             for child in manifest.child_modules:
                 if child.visibility == Visibility.Public:
                     exports.push(child.name)
@@ -369,54 +326,39 @@ impl ModuleResolver:
         val source = match file_read(file_path):
             Some(content): content
             nil:
-                return CompileError.io_error(
-                    "cannot extract exports: failed to read file {file_path}",
-                    ErrorCode.FILE_READ_ERROR
+                return CompileError.io(
+                    "cannot extract exports: failed to read file {file_path}"
                 ).with_note("ensure the file exists and is readable")
 
-        # Parse the file
-        var parser = Parser.new(source)
-        val module = match parser.parse():
-            Ok(m): m
-            Err(err):
-                return CompileError.parse_error(
-                    "cannot extract exports from {file_path}: parse error",
-                    ErrorCode.PARSE_ERROR
-                ).with_note("parser error: {err.message}")
-                 .with_note("file must be valid Simple syntax to extract exports")
-
-        # Extract export statements
         var exports: [text] = []
-        for item in module.items:
-            match item:
-                Node.ExportDecl(names):
-                    # Export statement lists symbols to export
-                    exports.extend(names)
-
-                Node.FnDecl(decl):
-                    # Public function declarations are implicitly exported
-                    if decl.visibility == Visibility.Public:
-                        exports.push(decl.name)
-
-                Node.StructDecl(decl):
-                    # Public struct declarations are implicitly exported
-                    if decl.visibility == Visibility.Public:
-                        exports.push(decl.name)
-
-                Node.EnumDecl(decl):
-                    # Public enum declarations are implicitly exported
-                    if decl.visibility == Visibility.Public:
-                        exports.push(decl.name)
-
-                Node.ClassDecl(decl):
-                    # Public class declarations are implicitly exported
-                    if decl.visibility == Visibility.Public:
-                        exports.push(decl.name)
-
-                _:
-                    # Other nodes don't contribute to exports
-                    pass
-
+        for line in source.split("\n"):
+            val trimmed = line.trim()
+            if trimmed.starts_with("export "):
+                val rest = trimmed.substring(7, trimmed.len())
+                for part in rest.split(","):
+                    val name = part.trim().split(" ")[0].trim()
+                    if name != "":
+                        exports.push(name)
+            elif trimmed.starts_with("fn "):
+                val name = trimmed.substring(3, trimmed.len()).split("(")[0].trim()
+                if name != "":
+                    exports.push(name)
+            elif trimmed.starts_with("struct "):
+                val name = trimmed.substring(7, trimmed.len()).split(":")[0].split("<")[0].trim()
+                if name != "":
+                    exports.push(name)
+            elif trimmed.starts_with("class "):
+                val name = trimmed.substring(6, trimmed.len()).split(":")[0].split("<")[0].trim()
+                if name != "":
+                    exports.push(name)
+            elif trimmed.starts_with("enum "):
+                val name = trimmed.substring(5, trimmed.len()).split(":")[0].split("<")[0].trim()
+                if name != "":
+                    exports.push(name)
+            elif trimmed.starts_with("trait "):
+                val name = trimmed.substring(6, trimmed.len()).split(":")[0].split("<")[0].trim()
+                if name != "":
+                    exports.push(name)
         Ok(exports)
 
     fn get_common_uses(file_path: text) -> [CommonUseStmt]:
@@ -452,6 +394,7 @@ impl ModuleResolver:
 extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_path_parent(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 extern fn rt_dir_exists(path: text) -> bool
 
 fn path_join(base: text, segment: text) -> text:
@@ -469,6 +412,14 @@ fn path_exists(path: text) -> bool:
 fn is_file(path: text) -> bool:
     """Check if a path is a file (not directory)."""
     rt_file_exists(path) and not rt_dir_exists(path)
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_read(path: text) -> text?:
+    if not rt_file_exists(path):
+        return nil
+    Some(rt_file_read_text(path) ?? "")
 
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_env_get(key: text) -> text

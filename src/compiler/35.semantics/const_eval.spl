@@ -9,9 +9,9 @@
 # This implements a subset of the MIR interpreter optimized for
 # compile-time evaluation with no side effects.
 
-from hir_types import {HirType, SymbolId, HirModule}
-from hir_definitions import {HirExpr, HirExprKind, HirConst, HirStaticAssert, HirStmt, HirStmtKind, HirBlock, HirFunction, HirCallArg}
-from compiler.core.lexer_types import {Span}
+use compiler.hir.hir_types.{HirType, SymbolId, HirModule}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirConst, HirStaticAssert, HirStmt, HirStmtKind, HirBlock, HirFunction, HirCallArg, HirBinOp, HirUnaryOp}
+use compiler.core.lexer_types.{Span}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -49,26 +49,7 @@ impl ConstValue:
             case _: nil
 
     fn to_text() -> text:
-        match self:
-            case ConstValue.Int(v): "{v}"
-            case ConstValue.Float(v): "{v}"
-            case ConstValue.Bool(v): if v: "true" else: "false"
-            case ConstValue.Char(v): "'{v}'"
-            case ConstValue.String(v): "\"{v}\""
-            case ConstValue.Unit: "()"
-            case ConstValue.Array(elems):
-                val parts = elems.map(&:to_text)
-                "[{parts.join(\", \")}]"
-            case ConstValue.Tuple(elems):
-                val parts = elems.map(&:to_text)
-                "({parts.join(\", \")})"
-            case ConstValue.Struct(name, fields):
-                var parts: [text] = []
-                # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-                for k in fields.keys():
-                    val v = fields[k]
-                    parts.push("{k}: {v.to_text()}")
-                "{name} {{ {parts.join(\", \")} }}"
+        const_value_to_text(self)
 
     fn eq(other: ConstValue) -> bool:
         match (self, other):
@@ -79,6 +60,33 @@ impl ConstValue:
             case (ConstValue.String(a), ConstValue.String(b)): a == b
             case (ConstValue.Unit, ConstValue.Unit): true
             case _: false
+
+fn const_value_to_text(value: ConstValue) -> text:
+    match value:
+        case ConstValue.Int(v): "{v}"
+        case ConstValue.Float(v): "{v}"
+        case ConstValue.Bool(v): if v: "true" else: "false"
+        case ConstValue.Char(v): "'{v}'"
+        case ConstValue.String(v): "\"{v}\""
+        case ConstValue.Unit: "()"
+        case ConstValue.Array(elems):
+            var parts: [text] = []
+            for elem in elems:
+                parts.push(const_value_to_text(elem))
+            "[{parts.join(\", \")}]"
+        case ConstValue.Tuple(elems):
+            var parts: [text] = []
+            for elem in elems:
+                parts.push(const_value_to_text(elem))
+            "({parts.join(\", \")})"
+        case ConstValue.Struct(name, fields):
+            var parts: [text] = []
+            # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+            for k in fields.keys():
+                val v = fields[k]
+                val value_text = const_value_to_text(v)
+                parts.push("{k}: {value_text}")
+            "{name} {{ {parts.join(\", \")} }}"
 
 # Compile-time evaluation errors
 enum ConstEvalError:
@@ -248,8 +256,8 @@ impl ConstEvaluator:
 
     # Evaluate binary operation
     me eval_binary(op: HirBinOp, left: HirExpr, right: HirExpr, span: Span) -> Result<ConstValue, ConstEvalError>:
-        val lhs = self.eval(left)?
-        val rhs = self.eval(right)?
+        val lhs: ConstValue = self.eval(left)?
+        val rhs: ConstValue = self.eval(right)?
 
         match (op, lhs, rhs):
             # Integer arithmetic
@@ -313,15 +321,17 @@ impl ConstEvaluator:
                 Ok(ConstValue.Int(a >> b))
 
             case _:
+                val lhs_text = const_value_to_text(lhs)
+                val rhs_text = const_value_to_text(rhs)
                 Err(ConstEvalError.TypeError(
                     "compatible operands",
-                    "{lhs.to_text()} and {rhs.to_text()}",
+                    "{lhs_text} and {rhs_text}",
                     span
                 ))
 
     # Evaluate unary operation
     me eval_unary(op: HirUnaryOp, operand: HirExpr, span: Span) -> Result<ConstValue, ConstEvalError>:
-        val value = self.eval(operand)?
+        val value: ConstValue = self.eval(operand)?
 
         match (op, value):
             case (HirUnaryOp.Neg, ConstValue.Int(v)):
@@ -333,9 +343,10 @@ impl ConstEvaluator:
             case (HirUnaryOp.BitNot, ConstValue.Int(v)):
                 Ok(ConstValue.Int(~v))
             case _:
+                val value_text = const_value_to_text(value)
                 Err(ConstEvalError.TypeError(
                     "valid operand for unary operator",
-                    value.to_text(),
+                    value_text,
                     span
                 ))
 
@@ -534,7 +545,7 @@ impl ConstEvaluator:
 
     # Evaluate conditional
     me eval_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?, span: Span) -> Result<ConstValue, ConstEvalError>:
-        val cond_val = self.eval(cond)?
+        val cond_val: ConstValue = self.eval(cond)?
         match cond_val:
             case ConstValue.Bool(true):
                 # Evaluate then branch
@@ -546,7 +557,8 @@ impl ConstEvaluator:
                     case nil:
                         Ok(ConstValue.Unit)
             case _:
-                Err(ConstEvalError.TypeError("bool", cond_val.to_text(), span))
+                val cond_text = const_value_to_text(cond_val)
+                Err(ConstEvalError.TypeError("bool", cond_text, span))
 
     # Evaluate block (returns last expression)
     me eval_block(block: HirBlock) -> Result<ConstValue, ConstEvalError>:
@@ -584,7 +596,7 @@ fn eval_const_expr(module: HirModule, expr: HirExpr) -> Result<ConstValue, Const
 # Evaluate a static assertion
 fn eval_static_assert(module: HirModule, assert_: HirStaticAssert) -> Result<(), ConstEvalError>:
     var evaluator = ConstEvaluator.new(module)
-    val result = evaluator.eval(assert_.condition)?
+    val result: ConstValue = evaluator.eval(assert_.condition)?
 
     match result:
         case ConstValue.Bool(true):
@@ -593,4 +605,5 @@ fn eval_static_assert(module: HirModule, assert_: HirStaticAssert) -> Result<(),
             val msg = assert_.message ?? "assertion failed"
             Err(ConstEvalError.AssertionFailed(msg, assert_.span))
         case _:
-            Err(ConstEvalError.TypeError("bool", result.to_text(), assert_.span))
+            val result_text = const_value_to_text(result)
+            Err(ConstEvalError.TypeError("bool", result_text, assert_.span))

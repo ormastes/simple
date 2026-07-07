@@ -668,6 +668,11 @@ impl ExecCore {
         use simple_compiler::pipeline::module_loader::load_module_with_imports;
         use std::collections::HashSet;
 
+        let trace = std::env::var("SIMPLE_NATIVE_BUILD_RUST_TRACE").ok().as_deref() == Some("1");
+        if trace {
+            eprintln!("[rust-jit] start path={}", path.display());
+        }
+
         // Set current file for module resolution
         set_current_file(Some(path.to_path_buf()));
 
@@ -680,6 +685,13 @@ impl ExecCore {
 
         // Lower to MIR
         let mut mir_module = lower_to_mir(&hir_module).map_err(|e| format!("MIR lowering error: {}", e))?;
+        if trace {
+            eprintln!(
+                "[rust-jit] lowered functions={} externs={}",
+                mir_module.functions.len(),
+                mir_module.extern_fn_names.len()
+            );
+        }
 
         // Extern declarations the JIT cannot resolve (e.g. rt_torch_* in a
         // torch-less build) would link as null pointers and SIGSEGV at call
@@ -746,9 +758,18 @@ impl ExecCore {
         // Create execution manager and compile
         let mut em = LocalExecutionManager::with_provider(jit_backend, self.symbol_provider.clone())?;
 
+        if trace {
+            eprintln!("[rust-jit] compile start");
+        }
         em.compile_module(&mir_module)?;
+        if trace {
+            eprintln!("[rust-jit] execute main start");
+        }
 
         let exit_code = em.execute("main", &[])?;
+        if trace {
+            eprintln!("[rust-jit] execute main done exit={}", exit_code);
+        }
         set_current_file(None);
         self.collect_gc();
         Ok(exit_code as i32)
@@ -841,7 +862,7 @@ fn source_uses_cli_args(path: &Path) -> bool {
     let Ok(source) = std::fs::read_to_string(path) else {
         return false;
     };
-    source.contains("get_cli_args") || source.contains("std.cli")
+    source.contains("get_cli_args") || source.contains("rt_cli_get_args") || source.contains("std.cli")
 }
 
 fn source_uses_jit_unsafe_graphics_runtime(path: &Path) -> bool {
