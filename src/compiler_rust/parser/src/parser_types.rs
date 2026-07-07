@@ -11,6 +11,24 @@ impl<'a> Parser<'a> {
     // === Type Parsing ===
 
     pub(crate) fn parse_type(&mut self) -> Result<Type, ParseError> {
+        use crate::parser_impl::core::MAX_PARSE_RECURSION_DEPTH;
+        self.parse_recursion_depth += 1;
+        if self.parse_recursion_depth > MAX_PARSE_RECURSION_DEPTH {
+            self.parse_recursion_depth -= 1;
+            return Err(ParseError::syntax_error_with_span(
+                format!(
+                    "parse error (recovery limit): type nesting exceeded {} levels without progress",
+                    MAX_PARSE_RECURSION_DEPTH
+                ),
+                self.current.span,
+            ));
+        }
+        let result = self.parse_type_inner();
+        self.parse_recursion_depth -= 1;
+        result
+    }
+
+    fn parse_type_inner(&mut self) -> Result<Type, ParseError> {
         // Parse the first type
         let first = self.parse_single_type()?;
 

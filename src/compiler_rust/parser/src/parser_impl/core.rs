@@ -15,6 +15,13 @@ use crate::token::{Span, Token, TokenKind};
 /// This prevents hangs when the lexer doesn't emit proper tokens or token consumption fails.
 pub const MAX_LOOP_ITERATIONS: usize = 100_000;
 
+/// Maximum recursive-descent nesting depth for expression/type parsing before the
+/// parser bails out with a located, graceful error instead of overflowing the
+/// native stack. A misparse (e.g. an unsupported token) can otherwise drive the
+/// mutually-recursive expression/type parsers without ever advancing, aborting
+/// the process with SIGABRT. This budget converts that into a diagnosable error.
+pub const MAX_PARSE_RECURSION_DEPTH: u32 = 512;
+
 /// Parser mode controlling strictness of no-parentheses call syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ParserMode {
@@ -81,6 +88,10 @@ pub struct Parser<'a> {
     /// transformed for the direct argument expression and deferred for nested
     /// ordinary call arguments so outer callbacks can own the placeholder scope.
     pub(crate) call_arg_depth: usize,
+    /// Recursive-descent nesting depth for expression/type parsing. Bounded by
+    /// `MAX_PARSE_RECURSION_DEPTH` so a non-advancing misparse yields a located
+    /// `parse error (recovery limit)` instead of a native stack overflow / SIGABRT.
+    pub(crate) parse_recursion_depth: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -108,6 +119,7 @@ impl<'a> Parser<'a> {
             binary_indent_count: 0,
             deferred_dedent_count: 0,
             call_arg_depth: 0,
+            parse_recursion_depth: 0,
         };
 
         // Check for common mistakes in the initial token
@@ -194,6 +206,7 @@ impl<'a> Parser<'a> {
             binary_indent_count: 0,
             deferred_dedent_count: 0,
             call_arg_depth: 0,
+            parse_recursion_depth: 0,
         }
     }
 

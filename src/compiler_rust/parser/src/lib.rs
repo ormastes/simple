@@ -45,3 +45,5 @@ pub use token::*;
 mod fstring_bug_tests;
 #[cfg(test)]
 mod import_parse_tests;
+#[cfg(test)]
+mod recovery_bound_tests;

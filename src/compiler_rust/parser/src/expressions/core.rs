@@ -40,6 +40,24 @@ impl<'a> Parser<'a> {
     // === Expression Parsing (Pratt Parser) ===
 
     pub(crate) fn parse_expression(&mut self) -> Result<Expr, ParseError> {
+        use crate::parser_impl::core::MAX_PARSE_RECURSION_DEPTH;
+        self.parse_recursion_depth += 1;
+        if self.parse_recursion_depth > MAX_PARSE_RECURSION_DEPTH {
+            self.parse_recursion_depth -= 1;
+            return Err(ParseError::syntax_error_with_span(
+                format!(
+                    "parse error (recovery limit): expression nesting exceeded {} levels without progress",
+                    MAX_PARSE_RECURSION_DEPTH
+                ),
+                self.current.span,
+            ));
+        }
+        let result = self.parse_expression_inner();
+        self.parse_recursion_depth -= 1;
+        result
+    }
+
+    fn parse_expression_inner(&mut self) -> Result<Expr, ParseError> {
         let saved_indent_count = self.binary_indent_count;
         self.binary_indent_count = 0;
         let mut result = self.parse_pipe()?;
