@@ -90,7 +90,7 @@ impl PolicyHooks:
     me request_install(kind: i64) -> bool:
         if hook_kind_allowed(kind):
             return true
-        me.rejected_installs = me.rejected_installs + 1
+        me.rejected_installs = me.rejected_count() + 1
         false
 
     # ── Typed installers (only the allowed kinds have one) ───────────────────
@@ -142,7 +142,7 @@ impl PolicyHooks:
         var f = me.gc_score
         val v: HookVote = f(block, valid, erase, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = me.fuel_aborts + 1
+            me.fuel_aborts = me.fuel_abort_count() + 1
             return default_gc_score(block, valid, erase, me.fuel_budget).value
         v.value
 
@@ -153,7 +153,7 @@ impl PolicyHooks:
         var f = me.qos
         val v: HookVote = f(opcode, nblocks, nsid, age, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = me.fuel_aborts + 1
+            me.fuel_aborts = me.fuel_abort_count() + 1
             return clamp_priority(default_qos(opcode, nblocks, nsid, age, me.fuel_budget).value)
         clamp_priority(v.value)
 
@@ -164,7 +164,7 @@ impl PolicyHooks:
         var f = me.hot_cold
         val v: HookVote = f(lba, read_count, write_count, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = me.fuel_aborts + 1
+            me.fuel_aborts = me.fuel_abort_count() + 1
             return clamp_bool(default_hot_cold(lba, read_count, write_count, me.fuel_budget).value)
         clamp_bool(v.value)
 
@@ -175,7 +175,7 @@ impl PolicyHooks:
         var f = me.telemetry
         val v: HookVote = f(kind, code, value, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = me.fuel_aborts + 1
+            me.fuel_aborts = me.fuel_abort_count() + 1
             return clamp_bool(default_telemetry(kind, code, value, me.fuel_budget).value)
         clamp_bool(v.value)
 
@@ -203,6 +203,8 @@ fn hooks_selftest() -> i64:
     fail = fail + expect_eq(h.rejected_count(), 2, "hooks: rejected installs counted")
     h.rejected_installs = -2
     fail = fail + expect_eq(h.rejected_count(), 0, "hooks: corrupted rejected count clamps to zero")
+    fail = fail + expect_eq(bool_to_int(h.request_install(HOOK_WAL)), 0, "hooks: corrupted rejected count still rejects forbidden install")
+    fail = fail + expect_eq(h.rejected_count(), 1, "hooks: corrupted rejected count increments from zero")
     h.rejected_installs = 2
 
     # Install a custom GC scorer (wear-aware: score by erase count) and watch it apply.
@@ -215,6 +217,8 @@ fn hooks_selftest() -> i64:
     fail = fail + expect_eq(h.fuel_abort_count(), 1, "hooks: fuel abort counted")
     h.fuel_aborts = -3
     fail = fail + expect_eq(h.fuel_abort_count(), 0, "hooks: corrupted fuel abort count clamps to zero")
+    fail = fail + expect_eq(h.gc_candidate_score(0, 7, 2), 7, "hooks: corrupted fuel abort count still discards over-fuel vote")
+    fail = fail + expect_eq(h.fuel_abort_count(), 1, "hooks: corrupted fuel abort count increments from zero")
     h.fuel_aborts = 1
 
     # Clear reverts to the default policy.
