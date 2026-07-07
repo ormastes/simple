@@ -97,8 +97,8 @@ Phone readability comes from two pieces, both emitted by the renderer:
    planned `LayoutProfile` size classes in `common/ui/profile.spl`:
    - **compact** (`<= 600px`, phone): single column, full-bleed panels, 16px base
      font (also stops iOS input-focus zoom), 44px touch targets, stacked rows.
-   - **regular** (`601–1200px`, tablet): 2-column grid.
-   - **expanded** (`> 1200px`, desktop): default multi-column layout.
+   - **regular** (`601–840px`, tablet): 2-column grid.
+   - **expanded** (`> 840px`, desktop): default multi-column layout.
 
 The webview applies the size class from its real device width, so this needs no
 server-side viewport plumbing. `common/ui/profile.spl` exposes the same
