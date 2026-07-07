@@ -3,11 +3,10 @@
 > **Status (2026-06-29): mostly DONE.** The data-path firmware is built and run-green in
 > `examples/09_embedded/simpleos_nvme_fw/fw/` (300 self-test asserts; phases ≈0–7), plus an
 > NVMe admin/multi-IO-queue controller front end that this plan's phase table omits. Operator
-> guide: `doc/07_guide/hardware/nvme_firmware/`. Still future: phase 8 multicore and rv32 bare-metal
-> boot (req5 offload and req7 sandboxed hooks are now DONE). rv32 bare-metal boot is
-> build-blocked — environmental: the rv32 LLVM native build is broken here (the proven
-> full-OS recipe also exits 255 with no diagnostic/ELF), see
-> `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`. Lean4 proofs
+> guide: `doc/07_guide/hardware/nvme_firmware/`. Still future: phase 8 multicore and the full
+> rv32 no-alloc firmware port (req5 offload and req7 sandboxed hooks are now DONE). The fast
+> rv32 direct-smoke path now builds and boots under QEMU (`ALL RV32 NVME FW CHECKS PASS` /
+> `RESULT: PASS`), but it is not the full port. Lean4 proofs
 > now ship with the firmware under `fw/proofs/` ({Alloc,Recover,Gc,Hooks,Fmc,Rain}.lean), not
 > just the emulator's `emu/proofs/`; the scheduled `doc/06_spec` manual was never produced (no sspec tests).
 

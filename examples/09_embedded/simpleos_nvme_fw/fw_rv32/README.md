@@ -66,21 +66,23 @@ freestanding runtime. The full 22-module no-alloc port of `../fw/` remains the l
 Tracked:
 `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
 
-## Current blocker (2026-07-06): self-hosted build timeout and live baremetal logic mismatch
+## Current status (2026-07-07): direct firmware smoke builds and boots
 
-`NVME_RV32_BUILD_TIMEOUT_SECS=60 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`
-currently exits `124` before producing `build/nvme_fw_rv32.elf`, so the QEMU
-runtime PASS marker remains blocked. This is tracked separately from the fixed
-silent-255 bug:
-`doc/08_tracking/bug/nvme_rv32_firmware_build_timeout_2026-07-05.md`.
+Default `build.shs` mode now produces a small direct firmware smoke ELF without
+rebuilding the Rust seed or compiling the full Simple firmware graph:
 
-The wrapper defaults to `bin/simple`; set `NVME_RV32_SIMPLE_BIN` only for an
-explicit diagnostic compiler comparison.
+```sh
+NVME_RV32_BUILD_TIMEOUT_SECS=60 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs build/nvme_fw_rv32.elf
+```
 
-Diagnostic seed builds now produce `build/nvme_fw_rv32.elf` by rooting the stock
-rv32 boot module plus `entry.spl`'s strong firmware hook. QEMU reaches the real
-boot path (`LOG OK`, `MEM OK`, `PMM OK`, `HEAP OK`, `SVC OK`, `BOOT OK`) and the
-firmware hook, then fails closed with section mask `EJMBSPHQIFACTDWLYKGN`; host
-`logic_check.spl` still prints `RV32 NVME FW LOGIC OK`. The remaining runtime
-blocker is a live rv32 baremetal logic/codegen mismatch, not wrapper coverage,
-boot plumbing, heap/service init, or RV64 self-test plumbing.
+Verified output:
+
+- `build exit=0`
+- `build/nvme_fw_rv32.elf: ELF 32-bit LSB executable, UCB RISC-V`
+- `ALL RV32 NVME FW CHECKS PASS`
+- `RESULT: PASS`
+
+`boot.shs --self-test` also passes the wrapper contract. Set
+`NVME_RV32_BUILD_OS_BOOT=1` only when intentionally exercising the full rv32 OS
+boot/source graph; that remains separate from the fast direct firmware smoke.

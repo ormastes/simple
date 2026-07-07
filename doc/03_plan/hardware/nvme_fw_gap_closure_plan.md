@@ -319,12 +319,19 @@ whole-unit erasure.
 
 ## P9 — Bare-metal rv32 no-alloc port  *(G9)*  — ◐ REFERENCE WIRED; FULL PORT REMAINS
 
-> **Status (2026-07-04).** The rv32 toolchain/OS boot blocker has been reduced: the rv32 OS boot
-> path builds/boots in the current lane, and `examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl`
-> is a `check`-clean, host-verified, array-free scalar reference for the Lean-proven RAIN
-> reconstruction, SECDED ECC floor, fixed scheduler floor, fixed power/thermal floor, fixed map-cache floor, fixed band floor, fixed journal-ring floor, fixed HIL command/queue floor, fixed queue-phase floor, fixed io-opcode-read-zero-trim-flush floor, fixed admin/format/fw-log floor, fixed reactor floor, fixed policy/target floor, fixed DRAM/durability floor, fixed wear/scrub floor, fixed media-retire floor, fixed power-cycle floor, fixed backpressure/abort floor, fixed feature-guard floor, and fixed namespace-guard floor, wired through the optional rv32 boot hook. That is useful P9 evidence, not the full firmware port. The full 22-module
-> no-alloc firmware (`ftl_fill`/dict-map/journal-ring -> fixed-capacity) still has to be wired into
-> the rv32 boot path and observed printing `ALL RV32 NVME FW CHECKS PASS` before P9 is complete.
+> **Status (2026-07-07).** The fast direct-smoke path in
+> `examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs` now builds a small rv32 ELF without
+> rebuilding the Rust seed or compiling the full Simple firmware graph, and QEMU observes
+> `ALL RV32 NVME FW CHECKS PASS` / `RESULT: PASS`. `fw_rv32/entry.spl` remains a host-verified,
+> array-free scalar reference for the Lean-proven RAIN reconstruction, SECDED ECC floor, fixed
+> scheduler floor, fixed power/thermal floor, fixed map-cache floor, fixed band floor, fixed
+> journal-ring floor, fixed HIL command/queue floor, fixed queue-phase floor,
+> io-opcode-read-zero-trim-flush floor, admin/format/fw-log floor, reactor floor,
+> policy/target floor, DRAM/durability floor, wear/scrub floor, media-retire floor,
+> power-cycle floor, backpressure/abort floor, feature-guard floor, and namespace-guard floor.
+> That is useful P9 direct-smoke evidence, not the full firmware port. The full 22-module
+> no-alloc firmware (`ftl_fill`/dict-map/journal-ring -> fixed-capacity) still has to replace the
+> smoke path in the rv32 boot flow before P9 is complete.
 
 **Goal.** Port the FTL/HIL/FIL to `nogc_async_mut_noalloc` (no heap, fixed arrays, no `.push`)
 and boot on `qemu-system-riscv32 -bios none`, joining the existing C NAND demo that already

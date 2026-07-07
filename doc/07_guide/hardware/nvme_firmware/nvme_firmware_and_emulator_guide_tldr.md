@@ -1,7 +1,7 @@
 # NVMe Firmware + Emulator Guide (TL;DR)
 
-Two pure-Simple, **simulation-only** deliverables under `examples/09_embedded/simpleos_nvme_fw/`,
-gated by `bin/simple run` (not `check`):
+Two main pure-Simple host deliverables plus one rv32 direct-smoke image live under
+`examples/09_embedded/simpleos_nvme_fw/`:
 
 - **`fw/`** — layered NVMe SSD firmware: HIL/FTL/FIL + NVMe controller front end (admin,
   multi IO queue, round-robin, live thermal/SMART composite-temperature model (P7), and RAIN
@@ -20,13 +20,12 @@ gated by `bin/simple run` (not `check`):
 
 Honest caveats: **newtypes are NOT enforced** on this binary (bug filed); the **Lean proofs are
 standalone hand-transcribed algorithm models with no mechanical link to executed bytes**; the
-Simple firmware was **NOT booted on rv32** — the rv32 LLVM native-build is currently broken in
-this environment (exits 255, no diagnostic; the proven full-OS recipe also fails; the bootable
-ELF is stale; boot NOT observed). See
-`doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
+rv32 direct-smoke image boots and prints the firmware PASS marker, but the full no-alloc firmware
+port remains open.
 
-P9 artifact: `fw_rv32/entry.spl` — a scalar/array-free re-expression of the RAIN reconstruct
-(check-clean + host-verified, but build-environmentally-blocked on rv32 per the bug above).
+P9 artifacts: `fw_rv32/entry.spl` is the scalar/array-free reference, and default
+`fw_rv32/build.shs` builds a fast direct rv32 smoke ELF. Verified 2026-07-07:
+`ALL RV32 NVME FW CHECKS PASS` / `RESULT: PASS`.
 
 <!-- sdn-diagram:id=nvme_fw_emu_tldr -->
 ```

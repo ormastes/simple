@@ -71,18 +71,44 @@ impl MirToLlvm:
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
-        val src_ty = self.get_operand_type(operand)
-        val target_ty = self.llvm_type_text(target)
-        val cast_inst = self.select_cast_instruction(src_ty, target_ty)
-        self.builder.emit("  {dest_name} = {cast_inst} {src_ty} {operand_val} to {target_ty}")
+        val src_ty = self.valid_llvm_type(self.get_operand_type(operand))
+        val target_ty = self.valid_llvm_type(self.llvm_type_text(target))
+        self.value_types[dest_name] = target_ty
+        val casted = self.value_as_type(operand_val, src_ty, target_ty)
+        if casted == operand_val:
+            if is_float_type(target_ty):
+                self.builder.emit("  {dest_name} = fadd {target_ty} {casted}, 0.0  ; cast")
+            elif target_ty == "ptr":
+                val nit = self.native_int()
+                self.builder.emit("  {dest_name} = getelementptr i8, ptr {casted}, {nit} 0  ; cast")
+            else:
+                self.builder.emit("  {dest_name} = add {target_ty} {casted}, 0  ; cast")
+        else:
+            if is_float_type(target_ty):
+                self.builder.emit("  {dest_name} = fadd {target_ty} {casted}, 0.0  ; cast")
+            elif target_ty == "ptr":
+                val nit = self.native_int()
+                self.builder.emit("  {dest_name} = getelementptr i8, ptr {casted}, {nit} 0  ; cast")
+            else:
+                self.builder.emit("  {dest_name} = add {target_ty} {casted}, 0  ; cast")
 
     me translate_bitcast(dest: LocalId, operand: MirOperand, target: MirType):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
-        val src_ty = self.get_operand_type(operand)
-        val target_ty = self.llvm_type_text(target)
-        self.builder.emit("  {dest_name} = bitcast {src_ty} {operand_val} to {target_ty}")
+        val src_ty = self.valid_llvm_type(self.get_operand_type(operand))
+        val target_ty = self.valid_llvm_type(self.llvm_type_text(target))
+        self.value_types[dest_name] = target_ty
+        if src_ty == target_ty:
+            if is_float_type(target_ty):
+                self.builder.emit("  {dest_name} = fadd {target_ty} {operand_val}, 0.0  ; bitcast")
+            elif target_ty == "ptr":
+                val nit = self.native_int()
+                self.builder.emit("  {dest_name} = getelementptr i8, ptr {operand_val}, {nit} 0  ; bitcast")
+            else:
+                self.builder.emit("  {dest_name} = add {target_ty} {operand_val}, 0  ; bitcast")
+        else:
+            self.builder.emit("  {dest_name} = bitcast {src_ty} {operand_val} to {target_ty}")
 
     # === Overrides: indirect calls / intrinsics ===
 

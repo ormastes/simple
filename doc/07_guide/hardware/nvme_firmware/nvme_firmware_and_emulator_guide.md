@@ -9,9 +9,9 @@ deliberately avoided — see the caveats below):
 2. **`emu/`** — a pure-Simple NVMe **host-interface ↔ device-interface emulator** with a
    settable memcpy/DMA seam on both sides, an ONFI NAND, domain newtypes, and Lean4 proofs.
 
-> **Simulation only.** No hardware, no QEMU, no real MMIO. The geometry and one-word/byte
-> payloads stand in for a real device so the whole stack runs and self-verifies on the host.
-> The Simple firmware was **not** booted bare-metal on rv32 (see "rv32 status").
+> **Mostly simulation.** The main firmware and emulator are host-runnable simulations. A
+> separate rv32 direct-smoke image now boots under QEMU and prints the firmware PASS marker;
+> the full no-alloc firmware port is still not complete (see "rv32 status").
 
 ---
 
@@ -101,10 +101,11 @@ Additional firmware modules: `power_thermal.spl` (power-state + thermal model, w
 
 > **Wired vs. shelf (honest status).** This is a hardware-**faithful simulation**, not a
 > silicon-shippable binary — "production level" in the literal sense is not done. Of the gap-closure
-> items: **P1** (`fil_fmc`), **P7** (`power_thermal`), and **P8** (`rain`) are **wired into the live
-> controller/FTL**; **P2** (`fil_scheduler`) is done-but-**shelf** (a single-threaded sim cannot
-> exhibit channel-level parallelism); **P3–P6** are **not started**; **P9** (rv32 bare-metal) is
-> **build-blocked** (see "rv32 status"). Canonical table:
+> items: **P1** (`fil_fmc`), **P2** (`fil_scheduler`), **P3** (SECDED ECC floor), **P4**
+> (segmented-PRP floor), **P5** (DRAM/map-cache floor), **P6** (cooperative ownership floor),
+> **P7** (`power_thermal`), and **P8** (`rain`) are wired floors in the live path. **P9** has a
+> QEMU-booted direct-smoke PASS marker; the full 22-module no-alloc firmware port remains open.
+> Canonical table:
 > `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status".
 
 ---
@@ -239,21 +240,18 @@ done
 
 ## 5. rv32 bare-metal status (read this plainly)
 
-The pure-Simple firmware was **NOT** booted bare-metal on rv32 this session — **P9 is
-build-blocked, not done.** A new array-free, scalar re-expression of the RAIN reconstruct lives in
-`examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl`; it is `bin/simple check`-clean and
-host-verified. But the rv32 LLVM native build **cannot produce an ELF in this environment**: the
-silent failure is environmental, not a property of the firmware source. The proven full-OS recipe
-(`--entry src/os/kernel/arch/riscv32/boot.spl`) **also** exits 255 with no diagnostic and no ELF
-when run here, so the rv32 LLVM backend itself is broken in this environment (the prebuilt
-`build/os/simpleos_riscv32.elf` that boots is **stale**). The boot was therefore never observed.
-This **supersedes** the older claim that the blocker was `[i64]`/`.push` needing a heap —
-`entry.spl` is now array-free yet still cannot build. Tracked in
-`doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
+Default `fw_rv32/build.shs` now builds a small direct rv32 ELF without rebuilding the Rust seed or
+compiling the full Simple firmware graph. Verified on 2026-07-07:
 
-A separate, self-contained **C** NAND/FTL demo previously booted on `qemu-system-riscv32 -bios none`
-(`ALL RV32 NAND CHECKS PASS`) — a **prior toolchain + boot-path proof, NOT re-verified this
-session**, and never the Simple firmware running on rv32.
+```sh
+NVME_RV32_BUILD_TIMEOUT_SECS=60 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs build/nvme_fw_rv32.elf
+```
+
+The boot prints `ALL RV32 NVME FW CHECKS PASS` and exits `RESULT: PASS`; `boot.shs --self-test`
+also passes. This is P9 direct-smoke evidence, not the full firmware port. Set
+`NVME_RV32_BUILD_OS_BOOT=1` only when intentionally exercising the slower full rv32 OS boot/source
+graph; the full 22-module no-alloc port remains open.
 
 ---
 

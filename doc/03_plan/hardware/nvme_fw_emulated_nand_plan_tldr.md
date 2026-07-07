@@ -3,8 +3,9 @@
 > **Status (2026-06-29): E3 DONE.** The ONFI NAND device + FIL-as-driver is built and run-green
 > as a SINGLE module `fw/fil_nand_device.spl` (a faithful drop-in for `fil_nand.Nand`), NOT the
 > planned 4-module `nand_device`/`nand_bus`/`nand_bus_sw`/`nand_ctrl` split. Still future: E4
-> async busy-timing reactor, E5 no-alloc rv32 boot, E6 `nand_bus_mmio`. The Simple firmware was
-> NOT booted on rv32 (only a separate C demo). Guide: `doc/07_guide/hardware/nvme_firmware/`.
+> async busy-timing reactor, full E5 no-alloc rv32 boot, E6 `nand_bus_mmio`. The rv32 direct-smoke
+> path now boots and prints the firmware PASS marker, but it is not the full E5 port. Guide:
+> `doc/07_guide/hardware/nvme_firmware/`.
 
 Turn the in-process array NAND (`fil_nand`) into a real **emulated NAND device** behind an
 **ONFI-style controller register seam**, so the FIL becomes a proper *driver* and the same
