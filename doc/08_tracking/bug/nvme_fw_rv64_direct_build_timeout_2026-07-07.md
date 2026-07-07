@@ -181,3 +181,35 @@ Terminated
 ```
 
 The next source-shape choke point is `logic_admin.spl`.
+
+## Update — early logic and IO wrappers now parse quickly
+
+`logic.spl`, `logic_rain.spl`, `logic_queue_phase.spl`,
+`logic_io_command.spl`, `logic_flush.spl`, and `logic_reactor.spl` were split
+into small public wrappers plus section/core/case files. The scalar host logic
+gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but it now gets through reactor and stops at DRAM /
+durability parsing:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_io_command.spl chars=105
+[BOOTSTRAP-PHASE] ... logic_flush.spl chars=90
+[BOOTSTRAP-PHASE] ... logic_admin.spl chars=90
+[BOOTSTRAP-PHASE] ... logic_reactor.spl chars=96
+[BOOTSTRAP-PHASE] ... logic_policy_target.spl chars=3166
+[BOOTSTRAP-PHASE] ... logic_dram_durability.spl chars=3594
+Terminated
+```
+
+The next source-shape choke point is `logic_dram_durability.spl`; the preceding
+`logic_policy_target.spl` also remains a large parse-cost file.
