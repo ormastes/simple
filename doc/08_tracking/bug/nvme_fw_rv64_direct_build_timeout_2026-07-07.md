@@ -241,3 +241,34 @@ Terminated
 ```
 
 The next source-shape choke point is `logic_wear_scrub.spl`.
+
+## Update — late public wrappers now parse quickly
+
+`logic_wear_scrub.spl`, `logic_media_retire.spl`, `logic_power_cycle.spl`,
+`logic_backpressure_abort.spl`, `logic_feature_guard.spl`,
+`logic_namespace_guard.spl`, and `logic_target.spl` were split into tiny public
+wrappers plus core/case files. The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but it now gets through every public `logic_*.spl`
+wrapper and stops in split case files:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_backpressure_abort.spl chars=129
+[BOOTSTRAP-PHASE] ... logic_feature_guard.spl chars=114
+[BOOTSTRAP-PHASE] ... logic_namespace_guard.spl chars=120
+[BOOTSTRAP-PHASE] ... logic_target.spl chars=105
+[BOOTSTRAP-PHASE] ... logic_rain_cases.spl chars=1181
+Terminated
+```
+
+The next source-shape choke point is the split case/core set, starting at
+`logic_rain_cases.spl`.
