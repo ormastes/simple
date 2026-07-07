@@ -1,6 +1,6 @@
 # nvme_rv64_baremetal_boot_spec
 
-> NVMe firmware RV64 baremetal wrapper evidence.
+> NVMe firmware RV64 baremetal boot evidence.
 
 <!-- sdn-diagram:id=nvme_rv64_baremetal_boot_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ nvme_rv64_baremetal_boot_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # nvme_rv64_baremetal_boot_spec
 
-NVMe firmware RV64 baremetal wrapper evidence.
+NVMe firmware RV64 baremetal boot evidence.
 
 ## At a Glance
 
@@ -46,15 +46,57 @@ NVMe firmware RV64 baremetal wrapper evidence.
 | Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-NVMe firmware RV64 baremetal wrapper evidence.
+NVMe firmware RV64 baremetal boot evidence.
 
-This spec does not claim real RV64 QEMU boot evidence. It proves the RV64 boot
-wrapper is fail-closed: fake-QEMU self-test accepts the PASS marker and rejects
-missing PASS or serial FAIL markers.
+The real boot scenario is fail-closed: it passes only when the prebuilt RV64
+firmware ELF boots under QEMU and prints every required serial marker. The
+wrapper self-test separately proves fake-QEMU missing-marker and serial-FAIL
+cases are rejected.
 
 ## Scenarios
 
 ### NVMe firmware rv64 baremetal wrapper
+
+#### boots the RV64 NVMe firmware ELF on QEMU and reports subsystem health
+
+- Run boot.shs for the RV64 NVMe firmware wrapper against the real ELF
+- The serial console shows the RV64 boot and firmware PASS markers
+   - Expected: verdict equals `pass`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run boot.shs for the RV64 NVMe firmware wrapper against the real ELF")
+val (out, err, code) = _run("sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs")
+
+step("The serial console shows the RV64 boot and firmware PASS markers")
+var verdict: text = "pass"
+if out.contains("missing-media:"):
+    verdict = "missing-media: build/nvme_fw_rv64.elf not built"
+else:
+    if not out.contains("SimpleOS RV64"):
+        verdict = "boot-fail: SimpleOS RV64 banner absent"
+    else:
+        if not out.contains("[BOOT] boot complete"):
+            verdict = "boot-fail: boot-complete marker absent"
+        else:
+            if not out.contains("ALL RV64 NVME FW CHECKS PASS"):
+                verdict = "boot-fail: firmware PASS marker absent"
+            else:
+                if not out.contains("RESULT: PASS"):
+                    verdict = "boot-fail: wrapper pass marker absent"
+                else:
+                    if out.contains("FAIL"):
+                        verdict = "boot-fail: serial failure marker present"
+expect(verdict).to_equal("pass")
+```
+
+</details>
 
 #### runs the rv64 boot wrapper fail-closed self-test
 
@@ -83,8 +125,8 @@ _expect_no_fail_marker(out, "rv64 boot wrapper self-test")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

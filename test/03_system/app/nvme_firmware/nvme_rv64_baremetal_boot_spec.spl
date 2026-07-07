@@ -1,9 +1,10 @@
 """
-NVMe firmware RV64 baremetal wrapper evidence.
+NVMe firmware RV64 baremetal boot evidence.
 
-This spec does not claim real RV64 QEMU boot evidence. It proves the RV64 boot
-wrapper is fail-closed: fake-QEMU self-test accepts the PASS marker and rejects
-missing PASS or serial FAIL markers.
+The real boot scenario is fail-closed: it passes only when the prebuilt RV64
+firmware ELF boots under QEMU and prints every required serial marker. The
+wrapper self-test separately proves fake-QEMU missing-marker and serial-FAIL
+cases are rejected.
 """
 
 use std.spec.*
@@ -17,6 +18,31 @@ fn _expect_no_fail_marker(out: text, label: text):
         fail(label + " printed a failure marker")
 
 describe "NVMe firmware rv64 baremetal wrapper":
+    it "boots the RV64 NVMe firmware ELF on QEMU and reports subsystem health":
+        step("Run boot.shs for the RV64 NVMe firmware wrapper against the real ELF")
+        val (out, err, code) = _run("sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs")
+
+        step("The serial console shows the RV64 boot and firmware PASS markers")
+        var verdict: text = "pass"
+        if out.contains("missing-media:"):
+            verdict = "missing-media: build/nvme_fw_rv64.elf not built"
+        else:
+            if not out.contains("SimpleOS RV64"):
+                verdict = "boot-fail: SimpleOS RV64 banner absent"
+            else:
+                if not out.contains("[BOOT] boot complete"):
+                    verdict = "boot-fail: boot-complete marker absent"
+                else:
+                    if not out.contains("ALL RV64 NVME FW CHECKS PASS"):
+                        verdict = "boot-fail: firmware PASS marker absent"
+                    else:
+                        if not out.contains("RESULT: PASS"):
+                            verdict = "boot-fail: wrapper pass marker absent"
+                        else:
+                            if out.contains("FAIL"):
+                                verdict = "boot-fail: serial failure marker present"
+        expect(verdict).to_equal("pass")
+
     it "runs the rv64 boot wrapper fail-closed self-test":
         step("Run boot.shs --self-test for the RV64 NVMe firmware wrapper")
         val (out, err, code) = _run("sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs --self-test")
