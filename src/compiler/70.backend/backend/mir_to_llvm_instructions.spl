@@ -12,10 +12,18 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
         """Translate binary operation. Uses nsw for signed int arithmetic."""
-        val dest_name = self.get_local(dest.id)
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
         val left_val = self.translate_operand(left)
         val right_val = self.translate_operand(right)
-        val ty = self.get_local_type(dest.id)
+        val left_ty = self.valid_llvm_type(self.get_operand_type(left))
+        var ty = self.valid_llvm_type(self.get_local_type(dest_id))
+        match op:
+            case Eq | Ne | Lt | Le | Gt | Ge:
+                ()
+            case _:
+                ty = left_ty
+                self.local_types[dest_id] = ty
 
         match op:
             case Add:
@@ -111,9 +119,13 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand):
         """Translate unary operation."""
-        val dest_name = self.get_local(dest.id)
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
-        val ty = self.get_local_type(dest.id)
+        var ty = self.valid_llvm_type(self.get_local_type(dest_id))
+        if ty == "nil":
+            ty = self.native_int()
+        self.local_types[dest_id] = ty
 
         match op:
             case Neg:
@@ -122,10 +134,11 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit_neg(dest_name, ty, operand_val)
             case Not:
-                self.builder.emit_icmp_eq(dest_name, ty, operand_val, "0")
+                val rhs = if ty == "ptr": "null" else: "0"
+                self.builder.emit_icmp_eq(dest_name, ty, operand_val, rhs)
             case BitNot: self.builder.emit_not(dest_name, ty, operand_val)
             case Transpose:
-                self.mark_ptr_local(dest.id)
+                self.mark_ptr_local(dest_id)
                 self.builder.emit("  {dest_name} = call ptr @__simple_runtime_transpose(ptr {operand_val})  ; transpose (')")
 
     me translate_call(dest: LocalId?, func: MirOperand, args: [MirOperand]):

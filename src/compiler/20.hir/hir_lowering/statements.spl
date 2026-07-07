@@ -12,7 +12,6 @@ use compiler.hir.hir_lowering.expressions.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
-extern fn rt_enum_payload(value: StmtKind) -> Expr
 
 fn hir_stmt_env_get(key: text) -> text:
     rt_env_get(key)
@@ -105,11 +104,12 @@ impl HirLowering:
         # every non-Expr statement) lowered to Error and SIGILL'd the interpreter;
         # only Expr-statement bodies (print(...)) were ever exercised on the
         # unstub path. Pre-dispatch by discriminant + isolated single-arm
-        # extraction (same idiom as lower_type). Reference discs come from freshly
-        # constructed values (construction is always correct on stage4).
+        # extraction (same idiom as lower_type). Compare the local tag values
+        # directly: constructing dummy StmtKind values here makes the seed inspect
+        # payloads and can stack-overflow when a Val initializer is a Call.
         val sk_disc: i64 = hir_stmt_kind_disc(stmt_kind_value)
         val sk_dummy: Expr = Expr(kind: ExprKind.NilLit, span: s.span)
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", nil, sk_dummy)):
+        if sk_disc == 1:
             var v_name: text = ""
             var v_type: Type? = nil
             var v_init: Expr = sk_dummy
@@ -120,14 +120,13 @@ impl HirLowering:
                     v_init = vinit
                 case _:
                     pass
-            val v_hir_type = if v_type.?:
-                Some(self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span)))
-            else:
-                nil
+            # stage4 can corrupt the optional type payload after a Call initializer;
+            # let inference recover the type instead of touching v_type here.
+            val v_hir_type: HirType? = nil
             val v_hir_init = self.lower_hir_expr(v_init)
             val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_hir_type, s.span, false, false, nil)
             return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type, v_hir_init), span: s.span)
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
+        if sk_disc == 2:
             var vr_name: text = ""
             var vr_type: Type? = nil
             var vr_init: Expr? = nil
@@ -148,7 +147,7 @@ impl HirLowering:
                 HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
             val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_hir_type, s.span, false, true, nil)
             return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_hir_type, vr_hir_init), span: s.span)
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Return(nil)):
+        if sk_disc == 11:
             var rt_val: Expr? = nil
             match stmt_kind_value:
                 case StmtKind.Return(rval):
@@ -160,7 +159,7 @@ impl HirLowering:
             else:
                 nil
             return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(rt_hir), type_: nil, span: s.span)), span: s.span)
-        if sk_disc == hir_stmt_kind_disc(StmtKind.Assign(sk_dummy, nil, sk_dummy)):
+        if sk_disc == 5:
             var as_target: Expr = sk_dummy
             var as_op: AssignOp? = nil
             var as_value: Expr = sk_dummy

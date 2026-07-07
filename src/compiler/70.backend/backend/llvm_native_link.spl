@@ -146,6 +146,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if is_simpleos_riscv64_link(user_objects, output):
         return link_simpleos_riscv64(user_objects, output, verbose)
 
+    if is_simpleos_riscv32_link(user_objects, output):
+        return link_simpleos_riscv32(user_objects, output, verbose)
+
     # Step 1: Compile C runtime to object files
     if trace:
         print "[LLVM-LINK] step 1: compile_runtime_objects..."
@@ -229,6 +232,17 @@ fn is_simpleos_x86_64_link(user_objects: [text], output: text) -> bool:
         return true
     if output.contains("simpleos_wm_simple_web_check") or output.contains("simpleos_x86_64"):
         return true
+    false
+
+fn is_simpleos_riscv32_link(user_objects: [text], output: text) -> bool:
+    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if target == "riscv32-unknown-none" or target == "riscv32-unknown-none-elf":
+        return true
+    if output.contains("riscv32") or output.contains("rv32"):
+        return true
+    for obj in user_objects:
+        if obj.contains("riscv32") or obj.contains("rv32"):
+            return true
     false
 
 fn compile_simpleos_x86_64_c(src: text, obj: text, opt_level: i64) -> Result<text, text>:
@@ -411,10 +425,50 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     args = args.push(output)
 
     if verbose:
-        print "[llvm-link] SimpleOS RISC-V link: ld.lld {args.join(\" \")}"
+        val joined_args = args.join(" ")
+        print "[llvm-link] SimpleOS RISC-V link: ld.lld {joined_args}"
     val (stdout, stderr, code) = rt_process_run("ld.lld", args)
     if code != 0:
         return Err("SimpleOS RISC-V link failed: {stdout}{stderr}")
+    Ok(output)
+
+fn link_simpleos_riscv32(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
+    val stub_c = "build/os/simpleos_riscv32_link_stubs.c"
+    val stub_o = "build/os/simpleos_riscv32_link_stubs.o"
+    var stub_src = "#include <stdint.h>\n"
+    stub_src = stub_src + "#define UART0 ((volatile uint8_t*)0x10000000UL)\n"
+    stub_src = stub_src + "void rt_riscv_uart_put(uint64_t b){while(!(UART0[5]&0x20)){} UART0[0]=(uint8_t)b;}\n"
+    rt_file_write_text(stub_c, stub_src)
+    val (stub_out, stub_err, stub_code) = rt_process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv32imafdc", "-mabi=ilp32d", "-ffreestanding", "-nostdlib",
+        "-o", stub_o, stub_c
+    ])
+    if stub_code != 0:
+        return Err("SimpleOS RV32 stub compilation failed: {stub_out}{stub_err}")
+
+    val linker_script_env = rt_env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script = if linker_script_env != "":
+        linker_script_env
+    else:
+        "src/os/kernel/arch/riscv32/linker.ld"
+    var args: [text] = [
+        "-m", "elf32lriscv",
+        "--no-relax",
+        "-nostdlib",
+        "-T", linker_script
+    ]
+    for obj in user_objects:
+        args = args.push(obj)
+    args = args.push(stub_o)
+    args = args.push("-o")
+    args = args.push(output)
+
+    if verbose:
+        val joined_args = args.join(" ")
+        print "[llvm-link] SimpleOS RV32 link: ld.lld {joined_args}"
+    val (stdout, stderr, code) = rt_process_run("ld.lld", args)
+    if code != 0:
+        return Err("SimpleOS RV32 link failed: {stdout}{stderr}")
     Ok(output)
 
 # ============================================================================

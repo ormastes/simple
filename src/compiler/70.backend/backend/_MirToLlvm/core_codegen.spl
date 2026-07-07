@@ -388,6 +388,7 @@ impl MirTextCodegen for MirToLlvm:
             case Ret(value):
                 match value:
                     Some(ret_operand):
+                        var matched_ret_operand_ty = ""
                         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                             match ret_operand.kind:
                                 case Const(const_value, const_type):
@@ -401,6 +402,8 @@ impl MirTextCodegen for MirToLlvm:
                         match ret_operand.kind:
                             case Copy(local) | Move(local):
                                 val return_local_id = self.local_id_value(local)
+                                val local_ret_ty = self.get_local_type(return_local_id)
+                                matched_ret_operand_ty = if local_ret_ty == nil or local_ret_ty == "nil": self.current_return_type else: local_ret_ty
                                 if self.current_function_name == "_start":
                                     self.builder.emit("  unreachable")
                                     return
@@ -411,8 +414,15 @@ impl MirTextCodegen for MirToLlvm:
                                 ()
                         val val_str = self.translate_operand(ret_operand)
                         val maybe_ret_ty = self.get_operand_type(ret_operand)
-                        val ret_ty = if maybe_ret_ty == nil: self.native_int() else: maybe_ret_ty
-                        self.builder.emit_ret(ret_ty, self.ret_value_for_type(ret_ty, val_str))
+                        val operand_ret_ty = if matched_ret_operand_ty != "": matched_ret_operand_ty else: if maybe_ret_ty == nil: self.native_int() else: maybe_ret_ty
+                        val ret_ty = self.current_return_type
+                        if operand_ret_ty != ret_ty:
+                            val casted_ret = self.builder.fresh_local()
+                            val cast_inst = self.select_cast_instruction(operand_ret_ty, ret_ty)
+                            self.builder.emit("  {casted_ret} = {cast_inst} {operand_ret_ty} {val_str} to {ret_ty}")
+                            self.builder.emit_ret(ret_ty, self.ret_value_for_type(ret_ty, casted_ret))
+                        else:
+                            self.builder.emit_ret(ret_ty, self.ret_value_for_type(ret_ty, val_str))
                     nil:
                         if self.current_return_type == "void":
                             self.builder.emit_ret_void()
@@ -484,7 +494,13 @@ impl MirTextCodegen for MirToLlvm:
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
-        val llvm_ty = self.valid_llvm_type(self.llvm_type_text(ty))
+        var llvm_ty = self.valid_llvm_type(self.llvm_type_text(ty))
+        match self.local_types.get(dest_id):
+            case Some(existing_ty):
+                if existing_ty != nil and existing_ty != "nil":
+                    llvm_ty = existing_ty
+            case nil:
+                ()
         self.local_types[dest_id] = llvm_ty
 
         match value:
@@ -571,7 +587,14 @@ impl MirTextCodegen for MirToLlvm:
         val dest_name = self.get_local(dest_id)
         val left_val = self.translate_operand(left)
         val right_val = self.translate_operand(right)
-        val ty = self.get_local_type(dest_id)
+        val left_ty = self.valid_llvm_type(self.get_operand_type(left))
+        var ty = self.valid_llvm_type(self.get_local_type(dest_id))
+        match op:
+            case Eq | Ne | Lt | Le | Gt | Ge:
+                ()
+            case _:
+                ty = left_ty
+                self.local_types[dest_id] = ty
 
         match op:
             case Add:

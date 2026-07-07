@@ -29,6 +29,10 @@ extern fn rt_env_get(key: text) -> text
 fn hir_module_env_get(key: text) -> text:
     rt_env_get(key)
 
+fn hir_module_phase_probe(msg: text):
+    if (hir_module_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1":
+        eprint("[BOOTSTRAP-PHASE] " + msg)
+
 impl HirLowering:
     me register_imported_symbol(imported_mod: any, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
         val as_cls = imported_mod.classes[imported_name]
@@ -80,13 +84,17 @@ impl HirLowering:
         # Pass 0: pre-register imported type names so explicit `use` paths win
         # over module load order when two modules export the same short name.
         if not bootstrap_mode:
+            hir_module_phase_probe("phase3:hir:imports:start {module.name}")
             self.resolve_import_symbols(module)
+            hir_module_phase_probe("phase3:hir:imports:done {module.name}")
 
         # First pass: declare all top-level symbols
         if bootstrap_mode:
             eprint("[hir-lower] declare:start")
         if not bootstrap_mode:
+            hir_module_phase_probe("phase3:hir:declare:start {module.name}")
             self.declare_module_symbols(module)
+            hir_module_phase_probe("phase3:hir:declare:done {module.name}")
         if bootstrap_mode:
             eprint("[hir-lower] declare:done")
 
@@ -144,6 +152,7 @@ impl HirLowering:
             val lower_function_keys = lower_module_functions.keys()
             while lower_idx < lower_function_keys.len():
                 val name = lower_function_keys[lower_idx]
+                hir_module_phase_probe("phase3:hir:function:start {module.name}.{name}")
                 val fn_: Function = lower_module_functions[name]
                 val hir_fn = self.lower_function(fn_)
                 # Key the HIR functions Dict by a distinct per-function SymbolId
@@ -166,6 +175,7 @@ impl HirLowering:
                 # distinct synthetic key preserves all entries and all consumers.
                 val fn_key: SymbolId = SymbolId(id: lower_idx)
                 functions[fn_key] = hir_fn
+                hir_module_phase_probe("phase3:hir:function:done {module.name}.{name}")
                 lower_idx = lower_idx + 1
 
         if bootstrap_mode:

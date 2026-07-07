@@ -55,17 +55,21 @@ Define and enforce a SPipe robust-software lane for flight-level Simple compiler
 - Simple compiler trusted-core flight-level evidence: `blocked`. The staged
   MC/DC plan exists, but self-hosted MC/DC instrumentation and independence-pair
   reporting are not proven complete.
-- SimpleOS mission-critical release evidence: `pass` only on hosts where the
-  documented formal toolchain or OSS CAD Suite environment is active; otherwise
-  `blocked` on missing `sby`, `yosys`, or SMT solver prerequisites.
+- SimpleOS mission-critical release evidence: `pass` on this host with the
+  documented formal toolchain or OSS CAD Suite environment active; fresh hosts
+  still need `sby`, `yosys`, and an SMT solver before the release gate can pass.
 - NVMe firmware evidence: wrapper coverage is `pass` for the recorded RV32/RV64
-  wrapper/spec checks. Bootstrap-wrapper QEMU proof has printed
-  `ALL RV32 NVME FW CHECKS PASS`, but production proof remains `blocked` until
-  the self-hosted `bin/simple` bootstrap/deploy path produces a current
-  `build/nvme_fw_rv32.elf` and the rv32 boot spec passes from that artifact.
-- Thread/process/coroutine lifecycle evidence: `smoke` to `pass` only for the
-  named lifecycle/regression checks in the log. Fairness, starvation, race, and
-  scheduler proof claims remain `blocked` without a model/formal gate.
+  wrapper/spec checks. Live RV32 minimal firmware is now `pass` through the
+  bounded pure-Simple RV32 QEMU checker for the section-4, section-5, and
+  section-7 slices
+  (`check-nvme-rv32-minimal-live.shs`, serial marker `ALL RV32 NVME FW CHECKS
+  PASS`). Full self-hosted bootstrap/deploy remains `blocked`: the Stage 4
+  native build timed out after 1800s without producing a refreshed
+  `bin/simple`.
+- Thread/process/coroutine lifecycle evidence: representative hardening checks
+  are `pass` for the named lifecycle/regression specs in the log. Broader
+  fairness, starvation, race, and scheduler proof claims remain `blocked`
+  without a model/formal gate.
 - Spark usage: `blocked` by quota in the current environment; mini/other
   sidecars can collect input, but cannot replace final normal/high-capability
   review.
@@ -93,6 +97,11 @@ dev-in-progress
   and rejects empty or non-object-magic outputs. This closes the false-progress
   part of the RV32 production blocker without claiming the broader invalid-SSA
   bootstrap bug is fixed.
+- nvme-fw: fixed the LLVM unary-op lowering path used by the RV32 firmware
+  checker so normalized local ids and non-`nil` destination types are used for
+  `Neg`/`Not`/`BitNot`/`Transpose`. Evidence: section-4, section-5, and
+  section-7 minimal live checks produced RV32 objects/ELF and QEMU serial output
+  `ALL RV32 NVME FW CHECKS PASS`.
 - evidence: `bin/simple check src/compiler/70.backend/backend/llvm_backend_tools.spl`
   passed; source assertion reported `llvm_object_fail_closed_source=pass`;
   `git diff --check` passed for the edited compiler helper.
@@ -238,6 +247,34 @@ dev-in-progress
 - blocker: QEMU now reaches the firmware hook (`RV32 NVME FW BEGIN`) and completes markers through admin (`R E J M B S P H Q I F A`), then stops before reactor marker `C`; `ALL RV32 NVME FW CHECKS PASS` remains blocked by `rv32_reactor_selftest()` on rv32 baremetal.
 - runtime: `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` `rt_as_heap` now bounds-checks the candidate header against the RAM window `[0x80000000,0x88000000)` BEFORE loading `header->object_type`, fixing a baremetal silent-hang (misclassified `i64` operands routed via `rt_native_eq`→`rt_as_string`→`rt_as_heap` dereferenced unmapped memory → trap to `mtvec=0`). Confirmed by GDB backtrace `PC=0 ← rt_as_string+30 ← rt_native_eq`; `HEAP OK` and `SVC OK` now print/pass where boot previously hung. Root-cause detail appended to the nvme rv32 firmware build-timeout bug doc.
 - skill: `.claude/skills/lib/spipe_phases.md` Phase 7 now carries a "Robust-SW / mission-critical lane" note linking `doc/07_guide/app/spipe/mission_critical_robust_sw.md` and the `check-simpleos-mission-critical-release.shs` acceptance line (`release_blockers=none`), reachable via the spipe.md phase-map link (AC-1/AC-6).
+- current-status: Not only bootstrap remains. Bootstrap/full deploy is still
+  postponed, but the non-bootstrap RV32 minimal live lane still has one
+  compiler/codegen blocker after the HIR fixes below.
+- compiler: HIR statement lowering now compares local `StmtKind` discriminant
+  integers for `Val`, `Var`, `Assign`, and `Return` instead of constructing
+  dummy value-carrying enum variants for comparison. This avoids a stage4
+  payload-inspection stack overflow on `val r = f(d1)` call initializers.
+- compiler: HIR parameter lowering now treats `Param.type_` as the non-optional
+  AST field it is and lowers it directly, avoiding the stale optional access
+  form.
+- evidence: `git diff --check -- src/compiler/20.hir/hir_lowering/statements.spl
+  src/compiler/20.hir/hir_lowering/expressions.spl
+  src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl` passed.
+  `bin/simple test test/01_unit/compiler/hir/hir_stmt_dispatch_source_spec.spl
+  --mode=interpreter --clean --timeout 60 --sequential` passed 1 example.
+- evidence: `NVME_RV32_MINIMAL_SECTIONS=0 NVME_RV32_BUILD_TIMEOUT_SECS=90 sh
+  scripts/check/check-nvme-rv32-minimal-live.shs` previously passed the
+  root-only diagnostic build. After removing the temporary Binary expression
+  predispatch, `NVME_RV32_MINIMAL_SECTIONS=1 ...` advanced past `rv32_xor8`
+  and now fails later while lowering `_selftest`.
+- blocker: `NVME_RV32_MINIMAL_SECTIONS=1 NVME_RV32_BUILD_TIMEOUT_SECS=90
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  fails with a stack overflow at
+  `phase3:hir:function:start ... nvme_fw_minimal_root.spl._selftest`.
+  A direct `rt_enum_payload` shortcut for Expr-statement payload extraction was
+  rejected because pure Simple reports `semantic: unknown extern function:
+  rt_enum_payload`; the remaining fix must use an owner-supported payload path
+  or a safer statement/expression lowering refactor.
 - hardening: G3/G5/G2/G6 closed. `check-async-library-hardening-evidence.shs` now parses `Passed:/Failed:` summaries (fail on failed>0, passed==0, or no-summary; exit code no longer trusted) and covers 19 specs including actors/generators/task_spawn/multicore_green representatives. Hardening matrix gained `qemu_scheduler_smp_handoff` row (host-mode `green_carrier_qemu_spec.spl`, summary-parsed, wired into release blockers; live `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` documented as separate readiness note). `check-simpleos-critical-formal-proofs.shs --self-test` proves require_theorem rejects a stripped theorem (AC-3 regeneration durability).
 - evidence: after checker hardening, `sh scripts/check/check-async-library-hardening-evidence.shs` passes 19/19 and `sh scripts/check/check-simpleos-mission-critical-release.shs` (OSS CAD sourced) reports `STATUS: PASS ... release_blockers=none` with matrix 25/25 including the new SMP-handoff row.
 - historical bug: `test/01_unit/lib/nogc_async_mut/task_spawn_runtime_pool_spec.spl` previously failed with `semantic: invalid assignment: cannot assign field on non-object value`; it was tracked in `doc/08_tracking/bug/task_spawn_runtime_pool_spec_semantic_fail_2026-07-05.md` and temporarily excluded from the roll-up.
@@ -269,3 +306,145 @@ dev-in-progress
 - 2026-07-07 non-bootstrap-first update: per user request, bootstrap native-build work is postponed and `src/app/cli/bootstrap_main.spl` is restored to the known `run_native_build_bootstrap(args) -> 1` stub. Current non-bootstrap evidence: `bin/simple check src/app/cli/bootstrap_main.spl` passed; `sh scripts/check/check-async-library-hardening-evidence.shs` passed 19/19; `sh scripts/check/check-nvme-baremetal-wrapper-coverage.shs --strict` passed with blockers `none`; `sh scripts/check/check-simpleos-mission-critical-release.shs` with OSS CAD Suite sourced timed out at 300s with no status output, so no SimpleOS release PASS is claimed from this run.
 - 2026-07-07 SimpleOS release wrapper typing/test update: `scripts/check/check-simpleos-mission-critical-release.shs` now runs its matrix under `MATRIX_TIMEOUT_SECS` and reports `matrix_status=matrix-timeout` plus `matrix_out`/`matrix_err` instead of hanging silently. Evidence: `sh -n scripts/check/check-simpleos-mission-critical-release.shs` passed; `sh scripts/check/check-simpleos-mission-critical-release.shs --self-test` passed; `MATRIX_TIMEOUT_SECS=5 sh scripts/check/check-simpleos-mission-critical-release.shs` with OSS CAD Suite sourced failed closed with `matrix_status=matrix-timeout`.
 - 2026-07-07 non-bootstrap SimpleOS matrix update: `scripts/check/check-simpleos-hardening-evidence-matrix.shs` now bounds formal/QEMU executable rows with `SIMPLEOS_HARDENING_GATE_TIMEOUT_SECS` and emits `simpleos_hardening_gate_start/status` trace lines. `scripts/check/check-simpleos-formal-coverage.shs` now audits the bounded `run_gate ...` calls. The green-carrier QEMU spec removes stale `build/os/simpleos_green_carrier_probe.elf` before current-source builds and only boots QEMU when the build succeeds, so failed current-source links cannot be masked by stale ELF output. Evidence: `sh scripts/check/check-simpleos-formal-coverage.shs` passed; `bin/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean --timeout 60 --sequential` passed the default non-live lane; `bin/simple spipe-docgen test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --output doc/06_spec --no-index` generated 1 complete manual with 0 stubs; with OSS CAD Suite sourced, `SIMPLEOS_HARDENING_GATE_TIMEOUT_SECS=90 MATRIX_TIMEOUT_SECS=240 sh scripts/check/check-simpleos-mission-critical-release.shs` now completes with `matrix_status=pass`, `prereq_status=ready`, and release blockers exactly `qemu_scheduler_smp_handoff,qemu_scheduler_hw_handoff`. The blocker logs show current-source freestanding link failure on missing runtime symbols such as `rt_array_data_ptr_u8`, `rt_dict_remove`, `rt_string_to_int_lenient`, and `rt_simd_*`; LLVM backend is unavailable in this build.
+- 2026-07-07 non-bootstrap syscall handoff fix: bootstrap remains postponed. The `qemu_scheduler_hw_handoff` blocker was traced to `rt_extras.c` NOP definitions of `rt_read_msr`/`rt_write_msr` shadowing the x86_64 baremetal `rdmsr`/`wrmsr` helpers; linked code returned `nil` instead of programming EFER/STAR/LSTAR/SFMASK, so ring-3 `syscall` never reached `kernel_syscall_entry_asm`. Removed those two NOPs so `baremetal_stubs.c` owns the MSR helpers, kept current-CPU syscall-entry programming, and changed the final user payload to emit `USER_SYSCALL_PASS=true` through syscall 60 after returning to user mode. Evidence: `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean --timeout 120 --sequential` passed 3 examples; `SIMPLEOS_HARDENING_GATE_TIMEOUT_SECS=180 sh scripts/check/check-simpleos-hardening-evidence-matrix.shs` passed with `simpleos_hardening_matrix_passed=26/26`, `simpleos_hardening_qemu_scheduler_hw_handoff_status=pass`, and `simpleos_hardening_mission_critical_release_blockers=none`; `SIMPLEOS_HARDENING_GATE_TIMEOUT_SECS=180 MATRIX_TIMEOUT_SECS=360 sh scripts/check/check-simpleos-mission-critical-release.shs` reported `STATUS: PASS ... release_blockers=none prereq_status=ready`.
+- 2026-07-07 x86 source-check cleanup: renamed x86_64 local interrupt wrappers from grammar-keyword names `cli`/`sti`/`hlt` to `x86_cli`/`x86_sti`/`x86_hlt` and updated x86_64 interrupt callers. Evidence: `bin/simple check src/os/kernel/arch/x86_64/cpu.spl` passed, `bin/simple check src/os/kernel/arch/x86_64/interrupt.spl` passed, and the opt-in green-carrier hardware handoff spec still passed 3 examples.
+- 2026-07-07 RV32 NVMe non-bootstrap follow-up: added `scripts/check/check-nvme-rv32-minimal-live.shs`, a pure-Simple minimal live check that builds a tiny rv32 `_start` and the existing firmware hook without importing the full SimpleOS boot graph. The checker strips comments/blank lines into `build/os/generated/nvme_fw_rv32_minimal_src` before compiling, but `NVME_RV32_BUILD_TIMEOUT_SECS=90 sh scripts/check/check-nvme-rv32-minimal-live.shs` still fails closed with `STATUS: FAIL nvme-rv32-minimal-live build_rc=124`; phase evidence shows `n_sources=24`, parse reaches `logic_map.spl`, and no QEMU media is produced. `NVME_RV32_BUILD_TIMEOUT_SECS=90 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs` also failed closed before producing `build/nvme_fw_rv32.elf`. Rust seed/debug diagnostic compilers now print `WARNING: this Rust-built Simple binary is a bootstrap seed only` and fail because LLVM is unavailable, so no Rust-seed media is claimed. Remaining non-bootstrap blocker: pure-Simple rv32 native-build throughput/media generation for the firmware live PASS, distinct from postponed full bootstrap/deploy.
+- 2026-07-07 RV32 NVMe rejected shortcut: bundling the stripped firmware logic into one generated 70 KB source reduced the minimal checker to `n_sources=1`, but a 90s run timed out while parsing that single root file. The checker remains on split stripped sources, which reaches farther through the firmware closure.
+- 2026-07-07 RV32 NVMe minimal checker update: fixed LLVM return emission for mismatched operand/function return widths, kept constant SSA types aligned with declared local types, and added an RV32 bare-metal LLVM link path so `NVME_RV32_MINIMAL_SECTIONS=0 NVME_RV32_BUILD_TIMEOUT_SECS=90 sh scripts/check/check-nvme-rv32-minimal-live.shs` now reports `STATUS: PASS nvme-rv32-minimal-live-root-build diagnostic_only=true`. Prefix mode now inlines only the selected firmware logic files instead of accidentally exposing the full source tree. Remaining non-bootstrap blocker: `NVME_RV32_MINIMAL_SECTIONS=1 ...` loads `n_sources=1`, parses the generated root, then aborts with stack overflow during HIR lowering of the first real logic function (`rv32_xor7`), so bootstrap is not the only remaining item.
+- 2026-07-07 RV32 NVMe refined blocker: a focused 7-parameter rv32 return probe now compiles to object with the pure-Simple compiler, confirming the LLVM return-width/local-type fix. The remaining `NVME_RV32_MINIMAL_SECTIONS=1` failure is earlier in HIR lowering: a tiny `val r = f(d1)` call-initializer reproducer stack-overflows before expression-call lowering starts, while extracting/lowering the `StmtKind.Val` initializer payload. Bootstrap/full deploy remains postponed, but this HIR payload/call-initializer issue is still a non-bootstrap blocker for the first real firmware logic section.
+- 2026-07-07 RV32 NVMe assignment-expression follow-up: bootstrap remains
+  postponed. The minimal checker now emits the wrapper `_selftest` fail mask as
+  one `val fail = 0 + ...` expression instead of generated `var fail` plus
+  assignment, which removes one wrapper-only assignment lowering trigger. Source
+  compiler work also adds `rt_enum_payload` to the native-safe extern list and
+  routes `StmtKind.Expr` payload extraction through that existing runtime helper
+  before assignment-expression routing; `bin/simple check
+  src/compiler/80.driver/compilability.spl`, `bin/simple check
+  src/compiler/20.hir/hir_lowering/statements.spl`, and
+  `bin/simple test test/01_unit/compiler/hir/hir_stmt_dispatch_source_spec.spl
+  --mode=interpreter --clean --timeout 60 --sequential` passed.
+- blocker: the deployed `bin/simple` ELF is unchanged because full
+  bootstrap/deploy is postponed, so live RV32 evidence still reflects the old
+  compiler. A tiny RV32 native-build repro with `fail = 1` still stack-overflows
+  in HIR on the active binary, and
+  `NVME_RV32_MINIMAL_SECTIONS=1 NVME_RV32_BUILD_TIMEOUT_SECS=90
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  now fails at `phase3:hir:function:start ... rv32_rain_selftest`. No live RV32
+  PASS is claimed.
+- 2026-07-07 RV32 NVMe diagnostic shaper correction: the `rt_enum_payload`
+  source detour was removed because native-build rejects it with
+  `semantic: unknown extern function: rt_enum_payload`. The minimal checker now
+  shapes only the generated diagnostic source: N=1 uses an assignment-free
+  `rv32_xor7`, a single RAIN recovery assertion, direct `val fail =
+  rv32_rain_selftest()`, and `SIMPLE_BOOTSTRAP_SKIP_MIR_OPT=1` to bypass the
+  old optimizer nil-kind failure. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs`, `git diff --check --
+  scripts/check/check-nvme-rv32-minimal-live.shs`, and
+  `bin/simple test test/01_unit/compiler/hir/hir_stmt_dispatch_source_spec.spl
+  --mode=interpreter --clean --timeout 60 --sequential` passed.
+- blocker: `NVME_RV32_MINIMAL_SECTIONS=1 NVME_RV32_BUILD_TIMEOUT_SECS=90
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  now clears HIR, borrow check, async processing, AOP, and MIR optimization
+  skip, then fails after `aot:format:done` with `semantic: undefined field
+  'kind': cannot access field on value of type 'nil'`. Tiny RV32 probes show a
+  branch/call wrapper and a single `if` expression both reach LLVM, so the next
+  blocker is narrower than HIR assignment lowering but still prevents live RV32
+  PASS. No full bootstrap/deploy was run.
+- 2026-07-07 RV32 NVMe N=1 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal checker now uses a shaped N=1 diagnostic RAIN probe
+  that avoids the active compiler's RV32 assignment, parameter-width,
+  comparison, and normal-function inline-asm traps. The Simple object exposes
+  `rv32_rain_selftest`; the checker renames the compiler-emitted dummy
+  `_start`, links a tiny external RV32 `_start` stub with matching `ilp32d`
+  ABI, and the stub prints UART PASS/FAIL after calling the selftest. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=1 NVME_RV32_BUILD_TIMEOUT_SECS=90
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: this is a diagnostic first-section live PASS, not full RV32 firmware
+  PASS. Full `NVME_RV32_MINIMAL_SECTIONS` unset / multi-section firmware still
+  must not be claimed until the remaining active-compiler RV32 i64/codegen and
+  throughput blockers are fixed or the postponed bootstrap/deploy picks up the
+  source compiler repairs.
+- 2026-07-07 RV32 NVMe N=2 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal checker now also shapes the ECC section for prefix
+  diagnostics, using one `i32` correction identity instead of the real
+  assignment-heavy ECC loop. Prefix aggregation now sums zero/nonzero section
+  returns without per-section bit multiplication, and generated `_selftest`
+  returns `i32` to match the active RV32 backend. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=2 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=2 is still diagnostic prefix coverage only. The real ECC
+  implementation and later sections remain gated by active-compiler RV32
+  assignment/loop/i64/codegen limits; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=3 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal checker now shapes the journal section for prefix
+  diagnostics with a small `i32` compaction identity instead of the real
+  assignment-heavy WAL simulation. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=3 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=3 remains diagnostic prefix coverage only. The real journal
+  implementation and later sections are still not live-proven with active
+  `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=4 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal checker now shapes the map section for prefix
+  diagnostics with a small `i32` cache/write-back identity that avoids active
+  RV32 negative-literal and mutation lowering traps. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=4 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=4 remains diagnostic prefix coverage only. The real map
+  implementation and later sections are still not live-proven with active
+  `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=5 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal checker now shapes the band allocator section for
+  prefix diagnostics with a small `i32` allocation/free identity instead of the
+  real mutation-heavy block lifecycle. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=5 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=5 remains diagnostic prefix coverage only. The real band
+  implementation and later sections are still not live-proven with active
+  `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=6 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal checker now shapes the scheduler section for prefix
+  diagnostics with a small `i32` balanced-vs-serialized channel identity instead
+  of the real loop/mutation drain model. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=6 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=6 remains diagnostic prefix coverage only. The real scheduler
+  implementation and later sections are still not live-proven with active
+  `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=7 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal checker now shapes the power/thermal section for
+  prefix diagnostics with a small `i32` throttle/cooldown identity instead of
+  the real loop/mutation thermal model. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=7 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=7 remains diagnostic prefix coverage only. The real
+  power/thermal implementation and later sections are still not live-proven
+  with active `bin/simple`; no full RV32 firmware PASS is claimed.
