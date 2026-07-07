@@ -115,11 +115,11 @@ impl L2pMap:
         var lru: i64 = 0
         var el: i64 = 0
         if found >= 0:
-            me.hits = me.hits + 1
+            me.hits = me.hit_count() + 1
             me.tick = me.tick + 1
             me.c_age[found] = me.tick
             return ftl_map_sanitize_ppn(me.c_ppn[found])
-        me.misses = me.misses + 1
+        me.misses = me.miss_count() + 1
         lru = ftl_lru_slot(me.c_age, me.cap)
         if lru == UNMAP:
             return ftl_map_sanitize_ppn(me.l2p[lba])
@@ -127,7 +127,7 @@ impl L2pMap:
             el = me.c_lba[lru]
             if ftl_map_lba_valid(el) and ftl_map_ppn_valid(me.c_ppn[lru]):
                 me.l2p[el] = me.c_ppn[lru]
-            me.evicts = me.evicts + 1
+            me.evicts = me.evict_count() + 1
         me.tick = me.tick + 1
         me.c_lba[lru] = lba
         me.c_ppn[lru] = ftl_map_sanitize_ppn(me.l2p[lba])
@@ -159,7 +159,7 @@ impl L2pMap:
                 el = me.c_lba[lru]
                 if ftl_map_lba_valid(el) and ftl_map_ppn_valid(me.c_ppn[lru]):
                     me.l2p[el] = me.c_ppn[lru]
-                me.evicts = me.evicts + 1
+                me.evicts = me.evict_count() + 1
             me.tick = me.tick + 1
             me.c_lba[lru] = lba
             me.c_ppn[lru] = ppn
@@ -229,6 +229,8 @@ fn ftl_map_selftest() -> i64:
     failures = failures + expect_eq(m.hit_count(), 1, "hits == 1 after cache hit")
     m.hits = -3
     failures = failures + expect_eq(m.hit_count(), 0, "corrupted negative cache hits clamp to zero")
+    failures = failures + expect_eq(m.lookup(10), 100, "corrupted negative cache hits still serves hit")
+    failures = failures + expect_eq(m.hit_count(), 1, "corrupted negative cache hits increments from zero")
     m.hits = 1
 
     # 2. flush() persists to l2p
@@ -241,6 +243,8 @@ fn ftl_map_selftest() -> i64:
     failures = failures + expect_eq(m.miss_count(), 1, "miss_count == 1 after unmapped lookup")
     m.misses = -4
     failures = failures + expect_eq(m.miss_count(), 0, "corrupted negative cache misses clamp to zero")
+    failures = failures + expect_eq(m.lookup(998), UNMAP, "corrupted negative cache misses still serves miss")
+    failures = failures + expect_eq(m.miss_count(), 1, "corrupted negative cache misses increments from zero")
     m.misses = 1
     failures = failures + expect_eq(m.lookup(LBA_COUNT), UNMAP, "out-of-range lookup fails closed")
     failures = failures + expect_eq(m.miss_count(), 1, "out-of-range lookup does not touch cache")
@@ -298,5 +302,11 @@ fn ftl_map_selftest() -> i64:
     failures = failures + expect_eq(evicts_ok, 1, "evictions > 0 after >cap updates")
     m.evicts = -5
     failures = failures + expect_eq(m.evict_count(), 0, "corrupted negative cache evictions clamp to zero")
+    m.c_lba[0] = 7
+    m.c_ppn[0] = 1007
+    m.c_dirty[0] = 1
+    m.c_age[0] = -100
+    m.update(200, 1200)
+    failures = failures + expect_eq(m.evict_count(), 1, "corrupted negative cache evictions increments from zero")
 
     failures
