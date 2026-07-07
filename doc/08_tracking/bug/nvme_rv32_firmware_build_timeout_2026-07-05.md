@@ -1399,3 +1399,32 @@ Review follow-up before commit narrowed the string-compare change so arbitrary
 pointer equality remains pointer equality. `rt_strcmp` is used only for
 bootstrap string-derived operands tracked in LLVM lowering, and index lowering
 again evaluates `base` before `index`.
+
+### Latest bootstrap progress: visible bootstrap CLI output (2026-07-07)
+
+Bootstrap print lowering now emits `rt_println(text)` instead of dropping print
+calls in bootstrap mode. The generated real-main shard now has visible CLI
+output:
+
+```text
+PASS test/01_unit/compiler/mir/bootstrap_binary_lowering_source_spec.spl
+PASS test/01_unit/app/cli/bootstrap_main_source_spec.spl
+real_main_print_fix_rc=0
+
+build/mini_builds/stage2_real_main_print_fix --version
+simple-bootstrap 1.0.0-beta
+version_rc=0
+
+build/mini_builds/stage2_real_main_print_fix
+Simple Bootstrap Compiler v1.0.0-beta
+Usage: simple compile <file> [-o <output>] [--native] [--opt-level=<level>] [--list-optimizations]
+noargs_rc=0
+
+build/mini_builds/stage2_real_main_print_fix --help
+help_rc=0
+```
+
+This removes the print/interpolation visibility blocker for the simple
+bootstrap CLI by using literal bootstrap text. Firmware production proof still
+waits on replacing the `run_native_build_bootstrap` stub so the matched
+`native-build` branch invokes the real native-build pipeline.

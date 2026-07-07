@@ -724,3 +724,48 @@ Remaining blockers are now narrower:
 - `run_native_build_bootstrap` remains a stub returning `1`;
 - full production firmware proof still needs the real native-build path to
   execute instead of only matching CLI command branches.
+
+## 2026-07-07 Progress: bootstrap print emits visible CLI output
+
+Bootstrap `print` / `_cli_eprint` no longer lowers to a no-op unit temp. In
+bootstrap mode, print calls lower to `rt_println(text)`, and the direct LLVM
+path emits a typed declaration:
+
+```text
+call void @rt_println(ptr ...)
+declare void @rt_println(ptr)
+```
+
+The bootstrap banner/version strings were kept literal in `bootstrap_main.spl`
+instead of adding interpolation support to this lane.
+
+Focused evidence:
+
+```text
+PASS test/01_unit/compiler/mir/bootstrap_binary_lowering_source_spec.spl
+PASS test/01_unit/app/cli/bootstrap_main_source_spec.spl
+real_main_print_fix_rc=0
+```
+
+Generated artifact smoke:
+
+```text
+build/mini_builds/stage2_real_main_print_fix --version
+simple-bootstrap 1.0.0-beta
+version_rc=0
+
+build/mini_builds/stage2_real_main_print_fix
+Simple Bootstrap Compiler v1.0.0-beta
+Usage: simple compile <file> [-o <output>] [--native] [--opt-level=<level>] [--list-optimizations]
+noargs_rc=0
+
+build/mini_builds/stage2_real_main_print_fix --help
+Simple Bootstrap Compiler v1.0.0-beta
+Built from Simple source via the staged bootstrap
+...
+help_rc=0
+```
+
+Remaining blocker for firmware production: `run_native_build_bootstrap` still
+returns `1`, so `native-build` command dispatch is matched but does not yet run
+the real native-build pipeline.
