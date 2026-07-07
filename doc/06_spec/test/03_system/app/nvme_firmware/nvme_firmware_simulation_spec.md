@@ -811,7 +811,7 @@ expect(count_out).to_contain("1141")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -823,6 +823,10 @@ expect(out).to_contain("present firmware seams: 6")
 expect(out).to_contain("missing for silicon:    7")
 expect(out).to_contain("Zynq NAND Flash Controller")
 expect(out).to_contain("PCIe endpoint init")
+expect(out).to_contain("DDR controller + OCM init")
+expect(out).to_contain("Cortex-A9 SMP + GIC bring-up")
+expect(out).to_contain("MMU + L1/L2")
+expect(out).to_contain("FSBL / BootROM handoff")
 expect(out).to_contain("ARMv7 freestanding Simple runtime")
 _expect_no_fail_marker(out, "Cosmos+ OpenSSD platform descriptor")
 ```
