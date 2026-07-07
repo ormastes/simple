@@ -1,7 +1,8 @@
 # BUG: Tauri mobile webview paints blank white on both iOS sim and Android emulator despite `eval OK` / render pipeline "succeeding"
 
-**Status:** Root-caused. Fix identified, verified, and captured as a patch (not committed to
-source in this pass — see Fix section). Priority: P0 (both mobile lanes render nothing visible).
+**Status:** FIXED. Patch applied and committed (see Fix section for sha). Priority: P0 (both
+mobile lanes render nothing visible) — root render-pipeline bug resolved; iOS-simulator
+end-to-end re-verification remains a follow-up item (see Verification below).
 
 ## Symptom
 
@@ -91,7 +92,7 @@ the shell uses (`examples/06_io/ui/render_mobile_page.spl` against
   investigation: the *generated page itself* was broken (336 KB of CSS, ~140 bytes of body), not
   the mobile shell/webview config — confirmed independent of any mobile simulator/emulator.
 
-## Fix (identified, verified, not committed to source in this pass)
+## Fix (applied and committed)
 
 Two files, both required together:
 
@@ -116,10 +117,66 @@ Two files, both required together:
    disk (same latent bug, just uncalled by the P0 lanes).
 
 Verified: after applying both changes, regenerating the same showcase page produces the correct
-346,701-byte page with full widget markup (see Evidence). Patch captured at
-`/private/tmp/claude-501/-Users-ormastes-simple/7597a415-f0b0-4c3f-822d-107292b34bec/scratchpad/mobile_blank_fix.patch`
-for review; **not applied to the committed tree in this pass** per this task's write-scope
-restriction (bug record + one guide prose fix + uncommitted evidence only).
+346,701-byte page with full widget markup (see Evidence). Applied at commit `<FIX_SHA>` (see
+`jj log`/`git log` for `doc/08_tracking/bug/tauri_mobile_webview_blank_white_render_2026-07-08.md`).
+
+## Verification (integration pass, 2026-07-07)
+
+- **Sanity grep:** searched the whole repo for every remaining importer of `parse_ui_to_tree`.
+  All active app/lib/example/numbered-test call sites (`src/app/ui.*`, `src/app/ui.mcp`,
+  `test/01_unit/**`, `test/02_integration/**`, `test/03_system/**`, `examples/06_io/ui/**`)
+  already imported `nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}` — the correct
+  implementation — and are unaffected by the deletion. The only importers of the *deleted*
+  `common.ui.parse.sdn_tree.{parse_ui_to_tree}` besides `glass_pipeline_compare.spl` are stale,
+  pre-existing duplicate test trees (`test/system/gui/*`, `test/unit/app/ui/backend_matrix_spec.spl`
+  — unnumbered leftovers from the `test/` → `test/0N_*` migration). Confirmed these were already
+  RED before this fix (e.g. `test/system/gui/sdn_parsing_spec.spl` was 9 passed / 9 failed
+  pre-patch; `test/unit/app/ui/backend_matrix_spec.spl` fails to resolve unrelated modules
+  — `app.ui.render.widgets`, `app.ui.web.backend` — that don't exist in the current tree at all).
+  No regression; out of scope for this fix (separate stale-test-tree cleanup).
+- **Regeneration:** `SIMPLE_EXECUTION_MODE=interpret bin/simple run examples/06_io/ui/render_mobile_page.spl
+  -- examples/06_io/ui/widget_showcase_mobile.ui.sdn <out>.html` wrote exactly **346,701 bytes**
+  (matches the Evidence section above), containing `id="root"`, `widget-navigation-bar`,
+  `widget-tabs`/`tab-bar-item`, `widget-dialog`, etc. — the full tree, not the 140-byte empty
+  panel.
+  Also regenerated `tools/tauri-shell/dist/index.html` from the same command (build artifact,
+  untracked by VCS — reverted to its stale committed 14,626-byte placeholder afterward so the
+  working tree stays clean; see prior precedent in this same doc history).
+- **Headless Chrome screenshot** at 390×844 (`Google Chrome --headless --window-size=390,844
+  --screenshot`) of the regenerated HTML: 100% non-white pixels; visually confirmed dark-theme
+  "Widget Showcase" page with nav/tab bar (Home/Search/Profile), Properties panel, command
+  palette, "Confirm Action" dialog, and "More Options" bottom sheet — definitively not blank.
+- **Specs:**
+  - `test/01_unit/app/ui/browser_backend_pixel_paths_spec.spl` — 4/4 PASS.
+  - `test/03_system/gui/glass_pixel_compare_spec.spl` — 8/13 pass, same 4 pre-existing failures
+    as before the fix (`ComparisonResult` missing `total_pixels` field / `len` method — an
+    unrelated, pre-existing bug in `glass_pipeline_compare.spl`'s comparison result type) plus
+    one *additional* failure ("runs core glass comparison") that was previously a false-pass:
+    with the broken empty-string stub, this example never reached the code path that touches
+    `ComparisonResult.total_pixels`, so it looked green; with real parsing restored it now hits
+    the same genuine pre-existing bug the other 4 failures hit. Net: no new distinct root cause,
+    one fewer false-positive. Filed as a follow-up (`ComparisonResult.total_pixels`/`len` gap)
+    rather than fixed here (out of scope).
+  - `test/02_integration/rendering/glass_pipeline_screenshot_spec.spl` — fails to resolve module
+    `common.ui.glass_test_page`; confirmed pre-existing/unrelated (same failure with the patch
+    reverted).
+- **`bin/simple check`** on both touched files: `All checks passed (1 file(s))` for both.
+- **`sh scripts/check/check-ui-backend-isolation.shs`**: `ui_backend_isolation_new=0`,
+  `ui_backend_isolation_ok=true` (baseline drift of 1 pre-existing, unrelated to this change and
+  already dirty in the working copy before this task started).
+- **iOS simulator (bonus, time-boxed) — SKIPPED, remaining P0 verification item:** built and
+  installed the Tauri iOS app (`cargo tauri ios build --debug --target aarch64-sim`, launched on
+  a booted iPhone 17 Pro sim). Discovered the mobile shell does **not** load
+  `tools/tauri-shell/dist/index.html` as a static asset on mobile — `src-tauri/src/lib.rs`
+  spawns an embedded/bundled `simple` runtime binary (baked in via `include_bytes!` at Rust
+  build time) as a subprocess over IPC, fronted by an inline `mdi_shell_html()` shell page, and
+  only falls back to `WebviewUrl::App("index.html")` in non-MDI/non-shared-wm modes. The
+  embedded runtime binary was not rebuilt from this source fix, so an iOS-sim screenshot
+  wouldn't actually exercise the fixed code path without also rebuilding/re-embedding that
+  runtime — out of scope for this fix's time budget. Desktop-lane verification (regeneration +
+  headless Chrome screenshot above) already proves the fix at the render-pipeline level; the
+  mobile IPC/bundled-runtime rebuild-and-relaunch is the remaining P0 acceptance step for a
+  future pass.
 
 ## Secondary finding (already fixed in this pass, low-risk)
 

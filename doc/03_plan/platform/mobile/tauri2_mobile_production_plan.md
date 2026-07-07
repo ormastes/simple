@@ -65,6 +65,20 @@ to production)` → `P3 (iOS device AOT, gated on Task #21)` + `P4 (release lane
   screen is **blank white** on both — not the styled dark showcase the retained evidence claims.
   The aggregate wrapper itself was not run (out of timebox). Treat the 07-02 retained "pass" as
   **not reconfirmed**; recommend filing a blank-paint regression bug before P1.2/P1.3 proceed.
+- **RESOLVED 2026-07-07 (integration pass):** root cause was a duplicate, broken
+  `parse_ui_to_tree(path)` in `src/lib/common/ui/parse/sdn_tree.spl` that ignored `path` and
+  always parsed `""`, colliding at the cross-module symbol level with the correct
+  `nogc_sync_mut.ui.parse.sdn_tree.parse_ui_to_tree` — see
+  `doc/08_tracking/bug/tauri_mobile_webview_blank_white_render_2026-07-08.md` (now FIXED). Fix:
+  deleted the broken stub and repointed `glass_pipeline_compare.spl`'s import to the correct
+  implementation. Desktop-lane verification (regenerate `render_mobile_page.spl` → 346,701 bytes
+  full widget tree; headless Chrome 390×844 screenshot 100% non-white, visually confirms styled
+  nav/tabs/dialog/bottom-sheet) confirms the render-pipeline blank-paint bug is fixed. **Not yet
+  re-confirmed end-to-end on-device/on-simulator**: the mobile shell loads content via an
+  embedded/bundled `simple` runtime subprocess (baked in via `include_bytes!`), not via the
+  `dist/index.html` static asset directly, so a full P0.2 aggregate-wrapper rerun still requires
+  rebuilding+re-embedding that bundled runtime with this fix before iOS/Android screenshots will
+  reflect it. That rebuild-and-rerun is the remaining P0 acceptance step blocking P1.2/P1.3.
 
 ---
 
