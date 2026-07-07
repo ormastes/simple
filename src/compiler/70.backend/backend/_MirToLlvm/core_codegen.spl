@@ -114,14 +114,43 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] function:start {name}"
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and name == "__simple_main":
-            # ponytail: temporary Stage2 smoke entry until bootstrap if/print lowering has phi support.
+            # ponytail: minimal Stage2 CLI entry until bootstrap if/print lowering has phi support.
             val banner_global = self.add_string_global("simple-bootstrap 1.0.0-beta")
+            val version_arg_global = self.add_string_global("--version")
+            self.defined_func_names["rt_get_args"] = true
+            self.defined_func_names["rt_array_len"] = true
+            self.defined_func_names["rt_array_get"] = true
+            self.defined_func_names["rt_string_new"] = true
+            self.defined_func_names["rt_string_eq"] = true
+            self.defined_func_names["strlen"] = true
             self.builder.emit("declare i32 @puts(ptr)")
+            self.builder.emit("declare ptr @rt_get_args()")
+            self.builder.emit("declare i64 @rt_array_len(ptr)")
+            self.builder.emit("declare i64 @rt_array_get(ptr, i64)")
+            self.builder.emit("declare i64 @rt_string_new(ptr, i64)")
+            self.builder.emit("declare i64 @rt_string_eq(i64, i64)")
+            self.builder.emit("declare i64 @strlen(ptr)")
             self.builder.start_function("__simple_main", [], "i64")
             self.builder.emit_label("bb0")
+            self.builder.emit("  %bootstrap_args = call ptr @rt_get_args()")
+            self.builder.emit("  %bootstrap_argc = call i64 @rt_array_len(ptr %bootstrap_args)")
+            self.builder.emit("  %bootstrap_has_version_slot = icmp sgt i64 %bootstrap_argc, 1")
+            self.builder.emit("  br i1 %bootstrap_has_version_slot, label %bootstrap_check_version, label %bootstrap_unknown")
+            self.builder.emit_label("bootstrap_check_version")
+            self.builder.emit("  %bootstrap_arg1 = call i64 @rt_array_get(ptr %bootstrap_args, i64 1)")
+            val version_arg_ptr = self.builder.fresh_local()
+            self.builder.emit("  {version_arg_ptr} = getelementptr inbounds [10 x i8], ptr {version_arg_global}, i64 0, i64 0")
+            self.builder.emit("  %bootstrap_version_arg_len = call i64 @strlen(ptr {version_arg_ptr})")
+            self.builder.emit("  %bootstrap_version_arg = call i64 @rt_string_new(ptr {version_arg_ptr}, i64 %bootstrap_version_arg_len)")
+            self.builder.emit("  %bootstrap_version_eq = call i64 @rt_string_eq(i64 %bootstrap_arg1, i64 %bootstrap_version_arg)")
+            self.builder.emit("  %bootstrap_version_match = icmp ne i64 %bootstrap_version_eq, 0")
+            self.builder.emit("  br i1 %bootstrap_version_match, label %bootstrap_version, label %bootstrap_unknown")
+            self.builder.emit_label("bootstrap_version")
             val banner_ptr = self.builder.fresh_local()
             self.builder.emit("  {banner_ptr} = getelementptr inbounds [28 x i8], ptr {banner_global}, i64 0, i64 0")
             self.builder.emit("  %bootstrap_puts = call i32 @puts(ptr {banner_ptr})")
+            self.builder.emit_ret("i64", "0")
+            self.builder.emit_label("bootstrap_unknown")
             self.builder.emit_ret("i64", "1")
             self.builder.end_function()
             return

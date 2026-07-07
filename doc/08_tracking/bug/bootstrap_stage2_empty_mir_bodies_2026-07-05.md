@@ -561,3 +561,39 @@ and bypasses real bootstrap `if`/print lowering. Next work is to replace the
 temporary smoke entry with real `main` lowering: proper condition values, phi
 or stack-slot merge handling, and real print lowering so `--version` can return
 0 while `native-build` remains fail-closed.
+
+## 2026-07-07 Progress: Stage 2 `--version` is argv-sensitive
+
+The bootstrap-only Stage 2 entry now checks the hosted runtime argv array and
+only treats `argv[1] == "--version"` as success. It prints the bootstrap banner
+and returns `0` for `--version`; no-arg and `native-build` remain fail-closed
+with return code `1`.
+
+Focused evidence:
+
+```text
+PASS test/01_unit/compiler/backend/bootstrap_llvm_entry_symbol_source_spec.spl
+stage2_cli_entry_rc=0
+[mir-lower-free] done instr-total=12 term-total=24
+[llvm-tools] llc-object
+```
+
+Smoke evidence:
+
+```text
+build/mini_builds/stage2_after_bootstrap_cli_entry --version
+simple-bootstrap 1.0.0-beta
+version_rc=0
+
+build/mini_builds/stage2_after_bootstrap_cli_entry
+noargs_rc=1
+
+build/mini_builds/stage2_after_bootstrap_cli_entry native-build
+native_build_rc=1
+```
+
+Remaining production gap: this is still a bootstrap-specific guarded entry, not
+full `bootstrap_main.spl` lowering. The real compiler path still needs proper
+condition values, phi or stack-slot merge handling, indexing, string equality,
+and print lowering before the full bootstrap/deploy and firmware build loops
+can be considered production proof.

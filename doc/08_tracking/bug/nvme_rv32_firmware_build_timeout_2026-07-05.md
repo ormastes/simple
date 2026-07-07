@@ -1277,3 +1277,30 @@ straight-line smoke entry that proves the binary is alive and keeps
 `native-build` fail-closed. RV32 firmware proof remains blocked until real
 bootstrap CLI lowering replaces the smoke entry and the full bootstrap/deploy
 loop produces a self-hosted `bin/simple`.
+
+### Latest bootstrap progress: Stage 2 `--version` succeeds, other commands fail closed (2026-07-07)
+
+The Stage 2 bootstrap entry is now argv-sensitive instead of unconditional. The
+bounded build and smoke evidence:
+
+```text
+PASS test/01_unit/compiler/backend/bootstrap_llvm_entry_symbol_source_spec.spl
+stage2_cli_entry_rc=0
+[mir-lower-free] done instr-total=12 term-total=24
+[llvm-tools] llc-object
+
+build/mini_builds/stage2_after_bootstrap_cli_entry --version
+simple-bootstrap 1.0.0-beta
+version_rc=0
+
+build/mini_builds/stage2_after_bootstrap_cli_entry
+noargs_rc=1
+
+build/mini_builds/stage2_after_bootstrap_cli_entry native-build
+native_build_rc=1
+```
+
+This satisfies the immediate Stage 2 CLI gate for a visible version probe and
+fail-closed unsupported commands. Firmware production proof is still open until
+the real bootstrap CLI lowering and full bootstrap/deploy loop produce a usable
+self-hosted compiler for the RV32 firmware build.
