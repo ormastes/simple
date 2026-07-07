@@ -38,13 +38,22 @@ extern fn simpleos_fat32_path_read_buffer_addr() -> u64
 extern fn simpleos_fat32_stream_open(path: text) -> i64
 extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i64
 
+# Materialise a raw identity-mapped buffer into a Simple [u8] via the C runtime
+# (rt_extras.c/baremetal_stubs.c). This AVOIDS the freestanding growable-[u8]
+# hazard: `var out:[u8]=[]` + per-byte `.push()` starts at cap=16 and grows the
+# backing store via ~9 realloc-copies, and the freestanding bump allocator's
+# grow-copy corrupts the element bytes (length survives, data does not — the ELF
+# arrived with magic=248,3,0,0 / phnum=0). rt_bytes_from_raw calls rt_array_new(n)
+# which PRE-SIZES capacity to n, so no realloc ever runs. Same helper the
+# freestanding VFS/sandbox boot paths use (vfs_boot_init, sandbox_boot_apply).
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
 use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
 use os.kernel.memory.vmm.{vmm_init}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.process_image.{build_user_process_image_unchecked}
 use os.kernel.loader.x86_64_fs_exec_ring3.{x86_64_fs_exec_enter_image_ring3}
-use os.kernel.boot.mmio.{mmio_read8}
 
 fn _read_fsexec_bytes() -> [u8]:
     """Stream /FSEXEC.ELF off the FAT32/NVMe disk into the static path-read buffer
@@ -61,13 +70,10 @@ fn _read_fsexec_bytes() -> [u8]:
         serial_println("[gen] FAIL fat32 stream read rc={n}")
         return []
     serial_println("[gen] /FSEXEC.ELF read size={fsize} buf=0x{buf}")
-    var out: [u8] = []
-    var i: u64 = 0
-    val size = fsize.to_u64()
-    while i < size:
-        out.push(mmio_read8(buf + i))
-        i = i + 1
-    out
+    # Pre-sized C-side materialisation (no growable-[u8] realloc — see the
+    # rt_bytes_from_raw extern comment above). buf is an identity-mapped physical
+    # address; the C helper reads the raw bytes directly.
+    rt_bytes_from_raw(buf as i64, fsize)
 
 fn spl_start():
     serial_println("")
