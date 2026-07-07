@@ -29,6 +29,8 @@ binding to a local first (`var f = me.hook; f(args)`); the setter must be a `me`
 use nvme_types.*
 use sandbox.*
 
+val HOOK_COUNTER_MAX: i64 = 1000000000000000000
+
 # ── A hook's return: a decision value + self-reported fuel consumed ───────────
 struct HookVote:
     value:     i64
@@ -36,6 +38,13 @@ struct HookVote:
 
 fn vote(value: i64, fuel_used: i64) -> HookVote:
     HookVote(value: value, fuel_used: fuel_used)
+
+fn hook_counter_next(v: i64) -> i64:
+    if v < 0:
+        return 1
+    if v >= HOOK_COUNTER_MAX:
+        return HOOK_COUNTER_MAX
+    v + 1
 
 # ── Default (built-in) hook bodies (positional scalar args) ───────────────────
 # gc_score(block, valid, erase, fuel): greedy default scores by live-page count, so the
@@ -90,7 +99,7 @@ impl PolicyHooks:
     me request_install(kind: i64) -> bool:
         if hook_kind_allowed(kind):
             return true
-        me.rejected_installs = me.rejected_count() + 1
+        me.rejected_installs = hook_counter_next(me.rejected_installs)
         false
 
     # ── Typed installers (only the allowed kinds have one) ───────────────────
@@ -142,7 +151,7 @@ impl PolicyHooks:
         var f = me.gc_score
         val v: HookVote = f(block, valid, erase, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = me.fuel_abort_count() + 1
+            me.fuel_aborts = hook_counter_next(me.fuel_aborts)
             return default_gc_score(block, valid, erase, me.fuel_budget).value
         v.value
 
@@ -153,7 +162,7 @@ impl PolicyHooks:
         var f = me.qos
         val v: HookVote = f(opcode, nblocks, nsid, age, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = me.fuel_abort_count() + 1
+            me.fuel_aborts = hook_counter_next(me.fuel_aborts)
             return clamp_priority(default_qos(opcode, nblocks, nsid, age, me.fuel_budget).value)
         clamp_priority(v.value)
 
@@ -164,7 +173,7 @@ impl PolicyHooks:
         var f = me.hot_cold
         val v: HookVote = f(lba, read_count, write_count, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = me.fuel_abort_count() + 1
+            me.fuel_aborts = hook_counter_next(me.fuel_aborts)
             return clamp_bool(default_hot_cold(lba, read_count, write_count, me.fuel_budget).value)
         clamp_bool(v.value)
 
@@ -175,7 +184,7 @@ impl PolicyHooks:
         var f = me.telemetry
         val v: HookVote = f(kind, code, value, me.fuel_budget)
         if v.fuel_used > me.fuel_budget:
-            me.fuel_aborts = me.fuel_abort_count() + 1
+            me.fuel_aborts = hook_counter_next(me.fuel_aborts)
             return clamp_bool(default_telemetry(kind, code, value, me.fuel_budget).value)
         clamp_bool(v.value)
 
@@ -206,6 +215,10 @@ fn hooks_selftest() -> i64:
     fail = fail + expect_eq(bool_to_int(h.request_install(HOOK_WAL)), 0, "hooks: corrupted rejected count still rejects forbidden install")
     fail = fail + expect_eq(h.rejected_count(), 1, "hooks: corrupted rejected count increments from zero")
     h.rejected_installs = 2
+    h.rejected_installs = HOOK_COUNTER_MAX
+    fail = fail + expect_eq(bool_to_int(h.request_install(HOOK_WAL)), 0, "hooks: saturated rejected count still rejects forbidden install")
+    fail = fail + expect_eq(h.rejected_count(), HOOK_COUNTER_MAX, "hooks: rejected count saturates")
+    h.rejected_installs = 2
 
     # Install a custom GC scorer (wear-aware: score by erase count) and watch it apply.
     h.install_gc_score(\b, v, e, fu: vote(e, 1))
@@ -219,6 +232,10 @@ fn hooks_selftest() -> i64:
     fail = fail + expect_eq(h.fuel_abort_count(), 0, "hooks: corrupted fuel abort count clamps to zero")
     fail = fail + expect_eq(h.gc_candidate_score(0, 7, 2), 7, "hooks: corrupted fuel abort count still discards over-fuel vote")
     fail = fail + expect_eq(h.fuel_abort_count(), 1, "hooks: corrupted fuel abort count increments from zero")
+    h.fuel_aborts = 1
+    h.fuel_aborts = HOOK_COUNTER_MAX
+    fail = fail + expect_eq(h.gc_candidate_score(0, 7, 2), 7, "hooks: saturated fuel abort still discards over-fuel vote")
+    fail = fail + expect_eq(h.fuel_abort_count(), HOOK_COUNTER_MAX, "hooks: fuel abort count saturates")
     h.fuel_aborts = 1
 
     # Clear reverts to the default policy.
