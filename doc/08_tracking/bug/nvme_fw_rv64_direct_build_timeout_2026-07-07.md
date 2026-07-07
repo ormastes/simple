@@ -506,3 +506,32 @@ Terminated
 
 Keep the DRAM durability split as total parse-load reduction, but do not count
 this probe as forward RV64 evidence.
+
+## Update — policy/target cases split, probe still near ECC/journal
+
+`logic_policy_target_cases.spl` was reduced to a small case facade, with policy
+hook/clamp, policy GC, and target geometry assertions moved into separate case
+modules. The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`. This run did not reach the newly split policy/target
+case files; it stopped at ECC check cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_target.spl
+[BOOTSTRAP-PHASE] ... logic_rain_cases.spl chars=264
+[BOOTSTRAP-PHASE] ... logic_rain_cases.spl
+[BOOTSTRAP-PHASE] ... logic_ecc_check_cases.spl chars=824
+Terminated
+```
+
+Keep the policy/target split as total parse-load reduction, but do not count
+this probe as forward RV64 evidence.
