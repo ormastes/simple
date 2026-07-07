@@ -338,6 +338,8 @@ impl NvmeController:
         if status == SC_SUCCESS:
             if me.target.lbas <= 0 or cmd.lba > me.target.lbas - cmd.nblocks:
                 status = SC_LBA_RANGE
+        if status == SC_SUCCESS and cmd.nblocks > MDTS_BLOCKS:
+            status = SC_INVALID_FIELD
         if status == SC_SUCCESS:
             if cmd_is_write(cmd) or cmd_is_write_zero(cmd):
                 val h: Handle = me.pool.acquire(cmd.cid, cmd.lba, cmd.nblocks, cmd.data)
@@ -488,6 +490,10 @@ fn nvme_controller_selftest() -> i64:
     hw.io_process()
     val hwoob: NvmeCpl = hw.io_reap(1)
     fail = fail + expect_eq(hwoob.status, SC_LBA_RANGE, "IO beyond target namespace is rejected")
+    hw.io_submit(1, cmd_make(66, OP_WRITE, 1, MDTS_BLOCKS + 1, prp_pack(0x44, 0x55)))
+    hw.io_process()
+    val hwmdts: NvmeCpl = hw.io_reap(1)
+    fail = fail + expect_eq(hwmdts.status, SC_INVALID_FIELD, "IO above advertised MDTS is rejected")
     val badcidr: AdminResult = c.admin_exec(admin_identify_cmd(70000, CNS_CONTROLLER))
     fail = fail + expect_eq(badcidr.status, SC_INVALID_FIELD, "admin dispatch rejects invalid command id")
     c.admin_submit(admin_identify_ns_cmd(18, 99))
@@ -599,10 +605,12 @@ fn nvme_controller_selftest() -> i64:
     val trr: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(trr.data, 0, "multi-block trim IO clears second LBA")
 
-    c.io_submit(1, cmd_make(106, OP_WRITE, 30, WRITE_BUFFER_CAP_BLOCKS + 1, 0x70))
+    c.wb.cap = 1
+    c.io_submit(1, cmd_make(106, OP_WRITE, 30, 2, prp_pack(0x70, 0x71)))
     c.io_process()
     val wob: NvmeCpl = c.io_reap(1)
-    fail = fail + expect_eq(wob.status, SC_NS_NOT_READY, "oversized IO write buffer command rejected")
+    fail = fail + expect_eq(wob.status, SC_NS_NOT_READY, "write buffer capacity rejection happens below MDTS")
+    c.wb.cap = WRITE_BUFFER_CAP_BLOCKS
     c.io_submit(1, cmd_make(107, OP_READ, 30, 1, 0))
     c.io_process()
     val rob: NvmeCpl = c.io_reap(1)
