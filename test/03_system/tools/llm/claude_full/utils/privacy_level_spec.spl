@@ -1,0 +1,55 @@
+"""
+# Claude full privacy level helpers
+"""
+
+use std.spec.*
+use app.io.mod.{env_get, env_set}
+use app.llm_caret.claude_full.utils.privacyLevel.*
+
+class PrivacyEnvSnapshot:
+    nonessential: text
+    telemetry: text
+
+fn capturePrivacyEnv() -> PrivacyEnvSnapshot:
+    PrivacyEnvSnapshot(
+        nonessential: env_get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") ?? "",
+        telemetry: env_get("DISABLE_TELEMETRY") ?? ""
+    )
+
+fn resetPrivacyEnv():
+    env_set("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "")
+    env_set("DISABLE_TELEMETRY", "")
+
+fn restorePrivacyEnv(snapshot: PrivacyEnvSnapshot):
+    env_set("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", snapshot.nonessential)
+    env_set("DISABLE_TELEMETRY", snapshot.telemetry)
+
+describe "Claude full privacy level helpers":
+    it "defaults when privacy env vars are unset or empty":
+        val before = capturePrivacyEnv()
+        resetPrivacyEnv()
+        expect(getPrivacyLevel()).to_equal("default")
+        expect(isEssentialTrafficOnly()).to_equal(false)
+        expect(isTelemetryDisabled()).to_equal(false)
+        expect(getEssentialTrafficOnlyReason()).to_be_nil()
+        restorePrivacyEnv(before)
+
+    it "treats telemetry env presence as no-telemetry":
+        val before = capturePrivacyEnv()
+        resetPrivacyEnv()
+        env_set("DISABLE_TELEMETRY", "0")
+        expect(getPrivacyLevel()).to_equal("no-telemetry")
+        expect(isEssentialTrafficOnly()).to_equal(false)
+        expect(isTelemetryDisabled()).to_equal(true)
+        restorePrivacyEnv(before)
+
+    it "lets nonessential traffic env take precedence":
+        val before = capturePrivacyEnv()
+        resetPrivacyEnv()
+        env_set("DISABLE_TELEMETRY", "1")
+        env_set("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "false")
+        expect(getPrivacyLevel()).to_equal("essential-traffic")
+        expect(isEssentialTrafficOnly()).to_equal(true)
+        expect(isTelemetryDisabled()).to_equal(true)
+        expect(getEssentialTrafficOnlyReason()).to_equal(Some("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+        restorePrivacyEnv(before)
