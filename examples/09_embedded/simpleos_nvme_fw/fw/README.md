@@ -9,10 +9,12 @@ Built layer-by-layer with parallel agents (Sonnet builders + Opus review gates),
 > 64 pages = 4096 pages, 3072 surfaced LBAs) and a one-byte-per-page payload stand in for a
 > real device so the entire stack runs and self-verifies on the host.
 
-> A bare-metal **rv32** RAIN self-test/reference (the sibling `../fw_rv32/entry.spl`,
-> gap-closure P9) exists and is host-verified. The rv32 OS boot path is restored, but the full
-> 22-module no-alloc firmware port is still the ceiling, so the "simulation only" scope above is
-> unchanged.
+> A bare-metal **rv32** scalar firmware floor (the sibling `../fw_rv32/entry.spl`,
+> gap-closure P9) exists and is host-verified. It covers RAIN, ECC, scheduler, power/thermal,
+> map-cache, band, journal, HIL/queue, IO/admin/flush, reactor, policy/target,
+> DRAM/durability, wear/scrub, media-retire, power-cycle, backpressure/abort,
+> feature/namespace guards, and the Cosmos+ OpenSSD target profile. The full no-alloc firmware
+> port is still the ceiling, so the "simulation only" scope above is unchanged.
 
 ## Run it
 
@@ -94,8 +96,8 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 > **Integration status (wired vs. shelf).** The authoritative wired-vs-shelf accounting is
 > `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status — wired vs. shelf" —
 > P1/P2/P7/P8 are **wired**, P3/P4/P5/P6 have wired simulation floors, and P9
-> (`../fw_rv32/entry.spl`) is the host-verified rv32 RAIN reference wired through the rv32 boot hook; the full no-alloc firmware
-> port remains the ceiling.
+> (`../fw_rv32/entry.spl`) is the host-verified rv32 scalar firmware floor wired through the rv32
+> boot hook; the full no-alloc firmware port remains the ceiling.
 
 ## Requirements coverage (from the research report)
 
