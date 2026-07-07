@@ -1492,20 +1492,32 @@ Harness fix:
   full output under `build/test-artifacts/nvme_gc_safety.out`. The GC program
   itself remains unchanged and still prints `GC SAFETY OK`.
 
-Still blocked outside firmware logic:
+Resolved outside firmware logic:
 
 ```text
-FAIL test/03_system/app/nvme_firmware/nvme_rv32_smp_boot_spec.spl
-missing-media: build/os/simpleos_riscv32.elf not built
+LLVM_SYS_180_PREFIX=/usr/lib/llvm-18 \
+cargo build --manifest-path src/compiler_rust/Cargo.toml \
+  -p simple-driver --features llvm --release
 
-FAIL test/03_system/app/nvme_firmware/nvme_rv32_fpga_boot_spec.spl
-missing-media: build/os/simpleos_riscv32_fpga.elf not built
-
-bin/simple os build --arch=riscv32
+SIMPLE_BIN=src/compiler_rust/target/release/simple \
+SIMPLE_BINARY=src/compiler_rust/target/release/simple \
 bin/simple os build --scenario=riscv32-fpga-mmode
-error: native backend 'llvm' is not available in this build
+
+SIMPLE_BINARY=src/compiler_rust/target/release/simple \
+SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on PATH="/usr/bin:$PATH" \
+src/compiler_rust/target/release/simple native-build \
+  --source build/os/generated --source src --source examples \
+  --backend llvm --opt-level=aggressive --log on --entry-closure \
+  --entry src/os/kernel/arch/riscv32/boot.spl \
+  --target riscv32-unknown-none \
+  -o build/os/simpleos_riscv32.elf \
+  --linker-script src/os/kernel/arch/riscv32/linker.ld
+
+PASS test/03_system/app/nvme_firmware/nvme_rv32_smp_boot_spec.spl
+PASS test/03_system/app/nvme_firmware/nvme_rv32_fpga_boot_spec.spl
 ```
 
-Next non-bootstrap prerequisite is an LLVM-enabled selected Simple compiler for
-RISC-V OS image generation. That is separate from the postponed bootstrap
-`run_native_build_bootstrap` work.
+The Rust-built Simple binary prints the expected bootstrap-only warning and is
+used here only to produce the missing RISC-V OS evidence media. The remaining
+firmware-production blocker is still the postponed bootstrap
+`run_native_build_bootstrap` path for self-hosted `native-build`.
