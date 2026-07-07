@@ -54,6 +54,16 @@ impl DramWriteBuffer:
             me.used_slots[i] = 0
             i = i + 1
 
+    me actual_used() -> i64:
+        val cap: i64 = me.effective_cap()
+        var i: i64 = 0
+        var n: i64 = 0
+        while i < cap:
+            if me.used_slots[i] != 0:
+                n = n + 1
+            i = i + 1
+        n
+
     me alloc(nblocks: i64) -> DramSpan:
         val cap: i64 = me.effective_cap()
         if nblocks <= 0:
@@ -75,7 +85,7 @@ impl DramWriteBuffer:
                     me.used_slots[start + i] = 1
                     me.data[start + i] = 0
                     i = i + 1
-                me.count = me.used() + nblocks
+                me.count = me.actual_used()
                 return DramSpan(base: start, len: nblocks, ok: true)
             start = start + 1
         me.overflows = me.overflow_count() + 1
@@ -94,9 +104,8 @@ impl DramWriteBuffer:
                 if me.used_slots[idx] != 0:
                     me.used_slots[idx] = 0
                     me.data[idx] = 0
-                    if me.count > 0:
-                        me.count = me.count - 1
             i = i + 1
+        me.count = me.actual_used()
 
     me stage(span: DramSpan, index: i64, byte: i64) -> i64:
         val cap: i64 = me.effective_cap()
@@ -167,6 +176,11 @@ fn dram_selftest() -> i64:
     fail = fail + expect_eq(b.used(), 0, "corrupted negative DRAM usage clamps to zero")
     b.count = WRITE_BUFFER_CAP_BLOCKS + 3
     fail = fail + expect_eq(b.used(), WRITE_BUFFER_CAP_BLOCKS, "corrupted oversized DRAM usage clamps to capacity")
+    val recover_high_count: DramSpan = b.alloc(1)
+    fail = fail + expect_eq(if recover_high_count.ok: 1 else: 0, 1, "corrupted oversized DRAM usage still allocates")
+    fail = fail + expect_eq(b.used(), 3, "alloc recovers corrupted oversized DRAM usage count")
+    b.release(recover_high_count)
+    fail = fail + expect_eq(b.used(), 2, "release rebuilds usage count from live slots")
     b.count = 2
     b.cap = WRITE_BUFFER_CAP_BLOCKS + 5
     fail = fail + expect_eq(b.effective_cap(), WRITE_BUFFER_CAP_BLOCKS, "corrupted oversized DRAM cap clamps to backing arena")
@@ -178,7 +192,7 @@ fn dram_selftest() -> i64:
     b.count = -5
     val recover_count: DramSpan = b.alloc(1)
     fail = fail + expect_eq(if recover_count.ok: 1 else: 0, 1, "corrupted negative DRAM usage still allocates")
-    fail = fail + expect_eq(b.used(), 1, "alloc recovers corrupted negative DRAM usage count")
+    fail = fail + expect_eq(b.used(), 3, "alloc recovers corrupted negative DRAM usage count")
     b.release(recover_count)
     b.count = 2
     b.overflows = -4
