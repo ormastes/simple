@@ -852,3 +852,32 @@ Terminated
 ```
 
 The current measured timeout is now around `logic_queue_phase_cases.spl`.
+
+## Update — queue submit cases split
+
+`logic_queue_submit_cases.spl` was reduced to a small case facade, with valid
+and invalid submit assertions moved into separate case modules. The scalar host
+logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`. This run got through the queue phase path in the
+previously targeted area, but stopped earlier in total parse order at HIL cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_sched_cases.spl chars=328
+[BOOTSTRAP-PHASE] ... logic_power_thermal_cases.spl chars=342
+[BOOTSTRAP-PHASE] ... logic_power_thermal_cases.spl
+[BOOTSTRAP-PHASE] ... logic_hil_cases.spl chars=643
+Terminated
+```
+
+Keep this split as total parse-load reduction, but do not count this probe as
+forward RV64 direct-build completion evidence.
