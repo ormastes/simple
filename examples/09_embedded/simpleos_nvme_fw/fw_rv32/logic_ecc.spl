@@ -1,2 +1,126 @@
+fn _rv32_ecc_bit(v: i64, bit: i64) -> i64:
+    (v >> bit) & 1
+
+fn _rv32_ecc_parity_pos(pos: i64) -> i32:
+    if pos == 1:
+        return 1
+    if pos == 2:
+        return 1
+    if pos == 4:
+        return 1
+    if pos == 8:
+        return 1
+    if pos == 16:
+        return 1
+    0
+
+fn _rv32_ecc_hamming_payload(data: i64) -> i64:
+    var p1: i64 = 0
+    var p2: i64 = 0
+    var p4: i64 = 0
+    var p8: i64 = 0
+    var p16: i64 = 0
+    var overall: i64 = 0
+    var pos: i64 = 1
+    var data_bit: i64 = 0
+    while pos <= 22:
+        if _rv32_ecc_parity_pos(pos) == 0:
+            val bit: i64 = _rv32_ecc_bit(data, data_bit)
+            overall = overall ^ bit
+            if (pos & 1) != 0:
+                p1 = p1 ^ bit
+            if (pos & 2) != 0:
+                p2 = p2 ^ bit
+            if (pos & 4) != 0:
+                p4 = p4 ^ bit
+            if (pos & 8) != 0:
+                p8 = p8 ^ bit
+            if (pos & 16) != 0:
+                p16 = p16 ^ bit
+            data_bit = data_bit + 1
+        pos = pos + 1
+    p1 | (p2 << 1) | (p4 << 2) | (p8 << 3) | (p16 << 4) | (overall << 5)
+
+fn _rv32_ecc_compute(data: i64, lba: i64, seq: i64) -> i64:
+    val payload: i64 = _rv32_ecc_hamming_payload(data)
+    val meta: i64 = (lba ^ (seq << 4) ^ (lba >> 3) ^ (seq >> 5)) & 2047
+    payload | (meta << 6)
+
+fn _rv32_ecc_pos_for_data_bit(bit: i64) -> i64:
+    var pos: i64 = 1
+    var seen: i64 = 0
+    while pos <= 22:
+        if _rv32_ecc_parity_pos(pos) == 0:
+            if seen == bit:
+                return pos
+            seen = seen + 1
+        pos = pos + 1
+    0
+
+fn _rv32_ecc_flip_data_pos(data: i64, pos: i64) -> i64:
+    var bit: i64 = 0
+    while bit < 17:
+        if _rv32_ecc_pos_for_data_bit(bit) == pos:
+            return data ^ (1 << bit)
+        bit = bit + 1
+    data
+
+fn _rv32_ecc_check(data: i64, lba: i64, seq: i64, stored: i64, injected_flips: i64) -> i64:
+    val flips: i64 = if injected_flips < 0: 0 else: injected_flips
+    val recomputed: i64 = _rv32_ecc_compute(data, lba, seq)
+    if flips >= 2:
+        return 2
+    if ((stored >> 6) & 2047) != ((recomputed >> 6) & 2047):
+        return 2
+    val syndrome: i64 = (stored ^ recomputed) & 31
+    val overall: i64 = ((stored >> 5) ^ (recomputed >> 5)) & 1
+    if syndrome == 0:
+        if overall == 0:
+            if flips == 1:
+                return 1
+            return 0
+        return 1
+    if overall == 0:
+        return 2
+    1
+
+fn _rv32_ecc_correct(data: i64, lba: i64, seq: i64, stored: i64) -> i64:
+    val syndrome: i64 = (stored ^ _rv32_ecc_compute(data, lba, seq)) & 31
+    if syndrome == 0:
+        return data
+    if _rv32_ecc_parity_pos(syndrome) != 0:
+        return data
+    _rv32_ecc_flip_data_pos(data, syndrome)
+
 fn rv32_ecc_selftest() -> i32:
-    return 0
+    val e1: i64 = _rv32_ecc_compute(171, 7, 3)
+    if e1 != _rv32_ecc_compute(171, 7, 3):
+        return 1
+    if (_rv32_ecc_compute(255, 255, 63) >> 6) <= 0:
+        return 1
+    if _rv32_ecc_compute(1, 0, 0) == _rv32_ecc_compute(2, 0, 0):
+        return 1
+    if _rv32_ecc_compute(2, 1, 1) == _rv32_ecc_compute(2, 2, 1):
+        return 1
+
+    val data: i64 = 66
+    val lba: i64 = 100
+    val seq: i64 = 5
+    val ecc: i64 = _rv32_ecc_compute(data, lba, seq)
+    if _rv32_ecc_check(data, lba, seq, ecc, 0) != 0:
+        return 1
+    if _rv32_ecc_check(data, lba, seq, ecc, -1) != 0:
+        return 1
+    if _rv32_ecc_check(data, lba, seq, ecc, 1) != 1:
+        return 1
+    if _rv32_ecc_check(data, lba, seq, ecc, 2) != 2:
+        return 1
+    if _rv32_ecc_check(data, lba, seq, ecc ^ 1, 0) != 2:
+        return 1
+    if _rv32_ecc_check(data ^ 1, lba, seq, ecc, 0) != 1:
+        return 1
+    if _rv32_ecc_correct(data ^ 1, lba, seq, ecc) != data:
+        return 1
+    if _rv32_ecc_check(data ^ 3, lba, seq, ecc, 0) != 2:
+        return 1
+    0
