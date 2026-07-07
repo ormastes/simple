@@ -594,3 +594,31 @@ Terminated
 ```
 
 The current measured timeout remains around the map/band parse boundary.
+
+## Update — queue phase cases split, probe reaches band geometry
+
+`logic_queue_phase_cases.spl` was reduced to a small case facade, with queue
+length, submit validation, and fetch/next assertions moved into separate case
+modules. The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but this run got through map cases and stopped at
+band geometry cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_journal_record_cases.spl
+[BOOTSTRAP-PHASE] ... logic_map_cases.spl chars=316
+[BOOTSTRAP-PHASE] ... logic_map_cases.spl
+[BOOTSTRAP-PHASE] ... logic_band_geometry_cases.spl chars=650
+Terminated
+```
+
+The current measured timeout is now around `logic_band_geometry_cases.spl`.
