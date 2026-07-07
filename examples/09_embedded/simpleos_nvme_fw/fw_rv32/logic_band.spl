@@ -1,2 +1,144 @@
+fn _rv32_band_block_valid(block: i64) -> i32:
+    if block < 0:
+        return 0
+    if block >= 64:
+        return 0
+    1
+
+fn _rv32_band_ppn_valid(ppn: i64) -> i32:
+    if ppn < 0:
+        return 0
+    if ppn >= 4096:
+        return 0
+    1
+
+fn _rv32_band_block_of(ppn: i64) -> i64:
+    if _rv32_band_ppn_valid(ppn) == 0:
+        return -1
+    ppn / 64
+
+fn _rv32_band_first_ppn(block: i64) -> i64:
+    if _rv32_band_block_valid(block) == 0:
+        return -1
+    block * 64
+
+fn _rv32_band_valid_count(raw: i64) -> i64:
+    if raw < 0:
+        return 0
+    if raw > 64:
+        return 64
+    raw
+
+fn _rv32_band_block_state(block: i64, state: i64) -> i64:
+    if _rv32_band_block_valid(block) == 0:
+        return 3
+    state
+
+fn _rv32_band_alloc_page(active_blk: i64, active_wp: i64, free_count: i64) -> i64:
+    if free_count <= 0 and (active_blk < 0 or active_wp >= 64):
+        return -1
+    if active_blk < 0:
+        return 0
+    if active_wp < 0:
+        return -1
+    if active_wp > 64:
+        return -1
+    if active_wp == 64:
+        if free_count <= 0:
+            return -1
+        return _rv32_band_first_ppn(active_blk + 1)
+    _rv32_band_first_ppn(active_blk) + active_wp
+
+fn _rv32_band_host_can_open(free_count: i64, reserve: i64) -> i32:
+    if free_count <= reserve:
+        return 0
+    1
+
+fn _rv32_band_host_writable_pages(active_wp: i64, free_count: i64, reserve: i64) -> i64:
+    var pages: i64 = 0
+    if active_wp >= 0 and active_wp < 64:
+        pages = 64 - active_wp
+    if free_count > reserve:
+        pages = pages + (free_count - reserve) * 64
+    pages
+
+fn _rv32_band_mark_valid_count(block_state: i64, was_valid: i32, count: i64) -> i64:
+    if block_state == 0:
+        return count
+    if block_state == 3:
+        return count
+    if was_valid != 0:
+        return count
+    _rv32_band_valid_count(count + 1)
+
+fn _rv32_band_mark_invalid_count(was_valid: i32, count: i64) -> i64:
+    if was_valid == 0:
+        return _rv32_band_valid_count(count)
+    _rv32_band_valid_count(count - 1)
+
+fn _rv32_band_free_state(block: i64) -> i64:
+    if _rv32_band_block_valid(block) == 0:
+        return 3
+    0
+
+fn _rv32_band_rebuild_state(ppn: i64, old_state: i64) -> i64:
+    if _rv32_band_ppn_valid(ppn) == 0:
+        return old_state
+    if old_state == 3:
+        return 3
+    2
+
 fn rv32_band_selftest() -> i32:
-    return 0
+    if _rv32_band_block_valid(0) != 1:
+        return 1
+    if _rv32_band_block_valid(63) != 1:
+        return 1
+    if _rv32_band_block_valid(64) != 0:
+        return 1
+    if _rv32_band_ppn_valid(4095) != 1:
+        return 1
+    if _rv32_band_ppn_valid(4096) != 0:
+        return 1
+    if _rv32_band_block_of(1355) != 21:
+        return 1
+    if _rv32_band_first_ppn(21) != 1344:
+        return 1
+    if _rv32_band_valid_count(-5) != 0:
+        return 1
+    if _rv32_band_valid_count(99) != 64:
+        return 1
+    if _rv32_band_block_state(64, 0) != 3:
+        return 1
+    if _rv32_band_alloc_page(-1, 0, 64) != 0:
+        return 1
+    if _rv32_band_alloc_page(0, 63, 63) != 63:
+        return 1
+    if _rv32_band_alloc_page(0, 64, 63) != 64:
+        return 1
+    if _rv32_band_alloc_page(0, 65, 63) != -1:
+        return 1
+    if _rv32_band_host_can_open(2, 2) != 0:
+        return 1
+    if _rv32_band_host_can_open(3, 2) != 1:
+        return 1
+    if _rv32_band_host_writable_pages(63, 2, 2) != 1:
+        return 1
+    if _rv32_band_host_writable_pages(64, 4, 2) != 128:
+        return 1
+    if _rv32_band_mark_valid_count(1, 0, 0) != 1:
+        return 1
+    if _rv32_band_mark_valid_count(3, 0, 0) != 0:
+        return 1
+    if _rv32_band_mark_invalid_count(1, 1) != 0:
+        return 1
+    if _rv32_band_free_state(4) != 0:
+        return 1
+    if _rv32_band_free_state(64) != 3:
+        return 1
+    if _rv32_band_rebuild_state(10, 0) != 2:
+        return 1
+    if _rv32_band_rebuild_state(10, 3) != 3:
+        return 1
+    if _rv32_band_rebuild_state(4096, 0) != 0:
+        return 1
+    0
