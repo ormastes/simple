@@ -60,7 +60,7 @@ fn _rd64(base: u64, off: u64) -> u64: mmio_read64(base + off)
 # file-backed range of every covering segment is copied in from `blob` via mmio.
 # Per-page perms: user_rw if any covering PT_LOAD is writable, else user_rx.
 # Returns 1 on success, 0 on failure.
-fn _map_pt_loads(space: AddressSpace, blob: u64) -> i64:
+fn _map_pt_loads(space: AddressSpace, blob: u64, file_len: u64) -> i64:
     val PAGE: u64 = 4096
     val PT_LOAD: u64 = 1
     val PF_W: u64 = 2
@@ -72,6 +72,13 @@ fn _map_pt_loads(space: AddressSpace, blob: u64) -> i64:
     if phnum == 0:
         serial_println("[spawn] FAIL no program headers")
         return 0
+    # Bound the phdr table + each segment's file range against the known file size,
+    # so a corrupt/oversized phdr can't drive mmio reads past the raw buffer into
+    # adjacent kernel memory (info-leak / fault) — the raw buffer carries no length.
+    val ph_table_end = phoff + (phnum * phentsize)
+    if phoff < 64 or ph_table_end > file_len:
+        serial_println("[spawn] FAIL phdr table OOB phoff={phoff} end={ph_table_end} file_len={file_len}")
+        return 0
 
     var lo: u64 = 0xFFFFFFFFFFFFFFFF
     var hi: u64 = 0
@@ -79,6 +86,11 @@ fn _map_pt_loads(space: AddressSpace, blob: u64) -> i64:
     while i < phnum:
         val ph = phoff + (i * phentsize)
         if _rd32(blob, ph) == PT_LOAD:
+            val foff = _rd64(blob, ph + 8)
+            val fsz = _rd64(blob, ph + 32)
+            if foff + fsz > file_len:
+                serial_println("[spawn] FAIL segment file range OOB foff={foff} fsz={fsz} file_len={file_len}")
+                return 0
             val sv = _rd64(blob, ph + 16)
             val se = sv + _rd64(blob, ph + 40)
             if sv < lo:
@@ -173,6 +185,9 @@ pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64) -> i
     if _rd32(blob, 0) != 0x464C457F:
         serial_println("[spawn] FAIL blob not ELF (clobbered/wrong file) w0={_rd32(blob, 0)}")
         return -5
+    if _rd8(blob, 4) != 2:
+        serial_println("[spawn] FAIL not ELFCLASS64 class={_rd8(blob, 4)}")
+        return -5
 
     # Trustworthy entry: ELF e_entry @ offset 24, read straight from the raw buffer.
     val entry = _rd64(blob, 24)
@@ -185,7 +200,7 @@ pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64) -> i
     vmm_clone_kernel_low_identity(space.phys_root)
     serial_println("[spawn] user AS ready root={space.phys_root}")
 
-    if _map_pt_loads(space, blob) == 0:
+    if _map_pt_loads(space, blob, fb.len().to_u64()) == 0:
         serial_println("[spawn] FAIL segment mapping")
         return -2
 
