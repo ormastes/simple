@@ -824,6 +824,36 @@ Terminated
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
 
+## Update — band state cases split
+
+`logic_band_state_cases.spl` was reduced to a small case facade, with mark,
+free, and rebuild-state assertions moved into separate case modules. The scalar
+host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`. This run got through band geometry, band allocation,
+and scheduler cases before stopping at HIL cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_band_geometry_cases.spl chars=334
+[BOOTSTRAP-PHASE] ... logic_band_alloc_cases.spl chars=335
+[BOOTSTRAP-PHASE] ... logic_sched_cases.spl chars=328
+[BOOTSTRAP-PHASE] ... logic_power_thermal_cases.spl chars=342
+[BOOTSTRAP-PHASE] ... logic_hil_cases.spl chars=228
+Terminated
+```
+
+Keep this split as total parse-load reduction; the RV64 direct ELF is still not
+produced under the 120s cap.
+
 ## Update — band validation cases split
 
 `logic_band_valid_cases.spl` was reduced to a small case facade, with block and
