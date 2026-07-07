@@ -4,7 +4,7 @@
 reconstruct** (`../fw/rain.spl`, proven in `../fw/proofs/Rain.lean`), the SECDED
 payload-window ECC floor, a fixed-channel scheduler floor, a fixed power/thermal floor, a
 fixed-capacity write-back map-cache floor, a fixed band allocator floor, a fixed-capacity
-journal-ring floor, a fixed HIL command/queue floor, a fixed queue-phase floor, a fixed io-opcode-read-zero-trim-flush floor, a fixed admin/format/fw-log floor, a fixed reactor floor, a fixed policy/target floor, a fixed DRAM/durability floor, a fixed wear/scrub floor, a fixed media-retire floor, a fixed power-cycle floor, a fixed backpressure/abort floor, a fixed feature-guard floor, and a fixed namespace-guard floor, written to run inside the bare-metal rv32 boot path with
+journal-ring floor, a fixed HIL command/queue floor, a fixed queue-phase floor, a fixed io-opcode-read-zero-trim-flush floor, a fixed admin/format/fw-log floor, a fixed reactor floor, a fixed policy/target floor, a fixed DRAM/durability floor, a fixed wear/scrub floor, a fixed media-retire floor, a fixed power-cycle floor, a fixed backpressure/abort floor, a fixed feature-guard floor, a fixed namespace-guard floor, and a fixed Cosmos+ OpenSSD target-profile floor, written to run inside the bare-metal rv32 boot path with
 **no heap and no arrays** — matching the constraint documented in
 `src/os/kernel/arch/riscv32/boot.spl` ("keep this module freestanding and minimal ... without
 pulling runtime formatting, arrays, or boot metadata into the first-stage entry object"). It
