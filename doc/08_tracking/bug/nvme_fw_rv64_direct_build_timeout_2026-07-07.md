@@ -736,6 +736,34 @@ Terminated
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
 
+## Update — namespace guard cases split
+
+`logic_namespace_guard_cases.spl` was reduced to a small case facade, with
+valid and invalid namespace command assertions moved into separate case modules.
+The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`. This run stopped earlier in total parse order at
+flush:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_io_command.spl chars=105
+[BOOTSTRAP-PHASE] ... logic_io_command.spl
+[BOOTSTRAP-PHASE] ... logic_flush.spl chars=90
+Terminated
+```
+
+Keep this split as total parse-load reduction, but do not count this probe as
+forward RV64 direct-build evidence.
+
 ## Update — journal checkpoint cases split, probe reaches namespace guard
 
 `logic_journal_checkpoint_cases.spl` was reduced to a small case facade, with
