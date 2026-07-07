@@ -151,14 +151,26 @@ through `test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl`.
   **However the end-to-end `compute_styles_ms` total was unchanged** — the dominant cost was never
   the candidate lookup at the scale measured. Root cause re-attributed to the runtime
   `text.substring()` primitive scaling with start offset (O(offset) per call, not slice length),
-  which makes `parse_html` itself quadratic (1573→6972→26641 ms at N=700/1500/3000 — now larger
-  than `compute_styles` at N=3000) and leaves a residual ~2.5x-per-2x-N superlinearity in
+  which made `parse_html` itself quadratic (1573→6972→26641 ms at N=700/1500/3000 — larger
+  than `compute_styles` at N=3000) and left a residual ~2.5x-per-2x-N superlinearity in
   `compute_styles` (5417/13241/32995 ms) via the same lazily-substring-backed node fields
   (`nd.tag`/`class_attr`/`class_words`). See
-  `doc/08_tracking/bug/text_substring_o_offset_parse_html_quadratic_2026-07-07.md` — now the top
-  web-lane item; the fix direction is byte-array-scan `parse_html` (same pattern as the CSS
-  scanner, `:3640`) or fix `text.substring()` in the runtime directly (bigger win, all callers
-  benefit).
+  `doc/08_tracking/bug/text_substring_o_offset_parse_html_quadratic_2026-07-07.md`.
+  **`parse_html` leg — LANDED 2026-07-07.** `_html_scan_events` rewrite: one native
+  `text.split("<")` event stream consumed by a two-pass `parse_html` (no per-position
+  `text.substring(pos, ...)` calls, so the O(offset) runtime primitive is off the hot path).
+  Opus-reviewed CLEAN, 23/23 semantic fixtures byte-identical. Measured **27.3s → 1.1s at
+  N=3000 (~24x)**; linearity confirmed 2.02–2.03x cost-per-doubling out to N=6000 (vs the prior
+  ~2.6-4.3x superlinear ratios). `count_html_nodes` + 2 helper fns deleted (folded into the
+  single-pass scanner). **Correction to the fix-direction note above:** a byte-array (`[u8]`)
+  scan of `parse_html` was prototyped and measured **~10x worse** than the baseline under the
+  interpreter — per-element `[u8]` reads dominate cost there just as they do in the
+  `css_bytes_*` helpers (see `doc/08_tracking/bug/css_bytes_helpers_dead_code_2026-07-07.md`).
+  The idiom that actually wins under the interpreter is one native `split()`/`substring`-free
+  event scan plus small segment slices, not a byte-array walk. `compute_styles` itself is
+  **unchanged and still open** — its residual superlinearity lives in the selector-match chain
+  (`style_rule_candidates`/cascade matching), not in parse-side node-field construction; do not
+  attribute it to parse_html lazy views.
 
 ### N2 — Separable box blur (2-pass)
 

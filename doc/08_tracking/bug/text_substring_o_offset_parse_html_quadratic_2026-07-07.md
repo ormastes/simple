@@ -4,7 +4,10 @@
 - **Area:** runtime `text` primitive (`text.substring`, UTF-8 char-indexed slicing) and
   `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl` (`parse_html`,
   tag/attribute extraction; and residually `compute_styles`).
-- **Status:** open — root cause localized (runtime `substring` offset cost), fix not yet applied.
+- **Status:** partially fixed 2026-07-07 — `parse_html` leg **FIXED** (native-split event
+  scanner, see "Update" below). `text.substring()` O(offset) itself remains **open** at the
+  runtime level; `compute_styles`'s residual superlinearity is **still open** and is **not**
+  attributable to parse-side lazy views (see correction below).
 - **Related fix:** N1 dict-lookup fix (`style_rule_candidates` O(1) bucket lookup via
   `id_key_dict`/`class_key_dict`/`tag_key_dict` carried through `RuleBuckets`) landed the same day
   and removed the *previously measured* dominant cost in `compute_styles`'s candidate lookup. This
@@ -123,3 +126,32 @@ Two independent angles, either sufficient on its own, both eventually desirable:
 
 Recommend pursuing (1) first (scoped to this file, same pattern already proven safe by the CSS
 scanner) and filing (2) as a follow-up runtime task once (1) is measured.
+
+## Update 2026-07-07 — `parse_html` leg FIXED, fix-direction (1) corrected
+
+**What landed.** `parse_html` was rewritten around a single native `_html_scan_events` event
+stream (`html.split("<")` once, consumed by a two-pass `parse_html`) instead of repeated
+per-position `text.substring(pos, ...)` calls. This removes the O(offset) runtime primitive from
+the hot path entirely — no byte-array conversion needed. `count_html_nodes` plus two now-unused
+helper functions were deleted (folded into the single-pass scanner). Opus-reviewed CLEAN: 23/23
+semantic fixtures byte-identical pre/post, linearity re-confirmed to N=6000 (2.02–2.03x cost per
+doubling, i.e. linear). Measured **27.3s → 1.1s at N=3000 (~24x)**.
+
+**Important correction to fix-direction (1) above.** The byte-array (`[u8]`) scan approach this
+record originally recommended (mirroring `css_bytes_find`/`_css_scan_rules_simple`) was
+prototyped and **measured ~10x worse than baseline** under the interpreter — per-element `[u8]`
+array reads/indexing dominate cost there, the same anti-pattern now documented in
+`doc/08_tracking/bug/css_bytes_helpers_dead_code_2026-07-07.md` (whose byte-helper functions
+turned out to have zero callers repo-wide). The idiom that actually wins under the interpreter is
+one native `split()` call producing a small number of segments, each handled with small
+`substring`/slice ops on short segments — not a per-byte array walk. Treat "byte-array scan" as a
+**disproven** direction for interpreted Simple hot loops; prefer native `split`/`find`-based event
+scanning.
+
+**Still open.**
+- `text.substring()`'s O(offset) runtime cost itself (fix-direction (2) above) is unchanged and
+  still the right long-term fix for every caller, not just this file.
+- `compute_styles`'s residual superlinearity (section (c) above) is **still open**. It is **not**
+  resolved by the parse_html fix and should **not** be attributed to parse-side lazy views — the
+  residual lives in the selector-match/candidate chain (`style_rule_candidates` and the per-node
+  cascade matching loop), a separate cost center from `parse_html`'s own tag/attribute extraction.

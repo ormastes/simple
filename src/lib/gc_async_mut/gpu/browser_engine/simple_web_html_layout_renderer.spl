@@ -350,71 +350,146 @@ fn html_text_range_has_non_ws(html: text, start: i32, end: i32) -> bool:
         i = i + 1
     false
 
-fn html_text_range_counts_as_node(html: text, start: i32, end: i32) -> bool:
-    val text_value = decode_html_entities(html.substring(start, end))
-    if text_value == " ":
-        return true
-    text_value.trim().len() > 0
+# ---------------------------------------------------------------------------
+# Split-based HTML structural scanning (parse_html)
+#
+# parse_html used to scan the WHOLE `html` document with
+# `find_from(html, needle, pos)` (growing `pos`) and materialize every tag's
+# inner text with `html.substring(lt + 1, gt)`. Under this interpreter both
+# cost O(len(receiver)) PER CALL (substring collects the whole receiver's
+# chars; find_from slices the receiver's tail), so one call per tag made the
+# parse O(tag_count * doc_len) = O(n^2) -- measured 1.5s/6.7s/26s at
+# 700/1500/3000 synthetic rules (doc/08_tracking/bug/
+# text_substring_o_offset_parse_html_quadratic_2026-07-07.md).
+#
+# A byte-array rewrite (the CSS scanner's css_bytes_find idiom) was tried
+# first and measured ~10x WORSE (14.5s at N=700): interpreted per-element
+# array reads make byte walking slower than the original whole-string calls.
+# The pattern that actually works under the interpreter is the one
+# _css_scan_rules_simple (~:3900) already uses: split the document ONCE on
+# "<" (native, O(n)), then only ever slice the SMALL per-tag segments
+# (native, O(segment)). Total cost is O(doc_len).
+#
+# _html_scan_events returns the document as a flat event list, two parallel
+# arrays [kinds, payloads]:
+#   kind "g" -- tag: payload is the tag's inner text (owned small string)
+#   kind "x" -- text run between tags (raw, entities still encoded)
+#   kind "e" -- trailing text after the last tag (raw); kept distinct because
+#               parse_html applies the single-space rule (txt == " ") only to
+#               middle runs, never to the tail.
+# Comments and raw-text elements (style/script/title) are consumed here and
+# produce no events, matching the old scanner's pos-jump behaviour exactly,
+# including the quirky cases: "-->" / closer ">" searches that cross a later
+# "<", unterminated comments/tags discarding the rest of the document, and
+# a raw-text element with no closer falling back to normal scanning.
+# ---------------------------------------------------------------------------
 
-fn html_text_tail_counts_as_node(html: text, start: i32, end: i32) -> bool:
-    decode_html_entities(html.substring(start, end)).trim().len() > 0
+fn _html_scan_events(html: text) -> [[text]]:
+    val parts = html.split("<")
+    val np = parts.len().to_i32()
+    val cap = np * 2 + 2
+    var kinds: [text] = [""; cap]
+    var payloads: [text] = [""; cap]
+    var out = 0
+    if np > 0 and parts[0].len() > 0:
+        kinds[out] = if np == 1: "e" else: "x"
+        payloads[out] = parts[0]
+        out = out + 1
+    var k = 1
+    while k < np:
+        var seg = parts[k]
+        if seg.starts_with("!--"):
+            # Comment: content may contain "<" (spanning later parts), but
+            # "-->" contains no "<" so it always lies within a single part.
+            var cidx = seg.index_of("-->").to_i32()
+            var terminated = cidx >= 0
+            while not terminated:
+                k = k + 1
+                if k >= np:
+                    break
+                seg = parts[k]
+                cidx = seg.index_of("-->").to_i32()
+                terminated = cidx >= 0
+            if not terminated:
+                # Unterminated comment: old scanner broke out, discarding the rest.
+                return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
+            val ctail = seg.substring(cidx + 3, seg.len())
+            if ctail.len() > 0 and out < cap:
+                kinds[out] = if k == np - 1: "e" else: "x"
+                payloads[out] = ctail
+                out = out + 1
+            k = k + 1
+            continue
+        # Normal tag: the old scanner searched ">" from the "<" across any
+        # embedded "<", so accumulate parts until the segment holds a ">".
+        var gt = seg.index_of(">").to_i32()
+        while gt < 0:
+            k = k + 1
+            if k >= np:
+                # No ">" until EOF: old scanner broke out, discarding the rest.
+                return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
+            seg = seg + "<" + parts[k]
+            gt = seg.index_of(">").to_i32()
+        val inner = seg.substring(0, gt)
+        var rest = seg.substring(gt + 1, seg.len())
+        if out < cap:
+            kinds[out] = "g"
+            payloads[out] = inner
+            out = out + 1
+        # Raw-text elements: consume content + closing tag, no events.
+        if inner.len() > 0:
+            val first = inner.char_at(0)
+            if first != "!" and first != "/":
+                val name = tag_name_of(inner)
+                if name == "style" or name == "script" or name == "title":
+                    val closer = "/" + name
+                    var j = k + 1
+                    var found = -1
+                    while j < np:
+                        if parts[j].starts_with(closer):
+                            found = j
+                            break
+                        j = j + 1
+                    if found >= 0:
+                        # First ">" from the closer on (may cross a "<").
+                        var seg2 = parts[found]
+                        var gt2 = seg2.index_of(">").to_i32()
+                        while gt2 < 0:
+                            found = found + 1
+                            if found >= np:
+                                # Closer without ">": old scanner re-scanned from
+                                # "</name", found no ">", and broke out.
+                                return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
+                            seg2 = seg2 + "<" + parts[found]
+                            gt2 = seg2.index_of(">").to_i32()
+                        rest = seg2.substring(gt2 + 1, seg2.len())
+                        k = found
+                    # Closer missing entirely: old scanner left pos after the
+                    # open tag and kept scanning the content as normal HTML,
+                    # which is what falling through with `rest` does.
+        if rest.len() > 0 and out < cap:
+            kinds[out] = if k == np - 1: "e" else: "x"
+            payloads[out] = rest
+            out = out + 1
+        k = k + 1
+    [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
+
+# True if a tag event's inner text produces an element node in the arena
+# (mirrors the skip rules in parse_html's build pass).
+fn _html_tag_event_makes_node(inner: text) -> bool:
+    if inner.len() == 0:
+        return false
+    val first = inner.char_at(0)
+    if first == "!" or first == "/":
+        return false
+    val name = tag_name_of(inner)
+    if name == "style" or name == "script" or name == "title" or name == "head" or name == "meta" or name == "link" or name == "base":
+        return false
+    true
 
 # ---------------------------------------------------------------------------
 # Parser -> arena
 # ---------------------------------------------------------------------------
-
-fn count_html_nodes(html: text) -> i32:
-    var count = 1
-    var pos = 0
-    val n = html.len()
-    while pos < n:
-        val lt = find_from(html, "<", pos)
-        if lt < 0:
-            if html_text_tail_counts_as_node(html, pos, n):
-                count = count + 1
-            break
-        if lt > pos:
-            if html_text_range_counts_as_node(html, pos, lt):
-                count = count + 1
-        if text_matches_at(html, "<!--", lt):
-            val cend = find_from(html, "-->", lt)
-            if cend < 0:
-                break
-            pos = cend + 3
-            continue
-        val gt = find_from(html, ">", lt)
-        if gt < 0:
-            break
-        val inner = html.substring(lt + 1, gt)
-        pos = gt + 1
-        if inner.len() == 0:
-            continue
-        val first = inner.char_at(0)
-        if first == "!" or first == "/":
-            continue
-        val name = tag_name_of(inner)
-        if name == "style":
-            val sclose = find_from(html, "</style", pos)
-            if sclose >= 0:
-                val sgt = find_from(html, ">", sclose)
-                pos = if sgt >= 0: sgt + 1 else: sclose
-            continue
-        if name == "script":
-            val cclose = find_from(html, "</script", pos)
-            if cclose >= 0:
-                val cgt = find_from(html, ">", cclose)
-                pos = if cgt >= 0: cgt + 1 else: cclose
-            continue
-        if name == "title":
-            val tclose = find_from(html, "</title", pos)
-            if tclose >= 0:
-                val tgt = find_from(html, ">", tclose)
-                pos = if tgt >= 0: tgt + 1 else: tclose
-            continue
-        if name == "head" or name == "meta" or name == "link" or name == "base":
-            continue
-        count = count + 1
-    count
 
 # Decode the HTML character entities the markdown/office HTML emitters produce
 # (markdown_escape_html: & < > " '). Text nodes carry escaped content, so the
@@ -453,46 +528,42 @@ fn decode_html_entities(s: text) -> text:
     out.replace("&amp;", "&")
 
 fn parse_html(html: text) -> [HNode]:
-    val node_count = count_html_nodes(html)
+    val ev = _html_scan_events(html)
+    val kinds = ev[0]
+    val payloads = ev[1]
+    val ev_count = kinds.len().to_i32()
+    # Counting pass: arena size, mirroring the node-creation rules below.
+    # (Replaces the old count_html_nodes second full scan of the document.)
+    var node_count = 1
+    var e = 0
+    while e < ev_count:
+        if kinds[e] == "g":
+            if _html_tag_event_makes_node(payloads[e]):
+                node_count = node_count + 1
+        else:
+            val ctxt = decode_html_entities(payloads[e])
+            if ctxt.trim().len() > 0 or (kinds[e] == "x" and ctxt == " "):
+                node_count = node_count + 1
+        e = e + 1
     var nodes: [HNode] = [mk_node("#root", -1); node_count]
     var node_i = 1
     var pstack: [i64] = [0; node_count]
     var stack_len = 1
-    var pos = 0
-    val n = html.len()
-    while pos < n:
-        val lt = find_from(html, "<", pos)
-        if lt < 0:
-            val tail = decode_html_entities(html.substring(pos, n))
-            val tail_trimmed = tail.trim()
-            if tail_trimmed.len() > 0:
-                var tn = mk_node("#text", pstack[stack_len - 1])
-                tn.text_data = tail
-                tn.text_trimmed = tail_trimmed
-                nodes[node_i] = tn
-                node_i = node_i + 1
-            break
-        if lt > pos:
-            val txt = decode_html_entities(html.substring(pos, lt))
+    e = 0
+    while e < ev_count:
+        val kind = kinds[e]
+        e = e + 1
+        if kind != "g":
+            val txt = decode_html_entities(payloads[e - 1])
             val txt_trimmed = txt.trim()
-            if txt_trimmed.len() > 0 or txt == " ":
+            if txt_trimmed.len() > 0 or (kind == "x" and txt == " "):
                 var tn = mk_node("#text", pstack[stack_len - 1])
                 tn.text_data = txt
                 tn.text_trimmed = txt_trimmed
                 nodes[node_i] = tn
                 node_i = node_i + 1
-        # comment?
-        if text_matches_at(html, "<!--", lt):
-            val cend = find_from(html, "-->", lt)
-            if cend < 0:
-                break
-            pos = cend + 3
             continue
-        val gt = find_from(html, ">", lt)
-        if gt < 0:
-            break
-        val inner = html.substring(lt + 1, gt)
-        pos = gt + 1
+        val inner = payloads[e - 1]
         if inner.len() == 0:
             continue
         val first = inner.char_at(0)
@@ -511,25 +582,9 @@ fn parse_html(html: text) -> [HNode]:
                 stack_len = found
             continue
         val name = tag_name_of(inner)
-        if name == "style":
-            val sclose = find_from(html, "</style", pos)
-            if sclose >= 0:
-                val sgt = find_from(html, ">", sclose)
-                pos = if sgt >= 0: sgt + 1 else: sclose
-            continue
-        if name == "script":
-            val cclose = find_from(html, "</script", pos)
-            if cclose >= 0:
-                val cgt = find_from(html, ">", cclose)
-                pos = if cgt >= 0: cgt + 1 else: cclose
-            continue
-        if name == "title":
-            # <title> is document metadata, never painted. Consume its text so it
-            # does not become a rendered #text node in the body flow.
-            val tclose = find_from(html, "</title", pos)
-            if tclose >= 0:
-                val tgt = find_from(html, ">", tclose)
-                pos = if tgt >= 0: tgt + 1 else: tclose
+        # style/script/title content is consumed by _html_scan_events; their
+        # open-tag events (and head/meta/link/base) produce no nodes.
+        if name == "style" or name == "script" or name == "title":
             continue
         if name == "head" or name == "meta" or name == "link" or name == "base":
             continue

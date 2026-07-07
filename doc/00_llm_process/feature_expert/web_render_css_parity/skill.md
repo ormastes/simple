@@ -195,3 +195,18 @@ mode only until that alias-resolution gap is fixed. See
 `doc/08_tracking/bug/web_backend_env_get_alias_unresolved_interpret_2026-07-07.md`
 and the honest-contract pin at
 `test/03_system/gui/ui_browser/backend_isolation_chromium_env_get_gap_b_spec.spl`.
+
+## 2026-07-07: `parse_html` rewritten to a linear native-split event scanner (24x @3000)
+
+`parse_html` no longer drives per-position `text.substring(pos, ...)` (O(offset) runtime cost →
+quadratic parse, see `doc/08_tracking/bug/text_substring_o_offset_parse_html_quadratic_2026-07-07.md`);
+it now builds one event stream via a single native `html.split("<")` (`_html_scan_events`) and
+consumes it in a two-pass `parse_html`. 27.3s→1.1s at N=3000 (~24x), confirmed linear
+(2.02–2.03x per doubling) to N=6000, 23/23 semantic fixtures byte-identical (opus-reviewed).
+**Idiom lesson:** a byte-array (`[i64]`/`[u8]`) rewrite of the same function was measured **~10x
+worse** under the interpreter — per-element array-index reads dominate there. Prefer one native
+`split()`/`find()` call over short segments, not a byte-array walk, for interpreted hot loops in
+this codebase (see also the now-dead `css_bytes_*` helpers,
+`doc/08_tracking/bug/css_bytes_helpers_dead_code_2026-07-07.md`, which embody the losing idiom).
+`compute_styles`'s own residual superlinearity is unrelated and still open (selector-match chain,
+not parse-side).
