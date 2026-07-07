@@ -52,6 +52,9 @@ impl BandAlloc:
     me ppn_ready(ppn: i64) -> bool:
         ppn_in_range(ppn) and ppn < me.valid.len() and me.block_ready(ppn_block(ppn))
 
+    me block_pages_ready(blk: i64) -> bool:
+        me.block_ready(blk) and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.valid.len()
+
     me actual_free_blocks() -> i64:
         var fc: i64 = 0
         var b: i64 = 0
@@ -73,7 +76,7 @@ impl BandAlloc:
     # Opens a fresh block when there is no active block or the current one is full.
     # Returns NO_PPN if no free block is available.
     me alloc_page() -> i64:
-        val no_active: bool = me.active_blk == UNMAP or not me.block_ready(me.active_blk) or me.active_wp < 0 or me.active_wp > PAGES_PER_BLOCK
+        val no_active: bool = me.active_blk == UNMAP or not me.block_pages_ready(me.active_blk) or me.active_wp < 0 or me.active_wp > PAGES_PER_BLOCK
         val blk_full:  bool = me.active_wp == PAGES_PER_BLOCK
         val need_new:  bool = (no_active or blk_full)
         if need_new:
@@ -84,7 +87,7 @@ impl BandAlloc:
             var next_blk: i64 = -1
             var b: i64 = 0
             while b < NUM_BLOCKS and b < me.blk_state.len():
-                if me.blk_state[b] == BLK_FREE:
+                if me.blk_state[b] == BLK_FREE and me.block_pages_ready(b):
                     next_blk = b
                     b = NUM_BLOCKS
                 b = b + 1
@@ -104,7 +107,7 @@ impl BandAlloc:
     # forward progress — the host write path therefore stops (NO_PPN -> SC_NS_NOT_READY)
     # before the device reaches a state where stale space exists but GC cannot reclaim it.
     me alloc_page_host(reserve: i64) -> i64:
-        val no_active: bool = me.active_blk == UNMAP or not me.block_ready(me.active_blk) or me.active_wp < 0 or me.active_wp > PAGES_PER_BLOCK
+        val no_active: bool = me.active_blk == UNMAP or not me.block_pages_ready(me.active_blk) or me.active_wp < 0 or me.active_wp > PAGES_PER_BLOCK
         val blk_full:  bool = me.active_wp == PAGES_PER_BLOCK
         val need_new:  bool = (no_active or blk_full)
         if need_new:
@@ -343,6 +346,7 @@ fn ftl_band_selftest() -> i64:
     ba.mark_invalid(p0)
     ba.free_block(0)
     fail = fail + expect_eq(ba.valid_count(0), 0, "truncated valid bitmap leaves counts untouched")
+    fail = fail + expect_eq(ba.alloc_page(), NO_PPN, "truncated valid bitmap blocks allocation")
     ba.valid = ftl_fill(NUM_PAGES, 0)
     ba.blk_state = []
     fail = fail + expect_eq(ba.free_blocks(), 0, "truncated block state reports no free blocks")

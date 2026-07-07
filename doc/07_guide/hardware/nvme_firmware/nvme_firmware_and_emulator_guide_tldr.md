@@ -7,7 +7,7 @@ Two main pure-Simple host deliverables plus one rv32 direct-smoke image live und
   multi IO queue, round-robin, live thermal/SMART composite-temperature model (P7), and RAIN
   XOR-parity channel protection (P8) — both now WIRED into the live controller/FTL, not shelf)
   over an ONFI NAND device. Gates:
-  `run fw/test_fw.spl` -> `ALL FIRMWARE SELF-TESTS PASS` (1125 asserts);
+  `run fw/test_fw.spl` -> `ALL FIRMWARE SELF-TESTS PASS` (1126 asserts);
   `run fw/sim_main.spl` → `ALL END-TO-END CHECKS PASS`;
   `run fw/nvme_main.spl` → `ALL NVME CONTROLLER E2E CHECKS PASS` (also asserts the SMART
   composite temperature equals the live thermal model);
