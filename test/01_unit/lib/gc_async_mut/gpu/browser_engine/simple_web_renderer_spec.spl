@@ -39,6 +39,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_url_to_pixels, simple_web_resolved_engine2d_backend_name}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_software_pixels,
     simple_web_layout_uses_legacy_widget_chrome,
     simple_web_layout_debug_layout_by_id}
 use std.gc_async_mut.gpu.browser_engine.simple_web_corpus_fixture_renderer.{
@@ -803,6 +804,26 @@ describe "SimpleWebRenderer":
         # proving the param actually reaches the Engine2D backend selector.
         val software_pixels = web.render_html_to_pixels(html, "software")
         expect(_pixels_equal(software_pixels, simple_software.render_html_to_pixels(html))).to_equal(true)
+
+    it "backend-isolation Gap E: WebRenderBackend exposes Draw IR and CPU-layout pixel readback":
+        # wm_compare probes previously called simple_web_layout_render_html_draw_ir /
+        # simple_web_layout_render_html_software_pixels directly (no facade for
+        # that shape existed -- Gap E). WebRenderBackend now wraps both so an
+        # app-layer caller never needs the direct backend-engine import. Byte
+        # (and structure)-identical to the underlying calls -- no behavior change.
+        val html = "<html><body><div style='width: 40px; height: 20px; background-color: #2563eb'>Gap E</div></body></html>"
+        val web = WebRenderBackend.create("pure_simple", 64, 40)
+
+        val facade_ir = web.render_html_to_draw_ir(html)
+        val direct_ir = simple_web_layout_render_html_draw_ir(html, 64, 40)
+        expect(facade_ir.batches.len()).to_equal(direct_ir.batches.len())
+        expect(facade_ir.batches.len()).to_be_greater_than(0)
+        expect(facade_ir.batches[0].commands.len()).to_equal(direct_ir.batches[0].commands.len())
+
+        val facade_pixels = web.render_html_software_pixels(html)
+        val direct_pixels = simple_web_layout_render_html_software_pixels(html, 64, 40)
+        expect(_pixels_equal(facade_pixels, direct_pixels)).to_equal(true)
+        expect(facade_pixels.len()).to_equal(64 * 40)
 
     it "fallback facade parses rgb() background-color with the shared CSS parser":
         val html = "<html><body style='background-color: rgb(5, 150, 105)'>Simple Web Renderer</body></html>"

@@ -17,8 +17,10 @@
 
 use std.gc_async_mut.gpu.browser_engine.browser_file_ops.{browser_file_read_bytes, browser_file_read_text, browser_file_write_text}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir, simple_web_layout_render_html_software_pixels}
 use std.gc_async_mut.io.mod_stub.{env_get as web_backend_env_get}
 use std.process.{process_run}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, DrawIrComposition, draw_ir_composition}
 
 # Platform-portable tmp dir: SIMPLE_WEB_RENDER_TMP env var overrides the
 # default so callers can redirect to a writable partition (e.g. D:/simple_work
@@ -179,6 +181,31 @@ impl WebRenderBackend:
             print "web_render_backend: html file empty or missing: {path}"
             return []
         self.render_html_to_pixels(html, engine2d_backend)
+
+    fn render_html_to_draw_ir(self, html: text) -> DrawIrComposition:
+        """Render `html` to a backend-agnostic Draw IR composition — the
+        layout/paint command list, not final pixels (P3 Gap E:
+        doc/03_plan/ui/rendering/backend_isolation_plan.md § P3 Gap E). Lets
+        probes assert against structured draw ops instead of only pixels,
+        without declaring their own `rt_*`/backend-engine call.
+
+        Only the `pure_simple` engine has a Draw IR representation; `chromium`
+        is a captured real-Chromium render with no IR to report, so it returns
+        an empty composition rather than substituting pure_simple's output."""
+        if self.backend == "chromium":
+            return draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [])
+        simple_web_layout_render_html_draw_ir(html, self.width, self.height)
+
+    fn render_html_software_pixels(self, html: text) -> [u32]:
+        """Render `html` through the pure_simple engine's own CPU layout/paint
+        path (parse -> CSS cascade -> block layout -> paint), bypassing
+        Engine2D backend selection entirely — for parity probes that need a
+        backend-independent pixel ground truth (P3 Gap E). `chromium` has no
+        equivalent CPU-only mode of its own; falls back to its normal capture
+        so callers still get real pixels rather than a silent empty buffer."""
+        if self.backend == "chromium":
+            return _render_html_via_chromium(html, self.width, self.height)
+        simple_web_layout_render_html_software_pixels(html, self.width, self.height)
 
     fn show_live_window(self, html_path: text, width: i32, height: i32, title: text) -> bool:
         """Open the backend's NATIVE LIVE window for this page (at width x height,
