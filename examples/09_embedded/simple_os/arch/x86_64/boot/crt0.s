@@ -572,7 +572,7 @@ rt_harden_text_write_trap_probe:
     ret
 
 /* ==================================================================
- * 64-bit GDT (5 entries for SYSCALL/SYSRET support)
+ * 64-bit GDT (6 segment entries + a 16-byte TSS descriptor)
  *
  * Selector layout required by MSR_STAR (Intel SDM Vol 3A §5.8.8):
  *   0x00: null
@@ -581,11 +581,15 @@ rt_harden_text_write_trap_probe:
  *   0x18: user CS 32-bit compat — SYSRET compat loads CS=0x1B (0x18|3)
  *   0x20: user SS/DS            — SYSRET loads SS=0x23 (0x20|3)
  *   0x28: user CS 64-bit        — SYSRET 64-bit loads CS=0x2B (0x28|3)
+ *   0x30: TSS (16-byte system descriptor) — filled + ltr'd by rt_x86_tss_init
  *
  * MSR_STAR value: (USER_CS_32 | 3) << 48 | KERNEL_CS << 32
  *              = 0x001B_0008_0000_0000
+ *
+ * The table lives in .data (writable): rt_x86_tss_init patches the TSS base
+ * and limit into gdt64_tss_desc at runtime, which would #GP on a .rodata page.
  * ================================================================== */
-.section .rodata
+.section .data
 .align 16
 gdt64:
     .quad 0                    /* 0x00: null descriptor */
@@ -629,6 +633,16 @@ gdt64:
     .byte 0xFA                 /* access: present, DPL=3, code, exec/read */
     .byte 0xAF                 /* flags: G=1, L=1, D=0 (64-bit) */
     .byte 0x00                 /* base high */
+
+    /* 0x30: 64-bit TSS descriptor — 16 bytes (2 slots). Reserved here (zero,
+     * so present=0) and filled at runtime by rt_x86_tss_init (baremetal_stubs.c),
+     * which writes base/limit/type=0x89 (present, available 64-bit TSS) then
+     * `ltr $0x30`. Kept INSIDE gdt64 and within the GDTR limit so the selector
+     * actually resolves — a free-floating .bss descriptor is never seen by ltr. */
+    .global gdt64_tss_desc
+gdt64_tss_desc:
+    .quad 0                    /* 0x30: TSS descriptor low  8 bytes */
+    .quad 0                    /* 0x38: TSS descriptor high 8 bytes (base 63:32) */
 
 gdt64_end:
 

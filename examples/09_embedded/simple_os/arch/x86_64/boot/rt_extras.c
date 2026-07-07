@@ -65,7 +65,12 @@ extern size_t strlen(const char *s);
 extern void serial_puts(const char *s);
 extern void serial_putchar(char c);
 
-__attribute__((weak, aligned(16))) uint8_t gdt64_tss_desc[16];
+/* gdt64_tss_desc is defined for real in boot/crt0.s as a 16-byte TSS descriptor
+ * INSIDE gdt64 (selector 0x30, within the GDTR limit, in writable .data). The
+ * former weak free-floating .bss array here was never seen by `ltr 0x30` (the
+ * CPU reads the active GDT, not this symbol), so it made rt_x86_tss_init's
+ * descriptor write a no-op and ltr #GP(0x30). Removed in favour of the crt0.s
+ * slot. */
 
 __attribute__((weak)) void spl_x86_on_user_fault(void) {
     serial_puts("[fault] user fault hook missing\r\n");
