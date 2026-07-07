@@ -11,6 +11,7 @@ This deliberately avoids arrays-of-structs.
 
 Semantics enforced (NVMe-faithful):
   * a CQ must exist before an SQ can bind to it (else SC_CQ_INVALID);
+  * an SQ with pending commands cannot be deleted (else SC_QUEUE_BUSY);
   * a CQ with a live SQ or pending completion cannot be deleted (else SC_QUEUE_BUSY);
   * qid must be in range and not already in use (else SC_INVALID_QID);
   * requested size must fit the device max (else SC_INVALID_QSIZE).
@@ -169,6 +170,8 @@ impl QueueSet:
             return SC_INVALID_QID
         if me.sq_active[qid] != 1:
             return SC_INVALID_QID
+        if me.sq_pending(qid) > 0:
+            return SC_QUEUE_BUSY
         me.sq_active[qid] = 0
         me.sq_cqid[qid] = 0
         me.sq_head[qid] = 0
@@ -473,10 +476,11 @@ fn nvme_qset_selftest() -> i64:
     qs.create_cq(4, 64)
     qs.create_sq(4, 64, 4)
     qs.sq_submit(4, cmd_make(88, OP_READ, 0, 1, 0))
-    fail = fail + expect_eq(qs.delete_sq(4), SC_SUCCESS, "delete pending SQ 4")
-    fail = fail + expect_eq(qs.sq_pending(4), 0, "deleted SQ hides stale pending commands")
-    val deleted_sq_fetch: NvmeCmd = qs.sq_fetch(4)
-    fail = fail + expect_eq(deleted_sq_fetch.nblocks, 0, "deleted SQ fetch returns inert command")
+    fail = fail + expect_eq(qs.delete_sq(4), SC_QUEUE_BUSY, "delete SQ 4 with pending command rejected")
+    fail = fail + expect_eq(qs.sq_pending(4), 1, "rejected SQ delete preserves pending command")
+    val pending_sq_fetch: NvmeCmd = qs.sq_fetch(4)
+    fail = fail + expect_eq(pending_sq_fetch.cid, 88, "pending command remains fetchable")
+    fail = fail + expect_eq(qs.delete_sq(4), SC_SUCCESS, "delete SQ 4 after draining command")
     fail = fail + expect_eq(qs.delete_cq(4), SC_SUCCESS, "delete CQ 4 after SQ 4 gone")
 
     qs.create_cq(5, 64)

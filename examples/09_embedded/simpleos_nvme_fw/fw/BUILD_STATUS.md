@@ -51,8 +51,8 @@ The full-controller layer, on top of the FTL/FIL stack (legacy single-queue
   command-dword decoders + `AdminCmd` builders, Identify Controller/Namespace + SMART builders.
 - **`nvme_qset.spl`** — `QueueSet`: up to `MAX_IO_QUEUES` IO SQ/CQ pairs in flat parallel
   arrays (ring of qid q at offset `q*MAX_QUEUE_SIZE`). Enforces NVMe-faithful semantics:
-  CQ-before-SQ, SQ binds to an existing CQ (`SC_CQ_INVALID`), no delete of a CQ with a bound
-  SQ or pending completions (`SC_QUEUE_BUSY`), qid range / in-use / size checks; fair
+  CQ-before-SQ, SQ binds to an existing CQ (`SC_CQ_INVALID`), no delete of an SQ/CQ with
+  pending work/completions (`SC_QUEUE_BUSY`), qid range / in-use / size checks; fair
   round-robin `next_pending_sq`.
 - **`nvme_controller.spl`** — `NvmeController{aq,qset,features,ftl,pool,last_id,smart,…}`:
   `admin_process` (Create/Delete IO SQ/CQ, Identify, Get/Set Features, Get Log Page) and
