@@ -204,6 +204,48 @@ fn metal_indexed_fill(w: i32, h: i32) -> Engine2DReadback:
     rb
 
 # ---------------------------------------------------------------------------
+# W3 (design cpu_gpu_dual_algorithm_plan.md) — draw_gradient_rect dual-algorithm
+# parity: kernel_draw_gradient_rect (plain data-parallel kernel, no GpuLut) vs
+# the CPU-lane integer-lerp oracle (emu_draw_gradient_rect, consolidated onto
+# SharedRaster by the D2 gradient decision). draw_gradient_rect IS a
+# RenderBackend trait op, so this lane drives it through Engine2D directly
+# (paint_primitives already exercises one call; this isolates the op with
+# edge cases the composite scene does not cover: h=1 -> max_t clamp to 1,
+# an off-framebuffer-edge rect the kernel's px/py bounds guard must clip, and
+# a non-opaque top/bottom color pair so the alpha channel's lerp is proven
+# too, not just RGB).
+# ---------------------------------------------------------------------------
+
+fn _gradient_scene(b: Engine2D, w: i32, h: i32):
+    b.clear(0xFF000000 as u32)
+    b.draw_gradient_rect(2, 2, 40, 24, 0xFFFF0000 as u32, 0xFF0000FF as u32)
+    b.draw_gradient_rect(10, 30, 30, 1, 0xFF112233 as u32, 0xFF445566 as u32)
+    b.draw_gradient_rect(w - 12, h - 12, 20, 20, 0xFF80FF00 as u32, 0xFF0080FF as u32)
+    b.draw_gradient_rect(4, h - 8, 50, 6, 0x80FFFFFF as u32, 0x8000FF00 as u32)
+
+fn cpu_gradient_rect(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend(w, h, "software")
+    _gradient_scene(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+fn metal_gradient_rect(w: i32, h: i32) -> Engine2DReadback:
+    var e = Engine2D.create_with_backend_fast(w, h, "metal")
+    if not e.capability.is_accelerated("draw_gradient_rect"):
+        # Honest capability under-report would mean the D3 self-description
+        # lied about the GPU dispatch below; surfaced (not silently ignored)
+        # so a regression in capability() is visible in the log even though
+        # compare_exact's device_readback check is the actual gate.
+        print "gradient_rect: WARN draw_gradient_rect missing from metal accelerated_ops (capability() under-report)"
+    _gradient_scene(e, w, h)
+    e.present()
+    val rb = e.read_pixels_with_source()
+    e.shutdown()
+    rb
+
+# ---------------------------------------------------------------------------
 # Parity comparison (honest: requires device_readback source on the Metal side)
 # ---------------------------------------------------------------------------
 
@@ -486,6 +528,20 @@ fn main() -> i64:
         print "stage-time metal_indexed_fill_us={ti2 - ti1}"
         compare_exact("indexed_fill", cpu_if, metal_if)
         print "PROVENANCE indexed_fill backend=metal source={metal_if.source}"
+
+    if stage == "all" or stage == "gradient_rect":
+        print "=== GPU offload evidence: draw_gradient_rect (W3 dual-algorithm) parity ==="
+        val gw = 64
+        val gh = 48
+        val tg0 = time_now_micros()
+        val cpu_gr = cpu_gradient_rect(gw, gh)
+        val tg1 = time_now_micros()
+        print "stage-time cpu_gradient_rect_us={tg1 - tg0}"
+        val metal_gr = metal_gradient_rect(gw, gh)
+        val tg2 = time_now_micros()
+        print "stage-time metal_gradient_rect_us={tg2 - tg1}"
+        compare_exact("gradient_rect", cpu_gr, metal_gr)
+        print "PROVENANCE gradient_rect backend=metal source={metal_gr.source}"
 
     if stage == "all" or stage == "text_edge":
         print "=== GPU offload evidence: draw_text edge cases (GPU-dict glyph atlas) parity ==="

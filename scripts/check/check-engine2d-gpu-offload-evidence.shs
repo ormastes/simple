@@ -12,7 +12,11 @@
 # #2 (glyph atlas backing kernel_glyph_atlas_blit, the draw_text accelerator)
 # proven bit-exact on out-of-charset glyphs, scale=1, and off-framebuffer-edge
 # text (design doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md
-# §3/§4, W4).
+# §3/§4, W4). The gradient_rect row is W3 (plan
+# doc/03_plan/ui/rendering/cpu_gpu_dual_algorithm_plan.md) — the plain
+# kernel_draw_gradient_rect dispatch (no GpuLut) proven bit-exact vs the
+# CPU-lane integer-lerp oracle on h=1, off-edge-clip, and alpha-channel-lerp
+# edge cases.
 # On non-macOS the harness reports skip; a skip is not verified evidence and
 # must not be reported as a pass.
 set -eu
@@ -64,9 +68,11 @@ emit() {
     echo "engine2d_gpu_offload_text=${TEXT_LINE:-none}"
     echo "engine2d_gpu_offload_wm_composite=${WM_LINE:-none}"
     echo "engine2d_gpu_offload_indexed_fill=${IF_LINE:-none}"
+    echo "engine2d_gpu_offload_gradient_rect=${GR_LINE:-none}"
     echo "engine2d_gpu_offload_text_edge=${TE_LINE:-none}"
     echo "engine2d_gpu_offload_provenance_wm=${PROV_WM:-none}"
     echo "engine2d_gpu_offload_provenance_indexed_fill=${PROV_IF:-none}"
+    echo "engine2d_gpu_offload_provenance_gradient_rect=${PROV_GR:-none}"
     echo "engine2d_gpu_offload_provenance_text_edge=${PROV_TE:-none}"
     echo "engine2d_gpu_offload_policy=exact-bitmap-no-blur-no-tolerance+device-readback-required"
     echo "engine2d_gpu_offload_harness=$HARNESS"
@@ -107,14 +113,23 @@ SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
     SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
     OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=text_edge \
     run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
+# W3: prove draw_gradient_rect (plain kernel_draw_gradient_rect, no GpuLut)
+# bit-exact vs the CPU-lane integer-lerp oracle through genuine
+# device_readback (plan doc/03_plan/ui/rendering/cpu_gpu_dual_algorithm_plan.md).
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
+    SIMPLE_ONE_CALL_READBACK="${SIMPLE_ONE_CALL_READBACK:-1}" \
+    OSTYPE="${OSTYPE:-}" GPU_OFFLOAD_STAGE=gradient_rect \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >>"$LOG" 2>&1 || true
 
 PRIM_LINE="$(grep -E '^primitives: ' "$LOG" | tail -n 1)"
 TEXT_LINE="$(grep -E '^text: ' "$LOG" | tail -n 1)"
 WM_LINE="$(grep -E '^wm_composite: ' "$LOG" | tail -n 1)"
 IF_LINE="$(grep -E '^indexed_fill: ' "$LOG" | tail -n 1)"
+GR_LINE="$(grep -E '^gradient_rect: ' "$LOG" | tail -n 1)"
 TE_LINE="$(grep -E '^text_edge: ' "$LOG" | tail -n 1)"
 PROV_WM="$(grep -E '^PROVENANCE wm_composite ' "$LOG" | tail -n 1)"
 PROV_IF="$(grep -E '^PROVENANCE indexed_fill ' "$LOG" | tail -n 1)"
+PROV_GR="$(grep -E '^PROVENANCE gradient_rect ' "$LOG" | tail -n 1)"
 PROV_TE="$(grep -E '^PROVENANCE text_edge ' "$LOG" | tail -n 1)"
 SKIP_LINE="$(grep -E '^GPU_OFFLOAD: skip' "$LOG" | tail -n 1)"
 
@@ -131,6 +146,9 @@ elif echo "$PRIM_LINE" | grep -q 'MATCH' \
     && echo "$IF_LINE" | grep -q 'MATCH' \
     && echo "$IF_LINE" | grep -q 'source=device_readback' \
     && echo "$PROV_IF" | grep -q 'source=device_readback' \
+    && echo "$GR_LINE" | grep -q 'MATCH' \
+    && echo "$GR_LINE" | grep -q 'source=device_readback' \
+    && echo "$PROV_GR" | grep -q 'source=device_readback' \
     && echo "$TE_LINE" | grep -q 'MATCH' \
     && echo "$TE_LINE" | grep -q 'source=device_readback' \
     && echo "$PROV_TE" | grep -q 'source=device_readback'; then

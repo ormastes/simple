@@ -400,6 +400,88 @@ fn _cmp_text_via_atlas(text_val: text, color: u32, font_size: i32) -> i32:
     mism
 
 # ============================================================================
+# W3 (design cpu_gpu_dual_algorithm_plan.md) — draw_gradient_rect GPU-kernel
+# formula oracle.
+#
+# The real Metal-vs-CPU device-readback proof lives in the run harness
+# test/02_integration/rendering/engine2d_gpu_offload_evidence.spl
+# (`gradient_rect` row — Metal's module graph is not safe to import into an
+# SSpec, see that file's header). Here, an INDEPENDENT Simple-level replica
+# of kernel_draw_gradient_rect's per-pixel formula (lerp_channel row
+# interpolation, THEN blend_src_over against the destination — the kernel
+# fix landed alongside this row; a raw fb[idx]=c write diverged from the
+# CPU-lane oracle on any alpha<255 top/bottom color) is pinned against
+# SoftwareBackend.draw_gradient_rect (which delegates to the canonical
+# emu_draw_gradient_rect) — the same two-independent-implementations pattern
+# _dense_lut_lookup_ref/_atlas_row_bits_ref use above, applied to W3.
+# ============================================================================
+
+fn _gr_channel(c: u32, shift: i32) -> i32:
+    ((c >> shift) & 0xFFu32).to_i32()
+
+fn _gr_pack(r: i32, g: i32, b: i32, a: i32) -> u32:
+    ((a.to_u32() & 0xFFu32) << 24) | ((r.to_u32() & 0xFFu32) << 16) | ((g.to_u32() & 0xFFu32) << 8) | (b.to_u32() & 0xFFu32)
+
+# Independent replica of the MSL `lerp_channel` helper (backend_metal_msl.spl):
+# a + (b-a)*t/max_t, plain truncating integer division.
+fn _gradient_lerp_channel_ref(a: i32, b: i32, t: i32, max_t: i32) -> i32:
+    if max_t <= 0:
+        return a
+    a + (b - a) * t / max_t
+
+# Independent replica of the MSL `blend_src_over` helper — Porter-Duff
+# src-over, plain truncating integer division, no rounding term (same
+# formula backend_software.spl's core.blend() uses).
+fn _gradient_blend_src_over_ref(src: u32, dst: u32) -> u32:
+    val sa = _gr_channel(src, 24)
+    if sa == 255:
+        return src
+    if sa == 0:
+        return dst
+    val sr = _gr_channel(src, 16)
+    val sg = _gr_channel(src, 8)
+    val sb = _gr_channel(src, 0)
+    val dr = _gr_channel(dst, 16)
+    val dg = _gr_channel(dst, 8)
+    val db = _gr_channel(dst, 0)
+    val da = _gr_channel(dst, 24)
+    val inv_a = 255 - sa
+    val out_r = (sr * sa + dr * inv_a) / 255
+    val out_g = (sg * sa + dg * inv_a) / 255
+    val out_b = (sb * sa + db * inv_a) / 255
+    val out_a = sa + (da * inv_a) / 255
+    _gr_pack(out_r, out_g, out_b, out_a)
+
+# Independent replica of kernel_draw_gradient_rect's whole per-pixel formula:
+# interpolate the row color, then alpha-blend it over the destination pixel.
+fn _gradient_kernel_ref(top: u32, bottom: u32, row: i32, h: i32, dst: u32) -> u32:
+    var max_t = h - 1
+    if max_t < 1:
+        max_t = 1
+    val r = _gradient_lerp_channel_ref(_gr_channel(top, 16), _gr_channel(bottom, 16), row, max_t)
+    val g = _gradient_lerp_channel_ref(_gr_channel(top, 8), _gr_channel(bottom, 8), row, max_t)
+    val b = _gradient_lerp_channel_ref(_gr_channel(top, 0), _gr_channel(bottom, 0), row, max_t)
+    val a = _gradient_lerp_channel_ref(_gr_channel(top, 24), _gr_channel(bottom, 24), row, max_t)
+    _gradient_blend_src_over_ref(_gr_pack(r, g, b, a), dst)
+
+fn _cmp_gradient_kernel_formula(w: i32, h: i32, top: u32, bottom: u32, bg: u32) -> i32:
+    var sw = _fresh_fill(bg)
+    sw.draw_gradient_rect(0, 0, w, h, top, bottom)
+    val got = sw.read_pixels()
+    var mism = 0
+    var row = 0
+    while row < h:
+        val want = _gradient_kernel_ref(top, bottom, row, h, bg)
+        var col = 0
+        while col < w:
+            val fb_idx = row * 48 + col
+            if got[fb_idx] != want:
+                mism = mism + 1
+            col = col + 1
+        row = row + 1
+    mism
+
+# ============================================================================
 # Specification
 # ============================================================================
 
@@ -540,3 +622,28 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
 
         it "matches the atlas-lookup formula on a lowercase/digit/space mix":
             expect(_cmp_text_via_atlas("Zz 9", 0xFF22C55Eu32, 14)).to_equal(0)
+
+    context "W3 — draw_gradient_rect GPU-kernel formula oracle (design cpu_gpu_dual_algorithm_plan W3)":
+        # SoftwareBackend.draw_gradient_rect (delegates to the canonical
+        # emu_draw_gradient_rect) vs an independent Simple replica of
+        # kernel_draw_gradient_rect's lerp+blend formula. The real Metal
+        # device-readback proof is in the offload evidence run harness
+        # (`gradient_rect` row, Metal's module graph is unsafe to import
+        # here). The alpha<255 rows below pin the fix landed alongside this
+        # spec: the kernel previously wrote the interpolated color raw
+        # (fb[idx]=c), diverging from the CPU-lane oracle's alpha blend on
+        # any non-opaque top/bottom color — now both sides call
+        # blend_src_over (short-circuits to a raw store when opaque, so the
+        # pre-existing opaque case stays bit-exact).
+
+        it "matches the lerp formula on an opaque top/bottom pair (h=24, the pre-existing bit-exact case)":
+            expect(_cmp_gradient_kernel_formula(30, 24, 0xFFFF0000u32, 0xFF0000FFu32, 0xFF000000u32)).to_equal(0)
+
+        it "matches the lerp formula at h=1 (max_t clamps to 1, no divide-by-zero)":
+            expect(_cmp_gradient_kernel_formula(20, 1, 0xFF112233u32, 0xFF445566u32, 0xFF000000u32)).to_equal(0)
+
+        it "matches the lerp+blend formula on a semi-transparent top/bottom pair over a non-black destination":
+            expect(_cmp_gradient_kernel_formula(16, 12, 0x80FFFFFFu32, 0x8000FF00u32, 0xFF202020u32)).to_equal(0)
+
+        it "matches the lerp+blend formula when only one endpoint is transparent (asymmetric alpha)":
+            expect(_cmp_gradient_kernel_formula(16, 12, 0x00FFFFFFu32, 0xFFFF0000u32, 0xFF303030u32)).to_equal(0)
