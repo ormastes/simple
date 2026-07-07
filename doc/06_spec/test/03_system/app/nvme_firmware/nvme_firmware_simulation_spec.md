@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -707,12 +707,40 @@ expect(rv64_out).to_contain("nvme_fw_rv64_direct_build_timeout_2026-07-07")
 
 </details>
 
+#### keeps the Cosmos+ OpenSSD platform descriptor executable and honest
+
+- Run the Zynq-7000 / Cosmos+ platform descriptor
+   - Expected: code equals `0`
+-  expect no fail marker
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the Zynq-7000 / Cosmos+ platform descriptor")
+val (out, err, code) = _run("src/os/kernel/arch/arm32/platform/cosmos_openssd.spl")
+expect(code).to_equal(0)
+expect(out).to_contain("COSMOS+ OpenSSD platform descriptor OK")
+expect(out).to_contain("present firmware seams: 6")
+expect(out).to_contain("missing for silicon:    7")
+expect(out).to_contain("Zynq NAND Flash Controller")
+expect(out).to_contain("PCIe endpoint init")
+expect(out).to_contain("ARMv7 freestanding Simple runtime")
+_expect_no_fail_marker(out, "Cosmos+ OpenSSD platform descriptor")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
