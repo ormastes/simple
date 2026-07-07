@@ -186,7 +186,7 @@ impl NvmeController:
             val abort_sqid: i64 = admin_qid(cmd.cdw10)
             if abort_sqid != ADMIN_QID and not me.qset.sq_is_active(abort_sqid):
                 return AdminResult(status: SC_INVALID_QID, data: 0, post: true)
-            me.abort_count = me.abort_count + 1
+            me.abort_count = smart_nonnegative(me.abort_count) + 1
             # Decode and record the Abort target (SQID in cdw10 low 16, CID in high 16).
             me.last_abort_sqid = abort_sqid
             me.last_abort_cid = admin_abort_cid(cmd.cdw10)
@@ -200,7 +200,7 @@ impl NvmeController:
             if cmd.cdw10 != 0 or cmd.cdw11 != 0 or cmd.cdw12 != 0:
                 return AdminResult(status: SC_INVALID_FIELD, data: 0, post: true)
             me.ftl.format()                    # erase user data; preserve bad-block table + wear
-            me.format_count = me.format_count + 1
+            me.format_count = smart_nonnegative(me.format_count) + 1
             me.dirty_since_checkpoint = false
             return AdminResult(status: SC_SUCCESS, data: 0, post: true)
         if cmd.opcode == ADMIN_FW_DOWNLOAD:
@@ -387,7 +387,7 @@ impl NvmeController:
                 me.pool.set_status(h, status)
                 me.pool.set_phase(h, PH_DONE)
                 me.pool.release(h)
-                me.writes = me.writes + 1
+                me.writes = smart_nonnegative(me.writes) + 1
                 if status == SC_SUCCESS:
                     if me.features.get(FEAT_VOLATILE_WC) == 0:
                         me.ftl.checkpoint()
@@ -400,7 +400,7 @@ impl NvmeController:
                     status = me.ftl.read_range_status(cmd.lba, cmd.nblocks)
                     if status == SC_SUCCESS:
                         rdata = me.ftl.read(cmd.lba)
-                    me.reads = me.reads + 1
+                    me.reads = smart_nonnegative(me.reads) + 1
                     me.pt.tick(1)
                 else:
                     if cmd_is_trim(cmd):
@@ -424,7 +424,7 @@ impl NvmeController:
             me.error_count = me.error_count + 1
             me.last_error = status
             if status == SC_MEDIA_ERR:
-                me.media_errors = me.media_errors + 1
+                me.media_errors = smart_nonnegative(me.media_errors) + 1
         cpl_make(cmd.cid, status, rdata)
 
     # Round-robin across all active IO submission queues; post each completion
@@ -469,9 +469,9 @@ impl NvmeController:
         # NVMe SMART unsafe shutdowns count power losses with dirty media state.
         me.ftl.crash()
         me.ftl.recover()
-        me.power_cycles = me.power_cycles + 1
+        me.power_cycles = smart_nonnegative(me.power_cycles) + 1
         if me.dirty_since_checkpoint:
-            me.unsafe_shutdowns = me.unsafe_shutdowns + 1
+            me.unsafe_shutdowns = smart_nonnegative(me.unsafe_shutdowns) + 1
         me.dirty_since_checkpoint = false
 
 # ── Self-test (compact; full admin-driven e2e lives in nvme_main.spl) ─────────
@@ -993,6 +993,30 @@ fn nvme_controller_selftest() -> i64:
     c.io_process()
     c.io_reap(1)
     fail = fail + expect_eq(c.error_log_count(), 1, "error log restarts from zero after corrupted negative count")
+
+    c.reads = -7
+    c.io_submit(1, cmd_make(126, OP_READ, 5, 1, 0))
+    c.io_process()
+    c.io_reap(1)
+    fail = fail + expect_eq(c.reads, 1, "read counter restarts from zero after corruption")
+    c.writes = -7
+    c.io_submit(1, cmd_make(127, OP_WRITE, 15, 1, 0x5D))
+    c.io_process()
+    c.io_reap(1)
+    fail = fail + expect_eq(c.writes, 1, "write counter restarts from zero after corruption")
+    c.media_errors = -7
+    c.io_submit(1, cmd_make(128, OP_READ, 8, 1, 0))
+    c.io_process()
+    c.io_reap(1)
+    fail = fail + expect_eq(c.media_errors, 1, "media-error counter restarts from zero after corruption")
+    c.power_cycles = -7
+    c.unsafe_shutdowns = -7
+    c.dirty_since_checkpoint = true
+    c.power_cycle()
+    fail = fail + expect_eq(c.power_cycles, 1, "power-cycle counter restarts from zero after corruption")
+    fail = fail + expect_eq(c.unsafe_shutdowns, 1, "unsafe-shutdown counter restarts from zero after corruption")
+    c.power_cycles = 0
+    c.unsafe_shutdowns = 0
 
     # Get Log Page (ERROR) reports the error-entry count; (FW_SLOT) reports the active fw revision.
     c.admin_submit(admin_get_log_cmd(43, LOG_ERROR))
