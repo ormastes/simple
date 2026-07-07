@@ -1065,6 +1065,12 @@ This confirms the remaining production media blocker is pure-Simple
 native-build parse/front-end throughput across the firmware closure, not stock
 rv32 boot imports.
 
+Rejected shortcut: bundling the stripped firmware logic into one generated
+70 KB `.spl` source reduced the closure to `n_sources=1`, but it was worse:
+`NVME_RV32_BUILD_TIMEOUT_SECS=90 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+timed out while still parsing that single root file. Keep the minimal checker on
+split stripped sources unless the parser gets a real large-file throughput fix.
+
 Rust diagnostic compilers are not an acceptable fallback. Current
 `src/compiler_rust/target/bootstrap/simple` and `target/debug/simple` both print
 the bootstrap-seed warning and fail this wrapper because LLVM is not available:
@@ -1564,3 +1570,23 @@ The Rust-built Simple binary prints the expected bootstrap-only warning and is
 used here only to produce the missing RISC-V OS evidence media. The remaining
 firmware-production blocker is still the postponed bootstrap
 `run_native_build_bootstrap` path for self-hosted `native-build`.
+
+### Minimal RV32 wrapper diagnostic still fails (2026-07-07)
+
+The attempted prefix diagnostic in `scripts/check/check-nvme-rv32-minimal-live.shs`
+does not provide a shippable workaround yet. Even with one inlined logic section
+and a larger Rust stack, the self-hosted native-build path aborts while lowering
+the generated root `selftest` function:
+
+```text
+NVME_RV32_MINIMAL_SECTIONS=1 NVME_RV32_BUILD_TIMEOUT_SECS=180 \
+  sh scripts/check/check-nvme-rv32-minimal-live.shs
+
+phase1:load_sources:done n_sources=1
+phase3:hir:function:start ...nvme_fw_minimal_root.spl._selftest
+thread 'simple-main' has overflowed its stack
+STATUS: FAIL nvme-rv32-minimal-live build_rc=134
+```
+
+This keeps the RV32 minimal self-hosted live checker uncommitted. The useful
+next fix is in HIR lowering recursion/stack behavior, not another wrapper shape.
