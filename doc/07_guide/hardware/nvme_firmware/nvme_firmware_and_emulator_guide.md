@@ -67,7 +67,7 @@ ORs in the thermal critical-warning bit from that model — replacing the former
 
 ```bash
 B=bin/simple
-$B run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # -> ALL FIRMWARE SELF-TESTS PASS  (1107 assertions)
+$B run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # -> ALL FIRMWARE SELF-TESTS PASS  (1109 assertions)
 $B run examples/09_embedded/simpleos_nvme_fw/fw/sim_main.spl   # -> ALL END-TO-END CHECKS PASS
 $B run examples/09_embedded/simpleos_nvme_fw/fw/nvme_main.spl  # -> ALL NVME CONTROLLER E2E CHECKS PASS
 $B run examples/09_embedded/simpleos_nvme_fw/fw/rain_check.spl      # -> RAIN OK
@@ -75,7 +75,7 @@ $B run examples/09_embedded/simpleos_nvme_fw/fw/rain_ftl_check.spl  # -> RAIN-FT
 $B run examples/09_embedded/simpleos_nvme_fw/fw/thermal_check.spl   # -> THERMAL OK
 ```
 
-- **`test_fw.spl`** — full self-test suite, 1107 `PASS:` assertions across all modules (now
+- **`test_fw.spl`** — full self-test suite, 1109 `PASS:` assertions across all modules (now
   including RAIN, thermal, sandbox, hooks selftests).
 - **`sim_main.spl`** — single-queue end-to-end: 128 writes → read-back → overwrite-all (write
   amplification) → garbage collection (reclaim stale blocks, logical view preserved) → trim →
