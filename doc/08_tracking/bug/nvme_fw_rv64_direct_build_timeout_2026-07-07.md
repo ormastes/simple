@@ -129,3 +129,29 @@ Terminated
 ```
 
 The next source-shape choke point is `logic_power_thermal.spl`.
+
+## Update — power/thermal wrapper now parses quickly
+
+`logic_power_thermal.spl` was split into a tiny public wrapper plus core/case
+files. The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but it now gets through power/thermal and stops at
+HIL parsing:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_power_thermal.spl chars=92
+[BOOTSTRAP-PHASE] ... logic_power_thermal.spl
+[BOOTSTRAP-PHASE] ... logic_hil.spl chars=957
+Terminated
+```
+
+The next source-shape choke point is `logic_hil.spl`.
