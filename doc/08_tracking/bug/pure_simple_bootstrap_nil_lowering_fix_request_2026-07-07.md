@@ -52,6 +52,24 @@ runtime is repaired or redeployed, use the source assertions in
 `test/01_unit/compiler/mir/mir_lowering_new_spec.spl` plus Rust
 `cargo check -p simple-compiler` as partial evidence only.
 
+Follow-up root cause found during redeploy:
+
+```text
+Program received signal SIGSEGV, Segmentation fault.
+__strlen_avx2
+__add_to_environ(... value=0x1b ...)
+rt_env_set
+frontend__core___AstExpr__nodes__expr_count_set
+```
+
+The checked-in source already converts `SIMPLE_BOOTSTRAP_EXPR_COUNT` through
+`int_to_str(value)`, so the deployed binary was stale. Redeploy then exposed a
+bootstrap parser blocker: named tuple return types such as
+`-> (stdout: text, stderr: text, exit_code: i64)` in compiler sources stop the
+Stage 4 parser. The fix request now includes keeping bootstrap compiler-source
+tuple returns positional, e.g. `-> (text, text, i64)`, with
+`test/01_unit/compiler/frontend/parser_spec.spl` guarding the high-risk paths.
+
 ## Fixed errors
 
 The 2026-07-07 bootstrap repair loop fixed several independent failures that
@@ -142,3 +160,30 @@ src/app/cli/native_build_main.spl -- ...` worker path either reject external
 entries under `SIMPLE_BOOTSTRAP=1` with a clear diagnostic, or route them
 through the normal non-bootstrap HIR module path instead of returning an empty
 bootstrap HIR module.
+
+## 2026-07-07 follow-up: native declaration collision crash
+
+Later cache-backed mini builds reproduced a separate stage4 native crash after
+the parser blockers were removed. CLI, MCP, and LSP shards all converged on
+Cranelift `IncompatibleDeclaration` warnings for constructor-looking names that
+were already declared as data/type symbols:
+
+- `Backend`
+- `Codegen`
+- `Symbol`
+
+Root cause: unresolved constructor calls can reach cross-module call codegen,
+where bare type names are treated as importable functions. The old path logged a
+warning and injected nil, allowing object creation/use to continue until a
+segfault. The repair now:
+
+- renames backend concrete constructors to `CompilerBackend` and
+  `CraneliftCodegenState`, with compatibility aliases `type Backend = ...` and
+  `type Codegen = ...`;
+- renames the HIR concrete symbol-table record to `HirSymbol`, with
+  `type Symbol = HirSymbol`;
+- makes Rust call codegen fail closed when a call target resolves to an existing
+  data/type declaration instead of synthesizing nil;
+- adds `test/01_unit/compiler/backend/backend_declaration_name_collision_spec.spl`
+  to prevent reintroducing short `Backend`, `Codegen`, or HIR `Symbol`
+  constructors.

@@ -52,6 +52,12 @@ fn is_profiler_function(name: &str) -> bool {
     name.starts_with("rt_profiler_")
 }
 
+fn is_cross_module_data_export<M: Module>(ctx: &InstrContext<'_, M>, raw_name: &str, resolved_name: &str) -> bool {
+    ctx.data_exports.contains(raw_name)
+        || ctx.data_exports.contains(resolved_name)
+        || ctx.data_exports.contains(&resolved_name.replace('.', "_dot_"))
+}
+
 fn inline_numeric_arg(builder: &mut FunctionBuilder, value: Value) -> Value {
     let zero = builder.ins().iconst(types::I64, 0);
     let eight = builder.ins().iconst(types::I64, 8);
@@ -3310,6 +3316,13 @@ pub fn compile_call<M: Module>(
         {
             Ok(existing)
         } else {
+            if is_cross_module_data_export(ctx, func_name, resolved_name.as_ref()) {
+                return Err(format!(
+                    "cross-module call '{}' resolved to data/type export '{}'; expected a function. \
+                     Constructor calls should lower to StructInit before codegen.",
+                    func_name, resolved_name
+                ));
+            }
             let call_conv = crate::codegen::shared::platform_call_conv();
             let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
             let param_count = ctx
@@ -3337,7 +3350,21 @@ pub fn compile_call<M: Module>(
                             ctx.func_ids.insert(resolved_name.to_string(), id);
                             Ok(id)
                         }
+                        Some(cranelift_module::FuncOrDataId::Data(_)) => {
+                            return Err(format!(
+                                "cross-module call '{}' resolved to data/type export '{}'; expected a function. \
+                                 Constructor calls should lower to StructInit before codegen.",
+                                func_name, resolved_name
+                            ));
+                        }
                         _ => {
+                            if is_cross_module_data_export(ctx, func_name, resolved_name.as_ref()) {
+                                return Err(format!(
+                                    "cross-module call '{}' resolved to data/type export '{}'; expected a function. \
+                                     Constructor calls should lower to StructInit before codegen.",
+                                    func_name, resolved_name
+                                ));
+                            }
                             // Truly unresolved — return NIL
                             eprintln!("[CODEGEN-WARN] Failed to declare cross-module function '{}' (resolved: '{}'): IncompatibleDeclaration", func_name, resolved_name);
                             if let Some(d) = dest {
