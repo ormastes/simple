@@ -155,6 +155,9 @@ fn build_smart_log(reads: i64, writes: i64, power_cycles: i64, unsafe_sd: i64, m
         crit = 1
     SmartLog(crit_warning: crit, temperature: smart_nonnegative(temperature), avail_spare: safe_spare, percent_used: smart_percent(percent_used), data_units_read: smart_nonnegative(reads), data_units_written: smart_nonnegative(writes), power_cycles: smart_nonnegative(power_cycles), unsafe_shutdowns: smart_nonnegative(unsafe_sd), media_errors: safe_media_err)
 
+fn admin_cpl_status_valid(status: i64) -> bool:
+    cpl_status_valid(status) or status == SC_CQ_INVALID or status == SC_INVALID_QID or status == SC_INVALID_QSIZE or status == SC_QUEUE_BUSY
+
 # ── FeatureStore — Get/Set Features backing store ─────────────────────────────
 struct FeatureStore:
     vals: [i64]
@@ -305,6 +308,8 @@ impl AdminQueue:
     me cq_post(p: NvmeCpl) -> bool:
         if not cid_valid(p.cid):
             return false
+        if not admin_cpl_status_valid(p.status):
+            return false
         val depth: i64 = me.effective_depth()
         if depth <= 0:
             return false
@@ -353,6 +358,8 @@ impl AdminQueue:
         if not cid_valid(cid):
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val status: i64 = me.cq_status[h]
+        if not admin_cpl_status_valid(status):
+            return cpl_make(0, SC_INVALID_FIELD, 0)
         val data:   i64 = me.cq_data[h]
         me.cq_head = (me.cq_head + 1) % depth
         me.cq_len = me.cq_len - 1
@@ -500,8 +507,19 @@ fn nvme_admin_selftest() -> i64:
     aq.cq_cid[bad_admin_cq_cid_slot] = saved_admin_cq_cid
     val repaired_admin_cq_cid: NvmeCpl = aq.cq_reap()
     fail = fail + expect_eq(repaired_admin_cq_cid.cid, 26, "repaired admin CQ head cid completion remains reapable")
+    aq.cq_post(cpl_make(27, SC_SUCCESS, 0x27))
+    val bad_admin_cq_status_slot: i64 = aq.cq_head
+    val saved_admin_cq_status: i64 = aq.cq_status[bad_admin_cq_status_slot]
+    aq.cq_status[bad_admin_cq_status_slot] = 70000
+    val bad_admin_cq_status: NvmeCpl = aq.cq_reap()
+    fail = fail + expect_eq(bad_admin_cq_status.status, SC_INVALID_FIELD, "invalid admin CQ head status reap fails closed")
+    fail = fail + expect_eq(aq.cq_pending(), 1, "invalid admin CQ head status preserves pending completion")
+    aq.cq_status[bad_admin_cq_status_slot] = saved_admin_cq_status
+    val repaired_admin_cq_status: NvmeCpl = aq.cq_reap()
+    fail = fail + expect_eq(repaired_admin_cq_status.status, SC_SUCCESS, "repaired admin CQ head status completion remains reapable")
     fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(70000, SC_SUCCESS, 0))), 0, "admin rejects oversized completion id")
     fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(-1, SC_SUCCESS, 0))), 0, "admin rejects negative completion id")
+    fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(28, 70000, 0))), 0, "admin rejects invalid completion status")
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(70000, FEAT_TEMP_THRESH, 1))), 0, "admin rejects oversized cid")
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(-1, FEAT_TEMP_THRESH, 1))), 0, "admin rejects negative cid")
 

@@ -103,6 +103,8 @@ impl NvmeQueues:
     me cq_post(p: NvmeCpl) -> bool:
         if not cid_valid(p.cid):
             return false
+        if not cpl_status_valid(p.status):
+            return false
         if me.cq_len < 0 or me.cq_len >= me.depth:
             return false
         val t: i64 = me.cq_tail
@@ -126,6 +128,8 @@ impl NvmeQueues:
         if not cid_valid(cid):
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val status: i64 = me.cq_status[h]
+        if not cpl_status_valid(status):
+            return cpl_make(0, SC_INVALID_FIELD, 0)
         val data:   i64 = me.cq_data[h]
         val next_h: i64 = me.cq_head + 1
         me.cq_head = next_h % me.depth
@@ -268,8 +272,19 @@ fn hil_queue_selftest() -> i64:
     q.cq_cid[bad_cq_cid_slot] = saved_cq_cid
     val repaired_cq_cid = q.cq_reap()
     failures = failures + expect_eq(repaired_cq_cid.cid, 46, "repaired HIL CQ head cid completion remains reapable")
+    q.cq_post(cpl_make(47, SC_SUCCESS, 0x67))
+    val bad_cq_status_slot: i64 = q.cq_head
+    val saved_cq_status: i64 = q.cq_status[bad_cq_status_slot]
+    q.cq_status[bad_cq_status_slot] = 70000
+    val bad_cq_status = q.cq_reap()
+    failures = failures + expect_eq(bad_cq_status.status, SC_INVALID_FIELD, "invalid HIL CQ head status reap fails closed")
+    failures = failures + expect_eq(q.cq_pending(), 1, "invalid HIL CQ head status preserves pending completion")
+    q.cq_status[bad_cq_status_slot] = saved_cq_status
+    val repaired_cq_status = q.cq_reap()
+    failures = failures + expect_eq(repaired_cq_status.status, SC_SUCCESS, "repaired HIL CQ head status completion remains reapable")
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(70000, SC_SUCCESS, 0))), 0, "reject oversized completion id")
     failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(-1, SC_SUCCESS, 0))), 0, "reject negative completion id")
+    failures = failures + expect_eq(bool_to_i64(q.cq_post(cpl_make(48, 70000, 0))), 0, "reject invalid completion status")
 
     # Test 4: fill SQ to depth; next submit must return false
     # At this point sq_head==2, sq_tail==2 (2 submit+fetch cycles above)

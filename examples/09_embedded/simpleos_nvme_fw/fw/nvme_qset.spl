@@ -289,6 +289,8 @@ impl QueueSet:
             return false
         if not cid_valid(p.cid):
             return false
+        if not cpl_status_valid(p.status):
+            return false
         val size: i64 = me.cq_effective_size(cqid)
         if size <= 0:
             return false
@@ -345,6 +347,8 @@ impl QueueSet:
         if not cid_valid(cid):
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val status: i64 = me.cq_status[slot]
+        if not cpl_status_valid(status):
+            return cpl_make(0, SC_INVALID_FIELD, 0)
         val data:   i64 = me.cq_data[slot]
         me.cq_head[cqid] = (me.cq_head[cqid] + 1) % size
         me.cq_len[cqid] = me.cq_len[cqid] - 1
@@ -523,8 +527,19 @@ fn nvme_qset_selftest() -> i64:
     qs.cq_cid[bad_io_cq_cid_slot] = saved_io_cq_cid
     val repaired_io_cq_cid: NvmeCpl = qs.cq_reap(1)
     fail = fail + expect_eq(repaired_io_cq_cid.cid, 82, "repaired CQ head cid completion remains reapable")
+    qs.cq_post(1, cpl_make(83, SC_SUCCESS, 0xC7))
+    val bad_io_cq_status_slot: i64 = 1 * MAX_QUEUE_SIZE + qs.cq_head[1]
+    val saved_io_cq_status: i64 = qs.cq_status[bad_io_cq_status_slot]
+    qs.cq_status[bad_io_cq_status_slot] = 70000
+    val bad_io_cq_status: NvmeCpl = qs.cq_reap(1)
+    fail = fail + expect_eq(bad_io_cq_status.status, SC_INVALID_FIELD, "invalid CQ head status reap fails closed")
+    fail = fail + expect_eq(qs.cq_pending(1), 1, "invalid CQ head status preserves pending completion")
+    qs.cq_status[bad_io_cq_status_slot] = saved_io_cq_status
+    val repaired_io_cq_status: NvmeCpl = qs.cq_reap(1)
+    fail = fail + expect_eq(repaired_io_cq_status.status, SC_SUCCESS, "repaired CQ head status completion remains reapable")
     fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(70000, SC_SUCCESS, 0))), 0, "post rejects oversized completion id")
     fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(-1, SC_SUCCESS, 0))), 0, "post rejects negative completion id")
+    fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(84, 70000, 0))), 0, "post rejects invalid completion status")
 
     # cannot delete CQ 1 while SQ 1 is bound; reverse order works
     fail = fail + expect_eq(qs.delete_cq(1), SC_QUEUE_BUSY, "delete CQ 1 with bound SQ rejected")
