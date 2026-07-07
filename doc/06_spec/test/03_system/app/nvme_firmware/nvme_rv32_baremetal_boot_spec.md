@@ -49,7 +49,7 @@ NVMe firmware baremetal-remote boot — a Simple-compiled rv32 kernel booted on 
 | Design | N/A |
 | Research | doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md |
 | Source | `test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl` |
-| Updated | 2026-07-05 |
+| Updated | 2026-07-07 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 NVMe firmware baremetal-remote boot — a Simple-compiled rv32 kernel booted on QEMU
@@ -81,11 +81,15 @@ hook.
 
 - Probe the host for qemu-system-riscv32 and the NVMe firmware rv32 ELF
 - qemu-system-riscv32 is not installed — fail with host-unavailable reason
+- fail
 - The NVMe firmware rv32 ELF is absent — fail with missing-media reason
+- fail
 - Boot the NVMe firmware rv32 ELF on QEMU and capture the serial console
 - The serial console shows the SimpleOS RV32 banner
 - The kernel reports boot completion on the serial console
 - The NVMe firmware hook reports its rv32 self-test PASS marker
+- The serial console contains no failure markers
+- fail
 - The heap subsystem self-check reports healthy
 - The supervisor-call subsystem self-check reports healthy
 
@@ -93,7 +97,7 @@ hook.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -138,36 +142,30 @@ else:
 
 ### NVMe firmware rv32 P9 build evidence
 
-The P9 firmware-specific rv32 wrapper must not build a stock OS image and call it NVMe
-evidence. The rv32 boot path now has an optional weak hook, and the NVMe firmware entry
-provides the strong exported hook that prints the firmware PASS marker.
-
 #### runs the rv32 no-alloc logic reference and proves the boot hook is wired
 
 - The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal+HIL+queue-phase+io-opcode-read-zero-trim-flush+admin-format-fw-log+reactor+policy-target+DRAM-durability+wear-scrub+media-retire+power-cycle+backpressure-abort+feature-guard+namespace-guard reference typechecks
    - Expected: check_code equals `0`
 - The host-runnable scalar logic reference passes
    - Expected: logic_code equals `0`
-   - Expected: logic_out contains `RV32 NVME FW LOGIC OK`
+-  expect no fail marker
 - The rv32 boot wrapper fail-closed self-test rejects missing PASS and serial FAIL markers
    - Expected: wrapper_code equals `0`
-   - Expected: wrapper_out contains `STATUS: PASS nvme-rv32-boot self-test`
+-  expect no fail marker
 - The stock rv32 boot path calls the optional NVMe firmware self-test hook
    - Expected: boot_code equals `0`
 - The firmware rv32 entry exports the strong hook that prints the PASS marker
    - Expected: hook_code equals `0`
-   - Expected: hook_out contains `rt_rv32_boot_optional_nvme_fw_selftest`
-   - Expected: hook_out contains `ALL RV32 NVME FW CHECKS PASS`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal reference typechecks")
+step("The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal+HIL+queue-phase+io-opcode-read-zero-trim-flush+admin-format-fw-log+reactor+policy-target+DRAM-durability+wear-scrub+media-retire+power-cycle+backpressure-abort+feature-guard+namespace-guard reference typechecks")
 val (check_out, check_err, check_code) = _run("bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
 expect(check_code).to_equal(0)
 
@@ -175,11 +173,13 @@ step("The host-runnable scalar logic reference passes")
 val (logic_out, logic_err, logic_code) = _run("bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl")
 expect(logic_code).to_equal(0)
 expect(logic_out).to_contain("RV32 NVME FW LOGIC OK")
+_expect_no_fail_marker(logic_out, "rv32 logic reference")
 
 step("The rv32 boot wrapper fail-closed self-test rejects missing PASS and serial FAIL markers")
 val (wrapper_out, wrapper_err, wrapper_code) = _run("sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --self-test")
 expect(wrapper_code).to_equal(0)
 expect(wrapper_out).to_contain("STATUS: PASS nvme-rv32-boot self-test")
+_expect_no_fail_marker(wrapper_out, "rv32 boot wrapper self-test")
 
 step("The stock rv32 boot path calls the optional NVMe firmware self-test hook")
 val (boot_out, boot_err, boot_code) = _run("rg -n 'rt_rv32_boot_optional_nvme_fw_selftest\\(\\)' src/os/kernel/arch/riscv32/boot.spl")
