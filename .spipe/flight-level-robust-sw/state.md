@@ -560,3 +560,16 @@ dev-in-progress
 - blocker: N=15 remains diagnostic prefix coverage only. The real DRAM
   durability implementation and later sections are still not live-proven with
   active `bin/simple`; no full RV32 firmware PASS is claimed.
+- 2026-07-07 RV32 NVMe N=21 diagnostic PASS: bootstrap/deploy remains
+  postponed. The minimal live checker now covers every registered prefix slice
+  through namespace guard with bounded `i32` diagnostic identities instead of
+  the real mutation-heavy firmware models. Evidence:
+  `sh -n scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  `git diff --check -- scripts/check/check-nvme-rv32-minimal-live.shs` passed,
+  and `NVME_RV32_MINIMAL_SECTIONS=21 NVME_RV32_BUILD_TIMEOUT_SECS=120
+  RUST_MIN_STACK=134217728 sh scripts/check/check-nvme-rv32-minimal-live.shs`
+  printed `ALL RV32 NVME FW CHECKS PASS` and
+  `STATUS: PASS nvme-rv32-minimal-live`.
+- blocker: N=21 remains diagnostic prefix coverage only. The real full firmware
+  implementations are still not live-proven with active `bin/simple`; no full
+  RV32 firmware PASS is claimed.
