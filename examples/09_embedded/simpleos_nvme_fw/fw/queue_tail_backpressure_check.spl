@@ -1,5 +1,5 @@
 """
-queue_tail_backpressure_check — corrupted CQ tail must not drop admin or IO work.
+queue_tail_backpressure_check — corrupted CQ pointers must not drop admin or IO work.
 
 Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/queue_tail_backpressure_check.spl
 """
@@ -21,6 +21,15 @@ fn main():
     val ac: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(ac.status, SC_SUCCESS, "admin command completes after CQ tail repair")
 
+    c.aq.cq_head = MAX_QUEUE_SIZE
+    c.admin_submit(admin_identify_cmd(5, CNS_CONTROLLER))
+    fail = fail + expect_eq(c.admin_process(), 0, "admin dispatch backs off on invalid CQ head")
+    fail = fail + expect_eq(c.aq.pending(), 1, "admin command remains pending behind invalid head")
+    c.aq.cq_head = 0
+    c.admin_process()
+    val ah: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(ah.status, SC_SUCCESS, "admin command completes after CQ head repair")
+
     c.admin_submit(admin_create_cq_cmd(2, 1, 64))
     c.admin_submit(admin_create_sq_cmd(3, 1, 64, 1))
     c.admin_process()
@@ -35,7 +44,16 @@ fn main():
     val ic: NvmeCpl = c.io_reap(1)
     fail = fail + expect_eq(ic.status, SC_SUCCESS, "IO command completes after CQ tail repair")
 
+    c.qset.cq_head[1] = MAX_QUEUE_SIZE
+    c.io_submit(1, cmd_make(6, OP_READ, 0, 1, 0))
+    fail = fail + expect_eq(c.io_process(), 0, "IO dispatch backs off on invalid CQ head")
+    fail = fail + expect_eq(c.qset.sq_pending(1), 1, "IO command remains pending behind invalid head")
+    c.qset.cq_head[1] = 0
+    c.io_process()
+    val ih: NvmeCpl = c.io_reap(1)
+    fail = fail + expect_eq(ih.status, SC_SUCCESS, "IO command completes after CQ head repair")
+
     if fail == 0:
-        print "QUEUE TAIL BACKPRESSURE OK"
+        print "QUEUE BACKPRESSURE OK"
     else:
-        print "QUEUE TAIL BACKPRESSURE FAIL ({fail})"
+        print "QUEUE BACKPRESSURE FAIL ({fail})"
