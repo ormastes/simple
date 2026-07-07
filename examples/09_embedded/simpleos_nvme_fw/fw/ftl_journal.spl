@@ -9,6 +9,13 @@ use nvme_types.*
 
 val JOURNAL_CAP: i64 = 512
 
+fn journal_counter_next(v: i64) -> i64:
+    if v < 0:
+        return 1
+    if v >= 9223372036854775806:
+        return 9223372036854775806
+    v + 1
+
 # ── Journal struct ────────────────────────────────────────────────────────────
 
 struct Journal:
@@ -85,7 +92,7 @@ impl Journal:
     me checkpoint(seq: i64):
         me.ckpt_seq = seq
         me.ckpt_valid = 1
-        me.sb_gen = me.sb_gen + 1
+        me.sb_gen = journal_counter_next(me.sb_gen)
         me.sb_ckpt_ptr = seq
 
     # Number of valid WAL records.
@@ -217,5 +224,11 @@ fn ftl_journal_selftest() -> i64:
     # Second checkpoint bumps sb_gen to 2.
     j.checkpoint(3)
     fail = fail + expect_eq(j.sb_gen, 2, "sb_gen after second checkpoint")
+    j.sb_gen = -4
+    j.checkpoint(4)
+    fail = fail + expect_eq(j.sb_gen, 1, "corrupted negative sb_gen resumes from one")
+    j.sb_gen = 9223372036854775806
+    j.checkpoint(5)
+    fail = fail + expect_eq(j.sb_gen, 9223372036854775806, "saturated sb_gen does not wrap negative")
 
     fail
