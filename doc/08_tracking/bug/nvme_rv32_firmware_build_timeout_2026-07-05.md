@@ -1304,3 +1304,30 @@ This satisfies the immediate Stage 2 CLI gate for a visible version probe and
 fail-closed unsupported commands. Firmware production proof is still open until
 the real bootstrap CLI lowering and full bootstrap/deploy loop produce a usable
 self-hosted compiler for the RV32 firmware build.
+
+### Latest bootstrap progress: real-main probe isolated behind env gate (2026-07-07)
+
+The default Stage 2 path still builds and smokes through the stable argv-aware
+bootstrap entry:
+
+```text
+PASS test/01_unit/app/cli/bootstrap_main_source_spec.spl
+PASS test/01_unit/compiler/backend/bootstrap_llvm_entry_symbol_source_spec.spl
+PASS test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl
+stage2_default_realmain_gate_rc=0
+[mir-lower-free] done instr-total=12 term-total=24
+[llvm-tools] llc-object
+version_rc=0
+version_stdout=simple-bootstrap 1.0.0-beta
+noargs_rc=1
+native_rc=1
+```
+
+The full `bootstrap_main.spl` lowering is now reachable only with
+`SIMPLE_BOOTSTRAP_REAL_MAIN=1`. That probe links after applying the existing SSA
+phi materializer, but it is not usable yet: `--version` returns `1` with empty
+stdout/stderr, and the preserved IR branches on `icmp ne i64 undef`.
+
+Firmware production proof remains blocked on real bootstrap HIR/MIR expression
+lowering for method-call conditions, argv indexing, string equality, and print.
+Do not add more bootstrap runtime shims for this lane; fix the lowering gap.

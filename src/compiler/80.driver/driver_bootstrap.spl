@@ -15,6 +15,7 @@ use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_back
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module, bootstrap_set_entry_hir_module}
+use compiler.mir_opt.{ssa_var_transform_blocks}
 use compiler.common.driver_core_types.{CompileResult}
 use driver_types.{CompileContext, CompileOptions}
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
@@ -169,6 +170,12 @@ pub fn bootstrap_lower_hir_globals_to_mir_module_driver() -> MirModule:
     log_phase("aot:bootstrap_driver_mir:done")
     module
 
+fn bootstrap_ssa_phi_function(fn_: MirFunction) -> MirFunction:
+    val rewritten = ssa_var_transform_blocks(fn_.blocks)
+    if rewritten.applied:
+        return MirFunction.with_blocks(fn_, rewritten.blocks)
+    fn_
+
 pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> CompileResult:
     """Emit LLVM for bootstrap MIR functions from the local driver module instance."""
     log_phase("aot:bootstrap_real_llvm:start")
@@ -186,7 +193,7 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
         val name = bootstrap_mir_function_name_at(idx)
         print "[bootstrap-real-llvm] function {name}"
         val fn_ = bootstrap_mir_function_at(idx)
-        val body = MirBody.from_function(fn_)
+        val body = MirBody.from_function(bootstrap_ssa_phi_function(fn_))
         translator.translate_function(if name == "main": "__simple_main" else: name, body)
         idx = idx + 1
     val llvm_ir = translator.builder.build()
@@ -231,7 +238,7 @@ pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, o
     for fn_ in module.functions.values():
         if bootstrap_trace_enabled():
             print "[bootstrap-real-llvm-module] function {fn_.name}"
-        val body = MirBody.from_function(fn_)
+        val body = MirBody.from_function(bootstrap_ssa_phi_function(fn_))
         translator.translate_function(if fn_.name == "main": "__simple_main" else: fn_.name, body)
     val llvm_ir = translator.builder.build()
     log_phase("aot:bootstrap_real_llvm_module:compile")

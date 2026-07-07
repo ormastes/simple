@@ -597,3 +597,41 @@ full `bootstrap_main.spl` lowering. The real compiler path still needs proper
 condition values, phi or stack-slot merge handling, indexing, string equality,
 and print lowering before the full bootstrap/deploy and firmware build loops
 can be considered production proof.
+
+## 2026-07-07 Progress: Real-main probe is opt-in and SSA-prepared
+
+The stable Stage 2 CLI gate remains protected by the bootstrap-specific entry
+unless `SIMPLE_BOOTSTRAP_REAL_MAIN=1` is set. The real-main probe now runs after
+the existing SSA phi materializer, and `bootstrap_main.spl` reads compiled user
+argv from slot `1` because the hosted runtime includes the executable in slot
+`0`.
+
+Focused evidence:
+
+```text
+PASS test/01_unit/app/cli/bootstrap_main_source_spec.spl
+PASS test/01_unit/compiler/backend/bootstrap_llvm_entry_symbol_source_spec.spl
+PASS test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl
+stage2_default_realmain_gate_rc=0
+[mir-lower-free] done instr-total=12 term-total=24
+[llvm-tools] llc-object
+version_rc=0
+version_stdout=simple-bootstrap 1.0.0-beta
+noargs_rc=1
+native_rc=1
+```
+
+The opt-in real-main path links, but still exits silently with `1`:
+
+```text
+SIMPLE_BOOTSTRAP_REAL_MAIN=1 ... stage2_real_main_after_argv_index_fresh
+stage2_real_main_after_argv_index_fresh --version
+version_rc=1
+stdout/stderr empty
+```
+
+The preserved LLVM IR shows the remaining semantic bug directly: `__simple_main`
+branches on `icmp ne i64 undef` and returns `1`. The next blocker is bootstrap
+HIR/MIR lowering for the real main expression forms: condition values from
+method calls, indexing, string equality, and print. Runtime helper shims are not
+the right next fix.
