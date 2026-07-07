@@ -5,6 +5,8 @@ use os.kernel.loader.smf.{smf_extract_executable_stub_for_arch, smf_extract_exec
 use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn_from_bytes}
 use os.kernel.loader.app_registry.{app_registry_cached_bytes, app_registry_fat32_alias, app_registry_root_alias}
 use os.kernel.loader.cap_exec_gate.{exec_cap_check}
+use os.kernel.loader.process_image.{build_user_process_image_unchecked}
+use os.kernel.loader.x86_64_fs_exec_ring3.{x86_64_fs_exec_enter_image_ring3}
 
 extern fn serial_println(msg: text)
 
@@ -149,6 +151,16 @@ pub fn x86_64_fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [tex
         return prepared.pid
     val pid = prepared.pid
     serial_println("[fs-exec] spawn:image path={path} entry={entry} segments=1 stub_bytes={stub.len()} argv_count={argv.len()} env_count={envp.len()} pid={pid}")
+
+    # Ring-3 control transfer: rebuild the general UserProcessImage from the same
+    # resident FAT-read bytes, map its PT_LOAD segments into a fresh user address
+    # space, and iretq to CPL3 (argv/envp are already threaded through the image
+    # builder's build_initial_stack — no separate argv path here). This is the
+    # map+enter sequence proven by the FS-exec smoke, lifted into the general
+    # spawn. Does not return on success: the process runs at ring 3 and exits.
+    val image = build_user_process_image_unchecked(path, bytes, Architecture.X86_64, argv, envp)
+    val handoff_rc = x86_64_fs_exec_enter_image_ring3(image)
+    serial_println("[fs-exec] x86_64:handoff-return path={path} rc={handoff_rc}")
     pid
 
 fn x86_64_fs_exec_spawn_hello_world_smf() -> i64:

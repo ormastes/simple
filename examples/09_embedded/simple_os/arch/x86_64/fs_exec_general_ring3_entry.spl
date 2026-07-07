@@ -2,18 +2,23 @@
 #
 # The rung above ring3_smoke_entry.spl. ring3_smoke mapped a raw embedded machine-
 # code buffer to prove the bare ring-3 handoff. This entry proves the SAME handoff
-# for bytes that flow through the REAL general spawn image builder:
+# for bytes that flow through the REAL general spawn image builder — sourced off
+# the FAT32/NVMe disk (the byte path proven by the FS-exec smoke and #22), NOT an
+# embedded kernel blob:
 #
-#   1. Materialise a small known ELF (build/os/elfexec/fsexec_hello.elf, embedded
-#      into the kernel as a .rodata blob by scripts/os/build_fsexec_general_ring3.shs)
-#      into a Simple [u8].
-#   2. Feed it to build_user_process_image_unchecked — the GENERAL spawn image
+#   1. Bring up the C-backed NVMe controller (simpleos_nvme_init) and read
+#      /FSEXEC.ELF off the FAT32 image into the kernel's static path-read buffer
+#      (simpleos_fat32_stream_open/read_at -> simpleos_fat32_path_read_buffer_addr),
+#      then materialise it into a Simple [u8]. This is the exact byte source the
+#      FS-exec smoke maps + runs today; it replaces the old .rodata blob accessor
+#      that hit the freestanding symbol-load anomaly.
+#   2. Feed the [u8] to build_user_process_image_unchecked — the GENERAL spawn image
 #      builder used by fs_exec_prepare_spawn_from_bytes — producing a real
-#      UserProcessImage (this exercises the general path; its file_bytes is always
-#      valid even though its module-val-bound structured fields are unreliable
-#      under freestanding native-build).
-#   3. Hand the image to x86_64_fs_exec_enter_image_ring3 — the missing control-
-#      transfer handoff — which maps it into a fresh user AS and iretq's to CPL3.
+#      UserProcessImage (its file_bytes is a pass-through copy of the raw ELF; the
+#      module-val-bound structured fields are unreliable under freestanding, so the
+#      handoff re-parses file_bytes).
+#   3. Hand the image to x86_64_fs_exec_enter_image_ring3 — the control-transfer
+#      handoff — which maps it into a fresh user AS and iretq's to CPL3.
 #
 # The payload writes "FDR\n" via `out` (only possible when CPL <= IOPL, i.e.
 # genuinely ring 3) then "FSEXEC_OK rc=42\n" via syscall 60, then exits QEMU via
@@ -25,8 +30,13 @@
 extern fn serial_println(msg: text)
 extern fn rt_debug_exit_success()
 extern fn rt_x86_tss_init() -> i64
-extern fn fsexec_hello_blob_size() -> u64
-extern fn fsexec_hello_blob_byte(i: u64) -> u8
+
+# C-backed NVMe + FAT32 boot reader (boot/baremetal_stubs.c) — the proven byte
+# source (same externs the FS-exec smoke uses).
+extern fn simpleos_nvme_init() -> i64
+extern fn simpleos_fat32_path_read_buffer_addr() -> u64
+extern fn simpleos_fat32_stream_open(path: text) -> i64
+extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i64
 
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
 use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
@@ -34,16 +44,28 @@ use os.kernel.memory.vmm.{vmm_init}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.process_image.{build_user_process_image_unchecked}
 use os.kernel.loader.x86_64_fs_exec_ring3.{x86_64_fs_exec_enter_image_ring3}
+use os.kernel.boot.mmio.{mmio_read8}
 
-fn _materialize_blob() -> [u8]:
-    """Copy the embedded ELF blob into a Simple [u8] via a C per-byte accessor
-    (C indexes its own array — no MMIO / addr translation). This is the byte-
-    source bridge the general builder consumes."""
-    val size = fsexec_hello_blob_size()
+fn _read_fsexec_bytes() -> [u8]:
+    """Stream /FSEXEC.ELF off the FAT32/NVMe disk into the static path-read buffer
+    and materialise it into a Simple [u8]. Same read path the FS-exec smoke uses;
+    the C DMA target is the static FAT buffer (disjoint from kernel rodata / the
+    VMM bump-allocator arena), so no clobber hazard."""
+    val fsize = simpleos_fat32_stream_open("/FSEXEC.ELF")
+    if fsize <= 0:
+        serial_println("[gen] FAIL fat32 stream open /FSEXEC.ELF rc={fsize}")
+        return []
+    val buf = simpleos_fat32_path_read_buffer_addr()
+    val n = simpleos_fat32_stream_read_at(0, buf, fsize.to_u64())
+    if n <= 0:
+        serial_println("[gen] FAIL fat32 stream read rc={n}")
+        return []
+    serial_println("[gen] /FSEXEC.ELF read size={fsize} buf=0x{buf}")
     var out: [u8] = []
     var i: u64 = 0
+    val size = fsize.to_u64()
     while i < size:
-        out.push(fsexec_hello_blob_byte(i))
+        out.push(mmio_read8(buf + i))
         i = i + 1
     out
 
@@ -55,12 +77,17 @@ fn spl_start():
     serial_println("[gen] arch-init + syscall MSRs done")
     rt_x86_tss_init()
 
-    # Materialise the embedded ELF blob into a Simple [u8] BEFORE pmm/vmm init.
-    # The blob's rodata lives in the tail of the ~20 MB kernel image, and the
-    # early VMM page-table allocator bump-allocates frames right after the image
-    # (observed: blob at 0x1450b30, cr3 at 0x145f000) — clobbering the blob if it
-    # is read after vmm_init. Copying it to the Simple heap first keeps it intact.
-    val bytes = _materialize_blob()
+    # 1. NVMe online, then read + materialise /FSEXEC.ELF BEFORE pmm/vmm init —
+    #    the FAT read + [u8] copy run against the C static heap; keeping them ahead
+    #    of the VMM bump allocator matches the FS-exec smoke ordering.
+    if simpleos_nvme_init() != 0:
+        serial_println("[gen] FAIL nvme init")
+        serial_println("TEST FAILED")
+        rt_debug_exit_success()
+        return
+    serial_println("[gen] nvme online")
+
+    val bytes = _read_fsexec_bytes()
     var b0: i64 = 0
     var b1: i64 = 0
     var b2: i64 = 0
@@ -71,8 +98,15 @@ fn spl_start():
         b2 = bytes[2].to_i64()
         b3 = bytes[3].to_i64()
     serial_println("[gen] blob materialized len={bytes.len()} magic={b0},{b1},{b2},{b3}")
+    if bytes.len() < 64:
+        serial_println("[gen] FAIL short ELF")
+        serial_println("TEST FAILED")
+        rt_debug_exit_success()
+        return
 
-    if not pmm_init_identity_range(0x20000000, 0x100000, 0x14000000):
+    # 2. PMM + VMM online (after NVMe/FAT — the C NVMe DMA uses the static C heap
+    #    in low .bss, disjoint from this identity range at 0x80000000+).
+    if not pmm_init_identity_range(0x80000000, 0x100000, 0x14000000):
         serial_println("[gen] FAIL pmm_init")
         serial_println("TEST FAILED")
         rt_debug_exit_success()
@@ -87,7 +121,7 @@ fn spl_start():
     )
     serial_println("[gen] general image built")
 
-    # THE MISSING HANDOFF: map + enter ring 3. Does not return on success.
+    # THE HANDOFF: map + enter ring 3. Does not return on success.
     val rc = x86_64_fs_exec_enter_image_ring3(image)
     serial_println("[gen] handoff returned rc={rc} (unexpected)")
     serial_println("TEST FAILED")
