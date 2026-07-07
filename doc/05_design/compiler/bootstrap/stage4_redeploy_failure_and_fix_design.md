@@ -1,5 +1,21 @@
 # Stage-4 Redeploy: Failure Root-Cause & Two-Sided Fix Design
 
+**2026-07-07 correction:** the original hypothesis in §2/§3.2/§4.1/§4.2 below
+was refuted by a later worker. The seed parser's `parse_parameters`
+(`src/compiler_rust/parser/src/parser_impl/core.rs`) **already** accepts
+`mut <name>: <Type>` in parameter lists — there was no seed parser gap; the
+observed failure was a *stale seed binary* being tested. The "duplicate
+`target_presets.spl`" finding was also a misread: `src/compiler/backend` is a
+git-tracked symlink (mode 120000) to `70.backend`, so there is only one real
+file. The actual root cause was unbounded recursive-descent recursion in the
+seed parser (no depth guard) → stack overflow → SIGABRT, triggered by the
+parse error's recovery path, not by `mut` itself. That fix **landed**: origin
+commit `4274c4f3f20b` (cherry-picked from change `9f1a7bd`) adds
+`MAX_PARSE_RECURSION_DEPTH = 512` guards threaded through
+`parse_expression`/`parse_type` in `expressions/core.rs`, `parser_types.rs`,
+`parser_impl/core.rs`, `lib.rs`, plus regression tests in
+`recovery_bound_tests.rs`. See the corrected §2/§3.1/§3.2/§4.1/§4.2 below.
+
 **Status:** ACTIVE design (2026-07-07). Companion plan:
 `doc/03_plan/cert/redeploy_selfhost_plan.md` (§ 2026-07-06/07 failure taxonomy).
 **Goal:** unblock the stage-4 self-host rebuild that ~130 frozen source fixes
@@ -30,6 +46,14 @@ only** (reusing the fixed seed) in an isolated worktree.
 
 ## 2. The open failure (class 4): evidence chain
 
+> **[CORRECTED 2026-07-07]** The "two defects" interpretation below is
+> WRONG for defect 1: there is no seed parser gap for `mut` parameters (see
+> top-of-file correction note). The real single root cause is defect 2
+> (unbounded recursion in the parse-error path), independent of what
+> specific token triggered the original parse error. The "duplicate module"
+> secondary finding is also WRONG — `src/compiler/backend` is a symlink to
+> `70.backend`, not a second copy.
+
 Instrumented run 2026-07-06 11:58→14:08 (first run ever to capture an exit
 code for this class):
 
@@ -47,73 +71,99 @@ Failing source line (`target_presets.spl:318`):
 fn preset_apply_compile_options(preset: TargetPreset, mut options: CompileOptions) -> CompileOptions:
 ```
 
-Interpretation (two defects, one incident):
+Interpretation — **REFUTED, kept for incident-history record only:**
 
-1. **Seed parser gap — `mut` parameter modifier.** The seed does not accept
-   `mut <name>: <Type>` in a parameter list. It misparses from the `mut`
-   token onward, so the `-> CompileOptions:` tail (col ~101) surfaces as
-   "unexpected token in expression".
-2. **Seed error-recovery non-termination.** After the parse error, recovery
-   (`src/compiler_rust/parser/src/error_recovery.rs`; note line ~302 already
-   special-cases a `mut` lexeme) recurses/loops without a depth bound until
-   the `simple-main` thread's stack overflows → `abort()`. This converted a
-   diagnosable one-line error into two days of "silent" build deaths.
+1. ~~**Seed parser gap — `mut` parameter modifier.** The seed does not accept
+   `mut <name>: <Type>` in a parameter list.~~ **FALSE.** `parse_parameters`
+   in `src/compiler_rust/parser/src/parser_impl/core.rs` already checks for
+   and consumes a leading `TokenKind::Mut` before the param name (verified
+   directly in the current tree). The `mut options: CompileOptions` in the
+   failing line was never the problem; the parser was simply being exercised
+   with a **stale seed binary** that predated (or otherwise lacked) this
+   handling. The `-> CompileOptions:` tail surfacing as "unexpected token"
+   was a downstream symptom of defect 2, not of a `mut`-parsing gap.
+2. **Seed error-recovery non-termination — the ACTUAL sole root cause.**
+   After a parse error (of any kind — not specifically `mut`-related),
+   recursive-descent parsing (`parse_expression`/`parse_type` and their
+   recovery paths) had no depth bound and could recurse until the
+   `simple-main` thread's stack overflowed → `abort()`. This converted a
+   diagnosable one-line error into two days of "silent" build deaths. **This
+   is the only real defect**, and it is now fixed (see §3.1).
 
-Blast radius of defect 1: `grep -rEl 'fn [a-z_]+\([^)]*\bmut [a-z_]+:'`
-finds ≥5 compiler files — `src/compiler/70.backend/target_presets.spl`,
+Blast radius: irrelevant — the `grep -rEl 'fn [a-z_]+\([^)]*\bmut [a-z_]+:'`
+census below was collected under the false premise that `mut` params needed
+a workaround. No workaround was needed; the census is kept only as a record
+of what was (mis)investigated: `src/compiler/70.backend/target_presets.spl`,
 `src/compiler/70.backend/backend/vhdl_codegen_helpers.spl`,
 `src/compiler/60.mir_opt/mir_opt/pattern_dispatch.spl`,
 `src/compiler/60.mir_opt/mir_opt/collection_opt_core.spl`,
-`src/compiler/60.mir_opt/_OptimizationPasses/io_passes.spl` — so a one-file
-workaround cannot clear stage4.
+`src/compiler/60.mir_opt/_OptimizationPasses/io_passes.spl`.
 
-**Secondary finding — duplicate module:** the error path names
-`src/compiler/backend/target_presets.spl` while the numbered layout has
-`src/compiler/70.backend/target_presets.spl`. Two same-name modules in the
-build closure reproduce the #41 duplicate-struct field-resolution hazard and
-must be reconciled (keep the `70.backend` one unless imports prove otherwise).
+**Secondary finding — duplicate module: FALSE.** `src/compiler/backend` is a
+git-tracked **symlink** (mode 120000, verified via `git ls-tree HEAD
+src/compiler/backend` → `120000 blob ... src/compiler/backend` pointing to
+`70.backend`) to `src/compiler/70.backend`. There is exactly one
+`target_presets.spl` on disk (`src/compiler/70.backend/target_presets.spl`).
+The "duplicate module in the build closure" was a misread of the error log,
+which reports the symlinked path as if it were a separate file. No #41-class
+hazard exists here; see §4.2 (no-op).
 
 ## 3. Fix design — Rust seed side (both changes required)
 
 ### 3.1 Bound error recovery (correctness of failure, non-negotiable)
 
-- **Where:** `src/compiler_rust/parser/src/error_recovery.rs` (+ its callers
-  in stmt/expr parsing).
-- **What:** introduce a recovery budget: (a) a recursion-depth counter (or
-  explicit fuel, e.g. 500 recovery attempts per file) threaded through the
-  recovery path, and (b) a **must-advance invariant** — every recovery
-  iteration either consumes ≥1 token or reduces nesting depth; if neither,
-  bail out of the file with a fatal-but-graceful parse error.
-- **Failure contract:** on budget exhaustion emit
-  `parse error (recovery limit) at <file>:<line>:<col>` and return an `Err`
-  up the driver, terminating the build with a nonzero exit and the file list
-  of failed modules. **Never** abort/overflow.
-- **Acceptance:** feeding current `target_presets.spl` to the *unfixed-3.2*
-  seed parser must produce a bounded, located error (regression test with a
-  deliberately unparseable file containing `mut` params + deep nesting);
-  process exits cleanly, no SIGABRT.
+**STATUS: DONE / LANDED — origin commit `4274c4f3f20b` (cherry-picked from
+change `9f1a7bd4f043a1edb25767e27e6c2d45fa2590ba`), 2026-07-07.** This was the
+only real fix required to unblock stage4; see the top-of-file correction
+note.
 
-### 3.2 Accept `mut` parameter syntax (feature parity, cheap-if-true)
+- **Where (as landed):** `src/compiler_rust/parser/src/expressions/core.rs`,
+  `src/compiler_rust/parser/src/parser_types.rs`,
+  `src/compiler_rust/parser/src/parser_impl/core.rs` (defines
+  `pub const MAX_PARSE_RECURSION_DEPTH: u32 = 512;`),
+  `src/compiler_rust/parser/src/lib.rs`, plus regression tests in
+  `src/compiler_rust/parser/src/recovery_bound_tests.rs`.
+- **What (as landed):** a `parse_recursion_depth` counter threaded through
+  `parse_expression` and `parse_type`; on exceeding `MAX_PARSE_RECURSION_DEPTH`
+  (512), emit a located `parse error (recovery limit)`-style `Err` instead of
+  recursing further. This directly prevents the stack overflow regardless of
+  what triggered the original parse error (it was never specific to `mut`
+  params).
+- **Failure contract (as landed):** budget exhaustion returns a bounded,
+  located `Err` up the driver instead of aborting. **Never** abort/overflow —
+  verified by `recovery_bound_tests.rs`, which runs on a production-sized
+  64MB stack and asserts a bounded `Err` + no abort.
+- **Acceptance (met):** regression tests assert bounded `Err`, no SIGABRT,
+  even for deliberately unparseable/deeply-nested input.
 
-- **Where:** seed parameter-list parsing (parser stmt/fn-signature path; the
-  interner already interns `mut`).
-- **What:** allow optional `mut` before a param name; represent it as the
-  param's mutability flag if the seed AST has one, else **parse-and-ignore**
-  (treat as annotation) — the seed only needs to *compile* the self-hosted
-  compiler, whose semantics enforce mutability itself.
-- **Guard:** if this turns out non-cheap (>~50 LOC or touches type checking),
-  SKIP it and rely on the pure-Simple rewrite (§4) — 3.1 alone already
-  converts the wall into a readable error list.
-- **Acceptance:** seed parses `fn f(a: T, mut b: U) -> U:` and the stage4
-  parse of all 5 affected files reports zero errors.
+### 3.2 Accept `mut` parameter syntax — **N/A: was never broken**
+
+**STATUS: N/A — no work needed.** `parse_parameters`
+(`src/compiler_rust/parser/src/parser_impl/core.rs`, ~line 1043) already
+accepted an optional leading `mut` token before a parameter name before any
+of this investigation started (confirmed by direct inspection of
+`self.check(&TokenKind::Mut)` in the current tree, and confirmed independently
+in the landed commit's own message: "mut-parameter syntax is already accepted
+by parse_parameters (verified), so no source rewrites are needed"). This
+section is retained only to document that the originally-proposed work item
+does not exist; do not schedule it.
 
 ## 4. Fix design — pure-Simple side
 
-### 4.1 `mut`-param seed compatibility (only if 3.2 is skipped)
+### 4.1 `mut`-param seed compatibility — **SKIPPED: unnecessary**
 
-Mechanical, semantics-preserving rewrite per site:
+**STATUS: SKIPPED.** The premise (seed can't parse `mut` params, so `.spl`
+sites must be mechanically rewritten to avoid the syntax) is false — see
+§3.2. The seed already accepts `mut <name>: <Type>` in parameter lists, so
+none of `target_presets.spl`, `vhdl_codegen_helpers.spl`,
+`pattern_dispatch.spl`, `collection_opt_core.spl`, or `io_passes.spl` need
+the `_in`-suffix rebind rewrite shown below. **Do not apply this rewrite —
+it would be a needless, purely-cosmetic churn of working code.** The
+mechanical rule is left here only as a historical record of the (abandoned)
+plan:
 
 ```spl
+# NOT APPLIED — kept for reference only, see status note above
 # before
 fn preset_apply_compile_options(preset: TargetPreset, mut options: CompileOptions) -> CompileOptions:
     options.gc_off = preset.no_gc
@@ -125,20 +175,24 @@ fn preset_apply_compile_options(preset: TargetPreset, options_in: CompileOptions
     ...
 ```
 
-Rule: rename the param (`_in` suffix), first statement `var <name> = <name>_in`,
-body otherwise untouched. Apply to every match of the census grep (re-run the
-grep in the worktree; do not trust the cached list of 5). Per repo policy this
-is recorded as a temporary seed-compat measure, NOT a language retreat —
-`mut` params remain valid Simple; if 3.2 lands, these rewrites may stay (they
-are harmless) but no new ones are required.
+### 4.2 "Duplicate" `target_presets.spl` reconciliation — **NO-OP, no reconciliation needed**
 
-### 4.2 Duplicate `target_presets.spl` reconciliation
+**STATUS: NO-OP.** `src/compiler/backend` is a git-tracked symlink (mode
+120000) to `src/compiler/70.backend` — verified with
+`git ls-tree HEAD src/compiler/backend` (shows `120000 blob ...
+src/compiler/backend` → target `70.backend`) and `readlink
+src/compiler/backend`. There is only **one** real file on disk:
+`src/compiler/70.backend/target_presets.spl`. `src/compiler/backend/target_presets.spl`
+is the same inode reached through the symlink, not a second copy. **Do not
+diff, "reconcile", or delete anything here** — the original steps 1-3 below
+were based on a misread of the error log (which prints the symlinked path)
+and would be destructive no-ops at best (deleting through the symlink
+deletes the only copy) or actively harmful at worst. Left below only as a
+record of the abandoned (incorrect) plan:
 
-1. `diff src/compiler/backend/target_presets.spl src/compiler/70.backend/target_presets.spl`.
-2. Find importers of each (`grep -rn "backend.target_presets\|70.backend.target_presets\|compiler.backend.target_presets" src/`).
-3. Keep exactly one (expected: the numbered `70.backend` copy), update
-   imports, delete the other. If they diverged, merge newest-truth per hunk
-   before deleting. This also removes the #41-class duplicate-struct hazard.
+1. ~~`diff src/compiler/backend/target_presets.spl src/compiler/70.backend/target_presets.spl`.~~
+2. ~~Find importers of each...~~
+3. ~~Keep exactly one... delete the other.~~
 
 ## 5. Bootstrap flow (pure-Simple only) + verification
 
