@@ -85,10 +85,25 @@ impl NvmeController:
     me last_smart() -> SmartLog:
         me.smart
 
+    me complete_pending_aer() -> bool:
+        if me.aer_event == 0:
+            return false
+        if not cid_valid(me.aer_held_cid):
+            return false
+        if me.aq.cq_is_full():
+            return false
+        if me.aq.cq_post(cpl_make(me.aer_held_cid, SC_SUCCESS, me.aer_event)):
+            me.aer_held_cid = -1
+            me.aer_event = 0
+            return true
+        false
+
     # Service every queued admin command, posting a completion for each (except an
     # Async Event Request held outstanding). Returns the number of completions posted.
     me admin_process() -> i64:
         var n: i64 = 0
+        if me.complete_pending_aer():
+            n = n + 1
         var pend: i64 = me.aq.pending()
         while pend > 0:
             if not me.aq.sq_can_fetch():
@@ -239,8 +254,8 @@ impl NvmeController:
     me raise_async_event(evt: i64):
         if me.aer_held_cid != -1:
             if cid_valid(me.aer_held_cid):
-                me.aq.cq_post(cpl_make(me.aer_held_cid, SC_SUCCESS, evt))
-                me.aer_held_cid = -1
+                me.aer_event = evt
+                me.complete_pending_aer()
             else:
                 me.aer_held_cid = -1
                 me.aer_event = evt
@@ -780,6 +795,24 @@ fn nvme_controller_selftest() -> i64:
     fail = fail + expect_eq(c.admin_completions(), 1, "AER completes after event raised")
     val aer: NvmeCpl = c.admin_reap()
     fail = fail + expect_eq(aer.data, AER_SMART_HEALTH, "AER reports the event type")
+
+    c.admin_submit(admin_async_event_cmd(61))
+    c.admin_process()
+    var aer_fill: i64 = 0
+    while aer_fill < MAX_QUEUE_SIZE:
+        c.aq.cq_post(cpl_make(1000 + aer_fill, SC_SUCCESS, 0))
+        aer_fill = aer_fill + 1
+    c.raise_async_event(AER_SMART_HEALTH)
+    fail = fail + expect_eq(c.aer_outstanding(), 1, "AER stays outstanding when admin CQ is full")
+    fail = fail + expect_eq(c.admin_completions(), MAX_QUEUE_SIZE, "full admin CQ keeps delayed AER queued")
+    aer_fill = 0
+    while aer_fill < MAX_QUEUE_SIZE:
+        c.admin_reap()
+        aer_fill = aer_fill + 1
+    fail = fail + expect_eq(c.admin_process(), 1, "delayed AER posts after CQ space returns")
+    val delayed_aer: NvmeCpl = c.admin_reap()
+    fail = fail + expect_eq(delayed_aer.data, AER_SMART_HEALTH, "delayed AER reports preserved event type")
+
     c.admin_submit(admin_cmd_make(28, ADMIN_ASYNC_EVENT, 0, 1, 0, 0))
     c.admin_process()
     val badaer: NvmeCpl = c.admin_reap()
