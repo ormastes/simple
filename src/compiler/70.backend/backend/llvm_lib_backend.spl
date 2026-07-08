@@ -64,7 +64,15 @@ pub fn llvm_lib_compile_module_direct(options: CompileOptions, module: MirModule
     # 6a. Verify generated IR before optimization/emission
     val ir_valid = llvm_verify_module(llvm_mod)
     if not ir_valid:
-        print "[llvm-lib] ERROR: generated IR failed verification for module '{module.name}' - output may crash or produce wrong results"
+        # Refuse to proceed into LLVM emission with an invalid module — that path
+        # segfaults inside libLLVM. Fail loudly with an Err instead (this usually
+        # means a called function, e.g. a runtime builtin like `print`, was never
+        # declared in the module — see translate_call).
+        llvm_dispose_builder(builder)
+        llvm_dispose_module(llvm_mod)
+        llvm_context_dispose(ctx)
+        return Err(compileerror_backend_error(BackendKind.LlvmLib,
+            "generated IR failed verification for module '{module.name}' — refusing to emit (would crash inside libLLVM)"))
 
     # 7. Get target machine
     val target = llvm_get_target_from_triple(triple_str)
