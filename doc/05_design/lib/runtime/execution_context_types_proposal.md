@@ -396,6 +396,37 @@ fn compute(x: Int) -> Int:
 3. Integrate with GPU backend selection
 4. Add device transfer primitives
 
+#### Host-side lowering target — already landed (#39, 2026-07-08)
+
+The runtime substrate this phase describes is not hypothetical: the #39 CPU/GPU
+offload work landed the concrete **host-side lowering target** that a `@gpu` /
+`GpuComputation<D, T>` computation compiles down to. When the effect system is
+built (Phase 2, boot-blocked on bootstrap stage-2), the effect's runtime lowering
+does not need a new scheduler or IPC stack — it routes to the existing mechanism:
+
+- **Device transfer primitive (task 4) = the SOSIX seal-before-share command
+  buffer.** A `@gpu`-annotated computation's payload is sealed into an immutable
+  command buffer (`engine2d_host_gpu_seal_draw_ir_payload`) and routed through the
+  existing runtime GPU queue to a `COMPLETED` receipt
+  (`engine2d_host_gpu_sosix_lane_route`, gated by `SIMPLE_SOSIX_GPU_LANE`, on both
+  the `gc_async_mut` and `nogc_async_mut` engine2d twins). Byte-preserving; proven
+  by `sosix_gpu_lane_route_spec.spl` (both twins 3/0).
+- **Device scheduling (task 2) = the green-thread `gpu_offload` park/unpark lane.**
+  Designed against the existing SimpleOS green scheduler; a task emitting a GPU
+  computation parks (`reason:"gpu_offload"`), the completion IPI unparks it. See
+  `doc/05_design/os/scheduling/cpu_gpu_offload_scheduler_design.md` (Gap #4) — pure
+  decision logic proven by `gpu_offload_sched_class_spec.spl` (16/0). OS wiring is
+  boot-blocked (freestanding B1), ships as spec.
+- **Memory management (Phase 4) = the `memory_leveling` `pin_device` lifecycle.**
+  A device-resident computation's backing page is `pin_device` on submit and
+  released on the completion coherence-proof — the capsule owns "may this page
+  move?", the scheduler owns "when is the device using it?" (Gap #4b).
+
+Blueprint + boundaries: `doc/05_design/os/scheduling/cpu_gpu_offload_scheduling_gap_map.md`.
+So the effect-level `@gpu` (Option 2) already has a real, tested host lowering to
+target; Phase 2 wires the type/effect front-end to it rather than inventing a new
+runtime path.
+
 ### Phase 4: Memory Management
 
 **Files to modify**:

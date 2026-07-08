@@ -51,9 +51,9 @@ before it is recorded as dispatched — the SOSIX protocol applied to the live o
   FFI step (mirrors `draw_ir_runtime_queue.spl:120-128`). Do NOT call `runtime_submit_pending` +
   `runtime_complete_pending` before `runtime_drain` — that leaves the packet in a state the runtime
   drain won't take (`drained=0`). Emit → drain directly.
-- **Known pre-existing (not this slice):** `host_gpu_queue_roundtrip_spec.spl` has 2/16 baseline
-  failures — stale `Engine2dHostGpuDrawIrEventFlowEvidence.forward`/`.backward` field references
-  (the live struct has `event/lane_result/decision/submit/receipt`). Fix or quarantine separately.
+- **Fixed 2026-07-08 (`18721ee0`):** `host_gpu_queue_roundtrip_spec.spl` was 2/16 (stale
+  `Engine2dHostGpuDrawIrEventFlowEvidence.forward`/`.backward` field references). Mapped to the live
+  struct (`submit.queued`/`decision.target_lane`/`receipt.committed_on_host`) → **16/16**.
 
 ## OS-DESIGN-ONLY — boot-blocked dependencies (ship as spec)
 - **B1 — freestanding-global fix** (uninitialized module globals / missing module-init in
