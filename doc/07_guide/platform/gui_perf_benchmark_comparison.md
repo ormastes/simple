@@ -31,6 +31,8 @@ reported as unavailable rather than passed.
 Simple CPU render-loop rows default to 300dpi retina metadata. Pass `--dpi N`
 to override it; the report keeps `logical_pixels` and `physical_pixels` equal to
 the requested benchmark dimensions so DPI evidence cannot hide a smaller render.
+Use `scripts/check/check-cpu-simd-render-dpi-contract.shs` for the focused
+default/override contract check.
 
 ### Current Simple Backend Evidence (2026-06-06 smoke)
 
@@ -125,6 +127,7 @@ bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
   fields in `tools/gui_perf_bench/run_all_benchmarks.shs`.
 - CPU render-loop DPI evidence defaults to 300dpi retina metadata and is
   configurable through `--dpi` without changing the requested pixel dimensions.
+  The focused wrapper is `scripts/check/check-cpu-simd-render-dpi-contract.shs`.
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
 - Software layout renders must not replay the already-painted framebuffer
   through an Engine2D software present/readback cycle. The 2026-06-06

@@ -80,6 +80,9 @@ implementation-evidence-in-progress
   300dpi retina metadata by default, accepts `--dpi` as an override, and reports
   logical and physical pixels as the requested benchmark dimensions so DPI
   evidence cannot hide a reduced render size.
+- verification: `scripts/check/check-cpu-simd-render-dpi-contract.shs` proves
+  the default 300dpi metadata, explicit `--dpi 220` override, unchanged 32x32
+  physical pixels, and checksum parity across the DPI metadata change.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 
@@ -114,5 +117,5 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
 - Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture
   separate `simple_web_cpu_simd`, `simple_web_software`, and
   `gui_perf_cpu_base_compare_*` baseline numbers at the default 300dpi and at
-  least one explicit `--dpi` override.
+  least one explicit `--dpi` override through the DPI contract wrapper.
 - Tauri integration: requires cargo-tauri CLI + WebKitGTK dev headers.
