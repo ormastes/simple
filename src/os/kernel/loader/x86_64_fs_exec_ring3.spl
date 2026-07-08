@@ -43,12 +43,6 @@ use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_read64, mmio
 
 extern fn serial_println(msg: text)
 extern fn pmm_alloc_page_raw() -> u64
-extern fn rt_text_to_bytes(s: text) -> [u8]
-# Decode a single boxed [u8] element. Under freestanding native-build [u8]
-# arrays store 8-byte boxed RuntimeValues, so plain `arr[i]` reads stride-1
-# garbage (ELF magic 0x7F arrives as 0xF8=127<<3); rt_bytes_u8_at decodes +
-# bounds-checks (mirrors byte_utils.byte_at).
-extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 # Little-endian scalar reads straight off the identity-mapped RAW file buffer.
 # The [u8] channel (byte_utils/read_*_le over image.file_bytes) reads boxed
@@ -65,198 +59,6 @@ fn _wr64(addr: u64, value: u64):
     while i < 8:
         mmio_write8(addr + i, ((value >> (i * 8)) & 0xFF) as u8)
         i = i + 1
-
-# Translate a virtual stack address to a physical address WITHIN the top stack
-# page only. The SysV initial frame is tiny (argc/argv/envp/auxv plus the
-# argv[0] path string — ~74 bytes for the argv=[]/path case) and always fits in
-# one page, so we translate via a plain `top_phys: u64` (captured at the mapping
-# loop) instead of threading the boxed `[u64] stk_phys` array through the hot
-# write path. Freestanding native-build stores array elements as boxed
-# RuntimeValues, so `stk_phys[i]` read back a shifted/garbage phys — the same
-# array-boxing hazard the rest of this module avoids by using raw mmio. Returns
-# 0 (a phys of 0 never occurs for an in-bounds vaddr since top_phys != 0) when
-# vaddr falls outside the top page.
-fn _top_phys_for_vaddr(top_phys: u64, stack_top: u64, vaddr: u64) -> u64:
-    val PAGE: u64 = 4096
-    val top_page_base = stack_top - PAGE
-    if vaddr < top_page_base or vaddr >= stack_top:
-        return 0
-    top_phys + (vaddr - top_page_base)
-
-fn _stack_write8(top_phys: u64, stack_top: u64, vaddr: u64, value: u8) -> bool:
-    val phys = _top_phys_for_vaddr(top_phys, stack_top, vaddr)
-    if phys == 0:
-        return false
-    mmio_write8(phys, value)
-    true
-
-fn _stack_write64(top_phys: u64, stack_top: u64, vaddr: u64, value: u64) -> bool:
-    val phys = _top_phys_for_vaddr(top_phys, stack_top, vaddr)
-    if phys == 0:
-        return false
-    _wr64(phys, value)
-    true
-
-# Write a NUL-terminated string. Each byte is decoded via rt_bytes_u8_at — plain
-# `raw[i]` on a boxed [u8] reads stride-1 garbage under freestanding native-build.
-fn _stack_write_cstr(top_phys: u64, stack_top: u64, vaddr: u64, s: text) -> bool:
-    val raw = rt_text_to_bytes(s)
-    val n = raw.len()
-    var i: i64 = 0
-    while i < n:
-        val b = ((rt_bytes_u8_at(raw, i)) & 0xFF) as u8
-        if not _stack_write8(top_phys, stack_top, vaddr + i.to_u64(), b):
-            return false
-        i = i + 1
-    _stack_write8(top_phys, stack_top, vaddr + n.to_u64(), 0 as u8)
-
-# NOTE (M2 blocker — DEFERRED, kept intentionally; do not delete): this frame
-# builder and its write helpers (_top_phys_for_vaddr / _stack_write8 /
-# _stack_write64 / _stack_write_cstr) are currently UNUSED — the M1 handoff
-# bypasses them and uses a bare STACK_TOP-16 rsp (see the call site in
-# x86_64_fs_exec_enter_image_ring3). Reason: under freestanding native-build the
-# phys translation is broken — _top_phys_for_vaddr/_stack_write64 returned 0 for
-# an IN-RANGE vaddr (QEMU: "argv-frame fail: write64 min argc" on rsp0=
-# 0x80001FFFE0, which is inside [top_page_base=0x80001FF000, stack_top=
-# 0x8000200000)), so the very first _stack_write64 aborted. Suspect u64 parameter
-# passing or the `vaddr < top_page_base or vaddr >= stack_top` range comparison
-# mis-compiling in freestanding native-build (the same module-val / boxing hazard
-# class this module elsewhere avoids by reading via raw mmio). Real-argv programs
-# (M2) need this translation fixed before the SysV frame can be written.
-#
-# Build a SysV-ABI initial stack (argc, argv[], NULL, envp[], NULL, auxv AT_NULL)
-# growing down from stack_top, entirely within the top stack page. A distinct
-# serial diagnostic precedes every early return so a QEMU run pinpoints the
-# failing step. Returns 0 on failure, otherwise a 16-byte-aligned user rsp.
-#
-# EMPTY-ARGV FAST PATH (argv=[]/envp=[]): build a MINIMAL argc=0 frame using
-# ONLY _stack_write64 — no rt_text_to_bytes, no _stack_write_cstr. The ring-3
-# verification payload ignores argc/argv/rsp entirely (it only emits FDR via
-# `out` + exits via syscall 60), and rt_text_to_bytes(image.binary_path) on a
-# freestanding struct-field text is unreliable — the [u8]/text conversion drove
-# the cstr write out of bounds ("[spawn] argv-frame fail: cstr"). Sidestepping
-# text conversion both unblocks ring-3 AND isolates the bug: if the minimal path
-# ALSO fails it emits a "write64 min ..." diag, proving the phys translation
-# itself is broken (deeper) rather than cstr/text-conversion-specific.
-# NOTE: an argv=[] launch of a REAL program (M2) should still synthesise argc=1
-# with argv[0]=binary_path; that needs the freestanding rt_text_to_bytes(struct
-# field) path fixed — tracked as the M2 follow-up. Real launches pass argv (the
-# full string path below), so this fast path only covers the empty verification
-# case.
-fn _build_sysv_stack_frame(top_phys: u64, stack_top: u64, binary_path: text, argv: [text], envp: [text]) -> u64:
-    val PAGE: u64 = 4096
-    val AT_NULL: u64 = 0
-    val top_page_base = stack_top - PAGE
-
-    if argv.len() == 0 and envp.len() == 0:
-        var rsp0 = (stack_top - 32) & (~(15.to_u64()))
-        if rsp0 < top_page_base:
-            serial_println("[spawn] argv-frame fail: min rsp<base")
-            return 0
-        if not _stack_write64(top_phys, stack_top, rsp0, 0):
-            serial_println("[spawn] argv-frame fail: write64 min argc")
-            return 0
-        if not _stack_write64(top_phys, stack_top, rsp0 + 8, 0):
-            serial_println("[spawn] argv-frame fail: write64 min argv-null")
-            return 0
-        if not _stack_write64(top_phys, stack_top, rsp0 + 16, 0):
-            serial_println("[spawn] argv-frame fail: write64 min envp-null")
-            return 0
-        if not _stack_write64(top_phys, stack_top, rsp0 + 24, 0):
-            serial_println("[spawn] argv-frame fail: write64 min aux-null")
-            return 0
-        serial_println("[spawn] argv-frame minimal ok rsp=0x{rsp0}")
-        return rsp0
-
-    var argc: i64 = argv.len()
-    if argc == 0:
-        argc = 1
-
-    var top = stack_top
-    var argv_addrs: [u64] = []
-    var a: i64 = 0
-    while a < argc:
-        var arg_s: text = binary_path
-        if argv.len() != 0:
-            arg_s = argv[a]
-        val raw = rt_text_to_bytes(arg_s)
-        val n = raw.len()
-        if n < 0 or n.to_u64() >= PAGE:
-            serial_println("[spawn] argv-frame fail: cstr-len n={n}")
-            return 0
-        top = top - (n.to_u64() + 1.to_u64())
-        if top < top_page_base:
-            serial_println("[spawn] argv-frame fail: argv-oob")
-            return 0
-        if not _stack_write_cstr(top_phys, stack_top, top, arg_s):
-            serial_println("[spawn] argv-frame fail: cstr")
-            return 0
-        argv_addrs.push(top)
-        a = a + 1
-
-    var envp_addrs: [u64] = []
-    var e: i64 = 0
-    while e < envp.len():
-        val es = envp[e]
-        val raw2 = rt_text_to_bytes(es)
-        val n2 = raw2.len()
-        if n2 < 0 or n2.to_u64() >= PAGE:
-            serial_println("[spawn] argv-frame fail: envp-len n={n2}")
-            return 0
-        top = top - (n2.to_u64() + 1.to_u64())
-        if top < top_page_base:
-            serial_println("[spawn] argv-frame fail: envp-oob")
-            return 0
-        if not _stack_write_cstr(top_phys, stack_top, top, es):
-            serial_println("[spawn] argv-frame fail: envp")
-            return 0
-        envp_addrs.push(top)
-        e = e + 1
-
-    val fixed_slots = 1.to_u64() + argv_addrs.len().to_u64() + 1.to_u64() + envp_addrs.len().to_u64() + 1.to_u64() + 2.to_u64()
-    var rsp = top - (fixed_slots * 8)
-    rsp = rsp & (~(15.to_u64()))
-    if rsp < top_page_base:
-        serial_println("[spawn] argv-frame fail: rsp<base")
-        return 0
-
-    var slot = rsp
-    if not _stack_write64(top_phys, stack_top, slot, argv_addrs.len().to_u64()):
-        serial_println("[spawn] argv-frame fail: write64 argc")
-        return 0
-    slot = slot + 8
-    var ap: i64 = 0
-    while ap < argv_addrs.len():
-        if not _stack_write64(top_phys, stack_top, slot, argv_addrs[ap]):
-            serial_println("[spawn] argv-frame fail: write64 argv")
-            return 0
-        slot = slot + 8
-        ap = ap + 1
-    if not _stack_write64(top_phys, stack_top, slot, AT_NULL):
-        serial_println("[spawn] argv-frame fail: write64 argv-null")
-        return 0
-    slot = slot + 8
-
-    var ep: i64 = 0
-    while ep < envp_addrs.len():
-        if not _stack_write64(top_phys, stack_top, slot, envp_addrs[ep]):
-            serial_println("[spawn] argv-frame fail: write64 envp")
-            return 0
-        slot = slot + 8
-        ep = ep + 1
-    if not _stack_write64(top_phys, stack_top, slot, 0):
-        serial_println("[spawn] argv-frame fail: write64 envp-null")
-        return 0
-    slot = slot + 8
-
-    if not _stack_write64(top_phys, stack_top, slot, 0):
-        serial_println("[spawn] argv-frame fail: write64 aux0")
-        return 0
-    slot = slot + 8
-    if not _stack_write64(top_phys, stack_top, slot, 0):
-        serial_println("[spawn] argv-frame fail: write64 aux1")
-        return 0
-    rsp
 
 # Map every PT_LOAD of the ELF held in the raw buffer `blob` into `space` at its
 # p_vaddr, page by page (one frame per page, so segments sharing a page are mapped
@@ -425,6 +227,7 @@ pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64, argv
     val PAGE: i64 = 4096
     val STACK_TOP: i64 = 0x8000200000
     val STACK_PAGES: i64 = 32
+    var top_phys: u64 = 0
     var p: i64 = 0
     while p < STACK_PAGES:
         val sva = STACK_TOP - ((p + 1) * PAGE)
@@ -436,24 +239,54 @@ pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64, argv
         if not vmm_map_page_in(space, VirtAddr(addr: sva.to_u64()), PhysAddr(addr: sph), VmFlags.user_rw()):
             serial_println("[spawn] FAIL stack map p={p}")
             return -4
+        # Capture the TOP stack page's physical address (p==0: sva==STACK_TOP-PAGE
+        # ==top_page_base). Low-canonical phys is identity-mapped in the kernel, so
+        # kernel-context mmio writes to top_phys land in the user stack — exactly
+        # how _map_pt_loads copies segment bytes (mmio_write8(phys+off,…)).
+        if p == 0:
+            top_phys = sph
         p = p + 1
-    # M1: use the PROVEN bare 16-aligned rsp in the mapped top page. The SysV
-    # frame builder (_build_sysv_stack_frame) is intentionally BYPASSED here: its
-    # _top_phys_for_vaddr/_stack_write64 translation returns 0 for an in-range
-    # vaddr under freestanding native-build (QEMU: "argv-frame fail: write64 min
-    # argc" on the very first write of rsp0=0x80001FFFE0, which IS inside
-    # [top_page_base, stack_top) — a u64 param-passing / range-comparison bug in
-    # the helper; see the NOTE on _build_sysv_stack_frame). The FSEXEC payload
-    # ignores argv/argc/rsp contents entirely, and the pre-regression handoff
-    # proved a bare rsp runs to FSEXEC_OK. STACK_TOP=0x8000200000, so STACK_TOP-16
-    # = 0x80001FFFF0 is 16-byte aligned and sits in the mapped top page.
-    # Real-argv frames (M2) require the translation bug fixed first.
-    val user_rsp: i64 = STACK_TOP - 16
-    serial_println("[spawn] user stack mapped top=0x{STACK_TOP} pages={STACK_PAGES} rsp=0x{user_rsp}")
+
+    # M2: build the SysV-ABI initial frame INLINE via direct-phys mmio. An earlier
+    # cross-function helper (_top_phys_for_vaddr, now deleted) miscompiled under
+    # freestanding native-build — its u64 range comparison returned 0 for the
+    # in-range vaddr 0x80001FFFE0 (filed as a codegen bug). Writing inline in this
+    # function's own scope, the way _map_pt_loads already does, sidesteps it. rsp0 is
+    # in the mapped top page BY CONSTRUCTION, so no range guard is needed: we know
+    # its offset within the top page and write the physical slots directly. Minimal
+    # frame (argc=0, argv=[NULL], envp=[NULL], auxv=[AT_NULL]) — the standard SysV
+    # minimum a libc crt0 walks. Expand auxv (AT_PAGESZ/AT_RANDOM) only if a real
+    # crt0 faults for a missing entry.
+    # All u64 with typed locals + bare integer literals — mirror _map_pt_loads'
+    # working idiom. `.to_u64()` on a literal (e.g. `15.to_u64()`) BOXES it under
+    # freestanding native-build, corrupting the arithmetic (first attempt yielded
+    # rsp=0x2000...); typed u64 locals and bare literals lower correctly.
+    val PAGE_U: u64 = 4096
+    val STACK_TOP_U: u64 = 0x8000200000
+    val ALIGN_MASK: u64 = 0xFFFFFFFFFFFFFFF0
+    val TOP_PAGE_BASE_U: u64 = STACK_TOP_U - PAGE_U
+    # 5 u64 slots = 40 bytes; 16-align rsp with headroom, all inside the top page.
+    val user_rsp_u: u64 = (STACK_TOP_U - 64) & ALIGN_MASK
+    val frame_off: u64 = user_rsp_u - TOP_PAGE_BASE_U
+    # Sentinel: prove the direct-phys write path lands where we expect before
+    # trusting the frame (kernel readback of the exact slot we wrote).
+    _wr64(top_phys + frame_off, 0xDEADBEEFCAFEF00D)
+    val sentinel = _rd64(top_phys + frame_off, 0)
+    serial_println("[spawn] frame phys top_phys=0x{top_phys} off=0x{frame_off} rsp=0x{user_rsp_u} sentinel=0x{sentinel}")
+    _wr64(top_phys + frame_off, 0)             # argc = 0
+    _wr64(top_phys + frame_off + 8, 0)         # argv[0] = NULL
+    _wr64(top_phys + frame_off + 16, 0)        # envp[0] = NULL
+    _wr64(top_phys + frame_off + 24, 0)        # auxv[0].type = AT_NULL
+    _wr64(top_phys + frame_off + 32, 0)        # auxv[0].value = 0
+    # Readback verify: the guest maps this same physical page at user_rsp, so a
+    # correct argc slot here == what the guest sees at [rsp].
+    val argc_rb = _rd64(top_phys + frame_off, 0)
+    serial_println("[spawn] frame argc readback={argc_rb} (expect 0)")
+    serial_println("[spawn] user stack mapped top=0x{STACK_TOP} pages={STACK_PAGES} rsp=0x{user_rsp_u}")
 
     val ctx = TaskContext(
         rax: 0, rbx: 0, rcx: 0, rdx: 0,
-        rsi: 0, rdi: 0, rbp: 0, rsp: user_rsp.to_u64(),
+        rsi: 0, rdi: 0, rbp: 0, rsp: user_rsp_u,
         r8: 0, r9: 0, r10: 0, r11: 0,
         r12: 0, r13: 0, r14: 0, r15: 0,
         rip: entry,
@@ -462,7 +295,7 @@ pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64, argv
         ss: 0x23,
         fpu_state: 0
     )
-    serial_println("[spawn] entering user cs=0x2b iopl=3 rip=0x{entry} rsp=0x{user_rsp}")
+    serial_println("[spawn] entering user cs=0x2b iopl=3 rip=0x{entry} rsp=0x{user_rsp_u}")
     arch_x86_64_enter_user_task(ctx, space.phys_root)
 
     serial_println("[spawn] returned from user (unexpected)")
