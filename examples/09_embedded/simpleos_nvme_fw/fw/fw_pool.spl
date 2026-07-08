@@ -10,6 +10,13 @@ use nvme_types.*
 
 val POOL_CAP: i64 = 16
 
+fn pool_gen_next(v: i64) -> i64:
+    if v < 0:
+        return 1
+    if v >= FW_SAFE_I64_LIMIT:
+        return FW_SAFE_I64_LIMIT
+    v + 1
+
 # ── TaskPool ──────────────────────────────────────────────────────────────────
 struct TaskPool:
     gen:      [i64]   # generation counter per slot
@@ -81,7 +88,7 @@ impl TaskPool:
         var i: i64 = 0
         while i < me.cap and i < POOL_CAP:
             val u = me.used[i]
-            if u == 0:
+            if u == 0 and me.gen[i] >= 0 and me.gen[i] < FW_SAFE_I64_LIMIT:
                 if slot < 0:
                     slot = i
             i = i + 1
@@ -112,6 +119,8 @@ impl TaskPool:
         if u != 1:
             return false
         val g = me.gen[h.index]
+        if g < 0 or g >= FW_SAFE_I64_LIMIT:
+            return false
         g == h.generation
 
     # phase: current PH_* phase, or -1 if the handle is invalid.
@@ -187,7 +196,7 @@ impl TaskPool:
             val live: i64 = me.live_count()
             me.used[h.index] = 0
             val og = me.gen[h.index]
-            me.gen[h.index] = og + 1
+            me.gen[h.index] = pool_gen_next(og)
             if live > 0:
                 me.live = live - 1
             else:
@@ -251,6 +260,18 @@ fn fw_pool_selftest() -> i64:
     fail = fail + expect_eq(p.live_count(), 0, "release after corrupted negative pool live stays nonnegative")
     p.live = POOL_CAP + 99
     fail = fail + expect_eq(p.live_count(), 2, "corrupted oversized pool live counts slots")
+    p.live = 2
+    p.gen[h2.index] = -1
+    fail = fail + expect_eq(if p.valid(h2): 1 else: 0, 0, "corrupted negative pool generation fails closed")
+    p.gen[h2.index] = h2.generation
+    p.gen[h2.index] = FW_SAFE_I64_LIMIT
+    fail = fail + expect_eq(if p.valid(h2): 1 else: 0, 0, "saturated pool generation fails closed")
+    p.used[h2.index] = 0
+    val hsat = p.acquire(22, 202, 1, 56)
+    fail = fail + expect_eq(if p.valid(hsat): 1 else: 0, 1, "acquire skips saturated generation slot")
+    p.release(hsat)
+    p.gen[h2.index] = h2.generation
+    p.used[h2.index] = 1
     p.live = 2
     p.used[h2.index] = 7
     fail = fail + expect_eq(if p.valid(h2): 1 else: 0, 0, "corrupted pool used flag fails closed")
