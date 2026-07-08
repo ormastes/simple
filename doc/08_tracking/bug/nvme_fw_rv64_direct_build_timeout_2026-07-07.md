@@ -764,6 +764,27 @@ Terminated
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
 
+## Update — build wrapper emits closure diagnostics
+
+The RV64 direct build wrapper now runs `native-build` with `--verbose` and
+records `closure=compiler-verbose` in `build/test-artifacts/nvme_fw_rv64_build.out`.
+That makes the compiler's `Entry closure files:` / `Driver start:` lines part
+of the normal evidence stream once the current self-hosted startup reaches that
+phase.
+
+A bounded 25s probe still fails closed before producing
+`build/nvme_fw_rv64.elf`:
+
+```text
+NVME_RV64_BUILD_FAILED code=124 reason=native-build-timeout timeout=25s elapsed=30s ...
+closure=compiler-verbose
+```
+
+The short probe did not reach the compiler closure-count line; it timed out
+while the self-hosted compiler was still emitting existing codegen ambiguity
+diagnostics. Treat this as evidence instrumentation only, not RV64 ELF
+completion.
+
 ## Update — elapsed evidence shows external termination before 120s cap
 
 `fw_rv64/build.shs` now reports native-build elapsed seconds. A fresh
