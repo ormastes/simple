@@ -81,9 +81,24 @@ normal render-loop measurement.
   `layout_ms=0`, `paint_ms=776`.
 - Total: `779724us`.
 - Checksum: `sum32:135445232233405312`.
+- Box trace after adding trace-only layout diagnostics showed:
+  `html x=0 y=0 w=7680 h=282 bg=0`,
+  `body x=8 y=8 w=7664 h=266 bg=270544896`, and
+  `main x=8 y=8 w=7664 h=266 bg=0`.
 
 The retained 8K bottleneck is therefore paint/fill bandwidth over the full
 framebuffer, not parse, CSS, style, or layout.
+
+Native SIMD framebuffer initialization was tested and reverted:
+
+- `simd_fill_row` over a zero-initialized framebuffer logged
+  `unknown extern function: rt_engine2d_simd_fill_u32`, changed the checksum,
+  and slowed 4K trace to `878028us`.
+- `engine2d_simd_fill_row_u32` over the full framebuffer segfaulted at 4K.
+
+The next optimization should stay inside the Engine2D-owned SIMD fill path or
+register a safe browser-layout framebuffer fill facade before using native SIMD
+from `simple_web_html_layout_renderer.spl`.
 
 ## Verification
 
