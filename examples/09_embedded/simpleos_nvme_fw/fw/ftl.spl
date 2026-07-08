@@ -83,7 +83,9 @@ impl Ftl:
             return SC_INTERNAL
         me.rain_update_page(ppn, 0, data)
         me.ensure_journal_room()
-        me.journal.append(0, lba, old_ppn, ppn, s)
+        val before_wal: i64 = me.journal.wal_len()
+        if me.journal.append(0, lba, old_ppn, ppn, s) <= before_wal:
+            return SC_NS_NOT_READY
         me.map.update(lba, ppn)
         me.band.mark_valid(ppn)
         if old_ppn != UNMAP:
@@ -142,11 +144,13 @@ impl Ftl:
             return SC_LBA_RANGE
         val ppn: i64 = me.map.lookup(lba)
         if ppn != UNMAP:
-            me.band.mark_invalid(ppn)
-            me.map.update(lba, UNMAP)
             val s: i64 = me.next_seq()
             me.ensure_journal_room()
-            me.journal.append(0, lba, ppn, UNMAP, s)
+            val before_wal: i64 = me.journal.wal_len()
+            if me.journal.append(0, lba, ppn, UNMAP, s) <= before_wal:
+                return SC_NS_NOT_READY
+            me.band.mark_invalid(ppn)
+            me.map.update(lba, UNMAP)
         SC_SUCCESS
 
     # Persist a checkpoint: flush the dirty map cache to the flash-resident L2P,
@@ -633,6 +637,13 @@ fn ftl_selftest() -> i64:
     stale.crash()
     stale.recover()
     fail = fail + expect_eq(stale.read(30), 0x22, "recover ignores stale WAL sequence rollback")
+    var jw: Ftl = ftl_new()
+    jw.write(31, 0x31)
+    jw.journal.cap = 0
+    fail = fail + expect_eq(jw.write(31, 0x32), SC_NS_NOT_READY, "write fails closed when WAL cannot append")
+    fail = fail + expect_eq(jw.read(31), 0x31, "failed WAL append write leaves old mapping intact")
+    fail = fail + expect_eq(jw.trim(31), SC_NS_NOT_READY, "trim fails closed when WAL cannot append")
+    fail = fail + expect_eq(jw.read(31), 0x31, "failed WAL append trim leaves mapping intact")
 
     # garbage collection: create a CLOSED block full of mostly-stale data, reclaim it
     var i: i64 = 0
