@@ -28,7 +28,7 @@ web_gpu_paint_offload_matrix_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -139,6 +139,25 @@ expect(economics.reason).to_equal("communication-overhead")
 
 </details>
 
+#### rejects offload when saved CPU paint is not enough to beat total work
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val frame = direct_frame(16, 16, 193, 0, 0, 16, 16)
+val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+expect(economics.cpu_paint_pixels).to_equal(193)
+expect(economics.gpu_paint_total_pixels).to_be_greater_than(economics.upload_bound_total_pixels)
+expect(economics.should_offload).to_equal(false)
+expect(economics.reason).to_equal("communication-overhead")
+```
+
+</details>
+
 #### does not treat skipped CPU work as offload when there are no fill commands
 
 <details>
@@ -197,8 +216,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

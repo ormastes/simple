@@ -15,6 +15,8 @@ requiring local GPU hardware:
   upload-bound total cost;
 - exact break-even work stays CPU-bound instead of being reported as GPU
   offload;
+- partial CPU savings still stay CPU-bound when total GPU paint work is more
+  expensive than upload-bound work;
 - no-op and offscreen fill-command frames do not claim offload just because CPU
   paint was skipped.
 
