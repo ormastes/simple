@@ -11,7 +11,7 @@ requiring local GPU hardware:
 - the presenter route only enters GPU paint for measured winning frames, so
   CUDA/Vulkan/Metal solid-fill wins offload while CUDA/Vulkan/Metal
   command-overhead losers, CPU backends, unknown backends, and disabled GPU
-  paint stay upload-bound with explicit route verdicts;
+  paint stay upload-bound with explicit CPU-job and speed route verdicts;
 - solid-only frames skip CPU paint and may offload when total CPU+transfer cost
   wins, reporting `cpu-paint-offloaded` and `measured-gpu-faster`;
 - residual-heavy fill frames may still offload when saved CPU paint makes total
