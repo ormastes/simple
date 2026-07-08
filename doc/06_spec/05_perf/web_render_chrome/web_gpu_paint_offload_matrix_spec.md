@@ -5,6 +5,9 @@ Source: `test/05_perf/web_render_chrome/web_gpu_paint_offload_matrix_spec.spl`
 This perf/evidence spec checks the Simple Web GPU paint decision without
 requiring local GPU hardware:
 
+- backend selection treats `software`, `cpu`, and `cpu_simd` as CPU paths,
+  treats `cuda`, `vulkan`, and `metal` as GPU paint candidates, and rejects
+  unknown names instead of letting them masquerade as offload;
 - solid-only frames skip CPU paint and may offload when total CPU+transfer cost
   wins, reporting `cpu-paint-offloaded` and `measured-gpu-faster`;
 - residual-heavy fill frames may still offload when saved CPU paint makes total

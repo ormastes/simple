@@ -28,7 +28,7 @@ web_gpu_paint_offload_matrix_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,6 +38,28 @@ web_gpu_paint_offload_matrix_spec -> common
 ## Scenarios
 
 ### Simple Web GPU paint offload matrix
+
+#### backend combinations
+
+#### only treats GPU backends as paint offload candidates
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(web_gpu_paint_backend_verdict("software")).to_equal("cpu-backend-not-gpu-offload")
+expect(web_gpu_paint_backend_verdict("cpu")).to_equal("cpu-backend-not-gpu-offload")
+expect(web_gpu_paint_backend_verdict("cpu_simd")).to_equal("cpu-backend-not-gpu-offload")
+expect(web_gpu_paint_backend_verdict("cuda")).to_equal("gpu-paint-candidate")
+expect(web_gpu_paint_backend_verdict("vulkan")).to_equal("gpu-paint-candidate")
+expect(web_gpu_paint_backend_verdict("metal")).to_equal("gpu-paint-candidate")
+expect(web_gpu_paint_backend_verdict("unknown")).to_equal("unknown-backend-not-gpu-offload")
+```
+
+</details>
 
 #### CPU paint and communication economics
 
@@ -226,8 +248,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
