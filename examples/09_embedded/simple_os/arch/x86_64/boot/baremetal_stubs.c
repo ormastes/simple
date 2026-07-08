@@ -15531,7 +15531,23 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         if (_bare_exec_handle(num, a0, a1, a2, a3, a4, a5, &bare_out)) return bare_out;
     }
     switch (num) {
-        case 0:  return spl_handle_exit(a0, a1, a2, a3, a4, a5);
+        case 0: {  /* exit(status) */
+            /* Prefer the strong Simple override (process/scheduler exit) when it
+             * is linked; the weak stub returns -38 (ENOSYS). For a STANDALONE
+             * ring-3 program (no scheduler to return to yet — e.g. the FS-exec
+             * ring-3 loader running a single clang-built ELF) provide a native
+             * terminator so it exits cleanly and reports status instead of
+             * faulting on fall-through past a no-return exit(). */
+            int64_t _ex = spl_handle_exit(a0, a1, a2, a3, a4, a5);
+            if (_ex == -38) {
+                serial_puts("[user] exit rc=");
+                serial_put_dec((int64_t)a0);
+                serial_puts("\r\n");
+                outb(0xf4, (uint8_t)((a0 << 1) | 1)); /* isa-debug-exit (QEMU) */
+                for (;;) __asm__ volatile("cli; hlt");  /* board: halt (0xf4 unused) */
+            }
+            return _ex;
+        }
         case 1:  return spl_handle_yield(a0, a1, a2, a3, a4, a5);
         case 2:  return spl_handle_spawn(a0, a1, a2, a3, a4, a5);
         case 3:  return spl_handle_wait(a0, a1, a2, a3, a4, a5);

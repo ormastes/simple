@@ -81,4 +81,17 @@ _start:
  */
 .weak __bss_start
 .weak __bss_end
-.weak environ
+
+/*
+ * environ: real .bss storage for the POSIX environment pointer that crt0
+ * publishes (envp in r14) before running constructors. This was `.weak
+ * environ`; with no libc definition it resolved to address 0, so the publish
+ * store `mov [environ], r14` faulted writing to NULL (ring-3 #PF at _start,
+ * errcode P|W|U, cr2=0). Give it 8 bytes of .bss — zeroed by the BSS clear
+ * above, then overwritten with envp.
+ */
+    .bss
+    .balign 8
+    .globl environ
+environ:
+    .quad 0

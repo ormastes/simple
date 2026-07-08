@@ -106,6 +106,12 @@ val MSR_KERNEL_GS_BASE: u32 = 0xC0000102
 
 # EFER bit 0 — System Call Extensions. Required to enable SYSCALL/SYSRET.
 val EFER_SCE: u64 = 0x1
+# EFER bit 11 — No-Execute Enable. Makes PTE bit 63 (NX) a valid no-execute bit
+# instead of a RESERVED bit. The ring-3 exec loader's W^X policy sets NX on
+# writable user pages (e.g. the user stack); without NXE the CPU raises a
+# reserved-bit page fault (errcode RSVD) on ANY access to them — which is exactly
+# why a ring-3 program faulted on its first stack read.
+val EFER_NXE: u64 = 0x800
 # RFLAGS mask: clear IF (bit 9) on SYSCALL entry so kernel runs with
 # interrupts disabled until it is ready to re-enable them.
 val SYSCALL_FMASK_IF: u64 = 0x200
@@ -199,6 +205,13 @@ fn install_syscall_entry():
     _syscall_entry_installed = 1
     val entry = rt_x86_install_syscall_entry_raw()
     log_raw_println("[syscall] MSRs programmed: LSTAR STAR SFMASK=0x200")
+    # Enable EFER.NXE so PTE bit 63 (NX) is a valid no-execute bit, not reserved.
+    # The exec loader marks writable user pages NX (W^X); without NXE any access
+    # to them faults reserved-bit. rt_x86_install_syscall_entry_raw sets EFER.SCE;
+    # OR in NXE here (pure-Simple, existing rt_read_msr/rt_write_msr externs).
+    val efer_val = read_msr(MSR_EFER)
+    write_msr(MSR_EFER, efer_val | EFER_NXE)
+    log_raw_println("[arch-init] EFER.NXE enabled")
 
 fn syscall_entry_installed() -> bool:
     """Test-visible accessor: did `install_syscall_entry` run?"""
