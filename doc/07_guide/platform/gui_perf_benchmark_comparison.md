@@ -148,6 +148,13 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
   `scripts/check/check-production-gui-web-backend-executed-evidence.shs`; the
   wrapper requires semi-transparent fill output to match software exactly and
   records the alpha hit count/checksums.
+- CPU-SIMD arch coverage is gated by
+  `scripts/check/check-cpu-simd-engine2d-arch-matrix.shs`. It reuses
+  `check-cpu-simd-engine2d-evidence.shs` for x86_64, aarch64, and riscv64,
+  records each architecture independently, and supports
+  `CPU_SIMD_ARCH_MATRIX_STRICT=1` when all three target binaries are expected
+  to pass. Current retained matrix evidence is partial on this x86_64 host:
+  x86_64 passes, while aarch64/riscv64 are unavailable without target binaries.
 - CPU-SIMD 4K/8K scale evidence is gated by
   `scripts/check/check-cpu-simd-render-scale-contract.shs`. It runs native
   CPU-SIMD rows at 3840x2160 and 7680x4320, requires full logical/physical
@@ -179,6 +186,9 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
    benchmark row and CPU drawing-library compare fields. The focused native
    scale contract captures 8K p50 timing and no-reduction proof; release-grade
    performance claims still need repeated runs on the target hardware.
+   Cross-arch completion still needs current aarch64 NEON and riscv64 RVV
+   matrix rows; run `check-cpu-simd-engine2d-arch-matrix.shs` with target
+   binaries and strict mode.
 3. **Tauri integration**: Needs `cargo-tauri` CLI + WebKitGTK dev package
 4. **Software text/layout optimization**: the real software render-loop row is
    still far slower than JS/GTK at 320x240; move bitmap/vector font and text-blit

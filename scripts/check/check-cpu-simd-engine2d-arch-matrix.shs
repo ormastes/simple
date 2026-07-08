@@ -1,0 +1,141 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/cpu-simd-engine2d-arch-matrix}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/cpu_simd_engine2d_arch_matrix_$(date -u +%F).md}"
+STRICT="${CPU_SIMD_ARCH_MATRIX_STRICT:-0}"
+SKIP_RUN="${CPU_SIMD_ARCH_MATRIX_SKIP_RUN:-0}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+host_arch() {
+    case "$(uname -m 2>/dev/null || echo unknown)" in
+        x86_64|amd64) echo x86_64 ;;
+        aarch64|arm64) echo aarch64 ;;
+        riscv64) echo riscv64 ;;
+        *) echo unknown ;;
+    esac
+}
+
+arch_bin() {
+    arch="$1"
+    case "$arch" in
+        x86_64) printf '%s' "${CPU_SIMD_ARCH_MATRIX_X86_64_SIMPLE_BIN:-}" ;;
+        aarch64) printf '%s' "${CPU_SIMD_ARCH_MATRIX_AARCH64_SIMPLE_BIN:-}" ;;
+        riscv64) printf '%s' "${CPU_SIMD_ARCH_MATRIX_RISCV64_SIMPLE_BIN:-}" ;;
+    esac
+}
+
+env_value() {
+    file="$1"
+    key="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+write_kv() {
+    printf '%s=%s\n' "$1" "$2" >>"$ENV_PATH"
+}
+
+run_arch() {
+    arch="$1"
+    current_host="$2"
+    arch_dir="$BUILD_DIR/$arch"
+    arch_out="$arch_dir/out"
+    mkdir -p "$arch_dir"
+    bin="$(arch_bin "$arch")"
+    if [ "$bin" = "" ] && [ "$arch" = "$current_host" ]; then
+        bin="${SIMPLE_BIN:-bin/simple}"
+    fi
+
+    if [ "$SKIP_RUN" = "1" ]; then
+        status=unavailable
+        reason=skip-run
+    elif [ "$bin" = "" ]; then
+        status=unavailable
+        reason=missing-simple-bin
+    elif [ ! -x "$bin" ]; then
+        status=unavailable
+        reason=missing-simple-bin
+    else
+        set +e
+        SIMPLE_BIN="$bin" BUILD_DIR="$arch_out" REPORT_PATH="$arch_dir/report.md" \
+            sh scripts/check/check-cpu-simd-engine2d-evidence.shs \
+            >"$arch_dir/stdout.txt" 2>"$arch_dir/stderr.txt"
+        code=$?
+        set -e
+        env_file="$arch_out/evidence.env"
+        status="$(env_value "$env_file" cpu_simd_evidence_status)"
+        reason="$(env_value "$env_file" cpu_simd_evidence_reason)"
+        if [ "$status" = "" ]; then
+            status=fail
+            reason="missing-evidence-env-exit-$code"
+        elif [ "$code" -ne 0 ] && [ "$status" != "fail" ]; then
+            status=fail
+            reason="wrapper-exit-$code"
+        fi
+    fi
+
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_status" "$status"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_reason" "$reason"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_simple_bin" "$bin"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_report" "$arch_dir/report.md"
+}
+
+ENV_PATH="$BUILD_DIR/evidence.env"
+rm -f "$ENV_PATH" "$REPORT_PATH"
+
+HOST_ARCH="$(host_arch)"
+write_kv cpu_simd_engine2d_arch_matrix_host_arch "$HOST_ARCH"
+write_kv cpu_simd_engine2d_arch_matrix_strict "$STRICT"
+
+for arch in x86_64 aarch64 riscv64; do
+    run_arch "$arch" "$HOST_ARCH"
+done
+
+passed=0
+missing=0
+failed=0
+for arch in x86_64 aarch64 riscv64; do
+    status="$(env_value "$ENV_PATH" "cpu_simd_engine2d_arch_matrix_${arch}_status")"
+    case "$status" in
+        pass) passed=$((passed + 1)) ;;
+        fail) failed=$((failed + 1)) ;;
+        *) missing=$((missing + 1)) ;;
+    esac
+done
+
+overall=pass
+reason=all-arches-pass
+if [ "$failed" -gt 0 ]; then
+    overall=fail
+    reason=arch-evidence-failed
+elif [ "$missing" -gt 0 ]; then
+    overall=partial
+    reason=arch-evidence-unavailable
+fi
+if [ "$STRICT" = "1" ] && [ "$overall" != "pass" ]; then
+    overall=fail
+    reason=strict-requires-all-arches-pass
+fi
+
+write_kv cpu_simd_engine2d_arch_matrix_passed_count "$passed"
+write_kv cpu_simd_engine2d_arch_matrix_unavailable_count "$missing"
+write_kv cpu_simd_engine2d_arch_matrix_failed_count "$failed"
+write_kv cpu_simd_engine2d_arch_matrix_status "$overall"
+write_kv cpu_simd_engine2d_arch_matrix_reason "$reason"
+
+{
+    echo "# CPU SIMD Engine2D Arch Matrix"
+    echo
+    sed 's/^/- /' "$ENV_PATH"
+} >"$REPORT_PATH"
+
+cat "$ENV_PATH"
+echo "report_path=$REPORT_PATH"
+
+if [ "$overall" = "fail" ]; then
+    exit 1
+fi

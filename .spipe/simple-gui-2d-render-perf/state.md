@@ -67,6 +67,15 @@ implementation-evidence-in-progress
   `blur_or_tolerance_used=false`. The wrapper now keeps `bin/simple` as the
   default invocation path because direct `release/.../simple` segfaults on this
   evidence despite the same ELF passing when invoked through the repo launcher.
+- implementation: Added `scripts/check/check-cpu-simd-engine2d-arch-matrix.shs`
+  so x86_64, aarch64, and riscv64 Engine2D SIMD evidence are recorded as
+  separate rows with strict all-arch mode for target-binary runs.
+- verification: `BUILD_DIR=build/check/cpu-simd-engine2d-arch-matrix
+  REPORT_PATH=doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-08.md sh
+  scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` reports
+  `cpu_simd_engine2d_arch_matrix_status=partial`, x86_64 `pass`,
+  aarch64/riscv64 `unavailable` with `missing-simple-bin`, and retained report
+  `doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-08.md`.
 - implementation: Split the GUI perf harness so `simple_web_cpu_simd` runs
   through the explicit `cpu_simd` render backend while `simple_web_software`
   remains the scalar software row. This prevents the 4K/8K comparison from
@@ -158,6 +167,9 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
   `scripts/check/check-production-gui-web-backend-executed-evidence.shs`, which
   requires exact software parity and positive alpha hits for a translucent fill
   without adding tolerance or blur.
+- CPU-SIMD arch matrix coverage is now explicit:
+  `scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` passes x86_64 on this
+  host and marks aarch64/riscv64 unavailable until target binaries are supplied.
 - CPU-SIMD 4K/8K no-reduction evidence now has a fail-closed wrapper at
   `scripts/check/check-cpu-simd-render-scale-contract.shs`; native full-size
   evidence passes for 3840x2160 and 7680x4320 with no screen-size reduction and
