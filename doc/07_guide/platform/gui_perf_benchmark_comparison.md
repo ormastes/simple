@@ -28,6 +28,8 @@ backend rows. The comparison uses `simple_web_cpu_simd` and the first completed
 CPU drawing-library baseline, preferring Node Canvas/Cairo and falling back to
 GTK/Cairo draw-only timing. If neither baseline is available, the comparison is
 reported as unavailable rather than passed.
+Simple CPU rows run in `SIMPLE_WEB_CPU_MODE=native` by default and fail closed
+if the runner reports interpreter fallback.
 Simple CPU render-loop rows default to 300dpi retina metadata. Pass `--dpi N`
 to override it; the report keeps `logical_pixels` and `physical_pixels` equal to
 the requested benchmark dimensions so DPI evidence cannot hide a smaller render.
@@ -134,7 +136,8 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
   `simple_web_cpu_simd` separately from `simple_web_software`, but still needs
   release-grade 8K throughput measurement before making a speed claim.
 - CPU drawing-library comparison is emitted as `gui_perf_cpu_base_compare_*`
-  fields in `tools/gui_perf_bench/run_all_benchmarks.shs`.
+  fields in `tools/gui_perf_bench/run_all_benchmarks.shs`. The Simple CPU rows
+  use `SIMPLE_WEB_CPU_MODE=native` by default; override only for diagnostics.
 - CPU render-loop DPI evidence defaults to 300dpi retina metadata and is
   configurable through `--dpi` without changing the requested pixel dimensions.
   The focused wrapper is `scripts/check/check-cpu-simd-render-dpi-contract.shs`.

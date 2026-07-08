@@ -114,6 +114,15 @@ implementation-evidence-in-progress
   `screen_size_reduced=false`, CPU-SIMD selection, checksum proof, and no
   fallback/unavailable reason. Retained report:
   `doc/09_report/cpu_simd_render_scale_contract_2026-07-08.md`.
+- implementation: Updated `tools/gui_perf_bench/run_all_benchmarks.shs` so
+  `simple_web_cpu_simd` and `simple_web_software` run with
+  `SIMPLE_WEB_CPU_MODE=native` by default, and fail closed if the Simple runner
+  reports interpreter fallback. This keeps the CPU drawing-library comparison
+  on the same compiled path proven by the scale contract.
+- verification: Small broad-runner smoke at 32x32, 1 frame, default 300dpi
+  passed with `SIMPLE_WEB_CPU_MODE=native`,
+  `gui_perf_benchmark_dpi_source=default`, no Simple CPU interpreter fallback,
+  and `gui_perf_cpu_base_compare_status=measured`.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 
@@ -150,6 +159,9 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
 - CPU-SIMD 4K/8K no-reduction evidence now has a fail-closed wrapper at
   `scripts/check/check-cpu-simd-render-scale-contract.shs`; native full-size
   evidence passes for 3840x2160 and 7680x4320 with no screen-size reduction.
+- The broad multi-framework runner now uses native mode for the Simple CPU rows
+  by default, so `gui_perf_cpu_base_compare_*` does not compare Node/GTK against
+  the interpreter path.
 - Native Simple executable size/speed evidence is intentionally skipped in the fast smoke run (`SKIP_SIMPLE_NATIVE=1`); a release-grade run should capture native artifact bytes or record an explicit native-build blocker.
 - Wire unwired probes into contract: warm_startup, frame_time_p50/p95, input_to_paint.
 - Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture
