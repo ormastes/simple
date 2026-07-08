@@ -76,6 +76,10 @@ implementation-evidence-in-progress
   the first completed CPU drawing-library baseline, preferring Node Canvas/Cairo
   and falling back to GTK/Cairo draw-only timing. Missing baselines are reported
   as unavailable instead of passing.
+- implementation: The narrow Simple CPU render-loop exporter now records
+  300dpi retina metadata by default, accepts `--dpi` as an override, and reports
+  logical and physical pixels as the requested benchmark dimensions so DPI
+  evidence cannot hide a reduced render size.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 
@@ -109,5 +113,6 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
 - Wire unwired probes into contract: warm_startup, frame_time_p50/p95, input_to_paint.
 - Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture
   separate `simple_web_cpu_simd`, `simple_web_software`, and
-  `gui_perf_cpu_base_compare_*` baseline numbers.
+  `gui_perf_cpu_base_compare_*` baseline numbers at the default 300dpi and at
+  least one explicit `--dpi` override.
 - Tauri integration: requires cargo-tauri CLI + WebKitGTK dev headers.

@@ -28,6 +28,9 @@ backend rows. The comparison uses `simple_web_cpu_simd` and the first completed
 CPU drawing-library baseline, preferring Node Canvas/Cairo and falling back to
 GTK/Cairo draw-only timing. If neither baseline is available, the comparison is
 reported as unavailable rather than passed.
+Simple CPU render-loop rows default to 300dpi retina metadata. Pass `--dpi N`
+to override it; the report keeps `logical_pixels` and `physical_pixels` equal to
+the requested benchmark dimensions so DPI evidence cannot hide a smaller render.
 
 ### Current Simple Backend Evidence (2026-06-06 smoke)
 
@@ -90,11 +93,11 @@ bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
 
 bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
   --software-render-backend cpu_simd \
-  --width 7680 --height 4320 --warmup-count 1 --sample-count 60
+  --width 7680 --height 4320 --dpi 300 --warmup-count 1 --sample-count 60
 
 bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
   --software-render-backend software \
-  --width 320 --height 240 --warmup-count 1 --sample-count 1
+  --width 320 --height 240 --dpi 220 --warmup-count 1 --sample-count 1
 ```
 
 ## Pixel Parity Gate
@@ -120,6 +123,8 @@ bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
   release-grade 8K throughput measurement before making a speed claim.
 - CPU drawing-library comparison is emitted as `gui_perf_cpu_base_compare_*`
   fields in `tools/gui_perf_bench/run_all_benchmarks.shs`.
+- CPU render-loop DPI evidence defaults to 300dpi retina metadata and is
+  configurable through `--dpi` without changing the requested pixel dimensions.
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
 - Software layout renders must not replay the already-painted framebuffer
   through an Engine2D software present/readback cycle. The 2026-06-06
