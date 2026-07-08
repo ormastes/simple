@@ -165,8 +165,10 @@ sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 
 Pass condition: `directx_native_readback_status=pass`, native wrapper gate
 `pass`, positive backend/device handle, readback source `device_readback`, and
-matching expected/actual checksum. The aggregate wrapper must no longer report
-DirectX as only `structured_readback_contract` or `not_device_readback`.
+positive matching expected/actual checksum. The wrapper self-test rejects zero
+or malformed handles, zero checksums, checksum mismatches, and
+structured-contract-only provenance. The aggregate wrapper must no longer
+report DirectX as only `structured_readback_contract` or `not_device_readback`.
 
 Local status: not proven on this Linux host. Existing structured DirectX specs
 are useful contract coverage only; production proof remains native-pending.

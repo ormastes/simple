@@ -116,9 +116,12 @@ sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 Promotion keys must replace provenance-only fields with a same-frame
 `device_readback` proof: `directx_native_readback_status=pass`,
 `directx_native_readback_source=device_readback`,
-`directx_native_readback_backend_handle` positive, expected/actual checksums
-matching, and `directx_native_readback_wrapper_gate_status=pass`. Until then
-keep `directx_spark_task_status` native-pending and
+`directx_native_readback_backend_handle` positive, positive matching
+expected/actual checksums, and
+`directx_native_readback_wrapper_gate_status=pass`. The wrapper self-test
+rejects zero or malformed handles, zero checksums, checksum mismatches, and
+structured-contract-only provenance. Until then keep `directx_spark_task_status`
+native-pending and
 `directx_normal_llm_verification_status` native-pending rather than pass.
 
 ### ROCm/HIP
