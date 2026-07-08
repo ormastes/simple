@@ -28,6 +28,8 @@ allocation from the CPU text path and re-ran the same retained 8K row:
 - Improvement versus the recorded 2026-07-08 row: `26.8%`.
 - Remaining gap versus Node Canvas/Cairo: `11.7x` slower.
 - Evidence report: `doc/09_report/cpu_simd_text_glyph_inline_perf_2026-07-09.md`.
+- Current owner blocker:
+  `doc/08_tracking/bug/browser_layout_large_simd_fill_facade_unsafe_2026-07-09.md`.
 
 `doc/09_report/cpu_simd_render_scale_contract_2026-07-08.md` separately proves
 the CPU-SIMD path beats the in-repo scalar software path for the focused 4K/8K

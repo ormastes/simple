@@ -100,6 +100,9 @@ The next optimization should stay inside the Engine2D-owned SIMD fill path or
 register a safe browser-layout framebuffer fill facade before using native SIMD
 from `simple_web_html_layout_renderer.spl`.
 
+Tracked blocker:
+`doc/08_tracking/bug/browser_layout_large_simd_fill_facade_unsafe_2026-07-09.md`.
+
 ## Verification
 
 - `SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean`
