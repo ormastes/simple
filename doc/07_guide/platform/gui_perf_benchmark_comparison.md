@@ -39,21 +39,23 @@ Use `scripts/check/check-cpu-simd-render-scale-contract.shs` for the focused
 CPU-SIMD 4K/8K no-reduction contract; it fails closed on fallback, missing
 checksum/nonzero-pixel proof, missing timing, or reduced logical/physical size.
 
-### Current Simple Backend Evidence (2026-06-06 smoke)
+### Current Simple Backend Evidence (2026-07-08 smoke)
 
-`doc/09_report/gui_perf_benchmark_2026-06-06.md` is the canonical linked smoke
-report for the current Simple backend profile. It was regenerated at 320x240,
-1 frame, with `profile_report_contract=true`.
+`doc/09_report/gui_perf_benchmark_2026-07-08.md` is the canonical linked smoke
+report for the current Simple backend profile. It was regenerated at
+7680x4320, 1 frame, 300dpi, with `SIMPLE_WEB_CPU_MODE=native` and
+`profile_report_contract=true`.
 
 | Backend | Frame p50 | Frame p95 | Status | Measurement |
 |---------|-----------|-----------|--------|-------------|
-| Simple CUDA fill | 0.479 ms | 0.479 ms | valid | Device-buffer fill/readback, checksum `sum32:328570011648000`, `nonzero_pixels:76800` |
-| Simple Web software | 3011.155 ms | 3011.155 ms | valid | Narrow software-only `simple_web_render_html_to_pixels_with_engine2d_backend` render-loop row, checksum `sum32:328745677397784`, `nonzero_pixels:76800` |
+| Simple Web CPU-SIMD | 1282.166 ms | 1282.166 ms | valid | Native CPU-SIMD render-loop row, checksum `sum32:135445232233405312`, `nonzero_pixels:33177600` |
+| Simple Web software | 909.530 ms | 909.530 ms | valid | Native scalar software render-loop row, same checksum and pixel proof as CPU-SIMD |
+| Simple CUDA fill | n/a | n/a | unavailable | CUDA row did not complete in this CPU-SIMD-focused run |
 
-The CUDA row proves the generated Engine2D GPU fill lane is measurable on this
-host. The software web row is not an availability probe anymore; it is a real
-frame measurement and shows the current pure Simple web GUI path remains
-dominated by interpreted text/layout work.
+The 2026-07-08 run is the current full-size CPU drawing comparison. It proves
+the CPU-SIMD and scalar software paths preserve checksum and full 8K pixel
+coverage with no screen-size reduction; it does not claim the CUDA lane passed
+on that host.
 
 ### Existing Evidence: Simple vs GTK Cold Start (from `gtk_gui_repeat_evidence`)
 
