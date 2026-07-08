@@ -108,11 +108,13 @@ implementation-evidence-in-progress
 - verification: `sh scripts/check/check-cpu-simd-render-scale-contract.shs`
   now passes in native mode at full 4K and 8K with
   `cpu_simd_render_scale_4k_pixels=3840x2160`,
-  `cpu_simd_render_scale_4k_p50_frame_us=462364`,
+  `cpu_simd_render_scale_4k_p50_frame_us=664780`,
+  `cpu_simd_render_scale_4k_software_checksum_parity=true`,
   `cpu_simd_render_scale_8k_pixels=7680x4320`,
-  `cpu_simd_render_scale_8k_p50_frame_us=1007526`, 300dpi default metadata,
-  `screen_size_reduced=false`, CPU-SIMD selection, checksum proof, and no
-  fallback/unavailable reason. Retained report:
+  `cpu_simd_render_scale_8k_p50_frame_us=2219128`,
+  `cpu_simd_render_scale_8k_software_checksum_parity=true`, 300dpi default
+  metadata, `screen_size_reduced=false`, CPU-SIMD selection, checksum proof,
+  scalar software checksum parity, and no fallback/unavailable reason. Retained report:
   `doc/09_report/cpu_simd_render_scale_contract_2026-07-08.md`.
 - implementation: Updated `tools/gui_perf_bench/run_all_benchmarks.shs` so
   `simple_web_cpu_simd` and `simple_web_software` run with
@@ -158,7 +160,8 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
   without adding tolerance or blur.
 - CPU-SIMD 4K/8K no-reduction evidence now has a fail-closed wrapper at
   `scripts/check/check-cpu-simd-render-scale-contract.shs`; native full-size
-  evidence passes for 3840x2160 and 7680x4320 with no screen-size reduction.
+  evidence passes for 3840x2160 and 7680x4320 with no screen-size reduction and
+  scalar software checksum parity.
 - The broad multi-framework runner now uses native mode for the Simple CPU rows
   by default, so `gui_perf_cpu_base_compare_*` does not compare Node/GTK against
   the interpreter path.

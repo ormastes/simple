@@ -27,30 +27,32 @@ run_export() {
     label="$1"
     width="$2"
     height="$3"
+    backend="${4:-cpu_simd}"
+    fixture_label="${5:-$label}"
     rm -f "$OUT_DIR/$label.sdn" "$OUT_DIR/$label.err"
     if [ "$DPI" = "300" ]; then
         SIMPLE_LIB="$ROOT/src" run_with_timeout "$SIMPLE_BIN" run "$ROOT/src/app/wm_compare/backend_measurement_software_export.spl" --mode="$EXEC_MODE" -- \
-            --software-render-backend cpu_simd \
+            --software-render-backend "$backend" \
             --width "$width" \
             --height "$height" \
             --warmup-count 1 \
             --sample-count "$SAMPLE_COUNT" \
-            --fixture "cpu-simd-${label}" \
+            --fixture "cpu-simd-${fixture_label}" \
             --shell simple-web \
-            --command "scale-${label}" \
+            --command "scale-${fixture_label}" \
             --host local \
             >"$OUT_DIR/$label.sdn" 2>"$OUT_DIR/$label.err"
     else
         SIMPLE_LIB="$ROOT/src" run_with_timeout "$SIMPLE_BIN" run "$ROOT/src/app/wm_compare/backend_measurement_software_export.spl" --mode="$EXEC_MODE" -- \
-            --software-render-backend cpu_simd \
+            --software-render-backend "$backend" \
             --width "$width" \
             --height "$height" \
             --dpi "$DPI" \
             --warmup-count 1 \
             --sample-count "$SAMPLE_COUNT" \
-            --fixture "cpu-simd-${label}" \
+            --fixture "cpu-simd-${fixture_label}" \
             --shell simple-web \
-            --command "scale-${label}" \
+            --command "scale-${fixture_label}" \
             --host local \
             >"$OUT_DIR/$label.sdn" 2>"$OUT_DIR/$label.err"
     fi
@@ -90,22 +92,22 @@ fail() {
 }
 
 require_value() {
-    label="$1"
-    expected="$2"
-    actual="$3"
-    if [ "$actual" != "$expected" ]; then
-        fail "${label}_expected_${expected}_got_${actual}"
+    require_label="$1"
+    require_expected="$2"
+    require_actual="$3"
+    if [ "$require_actual" != "$require_expected" ]; then
+        fail "${require_label}_expected_${require_expected}_got_${require_actual}"
     fi
 }
 
 require_positive() {
-    label="$1"
-    actual="$2"
-    case "$actual" in
-        ''|*[!0-9]*) fail "${label}_not_numeric_${actual}" ;;
+    positive_label="$1"
+    positive_actual="$2"
+    case "$positive_actual" in
+        ''|*[!0-9]*) fail "${positive_label}_not_numeric_${positive_actual}" ;;
     esac
-    if [ "$actual" -le 0 ]; then
-        fail "${label}_not_positive_${actual}"
+    if [ "$positive_actual" -le 0 ]; then
+        fail "${positive_label}_not_positive_${positive_actual}"
     fi
 }
 
@@ -156,6 +158,24 @@ check_export() {
     require_positive "${label}_artifact_submit_us" "$(sdn_i64_value artifact_submit_us "$file")"
 }
 
+check_software_export() {
+    label="$1"
+    width="$2"
+    height="$3"
+    file="$OUT_DIR/${label}_software.sdn"
+    pixels=$((width * height))
+
+    require_value "${label}_software_dpi" "$DPI" "$(field_value gui_perf_benchmark_dpi "$file")"
+    require_value "${label}_software_backend_family" "software" "$(sdn_text_value backend_family "$file")"
+    require_value "${label}_software_requested" "software" "$(sdn_text_value requested "$file")"
+    require_value "${label}_software_selected" "software" "$(sdn_text_value selected "$file")"
+    require_value "${label}_software_runtime_target" "cpu_scalar" "$(sdn_text_value runtime_compute_target "$file")"
+    require_value "${label}_software_runtime_path" "simple_web_layout_software" "$(sdn_text_value runtime_execution_path "$file")"
+    require_value "${label}_software_fallback" "false" "$(sdn_bool_value fallback_used "$file")"
+    require_value "${label}_software_pixel_proof" "nonzero_pixels:$pixels" "$(sdn_text_value pixel_proof "$file")"
+    require_value "${label}_software_checksum_parity" "$(sdn_text_value checksum "$OUT_DIR/$label.sdn")" "$(sdn_text_value checksum "$file")"
+}
+
 if run_export 4k "$WIDTH_4K" "$HEIGHT_4K"; then
     :
 else
@@ -168,8 +188,22 @@ else
     rc="$?"
     fail "8k_run_failed_exit_$rc"
 fi
+if run_export 4k_software "$WIDTH_4K" "$HEIGHT_4K" software 4k; then
+    :
+else
+    rc="$?"
+    fail "4k_software_run_failed_exit_$rc"
+fi
+if run_export 8k_software "$WIDTH_8K" "$HEIGHT_8K" software 8k; then
+    :
+else
+    rc="$?"
+    fail "8k_software_run_failed_exit_$rc"
+fi
 check_export 4k "$WIDTH_4K" "$HEIGHT_4K"
 check_export 8k "$WIDTH_8K" "$HEIGHT_8K"
+check_software_export 4k "$WIDTH_4K" "$HEIGHT_4K"
+check_software_export 8k "$WIDTH_8K" "$HEIGHT_8K"
 
 echo "cpu_simd_render_scale_contract_status=pass"
 echo "gui_perf_benchmark_backend=simple_web_cpu_simd"
@@ -180,6 +214,10 @@ echo "cpu_simd_render_scale_contract_sample_count=$SAMPLE_COUNT"
 echo "cpu_simd_render_scale_4k_pixels=${WIDTH_4K}x${HEIGHT_4K}"
 echo "cpu_simd_render_scale_4k_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/4k.sdn")"
 echo "cpu_simd_render_scale_4k_checksum=$(sdn_text_value checksum "$OUT_DIR/4k.sdn")"
+echo "cpu_simd_render_scale_4k_software_checksum=$(sdn_text_value checksum "$OUT_DIR/4k_software.sdn")"
+echo "cpu_simd_render_scale_4k_software_checksum_parity=true"
 echo "cpu_simd_render_scale_8k_pixels=${WIDTH_8K}x${HEIGHT_8K}"
 echo "cpu_simd_render_scale_8k_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/8k.sdn")"
 echo "cpu_simd_render_scale_8k_checksum=$(sdn_text_value checksum "$OUT_DIR/8k.sdn")"
+echo "cpu_simd_render_scale_8k_software_checksum=$(sdn_text_value checksum "$OUT_DIR/8k_software.sdn")"
+echo "cpu_simd_render_scale_8k_software_checksum_parity=true"

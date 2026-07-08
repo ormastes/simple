@@ -151,8 +151,9 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
 - CPU-SIMD 4K/8K scale evidence is gated by
   `scripts/check/check-cpu-simd-render-scale-contract.shs`. It runs native
   CPU-SIMD rows at 3840x2160 and 7680x4320, requires full logical/physical
-  dimensions, 300dpi retina metadata, checksum/nonzero-pixel proof, positive
-  timing, and no fallback/unavailable reason. Latest retained evidence:
+  dimensions, 300dpi retina metadata, checksum/nonzero-pixel proof, scalar
+  software checksum parity for the same scene/dimensions, positive timing, and
+  no fallback/unavailable reason. Latest retained evidence:
   `doc/09_report/cpu_simd_render_scale_contract_2026-07-08.md`.
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
 - Software layout renders must not replay the already-painted framebuffer
