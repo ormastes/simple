@@ -47,7 +47,7 @@ Validates the heavy production GUI/web renderer parity wrapper behavior that can
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/production_gui_web_renderer_parity_evidence_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-08 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -419,7 +419,7 @@ expect(evidence).to_contain("metal_engine2d_framebuffer_readback_simple_bin_stat
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -434,6 +434,16 @@ expect(script).to_contain("SIMPLE_BIN_STATUS=forbidden")
 expect(script).to_contain("production_gui_backend_simple_bin=$SIMPLE_BIN")
 expect(script).to_contain("production_gui_backend_simple_bin_source=$SIMPLE_BIN_SOURCE")
 expect(script).to_contain("production_gui_backend_simple_bin_status=$SIMPLE_BIN_STATUS")
+expect(script).to_contain("production_gui_backend_timing_budget_us")
+expect(script).to_contain("production_gui_backend_timing_budget_status")
+expect(script).to_contain("production_gui_backend_timing_budget_reason")
+val aggregate = file_read("scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
+expect(aggregate).to_contain("production_gui_web_renderer_parity_backend_timing_budget_us")
+expect(aggregate).to_contain("production_gui_web_renderer_parity_backend_timing_budget_status")
+expect(aggregate).to_contain("production_gui_web_renderer_parity_backend_timing_budget_reason")
+val gate = file_read("scripts/check/check-production-gui-web-renderer-parity-gate.shs")
+expect(gate).to_contain("production_gui_web_renderer_parity_gate_backend_timing_budget_status")
+expect(gate).to_contain("production_gui_web_renderer_parity_gate_required_backend_timing_budget_status=pass-or-warn")
 ```
 
 </details>
