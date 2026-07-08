@@ -49,7 +49,7 @@ NVMe firmware baremetal-remote boot — a Simple-compiled rv32 kernel booted on 
 | Design | N/A |
 | Research | doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md |
 | Source | `test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl` |
-| Updated | 2026-07-07 |
+| Updated | 2026-07-08 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 NVMe firmware baremetal-remote boot — a Simple-compiled rv32 kernel booted on QEMU
@@ -144,7 +144,7 @@ else:
 
 #### runs the rv32 no-alloc logic reference and proves the boot hook is wired
 
-- The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal+HIL+queue-phase+io-opcode-read-zero-trim-flush+admin-format-fw-log+reactor+policy-target+DRAM-durability+wear-scrub+media-retire+power-cycle+backpressure-abort+feature-guard+namespace-guard reference typechecks
+- The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal+HIL+queue-phase+task-pool-fail-closed+io-opcode-read-zero-trim-flush+admin-format-fw-log+reactor+policy-target+DRAM-durability+wear-scrub+media-retire+power-cycle+backpressure-abort+feature-guard+namespace-guard reference typechecks
    - Expected: check_code equals `0`
 - The host-runnable scalar logic reference passes
    - Expected: logic_code equals `0`
@@ -152,6 +152,8 @@ else:
 - The rv32 boot wrapper fail-closed self-test rejects missing PASS and serial FAIL markers
    - Expected: wrapper_code equals `0`
 -  expect no fail marker
+- The rv32 build wrapper reports background/status progress and failed-build reason metadata
+   - Expected: build_status_code equals `0`
 - The stock rv32 boot path calls the optional NVMe firmware self-test hook
    - Expected: boot_code equals `0`
 - The firmware rv32 entry exports the strong hook that prints the PASS marker
@@ -161,11 +163,11 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal+HIL+queue-phase+io-opcode-read-zero-trim-flush+admin-format-fw-log+reactor+policy-target+DRAM-durability+wear-scrub+media-retire+power-cycle+backpressure-abort+feature-guard+namespace-guard reference typechecks")
+step("The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal+HIL+queue-phase+task-pool-fail-closed+io-opcode-read-zero-trim-flush+admin-format-fw-log+reactor+policy-target+DRAM-durability+wear-scrub+media-retire+power-cycle+backpressure-abort+feature-guard+namespace-guard reference typechecks")
 val (check_out, check_err, check_code) = _run("bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
 expect(check_code).to_equal(0)
 
@@ -180,6 +182,10 @@ val (wrapper_out, wrapper_err, wrapper_code) = _run("sh examples/09_embedded/sim
 expect(wrapper_code).to_equal(0)
 expect(wrapper_out).to_contain("STATUS: PASS nvme-rv32-boot self-test")
 _expect_no_fail_marker(wrapper_out, "rv32 boot wrapper self-test")
+
+step("The rv32 build wrapper reports background/status progress and failed-build reason metadata")
+val (build_status_out, build_status_err, build_status_code) = _run("rg -n 'NVME_RV32_BUILD_BACKGROUND|NVME_RV32_BUILD_STATUS|reason=\\$BUILD_REASON|elapsed=\\$\\{BUILD_ELAPSED_SECS\\}s|external-termination-before-timeout|native-build-timeout' examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs")
+expect(build_status_code).to_equal(0)
 
 step("The stock rv32 boot path calls the optional NVMe firmware self-test hook")
 val (boot_out, boot_err, boot_code) = _run("rg -n 'rt_rv32_boot_optional_nvme_fw_selftest\\(\\)' src/os/kernel/arch/riscv32/boot.spl")

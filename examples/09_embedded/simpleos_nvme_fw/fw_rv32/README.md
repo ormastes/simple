@@ -4,7 +4,7 @@
 reconstruct** (`../fw/rain.spl`, proven in `../fw/proofs/Rain.lean`), the SECDED
 payload-window ECC floor, a fixed-channel scheduler floor, a fixed power/thermal floor, a
 fixed-capacity write-back map-cache floor, a fixed band allocator floor, a fixed-capacity
-journal-ring floor, a fixed HIL command/queue floor, a fixed queue-phase floor, a fixed io-opcode-read-zero-trim-flush floor, a fixed admin/format/fw-log floor, a fixed reactor floor, a fixed policy/target floor, a fixed DRAM/durability floor, a fixed wear/scrub floor, a fixed media-retire floor, a fixed power-cycle floor, a fixed backpressure/abort floor, a fixed feature-guard floor, a fixed namespace-guard floor, and a fixed Cosmos+ OpenSSD target-profile floor, written to run inside the bare-metal rv32 boot path with
+journal-ring floor, a fixed HIL command/queue floor, a fixed queue-phase floor, a fixed task-pool fail-closed floor, a fixed io-opcode-read-zero-trim-flush floor, a fixed admin/format/fw-log floor, a fixed reactor floor, a fixed policy/target floor, a fixed DRAM/durability floor, a fixed wear/scrub floor, a fixed media-retire floor, a fixed power-cycle floor, a fixed backpressure/abort floor, a fixed feature-guard floor, a fixed namespace-guard floor, and a fixed Cosmos+ OpenSSD target-profile floor, written to run inside the bare-metal rv32 boot path with
 **no heap and no arrays** — matching the constraint documented in
 `src/os/kernel/arch/riscv32/boot.spl` ("keep this module freestanding and minimal ... without
 pulling runtime formatting, arrays, or boot metadata into the first-stage entry object"). It
@@ -39,7 +39,7 @@ marker without any serial `FAIL` line.
 
 ## Status (2026-06-30): toolchain FIXED + freestanding runtime COMPLETED; rv32 OS builds & boots
 
-- ✅ `logic.spl` / `entry.spl` are `check`-clean, array-free, and the RAIN+ECC+scheduler+power-thermal+map-cache+band+journal-ring+HIL+queue-phase+io-opcode-read-zero-trim-flush+admin-format-fw-log+reactor+policy-target+DRAM-durability+wear-scrub+media-retire+power-cycle+backpressure-abort+feature-guard+namespace-guard logic is
+- ✅ `logic.spl` / `entry.spl` are `check`-clean, array-free, and the RAIN+ECC+scheduler+power-thermal+map-cache+band+journal-ring+HIL+queue-phase+task-pool-fail-closed+io-opcode-read-zero-trim-flush+admin-format-fw-log+reactor+policy-target+DRAM-durability+wear-scrub+media-retire+power-cycle+backpressure-abort+feature-guard+namespace-guard logic is
   host-verified (`RV32 NVME FW LOGIC OK`).
 - ✅ **Toolchain fixed and on origin.** `native-build --target riscv32-unknown-none` no longer
   exits with a silent 255: it routes to the in-process Rust LLVM handler, compiles riscv objects,
@@ -59,7 +59,7 @@ marker without any serial `FAIL` line.
   OK` (the trailing `TEST FAILED` is only the absent fat32 disk image).
 
 `entry.spl` remains the **standalone logic reference** for the firmware's RAIN reconstruct,
-ECC floor, fixed scheduler, fixed power/thermal model, fixed map cache, fixed band allocator, fixed journal ring, fixed HIL command/queue, fixed queue-phase handling, fixed io-opcode-read-zero-trim-flush handling, fixed admin/format/fw-log handling, fixed reactor handling, fixed policy/target handling, fixed DRAM/durability handling, fixed wear/scrub handling, fixed media-retire handling, fixed power-cycle handling, fixed backpressure/abort handling, fixed feature-guard handling, and fixed namespace-guard handling (host-verified), now wired through the rv32 boot hook. A standalone `native-build` of it alone still
+ECC floor, fixed scheduler, fixed power/thermal model, fixed map cache, fixed band allocator, fixed journal ring, fixed HIL command/queue, fixed queue-phase handling, fixed task-pool fail-closed handling, fixed io-opcode-read-zero-trim-flush handling, fixed admin/format/fw-log handling, fixed reactor handling, fixed policy/target handling, fixed DRAM/durability handling, fixed wear/scrub handling, fixed media-retire handling, fixed power-cycle handling, fixed backpressure/abort handling, fixed feature-guard handling, and fixed namespace-guard handling (host-verified), now wired through the rv32 boot hook. A standalone `native-build` of it alone still
 won't link — its dir has no `boot/` for C autodiscovery — so the bootable path is the OS build
 (`simple os build --arch=riscv32`, or the proven smoke-lane recipe), which links the shared
 freestanding runtime. The full 22-module no-alloc port of `../fw/` remains the larger ceiling.
