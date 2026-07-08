@@ -81,11 +81,11 @@ impl Ftl:
         if pc != NAND_OK:
             me.band.set_bad(ppn_block(ppn))
             return SC_INTERNAL
-        me.rain_update_page(ppn, 0, data)
         me.ensure_journal_room()
         val before_wal: i64 = me.journal.wal_len()
         if me.journal.append(0, lba, old_ppn, ppn, s) <= before_wal:
             return SC_NS_NOT_READY
+        me.rain_update_page(ppn, 0, data)
         me.map.update(lba, ppn)
         me.band.mark_valid(ppn)
         if old_ppn != UNMAP:
@@ -468,9 +468,11 @@ impl Ftl:
                 if pc != NAND_OK:
                     me.band.set_bad(ppn_block(newp))
                     return UNMAP    # failed relocation -> old page remains live; do NOT erase
-                me.rain_update_page(newp, 0, rd.data)
                 me.ensure_journal_room()
-                me.journal.append(0, rd.lba, ppn, newp, s)
+                val before_wal: i64 = me.journal.wal_len()
+                if me.journal.append(0, rd.lba, ppn, newp, s) <= before_wal:
+                    return UNMAP    # relocation is not durable; old page remains live
+                me.rain_update_page(newp, 0, rd.data)
                 me.map.update(rd.lba, newp)
                 me.band.mark_valid(newp)
                 me.band.mark_invalid(ppn)
@@ -642,6 +644,7 @@ fn ftl_selftest() -> i64:
     jw.journal.cap = 0
     fail = fail + expect_eq(jw.write(31, 0x32), SC_NS_NOT_READY, "write fails closed when WAL cannot append")
     fail = fail + expect_eq(jw.read(31), 0x31, "failed WAL append write leaves old mapping intact")
+    fail = fail + expect_eq(jw.rain_parity[1], 0, "failed WAL append write leaves new-page parity untouched")
     fail = fail + expect_eq(jw.trim(31), SC_NS_NOT_READY, "trim fails closed when WAL cannot append")
     fail = fail + expect_eq(jw.read(31), 0x31, "failed WAL append trim leaves mapping intact")
 
@@ -701,6 +704,18 @@ fn ftl_selftest() -> i64:
     fail = fail + expect_eq(read_blocked, UNMAP, "gc aborts on uncorrectable source read")
     fail = fail + expect_eq(rf.read_status(1200), SC_MEDIA_ERR, "failed source read remains reported as media error")
     fail = fail + expect_eq(rf.band.block_state(0), BLK_CLOSED, "failed source read keeps victim closed")
+
+    var wal_gc: Ftl = ftl_new()
+    i = 0
+    while i < PAGES_PER_BLOCK * 2:
+        wal_gc.write(1400 + i, 4000 + i)
+        i = i + 1
+    val gc_parity_before: i64 = wal_gc.rain_parity[0]
+    wal_gc.journal.cap = 0
+    fail = fail + expect_eq(wal_gc.gc_once(), UNMAP, "gc aborts when relocation WAL cannot append")
+    fail = fail + expect_eq(wal_gc.read(1400), 4000, "failed relocation WAL keeps old live page readable")
+    fail = fail + expect_eq(wal_gc.rain_parity[0], gc_parity_before, "failed relocation WAL leaves parity untouched")
+    fail = fail + expect_eq(wal_gc.band.block_state(0), BLK_CLOSED, "failed relocation WAL keeps victim closed")
 
     fail
 
