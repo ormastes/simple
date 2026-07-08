@@ -802,6 +802,30 @@ The wrapper now provides live progress and a precise failure reason, but the
 RV64 direct ELF still requires running the build outside that 70-second cap or
 reducing native-build work enough to complete before it.
 
+## Update — background mode escapes interactive command lifetime
+
+`fw_rv64/build.shs` now supports detached operation for hosts that kill
+interactive commands before the configured native-build timeout:
+
+```text
+NVME_RV64_BUILD_TIMEOUT_SECS=900 sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs --background
+NVME_RV64_BUILD_BACKGROUND pid=152834 out=build/test-artifacts/nvme_fw_rv64_background.out err=build/test-artifacts/nvme_fw_rv64_background.err
+
+sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs --status
+NVME_RV64_BUILD_STATUS running pid=152834 out=build/test-artifacts/nvme_fw_rv64_background.out err=build/test-artifacts/nvme_fw_rv64_background.err
+```
+
+The detached build emitted heartbeats after the foreground command returned:
+
+```text
+NVME_RV64_BUILD_HEARTBEAT elapsed=0s timeout=900s
+NVME_RV64_BUILD_HEARTBEAT elapsed=10s timeout=900s
+NVME_RV64_BUILD_HEARTBEAT elapsed=20s timeout=900s
+```
+
+This is now the canonical path for producing `build/nvme_fw_rv64.elf` on hosts
+with a short interactive process lifetime.
+
 ## Update — band allocation core split, probe reaches reactor cases
 
 `logic_band_core.spl` was reduced by moving band allocation, host-open, writable

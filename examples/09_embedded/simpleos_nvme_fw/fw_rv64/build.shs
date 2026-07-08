@@ -3,6 +3,7 @@
 set -e
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 
+MODE="${1:-}"
 OUT="build/nvme_fw_rv64.elf"
 OBJ="build/test-artifacts/nvme_fw_rv64.o"
 START_OBJ="build/test-artifacts/nvme_fw_rv64_start.o"
@@ -14,8 +15,36 @@ SIMPLE_BIN="${NVME_RV64_SIMPLE_BIN:-bin/simple}"
 LOG_DIR="build/test-artifacts"
 OUT_LOG="$LOG_DIR/nvme_fw_rv64_build.out"
 ERR_LOG="$LOG_DIR/nvme_fw_rv64_build.err"
+PID_FILE="$LOG_DIR/nvme_fw_rv64_build.pid"
+BG_OUT_LOG="$LOG_DIR/nvme_fw_rv64_background.out"
+BG_ERR_LOG="$LOG_DIR/nvme_fw_rv64_background.err"
 
 mkdir -p "$LOG_DIR" "$ENTRY_DIR"
+
+if [ "$MODE" = "--status" ]; then
+  if [ -f "$OUT" ]; then
+    echo "NVME_RV64_BUILD_STATUS built out=$OUT"
+    exit 0
+  fi
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "NVME_RV64_BUILD_STATUS running pid=$(cat "$PID_FILE") out=$BG_OUT_LOG err=$BG_ERR_LOG"
+    exit 0
+  fi
+  echo "NVME_RV64_BUILD_STATUS missing out=$OUT out_log=$OUT_LOG err_log=$ERR_LOG"
+  exit 1
+fi
+
+if [ "$MODE" = "--background" ]; then
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "NVME_RV64_BUILD_BACKGROUND already-running pid=$(cat "$PID_FILE")"
+    exit 0
+  fi
+  setsid sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs >"$BG_OUT_LOG" 2>"$BG_ERR_LOG" < /dev/null &
+  echo $! >"$PID_FILE"
+  echo "NVME_RV64_BUILD_BACKGROUND pid=$(cat "$PID_FILE") out=$BG_OUT_LOG err=$BG_ERR_LOG"
+  exit 0
+fi
+
 rm -f "$DIRECT_ENTRY" "$OUT" "$OBJ" "$START_OBJ" "$START_ASM"
 
 cat >"$DIRECT_ENTRY" <<'EOF_DIRECT_ENTRY'
