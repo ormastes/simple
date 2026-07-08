@@ -32,8 +32,8 @@ silicon. The simulation boundary is deliberate and unchanged:
         GC (`reclaim_block`/`gc_once`; `gc_safety_check.spl`, `ftl_gc_safety_selftest`).
   - [x] A fetched command **always** posts a completion — no host-hang. (Audit claim of a silent
         drop on pool exhaustion was **verified a non-bug**: `hil.tick`/`io_process` post a
-        completion for every command, and the task-pool acquire→release within one synchronous
-        tick, so it cannot exhaust.)
+        completion for every command, and normal acquire→release within one synchronous tick
+        cannot exhaust from queued backlog.)
   - [x] If task-pool metadata is unavailable or corrupt, HIL and multi-queue controller writes
         fail closed with `SC_NS_NOT_READY` and leave media unchanged
         (`task_pool_fail_closed_check.spl`).
