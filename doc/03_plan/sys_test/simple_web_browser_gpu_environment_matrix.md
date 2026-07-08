@@ -191,9 +191,10 @@ sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 
 Pass condition: `webgpu_real_readback_status=pass`,
 `webgpu_real_readback_source=device_readback`, positive
-`webgpu_real_readback_backend_handle`, and matching expected/actual checksum.
-`surface_upload` remains provenance-only and does not satisfy production
-device-readback proof.
+`webgpu_real_readback_backend_handle`, and positive matching expected/actual
+checksum. The wrapper self-test rejects zero or malformed handles, zero
+checksums, checksum mismatches, and upload-only provenance. `surface_upload`
+remains provenance-only and does not satisfy production device-readback proof.
 
 Local status: unavailable on the current host;
 `webgpu-real-probe-run-failed`, `source=not_device_readback`,
