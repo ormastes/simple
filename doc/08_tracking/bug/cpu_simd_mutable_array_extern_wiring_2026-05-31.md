@@ -64,3 +64,32 @@ Related: the mutable-array extern layout blocker is tracked in sibling
 
 Status remains Open — the honesty fix corrects the claim; the underlying SIMD
 wiring gap is still unaddressed.
+
+## 2026-07-09: retained 8K Simple Web evidence
+
+The retained Simple Web CPU-SIMD 4K/8K benchmark now routes through the real
+layout renderer and proves the remaining bottleneck is full-frame framebuffer
+allocation/fill, not parser, CSS, layout, or text glyph setup:
+
+- 8K trace: `paint_ms=776`, total `779724us`, checksum
+  `sum32:135445232233405312`.
+- Normal retained 8K row after the text glyph inline optimization:
+  `938678us`, checksum `sum32:135445232233405312`.
+- External Node Canvas/Cairo comparison remains `80.201ms` p50 at the same 8K
+  size, so the retained Simple row is still about `11.7x` slower.
+
+Direct browser-layout attempts to use the current SIMD fill externs are still
+blocked by this owner-boundary problem:
+
+- `simd_fill_row` over the layout framebuffer reported
+  `unknown extern function: rt_engine2d_simd_fill_u32`, changed checksum, and
+  slowed 4K trace to `878028us`.
+- `engine2d_simd_fill_row_u32` over a full framebuffer segfaulted at 4K.
+- A safer experiment that routed `fb_rect`/`fb_rect_clip` row fills through
+  `backend_software`'s existing `simd_fill_row` owner preserved 4K/8K checksums,
+  but regressed 8K to `1543525us`, so it was reverted.
+
+The smallest next real fix is still the same: add a proven mutable typed-array
+write-back bridge, then route bulk `[u32]` clear/fill/readback through that
+owner boundary. Browser-local SIMD fill shortcuts should remain rejected until
+that bridge exists.
