@@ -110,6 +110,11 @@ bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
 sh scripts/check/check-local-gpu-perf-summary.shs
 ```
 
+The no-hardware summary contract must report
+`gpu_perf_summary_contract=verdict-timing-overhead` for both canonical runner
+paths, proving the self-test still covers faster, near-CPU, slower-overhead,
+and timing-line parsing cases.
+
 ## Pixel Parity Gate
 
 "Do not cheat" — optimizations must not change pixel output.
