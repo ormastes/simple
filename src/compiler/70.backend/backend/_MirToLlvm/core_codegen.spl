@@ -26,6 +26,24 @@ fn llvm_bootstrap_ssa_function(fn_: MirFunction) -> MirFunction:
         return MirFunction.with_blocks(fn_, rewritten.blocks)
     fn_
 
+fn llvm_module_name_from_entry_path(path: text) -> text:
+    var mod_path = path
+    while mod_path.starts_with("../"):
+        mod_path = mod_path.substring(3)
+    if mod_path.starts_with("./"):
+        mod_path = mod_path.substring(2)
+    if mod_path.starts_with("src/"):
+        mod_path = mod_path.substring(4)
+    mod_path = mod_path.replace(".spl", "")
+    mod_path = mod_path.replace(".sdn", "")
+    mod_path.replace("/", ".")
+
+fn llvm_module_is_native_entry(module_name: text) -> bool:
+    val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    if native_entry == "":
+        return true
+    module_name == llvm_module_name_from_entry_path(native_entry)
+
 # ============================================================================
 # MIR to LLVM IR Translation
 # ============================================================================
@@ -36,6 +54,7 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_module(module: MirModule) -> text:
         """Translate MIR module to LLVM IR."""
+        self.entry_main_symbol = llvm_module_is_native_entry(module.name)
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             llvm_bootstrap_string_globals_reset()
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
@@ -57,7 +76,7 @@ impl MirTextCodegen for MirToLlvm:
                 var bootstrap_return_i = 0
                 while bootstrap_return_i < bootstrap_function_count:
                     val name = bootstrap_mir_function_name_at(bootstrap_return_i)
-                    val fn_name = if name == "main": "__simple_main" else: name
+                    val fn_name = self.llvm_function_symbol_name(name)
                     val bootstrap_fn = bootstrap_mir_function_at(bootstrap_return_i)
                     val body = MirBody.from_function(bootstrap_fn)
                     val ret_ty = self.llvm_type_text(body.return_ty)
@@ -74,9 +93,9 @@ impl MirTextCodegen for MirToLlvm:
                 if real_bootstrap:
                     val bootstrap_fn = bootstrap_mir_function_at(bootstrap_fni)
                     val body = MirBody.from_function(bootstrap_fn)
-                    self.translate_function(if name == "main": "__simple_main" else: name, body)
+                    self.translate_function(self.llvm_function_symbol_name(name), body)
                 else:
-                    val fn_name = if name == "main": "__simple_main" else: name
+                    val fn_name = self.llvm_function_symbol_name(name)
                     self.builder.emit("define i64 @{fn_name}() {")
                     self.builder.emit("entry:")
                     self.builder.emit("  ret i64 0")
@@ -86,7 +105,7 @@ impl MirTextCodegen for MirToLlvm:
         else:
             for fn_ in module.functions.values():
                 val body = MirBody.from_function(llvm_bootstrap_ssa_function(fn_))
-                val fn_name = if fn_.name == "main": "__simple_main" else: fn_.name
+                val fn_name = self.llvm_function_symbol_name(fn_.name)
                 val ret_ty = self.llvm_type_text(body.return_ty)
                 self.remember_function_return_type(fn_.name, ret_ty)
                 self.remember_function_return_type(fn_name, ret_ty)
@@ -94,7 +113,7 @@ impl MirTextCodegen for MirToLlvm:
                 self.remember_function_param_types_from_signature(fn_name, fn_.signature)
             for fn_ in module.functions.values():
                 val body = MirBody.from_function(llvm_bootstrap_ssa_function(fn_))
-                val fn_name = if fn_.name == "main": "__simple_main" else: fn_.name
+                val fn_name = self.llvm_function_symbol_name(fn_.name)
                 self.translate_function(fn_name, body)
 
         if self.unknown_func_decls.len() > 0:
@@ -222,8 +241,8 @@ impl MirTextCodegen for MirToLlvm:
         val is_readonly = not has_store and not has_call
         val is_small = inst_count < 10
 
-        # Rename 'main' to '__simple_main' for entry point linkage
-        val fn_name = if name == "main": "__simple_main" else: name
+        # Rename only the requested entry module's main to __simple_main.
+        val fn_name = self.llvm_function_symbol_name(name)
         self.defined_func_names[fn_name] = true
         self.remember_function_return_type(name, ret_ty)
         self.remember_function_return_type(fn_name, ret_ty)

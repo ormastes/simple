@@ -791,6 +791,16 @@ case wrappers: every imported module contributes duplicate
 RV64 emit-object path. Keep `target_logic` import-free until that backend issue
 is fixed.
 
+## Update - compiler source guards non-entry main symbols
+
+The MIR-to-LLVM translator now only maps `main` to `__simple_main` for the
+requested native-build entry module (`SIMPLE_NATIVE_BUILD_ENTRY`). Other modules
+that happen to define `main` get a module-scoped `__simple_main_<module>` symbol,
+removing the duplicate `__simple_main` root cause seen by imported RV64 firmware
+closures. Runtime proof against `NVME_RV64_BUILD_SECTION=target` still requires
+the self-hosted compiler/bootstrap lane to deploy this source change into
+`bin/simple`.
+
 ## Update — detached full build still stops without ELF
 
 After the RV64 target-core boot pass, a fresh foreground full build still exited
