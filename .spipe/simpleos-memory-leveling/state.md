@@ -58,3 +58,19 @@ Selected options: `A + 1 + 1B`.
   stripped mirror at `doc/06_spec/03_system/os/simpleos_memory_leveling_spec.md`.
 - 2026-07-08: `bin/simple check src/os/kernel/memory/memory_leveling.spl`
   passed. `simple check` is not used for SSpec block DSL files in this lane.
+- 2026-07-08: New continuation requested language + OS implementation. Scope:
+  add pure `std.memory_leveling` language intent API and OS adapter without
+  touching currently dirty compiler files or adding new syntax.
+- 2026-07-08: Added `src/lib/nogc_sync_mut/memory_leveling.spl` with
+  platform-neutral Simple memory intent helpers, plus
+  `memory_page_from_simple_intent` in the SimpleOS policy adapter.
+- 2026-07-08: Focused SSpec passed after language API coverage:
+  `bin/simple test test/03_system/os/simpleos_memory_leveling_spec.spl --mode=interpreter`
+  reported 12 examples, 0 failures.
+- 2026-07-08: `bin/simple check src/os/kernel/memory/memory_leveling.spl
+  src/lib/nogc_sync_mut/memory_leveling.spl` passed.
+- 2026-07-08: Regenerated SPipe manual with `bin/simple spipe-docgen ...`;
+  generator reported 1 complete doc and 0 stubs. `find doc/06_spec -name
+  '*_spec.spl' | wc -l` reported 0.
+- 2026-07-08: `sh scripts/audit/direct-env-runtime-guard.shs --working`
+  reported `STATUS: PASS direct-env-runtime-guard`.

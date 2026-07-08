@@ -41,7 +41,14 @@ policy boundary without changing callers.
 
 The policy must align with the existing Simple memory/capability model: movable
 ordinary pages are treated separately from pinned/registered/externally visible
-device pages. This selected slice does not add new language syntax.
+device pages.
+
+### REQ-006A: Simple Language Intent API
+
+Simple must expose a language-facing stdlib memory-leveling intent API that
+represents existing ownership (`shared`, `mut`, `iso`, `device_handle`) and
+placement (`cpu`, `gpu`, `nic`, `dma`, `unknown`) without adding new syntax.
+SimpleOS must be able to adapt that intent into its OS page policy model.
 
 ### REQ-007: No Hardware Completion Claim
 

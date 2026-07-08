@@ -43,3 +43,8 @@ not to swap or migration.
 
 The implementation must not add raw `rt_*` imports, GPU runtime handle pokes,
 or NIC/RDMA fixture bypasses.
+
+### NFR-006: Language API Stays Platform-Neutral
+
+The Simple language-facing memory intent API must be pure data logic and must
+not import SimpleOS internals, hardware drivers, or runtime probes.

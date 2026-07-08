@@ -5,13 +5,18 @@ Status: selected design for `A + 1 + 1B`.
 
 ## Implementation Path
 
-Add `src/os/kernel/memory/memory_leveling.spl`.
+Current OS policy module: `src/os/kernel/memory/memory_leveling.spl`.
+
+Add language-facing facade: `src/lib/nogc_sync_mut/memory_leveling.spl`.
 
 The selected implementation is the policy layer only. It is deliberately below
 language syntax and above hardware drivers:
 
 ```text
 Simple capability model / SimpleQ queues
+        |
+        v
+std.memory_leveling intent API
         |
         v
 SimpleOS memory-leveling policy
@@ -26,6 +31,7 @@ VMM, swap, DMA, GPU, NIC/RDMA drivers
   tier, NIC tier, DMA pin enforcement, and shadow copies.
 - `MemoryLevelingPage`: page id, tier, hotness, and device-visible flags.
 - `MemoryLevelingDecision`: action plus reason text.
+- `SimpleMemoryIntent`: language-facing owner/placement/hotness intent.
 
 ## Profile Semantics
 
@@ -94,8 +100,8 @@ external ownership before ordinary hot/cold decisions.
 
 ## Simple Language Memory Model Mapping
 
-The selected slice does not add syntax. It maps existing capability intent to
-OS policy inputs:
+The selected slice does not add syntax. It adds a `std.memory_leveling` data
+API that maps existing capability intent to OS policy inputs:
 
 | Simple ownership | OS policy implication |
 |------------------|-----------------------|
@@ -106,6 +112,21 @@ OS policy inputs:
 
 Future language placement hints should compile to profile/page metadata, not
 to driver calls from user code.
+
+Public language helpers:
+
+- `simple_memory_shared_cpu_hot()`
+- `simple_memory_mut_cpu_cold()`
+- `simple_memory_iso_cpu_cold()`
+- `simple_memory_device_gpu()`
+- `simple_memory_network_registered()`
+- `simple_memory_dma_pinned()`
+- `simple_memory_intent_summary(intent)`
+- `simple_memory_intent_movable(intent)`
+
+OS adapter:
+
+- `memory_page_from_simple_intent(page_id, intent)`
 
 ## SimpleQ / Queue Workload Mapping
 
@@ -131,6 +152,7 @@ contract instead of adding a second queue-specific pager.
 - `memory_page_dma_pinned(page_id)`
 - `memory_page_nic_registered(page_id)`
 - `memory_page_gpu_resident(page_id)`
+- `memory_page_from_simple_intent(page_id, intent)`
 - `memory_leveling_decide(profile, page)`
 
 ## Algorithm
@@ -168,6 +190,7 @@ QEMU evidence agree without parsing complex objects.
 - NIC/RDMA registry: supplies `nic_registered` and deregistration proof.
 - GPU memory manager: supplies `gpu_resident` plus future coherence proof.
 - SimpleQ queues: tag queue buffers through the same page-state fields.
+- Language facade: produces `SimpleMemoryIntent`; never imports OS modules.
 
 ## Error Handling
 

@@ -1,7 +1,17 @@
 # @tag: system, os, memory, leveling
 # @cover src/os/kernel/memory/memory_leveling.spl 90%
+# @cover src/lib/nogc_sync_mut/memory_leveling.spl 80%
 
 use std.spec.{describe, context, it, expect}
+use std.memory_leveling.{
+    simple_memory_shared_cpu_hot,
+    simple_memory_iso_cpu_cold,
+    simple_memory_device_gpu,
+    simple_memory_network_registered,
+    simple_memory_dma_pinned,
+    simple_memory_intent_movable,
+    simple_memory_intent_summary
+}
 use os.kernel.memory.memory_leveling.{
     MEMORY_ACTION_KEEP,
     MEMORY_ACTION_DEMOTE_COLD,
@@ -16,6 +26,7 @@ use os.kernel.memory.memory_leveling.{
     memory_page_nic_registered,
     memory_page_gpu_resident,
     memory_page_unknown,
+    memory_page_from_simple_intent,
     memory_leveling_decide,
     profile_summary_line,
     movement_decision_line
@@ -87,3 +98,27 @@ describe "SimpleOS memory leveling policy":
             val line = movement_decision_line(memory_profile_heterogeneous_device(), memory_page_unknown(40))
             expect(line).to_contain("action=reject")
             expect(line).to_contain("reason=external-visible-unknown-owner")
+
+    context "REQ-006A Simple language intent API":
+
+        it "keeps shared hot CPU intent movable and in CPU memory":
+            val intent = simple_memory_shared_cpu_hot()
+            val page = memory_page_from_simple_intent(50, intent)
+            val decision = memory_leveling_decide(memory_profile_simpleos_default(), page)
+            expect(simple_memory_intent_movable(intent)).to_equal(true)
+            expect(simple_memory_intent_summary(intent)).to_contain("owner=shared")
+            expect(decision.action).to_equal(MEMORY_ACTION_KEEP)
+
+        it "demotes isolated cold CPU intent through the OS policy":
+            val page = memory_page_from_simple_intent(51, simple_memory_iso_cpu_cold())
+            val decision = memory_leveling_decide(memory_profile_simpleos_default(), page)
+            expect(decision.action).to_equal(MEMORY_ACTION_DEMOTE_COLD)
+            expect(decision.reason).to_equal("cold-cpu-page-to-swap")
+
+        it "maps language GPU NIC and DMA intents to fail-closed OS pages":
+            val gpu_decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_from_simple_intent(52, simple_memory_device_gpu()))
+            val nic_decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_from_simple_intent(53, simple_memory_network_registered()))
+            val dma_decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_from_simple_intent(54, simple_memory_dma_pinned()))
+            expect(gpu_decision.reason).to_equal("gpu-resident-needs-coherence")
+            expect(nic_decision.reason).to_equal("nic-registered-not-swappable")
+            expect(dma_decision.reason).to_equal("dma-pinned-not-swappable")

@@ -12,12 +12,18 @@ their real hardware work.
 
 ## Layers
 
-- Simple language model: existing `T`, `mut T`, `iso T`, and device-visible
-  ownership rules describe whether memory can be moved or shared.
+- Simple language model: `std.memory_leveling` represents existing `T`,
+  `mut T`, `iso T`, and device-handle ownership as pure placement intent.
 - SimpleOS memory policy: selected slice added here; decides `keep`,
   `swap_out`, `promote_cpu`, `demote_cold`, `pin_device`, or `reject`.
 - VMM/swap/device drivers: future integration layer; this slice does not move
   real pages.
+
+## Language/OS Boundary
+
+`src/lib/nogc_sync_mut/memory_leveling.spl` is platform-neutral. It exports
+intent records and helpers only. `src/os/kernel/memory/memory_leveling.spl`
+owns the adapter from language intent to OS page state.
 
 ## Profiles
 

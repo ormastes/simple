@@ -3,6 +3,16 @@
 # This is pure policy logic. VMM, swap, GPU, NIC, and DMA drivers own real page
 # movement. The model gives those owners one small fail-closed contract to call.
 
+use std.memory_leveling.{
+    SimpleMemoryIntent,
+    SIMPLE_MEMORY_PLACEMENT_CPU,
+    SIMPLE_MEMORY_PLACEMENT_GPU,
+    SIMPLE_MEMORY_PLACEMENT_NIC,
+    SIMPLE_MEMORY_PLACEMENT_DMA,
+    SIMPLE_MEMORY_PLACEMENT_UNKNOWN,
+    SIMPLE_MEMORY_HOTNESS_COLD
+}
+
 const MEMORY_PROFILE_BAREMETAL_STATIC = "baremetal_static"
 const MEMORY_PROFILE_SIMPLEOS_DEFAULT = "simpleos_default"
 const MEMORY_PROFILE_HETEROGENEOUS_DEVICE = "heterogeneous_device"
@@ -156,6 +166,21 @@ fn memory_page_unknown(page_id: u64) -> MemoryLevelingPage:
         shadowed: false,
         external_visible: true
     )
+
+fn memory_page_from_simple_intent(page_id: u64, intent: SimpleMemoryIntent) -> MemoryLevelingPage:
+    if intent.placement == SIMPLE_MEMORY_PLACEMENT_DMA:
+        return memory_page_dma_pinned(page_id)
+    if intent.placement == SIMPLE_MEMORY_PLACEMENT_NIC:
+        return memory_page_nic_registered(page_id)
+    if intent.placement == SIMPLE_MEMORY_PLACEMENT_GPU:
+        return memory_page_gpu_resident(page_id)
+    if intent.placement == SIMPLE_MEMORY_PLACEMENT_CPU and not intent.externally_visible:
+        if intent.hotness == SIMPLE_MEMORY_HOTNESS_COLD:
+            return memory_page_cpu_cold(page_id)
+        return memory_page_cpu_hot(page_id)
+    if intent.placement == SIMPLE_MEMORY_PLACEMENT_UNKNOWN:
+        return memory_page_unknown(page_id)
+    memory_page_unknown(page_id)
 
 fn _decision(action: text, reason: text) -> MemoryLevelingDecision:
     MemoryLevelingDecision(action: action, reason: reason)

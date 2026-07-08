@@ -28,7 +28,7 @@ simpleos_memory_leveling_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -94,7 +94,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val decision = memory_leveling_decide(memory_profile_baremetal_static(), memory_page_cpu_cold(10u64))
+val decision = memory_leveling_decide(memory_profile_baremetal_static(), memory_page_cpu_cold(10))
 expect(decision.action).to_equal(MEMORY_ACTION_KEEP)
 expect(decision.reason).to_equal("baremetal-static-no-migration")
 ```
@@ -112,7 +112,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_dma_pinned(20u64))
+val decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_dma_pinned(20))
 expect(decision.action).to_equal(MEMORY_ACTION_REJECT)
 expect(decision.reason).to_equal("dma-pinned-not-swappable")
 ```
@@ -128,7 +128,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_nic_registered(21u64))
+val decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_nic_registered(21))
 expect(decision.action).to_equal(MEMORY_ACTION_REJECT)
 expect(decision.reason).to_equal("nic-registered-not-swappable")
 ```
@@ -144,7 +144,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_gpu_resident(22u64))
+val decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_gpu_resident(22))
 expect(decision.action).to_equal(MEMORY_ACTION_REJECT)
 expect(decision.reason).to_equal("gpu-resident-needs-coherence")
 ```
@@ -162,7 +162,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val decision = memory_leveling_decide(memory_profile_simpleos_default(), memory_page_cpu_cold(30u64))
+val decision = memory_leveling_decide(memory_profile_simpleos_default(), memory_page_cpu_cold(30))
 expect(decision.action).to_equal(MEMORY_ACTION_DEMOTE_COLD)
 expect(decision.reason).to_equal("cold-cpu-page-to-swap")
 ```
@@ -178,7 +178,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val decision = memory_leveling_decide(memory_profile_simpleos_default(), memory_page_cpu_hot(31u64))
+val decision = memory_leveling_decide(memory_profile_simpleos_default(), memory_page_cpu_hot(31))
 expect(decision.action).to_equal(MEMORY_ACTION_KEEP)
 expect(decision.reason).to_equal("cpu-page-kept")
 ```
@@ -196,9 +196,66 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val line = movement_decision_line(memory_profile_heterogeneous_device(), memory_page_unknown(40u64))
+val line = movement_decision_line(memory_profile_heterogeneous_device(), memory_page_unknown(40))
 expect(line).to_contain("action=reject")
 expect(line).to_contain("reason=external-visible-unknown-owner")
+```
+
+</details>
+
+#### REQ-006A Simple language intent API
+
+#### keeps shared hot CPU intent movable and in CPU memory
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val intent = simple_memory_shared_cpu_hot()
+val page = memory_page_from_simple_intent(50, intent)
+val decision = memory_leveling_decide(memory_profile_simpleos_default(), page)
+expect(simple_memory_intent_movable(intent)).to_equal(true)
+expect(simple_memory_intent_summary(intent)).to_contain("owner=shared")
+expect(decision.action).to_equal(MEMORY_ACTION_KEEP)
+```
+
+</details>
+
+#### demotes isolated cold CPU intent through the OS policy
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val page = memory_page_from_simple_intent(51, simple_memory_iso_cpu_cold())
+val decision = memory_leveling_decide(memory_profile_simpleos_default(), page)
+expect(decision.action).to_equal(MEMORY_ACTION_DEMOTE_COLD)
+expect(decision.reason).to_equal("cold-cpu-page-to-swap")
+```
+
+</details>
+
+#### maps language GPU NIC and DMA intents to fail-closed OS pages
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val gpu_decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_from_simple_intent(52, simple_memory_device_gpu()))
+val nic_decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_from_simple_intent(53, simple_memory_network_registered()))
+val dma_decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_from_simple_intent(54, simple_memory_dma_pinned()))
+expect(gpu_decision.reason).to_equal("gpu-resident-needs-coherence")
+expect(nic_decision.reason).to_equal("nic-registered-not-swappable")
+expect(dma_decision.reason).to_equal("dma-pinned-not-swappable")
 ```
 
 </details>
@@ -222,8 +279,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
