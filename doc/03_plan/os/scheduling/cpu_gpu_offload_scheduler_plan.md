@@ -9,35 +9,33 @@
   integration, pure-logic anchor `test/01_unit/os/kernel/scheduler/gpu_offload_sched_class_spec.spl`
   (16/0 — rank ordering, placement/backpressure fork, profile-gate + pin lifecycle, sealed-buffer
   protocol).
+- **Gap #1 — SOSIX seal-before-share command buffer** (`693dfd5b`): `SealedDrawIrPayload`
+  (build→write→seal→read; one-way seal; post-seal write rejected; djb2 content hash) +
+  `engine2d_sosix_gpu_lane_enabled()` flag reader in
+  `src/lib/gc_async_mut/gpu/engine2d/host_gpu_draw_ir_event_flow.spl`; spec
+  `sealed_draw_ir_payload_spec.spl` 7/0. Additive — existing consumers unchanged.
+- **Gap #2 — SOSIX GPU lane routing (migrate existing GPU offload)** (2026-07-08): flag-gated
+  `engine2d_host_gpu_sosix_lane_route(...)` seals the draw-IR payload and routes it through the
+  EXISTING runtime GPU queue (emit via `engine2d_host_gpu_event_submit_to_runtime_payload_text` →
+  `engine2d_host_gpu_runtime_drain`, COMPLETED=3) to a real receipt; ineligible/host-mutating ops
+  fall back to the CPU mirror. Spec `sosix_gpu_lane_route_spec.spl` 3/0 proves seal→route→drained→
+  COMPLETED with the payload bytes recovered byte-intact and content-identity re-derived from the
+  recovered bytes. No new queue, no backend_metal op-body change. Found + filed a runtime gap along
+  the way: `host_gpu_runtime_emit_payload_text_drops_hash_2026-07-08` (text-emit variant does not
+  persist the emitted i64 hash; bytes survive → worked around by re-hashing the recovered bytes).
 
-## Ready to execute — HOST-IMPL-NOW first slice (fully specced, deferred to a fresh session)
+### FUNCTIONAL PROOF done; REGRESSION GUARD (pixel-safety) still to run
+The functional half of the HOST-IMPL slice (does the sealed buffer traverse the queue to
+COMPLETED?) is LANDED and green. The remaining item is the belt-and-suspenders **pixel-safety**
+run: `check-engine2d-gpu-offload-evidence.shs` (every row MATCH + `source=device_readback`) +
+`check-engine2d-cpu-metal-parity-evidence.shs`, ideally with `SIMPLE_SOSIX_GPU_LANE` ON and OFF.
+Per the gap map, those gates do NOT import the queue path, so they cannot regress from this
+additive change (they prove pixels, not the queue) — run when disk headroom allows (~10 min Metal).
 
-**Why deferred:** it touches the bit-exact 2D Metal path and MUST run both `device_readback` gates
-with `SIMPLE_SOSIX_GPU_LANE` ON *and* OFF (~10 min of Metal runs) to prove zero pixel change. That
-verification needs stable disk + budget; do not ship it unverified.
-
-**The slice (gap map §4; recon confirmed):**
-- **File:** `src/lib/gc_async_mut/gpu/engine2d/host_gpu_draw_ir_event_flow.spl` ONLY (2D lane; leave
-  the `nogc_async_mut` twin — it's the browser lane's live import). Currently the evidence-only
-  adapter (builds `Engine2dHostGpuDrawIrEventFlowEvidence`, never touches the real FIFO).
-- **Flag:** `(env_get("SIMPLE_SOSIX_GPU_LANE") ?? "") == "1"` (default OFF; idiom matches
-  `backend_metal.spl:194`).
-- **Change when ON:** (a) seal the draw-IR `payload_text` (a seal-marker wrapper: sealed flag +
-  payload + hash; one-way seal; post-seal mutation rejected — mirrors `shared_dataset.spl:98,126-133`);
-  (b) route the sealed payload through the EXISTING exported primitives
-  `engine2d_host_gpu_event_submit_to_runtime_payload_text` (`host_gpu_event_queue.spl:309`) →
-  `engine2d_host_gpu_runtime_submit_pending` (`:348`) → `engine2d_host_gpu_runtime_drain` (`:376`);
-  (c) treat the drain receipt `ENGINE2D_HOST_GPU_RUNTIME_STATUS_COMPLETED` (=3, `:27`) as the
-  completion signal. NO new queue, NO backend_metal op-body change — same bytes ⇒ byte-identical
-  Metal dispatch + CPU mirror.
-- **Verification (two distinct gate roles — do not conflate):**
-  - REGRESSION GUARD (pixels unchanged, flag ON+OFF): `check-engine2d-gpu-offload-evidence.shs`
-    (every row MATCH + `source=device_readback`) + `check-engine2d-cpu-metal-parity-evidence.shs`.
-  - FUNCTIONAL PROOF (queue path ran): extend `draw_ir_runtime_queue_spec.spl` /
-    `host_gpu_event_queue_spec.spl` / `host_gpu_queue_roundtrip_spec.spl` to assert flag-ON
-    seal→submit→drain→COMPLETED (not UNAVAILABLE) + seal-rejects-post-seal-mutation.
-  - The readback gate does NOT traverse the queue path (its `use` block never imports it) — so it
-    proves pixel-safety, the queue specs prove the queue ran. Keep the two claims separate.
+- **Correct sequence gotcha (recorded):** the runtime `drain` auto-progresses submit+complete in one
+  FFI step (mirrors `draw_ir_runtime_queue.spl:120-128`). Do NOT call `runtime_submit_pending` +
+  `runtime_complete_pending` before `runtime_drain` — that leaves the packet in a state the runtime
+  drain won't take (`drained=0`). Emit → drain directly.
 - **Known pre-existing (not this slice):** `host_gpu_queue_roundtrip_spec.spl` has 2/16 baseline
   failures — stale `Engine2dHostGpuDrawIrEventFlowEvidence.forward`/`.backward` field references
   (the live struct has `event/lane_result/decision/submit/receipt`). Fix or quarantine separately.
