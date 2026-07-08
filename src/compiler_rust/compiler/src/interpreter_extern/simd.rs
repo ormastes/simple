@@ -1458,6 +1458,24 @@ pub fn rt_engine2d_simd_fill_row_u32(args: &[Value]) -> Result<Value, CompileErr
     Ok(pack_u32_array(sffi_fill_row_u32(count, color)))
 }
 
+/// rt_engine2d_simd_fill_u32(dst: [u32], offset: i64, count: i64, color: u32) -> i64
+///
+/// Interpreter arrays are Arc-cloned into extern args, so direct mutation cannot
+/// propagate. Return 0 so Simple falls back to its scalar write loop; native
+/// builds use the C SFFI function with the same name and mutate in place.
+pub fn rt_engine2d_simd_fill_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_simd_fill_u32 expects 4 arguments (dst, offset, count, color)".to_string(),
+        ));
+    }
+    let _dst = unpack_u32_array("rt_engine2d_simd_fill_u32(dst)", &args[0])?;
+    let _offset = require_u64_value("rt_engine2d_simd_fill_u32(offset)", &args[1])?;
+    let _count = require_u64_value("rt_engine2d_simd_fill_u32(count)", &args[2])?;
+    let _color = require_u32_value("rt_engine2d_simd_fill_u32(color)", &args[3])?;
+    Ok(Value::Int(0))
+}
+
 /// rt_engine2d_simd_copy_row_u32(src: [u32]) -> [u32]
 pub fn rt_engine2d_simd_copy_row_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
@@ -2057,4 +2075,28 @@ pub fn rt_rank_select_free(args: &[Value]) -> Result<Value, CompileError> {
     let handle = expect_index_i64("rt_rank_select_free", &args[0])?;
     remove_width_index(handle);
     Ok(Value::Nil)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine2d_direct_fill_interpreter_shim_falls_back() {
+        let dst = Value::array(vec![
+            Value::UInt { value: 0, width: 32 },
+            Value::UInt { value: 0, width: 32 },
+        ]);
+        let result = rt_engine2d_simd_fill_u32(&[
+            dst,
+            Value::Int(0),
+            Value::Int(2),
+            Value::UInt {
+                value: 0xFF00FF00,
+                width: 32,
+            },
+        ])
+        .unwrap();
+        assert_eq!(result, Value::Int(0));
+    }
 }
