@@ -273,6 +273,21 @@ vulkan_engine2d_readback_rect_actual_checksum=1
 vulkan_engine2d_readback_rect_mismatches=0
 EOF
 SH
+    cat >"$self_dir/vulkan_pass_bad_mismatch.shs" <<'SH'
+#!/bin/sh
+set -eu
+mkdir -p "$BUILD_DIR"
+cat >"$BUILD_DIR/evidence.env" <<'EOF'
+vulkan_engine2d_readback_status=pass
+vulkan_engine2d_readback_reason=fake-pass-with-mismatch
+vulkan_engine2d_readback_present_exercised=true
+vulkan_engine2d_readback_readback_exercised=true
+vulkan_engine2d_readback_backend_name=vulkan
+vulkan_engine2d_readback_rect_expected_checksum=1
+vulkan_engine2d_readback_rect_actual_checksum=1
+vulkan_engine2d_readback_rect_mismatches=1
+EOF
+SH
     cat >"$self_dir/metal_unavailable.shs" <<'SH'
 #!/bin/sh
 set -eu
@@ -355,6 +370,27 @@ SH
     if ! grep -q '^generated_2d_backend_matrix_cuda_checksum_proof=false$' "$self_dir/checksum_run/evidence.env"; then
         echo "self_test_status=fail"
         echo "self_test_reason=missing-cuda-checksum-proof-false"
+        exit 1
+    fi
+    set +e
+    BUILD_DIR="$self_dir/vulkan_mismatch_run" \
+        REPORT_PATH="$self_dir/vulkan_mismatch_report.md" \
+        CUDA_READBACK_SCRIPT="$self_dir/cuda_pass_with_proof.shs" \
+        OPENCL_READBACK_SCRIPT="$self_dir/opencl_pass_with_proof.shs" \
+        VULKAN_READBACK_SCRIPT="$self_dir/vulkan_pass_bad_mismatch.shs" \
+        METAL_READBACK_SCRIPT="$self_dir/metal_unavailable.shs" \
+        ROCM_READBACK_SCRIPT="$self_dir/rocm_unavailable.shs" \
+        sh "$0" >"$self_dir/vulkan_mismatch_stdout.log" 2>"$self_dir/vulkan_mismatch_stderr.log"
+    code=$?
+    set -e
+    if [ "$code" -eq 0 ]; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=vulkan-mismatch-pass-was-accepted"
+        exit 1
+    fi
+    if ! grep -q '^generated_2d_backend_matrix_vulkan_checksum_proof=false$' "$self_dir/vulkan_mismatch_run/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-vulkan-mismatch-proof-false"
         exit 1
     fi
     set +e
