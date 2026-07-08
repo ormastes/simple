@@ -764,6 +764,44 @@ Terminated
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
 
+## Update — band allocation core split, probe reaches reactor cases
+
+`logic_band_core.spl` was reduced by moving band allocation, host-open, writable
+page, and block-state helper bodies into `logic_band_alloc_core.spl`. Geometry
+case files now import the narrow geometry/allocation core files directly so
+geometry-only checks do not pull the broader band facade.
+
+The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but this run got through band geometry, band
+allocation, scheduler, power/thermal, HIL, queue phase, I/O command, flush, and
+admin cases before stopping at reactor cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_band_geometry_cases.spl
+[BOOTSTRAP-PHASE] ... logic_band_alloc_cases.spl
+[BOOTSTRAP-PHASE] ... logic_sched_cases.spl
+[BOOTSTRAP-PHASE] ... logic_power_thermal_cases.spl
+[BOOTSTRAP-PHASE] ... logic_hil_cases.spl
+[BOOTSTRAP-PHASE] ... logic_queue_phase_cases.spl
+[BOOTSTRAP-PHASE] ... logic_io_command_cases.spl
+[BOOTSTRAP-PHASE] ... logic_flush_cases.spl
+[BOOTSTRAP-PHASE] ... logic_admin_cases.spl
+[BOOTSTRAP-PHASE] ... logic_reactor_cases.spl chars=328
+Terminated
+```
+
+The current measured timeout is now around `logic_reactor_cases.spl`.
+
 ## Update — map flush cases split, probe reaches band geometry
 
 `logic_map_flush_cases.spl` was reduced to a small case facade, with flush L2P
