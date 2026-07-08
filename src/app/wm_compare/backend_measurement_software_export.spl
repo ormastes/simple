@@ -72,9 +72,33 @@ fn _is_supported_software_backend(backend: text) -> bool:
     backend == "software" or backend == "cpu" or backend == "cpu_simd"
 
 fn _render_software_pixels(html: text, width: i32, height: i32, backend: text) -> [u32]:
-    if _is_supported_software_backend(backend):
+    if backend == "software":
         return web_render_backend("pure_simple", width, height).render_html_software_pixels(html)
+    if backend == "cpu" or backend == "cpu_simd":
+        return web_render_backend("pure_simple", width, height).render_html_to_pixels(html, backend)
     []
+
+fn _backend_family(backend: text) -> text:
+    if backend == "cpu_simd":
+        return "cpu_simd"
+    "software"
+
+fn _runtime_compute_target(backend: text) -> text:
+    if backend == "cpu_simd":
+        return "cpu_simd"
+    "cpu_scalar"
+
+fn _runtime_execution_path(backend: text) -> text:
+    if backend == "cpu_simd":
+        return "simple_web_layout_engine2d_cpu_simd"
+    "simple_web_layout_software"
+
+fn _runtime_status(backend: text, supported: bool) -> text:
+    if not supported:
+        return "unsupported-backend"
+    if backend == "cpu_simd":
+        return "cpu-simd-render-loop-ready"
+    "cpu-scalar-baseline-ready"
 
 fn _checksum_u32_pixels(pixels: [u32]) -> i64:
     var checksum: i64 = 0
@@ -88,7 +112,7 @@ fn _nonzero_pixels(pixels: [u32]) -> i64:
     var count: i64 = 0
     var i = 0
     while i < pixels.len():
-        if pixels[i] != 0u32:
+        if (pixels[i] as i64) != 0:
             count = count + 1
         i = i + 1
     count
@@ -124,7 +148,7 @@ pub fn software_only_render_loop_export_sdn(args: [text]) -> text:
     backend_comparison_samples_sdn([
         BackendComparisonSample(
         fixture_id: fixture_id,
-        backend_family: "software",
+        backend_family: _backend_family(backend),
         shell: _arg_value(args, "--shell", "simple-web"),
         requested_backend: backend,
         selected_backend: if supported_backend: backend else: "software",
@@ -156,12 +180,12 @@ pub fn software_only_render_loop_export_sdn(args: [text]) -> text:
         generated_source_format: "none",
         generated_binary_format: "none",
         generated_artifact_path_suffix: "",
-        runtime_compute_target: "cpu_scalar",
-        runtime_execution_path: "simple_web_layout_software",
+        runtime_compute_target: _runtime_compute_target(backend),
+        runtime_execution_path: _runtime_execution_path(backend),
         runtime_launch_api: "RenderBackend",
         runtime_entry_symbol: "RenderBackend.draw_text_or_text_blit",
         runtime_artifact_name: "",
-        runtime_status: if supported_backend: "cpu-scalar-baseline-ready" else: "unsupported-backend",
+        runtime_status: _runtime_status(backend, supported_backend),
         checksum: "sum32:" + checksum_value.to_string(),
         pixel_proof: "nonzero_pixels:" + proof_count.to_string(),
         scalar_baseline_compared: true,

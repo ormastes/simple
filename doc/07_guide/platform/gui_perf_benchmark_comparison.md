@@ -84,6 +84,10 @@ bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
   --measure-cuda-device-buffer true --width 7680 --height 4320
 
 bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
+  --software-render-backend cpu_simd \
+  --width 7680 --height 4320 --warmup-count 1 --sample-count 60
+
+bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
   --software-render-backend software \
   --width 320 --height 240 --warmup-count 1 --sample-count 1
 ```
@@ -106,7 +110,9 @@ bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
 ### Software rasterizer
 - Engine2D Simple scalar is 31x slower than C scalar for fill at 1080p
 - Key optimization: the Simple-to-C compilation gap, not algorithmic
-- CPU SIMD (AVX2) backend exists but needs 8K throughput measurement
+- CPU SIMD (AVX2) backend exists. The benchmark harness now records
+  `simple_web_cpu_simd` separately from `simple_web_software`, but still needs
+  release-grade 8K throughput measurement before making a speed claim.
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
 - Software layout renders must not replay the already-painted framebuffer
   through an Engine2D software present/readback cycle. The 2026-06-06
@@ -127,7 +133,8 @@ bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
 
 1. **Compiled Simple 8K repeats**: CUDA and software backends now have measured
    smoke rows; repeat at 8K with multiple frames before making release claims.
-2. **CPU SIMD at 8K**: AVX2 backend exists but no 8K throughput evidence yet
+2. **CPU SIMD at 8K**: AVX2 backend has a dedicated `simple_web_cpu_simd`
+   benchmark row, but no 8K throughput evidence has been captured yet
 3. **Tauri integration**: Needs `cargo-tauri` CLI + WebKitGTK dev package
 4. **Software text/layout optimization**: the real software render-loop row is
    still far slower than JS/GTK at 320x240; move bitmap/vector font and text-blit

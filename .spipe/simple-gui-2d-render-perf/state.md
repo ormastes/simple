@@ -67,6 +67,10 @@ implementation-evidence-in-progress
   `blur_or_tolerance_used=false`. The wrapper now keeps `bin/simple` as the
   default invocation path because direct `release/.../simple` segfaults on this
   evidence despite the same ELF passing when invoked through the repo launcher.
+- implementation: Split the GUI perf harness so `simple_web_cpu_simd` runs
+  through the explicit `cpu_simd` render backend while `simple_web_software`
+  remains the scalar software row. This prevents the 4K/8K comparison from
+  silently measuring the same scalar path twice.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 
@@ -98,5 +102,6 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
 - AC-6 now has focused vector-font unavailable fallback evidence in the repeat script and tracked report; additional GPU/native unavailable combinations can extend the same probe pattern.
 - Native Simple executable size/speed evidence is intentionally skipped in the fast smoke run (`SKIP_SIMPLE_NATIVE=1`); a release-grade run should capture native artifact bytes or record an explicit native-build blocker.
 - Wire unwired probes into contract: warm_startup, frame_time_p50/p95, input_to_paint.
-- Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture baseline numbers.
+- Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture
+  separate `simple_web_cpu_simd` and `simple_web_software` baseline numbers.
 - Tauri integration: requires cargo-tauri CLI + WebKitGTK dev headers.
