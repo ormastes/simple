@@ -31,6 +31,11 @@ hardware claims. Vulkan, Metal, CUDA, and RDMA targets are recognized as real
 device memory classes but remain pinned/fail-closed until the owner driver
 supplies migration, coherence, or deregistration proof.
 
+Vulkan, Metal, and CUDA readback proof upgrades the decision from `reject` to
+`pin_device`: the allocation is proven device-readable, but still not movable.
+Only Vulkan and CUDA readback-backed pinning are exercised by this lane's
+executable spec; Metal shares the same policy path without runtime test evidence.
+
 ## Profiles
 
 - `baremetal_static`: no swap, no migration, no GPU/NIC tiers, DMA pin safety
@@ -45,6 +50,7 @@ supplies migration, coherence, or deregistration proof.
 - NIC-registered pages reject swap and demotion.
 - GPU-resident pages reject swap and demotion until a coherence proof exists.
 - Vulkan, Metal, CUDA, and RDMA hardware intents reject movement by default.
+- Vulkan, Metal, and CUDA readback-backed intents pin device memory.
 - Unknown/external states reject movement.
 - Bare-metal profile always keeps pages unless a device pin forces rejection.
 

@@ -28,7 +28,7 @@ simpleos_memory_leveling_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -368,6 +368,27 @@ expect(simple_memory_intent_real_hardware(simple_memory_device_gpu())).to_equal(
 
 </details>
 
+#### REQ-009 Vulkan and CUDA readback backed pinning
+
+#### pins real Vulkan and CUDA memory when readback proof exists
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val vulkan = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_vulkan_gpu_readback_real())
+val cuda = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_cuda_gpu_readback_real())
+expect(vulkan.action).to_equal(MEMORY_ACTION_PIN_DEVICE)
+expect(vulkan.reason).to_equal("vulkan-readback-backed-pinned")
+expect(cuda.action).to_equal(MEMORY_ACTION_PIN_DEVICE)
+expect(cuda.reason).to_equal("cuda-readback-backed-pinned")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -387,8 +408,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

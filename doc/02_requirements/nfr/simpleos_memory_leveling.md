@@ -55,3 +55,10 @@ Hardware-targeted decisions must reject model-only intents. x86, ARM, RISC-V,
 Vulkan, Metal, CUDA, and RDMA claims are valid only when the intent is marked
 with real hardware evidence; GPU/RDMA device memory still fails closed unless a
 future owner driver supplies migration/coherence evidence.
+
+### NFR-008: Readback Proof Is Pinning Evidence Only
+
+Vulkan, Metal, and CUDA readback proof must only permit `pin_device`. It must
+not permit swap, migration, demotion, or a GPUDirect/RDMA/CXL completion claim.
+This lane tests Vulkan and CUDA readback-backed pinning; Metal is implemented
+but intentionally not tested.

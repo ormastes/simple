@@ -127,8 +127,11 @@ Public language helpers:
 - `simple_memory_arm_cpu_real()`
 - `simple_memory_riscv_cpu_real()`
 - `simple_memory_vulkan_gpu_real()`
+- `simple_memory_vulkan_gpu_readback_real()`
 - `simple_memory_metal_gpu_real()`
+- `simple_memory_metal_gpu_readback_real()`
 - `simple_memory_cuda_gpu_real()`
+- `simple_memory_cuda_gpu_readback_real()`
 - `simple_memory_rdma_nic_real()`
 - `simple_memory_intent_real_hardware(intent)`
 - `simple_memory_intent_summary(intent)`
@@ -180,6 +183,8 @@ contract instead of adding a second queue-specific pager.
 6. Hardware-targeted intents must carry real evidence. x86/ARM/RISC-V CPU
    targets use ordinary CPU policy; Vulkan, Metal, CUDA, and RDMA targets stay
    pinned/fail-closed until their owner driver provides safe movement proof.
+7. Vulkan, Metal, and CUDA readback proof returns `pin_device`, not migration.
+   This lane tests Vulkan and CUDA only; Metal is intentionally untested.
 
 ## Decision Reasons
 
@@ -196,8 +201,11 @@ Decision reasons are stable evidence strings:
 - `real-hardware-evidence-required`
 - `unsupported-cpu-hardware-target`
 - `vulkan-gpu-memory-pinned`
+- `vulkan-readback-backed-pinned`
 - `metal-gpu-memory-pinned`
+- `metal-readback-backed-pinned`
 - `cuda-gpu-memory-pinned`
+- `cuda-readback-backed-pinned`
 - `rdma-registered-not-swappable`
 - `unsupported-hardware-backend`
 

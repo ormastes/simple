@@ -89,3 +89,6 @@ Selected options: `A + 1 + 1B`.
   Vulkan/Metal/CUDA/RDMA device memory remains pinned/fail-closed until driver
   migration/coherence proof exists. Focused SSpec reported 18 examples, 0
   failures; module check and docgen passed with 0 stubs.
+- 2026-07-08: Added readback-backed `pin_device` decisions for Vulkan, CUDA,
+  and Metal. Vulkan and CUDA are covered by executable SSpec; Metal follows the
+  same policy path but is intentionally not tested per user instruction.

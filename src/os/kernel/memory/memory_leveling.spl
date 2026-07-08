@@ -14,6 +14,9 @@ use std.memory_leveling.{
     SIMPLE_MEMORY_BACKEND_CUDA,
     SIMPLE_MEMORY_BACKEND_RDMA,
     SIMPLE_MEMORY_EVIDENCE_REAL,
+    SIMPLE_MEMORY_EVIDENCE_VULKAN_READBACK,
+    SIMPLE_MEMORY_EVIDENCE_METAL_READBACK,
+    SIMPLE_MEMORY_EVIDENCE_CUDA_READBACK,
     SIMPLE_MEMORY_PLACEMENT_CPU,
     SIMPLE_MEMORY_PLACEMENT_GPU,
     SIMPLE_MEMORY_PLACEMENT_NIC,
@@ -38,6 +41,7 @@ const MEMORY_HOTNESS_UNKNOWN = "unknown"
 
 const MEMORY_ACTION_KEEP = "keep"
 const MEMORY_ACTION_DEMOTE_COLD = "demote_cold"
+const MEMORY_ACTION_PIN_DEVICE = "pin_device"
 const MEMORY_ACTION_REJECT = "reject"
 
 struct MemoryLevelingProfile:
@@ -218,17 +222,23 @@ fn _supported_cpu_arch(intent: SimpleMemoryIntent) -> bool:
     intent.hardware_arch == SIMPLE_MEMORY_ARCH_X86 or intent.hardware_arch == SIMPLE_MEMORY_ARCH_ARM or intent.hardware_arch == SIMPLE_MEMORY_ARCH_RISCV
 
 fn memory_leveling_real_hardware_decide(profile: MemoryLevelingProfile, intent: SimpleMemoryIntent) -> MemoryLevelingDecision:
-    if intent.hardware_evidence != SIMPLE_MEMORY_EVIDENCE_REAL:
+    if intent.hardware_evidence != SIMPLE_MEMORY_EVIDENCE_REAL and intent.hardware_evidence != SIMPLE_MEMORY_EVIDENCE_VULKAN_READBACK and intent.hardware_evidence != SIMPLE_MEMORY_EVIDENCE_METAL_READBACK and intent.hardware_evidence != SIMPLE_MEMORY_EVIDENCE_CUDA_READBACK:
         return _decision(MEMORY_ACTION_REJECT, "real-hardware-evidence-required")
     if intent.hardware_backend == SIMPLE_MEMORY_BACKEND_CPU:
         if _supported_cpu_arch(intent) and intent.placement == SIMPLE_MEMORY_PLACEMENT_CPU:
             return memory_leveling_decide(profile, memory_page_from_simple_intent(0, intent))
         return _decision(MEMORY_ACTION_REJECT, "unsupported-cpu-hardware-target")
     if intent.hardware_backend == SIMPLE_MEMORY_BACKEND_VULKAN:
+        if intent.hardware_evidence == SIMPLE_MEMORY_EVIDENCE_VULKAN_READBACK:
+            return _decision(MEMORY_ACTION_PIN_DEVICE, "vulkan-readback-backed-pinned")
         return _decision(MEMORY_ACTION_REJECT, "vulkan-gpu-memory-pinned")
     if intent.hardware_backend == SIMPLE_MEMORY_BACKEND_METAL:
+        if intent.hardware_evidence == SIMPLE_MEMORY_EVIDENCE_METAL_READBACK:
+            return _decision(MEMORY_ACTION_PIN_DEVICE, "metal-readback-backed-pinned")
         return _decision(MEMORY_ACTION_REJECT, "metal-gpu-memory-pinned")
     if intent.hardware_backend == SIMPLE_MEMORY_BACKEND_CUDA:
+        if intent.hardware_evidence == SIMPLE_MEMORY_EVIDENCE_CUDA_READBACK:
+            return _decision(MEMORY_ACTION_PIN_DEVICE, "cuda-readback-backed-pinned")
         return _decision(MEMORY_ACTION_REJECT, "cuda-gpu-memory-pinned")
     if intent.hardware_backend == SIMPLE_MEMORY_BACKEND_RDMA:
         return _decision(MEMORY_ACTION_REJECT, "rdma-registered-not-swappable")

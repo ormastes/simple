@@ -63,3 +63,10 @@ evidence for x86, ARM, RISC-V, Vulkan, Metal, CUDA, and RDMA targets. Real
 x86/ARM/RISC-V CPU targets may use the CPU page policy. Real Vulkan, Metal,
 CUDA, and RDMA targets must remain pinned/fail-closed until the owning driver
 supplies a safe migration or deregistration proof.
+
+### REQ-009: Vulkan/CUDA Readback-Backed Pinning
+
+Real Vulkan and CUDA intents with readback proof may return `pin_device`
+instead of `reject`, because the device allocation is known and readable while
+still not safe to swap or migrate. Metal must expose the same readback-proof
+intent shape, but Metal runtime testing is not required for this lane.

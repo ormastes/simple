@@ -34,6 +34,10 @@ Real hardware target gate:
 - `simple_memory_vulkan_gpu_real()`, `simple_memory_metal_gpu_real()`,
   `simple_memory_cuda_gpu_real()`, and `simple_memory_rdma_nic_real()` are
   recognized as real device-memory targets, but remain pinned/fail-closed.
+- `simple_memory_vulkan_gpu_readback_real()` and
+  `simple_memory_cuda_gpu_readback_real()` return `pin_device` when readback
+  proof exists. `simple_memory_metal_gpu_readback_real()` is implemented but not
+  tested in this lane.
 - `memory_leveling_real_hardware_decide(profile, intent)` rejects model-only
   hardware claims with `real-hardware-evidence-required`.
 
