@@ -4,9 +4,12 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+. "$ROOT_DIR/scripts/deps/generated-2d-readback-lib.shs"
+
 BUILD_DIR="${BUILD_DIR:-build/generated_2d_backend_readback_matrix}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/generated_2d_backend_readback_matrix_$(date -u +%F).md}"
 HOST_OS="${GENERATED_2D_HOST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 if [ "${GENERATED_2D_REQUIRED_BACKENDS+x}" = x ]; then
     REQUIRED_BACKENDS="$GENERATED_2D_REQUIRED_BACKENDS"
 elif [ "$HOST_OS" = "Darwin" ]; then
@@ -21,6 +24,7 @@ CUDA_PTX_PATH="${CUDA_PTX_PATH:-$PORTABLE_TOOLCHAIN_BUILD_DIR/simple_2d_optimiza
 OPENCL_SPIRV_PATH="${OPENCL_SPIRV_PATH:-$PORTABLE_TOOLCHAIN_BUILD_DIR/simple_2d_optimization.spirv}"
 METAL_METALLIB_PATH="${METAL_METALLIB_PATH:-$PORTABLE_TOOLCHAIN_BUILD_DIR/simple_2d_optimization.metallib}"
 ROCM_HSACO_PATH="${ROCM_HSACO_PATH:-$PORTABLE_TOOLCHAIN_BUILD_DIR/simple_2d_optimization.hsaco}"
+PORTABLE_TOOLCHAIN_SCRIPT="${PORTABLE_TOOLCHAIN_SCRIPT:-scripts/check/check-portable-compute-toolchains.shs}"
 CUDA_READBACK_SCRIPT="${CUDA_READBACK_SCRIPT:-scripts/check/check-cuda-generated-2d-readback.shs}"
 OPENCL_READBACK_SCRIPT="${OPENCL_READBACK_SCRIPT:-scripts/check/check-opencl-generated-2d-readback.shs}"
 VULKAN_READBACK_SCRIPT="${VULKAN_READBACK_SCRIPT:-scripts/check/check-vulkan-engine2d-readback.shs}"
@@ -118,6 +122,28 @@ append_env() {
     key="$1"
     value="$2"
     printf '%s=%s\n' "$key" "$value" >>"$ENV_PATH"
+}
+
+prepare_required_toolchains() {
+    need=false
+    if is_required_backend cuda && ! generated_2d_module_verified "$CUDA_PTX_PATH"; then
+        need=true
+    fi
+    if is_required_backend metal && ! generated_2d_module_verified "$METAL_METALLIB_PATH"; then
+        need=true
+    fi
+    if is_required_backend rocm && ! generated_2d_module_verified "$ROCM_HSACO_PATH"; then
+        need=true
+    fi
+    if [ "$need" != "true" ]; then
+        return 0
+    fi
+    if [ ! -f "$PORTABLE_TOOLCHAIN_SCRIPT" ]; then
+        return 0
+    fi
+    BUILD_DIR="$PORTABLE_TOOLCHAIN_BUILD_DIR" \
+        SIMPLE_BIN="$SIMPLE_BIN" \
+        sh "$PORTABLE_TOOLCHAIN_SCRIPT" >/dev/null 2>&1 || true
 }
 
 default_required_path() {
@@ -224,7 +250,7 @@ run_backend() {
     fi
 
     backend_name_proof=true
-    if [ "$backend" = "vulkan" ] && [ "${backend_name:-}" != "vulkan" ]; then
+    if [ "${backend_name:-}" != "$backend" ]; then
         backend_name_proof=false
     fi
 
@@ -295,6 +321,7 @@ mkdir -p "$BUILD_DIR"
 cat >"$BUILD_DIR/evidence.env" <<'EOF'
 opencl_generated_2d_readback_status=pass
 opencl_generated_2d_readback_reason=fake-pass-with-proof
+opencl_generated_2d_readback_backend_name=opencl
 opencl_generated_2d_readback_submit_attempted=true
 opencl_generated_2d_readback_readback_available=true
 opencl_generated_2d_readback_expected_checksum=4
@@ -322,6 +349,7 @@ mkdir -p "$BUILD_DIR"
 cat >"$BUILD_DIR/evidence.env" <<'EOF'
 cuda_generated_2d_readback_status=pass
 cuda_generated_2d_readback_reason=fake-pass-with-proof
+cuda_generated_2d_readback_backend_name=cuda
 cuda_generated_2d_readback_submit_attempted=true
 cuda_generated_2d_readback_readback_available=true
 cuda_generated_2d_readback_expected_checksum=4
@@ -349,6 +377,7 @@ mkdir -p "$BUILD_DIR"
 cat >"$BUILD_DIR/evidence.env" <<'EOF'
 cuda_generated_2d_readback_status=pass
 cuda_generated_2d_readback_reason=fake-pass-with-failing-process
+cuda_generated_2d_readback_backend_name=cuda
 cuda_generated_2d_readback_submit_attempted=true
 cuda_generated_2d_readback_readback_available=true
 cuda_generated_2d_readback_expected_checksum=4
@@ -370,6 +399,75 @@ cuda_generated_2d_readback_ops=fill,copy,alpha,scroll
 EOF
 exit 1
 SH
+    cat >"$self_dir/cuda_pass_wrong_backend.shs" <<'SH'
+#!/bin/sh
+set -eu
+mkdir -p "$BUILD_DIR"
+cat >"$BUILD_DIR/evidence.env" <<'EOF'
+cuda_generated_2d_readback_status=pass
+cuda_generated_2d_readback_reason=fake-pass-with-cpu-backend
+cuda_generated_2d_readback_backend_name=cpu
+cuda_generated_2d_readback_submit_attempted=true
+cuda_generated_2d_readback_readback_available=true
+cuda_generated_2d_readback_expected_checksum=4
+cuda_generated_2d_readback_actual_checksum=4
+cuda_generated_2d_readback_mismatch_count=0
+cuda_generated_2d_readback_fill_expected_checksum=1
+cuda_generated_2d_readback_fill_actual_checksum=1
+cuda_generated_2d_readback_fill_mismatch_count=0
+cuda_generated_2d_readback_copy_expected_checksum=1
+cuda_generated_2d_readback_copy_actual_checksum=1
+cuda_generated_2d_readback_copy_mismatch_count=0
+cuda_generated_2d_readback_alpha_expected_checksum=1
+cuda_generated_2d_readback_alpha_actual_checksum=1
+cuda_generated_2d_readback_alpha_mismatch_count=0
+cuda_generated_2d_readback_scroll_expected_checksum=1
+cuda_generated_2d_readback_scroll_actual_checksum=1
+cuda_generated_2d_readback_scroll_mismatch_count=0
+cuda_generated_2d_readback_ops=fill,copy,alpha,scroll
+EOF
+SH
+    cat >"$self_dir/create_cuda_toolchain.shs" <<'SH'
+#!/bin/sh
+set -eu
+mkdir -p "$BUILD_DIR"
+cat >"$BUILD_DIR/simple_2d_optimization.ptx" <<'EOF'
+.version 7.0
+.visible .entry simple_2d_fill_u32() {}
+.visible .entry simple_2d_copy_u32() {}
+.visible .entry simple_2d_alpha_u32() {}
+.visible .entry simple_2d_scroll_u32() {}
+EOF
+SH
+    cat >"$self_dir/cuda_requires_ptx.shs" <<'SH'
+#!/bin/sh
+set -eu
+test -s "$PTX_PATH"
+mkdir -p "$BUILD_DIR"
+cat >"$BUILD_DIR/evidence.env" <<'EOF'
+cuda_generated_2d_readback_status=pass
+cuda_generated_2d_readback_reason=fake-pass-with-auto-toolchain
+cuda_generated_2d_readback_backend_name=cuda
+cuda_generated_2d_readback_submit_attempted=true
+cuda_generated_2d_readback_readback_available=true
+cuda_generated_2d_readback_expected_checksum=4
+cuda_generated_2d_readback_actual_checksum=4
+cuda_generated_2d_readback_mismatch_count=0
+cuda_generated_2d_readback_fill_expected_checksum=1
+cuda_generated_2d_readback_fill_actual_checksum=1
+cuda_generated_2d_readback_fill_mismatch_count=0
+cuda_generated_2d_readback_copy_expected_checksum=1
+cuda_generated_2d_readback_copy_actual_checksum=1
+cuda_generated_2d_readback_copy_mismatch_count=0
+cuda_generated_2d_readback_alpha_expected_checksum=1
+cuda_generated_2d_readback_alpha_actual_checksum=1
+cuda_generated_2d_readback_alpha_mismatch_count=0
+cuda_generated_2d_readback_scroll_expected_checksum=1
+cuda_generated_2d_readback_scroll_actual_checksum=1
+cuda_generated_2d_readback_scroll_mismatch_count=0
+cuda_generated_2d_readback_ops=fill,copy,alpha,scroll
+EOF
+SH
     cat >"$self_dir/cuda_pass_bad_per_op.shs" <<'SH'
 #!/bin/sh
 set -eu
@@ -377,6 +475,7 @@ mkdir -p "$BUILD_DIR"
 cat >"$BUILD_DIR/evidence.env" <<'EOF'
 cuda_generated_2d_readback_status=pass
 cuda_generated_2d_readback_reason=fake-pass-with-bad-per-op
+cuda_generated_2d_readback_backend_name=cuda
 cuda_generated_2d_readback_submit_attempted=true
 cuda_generated_2d_readback_readback_available=true
 cuda_generated_2d_readback_expected_checksum=4
@@ -404,6 +503,7 @@ mkdir -p "$BUILD_DIR"
 cat >"$BUILD_DIR/evidence.env" <<'EOF'
 cuda_generated_2d_readback_status=pass
 cuda_generated_2d_readback_reason=fake-pass-without-ops
+cuda_generated_2d_readback_backend_name=cuda
 cuda_generated_2d_readback_submit_attempted=true
 cuda_generated_2d_readback_readback_available=true
 cuda_generated_2d_readback_expected_checksum=1
@@ -418,6 +518,7 @@ mkdir -p "$BUILD_DIR"
 cat >"$BUILD_DIR/evidence.env" <<'EOF'
 cuda_generated_2d_readback_status=pass
 cuda_generated_2d_readback_reason=fake-pass-with-bad-checksum
+cuda_generated_2d_readback_backend_name=cuda
 cuda_generated_2d_readback_submit_attempted=true
 cuda_generated_2d_readback_readback_available=true
 cuda_generated_2d_readback_expected_checksum=1
@@ -432,6 +533,7 @@ mkdir -p "$BUILD_DIR"
 cat >"$BUILD_DIR/evidence.env" <<'EOF'
 cuda_generated_2d_readback_status=pass
 cuda_generated_2d_readback_reason=fake-pass-with-zero-checksum
+cuda_generated_2d_readback_backend_name=cuda
 cuda_generated_2d_readback_submit_attempted=true
 cuda_generated_2d_readback_readback_available=true
 cuda_generated_2d_readback_expected_checksum=0
@@ -522,6 +624,7 @@ mkdir -p "$BUILD_DIR"
 cat >"$BUILD_DIR/evidence.env" <<'EOF'
 metal_generated_2d_readback_status=unavailable
 metal_generated_2d_readback_reason=missing-primary-tool
+metal_generated_2d_readback_backend_name=metal
 metal_generated_2d_readback_submit_attempted=false
 metal_generated_2d_readback_readback_available=false
 EOF
@@ -534,6 +637,7 @@ mkdir -p "$BUILD_DIR"
 cat >"$BUILD_DIR/evidence.env" <<'EOF'
 metal_generated_2d_readback_status=pass
 metal_generated_2d_readback_reason=fake-metal-pass-without-proof
+metal_generated_2d_readback_backend_name=metal
 metal_generated_2d_readback_expected_checksum=1
 metal_generated_2d_readback_actual_checksum=1
 metal_generated_2d_readback_mismatch_count=0
@@ -546,6 +650,7 @@ mkdir -p "$BUILD_DIR"
 cat >"$BUILD_DIR/evidence.env" <<'EOF'
 rocm_generated_2d_readback_status=unavailable
 rocm_generated_2d_readback_reason=missing-primary-tool
+rocm_generated_2d_readback_backend_name=rocm
 rocm_generated_2d_readback_submit_attempted=false
 rocm_generated_2d_readback_readback_available=false
 EOF
@@ -597,6 +702,50 @@ SH
     if ! grep -q '^generated_2d_backend_matrix_cuda_exit_code_proof=false$' "$self_dir/exit_fail_run/evidence.env"; then
         echo "self_test_status=fail"
         echo "self_test_reason=missing-exit-code-proof-false"
+        exit 1
+    fi
+    set +e
+    BUILD_DIR="$self_dir/wrong_backend_run" \
+        REPORT_PATH="$self_dir/wrong_backend_report.md" \
+        CUDA_READBACK_SCRIPT="$self_dir/cuda_pass_wrong_backend.shs" \
+        OPENCL_READBACK_SCRIPT="$self_dir/opencl_pass_with_proof.shs" \
+        VULKAN_READBACK_SCRIPT="$self_dir/vulkan_pass_with_proof.shs" \
+        METAL_READBACK_SCRIPT="$self_dir/metal_unavailable.shs" \
+        ROCM_READBACK_SCRIPT="$self_dir/rocm_unavailable.shs" \
+        sh "$0" >"$self_dir/wrong_backend_stdout.log" 2>"$self_dir/wrong_backend_stderr.log"
+    code=$?
+    set -e
+    if [ "$code" -eq 0 ]; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=wrong-backend-pass-was-accepted"
+        exit 1
+    fi
+    if ! grep -q '^generated_2d_backend_matrix_cuda_backend_name_proof=false$' "$self_dir/wrong_backend_run/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-cuda-backend-name-proof-false"
+        exit 1
+    fi
+    set +e
+    BUILD_DIR="$self_dir/auto_toolchain_run" \
+        REPORT_PATH="$self_dir/auto_toolchain_report.md" \
+        PORTABLE_TOOLCHAIN_BUILD_DIR="$self_dir/auto_toolchains" \
+        PORTABLE_TOOLCHAIN_SCRIPT="$self_dir/create_cuda_toolchain.shs" \
+        CUDA_READBACK_SCRIPT="$self_dir/cuda_requires_ptx.shs" \
+        OPENCL_READBACK_SCRIPT="$self_dir/opencl_pass_with_proof.shs" \
+        VULKAN_READBACK_SCRIPT="$self_dir/vulkan_pass_with_proof.shs" \
+        METAL_READBACK_SCRIPT="$self_dir/metal_unavailable.shs" \
+        ROCM_READBACK_SCRIPT="$self_dir/rocm_unavailable.shs" \
+        sh "$0" >"$self_dir/auto_toolchain_stdout.log" 2>"$self_dir/auto_toolchain_stderr.log"
+    code=$?
+    set -e
+    if [ "$code" -ne 0 ]; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=auto-toolchain-run-rejected"
+        exit 1
+    fi
+    if ! grep -q '^generated_2d_backend_matrix_cuda_verdict=pass$' "$self_dir/auto_toolchain_run/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-auto-toolchain-cuda-pass"
         exit 1
     fi
     set +e
@@ -798,6 +947,8 @@ SH
     echo "self_test_reason=submit-readback-checksum-proof-fails-closed"
     exit 0
 fi
+
+prepare_required_toolchains
 
 {
     echo "generated_2d_backend_matrix_required_backends=$REQUIRED_BACKENDS"

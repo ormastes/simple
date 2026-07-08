@@ -173,10 +173,12 @@ sh scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs
 The wrapper runs CUDA, OpenCL, Vulkan, Metal, and ROCm lanes. By default,
 Linux requires CUDA/OpenCL/Vulkan and macOS also requires Metal; override with
 `GENERATED_2D_REQUIRED_BACKENDS` for host-specific probes. Required lanes
-must pass exact checksum/readback proof with a zero child exit code and must expose normalized device proof:
+auto-prepare missing portable CUDA/Metal/ROCm toolchain artifacts through
+`scripts/check/check-portable-compute-toolchains.shs`, then must pass exact
+checksum/readback proof with a zero child exit code and must expose normalized device proof:
 `submit_attempted=true`, `readback_available=true`, positive matching aggregate checksums,
 positive matching per-op checksums for CUDA/OpenCL/Metal/ROCm,
-exercised ops, `backend_name=vulkan`, and `clear`/`rect` status, checksum, and
+exercised ops, `backend_name=<backend>`, and `clear`/`rect` status, checksum, and
 zero-mismatch proof for the Vulkan lane, and the backend proof path. Unavailable optional lanes are recorded as explicit
 host-unavailable evidence instead of hidden success. The companion report is
 written under `doc/09_report/`, and per-backend logs/evidence files are written
@@ -187,7 +189,9 @@ Use `sh scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs
 backend cannot report `pass` unless submit/readback provenance, positive
 matching aggregate and per-op checksums, exercised ops, zero mismatches, and a zero child exit code are present.
 For Vulkan, the aggregate also rejects evidence whose backend name is not exactly
-`vulkan` or whose `clear`/`rect` per-op proof is incomplete.
+`vulkan` or whose `clear`/`rect` per-op proof is incomplete. For CUDA, OpenCL,
+Metal, and ROCm, the aggregate rejects evidence whose `backend_name` is missing
+or names a different backend.
 For Metal-specific parser changes, also run
 `sh scripts/check/check-metal-generated-2d-readback.shs --self-test`.
 For CUDA-specific parser changes, also run
