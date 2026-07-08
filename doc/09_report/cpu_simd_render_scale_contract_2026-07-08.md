@@ -33,6 +33,16 @@ cpu_simd_render_scale_8k_vs_software_p50_ratio_permille=834
 cpu_simd_render_scale_8k_checksum=sum32:135445232233405312
 cpu_simd_render_scale_8k_software_checksum=sum32:135445232233405312
 cpu_simd_render_scale_8k_software_checksum_parity=true
+gui_perf_cpu_base_compare_status=measured
+gui_perf_cpu_base_compare_source=cpu_simd_scale_contract
+gui_perf_cpu_base_compare_pixels=7680x4320
+gui_perf_cpu_base_compare_simple_backend=simple_web_cpu_simd
+gui_perf_cpu_base_compare_simple_p50_ms=1132.428
+gui_perf_cpu_base_compare_baseline_backend=simple_web_software
+gui_perf_cpu_base_compare_baseline_metric=p50_frame_ms
+gui_perf_cpu_base_compare_baseline_ms=945.236
+gui_perf_cpu_base_compare_baseline_over_simple_ratio=0.834
+gui_perf_cpu_base_compare_target_met=no
 ```
 
 The wrapper fails closed unless CPU-SIMD is selected, logical and physical
@@ -42,7 +52,10 @@ match the scalar software row for the same scene and dimensions, timing fields
 are positive, software baseline timing is retained for comparison, and
 fallback/unavailable fields are empty. Ratio fields are software p50 divided by
 CPU-SIMD p50 in permille; values below `1000` mean this host still needs CPU
-SIMD render-loop optimization before a speedup claim.
+SIMD render-loop optimization before a speedup claim. The focused
+`gui_perf_cpu_base_compare_*` fields use the same in-wrapper scalar software
+baseline; external Cairo/GTK CPU drawing-library comparison remains in
+`tools/gui_perf_bench/run_all_benchmarks.shs`.
 
 Additional focused coverage:
 

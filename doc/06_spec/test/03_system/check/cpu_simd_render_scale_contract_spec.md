@@ -66,7 +66,9 @@ dimensions to a tiny fixture while preserving the same code path.
 - REQ-CPU-SIMD-SCALE-002: The scale wrapper emits a neutral p50 ratio field so
   reports can compare CPU-SIMD against the scalar software baseline without
   inventing a pass threshold.
-- REQ-CPU-SIMD-SCALE-003: The wrapper remains runnable at small overridden
+- REQ-CPU-SIMD-SCALE-003: The wrapper emits `gui_perf_cpu_base_compare_*`
+  fields for the focused CPU-SIMD vs scalar software baseline row.
+- REQ-CPU-SIMD-SCALE-004: The wrapper remains runnable at small overridden
   dimensions for fast contract verification.
 
 ## Plan
@@ -103,7 +105,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contra
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -116,6 +118,8 @@ expect(script).to_contain("cpu_simd_render_scale_8k_p95_frame_us")
 expect(script).to_contain("cpu_simd_render_scale_8k_software_p50_frame_us")
 expect(script).to_contain("cpu_simd_render_scale_8k_software_p95_frame_us")
 expect(script).to_contain("cpu_simd_render_scale_8k_vs_software_p50_ratio_permille")
+expect(script).to_contain("gui_perf_cpu_base_compare_status=measured")
+expect(script).to_contain("gui_perf_cpu_base_compare_baseline_backend=simple_web_software")
 expect(script).to_contain("gui_perf_benchmark_screen_size_reduced")
 expect(script).to_contain("software_checksum_parity=true")
 ```
@@ -127,7 +131,7 @@ expect(script).to_contain("software_checksum_parity=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -150,6 +154,11 @@ expect(out).to_contain("cpu_simd_render_scale_4k_software_p50_frame_us=")
 expect(out).to_contain("cpu_simd_render_scale_8k_software_p50_frame_us=")
 expect(out).to_contain("cpu_simd_render_scale_4k_vs_software_p50_ratio_permille=")
 expect(out).to_contain("cpu_simd_render_scale_8k_vs_software_p50_ratio_permille=")
+expect(out).to_contain("gui_perf_cpu_base_compare_status=measured")
+expect(out).to_contain("gui_perf_cpu_base_compare_pixels=32x32")
+expect(out).to_contain("gui_perf_cpu_base_compare_simple_backend=simple_web_cpu_simd")
+expect(out).to_contain("gui_perf_cpu_base_compare_baseline_backend=simple_web_software")
+expect(out).to_contain("gui_perf_cpu_base_compare_target_met=")
 expect(out).to_contain("cpu_simd_render_scale_4k_software_checksum_parity=true")
 expect(out).to_contain("cpu_simd_render_scale_8k_software_checksum_parity=true")
 ```
