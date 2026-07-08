@@ -1,0 +1,89 @@
+# @tag: system, os, memory, leveling
+# @cover src/os/kernel/memory/memory_leveling.spl 90%
+
+use std.spec.{describe, context, it, expect}
+use os.kernel.memory.memory_leveling.{
+    MEMORY_ACTION_KEEP,
+    MEMORY_ACTION_DEMOTE_COLD,
+    MEMORY_ACTION_REJECT,
+    memory_profile_baremetal_static,
+    memory_profile_simpleos_default,
+    memory_profile_heterogeneous_device,
+    memory_profile_summary,
+    memory_page_cpu_hot,
+    memory_page_cpu_cold,
+    memory_page_dma_pinned,
+    memory_page_nic_registered,
+    memory_page_gpu_resident,
+    memory_page_unknown,
+    memory_leveling_decide,
+    profile_summary_line,
+    movement_decision_line
+}
+
+describe "SimpleOS memory leveling policy":
+
+    context "REQ-001 profile footprint":
+
+        it "exposes baremetal static profile as no swap and no migration":
+            val profile = memory_profile_baremetal_static()
+            val summary = memory_profile_summary(profile)
+            expect(summary).to_contain("profile=baremetal_static")
+            expect(summary).to_contain("swap=off")
+            expect(summary).to_contain("migration=off")
+            expect(summary).to_contain("gpu=off")
+            expect(summary).to_contain("nic=off")
+            expect(summary).to_contain("dma_pin=on")
+
+        it "exposes heterogeneous device profile with GPU NIC DMA and shadow state":
+            val profile = memory_profile_heterogeneous_device()
+            val summary = profile_summary_line(profile)
+            expect(summary).to_contain("profile=heterogeneous_device")
+            expect(summary).to_contain("swap=on")
+            expect(summary).to_contain("migration=on")
+            expect(summary).to_contain("gpu=on")
+            expect(summary).to_contain("nic=on")
+            expect(summary).to_contain("shadow=on")
+
+    context "REQ-002 baremetal simplicity":
+
+        it "keeps normal cold pages instead of swapping or migrating on baremetal":
+            val decision = memory_leveling_decide(memory_profile_baremetal_static(), memory_page_cpu_cold(10))
+            expect(decision.action).to_equal(MEMORY_ACTION_KEEP)
+            expect(decision.reason).to_equal("baremetal-static-no-migration")
+
+    context "REQ-003 device pinned safety":
+
+        it "rejects DMA pinned pages before swap decisions":
+            val decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_dma_pinned(20))
+            expect(decision.action).to_equal(MEMORY_ACTION_REJECT)
+            expect(decision.reason).to_equal("dma-pinned-not-swappable")
+
+        it "rejects NIC registered pages before swap decisions":
+            val decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_nic_registered(21))
+            expect(decision.action).to_equal(MEMORY_ACTION_REJECT)
+            expect(decision.reason).to_equal("nic-registered-not-swappable")
+
+        it "rejects GPU resident pages until coherence proof exists":
+            val decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_gpu_resident(22))
+            expect(decision.action).to_equal(MEMORY_ACTION_REJECT)
+            expect(decision.reason).to_equal("gpu-resident-needs-coherence")
+
+    context "REQ-004 default swap and demotion":
+
+        it "demotes cold CPU pages under the default SimpleOS profile":
+            val decision = memory_leveling_decide(memory_profile_simpleos_default(), memory_page_cpu_cold(30))
+            expect(decision.action).to_equal(MEMORY_ACTION_DEMOTE_COLD)
+            expect(decision.reason).to_equal("cold-cpu-page-to-swap")
+
+        it "keeps hot CPU pages under the default SimpleOS profile":
+            val decision = memory_leveling_decide(memory_profile_simpleos_default(), memory_page_cpu_hot(31))
+            expect(decision.action).to_equal(MEMORY_ACTION_KEEP)
+            expect(decision.reason).to_equal("cpu-page-kept")
+
+    context "REQ-005 fail closed heterogeneous model":
+
+        it "rejects unknown externally visible page states":
+            val line = movement_decision_line(memory_profile_heterogeneous_device(), memory_page_unknown(40))
+            expect(line).to_contain("action=reject")
+            expect(line).to_contain("reason=external-visible-unknown-owner")

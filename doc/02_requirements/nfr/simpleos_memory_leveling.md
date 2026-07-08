@@ -1,0 +1,45 @@
+# SimpleOS Memory Leveling NFR Requirements
+
+Status: selected.
+
+Selected NFR scope: Options 1 and 1B.
+
+## Requirements
+
+### NFR-001: Deterministic Safety Evidence
+
+The memory-leveling policy must have deterministic SSpec evidence proving:
+
+- `baremetal_static` disables swap and migration.
+- DMA-pinned pages reject swap/demotion.
+- NIC-registered pages reject swap/demotion.
+- GPU-resident pages reject swap/demotion unless a later explicit coherence
+  proof is added.
+- Cold ordinary CPU pages demote only under profiles that allow demotion.
+
+### NFR-002: Profile Footprint Evidence
+
+Each profile must expose a small capability summary covering:
+
+- swap enabled/disabled
+- migration enabled/disabled
+- GPU tier enabled/disabled
+- NIC tier enabled/disabled
+- DMA pin enforcement enabled/disabled
+- shadow copies enabled/disabled
+
+### NFR-003: Small Hot-Path Surface
+
+The selected slice must avoid runtime calls, process execution, environment
+reads, hardware probes, and broad scans. Policy decisions must be pure data
+operations.
+
+### NFR-004: Fail-Closed Device Defaults
+
+Unknown or externally visible page states must default to `keep` or `reject`,
+not to swap or migration.
+
+### NFR-005: No New Runtime Shortcut
+
+The implementation must not add raw `rt_*` imports, GPU runtime handle pokes,
+or NIC/RDMA fixture bypasses.
