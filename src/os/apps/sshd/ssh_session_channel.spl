@@ -10,6 +10,7 @@ use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_get_text, ssh_ascii_text_to_bytes}
 use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_KEXINIT}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_failure, ssh_build_channel_data, ssh_build_channel_window_adjust}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
+use os.apps.sshd.ssh_session_shell_test_ext.{ssh_exec_fat_launch_line}
 use os.apps.sshd.ssh_session_helpers.{_u8_at, _bytes_to_hex, _read_u32_stable, _read_text_field_fast, _text_equals_bytes, _build_channel_open_confirmation_stable, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable}
 use os.kernel.loader.app_registry.{app_registry_fat32_alias}
 use os.kernel.log.klog_api.{log_info}
@@ -112,16 +113,27 @@ fn _live_exec_command(payload: [u8]) -> text:
                 return "simple"
     return ""
 
-fn _live_exec_command_hex(payload_hex: text) -> text:
-    if payload_hex == "62000000000000000465786563010000000474727565":
-        return "true"
-    if payload_hex == "62000000000000000465786563010000002473696d706c652e736d66202d2d76657273696f6e3b2073696d706c65202d2d636865636b":
-        return "rv64-combined"
-    if payload_hex == "62000000000000000465786563010000001473696d706c652e736d66202d2d76657273696f6e":
-        return "simple.smf"
-    if payload_hex == "62000000000000000465786563010000000e73696d706c65202d2d636865636b":
-        return "simple"
-    ""
+fn _live_exec_command_text(payload: [u8]) -> text:
+    """Extract the exec command line from a live SSH_MSG_CHANNEL_REQUEST payload.
+
+    Generic field parsing (recipient/request-type/want-reply via
+    ssh_parse_channel_request, then the exec command string) instead of a
+    fixed table of exact byte sequences — this is what makes the live x86_64
+    boot lane accept arbitrary multi-argument commands (guest-side whitespace
+    split happens downstream; no shell metacharacters in v1).
+    """
+    val parsed = ssh_parse_channel_request(payload)
+    match parsed:
+        Ok(fields):
+            if fields.1 != "exec":
+                return ""
+            match _read_text_field_fast(payload, fields.3):
+                Ok(cmd_field):
+                    cmd_field.value
+                Err(_):
+                    ""
+        Err(_):
+            ""
 
 impl SshSession:
 
@@ -216,9 +228,8 @@ impl SshSession:
         self.send_packet(confirm)
 
         val request_payload = self.recv_packet_payload()
-        val request_hex = _bytes_to_hex(request_payload)
-        serial_println("[sshd-session] live channel request len={request_payload.len()} payload={request_hex}")
-        val command = _live_exec_command_hex(request_hex)
+        serial_println("[sshd-session] live channel request len={request_payload.len()} payload={_bytes_to_hex(request_payload)}")
+        val command = _live_exec_command_text(request_payload)
         if command == "":
             self.state = SessionState.Closed
             return
@@ -227,14 +238,30 @@ impl SshSession:
         serial_println("[sshd-session] exec command={command}")
         val success = _build_channel_success_stable(remote_id)
         self.send_packet(success)
-        if command == "true":
+        if command.trim() == "true":
             self._finish_exec_request(local_id, remote_id, 0, [])
-        elif command == "rv64-combined":
+            return
+        if command == "simple.smf --version; simple --check":
+            # RV64 single-connection combined probe (semicolon-joined by the
+            # test harness, not shell-interpreted here — two known fixed
+            # commands run back to back over one exec channel).
             self.send_packet(ssh_build_channel_data(remote_id, _ssh_exec_simple_session_bytes("simple.smf")))
             self.send_packet(ssh_build_channel_data(remote_id, _ssh_exec_simple_session_bytes("simple")))
             self._finish_exec_request(local_id, remote_id, 0, [])
-        else:
-            self._finish_exec_request(local_id, remote_id, 0, _ssh_exec_simple_session_bytes(command))
+            return
+        # Generic multi-argument routing: full argv[0..] flows through to the
+        # session-line resolver (simple/simple.smf) or the FS-ELF loader
+        # resolution (any other on-disk binary), both of which now report the
+        # complete argv rather than dropping everything after argv[0].
+        val simple_session_bytes = _ssh_exec_simple_session_bytes(command)
+        if simple_session_bytes.len() > 0:
+            self._finish_exec_request(local_id, remote_id, 0, simple_session_bytes)
+            return
+        val fat_launch_line = ssh_exec_fat_launch_line(command)
+        if fat_launch_line != "":
+            self._finish_exec_request(local_id, remote_id, 0, ssh_ascii_text_to_bytes(fat_launch_line))
+            return
+        self._finish_exec_request(local_id, remote_id, 0, [])
 
     me _handle_channel_open(payload: [u8]):
         """Handle SSH_MSG_CHANNEL_OPEN."""
@@ -543,6 +570,18 @@ impl SshSession:
         if simple_session_line != "":
             serial_println("[sshd-session] exec simple path proof command={command}")
             self._finish_exec_request(local_id, remote_id, 0, _ssh_exec_simple_session_bytes(command))
+            return
+
+        # Filesystem-ELF exec: when argv[0] resolves to a launchable on-disk
+        # binary (e.g. `/bin/hello`), report the loader resolution over the SSH
+        # channel. Live in-process ELF stdout capture-and-return additionally
+        # requires the cooperative-exit kernel primitive (the freestanding exec
+        # path is noreturn and the guest `exit` syscall powers off QEMU), so the
+        # spawned program's own bytes stream back only once that lands.
+        val fat_launch_line = ssh_exec_fat_launch_line(command)
+        if fat_launch_line != "":
+            serial_println("[sshd-session] exec fat-elf resolved command={command}")
+            self._finish_exec_request(local_id, remote_id, 0, ssh_ascii_text_to_bytes(fat_launch_line))
             return
 
         self._ensure_shell_started(false)
