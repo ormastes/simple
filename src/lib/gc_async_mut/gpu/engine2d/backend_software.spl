@@ -15,9 +15,8 @@
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, ReadbackSource, readback_source_label}
 use std.gc_async_mut.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_software}
 use std.gpu.engine2d.color.{color_a, blend}
-use std.gpu.engine2d.glyph.{glyph_data}
 use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
-use std.common.string_core.{char_from_code}
+use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
 use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, simd_fill_row, engine2d_simd_copy_row_u32, engine2d_simd_blend_row_u32}
 use std.gpu.engine2d.backend_emu.{
@@ -346,9 +345,8 @@ impl RenderBackend for SoftwareBackend:
         emu_draw_gradient_rect(self, x, y, w, h, top_color, bottom_color)
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-        # Use glyph_data directly via sw_set_pixel — avoids passing self.buf
-        # to any free function (which would silently drop writes due to the
-        # self-pass-to-free-fn mutation-loss bug).
+        # Render glyph rows inline via the shared packed atlas. This avoids
+        # per-character row-array allocation while keeping byte-identical glyphs.
         val metrics = text_metrics(text_val, font_size)
         val gh = metrics.glyph_height_px
         val scale = metrics.scale
@@ -359,11 +357,10 @@ impl RenderBackend for SoftwareBackend:
         var cursor_x = x
         while i < text_len:
             val code = text_val.char_code_at(i)
-            val ch = char_from_code(code)
-            val bitmap = glyph_data(ch)
+            val glyph_index = glyph_index_for_char_code(code)
             var gy = 0
             while gy < gh:
-                val row_data = bitmap[gy]
+                val row_data = glyph_row_bits(glyph_index, gy)
                 var gx = 0
                 while gx < 5:
                     val bit = (row_data >> (4 - gx)) & 1
