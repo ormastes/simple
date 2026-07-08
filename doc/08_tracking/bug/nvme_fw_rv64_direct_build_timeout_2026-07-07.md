@@ -860,6 +860,30 @@ This is now the smallest known RV64 firmware native-build reproducer. The
 remaining production blocker is no longer only parse budget; even a 6-file
 firmware closure hits duplicate generated symbols before an ELF can be linked.
 
+## Update — isolated cache and one-binary mode still duplicate main
+
+RV64 direct firmware builds now use a section-specific native cache directory
+such as `build/native_cache/nvme_fw_rv64_target`. This prevents stale shared
+`build/native_cache` objects from contaminating section probes.
+
+The isolated-cache target probe still fails, but now consistently classifies the
+fresh duplicate-main failure:
+
+```text
+cache-dir=build/native_cache/nvme_fw_rv64_target
+[native-build] Entry closure files: 6
+NVME_RV64_BUILD_FAILED code=1 reason=native-build-duplicate-main timeout=90s elapsed=50s ...
+error: emit-object relocatable link failed: ld.lld: error: duplicate symbol: __simple_main
+```
+
+A direct `--mode one-binary` check against the same 6-file target closure also
+failed with duplicate `__simple_main`, so this is not only a dynload-mode issue:
+
+```text
+[native-build] Driver start: inputs=6 backend=llvm mode=one-binary
+error: emit-object relocatable link failed: ld.lld: error: duplicate symbol: __simple_main
+```
+
 ## Update — elapsed evidence shows external termination before 120s cap
 
 `fw_rv64/build.shs` now reports native-build elapsed seconds. A fresh
