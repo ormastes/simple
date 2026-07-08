@@ -9,8 +9,8 @@ Two main pure-Simple host deliverables plus one rv32 direct-smoke image live und
   over an ONFI NAND device. Gates:
   `run fw/test_fw.spl` -> `ALL FIRMWARE SELF-TESTS PASS` (1170 asserts);
   `run fw/sim_main.spl` → `ALL END-TO-END CHECKS PASS`;
-  `run fw/nvme_main.spl` → `ALL NVME CONTROLLER E2E CHECKS PASS` (also asserts the SMART
-  composite temperature equals the live thermal model);
+  `run fw/nvme_main.spl` → `ALL NVME CONTROLLER E2E CHECKS PASS` (invalid namespace rejection
+  plus SMART composite temperature from the live thermal model);
   `run fw/rain_ftl_check.spl` → `RAIN-FTL OK` (256 LBAs survive a whole-channel uncorrectable
   failure; gated in the system spec).
 - **`emu/`** — host-interface ↔ device-interface emulator over a **settable memcpy seam on both

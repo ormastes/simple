@@ -82,8 +82,8 @@ $B run examples/09_embedded/simpleos_nvme_fw/fw/thermal_check.spl   # -> THERMAL
   power-fail + recovery (committed state survives, trim stays trimmed).
 - **`nvme_main.spl`** — admin-driven controller acceptance: host bring-up (Identify → Features →
   Create CQ→SQ) → multi-queue IO with round-robin → negative cases (SQ→missing-CQ rejected,
-  delete-bound-CQ rejected) → reverse-order teardown → SMART log (live thermal temperature +
-  critical-warning) → power-cycle survival.
+  invalid namespace rejected, delete-bound-CQ rejected) → reverse-order teardown → SMART log
+  (live thermal temperature + critical-warning) → power-cycle survival.
 - **`rain_check.spl` / `rain_ftl_check.spl` / `thermal_check.spl`** — the P7/P8 wiring demos:
   `RAIN OK` (standalone per-stripe XOR parity), `RAIN-FTL OK` (256 LBAs survive a whole-channel
   uncorrectable failure, rebuilt in place), `THERMAL OK` (live composite temperature + critical
