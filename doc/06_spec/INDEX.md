@@ -7,13 +7,14 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 110
+- **Total Lines:** 41
+- **Warnings:** 3
 
 ---
 
-## Other (1 features)
+## Hardware (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Web Gpu Paint Offload Matrix Specification](test/05_perf/web_render_chrome/web_gpu_paint_offload_matrix_spec.md) | Partial | N/A | 11 | 60% | 110 lines |
+| [Nvme Firmware Simulation Specification](test/03_system/app/nvme_firmware/nvme_firmware_simulation_spec.md) | Implemented | 4/5 | 30 | 20% | 41 lines |
 

@@ -27,7 +27,7 @@ nvme_firmware_simulation_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 29 | 29 | 0 | 0 |
+| 30 | 30 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -49,7 +49,7 @@ NVMe SSD firmware (HIL/FTL/FIL + admin/IO-queue controller) — system scenario.
 | Design | N/A |
 | Research | doc/01_research/hardware/nvme_firmware/nvme_ssd_firmware_architecture.md |
 | Source | `test/03_system/app/nvme_firmware/nvme_firmware_simulation_spec.spl` |
-| Updated | 2026-07-07 |
+| Updated | 2026-07-08 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 NVMe SSD firmware (HIL/FTL/FIL + admin/IO-queue controller) — system scenario.
@@ -155,7 +155,7 @@ _expect_no_fail_marker(out, "end-to-end SSD simulation")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -167,6 +167,7 @@ step("Identify the controller and the namespace via the admin queue")
 expect(out).to_contain("identify controller ok")
 expect(out).to_contain("controller reports max IO queues")
 expect(out).to_contain("namespace size == LBA_COUNT")
+expect(out).to_contain("identify invalid namespace rejected")
 
 step("Create an IO completion queue, then the submission queue bound to it")
 expect(out).to_contain("create IO CQ 1")
@@ -390,6 +391,31 @@ expect(code).to_equal(0)
 step("The oversized write is rejected before any LBA is programmed")
 expect(out).to_contain("DRAM BUFFER OK")
 _expect_no_fail_marker(out, "DRAM buffer check")
+```
+
+</details>
+
+#### fails closed when task-pool allocation is unavailable
+
+- Run HIL and controller writes with task-pool allocation disabled
+   - Expected: code equals `0`
+- Writes return namespace-not-ready and leave media unchanged
+-  expect no fail marker
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run HIL and controller writes with task-pool allocation disabled")
+val (out, err, code) = _run(FW + "/task_pool_fail_closed_check.spl")
+expect(code).to_equal(0)
+step("Writes return namespace-not-ready and leave media unchanged")
+expect(out).to_contain("TASK POOL CLOSED OK")
+_expect_no_fail_marker(out, "task pool fail-closed check")
 ```
 
 </details>
@@ -741,7 +767,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Reject stale wording that narrows the rv32 firmware floor back to RAIN-only")
-val (stale_out, stale_err, stale_code) = _shell("! rg -n 'Status \\(2026-06-30\\): PLANNED|rv32 RAIN self-test/reference|rv32 RAIN reference|bare-metal \\*\\*rv32\\*\\* RAIN' examples/09_embedded/simpleos_nvme_fw/fw/README.md examples/09_embedded/simpleos_nvme_fw/fw/BUILD_STATUS.md examples/09_embedded/simpleos_nvme_fw/fw/PRODUCTION_STATUS.md doc/03_plan/hardware/nvme_fw_gap_closure_plan.md")
+val (stale_out, stale_err, stale_code) = _shell("! rg -n 'Status \\(2026-06-30\\): PLANNED|rv32 RAIN self-test/reference|rv32 RAIN reference|bare-metal \\*\\*rv32\\*\\* RAIN|direct-smoke image (now )?boots|QEMU-booted direct-smoke|Verified 2026-07-07|now builds a small rv32 ELF|builds a fast direct rv32 smoke ELF' examples/09_embedded/simpleos_nvme_fw/fw/README.md examples/09_embedded/simpleos_nvme_fw/fw/BUILD_STATUS.md examples/09_embedded/simpleos_nvme_fw/fw/PRODUCTION_STATUS.md doc/03_plan/hardware/nvme_fw_gap_closure_plan.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide_tldr.md")
 expect(stale_code).to_equal(0)
 
 step("Require the production docs to name the rv32 scalar firmware floor and OpenSSD target profile")
@@ -781,22 +807,27 @@ expect(rv64_out).to_contain("nvme_fw_rv64_direct_build_timeout_2026-07-07")
 - Reject stale self-test assertion counts in operator docs
    - Expected: stale_code equals `0`
    - Expected: count_code equals `0`
+   - Expected: namespace_doc_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Reject stale self-test assertion counts in operator docs")
 val docs = "examples/09_embedded/simpleos_nvme_fw/fw/README.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide_tldr.md"
-val (stale_out, stale_err, stale_code) = _shell("! rg -n '526 (checks|asserts|assertions)' " + docs)
+val (stale_out, stale_err, stale_code) = _shell("! rg -n '(526|1167|1170) (checks|asserts|assertions)' " + docs)
 expect(stale_code).to_equal(0)
-val (count_out, count_err, count_code) = _shell("rg -n '1167 (checks|asserts|assertions)' " + docs)
+val (count_out, count_err, count_code) = _shell("rg -n '1174 (checks|asserts|assertions)' " + docs)
 expect(count_code).to_equal(0)
-expect(count_out).to_contain("1167")
+expect(count_out).to_contain("1174")
+val namespace_docs = "doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide.md doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide_tldr.md examples/09_embedded/simpleos_nvme_fw/fw/BUILD_STATUS.md examples/09_embedded/simpleos_nvme_fw/fw/PRODUCTION_STATUS.md"
+val (namespace_doc_out, namespace_doc_err, namespace_doc_code) = _shell("rg -n 'invalid namespace rejected|invalid namespace rejection|Invalid Identify Namespace|invalid.*namespace' " + namespace_docs)
+expect(namespace_doc_code).to_equal(0)
+expect(namespace_doc_out).to_contain("invalid namespace")
 ```
 
 </details>
@@ -837,8 +868,8 @@ _expect_no_fail_marker(out, "Cosmos+ OpenSSD platform descriptor")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 29 |
-| Active scenarios | 29 |
+| Total scenarios | 30 |
+| Active scenarios | 30 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -34,6 +34,9 @@ silicon. The simulation boundary is deliberate and unchanged:
         drop on pool exhaustion was **verified a non-bug**: `hil.tick`/`io_process` post a
         completion for every command, and the task-pool acquire→release within one synchronous
         tick, so it cannot exhaust.)
+  - [x] If task-pool metadata is unavailable or corrupt, HIL and multi-queue controller writes
+        fail closed with `SC_NS_NOT_READY` and leave media unchanged
+        (`task_pool_fail_closed_check.spl`).
   - [x] Journal overflow is surfaced — `ensure_journal_room` forces a checkpoint+truncate before
         appending, never a silent ack of a lost record (`durability_check.spl` 600-write case).
   - [x] A write that cannot allocate fails atomically (`SC_NS_NOT_READY`, no half-applied

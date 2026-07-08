@@ -32,6 +32,7 @@ Standalone production-hardening regressions and proofs:
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/gc_safety_check.spl   # GC data-loss guard + no write-cliff
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/durability_check.spl  # power-loss recovery + WAL overflow
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/wear_scrub_check.spl  # static wear-leveling + read-disturb scrub
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/task_pool_fail_closed_check.spl # invalid task pool rejects writes
 lean examples/09_embedded/simpleos_nvme_fw/fw/proofs/Alloc.lean              # + Recover, Gc, Hooks, Fmc, Rain .lean (6 proofs, req 6)
 ```
 
