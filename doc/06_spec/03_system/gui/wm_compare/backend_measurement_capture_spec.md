@@ -42,7 +42,7 @@ backend_measurement_capture_spec -> app
 #### parses repeated /usr/bin/time samples into p50 p95 and max RSS
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -68,7 +68,7 @@ expect(measurement.max_rss_kb).to_equal(930308)
 #### converts host measurements into backend measurement records
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -101,7 +101,7 @@ expect(sdn).to_contain("p95_us: 2000000")
 #### converts host measurements into normalized comparison samples
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -143,7 +143,7 @@ expect(sample.warm_start_us).to_equal(1000000)
 #### builds host-safe initialized OpenCL GPU samples with compiler and runtime proof
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -178,7 +178,7 @@ expect(backend_comparison_sample_valid(missing_timing)).to_equal(false)
 #### converts measured initialized CUDA GPU evidence without fixture timings
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -226,9 +226,9 @@ expect(sample.p50_frame_us).to_equal(410)
 expect(sample.p95_frame_us).to_equal(640)
 expect(sample.artifact_submit_us).to_equal(37)
 expect(sample.artifact_readback_us).to_equal(81)
-expect(sample.generated_operation).to_equal("alpha_blend")
+expect(sample.generated_operation).to_equal("simple_2d_alpha_u32")
 expect(sample.runtime_compute_target).to_equal("cuda")
-expect(sample.runtime_launch_api).to_equal("rt_cuda_launch_kernel")
+expect(sample.runtime_launch_api).to_equal("cuda_launch_api")
 expect(sample.runtime_status).to_equal("ready")
 ```
 
@@ -237,7 +237,7 @@ expect(sample.runtime_status).to_equal("ready")
 #### rejects measured initialized GPU evidence when runtime gate is not ready
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -278,8 +278,8 @@ val sample = initialized_gpu_comparison_sample_from_measurement(
     args_ptr: 4096
     )
 )
-expect(sample.runtime_status).to_equal("module-not-loaded")
-expect(backend_comparison_sample_valid(sample)).to_equal(false)
+expect(sample.runtime_status).to_equal("opencl-program-unavailable")
+expect(backend_comparison_initialized_valid(sample)).to_equal(false)
 ```
 
 </details>
@@ -287,9 +287,9 @@ expect(backend_comparison_sample_valid(sample)).to_equal(false)
 #### exports measured initialized OpenCL GPU evidence as normalized SDN
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -332,19 +332,21 @@ expect(sdn).to_contain("valid: true")
 expect(sdn).to_contain("sample_count: 1")
 expect(sdn).to_contain("backend_family: \"opencl\"")
 expect(sdn).to_contain("operation_family: \"image_blit\"")
-expect(sdn).to_contain("generated_operation: \"copy\"")
+expect(sdn).to_contain("generated_operation: \"simple_2d_copy_u32\"")
 expect(sdn).to_contain("runtime_launch_api: \"clEnqueueNDRangeKernel\"")
 expect(sdn).to_contain("runtime_status: \"ready\"")
 expect(sdn).to_contain("artifact_submit_us: 41")
 expect(sdn).to_contain("artifact_readback_us: 95")
 expect(sdn).to_contain("checksum: \"sha256:opencl:measured-export\"")
+expect(sdn).to_contain("offload_missing_scalar_baseline_count: 1")
+expect(sdn).to_contain("offload_efficiency_verdict: \"missing-scalar-baseline\"")
 ```
 
 </details>
 
 #### emits initialized runner samples only when backend probe and generated gate are ready
 
-1. BackendProbeResult success
+- BackendProbeResult success
    - Expected: backend_comparison_initialized_valid(sample) is true
    - Expected: sample.status equals `Initialized`
    - Expected: sample.runtime_status equals `ready`
@@ -352,7 +354,7 @@ expect(sdn).to_contain("checksum: \"sha256:opencl:measured-export\"")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -404,14 +406,14 @@ expect(sample.artifact_submit_us).to_equal(39)
 
 #### emits explicit unavailable runner samples when generated module gate is not ready
 
-1. BackendProbeResult success
+- BackendProbeResult success
    - Expected: backend_comparison_sample_valid(sample) is true
    - Expected: sample.status equals `Failed`
    - Expected: sample.runtime_status equals `opencl-runtime-or-queue-unavailable`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -464,7 +466,7 @@ expect(sample.runtime_status).to_equal("opencl-runtime-or-queue-unavailable")
 #### exports unavailable ROCm runner samples when strict probe cannot initialize
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -516,7 +518,7 @@ expect(sdn).to_contain("ROCm/HIP probe unavailable in interpreter")
 #### captures OpenCL device-buffer measurements or explicit unavailable evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -555,7 +557,7 @@ else:
 #### exports OpenCL device-buffer measurement rows as normalized SDN
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -587,7 +589,7 @@ expect(sdn).to_contain("runtime_launch_api: \"clEnqueueNDRangeKernel\"")
 #### captures CUDA device-buffer measurements or explicit unavailable evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -610,7 +612,7 @@ val sample = cuda_device_buffer_measurement_sample(
 expect(backend_comparison_sample_valid(sample)).to_equal(true)
 expect(sample.backend_family).to_equal("cuda")
 expect(sample.operation_family).to_equal("fill")
-expect(sample.runtime_launch_api).to_equal("rt_cuda_launch_kernel")
+expect(sample.runtime_launch_api).to_equal("cuda_launch_api")
 if sample.status == "Initialized":
     expect(sample.checksum).to_contain("sum32:")
     expect(sample.pixel_proof).to_contain("nonzero_pixels:")
@@ -626,7 +628,7 @@ else:
 #### exports CUDA device-buffer measurement rows as normalized SDN
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -650,7 +652,7 @@ expect(sdn).to_contain("valid: true")
 expect(sdn).to_contain("sample_count: 1")
 expect(sdn).to_contain("backend_family: \"cuda\"")
 expect(sdn).to_contain("operation_family: \"fill\"")
-expect(sdn).to_contain("runtime_launch_api: \"rt_cuda_launch_kernel\"")
+expect(sdn).to_contain("runtime_launch_api: \"cuda_launch_api\"")
 ```
 
 </details>
@@ -658,7 +660,7 @@ expect(sdn).to_contain("runtime_launch_api: \"rt_cuda_launch_kernel\"")
 #### captures ROCm HIP device-buffer runtime status as explicit evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -682,8 +684,8 @@ expect(backend_comparison_sample_valid(sample)).to_equal(true)
 expect(sample.backend_family).to_equal("rocm")
 expect(sample.operation_family).to_equal("fill")
 expect(sample.generated_binary_format).to_equal("hsaco")
-expect(sample.runtime_launch_api).to_equal("rt_rocm_launch_kernel")
-expect(sample.unavailable_reason == "missing-rocm-ffi").to_equal(false)
+expect(sample.runtime_launch_api).to_equal("hip_launch_api")
+expect(sample.unavailable_reason).to_not_equal("missing-rocm-ffi")
 expect(sample.unavailable_reason).to_contain("rocm")
 ```
 
@@ -692,7 +694,7 @@ expect(sample.unavailable_reason).to_contain("rocm")
 #### exports ROCm HIP device-buffer measurement rows as normalized SDN
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -716,7 +718,7 @@ expect(sdn).to_contain("valid: true")
 expect(sdn).to_contain("sample_count: 1")
 expect(sdn).to_contain("backend_family: \"rocm\"")
 expect(sdn).to_contain("generated_binary_format: \"hsaco\"")
-expect(sdn).to_contain("runtime_launch_api: \"rt_rocm_launch_kernel\"")
+expect(sdn).to_contain("runtime_launch_api: \"hip_launch_api\"")
 ```
 
 </details>
@@ -727,7 +729,7 @@ expect(sdn).to_contain("runtime_launch_api: \"rt_rocm_launch_kernel\"")
 #### measures Simple Web software render loops with non-zero frame samples and pixel proof
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -772,7 +774,7 @@ expect(sample.runtime_status).to_equal("cpu-render-loop-ready")
 #### exports Simple Web software render-loop rows as normalized SDN
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -815,7 +817,7 @@ expect(sdn).to_contain("runtime_status: \"cpu-render-loop-ready\"")
 #### builds a current-host backend matrix with explicit unavailable GPU lanes
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -849,9 +851,9 @@ expect(sdn).to_contain("cpu_simd_status: \"Initialized\"")
 #### builds normalized current-host comparison samples for GPU and CPU lanes
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -887,6 +889,8 @@ expect(sdn).to_contain("generated_binary_format: \"spirv\"")
 expect(sdn).to_contain("runtime_launch_api: \"clEnqueueNDRangeKernel\"")
 expect(sdn).to_contain("runtime_status: \"opencl-runtime-or-queue-unavailable\"")
 expect(sdn).to_contain("offload_tag_kind: \"baseline\"")
+expect(sdn).to_contain("offload_missing_scalar_baseline_count: 0")
+expect(sdn).to_contain("offload_efficiency_verdict: \"unavailable\"")
 ```
 
 </details>
@@ -894,7 +898,7 @@ expect(sdn).to_contain("offload_tag_kind: \"baseline\"")
 #### exports normalized startup size samples as SDN for audit reports
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -938,7 +942,7 @@ expect(sdn).to_contain("runtime_compute_target: \"opencl\"")
 #### exports measured Simple software render-loop rows with non-zero frame evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -975,7 +979,7 @@ expect(sdn).to_contain("sample_count: 1")
 #### exports measured Simple software render-loop rows through the narrow software entrypoint
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1012,7 +1016,7 @@ expect(sdn).to_contain("sample_count: 1")
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/wm_compare/backend_measurement_capture_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-08 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

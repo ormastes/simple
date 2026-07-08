@@ -80,7 +80,7 @@ expect(sdn).to_contain("binary_size_delta_bytes: 10000")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -108,6 +108,8 @@ expect(sdn).to_contain("checksum: \"sha256:1234\"")
 expect(sdn).to_contain("pixel_proof: \"nonzero_pixels:4096\"")
 expect(sdn).to_contain("artifact_total_us: 660")
 expect(sdn).to_contain("offload_overhead_verdict: \"offload-overhead-contained\"")
+expect(sdn).to_contain("speed_verdict: \"missing-scalar-baseline\"")
+expect(sdn).to_contain("offload_efficiency_verdict: \"missing-scalar-baseline\"")
 ```
 
 </details>
@@ -207,7 +209,7 @@ expect(backend_comparison_offload_efficiency_verdict(break_even, 2000)).to_equal
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -247,6 +249,10 @@ expect(sdn).to_contain("offload_faster_but_overhead_dominates_count: 1")
 expect(sdn).to_contain("offload_break_even_count: 1")
 expect(sdn).to_contain("offload_slower_communication_overhead_count: 1")
 expect(sdn).to_contain("offload_slower_compute_bound_count: 1")
+expect(sdn).to_contain("offload_missing_scalar_baseline_count: 0")
+expect(sdn).to_contain("offload_efficiency_verdict: \"offload-useful\"")
+expect(sdn).to_contain("offload_efficiency_verdict: \"offload-slower-communication-overhead\"")
+expect(sdn).to_contain("offload_efficiency_verdict: \"offload-slower-compute-bound\"")
 ```
 
 </details>
