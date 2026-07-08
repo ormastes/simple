@@ -28,7 +28,7 @@ backend_measurement_report_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -42,7 +42,7 @@ backend_measurement_report_spec -> app
 #### accepts initialized accelerated lanes with timings, RSS, size, and scalar baseline
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -58,7 +58,7 @@ expect(backend_measurement_satisfies_lane(record)).to_equal(true)
 #### records binary size delta for initialized measurement evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -78,7 +78,7 @@ expect(sdn).to_contain("binary_size_delta_bytes: 10000")
 #### normalizes initialized backend comparison samples for shared UI and GPU reports
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -115,9 +115,9 @@ expect(sdn).to_contain("offload_overhead_verdict: \"offload-overhead-contained\"
 #### classifies measured backend speed against an explicit scalar baseline
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -126,16 +126,23 @@ expect(backend_comparison_speed_verdict(sample, 2000)).to_equal("backend-faster-
 expect(backend_comparison_speed_verdict(sample, 1000)).to_equal("backend-equal-to-scalar")
 expect(backend_comparison_speed_verdict(sample, 900)).to_equal("backend-slower-than-scalar")
 expect(backend_comparison_speed_verdict(sample, 0)).to_equal("missing-scalar-baseline")
+expect(backend_comparison_offload_efficiency_verdict(sample, 2000)).to_equal("offload-useful")
 ```
 
 </details>
 
 #### classifies communication overhead that dominates the measured frame
 
-<details>
-<summary>Executable SPipe</summary>
+- var sample =  initialized sample
+   - Expected: backend_comparison_artifact_total_us(sample) equals `1510`
+   - Expected: backend_comparison_offload_overhead_verdict(sample) equals `offload-overhead-dominates`
+   - Expected: backend_comparison_offload_efficiency_verdict(sample, 2000) equals `offload-faster-but-overhead-dominates`
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -144,16 +151,63 @@ sample.artifact_submit_us = 700
 sample.artifact_readback_us = 400
 expect(backend_comparison_artifact_total_us(sample)).to_equal(1510)
 expect(backend_comparison_offload_overhead_verdict(sample)).to_equal("offload-overhead-dominates")
+expect(backend_comparison_offload_efficiency_verdict(sample, 2000)).to_equal("offload-faster-but-overhead-dominates")
+```
+
+</details>
+
+#### classifies slower offloads by communication overhead versus compute cost
+
+- var transfer bound =  initialized sample
+   - Expected: backend_comparison_offload_efficiency_verdict(transfer_bound, 2000) equals `offload-slower-communication-overhead`
+- var compute bound =  initialized sample
+   - Expected: backend_comparison_offload_efficiency_verdict(compute_bound, 2000) equals `offload-slower-compute-bound`
+- var break even =  initialized sample
+   - Expected: backend_comparison_offload_efficiency_verdict(break_even, 2000) equals `offload-break-even`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var transfer_bound = _initialized_sample()
+transfer_bound.p50_frame_us = 2500
+transfer_bound.p95_frame_us = 2600
+transfer_bound.p95_input_to_paint_us = 2700
+transfer_bound.artifact_submit_us = 2100
+expect(backend_comparison_offload_efficiency_verdict(transfer_bound, 2000)).to_equal("offload-slower-communication-overhead")
+
+var compute_bound = _initialized_sample()
+compute_bound.p50_frame_us = 2500
+compute_bound.p95_frame_us = 2600
+compute_bound.p95_input_to_paint_us = 2700
+expect(backend_comparison_offload_efficiency_verdict(compute_bound, 2000)).to_equal("offload-slower-compute-bound")
+
+var break_even = _initialized_sample()
+break_even.p50_frame_us = 2000
+break_even.p95_frame_us = 2100
+break_even.p95_input_to_paint_us = 2200
+expect(backend_comparison_offload_efficiency_verdict(break_even, 2000)).to_equal("offload-break-even")
 ```
 
 </details>
 
 #### summarizes measured offload combinations against the scalar baseline
 
-<details>
-<summary>Executable SPipe</summary>
+- var slower =  initialized sample
+- var slower overhead =  initialized sample
+- var overhead =  initialized sample
+- var equal =  initialized sample
+   - Expected: backend_comparison_scalar_p50_us(samples) equals `2000`
 
-Runnable source: 22 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -164,39 +218,53 @@ slower.fixture_id = "wm_compare:button_grid:64:slow"
 slower.p50_frame_us = 2500
 slower.p95_frame_us = 2600
 slower.p95_input_to_paint_us = 2700
+var slower_overhead = _initialized_sample()
+slower_overhead.fixture_id = "wm_compare:button_grid:64:slow-overhead"
+slower_overhead.p50_frame_us = 2500
+slower_overhead.p95_frame_us = 2600
+slower_overhead.p95_input_to_paint_us = 2700
+slower_overhead.artifact_submit_us = 2100
 var overhead = _initialized_sample()
 overhead.fixture_id = "wm_compare:button_grid:64:overhead"
 overhead.artifact_submit_us = 700
 overhead.artifact_readback_us = 400
-val samples = [scalar, fast, slower, overhead]
+var equal = _initialized_sample()
+equal.fixture_id = "wm_compare:button_grid:64:equal"
+equal.p50_frame_us = 2000
+equal.p95_frame_us = 2100
+equal.p95_input_to_paint_us = 2200
+val samples = [scalar, fast, slower, slower_overhead, overhead, equal]
 expect(backend_comparison_scalar_p50_us(samples)).to_equal(2000)
 val sdn = backend_comparison_samples_sdn(samples)
 expect(sdn).to_contain("scalar_baseline_p50_us: 2000")
 expect(sdn).to_contain("backend_faster_than_scalar_count: 2")
-expect(sdn).to_contain("backend_slower_than_scalar_count: 1")
-expect(sdn).to_contain("offload_overhead_contained_count: 2")
-expect(sdn).to_contain("offload_overhead_dominates_count: 1")
+expect(sdn).to_contain("backend_equal_to_scalar_count: 1")
+expect(sdn).to_contain("backend_slower_than_scalar_count: 2")
+expect(sdn).to_contain("offload_overhead_contained_count: 3")
+expect(sdn).to_contain("offload_overhead_dominates_count: 2")
+expect(sdn).to_contain("offload_useful_count: 1")
+expect(sdn).to_contain("offload_faster_but_overhead_dominates_count: 1")
+expect(sdn).to_contain("offload_break_even_count: 1")
+expect(sdn).to_contain("offload_slower_communication_overhead_count: 1")
+expect(sdn).to_contain("offload_slower_compute_bound_count: 1")
 ```
 
 </details>
 
 #### rejects initialized comparison samples without pixel proof fallback reason compiler metadata or runtime provenance
 
-1. var missing proof =  initialized sample
+- var missing proof =  initialized sample
    - Expected: backend_comparison_sample_valid(missing_proof) is false
-
-2. var missing reason =  initialized sample
+- var missing reason =  initialized sample
    - Expected: backend_comparison_sample_valid(missing_reason) is false
-
-3. var missing metadata =  initialized sample
+- var missing metadata =  initialized sample
    - Expected: backend_comparison_sample_valid(missing_metadata) is false
-
-4. var missing runtime =  initialized sample
+- var missing runtime =  initialized sample
    - Expected: backend_comparison_sample_valid(missing_runtime) is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -225,7 +293,7 @@ expect(backend_comparison_sample_valid(missing_runtime)).to_equal(false)
 #### rejects initialized accelerated lane evidence without scalar baseline comparison
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -255,7 +323,7 @@ expect(backend_measurement_satisfies_lane(record)).to_equal(false)
 #### rejects initialized OpenCL lane evidence without scalar baseline comparison
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -285,7 +353,7 @@ expect(backend_measurement_satisfies_lane(record)).to_equal(false)
 #### accepts unavailable backend lanes only with explicit reason
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -305,13 +373,13 @@ expect(backend_measurement_satisfies_lane(record)).to_equal(true)
 
 #### normalizes unavailable backend comparison samples with explicit reason
 
-1. StrictBackendFactory strict
+- StrictBackendFactory strict
    - Expected: backend_comparison_unavailable_valid(sample) is true
    - Expected: backend_comparison_sample_valid(sample) is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -361,7 +429,7 @@ expect(sdn).to_contain("unavailable_reason:")
 #### rejects fallback evidence for an accelerated lane
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -393,7 +461,7 @@ expect(backend_measurement_satisfies_lane(record)).to_equal(false)
 #### rejects fallback evidence for OpenCL like CUDA and Vulkan
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -424,12 +492,12 @@ expect(backend_measurement_satisfies_lane(record)).to_equal(false)
 
 #### requires OpenCL initialized samples to carry GPU artifact timings
 
-1.  initialized record
+-  initialized record
    - Expected: backend_comparison_sample_valid(sample) is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -463,20 +531,16 @@ expect(backend_comparison_sample_valid(sample)).to_equal(false)
 
 #### requires Metal Vulkan CUDA OpenCL HIP and CPU SIMD lanes in the matrix
 
-1. StrictBackendFactory strict
-
-2. StrictBackendFactory strict
-
-3. StrictBackendFactory strict
-
-4. StrictBackendFactory strict
-
-5. StrictBackendFactory strict
+- StrictBackendFactory strict
+- StrictBackendFactory strict
+- StrictBackendFactory strict
+- StrictBackendFactory strict
+- StrictBackendFactory strict
    - Expected: backend_measurement_matrix_valid(records) is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -528,7 +592,7 @@ expect(sdn).to_contain("p95_us:")
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/wm_compare/backend_measurement_report_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-08 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -540,8 +604,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

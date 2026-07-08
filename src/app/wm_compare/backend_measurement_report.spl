@@ -126,6 +126,25 @@ pub fn backend_comparison_speed_verdict(sample: BackendComparisonSample, scalar_
         return "backend-equal-to-scalar"
     "backend-slower-than-scalar"
 
+pub fn backend_comparison_offload_efficiency_verdict(sample: BackendComparisonSample, scalar_p50_frame_us: i64) -> text:
+    if not _is_gpu_family(sample.backend_family):
+        return "not-gpu-offload"
+    val speed = backend_comparison_speed_verdict(sample, scalar_p50_frame_us)
+    if speed == "unavailable" or speed == "missing-scalar-baseline":
+        return speed
+    val overhead = backend_comparison_offload_overhead_verdict(sample)
+    if overhead == "missing-artifact-timing" or overhead == "missing-frame-timing":
+        return overhead
+    if speed == "backend-faster-than-scalar":
+        if overhead == "offload-overhead-dominates":
+            return "offload-faster-but-overhead-dominates"
+        return "offload-useful"
+    if speed == "backend-equal-to-scalar":
+        return "offload-break-even"
+    if overhead == "offload-overhead-dominates":
+        return "offload-slower-communication-overhead"
+    "offload-slower-compute-bound"
+
 fn _is_scalar_baseline_family(name: text) -> bool:
     name == "software" or name == "cpu" or name == "scalar" or name == "cpu_scalar"
 
@@ -146,6 +165,13 @@ fn _comparison_offload_overhead_verdict_count(samples: [BackendComparisonSample]
     var count = 0
     for sample in samples:
         if _is_gpu_family(sample.backend_family) and backend_comparison_offload_overhead_verdict(sample) == verdict:
+            count = count + 1
+    count
+
+fn _comparison_offload_efficiency_verdict_count(samples: [BackendComparisonSample], scalar_p50_frame_us: i64, verdict: text) -> i32:
+    var count = 0
+    for sample in samples:
+        if _is_gpu_family(sample.backend_family) and backend_comparison_offload_efficiency_verdict(sample, scalar_p50_frame_us) == verdict:
             count = count + 1
     count
 
@@ -544,6 +570,11 @@ pub fn backend_comparison_samples_sdn(samples: [BackendComparisonSample]) -> tex
         "backend_slower_than_scalar_count: " + _comparison_speed_verdict_count(samples, scalar_p50_frame_us, "backend-slower-than-scalar").to_string() + " " +
         "offload_overhead_contained_count: " + _comparison_offload_overhead_verdict_count(samples, "offload-overhead-contained").to_string() + " " +
         "offload_overhead_dominates_count: " + _comparison_offload_overhead_verdict_count(samples, "offload-overhead-dominates").to_string() + " " +
+        "offload_useful_count: " + _comparison_offload_efficiency_verdict_count(samples, scalar_p50_frame_us, "offload-useful").to_string() + " " +
+        "offload_faster_but_overhead_dominates_count: " + _comparison_offload_efficiency_verdict_count(samples, scalar_p50_frame_us, "offload-faster-but-overhead-dominates").to_string() + " " +
+        "offload_break_even_count: " + _comparison_offload_efficiency_verdict_count(samples, scalar_p50_frame_us, "offload-break-even").to_string() + " " +
+        "offload_slower_communication_overhead_count: " + _comparison_offload_efficiency_verdict_count(samples, scalar_p50_frame_us, "offload-slower-communication-overhead").to_string() + " " +
+        "offload_slower_compute_bound_count: " + _comparison_offload_efficiency_verdict_count(samples, scalar_p50_frame_us, "offload-slower-compute-bound").to_string() + " " +
         "valid: " + _bool_text(backend_comparison_samples_valid(samples)) + "\n" +
         entries.join("\n") + "\n)"
 
