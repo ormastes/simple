@@ -12,6 +12,7 @@ ENTRY_DIR="build/os/generated"
 DIRECT_ENTRY="$ENTRY_DIR/nvme_fw_rv64_direct_entry.spl"
 TIMEOUT_SECS="${NVME_RV64_BUILD_TIMEOUT_SECS:-300}"
 SIMPLE_BIN="${NVME_RV64_SIMPLE_BIN:-bin/simple}"
+SECTION="${NVME_RV64_BUILD_SECTION:-all}"
 LOG_DIR="build/test-artifacts"
 OUT_LOG="$LOG_DIR/nvme_fw_rv64_build.out"
 ERR_LOG="$LOG_DIR/nvme_fw_rv64_build.err"
@@ -47,7 +48,9 @@ fi
 
 rm -f "$DIRECT_ENTRY" "$OUT" "$OBJ" "$START_OBJ" "$START_ASM"
 
-cat >"$DIRECT_ENTRY" <<'EOF_DIRECT_ENTRY'
+case "$SECTION" in
+  all)
+    cat >"$DIRECT_ENTRY" <<'EOF_DIRECT_ENTRY'
 use logic.{nvme_fw_rv32_logic_selftest}
 
 @export("C", name: "rt_rv64_boot_optional_nvme_fw_selftest")
@@ -57,13 +60,44 @@ fn rt_rv64_boot_optional_nvme_fw_selftest() -> i64:
 fn main() -> i64:
     nvme_fw_rv32_logic_selftest() as i64
 EOF_DIRECT_ENTRY
+    ;;
+  primary)
+    cat >"$DIRECT_ENTRY" <<'EOF_DIRECT_ENTRY'
+use logic_sections_primary.{nvme_fw_rv32_primary_sections}
+
+@export("C", name: "rt_rv64_boot_optional_nvme_fw_selftest")
+fn rt_rv64_boot_optional_nvme_fw_selftest() -> i64:
+    nvme_fw_rv32_primary_sections() as i64
+
+fn main() -> i64:
+    nvme_fw_rv32_primary_sections() as i64
+EOF_DIRECT_ENTRY
+    ;;
+  secondary)
+    cat >"$DIRECT_ENTRY" <<'EOF_DIRECT_ENTRY'
+use logic_sections_secondary.{nvme_fw_rv32_secondary_sections}
+
+@export("C", name: "rt_rv64_boot_optional_nvme_fw_selftest")
+fn rt_rv64_boot_optional_nvme_fw_selftest() -> i64:
+    nvme_fw_rv32_secondary_sections() as i64
+
+fn main() -> i64:
+    nvme_fw_rv32_secondary_sections() as i64
+EOF_DIRECT_ENTRY
+    ;;
+  *)
+    echo "NVME_RV64_BUILD_FAILED invalid-section section=$SECTION expected=all,primary,secondary" >&2
+    exit 2
+    ;;
+esac
 
 {
   echo "NVME_RV64_BUILD_START timeout=${TIMEOUT_SECS}s out=$OUT"
   echo "compiler=$SIMPLE_BIN"
   echo "sources=build/os/generated,examples/09_embedded/simpleos_nvme_fw/fw_rv32"
-  echo "entry=$DIRECT_ENTRY target=riscv64-unknown-none mode=direct_firmware"
+  echo "entry=$DIRECT_ENTRY target=riscv64-unknown-none mode=direct_firmware section=$SECTION"
   echo "closure=compiler-verbose"
+  echo "stub_fallback=disabled"
 } >"$OUT_LOG"
 : >"$ERR_LOG"
 
@@ -170,7 +204,7 @@ fi
 
 BUILD_START_EPOCH=$(date +%s)
 set +e
-env SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 "$SIMPLE_BIN" native-build --backend llvm \
+env SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BIN" native-build --backend llvm \
   --source build/os/generated --source examples/09_embedded/simpleos_nvme_fw/fw_rv32 \
   --entry "$DIRECT_ENTRY" --entry-closure \
   --target riscv64-unknown-none \
@@ -205,6 +239,7 @@ if [ "$rc" -ne 0 ]; then
     BUILD_REASON="external-termination-before-timeout"
   fi
   echo "NVME_RV64_BUILD_FAILED code=$rc reason=$BUILD_REASON timeout=${TIMEOUT_SECS}s elapsed=${BUILD_ELAPSED_SECS}s out=$OUT_LOG err=$ERR_LOG" >&2
+  grep -E "\\[native-build\\] Entry closure files|\\[native-build\\] Driver start|phase2:parse:file:" "$OUT_LOG" | tail -n 20 >&2 || true
   tail -n 40 "$OUT_LOG" >&2 || true
   tail -n 40 "$ERR_LOG" >&2 || true
   exit "$rc"

@@ -764,26 +764,55 @@ Terminated
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
 
-## Update — build wrapper emits closure diagnostics
+## Update — closure diagnostics and fail-closed stub fallback
 
-The RV64 direct build wrapper now runs `native-build` with `--verbose` and
-records `closure=compiler-verbose` in `build/test-artifacts/nvme_fw_rv64_build.out`.
-That makes the compiler's `Entry closure files:` / `Driver start:` lines part
-of the normal evidence stream once the current self-hosted startup reaches that
-phase.
+The RV64 direct build wrapper now runs `native-build` with `--verbose`, records
+`closure=compiler-verbose`, and sets `SIMPLE_NO_STUB_FALLBACK=1` with
+`stub_fallback=disabled`. Production firmware must not silently accept codegen
+stub fallback. The failure path also prints the compiler closure count,
+driver-start line, and latest parse phase lines directly before the generic
+log tails.
 
-A bounded 25s probe still fails closed before producing
-`build/nvme_fw_rv64.elf`:
+A 60s bounded full-build probe still failed before producing
+`build/nvme_fw_rv64.elf`, but reached the compiler closure evidence:
 
 ```text
-NVME_RV64_BUILD_FAILED code=124 reason=native-build-timeout timeout=25s elapsed=30s ...
-closure=compiler-verbose
+[native-build] Entry closure files: 177
+[native-build] Driver start: inputs=177 backend=llvm mode=dynload
+[BOOTSTRAP-PHASE] +2759ms phase2:parse:file:start .../logic_sections_primary.spl chars=1441
+NVME_RV64_BUILD_FAILED code=124 reason=native-build-timeout timeout=60s elapsed=60s ...
+stub_fallback=disabled
 ```
 
-The short probe did not reach the compiler closure-count line; it timed out
-while the self-hosted compiler was still emitting existing codegen ambiguity
-diagnostics. Treat this as evidence instrumentation only, not RV64 ELF
-completion.
+This narrows the remaining blocker: the direct RV64 firmware build is no longer
+an unknown source-root problem; it is compiling a 177-file entry closure and
+timing out while parsing that closure with the current self-hosted compiler.
+
+## Update — primary section closure probe
+
+The RV64 direct build wrapper now supports
+`NVME_RV64_BUILD_SECTION=all|primary|secondary`. The default remains `all` for
+the production firmware path; the section selector is a diagnostic/probe knob
+for isolating closure size and future chunked-build work. Invalid section names
+fail closed:
+
+```text
+NVME_RV64_BUILD_FAILED invalid-section section=nope expected=all,primary,secondary
+```
+
+A 60s primary-section probe reduced the entry closure from 177 files to 117
+files, but still timed out while parsing:
+
+```text
+entry=build/os/generated/nvme_fw_rv64_direct_entry.spl target=riscv64-unknown-none mode=direct_firmware section=primary
+stub_fallback=disabled
+[BOOTSTRAP-PHASE] +9ms phase1:load_sources:done n_sources=117
+[BOOTSTRAP-PHASE] +17647ms phase2:parse:file:start .../logic_journal_count_cases.spl chars=260
+NVME_RV64_BUILD_FAILED code=124 reason=native-build-timeout timeout=60s elapsed=60s ...
+```
+
+This confirms primary/secondary chunking can reduce closure size, but primary
+alone is still too large for the current 60s self-hosted parse budget.
 
 ## Update — elapsed evidence shows external termination before 120s cap
 
