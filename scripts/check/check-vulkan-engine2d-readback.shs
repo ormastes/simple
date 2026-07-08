@@ -45,10 +45,37 @@ value_of() {
     sed -n "s/^${key}=//p" "$EVIDENCE_LOG" | tail -n 1
 }
 
+is_unsigned_decimal() {
+    printf '%s\n' "$1" | grep -Eq '^[0-9]+$'
+}
+
+pass_failure_reason() {
+    [ "$(value_of present_exercised)" = "true" ] || { echo "missing-present"; return; }
+    [ "$(value_of readback_exercised)" = "true" ] || { echo "missing-readback"; return; }
+    [ "$(value_of backend_name)" = "vulkan" ] || { echo "backend-not-vulkan"; return; }
+    for op in clear rect; do
+        [ "$(value_of "${op}_status")" = "pass" ] || { echo "${op}-not-pass"; return; }
+        expected="$(value_of "${op}_expected_checksum")"
+        actual="$(value_of "${op}_actual_checksum")"
+        mismatches="$(value_of "${op}_mismatches")"
+        is_unsigned_decimal "$expected" && is_unsigned_decimal "$actual" || { echo "${op}-checksum-missing"; return; }
+        [ "$expected" = "$actual" ] || { echo "${op}-checksum-mismatch"; return; }
+        [ "$mismatches" = "0" ] || { echo "${op}-mismatch-count"; return; }
+    done
+}
+
 write_report() {
     status="$1"
     reason="$2"
     spec_status="$3"
+    if [ "$status" = "pass" ]; then
+        fail_reason="$(pass_failure_reason)"
+        if [ -n "$fail_reason" ]; then
+            status="fail"
+            reason="$fail_reason"
+            spec_status="fail"
+        fi
+    fi
     {
         echo "vulkan_engine2d_readback_status=$status"
         echo "vulkan_engine2d_readback_reason=$reason"
@@ -115,6 +142,104 @@ write_report() {
         sed 's/^/- /' "$EVIDENCE_LOG" 2>/dev/null || true
     } >"$REPORT_PATH"
 }
+
+if [ "${1:-}" = "--self-test" ]; then
+    self_dir="${WORK_DIR}.self_test"
+    rm -rf "$self_dir"
+    mkdir -p "$self_dir"
+    EVIDENCE_LOG="$self_dir/evidence.log"
+    ENV_PATH="$self_dir/evidence.env"
+    REPORT_PATH="$self_dir/report.md"
+    STRICT_LOG="$self_dir/vulkan_strict.json"
+    PARITY_LOG="$self_dir/engine2d_cpu_vulkan_parity.json"
+    STRICT_CODE=0
+    PARITY_CODE=0
+
+    cat >"$EVIDENCE_LOG" <<'EOF'
+backend_name=vulkan
+readback_exercised=true
+clear_status=pass
+clear_expected_checksum=0
+clear_actual_checksum=0
+clear_mismatches=0
+rect_status=pass
+rect_expected_checksum=1
+rect_actual_checksum=1
+rect_mismatches=0
+EOF
+    write_report pass pass pass
+    if ! grep -q '^vulkan_engine2d_readback_status=fail$' "$ENV_PATH" \
+        || ! grep -q '^vulkan_engine2d_readback_reason=missing-present$' "$ENV_PATH"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-present-accepted"
+        exit 1
+    fi
+
+    cat >"$EVIDENCE_LOG" <<'EOF'
+present_exercised=true
+backend_name=vulkan
+clear_status=pass
+clear_expected_checksum=0
+clear_actual_checksum=0
+clear_mismatches=0
+rect_status=pass
+rect_expected_checksum=1
+rect_actual_checksum=1
+rect_mismatches=0
+EOF
+    write_report pass pass pass
+    if ! grep -q '^vulkan_engine2d_readback_status=fail$' "$ENV_PATH" \
+        || ! grep -q '^vulkan_engine2d_readback_reason=missing-readback$' "$ENV_PATH"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-readback-accepted"
+        exit 1
+    fi
+
+    cat >"$EVIDENCE_LOG" <<'EOF'
+present_exercised=true
+readback_exercised=true
+backend_name=vulkan
+clear_status=pass
+clear_expected_checksum=0
+clear_actual_checksum=0
+clear_mismatches=0
+rect_status=pass
+rect_expected_checksum=1
+rect_actual_checksum=2
+rect_mismatches=0
+EOF
+    write_report pass pass pass
+    if ! grep -q '^vulkan_engine2d_readback_status=fail$' "$ENV_PATH" \
+        || ! grep -q '^vulkan_engine2d_readback_reason=rect-checksum-mismatch$' "$ENV_PATH"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=checksum-mismatch-accepted"
+        exit 1
+    fi
+
+    cat >"$EVIDENCE_LOG" <<'EOF'
+present_exercised=true
+readback_exercised=true
+backend_name=vulkan
+clear_status=pass
+clear_expected_checksum=0
+clear_actual_checksum=0
+clear_mismatches=0
+rect_status=pass
+rect_expected_checksum=1
+rect_actual_checksum=1
+rect_mismatches=0
+EOF
+    write_report pass pass pass
+    if ! grep -q '^vulkan_engine2d_readback_status=pass$' "$ENV_PATH"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=valid-readback-rejected"
+        exit 1
+    fi
+
+    echo "self_test_status=pass"
+    echo "self_test_reason=vulkan-present-readback-checksum-gate"
+    exit 0
+fi
 
 mkdir -p "$WORK_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$EVIDENCE_LOG" "$STRICT_LOG" "$PARITY_LOG" "$ENV_PATH" "$REPORT_PATH" "$CLEAR_EXPECTED_PIXELS" "$CLEAR_ACTUAL_PIXELS" "$RECT_EXPECTED_PIXELS" "$RECT_ACTUAL_PIXELS"
