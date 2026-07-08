@@ -55,7 +55,9 @@ report for the current Simple backend profile. It was regenerated at
 The 2026-07-08 run is the current full-size CPU drawing comparison. It proves
 the CPU-SIMD and scalar software paths preserve checksum and full 8K pixel
 coverage with no screen-size reduction; it does not claim the CUDA lane passed
-on that host.
+on that host. It also records `gui_perf_cpu_base_compare_target_met=no` against
+Node Canvas/Cairo; the open blocker is
+`doc/08_tracking/bug/cpu_simd_external_cairo_8k_perf_gap_2026-07-09.md`.
 
 ### Existing Evidence: Simple vs GTK Cold Start (from `gtk_gui_repeat_evidence`)
 

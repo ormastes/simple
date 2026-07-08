@@ -108,7 +108,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contra
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -129,6 +129,13 @@ expect(script).to_contain("falling back to interpreter")
 expect(script).to_contain("cpu_simd_render_scale_contract_mode=$EXEC_MODE")
 expect(script).to_contain("cpu_simd_render_scale_contract_dpi=$DPI")
 expect(script).to_contain("cpu_simd_render_scale_contract_sample_count=$SAMPLE_COUNT")
+expect(script).to_contain("CPU_SIMD_RENDER_SCALE_4K_WIDTH:-3840")
+expect(script).to_contain("CPU_SIMD_RENDER_SCALE_8K_WIDTH:-7680")
+expect(script).to_contain("run_export 4k_software \"$WIDTH_4K\" \"$HEIGHT_4K\" software 4k")
+expect(script).to_contain("run_export 8k_software \"$WIDTH_8K\" \"$HEIGHT_8K\" software 8k")
+expect(script).to_contain("_software_checksum_parity")
+expect(script).to_contain("cpu_simd_render_scale_4k_software_checksum_parity=true")
+expect(script).to_contain("cpu_simd_render_scale_8k_software_checksum_parity=true")
 ```
 
 </details>
