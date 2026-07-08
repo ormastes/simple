@@ -1,0 +1,35 @@
+use std.spec
+use std.gc_sync_mut.db.dbfs_engine.{
+    TxnId, TxnStep, DbfsTxn, TXN_STATUS_COMMITTED,
+    INLINE_THRESHOLD, InlineEntry, InlineDataStore, ReadSource,
+    resolve_read_source, serialize_inline_entry, deserialize_inline_entry,
+    WAL_RECORD_DATA, WAL_RECORD_COMMIT
+}
+
+describe "gc_sync_mut DBFS engine facade":
+
+    it "re-exports transaction, inline-data, and WAL contracts":
+        var txn = DbfsTxn.new(TxnId.null())
+        expect(txn.write_data("abc").is_ok()).to_equal(true)
+        expect(txn.write_metadata_private().is_ok()).to_equal(true)
+        expect(txn.append_wal().is_ok()).to_equal(true)
+        expect(txn.flush_wal().is_ok()).to_equal(true)
+        expect(txn.publish_root().is_ok()).to_equal(true)
+        expect(txn.commit().is_ok()).to_equal(true)
+        expect(txn.status).to_equal(TXN_STATUS_COMMITTED)
+        val order = txn.observe_steps().order()
+        expect(order.index_of(TxnStep.Data)).to_equal(0)
+        expect(order.index_of(TxnStep.Commit) > order.index_of(TxnStep.WalFlush)).to_equal(true)
+
+        val entry = InlineEntry(ino_id: 9, data: [0x41, 0x42], size: 2)
+        val encoded = serialize_inline_entry(entry)
+        val decoded = deserialize_inline_entry(encoded)
+        expect(decoded.data[1]).to_equal(0x42)
+        var store = InlineDataStore.new(INLINE_THRESHOLD)
+        expect(store.put(9, [0x41, 0x42])).to_equal(true)
+        match resolve_read_source(9, 2, store):
+            case ReadSource.Inline(data):
+                expect(data.len() as i64).to_equal(2)
+            case ReadSource.Extent:
+                fail("small inline payload resolved to extent")
+        expect(WAL_RECORD_DATA != WAL_RECORD_COMMIT).to_equal(true)
