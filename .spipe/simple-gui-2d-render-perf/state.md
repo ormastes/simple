@@ -103,6 +103,17 @@ implementation-evidence-in-progress
   native-mode smoke falls back to interpreter because HIR lowering cannot resolve
   `web_backend_env_get` while lowering `_chromium_tmp_dir`. Tracked as
   `doc/08_tracking/bug/cpu_simd_4k_8k_render_scale_interpreter_termination.md`.
+- implementation: Fixed the native/JIT fallback by importing `env_get` directly
+  in `web_render_backend.spl` instead of aliasing it through `mod_stub`.
+- verification: `sh scripts/check/check-cpu-simd-render-scale-contract.shs`
+  now passes in native mode at full 4K and 8K with
+  `cpu_simd_render_scale_4k_pixels=3840x2160`,
+  `cpu_simd_render_scale_4k_p50_frame_us=462364`,
+  `cpu_simd_render_scale_8k_pixels=7680x4320`,
+  `cpu_simd_render_scale_8k_p50_frame_us=1007526`, 300dpi default metadata,
+  `screen_size_reduced=false`, CPU-SIMD selection, checksum proof, and no
+  fallback/unavailable reason. Retained report:
+  `doc/09_report/cpu_simd_render_scale_contract_2026-07-08.md`.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 
@@ -137,9 +148,8 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
   requires exact software parity and positive alpha hits for a translucent fill
   without adding tolerance or blur.
 - CPU-SIMD 4K/8K no-reduction evidence now has a fail-closed wrapper at
-  `scripts/check/check-cpu-simd-render-scale-contract.shs`; current full-size
-  status is blocked by interpreter termination/native lowering fallback, not by
-  missing contract coverage.
+  `scripts/check/check-cpu-simd-render-scale-contract.shs`; native full-size
+  evidence passes for 3840x2160 and 7680x4320 with no screen-size reduction.
 - Native Simple executable size/speed evidence is intentionally skipped in the fast smoke run (`SKIP_SIMPLE_NATIVE=1`); a release-grade run should capture native artifact bytes or record an explicit native-build blocker.
 - Wire unwired probes into contract: warm_startup, frame_time_p50/p95, input_to_paint.
 - Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture

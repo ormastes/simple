@@ -2,7 +2,7 @@
 
 ## Status
 
-open
+fixed
 
 ## Evidence
 
@@ -15,19 +15,16 @@ open
 - `bin/simple run src/app/wm_compare/backend_measurement_software_export.spl --mode=native`
   falls back to interpreter with:
   `HIR lowering error: Unknown variable: web_backend_env_get while lowering _chromium_tmp_dir`.
+- Fixed by importing `env_get` directly in `web_render_backend.spl` instead of
+  aliasing it through `mod_stub`.
+- `sh scripts/check/check-cpu-simd-render-scale-contract.shs` now passes in
+  native mode with full 3840x2160 and 7680x4320 CPU-SIMD rows.
 
 ## Impact
 
-Current evidence can prove CPU-SIMD backend selection, DPI metadata, no
-screen-size reduction, checksums, and timing at small dimensions, but full 4K/8K
-CPU-SIMD render-loop evidence is blocked until the compiled/native path works
-or the interpreter memory/runtime ceiling is removed.
+Resolved for the native scale contract. Interpreter-only full-size runs remain
+too expensive for this lane; the canonical evidence path is native mode.
 
 ## Required Fix
 
-Fix the native lowering/import path for `web_backend_env_get` in the Simple Web
-render backend closure, then rerun:
-
-```sh
-sh scripts/check/check-cpu-simd-render-scale-contract.shs
-```
+No remaining action for this bug.

@@ -1,7 +1,7 @@
 # Interpreter: `env_get as web_backend_env_get` re-export alias unresolved — chromium WebRenderBackend facade crashes E1002
 
 Date: 2026-07-07
-Status: open (pre-existing, discovered during backend-isolation Gap B integration)
+Status: fixed
 Severity: P2
 Related: web_render_backend (`--web-engine chromium` facade), family of
 `interp_module_alias_time_shadowed_builtin_2026-07-02.md` (interpreter
@@ -91,3 +91,10 @@ particularly for `env_get`-shaped stdlib entry points.
 
 Until fixed, the chromium lane is native/compiled-mode only; interpret mode
 fails loudly (E1002) rather than silently degrading.
+
+## Fix
+
+2026-07-08: `web_render_backend.spl` now imports `env_get` directly from the
+env facade instead of aliasing it through `mod_stub`. Native CPU-SIMD scale
+evidence no longer falls back on `web_backend_env_get` lowering and
+`sh scripts/check/check-cpu-simd-render-scale-contract.shs` passes at 4K and 8K.

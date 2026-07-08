@@ -143,10 +143,11 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
   wrapper requires semi-transparent fill output to match software exactly and
   records the alpha hit count/checksums.
 - CPU-SIMD 4K/8K scale evidence is gated by
-  `scripts/check/check-cpu-simd-render-scale-contract.shs`. Current full-size
-  runs are blocked by interpreter termination; native-mode smoke falls back to
-  interpreter because `web_backend_env_get` is not resolved during HIR lowering.
-  See `doc/08_tracking/bug/cpu_simd_4k_8k_render_scale_interpreter_termination.md`.
+  `scripts/check/check-cpu-simd-render-scale-contract.shs`. It runs native
+  CPU-SIMD rows at 3840x2160 and 7680x4320, requires full logical/physical
+  dimensions, 300dpi retina metadata, checksum/nonzero-pixel proof, positive
+  timing, and no fallback/unavailable reason. Latest retained evidence:
+  `doc/09_report/cpu_simd_render_scale_contract_2026-07-08.md`.
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
 - Software layout renders must not replay the already-painted framebuffer
   through an Engine2D software present/readback cycle. The 2026-06-06
@@ -168,9 +169,9 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
 1. **Compiled Simple 8K repeats**: CUDA and software backends now have measured
    smoke rows; repeat at 8K with multiple frames before making release claims.
 2. **CPU SIMD at 8K**: AVX2 backend has a dedicated `simple_web_cpu_simd`
-   benchmark row and CPU drawing-library compare fields, but no 8K throughput
-   evidence has been captured yet. The focused scale wrapper is in place, but
-   full-size execution currently terminates in the interpreter path.
+   benchmark row and CPU drawing-library compare fields. The focused native
+   scale contract captures 8K p50 timing and no-reduction proof; release-grade
+   performance claims still need repeated runs on the target hardware.
 3. **Tauri integration**: Needs `cargo-tauri` CLI + WebKitGTK dev package
 4. **Software text/layout optimization**: the real software render-loop row is
    still far slower than JS/GTK at 320x240; move bitmap/vector font and text-blit
