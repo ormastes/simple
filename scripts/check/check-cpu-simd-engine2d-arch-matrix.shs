@@ -111,7 +111,7 @@ target_file_pattern() {
 run_target_binary_build() {
     arch="$1"
     arch_dir="$BUILD_DIR/$arch"
-    out_bin="$arch_dir/llvm_nested_method_probe"
+    out_bin="$arch_dir/engine2d-simd-c-kernels/engine2d_simd_c_test"
     triple="$(target_triple "$arch")"
     runner="$(target_runner "$arch")"
     mkdir -p "$arch_dir"
@@ -119,37 +119,34 @@ run_target_binary_build() {
     if [ "$TARGET_BUILD" != "1" ]; then
         status=unavailable
         reason=disabled
-    elif [ ! -x "$NATIVE_BUILD_SIMPLE" ]; then
-        status=unavailable
-        reason=missing-native-build-driver
     elif [ "$runner" != "" ] && ! command -v "$(printf '%s' "$runner" | awk '{print $1}')" >/dev/null 2>&1; then
         status=unavailable
         reason=missing-qemu-runner
+    elif ! command -v "$(runtime_cc "$arch")" >/dev/null 2>&1; then
+        status=unavailable
+        reason=missing-c-compiler
     else
         set +e
-        "$NATIVE_BUILD_SIMPLE" native-build --target="$triple" \
-            --source examples --entry examples/llvm_nested_method_probe.spl \
-            --entry-closure --runtime-bundle core-c-bootstrap --threads 1 \
-            --timeout 120 -o "$out_bin" >"$arch_dir/native-build.stdout.txt" 2>"$arch_dir/native-build.stderr.txt"
-        build_code=$?
+        CC="$(runtime_cc "$arch")" \
+            BUILD_DIR="$arch_dir/engine2d-simd-c-kernels" \
+            ENGINE2D_SIMD_C_KERNELS_CFLAGS="$(if [ "$arch" = "riscv64" ]; then printf '%s' "-march=rv64gcv -mabi=lp64d"; fi)" \
+            ENGINE2D_SIMD_C_KERNELS_RUNNER="$runner" \
+            sh scripts/check/check-engine2d-simd-c-kernels.shs \
+            >"$arch_dir/engine2d-simd-c-kernels.stdout.txt" \
+            2>"$arch_dir/engine2d-simd-c-kernels.stderr.txt"
+        run_code=$?
         file "$out_bin" >"$arch_dir/file.txt" 2>/dev/null
         file_code=$?
-        # shellcheck disable=SC2086
-        $runner "$out_bin" >"$arch_dir/run.stdout.txt" 2>"$arch_dir/run.stderr.txt"
-        run_code=$?
         set -e
-        if [ "$build_code" -ne 0 ]; then
+        if [ "$run_code" -ne 0 ]; then
             status=fail
-            reason="native-build-exit-$build_code"
+            reason="engine2d-simd-c-kernels-exit-$run_code"
         elif [ "$file_code" -ne 0 ] || ! grep -q "$(target_file_pattern "$arch")" "$arch_dir/file.txt"; then
             status=fail
             reason=target-file-mismatch
-        elif [ "$run_code" -ne 0 ]; then
-            status=fail
-            reason="target-run-exit-$run_code"
         else
             status=pass
-            reason=target-binary-ran
+            reason=engine2d-simd-c-kernels-ran
         fi
     fi
 

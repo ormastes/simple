@@ -26,7 +26,6 @@ set -eu
 #   BUILD_DIR   default: build/check/engine2d-simd-c-kernels
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-ROOT_DIR="$(CDPATH= cd -- "$ROOT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
 SRC="src/runtime/runtime_simd_dispatch.c"
@@ -34,6 +33,8 @@ TEST="test/09_baselines/engine2d_simd/engine2d_simd_c_test.c"
 BUILD_DIR="${BUILD_DIR:-build/check/engine2d-simd-c-kernels}"
 GEN_HDR="$BUILD_DIR/engine2d_simd_helpers.generated.h"
 BIN="$BUILD_DIR/engine2d_simd_c_test"
+EXTRA_CFLAGS="${ENGINE2D_SIMD_C_KERNELS_CFLAGS:-}"
+RUNNER="${ENGINE2D_SIMD_C_KERNELS_RUNNER:-}"
 
 fail() {
     echo "engine2d-simd-c-kernels: fail"
@@ -69,13 +70,15 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
-# Slice the helper block out of the real source verbatim: from the line that
-# defines engine2d_fill_into up to (but not including) the first SplArray*
-# helper that begins the runtime-coupled entry points. Anchored on stable
-# function-name lines.
+# Slice the helper blocks out of the real source verbatim. Keep the pure
+# raw-buffer helpers and their AVX2/RVV specializations, but exclude the
+# runtime-coupled SplArray entry points between them.
 awk '
-    /^static void engine2d_fill_into\(/ { grab = 1 }
+    /^static atomic_uint_fast64_t g_engine2d_simd_row_hits/ { grab = 1 }
     /^static SplArray\* engine2d_new_pixel_array\(/ { grab = 0 }
+    /^SplArray\* rt_engine2d_simd_blend_row_u32\(/ { saw_return_api = 1 }
+    saw_return_api && !appended_backend_helpers && /^#if defined\(__x86_64__\)/ { grab = 1; appended_backend_helpers = 1 }
+    /^int64_t rt_engine2d_simd_fill_u32\(/ { grab = 0 }
     grab { print }
 ' "$SRC" > "$GEN_HDR"
 
@@ -92,7 +95,7 @@ for fn in engine2d_fill_into engine2d_copy_into engine2d_blend_pixel engine2d_bl
     fi
 done
 
-CFLAGS="-O2 -I$BUILD_DIR -Wall"
+CFLAGS="-O2 -I$BUILD_DIR -Wall $EXTRA_CFLAGS"
 
 # On Apple aarch64, force arm64 so the NEON (#if __aarch64__) path compiles.
 case "$(uname -s)" in
@@ -110,7 +113,8 @@ if ! $CC_BIN $CFLAGS "$TEST" -o "$BIN"; then
 fi
 
 echo "Running $BIN"
-if "$BIN"; then
+# shellcheck disable=SC2086
+if $RUNNER "$BIN"; then
     echo "engine2d-simd-c-kernels: pass"
     exit 0
 fi

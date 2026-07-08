@@ -25,9 +25,14 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 #  include <arm_neon.h>
+#endif
+
+#if defined(__riscv) && defined(__riscv_vector)
+#  include <riscv_vector.h>
 #endif
 
 /* The x86 branch of fill_into/copy_into references simd_detect_avx2(); it is
