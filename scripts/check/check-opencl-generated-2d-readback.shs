@@ -51,6 +51,142 @@ emit_unavailable() {
     emit_env "unavailable" "$reason" "false" "false"
 }
 
+opencl_env_value() {
+    key="$1"
+    grep "^$key=" "$BUILD_DIR/evidence.env" 2>/dev/null | head -1 | cut -d= -f2- || true
+}
+
+opencl_unsigned_decimal() {
+    printf '%s\n' "$1" | grep -Eq '^[0-9]+$'
+}
+
+opencl_positive_decimal() {
+    opencl_unsigned_decimal "$1" || return 1
+    printf '%s\n' "$1" | grep -Eq '[1-9]'
+}
+
+opencl_mark_claimed_pass_failed() {
+    reason="$1"
+    tmp="$BUILD_DIR/evidence.env.tmp"
+    awk -F= -v reason="$reason" '
+        /^opencl_generated_2d_readback_status=/ {
+            print "opencl_generated_2d_readback_status=fail"
+            status_seen = 1
+            next
+        }
+        /^opencl_generated_2d_readback_reason=/ {
+            print "opencl_generated_2d_readback_reason=" reason
+            reason_seen = 1
+            next
+        }
+        { print }
+        END {
+            if (!status_seen) print "opencl_generated_2d_readback_status=fail"
+            if (!reason_seen) print "opencl_generated_2d_readback_reason=" reason
+        }
+    ' "$BUILD_DIR/evidence.env" >"$tmp"
+    mv "$tmp" "$BUILD_DIR/evidence.env"
+}
+
+opencl_validate_evidence() {
+    [ -s "$BUILD_DIR/evidence.env" ] || return 0
+    status="$(opencl_env_value opencl_generated_2d_readback_status)"
+    [ "$status" = "pass" ] || return 0
+    submit="$(opencl_env_value opencl_generated_2d_readback_submit_attempted)"
+    readback="$(opencl_env_value opencl_generated_2d_readback_readback_available)"
+    expected="$(opencl_env_value opencl_generated_2d_readback_expected_checksum)"
+    actual="$(opencl_env_value opencl_generated_2d_readback_actual_checksum)"
+    mismatches="$(opencl_env_value opencl_generated_2d_readback_mismatch_count)"
+
+    if [ "$submit" != "true" ]; then
+        opencl_mark_claimed_pass_failed "missing-submit-attempt"
+    elif [ "$readback" != "true" ]; then
+        opencl_mark_claimed_pass_failed "missing-readback"
+    elif ! opencl_positive_decimal "$expected" || ! opencl_positive_decimal "$actual"; then
+        opencl_mark_claimed_pass_failed "checksum-missing-or-zero"
+    elif [ "$expected" != "$actual" ]; then
+        opencl_mark_claimed_pass_failed "aggregate-checksum-mismatch"
+    elif [ "$mismatches" != "0" ]; then
+        opencl_mark_claimed_pass_failed "aggregate-mismatch-count"
+    fi
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    self_dir="${BUILD_DIR}.self_test"
+    rm -rf "$self_dir"
+    mkdir -p "$self_dir"
+    BUILD_DIR="$self_dir"
+
+    cat >"$BUILD_DIR/evidence.env" <<'EOF'
+opencl_generated_2d_readback_status=pass
+opencl_generated_2d_readback_reason=fake
+opencl_generated_2d_readback_readback_available=true
+opencl_generated_2d_readback_expected_checksum=4
+opencl_generated_2d_readback_actual_checksum=4
+opencl_generated_2d_readback_mismatch_count=0
+EOF
+    opencl_validate_evidence
+    if ! grep -q '^opencl_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^opencl_generated_2d_readback_reason=missing-submit-attempt$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-submit-accepted"
+        exit 1
+    fi
+
+    cat >"$BUILD_DIR/evidence.env" <<'EOF'
+opencl_generated_2d_readback_status=pass
+opencl_generated_2d_readback_reason=fake
+opencl_generated_2d_readback_submit_attempted=true
+opencl_generated_2d_readback_expected_checksum=4
+opencl_generated_2d_readback_actual_checksum=4
+opencl_generated_2d_readback_mismatch_count=0
+EOF
+    opencl_validate_evidence
+    if ! grep -q '^opencl_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^opencl_generated_2d_readback_reason=missing-readback$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-readback-accepted"
+        exit 1
+    fi
+
+    cat >"$BUILD_DIR/evidence.env" <<'EOF'
+opencl_generated_2d_readback_status=pass
+opencl_generated_2d_readback_reason=fake
+opencl_generated_2d_readback_submit_attempted=true
+opencl_generated_2d_readback_readback_available=true
+opencl_generated_2d_readback_expected_checksum=4
+opencl_generated_2d_readback_actual_checksum=5
+opencl_generated_2d_readback_mismatch_count=0
+EOF
+    opencl_validate_evidence
+    if ! grep -q '^opencl_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^opencl_generated_2d_readback_reason=aggregate-checksum-mismatch$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=checksum-mismatch-accepted"
+        exit 1
+    fi
+
+    cat >"$BUILD_DIR/evidence.env" <<'EOF'
+opencl_generated_2d_readback_status=pass
+opencl_generated_2d_readback_reason=readback-pixels-matched
+opencl_generated_2d_readback_submit_attempted=true
+opencl_generated_2d_readback_readback_available=true
+opencl_generated_2d_readback_expected_checksum=4
+opencl_generated_2d_readback_actual_checksum=4
+opencl_generated_2d_readback_mismatch_count=0
+EOF
+    opencl_validate_evidence
+    if ! grep -q '^opencl_generated_2d_readback_status=pass$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=valid-readback-rejected"
+        exit 1
+    fi
+
+    echo "self_test_status=pass"
+    echo "self_test_reason=opencl-submit-readback-checksum-gate"
+    exit 0
+fi
+
 loader_present=false
 if has_opencl_loader; then
     loader_present=true
@@ -353,6 +489,8 @@ C_EOF
     fi
 fi
 
+. "$BUILD_DIR/evidence.env"
+opencl_validate_evidence
 . "$BUILD_DIR/evidence.env"
 generated_2d_report_from_env "$REPORT_PATH" "OpenCL Generated 2D Readback Evidence" "$BUILD_DIR/evidence.env" "Generated OpenCL evidence is fail-closed until the OpenCL loader, runtime probe, compiled kernel harness, device/queue/kernel handles, submit, synchronization, and readback checksum are all present. The SPIR-V fields are retained as portable-toolchain diagnostics; this gate passes only from direct OpenCL C runtime execution and readback checksum parity."
 
