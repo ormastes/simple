@@ -814,6 +814,29 @@ NVME_RV64_BUILD_FAILED code=124 reason=native-build-timeout timeout=60s elapsed=
 This confirms primary/secondary chunking can reduce closure size, but primary
 alone is still too large for the current 60s self-hosted parse budget.
 
+## Update — secondary section closure and probe output isolation
+
+Section probes now write section-specific artifacts such as
+`build/nvme_fw_rv64_primary.elf` and `build/nvme_fw_rv64_secondary.elf`.
+Only the default `NVME_RV64_BUILD_SECTION=all` path writes
+`build/nvme_fw_rv64.elf`, so a partial diagnostic probe cannot accidentally
+masquerade as the full production firmware image.
+
+A 90s secondary-section probe reduced the entry closure to 61 files, but the
+host still terminated the build before the wrapper timeout:
+
+```text
+entry=build/os/generated/nvme_fw_rv64_direct_entry.spl target=riscv64-unknown-none mode=direct_firmware section=secondary
+[native-build] Entry closure files: 61
+[native-build] Driver start: inputs=61 backend=llvm mode=dynload
+[BOOTSTRAP-PHASE] +3ms phase1:load_sources:done n_sources=61
+NVME_RV64_BUILD_FAILED code=143 reason=external-termination-before-timeout timeout=90s elapsed=70s ...
+```
+
+This confirms that secondary-only is much smaller than the full 177-file
+closure, but the current host/compiler path still cannot produce even that
+section within the observed 70-second process lifetime.
+
 ## Update — elapsed evidence shows external termination before 120s cap
 
 `fw_rv64/build.shs` now reports native-build elapsed seconds. A fresh
