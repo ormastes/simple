@@ -802,6 +802,36 @@ Terminated
 
 The current measured timeout is now around `logic_reactor_cases.spl`.
 
+## Update — reactor core split, probe reaches policy target cases
+
+`logic_reactor_core.spl` was reduced by moving lock, foreground, and background
+helper bodies into narrow core files. Reactor case files now import only the
+core slice they exercise, while `logic_reactor_core.spl` remains a compatibility
+facade for callers that need the original helper names.
+
+The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but this run got through reactor cases before
+stopping at policy target cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_reactor_cases.spl chars=328
+[BOOTSTRAP-PHASE] ... logic_reactor_cases.spl
+[BOOTSTRAP-PHASE] ... logic_policy_target_cases.spl chars=340
+Terminated
+```
+
+The current measured timeout is now around `logic_policy_target_cases.spl`.
+
 ## Update — map flush cases split, probe reaches band geometry
 
 `logic_map_flush_cases.spl` was reduced to a small case facade, with flush L2P
