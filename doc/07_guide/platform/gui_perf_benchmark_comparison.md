@@ -159,12 +159,15 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
   `scripts/check/check-cpu-simd-engine2d-arch-matrix.shs`. It reuses
   `check-cpu-simd-engine2d-evidence.shs` for x86_64, aarch64, and riscv64,
   records each architecture independently, and supports
-  `CPU_SIMD_ARCH_MATRIX_STRICT=1` when all three target binaries are expected
-  to pass. Current retained matrix evidence is partial on this x86_64 host:
-  x86_64 passes, while aarch64/riscv64 are unavailable without target binaries.
-  The wrapper also cross-compiles the native runtime owner for x86_64, aarch64,
-  generic riscv64, and `rv64gcv` RVV when compilers are present. riscv64 native
-  RVV target proof remains tracked at
+  `CPU_SIMD_ARCH_MATRIX_STRICT=1` when all full native SIMD evidence rows are
+  expected to pass. Current retained matrix evidence is split into three
+  signals: x86_64 full Engine2D SIMD evidence passes on this host;
+  cross-target native-build smoke passes for x86_64, aarch64, and riscv64 when
+  target builds are enabled; full aarch64/riscv64 SIMD evidence rows remain
+  unavailable until matching target Simple binaries are supplied. The wrapper
+  also cross-compiles the native runtime owner for x86_64, aarch64, generic
+  riscv64, and `rv64gcv` RVV when compilers are present. riscv64 native RVV
+  target proof remains tracked at
   `doc/08_tracking/bug/cpu_simd_engine2d_rvv_native_rows_missing_2026-07-08.md`.
 - CPU-SIMD 4K/8K scale evidence is gated by
   `scripts/check/check-cpu-simd-render-scale-contract.shs`. It runs native
