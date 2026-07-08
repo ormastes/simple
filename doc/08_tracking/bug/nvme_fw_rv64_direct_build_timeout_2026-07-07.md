@@ -801,6 +801,14 @@ NVME_RV64_BUILD_STATUS running ... last_phase=[BOOTSTRAP-PHASE] ... logic_queue_
 NVME_RV64_BUILD_STATUS stopped ... last_phase=[BOOTSTRAP-PHASE] ... logic_ecc_compute_cases.spl chars=276
 ```
 
+`--status` also reports `last_heartbeat=` from the detached wrapper log. A
+later retry stopped without an ELF at:
+
+```text
+last_heartbeat=NVME_RV64_BUILD_HEARTBEAT elapsed=40s timeout=300s
+last_phase=[BOOTSTRAP-PHASE] ... logic_power_thermal_cases.spl chars=342
+```
+
 ## Update — closure diagnostics and fail-closed stub fallback
 
 The RV64 direct build wrapper now runs `native-build` with `--verbose`, records
