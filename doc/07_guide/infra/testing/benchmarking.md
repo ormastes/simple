@@ -174,16 +174,16 @@ The wrapper runs CUDA, OpenCL, Vulkan, Metal, and ROCm lanes. By default,
 Linux requires CUDA/OpenCL/Vulkan and macOS also requires Metal; override with
 `GENERATED_2D_REQUIRED_BACKENDS` for host-specific probes. Required lanes
 must pass exact checksum/readback proof and must expose normalized device proof:
-`submit_attempted=true`, `readback_available=true`, exercised ops, and the
-backend proof path. Unavailable optional lanes are recorded as explicit
+`submit_attempted=true`, `readback_available=true`, positive matching
+checksums, exercised ops, and the backend proof path. Unavailable optional lanes are recorded as explicit
 host-unavailable evidence instead of hidden success. The companion report is
 written under `doc/09_report/`, and per-backend logs/evidence files are written
 under `build/generated_2d_backend_readback_matrix/`.
 
 Use `sh scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs
 --self-test` after changing the wrapper. It uses fake child lanes to prove a
-backend cannot report `pass` unless submit/readback provenance, matching
-checksums, and zero mismatches are present.
+backend cannot report `pass` unless submit/readback provenance, positive
+matching checksums, and zero mismatches are present.
 For Metal-specific parser changes, also run
 `sh scripts/check/check-metal-generated-2d-readback.shs --self-test`.
 For CUDA-specific parser changes, also run
