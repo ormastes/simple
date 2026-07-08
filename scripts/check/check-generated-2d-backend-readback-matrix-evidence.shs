@@ -213,6 +213,20 @@ opencl_generated_2d_readback_actual_checksum=1
 opencl_generated_2d_readback_mismatch_count=0
 EOF
 SH
+    cat >"$self_dir/cuda_pass_with_proof.shs" <<'SH'
+#!/bin/sh
+set -eu
+mkdir -p "$BUILD_DIR"
+cat >"$BUILD_DIR/evidence.env" <<'EOF'
+cuda_generated_2d_readback_status=pass
+cuda_generated_2d_readback_reason=fake-pass-with-proof
+cuda_generated_2d_readback_submit_attempted=true
+cuda_generated_2d_readback_readback_available=true
+cuda_generated_2d_readback_expected_checksum=1
+cuda_generated_2d_readback_actual_checksum=1
+cuda_generated_2d_readback_mismatch_count=0
+EOF
+SH
     cat >"$self_dir/vulkan_pass_with_proof.shs" <<'SH'
 #!/bin/sh
 set -eu
@@ -239,6 +253,18 @@ metal_generated_2d_readback_submit_attempted=false
 metal_generated_2d_readback_readback_available=false
 EOF
 exit 1
+SH
+    cat >"$self_dir/metal_pass_missing_proof.shs" <<'SH'
+#!/bin/sh
+set -eu
+mkdir -p "$BUILD_DIR"
+cat >"$BUILD_DIR/evidence.env" <<'EOF'
+metal_generated_2d_readback_status=pass
+metal_generated_2d_readback_reason=fake-metal-pass-without-proof
+metal_generated_2d_readback_expected_checksum=1
+metal_generated_2d_readback_actual_checksum=1
+metal_generated_2d_readback_mismatch_count=0
+EOF
 SH
     cat >"$self_dir/rocm_unavailable.shs" <<'SH'
 #!/bin/sh
@@ -279,8 +305,34 @@ SH
         echo "self_test_reason=missing-submit-provenance-not-recorded"
         exit 1
     fi
+    set +e
+    BUILD_DIR="$self_dir/optional_run" \
+        REPORT_PATH="$self_dir/optional_report.md" \
+        CUDA_READBACK_SCRIPT="$self_dir/cuda_pass_with_proof.shs" \
+        OPENCL_READBACK_SCRIPT="$self_dir/opencl_pass_with_proof.shs" \
+        VULKAN_READBACK_SCRIPT="$self_dir/vulkan_pass_with_proof.shs" \
+        METAL_READBACK_SCRIPT="$self_dir/metal_pass_missing_proof.shs" \
+        ROCM_READBACK_SCRIPT="$self_dir/rocm_unavailable.shs" \
+        sh "$0" >"$self_dir/optional_stdout.log" 2>"$self_dir/optional_stderr.log"
+    code=$?
+    set -e
+    if [ "$code" -eq 0 ]; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=optional-missing-proof-pass-was-accepted"
+        exit 1
+    fi
+    if ! grep -q '^generated_2d_backend_matrix_metal_verdict=fail$' "$self_dir/optional_run/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-metal-fail-verdict"
+        exit 1
+    fi
+    if ! grep -q '^generated_2d_backend_matrix_metal_submit_attempted=missing$' "$self_dir/optional_run/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-optional-submit-provenance-not-recorded"
+        exit 1
+    fi
     echo "self_test_status=pass"
-    echo "self_test_reason=missing-required-submit-readback-proof-fails-closed"
+    echo "self_test_reason=missing-submit-readback-proof-fails-closed"
     exit 0
 fi
 
