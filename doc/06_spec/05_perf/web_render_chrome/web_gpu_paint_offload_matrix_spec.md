@@ -7,6 +7,8 @@ requiring local GPU hardware:
 
 - solid-only frames skip CPU paint and may offload when total CPU+transfer cost
   wins;
+- residual-heavy fill frames may still offload when saved CPU paint makes total
+  work win even though transfer alone loses;
 - mixed text/solid frames do not claim offload because CPU ground truth is still
   required for residual parity;
 - many tiny solid fills are rejected when command traffic does not beat the

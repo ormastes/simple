@@ -61,6 +61,26 @@ expect(economics.should_offload).to_equal(true)
 
 </details>
 
+#### offloads when transfer loses but saved CPU paint makes total work win
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val frame = direct_frame(16, 16, 0, 0, 0, 16, 16)
+val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+expect(economics.cpu_paint_pixels).to_equal(0)
+expect(economics.gpu_paint_transfer_pixels).to_be_greater_than(economics.upload_bound_transfer_pixels)
+expect(economics.gpu_paint_total_pixels).to_be_less_than(economics.upload_bound_total_pixels)
+expect(economics.should_offload).to_equal(true)
+expect(economics.reason).to_equal("gpu-paint-total-win")
+```
+
+</details>
+
 #### does not claim offload when CPU ground truth is still required
 
 <details>
@@ -177,8 +197,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
