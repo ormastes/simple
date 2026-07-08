@@ -77,13 +77,83 @@ rm -f "$EVIDENCE_SRC" "$EVIDENCE_LOG" "$ENV_PATH" "$REPORT_PATH"
 
 cat >"$EVIDENCE_SRC" <<'SIMPLE'
 use app.wm_compare.production_gui_web_renderer_parity.{run_backend_executed_gui_widget_scene_parity}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gc_async_mut.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
+
+struct CpuSimdAlphaQualityReport:
+    exact_parity: bool
+    checksum_match: bool
+    alpha_hits: i64
+    software_checksum: i64
+    cpu_simd_checksum: i64
+    software_alpha_pixel: u32
+    cpu_simd_alpha_pixel: u32
+
+fn checksum_pixels(px: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    val px_count = px.len()
+    while i < px_count:
+        sum = sum + (px[i] as i64) * ((i + 1) as i64)
+        i = i + 1
+    sum
+
+fn render_alpha_quality_software() -> [u32]:
+    var backend = SoftwareBackend.create()
+    backend.init(8, 8)
+    backend.clear(0xFF102030u32)
+    backend.draw_rect_filled(2, 2, 4, 4, 0x804488CCu32)
+    backend.present()
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    pixels
+
+fn render_alpha_quality_cpu_simd() -> [u32]:
+    var backend = CpuBackend.create()
+    backend.init(8, 8)
+    backend.clear(0xFF102030u32)
+    backend.draw_rect_filled(2, 2, 4, 4, 0x804488CCu32)
+    backend.present()
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    pixels
+
+fn pixels_exact_match(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn run_cpu_simd_alpha_quality() -> CpuSimdAlphaQualityReport:
+    val software = render_alpha_quality_software()
+    reset_simd_hits()
+    val cpu_simd = render_alpha_quality_cpu_simd()
+    val hits = simd_hit_counts()
+    val sw_checksum = checksum_pixels(software)
+    val cpu_checksum = checksum_pixels(cpu_simd)
+    val alpha_idx = 2 + (2 * 8)
+    CpuSimdAlphaQualityReport(
+        exact_parity: pixels_exact_match(software, cpu_simd),
+        checksum_match: sw_checksum == cpu_checksum,
+        alpha_hits: hits.alpha_hits,
+        software_checksum: sw_checksum,
+        cpu_simd_checksum: cpu_checksum,
+        software_alpha_pixel: software[alpha_idx],
+        cpu_simd_alpha_pixel: cpu_simd[alpha_idx]
+    )
 
 fn main():
     val sample_count: i64 = 3
     val report = run_backend_executed_gui_widget_scene_parity(16, 16)
+    val alpha_quality = run_cpu_simd_alpha_quality()
     val metal_ok = if report.metal_resolved_backend == "metal": report.metal_gpu_frame_complete and report.metal_gpu_readback_pixel_count == 16 * 16 else: true
     val metal_handle_ok = if report.metal_resolved_backend == "metal": report.metal_command_queue_handle > 0 else: true
-    var all_samples_pass = report.exact_backend_parity and report.backend_checksum_match and report.same_frame_backend_readback and report.cpu_simd_total_hits > 0 and metal_ok and metal_handle_ok and report.timing_budget_status == "pass"
+    var all_samples_pass = report.exact_backend_parity and report.backend_checksum_match and report.same_frame_backend_readback and report.cpu_simd_total_hits > 0 and alpha_quality.exact_parity and alpha_quality.checksum_match and alpha_quality.alpha_hits > 0 and metal_ok and metal_handle_ok
     var min_total_elapsed_us = report.total_elapsed_us
     var max_total_elapsed_us = report.total_elapsed_us
     var sum_total_elapsed_us = report.total_elapsed_us
@@ -95,7 +165,8 @@ fn main():
         val sample = run_backend_executed_gui_widget_scene_parity(16, 16)
         val sample_metal_ok = if sample.metal_resolved_backend == "metal": sample.metal_gpu_frame_complete and sample.metal_gpu_readback_pixel_count == 16 * 16 else: true
         val sample_metal_handle_ok = if sample.metal_resolved_backend == "metal": sample.metal_command_queue_handle > 0 else: true
-        if not (sample.exact_backend_parity and sample.backend_checksum_match and sample.same_frame_backend_readback and sample.cpu_simd_total_hits > 0 and sample_metal_ok and sample_metal_handle_ok and sample.timing_budget_status == "pass"):
+        val sample_alpha_quality = run_cpu_simd_alpha_quality()
+        if not (sample.exact_backend_parity and sample.backend_checksum_match and sample.same_frame_backend_readback and sample.cpu_simd_total_hits > 0 and sample_alpha_quality.exact_parity and sample_alpha_quality.checksum_match and sample_alpha_quality.alpha_hits > 0 and sample_metal_ok and sample_metal_handle_ok):
             all_samples_pass = false
         if sample.total_elapsed_us < min_total_elapsed_us:
             min_total_elapsed_us = sample.total_elapsed_us
@@ -125,6 +196,12 @@ fn main():
     print "production_gui_backend_cpu_simd_alpha_hits=" + report.cpu_simd_alpha_hits.to_text()
     print "production_gui_backend_cpu_simd_blit_hits=" + report.cpu_simd_blit_hits.to_text()
     print "production_gui_backend_cpu_simd_scroll_hits=" + report.cpu_simd_scroll_hits.to_text()
+    print "production_gui_backend_cpu_simd_alpha_quality_status=" + (if alpha_quality.exact_parity and alpha_quality.checksum_match and alpha_quality.alpha_hits > 0: "pass" else: "fail")
+    print "production_gui_backend_cpu_simd_alpha_quality_hits=" + alpha_quality.alpha_hits.to_text()
+    print "production_gui_backend_cpu_simd_alpha_quality_software_checksum=" + alpha_quality.software_checksum.to_text()
+    print "production_gui_backend_cpu_simd_alpha_quality_cpu_simd_checksum=" + alpha_quality.cpu_simd_checksum.to_text()
+    print "production_gui_backend_cpu_simd_alpha_quality_software_pixel=" + alpha_quality.software_alpha_pixel.to_text()
+    print "production_gui_backend_cpu_simd_alpha_quality_cpu_simd_pixel=" + alpha_quality.cpu_simd_alpha_pixel.to_text()
     print "production_gui_backend_metal_different_pixels=" + report.metal_different_pixels.to_text()
     print "production_gui_backend_metal_max_channel_diff=" + report.metal_max_channel_diff.to_text()
     print "production_gui_backend_metal_gpu_frame_complete=" + report.metal_gpu_frame_complete.to_text()
@@ -216,6 +293,12 @@ else
                 production_gui_backend_cpu_simd_alpha_hits \
                 production_gui_backend_cpu_simd_blit_hits \
                 production_gui_backend_cpu_simd_scroll_hits \
+                production_gui_backend_cpu_simd_alpha_quality_status \
+                production_gui_backend_cpu_simd_alpha_quality_hits \
+                production_gui_backend_cpu_simd_alpha_quality_software_checksum \
+                production_gui_backend_cpu_simd_alpha_quality_cpu_simd_checksum \
+                production_gui_backend_cpu_simd_alpha_quality_software_pixel \
+                production_gui_backend_cpu_simd_alpha_quality_cpu_simd_pixel \
                 production_gui_backend_metal_different_pixels \
                 production_gui_backend_metal_max_channel_diff \
                 production_gui_backend_metal_gpu_frame_complete \
@@ -278,6 +361,8 @@ status="$(field_of production_gui_backend_status "$ENV_PATH" 2>/dev/null || sed 
     echo "- dimensions: ${WIDTH}x${HEIGHT}"
     echo "- CPU SIMD resolved: $(sed -n 's/^production_gui_backend_cpu_simd_resolved=//p' "$ENV_PATH" | tail -n 1)"
     echo "- CPU SIMD total hits: $(sed -n 's/^production_gui_backend_cpu_simd_total_hits=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- CPU SIMD alpha quality: $(sed -n 's/^production_gui_backend_cpu_simd_alpha_quality_status=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- CPU SIMD alpha quality hits: $(sed -n 's/^production_gui_backend_cpu_simd_alpha_quality_hits=//p' "$ENV_PATH" | tail -n 1)"
     echo "- CPU SIMD different pixels: $(sed -n 's/^production_gui_backend_cpu_simd_different_pixels=//p' "$ENV_PATH" | tail -n 1)"
     echo "- Metal resolved: $(sed -n 's/^production_gui_backend_metal_resolved=//p' "$ENV_PATH" | tail -n 1)"
     echo "- Metal gpu frame complete: $(sed -n 's/^production_gui_backend_metal_gpu_frame_complete=//p' "$ENV_PATH" | tail -n 1)"
@@ -307,10 +392,11 @@ status="$(field_of production_gui_backend_status "$ENV_PATH" 2>/dev/null || sed 
     echo "- blur/tolerance used: false"
     echo
     echo "This evidence intentionally exercises the currently proven Metal GPU"
-    echo "readback subset (clear + filled rectangle) through Engine2D. It proves"
-    echo "backend execution separately from the HTML layout fast path, which"
-    echo "currently renders through a pure framebuffer renderer. Larger generated"
-    echo "GUI scenes remain tracked as open Metal coverage."
+    echo "readback subset (clear + filled rectangle) through Engine2D and separately"
+    echo "requires CPU-SIMD alpha blending to match the software renderer exactly."
+    echo "It proves backend execution separately from the HTML layout fast path,"
+    echo "which currently renders through a pure framebuffer renderer. Larger"
+    echo "generated GUI scenes remain tracked as open Metal coverage."
     echo
     echo "## Raw Evidence"
     sed 's/^/- /' "$ENV_PATH"

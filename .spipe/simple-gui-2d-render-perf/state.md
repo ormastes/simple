@@ -83,6 +83,15 @@ implementation-evidence-in-progress
 - verification: `scripts/check/check-cpu-simd-render-dpi-contract.shs` proves
   the default 300dpi metadata, explicit `--dpi 220` override, unchanged 32x32
   physical pixels, and checksum parity across the DPI metadata change.
+- implementation: Backend-executed GUI evidence now includes a focused
+  CPU-SIMD alpha quality scene that blends a semi-transparent rectangle through
+  `CpuBackend`, compares it against `SoftwareBackend` exactly, and requires a
+  positive alpha SIMD hit.
+- verification: `sh scripts/check/check-production-gui-web-backend-executed-evidence.shs`
+  passed with `production_gui_backend_cpu_simd_alpha_quality_status=pass`,
+  `production_gui_backend_cpu_simd_alpha_quality_hits=4`, matching alpha
+  checksums/pixels, exact backend parity, and `timing_budget_status=warn`
+  recorded separately for Vulkan cold-start/render scheduling follow-up.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 
@@ -112,6 +121,10 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
   optimization and native RVV row enablement still need implementation and
   evidence.
 - AC-6 now has focused vector-font unavailable fallback evidence in the repeat script and tracked report; additional GPU/native unavailable combinations can extend the same probe pattern.
+- CPU-SIMD color/transparency quality is covered by
+  `scripts/check/check-production-gui-web-backend-executed-evidence.shs`, which
+  requires exact software parity and positive alpha hits for a translucent fill
+  without adding tolerance or blur.
 - Native Simple executable size/speed evidence is intentionally skipped in the fast smoke run (`SKIP_SIMPLE_NATIVE=1`); a release-grade run should capture native artifact bytes or record an explicit native-build blocker.
 - Wire unwired probes into contract: warm_startup, frame_time_p50/p95, input_to_paint.
 - Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture

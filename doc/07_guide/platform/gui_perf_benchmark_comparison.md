@@ -110,6 +110,13 @@ bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
 2. `backend_parity.spl` — framebuffer vs software byte-for-byte
 3. `golden_gate.spl` — golden-image drift, exact-only acceptance
 
+For focused backend execution evidence, run
+`scripts/check/check-production-gui-web-backend-executed-evidence.shs`. It keeps
+the Metal/OpenCL/Vulkan same-frame readback subset separate from the CPU-SIMD
+alpha quality check and requires `production_gui_backend_cpu_simd_alpha_quality_status=pass`.
+Timing budget fields are emitted as pass/warn scheduling evidence; correctness
+status is driven by parity, readback, and CPU-SIMD quality gates.
+
 ## Optimization Opportunities
 
 ### CUDA (highest impact, measured smoke; needs 8K repeats)
@@ -128,6 +135,10 @@ bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
 - CPU render-loop DPI evidence defaults to 300dpi retina metadata and is
   configurable through `--dpi` without changing the requested pixel dimensions.
   The focused wrapper is `scripts/check/check-cpu-simd-render-dpi-contract.shs`.
+- CPU-SIMD alpha quality is gated by
+  `scripts/check/check-production-gui-web-backend-executed-evidence.shs`; the
+  wrapper requires semi-transparent fill output to match software exactly and
+  records the alpha hit count/checksums.
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
 - Software layout renders must not replay the already-painted framebuffer
   through an Engine2D software present/readback cycle. The 2026-06-06
