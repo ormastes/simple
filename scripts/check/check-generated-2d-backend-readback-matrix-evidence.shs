@@ -6,7 +6,14 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/generated_2d_backend_readback_matrix}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/generated_2d_backend_readback_matrix_$(date -u +%F).md}"
-REQUIRED_BACKENDS="${GENERATED_2D_REQUIRED_BACKENDS:-cuda opencl vulkan}"
+HOST_OS="${GENERATED_2D_HOST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+if [ "${GENERATED_2D_REQUIRED_BACKENDS+x}" = x ]; then
+    REQUIRED_BACKENDS="$GENERATED_2D_REQUIRED_BACKENDS"
+elif [ "$HOST_OS" = "Darwin" ]; then
+    REQUIRED_BACKENDS="cuda opencl vulkan metal"
+else
+    REQUIRED_BACKENDS="cuda opencl vulkan"
+fi
 ENV_PATH="$BUILD_DIR/evidence.env"
 ROWS_PATH="$BUILD_DIR/rows.md"
 PORTABLE_TOOLCHAIN_BUILD_DIR="${PORTABLE_TOOLCHAIN_BUILD_DIR:-build/portable_compute_toolchains}"
@@ -348,6 +355,28 @@ SH
     if ! grep -q '^generated_2d_backend_matrix_cuda_checksum_proof=false$' "$self_dir/checksum_run/evidence.env"; then
         echo "self_test_status=fail"
         echo "self_test_reason=missing-cuda-checksum-proof-false"
+        exit 1
+    fi
+    set +e
+    BUILD_DIR="$self_dir/darwin_run" \
+        REPORT_PATH="$self_dir/darwin_report.md" \
+        GENERATED_2D_HOST_OS=Darwin \
+        CUDA_READBACK_SCRIPT="$self_dir/cuda_pass_with_proof.shs" \
+        OPENCL_READBACK_SCRIPT="$self_dir/opencl_pass_with_proof.shs" \
+        VULKAN_READBACK_SCRIPT="$self_dir/vulkan_pass_with_proof.shs" \
+        METAL_READBACK_SCRIPT="$self_dir/metal_unavailable.shs" \
+        ROCM_READBACK_SCRIPT="$self_dir/rocm_unavailable.shs" \
+        sh "$0" >"$self_dir/darwin_stdout.log" 2>"$self_dir/darwin_stderr.log"
+    code=$?
+    set -e
+    if [ "$code" -eq 0 ]; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=darwin-missing-metal-was-accepted"
+        exit 1
+    fi
+    if ! grep -q '^generated_2d_backend_matrix_metal_required=true$' "$self_dir/darwin_run/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=darwin-metal-not-required"
         exit 1
     fi
     set +e

@@ -170,7 +170,9 @@ backend measurement export, or Simple Web layout evidence paths:
 sh scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs
 ```
 
-The wrapper runs CUDA, OpenCL, Vulkan, Metal, and ROCm lanes. Required lanes
+The wrapper runs CUDA, OpenCL, Vulkan, Metal, and ROCm lanes. By default,
+Linux requires CUDA/OpenCL/Vulkan and macOS also requires Metal; override with
+`GENERATED_2D_REQUIRED_BACKENDS` for host-specific probes. Required lanes
 must pass exact checksum/readback proof and must expose normalized device proof:
 `submit_attempted=true`, `readback_available=true`, exercised ops, and the
 backend proof path. Unavailable optional lanes are recorded as explicit
