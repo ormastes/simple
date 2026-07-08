@@ -557,21 +557,34 @@ expect(metal_request.call_shape()).to_equal("metal_compute_api")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val valid = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32 .entry simple_2d_bitmap_glyph_raster_u32", 4486)
 val missing = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32", 4486)
 val missing_glyph = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32", 4486)
+val vulkan_valid = generated_2d_module_artifact_evidence("vulkan", GENERATED_2D_FILL, 16, 16, "SPIR-V 1.5", "OpEntryPoint GLCompute %simple_2d_fill_u32 \"simple_2d_fill_u32\" OpEntryPoint GLCompute %simple_2d_copy_u32 \"simple_2d_copy_u32\" OpEntryPoint GLCompute %simple_2d_alpha_u32 \"simple_2d_alpha_u32\" OpEntryPoint GLCompute %simple_2d_scroll_u32 \"simple_2d_scroll_u32\" OpEntryPoint GLCompute %simple_2d_bitmap_glyph_raster_u32 \"simple_2d_bitmap_glyph_raster_u32\"", 4096)
+val metal_valid = generated_2d_module_artifact_evidence("metal", GENERATED_2D_FILL, 16, 16, "MTLB metallib", "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32", 4096)
+val metal_bad_magic = generated_2d_module_artifact_evidence("metal", GENERATED_2D_FILL, 16, 16, "SPIR-V 1.5", "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32", 4096)
 val load = generated_2d_artifact_load_evidence_from_module(valid, true, 0, 77)
 val blocked = generated_2d_artifact_load_evidence_from_module(missing, true, 0, 77)
 val glyph_blocked = generated_2d_artifact_load_evidence_from_module(missing_glyph, true, 0, 77)
+val vulkan_load = generated_2d_artifact_load_evidence_from_module(vulkan_valid, true, 11, 22)
+val metal_load = generated_2d_artifact_load_evidence_from_module(metal_valid, true, 33, 44)
 
 expect(valid.artifact_valid).to_equal(true)
 expect(valid.reason).to_equal("pass")
 expect(valid.summary()).to_contain("simple_2d_optimization.ptx")
+expect(vulkan_valid.artifact_valid).to_equal(true)
+expect(vulkan_valid.plan.artifact_name).to_equal("simple_2d_optimization.spirv")
+expect(metal_valid.artifact_valid).to_equal(true)
+expect(metal_valid.plan.artifact_name).to_equal("simple_2d_optimization.metallib")
+expect(metal_bad_magic.artifact_valid).to_equal(false)
+expect(metal_bad_magic.reason).to_equal("artifact-magic-mismatch")
 expect(load.loaded).to_equal(true)
+expect(vulkan_load.loaded).to_equal(true)
+expect(metal_load.loaded).to_equal(true)
 expect(missing.artifact_valid).to_equal(false)
 expect(missing.reason).to_equal("missing-entry-symbol:simple_2d_scroll_u32")
 expect(blocked.loaded).to_equal(false)
