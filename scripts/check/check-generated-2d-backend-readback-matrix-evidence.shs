@@ -179,8 +179,13 @@ run_backend() {
         ops_proof=true
     fi
 
+    exit_code_proof=false
+    if [ "$exit_code" -eq 0 ]; then
+        exit_code_proof=true
+    fi
+
     verdict=fail
-    if [ "$backend_status" = "pass" ] && [ "$submit_attempted" = "true" ] && [ "$readback_available" = "true" ] && [ "$checksum_proof" = "true" ] && [ "$ops_proof" = "true" ]; then
+    if [ "$backend_status" = "pass" ] && [ "$exit_code_proof" = "true" ] && [ "$submit_attempted" = "true" ] && [ "$readback_available" = "true" ] && [ "$checksum_proof" = "true" ] && [ "$ops_proof" = "true" ]; then
         verdict=pass
     elif [ "$required" = "false" ] && [ "$backend_status" = "unavailable" ] && is_clean_optional_unavailable "$backend" "$backend_reason"; then
         verdict=host-unavailable
@@ -191,6 +196,7 @@ run_backend() {
     append_env "generated_2d_backend_matrix_${backend}_required" "$required"
     append_env "generated_2d_backend_matrix_${backend}_verdict" "$verdict"
     append_env "generated_2d_backend_matrix_${backend}_exit_code" "$exit_code"
+    append_env "generated_2d_backend_matrix_${backend}_exit_code_proof" "$exit_code_proof"
     append_env "generated_2d_backend_matrix_${backend}_submit_attempted" "${submit_attempted:-missing}"
     append_env "generated_2d_backend_matrix_${backend}_readback_available" "${readback_available:-missing}"
     append_env "generated_2d_backend_matrix_${backend}_checksum_proof" "$checksum_proof"
@@ -203,7 +209,7 @@ run_backend() {
     append_env "generated_2d_backend_matrix_${backend}_stdout" "$stdout_path"
     append_env "generated_2d_backend_matrix_${backend}_stderr" "$stderr_path"
 
-    proof="submit=${submit_attempted:-missing}; readback=${readback_available:-missing}; checksum=${checksum_proof}; ops_proof=${ops_proof}; backend=${backend_name:-}; ops=${ops:-missing}; path=${required_path}"
+    proof="exit=${exit_code_proof}; submit=${submit_attempted:-missing}; readback=${readback_available:-missing}; checksum=${checksum_proof}; ops_proof=${ops_proof}; backend=${backend_name:-}; ops=${ops:-missing}; path=${required_path}"
 
     printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' \
         "$backend" "$required" "${backend_status:-missing}" "${backend_reason:-missing}" \
@@ -260,6 +266,22 @@ cuda_generated_2d_readback_actual_checksum=1
 cuda_generated_2d_readback_mismatch_count=0
 cuda_generated_2d_readback_ops=fill,copy,alpha,scroll
 EOF
+SH
+    cat >"$self_dir/cuda_pass_exit_fail.shs" <<'SH'
+#!/bin/sh
+set -eu
+mkdir -p "$BUILD_DIR"
+cat >"$BUILD_DIR/evidence.env" <<'EOF'
+cuda_generated_2d_readback_status=pass
+cuda_generated_2d_readback_reason=fake-pass-with-failing-process
+cuda_generated_2d_readback_submit_attempted=true
+cuda_generated_2d_readback_readback_available=true
+cuda_generated_2d_readback_expected_checksum=1
+cuda_generated_2d_readback_actual_checksum=1
+cuda_generated_2d_readback_mismatch_count=0
+cuda_generated_2d_readback_ops=fill,copy,alpha,scroll
+EOF
+exit 1
 SH
     cat >"$self_dir/cuda_pass_missing_ops.shs" <<'SH'
 #!/bin/sh
@@ -394,6 +416,27 @@ SH
     if ! grep -q '^generated_2d_backend_matrix_cuda_submit_attempted=missing$' "$self_dir/run/evidence.env"; then
         echo "self_test_status=fail"
         echo "self_test_reason=missing-submit-provenance-not-recorded"
+        exit 1
+    fi
+    set +e
+    BUILD_DIR="$self_dir/exit_fail_run" \
+        REPORT_PATH="$self_dir/exit_fail_report.md" \
+        CUDA_READBACK_SCRIPT="$self_dir/cuda_pass_exit_fail.shs" \
+        OPENCL_READBACK_SCRIPT="$self_dir/opencl_pass_with_proof.shs" \
+        VULKAN_READBACK_SCRIPT="$self_dir/vulkan_pass_with_proof.shs" \
+        METAL_READBACK_SCRIPT="$self_dir/metal_unavailable.shs" \
+        ROCM_READBACK_SCRIPT="$self_dir/rocm_unavailable.shs" \
+        sh "$0" >"$self_dir/exit_fail_stdout.log" 2>"$self_dir/exit_fail_stderr.log"
+    code=$?
+    set -e
+    if [ "$code" -eq 0 ]; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=nonzero-child-pass-was-accepted"
+        exit 1
+    fi
+    if ! grep -q '^generated_2d_backend_matrix_cuda_exit_code_proof=false$' "$self_dir/exit_fail_run/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-exit-code-proof-false"
         exit 1
     fi
     set +e
