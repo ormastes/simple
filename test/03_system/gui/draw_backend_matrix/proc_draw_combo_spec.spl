@@ -1,6 +1,7 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl
 # @cover src/lib/common/ui/event.spl
 # @tag: system, ui, engine2d, gpu, combination, headless
@@ -9,12 +10,15 @@
 
 **Category:** Testing | **Status:** Implemented
 **Plan:** doc/03_plan/ui/testing/gpu_draw_event_intensive_tests.md
+**Requirements:** N/A
+**Research:** N/A
+**Design:** N/A
 
 ## Overview
 
 `draw_backend_matrix_spec.spl` (this dir) pins ONE drawing backend at a time.
 This spec instead runs full **processing × drawing COMBINATION** lanes on a
-headless host, for two combos — **cuda/vulkan** and **vulkan/vulkan**
+headless host, for three combos — **cuda/vulkan**, **vulkan/vulkan**, and **metal/vulkan**
 (processing / drawing) — across three surfaces plus event handling:
 
 1. **2D** — filled rect + line on a real vulkan framebuffer, `read_pixels()`
@@ -50,6 +54,9 @@ fail-closed classification instead.
   (`assert_payload_gating(ComputeBackend.Vulkan)`): the reduce value equals the
   CPU oracle (60) in both gate branches while only the payload gate flips
   `ran_on_cpu` — an absolute oracle, not a masquerade.
+- **metal processing half** exercises the same payload-gated compute/offload
+  lane for `ComputeBackend.Metal`, so Metal cannot disappear from the processing
+  matrix on non-macOS hosts.
 - **vulkan drawing half** goes through `Engine2D.probe_backend`/
   `create_requested_backend("vulkan")`; if no Vulkan device is present it
   fail-closes on a concrete `reason` (never a silent skip).
@@ -59,6 +66,14 @@ fail-closed classification instead.
 `std.spec` matchers only; facades only (no raw `rt_*`); shared
 `assert_color_eq` / `read_pixels_ppm` / `assert_payload_gating` helpers reused
 from `test/helpers/gpu_draw_event_shared.spl`.
+
+## Coverage matrix
+
+| Processing | Drawing | 2D | GUI | Web | Event |
+|------------|---------|----|-----|-----|-------|
+| CUDA | Vulkan | real probe or fail-closed | real probe or fail-closed | real probe or fail-closed | real probe or fail-closed |
+| Vulkan | Vulkan | payload gate + readback | payload gate + readback | payload gate + PPM oracle | payload gate + reducer-driven re-render |
+| Metal | Vulkan | payload gate + readback | payload gate + readback | payload gate + PPM oracle | payload gate + reducer-driven re-render |
 """
 
 use std.spec.*
@@ -117,6 +132,10 @@ fn assert_cuda_processing_half():
 fn assert_vulkan_processing_half():
     step("processing=vulkan: payload-gated offload lane, absolute oracle (60==60, gate flips ran_on_cpu)")
     assert_payload_gating(ComputeBackend.Vulkan)
+
+fn assert_metal_processing_half():
+    step("processing=metal: payload-gated offload lane, absolute oracle (60==60, gate flips ran_on_cpu)")
+    assert_payload_gating(ComputeBackend.Metal)
 
 # ---------------------------------------------------------------------------
 # Vulkan drawing half via the Engine2D facade. Returns true if the scene was
@@ -239,7 +258,7 @@ fn assert_event_render_chain():
     assert_color_eq(px_at(f1, w, 1, 1), BG)
     assert_color_eq(px_at(f2, w, 1, 1), BG)
 
-describe "Processing × Drawing combination runs — headless offscreen (cuda/vulkan & vulkan/vulkan)":
+describe "Processing × Drawing combination runs — headless offscreen (cuda/vulkan, vulkan/vulkan, metal/vulkan)":
 
     it "cuda/vulkan — 2D: cuda processing honest probe (device or fail-closed) + vulkan drawing readback":
         assert_cuda_processing_half()
@@ -247,6 +266,10 @@ describe "Processing × Drawing combination runs — headless offscreen (cuda/vu
 
     it "vulkan/vulkan — 2D: vulkan payload-gated processing + vulkan drawing readback":
         assert_vulkan_processing_half()
+        vulkan_draw_scene_or_unavailable("2d")
+
+    it "metal/vulkan — 2D: metal payload-gated processing + vulkan drawing readback":
+        assert_metal_processing_half()
         vulkan_draw_scene_or_unavailable("2d")
 
     it "cuda/vulkan — GUI widget-layer scene: cuda processing honest probe + vulkan drawing readback":
@@ -257,6 +280,10 @@ describe "Processing × Drawing combination runs — headless offscreen (cuda/vu
         assert_vulkan_processing_half()
         vulkan_draw_scene_or_unavailable("gui")
 
+    it "metal/vulkan — GUI widget-layer scene: metal processing + vulkan drawing readback":
+        assert_metal_processing_half()
+        vulkan_draw_scene_or_unavailable("gui")
+
     it "cuda/vulkan — Web: cuda processing honest probe + vulkan-drawn HTML fixture PPM oracle":
         assert_cuda_processing_half()
         assert_web_vulkan_render()
@@ -265,10 +292,18 @@ describe "Processing × Drawing combination runs — headless offscreen (cuda/vu
         assert_vulkan_processing_half()
         assert_web_vulkan_render()
 
+    it "metal/vulkan — Web: metal processing + vulkan-drawn HTML fixture PPM oracle":
+        assert_metal_processing_half()
+        assert_web_vulkan_render()
+
     it "cuda/vulkan — Event: pointer press moves focus, re-render flips the button pixel":
         assert_cuda_processing_half()
         assert_event_render_chain()
 
     it "vulkan/vulkan — Event: pointer press moves focus, re-render flips the button pixel":
         assert_vulkan_processing_half()
+        assert_event_render_chain()
+
+    it "metal/vulkan — Event: pointer press moves focus, re-render flips the button pixel":
+        assert_metal_processing_half()
         assert_event_render_chain()
