@@ -781,6 +781,13 @@ without `build/nvme_fw_rv64.elf` or `build/test-artifacts/nvme_fw_rv64.o`.
 stopped` and points at the foreground/background logs instead of flattening it
 to a plain missing-media state.
 
+## Update — stopped status now carries last phase
+
+`fw_rv64/build.shs --status` now includes `last_phase=` for stopped background
+builds, populated from the latest `[native-build]`, `[BOOTSTRAP-PHASE]`, or
+`NVME_RV64_BUILD_FAILED` log line. This makes the next full-closure blocker
+visible from the status command without requiring manual log tailing.
+
 ## Update — closure diagnostics and fail-closed stub fallback
 
 The RV64 direct build wrapper now runs `native-build` with `--verbose`, records
