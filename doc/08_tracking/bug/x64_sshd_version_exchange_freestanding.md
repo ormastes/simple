@@ -62,6 +62,64 @@ loop AFTER vmm_init — net survives vmm):
 `-netdev user,hostfwd=tcp::2222-:22 -device virtio-net-pci` + an NVMe disk, then
 `ssh -p 2222 root@127.0.0.1 true` (password `simpleos`).
 
+## Deeper root cause (traced 2026-07-08)
+
+It is NOT merely a double-take that a reorder fixes — the underlying byte access is
+corrupt on the x64 freestanding codegen:
+
+- The C marshalling is correct: `_tls_runtime_array_from_bytes` (baremetal_stubs.c
+  :10325) builds the `[u8]` as `out->items[i] = ENCODE_INT(buf[i])` over the correct
+  string data (`rt_boot_tcp_take_version_bytes` :7512 → `rt_net_recv_version_text`
+  → `s->data`, and the C side prints the correct `SSH-2.0-OpenSSH…`).
+- Yet the Simple side reads it back corrupt: `_u8_at` = `rt_bytes_u8_at(data,i)`
+  (`ssh_session_helpers.spl:58`, the authoritative raw decoder) returns non-`S` for
+  index 0, so `_ssh_identification_bytes_start_ssh2` fails. Length is correct (41),
+  values are wrong — an ENCODE_INT/decode or element-stride mismatch specific to the
+  x64 freestanding native-build.
+- The text→bytes reconstruction path is ALSO flagged unreliable by the existing
+  design comment (`ssh_session.spl:806-808`: "the live text object can print
+  correctly while returning corrupt values from split/char_at byte reconstruction").
+
+So under x64 freestanding native-build there is currently **no reliable way to
+recover the exact client-version bytes** — needed both to parse the version AND to
+compute the KEX exchange hash H (which signs V_C/V_S exactly). This is a **core
+runtime string/`[u8]` byte-access correctness bug on x64 freestanding**, not a
+sshd-local logic bug; it will recur through KEX/packet/auth. Fixing it means making
+`rt_bytes_u8_at` (and `char_at`) agree with `_tls_runtime_array_from_bytes`'
+element encoding on the x64 native-build path — the same ENCODE/decode/stride class
+already seen in the loader (`x86_64_fs_exec_ring3.spl` uses raw mmio + explicit
+`rt_bytes_u8_at`, and the frame builder hit `.to_u64()`-literal boxing). A
+speculative sshd reorder is NOT a fix and risks the proven rv64 lane.
+
+## Deepest conclusion: a C↔Simple RuntimeValue ABI mismatch on x64 native-build
+
+The C runtime is internally consistent, so the corruption is NOT in the sshd or the
+C helpers:
+- `_tls_runtime_array_from_bytes` (:10325) stores `runtime_array_inline_items(out)[i]
+  = ENCODE_INT(buf[i])` and sets `out->items` to that inline location.
+- `rt_bytes_u8_at` (:9623) reads `_rv_byte(runtime_array_items(arr)[idx])`;
+  `runtime_array_items` (:310) returns `a->items` (= the inline location);
+  `_rv_byte` (:6212) does `IS_INT(v) ? DECODE_INT(v) : v` → recovers the byte.
+
+Build and read are both C in the same file with the same structs, so C→C is exact.
+The value is corrupted only because the `[u8]` RuntimeValue **round-trips through
+the Simple x64 native-build codegen** (C `rt_boot_tcp_take_version_bytes` → Simple
+facade `rt_net_recv_version_bytes` → Simple `do_version_exchange` locals → C
+`rt_bytes_u8_at`). This points to a **C↔Simple `RuntimeValue`/`[u8]` ABI or
+representation mismatch on the x86_64 freestanding native-build path** (calling
+convention / tag handling for heap RuntimeValues passed across the C boundary).
+
+Corroborating evidence elsewhere on x64 freestanding:
+- The ring-3 loader deliberately AVOIDS `[u8]` and reads the ELF via `mmio`/raw
+  buffers (`x86_64_fs_exec_ring3.spl`), because `[u8]` element reads were garbage.
+- The prod entry's own magic check prints `magic=248,3,0,0` (garbage) for a valid
+  ELF `[u8]`, and the loader ignores it, parsing via mmio instead.
+
+Fixing this is a compiler/runtime ABI task (make Simple x64 native-build pass heap
+`RuntimeValue`/`[u8]` to/from the C runtime with the same representation the C
+runtime uses), NOT a sshd change. It unblocks the entire x64 SSH protocol (version
+→ KEX → packet → auth) at once, since all of it is `[u8]`-based.
+
 ## Impact
 
 This is the gate for "hello world over SSH" on x86_64: the ring-3 FS-exec path and
