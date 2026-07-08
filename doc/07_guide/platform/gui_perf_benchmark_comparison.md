@@ -203,9 +203,9 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
 2. **CPU SIMD at 8K**: AVX2 backend has a dedicated `simple_web_cpu_simd`
    benchmark row and CPU drawing-library compare fields. The focused native
    scale contract captures 8K p50/p95 timing, no-reduction proof, checksum
-   parity, and software-baseline timing. Current retained 8K ratio is above
-   `1000`, while the retained 4K row is still below the scalar baseline; keep
-   optimizing before making broad release-grade CPU-SIMD speedup claims.
+   parity, and software-baseline timing. Current retained 4K and 8K ratios are
+   both above `1000`; keep multiple-frame repeats before making broad
+   release-grade CPU-SIMD speedup claims.
    Cross-arch target-native-build smoke now builds and runs x86_64, aarch64,
    and riscv64 outputs. Completion still needs current aarch64 NEON and
    riscv64 RVV Simple SIMD runtime matrix rows, plus strict mode with matching
