@@ -69,15 +69,22 @@ expect(metal.launch_api).to_equal("MTLComputeCommandEncoder.dispatchThreads")
 
 </details>
 
-#### requires Vulkan artifact load submit and readback proof before device execution
+#### requires CUDA Vulkan and Metal artifact load submit and readback proof before device execution
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+val cuda_module = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 64, 64, ".version 8.0 PTX", required_2d_entries(), 4096)
+val cuda_load = generated_2d_artifact_load_evidence_from_module(cuda_module, true, 0, 9)
+val cuda_missing_args = generated_2d_execution_request_from_load(cuda_load, 0)
+val cuda_request = generated_2d_execution_request_from_load(cuda_load, 11)
+val cuda_submit = generated_2d_submit_result(cuda_request, true, true)
+val cuda_executed = generated_2d_execution_evidence(cuda_submit, true, 2026070802, 2026070802)
+
 val module = generated_2d_module_artifact_evidence("vulkan", GENERATED_2D_FILL, 64, 64, "SPIR-V 1.3 Vulkan", required_2d_entries(), 4096)
 val missing_queue = generated_2d_artifact_load_evidence_from_module(module, true, 0, 9)
 val load = generated_2d_artifact_load_evidence_from_module(module, true, 7, 9)
@@ -86,6 +93,21 @@ val submit = generated_2d_submit_result(request, true, true)
 val no_readback = generated_2d_execution_evidence(submit, false, 2026070801, 2026070801)
 val executed = generated_2d_execution_evidence(submit, true, 2026070801, 2026070801)
 
+val metal_module = generated_2d_module_artifact_evidence("metal", GENERATED_2D_FILL, 64, 64, "MTLB metallib", required_2d_entries(), 4096)
+val metal_missing_encoder = generated_2d_artifact_load_evidence_from_module(metal_module, true, 0, 9)
+val metal_load = generated_2d_artifact_load_evidence_from_module(metal_module, true, 7, 9)
+val metal_request = generated_2d_execution_request_from_load(metal_load, 0)
+val metal_submit = generated_2d_submit_result(metal_request, true, true)
+val metal_executed = generated_2d_execution_evidence(metal_submit, true, 2026070803, 2026070803)
+
+expect(cuda_module.artifact_valid).to_be(true)
+expect(cuda_load.loaded).to_be(true)
+expect(cuda_missing_args.can_submit).to_be(false)
+expect(cuda_missing_args.reason).to_equal("missing-args-pointer")
+expect(cuda_request.handle_kind).to_equal("cuda-kernel-args")
+expect(cuda_request.call_shape()).to_equal("cuda_launch_api")
+expect(cuda_executed.device_executed).to_be(true)
+expect(cuda_executed.reason).to_equal("readback-checksum-matched")
 expect(module.artifact_valid).to_be(true)
 expect(missing_queue.loaded).to_be(false)
 expect(missing_queue.reason).to_equal("missing-queue-or-encoder-handle")
@@ -98,6 +120,14 @@ expect(no_readback.device_executed).to_be(false)
 expect(no_readback.reason).to_equal("device-readback-required")
 expect(executed.device_executed).to_be(true)
 expect(executed.reason).to_equal("readback-checksum-matched")
+expect(metal_module.artifact_valid).to_be(true)
+expect(metal_missing_encoder.loaded).to_be(false)
+expect(metal_missing_encoder.reason).to_equal("missing-queue-or-encoder-handle")
+expect(metal_load.loaded).to_be(true)
+expect(metal_request.handle_kind).to_equal("metal-encoder-pipeline")
+expect(metal_request.call_shape()).to_equal("metal_compute_api")
+expect(metal_executed.device_executed).to_be(true)
+expect(metal_executed.reason).to_equal("readback-checksum-matched")
 ```
 
 </details>
