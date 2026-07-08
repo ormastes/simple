@@ -784,6 +784,24 @@ produced; the next production fix should address the external kill or run the
 direct build in an environment with a larger process lifetime before resuming
 source-shape reductions.
 
+## Update — heartbeat proves host lifetime cap survives visible output
+
+`fw_rv64/build.shs` now emits `NVME_RV64_BUILD_HEARTBEAT` while native-build is
+running, so silent-child idle termination is ruled out. A fresh 120-second probe
+printed heartbeats through 60 seconds, then still exited 143 at 70 seconds:
+
+```text
+NVME_RV64_BUILD_HEARTBEAT elapsed=40s timeout=120s
+NVME_RV64_BUILD_HEARTBEAT elapsed=50s timeout=120s
+NVME_RV64_BUILD_HEARTBEAT elapsed=60s timeout=120s
+NVME_RV64_BUILD_FAILED code=143 reason=external-termination-before-timeout timeout=120s elapsed=70s
+```
+
+This host appears to impose a hard process lifetime below the wrapper timeout.
+The wrapper now provides live progress and a precise failure reason, but the
+RV64 direct ELF still requires running the build outside that 70-second cap or
+reducing native-build work enough to complete before it.
+
 ## Update — band allocation core split, probe reaches reactor cases
 
 `logic_band_core.spl` was reduced by moving band allocation, host-open, writable

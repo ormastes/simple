@@ -37,12 +37,6 @@ EOF_DIRECT_ENTRY
 } >"$OUT_LOG"
 : >"$ERR_LOG"
 
-if command -v timeout >/dev/null 2>&1; then
-  BUILD_RUNNER="timeout -k 10s ${TIMEOUT_SECS}s"
-else
-  BUILD_RUNNER=""
-fi
-
 cat >"$START_ASM" <<'EOF_START'
     .section .text.entry, "ax"
     .globl _start
@@ -144,14 +138,31 @@ if ! riscv64-unknown-elf-gcc -march=rv64imafdc -mabi=lp64d -c "$START_ASM" -o "$
   exit 1
 fi
 
-set +e
 BUILD_START_EPOCH=$(date +%s)
-$BUILD_RUNNER env SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 "$SIMPLE_BIN" native-build --backend llvm \
+set +e
+env SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 "$SIMPLE_BIN" native-build --backend llvm \
   --source build/os/generated --source examples/09_embedded/simpleos_nvme_fw/fw_rv32 \
   --entry "$DIRECT_ENTRY" --entry-closure \
   --target riscv64-unknown-none \
-  --emit-object -o "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"
-rc=$?
+  --emit-object -o "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG" &
+BUILD_PID=$!
+rc=0
+while kill -0 "$BUILD_PID" 2>/dev/null; do
+  BUILD_NOW_EPOCH=$(date +%s)
+  BUILD_ELAPSED_SECS=$((BUILD_NOW_EPOCH - BUILD_START_EPOCH))
+  echo "NVME_RV64_BUILD_HEARTBEAT elapsed=${BUILD_ELAPSED_SECS}s timeout=${TIMEOUT_SECS}s"
+  if [ "$BUILD_ELAPSED_SECS" -ge "$TIMEOUT_SECS" ]; then
+    kill "$BUILD_PID" 2>/dev/null || true
+    wait "$BUILD_PID" 2>/dev/null
+    rc=124
+    break
+  fi
+  sleep 10
+done
+if [ "$rc" -eq 0 ]; then
+  wait "$BUILD_PID"
+  rc=$?
+fi
 BUILD_END_EPOCH=$(date +%s)
 BUILD_ELAPSED_SECS=$((BUILD_END_EPOCH - BUILD_START_EPOCH))
 set -e
