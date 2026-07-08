@@ -32,6 +32,13 @@ struct Ftl:
 
 val FTL_MAX_SEQ: i64 = 1000000000000000000
 
+fn read_disturb_counter_next(v: i64) -> i64:
+    if v < 0:
+        return 1
+    if v >= FW_SAFE_I64_LIMIT:
+        return FW_SAFE_I64_LIMIT
+    v + 1
+
 fn ftl_new() -> Ftl:
     Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new(), rain_parity: ftl_fill(rain_num_stripes(), 0))
 
@@ -288,6 +295,8 @@ impl Ftl:
             return 0
         if me.rd_disturb[blk] < 0:
             return 0
+        if me.rd_disturb[blk] > FW_SAFE_I64_LIMIT:
+            return FW_SAFE_I64_LIMIT
         me.rd_disturb[blk]
 
     me bump_read_disturb(blk: i64):
@@ -295,7 +304,7 @@ impl Ftl:
             return
         if blk >= me.rd_disturb.len():
             return
-        me.rd_disturb[blk] = me.read_disturb_count(blk) + 1
+        me.rd_disturb[blk] = read_disturb_counter_next(me.rd_disturb[blk])
 
     me clear_read_disturb(blk: i64):
         if not block_in_range(blk):
@@ -572,6 +581,10 @@ fn ftl_selftest() -> i64:
     fail = fail + expect_eq(ftl.read_disturb_count(blk10), 0, "corrupted negative read-disturb clamps to zero")
     fail = fail + expect_eq(ftl.read(10), 0xAB, "read after corrupted read-disturb counter")
     fail = fail + expect_eq(ftl.read_disturb_count(blk10), 1, "read-disturb resumes from zero after corruption")
+    ftl.rd_disturb[blk10] = FW_OVERFLOW_TEST_SIZE + 1
+    fail = fail + expect_eq(ftl.read_disturb_count(blk10), FW_SAFE_I64_LIMIT, "corrupted oversized read-disturb saturates")
+    fail = fail + expect_eq(ftl.read(10), 0xAB, "read survives oversized read-disturb counter")
+    fail = fail + expect_eq(ftl.read_disturb_count(blk10), FW_SAFE_I64_LIMIT, "read-disturb stays saturated after oversized corruption")
     ftl.rd_disturb = []
     fail = fail + expect_eq(ftl.read_disturb_count(blk10), 0, "truncated read-disturb table fails closed")
     fail = fail + expect_eq(ftl.read(10), 0xAB, "read survives truncated read-disturb table")
