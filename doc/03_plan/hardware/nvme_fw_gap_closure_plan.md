@@ -54,7 +54,7 @@ the firmware":
 | P7 | `power_thermal` | `nvme_controller` (IO path ticks it; SMART reports its temperature) | **wired** |
 | P8 | `rain` | `ftl` (writes/GC/format maintain parity; `rain_recover_channel` rebuilds a failed channel inside the live FTL, verified end-to-end through the normal read path) | **wired** |
 | P2 | `fil_scheduler` | `fil.spl` (every valid program/read/erase queues the target block through the scheduler before the FMC command) | **wired timing floor** — channel-level parallelism is still a model the single-threaded sim cannot physically exhibit |
-| P9 | `fw_rv32/entry.spl`, `fw_rv64/build.shs` | bare-metal rv32 scalar firmware floor (re-expresses RAIN, ECC, fixed scheduler, fixed power/thermal, fixed map-cache, fixed band, fixed journal-ring, fixed HIL, fixed queue-phase, fixed io-opcode-read-zero-trim-flush, fixed admin/format/fw-log, fixed reactor, fixed policy/target, fixed DRAM/durability, fixed wear/scrub, fixed media-retire, fixed power-cycle, fixed backpressure/abort, fixed feature/namespace guards, and the Cosmos+ OpenSSD target profile array-free; `check`-clean + host-verified); rv64 direct-build recipe plus fail-closed real-boot SSpec | rv32 wired through boot hook; rv64 ELF output blocked by native-build termination; full no-alloc firmware port remains the ceiling |
+| P9 | `fw_rv32/entry.spl`, `fw_rv64/build.shs` | bare-metal rv32 scalar firmware floor (re-expresses RAIN, ECC, fixed scheduler, fixed power/thermal, fixed map-cache, fixed band, fixed journal-ring, fixed HIL, fixed queue-phase, fixed task-pool fail-closed, fixed io-opcode-read-zero-trim-flush, fixed admin/format/fw-log, fixed reactor, fixed policy/target, fixed DRAM/durability, fixed wear/scrub, fixed media-retire, fixed power-cycle, fixed backpressure/abort, fixed feature/namespace guards, and the Cosmos+ OpenSSD target profile array-free; `check`-clean + host-verified); rv64 direct-build recipe plus fail-closed real-boot SSpec | rv32 wired through boot hook; rv64 ELF output blocked by native-build termination; full no-alloc firmware port remains the ceiling |
 
 Adding more standalone modules (full P4 HostMem/PRP lists, full P5 DRAM refresh/ECC/bandwidth, multicore P6 beyond the cooperative token, or full BCH/LDPC beyond the P3 floor) widens the shelf without closing the gap. Prefer
 wiring an existing verified module into the live path over landing a new disconnected one.
@@ -326,7 +326,8 @@ whole-unit erasure.
 > `ALL RV32 NVME FW CHECKS PASS` / `RESULT: PASS`. `fw_rv32/entry.spl` remains a host-verified,
 > array-free scalar reference for the Lean-proven RAIN reconstruction, SECDED ECC floor, fixed
 > scheduler floor, fixed power/thermal floor, fixed map-cache floor, fixed band floor, fixed
-> journal-ring floor, fixed HIL command/queue floor, fixed queue-phase floor,
+> journal-ring floor, fixed HIL command/queue floor, fixed queue-phase floor, fixed task-pool
+> fail-closed floor,
 > io-opcode-read-zero-trim-flush floor, admin/format/fw-log floor, reactor floor,
 > policy/target floor, DRAM/durability floor, wear/scrub floor, media-retire floor,
 > power-cycle floor, backpressure/abort floor, feature-guard floor, and namespace-guard floor.

@@ -140,7 +140,7 @@ channel-level parallelism is a model a single-threaded sim cannot physically exh
 scope); P4 has a **wired segmented-PRP host-byte floor** (full HostMem/SGL/IOMMU remains out of scope);
 P5 has a **wired bounded-map-cache + fixed arena/free-list floor** (full DRAM subsystem remains out of scope);
 P6 has a **wired cooperative-owner floor** (true multicore/preemption remains out of scope);
-P9 is **reference-wired, full-port pending** (rv32 note above; rv64 recipe present, ELF output blocked).
+P9 is **reference-wired, full-port pending** (rv32 note above, including the task-pool fail-closed scalar floor; rv64 recipe present, ELF output blocked).
 
 Silicon-only pieces remain out of scope (real BCH/RS/LDPC hardware ECC, MMIO/PCIe, full PRP/SGL DMA, real DRAM refresh/ECC/bandwidth, multicore/preemptive scheduling, persistent backing
 store) — see `PRODUCTION_STATUS.md` § Silicon boundary. This is a hardware-FAITHFUL **simulation**,

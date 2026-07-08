@@ -17,7 +17,7 @@ silicon. The simulation boundary is deliberate and unchanged:
   real register MMIO / PCIe transport, a persistent backing store, and multi-channel NAND
   timing. The bare-metal **rv32** scalar firmware floor is written, host-verified, and wired through
   the rv32 boot hook, including RAIN, ECC, scheduler, power/thermal, map-cache, band, journal,
-  HIL/queue, IO/admin/flush, reactor, policy/target, DRAM/durability, wear/scrub, media-retire,
+  HIL/queue, task-pool fail-closed, IO/admin/flush, reactor, policy/target, DRAM/durability, wear/scrub, media-retire,
   power-cycle, backpressure/abort, feature/namespace guards, and the Cosmos+ OpenSSD target
   profile; the full no-alloc firmware port is not wired into that boot path yet (see also
   `BUILD_STATUS.md`). The sibling rv64 lane has a direct-build recipe and fail-closed real-boot
@@ -107,7 +107,7 @@ channel-level parallelism; **P3 has a wired SECDED payload-window stored-ECC sim
 wired segmented-PRP host-byte floor** (not full HostMem/SGL/IOMMU); **P5 has a wired bounded-map-cache
 and fixed arena/free-list floor** (not a full DRAM subsystem); **P6 has a wired cooperative-owner floor** (not
 multicore/preemptive); and **P9** has a host-verified rv32 scalar firmware floor wired through the
-boot hook plus an rv64 direct-build recipe whose ELF output is still blocked, while the full
+boot hook (including task-pool fail-closed coverage) plus an rv64 direct-build recipe whose ELF output is still blocked, while the full
 no-alloc firmware port remains pending (see the silicon boundary below).
 
 **Silicon boundary (unchanged).** Real BCH/Reed–Solomon/LDPC hardware ECC (the sim keeps a
