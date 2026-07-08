@@ -194,6 +194,8 @@ For CUDA-specific parser changes, also run
 `sh scripts/check/check-cuda-generated-2d-readback.shs --self-test`.
 For OpenCL-specific parser changes, also run
 `sh scripts/check/check-opencl-generated-2d-readback.shs --self-test`.
+For ROCm-specific parser changes, also run
+`sh scripts/check/check-rocm-generated-2d-readback.shs --self-test`.
 For Vulkan-specific parser changes, also run
 `sh scripts/check/check-vulkan-engine2d-readback.shs --self-test`.
 
