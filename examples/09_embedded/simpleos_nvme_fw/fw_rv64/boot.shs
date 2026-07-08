@@ -27,6 +27,9 @@ case "${NVME_RV64_FAKE_SERIAL:-pass}" in
   missing)
     printf '%s\n' "SimpleOS RV64" "[BOOT] boot complete" >"$serial"
     ;;
+  empty)
+    : >"$serial"
+    ;;
   fail)
     printf '%s\n' "SimpleOS RV64" "[BOOT] boot complete" "ALL RV64 NVME FW CHECKS PASS" "FAIL injected" >"$serial"
     ;;
@@ -54,6 +57,15 @@ EOF
     exit 1
   }
 
+  if PATH="$fake_bin:$PATH" NVME_RV64_FAKE_SERIAL=empty sh "$0" "$fake_elf" >"$tmp_dir/empty.out" 2>&1; then
+    echo "STATUS: FAIL nvme-rv64-boot self-test: empty serial passed" >&2
+    exit 1
+  fi
+  grep -Fq "RESULT: FAIL (serial empty)" "$tmp_dir/empty.out" || {
+    echo "STATUS: FAIL nvme-rv64-boot self-test: empty serial reason absent" >&2
+    exit 1
+  }
+
   if PATH="$fake_bin:$PATH" NVME_RV64_FAKE_SERIAL=fail sh "$0" "$fake_elf" >"$tmp_dir/fail.out" 2>&1; then
     echo "STATUS: FAIL nvme-rv64-boot self-test: serial FAIL marker passed" >&2
     exit 1
@@ -77,6 +89,9 @@ mkdir -p "$(dirname "$LOG")"; rm -f "$LOG"
 timeout 15 qemu-system-riscv64 -machine virt -cpu rv64 -m 128M -nographic -bios none \
   -kernel "$ELF" -serial file:"$LOG" </dev/null >/dev/null 2>&1
 echo "--- serial ---"; cat "$LOG" 2>/dev/null; echo "--- end ---"
+if [ ! -s "$LOG" ]; then
+  echo "RESULT: FAIL (serial empty)"; exit 1
+fi
 if ! grep -q "ALL RV64 NVME FW CHECKS PASS" "$LOG" 2>/dev/null; then
   echo "RESULT: FAIL (marker not found)"; exit 1
 fi

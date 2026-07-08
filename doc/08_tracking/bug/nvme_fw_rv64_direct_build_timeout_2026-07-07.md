@@ -914,12 +914,16 @@ still fails with an empty serial log:
 ```text
 --- serial ---
 --- end ---
-RESULT: FAIL (marker not found)
+RESULT: FAIL (serial empty)
 ```
 
 So the direct RV64 path can now build a real 2-file firmware probe, but that
 partial probe is not yet a boot PASS and must not be treated as production
 firmware completion.
+
+The RV64 boot wrapper now classifies this case explicitly as `serial empty`;
+the generic `marker not found` failure is reserved for non-empty serial output
+that still misses the firmware PASS marker.
 
 ## Update — elapsed evidence shows external termination before 120s cap
 
