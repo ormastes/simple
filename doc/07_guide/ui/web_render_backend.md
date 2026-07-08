@@ -33,9 +33,9 @@ Pure-Simple GPU paint is opt-in with `SIMPLE_WEB_GPU_PAINT=1`. The default path
 uploads the completed CPU layout image to Engine2D because small or residual-heavy
 pages can lose more time to command/upload/readback traffic than they save on
 device fill work. `web_gpu_paint_economics(frame, base)` is the local decision
-helper: it compares full-image upload/readback cost with primitive fill commands
-plus residual upload cost, and only returns an offload win when CPU paint was
-actually skipped. Solid-only pages build the frame from fill ops; mixed pages
+helper: it compares total CPU paint plus upload/readback cost against primitive
+fill commands plus residual upload cost, and only returns an offload win when
+estimated total work is lower. Solid-only pages build the frame from fill ops; mixed pages
 still keep CPU ground truth for residual parity. The forced GPU paint path
 predicts the residual from the local fill list, so it avoids an extra full-frame
 GPU readback before the final pixel-returning API readback. The deterministic

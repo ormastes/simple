@@ -46,7 +46,7 @@ web_gpu_paint_offload_matrix_spec -> common
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -55,6 +55,7 @@ val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
 expect(economics.cpu_paint_pixels).to_equal(0)
 expect(economics.fill_pixels).to_be_greater_than(0)
 expect(economics.gpu_paint_transfer_pixels).to_be_less_than(economics.upload_bound_transfer_pixels)
+expect(economics.gpu_paint_total_pixels).to_be_less_than(economics.upload_bound_total_pixels)
 expect(economics.should_offload).to_equal(true)
 ```
 
@@ -83,7 +84,7 @@ expect(economics.reason).to_equal("cpu-ground-truth-required")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -92,6 +93,7 @@ val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
 expect(economics.cpu_paint_pixels).to_equal(0)
 expect(economics.fill_op_count).to_be_greater_than(7)
 expect(economics.gpu_paint_transfer_pixels).to_be_greater_than(economics.upload_bound_transfer_pixels)
+expect(economics.gpu_paint_total_pixels).to_equal(economics.upload_bound_total_pixels)
 expect(economics.should_offload).to_equal(false)
 expect(economics.reason).to_equal("communication-overhead")
 ```
