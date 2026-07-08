@@ -764,6 +764,26 @@ Terminated
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
 
+## Update — elapsed evidence shows external termination before 120s cap
+
+`fw_rv64/build.shs` now reports native-build elapsed seconds. A fresh
+`NVME_RV64_BUILD_TIMEOUT_SECS=120` probe exited with code 143 after 70 seconds,
+before the configured wrapper timeout:
+
+```text
+NVME_RV64_BUILD_FAILED code=143 timeout=120s elapsed=70s
+[BOOTSTRAP-PHASE] ... logic_sections_primary.spl chars=1441
+[BOOTSTRAP-PHASE] ... logic_sections_secondary.spl chars=1464
+[BOOTSTRAP-PHASE] ... logic_media_retire.spl chars=111
+Terminated
+```
+
+Treat this host result as `external-termination-before-timeout`, not proof that
+the native build consumed the full 120-second budget. The RV64 ELF is still not
+produced; the next production fix should address the external kill or run the
+direct build in an environment with a larger process lifetime before resuming
+source-shape reductions.
+
 ## Update — band allocation core split, probe reaches reactor cases
 
 `logic_band_core.spl` was reduced by moving band allocation, host-open, writable
