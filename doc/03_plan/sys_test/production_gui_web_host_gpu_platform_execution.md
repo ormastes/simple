@@ -168,9 +168,12 @@ equivalent backend-specific field, with nonnegative
 `rt_webgpu_readback_checksum` and a positive surface/backend handle. The
 standalone wrapper publishes `webgpu_real_readback_status=pass`,
 `webgpu_real_readback_source=device_readback`, a positive
-`webgpu_real_readback_backend_handle`, and matching expected/actual checksums
-when a real `webgpu-real` host is available. The aggregate now consumes that
-same-frame proof and reports `webgpu_spark_task_status=pass` and
+`webgpu_real_readback_backend_handle`, and positive matching expected/actual
+checksums when a real `webgpu-real` host is available. The wrapper self-test
+rejects zero or malformed handles, zero checksums, checksum mismatches, and
+upload-only provenance so communication or surface-upload evidence cannot
+masquerade as same-frame proof. The aggregate now consumes that same-frame
+proof and reports `webgpu_spark_task_status=pass` and
 `webgpu_normal_llm_verification_status=pass`; keep `surface_upload`
 provenance-only.
 
