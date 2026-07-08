@@ -28,8 +28,8 @@
 # general path is usable freestanding is tracked as a separate blocker.
 
 use os.kernel.memory.vmm_address_space.{
-    create_user_address_space, vmm_map_page_in,
-    vmm_clone_kernel_low_identity, vmm_zero_phys_range
+    create_user_address_space, vmm_map_user_low_page,
+    vmm_clone_kernel_low_private, vmm_zero_phys_range
 }
 use os.kernel.types.memory_types.{VmFlags, VirtAddr, PhysAddr}
 use os.kernel.types.task_types.{
@@ -133,7 +133,7 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, file_len: u64) -> i64:
             j = j + 1
 
         val flags = if writable: VmFlags.user_rw() else: VmFlags.user_rx()
-        if not vmm_map_page_in(space, VirtAddr(addr: va), PhysAddr(addr: phys), flags):
+        if not vmm_map_user_low_page(space, VirtAddr(addr: va), PhysAddr(addr: phys), flags):
             serial_println("[spawn] FAIL map page va=0x{va}")
             return 0
 
@@ -203,8 +203,15 @@ pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64, argv
     if space.phys_root == 0 or space.phys_root == 1:
         serial_println("[spawn] FAIL user-AS synthetic root={space.phys_root}")
         return -1
-    vmm_clone_kernel_low_identity(space.phys_root)
-    serial_println("[spawn] user AS ready root={space.phys_root}")
+    # PRIVATE low-half clone: gives this AS its own PML4[0] PDPT so PT_LOADs at
+    # low VAs (clang links at 0x10000000, PML4[0]) can install private 4K user
+    # pages — vmm_map_user_low_page splits the shared kernel 2MiB identity page
+    # copy-on-map instead of corrupting the kernel's tables. Safe for the PML4[1]
+    # fixture/stack VAs too (fresh tables, no privatization triggers).
+    if not vmm_clone_kernel_low_private(space.phys_root):
+        serial_println("[spawn] FAIL clone kernel low private root={space.phys_root}")
+        return -1
+    serial_println("[spawn] user AS ready (private low) root={space.phys_root}")
 
     if _map_pt_loads(space, blob, fb.len().to_u64()) == 0:
         serial_println("[spawn] FAIL segment mapping")
@@ -236,7 +243,7 @@ pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64, argv
             serial_println("[spawn] FAIL stack alloc p={p}")
             return -3
         vmm_zero_phys_range(sph, PAGE.to_u64())
-        if not vmm_map_page_in(space, VirtAddr(addr: sva.to_u64()), PhysAddr(addr: sph), VmFlags.user_rw()):
+        if not vmm_map_user_low_page(space, VirtAddr(addr: sva.to_u64()), PhysAddr(addr: sph), VmFlags.user_rw()):
             serial_println("[spawn] FAIL stack map p={p}")
             return -4
         # Capture the TOP stack page's physical address (p==0: sva==STACK_TOP-PAGE
