@@ -241,16 +241,18 @@ done
 
 ## 5. rv32 bare-metal status (read this plainly)
 
-Default `fw_rv32/build.shs` now builds a small direct rv32 ELF without rebuilding the Rust seed or
-compiling the full Simple firmware graph. Verified on 2026-07-07:
+Default `fw_rv32/build.shs` is the small direct rv32 ELF recipe; it avoids rebuilding the Rust
+seed and does not compile the full Simple firmware graph. Build the ELF before treating this as
+boot evidence:
 
 ```sh
 NVME_RV32_BUILD_TIMEOUT_SECS=60 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs build/nvme_fw_rv32.elf
 ```
 
-The boot prints `ALL RV32 NVME FW CHECKS PASS` and exits `RESULT: PASS`; `boot.shs --self-test`
-also passes. This is P9 direct-smoke evidence, not the full firmware port. Set
+When the ELF exists, the boot must print `ALL RV32 NVME FW CHECKS PASS` and exit `RESULT: PASS`;
+`boot.shs --self-test` separately proves the wrapper fails closed on bad serial output. This is
+P9 direct-smoke evidence, not the full firmware port. Set
 `NVME_RV32_BUILD_OS_BOOT=1` only when intentionally exercising the slower full rv32 OS boot/source
 graph; the full 22-module no-alloc port remains open.
 

@@ -24,8 +24,9 @@ rv32 direct-smoke path needs `build/nvme_fw_rv32.elf` before it can prove a QEMU
 full no-alloc firmware port remains open.
 
 P9 artifacts: `fw_rv32/entry.spl` is the scalar/array-free reference, and default
-`fw_rv32/build.shs` builds a fast direct rv32 smoke ELF. Verified 2026-07-07:
-`ALL RV32 NVME FW CHECKS PASS` / `RESULT: PASS`.
+`fw_rv32/build.shs` is the fast direct rv32 smoke ELF recipe; QEMU boot evidence exists only
+after `build/nvme_fw_rv32.elf` is produced and prints `ALL RV32 NVME FW CHECKS PASS` /
+`RESULT: PASS`.
 
 <!-- sdn-diagram:id=nvme_fw_emu_tldr -->
 ```
