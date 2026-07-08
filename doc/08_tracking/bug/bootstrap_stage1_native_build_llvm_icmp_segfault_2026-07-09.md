@@ -60,6 +60,32 @@ Most likely one of:
 2. **Simple-side codegen** passing a null/undef value operand to `LLVMBuildICmp` (a missing/ordering
    bug in the Simple LLVM IR builder that only shows up on this input).
 
+## Update 2026-07-09 — it's a CASCADE, common cause = interpreter FFI pointer marshalling in native-build
+
+A diagnostic experiment (temporary null-operand guard in `sffi/llvm_codegen.spl:llvm_build_icmp`,
+now reverted) invalidated the native cache and forced a fuller recompile, which surfaced a **second,
+distinct** native-build crash that aborts even earlier:
+```
+LLVM ERROR: ABI alignment must be a 16-bit integer          (exit 134, SIGABRT)
+llvm::report_fatal_error(...)
+llvm::DataLayout::DataLayout(llvm::StringRef)
+llvm::Module::setDataLayout(llvm::StringRef)
+simple_compiler::interpreter::interpreter_extern::call_extern_function_with_values   ← same FFI path
+```
+The aarch64-darwin datalayout literal in `llvm_target.spl:datalayout()` (`"e-m:o-i64:64-i128:128-
+n32:64-S128-Fn32"`, line 147) is **valid** (max alignment 128) — LLVM is not rejecting that string.
+So LLVM received a **corrupted** datalayout `StringRef` (garbage bytes parsed as an out-of-range
+alignment). That, plus the ICmp crash receiving a bad `llvm::Value*`, means **both** failures are
+LLVM C-API calls reached through `call_extern_function_with_values` with a **bad pointer/`StringRef`
+argument** — i.e. the strongest single hypothesis is now **interpreter FFI marshalling of
+pointer/opaque/`text` arguments in the native-build path**, not two independent codegen bugs.
+
+Caveat: the deployed binary's native-build produced this very binary earlier, so the marshalling
+defect is either recent (a peer interpreter/FFI change) or triggered only by a specific arg
+shape/order that the current bootstrap sources hit. The guard experiment also proved the ICmp site is
+reachable and the build *would* advance past it if the operand were valid — consistent with
+"transient bad pointer" rather than "always-null operand".
+
 ## Fix direction
 
 Instrument the `LLVMBuildICmp` extern binding (or `call_extern_function_with_values` for opaque
