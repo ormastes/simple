@@ -28,7 +28,7 @@ backend_measurement_report_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -144,6 +144,38 @@ sample.artifact_submit_us = 700
 sample.artifact_readback_us = 400
 expect(backend_comparison_artifact_total_us(sample)).to_equal(1510)
 expect(backend_comparison_offload_overhead_verdict(sample)).to_equal("offload-overhead-dominates")
+```
+
+</details>
+
+#### summarizes measured offload combinations against the scalar baseline
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val scalar = _software_sample(2000)
+val fast = _initialized_sample()
+var slower = _initialized_sample()
+slower.fixture_id = "wm_compare:button_grid:64:slow"
+slower.p50_frame_us = 2500
+slower.p95_frame_us = 2600
+slower.p95_input_to_paint_us = 2700
+var overhead = _initialized_sample()
+overhead.fixture_id = "wm_compare:button_grid:64:overhead"
+overhead.artifact_submit_us = 700
+overhead.artifact_readback_us = 400
+val samples = [scalar, fast, slower, overhead]
+expect(backend_comparison_scalar_p50_us(samples)).to_equal(2000)
+val sdn = backend_comparison_samples_sdn(samples)
+expect(sdn).to_contain("scalar_baseline_p50_us: 2000")
+expect(sdn).to_contain("backend_faster_than_scalar_count: 2")
+expect(sdn).to_contain("backend_slower_than_scalar_count: 1")
+expect(sdn).to_contain("offload_overhead_contained_count: 2")
+expect(sdn).to_contain("offload_overhead_dominates_count: 1")
 ```
 
 </details>
