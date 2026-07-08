@@ -1,7 +1,7 @@
 # CPU-SIMD/GPU Scheduling Parity Gate Missing
 
 - **Date:** 2026-07-09
-- **Status:** open
+- **Status:** resolved
 - **Severity:** high
 - **Area:** Engine2D, CPU-SIMD, GPU scheduling
 
@@ -23,12 +23,13 @@ Related proof paths include:
 - `test/02_integration/lib/gpu/gpu_scheduler_diag_spec.spl`
 - `scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`
 
-These are useful, but no dedicated spec compares `cpu_simd` and GPU scheduling
-for the same drawing workload.
+These are useful, but originally no dedicated spec compared `cpu_simd` and GPU
+scheduling for the same drawing workload.
 
 ## Expected
 
-Add a focused SPipe spec or wrapper that runs the same Engine2D workload through
-explicit `cpu_simd` and GPU backend selections, then asserts queue submit,
-completion, drain ordering, backend tag/config separation, fallback state, and
-checksum/readback parity where the host GPU backend is available.
+Implemented by
+`test/03_system/check/cpu_simd_gpu_scheduling_parity_spec.spl`. The spec keeps
+`cpu_simd` on the host/direct drawing path and sends the same Draw IR payload
+through the GPU pure queue, asserting queued -> submitted -> completed -> drained
+ordering plus backend handle and payload hash/text preservation.
