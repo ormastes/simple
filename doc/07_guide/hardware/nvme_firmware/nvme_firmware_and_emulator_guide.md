@@ -9,9 +9,10 @@ deliberately avoided — see the caveats below):
 2. **`emu/`** — a pure-Simple NVMe **host-interface ↔ device-interface emulator** with a
    settable memcpy/DMA seam on both sides, an ONFI NAND, domain newtypes, and Lean4 proofs.
 
-> **Mostly simulation.** The main firmware and emulator are host-runnable simulations. A
-> separate rv32 direct-smoke image now boots under QEMU and prints the firmware PASS marker;
-> the full no-alloc firmware port is still not complete (see "rv32 status").
+> **Mostly simulation.** The main firmware and emulator are host-runnable simulations. The
+> rv32 direct-smoke path is fail-closed and boots under QEMU only after
+> `build/nvme_fw_rv32.elf` is produced; the full no-alloc firmware port is still not complete
+> (see "rv32 status").
 
 ---
 
