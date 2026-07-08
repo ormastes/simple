@@ -181,6 +181,8 @@ under `build/generated_2d_backend_readback_matrix/`.
 Use `sh scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs
 --self-test` after changing the wrapper. It uses fake child lanes to prove a
 backend cannot report `pass` unless submit/readback provenance is present.
+For Metal-specific parser changes, also run
+`sh scripts/check/check-metal-generated-2d-readback.shs --self-test`.
 
 For Simple Web layout benchmark scenes, the Node bitmap fixture can consume a
 Simple-produced ARGB transport baseline with
