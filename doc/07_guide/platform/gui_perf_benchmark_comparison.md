@@ -114,7 +114,8 @@ The no-hardware summary contract must report
 `gpu_perf_summary_contract=verdict-timing-overhead` plus explicit
 `gpu_perf_summary_case_*` pass markers for both canonical runner paths, proving
 the self-test still covers faster, near-CPU, slower-overhead, ambiguous generic
-speedup, timing-line parsing, and missing-contract/case-marker rejection.
+speedup, timing-line parsing, fail precedence, and missing-contract/case-marker
+rejection.
 
 ## Pixel Parity Gate
 
