@@ -29,6 +29,14 @@ is what the honest bit-level gate uses (pure-Simple ≡ Chromium OSR, `mismatch=
 Pure-Simple pixel artifacts stamp their `engine2d_backend` from the same
 Engine2D `auto` resolution path used for rendering; do not hard-code default
 artifact provenance as `software`.
+Pure-Simple GPU paint is opt-in with `SIMPLE_WEB_GPU_PAINT=1`. The default path
+uploads the completed CPU layout image to Engine2D because small or residual-heavy
+pages can lose more time to command/upload/readback traffic than they save on
+device fill work. `web_gpu_paint_economics(frame, base)` is the local decision
+helper: it compares full-image upload/readback cost with primitive fill commands
+plus residual upload cost. The forced GPU paint path predicts the residual from
+the local fill list, so it avoids an extra full-frame GPU readback before the
+final pixel-returning API readback.
 The browser backend keeps a retained one-entry pixel artifact cache for
 unchanged static full HTML at the same viewport and resolved backend. Requests
 with `data-simple-dynamic`, `data-live`, `data-ui-patch`, or WebSocket JS bypass

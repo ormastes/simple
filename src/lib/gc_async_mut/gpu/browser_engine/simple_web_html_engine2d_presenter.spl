@@ -7,19 +7,16 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 }
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-
-extern fn rt_env_get(key: text) -> text
+use std.gc_async_mut.io.mod_stub.{env_get}
 
 # ---------------------------------------------------------------------------
 # GPU paint flag
 # ---------------------------------------------------------------------------
-# When SIMPLE_WEB_GPU_PAINT=1 the non-CPU presenter path composes the frame from
-# a display list of REAL per-primitive Engine2D backend calls (one
-# draw_rect_filled per solid box) plus a residual blit, instead of uploading one
-# finished CPU bitmap and blitting it once. Default OFF: the safe upload path
-# stays in force until per-primitive parity is proven on the target machine.
+# SIMPLE_WEB_GPU_PAINT=1 forces per-primitive GPU paint. The default path stays
+# upload-bound; callers can use the economics API below before opting into GPU
+# paint so command/readback overhead does not silently make small pages slower.
 pub fn web_gpu_paint_enabled() -> bool:
-    val v = rt_env_get("SIMPLE_WEB_GPU_PAINT")
+    val v = env_get("SIMPLE_WEB_GPU_PAINT")
     v == "1" or v == "true" or v == "on"
 
 fn _backend_is_cpu(normalized_backend: text) -> bool:
@@ -36,6 +33,16 @@ class _DirtyRect:
     y: i32
     w: i32
     h: i32
+
+pub class WebGpuPaintEconomics:
+    frame_pixels: i32
+    fill_op_count: i32
+    fill_pixels: i32
+    residual_pixels: i32
+    upload_bound_transfer_pixels: i32
+    gpu_paint_transfer_pixels: i32
+    should_offload: bool
+    reason: text
 
 # Bounding box of every pixel where the GPU-composited fills differ from the CPU
 # ground-truth framebuffer. If the GPU readback length is wrong (backend cannot
@@ -70,7 +77,8 @@ fn _dirty_bounds(truth: [u32], gpu: [u32], width: i32, height: i32) -> _DirtyRec
     _DirtyRect(valid: true, x: min_x, y: min_y, w: max_x - min_x + 1, h: max_y - min_y + 1)
 
 fn _extract_subimage(src: [u32], src_width: i32, rect: _DirtyRect) -> [u32]:
-    var out: [u32] = [0u32; rect.w * rect.h]
+    val zero = 0 as u32
+    var out: [u32] = [zero; rect.w * rect.h]
     var ry: i32 = 0
     while ry < rect.h:
         val src_row = (rect.y + ry) * src_width + rect.x
@@ -81,6 +89,76 @@ fn _extract_subimage(src: [u32], src_width: i32, rect: _DirtyRect) -> [u32]:
             rx = rx + 1
         ry = ry + 1
     out
+
+fn _clip_start(v: i32) -> i32:
+    if v < 0: 0 else: v
+
+fn _clip_end(v: i32, max_value: i32) -> i32:
+    if v > max_value: max_value else: v
+
+fn _fill_op_clipped_pixels(op_x: i32, op_y: i32, op_w: i32, op_h: i32, width: i32, height: i32) -> i32:
+    val x0 = _clip_start(op_x)
+    val y0 = _clip_start(op_y)
+    val x1 = _clip_end(op_x + op_w, width)
+    val y1 = _clip_end(op_y + op_h, height)
+    if x1 <= x0 or y1 <= y0:
+        return 0
+    (x1 - x0) * (y1 - y0)
+
+fn _fill_op_pixels(frame: WebGpuPaintFrame) -> i32:
+    var total: i32 = 0
+    var i: i32 = 0
+    val op_count = frame.fill_ops.len()
+    while i < op_count:
+        val op = frame.fill_ops[i]
+        total = total + _fill_op_clipped_pixels(op.x, op.y, op.width, op.height, frame.width, frame.height)
+        i = i + 1
+    total
+
+fn _simulate_fill_ops(frame: WebGpuPaintFrame, base: u32) -> [u32]:
+    val width = frame.width
+    val height = frame.height
+    var out: [u32] = [base; width * height]
+    var oi: i32 = 0
+    val op_count = frame.fill_ops.len()
+    while oi < op_count:
+        val op = frame.fill_ops[oi]
+        val x0 = _clip_start(op.x)
+        val y0 = _clip_start(op.y)
+        val x1 = _clip_end(op.x + op.width, width)
+        val y1 = _clip_end(op.y + op.height, height)
+        var y = y0
+        while y < y1:
+            val row = y * width
+            var x = x0
+            while x < x1:
+                out[row + x] = op.color as u32
+                x = x + 1
+            y = y + 1
+        oi = oi + 1
+    out
+
+pub fn web_gpu_paint_economics(frame: WebGpuPaintFrame, base: u32) -> WebGpuPaintEconomics:
+    val frame_pixels = frame.width * frame.height
+    val op_count = frame.fill_ops.len()
+    val fill_pixels = _fill_op_pixels(frame)
+    val simulated = _simulate_fill_ops(frame, base)
+    val dirty = _dirty_bounds(frame.fb, simulated, frame.width, frame.height)
+    val residual_pixels = if dirty.valid: dirty.w * dirty.h else: 0
+    val upload_transfer = frame_pixels * 2
+    val gpu_transfer = frame_pixels + residual_pixels + op_count * 64
+    val should = op_count > 0 and fill_pixels > 0 and gpu_transfer < upload_transfer
+    val reason = if should:
+        "gpu-paint-transfer-win"
+    else:
+        if op_count == 0:
+            "no-gpu-fill-ops"
+        else:
+            if fill_pixels == 0:
+                "no-clipped-fill-pixels"
+            else:
+                "communication-overhead"
+    WebGpuPaintEconomics(frame_pixels: frame_pixels, fill_op_count: op_count, fill_pixels: fill_pixels, residual_pixels: residual_pixels, upload_bound_transfer_pixels: upload_transfer, gpu_paint_transfer_pixels: gpu_transfer, should_offload: should, reason: reason)
 
 # ---------------------------------------------------------------------------
 # GPU-paint present: real per-primitive Engine2D dispatch
@@ -103,13 +181,15 @@ fn present_gpu_paint_readback(frame: WebGpuPaintFrame, backend_name: text, base:
             engine.clear(base)
             var rect_count: i32 = 0
             var oi: i32 = 0
-            while oi < frame.fill_ops.len():
+            val op_count = frame.fill_ops.len()
+            while oi < op_count:
                 val op = frame.fill_ops[oi]
                 engine.draw_rect_filled(op.x, op.y, op.width, op.height, op.color as u32)
                 rect_count = rect_count + 1
                 oi = oi + 1
-            # Measure the residual against the real GPU output after the fills.
-            val after_fills = engine.read_pixels()
+            # Predict the residual locally so GPU paint does not pay an extra
+            # full-frame GPU->CPU readback before the final API readback.
+            val after_fills = _simulate_fill_ops(frame, base)
             val dirty = _dirty_bounds(frame.fb, after_fills, width, height)
             var blit_count: i32 = 0
             var blit_pixels: i32 = 0
