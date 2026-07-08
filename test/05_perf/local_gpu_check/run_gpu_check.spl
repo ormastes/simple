@@ -9,13 +9,45 @@
 extern fn rt_exec(cmd: text) -> i64
 extern fn rt_exec_output(cmd: text) -> text
 
+fn gpu_output_verdict(output: text) -> text:
+    if output.find("PASS: GPU equal or better") >= 0 or output.find("GPU speedup:") >= 0 or output.find("Speedup:") >= 0:
+        return "measured-gpu-faster"
+    if output.find("ACCEPTABLE: within 1.25x") >= 0:
+        return "measured-near-cpu"
+    if output.find("WARN: GPU slower") >= 0 or output.find("NOTE: host-visible mem slower than CPU") >= 0:
+        return "measured-gpu-slower-overhead"
+    if output.find("FAIL:") >= 0:
+        return "unavailable-or-failed"
+    "unclassified-output"
+
+fn first_matching_line(output: text, a: text, b: text) -> text:
+    var idx = output.find(a)
+    if idx < 0 and b.len() > 0:
+        idx = output.find(b)
+    if idx < 0:
+        return "missing"
+    val rest = output.slice(idx, output.len())
+    val newline = rest.find("\n")
+    if newline < 0:
+        return rest.trim()
+    rest.slice(0, newline).trim()
+
+fn self_check_gpu_summary_classifier() -> bool:
+    gpu_output_verdict("PASS: GPU equal or better") == "measured-gpu-faster" and
+        gpu_output_verdict("NOTE: host-visible mem slower than CPU") == "measured-gpu-slower-overhead" and
+        gpu_output_verdict("FAIL: no devices") == "unavailable-or-failed"
+
 fn main():
+    if not self_check_gpu_summary_classifier():
+        print "FAIL: gpu summary classifier self-check"
+        return pass_dn
+
     print "========================================"
     print "GPU Performance Check — Build & Run"
     print "========================================"
     print ""
 
-    var base = "test/perf/local_gpu_check/c_cuda"
+    var base = "test/05_perf/local_gpu_check/c_cuda"
 
     # Build CUDA bench
     print "[1/4] Building CUDA benchmark..."
@@ -49,9 +81,13 @@ fn main():
     print "========================================"
     print "SUMMARY"
     print "========================================"
-    print "  CUDA: RTX A6000 — 56x CPU, sub-ms frames"
-    print "  Vulkan: 3 devices — 268ms init (< 500ms NFR)"
-    print "  Both backends: PROVEN locally"
+    print "  CUDA verdict: " + gpu_output_verdict(cuda_out)
+    print "  CUDA GPU timing: " + first_matching_line(cuda_out, "GPU kernel clear:", "Avg kernel:")
+    print "  CUDA CPU timing: " + first_matching_line(cuda_out, "CPU memset clear:", "Avg CPU memset:")
+    print "  Vulkan verdict: " + gpu_output_verdict(vk_out)
+    print "  Vulkan GPU timing: " + first_matching_line(vk_out, "GPU fill avg:", "Avg:")
+    print "  Vulkan CPU timing: " + first_matching_line(vk_out, "CPU memset avg:", "CPU memset comparison")
+    print "  Offload proof: measured subprocess output only; slower verdict means sync/host-visible communication overhead beat GPU work."
     print "========================================"
 
 main()
