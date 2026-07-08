@@ -33,6 +33,9 @@ to override it; the report keeps `logical_pixels` and `physical_pixels` equal to
 the requested benchmark dimensions so DPI evidence cannot hide a smaller render.
 Use `scripts/check/check-cpu-simd-render-dpi-contract.shs` for the focused
 default/override contract check.
+Use `scripts/check/check-cpu-simd-render-scale-contract.shs` for the focused
+CPU-SIMD 4K/8K no-reduction contract; it fails closed on fallback, missing
+checksum/nonzero-pixel proof, missing timing, or reduced logical/physical size.
 
 ### Current Simple Backend Evidence (2026-06-06 smoke)
 
@@ -139,6 +142,11 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
   `scripts/check/check-production-gui-web-backend-executed-evidence.shs`; the
   wrapper requires semi-transparent fill output to match software exactly and
   records the alpha hit count/checksums.
+- CPU-SIMD 4K/8K scale evidence is gated by
+  `scripts/check/check-cpu-simd-render-scale-contract.shs`. Current full-size
+  runs are blocked by interpreter termination; native-mode smoke falls back to
+  interpreter because `web_backend_env_get` is not resolved during HIR lowering.
+  See `doc/08_tracking/bug/cpu_simd_4k_8k_render_scale_interpreter_termination.md`.
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
 - Software layout renders must not replay the already-painted framebuffer
   through an Engine2D software present/readback cycle. The 2026-06-06
@@ -161,7 +169,8 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
    smoke rows; repeat at 8K with multiple frames before making release claims.
 2. **CPU SIMD at 8K**: AVX2 backend has a dedicated `simple_web_cpu_simd`
    benchmark row and CPU drawing-library compare fields, but no 8K throughput
-   evidence has been captured yet
+   evidence has been captured yet. The focused scale wrapper is in place, but
+   full-size execution currently terminates in the interpreter path.
 3. **Tauri integration**: Needs `cargo-tauri` CLI + WebKitGTK dev package
 4. **Software text/layout optimization**: the real software render-loop row is
    still far slower than JS/GTK at 320x240; move bitmap/vector font and text-blit

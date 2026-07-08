@@ -92,6 +92,17 @@ implementation-evidence-in-progress
   `production_gui_backend_cpu_simd_alpha_quality_hits=4`, matching alpha
   checksums/pixels, exact backend parity, and `timing_budget_status=warn`
   recorded separately for Vulkan cold-start/render scheduling follow-up.
+- implementation: Added `scripts/check/check-cpu-simd-render-scale-contract.shs`
+  as the focused 4K/8K CPU-SIMD render-loop contract. It reuses the narrow
+  software exporter and fails closed unless CPU-SIMD is selected, 300dpi retina
+  metadata is defaulted, logical/physical pixels match the requested full size,
+  `screen_size_reduced=false`, checksum/nonzero-pixel proof is present, timing
+  fields are positive, and fallback/unavailable fields are empty.
+- verification: The scale contract passes with reduced smoke dimensions
+  (`32x32` and `48x48`) but the real 4K run terminates before SDN output. The
+  native-mode smoke falls back to interpreter because HIR lowering cannot resolve
+  `web_backend_env_get` while lowering `_chromium_tmp_dir`. Tracked as
+  `doc/08_tracking/bug/cpu_simd_4k_8k_render_scale_interpreter_termination.md`.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 
@@ -125,6 +136,10 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
   `scripts/check/check-production-gui-web-backend-executed-evidence.shs`, which
   requires exact software parity and positive alpha hits for a translucent fill
   without adding tolerance or blur.
+- CPU-SIMD 4K/8K no-reduction evidence now has a fail-closed wrapper at
+  `scripts/check/check-cpu-simd-render-scale-contract.shs`; current full-size
+  status is blocked by interpreter termination/native lowering fallback, not by
+  missing contract coverage.
 - Native Simple executable size/speed evidence is intentionally skipped in the fast smoke run (`SKIP_SIMPLE_NATIVE=1`); a release-grade run should capture native artifact bytes or record an explicit native-build blocker.
 - Wire unwired probes into contract: warm_startup, frame_time_p50/p95, input_to_paint.
 - Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture

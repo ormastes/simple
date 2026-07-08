@@ -1,0 +1,180 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+OUT_DIR="${OUT_DIR:-$ROOT/build/check/cpu-simd-render-scale}"
+TIMEOUT_SECS="${CPU_SIMD_RENDER_SCALE_TIMEOUT_SECS:-900}"
+WIDTH_4K="${CPU_SIMD_RENDER_SCALE_4K_WIDTH:-3840}"
+HEIGHT_4K="${CPU_SIMD_RENDER_SCALE_4K_HEIGHT:-2160}"
+WIDTH_8K="${CPU_SIMD_RENDER_SCALE_8K_WIDTH:-7680}"
+HEIGHT_8K="${CPU_SIMD_RENDER_SCALE_8K_HEIGHT:-4320}"
+DPI="${CPU_SIMD_RENDER_SCALE_DPI:-300}"
+SAMPLE_COUNT="${CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT:-1}"
+
+mkdir -p "$OUT_DIR"
+
+run_with_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+run_export() {
+    label="$1"
+    width="$2"
+    height="$3"
+    rm -f "$OUT_DIR/$label.sdn" "$OUT_DIR/$label.err"
+    if [ "$DPI" = "300" ]; then
+        SIMPLE_LIB="$ROOT/src" run_with_timeout "$SIMPLE_BIN" run "$ROOT/src/app/wm_compare/backend_measurement_software_export.spl" -- \
+            --software-render-backend cpu_simd \
+            --width "$width" \
+            --height "$height" \
+            --warmup-count 1 \
+            --sample-count "$SAMPLE_COUNT" \
+            --fixture "cpu-simd-${label}" \
+            --shell simple-web \
+            --command "scale-${label}" \
+            --host local \
+            >"$OUT_DIR/$label.sdn" 2>"$OUT_DIR/$label.err"
+    else
+        SIMPLE_LIB="$ROOT/src" run_with_timeout "$SIMPLE_BIN" run "$ROOT/src/app/wm_compare/backend_measurement_software_export.spl" -- \
+            --software-render-backend cpu_simd \
+            --width "$width" \
+            --height "$height" \
+            --dpi "$DPI" \
+            --warmup-count 1 \
+            --sample-count "$SAMPLE_COUNT" \
+            --fixture "cpu-simd-${label}" \
+            --shell simple-web \
+            --command "scale-${label}" \
+            --host local \
+            >"$OUT_DIR/$label.sdn" 2>"$OUT_DIR/$label.err"
+    fi
+}
+
+field_value() {
+    key="$1"
+    file="$2"
+    grep "^${key}=" "$file" | tail -1 | cut -d= -f2-
+}
+
+sdn_text_value() {
+    key="$1"
+    file="$2"
+    grep -o "${key}: \"[^\"]*\"" "$file" | head -1 | sed "s/^${key}: \"//; s/\"$//"
+}
+
+sdn_bool_value() {
+    key="$1"
+    file="$2"
+    grep -o "${key}: \\(true\\|false\\)" "$file" | head -1 | sed "s/^${key}: //"
+}
+
+sdn_i64_value() {
+    key="$1"
+    file="$2"
+    grep -o "${key}: [0-9][0-9]*" "$file" | head -1 | sed "s/^${key}: //"
+}
+
+fail() {
+    echo "cpu_simd_render_scale_contract_status=fail"
+    echo "cpu_simd_render_scale_contract_reason=$1"
+    exit 1
+}
+
+require_value() {
+    label="$1"
+    expected="$2"
+    actual="$3"
+    if [ "$actual" != "$expected" ]; then
+        fail "${label}_expected_${expected}_got_${actual}"
+    fi
+}
+
+require_positive() {
+    label="$1"
+    actual="$2"
+    case "$actual" in
+        ''|*[!0-9]*) fail "${label}_not_numeric_${actual}" ;;
+    esac
+    if [ "$actual" -le 0 ]; then
+        fail "${label}_not_positive_${actual}"
+    fi
+}
+
+check_export() {
+    label="$1"
+    width="$2"
+    height="$3"
+    file="$OUT_DIR/$label.sdn"
+    pixels=$((width * height))
+
+    require_value "${label}_dpi" "$DPI" "$(field_value gui_perf_benchmark_dpi "$file")"
+    require_value "${label}_dpi_default" "300" "$(field_value gui_perf_benchmark_dpi_default "$file")"
+    if [ "$DPI" = "300" ]; then
+        require_value "${label}_dpi_source" "default" "$(field_value gui_perf_benchmark_dpi_source "$file")"
+    else
+        require_value "${label}_dpi_source" "override" "$(field_value gui_perf_benchmark_dpi_source "$file")"
+    fi
+    require_value "${label}_density" "retina" "$(field_value gui_perf_benchmark_density_profile "$file")"
+    require_value "${label}_logical_pixels" "${width}x${height}" "$(field_value gui_perf_benchmark_logical_pixels "$file")"
+    require_value "${label}_physical_pixels" "${width}x${height}" "$(field_value gui_perf_benchmark_physical_pixels "$file")"
+    require_value "${label}_screen_size_reduced" "false" "$(field_value gui_perf_benchmark_screen_size_reduced "$file")"
+    require_value "${label}_requested" "cpu_simd" "$(sdn_text_value requested "$file")"
+    require_value "${label}_selected" "cpu_simd" "$(sdn_text_value selected "$file")"
+    require_value "${label}_backend_family" "cpu_simd" "$(sdn_text_value backend_family "$file")"
+    require_value "${label}_status" "Initialized" "$(sdn_text_value status "$file")"
+    require_value "${label}_readback_scope" "software-render-loop" "$(sdn_text_value render_readback_scope "$file")"
+    require_value "${label}_runtime_target" "cpu_simd" "$(sdn_text_value runtime_compute_target "$file")"
+    require_value "${label}_runtime_path" "simple_web_layout_engine2d_cpu_simd" "$(sdn_text_value runtime_execution_path "$file")"
+    require_value "${label}_runtime_status" "cpu-simd-render-loop-ready" "$(sdn_text_value runtime_status "$file")"
+    require_value "${label}_scalar_baseline_compared" "true" "$(sdn_bool_value scalar_baseline_compared "$file")"
+    require_value "${label}_fallback" "false" "$(sdn_bool_value fallback_used "$file")"
+    require_value "${label}_fallback_reason" "" "$(sdn_text_value fallback_reason "$file")"
+    require_value "${label}_unavailable_reason" "" "$(sdn_text_value unavailable_reason "$file")"
+    require_value "${label}_pixel_proof" "nonzero_pixels:$pixels" "$(sdn_text_value pixel_proof "$file")"
+    case "$(sdn_text_value checksum "$file")" in
+        sum32:*) ;;
+        *) fail "${label}_missing_checksum" ;;
+    esac
+    require_positive "${label}_cold_start_us" "$(sdn_i64_value cold_start_us "$file")"
+    require_positive "${label}_warm_start_us" "$(sdn_i64_value warm_start_us "$file")"
+    require_positive "${label}_p50_frame_us" "$(sdn_i64_value p50_frame_us "$file")"
+    require_positive "${label}_p95_frame_us" "$(sdn_i64_value p95_frame_us "$file")"
+    require_positive "${label}_p95_input_to_paint_us" "$(sdn_i64_value p95_input_to_paint_us "$file")"
+    require_positive "${label}_max_rss_kb" "$(sdn_i64_value max_rss_kb "$file")"
+    require_positive "${label}_binary_size_bytes" "$(sdn_i64_value binary_size_bytes "$file")"
+    require_positive "${label}_baseline_binary_size_bytes" "$(sdn_i64_value baseline_binary_size_bytes "$file")"
+    require_positive "${label}_package_size_bytes" "$(sdn_i64_value package_size_bytes "$file")"
+    require_positive "${label}_artifact_submit_us" "$(sdn_i64_value artifact_submit_us "$file")"
+}
+
+if run_export 4k "$WIDTH_4K" "$HEIGHT_4K"; then
+    :
+else
+    rc="$?"
+    fail "4k_run_failed_exit_$rc"
+fi
+if run_export 8k "$WIDTH_8K" "$HEIGHT_8K"; then
+    :
+else
+    rc="$?"
+    fail "8k_run_failed_exit_$rc"
+fi
+check_export 4k "$WIDTH_4K" "$HEIGHT_4K"
+check_export 8k "$WIDTH_8K" "$HEIGHT_8K"
+
+echo "cpu_simd_render_scale_contract_status=pass"
+echo "gui_perf_benchmark_backend=simple_web_cpu_simd"
+echo "cpu_simd_render_scale_contract_dpi=$DPI"
+echo "cpu_simd_render_scale_contract_dpi_source=$(field_value gui_perf_benchmark_dpi_source "$OUT_DIR/4k.sdn")"
+echo "cpu_simd_render_scale_contract_sample_count=$SAMPLE_COUNT"
+echo "cpu_simd_render_scale_4k_pixels=${WIDTH_4K}x${HEIGHT_4K}"
+echo "cpu_simd_render_scale_4k_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/4k.sdn")"
+echo "cpu_simd_render_scale_4k_checksum=$(sdn_text_value checksum "$OUT_DIR/4k.sdn")"
+echo "cpu_simd_render_scale_8k_pixels=${WIDTH_8K}x${HEIGHT_8K}"
+echo "cpu_simd_render_scale_8k_p50_frame_us=$(sdn_i64_value p50_frame_us "$OUT_DIR/8k.sdn")"
+echo "cpu_simd_render_scale_8k_checksum=$(sdn_text_value checksum "$OUT_DIR/8k.sdn")"
