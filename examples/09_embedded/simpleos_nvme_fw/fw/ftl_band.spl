@@ -58,6 +58,18 @@ impl BandAlloc:
     me active_ready() -> bool:
         me.block_pages_ready(me.active_blk) and me.blk_state[me.active_blk] == BLK_OPEN
 
+    me valid_counter_next(blk: i64) -> i64:
+        val count: i64 = me.valid_count(blk)
+        if count >= PAGES_PER_BLOCK:
+            return PAGES_PER_BLOCK
+        count + 1
+
+    me valid_counter_prev(blk: i64) -> i64:
+        val count: i64 = me.valid_count(blk)
+        if count <= 0:
+            return 0
+        count - 1
+
     me actual_free_blocks() -> i64:
         var fc: i64 = 0
         var b: i64 = 0
@@ -136,7 +148,7 @@ impl BandAlloc:
             return
         if me.valid[ppn] == 0:
             me.valid[ppn] = 1
-            me.blk_valid[blk] = me.blk_valid[blk] + 1
+            me.blk_valid[blk] = me.valid_counter_next(blk)
 
     # Mark a physical page as stale (no longer the current version).
     # No-op if the page is already invalid.
@@ -146,7 +158,7 @@ impl BandAlloc:
         if me.valid[ppn] == 1:
             me.valid[ppn] = 0
             val blk: i64 = ppn_block(ppn)
-            me.blk_valid[blk] = me.blk_valid[blk] - 1
+            me.blk_valid[blk] = me.valid_counter_prev(blk)
 
     # Number of valid (live) pages in the given block.
     me valid_count(blk: i64) -> i64:
@@ -228,7 +240,7 @@ impl BandAlloc:
             return
         if me.valid[ppn] == 0:
             me.valid[ppn] = 1
-            me.blk_valid[blk] = me.blk_valid[blk] + 1
+            me.blk_valid[blk] = me.valid_counter_next(blk)
             me.blk_state[blk] = BLK_CLOSED
 
     # Recovery: retire a persistently-bad block so the allocator never selects it.
@@ -294,8 +306,16 @@ fn ftl_band_selftest() -> i64:
     fail = fail + expect_eq(ba.valid_count(0), 1, "mark_valid idempotent")
     ba.blk_valid[0] = -5
     fail = fail + expect_eq(ba.valid_count(0), 0, "corrupted negative block valid count clamps to zero")
+    ba.valid[p0] = 0
+    ba.mark_valid(p0)
+    fail = fail + expect_eq(ba.valid_count(0), 1, "mark_valid recovers corrupted negative block valid count")
+    ba.mark_invalid(p0)
+    fail = fail + expect_eq(ba.valid_count(0), 0, "mark_invalid does not underflow recovered block valid count")
     ba.blk_valid[0] = PAGES_PER_BLOCK + 7
     fail = fail + expect_eq(ba.valid_count(0), PAGES_PER_BLOCK, "corrupted oversized block valid count clamps to block pages")
+    ba.valid[p0] = 0
+    ba.mark_valid(p0)
+    fail = fail + expect_eq(ba.valid_count(0), PAGES_PER_BLOCK, "mark_valid saturates corrupted oversized block valid count")
     ba.blk_valid[0] = 1
     ba.mark_valid(NUM_PAGES)
     fail = fail + expect_eq(ba.valid_count(NUM_BLOCKS), 0, "invalid block valid_count fails closed")
