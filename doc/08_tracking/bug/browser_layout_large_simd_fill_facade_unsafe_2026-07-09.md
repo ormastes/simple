@@ -21,6 +21,16 @@ current Engine2D SIMD fill externs directly for a full framebuffer.
   `unknown extern function: rt_engine2d_simd_fill_u32`, changed checksum, and
   slowed 4K trace to `878028us`.
 - `engine2d_simd_fill_row_u32` over the full framebuffer segfaulted at 4K.
+- Routing the 4K benchmark through
+  `simple_web_layout_render_html_pixels_engine2d(..., "cpu_simd")` also fails
+  before measurement with `unknown extern function: rt_engine2d_simd_fill_u32`,
+  so the existing DrawIR fast path does not provide a safe browser-layout fill
+  owner boundary yet.
+- A safer owner-boundary experiment that routed `fb_rect`/`fb_rect_clip` row
+  fills through `backend_software`'s existing `simd_fill_row` owner compiled and
+  preserved checksum (`sum32:32105444634193792` at 4K,
+  `sum32:135445232233405312` at 8K), but regressed 8K to `1543525us`, so it was
+  rejected and reverted.
 
 The existing row-returning facade is proven only for small evidence rows
 (`count=64`) in `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`.
