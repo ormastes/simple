@@ -736,6 +736,34 @@ Terminated
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
 
+## Update — journal append cases split, probe reaches map cases
+
+`logic_journal_append_cases.spl` was reduced to a small case facade, with
+append-count assertions and full-state assertions moved into separate case
+modules. The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but this run got through journal count and journal
+record cases before stopping at map cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_journal_count_cases.spl chars=260
+[BOOTSTRAP-PHASE] ... logic_journal_count_cases.spl
+[BOOTSTRAP-PHASE] ... logic_journal_record_cases.spl chars=351
+[BOOTSTRAP-PHASE] ... logic_map_cases.spl chars=316
+Terminated
+```
+
+The current measured timeout is now around `logic_map_cases.spl`.
+
 ## Update — feature guard value cases split, probe reaches queue phase cases
 
 `logic_feature_guard_value_cases.spl` was reduced to a small case facade, with
