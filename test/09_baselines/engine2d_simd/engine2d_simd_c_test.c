@@ -201,7 +201,7 @@ int main(void) {
 #if defined(__aarch64__) || defined(_M_ARM64)
     fprintf(stderr, "ENGINE2D_SIMD_C_TEST: NEON path active (aarch64)\n");
 #elif defined(__x86_64__) || defined(_M_X64)
-    fprintf(stderr, "ENGINE2D_SIMD_C_TEST: x86_64 path (scalar fallback unless AVX2)\n");
+    fprintf(stderr, "ENGINE2D_SIMD_C_TEST: x86_64 path (SSE2 fallback unless AVX2)\n");
 #else
     fprintf(stderr, "ENGINE2D_SIMD_C_TEST: scalar path\n");
 #endif

@@ -47,7 +47,7 @@ The scale wrapper is the focused evidence gate for CPU-SIMD rendering at 4K and 
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/cpu_simd_render_scale_contract_spec.spl` |
-| Updated | 2026-07-08 |
+| Updated | 2026-07-09 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -70,6 +70,9 @@ dimensions to a tiny fixture while preserving the same code path.
   fields for the focused CPU-SIMD vs scalar software baseline row.
 - REQ-CPU-SIMD-SCALE-004: The wrapper remains runnable at small overridden
   dimensions for fast contract verification.
+- REQ-CPU-SIMD-SCALE-005: The executable contract records native mode,
+  default 300dpi retina density, and sample count so reports cannot pass with
+  interpreter fallback or DPI drift.
 
 ## Plan
 
@@ -105,7 +108,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contra
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -122,6 +125,10 @@ expect(script).to_contain("gui_perf_cpu_base_compare_status=measured")
 expect(script).to_contain("gui_perf_cpu_base_compare_baseline_backend=simple_web_software")
 expect(script).to_contain("gui_perf_benchmark_screen_size_reduced")
 expect(script).to_contain("software_checksum_parity=true")
+expect(script).to_contain("falling back to interpreter")
+expect(script).to_contain("cpu_simd_render_scale_contract_mode=$EXEC_MODE")
+expect(script).to_contain("cpu_simd_render_scale_contract_dpi=$DPI")
+expect(script).to_contain("cpu_simd_render_scale_contract_sample_count=$SAMPLE_COUNT")
 ```
 
 </details>
@@ -131,7 +138,7 @@ expect(script).to_contain("software_checksum_parity=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -148,6 +155,10 @@ expect(code).to_equal(0)
 
 val out = file_read(root + "/stdout.txt")
 expect(out).to_contain("cpu_simd_render_scale_contract_status=pass")
+expect(out).to_contain("cpu_simd_render_scale_contract_mode=native")
+expect(out).to_contain("cpu_simd_render_scale_contract_dpi=300")
+expect(out).to_contain("cpu_simd_render_scale_contract_dpi_source=default")
+expect(out).to_contain("cpu_simd_render_scale_contract_sample_count=1")
 expect(out).to_contain("cpu_simd_render_scale_4k_pixels=16x16")
 expect(out).to_contain("cpu_simd_render_scale_8k_pixels=32x32")
 expect(out).to_contain("cpu_simd_render_scale_4k_software_p50_frame_us=")

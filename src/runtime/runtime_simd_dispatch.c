@@ -537,6 +537,8 @@ int64_t rt_simd_engine2d_neon_reset(void) {
 }
 
 #if defined(__x86_64__) || defined(_M_X64)
+static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color);
+static void engine2d_copy_u32_sse2(int64_t* dst, const int64_t* src, int64_t count);
 __attribute__((target("avx2")))
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color);
 __attribute__((target("avx2")))
@@ -571,6 +573,8 @@ static void engine2d_fill_into(int64_t* out, int64_t n, int64_t color) {
         engine2d_fill_u32_avx2(out, n, color_word);
         return;
     }
+    engine2d_fill_u32_sse2(out, n, color_word);
+    return;
 #elif defined(__riscv) && defined(__riscv_vector)
     engine2d_fill_u32_rvv(out, n, color_word);
     return;
@@ -593,6 +597,8 @@ static void engine2d_copy_into(int64_t* out, const int64_t* src, int64_t n) {
         engine2d_copy_u32_avx2(out, src, n);
         return;
     }
+    engine2d_copy_u32_sse2(out, src, n);
+    return;
 #elif defined(__riscv) && defined(__riscv_vector)
     engine2d_copy_u32_rvv(out, src, n);
     return;
@@ -720,6 +726,30 @@ SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src) {
 }
 
 #if defined(__x86_64__) || defined(_M_X64)
+static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color) {
+    __m128i v = _mm_set_epi64x(color, color);
+    int64_t i = 0;
+    if (count >= 2) engine2d_record_simd_row_hit();
+    for (; i + 2 <= count; i += 2) {
+        _mm_storeu_si128((__m128i*)(void*)(data + i), v);
+    }
+    for (; i < count; i++) {
+        data[i] = color;
+    }
+}
+
+static void engine2d_copy_u32_sse2(int64_t* dst, const int64_t* src, int64_t count) {
+    int64_t i = 0;
+    if (count >= 2) engine2d_record_simd_row_hit();
+    for (; i + 2 <= count; i += 2) {
+        __m128i v = _mm_loadu_si128((const __m128i*)(const void*)(src + i));
+        _mm_storeu_si128((__m128i*)(void*)(dst + i), v);
+    }
+    for (; i < count; i++) {
+        dst[i] = src[i];
+    }
+}
+
 __attribute__((target("avx2")))
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color) {
     __m256i v = _mm256_set1_epi64x(color);
@@ -785,6 +815,8 @@ int64_t rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, 
         engine2d_fill_u32_avx2(data + off, n, color_word);
         return n;
     }
+    engine2d_fill_u32_sse2(data + off, n, color_word);
+    return n;
 #elif defined(__riscv) && defined(__riscv_vector)
     engine2d_fill_u32_rvv(data + off, n, color_word);
     return n;
@@ -811,17 +843,26 @@ int64_t rt_engine2d_simd_copy_u32(SplArray* dst, int64_t dst_off, SplArray* src,
     const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
     if (!dst_data || !src_data || n <= 0) return 0;
 
-#if defined(__x86_64__) || defined(_M_X64)
-    if (simd_detect_avx2()) {
-        engine2d_copy_u32_avx2(dst_data + d_off, src_data + s_off, n);
+    const int64_t* src_start = src_data + s_off;
+    int64_t* dst_start = dst_data + d_off;
+    if (dst_data == src_data && dst_start < src_start + n && src_start < dst_start + n) {
+        memmove(dst_start, src_start, (size_t)n * sizeof(int64_t));
         return n;
     }
+
+#if defined(__x86_64__) || defined(_M_X64)
+    if (simd_detect_avx2()) {
+        engine2d_copy_u32_avx2(dst_start, src_start, n);
+        return n;
+    }
+    engine2d_copy_u32_sse2(dst_start, src_start, n);
+    return n;
 #elif defined(__riscv) && defined(__riscv_vector)
-    engine2d_copy_u32_rvv(dst_data + d_off, src_data + s_off, n);
+    engine2d_copy_u32_rvv(dst_start, src_start, n);
     return n;
 #endif
 
-    memmove(dst_data + d_off, src_data + s_off, (size_t)n * sizeof(int64_t));
+    memmove(dst_start, src_start, (size_t)n * sizeof(int64_t));
     return n;
 }
 
