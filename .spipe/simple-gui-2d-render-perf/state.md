@@ -59,8 +59,8 @@ implementation-evidence-in-progress
   aarch64, and riscv64 probes. The software backend now routes clear, opaque
   fills, text run fills, image row copies, and alpha hlines through local row
   helpers that preserve `self.buf` mutation while using the native row ABI only
-  where it is proven safe. x86 now proves native row execution; RVV remains
-  exact scalar-compatible until a native RVV row kernel exists.
+  where it is proven safe. x86 now proves native row execution; RVV row source
+  now cross-compiles, but target-binary execution proof is still required.
 - verification: `sh scripts/check/check-cpu-simd-engine2d-evidence.shs` passed
   on x86_64 with `feature=avx2`, `cpu_simd_x86_status=Initialized`, fill/copy/
   alpha/scroll mismatch counts all `0`, diagram mismatch count `0`, and
@@ -78,8 +78,8 @@ implementation-evidence-in-progress
   `doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-08.md`.
 - blocker: riscv64 native RVV row proof is tracked at
   `doc/08_tracking/bug/cpu_simd_engine2d_rvv_native_rows_missing_2026-07-08.md`;
-  `engine2d_simd_ops.rs` currently has x86_64 SSE2 and aarch64 NEON rows but no
-  RVV fill/copy row kernel.
+  `runtime_simd_dispatch.c` now has an `rv64gcv` compile gate, but no riscv64
+  Simple target binary run has proved native RVV execution and bit-exact output.
 - implementation: Split the GUI perf harness so `simple_web_cpu_simd` runs
   through the explicit `cpu_simd` render backend while `simple_web_software`
   remains the scalar software row. This prevents the 4K/8K comparison from
@@ -174,7 +174,9 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
 - CPU-SIMD arch matrix coverage is now explicit:
   `scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` passes x86_64 on this
   host and marks aarch64/riscv64 unavailable until target binaries are supplied.
-  riscv64 native RVV rows are a tracked blocker:
+  The wrapper also cross-compiles the native runtime owner for x86_64, aarch64,
+  generic riscv64, and `rv64gcv` RVV when compilers are present. riscv64 native
+  RVV target proof remains tracked:
   `doc/08_tracking/bug/cpu_simd_engine2d_rvv_native_rows_missing_2026-07-08.md`.
 - CPU-SIMD 4K/8K no-reduction evidence now has a fail-closed wrapper at
   `scripts/check/check-cpu-simd-render-scale-contract.shs`; native full-size

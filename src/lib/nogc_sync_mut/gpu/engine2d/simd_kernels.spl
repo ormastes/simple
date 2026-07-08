@@ -76,14 +76,15 @@ extern fn rt_simd_has_neon() -> bool
 extern fn rt_simd_has_rvv() -> bool
 
 # ============================================================================
-# Native SIMD pixel-row kernels (NEON on aarch64 / SSE2 on x86_64)
+# Native SIMD pixel-row kernels (NEON on aarch64 / SSE2/AVX2 on x86_64 / RVV on riscv64)
 #
 # These are the genuine vectorized span kernels: the Rust runtime executes
-# `vdupq_n_u32`/`vst1q_u32` on aarch64 and SSE2 stores/loads on x86_64 over a
-# packed pixel buffer. Output is bit-identical to the scalar reference. The
-# historical neon-hit counter now counts native row chunks on both NEON and x86
-# SSE2, so the evidence layer can prove real SIMD executed instead of trusting
-# a scalar path that merely reports a feature bit.
+# `vdupq_n_u32`/`vst1q_u32` on aarch64, SSE2/AVX2 stores/loads on x86_64, and
+# RVV stores/loads on riscv64 over a packed pixel buffer. Output is bit-identical
+# to the scalar reference. The historical neon-hit counter now counts native row
+# chunks on all native row architectures, so the evidence layer can prove real
+# SIMD executed instead of trusting a scalar path that merely reports a feature
+# bit.
 #
 # Implementation: src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs;
 # interpreter dispatch: compiler/src/interpreter_extern/simd.rs.
@@ -204,7 +205,7 @@ fn native_simd_pixel_evidence() -> NativeSimdPixelEvidence:
     the native output against an independent scalar reference computed here.
     """
     val level = detect_simd_level()
-    if level != SimdLevel.Neon and level != SimdLevel.Avx2 and level != SimdLevel.Sse42:
+    if level != SimdLevel.Neon and level != SimdLevel.Avx2 and level != SimdLevel.Sse42 and level != SimdLevel.Rvv:
         return NativeSimdPixelEvidence(
             executed: false,
             bit_exact: true,
@@ -283,8 +284,6 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
     val native = native_simd_pixel_evidence()
     val reason = if feature == "scalar":
         "runtime reported scalar fallback; SIMD feature unavailable"
-    else if feature == "rvv":
-        "runtime reported rvv; CPU-SIMD provider uses exact scalar-compatible rows until RVV row kernels are implemented"
     else if native.executed and native.bit_exact:
         "native SIMD kernels executed (hits={native.hits}) and matched scalar bit-for-bit"
     else if native.executed:
@@ -316,11 +315,10 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
 # When the host has real SIMD (aarch64 NEON or x86 SSE2/AVX2-capable runtime),
 # the hot fill/blend rows route
 # through the C-backed `rt_engine2d_simd_*_row_u32` kernels (runtime_simd_dispatch.c,
-# NEON/AVX2/scalar today) so the live CPU-SIMD render path uses the native row
+# NEON/AVX2/RVV/scalar today) so the live CPU-SIMD render path uses the native row
 # ABI only where the row ABI is proven safe. Output is bit-identical to the
 # scalar path (the C blend uses the same truncating /255 floor; verified
-# exhaustively). RVV remains scalar-correct through the same provider surface
-# until a native RVV row implementation exists.
+# exhaustively).
 #
 # Interpreter note: a `[u32]` framebuffer is a boxed array here, so the native
 # row is built/blended with NEON and then copied into the framebuffer element-
@@ -336,7 +334,7 @@ pub fn native_pixel_rows_enabled() -> bool:
     if _native_rows_detected:
         return _native_rows_cached
     val level = detect_simd_level()
-    _native_rows_cached = level == SimdLevel.Neon or level == SimdLevel.Avx2 or level == SimdLevel.Sse42
+    _native_rows_cached = level == SimdLevel.Neon or level == SimdLevel.Avx2 or level == SimdLevel.Sse42 or level == SimdLevel.Rvv
     _native_rows_detected = true
     _native_rows_cached
 
@@ -348,8 +346,6 @@ pub fn simd_fill_row(mut buf: any, offset: i64, count: i64, color: u32):
     if count <= 0:
         return
     if native_pixel_rows_enabled():
-        # Native row ABI: x86/aarch64 use vector kernels where the runtime has them;
-        # riscv64 keeps scalar-correct output until RVV is implemented below it.
         val row = engine2d_simd_fill_row_u32(count, color)
         var j: i64 = 0
         while j < count:

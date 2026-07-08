@@ -6,6 +6,7 @@
 #include "runtime_simd_dispatch.h"
 #include "runtime.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -516,11 +517,35 @@ static int engine2d_span_bounds(SplArray* array, int64_t offset, int64_t count,
 #  include <arm_neon.h>
 #endif
 
+#if defined(__riscv) && defined(__riscv_vector)
+#  include <riscv_vector.h>
+#endif
+
+static atomic_uint_fast64_t g_engine2d_simd_row_hits;
+
+static inline void engine2d_record_simd_row_hit(void) {
+    atomic_fetch_add_explicit(&g_engine2d_simd_row_hits, 1, memory_order_relaxed);
+}
+
+int64_t rt_simd_engine2d_neon_hits(void) {
+    return (int64_t)atomic_load_explicit(&g_engine2d_simd_row_hits, memory_order_relaxed);
+}
+
+int64_t rt_simd_engine2d_neon_reset(void) {
+    atomic_store_explicit(&g_engine2d_simd_row_hits, 0, memory_order_relaxed);
+    return 0;
+}
+
 #if defined(__x86_64__) || defined(_M_X64)
 __attribute__((target("avx2")))
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color);
 __attribute__((target("avx2")))
 static void engine2d_copy_u32_avx2(int64_t* dst, const int64_t* src, int64_t count);
+#endif
+
+#if defined(__riscv) && defined(__riscv_vector)
+static void engine2d_fill_u32_rvv(int64_t* data, int64_t count, int64_t color);
+static void engine2d_copy_u32_rvv(int64_t* dst, const int64_t* src, int64_t count);
 #endif
 
 /* ----------------------------------------------------------------------
@@ -537,6 +562,7 @@ static void engine2d_fill_into(int64_t* out, int64_t n, int64_t color) {
     int64_t i = 0;
 #if defined(__aarch64__) || defined(_M_ARM64)
     uint64x2_t v = vdupq_n_u64((uint64_t)color_word);
+    if (n >= 2) engine2d_record_simd_row_hit();
     for (; i + 2 <= n; i += 2) {
         vst1q_u64((uint64_t*)(void*)(out + i), v);
     }
@@ -545,6 +571,9 @@ static void engine2d_fill_into(int64_t* out, int64_t n, int64_t color) {
         engine2d_fill_u32_avx2(out, n, color_word);
         return;
     }
+#elif defined(__riscv) && defined(__riscv_vector)
+    engine2d_fill_u32_rvv(out, n, color_word);
+    return;
 #endif
     for (; i < n; i++) {
         out[i] = color_word;
@@ -554,6 +583,7 @@ static void engine2d_fill_into(int64_t* out, int64_t n, int64_t color) {
 static void engine2d_copy_into(int64_t* out, const int64_t* src, int64_t n) {
     int64_t i = 0;
 #if defined(__aarch64__) || defined(_M_ARM64)
+    if (n >= 2) engine2d_record_simd_row_hit();
     for (; i + 2 <= n; i += 2) {
         uint64x2_t v = vld1q_u64((const uint64_t*)(const void*)(src + i));
         vst1q_u64((uint64_t*)(void*)(out + i), v);
@@ -563,6 +593,9 @@ static void engine2d_copy_into(int64_t* out, const int64_t* src, int64_t n) {
         engine2d_copy_u32_avx2(out, src, n);
         return;
     }
+#elif defined(__riscv) && defined(__riscv_vector)
+    engine2d_copy_u32_rvv(out, src, n);
+    return;
 #endif
     for (; i < n; i++) {
         out[i] = src[i];
@@ -691,6 +724,7 @@ __attribute__((target("avx2")))
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color) {
     __m256i v = _mm256_set1_epi64x(color);
     int64_t i = 0;
+    if (count >= 4) engine2d_record_simd_row_hit();
     for (; i + 4 <= count; i += 4) {
         _mm256_storeu_si256((__m256i*)(void*)(data + i), v);
     }
@@ -702,12 +736,37 @@ static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color) 
 __attribute__((target("avx2")))
 static void engine2d_copy_u32_avx2(int64_t* dst, const int64_t* src, int64_t count) {
     int64_t i = 0;
+    if (count >= 4) engine2d_record_simd_row_hit();
     for (; i + 4 <= count; i += 4) {
         __m256i v = _mm256_loadu_si256((const __m256i*)(const void*)(src + i));
         _mm256_storeu_si256((__m256i*)(void*)(dst + i), v);
     }
     for (; i < count; i++) {
         dst[i] = src[i];
+    }
+}
+#endif
+
+#if defined(__riscv) && defined(__riscv_vector)
+static void engine2d_fill_u32_rvv(int64_t* data, int64_t count, int64_t color) {
+    engine2d_record_simd_row_hit();
+    int64_t i = 0;
+    while (i < count) {
+        size_t vl = __riscv_vsetvl_e64m1((size_t)(count - i));
+        vint64m1_t v = __riscv_vmv_v_x_i64m1(color, vl);
+        __riscv_vse64_v_i64m1(data + i, v, vl);
+        i += (int64_t)vl;
+    }
+}
+
+static void engine2d_copy_u32_rvv(int64_t* dst, const int64_t* src, int64_t count) {
+    engine2d_record_simd_row_hit();
+    int64_t i = 0;
+    while (i < count) {
+        size_t vl = __riscv_vsetvl_e64m1((size_t)(count - i));
+        vint64m1_t v = __riscv_vle64_v_i64m1(src + i, vl);
+        __riscv_vse64_v_i64m1(dst + i, v, vl);
+        i += (int64_t)vl;
     }
 }
 #endif
@@ -726,6 +785,9 @@ int64_t rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, 
         engine2d_fill_u32_avx2(data + off, n, color_word);
         return n;
     }
+#elif defined(__riscv) && defined(__riscv_vector)
+    engine2d_fill_u32_rvv(data + off, n, color_word);
+    return n;
 #endif
 
     for (int64_t i = 0; i < n; i++) {
@@ -754,6 +816,9 @@ int64_t rt_engine2d_simd_copy_u32(SplArray* dst, int64_t dst_off, SplArray* src,
         engine2d_copy_u32_avx2(dst_data + d_off, src_data + s_off, n);
         return n;
     }
+#elif defined(__riscv) && defined(__riscv_vector)
+    engine2d_copy_u32_rvv(dst_data + d_off, src_data + s_off, n);
+    return n;
 #endif
 
     memmove(dst_data + d_off, src_data + s_off, (size_t)n * sizeof(int64_t));

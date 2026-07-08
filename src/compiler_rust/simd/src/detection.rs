@@ -184,8 +184,34 @@ impl SimdFeatures {
 
     #[cfg(target_arch = "riscv64")]
     fn detect_riscv64_optional_features() -> bool {
-        // Do not treat compile-time `target_feature=v` as host runtime support.
-        false
+        #[cfg(target_os = "linux")]
+        {
+            const AT_HWCAP: usize = 16;
+            const COMPAT_HWCAP_ISA_V: usize = 1 << ((b'V' - b'A') as usize);
+
+            let Ok(auxv) = std::fs::read("/proc/self/auxv") else {
+                return false;
+            };
+            let word = std::mem::size_of::<usize>();
+            for entry in auxv.chunks_exact(word * 2) {
+                let mut key_bytes = [0_u8; std::mem::size_of::<usize>()];
+                let mut value_bytes = [0_u8; std::mem::size_of::<usize>()];
+                key_bytes.copy_from_slice(&entry[..word]);
+                value_bytes.copy_from_slice(&entry[word..word * 2]);
+                let key = usize::from_ne_bytes(key_bytes);
+                if key == 0 {
+                    break;
+                }
+                if key == AT_HWCAP {
+                    return (usize::from_ne_bytes(value_bytes) & COMPAT_HWCAP_ISA_V) != 0;
+                }
+            }
+            false
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
     }
 
     #[cfg(target_arch = "wasm32")]

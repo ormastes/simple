@@ -39,6 +39,49 @@ write_kv() {
     printf '%s=%s\n' "$1" "$2" >>"$ENV_PATH"
 }
 
+runtime_cc() {
+    arch="$1"
+    case "$arch" in
+        x86_64) printf '%s' "${CPU_SIMD_ARCH_MATRIX_X86_64_CC:-${CC:-cc}}" ;;
+        aarch64) printf '%s' "${CPU_SIMD_ARCH_MATRIX_AARCH64_CC:-aarch64-linux-gnu-gcc}" ;;
+        riscv64|riscv64_rvv) printf '%s' "${CPU_SIMD_ARCH_MATRIX_RISCV64_CC:-riscv64-linux-gnu-gcc}" ;;
+    esac
+}
+
+compile_runtime_owner() {
+    arch="$1"
+    cc="$(runtime_cc "$arch")"
+    flags=""
+    if [ "$arch" = "riscv64_rvv" ]; then
+        flags="-march=rv64gcv -mabi=lp64d"
+    fi
+    obj="$BUILD_DIR/runtime_${arch}.o"
+    err="$BUILD_DIR/runtime_${arch}.stderr.txt"
+
+    if ! command -v "$cc" >/dev/null 2>&1; then
+        status=unavailable
+        reason=missing-c-compiler
+    else
+        set +e
+        # shellcheck disable=SC2086
+        "$cc" $flags -c -O2 -std=gnu11 -Isrc/runtime src/runtime/runtime_simd_dispatch.c -o "$obj" 2>"$err"
+        code=$?
+        set -e
+        if [ "$code" -eq 0 ]; then
+            status=pass
+            reason=compiled
+        else
+            status=fail
+            reason="compile-exit-$code"
+        fi
+    fi
+
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_status" "$status"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_reason" "$reason"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_cc" "$cc"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_flags" "$flags"
+}
+
 run_arch() {
     arch="$1"
     current_host="$2"
@@ -94,6 +137,9 @@ write_kv cpu_simd_engine2d_arch_matrix_strict "$STRICT"
 for arch in x86_64 aarch64 riscv64; do
     run_arch "$arch" "$HOST_ARCH"
 done
+for arch in x86_64 aarch64 riscv64 riscv64_rvv; do
+    compile_runtime_owner "$arch"
+done
 
 passed=0
 missing=0
@@ -106,10 +152,23 @@ for arch in x86_64 aarch64 riscv64; do
         *) missing=$((missing + 1)) ;;
     esac
 done
+runtime_failed=0
+runtime_missing=0
+for arch in x86_64 aarch64 riscv64 riscv64_rvv; do
+    status="$(env_value "$ENV_PATH" "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_status")"
+    case "$status" in
+        pass) ;;
+        fail) runtime_failed=$((runtime_failed + 1)) ;;
+        *) runtime_missing=$((runtime_missing + 1)) ;;
+    esac
+done
 
 overall=pass
 reason=all-arches-pass
-if [ "$failed" -gt 0 ]; then
+if [ "$runtime_failed" -gt 0 ]; then
+    overall=fail
+    reason=runtime-owner-cross-compile-failed
+elif [ "$failed" -gt 0 ]; then
     overall=fail
     reason=arch-evidence-failed
 elif [ "$missing" -gt 0 ]; then
@@ -124,6 +183,8 @@ fi
 write_kv cpu_simd_engine2d_arch_matrix_passed_count "$passed"
 write_kv cpu_simd_engine2d_arch_matrix_unavailable_count "$missing"
 write_kv cpu_simd_engine2d_arch_matrix_failed_count "$failed"
+write_kv cpu_simd_engine2d_arch_matrix_runtime_compile_unavailable_count "$runtime_missing"
+write_kv cpu_simd_engine2d_arch_matrix_runtime_compile_failed_count "$runtime_failed"
 write_kv cpu_simd_engine2d_arch_matrix_status "$overall"
 write_kv cpu_simd_engine2d_arch_matrix_reason "$reason"
 

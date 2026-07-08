@@ -27,7 +27,7 @@ cpu_simd_engine2d_simple_bin_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ The CPU SIMD Engine2D wrapper needs a Simple binary that contains the Engine2D S
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/cpu_simd_engine2d_simple_bin_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-07-08 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -67,6 +67,11 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
   `simple-bin-forbidden` evidence before generated Engine2D evidence runs.
 - REQ-CPU-SIMD-ENGINE2D-BIN-003: Evidence records selected Simple binary,
   source, and status fields.
+- REQ-CPU-SIMD-ENGINE2D-BIN-004: Arch matrix evidence records x86_64,
+  aarch64, and riscv64 independently and exposes strict all-arch mode.
+- REQ-CPU-SIMD-ENGINE2D-BIN-005: Runtime owner cross-compiles the native
+  Engine2D SIMD rows for x86_64, aarch64, riscv64, and RVV riscv64 when the
+  matching C compilers are present.
 
 ## Plan
 
@@ -137,7 +142,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-cpu-simd-engine2d-seed-forbidden"
-val command = "rm -rf " + root + " && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-cpu-simd-engine2d-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-cpu-simd-engine2d-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -154,12 +159,71 @@ expect(src_code).to_equal(0)
 
 </details>
 
+<details>
+<summary>Advanced: records independent x86 arm and riscv matrix rows</summary>
+
+#### records independent x86 arm and riscv matrix rows
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 40 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val script = file_read("scripts/check/check-cpu-simd-engine2d-arch-matrix.shs")
+expect(script).to_contain("x86_64 aarch64 riscv64")
+expect(script).to_contain("check-cpu-simd-engine2d-evidence.shs")
+expect(script).to_contain("CPU_SIMD_ARCH_MATRIX_STRICT")
+expect(script).to_contain("cpu_simd_engine2d_arch_matrix_")
+expect(script).to_contain("aarch64)")
+expect(script).to_contain("riscv64)")
+expect(script).to_contain("riscv64_rvv")
+expect(script).to_contain("rv64gcv")
+expect(script).to_contain("runtime_compile_status")
+expect(script).to_contain("strict-requires-all-arches-pass")
+
+val runtime = file_read("src/runtime/runtime_simd_dispatch.c")
+expect(runtime).to_contain("__riscv_vector")
+expect(runtime).to_contain("__riscv_vsetvl_e64m1")
+expect(runtime).to_contain("rt_simd_engine2d_neon_hits")
+expect(runtime).to_contain("engine2d_record_simd_row_hit")
+val detector = file_read("src/compiler_rust/simd/src/detection.rs")
+expect(detector).to_contain("COMPAT_HWCAP_ISA_V")
+expect(detector).to_contain("/proc/self/auxv")
+
+val root = "build/test-cpu-simd-engine2d-arch-matrix"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && CPU_SIMD_ARCH_MATRIX_SKIP_RUN=1 BUILD_DIR=" + root + " REPORT_PATH=" + root + "/report.md sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs > " + root + "/stdout.txt"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_x86_64_status=unavailable")
+expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_aarch64_status=unavailable")
+expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_riscv64_status=unavailable")
+expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_riscv64_rvv_runtime_compile_status=")
+expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_runtime_compile_failed_count=")
+expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_status=partial")
+
+val strict_root = root + "-strict"
+val strict_command = "rm -rf " + strict_root + " && mkdir -p " + strict_root + " && CPU_SIMD_ARCH_MATRIX_SKIP_RUN=1 CPU_SIMD_ARCH_MATRIX_STRICT=1 BUILD_DIR=" + strict_root + " REPORT_PATH=" + strict_root + "/report.md sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs > " + strict_root + "/stdout.txt"
+val (_strict_stdout, _strict_stderr, strict_code) = process_run("/bin/sh", ["-c", strict_command])
+expect(strict_code).to_equal(1)
+val strict_evidence = file_read(strict_root + "/evidence.env")
+expect(strict_evidence).to_contain("cpu_simd_engine2d_arch_matrix_status=fail")
+expect(strict_evidence).to_contain("cpu_simd_engine2d_arch_matrix_reason=strict-requires-all-arches-pass")
+```
+
+</details>
+
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
