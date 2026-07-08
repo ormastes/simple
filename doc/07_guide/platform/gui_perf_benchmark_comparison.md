@@ -105,6 +105,9 @@ bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
 bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
   --software-render-backend software \
   --width 320 --height 240 --dpi 220 --warmup-count 1 --sample-count 1
+
+# No-hardware summary contract for CUDA/Vulkan local perf output:
+sh scripts/check/check-local-gpu-perf-summary.shs
 ```
 
 ## Pixel Parity Gate
