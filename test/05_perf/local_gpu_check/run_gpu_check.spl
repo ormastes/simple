@@ -4,10 +4,11 @@
 # Prereqs: gcc, libcuda.so, libvulkan.so (all present on this host)
 #
 # Usage:
-#   bin/simple test/perf/local_gpu_check/run_gpu_check.spl
+#   bin/simple test/05_perf/local_gpu_check/run_gpu_check.spl
 
 extern fn rt_exec(cmd: text) -> i64
 extern fn rt_exec_output(cmd: text) -> text
+extern fn rt_cli_get_args() -> [text]
 
 fn gpu_output_verdict(output: text) -> text:
     if output.find("PASS: GPU equal or better") >= 0 or output.find("GPU speedup:") >= 0 or output.find("Speedup:") >= 0:
@@ -37,7 +38,36 @@ fn self_check_gpu_summary_classifier() -> bool:
         gpu_output_verdict("NOTE: host-visible mem slower than CPU") == "measured-gpu-slower-overhead" and
         gpu_output_verdict("FAIL: no devices") == "unavailable-or-failed"
 
+fn has_arg(args: [text], needle: text) -> bool:
+    var i = 0
+    val count = args.len()
+    while i < count:
+        if args[i] == needle:
+            return true
+        i = i + 1
+    false
+
+fn self_test_summary_contract() -> i64:
+    if not self_check_gpu_summary_classifier():
+        print "gpu_perf_summary_self_test=fail reason=classifier"
+        return 1
+    if gpu_output_verdict("ACCEPTABLE: within 1.25x") != "measured-near-cpu":
+        print "gpu_perf_summary_self_test=fail reason=near-cpu"
+        return 1
+    if first_matching_line("before\nGPU fill avg: 2.66 ms\nafter", "GPU fill avg:", "") != "GPU fill avg: 2.66 ms":
+        print "gpu_perf_summary_self_test=fail reason=timing-line"
+        return 1
+    if first_matching_line("nothing useful", "GPU fill avg:", "Avg kernel:") != "missing":
+        print "gpu_perf_summary_self_test=fail reason=missing-line"
+        return 1
+    print "gpu_perf_summary_self_test=pass"
+    return 0
+
 fn main():
+    val args = rt_cli_get_args()
+    if has_arg(args, "--self-test"):
+        return self_test_summary_contract()
+
     if not self_check_gpu_summary_classifier():
         print "FAIL: gpu summary classifier self-check"
         return pass_dn
