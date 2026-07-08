@@ -809,6 +809,11 @@ last_heartbeat=NVME_RV64_BUILD_HEARTBEAT elapsed=40s timeout=300s
 last_phase=[BOOTSTRAP-PHASE] ... logic_power_thermal_cases.spl chars=342
 ```
 
+`--status` now also includes `last_done=`, so a stopped build can report both
+the last fully completed phase and the current/failed phase start. This avoids
+guessing whether the final `phase2:parse:file:start` line completed before the
+process exited.
+
 ## Update — closure diagnostics and fail-closed stub fallback
 
 The RV64 direct build wrapper now runs `native-build` with `--verbose`, records
