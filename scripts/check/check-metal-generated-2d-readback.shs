@@ -111,6 +111,7 @@ emit_env_harness() {
     h_scroll_ex="${h_scroll_ex:-0}"
     h_actual="$(readback_checksum_sum "$h_fill_ck" "$h_copy_ck" "$h_alpha_ck" "$h_scroll_ck")"
     h_expected="$(readback_checksum_sum "$h_fill_ex" "$h_copy_ex" "$h_alpha_ex" "$h_scroll_ex")"
+    h_mismatch_count=0
     reason="harness-executed"
     if [ "$h_status" = "pass" ]; then
         if [ "$h_submit" != "true" ]; then
@@ -134,18 +135,23 @@ emit_env_harness() {
         elif [ "$h_fill_ck" != "$h_fill_ex" ]; then
             h_status="fail"
             reason="fill-checksum-mismatch"
+            h_mismatch_count=1
         elif [ "$h_copy_ck" != "$h_copy_ex" ]; then
             h_status="fail"
             reason="copy-checksum-mismatch"
+            h_mismatch_count=1
         elif [ "$h_alpha_ck" != "$h_alpha_ex" ]; then
             h_status="fail"
             reason="alpha-checksum-mismatch"
+            h_mismatch_count=1
         elif [ "$h_scroll_ck" != "$h_scroll_ex" ]; then
             h_status="fail"
             reason="scroll-checksum-mismatch"
+            h_mismatch_count=1
         elif [ "$h_actual" != "$h_expected" ]; then
             h_status="fail"
             reason="aggregate-checksum-mismatch"
+            h_mismatch_count=1
         else
             reason="gpu-readback-verified"
         fi
@@ -163,6 +169,7 @@ emit_env_harness() {
         echo "metal_generated_2d_readback_readback_available=$h_readback"
         echo "metal_generated_2d_readback_expected_checksum=$h_expected"
         echo "metal_generated_2d_readback_actual_checksum=$h_actual"
+        echo "metal_generated_2d_readback_mismatch_count=$h_mismatch_count"
         echo "metal_generated_2d_readback_fill_checksum=$h_fill_ck"
         echo "metal_generated_2d_readback_fill_expected=$h_fill_ex"
         echo "metal_generated_2d_readback_copy_checksum=$h_copy_ck"
@@ -246,6 +253,33 @@ EOF
         || ! grep -q '^metal_generated_2d_readback_reason=gpu-readback-verified$' "$BUILD_DIR/evidence.env"; then
         echo "self_test_status=fail"
         echo "self_test_reason=valid-readback-rejected"
+        exit 1
+    fi
+    if ! grep -q '^metal_generated_2d_readback_mismatch_count=0$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=valid-readback-missing-zero-mismatch-count"
+        exit 1
+    fi
+
+    cat >"$self_dir/fill_mismatch.out" <<'EOF'
+status=pass
+submit_attempted=true
+readback_available=true
+fill_checksum=2
+fill_expected=1
+copy_checksum=1
+copy_expected=1
+alpha_checksum=1
+alpha_expected=1
+scroll_checksum=1
+scroll_expected=1
+EOF
+    emit_env_harness "$self_dir/fill_mismatch.out"
+    if ! grep -q '^metal_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^metal_generated_2d_readback_reason=fill-checksum-mismatch$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^metal_generated_2d_readback_mismatch_count=1$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=fill-mismatch-not-recorded"
         exit 1
     fi
 
