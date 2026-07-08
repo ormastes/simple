@@ -170,7 +170,8 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
   `scripts/check/check-cpu-simd-render-scale-contract.shs`. It runs native
   CPU-SIMD rows at 3840x2160 and 7680x4320, requires full logical/physical
   dimensions, 300dpi retina metadata, checksum/nonzero-pixel proof, scalar
-  software checksum parity for the same scene/dimensions, positive timing, and
+  software checksum parity for the same scene/dimensions, p50/p95 timing for
+  both CPU-SIMD and software baseline rows, a software-vs-SIMD p50 ratio, and
   no fallback/unavailable reason. Latest retained evidence:
   `doc/09_report/cpu_simd_render_scale_contract_2026-07-08.md`.
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
@@ -195,8 +196,10 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
    smoke rows; repeat at 8K with multiple frames before making release claims.
 2. **CPU SIMD at 8K**: AVX2 backend has a dedicated `simple_web_cpu_simd`
    benchmark row and CPU drawing-library compare fields. The focused native
-   scale contract captures 8K p50 timing and no-reduction proof; release-grade
-   performance claims still need repeated runs on the target hardware.
+   scale contract captures 8K p50/p95 timing, no-reduction proof, checksum
+   parity, and software-baseline timing. Current retained ratio is below
+   `1000`, so release-grade performance claims still need optimization plus
+   repeated runs on the target hardware.
    Cross-arch target-native-build smoke now builds and runs x86_64, aarch64,
    and riscv64 outputs. Completion still needs current aarch64 NEON and
    riscv64 RVV Simple SIMD runtime matrix rows, plus strict mode with matching

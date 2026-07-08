@@ -16,12 +16,20 @@ cpu_simd_render_scale_contract_dpi=300
 cpu_simd_render_scale_contract_dpi_source=default
 cpu_simd_render_scale_contract_sample_count=1
 cpu_simd_render_scale_4k_pixels=3840x2160
-cpu_simd_render_scale_4k_p50_frame_us=664780
+cpu_simd_render_scale_4k_p50_frame_us=468599
+cpu_simd_render_scale_4k_p95_frame_us=468599
+cpu_simd_render_scale_4k_software_p50_frame_us=297890
+cpu_simd_render_scale_4k_software_p95_frame_us=297890
+cpu_simd_render_scale_4k_vs_software_p50_ratio_permille=635
 cpu_simd_render_scale_4k_checksum=sum32:32105444634193792
 cpu_simd_render_scale_4k_software_checksum=sum32:32105444634193792
 cpu_simd_render_scale_4k_software_checksum_parity=true
 cpu_simd_render_scale_8k_pixels=7680x4320
-cpu_simd_render_scale_8k_p50_frame_us=2219128
+cpu_simd_render_scale_8k_p50_frame_us=2644273
+cpu_simd_render_scale_8k_p95_frame_us=2644273
+cpu_simd_render_scale_8k_software_p50_frame_us=1520218
+cpu_simd_render_scale_8k_software_p95_frame_us=1520218
+cpu_simd_render_scale_8k_vs_software_p50_ratio_permille=574
 cpu_simd_render_scale_8k_checksum=sum32:135445232233405312
 cpu_simd_render_scale_8k_software_checksum=sum32:135445232233405312
 cpu_simd_render_scale_8k_software_checksum_parity=true
@@ -31,4 +39,7 @@ The wrapper fails closed unless CPU-SIMD is selected, logical and physical
 pixels match the requested full size, `screen_size_reduced=false`, 300dpi retina
 metadata is present, checksum/nonzero-pixel proof exists, CPU-SIMD checksums
 match the scalar software row for the same scene and dimensions, timing fields
-are positive, and fallback/unavailable fields are empty.
+are positive, software baseline timing is retained for comparison, and
+fallback/unavailable fields are empty. Ratio fields are software p50 divided by
+CPU-SIMD p50 in permille; values below `1000` mean this host still needs CPU
+SIMD render-loop optimization before a speedup claim.
