@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use super::{effective_target, ModuleImports};
-use super::tools::{find_c_compiler, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol};
+use super::tools::{
+    find_c_compiler, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol, target_c_compiler,
+};
 
 fn is_linker_provided_symbol(sym: &str, defined: &std::collections::HashSet<String>) -> bool {
     matches!(
@@ -645,7 +647,7 @@ pub(crate) fn generate_stub_object(
         let stub_c = temp_dir.join("_stubs.c");
         std::fs::write(&stub_c, "/* no stubs needed */\n").map_err(|e| format!("write stubs: {e}"))?;
         let stub_o = temp_dir.join("_stubs.o");
-        let empty_cc = find_c_compiler();
+        let empty_cc = target_c_compiler(effective_target());
         let status = std::process::Command::new(&empty_cc)
             .arg("-c")
             .arg("-ffunction-sections")
@@ -776,9 +778,9 @@ pub(crate) fn generate_stub_object(
         let mut asm_code = String::with_capacity(needs_stub.len() * 100);
         asm_code.push_str("/* Auto-generated stubs for bootstrap linking */\n");
 
-        let host_target = simple_common::target::Target::host();
-        let ret_nil = simple_common::platform::asm_helpers::asm_ret_nil(&host_target);
-        let jmp_prefix = simple_common::platform::asm_helpers::asm_jmp_instruction(&host_target);
+        let target = effective_target();
+        let ret_nil = simple_common::platform::asm_helpers::asm_ret_nil(&target);
+        let jmp_prefix = simple_common::platform::asm_helpers::asm_jmp_instruction(&target);
 
         for sym in &needs_stub {
             if !plat_config.is_valid_asm_label(sym) {
@@ -841,7 +843,7 @@ pub(crate) fn generate_stub_object(
         std::fs::write(&stub_s, &asm_code).map_err(|e| format!("write stubs: {e}"))?;
 
         let stub_o = temp_dir.join("_stubs.o");
-        let asm_cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
+        let asm_cc = target_c_compiler(effective_target());
         let output = std::process::Command::new(&asm_cc)
             .arg("-c")
             .arg("-ffunction-sections")

@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 
-use super::{safe_canonicalize, RUNTIME_PATH_OVERRIDE};
+use super::{effective_target, safe_canonicalize, RUNTIME_PATH_OVERRIDE};
 use simple_common::CORE_REQUIRED_RUNTIME_SYMBOLS;
 
 fn has_nonempty_archive_payload(path: &Path) -> bool {
@@ -102,6 +102,38 @@ pub(crate) fn find_cxx_compiler() -> String {
     simple_common::platform::cc_detect::find_cxx_compiler()
 }
 
+pub(crate) fn hosted_linux_cross_compiler(
+    target: simple_common::target::Target,
+    needs_cxx: bool,
+) -> Option<&'static str> {
+    if target.os != simple_common::target::TargetOS::Linux || target.is_host() {
+        return None;
+    }
+    match (target.arch, needs_cxx) {
+        (simple_common::target::TargetArch::Aarch64, false) => Some("aarch64-linux-gnu-gcc"),
+        (simple_common::target::TargetArch::Aarch64, true) => Some("aarch64-linux-gnu-g++"),
+        (simple_common::target::TargetArch::Riscv64, false) => Some("riscv64-linux-gnu-gcc"),
+        (simple_common::target::TargetArch::Riscv64, true) => Some("riscv64-linux-gnu-g++"),
+        (simple_common::target::TargetArch::Arm, false) => Some("arm-linux-gnueabihf-gcc"),
+        (simple_common::target::TargetArch::Arm, true) => Some("arm-linux-gnueabihf-g++"),
+        (simple_common::target::TargetArch::X86, false) => Some("i686-linux-gnu-gcc"),
+        (simple_common::target::TargetArch::X86, true) => Some("i686-linux-gnu-g++"),
+        _ => None,
+    }
+}
+
+pub(crate) fn target_c_compiler(target: simple_common::target::Target) -> String {
+    hosted_linux_cross_compiler(target, false)
+        .map(str::to_string)
+        .unwrap_or_else(find_c_compiler)
+}
+
+pub(crate) fn target_cxx_compiler(target: simple_common::target::Target) -> String {
+    hosted_linux_cross_compiler(target, true)
+        .map(str::to_string)
+        .unwrap_or_else(find_cxx_compiler)
+}
+
 fn host_archive_name() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -179,7 +211,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
 
     std::fs::create_dir_all(build_dir).ok()?;
 
-    let cc = find_c_compiler();
+    let cc = target_c_compiler(effective_target());
     let ar = find_archive_tool();
     let obj_ext = host_object_extension();
     let mut objects = Vec::new();

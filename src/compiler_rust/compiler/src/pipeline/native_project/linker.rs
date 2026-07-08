@@ -7,10 +7,50 @@ use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports,
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     find_archive_tool, find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_native_all_library,
-    find_objcopy_tool, is_system_symbol, strip_llvm_constructors,
+    find_objcopy_tool, is_system_symbol, strip_llvm_constructors, target_c_compiler, target_cxx_compiler,
 };
 
 impl NativeProjectBuilder {
+    fn freestanding_target_triple(target: simple_common::target::Target) -> Option<&'static str> {
+        match (target.arch, target.os) {
+            (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::None) => {
+                Some("riscv32-unknown-elf")
+            }
+            (simple_common::target::TargetArch::Riscv64, simple_common::target::TargetOS::None) => {
+                Some("riscv64-unknown-elf")
+            }
+            (simple_common::target::TargetArch::Aarch64, simple_common::target::TargetOS::None) => {
+                Some("aarch64-none-elf")
+            }
+            (simple_common::target::TargetArch::Arm, simple_common::target::TargetOS::None) => {
+                Some("armv7-none-eabihf")
+            }
+            (simple_common::target::TargetArch::X86, simple_common::target::TargetOS::None) => Some("i686-unknown-elf"),
+            (simple_common::target::TargetArch::X86_64, simple_common::target::TargetOS::None) => {
+                Some("x86_64-unknown-elf")
+            }
+            (simple_common::target::TargetArch::X86_64, simple_common::target::TargetOS::SimpleOS) => {
+                Some("x86_64-unknown-elf")
+            }
+            (simple_common::target::TargetArch::Aarch64, simple_common::target::TargetOS::SimpleOS) => {
+                Some("aarch64-none-elf")
+            }
+            (simple_common::target::TargetArch::Riscv64, simple_common::target::TargetOS::SimpleOS) => {
+                Some("riscv64-unknown-elf")
+            }
+            (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::SimpleOS) => {
+                Some("riscv32-unknown-elf")
+            }
+            (simple_common::target::TargetArch::X86, simple_common::target::TargetOS::SimpleOS) => {
+                Some("i686-unknown-elf")
+            }
+            (simple_common::target::TargetArch::Arm, simple_common::target::TargetOS::SimpleOS) => {
+                Some("armv7-none-eabihf")
+            }
+            _ => None,
+        }
+    }
+
     fn simpleos_sysroot_dir() -> PathBuf {
         std::env::var("SIMPLEOS_SYSROOT")
             .map(PathBuf::from)
@@ -408,6 +448,10 @@ impl NativeProjectBuilder {
         matches!(sym, "rt_net_https_openssl_local_probe")
     }
 
+    fn is_sqlite_runtime_symbol(sym: &str) -> bool {
+        sym.starts_with("rt_sqlite_") || sym.starts_with("sqlite3_")
+    }
+
     fn entry_objects_require_libm(object_paths: &[PathBuf]) -> Result<bool, String> {
         for input in object_paths {
             if Self::read_undefined_symbol_set(input)?
@@ -425,6 +469,18 @@ impl NativeProjectBuilder {
             if Self::read_undefined_symbol_set(input)?
                 .iter()
                 .any(|sym| Self::is_openssl_runtime_symbol(sym))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn entry_objects_require_sqlite(object_paths: &[PathBuf]) -> Result<bool, String> {
+        for input in object_paths {
+            if Self::read_undefined_symbol_set(input)?
+                .iter()
+                .any(|sym| Self::is_sqlite_runtime_symbol(sym))
             {
                 return Ok(true);
             }
@@ -561,7 +617,7 @@ impl NativeProjectBuilder {
     /// Compile the C++ main stub to an object file.
     pub(crate) fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
         let main_cpp = temp_dir.join("_main_stub.cpp");
-        let cxx = find_cxx_compiler();
+        let cxx = target_cxx_compiler(effective_target());
         let is_msvc = cxx.contains("clang-cl") || simple_common::platform::cc_detect::is_msvc_target(&cxx);
 
         let has_entry = self.entry_file.is_some();
@@ -671,22 +727,14 @@ int main(int argc, char** argv) {
         init_names.sort();
         init_names.dedup();
 
-        let cxx = find_cxx_compiler();
-        let is_clang_cl = cxx.contains("clang-cl");
         let cross_target = effective_target();
+        let cxx = target_cxx_compiler(cross_target);
+        let is_clang_cl = cxx.contains("clang-cl");
         let use_llvm_backend = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
         let init_target_triple = if cross_target.is_host() {
             None
         } else {
-            match cross_target.arch {
-                simple_common::target::TargetArch::Riscv32 => Some("riscv32-unknown-elf"),
-                simple_common::target::TargetArch::Riscv64 => Some("riscv64-unknown-elf"),
-                simple_common::target::TargetArch::Aarch64 => Some("aarch64-none-elf"),
-                simple_common::target::TargetArch::Arm => Some("armv7-none-eabihf"),
-                simple_common::target::TargetArch::X86 => Some("i686-unknown-elf"),
-                simple_common::target::TargetArch::X86_64 => Some("x86_64-unknown-elf"),
-                _ => None,
-            }
+            Self::freestanding_target_triple(cross_target)
         };
 
         let mut code = String::from("// Auto-generated: calls all __module_init_* functions\n");
@@ -843,9 +891,9 @@ int main(int argc, char** argv) {
             .is_some_and(|(_, is_native_all)| *is_native_all);
 
         let cc = if has_native_all {
-            find_cxx_compiler()
+            target_cxx_compiler(cross_target)
         } else {
-            find_c_compiler()
+            target_c_compiler(cross_target)
         };
         let is_clang_cl = cc.contains("clang-cl");
         let is_msvc = simple_common::platform::cc_detect::is_msvc_target(&cc);
@@ -862,50 +910,6 @@ int main(int argc, char** argv) {
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cmd.arg("-Wl,-z,muldefs");
-
-        let cross_target = effective_target();
-        if !cross_target.is_host() {
-            let triple = match (cross_target.arch, cross_target.os) {
-                (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::None) => {
-                    "riscv32-unknown-elf"
-                }
-                (simple_common::target::TargetArch::Riscv64, simple_common::target::TargetOS::None) => {
-                    "riscv64-unknown-elf"
-                }
-                (simple_common::target::TargetArch::Aarch64, simple_common::target::TargetOS::None) => {
-                    "aarch64-none-elf"
-                }
-                (simple_common::target::TargetArch::Arm, simple_common::target::TargetOS::None) => "armv7-none-eabihf",
-                (simple_common::target::TargetArch::X86, simple_common::target::TargetOS::None) => "i686-unknown-elf",
-                (simple_common::target::TargetArch::X86_64, simple_common::target::TargetOS::None) => {
-                    "x86_64-unknown-elf"
-                }
-                (simple_common::target::TargetArch::X86_64, simple_common::target::TargetOS::SimpleOS) => {
-                    "x86_64-unknown-elf"
-                }
-                (simple_common::target::TargetArch::Aarch64, simple_common::target::TargetOS::SimpleOS) => {
-                    "aarch64-none-elf"
-                }
-                (simple_common::target::TargetArch::Riscv64, simple_common::target::TargetOS::SimpleOS) => {
-                    "riscv64-unknown-elf"
-                }
-                (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::SimpleOS) => {
-                    "riscv32-unknown-elf"
-                }
-                (simple_common::target::TargetArch::X86, simple_common::target::TargetOS::SimpleOS) => {
-                    "i686-unknown-elf"
-                }
-                (simple_common::target::TargetArch::Arm, simple_common::target::TargetOS::SimpleOS) => {
-                    "armv7-none-eabihf"
-                }
-                _ => "",
-            };
-            if !triple.is_empty() {
-                cmd.arg(format!("--target={}", triple));
-                cmd.arg("-nostdlib");
-                cmd.arg("-ffreestanding");
-            }
-        }
 
         if let Some(ref ls) = self.config.linker_script {
             cmd.arg(format!("-T{}", ls.display()));
@@ -1110,12 +1114,20 @@ int main(int argc, char** argv) {
             && self.runtime_bundle_prefers_core_lane()
             && !Self::entry_objects_require_libm(object_paths)?;
         let require_openssl = cfg!(target_os = "linux") && Self::entry_objects_require_openssl(object_paths)?;
+        let omit_sqlite = cfg!(target_os = "linux")
+            && selected_runtime
+                .as_ref()
+                .is_some_and(|(_, is_native_all)| !is_native_all)
+            && !Self::entry_objects_require_sqlite(object_paths)?;
         if is_clang_cl {
             for lib in &link_config.libraries {
                 if omit_unwind && *lib == "unwind" {
                     continue;
                 }
                 if omit_libm && *lib == "m" {
+                    continue;
+                }
+                if omit_sqlite && *lib == "sqlite3" {
                     continue;
                 }
                 cmd.arg(format!("{}.lib", lib));
@@ -1130,6 +1142,9 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 if omit_libm && *lib == "m" {
+                    continue;
+                }
+                if omit_sqlite && *lib == "sqlite3" {
                     continue;
                 }
                 cmd.arg(format!("-l{}", lib));
@@ -1258,15 +1273,8 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
         imports: &ModuleImports,
     ) -> Result<(), String> {
         let cross_target = effective_target();
-        let triple = match cross_target.arch {
-            simple_common::target::TargetArch::Riscv32 => "riscv32-unknown-elf",
-            simple_common::target::TargetArch::Riscv64 => "riscv64-unknown-elf",
-            simple_common::target::TargetArch::Aarch64 => "aarch64-none-elf",
-            simple_common::target::TargetArch::Arm => "armv7-none-eabihf",
-            simple_common::target::TargetArch::X86 => "i686-unknown-elf",
-            simple_common::target::TargetArch::X86_64 => "x86_64-unknown-elf",
-            _ => return Err("unsupported freestanding target architecture".to_string()),
-        };
+        let triple = Self::freestanding_target_triple(cross_target)
+            .ok_or_else(|| "unsupported freestanding target architecture".to_string())?;
 
         let use_llvm = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
         let riscv32_march_override = std::env::var("SIMPLE_RISCV32_MARCH").ok();
@@ -1960,6 +1968,57 @@ pub(crate) fn normalize_windows_pe_metadata(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod linker_tests {
     use super::*;
+    use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
+    use simple_common::target::{Target, TargetArch, TargetOS};
+
+    #[test]
+    fn hosted_linux_cross_compilers_select_gnu_toolchains() {
+        assert_eq!(
+            hosted_linux_cross_compiler(Target::new(TargetArch::Aarch64, TargetOS::Linux), false),
+            Some("aarch64-linux-gnu-gcc")
+        );
+        assert_eq!(
+            hosted_linux_cross_compiler(Target::new(TargetArch::Aarch64, TargetOS::Linux), true),
+            Some("aarch64-linux-gnu-g++")
+        );
+        assert_eq!(
+            hosted_linux_cross_compiler(Target::new(TargetArch::Riscv64, TargetOS::Linux), false),
+            Some("riscv64-linux-gnu-gcc")
+        );
+        assert_eq!(
+            hosted_linux_cross_compiler(Target::new(TargetArch::Riscv64, TargetOS::Linux), true),
+            Some("riscv64-linux-gnu-g++")
+        );
+        assert_eq!(
+            hosted_linux_cross_compiler(Target::new(TargetArch::Arm, TargetOS::Linux), false),
+            Some("arm-linux-gnueabihf-gcc")
+        );
+    }
+
+    #[test]
+    fn hosted_linux_cross_compilers_leave_host_and_freestanding_alone() {
+        assert_eq!(hosted_linux_cross_compiler(Target::host(), false), None);
+        assert_eq!(
+            hosted_linux_cross_compiler(Target::new(TargetArch::Aarch64, TargetOS::None), false),
+            None
+        );
+    }
+
+    #[test]
+    fn freestanding_target_triple_keeps_none_and_simpleos_mappings() {
+        assert_eq!(
+            NativeProjectBuilder::freestanding_target_triple(Target::new(TargetArch::Riscv64, TargetOS::None)),
+            Some("riscv64-unknown-elf")
+        );
+        assert_eq!(
+            NativeProjectBuilder::freestanding_target_triple(Target::new(TargetArch::Aarch64, TargetOS::SimpleOS)),
+            Some("aarch64-none-elf")
+        );
+        assert_eq!(
+            NativeProjectBuilder::freestanding_target_triple(Target::new(TargetArch::Aarch64, TargetOS::Linux)),
+            None
+        );
+    }
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -2086,5 +2145,43 @@ mod linker_tests {
 
         assert!(!NativeProjectBuilder::entry_objects_require_openssl(&[plain_o]).unwrap());
         assert!(NativeProjectBuilder::entry_objects_require_openssl(&[https_o]).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn link_inputs_require_sqlite_detects_sqlite_runtime_symbols_only_when_referenced() {
+        let temp = tempfile::tempdir().unwrap();
+        let plain_c = temp.path().join("plain.c");
+        let sqlite_c = temp.path().join("sqlite.c");
+        let plain_o = temp.path().join("plain.o");
+        let sqlite_o = temp.path().join("sqlite.o");
+
+        std::fs::write(&plain_c, "int plain(void) { return 1; }\n").unwrap();
+        std::fs::write(
+            &sqlite_c,
+            "extern long long rt_sqlite_open(void); long long db(void) { return rt_sqlite_open(); }\n",
+        )
+        .unwrap();
+
+        let plain_status = std::process::Command::new("cc")
+            .args(["-c", "-O0"])
+            .arg(&plain_c)
+            .arg("-o")
+            .arg(&plain_o)
+            .status()
+            .unwrap();
+        assert!(plain_status.success());
+
+        let sqlite_status = std::process::Command::new("cc")
+            .args(["-c", "-O0"])
+            .arg(&sqlite_c)
+            .arg("-o")
+            .arg(&sqlite_o)
+            .status()
+            .unwrap();
+        assert!(sqlite_status.success());
+
+        assert!(!NativeProjectBuilder::entry_objects_require_sqlite(&[plain_o]).unwrap());
+        assert!(NativeProjectBuilder::entry_objects_require_sqlite(&[sqlite_o]).unwrap());
     }
 }
