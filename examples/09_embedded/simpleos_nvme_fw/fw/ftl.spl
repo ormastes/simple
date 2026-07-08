@@ -211,12 +211,20 @@ impl Ftl:
     #  3. Re-apply persistently-retired blocks so the allocator skips them.
     me recover():
         val n: i64 = me.journal.wal_len()
+        var seq_floor: i64 = me.journal.ckpt_seq
+        if seq_floor < 0:
+            seq_floor = 0
+        if seq_floor > FTL_MAX_SEQ:
+            seq_floor = FTL_MAX_SEQ
+        var seen_seq: [i64] = ftl_fill(LBA_COUNT, seq_floor)
         var i: i64 = 0
         while i < n:
             val lba: i64 = me.journal.record_lba(i)
             val newp: i64 = me.journal.record_new(i)
-            if ftl_host_lba_valid(lba) and (newp == UNMAP or ppn_in_range(newp)):
+            val s: i64 = me.journal.record_seq(i)
+            if ftl_host_lba_valid(lba) and s >= seen_seq[lba] and (newp == UNMAP or ppn_in_range(newp)):
                 me.map.update(lba, newp)
+                seen_seq[lba] = s
             i = i + 1
         me.map.flush()
         var lba2: i64 = 0
@@ -617,6 +625,14 @@ fn ftl_selftest() -> i64:
     ftl.recover()
     fail = fail + expect_eq(ftl.read(10), 0x99, "recover skips invalid WAL ppn")
     fail = fail + expect_eq(ftl.read(LBA_COUNT), 0, "recover skips invalid WAL lba")
+    var stale: Ftl = ftl_new()
+    stale.write(30, 0x11)
+    val stale_old_ppn: i64 = stale.physical_ppn(30)
+    stale.write(30, 0x22)
+    stale.journal.append(0, 30, UNMAP, stale_old_ppn, 1)
+    stale.crash()
+    stale.recover()
+    fail = fail + expect_eq(stale.read(30), 0x22, "recover ignores stale WAL sequence rollback")
 
     # garbage collection: create a CLOSED block full of mostly-stale data, reclaim it
     var i: i64 = 0
