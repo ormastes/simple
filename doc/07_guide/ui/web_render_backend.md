@@ -34,9 +34,13 @@ uploads the completed CPU layout image to Engine2D because small or residual-hea
 pages can lose more time to command/upload/readback traffic than they save on
 device fill work. `web_gpu_paint_economics(frame, base)` is the local decision
 helper: it compares full-image upload/readback cost with primitive fill commands
-plus residual upload cost. The forced GPU paint path predicts the residual from
-the local fill list, so it avoids an extra full-frame GPU readback before the
-final pixel-returning API readback.
+plus residual upload cost, and only returns an offload win when CPU paint was
+actually skipped. Solid-only pages build the frame from fill ops; mixed pages
+still keep CPU ground truth for residual parity. The forced GPU paint path
+predicts the residual from the local fill list, so it avoids an extra full-frame
+GPU readback before the final pixel-returning API readback. The deterministic
+policy gate is
+`test/05_perf/web_render_chrome/web_gpu_paint_offload_matrix_spec.spl`.
 The browser backend keeps a retained one-entry pixel artifact cache for
 unchanged static full HTML at the same viewport and resolved backend. Requests
 with `data-simple-dynamic`, `data-live`, `data-ui-patch`, or WebSocket JS bypass

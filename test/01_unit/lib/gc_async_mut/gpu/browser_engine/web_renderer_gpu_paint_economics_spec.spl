@@ -11,12 +11,16 @@ fn solid_full_frame_html() -> text:
 fn text_only_html() -> text:
     "<html><body>hello</body></html>"
 
+fn blank_html() -> text:
+    "<html><body></body></html>"
+
 describe "Simple web renderer GPU paint economics":
 
     context "offload decision":
         it "offloads solid fills when transfer cost beats upload-bound presentation":
             val frame = simple_web_layout_render_html_gpu_frame(solid_full_frame_html(), 64, 64)
             val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(0)
             expect(economics.fill_op_count).to_be_greater_than(0)
             expect(economics.should_offload).to_equal(true)
             expect(economics.reason).to_equal("gpu-paint-transfer-win")
@@ -25,5 +29,13 @@ describe "Simple web renderer GPU paint economics":
         it "keeps text-only frames on the upload-bound path":
             val frame = simple_web_layout_render_html_gpu_frame(text_only_html(), 64, 64)
             val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(64 * 64)
+            expect(economics.should_offload).to_equal(false)
+            expect(economics.reason).to_equal("cpu-ground-truth-required")
+
+        it "does not offload when there is no GPU fill work":
+            val frame = simple_web_layout_render_html_gpu_frame(blank_html(), 64, 64)
+            val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(0)
             expect(economics.should_offload).to_equal(false)
             expect(economics.reason).to_equal("no-gpu-fill-ops")

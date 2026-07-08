@@ -8733,6 +8733,7 @@ class WebGpuPaintFrame:
     fill_ops: [SceneCommand]
     width: i32
     height: i32
+    cpu_paint_pixels: i32
 
 # Emit a fill_rect op for every node whose background is a plain opaque
 # border-box rectangle — i.e. exactly the case where paint() writes a flat
@@ -8767,6 +8768,57 @@ fn _web_gpu_solid_fill_ops(nodes: [HNode], styles: [Style], bx: [i32], by: [i32]
         i = i + 1
     ops
 
+fn _web_gpu_solid_only_frame(nodes: [HNode], styles: [Style], widget_mode: bool) -> bool:
+    if widget_mode:
+        return false
+    val node_count = nodes.len().to_i32()
+    var i: i32 = 0
+    while i < node_count:
+        val nd = nodes[i]
+        val st = styles[i]
+        val visible = st.display != "none" and not st.visibility_hidden and not st.content_visibility_hidden
+        if visible:
+            if nd.tag == "#text":
+                if nd.text_trimmed != "":
+                    return false
+            else:
+                val has_bg = st.bg != 0u32
+                val has_gradient = st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32
+                val has_extra_paint = st.border_w > 0 or st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0 or st.outline_w > 0 or st.box_shadow_raw != "" or st.bg_layers_raw != "" or st.overflow_auto_y or nd.has_icon_image_class or nd.has_focused_class
+                val plain_radius = st.border_radius_tl_px == 0 and st.border_radius_tr_px == 0 and st.border_radius_br_px == 0 and st.border_radius_bl_px == 0
+                val plain_solid_bg = has_bg and not has_gradient and st.opacity_pct == 100 and plain_radius and st.background_clip == "border-box"
+                if has_gradient or has_extra_paint:
+                    return false
+                if has_bg and not plain_solid_bg:
+                    return false
+            i = i + 1
+        else:
+            i = i + 1
+    true
+
+fn _web_gpu_simulate_fill_ops(fill_ops: [SceneCommand], width: i32, height: i32, base: u32) -> [u32]:
+    var out: [u32] = [base; width * height]
+    var oi: i32 = 0
+    val op_count = fill_ops.len()
+    while oi < op_count:
+        val op = fill_ops[oi]
+        val x0 = if op.x < 0: 0 else: op.x
+        val y0 = if op.y < 0: 0 else: op.y
+        val x1_raw = op.x + op.width
+        val y1_raw = op.y + op.height
+        val x1 = if x1_raw > width: width else: x1_raw
+        val y1 = if y1_raw > height: height else: y1_raw
+        var y = y0
+        while y < y1:
+            val row = y * width
+            var x = x0
+            while x < x1:
+                out[row + x] = op.color as u32
+                x = x + 1
+            y = y + 1
+        oi = oi + 1
+    out
+
 pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i32) -> WebGpuPaintFrame:
     val nodes = parse_html(html)
     val rules = extract_css_vw(html, width)
@@ -8795,11 +8847,14 @@ pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i
     val white = argb(255, 255, 255)
     val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
     val base = if widget_mode: argb(245, 245, 245) else: white
+    val fill_ops = _web_gpu_solid_fill_ops(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height, widget_mode)
+    if _web_gpu_solid_only_frame(nodes, styles, widget_mode):
+        val gpu_fb = _web_gpu_simulate_fill_ops(fill_ops, width, height, base)
+        return WebGpuPaintFrame(fb: gpu_fb, fill_ops: fill_ops, width: width, height: height, cpu_paint_pixels: 0)
     var fb: [u32] = [base; width * height]
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
     val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
-    val fill_ops = _web_gpu_solid_fill_ops(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height, widget_mode)
-    WebGpuPaintFrame(fb: painted, fill_ops: fill_ops, width: width, height: height)
+    WebGpuPaintFrame(fb: painted, fill_ops: fill_ops, width: width, height: height, cpu_paint_pixels: width * height)
 
 # Render at a scroll offset: lay out with the full scroll extent, then shift
 # paint coordinates into the viewport so allocation stays bounded by WxH.
