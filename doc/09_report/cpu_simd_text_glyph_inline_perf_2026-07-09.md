@@ -47,6 +47,19 @@ The prior external Node Canvas/Cairo row remains `80.201ms` p50 at the same 8K
 size. The CPU-SIMD row improved from `1282.166ms` to `938.678ms`, but remains
 about `11.7x` slower than that external CPU drawing-library baseline.
 
+## Rejected Follow-ups
+
+Two smaller follow-ups were tried and reverted because they preserved the
+checksum but did not improve the retained 8K row:
+
+- Coalescing adjacent glyph-bit spans in `SoftwareBackend.draw_text`: 8K
+  `938812us`, checksum `sum32:135445232233405312`.
+- Returning selector-backed HTML to full layout before heuristic color scans:
+  8K `947898us`, checksum `sum32:135445232233405312`.
+
+The next useful target is the full Simple Web layout/paint stage split, not
+another backend-only text-loop micro-change.
+
 ## Verification
 
 - `SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean`
