@@ -736,6 +736,36 @@ Terminated
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
 
+## Update — feature guard value cases split, probe reaches queue phase cases
+
+`logic_feature_guard_value_cases.spl` was reduced to a small case facade, with
+queue-depth, temperature, and power-state value assertions moved into separate
+case modules. The scalar host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but this run got through feature guard, namespace,
+target, RAIN, ECC, journal, map, band, scheduler, power, and HIL cases before
+stopping at queue-phase cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_feature_guard.spl chars=114
+[BOOTSTRAP-PHASE] ... logic_feature_guard.spl
+[BOOTSTRAP-PHASE] ... logic_ecc_compute_cases.spl chars=276
+[BOOTSTRAP-PHASE] ... logic_hil_cases.spl chars=228
+[BOOTSTRAP-PHASE] ... logic_queue_phase_cases.spl chars=332
+Terminated
+```
+
+The current measured timeout is now around `logic_queue_phase_cases.spl`.
+
 ## Update — flush dirty cases split, probe reaches namespace guard
 
 `logic_flush_dirty_cases.spl` was reduced to a small case facade, with valid
