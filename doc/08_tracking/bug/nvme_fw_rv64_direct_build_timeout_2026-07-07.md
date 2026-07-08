@@ -764,6 +764,33 @@ Terminated
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
 
+## Update - target logic RV64 probe boots
+
+The full RV64 direct build remains blocked, but `fw_rv64/build.shs` now has a
+`target_logic` section that avoids imported-module duplicate `__simple_main`
+emission and boots a target profile/aperture probe through OpenSBI.
+
+```text
+NVME_RV64_BUILD_SECTION=target_logic NVME_RV64_BUILD_TIMEOUT_SECS=120 \
+  sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs
+build/nvme_fw_rv64_target_logic.elf: ELF 64-bit LSB executable, UCB RISC-V
+
+NVME_RV64_BOOT_LOG=build/nvme_fw_rv64_target_logic_serial.log \
+  sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs \
+  build/nvme_fw_rv64_target_logic.elf
+RV64 ENTRY
+SimpleOS RV64
+[BOOT] boot complete
+ALL RV64 NVME FW CHECKS PASS
+RESULT: PASS
+```
+
+The rejected `target` section exposed the compiler-side root cause for imported
+case wrappers: every imported module contributes duplicate
+`rt_rv64_boot_optional_nvme_fw_selftest` / `__simple_main` symbols during the
+RV64 emit-object path. Keep `target_logic` import-free until that backend issue
+is fixed.
+
 ## Update — detached full build still stops without ELF
 
 After the RV64 target-core boot pass, a fresh foreground full build still exited
