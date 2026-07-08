@@ -71,6 +71,11 @@ implementation-evidence-in-progress
   through the explicit `cpu_simd` render backend while `simple_web_software`
   remains the scalar software row. This prevents the 4K/8K comparison from
   silently measuring the same scalar path twice.
+- implementation: The GUI perf harness now emits
+  `gui_perf_cpu_base_compare_*` fields comparing `simple_web_cpu_simd` against
+  the first completed CPU drawing-library baseline, preferring Node Canvas/Cairo
+  and falling back to GTK/Cairo draw-only timing. Missing baselines are reported
+  as unavailable instead of passing.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 
@@ -103,5 +108,6 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
 - Native Simple executable size/speed evidence is intentionally skipped in the fast smoke run (`SKIP_SIMPLE_NATIVE=1`); a release-grade run should capture native artifact bytes or record an explicit native-build blocker.
 - Wire unwired probes into contract: warm_startup, frame_time_p50/p95, input_to_paint.
 - Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture
-  separate `simple_web_cpu_simd` and `simple_web_software` baseline numbers.
+  separate `simple_web_cpu_simd`, `simple_web_software`, and
+  `gui_perf_cpu_base_compare_*` baseline numbers.
 - Tauri integration: requires cargo-tauri CLI + WebKitGTK dev headers.

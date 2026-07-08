@@ -100,6 +100,63 @@ run_bench() {
     echo "" | tee -a "$REPORT"
 }
 
+kv_value() {
+    local file="$1"
+    local key="$2"
+    grep "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+sdn_i64_value() {
+    local file="$1"
+    local key="$2"
+    sed -n "s/.*${key}: \\([0-9][0-9]*\\).*/\\1/p" "$file" 2>/dev/null | head -1 || true
+}
+
+emit_cpu_base_compare() {
+    local simple_file="$BUILD_DIR/simple_web_cpu_simd.stdout"
+    local simple_us
+    simple_us="$(sdn_i64_value "$simple_file" "p50_frame_us")"
+    local baseline_backend=""
+    local baseline_metric=""
+    local baseline_ms=""
+
+    if [[ "$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_status")" == "completed" ]]; then
+        baseline_backend="$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_backend")"
+        baseline_metric="frame_time_p50_ms"
+        baseline_ms="$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_frame_time_p50_ms")"
+    elif [[ "$(kv_value "$BUILD_DIR/gtk3.stdout" "gui_perf_benchmark_status")" == "completed" ]]; then
+        baseline_backend="gtk3_cairo"
+        baseline_metric="draw_only_avg_ms"
+        baseline_ms="$(kv_value "$BUILD_DIR/gtk3.stdout" "gui_perf_benchmark_draw_only_avg_ms")"
+    fi
+
+    echo "## CPU Drawing Library Baseline Compare" | tee -a "$REPORT"
+    echo "" | tee -a "$REPORT"
+    if [[ -z "$simple_us" ]]; then
+        echo "gui_perf_cpu_base_compare_status=unavailable" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_reason=simple_web_cpu_simd_missing_p50_frame_us" | tee -a "$REPORT"
+    elif [[ -z "$baseline_ms" ]]; then
+        echo "gui_perf_cpu_base_compare_status=unavailable" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_reason=no_completed_gtk3_or_node_canvas_cpu_baseline" | tee -a "$REPORT"
+    else
+        local simple_ms
+        simple_ms="$(awk -v us="$simple_us" 'BEGIN { printf "%.3f", us / 1000.0 }')"
+        local ratio
+        ratio="$(awk -v b="$baseline_ms" -v s="$simple_ms" 'BEGIN { if (s > 0) printf "%.3f", b / s; else print "0" }')"
+        local target
+        target="$(awk -v b="$baseline_ms" -v s="$simple_ms" 'BEGIN { print (s <= b) ? "yes" : "no" }')"
+        echo "gui_perf_cpu_base_compare_status=measured" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_simple_backend=simple_web_cpu_simd" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_simple_p50_ms=$simple_ms" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_backend=$baseline_backend" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_metric=$baseline_metric" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_ms=$baseline_ms" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_over_simple_ratio=$ratio" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_target_met=$target" | tee -a "$REPORT"
+    fi
+    echo "" | tee -a "$REPORT"
+}
+
 # ── 1. C/GTK3 ──
 if pkg-config --exists gtk+-3.0 2>/dev/null; then
     GTK_BIN="$BUILD_DIR/bench_gtk"
@@ -211,6 +268,8 @@ else
     echo "gui_perf_benchmark_reason=simple compiler binary not found" | tee -a "$REPORT"
     echo "" | tee -a "$REPORT"
 fi
+
+emit_cpu_base_compare
 
 {
     echo "## Reproducibility"
