@@ -764,6 +764,23 @@ Terminated
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
 
+## Update — detached full build still stops without ELF
+
+After the RV64 target-core boot pass, a fresh foreground full build still exited
+early:
+
+```text
+NVME_RV64_BUILD_FAILED code=143 reason=external-termination-before-timeout timeout=120s elapsed=80s
+```
+
+Running the full build through `--background` escaped the foreground command
+lifetime and reached `NVME_RV64_BUILD_HEARTBEAT elapsed=60s timeout=300s`, with
+native-build reporting `Entry closure files: 177`, but the process still exited
+without `build/nvme_fw_rv64.elf` or `build/test-artifacts/nvme_fw_rv64.o`.
+`fw_rv64/build.shs --status` now reports this as `NVME_RV64_BUILD_STATUS
+stopped` and points at the foreground/background logs instead of flattening it
+to a plain missing-media state.
+
 ## Update — closure diagnostics and fail-closed stub fallback
 
 The RV64 direct build wrapper now runs `native-build` with `--verbose`, records
