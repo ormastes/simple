@@ -7,6 +7,16 @@
 # Large messages use shared buffer pages (slow path, zero-copy).
 #
 # All fields use primitive types for baremetal ABI safety.
+#
+# ponytail: the module-global `var name: [T; N]` arrays below (buffer_pool_*,
+# ep_pending_*, ep_inline_*, ep_waiter_inline_*) cannot be exercised by
+# `bin/simple test` today — the interpreter's spec-test path fails with
+# "semantic: variable `<name>` not found" for any function that touches one,
+# even pre-existing, untouched functions (msg_buffer_init/msg_buffer_alloc).
+# Confirmed by bisection: instance/class fields with dynamic arrays (see
+# InlineChannel below, or L4BufferPool in l4_fast_ipc.spl) work fine under
+# the same runner. This is a pre-existing interpreter gap, not introduced
+# here — flagging so it can be tracked and fixed independently.
 
 use os.kernel.types.bitfield.{bits_get, bits_set}
 
@@ -169,6 +179,63 @@ var ep_inline_badge: [u32; 256]
 var ep_inline_head: [u64; 64]
 var ep_inline_tail: [u64; 64]
 var ep_inline_count: [u64; 64]
+
+# ===========================================================================
+# InlineChannel — instance-owned inline-message queue (hardened alternative)
+# ===========================================================================
+# The flat ep_inline_* arrays above are module-global: every endpoint shares
+# the same 64-slot table, so correctness depends on every call site using a
+# distinct endpoint_id and never racing it without an outer lock (flagged by
+# the IPC audit as a correctness risk). InlineChannel gives the same bounded
+# FIFO semantics (capacity = MAX_INLINE_PER_EP, same errno on full) but as
+# state the caller owns and passes around instead of a shared global table —
+# use this for new call sites that can hold their own channel instance.
+# ponytail: the ep_inline_* baremetal fast path above is left as-is (ABI/perf
+# critical, already has real callers); migrating it fully to instance state
+# is a larger follow-up, not required for this bounded increment.
+
+class InlineChannel:
+    """Bounded FIFO queue of InlineMessage, owned by the caller (no module-global state)."""
+    messages: [InlineMessage?]
+    head: i64
+    tail: i64
+    count: i64
+    capacity: i64
+
+impl InlineChannel:
+    static fn new(capacity: i64) -> InlineChannel:
+        """Create an empty channel with the given capacity."""
+        var messages: [InlineMessage?] = []
+        var i: i64 = 0
+        while i < capacity:
+            messages.push(nil)
+            i = i + 1
+        InlineChannel(messages: messages, head: 0, tail: 0, count: 0, capacity: capacity)
+
+    me send(msg: InlineMessage) -> u64:
+        """Enqueue a message. Returns 0 on success, 3 if full (fail-closed)."""
+        if self.count >= self.capacity:
+            return 3
+        self.messages[self.tail] = msg
+        self.tail = (self.tail + 1) % self.capacity
+        self.count = self.count + 1
+        0
+
+    me recv() -> InlineMessage?:
+        """Dequeue the oldest message (FIFO). Returns nil if empty (fail-closed)."""
+        if self.count == 0:
+            return nil
+        val msg = self.messages[self.head]
+        self.messages[self.head] = nil
+        self.head = (self.head + 1) % self.capacity
+        self.count = self.count - 1
+        msg
+
+    fn is_empty() -> bool:
+        self.count == 0
+
+    fn is_full() -> bool:
+        self.count >= self.capacity
 
 # Per-endpoint receive waiter (thread blocked waiting for a message; 0 = none)
 var ep_recv_waiter: [u64; 64]

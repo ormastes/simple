@@ -2,7 +2,7 @@
 # Contains spl_handle_* for network syscalls 70–77.
 
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
-use os.kernel.ipc.syscall.{_handle_net_socket}
+use os.kernel.socket_compat.{posix_socket}
 use os.kernel.ipc.syscall.{_handle_net_bind}
 use os.kernel.ipc.syscall.{_handle_net_listen}
 use os.kernel.ipc.syscall.{_handle_net_connect}
@@ -25,12 +25,19 @@ use os.kernel.abi.syscall_shim.{_make_args}
 fn spl_handle_net_socket(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """Strong override for the weak spl_handle_net_socket stub.
 
-    Forwards to _handle_net_socket() in syscall.spl.
-    Syscall number 70: create a network socket.
+    Routes directly to posix_socket() in socket_compat.spl, which allocates
+    a local POSIX fd without depending on netstack IPC or a NIC driver
+    (loopback traffic on 127.0.0.1 is served entirely by
+    os.kernel.net.loopback_socket; see posix_bind/posix_connect).
+
+    Previously forwarded to _handle_net_socket() -> _forward_net_ipc() in
+    os.kernel.ipc.syscall_net.spl, which unconditionally returned -ENOSYS
+    ("kernel forwarding path is not fully wired" -- see that file's comment).
+    That was the exact bug: the app-facing socket() syscall always failed
+    with ENOSYS regardless of destination. Syscall number 70: create a
+    network socket.
     """
-    val args = _make_args(70, a0, a1, a2, a3, a4, a5)
-    val result = _handle_net_socket(args)
-    result.value
+    posix_socket(a0 as i32, a1 as i32, a2 as i32)
 
 # ===========================================================================
 # syscall 71 — net_bind   [IMPLEMENTED]
@@ -45,7 +52,17 @@ fn spl_handle_net_socket(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -
 fn spl_handle_net_bind(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """Strong override for the weak spl_handle_net_bind stub.
 
-    Forwards to _handle_net_bind() in syscall.spl.
+    Forwards to _handle_net_bind() in syscall.spl, which still returns
+    -ENOSYS (kernel forwarding path stub in os.kernel.ipc.syscall_net.spl,
+    outside this module's ownership).
+
+    # ponytail: bind()/connect()/send()/recv() at the raw syscall ABI still
+    # need the user-space sockaddr (a1 pointer) parsed via mmio into
+    # SockaddrIn before they can route to posix_bind/posix_connect in
+    # socket_compat.spl (which now has a working loopback path -- see
+    # os.kernel.net.loopback_socket). socket() itself (syscall 70, scalar
+    # args only) is fixed above; the pointer-marshaling work for these
+    # syscalls is deferred as a separate bounded change.
     Syscall number 71: bind a socket to a local address and port.
     """
     val args = _make_args(71, a0, a1, a2, a3, a4, a5)

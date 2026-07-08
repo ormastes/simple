@@ -287,3 +287,72 @@ fn arena_is_sealed_impl(arena_id: i64) -> bool:
     if idx < 0:
         return false
     _nvfs_arena_metas[idx as i32].sealed
+
+# --- Durability: persist the arena valid-length header on fsync ---
+#
+# The nvme data path (_nvfs_arena_append_nvme) already writes bytes THROUGH the
+# block device synchronously, so data is durable at append time. What was NOT
+# durable is the valid-length (`total_bytes`): it lived only in in-memory meta,
+# so a remount could not tell how many bytes of the region are real. The layout
+# already reserves LBA=base_block as a header sector (data starts at base_block+1
+# per _nvfs_arena_data_lba), but nothing was ever written there. fsync now commits
+# a magic + little-endian total_bytes into that reserved header sector, making the
+# length durable and recoverable via arena_durable_len_impl.
+#
+# ponytail: this only makes the ALREADY write-through nvme-backed arena's length
+# metadata durable. The default kind-0 in-memory arena stays volatile (making it
+# durable needs a block-allocation policy, out of scope), fsync is honestly false
+# there, and dbfs/vfs still do not route file writes through nvme arenas nor call
+# fsync. Full journaling / crash-consistent metadata is deferred.
+
+# Commit the arena valid-length into the reserved header sector (LBA=base_block).
+# Returns true only for a device-backed arena that was actually persisted.
+fn arena_fsync_impl(arena_id: i64) -> bool:
+    val idx = _nvfs_arena_find_idx(arena_id)
+    if idx < 0:
+        return false
+    val meta = _nvfs_arena_metas[idx as i32]
+    if meta.discarded:
+        return false
+    if not _nvfs_arena_is_nvme(idx):
+        return false
+    val base = _nvfs_arena_base_blocks[idx as i32]
+    if base < 0:
+        return false
+    val sector_size = _nvfs_arena_sector_size()
+    var hdr = alloc_zeroed_bytes(sector_size)
+    hdr[0] = 78
+    hdr[1] = 86
+    hdr[2] = 70
+    hdr[3] = 49
+    val total = meta.total_bytes
+    hdr[4] = (total & 0xFF) as u8
+    hdr[5] = ((total >> 8) & 0xFF) as u8
+    hdr[6] = ((total >> 16) & 0xFF) as u8
+    hdr[7] = ((total >> 24) & 0xFF) as u8
+    hdr[8] = ((total >> 32) & 0xFF) as u8
+    hdr[9] = ((total >> 40) & 0xFF) as u8
+    hdr[10] = ((total >> 48) & 0xFF) as u8
+    hdr[11] = ((total >> 56) & 0xFF) as u8
+    nvfs_raw_write_sector(base as u64, hdr)
+
+# Recover a durably-committed arena length from the device header sector.
+# Returns -1 when the header carries no valid magic (nothing was fsync'd yet).
+fn arena_durable_len_impl(base_block: i64) -> i64:
+    if base_block < 0:
+        return -1
+    val sec = nvfs_raw_read_sector(base_block as u64)
+    if (sec.len() as i64) < 12:
+        return -1
+    if sec[0].to_i64() != 78 or sec[1].to_i64() != 86 or sec[2].to_i64() != 70 or sec[3].to_i64() != 49:
+        return -1
+    var v: i64 = 0
+    v = v | (sec[4].to_i64() << 0)
+    v = v | (sec[5].to_i64() << 8)
+    v = v | (sec[6].to_i64() << 16)
+    v = v | (sec[7].to_i64() << 24)
+    v = v | (sec[8].to_i64() << 32)
+    v = v | (sec[9].to_i64() << 40)
+    v = v | (sec[10].to_i64() << 48)
+    v = v | (sec[11].to_i64() << 56)
+    v

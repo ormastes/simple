@@ -51,9 +51,46 @@ yet provable**. Two tracked blockers:
    `build/os/clang_static/bin/clang_static` (a static clang that runs **on**
    SimpleOS, not the host cross-compiler above) plus
    `build/os/.bake_include_toolchain`. `--status` gate =
-   `guest-toolchain-exec-gate BLOCKED`.
+   `guest-toolchain-exec-gate BLOCKED`. **On desktop SimpleOS this static path
+   is DEPRECATED — see the launch-policy section below.**
 
 Full detail & remaining steps: `doc/08_tracking/bug/simpleos_in_guest_toolchain_execution.md`.
 SSH live-guest harness (gated): `test/03_system/os/simpleos_guest_toolchain_live_spec.spl`
 (needs `SIMPLEOS_QEMU_SSH_TOOLCHAIN_LIVE=1`, `sshpass`, and a baked
 `build/os/simpleos_disk.img`).
+
+## Desktop SimpleOS launch policy — static `clang_static` is DEPRECATED
+
+On **desktop SimpleOS**, the guest-native `clang_static` workaround
+(`src/os/port/llvm/clang_static.shs` re-linking the cross objects into one
+self-contained static ELF, gated by `guest_toolchain_execution_gate_detail` on
+`build/os/clang_static/bin/clang_static` + `build/os/.bake_include_toolchain`)
+is **deprecated**. It stands in for a real loader — bake one special binary
+instead of launching an ordinary ELF **from the filesystem**. That is not how a
+general OS runs programs.
+
+**Proper model (general OS filesystem launch).** The toolchain is an ordinary
+statically-linked `x86_64-unknown-simpleos` ELF — exactly what the cross
+compiler already produces (see *Build + link hello world* above). It is:
+
+- **Placed at a proper filesystem location** — canonical `/usr/bin/clang`,
+  resolved by the guest shell `PATH` (`/usr/bin:/sys/apps`, see
+  `src/os/apps/shell/path_search.spl`) — **not** a `*.SMF` alias baked into the
+  app-registry allowlist; **or**
+- **Pointed to by an env path** — host-side `SIMPLEOS_TOOLCHAIN_DIR` tells the
+  disk bake where to stage the toolchain tree, so the on-disk location is not
+  hardcoded.
+
+…and **launched via the general filesystem-exec loader** (the ring-3 FS-exec
+track, `FR-SOS-020+` in
+`doc/02_requirements/os/simpleos/simpleos_os_subsystem_feature_requests.md`):
+shell resolves the path → reads the on-disk ELF → maps PT_LOAD segments → enters
+ring-3. No static-relink step, no registry allowlist, no GOT special-casing.
+
+The `.got`/`.got.plt` placement in `share/simpleos/simpleos.ld` **stays** — that
+is correct static-ELF linking, orthogonal to this deprecation.
+
+**Migration.** New work targets the FS-exec loader + `/usr/bin/clang` location.
+`clang_static.shs` and the static `guest_toolchain_execution_gate` requirement
+remain only as a legacy fallback until the FS-exec lane proves an ordinary
+on-disk toolchain ELF runs in ring-3, then are removed from the desktop lane.

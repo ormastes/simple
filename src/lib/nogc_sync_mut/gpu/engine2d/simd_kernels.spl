@@ -79,11 +79,11 @@ extern fn rt_simd_has_rvv() -> bool
 # Native SIMD pixel-row kernels (NEON on aarch64 / SSE2 on x86_64)
 #
 # These are the genuine vectorized span kernels: the Rust runtime executes
-# `vdupq_n_u32`/`vst1q_u32` (fill) and `vld1q_u32`/`vst1q_u32` (copy) over a
+# `vdupq_n_u32`/`vst1q_u32` on aarch64 and SSE2 stores/loads on x86_64 over a
 # packed pixel buffer. Output is bit-identical to the scalar reference. The
-# neon-hit counter only increments when a real SIMD (not scalar-fallback)
-# chunk runs, so the evidence layer can prove NEON actually executed instead
-# of trusting a scalar path that merely reports `has_neon`.
+# historical neon-hit counter now counts native row chunks on both NEON and x86
+# SSE2, so the evidence layer can prove real SIMD executed instead of trusting
+# a scalar path that merely reports a feature bit.
 #
 # Implementation: src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs;
 # interpreter dispatch: compiler/src/interpreter_extern/simd.rs.
@@ -111,13 +111,13 @@ fn engine2d_simd_has_neon() -> bool:
 fn engine2d_simd_has_rvv() -> bool:
     rt_simd_has_rvv()
 
-fn engine2d_simd_fill_row_u32(count: i64, color: u32) -> [u32]:
+pub fn engine2d_simd_fill_row_u32(count: i64, color: u32) -> [u32]:
     rt_engine2d_simd_fill_row_u32(count, color)
 
-fn engine2d_simd_copy_row_u32(src: [u32]) -> [u32]:
+pub fn engine2d_simd_copy_row_u32(src: [u32]) -> [u32]:
     rt_engine2d_simd_copy_row_u32(src)
 
-fn engine2d_simd_blend_row_u32(dst_row: [u32], src_row: [u32]) -> [u32]:
+pub fn engine2d_simd_blend_row_u32(dst_row: [u32], src_row: [u32]) -> [u32]:
     rt_engine2d_simd_blend_row_u32(dst_row, src_row)
 
 fn engine2d_simd_neon_hits() -> i64:
@@ -203,12 +203,20 @@ fn native_simd_pixel_evidence() -> NativeSimdPixelEvidence:
     hit counter advanced); a scalar host leaves it false. `bit_exact` compares
     the native output against an independent scalar reference computed here.
     """
+    val level = detect_simd_level()
+    if level != SimdLevel.Neon and level != SimdLevel.Avx2 and level != SimdLevel.Sse42:
+        return NativeSimdPixelEvidence(
+            executed: false,
+            bit_exact: true,
+            hits: 0,
+            fill_checksum: 0
+        )
     engine2d_simd_neon_reset()
     val count: i64 = 64
     val color: u32 = 0xFF8040C0
     val native_fill = engine2d_simd_fill_row_u32(count, color)
 
-    var ref_fill: [u32] = [0u32; 64]
+    var ref_fill: [u32] = [0; 64]
     var i: i64 = 0
     while i < count:
         ref_fill[i.to_i32()] = color
@@ -255,7 +263,7 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
     val feature = level.feature_text()
     val before = simd_hit_counts()
 
-    var pixels: [u32] = [0u32; 16]
+    var pixels: [u32] = [0; 16]
     var copy_src: [u32] = [0xFF112233; 16]
     var alpha_src: [u32] = [0x804488CC; 16]
     fill_span(pixels, 0, 16, 0xFF102030)
@@ -275,6 +283,8 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
     val native = native_simd_pixel_evidence()
     val reason = if feature == "scalar":
         "runtime reported scalar fallback; SIMD feature unavailable"
+    else if feature == "rvv":
+        "runtime reported rvv; CPU-SIMD provider uses exact scalar-compatible rows until RVV row kernels are implemented"
     else if native.executed and native.bit_exact:
         "native SIMD kernels executed (hits={native.hits}) and matched scalar bit-for-bit"
     else if native.executed:
@@ -303,11 +313,14 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
 # ============================================================================
 # Native-SIMD routing gate
 #
-# When the host has real SIMD (NEON on aarch64), the hot fill/blend rows route
+# When the host has real SIMD (aarch64 NEON or x86 SSE2/AVX2-capable runtime),
+# the hot fill/blend rows route
 # through the C-backed `rt_engine2d_simd_*_row_u32` kernels (runtime_simd_dispatch.c,
-# NEON/AVX2/scalar) so the live CPU-SIMD render path genuinely executes vector
-# code rather than a scalar loop. Output is bit-identical to the scalar path
-# (the C blend uses the same truncating /255 floor; verified exhaustively).
+# NEON/AVX2/scalar today) so the live CPU-SIMD render path uses the native row
+# ABI only where the row ABI is proven safe. Output is bit-identical to the
+# scalar path (the C blend uses the same truncating /255 floor; verified
+# exhaustively). RVV remains scalar-correct through the same provider surface
+# until a native RVV row implementation exists.
 #
 # Interpreter note: a `[u32]` framebuffer is a boxed array here, so the native
 # row is built/blended with NEON and then copied into the framebuffer element-
@@ -316,15 +329,16 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
 # packed i64 and the same kernels run over it. (blit/scroll stay pure-Simple
 # scalar: they are in-place sub-range copies that a return-style row kernel
 # can't express without extra marshalling, and they were never Rust-backed.)
-var _neon_rows_cached: bool = false
-var _neon_rows_detected: bool = false
+var _native_rows_cached: bool = false
+var _native_rows_detected: bool = false
 
-fn _neon_pixel_rows_enabled() -> bool:
-    if _neon_rows_detected:
-        return _neon_rows_cached
-    _neon_rows_cached = detect_simd_level() == SimdLevel.Neon
-    _neon_rows_detected = true
-    _neon_rows_cached
+pub fn native_pixel_rows_enabled() -> bool:
+    if _native_rows_detected:
+        return _native_rows_cached
+    val level = detect_simd_level()
+    _native_rows_cached = level == SimdLevel.Neon or level == SimdLevel.Avx2 or level == SimdLevel.Sse42
+    _native_rows_detected = true
+    _native_rows_cached
 
 # ============================================================================
 # Fill Row — write solid color across a pixel row
@@ -333,8 +347,9 @@ fn _neon_pixel_rows_enabled() -> bool:
 pub fn simd_fill_row(mut buf: any, offset: i64, count: i64, color: u32):
     if count <= 0:
         return
-    if _neon_pixel_rows_enabled():
-        # Genuine NEON (C kernel): vdupq + vst1q build the row in the runtime.
+    if native_pixel_rows_enabled():
+        # Native row ABI: x86/aarch64 use vector kernels where the runtime has them;
+        # riscv64 keeps scalar-correct output until RVV is implemented below it.
         val row = engine2d_simd_fill_row_u32(count, color)
         var j: i64 = 0
         while j < count:
@@ -357,12 +372,12 @@ pub fn _scalar_fill_row(mut buf: any, offset: i64, count: i64, color: u32):
 pub fn simd_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
     if count <= 0:
         return
-    if _neon_pixel_rows_enabled():
-        # Gather aligned dst/src rows, src-over blend via the C NEON kernel,
+    if native_pixel_rows_enabled():
+        # Gather aligned dst/src rows, src-over blend via the native row kernel,
         # scatter back. Bit-identical to _scalar_blend_row (same floor /255).
         val n = count.to_i32()
-        var dst_row: [u32] = [0u32; n]
-        var src_row: [u32] = [0u32; n]
+        var dst_row: [u32] = [0; n]
+        var src_row: [u32] = [0; n]
         var j: i64 = 0
         while j < count:
             val idx = (offset + j).to_i32()

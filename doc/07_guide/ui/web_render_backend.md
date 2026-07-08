@@ -96,7 +96,9 @@ the existing backend primitives, instead of collapsing each box to one flat
 `doc/08_tracking/bug/engine2d_draw_ir_image_path_no_resolver_2026-07-06.md`).
 Honest backend caveats a comparison must respect: Vulkan `line`/`circle_outline`/
 `rounded_rect` are empty-shader no-ops, Metal `clip` is a no-op, and `cpu_simd`
-is an alias of `cpu` (no live SIMD). Coverage plan +
+is the SIMD-instrumented CPU lane with native x86 row evidence, exact
+scalar-compatible RVV rows, and
+native-row proof required where enabled. Coverage plan +
 baseline: `doc/03_plan/ui/testing/gpu_draw_event_intensive_tests.md`.
 
 For GUI/web/2D Vulkan verification on macOS, run the stronger comparison through

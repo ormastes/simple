@@ -20,10 +20,11 @@ use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use driver_types.{CompileResult, CompileOptions, compileoptions_effective_mir_opt_level, CompileContext}
 use compiler.common.driver_core_types.{driver_output_format_is_smf, driver_output_format_is_both, driver_output_format_is_self_contained}
 use compiler.driver.driver.{CompilerDriver}
+use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name}
 use compiler.common.config.{Logger}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind}
 use compiler.mir.mir_data.{MirModule}
-use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint}
+use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_scope_key}
 use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -77,6 +78,28 @@ fn driver_native_build_cache_dir() -> text:
 
 fn driver_native_build_cache_path(cache_dir: text) -> text:
     rt_path_join(cache_dir, "build_cache.sdn")
+
+fn driver_native_build_cache_scope(backend: text, cache_dir: text, target_cpu: text, opt_level: i64) -> (text, text):
+    val raw_target = if target_cpu == "": nil else: Some(target_cpu)
+    val scope = native_build_cache_scope_key(Some(backend), raw_target, [], opt_level as i32)
+    val cache_scope_root = rt_path_join(cache_dir, scope)
+    (cache_scope_root, scope)
+
+fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> text:
+    for source in ctx.sources:
+        if source.module_name == module_name:
+            return source.path
+    ""
+
+fn driver_native_build_filter_scoped_outputs(cached_outputs: [text], cache_scope_root: text) -> ([text], bool):
+    var scoped_outputs: [text] = []
+    var all_in_scope = true
+    for obj in cached_outputs:
+        if obj.starts_with(cache_scope_root + "/"):
+            scoped_outputs = scoped_outputs.push(obj)
+        else:
+            all_in_scope = false
+    (scoped_outputs, all_in_scope)
 
 fn native_pre_parse_skip_diagnostic(path: text, reason: text) -> text:
     if reason == "":
@@ -140,7 +163,8 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
     if trace:
         print "[NATIVE] bootstrap direct effective_backend={effective_backend}"
 
-    val direct_result = _compile_one_module(ctx, backend_name, is_release, driver_opt_level, output, "app.cli.bootstrap_main")
+    val entry_module_name = bootstrap_entry_module_name(ctx)
+    val direct_result = _compile_one_module(ctx, backend_name, is_release, driver_opt_level, output, entry_module_name)
     match direct_result:
         case Ok(obj_path):
             if effective_backend == "llvm" or effective_backend == "llvm-lib":
@@ -188,8 +212,11 @@ impl CompilerDriver:
         # Load build cache
         val cache_dir = driver_native_build_cache_dir()
         rt_dir_create(cache_dir, true)
+        val native_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+        val (cache_scope_root, _) = driver_native_build_cache_scope(effective_backend, cache_dir, native_target, driver_opt_level)
+        rt_dir_create(cache_scope_root, true)
         val cache_path = driver_native_build_cache_path(cache_dir)
-        val object_base = rt_path_join(cache_dir, "object")
+        val object_base = rt_path_join(cache_scope_root, "object")
         var build_cache: BuildCache = BuildCache.load(cache_path)
         var cache_hit_count: i64 = 0
         var cache_miss_count: i64 = 0
@@ -219,23 +246,23 @@ impl CompilerDriver:
         # Phase 1: Check cache, collect cached objects, identify uncached modules
         var uncached_names: [text] = []
         for name in module_names:
-            val cached_entry = build_cache.get_entry(name)
+            val cache_source = driver_native_module_cache_source(ctx, name)
             var used_cache = false
-            if cached_entry.?:
-                val entry = cached_entry.unwrap()
-                if entry.outputs.len() > 0:
-                    var all_exist = true
-                    for out in entry.outputs:
-                        if not rt_file_exists(out):
-                            all_exist = false
-                    if all_exist:
+            if cache_source != "":
+                val cached_outputs = build_cache.get_cached_outputs(cache_source)
+                if cached_outputs.?:
+                    val all_outputs = cached_outputs.unwrap()
+                    val (scoped_outputs, all_in_scope) = driver_native_build_filter_scoped_outputs(all_outputs, cache_scope_root)
+                    if all_in_scope and scoped_outputs.len() > 0:
                         print "[NATIVE] cache hit: {name}"
                         cache_hit_count = cache_hit_count + 1
-                        for obj in entry.outputs:
+                        for obj in scoped_outputs:
                             object_files = object_files.push(obj)
                         if low_memory:
                             ctx.evict_mir_module(name)
                         used_cache = true
+                    elif not all_in_scope:
+                        build_cache.remove_entry(cache_source)
             if not used_cache:
                 uncached_names = uncached_names.push(name)
 
@@ -286,7 +313,11 @@ impl CompilerDriver:
                     var mod_name = obj_path
                     if obj_path.starts_with(prefix):
                         mod_name = obj_path[prefix.len():obj_path.len() - 2]
-                    build_cache.update_entry(mod_name, obj_fp.unwrap(), [], [obj_path])
+                    val cache_source = driver_native_module_cache_source(ctx, mod_name)
+                    if cache_source != "":
+                        val source_fp = FileFingerprint.from_file(cache_source)
+                        if source_fp.?:
+                            build_cache.update_entry(cache_source, source_fp.unwrap(), [], [obj_path])
 
             # Evict MIR for compiled modules in low-memory mode
             if low_memory:
@@ -317,9 +348,9 @@ impl CompilerDriver:
             else:
                 var args: [text] = ["-r"]
                 for obj in object_files:
-                    args.push(obj)
-                args.push("-o")
-                args.push(output)
+                    args = args.push(obj)
+                args = args.push("-o")
+                args = args.push(output)
                 val (_stdout, stderr, code) = rt_process_run("ld.lld", args)
                 if code != 0:
                     return CompileResult.CodegenError("emit-object relocatable link failed: {stderr}")
@@ -682,7 +713,7 @@ fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, opt_level
     if trace:
         print "[NATIVE] compiling module: {name}"
         print "[NATIVE] select module:start"
-    if name == "app.cli.bootstrap_main":
+    if name == bootstrap_entry_module_name(ctx):
         if trace:
             print "[NATIVE] select module:bootstrap check"
         if ctx.bootstrap_entry_mir.?:

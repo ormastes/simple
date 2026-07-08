@@ -112,6 +112,68 @@ Operational hazards confirmed while diagnosing (all can kill a 2h stage-4 run):
 - Un-instrumented runs die silently (no RC, no signal in logs). Mandate: every
   stage-4 run wraps in `sh -c '...; echo RC=$?'` with stderr preserved.
 
+### 2026-07-07 (evening) — EMPIRICAL: parser wall fixed, but stage2 self-host still fails
+
+Two facts were proven this session, both by running to completion instead of guessing:
+
+1. **The parser recursion wall (RC=134) is FIXED.** A fresh seed built with the
+   `MAX_PARSE_RECURSION_DEPTH=512` guard ran the full stage4 build for **6h with
+   no stack overflow** — the SIGABRT is gone. The guard works.
+2. **But the seed-interpreted stage4 path is PERF-DEAD.** That same 6h run
+   (`--timeout 21600`, `--threads 8`) **timed out before emitting a binary**. The
+   interpreted worker cannot compile the whole compiler in 6h. Conclusion:
+   redeploy is impossible via the seed; it REQUIRES stage2→stage3 self-host to
+   succeed (so stage4 is built by a *compiled* pure-Simple compiler, not the seed).
+
+**Stage2 self-host does NOT pass on `main` (tip `14a35ab`).** The latest stage2
+log (`build/bootstrap/logs/x86_64-.../stage2-native-build.log`, 07-07 05:35)
+lowers `bootstrap_main.spl` fine (`bootstrap-functions:count 6`) then lowers
+**two more modules with `functions:count 0`** → empty LLVM IR → `llc failed
+during bootstrap` → worker exit 1. Stage3 log is 0 bytes (never ran); stage4
+fell back to the seed. This is the "empty MIR bodies" bug
+(`doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md`) — still
+open despite the `speed up pure Simple bootstrap` / `link bootstrap stage2 from
+fresh MIR` commits.
+
+**A parallel lane is actively fixing this.** The main WC has 27 uncommitted files
+(`driver_bootstrap.spl`, `driver_aot_output.spl`, `_MirToLlvm/*`, mir_opt, +3 new
+specs `bootstrap_decl_count_slot_spec` / `bootstrap_context_mir_source_spec` /
+`bootstrap_llvm_entry_symbol_source_spec`) — exactly the empty-MIR/decl-count
+path. Do NOT edit those files in the main WC (collision). Next action is decided
+by whether that in-progress diff fixes stage2 (validate in an isolated worktree
+with a cheap stage2-only repro) — NOT by re-running the seed build, which only
+reconfirms the 6h timeout.
+
+### 2026-07-07 (evening, cont.) — FRONTIER MOVED: stage2 fixed, stage3 SIGSEGV
+
+Validated the lane's in-progress fix by running a full pure-Simple bootstrap on a
+**frozen snapshot** (isolated worktree @ `14a35ab` + symlinked seed + rsynced the
+20 changed `src/**.spl` files). Result in ~76s (monitor killed the seed-fallback):
+
+- **Stage 2 PASSES** ✅ — seed → `bootstrap_main.spl` now compiles + links a real
+  20 KB stage2 binary (`llc-done`, `llc-object`). The string-globals fix cleared
+  the `@.str.0` wall for real.
+- **Stage 3 self-host SIGSEGVs** ❌ (exit 139) → falls back to seed for stage 4.
+  Crash symbolized on the stage2 binary: `SIGSEGV at address (nil)` in
+  **`__simple_main`** (frame `0x202024`, = `__simple_main`+0x34; the other frame
+  `0x202214` is just `_spl_crash_handler`). The stage2 binary null-derefs at entry
+  on ANY invocation, incl. `--version`.
+
+**Root of the stage3 crash = the lane's mid-edit `main`→`__simple_main` rename.**
+Their uncommitted `_MirToLlvm/core_codegen.spl` adds
+`val fn_name = if fn_.name == "main": "__simple_main" else: fn_.name` to the
+**bootstrap** codegen path. `__simple_main` normally runs only after the C `main`
+wrapper (`backend/entry_point.spl`) calls `spl_init_args`; the bootstrap-path
+rename produces a `__simple_main` whose arg-init/C-main wiring is not yet complete,
+so it derefs a nil args global at entry. This is incomplete-fix churn, not a
+permanent wall — do NOT fix it here (collision with the active lane).
+
+**Disposition:** redeploy is gated on the lane finishing the `__simple_main`
+entry wiring and committing. Re-validation is armed: rerun
+`scratchpad/frozen_bootstrap.sh` (reuses the worktree, re-copies the latest
+`.spl`, ~90s to the stage2/stage3 frontier). When stage3 stops SIGSEGVing, the
+same script builds stage4 + gates it; deploy then needs backup + user go-ahead.
+
 ### Execution plan (2026-07-07, per user directive)
 
 1. **Docs first** (this update + the design doc) — DONE with this commit.

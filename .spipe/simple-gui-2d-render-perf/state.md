@@ -55,6 +55,18 @@ implementation-evidence-in-progress
   WebGPU JS/WASM Simple 106/106, interpreter perf 10/10, and GTK repeat evidence
   with Simple open 243 us, GTK open 77948 us, Simple frame 1 us, GTK frame
   28 us, vector checksum 212444 deterministic true.
+- implementation: Hardened the Engine2D CPU-SIMD row path for explicit x86,
+  aarch64, and riscv64 probes. The software backend now routes clear, opaque
+  fills, text run fills, image row copies, and alpha hlines through local row
+  helpers that preserve `self.buf` mutation while using the native row ABI only
+  where it is proven safe. x86 now proves native row execution; RVV remains
+  exact scalar-compatible until a native RVV row kernel exists.
+- verification: `sh scripts/check/check-cpu-simd-engine2d-evidence.shs` passed
+  on x86_64 with `feature=avx2`, `cpu_simd_x86_status=Initialized`, fill/copy/
+  alpha/scroll mismatch counts all `0`, diagram mismatch count `0`, and
+  `blur_or_tolerance_used=false`. The wrapper now keeps `bin/simple` as the
+  default invocation path because direct `release/.../simple` segfaults on this
+  evidence despite the same ELF passing when invoked through the repo launcher.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 
@@ -78,7 +90,11 @@ Existing evidence (from GTK repeat evidence): Simple open 243 us vs GTK open 779
 Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 28x at frame.
 
 ## Remaining Work
-- AC-3 is advanced by retained framebuffer/cache, static pixel hot paths, and retained static-shell primitive command plans; broader fill/copy/blit/text optimization across dynamic GUI scenes still needs implementation and evidence.
+- AC-3 is advanced by retained framebuffer/cache, static pixel hot paths,
+  retained static-shell primitive command plans, and the CPU-SIMD row helper
+  path for fill/copy/alpha/text/image spans. Broader dynamic GUI scene
+  optimization and native RVV row enablement still need implementation and
+  evidence.
 - AC-6 now has focused vector-font unavailable fallback evidence in the repeat script and tracked report; additional GPU/native unavailable combinations can extend the same probe pattern.
 - Native Simple executable size/speed evidence is intentionally skipped in the fast smoke run (`SKIP_SIMPLE_NATIVE=1`); a release-grade run should capture native artifact bytes or record an explicit native-build blocker.
 - Wire unwired probes into contract: warm_startup, frame_time_p50/p95, input_to_paint.

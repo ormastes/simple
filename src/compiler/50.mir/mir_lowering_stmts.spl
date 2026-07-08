@@ -13,6 +13,11 @@ use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 
+fn mir_stmt_symbol_id_value(symbol: SymbolId) -> i64:
+    match symbol:
+        case SymbolId(id): id
+        case _: -1
+
 fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:
     match k:
         case HirStmtKind.Expr(_):
@@ -74,7 +79,8 @@ impl MirLowering:
 
                     if let_symbol.?:
                         val symbol_value = let_symbol ?? SymbolId(id: -1)
-                        if symbol_value == nil:
+                        val symbol_value_id = mir_stmt_symbol_id_value(symbol_value)
+                        if symbol_value_id < 0:
                             self.error("let binding has no resolved symbol", Some(span))
                             return
                         val mir_type = match let_type:
@@ -86,12 +92,12 @@ impl MirLowering:
                         val init_local = self.lower_expr(let_init)
                         val bf_sym = self.bitfield_value_syms.get(init_local.id)
                         if bf_sym != nil:
-                            self.local_map[symbol_value.id] = init_local
+                            self.local_map[symbol_value_id] = init_local
                         else:
                             var b = self.builder
                             val local = b.new_local(nil, mir_type, LocalKind.Var)
                             self.builder = b
-                            self.local_map[symbol_value.id] = local
+                            self.local_map[symbol_value_id] = local
                             var b2 = self.builder
                             b2.emit_copy(local, init_local)
                             self.builder = b2
@@ -104,7 +110,8 @@ impl MirLowering:
                         self.lower_expr(expr)
 
                     case Let(symbol, type_, init):
-                        if symbol == nil:
+                        val symbol_id = mir_stmt_symbol_id_value(symbol)
+                        if symbol_id < 0:
                             self.error("let binding has no resolved symbol", Some(span))
                             return
                         # NOTE: avoid Option.map()/.unwrap() and `if val ...`
@@ -141,12 +148,12 @@ impl MirLowering:
                         else:
                             nil
                         if bf_sym != nil:
-                            self.local_map[symbol.id] = init_local
+                            self.local_map[symbol_id] = init_local
                         else:
                             var b = self.builder
                             val local = b.new_local(nil, mir_type, LocalKind.Var)
                             self.builder = b
-                            self.local_map[symbol.id] = local
+                            self.local_map[symbol_id] = local
                             if has_init:
                                 var b2 = self.builder
                                 b2.emit_copy(local, init_local)
@@ -169,10 +176,11 @@ impl MirLowering:
         """Lower assignment."""
         match target.kind:
             case Var(symbol):
-                if symbol == nil:
+                val symbol_id = mir_stmt_symbol_id_value(symbol)
+                if symbol_id < 0:
                     self.error("assignment target has no resolved symbol", Some(target.span))
-                elif self.local_map.has(symbol.id):
-                    val local = self.local_map[symbol.id]
+                elif self.local_map.has(symbol_id):
+                    val local = self.local_map[symbol_id]
                     if val assign_op = op:
                         # Compound assignment
                         val current = mir_operand_copy(local)
@@ -591,7 +599,11 @@ impl MirLowering:
         self.builder = b_init
 
         # Bind loop variable to the counter
-        self.local_map[var_.id] = counter
+        val range_var_id = mir_stmt_symbol_id_value(var_)
+        if range_var_id < 0:
+            self.error("for range loop variable has no resolved symbol", Some(body.span))
+        else:
+            self.local_map[range_var_id] = counter
 
         # Create loop blocks
         var b_blocks = self.builder
@@ -743,7 +755,11 @@ impl MirLowering:
         val loop_var = b7.new_local(nil, element_type, LocalKind.Var)
         b7.emit_copy(loop_var, next_local)
         self.builder = b7
-        self.local_map[var_.id] = loop_var
+        val loop_var_id = mir_stmt_symbol_id_value(var_)
+        if loop_var_id < 0:
+            self.error("for loop variable has no resolved symbol", Some(body.span))
+        else:
+            self.local_map[loop_var_id] = loop_var
 
         # Lower the loop body
         self.lower_block(body)

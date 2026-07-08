@@ -68,6 +68,7 @@ impl MirLowering:
     fn symbol_id_value(symbol: SymbolId) -> i64:
         match symbol:
             case SymbolId(id): id
+            case _: -1
 
     fn hir_bitfield_fields(bitfield_def: HirBitfield) -> [HirBitfieldField]:
         match bitfield_def:
@@ -75,8 +76,39 @@ impl MirLowering:
                 fields
 
     fn hir_module_function(module: HirModule, symbol: SymbolId) -> HirFunction:
+        val target_id = self.symbol_id_value(symbol)
+        if target_id < 0:
+            return HirFunction(
+                symbol: symbol,
+                name: "",
+                type_params: [],
+                params: [],
+                return_type: HirType(kind: HirTypeKind.Int(64, true), span: Span.empty()),
+                body: HirBlock(stmts: [], has: false, value: nil, span: Span.empty()),
+                effects: [],
+                visibility: Visibility.Private,
+                is_async: false,
+                is_static: false,
+                is_public: false,
+                is_method: false,
+                is_mutable: false,
+                is_const: false,
+                is_extern: true,
+                func_attr: nil,
+                has_export_attr: false,
+                export_attr: nil,
+                has_driver_manifest_attr: false,
+                driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0, device_ids: [], version: "", abi: ""),
+                has_suspension: false,
+                has_vhdl_metadata: false,
+                vhdl_metadata: vhdl_hardware_metadata_default(),
+                has_doc_comment: false,
+                doc_comment: "",
+                span: Span.empty()
+            )
         for fn_ in module.functions.values():
-            if fn_.symbol.id == symbol.id:
+            val fn_id = self.symbol_id_value(fn_.symbol)
+            if fn_id == target_id:
                 return fn_
         HirFunction(
             symbol: symbol,
@@ -236,26 +268,16 @@ impl MirLowering:
         if bootstrap_mode:
             if bootstrap_trace:
                 print "[mir-lower] fn-list:start"
-            _bootstrap_mir_functions = []
-            _bootstrap_mir_function_names = []
-            val bootstrap_function_count = 6
+            bootstrap_mir_functions_reset()
+            val bootstrap_function_keys = module.functions.keys()
+            val bootstrap_function_count = bootstrap_function_keys.len()
             if bootstrap_trace:
                 print "[mir-lower] functions:count {bootstrap_function_count}"
             var bootstrap_fni = 0
             while bootstrap_fni < bootstrap_function_count:
                 if bootstrap_trace:
                     print "[mir-lower] function-index {bootstrap_fni}"
-                var fn_sym = SymbolId(id: 1)
-                if bootstrap_fni == 1:
-                    fn_sym = SymbolId(id: 2)
-                if bootstrap_fni == 2:
-                    fn_sym = SymbolId(id: 3)
-                if bootstrap_fni == 3:
-                    fn_sym = SymbolId(id: 4)
-                if bootstrap_fni == 4:
-                    fn_sym = SymbolId(id: 5)
-                if bootstrap_fni == 5:
-                    fn_sym = SymbolId(id: 6)
+                val fn_sym = bootstrap_function_keys[bootstrap_fni]
                 if bootstrap_trace:
                     print "[mir-lower] function-symbol"
                 val fn_ = self.hir_module_function(module, fn_sym)
@@ -264,9 +286,8 @@ impl MirLowering:
                 if not self.hir_function_is_extern(fn_):
                     if bootstrap_trace:
                         print "[mir-lower] function:start {fn_.name}"
-                    _bootstrap_mir_function_names.push(fn_.name)
                     val mir_fn = self.lower_function(fn_)
-                    _bootstrap_mir_functions.push(mir_fn)
+                    bootstrap_mir_functions_add(fn_.name, mir_fn)
                     var bldr = self.builder
                     var bldr_module = bldr.module
                     var functions = bldr_module.functions

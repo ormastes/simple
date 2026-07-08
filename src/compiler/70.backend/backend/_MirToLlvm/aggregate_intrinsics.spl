@@ -26,11 +26,13 @@ impl MirToLlvm:
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val base_val = self.translate_operand(base)
+        val base_ptr = self.value_as_type(base_val, self.get_operand_type(base), "ptr")
         var index_vals: [text] = []
         for idx in indices:
             index_vals = index_vals.push(self.translate_operand(idx))
         val base_ty = self.valid_llvm_type(self.get_operand_type(base))
-        self.builder.emit_gep(dest_name, base_ty, base_val, index_vals)
+        self.mark_ptr_local(dest_id)
+        self.builder.emit_gep(dest_name, base_ty, base_ptr, index_vals)
 
     # === Overrides: aggregates ===
 
@@ -41,8 +43,9 @@ impl MirToLlvm:
         val agg_ptr = self.builder.fresh_local()
         self.builder.emit_alloca(agg_ptr, agg_ty)
         for i in 0..operands.len():
-            val elem_val = self.translate_operand(operands[i])
+            val raw_elem_val = self.translate_operand(operands[i])
             val elem_ty = self.valid_llvm_type(self.get_operand_type(operands[i]))
+            val elem_val = self.value_as_type(raw_elem_val, self.get_operand_type(operands[i]), elem_ty)
             val elem_ptr = self.builder.fresh_local()
             self.builder.emit("  {elem_ptr} = getelementptr inbounds {agg_ty}, ptr {agg_ptr}, i32 0, i32 {i}")
             self.builder.emit_store(elem_ty, elem_val, elem_ptr)
@@ -51,16 +54,19 @@ impl MirToLlvm:
     me translate_get_field(dest: LocalId, base: MirOperand, field: i64):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
-        val base_val = self.translate_operand(base)
+        val raw_base_val = self.translate_operand(base)
+        val base_val = self.value_as_type(raw_base_val, self.get_operand_type(base), "ptr")
         val nit = self.native_int()
         val field_ptr = self.builder.fresh_local()
         self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
         self.builder.emit_load(dest_name, nit, field_ptr)
 
     me translate_set_field(base: MirOperand, field: i64, value: MirOperand):
-        val base_val = self.translate_operand(base)
-        val value_val = self.translate_operand(value)
+        val raw_base_val = self.translate_operand(base)
+        val base_val = self.value_as_type(raw_base_val, self.get_operand_type(base), "ptr")
+        val raw_value_val = self.translate_operand(value)
         val nit = self.native_int()
+        val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), nit)
         val field_ptr = self.builder.fresh_local()
         self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
         self.builder.emit_store(nit, value_val, field_ptr)
@@ -116,16 +122,19 @@ impl MirToLlvm:
         val dest_name: text? = match dest:
             case Some(dest_local): Some(self.get_local(self.local_id_value(dest_local)))
             case nil: nil
-        val ptr_val = self.translate_operand(ptr)
+        val raw_ptr_val = self.translate_operand(ptr)
+        val ptr_val = self.value_as_type(raw_ptr_val, self.get_operand_type(ptr), "ptr")
         var arg_vals: [text] = []
         var arg_i = 0
         for arg in args:
             var arg_ty = self.valid_llvm_type(self.get_operand_type(arg))
+            var arg_val = self.translate_operand(arg)
             if arg_i < sig.params.len():
                 val param_ty = sig.params[arg_i]
                 if param_ty != nil:
                     arg_ty = self.valid_llvm_type(self.llvm_type_text(param_ty))
-            arg_vals = arg_vals.push("{arg_ty} {self.translate_operand(arg)}")
+            arg_val = self.value_as_type(arg_val, self.get_operand_type(arg), arg_ty)
+            arg_vals = arg_vals.push("{arg_ty} {arg_val}")
             arg_i = arg_i + 1
         val ret_ty = match dest:
             case Some(dest_local): self.valid_llvm_type(self.get_local_type(self.local_id_value(dest_local)))
@@ -158,9 +167,15 @@ impl MirToLlvm:
                             Some(else_id):
                                 val dest_id = self.local_id_value(dest_local)
                                 val dest_name = self.get_local(dest_id)
-                                val phi_ty = self.valid_llvm_type(self.get_local_type(dest_id))
-                                val then_val = self.translate_operand(args[1])
-                                val else_val = self.translate_operand(args[3])
+                                val then_ty = self.valid_llvm_type(self.get_operand_type(args[1]))
+                                val else_ty = self.valid_llvm_type(self.get_operand_type(args[3]))
+                                val phi_ty = if then_ty == "ptr" or else_ty == "ptr": "ptr" else: self.valid_llvm_type(self.get_local_type(dest_id))
+                                if phi_ty == "ptr":
+                                    self.mark_ptr_local(dest_id)
+                                val then_raw = self.translate_operand(args[1])
+                                val else_raw = self.translate_operand(args[3])
+                                val then_val = self.value_as_type(then_raw, then_ty, phi_ty)
+                                val else_val = self.value_as_type(else_raw, else_ty, phi_ty)
                                 self.builder.emit("  {dest_name} = phi {phi_ty} [ {then_val}, %bb{then_id} ], [ {else_val}, %bb{else_id} ]")
                                 true
                             nil:

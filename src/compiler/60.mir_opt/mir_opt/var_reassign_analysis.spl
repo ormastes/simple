@@ -37,6 +37,11 @@ fn local_count_index(local_ids: [i64], local_id: i64) -> i64:
         i = i + 1
     -1
 
+fn var_reassign_local_id_value(local: LocalId) -> i64:
+    match local:
+        case LocalId(raw_id): raw_id
+        case _: 0
+
 fn local_count_increment(local_ids: [i64], counts: [i64], local_id: i64) -> ([i64], [i64]):
     val idx = local_count_index(local_ids, local_id)
     if idx < 0:
@@ -94,9 +99,9 @@ fn local_alias_reset(keys: [i64], values: [i64], local_id: i64) -> ([i64], [i64]
 fn var_reassign_operand_local(operand: MirOperand) -> i64?:
     match operand.kind:
         case Copy(local):
-            Some(local.id)
+            Some(var_reassign_local_id_value(local))
         case Move(local):
-            Some(local.id)
+            Some(var_reassign_local_id_value(local))
         case Const(_, _):
             nil
 
@@ -119,51 +124,51 @@ fn var_reassign_collect_escape_operand_with_aliases(escaped: [i64], operand: Mir
 fn var_reassign_written_local(inst: MirInst) -> i64?:
     match inst.kind:
         case Const(dest, _, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case Copy(dest, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case Move(dest, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case BinOp(dest, _, _, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case UnaryOp(dest, _, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case CheckedBinOp(dest, _, _, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case Alloc(dest, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case Load(dest, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case GetElementPtr(dest, _, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case Aggregate(dest, _, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case GetField(dest, _, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case Cast(dest, _, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case Bitcast(dest, _, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case Call(dest, _, _):
             if dest.?:
                 val call_dest = dest
-                Some(call_dest.id)
+                Some(var_reassign_local_id_value(call_dest))
             else:
                 nil
         case CallIndirect(dest, _, _, _):
             if dest.?:
                 val indirect_dest = dest
-                Some(indirect_dest.id)
+                Some(var_reassign_local_id_value(indirect_dest))
             else:
                 nil
         case Intrinsic(dest, _, _):
             if dest.?:
                 val intrinsic_dest = dest
-                Some(intrinsic_dest.id)
+                Some(var_reassign_local_id_value(intrinsic_dest))
             else:
                 nil
         case Ref(dest, _, _):
-            Some(dest.id)
+            Some(var_reassign_local_id_value(dest))
         case _:
             nil
 
@@ -243,7 +248,7 @@ fn var_reassign_collect_term_escapes_with_aliases(escaped: [i64], term: MirTermi
             var result = escaped
             if dest.?:
                 val term_dest = dest
-                result = local_list_push_unique(result, local_alias_root(alias_keys, alias_values, term_dest.id))
+                result = local_list_push_unique(result, local_alias_root(alias_keys, alias_values, var_reassign_local_id_value(term_dest)))
             result = var_reassign_collect_escape_operand_with_aliases(result, func, alias_keys, alias_values)
             for arg in args:
                 result = var_reassign_collect_escape_operand_with_aliases(result, arg, alias_keys, alias_values)
@@ -254,11 +259,11 @@ fn var_reassign_collect_term_escapes_with_aliases(escaped: [i64], term: MirTermi
 fn var_reassign_update_aliases_for_inst(inst: MirInst, alias_keys: [i64], alias_values: [i64]) -> ([i64], [i64]):
     match inst.kind:
         case Copy(dest, src):
-            local_alias_set(alias_keys, alias_values, dest.id, local_alias_root(alias_keys, alias_values, src.id))
+            local_alias_set(alias_keys, alias_values, var_reassign_local_id_value(dest), local_alias_root(alias_keys, alias_values, var_reassign_local_id_value(src)))
         case Move(dest, src):
-            local_alias_set(alias_keys, alias_values, dest.id, local_alias_root(alias_keys, alias_values, src.id))
+            local_alias_set(alias_keys, alias_values, var_reassign_local_id_value(dest), local_alias_root(alias_keys, alias_values, var_reassign_local_id_value(src)))
         case Ref(dest, _, place):
-            local_alias_set(alias_keys, alias_values, dest.id, local_alias_root(alias_keys, alias_values, place.local.id))
+            local_alias_set(alias_keys, alias_values, var_reassign_local_id_value(dest), local_alias_root(alias_keys, alias_values, var_reassign_local_id_value(place.local)))
         case _:
             val written = var_reassign_written_local(inst)
             if written.?:
@@ -289,7 +294,7 @@ fn analyze_var_reassign_blocks(blocks: [MirBlock]) -> VarReassignAnalysis:
                 counts = next_counts[1]
             match inst.kind:
                 case Ref(_, _, place):
-                    borrowed = local_list_push_unique(borrowed, local_alias_root(alias_keys, alias_values, place.local.id))
+                    borrowed = local_list_push_unique(borrowed, local_alias_root(alias_keys, alias_values, var_reassign_local_id_value(place.local)))
                 case _:
                     pass_do_nothing
             escaped = var_reassign_collect_inst_escapes_with_aliases(escaped, inst, alias_keys, alias_values)

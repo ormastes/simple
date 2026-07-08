@@ -31,10 +31,10 @@ Probe the discoverability sweep:
 bin/simple run examples/06_io/ui/engine2d_backend_test.spl --backend=all
 ```
 
-`cpu_simd` and `simd_cpu` are explicit aliases for the SIMD-instrumented CPU
-Engine2D surface. The sample fails the SIMD CPU lane if no SIMD span hits are
-recorded. Metal is strict: unavailable Metal is reported and skipped rather
-than silently accepted as a CPU fallback.
+`cpu_simd` and `simd_cpu` select the SIMD-instrumented CPU Engine2D surface.
+The sample fails the SIMD CPU lane if no SIMD span hits are recorded. Metal is
+strict: unavailable Metal is reported and skipped rather than silently accepted
+as a CPU fallback.
 
 ## Verification
 

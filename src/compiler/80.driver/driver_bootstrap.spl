@@ -10,15 +10,17 @@ use compiler.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.codegen.{CodegenPipeline, CompiledModule}
 use compiler.backend.llvm_backend.{MirToLlvm, LlvmTargetConfig}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, compile_ir_to_object}
+use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_text}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_backend}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at}
-use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module, bootstrap_set_entry_hir_module}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module}
 use compiler.mir_opt.{ssa_var_transform_blocks}
 use compiler.common.driver_core_types.{CompileResult}
 use driver_types.{CompileContext, CompileOptions}
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
+use compiler.driver.driver_source_loading.{_driver_module_name_from_path}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_write_text_at(path: text, offset: i64, content: text) -> bool
@@ -85,20 +87,34 @@ pub fn bootstrap_emit_seed_wrapper(output: text) -> CompileResult:
     val _ = output
     CompileResult.CodegenError("bootstrap seed-wrapper fallback was removed")
 
+pub fn bootstrap_entry_module_name(ctx: CompileContext) -> text:
+    val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    if native_entry != "":
+        var i = 0
+        while i < ctx.sources.len():
+            val source = ctx.sources[i]
+            if source.path == native_entry or source.path.ends_with("/" + native_entry):
+                return source.module_name
+            i = i + 1
+        return _driver_module_name_from_path(native_entry)
+    "app.cli.bootstrap_main"
+
 pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, bool):
     """Bootstrap MIR lowering as a free function to avoid Stage1 method dispatch instability."""
     if bootstrap_trace_enabled():
         print "[driver-mir] bootstrap free:start"
     var next_ctx = ctx
-    # Hand the real HIR module for the entry (produced by the HIR phase from the
-    # freshly-parsed Module.functions) to the MIR free path so it lowers real
-    # bodies instead of ret-0 stubs.
-    val entry_hir = ctx.hir_modules["app.cli.bootstrap_main"]
+    # Hand the real HIR module for the requested entry (produced by the HIR phase
+    # from the freshly-parsed Module.functions) to the MIR free path so it lowers
+    # real bodies instead of ret-0 stubs.
+    val entry_module_name = bootstrap_entry_module_name(ctx)
+    bootstrap_clear_entry_hir_module()
+    val entry_hir = ctx.hir_modules[entry_module_name]
     if entry_hir != nil:
         bootstrap_set_entry_hir_module(entry_hir)
     var bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module()
     next_ctx.bootstrap_entry_mir = Some(bootstrap_mir)
-    next_ctx.mir_modules["app.cli.bootstrap_main"] = bootstrap_mir
+    next_ctx.mir_modules[entry_module_name] = bootstrap_mir
     if bootstrap_trace_enabled():
         print "[driver-mir] bootstrap free:done"
     (next_ctx, next_ctx.errors.len() == 0)
@@ -171,10 +187,35 @@ pub fn bootstrap_lower_hir_globals_to_mir_module_driver() -> MirModule:
     module
 
 fn bootstrap_ssa_phi_function(fn_: MirFunction) -> MirFunction:
+    if fn_.blocks.len() == 1:
+        return fn_
     val rewritten = ssa_var_transform_blocks(fn_.blocks)
+    if bootstrap_trace_enabled():
+        print "[bootstrap-real-llvm] ssa-result {fn_.name} applied={rewritten.applied} reason={rewritten.reason} phi={rewritten.phi_required_count}"
     if rewritten.applied:
         return MirFunction.with_blocks(fn_, rewritten.blocks)
     fn_
+
+fn bootstrap_is_runtime_declared_name(name: text) -> bool:
+    name == "rt_get_args" or name == "rt_env_get" or name == "rt_print" or name == "rt_println" or name == "rt_panic"
+
+fn bootstrap_unknown_decl_return_type(name: text) -> text:
+    if name == "env_get":
+        return "ptr"
+    "i64"
+
+fn bootstrap_emit_llvm_trailer(translator: MirToLlvm):
+    if translator.unknown_func_decls.len() > 0:
+        translator.builder.emit("")
+        translator.builder.emit("; External call declarations")
+        for unknown_name in translator.unknown_func_decls.keys():
+            if not translator.defined_func_names.has(unknown_name) and not bootstrap_is_runtime_declared_name(unknown_name):
+                translator.builder.emit("declare {bootstrap_unknown_decl_return_type(unknown_name)} @{unknown_name}(...)")
+    val string_globals = llvm_bootstrap_string_globals_text()
+    if string_globals != "":
+        translator.builder.emit("")
+        translator.builder.emit("; String constants")
+        translator.builder.emit(string_globals)
 
 pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> CompileResult:
     """Emit LLVM for bootstrap MIR functions from the local driver module instance."""
@@ -193,9 +234,19 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
         val name = bootstrap_mir_function_name_at(idx)
         print "[bootstrap-real-llvm] function {name}"
         val fn_ = bootstrap_mir_function_at(idx)
-        val body = MirBody.from_function(bootstrap_ssa_phi_function(fn_))
+        if bootstrap_trace_enabled():
+            print "[bootstrap-real-llvm] ssa-start {name}"
+        val ssa_fn = bootstrap_ssa_phi_function(fn_)
+        if bootstrap_trace_enabled():
+            print "[bootstrap-real-llvm] body-start {name}"
+        val body = MirBody.from_function(ssa_fn)
+        if bootstrap_trace_enabled():
+            print "[bootstrap-real-llvm] translate-start {name}"
         translator.translate_function(if name == "main": "__simple_main" else: name, body)
+        if bootstrap_trace_enabled():
+            print "[bootstrap-real-llvm] translate-done {name}"
         idx = idx + 1
+    bootstrap_emit_llvm_trailer(translator)
     val llvm_ir = translator.builder.build()
     log_phase("aot:bootstrap_real_llvm:compile")
     val result = compile_ir_to_object(llvm_ir, config, bootstrap_llvm_opt_level(opt_level_i64))
@@ -238,8 +289,18 @@ pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, o
     for fn_ in module.functions.values():
         if bootstrap_trace_enabled():
             print "[bootstrap-real-llvm-module] function {fn_.name}"
-        val body = MirBody.from_function(bootstrap_ssa_phi_function(fn_))
+        if bootstrap_trace_enabled():
+            print "[bootstrap-real-llvm-module] ssa-start {fn_.name}"
+        val ssa_fn = bootstrap_ssa_phi_function(fn_)
+        if bootstrap_trace_enabled():
+            print "[bootstrap-real-llvm-module] body-start {fn_.name}"
+        val body = MirBody.from_function(ssa_fn)
+        if bootstrap_trace_enabled():
+            print "[bootstrap-real-llvm-module] translate-start {fn_.name}"
         translator.translate_function(if fn_.name == "main": "__simple_main" else: fn_.name, body)
+        if bootstrap_trace_enabled():
+            print "[bootstrap-real-llvm-module] translate-done {fn_.name}"
+    bootstrap_emit_llvm_trailer(translator)
     val llvm_ir = translator.builder.build()
     log_phase("aot:bootstrap_real_llvm_module:compile")
     val result = compile_ir_to_object(llvm_ir, config, bootstrap_llvm_opt_level(opt_level_i64))

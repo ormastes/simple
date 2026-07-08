@@ -40,10 +40,13 @@ intensive coverage plan was written. Full plan + honest backend baseline:
   border/shadow no longer vanish. (Updates the "Styling: borders, shadows,
   gradients" row below — no longer 0.) `<img>`/background-image is still blocked:
   `doc/08_tracking/bug/engine2d_draw_ir_image_path_no_resolver_2026-07-06.md`.
-- **`cpu_simd` is now honestly an alias of `cpu`** (no live SIMD dispatch on any
-  arch — the `CpuSimdSession` is orphaned; x86 SSE2/AVX2 externs exist but are
-  unused). Probe text corrected; wiring gap tracked in
-  `cpu_simd_mutable_array_extern_wiring_2026-05-31.md`.
+- **`cpu_simd` is a real SIMD-instrumented CPU lane, not a GPU fallback.**
+  `scripts/check/check-cpu-simd-engine2d-evidence.shs` proves fill/copy/alpha/
+  blit/scroll hit accounting, exact bitmap output, and arch-specific probes.
+  On this x86_64 host it reports `feature=avx2`, `cpu_simd_x86=Initialized`,
+  `native_simd_executed=true`, and zero exact-bitmap mismatches. x86/aarch64 are
+  native row proof gates; RVV remains scalar-compatible until a native RVV row
+  kernel exists.
 - **Dishonest GPU-event-offload scaffolding removed**: fabricated `baseline_ms/2`
   2× "speedup", a dead `hit_test_batch` label, and a `gpu_batched`-based
   false-completion flag. Event handling is honestly CPU-side (hit-test + reducers).
