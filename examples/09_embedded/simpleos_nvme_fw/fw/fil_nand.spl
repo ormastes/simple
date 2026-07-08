@@ -67,10 +67,21 @@ fn nand_new() -> Nand:
     Nand(data: data, oob_lba: oob_lba, oob_seq: oob_seq, oob_ecc: oob_ecc, page_err: page_err, blk_state: blk_state, blk_erase: blk_erase, blk_wp: blk_wp, prog_fail: prog_fail, erase_fail: erase_fail)
 
 impl Nand:
+    me page_ready(ppn: i64) -> bool:
+        ppn_in_range(ppn) and ppn < me.data.len() and ppn < me.oob_lba.len() and ppn < me.oob_seq.len() and ppn < me.oob_ecc.len() and ppn < me.page_err.len()
+
+    me block_ready(blk: i64) -> bool:
+        block_in_range(blk) and blk < me.blk_state.len() and blk < me.blk_erase.len() and blk < me.blk_wp.len() and blk < me.prog_fail.len() and blk < me.erase_fail.len()
+
+    me block_pages_ready(blk: i64) -> bool:
+        me.block_ready(blk) and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.data.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.oob_lba.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.oob_seq.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.oob_ecc.len() and block_first_ppn(blk) + PAGES_PER_BLOCK <= me.page_err.len()
+
     me program(ppn: i64, lba: i64, seq: i64, data: i64) -> i64:
-        if not ppn_in_range(ppn):
+        if not me.page_ready(ppn):
             return NAND_BAD_BLOCK
         val blk: i64 = ppn_block(ppn)
+        if not me.block_ready(blk):
+            return NAND_BAD_BLOCK
         if me.blk_state[blk] == BLK_BAD:
             return NAND_BAD_BLOCK
         if me.prog_fail[blk] != 0:
@@ -86,7 +97,7 @@ impl Nand:
         NAND_OK
 
     me read_page(ppn: i64) -> NandRead:
-        if not ppn_in_range(ppn):
+        if not me.page_ready(ppn):
             return NandRead(data: 0, lba: UNMAP, seq: 0, ecc: 0, err: 2)
         var err: i64 = me.page_err[ppn]
         if err < 0:
@@ -94,7 +105,7 @@ impl Nand:
         NandRead(data: me.data[ppn], lba: me.oob_lba[ppn], seq: me.oob_seq[ppn], ecc: me.oob_ecc[ppn], err: err)
 
     me erase_block(blk: i64) -> i64:
-        if not block_in_range(blk):
+        if not me.block_pages_ready(blk):
             return NAND_BAD_BLOCK
         if me.blk_state[blk] == BLK_BAD:
             return NAND_BAD_BLOCK
@@ -117,7 +128,7 @@ impl Nand:
         NAND_OK
 
     me erase_count(blk: i64) -> i64:
-        if not block_in_range(blk):
+        if not me.block_ready(blk):
             return 0
         if me.blk_erase[blk] < 0:
             return 0
@@ -126,17 +137,17 @@ impl Nand:
         me.blk_erase[blk]
 
     me inject_prog_fail(blk: i64):
-        if not block_in_range(blk):
+        if not me.block_ready(blk):
             return
         me.prog_fail[blk] = 1
 
     me inject_erase_fail(blk: i64):
-        if not block_in_range(blk):
+        if not me.block_ready(blk):
             return
         me.erase_fail[blk] = 1
 
     me inject_read_bitflip(ppn: i64, n: i64):
-        if not ppn_in_range(ppn):
+        if not me.page_ready(ppn):
             return
         if n < 0:
             me.page_err[ppn] = 0
@@ -144,12 +155,12 @@ impl Nand:
         me.page_err[ppn] = n
 
     me corrupt_page_data(ppn: i64, data: i64):
-        if not ppn_in_range(ppn):
+        if not me.page_ready(ppn):
             return
         me.data[ppn] = data
 
     me set_bad(blk: i64):
-        if not block_in_range(blk):
+        if not me.block_ready(blk):
             return
         me.blk_state[blk] = BLK_BAD
 
@@ -234,5 +245,15 @@ fn nand_selftest() -> i64:
     failures = failures + expect_eq(nand.read_page(NUM_PAGES).err, 2, "out-of-range read reports uncorrectable")
     failures = failures + expect_eq(nand.erase_block(NUM_BLOCKS), NAND_BAD_BLOCK, "out-of-range erase fails closed")
     failures = failures + expect_eq(nand.erase_count(NUM_BLOCKS), 0, "out-of-range erase count is inert")
+    var nt = nand_new()
+    nt.data = []
+    failures = failures + expect_eq(nt.program(0, 1, 1, 1), NAND_BAD_BLOCK, "truncated NAND data program fails closed")
+    failures = failures + expect_eq(nt.read_page(0).err, 2, "truncated NAND data read reports uncorrectable")
+    failures = failures + expect_eq(nt.erase_block(0), NAND_BAD_BLOCK, "truncated NAND data erase fails closed")
+    nt = nand_new()
+    nt.blk_state = []
+    failures = failures + expect_eq(nt.program(0, 1, 1, 1), NAND_BAD_BLOCK, "truncated NAND block metadata program fails closed")
+    failures = failures + expect_eq(nt.erase_count(0), 0, "truncated NAND block metadata erase count is inert")
+    failures = failures + expect_eq(nt.erase_block(0), NAND_BAD_BLOCK, "truncated NAND block metadata erase fails closed")
 
     failures
