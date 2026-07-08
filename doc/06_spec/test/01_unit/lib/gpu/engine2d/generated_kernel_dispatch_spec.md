@@ -399,12 +399,12 @@ expect(cuda_bad_dims.reason).to_equal("invalid-dimensions")
 
 </details>
 
-#### records shared generated session runtime provenance for CUDA HIP Vulkan and OpenCL
+#### records shared generated session runtime provenance for CUDA HIP Vulkan OpenCL and Metal
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -413,6 +413,8 @@ val hip_missing_module = generated_2d_session_runtime_provenance("rocm", GENERAT
 val vulkan_missing_runtime = generated_2d_session_runtime_provenance("vulkan", GENERATED_2D_FILL, 16, 16, false, true, 7)
 val opencl_unavailable = generated_2d_session_runtime_provenance("opencl", GENERATED_2D_COPY, 16, 16, false, false, 2048)
 val opencl_missing_args = generated_2d_session_runtime_provenance("opencl", GENERATED_2D_COPY, 16, 16, true, true, 0)
+val metal_missing_runtime = generated_2d_session_runtime_provenance("metal", GENERATED_2D_FILL, 16, 16, false, true, 7)
+val metal_missing_module = generated_2d_session_runtime_provenance("metal", GENERATED_2D_FILL, 16, 16, true, false, 7)
 val unsupported = generated_2d_session_runtime_provenance("opencl", "rect_filled", 16, 16, true, true, 2048)
 
 expect(cuda_ready.ready).to_equal(true)
@@ -428,6 +430,9 @@ expect(opencl_unavailable.ready).to_equal(false)
 expect(opencl_unavailable.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
 expect(opencl_unavailable.launch_api).to_equal("clEnqueueNDRangeKernel")
 expect(opencl_missing_args.typed_status).to_equal("args-unavailable")
+expect(metal_missing_runtime.typed_status).to_equal("metal-runtime-unavailable")
+expect(metal_missing_module.typed_status).to_equal("metal-pipeline-unavailable")
+expect(metal_missing_module.launch_api).to_equal("MTLComputeCommandEncoder.dispatchThreads")
 expect(unsupported.typed_status).to_equal("plan-not-ready:unsupported-operation")
 expect(opencl_unavailable.diagnostic_text()).to_contain("backend=opencl")
 expect(opencl_unavailable.diagnostic_text()).to_contain("artifact=simple_2d_optimization.spirv")
