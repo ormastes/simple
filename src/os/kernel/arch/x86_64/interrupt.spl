@@ -301,3 +301,66 @@ fn x86_dispatch_installed_syscall_abi(id: u64, arg0: u64, arg1: u64, arg2: u64, 
 fn spl_x86_dispatch_installed_syscall_abi(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64:
     """Raw C ABI wrapper for baremetal syscall_entry.s and C stubs."""
     x86_dispatch_installed_syscall_abi(id, arg0, arg1, arg2, arg3, arg4, arg5)
+
+# ============================================================================
+# Ring-3 fault termination
+# ============================================================================
+# The x86_64 rich-fault ISR stub (`_rich_fault_entry`, baremetal_stubs.c) used
+# to recover from EVERY fault the same way: advance the faulting RIP by 2 bytes,
+# set RAX=nil, and `iretq`. That is only valid for the narrow ring-0 use case of
+# skipping a stubbed no-op call during boot. On a ring-3 (CPL=3) unrecoverable
+# fault (page fault with no mapping / protection violation, or #GP), iretq-ing
+# back to the faulting user instruction re-faults immediately, and the stub then
+# advances 2 bytes and iretqs again — an unbounded kernel re-fault runaway
+# (observed: clang_static NULL deref looped ~107k frames, rip symbolising near
+# kernel::arch::x86_64::boot::parse_hhdm).
+#
+# The stub now guards on CS: a ring-3 fault calls `spl_x86_on_user_fault` and
+# then parks the CPU instead of returning into the doomed user context. This
+# function is the pure-Simple decision + fatal-signal marker. It must never
+# itself fault, so it uses only port I/O (no heap, no allocation, no scheduler
+# traversal — the same COM1 primitive the IDT exception handlers already use).
+
+fn _pf_serial_putc(ch: u8):
+    """Write one byte to COM1 (0x3F8), waiting for the TX holding register."""
+    var lsr: i32 = 0
+    while (lsr & 0x20) == 0:
+        lsr = inb(0x3FD)
+    outb(0x3F8, ch as i32)
+
+fn _pf_serial_puts(msg: text):
+    """Write a static string to COM1. Heap-free: indexes the literal in place."""
+    var i = 0
+    while i < msg.len():
+        _pf_serial_putc(msg[i] as u8)
+        i = i + 1
+
+fn _pf_serial_hex(value: u64):
+    """Print a 64-bit value as 0x-prefixed hex to COM1."""
+    _pf_serial_puts("0x")
+    var shift = 60
+    while shift >= 0:
+        val nibble = ((value >> shift) & 0x0F) as u8
+        val ch = if nibble < 10: (0x30 + nibble) as u8 else: (0x57 + nibble) as u8
+        _pf_serial_putc(ch)
+        shift = shift - 4
+
+@export("C", name: "spl_x86_on_user_fault")
+fn spl_x86_on_user_fault(rip: u64, cs: u64, cr2: u64):
+    """Terminate a ring-3 process that took an unrecoverable fault.
+
+    Called from the x86_64 rich-fault ISR stub (`_rich_fault_entry`) when the
+    interrupt frame's CS indicates CPL=3. Emits a fatal-signal marker; the ISR
+    stub parks the CPU afterwards so the fault never re-enters the faulting user
+    instruction (the historical kernel re-fault runaway).
+
+    Heap-free and self-contained by contract: the whole point is that the fault
+    handler must not itself fault, so this path allocates nothing.
+    """
+    _pf_serial_puts("\n[fault] ring-3 process killed: SIGSEGV rip=")
+    _pf_serial_hex(rip)
+    _pf_serial_puts(" cr2=")
+    _pf_serial_hex(cr2)
+    _pf_serial_puts(" cs=")
+    _pf_serial_hex(cs)
+    _pf_serial_puts("\n")
