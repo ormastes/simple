@@ -814,6 +814,11 @@ the last fully completed phase and the current/failed phase start. This avoids
 guessing whether the final `phase2:parse:file:start` line completed before the
 process exited.
 
+The foreground failure summary now scans both `nvme_fw_rv64_build.out` and
+`nvme_fw_rv64_build.err` for native-build phase lines. The phase profiler writes
+to stderr in current runs, so this keeps direct foreground failures aligned with
+the background `--status` telemetry.
+
 ## Update — closure diagnostics and fail-closed stub fallback
 
 The RV64 direct build wrapper now runs `native-build` with `--verbose`, records
