@@ -25,7 +25,7 @@ runtime submission readiness.
 
 ## Examples
 
-The scenarios cover CUDA, ROCm, OpenCL, and Metal metadata; unsupported backend
+The scenarios cover CUDA, ROCm, Vulkan, OpenCL, and Metal metadata; unsupported backend
 failure; backend-specific launch APIs; session/runtime provenance; artifact
 load evidence; and submit evidence.
 """
@@ -59,10 +59,14 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         expect(dispatch.artifact_suffix(GENERATED_2D_ALPHA)).to_equal("simple_2d_alpha_u32.hsaco")
         expect(dispatch.required_entries()).to_contain("simple_2d_scroll_u32")
 
-    it "maps OpenCL and Metal to their binary artifact formats":
+    it "maps Vulkan OpenCL and Metal to their binary artifact formats":
+        val vulkan = generated_2d_dispatch_for_backend("vulkan")
         val opencl = generated_2d_dispatch_for_backend("opencl")
         val metal = generated_2d_dispatch_for_backend("metal")
 
+        expect(vulkan.source_format).to_equal("spirv")
+        expect(vulkan.binary_format).to_equal("spirv")
+        expect(vulkan.kernel_entry(GENERATED_2D_FILL)).to_equal("simple_2d_fill_u32")
         expect(opencl.source_format).to_equal("opencl-c")
         expect(opencl.binary_format).to_equal("spirv")
         expect(opencl.kernel_entry(GENERATED_2D_COPY)).to_equal("simple_2d_copy_u32")
@@ -97,18 +101,21 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         expect(plan.entry_name).to_equal("simple_2d_fill_u32")
         expect(plan.artifact_name).to_equal("simple_2d_optimization.ptx")
         expect(plan.required_entries).to_contain("simple_2d_copy_u32")
-        expect(plan.launch_api).to_equal("rt_cuda_launch_kernel")
+        expect(plan.launch_api).to_equal("cuda_launch_api")
         expect(plan.grid_x).to_equal(1200)
         expect(plan.block_x).to_equal(256)
         expect(plan.args_layout).to_equal("dst,width,height,color_u32")
 
-    it "uses backend-specific launch APIs for HIP, OpenCL, and Metal":
+    it "uses backend-specific launch APIs for HIP, Vulkan, OpenCL, and Metal":
         val hip = generated_2d_launch_plan("rocm", GENERATED_2D_ALPHA, 16, 16)
+        val vulkan = generated_2d_launch_plan("vulkan", GENERATED_2D_FILL, 16, 16)
         val opencl = generated_2d_launch_plan("opencl", GENERATED_2D_COPY, 32, 4)
         val metal = generated_2d_launch_plan("metal", GENERATED_2D_SCROLL, 10, 10)
 
-        expect(hip.launch_api).to_equal("rt_rocm_launch_kernel")
+        expect(hip.launch_api).to_equal("hip_launch_api")
         expect(hip.artifact_name).to_equal("simple_2d_optimization.hsaco")
+        expect(vulkan.launch_api).to_equal("vkCmdDispatch")
+        expect(vulkan.artifact_name).to_equal("simple_2d_optimization.spirv")
         expect(opencl.launch_api).to_equal("clEnqueueNDRangeKernel")
         expect(opencl.artifact_name).to_equal("simple_2d_optimization.spirv")
         expect(metal.launch_api).to_equal("MTLComputeCommandEncoder.dispatchThreads")
@@ -140,10 +147,14 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         expect(rocm.handle_kind).to_equal("rocm-kernel-args")
         expect(rocm.call_shape()).to_equal("hip_launch_api")
 
-    it "binds OpenCL and Metal launch plans to queue or encoder execution calls":
+    it "binds Vulkan OpenCL and Metal launch plans to queue or encoder execution calls":
+        val vulkan = generated_2d_execution_request("vulkan", GENERATED_2D_FILL, 16, 16, 55, 66, 0)
         val opencl = generated_2d_execution_request("opencl", GENERATED_2D_COPY, 16, 16, 11, 22, 0)
         val metal = generated_2d_execution_request("metal", GENERATED_2D_SCROLL, 16, 16, 33, 44, 0)
 
+        expect(vulkan.can_submit).to_equal(true)
+        expect(vulkan.handle_kind).to_equal("vulkan-command-buffer-pipeline")
+        expect(vulkan.call_shape()).to_equal("vulkan_compute_api")
         expect(opencl.can_submit).to_equal(true)
         expect(opencl.handle_kind).to_equal("opencl-queue-kernel")
         expect(opencl.call_shape()).to_equal("opencl_ndrange_api")
@@ -177,37 +188,45 @@ describe "Engine2D generated 2D kernel dispatch metadata":
         expect(bad_plan.can_submit).to_equal(false)
         expect(bad_plan.reason).to_equal("backend-inactive")
 
-    it "shares generated session launch preflight for CUDA HIP and OpenCL sessions":
+    it "shares generated session launch preflight for CUDA HIP Vulkan and OpenCL sessions":
         val cuda_ready = generated_2d_session_launch_gate("cuda", GENERATED_2D_FILL, 16, 16, true, true, 2048)
         val hip_missing_module = generated_2d_session_launch_gate("rocm", GENERATED_2D_ALPHA, 16, 16, true, false, 2048)
+        val vulkan_missing_runtime = generated_2d_session_launch_gate("vulkan", GENERATED_2D_FILL, 16, 16, false, true, 7)
         val opencl_missing_args = generated_2d_session_launch_gate("opencl", GENERATED_2D_COPY, 16, 16, true, true, 0)
         val cuda_bad_dims = generated_2d_session_launch_gate("cuda", GENERATED_2D_FILL, 0, 16, true, true, 2048)
 
         expect(cuda_ready.ready).to_equal(true)
         expect(cuda_ready.reason).to_equal("ready")
-        expect(cuda_ready.plan.launch_api).to_equal("rt_cuda_launch_kernel")
+        expect(cuda_ready.plan.launch_api).to_equal("cuda_launch_api")
         expect(hip_missing_module.ready).to_equal(false)
         expect(hip_missing_module.reason).to_equal("module-not-loaded")
-        expect(hip_missing_module.plan.launch_api).to_equal("rt_rocm_launch_kernel")
+        expect(hip_missing_module.plan.launch_api).to_equal("hip_launch_api")
+        expect(vulkan_missing_runtime.ready).to_equal(false)
+        expect(vulkan_missing_runtime.reason).to_equal("runtime-not-ready")
+        expect(vulkan_missing_runtime.plan.launch_api).to_equal("vkCmdDispatch")
         expect(opencl_missing_args.ready).to_equal(false)
         expect(opencl_missing_args.reason).to_equal("missing-args-pointer")
         expect(opencl_missing_args.plan.launch_api).to_equal("clEnqueueNDRangeKernel")
         expect(cuda_bad_dims.ready).to_equal(false)
         expect(cuda_bad_dims.reason).to_equal("invalid-dimensions")
 
-    it "records shared generated session runtime provenance for CUDA HIP and OpenCL":
+    it "records shared generated session runtime provenance for CUDA HIP Vulkan and OpenCL":
         val cuda_ready = generated_2d_session_runtime_provenance("cuda", GENERATED_2D_FILL, 16, 16, true, true, 2048)
         val hip_missing_module = generated_2d_session_runtime_provenance("rocm", GENERATED_2D_ALPHA, 16, 16, true, false, 2048)
+        val vulkan_missing_runtime = generated_2d_session_runtime_provenance("vulkan", GENERATED_2D_FILL, 16, 16, false, true, 7)
         val opencl_unavailable = generated_2d_session_runtime_provenance("opencl", GENERATED_2D_COPY, 16, 16, false, false, 2048)
         val opencl_missing_args = generated_2d_session_runtime_provenance("opencl", GENERATED_2D_COPY, 16, 16, true, true, 0)
         val unsupported = generated_2d_session_runtime_provenance("opencl", "rect_filled", 16, 16, true, true, 2048)
 
         expect(cuda_ready.ready).to_equal(true)
         expect(cuda_ready.typed_status).to_equal("ready")
-        expect(cuda_ready.launch_api).to_equal("rt_cuda_launch_kernel")
+        expect(cuda_ready.launch_api).to_equal("cuda_launch_api")
         expect(hip_missing_module.ready).to_equal(false)
         expect(hip_missing_module.typed_status).to_equal("hip-module-unavailable")
-        expect(hip_missing_module.launch_api).to_equal("rt_rocm_launch_kernel")
+        expect(hip_missing_module.launch_api).to_equal("hip_launch_api")
+        expect(vulkan_missing_runtime.ready).to_equal(false)
+        expect(vulkan_missing_runtime.typed_status).to_equal("vulkan-runtime-unavailable")
+        expect(vulkan_missing_runtime.launch_api).to_equal("vkCmdDispatch")
         expect(opencl_unavailable.ready).to_equal(false)
         expect(opencl_unavailable.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
         expect(opencl_unavailable.launch_api).to_equal("clEnqueueNDRangeKernel")
