@@ -122,3 +122,38 @@ Keep the new modules, but treat them as a refactor-in-progress:
 - Has responsibility overlap: must be integrated before declaring the scheduler architecture complete.
 - Highest-risk issue: ineffective automated tests.
 - Next refactor target: connect policy/syscall modules to existing scheduler state and replace manual spec functions with real discovered examples.
+
+## Runtime Integration Status (2026-07-08)
+
+This duplication analysis is still accurate for the *code overlap* question
+it was written to answer, but it should not be read as evidence that the
+scheduler these modules extend is live at runtime. It is not: the whole
+`src/os/kernel/scheduler/` tree (4,850 lines, verified `wc -l` 2026-07-08,
+including `process_isolation.spl`, `sched_class_queue.spl`,
+`sched_policy_engine.spl` analyzed here) is implemented-but-unwired.
+
+- The x86_64 boot the QEMU spec runs never enters ring-3 through the
+  scheduler; the one real ring-3 handoff,
+  `x86_64_fs_exec_enter_image_ring3` (`src/os/kernel/loader/x86_64_fs_exec_ring3.spl:270`),
+  iretq's directly and exits QEMU on process exit instead of returning to
+  this scheduler (docstring, lines 273-274; zero scheduler references in
+  that file).
+- `kernel_stack: 0` is hardcoded at every task-creation site
+  (`scheduler_task_mgmt.spl:80`, `scheduler_exec.spl:212`, `:263`,
+  `scheduler_arm_bootstrap.spl:127`) — no kernel-stack allocator, no
+  `TSS.RSP0` wiring.
+- No architecture's timer IRQ calls into the scheduler:
+  `# scheduler_tick()` is commented out at `arch/riscv64/timer.spl:166`,
+  and `arch/x86_64/timer.spl` has no scheduler hook at all — so there is
+  no preemptive multitasking to isolate processes across.
+
+In other words, `ProcessIsolationPolicy` / `ProcessIsolationManager` and the
+class-queue/policy-engine modules analyzed above cannot yet be exercised by
+a real running process, because no real process reaches them. See
+`doc/03_plan/agent_tasks/simpleos_missing_os_subsystems_report.md` (the
+capability audit) and
+`doc/02_requirements/os/simpleos/simpleos_os_subsystem_feature_requests.md`
+FR-SOS-036 (process exit returns to the in-kernel exec caller via
+scheduler resume, retiring `out 0xf4`), FR-SOS-038 (a CPL3 fault kills
+only the faulting task), and FR-SOS-039 (a timer tick taken at CPL3 is
+handled and resumes the ring-3 task) for the fix plan that unblocks this.

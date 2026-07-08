@@ -28,3 +28,30 @@
 
 - `parse_task_attr` extends existing `@task` parsing.
 - `validate_task_policy_attr` enforces runtime-family/effect constraints for RT/deadline policies.
+
+## Runtime Integration Status (2026-07-08)
+
+The data structures and algorithms above are implemented (`src/os/kernel/scheduler/*.spl`,
+4,850 lines total, verified `wc -l` 2026-07-08) but **none of it runs at
+runtime today**. The x86_64 kernel image the QEMU spec boots is a probe
+fixture that never enters ring-3; the one path that reaches CPL3,
+`x86_64_fs_exec_enter_image_ring3` in
+`src/os/kernel/loader/x86_64_fs_exec_ring3.spl:270`, iretq's directly and
+exits QEMU on process exit (its own docstring says so, lines 273-274) —
+it never calls back into this scheduler. Two more gaps compound this:
+
+- No per-process kernel stack — `kernel_stack: 0` at every task-creation
+  site (`scheduler_task_mgmt.spl:80`, `scheduler_exec.spl:212`, `:263`,
+  `scheduler_arm_bootstrap.spl:127`); no kernel-stack allocator; nothing
+  sets `TSS.RSP0`.
+- No timer-tick wiring — the RISC-V64 hook is commented out
+  (`# scheduler_tick()` at `arch/riscv64/timer.spl:166`), and the x86_64
+  timer (`arch/x86_64/timer.spl`) has no scheduler hook at all.
+
+So this design is implemented-but-unwired: dead at runtime until the
+FS-exec keystone runs a real ring-3 process and returns to the scheduler
+instead of exiting QEMU. See
+`doc/03_plan/agent_tasks/simpleos_missing_os_subsystems_report.md` (the
+capability audit) and
+`doc/02_requirements/os/simpleos/simpleos_os_subsystem_feature_requests.md`
+FR-SOS-036/038/039 (the M2 return-to-scheduler track) for the fix plan.
