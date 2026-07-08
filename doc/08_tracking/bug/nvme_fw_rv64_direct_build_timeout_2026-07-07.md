@@ -788,6 +788,19 @@ builds, populated from the latest `[native-build]`, `[BOOTSTRAP-PHASE]`, or
 `NVME_RV64_BUILD_FAILED` log line. This makes the next full-closure blocker
 visible from the status command without requiring manual log tailing.
 
+## Update — running status also carries last phase
+
+`fw_rv64/build.shs --status` now includes the same `last_phase=` field while a
+background build is still running, so long full-closure probes can be monitored
+without tailing logs or waiting for a stopped/missing-media state.
+
+Live status evidence from a fresh full-closure background probe:
+
+```text
+NVME_RV64_BUILD_STATUS running ... last_phase=[BOOTSTRAP-PHASE] ... logic_queue_phase.spl chars=108
+NVME_RV64_BUILD_STATUS stopped ... last_phase=[BOOTSTRAP-PHASE] ... logic_ecc_compute_cases.spl chars=276
+```
+
 ## Update — closure diagnostics and fail-closed stub fallback
 
 The RV64 direct build wrapper now runs `native-build` with `--verbose`, records
