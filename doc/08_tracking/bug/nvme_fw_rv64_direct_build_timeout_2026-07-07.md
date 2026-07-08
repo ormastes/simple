@@ -907,9 +907,8 @@ Entry point address: 0x80200000
 0000000080211000 B _stack_top
 ```
 
-However, booting it with
-`sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs build/nvme_fw_rv64_target_core.elf`
-still fails with an empty serial log:
+Booting it with the old `-bios none` wrapper failed with an empty serial log
+because the ELF is linked at `0x80200000` as an OpenSBI S-mode payload:
 
 ```text
 --- serial ---
@@ -917,13 +916,28 @@ still fails with an empty serial log:
 RESULT: FAIL (serial empty)
 ```
 
+The RV64 wrapper now uses QEMU's default OpenSBI firmware. Rebuilding the
+`target_core` probe after adding an early `_start` UART marker shows that
+OpenSBI reaches the firmware entry, but the Simple selftest path still does
+not reach the PASS marker:
+
+```text
+`sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs build/nvme_fw_rv64_target_core.elf`
+--- serial ---
+RV64 ENTRY
+RV64 ENTRY
+...
+--- end ---
+RESULT: FAIL (marker not found)
+```
+
 So the direct RV64 path can now build a real 2-file firmware probe, but that
 partial probe is not yet a boot PASS and must not be treated as production
 firmware completion.
 
-The RV64 boot wrapper now classifies this case explicitly as `serial empty`;
-the generic `marker not found` failure is reserved for non-empty serial output
-that still misses the firmware PASS marker.
+The wrapper still classifies truly empty serial logs as `serial empty`; after
+the OpenSBI fix, the current target-core blocker is `marker not found` after
+entry is reached.
 
 ## Update — elapsed evidence shows external termination before 120s cap
 

@@ -42,13 +42,13 @@ EOF
   fake_elf="$tmp_dir/fake.elf"
   : >"$fake_elf"
 
-  PATH="$fake_bin:$PATH" NVME_RV64_FAKE_SERIAL=pass sh "$0" "$fake_elf" >"$tmp_dir/pass.out" 2>&1
+  PATH="$fake_bin:$PATH" NVME_RV64_FAKE_SERIAL=pass NVME_RV64_BOOT_LOG="$tmp_dir/pass.log" sh "$0" "$fake_elf" >"$tmp_dir/pass.out" 2>&1
   grep -Fq "RESULT: PASS" "$tmp_dir/pass.out" || {
     echo "STATUS: FAIL nvme-rv64-boot self-test: fake pass did not pass" >&2
     exit 1
   }
 
-  if PATH="$fake_bin:$PATH" NVME_RV64_FAKE_SERIAL=missing sh "$0" "$fake_elf" >"$tmp_dir/missing.out" 2>&1; then
+  if PATH="$fake_bin:$PATH" NVME_RV64_FAKE_SERIAL=missing NVME_RV64_BOOT_LOG="$tmp_dir/missing.log" sh "$0" "$fake_elf" >"$tmp_dir/missing.out" 2>&1; then
     echo "STATUS: FAIL nvme-rv64-boot self-test: missing marker passed" >&2
     exit 1
   fi
@@ -57,7 +57,7 @@ EOF
     exit 1
   }
 
-  if PATH="$fake_bin:$PATH" NVME_RV64_FAKE_SERIAL=empty sh "$0" "$fake_elf" >"$tmp_dir/empty.out" 2>&1; then
+  if PATH="$fake_bin:$PATH" NVME_RV64_FAKE_SERIAL=empty NVME_RV64_BOOT_LOG="$tmp_dir/empty.log" sh "$0" "$fake_elf" >"$tmp_dir/empty.out" 2>&1; then
     echo "STATUS: FAIL nvme-rv64-boot self-test: empty serial passed" >&2
     exit 1
   fi
@@ -66,7 +66,7 @@ EOF
     exit 1
   }
 
-  if PATH="$fake_bin:$PATH" NVME_RV64_FAKE_SERIAL=fail sh "$0" "$fake_elf" >"$tmp_dir/fail.out" 2>&1; then
+  if PATH="$fake_bin:$PATH" NVME_RV64_FAKE_SERIAL=fail NVME_RV64_BOOT_LOG="$tmp_dir/fail.log" sh "$0" "$fake_elf" >"$tmp_dir/fail.out" 2>&1; then
     echo "STATUS: FAIL nvme-rv64-boot self-test: serial FAIL marker passed" >&2
     exit 1
   fi
@@ -80,15 +80,18 @@ EOF
 fi
 
 ELF="${1:-build/nvme_fw_rv64.elf}"
-LOG="build/nvme_fw_rv64_serial.log"
+LOG="${NVME_RV64_BOOT_LOG:-build/nvme_fw_rv64_serial.log}"
+PRINT_LOG="${LOG}.print"
 if [ ! -f "$ELF" ]; then
   echo "missing-media: $ELF (run examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs first)"
   exit 2
 fi
 mkdir -p "$(dirname "$LOG")"; rm -f "$LOG"
-timeout 15 qemu-system-riscv64 -machine virt -cpu rv64 -m 128M -nographic -bios none \
+# RV64 firmware links at 0x80200000 as an OpenSBI S-mode payload.
+timeout 15 qemu-system-riscv64 -machine virt -cpu rv64 -m 128M -nographic \
   -kernel "$ELF" -serial file:"$LOG" </dev/null >/dev/null 2>&1
-echo "--- serial ---"; cat "$LOG" 2>/dev/null; echo "--- end ---"
+awk 'NR <= 80 { print } NR == 81 { print "... serial truncated ..." }' "$LOG" >"$PRINT_LOG" 2>/dev/null || true
+echo "--- serial ---"; cat "$PRINT_LOG" 2>/dev/null; echo "--- end ---"
 if [ ! -s "$LOG" ]; then
   echo "RESULT: FAIL (serial empty)"; exit 1
 fi
