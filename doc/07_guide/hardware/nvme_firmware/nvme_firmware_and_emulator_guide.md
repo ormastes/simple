@@ -105,7 +105,8 @@ Additional firmware modules: `power_thermal.spl` (power-state + thermal model, w
 > items: **P1** (`fil_fmc`), **P2** (`fil_scheduler`), **P3** (SECDED ECC floor), **P4**
 > (segmented-PRP floor), **P5** (DRAM/map-cache floor), **P6** (cooperative ownership floor),
 > **P7** (`power_thermal`), and **P8** (`rain`) are wired floors in the live path. **P9** has a
-> QEMU-booted direct-smoke PASS marker; the full 22-module no-alloc firmware port remains open.
+> fail-closed rv32 direct-smoke recipe; the QEMU PASS marker requires a produced
+> `build/nvme_fw_rv32.elf`, and the full 22-module no-alloc firmware port remains open.
 > Canonical table:
 > `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status".
 
