@@ -314,15 +314,33 @@ impl MirLowering:
                     result_type = self.bootstrap_text_type()
                 if val expr_type = expr_value.type_:
                     result_type = self.lower_type(expr_type)
-                var b = self.builder
-                val ptr = b.emit_gep(
-                    mir_operand_copy(base_local),
-                    [mir_operand_copy(index_local)],
-                    MirType.ptr(result_type, false)
-                )
-                val loaded = b.emit_load(mir_operand_copy(ptr), result_type)
-                self.builder = b
-                loaded
+                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    # Bootstrap arrays are tagged RuntimeValue handles returned by
+                    # the runtime (rt_get_args), not raw pointers -- a raw GEP+load
+                    # ptr on the handle faults. Route element reads through the
+                    # rt_array_get runtime accessor, mirroring the rt_array_len
+                    # accessor used for .len() in bootstrap mode.
+                    val getter = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_array_get"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(result_type, false), MirType.i64()], return_type: result_type, is_variadic: false)))
+                    ))
+                    var bg = self.builder
+                    val getter_result = bg.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(index_local)], result_type)
+                    self.builder = bg
+                    if val getter_local = getter_result:
+                        getter_local
+                    else:
+                        base_local
+                else:
+                    var b = self.builder
+                    val ptr = b.emit_gep(
+                        mir_operand_copy(base_local),
+                        [mir_operand_copy(index_local)],
+                        MirType.ptr(result_type, false)
+                    )
+                    val loaded = b.emit_load(mir_operand_copy(ptr), result_type)
+                    self.builder = b
+                    loaded
 
             case SetLit(elements, _):
                 self.lower_set_lit(elements)
