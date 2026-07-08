@@ -1,5 +1,15 @@
-"""Draw IR host/GPU event-flow evidence adapter."""
+"""Draw IR host/GPU event-flow evidence adapter.
 
+Also hosts the SOSIX seal-before-share primitive for the host draw-IR payload
+(#39 Gap #1). A draw-IR command buffer is built (unsealed), then sealed once;
+after seal it is immutable and readable, mirroring SharedDataset semantics
+(src/os/kernel/ipc/shared_dataset.spl: write-gate :98, one-way seal :126-133,
+read-rejects-unless-sealed :160). Used by the SIMPLE_SOSIX_GPU_LANE routing to
+turn the raw payload_text into an immutable command buffer before it enters the
+runtime GPU queue. Pure: no Metal, no bit-exact pixel path touched.
+"""
+
+use std.env.variables.{env_get}
 use std.gpu.engine2d.backend_lane.{
     ENGINE2D_HOST_GPU_LANE_GPU,
     ENGINE2D_HOST_GPU_LANE_HOST,
@@ -16,6 +26,70 @@ use std.gpu.engine2d.host_gpu_event_queue.{
     engine2d_host_gpu_event_submit,
     engine2d_host_gpu_event_receipt
 }
+
+# ---------------------------------------------------------------------------
+# SOSIX seal-before-share command buffer (#39 Gap #1)
+# ---------------------------------------------------------------------------
+
+# Immutable draw-IR command buffer. state: "building" (writable) | "sealed"
+# (immutable, readable). payload_hash is computed at seal time so a sealed
+# buffer carries a stable content identity for the runtime queue.
+struct SealedDrawIrPayload:
+    state: text
+    payload_text: text
+    payload_hash: i64
+
+# djb2 content hash over the payload chars — deterministic, matches the i64
+# payload_hash the runtime queue already threads (host_gpu_event_queue.spl).
+fn _draw_ir_payload_hash(payload_text: text) -> i64:
+    var h: i64 = 5381
+    val n = payload_text.len()
+    var i: i64 = 0
+    while i < n:
+        val c = payload_text.char_code_at(i).to_i64()
+        h = ((h * 33) + c) & 0x7FFFFFFFFFFFFFFF
+        i = i + 1
+    h
+
+# Start a new (writable, unsealed) command buffer.
+fn draw_ir_payload_new() -> SealedDrawIrPayload:
+    SealedDrawIrPayload(state: "building", payload_text: "", payload_hash: 0)
+
+# Append to a building buffer. Post-seal writes are REJECTED (returned
+# unchanged) — the seal-before-share immutability gate (shared_dataset.spl:98).
+fn draw_ir_payload_write(buf: SealedDrawIrPayload, more: text) -> SealedDrawIrPayload:
+    if buf.state != "building":
+        return buf
+    SealedDrawIrPayload(state: "building", payload_text: buf.payload_text + more, payload_hash: 0)
+
+# One-way seal: building -> sealed, computing the content hash. A second seal is
+# a no-op (idempotent, matching shared_dataset.spl:126-133).
+fn draw_ir_payload_seal(buf: SealedDrawIrPayload) -> SealedDrawIrPayload:
+    if buf.state != "building":
+        return buf
+    SealedDrawIrPayload(state: "sealed", payload_text: buf.payload_text, payload_hash: _draw_ir_payload_hash(buf.payload_text))
+
+# Read the sealed payload. An unsealed buffer reads as "" — reads require a
+# sealed dataset (shared_dataset.spl:160).
+fn draw_ir_payload_read(buf: SealedDrawIrPayload) -> text:
+    if buf.state != "sealed":
+        return ""
+    buf.payload_text
+
+fn draw_ir_payload_is_sealed(buf: SealedDrawIrPayload) -> bool:
+    buf.state == "sealed"
+
+# Convenience: build -> write -> seal in one call (the common host-lane path).
+fn engine2d_host_gpu_seal_draw_ir_payload(payload_text: text) -> SealedDrawIrPayload:
+    val building = draw_ir_payload_write(draw_ir_payload_new(), payload_text)
+    draw_ir_payload_seal(building)
+
+# The SIMPLE_SOSIX_GPU_LANE flag: when set, the host draw-IR event flow seals
+# the payload and routes it through the runtime GPU queue (Gap #2). Default OFF
+# — the legacy evidence-only path is byte-unchanged. Idiom matches
+# backend_metal.spl:194.
+fn engine2d_sosix_gpu_lane_enabled() -> bool:
+    (env_get("SIMPLE_SOSIX_GPU_LANE") ?? "") == "1"
 
 struct Engine2dHostGpuDrawIrEventFlowEvidence:
     event: Engine2dHostGpuEvent
@@ -46,3 +120,11 @@ fn engine2d_host_gpu_draw_ir_event_flow_summary(evidence: Engine2dHostGpuDrawIrE
 export Engine2dHostGpuDrawIrEventFlowEvidence
 export engine2d_host_gpu_draw_ir_event_flow
 export engine2d_host_gpu_draw_ir_event_flow_summary
+export SealedDrawIrPayload
+export draw_ir_payload_new
+export draw_ir_payload_write
+export draw_ir_payload_seal
+export draw_ir_payload_read
+export draw_ir_payload_is_sealed
+export engine2d_host_gpu_seal_draw_ir_payload
+export engine2d_sosix_gpu_lane_enabled
