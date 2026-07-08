@@ -4,7 +4,7 @@ Date: 2026-07-08
 
 ## Status
 
-Open.
+Mitigated; full deploy still unproven.
 
 ## Context
 
@@ -37,8 +37,26 @@ pure-Simple 4K/8K performance evidence from this workspace. Rust-seed tests can
 prove the extern registration and source path, but retained performance reports
 must wait for a successful pure-Simple deploy.
 
+## Mitigation
+
+Entry-closure discovery now deduplicates at enqueue time in both native-build
+closure walkers:
+
+- Simple `native_build_main.spl` uses dictionaries for discovered files and
+  import-resolution cache entries instead of linear scans.
+- Rust native-project discovery tracks queued files separately from processed
+  files, so fan-in imports cannot enqueue the same dependency repeatedly before
+  first visit.
+
+Focused evidence:
+
+- `cargo test -p simple-compiler --lib test_entry_closure_handles_shared_import_fan_in`
+  passed.
+- The updated Simple source contract for entry-closure traversal passed under
+  the bootstrap seed. The surrounding spec still has unrelated stale failures.
+
 ## Next Step
 
-Investigate the stage-4 `--entry-closure` path before object output. Per the
-unstable-build workflow, keep `build/bootstrap/native_cache` and use isolated
-mini caches for smaller entries rather than clearing the main cache.
+Rebuild/deploy a pure-Simple `bin/simple` and rerun the retained 4K/8K SIMD
+performance evidence. Keep `build/bootstrap/native_cache` and use isolated mini
+caches for any further bootstrap probes.

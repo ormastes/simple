@@ -200,6 +200,7 @@ impl NativeProjectBuilder {
         }
 
         let mut queue = VecDeque::from([canonical_entry.clone()]);
+        let mut queued = HashSet::from([canonical_entry.clone()]);
         let mut seen = HashSet::new();
         let mut files: Vec<(PathBuf, String)> = Vec::new();
 
@@ -338,7 +339,7 @@ impl NativeProjectBuilder {
             }
 
             for dep in found_deps {
-                if !seen.contains(&dep) {
+                if queued.insert(dep.clone()) {
                     queue.push_back(dep);
                 }
             }

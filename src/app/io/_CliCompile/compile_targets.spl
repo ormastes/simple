@@ -356,15 +356,6 @@ fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
             return src_path
     ""
 
-fn _nb_resolve_cache_get(cache: [[text]], key: text) -> text:
-    var ci = 0
-    while ci < cache.len():
-        val entry = cache[ci]
-        if entry.len() > 1 and entry[0] == key:
-            return entry[1]
-        ci = ci + 1
-    ""
-
 fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # BFS the entry's import closure so --entry-closure compiles only reachable
     # modules (one `main`), not every file in the --source dirs. Over-approximates
@@ -372,9 +363,10 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # errors in the compile phase.
     val trace_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
     var queue: [text] = [entry]
-    var discovered: [text] = [entry]
+    var discovered: Dict<text, bool> = {}
+    discovered[entry] = true
     var result: [text] = []
-    var resolve_cache: [[text]] = []
+    var resolve_cache: Dict<text, text> = {}
     val closure_source_dirs = _nb_normalize_source_dirs(source_dirs)
     var qi = 0
     while qi < queue.len():
@@ -406,15 +398,17 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                 continue
             val segs = mp.split(".")
             val seg_key = segs.join("/")
-            var rp = _nb_resolve_cache_get(resolve_cache, seg_key)
-            if rp == "":
+            var rp = ""
+            if resolve_cache.has(seg_key):
+                rp = resolve_cache.get(seg_key) ?? ""
+            else:
                 rp = _nb_resolve_segs(segs, closure_source_dirs)
-                resolve_cache = resolve_cache.push([seg_key, rp])
+                resolve_cache[seg_key] = rp
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
-            if rp != "" and not discovered.contains(rp):
+            if rp != "" and not discovered.has(rp):
                 queue = queue.push(rp)
-                discovered = discovered.push(rp)
+                discovered[rp] = true
             if rp == "" and segs.len() > 1 and not raw.contains("{"):
                 var drop: [text] = []
                 var di = 0
@@ -422,13 +416,15 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                     drop = drop.push(segs[di])
                     di = di + 1
                 val drop_key = drop.join("/")
-                var drop_rp = _nb_resolve_cache_get(resolve_cache, drop_key)
-                if drop_rp == "":
+                var drop_rp = ""
+                if resolve_cache.has(drop_key):
+                    drop_rp = resolve_cache.get(drop_key) ?? ""
+                else:
                     drop_rp = _nb_resolve_segs(drop, closure_source_dirs)
-                    resolve_cache = resolve_cache.push([drop_key, drop_rp])
-                if drop_rp != "" and not discovered.contains(drop_rp):
+                    resolve_cache[drop_key] = drop_rp
+                if drop_rp != "" and not discovered.has(drop_rp):
                     queue = queue.push(drop_rp)
-                    discovered = discovered.push(drop_rp)
+                    discovered[drop_rp] = true
     result
 
 fn cli_native_build(args: [text]) -> i64:

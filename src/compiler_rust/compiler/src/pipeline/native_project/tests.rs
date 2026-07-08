@@ -603,6 +603,46 @@ fn test_discover_files_from_entry_excludes_unrelated_source_files() {
 }
 
 #[test]
+fn test_entry_closure_handles_shared_import_fan_in() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_app_dir = project_root.join("src/app");
+    let src_lib_dir = project_root.join("src/lib");
+    std::fs::create_dir_all(&src_app_dir).unwrap();
+    std::fs::create_dir_all(&src_lib_dir).unwrap();
+
+    let entry_file = src_app_dir.join("main.spl");
+    let a_file = src_lib_dir.join("a.spl");
+    let b_file = src_lib_dir.join("b.spl");
+    let shared_file = src_lib_dir.join("shared.spl");
+
+    std::fs::write(
+        &entry_file,
+        "use lib.a.{a}\nuse lib.b.{b}\nfn main() -> i64:\n    return a() + b()\n",
+    )
+    .unwrap();
+    std::fs::write(&a_file, "use lib.shared.{s}\nfn a() -> i64:\n    return s()\n").unwrap();
+    std::fs::write(&b_file, "use lib.shared.{s}\nfn b() -> i64:\n    return s()\n").unwrap();
+    std::fs::write(&shared_file, "fn s() -> i64:\n    return 1\n").unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(src_app_dir)
+        .source_dir(src_lib_dir)
+        .entry_file(entry_file.clone());
+
+    let files = builder.discover_files().unwrap();
+    assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
+    assert!(files.iter().any(|path| same_file_path(path, &a_file)));
+    assert!(files.iter().any(|path| same_file_path(path, &b_file)));
+    assert!(files.iter().any(|path| same_file_path(path, &shared_file)));
+    assert_eq!(files.len(), 4);
+}
+
+#[test]
 fn test_entry_closure_resolves_project_src_imports_from_narrow_source_roots() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");
