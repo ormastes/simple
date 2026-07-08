@@ -389,7 +389,8 @@ impl Ftl:
                 rec[page] = acc
                 page = page + 1
             # 2. erase the failed block (clears the corrupted pages so they are programmable).
-            me.fil.erase(blk)
+            if me.fil.erase(blk) != NAND_OK:
+                return rebuilt
             # 3. reprogram the block's live pages in place with the recovered payload.
             val s: i64 = me.next_seq()
             page = 0
@@ -398,7 +399,8 @@ impl Ftl:
                 val who: i64 = rev[ppn]
                 if who != UNMAP:
                     val payload: i64 = rec[page]
-                    me.fil.program(ppn, who, s, payload)
+                    if me.fil.program(ppn, who, s, payload) != NAND_OK:
+                        return rebuilt
                     rebuilt = rebuilt + 1
                 page = page + 1
             group = group + 1
@@ -741,6 +743,12 @@ fn ftl_rain_selftest() -> i64:
     fail = fail + expect_eq(ftl.rain_recover_channel(failed), 0, "ftl-rain: corrupted parity table blocks rebuild")
     fail = fail + expect_eq(ftl.erase_count(blk0), erase_before_bad_parity, "ftl-rain: corrupted parity table does not erase failed block")
     ftl.rain_parity = saved_parity
+    var bad_rain: Ftl = ftl_new()
+    fail = fail + expect_eq(bad_rain.write(0, 1), SC_SUCCESS, "ftl-rain: media-failure setup write")
+    val bad_blk: i64 = ppn_block(bad_rain.physical_ppn(0))
+    bad_rain.fil.inject_erase_fail(bad_blk)
+    fail = fail + expect_eq(bad_rain.rain_recover_channel(bad_blk % NUM_CHANNELS), 0, "ftl-rain: erase failure reports no rebuilt pages")
+    fail = fail + expect_eq(bool_to_int(bad_rain.fil.block_bad(bad_blk)), 1, "ftl-rain: erase failure retires failed block")
     ftl.rain_parity = []
     ftl.rain_seal()
     fail = fail + expect_eq(ftl.rain_parity_ready(), true, "ftl-rain: seal repairs corrupted parity table")
