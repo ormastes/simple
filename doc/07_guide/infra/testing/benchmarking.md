@@ -178,6 +178,11 @@ host-unavailable evidence instead of hidden success. The companion report is
 written under `doc/09_report/`, and per-backend logs/evidence files are written
 under `build/generated_2d_backend_readback_matrix/`.
 
+Use `sh scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs
+--self-test` after changing the wrapper. It uses fake child lanes to prove a
+required backend cannot report `pass` unless submit/readback provenance is
+present.
+
 For Simple Web layout benchmark scenes, the Node bitmap fixture can consume a
 Simple-produced ARGB transport baseline with
 `SIMPLE_WEB_ENGINE2D_BASELINE_ARGB_IN`. This keeps live Electron/Node capture
