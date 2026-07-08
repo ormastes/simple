@@ -77,3 +77,31 @@ down; success is proven on the serial log).
 Dominant effort = items 1+3 (mechanical). The single ballooning risk = item 2
 (net-survives-`vmm_init`), which is empirical and has a known mitigation. Item 5
 is the only genuinely large piece and is out of scope for `ssh guest run /ELF`.
+
+## Empirical results — verified 2026-07-08
+
+Item 1 (fork) and item 2 (net survives `vmm_init`) are **PROVEN**, and a new
+prerequisite blocker was found:
+
+- **Forked entry `arch/x86_64/ssh_ring3_entry.spl` BUILDS** (merged kernel:
+  sshd + net + nvme + vmm + ring-3 loader, `build/os/simpleos_ssh_ring3.elf`,
+  22 MB, 0 failed). Native-build recipe + build-marker generation
+  (`build/os/generated/ssh_live_build_marker.spl`, not auto-written for x64 —
+  gap in `os_build_run.spl:203`, riscv64-only) captured.
+- **BOOTS and sshd LISTENS after `vmm_init`** — serial:
+  `[boot] pmm+vmm online (+nvme bar high)` → `[sshd] SSH daemon listening on
+  port 22` → `[sshd] accept loop start`. So **virtio-net (PIO) survives
+  `vmm_init`** (item 2 resolved — no `vmm_map_virtio_net_bar_high` needed).
+- **TCP + version-banner exchange WORK**: a real host `ssh -p 2222
+  root@127.0.0.1 true` connects; `[tcp] Connection established`, `[sshd] accepted
+  client`, banner sent, client version `SSH-2.0-OpenSSH_9.6p1` received.
+
+**NEW BLOCKER (prerequisite, not the exec wiring): x64 SSH LOGIN itself fails at
+version exchange** under freestanding native-build — the server reads an empty
+client version and aborts. Filed:
+`doc/08_tracking/bug/x64_sshd_version_exchange_freestanding.md` (double-take
+consumes the buffered version + boxed-`[u8]` read-back). x64 SSH login has never
+passed (only rv64 is proven), so this must be fixed BEFORE item 3 (exec dispatch)
+is demonstrable end-to-end. Once x64 SSH login works, item 3 (route resolved path
+→ `fs_exec_spawn_ring3`) + item 4 (harness) complete the one-shot demo; the
+OS-side ring-3 exec they drive is already proven.
