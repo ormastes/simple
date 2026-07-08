@@ -884,6 +884,43 @@ failed with duplicate `__simple_main`, so this is not only a dynload-mode issue:
 error: emit-object relocatable link failed: ld.lld: error: duplicate symbol: __simple_main
 ```
 
+## Update — target-core 2-file probe builds but boots silent
+
+The wrapper now supports `NVME_RV64_BUILD_SECTION=target_core`, a 2-file
+diagnostic probe that imports only `logic_target_core` and directly checks the
+target profile/aperture validators from the generated entry. This bypasses the
+duplicate `__simple_main` failure seen in the 6-file `target` closure:
+
+```text
+[native-build] Entry closure files: 2
+[native-build] Build successful: build/test-artifacts/nvme_fw_rv64_target_core.o
+NVME_RV64_NATIVE_BUILD_DONE elapsed=40s
+build/nvme_fw_rv64_target_core.elf: ELF 64-bit LSB executable, UCB RISC-V ...
+```
+
+The resulting ELF is structurally plausible:
+
+```text
+Entry point address: 0x80200000
+0000000080200000 T _start
+000000008020058e T rt_rv64_boot_optional_nvme_fw_selftest
+0000000080211000 B _stack_top
+```
+
+However, booting it with
+`sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs build/nvme_fw_rv64_target_core.elf`
+still fails with an empty serial log:
+
+```text
+--- serial ---
+--- end ---
+RESULT: FAIL (marker not found)
+```
+
+So the direct RV64 path can now build a real 2-file firmware probe, but that
+partial probe is not yet a boot PASS and must not be treated as production
+firmware completion.
+
 ## Update — elapsed evidence shows external termination before 120s cap
 
 `fw_rv64/build.shs` now reports native-build elapsed seconds. A fresh
