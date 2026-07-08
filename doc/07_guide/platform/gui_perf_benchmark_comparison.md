@@ -113,7 +113,7 @@ sh scripts/check/check-local-gpu-perf-summary.shs
 The no-hardware summary contract must report
 `gpu_perf_summary_contract=verdict-timing-overhead` for both canonical runner
 paths, proving the self-test still covers faster, near-CPU, slower-overhead,
-and timing-line parsing cases.
+ambiguous generic speedup, and timing-line parsing cases.
 
 ## Pixel Parity Gate
 
