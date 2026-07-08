@@ -53,6 +53,21 @@ fn ftl_journal_new() -> Journal:
 # ── Methods ───────────────────────────────────────────────────────────────────
 
 impl Journal:
+    me physical_cap() -> i64:
+        var c: i64 = JOURNAL_CAP
+        if me.wal_lba.len() < c:
+            c = me.wal_lba.len()
+        if me.wal_old.len() < c:
+            c = me.wal_old.len()
+        if me.wal_new.len() < c:
+            c = me.wal_new.len()
+        if me.wal_seq.len() < c:
+            c = me.wal_seq.len()
+        c
+
+    me wal_slot_ready(ridx: i64) -> bool:
+        ridx >= 0 and ridx < me.physical_cap()
+
     me effective_count() -> i64:
         var n: i64 = me.wal_count
         if n < 0:
@@ -62,6 +77,9 @@ impl Journal:
             return 0
         if c > JOURNAL_CAP:
             c = JOURNAL_CAP
+        val physical: i64 = me.physical_cap()
+        if c > physical:
+            c = physical
         if n > c:
             n = c
         if n > JOURNAL_CAP:
@@ -79,6 +97,8 @@ impl Journal:
         if count >= me.cap:
             return count
         if count >= JOURNAL_CAP:
+            return count
+        if not me.wal_slot_ready(count):
             return count
         val slot: i64 = count
         me.wal_lba[slot] = map_lba
@@ -104,27 +124,29 @@ impl Journal:
     # ever silently lost (and a write acked to the host whose record went missing).
     me is_full() -> bool:
         val count: i64 = me.effective_count()
+        if not me.wal_slot_ready(count):
+            return true
         count >= me.cap or count >= JOURNAL_CAP
 
     # Accessors for WAL replay.
     me record_lba(ridx: i64) -> i64:
         if ridx < 0 or ridx >= me.effective_count():
             return UNMAP
-        if ridx >= JOURNAL_CAP:
+        if not me.wal_slot_ready(ridx):
             return UNMAP
         me.wal_lba[ridx]
 
     me record_new(ridx: i64) -> i64:
         if ridx < 0 or ridx >= me.effective_count():
             return UNMAP
-        if ridx >= JOURNAL_CAP:
+        if not me.wal_slot_ready(ridx):
             return UNMAP
         me.wal_new[ridx]
 
     me record_seq(ridx: i64) -> i64:
         if ridx < 0 or ridx >= me.effective_count():
             return 0
-        if ridx >= JOURNAL_CAP:
+        if not me.wal_slot_ready(ridx):
             return 0
         me.wal_seq[ridx]
 
@@ -139,7 +161,7 @@ impl Journal:
         var i: i64 = 0
         val count: i64 = me.effective_count()
         while i < count:
-            if me.wal_seq[i] > me.ckpt_seq:
+            if me.wal_slot_ready(i) and me.wal_seq[i] > me.ckpt_seq:
                 new_addr.push(me.wal_lba[i])
                 new_old.push(me.wal_old[i])
                 new_new.push(me.wal_new[i])
@@ -206,6 +228,24 @@ fn ftl_journal_selftest() -> i64:
     fail = fail + expect_eq(j.wal_len(), JOURNAL_CAP, "corrupt oversized WAL cap leaves count unchanged")
     j.wal_count = 3
     j.cap = JOURNAL_CAP
+
+    var jt: Journal = ftl_journal_new()
+    jt.append(0, 300, 40, 50, 7)
+    jt.append(0, 301, 41, 51, 8)
+    jt.wal_lba = []
+    jt.wal_old = []
+    jt.wal_new = []
+    jt.wal_seq = []
+    fail = fail + expect_eq(jt.wal_len(), 0, "truncated WAL arrays clamp len to physical slots")
+    fail = fail + expect_eq(if jt.is_full(): 1 else: 0, 1, "truncated WAL arrays force journal repair")
+    fail = fail + expect_eq(jt.record_lba(0), UNMAP, "truncated WAL lba read fails closed")
+    fail = fail + expect_eq(jt.record_new(0), UNMAP, "truncated WAL ppn read fails closed")
+    fail = fail + expect_eq(jt.record_seq(0), 0, "truncated WAL seq read fails closed")
+    fail = fail + expect_eq(jt.append(0, 302, 42, 52, 9), 0, "truncated WAL append fails closed")
+    jt.truncate_checkpointed()
+    fail = fail + expect_eq(if jt.is_full(): 1 else: 0, 0, "truncate rebuilds truncated WAL storage")
+    fail = fail + expect_eq(jt.append(0, 303, 43, 53, 10), 1, "append resumes after WAL storage rebuild")
+    fail = fail + expect_eq(jt.record_seq(0), 10, "rebuilt WAL stores new record")
 
     # Checkpoint at seq=2 — records 1 and 2 become durable.
     j.checkpoint(2)
