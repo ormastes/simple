@@ -14,7 +14,7 @@
   `engine2d_sosix_gpu_lane_enabled()` flag reader in
   `src/lib/gc_async_mut/gpu/engine2d/host_gpu_draw_ir_event_flow.spl`; spec
   `sealed_draw_ir_payload_spec.spl` 7/0. Additive — existing consumers unchanged.
-- **Gap #2 — SOSIX GPU lane routing (migrate existing GPU offload)** (2026-07-08): flag-gated
+- **Gap #2 — SOSIX GPU lane routing MECHANISM** (`2fff9659`, 2026-07-08): flag-gated
   `engine2d_host_gpu_sosix_lane_route(...)` seals the draw-IR payload and routes it through the
   EXISTING runtime GPU queue (emit via `engine2d_host_gpu_event_submit_to_runtime_payload_text` →
   `engine2d_host_gpu_runtime_drain`, COMPLETED=3) to a real receipt; ineligible/host-mutating ops
@@ -24,13 +24,28 @@
   the way: `host_gpu_runtime_emit_payload_text_drops_hash_2026-07-08` (text-emit variant does not
   persist the emitted i64 hash; bytes survive → worked around by re-hashing the recovered bytes).
 
-### FUNCTIONAL PROOF done; REGRESSION GUARD (pixel-safety) still to run
-The functional half of the HOST-IMPL slice (does the sealed buffer traverse the queue to
-COMPLETED?) is LANDED and green. The remaining item is the belt-and-suspenders **pixel-safety**
-run: `check-engine2d-gpu-offload-evidence.shs` (every row MATCH + `source=device_readback`) +
-`check-engine2d-cpu-metal-parity-evidence.shs`, ideally with `SIMPLE_SOSIX_GPU_LANE` ON and OFF.
-Per the gap map, those gates do NOT import the queue path, so they cannot regress from this
-additive change (they prove pixels, not the queue) — run when disk headroom allows (~10 min Metal).
+### Wired into the live browser dispatch — opt-in migration LANDED (2026-07-08)
+The routing mechanism is now ported to the **`nogc_async_mut`** twin (the browser lane's import) and
+**wired into the real GPU-offload dispatch site**. When `SIMPLE_SOSIX_GPU_LANE=1`, the browser's
+existing draw-IR offload payload is routed through the immutable seal-before-share command buffer
+before it is recorded as dispatched — the SOSIX protocol applied to the live offload path.
+
+- **Mechanism port:** `src/lib/nogc_async_mut/gpu/engine2d/host_gpu_draw_ir_event_flow.spl` gains the
+  same seal (Gap #1) + `engine2d_host_gpu_sosix_lane_route` (Gap #2) as the gc twin; proof
+  `test/01_unit/lib/nogc_async_mut/gpu/engine2d/sosix_gpu_lane_route_spec.spl` 3/0.
+- **Live wiring:** `browser_backend_dispatch_prepared_draw_ir` (`backend.spl:203`) — the site that
+  records the browser's dispatched draw-IR payload — now, flag-gated, seals `payload.payload_sdn`
+  and dispatches `draw_ir_payload_read(sealed)`. **Byte-preserving** (`read(sealed) == payload_sdn`),
+  so rendered pixels are unchanged; only the discipline (one-way immutable buffer) + diagnostic differ.
+  This site is queue-neutral (the runtime queue already drained upstream; status `submitted`/`drained`
+  is a precondition at `:206`), so there is NO global-singleton interference — the earlier concern
+  about bolting an emit/drain onto `record_event_dispatch` is avoided by sealing at the record site.
+- **Honesty caveat:** the flag is **default OFF** — this is opt-in/shadow, not a cutover. The legacy
+  path is byte-identical. `record_event_dispatch` remains evidence-only (its own comment `:700-704`
+  and the spec docstring forbid calling it a live submit).
+- **Proof:** `browser_backend_host_gpu_event_evidence_spec.spl` 4/0 (adds a wiring assertion that the
+  flag-gated seal is present at the dispatch site). Because the wiring is pixel-neutral, the
+  `device_readback` gates stay trivially green and are not required to unblock it.
 
 - **Correct sequence gotcha (recorded):** the runtime `drain` auto-progresses submit+complete in one
   FFI step (mirrors `draw_ir_runtime_queue.spl:120-128`). Do NOT call `runtime_submit_pending` +

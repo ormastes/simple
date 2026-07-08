@@ -22,7 +22,7 @@ use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache, web_render_resolved_engine2d_backend_name}
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend, web_render_backend_names}
 use std.nogc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{engine2d_draw_ir_payload_summary}
-use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary}
+use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary, engine2d_sosix_gpu_lane_enabled, engine2d_host_gpu_seal_draw_ir_payload, draw_ir_payload_read}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
 use std.io_runtime.{write_file, time_now_unix_micros}
 
@@ -211,6 +211,15 @@ fn browser_backend_dispatch_prepared_draw_ir(artifact: WebRenderArtifact, root_n
     val batch = draw_ir_batch_with_source("browser-frame-{revision}", DRAW_IR_BACKEND_GPU, embedding, commands, source)
     val packet_bytes = commands.len().to_i64() * 64
     val payload = engine2d_draw_ir_payload_summary(batch, packet_bytes)
+    if engine2d_sosix_gpu_lane_enabled():
+        # SOSIX seal-before-share (#39 Gap #2): route the browser's existing
+        # GPU-offload draw-IR payload through the immutable command-buffer gate
+        # before it is recorded as dispatched. Byte-preserving —
+        # draw_ir_payload_read(sealed) == payload.payload_sdn — so the dispatched
+        # bytes and rendered pixels are unchanged; only the discipline (one-way
+        # sealed buffer) and the diagnostic differ. Default OFF: legacy path below.
+        val sealed = engine2d_host_gpu_seal_draw_ir_payload(payload.payload_sdn)
+        return web_render_artifact_with_runtime_dispatch_payload(artifact, "dispatched", "Draw IR sealed (sosix) + dispatched to Engine2D backend", payload.packet_bytes, payload.command_checksum, draw_ir_payload_read(sealed))
     web_render_artifact_with_runtime_dispatch_payload(artifact, "dispatched", "Draw IR runtime packet dispatched to Engine2D backend", payload.packet_bytes, payload.command_checksum, payload.payload_sdn)
 
 # =========================================================================
