@@ -28,7 +28,7 @@ backend_measurement_report_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,7 +80,7 @@ expect(sdn).to_contain("binary_size_delta_bytes: 10000")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -102,10 +102,48 @@ expect(sdn).to_contain("generated_binary_format: \"ptx\"")
 expect(sdn).to_contain("generated_artifact_path_suffix: \"simple_2d_optimization.ptx\"")
 expect(sdn).to_contain("runtime_compute_target: \"cuda\"")
 expect(sdn).to_contain("runtime_execution_path: \"generated_2d_kernel\"")
-expect(sdn).to_contain("runtime_launch_api: \"rt_cuda_launch_kernel\"")
+expect(sdn).to_contain("runtime_launch_api: \"cuda_launch_api\"")
 expect(sdn).to_contain("runtime_status: \"ready\"")
 expect(sdn).to_contain("checksum: \"sha256:1234\"")
 expect(sdn).to_contain("pixel_proof: \"nonzero_pixels:4096\"")
+expect(sdn).to_contain("artifact_total_us: 660")
+expect(sdn).to_contain("offload_overhead_verdict: \"offload-overhead-contained\"")
+```
+
+</details>
+
+#### classifies measured backend speed against an explicit scalar baseline
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sample = _initialized_sample()
+expect(backend_comparison_speed_verdict(sample, 2000)).to_equal("backend-faster-than-scalar")
+expect(backend_comparison_speed_verdict(sample, 1000)).to_equal("backend-equal-to-scalar")
+expect(backend_comparison_speed_verdict(sample, 900)).to_equal("backend-slower-than-scalar")
+expect(backend_comparison_speed_verdict(sample, 0)).to_equal("missing-scalar-baseline")
+```
+
+</details>
+
+#### classifies communication overhead that dominates the measured frame
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sample = _initialized_sample()
+sample.artifact_submit_us = 700
+sample.artifact_readback_us = 400
+expect(backend_comparison_artifact_total_us(sample)).to_equal(1510)
+expect(backend_comparison_offload_overhead_verdict(sample)).to_equal("offload-overhead-dominates")
 ```
 
 </details>

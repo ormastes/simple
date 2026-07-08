@@ -97,6 +97,35 @@ fn _comparison_artifact_timings_valid(sample: BackendComparisonSample) -> bool:
         sample.artifact_submit_us > 0 and sample.artifact_sync_us >= 0 and
         sample.artifact_readback_us >= 0
 
+pub fn backend_comparison_artifact_total_us(sample: BackendComparisonSample) -> i64:
+    sample.artifact_build_us + sample.artifact_load_us + sample.artifact_submit_us +
+        sample.artifact_sync_us + sample.artifact_readback_us
+
+pub fn backend_comparison_offload_overhead_verdict(sample: BackendComparisonSample) -> text:
+    if not _is_gpu_family(sample.backend_family):
+        return "not-gpu-offload"
+    if sample.status != "Initialized":
+        return "unavailable"
+    val artifact_total = backend_comparison_artifact_total_us(sample)
+    if artifact_total <= 0:
+        return "missing-artifact-timing"
+    if sample.p50_frame_us <= 0:
+        return "missing-frame-timing"
+    if artifact_total >= sample.p50_frame_us:
+        return "offload-overhead-dominates"
+    "offload-overhead-contained"
+
+pub fn backend_comparison_speed_verdict(sample: BackendComparisonSample, scalar_p50_frame_us: i64) -> text:
+    if sample.status != "Initialized":
+        return "unavailable"
+    if scalar_p50_frame_us <= 0:
+        return "missing-scalar-baseline"
+    if sample.p50_frame_us < scalar_p50_frame_us:
+        return "backend-faster-than-scalar"
+    if sample.p50_frame_us == scalar_p50_frame_us:
+        return "backend-equal-to-scalar"
+    "backend-slower-than-scalar"
+
 fn _comparison_compiler_metadata_valid(sample: BackendComparisonSample) -> bool:
     if not _is_gpu_family(sample.backend_family):
         return true
@@ -454,6 +483,8 @@ pub fn backend_comparison_sample_sdn(sample: BackendComparisonSample) -> text:
         "artifact_submit_us: " + sample.artifact_submit_us.to_string() + " " +
         "artifact_sync_us: " + sample.artifact_sync_us.to_string() + " " +
         "artifact_readback_us: " + sample.artifact_readback_us.to_string() + " " +
+        "artifact_total_us: " + backend_comparison_artifact_total_us(sample).to_string() + " " +
+        "offload_overhead_verdict: \"" + backend_comparison_offload_overhead_verdict(sample) + "\" " +
         "render_readback_scope: \"" + _sdn_escape(sample.render_readback_scope) + "\" " +
         "offload_tag_kind: \"" + _sdn_escape(sample.offload_tag_kind) + "\" " +
         "operation_family: \"" + _sdn_escape(sample.operation_family) + "\" " +
