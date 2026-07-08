@@ -12,6 +12,7 @@
 # Usage: sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
 set -e
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+MODE="${1:-}"
 OUT="build/nvme_fw_rv32.elf"
 OBJ="build/test-artifacts/nvme_fw_rv32.o"
 START_OBJ="build/test-artifacts/nvme_fw_rv32_start.o"
@@ -27,6 +28,9 @@ OS_BOOT_BUILD="${NVME_RV32_BUILD_OS_BOOT:-0}"
 LOG_DIR="build/test-artifacts"
 OUT_LOG="$LOG_DIR/nvme_fw_rv32_build.out"
 ERR_LOG="$LOG_DIR/nvme_fw_rv32_build.err"
+PID_FILE="$LOG_DIR/nvme_fw_rv32_build.pid"
+BG_OUT_LOG="$LOG_DIR/nvme_fw_rv32_background.out"
+BG_ERR_LOG="$LOG_DIR/nvme_fw_rv32_background.err"
 
 if ! grep -q "rt_rv32_boot_optional_nvme_fw_selftest" "$BOOT"; then
   echo "NVME_RV32_BOOT_NOT_WIRED: add rt_rv32_boot_optional_nvme_fw_selftest() to $BOOT before building $OUT"
@@ -35,6 +39,37 @@ fi
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$ENTRY_DIR"
+
+if [ "$MODE" = "--status" ]; then
+  LAST_PHASE="$(grep -ahE '\[native-build\]|\[BOOTSTRAP-PHASE\]|NVME_RV32_BUILD_FAILED' "$OUT_LOG" "$ERR_LOG" "$BG_OUT_LOG" "$BG_ERR_LOG" 2>/dev/null | tail -n 1 || true)"
+  LAST_DONE="$(grep -ahE '\[BOOTSTRAP-PHASE\].*:done|NVME_RV32_BUILD_DONE|NVME_RV32_BUILD_FAILED' "$OUT_LOG" "$ERR_LOG" "$BG_OUT_LOG" "$BG_ERR_LOG" 2>/dev/null | tail -n 1 || true)"
+  if [ -f "$OUT" ]; then
+    echo "NVME_RV32_BUILD_STATUS built out=$OUT"
+    exit 0
+  fi
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "NVME_RV32_BUILD_STATUS running pid=$(cat "$PID_FILE") out=$BG_OUT_LOG err=$BG_ERR_LOG last_done=$LAST_DONE last_phase=$LAST_PHASE"
+    exit 0
+  fi
+  if [ -f "$PID_FILE" ]; then
+    echo "NVME_RV32_BUILD_STATUS stopped pid=$(cat "$PID_FILE") missing=$OUT out_log=$OUT_LOG err_log=$ERR_LOG bg_out=$BG_OUT_LOG bg_err=$BG_ERR_LOG last_done=$LAST_DONE last_phase=$LAST_PHASE"
+    exit 1
+  fi
+  echo "NVME_RV32_BUILD_STATUS missing out=$OUT out_log=$OUT_LOG err_log=$ERR_LOG"
+  exit 1
+fi
+
+if [ "$MODE" = "--background" ]; then
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "NVME_RV32_BUILD_BACKGROUND already-running pid=$(cat "$PID_FILE")"
+    exit 0
+  fi
+  setsid sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs >"$BG_OUT_LOG" 2>"$BG_ERR_LOG" < /dev/null &
+  echo $! >"$PID_FILE"
+  echo "NVME_RV32_BUILD_BACKGROUND pid=$(cat "$PID_FILE") out=$BG_OUT_LOG err=$BG_ERR_LOG"
+  exit 0
+fi
+
 rm -f "$ENTRY_DIR"/*.spl
 if [ "$OS_BOOT_BUILD" = "1" ]; then
   for logic_src in examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic*.spl; do
@@ -97,6 +132,7 @@ else
   BUILD_RUNNER=""
 fi
 if [ "$OS_BOOT_BUILD" = "1" ]; then
+  BUILD_START_EPOCH=$(date +%s)
   set +e
   $BUILD_RUNNER env SIMPLE_COMPILER_PHASE_PROFILE=1 "$SIMPLE_BIN" native-build --backend llvm \
     --source build/os/generated --source src \
@@ -105,11 +141,21 @@ if [ "$OS_BOOT_BUILD" = "1" ]; then
     --target riscv32-unknown-none \
     -o "$OUT" >>"$OUT_LOG" 2>>"$ERR_LOG"
   rc=$?
+  BUILD_END_EPOCH=$(date +%s)
+  BUILD_ELAPSED_SECS=$((BUILD_END_EPOCH - BUILD_START_EPOCH))
   set -e
   if [ "$rc" -eq 0 ]; then
+    echo "NVME_RV32_BUILD_DONE elapsed=${BUILD_ELAPSED_SECS}s" >>"$OUT_LOG"
     echo "build exit=0"
   else
-    echo "NVME_RV32_BUILD_FAILED code=$rc timeout=${TIMEOUT_SECS}s out=$OUT_LOG err=$ERR_LOG" >&2
+    BUILD_REASON="native-build-failed"
+    if [ "$rc" -eq 124 ]; then
+      BUILD_REASON="native-build-timeout"
+    fi
+    if [ "$rc" -eq 143 ] && [ "$BUILD_ELAPSED_SECS" -lt "$TIMEOUT_SECS" ]; then
+      BUILD_REASON="external-termination-before-timeout"
+    fi
+    echo "NVME_RV32_BUILD_FAILED code=$rc reason=$BUILD_REASON timeout=${TIMEOUT_SECS}s elapsed=${BUILD_ELAPSED_SECS}s out=$OUT_LOG err=$ERR_LOG" >&2
     tail -n 40 "$OUT_LOG" >&2 || true
     tail -n 40 "$ERR_LOG" >&2 || true
     exit "$rc"
@@ -180,6 +226,7 @@ EOF_START
     tail -n 40 "$ERR_LOG" >&2 || true
     exit 1
   fi
+  BUILD_START_EPOCH=$(date +%s)
   set +e
   $BUILD_RUNNER env SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 "$SIMPLE_BIN" native-build --backend llvm \
     --source build/os/generated \
@@ -187,13 +234,23 @@ EOF_START
     --target riscv32-unknown-none \
     --emit-object -o "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"
   rc=$?
+  BUILD_END_EPOCH=$(date +%s)
+  BUILD_ELAPSED_SECS=$((BUILD_END_EPOCH - BUILD_START_EPOCH))
   set -e
   if [ "$rc" -ne 0 ]; then
-    echo "NVME_RV32_BUILD_FAILED code=$rc timeout=${TIMEOUT_SECS}s out=$OUT_LOG err=$ERR_LOG" >&2
+    BUILD_REASON="native-build-failed"
+    if [ "$rc" -eq 124 ]; then
+      BUILD_REASON="native-build-timeout"
+    fi
+    if [ "$rc" -eq 143 ] && [ "$BUILD_ELAPSED_SECS" -lt "$TIMEOUT_SECS" ]; then
+      BUILD_REASON="external-termination-before-timeout"
+    fi
+    echo "NVME_RV32_BUILD_FAILED code=$rc reason=$BUILD_REASON timeout=${TIMEOUT_SECS}s elapsed=${BUILD_ELAPSED_SECS}s out=$OUT_LOG err=$ERR_LOG" >&2
     tail -n 40 "$OUT_LOG" >&2 || true
     tail -n 40 "$ERR_LOG" >&2 || true
     exit "$rc"
   fi
+  echo "NVME_RV32_BUILD_DONE elapsed=${BUILD_ELAPSED_SECS}s" >>"$OUT_LOG"
   llvm-objcopy --redefine-sym _start=__simple_unused_start "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG" || true
   if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
     echo "NVME_RV32_BUILD_FAILED link out=$OUT_LOG err=$ERR_LOG" >&2

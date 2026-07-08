@@ -1639,3 +1639,24 @@ STATUS: FAIL nvme-rv32-minimal-live build_rc=134
 
 This keeps the RV32 minimal self-hosted live checker uncommitted. The useful
 next fix is in HIR lowering recursion/stack behavior, not another wrapper shape.
+
+### RV32 wrapper now reports status/background and external termination (2026-07-08)
+
+`fw_rv32/build.shs` now mirrors the RV64 operational wrapper surface:
+`--status`, `--background`, elapsed build metadata, and failed-build reason
+classification. This prevents a missing `build/nvme_fw_rv32.elf` from collapsing
+to an opaque missing-media state after a killed build.
+
+Latest direct wrapper attempt on the self-hosted `bin/simple` still did not
+produce `build/nvme_fw_rv32.elf`:
+
+```text
+NVME_RV32_BUILD_TIMEOUT_SECS=300 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+NVME_RV32_BUILD_FAILED code=143 reason=external-termination-before-timeout timeout=300s ...
+[BOOTSTRAP-PHASE] +0ms phase2:parse:file:start build/os/generated/nvme_fw_direct_entry.spl chars=75543
+Terminated
+```
+
+This is still not a firmware logic failure: the scalar logic and production
+simulation gates remain green. The remaining blocker is the self-hosted native
+build/parse path for the generated RV32 firmware entry.
