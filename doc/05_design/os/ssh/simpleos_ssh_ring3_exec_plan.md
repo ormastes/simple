@@ -1,107 +1,154 @@
-# SimpleOS — one-shot SSH → ring-3 filesystem-exec: execution plan
+# SimpleOS — "hello world over SSH" (ring-3 filesystem-exec): execution plan
 
-Status: 2026-07-08. The OS-side execution path (run a clang-built ELF from the
-FAT32 filesystem in ring-3 to clean exit) is **DONE and verified** — see
-`scripts/os/build_clang_hello_ring3.shs` and
-`project_simpleos_clang_hello_fs_ring3`. This doc is the ordered checklist to
-close the remaining transport gap: **`ssh guest <cmd>` executes an on-disk ELF in
-ring-3 over a real SSH connection** (one-shot: the program exits and takes QEMU
-down; success is proven on the serial log).
+Status: 2026-07-08. Goal: **`ssh guest <cmd>` executes an on-disk clang-built ELF
+in ring-3 over a real SSH connection** (one-shot demo: the program exits and takes
+QEMU down; success is proven on the serial log — `hello from clang on simpleos` +
+`[user] exit rc=42`).
+
+The OS-side execution path is **DONE and verified** (see
+`scripts/os/build_clang_hello_ring3.shs`, memory
+`project_simpleos_clang_hello_fs_ring3`). The SSH transport around it is largely
+built and de-risked. **One blocker remains, and it is now root-caused to a core
+compiler/runtime ABI bug** (not a sshd bug) — see "Critical path" below.
+
+## Progress ledger (2026-07-08)
+
+| Piece | State | Evidence |
+|-------|-------|----------|
+| Clang ELF runs from FS in ring-3 → clean exit | **DONE** | `build_clang_hello_ring3.shs` self-test PASS; serial `hello from clang on simpleos` + `[user] exit rc=42` |
+| PML4[0]-safe loader mapping | **DONE** | commit `b376cb7d`; clang links at 0x10000000 |
+| EFER.NXE / crt0 `environ` / native `exit` syscall | **DONE** | commit `afbecf11` |
+| M1.5 post-vmm FAT read (`vmm_map_nvme_bar_high` after `vmm_init`) | **DONE** | commit `fbe6969a`; post-vmm `read size=13888` → hello → exit 42 |
+| Merged ring-3 + sshd kernel builds | **DONE** | `ssh_ring3_entry.spl`, `build/os/simpleos_ssh_ring3.elf` 22 MB, 0 failed (commit `6f8a3af9`) |
+| Merged kernel boots, sshd listens AFTER `vmm_init` | **DONE** | serial `pmm+vmm online (+nvme bar high)` → `[sshd] accept loop start` |
+| virtio-net (PIO) survives `vmm_init` | **DONE** | sshd accept loop + TCP connect work post-vmm; no `vmm_map_virtio_net_bar_high` needed |
+| Real host SSH client connects, TCP + version banner | **DONE** | `[tcp] Connection established`, `[sshd] accepted client`, banner sent, client version `SSH-2.0-OpenSSH_9.6p1` received |
+| **x64 SSH LOGIN completes (version → KEX → auth)** | **BLOCKED** | version exchange fails; root-caused to a C↔Simple `RuntimeValue`/`[u8]` ABI mismatch (below) |
+| SSH exec dispatch → `fs_exec_spawn_ring3` | **not started** | small; gated on login |
+| One-shot demo harness | **not started** | small; gated on login |
+| Interactive shell / return-to-scheduler | **deferred (LARGE)** | not required for one-shot |
 
 ## What already works (do not rebuild)
 
-- Ring-3 FS-exec loader: `src/os/kernel/loader/x86_64_fs_exec_ring3.spl`
-  (`x86_64_fs_exec_enter_image_ring3`) — PML4[0]-safe mapping, SysV frame, ring-3.
-- Shell-facing spawn: `src/os/kernel/loader/x86_64_fs_exec_spawn.spl`
-  (`x86_64_fs_exec_spawn`) ← `fs_exec_spawn_ring3` (`fs_exec_spawn.spl`). Reads the
-  ELF from FAT post-vmm via `_x86_64_read_spawn_bytes_and_blob`
-  (`stream_open`+`stream_read_at`+`mmio_read32` validate).
-- Kernel prereqs (landed this session): `EFER.NXE` (cpu.spl), `environ` (crt0.S),
-  native `exit` syscall (baremetal_stubs.c case 0), NVMe-BAR-post-vmm
-  (`vmm_map_nvme_bar_high()` after `vmm_init`, verified by the prod entry reading
-  POST-vmm — the shell's read ordering).
-- SSH login + auth: proven earlier; sshd is pure-Simple under `src/os/apps/sshd/`.
-- virtio-net: PIO-based (`baremetal_stubs.c` `_vnet.iobase`), guest IP 10.0.2.15,
-  QEMU host `127.0.0.1:2222` → guest `:22`.
+- **Ring-3 FS-exec loader** `src/os/kernel/loader/x86_64_fs_exec_ring3.spl`
+  (`x86_64_fs_exec_enter_image_ring3`) — PML4[0]-safe mapping (splits the kernel
+  2 MiB identity page into a private 4K PT), inline SysV frame, ring-3 iretq.
+- **Shell-facing spawn** `x86_64_fs_exec_spawn.spl` (`x86_64_fs_exec_spawn`) ←
+  `fs_exec_spawn_ring3(path,argv,envp)` (`fs_exec_spawn.spl:272`, does not return on
+  success). Reads the ELF from FAT post-vmm via `_x86_64_read_spawn_bytes_and_blob`.
+- **Kernel prereqs**: `EFER.NXE` (cpu.spl), `environ` (crt0.S), native `exit`
+  syscall (baremetal_stubs.c `rt_syscall_dispatch` case 0), `vmm_map_nvme_bar_high()`
+  after `vmm_init`.
+- **Merged SSH+ring-3 boot** `arch/x86_64/ssh_ring3_entry.spl`:
+  `arch_x86_64_early_init` + `rt_x86_tss_init` + `simpleos_nvme_init` + `rt_net_init`
+  (all BEFORE vmm) → `pmm_init_identity_range` + `vmm_init` + `vmm_map_nvme_bar_high`
+  → `SshDaemon.start()`.
+- **rv64 SSH login is proven** (durable transcripts `build/os/rv64-ssh-live.*`).
+  **x64 SSH login is NOT proven** — see the blocker.
 
-## The gap (two separate kernels today)
+## Reproducible build + boot (merged x64 SSH+ring-3 kernel)
 
-- SSH boot `examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl` does
-  ONLY `rt_net_init()` + `SshDaemon.new(22).start()` — **no nvme/vmm/ring-3**.
-- Ring-3 boot `fs_exec_prod_ring3_entry.spl` does nvme+vmm+bar-high+ring-3 but
-  **no networking/sshd**, and is one-shot.
-- SSH exec dispatch (`ssh_session_channel.spl:213 _do_live_interactive_fast_path`,
-  L241/L244/L260) matches 3 fixed strings (`true`,
-  `simple.smf --version; simple --check`) and otherwise routes to a **text
-  reporter** `ssh_exec_fat_launch_line` (`ssh_session_shell_test_ext.spl:56`) that
-  resolves a path but **never spawns**. No sshd code calls `fs_exec_spawn_ring3`.
-- Path resolution mismatch: the SSH resolver uses the **app registry**
-  (`app_registry_cached_bytes`), but the loader reads **FAT**. A real on-disk
-  `/FSEXEC.ELF` must be routed to `fs_exec_spawn_ring3(path)` (FAT read), not the
-  registry check.
+```bash
+SEED="src/compiler_rust/target/release/simple"
+# 1. build markers the entry/build require (NOT auto-generated for x64 — see gap below)
+mkdir -p build/os/generated/generated
+printf 'pub fn ssh_live_build_marker() -> text:\n    "ssh-ring3-build:manual"\n' \
+  > build/os/generated/ssh_live_build_marker.spl
+# (also build/os/generated/generated/simpleos_log_config.spl with simpleos_log_compile_* stubs)
+# 2. native-build the merged kernel
+SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$PWD/src" SIMPLE_OS_LOG_MODE=off SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+  "$SEED" native-build --source build/os/generated --source src/os --source src/lib \
+  --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 \
+  --opt-level=aggressive --log off --entry-closure \
+  --entry examples/09_embedded/simple_os/arch/x86_64/ssh_ring3_entry.spl \
+  --target x86_64-unknown-none -o build/os/simpleos_ssh_ring3.elf \
+  --linker-script examples/09_embedded/simple_os/arch/x86_64/linker.ld
+# 3. boot with net (2222->22) + NVMe disk (clang hello staged as /FSEXEC.ELF)
+qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot -machine q35 -cpu qemu64 -m 2G \
+  -kernel build/os/simpleos_ssh_ring3.elf -serial file:build/os/x64-ssh-ring3.serial.log \
+  -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+  -drive file=build/os/hello/fat32-hello.img,if=none,id=nvm,format=raw -device nvme,serial=deadbeef,drive=nvm \
+  -netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0 &
+# 4. after "[sshd] accept loop start": ssh -p 2222 root@127.0.0.1 <cmd>  (askpass password "simpleos")
+```
 
-## Execution checklist (one-shot demo)
+Known build-infra gap: the `ssh_live_build_marker` is auto-generated only for
+riscv64 targets (`os_build_run.spl:203` `_is_riscv64_live_helper_target`); x64
+needs it hand-written (above) or that gate extended to `_is_ssh_live_target`.
 
-1. **[MEDIUM] Fork a ring-3-capable SSH entry.** New
-   `arch/x86_64/ssh_ring3_entry.spl` = `ssh_live_entry.spl` + the prod init
-   sequence BEFORE `SshDaemon.start()`: `arch_x86_64_early_init()` +
-   `rt_x86_tss_init()` + `simpleos_nvme_init()` + `rt_net_init()` +
-   `pmm_init_identity_range(...)` + `vmm_init(g_pmm,0)` + `vmm_map_nvme_bar_high()`.
-   Keep `rt_net_init` BEFORE `vmm_init` so net comes up under boot page tables.
-2. **[EMPIRICAL — the one risk] Verify virtio-net survives `vmm_init`.** PIO ports
-   survive the PML4 swap, but the rx/tx DMA ring RAM must fall inside what
-   `vmm_init` maps (0..4GB identity). Boot the forked entry, confirm sshd still
-   handshakes AFTER `vmm_init`. If net drops: mitigation = receive the exec command
-   PRE-`vmm_init`, then run nvme+vmm+bar+spawn (session drops; serial proves it).
-   There is no `vmm_map_virtio_net_bar_high` today — add one only if PIO/DMA proves
-   MMIO-dependent.
-3. **[SMALL] Route the exec dispatch to a real spawn.** In
+## Critical path — the ONE blocker (root-caused)
+
+**x64 SSH login fails at version exchange.** The sshd accepts the TCP connection,
+sends its banner, and the client version arrives correctly on the C side
+(`[tcp-recv-version] text=SSH-2.0-OpenSSH_9.6p1`), but the Simple-side `[u8]` of
+that version reads back **corrupt** (`version raw bytes … hex=57579a57…`,
+length 41 correct, values wrong), so `_ssh_identification_bytes_start_ssh2` fails,
+the session falls to a second `rt_net_recv_version_text` take which returns empty
+(the version was already consumed), and it aborts "invalid client version".
+
+**Root cause is NOT the sshd** (filed:
+`doc/08_tracking/bug/x64_sshd_version_exchange_freestanding.md`). Traced to the
+core: the C runtime is internally consistent —
+`_tls_runtime_array_from_bytes` (baremetal_stubs.c:10325) builds the array as
+`runtime_array_inline_items(out)[i] = ENCODE_INT(buf[i])` and sets `out->items` to
+that inline location; `rt_bytes_u8_at` (:9623) reads
+`_rv_byte(runtime_array_items(arr)[idx])`; `runtime_array_items` (:310) returns
+`a->items`; `_rv_byte` (:6212) does `IS_INT(v)?DECODE_INT(v):v`. Build and read are
+both C in one file with the same structs → C→C is exact. The value corrupts only as
+the `[u8]` `RuntimeValue` **round-trips through the Simple x86_64 freestanding
+native-build codegen** (C `rt_boot_tcp_take_version_bytes` → Simple facade
+`rt_net_recv_version_bytes` → Simple `do_version_exchange` locals → C
+`rt_bytes_u8_at`). This is a **C↔Simple `RuntimeValue`/`[u8]` ABI / representation
+mismatch on the x64 freestanding native-build path** (heap-pointer tag / calling
+convention across the C boundary).
+
+Corroboration (same class elsewhere on x64 freestanding):
+- The ring-3 loader deliberately AVOIDS `[u8]` and parses the ELF via `mmio` on a
+  raw buffer (`x86_64_fs_exec_ring3.spl`), because `[u8]` element reads were garbage.
+- The prod entry's magic check prints `magic=248,3,0,0` for a valid ELF `[u8]` and
+  the loader ignores it, reading via mmio instead.
+
+**Why this is the gate, not a sshd reorder:** the whole SSH protocol (version →
+KEX → packet → auth) is `[u8]`-based; a version-exchange reorder to a text-first
+path would still need `char_at`/text→bytes reconstruction (also flagged unreliable,
+`ssh_session.spl:806-808`) to compute the KEX exchange hash H over the exact V_C
+bytes, and it would risk the proven rv64 lane. Fixing the ABI unblocks the entire
+x64 SSH protocol at once.
+
+## Ordered remaining steps
+
+1. **[GATE — compiler/runtime, LARGE] Fix the x64 native-build `RuntimeValue`/`[u8]`
+   ABI.** Make Simple x86_64 freestanding native-build pass heap `RuntimeValue`s
+   (esp. `[u8]` arrays) to/from the C runtime with the exact representation the C
+   runtime uses (`ENCODE_PTR`/`DECODE_PTR`, tag bits, calling convention). Minimal
+   repro: a Simple fn that calls a C fn returning a `[u8]` built by
+   `_tls_runtime_array_from_bytes`, then reads it back with `rt_bytes_u8_at` and
+   asserts the bytes — compare interp vs x64 native-build. This unblocks x64 SSH
+   login AND removes the `[u8]`-via-mmio workarounds in the loader. Needs broad
+   re-verification (all `[u8]` interop).
+2. **[SMALL] Route the exec dispatch to a real spawn.** In
    `ssh_session_channel.spl _do_live_interactive_fast_path`, for a command that
-   resolves to a FAT path, call `fs_exec_spawn_ring3(path, argv, [])` (import from
-   `os.kernel.loader.fs_exec_spawn`) instead of `ssh_exec_fat_launch_line`. Resolve
-   the path to a FAT location (accept an absolute `/…ELF` directly; or extend
-   `_ssh_shell_resolve_launch_path` to probe FAT via the loader read rather than
-   the registry). On spawn success control never returns.
-4. **[SMALL] Stage the ELF on disk + a test harness.** Bake the clang hello onto
-   the SSH boot's disk as `/FSEXEC.ELF` (reuse `patch_fsexec_image.spl`); a
-   `scripts/os/ssh_clang_hello_ring3.shs` that boots the forked entry under QEMU
-   with `-netdev user,hostfwd=tcp::2222-:22` + the NVMe disk, then host-side
-   `ssh -p 2222 root@127.0.0.1 /FSEXEC.ELF` (needs `sshpass`/key). Gate on the
-   serial log: `hello from clang on simpleos` + `[user] exit rc=42`.
-5. **[LARGE — defer] Interactive shell / return-to-scheduler.** For a persistent
-   shell (multiple commands over one SSH session), ring-3 exit must return to the
-   scheduler instead of `isa-debug-exit`. Not required for the one-shot demo.
+   resolves to a FAT path (accept an absolute `/…ELF` directly), call
+   `fs_exec_spawn_ring3(path, [path], [])` (import from
+   `os.kernel.loader.fs_exec_spawn`) instead of the text-report branch
+   (`ssh_exec_fat_launch_line`). On spawn success control never returns. CAUTION:
+   this pulls the loader into the net-only `ssh_live_entry.spl` link too — verify
+   that build still succeeds, or guard the import to the ring-3 entry.
+3. **[SMALL] One-shot demo harness** `scripts/os/ssh_clang_hello_ring3.shs`: build
+   the merged kernel (above), stage the clang hello as `/FSEXEC.ELF` (reuse
+   `examples/09_embedded/simpleos_hello_c/patch_fsexec_image.spl`), boot with net +
+   NVMe, wait for `[sshd] accept loop start`, run `ssh -p 2222 root@127.0.0.1
+   /FSEXEC.ELF` (askpass password `simpleos`), gate the serial log on `hello from
+   clang on simpleos` + `[user] exit rc=42`.
+4. **[LARGE — defer] Interactive shell / return-to-scheduler.** For multiple
+   commands over one SSH session, ring-3 exit must return to the scheduler instead
+   of `isa-debug-exit`. Not required for the one-shot demo.
 
 ## Risk summary
 
-Dominant effort = items 1+3 (mechanical). The single ballooning risk = item 2
-(net-survives-`vmm_init`), which is empirical and has a known mitigation. Item 5
-is the only genuinely large piece and is out of scope for `ssh guest run /ELF`.
-
-## Empirical results — verified 2026-07-08
-
-Item 1 (fork) and item 2 (net survives `vmm_init`) are **PROVEN**, and a new
-prerequisite blocker was found:
-
-- **Forked entry `arch/x86_64/ssh_ring3_entry.spl` BUILDS** (merged kernel:
-  sshd + net + nvme + vmm + ring-3 loader, `build/os/simpleos_ssh_ring3.elf`,
-  22 MB, 0 failed). Native-build recipe + build-marker generation
-  (`build/os/generated/ssh_live_build_marker.spl`, not auto-written for x64 —
-  gap in `os_build_run.spl:203`, riscv64-only) captured.
-- **BOOTS and sshd LISTENS after `vmm_init`** — serial:
-  `[boot] pmm+vmm online (+nvme bar high)` → `[sshd] SSH daemon listening on
-  port 22` → `[sshd] accept loop start`. So **virtio-net (PIO) survives
-  `vmm_init`** (item 2 resolved — no `vmm_map_virtio_net_bar_high` needed).
-- **TCP + version-banner exchange WORK**: a real host `ssh -p 2222
-  root@127.0.0.1 true` connects; `[tcp] Connection established`, `[sshd] accepted
-  client`, banner sent, client version `SSH-2.0-OpenSSH_9.6p1` received.
-
-**NEW BLOCKER (prerequisite, not the exec wiring): x64 SSH LOGIN itself fails at
-version exchange** under freestanding native-build — the server reads an empty
-client version and aborts. Filed:
-`doc/08_tracking/bug/x64_sshd_version_exchange_freestanding.md` (double-take
-consumes the buffered version + boxed-`[u8]` read-back). x64 SSH login has never
-passed (only rv64 is proven), so this must be fixed BEFORE item 3 (exec dispatch)
-is demonstrable end-to-end. Once x64 SSH login works, item 3 (route resolved path
-→ `fs_exec_spawn_ring3`) + item 4 (harness) complete the one-shot demo; the
-OS-side ring-3 exec they drive is already proven.
+The only remaining risk is item 1 (the x64 `RuntimeValue`/`[u8]` ABI fix) — a core
+compiler/runtime change with broad `[u8]` impact, so it needs its own careful change
+and system-wide re-verification. Everything else (2–3) is mechanical and gated on
+it; item 4 is out of scope for `ssh guest run /ELF`. Items proven this session
+(fork builds, boots, sshd listens post-vmm, net survives vmm, TCP + version banner)
+are no longer risks.
