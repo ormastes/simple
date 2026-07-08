@@ -18,6 +18,9 @@ Prove the production GUI/web host-GPU path with fail-closed evidence:
 - A nonzero backend-code drain may pass only the queue emit/drain subcheck; it is not evidence of backend-handle integration.
 - A nonzero backend-code payload drain must report `queue_nonzero_backend_last_payload_size=512`, `queue_nonzero_backend_last_payload_hash=98765`, and `queue_nonzero_backend_last_payload_text=queue probe payload command=draw_ir_rect id=runtime-backend` in the wrapper raw evidence.
 - On this Linux production lane, Vulkan, CUDA, and OpenCL child readback wrappers must report PASS; other hosts may record typed unavailable/runtime-unavailable child reasons only when the platform matrix explicitly marks that backend host-specific.
+- Child backend verdicts must come from each wrapper's final backend-specific
+  status key; a generic early `evidence_status=pass` is diagnostic only and
+  cannot override a later focused-spec or readback failure.
 - Metal and ROCm are recorded as host-unavailable on this Linux lane unless their required host runtime and tools are present.
 - Backend runtime queue integration may PASS when the joined BrowserBackend frame proves queue submit/drain metadata, a positive `browser_first_backend_handle` propagated from the Engine2D backend readback receipt, frame payload metadata/text (`browser_first_payload_size=12288`, positive `browser_first_payload_hash`, and `browser_first_payload_text=web-render-frame;backend=vulkan;pixels=3072;checksum=...`), `browser_first_readback_pixel_count`, `browser_first_readback_checksum`, `browser_first_readback_reason`, and same-frame backend device readback source `device_readback`. Synthetic runtime-queue handles remain isolated probe evidence.
 - `browser_host_event_roundtrip_status` must be `pass` so BrowserBackend host event ingress/dispatch/render telemetry is proven separately from frame readback.

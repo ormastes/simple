@@ -128,10 +128,6 @@ run_child() {
         reason="$(field_of "$reason_key" "$case_dir/build/evidence.env")"
     fi
     raw_evidence_status="$(field_of "evidence_status" "$case_dir/stdout.env")"
-    if [ "${raw_evidence_status:-}" = "pass" ]; then
-        status="pass"
-        reason="pass"
-    fi
     timed_out="false"
     if [ "$code" = "124" ]; then
         timed_out="true"
@@ -149,6 +145,7 @@ run_child() {
     append_env "readback_${name}_status" "${status:-missing}"
     append_env "readback_${name}_reason" "${reason:-missing}"
     append_env "readback_${name}_verdict" "$verdict"
+    append_env "readback_${name}_raw_evidence_status" "${raw_evidence_status:-missing}"
     append_env "readback_${name}_report" "$case_dir/report.md"
     case "$name" in
         cuda | opencl | metal | rocm)
@@ -183,6 +180,40 @@ run_child() {
         append_env "readback_directx_native_child_report" "${child_report:-$case_dir/report.md}"
     fi
 }
+
+if [ "${1:-}" = "--self-test" ]; then
+    self_dir="${BUILD_DIR}.self_test"
+    rm -rf "$self_dir"
+    mkdir -p "$self_dir"
+    BUILD_DIR="$self_dir"
+    ENV_PATH="$BUILD_DIR/evidence.env"
+    : >"$ENV_PATH"
+
+    cat >"$self_dir/vulkan_raw_pass_final_fail.shs" <<'SH'
+#!/bin/sh
+set -eu
+mkdir -p "$BUILD_DIR"
+echo "evidence_status=pass"
+cat >"$BUILD_DIR/evidence.env" <<'EOF'
+vulkan_engine2d_readback_status=fail
+vulkan_engine2d_readback_reason=focused-specs-failed
+EOF
+SH
+    chmod +x "$self_dir/vulkan_raw_pass_final_fail.shs"
+
+    run_child vulkan "$self_dir/vulkan_raw_pass_final_fail.shs" vulkan_engine2d_readback_status vulkan_engine2d_readback_reason
+    if ! grep -q '^readback_vulkan_status=fail$' "$ENV_PATH" \
+        || ! grep -q '^readback_vulkan_verdict=fail$' "$ENV_PATH" \
+        || ! grep -q '^readback_vulkan_raw_evidence_status=pass$' "$ENV_PATH"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=raw-evidence-overrode-final-status"
+        exit 1
+    fi
+
+    echo "self_test_status=pass"
+    echo "self_test_reason=backend-specific-status-wins"
+    exit 0
+fi
 
 run_queue_probe() {
     queue_probe_source="test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl"
