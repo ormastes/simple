@@ -174,6 +174,9 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
   both CPU-SIMD and software baseline rows, a software-vs-SIMD p50 ratio, and
   no fallback/unavailable reason. Latest retained evidence:
   `doc/09_report/cpu_simd_render_scale_contract_2026-07-08.md`.
+- `SIMPLE_WEB_GPU_PAINT=1` now allows `cpu_simd` through the per-primitive
+  Engine2D paint path for focused experiments; the default upload-bound
+  software/GPU present path is unchanged.
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
 - Software layout renders must not replay the already-painted framebuffer
   through an Engine2D software present/readback cycle. The 2026-06-06
