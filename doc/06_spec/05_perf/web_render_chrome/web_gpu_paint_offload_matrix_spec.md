@@ -9,8 +9,9 @@ requiring local GPU hardware:
   treats `cuda`, `vulkan`, and `metal` as GPU paint candidates, and rejects
   unknown names instead of letting them masquerade as offload;
 - the presenter route only enters GPU paint for measured winning frames, so
-  CUDA/Vulkan/Metal solid-fill wins offload while Vulkan command-overhead
-  losers, CPU backends, and disabled GPU paint stay upload-bound;
+  CUDA/Vulkan/Metal solid-fill wins offload while CUDA/Vulkan/Metal
+  command-overhead losers, CPU backends, unknown backends, and disabled GPU
+  paint stay upload-bound with explicit route verdicts;
 - solid-only frames skip CPU paint and may offload when total CPU+transfer cost
   wins, reporting `cpu-paint-offloaded` and `measured-gpu-faster`;
 - residual-heavy fill frames may still offload when saved CPU paint makes total

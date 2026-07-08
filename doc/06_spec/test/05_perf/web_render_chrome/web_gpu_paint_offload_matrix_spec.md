@@ -28,7 +28,7 @@ web_gpu_paint_offload_matrix_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,6 +76,28 @@ expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 6
 expect(simple_web_layout_render_html_should_gpu_paint(many_tiny_solid_html(), 16, 16, "vulkan", true)).to_be(false)
 expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "cpu_simd", true)).to_be(false)
 expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "vulkan", false)).to_be(false)
+```
+
+</details>
+
+#### reports why each backend and flag combination does or does not offload
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "cuda", true)).to_equal("gpu-paint:gpu-paint-transfer-win")
+expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "vulkan", true)).to_equal("gpu-paint:gpu-paint-transfer-win")
+expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "metal", true)).to_equal("gpu-paint:gpu-paint-transfer-win")
+expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "cuda", true)).to_equal("gpu-upload:communication-overhead:measured-gpu-slower-overhead")
+expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "vulkan", true)).to_equal("gpu-upload:communication-overhead:measured-gpu-slower-overhead")
+expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "metal", true)).to_equal("gpu-upload:communication-overhead:measured-gpu-slower-overhead")
+expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "cpu_simd", true)).to_equal("cpu-backend-not-gpu-offload")
+expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "unknown", true)).to_equal("unknown-backend-not-gpu-offload")
+expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "vulkan", false)).to_equal("gpu-paint-disabled")
 ```
 
 </details>
@@ -267,8 +289,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
