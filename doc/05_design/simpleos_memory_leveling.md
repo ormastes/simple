@@ -153,6 +153,7 @@ contract instead of adding a second queue-specific pager.
 - `memory_page_nic_registered(page_id)`
 - `memory_page_gpu_resident(page_id)`
 - `memory_page_from_simple_intent(page_id, intent)`
+- `memory_leveling_evidence_scope()`
 - `memory_leveling_decide(profile, page)`
 
 ## Algorithm

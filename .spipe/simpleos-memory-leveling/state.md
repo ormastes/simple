@@ -74,3 +74,13 @@ Selected options: `A + 1 + 1B`.
   '*_spec.spl' | wc -l` reported 0.
 - 2026-07-08: `sh scripts/audit/direct-env-runtime-guard.shs --working`
   reported `STATUS: PASS direct-env-runtime-guard`.
+- 2026-07-08: Final trace cleanup added explicit REQ-006 and REQ-007
+  executable contexts plus `memory_leveling_evidence_scope() == "model-only"`.
+  Focused SSpec now reports 14 examples, 0 failures.
+- 2026-07-08: Final module check passed for
+  `src/os/kernel/memory/memory_leveling.spl` and
+  `src/lib/nogc_sync_mut/memory_leveling.spl`; `src/lib`, `src/compiler`,
+  `src/app/mcp`, and `src/app/simple_lsp_mcp` checks passed from a clean
+  GitHub-head worktree. MCP stdio integration smoke failed on both the current
+  head and the memory commit parent, so it is recorded as pre-existing and not
+  caused by this lane.

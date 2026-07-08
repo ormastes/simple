@@ -28,7 +28,7 @@ simpleos_memory_leveling_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -203,6 +203,25 @@ expect(line).to_contain("reason=external-visible-unknown-owner")
 
 </details>
 
+#### REQ-006 Simple language model boundary
+
+#### treats device handles as non movable external memory
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val intent = simple_memory_device_gpu()
+val decision = memory_leveling_decide(memory_profile_heterogeneous_device(), memory_page_from_simple_intent(41, intent))
+expect(simple_memory_intent_movable(intent)).to_equal(false)
+expect(decision.action).to_equal(MEMORY_ACTION_REJECT)
+```
+
+</details>
+
 #### REQ-006A Simple language intent API
 
 #### keeps shared hot CPU intent movable and in CPU memory
@@ -260,6 +279,22 @@ expect(dma_decision.reason).to_equal("dma-pinned-not-swappable")
 
 </details>
 
+#### REQ-007 no hardware completion claim
+
+#### labels this implementation as model only evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(memory_leveling_evidence_scope()).to_equal("model-only")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -279,8 +314,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
