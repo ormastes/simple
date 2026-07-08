@@ -101,8 +101,20 @@ fn qid_in_range(qid: i64) -> bool:
     qid >= 1 and qid <= MAX_IO_QUEUES
 
 impl QueueSet:
+    me cq_meta_ready(qid: i64) -> bool:
+        qid_in_range(qid) and qid < me.cq_active.len() and qid < me.cq_size.len() and qid < me.cq_head.len() and qid < me.cq_tail.len() and qid < me.cq_len.len()
+
+    me sq_meta_ready(qid: i64) -> bool:
+        qid_in_range(qid) and qid < me.sq_active.len() and qid < me.sq_size.len() and qid < me.sq_cqid.len() and qid < me.sq_head.len() and qid < me.sq_tail.len() and qid < me.sq_len.len()
+
+    me cq_slot_ready(slot: i64) -> bool:
+        slot >= 0 and slot < me.cq_cid.len() and slot < me.cq_status.len() and slot < me.cq_data.len()
+
+    me sq_slot_ready(slot: i64) -> bool:
+        slot >= 0 and slot < me.sq_cid.len() and slot < me.sq_nsid.len() and slot < me.sq_op.len() and slot < me.sq_lba.len() and slot < me.sq_nblk.len() and slot < me.sq_data.len()
+
     me cq_effective_size(qid: i64) -> i64:
-        if not qid_in_range(qid):
+        if not me.cq_meta_ready(qid):
             return 0
         var size: i64 = me.cq_size[qid]
         if size < 0:
@@ -112,7 +124,7 @@ impl QueueSet:
         size
 
     me sq_effective_size(qid: i64) -> i64:
-        if not qid_in_range(qid):
+        if not me.sq_meta_ready(qid):
             return 0
         var size: i64 = me.sq_size[qid]
         if size < 0:
@@ -122,12 +134,12 @@ impl QueueSet:
         size
 
     me cq_is_active(qid: i64) -> bool:
-        if not qid_in_range(qid):
+        if not me.cq_meta_ready(qid):
             return false
         me.cq_active[qid] == 1
 
     me sq_is_active(qid: i64) -> bool:
-        if not qid_in_range(qid):
+        if not me.sq_meta_ready(qid):
             return false
         me.sq_active[qid] == 1
 
@@ -138,7 +150,7 @@ impl QueueSet:
 
     # ── Create / delete (admin-driven) ───────────────────────────────────────
     me create_cq(qid: i64, size: i64) -> i64:
-        if not qid_in_range(qid):
+        if not me.cq_meta_ready(qid):
             return SC_INVALID_QID
         if me.cq_active[qid] != 0:
             return SC_INVALID_QID
@@ -152,7 +164,7 @@ impl QueueSet:
         SC_SUCCESS
 
     me create_sq(qid: i64, size: i64, cqid: i64) -> i64:
-        if not qid_in_range(qid):
+        if not me.sq_meta_ready(qid):
             return SC_INVALID_QID
         if me.sq_active[qid] != 0:
             return SC_INVALID_QID
@@ -169,7 +181,7 @@ impl QueueSet:
         SC_SUCCESS
 
     me delete_sq(qid: i64) -> i64:
-        if not qid_in_range(qid):
+        if not me.sq_meta_ready(qid):
             return SC_INVALID_QID
         if me.sq_active[qid] != 1:
             return SC_INVALID_QID
@@ -184,14 +196,14 @@ impl QueueSet:
 
     # A CQ cannot be torn down while an SQ still feeds it.
     me delete_cq(qid: i64) -> i64:
-        if not qid_in_range(qid):
+        if not me.cq_meta_ready(qid):
             return SC_INVALID_QID
         if me.cq_active[qid] != 1:
             return SC_INVALID_QID
         var bound: i64 = 0
         var s: i64 = 1
         while s <= MAX_IO_QUEUES:
-            if me.sq_active[s] != 0 and me.sq_cqid[s] == qid:
+            if me.sq_is_active(s) and me.sq_cqid[s] == qid:
                 bound = 1
             s = s + 1
         if bound == 1:
@@ -229,6 +241,8 @@ impl QueueSet:
         if tail < 0 or tail >= size:
             return false
         val slot: i64 = base + tail
+        if not me.sq_slot_ready(slot):
+            return false
         me.sq_cid[slot]  = c.cid
         me.sq_nsid[slot] = c.nsid
         me.sq_op[slot]   = c.opcode
@@ -261,6 +275,8 @@ impl QueueSet:
         if head < 0 or head >= size:
             return false
         val slot: i64 = qid * MAX_QUEUE_SIZE + head
+        if not me.sq_slot_ready(slot):
+            return false
         if not cid_valid(me.sq_cid[slot]):
             return false
         true
@@ -276,6 +292,8 @@ impl QueueSet:
         if head < 0 or head >= size:
             return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val slot: i64 = base + head
+        if not me.sq_slot_ready(slot):
+            return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val cid:  i64 = me.sq_cid[slot]
         if not cid_valid(cid):
             return cmd_make(0, OP_FLUSH, 0, 0, 0)
@@ -306,6 +324,8 @@ impl QueueSet:
         if tail < 0 or tail >= size:
             return false
         val slot: i64 = base + tail
+        if not me.cq_slot_ready(slot):
+            return false
         me.cq_cid[slot]    = p.cid
         me.cq_status[slot] = p.status
         me.cq_data[slot]   = p.data
@@ -337,6 +357,8 @@ impl QueueSet:
             return true
         if me.cq_len[cqid] > 0:
             val head_slot: i64 = cqid * MAX_QUEUE_SIZE + me.cq_head[cqid]
+            if not me.cq_slot_ready(head_slot):
+                return true
             if not cid_valid(me.cq_cid[head_slot]):
                 return true
             if not cpl_status_valid(me.cq_status[head_slot]):
@@ -354,6 +376,8 @@ impl QueueSet:
         if head < 0 or head >= size:
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val slot: i64 = base + head
+        if not me.cq_slot_ready(slot):
+            return cpl_make(0, SC_INVALID_FIELD, 0)
         val cid:    i64 = me.cq_cid[slot]
         if not cid_valid(cid):
             return cpl_make(0, SC_INVALID_FIELD, 0)
@@ -556,6 +580,27 @@ fn nvme_qset_selftest() -> i64:
     fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(70000, SC_SUCCESS, 0))), 0, "post rejects oversized completion id")
     fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(-1, SC_SUCCESS, 0))), 0, "post rejects negative completion id")
     fail = fail + expect_eq(bool_to_i64(qs.cq_post(1, cpl_make(84, 70000, 0))), 0, "post rejects invalid completion status")
+
+    var qtr: QueueSet = queue_set_new()
+    qtr.create_cq(1, MAX_QUEUE_SIZE)
+    qtr.create_sq(1, MAX_QUEUE_SIZE, 1)
+    qtr.sq_cid = []
+    fail = fail + expect_eq(bool_to_i64(qtr.sq_submit(1, cmd_make(90, OP_WRITE, 17, 1, 0xD0))), 0, "truncated SQ ring submit fails closed")
+    qtr.sq_len[1] = 1
+    fail = fail + expect_eq(bool_to_i64(qtr.sq_can_fetch(1)), 0, "truncated SQ ring blocks dispatch")
+    fail = fail + expect_eq(qtr.sq_fetch(1).nblocks, 0, "truncated SQ ring fetch returns inert command")
+    fail = fail + expect_eq(qtr.next_pending_sq(), -1, "truncated SQ ring is skipped by round-robin")
+    qtr.cq_cid = []
+    fail = fail + expect_eq(bool_to_i64(qtr.cq_post(1, cpl_make(91, SC_SUCCESS, 0xD1))), 0, "truncated CQ ring post fails closed")
+    qtr.cq_len[1] = 1
+    fail = fail + expect_eq(bool_to_i64(qtr.cq_is_full(1)), 1, "truncated CQ ring blocks IO dispatch")
+    fail = fail + expect_eq(qtr.cq_reap(1).status, SC_INVALID_FIELD, "truncated CQ ring reap fails closed")
+
+    var qmeta: QueueSet = queue_set_new()
+    qmeta.sq_active = []
+    fail = fail + expect_eq(qmeta.create_sq(1, MAX_QUEUE_SIZE, 1), SC_INVALID_QID, "truncated SQ metadata create fails closed")
+    qmeta.cq_active = []
+    fail = fail + expect_eq(qmeta.create_cq(1, MAX_QUEUE_SIZE), SC_INVALID_QID, "truncated CQ metadata create fails closed")
 
     # cannot delete CQ 1 while SQ 1 is bound; reverse order works
     fail = fail + expect_eq(qs.delete_cq(1), SC_QUEUE_BUSY, "delete CQ 1 with bound SQ rejected")
