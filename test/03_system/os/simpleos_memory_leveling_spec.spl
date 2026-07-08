@@ -9,7 +9,15 @@ use std.memory_leveling.{
     simple_memory_device_gpu,
     simple_memory_network_registered,
     simple_memory_dma_pinned,
+    simple_memory_x86_cpu_real,
+    simple_memory_arm_cpu_real,
+    simple_memory_riscv_cpu_real,
+    simple_memory_vulkan_gpu_real,
+    simple_memory_metal_gpu_real,
+    simple_memory_cuda_gpu_real,
+    simple_memory_rdma_nic_real,
     simple_memory_intent_movable,
+    simple_memory_intent_real_hardware,
     simple_memory_intent_summary
 }
 use os.kernel.memory.memory_leveling.{
@@ -28,6 +36,7 @@ use os.kernel.memory.memory_leveling.{
     memory_page_unknown,
     memory_page_from_simple_intent,
     memory_leveling_evidence_scope,
+    memory_leveling_real_hardware_decide,
     memory_leveling_decide,
     profile_summary_line,
     movement_decision_line
@@ -132,7 +141,36 @@ describe "SimpleOS memory leveling policy":
             expect(nic_decision.reason).to_equal("nic-registered-not-swappable")
             expect(dma_decision.reason).to_equal("dma-pinned-not-swappable")
 
-    context "REQ-007 no hardware completion claim":
+    context "REQ-007 no unsupported hardware completion claim":
 
-        it "labels this implementation as model only evidence":
-            expect(memory_leveling_evidence_scope()).to_equal("model-only")
+        it "labels this implementation as hardware gated evidence":
+            expect(memory_leveling_evidence_scope()).to_equal("hardware-gated")
+
+    context "REQ-008 real hardware target gate":
+
+        it "requires real evidence before accepting hardware decisions":
+            val decision = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_device_gpu())
+            expect(decision.action).to_equal(MEMORY_ACTION_REJECT)
+            expect(decision.reason).to_equal("real-hardware-evidence-required")
+
+        it "applies CPU policy to real x86 ARM and RISC-V targets":
+            val x86 = memory_leveling_real_hardware_decide(memory_profile_simpleos_default(), simple_memory_x86_cpu_real())
+            val arm = memory_leveling_real_hardware_decide(memory_profile_simpleos_default(), simple_memory_arm_cpu_real())
+            val riscv = memory_leveling_real_hardware_decide(memory_profile_simpleos_default(), simple_memory_riscv_cpu_real())
+            expect(x86.action).to_equal(MEMORY_ACTION_KEEP)
+            expect(arm.action).to_equal(MEMORY_ACTION_KEEP)
+            expect(riscv.action).to_equal(MEMORY_ACTION_KEEP)
+
+        it "keeps real Vulkan Metal CUDA and RDMA device memory fail closed":
+            val vulkan = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_vulkan_gpu_real())
+            val metal = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_metal_gpu_real())
+            val cuda = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_cuda_gpu_real())
+            val rdma = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_rdma_nic_real())
+            expect(vulkan.reason).to_equal("vulkan-gpu-memory-pinned")
+            expect(metal.reason).to_equal("metal-gpu-memory-pinned")
+            expect(cuda.reason).to_equal("cuda-gpu-memory-pinned")
+            expect(rdma.reason).to_equal("rdma-registered-not-swappable")
+
+        it "marks real hardware intents separately from model intents":
+            expect(simple_memory_intent_real_hardware(simple_memory_x86_cpu_real())).to_equal(true)
+            expect(simple_memory_intent_real_hardware(simple_memory_device_gpu())).to_equal(false)

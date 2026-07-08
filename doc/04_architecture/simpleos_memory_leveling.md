@@ -25,6 +25,12 @@ their real hardware work.
 intent records and helpers only. `src/os/kernel/memory/memory_leveling.spl`
 owns the adapter from language intent to OS page state.
 
+Hardware intent fields are data only. The OS policy accepts real x86/ARM/RISC-V
+CPU targets when the intent carries real evidence, and rejects model-only
+hardware claims. Vulkan, Metal, CUDA, and RDMA targets are recognized as real
+device memory classes but remain pinned/fail-closed until the owner driver
+supplies migration, coherence, or deregistration proof.
+
 ## Profiles
 
 - `baremetal_static`: no swap, no migration, no GPU/NIC tiers, DMA pin safety
@@ -38,6 +44,7 @@ owns the adapter from language intent to OS page state.
 - DMA-pinned pages reject swap and demotion.
 - NIC-registered pages reject swap and demotion.
 - GPU-resident pages reject swap and demotion until a coherence proof exists.
+- Vulkan, Metal, CUDA, and RDMA hardware intents reject movement by default.
 - Unknown/external states reject movement.
 - Bare-metal profile always keeps pages unless a device pin forces rejection.
 

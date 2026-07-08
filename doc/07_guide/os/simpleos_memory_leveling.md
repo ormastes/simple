@@ -1,9 +1,10 @@
 # SimpleOS Memory Leveling
 
-Status: profile-policy slice.
+Status: hardware-gated profile-policy slice.
 
 The current SimpleOS memory-leveling surface is a pure policy model in
-`src/os/kernel/memory/memory_leveling.spl`. It does not move real pages yet.
+`src/os/kernel/memory/memory_leveling.spl`. It gates real hardware claims but
+does not move GPU/NIC pages yet.
 
 The Simple language-facing surface is `std.memory_leveling`. It represents
 ownership/placement intent as pure data and does not add syntax.
@@ -25,6 +26,17 @@ Language-to-OS adapter:
 - `simple_memory_network_registered()` maps to NIC-registered memory.
 - `simple_memory_dma_pinned()` maps to DMA-pinned memory.
 
+Real hardware target gate:
+
+- `simple_memory_x86_cpu_real()`, `simple_memory_arm_cpu_real()`, and
+  `simple_memory_riscv_cpu_real()` apply the CPU page policy when marked with
+  real evidence.
+- `simple_memory_vulkan_gpu_real()`, `simple_memory_metal_gpu_real()`,
+  `simple_memory_cuda_gpu_real()`, and `simple_memory_rdma_nic_real()` are
+  recognized as real device-memory targets, but remain pinned/fail-closed.
+- `memory_leveling_real_hardware_decide(profile, intent)` rejects model-only
+  hardware claims with `real-hardware-evidence-required`.
+
 Focused evidence:
 
 ```sh
@@ -32,4 +44,5 @@ bin/simple test test/03_system/os/simpleos_memory_leveling_spec.spl --mode=inter
 ```
 
 Do not claim GPUDirect, RDMA hardware paging, CXL, or live GPU/NIC migration
-from this model-only evidence.
+from this hardware-gated policy. Real device movement still needs driver-owned
+migration/coherence evidence.

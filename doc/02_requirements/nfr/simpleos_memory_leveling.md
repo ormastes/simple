@@ -48,3 +48,10 @@ or NIC/RDMA fixture bypasses.
 
 The Simple language-facing memory intent API must be pure data logic and must
 not import SimpleOS internals, hardware drivers, or runtime probes.
+
+### NFR-007: Real Hardware Claims Require Evidence
+
+Hardware-targeted decisions must reject model-only intents. x86, ARM, RISC-V,
+Vulkan, Metal, CUDA, and RDMA claims are valid only when the intent is marked
+with real hardware evidence; GPU/RDMA device memory still fails closed unless a
+future owner driver supplies migration/coherence evidence.

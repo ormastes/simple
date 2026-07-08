@@ -28,7 +28,7 @@ simpleos_memory_leveling_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -279,9 +279,9 @@ expect(dma_decision.reason).to_equal("dma-pinned-not-swappable")
 
 </details>
 
-#### REQ-007 no hardware completion claim
+#### REQ-007 no unsupported hardware completion claim
 
-#### labels this implementation as model only evidence
+#### labels this implementation as hardware gated evidence
 
 <details>
 <summary>Executable SSpec</summary>
@@ -290,7 +290,80 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(memory_leveling_evidence_scope()).to_equal("model-only")
+expect(memory_leveling_evidence_scope()).to_equal("hardware-gated")
+```
+
+</details>
+
+#### REQ-008 real hardware target gate
+
+#### requires real evidence before accepting hardware decisions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val decision = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_device_gpu())
+expect(decision.action).to_equal(MEMORY_ACTION_REJECT)
+expect(decision.reason).to_equal("real-hardware-evidence-required")
+```
+
+</details>
+
+#### applies CPU policy to real x86 ARM and RISC-V targets
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val x86 = memory_leveling_real_hardware_decide(memory_profile_simpleos_default(), simple_memory_x86_cpu_real())
+val arm = memory_leveling_real_hardware_decide(memory_profile_simpleos_default(), simple_memory_arm_cpu_real())
+val riscv = memory_leveling_real_hardware_decide(memory_profile_simpleos_default(), simple_memory_riscv_cpu_real())
+expect(x86.action).to_equal(MEMORY_ACTION_KEEP)
+expect(arm.action).to_equal(MEMORY_ACTION_KEEP)
+expect(riscv.action).to_equal(MEMORY_ACTION_KEEP)
+```
+
+</details>
+
+#### keeps real Vulkan Metal CUDA and RDMA device memory fail closed
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val vulkan = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_vulkan_gpu_real())
+val metal = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_metal_gpu_real())
+val cuda = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_cuda_gpu_real())
+val rdma = memory_leveling_real_hardware_decide(memory_profile_heterogeneous_device(), simple_memory_rdma_nic_real())
+expect(vulkan.reason).to_equal("vulkan-gpu-memory-pinned")
+expect(metal.reason).to_equal("metal-gpu-memory-pinned")
+expect(cuda.reason).to_equal("cuda-gpu-memory-pinned")
+expect(rdma.reason).to_equal("rdma-registered-not-swappable")
+```
+
+</details>
+
+#### marks real hardware intents separately from model intents
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(simple_memory_intent_real_hardware(simple_memory_x86_cpu_real())).to_equal(true)
+expect(simple_memory_intent_real_hardware(simple_memory_device_gpu())).to_equal(false)
 ```
 
 </details>
@@ -314,8 +387,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

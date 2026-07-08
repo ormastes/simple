@@ -84,3 +84,8 @@ Selected options: `A + 1 + 1B`.
   GitHub-head worktree. MCP stdio integration smoke failed on both the current
   head and the memory commit parent, so it is recorded as pre-existing and not
   caused by this lane.
+- 2026-07-08: Added hardware-gated real target intent for x86, ARM, RISC-V,
+  Vulkan, Metal, CUDA, and RDMA. Real CPU targets apply the CPU page policy;
+  Vulkan/Metal/CUDA/RDMA device memory remains pinned/fail-closed until driver
+  migration/coherence proof exists. Focused SSpec reported 18 examples, 0
+  failures; module check and docgen passed with 0 stubs.

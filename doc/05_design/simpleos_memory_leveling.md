@@ -31,7 +31,8 @@ VMM, swap, DMA, GPU, NIC/RDMA drivers
   tier, NIC tier, DMA pin enforcement, and shadow copies.
 - `MemoryLevelingPage`: page id, tier, hotness, and device-visible flags.
 - `MemoryLevelingDecision`: action plus reason text.
-- `SimpleMemoryIntent`: language-facing owner/placement/hotness intent.
+- `SimpleMemoryIntent`: language-facing owner/placement/hotness intent plus
+  optional hardware arch/backend/evidence tags.
 
 ## Profile Semantics
 
@@ -115,12 +116,21 @@ to driver calls from user code.
 
 Public language helpers:
 
+- `simple_memory_hardware_intent(...)`
 - `simple_memory_shared_cpu_hot()`
 - `simple_memory_mut_cpu_cold()`
 - `simple_memory_iso_cpu_cold()`
 - `simple_memory_device_gpu()`
 - `simple_memory_network_registered()`
 - `simple_memory_dma_pinned()`
+- `simple_memory_x86_cpu_real()`
+- `simple_memory_arm_cpu_real()`
+- `simple_memory_riscv_cpu_real()`
+- `simple_memory_vulkan_gpu_real()`
+- `simple_memory_metal_gpu_real()`
+- `simple_memory_cuda_gpu_real()`
+- `simple_memory_rdma_nic_real()`
+- `simple_memory_intent_real_hardware(intent)`
 - `simple_memory_intent_summary(intent)`
 - `simple_memory_intent_movable(intent)`
 
@@ -154,6 +164,7 @@ contract instead of adding a second queue-specific pager.
 - `memory_page_gpu_resident(page_id)`
 - `memory_page_from_simple_intent(page_id, intent)`
 - `memory_leveling_evidence_scope()`
+- `memory_leveling_real_hardware_decide(profile, intent)`
 - `memory_leveling_decide(profile, page)`
 
 ## Algorithm
@@ -166,6 +177,9 @@ contract instead of adding a second queue-specific pager.
 4. In `heterogeneous_device`, keep hot CPU pages, demote cold CPU pages, and
    preserve explicit device states for future hardware integration.
 5. Unknown states reject by default.
+6. Hardware-targeted intents must carry real evidence. x86/ARM/RISC-V CPU
+   targets use ordinary CPU policy; Vulkan, Metal, CUDA, and RDMA targets stay
+   pinned/fail-closed until their owner driver provides safe movement proof.
 
 ## Decision Reasons
 
@@ -179,6 +193,13 @@ Decision reasons are stable evidence strings:
 - `cpu-page-kept`
 - `external-visible-unknown-owner`
 - `unknown-page-state`
+- `real-hardware-evidence-required`
+- `unsupported-cpu-hardware-target`
+- `vulkan-gpu-memory-pinned`
+- `metal-gpu-memory-pinned`
+- `cuda-gpu-memory-pinned`
+- `rdma-registered-not-swappable`
+- `unsupported-hardware-backend`
 
 These strings are intentionally boring. They let specs, operator docs, and later
 QEMU evidence agree without parsing complex objects.

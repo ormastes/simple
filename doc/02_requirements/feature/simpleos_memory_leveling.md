@@ -55,3 +55,11 @@ SimpleOS must be able to adapt that intent into its OS page policy model.
 This implementation must not claim real GPUDirect, RDMA hardware paging, CXL,
 or live GPU/NIC migration. Model evidence is valid only when labeled as model
 evidence.
+
+### REQ-008: Real Hardware Target Gate
+
+Simple memory intents must distinguish model evidence from real hardware
+evidence for x86, ARM, RISC-V, Vulkan, Metal, CUDA, and RDMA targets. Real
+x86/ARM/RISC-V CPU targets may use the CPU page policy. Real Vulkan, Metal,
+CUDA, and RDMA targets must remain pinned/fail-closed until the owning driver
+supplies a safe migration or deregistration proof.
