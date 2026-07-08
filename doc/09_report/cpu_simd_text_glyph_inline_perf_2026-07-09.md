@@ -60,7 +60,40 @@ checksum but did not improve the retained 8K row:
 The next useful target is the full Simple Web layout/paint stage split, not
 another backend-only text-loop micro-change.
 
+## Layout/Paint Stage Split
+
+An opt-in trace flag was added to
+`src/app/wm_compare/backend_measurement_software_export.spl` so the same
+generated benchmark HTML can run through
+`simple_web_layout_render_html_software_pixels_traced` without changing the
+normal render-loop measurement.
+
+4K trace:
+
+- `parse_html_ms=1`, `extract_css_ms=0`, `compute_styles_ms=1`,
+  `layout_ms=0`, `paint_ms=201`.
+- Total: `204480us`.
+- Checksum: `sum32:32105444634193792`.
+
+8K trace:
+
+- `parse_html_ms=1`, `extract_css_ms=0`, `compute_styles_ms=1`,
+  `layout_ms=0`, `paint_ms=776`.
+- Total: `779724us`.
+- Checksum: `sum32:135445232233405312`.
+
+The retained 8K bottleneck is therefore paint/fill bandwidth over the full
+framebuffer, not parse, CSS, style, or layout.
+
 ## Verification
 
 - `SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean`
   passed: `2 examples, 0 failures`.
+- `SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter --clean`
+  passed: `24 examples, 0 failures`.
+- Normal retained 8K CPU-SIMD row after adding the opt-in trace flag:
+  `943683us`, checksum `sum32:135445232233405312`, full `7680x4320`,
+  `gui_perf_benchmark_screen_size_reduced=false`.
+- `sh scripts/audit/direct-env-runtime-guard.shs --working` and `--staged`
+  passed.
+- `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.

@@ -6,6 +6,7 @@
 
 use app.wm_compare.backend_measurement_report.{BackendComparisonSample, backend_comparison_samples_sdn}
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels_traced}
 use std.nogc_sync_mut.sffi.io.{file_write_text}
 use std.io_runtime.{get_args}
 use std.nogc_sync_mut.io.time_ops.{time_now_micros}
@@ -40,6 +41,10 @@ fn _arg_dpi_source(args: [text]) -> text:
     if _arg_value(args, "--dpi", "") == "":
         return "default"
     "override"
+
+fn _arg_enabled(args: [text], key: text) -> bool:
+    val raw = _arg_value(args, key, "")
+    raw == "1" or raw == "true" or raw == "yes"
 
 fn _positive_elapsed_us(start_us: i64) -> i64:
     val elapsed = time_now_micros() - start_us
@@ -137,6 +142,22 @@ pub fn software_only_render_loop_export_sdn(args: [text]) -> text:
     val backend = _arg_value(args, "--software-render-backend", "software")
     val fixture_id = _arg_value(args, "--fixture", "software-render-loop")
     val html = _sample_html(fixture_id)
+    if _arg_enabled(args, "--trace-layout-stages"):
+        val trace_start_us = time_now_micros()
+        val trace_pixels = simple_web_layout_render_html_software_pixels_traced(html, width, height)
+        val trace_elapsed_us = _positive_elapsed_us(trace_start_us)
+        val trace_checksum = _checksum_u32_pixels(trace_pixels)
+        val trace_nonzero = _nonzero_pixels(trace_pixels)
+        return "gui_perf_layout_trace_total_us=" + trace_elapsed_us.to_string() + "\n" +
+            "gui_perf_layout_trace_checksum=sum32:" + trace_checksum.to_string() + "\n" +
+            "gui_perf_layout_trace_pixel_proof=nonzero_pixels:" + trace_nonzero.to_string() + "\n" +
+            "gui_perf_benchmark_dpi=" + dpi.to_string() + "\n" +
+            "gui_perf_benchmark_dpi_default=300\n" +
+            "gui_perf_benchmark_dpi_source=" + _arg_dpi_source(args) + "\n" +
+            "gui_perf_benchmark_density_profile=retina\n" +
+            "gui_perf_benchmark_logical_pixels=" + width.to_string() + "x" + height.to_string() + "\n" +
+            "gui_perf_benchmark_physical_pixels=" + width.to_string() + "x" + height.to_string() + "\n" +
+            "gui_perf_benchmark_screen_size_reduced=false"
     val supported_backend = _is_supported_software_backend(backend)
     var warmup = 0
     if supported_backend:
