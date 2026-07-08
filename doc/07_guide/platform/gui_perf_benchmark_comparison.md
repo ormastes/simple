@@ -195,10 +195,11 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
    benchmark row and CPU drawing-library compare fields. The focused native
    scale contract captures 8K p50 timing and no-reduction proof; release-grade
    performance claims still need repeated runs on the target hardware.
-   Cross-arch completion still needs current aarch64 NEON and riscv64 RVV
-   matrix rows; run `check-cpu-simd-engine2d-arch-matrix.shs` with target
-   binaries and strict mode. riscv64 also needs the tracked target-binary RVV
-   proof before it can pass as native SIMD rather than scalar-correct.
+   Cross-arch target-native-build smoke now builds and runs x86_64, aarch64,
+   and riscv64 outputs. Completion still needs current aarch64 NEON and
+   riscv64 RVV Simple SIMD runtime matrix rows, plus strict mode with matching
+   target Simple binaries, before those rows can pass as native SIMD rather
+   than scalar-correct.
 3. **Tauri integration**: Needs `cargo-tauri` CLI + WebKitGTK dev package
 4. **Software text/layout optimization**: the real software render-loop row is
    still far slower than JS/GTK at 320x240; move bitmap/vector font and text-blit

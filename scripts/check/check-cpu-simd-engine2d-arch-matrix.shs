@@ -8,6 +8,8 @@ BUILD_DIR="${BUILD_DIR:-build/cpu-simd-engine2d-arch-matrix}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/cpu_simd_engine2d_arch_matrix_$(date -u +%F).md}"
 STRICT="${CPU_SIMD_ARCH_MATRIX_STRICT:-0}"
 SKIP_RUN="${CPU_SIMD_ARCH_MATRIX_SKIP_RUN:-0}"
+TARGET_BUILD="${CPU_SIMD_ARCH_MATRIX_TARGET_BUILD:-0}"
+NATIVE_BUILD_SIMPLE="${CPU_SIMD_ARCH_MATRIX_NATIVE_BUILD_SIMPLE:-src/compiler_rust/target/debug/simple}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 
@@ -82,6 +84,81 @@ compile_runtime_owner() {
     write_kv "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_flags" "$flags"
 }
 
+target_triple() {
+    case "$1" in
+        x86_64) printf '%s' "x86_64-unknown-linux-gnu" ;;
+        aarch64) printf '%s' "aarch64-unknown-linux-gnu" ;;
+        riscv64) printf '%s' "riscv64gc-unknown-linux-gnu" ;;
+    esac
+}
+
+target_runner() {
+    case "$1" in
+        x86_64) printf '%s' "" ;;
+        aarch64) printf '%s' "qemu-aarch64 -L /usr/aarch64-linux-gnu" ;;
+        riscv64) printf '%s' "qemu-riscv64 -L /usr/riscv64-linux-gnu" ;;
+    esac
+}
+
+target_file_pattern() {
+    case "$1" in
+        x86_64) printf '%s' "x86-64" ;;
+        aarch64) printf '%s' "ARM aarch64" ;;
+        riscv64) printf '%s' "RISC-V" ;;
+    esac
+}
+
+run_target_binary_build() {
+    arch="$1"
+    arch_dir="$BUILD_DIR/$arch"
+    out_bin="$arch_dir/llvm_nested_method_probe"
+    triple="$(target_triple "$arch")"
+    runner="$(target_runner "$arch")"
+    mkdir -p "$arch_dir"
+
+    if [ "$TARGET_BUILD" != "1" ]; then
+        status=unavailable
+        reason=disabled
+    elif [ ! -x "$NATIVE_BUILD_SIMPLE" ]; then
+        status=unavailable
+        reason=missing-native-build-driver
+    elif [ "$runner" != "" ] && ! command -v "$(printf '%s' "$runner" | awk '{print $1}')" >/dev/null 2>&1; then
+        status=unavailable
+        reason=missing-qemu-runner
+    else
+        set +e
+        "$NATIVE_BUILD_SIMPLE" native-build --target="$triple" \
+            --source examples --entry examples/llvm_nested_method_probe.spl \
+            --entry-closure --runtime-bundle core-c-bootstrap --threads 1 \
+            --timeout 120 -o "$out_bin" >"$arch_dir/native-build.stdout.txt" 2>"$arch_dir/native-build.stderr.txt"
+        build_code=$?
+        file "$out_bin" >"$arch_dir/file.txt" 2>/dev/null
+        file_code=$?
+        # shellcheck disable=SC2086
+        $runner "$out_bin" >"$arch_dir/run.stdout.txt" 2>"$arch_dir/run.stderr.txt"
+        run_code=$?
+        set -e
+        if [ "$build_code" -ne 0 ]; then
+            status=fail
+            reason="native-build-exit-$build_code"
+        elif [ "$file_code" -ne 0 ] || ! grep -q "$(target_file_pattern "$arch")" "$arch_dir/file.txt"; then
+            status=fail
+            reason=target-file-mismatch
+        elif [ "$run_code" -ne 0 ]; then
+            status=fail
+            reason="target-run-exit-$run_code"
+        else
+            status=pass
+            reason=target-binary-ran
+        fi
+    fi
+
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_target_binary_status" "$status"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_target_binary_reason" "$reason"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_target_binary_triple" "$triple"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_target_binary_path" "$out_bin"
+}
+
 run_arch() {
     arch="$1"
     current_host="$2"
@@ -133,12 +210,17 @@ rm -f "$ENV_PATH" "$REPORT_PATH"
 HOST_ARCH="$(host_arch)"
 write_kv cpu_simd_engine2d_arch_matrix_host_arch "$HOST_ARCH"
 write_kv cpu_simd_engine2d_arch_matrix_strict "$STRICT"
+write_kv cpu_simd_engine2d_arch_matrix_target_build "$TARGET_BUILD"
+write_kv cpu_simd_engine2d_arch_matrix_native_build_simple "$NATIVE_BUILD_SIMPLE"
 
 for arch in x86_64 aarch64 riscv64; do
     run_arch "$arch" "$HOST_ARCH"
 done
 for arch in x86_64 aarch64 riscv64 riscv64_rvv; do
     compile_runtime_owner "$arch"
+done
+for arch in x86_64 aarch64 riscv64; do
+    run_target_binary_build "$arch"
 done
 
 passed=0
@@ -162,10 +244,23 @@ for arch in x86_64 aarch64 riscv64 riscv64_rvv; do
         *) runtime_missing=$((runtime_missing + 1)) ;;
     esac
 done
+target_binary_failed=0
+target_binary_missing=0
+for arch in x86_64 aarch64 riscv64; do
+    status="$(env_value "$ENV_PATH" "cpu_simd_engine2d_arch_matrix_${arch}_target_binary_status")"
+    case "$status" in
+        pass) ;;
+        fail) target_binary_failed=$((target_binary_failed + 1)) ;;
+        *) target_binary_missing=$((target_binary_missing + 1)) ;;
+    esac
+done
 
 overall=pass
 reason=all-arches-pass
-if [ "$runtime_failed" -gt 0 ]; then
+if [ "$target_binary_failed" -gt 0 ]; then
+    overall=fail
+    reason=target-binary-build-failed
+elif [ "$runtime_failed" -gt 0 ]; then
     overall=fail
     reason=runtime-owner-cross-compile-failed
 elif [ "$failed" -gt 0 ]; then
@@ -185,6 +280,8 @@ write_kv cpu_simd_engine2d_arch_matrix_unavailable_count "$missing"
 write_kv cpu_simd_engine2d_arch_matrix_failed_count "$failed"
 write_kv cpu_simd_engine2d_arch_matrix_runtime_compile_unavailable_count "$runtime_missing"
 write_kv cpu_simd_engine2d_arch_matrix_runtime_compile_failed_count "$runtime_failed"
+write_kv cpu_simd_engine2d_arch_matrix_target_binary_unavailable_count "$target_binary_missing"
+write_kv cpu_simd_engine2d_arch_matrix_target_binary_failed_count "$target_binary_failed"
 write_kv cpu_simd_engine2d_arch_matrix_status "$overall"
 write_kv cpu_simd_engine2d_arch_matrix_reason "$reason"
 

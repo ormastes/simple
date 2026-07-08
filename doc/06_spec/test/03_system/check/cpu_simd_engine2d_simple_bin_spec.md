@@ -72,6 +72,8 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
 - REQ-CPU-SIMD-ENGINE2D-BIN-005: Runtime owner cross-compiles the native
   Engine2D SIMD rows for x86_64, aarch64, riscv64, and RVV riscv64 when the
   matching C compilers are present.
+- REQ-CPU-SIMD-ENGINE2D-BIN-006: Optional target-binary proof builds and runs
+  x86_64, aarch64, and riscv64 native-build outputs independently.
 
 ## Plan
 
@@ -167,7 +169,7 @@ expect(src_code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -181,6 +183,12 @@ expect(script).to_contain("riscv64)")
 expect(script).to_contain("riscv64_rvv")
 expect(script).to_contain("rv64gcv")
 expect(script).to_contain("runtime_compile_status")
+expect(script).to_contain("CPU_SIMD_ARCH_MATRIX_TARGET_BUILD")
+expect(script).to_contain("target_binary_status")
+expect(script).to_contain("target-binary-ran")
+expect(script).to_contain("qemu-aarch64 -L /usr/aarch64-linux-gnu")
+expect(script).to_contain("qemu-riscv64 -L /usr/riscv64-linux-gnu")
+expect(script).to_contain("examples/llvm_nested_method_probe.spl")
 expect(script).to_contain("strict-requires-all-arches-pass")
 
 val runtime = file_read("src/runtime/runtime_simd_dispatch.c")
@@ -202,6 +210,10 @@ expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_aarch64_status=unavai
 expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_riscv64_status=unavailable")
 expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_riscv64_rvv_runtime_compile_status=")
 expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_runtime_compile_failed_count=")
+expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_x86_64_target_binary_status=unavailable")
+expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_aarch64_target_binary_status=unavailable")
+expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_riscv64_target_binary_status=unavailable")
+expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_target_binary_unavailable_count=3")
 expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_status=partial")
 
 val strict_root = root + "-strict"
