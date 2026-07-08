@@ -42,9 +42,10 @@ silicon. The simulation boundary is deliberate and unchanged:
       Get/Set Features, Create/Delete IO SQ/CQ, Get Log Page, **Abort, Async Event Request,
       Format NVM, Firmware Download/Commit**; IO: Read/Write/Flush/Trim. Unknown opcode →
       `SC_INVALID_OPCODE`; LBA/NLB out of range → `SC_LBA_RANGE` with **no integer overflow**
-      (the overflow bypass that could index `l2p[]` out of range is fixed). Invalid IO NSIDs are
-      rejected before media access in the single-namespace model. Malformed input never crashes;
-      negative-path tests at `cmd_validate` and the queue level.
+      (the overflow bypass that could index `l2p[]` out of range is fixed). Invalid Identify
+      Namespace requests and IO NSIDs are rejected before media access in the single-namespace
+      model. Malformed input never crashes; negative-path tests at `cmd_validate`, the queue
+      level, and the controller E2E gate.
 - [x] **Durability.** A power cycle wipes *all* volatile DRAM state (write-back map cache + band
       valid bitmap); recovery replays the journal onto the flash-resident L2P, rebuilds the band
       bitmap, and re-applies the (persistent) bad-block table; committed writes survive, trims

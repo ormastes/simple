@@ -64,8 +64,8 @@ The full-controller layer, on top of the FTL/FIL stack (legacy single-queue
   drop-in for `fil_nand.Nand`** — same `program/read_page/erase_block/erase_count/inject_*/set_bad`
   seam, each driving the ONFI bus internally.
 - **`nvme_main.spl`** — the controller acceptance e2e: host bring-up (Identify → Features →
-  Create CQ→SQ) → multi-queue IO + round-robin → negative cases (SQ→missing-CQ, delete-bound-CQ)
-  → reverse-order teardown → SMART log → power-cycle survival.
+  Create CQ→SQ) → multi-queue IO + round-robin → negative cases (SQ→missing-CQ, invalid
+  namespace, delete-bound-CQ) → reverse-order teardown → SMART log → power-cycle survival.
 
 **The FIL runs on the ONFI device** (plan phase E3, done): `fil.spl` composes `NandDevice` (not the
 behavioural `fil_nand.Nand`), so every write/read/GC-erase/recovery-OOB-scan in `sim_main` and
