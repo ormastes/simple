@@ -917,27 +917,36 @@ RESULT: FAIL (serial empty)
 ```
 
 The RV64 wrapper now uses QEMU's default OpenSBI firmware. Rebuilding the
-`target_core` probe after adding an early `_start` UART marker shows that
-OpenSBI reaches the firmware entry, but the Simple selftest path still does
-not reach the PASS marker:
+`target_core` probe after adding an early `_start` UART marker showed that
+OpenSBI reaches the firmware entry. The first generated probe still looped
+because the imported helper calls lowered to `jalr a0` without loading the
+callee address. The target-core probe now keeps the two constant target checks
+inside the exported entry so this boot slice exercises the RV64 firmware
+startup path without that imported-call lowering bug.
 
 ```text
-`sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs build/nvme_fw_rv64_target_core.elf`
+$ NVME_RV64_BUILD_SECTION=target_core NVME_RV64_BUILD_TIMEOUT_SECS=90 \
+  sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs
+build/nvme_fw_rv64_target_core.elf: ELF 64-bit LSB executable, UCB RISC-V ...
+
+$ NVME_RV64_BOOT_LOG=build/nvme_fw_rv64_target_core_serial.log \
+  sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs build/nvme_fw_rv64_target_core.elf
 --- serial ---
 RV64 ENTRY
-RV64 ENTRY
-...
+SimpleOS RV64
+[BOOT] boot complete
+ALL RV64 NVME FW CHECKS PASS
 --- end ---
-RESULT: FAIL (marker not found)
+RESULT: PASS
 ```
 
-So the direct RV64 path can now build a real 2-file firmware probe, but that
-partial probe is not yet a boot PASS and must not be treated as production
-firmware completion.
+So the direct RV64 path can now build and boot a real 1-file target-core
+firmware probe. It is still not full production firmware completion because
+the full `all` closure image is not built and booted yet.
 
 The wrapper still classifies truly empty serial logs as `serial empty`; after
-the OpenSBI fix, the current target-core blocker is `marker not found` after
-entry is reached.
+the OpenSBI fix, the remaining RV64 blocker is the full firmware closure, not
+the target-core boot path.
 
 ## Update — elapsed evidence shows external termination before 120s cap
 
