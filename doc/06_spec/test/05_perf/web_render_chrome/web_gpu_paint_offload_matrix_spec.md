@@ -28,7 +28,7 @@ web_gpu_paint_offload_matrix_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -57,6 +57,25 @@ expect(web_gpu_paint_backend_verdict("cuda")).to_equal("gpu-paint-candidate")
 expect(web_gpu_paint_backend_verdict("vulkan")).to_equal("gpu-paint-candidate")
 expect(web_gpu_paint_backend_verdict("metal")).to_equal("gpu-paint-candidate")
 expect(web_gpu_paint_backend_verdict("unknown")).to_equal("unknown-backend-not-gpu-offload")
+```
+
+</details>
+
+#### routes only measured winning frames into the GPU paint path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "cuda", true)).to_be(true)
+expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "vulkan", true)).to_be(true)
+expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "metal", true)).to_be(true)
+expect(simple_web_layout_render_html_should_gpu_paint(many_tiny_solid_html(), 16, 16, "vulkan", true)).to_be(false)
+expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "cpu_simd", true)).to_be(false)
+expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "vulkan", false)).to_be(false)
 ```
 
 </details>
@@ -248,8 +267,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

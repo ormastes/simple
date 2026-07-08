@@ -199,6 +199,23 @@ pub fn web_gpu_paint_economics(frame: WebGpuPaintFrame, base: u32) -> WebGpuPain
         "not-offloaded"
     WebGpuPaintEconomics(frame_pixels: frame_pixels, cpu_paint_pixels: frame.cpu_paint_pixels, fill_op_count: op_count, fill_pixels: fill_pixels, residual_pixels: residual_pixels, upload_bound_transfer_pixels: upload_transfer, gpu_paint_transfer_pixels: gpu_transfer, upload_bound_total_pixels: upload_total, gpu_paint_total_pixels: gpu_total, should_offload: should, reason: reason, cpu_job_verdict: cpu_job_verdict, speed_verdict: speed_verdict)
 
+fn _should_use_gpu_paint(frame: WebGpuPaintFrame, backend_name: text, base: u32, gpu_paint: bool) -> bool:
+    if not gpu_paint:
+        return false
+    if web_gpu_paint_backend_verdict(backend_name) != "gpu-paint-candidate":
+        return false
+    web_gpu_paint_economics(frame, base).should_offload
+
+pub fn simple_web_layout_render_html_should_gpu_paint(html: text, width: i32, height: i32, backend_name: text, gpu_paint: bool) -> bool:
+    val normalized_backend = backend_name.trim().lower()
+    if not gpu_paint:
+        return false
+    if web_gpu_paint_backend_verdict(normalized_backend) != "gpu-paint-candidate":
+        return false
+    val base = _base_for(html)
+    val frame = simple_web_layout_render_html_gpu_frame(html, width, height)
+    _should_use_gpu_paint(frame, normalized_backend, base, true)
+
 # ---------------------------------------------------------------------------
 # GPU-paint present: real per-primitive Engine2D dispatch
 # ---------------------------------------------------------------------------
@@ -286,7 +303,9 @@ pub fn simple_web_layout_render_html_readback_paint(html: text, width: i32, heig
     val normalized_backend = backend_name.trim().lower()
     if gpu_paint and web_gpu_paint_backend_verdict(normalized_backend) == "gpu-paint-candidate":
         val frame = simple_web_layout_render_html_gpu_frame(html, width, height)
-        return present_gpu_paint_readback(frame, normalized_backend, base)
+        if _should_use_gpu_paint(frame, normalized_backend, base, true):
+            return present_gpu_paint_readback(frame, normalized_backend, base)
+        return present_layout_pixels_with_engine2d_readback(frame.fb, width, height, backend_name, base)
     val pixels = simple_web_layout_render_html_software_pixels(html, width, height)
     present_layout_pixels_with_engine2d_readback(pixels, width, height, backend_name, base)
 
