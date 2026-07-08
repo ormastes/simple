@@ -120,6 +120,8 @@ ELECTRON_BITMAP_TIMEOUT_SECS=60 sh scripts/check/check-production-gui-web-render
 
 Pass condition: generated Metal readback and raw Metal framebuffer readback
 report `pass`; production renderer parity wrapper must not use blur/tolerance.
+The generated Metal wrapper self-test rejects missing submit/readback, zero
+per-op checksums, and checksum mismatches.
 
 Local status: host-unavailable on Linux; current acceptable reason is
 `metal-requires-macos` for the production renderer wrapper and
@@ -143,6 +145,8 @@ sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 
 Pass condition: ROCm module verified, submit attempted, readback available, and
 per-op checksums match for fill/copy/alpha/scroll.
+The ROCm wrapper self-test rejects missing submit/readback, zero per-op
+checksums, and checksum mismatches.
 
 Local status: host-unavailable; no AMD GPU is visible and `rocminfo` is absent.
 

@@ -98,6 +98,8 @@ Promotion keys:
 expected/actual checksums, aggregate `readback_metal_verdict=pass`,
 `metal_spark_task_status=pass`, `metal_normal_llm_verification_status=pass`,
 and `metal_host_availability=host-available`.
+The Metal wrapper self-test rejects missing submit/readback, zero per-op
+checksums, and checksum mismatches.
 
 ### Windows DirectX
 
@@ -148,6 +150,8 @@ Promotion keys:
 expected/actual checksums, aggregate `readback_rocm_verdict=pass`,
 `rocm_spark_task_status=pass`, `rocm_normal_llm_verification_status=pass`,
 and `rocm_host_availability=host-available`.
+The ROCm wrapper self-test rejects missing submit/readback, zero per-op
+checksums, and checksum mismatches.
 
 ### WebGPU
 
