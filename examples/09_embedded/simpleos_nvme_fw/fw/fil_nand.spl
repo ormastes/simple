@@ -6,6 +6,13 @@ Depends only on nvme_types and the ECC utility used for OOB parity.
 use nvme_types.*
 use fil_ecc.*
 
+fn nand_erase_counter_next(v: i64) -> i64:
+    if v < 0:
+        return 1
+    if v >= FW_SAFE_I64_LIMIT:
+        return FW_SAFE_I64_LIMIT
+    v + 1
+
 # ── NandRead: result returned by read_page ────────────────────────────────────
 struct NandRead:
     data: i64
@@ -104,7 +111,7 @@ impl Nand:
             me.oob_ecc[ppn] = 0
             me.page_err[ppn] = 0
             pg = pg + 1
-        me.blk_erase[blk] = me.blk_erase[blk] + 1
+        me.blk_erase[blk] = nand_erase_counter_next(me.blk_erase[blk])
         me.blk_wp[blk] = 0
         me.blk_state[blk] = BLK_FREE
         NAND_OK
@@ -202,8 +209,12 @@ fn nand_selftest() -> i64:
     failures = failures + expect_eq(nand.read_page(0).err, 0, "corrupted negative read error clamps to zero")
     nand.blk_erase[1] = -5
     failures = failures + expect_eq(nand.erase_count(1), 0, "corrupted negative erase count clamps to zero")
+    failures = failures + expect_eq(nand.erase_block(1), NAND_OK, "erase recovers corrupted negative erase count")
+    failures = failures + expect_eq(nand.erase_count(1), 1, "erase count recovers from corrupted negative value")
     nand.blk_erase[1] = FW_OVERFLOW_TEST_SIZE + 1
     failures = failures + expect_eq(nand.erase_count(1), FW_SAFE_I64_LIMIT, "corrupted oversized erase count saturates")
+    failures = failures + expect_eq(nand.erase_block(1), NAND_OK, "erase still succeeds with saturated erase count")
+    failures = failures + expect_eq(nand.erase_count(1), FW_SAFE_I64_LIMIT, "erase count remains saturated after oversized value")
 
     val ppn3: i64 = block_first_ppn(3)
     rc = nand.program(ppn3, 42, 3, 0xCD)
