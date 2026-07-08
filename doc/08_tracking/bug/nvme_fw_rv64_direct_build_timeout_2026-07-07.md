@@ -794,6 +794,36 @@ Terminated
 
 The current measured timeout is now around `logic_ecc_compute_cases.spl`.
 
+## Update — ECC compute payload split, probe reaches I/O command cases
+
+`logic_ecc_compute.spl` was reduced to the compute entrypoint, with Hamming
+payload construction moved into `logic_ecc_compute_payload.spl`. The scalar
+host logic gate remains green:
+
+```text
+bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl --mode=interpreter
+All checks passed (1 file(s))
+
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+A 120s RV64 direct build retry still exits 143 before producing
+`build/nvme_fw_rv64.elf`, but this run got through ECC compute, journal, map,
+band, scheduler, power, HIL, and queue-phase cases before stopping at I/O
+command cases:
+
+```text
+[BOOTSTRAP-PHASE] ... logic_ecc_compute_cases.spl chars=276
+[BOOTSTRAP-PHASE] ... logic_ecc_compute_cases.spl
+[BOOTSTRAP-PHASE] ... logic_journal_record_cases.spl chars=351
+[BOOTSTRAP-PHASE] ... logic_queue_phase_cases.spl chars=332
+[BOOTSTRAP-PHASE] ... logic_io_command_cases.spl chars=263
+Terminated
+```
+
+The current measured timeout is now around `logic_io_command_cases.spl`.
+
 ## Update — namespace guard cases split
 
 `logic_namespace_guard_cases.spl` was reduced to a small case facade, with
