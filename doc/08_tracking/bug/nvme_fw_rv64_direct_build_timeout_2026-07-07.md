@@ -837,6 +837,29 @@ This confirms that secondary-only is much smaller than the full 177-file
 closure, but the current host/compiler path still cannot produce even that
 section within the observed 70-second process lifetime.
 
+## Update — target subsystem reaches duplicate-main failure
+
+The RV64 direct build wrapper now supports `NVME_RV64_BUILD_SECTION=target`.
+This is a smallest useful secondary subsystem probe: it imports the target
+profile self-test and writes `build/nvme_fw_rv64_target.elf` instead of the full
+firmware path.
+
+A 90s target-subsystem probe reduced the entry closure to 6 files and got past
+parse/lowering/backend driver work, then failed during emit-object relocatable
+link:
+
+```text
+[native-build] Entry closure files: 6
+[native-build] Driver start: inputs=6 backend=llvm mode=dynload
+[BOOTSTRAP-PHASE] +1ms phase1:load_sources:done n_sources=6
+NVME_RV64_BUILD_FAILED code=1 reason=native-build-duplicate-symbol timeout=90s elapsed=50s ...
+error: emit-object relocatable link failed: ld.lld: error: duplicate symbol: rt_rv64_boot_optional_nvme_fw_selftest
+```
+
+This is now the smallest known RV64 firmware native-build reproducer. The
+remaining production blocker is no longer only parse budget; even a 6-file
+firmware closure hits duplicate generated symbols before an ELF can be linked.
+
 ## Update — elapsed evidence shows external termination before 120s cap
 
 `fw_rv64/build.shs` now reports native-build elapsed seconds. A fresh

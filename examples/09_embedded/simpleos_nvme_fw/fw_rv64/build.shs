@@ -10,10 +10,10 @@ TIMEOUT_SECS="${NVME_RV64_BUILD_TIMEOUT_SECS:-300}"
 SIMPLE_BIN="${NVME_RV64_SIMPLE_BIN:-bin/simple}"
 SECTION="${NVME_RV64_BUILD_SECTION:-all}"
 case "$SECTION" in
-  all|primary|secondary)
+  all|primary|secondary|target)
     ;;
   *)
-    echo "NVME_RV64_BUILD_FAILED invalid-section section=$SECTION expected=all,primary,secondary" >&2
+    echo "NVME_RV64_BUILD_FAILED invalid-section section=$SECTION expected=all,primary,secondary,target" >&2
     exit 2
     ;;
 esac
@@ -98,6 +98,18 @@ fn rt_rv64_boot_optional_nvme_fw_selftest() -> i64:
 
 fn main() -> i64:
     nvme_fw_rv32_secondary_sections() as i64
+EOF_DIRECT_ENTRY
+    ;;
+  target)
+    cat >"$DIRECT_ENTRY" <<'EOF_DIRECT_ENTRY'
+use logic_target.{rv32_target_profile_selftest}
+
+@export("C", name: "rt_rv64_boot_optional_nvme_fw_selftest")
+fn rt_rv64_boot_optional_nvme_fw_selftest() -> i64:
+    rv32_target_profile_selftest() as i64
+
+fn main() -> i64:
+    rv32_target_profile_selftest() as i64
 EOF_DIRECT_ENTRY
     ;;
 esac
@@ -248,6 +260,12 @@ if [ "$rc" -ne 0 ]; then
   fi
   if [ "$rc" -eq 143 ] && [ "$BUILD_ELAPSED_SECS" -lt "$TIMEOUT_SECS" ]; then
     BUILD_REASON="external-termination-before-timeout"
+  fi
+  if grep -q "duplicate symbol:" "$ERR_LOG" 2>/dev/null; then
+    BUILD_REASON="native-build-duplicate-symbol"
+  fi
+  if grep -q "duplicate symbol: __simple_main" "$ERR_LOG" 2>/dev/null; then
+    BUILD_REASON="native-build-duplicate-main"
   fi
   echo "NVME_RV64_BUILD_FAILED code=$rc reason=$BUILD_REASON timeout=${TIMEOUT_SECS}s elapsed=${BUILD_ELAPSED_SECS}s out=$OUT_LOG err=$ERR_LOG" >&2
   grep -E "\\[native-build\\] Entry closure files|\\[native-build\\] Driver start|phase2:parse:file:" "$OUT_LOG" | tail -n 20 >&2 || true
