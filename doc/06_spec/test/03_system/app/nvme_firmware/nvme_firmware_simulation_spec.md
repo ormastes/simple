@@ -757,12 +757,14 @@ expect(code).to_equal(0)
    - Expected: stale_code equals `0`
 - Require the production docs to name the rv32 scalar firmware floor and OpenSSD target profile
    - Expected: floor_code equals `0`
+- Require the rv32/P9 docs to keep the task-pool fail-closed floor visible
+   - Expected: pool_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -775,6 +777,11 @@ val (floor_out, floor_err, floor_code) = _shell("rg -n 'rv32 scalar firmware flo
 expect(floor_code).to_equal(0)
 expect(floor_out).to_contain("rv32 scalar firmware floor")
 expect(floor_out).to_contain("Cosmos+ OpenSSD target profile")
+
+step("Require the rv32/P9 docs to keep the task-pool fail-closed floor visible")
+val (pool_out, pool_err, pool_code) = _shell("rg -n 'task-pool fail-closed|task-pool-fail-closed' examples/09_embedded/simpleos_nvme_fw/fw/BUILD_STATUS.md examples/09_embedded/simpleos_nvme_fw/fw/PRODUCTION_STATUS.md doc/03_plan/hardware/nvme_fw_gap_closure_plan.md examples/09_embedded/simpleos_nvme_fw/fw_rv32/README.md")
+expect(pool_code).to_equal(0)
+expect(pool_out).to_contain("task-pool")
 ```
 
 </details>
