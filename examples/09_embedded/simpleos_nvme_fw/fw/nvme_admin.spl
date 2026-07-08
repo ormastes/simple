@@ -216,12 +216,16 @@ impl FeatureStore:
     me set(fid: i64, value: i64) -> bool:
         if fid < 0 or fid >= FEAT_MAX:
             return false
+        if fid >= me.vals.len():
+            return false
         me.vals[fid] = value
         true
 
     me get(fid: i64) -> i64:
         if fid < 0 or fid >= FEAT_MAX:
             return 0
+        if fid >= me.vals.len():
+            return feature_value_safe(fid, 0)
         feature_value_safe(fid, me.vals[fid])
 
 # ── AdminQueue — qid-0 submission + completion rings ──────────────────────────
@@ -277,8 +281,22 @@ impl AdminQueue:
             d = MAX_QUEUE_SIZE
         if d > me.sq_cid.len():
             d = me.sq_cid.len()
+        if d > me.sq_op.len():
+            d = me.sq_op.len()
+        if d > me.sq_nsid.len():
+            d = me.sq_nsid.len()
+        if d > me.sq_cdw10.len():
+            d = me.sq_cdw10.len()
+        if d > me.sq_cdw11.len():
+            d = me.sq_cdw11.len()
+        if d > me.sq_cdw12.len():
+            d = me.sq_cdw12.len()
         if d > me.cq_cid.len():
             d = me.cq_cid.len()
+        if d > me.cq_status.len():
+            d = me.cq_status.len()
+        if d > me.cq_data.len():
+            d = me.cq_data.len()
         d
 
     me submit(c: AdminCmd) -> bool:
@@ -441,6 +459,9 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(fs.get(FEAT_VOLATILE_WC), 1, "volatile write cache default on")
     fs.vals[FEAT_NUM_QUEUES] = 999999
     fail = fail + expect_eq(fs.get(FEAT_NUM_QUEUES), feature_num_queues_default(), "corrupted queue count feature returns advertised max")
+    fs.vals = []
+    fail = fail + expect_eq(bool_to_i64(fs.set(FEAT_TEMP_THRESH, 359)), 0, "truncated feature store rejects set")
+    fail = fail + expect_eq(fs.get(FEAT_TEMP_THRESH), 0, "truncated feature store get fails closed")
 
     # AdminQueue submit/fetch preserves cid + all dwords
     var aq: AdminQueue = admin_queue_new()
@@ -568,6 +589,20 @@ fn nvme_admin_selftest() -> i64:
     fail = fail + expect_eq(bool_to_i64(aq.cq_post(cpl_make(28, 70000, 0))), 0, "admin rejects invalid completion status")
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(70000, FEAT_TEMP_THRESH, 1))), 0, "admin rejects oversized cid")
     fail = fail + expect_eq(bool_to_i64(aq.submit(admin_set_feature_cmd(-1, FEAT_TEMP_THRESH, 1))), 0, "admin rejects negative cid")
+    var aqt: AdminQueue = admin_queue_new()
+    aqt.sq_op = []
+    fail = fail + expect_eq(aqt.effective_depth(), 0, "truncated admin SQ sibling ring clamps depth to zero")
+    fail = fail + expect_eq(bool_to_i64(aqt.submit(admin_set_feature_cmd(29, FEAT_TEMP_THRESH, 317))), 0, "truncated admin SQ sibling ring rejects submit")
+    aqt.sq_len = 1
+    fail = fail + expect_eq(bool_to_i64(aqt.sq_can_fetch()), 0, "truncated admin SQ sibling ring blocks dispatch")
+    fail = fail + expect_eq(aqt.fetch().opcode, SC_INVALID_OPCODE, "truncated admin SQ sibling ring fetch fails closed")
+    var aqc: AdminQueue = admin_queue_new()
+    aqc.cq_status = []
+    fail = fail + expect_eq(aqc.effective_depth(), 0, "truncated admin CQ sibling ring clamps depth to zero")
+    fail = fail + expect_eq(bool_to_i64(aqc.cq_post(cpl_make(30, SC_SUCCESS, 0))), 0, "truncated admin CQ sibling ring rejects post")
+    aqc.cq_len = 1
+    fail = fail + expect_eq(bool_to_i64(aqc.cq_is_full()), 1, "truncated admin CQ sibling ring blocks dispatch")
+    fail = fail + expect_eq(aqc.cq_reap().status, SC_INVALID_FIELD, "truncated admin CQ sibling ring reap fails closed")
 
     # Identify builders surface the device geometry
     val ictrl: IdentifyData = build_identify_controller()
