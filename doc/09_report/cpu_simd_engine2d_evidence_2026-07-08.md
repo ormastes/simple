@@ -2,8 +2,8 @@
 
 - status: pass
 - reason: runtime-evidence-verified
-- simple_bin: bin/simple
-- simple_bin_source: repo-self-hosted-engine2d-simd
+- simple_bin: /home/ormastes/dev/pub/simple/bin/simple
+- simple_bin_source: explicit-env
 - simple_bin_status: pass
 - arch: x86_64
 - feature: avx2
@@ -23,6 +23,9 @@
 - alpha expected checksum: 582193168320
 - alpha actual checksum: 582193168320
 - alpha mismatch count: 0
+- alpha edge expected checksum: 154327572770
+- alpha edge actual checksum: 154327572770
+- alpha edge mismatch count: 0
 - scroll expected checksum: 581833852104
 - scroll actual checksum: 581833852104
 - scroll mismatch count: 0
@@ -45,15 +48,15 @@
 - x86_status: Initialized
 - arm_status: Unavailable
 - riscv_status: Unavailable
-- evidence_log: build/cpu-simd-engine2d-evidence/evidence.log
-- evidence_log_bytes: 2734
-- evidence_log_cksum: 1033994295
+- evidence_log: build/check/cpu-simd-engine2d-evidence-alpha-edge/evidence.log
+- evidence_log_bytes: 2871
+- evidence_log_cksum: 872112693
 
 ## Raw Evidence
 - cpu_simd_evidence_status=pass
 - cpu_simd_evidence_reason=runtime-evidence-verified
-- cpu_simd_evidence_simple_bin=bin/simple
-- cpu_simd_evidence_simple_bin_source=repo-self-hosted-engine2d-simd
+- cpu_simd_evidence_simple_bin=/home/ormastes/dev/pub/simple/bin/simple
+- cpu_simd_evidence_simple_bin_source=explicit-env
 - cpu_simd_evidence_simple_bin_status=pass
 - cpu_simd_evidence_arch=x86_64
 - cpu_simd_evidence_feature=avx2
@@ -73,6 +76,9 @@
 - cpu_simd_evidence_alpha_expected_checksum=582193168320
 - cpu_simd_evidence_alpha_actual_checksum=582193168320
 - cpu_simd_evidence_alpha_mismatch_count=0
+- cpu_simd_evidence_alpha_edge_expected_checksum=154327572770
+- cpu_simd_evidence_alpha_edge_actual_checksum=154327572770
+- cpu_simd_evidence_alpha_edge_mismatch_count=0
 - cpu_simd_evidence_scroll_expected_checksum=581833852104
 - cpu_simd_evidence_scroll_actual_checksum=581833852104
 - cpu_simd_evidence_scroll_mismatch_count=0
@@ -95,9 +101,9 @@
 - cpu_simd_evidence_x86_status=Initialized
 - cpu_simd_evidence_arm_status=Unavailable
 - cpu_simd_evidence_riscv_status=Unavailable
-- cpu_simd_evidence_log=build/cpu-simd-engine2d-evidence/evidence.log
-- cpu_simd_evidence_log_bytes=2734
-- cpu_simd_evidence_log_cksum=1033994295
+- cpu_simd_evidence_log=build/check/cpu-simd-engine2d-evidence-alpha-edge/evidence.log
+- cpu_simd_evidence_log_bytes=2871
+- cpu_simd_evidence_log_cksum=872112693
 
 ## Evidence Log
 - [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
@@ -124,6 +130,9 @@
 - cpu_simd_alpha_expected_checksum=582193168320
 - cpu_simd_alpha_actual_checksum=582193168320
 - cpu_simd_alpha_mismatch_count=0
+- cpu_simd_alpha_edge_expected_checksum=154327572770
+- cpu_simd_alpha_edge_actual_checksum=154327572770
+- cpu_simd_alpha_edge_mismatch_count=0
 - cpu_simd_scroll_expected_checksum=581833852104
 - cpu_simd_scroll_actual_checksum=581833852104
 - cpu_simd_scroll_mismatch_count=0

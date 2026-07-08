@@ -74,6 +74,8 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
   matching C compilers are present.
 - REQ-CPU-SIMD-ENGINE2D-BIN-006: Optional target-binary proof builds and runs
   x86_64, aarch64, and riscv64 native-build outputs independently.
+- REQ-CPU-SIMD-ENGINE2D-BIN-007: Exact bitmap quality evidence covers alpha
+  blend edge cases for transparent, opaque, low-alpha, and high-alpha pixels.
 
 ## Plan
 
@@ -111,7 +113,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_engine2d_simple_bin
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -128,6 +130,12 @@ expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 expect(script).to_contain("cpu_simd_evidence_simple_bin=$SIMPLE_BIN")
 expect(script).to_contain("cpu_simd_evidence_simple_bin_source=$SIMPLE_BIN_SOURCE")
 expect(script).to_contain("cpu_simd_evidence_simple_bin_status=$SIMPLE_BIN_STATUS")
+expect(script).to_contain("cpu_simd_alpha_edge_expected_checksum")
+expect(script).to_contain("cpu_simd_alpha_edge_actual_checksum")
+expect(script).to_contain("cpu_simd_alpha_edge_mismatch_count")
+expect(script).to_contain("0x00000000u32")
+expect(script).to_contain("0xFFFFFFFFu32")
+expect(script).to_contain("0xFEF0A020u32")
 val no_seed_candidate = not script.contains("target/debug/simple\"") and not script.contains("target/release/simple\"")
 expect(no_seed_candidate).to_be(true)
 ```
