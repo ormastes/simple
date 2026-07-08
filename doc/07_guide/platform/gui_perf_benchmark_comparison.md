@@ -155,6 +155,8 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
   `CPU_SIMD_ARCH_MATRIX_STRICT=1` when all three target binaries are expected
   to pass. Current retained matrix evidence is partial on this x86_64 host:
   x86_64 passes, while aarch64/riscv64 are unavailable without target binaries.
+  riscv64 native RVV rows remain tracked at
+  `doc/08_tracking/bug/cpu_simd_engine2d_rvv_native_rows_missing_2026-07-08.md`.
 - CPU-SIMD 4K/8K scale evidence is gated by
   `scripts/check/check-cpu-simd-render-scale-contract.shs`. It runs native
   CPU-SIMD rows at 3840x2160 and 7680x4320, requires full logical/physical
@@ -188,7 +190,8 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
    performance claims still need repeated runs on the target hardware.
    Cross-arch completion still needs current aarch64 NEON and riscv64 RVV
    matrix rows; run `check-cpu-simd-engine2d-arch-matrix.shs` with target
-   binaries and strict mode.
+   binaries and strict mode. riscv64 also needs the tracked native RVV row
+   implementation before it can pass as native SIMD rather than scalar-correct.
 3. **Tauri integration**: Needs `cargo-tauri` CLI + WebKitGTK dev package
 4. **Software text/layout optimization**: the real software render-loop row is
    still far slower than JS/GTK at 320x240; move bitmap/vector font and text-blit

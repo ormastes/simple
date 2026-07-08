@@ -76,6 +76,10 @@ implementation-evidence-in-progress
   `cpu_simd_engine2d_arch_matrix_status=partial`, x86_64 `pass`,
   aarch64/riscv64 `unavailable` with `missing-simple-bin`, and retained report
   `doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-08.md`.
+- blocker: riscv64 native RVV row proof is tracked at
+  `doc/08_tracking/bug/cpu_simd_engine2d_rvv_native_rows_missing_2026-07-08.md`;
+  `engine2d_simd_ops.rs` currently has x86_64 SSE2 and aarch64 NEON rows but no
+  RVV fill/copy row kernel.
 - implementation: Split the GUI perf harness so `simple_web_cpu_simd` runs
   through the explicit `cpu_simd` render backend while `simple_web_software`
   remains the scalar software row. This prevents the 4K/8K comparison from
@@ -170,6 +174,8 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
 - CPU-SIMD arch matrix coverage is now explicit:
   `scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` passes x86_64 on this
   host and marks aarch64/riscv64 unavailable until target binaries are supplied.
+  riscv64 native RVV rows are a tracked blocker:
+  `doc/08_tracking/bug/cpu_simd_engine2d_rvv_native_rows_missing_2026-07-08.md`.
 - CPU-SIMD 4K/8K no-reduction evidence now has a fail-closed wrapper at
   `scripts/check/check-cpu-simd-render-scale-contract.shs`; native full-size
   evidence passes for 3840x2160 and 7680x4320 with no screen-size reduction and
