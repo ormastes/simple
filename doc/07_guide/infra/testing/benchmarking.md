@@ -171,10 +171,12 @@ sh scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs
 ```
 
 The wrapper runs CUDA, OpenCL, Vulkan, Metal, and ROCm lanes. Required lanes
-must pass exact checksum/readback proof; unavailable optional lanes are recorded
-as explicit host-unavailable evidence instead of hidden success. The companion
-report is written under `doc/09_report/`, and per-backend logs/evidence files
-are written under `build/generated_2d_backend_readback_matrix/`.
+must pass exact checksum/readback proof and must expose normalized device proof:
+`submit_attempted=true`, `readback_available=true`, exercised ops, and the
+backend proof path. Unavailable optional lanes are recorded as explicit
+host-unavailable evidence instead of hidden success. The companion report is
+written under `doc/09_report/`, and per-backend logs/evidence files are written
+under `build/generated_2d_backend_readback_matrix/`.
 
 For Simple Web layout benchmark scenes, the Node bitmap fixture can consume a
 Simple-produced ARGB transport baseline with

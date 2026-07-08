@@ -425,7 +425,10 @@ Current evidence:
   writes `doc/09_report/generated_2d_backend_readback_matrix_2026-06-05.md`.
   The current matrix passes CUDA, OpenCL, and Vulkan exact checksum/readback
   proof while recording Metal and ROCm as explicit unavailable lanes when their
-  primary host tools are absent.
+  primary host tools are absent. New matrix rows also surface normalized device
+  proof fields (`submit_attempted`, `readback_available`, exercised ops, and
+  proof path), and required `pass` lanes fail closed if that provenance is
+  missing.
 - OpenCL, HIP, and ROCm now use the same acceleration-lane validation as CUDA,
   Metal, and Vulkan: initialized rows require scalar baseline comparison,
   strict rows reject GPU-to-CPU fallback, and initialized GPU samples require

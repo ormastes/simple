@@ -60,6 +60,30 @@ append_env() {
     printf '%s=%s\n' "$key" "$value" >>"$ENV_PATH"
 }
 
+default_required_path() {
+    backend="$1"
+    case "$backend" in
+        cuda)
+            echo "CUDA source -> PTX -> CUDA driver module/kernel handles -> launch -> synchronize -> device-to-host readback -> per-op checksums"
+            ;;
+        opencl)
+            echo "OpenCL source -> OpenCL program/kernel handles -> enqueue -> finish -> device-to-host readback -> per-op checksums"
+            ;;
+        vulkan)
+            echo "Vulkan strict Engine2D backend -> present/readback exercised -> exact CPU/Vulkan parity specs -> rect checksum"
+            ;;
+        metal)
+            echo "Metal source -> metallib -> MTLDevice -> compute pipeline -> command buffer/encoder -> submit -> wait -> buffer readback -> per-op checksums"
+            ;;
+        rocm)
+            echo "HIP source -> HSACO -> ROCm loader -> device/module/kernel handles -> launch -> synchronize -> host readback -> per-op checksums"
+            ;;
+        *)
+            echo "unknown"
+            ;;
+    esac
+}
+
 run_backend() {
     backend="$1"
     prefix="$2"
@@ -99,13 +123,21 @@ run_backend() {
     actual="$(value_of "$env_file" "${prefix}_actual_checksum")"
     mismatch="$(value_of "$env_file" "${prefix}_mismatch_count")"
     ops="$(value_of "$env_file" "${prefix}_ops")"
+    submit_attempted="$(value_of "$env_file" "${prefix}_submit_attempted")"
+    readback_available="$(value_of "$env_file" "${prefix}_readback_available")"
+    backend_name="$(value_of "$env_file" "${prefix}_backend_name")"
+    required_path="$(value_of "$env_file" "${prefix}_required_path")"
 
     if [ "$backend" = "vulkan" ]; then
         expected="$(value_of "$env_file" "vulkan_engine2d_readback_rect_expected_checksum")"
         actual="$(value_of "$env_file" "vulkan_engine2d_readback_rect_actual_checksum")"
         mismatch="$(value_of "$env_file" "vulkan_engine2d_readback_rect_mismatches")"
         ops="clear,rect"
+        submit_attempted="$(value_of "$env_file" "vulkan_engine2d_readback_present_exercised")"
+        readback_available="$(value_of "$env_file" "vulkan_engine2d_readback_readback_exercised")"
+        backend_name="$(value_of "$env_file" "vulkan_engine2d_readback_backend_name")"
     fi
+    required_path="${required_path:-$(default_required_path "$backend")}"
 
     required=false
     if is_required_backend "$backend"; then
@@ -113,7 +145,7 @@ run_backend() {
     fi
 
     verdict=fail
-    if [ "$backend_status" = "pass" ]; then
+    if [ "$backend_status" = "pass" ] && [ "$submit_attempted" = "true" ] && [ "$readback_available" = "true" ]; then
         verdict=pass
     elif [ "$required" = "false" ] && [ "$backend_status" = "unavailable" ] && is_clean_optional_unavailable "$backend" "$backend_reason"; then
         verdict=host-unavailable
@@ -124,14 +156,21 @@ run_backend() {
     append_env "generated_2d_backend_matrix_${backend}_required" "$required"
     append_env "generated_2d_backend_matrix_${backend}_verdict" "$verdict"
     append_env "generated_2d_backend_matrix_${backend}_exit_code" "$exit_code"
+    append_env "generated_2d_backend_matrix_${backend}_submit_attempted" "${submit_attempted:-missing}"
+    append_env "generated_2d_backend_matrix_${backend}_readback_available" "${readback_available:-missing}"
+    append_env "generated_2d_backend_matrix_${backend}_ops" "${ops:-missing}"
+    append_env "generated_2d_backend_matrix_${backend}_backend_name" "${backend_name:-}"
+    append_env "generated_2d_backend_matrix_${backend}_required_path" "$required_path"
     append_env "generated_2d_backend_matrix_${backend}_evidence_env" "$env_file"
     append_env "generated_2d_backend_matrix_${backend}_report" "$backend_report"
     append_env "generated_2d_backend_matrix_${backend}_stdout" "$stdout_path"
     append_env "generated_2d_backend_matrix_${backend}_stderr" "$stderr_path"
 
-    printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
+    proof="submit=${submit_attempted:-missing}; readback=${readback_available:-missing}; backend=${backend_name:-}; ops=${ops:-missing}; path=${required_path}"
+
+    printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' \
         "$backend" "$required" "${backend_status:-missing}" "${backend_reason:-missing}" \
-        "${expected:-}" "${actual:-}" "${mismatch:-}" >>"$ROWS_PATH"
+        "$proof" "${expected:-}" "${actual:-}" "${mismatch:-}" >>"$ROWS_PATH"
 
     if [ "$verdict" = "fail" ]; then
         return 1
@@ -143,8 +182,8 @@ run_backend() {
     echo "generated_2d_backend_matrix_required_backends=$REQUIRED_BACKENDS"
 } >"$ENV_PATH"
 {
-    echo "| Backend | Required | Status | Reason | Expected checksum | Actual checksum | Mismatches |"
-    echo "| --- | --- | --- | --- | --- | --- | --- |"
+    echo "| Backend | Required | Status | Reason | Device proof | Expected checksum | Actual checksum | Mismatches |"
+    echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
 } >"$ROWS_PATH"
 
 overall=pass
