@@ -46,7 +46,7 @@ web_gpu_paint_offload_matrix_spec -> common
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -57,6 +57,8 @@ expect(economics.fill_pixels).to_be_greater_than(0)
 expect(economics.gpu_paint_transfer_pixels).to_be_less_than(economics.upload_bound_transfer_pixels)
 expect(economics.gpu_paint_total_pixels).to_be_less_than(economics.upload_bound_total_pixels)
 expect(economics.should_offload).to_equal(true)
+expect(economics.cpu_job_verdict).to_equal("cpu-paint-offloaded")
+expect(economics.speed_verdict).to_equal("measured-gpu-faster")
 ```
 
 </details>
@@ -66,7 +68,7 @@ expect(economics.should_offload).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -77,6 +79,8 @@ expect(economics.gpu_paint_transfer_pixels).to_be_greater_than(economics.upload_
 expect(economics.gpu_paint_total_pixels).to_be_less_than(economics.upload_bound_total_pixels)
 expect(economics.should_offload).to_equal(true)
 expect(economics.reason).to_equal("gpu-paint-total-win")
+expect(economics.cpu_job_verdict).to_equal("cpu-paint-offloaded")
+expect(economics.speed_verdict).to_equal("measured-gpu-faster")
 ```
 
 </details>
@@ -86,7 +90,7 @@ expect(economics.reason).to_equal("gpu-paint-total-win")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -95,6 +99,8 @@ val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
 expect(economics.cpu_paint_pixels).to_equal(64 * 64)
 expect(economics.should_offload).to_equal(false)
 expect(economics.reason).to_equal("cpu-ground-truth-required")
+expect(economics.cpu_job_verdict).to_equal("cpu-paint-required")
+expect(economics.speed_verdict).to_equal("not-offloaded")
 ```
 
 </details>
@@ -104,7 +110,7 @@ expect(economics.reason).to_equal("cpu-ground-truth-required")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -116,6 +122,7 @@ expect(economics.gpu_paint_transfer_pixels).to_be_greater_than(economics.upload_
 expect(economics.gpu_paint_total_pixels).to_equal(economics.upload_bound_total_pixels)
 expect(economics.should_offload).to_equal(false)
 expect(economics.reason).to_equal("communication-overhead")
+expect(economics.speed_verdict).to_equal("measured-gpu-slower-overhead")
 ```
 
 </details>
@@ -125,7 +132,7 @@ expect(economics.reason).to_equal("communication-overhead")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -135,6 +142,7 @@ expect(economics.cpu_paint_pixels).to_equal(192)
 expect(economics.gpu_paint_total_pixels).to_equal(economics.upload_bound_total_pixels)
 expect(economics.should_offload).to_equal(false)
 expect(economics.reason).to_equal("communication-overhead")
+expect(economics.speed_verdict).to_equal("measured-gpu-slower-overhead")
 ```
 
 </details>
@@ -144,7 +152,7 @@ expect(economics.reason).to_equal("communication-overhead")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -154,6 +162,8 @@ expect(economics.cpu_paint_pixels).to_equal(193)
 expect(economics.gpu_paint_total_pixels).to_be_greater_than(economics.upload_bound_total_pixels)
 expect(economics.should_offload).to_equal(false)
 expect(economics.reason).to_equal("communication-overhead")
+expect(economics.cpu_job_verdict).to_equal("cpu-paint-offloaded")
+expect(economics.speed_verdict).to_equal("measured-gpu-slower-overhead")
 ```
 
 </details>

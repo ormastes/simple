@@ -6,17 +6,19 @@ This perf/evidence spec checks the Simple Web GPU paint decision without
 requiring local GPU hardware:
 
 - solid-only frames skip CPU paint and may offload when total CPU+transfer cost
-  wins;
+  wins, reporting `cpu-paint-offloaded` and `measured-gpu-faster`;
 - residual-heavy fill frames may still offload when saved CPU paint makes total
   work win even though transfer alone loses;
 - mixed text/solid frames do not claim offload because CPU ground truth is still
-  required for residual parity;
+  required for residual parity, reporting `cpu-paint-required` and
+  `not-offloaded`;
 - many tiny solid fills are rejected when command traffic does not beat the
-  upload-bound total cost;
+  upload-bound total cost, reporting `measured-gpu-slower-overhead`;
 - exact break-even work stays CPU-bound instead of being reported as GPU
   offload;
 - partial CPU savings still stay CPU-bound when total GPU paint work is more
-  expensive than upload-bound work;
+  expensive than upload-bound work, also reporting
+  `measured-gpu-slower-overhead`;
 - no-op and offscreen fill-command frames do not claim offload just because CPU
   paint was skipped.
 
