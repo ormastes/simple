@@ -100,6 +100,25 @@ expect(economics.reason).to_equal("communication-overhead")
 
 </details>
 
+#### keeps exact break-even work on CPU instead of claiming offload
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val frame = direct_frame(16, 16, 192, 0, 0, 16, 16)
+val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+expect(economics.cpu_paint_pixels).to_equal(192)
+expect(economics.gpu_paint_total_pixels).to_equal(economics.upload_bound_total_pixels)
+expect(economics.should_offload).to_equal(false)
+expect(economics.reason).to_equal("communication-overhead")
+```
+
+</details>
+
 #### does not treat skipped CPU work as offload when there are no fill commands
 
 <details>
@@ -158,8 +177,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -7,7 +7,7 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 74
+- **Total Lines:** 82
 
 ---
 
@@ -15,4 +15,4 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Web Gpu Paint Offload Matrix Specification](test/05_perf/web_render_chrome/web_gpu_paint_offload_matrix_spec.md) | Partial | N/A | 5 | 40% | 74 lines |
+| [Web Gpu Paint Offload Matrix Specification](test/05_perf/web_render_chrome/web_gpu_paint_offload_matrix_spec.md) | Partial | N/A | 6 | 50% | 82 lines |

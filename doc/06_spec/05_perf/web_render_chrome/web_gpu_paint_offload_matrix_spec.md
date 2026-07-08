@@ -11,6 +11,8 @@ requiring local GPU hardware:
   required for residual parity;
 - many tiny solid fills are rejected when command traffic does not beat the
   upload-bound total cost;
+- exact break-even work stays CPU-bound instead of being reported as GPU
+  offload;
 - no-op and offscreen fill-command frames do not claim offload just because CPU
   paint was skipped.
 
