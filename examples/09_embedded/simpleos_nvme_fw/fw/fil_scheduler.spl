@@ -52,17 +52,22 @@ fn channel_sched_new() -> ChannelSched:
     ChannelSched(pending: sched_fill(NUM_CHANNELS, 0), done: 0, steps: 0)
 
 impl ChannelSched:
+    me channel_ready(ch: i64) -> bool:
+        ch >= 0 and ch < NUM_CHANNELS and ch < me.pending.len()
+
     # Queue one block-op onto the channel its block maps to.
     me submit(blk: i64):
         if blk < 0:
             return
         val ch: i64 = channel_of(blk)
+        if not me.channel_ready(ch):
+            return
         if me.pending[ch] < 0:
             me.pending[ch] = 0
         me.pending[ch] = sched_counter_next(me.pending[ch])
 
     me queue_depth(ch: i64) -> i64:
-        if ch < 0 or ch >= NUM_CHANNELS:
+        if not me.channel_ready(ch):
             return 0
         if me.pending[ch] < 0:
             return 0
@@ -89,7 +94,7 @@ impl ChannelSched:
             var dispatched: i64 = 0
             var ch: i64 = 0
             while ch < NUM_CHANNELS:
-                if me.pending[ch] > 0:
+                if me.channel_ready(ch) and me.pending[ch] > 0:
                     me.pending[ch] = me.pending[ch] - 1
                     me.done = sched_counter_next(me.done)
                     dispatched = dispatched + 1
@@ -153,6 +158,13 @@ fn fil_scheduler_selftest() -> i64:
     s3.pending[0] = SCHED_COUNTER_MAX
     s3.submit(0)
     fail = fail + expect_eq(s3.queue_depth(0), SCHED_COUNTER_MAX, "sched: pending counter saturates")
+
+    var st: ChannelSched = channel_sched_new()
+    st.pending = []
+    st.submit(0)
+    fail = fail + expect_eq(st.total_pending(), 0, "sched: truncated pending array reports no work")
+    fail = fail + expect_eq(st.run(), 0, "sched: truncated pending array run is inert")
+    fail = fail + expect_eq(st.queue_depth(0), 0, "sched: truncated pending array channel depth fails closed")
 
     var s4: ChannelSched = channel_sched_new()
     s4.pending[0] = 1
