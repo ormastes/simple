@@ -4,7 +4,8 @@
 # hardware-specific device readback proof stays in the Engine2D backend gates.
 
 use std.spec.{describe, context, it, expect}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_gpu_frame}
+use common.render_scene.scene.{scene_fill_rect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_gpu_frame, WebGpuPaintFrame}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{web_gpu_paint_economics}
 
 fn solid_full_frame_html() -> text:
@@ -20,6 +21,11 @@ fn many_tiny_solid_html() -> text:
         html = html + "<div style='background-color:#1d4ed8;width:1px;height:1px'></div>"
         i = i + 1
     html + "</body></html>"
+
+fn direct_frame(width: i32, height: i32, cpu_paint_pixels: i32, fill_x: i32, fill_y: i32, fill_w: i32, fill_h: i32) -> WebGpuPaintFrame:
+    val base = 0xFFFFFFFFu32
+    val op = scene_fill_rect(fill_x, fill_y, fill_w, fill_h, 0xFF1D4ED8u32 as i32)
+    WebGpuPaintFrame(fb: [base; width * height], fill_ops: [op], width: width, height: height, cpu_paint_pixels: cpu_paint_pixels)
 
 describe "Simple Web GPU paint offload matrix":
 
@@ -47,3 +53,20 @@ describe "Simple Web GPU paint offload matrix":
             expect(economics.gpu_paint_transfer_pixels).to_be_greater_than(economics.upload_bound_transfer_pixels)
             expect(economics.should_offload).to_equal(false)
             expect(economics.reason).to_equal("communication-overhead")
+
+        it "does not treat skipped CPU work as offload when there are no fill commands":
+            val frame = WebGpuPaintFrame(fb: [0xFFFFFFFFu32; 16 * 16], fill_ops: [], width: 16, height: 16, cpu_paint_pixels: 0)
+            val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(0)
+            expect(economics.fill_op_count).to_equal(0)
+            expect(economics.should_offload).to_equal(false)
+            expect(economics.reason).to_equal("no-gpu-fill-ops")
+
+        it "rejects offscreen fill commands that do no clipped GPU work":
+            val frame = direct_frame(16, 16, 0, 32, 32, 8, 8)
+            val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(0)
+            expect(economics.fill_op_count).to_equal(1)
+            expect(economics.fill_pixels).to_equal(0)
+            expect(economics.should_offload).to_equal(false)
+            expect(economics.reason).to_equal("no-clipped-fill-pixels")

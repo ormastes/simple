@@ -1,14 +1,13 @@
 # Test Specification Index
 
-*Generated: 2026-07-05*
+*Generated: 2026-07-08*
 
 ## Quick Stats
 
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 3
-- **Warnings:** 7
+- **Total Lines:** 50
 
 ---
 
@@ -16,5 +15,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Claude Full CustomSelect useSelectNavigation](test/03_system/tools/llm/claude_full/components/custom_select_navigation_spec.md) | Minimal | N/A | 5 | 20% | 3 lines |
+| [Web Gpu Paint Offload Matrix Specification](test/05_perf/web_render_chrome/web_gpu_paint_offload_matrix_spec.md) | Partial | N/A | 5 | 40% | 50 lines |
 

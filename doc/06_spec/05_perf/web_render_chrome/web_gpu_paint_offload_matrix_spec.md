@@ -9,7 +9,9 @@ requiring local GPU hardware:
 - mixed text/solid frames do not claim offload because CPU ground truth is still
   required for residual parity;
 - many tiny solid fills are rejected when command traffic is more expensive than
-  the upload-bound path.
+  the upload-bound path;
+- no-op and offscreen fill-command frames do not claim offload just because CPU
+  paint was skipped.
 
 The hardware device-readback proof remains in the Engine2D backend evidence
 gates; this spec only guards the CPU-work and communication-overhead policy.
