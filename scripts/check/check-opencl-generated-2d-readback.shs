@@ -88,6 +88,21 @@ opencl_mark_claimed_pass_failed() {
     mv "$tmp" "$BUILD_DIR/evidence.env"
 }
 
+opencl_validate_op_evidence() {
+    op="$1"
+    expected="$(opencl_env_value "opencl_generated_2d_readback_${op}_expected_checksum")"
+    actual="$(opencl_env_value "opencl_generated_2d_readback_${op}_actual_checksum")"
+    mismatches="$(opencl_env_value "opencl_generated_2d_readback_${op}_mismatch_count")"
+
+    if ! opencl_positive_decimal "$expected" || ! opencl_positive_decimal "$actual"; then
+        opencl_mark_claimed_pass_failed "${op}-checksum-missing-or-zero"
+    elif [ "$expected" != "$actual" ]; then
+        opencl_mark_claimed_pass_failed "${op}-checksum-mismatch"
+    elif [ "$mismatches" != "0" ]; then
+        opencl_mark_claimed_pass_failed "${op}-mismatch-count"
+    fi
+}
+
 opencl_validate_evidence() {
     [ -s "$BUILD_DIR/evidence.env" ] || return 0
     status="$(opencl_env_value opencl_generated_2d_readback_status)"
@@ -108,6 +123,11 @@ opencl_validate_evidence() {
         opencl_mark_claimed_pass_failed "aggregate-checksum-mismatch"
     elif [ "$mismatches" != "0" ]; then
         opencl_mark_claimed_pass_failed "aggregate-mismatch-count"
+    else
+        for op in fill copy alpha scroll; do
+            opencl_validate_op_evidence "$op"
+            [ "$(opencl_env_value opencl_generated_2d_readback_status)" = "pass" ] || break
+        done
     fi
 }
 
@@ -174,6 +194,18 @@ opencl_generated_2d_readback_readback_available=true
 opencl_generated_2d_readback_expected_checksum=4
 opencl_generated_2d_readback_actual_checksum=4
 opencl_generated_2d_readback_mismatch_count=0
+opencl_generated_2d_readback_fill_expected_checksum=1
+opencl_generated_2d_readback_fill_actual_checksum=1
+opencl_generated_2d_readback_fill_mismatch_count=0
+opencl_generated_2d_readback_copy_expected_checksum=1
+opencl_generated_2d_readback_copy_actual_checksum=1
+opencl_generated_2d_readback_copy_mismatch_count=0
+opencl_generated_2d_readback_alpha_expected_checksum=1
+opencl_generated_2d_readback_alpha_actual_checksum=1
+opencl_generated_2d_readback_alpha_mismatch_count=0
+opencl_generated_2d_readback_scroll_expected_checksum=1
+opencl_generated_2d_readback_scroll_actual_checksum=1
+opencl_generated_2d_readback_scroll_mismatch_count=0
 EOF
     opencl_validate_evidence
     if ! grep -q '^opencl_generated_2d_readback_status=pass$' "$BUILD_DIR/evidence.env"; then
@@ -182,8 +214,37 @@ EOF
         exit 1
     fi
 
+    cat >"$BUILD_DIR/evidence.env" <<'EOF'
+opencl_generated_2d_readback_status=pass
+opencl_generated_2d_readback_reason=readback-pixels-matched
+opencl_generated_2d_readback_submit_attempted=true
+opencl_generated_2d_readback_readback_available=true
+opencl_generated_2d_readback_expected_checksum=4
+opencl_generated_2d_readback_actual_checksum=4
+opencl_generated_2d_readback_mismatch_count=0
+opencl_generated_2d_readback_fill_expected_checksum=1
+opencl_generated_2d_readback_fill_actual_checksum=1
+opencl_generated_2d_readback_fill_mismatch_count=0
+opencl_generated_2d_readback_copy_expected_checksum=1
+opencl_generated_2d_readback_copy_actual_checksum=2
+opencl_generated_2d_readback_copy_mismatch_count=0
+opencl_generated_2d_readback_alpha_expected_checksum=1
+opencl_generated_2d_readback_alpha_actual_checksum=1
+opencl_generated_2d_readback_alpha_mismatch_count=0
+opencl_generated_2d_readback_scroll_expected_checksum=1
+opencl_generated_2d_readback_scroll_actual_checksum=1
+opencl_generated_2d_readback_scroll_mismatch_count=0
+EOF
+    opencl_validate_evidence
+    if ! grep -q '^opencl_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^opencl_generated_2d_readback_reason=copy-checksum-mismatch$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=per-op-checksum-mismatch-accepted"
+        exit 1
+    fi
+
     echo "self_test_status=pass"
-    echo "self_test_reason=opencl-submit-readback-checksum-gate"
+    echo "self_test_reason=opencl-submit-readback-per-op-checksum-gate"
     exit 0
 fi
 
