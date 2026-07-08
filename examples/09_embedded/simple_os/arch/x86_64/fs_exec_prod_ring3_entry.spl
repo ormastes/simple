@@ -59,6 +59,7 @@ extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
 use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
 use os.kernel.memory.vmm.{vmm_init}
+use os.kernel.memory.vmm_address_space.{vmm_map_nvme_bar_high}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.process_image.{build_user_process_image_unchecked}
 use os.kernel.loader.x86_64_fs_exec_ring3.{x86_64_fs_exec_enter_image_ring3}
@@ -92,9 +93,7 @@ fn spl_start():
     serial_println("[prod] arch-init + syscall MSRs done")
     rt_x86_tss_init()
 
-    # 2. NVMe online, then read + materialise /FSEXEC.ELF BEFORE pmm/vmm init — the
-    #    FAT read + [u8] copy run against the C static heap while it is still
-    #    identity-mapped. This is the ordering that makes the general entry pass.
+    # 2. NVMe online.
     if simpleos_nvme_init() != 0:
         serial_println("[prod] FAIL nvme init")
         serial_println("TEST FAILED")
@@ -102,6 +101,26 @@ fn spl_start():
         return
     serial_println("[prod] nvme online")
 
+    # 3. PMM + VMM online. M1.5: vmm_init installs g_vmm.pml4 which only
+    #    identity-maps 0..4GB; the NVMe MMIO BAR VA (0xFFFFC00000000000, PML4[384])
+    #    lives only in boot_pml4, so after CR3=g_vmm.pml4 the C NVMe driver's
+    #    doorbell/CSTS writes hit a not-present page and the FAT read returns 0 —
+    #    exactly the blocker the shell fs_exec_spawn (post-vmm) read hits.
+    #    vmm_map_nvme_bar_high() remaps the BAR into g_vmm.pml4[384] (proven pattern,
+    #    fs_elf_exec_smoke_entry), so the ON-DEMAND read BELOW — done AFTER vmm, the
+    #    same way the shell reads — succeeds.
+    if not pmm_init_identity_range(0x80000000, 0x100000, 0x14000000):
+        serial_println("[prod] FAIL pmm_init")
+        serial_println("TEST FAILED")
+        rt_debug_exit_success()
+        return
+    vmm_init(g_pmm, 0)
+    vmm_map_nvme_bar_high()
+    serial_println("[prod] pmm+vmm online (+nvme bar high)")
+
+    # 4. Read /FSEXEC.ELF POST-vmm (the shell fs_exec_spawn read path). With the BAR
+    #    remapped above, the C NVMe/FAT bridge streams the ELF into the static
+    #    path-read buffer (low .bss, still identity-mapped) correctly.
     val bytes = _read_fsexec_bytes()
     var b0: i64 = 0
     var b1: i64 = 0
@@ -114,23 +133,13 @@ fn spl_start():
         b3 = bytes[3].to_i64()
     serial_println("[prod] blob materialized len={bytes.len()} magic={b0},{b1},{b2},{b3}")
     if bytes.len() < 64:
-        serial_println("[prod] FAIL short ELF")
+        serial_println("[prod] FAIL short ELF (post-vmm read blocker?)")
         serial_println("TEST FAILED")
         rt_debug_exit_success()
         return
 
-    # 3. PMM + VMM online (after NVMe/FAT — the C NVMe DMA uses the static C heap in
-    #    low .bss, disjoint from this identity range at 0x80000000+).
-    if not pmm_init_identity_range(0x80000000, 0x100000, 0x14000000):
-        serial_println("[prod] FAIL pmm_init")
-        serial_println("TEST FAILED")
-        rt_debug_exit_success()
-        return
-    vmm_init(g_pmm, 0)
-    serial_println("[prod] pmm+vmm online")
-
-    # 4. THE GENERAL SPAWN IMAGE BUILDER (same one fs_exec_prepare_spawn_from_bytes
-    #    calls). Produces a real UserProcessImage from the pre-read ELF bytes.
+    # 5. THE GENERAL SPAWN IMAGE BUILDER (same one fs_exec_prepare_spawn_from_bytes
+    #    calls). Produces a real UserProcessImage from the post-vmm-read ELF bytes.
     val image = build_user_process_image_unchecked(
         "/sys/apps/fsexec_hello.elf", bytes, Architecture.X86_64, [], []
     )
