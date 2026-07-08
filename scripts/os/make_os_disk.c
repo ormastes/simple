@@ -19,10 +19,9 @@
 
 enum {
     SECTOR_SIZE = 512,
-    TOTAL_SECTORS = 131072,
+    DEFAULT_TOTAL_SECTORS = 131072, /* 64 MiB */
     RESERVED_SECTORS = 32,
     FAT_COUNT = 1,
-    FAT_SIZE_SECTORS = 256,
     SECTORS_PER_CLUSTER = 8,
     ROOT_CLUSTER = 2,
 };
@@ -37,8 +36,24 @@ static uint32_t *g_fat;
 static size_t g_image_size;
 static int g_next_cluster = 3;
 
-static const int DATA_START_SECTOR = RESERVED_SECTORS + FAT_COUNT * FAT_SIZE_SECTORS;
+/* Geometry derived from the SIZE_MB argument (argv[3] of the binary /
+ * SIZE_BITS positional of make_os_disk.shs). Defaults preserve the historical
+ * 64 MiB layout when the argument is missing/unparseable. */
+static uint32_t g_total_sectors = DEFAULT_TOTAL_SECTORS;
+static uint32_t g_fat_size_sectors;
+static uint32_t g_data_start_sector;
+
 static const int CLUSTER_SIZE = SECTOR_SIZE * SECTORS_PER_CLUSTER;
+
+static void init_geometry(const char *size_mb_arg)
+{
+    long mb = size_mb_arg ? strtol(size_mb_arg, NULL, 10) : 0;
+    if (mb >= 16 && mb <= 8192)
+        g_total_sectors = (uint32_t)mb * 2048u; /* MB -> 512-byte sectors */
+    uint32_t clusters = g_total_sectors / SECTORS_PER_CLUSTER;
+    g_fat_size_sectors = ((clusters + 2u) * 4u + SECTOR_SIZE - 1u) / SECTOR_SIZE;
+    g_data_start_sector = RESERVED_SECTORS + FAT_COUNT * g_fat_size_sectors;
+}
 
 static void die(const char *msg)
 {
@@ -90,7 +105,7 @@ static void write_u64(unsigned char *data, size_t offset, uint64_t value)
 
 static size_t cluster_offset(int cluster)
 {
-    return (size_t)(DATA_START_SECTOR + (cluster - 2) * SECTORS_PER_CLUSTER) * SECTOR_SIZE;
+    return ((size_t)g_data_start_sector + (size_t)(cluster - 2) * SECTORS_PER_CLUSTER) * SECTOR_SIZE;
 }
 
 static int alloc_clusters(const unsigned char *data, size_t len)
@@ -409,14 +424,14 @@ int main(int argc, char **argv)
         die("usage: make_os_disk IMAGE PLATFORM SIZE_BITS KERNEL");
     const char *img_path = argv[1];
     const char *platform = argv[2];
-    (void)argv[3];
     const char *kernel_path = argv[4];
     const char *lane = lane_for_platform(platform);
 
-    size_t image_size = (size_t)TOTAL_SECTORS * SECTOR_SIZE;
+    init_geometry(argv[3]);
+    size_t image_size = (size_t)g_total_sectors * SECTOR_SIZE;
     g_image_size = image_size;
     g_image = (unsigned char *)xcalloc(image_size, 1);
-    g_fat = (uint32_t *)xcalloc((size_t)FAT_SIZE_SECTORS * SECTOR_SIZE / 4, sizeof(uint32_t));
+    g_fat = (uint32_t *)xcalloc((size_t)g_fat_size_sectors * SECTOR_SIZE / 4, sizeof(uint32_t));
     g_fat[0] = 0x0ffffff8U;
     g_fat[1] = 0x0fffffffU;
     g_fat[ROOT_CLUSTER] = 0x0fffffffU;
@@ -591,8 +606,8 @@ int main(int argc, char **argv)
     g_image[21] = 0xf8;
     le16(24, 63);
     le16(26, 255);
-    le32(32, TOTAL_SECTORS);
-    le32(36, FAT_SIZE_SECTORS);
+    le32(32, g_total_sectors);
+    le32(36, g_fat_size_sectors);
     le32(44, ROOT_CLUSTER);
     le16(48, 1);
     le16(50, 6);
@@ -600,7 +615,7 @@ int main(int argc, char **argv)
     g_image[511] = 0xaa;
 
     unsigned char *fat_bytes = g_image + ((size_t)RESERVED_SECTORS * SECTOR_SIZE);
-    for (size_t i = 0; i < (size_t)FAT_SIZE_SECTORS * SECTOR_SIZE / 4; ++i)
+    for (size_t i = 0; i < (size_t)g_fat_size_sectors * SECTOR_SIZE / 4; ++i)
         write_u32(fat_bytes, i * 4, g_fat[i]);
 
     write_file_path(img_path, g_image, image_size);
