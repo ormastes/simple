@@ -275,6 +275,12 @@ Rejected follow-up:
 - Full 8K external CPU drawing-library profile contract passed:
   `profile_report_contract=true`, `profile_kind=gui`, report path
   `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`.
+- `sh scripts/check/check-cpu-simd-render-dpi-contract.shs` passed with
+  `cpu_simd_render_dpi_default=300`,
+  `cpu_simd_render_dpi_override=220`,
+  `cpu_simd_render_dpi_physical_pixels=32x32`, and checksum
+  `sum32:2944430194688`, proving the retina default stays configurable without
+  reducing physical pixels.
 - Engine2D SIMD arch matrix passed for target C kernel binaries on x86_64,
   AArch64, and RISC-V; runtime owner compile also passed for RISC-V RVV:
   `doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-09.md`.
