@@ -99,3 +99,27 @@ Simple CPU-SIMD row beating the Simple scalar row at 4K and 8K while preserving
 checksum parity, full physical size, and 300 DPI metadata. This still does not
 provide a mutable browser framebuffer facade, and the external drawing-library
 gap remains open.
+
+## 2026-07-09 retained hardening evidence
+
+The remaining open item is performance, not missing quality proof:
+
+- `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md` records the retained
+  8K external baseline at full `7680x4320`, default 300dpi, no screen-size
+  reduction, checksum `sum32:135445232233405312`, nonzero pixel proof, CPU-SIMD
+  runtime target, software-render-loop readback scope, and
+  `fallback_used=false`.
+- `scripts/check/check-cpu-simd-render-dpi-contract.shs` proves default 300dpi
+  and an override DPI keep physical pixels unchanged with stable checksum.
+- `doc/09_report/production_gui_web_backend_executed_evidence_2026-07-09_cpu_simd_alpha.md`
+  proves CPU-SIMD color/transparency parity against software with zero differing
+  pixels, alpha-quality hits, matching alpha checksums, and no tolerance/blur
+  fallback.
+- `doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-09.md` proves the
+  Engine2D SIMD C kernels build/run for x86_64, AArch64, and RISC-V target
+  binaries, with runtime owner compile coverage for RISC-V RVV.
+
+The next implementation must therefore target a safe framebuffer owner facade
+or a different measured framebuffer-fill reduction. It must not reduce viewport
+size, change DPI semantics, route through GPU fallback, or accept checksum/color
+drift as a speed win.

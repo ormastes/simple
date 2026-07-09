@@ -65,6 +65,10 @@ ratio and the bottleneck owner.
 
 ## Next Step
 
-Profile the next largest retained render-loop cost after glyph row lookup. The
-gap is still dominated by Simple Web layout/DrawIR/text presentation rather than
-viewport size, DPI, checksum, or GPU backend selection semantics.
+Do not repeat the viewport/DPI/fallback/color proof work. The retained evidence
+already proves full 8K size, default 300dpi, configurable DPI override, checksum
+and pixel proof, CPU-SIMD runtime target, no fallback, and alpha-quality parity.
+The remaining perf work is the owner-boundary framebuffer fill problem tracked
+in `browser_layout_large_simd_fill_facade_unsafe_2026-07-09.md`: design a safe
+browser-layout framebuffer owner facade, prove it preserves the retained 4K/8K
+checksums, and then re-run the external CPU drawing-library comparison.
