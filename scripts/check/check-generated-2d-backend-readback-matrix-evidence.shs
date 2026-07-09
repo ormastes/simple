@@ -91,8 +91,8 @@ vulkan_op_proof() {
         mismatch="$(value_of "$env_file" "vulkan_engine2d_readback_${op}_mismatches")"
 
         [ "$status" = "pass" ] || return 1
-        is_unsigned_decimal "${expected:-}" || return 1
-        is_unsigned_decimal "${actual:-}" || return 1
+        is_positive_decimal "${expected:-}" || return 1
+        is_positive_decimal "${actual:-}" || return 1
         [ "$expected" = "$actual" ] || return 1
         [ "${mismatch:-}" = "0" ] || return 1
     done
@@ -215,9 +215,6 @@ run_backend() {
     required_path="$(value_of "$env_file" "${prefix}_required_path")"
 
     if [ "$backend" = "vulkan" ]; then
-        expected="$(value_of "$env_file" "vulkan_engine2d_readback_rect_expected_checksum")"
-        actual="$(value_of "$env_file" "vulkan_engine2d_readback_rect_actual_checksum")"
-        mismatch="$(value_of "$env_file" "vulkan_engine2d_readback_rect_mismatches")"
         ops="clear,rect"
         submit_attempted="$(value_of "$env_file" "vulkan_engine2d_readback_present_exercised")"
         readback_available="$(value_of "$env_file" "vulkan_engine2d_readback_readback_exercised")"
@@ -231,7 +228,11 @@ run_backend() {
     fi
 
     checksum_proof=false
-    if is_positive_decimal "${expected:-}" && is_positive_decimal "${actual:-}" && [ "$expected" = "$actual" ] && [ "${mismatch:-}" = "0" ]; then
+    if [ "$backend" = "vulkan" ]; then
+        if vulkan_op_proof "$env_file"; then
+            checksum_proof=true
+        fi
+    elif is_positive_decimal "${expected:-}" && is_positive_decimal "${actual:-}" && [ "$expected" = "$actual" ] && [ "${mismatch:-}" = "0" ]; then
         checksum_proof=true
     fi
 
@@ -552,6 +553,26 @@ vulkan_engine2d_readback_present_exercised=true
 vulkan_engine2d_readback_readback_exercised=true
 vulkan_engine2d_readback_backend_name=vulkan
 vulkan_engine2d_readback_clear_status=pass
+vulkan_engine2d_readback_clear_expected_checksum=1
+vulkan_engine2d_readback_clear_actual_checksum=1
+vulkan_engine2d_readback_clear_mismatches=0
+vulkan_engine2d_readback_rect_status=pass
+vulkan_engine2d_readback_rect_expected_checksum=1
+vulkan_engine2d_readback_rect_actual_checksum=1
+vulkan_engine2d_readback_rect_mismatches=0
+EOF
+SH
+    cat >"$self_dir/vulkan_pass_zero_checksum.shs" <<'SH'
+#!/bin/sh
+set -eu
+mkdir -p "$BUILD_DIR"
+cat >"$BUILD_DIR/evidence.env" <<'EOF'
+vulkan_engine2d_readback_status=pass
+vulkan_engine2d_readback_reason=fake-pass-with-zero-clear-checksum
+vulkan_engine2d_readback_present_exercised=true
+vulkan_engine2d_readback_readback_exercised=true
+vulkan_engine2d_readback_backend_name=vulkan
+vulkan_engine2d_readback_clear_status=pass
 vulkan_engine2d_readback_clear_expected_checksum=0
 vulkan_engine2d_readback_clear_actual_checksum=0
 vulkan_engine2d_readback_clear_mismatches=0
@@ -588,8 +609,8 @@ vulkan_engine2d_readback_present_exercised=true
 vulkan_engine2d_readback_readback_exercised=true
 vulkan_engine2d_readback_backend_name=vulkan
 vulkan_engine2d_readback_clear_status=pass
-vulkan_engine2d_readback_clear_expected_checksum=0
-vulkan_engine2d_readback_clear_actual_checksum=0
+vulkan_engine2d_readback_clear_expected_checksum=1
+vulkan_engine2d_readback_clear_actual_checksum=1
 vulkan_engine2d_readback_clear_mismatches=0
 vulkan_engine2d_readback_rect_status=pass
 vulkan_engine2d_readback_rect_expected_checksum=1
@@ -608,8 +629,8 @@ vulkan_engine2d_readback_present_exercised=true
 vulkan_engine2d_readback_readback_exercised=true
 vulkan_engine2d_readback_backend_name=software
 vulkan_engine2d_readback_clear_status=pass
-vulkan_engine2d_readback_clear_expected_checksum=0
-vulkan_engine2d_readback_clear_actual_checksum=0
+vulkan_engine2d_readback_clear_expected_checksum=1
+vulkan_engine2d_readback_clear_actual_checksum=1
 vulkan_engine2d_readback_clear_mismatches=0
 vulkan_engine2d_readback_rect_status=pass
 vulkan_engine2d_readback_rect_expected_checksum=1
@@ -851,6 +872,27 @@ SH
     if ! grep -q '^generated_2d_backend_matrix_vulkan_checksum_proof=false$' "$self_dir/vulkan_mismatch_run/evidence.env"; then
         echo "self_test_status=fail"
         echo "self_test_reason=missing-vulkan-mismatch-proof-false"
+        exit 1
+    fi
+    set +e
+    BUILD_DIR="$self_dir/vulkan_zero_checksum_run" \
+        REPORT_PATH="$self_dir/vulkan_zero_checksum_report.md" \
+        CUDA_READBACK_SCRIPT="$self_dir/cuda_pass_with_proof.shs" \
+        OPENCL_READBACK_SCRIPT="$self_dir/opencl_pass_with_proof.shs" \
+        VULKAN_READBACK_SCRIPT="$self_dir/vulkan_pass_zero_checksum.shs" \
+        METAL_READBACK_SCRIPT="$self_dir/metal_unavailable.shs" \
+        ROCM_READBACK_SCRIPT="$self_dir/rocm_unavailable.shs" \
+        sh "$0" >"$self_dir/vulkan_zero_checksum_stdout.log" 2>"$self_dir/vulkan_zero_checksum_stderr.log"
+    code=$?
+    set -e
+    if [ "$code" -eq 0 ]; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=vulkan-zero-checksum-pass-was-accepted"
+        exit 1
+    fi
+    if ! grep -q '^generated_2d_backend_matrix_vulkan_checksum_proof=false$' "$self_dir/vulkan_zero_checksum_run/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-vulkan-zero-checksum-proof-false"
         exit 1
     fi
     set +e
