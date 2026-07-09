@@ -58,6 +58,8 @@ The canonical public row-fill facade was changed to stop exposing the unsafe
 mutable extern path. `simd_fill_row` now uses the safe return-row SIMD ABI and
 scatter writeback for row-sized fills, with interpreter and native spec coverage
 in `test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl`.
+The interpreter no-op registration for the mutable fill extern was removed too,
+so accidental direct use fails closed instead of silently reporting fallback.
 
 This is a correctness containment only. Browser layout full-frame 4K/8K fill
 still needs a real mutable typed-array owner bridge before it can replace the

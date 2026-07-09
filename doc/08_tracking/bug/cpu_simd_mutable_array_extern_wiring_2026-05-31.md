@@ -100,6 +100,9 @@ The public `simd_fill_row` facade no longer calls the unsafe
 `rt_engine2d_simd_fill_u32` mutable extern. On native-capable hosts it now uses
 the already-proven return-row ABI (`rt_engine2d_simd_fill_row_u32`) and scatters
 that row back into the caller's buffer; otherwise it uses the scalar fallback.
+The interpreter's previous no-op shim for `rt_engine2d_simd_fill_u32` is also
+unregistered, so direct mutable-fill use fails closed until a real write-back
+bridge exists.
 
 Focused evidence:
 
