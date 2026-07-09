@@ -77,6 +77,8 @@ dimensions to a tiny fixture while preserving the same code path.
   benchmark scheduling is explicit and can be reversed for follow-up evidence.
 - REQ-CPU-SIMD-SCALE-007: The wrapper reports whether the selected production
   binary links the Engine2D SIMD row externs and can require that in strict mode.
+- REQ-CPU-SIMD-SCALE-008: The wrapper reports whether runtime sources changed
+  after the selected production binary and can require freshness in strict mode.
 
 ## Plan
 
@@ -146,6 +148,10 @@ expect(script).to_contain("rt_engine2d_simd_copy_row_u32")
 expect(script).to_contain("rt_engine2d_simd_blend_row_u32")
 expect(script).to_contain("cpu_simd_render_scale_engine2d_binary_link_status=$ENGINE2D_BINARY_LINK_STATUS")
 expect(script).to_contain("engine2d_simd_externs_not_linked_in_simple_bin")
+expect(script).to_contain("CPU_SIMD_RENDER_SCALE_REQUIRE_RUNTIME_FRESH")
+expect(script).to_contain("runtime_source_fresh_status")
+expect(script).to_contain("runtime_sources_newer_than_simple_bin")
+expect(script).to_contain("cpu_simd_render_scale_runtime_source_fresh_status=$RUNTIME_SOURCE_FRESH_STATUS")
 expect(script).to_contain("CPU_SIMD_RENDER_SCALE_4K_WIDTH:-3840")
 expect(script).to_contain("CPU_SIMD_RENDER_SCALE_8K_WIDTH:-7680")
 expect(script).to_contain("run_export 4k_software \"$WIDTH_4K\" \"$HEIGHT_4K\" software 4k")
@@ -277,6 +283,8 @@ expect(out).to_contain("cpu_simd_render_scale_contract_sample_count=1")
 expect(out).to_contain("cpu_simd_render_scale_contract_run_order=software_first")
 expect(out).to_contain("cpu_simd_render_scale_engine2d_binary_link_status=")
 expect(out).to_contain("cpu_simd_render_scale_engine2d_binary_link_required=0")
+expect(out).to_contain("cpu_simd_render_scale_runtime_source_fresh_status=")
+expect(out).to_contain("cpu_simd_render_scale_runtime_source_fresh_required=0")
 expect(out).to_contain("cpu_simd_render_scale_4k_pixels=16x16")
 expect(out).to_contain("cpu_simd_render_scale_8k_pixels=32x32")
 expect(out).to_contain("cpu_simd_render_scale_4k_software_p50_frame_us=")

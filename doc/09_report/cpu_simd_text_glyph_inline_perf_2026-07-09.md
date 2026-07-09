@@ -283,6 +283,13 @@ Rejected follow-up:
   Simple core runtime, then fully overwrites it with the repeated value. This
   removes the redundant zero-fill before large framebuffer repeats without
   changing normal array allocation behavior.
+- Deployed-binary freshness gate:
+  `check-cpu-simd-render-scale-contract.shs` now emits
+  `cpu_simd_render_scale_runtime_source_fresh_status`. On this workspace,
+  `CPU_SIMD_RENDER_SCALE_REQUIRE_RUNTIME_FRESH=1` correctly fails with
+  `runtime_sources_newer_than_simple_bin` because `bin/simple` predates the
+  latest runtime array-repeat changes. The source change is covered, but
+  deployed-binary performance proof requires a fresh bootstrap/deploy.
 - Full strict 4K/8K rerun after array-repeat doubling:
   `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-array-repeat-doubling-full sh scripts/check/check-cpu-simd-render-scale-contract.shs`
   passed with 4K CPU-SIMD p50 `205462us` vs scalar `207347us`, 8K CPU-SIMD p50
