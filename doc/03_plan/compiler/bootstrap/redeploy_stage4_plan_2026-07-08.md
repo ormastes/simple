@@ -317,3 +317,20 @@ for this `Gt` case's `lhs` and find why that local has no prior def in `value_ma
 (`grep -rn icmp-probe src/` = 0). Full detail:
 `doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
 (§ Update 2026-07-10 icmp-wrapper probe, corrected location).
+
+## Update 2026-07-10 (translate_binop trace) — NULL operand pinned to a value_map miss for one local; STRUCTURAL (MIR-level), documented for #79
+
+Instrumented `translate_binop` + `get_value` in `llvm_lib_translate_expr.spl` per the proposed #79
+step. ONE run: `NULL-OPERAND missing local.id=3` then `NULL-BINOP op=Lt dest=6 lhs=0 left=Copy#4
+right=Copy#5` immediately before exit 139. Root miss = `_3` absent from `value_map`; `_4` holds a
+propagated 0 (via a `copy/move/ref _3`), feeding the crashing comparison (Lt this run, Gt earlier —
+same nondeterministic family). Static audit: post-#133 Arg-local seeding is correct, and the backend
+has NO reachable silent dest-skip (all skip paths print/eprint; none in the log; the one silent arm —
+Const Zero + void — is unreachable as a local def). Conclusion: the MIR itself reaches the backend
+with `_3` used before any definition in block-list order — either (i) a bootstrap-gated HIR/MIR
+lowering use-before-def (same family as #130/#133) or (ii) a def in a later-listed block that the
+backend's single linear block pass (no RPO, no allocas) cannot see. Both are structural; NOT fixed
+this session. Proposed discriminator for #79: one-shot MIR dump + function name on first value_map
+miss. Probes reverted (content grep = 0). Stage-1 state: still FAILED exit 139. Full detail:
+`doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
+(§ Update 2026-07-10 translate_binop null-operand trace).

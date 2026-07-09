@@ -610,3 +610,64 @@ deterministic Simple-side bug", not a shared nondeterministic corruption mechani
 
 **Probe reverted** (`jj restore src/lib/nogc_async_mut/sffi/llvm_codegen.spl`; `grep -rn icmp-probe
 src/` = 0 repo-wide; `jj diff` clean). Log: scratchpad `icmp_probe_run1.log`.
+
+## Update 2026-07-10 (translate_binop null-operand trace) — root miss = one local absent from value_map; backend audited clean; classified STRUCTURAL (MIR-level)
+
+**Experiment (per gt_lhs_trace_guide).** TEMPORARY probes added to
+`src/compiler/70.backend/backend/llvm_lib_translate_expr.spl`: (1) in `translate_binop` right after
+`lhs`/`rhs` are computed — if either is 0, eprint the binop kind, `dest.id`, and each operand's kind +
+local id; (2) in `get_value` — eprint the `local.id` on every value_map miss (catches null production
+at the source for ALL consumers). ONE bootstrap run (no concurrent bootstrap; log: scratchpad
+`gt_lhs_run1.log`).
+
+**Probe hits (lines 2606-2607, immediately before `worker exited with code 139` / Stage 1 FAILED):**
+```
+NULL-OPERAND missing local.id=3 (value_map miss)
+NULL-BINOP op=Lt dest=6 lhs=0 rhs=4361717120 left=Copy#4 right=Copy#5
+```
+Reading: the ROOT miss is local `_3` (genuinely absent from `value_map` — a present-but-zero entry
+would not fire the `get_value` probe). The crashing comparison's lhs is `Copy#4` with NO miss line for
+id=4, i.e. `_4` IS in the map with value 0 — a propagated null. The only silent 0-propagation paths
+that read one local and store into another with no intervening output are the `Copy(dest, src)` /
+`Move(dest, src)` instruction arms (translate_instruction lines 32-38) and `Ref` (lines 115-117). So
+the chain is `_4 = copy/move/ref _3` (miss → 0 stored) then `_6 = _4 Lt _5` → `LLVMBuildICmp` with
+lhs=NULL → SIGSEGV. This run caught `Lt`, the earlier run caught `Gt` — consistent with the known
+iteration-order nondeterminism; same failure class.
+
+**Static trace of why `_3` has no definition (no further runs):**
+- *Param seeding is NOT the hole (post-#133):* `compile_function`
+  (`llvm_lib_translate.spl:51-61`) seeds every `LocalKind.Arg` local into `value_map` unconditionally,
+  and `mir_data.spl:begin_function` (post-#133, d16a8883) creates Arg locals unconditionally
+  (bootstrap: ids 0..n-1, `_return` gated off). `function_lowering.spl:98-138` maps param symbols to
+  the real Arg locals. If `_3` were an Arg it would be present (even a 0 `llvm_get_param` would make
+  the key exist and not fire the probe).
+- *Backend has no reachable silent dest-skip:* audited every `translate_instruction` arm.
+  All value-producing arms write `local_value_map[dest.id]` unconditionally (Copy/Move/BinOp/UnaryOp/
+  Alloc/Load/GEP/Aggregate/GetField/Cast/Bitcast/Ref/phi-intrinsic) or emit a diagnostic on the skip
+  path: unresolved Call/CallIndirect/Intrinsic → `eprint` (stderr; NOT in the log), Compose/Parallel/
+  LayerConnect/InlineAsm/unhandled-kind → `print` (stdout; worker stdout IS captured in this log —
+  gc-warnings, stdout, appear adjacent to the probe lines — and no such warning appears). The one
+  fully-silent arm, `translate_const` `Zero` + Unit/Never (line ~183), is unreachable as a local def:
+  repo-wide, `MirConstValue.Zero` is emitted at exactly ONE site (`module_lowering.spl:153`, a return
+  operand, never a `Const` instruction).
+- *Therefore the miss is upstream of the backend:* the MIR arriving at `translate_module_to_llvm`
+  uses `_3` without a definition that precedes it in block-list order. Two structural sub-hypotheses:
+  (i) HIR→MIR lowering under SIMPLE_BOOTSTRAP emits a genuine use-before-def — same bootstrap-gated
+  lowering-gap family as #130 (wiped call args) and #133 (dropped params); e.g. a value-producing
+  Call lowered with `dest=None` while the result local is still referenced, or a dropped var-init;
+  (ii) the def exists but lives in a block that appears LATER in `func.blocks` than the using block —
+  `compile_function` translates blocks in list order with a single accumulating `value_map` (no
+  dominance-order traversal, no alloca/mem2reg fallback), so any non-topological block order produces
+  exactly this miss even for well-formed MIR.
+
+**Classification: STRUCTURAL — documented for #79, NOT fixed here.** Neither sub-hypothesis is a
+one-line backend fix: (i) needs a #133-style HIR/MIR lowering change; (ii) needs dominance-aware
+block traversal or alloca-based locals in the llvm-lib backend. Guarding/faking the null operand is
+forbidden (would suppress the crash, not the miscompile). Proposed #79 next step: dump the MIR of the
+crashing function (add a per-function name eprint + a one-shot MIR dump when a value_map miss occurs)
+to discriminate (i) vs (ii) in a single run; if (ii), the fix is contained to
+`llvm_lib_translate.spl` (translate blocks in RPO or pre-seed via allocas).
+
+**Probes reverted** (exact inverse edits; `grep -rn "NULL OPERAND\|NULL-BINOP\|gt-trace" src/` = 0;
+`git diff` on the probed file is empty). Stage-1 state after this session's single run: unchanged —
+`native-build worker exited with code 139`, Stage 1 FAILED (log: scratchpad `gt_lhs_run1.log`).
