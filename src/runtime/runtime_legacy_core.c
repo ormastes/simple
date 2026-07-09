@@ -339,15 +339,6 @@ const char* spl_env_get(const char* key) {
     return value ? value : "";
 }
 
-bool rt_env_set(const char* key, const char* value) {
-    if (!key) return false;
-#if defined(_WIN32)
-    return _putenv_s(key, value ? value : "") == 0;
-#else
-    return setenv(key, value ? value : "", 1) == 0;
-#endif
-}
-
 void rt_sleep_ms_native(int64_t ms) {
     if (ms <= 0) return;
 #if defined(_WIN32)

@@ -340,6 +340,8 @@ seed_inputs_hash() {
     find src/compiler_rust \( -name '*.rs' -o -name 'Cargo.toml' \) \
       -not -path '*/target/*' -print0 2>/dev/null | LC_ALL=C sort -z \
       | xargs -0 sha256sum 2>/dev/null
+    find src/runtime \( -name '*.c' -o -name '*.h' \) -print0 2>/dev/null | LC_ALL=C sort -z \
+      | xargs -0 sha256sum 2>/dev/null
     sha256sum src/compiler_rust/Cargo.lock 2>/dev/null
     printf 'profile=bootstrap backend=%s features=%s\n' "${backend}" "${llvm_features}"
     rustc -V 2>/dev/null
@@ -503,7 +505,7 @@ else
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     "${stage2_bin}" native-build \
-    --backend "${backend}" \
+    --backend cranelift \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
@@ -575,7 +577,7 @@ fi
 if [ "${stage4_is_seed}" -eq 1 ]; then
   stage4_backend="cranelift"
 else
-  stage4_backend="${backend}"
+  stage4_backend="cranelift"
 fi
 
 # ===========================================================================
@@ -600,7 +602,6 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
     --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
-    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${full_dir}/simple"
 else
   run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
@@ -614,7 +615,6 @@ else
     --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
-    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${full_dir}/simple"
 fi
 
@@ -623,6 +623,8 @@ if [ ! -x "${full_bin}" ]; then
   echo "error: failed to compile full CLI binary from main.spl" >&2
   exit 1
 fi
+
+install -m755 "${seed_bin}" "${full_dir}/simple_seed"
 
 stage4_smoke="$(setsid timeout 30 "${full_bin}" -c 'print(1+1)' 2>/dev/null)"
 if [ "${stage4_smoke}" != "2" ]; then

@@ -248,8 +248,9 @@ int64_t rt_thread_available_parallelism(void);
 /** Get Unix epoch time in microseconds. */
 int64_t rt_time_now_unix_micros(void);
 
-/** Set environment variable. Returns true on success. */
-bool rt_env_set(const char* key, const char* value);
+/** Set an environment variable from native text pointer/length pairs. */
+bool rt_env_set(const uint8_t* key, uint64_t key_len,
+                const uint8_t* value, uint64_t value_len);
 ```
 
 ## `rt_` Functions in runtime.c (not platform headers)

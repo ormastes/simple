@@ -431,6 +431,13 @@ fn runner_cli_case_match_rejects_spec_syntax() {
     cmd.assert().code(20);
 }
 
+#[test]
+fn runner_cli_accepts_val_statement_snippets() {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("simple");
+    cmd.arg("-c").arg("val x=5; print(x)");
+    cmd.assert().success().stdout("5\n");
+}
+
 /// Regression: CLI rejects `match` even with `=>` syntax (should succeed).
 #[test]
 fn runner_cli_match_arrow_rejects_basic_syntax() {

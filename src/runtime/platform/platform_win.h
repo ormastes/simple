@@ -577,11 +577,6 @@ void spl_env_set(const char* key, const char* value) {
     _putenv_s(key, value ? value : "");
 }
 
-bool rt_env_set(const char* key, const char* value) {
-    if (!key) return false;
-    return _putenv_s(key, value ? value : "") == 0;
-}
-
 /* ----------------------------------------------------------------
  * New Cross-Platform Functions
  * ---------------------------------------------------------------- */

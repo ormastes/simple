@@ -118,7 +118,12 @@ pub fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
         let print_exit_code = should_print_code_result(&code);
 
         // Wrap expression in main if not already a full program
-        let full_code = if code.contains("main") || code.contains("fn ") || code.contains("let ") {
+        let full_code = if code.contains("main")
+            || code.contains("fn ")
+            || code.contains("let ")
+            || code.contains("val ")
+            || code.contains("var ")
+        {
             code
         } else {
             format!("main = {}", code)

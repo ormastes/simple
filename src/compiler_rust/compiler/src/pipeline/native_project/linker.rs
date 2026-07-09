@@ -886,6 +886,20 @@ int main(int argc, char** argv) {
         let init_o = self.generate_init_caller(temp_dir, object_paths, None)?;
         let selected_runtime = self.selected_runtime_library(temp_dir)?;
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let selected_runtime = match selected_runtime {
+            Some((runtime_lib, true)) => {
+                let filtered = strip_llvm_constructors(&runtime_lib, temp_dir).map_err(|err| {
+                    format!(
+                        "failed to strip LLVM constructors from {}: {:?}",
+                        runtime_lib.display(),
+                        err
+                    )
+                })?;
+                Some((filtered, true))
+            }
+            other => other,
+        };
         let has_native_all = selected_runtime
             .as_ref()
             .is_some_and(|(_, is_native_all)| *is_native_all);

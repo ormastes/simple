@@ -16,7 +16,7 @@ use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_back
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module}
-use compiler.mir_opt.{ssa_var_transform_blocks}
+use compiler.mir_opt.{ssa_alloca_transform_blocks}
 use compiler.common.driver_core_types.{CompileResult}
 use driver_types.{CompileContext, CompileOptions}
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
@@ -70,10 +70,12 @@ pub fn bootstrap_symbol_for_name(name: text) -> SymbolId:
         return SymbolId(id: 5)
     if name == "main":
         return SymbolId(id: 6)
+    if name == "rt_native_build":
+        return SymbolId(id: 8)
     SymbolId(id: 100)
 
 pub fn bootstrap_function_names() -> [text]:
-    ["bootstrap_version", "native_build_help", "compile_result_exit", "run_native_build_bootstrap", "get_cli_args", "main"]
+    ["bootstrap_version", "native_build_help", "compile_result_exit", "run_native_build_bootstrap", "get_cli_args", "main", "rt_native_build"]
 
 pub fn bootstrap_compile_to_native_local(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
     """Fail closed: the old direct-IR path emitted ret-0 diagnostic stubs."""
@@ -189,7 +191,15 @@ pub fn bootstrap_lower_hir_globals_to_mir_module_driver() -> MirModule:
 fn bootstrap_ssa_phi_function(fn_: MirFunction) -> MirFunction:
     if fn_.blocks.len() == 1:
         return fn_
-    val rewritten = ssa_var_transform_blocks(fn_.blocks)
+    # This whole file only runs under the SIMPLE_BOOTSTRAP real-LLVM path
+    # (bootstrap_emit_real_llvm_object / bootstrap_emit_real_llvm_module_object,
+    # both gated on SIMPLE_BOOTSTRAP_REAL_LLVM upstream in driver.spl), so the
+    # alloca-per-reassigned-local transform always applies here instead of the
+    # hand-built phi mechanism, which cannot correctly resolve each phi's
+    # incoming-value-per-predecessor for real control flow. An entry-block
+    # alloca dominates every use by construction, so it cannot produce the
+    # `undef` phi operands the join-predecessor phi materialization could.
+    val rewritten = ssa_alloca_transform_blocks(fn_.blocks, fn_.locals, fn_.entry_block)
     if bootstrap_trace_enabled():
         print "[bootstrap-real-llvm] ssa-result {fn_.name} applied={rewritten.applied} reason={rewritten.reason} phi={rewritten.phi_required_count}"
     if rewritten.applied:

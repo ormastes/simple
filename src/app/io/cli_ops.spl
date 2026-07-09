@@ -89,10 +89,24 @@ fn _cli_dir_create_impl(path: text, recursive: bool) -> bool:
 fn _cli_eprint(msg: text):
     eprint(msg)
 
+fn _cli_current_exe_path() -> text:
+    if _cli_is_windows_platform():
+        return ""
+    val pid = rt_getpid()
+    val result = _cli_shell("readlink -f /proc/{pid}/exe")
+    if result.exit_code != 0:
+        return ""
+    result.stdout.trim()
+
 fn _cli_is_current_exe(path: text) -> bool:
     if path == "" or _cli_is_windows_platform():
         return false
-    val same = _cli_shell("test /proc/$PPID/exe -ef '{path}'")
+    val current = _cli_current_exe_path()
+    if current.len() == 0:
+        # If identity cannot be established, delegation is unsafe: the
+        # candidate may be this process and recurse without bound.
+        return true
+    val same = _cli_shell("test '{current}' -ef '{path}'")
     same.exit_code == 0
 
 pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
@@ -105,7 +119,7 @@ pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
     else:
         if not cmd.contains("/"):
             val check = rt_process_run("which", [cmd])
-            if check.2 == 0 and check.0.trim() != "":
+            if check.2 == 0 and check.0.trim().len() > 0:
                 resolved_cmd = check.0.trim()
     rt_process_run(resolved_cmd, args)
 
@@ -119,7 +133,7 @@ pub fn _cli_run_workspace_root_guard() -> i64:
 
 pub fn _cli_driver_binary() -> text:
     val override = cli_env_get("SIMPLE_BOOTSTRAP_DRIVER") ?? ""
-    if override != "":
+    if override.len() > 0:
         # Self-exec guard: an inherited override that points at THIS binary
         # would delegate to ourselves recursively without bound (simple.bak
         # fork bomb OOM-killed the user session, 2026-06-12).
@@ -131,12 +145,11 @@ pub fn _cli_driver_binary() -> text:
     # bin/release/<triple>/simple is the self-hosted CLI, simple_seed is the
     # Rust seed it delegates to). Absolute path, so this works from any cwd.
     if not _cli_is_windows_platform():
-        val exe_result = _cli_shell("readlink -f /proc/self/exe")
-        val exe_path = exe_result.stdout.trim()
-        if exe_path != "":
+        val exe_path = _cli_current_exe_path()
+        if exe_path.len() > 0:
             val dir_result = _cli_shell("dirname '{exe_path}'")
             val exe_dir = dir_result.stdout.trim()
-            if exe_dir != "":
+            if exe_dir.len() > 0:
                 val seed_sibling = "{exe_dir}/simple_seed"
                 if _cli_file_exists_impl(seed_sibling):
                     if not _cli_is_current_exe(seed_sibling):
@@ -157,12 +170,12 @@ pub fn _cli_driver_binary() -> text:
 pub fn _cli_frontend_delegate_binary() -> text:
     # Loop guard: if we ARE the delegate child, return "" to avoid re-delegating.
     val loop_flag = cli_env_get("SIMPLE_FRONTEND_DELEGATED") ?? ""
-    if loop_flag == "1":
+    if loop_flag.len() == 1 and loop_flag.starts_with("1"):
         return ""
 
     # Env override: explicit delegate path.
     val override = cli_env_get("SIMPLE_FRONTEND_DELEGATE") ?? ""
-    if override != "":
+    if override.len() > 0:
         if _cli_file_exists_impl(override):
             if _cli_is_windows_platform() or not _cli_is_current_exe(override):
                 return override
@@ -170,17 +183,16 @@ pub fn _cli_frontend_delegate_binary() -> text:
 
     # Fall back to _cli_driver_binary() — already self-exec-guarded.
     val driver = _cli_driver_binary()
-    if driver != "":
+    if driver.len() > 0:
         return driver
 
     # Sibling seed: look for simple_seed next to our own executable.
     if not _cli_is_windows_platform():
-        val exe_result = _cli_shell("readlink -f /proc/self/exe")
-        val exe_path = exe_result.stdout.trim()
-        if exe_path != "":
+        val exe_path = _cli_current_exe_path()
+        if exe_path.len() > 0:
             val dir_result = _cli_shell("dirname '{exe_path}'")
             val dir = dir_result.stdout.trim()
-            if dir != "":
+            if dir.len() > 0:
                 val seed_candidate = "{dir}/simple_seed"
                 if _cli_file_exists_impl(seed_candidate):
                     if not _cli_is_current_exe(seed_candidate):
@@ -192,9 +204,9 @@ pub fn _cli_run_frontend_delegate(delegate: text, args: [text]) -> i64:
     # Set loop guard so the delegate child does not re-delegate.
     rt_env_set("SIMPLE_FRONTEND_DELEGATED", "1")
     val result = _cli_process_run(delegate, args)
-    if result.0 != "":
+    if result.0.len() > 0:
         print_raw(result.0)
-    if result.1 != "":
+    if result.1.len() > 0:
         _cli_eprint(result.1)
     result.2
 

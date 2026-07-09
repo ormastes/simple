@@ -101,7 +101,16 @@ fn extract_rt_string_array(arr: RuntimeValue) -> Vec<String> {
 /// Returns exit code (0 = success).
 #[no_mangle]
 pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
-    let args_vec = extract_rt_string_array(args);
+    let args_vec = if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
+        // ponytail: bootstrap binaries currently mix the C array ABI with the
+        // Rust RuntimeValue ABI; process argv is the command's source of truth.
+        std::env::args().collect()
+    } else {
+        extract_rt_string_array(args)
+    };
+    if native_build_rust_trace_enabled() {
+        eprintln!("[native-rust-trace] raw args={:?}", args_vec);
+    }
 
     let mut source_dirs: Vec<PathBuf> = Vec::new();
     let mut output: Option<PathBuf> = None;
@@ -291,6 +300,14 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 entry_closure = true;
                 i += 1;
             }
+            "--mode" => {
+                if i + 1 < args_vec.len() {
+                    i += 2;
+                } else {
+                    eprintln!("error: --mode requires a value");
+                    return 1;
+                }
+            }
             "--emit-archive" => {
                 emit_archive = true;
                 i += 1;
@@ -395,6 +412,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                             return 1;
                         }
                     }
+                } else if other.starts_with("--mode=") {
                 } else if other.starts_with("--log") {
                     eprintln!(
                         "error: unknown log option '{}'; expected --log or --log=<on|off>",

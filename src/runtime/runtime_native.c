@@ -2327,11 +2327,54 @@ int64_t rt_file_size(const char* path) {
     return (int64_t)st.st_size;
 }
 
-__attribute__((weak))
-const char* rt_env_get(const char* key) {
-    const char* value = spl_env_get(key);
-    if (!value) value = "";
-    return (const char*)(intptr_t)rt_string_new((const uint8_t*)value, (uint64_t)strlen(value));
+static char* rt_core_text_arg_to_cstr(const uint8_t* ptr, uint64_t len) {
+    if (!ptr && len != 0) return NULL;
+    char* out = (char*)malloc((size_t)len + 1);
+    if (!out) return NULL;
+    if (len != 0) memcpy(out, ptr, (size_t)len);
+    out[len] = '\0';
+    return out;
+}
+
+int64_t rt_env_get(const uint8_t* key_ptr, uint64_t key_len) {
+    char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
+    if (!key) return rt_core_nil();
+    const char* value = getenv(key);
+    free(key);
+    if (!value) return rt_core_nil();
+    return rt_string_new((const uint8_t*)value, (uint64_t)strlen(value));
+}
+
+int64_t rt_env_get_i64(const uint8_t* key_ptr, uint64_t key_len, int64_t default_value) {
+    char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
+    if (!key) return default_value;
+    const char* value = getenv(key);
+    if (!value || value[0] == '\0') {
+        free(key);
+        return default_value;
+    }
+    char* end = NULL;
+    long long parsed = strtoll(value, &end, 10);
+    free(key);
+    return end == value ? default_value : (int64_t)parsed;
+}
+
+bool rt_env_set(const uint8_t* key_ptr, uint64_t key_len, const uint8_t* value_ptr, uint64_t value_len) {
+    char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
+    char* value = rt_core_text_arg_to_cstr(value_ptr, value_len);
+    if (!key || !value) {
+        free(key);
+        free(value);
+        return false;
+    }
+#if defined(_WIN32)
+    bool ok = _putenv_s(key, value) == 0;
+#else
+    bool ok = setenv(key, value, 1) == 0;
+#endif
+    free(key);
+    free(value);
+    return ok;
 }
 
 /* rt_file_write, rt_file_copy, rt_file_size, rt_file_stat, rt_file_append
@@ -2564,16 +2607,27 @@ static char* rt_core_shell_quote(const char* s) {
     return out;
 }
 
-SplArray* rt_process_run(const char* cmd, SplArray* args) {
+SplArray* rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     SplArray* result = rt_array_new(3);
-    if (!cmd || !*cmd) {
+    if (!cmd || cmd_len == 0) {
         rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
         rt_array_push(result, rt_string_new((const uint8_t*)"missing command", 15));
         rt_array_push(result, rt_value_int(-1));
         return result;
     }
 
-    char* command = rt_core_shell_quote(cmd);
+    char* cmd_c = (char*)malloc((size_t)cmd_len + 1);
+    if (!cmd_c) {
+        rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+        rt_array_push(result, rt_string_new((const uint8_t*)"process spawn failed", 20));
+        rt_array_push(result, rt_value_int(-1));
+        return result;
+    }
+    memcpy(cmd_c, cmd, (size_t)cmd_len);
+    cmd_c[cmd_len] = '\0';
+
+    char* command = rt_core_shell_quote(cmd_c);
+    free(cmd_c);
     int64_t argc = rt_array_len(args);
     for (int64_t i = 0; i < argc; i++) {
         int64_t arg = rt_array_get(args, i);
@@ -2712,7 +2766,13 @@ const char* rt_getenv(const char* key) {
 }
 
 int rt_setenv(const char* key, const char* value) {
-    return rt_env_set(key, value) ? 1 : 0;
+    if (!key) return 0;
+#if defined(_WIN32)
+    return _putenv_s(key, value ? value : "") == 0 ? 1 : 0;
+#else
+    int result = value ? setenv(key, value, 1) : unsetenv(key);
+    return result == 0 ? 1 : 0;
+#endif
 }
 
 void rt_exit(int64_t code) {

@@ -88,8 +88,18 @@ impl MirLowering:
                 if found_receiver_type != nil:
                     len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)
             if len_symbol == "" and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                # ponytail: bootstrap flat HIR lacks type inference; current real-main len() is argv array len.
-                len_symbol = "rt_array_len"
+                # Bug #137 (follow-up): bootstrap flat HIR lacks type inference,
+                # so BOTH `all_args.len()` (an argv ARRAY) and `first.len()` (a
+                # single argv element, a tagged STRING) hit this untyped branch.
+                # Forcing `rt_array_len` was correct only for the array: on a
+                # tagged string it calls rt_core_array_ptr on a string handle
+                # and silently returns 0, so every `first.len() == N` guard in
+                # bootstrap_main (--version/--help/compile/native-build) was
+                # dead and never dispatched. rt_len is the unified accessor --
+                # it routes a tagged string to its length and a (raw or tagged)
+                # array ptr to its element count -- so one symbol serves both
+                # call sites correctly.
+                len_symbol = "rt_len"
             if len_symbol != "":
                 val receiver_local = self.lower_expr(receiver)
                 val func_operand = MirOperand(kind: MirOperandKind.Const(
@@ -102,6 +112,55 @@ impl MirLowering:
                 if val result_local = result:
                     return result_local
                 return receiver_local
+
+        # Bug #137 (follow-up): `x.starts_with(literal)` on the bootstrap
+        # argv-element path resolves to MethodResolution.Unresolved (the flat
+        # bootstrap HIR has no method resolution), so it fell through to the
+        # `case Unresolved:` arm below which emits an ERROR and returns a
+        # fresh unit temp WITHOUT lowering the call or its arguments -- the
+        # call result local was referenced (`and i64 %2, %lN`) but never
+        # defined (llc: "use of undefined value"). The no-arg `len` above is
+        # the only string method that had a pre-resolution special case, which
+        # is why `first.len()` lowered but `first.starts_with(...)` did not.
+        #
+        # Emit a real runtime call. Representation: argv elements are TAGGED
+        # heap strings (rt_cli_get_args builds them via rt_string_new), while a
+        # bootstrap string literal lowers to a RAW char* pointer (a
+        # getelementptr into a [N x i8] global). rt_string_starts_with(i64
+        # value, i64 prefix) needs BOTH operands tagged, so tag the raw literal
+        # first: rt_string_new(ptr, rt_strlen(ptr)). rt_string_starts_with is
+        # bounds-checked (returns 0 when prefix longer than receiver), which
+        # matters now that `and` is eager -- `starts_with` runs even when the
+        # preceding `len == N` guard is false.
+        if method == "starts_with" and args.len() == 1 and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            val sw_receiver = self.lower_expr(receiver)
+            val sw_prefix_ptr = self.lower_expr(args[0].value)
+            val strlen_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_strlen"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_swlen = self.builder
+            val sw_len_res = b_swlen.emit_call(strlen_op, [mir_operand_copy(sw_prefix_ptr)], MirType.i64())
+            self.builder = b_swlen
+            if val sw_prefix_len = sw_len_res:
+                val newstr_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_string_new"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_swnew = self.builder
+                val sw_tagged_res = b_swnew.emit_call(newstr_op, [mir_operand_copy(sw_prefix_ptr), mir_operand_copy(sw_prefix_len)], MirType.i64())
+                self.builder = b_swnew
+                if val sw_tagged_prefix = sw_tagged_res:
+                    val starts_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_string_starts_with"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_sw = self.builder
+                    val sw_res = b_sw.emit_call(starts_op, [mir_operand_copy(sw_receiver), mir_operand_copy(sw_tagged_prefix)], MirType.i64())
+                    self.builder = b_sw
+                    if val sw_local = sw_res:
+                        return sw_local
+            return sw_receiver
 
         if (method == "substring" or method == "slice"):
             val maybe_receiver_type = receiver.type_
@@ -419,6 +478,8 @@ impl MirLowering:
             return "main"
         if id == 7:
             return "bootstrap_output_from_args"
+        if id == 8:
+            return "rt_native_build"
         ""
 
     me symbol_to_operand(symbol: SymbolId) -> MirOperand:

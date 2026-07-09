@@ -8,7 +8,7 @@ use compiler.backend.backend.mir_to_llvm.*
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
-use compiler.mir_opt.{ssa_var_transform_blocks}
+use compiler.mir_opt.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
 use compiler.backend.backend_api.*
 use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
@@ -20,6 +20,20 @@ extern fn rt_env_get(key: text) -> text
 
 fn llvm_bootstrap_ssa_function(fn_: MirFunction) -> MirFunction:
     if fn_.blocks.len() == 1:
+        return fn_
+    # SIMPLE_BOOTSTRAP-only: replace the hand-built SSA-phi mechanism (which
+    # cannot correctly resolve each phi's incoming-value-per-predecessor for
+    # real control flow -- short-circuit `and`, nested if-EXPRESSIONS) with
+    # an alloca-per-reassigned-local transform. An entry-block alloca
+    # dominates every use by construction, so this cannot produce the
+    # `undef` phi operands the join-predecessor phi materialization could.
+    # Gated on the same SIMPLE_BOOTSTRAP condition the rest of this LLVM
+    # text-codegen path uses -- the normal (non-bootstrap) build never sets
+    # this env var, so it is byte-for-byte unchanged.
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        val alloca_rewritten = ssa_alloca_transform_blocks(fn_.blocks, fn_.locals, fn_.entry_block)
+        if alloca_rewritten.applied:
+            return MirFunction.with_blocks(fn_, alloca_rewritten.blocks)
         return fn_
     val rewritten = ssa_var_transform_blocks(fn_.blocks)
     if rewritten.applied:
@@ -503,9 +517,9 @@ impl MirTextCodegen for MirToLlvm:
                     var arg_val = self.translate_operand(arg)
                     var arg_ty = self.valid_llvm_type(self.get_operand_type(arg))
                     val param_ty = self.lookup_function_param_type(call_func_val, arg_i)
-                    if param_ty != "":
+                    if param_ty != "" and param_ty != nil:
                         arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
-                        arg_ty = param_ty
+                        arg_ty = self.valid_llvm_type(param_ty)
                     elif arg_val == "0":
                         arg_val = self.ret_value_for_type(arg_ty, "0")
                     arg_vals = arg_vals.push("{arg_ty} {arg_val}")
@@ -809,9 +823,9 @@ impl MirTextCodegen for MirToLlvm:
                 case _:
                     ()
             val param_ty = self.lookup_function_param_type(call_func_name, arg_i)
-            if param_ty != "":
+            if param_ty != "" and param_ty != nil:
                 arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
-                arg_ty = param_ty
+                arg_ty = self.valid_llvm_type(param_ty)
             elif arg_val == "0":
                 arg_val = self.ret_value_for_type(arg_ty, "0")
             arg_parts = arg_parts.push("{arg_ty} {arg_val}")
@@ -908,10 +922,28 @@ impl MirTextCodegen for MirToLlvm:
         "%l{id}"
 
     fn local_value_text(id: i64) -> text:
-        """Return a defined LLVM local name or `undef` for missing locals."""
+        """Return a (possibly forward-referenced) LLVM local name, or `undef`
+        only for locals that were never declared at all.
+
+        `self.local_types`/`ptr_locals`/`bool_locals` are populated up-front
+        from `body.locals` in `translate_function`, independent of the order
+        blocks are textually emitted in. A local can therefore be a real,
+        typed MIR local that simply hasn't been *textually* emitted yet
+        (e.g. it's defined in a block that comes later in `body.blocks` but
+        is a CFG predecessor of the block using it, as happens with
+        SSA-phi-materialized merge values). LLVM's .ll parser resolves such
+        forward references by CFG dominance, not textual order, so emitting
+        the real `%lN` name here is valid -- unlike emitting `undef`, which
+        silently produces wrong branch/arithmetic results (bug #135).
+        Only a local with NO declared type at all (truly malformed MIR)
+        still falls back to `undef` so LLVM stays valid.
+        """
         if self.defined_locals.has(id):
             return self.get_local(id)
-        # ponytail: malformed MIR lowers to `undef` so LLVM stays valid.
+        if self.ptr_locals.has(id) or self.bool_locals.has(id) or self.local_types.has(id):
+            return self.get_local(id)
+        # ponytail: malformed MIR (no declared local at all) lowers to
+        # `undef` so LLVM stays valid.
         "undef"
 
     fn get_local_type(id: i64) -> text:
@@ -929,42 +961,47 @@ impl MirTextCodegen for MirToLlvm:
             case nil: self.native_int()
 
     fn lookup_function_return_type(func_name: text) -> text:
-        match self.function_return_types.get(func_name):
-            case Some(ty):
-                if ty == nil or ty == "nil":
-                    ""
-                else:
-                    ty
-            case nil:
-                if func_name.starts_with("@"):
-                    val bare = func_name[1:]
-                    match self.function_return_types.get(bare):
-                        case Some(bare_ty):
-                            if bare_ty == nil or bare_ty == "nil":
-                                ""
-                            else:
-                                bare_ty
-                        case nil: ""
-                else:
-                    ""
+        # ponytail: flattened (no nested match-as-expression) -- a nested
+        # `match X.get(y):` inside an outer match arm was observed to silently
+        # skip its `case Some(...)` body under the bootstrap seed's codegen
+        # even when `.has(y)` was true, which fed a raw `nil` into emitted
+        # LLVM IR text (bug #134). Explicit early-returns avoid the nested
+        # match-value-propagation path entirely.
+        val direct = self.function_return_types.get(func_name)
+        if direct.?:
+            val ty = direct.unwrap()
+            if ty == nil or ty == "nil":
+                return ""
+            return ty
+        if not func_name.starts_with("@"):
+            return ""
+        val bare = func_name[1:]
+        val bare_hit = self.function_return_types.get(bare)
+        if bare_hit.?:
+            val bare_ty = bare_hit.unwrap()
+            if bare_ty == nil or bare_ty == "nil":
+                return ""
+            return bare_ty
+        ""
 
     fn lookup_function_param_type(func_name: text, index: i64) -> text:
-        match self.function_param_types.get(func_name):
-            case Some(param_tys):
-                if index < param_tys.len():
-                    return param_tys[index]
-                ""
-            case nil:
-                if func_name.starts_with("@"):
-                    val bare = func_name[1:]
-                    match self.function_param_types.get(bare):
-                        case Some(bare_param_tys):
-                            if index < bare_param_tys.len():
-                                return bare_param_tys[index]
-                            ""
-                        case nil: ""
-                else:
-                    ""
+        # ponytail: flattened for the same reason as lookup_function_return_type.
+        val direct = self.function_param_types.get(func_name)
+        if direct.?:
+            val param_tys = direct.unwrap()
+            if index < param_tys.len():
+                return param_tys[index]
+            return ""
+        if not func_name.starts_with("@"):
+            return ""
+        val bare = func_name[1:]
+        val bare_hit = self.function_param_types.get(bare)
+        if bare_hit.?:
+            val bare_param_tys = bare_hit.unwrap()
+            if index < bare_param_tys.len():
+                return bare_param_tys[index]
+            return ""
+        ""
 
     me mark_ptr_local(id: i64):
         self.local_types[id] = "ptr"

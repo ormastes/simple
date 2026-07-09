@@ -379,7 +379,7 @@ char*    spl_sprintf(const char* fmt, ...);
 
 int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
-SplArray* rt_process_run(const char* cmd, SplArray* args);
+SplArray* rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 
 /* ===== Process Async ===== */
 
@@ -402,10 +402,10 @@ bool        rt_editor_wait_simple_dap_stopped(int64_t pid);
 /* ===== Environment ===== */
 
 const char* spl_env_get(const char* key);
-const char* rt_env_get(const char* key);
-int64_t     rt_env_get_i64(const char* key, int64_t default_value);
+int64_t     rt_env_get(const uint8_t* key, uint64_t key_len);
+int64_t     rt_env_get_i64(const uint8_t* key, uint64_t key_len, int64_t default_value);
 void        spl_env_set(const char* key, const char* value);
-bool        rt_env_set(const char* key, const char* value);
+bool        rt_env_set(const uint8_t* key, uint64_t key_len, const uint8_t* value, uint64_t value_len);
 const char* rt_platform_name(void);
 int64_t     rt_term_enable_ansi(void);
 

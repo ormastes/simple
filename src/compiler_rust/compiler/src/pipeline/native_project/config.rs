@@ -50,6 +50,15 @@ fn is_compiler_like_entry(path: &Path) -> bool {
         || p.ends_with("/src/app/cli")
 }
 
+fn is_bootstrap_main_entry(path: &Option<PathBuf>) -> bool {
+    std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1")
+        && path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|name| name.to_str())
+            == Some("bootstrap_main.spl")
+}
+
 fn runtime_path_has_abi_complete_simple_core(runtime_path: Option<&Path>) -> bool {
     runtime_path.is_some_and(|path| {
         ["simple-core", "simple_core"].iter().any(|lane_dir| {
@@ -128,6 +137,9 @@ impl NativeProjectBuilder {
         selected_runtime: Option<&(PathBuf, bool)>,
     ) -> Result<(), String> {
         if let Some((runtime_lib, true)) = selected_runtime {
+            if is_bootstrap_main_entry(&self.entry_file) {
+                return Ok(());
+            }
             let entry = self
                 .entry_file
                 .as_ref()
@@ -151,6 +163,15 @@ impl NativeProjectBuilder {
         }
         let lane = self.resolve_runtime_lane();
         let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
+
+        if is_bootstrap_main_entry(&self.entry_file) {
+            if let Some(ref rp) = self.config.runtime_path {
+                let native_all = rp.join("libsimple_native_all.a");
+                if native_all.exists() {
+                    return Ok(Some((native_all, true)));
+                }
+            }
+        }
 
         let mut push_runtime_candidates = |dir: &Path| {
             let runtime_deps = dir.join("deps").join("libsimple_runtime.a");
