@@ -211,10 +211,25 @@ Focused CPU-SIMD routing containment:
   `1435462us` vs scalar `1589252us`; checksum parity held at both sizes,
   300 DPI remained the default, physical pixels stayed `7680x4320` at 8K, and
   `gui_perf_cpu_base_compare_target_met=yes`.
+- Retained-checksum full native rerun:
+  `OUT_DIR=build/check/cpu-simd-render-scale-retained-checksum` passed the
+  canonical 4K checksum `sum32:32105444634193792` and 8K checksum
+  `sum32:135445232233405312`, but timing was variable: 8K CPU-SIMD p50
+  `1435662us` vs scalar `1049096us`, so
+  `gui_perf_cpu_base_compare_target_met=no` on that run.
 - The external Node canvas baseline remains much faster in
   `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`; this containment
-  closes the Simple scalar-vs-CPU-SIMD regression for the full-size scale
-  contract, not the external drawing-library gap.
+  improves routing and hardens color proof, but the stable 8K speed target and
+  external drawing-library gap remain open.
+
+Rejected follow-up:
+
+- Initializing the framebuffer directly to an inferred full-page background and
+  skipping a matching root/body repaint was rejected. The scale contract still
+  passed scalar/SIMD parity, but the retained full-size fixture checksum changed
+  from `sum32:135445232233405312` to `sum32:17761116667698048`, proving a color
+  regression. The scale contract now retains the canonical 4K/8K checksums by
+  default so this class of quality drift fails closed.
 
 ## Verification
 
