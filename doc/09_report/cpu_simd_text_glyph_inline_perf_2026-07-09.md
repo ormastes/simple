@@ -187,6 +187,25 @@ Full 8K external CPU drawing-library baseline refresh:
   checksum `sum32:135445232233405312`, `nonzero_pixels:33177600`, and
   `screen_size_reduced=false`.
 
+Focused CPU-SIMD solid-fill containment:
+
+- The browser presenter now routes `cpu_simd` solid-only frames through the
+  existing Engine2D display-list readback path. This exercises the current
+  `CpuBackend`/`SoftwareBackend` `simd_fill_row` owner path for opaque solid
+  rectangles and avoids unsafe browser-framebuffer externs.
+- The solid-only detector now rejects translucent backgrounds by requiring
+  `st.bg` alpha 255. This keeps `rgba(...)` and CSS opacity on the normal CPU
+  mirror path so color/transparency composition stays byte-exact.
+- Focused native evidence:
+  `SIMPLE_LIB=src bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_cpu_simd_paint_spec.spl --mode=native --clean`
+  passed with `4 examples, 0 failures`; the solid case asserts SIMD fill hits,
+  while translucent and opacity cases preserve expected pixels.
+- Small native scale-contract smoke:
+  `CPU_SIMD_RENDER_SCALE_4K_WIDTH=16 CPU_SIMD_RENDER_SCALE_4K_HEIGHT=16 CPU_SIMD_RENDER_SCALE_8K_WIDTH=32 CPU_SIMD_RENDER_SCALE_8K_HEIGHT=32 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 sh scripts/check/check-cpu-simd-render-scale-contract.shs`
+  passed checksum parity and 300 DPI/full-size metadata, but still reported
+  `gui_perf_cpu_base_compare_target_met=no`. The full 8K text fixture blocker
+  remains open.
+
 ## Verification
 
 - `SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean`

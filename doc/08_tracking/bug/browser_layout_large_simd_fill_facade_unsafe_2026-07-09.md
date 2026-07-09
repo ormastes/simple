@@ -80,3 +80,16 @@ so accidental direct use fails closed instead of silently reporting fallback.
 This is a correctness containment only. Browser layout full-frame 4K/8K fill
 still needs a real mutable typed-array owner bridge before it can replace the
 current compiler array-repeat framebuffer initialization/fill path.
+
+## 2026-07-09 solid-only CPU-SIMD containment
+
+`cpu_simd` browser readback now uses the existing Engine2D display-list path
+only when layout classifies the frame as solid-only. That path reaches the
+current `CpuBackend`/`SoftwareBackend` SIMD row-fill owner and is covered by
+`web_renderer_cpu_simd_paint_spec.spl`.
+
+The solid-only classifier was hardened to require an opaque background alpha, so
+translucent `rgba(...)` and CSS opacity keep using the normal CPU mirror path.
+This is a narrow safe optimization for opaque solid rectangles; it does not
+solve full-frame 4K/8K text fixture speed, and the mutable browser framebuffer
+facade blocker remains open.
