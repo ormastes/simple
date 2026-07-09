@@ -134,13 +134,27 @@ person touching `translate_call` should land it alongside whatever they're alrea
 1. **Land the uncommitted `rt_cli_get_args` declare_fn fix** (this session,
    `llvm_lib_translate.spl:238`, additive one-liner) — review + commit. Real, verified fix for a
    broken-IR drop, but note: it does NOT by itself unblock Stage 1 (see (2)).
-2. **Diagnose the `LLVMBuildICmp` SIGSEGV** (step 5 above) — this is, and has been throughout this
-   session, the actual fatal blocker of Stage 1 (exit 139), unaffected by (1). Repeat the
-   temporary-diagnostic-eprint method from `bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`,
-   this time instrumenting the `LLVMBuildICmp` extern binding / the interpreter's
-   `call_extern_function_with_values` opaque-pointer marshalling (that doc's original "Fix direction"
-   section), to determine whether this is an `ICmp` call site #130's fix didn't cover, or #130's fix
-   being incomplete/order-sensitive.
+2. **UPDATED 2026-07-09 (post-9d11e852 diagnosis pass): the wall is nondeterministic, not a stable
+   exit-139.** A fresh `bin/simple build bootstrap` against `9d11e852` (instrumenting `translate_binop`
+   to log the source MIR operand of any NULL ICmp lhs/rhs) did **not** reproduce exit 139 — it aborted
+   at exit **134** again (`LLVMSetDataLayout`/`DataLayout::DataLayout` → "ABI alignment must be a 16-bit
+   integer"), before `translate_binop` was ever reached (0 diagnostic hits). Cross-referencing all of
+   today's crash reports (10:35 SIGABRT/134, 13:36/13:44/13:47 SIGSEGV/139, 14:08 SIGABRT/134) shows the
+   crash **site** flips between the `LLVMSetDataLayout` text-arg wall and the `LLVMBuildICmp`
+   `Value*`-operand wall across runs of an otherwise-unchanged tree — inconsistent with a fixed missing
+   `value_map` key (which would fail identically every run) and consistent with a heap/timing-dependent
+   corruption inside the interpreter's shared `call_extern_function_with_values` FFI-marshalling path
+   (present in every one of these backtraces, regardless of which downstream LLVM C API is hit). Full
+   evidence + verdict: `bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`'s
+   "post-9d11e852 diagnosis session" update.
+   **Revised next step:** do NOT keep repeating the positional Simple-side `eprint`-guard method — it
+   only fires if that exact call site is reached before the nondeterministic corruption happens to
+   manifest elsewhere first (as this run demonstrates). Instead diagnose
+   `call_extern_function_with_values` itself (`simple_compiler::interpreter::interpreter_extern`, Rust)
+   for a dangling/reused `text.ptr()` buffer or a stale/uninitialized extern-argument marshalling slot —
+   see that bug-doc section's "Concrete next fix direction" for the specific experiment (compare the
+   argument address/bytes on the interpreter side immediately before an extern call vs. what the native
+   callee receives).
 3. **Land the latent Copy/Move `.id`-unwrap fix** in `translate_call` (found by code-reading this
    session, not yet hit by an actual run) alongside whichever #79 work next touches that function —
    matches the `7984ab3ad7` pattern exactly, one line per match arm.

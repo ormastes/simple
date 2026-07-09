@@ -237,3 +237,101 @@ diagnostic-eprint method should be repeated on the `LLVMBuildICmp` extern bindin
 direction" section, written before #130/#133 landed, already outlines this — it remains the correct
 next step, now confirmed still-applicable rather than superseded). This is genuinely `#79`/#130
 territory: a recurring/unfixed instance of an already-diagnosed crash class, not a new bug shape.
+
+## Update 2026-07-09 (pure-diagnosis session, post-9d11e852) — instrumented `translate_binop`, wall PRE-EMPTED by an even earlier abort; crash SITE is nondeterministic across unchanged-tree runs
+
+**Setup.** Added a temporary diagnostic to `translate_binop` in
+`src/compiler/70.backend/backend/llvm_lib_translate_expr.spl` (right after the `lhs`/`rhs` computation,
+lines 208-209): `eprint` fires only when `lhs == 0 or rhs == 0`, printing the source `MirOperand` kind
+(`Copy#<local.id>` / `Move#<local.id>` / `Const`) for both sides, plus `dest.id`. Ran exactly ONE
+`bin/simple build bootstrap` against tip `9d11e852` (the just-landed `rt_cli_get_args` decl fix — the
+guide's stated premise was that this fix is orthogonal to the ICmp wall). Log:
+`/private/tmp/claude-501/-Users-ormastes-simple/7597a415-f0b0-4c3f-822d-107292b34bec/scratchpad/nullop.log`.
+
+**Result: the diagnostic never fired (0 occurrences of `NULL-ICMP-OPERAND`).** Stage 1 instead aborted
+with exit **134** again:
+```
+LLVM ERROR: ABI alignment must be a 16-bit integer
+error: native-build worker exited with code 134.
+Stage 1 FAILED
+```
+Crash report `~/Library/Logs/DiagnosticReports/simple-2026-07-09-140843.ips`, faulting thread:
+```
+abort
+llvm::report_fatal_error(llvm::Twine const&, bool)
+llvm::report_fatal_error(llvm::Error, bool)
+llvm::DataLayout::DataLayout(llvm::StringRef)
+llvm::Module::setDataLayout(llvm::StringRef)
+core::ops::function::FnOnce::call_once
+simple_compiler::interpreter::interpreter_extern::call_extern_function_with_values
+```
+This is the **same DataLayout wall** already documented above (`llvm_set_data_layout(llvm_mod,
+data_layout)` at `llvm_lib_backend.spl:54`), called once at module setup — **before** `Pass 2`
+(`translate_module_to_llvm` → per-instruction translation) even starts. So `translate_binop` was never
+reached this run; that is exactly why the instrumentation caught nothing. **The literal task ("find
+which local is NULL at the ICmp") is unachievable on this run** because the code path containing the
+ICmp is unreachable before the process aborts.
+
+**The wall is nondeterministic across otherwise-identical runs of the same tree — new evidence.**
+Cross-referencing today's (2026-07-09) crash reports, which this doc had not previously assembled in
+one place:
+| time | file | signal | site |
+|---|---|---|---|
+| 10:35 | `simple-2026-07-09-103528.ips` | SIGABRT (134) | `setDataLayout`/`DataLayout::DataLayout` (same as this run) |
+| 13:36 | `simple-2026-07-09-133637.ips` | SIGSEGV (139) | `ConstantFolder::FoldCmp`/`LLVMBuildICmp` |
+| 13:44 | `simple-2026-07-09-134458.ips` | SIGSEGV (139) | `ConstantFolder::FoldCmp`/`LLVMBuildICmp` |
+| 13:47 | `simple-2026-07-09-134732.ips` | SIGSEGV (139) | `ConstantFolder::FoldCmp`/`LLVMBuildICmp` |
+| 14:08 | `simple-2026-07-09-140843.ips` | SIGABRT (134) | `setDataLayout`/`DataLayout::DataLayout` (this run) |
+
+(`9d11e852` landed 14:03:45; the 13:xx reports predate it, the 14:08 report is against it.) The
+10:35→13:36 flip (134→139) happened with **no commit in between** on the timeline this doc already
+established (both are pre-`9d11e852`, post-`#133`/`d16a8883`), and the 13:47→14:08 flip (139→134)
+straddles only the orthogonal `rt_cli_get_args` decl fix. **A fixed MIR translation of a fixed input
+program calling a fixed missing `value_map` key would fail at the same site every single run.** Flipping
+between two distinct LLVM-C-API call sites (`LLVMSetDataLayout`'s `text` `StringRef` vs. `LLVMBuildICmp`'s
+`llvm::Value*` operand) across runs of the same source is inconsistent with hypothesis (b) and consistent
+with hypothesis (a): a heap/ASLR/allocation-timing-dependent corruption inside the interpreter's generic
+FFI argument marshalling (`call_extern_function_with_values`, present in **every** frame trace above,
+regardless of which LLVM API is ultimately called) that nondeterministically clobbers whichever
+pointer/text-typed argument happens to be marshalled around that time.
+
+**Static corroboration (no rebuild needed).** The intended datalayout string for this host
+(macOS/aarch64 → `LlvmTargetTriple.datalayout()`, `llvm_target.spl:145-151`, `is_macho` branch):
+```
+"e-m:o-i64:64-i128:128-n32:64-S128-Fn32"
+```
+is well-formed and is the exact standard clang/LLVM `arm64-apple-macosx` datalayout — confirmed by
+reading the source directly (no Simple-side string-construction bug). So the corruption happens between
+the Simple `text` value and what LLVM's C API receives, i.e. inside `call_extern_function_with_values` /
+the `_lc2` binding thunk, not in `llvm_target.spl`.
+
+**(a) vs (b) verdict: (a), FFI/memory-corruption in `call_extern_function_with_values`.** Evidence: (i)
+crash SITE nondeterminism across unchanged-tree runs, which a fixed missing-value_map-key lookup cannot
+produce; (ii) both crash sites funnel through the same generic interpreter FFI-dispatch frame, not
+translator-specific code; (iii) the intended datalayout string is statically well-formed, ruling out a
+Simple-source string bug for that wall specifically.
+
+**ICmp NULL-operand localization: POSTPONED.** Cannot name which local id is null this session — the
+crash preempted `translate_binop` entirely (0 diagnostic hits). Per the "ONE build at a time" / no-easy-pass
+constraints, did not force a second rebuild hoping to land on the ICmp site (which run hits which wall
+appears to be governed by nondeterministic corruption, not something a second run can reliably steer).
+
+**Concrete next fix direction for #79.** Stop instrumenting individual Simple-side translator call
+sites — a positional `eprint` guard only fires if that exact site is reached before whichever
+nondeterministic corruption manifests *first*, as this run demonstrates. Instead instrument (or
+code-review) the shared choke point: `call_extern_function_with_values` in the Rust interpreter
+(`simple_compiler::interpreter::interpreter_extern`), specifically how it marshals `text`/pointer-typed
+Simple values into raw C ABI arguments for two-arg (`_lc2`-style) extern calls. Look for: (1) a
+dangling/reused buffer for `text.ptr()` when the underlying value is short-lived (e.g. a temporary
+`text` built inline and not kept alive/rooted across the FFI call boundary — a classic use-after-free if
+GC/arena reuse recycles the backing bytes before the C call reads them), or (2) a stale/uninitialized
+slot in extern-argument marshalling reused across nondeterministic call ordering (which would explain
+why the *symptom* — which C API call sees the bad pointer — varies run to run while the *root cause*
+stays constant). A confirming experiment for whoever picks this up next: compare the argument
+address/bytes on the interpreter side immediately before an extern call vs. what the native callee
+actually receives, across a few runs, to catch the corruption in the act rather than only observing the
+two downstream symptoms.
+
+**Diagnostic reverted.** The temporary `translate_binop` `eprint` instrumentation was fully reverted via
+`jj restore src/compiler/70.backend/backend/llvm_lib_translate_expr.spl` — `jj diff` on that file shows
+no changes after this session.
