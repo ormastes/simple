@@ -340,9 +340,10 @@ Rejected follow-up:
   `CPU_SIMD_RENDER_SCALE_PROBE_ONLY=1 CPU_SIMD_RENDER_SCALE_REQUIRE_NATIVE_PROBE=1
   CPU_SIMD_RENDER_SCALE_NATIVE_PROBE_BIN=build/check/cpu-simd-render-scale-export-bin-current/backend_measurement_software_export_native_probe
   sh scripts/check/check-cpu-simd-render-scale-contract.shs` passes with
-  `cpu_simd_render_scale_native_probe_status=pass`. The scale wrapper now
-  generates tiny literal-argument entrypoints for each render row because direct
-  argv handoff remains incomplete for this exporter.
+  `cpu_simd_render_scale_native_probe_status=pass`. The scale and external
+  benchmark wrappers now generate tiny typed-value entrypoints for each Simple
+  Web render row because direct argv and native text-array handoff remain
+  incomplete for this exporter.
 - Scale-to-arch evidence link:
   `CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ONLY=1
   CPU_SIMD_RENDER_SCALE_REQUIRE_ARCH_MATRIX=1

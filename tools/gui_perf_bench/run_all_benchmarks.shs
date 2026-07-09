@@ -38,11 +38,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-SIMPLE_DPI_ARG=""
-if [[ "$DPI" != "300" ]]; then
-    SIMPLE_DPI_ARG="--dpi $DPI"
-fi
-
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT")"
 {
     echo "# GUI Performance Profile"
@@ -119,6 +114,23 @@ run_bench() {
         echo '```' | tee -a "$REPORT"
     fi
     echo "" | tee -a "$REPORT"
+}
+
+write_simple_web_export_entry() {
+    local entry="$1"
+    local backend="$2"
+    local fixture="$3"
+    local dpi_source="default"
+    if [[ "$DPI" != "300" ]]; then
+        dpi_source="override"
+    fi
+    cat >"$entry" <<EOF
+use app.wm_compare.backend_measurement_software_export.{software_only_render_loop_export_values}
+
+fn main() -> i64:
+    print(software_only_render_loop_export_values("$backend", $WIDTH, $HEIGHT, $DPI, "$dpi_source", 1, $FRAMES, "$fixture", "simple-web", "bench-8k", "$(hostname)", $SIMPLE_BIN_SIZE, $SIMPLE_BIN_SIZE, $SIMPLE_BIN_SIZE))
+    0
+EOF
 }
 
 kv_value() {
@@ -308,8 +320,12 @@ fi
 SIMPLE_BIN="$(select_simple_bin)"
 if [[ -x "$SIMPLE_BIN" ]]; then
     SIMPLE_BIN_SIZE=$(stat -Lc%s "$SIMPLE_BIN" 2>/dev/null || wc -c <"$SIMPLE_BIN")
-    run_bench "simple_web_cpu_simd" "$SIMPLE_BIN run $PROJECT_DIR/src/app/wm_compare/backend_measurement_software_export.spl --mode=$SIMPLE_WEB_CPU_MODE -- --software-render-backend cpu_simd --width $WIDTH --height $HEIGHT $SIMPLE_DPI_ARG --warmup-count 1 --sample-count $FRAMES --binary-size-bytes $SIMPLE_BIN_SIZE --baseline-binary-size-bytes $SIMPLE_BIN_SIZE --package-size-bytes $SIMPLE_BIN_SIZE --fixture gui-perf-8k-cpu-simd --shell simple-web --command bench-8k --host $(hostname)"
-    run_bench "simple_web_software" "$SIMPLE_BIN run $PROJECT_DIR/src/app/wm_compare/backend_measurement_software_export.spl --mode=$SIMPLE_WEB_CPU_MODE -- --software-render-backend software --width $WIDTH --height $HEIGHT $SIMPLE_DPI_ARG --warmup-count 1 --sample-count $FRAMES --binary-size-bytes $SIMPLE_BIN_SIZE --baseline-binary-size-bytes $SIMPLE_BIN_SIZE --package-size-bytes $SIMPLE_BIN_SIZE --fixture gui-perf-8k-software --shell simple-web --command bench-8k --host $(hostname)"
+    SIMPLE_WEB_CPU_SIMD_ENTRY="$BUILD_DIR/simple_web_cpu_simd.entry.spl"
+    SIMPLE_WEB_SOFTWARE_ENTRY="$BUILD_DIR/simple_web_software.entry.spl"
+    write_simple_web_export_entry "$SIMPLE_WEB_CPU_SIMD_ENTRY" cpu_simd gui-perf-8k-cpu-simd
+    write_simple_web_export_entry "$SIMPLE_WEB_SOFTWARE_ENTRY" software gui-perf-8k-software
+    run_bench "simple_web_cpu_simd" "$SIMPLE_BIN run $SIMPLE_WEB_CPU_SIMD_ENTRY --mode=$SIMPLE_WEB_CPU_MODE"
+    run_bench "simple_web_software" "$SIMPLE_BIN run $SIMPLE_WEB_SOFTWARE_ENTRY --mode=$SIMPLE_WEB_CPU_MODE"
 else
     echo "--- simple_web_cpu_simd/simple_web_software: SKIPPED ---" | tee -a "$REPORT"
     echo "gui_perf_benchmark_backend=simple_web_cpu_simd,simple_web_software" | tee -a "$REPORT"
