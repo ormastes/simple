@@ -140,6 +140,16 @@ This keeps 300 DPI retina metadata, full physical size, and
 browser-only fill facade; the unsafe mutable Engine2D fill extern remains
 blocked.
 
+Two post-repeat follow-ups were tried and rejected because they preserved
+checksum/no-reduction metadata but did not beat the clean 8K repeat-fill trace:
+
+- Allocating the repeat array without zero-initializing its backing storage:
+  4K `paint_ms=199`, total `203022us`; 8K `paint_ms=770`, total `773902us`,
+  checksum `sum32:135445232233405312`.
+- Filling the native repeat array by doubling initialized spans with `memcpy`:
+  8K `paint_ms=768`, total `771496us`, checksum
+  `sum32:135445232233405312`.
+
 Tracked blocker:
 `doc/08_tracking/bug/browser_layout_large_simd_fill_facade_unsafe_2026-07-09.md`.
 
