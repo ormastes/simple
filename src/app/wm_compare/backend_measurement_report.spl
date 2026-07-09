@@ -72,7 +72,9 @@ fn _sdn_escape(value: text) -> text:
     slash_escaped.replace("\"", "\\\"")
 
 fn _bool_text(value: bool) -> text:
-    if value: "true" else: "false"
+    if value:
+        return "true"
+    "false"
 
 fn _is_acceleration_lane(name: text) -> bool:
     if name == "metal": return true
@@ -84,7 +86,9 @@ fn _is_acceleration_lane(name: text) -> bool:
     if name == "cpu_simd": return true
     if name == "cpu_simd_x86": return true
     if name == "cpu_simd_arm": return true
-    name == "cpu_simd_riscv"
+    if name == "cpu_simd_riscv":
+        return true
+    false
 
 fn _is_gpu_family(name: text) -> bool:
     if name == "metal": return true
@@ -93,26 +97,44 @@ fn _is_gpu_family(name: text) -> bool:
     if name == "opencl": return true
     if name == "hip": return true
     if name == "rocm": return true
-    name == "gpu"
+    if name == "gpu":
+        return true
+    false
 
 fn _comparison_identity_valid(sample: BackendComparisonSample) -> bool:
-    if sample.fixture_id == "": return false
-    if sample.backend_family == "": return false
-    if sample.shell == "": return false
-    if sample.requested_backend == "": return false
-    if sample.selected_backend == "": return false
-    if sample.status == "": return false
-    if sample.command == "": return false
-    sample.host != ""
+    if sample.fixture_id == "":
+        return false
+    if sample.backend_family == "":
+        return false
+    if sample.shell == "":
+        return false
+    if sample.requested_backend == "":
+        return false
+    if sample.selected_backend == "":
+        return false
+    if sample.status == "":
+        return false
+    if sample.command == "":
+        return false
+    if sample.host == "":
+        return false
+    true
 
 fn _comparison_artifact_timings_valid(sample: BackendComparisonSample) -> bool:
-    if not _is_gpu_family(sample.backend_family):
+    val is_gpu = _is_gpu_family(sample.backend_family)
+    if not is_gpu:
         return true
-    if sample.artifact_build_us <= 0: return false
-    if sample.artifact_load_us < 0: return false
-    if sample.artifact_submit_us <= 0: return false
-    if sample.artifact_sync_us < 0: return false
-    sample.artifact_readback_us >= 0
+    if sample.artifact_build_us <= 0:
+        return false
+    if sample.artifact_load_us < 0:
+        return false
+    if sample.artifact_submit_us <= 0:
+        return false
+    if sample.artifact_sync_us < 0:
+        return false
+    if sample.artifact_readback_us < 0:
+        return false
+    true
 
 pub fn backend_comparison_artifact_total_us(sample: BackendComparisonSample) -> i64:
     sample.artifact_build_us + sample.artifact_load_us + sample.artifact_submit_us +
@@ -180,49 +202,108 @@ fn _comparison_speed_verdict_count(samples: [BackendComparisonSample], scalar_p5
     var count = 0
     for sample in samples:
         if _is_gpu_family(sample.backend_family):
-            val actual = backend_comparison_speed_verdict(sample, scalar_p50_frame_us)
-            if actual == verdict:
-                count = count + 1
+            if sample.status == "Initialized":
+                if scalar_p50_frame_us > 0:
+                    if verdict == "backend-faster-than-scalar":
+                        if sample.p50_frame_us < scalar_p50_frame_us:
+                            count = count + 1
+                    if verdict == "backend-equal-to-scalar":
+                        if sample.p50_frame_us == scalar_p50_frame_us:
+                            count = count + 1
+                    if verdict == "backend-slower-than-scalar":
+                        if sample.p50_frame_us > scalar_p50_frame_us:
+                            count = count + 1
     count
 
 fn _comparison_offload_overhead_verdict_count(samples: [BackendComparisonSample], verdict: text) -> i32:
     var count = 0
     for sample in samples:
         if _is_gpu_family(sample.backend_family):
-            val actual = backend_comparison_offload_overhead_verdict(sample)
-            if actual == verdict:
-                count = count + 1
+            if sample.status == "Initialized":
+                if backend_comparison_artifact_total_us(sample) > 0:
+                    if sample.p50_frame_us > 0:
+                        if verdict == "offload-overhead-contained":
+                            if backend_comparison_artifact_total_us(sample) < sample.p50_frame_us:
+                                count = count + 1
+                        if verdict == "offload-overhead-dominates":
+                            if backend_comparison_artifact_total_us(sample) >= sample.p50_frame_us:
+                                count = count + 1
     count
 
 fn _comparison_offload_efficiency_verdict_count(samples: [BackendComparisonSample], scalar_p50_frame_us: i64, verdict: text) -> i32:
     var count = 0
     for sample in samples:
         if _is_gpu_family(sample.backend_family):
-            val actual = backend_comparison_offload_efficiency_verdict(sample, scalar_p50_frame_us)
-            if actual == verdict:
-                count = count + 1
+            if sample.status == "Initialized":
+                val artifact_total = backend_comparison_artifact_total_us(sample)
+                if scalar_p50_frame_us <= 0:
+                    if verdict == "missing-scalar-baseline":
+                        count = count + 1
+                if scalar_p50_frame_us > 0:
+                    if artifact_total <= 0:
+                        if verdict == "missing-artifact-timing":
+                            count = count + 1
+                    if artifact_total > 0:
+                        if sample.p50_frame_us <= 0:
+                            if verdict == "missing-frame-timing":
+                                count = count + 1
+                        if sample.p50_frame_us > 0:
+                            if sample.p50_frame_us < scalar_p50_frame_us:
+                                if artifact_total >= sample.p50_frame_us:
+                                    if verdict == "offload-faster-but-overhead-dominates":
+                                        count = count + 1
+                                if artifact_total < sample.p50_frame_us:
+                                    if verdict == "offload-useful":
+                                        count = count + 1
+                            if sample.p50_frame_us == scalar_p50_frame_us:
+                                if verdict == "offload-break-even":
+                                    count = count + 1
+                            if sample.p50_frame_us > scalar_p50_frame_us:
+                                if artifact_total >= sample.p50_frame_us:
+                                    if verdict == "offload-slower-communication-overhead":
+                                        count = count + 1
+                                if artifact_total < sample.p50_frame_us:
+                                    if verdict == "offload-slower-compute-bound":
+                                        count = count + 1
     count
 
 fn _comparison_compiler_metadata_valid(sample: BackendComparisonSample) -> bool:
-    if not _is_gpu_family(sample.backend_family):
+    val is_gpu = _is_gpu_family(sample.backend_family)
+    if not is_gpu:
         return true
-    if sample.offload_tag_kind == "": return false
-    if sample.operation_family == "": return false
-    if sample.generated_operation == "": return false
-    if sample.generated_entry_symbol == "": return false
-    if sample.generated_source_format == "": return false
-    if sample.generated_binary_format == "": return false
-    sample.generated_artifact_path_suffix != ""
+    if sample.offload_tag_kind == "":
+        return false
+    if sample.operation_family == "":
+        return false
+    if sample.generated_operation == "":
+        return false
+    if sample.generated_entry_symbol == "":
+        return false
+    if sample.generated_source_format == "":
+        return false
+    if sample.generated_binary_format == "":
+        return false
+    if sample.generated_artifact_path_suffix == "":
+        return false
+    true
 
 fn _comparison_runtime_metadata_valid(sample: BackendComparisonSample) -> bool:
-    if not _is_gpu_family(sample.backend_family):
+    val is_gpu = _is_gpu_family(sample.backend_family)
+    if not is_gpu:
         return true
-    if sample.runtime_compute_target == "": return false
-    if sample.runtime_execution_path == "": return false
-    if sample.runtime_launch_api == "": return false
-    if sample.runtime_entry_symbol == "": return false
-    if sample.runtime_artifact_name == "": return false
-    sample.runtime_status == "ready"
+    if sample.runtime_compute_target == "":
+        return false
+    if sample.runtime_execution_path == "":
+        return false
+    if sample.runtime_launch_api == "":
+        return false
+    if sample.runtime_entry_symbol == "":
+        return false
+    if sample.runtime_artifact_name == "":
+        return false
+    if sample.runtime_status != "ready":
+        return false
+    true
 
 pub fn backend_measurement_from_probe(probe: BackendProbeResult,
                                       command: text, host: text,
@@ -471,14 +552,19 @@ pub fn backend_measurement_unavailable_valid(record: BackendMeasurementRecord) -
     true
 
 pub fn backend_measurement_satisfies_lane(record: BackendMeasurementRecord) -> bool:
-    if backend_measurement_initialized_valid(record):
+    val initialized_valid = backend_measurement_initialized_valid(record)
+    if initialized_valid:
         return true
-    backend_measurement_unavailable_valid(record)
+    val unavailable_valid = backend_measurement_unavailable_valid(record)
+    if unavailable_valid:
+        return true
+    false
 
 pub fn backend_comparison_initialized_valid(sample: BackendComparisonSample) -> bool:
     if sample.status != "Initialized":
         return false
-    if not _comparison_identity_valid(sample):
+    val identity_valid = _comparison_identity_valid(sample)
+    if not identity_valid:
         return false
     if sample.warmup_count < 0:
         return false
@@ -511,14 +597,18 @@ pub fn backend_comparison_initialized_valid(sample: BackendComparisonSample) -> 
     if sample.fallback_used:
         if sample.fallback_reason == "":
             return false
-    if _is_acceleration_lane(sample.requested_backend):
+    val requested_is_accel = _is_acceleration_lane(sample.requested_backend)
+    if requested_is_accel:
         if not sample.scalar_baseline_compared:
             return false
-    if not _comparison_compiler_metadata_valid(sample):
+    val compiler_metadata_valid = _comparison_compiler_metadata_valid(sample)
+    if not compiler_metadata_valid:
         return false
-    if not _comparison_runtime_metadata_valid(sample):
+    val runtime_metadata_valid = _comparison_runtime_metadata_valid(sample)
+    if not runtime_metadata_valid:
         return false
-    if not _comparison_artifact_timings_valid(sample):
+    val artifact_timings_valid = _comparison_artifact_timings_valid(sample)
+    if not artifact_timings_valid:
         return false
     true
 
@@ -526,7 +616,8 @@ pub fn backend_comparison_unavailable_valid(sample: BackendComparisonSample) -> 
     if sample.status != "Unavailable":
         if sample.status != "Failed":
             return false
-    if not _comparison_identity_valid(sample):
+    val identity_valid = _comparison_identity_valid(sample)
+    if not identity_valid:
         return false
     if sample.unavailable_reason == "":
         return false
@@ -536,9 +627,13 @@ pub fn backend_comparison_unavailable_valid(sample: BackendComparisonSample) -> 
     true
 
 pub fn backend_comparison_sample_valid(sample: BackendComparisonSample) -> bool:
-    if backend_comparison_initialized_valid(sample):
+    val initialized_valid = backend_comparison_initialized_valid(sample)
+    if initialized_valid:
         return true
-    backend_comparison_unavailable_valid(sample)
+    val unavailable_valid = backend_comparison_unavailable_valid(sample)
+    if unavailable_valid:
+        return true
+    false
 
 pub fn backend_comparison_samples_valid(samples: [BackendComparisonSample]) -> bool:
     if samples.len() == 0:
@@ -556,7 +651,9 @@ pub fn backend_measurement_binary_size_delta_valid(record: BackendMeasurementRec
         return false
     if record.binary_size_bytes <= 0:
         return false
-    record.baseline_binary_size_bytes > 0
+    if record.baseline_binary_size_bytes <= 0:
+        return false
+    true
 
 pub fn backend_measurement_record_sdn(record: BackendMeasurementRecord) -> text:
     "(backend_measurement " +
