@@ -238,6 +238,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_len", &[I64], &[I64]),
     // FR-COMPILER-012: array-repeat for `[value; count]` syntax in JIT
     RuntimeFuncSpec::new("rt_array_repeat", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_u32_alloc_filled", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_first", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_last", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_filter", &[I64, I64], &[I64]),

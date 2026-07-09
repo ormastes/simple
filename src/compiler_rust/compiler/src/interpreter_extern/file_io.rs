@@ -512,14 +512,8 @@ pub fn rt_intern_symbol(args: &[Value]) -> Result<Value, CompileError> {
 /// `BrowserRenderer.render_dom_to_pixels`) was costing ~30 s/call before this.
 /// Now it's a single Rust-side `vec![]` macro: O(n) at native speed.
 pub fn rt_u32_alloc_filled(args: &[Value]) -> Result<Value, CompileError> {
-    let len = match args.first() {
-        Some(Value::Int(n)) => *n,
-        _ => return Ok(Value::array(vec![])),
-    };
-    let fill = match args.get(1) {
-        Some(Value::Int(n)) => *n,
-        _ => 0,
-    };
+    let len = args.first().map(Value::as_int).transpose()?.unwrap_or(0);
+    let fill = args.get(1).map(Value::as_int).transpose()?.unwrap_or(0);
     if len <= 0 {
         return Ok(Value::array(vec![]));
     }

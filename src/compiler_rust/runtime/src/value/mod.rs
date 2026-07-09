@@ -143,7 +143,7 @@ pub use collections::{
     rt_typed_words_u32_set, rt_typed_words_u32_store_known_data_at, rt_typed_words_u32_unchecked,
     rt_typed_words_u64_at, rt_typed_words_u64_data_at, rt_typed_words_u64_data_at_checked, rt_typed_words_u64_push,
     rt_typed_words_u64_push_known_at, rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at,
-    rt_typed_words_u64_set, rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked,
+    rt_typed_words_u64_set, rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked, rt_u32_alloc_filled,
 };
 pub use collections::{rt_any_add, rt_array_all, rt_array_any, rt_array_filter, rt_array_find};
 pub use utf8_kernels::{

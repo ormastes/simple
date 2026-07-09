@@ -156,10 +156,26 @@ checksum/no-reduction metadata but did not beat the clean 8K repeat-fill trace:
 Tracked blocker:
 `doc/08_tracking/bug/browser_layout_large_simd_fill_facade_unsafe_2026-07-09.md`.
 
+Follow-up containment replaced browser layout `[base; width * height]`
+framebuffer initialization with the safe returned-array facade
+`rt_u32_alloc_filled(len, fill)`. The Simple boundary passes `fill.to_i64()` so
+native SFFI receives the registered `[I64, I64]` shape; the C helper stores
+tagged integer pixels with `rt_value_int(...)`, and the Rust/interpreter mirrors
+accept the same numeric contract.
+
+Focused evidence:
+
+- `SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean`
+  passed with `6 examples, 0 failures`.
+- Default 300 DPI scale-contract output retained checksum parity:
+  16x16 `sum32:1099407158984`, 32x32 `sum32:4392174910448`, and full
+  nonzero pixel proof for both CPU-SIMD and scalar software rows.
+- The same SPipe contract also passed the explicit DPI override path.
+
 ## Verification
 
 - `SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean`
-  passed after the native/Rust array-repeat source contract: `4 examples, 0
+  passed after the returned-array fill facade contract: `6 examples, 0
   failures`.
 - `cargo test -p simple-runtime test_array_repeat` passed: `1 passed`.
 - `SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter --clean`
