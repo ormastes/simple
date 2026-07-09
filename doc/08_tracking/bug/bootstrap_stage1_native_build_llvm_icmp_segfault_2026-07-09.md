@@ -335,3 +335,77 @@ two downstream symptoms.
 **Diagnostic reverted.** The temporary `translate_binop` `eprint` instrumentation was fully reverted via
 `jj restore src/compiler/70.backend/backend/llvm_lib_translate_expr.spl` — `jj diff` on that file shows
 no changes after this session.
+
+## Update 2026-07-10 (Codex/Spark bootstrap-first pass) — one run reached `translate_binop`; NULL source is `Copy#3` missing from `value_map`
+
+**Current wall.** Stage 1 bootstrap native-build on the `llvm-lib` path is still failing. Across the
+unchanged-tree evidence set, the visible crash remains nondeterministic between:
+- SIGSEGV/139 in `llvm::ConstantFolder::FoldCmp` via `LLVMBuildICmp`
+- SIGABRT/134 in `llvm::DataLayout::DataLayout` via `LLVMSetDataLayout`
+
+The shared frame remains `simple_compiler::interpreter::interpreter_extern::call_extern_function_with_values`.
+Treat translator-local probes as useful snapshots, but not as sufficient proof that the whole wall is
+translator-only.
+
+**Latest wall snapshot.**
+| timestamp | command | signal | top crash / signal line | artifact |
+|---|---|---|---|---|
+| 2026-07-10 00:16 KST | `bin/simple build bootstrap` with temporary `translate_binop` NULL probe | 139 | `LLVMBuildICmp`/`ConstantFolder::FoldCmp`; worker exit 139 | `/private/tmp/claude-501/-Users-ormastes-simple/7597a415-f0b0-4c3f-822d-107292b34bec/scratchpad/codex_null_binop_bootstrap.log` |
+
+**Captured NULL operand.** The temporary probe fired once:
+```
+[llvm-lib] NULL-BINOP-OPERAND dest=4 lhs=4401713832 rhs=0 left=Copy#2 present=true value=4401713832 right=Copy#3 present=false value=0
+```
+
+**(a) vs (b) for this run.** This specific run proves a genuine Simple-side unmapped operand at the
+`translate_binop` site: `right=Copy#3` was absent from `value_map`, so `translate_operand` returned
+0 before the LLVM C API call. This is hypothesis (b) for this run, not an LLVM-returned null.
+
+**Defining MIR instruction status.** No prior translated instruction in the current `value_map` defined
+local `3` before the binop. Static code-reading leaves two plausible sources:
+- `function_lowering.spl:124` can still produce a phantom `LocalId(id: pli + 1)` if the parameter scan
+  fails to find an `Arg` local; that would create body references to a local never registered in
+  `MirFunction.locals`.
+- `mir_lowering_stmts.spl:154-159` can create a `LocalKind.Var` with no `emit_copy` when a let binding
+  has no initializer; a later read would likewise be a `Copy#<local>` with no value-map write.
+
+The one-run diagnostic did not include function name, binop kind, or the surrounding MIR instruction
+stream, so the exact source function/def site remains **POSTPONED**, not guessed. The next targeted
+diagnostic should print function name and the current instruction before `translate_instruction`, or
+preferably instrument `MirFunction` validation before LLVM translation to reject any `Copy`/`Move`
+whose local has no prior def/arg in block order.
+
+**Resolved historical item.** The `rt_cli_get_args` unresolved-callee issue remains resolved by the
+`declare_runtime_functions()` addition in `llvm_lib_translate.spl`; keep it as historical evidence,
+but do not treat it as the active wall.
+
+**Diagnostic reverted.** The temporary `translate_binop` helper/eprint was removed after the run;
+`git diff -- src/compiler/70.backend/backend/llvm_lib_translate_expr.spl` is clean.
+
+## Update 2026-07-10 (Codex bootstrap continuation) — DataLayout fixed, next ICmp source narrowed to bootstrap builtin signature
+
+**Applied fixes.**
+- `translate_call` now unwraps `Copy(local)`/`Move(local)` through `local.id` before indexing
+  `value_map`, matching the rest of llvm-lib operand lookup.
+- `llvm_set_data_layout` now passes a NUL-terminated C string in all three active LLVM FFI wrappers
+  (`nogc_async_mut/sffi`, `nogc_sync_mut/sffi`, `nogc_sync_mut/ffi`). The next bootstrap run moved past
+  the `LLVMSetDataLayout`/`DataLayout` abort, so the prior ABI-alignment crash was a real C-string
+  boundary bug.
+- `bootstrap_builtin_signature` now gives argument-taking bootstrap helpers real HIR function
+  parameter lists: `bootstrap_output_from_args([text], i64) -> text`,
+  `run_native_build_bootstrap([text]) -> i64`, and `eprint(text) -> unit`.
+
+**Latest diagnostic before cleanup.** A targeted one-run probe logged:
+```
+[llvm-lib] MISSING-BINOP func=bootstrap_output_from_args block=0 inst=0 dest=4 left=Copy#2 present=true value=4362295208 right=Copy#3 present=false value=0
+```
+This points at the first entry-block comparison in
+`src/app/cli/bootstrap_main.spl` (`i >= args.len()`). The zero-argument bootstrap builtin signature was
+the most direct local cause: unresolved bootstrap references to `bootstrap_output_from_args` could carry
+the wrong function shape even though the declaration-lowering path kept the source params.
+
+**Verification status.** Focused backend checks pass for the llvm-lib translator after removing the
+temporary diagnostic. The HIR lowering file still fails the current `bin/simple check` on pre-existing
+parser errors around enum-payload `match p:` code; the reported locations are not in the edited
+`bootstrap_builtin_signature` block. No fourth bootstrap run was started in this session because the
+runaway guard caps one feature lane at three verify/fix bootstrap cycles.

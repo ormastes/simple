@@ -155,10 +155,38 @@ person touching `translate_call` should land it alongside whatever they're alrea
    see that bug-doc section's "Concrete next fix direction" for the specific experiment (compare the
    argument address/bytes on the interpreter side immediately before an extern call vs. what the native
    callee receives).
-3. **Land the latent Copy/Move `.id`-unwrap fix** in `translate_call` (found by code-reading this
-   session, not yet hit by an actual run) alongside whichever #79 work next touches that function —
-   matches the `7984ab3ad7` pattern exactly, one line per match arm.
-4. Once Stage 1 (path 2) passes, re-gate the full `bin/simple build bootstrap` 3-stage before any
+3. **UPDATED 2026-07-10 (Codex/Spark bootstrap-first pass): one run did reach `translate_binop` and
+   proved a genuine missing `value_map` operand for that run.** The temporary probe logged:
+   `dest=4 lhs=<nonzero> rhs=0 left=Copy#2 present=true right=Copy#3 present=false`, then Stage 1
+   failed at exit 139. Artifact:
+   `/private/tmp/claude-501/-Users-ormastes-simple/7597a415-f0b0-4c3f-822d-107292b34bec/scratchpad/codex_null_binop_bootstrap.log`.
+   This does not invalidate the nondeterministic FFI concern in (2); it means the current action needs
+   two coordinated checks:
+   - add a MIR/value-map validator before LLVM translation that reports function name, block, instruction
+     index, and any `Copy`/`Move` local with no prior def or `Arg` local; this should identify whether
+     `Copy#3` came from the `function_lowering.spl:124` phantom-parameter fallback or from an
+     initializer-less local path such as `mir_lowering_stmts.spl:154-159`;
+   - continue tracing `call_extern_function_with_values` argument bytes/addresses because unchanged-tree
+     runs still flip between `LLVMBuildICmp` and `LLVMSetDataLayout`.
+   The temporary compiler diagnostic was reverted; only docs remain dirty.
+4. **UPDATED 2026-07-10 (Codex bootstrap continuation): applied three targeted fixes and stopped at the
+   session verify/fix cap.**
+   - `translate_call`'s latent `Copy`/`Move` `.id` unwrap fix is now applied.
+   - `llvm_set_data_layout` now NUL-terminates the layout string in all three active LLVM FFI wrappers;
+     the next bootstrap moved past the prior `LLVMSetDataLayout` abort.
+   - A targeted probe then identified the next ICmp wall as
+     `bootstrap_output_from_args block=0 inst=0`, missing `Copy#3` for the `i >= args.len()` comparison.
+     `bootstrap_builtin_signature` was updated so argument-taking bootstrap helpers no longer receive a
+     zero-parameter HIR function type (`bootstrap_output_from_args([text], i64)`, `run_native_build_bootstrap([text])`,
+     `eprint(text)`).
+   The temporary diagnostic was removed. Backend focused checks pass; `expressions.spl` still fails the
+   current file-level checker on pre-existing enum-payload parser errors away from the edited signature
+   block. Do the next bootstrap in a fresh scoped session because this lane already consumed three
+   bootstrap verify/fix cycles.
+5. If the next Stage 1 run still fails, start from the latest wall, not from DataLayout: inspect the
+   emitted HIR/MIR for `bootstrap_output_from_args` and confirm params/arg locals are present before
+   llvm-lib translation.
+6. Once Stage 1 (path 2) passes, re-gate the full `bin/simple build bootstrap` 3-stage before any
    redeploy to `bin/release`.
 
 **Path 1 (cranelift/llc `SIMPLE_BOOTSTRAP` string-literal drop — stale/deprioritized, not today's
@@ -185,12 +213,12 @@ wall, preserved for whoever resumes it):**
 - `4866213` — llvm-lib trivial-binary milestone: create_target_machine
   Triple/CPU/Features NUL-terminate + cpu `x86-64-v1`→`x86-64` + name
   NUL-terminate (all 4 FFI copies). `42` and `40+2` → running ELF64 returning 42.
-- `bfd98b03` (#130) — stop wiping call/method args under SIMPLE_BOOTSTRAP; cleared the ICmp SIGSEGV
-  wall (moved it to a DataLayout abort).
-- `d16a8883` (#133) — lower function params under SIMPLE_BOOTSTRAP; cleared the DataLayout abort
-  (exit 134 → moved to exit 139). On that tree, exit 139 is the `LLVMBuildICmp` SIGSEGV (see below) —
-  a separate, non-fatal `translate_call` unresolved-callee eprint (`rt_cli_get_args`) also appeared in
-  the same run's log but is NOT what causes the 139.
+- `bfd98b03` (#130) — stop wiping call/method args under SIMPLE_BOOTSTRAP; not blocking now. It moved
+  the visible symptom from one ICmp crash instance to the DataLayout abort, but later evidence shows
+  the broader Stage-1 wall was not fully resolved.
+- `d16a8883` (#133) — lower function params under SIMPLE_BOOTSTRAP; not blocking now. It moved the
+  visible symptom back from DataLayout abort to exit 139, but later evidence still shows both the
+  DataLayout and ICmp walls can appear across reruns.
 
 ## Uncommitted this session (2026-07-09, left for review — see bug doc for full detail)
 
