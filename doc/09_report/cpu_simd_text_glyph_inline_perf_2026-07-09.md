@@ -331,12 +331,13 @@ Rejected follow-up:
   helpers, and simplifies the one-sample percentile path used by the scale
   contract. The focused Cranelift build now emits the exporter object; the
   remaining failure is in the imported report module. Report validators,
-  direct metadata checks, and the speed verdict counter now compile farther
-  after removing expression-return and nested text-verdict helper patterns. The
-  latest focused build stops at `_comparison_offload_overhead_verdict_count`
-  with a Cranelift verifier failure in `backend_measurement_report.spl`, so
-  strict fresh-binary proof remains blocked by native backend verification for
-  the report import rather than by the exporter source contract.
+  direct metadata checks, the speed verdict counter, the overhead counter, and
+  core-lane presence now compile farther after removing expression-return,
+  compound-chain, and nested helper-call patterns. The latest focused build
+  stops at `_comparison_offload_efficiency_verdict_count` with a Cranelift
+  verifier failure in `backend_measurement_report.spl`, so strict fresh-binary
+  proof remains blocked by native backend verification for the report import
+  rather than by the exporter source contract.
 - Full strict 4K/8K rerun after array-repeat doubling:
   `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-array-repeat-doubling-full sh scripts/check/check-cpu-simd-render-scale-contract.shs`
   passed with 4K CPU-SIMD p50 `205462us` vs scalar `207347us`, 8K CPU-SIMD p50

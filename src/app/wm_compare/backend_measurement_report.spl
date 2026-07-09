@@ -220,13 +220,15 @@ fn _comparison_offload_overhead_verdict_count(samples: [BackendComparisonSample]
     for sample in samples:
         if _is_gpu_family(sample.backend_family):
             if sample.status == "Initialized":
-                if backend_comparison_artifact_total_us(sample) > 0:
+                val artifact_total = sample.artifact_build_us + sample.artifact_load_us + sample.artifact_submit_us +
+                    sample.artifact_sync_us + sample.artifact_readback_us
+                if artifact_total > 0:
                     if sample.p50_frame_us > 0:
                         if verdict == "offload-overhead-contained":
-                            if backend_comparison_artifact_total_us(sample) < sample.p50_frame_us:
+                            if artifact_total < sample.p50_frame_us:
                                 count = count + 1
                         if verdict == "offload-overhead-dominates":
-                            if backend_comparison_artifact_total_us(sample) >= sample.p50_frame_us:
+                            if artifact_total >= sample.p50_frame_us:
                                 count = count + 1
     count
 
@@ -235,7 +237,8 @@ fn _comparison_offload_efficiency_verdict_count(samples: [BackendComparisonSampl
     for sample in samples:
         if _is_gpu_family(sample.backend_family):
             if sample.status == "Initialized":
-                val artifact_total = backend_comparison_artifact_total_us(sample)
+                val artifact_total = sample.artifact_build_us + sample.artifact_load_us + sample.artifact_submit_us +
+                    sample.artifact_sync_us + sample.artifact_readback_us
                 if scalar_p50_frame_us <= 0:
                     if verdict == "missing-scalar-baseline":
                         count = count + 1
@@ -762,18 +765,29 @@ fn _status_for(records: [BackendMeasurementRecord], backend: text) -> text:
     "Missing"
 
 fn _all_core_lanes_present(records: [BackendMeasurementRecord]) -> bool:
-    _status_for(records, "metal") != "Missing" and
-        _status_for(records, "vulkan") != "Missing" and
-        _status_for(records, "cuda") != "Missing" and
-        _status_for(records, "opencl") != "Missing" and
-        _status_for(records, "rocm") != "Missing" and
-        (_status_for(records, "cpu_simd") != "Missing" or
-         _status_for(records, "cpu_simd_x86") != "Missing" or
-         _status_for(records, "cpu_simd_arm") != "Missing" or
-         _status_for(records, "cpu_simd_riscv") != "Missing")
+    if _status_for(records, "metal") == "Missing":
+        return false
+    if _status_for(records, "vulkan") == "Missing":
+        return false
+    if _status_for(records, "cuda") == "Missing":
+        return false
+    if _status_for(records, "opencl") == "Missing":
+        return false
+    if _status_for(records, "rocm") == "Missing":
+        return false
+    if _status_for(records, "cpu_simd") != "Missing":
+        return true
+    if _status_for(records, "cpu_simd_x86") != "Missing":
+        return true
+    if _status_for(records, "cpu_simd_arm") != "Missing":
+        return true
+    if _status_for(records, "cpu_simd_riscv") != "Missing":
+        return true
+    false
 
 pub fn backend_measurement_matrix_valid(records: [BackendMeasurementRecord]) -> bool:
-    if not _all_core_lanes_present(records):
+    val core_lanes_present = _all_core_lanes_present(records)
+    if not core_lanes_present:
         return false
     for record in records:
         if not backend_measurement_satisfies_lane(record):
