@@ -286,7 +286,6 @@ void     rt_array_set(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_set_text(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_push(SplArray* array, int64_t value);
 SplArray* rt_array_repeat(int64_t value, int64_t count);
-SplArray* rt_u32_alloc_filled(int64_t len, int64_t fill);
 int64_t  rt_array_data_ptr(SplArray* array);
 int64_t  rt_array_data_ptr_text(SplArray* array);
 int64_t  rt_array_data_ptr_u8(SplArray* array);

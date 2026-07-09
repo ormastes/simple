@@ -3186,16 +3186,6 @@ pub extern "C" fn rt_array_repeat(value: RuntimeValue, count: i64) -> RuntimeVal
     result
 }
 
-#[no_mangle]
-pub extern "C" fn rt_u32_alloc_filled(len: i64, fill: RuntimeValue) -> RuntimeValue {
-    let fill_u32 = if fill.is_int() {
-        fill.as_int() as u32
-    } else {
-        fill.to_raw() as u32
-    };
-    rt_array_repeat(RuntimeValue::from_int(fill_u32 as i64), len)
-}
-
 /// Create an array with a range of integers [start, end)
 #[no_mangle]
 pub extern "C" fn rt_array_range(start: i64, end: i64, step: i64) -> RuntimeValue {

@@ -1611,10 +1611,6 @@ SplArray* rt_array_repeat(int64_t value, int64_t count) {
     return a;
 }
 
-SplArray* rt_u32_alloc_filled(int64_t len, int64_t fill) {
-    return rt_array_repeat(rt_value_int(rt_core_numeric_arg(fill) & 0xffffffffLL), rt_core_numeric_arg(len));
-}
-
 int64_t rt_array_data_ptr(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? (int64_t)(uintptr_t)array->data : 0;

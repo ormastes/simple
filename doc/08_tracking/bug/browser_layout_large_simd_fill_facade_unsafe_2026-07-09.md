@@ -1,7 +1,7 @@
 # Browser Layout Large SIMD Fill Facade Unsafe
 
 - **Date:** 2026-07-09
-- **Status:** contained
+- **Status:** open
 - **Severity:** high
 - **Area:** Simple Web layout, CPU-SIMD, runtime facade
 
@@ -42,13 +42,11 @@ current Engine2D SIMD fill externs directly for a full framebuffer.
   trace after the C native change: 4K `paint_ms=199`, total `202984us`; 8K
   `paint_ms=765`, total `768514us`, with unchanged checksums and no screen-size
   reduction. This does not expose a safe mutable Engine2D fill facade.
-- Browser layout now routes full-frame base fills through returned-array
-  `rt_u32_alloc_filled(len, fill)` instead of direct mutable Engine2D SIMD
-  fill. The native C helper stores tagged integer pixels, the Rust runtime
-  mirror uses `RuntimeValue::from_int`, and the interpreter helper accepts
-  signed/unsigned numeric values through `Value::as_int`. The focused scale
-  contract passes for default 300 DPI and explicit DPI override with checksum
-  parity and full nonzero pixel proof.
+- A returned-array `rt_u32_alloc_filled(len, fill)` facade was tried as a
+  smaller owner-boundary alternative, but direct native export segfaulted before
+  writing SDN evidence. It was rejected and removed; browser layout remains on
+  compiler-lowered `[base; width * height]`, backed by the optimized native
+  `rt_array_repeat` path.
 
 The existing row-returning facade is proven only for small evidence rows
 (`count=64`) in `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`.
@@ -79,7 +77,6 @@ in `test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl`.
 The interpreter no-op registration for the mutable fill extern was removed too,
 so accidental direct use fails closed instead of silently reporting fallback.
 
-This is a correctness containment only. Browser layout full-frame base fill no
-longer uses the unsafe mutable Engine2D extern path, but a lower-level mutable
-typed-array owner bridge is still required before claiming Cairo-class fill
-bandwidth.
+This is a correctness containment only. Browser layout full-frame 4K/8K fill
+still needs a real mutable typed-array owner bridge before it can replace the
+current compiler array-repeat framebuffer initialization/fill path.

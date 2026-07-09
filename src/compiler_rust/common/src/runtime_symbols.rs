@@ -1209,7 +1209,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_push_no_grow",
     "rt_array_range",
     "rt_array_repeat",
-    "rt_u32_alloc_filled",
     "rt_array_reverse",
     "rt_array_reversed",
     "rt_array_set_len_known",
