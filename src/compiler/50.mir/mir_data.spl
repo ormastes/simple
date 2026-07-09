@@ -108,9 +108,23 @@ impl MirBuilder:
             if signature.return_type.kind != MirTypeKind.Unit:
                 self.new_local(Some("_return"), signature.return_type, LocalKind.Return)
 
-            # Create parameter locals
-            for i in 0..signature.params.len():
-                self.new_local(nil, signature.params[i], LocalKind.Arg(i))
+        # NOTE(#133): parameter locals are created unconditionally, including
+        # under SIMPLE_BOOTSTRAP. HIR param lowering was fixed (declaration_lowering.spl
+        # lower_function) to stop dropping params under bootstrap, so `signature.params`
+        # is now correctly populated -- but this loop was still gated off, so no
+        # `LocalKind.Arg(i)` locals ever got created for bootstrap functions. Without
+        # them, function_lowering.spl's param-to-local mapping fell back to a phantom
+        # `LocalId(id: pli+1)` that was never registered as a real local (and collided
+        # with body-local ids, which also start counting from 0/1), so the codegen's
+        # Arg-local scan (core_codegen.spl) found nothing and emitted a zero-param
+        # `define`, while body references to the param read as `undef`. Creating the
+        # Arg locals here fixes both: real params on `define`, and body identifier
+        # references resolve to the correct local.
+        # `_return` local creation stays bootstrap-gated -- 0-param bootstrap functions
+        # (e.g. `bootstrap_version`, which returns `text`) already work today without
+        # it, so this is left untouched to avoid an unrelated behavior change.
+        for i in 0..signature.params.len():
+            self.new_local(nil, signature.params[i], LocalKind.Arg(i))
 
     me end_function() -> MirFunction:
         """Finish building current function and return it."""

@@ -125,8 +125,19 @@ impl HirLowering:
             else:
                 fn_symbol_id = self.symbols.define(fn_.name, SymbolKind.Function, nil, fn_.span, fn_.visibility, false, nil)
         self.current_function = Some(fn_symbol_id)
-        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
-            self.symbols.push_scope(ScopeKind.Function)
+        # NOTE(#133): push the function scope unconditionally, including under
+        # SIMPLE_BOOTSTRAP. Bug #133: params were never lowered under bootstrap
+        # (see below), so the `define` emitted zero params while callers passed
+        # real args (`call ... (nil, nil)`) and the body's own identifier
+        # references (e.g. `args`, `i`) resolved to `i64 undef` because no
+        # scope/symbol existed for them. Body identifiers resolve through
+        # `self.symbols.lookup(name)` (expressions.spl Ident arm) regardless of
+        # bootstrap mode -- only the function's OWN symbol uses the name-based
+        # `bootstrap_hir_symbol_for_name` scheme. Pushing the scope here and
+        # lowering params below (via the existing `lower_param`, which calls
+        # `self.symbols.define`) makes `args`/`i` resolve to real param locals
+        # under bootstrap too.
+        self.symbols.push_scope(ScopeKind.Function)
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:scope {fn_.name}")
 
@@ -140,38 +151,49 @@ impl HirLowering:
             eprint("[hir-lower] lower_function:type_params {fn_.name}")
 
         # Lower parameters
+        # NOTE(#133): lowered unconditionally, including under SIMPLE_BOOTSTRAP.
+        # Previously this whole block was skipped under bootstrap, so `params`
+        # stayed empty for every bootstrap entry function -- the MIR `define`
+        # emitted zero params while callers passed real args (mismatched arity,
+        # `call ... (nil, nil)`), and the body's references to those params
+        # (e.g. `args`, `i` in bootstrap_output_from_args) resolved to `i64
+        # undef` since no symbol/local existed for them. `lower_param` (below)
+        # calls `self.symbols.define`, and the body's Ident lowering resolves
+        # names via `self.symbols.lookup` (scope-based, not bootstrap's
+        # name-based function-symbol scheme) -- so lowering params the same way
+        # as non-bootstrap, now that the function scope above is always pushed,
+        # makes the body's param references bind correctly under bootstrap too.
         var params: [HirParam] = []
-        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
-            val fn_params = function_params(fn_)
-            # Compute the implicit-`self` condition with nested checks + an
-            # intermediate bool rather than one compound `A and B and C and
-            # (D or E)` expression: the cranelift backend mis-lowered the fused
-            # form, nil-checking the boolean result of the `(len()==0 or
-            # [0].name != ...)` sub-expression as if it were a heap pointer,
-            # trapping with "field access on nil receiver" (SIGILL) even for a
-            # plain non-method `fn main()`. Short-circuiting via nested ifs keeps
-            # the array-indexing operand out of the fused boolean entirely.
-            var needs_implicit_self = false
-            if fn_.is_method and not fn_.is_static and self.current_method_self_type.?:
-                if fn_params.len() == 0:
-                    needs_implicit_self = true
-                elif fn_params[0].name != "self":
-                    needs_implicit_self = true
-            if needs_implicit_self:
-                val self_type = self.current_method_self_type.unwrap()
-                val self_symbol = self.symbols.define("self", SymbolKind.Parameter, Some(self_type), fn_.span, Visibility.Private, false, nil)
-                params = params.push(HirParam(
-                    symbol: self_symbol,
-                    name: "self",
-                    type_: self_type,
-                    has_default: false,
-                    default: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: fn_.span), span: fn_.span),
-                    span: fn_.span
-                ))
-            var pi = 0
-            while pi < fn_params.len():
-                params = params.push(self.lower_param(fn_params[pi]))
-                pi = pi + 1
+        val fn_params = function_params(fn_)
+        # Compute the implicit-`self` condition with nested checks + an
+        # intermediate bool rather than one compound `A and B and C and
+        # (D or E)` expression: the cranelift backend mis-lowered the fused
+        # form, nil-checking the boolean result of the `(len()==0 or
+        # [0].name != ...)` sub-expression as if it were a heap pointer,
+        # trapping with "field access on nil receiver" (SIGILL) even for a
+        # plain non-method `fn main()`. Short-circuiting via nested ifs keeps
+        # the array-indexing operand out of the fused boolean entirely.
+        var needs_implicit_self = false
+        if fn_.is_method and not fn_.is_static and self.current_method_self_type.?:
+            if fn_params.len() == 0:
+                needs_implicit_self = true
+            elif fn_params[0].name != "self":
+                needs_implicit_self = true
+        if needs_implicit_self:
+            val self_type = self.current_method_self_type.unwrap()
+            val self_symbol = self.symbols.define("self", SymbolKind.Parameter, Some(self_type), fn_.span, Visibility.Private, false, nil)
+            params = params.push(HirParam(
+                symbol: self_symbol,
+                name: "self",
+                type_: self_type,
+                has_default: false,
+                default: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: fn_.span), span: fn_.span),
+                span: fn_.span
+            ))
+        var pi = 0
+        while pi < fn_params.len():
+            params = params.push(self.lower_param(fn_params[pi]))
+            pi = pi + 1
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:params {fn_.name}")
 
@@ -207,8 +229,8 @@ impl HirLowering:
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:body {fn_.name}")
 
-        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
-            self.symbols.pop_scope()
+        # NOTE(#133): pop unconditionally, matching the unconditional push above.
+        self.symbols.pop_scope()
         self.current_function = nil
 
         # Compute effective visibility using filename matching
