@@ -34,21 +34,24 @@ allocation from the CPU text path and re-ran the same retained 8K row:
 The current external CPU baseline refresh after the compare contract added
 explicit quality and no-screen-reduction proof records:
 
-- Simple Web CPU-SIMD: `835.578 ms` p50 at `7680x4320`, 300dpi, no screen-size
+- Simple Web CPU-SIMD: `767.872 ms` p50 at `7680x4320`, 300dpi, no screen-size
   reduction, checksum `sum32:135445232233405312`, pixel proof
   `nonzero_pixels:33177600`.
-- Simple Web scalar software: `829.183 ms` p50 with the same checksum.
-- Node Canvas/Cairo: `72.075 ms` p50 at the same 8K size.
+- Simple Web scalar software: `799.203 ms` p50 with the same checksum.
+- Node Canvas/Cairo: `73.892 ms` p50 at the same 8K size.
 - `gui_perf_cpu_base_compare_dpi_source=default`.
 - `gui_perf_cpu_base_compare_schedule_order=cpu_simd_first`.
 - `gui_perf_cpu_base_compare_physical_pixels=7680x4320`.
 - `gui_perf_cpu_base_compare_screen_size_reduced=false`.
 - `gui_perf_cpu_base_compare_simple_checksum=sum32:135445232233405312`.
 - `gui_perf_cpu_base_compare_simple_pixel_proof=nonzero_pixels:33177600`.
+- `gui_perf_cpu_base_compare_runtime_compute_target=cpu_simd`.
+- `gui_perf_cpu_base_compare_render_readback_scope=software-render-loop`.
+- `gui_perf_cpu_base_compare_fallback_used=false`.
 - `gui_perf_cpu_base_compare_target_met=no`.
 - Current evidence report:
   `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`.
-- Remaining gap versus Node Canvas/Cairo: `11.6x` slower.
+- Remaining gap versus Node Canvas/Cairo: `10.4x` slower.
 
 `doc/09_report/cpu_simd_render_scale_contract_2026-07-08.md` separately proves
 the CPU-SIMD path beats the in-repo scalar software path for the focused 4K/8K

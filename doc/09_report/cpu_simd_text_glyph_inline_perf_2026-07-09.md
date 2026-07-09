@@ -181,18 +181,20 @@ Full 8K external CPU drawing-library baseline refresh:
   `baseline_backend=javascript_node_canvas`,
   `gui_perf_cpu_base_compare_dpi_source=default`,
   `gui_perf_cpu_base_compare_schedule_order=cpu_simd_first`, Simple CPU-SIMD
-  p50 `835.578ms`, Node canvas p50 `72.075ms`,
+  p50 `767.872ms`, Node canvas p50 `73.892ms`,
   `gui_perf_cpu_base_compare_target_met=no`.
-- Simple internal scalar row also completed at p50 `829.183ms`, so this full
-  external compare run still leaves CPU-SIMD and scalar effectively in the same
-  framebuffer-fill-bound class while both remain far behind Node canvas. It
-  kept full `7680x4320`, 300 DPI retina metadata, checksum
-  `sum32:135445232233405312`, `nonzero_pixels:33177600`, and
-  `screen_size_reduced=false`; the compare block now duplicates those proof
-  fields as `gui_perf_cpu_base_compare_physical_pixels`,
+- Simple internal scalar row also completed at p50 `799.203ms`, so this full
+  external compare run keeps CPU-SIMD slightly ahead of scalar while both remain
+  far behind Node canvas. It kept full `7680x4320`, 300 DPI retina metadata,
+  checksum `sum32:135445232233405312`, `nonzero_pixels:33177600`, and
+  `screen_size_reduced=false`; the compare block duplicates those proof fields
+  as `gui_perf_cpu_base_compare_physical_pixels`,
   `gui_perf_cpu_base_compare_screen_size_reduced`,
   `gui_perf_cpu_base_compare_simple_checksum`, and
-  `gui_perf_cpu_base_compare_simple_pixel_proof`.
+  `gui_perf_cpu_base_compare_simple_pixel_proof`, and now also records
+  `gui_perf_cpu_base_compare_runtime_compute_target=cpu_simd`,
+  `gui_perf_cpu_base_compare_render_readback_scope=software-render-loop`, and
+  `gui_perf_cpu_base_compare_fallback_used=false`.
 
 Focused CPU-SIMD routing containment:
 

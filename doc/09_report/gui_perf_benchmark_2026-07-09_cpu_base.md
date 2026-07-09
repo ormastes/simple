@@ -1,6 +1,6 @@
 # GUI Performance Profile
 
-**Date:** 2026-07-09T18:42:56+00:00
+**Date:** 2026-07-09T18:53:37+00:00
 **Resolution:** 7680x4320
 **Frames:** 1
 **DPI:** 300
@@ -37,18 +37,18 @@ TUI startup speed is not measured by this GUI profile. The canonical startup aud
 gui_perf_benchmark_backend=gtk3
 gui_perf_benchmark_resolution=7680x4320
 gui_perf_benchmark_frames=1
-gui_perf_benchmark_cold_startup_ms=72.29
+gui_perf_benchmark_cold_startup_ms=75.18
 gui_perf_benchmark_warm_total_ms=0.04
 gui_perf_benchmark_frame_time_avg_ms=0.000
 gui_perf_benchmark_frame_time_p50_ms=0.000
 gui_perf_benchmark_frame_time_p95_ms=0.000
 gui_perf_benchmark_frame_time_max_ms=0.000
-gui_perf_benchmark_draw_only_avg_ms=0.034
+gui_perf_benchmark_draw_only_avg_ms=0.035
 gui_perf_benchmark_pixel_count=33177600
 gui_perf_benchmark_bytes_per_frame=132710400
 gui_perf_benchmark_status=completed
 ```
-gui_perf_benchmark_max_rss_kb=81152
+gui_perf_benchmark_max_rss_kb=81408
 gui_perf_benchmark_exit_code=0
 
 --- python_tkinter: SKIPPED (tkinter not found) ---
@@ -62,18 +62,18 @@ gui_perf_benchmark_reason=python3 tkinter not available
 gui_perf_benchmark_backend=javascript_node_canvas
 gui_perf_benchmark_resolution=7680x4320
 gui_perf_benchmark_frames=1
-gui_perf_benchmark_cold_startup_ms=0.90
-gui_perf_benchmark_warm_total_ms=72.08
-gui_perf_benchmark_frame_time_avg_ms=72.075
-gui_perf_benchmark_frame_time_p50_ms=72.075
-gui_perf_benchmark_frame_time_p95_ms=72.075
-gui_perf_benchmark_frame_time_max_ms=72.075
+gui_perf_benchmark_cold_startup_ms=0.72
+gui_perf_benchmark_warm_total_ms=73.90
+gui_perf_benchmark_frame_time_avg_ms=73.892
+gui_perf_benchmark_frame_time_p50_ms=73.892
+gui_perf_benchmark_frame_time_p95_ms=73.892
+gui_perf_benchmark_frame_time_max_ms=73.892
 gui_perf_benchmark_pixel_count=33177600
 gui_perf_benchmark_bytes_per_frame=132710400
 gui_perf_benchmark_pixel_checksum=12851353600
 gui_perf_benchmark_status=completed
 ```
-gui_perf_benchmark_max_rss_kb=324352
+gui_perf_benchmark_max_rss_kb=324096
 gui_perf_benchmark_exit_code=0
 
 --- electron: SKIPPED (electron not installed) ---
@@ -117,7 +117,7 @@ Run `simple migrate --fix-generics` to automatically update your code
 
 ```text
 (backend_comparison_samples sample_count: 1 scalar_baseline_p50_us: 0 backend_faster_than_scalar_count: 0 backend_equal_to_scalar_count: 0 backend_slower_than_scalar_count: 0 offload_overhead_contained_count: 0 offload_overhead_dominates_count: 0 offload_useful_count: 0 offload_faster_but_overhead_dominates_count: 0 offload_break_even_count: 0 offload_slower_communication_overhead_count: 0 offload_slower_compute_bound_count: 0 offload_missing_scalar_baseline_count: 0 valid: true
-  (backend_comparison_sample fixture_id: "gui-perf-8k-cpu-simd" backend_family: "cpu_simd" shell: "simple-web" requested: "cpu_simd" selected: "cpu_simd" device_id: "host-software" status: "Initialized" command: "bench-8k" host: "dl" warmup_count: 1 sample_count: 1 cold_start_us: 835578 warm_start_us: 835578 p50_frame_us: 835578 p95_frame_us: 835578 p95_input_to_paint_us: 835578 max_rss_kb: 1 binary_size_bytes: 54795064 baseline_binary_size_bytes: 54795064 binary_size_delta_bytes: 0 package_size_bytes: 54795064 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 835578 artifact_sync_us: 0 artifact_readback_us: 0 artifact_total_us: 835578 offload_overhead_verdict: "not-gpu-offload" speed_verdict: "missing-scalar-baseline" offload_efficiency_verdict: "not-gpu-offload" render_readback_scope: "software-render-loop" offload_tag_kind: "@gpu" operation_family: "text_blit" generated_operation: "" generated_entry_symbol: "" generated_source_format: "none" generated_binary_format: "none" generated_artifact_path_suffix: "" runtime_compute_target: "cpu_simd" runtime_execution_path: "simple_web_layout_engine2d_cpu_simd" runtime_launch_api: "RenderBackend" runtime_entry_symbol: "RenderBackend.draw_text_or_text_blit" runtime_artifact_name: "" runtime_status: "cpu-simd-render-loop-ready" checksum: "sum32:135445232233405312" pixel_proof: "nonzero_pixels:33177600" scalar_baseline_compared: true fallback_used: false fallback_reason: "" unavailable_reason: "")
+  (backend_comparison_sample fixture_id: "gui-perf-8k-cpu-simd" backend_family: "cpu_simd" shell: "simple-web" requested: "cpu_simd" selected: "cpu_simd" device_id: "host-software" status: "Initialized" command: "bench-8k" host: "dl" warmup_count: 1 sample_count: 1 cold_start_us: 767872 warm_start_us: 767872 p50_frame_us: 767872 p95_frame_us: 767872 p95_input_to_paint_us: 767872 max_rss_kb: 1 binary_size_bytes: 54795064 baseline_binary_size_bytes: 54795064 binary_size_delta_bytes: 0 package_size_bytes: 54795064 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 767872 artifact_sync_us: 0 artifact_readback_us: 0 artifact_total_us: 767872 offload_overhead_verdict: "not-gpu-offload" speed_verdict: "missing-scalar-baseline" offload_efficiency_verdict: "not-gpu-offload" render_readback_scope: "software-render-loop" offload_tag_kind: "@gpu" operation_family: "text_blit" generated_operation: "" generated_entry_symbol: "" generated_source_format: "none" generated_binary_format: "none" generated_artifact_path_suffix: "" runtime_compute_target: "cpu_simd" runtime_execution_path: "simple_web_layout_engine2d_cpu_simd" runtime_launch_api: "RenderBackend" runtime_entry_symbol: "RenderBackend.draw_text_or_text_blit" runtime_artifact_name: "" runtime_status: "cpu-simd-render-loop-ready" checksum: "sum32:135445232233405312" pixel_proof: "nonzero_pixels:33177600" scalar_baseline_compared: true fallback_used: false fallback_reason: "" unavailable_reason: "")
 )
 gui_perf_benchmark_dpi=300
 gui_perf_benchmark_dpi_default=300
@@ -127,14 +127,14 @@ gui_perf_benchmark_logical_pixels=7680x4320
 gui_perf_benchmark_physical_pixels=7680x4320
 gui_perf_benchmark_screen_size_reduced=false
 ```
-gui_perf_benchmark_max_rss_kb=920960
+gui_perf_benchmark_max_rss_kb=901392
 gui_perf_benchmark_exit_code=0
 
 ### simple_web_software
 
 ```text
-(backend_comparison_samples sample_count: 1 scalar_baseline_p50_us: 829183 backend_faster_than_scalar_count: 0 backend_equal_to_scalar_count: 0 backend_slower_than_scalar_count: 0 offload_overhead_contained_count: 0 offload_overhead_dominates_count: 0 offload_useful_count: 0 offload_faster_but_overhead_dominates_count: 0 offload_break_even_count: 0 offload_slower_communication_overhead_count: 0 offload_slower_compute_bound_count: 0 offload_missing_scalar_baseline_count: 0 valid: true
-  (backend_comparison_sample fixture_id: "gui-perf-8k-software" backend_family: "software" shell: "simple-web" requested: "software" selected: "software" device_id: "host-software" status: "Initialized" command: "bench-8k" host: "dl" warmup_count: 1 sample_count: 1 cold_start_us: 829183 warm_start_us: 829183 p50_frame_us: 829183 p95_frame_us: 829183 p95_input_to_paint_us: 829183 max_rss_kb: 1 binary_size_bytes: 54795064 baseline_binary_size_bytes: 54795064 binary_size_delta_bytes: 0 package_size_bytes: 54795064 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 829183 artifact_sync_us: 0 artifact_readback_us: 0 artifact_total_us: 829183 offload_overhead_verdict: "not-gpu-offload" speed_verdict: "backend-equal-to-scalar" offload_efficiency_verdict: "not-gpu-offload" render_readback_scope: "software-render-loop" offload_tag_kind: "@gpu" operation_family: "text_blit" generated_operation: "" generated_entry_symbol: "" generated_source_format: "none" generated_binary_format: "none" generated_artifact_path_suffix: "" runtime_compute_target: "cpu_scalar" runtime_execution_path: "simple_web_layout_software" runtime_launch_api: "RenderBackend" runtime_entry_symbol: "RenderBackend.draw_text_or_text_blit" runtime_artifact_name: "" runtime_status: "cpu-scalar-baseline-ready" checksum: "sum32:135445232233405312" pixel_proof: "nonzero_pixels:33177600" scalar_baseline_compared: true fallback_used: false fallback_reason: "" unavailable_reason: "")
+(backend_comparison_samples sample_count: 1 scalar_baseline_p50_us: 799203 backend_faster_than_scalar_count: 0 backend_equal_to_scalar_count: 0 backend_slower_than_scalar_count: 0 offload_overhead_contained_count: 0 offload_overhead_dominates_count: 0 offload_useful_count: 0 offload_faster_but_overhead_dominates_count: 0 offload_break_even_count: 0 offload_slower_communication_overhead_count: 0 offload_slower_compute_bound_count: 0 offload_missing_scalar_baseline_count: 0 valid: true
+  (backend_comparison_sample fixture_id: "gui-perf-8k-software" backend_family: "software" shell: "simple-web" requested: "software" selected: "software" device_id: "host-software" status: "Initialized" command: "bench-8k" host: "dl" warmup_count: 1 sample_count: 1 cold_start_us: 799203 warm_start_us: 799203 p50_frame_us: 799203 p95_frame_us: 799203 p95_input_to_paint_us: 799203 max_rss_kb: 1 binary_size_bytes: 54795064 baseline_binary_size_bytes: 54795064 binary_size_delta_bytes: 0 package_size_bytes: 54795064 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 799203 artifact_sync_us: 0 artifact_readback_us: 0 artifact_total_us: 799203 offload_overhead_verdict: "not-gpu-offload" speed_verdict: "backend-equal-to-scalar" offload_efficiency_verdict: "not-gpu-offload" render_readback_scope: "software-render-loop" offload_tag_kind: "@gpu" operation_family: "text_blit" generated_operation: "" generated_entry_symbol: "" generated_source_format: "none" generated_binary_format: "none" generated_artifact_path_suffix: "" runtime_compute_target: "cpu_scalar" runtime_execution_path: "simple_web_layout_software" runtime_launch_api: "RenderBackend" runtime_entry_symbol: "RenderBackend.draw_text_or_text_blit" runtime_artifact_name: "" runtime_status: "cpu-scalar-baseline-ready" checksum: "sum32:135445232233405312" pixel_proof: "nonzero_pixels:33177600" scalar_baseline_compared: true fallback_used: false fallback_reason: "" unavailable_reason: "")
 )
 gui_perf_benchmark_dpi=300
 gui_perf_benchmark_dpi_default=300
@@ -144,7 +144,7 @@ gui_perf_benchmark_logical_pixels=7680x4320
 gui_perf_benchmark_physical_pixels=7680x4320
 gui_perf_benchmark_screen_size_reduced=false
 ```
-gui_perf_benchmark_max_rss_kb=923476
+gui_perf_benchmark_max_rss_kb=941660
 gui_perf_benchmark_exit_code=0
 
 ## CPU Drawing Library Baseline Compare
@@ -160,13 +160,18 @@ gui_perf_cpu_base_compare_physical_pixels=7680x4320
 gui_perf_cpu_base_compare_screen_size_reduced=false
 gui_perf_cpu_base_compare_simple_checksum=sum32:135445232233405312
 gui_perf_cpu_base_compare_simple_pixel_proof=nonzero_pixels:33177600
+gui_perf_cpu_base_compare_runtime_compute_target=cpu_simd
+gui_perf_cpu_base_compare_runtime_execution_path=simple_web_layout_engine2d_cpu_simd
+gui_perf_cpu_base_compare_render_readback_scope=software-render-loop
+gui_perf_cpu_base_compare_offload_tag_kind=@gpu
+gui_perf_cpu_base_compare_fallback_used=false
 gui_perf_cpu_base_compare_status=measured
 gui_perf_cpu_base_compare_simple_backend=simple_web_cpu_simd
-gui_perf_cpu_base_compare_simple_p50_ms=835.578
+gui_perf_cpu_base_compare_simple_p50_ms=767.872
 gui_perf_cpu_base_compare_baseline_backend=javascript_node_canvas
 gui_perf_cpu_base_compare_baseline_metric=frame_time_p50_ms
-gui_perf_cpu_base_compare_baseline_ms=72.075
-gui_perf_cpu_base_compare_baseline_over_simple_ratio=0.086
+gui_perf_cpu_base_compare_baseline_ms=73.892
+gui_perf_cpu_base_compare_baseline_over_simple_ratio=0.096
 gui_perf_cpu_base_compare_target_met=no
 
 ## Reproducibility
