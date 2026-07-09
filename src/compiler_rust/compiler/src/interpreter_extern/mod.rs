@@ -1706,7 +1706,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_typed_words_u64_unchecked",
         sffi_array::rt_typed_words_u64_unchecked_fn
     );
-    insert_simple!("rt_u32_alloc_filled", file_io::rt_u32_alloc_filled);
     insert_simple!("rt_unix_socket_accept", qmp_socket::rt_unix_socket_accept);
     insert_simple!("rt_unix_socket_close", qmp_socket::rt_unix_socket_close);
     insert_simple!("rt_unix_socket_connect", qmp_socket::rt_unix_socket_connect);

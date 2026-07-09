@@ -290,6 +290,17 @@ Rejected follow-up:
   `runtime_sources_newer_than_simple_bin` because `bin/simple` predates the
   latest runtime array-repeat changes. The source change is covered, but
   deployed-binary performance proof requires a fresh bootstrap/deploy.
+- Clean bootstrap/deploy follow-up:
+  removed the stale Rust seed interpreter registration for rejected
+  `rt_u32_alloc_filled`; `cargo check -p simple-compiler` passed after that
+  fix. A clean `/tmp/simple-simd-clean` `bootstrap-from-scratch.sh
+  --full-bootstrap --deploy` then advanced past Rust seed/native runtime build,
+  but Stage 2/3 hit the known
+  `bootstrap_stage2_empty_mir_bodies_2026-07-05` fallback and Stage 4 native
+  full-CLI compile remained CPU-bound for more than 18 minutes without producing
+  `build/bootstrap/full/x86_64-unknown-linux-gnu/simple`, so the run was
+  interrupted. Strict deployed-binary freshness evidence remains blocked on a
+  completed deploy, not on the SIMD runtime source change.
 - Full strict 4K/8K rerun after array-repeat doubling:
   `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-array-repeat-doubling-full sh scripts/check/check-cpu-simd-render-scale-contract.shs`
   passed with 4K CPU-SIMD p50 `205462us` vs scalar `207347us`, 8K CPU-SIMD p50
