@@ -86,6 +86,24 @@ shape/order that the current bootstrap sources hit. The guard experiment also pr
 reachable and the build *would* advance past it if the operand were valid — consistent with
 "transient bad pointer" rather than "always-null operand".
 
+## Update 2026-07-09 (later) — #130 VALIDATED this diagnosis + fixed the ICmp wall
+
+Peer commit `bfd98b03 fix(hir): stop wiping call/method args under SIMPLE_BOOTSTRAP (#130)`
+(Simple-source, `src/compiler/20.hir/hir_lowering/expressions.spl`) landed. Re-running the bootstrap
+on that tree: the failure moved from the **ICmp SIGSEGV (139)** to the **DataLayout abort (134)** —
+i.e. #130 fixed the bad-`llvm::Value*`-operand crash exactly as this bug predicted (it WAS
+call/method args being wiped under `SIMPLE_BOOTSTRAP`), and the build now advances to the second wall
+this doc already documented.
+
+**The current front wall — same FFI-arg-corruption class, likely a case #130 missed:**
+`llvm_set_data_layout(mod_, layout)` → `_lc2("LLVMSetDataLayout", mod_, layout.ptr())`
+(`sffi/llvm_types.spl:79-80`). `layout` is a valid literal from `datalayout()`
+(`llvm_target.spl:147`), but LLVM receives a corrupted string → "ABI alignment must be a 16-bit
+integer". So the **`layout.ptr()` text-pointer argument** reaches LLVM corrupted — the same class of
+bug as the ICmp operand #130 just fixed. Suggests #130's "stop wiping call/method args" fix does not
+cover the `text.ptr()`-argument path (or `_lc2`/`text.ptr()` under SIMPLE_BOOTSTRAP has its own
+wiping). This is the concrete next step for #79.
+
 ## Context — this is a wall of the ACTIVE #79 llvm-lib effort, not an independent regression
 
 The LLVM-lib native-build path is under active peer development (`#79 stage4 self-host redeploy`),
