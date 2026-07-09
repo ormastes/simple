@@ -312,6 +312,18 @@ Rejected follow-up:
   src/app/wm_compare/backend_measurement_software_export.spl` passes. The
   remaining blocker is therefore native-build/codegen-specific, not the exporter
   source contract.
+- Focused fresh-binary continuation:
+  `SIMPLE_DEBUG_FIELD_ACCESS=1` localized the first native-build crash to
+  `bitfield_type_sym_for(base_local.id)` and the second to
+  `collection_opt_core.inst_in_list(d1_local.id)`. Both now fail closed when the
+  bootstrap interpreter binds an `if val` local to nil, so the focused exporter
+  build reaches backend codegen instead of crashing in MIR lowering/optimization.
+  Cranelift then fails verifier checks in `_render_software_pixels`; trying the
+  same focused build with `llvm-lib` exits 139 after unresolved-call diagnostics.
+  `SIMPLE_LIB=src bin/simple check
+  src/app/wm_compare/backend_measurement_software_export.spl` still passes, so
+  strict fresh-binary proof remains blocked by native backend codegen, not by
+  the CPU-SIMD scale contract.
 - Full strict 4K/8K rerun after array-repeat doubling:
   `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-array-repeat-doubling-full sh scripts/check/check-cpu-simd-render-scale-contract.shs`
   passed with 4K CPU-SIMD p50 `205462us` vs scalar `207347us`, 8K CPU-SIMD p50
