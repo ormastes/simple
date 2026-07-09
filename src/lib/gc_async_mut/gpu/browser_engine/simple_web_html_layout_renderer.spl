@@ -6293,11 +6293,11 @@ fn fb_text_thin_scaled_clip_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32,
     while i < endv:
         if cx >= fbw or cx >= clip.x1:
             return out
-        if cx < fbw and cx < clip.x1:
-            val gi = glyph_index_for_char_code(s.char_code_at(i))
-            if gi >= 0 and gi != 36:
-                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
-        cx = cx + if s.char_code_at(i) == 32: space_advance else: advance
+        val code = s.char_code_at(i)
+        val gi = glyph_index_for_char_code(code)
+        if gi >= 0 and gi != 36:
+            out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
+        cx = cx + if code == 32: space_advance else: advance
         i = i + 1
     out
 
@@ -6904,6 +6904,20 @@ fn text_line_aligned_x(base_x: i32, line_box_w: i32, line_w: i32, st: Style, lin
     if align == "right":
         return base_x + line_box_w - line_w
     base_x
+
+fn text_line_needs_paint_width(st: Style, line_i: i32, line_count: i32) -> bool:
+    if st.text_decoration_underline:
+        return true
+    var align = st.text_align
+    if line_i == line_count - 1 and st.text_align_last != "auto":
+        align = st.text_align_last
+    if align == "center" or align == "right":
+        return true
+    if align == "start":
+        return st.direction_rtl
+    if align == "end":
+        return not st.direction_rtl
+    false
 
 fn ellipsize_text_for_width(txt: text, start: i32, endv: i32, max_width: i32, advance: i32, space_advance: i32) -> text:
     if max_width <= 0:
@@ -8353,7 +8367,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                             val draw_end = if st.text_overflow_ellipsis and line_i == 0: draw_txt.len() else: node_ends[line_i]
                             val line_base_x = if line_i == 0: text_x + st.text_indent_px else: text_x
                             val line_box_w = if line_i == 0: w - st.text_indent_px else: w
-                            val line_w = text_line_advance_width(draw_txt, draw_start, draw_end, sparse_stride, sparse_space_stride)
+                            val line_w = if text_line_needs_paint_width(st, line_i, line_count): text_line_advance_width(draw_txt, draw_start, draw_end, sparse_stride, sparse_space_stride) else: 0
                             val line_text_x = text_line_aligned_x(line_base_x, line_box_w, line_w, st, line_i, line_count)
                             if st.text_shadow_color != 0u32:
                                 out = fb_text_sparse_range(out, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, sparse_stride, sparse_space_stride, st.font_style_italic)
@@ -8379,7 +8393,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                                 val draw_end = if st.text_overflow_ellipsis and line_i == 0: draw_txt.len() else: node_ends[line_i]
                                 val line_base_x = if line_i == 0: text_x + st.text_indent_px else: text_x
                                 val line_box_w = if line_i == 0: w - st.text_indent_px else: w
-                                val line_w = text_line_advance_width(draw_txt, draw_start, draw_end, adv, space_adv)
+                                val line_w = if text_line_needs_paint_width(st, line_i, line_count): text_line_advance_width(draw_txt, draw_start, draw_end, adv, space_adv) else: 0
                                 val line_text_x = text_line_aligned_x(line_base_x, line_box_w, line_w, st, line_i, line_count)
                                 if st.text_shadow_color != 0u32:
                                     out = fb_text_thin_scaled_clip_range(out, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, scale, adv, space_adv, st.font_style_italic, clip)

@@ -223,7 +223,16 @@ Focused CPU-SIMD routing containment:
   Full native evidence in `build/check/cpu-simd-render-scale-exporter-direct`
   kept the canonical 4K/8K checksums and improved the CPU-SIMD 8K p50 to
   `1128035us`, but scalar was still `977624us`, so
-  `gui_perf_cpu_base_compare_target_met=no` remains the latest retained result.
+  `gui_perf_cpu_base_compare_target_met=no` on that run.
+- Renderer text paint-loop width-scan skip:
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+  now avoids computing per-line advance width during paint when default
+  left/start alignment and no underline make that value unused. Full native
+  evidence in `build/check/cpu-simd-render-scale-skip-line-width` kept the
+  canonical 4K checksum `sum32:32105444634193792` and 8K checksum
+  `sum32:135445232233405312`; 4K CPU-SIMD p50 was `203104us` vs scalar
+  `204715us`, and 8K CPU-SIMD p50 was `960459us` vs scalar `1020635us`, so
+  `gui_perf_cpu_base_compare_target_met=yes` for this focused retained row.
 - The external Node canvas baseline remains much faster in
   `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`; this containment
   improves routing and hardens color proof, but the stable 8K speed target and
