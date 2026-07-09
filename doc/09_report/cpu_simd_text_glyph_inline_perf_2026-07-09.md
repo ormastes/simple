@@ -273,6 +273,9 @@ Rejected follow-up:
 - Full 8K external CPU drawing-library profile contract passed:
   `profile_report_contract=true`, `profile_kind=gui`, report path
   `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`.
+- Engine2D SIMD arch matrix passed for target C kernel binaries on x86_64,
+  AArch64, and RISC-V; runtime owner compile also passed for RISC-V RVV:
+  `doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-09.md`.
 - `sh scripts/audit/direct-env-runtime-guard.shs --working` and `--staged`
   passed.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.

@@ -820,6 +820,9 @@ int64_t rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, 
 #elif defined(__riscv) && defined(__riscv_vector)
     engine2d_fill_u32_rvv(data + off, n, color_word);
     return n;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    engine2d_fill_into(data + off, n, color_word);
+    return n;
 #endif
 
     for (int64_t i = 0; i < n; i++) {
@@ -859,6 +862,9 @@ int64_t rt_engine2d_simd_copy_u32(SplArray* dst, int64_t dst_off, SplArray* src,
     return n;
 #elif defined(__riscv) && defined(__riscv_vector)
     engine2d_copy_u32_rvv(dst_start, src_start, n);
+    return n;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    engine2d_copy_into(dst_start, src_start, n);
     return n;
 #endif
 

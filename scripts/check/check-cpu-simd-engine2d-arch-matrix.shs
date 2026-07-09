@@ -42,6 +42,30 @@ write_kv() {
     printf '%s=%s\n' "$1" "$2" >>"$ENV_PATH"
 }
 
+source_range_contains() {
+    start="$1"
+    pattern="$2"
+    awk "/$start/ { grab = 1 } grab { print } /^}/ { if (grab) exit }" src/runtime/runtime_simd_dispatch.c |
+        grep -q "$pattern"
+}
+
+check_source_contract() {
+    status=pass
+    reason=mutable-aarch64-dispatch-present
+    if ! source_range_contains "rt_engine2d_simd_fill_u32" "engine2d_fill_into(data + off, n, color_word)"; then
+        status=fail
+        reason=missing-aarch64-fill-dispatch
+    elif ! source_range_contains "rt_engine2d_simd_copy_u32" "engine2d_copy_into(dst_start, src_start, n)"; then
+        status=fail
+        reason=missing-aarch64-copy-dispatch
+    elif ! source_range_contains "rt_engine2d_simd_copy_u32" "memmove(dst_start, src_start"; then
+        status=fail
+        reason=missing-copy-overlap-guard
+    fi
+    write_kv cpu_simd_engine2d_arch_matrix_source_contract_status "$status"
+    write_kv cpu_simd_engine2d_arch_matrix_source_contract_reason "$reason"
+}
+
 runtime_cc() {
     arch="$1"
     case "$arch" in
@@ -210,6 +234,7 @@ write_kv cpu_simd_engine2d_arch_matrix_host_arch "$HOST_ARCH"
 write_kv cpu_simd_engine2d_arch_matrix_strict "$STRICT"
 write_kv cpu_simd_engine2d_arch_matrix_target_build "$TARGET_BUILD"
 write_kv cpu_simd_engine2d_arch_matrix_native_build_simple "$NATIVE_BUILD_SIMPLE"
+check_source_contract
 
 for arch in x86_64 aarch64 riscv64; do
     run_arch "$arch" "$HOST_ARCH"
@@ -255,7 +280,11 @@ done
 
 overall=pass
 reason=all-arches-pass
-if [ "$target_binary_failed" -gt 0 ]; then
+source_contract_status="$(env_value "$ENV_PATH" cpu_simd_engine2d_arch_matrix_source_contract_status)"
+if [ "$source_contract_status" != "pass" ]; then
+    overall=fail
+    reason=source-contract-failed
+elif [ "$target_binary_failed" -gt 0 ]; then
     overall=fail
     reason=target-binary-build-failed
 elif [ "$TARGET_BUILD" = "1" ] && [ "$ALLOW_PARTIAL" != "1" ] && [ "$target_binary_missing" -gt 0 ]; then
