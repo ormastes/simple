@@ -140,6 +140,8 @@ expect(script).to_contain("cpu_simd_render_scale_contract_sample_count=$SAMPLE_C
 expect(script).to_contain("CPU_SIMD_RENDER_SCALE_RUN_ORDER")
 expect(script).to_contain("cpu_simd_render_scale_contract_run_order=$RUN_ORDER")
 expect(script).to_contain("gui_perf_cpu_base_compare_schedule_order=$RUN_ORDER")
+expect(script).to_contain("gui_perf_cpu_base_compare_simd_provider_hits=")
+expect(script).to_contain("gui_perf_cpu_base_compare_native_simd_executed=")
 expect(script).to_contain("unsupported_run_order_$RUN_ORDER")
 expect(script).to_contain("CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY")
 expect(script).to_contain("binary_has_engine2d_simd_externs")
@@ -182,6 +184,10 @@ expect(script).to_contain("}x$")
 expect(script).to_contain("gui_perf_cpu_base_compare_dpi=$DPI")
 expect(script).to_contain("gui_perf_cpu_base_compare_frames=$FRAMES")
 expect(script).to_contain("gui_perf_cpu_base_compare_simple_mode=$SIMPLE_WEB_CPU_MODE")
+expect(script).to_contain("gui_perf_cpu_base_compare_simple_launch_kind=run")
+expect(script).to_contain("gui_perf_cpu_base_compare_simple_native_artifact_used=false")
+expect(script).to_contain("gui_perf_cpu_base_compare_simd_provider_hits=")
+expect(script).to_contain("gui_perf_cpu_base_compare_native_simd_executed=")
 ```
 
 </details>
@@ -195,9 +201,12 @@ Runnable source: 4 lines folded for reproduction.
 
 ```simple
 val exporter = file_read("src/app/wm_compare/backend_measurement_software_export.spl")
-expect(exporter).to_contain("fn _obvious_text_page")
-expect(exporter).to_contain("backend == \"cpu_simd\" and _obvious_text_page(html)")
+expect(exporter).to_contain("if backend == \"cpu_simd\":")
+expect(exporter).to_contain("this exporter fixture has no SIMD-safe text primitive")
 expect(exporter).to_contain("simple_web_layout_render_html_software_pixels(html, width, height)")
+expect(exporter).to_contain("simd_provider_hits:")
+expect(exporter).to_contain("gui_perf_benchmark_simd_provider_hits=")
+expect(exporter).to_contain("gui_perf_benchmark_native_simd_executed=")
 ```
 
 </details>
