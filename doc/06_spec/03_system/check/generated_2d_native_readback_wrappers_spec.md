@@ -1,6 +1,6 @@
 # Generated 2D native readback wrapper evidence
 
-> Runs the Metal and ROCm/HIP generated-2D readback wrappers into isolated build-local evidence directories and asserts their deterministic `evidence.env` contracts. Linux hosts without Metal or ROCm are expected to fail closed with typed unavailable evidence; native host passes must prove submit plus readback availability and matching operation checksums. OpenCL pass evidence must load the generated SPIR-V artifact rather than an inline duplicate OpenCL C source.
+> Runs the CUDA, Metal, and ROCm/HIP generated-2D readback wrappers into isolated build-local evidence directories and asserts their deterministic `evidence.env` contracts. Linux hosts without Metal or ROCm are expected to fail closed with typed unavailable evidence; native host passes must prove submit plus readback availability and matching operation checksums. OpenCL pass evidence must load the generated SPIR-V artifact rather than an inline duplicate OpenCL C source.
 
 <!-- sdn-diagram:id=generated_2d_native_readback_wrappers_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ generated_2d_native_readback_wrappers_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Generated 2D native readback wrapper evidence
 
-Runs the Metal and ROCm/HIP generated-2D readback wrappers into isolated build-local evidence directories and asserts their deterministic `evidence.env` contracts. Linux hosts without Metal or ROCm are expected to fail closed with typed unavailable evidence; native host passes must prove submit plus readback availability and matching operation checksums. OpenCL pass evidence must load the generated SPIR-V artifact rather than an inline duplicate OpenCL C source.
+Runs the CUDA, Metal, and ROCm/HIP generated-2D readback wrappers into isolated build-local evidence directories and asserts their deterministic `evidence.env` contracts. Linux hosts without Metal or ROCm are expected to fail closed with typed unavailable evidence; native host passes must prove submit plus readback availability and matching operation checksums. OpenCL pass evidence must load the generated SPIR-V artifact rather than an inline duplicate OpenCL C source.
 
 ## At a Glance
 
@@ -52,7 +52,7 @@ Runs the Metal and ROCm/HIP generated-2D readback wrappers into isolated build-l
 
 ## Overview
 
-Runs the Metal and ROCm/HIP generated-2D readback wrappers into isolated
+Runs the CUDA, Metal, and ROCm/HIP generated-2D readback wrappers into isolated
 build-local evidence directories and asserts their deterministic `evidence.env`
 contracts. Linux hosts without Metal or ROCm are expected to fail closed with
 typed unavailable evidence; native host passes must prove submit plus readback
@@ -108,6 +108,8 @@ A native pass must report `status=pass`, `submit_attempted=true`, and
 - Pass evidence must prove submit/readback and matching checksums.
 - OpenCL generated-2D readback uses `clCreateProgramWithIL` and never
   `clCreateProgramWithSource`.
+- CUDA pass evidence identifies the CUDA backend and all four generated 2D
+  operations.
 
 ## Scenarios
 
@@ -266,12 +268,30 @@ expect(wrapper.contains("clCreateProgramWithSource")).to_equal(false)
 
 </details>
 
+#### requires CUDA identity and the full generated operation set
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val wrapper = rt_file_read_text("scripts/check/check-cuda-generated-2d-readback.shs")
+expect(wrapper).to_contain("cuda_generated_2d_readback_backend_name")
+expect(wrapper).to_contain("cuda_generated_2d_readback_ops")
+expect(wrapper).to_contain("wrong-backend-name")
+expect(wrapper).to_contain("wrong-ops")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

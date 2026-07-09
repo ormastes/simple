@@ -78,6 +78,8 @@ cuda_validate_evidence() {
     expected="$(cuda_env_value cuda_generated_2d_readback_expected_checksum)"
     actual="$(cuda_env_value cuda_generated_2d_readback_actual_checksum)"
     mismatches="$(cuda_env_value cuda_generated_2d_readback_mismatch_count)"
+    backend_name="$(cuda_env_value cuda_generated_2d_readback_backend_name)"
+    ops="$(cuda_env_value cuda_generated_2d_readback_ops)"
 
     if [ "$submit" != "true" ]; then
         cuda_mark_claimed_pass_failed "missing-submit-attempt"
@@ -105,6 +107,12 @@ cuda_validate_evidence() {
                 break
             fi
         done
+        [ "$(cuda_env_value cuda_generated_2d_readback_status)" = "pass" ] || return 0
+        if [ "$backend_name" != "cuda" ]; then
+            cuda_mark_claimed_pass_failed "wrong-backend-name"
+        elif [ "$ops" != "fill,copy,alpha,scroll" ]; then
+            cuda_mark_claimed_pass_failed "wrong-ops"
+        fi
     fi
 }
 
@@ -318,6 +326,7 @@ EOF
     cat >"$BUILD_DIR/evidence.env" <<'EOF'
 cuda_generated_2d_readback_status=pass
 cuda_generated_2d_readback_reason=readback-pixels-matched
+cuda_generated_2d_readback_backend_name=cuda
 cuda_generated_2d_readback_submit_attempted=true
 cuda_generated_2d_readback_readback_available=true
 cuda_generated_2d_readback_expected_checksum=4
@@ -335,11 +344,41 @@ cuda_generated_2d_readback_alpha_mismatch_count=0
 cuda_generated_2d_readback_scroll_expected_checksum=1
 cuda_generated_2d_readback_scroll_actual_checksum=1
 cuda_generated_2d_readback_scroll_mismatch_count=0
+cuda_generated_2d_readback_ops=fill,copy,alpha,scroll
 EOF
     cuda_validate_evidence
     if ! grep -q '^cuda_generated_2d_readback_status=pass$' "$BUILD_DIR/evidence.env"; then
         echo "self_test_status=fail"
         echo "self_test_reason=valid-readback-rejected"
+        exit 1
+    fi
+
+    awk '
+        /^cuda_generated_2d_readback_backend_name=/ { print "cuda_generated_2d_readback_backend_name=cpu"; next }
+        { print }
+    ' "$BUILD_DIR/evidence.env" >"$BUILD_DIR/evidence.env.tmp"
+    mv "$BUILD_DIR/evidence.env.tmp" "$BUILD_DIR/evidence.env"
+    cuda_validate_evidence
+    if ! grep -q '^cuda_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^cuda_generated_2d_readback_reason=wrong-backend-name$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=wrong-backend-name-accepted"
+        exit 1
+    fi
+
+    awk '
+        /^cuda_generated_2d_readback_status=/ { print "cuda_generated_2d_readback_status=pass"; next }
+        /^cuda_generated_2d_readback_reason=/ { print "cuda_generated_2d_readback_reason=readback-pixels-matched"; next }
+        /^cuda_generated_2d_readback_backend_name=/ { print "cuda_generated_2d_readback_backend_name=cuda"; next }
+        /^cuda_generated_2d_readback_ops=/ { print "cuda_generated_2d_readback_ops=fill"; next }
+        { print }
+    ' "$BUILD_DIR/evidence.env" >"$BUILD_DIR/evidence.env.tmp"
+    mv "$BUILD_DIR/evidence.env.tmp" "$BUILD_DIR/evidence.env"
+    cuda_validate_evidence
+    if ! grep -q '^cuda_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^cuda_generated_2d_readback_reason=wrong-ops$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=wrong-ops-accepted"
         exit 1
     fi
 
