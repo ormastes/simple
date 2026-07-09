@@ -544,3 +544,69 @@ finding to chase (stale native/module cache serving old wrapper code).
 **Probes fully reverted** (`jj restore` both files; `grep -c icmp-probe` = 0 in both
 `nogc_sync_mut/sffi/llvm_codegen.spl` and `nogc_async_mut/sffi/llvm_codegen.spl`; `jj diff` clean).
 Logs: scratchpad `icmp_probe_run1.log`, `icmp_probe_run2.log`, selftest `icmp_probe_selftest.spl`.
+
+## Update 2026-07-10 (icmp-wrapper probe, corrected location) — VERDICT: (b) Simple-side NULL operand, DISCRIMINATED
+
+**Setup.** Re-ran the discriminating experiment at the correct, empirically-proven-live probe point:
+`llvm_build_icmp` in `src/lib/nogc_async_mut/sffi/llvm_codegen.spl:139` (not the `nogc_sync_mut` dead
+copy used in the prior, inconclusive pass). Probe: (1) unconditional positive-control eprint on the
+first 3 `llvm_build_icmp` calls (module-level counter), (2) conditional eprint when `lhs == 0 or
+rhs == 0`, both placed immediately before the `_lcn("LLVMBuildICmp", args)` extern call. WC verified
+clean on `origin/main` tip (`3cf7e37f`) before starting; no other bootstrap running.
+
+**Result — ONE bootstrap run, decisive, no ambiguity (run 2 not needed):**
+```
+[icmp-probe] CALL#1 pred=33 lhs=35081175520 rhs=4327134128 name=tobool
+[icmp-probe] CALL#2 pred=38 lhs=0 rhs=4327133968 name=gt
+[icmp-probe] NULL OPERAND pre-FFI: pred=38 lhs=0 rhs=4327133968 name=gt
+
+error: native-build worker exited with code 139.
+  interpreter: /Users/ormastes/simple/bin/simple (exit code 139)
+[LIM-010] SEGFAULT (exit 139) — likely LLVM constructor conflict
+Stage 1 FAILED
+```
+(full log: scratchpad `icmp_probe_run1.log`, lines 2604-2613; grep `icmp-probe|unresolved function|Stage
+1|exit code` shown above is the complete signal set).
+
+**Positive control fired** (CALL#1, CALL#2 — proves the wrapper executes and the probe point is live,
+consistent with the prior selftest). **The null-operand branch ALSO fired**, on the very next line,
+for the `pred=38` (`LLVM_INT_SGT`, i.e. Simple `>`/`Gt`) comparison named `"gt"`: `lhs=0`. The crash
+(`exit 139`) follows immediately — 2 lines later in the log, no other icmp calls or unrelated output in
+between — so this is not a stale/buffered line from an earlier, unrelated call; it is the operand of
+the crashing call itself.
+
+**Verdict: (b) Simple-side NULL operand, PROVEN for this crash instance — not (a) FFI marshalling
+corruption.** The interpreter's `call_extern_function_with_values` received `lhs=0` from Simple-side
+code *before* the FFI call, and passed it through faithfully to `LLVMBuildICmp`, which then crashed in
+`ConstantFolder::FoldCmp` on the genuine NULL `llvm::Value*`. There is no corruption step to blame —
+Simple already computed 0 for the left operand of a `>` comparison named `"gt"`.
+
+**Context / next-step localization (static code read, not re-run).** `name="gt"` traces to the `Gt`
+case's integer branch in `src/compiler/70.backend/backend/llvm_lib_translate_expr.spl:301-305`:
+```
+case Gt:
+    val cmp = if left_is_float:
+        llvm_build_fcmp(builder, LLVM_REAL_OGT, lhs, rhs, "gt")
+    else:
+        llvm_build_icmp(builder, LLVM_INT_SGT, lhs, rhs, "gt")
+```
+`lhs` here is the already-translated left operand of a `>` binary op (from `translate_binop`'s earlier
+`lhs`/`rhs` computation, same function documented in the 2026-07-09 "pure-diagnosis session" update
+above). A `lhs=0` reaching this call site is the same failure shape already characterized there and in
+the 2026-07-10 "one run reached translate_binop" update: an operand `local` missing from `value_map`
+(`translate_operand` returns 0 for an unmapped `Copy`/`Move`), now specifically pinned to the `Gt`
+comparison rather than a generic binop. **Not re-diagnosed further this session** (which local/MIR
+instruction feeds this particular `Gt`'s lhs was not re-captured — would need a `translate_binop`-level
+probe printing operand kind/local-id, as previously proposed, run against current tip).
+
+**This closes the (a) vs (b) discriminator for #79: stop looking at interpreter FFI marshalling for
+this crash family; the fix belongs in Simple-side MIR/value_map completeness (missing def for whatever
+local feeds this `Gt`'s left operand), per `.claude/rules/bootstrap.md`'s "fix in pure Simple" rule.**
+Nondeterminism seen in earlier sessions (134 DataLayout vs 139 ICmp) is better explained by *which*
+missing-value_map site the compile happens to reach first on a given run, not by heap/ASLR-dependent
+FFI corruption — the DataLayout wall was independently traced to and fixed as a real NUL-termination
+bug (see 2026-07-10 "DataLayout fixed" update above), consistent with "each wall was a distinct,
+deterministic Simple-side bug", not a shared nondeterministic corruption mechanism.
+
+**Probe reverted** (`jj restore src/lib/nogc_async_mut/sffi/llvm_codegen.spl`; `grep -rn icmp-probe
+src/` = 0 repo-wide; `jj diff` clean). Log: scratchpad `icmp_probe_run1.log`.

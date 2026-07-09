@@ -301,3 +301,19 @@ copy first (resolver order, `module_loader_resolve.spl:206-208`), so the instrum
 experiment with the probe in the `nogc_async_mut` copy. All probes reverted. Full detail:
 `doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
 (§ Update 2026-07-10 icmp-wrapper probe experiment).
+
+## Update 2026-07-10 (icmp wrapper probe, corrected location) — DISCRIMINATED: (b) Simple-side NULL, not FFI corruption
+
+Re-ran the probe at the corrected location (`nogc_async_mut/sffi/llvm_codegen.spl:llvm_build_icmp`).
+ONE bootstrap run was decisive: positive control fired (proves the wrapper executes), and the
+null-operand branch fired too, immediately before the crash — `lhs=0` for a `>` (`Gt`) integer
+comparison, then exit 139 two log lines later. **Verdict: (b) Simple-side NULL — the interpreter
+passed a genuine 0 through FFI faithfully; there is no marshalling corruption to chase.** Static
+tracing points at `llvm_lib_translate_expr.spl`'s `Gt` case (`llvm_build_icmp(..., LLVM_INT_SGT, lhs,
+rhs, "gt")`, lines 301-305) receiving `lhs=0` from `translate_binop`'s operand lookup — same shape as
+the "missing local in `value_map`" failure class already documented for other binops. Next step for
+#79: instrument `translate_binop` (not the FFI layer) to print the source `MirOperand` kind/local-id
+for this `Gt` case's `lhs` and find why that local has no prior def in `value_map`. Probe reverted
+(`grep -rn icmp-probe src/` = 0). Full detail:
+`doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
+(§ Update 2026-07-10 icmp-wrapper probe, corrected location).
