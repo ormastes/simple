@@ -123,3 +123,23 @@ The next implementation must therefore target a safe framebuffer owner facade
 or a different measured framebuffer-fill reduction. It must not reduce viewport
 size, change DPI semantics, route through GPU fallback, or accept checksum/color
 drift as a speed win.
+
+## 2026-07-09 browser-layout owner facade
+
+Browser layout now routes full-frame framebuffer allocation through
+`browser_layout_framebuffer_filled(base, width, height)`. The helper is the only
+owner boundary for the proven compiler/native array-repeat fill path and keeps
+the unsafe mutable Engine2D externs out of the renderer. This is a containment
+step toward the native owner bridge: it centralizes the place where a future
+typed native fill ABI can be installed without touching paint, GPU, DPI, or
+quality semantics.
+
+Focused evidence:
+
+- `SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean`
+  passed, including the guard that the renderer uses the safe owner fill facade
+  and still excludes `rt_engine2d_simd_fill_u32`,
+  `engine2d_simd_fill_row_u32`, and `rt_u32_alloc_filled`.
+- A direct `bin/simple check` of the large renderer was attempted and exited
+  `143` after the existing broad `SIMPLE_LIB=src` memory guard terminated the
+  compile; no focused syntax failure was emitted before termination.
