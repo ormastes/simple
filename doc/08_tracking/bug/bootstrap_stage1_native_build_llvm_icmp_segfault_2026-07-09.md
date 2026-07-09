@@ -86,6 +86,18 @@ shape/order that the current bootstrap sources hit. The guard experiment also pr
 reachable and the build *would* advance past it if the operand were valid — consistent with
 "transient bad pointer" rather than "always-null operand".
 
+## Context — this is a wall of the ACTIVE #79 llvm-lib effort, not an independent regression
+
+The LLVM-lib native-build path is under active peer development (`#79 stage4 self-host redeploy`),
+with 8 `llvm-lib`/`llvm-ffi` commits in the last 3 days, several fixing this exact crash class:
+`7984ab3ad7 fix(llvm-lib): thread value_map through translators + key operands by LocalId.id`
+(operand-value mapping — directly the bad-`llvm::Value*`-ICmp-operand here),
+`50427136eb fix(llvm-lib): refuse to emit an IR-verification-failed module (was segfault)`,
+`747448c900`/`ff36210a60` (per-arch target-init). So these crashes are the **current walls** of that
+in-flight effort — coordinate with #79 rather than patching independently (a solo guard/fix would
+collide with the operand-mapping work already underway). This doc contributes the DataLayout wall +
+the FFI-marshalling common-cause hypothesis + the [LIM-010] debunk to that thread.
+
 ## Fix direction
 
 Instrument the `LLVMBuildICmp` extern binding (or `call_extern_function_with_values` for opaque
