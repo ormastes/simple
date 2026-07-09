@@ -272,6 +272,17 @@ Rejected follow-up:
   `cpu_simd_render_scale_engine2d_binary_link_required=1`, and
   `cpu_simd_render_scale_contract_status=pass` for
   `/home/ormastes/dev/pub/simple/bin/simple`.
+- Array-repeat owner optimization:
+  `rt_array_repeat` now writes the first non-byte element once and fills the
+  rest by doubling `memcpy` chunks in both `src/runtime/runtime_native.c` and
+  `src/runtime/simple_core/core_array_ops.spl`, preserving `[base; width *
+  height]` semantics while reducing interpreted/self-hosted fill loop work.
+- Full strict 4K/8K rerun after array-repeat doubling:
+  `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-array-repeat-doubling-full sh scripts/check/check-cpu-simd-render-scale-contract.shs`
+  passed with 4K CPU-SIMD p50 `205462us` vs scalar `207347us`, 8K CPU-SIMD p50
+  `764831us` vs scalar `798711us`, canonical 8K checksum
+  `sum32:135445232233405312`, full `7680x4320`, strict binary-link status
+  `pass`, and `gui_perf_cpu_base_compare_target_met=yes`.
 - `cargo test -p simple-runtime test_array_repeat` passed: `1 passed`.
 - `SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter --clean`
   passed after the trace split: `25 examples, 0 failures`.

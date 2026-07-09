@@ -1605,8 +1605,13 @@ SplArray* rt_array_repeat(int64_t value, int64_t count) {
         return a;
     }
     int64_t* data = (int64_t*)array->data;
-    for (int64_t i = 0; i < n; i++) {
-        data[i] = value;
+    data[0] = value;
+    int64_t filled = 1;
+    while (filled < n) {
+        int64_t chunk = filled;
+        if (chunk > n - filled) chunk = n - filled;
+        memcpy(data + filled, data, (size_t)chunk * sizeof(int64_t));
+        filled += chunk;
     }
     return a;
 }

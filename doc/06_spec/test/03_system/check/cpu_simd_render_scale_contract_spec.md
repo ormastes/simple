@@ -196,7 +196,7 @@ expect(exporter).to_contain("simple_web_layout_render_html_software_pixels(html,
 
 </details>
 
-#### native array repeat fills the framebuffer without per-element push
+#### native array repeat fills the framebuffer with memcpy doubling
 
 <details>
 <summary>Executable SSpec</summary>
@@ -208,8 +208,14 @@ val source = file_read("src/runtime/runtime_native.c")
 val repeat_start = source.find("SplArray* rt_array_repeat")
 val repeat_body = source.slice(repeat_start, repeat_start + 700)
 expect(repeat_body).to_contain("array->len = n")
-expect(repeat_body).to_contain("data[i] = value")
+expect(repeat_body).to_contain("data[0] = value")
+expect(repeat_body).to_contain("memcpy(data + filled, data")
 expect(repeat_body.contains("rt_array_push")).to_equal(false)
+val core_source = file_read("src/runtime/simple_core/core_array_ops.spl")
+val core_repeat_start = core_source.find("pub fn rt_array_repeat")
+val core_repeat_body = core_source.slice(core_repeat_start, core_repeat_start + 500)
+expect(core_repeat_body).to_contain("spl_store_i64(items, 0, value)")
+expect(core_repeat_body).to_contain("memcpy(items + filled * 8, items")
 val rust_source = file_read("src/compiler_rust/runtime/src/value/collections.rs")
 val rust_repeat_start = rust_source.find("pub extern \"C\" fn rt_array_repeat")
 val rust_repeat_body = rust_source.slice(rust_repeat_start, rust_repeat_start + 500)
