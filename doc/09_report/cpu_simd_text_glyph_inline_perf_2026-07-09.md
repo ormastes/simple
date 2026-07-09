@@ -149,6 +149,9 @@ checksum/no-reduction metadata but did not beat the clean 8K repeat-fill trace:
 - Filling the native repeat array by doubling initialized spans with `memcpy`:
   8K `paint_ms=768`, total `771496us`, checksum
   `sum32:135445232233405312`.
+- Reusing the existing Engine2D C SIMD fill helper from native
+  `rt_array_repeat`: 4K `paint_ms=200`, total `203982us`; 8K `paint_ms=766`,
+  total `770542us`, checksum `sum32:135445232233405312`.
 
 Tracked blocker:
 `doc/08_tracking/bug/browser_layout_large_simd_fill_facade_unsafe_2026-07-09.md`.
