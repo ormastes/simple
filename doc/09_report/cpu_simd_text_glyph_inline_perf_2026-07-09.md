@@ -281,6 +281,12 @@ Rejected follow-up:
   `cpu_simd_render_dpi_physical_pixels=32x32`, and checksum
   `sum32:2944430194688`, proving the retina default stays configurable without
   reducing physical pixels.
+- `BUILD_DIR=build/production_gui_web_backend_executed_evidence_cpu_simd_alpha REPORT_PATH=doc/09_report/production_gui_web_backend_executed_evidence_2026-07-09_cpu_simd_alpha.md sh scripts/check/check-production-gui-web-backend-executed-evidence.shs`
+  passed with `production_gui_backend_cpu_simd_different_pixels=0`,
+  `production_gui_backend_cpu_simd_alpha_quality_status=pass`,
+  `production_gui_backend_cpu_simd_alpha_quality_hits=4`, matching software and
+  CPU-SIMD alpha-quality checksums `8901726553200`, matching alpha pixels
+  `4280964222`, and `production_gui_backend_blur_or_tolerance_used=false`.
 - Engine2D SIMD arch matrix passed for target C kernel binaries on x86_64,
   AArch64, and RISC-V; runtime owner compile also passed for RISC-V RVV:
   `doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-09.md`.
