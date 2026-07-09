@@ -30,6 +30,14 @@ GTK/Cairo draw-only timing. If neither baseline is available, the comparison is
 reported as unavailable rather than passed. The comparison row records its
 source, pixels, DPI, frame count, and Simple execution mode so retained reports
 cannot be mistaken for a smaller or interpreter-backed run.
+The compare block must also expose candidate discovery before selection:
+`gui_perf_cpu_base_compare_candidate_count`,
+`gui_perf_cpu_base_compare_candidate_order`, per-candidate backend/library/probe
+status rows, `gui_perf_cpu_base_compare_selection_rule`, and
+`gui_perf_cpu_base_compare_selected_candidate`. Candidate discovery is distinct
+from `gui_perf_cpu_base_compare_baseline_backend`: a report that only names the
+chosen baseline does not prove the host's available external CPU drawing
+libraries were checked.
 Simple CPU rows run in `SIMPLE_WEB_CPU_MODE=native` by default and fail closed
 if the runner reports interpreter fallback.
 Simple CPU render-loop rows default to 300dpi retina metadata. Pass `--dpi N`
@@ -149,6 +157,11 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
 - CPU drawing-library comparison is emitted as `gui_perf_cpu_base_compare_*`
   fields in `tools/gui_perf_bench/run_all_benchmarks.shs`. The Simple CPU rows
   use `SIMPLE_WEB_CPU_MODE=native` by default; override only for diagnostics.
+  The compare block records `javascript_node_canvas` and `gtk3_cairo` as
+  measurable candidates, plus `pixman` and `skia` as explicit probe-only
+  candidates when their `pkg-config` metadata is available or missing. Baseline
+  selection uses `first_completed_candidate`, so reports preserve both
+  discovery status and the chosen timing source.
 - CPU render-loop DPI evidence defaults to 300dpi retina metadata and is
   configurable through `--dpi` without changing the requested pixel dimensions.
   The focused wrapper is `scripts/check/check-cpu-simd-render-dpi-contract.shs`.

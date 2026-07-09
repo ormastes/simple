@@ -176,7 +176,16 @@ Full 8K external CPU drawing-library baseline refresh:
 - Report: `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`.
 - Command: `BUILD_DIR=build/gui_perf_bench_2026-07-09_cpu_base REPORT_PATH=doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md SIMPLE_WEB_CPU_MODE=native tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 1 --dpi 300`.
 - Available CPU baselines on host `dl`: GTK3/Cairo completed, Node canvas
-  completed, Python tkinter unavailable.
+  completed, Python tkinter unavailable. Follow-up hardening makes this
+  machine-readable in the compare block with
+  `gui_perf_cpu_base_compare_candidate_count`,
+  `gui_perf_cpu_base_compare_candidate_order=javascript_node_canvas,gtk3_cairo,pixman,skia`,
+  per-candidate backend/library/probe/status/reason rows,
+  `gui_perf_cpu_base_compare_selection_rule=first_completed_candidate`,
+  `gui_perf_cpu_base_compare_selected_candidate=...`, and
+  `gui_perf_cpu_base_compare_available_cpu_libraries=...`,
+  per-library availability/status keys, plus
+  `gui_perf_cpu_base_compare_baseline_selection_reason=...`.
 - External compare result: `gui_perf_cpu_base_compare_status=measured`,
   `baseline_backend=javascript_node_canvas`,
   `gui_perf_cpu_base_compare_dpi_source=default`,

@@ -23,6 +23,12 @@ Harden the Simple GUI library's 2D rendering and vector-font paths with measurab
 - Claiming superiority over every native GUI library without a named comparable baseline and repeatable benchmark.
 - Requiring unavailable hardware or native libraries to pass on hosts that do not provide them.
 
+## Cooperative Review
+- Lower-model review: GPT-5.4 mini reviewed the CPU drawing-library candidate/provenance schema; Codex Spark was requested but unavailable because its quota was exhausted.
+- Shared report interface: `gui_perf_cpu_base_compare_candidate_*`, `gui_perf_cpu_base_compare_selection_rule`, and `gui_perf_cpu_base_compare_selected_*`.
+- Setup/checker helpers: `pkg_status`, `node_canvas_status`, and `bench_status`; no placeholder helpers were introduced.
+- Merge owner, final reviewer, and generated-manual review owner: primary Codex agent.
+
 ## Phase
 implementation-evidence-in-progress
 
@@ -138,6 +144,14 @@ implementation-evidence-in-progress
   passed with `SIMPLE_WEB_CPU_MODE=native`,
   `gui_perf_benchmark_dpi_source=default`, no Simple CPU interpreter fallback,
   and `gui_perf_cpu_base_compare_status=measured`.
+- implementation: Added machine-readable discovery and selection provenance for
+  Node Canvas/Cairo, GTK3/Cairo, Pixman, and Skia. Fixed the Node Canvas probe
+  to resolve from `tools/gui_perf_bench`, matching the benchmark script and npm
+  install location.
+- verification: The 32x32, 1-frame, 300dpi native smoke completed Node Canvas
+  and GTK3/Cairo, detected Pixman, recorded Skia missing, selected Node Canvas,
+  proved native CPU-SIMD execution with positive hits, and passed the GUI
+  profile report contract.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 

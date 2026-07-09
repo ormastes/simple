@@ -126,8 +126,10 @@ write_simple_web_export_entry() {
     fi
     cat >"$entry" <<EOF
 use app.wm_compare.backend_measurement_software_export.{software_only_render_loop_export_values}
+use std.gc_async_mut.gpu.engine2d.simd_provider.{reset_simd_hits}
 
 fn main() -> i64:
+    reset_simd_hits()
     print(software_only_render_loop_export_values("$backend", $WIDTH, $HEIGHT, $DPI, "$dpi_source", 1, $FRAMES, "$fixture", "simple-web", "bench-8k", "$(hostname)", $SIMPLE_BIN_SIZE, $SIMPLE_BIN_SIZE, $SIMPLE_BIN_SIZE))
     0
 EOF
@@ -157,6 +159,36 @@ sdn_token_value() {
     sed -n "s/.*${key}: \\([^ )][^ )]*\\).*/\\1/p" "$file" 2>/dev/null | head -1 || true
 }
 
+pkg_status() {
+    local pkg="$1"
+    if pkg-config --exists "$pkg" 2>/dev/null; then
+        printf '%s\n' present
+    else
+        printf '%s\n' missing
+    fi
+}
+
+node_canvas_status() {
+    if ! command -v node >/dev/null 2>&1; then
+        printf '%s\n' node-missing
+    elif (cd "$SCRIPT_DIR" && node -e "require('canvas')") >/dev/null 2>&1; then
+        printf '%s\n' present
+    else
+        printf '%s\n' canvas-missing
+    fi
+}
+
+bench_status() {
+    local file="$1"
+    local status
+    status="$(kv_value "$file" "gui_perf_benchmark_status")"
+    if [[ -n "$status" ]]; then
+        printf '%s\n' "$status"
+    else
+        printf '%s\n' not-run
+    fi
+}
+
 emit_cpu_base_compare() {
     local simple_file="$BUILD_DIR/simple_web_cpu_simd.stdout"
     local simple_us
@@ -164,20 +196,79 @@ emit_cpu_base_compare() {
     local baseline_backend=""
     local baseline_metric=""
     local baseline_ms=""
+    local baseline_reason=""
+    local selected_candidate=""
+    local selected_library=""
+    local gtk3_availability cairo_availability node_canvas_availability pixman_availability skia_availability
+    local gtk3_bench_status node_canvas_bench_status
+    gtk3_availability="$(pkg_status gtk+-3.0)"
+    cairo_availability="$(pkg_status cairo)"
+    node_canvas_availability="$(node_canvas_status)"
+    pixman_availability="$(pkg_status pixman-1)"
+    skia_availability="$(pkg_status skia)"
+    gtk3_bench_status="$(bench_status "$BUILD_DIR/gtk3.stdout")"
+    node_canvas_bench_status="$(bench_status "$BUILD_DIR/javascript_node.stdout")"
 
     if [[ "$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_status")" == "completed" ]]; then
         baseline_backend="$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_backend")"
         baseline_metric="frame_time_p50_ms"
         baseline_ms="$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_frame_time_p50_ms")"
+        baseline_reason="node_canvas_completed_preferred_frame_time"
+        selected_candidate="javascript_node_canvas"
+        selected_library="cairo"
     elif [[ "$(kv_value "$BUILD_DIR/gtk3.stdout" "gui_perf_benchmark_status")" == "completed" ]]; then
         baseline_backend="gtk3_cairo"
         baseline_metric="draw_only_avg_ms"
         baseline_ms="$(kv_value "$BUILD_DIR/gtk3.stdout" "gui_perf_benchmark_draw_only_avg_ms")"
+        baseline_reason="gtk3_cairo_completed_fallback_draw_only"
+        selected_candidate="gtk3_cairo"
+        selected_library="cairo"
+    else
+        baseline_reason="no_completed_external_cpu_baseline"
+        selected_candidate="none"
+        selected_library="none"
     fi
 
     echo "## CPU Drawing Library Baseline Compare" | tee -a "$REPORT"
     echo "" | tee -a "$REPORT"
     echo "gui_perf_cpu_base_compare_source=gui_perf_bench_external_cpu_library" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_count=4" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_order=javascript_node_canvas,gtk3_cairo,pixman,skia" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_1_backend=javascript_node_canvas" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_1_library=cairo" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_1_probe=require('canvas')" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_1_status=$node_canvas_bench_status" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_1_reason=$node_canvas_availability" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_2_backend=gtk3_cairo" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_2_library=cairo" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_2_probe=pkg-config gtk+-3.0" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_2_status=$gtk3_bench_status" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_2_reason=$gtk3_availability" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_3_backend=pixman" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_3_library=pixman" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_3_probe=pkg-config pixman-1" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_3_status=probe-only" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_3_reason=$pixman_availability" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_4_backend=skia" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_4_library=skia" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_4_probe=pkg-config skia" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_4_status=probe-only" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_candidate_4_reason=$skia_availability" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_selection_rule=first_completed_candidate" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_selected_candidate=$selected_candidate" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_selected_library=$selected_library" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_selected_reason=$baseline_reason" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_checked_cpu_libraries=javascript_node_canvas,gtk3_cairo,pixman,skia" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_available_cpu_libraries=node_canvas:$node_canvas_availability,gtk3_cairo:$gtk3_availability,cairo:$cairo_availability,pixman:$pixman_availability,skia:$skia_availability" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_node_canvas_availability=$node_canvas_availability" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_node_canvas_benchmark_status=$node_canvas_bench_status" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_gtk3_cairo_availability=$gtk3_availability" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_gtk3_cairo_benchmark_status=$gtk3_bench_status" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_cairo_availability=$cairo_availability" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_pixman_availability=$pixman_availability" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_skia_availability=$skia_availability" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_baseline_selection_order=javascript_node_canvas,gtk3_cairo" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_baseline_selection_reason=$baseline_reason" | tee -a "$REPORT"
     echo "gui_perf_cpu_base_compare_pixels=${WIDTH}x${HEIGHT}" | tee -a "$REPORT"
     echo "gui_perf_cpu_base_compare_dpi=$DPI" | tee -a "$REPORT"
     echo "gui_perf_cpu_base_compare_dpi_source=$(kv_value "$simple_file" "gui_perf_benchmark_dpi_source")" | tee -a "$REPORT"
@@ -265,12 +356,12 @@ fi
 # ── 3. JavaScript/Node canvas ──
 if command -v node >/dev/null 2>&1; then
     # Check if canvas module available
-    if node -e "require('canvas')" 2>/dev/null; then
+    if (cd "$SCRIPT_DIR" && node -e "require('canvas')") 2>/dev/null; then
         run_bench "javascript_node" "node $SCRIPT_DIR/bench_js_node.js --width $WIDTH --height $HEIGHT --frames $FRAMES"
     else
         echo "--- javascript_node: installing canvas module ---"
         (cd "$SCRIPT_DIR" && npm install canvas 2>/dev/null) || true
-        if node -e "require('canvas')" 2>/dev/null; then
+        if (cd "$SCRIPT_DIR" && node -e "require('canvas')") 2>/dev/null; then
             run_bench "javascript_node" "node $SCRIPT_DIR/bench_js_node.js --width $WIDTH --height $HEIGHT --frames $FRAMES"
         else
             echo "--- javascript_node: SKIPPED (canvas module unavailable) ---" | tee -a "$REPORT"
