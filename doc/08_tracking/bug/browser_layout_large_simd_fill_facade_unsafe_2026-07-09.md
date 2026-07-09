@@ -51,3 +51,14 @@ Either:
 Design the facade at the runtime/Engine2D owner boundary so native builds can
 fill a browser-layout `[u32]` framebuffer without missing externs, returned-array
 segfaults, checksum drift, or GPU backend behavior changes.
+
+## 2026-07-09 containment
+
+The canonical public row-fill facade was changed to stop exposing the unsafe
+mutable extern path. `simd_fill_row` now uses the safe return-row SIMD ABI and
+scatter writeback for row-sized fills, with interpreter and native spec coverage
+in `test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl`.
+
+This is a correctness containment only. Browser layout full-frame 4K/8K fill
+still needs a real mutable typed-array owner bridge before it can replace the
+current pure Simple framebuffer initialization/fill path.

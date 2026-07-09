@@ -93,3 +93,21 @@ The smallest next real fix is still the same: add a proven mutable typed-array
 write-back bridge, then route bulk `[u32]` clear/fill/readback through that
 owner boundary. Browser-local SIMD fill shortcuts should remain rejected until
 that bridge exists.
+
+## 2026-07-09: public facade containment
+
+The public `simd_fill_row` facade no longer calls the unsafe
+`rt_engine2d_simd_fill_u32` mutable extern. On native-capable hosts it now uses
+the already-proven return-row ABI (`rt_engine2d_simd_fill_row_u32`) and scatters
+that row back into the caller's buffer; otherwise it uses the scalar fallback.
+
+Focused evidence:
+
+- `SIMPLE_LIB=src bin/simple test test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl --mode=interpreter --clean`
+- `SIMPLE_LIB=src bin/simple test test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl --mode=native --clean`
+
+Both modes pass 19 examples. This contains the missing-extern failure for public
+row fill callers, but it does not close the full-frame 8K performance blocker:
+the mutable typed-array write-back bridge is still required before browser
+layout can safely bulk-fill a full framebuffer through the native mutable
+extern.
