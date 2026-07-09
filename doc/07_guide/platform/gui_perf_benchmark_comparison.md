@@ -27,7 +27,9 @@ Current harness runs also emit `gui_perf_cpu_base_compare_*` fields after the
 backend rows. The comparison uses `simple_web_cpu_simd` and the first completed
 CPU drawing-library baseline, preferring Node Canvas/Cairo and falling back to
 GTK/Cairo draw-only timing. If neither baseline is available, the comparison is
-reported as unavailable rather than passed.
+reported as unavailable rather than passed. The comparison row records its
+source, pixels, DPI, frame count, and Simple execution mode so retained reports
+cannot be mistaken for a smaller or interpreter-backed run.
 Simple CPU rows run in `SIMPLE_WEB_CPU_MODE=native` by default and fail closed
 if the runner reports interpreter fallback.
 Simple CPU render-loop rows default to 300dpi retina metadata. Pass `--dpi N`
