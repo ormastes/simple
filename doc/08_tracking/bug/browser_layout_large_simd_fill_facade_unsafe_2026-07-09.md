@@ -83,16 +83,16 @@ current compiler array-repeat framebuffer initialization/fill path.
 
 ## 2026-07-09 solid-only CPU-SIMD containment
 
-`cpu_simd` browser readback now uses the existing Engine2D display-list path
-only when layout classifies the frame as solid-only. That path reaches the
-current `CpuBackend`/`SoftwareBackend` SIMD row-fill owner and is covered by
-`web_renderer_cpu_simd_paint_spec.spl`.
+`cpu_simd` browser readback now uses the existing Engine2D display-list path for
+the main residual presentation path, not only solid-only frames. That path
+reaches the current `CpuBackend`/`SoftwareBackend` SIMD row-fill owner and is
+covered by `web_renderer_cpu_simd_paint_spec.spl`.
 
-The solid-only classifier was hardened to require an opaque background alpha, so
-translucent `rgba(...)` and CSS opacity keep using the normal CPU mirror path.
-The public Engine2D renderer also skips heuristic/probe routing for obvious
-text pages requested as `cpu_simd`, avoiding a routing tax when no solid-fill
-SIMD shortcut applies.
+The CPU layout framebuffer remains the exact oracle. Text, translucent
+`rgba(...)`, and CSS opacity fixtures are compared against
+`simple_web_layout_render_html_software_pixels(...)` while the residual
+presentation records positive SIMD hits, so color/transparency composition
+stays byte-exact without reintroducing unsafe browser-framebuffer externs.
 
 Full native scale-contract evidence after that routing containment shows the
 Simple CPU-SIMD row beating the Simple scalar row at 4K and 8K while preserving

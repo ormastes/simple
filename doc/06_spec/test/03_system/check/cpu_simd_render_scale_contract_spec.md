@@ -141,7 +141,7 @@ expect(script).to_contain("CPU_SIMD_RENDER_SCALE_RUN_ORDER")
 expect(script).to_contain("cpu_simd_render_scale_contract_run_order=$RUN_ORDER")
 expect(script).to_contain("gui_perf_cpu_base_compare_schedule_order=$RUN_ORDER")
 expect(script).to_contain("gui_perf_cpu_base_compare_simd_provider_hits=")
-expect(script).to_contain("gui_perf_cpu_base_compare_native_simd_executed=")
+expect(script).to_contain("gui_perf_cpu_base_compare_native_simd_executed=true")
 expect(script).to_contain("gui_perf_cpu_base_compare_engine2d_simd_probe_status=")
 expect(script).to_contain("gui_perf_cpu_base_compare_engine2d_simd_probe_hits=")
 expect(script).to_contain("gui_perf_cpu_base_compare_engine2d_simd_probe_native_executed=")
@@ -151,6 +151,8 @@ expect(script).to_contain("binary_has_engine2d_simd_externs")
 expect(script).to_contain("rt_engine2d_simd_fill_row_u32")
 expect(script).to_contain("rt_engine2d_simd_copy_row_u32")
 expect(script).to_contain("rt_engine2d_simd_blend_row_u32")
+expect(script).to_contain("std.gc_async_mut.gpu.engine2d.simd_provider")
+expect(script).to_contain("reset_simd_hits")
 expect(script).to_contain("cpu_simd_render_scale_engine2d_binary_link_status=$ENGINE2D_BINARY_LINK_STATUS")
 expect(script).to_contain("engine2d_simd_externs_not_linked_in_simple_bin")
 expect(script).to_contain("CPU_SIMD_RENDER_SCALE_REQUIRE_RUNTIME_FRESH")
@@ -198,7 +200,7 @@ expect(script).to_contain("gui_perf_cpu_base_compare_engine2d_simd_probe_native_
 
 </details>
 
-#### cpu simd text fixture skips the generic renderer wrapper
+#### cpu simd text fixture routes through residual Engine2D presentation
 
 <details>
 <summary>Executable SSpec</summary>
@@ -208,8 +210,7 @@ Runnable source: 4 lines folded for reproduction.
 ```simple
 val exporter = file_read("src/app/wm_compare/backend_measurement_software_export.spl")
 expect(exporter).to_contain("if backend == \"cpu_simd\":")
-expect(exporter).to_contain("this exporter fixture has no SIMD-safe text primitive")
-expect(exporter).to_contain("simple_web_layout_render_html_software_pixels(html, width, height)")
+expect(exporter).to_contain("simple_web_layout_render_html_readback_paint(html, width, height, \"cpu_simd\", true).pixels")
 expect(exporter).to_contain("simd_provider_hits:")
 expect(exporter).to_contain("gui_perf_benchmark_simd_provider_hits=")
 expect(exporter).to_contain("gui_perf_benchmark_native_simd_executed=")

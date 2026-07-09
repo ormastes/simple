@@ -198,6 +198,15 @@ Full 8K external CPU drawing-library baseline refresh:
 
 Focused CPU-SIMD routing containment:
 
+Current follow-up note (2026-07-09): the `cpu_simd` text path no longer
+bypasses Engine2D presentation. It now uses residual Engine2D CPU-SIMD
+presentation for text, translucent color, and CSS opacity fixtures, with the
+CPU layout framebuffer retained as the exact oracle. The unit contract compares
+those fixtures against `simple_web_layout_render_html_software_pixels(...)` and
+requires positive SIMD hits, so the older "text pages skip probe routing" note
+below is historical evidence for the previous containment step, not the current
+route.
+
 - The browser presenter now routes `cpu_simd` solid-only frames through the
   existing Engine2D display-list readback path. This exercises the current
   `CpuBackend`/`SoftwareBackend` `simd_fill_row` owner path for opaque solid
