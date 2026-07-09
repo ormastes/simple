@@ -217,6 +217,13 @@ Focused CPU-SIMD routing containment:
   `sum32:135445232233405312`, but timing was variable: 8K CPU-SIMD p50
   `1435662us` vs scalar `1049096us`, so
   `gui_perf_cpu_base_compare_target_met=no` on that run.
+- Exporter direct text-layout shortcut:
+  `src/app/wm_compare/backend_measurement_software_export.spl` now bypasses
+  the generic renderer wrapper for obvious text pages requested as `cpu_simd`.
+  Full native evidence in `build/check/cpu-simd-render-scale-exporter-direct`
+  kept the canonical 4K/8K checksums and improved the CPU-SIMD 8K p50 to
+  `1128035us`, but scalar was still `977624us`, so
+  `gui_perf_cpu_base_compare_target_met=no` remains the latest retained result.
 - The external Node canvas baseline remains much faster in
   `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`; this containment
   improves routing and hardens color proof, but the stable 8K speed target and
