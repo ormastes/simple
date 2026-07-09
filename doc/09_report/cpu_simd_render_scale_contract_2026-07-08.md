@@ -58,6 +58,12 @@ both 4K and 8K on this host. The focused
 baseline; external Cairo/GTK CPU drawing-library comparison remains in
 `tools/gui_perf_bench/run_all_benchmarks.shs`.
 
+The executable contract also covers DPI changeability with tiny dimensions:
+`CPU_SIMD_RENDER_SCALE_DPI=220` must pass, report
+`cpu_simd_render_scale_contract_dpi=220`, and mark
+`cpu_simd_render_scale_contract_dpi_source=override`. The default path remains
+300 DPI retina.
+
 Additional focused coverage:
 
 ```sh
