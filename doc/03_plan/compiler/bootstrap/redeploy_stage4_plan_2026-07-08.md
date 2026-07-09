@@ -62,6 +62,35 @@ the `SIMPLE_BOOTSTRAP` compile path (#66 was closed for the concat case).
 
 ## CURRENT WALL (path 2, llvm-lib AOT / LLVM-C-API) — this is what `bin/simple build bootstrap` hits today
 
+**UPDATE 2026-07-10 (name-the-callees attempt — INCONCLUSIVE, wall no longer reproduces as described
+below):** ran the one authorized diagnostic bootstrap on current `main` tip (`8e5dedaf` / working-copy
+parent at run time), with a temporary identity `eprint` added inside the `func_ref == 0` block in
+`translate_call` (`llvm_lib_translate_expr.spl:478-480`) to print operand kind + `fn_name`/`local.id`.
+Result: Stage 1 still fails at exit 139 (SIGSEGV), but **neither the new diagnostic eprint nor the
+pre-existing `"[llvm-lib] ERROR: unresolved function call, skipping instruction"` line appears anywhere
+in the log** (full log, 2617 lines, grepped for both strings — zero matches; verified byte-for-byte,
+not a truncation/buffering artifact against the `error: native-build worker exited with code 139` tail).
+This directly contradicts the immediately-preceding "Verification of a2919c90" entry below, which
+recorded that exact eprint firing twice at fixed log line numbers across 2 byte-identical runs. Two
+readings, neither confirmed with a second run (only one authorized this session):
+1. **Nondeterminism reasserted itself** — consistent with `e7e074edc1`'s "NONDETERMINISTIC FFI
+   corruption, not a deterministic cascade" framing, which the very next commit (`90ef5827`, this
+   session's start-of-run parent) had marked superseded/GONE. This run's evidence says otherwise.
+2. **The wall moved** — commits landed between `a2919c90` (the verified-deterministic tip) and the tip
+   used for this run (`9d11e852d2`, `e7e074edc1`, `90ef5827`, plus unrelated concurrent work from other
+   sessions on this shared `main`) may have shifted the SIGSEGV to a site that no longer routes through
+   `translate_call`'s `func_ref == 0` branch at all — i.e. the crash now happens earlier/elsewhere in
+   the same Stage-1 llvm-lib translation pass.
+Diagnostic eprint reverted in full after the run (`git diff` on
+`llvm_lib_translate_expr.spl` is clean). **No fix applied — nothing to name.** Next step for #79: rerun
+the same one-shot identity-eprint diagnostic (design still valid, code above at `:478-480` unedited) on
+a *fresh* pinned commit, ideally 2 back-to-back runs on the same commit (not one), to first
+re-establish whether the current wall is deterministic at all before trying to name callees again. If
+deterministic and the eprint still doesn't fire, the next diagnostic should bracket wider — add a
+temporary marker eprint at `translate_instruction`'s dispatch (entry of `llvm_lib_translate_expr.spl`)
+to find which MIR instruction kind is executing immediately before the crash, since the crash may no
+longer be inside `translate_call` at all.
+
 **UPDATE 2026-07-10 (verification of a2919c90, verification-only):** the nondeterministic 134/139
 site-flip is GONE. Two full `bin/simple build bootstrap` runs on `a2919c90` (NUL-terminated
 `LLVMSetDataLayout` arg + translate_call `local.id` fix + HIR typed params) both failed Stage 1

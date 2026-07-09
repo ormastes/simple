@@ -446,3 +446,44 @@ one at a time, no code changes.
 the `Copy`/`Move` arms — plus the enclosing MIR function name. One deterministic run then names the
 exact 2 unresolved calls, which is the next fix target (missing extern declaration or a
 still-unmapped local feeding an indirect call).
+
+## Update 2026-07-10 (name-the-callees attempt) — proposal executed, wall did NOT reproduce as predicted; POSTPONED
+
+Implemented the proposal above exactly: extended the `func_ref == 0` block in `translate_call`
+(`llvm_lib_translate_expr.spl:478-480`) with a temporary identity `eprint` — operand kind
+(`Const`/`Copy`/`Move`), `fn_name` for the `Const(Str(...))` arm, `local.id` for `Copy`/`Move` (via
+`.to_string()`; matched actual file convention of `+` for text concat, not `++` — `++` is not a valid
+Simple operator, confirmed by repo-wide grep finding zero non-vendor uses).
+
+**One authorized bootstrap run** (`bin/simple build bootstrap`, working-copy parent `8e5dedaf` at run
+time — post `a2919c90`/`9d11e852d2`/`e7e074edc1`/`90ef5827`), full log captured
+(scratchpad `name_callees.log`, 2617 lines). Result:
+
+- Stage 1 FAILED, worker exit 139 (SIGSEGV) — same terminal symptom as every prior session.
+- **Neither the pre-existing `"[llvm-lib] ERROR: unresolved function call, skipping instruction"` line
+  nor the new `"[llvm-lib] UNRESOLVED CALLEE ..."` lines appear anywhere in the log** (`grep -c` = 0 for
+  both, checked against the full file, not just the tail — ruled out truncation).
+- This contradicts the "Verification of a2919c90" table above, which recorded that exact
+  `unresolved function call` eprint firing **twice**, at fixed log line numbers, identically across 2
+  separate runs, immediately preceding the same exit-139 crash.
+
+**Interpretation — the func_ref==0 branch was not hit this run, despite the same exit code.** Two
+non-exclusive possibilities, neither confirmed (only one run authorized):
+1. Nondeterminism is back (aligns with `e7e074edc1`'s framing, which `90ef5827` had marked
+   superseded — this run's evidence undercuts that supersession).
+2. The wall moved: commits after `a2919c90` changed the Stage-1 llvm-lib translation pass enough that
+   the SIGSEGV now happens at a different point that never reaches `translate_call`'s
+   `func_ref == 0` check for the previously-identified 2 dropped calls.
+
+**Classification: anything else (not a trivial missing declare or special-name-mapping gap) — do NOT
+fix.** No callee names obtained; nothing to `declare_fn` or map. Diagnostic fully reverted
+(`git diff -- llvm_lib_translate_expr.spl` clean, verified byte-identical to pre-edit via direct
+`diff`, after also recovering from a `jj workspace update-stale` "Concurrent modification" reconcile
+mid-session that transiently restored the not-yet-committed diagnostic — re-reverted and re-verified).
+
+**Next step for #79 (not this session):** re-run the same one-shot eprint (code unchanged, still valid)
+on a freshly pinned commit, with 2 back-to-back runs (not 1) to first re-establish whether the wall is
+deterministic before trying to name callees. If deterministic and the eprint still never fires, widen
+the diagnostic to `translate_instruction`'s top-level dispatch to find which MIR instruction kind
+executes immediately before the crash — the SIGSEGV site may no longer be inside `translate_call`.
+POSTPONED, exact state as described above.
