@@ -233,6 +233,11 @@ Focused CPU-SIMD routing containment:
   `sum32:135445232233405312`; 4K CPU-SIMD p50 was `203104us` vs scalar
   `204715us`, and 8K CPU-SIMD p50 was `960459us` vs scalar `1020635us`, so
   `gui_perf_cpu_base_compare_target_met=yes` for this focused retained row.
+- Scheduling hardening: the scale wrapper now emits
+  `cpu_simd_render_scale_contract_run_order` and
+  `gui_perf_cpu_base_compare_schedule_order`, with
+  `CPU_SIMD_RENDER_SCALE_RUN_ORDER=software_first` available for reverse-order
+  follow-up rows.
 - The external Node canvas baseline remains much faster in
   `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`; this containment
   improves routing and hardens color proof, but the stable 8K speed target and
