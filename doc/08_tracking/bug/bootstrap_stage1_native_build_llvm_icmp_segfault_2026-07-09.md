@@ -487,3 +487,60 @@ deterministic before trying to name callees. If deterministic and the eprint sti
 the diagnostic to `translate_instruction`'s top-level dispatch to find which MIR instruction kind
 executes immediately before the crash — the SIGSEGV site may no longer be inside `translate_call`.
 POSTPONED, exact state as described above.
+
+## Update 2026-07-10 (icmp-wrapper probe experiment) — probe point INVALIDATED: the nogc_sync_mut sffi wrapper is a DEAD COPY; active copy is nogc_async_mut
+
+**Goal.** Discriminate hypothesis (a) FFI-marshalling corruption vs (b) Simple-side null operand by
+eprinting from inside `llvm_build_icmp` in `src/lib/nogc_sync_mut/sffi/llvm_codegen.spl:139` — assumed
+to be the last Simple-side point before the `_lcn("LLVMBuildICmp", args)` extern call.
+
+**Probe design.** (run 1) conditional eprint `[icmp-probe] NULL OPERAND pre-FFI: pred/lhs/rhs/name`
+when `lhs == 0 or rhs == 0`; (run 2) same, PLUS an unconditional positive-control eprint for the first
+3 icmp calls (module-level counter) to prove the wrapper executes at all.
+
+**Results (2 bootstrap runs, one at a time, parent `eda1cf0b` = origin/main tip).**
+
+| Run | Probe | Stage-1 outcome | Probe lines in log |
+|-----|-------|-----------------|--------------------|
+| 1 | null-check only | FAILED, worker exit 139 (`icmp_probe_run1.log`, 2617 lines) | 0 |
+| 2 | null-check + positive control | FAILED, worker exit 139 (`icmp_probe_run2.log`, 2617 lines — same shape) | 0 (positive control ALSO silent) |
+
+No fresh macOS crash report was generated for either run (all `simple-*.ips` in
+`~/Library/Logs/DiagnosticReports/` are internally 2026-07-09; 07-10 mtimes are re-symbolication
+touches, same pattern as the a2919c90 verification session). Neither run printed
+`[llvm-lib] ERROR: unresolved function call` — consistent with the 07-10 name-the-callees session, and
+further evidence that wall no longer passes through `translate_call`'s `func_ref == 0` branch.
+
+**Why the probe was silent — proven by out-of-band selftest, not speculation.** A tiny interpreted
+program (`scratchpad/icmp_probe_selftest.spl`: `use std.sffi.llvm.*` — the exact import
+`llvm_lib_translate_expr.spl:10` uses — then `llvm_build_icmp` on two consts, run via the same
+`bin/simple` binary the worker log names) executed icmp successfully with ZERO probe output while the
+probe sat in the `nogc_sync_mut` copy; moving the probe to
+`src/lib/nogc_async_mut/sffi/llvm_codegen.spl:139` made it fire immediately
+(`[icmp-probe-async] CALLED: pred=32 lhs=... rhs=... name=eq`). Root cause: the module resolver's
+family search order puts `nogc_async_mut` FIRST
+(`src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl:206-208`:
+`nogc_async_mut > nogc_async_immut > nogc_sync_immut > nogc_sync_mut > common > ...`), so
+`use std.sffi.llvm.*` resolves to the `nogc_async_mut/sffi` copy. The `nogc_sync_mut/sffi` copy (and
+`nogc_sync_mut/ffi/llvm_instructions.spl`) are dead copies for this import path.
+
+**Verdict: still-ambiguous for (a) vs (b) — the experiment did not discriminate** because both runs
+carried the probe in a dead copy. It did, however, produce two hard results:
+1. The CORRECT probe point is now empirically established:
+   `src/lib/nogc_async_mut/sffi/llvm_codegen.spl` `llvm_build_icmp` (fires under `use std.sffi.llvm.*`
+   in the same interpreter binary the Stage-1 worker uses).
+2. Any past or future "fix all three wrapper copies" work MUST include the `nogc_async_mut` copy —
+   note the 07-10 `llvm_set_data_layout` NUL-termination fix already did (it listed
+   `nogc_async_mut/sffi` among the three), but the sync-family copies it also patched are likely inert.
+
+**Next step for #79.** Re-run the identical discriminating experiment with the probe (null-check +
+first-3 positive control) in `src/lib/nogc_async_mut/sffi/llvm_codegen.spl:llvm_build_icmp`. Expected
+outcomes unchanged: positive control fires + null line + ICmp crash → (b) Simple-side; positive
+control fires + NO null line + ICmp crash at 0x0 → (a) FFI-marshalling corruption proven. If the
+positive control is STILL silent there under a real bootstrap (it cannot be, per the selftest, unless
+the worker pre-compiles/caches the stdlib differently from `bin/simple run`), that itself becomes the
+finding to chase (stale native/module cache serving old wrapper code).
+
+**Probes fully reverted** (`jj restore` both files; `grep -c icmp-probe` = 0 in both
+`nogc_sync_mut/sffi/llvm_codegen.spl` and `nogc_async_mut/sffi/llvm_codegen.spl`; `jj diff` clean).
+Logs: scratchpad `icmp_probe_run1.log`, `icmp_probe_run2.log`, selftest `icmp_probe_selftest.spl`.

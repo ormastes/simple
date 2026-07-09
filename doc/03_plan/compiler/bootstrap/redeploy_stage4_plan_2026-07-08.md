@@ -287,3 +287,17 @@ wall, preserved for whoever resumes it):**
   reasonable structural item to scope separately; the immediate instance was fixed additively.
 - Interpreter completeness (`#99`) and class-in-array mutation (`#112`) —
   interpreter-lane items; `#112` repro blocked by the exec-mode kill-monitor.
+
+## Update 2026-07-10 (icmp wrapper probe) — discriminating experiment inconclusive; probe point corrected
+
+The (a)-vs-(b) ICmp discriminating probe (null-operand eprint in
+`nogc_sync_mut/sffi/llvm_codegen.spl:llvm_build_icmp`) ran 2 bootstraps: both Stage 1 FAILED exit 139,
+zero probe output — including an unconditional positive-control eprint in run 2. An out-of-band
+interpreted selftest proved why: `use std.sffi.llvm.*` resolves to the **`nogc_async_mut`** family
+copy first (resolver order, `module_loader_resolve.spl:206-208`), so the instrumented
+`nogc_sync_mut/sffi` wrapper is a dead copy. Probe moved to
+`src/lib/nogc_async_mut/sffi/llvm_codegen.spl` fires correctly in the selftest. Verdict on
+(a) FFI-marshalling vs (b) Simple-side null: still open. Next #79 action: repeat the identical
+experiment with the probe in the `nogc_async_mut` copy. All probes reverted. Full detail:
+`doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
+(§ Update 2026-07-10 icmp-wrapper probe experiment).
