@@ -329,10 +329,15 @@ Rejected follow-up:
   `RenderBackend.render_html_to_pixels` branch in the proof exporter, keeps the
   CPU-SIMD fixture on the direct Simple Web layout path, flattens small boolean
   helpers, and simplifies the one-sample percentile path used by the scale
-  contract. The focused Cranelift build now compiles through the exporter helper
-  set and reaches the imported report module; the current blocker is
-  `backend_comparison_initialized_valid` failing Cranelift verification in
-  `backend_measurement_report.spl`. Source check for the exporter still passes.
+  contract. The focused Cranelift build now emits the exporter object; the
+  remaining failure is in the imported report module. The report validators and
+  verdict counters were flattened to avoid compound condition codegen paths, but
+  the focused build still stops at `backend_comparison_initialized_valid` with a
+  Cranelift verifier failure in `backend_measurement_report.spl`. A focused
+  source check for the report module was terminated after emitting existing
+  repository warnings, so strict fresh-binary proof remains blocked by native
+  backend verification for the report import rather than by the exporter source
+  contract.
 - Full strict 4K/8K rerun after array-repeat doubling:
   `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-array-repeat-doubling-full sh scripts/check/check-cpu-simd-render-scale-contract.shs`
   passed with 4K CPU-SIMD p50 `205462us` vs scalar `207347us`, 8K CPU-SIMD p50

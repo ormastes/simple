@@ -179,22 +179,28 @@ pub fn backend_comparison_scalar_p50_us(samples: [BackendComparisonSample]) -> i
 fn _comparison_speed_verdict_count(samples: [BackendComparisonSample], scalar_p50_frame_us: i64, verdict: text) -> i32:
     var count = 0
     for sample in samples:
-        if _is_gpu_family(sample.backend_family) and backend_comparison_speed_verdict(sample, scalar_p50_frame_us) == verdict:
-            count = count + 1
+        if _is_gpu_family(sample.backend_family):
+            val actual = backend_comparison_speed_verdict(sample, scalar_p50_frame_us)
+            if actual == verdict:
+                count = count + 1
     count
 
 fn _comparison_offload_overhead_verdict_count(samples: [BackendComparisonSample], verdict: text) -> i32:
     var count = 0
     for sample in samples:
-        if _is_gpu_family(sample.backend_family) and backend_comparison_offload_overhead_verdict(sample) == verdict:
-            count = count + 1
+        if _is_gpu_family(sample.backend_family):
+            val actual = backend_comparison_offload_overhead_verdict(sample)
+            if actual == verdict:
+                count = count + 1
     count
 
 fn _comparison_offload_efficiency_verdict_count(samples: [BackendComparisonSample], scalar_p50_frame_us: i64, verdict: text) -> i32:
     var count = 0
     for sample in samples:
-        if _is_gpu_family(sample.backend_family) and backend_comparison_offload_efficiency_verdict(sample, scalar_p50_frame_us) == verdict:
-            count = count + 1
+        if _is_gpu_family(sample.backend_family):
+            val actual = backend_comparison_offload_efficiency_verdict(sample, scalar_p50_frame_us)
+            if actual == verdict:
+                count = count + 1
     count
 
 fn _comparison_compiler_metadata_valid(sample: BackendComparisonSample) -> bool:
@@ -425,55 +431,89 @@ pub fn backend_comparison_from_measurement_with_runtime_metadata(record: Backend
 pub fn backend_measurement_initialized_valid(record: BackendMeasurementRecord) -> bool:
     if record.status != "Initialized":
         return false
-    if record.command == "" or record.host == "" or record.render_readback_scope == "":
+    if record.command == "":
         return false
-    if record.warmup_count < 0 or record.sample_count <= 0:
+    if record.host == "":
         return false
-    if record.p50_us <= 0 or record.p95_us < record.p50_us:
+    if record.render_readback_scope == "":
         return false
-    if record.max_rss_kb <= 0 or record.binary_size_bytes <= 0 or record.baseline_binary_size_bytes <= 0:
+    if record.warmup_count < 0:
         return false
-    if _is_acceleration_lane(record.requested_backend) and not record.scalar_baseline_compared:
+    if record.sample_count <= 0:
         return false
-    if _is_acceleration_lane(record.requested_backend) and record.fallback_used:
+    if record.p50_us <= 0:
         return false
+    if record.p95_us < record.p50_us:
+        return false
+    if record.max_rss_kb <= 0:
+        return false
+    if record.binary_size_bytes <= 0:
+        return false
+    if record.baseline_binary_size_bytes <= 0:
+        return false
+    if _is_acceleration_lane(record.requested_backend):
+        if not record.scalar_baseline_compared:
+            return false
+    if _is_acceleration_lane(record.requested_backend):
+        if record.fallback_used:
+            return false
     true
 
 pub fn backend_measurement_unavailable_valid(record: BackendMeasurementRecord) -> bool:
-    if record.status != "Unavailable" and record.status != "Failed":
-        return false
+    if record.status != "Unavailable":
+        if record.status != "Failed":
+            return false
     if record.unavailable_reason == "":
         return false
-    if _is_acceleration_lane(record.requested_backend) and record.fallback_used:
-        return false
+    if _is_acceleration_lane(record.requested_backend):
+        if record.fallback_used:
+            return false
     true
 
 pub fn backend_measurement_satisfies_lane(record: BackendMeasurementRecord) -> bool:
-    backend_measurement_initialized_valid(record) or backend_measurement_unavailable_valid(record)
+    if backend_measurement_initialized_valid(record):
+        return true
+    backend_measurement_unavailable_valid(record)
 
 pub fn backend_comparison_initialized_valid(sample: BackendComparisonSample) -> bool:
     if sample.status != "Initialized":
         return false
     if not _comparison_identity_valid(sample):
         return false
-    if sample.warmup_count < 0 or sample.sample_count <= 0:
+    if sample.warmup_count < 0:
         return false
-    if sample.cold_start_us <= 0 or sample.warm_start_us <= 0:
+    if sample.sample_count <= 0:
         return false
-    if sample.p50_frame_us <= 0 or sample.p95_frame_us < sample.p50_frame_us:
+    if sample.cold_start_us <= 0:
+        return false
+    if sample.warm_start_us <= 0:
+        return false
+    if sample.p50_frame_us <= 0:
+        return false
+    if sample.p95_frame_us < sample.p50_frame_us:
         return false
     if sample.p95_input_to_paint_us < sample.p95_frame_us:
         return false
-    if sample.max_rss_kb <= 0 or sample.binary_size_bytes <= 0 or sample.baseline_binary_size_bytes <= 0:
+    if sample.max_rss_kb <= 0:
         return false
-    if sample.package_size_bytes <= 0 or sample.render_readback_scope == "":
+    if sample.binary_size_bytes <= 0:
         return false
-    if sample.checksum == "" or sample.pixel_proof == "":
+    if sample.baseline_binary_size_bytes <= 0:
         return false
-    if sample.fallback_used and sample.fallback_reason == "":
+    if sample.package_size_bytes <= 0:
         return false
-    if _is_acceleration_lane(sample.requested_backend) and not sample.scalar_baseline_compared:
+    if sample.render_readback_scope == "":
         return false
+    if sample.checksum == "":
+        return false
+    if sample.pixel_proof == "":
+        return false
+    if sample.fallback_used:
+        if sample.fallback_reason == "":
+            return false
+    if _is_acceleration_lane(sample.requested_backend):
+        if not sample.scalar_baseline_compared:
+            return false
     if not _comparison_compiler_metadata_valid(sample):
         return false
     if not _comparison_runtime_metadata_valid(sample):
@@ -483,18 +523,22 @@ pub fn backend_comparison_initialized_valid(sample: BackendComparisonSample) -> 
     true
 
 pub fn backend_comparison_unavailable_valid(sample: BackendComparisonSample) -> bool:
-    if sample.status != "Unavailable" and sample.status != "Failed":
-        return false
+    if sample.status != "Unavailable":
+        if sample.status != "Failed":
+            return false
     if not _comparison_identity_valid(sample):
         return false
     if sample.unavailable_reason == "":
         return false
-    if sample.fallback_used and sample.fallback_reason == "":
-        return false
+    if sample.fallback_used:
+        if sample.fallback_reason == "":
+            return false
     true
 
 pub fn backend_comparison_sample_valid(sample: BackendComparisonSample) -> bool:
-    backend_comparison_initialized_valid(sample) or backend_comparison_unavailable_valid(sample)
+    if backend_comparison_initialized_valid(sample):
+        return true
+    backend_comparison_unavailable_valid(sample)
 
 pub fn backend_comparison_samples_valid(samples: [BackendComparisonSample]) -> bool:
     if samples.len() == 0:
@@ -510,7 +554,9 @@ pub fn backend_measurement_binary_size_delta_bytes(record: BackendMeasurementRec
 pub fn backend_measurement_binary_size_delta_valid(record: BackendMeasurementRecord) -> bool:
     if record.status != "Initialized":
         return false
-    record.binary_size_bytes > 0 and record.baseline_binary_size_bytes > 0
+    if record.binary_size_bytes <= 0:
+        return false
+    record.baseline_binary_size_bytes > 0
 
 pub fn backend_measurement_record_sdn(record: BackendMeasurementRecord) -> text:
     "(backend_measurement " +
