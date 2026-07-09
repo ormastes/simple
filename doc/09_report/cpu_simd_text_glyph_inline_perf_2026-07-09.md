@@ -329,15 +329,16 @@ Rejected follow-up:
   `RenderBackend.render_html_to_pixels` branch in the proof exporter, keeps the
   CPU-SIMD fixture on the direct Simple Web layout path, flattens small boolean
   helpers, and simplifies the one-sample percentile path used by the scale
-  contract. The focused Cranelift build now emits the exporter object; the
-  remaining failure is in the imported report module. Report validators,
-  direct metadata checks, the speed verdict counter, the overhead counter, and
-  core-lane presence now compile farther after removing expression-return,
-  compound-chain, and nested helper-call patterns. The latest focused build
-  stops at `_comparison_offload_efficiency_verdict_count` with a Cranelift
-  verifier failure in `backend_measurement_report.spl`, so strict fresh-binary
-  proof remains blocked by native backend verification for the report import
-  rather than by the exporter source contract.
+  contract. The focused Cranelift build now avoids importing the full
+  `backend_measurement_report.spl` module; the exporter writes its own
+  single-sample SDN row. `SIMPLE_LIB=src bin/simple check
+  src/app/wm_compare/backend_measurement_software_export.spl` passes, and a
+  focused `one-binary` native probe
+  (`backend_measurement_software_export_native_probe.spl`) builds and exits
+  `0` after running the CPU-SIMD trace render and checking the native checksum
+  witness. The normal exporter binary no longer crashes with `main(args)`, but
+  native argv handoff is still incomplete for `--out`, so strict wrapper-level
+  fresh-binary export remains a follow-up.
 - Full strict 4K/8K rerun after array-repeat doubling:
   `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-array-repeat-doubling-full sh scripts/check/check-cpu-simd-render-scale-contract.shs`
   passed with 4K CPU-SIMD p50 `205462us` vs scalar `207347us`, 8K CPU-SIMD p50
