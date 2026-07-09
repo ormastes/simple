@@ -142,6 +142,9 @@ expect(script).to_contain("cpu_simd_render_scale_contract_run_order=$RUN_ORDER")
 expect(script).to_contain("gui_perf_cpu_base_compare_schedule_order=$RUN_ORDER")
 expect(script).to_contain("gui_perf_cpu_base_compare_simd_provider_hits=")
 expect(script).to_contain("gui_perf_cpu_base_compare_native_simd_executed=")
+expect(script).to_contain("gui_perf_cpu_base_compare_engine2d_simd_probe_status=")
+expect(script).to_contain("gui_perf_cpu_base_compare_engine2d_simd_probe_hits=")
+expect(script).to_contain("gui_perf_cpu_base_compare_engine2d_simd_probe_native_executed=")
 expect(script).to_contain("unsupported_run_order_$RUN_ORDER")
 expect(script).to_contain("CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY")
 expect(script).to_contain("binary_has_engine2d_simd_externs")
@@ -188,6 +191,9 @@ expect(script).to_contain("gui_perf_cpu_base_compare_simple_launch_kind=run")
 expect(script).to_contain("gui_perf_cpu_base_compare_simple_native_artifact_used=false")
 expect(script).to_contain("gui_perf_cpu_base_compare_simd_provider_hits=")
 expect(script).to_contain("gui_perf_cpu_base_compare_native_simd_executed=")
+expect(script).to_contain("gui_perf_cpu_base_compare_engine2d_simd_probe_status=")
+expect(script).to_contain("gui_perf_cpu_base_compare_engine2d_simd_probe_hits=")
+expect(script).to_contain("gui_perf_cpu_base_compare_engine2d_simd_probe_native_executed=")
 ```
 
 </details>
@@ -207,6 +213,9 @@ expect(exporter).to_contain("simple_web_layout_render_html_software_pixels(html,
 expect(exporter).to_contain("simd_provider_hits:")
 expect(exporter).to_contain("gui_perf_benchmark_simd_provider_hits=")
 expect(exporter).to_contain("gui_perf_benchmark_native_simd_executed=")
+expect(exporter).to_contain("simple_web_layout_render_html_readback_paint")
+expect(exporter).to_contain("gui_perf_benchmark_engine2d_simd_probe_hits=")
+expect(exporter).to_contain("gui_perf_benchmark_engine2d_simd_probe_native_executed=")
 ```
 
 </details>

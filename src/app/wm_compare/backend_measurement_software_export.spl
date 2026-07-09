@@ -6,6 +6,7 @@
 
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels, simple_web_layout_render_html_software_pixels_traced}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{simple_web_layout_render_html_readback_paint}
 use std.gc_async_mut.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
 use std.io_runtime.{get_args}
 use std.nogc_sync_mut.sffi.io.{file_write_text}
@@ -90,6 +91,9 @@ fn _percentile_nearest_rank(sorted: [i64], pct: i32) -> i64:
 fn _sample_html(fixture_id: text) -> text:
     "<html><head><title>GUI Perf</title><style>body{background:#102030;color:#f8fafc} .panel{padding:12px;border:1px solid #38bdf8}</style></head><body><main class='panel'><h1>Simple GUI Perf</h1><p>" + fixture_id + "</p><button>Render</button><section><h2>Text lane</h2><p>abcdefghijklmnopqrstuvwxyz 0123456789</p></section></main></body></html>"
 
+fn _solid_probe_html(fixture_id: text) -> text:
+    "<!doctype html><meta charset='utf-8'><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#ffffff}.panel{width:75%;height:60%;background:#336699}</style><body><div class='panel'></div><!-- " + fixture_id + " --></body>"
+
 fn _is_supported_software_backend(backend: text) -> bool:
     if backend == "software": return true
     if backend == "cpu": return true
@@ -149,6 +153,47 @@ fn _scalar_baseline_p50_us(backend_family: text, p50: i64) -> i64:
 
 fn _native_simd_executed_text(simd_provider_hits: i64) -> text:
     _bool_text(simd_provider_hits > 0)
+
+class Engine2DSimdProbe:
+    status: text
+    pixels: text
+    readback_source: text
+    elapsed_us: i64
+    hits: i64
+    checksum: i64
+    proof: i64
+
+fn _empty_engine2d_simd_probe(width: i32, height: i32) -> Engine2DSimdProbe:
+    Engine2DSimdProbe(status: "skipped", pixels: width.to_string() + "x" + height.to_string(), readback_source: "", elapsed_us: 0, hits: 0, checksum: 0, proof: 0)
+
+fn _engine2d_simd_probe(backend: text, supported_backend: bool, html: text, width: i32, height: i32) -> Engine2DSimdProbe:
+    if not supported_backend or backend != "cpu_simd" or width <= 0 or height <= 0:
+        return _empty_engine2d_simd_probe(width, height)
+    reset_simd_hits()
+    val start_us = time_now_micros()
+    val readback = simple_web_layout_render_html_readback_paint(html, width, height, "cpu_simd", true)
+    val elapsed_us = _positive_elapsed_us(start_us)
+    val hits = simd_hit_counts()
+    val total_hits = hits.fill_hits + hits.copy_hits + hits.alpha_hits + hits.blit_hits + hits.scroll_hits
+    Engine2DSimdProbe(
+        status: "measured",
+        pixels: width.to_string() + "x" + height.to_string(),
+        readback_source: readback.source,
+        elapsed_us: elapsed_us,
+        hits: total_hits,
+        checksum: _checksum_u32_pixels(readback.pixels),
+        proof: _nonzero_pixels(readback.pixels)
+    )
+
+fn _engine2d_simd_probe_fields(probe: Engine2DSimdProbe) -> text:
+    "gui_perf_benchmark_engine2d_simd_probe_status=" + probe.status + "\n" +
+        "gui_perf_benchmark_engine2d_simd_probe_pixels=" + probe.pixels + "\n" +
+        "gui_perf_benchmark_engine2d_simd_probe_readback_source=" + probe.readback_source + "\n" +
+        "gui_perf_benchmark_engine2d_simd_probe_elapsed_us=" + probe.elapsed_us.to_string() + "\n" +
+        "gui_perf_benchmark_engine2d_simd_probe_hits=" + probe.hits.to_string() + "\n" +
+        "gui_perf_benchmark_engine2d_simd_probe_native_executed=" + _native_simd_executed_text(probe.hits) + "\n" +
+        "gui_perf_benchmark_engine2d_simd_probe_checksum=sum32:" + probe.checksum.to_string() + "\n" +
+        "gui_perf_benchmark_engine2d_simd_probe_pixel_proof=nonzero_pixels:" + probe.proof.to_string() + "\n"
 
 fn _software_sample_sdn(fixture_id: text, backend: text, supported_backend: bool, args: [text],
                         warmup_count: i32, sample_count: i32, p50: i64, p95: i64,
@@ -272,6 +317,7 @@ pub fn software_only_render_loop_export_sdn(args: [text]) -> text:
             "gui_perf_benchmark_physical_pixels=" + width.to_string() + "x" + height.to_string() + "\n" +
             "gui_perf_benchmark_screen_size_reduced=false"
     val supported_backend = _is_supported_software_backend(backend)
+    val probe_html = _solid_probe_html(fixture_id)
     var warmup = 0
     if supported_backend:
         while warmup < warmup_count:
@@ -294,6 +340,7 @@ pub fn software_only_render_loop_export_sdn(args: [text]) -> text:
     val p95 = _percentile_nearest_rank(sorted, 95)
     val checksum_value = _checksum_u32_pixels(pixels)
     val proof_count = _nonzero_pixels(pixels)
+    val engine2d_probe = _engine2d_simd_probe(backend, supported_backend, probe_html, width, height)
     val samples_sdn = _software_sample_sdn(fixture_id, backend, supported_backend, args,
         warmup_count, sample_count, p50, p95, checksum_value, proof_count, simd_provider_hits)
     samples_sdn + "\n" +
@@ -305,6 +352,7 @@ pub fn software_only_render_loop_export_sdn(args: [text]) -> text:
         "gui_perf_benchmark_physical_pixels=" + width.to_string() + "x" + height.to_string() + "\n" +
         "gui_perf_benchmark_simd_provider_hits=" + simd_provider_hits.to_string() + "\n" +
         "gui_perf_benchmark_native_simd_executed=" + _native_simd_executed_text(simd_provider_hits) + "\n" +
+        _engine2d_simd_probe_fields(engine2d_probe) +
         "gui_perf_benchmark_screen_size_reduced=false"
 
 pub fn software_only_render_loop_export_values(backend: text, width: i32, height: i32,
@@ -318,6 +366,7 @@ pub fn software_only_render_loop_export_values(backend: text, width: i32, height
     if dpi <= 0:
         dpi = 300
     val html = _sample_html(fixture_id)
+    val probe_html = _solid_probe_html(fixture_id)
     val supported_backend = _is_supported_software_backend(backend)
     var warmup = 0
     if supported_backend:
@@ -341,6 +390,7 @@ pub fn software_only_render_loop_export_values(backend: text, width: i32, height
     val p95 = _percentile_nearest_rank(sorted, 95)
     val checksum_value = _checksum_u32_pixels(pixels)
     val proof_count = _nonzero_pixels(pixels)
+    val engine2d_probe = _engine2d_simd_probe(backend, supported_backend, probe_html, width, height)
     val samples_sdn = _software_sample_sdn_values(fixture_id, backend, supported_backend,
         shell, command, host, "text_blit", 1, _positive_or_one(binary_size_bytes),
         _positive_or_one(baseline_binary_size_bytes), _positive_or_one(package_size_bytes),
@@ -354,6 +404,7 @@ pub fn software_only_render_loop_export_values(backend: text, width: i32, height
         "gui_perf_benchmark_physical_pixels=" + width.to_string() + "x" + height.to_string() + "\n" +
         "gui_perf_benchmark_simd_provider_hits=" + simd_provider_hits.to_string() + "\n" +
         "gui_perf_benchmark_native_simd_executed=" + _native_simd_executed_text(simd_provider_hits) + "\n" +
+        _engine2d_simd_probe_fields(engine2d_probe) +
         "gui_perf_benchmark_screen_size_reduced=false"
 
 fn main() -> i64:
