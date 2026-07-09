@@ -22,7 +22,15 @@ redeployable to `bin/release/<triple>/simple`.
    (commits `7984ab3`, `4866213`) but is long-horizon for #79 — and the deployed
    `bin/simple` has **no LLVM linked**, so it can't even run this backend.
 
-## CURRENT WALL — string literals dropped in the stage2 self-compile
+## CURRENT WALL (path 1, cranelift/llc `SIMPLE_BOOTSTRAP` string-literal drop) — STALE, see path-2 update below
+
+**This section describes path 1** (`SIMPLE_BOOTSTRAP=1` stage2 self-compile via the pure-Simple
+`MirToLlvm` text backend + `llc`, `driver_bootstrap.spl`). **`bin/simple build bootstrap`'s actual
+Stage 1 currently runs path 2** (the `llvm-lib` AOT / LLVM-C-API path below — confirmed by the
+`[llvm-lib]`-prefixed errors and `LLVMBuildICmp`/`LLVMSetDataLayout` FFI crash backtraces in
+`bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`). Path-1's string-drop investigation
+below is preserved for whoever resumes that path, but it is **not** the wall blocking
+`bin/simple build bootstrap` today — see "CURRENT WALL (path 2)" below for that.
 
 **Evidence.** The `SIMPLE_BOOTSTRAP=1` stage2 self-compile of
 `src/app/cli/bootstrap_main.spl` returns rc=0 and emits a **21KB inert stub**:
@@ -52,6 +60,59 @@ zeroes string literals** while running the (interpreted) compiler during the
 self-compile — the #66 "string drops to empty in run path" class, residual on
 the `SIMPLE_BOOTSTRAP` compile path (#66 was closed for the concat case).
 
+## CURRENT WALL (path 2, llvm-lib AOT / LLVM-C-API) — this is what `bin/simple build bootstrap` hits today
+
+Path 2 (`src/compiler/70.backend/backend/llvm_lib_*`, native-build LLVM-IR generation run
+**interpreted** by the deployed `bin/simple`) has been the actual Stage-1 wall all session
+(2026-07-09). It advanced twice (139→134→139 across #130/#133, real exit-code/backtrace changes),
+then **stalled at exit 139** for the rest of this session (steps 3-5 below) — a real, separate bug was
+fixed in step 4, but it did not move the fatal 139:
+1. **Pre-#130:** ICmp SIGSEGV (139) — bad `llvm::Value*` operand from wiped call/method args.
+2. **#130** `bfd98b03 fix(hir): stop wiping call/method args under SIMPLE_BOOTSTRAP` — fixed that,
+   moved the wall to a DataLayout abort (134, corrupted `text.ptr()` param to `LLVMSetDataLayout`).
+3. **#133** `d16a8883 fix(bootstrap): lower function params under SIMPLE_BOOTSTRAP` — fixed the
+   DataLayout wall. On the resulting tree, Stage 1 still fails at exit 139 (SIGSEGV), and the log
+   *also* shows a separate, non-fatal event: an **unresolved-function-call** eprint from
+   `translate_call` (`llvm_lib_translate_expr.spl:478-480`) for callee `Const(Str("rt_cli_get_args"))`
+   → `func_ref == 0` (not in `func_map`, not pre-declared in the LLVM module) → that one call is
+   dropped, producing broken IR **for that call site only**.
+4. **2026-07-09 fix (this session, uncommitted, left for review):** `rt_cli_get_args` is a real
+   runtime extern (`src/runtime/runtime_native.c:1198`, used by `src/app/sj/main.spl` /
+   `sj_daemon/main.spl`) that `declare_runtime_functions()` in `llvm_lib_translate.spl` never
+   pre-declared (only sibling `rt_get_args` was). Added one line mirroring the existing declaration:
+   `declare_fn(mod_, "rt_cli_get_args", llvm_function_type(ptr_ty, [], false))` right after
+   `rt_get_args` (`llvm_lib_translate.spl:237`). Verified: re-run shows **zero**
+   `[llvm-lib] ERROR: unresolved function call` occurrences (was 1) — that specific broken-IR drop is
+   genuinely fixed. **This is a real, worthwhile, standalone fix — keep/land it — but see (5): it does
+   NOT unblock Stage 1.**
+5. **CORRECTED — the fatal wall did NOT move; it was mis-attributed to (3)'s dropped call.**
+   Comparing macOS crash reports from the pre-fix run
+   (`~/Library/Logs/DiagnosticReports/simple-2026-07-09-134458.ips`) and the post-fix run
+   (`...-134732.ips`) shows **byte-identical** crashing-thread top-8 frames and identical
+   `EXC_BAD_ACCESS`/`KERN_INVALID_ADDRESS at 0x0` in both — `llvm::ConstantFolder::FoldCmp` /
+   `LLVMBuildICmp`, reached via `call_extern_function_with_values`. The SIGSEGV was **already** the
+   fatal Stage-1 crash before step (4)'s fix; the `rt_cli_get_args` unresolved-callee eprint and the
+   SIGSEGV are two independent, co-occurring events in the same Stage-1 compile, not cause→effect.
+   **True current state: exit 139, `LLVMBuildICmp`/`ConstantFolder::FoldCmp` SIGSEGV, unchanged
+   before and after this session's fix — this is the same crash class #130 (step 2) was believed to
+   have fixed**, either a different uncovered `ICmp` call site, or an incomplete/order-sensitive fix.
+   See `doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`'s "State
+   after this run" section for the full comparison and backtrace. **This is the next thing to
+   instrument/diagnose** (repeat this doc's Step-1 diagnostic-eprint method, but on the
+   `LLVMBuildICmp` extern binding / `call_extern_function_with_values` opaque-`llvm::Value*`
+   marshalling, per that bug doc's original "Fix direction" section).
+
+**A second, separate, NOT-yet-hit latent bug found by code-reading while diagnosing (4):**
+`translate_call`'s inline `Copy(local)`/`Move(local)` match arms (used to resolve an *indirect*-call
+callee) pass the raw `LocalId` struct to `get_value(value_map, local)` instead of unwrapping `local.id`
+first — the exact bug class `7984ab3ad7` (2026-07-08) fixed in the sibling `translate_operand`
+function and the `SetField` inline match in the *same file*, but missed this occurrence. Any indirect
+call (callee = `Copy`/`Move` operand, not a `Const(Str(name))`) will always resolve `func_ref == 0` and
+get silently dropped. One-line-per-arm fix, matching the established `7984ab3ad7` pattern exactly:
+`get_value(value_map, local.id)`. Not applied (not the wall actually hit; flagged as active #79/#133
+territory per this plan's own "do not solo-patch structural value_map threading" guidance) — next
+person touching `translate_call` should land it alongside whatever they're already doing there.
+
 ## Why it's been hard (structural, not just difficulty)
 
 - **Duplicate module files**: numbered (`50.mir`, `70.backend`) vs non-numbered
@@ -69,6 +130,25 @@ the `SIMPLE_BOOTSTRAP` compile path (#66 was closed for the concat case).
 
 ## Next steps (in order)
 
+**Path 2 (the live wall — do this first, it's what `bin/simple build bootstrap` actually runs):**
+1. **Land the uncommitted `rt_cli_get_args` declare_fn fix** (this session,
+   `llvm_lib_translate.spl:238`, additive one-liner) — review + commit. Real, verified fix for a
+   broken-IR drop, but note: it does NOT by itself unblock Stage 1 (see (2)).
+2. **Diagnose the `LLVMBuildICmp` SIGSEGV** (step 5 above) — this is, and has been throughout this
+   session, the actual fatal blocker of Stage 1 (exit 139), unaffected by (1). Repeat the
+   temporary-diagnostic-eprint method from `bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`,
+   this time instrumenting the `LLVMBuildICmp` extern binding / the interpreter's
+   `call_extern_function_with_values` opaque-pointer marshalling (that doc's original "Fix direction"
+   section), to determine whether this is an `ICmp` call site #130's fix didn't cover, or #130's fix
+   being incomplete/order-sensitive.
+3. **Land the latent Copy/Move `.id`-unwrap fix** in `translate_call` (found by code-reading this
+   session, not yet hit by an actual run) alongside whichever #79 work next touches that function —
+   matches the `7984ab3ad7` pattern exactly, one line per match arm.
+4. Once Stage 1 (path 2) passes, re-gate the full `bin/simple build bootstrap` 3-stage before any
+   redeploy to `bin/release`.
+
+**Path 1 (cranelift/llc `SIMPLE_BOOTSTRAP` string-literal drop — stale/deprioritized, not today's
+wall, preserved for whoever resumes it):**
 1. **[#128] Pin the drop point.** Instrument the string-literal lowering in
    **both** copies simultaneously — `50.mir/mir_data.spl:486` `emit_const_str`
    AND `mir/mir_data.spl` (+ the HIR→MIR literal path) — with an `eprint` of
@@ -91,10 +171,34 @@ the `SIMPLE_BOOTSTRAP` compile path (#66 was closed for the concat case).
 - `4866213` — llvm-lib trivial-binary milestone: create_target_machine
   Triple/CPU/Features NUL-terminate + cpu `x86-64-v1`→`x86-64` + name
   NUL-terminate (all 4 FFI copies). `42` and `40+2` → running ELF64 returning 42.
+- `bfd98b03` (#130) — stop wiping call/method args under SIMPLE_BOOTSTRAP; cleared the ICmp SIGSEGV
+  wall (moved it to a DataLayout abort).
+- `d16a8883` (#133) — lower function params under SIMPLE_BOOTSTRAP; cleared the DataLayout abort
+  (exit 134 → moved to exit 139). On that tree, exit 139 is the `LLVMBuildICmp` SIGSEGV (see below) —
+  a separate, non-fatal `translate_call` unresolved-callee eprint (`rt_cli_get_args`) also appeared in
+  the same run's log but is NOT what causes the 139.
+
+## Uncommitted this session (2026-07-09, left for review — see bug doc for full detail)
+
+- **Applied:** `llvm_lib_translate.spl:238` — `declare_fn(mod_, "rt_cli_get_args", ...)`, additive.
+  Verified fix: cleared the `translate_call` unresolved-callee eprint for the `Const(Str("rt_cli_get_args"))`
+  case (1 → 0 occurrences). **Does not affect the exit-139 SIGSEGV** — crash-report comparison
+  (pre-fix `simple-2026-07-09-134458.ips` vs post-fix `...-134732.ips`) shows byte-identical crash
+  signatures, proving these were always two independent issues.
+- **Not applied (reported for #79):** `translate_call`'s `Copy`/`Move` match arms need
+  `local` → `local.id` (same class as `7984ab3ad7`, latent, not yet hit by a real run).
+- **Not diagnosed (the actual fatal wall, present throughout this session, before and after the fix
+  above):** `LLVMBuildICmp`/`ConstantFolder::FoldCmp` SIGSEGV (exit 139), crash reports
+  `simple-2026-07-09-134458.ips` (pre-fix) and `simple-2026-07-09-134732.ips` (post-fix).
 
 ## Out of scope for #79 (recorded, not on the critical path)
 
-- llvm-lib runtime-builtin decls (`#129`) — needed only if pursuing llvm-lib
-  self-host; deployed binary has no LLVM.
+- llvm-lib runtime-builtin decls (`#129`) — **UPDATE 2026-07-09: no longer purely out-of-scope.**
+  `bin/simple build bootstrap`'s Stage 1 now runs the llvm-lib path (path 2) as its live wall, and
+  `#129`'s exact class of gap (a `declare_runtime_functions()` hardcoded list missing a real extern,
+  here `rt_cli_get_args`) was this session's actual blocker. The broader `#129` question — should
+  `declare_runtime_functions()` stay a hand-maintained list, or should it derive declarations from the
+  `extern fn` decls actually present in the MIR module (avoiding future one-off gaps) — is still a
+  reasonable structural item to scope separately; the immediate instance was fixed additively.
 - Interpreter completeness (`#99`) and class-in-array mutation (`#112`) —
   interpreter-lane items; `#112` repro blocked by the exec-mode kill-monitor.
