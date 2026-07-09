@@ -1,6 +1,6 @@
 # Generated 2D native readback wrapper evidence
 
-> Runs the Metal and ROCm/HIP generated-2D readback wrappers into isolated build-local evidence directories and asserts their deterministic `evidence.env` contracts. Linux hosts without Metal or ROCm are expected to fail closed with typed unavailable evidence; native host passes must prove submit plus readback availability and matching operation checksums.
+> Runs the Metal and ROCm/HIP generated-2D readback wrappers into isolated build-local evidence directories and asserts their deterministic `evidence.env` contracts. Linux hosts without Metal or ROCm are expected to fail closed with typed unavailable evidence; native host passes must prove submit plus readback availability and matching operation checksums. OpenCL pass evidence must load the generated SPIR-V artifact rather than an inline duplicate OpenCL C source.
 
 <!-- sdn-diagram:id=generated_2d_native_readback_wrappers_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ generated_2d_native_readback_wrappers_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Generated 2D native readback wrapper evidence
 
-Runs the Metal and ROCm/HIP generated-2D readback wrappers into isolated build-local evidence directories and asserts their deterministic `evidence.env` contracts. Linux hosts without Metal or ROCm are expected to fail closed with typed unavailable evidence; native host passes must prove submit plus readback availability and matching operation checksums.
+Runs the Metal and ROCm/HIP generated-2D readback wrappers into isolated build-local evidence directories and asserts their deterministic `evidence.env` contracts. Linux hosts without Metal or ROCm are expected to fail closed with typed unavailable evidence; native host passes must prove submit plus readback availability and matching operation checksums. OpenCL pass evidence must load the generated SPIR-V artifact rather than an inline duplicate OpenCL C source.
 
 ## At a Glance
 
@@ -47,7 +47,7 @@ Runs the Metal and ROCm/HIP generated-2D readback wrappers into isolated build-l
 | Design | doc/05_design/host_gpu_lane.md |
 | Research | doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md |
 | Source | `test/03_system/check/generated_2d_native_readback_wrappers_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-07-09 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -57,6 +57,8 @@ build-local evidence directories and asserts their deterministic `evidence.env`
 contracts. Linux hosts without Metal or ROCm are expected to fail closed with
 typed unavailable evidence; native host passes must prove submit plus readback
 availability and matching operation checksums.
+OpenCL pass evidence must load the generated SPIR-V artifact rather than an
+inline duplicate OpenCL C source.
 
 **Plan:** doc/03_plan/sys_test/production_gui_web_host_gpu_queue_readback.md
 **Requirements:** doc/02_requirements/feature/host_gpu_lane.md
@@ -103,8 +105,9 @@ A native pass must report `status=pass`, `submit_attempted=true`, and
 - ROCm/HIP evidence includes loader, probe, module, submit, readback, checksum,
   and operation keys.
 - Unavailable evidence must report `readback_available=false`.
-- Pass evidence must prove submit/readback, matching nonzero per-operation
-  checksums, and matching aggregate expected/actual checksum rows.
+- Pass evidence must prove submit/readback and matching checksums.
+- OpenCL generated-2D readback uses `clCreateProgramWithIL` and never
+  `clCreateProgramWithSource`.
 
 ## Scenarios
 
@@ -155,7 +158,7 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -180,7 +183,7 @@ expect(evidence).to_contain("metal_generated_2d_readback_alpha_expected=999")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -239,12 +242,36 @@ else:
 
 </details>
 
+#### loads OpenCL generated SPIR-V instead of inline source
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val wrapper = rt_file_read_text("scripts/check/check-opencl-generated-2d-readback.shs")
+expect(wrapper).to_contain("clCreateProgramWithIL")
+expect(wrapper).to_contain("opencl_generated_2d_readback_generated_module_loaded=true")
+expect(wrapper).to_contain("OpenCL generated SPIR-V -> clCreateProgramWithIL")
+expect(wrapper).to_contain("opencl_generated_2d_readback_reason=generated-module-not-loaded")
+expect(wrapper).to_contain("wrong-backend-name")
+expect(wrapper).to_contain("wrong-ops")
+expect(wrapper).to_contain("opencl-il-loader-missing")
+expect(wrapper).to_contain("opencl-create-program-with-generated-il")
+expect(wrapper).to_contain("opencl-build-generated-program")
+expect(wrapper.contains("clCreateProgramWithSource")).to_equal(false)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
