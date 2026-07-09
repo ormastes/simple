@@ -336,9 +336,13 @@ Rejected follow-up:
   focused `one-binary` native probe
   (`backend_measurement_software_export_native_probe.spl`) builds and exits
   `0` after running the CPU-SIMD trace render and checking the native checksum
-  witness. The normal exporter binary no longer crashes with `main(args)`, but
-  native argv handoff is still incomplete for `--out`, so strict wrapper-level
-  fresh-binary export remains a follow-up.
+  witness. The scale contract now has an opt-in native probe gate:
+  `CPU_SIMD_RENDER_SCALE_PROBE_ONLY=1 CPU_SIMD_RENDER_SCALE_REQUIRE_NATIVE_PROBE=1
+  CPU_SIMD_RENDER_SCALE_NATIVE_PROBE_BIN=build/check/cpu-simd-render-scale-export-bin-current/backend_measurement_software_export_native_probe
+  sh scripts/check/check-cpu-simd-render-scale-contract.shs` passes with
+  `cpu_simd_render_scale_native_probe_status=pass`. The normal exporter binary
+  no longer crashes with `main(args)`, but native argv handoff is still
+  incomplete for `--out`, so direct native CLI export remains a follow-up.
 - Full strict 4K/8K rerun after array-repeat doubling:
   `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-array-repeat-doubling-full sh scripts/check/check-cpu-simd-render-scale-contract.shs`
   passed with 4K CPU-SIMD p50 `205462us` vs scalar `207347us`, 8K CPU-SIMD p50

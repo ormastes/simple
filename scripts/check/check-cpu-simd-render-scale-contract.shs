@@ -15,6 +15,9 @@ EXEC_MODE="${CPU_SIMD_RENDER_SCALE_MODE:-native}"
 RUN_ORDER="${CPU_SIMD_RENDER_SCALE_RUN_ORDER:-cpu_simd_first}"
 REQUIRE_ENGINE2D_BINARY="${CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY:-0}"
 REQUIRE_RUNTIME_FRESH="${CPU_SIMD_RENDER_SCALE_REQUIRE_RUNTIME_FRESH:-0}"
+REQUIRE_NATIVE_PROBE="${CPU_SIMD_RENDER_SCALE_REQUIRE_NATIVE_PROBE:-0}"
+NATIVE_PROBE_BIN="${CPU_SIMD_RENDER_SCALE_NATIVE_PROBE_BIN:-}"
+PROBE_ONLY="${CPU_SIMD_RENDER_SCALE_PROBE_ONLY:-0}"
 
 mkdir -p "$OUT_DIR"
 
@@ -129,6 +132,35 @@ runtime_source_fresh_status() {
         echo stale
     fi
 }
+
+native_probe_status() {
+    if [ "$NATIVE_PROBE_BIN" = "" ]; then
+        echo not_configured
+        return
+    fi
+    if [ ! -x "$NATIVE_PROBE_BIN" ]; then
+        echo missing
+        return
+    fi
+    if run_with_timeout "$NATIVE_PROBE_BIN" >/dev/null 2>"$OUT_DIR/native_probe.err"; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+if [ "$PROBE_ONLY" = "1" ]; then
+    NATIVE_PROBE_STATUS="$(native_probe_status)"
+    if [ "$REQUIRE_NATIVE_PROBE" = "1" ] && [ "$NATIVE_PROBE_STATUS" != "pass" ]; then
+        fail "native_probe_${NATIVE_PROBE_STATUS}"
+    fi
+    echo "cpu_simd_render_scale_contract_status=pass"
+    echo "cpu_simd_render_scale_native_probe_status=$NATIVE_PROBE_STATUS"
+    echo "cpu_simd_render_scale_native_probe_required=$REQUIRE_NATIVE_PROBE"
+    echo "cpu_simd_render_scale_native_probe_bin=$NATIVE_PROBE_BIN"
+    echo "cpu_simd_render_scale_probe_only=1"
+    exit 0
+fi
 
 require_value() {
     require_label="$1"
@@ -293,6 +325,10 @@ RUNTIME_SOURCE_FRESH_STATUS="$(runtime_source_fresh_status)"
 if [ "$REQUIRE_RUNTIME_FRESH" = "1" ] && [ "$RUNTIME_SOURCE_FRESH_STATUS" != "fresh" ]; then
     fail "runtime_sources_newer_than_simple_bin"
 fi
+NATIVE_PROBE_STATUS="$(native_probe_status)"
+if [ "$REQUIRE_NATIVE_PROBE" = "1" ] && [ "$NATIVE_PROBE_STATUS" != "pass" ]; then
+    fail "native_probe_${NATIVE_PROBE_STATUS}"
+fi
 
 echo "cpu_simd_render_scale_contract_status=pass"
 echo "gui_perf_benchmark_backend=simple_web_cpu_simd"
@@ -305,6 +341,9 @@ echo "cpu_simd_render_scale_runtime_source_fresh_required=$REQUIRE_RUNTIME_FRESH
 echo "cpu_simd_render_scale_runtime_native_mtime=$(file_mtime "$ROOT/src/runtime/runtime_native.c")"
 echo "cpu_simd_render_scale_runtime_simple_core_array_ops_mtime=$(file_mtime "$ROOT/src/runtime/simple_core/core_array_ops.spl")"
 echo "cpu_simd_render_scale_simple_bin_mtime=$(file_mtime "$SIMPLE_BIN")"
+echo "cpu_simd_render_scale_native_probe_status=$NATIVE_PROBE_STATUS"
+echo "cpu_simd_render_scale_native_probe_required=$REQUIRE_NATIVE_PROBE"
+echo "cpu_simd_render_scale_native_probe_bin=$NATIVE_PROBE_BIN"
 echo "cpu_simd_render_scale_contract_dpi=$DPI"
 echo "cpu_simd_render_scale_contract_dpi_source=$(field_value gui_perf_benchmark_dpi_source "$OUT_DIR/4k.sdn")"
 echo "cpu_simd_render_scale_contract_sample_count=$SAMPLE_COUNT"
