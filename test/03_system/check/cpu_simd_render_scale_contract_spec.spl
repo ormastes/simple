@@ -33,6 +33,9 @@ dimensions to a tiny fixture while preserving the same code path.
   binary links the Engine2D SIMD row externs and can require that in strict mode.
 - REQ-CPU-SIMD-SCALE-008: The wrapper reports whether runtime sources changed
   after the selected production binary and can require freshness in strict mode.
+- REQ-CPU-SIMD-SCALE-009: The wrapper can require the canonical Engine2D SIMD
+  arch matrix and expose x86_64, AArch64, and RISC-V target-binary pass fields
+  without rerunning render benchmarks.
 
 ## Plan
 
@@ -123,8 +126,8 @@ describe "CPU SIMD render scale contract":
 
     it "cpu simd text fixture skips the generic renderer wrapper":
         val exporter = file_read("src/app/wm_compare/backend_measurement_software_export.spl")
-        expect(exporter).to_contain("fn _obvious_text_page")
-        expect(exporter).to_contain("backend == \"cpu_simd\" and _obvious_text_page(html)")
+        expect(exporter).to_contain("if backend == \"cpu_simd\":")
+        expect(exporter).to_contain("this exporter fixture has no SIMD-safe text primitive")
         expect(exporter).to_contain("simple_web_layout_render_html_software_pixels(html, width, height)")
 
     it "native array repeat fills the framebuffer with memcpy doubling":
@@ -215,3 +218,29 @@ describe "CPU SIMD render scale contract":
         expect(out).to_contain("cpu_simd_render_scale_contract_dpi_source=override")
         expect(out).to_contain("cpu_simd_render_scale_4k_pixels=8x8")
         expect(out).to_contain("cpu_simd_render_scale_8k_pixels=16x16")
+
+    it "requires arch matrix target binaries without rerunning render benchmarks":
+        val root = "build/test-cpu-simd-render-scale-arch-matrix-only"
+        val env_path = root + "/evidence.env"
+        val command =
+            "rm -rf " + root + " && mkdir -p " + root +
+            " && printf '%s\\n' " +
+            "'cpu_simd_engine2d_arch_matrix_status=pass' " +
+            "'cpu_simd_engine2d_arch_matrix_x86_64_target_binary_status=pass' " +
+            "'cpu_simd_engine2d_arch_matrix_aarch64_target_binary_status=pass' " +
+            "'cpu_simd_engine2d_arch_matrix_riscv64_target_binary_status=pass' > " + env_path +
+            " && CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ONLY=1" +
+            " CPU_SIMD_RENDER_SCALE_REQUIRE_ARCH_MATRIX=1" +
+            " CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ENV=" + env_path +
+            " sh scripts/check/check-cpu-simd-render-scale-contract.shs > " + root + "/stdout.txt"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val out = file_read(root + "/stdout.txt")
+        expect(out).to_contain("cpu_simd_render_scale_contract_status=pass")
+        expect(out).to_contain("cpu_simd_render_scale_arch_matrix_status=pass")
+        expect(out).to_contain("cpu_simd_render_scale_arch_matrix_required=1")
+        expect(out).to_contain("cpu_simd_render_scale_arch_matrix_x86_64_target_binary_status=pass")
+        expect(out).to_contain("cpu_simd_render_scale_arch_matrix_aarch64_target_binary_status=pass")
+        expect(out).to_contain("cpu_simd_render_scale_arch_matrix_riscv64_target_binary_status=pass")
+        expect(out).to_contain("cpu_simd_render_scale_arch_matrix_only=1")

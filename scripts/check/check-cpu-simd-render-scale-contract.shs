@@ -18,6 +18,9 @@ REQUIRE_RUNTIME_FRESH="${CPU_SIMD_RENDER_SCALE_REQUIRE_RUNTIME_FRESH:-0}"
 REQUIRE_NATIVE_PROBE="${CPU_SIMD_RENDER_SCALE_REQUIRE_NATIVE_PROBE:-0}"
 NATIVE_PROBE_BIN="${CPU_SIMD_RENDER_SCALE_NATIVE_PROBE_BIN:-}"
 PROBE_ONLY="${CPU_SIMD_RENDER_SCALE_PROBE_ONLY:-0}"
+REQUIRE_ARCH_MATRIX="${CPU_SIMD_RENDER_SCALE_REQUIRE_ARCH_MATRIX:-0}"
+ARCH_MATRIX_ENV="${CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ENV:-}"
+ARCH_MATRIX_ONLY="${CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ONLY:-0}"
 
 mkdir -p "$OUT_DIR"
 
@@ -35,33 +38,31 @@ run_export() {
     height="$3"
     backend="${4:-cpu_simd}"
     fixture_label="${5:-$label}"
-    rm -f "$OUT_DIR/$label.sdn" "$OUT_DIR/$label.err"
-    if [ "$DPI" = "300" ]; then
-        SIMPLE_LIB="$ROOT/src" run_with_timeout "$SIMPLE_BIN" run "$ROOT/src/app/wm_compare/backend_measurement_software_export.spl" --mode="$EXEC_MODE" -- \
-            --software-render-backend "$backend" \
-            --width "$width" \
-            --height "$height" \
-            --warmup-count 1 \
-            --sample-count "$SAMPLE_COUNT" \
-            --fixture "cpu-simd-${fixture_label}" \
-            --shell simple-web \
-            --command "scale-${fixture_label}" \
-            --host local \
-            >"$OUT_DIR/$label.sdn" 2>"$OUT_DIR/$label.err"
-    else
-        SIMPLE_LIB="$ROOT/src" run_with_timeout "$SIMPLE_BIN" run "$ROOT/src/app/wm_compare/backend_measurement_software_export.spl" --mode="$EXEC_MODE" -- \
-            --software-render-backend "$backend" \
-            --width "$width" \
-            --height "$height" \
-            --dpi "$DPI" \
-            --warmup-count 1 \
-            --sample-count "$SAMPLE_COUNT" \
-            --fixture "cpu-simd-${fixture_label}" \
-            --shell simple-web \
-            --command "scale-${fixture_label}" \
-            --host local \
-            >"$OUT_DIR/$label.sdn" 2>"$OUT_DIR/$label.err"
+    entry="$OUT_DIR/$label.entry.spl"
+    dpi_arg=""
+    if [ "$DPI" != "300" ]; then
+        dpi_arg="        \"--dpi\", \"$DPI\","
     fi
+    rm -f "$OUT_DIR/$label.sdn" "$OUT_DIR/$label.err" "$entry"
+    cat >"$entry" <<EOF
+use app.wm_compare.backend_measurement_software_export.{software_only_render_loop_export_sdn}
+
+fn main() -> i64:
+    print(software_only_render_loop_export_sdn([
+        "--software-render-backend", "$backend",
+        "--width", "$width",
+        "--height", "$height",
+$dpi_arg
+        "--warmup-count", "1",
+        "--sample-count", "$SAMPLE_COUNT",
+        "--fixture", "cpu-simd-${fixture_label}",
+        "--shell", "simple-web",
+        "--command", "scale-${fixture_label}",
+        "--host", "local"
+    ]))
+    0
+EOF
+    SIMPLE_LIB="$ROOT/src" run_with_timeout "$SIMPLE_BIN" run "$entry" --mode="$EXEC_MODE" >"$OUT_DIR/$label.sdn" 2>"$OUT_DIR/$label.err"
     if grep -q "falling back to interpreter" "$OUT_DIR/$label.err" 2>/dev/null; then
         return 97
     fi
@@ -150,6 +151,25 @@ native_probe_status() {
     fi
 }
 
+arch_matrix_value() {
+    key="$1"
+    if [ "$ARCH_MATRIX_ENV" = "" ] || [ ! -f "$ARCH_MATRIX_ENV" ]; then
+        echo ""
+        return
+    fi
+    grep "^${key}=" "$ARCH_MATRIX_ENV" | tail -1 | cut -d= -f2-
+}
+
+arch_matrix_status() {
+    if [ "$ARCH_MATRIX_ENV" = "" ]; then
+        echo not_configured
+    elif [ ! -f "$ARCH_MATRIX_ENV" ]; then
+        echo missing
+    else
+        arch_matrix_value cpu_simd_engine2d_arch_matrix_status
+    fi
+}
+
 if [ "$PROBE_ONLY" = "1" ]; then
     NATIVE_PROBE_STATUS="$(native_probe_status)"
     if [ "$REQUIRE_NATIVE_PROBE" = "1" ] && [ "$NATIVE_PROBE_STATUS" != "pass" ]; then
@@ -183,6 +203,32 @@ require_positive() {
         fail "${positive_label}_not_positive_${positive_actual}"
     fi
 }
+
+require_arch_matrix_pass() {
+    require_value "arch_matrix_status" "pass" "$(arch_matrix_status)"
+    require_value "arch_matrix_x86_64_target_binary" "pass" "$(arch_matrix_value cpu_simd_engine2d_arch_matrix_x86_64_target_binary_status)"
+    require_value "arch_matrix_aarch64_target_binary" "pass" "$(arch_matrix_value cpu_simd_engine2d_arch_matrix_aarch64_target_binary_status)"
+    require_value "arch_matrix_riscv64_target_binary" "pass" "$(arch_matrix_value cpu_simd_engine2d_arch_matrix_riscv64_target_binary_status)"
+}
+
+emit_arch_matrix_fields() {
+    echo "cpu_simd_render_scale_arch_matrix_status=$(arch_matrix_status)"
+    echo "cpu_simd_render_scale_arch_matrix_required=$REQUIRE_ARCH_MATRIX"
+    echo "cpu_simd_render_scale_arch_matrix_env=$ARCH_MATRIX_ENV"
+    echo "cpu_simd_render_scale_arch_matrix_x86_64_target_binary_status=$(arch_matrix_value cpu_simd_engine2d_arch_matrix_x86_64_target_binary_status)"
+    echo "cpu_simd_render_scale_arch_matrix_aarch64_target_binary_status=$(arch_matrix_value cpu_simd_engine2d_arch_matrix_aarch64_target_binary_status)"
+    echo "cpu_simd_render_scale_arch_matrix_riscv64_target_binary_status=$(arch_matrix_value cpu_simd_engine2d_arch_matrix_riscv64_target_binary_status)"
+}
+
+if [ "$ARCH_MATRIX_ONLY" = "1" ]; then
+    if [ "$REQUIRE_ARCH_MATRIX" = "1" ]; then
+        require_arch_matrix_pass
+    fi
+    echo "cpu_simd_render_scale_contract_status=pass"
+    emit_arch_matrix_fields
+    echo "cpu_simd_render_scale_arch_matrix_only=1"
+    exit 0
+fi
 
 ratio_permille() {
     numerator="$1"
@@ -331,6 +377,13 @@ NATIVE_PROBE_STATUS="$(native_probe_status)"
 if [ "$REQUIRE_NATIVE_PROBE" = "1" ] && [ "$NATIVE_PROBE_STATUS" != "pass" ]; then
     fail "native_probe_${NATIVE_PROBE_STATUS}"
 fi
+ARCH_MATRIX_STATUS="$(arch_matrix_status)"
+if [ "$REQUIRE_ARCH_MATRIX" = "1" ] && [ "$ARCH_MATRIX_STATUS" != "pass" ]; then
+    fail "arch_matrix_${ARCH_MATRIX_STATUS}"
+fi
+if [ "$REQUIRE_ARCH_MATRIX" = "1" ]; then
+    require_arch_matrix_pass
+fi
 
 echo "cpu_simd_render_scale_contract_status=pass"
 echo "gui_perf_benchmark_backend=simple_web_cpu_simd"
@@ -347,6 +400,7 @@ echo "cpu_simd_render_scale_native_probe_status=$NATIVE_PROBE_STATUS"
 echo "cpu_simd_render_scale_native_probe_required=$REQUIRE_NATIVE_PROBE"
 echo "cpu_simd_render_scale_native_probe_bin=$NATIVE_PROBE_BIN"
 echo "cpu_simd_render_scale_native_probe_contract=cpu_simd_trace_sdn_length_witness"
+emit_arch_matrix_fields
 echo "cpu_simd_render_scale_contract_dpi=$DPI"
 echo "cpu_simd_render_scale_contract_dpi_source=$(field_value gui_perf_benchmark_dpi_source "$OUT_DIR/4k.sdn")"
 echo "cpu_simd_render_scale_contract_sample_count=$SAMPLE_COUNT"
