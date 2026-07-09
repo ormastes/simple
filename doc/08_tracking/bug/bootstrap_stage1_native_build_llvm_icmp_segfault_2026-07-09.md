@@ -409,3 +409,40 @@ temporary diagnostic. The HIR lowering file still fails the current `bin/simple 
 parser errors around enum-payload `match p:` code; the reported locations are not in the edited
 `bootstrap_builtin_signature` block. No fourth bootstrap run was started in this session because the
 runaway guard caps one feature lane at three verify/fix bootstrap cycles.
+
+## Verification of a2919c90 (2026-07-10, verification-only session)
+
+Verified `bin/simple build bootstrap` on `a2919c90 fix(bootstrap): repair llvm-lib stage1 bootstrap
+blockers` (origin/main tip; includes the translate_call `local.id` fix, the `LLVMSetDataLayout`
+NUL-termination fix in all 3 `llvm_types.spl` copies, and the HIR typed-params fix). Two full runs,
+one at a time, no code changes.
+
+| Run | Stage reached | Worker exit | Crash signature | Notes |
+|-----|--------------|-------------|-----------------|-------|
+| 1 | Stage 1 FAILED | 139 (SIGSEGV) | 2x `[llvm-lib] ERROR: unresolved function call, skipping instruction` at log lines 2604-2605, then `native-build worker exited with code 139` at line 2607 | log: scratchpad `boot_a2919c90_run1.log` |
+| 2 | Stage 1 FAILED | 139 (SIGSEGV) | **Byte-identical failure tail** — same 2 unresolved-call eprints at the same log lines, same exit 139 at line 2607 | log: scratchpad `boot_a2919c90_run2.log` |
+
+**Verdict: advanced-to-new-wall (nondeterminism gone; deterministic ICmp wall remains).**
+- The exit-134 `LLVMSetDataLayout` "ABI alignment must be a 16-bit integer" abort did NOT appear in
+  either run. Both runs failed identically (same signature, same log line numbers). With n=2 this is
+  consistent with — not absolute proof of — the NUL-termination fix having killed the run-varying
+  overread that caused the 134/139 site flip.
+- No fresh macOS crash report was generated for today's runs (all `simple-*.ips` in
+  `~/Library/Logs/DiagnosticReports/` have internal `captureTime` 2026-07-09, pre-fix; their 07-10
+  mtimes are re-symbolication/analytics touches, verified via the embedded JSON `procLaunch`
+  fields). Historical 139 reports show the same top frames expected here:
+  `LLVMBuildICmp` → `llvm::IRBuilderBase::CreateICmp` → `llvm::ConstantFolder::FoldCmp` (NULL
+  `Value*` operand), reached from interpreter `call_extern_function_with_values`.
+
+**The deterministic front wall now.** Two call instructions fail to resolve in
+`translate_call` (`src/compiler/70.backend/backend/llvm_lib_translate_expr.spl:478-480`:
+`func_ref == 0` → eprint + skip). The skipped call means the `dest` local is never inserted into
+`value_map`; a later ICmp that consumes that local gets a NULL `llvm::Value*` and SIGSEGVs inside
+`FoldCmp`. This is NOT `rt_cli_get_args` (already declared at `llvm_lib_translate.spl:238` since
+9d11e852) — the unresolved callee(s) are currently anonymous because the eprint prints no name.
+
+**Proposal (docs-only; no code changed this session):** extend the `func_ref == 0` eprint in
+`translate_call` to print the callee — `fn_name` for the `Const(Str(...))` arm and `local.id` for
+the `Copy`/`Move` arms — plus the enclosing MIR function name. One deterministic run then names the
+exact 2 unresolved calls, which is the next fix target (missing extern declaration or a
+still-unmapped local feeding an indirect call).

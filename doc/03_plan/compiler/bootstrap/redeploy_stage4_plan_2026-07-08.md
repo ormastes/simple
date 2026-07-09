@@ -62,6 +62,20 @@ the `SIMPLE_BOOTSTRAP` compile path (#66 was closed for the concat case).
 
 ## CURRENT WALL (path 2, llvm-lib AOT / LLVM-C-API) — this is what `bin/simple build bootstrap` hits today
 
+**UPDATE 2026-07-10 (verification of a2919c90, verification-only):** the nondeterministic 134/139
+site-flip is GONE. Two full `bin/simple build bootstrap` runs on `a2919c90` (NUL-terminated
+`LLVMSetDataLayout` arg + translate_call `local.id` fix + HIR typed params) both failed Stage 1
+**identically**: 2x `[llvm-lib] ERROR: unresolved function call, skipping instruction`
+(`llvm_lib_translate_expr.spl:478-480`) immediately followed by worker exit 139 (ICmp/FoldCmp NULL
+operand) at the same log line numbers. No exit-134 DataLayout abort in either run. The wall is now
+DETERMINISTIC: 2 unresolved calls (not `rt_cli_get_args` — that's declared since 9d11e852) get
+skipped, their `dest` locals never enter `value_map`, and a downstream ICmp consumes NULL. Next
+step: name the callees — extend the `func_ref == 0` eprint to print `fn_name` / `local.id` + the
+enclosing MIR function, rerun once, then declare/map the missing callee(s). Full per-run table:
+`doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
+§ "Verification of a2919c90". The nondeterministic-corruption narrative in step 2 of "Next steps"
+below is now STALE.
+
 Path 2 (`src/compiler/70.backend/backend/llvm_lib_*`, native-build LLVM-IR generation run
 **interpreted** by the deployed `bin/simple`) has been the actual Stage-1 wall all session
 (2026-07-09). It advanced twice (139→134→139 across #130/#133, real exit-code/backtrace changes),
