@@ -90,6 +90,12 @@ current `CpuBackend`/`SoftwareBackend` SIMD row-fill owner and is covered by
 
 The solid-only classifier was hardened to require an opaque background alpha, so
 translucent `rgba(...)` and CSS opacity keep using the normal CPU mirror path.
-This is a narrow safe optimization for opaque solid rectangles; it does not
-solve full-frame 4K/8K text fixture speed, and the mutable browser framebuffer
-facade blocker remains open.
+The public Engine2D renderer also skips heuristic/probe routing for obvious
+text pages requested as `cpu_simd`, avoiding a routing tax when no solid-fill
+SIMD shortcut applies.
+
+Full native scale-contract evidence after that routing containment shows the
+Simple CPU-SIMD row beating the Simple scalar row at 4K and 8K while preserving
+checksum parity, full physical size, and 300 DPI metadata. This still does not
+provide a mutable browser framebuffer facade, and the external drawing-library
+gap remains open.

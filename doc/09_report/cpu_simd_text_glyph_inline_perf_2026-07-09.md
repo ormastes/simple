@@ -187,7 +187,7 @@ Full 8K external CPU drawing-library baseline refresh:
   checksum `sum32:135445232233405312`, `nonzero_pixels:33177600`, and
   `screen_size_reduced=false`.
 
-Focused CPU-SIMD solid-fill containment:
+Focused CPU-SIMD routing containment:
 
 - The browser presenter now routes `cpu_simd` solid-only frames through the
   existing Engine2D display-list readback path. This exercises the current
@@ -196,15 +196,25 @@ Focused CPU-SIMD solid-fill containment:
 - The solid-only detector now rejects translucent backgrounds by requiring
   `st.bg` alpha 255. This keeps `rgba(...)` and CSS opacity on the normal CPU
   mirror path so color/transparency composition stays byte-exact.
+- The public Engine2D renderer now skips heuristic/probe routing for obvious
+  text pages requested as `cpu_simd`; those pages go directly to the real layout
+  software pixels, avoiding a CPU-SIMD routing tax when no solid-fill SIMD
+  shortcut can apply.
 - Focused native evidence:
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_cpu_simd_paint_spec.spl --mode=native --clean`
-  passed with `4 examples, 0 failures`; the solid case asserts SIMD fill hits,
-  while translucent and opacity cases preserve expected pixels.
-- Small native scale-contract smoke:
-  `CPU_SIMD_RENDER_SCALE_4K_WIDTH=16 CPU_SIMD_RENDER_SCALE_4K_HEIGHT=16 CPU_SIMD_RENDER_SCALE_8K_WIDTH=32 CPU_SIMD_RENDER_SCALE_8K_HEIGHT=32 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 sh scripts/check/check-cpu-simd-render-scale-contract.shs`
-  passed checksum parity and 300 DPI/full-size metadata, but still reported
-  `gui_perf_cpu_base_compare_target_met=no`. The full 8K text fixture blocker
-  remains open.
+  passed with `6 examples, 0 failures`; the solid case asserts SIMD fill hits,
+  public text renders assert no fill-probe hits, and translucent/opacity cases
+  preserve expected pixels.
+- Full native 4K/8K scale contract after routing containment:
+  `SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-engine-skip sh scripts/check/check-cpu-simd-render-scale-contract.shs`
+  passed. 4K CPU-SIMD p50 `201516us` vs scalar `205874us`; 8K CPU-SIMD p50
+  `1435462us` vs scalar `1589252us`; checksum parity held at both sizes,
+  300 DPI remained the default, physical pixels stayed `7680x4320` at 8K, and
+  `gui_perf_cpu_base_compare_target_met=yes`.
+- The external Node canvas baseline remains much faster in
+  `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`; this containment
+  closes the Simple scalar-vs-CPU-SIMD regression for the full-size scale
+  contract, not the external drawing-library gap.
 
 ## Verification
 
