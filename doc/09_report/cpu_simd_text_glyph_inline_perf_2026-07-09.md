@@ -171,6 +171,22 @@ Focused evidence:
   passed with the source contract guarding against `rt_u32_alloc_filled` and
   direct `rt_engine2d_simd_fill_u32`.
 
+Full 8K external CPU drawing-library baseline refresh:
+
+- Report: `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`.
+- Command: `BUILD_DIR=build/gui_perf_bench_2026-07-09_cpu_base REPORT_PATH=doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md SIMPLE_WEB_CPU_MODE=native tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 1 --dpi 300`.
+- Available CPU baselines on host `dl`: GTK3/Cairo completed, Node canvas
+  completed, Python tkinter unavailable.
+- External compare result: `gui_perf_cpu_base_compare_status=measured`,
+  `baseline_backend=javascript_node_canvas`, Simple CPU-SIMD p50
+  `1686.303ms`, Node canvas p50 `74.552ms`,
+  `gui_perf_cpu_base_compare_target_met=no`.
+- Simple internal scalar row also completed at p50 `1275.214ms`, so the
+  current CPU-SIMD software-render loop is slower than the scalar Simple row on
+  this evidence run. It still kept full `7680x4320`, 300 DPI retina metadata,
+  checksum `sum32:135445232233405312`, `nonzero_pixels:33177600`, and
+  `screen_size_reduced=false`.
+
 ## Verification
 
 - `SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean`
@@ -182,6 +198,9 @@ Focused evidence:
 - Normal retained 8K CPU-SIMD row after adding the opt-in trace flag:
   `943683us`, checksum `sum32:135445232233405312`, full `7680x4320`,
   `gui_perf_benchmark_screen_size_reduced=false`.
+- Full 8K external CPU drawing-library profile contract passed:
+  `profile_report_contract=true`, `profile_kind=gui`, report path
+  `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`.
 - `sh scripts/audit/direct-env-runtime-guard.shs --working` and `--staged`
   passed.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
