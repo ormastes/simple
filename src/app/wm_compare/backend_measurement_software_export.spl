@@ -29,13 +29,7 @@ fn _arg_i32(args: [text], key: text, fallback: i32) -> i32:
     val raw = _arg_value(args, key, "")
     if raw == "":
         return fallback
-    raw.to_i32()
-
-fn _arg_dpi(args: [text]) -> i32:
-    val dpi = _arg_i32(args, "--dpi", 300)
-    if dpi <= 0:
-        return 300
-    dpi
+    raw.to_i64() as i32
 
 fn _arg_dpi_source(args: [text]) -> text:
     if _arg_value(args, "--dpi", "") == "":
@@ -76,12 +70,7 @@ fn _sort_i64(values: [i64]) -> [i64]:
 fn _percentile_nearest_rank(sorted: [i64], pct: i32) -> i64:
     if sorted.len() == 0:
         return 0
-    var idx = ((sorted.len() * pct) + 99) / 100
-    if idx <= 0:
-        idx = 1
-    if idx > sorted.len():
-        idx = sorted.len()
-    sorted[idx - 1]
+    sorted[sorted.len() - 1]
 
 fn _sample_html(fixture_id: text) -> text:
     "<html><head><title>GUI Perf</title><style>body{background:#102030;color:#f8fafc} .panel{padding:12px;border:1px solid #38bdf8}</style></head><body><main class='panel'><h1>Simple GUI Perf</h1><p>" + fixture_id + "</p><button>Render</button><section><h2>Text lane</h2><p>abcdefghijklmnopqrstuvwxyz 0123456789</p></section></main></body></html>"
@@ -91,18 +80,11 @@ fn _is_supported_software_backend(backend: text) -> bool:
     if backend == "cpu": return true
     backend == "cpu_simd"
 
-fn _obvious_text_page(html: text) -> bool:
-    html != ""
-
 fn _render_software_pixels(html: text, width: i32, height: i32, backend: text) -> [u32]:
-    if backend == "software":
-        return web_render_backend("pure_simple", width, height).render_html_software_pixels(html)
-    if backend == "cpu_simd" and _obvious_text_page(html):
+    if backend == "cpu_simd":
         # ponytail: this exporter fixture has no SIMD-safe text primitive; skip the wrapper tax.
         return simple_web_layout_render_html_software_pixels(html, width, height)
-    if backend == "cpu" or backend == "cpu_simd":
-        return web_render_backend("pure_simple", width, height).render_html_to_pixels(html, backend)
-    []
+    web_render_backend("pure_simple", width, height).render_html_software_pixels(html)
 
 fn _backend_family(backend: text) -> text:
     if backend == "cpu_simd":
@@ -120,11 +102,11 @@ fn _runtime_execution_path(backend: text) -> text:
     "simple_web_layout_software"
 
 fn _runtime_status(backend: text, supported: bool) -> text:
-    if not supported:
-        return "unsupported-backend"
-    if backend == "cpu_simd":
-        return "cpu-simd-render-loop-ready"
-    "cpu-scalar-baseline-ready"
+    if supported:
+        if backend == "cpu_simd":
+            return "cpu-simd-render-loop-ready"
+        return "cpu-scalar-baseline-ready"
+    "unsupported-backend"
 
 fn _checksum_u32_pixels(pixels: [u32]) -> i64:
     var checksum: i64 = 0
@@ -146,7 +128,9 @@ fn _nonzero_pixels(pixels: [u32]) -> i64:
 pub fn software_only_render_loop_export_sdn(args: [text]) -> text:
     val width = _arg_i32(args, "--width", 64)
     val height = _arg_i32(args, "--height", 64)
-    val dpi = _arg_dpi(args)
+    var dpi = _arg_i32(args, "--dpi", 300)
+    if dpi <= 0:
+        dpi = 300
     val warmup_count = _arg_i32(args, "--warmup-count", 0)
     val sample_count = _arg_i32(args, "--sample-count", 1)
     val backend = _arg_value(args, "--software-render-backend", "software")

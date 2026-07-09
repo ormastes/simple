@@ -324,6 +324,15 @@ Rejected follow-up:
   src/app/wm_compare/backend_measurement_software_export.spl` still passes, so
   strict fresh-binary proof remains blocked by native backend codegen, not by
   the CPU-SIMD scale contract.
+- Focused fresh-binary exporter simplification:
+  `backend_measurement_software_export.spl` now avoids the generic
+  `RenderBackend.render_html_to_pixels` branch in the proof exporter, keeps the
+  CPU-SIMD fixture on the direct Simple Web layout path, flattens small boolean
+  helpers, and simplifies the one-sample percentile path used by the scale
+  contract. The focused Cranelift build now compiles through the exporter helper
+  set and reaches the imported report module; the current blocker is
+  `backend_comparison_initialized_valid` failing Cranelift verification in
+  `backend_measurement_report.spl`. Source check for the exporter still passes.
 - Full strict 4K/8K rerun after array-repeat doubling:
   `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-array-repeat-doubling-full sh scripts/check/check-cpu-simd-render-scale-contract.shs`
   passed with 4K CPU-SIMD p50 `205462us` vs scalar `207347us`, 8K CPU-SIMD p50
