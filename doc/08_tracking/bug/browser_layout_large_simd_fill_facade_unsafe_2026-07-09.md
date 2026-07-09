@@ -36,6 +36,12 @@ current Engine2D SIMD fill externs directly for a full framebuffer.
   preserved checksum (`sum32:32105444634193792` at 4K,
   `sum32:135445232233405312` at 8K), but regressed 8K to `1543525us`, so it was
   rejected and reverted.
+- Native `rt_array_repeat` now mitigates the framebuffer initialization path by
+  filling the allocated backing words directly instead of pushing once per
+  pixel; the Rust runtime mirror uses the same no-push shape. Clean sequential
+  trace after the C native change: 4K `paint_ms=199`, total `202984us`; 8K
+  `paint_ms=765`, total `768514us`, with unchanged checksums and no screen-size
+  reduction. This does not expose a safe mutable Engine2D fill facade.
 
 The existing row-returning facade is proven only for small evidence rows
 (`count=64`) in `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`.

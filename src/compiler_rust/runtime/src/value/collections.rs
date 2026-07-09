@@ -3178,8 +3178,10 @@ pub extern "C" fn rt_array_repeat(value: RuntimeValue, count: i64) -> RuntimeVal
         return result;
     }
 
-    for _ in 0..count {
-        rt_array_push(result, value);
+    let arr = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, result);
+    unsafe {
+        (*arr).len = count as u64;
+        (*arr).as_mut_slice().fill(value);
     }
     result
 }

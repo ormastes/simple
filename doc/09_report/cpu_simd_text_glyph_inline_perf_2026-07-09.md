@@ -122,13 +122,33 @@ full-frame framebuffer initialization/fill before draw work, which reinforces
 that the remaining optimization belongs at the browser-layout framebuffer owner
 boundary.
 
+Native array-repeat fill was then aligned with the existing Simple core
+runtime implementation so `[base; width * height]` sets the array length once
+and fills the backing words directly instead of calling `rt_array_push` once
+per pixel. The Rust runtime mirror uses the same no-push fill shape. Sequential
+trace evidence after the C native runtime change:
+
+- 4K: `framebuffer_init_ms=183`, `trace_setup_ms=0`, `paint_draw_ms=15`,
+  `paint_ms=199`, total `202984us`, checksum `sum32:32105444634193792`,
+  `nonzero_pixels:8294400`.
+- 8K: `framebuffer_init_ms=732`, `trace_setup_ms=0`, `paint_draw_ms=32`,
+  `paint_ms=765`, total `768514us`, checksum
+  `sum32:135445232233405312`, `nonzero_pixels:33177600`.
+
+This keeps 300 DPI retina metadata, full physical size, and
+`screen_size_reduced=false`. It is a native array-repeat optimization, not a
+browser-only fill facade; the unsafe mutable Engine2D fill extern remains
+blocked.
+
 Tracked blocker:
 `doc/08_tracking/bug/browser_layout_large_simd_fill_facade_unsafe_2026-07-09.md`.
 
 ## Verification
 
 - `SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean`
-  passed: `2 examples, 0 failures`.
+  passed after the native/Rust array-repeat source contract: `4 examples, 0
+  failures`.
+- `cargo test -p simple-runtime test_array_repeat` passed: `1 passed`.
 - `SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter --clean`
   passed after the trace split: `25 examples, 0 failures`.
 - Normal retained 8K CPU-SIMD row after adding the opt-in trace flag:

@@ -1594,8 +1594,19 @@ SplArray* rt_array_repeat(int64_t value, int64_t count) {
     int64_t n = count;
     if (n < 0) n = 0;
     SplArray* a = rt_array_new(n);
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return a;
+    array->len = n;
+    if (n <= 0 || !array->data) {
+        return a;
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        memset(array->data, (int)(rt_core_numeric_arg(value) & 0xff), (size_t)n);
+        return a;
+    }
+    int64_t* data = (int64_t*)array->data;
     for (int64_t i = 0; i < n; i++) {
-        rt_array_push(a, value);
+        data[i] = value;
     }
     return a;
 }
