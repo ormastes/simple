@@ -13,6 +13,7 @@ DPI="${CPU_SIMD_RENDER_SCALE_DPI:-300}"
 SAMPLE_COUNT="${CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT:-1}"
 EXEC_MODE="${CPU_SIMD_RENDER_SCALE_MODE:-native}"
 RUN_ORDER="${CPU_SIMD_RENDER_SCALE_RUN_ORDER:-cpu_simd_first}"
+REQUIRE_ENGINE2D_BINARY="${CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY:-0}"
 
 mkdir -p "$OUT_DIR"
 
@@ -90,6 +91,23 @@ fail() {
     echo "cpu_simd_render_scale_contract_status=fail"
     echo "cpu_simd_render_scale_contract_reason=$1"
     exit 1
+}
+
+binary_has_engine2d_simd_externs() {
+    [ -x "$1" ] || return 1
+    command -v nm >/dev/null 2>&1 || return 1
+    _symbols="$(nm -a "$1" 2>/dev/null || nm -D "$1" 2>/dev/null || true)"
+    printf '%s\n' "$_symbols" | grep -q 'rt_engine2d_simd_fill_row_u32' \
+        && printf '%s\n' "$_symbols" | grep -q 'rt_engine2d_simd_copy_row_u32' \
+        && printf '%s\n' "$_symbols" | grep -q 'rt_engine2d_simd_blend_row_u32'
+}
+
+engine2d_binary_link_status() {
+    if binary_has_engine2d_simd_externs "$SIMPLE_BIN"; then
+        echo pass
+    else
+        echo missing
+    fi
 }
 
 require_value() {
@@ -247,9 +265,17 @@ check_export 8k "$WIDTH_8K" "$HEIGHT_8K"
 check_software_export 4k "$WIDTH_4K" "$HEIGHT_4K"
 check_software_export 8k "$WIDTH_8K" "$HEIGHT_8K"
 
+ENGINE2D_BINARY_LINK_STATUS="$(engine2d_binary_link_status)"
+if [ "$REQUIRE_ENGINE2D_BINARY" = "1" ] && [ "$ENGINE2D_BINARY_LINK_STATUS" != "pass" ]; then
+    fail "engine2d_simd_externs_not_linked_in_simple_bin"
+fi
+
 echo "cpu_simd_render_scale_contract_status=pass"
 echo "gui_perf_benchmark_backend=simple_web_cpu_simd"
 echo "cpu_simd_render_scale_contract_mode=$EXEC_MODE"
+echo "cpu_simd_render_scale_engine2d_binary_link_status=$ENGINE2D_BINARY_LINK_STATUS"
+echo "cpu_simd_render_scale_engine2d_binary_link_required=$REQUIRE_ENGINE2D_BINARY"
+echo "cpu_simd_render_scale_engine2d_binary_link_simple_bin=$SIMPLE_BIN"
 echo "cpu_simd_render_scale_contract_dpi=$DPI"
 echo "cpu_simd_render_scale_contract_dpi_source=$(field_value gui_perf_benchmark_dpi_source "$OUT_DIR/4k.sdn")"
 echo "cpu_simd_render_scale_contract_sample_count=$SAMPLE_COUNT"

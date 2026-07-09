@@ -264,8 +264,14 @@ Rejected follow-up:
 ## Verification
 
 - `SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean`
-  passed after the array-repeat owner-boundary contract: `6 examples, 0
+  passed after the binary-link contract: `7 examples, 0
   failures`.
+- Strict tiny production-binary link gate passed:
+  `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_4K_WIDTH=16 CPU_SIMD_RENDER_SCALE_4K_HEIGHT=16 CPU_SIMD_RENDER_SCALE_8K_WIDTH=32 CPU_SIMD_RENDER_SCALE_8K_HEIGHT=32 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-binary-link-strict sh scripts/check/check-cpu-simd-render-scale-contract.shs`
+  emitted `cpu_simd_render_scale_engine2d_binary_link_status=pass`,
+  `cpu_simd_render_scale_engine2d_binary_link_required=1`, and
+  `cpu_simd_render_scale_contract_status=pass` for
+  `/home/ormastes/dev/pub/simple/bin/simple`.
 - `cargo test -p simple-runtime test_array_repeat` passed: `1 passed`.
 - `SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter --clean`
   passed after the trace split: `25 examples, 0 failures`.
