@@ -277,6 +277,12 @@ Rejected follow-up:
   rest by doubling `memcpy` chunks in both `src/runtime/runtime_native.c` and
   `src/runtime/simple_core/core_array_ops.spl`, preserving `[base; width *
   height]` semantics while reducing interpreted/self-hosted fill loop work.
+- Array-repeat allocation hardening:
+  public `rt_array_new` keeps zeroed-array semantics, while `rt_array_repeat`
+  now uses repeat-private uninitialized element storage in the C runtime and
+  Simple core runtime, then fully overwrites it with the repeated value. This
+  removes the redundant zero-fill before large framebuffer repeats without
+  changing normal array allocation behavior.
 - Full strict 4K/8K rerun after array-repeat doubling:
   `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-array-repeat-doubling-full sh scripts/check/check-cpu-simd-render-scale-contract.shs`
   passed with 4K CPU-SIMD p50 `205462us` vs scalar `207347us`, 8K CPU-SIMD p50

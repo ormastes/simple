@@ -1472,7 +1472,7 @@ int64_t rt_strcmp(const char* a, const char* b) {
  * Array Operations
  * ================================================================ */
 
-static SplArray* rt_core_array_new(int64_t cap, uint8_t flags) {
+static SplArray* rt_core_array_new_fill(int64_t cap, uint8_t flags, int zero_items) {
     int64_t actual_cap = cap > 4 ? cap : 4;
     if (actual_cap < 0 || actual_cap > INT64_MAX / (int64_t)sizeof(int64_t)) {
         return NULL;
@@ -1483,12 +1483,16 @@ static SplArray* rt_core_array_new(int64_t cap, uint8_t flags) {
     a->flags = flags;
     a->cap = actual_cap;
     size_t elem_size = (flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
-    a->data = calloc((size_t)actual_cap, elem_size);
+    a->data = zero_items ? calloc((size_t)actual_cap, elem_size) : malloc((size_t)actual_cap * elem_size);
     if (!a->data) {
         free(a);
         return NULL;
     }
     return (SplArray*)(((uintptr_t)a) | RT_VALUE_TAG_HEAP);
+}
+
+static SplArray* rt_core_array_new(int64_t cap, uint8_t flags) {
+    return rt_core_array_new_fill(cap, flags, 1);
 }
 
 SplArray* rt_array_new(int64_t cap) {
@@ -1593,7 +1597,7 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
 SplArray* rt_array_repeat(int64_t value, int64_t count) {
     int64_t n = count;
     if (n < 0) n = 0;
-    SplArray* a = rt_array_new(n);
+    SplArray* a = rt_core_array_new_fill(n, 0, 0);
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return a;
     array->len = n;
