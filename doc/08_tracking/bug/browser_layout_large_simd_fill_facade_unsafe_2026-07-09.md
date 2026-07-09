@@ -17,6 +17,11 @@ current Engine2D SIMD fill externs directly for a full framebuffer.
 
 - Retained 8K trace: `paint_ms=776`, total `779724us`, checksum
   `sum32:135445232233405312`.
+- Follow-up split trace: 4K `framebuffer_init_ms=188`, `paint_draw_ms=15`,
+  `paint_ms=204`, checksum `sum32:32105444634193792`; 8K
+  `framebuffer_init_ms=1503`, `paint_draw_ms=32`, `paint_ms=1535`, checksum
+  `sum32:135445232233405312`. Both kept 300 DPI retina metadata, full physical
+  size, and `screen_size_reduced=false`.
 - `simd_fill_row` over a browser-layout framebuffer logged
   `unknown extern function: rt_engine2d_simd_fill_u32`, changed checksum, and
   slowed 4K trace to `878028us`.

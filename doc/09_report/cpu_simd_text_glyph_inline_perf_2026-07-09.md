@@ -106,6 +106,22 @@ Follow-up trace instrumentation now splits the opt-in paint line into
 retained 4K/8K trace distinguish full-frame framebuffer initialization,
 trace-only setup, and subsequent draw work.
 
+Follow-up split traces:
+
+- 4K: `framebuffer_init_ms=188`, `trace_setup_ms=0`, `paint_draw_ms=15`,
+  `paint_ms=204`, total `208234us`, checksum `sum32:32105444634193792`,
+  `nonzero_pixels:8294400`.
+- 8K: `framebuffer_init_ms=1503`, `trace_setup_ms=0`, `paint_draw_ms=32`,
+  `paint_ms=1535`, total `1539281us`, checksum
+  `sum32:135445232233405312`, `nonzero_pixels:33177600`.
+
+Both split traces kept `dpi=300`, `density_profile=retina`, full physical
+size, and `screen_size_reduced=false`. The split-trace run is retained as
+bottleneck evidence, not as a speed improvement: it shows the dominant cost is
+full-frame framebuffer initialization/fill before draw work, which reinforces
+that the remaining optimization belongs at the browser-layout framebuffer owner
+boundary.
+
 Tracked blocker:
 `doc/08_tracking/bug/browser_layout_large_simd_fill_facade_unsafe_2026-07-09.md`.
 
