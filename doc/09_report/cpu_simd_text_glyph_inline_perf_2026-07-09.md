@@ -178,12 +178,15 @@ Full 8K external CPU drawing-library baseline refresh:
 - Available CPU baselines on host `dl`: GTK3/Cairo completed, Node canvas
   completed, Python tkinter unavailable.
 - External compare result: `gui_perf_cpu_base_compare_status=measured`,
-  `baseline_backend=javascript_node_canvas`, Simple CPU-SIMD p50
-  `1686.303ms`, Node canvas p50 `74.552ms`,
+  `baseline_backend=javascript_node_canvas`,
+  `gui_perf_cpu_base_compare_dpi_source=default`,
+  `gui_perf_cpu_base_compare_schedule_order=cpu_simd_first`, Simple CPU-SIMD
+  p50 `796.960ms`, Node canvas p50 `72.510ms`,
   `gui_perf_cpu_base_compare_target_met=no`.
-- Simple internal scalar row also completed at p50 `1275.214ms`, so the
-  current CPU-SIMD software-render loop is slower than the scalar Simple row on
-  this evidence run. It still kept full `7680x4320`, 300 DPI retina metadata,
+- Simple internal scalar row also completed at p50 `912.982ms`, so the current
+  CPU-SIMD software-render loop beats the scalar Simple row on this evidence
+  run but remains far behind Node canvas. It still kept full `7680x4320`, 300
+  DPI retina metadata,
   checksum `sum32:135445232233405312`, `nonzero_pixels:33177600`, and
   `screen_size_reduced=false`.
 
@@ -240,8 +243,8 @@ Focused CPU-SIMD routing containment:
   follow-up rows.
 - The external Node canvas baseline remains much faster in
   `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`; this containment
-  improves routing and hardens color proof, but the stable 8K speed target and
-  external drawing-library gap remain open.
+  improves routing, scalar comparison, scheduling metadata, and color proof,
+  but the external drawing-library gap remains open.
 
 Rejected follow-up:
 
