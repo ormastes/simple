@@ -100,6 +100,12 @@ The next optimization should stay inside the Engine2D-owned SIMD fill path or
 register a safe browser-layout framebuffer fill facade before using native SIMD
 from `simple_web_html_layout_renderer.spl`.
 
+Follow-up trace instrumentation now splits the opt-in paint line into
+`framebuffer_init_ms`, `trace_setup_ms`, `paint_draw_ms`, and aggregate
+`paint_ms`. This does not change normal rendering; it only makes the next
+retained 4K/8K trace distinguish full-frame framebuffer initialization,
+trace-only setup, and subsequent draw work.
+
 Tracked blocker:
 `doc/08_tracking/bug/browser_layout_large_simd_fill_facade_unsafe_2026-07-09.md`.
 
@@ -108,7 +114,7 @@ Tracked blocker:
 - `SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_render_scale_contract_spec.spl --mode=interpreter --clean`
   passed: `2 examples, 0 failures`.
 - `SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter --clean`
-  passed: `24 examples, 0 failures`.
+  passed after the trace split: `25 examples, 0 failures`.
 - Normal retained 8K CPU-SIMD row after adding the opt-in trace flag:
   `943683us`, checksum `sum32:135445232233405312`, full `7680x4320`,
   `gui_perf_benchmark_screen_size_reduced=false`.
