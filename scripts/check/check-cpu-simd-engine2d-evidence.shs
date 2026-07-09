@@ -11,6 +11,7 @@ fi
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=pass
+CANDIDATE_SMOKE_DIR="${BUILD_DIR:-build/cpu-simd-engine2d-evidence}/candidate-smoke"
 
 is_rust_seed_simple() {
     case "$1" in
@@ -39,6 +40,31 @@ binary_has_engine2d_simd_externs() {
         && printf '%s\n' "$_symbols" | grep -q 'rt_engine2d_simd_copy_row_u32' \
         && printf '%s\n' "$_symbols" | grep -q 'rt_engine2d_simd_blend_row_u32'
 }
+
+binary_runs_engine2d_simd_smoke() {
+    [ -x "$1" ] || return 1
+    mkdir -p "$CANDIDATE_SMOKE_DIR"
+    _smoke_src="$CANDIDATE_SMOKE_DIR/engine2d_simd_candidate_smoke.spl"
+    cat >"$_smoke_src" <<'SIMPLE'
+use std.gpu.engine2d.simd_kernels.{engine2d_simd_fill_row_u32}
+fn main() -> i64:
+    val row = engine2d_simd_fill_row_u32(4, 0xFF010203u32)
+    if row.len() != 4:
+        return 1
+    if row[0] != 0xFF010203u32:
+        return 2
+    0
+SIMPLE
+    if command -v timeout >/dev/null 2>&1; then
+        SIMPLE_LIB="${SIMPLE_LIB:-src}" timeout 20 "$1" run "$_smoke_src" --mode=interpreter --clean >"$CANDIDATE_SMOKE_DIR/$(basename "$1").stdout" 2>"$CANDIDATE_SMOKE_DIR/$(basename "$1").stderr"
+    else
+        SIMPLE_LIB="${SIMPLE_LIB:-src}" "$1" run "$_smoke_src" --mode=interpreter --clean >"$CANDIDATE_SMOKE_DIR/$(basename "$1").stdout" 2>"$CANDIDATE_SMOKE_DIR/$(basename "$1").stderr"
+    fi
+}
+
+binary_has_runnable_engine2d_simd_externs() {
+    binary_has_engine2d_simd_externs "$1" && binary_runs_engine2d_simd_smoke "$1"
+}
 if [ "$SIMPLE_BIN_PINNED" = "0" ] || [ "$SIMPLE_BIN" = "bin/simple" ]; then
     SIMPLE_BIN_SOURCE="missing-self-hosted-engine2d-simd"
     for _cand in \
@@ -46,7 +72,7 @@ if [ "$SIMPLE_BIN_PINNED" = "0" ] || [ "$SIMPLE_BIN" = "bin/simple" ]; then
         "release"/*/simple \
         "bin/release"/*/simple \
         "build/bootstrap/stage3/simple"; do
-        if binary_has_engine2d_simd_externs "$_cand"; then
+        if binary_has_runnable_engine2d_simd_externs "$_cand"; then
             SIMPLE_BIN="$_cand"
             SIMPLE_BIN_SOURCE="repo-self-hosted-engine2d-simd"
             break
@@ -54,7 +80,7 @@ if [ "$SIMPLE_BIN_PINNED" = "0" ] || [ "$SIMPLE_BIN" = "bin/simple" ]; then
     done
     if [ "$SIMPLE_BIN_SOURCE" = "missing-self-hosted-engine2d-simd" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
         _path_simple="$(command -v simple)"
-        if binary_has_engine2d_simd_externs "$_path_simple"; then
+        if binary_has_runnable_engine2d_simd_externs "$_path_simple"; then
             SIMPLE_BIN="$_path_simple"
             SIMPLE_BIN_SOURCE="path-opt-in-engine2d-simd"
         fi
