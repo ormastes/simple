@@ -335,8 +335,8 @@ Rejected follow-up:
   src/app/wm_compare/backend_measurement_software_export.spl` passes, and a
   focused `one-binary` native probe
   (`backend_measurement_software_export_native_probe.spl`) builds and exits
-  `0` after running the CPU-SIMD trace render and checking the native checksum
-  witness. The scale contract now has an opt-in native probe gate:
+  `0` after running the CPU-SIMD trace render and checking the native SDN
+  length witness. The scale contract now has an opt-in native probe gate:
   `CPU_SIMD_RENDER_SCALE_PROBE_ONLY=1 CPU_SIMD_RENDER_SCALE_REQUIRE_NATIVE_PROBE=1
   CPU_SIMD_RENDER_SCALE_NATIVE_PROBE_BIN=build/check/cpu-simd-render-scale-export-bin-current/backend_measurement_software_export_native_probe
   sh scripts/check/check-cpu-simd-render-scale-contract.shs` passes with
