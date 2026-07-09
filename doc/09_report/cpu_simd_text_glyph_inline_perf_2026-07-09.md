@@ -301,6 +301,17 @@ Rejected follow-up:
   `build/bootstrap/full/x86_64-unknown-linux-gnu/simple`, so the run was
   interrupted. Strict deployed-binary freshness evidence remains blocked on a
   completed deploy, not on the SIMD runtime source change.
+- Focused fresh-binary follow-up:
+  the smaller exporter-only native build path avoids compiling the full CLI, but
+  initially hit parser errors on decimal `0u32` sentinels in
+  `src/lib/common/ui/wm_chrome_theme.spl`; those sentinels now use plain `0` and
+  `SIMPLE_LIB=src bin/simple check src/lib/common/ui/wm_chrome_theme.spl`
+  passes. Retrying the focused exporter build still fails later with
+  `semantic: undefined field 'id': cannot access field on value of type 'nil'`,
+  while `SIMPLE_LIB=src bin/simple check
+  src/app/wm_compare/backend_measurement_software_export.spl` passes. The
+  remaining blocker is therefore native-build/codegen-specific, not the exporter
+  source contract.
 - Full strict 4K/8K rerun after array-repeat doubling:
   `CPU_SIMD_RENDER_SCALE_REQUIRE_ENGINE2D_BINARY=1 CPU_SIMD_RENDER_SCALE_SAMPLE_COUNT=1 OUT_DIR=build/check/cpu-simd-render-scale-array-repeat-doubling-full sh scripts/check/check-cpu-simd-render-scale-contract.shs`
   passed with 4K CPU-SIMD p50 `205462us` vs scalar `207347us`, 8K CPU-SIMD p50
