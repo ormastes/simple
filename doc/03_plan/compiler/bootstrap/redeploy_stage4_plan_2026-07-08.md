@@ -128,6 +128,14 @@ Full per-fix diagnostic detail (probes, crash reports, budget accounting):
 
 ## NEXT STEPS (in order)
 
+0. **822-symbol stub-wall classification + fix plan (2026-07-11, pure
+   analysis, uncommitted):** full bucket inventory + root-cause + fix-locus
+   table for the stage4 stub wall is in
+   `stage4_stub_symbol_plan_2026-07-11.md`. Highest-leverage single fix
+   (measured, not inferred): stage4 links the stale 391-symbol
+   `target/bootstrap/deps/libsimple_runtime.a` instead of the complete
+   22,576-symbol `target/debug/deps/libsimple_runtime.a` — this alone
+   accounts for ~400 of the 822/1052 stubbed symbols.
 1. ~~Semantic wall (`replace` in nested call context)~~ **DONE 2026-07-10**
    (uncommitted in WC — receiver hoists on the post-link SMF-cache path; see
    STATUS NOW and the bug doc's 2026-07-10 semantic-replace section).
