@@ -92,16 +92,44 @@ fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeM
         var terminator_already_emitted = false
         match block.terminator:
             case Ret(value):
-                if value.?:
+                val declared_void = type_mapper.is_void_mir_type(func.signature.return_type)
+                if value.? and declared_void:
+                    # MIR Ret carries a value but the function is declared
+                    # void — emitting `ret <ty> val` against a void signature
+                    # fails IR verification ("Function return type does not
+                    # match operand type of return inst"). This is a real
+                    # value-presence mismatch (likely a MIR lowering gap, not
+                    # something to hide) — name it and drop the value so the
+                    # module still verifies.
+                    eprint("[llvm-lib] ERROR: Ret carries a value in void-declared function " + func.name + " — emitting ret_void and dropping the value")
+                    llvm_build_ret_void(builder)
+                elif value.?:
                     val ret_val = translate_operand(ctx, mod_, builder, type_mapper, value.unwrap(), value_map, local_types, func_map)
                     # Coerce to the declared return type: string globals are ptr
                     # but text-returning signatures map to i64 (tagged values),
                     # and vice versa — an uncoerced ret fails IR verification
                     # ("Function return type does not match operand type").
                     val coerced = if ret_val == 0:
-                        # unmapped operand: leave 0 for the IR verifier to
-                        # report (LLVMTypeOf(NULL) segfaults)
-                        ret_val
+                        # Unmapped operand: translate_operand (via get_value)
+                        # already named-diagnosed the missing def ("read of
+                        # undefined local _N — no def reached value_map").
+                        # Passing ret_val=0 straight to LLVMBuildRet is NOT a
+                        # safe no-op: LLVM's ReturnInst treats a null Value*
+                        # as a ZERO-OPERAND return (prints as bare `ret void`)
+                        # regardless of the declared return type, so it fails
+                        # verification exactly like a genuinely-missing Ret
+                        # value ("Function return type does not match operand
+                        # type of return inst"). Same fix as the missing-value
+                        # case below: name it and synthesize a typed
+                        # zero/null placeholder so the module still verifies
+                        # instead of silently producing an unlabeled mismatch.
+                        eprint("[llvm-lib] ERROR: Ret operand unmapped (undefined local) in " + func.name + " — emitting a typed zero/null placeholder instead of a null-operand ret")
+                        val want_ty0 = type_mapper.map_type(func.signature.return_type)
+                        val ptr_ty_h0 = llvm_pointer_type(llvm_int8_type_in_context(ctx), 0)
+                        if want_ty0 == ptr_ty_h0:
+                            llvm_const_null(want_ty0)
+                        else:
+                            llvm_const_int(want_ty0, 0, false)
                     else:
                         val want_ty = type_mapper.map_type(func.signature.return_type)
                         val have_ty = llvm_type_of(ret_val)
@@ -118,8 +146,24 @@ fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeM
                         else:
                             ret_val
                     llvm_build_ret(builder, coerced)
-                else:
+                elif declared_void:
                     llvm_build_ret_void(builder)
+                else:
+                    # MIR Ret carries no value but the function is declared
+                    # non-void — emitting `ret void` against a non-void
+                    # signature fails IR verification the same way as above.
+                    # A lost return value is a real MIR bug (diverging path,
+                    # miscompiled early-return, etc.) — name it and synthesize
+                    # a typed zero/null placeholder instead of silently
+                    # normalizing to ret_void.
+                    eprint("[llvm-lib] ERROR: Ret carries no value in non-void-declared function " + func.name + " — emitting a typed zero/null placeholder instead of ret_void")
+                    val want_ty = type_mapper.map_type(func.signature.return_type)
+                    val ptr_ty_h = llvm_pointer_type(llvm_int8_type_in_context(ctx), 0)
+                    val placeholder = if want_ty == ptr_ty_h:
+                        llvm_const_null(want_ty)
+                    else:
+                        llvm_const_int(want_ty, 0, false)
+                    llvm_build_ret(builder, placeholder)
                 terminator_already_emitted = true
             case Goto(target):
                 val dest_bb = block_map[target]

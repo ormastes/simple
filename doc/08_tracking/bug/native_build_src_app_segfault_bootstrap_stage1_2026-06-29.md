@@ -60,3 +60,16 @@ Capture the core / run under a debug seed to localize the segfault in the
 native-build pipeline (likely codegen/linker stage given `--backend=llvm-lib`).
 Until fixed, binary-level verification of self-hosted compiler changes must use
 an alternate path (e.g. Rust-seed cargo build for resolver parity).
+
+## Superseded — see `bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
+
+This doc's SIGSEGV (Linux x86_64 seed, 2026-06-29) is a distinct earlier
+symptom from a different platform/seed than the actively-tracked macOS aarch64
+Stage-1 wall. All current diagnosis and fixes (SIGSEGV elimination via
+`llvm_build_call2` Name NUL-termination, and — as of 2026-07-10 — elimination
+of the two "Function return type does not match operand type of return inst"
+IR-verifier errors via named `Ret`-case fixes in `llvm_lib_translate.spl`) are
+tracked in `bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`.
+As of 2026-07-10, Stage 1 is SIGSEGV-free, IR-verification-clean, and the wall
+has moved to object-file emission (an apparent x86-64/ELF target-cache
+mismatch on the aarch64 Mach-O host) — see that doc for the current state.

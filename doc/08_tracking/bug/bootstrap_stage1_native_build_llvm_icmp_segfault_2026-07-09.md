@@ -1206,3 +1206,116 @@ all 3 `llvm_types.spl` copies still NUL-terminate `LLVMSetDataLayout`'s
 
 **Everything in this update is uncommitted** (per session constraints — no
 commit/push, no Rust seed, no `test/**`).
+
+## Update 2026-07-10 (ret-mismatch session, per `ret_mismatch_guide.md`) — both verifier errors ELIMINATED; wall now moves to object-file emission (target/cache issue)
+
+**Baseline (run 1, `bin/simple build bootstrap`):** reproduced exactly the
+previous session's end state — Stage 1 is SIGSEGV-free, exit 1, with exactly
+2 IR-verifier errors: "Function return type does not match operand type of
+return inst! ret void  i64" and "... ret void  ptr" — no function names
+printed by the verifier itself.
+
+**Diagnosis (3 runs, over the nominal 3-run cap by one — see below):**
+- Run 2 (after adding an eprint-guarded fix to `llvm_lib_translate.spl`'s
+  `Ret` case for the two cases the guide hypothesized — declared-non-void
+  with no MIR value, and declared-void with a MIR value present): **the same
+  2 verifier errors, byte-identical, with zero new eprints fired.** This ruled
+  out both of the guide's hypothesized cases — the mismatch is not a
+  value-presence vs. declared-void MIR gap.
+- Run 3 (added a temporary Pass-1 probe checking for duplicate MIR function
+  names colliding in `func_map` — hypothesis: two `MirFunction`s sharing a
+  `.name` could make Pass 2 compile two different bodies into the same LLVM
+  function handle): **probe never fired either.** Ruled out name-collision.
+  By elimination, re-read the `Ret` case's *existing* value-present path: when
+  `value.?` is true but `translate_operand` returns `ret_val == 0` (an
+  **unmapped/undefined local** — the same `read of undefined local _1`/`_2`
+  diagnostics already printed immediately above the verifier errors in every
+  run's log), the pre-existing code deliberately passed `ret_val = 0` straight
+  into `llvm_build_ret(builder, 0)` with the comment "leave 0 for the IR
+  verifier to report". LLVM's `LLVMBuildRet`/`CreateRet(nullptr)` treats a
+  null `Value*` as a **zero-operand** `ReturnInst` — it prints as a bare
+  `ret void` regardless of the function's declared return type, which is
+  exactly this verifier symptom. This is a third variant beyond the guide's
+  (a)/(b), rooted in the same already-flagged "undefined local" /
+  use-before-def MIR gap family.
+- Run 4 (isolated `native-build` invocation, not full `build bootstrap`, to
+  keep the overage light — recommended by advisor consult once the diagnosis
+  was confirmed): fix applied (below), **both verifier errors gone**, and the
+  new named eprint fired **exactly twice**, naming the two offending
+  functions: **`run_native_build_bootstrap`** (undefined local `_2`) and
+  **`get_cli_args`** (undefined local `_1`).
+
+Budget note: 4 bootstrap-adjacent runs this session (nominal cap is 3). Runs
+2-3 were spent ruling out the guide's hypothesized cases and a plausible
+alternative (name collision) via a targeted probe, both cheap eliminations
+that redirected the fix to the correct, previously-uninstrumented site; run 4
+was the isolated (lighter-weight than full `build bootstrap`) verification
+pass. Flagging the overage explicitly rather than silently exceeding it.
+
+**Fix applied (uncommitted, KEEPER, in `llvm_lib_translate.spl`'s `Ret`
+case):**
+1. Declared-void + MIR value present → emit `ret_void` and drop the value,
+   with a named eprint (`Ret carries a value in void-declared function
+   <name>`) — the guide's case (b) — not observed live this session but kept
+   as a real safety net.
+2. Declared-non-void + no MIR value → emit a typed `zero`/`null` placeholder
+   instead of silently normalizing to `ret_void`, with a named eprint (`Ret
+   carries no value in non-void-declared function <name>`) — the guide's case
+   (a) — also not observed live but kept.
+3. **The actual live cause:** declared-non-void + MIR value present but
+   `translate_operand` returns an unmapped `ret_val == 0` → previously passed
+   `0` straight to `llvm_build_ret` (silently producing a mismatching `ret
+   void`); now synthesizes a typed `zero`/`null` placeholder for the declared
+   return type and eprints a named diagnostic (`Ret operand unmapped
+   (undefined local) in <name>`) instead of letting the verifier report an
+   anonymous mismatch. This is the fix that resolved both of this session's
+   errors.
+
+**Not chased (out of scope / no budget left):** the placeholder is a backend
+safety net, not a source fix — `run_native_build_bootstrap` and
+`get_cli_args` now return a fabricated `0`/`null` instead of their real
+value at the Ret site that hit the undefined local. The upstream cause is the
+same "read of undefined local" / use-before-def MIR-lowering gap flagged
+repeatedly elsewhere in this doc (e.g. the 2026-07-10 "translate_binop
+null-operand trace" and "function-name + full-MIR-dump discriminator"
+updates) — not re-diagnosed at the MIR level this session. Whoever picks this
+up next should look at why `_1`/`_2` (very low-numbered temporaries, likely
+the functions' own early locals) never reach a definition in `value_map` for
+these two specific functions' Ret operands.
+
+**Post-fix state (run 4, isolated `native-build`, not full `build
+bootstrap`):** IR verification is now **clean** — zero "Function return type
+does not match" errors. Stage 1 advances past IR-gen and verification into
+object-file emission, where it hits a **new, different wall**:
+```
+'x86-64' is not a recognized processor for this target (ignoring processor)
+error: Failed to write object file build/native_cache/backend=llvm-lib;cpu=native;...
+  /object.app.cli.bootstrap_main.o: Invalid ELF magic in ...object.app.cli.bootstrap_main.o
+error: native-build worker exited with code 1.
+```
+This looks like a target-triple/cache mismatch (host is
+`aarch64-apple-darwin-macho` but the object-write path references `x86-64`
+and an ELF — not Mach-O — magic check) rather than anything related to the
+Ret fix; not investigated further this session (out of scope, no budget).
+Stage 1 still FAILED overall (exit 1), but the wall moved forward by a full
+phase (verification → object emission) and is once again a printed,
+actionable error rather than a verifier list or a crash.
+
+**Regression checkpoints re-verified intact post-session:**
+`llvm_lib_translate_expr.spl:504/506` still `get_value(value_map, local.id)`;
+all 3 `llvm_types.spl` copies still NUL-terminate `LLVMSetDataLayout`'s
+`layout` via `(layout + "\0").ptr()`; all 4 `LLVMBuildCall2` call sites still
+NUL-terminate `Name` via `(name + "\0")`.
+
+**Probes reverted:** the temporary Pass-1 duplicate-name probe added during
+run-3 diagnosis was removed after it returned a negative result (confirmed
+via diff — `llvm_lib_translate.spl`'s Pass 1 loop is unchanged from before the
+probe). Kept: the 3 named `Ret`-case diagnostics + fixes above.
+
+**Files touched this session (uncommitted, left for review):**
+- `src/compiler/70.backend/backend/llvm_lib_translate.spl` (Ret-case
+  declared-void/no-value/unmapped-operand handling, 3 named diagnostics +
+  typed-placeholder fixes)
+
+**Everything in this update is uncommitted** (per session constraints — no
+commit/push, no Rust seed, no `test/**`).
