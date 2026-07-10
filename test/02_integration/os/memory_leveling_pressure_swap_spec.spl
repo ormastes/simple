@@ -7,7 +7,7 @@ use os.kernel.memory.pmm.{pmm_init_identity_range, pmm_get_manager, pmm_alloc_pa
 use os.kernel.memory.vmm.{vmm_init_sparse_for_test, vmm_map_page, vmm_read_pte, vmm_translate}
 use os.kernel.memory.memory_leveling_vmm.{memory_vmm_write_physical, memory_vmm_read_physical}
 use os.kernel.memory.memory_leveling_manager.{simpleos_memory_leveling_config_default}
-use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_init, memory_leveling_runtime_manager, memory_leveling_runtime_register_cpu_range}
+use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_init, memory_leveling_runtime_manager, memory_leveling_runtime_register_cpu_range, memory_leveling_runtime_register_cpu_range_in_space, memory_leveling_runtime_mapping_at}
 use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_install_block_device, memory_swap_runtime_clear_for_test, memory_swap_runtime_poll_pmm_pressure, memory_swap_runtime_release_range, memory_swap_runtime_handle_fault, memory_swap_runtime_last_fault_reason, memory_swap_runtime_last_fault_state}
 
 describe "SimpleOS pressure-driven swap":
@@ -71,6 +71,7 @@ describe "SimpleOS pressure-driven swap":
         expect(vmm_map_page(first_virt, PhysAddr(addr: first_phys), flags)).to_equal(true)
         expect(memory_leveling_runtime_register_cpu_range(first_virt.addr, 4096, 77).ok).to_equal(true)
         expect(memory_swap_runtime_poll_pmm_pressure().swapped).to_equal(1)
+
         expect(memory_swap_runtime_release_range(first_virt.addr, 4096, 77).ok).to_equal(true)
 
         val second_phys = pmm_alloc_page_raw()
@@ -78,3 +79,17 @@ describe "SimpleOS pressure-driven swap":
         expect(vmm_map_page(second_virt, PhysAddr(addr: second_phys), flags)).to_equal(true)
         expect(memory_leveling_runtime_register_cpu_range(second_virt.addr, 4096, 77).ok).to_equal(true)
         expect(memory_swap_runtime_poll_pmm_pressure().swapped).to_equal(1)
+
+    it "keeps process address-space identity with demand-page registrations":
+        var config = simpleos_memory_leveling_config_default()
+        memory_leveling_runtime_init(config)
+        val first = memory_leveling_runtime_register_cpu_range_in_space(0x74000000, 4096, 101, 0x1000, 11)
+        val second = memory_leveling_runtime_register_cpu_range_in_space(0x74000000, 4096, 202, 0x2000, 22)
+        expect(first.ok).to_equal(true)
+        expect(second.ok).to_equal(true)
+        val first_mapping = memory_leveling_runtime_mapping_at(0x74000000).unwrap()
+        expect(first_mapping.space_root).to_equal(0x1000)
+        expect(first_mapping.space_id).to_equal(11)
+        val second_mapping = memory_leveling_runtime_manager().runtime_mapping(second.allocation_ids[0]).unwrap()
+        expect(second_mapping.space_root).to_equal(0x2000)
+        expect(second_mapping.space_id).to_equal(22)

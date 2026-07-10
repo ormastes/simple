@@ -8,12 +8,16 @@
 #   32-47:  Hardware IRQs (timer, keyboard, etc.)
 #   48-255: Software interrupts / available
 
-use os.kernel.types.task_types.{TaskContext}
+use os.kernel.types.task_types.{TaskContext, AddressSpace}
+use os.kernel.types.memory_types.{VirtAddr}
 use os.kernel.interrupts.gdt.{GDT_KERNEL_CS}
 use os.kernel.interrupts.irq_routing.{irq_dispatch_routed}
 use os.kernel.types.vmspace_types.{VMA_ANON, VMA_FILE}
-use os.kernel.memory.vmm.{vma_find, vmm_handle_anon_fault, vmm_handle_file_fault}
-use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_handle_fault}
+use os.kernel.memory.vmm.{vma_find, vmm_handle_anon_fault, vmm_handle_file_fault, PTE_PRESENT, PTE_ADDR_MASK}
+use os.kernel.memory.vmm_address_space.{vmm_read_pte_in, vmm_unmap_page_in}
+use os.kernel.memory.pmm.{pmm_free_page_raw}
+use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_register_cpu_range_in_space}
+use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_handle_fault_in_space}
 use os.kernel.ipc.syscall.{syscall_current_vmspace}
 use std.baremetal.x86.io.{inb, outb}
 
@@ -375,15 +379,24 @@ fn _isr_gpf(ctx: TaskContext):
 fn _isr_page_fault(ctx: TaskContext):
     """Vector 14: Page Fault. Dispatches to demand-page handlers based on VMA kind."""
     val cr2 = rt_read_cr2()
-    if memory_swap_runtime_handle_fault(cr2) == 0:
+    val current_space = syscall_current_vmspace()
+    if memory_swap_runtime_handle_fault_in_space(current_space.pml4, current_space.id, cr2) == 0:
         return
-    val space = syscall_current_vmspace()
+    val space = current_space
     val area_opt = vma_find(space, cr2)
     if area_opt != nil:
         var rc = vmm_handle_anon_fault(space, cr2)
         if rc != 0:
             rc = vmm_handle_file_fault(space, cr2)
         if rc == 0:
+            val page_base = (cr2 / 4096) * 4096
+            val pte = vmm_read_pte_in(AddressSpace(phys_root: space.pml4, id: space.id), VirtAddr(addr: page_base))
+            if (pte & PTE_PRESENT) != 0:
+                val registered = memory_leveling_runtime_register_cpu_range_in_space(page_base, 4096, space.id, space.pml4, space.id)
+                if registered.ok:
+                    return
+                if vmm_unmap_page_in(AddressSpace(phys_root: space.pml4, id: space.id), VirtAddr(addr: page_base)):
+                    pmm_free_page_raw(pte & PTE_ADDR_MASK)
             return
     _serial_puts("\n!!! EXCEPTION: Page Fault (#PF)\n")
     _serial_puts("  RIP: ")
