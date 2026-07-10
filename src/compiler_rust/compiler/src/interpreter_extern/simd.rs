@@ -1495,7 +1495,7 @@ pub fn rt_engine2d_simd_copy_row_u32(args: &[Value]) -> Result<Value, CompileErr
 }
 
 /// rt_engine2d_simd_blend_row_u32(dst_row: [u32], src_row: [u32]) -> [u32]
-/// Src-over blend of src over dst, element-wise (truncating-integer, out alpha=255, 0xAARRGGBB).
+/// Src-over blend of src over dst, element-wise (truncating-integer, 0xAARRGGBB).
 pub fn rt_engine2d_simd_blend_row_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
         return Err(CompileError::runtime(
@@ -1519,7 +1519,9 @@ pub fn rt_engine2d_simd_blend_row_u32(args: &[Value]) -> Result<Value, CompileEr
             let r = (((s >> 16) & 0xFF) * sa + ((d >> 16) & 0xFF) * inv) / 255;
             let g = (((s >> 8) & 0xFF) * sa + ((d >> 8) & 0xFF) * inv) / 255;
             let b = ((s & 0xFF) * sa + (d & 0xFF) * inv) / 255;
-            (255u32 << 24) | (r << 16) | (g << 8) | b
+            let da = (d >> 24) & 0xFF;
+            let a = sa + (da * inv) / 255;
+            (a << 24) | (r << 16) | (g << 8) | b
         };
         out.push(pixel);
     }
@@ -2082,4 +2084,26 @@ pub fn rt_rank_select_free(args: &[Value]) -> Result<Value, CompileError> {
     let handle = expect_index_i64("rt_rank_select_free", &args[0])?;
     remove_width_index(handle);
     Ok(Value::Nil)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn u32_array(values: &[u32]) -> Value {
+        Value::Array(Arc::new(values.iter().map(|v| Value::Int(*v as i64)).collect()))
+    }
+
+    #[test]
+    fn engine2d_simd_blend_row_preserves_src_over_alpha() {
+        let result = rt_engine2d_simd_blend_row_u32(&[u32_array(&[0x1020_3040]), u32_array(&[0x0102_0304])])
+            .expect("blend row should succeed");
+
+        let Value::Array(items) = result else {
+            panic!("expected array result");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], Value::Int(0x101F_2F3F));
+    }
 }

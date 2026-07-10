@@ -609,7 +609,9 @@ static inline int64_t engine2d_blend_pixel(int64_t s, int64_t d) {
     uint32_t r = (((sp >> 16) & 0xFFu) * sa + ((dp >> 16) & 0xFFu) * inv) / 255u;
     uint32_t g = (((sp >> 8) & 0xFFu) * sa + ((dp >> 8) & 0xFFu) * inv) / 255u;
     uint32_t b = ((sp & 0xFFu) * sa + (dp & 0xFFu) * inv) / 255u;
-    uint32_t out = (255u << 24) | (r << 16) | (g << 8) | b;
+    uint32_t da = (dp >> 24) & 0xFFu;
+    uint32_t a = sa + (da * inv) / 255u;
+    uint32_t out = (a << 24) | (r << 16) | (g << 8) | b;
     return (int64_t)(uint64_t)out;
 }
 
@@ -651,8 +653,12 @@ static void engine2d_blend_into(int64_t* out, const int64_t* dst,
 
         uint32_t r0 = a0[0] / 255u, g0 = a0[1] / 255u, b0 = a0[2] / 255u;
         uint32_t r1 = a1[0] / 255u, g1 = a1[1] / 255u, b1 = a1[2] / 255u;
-        uint32_t o0 = (255u << 24) | (r0 << 16) | (g0 << 8) | b0;
-        uint32_t o1 = (255u << 24) | (r1 << 16) | (g1 << 8) | b1;
+        uint32_t da0 = (d0 >> 24) & 0xFFu;
+        uint32_t da1 = (d1 >> 24) & 0xFFu;
+        uint32_t oa0 = sa0 + (da0 * (255u - sa0)) / 255u;
+        uint32_t oa1 = sa1 + (da1 * (255u - sa1)) / 255u;
+        uint32_t o0 = (oa0 << 24) | (r0 << 16) | (g0 << 8) | b0;
+        uint32_t o1 = (oa1 << 24) | (r1 << 16) | (g1 << 8) | b1;
         if (sa0 == 255u) o0 = s0; else if (sa0 == 0u) o0 = d0;
         if (sa1 == 255u) o1 = s1; else if (sa1 == 0u) o1 = d1;
         out[i] = (int64_t)(uint64_t)o0;

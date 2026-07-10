@@ -402,6 +402,22 @@ next capture task.
 
 macOS Metal render-log compare:
 
+2026-07-10 macOS arm64 source/evidence update:
+
+- `sh scripts/check/check-metal-generated-2d-readback.shs` passed with real
+  Metal submit/readback and matching fill/copy/alpha/scroll checksums; report:
+  `doc/09_report/metal_generated_2d_readback_2026-07-10.md`.
+- `sh scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs`
+  reached real Metal framebuffer readback but failed the circle alpha-blend row
+  on the CPU mirror/oracle path. Source fix landed in the row-blend runtime and
+  interpreter externs so non-opaque src-over preserves output alpha; focused C
+  and Rust checks pass. Regenerate this wrapper after refreshing the deployed
+  `bin/simple`.
+- `sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs` remains
+  fail-closed here: desktop production parity source missing/not pass, iOS
+  render-log marker missing, and Android blocked by missing `adb`; report:
+  `doc/09_report/tauri_mobile_renderer_parity_evidence_2026-07-10.md`.
+
 ```text
 macos_metal_render_log_compare_status=pass
 macos_metal_render_log_compare_required_api=metal
