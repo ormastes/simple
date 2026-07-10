@@ -406,9 +406,11 @@ impl MirLowering:
         self.builder = b2
         val then_result = self.lower_block(then_)
         var b3 = self.builder
+        var result_defined = false
         if not b3.current_block_has_explicit_terminator():
             if val then_local = then_result:
                 b3.emit_copy(result, then_local)
+                result_defined = true
             b3.terminate_goto(merge_block)
         self.builder = b3
 
@@ -422,6 +424,7 @@ impl MirLowering:
             if not b5.current_block_has_explicit_terminator():
                 if val else_local = else_result:
                     b5.emit_copy(result, else_local)
+                    result_defined = true
                 b5.terminate_goto(merge_block)
             self.builder = b5
         else:
@@ -432,6 +435,12 @@ impl MirLowering:
         # Merge block
         var b6 = self.builder
         b6.switch_to_block(merge_block)
+        # The terminator guard skips emit_copy in arms that already returned;
+        # if no arm defined result, the returned LocalId would be read while
+        # undefined downstream (NULL llvm::Value* -> ICmp SIGSEGV in llvm-lib).
+        # Define it in the merge block so every returned id has a def.
+        if not result_defined:
+            b6.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b6
 
         result
