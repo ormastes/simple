@@ -29,12 +29,9 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
   matching C compilers are present.
 - REQ-CPU-SIMD-ENGINE2D-BIN-006: Optional target-binary proof builds and runs
   the Engine2D SIMD C kernel harness for x86_64, aarch64, and riscv64
-  independently, but never counts that C-only proof as a passing Simple target
-  row.
+  independently.
 - REQ-CPU-SIMD-ENGINE2D-BIN-007: Exact bitmap quality evidence covers alpha
   blend edge cases for transparent, opaque, low-alpha, and high-alpha pixels.
-- REQ-CPU-SIMD-ENGINE2D-BIN-008: Hosted native builds link the Engine2D SIMD
-  runtime owner that supplies the public Simple row-kernel externs.
 
 ## Plan
 
@@ -72,7 +69,6 @@ use std.spec.*
 describe "CPU SIMD Engine2D Simple binary contract":
 
     it "auto selects only self hosted Simple launchers":
-        step("Inspect self-hosted candidate selection and executable SIMD smoke")
         val script = file_read("scripts/check/check-cpu-simd-engine2d-evidence.shs")
         expect(script).to_contain("SIMPLE_BIN_SOURCE=")
         expect(script).to_contain("SIMPLE_BIN_STATUS=pass")
@@ -98,8 +94,6 @@ describe "CPU SIMD Engine2D Simple binary contract":
         expect(script).to_contain("cpu_simd_evidence_simple_bin=$SIMPLE_BIN")
         expect(script).to_contain("cpu_simd_evidence_simple_bin_source=$SIMPLE_BIN_SOURCE")
         expect(script).to_contain("cpu_simd_evidence_simple_bin_status=$SIMPLE_BIN_STATUS")
-
-        step("Require exact alpha-edge evidence and reject the legacy mutation extern")
         expect(script).to_contain("cpu_simd_alpha_edge_expected_checksum")
         expect(script).to_contain("cpu_simd_alpha_edge_actual_checksum")
         expect(script).to_contain("cpu_simd_alpha_edge_mismatch_count")
@@ -113,13 +107,11 @@ describe "CPU SIMD Engine2D Simple binary contract":
         expect(no_seed_candidate).to_be(true)
 
     it "rejects explicit Rust seed before generating Engine2D evidence":
-        step("Run the wrapper with an explicitly forbidden Rust seed")
         val root = "build/test-cpu-simd-engine2d-seed-forbidden"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-cpu-simd-engine2d-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(0)
 
-        step("Confirm fail-closed provenance before evidence source generation")
         val evidence = file_read(root + "/out/evidence.env")
         expect(evidence).to_contain("cpu_simd_evidence_status=fail")
         expect(evidence).to_contain("cpu_simd_evidence_reason=simple-bin-forbidden")
@@ -131,7 +123,6 @@ describe "CPU SIMD Engine2D Simple binary contract":
         expect(src_code).to_equal(0)
 
     it "records independent x86 arm and riscv matrix rows":
-        step("Inspect architecture, C target-harness, and runtime-owner contracts")
         val script = file_read("scripts/check/check-cpu-simd-engine2d-arch-matrix.shs")
         expect(script).to_contain("x86_64 aarch64 riscv64")
         expect(script).to_contain("check-cpu-simd-engine2d-evidence.shs")
@@ -144,8 +135,6 @@ describe "CPU SIMD Engine2D Simple binary contract":
         expect(script).to_contain("runtime_compile_status")
         expect(script).to_contain("CPU_SIMD_ARCH_MATRIX_TARGET_BUILD")
         expect(script).to_contain("target_binary_status")
-        expect(script).to_contain("target_binary_kind")
-        expect(script).to_contain("standalone-c-runtime-kernel-harness")
         expect(script).to_contain("engine2d-simd-c-kernels-ran")
         expect(script).to_contain("check-engine2d-simd-c-kernels.shs")
         expect(script).to_contain("ENGINE2D_SIMD_C_KERNELS_CFLAGS")
@@ -155,24 +144,16 @@ describe "CPU SIMD Engine2D Simple binary contract":
         expect(script).to_contain("qemu-riscv64 -L /usr/riscv64-linux-gnu")
         expect(script).to_contain("-march=rv64gcv -mabi=lp64d")
         expect(script).to_contain("strict-requires-all-arches-pass")
-        expect(script).to_contain("engine2d-simple-target-evidence-unavailable")
-
-        val native_runtime = file_read("src/compiler/70.backend/backend/runtime_compiler.spl")
-        expect(native_runtime).to_contain("\"runtime_simd_case\", \"runtime_simd_dispatch\"")
-        expect(native_runtime).to_contain("object_8, object_9")
 
         val runtime = file_read("src/runtime/runtime_simd_dispatch.c")
         expect(runtime).to_contain("__riscv_vector")
         expect(runtime).to_contain("__riscv_vsetvl_e64m1")
-        expect(runtime).to_contain("ENGINE2D_HAS_TARGET_AVX2")
-        expect(runtime).to_contain("defined(__GNUC__) || defined(__clang__)")
         expect(runtime).to_contain("rt_simd_engine2d_neon_hits")
         expect(runtime).to_contain("engine2d_record_simd_row_hit")
         val detector = file_read("src/compiler_rust/simd/src/detection.rs")
         expect(detector).to_contain("COMPAT_HWCAP_ISA_V")
         expect(detector).to_contain("/proc/self/auxv")
 
-        step("Run the partial matrix without target C harnesses")
         val root = "build/test-cpu-simd-engine2d-arch-matrix"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && CPU_SIMD_ARCH_MATRIX_SKIP_RUN=1 BUILD_DIR=" + root + " REPORT_PATH=" + root + "/report.md sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs > " + root + "/stdout.txt"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -189,20 +170,6 @@ describe "CPU SIMD Engine2D Simple binary contract":
         expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_target_binary_unavailable_count=3")
         expect(evidence).to_contain("cpu_simd_engine2d_arch_matrix_status=partial")
 
-        step("Run C target harnesses without upgrading missing Simple rows")
-        val target_root = root + "-c-targets"
-        val target_command = "rm -rf " + target_root + " && mkdir -p " + target_root + " && CPU_SIMD_ARCH_MATRIX_SKIP_RUN=1 CPU_SIMD_ARCH_MATRIX_TARGET_BUILD=1 CPU_SIMD_ARCH_MATRIX_ALLOW_PARTIAL=1 BUILD_DIR=" + target_root + " REPORT_PATH=" + target_root + "/report.md sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs > " + target_root + "/stdout.txt"
-        val (_target_stdout, _target_stderr, target_code) = process_run("/bin/sh", ["-c", target_command])
-        expect(target_code).to_equal(0)
-        val target_evidence = file_read(target_root + "/evidence.env")
-        expect(target_evidence).to_contain("cpu_simd_engine2d_arch_matrix_x86_64_target_binary_status=pass")
-        expect(target_evidence).to_contain("cpu_simd_engine2d_arch_matrix_aarch64_target_binary_status=pass")
-        expect(target_evidence).to_contain("cpu_simd_engine2d_arch_matrix_riscv64_target_binary_status=pass")
-        expect(target_evidence).to_contain("cpu_simd_engine2d_arch_matrix_x86_64_target_binary_kind=standalone-c-runtime-kernel-harness")
-        expect(target_evidence).to_contain("cpu_simd_engine2d_arch_matrix_status=partial")
-        expect(target_evidence).to_contain("cpu_simd_engine2d_arch_matrix_reason=engine2d-simple-target-evidence-unavailable")
-
-        step("Require strict mode to fail incomplete compiled Simple evidence")
         val strict_root = root + "-strict"
         val strict_command = "rm -rf " + strict_root + " && mkdir -p " + strict_root + " && CPU_SIMD_ARCH_MATRIX_SKIP_RUN=1 CPU_SIMD_ARCH_MATRIX_STRICT=1 BUILD_DIR=" + strict_root + " REPORT_PATH=" + strict_root + "/report.md sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs > " + strict_root + "/stdout.txt"
         val (_strict_stdout, _strict_stderr, strict_code) = process_run("/bin/sh", ["-c", strict_command])

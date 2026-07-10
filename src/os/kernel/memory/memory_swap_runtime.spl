@@ -1,0 +1,74 @@
+# Installed swap coordinator used by the page-fault owner.
+
+use os.kernel.memory.memory_swap_coordinator.{MemorySwapCoordinator}
+use os.kernel.memory.memory_leveling_manager.{MemoryPressureReport}
+use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_apply_pressure, memory_leveling_runtime_mapping, memory_leveling_runtime_replace_manager}
+use os.kernel.types.memory_types.{VirtAddr}
+use os.kernel.memory.vmm.{PTE_PRESENT, vmm_read_pte}
+
+struct MemorySwapPressureResult:
+    report: MemoryPressureReport
+    swapped: u64
+    failed: u64
+
+var _memory_swap_runtime_coordinator: MemorySwapCoordinator? = nil
+var _memory_swap_runtime_last_fault_reason: text = "none"
+var _memory_swap_runtime_last_fault_state: text = "none"
+
+fn memory_swap_runtime_install(coordinator: MemorySwapCoordinator):
+    _memory_swap_runtime_coordinator = Some(coordinator)
+
+fn memory_swap_runtime_clear_for_test():
+    _memory_swap_runtime_coordinator = nil
+    _memory_swap_runtime_last_fault_reason = "none"
+    _memory_swap_runtime_last_fault_state = "none"
+
+fn memory_swap_runtime_last_fault_reason() -> text:
+    _memory_swap_runtime_last_fault_reason
+
+fn memory_swap_runtime_last_fault_state() -> text:
+    _memory_swap_runtime_last_fault_state
+
+fn memory_swap_runtime_handle_fault(virt_addr: u64) -> i32:
+    match _memory_swap_runtime_coordinator:
+        Some(coordinator):
+            val restored = coordinator.restore_faulting_page(virt_addr)
+            val restore_reason = restored.reason
+            val restore_state = restored.state
+            val page_addr = (virt_addr / 4096) * 4096
+            val pte = vmm_read_pte(VirtAddr(addr: page_addr))
+            val return_code: i32 = if (pte & PTE_PRESENT) != 0: 0 else: -1
+            _memory_swap_runtime_last_fault_reason = restore_reason
+            _memory_swap_runtime_last_fault_state = restore_state
+            memory_leveling_runtime_replace_manager(coordinator.manager)
+            _memory_swap_runtime_coordinator = Some(coordinator)
+            return return_code
+        None:
+            _memory_swap_runtime_last_fault_reason = "not-installed"
+            _memory_swap_runtime_last_fault_state = "none"
+            return -1
+
+fn memory_swap_runtime_apply_pressure(level: text) -> MemorySwapPressureResult:
+    val report = memory_leveling_runtime_apply_pressure(level)
+    var swapped: u64 = 0
+    var failed: u64 = 0
+    match _memory_swap_runtime_coordinator:
+        Some(coordinator):
+            var i: i64 = 0
+            while i < report.candidate_ids.len():
+                val allocation_id = report.candidate_ids[i]
+                match memory_leveling_runtime_mapping(allocation_id):
+                    Some(mapping):
+                        val result = coordinator.swap_out_page(mapping.allocation_id, mapping.owner_id, mapping.virt_addr, mapping.page_index, mapping.byte_length)
+                        if result.ok:
+                            swapped = swapped + 1
+                        else:
+                            failed = failed + 1
+                    None:
+                        failed = failed + 1
+                i = i + 1
+            memory_leveling_runtime_replace_manager(coordinator.manager)
+            _memory_swap_runtime_coordinator = Some(coordinator)
+        None:
+            failed = report.selected
+    MemorySwapPressureResult(report: report, swapped: swapped, failed: failed)

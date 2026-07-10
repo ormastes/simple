@@ -1,13 +1,28 @@
 # SimpleOS Memory Leveling
 
-Status: hardware-gated profile-policy slice.
+Status: Feature D integration in progress; unsupported hardware remains gated.
 
-The current SimpleOS memory-leveling surface is a pure policy model in
-`src/os/kernel/memory/memory_leveling.spl`. It gates real hardware claims but
-does not move GPU/NIC pages yet.
+The existing `MemoryLevelingProfile` API remains a compatibility policy model.
+The integrated memory-leveling owner adds allocation identity, bounded pressure,
+swap transactions, DMA ownership, and incremental telemetry without turning the
+language configuration into an operating-system configuration.
 
-The Simple language-facing surface is `std.memory_leveling`. It represents
-ownership/placement intent as pure data and does not add syntax.
+## Two Configurations
+
+`SimpleMemoryPlacementConfig` belongs to `std.memory_leveling`. It represents
+platform-neutral placement intent and acceptable capabilities. It contains no
+PMM capacity, watermark, reservation, swap-slot, or driver state.
+
+`SimpleOsMemoryLevelingConfig` belongs to the SimpleOS kernel. It owns CPU/GPU/
+NIC/DMA/swap capacities, protected reservations, high/low watermarks, pressure
+batch size, cooldown, swap policy, and device-safety requirements.
+
+The configurations are independently constructed and copied. They share only
+immutable tier/domain/capability values. A request adapter copies relevant
+placement values; it never aliases, embeds, serializes, or mutates one config as
+the other.
+
+## Compatibility Profiles
 
 Profiles:
 
@@ -16,8 +31,22 @@ Profiles:
 - `heterogeneous_device`: CPU, swap, GPU, NIC/RDMA, DMA-pinned, and shadow-copy
   policy states.
 
-Safety rule: device-visible pages fail closed. DMA-pinned, NIC-registered, and
-GPU-resident pages are not swappable in this slice.
+## Safety Rules
+
+Device-visible pages fail closed. Pinned, mapped, in-flight, device-owned, and
+dirty non-coherent allocations cannot be reclaimed, relocated, swapped, or
+released. Physical contiguity is valid only when PMM proves one range; otherwise
+the DMA mapping exposes every scatter/gather segment.
+
+Pressure work is bounded by the kernel configuration and has a hard maximum of
+64 candidates per call. Stats are maintained by lifecycle events and do not scan
+PMM or the allocation registry when queried.
+
+Swap commits only after bytes and checksum are stored. Restore validates content,
+commits the CPU mapping, and then releases the slot. Failure leaves the original
+owner intact or marks an unrecoverable rollback explicitly failed.
+
+## Placement Adapter
 
 Language-to-OS adapter:
 
@@ -26,7 +55,7 @@ Language-to-OS adapter:
 - `simple_memory_network_registered()` maps to NIC-registered memory.
 - `simple_memory_dma_pinned()` maps to DMA-pinned memory.
 
-Real hardware target gate:
+## Hardware Target Gate
 
 - `simple_memory_x86_cpu_real()`, `simple_memory_arm_cpu_real()`, and
   `simple_memory_riscv_cpu_real()` apply the CPU page policy when marked with
@@ -41,12 +70,17 @@ Real hardware target gate:
 - `memory_leveling_real_hardware_decide(profile, intent)` rejects model-only
   hardware claims with `real-hardware-evidence-required`.
 
-Focused evidence:
+QEMU can prove virtio descriptor ownership, protected reclaim, and swap behavior.
+It does not prove physical GPU-local migration, GPUDirect, RDMA paging,
+non-coherent cache maintenance, or IOMMU isolation. Those capabilities must
+remain unavailable until a hardware owner and evidence command are recorded.
+
+## Focused Evidence
 
 ```sh
 bin/simple test test/03_system/os/simpleos_memory_leveling_spec.spl --mode=interpreter
 ```
 
 Do not claim GPUDirect, RDMA hardware paging, CXL, or live GPU/NIC migration
-from this hardware-gated policy. Real device movement still needs driver-owned
-migration/coherence evidence.
+from model or QEMU-only evidence. Real device movement needs driver-owned
+migration/coherence proof.

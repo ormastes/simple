@@ -184,7 +184,24 @@ impl MirLowering:
                 self.builder = b
                 dest
 
-            case NilLit | UnitLit:
+            case NilLit:
+                # Bug #137 (follow-up): a bare `nil` literal previously
+                # allocated a fresh temp via `new_temp` but emitted NO
+                # defining instruction. When that temp was then used as an
+                # operand -- e.g. the RHS of `args == nil`, lowered by the
+                # backend to `inttoptr i64 %lN to ptr` -- `%lN` was a dangling
+                # SSA reference (llc: "use of undefined value"). Materialize
+                # nil as a real const-0 (i64): translate_const emits
+                # `%lN = add i64 0, 0`, a defined value that the Eq/Ne
+                # comparison then casts to `ptr` (null) via inttoptr, or
+                # compares directly as an integer.
+                var b_nil_lit = self.builder
+                val nil_result = b_nil_lit.new_temp(MirType.i64())
+                b_nil_lit.emit_const(nil_result, MirConstValue.Int(0), MirType.i64())
+                self.builder = b_nil_lit
+                nil_result
+
+            case UnitLit:
 
                 var b = self.builder
                 val result = b.new_temp(MirType.unit())
@@ -270,6 +287,53 @@ impl MirLowering:
                             val temp = b_special.new_temp(MirType.i64())
                             self.builder = b_special
                             temp
+                    case And | Or:
+                        # Bug #137: HirBinOp.And/Or have no entry in
+                        # lower_binop's explicit case list, so they used to
+                        # fall through to `case _: MirBinOp.Add`. `(a + b) != 0`
+                        # is OR semantics, not AND -- `a=1,b=0` wrongly
+                        # evaluates true. Combine the operands with a real
+                        # bitwise `and`/`or` instead.
+                        #
+                        # `and`/`or` operands are boolean by the type system
+                        # (each is a 0/1 value: a comparison result, a bool
+                        # local, or a bool-returning call), so a bitwise
+                        # and/or of the two is exactly logical and/or -- no
+                        # truthiness `!= 0` normalization is needed, and adding
+                        # one is actively harmful: an i1 comparison operand vs.
+                        # an i64 zero forces the backend to reconcile types
+                        # with an illegal `bitcast i64 -> i1` (llc: "invalid
+                        # cast opcode").
+                        #
+                        # Result type is i64 (not bool/i1): the two operands
+                        # can have MIXED backend types -- `a` from an inline
+                        # `==` is tracked i1, while `b` from a method call
+                        # (e.g. `.starts_with(...)`) is i64. translate_binop's
+                        # `value_as_type` legally `zext`s an i1 operand up to
+                        # the i64 dest but has NO legal cast to narrow an i64
+                        # operand down to i1, so a bool/i1 dest would
+                        # reintroduce the illegal bitcast. With an i64 dest both
+                        # operands widen cleanly and the `if`/`while` terminator
+                        # converts the i64 result to a branch via `icmp ne i64
+                        # result, 0` (core_codegen If-terminator else branch).
+                        #
+                        # This arm IS reached on the normal (non-bootstrap)
+                        # native path too -- HIR keeps `and`/`or` as a plain
+                        # Binary(And/Or) node (no short-circuit control-flow
+                        # desugaring upstream) and the interpreter backend also
+                        # evaluates both operands eagerly. The prior `case _`
+                        # add-fallthrough was ALSO eager, so switching to a
+                        # bitwise combine changes NO evaluation order -- it only
+                        # corrects the combine operator. Hence safe ungated.
+                        val left_local = self.lower_expr(left)
+                        val right_local = self.lower_expr(right)
+                        var b_logic = self.builder
+                        val combine_op = match op:
+                            case And: MirBinOp.BitAnd
+                            case _: MirBinOp.BitOr
+                        val logic_result = b_logic.emit_binop(combine_op, mir_operand_copy(left_local), mir_operand_copy(right_local), MirType.i64())
+                        self.builder = b_logic
+                        logic_result
                     case _:
                         val left_local = self.lower_expr(left)
                         val right_local = self.lower_expr(right)

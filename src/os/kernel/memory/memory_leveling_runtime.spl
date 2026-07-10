@@ -1,0 +1,116 @@
+# Kernel-global page-granular memory-leveling registry and virtual mappings.
+
+use std.memory_leveling.{simple_memory_mut_cpu_cold, simple_memory_placement_config_from_intent, memory_leveling_policy_from_intent, MemoryLevelingStats}
+use os.kernel.memory.memory_leveling_manager.{MemoryLevelingManager, SimpleOsMemoryLevelingConfig, MemoryPressureReport, memory_leveling_manager_new, simpleos_memory_leveling_config_default}
+
+struct MemoryLevelingRuntimeMapping:
+    allocation_id: u64
+    owner_id: u64
+    virt_addr: u64
+    page_index: u64
+    byte_length: u64
+
+struct MemoryLevelingRuntimeResult:
+    ok: bool
+    reason: text
+    allocation_ids: [u64]
+
+var _memory_leveling_runtime_manager: MemoryLevelingManager? = nil
+var _memory_leveling_runtime_mappings: [MemoryLevelingRuntimeMapping] = []
+
+fn memory_leveling_runtime_init(config: SimpleOsMemoryLevelingConfig):
+    _memory_leveling_runtime_manager = Some(memory_leveling_manager_new(config))
+    _memory_leveling_runtime_mappings = []
+
+fn memory_leveling_runtime_reset_for_test():
+    memory_leveling_runtime_init(simpleos_memory_leveling_config_default())
+
+fn memory_leveling_runtime_manager() -> MemoryLevelingManager:
+    match _memory_leveling_runtime_manager:
+        Some(manager):
+            _memory_leveling_runtime_manager = Some(manager)
+            return manager
+        None:
+            val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
+            _memory_leveling_runtime_manager = Some(manager)
+            return manager
+
+fn memory_leveling_runtime_replace_manager(manager: MemoryLevelingManager):
+    _memory_leveling_runtime_manager = Some(manager)
+
+fn memory_leveling_runtime_register_cpu_range(virt_addr: u64, byte_length: u64, owner_id: u64) -> MemoryLevelingRuntimeResult:
+    if virt_addr == 0 or (virt_addr % 4096) != 0 or byte_length == 0 or owner_id == 0:
+        return MemoryLevelingRuntimeResult(ok: false, reason: "invalid-request", allocation_ids: [])
+    val manager = memory_leveling_runtime_manager()
+    val intent = simple_memory_mut_cpu_cold()
+    val placement = simple_memory_placement_config_from_intent(intent)
+    val policy = memory_leveling_policy_from_intent(intent)
+    val page_count = (byte_length + 4095) / 4096
+    var allocation_ids: [u64] = []
+    var page_index: u64 = 0
+    while page_index < page_count:
+        val remaining = byte_length - page_index * 4096
+        val page_bytes = if remaining > 4096: 4096 else: remaining
+        val requested = manager.request(placement, policy, page_bytes, 1, owner_id)
+        if not requested.ok:
+            var rollback_index: i64 = 0
+            while rollback_index < allocation_ids.len():
+                manager.release(allocation_ids[rollback_index], owner_id)
+                rollback_index = rollback_index + 1
+            _memory_leveling_runtime_manager = Some(manager)
+            return MemoryLevelingRuntimeResult(ok: false, reason: requested.reason, allocation_ids: [])
+        allocation_ids.push(requested.allocation_id)
+        _memory_leveling_runtime_mappings.push(MemoryLevelingRuntimeMapping(
+            allocation_id: requested.allocation_id,
+            owner_id: owner_id,
+            virt_addr: virt_addr + page_index * 4096,
+            page_index: page_index,
+            byte_length: page_bytes
+        ))
+        page_index = page_index + 1
+    _memory_leveling_runtime_manager = Some(manager)
+    MemoryLevelingRuntimeResult(ok: true, reason: "ok", allocation_ids: allocation_ids)
+
+fn memory_leveling_runtime_mapping(allocation_id: u64) -> MemoryLevelingRuntimeMapping?:
+    var i: i64 = 0
+    while i < _memory_leveling_runtime_mappings.len():
+        if _memory_leveling_runtime_mappings[i].allocation_id == allocation_id:
+            return _memory_leveling_runtime_mappings[i]
+        i = i + 1
+    nil
+
+fn memory_leveling_runtime_release_range(virt_addr: u64, byte_length: u64, owner_id: u64) -> MemoryLevelingRuntimeResult:
+    val end_addr = virt_addr + ((byte_length + 4095) / 4096) * 4096
+    val manager = memory_leveling_runtime_manager()
+    var released_ids: [u64] = []
+    var i: i64 = 0
+    while i < _memory_leveling_runtime_mappings.len():
+        val mapping = _memory_leveling_runtime_mappings[i]
+        if mapping.virt_addr >= virt_addr and mapping.virt_addr < end_addr:
+            if mapping.owner_id != owner_id:
+                _memory_leveling_runtime_manager = Some(manager)
+                return MemoryLevelingRuntimeResult(ok: false, reason: "not-owner", allocation_ids: released_ids)
+            val released = manager.release(mapping.allocation_id, owner_id)
+            if not released.ok:
+                _memory_leveling_runtime_manager = Some(manager)
+                return MemoryLevelingRuntimeResult(ok: false, reason: released.reason, allocation_ids: released_ids)
+            released_ids.push(mapping.allocation_id)
+            val last = _memory_leveling_runtime_mappings.len() - 1
+            _memory_leveling_runtime_mappings[i] = _memory_leveling_runtime_mappings[last]
+            _memory_leveling_runtime_mappings.pop()
+        else:
+            i = i + 1
+    _memory_leveling_runtime_manager = Some(manager)
+    MemoryLevelingRuntimeResult(ok: true, reason: "ok", allocation_ids: released_ids)
+
+fn memory_leveling_runtime_apply_pressure(level: text) -> MemoryPressureReport:
+    val manager = memory_leveling_runtime_manager()
+    val report = manager.apply_pressure(level)
+    _memory_leveling_runtime_manager = Some(manager)
+    report
+
+fn memory_leveling_runtime_stats() -> MemoryLevelingStats:
+    val manager = memory_leveling_runtime_manager()
+    val stats = manager.snapshot()
+    _memory_leveling_runtime_manager = Some(manager)
+    stats

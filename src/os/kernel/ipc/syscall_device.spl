@@ -5,9 +5,9 @@
 
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.types.task_types.{TaskId}
-use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_PRESENT, VM_WRITABLE, VM_NO_EXECUTE, VM_CACHE_DISABLE}
-use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
-use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_NO_EXECUTE, VM_CACHE_DISABLE}
+use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, PAGE_SIZE}
+use os.kernel.memory.pmm.{pmm_alloc_pages, pmm_free_page_range}
 use os.kernel.boot.mmio.{mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 use os.drivers.pci.pci.{pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
 use os.kernel.interrupts.irq_routing.{irq_route_register}
@@ -335,17 +335,14 @@ fn _dma_unregister_alloc(virt_addr: u64):
     dma_alloc_cache_policy[i] = 0
     dma_alloc_id[i] = 0
 
-fn _dma_free_pages(virt_addr: u64, size: u64):
+fn _dma_free_pages(virt_addr: u64, phys_addr: u64, size: u64):
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
     var offset: u64 = 0
     while offset < page_count:
         val virt = VirtAddr(addr: virt_addr + offset * PAGE_SIZE)
-        val pte = vmm_read_pte(virt)
-        if pte != 0:
-            val phys_addr = pte & PTE_ADDR_MASK
-            vmm_unmap_page(virt)
-            pmm_free_page(PageFrame.from_phys_addr(PhysAddr(addr: phys_addr)))
+        vmm_unmap_page(virt)
         offset = offset + 1
+    pmm_free_page_range(PhysAddr(addr: phys_addr), page_count)
 
 fn _dma_release_task_allocs(owner: TaskId):
     """Release all live DMA records owned by a task before final cleanup."""
@@ -353,8 +350,9 @@ fn _dma_release_task_allocs(owner: TaskId):
     while i < MAX_DMA_ALLOCS:
         if dma_alloc_active[i] != 0 and dma_alloc_owner[i] == owner.id:
             val virt_addr = dma_alloc_virt[i]
+            val phys_addr = dma_alloc_phys[i]
             val size = dma_alloc_size[i]
-            _dma_free_pages(virt_addr, size)
+            _dma_free_pages(virt_addr, phys_addr, size)
             task_unregister_resource(owner.id, RES_DMA_BUFFER, virt_addr)
             dma_alloc_active[i] = 0
             dma_alloc_owner[i] = 0
@@ -389,19 +387,18 @@ fn _handle_alloc_dma(args: SyscallArgs, caller: TaskId) -> SyscallResult:
 
     val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_CACHE_DISABLE | VM_NO_EXECUTE)
 
-    var first_phys: u64 = 0
+    val opt_phys = pmm_alloc_pages(page_count)
+    if not opt_phys.?:
+        return SyscallResult(value: -12)
+    val base_phys = opt_phys.unwrap()
+    val first_phys = base_phys.addr
     var offset: u64 = 0
     while offset < page_count:
-        if val Some(frame) = pmm_alloc_page():
-            val phys = frame.to_phys_addr()
-            if offset == 0:
-                first_phys = phys.addr
-            val virt = VirtAddr(addr: base_virt + offset * PAGE_SIZE)
-            val ok = vmm_map_page(virt, phys, flags)
-            if !ok:
-                pmm_free_page(frame)
-                return SyscallResult(value: -12)
-        else:
+        val phys = PhysAddr(addr: base_phys.addr + offset * PAGE_SIZE)
+        val virt = VirtAddr(addr: base_virt + offset * PAGE_SIZE)
+        val ok = vmm_map_page(virt, phys, flags)
+        if !ok:
+            _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
             return SyscallResult(value: -12)
         offset = offset + 1
 
@@ -415,12 +412,12 @@ fn _handle_alloc_dma(args: SyscallArgs, caller: TaskId) -> SyscallResult:
 
     val registered = _dma_register_alloc(caller, base_virt, first_phys, page_count * PAGE_SIZE, owner_device, cache_policy, allocation_id)
     if not registered:
-        _dma_free_pages(base_virt, page_count * PAGE_SIZE)
+        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
         return SyscallResult(value: -12)
     val cleanup_tracked = task_register_resource(caller.id, RES_DMA_BUFFER, base_virt, page_count * PAGE_SIZE)
     if not cleanup_tracked:
         _dma_unregister_alloc(base_virt)
-        _dma_free_pages(base_virt, page_count * PAGE_SIZE)
+        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
         return SyscallResult(value: -12)
 
     SyscallResult(value: base_virt as i64)
@@ -448,7 +445,7 @@ fn _handle_free_dma(args: SyscallArgs, caller: TaskId) -> SyscallResult:
     if dma_alloc_size[slot] != ((size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE:
         return SyscallResult(value: -22)
 
-    _dma_free_pages(virt_addr, dma_alloc_size[slot])
+    _dma_free_pages(virt_addr, dma_alloc_phys[slot], dma_alloc_size[slot])
     _dma_unregister_alloc(virt_addr)
     task_unregister_resource(caller.id, RES_DMA_BUFFER, virt_addr)
 

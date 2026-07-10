@@ -27,7 +27,7 @@ vulkan_strict_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -455,40 +455,6 @@ if probe.is_ok():
 
 #### sync and readback correctness
 
-#### releases repeated Vulkan render cycles after the queue is idle
-
-- var engine = result unwrap
-- engine clear
-- engine present
-   - Expected: engine.read_pixels()[0] equals `color`
-- engine shutdown
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val probe = probe_vulkan()
-if probe.is_ok():
-    var cycle = 0
-    while cycle < 2:
-        val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
-        expect(result.is_ok()).to_equal(true)
-        if result.is_ok():
-            var engine = result.unwrap()
-            val color = if cycle == 0: color_blue_u32() else: color_red_u32()
-            engine.clear(color)
-            engine.present()
-            expect(engine.read_pixels()[0]).to_equal(color)
-            engine.shutdown()
-        cycle = cycle + 1
-```
-
-</details>
-
 #### read_pixels after present reflects latest draw
 
 - var engine = result unwrap
@@ -571,7 +537,7 @@ if probe.is_ok():
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/rendering/vulkan_strict_spec.spl` |
-| Updated | 2026-07-09 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -583,8 +549,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

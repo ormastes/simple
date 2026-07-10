@@ -503,14 +503,14 @@ class CudaBackend:
         cuda_backend_free(host_pixels, self.framebuffer_bytes)
         upload_rc == CUDA_SUCCESS
 
-    me _disable_device_readback(reason: text):
-        self.last_probe = _cuda_context_failure(reason)
+    me _disable_device_readback_after_mirror_sync_failure():
+        self.last_probe = _cuda_context_failure("CUDA mirror-to-device synchronization failed")
         self.initialized = false
 
     me _sync_mirror_to_device_after_cpu_path():
         if self.initialized:
             if not self._copy_mirror_to_device():
-                self._disable_device_readback("CUDA mirror-to-device synchronization failed")
+                self._disable_device_readback_after_mirror_sync_failure()
 
     me _draw_image_kernel(kernel_name: text, x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> bool:
         if not self.initialized:
@@ -765,14 +765,10 @@ impl RenderBackend for CudaBackend:
 
     fn read_pixels_with_source() -> Engine2DReadback:
         if self.initialized and self.readback_ptr != 0 and self.d_framebuffer != 0:
-            val sync_rc = self.session.sync()
-            if sync_rc != CUDA_SUCCESS:
-                self._disable_device_readback("CUDA device readback synchronization failed")
-                return engine2d_readback(self.mirror.read_pixels(), "cpu_mirror")
+            self.session.sync()
             val rc = cuda_memcpy_dtoh(self.readback_ptr, self.d_framebuffer, self.framebuffer_bytes)
             if rc == CUDA_SUCCESS:
                 return engine2d_readback_with_handle(_read_u32_pixels_from_host(self.readback_ptr, self.width() * self.height()), "device_readback", self.d_framebuffer)
-            self._disable_device_readback("CUDA device readback copy failed")
         engine2d_readback(self.mirror.read_pixels(), "cpu_mirror")
     fn width() -> i32:
         self.mirror.width()

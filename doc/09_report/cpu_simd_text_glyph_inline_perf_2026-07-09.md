@@ -176,16 +176,7 @@ Full 8K external CPU drawing-library baseline refresh:
 - Report: `doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md`.
 - Command: `BUILD_DIR=build/gui_perf_bench_2026-07-09_cpu_base REPORT_PATH=doc/09_report/gui_perf_benchmark_2026-07-09_cpu_base.md SIMPLE_WEB_CPU_MODE=native tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 1 --dpi 300`.
 - Available CPU baselines on host `dl`: GTK3/Cairo completed, Node canvas
-  completed, Python tkinter unavailable. Follow-up hardening makes this
-  machine-readable in the compare block with
-  `gui_perf_cpu_base_compare_candidate_count`,
-  `gui_perf_cpu_base_compare_candidate_order=javascript_node_canvas,gtk3_cairo,pixman,skia`,
-  per-candidate backend/library/probe/status/reason rows,
-  `gui_perf_cpu_base_compare_selection_rule=first_completed_candidate`,
-  `gui_perf_cpu_base_compare_selected_candidate=...`, and
-  `gui_perf_cpu_base_compare_available_cpu_libraries=...`,
-  per-library availability/status keys, plus
-  `gui_perf_cpu_base_compare_baseline_selection_reason=...`.
+  completed, Python tkinter unavailable.
 - External compare result: `gui_perf_cpu_base_compare_status=measured`,
   `baseline_backend=javascript_node_canvas`,
   `gui_perf_cpu_base_compare_dpi_source=default`,
@@ -206,15 +197,6 @@ Full 8K external CPU drawing-library baseline refresh:
   `gui_perf_cpu_base_compare_fallback_used=false`.
 
 Focused CPU-SIMD routing containment:
-
-Current follow-up note (2026-07-09): the `cpu_simd` text path no longer
-bypasses Engine2D presentation. It now uses residual Engine2D CPU-SIMD
-presentation for text, translucent color, and CSS opacity fixtures, with the
-CPU layout framebuffer retained as the exact oracle. The unit contract compares
-those fixtures against `simple_web_layout_render_html_software_pixels(...)` and
-requires positive SIMD hits, so the older "text pages skip probe routing" note
-below is historical evidence for the previous containment step, not the current
-route.
 
 - The browser presenter now routes `cpu_simd` solid-only frames through the
   existing Engine2D display-list readback path. This exercises the current

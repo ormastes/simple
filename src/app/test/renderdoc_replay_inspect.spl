@@ -1,0 +1,95 @@
+# codex-impl
+# Pure-Simple RenderDoc capture inspector. The existing RenderDoc CLI converts
+# RDC to XML; Simple parses stable driver/chunk/action/resource markers.
+
+use app.io.mod.{dir_create_all, file_delete, file_exists, file_read_text, file_size, process_run_timeout}
+use std.common.crypto.sha256.{sha256_text}
+
+struct RenderDocReplayInspection:
+    status: text
+    reason: text
+    driver: text
+    capture_path: text
+    xml_path: text
+    xml_hash: text
+    xml_bytes: i64
+    chunk_count: i64
+    relevant_action_count: i64
+    dispatch_count: i64
+    draw_count: i64
+    pipeline_count: i64
+    shader_count: i64
+    resource_count: i64
+    convert_exit_code: i64
+    convert_log: text
+
+fn _count_marker(content: text, marker: text) -> i64:
+    if marker == "": return 0
+    var count: i64 = 0
+    var offset = 0
+    while offset < content.len():
+        val relative = content[offset:content.len()].index_of(marker)
+        if relative < 0: return count
+        count = count + 1
+        offset = offset + relative + marker.len()
+    count
+
+fn _inspection_failure(reason: text, capture_path: text, xml_path: text, exit_code: i64, log: text) -> RenderDocReplayInspection:
+    RenderDocReplayInspection(
+        status: "fail", reason: reason, driver: "", capture_path: capture_path,
+        xml_path: xml_path, xml_hash: "", xml_bytes: 0, chunk_count: 0,
+        relevant_action_count: 0, dispatch_count: 0, draw_count: 0,
+        pipeline_count: 0, shader_count: 0, resource_count: 0,
+        convert_exit_code: exit_code, convert_log: log
+    )
+
+fn parse_renderdoc_capture_xml(xml: text, capture_path: text, xml_path: text, exit_code: i64, convert_log: text) -> RenderDocReplayInspection:
+    """Parse RenderDoc's XML conversion without trusting file magic."""
+    if exit_code != 0: return _inspection_failure("capture-open-failed", capture_path, xml_path, exit_code, convert_log)
+    if not xml.contains("<rdc>") or not xml.contains("<chunks version="):
+        return _inspection_failure("invalid-renderdoc-xml", capture_path, xml_path, exit_code, convert_log)
+    var driver = "unknown"
+    if xml.contains(">Vulkan</driver>"):
+        driver = "vulkan"
+    else if xml.contains(">D3D12</driver>"):
+        driver = "d3d12"
+    else if xml.contains(">D3D11</driver>"):
+        driver = "d3d11"
+    val chunks = _count_marker(xml, "<chunk ")
+    val dispatches = _count_marker(xml, "name=\"vkCmdDispatch\"")
+    val draws = _count_marker(xml, "name=\"vkCmdDraw")
+    val pipelines = _count_marker(xml, "vkCreateComputePipelines") + _count_marker(xml, "vkCreateGraphicsPipelines")
+    val shaders = _count_marker(xml, "vkCreateShaderModule")
+    val resources = _count_marker(xml, "vkCreateBuffer") + _count_marker(xml, "vkCreateImage")
+    val relevant = dispatches + draws
+    var reason = "pass"
+    if driver == "unknown": reason = "unsupported-capture-driver"
+    else if chunks <= 0: reason = "empty-capture"
+    else if relevant <= 0: reason = "missing-relevant-actions"
+    else if pipelines <= 0: reason = "missing-pipeline-evidence"
+    else if shaders <= 0: reason = "missing-shader-evidence"
+    else if resources <= 0: reason = "missing-resource-evidence"
+    val status = if reason == "pass": "pass" else "fail"
+    RenderDocReplayInspection(
+        status: status, reason: reason,
+        driver: driver, capture_path: capture_path, xml_path: xml_path,
+        xml_hash: sha256_text(xml), xml_bytes: xml.len().to_i64(),
+        chunk_count: chunks, relevant_action_count: relevant,
+        dispatch_count: dispatches, draw_count: draws, pipeline_count: pipelines,
+        shader_count: shaders, resource_count: resources,
+        convert_exit_code: exit_code, convert_log: convert_log
+    )
+
+fn inspect_renderdoc_capture(renderdoc_cmd: text, capture_path: text, output_dir: text, timeout_ms: i64) -> RenderDocReplayInspection:
+    """Open an RDC by converting it to XML with the canonical RenderDoc CLI."""
+    if not file_exists(renderdoc_cmd): return _inspection_failure("renderdoccmd-missing", capture_path, "", -1, "")
+    if not file_exists(capture_path): return _inspection_failure("capture-missing", capture_path, "", -1, "")
+    if file_size(capture_path) <= 4: return _inspection_failure("capture-too-small", capture_path, "", -1, "")
+    dir_create_all(output_dir)
+    val xml_path = output_dir + "/capture.xml"
+    if file_exists(xml_path): file_delete(xml_path)
+    val (stdout, stderr, exit_code) = process_run_timeout(renderdoc_cmd, ["convert", "-f", capture_path, "-o", xml_path, "-i", "rdc", "-c", "xml"], timeout_ms)
+    val log = stdout + stderr
+    if exit_code != 0 or not file_exists(xml_path):
+        return _inspection_failure("capture-open-failed", capture_path, xml_path, exit_code, log)
+    parse_renderdoc_capture_xml(file_read_text(xml_path), capture_path, xml_path, exit_code, log)

@@ -23,12 +23,11 @@
 #   [11:0]  Page offset  (12 bits, 4KB)
 
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags}
-use os.kernel.boot.mmio.{mmio_read64, mmio_write64}
-use os.kernel.memory.pmm.{PhysMemManager}
+use os.kernel.boot.mmio.{mmio_read64, mmio_write64, mmio_invalidate_tlb}
+use os.kernel.memory.pmm.{PhysMemManager, pmm_alloc_page, pmm_free_page}
 
 extern fn rt_read_cr3() -> u64
 extern fn rt_write_cr3(value: u64)
-extern fn rt_invlpg(addr: u64)
 
 # ============================================================================
 # Constants
@@ -145,13 +144,6 @@ var g_vmm: VirtMemManager = VirtMemManager(
 fn _phys_to_virt(phys: u64) -> u64:
     """Convert physical to virtual address via HHDM."""
     phys + g_vmm.hhdm_offset
-
-# ============================================================================
-# PMM Interface (forward declarations)
-# ============================================================================
-
-extern fn pmm_alloc_page() -> PageFrame?
-extern fn pmm_free_page(frame: PageFrame)
 
 fn _alloc_table_page() -> u64:
     """Allocate a zeroed page for a new page table.
@@ -277,7 +269,7 @@ fn _identity_map_4gb():
 # Page Mapping (4KB pages)
 # ============================================================================
 
-fn vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+fn x86_64_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
     """Map a single 4KB virtual page to a physical frame.
 
     Walks the 4-level page table, creating intermediate tables as needed.
@@ -326,7 +318,7 @@ fn vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
 
     true
 
-fn vmm_unmap_page(virt: VirtAddr) -> bool:
+fn x86_64_vmm_unmap_page(virt: VirtAddr) -> bool:
     """Unmap a single 4KB virtual page.
 
     Clears the page table entry and invalidates the TLB.
@@ -411,7 +403,7 @@ fn vmm_map_framebuffer(fb_phys: PhysAddr, fb_virt: VirtAddr, size: u64):
         val offset = i * PAGE_SIZE
         val virt = VirtAddr(addr: fb_virt.addr + offset)
         val phys = PhysAddr(addr: fb_phys.addr + offset)
-        vmm_map_page(virt, phys, flags)
+        x86_64_vmm_map_page(virt, phys, flags)
         i = i + 1
 
     log_raw_println("[VMM] Mapped framebuffer: {page_count} pages at virt 0x{fb_virt.addr}")
@@ -424,7 +416,7 @@ fn vmm_get_manager() -> VirtMemManager:
     """Get reference to the global VMM."""
     g_vmm
 
-fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
+fn x86_64_vmm_translate(virt: VirtAddr) -> PhysAddr?:
     """Translate virtual address to physical by walking page tables.
 
     Returns nil if the address is not mapped.
@@ -473,7 +465,7 @@ fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
 
 fn _invlpg(vaddr: u64):
     """Invalidate TLB entry for a virtual address."""
-    rt_invlpg(vaddr)
+    mmio_invalidate_tlb(vaddr)
 
 fn _load_cr3(pml4_phys: u64):
     """Load CR3 register with a new PML4 physical address."""
@@ -503,15 +495,15 @@ impl X86Paging:
 
     fn map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
         """Map a 4KB virtual page to a physical frame."""
-        vmm_map_page(virt, phys, flags)
+        x86_64_vmm_map_page(virt, phys, flags)
 
     fn unmap_page(virt: VirtAddr) -> bool:
         """Unmap a 4KB virtual page."""
-        vmm_unmap_page(virt)
+        x86_64_vmm_unmap_page(virt)
 
     fn translate(virt: VirtAddr) -> PhysAddr?:
         """Translate virtual to physical address."""
-        vmm_translate(virt)
+        x86_64_vmm_translate(virt)
 
     fn create_address_space() -> u64:
         """Create a new PML4 for a process."""

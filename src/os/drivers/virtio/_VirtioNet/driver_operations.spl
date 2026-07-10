@@ -35,8 +35,9 @@ impl VirtioNetDriver:
             rx_desc_phys: 0, rx_queue_size: 0, rx_last_used: 0,
             tx_desc_virt: 0, tx_avail_virt: 0, tx_used_virt: 0,
             tx_desc_phys: 0, tx_queue_size: 0, tx_last_used: 0,
-            rx_bufs_virt: 0, rx_bufs_phys: 0,
-            tx_bufs_virt: 0, tx_bufs_phys: 0,
+            rx_bufs_virt: 0, rx_bufs_phys: 0, rx_bufs_allocation_id: 0,
+            tx_bufs_virt: 0, tx_bufs_phys: 0, tx_bufs_allocation_id: 0,
+            rx_queue_allocation_id: 0, tx_queue_allocation_id: 0,
             mac0: 0, mac1: 0, mac2: 0, mac3: 0, mac4: 0, mac5: 0,
             initialized: false,
             completion_mode: VIRTIO_NET_COMPLETION_AUTO
@@ -109,6 +110,7 @@ impl VirtioNetDriver:
             return Err("RX buffer allocation failed")
         self.rx_bufs_virt = rx_buf_result.unwrap_virt()
         self.rx_bufs_phys = rx_buf_result.unwrap_phys()
+        self.rx_bufs_allocation_id = rx_buf_result.unwrap_allocation_id()
         log_info("[virtio] " + "[virtio-net] RX buffers: virt=0x{self.rx_bufs_virt} phys=0x{self.rx_bufs_phys}")
 
         self.prepost_rx_descriptors()
@@ -120,6 +122,7 @@ impl VirtioNetDriver:
             return Err("TX buffer allocation failed")
         self.tx_bufs_virt = tx_buf_result.unwrap_virt()
         self.tx_bufs_phys = tx_buf_result.unwrap_phys()
+        self.tx_bufs_allocation_id = tx_buf_result.unwrap_allocation_id()
         log_info("[virtio] " + "[virtio-net] TX buffers: virt=0x{self.tx_bufs_virt} phys=0x{self.tx_bufs_phys}")
 
         # -- Step 7: Read MAC address from config space --
@@ -160,6 +163,10 @@ impl VirtioNetDriver:
             return Err("DMA alloc for queue {queue_idx} failed")
         val ring_virt = dma_result.unwrap_virt()
         val ring_phys = dma_result.unwrap_phys()
+        if queue_idx == VIRTIO_NET_RX_QUEUE:
+            self.rx_queue_allocation_id = dma_result.unwrap_allocation_id()
+        else:
+            self.tx_queue_allocation_id = dma_result.unwrap_allocation_id()
 
         # Compute sub-region offsets
         val desc_virt = ring_virt
@@ -216,7 +223,8 @@ impl VirtioNetDriver:
         """Allocate contiguous DMA buffer via syscall 84 (AllocDma).
 
         Returns a DmaAllocResult with virt and phys addresses.
-        Syscall protocol: arg0=size, arg1=pointer to (phys:u64, virt:u64) result pair.
+        Syscall protocol: arg0=size, arg1=pointer to
+        (phys:u64, allocation_id:u64) result pair.
         """
         var phys_out: u64 = 0
         var virt_out: u64 = 0
@@ -224,11 +232,11 @@ impl VirtioNetDriver:
         var result_pair: [u64; 2] = [0; 2]
         val result = syscall(84, size, &result_pair as u64, 0, 0, 0)
         if result < 0:
-            return DmaAllocResult(virt: 0, phys: 0, ok: false)
+            return DmaAllocResult(virt: 0, phys: 0, allocation_id: 0, ok: false)
         # Read back from the result pair
         phys_out = result_pair[0]
         virt_out = result as u64
-        DmaAllocResult(virt: virt_out, phys: phys_out, ok: true)
+        DmaAllocResult(virt: virt_out, phys: phys_out, allocation_id: result_pair[1], ok: true)
 
     # ========================================================================
     # Pre-Post RX Descriptors

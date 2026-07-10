@@ -154,6 +154,27 @@ build transition. **Delegate EDITS to subagents; run BUILDS yourself** via
 detached Bash (`SIMPLE_BOOTSTRAP=1 seed native-build … -o …stage2/…/simple`),
 then grep IR + RUN the binary's arms.
 
+### Method-resolution is a project-wide DEAD STUB (not a cheap re-enable)
+
+Investigated whether the bootstrap method-drop class could be killed by
+re-enabling a skipped resolution pass. NO: `resolve_methods()`
+(`src/compiler/35.semantics/resolve.spl:731`) is stubbed project-wide — it builds
+an EMPTY `SymbolTable` (`resolve.spl:743`, deliberate "Phase 9 follow-up" stub),
+so `try_instance_method`/`try_trait_method`/`try_ufcs` always return nil. Every
+`HirExprKind.MethodCall` starts `MethodResolution.Unresolved` in BOTH normal
+(`expressions.spl:379`) and bootstrap (`module_lowering.spl:578`
+`lower_bootstrap_flat_expr`) lowering, and the default driver branch
+(`driver.spl:601-723`) never calls `resolve_methods` at all. Un-stubbing =
+pipeline-wide, multi-step, unverified-at-scale (build populated SymbolTable + wire
+into default driver + bootstrap `module_lowering.spl:578` sets receiver
+`type_: HirType.Infer(0,0)` so has no type to resolve against). NOT bootstrap-
+scoped. So the method-drop tail must be handled in the MIR-lowering
+`Unresolved` arm (`method_calls_literals.spl` `lower_method_call`), either via
+per-method special-cases (done: `len`, `substring`/`slice`, `starts_with`) if the
+remaining set is small, or ONE generic UFCS-style emission
+(`method_name(receiver, args…)` → linkable rt_/free-fn) to cover all at once.
+Decide via the 6-fn construct enumeration.
+
 ### ALLOCA IMPLEMENTED & WORKING (reassigned-local class fixed)
 
 `ssa_alloca_transform_blocks` in `var_reassign_ssa.spl` (gated in

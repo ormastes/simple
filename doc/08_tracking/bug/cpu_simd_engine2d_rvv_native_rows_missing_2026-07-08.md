@@ -20,22 +20,12 @@ open
 - Simple owner facade `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`
   still requires a riscv64 target binary run before RVV can count as native
   drawing evidence.
-- The self-hosted hosted-native runtime compiler omitted
-  `runtime_simd_dispatch.c`; it now includes that owner so generated binaries
-  can link the public Engine2D SIMD row externs.
-- A focused self-hosted `native-build --backend llvm` probe still fails before
-  target execution: array aggregates lower to opaque `ptr` and `llc-18`
-  rejects `getelementptr inbounds ptr, ptr ..., i32 0, i32 0` as invalid.
-  Cranelift rejects the same public array-returning probe with `type mismatch:
-  cannot convert object to int`.
-- Hosted cross linking also still compiles runtime objects and selects CRT/linker
-  tools from the x86_64 host instead of the target toolchain descriptor.
 
 ## Impact
 
-The riscv64 lane cannot yet prove native RVV Engine2D drawing in a compiled
-Simple target binary. Standalone C runtime-kernel execution is supporting
-evidence only; the matrix remains partial until the public Simple path runs.
+The riscv64 lane cannot yet prove native RVV Engine2D drawing in a target
+binary. It can prove the owner C source compiles for RVV, but not that a
+riscv64 Simple binary selected it and produced bit-exact output.
 
 ## Required Fix
 

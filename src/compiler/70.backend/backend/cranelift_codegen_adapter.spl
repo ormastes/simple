@@ -464,6 +464,17 @@ fn cl_translate_instruction(
 
         case Intrinsic(dest, name, args):
             if name == "__simple_ssa_phi" and dest.?:
+                # bug #135 (opus review Finding 3): the stack-slot path below
+                # doesn't care about arg count (it just loads the phi's slot),
+                # but the two elif fallbacks (no slot registered) only ever
+                # look at args[0] / args[1] -- an N-ary join (elif-ladder,
+                # more than one incoming pair) would silently use just the
+                # first pair. No caller currently emits N-ary joins through
+                # this backend, so this is latent; guard it loudly rather
+                # than miscompiling silently if that ever changes.
+                if args.len() > 4 and not slot_map.has(dest.unwrap().id):
+                    eprint("[cranelift] ERROR: __simple_ssa_phi has {args.len()} args (N-ary join) with no stack slot; this fallback only supports a single then/else pair")
+                    return
                 val dest_id = dest.unwrap().id
                 if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
@@ -500,6 +511,16 @@ fn cranelift_phi_const_block_arg(arg: MirOperand) -> i64?:
         case _: nil
 
 fn cranelift_phi_incoming_for_predecessor(pred_id: i64, args: [MirOperand]) -> MirOperand?:
+    # bug #135 (opus review Finding 3): only checks the first (block, value)
+    # pair. var_reassign_ssa.spl can emit more than one pair for an N-ary
+    # join (e.g. an elif-ladder); a predecessor matching a later pair would
+    # silently resolve to `nil` here (no incoming value stored) instead of
+    # its real value. No caller currently routes an N-ary plan through this
+    # backend, so this is latent; guard it loudly rather than miscompiling
+    # silently if that ever changes.
+    if args.len() > 4:
+        eprint("[cranelift] ERROR: __simple_ssa_phi has {args.len()} args (N-ary join); this backend only matches a single then/else pair")
+        return nil
     if args.len() >= 4:
         val then_block = cranelift_phi_const_block_arg(args[0])
         val else_block = cranelift_phi_const_block_arg(args[2])

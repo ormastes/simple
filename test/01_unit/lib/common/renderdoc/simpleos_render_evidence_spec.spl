@@ -1,0 +1,129 @@
+# codex-system-test
+# @req REQ-016 REQ-018 REQ-019 REQ-020 REQ-021
+"""# SimpleOS Render and SIMD Evidence
+
+Validates the portable QEMU/board identity contract and target-native SIMD
+execution receipts independently from any live host or board run.
+"""
+use std.spec.*
+use common.renderdoc.simpleos_render_target_evidence.{
+    SimpleOsRenderTargetEvidence,
+    simpleos_render_target_status,
+    validate_simpleos_render_target_evidence
+}
+use common.renderdoc.simpleos_simd_render_evidence.{
+    CpuSimdKernelEvidence,
+    SimpleOsSimdRenderEvidence,
+    validate_simpleos_simd_render_evidence
+}
+
+val EVIDENCE_HASH: text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val OTHER_HASH: text = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+fn target_evidence(runtime_kind: text, board_id: text, board_hash: text, capture_hash: text, boot_id: text) -> SimpleOsRenderTargetEvidence:
+    SimpleOsRenderTargetEvidence(
+        runtime_kind: runtime_kind, architecture: "x86_64", board_id: board_id,
+        board_model: if runtime_kind == "physical-board": "xck26" else: "qemu-virt",
+        board_revision: if runtime_kind == "physical-board": "1" else: "virtual",
+        board_serial_hash: board_hash, firmware_hash: EVIDENCE_HASH,
+        boot_transport: "qemu-or-flash", display_controller: "virtio-gpu",
+        driver_id: "simpleos-virtio-gpu", scanout_id: 1, resource_id: 2,
+        dma_mode: "coherent", cache_mode: "write-combined", iommu_mode: "identity",
+        width: 4, height: 4, stride: 16, format: "argb-u32", surface_handle: 42,
+        present_sequence: 1, frame_complete: true, guest_readback_source: "device_readback",
+        guest_pixel_hash: EVIDENCE_HASH, serial_log_path: "build/evidence/serial.log",
+        serial_log_hash: EVIDENCE_HASH, capture_kind: "qmp-screendump",
+        capture_path: "build/evidence/frame.ppm", capture_hash: capture_hash,
+        capture_tool: "simple-qmp", boot_id: boot_id, frame_id: "frame-1",
+        oracle_hash: EVIDENCE_HASH, oracle_mismatch_count: 0
+    )
+
+fn make_simd_kernel_evidence(operation: text, chunks: i64, fallback_calls: i64, fallback_reason: text) -> CpuSimdKernelEvidence:
+    CpuSimdKernelEvidence(operation: operation, dispatch_calls: 1, vector_chunks: chunks, vector_lanes: 8, scalar_tail_pixels: 0, scalar_fallback_calls: fallback_calls, output_hash: EVIDENCE_HASH, fallback_reason: fallback_reason)
+
+fn simd_evidence(arch: text, isa: text, kernels: [CpuSimdKernelEvidence], simd_hash: text) -> SimpleOsSimdRenderEvidence:
+    SimpleOsSimdRenderEvidence(
+        requested_arch: arch, actual_arch: arch, requested_isa: isa, detected_isa: isa,
+        execution_host: "simpleos-qemu-tcg", feature_detection_source: "guest-cpuid",
+        qemu_machine: "virt", qemu_cpu: "max", guest_image_hash: EVIDENCE_HASH,
+        boot_id: "boot-1", frame_id: "frame-1", surface_handle: 42, kernels: kernels,
+        scalar_oracle_hash: EVIDENCE_HASH, simd_output_hash: simd_hash,
+        qmp_capture_hash: EVIDENCE_HASH, mismatch_count: 0
+    )
+
+fn required_kernels() -> [CpuSimdKernelEvidence]:
+    [make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, ""), make_simd_kernel_evidence("scroll", 4, 0, "")]
+
+describe "SimpleOS portable rendering evidence":
+    it "should validate a correlated QEMU target record":
+        step("Prepare correlated guest serial and QMP evidence")
+        val evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
+        expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("pass")
+        expect(simpleos_render_target_status(evidence)).to_equal("qemu-verified")
+
+    it "should validate a complete physical-board record":
+        step("Prepare identified board boot capture and transcript evidence")
+        val evidence = target_evidence("physical-board", "kv260-1", EVIDENCE_HASH, EVIDENCE_HASH, "boot-1")
+        expect(simpleos_render_target_status(evidence)).to_equal("board-verified")
+
+    # @manual: folded
+    it "should reject physical-board evidence without board identity":
+        step("Remove board identity from a physical run")
+        val evidence = target_evidence("physical-board", "", "", EVIDENCE_HASH, "boot-1")
+        expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missing-board-identity")
+
+    # @manual: folded
+    it "should reject guest and external capture hash disagreement":
+        step("Pair the guest receipt with another framebuffer")
+        val evidence = target_evidence("qemu", "", "", OTHER_HASH, "boot-1")
+        expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("guest-capture-mismatch")
+
+    # @manual: folded
+    it "should reject missing boot correlation":
+        step("Remove the boot identity from QEMU evidence")
+        val evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "")
+        expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missing-correlation")
+
+    # @manual: folded
+    it "should reject non-hex evidence hashes":
+        step("Replace a capture digest with a same-length non-hex string")
+        val evidence = target_evidence("qemu", "", "", "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg", "boot-1")
+        expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missing-capture-evidence")
+
+describe "SimpleOS target-native SIMD evidence":
+    it "should validate x86 AVX2 vector chunks for every operation":
+        step("Prepare x86 AVX2 runtime-owner counters and exact pixels")
+        expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", required_kernels(), EVIDENCE_HASH)).code).to_equal("pass")
+
+    it "should validate AArch64 NEON vector chunks":
+        step("Prepare AArch64 NEON runtime-owner counters")
+        expect(validate_simpleos_simd_render_evidence(simd_evidence("aarch64", "neon", required_kernels(), EVIDENCE_HASH)).code).to_equal("pass")
+
+    it "should validate RV64 RVV vector chunks":
+        step("Prepare vector-enabled RV64 runtime-owner counters")
+        expect(validate_simpleos_simd_render_evidence(simd_evidence("rv64", "rvv", required_kernels(), EVIDENCE_HASH)).code).to_equal("pass")
+
+    # @manual: folded
+    it "should reject wrapper dispatch without actual vector chunks":
+        step("Set fill dispatch positive while its vector chunks remain zero")
+        val kernels = [make_simd_kernel_evidence("fill", 0, 0, ""), make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, ""), make_simd_kernel_evidence("scroll", 4, 0, "")]
+        val result = validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", kernels, EVIDENCE_HASH))
+        expect(result.code).to_equal("zero-vector-chunks")
+        expect(result.operation).to_equal("fill")
+
+    # @manual: folded
+    it "should reject required scalar fallback":
+        step("Force alpha onto scalar fallback")
+        val kernels = [make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 1, "scalar"), make_simd_kernel_evidence("scroll", 4, 0, "")]
+        expect(validate_simpleos_simd_render_evidence(simd_evidence("aarch64", "neon", kernels, EVIDENCE_HASH)).code).to_equal("required-operation-scalar-fallback")
+
+    # @manual: folded
+    it "should reject exact-pixel disagreement":
+        step("Change the SIMD output hash while counters remain positive")
+        expect(validate_simpleos_simd_render_evidence(simd_evidence("rv64", "rvv", required_kernels(), OTHER_HASH)).code).to_equal("simd-oracle-mismatch")
+
+    # @manual: folded
+    it "should reject duplicate SIMD operations":
+        step("Duplicate fill while omitting scroll")
+        val kernels = [make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, "")]
+        expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", kernels, EVIDENCE_HASH)).code).to_equal("duplicate-required-operation")
