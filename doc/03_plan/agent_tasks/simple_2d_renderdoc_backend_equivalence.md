@@ -37,9 +37,10 @@
 
 ## Remaining External-Evidence Handoff
 
-- TODO 528: run the Metal record/equivalence lane on a Metal-capable host; no
-  MoltenVK runtime exists on this Linux host.
+- TODO 528 is closed as of 2026-07-11 on a Metal-capable macOS host:
+  framebuffer readback, CPU/Metal parity, Electron/Chrome/Simple Metal browser
+  backing, and macOS Metal render-log compare all pass with zero blocked gates.
 - TODO 529: obtain an independently reviewed SimpleOS QEMU framebuffer oracle
   before enabling exact x86_64/AArch64/RV64 guest comparisons.
-- Do not replace either prerequisite with a software fallback, generated
+- Do not replace remaining prerequisites with a software fallback, generated
   baseline, tolerance, or synthetic positive receipt.
