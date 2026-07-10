@@ -43,6 +43,47 @@ calls (`simpleos_fat32_stream_open("/FSEXEC.ELF")` +
 `simpleos_fat32_path_read_buffer_addr()`), pre-read BEFORE `vmm_init`, and runs
 the ELF to `hello from clang on simpleos` + `[user] exit rc=42`.
 
+## 2026-07-10 root-cause update (fixed seed 5c7c1186) — TWO distinct bugs found
+
+Rebuilt the seed with the if-expr phi-merge fix (`5c7c1186`) and instrumented the
+merged SSH kernel. The original "stream_open returns 0" symptom was NOT ordering —
+it was two separate bugs:
+
+1. **The SSH command path text mis-decodes: `/FSEXEC.ELF` -> `/E`** (this is why
+   the FAT lookup returned 0 — it looked up a file that does not exist). ROOT
+   CAUSE: **x64 freestanding text-return-into-typed-store heap-tag mangling.**
+   Proven cleanly: a boot-time pre-read placed right after `simpleos_nvme_init`
+   (before `rt_net_init`) with the LITERAL `"/FSEXEC.ELF"` reads **13888** (the
+   `5c7c1186` fix repaired the boot FAT read). The intact raw SSH payload bytes
+   rebuilt into a `[u8]` via `rt_push_byte` give the correct 11 bytes
+   (`bytes_len=11`), yet `rt_string_from_byte_array([u8]) -> text` returns a 2-char
+   garbage string — and the same corruption is what `_read_text_field_fast`'s
+   `value: rt_string_from_byte_array(...)` produces for the decoded `command`.
+   `[u8]` and `i64` channels are intact across every hop; only a *dynamically
+   built* `text` heap handle stored into a local/struct field corrupts. LITERAL
+   `text` (rodata constant) marshals correctly. WORKAROUND wired in
+   `ssh_session.spl _handle_exec_request_inline`: detect the leading `/` from the
+   RAW payload byte (`_u8_at(payload, off+4) == 0x2Fu8`) and call
+   `fs_exec_spawn_ring3("/FSEXEC.ELF", ...)` with a LITERAL path.
+
+2. **Invoking the ring-3 spawn from the deep SSH-session call stack faults**
+   (SEPARATE, still open). With the literal path wired, control faults in ring-0
+   (`cs=0x08`, `errcode=0`, `cr2=0`) *before* `x86_64_fs_exec_spawn_as` prints its
+   first `spawn:resolve` line — recovering-fault storm with wild rips
+   (`_parse_hhdm`, `_parse_rsdp`, `services.vfs.vfs_boot_init VfsFileSize.to_i64`),
+   i.e. control-flow / return-address corruption, not a clean null deref. It
+   reproduces with the minimal clean dispatch (no experimental machinery), so it is
+   a codegen / stack-depth issue in the spawn call path when reached from the deep
+   sshd stack — NOT the dispatch wiring. Not yet bisected. The prod entry
+   (`fs_exec_prod_ring3_entry.spl`) runs the identical read+build+enter sequence
+   from a SHALLOW boot stack and succeeds, which is the key difference to chase.
+   Separately: the merged kernel emits 2 benign recovering faults during early
+   arch-init (boot still completes; SSH login works end-to-end).
+
+NOTE: the "clobber/ordering" hypothesis below is NOT supported by evidence — every
+run with a *resolvable* path faulted before the exec-time read ever executed, so a
+clean exec-time read returning 0 was never observed.
+
 ## What differs (the actual bug surface)
 
 Same extern calls, same image, same pre-read-before-vmm ordering — yet
