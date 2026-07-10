@@ -615,13 +615,63 @@ impl MirLowering:
             MirType.i64()
         val array_type = MirType(kind: MirTypeKind.Array(elem_type, elements.len()))
 
-        val arr_local = self.builder.emit_aggregate(
+        self.builder.emit_aggregate(
             AggregateKind.Array(elem_type),
             operands,
             array_type
         )
-        self.runtime_array_locals[arr_local.id] = true
-        arr_local
+
+    me lower_array_repeat(value: HirExpr, count: HirExpr) -> LocalId:
+        """Lower array-repeat `[value; count]` to `rt_array_repeat(value, count)`.
+
+        The runtime stores `count` raw i64 copies of `value` and returns a tagged
+        heap-array handle. Both operands are coerced to the i64 runtime ABI. The
+        result local is typed as an Array so later `[i]` reads route through
+        `rt_array_get` (see expr_dispatch `local_is_runtime_array`/Array-type
+        branch) rather than an inline aggregate GEP.
+        """
+        # Element type from the repeated value (default i64). Redundant nil
+        # re-check guards against lower_type(nil) -- same pattern as lower_array_lit.
+        var elem_type = MirType.i64()
+        val value_type = value.type_
+        if val vt = value_type:
+            if vt != nil:
+                elem_type = self.lower_type(vt)
+
+        # Lower and coerce operands to the i64 runtime ABI.
+        val value_local = self.lower_expr(value)
+        val count_local = self.lower_expr(count)
+        var vb = self.builder
+        val value_i64 = vb.emit_cast(mir_operand_copy(value_local), MirType.i64())
+        self.builder = vb
+        var cb = self.builder
+        val count_i64 = cb.emit_cast(mir_operand_copy(count_local), MirType.i64())
+        self.builder = cb
+
+        # Static size when the count is a literal, else 0. The heap array carries
+        # its own runtime length; this only annotates the MIR type for routing.
+        var static_size: i64 = 0
+        match count.kind:
+            case IntLit(cv, _): static_size = cv
+            case _: static_size = 0
+        val array_type = MirType(kind: MirTypeKind.Array(elem_type, static_size))
+
+        val repeat_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_repeat"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.i64(), MirType.i64()],
+                return_type: MirType.i64(),
+                is_variadic: false
+            )))
+        ))
+        var b = self.builder
+        val result = b.emit_call(
+            repeat_fn,
+            [mir_operand_copy(value_i64), mir_operand_copy(count_i64)],
+            array_type
+        )
+        self.builder = b
+        result ?? self.builder.new_temp(array_type)
 
     me lower_tuple_lit(elements: [HirExpr]) -> LocalId:
         """Lower tuple literal."""
