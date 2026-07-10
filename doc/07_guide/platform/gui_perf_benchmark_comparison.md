@@ -175,10 +175,12 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
   records each architecture independently, and supports
   `CPU_SIMD_ARCH_MATRIX_STRICT=1` when all full native SIMD evidence rows are
   expected to pass. Current retained matrix evidence is split into three
-  signals: x86_64 full Engine2D SIMD evidence passes on this host;
-  cross-target native-build smoke passes for x86_64, aarch64, and riscv64 when
-  target builds are enabled; full aarch64/riscv64 SIMD evidence rows remain
-  unavailable until matching target Simple binaries are supplied. The wrapper
+  signals: x86_64 full Engine2D SIMD evidence passes on this host; standalone C
+  runtime-kernel harnesses cross-build and run for x86_64, aarch64, and riscv64
+  when target builds are enabled; full aarch64/riscv64 SIMD evidence rows remain
+  unavailable until matching target Simple binaries are supplied. C-only target
+  harnesses cannot make the overall matrix pass while Simple rows are missing.
+  The wrapper
   also cross-compiles the native runtime owner for x86_64, aarch64, generic
   riscv64, and `rv64gcv` RVV when compilers are present. riscv64 native RVV
   target proof remains tracked at
@@ -220,8 +222,9 @@ status is driven by parity, readback, and CPU-SIMD quality gates.
    parity, and software-baseline timing. Current retained 4K and 8K ratios are
    both above `1000`; keep multiple-frame repeats before making broad
    release-grade CPU-SIMD speedup claims.
-   Cross-arch target-native-build smoke now builds and runs x86_64, aarch64,
-   and riscv64 outputs. Completion still needs current aarch64 NEON and
+   Cross-arch standalone C runtime-kernel smoke now builds and runs x86_64,
+   aarch64, and riscv64 outputs. Completion still needs compiled Simple target
+   execution with current aarch64 NEON and
    riscv64 RVV Simple SIMD runtime matrix rows, plus strict mode with matching
    target Simple binaries, before those rows can pass as native SIMD rather
    than scalar-correct.

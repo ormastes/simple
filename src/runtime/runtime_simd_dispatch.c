@@ -539,10 +539,15 @@ int64_t rt_simd_engine2d_neon_reset(void) {
 #if defined(__x86_64__) || defined(_M_X64)
 static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color);
 static void engine2d_copy_u32_sse2(int64_t* dst, const int64_t* src, int64_t count);
+#if defined(__GNUC__) || defined(__clang__)
+#define ENGINE2D_HAS_TARGET_AVX2 1
 __attribute__((target("avx2")))
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color);
 __attribute__((target("avx2")))
 static void engine2d_copy_u32_avx2(int64_t* dst, const int64_t* src, int64_t count);
+#else
+#define ENGINE2D_HAS_TARGET_AVX2 0
+#endif
 #endif
 
 #if defined(__riscv) && defined(__riscv_vector)
@@ -569,10 +574,12 @@ static void engine2d_fill_into(int64_t* out, int64_t n, int64_t color) {
         vst1q_u64((uint64_t*)(void*)(out + i), v);
     }
 #elif defined(__x86_64__) || defined(_M_X64)
+#if ENGINE2D_HAS_TARGET_AVX2
     if (simd_detect_avx2()) {
         engine2d_fill_u32_avx2(out, n, color_word);
         return;
     }
+#endif
     engine2d_fill_u32_sse2(out, n, color_word);
     return;
 #elif defined(__riscv) && defined(__riscv_vector)
@@ -593,10 +600,12 @@ static void engine2d_copy_into(int64_t* out, const int64_t* src, int64_t n) {
         vst1q_u64((uint64_t*)(void*)(out + i), v);
     }
 #elif defined(__x86_64__) || defined(_M_X64)
+#if ENGINE2D_HAS_TARGET_AVX2
     if (simd_detect_avx2()) {
         engine2d_copy_u32_avx2(out, src, n);
         return;
     }
+#endif
     engine2d_copy_u32_sse2(out, src, n);
     return;
 #elif defined(__riscv) && defined(__riscv_vector)
@@ -750,6 +759,7 @@ static void engine2d_copy_u32_sse2(int64_t* dst, const int64_t* src, int64_t cou
     }
 }
 
+#if ENGINE2D_HAS_TARGET_AVX2
 __attribute__((target("avx2")))
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color) {
     __m256i v = _mm256_set1_epi64x(color);
@@ -775,6 +785,7 @@ static void engine2d_copy_u32_avx2(int64_t* dst, const int64_t* src, int64_t cou
         dst[i] = src[i];
     }
 }
+#endif
 #endif
 
 #if defined(__riscv) && defined(__riscv_vector)

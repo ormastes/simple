@@ -25,8 +25,18 @@ Harden the Simple GUI library's 2D rendering and vector-font paths with measurab
 
 ## Cooperative Review
 - Lower-model review: GPT-5.4 mini reviewed the CPU drawing-library candidate/provenance schema; Codex Spark was requested but unavailable because its quota was exhausted.
+- Target-binary review: GPT-5.6 Luna traced the self-hosted native-build target,
+  runtime-object, linker, and QEMU paths and confirmed the current C harness is
+  not compiled Simple execution.
 - Shared report interface: `gui_perf_cpu_base_compare_candidate_*`, `gui_perf_cpu_base_compare_selection_rule`, and `gui_perf_cpu_base_compare_selected_*`.
+- Arch report interface: existing `cpu_simd_engine2d_arch_matrix_<arch>_*`
+  rows plus `target_binary_kind`; proposed `simple_target_*` rows remain
+  deferred until a real compiled Simple target artifact exists.
 - Setup/checker helpers: `pkg_status`, `node_canvas_status`, and `bench_status`; no placeholder helpers were introduced.
+- Target setup/checker helpers: existing `run_target_binary_build`; proposed
+  `build_simple_target_probe` / `run_simple_target_probe` were not added because
+  the AOT and hosted cross-link owner paths fail before they could produce
+  trustworthy artifacts. No fail-fast placeholder was introduced.
 - Merge owner, final reviewer, and generated-manual review owner: primary Codex agent.
 
 ## Phase
@@ -152,6 +162,35 @@ implementation-evidence-in-progress
   and GTK3/Cairo, detected Pixman, recorded Skia missing, selected Node Canvas,
   proved native CPU-SIMD execution with positive hits, and passed the GUI
   profile report contract.
+- implementation: Hosted native runtime compilation now includes
+  `runtime_simd_dispatch.c`. The arch matrix labels standalone C target kernels
+  explicitly and remains partial while AArch64/RISC-V compiled Simple rows are
+  unavailable.
+- runtime_need: Compiled Simple binaries must link the public Engine2D SIMD row
+  extern owner before target-native evidence can run.
+- facade_checked: `std.gpu.engine2d.simd_kernels` is the existing public facade;
+  the missing capability was in the hosted runtime object list and AOT/cross
+  linker pipeline.
+- chosen_path: `fix-codegen-runtime-owner`.
+- rejected_shortcuts: Raw fixture `rt_*` externs, direct backend pokes, and
+  standalone C harnesses presented as compiled Simple evidence.
+- blocker: Self-hosted LLVM AOT still emits an invalid opaque-pointer GEP for
+  array aggregates, Cranelift rejects the public array-return probe, and hosted
+  cross linking still selects host runtime/linker tools. These prevent honest
+  AArch64/RISC-V Simple target rows; the existing C/QEMU rows remain supporting
+  evidence only.
+- verification: Final retained matrix records x86_64 full Simple SIMD `pass`,
+  AArch64/RISC-V Simple rows `unavailable`, all four runtime-owner compile rows
+  `pass`, all three standalone C/QEMU target rows `pass`, and overall `partial`
+  with reason `engine2d-simple-target-evidence-unavailable`.
+- verification: The Simple-binary contract passes 3/3; its regenerated manual
+  has ordered operator steps and zero stubs. CPU-SIMD/GPU scheduling parity
+  passes 1/1 without changing the GPU queue path.
+- verification: `simple check` passes for `src/compiler`, `src/lib`,
+  `src/app/mcp`, and `src/app/simple_lsp_mcp`. The required MCP stdio integration
+  remains red against the prebuilt shared-workspace server because it identifies
+  itself as `simple-pipe-mcp` while the spec requires `simple-mcp-full`; this is
+  unrelated to the runtime object-list change and was not absorbed into this lane.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 
