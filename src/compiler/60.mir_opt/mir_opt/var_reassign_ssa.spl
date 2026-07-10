@@ -270,6 +270,7 @@ fn ssa_var_transform_inst_supported(inst: MirInst) -> bool:
         case Cast(_, _, _): true
         case Bitcast(_, _, _): true
         case Call(_, _, _): true
+        case Intrinsic(_, _, _): true
         case Nop: true
         case DebugValue(_, _): true
         case _: false
@@ -948,8 +949,10 @@ fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
 
 fn ssa_local_type_lookup(mir_locals: [MirLocal], local_id: i64) -> MirType:
     for local in mir_locals:
-        if ssa_local_id_value(local.id) == local_id:
-            return local.type_
+        match local:
+            case MirLocal(id, _, type_, _, _):
+                if ssa_local_id_value(id) == local_id:
+                    return type_
     MirType.i64()
 
 # --- read-side: rewrite a use of a possibly-reassigned local into a Load ---
@@ -1052,6 +1055,9 @@ fn ssa_alloca_rewrite_inst_operands(inst: MirInst, slot_keys: [i64], slot_values
             for p in ra[1]:
                 prepend = prepend.push(p)
             (MirInst(kind: MirInstKind.Call(dest, rf[0], ra[0]), span: inst.span), prepend, ra[2])
+        case Intrinsic(dest, name, args):
+            val r = ssa_alloca_rewrite_operand_list(args, slot_keys, slot_values, next_temp)
+            (MirInst(kind: MirInstKind.Intrinsic(dest, name, r[0]), span: inst.span), r[1], r[2])
         case _:
             (inst, [], next_temp)
 
@@ -1122,6 +1128,11 @@ fn ssa_alloca_rename_dest(inst: MirInst, original_id: i64, new_id: i64) -> MirIn
         case Call(dest, func, args):
             if dest.? and ssa_local_id_value(dest.unwrap()) == original_id:
                 MirInst(kind: MirInstKind.Call(Some(ssa_local(new_id)), func, args), span: inst.span)
+            else:
+                inst
+        case Intrinsic(dest, name, args):
+            if dest.? and ssa_local_id_value(dest.unwrap()) == original_id:
+                MirInst(kind: MirInstKind.Intrinsic(Some(ssa_local(new_id)), name, args), span: inst.span)
             else:
                 inst
         case _:

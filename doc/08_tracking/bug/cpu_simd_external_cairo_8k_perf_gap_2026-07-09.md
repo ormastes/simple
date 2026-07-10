@@ -90,6 +90,20 @@ the stale timing. First produce a fresh self-hosted CLI, confirm its
 `rt_array_repeat` no longer contains the per-element push loop, then run the
 retained 4K/8K and external Cairo comparisons once.
 
+### Focused current-runtime result
+
+After repairing Stage 2 LLVM emission, a standalone native probe compiled with
+the fresh bootstrap runtime allocated and filled 33,177,600 `u32` elements,
+validated the array length and final 32-bit color, and exited zero in `0.21 s`
+wall time at `260096 KiB` max RSS. Its disassembly calls `memcpy` from
+`rt_array_repeat`; it does not call `rt_array_push`.
+
+This is a 3.6x improvement over the `0.762 s` stale push-loop probe and proves
+the checked-in bulk-fill runtime is materially faster. It is not a replacement
+for the retained full-render comparison: the fresh Stage 4 CLI currently fails
+its standard smoke because its link accepted unresolved stubs, so no fresh
+4K/8K or Cairo row is claimed yet.
+
 ## Next Step
 
 Do not repeat the viewport/DPI/fallback/color proof work. The retained evidence

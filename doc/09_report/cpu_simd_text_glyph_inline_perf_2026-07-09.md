@@ -401,3 +401,20 @@ Cairo comparison as a stale-deployment result pending a fresh self-hosted
 build. An isolated rebuild reached the known Stage 2 LLVM failure and then
 spent 18 bounded minutes in seed-driven Stage 4 without producing an
 executable; it was stopped rather than allowed to run unbounded.
+
+### 2026-07-10 focused fresh-runtime measurement
+
+The Stage 2 LLVM blockers were repaired sufficiently to compile a standalone
+current-runtime probe. At a full 8K element count (`33,177,600`), the native
+`rt_array_repeat` path completed in `0.21 s` wall time with `260096 KiB` max
+RSS, preserved the requested array length and final color, and exited zero.
+Disassembly proves the binary uses the current doubling-`memcpy` path. The stale
+deployed push-loop probe took `0.762 s`, so the current runtime is approximately
+3.6x faster for the isolated owner-fill operation.
+
+A direct-store replacement measured `0.20 s`, within one-run noise, and was
+reverted because it generated more complex code without a material gain.
+Stage 2 and Stage 3 binaries now build, but the Stage 4 full CLI accepted 822
+unresolved stubs and fails `-c 'print(1+1)'` with a nil field access. Therefore
+the focused result is accepted as runtime evidence only; retained full 4K/8K
+and external Cairo evidence remains pending a smoke-clean Stage 4 binary.

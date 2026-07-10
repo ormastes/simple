@@ -3,7 +3,7 @@ use compiler.mir.mir_instructions.{
     BlockId, MirBlock, MirInst, MirInstKind, MirBorrowKind,
     MirPlace, MirOperand, MirOperandKind, MirTerminator, MirBinOp
 }
-use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirLocal, MirType}
 use compiler.mir_opt.mir_opt.var_reassign_analysis.{
     analyze_var_reassign_blocks,
     var_reassign_analysis_to_jit_facts,
@@ -12,6 +12,7 @@ use compiler.mir_opt.mir_opt.var_reassign_analysis.{
 use compiler.mir_opt.mir_opt.var_reassign_ssa.{
     jit_hotspot_specialization_provider_from_var_reassign_analysis,
     ssa_var_transform_blocks,
+    ssa_alloca_transform_blocks,
     ssa_phi_plans_for_blocks,
     ssa_materialize_phi_plans_for_blocks,
     ssa_phi_lowering_kind_name,
@@ -65,6 +66,46 @@ fn hotspot_config() -> TieredJitConfig:
     TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: false)
 
 describe "var reassignment analysis":
+    it "keeps intrinsics while lowering reassigned locals through stack slots":
+        val entry = MirBlock(
+            id: BlockId.new(0),
+            label: "entry",
+            instructions: [
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
+                inst(MirInstKind.Intrinsic(nil, "bounds_check", [copy_operand(0)]))
+            ],
+            terminator: MirTerminator.Goto(BlockId.new(1))
+        )
+        val next = MirBlock(
+            id: BlockId.new(1),
+            label: "next",
+            instructions: [
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64())),
+                inst(MirInstKind.Intrinsic(Some(local(0)), "probe", [copy_operand(0)]))
+            ],
+            terminator: MirTerminator.Ret(Some(copy_operand(0)))
+        )
+        val locals = [MirLocal(id: local(0), name: nil, type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false)]
+        val result = ssa_alloca_transform_blocks([entry, next], locals, BlockId.entry())
+
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("ready")
+        match result.blocks[0].instructions[4].kind:
+            case Intrinsic(_, name, args):
+                expect(name).to_equal("bounds_check")
+                match args[0].kind:
+                    case Copy(loaded): expect(loaded.id).to_equal(3)
+                    case _: fail("intrinsic operand was not loaded from the reassigned local slot")
+            case _: fail("intrinsic was removed by the alloca transform")
+        match result.blocks[1].instructions[3].kind:
+            case Intrinsic(dest, _, args):
+                expect(dest.?).to_equal(true)
+                expect(dest.unwrap().id).to_equal(6)
+                match args[0].kind:
+                    case Copy(loaded): expect(loaded.id).to_equal(5)
+                    case _: fail("intrinsic operand was not loaded before destination rewrite")
+            case _: fail("intrinsic destination was not preserved by the alloca transform")
+
     it "marks repeated local definitions as SSA-transformable when local and borrow-safe":
         val blocks = one_block(
             [

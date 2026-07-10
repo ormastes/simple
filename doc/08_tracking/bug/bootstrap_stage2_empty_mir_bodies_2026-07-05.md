@@ -769,3 +769,30 @@ help_rc=0
 Remaining blocker for firmware production: `run_native_build_bootstrap` still
 returns `1`, so `native-build` command dispatch is matched but does not yet run
 the real native-build pipeline.
+
+## 2026-07-10 SIMD deployment continuation
+
+The current Stage 2 LLVM failure was reduced from preserved IR. The
+`bootstrap_output_from_args` function reused five local names across branch
+arms because `ssa_alloca_transform_blocks` rejected MIR containing bounds-check
+intrinsics. The alloca transform now accepts `Intrinsic`, rewrites its operands,
+and renames an intrinsic destination when it is a reassigned local. The focused
+MIR optimizer spec passes with `18 examples, 0 failures`.
+
+The next `llc` wall was an unconditional second declaration of
+`rt_array_get` in `bootstrap_emit_llvm_trailer`; normal runtime declarations
+already emit its typed declaration. Removing the duplicate advances Stage 2
+through LLVM and native linking. The bootstrap source-contract spec passes with
+`13 examples, 0 failures`.
+
+With `SIMPLE_RUNTIME_PATH` exported as the production wrapper does:
+
+- Stage 2 produced a 117 MiB bootstrap binary.
+- Stage 3 produced a 113 MiB bootstrap binary in 16.2 seconds and prints
+  `simple-bootstrap 1.0.0-beta`.
+- Stage 4 compiled 1,177 modules and linked a 42 MiB full CLI in 229.2 seconds.
+
+Stage 4 is not deployable. Its link accepted 822 unresolved-symbol stubs, and
+the standard `-c 'print(1+1)'` smoke aborts with `field access on nil receiver`
+and exit 132. The next owner is unresolved-stub rejection/closure completeness;
+do not restore seed fallback or deploy this artifact.
