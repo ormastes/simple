@@ -57,8 +57,8 @@ lane must extend that work rather than replace its stable intent API.
 - No per-domain reservation, high/low watermark, or starvation protection.
 - No incremental telemetry counters or bounded pressure candidate structure.
 - Virtio GPU/NIC tests prove device models and descriptors, not memory migration.
-- No repository entity named “SimpleQ OS” was found. The authoritative OS is
-  SimpleOS; “SimpleQ” needs user confirmation if it denotes a separate target.
+- No repository entity named “SimpleQ OS” was found. The user clarified that
+  “SimpleQ OS” was a typo; SimpleOS is the only OS target for this feature.
 - Kernel syscall DMA allocates individual pages but exports only the first
   physical address while virtio callers perform `phys + offset`; this must be
   replaced by the existing contiguous PMM allocator or a real scatter/gather
