@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-# Bootstrap wrapper for Linux and FreeBSD.
+# Bootstrap wrapper for Linux, macOS, Windows/MSYS2, and FreeBSD.
 #
 # Output layout uses <arch>-<vendor>-<os>-<abi> target triple:
 #   build/bootstrap/stage{1,2,3}/<triple>/simple
@@ -16,11 +16,8 @@ Usage: scripts/bootstrap/bootstrap-from-scratch.sh [options]
 
 Bootstrap wrapper.
 
-Linux:
+Linux / macOS / Windows (Git Bash or MSYS2) / FreeBSD:
   Runs the verified staged bootstrap pipeline using the active runtime binary.
-
-FreeBSD / --target=freebsd-x86_64:
-  Runs the FreeBSD seed bootstrap verifier using bin/freebsd/simple.
 
 SimpleOS / --target=simpleos-x86_64:
   Runs the host-driven SimpleOS bootstrap target lane and stages guest artifacts
@@ -37,6 +34,8 @@ Options:
   --pure-simple      Compatibility alias for the default no-Rust rebuild mode.
   --mode=<name>      Pure-Simple build mode: dynload or one-binary
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
+  --full-cli         Relink the full CLI after the staged pure-Simple build.
+                     Implied by --deploy, --full-bootstrap, and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
@@ -59,6 +58,7 @@ verbose=0
 jobs=""
 pure_simple=0
 full_bootstrap=0
+full_cli=0
 fresh_cache=0
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 
@@ -84,6 +84,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --pure-simple)
       pure_simple=1
+      ;;
+    --full-cli)
+      full_cli=1
       ;;
     --fresh-cache|--no-cache)
       fresh_cache=1
@@ -156,19 +159,12 @@ target=$(normalize_target "${target}")
 
 host_os=$(uname -s 2>/dev/null || echo unknown)
 
-# FreeBSD dispatch (separate script)
-if [ "${target}" = "freebsd-x86_64" ] || [ "${host_os}" = "FreeBSD" ]; then
-  freebsd_args="--output=${output_dir}"
-  if [ "${deploy}" -eq 1 ]; then
-    freebsd_args="${freebsd_args} --deploy"
-  fi
-  if [ "${verbose}" -eq 1 ]; then
-    freebsd_args="${freebsd_args} --verbose"
-  fi
-  if [ -n "${jobs}" ]; then
-    freebsd_args="${freebsd_args} --jobs=${jobs}"
-  fi
-  exec "${repo_root}/scripts/bootstrap/bootstrap-freebsd-seed.sh" ${freebsd_args}
+# FreeBSD must build inside FreeBSD. Linux hosts use the QEMU verifier, which
+# syncs the repository and invokes this same wrapper in the guest.
+if [ "${target}" = "freebsd-x86_64" ] && [ "${host_os}" != "FreeBSD" ]; then
+  echo "error: FreeBSD bootstrap must run inside FreeBSD." >&2
+  echo "  Linux host: sh scripts/check/check-freebsd-bootstrap-qemu.shs --full" >&2
+  exit 1
 fi
 
 # SimpleOS target-lane dispatch (host-driven bootstrap to staged guest artifacts)
@@ -194,6 +190,63 @@ PLATFORM="${PLATFORM_TRIPLE}"
 arch="${PLATFORM_ARCH}"
 os="${PLATFORM_OS}"
 echo "Platform: ${PLATFORM}"
+
+exe_suffix=""
+archive_prefix="lib"
+archive_suffix=".a"
+if [ "${os}" = "windows" ]; then
+  exe_suffix=".exe"
+  archive_prefix=""
+  archive_suffix=".lib"
+fi
+
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256 >/dev/null 2>&1; then
+    sha256 -q "$1"
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$1" | awk '{print $NF}'
+  else
+    echo "error: no SHA-256 tool found (sha256sum, shasum, sha256, or openssl)" >&2
+    return 1
+  fi
+}
+
+hash_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256 >/dev/null 2>&1; then
+    sha256 | awk '{print $NF}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 | awk '{print $NF}'
+  else
+    echo "error: no SHA-256 tool found (sha256sum, shasum, sha256, or openssl)" >&2
+    return 1
+  fi
+}
+
+hash_path_list() {
+  while IFS= read -r file; do
+    printf '%s  %s\n' "$(hash_file "${file}")" "${file}"
+  done
+}
+
+run_timeout() {
+  timeout_seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${timeout_seconds}" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "${timeout_seconds}" "$@"
+  else
+    "$@"
+  fi
+}
 
 if [ -n "${LLVM_PREFIX:-}" ] && [ -d "${LLVM_PREFIX}/bin" ]; then
   case ":${PATH}:" in
@@ -250,11 +303,11 @@ native_cache_freshened=0
 
 bootstrap_wide_inputs_hash() {
   {
-    find src/compiler src/app src/lib -name '*.spl' -print0 2>/dev/null | LC_ALL=C sort -z \
-      | xargs -0 sha256sum 2>/dev/null
-    printf 'backend=%s mode=%s\n' "${backend}" "${bootstrap_mode}"
+    # Source-level invalidation belongs to the native-build cache, which
+    # fingerprints each module. This stamp covers only build-wide context.
+    printf 'platform=%s backend=%s mode=%s\n' "${PLATFORM}" "${backend}" "${bootstrap_mode}"
     env | LC_ALL=C sort | awk '/^SIMPLE_.*(AOP|MDSOC|WEAV|LOAD|INTERPRET|EXECUTION|LIB|NATIVE_BUILD)/ { print }'
-  } | sha256sum | awk '{print $1}'
+  } | hash_stream
 }
 
 prepare_native_cache() {
@@ -276,7 +329,7 @@ prepare_native_cache() {
     return
   fi
   if [ ! -f "${native_cache_stamp}" ] || [ "$(cat "${native_cache_stamp}" 2>/dev/null)" != "${current_hash}" ]; then
-    echo "  ${label}: clearing native cache (compiler/AOP/loader/interpreter inputs changed)"
+    echo "  ${label}: clearing native cache (platform/backend/AOP build context changed)"
     rm -rf "${native_cache_dir}/"
     mkdir -p "${native_cache_dir}"
     printf '%s\n' "${current_hash}" > "${native_cache_stamp}"
@@ -317,8 +370,8 @@ run_logged() {
 # Bootstrap pipeline
 # ===========================================================================
 
-seed_bin="src/compiler_rust/target/bootstrap/simple"
-native_all_lib="src/compiler_rust/target/bootstrap/libsimple_native_all.a"
+seed_bin="src/compiler_rust/target/bootstrap/simple${exe_suffix}"
+native_all_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_native_all${archive_suffix}"
 
 # Detect stale seed OR stale runtime library by CONTENT, not mtime.
 #
@@ -338,14 +391,13 @@ seed_stamp="${seed_bin}.inputs.sha256"
 seed_inputs_hash() {
   {
     find src/compiler_rust \( -name '*.rs' -o -name 'Cargo.toml' \) \
-      -not -path '*/target/*' -print0 2>/dev/null | LC_ALL=C sort -z \
-      | xargs -0 sha256sum 2>/dev/null
-    find src/runtime \( -name '*.c' -o -name '*.h' \) -print0 2>/dev/null | LC_ALL=C sort -z \
-      | xargs -0 sha256sum 2>/dev/null
-    sha256sum src/compiler_rust/Cargo.lock 2>/dev/null
+      -not -path '*/target/*' -type f -print 2>/dev/null | LC_ALL=C sort | hash_path_list
+    find src/runtime \( -name '*.c' -o -name '*.h' \) -type f -print 2>/dev/null \
+      | LC_ALL=C sort | hash_path_list
+    printf '%s  %s\n' "$(hash_file src/compiler_rust/Cargo.lock)" src/compiler_rust/Cargo.lock
     printf 'profile=bootstrap backend=%s features=%s\n' "${backend}" "${llvm_features}"
     rustc -V 2>/dev/null
-  } | sha256sum | awk '{print $1}'
+  } | hash_stream
 }
 seed_stale=0
 # (content-hash staleness gate runs below, after backend/llvm_features settle)
@@ -361,7 +413,11 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
     llvm_features="--features llvm"
     # macOS needs LIBRARY_PATH for zstd and other Homebrew libs
     if [ "${host_os}" = "Darwin" ]; then
-      export LIBRARY_PATH="${LIBRARY_PATH:+${LIBRARY_PATH}:}/opt/homebrew/lib"
+      brew_prefix="$(brew --prefix 2>/dev/null || true)"
+      if [ -n "${brew_prefix}" ]; then
+        export HOMEBREW_PREFIX="${brew_prefix}"
+        export LIBRARY_PATH="${LIBRARY_PATH:+${LIBRARY_PATH}:}${brew_prefix}/lib"
+      fi
       export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
     fi
   else
@@ -464,8 +520,8 @@ else
   # the self-hosting frontend now fails closed instead of linking a ret-0 stub
   # (doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md), so a
   # stage-2 build error must not abort the whole pipeline.
-  stage2_bin="${output_dir}/stage2/${PLATFORM}/simple"
-  stage3_bin="${output_dir}/stage3/${PLATFORM}/simple"
+  stage2_bin="${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}"
+  stage3_bin="${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}"
   rm -f "${stage2_bin}" "${stage3_bin}"
   set +e
   env RUST_LOG="${RUST_LOG:-error}" \
@@ -519,7 +575,7 @@ else
   set -e
 
   echo "  stage3-native-build log: ${log_dir}/stage3-native-build.log"
-  if [ "${stage3_status}" -eq 0 ] && [ -x "${output_dir}/stage3/${PLATFORM}/simple" ]; then
+  if [ "${stage3_status}" -eq 0 ] && [ -x "${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}" ]; then
     stage3_ok=1
     echo "  Stage 3 succeeded"
   else
@@ -532,9 +588,9 @@ else
 fi
 
 # Locate stage outputs — check new layout first, fall back to flat
-if [ -x "${output_dir}/stage2/${PLATFORM}/simple" ]; then
-  stage2="${output_dir}/stage2/${PLATFORM}/simple"
-  stage3="${output_dir}/stage3/${PLATFORM}/simple"
+if [ -x "${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}" ]; then
+  stage2="${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}"
+  stage3="${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}"
 elif [ -x "${output_dir}/simple_stage2" ]; then
   stage2="${output_dir}/simple_stage2"
   stage3="${output_dir}/simple_stage3"
@@ -551,8 +607,8 @@ fi
 # Decide which compiler to use for stage 4
 stage4_is_seed=0
 if [ "${stage3_ok:-0}" -eq 1 ] && [ -x "${stage3}" ]; then
-  hash2=$(sha256sum "${stage2}" | awk '{print $1}')
-  hash3=$(sha256sum "${stage3}" | awk '{print $1}')
+  hash2=$(hash_file "${stage2}")
+  hash3=$(hash_file "${stage3}")
   echo "stage2 sha256: ${hash2}"
   echo "stage3 sha256: ${hash3}"
   if [ "${hash2}" != "${hash3}" ]; then
@@ -567,6 +623,22 @@ else
   echo "Stage 3 unavailable — using seed for stage 4"
   stage_for_build="${seed_bin}"
   stage4_is_seed=1
+fi
+
+# Fast iteration stops after the pure-Simple dynload stages. Relinking the
+# complete CLI is explicit because it is the dominant cost and is unnecessary
+# for ordinary compiler/app/lib edits that are consumed through dynload caches.
+if [ "${deploy}" -eq 1 ] || [ "${full_bootstrap}" -eq 1 ] || [ "${bootstrap_mode}" = "one-binary" ]; then
+  full_cli=1
+fi
+if [ "${full_cli}" -eq 0 ]; then
+  echo "Pure-Simple dynload build complete; full CLI relink skipped."
+  echo "  cache: ${native_cache_dir}"
+  echo "  use --full-cli, --deploy, --mode=one-binary, or --full-bootstrap to relink"
+  if [ "${stage3_ok:-0}" -eq 0 ]; then
+    exit 2
+  fi
+  exit 0
 fi
 
 # When stage 4 uses the Rust seed, --backend llvm-lib triggers the
@@ -602,7 +674,7 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
     --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
-    -o "${full_dir}/simple"
+    -o "${full_dir}/simple${exe_suffix}"
 else
   run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
@@ -615,18 +687,18 @@ else
     --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
-    -o "${full_dir}/simple"
+    -o "${full_dir}/simple${exe_suffix}"
 fi
 
-full_bin="${full_dir}/simple"
+full_bin="${full_dir}/simple${exe_suffix}"
 if [ ! -x "${full_bin}" ]; then
   echo "error: failed to compile full CLI binary from main.spl" >&2
   exit 1
 fi
 
-install -m755 "${seed_bin}" "${full_dir}/simple_seed"
+install -m755 "${seed_bin}" "${full_dir}/simple_seed${exe_suffix}"
 
-stage4_smoke="$(setsid timeout 30 "${full_bin}" -c 'print(1+1)' 2>/dev/null)"
+stage4_smoke="$(run_timeout 30 "${full_bin}" -c 'print(1+1)' 2>/dev/null)"
 if [ "${stage4_smoke}" != "2" ]; then
   echo "error: stage4 binary failed smoke test (-c 'print(1+1)' -> '${stage4_smoke}')" >&2
   exit 1
@@ -669,7 +741,7 @@ if [ "${build_mcp}" -eq 1 ]; then
         --mode "${bootstrap_mode}" \
         --entry "${mcp_spl}" \
         --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-        -o "${full_dir}/${mcp_name}" \
+        -o "${full_dir}/${mcp_name}${exe_suffix}" \
         >"${log_dir}/${mcp_log}.log" 2>&1
     else
       env RUST_LOG="${RUST_LOG:-error}" \
@@ -684,7 +756,7 @@ if [ "${build_mcp}" -eq 1 ]; then
         --mode "${bootstrap_mode}" \
         --entry "${mcp_spl}" \
         --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-        -o "${full_dir}/${mcp_name}" \
+        -o "${full_dir}/${mcp_name}${exe_suffix}" \
         >"${log_dir}/${mcp_log}.log" 2>&1
     fi
     mcp_status=$?
@@ -693,11 +765,11 @@ if [ "${build_mcp}" -eq 1 ]; then
     if [ "${mcp_status}" -ne 0 ]; then
       mcp_build_ok=0
       echo "  WARNING: ${mcp_name} build failed (exit ${mcp_status})"
-    elif [ ! -s "${full_dir}/${mcp_name}" ]; then
+    elif [ ! -s "${full_dir}/${mcp_name}${exe_suffix}" ]; then
       mcp_build_ok=0
       echo "  WARNING: ${mcp_name} produced a zero-byte file"
     else
-      echo "  ${mcp_name}: ${full_dir}/${mcp_name}"
+      echo "  ${mcp_name}: ${full_dir}/${mcp_name}${exe_suffix}"
     fi
   done
 else
@@ -718,10 +790,10 @@ if [ "${deploy}" -eq 1 ]; then
   # doc/08_tracking/bug/stage4_deploy_no_seed_test_runner_blocked_2026-06-11.md).
   seed_probe() {
     [ -x "$1" ] || return 1
-    out="$(setsid timeout 30 "$1" -c 'print(1+1)' 2>/dev/null)" || return 1
+    out="$(run_timeout 30 "$1" -c 'print(1+1)' 2>/dev/null)" || return 1
     [ "${out}" = "2" ]
   }
-  seed_delegate="${deploy_dir}/simple_seed"
+  seed_delegate="${deploy_dir}/simple_seed${exe_suffix}"
   if ! seed_probe "${seed_delegate}"; then
     seed_src=""
     for cand in src/compiler_rust/target/bootstrap/simple \
@@ -737,18 +809,19 @@ if [ "${deploy}" -eq 1 ]; then
     echo "Installed probed seed delegate: ${seed_src} -> ${seed_delegate}"
   fi
 
-  prev_bin="${deploy_dir}/simple.pre_deploy"
-  [ -x "${deploy_dir}/simple" ] && cp "${deploy_dir}/simple" "${prev_bin}"
-  install -m755 "${full_bin}" "${deploy_dir}/simple"
-  echo "Deployed full CLI binary to ${deploy_dir}/simple"
+  deployed_bin="${deploy_dir}/simple${exe_suffix}"
+  prev_bin="${deploy_dir}/simple${exe_suffix}.pre_deploy"
+  [ -x "${deployed_bin}" ] && cp "${deployed_bin}" "${prev_bin}"
+  install -m755 "${full_bin}" "${deployed_bin}"
+  echo "Deployed full CLI binary to ${deployed_bin}"
 
   # Post-swap smoke: the deployed binary must evaluate code; restore on failure.
-  smoke_out="$(setsid timeout 30 "${deploy_dir}/simple" -c 'print(1+1)' 2>/dev/null)"
+  smoke_out="$(run_timeout 30 "${deployed_bin}" -c 'print(1+1)' 2>/dev/null)"
   if [ "${smoke_out}" != "2" ]; then
     echo "ERROR: deployed binary failed smoke test (-c 'print(1+1)' -> '${smoke_out}')." >&2
     if [ -x "${prev_bin}" ]; then
-      mv "${prev_bin}" "${deploy_dir}/simple"
-      echo "Restored previous binary to ${deploy_dir}/simple" >&2
+      mv "${prev_bin}" "${deployed_bin}"
+      echo "Restored previous binary to ${deployed_bin}" >&2
     fi
     exit 1
   fi
@@ -757,9 +830,9 @@ if [ "${deploy}" -eq 1 ]; then
   # Deploy MCP servers if they were built successfully
   if [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ]; then
     for mcp_bin_name in simple_mcp_server simple_lsp_mcp_server; do
-      if [ -x "${full_dir}/${mcp_bin_name}" ] && [ -s "${full_dir}/${mcp_bin_name}" ]; then
-        install -m755 "${full_dir}/${mcp_bin_name}" "${deploy_dir}/${mcp_bin_name}"
-        echo "Deployed ${mcp_bin_name} to ${deploy_dir}/${mcp_bin_name}"
+      if [ -x "${full_dir}/${mcp_bin_name}${exe_suffix}" ] && [ -s "${full_dir}/${mcp_bin_name}${exe_suffix}" ]; then
+        install -m755 "${full_dir}/${mcp_bin_name}${exe_suffix}" "${deploy_dir}/${mcp_bin_name}${exe_suffix}"
+        echo "Deployed ${mcp_bin_name} to ${deploy_dir}/${mcp_bin_name}${exe_suffix}"
       fi
     done
   fi

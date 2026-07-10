@@ -710,16 +710,6 @@ pub fn rt_exec(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(result as i64))
 }
 
-/// Execute a shell command and return captured stdout.
-pub fn rt_exec_output(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
-        return Ok(Value::Str(String::new()));
-    }
-    let cmd = value_to_runtime_string(&args[0]);
-    let result = simple_runtime::value::cli_sffi::rt_exec_output(cmd);
-    Ok(runtime_string_to_value(result))
-}
-
 /// Get file hash
 pub fn rt_file_hash(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {

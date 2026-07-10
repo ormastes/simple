@@ -53,23 +53,37 @@ impl MemorySwapCoordinator:
             return manager_prepared
         val vmm_prepared = memory_vmm_prepare_swap(virt_addr)
         if not vmm_prepared.ok:
-            me.manager.rollback_swap(allocation_id, owner_id)
+            val manager_rolled_back = me.manager.rollback_swap(allocation_id, owner_id)
+            if not manager_rolled_back.ok:
+                return _memory_swap_coordinator_failure("manager-rollback-failed", allocation_id)
             return _memory_swap_coordinator_failure(vmm_prepared.reason, allocation_id)
         val bytes = memory_vmm_read_physical(vmm_prepared.txn.source_phys_addr, byte_length)
         val written = me.store.write(allocation_id, page_index, bytes)
         if not written.ok:
-            me.manager.rollback_swap(allocation_id, owner_id)
+            val manager_rolled_back = me.manager.rollback_swap(allocation_id, owner_id)
+            if not manager_rolled_back.ok:
+                return _memory_swap_coordinator_failure("manager-rollback-failed", allocation_id)
             return _memory_swap_coordinator_failure(written.reason, allocation_id)
         val vmm_committed = memory_vmm_commit_swap(vmm_prepared.txn)
         if not vmm_committed.ok:
-            me.store.release(written.slot_id, allocation_id)
-            me.manager.rollback_swap(allocation_id, owner_id)
+            val manager_rolled_back = me.manager.rollback_swap(allocation_id, owner_id)
+            if not manager_rolled_back.ok:
+                return _memory_swap_coordinator_failure("manager-rollback-failed", allocation_id)
+            val released = me.store.release(written.slot_id, allocation_id)
+            if not released.ok:
+                return _memory_swap_coordinator_failure("slot-cleanup-failed", allocation_id)
             return _memory_swap_coordinator_failure(vmm_committed.reason, allocation_id)
         val manager_committed = me.manager.commit_swap(allocation_id, owner_id, written.slot_id)
         if not manager_committed.ok:
-            memory_vmm_rollback_swap(vmm_committed.txn)
-            me.store.release(written.slot_id, allocation_id)
-            me.manager.rollback_swap(allocation_id, owner_id)
+            val vmm_rolled_back = memory_vmm_rollback_swap(vmm_committed.txn)
+            if not vmm_rolled_back.ok:
+                return _memory_swap_coordinator_failure("vmm-rollback-failed", allocation_id)
+            val manager_rolled_back = me.manager.rollback_swap(allocation_id, owner_id)
+            if not manager_rolled_back.ok:
+                return _memory_swap_coordinator_failure("manager-rollback-failed", allocation_id)
+            val released = me.store.release(written.slot_id, allocation_id)
+            if not released.ok:
+                return _memory_swap_coordinator_failure("slot-cleanup-failed", allocation_id)
             return manager_committed
         pmm_free_page_raw(vmm_committed.txn.source_phys_addr)
         me.mappings.push(MemorySwapPageMapping(
@@ -108,23 +122,27 @@ impl MemorySwapCoordinator:
             return _memory_swap_coordinator_failure("map-failed", allocation_id)
         val manager_committed = me.manager.commit_restore(allocation_id, owner_id)
         if not manager_committed.ok:
-            vmm_unmap_page(VirtAddr(addr: mapping.txn.virt_addr))
+            if not vmm_unmap_page(VirtAddr(addr: mapping.txn.virt_addr)):
+                return _memory_swap_coordinator_failure("vmm-rollback-failed", allocation_id)
             pmm_free_page_raw(destination)
-            me.manager.rollback_restore(allocation_id, owner_id)
+            val manager_rolled_back = me.manager.rollback_restore(allocation_id, owner_id)
+            if not manager_rolled_back.ok:
+                return _memory_swap_coordinator_failure("manager-rollback-failed", allocation_id)
             return manager_committed
-        val released = me.store.release(mapping.slot_id, allocation_id)
-        if not released.ok:
-            return _memory_swap_coordinator_failure(released.reason, allocation_id)
+        val _released = me.store.release(mapping.slot_id, allocation_id)
         val last = me.mappings.len() - 1
         me.mappings[index] = me.mappings[last]
         me.mappings.pop()
         me.last_restore_code = 0
+        # Registry and VMM ownership are committed. Failed slot release is a
+        # cleanup leak, not a failed restore that callers should retry.
         manager_committed
 
     me has_swapped_mapping(allocation_id: u64) -> bool:
         me._find_mapping(allocation_id) >= 0
 
     me restore_faulting_page(virt_addr: u64) -> MemoryLevelingOperation:
+        me.last_restore_code = -1
         val page_addr = (virt_addr / 4096) * 4096
         val index = me._find_mapping_by_virt(page_addr)
         if index < 0:

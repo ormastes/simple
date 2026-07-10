@@ -173,6 +173,57 @@ impl MirLowering:
                         return sw_local
             return sw_receiver
 
+        # Bug #137 (follow-up): the typed substring/slice special case below is
+        # gated on receiver.type_ == Some(Str), but bootstrap flat HIR sets
+        # EVERY expr type_ to nil, so `args[i].substring(2)` /
+        # `args[i].substring(9)` (the -oFILE / --output=FILE path parsing in
+        # bootstrap_main lines 17,21) never reached it and fell through to
+        # `case Unresolved:` -> const 0 -> wrong/garbage filename. Handle it
+        # type-independently under bootstrap, mirroring the starts_with fix.
+        #
+        # Representation: the receiver is a tagged argv element (rt_string_new-
+        # built), but spl_str_slice/spl_str_len operate on RAW char*. Coerce the
+        # tagged receiver to its null-terminated buffer once via rt_string_data
+        # (tagged -> raw ptr). The raw-char* result matches the non-bootstrap
+        # Str-path representation the downstream -o/--output filename handling
+        # expects. Supports both `.substring(start)` (1 arg; end = spl_str_len)
+        # and `.substring(start, end)` (2 args).
+        if (method == "substring" or method == "slice") and (args.len() == 1 or args.len() == 2) and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            val sub_recv_tagged = self.lower_expr(receiver)
+            val strdata_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_data"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+            ))
+            var b_subsd = self.builder
+            val sub_recv_res = b_subsd.emit_call(strdata_op, [mir_operand_copy(sub_recv_tagged)], MirType(kind: MirTypeKind.Opaque("str")))
+            self.builder = b_subsd
+            if val sub_recv_raw = sub_recv_res:
+                var sub_args: [MirOperand] = [mir_operand_copy(sub_recv_raw)]
+                for arg in args:
+                    val sub_arg_local = self.lower_expr(arg.value)
+                    sub_args = sub_args.push(mir_operand_copy(sub_arg_local))
+                if args.len() == 1:
+                    val sublen_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("spl_str_len"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_sublen = self.builder
+                    val sublen_res = b_sublen.emit_call(sublen_op, [mir_operand_copy(sub_recv_raw)], MirType.i64())
+                    self.builder = b_sublen
+                    if val sublen_local = sublen_res:
+                        sub_args = sub_args.push(mir_operand_copy(sublen_local))
+                val subslice_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("spl_str_slice"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                ))
+                var b_subslice = self.builder
+                val subslice_res = b_subslice.emit_call(subslice_op, sub_args, MirType(kind: MirTypeKind.Opaque("str")))
+                self.builder = b_subslice
+                if val subslice_local = subslice_res:
+                    return subslice_local
+                return sub_recv_raw
+            return sub_recv_tagged
+
         if (method == "substring" or method == "slice"):
             val maybe_receiver_type = receiver.type_
             match maybe_receiver_type:

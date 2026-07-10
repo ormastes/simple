@@ -1088,7 +1088,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_error_type_mismatch", error_sffi::rt_error_type_mismatch);
     insert_simple!("rt_error_undefined_var", error_sffi::rt_error_undefined_var);
     insert_simple!("rt_exec", cranelift::rt_exec);
-    insert_simple!("rt_exec_output", cranelift::rt_exec_output);
     insert_simple!("rt_execute_native", native_sffi::rt_execute_native);
     insert_simple!("rt_exit", system::rt_exit);
     insert_simple!("rt_fault_set_execution_limit", cli::rt_fault_set_execution_limit);

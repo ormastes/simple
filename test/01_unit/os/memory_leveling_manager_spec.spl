@@ -8,7 +8,8 @@ use std.memory_leveling.{
 }
 use os.kernel.memory.memory_leveling_manager.{
     memory_leveling_manager_new,
-    simpleos_memory_leveling_config_default
+    simpleos_memory_leveling_config_default,
+    simpleos_memory_leveling_config_validate
 }
 use os.kernel.memory.memory_swap.{memory_swap_store_new}
 
@@ -26,6 +27,37 @@ describe "SimpleOS memory leveling manager":
         expect(os_config.pressure_batch_limit).to_equal(7)
         expect(placement.preferred_tier.name).to_equal("cpu_cold")
         expect(os_config.swap_enabled).to_equal(true)
+
+    it "validates SimpleOS policy without changing language placement":
+        val intent = simple_memory_iso_cpu_cold()
+        val placement = simple_memory_placement_config_from_intent(intent)
+        var config = simpleos_memory_leveling_config_default()
+        config.cpu_low_watermark_bytes = config.cpu_high_watermark_bytes + 1
+
+        expect(simpleos_memory_leveling_config_validate(config)).to_equal("invalid-watermark")
+        expect(placement.preferred_tier.name).to_equal("cpu_cold")
+
+    it "rejects restore when resident capacity was consumed while swapped":
+        var config = simpleos_memory_leveling_config_default()
+        config.physical_capacity_bytes = 10
+        config.cpu_capacity_bytes = 10
+        config.cpu_reserved_bytes = 0
+        config.cpu_low_watermark_bytes = 0
+        config.cpu_high_watermark_bytes = 10
+        config.gpu_reserved_bytes = 0
+        config.nic_reserved_bytes = 0
+        config.dma_reserved_bytes = 0
+        val manager = memory_leveling_manager_new(config)
+        val intent = simple_memory_iso_cpu_cold()
+        val placement = simple_memory_placement_config_from_intent(intent)
+        val policy = memory_leveling_policy_from_intent(intent)
+        val swapped = manager.request(placement, policy, 10, 1, 1)
+        expect(manager.prepare_swap(swapped.allocation_id, 1).ok).to_equal(true)
+        expect(manager.commit_swap(swapped.allocation_id, 1, 1).ok).to_equal(true)
+        expect(manager.request(placement, policy, 10, 1, 2).ok).to_equal(true)
+
+        expect(manager.prepare_restore(swapped.allocation_id, 1).reason).to_equal("domain-capacity")
+        expect(manager.get(swapped.allocation_id).unwrap().state.name).to_equal("swapped")
 
     it "enforces ordered DMA ownership and balanced protection counters":
         val intent = simple_memory_iso_cpu_cold()
@@ -72,6 +104,8 @@ describe "SimpleOS memory leveling manager":
         config.physical_capacity_bytes = 100
         config.cpu_capacity_bytes = 100
         config.cpu_reserved_bytes = 20
+        config.cpu_low_watermark_bytes = 25
+        config.cpu_high_watermark_bytes = 50
         config.gpu_capacity_bytes = 50
         config.gpu_reserved_bytes = 10
         config.nic_reserved_bytes = 10
