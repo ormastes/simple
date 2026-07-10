@@ -785,3 +785,194 @@ over a MIR that already has genuine holes in it.
 unchanged — `native-build worker exited with code 139`, Stage 1 FAILED. Logs: scratchpad
 `mir_dump_run1.log` (parse-error run), `mir_dump_run2.log` (post-loop dump, unreachable), `mir_dump_run3.log`
 (decisive — function-entry dump).
+
+## 2026-07-10 — construct ID: 6/13 gaps pinned to `lower_if`'s phantom `result` local (STATIC read, no bootstrap run this pass)
+
+**Entry file confirmed.** `doc/03_plan/compiler/bootstrap/redeploy_stage4_plan_2026-07-08.md` names
+`src/app/cli/bootstrap_main.spl` as the Stage-1 entry; its `fn main() -> i64:` (lines 44-73) is the
+dumped function. Read in full and correlated line-by-line against `mir_dump_run3.log:2549-2623`.
+
+**Block-to-source correlation.** `main`'s 19 MIR blocks are exactly `1 entry (block0) + 6×3`
+(then/else/merge) for the 6 `if` expressions the source lowers via `lower_if`
+(`argc<1`, `first=="--version"`, `first=="--help"`, `first=="native-build"`, `first=="compile"`, and
+the nested `argc<2` inside the `compile` arm) — block-id creation order (`then_block, else_block,
+merge_block` allocated in that order inside `lower_if`, `mir_lowering_stmts.spl:396-398`) reproduces
+the observed id assignment exactly: `(1,2,3)=if1, (4,5,6)=if2, (7,8,9)=if3, (10,11,12)=if4,
+(13,14,15)=if5, (16,17,18)=if6[nested]`. The 6 `else_i` blocks (2,5,8,11,14,17) are all empty (no
+source-level `else:` anywhere in `main`, so `lower_if`'s implicit-else path just
+`terminate_goto(merge)`, matching the guide's per-block gap-adjacency check).
+
+**Confirmed construct (6 of 13 gaps: `_7,_20,_27,_44,_49,_52`, each immediately preceding a `then_i`
+block's content — `_7`→block1, `_20`→block4, `_27`→block7, `_44`→block10, `_49`→block13, `_52`→block16).**
+Every one of `main`'s 6 `if` arms ends in an explicit `return` (a guard clause: `if COND: <prints...>;
+return N`). `lower_if` (`src/compiler/50.mir/mir_lowering_stmts.spl:391-437`) unconditionally allocates
+a merge-value placeholder **before** lowering either arm:
+
+```
+me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?) -> LocalId:
+    val cond_local = self.lower_expr(cond)
+    var b = self.builder
+    val then_block = b.new_block(Some("then"))
+    val else_block = b.new_block(Some("else"))
+    val merge_block = b.new_block(Some("merge"))
+    val result = b.new_temp(MirType.i64())          # <-- allocated HERE, line 399
+    b.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
+    ...
+    if not b3.current_block_has_explicit_terminator():   # line 409
+        if val then_local = then_result:
+            b3.emit_copy(result, then_local)             # <-- ONLY def-site for `result`
+        b3.terminate_goto(merge_block)
+    ...
+```
+
+`result`'s local id (`new_temp`, line 399) is allocated in the *parent* block right after the
+condition, i.e. numerically it is the id immediately preceding `then_block`'s own content — exactly
+the position of every one of these 6 gaps. Its **only** defining instruction is the
+`emit_copy(result, then_local)` at line 411 — but that line is now gated behind
+`current_block_has_explicit_terminator()` (added by commit `2eb21aa289` "fix(compiler): lower bootstrap
+cli conditions", 2026-07-07, to stop a *different* bug: double-terminating a block that already ends in
+`return`). For every guard-clause `if` in `main` the then-arm already has a `Return` terminator, so
+`current_block_has_explicit_terminator()` is true, the `if not ...:` body is skipped entirely, and
+`result` is left permanently undefined — `lower_if` still *returns* `result` as this if-expression's
+value (line 437, unconditional), so the id is live/"used" (by the discarding caller and by anything
+downstream that walks all locals) even though nothing ever emitted its `Const`/`Copy`/`Call`. This is
+exactly the "hands back a fresh local id but never emits its def" mechanism this session was asked to
+find, and the 2eb21aa289 diff is a clean, git-blamable smoking gun (before that commit, the `emit_copy`
++ `terminate_goto` pair was unconditional, so `result` was always defined, at the cost of the
+double-terminator bug 2eb21aa289 was fixing).
+
+**Proposed patch (NOT applied — `mir_lowering_stmts.spl` is peer-hot #79/#133 territory, orchestrator
+decides).** The double-terminator bug and the phantom-local bug are both real; the correct fix keeps
+the terminator guard but stops promising a value nobody will define — either (a) don't allocate
+`result` until we know at least one arm falls through, or (b) explicitly mark it as never read when
+both arms diverge. (a) is the smaller, more local change:
+
+```diff
+--- a/src/compiler/50.mir/mir_lowering_stmts.spl
++++ b/src/compiler/50.mir/mir_lowering_stmts.spl
+@@ -391,13 +391,10 @@
+     me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?) -> LocalId:
+         """Lower if expression."""
+         val cond_local = self.lower_expr(cond)
+ 
+         var b = self.builder
+         val then_block = b.new_block(Some("then"))
+         val else_block = b.new_block(Some("else"))
+         val merge_block = b.new_block(Some("merge"))
+-        val result = b.new_temp(MirType.i64())
+         b.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
+         self.builder = b
+ 
+         # Then block
+         var b2 = self.builder
+         b2.switch_to_block(then_block)
+         self.builder = b2
+         val then_result = self.lower_block(then_)
+         var b3 = self.builder
++        var result: LocalId? = nil
+         if not b3.current_block_has_explicit_terminator():
+             if val then_local = then_result:
++                if result == nil:
++                    result = b3.new_temp(MirType.i64())
+                 b3.emit_copy(result, then_local)
+             b3.terminate_goto(merge_block)
+         self.builder = b3
+ 
+         # Else block
+         var b4 = self.builder
+         b4.switch_to_block(else_block)
+         self.builder = b4
+         if val else_block_value = else_:
+             val else_result = self.lower_block(else_block_value)
+             var b5 = self.builder
+             if not b5.current_block_has_explicit_terminator():
+                 if val else_local = else_result:
++                    if result == nil:
++                        result = b5.new_temp(MirType.i64())
+                     b5.emit_copy(result, else_local)
+                 b5.terminate_goto(merge_block)
+             self.builder = b5
+         else:
+             var b5 = self.builder
+             b5.terminate_goto(merge_block)
+             self.builder = b5
+ 
+         # Merge block
+         var b6 = self.builder
+         b6.switch_to_block(merge_block)
+         self.builder = b6
+ 
+-        result
++        result ?? b6.new_temp(MirType.i64())
+```
+
+(Sketch only — needs a real pass to thread the `LocalId?`/lazy-alloc through cleanly and confirm no
+other caller relies on `result` being allocated before either arm lowers; e.g. a arm that recursively
+calls `lower_if` and expects the *outer* `result` id to already exist would break. The safer, smaller
+alternative is to leave allocation eager but make the **final line** conditional: only return `result`
+if at least one `emit_copy(result, ...)` actually ran, otherwise synthesize a fresh, always-unread
+`nil`/unit value — the crash symptom then depends on whether **any** downstream consumer still reads
+`main`'s discarded if-statement value; if statement-position calls discard the returned `LocalId`
+anyway (as `lower_stmt`'s `case Expr(expr): self.lower_expr(expr)` does — return value unused), simply
+never allocating `result` for a diverging arm and returning a sentinel (e.g. `LocalId(id: -1)` or a
+`LocalId?` threaded through `lower_if`'s signature) may be enough; that's an API-shape decision for
+whoever lands the fix.)
+
+**NOT pinned: the remaining 7 gaps (`_3`, and `_13,_24,_41,_46,_56,_64` — one immediately preceding
+each `merge_i` block's content: `_13`→block3, `_24`→block6, `_41`→block9, `_46`→block12, `_56`→block18,
+`_64`→block15).** These 6 "merge-preceding" gaps have the *identical* structural signature (an id
+allocated, consumed as if live, never emitted, positioned immediately before a block's first real
+instruction) but I could not find a second `new_temp`/`new_local` call site in `lower_if`,
+`switch_to_block`, `new_block`, `terminate_if`/`terminate_goto`, or `lower_block`
+(`function_lowering.spl:315-368`) that would explain a *second* per-`if` allocation — `lower_if` as
+read only calls `new_temp` once (line 399, already accounted for above). Ruled out by direct reading:
+shared local/block id counters (confirmed separate: `next_local_id` vs `next_block_id`,
+`mir_data.spl:33-34,180-183,227-230`); `emit_bounds_check_for_index` (`expr_dispatch.spl:71-98` — early
+`return`s with **no** allocation when `base.type_` is nil, which it is under bootstrap's flat HIR, so
+it's a no-op here, not a leak); the `try_lower_bootstrap_cli_arg_index` special case
+(`switch_operators_calls.spl:416-450` — doesn't match here since `all_args`/`first` are `Var`-bound
+locals, not the literal `get_cli_args()` call result at the index site); string-interpolation dropping
+under `SIMPLE_BOOTSTRAP` (`expressions.spl:227-236` — forces `hir_interps=nil`, a valid value, not a
+dangling id); and `lower_binop`'s op mapping (`switch_operators_calls.spl:340-366` — plain enum mapping,
+no temp allocation; the `PipeForward`/`Compose`/... `new_temp`-without-emit added by `2eb21aa289` in
+`expr_dispatch.spl`'s `Binary` arm doesn't apply — `main` uses only `Lt`/`Eq`, which take the `case _:`
+normal-binop path that always calls `emit_binop`, which always emits).
+
+The isolated intra-block gap `_3` (`argc = all_args.len()`, between `Copy(_2)`=`all_args:=call-result`
+and `Copy(_4)`=`argc:=copy(_3)`, matching the `val`-lowering `init_local = lower_expr(let_init); local =
+new_local(...); emit_copy(local, init_local)` pattern at `mir_lowering_stmts.spl:92-103`) is
+structurally the same "reserved id, no defining instruction" shape, and the one code site that matches
+it exactly is `lower_method_call`'s final `Unresolved` arm
+(`method_calls_literals.spl:253-258`):
+```
+case Unresolved:
+    self.error("unresolved method call: {method}", nil)
+    var b = self.builder
+    val temp = b.new_temp(MirType.unit())   # allocated, never self.emit()'d
+    self.builder = b
+    temp
+```
+— but I could **not** confirm `all_args.len()` actually reaches this arm: the dedicated `len`/`length`
+fast path earlier in the same function (`method_calls_literals.spl:84-104`) forces
+`len_symbol = "rt_array_len"` under `SIMPLE_BOOTSTRAP=="1"` whenever the receiver's HIR type is
+unresolved (the common bootstrap case), and that path always calls `emit_call` (which — read at
+`mir_data.spl:354-366` — unconditionally appends a `Call` `MirInst` before returning, no skip
+possible) and `return`s before ever reaching `match resolution:`. Per current `main` tip
+(`0e0214f24a`), that fast path should intercept `all_args.len()` and emit the `Call`. Either (a) the
+dump in this bug doc predates a fix that already lands this fast path correctly (stale artifact, worth
+a fresh capture before trusting `_3` further), or (b) something upstream of `lower_method_call`
+(receiver/method resolution, or a different desugaring of `.len()` for the *first* call in the
+function specifically) prevents this fast path from firing for this one call site — not distinguishable
+without an instrumented run, which is out of scope for this pass.
+
+**Honest summary of correlation reached:** 6/13 gaps pinned with high confidence to a single,
+git-blamable, easily-fixable bug (`lower_if`'s phantom `result`, `mir_lowering_stmts.spl:399` +
+`2eb21aa289`'s terminator gating). The other 7 share the exact same "id reserved, def skipped"
+fingerprint and are very likely 1 (or 2) sibling bugs in the same control-flow-lowering family, but the
+second call site was not locatable via static reading alone within this pass's scope — next step for
+whoever picks this up: instrument `new_temp`/`new_local` call sites in `mir_lowering_stmts.spl` and
+`function_lowering.spl` to log caller + resulting id, one bootstrap run, and match against
+`_13,_24,_41,_46,_56,_64` (predict: something invoked once per top-level `if`'s *merge* block entry,
+i.e. inside or immediately after the "Merge block" section at `mir_lowering_stmts.spl:432-437`, or in
+whatever wraps `lower_stmt`'s handling of an `Expr`-statement `if` — this pass's reading of both sites
+found no allocation, so the real site is somewhere not yet inspected).

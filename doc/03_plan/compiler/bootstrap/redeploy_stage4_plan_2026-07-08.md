@@ -249,6 +249,20 @@ wall, preserved for whoever resumes it):**
    `bin/simple build bootstrap` 3-stage and the extended smoke matrix before any
    redeploy to `bin/release`.
 
+## 2026-07-10 — construct ID for the 13-local MIR gap (static read, no run)
+
+Full writeup: `doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
+§"2026-07-10 — construct ID: 6/13 gaps pinned to `lower_if`'s phantom `result` local". Summary: 6 of the
+13 undefined locals in `main`'s MIR (`_7,_20,_27,_44,_49,_52`) are `lower_if`'s merge-value placeholder
+(`src/compiler/50.mir/mir_lowering_stmts.spl:399`, `val result = b.new_temp(MirType.i64())`), whose only
+defining `emit_copy` (lines 410-411 / 423-424) is now gated behind
+`current_block_has_explicit_terminator()` (added by `2eb21aa289`, 2026-07-07, to fix a double-terminator
+bug) — every guard-clause `if` in `main` ends in an explicit `return`, so that gate is always true and
+`result` is never defined even though `lower_if` still returns it. Proposed patch (not applied, sketch
+only) in the bug doc. The other 7 gaps (`_3,_13,_24,_41,_46,_56,_64`) share the identical fingerprint
+but the second call site was not located by static reading — see the bug doc's "NOT pinned" section for
+what was ruled out and the recommended next instrumentation.
+
 ## Landed this session (verified, on origin/main)
 
 - `7984ab3` — llvm-lib value_map return-threading + operand `LocalId.id` key →
