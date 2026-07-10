@@ -43,6 +43,17 @@ fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:
 # ============================================================================
 
 impl MirLowering:
+    me local_mir_type_of(local: LocalId) -> MirType?:
+        """Look up a local's registered MIR type (mirrors the scan in
+        local_is_runtime_array). Used to thread a runtime-array initializer's
+        real Array/Slice type onto an un-annotated `var xs = [...]` binding,
+        instead of the i64 default that would send later `xs[i]` reads down the
+        wrong raw-GEP path (they must take rt_array_get)."""
+        for item in self.builder.locals:
+            if item.id.id == local.id:
+                return Some(item.type_)
+        nil
+
     me lower_stmt(stmt: HirStmt):
         """Lower HIR statement to MIR."""
         # NOTE: previously declared `val stmt_kind: HirStmtKind` / `val
@@ -99,6 +110,19 @@ impl MirLowering:
                         if init_local_id < 0:
                             self.error("let initializer produced no local", Some(span))
                             return
+                        # Without an explicit annotation (`var xs = [...]`),
+                        # mir_type defaulted to i64, so `xs` lost the array type
+                        # and later `xs[i]` reads took the wrong raw-GEP path
+                        # (local_is_runtime_array checks THIS binding's MIR kind).
+                        # Thread the initializer's real Array/Slice type onto the
+                        # binding instead. Copy is unchanged (a runtime array is a
+                        # pointer; translate_copy_move keys off the source local),
+                        # so value semantics are preserved -- only the read-path
+                        # decision is corrected.
+                        val effective_type = if let_type == nil and self.local_is_runtime_array(init_local):
+                            self.local_mir_type_of(init_local) ?? mir_type
+                        else:
+                            mir_type
                         val bf_sym = self.bitfield_value_syms.get(init_local_id)
                         # Struct values are pointer-represented; alias the binding
                         # straight to the constructed local (like the bitfield
@@ -109,9 +133,11 @@ impl MirLowering:
                             self.local_map[symbol_value_id] = init_local
                         else:
                             var b = self.builder
-                            val local = b.new_local(nil, mir_type, LocalKind.Var)
+                            val local = b.new_local(nil, effective_type, LocalKind.Var)
                             self.builder = b
                             self.local_map[symbol_value_id] = local
+                            if self.runtime_array_locals.has(init_local.id):
+                                self.runtime_array_locals[local.id] = true
                             var b2 = self.builder
                             b2.emit_copy(local, init_local)
                             self.builder = b2
@@ -178,13 +204,25 @@ impl MirLowering:
                         # Key on init_local.id directly to match how
                         # lower_struct_construct writes the map.
                         val struct_sym: text? = if has_init: self.struct_value_syms.get(init_local.id) else: nil
+                        # See the disc==1 early-Let path: an un-annotated
+                        # `var xs = [...]` must inherit the initializer's real
+                        # Array/Slice type so later `xs[i]` reads take
+                        # rt_array_get instead of a raw GEP. (This arm is dead for
+                        # Let today -- disc==1 handles it above -- but kept in sync
+                        # so the two paths cannot silently diverge.)
+                        val effective_type = if type_ == nil and has_init and self.local_is_runtime_array(init_local):
+                            self.local_mir_type_of(init_local) ?? mir_type
+                        else:
+                            mir_type
                         if bf_sym != nil or struct_sym != nil:
                             self.local_map[symbol_id] = init_local
                         else:
                             var b = self.builder
-                            val local = b.new_local(nil, mir_type, LocalKind.Var)
+                            val local = b.new_local(nil, effective_type, LocalKind.Var)
                             self.builder = b
                             self.local_map[symbol_id] = local
+                            if has_init and self.runtime_array_locals.has(init_local.id):
+                                self.runtime_array_locals[local.id] = true
                             if has_init:
                                 var b2 = self.builder
                                 b2.emit_copy(local, init_local)
