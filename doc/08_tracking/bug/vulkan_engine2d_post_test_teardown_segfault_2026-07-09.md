@@ -1,5 +1,9 @@
 # Vulkan Engine2D Post-Test Teardown Segfault - 2026-07-09
 
+## Status
+
+Resolved on 2026-07-09.
+
 ## Severity
 
 P1. The direct Vulkan interpreter process dies during teardown after all
@@ -24,25 +28,24 @@ with `139` after `Segmentation fault`.
 
 `VulkanBackend.shutdown()` and `VulkanSession._cleanup()` previously destroyed
 buffers, pipelines, and shader modules without waiting for submitted work.
-Both now wait for the queue before destruction. The post-test crash remains,
-which puts the remaining fault below those owner-level object lifetimes.
+Both now wait for the queue before destruction.
+
+The standalone `VulkanBackend` then released only those per-renderer objects;
+the process-global logical device remained alive until C library teardown. GDB
+showed the NVIDIA Vulkan driver update thread faulting while `libEGL_nvidia`
+was closing from an atexit handler. The standalone shutdown path now calls the
+existing `vulkan_sffi_shutdown()` after its resources are released, so the
+runtime destroys the device before the loader begins process teardown.
 
 The test runner previously replaced a nonzero child exit with an otherwise
 green example summary. `test_runner_single.spl` now keeps the parsed counts but
 records at least one failure for every nonzero child exit, so `simple test
 test/02_integration/rendering/vulkan_strict_spec.spl --mode=interpreter --clean`
-correctly exits nonzero while the runtime bug remains.
+cannot report a future child crash as a passing summary.
 
-## Required Fix
+## Verification
 
-Make `rt_vulkan_init` and `rt_vulkan_shutdown` safe across repeated Engine2D
-probe/create/render/shutdown cycles, including device, queue, command-pool, and
-loader lifetime. Add a native or interpreter subprocess regression that fails
-when the child exits by signal after otherwise-green Vulkan assertions.
-
-## Current Evidence Rule
-
-Do not treat `vulkan_strict_spec.spl` as stable live Vulkan proof on this host
-until the direct child exit is clean. The generated 2D matrix and wrapper
-self-tests remain valid fail-closed contract checks, not a substitute for this
-runtime fix.
+`SIMPLE_LIB=src bin/simple run test/02_integration/rendering/vulkan_strict_spec.spl`
+now exits `0` after all 19 assertions, including repeated create/render/shutdown
+cycles. The runner's nonzero-child guard remains required so a future signal
+cannot be reported as a passing summary.
