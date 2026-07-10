@@ -232,6 +232,20 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                             Some(TypeId::STRING)
                         }
                         "rt_string_eq" | "rt_native_eq" | "rt_native_neq" => Some(TypeId::I64),
+                        // Array/collection length returns a native i64. Recording
+                        // it here types the `len()` result VReg so a CHAINED
+                        // `arr.len().to_i64()` (or `.to_u32()` etc.) sees an i64
+                        // receiver and takes the builtin-identity/cast path in
+                        // compile_method_call_static — identical to the
+                        // bound-intermediate `val n = arr.len(); n.to_i64()` form,
+                        // whose reload is a typed `Load`. Without this the chained
+                        // receiver is untyped, `prefer_builtin_first` is false, and
+                        // `i64.to_i64` falls through to name-based symbol
+                        // resolution that mis-picks an unrelated `Type.to_i64` in a
+                        // large whole-program link (x64 freestanding SSH kernel:
+                        // `our_version.len().to_i64()` returned garbage → empty
+                        // server version → KEX "incorrect signature").
+                        "rt_array_len" | "rt_len" => Some(TypeId::I64),
                         "rt_array_get_text" => Some(TypeId::STRING),
                         "rt_typed_bytes_u8_at" | "rt_typed_bytes_u8_data_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
                         "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" | "rt_typed_words_u32_data_at" => {
