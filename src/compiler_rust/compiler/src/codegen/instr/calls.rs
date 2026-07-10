@@ -2534,7 +2534,7 @@ fn expand_process_c_runtime_args<M: Module>(
     builder: &mut FunctionBuilder,
     arg_vals: &[cranelift_codegen::ir::Value],
     cstr_indices: &[usize],
-    array_indices: &[usize],
+    _array_indices: &[usize],
 ) -> Vec<cranelift_codegen::ir::Value> {
     // The cmd argument is a Simple `text` value; the linked native runtime
     // (compiler_rust/runtime/src/value/sffi/env_process.rs, e.g. rt_process_run)
@@ -2543,18 +2543,18 @@ fn expand_process_c_runtime_args<M: Module>(
     // entirely, shifting every later argument into the wrong register and
     // leaving the final register uninitialized — manifesting as an
     // exit_group(-8) crash on `simple -c` (self-exec-guard shells out via
-    // rt_process_run). Use the normal (ptr, len) expansion instead, then
-    // account for the extra length slot when masking the array argument.
-    let mut expanded = expand_text_args(ctx, builder, arg_vals, cstr_indices);
-    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
-    for &orig_index in array_indices {
-        let shift = cstr_indices.iter().filter(|&&t| t < orig_index).count();
-        let new_index = orig_index + shift;
-        if let Some(value) = expanded.get_mut(new_index) {
-            *value = builder.ins().band(*value, ptr_mask);
-        }
-    }
-    expanded
+    // rt_process_run). Use the normal (ptr, len) expansion instead.
+    //
+    // The args array argument is passed through UNMASKED (2026-07-11 fix):
+    // it previously had its low 3 tag bits stripped (`& !7`), which turned
+    // the TAG_HEAP(0b001) RuntimeValue into a TAG_INT value — the Rust
+    // runtime's rt_process_run (args: RuntimeValue → rt_array_len →
+    // as_typed_ptr) then rejected it and silently ran the command with ZERO
+    // args (stage4 full-CLI `run`/`-c` fell through to the interactive
+    // REPL because delegation to the sibling seed lost its argv). The
+    // core-C runtime needs no mask either: rt_core_as_array accepts both
+    // tagged and raw aligned pointers (runtime_native.c).
+    expand_text_args(ctx, builder, arg_vals, cstr_indices)
 }
 
 fn expand_file_write_bytes_args<M: Module>(

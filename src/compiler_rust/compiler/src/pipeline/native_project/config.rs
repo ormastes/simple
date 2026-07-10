@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use super::tools::{
-    build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library, find_runtime_library,
+    archive_defined_symbols, build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library, find_runtime_library,
     find_simple_core_runtime_library, runtime_archive_has_core_required_symbols,
 };
 
@@ -67,6 +67,27 @@ fn runtime_path_has_abi_complete_simple_core(runtime_path: Option<&Path>) -> boo
             .any(|candidate| candidate.exists() && runtime_archive_has_core_required_symbols(candidate))
         })
     })
+}
+
+pub(crate) fn runtime_archive_has_bootstrap_cli_symbols(path: &Path) -> bool {
+    let Some(symbols) = archive_defined_symbols(path) else {
+        return false;
+    };
+    [
+        "__simple_runtime_init",
+        "__simple_runtime_shutdown",
+        "rt_get_args",
+        "rt_cli_get_args",
+        "rt_array_len",
+        "rt_array_get",
+        "rt_array_get_text",
+        "rt_string_len",
+        "rt_string_data",
+        "rt_file_read_text",
+        "rt_process_run",
+    ]
+    .iter()
+    .all(|symbol| symbols.contains(symbol.trim_start_matches('_')))
 }
 
 impl NativeProjectBuilder {
@@ -179,16 +200,23 @@ impl NativeProjectBuilder {
             }
         }
 
+        let mut saw_core_c_runtime_path_archive = false;
         let mut push_runtime_candidates = |dir: &Path| {
             let runtime_deps = dir.join("deps").join(runtime_name);
             let runtime = dir.join(runtime_name);
             match lane {
                 NativeRuntimeLane::CoreCBootstrap => {
                     if runtime_deps.exists() {
-                        candidates.push((runtime_deps, false));
+                        saw_core_c_runtime_path_archive = true;
+                        if runtime_archive_has_bootstrap_cli_symbols(&runtime_deps) {
+                            candidates.push((runtime_deps, false));
+                        }
                     }
                     if runtime.exists() {
-                        candidates.push((runtime, false));
+                        saw_core_c_runtime_path_archive = true;
+                        if runtime_archive_has_bootstrap_cli_symbols(&runtime) {
+                            candidates.push((runtime, false));
+                        }
                     }
                 }
                 NativeRuntimeLane::SimpleCore => {
@@ -225,6 +253,22 @@ impl NativeProjectBuilder {
                             candidates.push((runtime, false));
                         }
                     }
+                }
+            }
+        }
+
+        if lane == NativeRuntimeLane::CoreCBootstrap
+            && candidates.is_empty()
+            && (self.config.runtime_path.is_none() || saw_core_c_runtime_path_archive)
+        {
+            if let Some(runtime) = build_core_c_runtime_library(&temp_dir.join("core_c_runtime")) {
+                candidates.push((runtime, false));
+            }
+            if let Some(runtime) = find_runtime_library() {
+                if runtime_archive_has_bootstrap_cli_symbols(&runtime)
+                    && !candidates.iter().any(|(p, _)| p == &runtime)
+                {
+                    candidates.push((runtime, false));
                 }
             }
         }

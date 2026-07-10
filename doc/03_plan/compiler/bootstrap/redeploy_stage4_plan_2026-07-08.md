@@ -1,6 +1,49 @@
 # Stage4 Self-Host Redeploy (#79) — Plan (updated 2026-07-11)
 
-## STATUS NOW (2026-07-11, second wave): nm-fix seed landed (uncommitted) + gate re-run — smoke STILL FAILS, NOT deployed; blocker re-diagnosed to runtime-lane selection
+## STATUS NOW (2026-07-11, third wave): runtime-path + argv/runtime selection landed locally; stage4 links, smoke still fails in parser path, NOT deployed
+
+The second-wave ordered item (pass `--runtime-path` in the non-seed stage-4
+branch and stop selecting stale bootstrap `deps/libsimple_runtime.a` when it
+lacks CLI bootstrap symbols) is implemented locally:
+
+- `scripts/bootstrap/bootstrap-from-scratch.sh` now passes
+  `--runtime-path "$(pwd)/src/compiler_rust/target/bootstrap"` in the
+  stage2-driven stage-4 branch.
+- `config.rs::selected_runtime_library` skips runtime-path core-C archives
+  that do not expose the bootstrap CLI ABI (`rt_get_args`,
+  `rt_cli_get_args`, array/string/file/process basics) and falls back to a
+  generated core-C runtime archive only when a core-C runtime archive was
+  present but incomplete, or no runtime path was supplied.
+- `calls.rs::expand_process_c_runtime_args` keeps the args array tagged for
+  `rt_process_run`; masking the low tag bits made delegated self-exec lose
+  argv and fall into the REPL.
+
+Verification run:
+
+- `cargo check -p simple-compiler`: PASS.
+- `cargo test -p simple-compiler --lib runtime_bundle_auto -- --nocapture --test-threads=1`: PASS, 5 tests.
+- `timeout 1800 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy --no-mcp --jobs=half`: FAIL before deploy.
+  The script rebuilt the Rust seed/runtime, stage2 and stage3 succeeded, and
+  stage4 linked `build/bootstrap/full/aarch64-apple-darwin/simple`.
+
+New blocker:
+
+- Stage4 now recognizes argv and has real linked definitions for
+  `rt_get_args`, `rt_cli_get_args`, `rt_array_len`, `rt_string_len`,
+  `rt_file_read_text`, and `rt_process_run`.
+- `build/bootstrap/full/aarch64-apple-darwin/simple -c 'print(1+1)'` now
+  exits with `error: failed to run -c snippet` instead of entering the REPL.
+- `build/bootstrap/full/aarch64-apple-darwin/simple run <file>` fails with a
+  blank `Parse error`.
+- Stage4 still generates 808 stubs. The current preview includes parser/front
+  end and source-processing symbols such as `_lexer_tokenize`, `_input_chars`,
+  `_input_trim`, `_chars_len`, `_parts_len`, and `_path_*`. The next fix is
+  scan-after-GC/entry-closure tightening or owner-function routing so the CLI
+  run path does not rely on parser/lexer stubs.
+
+Deploy was not performed; TODO 119 remains open.
+
+## STATUS NOW (2026-07-11, second wave): nm-fix seed landed + gate re-run — smoke STILL FAILS, NOT deployed; blocker re-diagnosed to runtime-lane selection
 
 The proposed `nm_command()` seed fix from
 `stage4_stub_symbol_plan_2026-07-11.md` § "Step 1 status" was **applied**

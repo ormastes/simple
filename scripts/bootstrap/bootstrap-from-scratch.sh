@@ -702,6 +702,7 @@ else
     --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
+    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${full_dir}/simple${exe_suffix}"
 fi
 

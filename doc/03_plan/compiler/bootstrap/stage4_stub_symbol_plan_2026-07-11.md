@@ -253,6 +253,7 @@ landed helper.
 | Standard gate command — with nm fix | 807/808 |
 | + `--runtime-path src/compiler_rust/target/bootstrap`, `SIMPLE_NM=/usr/bin/nm` (broken reader, control) | 1041 |
 | + `--runtime-path …/target/bootstrap`, fixed reader | **662** |
+| + non-seed stage4 `--runtime-path`, tagged process args, and bootstrap-CLI runtime selection | **808** |
 
 Interpretation:
 - **The nm fix works: 1041 → 662 (−379 symbols) when the full archive is in
@@ -279,6 +280,19 @@ Interpretation:
   methods 11, type-descriptors 12, other `rt_*` 207, non-`rt_` misc 102.
   These are the true bucket-(a)/(c) inputs for ordered-plan step 3
   (scan-after-GC).
+- **2026-07-11 third-wave update:** the stage2-driven stage4 branch now passes
+  `--runtime-path`, `rt_process_run` keeps the args array tagged, and core-C
+  runtime selection skips stale bootstrap archives that lack CLI bootstrap
+  symbols. Fresh `--full-bootstrap --deploy --no-mcp --jobs=half` rebuilt the
+  seed/runtime; stage2 and stage3 passed; stage4 linked and now recognizes
+  `-c`/argv with real `rt_get_args`, `rt_cli_get_args`, `rt_array_len`,
+  `rt_string_len`, `rt_file_read_text`, and `rt_process_run` symbols. Smoke
+  still fails before deploy: `-c 'print(1+1)'` reports
+  `error: failed to run -c snippet`, and `run <file>` reports a blank
+  `Parse error`. The remaining 808-stub preview includes parser/source
+  symbols (`_lexer_tokenize`, `_input_chars`, `_input_trim`, `_chars_len`,
+  `_parts_len`, `_path_*`), so the next ordered work is scan-after-GC /
+  entry-closure tightening or owner routing for the parser/lexer run path.
 - **Smoke matrix: FAIL in both configs — NOT deployed.** 807-build: `check`/
   `test` exit 3 silently, `run` parse-errors (file/lexer externs stubbed).
   662-build: `--version` OK but `run file.spl` and `-c 'print(1+1)'` ignore

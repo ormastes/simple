@@ -728,7 +728,8 @@ fn test_runtime_bundle_auto_prefers_core_c_bootstrap_for_non_compiler_entry_when
     ));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert_eq!(selected, runtime);
+    assert_ne!(selected, runtime);
+    assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
     assert!(!is_native_all);
 }
 
@@ -751,7 +752,8 @@ fn test_runtime_bundle_auto_prefers_core_c_for_compiler_entry() {
     builder.entry_file = Some(PathBuf::from("/project/src/app/cli/main.spl"));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert_eq!(selected, runtime);
+    assert_ne!(selected, runtime);
+    assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
     assert!(!is_native_all);
 }
 
@@ -778,7 +780,8 @@ fn test_runtime_bundle_auto_prefers_core_c_for_compiler_source_root() {
     builder.source_dirs.push(PathBuf::from("/project/src/compiler"));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert_eq!(selected, runtime);
+    assert_ne!(selected, runtime);
+    assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
     assert!(!is_native_all);
 }
 
@@ -803,7 +806,8 @@ fn test_runtime_bundle_auto_falls_back_to_core_c_when_simple_core_is_incomplete(
     builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert_eq!(selected, runtime);
+    assert_ne!(selected, runtime);
+    assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
     assert!(!is_native_all);
 }
 
