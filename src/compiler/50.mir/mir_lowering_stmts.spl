@@ -181,28 +181,48 @@ impl MirLowering:
                     case _:
                         ()
 
+    me lower_assign_var(symbol_id: i64, op: HirAssignOp?, value_local: LocalId, span: Span):
+        """Emit the write-back for an assignment to a local variable target
+        (shared by the `Var` and `NamedVar` lvalue cases)."""
+        if symbol_id < 0:
+            self.error("assignment target has no resolved symbol", Some(span))
+        elif self.local_map.has(symbol_id):
+            val local = self.local_map[symbol_id]
+            # Use the positive `op.?` presence test, NOT `if val assign_op = op`:
+            # the seed interpreter's `if val <pat> = <optional>` presence check
+            # can wrongly enter the true branch when the optional is nil (the
+            # documented `if val`/`if not x.?` quirk), which turned a plain
+            # `x = x + 1` (op == nil) into a spurious compound `x + (x + 1)`.
+            if op.?:
+                # Compound assignment (x += y etc.)
+                val assign_op = op.unwrap()
+                val current = mir_operand_copy(local)
+                val new_val = mir_operand_copy(value_local)
+                val mir_op = self.lower_assign_op(assign_op)
+                var b = self.builder
+                val result = b.emit_binop(mir_op, current, new_val, MirType.i64())
+                b.emit_copy(local, result)
+                self.builder = b
+            else:
+                var b = self.builder
+                b.emit_copy(local, value_local)
+                self.builder = b
+
     me lower_assign(target: HirExpr, op: HirAssignOp?, value_local: LocalId):
         """Lower assignment."""
         match target.kind:
             case Var(symbol):
-                val symbol_id = mir_stmt_symbol_id_value(symbol)
-                if symbol_id < 0:
-                    self.error("assignment target has no resolved symbol", Some(target.span))
-                elif self.local_map.has(symbol_id):
-                    val local = self.local_map[symbol_id]
-                    if val assign_op = op:
-                        # Compound assignment
-                        val current = mir_operand_copy(local)
-                        val new_val = mir_operand_copy(value_local)
-                        val mir_op = self.lower_assign_op(assign_op)
-                        var b = self.builder
-                        val result = b.emit_binop(mir_op, current, new_val, MirType.i64())
-                        b.emit_copy(local, result)
-                        self.builder = b
-                    else:
-                        var b = self.builder
-                        b.emit_copy(local, value_local)
-                        self.builder = b
+                self.lower_assign_var(mir_stmt_symbol_id_value(symbol), op, value_local, target.span)
+
+            case NamedVar(symbol, name):
+                # HIR lowering emits NamedVar(symbol, name) for every resolved
+                # identifier (see expr_dispatch `case NamedVar`). The assignment
+                # lvalue path only handled the name-less Var(symbol) variant, so
+                # `x = ...` where the target is a NamedVar fell through to the
+                # catch-all and the write-back Copy was silently dropped --
+                # loop-carried updates (`i = i + 1`) were lost, producing
+                # non-terminating loops on the native path. Mirror the Var arm.
+                self.lower_assign_var(mir_stmt_symbol_id_value(symbol), op, value_local, target.span)
 
             case Field(base, field, resolved):
                 # Field assignment: obj.field = value

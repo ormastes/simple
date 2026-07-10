@@ -30,10 +30,21 @@ fn llvm_bootstrap_ssa_function(fn_: MirFunction) -> MirFunction:
     # Gated on the same SIMPLE_BOOTSTRAP condition the rest of this LLVM
     # text-codegen path uses -- the normal (non-bootstrap) build never sets
     # this env var, so it is byte-for-byte unchanged.
+    # Replace the hand-built SSA-phi mechanism (which cannot correctly resolve
+    # each phi's incoming-value-per-predecessor for real control flow -- short-
+    # circuit `and`, nested if-EXPRESSIONS, and especially loop back-edges,
+    # where a multi-def loop-carried local like `i = i + 1` otherwise produces
+    # an llc "multiple definition of local value" SSA violation) with an
+    # alloca-per-reassigned-local transform. An entry-block alloca dominates
+    # every use by construction, so it cannot produce the `undef`/wrong phi
+    # operands the join-predecessor phi materialization could. Applied on BOTH
+    # the normal and SIMPLE_BOOTSTRAP paths; ssa_var_transform_blocks remains
+    # the fallback only when the alloca transform reports it did not apply
+    # (single-def functions -- byte-for-byte unchanged there).
+    val alloca_rewritten = ssa_alloca_transform_blocks(fn_.blocks, fn_.locals, fn_.entry_block)
+    if alloca_rewritten.applied:
+        return MirFunction.with_blocks(fn_, alloca_rewritten.blocks)
     if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-        val alloca_rewritten = ssa_alloca_transform_blocks(fn_.blocks, fn_.locals, fn_.entry_block)
-        if alloca_rewritten.applied:
-            return MirFunction.with_blocks(fn_, alloca_rewritten.blocks)
         return fn_
     val rewritten = ssa_var_transform_blocks(fn_.blocks)
     if rewritten.applied:
@@ -1088,6 +1099,13 @@ impl MirTextCodegen for MirToLlvm:
         val load_ty = self.valid_llvm_type(self.get_local_type(dest_id))
         if load_ty == "ptr":
             self.mark_ptr_local(dest_id)
+        # Register the load result's type. Locals materialized after the
+        # up-front local_types population (e.g. the alloca transform's
+        # load-before-use temps) are otherwise untracked, which makes the Ret
+        # path treat `return <loaded local>` as untyped and zero it
+        # (`ret i64 0`). Mirrors translate_const's dest-type registration.
+        self.local_types[dest_id] = load_ty
+        self.value_types[dest_name] = load_ty
         self.builder.emit_load(dest_name, load_ty, ptr_val)
 
     me translate_store(ptr: MirOperand, value: MirOperand):

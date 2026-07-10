@@ -14,6 +14,69 @@ extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i6
 extern fn simpleos_fat32_preloaded_size() -> u64
 extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
 
+# Boot pre-read cache. In the merged SSH kernel the exec-time FAT re-open goes
+# through fat32_find_file -> NVMe again and returns len=0 (NVMe/FAT stream is no
+# longer reachable that late; proven NOT a path-parse issue — a literal
+# "/FSEXEC.ELF" also yields len=0). The boot entry pre-reads the ELF into the
+# resident C static FAT path-read buffer (simpleos_fat32_path_read_buf, a fixed
+# 4 MiB BSS address that persists and is NOT clobbered by a later failing
+# stream_open) while NVMe is still reachable, right after vmm_map_nvme_bar_high().
+# Only the size needs caching; the buffer address is re-derived from the extern.
+# g_preread_len stays 0 unless the SSH boot entry calls the preread below, so the
+# non-SSH prod entry (which never touches this reader) is unaffected.
+var g_preread_len: i64 = 0
+
+pub fn x86_64_fs_exec_preread_boot(path: text) -> i64:
+    """Boot-time pre-read of an on-disk ELF into the resident FAT path-read buffer,
+    caching its size for the exec-time spawn reader fallback. Call while NVMe/FAT is
+    still reachable (right after vmm_map_nvme_bar_high()). Returns bytes read, 0 on
+    failure. Validates via the materialised [u8] (bytes[0..3]) — the SAME method the
+    proven prod entry uses — NOT mmio_read32, which does not reliably read this RAM
+    buffer's first word here."""
+    val fsize = simpleos_fat32_stream_open(path)
+    if fsize <= 4:
+        serial_println("[fs-exec] preread:open-fail path={path} rc={fsize}")
+        return 0
+    val buf = simpleos_fat32_path_read_buffer_addr()
+    if buf == 0.to_u64():
+        serial_println("[fs-exec] preread:no-buf path={path}")
+        return 0
+    val n = simpleos_fat32_stream_read_at(0.to_u64(), buf, fsize.to_u64())
+    if n <= 0:
+        serial_println("[fs-exec] preread:read-fail path={path} rc={n}")
+        return 0
+    val probe = rt_bytes_from_raw(buf as i64, fsize)
+    var b0: i64 = 0
+    var b1: i64 = 0
+    var b2: i64 = 0
+    var b3: i64 = 0
+    if probe.len() >= 4:
+        b0 = probe[0].to_i64()
+        b1 = probe[1].to_i64()
+        b2 = probe[2].to_i64()
+        b3 = probe[3].to_i64()
+    serial_println("[fs-exec] preread:read path={path} size={fsize} n={n} magic={b0},{b1},{b2},{b3}")
+    if not (b0 == 127 and b1 == 69 and b2 == 76 and b3 == 70):
+        serial_println("[fs-exec] preread:not-elf path={path}")
+        return 0
+    g_preread_len = fsize
+    serial_println("[fs-exec] preread:ok path={path} size={fsize} buf=0x{buf}")
+    fsize
+
+fn _x86_64_preread_fallback() -> ([u8], u64):
+    """Return the boot pre-read resident bytes when the exec-time FAT stream fails.
+    The resident C static buffer still holds the boot-read ELF (a failing exec-time
+    stream_open never writes it), and g_preread_len is set only after a validated
+    boot read, so re-materialising is safe. pbuf is handed back as the mmio ELF
+    source for the ring-3 handoff (same buffer prod passes)."""
+    if g_preread_len <= 4:
+        return ([], 0.to_u64())
+    val pbuf = simpleos_fat32_path_read_buffer_addr()
+    if pbuf == 0.to_u64():
+        return ([], 0.to_u64())
+    serial_println("[fs-exec] spawn:preread-hit len={g_preread_len}")
+    (rt_bytes_from_raw(pbuf as i64, g_preread_len), pbuf)
+
 fn _x86_64_read_spawn_bytes_and_blob(path: text) -> ([u8], u64):
     val fsize = simpleos_fat32_stream_open(path)
     if fsize <= 4:

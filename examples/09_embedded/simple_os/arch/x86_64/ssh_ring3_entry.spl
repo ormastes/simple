@@ -51,20 +51,14 @@ fn _start():
         return
     serial_println("[boot] nvme online")
 
-    # PRELOAD /FSEXEC.ELF into the static path-read buffer NOW (pre-net, pre-vmm),
-    # while the FAT/NVMe DMA state is pristine. The exec-time FAT read returns 0 in
-    # this merged SSH kernel (device/FS state clobbered after rt_net_init + vmm + SSH
-    # activity — bug x64_ssh_kernel_fat32_stream_open_zero), so the ring-3 spawn
-    # consumes THIS resident buffer instead of re-streaming. size=13888 also confirms
-    # the if-expr phi-merge codegen fix (5c7c1186) repaired the boot-time read path.
-    val _preload_size = simpleos_fat32_stream_open("/FSEXEC.ELF")
-    if _preload_size > 0:
-        val _preload_buf = simpleos_fat32_path_read_buffer_addr()
-        val _preload_n = simpleos_fat32_stream_read_at(0.to_u64(), _preload_buf, _preload_size.to_u64())
-        simpleos_fat32_note_preload_size(_preload_size.to_u64())
-        serial_println("[boot] fsexec preloaded size={_preload_size} read={_preload_n}")
-    else:
-        serial_println("[boot] fsexec preload FAILED rc={_preload_size}")
+    # 2b. Pre-read /FSEXEC.ELF NOW, right after nvme_init and BEFORE rt_net_init.
+    #     Proven: a post-net read delivers garbage cluster data (magic=248,3,0,0) —
+    #     rt_net_init disturbs NVMe DMA. Reading here, on the pristine NVMe/boot page
+    #     tables, gets clean ELF bytes into the resident C static FAT buffer; they
+    #     persist (nothing else overwrites it) so the exec-time spawn reader's
+    #     fallback delivers them.
+    val preread = x86_64_fs_exec_preread_boot("/FSEXEC.ELF")
+    serial_println("[boot] fsexec preread size={preread}")
 
     val net_init = rt_net_init()
     serial_println("[boot] rt_net_init rc={net_init}")
