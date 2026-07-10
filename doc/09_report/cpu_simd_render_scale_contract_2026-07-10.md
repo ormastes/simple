@@ -24,11 +24,12 @@ The separate `check-llvm-simd-row-native-arch.shs` self-hosted matrix now
 executes exact, vectorized x86_64, AArch64, and RISC-V row probes. The broader
 Engine2D matrix in `cpu_simd_engine2d_arch_matrix_2026-07-10.md` still has zero
 passing Simple lanes and is not superseded by that focused result. A prototype
-that routed opaque square browser backgrounds through the existing native span ABI was pixel-exact, but
-was rejected after review because it produced zero native hits in the AOT
-layout fixture after three verification cycles. Native multiple-style-block
-layout still null-calls around the array concatenations in `extract_css_vw`; see
-`doc/08_tracking/bug/simple_web_layout_native_extract_css_null_call_2026-07-10.md`.
+that routed opaque square browser backgrounds through the existing native span
+ABI was rejected after three capped verification cycles: its AOT fixture did
+not prove the expected inline-style color and produced zero native hits. The
+multiple-style-block array-concat null call is resolved; the remaining quality
+blocker is tracked in
+`doc/08_tracking/bug/simple_web_layout_native_inline_style_color_missing_2026-07-10.md`.
 Full-size performance and RSS evidence therefore remains open.
 
 ## CPU Library Comparison
