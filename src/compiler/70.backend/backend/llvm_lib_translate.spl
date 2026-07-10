@@ -84,7 +84,30 @@ fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeM
             case Ret(value):
                 if value.?:
                     val ret_val = translate_operand(ctx, mod_, builder, type_mapper, value.unwrap(), value_map, local_types, func_map)
-                    llvm_build_ret(builder, ret_val)
+                    # Coerce to the declared return type: string globals are ptr
+                    # but text-returning signatures map to i64 (tagged values),
+                    # and vice versa — an uncoerced ret fails IR verification
+                    # ("Function return type does not match operand type").
+                    val coerced = if ret_val == 0:
+                        # unmapped operand: leave 0 for the IR verifier to
+                        # report (LLVMTypeOf(NULL) segfaults)
+                        ret_val
+                    else:
+                        val want_ty = type_mapper.map_type(func.signature.return_type)
+                        val have_ty = llvm_type_of(ret_val)
+                        val ptr_ty_h = llvm_pointer_type(llvm_int8_type_in_context(ctx), 0)
+                        val i1_ty_h = llvm_int1_type_in_context(ctx)
+                        if have_ty == want_ty:
+                            ret_val
+                        elif have_ty == ptr_ty_h and want_ty != ptr_ty_h:
+                            llvm_build_ptr_to_int(builder, ret_val, want_ty, "retcast")
+                        elif have_ty != ptr_ty_h and want_ty == ptr_ty_h:
+                            llvm_build_int_to_ptr(builder, ret_val, want_ty, "retcast")
+                        elif have_ty == i1_ty_h:
+                            llvm_build_zext(builder, ret_val, want_ty, "retcast")
+                        else:
+                            ret_val
+                    llvm_build_ret(builder, coerced)
                 else:
                     llvm_build_ret_void(builder)
                 terminator_already_emitted = true
@@ -97,7 +120,7 @@ fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeM
                 val i1_ty = llvm_int1_type_in_context(ctx)
                 val cond_ty = llvm_type_of(precomputed_cond_val)
                 precomputed_final_cond = if cond_ty != i1_ty:
-                    val zero = if llvm_get_type_kind(cond_ty) == 14:
+                    val zero = if llvm_get_type_kind(cond_ty) == 12:  # 12=Pointer (was 14=Metadata)
                         llvm_const_null(cond_ty)
                     else:
                         llvm_const_int(cond_ty, 0, false)

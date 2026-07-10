@@ -205,8 +205,38 @@ fn translate_binop(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                    value_map: {i64: i64}, local_types: {i64: i64},
                    func_map: {text: i64}) -> {i64: i64}:
     var local_value_map: Dict<i64, i64> = value_map
-    val lhs = translate_operand(ctx, mod_, builder, tm, left, value_map, local_types, func_map)
-    val rhs = translate_operand(ctx, mod_, builder, tm, right, value_map, local_types, func_map)
+    var lhs = translate_operand(ctx, mod_, builder, tm, left, value_map, local_types, func_map)
+    var rhs = translate_operand(ctx, mod_, builder, tm, right, value_map, local_types, func_map)
+    # Harmonize i1 operands (icmp results held in Bool-typed locals) with a
+    # wider integer partner: LLVM rejects mixed-width binops/icmps
+    # ("Both operands ... are not of the same type", e.g. add i64 x, i1 y).
+    if lhs == 0 or rhs == 0:
+        # A null operand segfaults inside LLVMBuild*/FoldCmp. Name the source
+        # operand loudly and substitute i64 0 so the failure stays diagnosable
+        # (build still fails; nothing is silently passed).
+        val left_desc = match left.kind:
+            case Copy(local): "Copy#" + local.id.to_text()
+            case Move(local): "Move#" + local.id.to_text()
+            case Const(_, _): "Const"
+        val right_desc = match right.kind:
+            case Copy(local): "Copy#" + local.id.to_text()
+            case Move(local): "Move#" + local.id.to_text()
+            case Const(_, _): "Const"
+        eprint("[llvm-lib] ERROR: binop operand translated to null (lhs=" + lhs.to_text() + " " + left_desc + ", rhs=" + rhs.to_text() + " " + right_desc + ") — substituting i64 0")
+        if lhs == 0:
+            lhs = llvm_const_int(llvm_int64_type_in_context(ctx), 0, true)
+        if rhs == 0:
+            rhs = llvm_const_int(llvm_int64_type_in_context(ctx), 0, true)
+    if lhs != 0 and rhs != 0:
+        # (guard: LLVMTypeOf(NULL) segfaults; an unmapped operand stays 0 here
+        # and is left for the IR verifier to report)
+        val i1_ty_h = llvm_int1_type_in_context(ctx)
+        val lhs_ty_h = llvm_type_of(lhs)
+        val rhs_ty_h = llvm_type_of(rhs)
+        if lhs_ty_h == i1_ty_h and rhs_ty_h != i1_ty_h and is_int_type_ref(ctx, rhs_ty_h):
+            lhs = llvm_build_zext(builder, lhs, rhs_ty_h, "bzext")
+        elif rhs_ty_h == i1_ty_h and lhs_ty_h != i1_ty_h and is_int_type_ref(ctx, lhs_ty_h):
+            rhs = llvm_build_zext(builder, rhs, lhs_ty_h, "bzext")
     val dest_ty = get_local_type(local_types, tm, dest.id)
     val is_float = is_float_type_ref(ctx, dest_ty)
     val left_ty = get_operand_type_ref(left, local_types, tm)
@@ -259,7 +289,7 @@ fn translate_binop(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
             if left_is_float:
                 val cmp = llvm_build_fcmp(builder, LLVM_REAL_OEQ, lhs, rhs, "eq")
                 maybe_zext(builder, ctx, cmp, dest_ty)
-            elif llvm_get_type_kind(left_ty) == 10:
+            elif llvm_get_type_kind(left_ty) == 12:  # 12=Pointer (was 10=Struct — wrong kind, branch never fired)
                 val cmp = llvm_build_icmp(builder, LLVM_INT_EQ, lhs, rhs, "eq")
                 maybe_zext(builder, ctx, cmp, dest_ty)
             else:
@@ -276,7 +306,7 @@ fn translate_binop(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
             if left_is_float:
                 val cmp = llvm_build_fcmp(builder, LLVM_REAL_ONE, lhs, rhs, "ne")
                 maybe_zext(builder, ctx, cmp, dest_ty)
-            elif llvm_get_type_kind(left_ty) == 10:
+            elif llvm_get_type_kind(left_ty) == 12:  # 12=Pointer (was 10=Struct — wrong kind, branch never fired)
                 val cmp = llvm_build_icmp(builder, LLVM_INT_NE, lhs, rhs, "ne")
                 maybe_zext(builder, ctx, cmp, dest_ty)
             else:
@@ -349,7 +379,7 @@ fn translate_unaryop(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
             if is_float: llvm_build_fneg(builder, op_val, "neg")
             else: llvm_build_neg(builder, op_val, "neg")
         case Not:
-            val zero = if llvm_get_type_kind(operand_ty) == 14:
+            val zero = if llvm_get_type_kind(operand_ty) == 12:  # 12=Pointer (was 14=Metadata)
                 llvm_const_null(operand_ty)
             else:
                 llvm_const_int(operand_ty, 0, false)
@@ -399,8 +429,8 @@ fn translate_cast(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
     # 0=Void, 2=Float, 3=Double, 7=Label, 10=Integer, 11=Function, 12=Struct, 14=Pointer
     val TK_FLOAT = 2
     val TK_DOUBLE = 3
-    val TK_INTEGER = 10
-    val TK_POINTER = 14
+    val TK_INTEGER = 8   # LLVM C API: 8=Integer (was 10=Struct)
+    val TK_POINTER = 12  # LLVM C API: 12=Pointer (was 14=Metadata)
 
     val src_is_int = src_ty_kind == TK_INTEGER
     val src_is_float = src_ty_kind == TK_FLOAT or src_ty_kind == TK_DOUBLE
@@ -471,9 +501,9 @@ fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                         func_ref = func_map[name]
                 case _: ()
         case Copy(local):
-            func_ref = get_value(value_map, local)
+            func_ref = get_value(value_map, local.id)
         case Move(local):
-            func_ref = get_value(value_map, local)
+            func_ref = get_value(value_map, local.id)
 
     if func_ref == 0:
         val callee_desc = if fn_name != "": "'" + fn_name + "'" else: "<indirect>"
@@ -483,12 +513,27 @@ fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
     # Build args
     var arg_vals: [i64] = []
     for arg in args:
-        arg_vals.push(translate_operand(ctx, mod_, builder, tm, arg, value_map, local_types, func_map))
+        val arg_val = translate_operand(ctx, mod_, builder, tm, arg, value_map, local_types, func_map)
+        if arg_val == 0:
+            # A null LLVMValueRef argument segfaults inside LLVMBuildCall2 (or
+            # fails verification as "Operand is null"). Name the operand kind so
+            # the producing translation path is identifiable from the log.
+            val arg_desc = match arg.kind:
+                case Copy(local): "Copy#" + local.id.to_text()
+                case Move(local): "Move#" + local.id.to_text()
+                case Const(_, _): "Const"
+            eprint("[llvm-lib] ERROR: call arg translated to null (" + arg_desc + ") for callee '" + fn_name + "' — substituting i64 0 to avoid segfault")
+            arg_vals.push(llvm_const_int(llvm_int64_type_in_context(ctx), 0, true))
+        else:
+            arg_vals.push(arg_val)
 
     # Get function type — use LLVMGlobalGetValueType for opaque pointers (LLVM 15+)
     val fn_ty = llvm_global_get_value_type(func_ref)
 
-    val call_name = if dest.?: "call" else: ""
+    # Void-returning calls must be unnamed ("Instruction has a name, but
+    # provides a void value!" fails IR verification).
+    val ret_is_void = llvm_get_type_kind(llvm_get_return_type(fn_ty)) == 0
+    val call_name = if dest.? and not ret_is_void: "call" else: ""
     val call_val = llvm_build_call2(builder, fn_ty, func_ref, arg_vals, call_name)
 
     if dest.?:
@@ -610,7 +655,7 @@ fn translate_const_value(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMappe
     val llvm_ty = tm.map_type(ty)
     match value:
         case Int(v):
-            if v == 0 and llvm_get_type_kind(llvm_ty) == 14:
+            if v == 0 and llvm_get_type_kind(llvm_ty) == 12:  # 12=Pointer (was 14=Metadata — Int(0)-as-ptr built an invalid ConstInt instead of const_null)
                 llvm_const_null(llvm_ty)
             else:
                 llvm_const_int(llvm_ty, v, true)
@@ -653,6 +698,7 @@ fn get_value(value_map: {i64: i64}, local_id: i64) -> i64:
     if value_map.contains(local_id):
         value_map[local_id]
     else:
+        eprint("[llvm-lib] ERROR: read of undefined local _" + local_id.to_text() + " (no def reached value_map) — IR will fail verification")
         0
 
 fn get_local_type(local_types: {i64: i64}, tm: LlvmLibTypeMapper, local_id: i64) -> i64:
@@ -679,6 +725,9 @@ fn get_operand_type_ref(operand: MirOperand, local_types: {i64: i64}, tm: LlvmLi
 fn is_float_type_ref(ctx: i64, ty: i64) -> bool:
     val kind = llvm_get_type_kind(ty)
     kind == 2 or kind == 3  # 2=Float, 3=Double
+
+fn is_int_type_ref(ctx: i64, ty: i64) -> bool:
+    llvm_get_type_kind(ty) == 8  # 8=Integer
 
 # ============================================================================
 # Exports
