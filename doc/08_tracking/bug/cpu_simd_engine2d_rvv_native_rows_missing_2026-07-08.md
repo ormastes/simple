@@ -20,12 +20,28 @@ open
 - Simple owner facade `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`
   still requires a riscv64 target binary run before RVV can count as native
   drawing evidence.
+- The self-hosted hosted-native runtime compiler omitted
+  `runtime_simd_dispatch.c`; it now includes that owner so generated binaries
+  can link the public Engine2D SIMD row externs.
+- The LLVM path now lowers runtime arrays through `rt_array_new` / array
+  accessors and carries imported function signatures through HIR and MIR. A
+  focused x86_64 native binary calls the public Simple fill-row wrapper, checks
+  length and `0xFF010203` pixel data, and exits zero.
+- The same focused entry closure emits valid AArch64 and RV64GC ELF objects.
+  Target disassembly contains calls to `engine2d_simd_fill_row_u32`,
+  `rt_array_len`, and `rt_array_get` on both architectures.
+- Hosted cross compilation now selects target C compilers and no longer routes
+  generic RV64 Linux object names through the SimpleOS linker. Full AArch64
+  linking on this host remains unavailable because `aarch64-linux-gnu-ld` is
+  missing; RV64 linking remains unavailable because `riscv64-linux-gnu-gcc` is
+  missing.
 
 ## Impact
 
-The riscv64 lane cannot yet prove native RVV Engine2D drawing in a target
-binary. It can prove the owner C source compiles for RVV, but not that a
-riscv64 Simple binary selected it and produced bit-exact output.
+The compiler now proves the public Simple path through target object code, but
+the riscv64 lane cannot yet execute that code on this host. The matrix remains
+partial until the target linker/toolchain and runnable target binary are
+available.
 
 ## Required Fix
 

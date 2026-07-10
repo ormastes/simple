@@ -135,7 +135,24 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.emit("; External call declarations")
             for unknown_name in self.unknown_func_decls.keys():
                 if not self.defined_func_names.has(unknown_name):
-                    self.builder.emit("declare i64 @{unknown_name}(...)")
+                    if unknown_name == "engine2d_simd_fill_row_u32":
+                        self.builder.emit("declare ptr @engine2d_simd_fill_row_u32(i64, i64)")
+                        continue
+                    if unknown_name == "engine2d_simd_copy_row_u32":
+                        self.builder.emit("declare ptr @engine2d_simd_copy_row_u32(ptr)")
+                        continue
+                    if unknown_name == "engine2d_simd_blend_row_u32":
+                        self.builder.emit("declare ptr @engine2d_simd_blend_row_u32(ptr, ptr)")
+                        continue
+                    var ret_ty = self.lookup_function_return_type(unknown_name)
+                    if ret_ty == "":
+                        ret_ty = "i64"
+                    var params: [text] = []
+                    match self.function_param_types.get(unknown_name):
+                        case Some(known_params): params = known_params
+                        case nil: ()
+                    val param_text = if params.len() == 0: "..." else: params.join(", ")
+                    self.builder.emit("declare {ret_ty} @{unknown_name}({param_text})")
 
         val bootstrap_string_globals = if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             llvm_bootstrap_string_globals_text()
@@ -602,7 +619,10 @@ impl MirTextCodegen for MirToLlvm:
         val src_id = self.local_id_value(src)
         val dest_name = self.get_local(dest_id)
         val src_name = self.local_value_text(src_id)
-        var ty = self.valid_llvm_type(self.get_local_type(src_id))
+        var src_ty = self.valid_llvm_type(self.get_local_type(src_id))
+        if self.value_types.has(src_name):
+            src_ty = self.valid_llvm_type(self.value_types[src_name])
+        var ty = self.valid_llvm_type(self.get_local_type(dest_id))
         if self.ptr_locals.has(src_id):
             ty = "ptr"
             self.local_types[dest_id] = "ptr"
@@ -611,23 +631,24 @@ impl MirTextCodegen for MirToLlvm:
             ty = "i1"
             self.local_types[dest_id] = "i1"
             self.bool_locals[dest_id] = true
+        val src_value = self.value_as_type(src_name, src_ty, ty)
         val comment = if is_move: "move" else: "copy"
         self.value_types[dest_name] = ty
 
         if is_float_type(ty):
-            self.builder.emit("  {dest_name} = fadd {ty} {src_name}, 0.0  ; {comment}")
+            self.builder.emit("  {dest_name} = fadd {ty} {src_value}, 0.0  ; {comment}")
         elif ty == "ptr":
             val nit = self.native_int()
-            self.builder.emit("  {dest_name} = getelementptr i8, ptr {src_name}, {nit} 0  ; {comment}")
+            self.builder.emit("  {dest_name} = getelementptr i8, ptr {src_value}, {nit} 0  ; {comment}")
         elif ty == "void":
             ()
         elif is_integer_type(ty) or ty == "i1":
-            self.builder.emit("  {dest_name} = add {ty} {src_name}, 0  ; {comment}")
+            self.builder.emit("  {dest_name} = add {ty} {src_value}, 0  ; {comment}")
         else:
             # Aggregate types: alloca + store + load
             val tmp = self.builder.fresh_local()
             self.builder.emit_alloca(tmp, ty)
-            self.builder.emit_store(ty, src_name, tmp)
+            self.builder.emit_store(ty, src_value, tmp)
             self.builder.emit_load(dest_name, ty, tmp)
 
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
@@ -823,9 +844,21 @@ impl MirTextCodegen for MirToLlvm:
                 case _:
                     ()
             val param_ty = self.lookup_function_param_type(call_func_name, arg_i)
-            if param_ty != "" and param_ty != nil:
-                arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
-                arg_ty = self.valid_llvm_type(param_ty)
+            var effective_param_ty = if param_ty == nil: "" else: self.valid_llvm_type(param_ty)
+            if bare_name_for_call == "rt_array_len":
+                effective_param_ty = "ptr"
+            elif bare_name_for_call == "rt_array_get":
+                effective_param_ty = if arg_i == 0: "ptr" else: "i64"
+            elif bare_name_for_call == "rt_array_set":
+                effective_param_ty = if arg_i == 0: "ptr" else: "i64"
+            elif bare_name_for_call == "engine2d_simd_fill_row_u32" or bare_name_for_call == "rt_engine2d_simd_fill_row_u32":
+                effective_param_ty = "i64"
+            elif bare_name_for_call == "engine2d_simd_copy_row_u32" or bare_name_for_call == "rt_engine2d_simd_copy_row_u32" or bare_name_for_call == "engine2d_simd_blend_row_u32" or bare_name_for_call == "rt_engine2d_simd_blend_row_u32":
+                effective_param_ty = "ptr"
+            val row_call = bare_name_for_call == "engine2d_simd_fill_row_u32" or bare_name_for_call == "rt_engine2d_simd_fill_row_u32" or bare_name_for_call == "engine2d_simd_copy_row_u32" or bare_name_for_call == "rt_engine2d_simd_copy_row_u32" or bare_name_for_call == "engine2d_simd_blend_row_u32" or bare_name_for_call == "rt_engine2d_simd_blend_row_u32"
+            if (param_ty != "" and param_ty != nil) or bare_name_for_call == "rt_array_len" or bare_name_for_call == "rt_array_get" or bare_name_for_call == "rt_array_set" or row_call:
+                arg_val = self.value_as_type(arg_val, arg_ty, effective_param_ty)
+                arg_ty = effective_param_ty
             elif arg_val == "0":
                 arg_val = self.ret_value_for_type(arg_ty, "0")
             arg_parts = arg_parts.push("{arg_ty} {arg_val}")
@@ -835,6 +868,10 @@ impl MirTextCodegen for MirToLlvm:
             Some(name):
                 var ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
                 var known_ret_ty = self.lookup_function_return_type(call_func_name)
+                if bare_name_for_call == "rt_array_len" or bare_name_for_call == "rt_array_get":
+                    known_ret_ty = "i64"
+                elif bare_name_for_call == "engine2d_simd_fill_row_u32" or bare_name_for_call == "rt_engine2d_simd_fill_row_u32" or bare_name_for_call == "engine2d_simd_copy_row_u32" or bare_name_for_call == "rt_engine2d_simd_copy_row_u32" or bare_name_for_call == "engine2d_simd_blend_row_u32" or bare_name_for_call == "rt_engine2d_simd_blend_row_u32":
+                    known_ret_ty = "ptr"
                 if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     val bare_func_name = if call_func_name.starts_with("@"): call_func_name[1:] else: call_func_name
                     if bare_func_name == "get_args" or bare_func_name == "get_cli_args" or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args":
@@ -882,6 +919,7 @@ impl MirTextCodegen for MirToLlvm:
                             case Str(name):
                                 if signature.return_type != nil:
                                     self.remember_function_return_type(name, self.llvm_type_text(signature.return_type))
+                                self.remember_function_param_types_from_signature(name, signature)
                                 self.unknown_func_decls[name] = true
                                 "@{name}"
                             case _: self.translate_const_value(value)

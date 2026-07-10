@@ -100,8 +100,19 @@ impl MirLowering:
                 # array ptr to its element count -- so one symbol serves both
                 # call sites correctly.
                 len_symbol = "rt_len"
+            var receiver_local: LocalId = 0
+            var receiver_lowered = false
+            if len_symbol == "":
+                match resolution:
+                    case Unresolved:
+                        receiver_local = self.lower_expr(receiver)
+                        receiver_lowered = true
+                        if self.local_is_runtime_array(receiver_local):
+                            len_symbol = "rt_array_len"
+                    case _: ()
             if len_symbol != "":
-                val receiver_local = self.lower_expr(receiver)
+                if not receiver_lowered:
+                    receiver_local = self.lower_expr(receiver)
                 val func_operand = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str(len_symbol),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
@@ -489,9 +500,18 @@ impl MirLowering:
         var name = if sym.?: sym.name else: self.bootstrap_symbol_name(symbol)
         if name == "":
             name = "unknown_{self.symbol_id_value(symbol)}"
+        var signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        if sym != nil and sym.type_ != nil:
+            match sym.type_.kind:
+                case HirTypeKind.Function(params, ret, _):
+                    var mir_params: [MirType] = []
+                    for param in params:
+                        mir_params = mir_params.push(self.lower_type(param))
+                    signature = MirSignature(params: mir_params, return_type: self.lower_type(ret), is_variadic: false)
+                case _: ()
         MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(name),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            MirType(kind: MirTypeKind.FuncPtr(signature))
         ))
 
     me lower_array_lit(elements: [HirExpr]) -> LocalId:

@@ -34,6 +34,15 @@ fn mir_expr_symbol_id_value(symbol: SymbolId) -> i64:
 # ============================================================================
 
 impl MirLowering:
+    fn local_is_runtime_array(local: LocalId) -> bool:
+        for item in self.builder.locals:
+            if item.id.id == local.id:
+                match item.type_.kind:
+                    case MirTypeKind.Array(_, _): return true
+                    case MirTypeKind.Slice(_): return true
+                    case _: return false
+        false
+
     me host_gpu_runtime_func(name: text) -> MirOperand:
         MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(name),
@@ -80,7 +89,10 @@ impl MirLowering:
         if val found_base_type = base_type:
             len_symbol = self.len_runtime_symbol_for_hir_type(found_base_type)
         if len_symbol == "":
-            return
+            if self.local_is_runtime_array(base_local):
+                len_symbol = "rt_array_len"
+            else:
+                return
         val func_operand = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(len_symbol),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
@@ -367,7 +379,7 @@ impl MirLowering:
                 self.lower_array_lit(elements)
 
             case Index(base, index):
-                # Array indexing: arr[i] -> bounds_check + GEP + Load
+                # Runtime arrays are tagged handles, not raw element pointers.
                 val base_local = self.lower_expr(base)
                 val index_local = self.lower_expr(index)
                 if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):
@@ -378,21 +390,26 @@ impl MirLowering:
                     result_type = self.bootstrap_text_type()
                 if val expr_type = expr_value.type_:
                     result_type = self.lower_type(expr_type)
-                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    # Bootstrap arrays are tagged RuntimeValue handles returned by
-                    # the runtime (rt_get_args), not raw pointers -- a raw GEP+load
-                    # ptr on the handle faults. Route element reads through the
-                    # rt_array_get runtime accessor, mirroring the rt_array_len
-                    # accessor used for .len() in bootstrap mode.
+                val runtime_array = self.local_is_runtime_array(base_local)
+                if runtime_array or (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     val getter = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_array_get"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(result_type, false), MirType.i64()], return_type: result_type, is_variadic: false)))
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(result_type, false), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                     ))
                     var bg = self.builder
-                    val getter_result = bg.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(index_local)], result_type)
+                    val getter_result = bg.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(index_local)], MirType.i64())
                     self.builder = bg
                     if val getter_local = getter_result:
-                        getter_local
+                        val result_is_i64 = match result_type.kind:
+                            case MirTypeKind.Int(64, true): true
+                            case _: false
+                        if result_is_i64:
+                            getter_local
+                        else:
+                            var cast_builder = self.builder
+                            val casted = cast_builder.emit_cast(mir_operand_copy(getter_local), result_type)
+                            self.builder = cast_builder
+                            casted
                     else:
                         base_local
                 else:

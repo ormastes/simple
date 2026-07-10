@@ -1,8 +1,32 @@
-# # MCP Protocol Runtime Spec
-#
-# Wire-level protocol checks for active simple-mcp server wrapper.
+"""
+# MCP Protocol Runtime
 
-use std.spec
+Wire-level protocol checks for the full Simple MCP server wrapper.
+
+## Requirements
+
+**Requirements:** N/A
+
+- The server accepts Content-Length framing and JSONL transport.
+- Initialize and tools/list return valid full-server responses.
+- Unknown tools return tool-level errors rather than JSON-RPC failures.
+
+## Plan
+
+Exercise initialize, tools/list, and an unknown tools/call request through the
+installed wrapper with the full tool set enabled.
+
+## Design
+
+The spec writes protocol input to a temporary file and drives the production
+stdio wrapper through a shell pipe.
+
+## Research
+
+N/A
+"""
+
+use std.spec.{describe, slow_it, expect, step}
 use std.common.spec.scenario_helpers.{capture_api_protocol_fields, capture_exec_detailed}
 use std.nogc_sync_mut.io.file_ops.{file_write}
 use std.process.{run}
@@ -58,14 +82,15 @@ fn has_valid_content_length_frames(output: text) -> bool:
 fn send_mcp(messages: text) -> text:
     val tmp = "/tmp/mcp_protocol_runtime_input_" + messages.len().to_string() + ".txt"
     file_write(tmp, messages)
-    val result = run("/bin/sh", ["-c", "cat " + tmp + " | bin/simple_mcp_server 2>/dev/null"])
+    val result = run("/bin/sh", ["-c", "cat " + tmp + " | SIMPLE_MCP_FULL=1 SIMPLE_MCP_TOOL_SET=all bin/simple_mcp_server 2>/dev/null"])
     result.stdout
 
 describe "MCP Protocol Runtime":
     # @inline
     # @capture(protocol)
     slow_it "handles initialize, tools/list, and unknown-tool MCP startup flows":
-        # @step: Operator sends initialize, Codex framed startup, JSONL tools/list, and unknown-tool calls
+        # @step: Initialize the full MCP server
+        step("Initialize the full MCP server")
         val single_output = send_mcp(init_request("1"))
         expect(single_output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
         expect(single_output.contains("\"simple-mcp-full\"")).to_equal(true)
@@ -74,6 +99,8 @@ describe "MCP Protocol Runtime":
         val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
         val initialized = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}"
         val req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/list\",\"params\":{}}"
+        # @step: List tools over Content-Length framing
+        step("List tools over Content-Length framing")
         val input = mcp_msg(init) + mcp_msg(initialized) + mcp_msg(req)
         val output = send_mcp(input)
         val output_frames_valid = has_valid_content_length_frames(output)
@@ -83,6 +110,8 @@ describe "MCP Protocol Runtime":
         expect(output.contains("\"tools\":")).to_equal(true)
         expect(output.contains("\"inputSchema\":")).to_equal(true)
 
+        # @step: List tools over JSONL framing
+        step("List tools over JSONL framing")
         val jsonl_tools = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(req)
         val jsonl_output = send_mcp(jsonl_tools)
         expect(jsonl_output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
@@ -91,6 +120,8 @@ describe "MCP Protocol Runtime":
         expect(jsonl_output.contains("\"name\":\"debug_create_session\"")).to_equal(true)
         expect(jsonl_output.contains("\"error\":")).to_equal(false)
 
+        # @step: Return a tool-level error for an unknown tool
+        step("Return a tool-level error for an unknown tool")
         val unknown_req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{}}}"
         val unknown_input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(unknown_req)
         val unknown_output = send_mcp(unknown_input)

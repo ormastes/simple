@@ -1,0 +1,31 @@
+"""Regression contract for hosted LLVM SIMD row array ABI and cross targets."""
+
+use std.io_runtime.{file_read}
+use std.spec.*
+
+describe "LLVM SIMD row array ABI":
+    it "uses the runtime array ABI for packed pixel rows":
+        val aggregate = file_read("src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl")
+        val declarations = file_read("src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl")
+        expect(aggregate).to_contain("call ptr @rt_array_new")
+        expect(aggregate).to_contain("call i8 @rt_array_push")
+        expect(declarations).to_contain("declare ptr @rt_engine2d_simd_fill_row_u32(i64, i64)")
+        expect(declarations).to_contain("declare ptr @rt_engine2d_simd_copy_row_u32(ptr)")
+        expect(declarations).to_contain("declare ptr @rt_engine2d_simd_blend_row_u32(ptr, ptr)")
+
+    it "keeps the public Simple wrapper narrow and typed":
+        val rows = file_read("src/lib/nogc_sync_mut/gpu/engine2d/simd_native_rows.spl")
+        expect(rows).to_contain("engine2d_simd_fill_row_u32(count: i64, color: u32) -> [u32]")
+        expect(rows).to_contain("engine2d_simd_copy_row_u32(src: [u32]) -> [u32]")
+        expect(rows).to_contain("engine2d_simd_blend_row_u32(dst_row: [u32], src_row: [u32]) -> [u32]")
+
+    it "selects hosted cross compilers without entering the SimpleOS RV64 path":
+        val runtime = file_read("src/compiler/70.backend/backend/runtime_compiler.spl")
+        val native_link = file_read("src/compiler/70.backend/backend/llvm_native_link.spl")
+        val cc_link = file_read("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl")
+        expect(runtime).to_contain("target.starts_with(\"aarch64-\")")
+        expect(runtime).to_contain("target.starts_with(\"riscv64-\")")
+        expect(native_link).to_contain("target == \"riscv64-unknown-none\"")
+        expect(native_link).to_contain("obj.contains(\"simpleos_riscv64\")")
+        expect(native_link.contains("obj.contains(\"riscv64\")")).to_equal(false)
+        expect(cc_link).to_contain("process_run(cc, args)")

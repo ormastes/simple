@@ -26,6 +26,18 @@ extern fn rt_env_get(key: text) -> text
 # ============================================================================
 
 impl MirLowering:
+    me emit_resolved_direct_call(func: MirOperand, args: [MirOperand], return_type: MirType) -> LocalId:
+        var b = self.builder
+        if return_type.kind != MirTypeKind.Unit:
+            val dest = b.new_temp(return_type)
+            b.emit(MirInst(kind: MirInstKind.Call(Some(dest), func, args), span: nil))
+            self.builder = b
+            return dest
+        b.emit(MirInst(kind: MirInstKind.Call(nil, func, args), span: nil))
+        val temp = b.new_temp(MirType.unit())
+        self.builder = b
+        temp
+
     me should_emit_switch(int_cases: [(i64, HirBlock)]) -> bool:
         """Heuristic: dense int matches go to Switch (jump table), sparse
         / small matches stay as If chains. Mirrors the Rust-seed B5
@@ -201,11 +213,9 @@ impl MirLowering:
                 nil
 
     me try_lower_bitfield_construct_for_symbol(symbol: SymbolId, args: [HirCallArg]) -> LocalId?:
-        # Direct field access: self.symbol_id_value(symbol) returned nil here
-        # in the interpreter (SymbolId match-destructure defect).
-        if symbol == nil:
+        val sym_id = mir_expr_symbol_id_value(symbol)
+        if sym_id < 0:
             return nil
-        val sym_id = symbol.id
         if not self.bitfield_map.has(sym_id):
             return nil
         val raw_local = self.lower_expr(args[0].value)
@@ -407,6 +417,10 @@ impl MirLowering:
         self.bootstrap_symbol_name(symbol)
 
     me bootstrap_resolved_call_return_type(symbol: SymbolId, name: text) -> MirType:
+        if name == "engine2d_simd_fill_row_u32" or name == "engine2d_simd_copy_row_u32" or name == "engine2d_simd_blend_row_u32" or name == "rt_engine2d_simd_fill_row_u32" or name == "rt_engine2d_simd_copy_row_u32" or name == "rt_engine2d_simd_blend_row_u32":
+            return MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U32), 0))
+        if name == "rt_array_len" or name == "rt_array_get":
+            return MirType.i64()
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             return self.resolved_call_return_type(symbol)
         var call_name = name
@@ -522,31 +536,12 @@ impl MirLowering:
                     ))
                 else:
                     self.symbol_to_operand(symbol)
-                var b = self.builder
-                val result = b.emit_call(func_operand, arg_operands, return_type)
-                if val result_local = result:
-                    self.builder = b
-                    result_local
-                else:
-                    val temp = b.new_temp(MirType.unit())
-                    self.builder = b
-                    temp
+                self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
 
             case NamedVar(symbol, callee_name):
-                val func_operand = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str(callee_name),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                ))
+                val func_operand = self.symbol_to_operand(symbol)
                 val return_type = self.bootstrap_resolved_call_return_type(symbol, callee_name)
-                var b = self.builder
-                val result = b.emit_call(func_operand, arg_operands, return_type)
-                if val result_local = result:
-                    self.builder = b
-                    result_local
-                else:
-                    val temp = b.new_temp(MirType.unit())
-                    self.builder = b
-                    temp
+                self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
 
             case _:
                 # Indirect call - lower callee expression and use CallIndirect
