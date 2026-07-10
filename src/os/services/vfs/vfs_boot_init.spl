@@ -41,6 +41,7 @@ use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT
 use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_resource_set_label, device_grant_is_isolated}
 use os.kernel.boot.boot_nvme_production_handoff.{boot_nvme_production_handoff_provision}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_read8, mmio_write8}
+use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_install_block_device}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc}
 use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
@@ -99,6 +100,7 @@ var g_boot_fat32_num_fats: u32 = 0u32
 var g_boot_fat32_fat_size: u32 = 0u32
 var g_boot_fat32_root_cluster: u32 = 0u32
 var g_boot_fat32_data_start_lba: u64 = 0u64
+var g_boot_fat32_total_sectors: u64 = 0u64
 var g_boot_fat32_scratch: SharedDmaBuffer = SharedDmaBuffer(
     cpu_virt_addr: 0u64,
     host_phys_addr: 0u64,
@@ -137,6 +139,7 @@ fn _vfs_boot_reset_storage_state():
     g_boot_fat32_fat_size = 0u32
     g_boot_fat32_root_cluster = 0u32
     g_boot_fat32_data_start_lba = 0u64
+    g_boot_fat32_total_sectors = 0u64
     g_boot_fat32_scratch = SharedDmaBuffer(
         cpu_virt_addr: 0u64,
         host_phys_addr: 0u64,
@@ -208,7 +211,36 @@ pub fn vfs_boot_init_production() -> bool:
     if reason != "ready":
         log_raw_println("[vfs-init] production boot storage rejected: {reason}")
         return false
+    val swap_reason = _vfs_boot_install_memory_swap()
+    log_raw_println("[vfs-init] memory swap: {swap_reason}")
     true
+
+struct VfsBootMemorySwapRange:
+    base_lba: u64
+    capacity_slots: u64
+
+fn vfs_boot_memory_swap_range(volume_sectors: u64, volume_sector_size: u32, namespace_sectors: u64, namespace_sector_size: u32) -> VfsBootMemorySwapRange?:
+    if volume_sectors == 0 or volume_sector_size == 0 or namespace_sectors == 0 or namespace_sector_size == 0:
+        return nil
+    if volume_sectors > 0xFFFFFFFFu64:
+        return nil
+    val volume_bytes = volume_sectors * volume_sector_size.to_u64()
+    val base_lba = (volume_bytes + namespace_sector_size.to_u64() - 1) / namespace_sector_size.to_u64()
+    if base_lba >= namespace_sectors:
+        return nil
+    val sectors_per_slot = (4096 + namespace_sector_size.to_u64() - 1) / namespace_sector_size.to_u64()
+    val capacity_slots = (namespace_sectors - base_lba) / sectors_per_slot
+    if capacity_slots == 0:
+        return nil
+    Some(VfsBootMemorySwapRange(base_lba: base_lba, capacity_slots: capacity_slots))
+
+fn _vfs_boot_install_memory_swap() -> text:
+    match vfs_boot_memory_swap_range(g_boot_fat32_total_sectors, g_boot_fat32_bytes_per_sector, g_nvme.get_sector_count(), g_nvme.get_sector_size()):
+        nil: "unavailable:no-dedicated-range"
+        swap_range:
+            val device_impl = BootNvmeBlockDevice(sector_size_bytes: g_nvme.get_sector_size())
+            val device: BlockDevice = device_impl
+            memory_swap_runtime_install_block_device(device, swap_range.base_lba, swap_range.capacity_slots)
 
 fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     """Try the pure-Simple NVMe -> BlockDevice -> FAT32 stack first."""
@@ -428,7 +460,10 @@ fn _vfs_boot_init_direct_fat32_reader_from_addr(addr: u64) -> Result<bool, text>
     val fats = _vfs_boot_mem_byte(addr, 16u64)
     val fat_size = _vfs_boot_mem_u32_le(addr, 36u64)
     val root_cluster = _vfs_boot_mem_u32_le(addr, 44u64)
-    if bps == 0u32 or spc == 0u32 or reserved == 0u32 or fats == 0u32 or fat_size == 0u32 or root_cluster < 2u32:
+    val total16 = _vfs_boot_mem_u16_le(addr, 19u64)
+    val total32 = _vfs_boot_mem_u32_le(addr, 32u64)
+    val total_sectors = if total16 > 0u32: total16.to_u64() else: total32.to_u64()
+    if bps == 0u32 or spc == 0u32 or reserved == 0u32 or fats == 0u32 or fat_size == 0u32 or root_cluster < 2u32 or total_sectors == 0u64:
         return Err("fat32-invalid-geometry")
     g_boot_fat32_bytes_per_sector = bps
     g_boot_fat32_sectors_per_cluster = spc
@@ -437,6 +472,7 @@ fn _vfs_boot_init_direct_fat32_reader_from_addr(addr: u64) -> Result<bool, text>
     g_boot_fat32_fat_size = fat_size
     g_boot_fat32_root_cluster = root_cluster
     g_boot_fat32_data_start_lba = reserved.to_u64() + (fats.to_u64() * fat_size.to_u64())
+    g_boot_fat32_total_sectors = total_sectors
     val scratch_alloc = g_nvme.alloc_dma(4096u64)
     if scratch_alloc.is_err():
         return Err("fat32-scratch-dma:" + scratch_alloc.unwrap_err())
@@ -471,8 +507,11 @@ fn _vfs_boot_init_direct_fat32_reader_from_bytes(b: [u8]) -> Result<bool, text>:
     val fats = _vfs_boot_byte(b, 16)
     val fat_size = _vfs_boot_u32_le(b, 36)
     val root_cluster = _vfs_boot_u32_le(b, 44)
+    val total16 = _vfs_boot_u16_le(b, 19)
+    val total32 = _vfs_boot_u32_le(b, 32)
+    val total_sectors = if total16 > 0u32: total16.to_u64() else: total32.to_u64()
     serial_println("[vfs-init] fat32 direct bps={bps} spc={spc} res={reserved} fats={fats} fsz={fat_size} root={root_cluster}")
-    if bps == 0u32 or spc == 0u32 or reserved == 0u32 or fats == 0u32 or fat_size == 0u32 or root_cluster < 2u32:
+    if bps == 0u32 or spc == 0u32 or reserved == 0u32 or fats == 0u32 or fat_size == 0u32 or root_cluster < 2u32 or total_sectors == 0u64:
         return Err("fat32-invalid-geometry")
     g_boot_fat32_bytes_per_sector = bps
     g_boot_fat32_sectors_per_cluster = spc
@@ -481,6 +520,7 @@ fn _vfs_boot_init_direct_fat32_reader_from_bytes(b: [u8]) -> Result<bool, text>:
     g_boot_fat32_fat_size = fat_size
     g_boot_fat32_root_cluster = root_cluster
     g_boot_fat32_data_start_lba = reserved.to_u64() + (fats.to_u64() * fat_size.to_u64())
+    g_boot_fat32_total_sectors = total_sectors
     g_boot_fat32_direct_ready = true
     Ok(true)
 

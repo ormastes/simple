@@ -141,6 +141,24 @@ impl MemorySwapCoordinator:
     me has_swapped_mapping(allocation_id: u64) -> bool:
         me._find_mapping(allocation_id) >= 0
 
+    me release_swapped(allocation_id: u64, owner_id: u64) -> MemoryLevelingOperation:
+        val index = me._find_mapping(allocation_id)
+        if index < 0:
+            return _memory_swap_coordinator_failure("missing-slot", allocation_id)
+        val mapping = me.mappings[index]
+        if mapping.owner_id != owner_id:
+            return _memory_swap_coordinator_failure("not-owner", allocation_id)
+        val slot_released = me.store.release(mapping.slot_id, allocation_id)
+        if not slot_released.ok:
+            return _memory_swap_coordinator_failure(slot_released.reason, allocation_id)
+        val manager_released = me.manager.release(allocation_id, owner_id)
+        if not manager_released.ok:
+            return manager_released
+        val last = me.mappings.len() - 1
+        me.mappings[index] = me.mappings[last]
+        me.mappings.pop()
+        manager_released
+
     me restore_faulting_page(virt_addr: u64) -> MemoryLevelingOperation:
         me.last_restore_code = -1
         val page_addr = (virt_addr / 4096) * 4096

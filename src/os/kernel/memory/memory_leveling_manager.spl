@@ -58,6 +58,13 @@ struct MemoryLevelingOperation:
     allocation_id: u64
     state: text
 
+struct MemoryRuntimeMapping:
+    allocation_id: u64
+    owner_id: u64
+    virt_addr: u64
+    page_index: u64
+    byte_length: u64
+
 struct MemoryPressureReport:
     level: text
     inspected: u64
@@ -74,6 +81,7 @@ class MemoryLevelingManager:
     next_allocation_id: u64
     epoch: u64
     pressure_level: text
+    runtime_mappings: [MemoryRuntimeMapping]
 
 fn simpleos_memory_leveling_config_default() -> SimpleOsMemoryLevelingConfig:
     SimpleOsMemoryLevelingConfig(
@@ -94,6 +102,21 @@ fn simpleos_memory_leveling_config_default() -> SimpleOsMemoryLevelingConfig:
         swap_enabled: true,
         device_safety_enabled: true
     )
+
+fn simpleos_memory_leveling_config_for_physical_capacity(capacity_bytes: u64) -> SimpleOsMemoryLevelingConfig:
+    var config = simpleos_memory_leveling_config_default()
+    if capacity_bytes == 0:
+        return config
+    config.physical_capacity_bytes = capacity_bytes
+    config.cpu_capacity_bytes = capacity_bytes
+    config.cpu_reserved_bytes = capacity_bytes / 16
+    config.cpu_low_watermark_bytes = capacity_bytes / 8
+    config.cpu_high_watermark_bytes = capacity_bytes / 4
+    config.nic_capacity_bytes = if config.nic_capacity_bytes < capacity_bytes / 4: config.nic_capacity_bytes else: capacity_bytes / 4
+    config.nic_reserved_bytes = config.nic_capacity_bytes / 16
+    config.dma_capacity_bytes = if config.dma_capacity_bytes < capacity_bytes / 4: config.dma_capacity_bytes else: capacity_bytes / 4
+    config.dma_reserved_bytes = config.dma_capacity_bytes / 16
+    config
 
 fn simpleos_memory_leveling_config_validate(config: SimpleOsMemoryLevelingConfig) -> text:
     if config.physical_capacity_bytes == 0 or config.cpu_capacity_bytes == 0:
@@ -118,8 +141,32 @@ fn memory_leveling_manager_new(config: SimpleOsMemoryLevelingConfig) -> MemoryLe
         stats: memory_leveling_stats_empty(),
         next_allocation_id: 1,
         epoch: 0,
-        pressure_level: "normal"
+        pressure_level: "normal",
+        runtime_mappings: []
     )
+
+impl MemoryLevelingManager:
+    me runtime_mapping_add(mapping: MemoryRuntimeMapping):
+        me.runtime_mappings = me.runtime_mappings.push(mapping)
+
+    me runtime_mapping(allocation_id: u64) -> MemoryRuntimeMapping?:
+        for mapping in me.runtime_mappings:
+            if mapping.allocation_id == allocation_id:
+                return Some(mapping)
+        nil
+
+    me runtime_mapping_at(virt_addr: u64) -> MemoryRuntimeMapping?:
+        for mapping in me.runtime_mappings:
+            if mapping.virt_addr == virt_addr:
+                return Some(mapping)
+        nil
+
+    me runtime_mapping_remove(allocation_id: u64):
+        var next: [MemoryRuntimeMapping] = []
+        for mapping in me.runtime_mappings:
+            if mapping.allocation_id != allocation_id:
+                next = next.push(mapping)
+        me.runtime_mappings = next
 
 fn _memory_leveling_operation(ok: bool, reason: text, allocation_id: u64, state: text) -> MemoryLevelingOperation:
     MemoryLevelingOperation(ok: ok, reason: reason, allocation_id: allocation_id, state: state)
