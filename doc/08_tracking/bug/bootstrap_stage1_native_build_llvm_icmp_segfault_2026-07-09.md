@@ -976,3 +976,35 @@ whoever picks this up: instrument `new_temp`/`new_local` call sites in `mir_lowe
 i.e. inside or immediately after the "Merge block" section at `mir_lowering_stmts.spl:432-437`, or in
 whatever wraps `lower_stmt`'s handling of an `Expr`-statement `if` — this pass's reading of both sites
 found no allocation, so the real site is somewhere not yet inspected).
+
+## Update 2026-07-10 (fix session) — SIGSEGV ELIMINATED; wall is now an itemized IR-verification error list
+
+User authorized applying the fixes. Landed (`9bea509a`): (1) lower_if merge-placeholder def
+(result_defined + const-0 in merge block); (2) lower_method_call phantom temps defined at 5 sites
+(Unresolved arm + 4 void-call fallbacks — self.error only COLLECTS, hence the arm was silent);
+(3) builtin `print` → `rt_println` mapping in translate_call (all 14 dropped calls in
+bootstrap_main main() were `print` statements) + the unresolved-call error now names its callee.
+Follow-ups in this session: placeholder temps/consts switched unit→i64 (unit maps to LLVM `i0`,
+invalid in arithmetic/compare positions — killed the `icmp slt i64 x, i0 0` verifier error);
+`llvm_verify_module` (both wrapper copies) re-runs with Action=1 on failure so LLVM prints the
+specific verification failures to stderr.
+
+**Verified progression across 6 bootstrap runs this session:**
+exit 139 (FoldCmp SIGSEGV, NULL ICmp operand) → exit 1 (clean refuse-to-emit) → unresolved calls
+14 → 0 → verifier errors printed and itemized. Stage 1 still FAILED (exit 1), but the wall is now a
+deterministic, printed list — no crashes, no mystery.
+
+**Remaining verifier errors for `app.cli.bootstrap_main` (run 6 inventory):**
+- 7 × "Call parameter type does not match function signature" (e.g. `rt_native_eq(i64, ptr)` vs decl)
+- 4 × "Load operand must be a pointer" + 3 × "GEP base pointer is not a vector..." — same root: the
+  `[text]` args param is mapped as an LLVM ARRAY VALUE type `[0 x { ptr, i64 }]` instead of `ptr`
+  (LlvmLibTypeMapper array mapping; runtime arrays are heap refs)
+- 2 × "Function return type does not match operand type of return inst" (`ret [0 x i64] undef`)
+- 2 × "Both operands to a binary operator are not of the same type" (`add nsw i64 x, i1 y` — icmp
+  result consumed without zext)
+- 1 × "Operand is null" (`rt_native_eq(ptr, <null operand!>)` — one Const path still yields 0)
+
+Next fix locus (all backend, `llvm_lib_*`): (a) type-mapper array→ptr mapping (clears 7 of 19),
+(b) zext i1→i64 coercion in translate_binop arithmetic, (c) call-arg coercion to declared signature,
+(d) return-type coercion, (e) the last null Const operand. Each error is now printed with the exact
+LLVM instruction, so these are directly actionable.

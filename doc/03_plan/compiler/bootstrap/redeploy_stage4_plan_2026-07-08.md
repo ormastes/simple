@@ -381,3 +381,14 @@ have missed). Probes reverted (`grep -rn "MIR-PROBE\|MIR_PROBE\|describe_inst\|m
 Stage-1 state: still FAILED exit 139. Full detail:
 `doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
 (§ Update 2026-07-10 function-name + full-MIR-dump discriminator).
+
+## Update 2026-07-10 — Stage-1 SIGSEGV eliminated; CURRENT WALL (path 2) = itemized IR type errors
+
+Landed `9bea509a` + follow-ups: use-before-def MIR locals fixed (lower_if merge placeholder,
+lower_method_call phantom temps ×5), builtin `print`→`rt_println` mapped, unresolved-call error
+names its callee, `llvm_verify_module` prints LLVM's specific failures (Action=1 re-run) on refusal.
+Progression: 139 SIGSEGV → clean exit 1 → unresolved calls 14→0 → 19 printed verifier errors in 6
+classes (see bug doc for the full inventory). Dominant class: `[text]` param mapped as LLVM array
+VALUE `[0 x { ptr, i64 }]` instead of `ptr` (LlvmLibTypeMapper) — clears 7/19 when fixed. Others:
+i1→i64 zext in binops, call-arg signature coercion, return-type coercion, 1 residual null Const.
+All deterministic, all printed with exact instructions — directly actionable next wave.
