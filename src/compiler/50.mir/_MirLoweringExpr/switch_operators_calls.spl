@@ -84,6 +84,7 @@ impl MirLowering:
         self.builder = b
 
         # Lower each arm body into its block.
+        var result_defined = false
         var ci = 0
         while ci < case_blocks.len():
             val arm_block = case_blocks[ci].0
@@ -95,6 +96,7 @@ impl MirLowering:
             var b_arm2 = self.builder
             if val arm_result_local = arm_result:
                 b_arm2.emit_copy(result, arm_result_local)
+                result_defined = true
             b_arm2.terminate_goto(merge_block)
             self.builder = b_arm2
             ci = ci + 1
@@ -114,12 +116,20 @@ impl MirLowering:
         var b_d2 = self.builder
         if val def_result_local = def_result:
             b_d2.emit_copy(result, def_result_local)
+            result_defined = true
         b_d2.terminate_goto(merge_block)
         self.builder = b_d2
 
         # Merge block.
         var b_m = self.builder
         b_m.switch_to_block(merge_block)
+        # Mirrors lower_if's merge-placeholder fix: every arm/default that
+        # falls through to merge without producing a value (e.g. a void
+        # statement as the arm's last expression) leaves `result` undefined
+        # on that path -- a NULL llvm::Value* read downstream (ICmp/binop
+        # SIGSEGV in llvm-lib). Define it here if no arm ever did.
+        if not result_defined:
+            b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b_m
 
         result
@@ -132,6 +142,7 @@ impl MirLowering:
         val merge_block = b.new_block(Some("match_merge"))
         self.builder = b
 
+        var result_defined = false
         var i = 0
         while i < int_cases.len():
             val key = int_cases[i].0
@@ -159,6 +170,7 @@ impl MirLowering:
             var b_arm2 = self.builder
             if val arm_result_local = arm_result:
                 b_arm2.emit_copy(result, arm_result_local)
+                result_defined = true
             b_arm2.terminate_goto(merge_block)
             self.builder = b_arm2
 
@@ -181,12 +193,19 @@ impl MirLowering:
         var b_def = self.builder
         if val def_result_local = def_result:
             b_def.emit_copy(result, def_result_local)
+            result_defined = true
         b_def.terminate_goto(merge_block)
         self.builder = b_def
 
         # Merge block.
         var b_m = self.builder
         b_m.switch_to_block(merge_block)
+        # Mirrors lower_if's merge-placeholder fix: every arm/default that
+        # falls through to merge without producing a value leaves `result`
+        # undefined on that path -- a NULL llvm::Value* read downstream
+        # (ICmp/binop SIGSEGV in llvm-lib). Define it here if no arm ever did.
+        if not result_defined:
+            b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b_m
 
         result

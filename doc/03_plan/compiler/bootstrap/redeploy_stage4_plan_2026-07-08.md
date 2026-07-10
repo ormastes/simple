@@ -392,3 +392,87 @@ classes (see bug doc for the full inventory). Dominant class: `[text]` param map
 VALUE `[0 x { ptr, i64 }]` instead of `ptr` (LlvmLibTypeMapper) — clears 7/19 when fixed. Others:
 i1→i64 zext in binops, call-arg signature coercion, return-type coercion, 1 residual null Const.
 All deterministic, all printed with exact instructions — directly actionable next wave.
+
+## Update 2026-07-10 (later, `_3` fix session) — match/switch merge-placeholder gap fixed (static); wall now nondeterministic pre-diagnostic SIGSEGV in `get_cli_args`
+
+Session budget: 3 bootstrap runs (guide `fix_undef3_guide.md`), all consumed.
+
+**Run 1** burned on a probe-code bug: added a temporary `eprint`-based function-name
+probe to `compile_function` (`llvm_lib_translate.spl`) to find `_3`'s enclosing
+function, but used `eprintln`, which this runtime rejects (`'eprintln' is
+deprecated. Use 'eprint' instead`) — Stage 1 refused before reaching the
+translator at all. Fixed to `eprint` (already appends a newline in this
+runtime).
+
+**Run 2** (probe active): Stage 1 got through most of the compiler and crashed
+(exit 139) immediately after printing `TEMP-PROBE compiling function:
+get_cli_args` — no `_3` diagnostic, no other named diagnostic at all this run.
+`get_cli_args` (`src/app/cli/bootstrap_main.spl`) is `var raw_args =
+rt_get_args(); if raw_args == nil: raw_args = []`. Confirms the doc's
+"nondeterministic crash site" note: run 13 (previous session) hit the `_3`
+use-before-def + null-binop-operand diagnostics; this run hit a *different*,
+undiagnosed SIGSEGV first, consistent with `Dict` iteration order over
+`mir_module.functions` varying per run and the crash site being whichever null
+propagates through the LLVM C API first.
+
+**Static fix 1 (applied, not empirically confirmed as `_3`'s producer):**
+`emit_switch_dispatch` / `emit_if_chain_dispatch`
+(`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`, the `match`
+int-scrutinee lowering) had the exact merge-placeholder gap already fixed for
+`lower_if` (`9bea509a`) but never applied here: each arm/default only
+`emit_copy`s the shared `result` temp when its block produces a value
+(`if val arm_result_local = arm_result:`), then unconditionally
+`terminate_goto`s the merge block regardless. An arm whose last statement is
+void (no value) reaches merge with `result` never defined on that path — the
+same use-before-def shape (`_3` consumed directly by a binop) the guide
+flagged `lower_match arms` as an unaudited suspect for. Fixed by mirroring
+`lower_if`'s `result_defined` + merge-block `emit_const(Int(0), i64)`
+placeholder pattern in both functions. **This was not verified against the
+`_3` diagnostic directly — run 2/3 both crashed before that diagnostic could
+fire, so this fix addresses a real, confirmed-by-code-reading gap in the same
+bug family, but is not proven to be `_3`'s specific producer.**
+
+**Static fix 2 (Step 4, guarded, applied):** the `If`-terminator handler in
+`llvm_lib_translate.spl` called `llvm_type_of(precomputed_cond_val)`
+unconditionally — if `translate_operand` returns a null (0) `LLVMValueRef`
+for the condition, `LLVMTypeOf(NULL)` segfaults (same class of hazard already
+guarded at the ret-coercion and binop-operand sites, but not here). Added the
+same named-diagnostic-then-placeholder guard: `precomputed_cond_val == 0` now
+`eprint`s `[llvm-lib] ERROR: If-terminator cond translated to null (...)` and
+substitutes a constant `false` instead of crashing.
+
+**Static fix 3 (Step 4, guarded, applied):** `translate_call_indirect` and
+`translate_intrinsic` (`llvm_lib_translate_expr.spl`) built their arg lists
+with a raw, unguarded `translate_operand` push — the same null-argument
+LLVMBuildCall2 hazard `translate_call` was already guarded against. Added the
+matching named-diagnostic + i64-0-placeholder guard to both arg loops (and a
+null-target guard on `translate_call_indirect`'s `fn_ptr`).
+
+**Run 3** (all 3 fixes applied): Stage 1 still exit 139, crash again
+immediately after (and only after) `TEMP-PROBE compiling function:
+get_cli_args` — my new If-terminator guard did NOT fire, meaning the crash is
+NOT at the If-terminator this time (or precomputed_cond_val was non-null but
+something else in that path crashed), and no other new guard fired either.
+Only one `TEMP-PROBE` line printed in the entire run (vs 3 in run 2),
+consistent with the doc's non-deterministic-iteration-order theory — a
+different/earlier function-processing order this run. The crash is somewhere
+inside `compile_function` for `get_cli_args` (or later, before the next
+`TEMP-PROBE` would have printed) that is **not yet instrumented** — none of
+the existing named guards (translate_call args/callee, translate_binop
+operands, ret coercion, If-cond, call_indirect/intrinsic args) fired. Probe
+reverted (`compile_function` no longer prints).
+
+**Honest state at end of session:** `_3` use-before-def and the residual
+post-diagnostic crash from run 13 were NOT reproduced this session (different
+nondeterministic crash site both runs). Two real, code-reading-confirmed
+lowering/backend gaps were fixed (match/switch merge placeholder;
+If-terminator null-cond guard) plus 2 more null-arg guards, but Stage 1 is
+still SIGSEGV with zero diagnostics printed before the crash in both runs 2
+and 3 — meaning there is at least one more unguarded/unlowered path reachable
+from very early in `get_cli_args` (or a sibling small function iterated
+first) that no current instrumentation covers. Next session: re-add the
+function-name probe (temporarily) plus instrument `compile_function`'s
+block/value-map setup phase itself (block creation, param mapping,
+`local_types` construction) — the crash may be there rather than in any
+`translate_*` call, since none of those are printing a diagnostic before
+the SIGSEGV.

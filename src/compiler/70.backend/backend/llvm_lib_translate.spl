@@ -118,15 +118,28 @@ fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeM
             case If(cond, then_target, else_target):
                 precomputed_cond_val = translate_operand(ctx, mod_, builder, type_mapper, cond, value_map, local_types, func_map)
                 val i1_ty = llvm_int1_type_in_context(ctx)
-                val cond_ty = llvm_type_of(precomputed_cond_val)
-                precomputed_final_cond = if cond_ty != i1_ty:
-                    val zero = if llvm_get_type_kind(cond_ty) == 12:  # 12=Pointer (was 14=Metadata)
-                        llvm_const_null(cond_ty)
-                    else:
-                        llvm_const_int(cond_ty, 0, false)
-                    llvm_build_icmp(builder, LLVM_INT_NE, precomputed_cond_val, zero, "tobool")
+                precomputed_final_cond = if precomputed_cond_val == 0:
+                    # A null LLVMValueRef condition segfaults inside
+                    # LLVMTypeOf (see the ret-coercion comment above) — name
+                    # the operand kind so the producing translation path is
+                    # identifiable, then substitute a constant so codegen
+                    # continues instead of crashing.
+                    val cond_desc = match cond.kind:
+                        case Copy(local): "Copy#" + local.id.to_text()
+                        case Move(local): "Move#" + local.id.to_text()
+                        case Const(_, _): "Const"
+                    eprint("[llvm-lib] ERROR: If-terminator cond translated to null (" + cond_desc + ") — substituting false to avoid LLVMTypeOf(NULL) segfault")
+                    llvm_const_int(i1_ty, 0, false)
                 else:
-                    precomputed_cond_val
+                    val cond_ty = llvm_type_of(precomputed_cond_val)
+                    if cond_ty != i1_ty:
+                        val zero = if llvm_get_type_kind(cond_ty) == 12:  # 12=Pointer (was 14=Metadata)
+                            llvm_const_null(cond_ty)
+                        else:
+                            llvm_const_int(cond_ty, 0, false)
+                        llvm_build_icmp(builder, LLVM_INT_NE, precomputed_cond_val, zero, "tobool")
+                    else:
+                        precomputed_cond_val
                 precomputed_then_bb = block_map[then_target]
                 precomputed_else_bb = block_map[else_target]
                 llvm_build_cond_br(builder, precomputed_final_cond, precomputed_then_bb, precomputed_else_bb)
