@@ -111,6 +111,27 @@ fn u32_array_index_uses_word_fast_path() {
 }
 
 #[test]
+fn dynamic_u32_array_repeat_boxes_value() {
+    let mir =
+        compile_to_mir("fn test(count: i64) -> u32:\n    val arr: [u32] = [0xffffffffu32; count]\n    return arr[0]\n")
+            .unwrap();
+    let boxed = mir
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .find_map(|inst| match inst {
+            MirInst::BoxInt { dest, .. } => Some(*dest),
+            _ => None,
+        })
+        .expect("dynamic u32 repeat must box its value");
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, args, .. }
+            if target == &CallTarget::from_name("rt_array_repeat") && args.first() == Some(&boxed))
+    }));
+}
+
+#[test]
 fn u64_array_index_uses_word_fast_path() {
     let mir = compile_to_mir(
         "fn test() -> u64:\n    var arr: [u64] = []\n    var first: u64 = 10\n    var second: u64 = 20\n    arr.push(first)\n    arr.push(second)\n    return arr[1]\n",

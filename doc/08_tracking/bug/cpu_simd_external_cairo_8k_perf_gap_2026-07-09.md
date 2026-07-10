@@ -149,14 +149,39 @@ was reverted. The corrected helper rename and Simple-core ABI must be rebuilt
 and must reproduce the retained checksums before any current-source speed or
 Cairo-ratio claim is made.
 
+### Dynamic-repeat representation follow-up
+
+The fresh MIR path passed raw scalar values to `rt_array_repeat`, whose first
+argument is a boxed `RuntimeValue`. For a repeated `0xffffffffu32` framebuffer
+initializer, typed reads therefore interpreted the raw bits as a tagged value
+and returned `0x1fffffff`. MIR array-repeat lowering now boxes scalar elements
+the same way ordinary array literals do. The focused MIR regression and the
+dynamic `[u32; count]` compiler spec pass.
+
+A strict pure-Simple-runtime binary built from commit `3f1e2e2ed0f` plus this
+working change, using the retained
+`build/check/cpu_simd_full_render_current_entry.spl` diagnostic, then produced
+the correct full-width first
+pixel (`indexed_first=raw_first=4294967295`) at both 3840x2160 and 7680x4320.
+The measured render calls were `47856us` and `167412us`, with `326656 KiB` max
+RSS, but both checksums equal an entirely white framebuffer:
+
+- 4K: `35624176731648000` (`8294400 * 0xffffffff`)
+- 8K: `142496706926592000` (`33177600 * 0xffffffff`)
+
+These timings are rejected. They do not match the retained scene checksums
+(`32105444634193792` at 4K and `135445232233405312` at 8K), so no fresh speed
+or Cairo-ratio claim is made. The remaining correctness blocker is now after
+framebuffer initialization: the strict Simple-core renderer does not commit
+the scene's drawing writes.
+
 ## Next Step
 
 Do not repeat the viewport/DPI/fallback/color proof work. The retained evidence
 already proves full 8K size, default 300dpi, configurable DPI override, checksum
 and pixel proof, CPU-SIMD runtime target, no fallback, and alpha-quality parity.
-The immediate blocker is the interpreted native-build graph/parse path and
-fresh self-host deployment, not another framebuffer representation. Rebuild
-the pure-Simple CLI, verify the deployed
-`rt_array_repeat` machine code uses the current bulk-fill implementation, and
-then re-run the external CPU drawing-library comparison. Revisit the owner
-facade only if that fresh measurement still shows a material gap.
+The immediate blocker is the strict Simple-core drawing-write path after
+framebuffer initialization, not another framebuffer representation. Trace the
+first non-background rectangle write through typed `u32` set/push codegen and
+the generated Simple-core ABI. After that path reproduces the retained 4K/8K
+checksums, re-run the external CPU drawing-library comparison once.

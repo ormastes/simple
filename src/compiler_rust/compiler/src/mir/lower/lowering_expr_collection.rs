@@ -410,9 +410,21 @@ impl<'a> MirLowerer<'a> {
 
     pub(super) fn lower_array_repeat_expr(&mut self, value: &HirExpr, count: &HirExpr) -> MirLowerResult<VReg> {
         // Array repeat: [value; count] - creates array with count copies of value
-        // Lower to runtime call: rt_array_repeat(value, count)
-        let value_reg = self.lower_expr(value)?;
+        let raw_value_reg = self.lower_expr(value)?;
         let count_reg = self.lower_expr(count)?;
+        let value_reg = if value.ty == TypeId::U32 {
+            self.with_func(|func, current_block| {
+                let boxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::BoxInt {
+                    dest: boxed,
+                    value: raw_value_reg,
+                });
+                boxed
+            })?
+        } else {
+            raw_value_reg
+        };
 
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
