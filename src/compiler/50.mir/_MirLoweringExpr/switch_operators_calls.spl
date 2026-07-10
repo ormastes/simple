@@ -507,6 +507,36 @@ impl MirLowering:
         self.builder = b
         boot_temp
 
+    me lower_struct_construct(symbol: SymbolId, struct_name: text, args: [HirCallArg]) -> LocalId:
+        """Lower `Point(x:3, y:4)` (or `Point{...}`) into an aggregate: one i64
+        word per field, in declared field order. Named args are matched by name;
+        otherwise falls back to positional order. Yields a pointer to the
+        constructed storage (see backend translate_aggregate Struct branch)."""
+        val field_names = self.struct_field_order[struct_name]
+        var ops: [MirOperand] = []
+        var fi = 0
+        while fi < field_names.len():
+            val want = field_names[fi]
+            # Default to the positional arg at this field index; a named arg
+            # whose name matches overrides it.
+            var chosen = if fi < args.len(): args[fi].value else: args[0].value
+            var ai = 0
+            while ai < args.len():
+                if args[ai].has_name and args[ai].name == want:
+                    chosen = args[ai].value
+                ai = ai + 1
+            val v = self.lower_expr(chosen)
+            ops = ops.push(mir_operand_copy(v))
+            fi = fi + 1
+        val struct_ty = MirType(kind: MirTypeKind.Struct(symbol))
+        var b = self.builder
+        val dest = b.emit_aggregate(AggregateKind.Struct(symbol), ops, struct_ty)
+        self.builder = b
+        # Track dest local -> struct NAME so a later `p.x` field read can recover
+        # the field ordering (the pipeline has no expr type-inference).
+        self.struct_value_syms[dest.id] = struct_name
+        dest
+
     me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
         """Lower function call.
 
@@ -528,13 +558,20 @@ impl MirLowering:
                     return self.lower_bootstrap_print_call(args, "rt_println")
                 if is_gpu_intrinsic(callee_name):
                     return self.lower_gpu_intrinsic_call(callee_name, args)
-            case NamedVar(_, callee_name):
+                # Reclassify `Point(x:3,y:4)` paren-constructor Calls whose callee
+                # names a struct into stack-aggregate construction. Name-keyed so
+                # it dodges the interpreter symbol_id_value(-1) quirk.
+                if self.struct_field_order.has(callee_name):
+                    return self.lower_struct_construct(symbol, callee_name, args)
+            case NamedVar(nv_symbol, callee_name):
                 if callee_name == "print" or callee_name == "_cli_eprint":
                     return self.lower_bootstrap_print_call(args, "rt_print")
                 if callee_name == "println":
                     return self.lower_bootstrap_print_call(args, "rt_println")
                 if is_gpu_intrinsic(callee_name):
                     return self.lower_gpu_intrinsic_call(callee_name, args)
+                if self.struct_field_order.has(callee_name):
+                    return self.lower_struct_construct(nv_symbol, callee_name, args)
             case _: ()
 
         var arg_operands: [MirOperand] = []

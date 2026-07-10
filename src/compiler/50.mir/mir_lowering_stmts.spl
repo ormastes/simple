@@ -97,7 +97,12 @@ impl MirLowering:
                             case Some(type_value): self.lower_type(type_value)
                             case nil: self.local_mir_type_or_i64(init_local)
                         val bf_sym = self.bitfield_value_syms.get(init_local_id)
-                        if bf_sym != nil:
+                        # Struct values are pointer-represented; alias the binding
+                        # straight to the constructed local (like the bitfield
+                        # pass-through) so struct_value_syms (keyed by that local's
+                        # .id) stays valid for a later `p.x` field read.
+                        val struct_sym = self.struct_value_syms.get(init_local.id)
+                        if bf_sym != nil or struct_sym != nil:
                             self.local_map[symbol_value_id] = init_local
                         else:
                             var b = self.builder
@@ -148,15 +153,23 @@ impl MirLowering:
                         # not sig_N(6 downto 0)). bitfield_value_syms is only
                         # populated for real bitfield types, so non-bitfield
                         # code always takes the ordinary new_local + Copy path.
-                        val bf_sym = if has_init:
+                        var bf_sym: i64? = nil
+                        var struct_sym: text? = nil
+                        if has_init:
                             val init_local_id = mir_stmt_local_id_value(init_local)
                             if init_local_id < 0:
                                 self.error("let initializer produced no local", Some(span))
                                 return
-                            self.bitfield_value_syms.get(init_local_id)
-                        else:
-                            nil
-                        if bf_sym != nil:
+                            bf_sym = self.bitfield_value_syms.get(init_local_id)
+                            # Struct values are pointer-represented; aliasing the
+                            # binding straight to the constructed local (like the
+                            # bitfield pass-through) keeps struct_value_syms (keyed
+                            # by the constructed local's .id) valid so a later
+                            # `p.x` field read can recover the field ordering.
+                            # Key on init_local.id directly to match how
+                            # lower_struct_construct writes the map.
+                            struct_sym = self.struct_value_syms.get(init_local.id)
+                        if bf_sym != nil or struct_sym != nil:
                             self.local_map[symbol_id] = init_local
                         else:
                             var b = self.builder
@@ -233,7 +246,7 @@ impl MirLowering:
                     bitfield_b.emit_copy(receiver, bitfield_local)
                     self.builder = bitfield_b
                     return
-                val field_index = self.resolve_field_index(base, field, resolved)
+                val field_index = self.resolve_field_index(base, receiver, field, resolved)
                 var b = self.builder
                 b.emit_set_field(mir_operand_copy(receiver), field_index, mir_operand_copy(value_local))
                 self.builder = b

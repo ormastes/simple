@@ -55,6 +55,27 @@ impl MirToLlvm:
                     val elem_value = self.value_as_type(raw_elem, self.get_operand_type(operands[i]), "i64")
                     self.builder.emit("  call i8 @rt_array_push(ptr {dest_name}, i64 {elem_value})")
                 return
+            case Struct(_):
+                # Struct value = pointer to N i64 words. Reserve N words, store
+                # each field, and yield the POINTER (do NOT load by value). The
+                # per-field GEP form is byte-identical to translate_get_field
+                # (element type native_int, single index) so construct offsets
+                # exactly match field-read offsets.
+                val nit = self.native_int()
+                val n = operands.len()
+                val agg = self.builder.fresh_local()
+                self.builder.emit_alloca(agg, "[{n} x {nit}]")
+                for i in 0..n:
+                    val raw = self.translate_operand(operands[i])
+                    val v = self.value_as_type(raw, self.get_operand_type(operands[i]), nit)
+                    val fp = self.builder.fresh_local()
+                    self.builder.emit("  {fp} = getelementptr inbounds {nit}, ptr {agg}, i32 {i}")
+                    self.builder.emit_store(nit, v, fp)
+                self.mark_ptr_local(dest_id)
+                self.local_types[dest_id] = "ptr"
+                self.value_types[dest_name] = "ptr"
+                self.builder.emit("  {dest_name} = getelementptr i8, ptr {agg}, {nit} 0  ; struct ptr")
+                return
             case _: ()
         val agg_ty = self.valid_llvm_type(self.get_local_type(dest_id))
         val agg_ptr = self.builder.fresh_local()
