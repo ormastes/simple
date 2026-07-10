@@ -1,9 +1,12 @@
 # BUG: fat32 stream_open returns 0 in merged SSH kernel (prod entry reads 13888)
 
-**Status:** open — the ONE blocker between SSH-exec-dispatch and the full
-"hello over SSH" demo. SSH login is proven end-to-end (origin ee0d17c7); the
-exec dispatch fires and calls `fs_exec_spawn_ring3`.
-**Severity:** high (blocks the SSH→ring-3 one-shot demo)
+**Status:** RESOLVED (2026-07-10) — `ssh -p 2222 root@127.0.0.1 /FSEXEC.ELF`
+now runs the on-disk clang ELF in ring-3 to `hello from clang on simpleos` +
+`[user] exit rc=42`. Demo: `scripts/os/ssh_clang_hello_ring3.shs` prints
+`DEMO PASSES`. Four independent bugs had to be cleared (see "2026-07-10
+resolution" below). Underlying compiler bugs (text-return-into-store,
+`@cfg`-multi-variant mis-dispatch) remain and are worked around; file them.
+**Severity:** high (blocked the SSH→ring-3 one-shot demo)
 **Component:** SimpleOS x86_64 boot/FAT32 integration in the merged SSH+ring-3
 kernel (`examples/09_embedded/simple_os/arch/x86_64/ssh_ring3_entry.spl`)
 **Found:** 2026-07-10
@@ -83,6 +86,50 @@ it was two separate bugs:
 NOTE: the "clobber/ordering" hypothesis below is NOT supported by evidence — every
 run with a *resolvable* path faulted before the exec-time read ever executed, so a
 clean exec-time read returning 0 was never observed.
+
+## 2026-07-10 resolution — FOUR bugs cleared, demo passes
+
+The full `ssh … /FSEXEC.ELF` → ring-3 clang-hello demo now passes. Four distinct
+bugs, each masking the next:
+
+1. **SSH command text mis-decode** (`/FSEXEC.ELF` → `/E`): x64 freestanding
+   text-return-into-store heap-tag mangling (proven §above). WORKAROUND: dispatch
+   detects the leading `/` from the RAW payload byte and uses the LITERAL path.
+2. **Deep-stack ring-3 spawn faults**: invoking the spawn from deep inside the
+   sshd session dispatch (run→loop→packet→channel_request→exec + crypto) faults in
+   ring-0 (cr2=0) before the spawn's first line — kernel-stack overflow (the spawn's
+   own build+enter call tree exceeds the stack from that depth). FIX: DEFER — the
+   dispatch sets `SshSession.pending_ring3_exec` and the sshd accept loop performs
+   the spawn from a SHALLOW frame (like the prod boot entry). RSP delta deep→shallow
+   was ~13 KB, consistent with overflow.
+3. **Exec-time FAT read returns 0**: device/FS state is clobbered after
+   `rt_net_init` + vmm + SSH activity, so `simpleos_fat32_stream_open` at exec time
+   returns 0 (the boot read gets 13888). FIX: the boot entry PRELOADS `/FSEXEC.ELF`
+   into the static path-read buffer while state is pristine (pre-net, pre-vmm) and
+   records the size (C `simpleos_fat32_note_preload_size`); `x86_64_fs_exec_spawn_as`
+   short-circuits to that resident buffer (magic-checked) instead of re-streaming.
+4. **`fs_exec_spawn_ring3` routes to the WRONG arch**: the `@cfg` multi-variant
+   dispatch of `_fs_exec_spawn_ring3_active` mis-selects a non-x86_64 variant on the
+   `x86_64-unknown-none` build and routes to the VFS reader
+   (`fs_exec_spawn_as` → `g_vfs_read_executable_bytes` → `[vfs-read] len=0`), which
+   NEVER performs the ring-3 handoff (only `x86_64_fs_exec_spawn_as` does). Proof:
+   `[vfs-read]` fires while `x86_64_fs_exec_spawn_as` never calls the VFS reader.
+   WORKAROUND: the sshd accept loop calls `x86_64_fs_exec_spawn` DIRECTLY (single
+   non-`@cfg` pub fn), bypassing the wrapper. This is a compiler bug — FILE IT (the
+   `@cfg`-variant selection also mis-picked a `-16` stub for a fresh helper).
+
+Serial gate (passing): `[sshd] ring3 deferred spawn /FSEXEC.ELF` →
+`[fs-exec] spawn:resolve path=/FSEXEC.ELF` → `[fs-exec] spawn:preloaded len=13888`
+→ image built → ring-3 → `hello from clang on simpleos` → `[user] exit rc=42`.
+
+Files: `ssh_ring3_entry.spl` (boot preload), `boot/baremetal_stubs.c` (preload
+size globals), `x86_64_fs_exec_spawn.spl` (preload short-circuit),
+`ssh_session.spl` (raw-byte detect + defer flag), `sshd.spl` (shallow-frame direct
+spawn), `scripts/os/ssh_clang_hello_ring3.shs` (demo harness).
+
+LANDING NOTE: the `sshd.spl` direct import of `x86_64_fs_exec_spawn` is x86_64-only;
+guard it for the rv64 sshd lane (or fix the `@cfg` dispatch and revert to the
+wrapper) before landing.
 
 ## What differs (the actual bug surface)
 

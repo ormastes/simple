@@ -21,7 +21,6 @@ use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
 use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
 use os.kernel.memory.vmm.{vmm_init}
 use os.kernel.memory.vmm_address_space.{vmm_map_nvme_bar_high}
-use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_preread_boot}
 
 extern fn serial_println(msg: text)
 extern fn rt_net_init() -> i64
@@ -30,6 +29,10 @@ extern fn rt_embedded_host_rsa_pkcs8() -> [u8]
 extern fn rt_embedded_host_rsa_public_blob() -> [u8]
 extern fn rt_x86_tss_init() -> i64
 extern fn simpleos_nvme_init() -> i64
+extern fn simpleos_fat32_stream_open(path: text) -> i64
+extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i64
+extern fn simpleos_fat32_path_read_buffer_addr() -> u64
+extern fn simpleos_fat32_note_preload_size(sz: u64)
 
 fn _start():
     serial_println("")
@@ -48,16 +51,20 @@ fn _start():
         return
     serial_println("[boot] nvme online")
 
-    # 2b. Pre-read /FSEXEC.ELF into the resident FAT path-read buffer NOW — right
-    #     after nvme_init, BEFORE rt_net_init and vmm. The merged SSH kernel's
-    #     rt_net_init disturbs the NVMe controller so a LATER FAT read returns
-    #     non-ELF garbage (post-net post-vmm read yields preread:not-elf); reading
-    #     here, while NVMe is pristine and the BAR is still boot-mapped, gets clean
-    #     bytes. They persist in the C static buffer (nothing else overwrites it),
-    #     and x86_64_fs_exec_spawn's exec-time reader falls back to them (the
-    #     exec-time FAT re-open returns len=0).
-    val preread = x86_64_fs_exec_preread_boot("/FSEXEC.ELF")
-    serial_println("[boot] fsexec preread size={preread}")
+    # PRELOAD /FSEXEC.ELF into the static path-read buffer NOW (pre-net, pre-vmm),
+    # while the FAT/NVMe DMA state is pristine. The exec-time FAT read returns 0 in
+    # this merged SSH kernel (device/FS state clobbered after rt_net_init + vmm + SSH
+    # activity — bug x64_ssh_kernel_fat32_stream_open_zero), so the ring-3 spawn
+    # consumes THIS resident buffer instead of re-streaming. size=13888 also confirms
+    # the if-expr phi-merge codegen fix (5c7c1186) repaired the boot-time read path.
+    val _preload_size = simpleos_fat32_stream_open("/FSEXEC.ELF")
+    if _preload_size > 0:
+        val _preload_buf = simpleos_fat32_path_read_buffer_addr()
+        val _preload_n = simpleos_fat32_stream_read_at(0.to_u64(), _preload_buf, _preload_size.to_u64())
+        simpleos_fat32_note_preload_size(_preload_size.to_u64())
+        serial_println("[boot] fsexec preloaded size={_preload_size} read={_preload_n}")
+    else:
+        serial_println("[boot] fsexec preload FAILED rc={_preload_size}")
 
     val net_init = rt_net_init()
     serial_println("[boot] rt_net_init rc={net_init}")

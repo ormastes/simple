@@ -2652,6 +2652,15 @@ static struct {
     uint32_t cbuf_cluster;     /* cluster currently loaded in cbuf, 0 = none */
 } _fat_stream;
 
+/* /FSEXEC.ELF preload: the FAT/NVMe read works at boot (pre-net, pre-vmm) but
+ * returns 0 at exec time in the merged SSH kernel (device/FS state clobbered after
+ * rt_net_init + vmm + SSH daemon activity). The boot entry reads the ELF into the
+ * static path-read buffer once while state is pristine and records its size here;
+ * the exec-time spawn consumes the resident buffer instead of re-streaming. */
+static uint64_t g_fsexec_preload_size = 0;
+void simpleos_fat32_note_preload_size(uint64_t sz) { g_fsexec_preload_size = sz; }
+uint64_t simpleos_fat32_preloaded_size(void) { return g_fsexec_preload_size; }
+
 int64_t simpleos_fat32_stream_open(const char *path, int64_t path_len)
 {
     char path_buf[128];
@@ -15056,8 +15065,6 @@ __attribute__((weak)) int64_t spl_handle_device_grant(uint64_t, uint64_t, uint64
 __attribute__((weak)) int64_t spl_handle_map_bar(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_alloc_dma(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_free_dma(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-__attribute__((weak)) int64_t spl_handle_dma_sync_for_device(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-__attribute__((weak)) int64_t spl_handle_dma_sync_for_cpu(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_log_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_log_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_sysinfo(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -15703,8 +15710,6 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case 83: return spl_handle_map_bar(a0, a1, a2, a3, a4, a5);
         case 84: return spl_handle_alloc_dma(a0, a1, a2, a3, a4, a5);
         case 85: return spl_handle_free_dma(a0, a1, a2, a3, a4, a5);
-        case 86: return spl_handle_dma_sync_for_device(a0, a1, a2, a3, a4, a5);
-        case 87: return spl_handle_dma_sync_for_cpu(a0, a1, a2, a3, a4, a5);
         case 90: return spl_handle_log_write(a0, a1, a2, a3, a4, a5);
         case 91: return spl_handle_log_read(a0, a1, a2, a3, a4, a5);
         case 95: return spl_handle_sysinfo(a0, a1, a2, a3, a4, a5);
@@ -16195,18 +16200,6 @@ __attribute__((weak)) int64_t spl_handle_alloc_dma(uint64_t a0, uint64_t a1, uin
 
 __attribute__((weak)) int64_t spl_handle_free_dma(uint64_t a0, uint64_t a1, uint64_t a2,
                                                    uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return -38;
-}
-
-__attribute__((weak)) int64_t spl_handle_dma_sync_for_device(uint64_t a0, uint64_t a1, uint64_t a2,
-                                                              uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return -38;
-}
-
-__attribute__((weak)) int64_t spl_handle_dma_sync_for_cpu(uint64_t a0, uint64_t a1, uint64_t a2,
-                                                           uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     return -38;
 }
