@@ -286,6 +286,7 @@ int64_t  rt_array_get_text(SplArray* array, int64_t idx);
 void     rt_array_set(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_set_text(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_push(SplArray* array, int64_t value);
+SplArray* rt_array_concat(SplArray* a, SplArray* b);
 SplArray* rt_array_repeat(int64_t value, int64_t count);
 int64_t  rt_array_data_ptr(SplArray* array);
 int64_t  rt_array_data_ptr_text(SplArray* array);

@@ -1614,6 +1614,33 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
     return 1;
 }
 
+SplArray* rt_array_concat(SplArray* a, SplArray* b) {
+    RtCoreArray* left = rt_core_array_ptr(a);
+    RtCoreArray* right = rt_core_array_ptr(b);
+    if (!left || !right) return NULL;
+    if (left->len < 0 || right->len < 0 || left->len > INT64_MAX - right->len) return NULL;
+    int64_t total = left->len + right->len;
+    if (total > 100000000) return NULL;
+    uint8_t byte_flags = ((left->flags & RT_CORE_ARRAY_FLAG_BYTES) &&
+                          (right->flags & RT_CORE_ARRAY_FLAG_BYTES))
+                             ? RT_CORE_ARRAY_FLAG_BYTES
+                             : 0;
+    SplArray* result = rt_core_array_new_fill(total, byte_flags, 0);
+    RtCoreArray* out = rt_core_array_ptr(result);
+    if (!out) return result;
+    out->len = total;
+    if (total == 0 || !out->data) return result;
+    if (byte_flags) {
+        if (left->len > 0) memcpy(out->data, left->data, (size_t)left->len);
+        if (right->len > 0) memcpy((uint8_t*)out->data + left->len, right->data, (size_t)right->len);
+        return result;
+    }
+    int64_t* dst = (int64_t*)out->data;
+    for (int64_t i = 0; i < left->len; i++) dst[i] = rt_array_get(a, i);
+    for (int64_t i = 0; i < right->len; i++) dst[left->len + i] = rt_array_get(b, i);
+    return result;
+}
+
 /* FR-COMPILER-012: array-repeat for `[value; count]` syntax in JIT.
  * Creates a new array with `count` copies of `value`. */
 SplArray* rt_array_repeat(int64_t value, int64_t count) {

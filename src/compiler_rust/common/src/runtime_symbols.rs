@@ -134,6 +134,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_array_set_text",
     "rt_array_set_len_known_text",
     "rt_array_push",
+    "rt_array_concat",
     "rt_array_pop",
     "rt_array_len",
     "rt_bytes_u32_le_at",

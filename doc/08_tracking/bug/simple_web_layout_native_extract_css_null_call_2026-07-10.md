@@ -2,7 +2,8 @@
 
 ## Status
 
-Open. This blocks native 4K/8K CPU-SIMD layout performance evidence.
+Resolved on 2026-07-10. Native Simple Web layout now links and executes the
+array concatenation used by `extract_css_vw`.
 
 ## Reproduction
 
@@ -36,19 +37,51 @@ The binary builds `10 compiled, 0 cached, 0 failed`, then calls address zero:
 LLVM entry-closure builds expose additional pre-existing verification failures
 in unrelated modules and also cannot provide executable layout evidence.
 
+## Root Cause
+
+MIR correctly lowered array `+` to `rt_array_concat`, but the core C runtime
+did not implement or export that ABI symbol. The native linker left the call
+unresolved as address zero.
+
+## Fix
+
+- Implement `rt_array_concat` in `src/runtime/runtime_native.c`, including byte
+  array preservation and length/capacity guards.
+- Declare the ABI in `src/runtime/runtime.h`.
+- Require the symbol in the Rust core-runtime symbol audit.
+- Add a tracked Cranelift entry-closure regression that renders a two-style
+  document through the Simple Web software layout path.
+
+## Verification
+
+```sh
+SIMPLE_BIN="$PWD/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple" \
+OUT_DIR="$PWD/build/check/simple-web-layout-native-runtime-concat" \
+sh scripts/check/check-simple-web-layout-native.shs
+```
+
+The native regression built with zero failed files and reported:
+
+```text
+simple_web_layout_native_status=pass
+simple_web_layout_native_reason=core-array-concat-linked
+```
+
 ## Impact
 
 - Interpreter scalar and CPU-SIMD layout outputs are bit-exact.
 - The standalone C span ABI and x86-64/AArch64/RISC-V native probes pass.
-- Native end-to-end layout remains unsafe for realistic multiple-style-block pages.
+- Native end-to-end layout is safe for the tracked multiple-style-block probe.
+- The broader 4K/8K CPU-SIMD performance target remains open because the
+  attempted layout paint routing did not yet produce a valid styled AOT fixture
+  or native SIMD hit evidence.
 
 ## Attempted Fix
 
 The two array `+` operations that append selected selector groups and
-declarations lower to a null dynamic call. Explicit append loops allowed one
-focused page to render, but a two-style-block regression fixture still called
-address zero. Direct mutating `push` and reassigned `push` forms both failed
-native verification, so the workaround was rejected.
+declarations lowered to the missing runtime call. Explicit append loops allowed
+one focused page to render, but were rejected because they avoided rather than
+fixed the shared ABI defect.
 
 The one-style probe temporarily reported:
 
@@ -57,7 +90,5 @@ Build complete: 5 compiled, 0 cached, 0 failed
 pixels=57600
 ```
 
-That result is insufficient: the two-style-block probe still exits with signal
-11 after a clean native build. The compiler/runtime owner must fix native array
-concatenation or mutation lowering before the canonical scale contract can
-provide trustworthy full-size timing, RSS, and native SIMD hit evidence.
+The shared runtime ABI implementation supersedes that workaround and is covered
+by the tracked native regression above.
