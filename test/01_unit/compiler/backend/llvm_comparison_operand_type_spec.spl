@@ -147,3 +147,25 @@ describe "LLVM comparison operand type lowering":
         translator.translate_const(LocalId(id: 1), MirConstValue.Int(-1), MirType(kind: MirTypeKind.I32))
 
         expect(translator.unsigned_values.has("%l1")).to_equal(false)
+
+    it "uses the emitted SSA type for an imported call without signature metadata":
+        val translator = MirToLlvm.create("test.llvm.imported_call", CodegenTarget.X86_64, nil)
+        val fn_ty = MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+            params: [MirType(kind: MirTypeKind.U32)],
+            return_type: MirType.i64(),
+            is_variadic: false
+        )))
+        translator.local_types[4] = "i64"
+        translator.translate_instruction(MirInst(
+            kind: MirInstKind.Const(LocalId(id: 3), MirConstValue.Int(4279246896), MirType(kind: MirTypeKind.U32)),
+            span: nil
+        ))
+        translator.local_types[3] = "i64"
+        translator.translate_call(
+            Some(LocalId(id: 4)),
+            MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("imported_wrapper"), fn_ty)),
+            [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))]
+        )
+        val output = translator.builder.build()
+
+        expect(output).to_contain("call i64 @imported_wrapper(i32 %l3)")
