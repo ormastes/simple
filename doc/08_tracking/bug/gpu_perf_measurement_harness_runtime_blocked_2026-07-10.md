@@ -19,12 +19,13 @@ SIMPLE_LIB=src bin/simple run test/05_perf/local_gpu_check/run_gpu_check.spl
 self-hosted runtime reports `unknown extern function: rt_exec_output`; it
 therefore parses empty output as `unclassified-output` with missing timings.
 
-## Required Fix
+## Fix Status
 
-Provide one supported process-output facade to standalone performance runners,
-or repair the existing `rt_exec_output` runtime symbol. Then require the CUDA
-and Vulkan rows to report GPU timing, CPU timing, readback timing, and a
-classified overhead verdict before claiming measured GPU acceleration.
+The runtime now exports and interpreter-registers `rt_exec_output`. A rebuilt
+diagnostic runtime produced CUDA `0.02 ms` versus CPU `0.77 ms` for the 1080p
+clear (`38.5x`, measured-gpu-faster), while Vulkan reported `2.70 ms` and was
+classified measured-gpu-slower-overhead. The normal self-hosted binary still
+needs deployment before this is release evidence.
 
 ## Evidence Rule
 
