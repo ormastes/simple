@@ -717,6 +717,20 @@ const uint8_t* rt_string_data(int64_t string) {
     return s ? (const uint8_t*)s->data : NULL;
 }
 
+/* Bug #136: string-interpolation operand coercion to a raw C string.
+ * Interpolation `{expr}` operands are MIXED and statically undiscriminable:
+ * a tagged heap string (e.g. an argv element built via rt_string_new) vs a
+ * raw char* (e.g. a bootstrap string literal returned from a function). This
+ * inspects the tag at runtime: a valid tagged string yields its null-
+ * terminated buffer; anything else is assumed to already be a raw char* and
+ * is passed through. Used by MIR StringLit interpolation lowering, which then
+ * concatenates the raw segments with rt_strcat. Uses the same rt_core_as_string
+ * accessor + s->data buffer as rt_string_data above. */
+const char* rt_interp_cstr(int64_t v) {
+    RtCoreString* s = rt_core_as_string(v);
+    return s ? (const char*)s->data : (const char*)(uintptr_t)v;
+}
+
 int64_t rt_string_char_code_at(int64_t string, int64_t index) {
     RtCoreString* s = rt_core_as_string(string);
     if (!s || index < 0 || (uint64_t)index >= s->len) return 0;

@@ -49,6 +49,109 @@ impl MirLowering:
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
         ))
 
+    me split_interpolation_segments(value: text) -> [text]:
+        """Bug #136: split an interpolated string literal into its N+1 literal
+        text segments around N top-level `{...}` interpolation regions.
+
+        The lexer copies each `{expr}` VERBATIM into `value`, so the literal
+        text between/around the `{...}` regions is exactly what should surround
+        the lowered interpolation-expr results. Brace depth is tracked so nested
+        braces inside an expr (e.g. `{f({a: 1})}`) stay inside one region. Chars
+        inside a `{...}` region are dropped here (the parsed expr is lowered
+        separately from the interpolations list). Returns segments interleaving
+        positionally with the interpolation exprs: seg0, expr0, seg1, ..., segN.
+        """
+        var segments: [text] = []
+        var cur = ""
+        var depth = 0
+        var i = 0
+        val n = value.len()
+        while i < n:
+            val ch = value[i:i + 1]
+            if depth == 0 and ch == "{":
+                segments = segments.push(cur)
+                cur = ""
+                depth = 1
+            elif depth > 0 and ch == "{":
+                depth = depth + 1
+            elif depth > 0 and ch == "}":
+                depth = depth - 1
+            elif depth == 0:
+                cur = cur + ch
+            i = i + 1
+        segments = segments.push(cur)
+        segments
+
+    me emit_bootstrap_str_const(value: text) -> LocalId:
+        """Emit a raw string-const local (an Opaque `str` char* pointer)."""
+        var b = self.builder
+        val dest = b.new_temp(MirType(kind: MirTypeKind.Opaque("str")))
+        b.emit_const(dest, MirConstValue.Str(value), MirType(kind: MirTypeKind.Opaque("str")))
+        self.builder = b
+        dest
+
+    me lower_string_interpolation(value: text, interps: [HirInterpolation]) -> LocalId:
+        """Bug #136: lower an interpolated string literal to a real concatenated
+        raw char* value instead of discarding the `{expr}` parts and emitting
+        the verbatim literal.
+
+        Split `value` into literal segments around the top-level `{...}` regions
+        (positionally aligned with `interps`), lower each interpolation expr, and
+        coerce it to a raw C string via rt_interp_cstr (handles both a tagged
+        heap string -> its buffer, and an already-raw char* -> passthrough --
+        the operands are statically undiscriminable). Concatenate the alternating
+        [seg0, cstr(expr0), seg1, cstr(expr1), ..., segN] with rt_strcat, which
+        takes and returns raw char*. The result is a raw char* (Opaque `str`),
+        the same representation a plain string literal produces, so downstream
+        consumers (rt_println, etc.) are unaffected.
+        """
+        val segments = self.split_interpolation_segments(value)
+        # Number of interpolation slots to emit: guard against any mismatch
+        # between {...} regions found and the parsed interps list.
+        var slot_count = interps.len()
+        if segments.len() - 1 < slot_count:
+            slot_count = segments.len() - 1
+
+        # result starts as the first literal segment (raw char*).
+        var result_local = self.emit_bootstrap_str_const(segments[0])
+
+        var k = 0
+        while k < slot_count:
+            # Lower the interpolation expr, then coerce to raw char* at runtime.
+            # Intermediate var for the index access (seed chained-access quirk).
+            val interp_item = interps[k]
+            val interp_expr = interp_item.expr
+            val interp_local = self.lower_expr(interp_expr)
+            val cstr_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_interp_cstr"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+            ))
+            var b_cstr = self.builder
+            val cstr_res = b_cstr.emit_call(cstr_op, [mir_operand_copy(interp_local)], MirType(kind: MirTypeKind.Opaque("str")))
+            self.builder = b_cstr
+            if val cstr_local = cstr_res:
+                result_local = self.emit_raw_strcat(result_local, cstr_local)
+            # Append the following literal segment.
+            val next_seg = self.emit_bootstrap_str_const(segments[k + 1])
+            result_local = self.emit_raw_strcat(result_local, next_seg)
+            k = k + 1
+
+        result_local
+
+    me emit_raw_strcat(left: LocalId, right: LocalId) -> LocalId:
+        """Concatenate two raw char* locals via rt_strcat (raw char* -> raw char*)."""
+        val strcat_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_strcat"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+        ))
+        var b = self.builder
+        val res = b.emit_call(strcat_op, [mir_operand_copy(left), mir_operand_copy(right)], MirType(kind: MirTypeKind.Opaque("str")))
+        self.builder = b
+        if val res_local = res:
+            res_local
+        else:
+            left
+
     me emit_host_gpu_runtime_call(name: text, args: [MirOperand]):
         var b = self.builder
         b.emit_call(self.host_gpu_runtime_func(name), args, MirType.i64())
@@ -187,14 +290,27 @@ impl MirLowering:
                 self.builder = b
                 result
 
-            case StringLit(value, _):
+            case StringLit(value, interps_opt):
 
-                # Store string as constant; runtime resolves pointer
-                var b = self.builder
-                val dest = b.new_temp(MirType(kind: MirTypeKind.Opaque("str")))
-                b.emit_const(dest, MirConstValue.Str(value), MirType(kind: MirTypeKind.Opaque("str")))
-                self.builder = b
-                dest
+                # Bug #136: if the literal carries interpolation `{expr}` parts,
+                # lower them and concatenate; the parts list was previously
+                # discarded and the raw literal (with `{...}` verbatim) emitted.
+                # Empty/absent parts -> unchanged plain-literal behavior.
+                var has_interps = false
+                var interp_list: [HirInterpolation] = []
+                if val il = interps_opt:
+                    interp_list = il
+                    if interp_list.len() > 0:
+                        has_interps = true
+                if has_interps:
+                    self.lower_string_interpolation(value, interp_list)
+                else:
+                    # Store string as constant; runtime resolves pointer
+                    var b = self.builder
+                    val dest = b.new_temp(MirType(kind: MirTypeKind.Opaque("str")))
+                    b.emit_const(dest, MirConstValue.Str(value), MirType(kind: MirTypeKind.Opaque("str")))
+                    self.builder = b
+                    dest
 
             case NilLit:
                 # Bug #137 (follow-up): a bare `nil` literal previously

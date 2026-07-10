@@ -579,7 +579,19 @@ impl HirLowering:
             return HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
         val tag = expr_get_tag(expr_idx)
         if tag == EXPR_STRING_LIT:
-            return HirExpr(kind: HirExprKind.StringLit(expr_get_str(expr_idx), nil), has_type_: true, type_: HirType(kind: HirTypeKind.Str, span: span), span: span)
+            # Bug #136: the bootstrap flat parser stores the raw string value
+            # with any `{expr}` interpolations copied VERBATIM (e.g.
+            # "simple-bootstrap {bootstrap_version()}") but never parses the
+            # inner sub-expressions -- it passed `nil` for the parts list, so
+            # the MIR interpolation lowering had nothing to substitute and the
+            # `{...}` printed literally. Parse the raw value for top-level
+            # `{...}` regions here and build a real [HirInterpolation] list so
+            # the downstream lower_string_interpolation + rt_interp_cstr chain
+            # can evaluate and splice each part.
+            val raw_str_value = expr_get_str(expr_idx)
+            val interp_parts = self.build_bootstrap_interpolations(raw_str_value, span)
+            val str_interps = if interp_parts.len() > 0: Some(interp_parts) else: nil
+            return HirExpr(kind: HirExprKind.StringLit(raw_str_value, str_interps), has_type_: true, type_: HirType(kind: HirTypeKind.Str, span: span), span: span)
         if tag == EXPR_INT_LIT:
             return HirExpr(kind: HirExprKind.IntLit(expr_get_int(expr_idx), nil), has_type_: true, type_: HirType(kind: HirTypeKind.Int(64, true), span: span), span: span)
         if tag == EXPR_BOOL_LIT:
@@ -613,6 +625,60 @@ impl HirLowering:
         if tag == EXPR_BLOCK:
             return HirExpr(kind: HirExprKind.Block(self.lower_bootstrap_flat_block(expr_get_stmts(expr_idx))), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+
+    me bootstrap_flat_var_expr(name: text, span: Span) -> HirExpr:
+        """Build a bootstrap-flat HIR Var expr for `name`, mirroring the
+        EXPR_IDENT case (bootstrap symbol, overridden by a scope lookup hit)."""
+        var sym = bootstrap_hir_symbol_for_name(name)
+        val found = self.symbols.lookup(name)
+        if val found_symbol = found:
+            sym = found_symbol
+        HirExpr(kind: HirExprKind.Var(sym), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+
+    me bootstrap_interp_expr_from_source(inner: text, span: Span) -> HirExpr:
+        """Build an HIR expr for a single `{...}` interpolation inner source.
+
+        Bootstrap uses only two forms: a zero-arg call `name()` and a bare
+        identifier `name`. `name()` -> Call(Var(name), []); anything else ->
+        Var(inner)."""
+        if inner.ends_with("()"):
+            val fn_name = inner[0:inner.len() - 2]
+            val callee = self.bootstrap_flat_var_expr(fn_name, span)
+            HirExpr(kind: HirExprKind.Call(callee, [], []), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        else:
+            self.bootstrap_flat_var_expr(inner, span)
+
+    me build_bootstrap_interpolations(value: text, span: Span) -> [HirInterpolation]:
+        """Bug #136: scan a raw bootstrap string value for top-level `{...}`
+        regions and build the interpolation parts list. Brace depth is tracked
+        so nested braces inside an expr stay in one region; the inner source of
+        each top-level region is parsed into an HIR expr. The literal text
+        outside braces is ignored here (the MIR side re-splits `value` on the
+        same top-level brace logic to recover the surrounding segments)."""
+        var parts: [HirInterpolation] = []
+        var depth = 0
+        var inner = ""
+        var i = 0
+        val n = value.len()
+        while i < n:
+            val ch = value[i:i + 1]
+            if depth == 0 and ch == "{":
+                depth = 1
+                inner = ""
+            elif depth > 0 and ch == "{":
+                depth = depth + 1
+                inner = inner + ch
+            elif depth > 0 and ch == "}":
+                depth = depth - 1
+                if depth == 0:
+                    val part_expr = self.bootstrap_interp_expr_from_source(inner, span)
+                    parts = parts.push(HirInterpolation(expr: part_expr, has_format: false, format: "", span: span))
+                else:
+                    inner = inner + ch
+            elif depth > 0:
+                inner = inner + ch
+            i = i + 1
+        parts
 
     me lower_bootstrap_flat_stmt(stmt_idx: i64) -> HirStmt:
         val span = Span.empty()
