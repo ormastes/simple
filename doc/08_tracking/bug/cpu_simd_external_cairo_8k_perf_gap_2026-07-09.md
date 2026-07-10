@@ -104,13 +104,29 @@ for the retained full-render comparison: the fresh Stage 4 CLI currently fails
 its standard smoke because its link accepted unresolved stubs, so no fresh
 4K/8K or Cairo row is claimed yet.
 
+### Strict linker follow-up
+
+The reported 253-symbol strict exporter failure was a pre-link false positive:
+the stub scanner examined undefined references in all object sections before
+the linker discarded unreachable GPU backends. Strict mode now emits no stubs
+and lets the platform linker validate live sections after GC. A focused Rust
+regression passes, and an independent Luna review confirmed the ownership and
+minimal fix.
+
+The full exporter still has no accepted fresh row. The debug bootstrap's
+interpreted native-build worker timed out while loading/parsing the broad
+closure at both 120 and 600 seconds, before producing a binary. This is the
+existing `bootstrap_stage4_graph_load_timeout_2026-07-05` blocker; no reduced
+viewport, cached replay, or stale binary result is substituted.
+
 ## Next Step
 
 Do not repeat the viewport/DPI/fallback/color proof work. The retained evidence
 already proves full 8K size, default 300dpi, configurable DPI override, checksum
 and pixel proof, CPU-SIMD runtime target, no fallback, and alpha-quality parity.
-The immediate blocker is fresh self-host deployment, not another framebuffer
-representation. Rebuild the pure-Simple CLI, verify the deployed
+The immediate blocker is the interpreted native-build graph/parse path and
+fresh self-host deployment, not another framebuffer representation. Rebuild
+the pure-Simple CLI, verify the deployed
 `rt_array_repeat` machine code uses the current bulk-fill implementation, and
 then re-run the external CPU drawing-library comparison. Revisit the owner
 facade only if that fresh measurement still shows a material gap.

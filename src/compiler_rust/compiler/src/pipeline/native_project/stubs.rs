@@ -604,7 +604,7 @@ pub(crate) fn generate_stub_object(
     // no undefined rt_* to stub there.
     let stub_missing_runtime = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1")
         || std::env::var("SIMPLE_STUB_MISSING_RT").as_deref() == Ok("1");
-    let needs_stub: Vec<String> = undefined
+    let mut needs_stub: Vec<String> = undefined
         .into_iter()
         .filter(|s| !defined.contains(s))
         .filter(|s| !s.starts_with("_dyld_") && *s != "_main" && *s != "main")
@@ -632,8 +632,9 @@ pub(crate) fn generate_stub_object(
         .collect();
 
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
+    let strict_no_stub_fallback = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
     let is_freestanding = effective_target().os == simple_common::target::TargetOS::None;
-    if !is_bootstrap && !is_freestanding && !internal_missing.is_empty() {
+    if !is_bootstrap && !strict_no_stub_fallback && !is_freestanding && !internal_missing.is_empty() {
         let preview = internal_missing.iter().take(12).cloned().collect::<Vec<_>>().join(", ");
         eprintln!(
             "Warning: {} internal Simple symbol(s) will be stubbed: {}{}",
@@ -641,6 +642,13 @@ pub(crate) fn generate_stub_object(
             preview,
             if internal_missing.len() > 12 { " ..." } else { "" }
         );
+    }
+
+    // The object scan runs before the final linker's section GC, so it also sees
+    // references from unreachable functions. In strict mode, emit no weak stubs
+    // and let the platform linker diagnose only unresolved live sections.
+    if strict_no_stub_fallback {
+        needs_stub.clear();
     }
 
     if needs_stub.is_empty() {
@@ -678,24 +686,6 @@ pub(crate) fn generate_stub_object(
         all.sort();
         let _ = std::fs::write(&dump_path, all.join("\n") + "\n");
         eprintln!("Wrote {} unresolved symbols to {}", all.len(), dump_path);
-    }
-
-    if std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1") {
-        let internal_preview = internal_missing.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
-        let external_count = needs_stub.len().saturating_sub(internal_missing.len());
-        return Err(format!(
-            "unresolved native symbols require stubs while SIMPLE_NO_STUB_FALLBACK=1: total={} internal_simple={} external_or_runtime={}; preview=[{}]; internal_preview=[{}]{}",
-            needs_stub.len(),
-            internal_missing.len(),
-            external_count,
-            preview,
-            internal_preview,
-            if needs_stub.len() > 80 {
-                "; set SIMPLE_DUMP_STUBS=/path/to/stubs.txt to write the complete unresolved symbol list"
-            } else {
-                ""
-            }
-        ));
     }
 
     let forbidden_enum_ctors: Vec<&str> = needs_stub

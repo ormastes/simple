@@ -1643,7 +1643,7 @@ int main(int argc, char** argv) {
 
 #[cfg(not(target_os = "windows"))]
 #[test]
-fn test_no_stub_fallback_rejects_unresolved_host_symbols() {
+fn test_no_stub_fallback_defers_unresolved_host_symbols_to_linker() {
     let _guard = no_stub_fallback_env_lock().lock().unwrap();
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     if std::process::Command::new(&cc).arg("--version").output().is_err() {
@@ -1692,16 +1692,16 @@ int main(void) {
         populate_global_enum_defs: false,
     };
 
-    let result = super::stubs::generate_stub_object(temp.path(), &[], &main_o, None, &imports);
+    let stub_o = super::stubs::generate_stub_object(temp.path(), &[], &main_o, None, &imports).unwrap();
 
     match previous.as_deref() {
         Some(value) => std::env::set_var("SIMPLE_NO_STUB_FALLBACK", value),
         None => std::env::remove_var("SIMPLE_NO_STUB_FALLBACK"),
     }
 
-    let err = result.expect_err("SIMPLE_NO_STUB_FALLBACK=1 must reject unresolved stubs");
-    assert!(err.contains("SIMPLE_NO_STUB_FALLBACK=1"));
-    assert!(err.contains("missing_simple_symbol"));
+    let output = std::process::Command::new("nm").arg("-g").arg(stub_o).output().unwrap();
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("missing_simple_symbol"));
 }
 
 #[cfg(target_os = "linux")]

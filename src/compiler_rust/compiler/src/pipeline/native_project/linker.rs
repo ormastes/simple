@@ -1209,13 +1209,16 @@ int main(int argc, char** argv) {
             )?;
             cmd.arg(&stubs_o);
         }
-        for flag in &link_config.unresolved_symbol_flags {
-            cmd.arg(flag);
+        let strict_no_stub_fallback = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
+        if !strict_no_stub_fallback {
+            for flag in &link_config.unresolved_symbol_flags {
+                cmd.arg(flag);
+            }
         }
         #[cfg(target_os = "windows")]
-        if is_clang_cl {
+        if is_clang_cl && !strict_no_stub_fallback {
             cmd.arg("/link").arg("/WHOLEARCHIVE").arg("/FORCE:MULTIPLE,UNRESOLVED");
-        } else if is_msvc {
+        } else if is_msvc && !strict_no_stub_fallback {
             cmd.arg("-Xlinker").arg("/FORCE:MULTIPLE,UNRESOLVED");
         }
 

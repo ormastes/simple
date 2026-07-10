@@ -47,4 +47,13 @@ The escape hatch follows the repo convention `std::env::var_os("SIMPLE_...").is_
 - `stub_fallback_allowed_when_env_var_set` — asserts `compile_all_functions` returns `Ok` when `SIMPLE_ALLOW_STUB_FALLBACK=1`, confirming the escape hatch works
 
 **cargo check -p simple-compiler:** clean (0 new warnings/errors)
-**cargo test -p simple-compiler stub_fallback:** 3 passed, 0 failed (includes pre-existing `test_no_stub_fallback_rejects_unresolved_host_symbols` in `stubs.rs`, which is a separate linker-level gate and was unchanged)
+**cargo test -p simple-compiler stub_fallback:** 3 passed, 0 failed.
+
+## Linker strict-mode update 2026-07-10
+
+`SIMPLE_NO_STUB_FALLBACK=1` now emits no weak linker stubs and disables each
+platform's unresolved-symbol ignore/force flags. Resolution is deferred to the
+real linker after section GC, so unreachable backend functions cannot create a
+false strict failure while unresolved live calls still fail the link. The
+focused regression is
+`test_no_stub_fallback_defers_unresolved_host_symbols_to_linker`.

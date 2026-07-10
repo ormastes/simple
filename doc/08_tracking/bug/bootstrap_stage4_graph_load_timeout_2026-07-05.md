@@ -27,6 +27,15 @@ Stage-4 bootstrap's interpreted native-build worker exceeded the default 7200-se
 
 Stage-4 bootstrap remains incomplete and cannot produce a fresh pure-Simple binary. The long timeout blocks verification builds and prevents rapid iteration on bootstrap fixes.
 
+## Linux confirmation 2026-07-10
+
+The same interpreted-worker bottleneck blocks the full-size CPU-SIMD exporter
+on x86_64 Linux. A patched debug bootstrap passed strict stub validation, then
+timed out before codegen/output at both `--timeout 120` and `--timeout 600` while
+loading/parsing the reachable `src/app` + `src/lib` closure. No exporter binary
+was produced. This confirms the blocker is not Apple-only and must be removed
+before a fresh retained 4K/8K CPU-SIMD/Cairo comparison can be accepted.
+
 ## Scope
 
 The issue is in the module graph loading phase (`compiler/99.loader/module_graph.spl` or similar), likely:
