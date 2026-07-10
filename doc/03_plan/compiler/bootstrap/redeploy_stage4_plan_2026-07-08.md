@@ -22,15 +22,33 @@ generation run **interpreted** by the deployed `bin/simple`). As of
   calls, no verifier errors. IR generation, verification, and object emission
   all succeed — `object.app.cli.bootstrap_main.o` is written as a valid
   `Mach-O 64-bit object arm64` on this host.
-- **Current wall (in-flight, a parallel agent is fixing it now):** a frontend
-  **semantic** error, not codegen:
+- **The `replace` semantic wall is FIXED (2026-07-10, uncommitted in WC).**
+  It was NOT a compiler-source semantic bug: the deployed (Jul-5) `bin/simple`
+  worker binary's *nested/chained-call* method dispatcher predates the seed
+  fix `050209d9b3` (2026-07-07) that added `replace`/`replace_first` to the
+  chained-call str table, so any `X.method(..).replace(..)` chain in
+  val/return/expr-statement/tail position aborted the interpreted worker. The
+  executed site was `cache_validator.spl:182` (`source_to_cache_path`),
+  reached right after native linking succeeds (output_format=both SMF-cache
+  step). Fix = mechanical receiver hoists (per the documented "chained
+  methods broken — use intermediate var" runtime limitation) at that site +
+  the same-family chains on the SMF/SHB/MIR-cache path (smf_manifest,
+  watcher_protocol, shb_cache, both incremental.spl twins,
+  mir_interp_intrinsics str_replace) + a trace-only `Module.path` crash fix
+  in module_lowering.spl. The dispatcher-table fix itself is already on main
+  (Rust seed) and becomes live at the next redeploy. Full detail in the bug
+  doc's 2026-07-10 semantic-replace section.
+- **Current wall: Stage-2 determinism MISMATCH.** All three stages now
+  compile OK (first time in this arc):
   ```
-  error: semantic: method 'replace' not found on value of type str in nested call context
-  error: native-build worker exited with code 1.
+  Stage 1: OK (35576 bytes, hash=a2e3c687…d58c4ce1)
+  Stage 2: OK (35576 bytes, hash=c43152c2…7dcf880c)
+  Stage 3: OK (35576 bytes, hash=a2e3c687…d58c4ce1)
+  Bootstrap MISMATCH: outputs differ between stages
   ```
-  This is `str.replace` resolution failing in a nested call context — unrelated
-  to the llvm-lib backend fix arc that got here. Do not re-diagnose the
-  codegen/emission path for this; it's a separate, later-stage bug.
+  Stage 1 == Stage 3, only Stage 2 differs at identical size — likely a
+  single alternating nondeterministic embedded value (temp path/PID/
+  ordering). Next session: binary-diff the two 35,576-byte outputs.
 - Deployed `bin/simple` (unchanged) still works as a tool in the meantime.
 
 ## WHAT LANDED (fix arc, oldest → newest, all on origin/main)
@@ -53,14 +71,14 @@ Full per-fix diagnostic detail (probes, crash reports, budget accounting):
 
 ## NEXT STEPS (in order)
 
-1. **Semantic wall (in-flight — a parallel agent owns this right now, do not
-   duplicate work):** `method 'replace' not found on value of type str in
-   nested call context`. Locate the `str.replace` call resolution gap in the
-   frontend (nested-call-context method resolution) and fix it in
-   `.spl` source — this is not a backend/emission issue.
-2. **Whatever wall follows**, per the bug doc's continuation once (1) lands —
-   check the bug doc's latest section before starting new diagnosis to avoid
-   re-treading ground.
+1. ~~Semantic wall (`replace` in nested call context)~~ **DONE 2026-07-10**
+   (uncommitted in WC — receiver hoists on the post-link SMF-cache path; see
+   STATUS NOW and the bug doc's 2026-07-10 semantic-replace section).
+2. **Stage-2 determinism MISMATCH (current wall):** Stage 1/2/3 all compile
+   OK at 35,576 bytes, but Stage 2's hash differs from Stage 1/3 (which
+   match each other). Binary-diff the stage1 vs stage2 outputs; suspect one
+   alternating embedded value (temp path/PID/ordering). Check the bug doc's
+   latest section before starting new diagnosis to avoid re-treading ground.
 3. **Reconcile the two emit paths.** The original plan (2026-07-08) framed
    path 2 (llvm-lib AOT) as "long-horizon" and path 1 (cranelift/llc
    `SIMPLE_BOOTSTRAP`) as "the realistic route." That framing is now stale:

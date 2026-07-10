@@ -1424,3 +1424,117 @@ instrumentation needed).
 
 **Everything in this update is uncommitted** (per session constraints — no
 commit/push, no Rust seed, no `test/**`).
+
+## Update 2026-07-10 (semantic-replace session, per `semantic_replace_guide.md`) — "method 'replace' not found … in nested call context" wall FIXED; Stage 1/2/3 all compile OK; new wall = Stage-2 determinism MISMATCH
+
+**Baseline (run 1, full `bin/simple build bootstrap`):** reproduced the prior
+session's end state exactly — object emission succeeds, then
+`error: semantic: method 'replace' not found on value of type str in nested
+call context` → worker exit 1, Stage 1 FAILED.
+
+**Emit site + root cause (NOT a str-vs-text split, NOT a compiler-source
+semantic checker):** the message is emitted by the **Rust interpreter's
+nested/chained-call method dispatcher** —
+`src/compiler_rust/compiler/src/interpreter_helpers/method_dispatch.rs:765`
+(`call_method_on_value` fallthrough), whose only production caller is
+`interpreter_helpers/patterns.rs:226` (`handle_method_call_with_self_update`,
+used for `val`/`return`/expression-statement/block-tail positions when the
+receiver is itself a MethodCall). The receiver was a genuine `Value::Str`
+(`type_name()` → "str"); the failing shape is exactly
+`X.method(..).replace(..)` (chained, `replace` as the OUTER method). This is
+the guide's hypothesis (b): the nested-call path uses a **narrower builtin
+str-method table** than top-level resolution — it has
+len/trim/contains/starts_with/ends_with/index_of/… but (in the deployed
+binary) not `replace`/`replace_first`.
+
+**Key discovery — the gap is already fixed upstream but the deployed binary
+is stale:** commit `050209d9b3` (2026-07-07, "fix: speed up pure Simple
+bootstrap") added the `"replace"`/`"replace_first"` arms to
+`call_method_on_value`'s str table **with a unit test**
+(`nested_string_replace_dispatches_on_temporary_string`). The deployed
+`bin/release/aarch64-apple-darwin-macho/simple` is dated **Jul 5** — it
+predates the fix, and the Stage-1 native-build worker
+(`bin/simple run src/app/cli/native_build_worker.spl` under
+`SIMPLE_EXECUTION_MODE=interpret`) runs on that stale dispatcher. Verified
+empirically: `SIMPLE_EXECUTION_MODE=interpret` + a 3-line
+`a.replace(..).replace(..)` val-binding reproduces the exact error on the
+deployed binary; arg-position and interpolation forms work (only
+chained-outer-`replace` in val/return/expr-statement/block-tail positions
+fails).
+
+**Localizing the executed call site (isolated worker probes, untruncated
+stderr + temporary ungated eprobes):** the worker's stdout ends at
+`[NATIVE] calling link_llvm_native...`; probes proved
+`link_llvm_native` → `link_to_native` → link all **succeed** and
+`compile_to_native` returns Success. The failing statement is the very next
+call in `driver.compile()`'s `output_format=both` (dynload) branch:
+`source_to_cache_path` —
+`src/compiler/80.driver/cache/cache_validator.spl:182`:
+`source_path.replace("/", "_").replace(".spl", "")`. (Two earlier probe
+attempts with `SIMPLE_BOOTSTRAP=1`/`SIMPLE_COMPILER_TRACE=1` mis-routed to
+the llc lane — the Stage-1 worker does NOT run with `SIMPLE_BOOTSTRAP=1`;
+reproduce with plain env. Also fixed en route: a trace-only crash —
+`module_lowering.spl` diag line interpolated `{module.path}` but parser
+`Module` has no `path` field, aborting the whole worker under
+`SIMPLE_COMPILER_TRACE=1`.)
+
+**Fixes applied (uncommitted, KEEPERS — all mechanical receiver hoists per
+the repo's documented "Chained methods broken — use intermediate var"
+runtime limitation; semantics identical, `replace` still actually executes;
+each commented with the root cause). The true systematic fix is
+`050209d9b3`'s dispatcher-table fix, which takes effect at the next
+redeploy; these hoists unblock bootstrap on the current stale binary:**
+- `src/compiler/80.driver/cache/cache_validator.spl` (`source_to_cache_path`
+  — the actual Stage-1 wall)
+- `src/compiler/80.driver/watcher/smf_manifest.spl`
+  (`parse_manifest_entry_line` — 5 chained `.trim().replace(..)` fields, on
+  the same post-link SMF-manifest path)
+- `src/compiler/80.driver/watcher/watcher_protocol.spl` (`request_path_for`)
+- `src/compiler/80.driver/shb/shb_cache.spl` (`source_to_shb_path`)
+- `src/compiler/80.driver/driver_build/incremental.spl` +
+  `src/compiler/80.driver/driver/incremental.spl` (MIR-cache
+  `safe_name` chains, both twin copies)
+- `src/compiler/95.interp/mir_interp_intrinsics.spl` (`str_replace`
+  intrinsic used `s.unwrap().replace(..)`; sibling `str_slice` was already
+  hoisted)
+- `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`
+  (trace-only `Module.path` crash fix, see above)
+
+**Post-fix state (isolated worker run: exit 0, output binary produced; then
+final full `bin/simple build bootstrap`):** the `replace` error is GONE.
+**Stage 1: OK. Stage 2: OK. Stage 3: OK** (first time in this arc all three
+stages compile). New wall — determinism, not compilation:
+```
+Stage 1: OK (35576 bytes, hash=a2e3c687…d58c4ce1)
+Stage 2: OK (35576 bytes, hash=c43152c2…7dcf880c)
+Stage 3: OK (35576 bytes, hash=a2e3c687…d58c4ce1)
+Bootstrap MISMATCH: outputs differ between stages
+```
+Stage 1 and Stage 3 hashes are IDENTICAL; only Stage 2 differs (same size).
+Whoever picks this up next: this smells like one nondeterministic embedded
+value (temp path/PID/ordering) that alternates rather than drifts — diff the
+two 35,576-byte binaries directly.
+
+**Sanity (interpreted lane still healthy):** `bin/simple check
+src/app/cli/bootstrap_main.spl` → all checks passed; `bin/simple test
+test/01_unit/app/cli_parser_spec.spl` → 2/2 passed; all 8 edited files pass
+`bin/simple check` individually.
+
+**Runs used:** 2 full `build bootstrap` runs (baseline + final verify) + 5
+short isolated worker probes (each seconds-to-~1min; two of them
+dead-ended on the wrong-env llc route noted above, one crashed in the
+trace-only `Module.path` bug before reaching codegen).
+
+**Probes reverted:** all temporary `[PROBE-LL]`/`[PROBE-AOT]` eprints in
+`llvm_native_link.spl` / `driver_aot_output.spl` removed; both files
+diff-verified byte-identical to their pre-probe state.
+
+**Regression checkpoints re-verified intact post-session:**
+`llvm_lib_translate_expr.spl:504/506` `get_value(value_map, local.id)`; all
+3 `llvm_types.spl` copies NUL-terminate `LLVMSetDataLayout`'s layout; all 4
+`LLVMBuildCall2` call sites NUL-terminate `Name`; the 3 named `Ret`-case
+diagnostics; `llvm_target.spl` `Host` arm calls `detect_host_arch()`;
+`linker_wrapper_helpers.spl` multi-format magic check.
+
+**Everything in this update is uncommitted** (per session constraints — no
+commit/push, no Rust seed edits, no `test/**` edits).
