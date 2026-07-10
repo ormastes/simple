@@ -19,12 +19,17 @@ strict layout-rendering fix. Scalar/SIMD-labeled outputs remain bit-identical,
 but the retained constants are not updated because the lane reports zero SIMD
 provider and native hits.
 
-The strict C-kernel matrix executes x86_64, AArch64, and RISC-V target binaries;
-the separate RVV row is compile-only. The Simple architecture lanes have zero
-passes. A Simple x86_64 span probe compiles to an ELF binary containing the
-fill-row/fill-span symbols, but exits `1`; disassembly shows dynamic array
-length folded to zero. Native quality and architecture-complete Simple
-binaries remain open.
+The strict C-kernel matrix executes x86_64, AArch64, and RISC-V target binaries.
+The separate `check-llvm-simd-row-native-arch.shs` self-hosted matrix now
+executes exact, vectorized x86_64, AArch64, and RISC-V row probes. The broader
+Engine2D matrix in `cpu_simd_engine2d_arch_matrix_2026-07-10.md` still has zero
+passing Simple lanes and is not superseded by that focused result. A prototype
+that routed opaque square browser backgrounds through the existing native span ABI was pixel-exact, but
+was rejected after review because it produced zero native hits in the AOT
+layout fixture after three verification cycles. Native multiple-style-block
+layout still null-calls around the array concatenations in `extract_css_vw`; see
+`doc/08_tracking/bug/simple_web_layout_native_extract_css_null_call_2026-07-10.md`.
+Full-size performance and RSS evidence therefore remains open.
 
 ## CPU Library Comparison
 
