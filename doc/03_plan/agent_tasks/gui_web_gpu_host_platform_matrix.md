@@ -25,14 +25,16 @@ Current routing update, 2026-06-27:
 - Retained 4K/8K showcase performance is tracked in the 2026-06-27 parallel
   plan as its own lane and must not be inferred from queue/readback rows.
 
-Host-scope update, 2026-06-28:
+Host-scope update, 2026-06-28; macOS Metal superseded 2026-07-11:
 
-- The current Linux repo session cannot complete macOS Metal or Windows
-  D3D12/PIX validation. Those lanes are postponed from this host.
+- The 2026-06-28 Linux repo session could not complete macOS Metal or Windows
+  D3D12/PIX validation. The macOS Metal lane is now complete for native
+  generated/readback/browser/pairwise/render-log evidence from Darwin/arm64;
+  Windows D3D12/PIX remains postponed to a native Windows host.
 - Linux agents may continue shared wrapper/spec hardening and Linux Vulkan
   evidence work only when the host has real GUI/Vulkan/RenderDoc access.
-- macOS Metal acceptance requires native Darwin evidence from Metal tooling and
-  GPU capture/readback logs.
+- macOS Metal acceptance is satisfied by the 2026-07-11 Darwin evidence noted
+  in the Metal Spark Card below; GPU capture is `not-required` for that wrapper.
 - Windows D3D12 acceptance requires native Windows evidence from D3D12
   readback, Chrome/Electron D3D12 backing, and PIX or equivalent GPU-debugger
   artifacts.

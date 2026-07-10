@@ -5,9 +5,10 @@ Date: 2026-06-25
 ## Goal
 
 Prepare the remaining GUI/Web/2D hardening work for a separate Ubuntu GUI host
-with a real Vulkan-capable GPU. Linux Vulkan is the first implementation lane;
-macOS Metal/MoltenVK and Windows D3D12/PIX follow after the Linux render-log
-contract is stable. Completion requires evidence that Chrome,
+with a real Vulkan-capable GPU. Linux Vulkan was the first implementation lane;
+current macOS Metal evidence is now available from a Darwin/arm64 host, while
+Windows D3D12/PIX still follows on a native Windows host. Completion requires
+evidence that Chrome,
 Electron/Chromium, and Simple all render the same GUI/web fixture through
 Vulkan-backed paths, that RenderDoc can capture the comparable frames, and that
 pairwise ARGB comparison proves equivalence.
@@ -18,24 +19,28 @@ must not be used to claim Electron Vulkan backing when it reports
 
 ## Host Scope Update, 2026-06-28
 
-This repository session is running on a Linux host. It cannot complete macOS
-Metal or Windows D3D12/PIX validation locally. Treat those lanes as postponed
-host-validation packets:
+This 2026-06-28 note was written from a Linux host. It remains accurate for
+Windows D3D12/PIX, but the macOS Metal lane has since been executed on a
+Darwin/arm64 Metal host. Treat only the still-missing native platform lanes as
+postponed host-validation packets:
 
 - **Linux on this host:** continue only Linux-safe prep, wrapper hardening,
   source-coupling checks, retained 4K/8K evidence validation, and Linux Vulkan
   evidence collection when a real GUI/Vulkan/RenderDoc session is available.
-- **macOS Metal:** postponed from this host. The lane is ready only for a
-  Darwin/macOS agent with Metal tools, browser evidence, and Xcode GPU Frame
-  Capture or equivalent native capture logs.
+- **macOS Metal:** completed for native generated-2D readback, framebuffer
+  readback, Electron/Chrome/Simple Metal browser backing, pairwise ARGB
+  equivalence, and render-log comparison. GPU capture is recorded as
+  `not-required`; see
+  `doc/09_report/macos_metal_render_log_compare_2026-07-10.md`.
 - **Windows D3D12/PIX:** postponed from this host. The lane is ready only for a
   Windows agent with D3D12 native readback, Chrome/Electron D3D12 backing, and
   PIX or equivalent GPU-debugger artifacts.
 
-Do not mark the overall GUI/Web/2D platform goal complete from this Linux host
-unless the macOS and Windows evidence files were produced on their native
-platforms and reviewed as imported evidence. Local Linux work may still improve
-shared wrappers and specs, but macOS/Windows completion remains deferred.
+Do not mark the overall GUI/Web/2D platform goal complete unless remaining
+Linux RenderDoc and Windows D3D12/PIX evidence files are produced on their
+native/prepared platforms and reviewed as imported evidence. Local host work may
+still improve shared wrappers and specs, but Windows completion remains
+deferred.
 
 ## Headless Host Completion Criteria, 2026-06-28
 
@@ -61,7 +66,6 @@ claim for this lane means:
 This headless server must not be used to complete:
 
 - Chrome or Electron `.rdc` capture with real `RDOC` magic.
-- macOS Metal/Xcode GPU Frame Capture.
 - Windows D3D12/PIX or equivalent GPU-debugger capture.
 - iOS Tauri2/WKWebView device or simulator capture with Metal renderer proof.
 - Android Tauri2/WebView device or emulator capture with Vulkan renderer proof.
@@ -181,8 +185,9 @@ evidence is available.
 
 macOS Metal render-log normalization and comparison:
 
-Deferred on this Linux host. Run only on a macOS/Darwin host, then import the
-resulting evidence for review:
+Completed on Darwin/arm64 for native Metal readback, browser backing, pairwise
+ARGB comparison, and render-log comparison. The command remains the refresh path
+for future source changes:
 
 ```bash
 METAL_GENERATED_2D_READBACK_ENV=build/metal_generated_2d_readback/evidence.env \
