@@ -104,6 +104,11 @@ fn _mk_bytes_simple() -> [u8]:
     b = rt_push_byte(b, 0x48)
     b
 
+# P12 helper: a struct with a [u8] field, to test an extern-`[u8]` return stored
+# directly into a typed struct field (the sshd `server_version_bytes` shape).
+struct Holder:
+    data: [u8]
+
 fn spl_start():
     serial_put(80)
     serial_put(49)
@@ -331,6 +336,50 @@ fn spl_start():
     serial_put(32)
     mark(99)
     serial_dec_i64(rt_bytes_u8_at(w10, 0))
+    serial_newline()
+
+    # ---- P11: chained method call — arr.len().to_i64() (documented broken) ----
+    # `x.len().to_i64()` is a method call on a method-call result. On x64
+    # freestanding this mis-lowered to garbage (sshd version-exchange bug);
+    # the workaround was to bind `val n = x.len()` first. Extern-`[u8]` receiver.
+    var a11 = rt_abi_probe_bytes()
+    val ch11 = a11.len().to_i64()          # expect 8
+    val ch11b = a11.len().to_i64() - 2     # expect 6 (exact sshd `len-2` shape)
+    serial_put(80)
+    serial_put(49)
+    serial_put(49)  # "P11"
+    serial_put(32)
+    mark(76)  # 'L'= chained len (expect 8)
+    serial_dec_i64(ch11)
+    serial_put(32)
+    mark(116)  # 't'= chained len-2 (expect 6)
+    serial_dec_i64(ch11b)
+    serial_newline()
+
+    # ---- P12: extern `[u8]` return stored directly into typed destinations ----
+    # Stores an extern-`[u8]` return straight into a typed `[u8]` local and a
+    # typed struct field WITHOUT the `_copy_bytes_stable` workaround, then reads
+    # both back Simple-side (trusted packed reader) and C-side.
+    var d12: [u8] = rt_abi_probe_bytes()
+    var h12 = Holder(data: rt_abi_probe_bytes())
+    serial_put(80)
+    serial_put(49)
+    serial_put(50)  # "P12"
+    serial_put(32)
+    mark(76)  # 'L'= d12 local len (expect 8)
+    serial_dec_i64(d12.len())
+    serial_put(32)
+    mark(115)  # 's'= d12[0] Simple (expect 65)
+    serial_dec_i64(d12[0] as i64)
+    serial_put(32)
+    mark(99)  # 'c'= d12 C read (expect 65)
+    serial_dec_i64(rt_bytes_u8_at(d12, 0))
+    serial_put(32)
+    mark(102)  # 'f'= struct field len (expect 8)
+    serial_dec_i64(h12.data.len())
+    serial_put(32)
+    mark(103)  # 'g'= struct field [0] (expect 65)
+    serial_dec_i64(h12.data[0] as i64)
     serial_newline()
 
     serial_put(80)

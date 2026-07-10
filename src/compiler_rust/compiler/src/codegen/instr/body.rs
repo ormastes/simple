@@ -705,7 +705,29 @@ pub fn compile_function_body<M: Module>(
     }
 
     // Compile each block
+    //
+    // Pre-populate `local_addr_map` from EVERY `LocalAddr` in the function up
+    // front, so Store/Load address resolution is independent of the order in
+    // which `func.blocks` are compiled. Blocks are compiled in storage order,
+    // which after inlining is NOT guaranteed to be dominator order: inlining a
+    // Simple-fn branch inside an if-EXPRESSION can split/renumber the condition
+    // block so the merge-slot `LocalAddr` lands in a high-id block stored AFTER
+    // the low-id then/else/merge blocks that consume it. With lazy (first-touch)
+    // population the merge Store/Load in those earlier blocks missed the
+    // vreg->local mapping, fell through to the raw-value path, and silently
+    // mis-resolved — corrupting an extern-`[u8]` handle carried through the
+    // merge (abi_probe P9; if-STATEMENT P10 was clean because it reuses a
+    // pre-declared local). `LocalAddr` is a pure, SSA-unique
+    // `dest -> local_index` fact, so pre-scanning is order-safe for every
+    // backend/target and changes no other lowering.
     let mut local_addr_map: HashMap<VReg, usize> = HashMap::new();
+    for mir_block in &func.blocks {
+        for inst in &mir_block.instructions {
+            if let MirInst::LocalAddr { dest, local_index } = inst {
+                local_addr_map.insert(*dest, *local_index);
+            }
+        }
+    }
 
     for mir_block in &func.blocks {
         if generator_states.is_some() && mir_block.id == func.entry_block {
