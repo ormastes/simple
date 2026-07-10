@@ -792,7 +792,15 @@ impl SshSession:
         # Send our version string
         val our_version = ssh_build_version_string()
         serial_println("[sshd-session] version bytes len={our_version.len()}")
-        self.server_version_bytes = rt_bytes_slice(our_version, 0, our_version.len().to_i64() - 2)
+        # NOTE: `our_version.len().to_i64()` (chained method call) mis-lowers on
+        # x64 freestanding native-build and yields garbage (see bug doc); bind the
+        # length to an intermediate var first. Also, storing an extern `[u8]`
+        # return (rt_bytes_slice) directly into the struct field drops the
+        # BYTE_PACKED representation — pass it straight through _copy_bytes_stable
+        # (the proven-safe idiom) so the field holds a Simple-built packed copy.
+        val ov_len = our_version.len()
+        val sv_len_i: i64 = ov_len.to_i64() - 2
+        self.server_version_bytes = _copy_bytes_stable(rt_bytes_slice(our_version, 0, sv_len_i))
         self.server_version = rt_string_from_byte_array(self.server_version_bytes)
         serial_println("[sshd-session] version send start")
         serial_println("[sshd-session] version banner send start")

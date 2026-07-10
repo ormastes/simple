@@ -561,17 +561,17 @@ impl SshSession:
             serial_println("[sshd-session] host key blob={_bytes_to_hex(host_key_blob)}")
 
         # Compute exchange hash.
-        # NOTE: an `if`-EXPRESSION whose branches mix an extern `[u8]`-returning
-        # call (ANY-erased across the C facade) with a Simple-fn `[u8]` return
-        # corrupts the taken extern branch's handle in x64 freestanding codegen
-        # (seed lower_if_expr phi-merge; reproduced in abi_probe P9: handle=0x15,
-        # non-deterministic). Assigning into a pre-declared `var` via an
-        # if-STATEMENT (lowering_stmt.rs path) avoids the buggy merge — verified
-        # clean by abi_probe P10.
+        # NOTE: on x64 freestanding native-build, storing an extern `[u8]` return
+        # (ANY-erased across the C facade) directly into a typed local/var drops
+        # the BYTE_PACKED representation and corrupts the handle (same class as
+        # the abi_probe P9 if-expr phi-merge bug). Pass the extern return straight
+        # through `_copy_bytes_stable` — the proven-safe idiom used throughout —
+        # so `exchange_hash` holds a Simple-built packed copy. Verified: with this
+        # form the ed25519 signature verifies against a real OpenSSH client.
         serial_println("[sshd-session] exchange hash generation start")
         var exchange_hash = _zeroed_32_bytes()
         if using_live_openssh_profile:
-            exchange_hash = rt_ssh_curve25519_exchange_hash(
+            exchange_hash = _copy_bytes_stable(rt_ssh_curve25519_exchange_hash(
                 self.client_version_bytes,
                 self.server_version_bytes,
                 self.client_kexinit_payload,
@@ -580,7 +580,7 @@ impl SshSession:
                 client_public,
                 server_public,
                 shared_secret
-            )
+            ))
         else:
             exchange_hash = ssh_kex_compute_exchange_hash(
                 self.client_version_bytes,
