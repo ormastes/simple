@@ -1567,7 +1567,10 @@ outputs):** ~470 differing bytes between stage1/stage2, in 4 clusters:
 2. **LC_UUID (16 bytes @ offset ~0x558)** — ld64 generates a
    content-derived/link-varying UUID per link; with (1) present it differed
    because content differed, but even after fixing (1) it is not guaranteed
-   byte-stable and is pure non-semantic link metadata.
+   byte-stable. A later full-bootstrap run showed that suppressing this load
+   command with `-no_uuid` makes the generated executable unloadable on the
+   current macOS host (`dyld: missing LC_UUID load command`), so LC_UUID must be
+   preserved in deployed bootstrap binaries.
 3. **Output-basename echo in LINKEDIT (offset ~0x89CC)** — the symbol/export
    entry embeds the output file's basename; NOT an issue in the real
    bootstrap (all stages deliberately compile to the same basename
@@ -1581,18 +1584,18 @@ outputs):** ~470 differing bytes between stage1/stage2, in 4 clusters:
   run both declaration and body-compilation passes in sorted-name order
   (name is already the unique `func_map` dedup key). Kills the
   string-pool/section-layout nondeterminism.
-- `src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl`: pass
-  `-no_uuid` to ld64 on the macOS direct-linker path (and `-Wl,-no_uuid` on
-  the macOS cc-fallback path). This suppresses LC_UUID generation entirely —
-  the documented ld64 mechanism for reproducible output. This is the one
-  *documented normalization of non-semantic metadata* in this fix (the
-  UUID is link metadata, not program content); the stage comparison itself
-  remains a strict full-file SHA-256 — nothing was excluded from hashing.
+- `src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl`: the
+  temporary `-no_uuid` / `-Wl,-no_uuid` normalization was removed after a
+  2026-07-10 full-bootstrap run produced a Stage 2 executable that macOS dyld
+  refused to launch with `missing LC_UUID load command`. Keep LC_UUID in
+  deployed Mach-O outputs; future byte-stability work must account for UUIDs
+  without removing the load command.
 
 **Verification (cheap 3× `native-build` probes before spending the capped
 run):** pre-fix 3 runs → 3 distinct hashes; after sort-only → diffs
-collapsed to LC_UUID + code-signature only; after `-no_uuid` → runs to the
-same basename produce **identical SHA-256** (`11a9c3ca…`), 3/3.
+collapsed to LC_UUID + code-signature only. The later `-no_uuid` probe produced
+identical hashes, but that result is invalid for deployment on this macOS host
+because the executable lacks a load command required by dyld.
 
 **Final state (run 2 of 2, full `bin/simple build bootstrap`):**
 ```

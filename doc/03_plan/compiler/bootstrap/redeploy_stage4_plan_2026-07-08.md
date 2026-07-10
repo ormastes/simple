@@ -53,10 +53,13 @@ generation run **interpreted** by the deployed `bin/simple`). As of
   random-seeded `Dict` — so LLVM global/string-constant emission order (and
   therefore `__cstring` layout, section offsets, unwind info, and the code
   signature) varied per process; now both passes run in sorted-function-name
-  order. (2) ld64's LC_UUID varies per link; the macOS link paths
-  (`_LinkerWrapper/native_linking.spl`, direct-ld64 + cc-fallback) now pass
-  `-no_uuid` — a documented normalization of non-semantic link metadata; the
-  stage comparison itself is still a strict full-file SHA-256. Full diff
+  order. (2) ld64's LC_UUID varies per link; an earlier attempt passed
+  `-no_uuid` in the macOS link paths to normalize that metadata, but a later
+  full-bootstrap run on 2026-07-10 proved current macOS dyld rejects the
+  resulting Stage 2 executable with `missing LC_UUID load command` before
+  Stage 3 can run. The linker now keeps LC_UUID for launchability; future
+  deterministic-bootstrap work must normalize or compare UUIDs outside the
+  deployed executable rather than suppressing the load command. Full diff
   classification in the bug doc's 2026-07-10 determinism section. NOTE: the
   build's final step copies stage3 only into
   `bootstrap/stage3/<triple>/simple`; `bin/release` is untouched — redeploy
@@ -87,12 +90,13 @@ Full per-fix diagnostic detail (probes, crash reports, budget accounting):
 1. ~~Semantic wall (`replace` in nested call context)~~ **DONE 2026-07-10**
    (uncommitted in WC — receiver hoists on the post-link SMF-cache path; see
    STATUS NOW and the bug doc's 2026-07-10 semantic-replace section).
-2. ~~Stage-2 determinism MISMATCH~~ **DONE 2026-07-10** (uncommitted in WC —
-   sorted-name function emission in `llvm_lib_translate.spl` + ld64
-   `-no_uuid` in `_LinkerWrapper/native_linking.spl`; `build bootstrap` now
-   prints **Bootstrap VERIFIED** with all 3 stage hashes identical. See the
-   bug doc's 2026-07-10 determinism section for the byte-level
-   classification).
+2. ~~Stage-2 determinism MISMATCH~~ **PARTIAL 2026-07-10** — sorted-name
+   function emission fixed the string-pool/section-layout nondeterminism. The
+   attempted ld64 `-no_uuid` normalization produced byte-stable files but is
+   not deployable on this host because dyld rejects Mach-O executables missing
+   `LC_UUID`; `_LinkerWrapper/native_linking.spl` now keeps LC_UUID. Treat
+   byte-for-byte bootstrap determinism as reopened until UUID handling is solved
+   without creating an unloadable executable.
 3. **Reconcile the two emit paths.** The original plan (2026-07-08) framed
    path 2 (llvm-lib AOT) as "long-horizon" and path 1 (cranelift/llc
    `SIMPLE_BOOTSTRAP`) as "the realistic route." That framing is now stale:
