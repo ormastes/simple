@@ -95,20 +95,6 @@ fn simpleos_memory_leveling_config_default() -> SimpleOsMemoryLevelingConfig:
         device_safety_enabled: true
     )
 
-fn simpleos_memory_leveling_config_validate(config: SimpleOsMemoryLevelingConfig) -> text:
-    if config.physical_capacity_bytes == 0 or config.cpu_capacity_bytes == 0:
-        return "invalid-capacity"
-    if config.cpu_reserved_bytes > config.cpu_capacity_bytes or config.gpu_reserved_bytes > config.gpu_capacity_bytes or config.nic_reserved_bytes > config.nic_capacity_bytes or config.dma_reserved_bytes > config.dma_capacity_bytes:
-        return "invalid-reservation"
-    val reserved = config.cpu_reserved_bytes + config.gpu_reserved_bytes + config.nic_reserved_bytes + config.dma_reserved_bytes
-    if reserved > config.physical_capacity_bytes:
-        return "invalid-reservation"
-    if config.cpu_low_watermark_bytes > config.cpu_high_watermark_bytes or config.cpu_high_watermark_bytes > config.cpu_capacity_bytes:
-        return "invalid-watermark"
-    if config.swap_enabled and config.swap_capacity_bytes == 0:
-        return "invalid-swap-capacity"
-    "ok"
-
 fn memory_leveling_manager_new(config: SimpleOsMemoryLevelingConfig) -> MemoryLevelingManager:
     MemoryLevelingManager(
         config: config,
@@ -250,10 +236,6 @@ impl MemoryLevelingManager:
         me.stats.candidate_count = me.stats.candidate_count + 1
 
     me request(placement: SimpleMemoryPlacementConfig, policy: MemoryLevelingPolicy, byte_length: u64, page_count: u64, owner_id: u64) -> MemoryLevelingOperation:
-        val config_reason = simpleos_memory_leveling_config_validate(me.config)
-        if config_reason != "ok":
-            me.stats.failure_count = me.stats.failure_count + 1
-            return _memory_leveling_operation(false, config_reason, 0, "failed")
         if byte_length == 0 or page_count == 0 or owner_id == 0:
             me.stats.failure_count = me.stats.failure_count + 1
             return _memory_leveling_operation(false, "invalid-request", 0, "failed")
@@ -267,8 +249,7 @@ impl MemoryLevelingManager:
         me.next_allocation_id = me.next_allocation_id + 1
         var allocation = memory_allocation_from_intent(allocation_id, byte_length, page_count, placement.intent)
         allocation.owner_id = owner_id
-        allocation.tier = placement.preferred_tier
-        allocation.reclaimable = placement.movable and policy.movable and policy.swap_allowed and allocation.state.name == MEMORY_PAGE_STATE_CPU_OWNED
+        allocation.reclaimable = placement.movable and policy.movable and allocation.state.name == MEMORY_PAGE_STATE_CPU_OWNED
         me.allocations.push(allocation)
         me.generations.push(0)
         me.stats.allocation_count = me.stats.allocation_count + 1
@@ -279,10 +260,6 @@ impl MemoryLevelingManager:
         _memory_leveling_operation(true, "ok", allocation_id, allocation.state.name)
 
     me register_device_buffer(allocation_id: u64, owner_id: u64, byte_length: u64, page_count: u64, domain: MemoryDomain, tier: MemoryTier, dma_direction: text, coherent: bool, contiguous: bool, physical_base: u64, permanent_pin: bool) -> MemoryLevelingOperation:
-        val config_reason = simpleos_memory_leveling_config_validate(me.config)
-        if config_reason != "ok":
-            me.stats.failure_count = me.stats.failure_count + 1
-            return _memory_leveling_operation(false, config_reason, allocation_id, "failed")
         if allocation_id == 0 or owner_id == 0 or byte_length == 0 or page_count == 0 or me._find(allocation_id) >= 0:
             return _memory_leveling_operation(false, "invalid-request", allocation_id, "failed")
         val admission = me._admission_reason(domain.name, byte_length)
@@ -513,10 +490,6 @@ impl MemoryLevelingManager:
         val allocation = me.allocations[index]
         if allocation.owner_id != owner_id or allocation.state.name != MEMORY_PAGE_STATE_SWAPPED or allocation.swap_slot_id == 0:
             return _memory_leveling_operation(false, "invalid-state", allocation_id, allocation.state.name)
-        val admission = me._admission_reason(allocation.domain.name, allocation.byte_length)
-        if admission != "ok":
-            me.stats.failure_count = me.stats.failure_count + 1
-            return _memory_leveling_operation(false, admission, allocation_id, allocation.state.name)
         val migrating = memory_page_state(MEMORY_PAGE_STATE_MIGRATING, false, false)
         me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, migrating, 0, 0, 0, MEMORY_DMA_DIRECTION_NONE, true, allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
         me.stats.transition_count = me.stats.transition_count + 1

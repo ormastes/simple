@@ -35,7 +35,7 @@ Options:
   --mode=<name>      Pure-Simple build mode: dynload or one-binary
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
   --full-cli         Relink the full CLI after the staged pure-Simple build.
-                     Implied by --deploy, --full-bootstrap, and one-binary mode.
+                     Implied by --deploy and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
@@ -248,6 +248,13 @@ run_timeout() {
   fi
 }
 
+absolute_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "${repo_root}" "$1" ;;
+  esac
+}
+
 if [ -n "${LLVM_PREFIX:-}" ] && [ -d "${LLVM_PREFIX}/bin" ]; then
   case ":${PATH}:" in
     *":${LLVM_PREFIX}/bin:"*) ;;
@@ -390,8 +397,9 @@ native_all_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_nativ
 seed_stamp="${seed_bin}.inputs.sha256"
 seed_inputs_hash() {
   {
-    find src/compiler_rust \( -name '*.rs' -o -name 'Cargo.toml' \) \
-      -not -path '*/target/*' -type f -print 2>/dev/null | LC_ALL=C sort | hash_path_list
+    find src/compiler_rust \( -type d -name 'target*' -o -path src/compiler_rust/vendor \) -prune -o \
+      \( -name '*.rs' -o -name 'Cargo.toml' \) -type f -print 2>/dev/null \
+      | LC_ALL=C sort | hash_path_list
     find src/runtime \( -name '*.c' -o -name '*.h' \) -type f -print 2>/dev/null \
       | LC_ALL=C sort | hash_path_list
     printf '%s  %s\n' "$(hash_file src/compiler_rust/Cargo.lock)" src/compiler_rust/Cargo.lock
@@ -526,6 +534,7 @@ else
   set +e
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_BINARY="$(absolute_path "${seed_bin}")" \
     "${seed_bin}" native-build \
     --backend cranelift \
     --source src/compiler --source src/app --source src/lib \
@@ -560,6 +569,7 @@ else
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+    SIMPLE_BINARY="$(absolute_path "${stage2_bin}")" \
     "${stage2_bin}" native-build \
     --backend cranelift \
     --source src/compiler --source src/app --source src/lib \
@@ -628,13 +638,13 @@ fi
 # Fast iteration stops after the pure-Simple dynload stages. Relinking the
 # complete CLI is explicit because it is the dominant cost and is unnecessary
 # for ordinary compiler/app/lib edits that are consumed through dynload caches.
-if [ "${deploy}" -eq 1 ] || [ "${full_bootstrap}" -eq 1 ] || [ "${bootstrap_mode}" = "one-binary" ]; then
+if [ "${deploy}" -eq 1 ] || [ "${bootstrap_mode}" = "one-binary" ]; then
   full_cli=1
 fi
 if [ "${full_cli}" -eq 0 ]; then
   echo "Pure-Simple dynload build complete; full CLI relink skipped."
   echo "  cache: ${native_cache_dir}"
-  echo "  use --full-cli, --deploy, --mode=one-binary, or --full-bootstrap to relink"
+  echo "  use --full-cli, --deploy, or --mode=one-binary to relink"
   if [ "${stage3_ok:-0}" -eq 0 ]; then
     exit 2
   fi
@@ -666,6 +676,7 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
   run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+    SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
     "${stage_for_build}" run src/app/cli/native_build_main.spl -- \
     --backend "${stage4_backend}" \
     --source src/compiler --source src/app --source src/lib \
@@ -679,6 +690,7 @@ else
   run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+    SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
     "${stage_for_build}" native-build \
     --backend "${stage4_backend}" \
     --source src/compiler --source src/app --source src/lib \
@@ -732,6 +744,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       env RUST_LOG="${RUST_LOG:-error}" \
         SIMPLE_NO_DEPRECATED_WARNINGS=1 \
         LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+        SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
         "${stage_for_build}" run src/app/cli/native_build_main.spl -- \
         --backend "${stage4_backend}" \
         --source src/compiler --source src/app --source src/lib \
@@ -747,6 +760,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       env RUST_LOG="${RUST_LOG:-error}" \
         SIMPLE_NO_DEPRECATED_WARNINGS=1 \
         LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+        SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
         "${stage_for_build}" native-build \
         --backend "${stage4_backend}" \
         --source src/compiler --source src/app --source src/lib \
@@ -838,7 +852,9 @@ if [ "${deploy}" -eq 1 ]; then
   fi
 
   # Recreate wrapper/launcher entrypoints (bin/simple plus release links)
-  "${repo_root}/scripts/setup/setup.shs"
+  if [ "${os}" != "windows" ]; then
+    "${repo_root}/scripts/setup/setup.shs"
+  fi
 fi
 
 echo "Final binary: ${full_bin}"

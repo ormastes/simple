@@ -43,6 +43,11 @@ fn configured_library_paths() -> Vec<String> {
     }
     if let Some(sffi_paths) = std::env::var_os("SIMPLE_SFFI_PATH") {
         for dir in std::env::split_paths(&sffi_paths) {
+            #[cfg(target_os = "windows")]
+            paths.push(dir.join("spl_torch.dll").to_string_lossy().into_owned());
+            #[cfg(target_os = "macos")]
+            paths.push(dir.join("libspl_torch.dylib").to_string_lossy().into_owned());
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             paths.push(dir.join("libspl_torch.so").to_string_lossy().into_owned());
         }
     }

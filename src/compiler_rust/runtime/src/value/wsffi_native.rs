@@ -32,8 +32,16 @@ pub extern "C" fn spl_dlopen(path_rv: RuntimeValue) -> i64 {
     buf.extend_from_slice(slice);
     buf.push(0); // null terminator
 
-    let handle = unsafe { libc::dlopen(buf.as_ptr() as *const libc::c_char, libc::RTLD_NOW) };
-    handle as i64
+    #[cfg(unix)]
+    {
+        let handle = unsafe { libc::dlopen(buf.as_ptr() as *const libc::c_char, libc::RTLD_NOW) };
+        handle as i64
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+        unsafe { LoadLibraryA(buf.as_ptr()) as i64 }
+    }
 }
 
 /// spl_dlsym(handle: i64, name: text) -> i64
@@ -59,8 +67,18 @@ pub extern "C" fn spl_dlsym(handle: i64, name_rv: RuntimeValue) -> i64 {
     buf.extend_from_slice(slice);
     buf.push(0);
 
-    let result = unsafe { libc::dlsym(handle as *mut libc::c_void, buf.as_ptr() as *const libc::c_char) };
-    result as i64
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::dlsym(handle as *mut libc::c_void, buf.as_ptr() as *const libc::c_char) };
+        result as i64
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+        unsafe { GetProcAddress(handle as _, buf.as_ptr()) }
+            .map(|symbol| symbol as *const () as i64)
+            .unwrap_or(0)
+    }
 }
 
 /// spl_dlclose(handle: i64) -> i64
@@ -71,8 +89,16 @@ pub extern "C" fn spl_dlclose(handle: i64) -> i64 {
     if handle == 0 {
         return 0;
     }
-    let result = unsafe { libc::dlclose(handle as *mut libc::c_void) };
-    result as i64
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::dlclose(handle as *mut libc::c_void) };
+        result as i64
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::FreeLibrary;
+        unsafe { FreeLibrary(handle as _) as i64 }
+    }
 }
 
 /// spl_wffi_call_i64(fptr: i64, args: RuntimeValue_array, nargs: i64) -> i64

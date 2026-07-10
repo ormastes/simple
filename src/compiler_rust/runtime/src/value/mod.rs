@@ -78,7 +78,7 @@ mod utf8_kernels;
 pub mod bench_support;
 #[cfg(feature = "pytorch")]
 pub mod torch;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod wsffi_native;
 
 // Re-export core types
@@ -366,8 +366,8 @@ pub use cli_sffi::{
     rt_compile_to_llvm_ir, rt_compile_to_native, rt_compile_to_native_with_opt, rt_exec, rt_exec_output,
 };
 
-// Re-export dynamic-loading / WFFI SFFI functions (unix only)
-#[cfg(unix)]
+// Re-export dynamic-loading / WFFI SFFI functions.
+#[cfg(any(unix, windows))]
 pub use wsffi_native::{spl_dlclose, spl_dlopen, spl_dlsym, spl_wffi_call_f64, spl_wffi_call_i64};
 
 // Re-export file I/O SFFI functions

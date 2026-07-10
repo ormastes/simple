@@ -16,7 +16,8 @@ set -eu
 #   QEMU_USER            VM user (default: freebsd)
 #   QEMU_MEM             RAM (default: 4G)
 #   QEMU_CPUS            CPUs (default: 4)
-#   QEMU_SSH_TIMEOUT     Initial SSH wait seconds (default: 180)
+#   QEMU_SSH_TIMEOUT     Initial SSH wait seconds (default: 600; pristine images
+#                        may run freebsd-update before nuageinit/sshd)
 #   QEMU_ROOT_SSH_TIMEOUT Root SSH wait seconds after user SSH (default: 120)
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -27,7 +28,7 @@ QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
 QEMU_MEM="${QEMU_MEM:-4G}"
 QEMU_CPUS="${QEMU_CPUS:-4}"
-QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-180}"
+QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-600}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
 FREEBSD_VERSION="14.3"
 FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
@@ -36,6 +37,7 @@ QEMU_VM_PATH="${QEMU_VM_PATH:-${QEMU_BASE_VM_PATH:-${VM_DIR}/${FREEBSD_IMAGE_NAM
 QEMU_CLOUDINIT_ISO="${QEMU_CLOUDINIT_ISO:-${VM_DIR}/freebsd-cloudinit-seed.iso}"
 PID_FILE="${VM_DIR}/qemu.pid"
 SERIAL_LOG="${VM_DIR}/qemu-serial.log"
+QEMU_START_LOG="${VM_DIR}/qemu-start.log"
 OVERLAY_IMAGE="${VM_DIR}/freebsd-run.overlay.qcow2"
 
 MODE="smoke"
@@ -169,6 +171,12 @@ sed -i '' 's/^PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config
 
 # Set hostname
 hostname freebsd-bootstrap
+
+# The pristine cloud image enables network-bound firstboot update/package
+# jobs ahead of sshd. They can exceed the host's bounded SSH wait and are
+# redundant because full mode installs its explicit dependency set later.
+sysrc firstboot_freebsd_update_enable=NO >/dev/null 2>&1 || true
+sysrc firstboot_pkgs_enable=NO >/dev/null 2>&1 || true
 USERDATA
 chmod +x "$CLOUDINIT_DIR/user-data"
 
@@ -203,7 +211,8 @@ if [ -w /dev/kvm ] 2>/dev/null; then
     CPU_MODEL="host"
 fi
 
-qemu-system-x86_64 \
+rm -f "$PID_FILE" "$QEMU_START_LOG"
+if ! qemu-system-x86_64 \
     -machine "accel=${ACCEL}" \
     -cpu "$CPU_MODEL" \
     -m "$QEMU_MEM" \
@@ -215,11 +224,15 @@ qemu-system-x86_64 \
     -display none \
     -serial "file:${SERIAL_LOG}" \
     -daemonize \
-    -pidfile "$PID_FILE" 2>/dev/null
+    -pidfile "$PID_FILE" 2>"$QEMU_START_LOG"; then
+    [ -s "$QEMU_START_LOG" ] && tail -10 "$QEMU_START_LOG" >&2
+    fail "QEMU failed to start"
+fi
 
-if [ -f "$PID_FILE" ]; then
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     pass "QEMU started (pid=$(cat "$PID_FILE"), accel=${ACCEL})"
 else
+    [ -s "$QEMU_START_LOG" ] && tail -10 "$QEMU_START_LOG" >&2
     fail "QEMU failed to start"
 fi
 
@@ -328,6 +341,9 @@ else
     rsync -az --delete \
         --exclude='.git' \
         --exclude='.jj/' \
+        --exclude='/.claude/worktrees/' \
+        --exclude='/.codex/worktrees/' \
+        --exclude='/.agents/worktrees/' \
         --exclude='/build/' \
         --exclude='.simple/' \
         --exclude='/bootstrap/' \
@@ -348,34 +364,24 @@ else
         "${ROOT_DIR}/" "${VM_USER}@localhost:${VM_HOME}/simple/"
     pass "Project synced"
 
-    info "Full-bootstrap evidence: building Rust seed/runtime in VM..."
-    BUILD_OUT=$($VM_SSH "cd ${VM_HOME}/simple/src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all 2>&1; echo EXIT:\$?" 2>/dev/null)
-    BUILD_EXIT=$(printf '%s' "$BUILD_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
-    printf '%s\n' "$BUILD_OUT" | grep -v '^EXIT:' | tail -5
-    [ "$BUILD_EXIT" = "0" ] || fail "Rust seed build failed (exit $BUILD_EXIT)"
-    pass "Full-bootstrap Rust seed/runtime built"
-
-    info "Running 3-stage bootstrap in VM..."
-    BOOT_OUT=$($VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple build bootstrap --seed=src/compiler_rust/target/bootstrap/simple 2>&1; echo EXIT:\$?" 2>/dev/null)
+    info "Running canonical full bootstrap in VM..."
+    BOOT_OUT=$($VM_SSH "cd ${VM_HOME}/simple && sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --no-mcp --jobs=2 2>&1; echo EXIT:\$?" 2>/dev/null)
     BOOT_EXIT=$(printf '%s' "$BOOT_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$BOOT_OUT" | grep -v '^EXIT:' | tail -10
-    # exit 1 is acceptable (hash mismatch between stages is known non-determinism)
-    STAGE3_EXISTS=$($VM_SSH "test -f ${VM_HOME}/simple/bootstrap/simple_stage3 && echo yes || echo no" 2>/dev/null)
-    if [ "$STAGE3_EXISTS" != "yes" ]; then
-        fail "3-stage bootstrap failed — no stage3 binary (exit $BOOT_EXIT)"
+    [ "$BOOT_EXIT" = "0" ] || fail "Canonical FreeBSD bootstrap failed (exit $BOOT_EXIT)"
+    STAGE_BIN="${VM_HOME}/simple/build/bootstrap/stage3/x86_64-unknown-freebsd/simple"
+    STAGE_EXISTS=$($VM_SSH "test -x ${STAGE_BIN} && echo yes || echo no" 2>/dev/null)
+    if [ "$STAGE_EXISTS" != "yes" ]; then
+        fail "Canonical bootstrap produced no stage3 dynload binary"
     fi
-    if [ "$BOOT_EXIT" = "0" ]; then
-        pass "3-stage bootstrap completed (exact match)"
-    else
-        pass "3-stage bootstrap completed (hash mismatch is known non-determinism)"
-    fi
+    pass "Canonical Rust + pure-Simple dynload bootstrap completed"
 
     # Retrieve binary
     FREEBSD_BIN_DIR="${ROOT_DIR}/bin/release/freebsd-x86_64"
     mkdir -p "$FREEBSD_BIN_DIR"
     SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -P ${QEMU_PORT}"
     scp ${SCP_OPTS} \
-        "${VM_USER}@localhost:${VM_HOME}/simple/bootstrap/simple_stage3" \
+        "${VM_USER}@localhost:${STAGE_BIN}" \
         "${FREEBSD_BIN_DIR}/simple" 2>/dev/null || fail "Failed to retrieve binary"
     pass "Binary retrieved: ${FREEBSD_BIN_DIR}/simple"
 

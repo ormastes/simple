@@ -3,8 +3,10 @@
 Purpose: keep bootstrap and native-build mode policy out of the Rust seed and
 inside pure-Simple tooling.
 
-- Default mode is `dynload`: reuse native cache when compiler/AOP/loader inputs
-  are unchanged and emit native plus SMF cache artifacts where supported.
+- Default mode is `dynload`: preserve compiler-owned per-module cache entries,
+  rebuild Stage 2/3 pure-Simple artifacts, and skip the Stage 4 full CLI relink.
+- Use `--full-cli` or `--deploy` for Stage 4. `--full-bootstrap` controls Rust
+  seed/runtime freshness and does not imply a monolithic CLI build.
 - `one-binary` is the conservative monolithic native executable path.
 - Normal bootstrap never rebuilds Rust; `--full-bootstrap` is the only cargo
   rebuild path.

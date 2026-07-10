@@ -52,11 +52,7 @@ fn is_compiler_like_entry(path: &Path) -> bool {
 
 fn is_bootstrap_main_entry(path: &Option<PathBuf>) -> bool {
     std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1")
-        && path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .and_then(|name| name.to_str())
-            == Some("bootstrap_main.spl")
+        && path.as_ref().and_then(|p| p.file_name()).and_then(|name| name.to_str()) == Some("bootstrap_main.spl")
 }
 
 fn runtime_path_has_abi_complete_simple_core(runtime_path: Option<&Path>) -> bool {
@@ -163,10 +159,20 @@ impl NativeProjectBuilder {
         }
         let lane = self.resolve_runtime_lane();
         let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
+        let native_all_name = if cfg!(target_os = "windows") {
+            "simple_native_all.lib"
+        } else {
+            "libsimple_native_all.a"
+        };
+        let runtime_name = if cfg!(target_os = "windows") {
+            "simple_runtime.lib"
+        } else {
+            "libsimple_runtime.a"
+        };
 
         if is_bootstrap_main_entry(&self.entry_file) {
             if let Some(ref rp) = self.config.runtime_path {
-                let native_all = rp.join("libsimple_native_all.a");
+                let native_all = rp.join(native_all_name);
                 if native_all.exists() {
                     return Ok(Some((native_all, true)));
                 }
@@ -174,8 +180,8 @@ impl NativeProjectBuilder {
         }
 
         let mut push_runtime_candidates = |dir: &Path| {
-            let runtime_deps = dir.join("deps").join("libsimple_runtime.a");
-            let runtime = dir.join("libsimple_runtime.a");
+            let runtime_deps = dir.join("deps").join(runtime_name);
+            let runtime = dir.join(runtime_name);
             match lane {
                 NativeRuntimeLane::CoreCBootstrap => {
                     if runtime_deps.exists() {
@@ -188,8 +194,8 @@ impl NativeProjectBuilder {
                 NativeRuntimeLane::SimpleCore => {
                     for lane_dir in ["simple-core", "simple_core"] {
                         let candidate_dir = dir.join(lane_dir);
-                        let lane_runtime_deps = candidate_dir.join("deps").join("libsimple_runtime.a");
-                        let lane_runtime = candidate_dir.join("libsimple_runtime.a");
+                        let lane_runtime_deps = candidate_dir.join("deps").join(runtime_name);
+                        let lane_runtime = candidate_dir.join(runtime_name);
                         if lane_runtime_deps.exists() {
                             candidates.push((lane_runtime_deps, false));
                         }

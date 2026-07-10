@@ -103,7 +103,10 @@ Override with `SIMPLE_LINKER=<name>` environment variable.
 ## Building from Source
 
 ```bash
-# Normal bootstrap: rebuild pure-Simple stages, do not rebuild Rust
+# Normal edit/bugfix loop: changed pure-Simple dynload artifacts only
+scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
+
+# Relink and deploy the full CLI without rebuilding Rust
 scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload --deploy
 
 # Conservative monolithic pure-Simple output
@@ -270,11 +273,10 @@ cmake ../seed -DCMAKE_TOOLCHAIN_FILE=../src/compiler_seed/cmake/toolchains/freeb
 sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke
 ```
 
-This checks prerequisites, downloads/validates the VM image when needed, starts
-QEMU, verifies SSH connectivity, verifies rsync/toolchain access, syncs the
-workspace into the guest, and runs the FreeBSD bootstrap smoke inside the
-FreeBSD guest. Use `--full` when you need the repeated bootstrap verification
-pass. For manual VM setup debugging, run:
+Smoke mode checks the VM, SSH, and guest C toolchain. Full mode additionally
+installs rsync/build dependencies, syncs the workspace into the guest, and runs
+the canonical wrapper with `--full-bootstrap --mode=dynload` before retrieving
+the Stage 3 FreeBSD dynload binary. For manual VM setup debugging, run:
 
 ```bash
 bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick

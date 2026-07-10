@@ -725,6 +725,20 @@ pub extern "C" fn rt_exec(cmd: RuntimeValue) -> i32 {
     }
 }
 
+/// Execute a shell command and return captured stdout.
+#[no_mangle]
+pub extern "C" fn rt_exec_output(cmd: RuntimeValue) -> RuntimeValue {
+    let cmd_str = match extract_string(cmd) {
+        Some(s) => s,
+        None => return rt_string_new("".as_ptr(), 0),
+    };
+
+    match Command::new("sh").arg("-c").arg(&cmd_str).output() {
+        Ok(output) => rt_string_new(output.stdout.as_ptr(), output.stdout.len() as u64),
+        Err(_) => rt_string_new("".as_ptr(), 0),
+    }
+}
+
 /// Compute SHA256 hash of a file.
 /// Used for bootstrap verification (v2 == v3).
 #[no_mangle]

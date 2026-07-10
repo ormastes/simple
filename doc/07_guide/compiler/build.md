@@ -197,23 +197,29 @@ pure-Simple stages.
 # Default fast path: dynload pure-Simple stages, no cargo
 scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
 
+# Relink the full pure-Simple CLI without rebuilding Rust
+scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload --full-cli
+
 # Conservative monolithic pure-Simple output, no cargo
 scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary
 
-# Explicit Rust seed/runtime rebuild plus pure-Simple stages
+# Explicit Rust seed/runtime rebuild plus pure-Simple dynload stages
 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
+
+# Rebuild Rust seed/runtime and relink the full CLI
+scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --full-cli
 ```
 
 On Windows, use the Windows bootstrap wrapper:
 
 ```powershell
-.\scripts\bootstrap\bootstrap-windows.sh --deploy
+.\scripts\bootstrap\bootstrap-windows.cmd --deploy
 ```
 
-Windows stage outputs are executable paths (`simple_stage1.exe`,
-`simple_stage2.exe`, `simple_stage3.exe`). Normal Windows bootstrap uses the
-same policy: rebuild pure-Simple stages by default, and rebuild the Rust
-seed/runtime only in an explicit full-bootstrap lane.
+Windows stage outputs are executable paths (`stage2/<triple>/simple.exe` and
+`stage3/<triple>/simple.exe`). Use `--mingw` or `--msvc` on the Bash wrapper to
+override automatic ABI selection. Normal Windows bootstrap uses the same
+dynload-only default and explicit full-build policy.
 
 On Windows, stripped native links normalize volatile PE metadata after the
 hosted linker returns. The normalizer zeroes the COFF `TimeDateStamp` and PE
@@ -231,8 +237,10 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary
 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
 ```
 
-`dynload` is the default fast-iteration mode. `one-binary` clears the native
-cache and builds the conservative monolithic native executable path.
+`dynload` is the default fast-iteration mode. It preserves compiler-owned
+per-module cache entries and skips Stage 4. `--full-cli`, `--deploy`,
+and `one-binary` request the monolithic native executable. `--full-bootstrap`
+alone refreshes Rust inputs but keeps the dynload-only output boundary.
 
 Bootstrap output uses `<arch>-<vendor>-<os>-<abi>` target triples:
 

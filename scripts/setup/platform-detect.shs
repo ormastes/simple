@@ -3,7 +3,8 @@
 # Sets: PLATFORM_TRIPLE, PLATFORM_ARCH, PLATFORM_OS
 
 PLATFORM_ARCH="$(uname -m)"
-case "$(uname -s)" in
+PLATFORM_UNAME="$(uname -s)"
+case "${PLATFORM_UNAME}" in
   Linux)   PLATFORM_OS="linux"   ;;
   Darwin)  PLATFORM_OS="macos"   ;;
   FreeBSD) PLATFORM_OS="freebsd" ;;
@@ -21,16 +22,30 @@ case "${PLATFORM_ARCH}" in
   riscv64) PLATFORM_ARCH="riscv64" ;;
 esac
 
+PLATFORM_ABI=""
 case "${PLATFORM_OS}" in
   linux)    PLATFORM_TRIPLE="${PLATFORM_ARCH}-unknown-linux-gnu" ;;
   macos)    PLATFORM_TRIPLE="${PLATFORM_ARCH}-apple-darwin" ;;
   freebsd)  PLATFORM_TRIPLE="${PLATFORM_ARCH}-unknown-freebsd" ;;
-  windows)  PLATFORM_TRIPLE="${PLATFORM_ARCH}-pc-windows-msvc" ;;
+  windows)
+    PLATFORM_ABI="${SIMPLE_WINDOWS_ABI:-}"
+    if [ -z "${PLATFORM_ABI}" ]; then
+      case "${MSYSTEM:-}" in
+        MINGW*|UCRT*|CLANG*) PLATFORM_ABI="gnu" ;;
+        *) PLATFORM_ABI="msvc" ;;
+      esac
+    fi
+    case "${PLATFORM_ABI}" in
+      gnu|msvc) ;;
+      *) echo "error: SIMPLE_WINDOWS_ABI must be gnu or msvc" >&2; return 1 2>/dev/null || exit 1 ;;
+    esac
+    PLATFORM_TRIPLE="${PLATFORM_ARCH}-pc-windows-${PLATFORM_ABI}"
+    ;;
   simpleos) PLATFORM_TRIPLE="${PLATFORM_ARCH}-unknown-simpleos" ;;
   *)        PLATFORM_TRIPLE="${PLATFORM_ARCH}-unknown-${PLATFORM_OS}" ;;
 esac
 
-export PLATFORM_TRIPLE PLATFORM_ARCH PLATFORM_OS
+export PLATFORM_TRIPLE PLATFORM_ARCH PLATFORM_OS PLATFORM_ABI
 
 # ---------------------------------------------------------------------------
 # Toolchain detection (shared interface): LLVM prefix/lib — version- and
@@ -93,6 +108,18 @@ _llvm_prefixes() {
 # Try prefix $1 for version $2; on success set LLVM_* and return 0.
 _llvm_try_prefix() {
   [ -n "$1" ] && [ -d "$1" ] || return 1
+  _prefix_cfg=""
+  if [ -x "$1/bin/llvm-config" ]; then
+    _prefix_cfg="$1/bin/llvm-config"
+  elif [ -x "$1/bin/llvm-config.exe" ]; then
+    _prefix_cfg="$1/bin/llvm-config.exe"
+  fi
+  if [ -n "${_prefix_cfg}" ]; then
+    case "$(${_prefix_cfg} --version 2>/dev/null)" in
+      $2.*) ;;
+      *) return 1 ;;
+    esac
+  fi
   for _ld in $(_llvm_libdirs); do
     for _name in $(_llvm_lib_names "$2"); do
       if [ -f "$1/${_ld}/${_name}" ]; then

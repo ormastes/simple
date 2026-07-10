@@ -21,6 +21,7 @@ use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
 use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
 use os.kernel.memory.vmm.{vmm_init}
 use os.kernel.memory.vmm_address_space.{vmm_map_nvme_bar_high}
+use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_preread_boot}
 
 extern fn serial_println(msg: text)
 extern fn rt_net_init() -> i64
@@ -46,6 +47,18 @@ fn _start():
         serial_println("[FATAL] nvme init failed")
         return
     serial_println("[boot] nvme online")
+
+    # 2b. Pre-read /FSEXEC.ELF into the resident FAT path-read buffer NOW — right
+    #     after nvme_init, BEFORE rt_net_init and vmm. The merged SSH kernel's
+    #     rt_net_init disturbs the NVMe controller so a LATER FAT read returns
+    #     non-ELF garbage (post-net post-vmm read yields preread:not-elf); reading
+    #     here, while NVMe is pristine and the BAR is still boot-mapped, gets clean
+    #     bytes. They persist in the C static buffer (nothing else overwrites it),
+    #     and x86_64_fs_exec_spawn's exec-time reader falls back to them (the
+    #     exec-time FAT re-open returns len=0).
+    val preread = x86_64_fs_exec_preread_boot("/FSEXEC.ELF")
+    serial_println("[boot] fsexec preread size={preread}")
+
     val net_init = rt_net_init()
     serial_println("[boot] rt_net_init rc={net_init}")
     if net_init < 0:

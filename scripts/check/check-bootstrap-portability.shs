@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "${root}"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+for script in \
+  scripts/bootstrap/bootstrap-from-scratch.sh \
+  scripts/check/check-freebsd-bootstrap-qemu.shs \
+  scripts/setup/platform-detect.shs \
+  scripts/setup/setup.shs; do
+  sh -n "${script}" || fail "shell syntax: ${script}"
+done
+bash -n scripts/bootstrap/bootstrap-windows.sh || fail "shell syntax: bootstrap-windows.sh"
+
+help=$(sh scripts/bootstrap/bootstrap-from-scratch.sh --help)
+printf '%s\n' "${help}" | grep -q -- '--full-cli' || fail "missing --full-cli help"
+printf '%s\n' "${help}" | grep -q -- '--full-bootstrap' || fail "missing --full-bootstrap help"
+
+grep -q 'command -v shasum' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS SHA-256 fallback"
+grep -q 'command -v gtimeout' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS timeout fallback"
+if grep -q 'bootstrap-freebsd-seed.sh' scripts/bootstrap/bootstrap-from-scratch.sh; then
+  fail "dead FreeBSD dispatcher remains"
+fi
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-platform.XXXXXX")
+trap 'rm -rf "${tmp}"' EXIT HUP INT TERM
+cat >"${tmp}/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  -m) echo x86_64 ;;
+  *) echo MINGW64_NT-10.0 ;;
+esac
+EOF
+chmod +x "${tmp}/uname"
+
+mingw=$(PATH="${tmp}:${PATH}" MSYSTEM=MINGW64 sh -c '. scripts/setup/platform-detect.shs; printf "%s" "$PLATFORM_TRIPLE"')
+[ "${mingw}" = "x86_64-pc-windows-gnu" ] || fail "MinGW triple: ${mingw}"
+
+msvc=$(PATH="${tmp}:${PATH}" MSYSTEM= SIMPLE_WINDOWS_ABI=msvc sh -c '. scripts/setup/platform-detect.shs; printf "%s" "$PLATFORM_TRIPLE"')
+[ "${msvc}" = "x86_64-pc-windows-msvc" ] || fail "MSVC triple: ${msvc}"
+
+set +e
+freebsd_out=$(sh scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 2>&1)
+freebsd_status=$?
+set -e
+[ "${freebsd_status}" -ne 0 ] || fail "Linux host accepted direct FreeBSD bootstrap"
+printf '%s\n' "${freebsd_out}" | grep -q 'check-freebsd-bootstrap-qemu.shs --full' || fail "missing FreeBSD QEMU handoff"
+
+echo "Bootstrap portability contract PASS"
