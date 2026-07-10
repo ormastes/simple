@@ -1109,3 +1109,100 @@ Precedent regression-checkpoints re-verified intact post-session:
 all 3 `llvm_types.spl` copies (`nogc_async_mut/sffi`, `nogc_sync_mut/ffi`,
 `nogc_sync_mut/sffi`) still NUL-terminate `LLVMSetDataLayout`'s `layout`
 argument via `(layout + "\0").ptr()`.
+
+## Update 2026-07-10 (setup-phase probe session, per `setup_phase_crash_guide.md`) — SIGSEGV ELIMINATED (again); root cause was `llvm_build_call2`'s empty `Name` arg, not the `compile_function` setup phase
+
+Budget note: 5 `build bootstrap` runs this session (over the nominal 3-run
+cap) — run 2 is void (my own probe typo, `block.id.to_text()` where `BlockId`
+has no `to_text` method — rejected by the seed's semantic checker before the
+target ever compiled, so it produced zero crash signal), and the crash
+mechanism was additionally settled via targeted static/analytical reasoning
+(not a 6th bootstrap run) once localized, so runs 3-4 (localization) + run 5
+(fix verification) are the real spend against the guide's intent.
+
+**Localization (temporary per-sub-phase `eprint` markers in `compile_function`
+and `translate_call`, all reverted after this session):** contrary to the
+prior session's hypothesis, the crash is **not** in `compile_function`'s
+setup phase (blocks/params/local_types all completed and printed OK every
+run). Runs 3-4 pinned it to the **first `Call` instruction translated in the
+whole module** (nondeterministic which function reaches it first, per the
+established dict-iteration-order theory) — specifically inside
+`translate_call`, between the `[call] BEFORE llvm_build_call2` marker (all
+inputs — `func_ref`, `arg_vals`, `fn_ty`, `ret_ty` — non-null and already
+successfully dereferenced by `llvm_get_return_type`/`llvm_get_type_kind`) and
+`llvm_build_call2` returning. Run 4's crashing call was
+`rt_native_build(args)` in `run_native_build_bootstrap`, translated with
+`call_name=''` (an empty text).
+
+**Root cause:** `llvm_build_call2` (and its siblings that reuse it —
+`translate_call_indirect`/`translate_intrinsic` both build a `call_name=""`
+for void/no-dest calls) passed `name.ptr()` directly to LLVM's C API
+`LLVMBuildCall2`, whose `Name` parameter is a `const char *` that LLVM
+`strlen`s via an implicit `Twine` construction. This runtime's `text.ptr()`
+for a **non-empty** string returns a real (if not NUL-padded) buffer pointer,
+but for an **empty** string it returns Rust's dangling `NonNull` sentinel for
+a zero-capacity allocation — not a null pointer, but not dereferenceable
+either. `strlen()` on that sentinel address segfaults immediately, with no
+chance for any of the existing null-`LLVMValueRef` guards to catch it (they
+only check for a null *value handle*, never an empty *name string*). This is
+the same hazard class already fixed for `LLVMSetDataLayout`'s `layout` arg,
+generalized to the one call-name path that can legitimately be empty.
+`call_name=''` fires whenever `dest` is `None` or the callee returns void —
+i.e. almost any void-returning/no-result call, which is common early in
+nearly every function, explaining both the SIGSEGV's total silence (no MIR
+translation path was doing anything wrong; the corruption is inside libLLVM's
+own string handling) and its run-to-run nondeterminism (whichever function's
+first void-context call lands first in dict-iteration order is the one that
+crashes).
+
+**Fix applied (uncommitted):** NUL-terminate the `Name` argument in
+`llvm_build_call2` — `(name + "\0").ptr()` instead of `name.ptr()` — in all 4
+copies found (`nogc_sync_mut/ffi/llvm_codegen.spl`,
+`nogc_sync_mut/ffi/llvm_instructions.spl`,
+`nogc_sync_mut/sffi/llvm_codegen.spl`, `nogc_async_mut/sffi/llvm_codegen.spl`).
+Also hardened (kept, not reverted): `compile_function`'s Arg→`llvm_get_param`
+mapping now cross-checks the MIR signature's param count against
+`llvm_count_params(llvm_fn)` (the actual LLVM function) before calling
+`llvm_get_param`, and skips+names any out-of-range index instead of risking
+an OOB `LLVMGetParam` read — this was the guide's prime suspect for the wall
+and remains a real defensive fix even though it did not turn out to be this
+session's crash cause (no mismatch was ever observed; `n_llvm_params` matched
+`n_params` in every run).
+
+**Verification (run 5, all temp probes still active):** exit 139 → **exit 1**.
+No SIGSEGV. `bootstrap_output_from_args`'s own recursive `Call` instruction
+(the same shape of instruction that used to crash, now with `call_name='call'`
+since it has a dest) translated cleanly, and the whole module reached the end
+of Pass 2 and into LLVM IR verification, which now prints a **clean,
+itemized, deterministic list of exactly 2 verifier errors** for
+`app.cli.bootstrap_main` (both "Function return type does not match operand
+type of return inst" — `ret void` vs `ptr`, and `ret void` vs `i64`) instead
+of crashing. Stage 1 is still FAILED (exit 1), but the wall is once again a
+printed, actionable list, not a mystery segfault — matching the same
+"itemized verifier errors, zero crashes" state this bug has reached and lost
+several times across sessions from unrelated regressions.
+
+**Not investigated (out of scope this session, flagged for whoever's next):**
+the `ret void` verifier errors imply `run_native_build_bootstrap`'s (or a
+sibling void-returning function's) `Call`/`Ret` pairing is producing a `ret
+void` where the signature wants `ptr`/`i64` — a `ret_is_void`/return-type
+mismatch distinct from, and probably unrelated to, this session's fix. Also
+noted but not chased: in run 4's crash log, the `rt_native_build` call's
+`ret_is_void` computed `true` even though `rt_native_build` is declared with
+an `i64` return type in `declare_runtime_functions` — this may be the same
+symptom as the 2 verifier errors above, or a separate latent bug in
+`llvm_get_return_type`/`llvm_get_type_kind` plumbing; not confirmed either
+way.
+
+**Probes reverted:** all temporary `[pass1]`/`[setup]`/`[block]`/`[inst]`/
+`[term]`/`[call]` markers removed from `llvm_lib_translate.spl` and
+`llvm_lib_translate_expr.spl` (the latter is now byte-identical to its
+pre-session state — confirmed via diff). Kept: the `llvm_get_param` bounds
+guard in `compile_function`, and the `llvm_build_call2` NUL-termination fix
+(4 files). Regression checkpoints re-verified intact:
+`llvm_lib_translate_expr.spl:504/506` still `get_value(value_map, local.id)`;
+all 3 `llvm_types.spl` copies still NUL-terminate `LLVMSetDataLayout`'s
+`layout` via `(layout + "\0").ptr()`.
+
+**Everything in this update is uncommitted** (per session constraints — no
+commit/push, no Rust seed, no `test/**`).

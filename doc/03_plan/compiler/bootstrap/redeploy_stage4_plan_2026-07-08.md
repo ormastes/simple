@@ -476,3 +476,26 @@ block/value-map setup phase itself (block creation, param mapping,
 `local_types` construction) — the crash may be there rather than in any
 `translate_*` call, since none of those are printing a diagnostic before
 the SIGSEGV.
+
+## Update 2026-07-10 (setup-phase probe session) — SIGSEGV wall cleared again; see bug doc for full writeup
+
+Followed up on "instrument `compile_function`'s block/value-map setup phase
+itself" per the previous session's next step. Result: the setup phase was
+NOT the crash site (blocks/params/local_types all completed cleanly every
+run) — the crash was pinned to the first `Call` instruction translated in
+the whole module, specifically inside `llvm_build_call2` when the builder
+`Name` argument is an empty text (`call_name=''`, used for void/no-dest
+calls). Root cause: this runtime's `text.ptr()` on an empty string returns a
+dangling (non-dereferenceable) sentinel, and `LLVMBuildCall2`'s C API
+`strlen`s the `Name` argument via an implicit `Twine` — segfaulting
+immediately on the dangling pointer. Same hazard class as the
+already-fixed `LLVMSetDataLayout` NUL-termination gap, generalized to
+`llvm_build_call2`'s `Name` arg (fixed in all 4 copies:
+`nogc_sync_mut/ffi/llvm_codegen.spl`, `nogc_sync_mut/ffi/llvm_instructions.spl`,
+`nogc_sync_mut/sffi/llvm_codegen.spl`, `nogc_async_mut/sffi/llvm_codegen.spl`).
+
+Verified: Stage 1 exit 139 → exit 1, itemized 2-error verifier list (return
+type mismatches unrelated to this fix), no crash. Full root-cause writeup,
+budget accounting, and reverted-probe confirmation in the bug doc:
+`doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
+(2026-07-10 "setup-phase probe session" entry). All changes left uncommitted.

@@ -50,13 +50,23 @@ fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeM
     # Build value map: local ID → LLVMValueRef
     var value_map: {i64: i64} = {}
 
-    # Map function parameters to locals
+    # Map function parameters to locals. Guard against index mismatches
+    # between the MIR signature and the actual LLVM function's param count --
+    # llvm_get_param(fn, index) with an out-of-range index is a classic OOB
+    # segfault, so validate against both before calling it.
+    val n_params = func.signature.params.len()
+    val n_llvm_params = llvm_count_params(llvm_fn)
+    if n_llvm_params != n_params:
+        eprint("[llvm-lib] ERROR: LLVM param count mismatch for " + func.name + " sig_n_params=" + n_params.to_text() + " llvm_n_params=" + n_llvm_params.to_text())
     var param_idx = 0
     for local in func.locals:
         match local.kind:
             case Arg(index):
-                val param_val = llvm_get_param(llvm_fn, index)
-                value_map[local.id.id] = param_val
+                if index < 0 or index >= n_params or index >= n_llvm_params:
+                    eprint("[llvm-lib] ERROR: Arg local id=" + local.id.id.to_text() + " index=" + index.to_text() + " out of range for " + func.name + " (n_params=" + n_params.to_text() + " n_llvm_params=" + n_llvm_params.to_text() + ") — skipping llvm_get_param to avoid OOB")
+                else:
+                    val param_val = llvm_get_param(llvm_fn, index)
+                    value_map[local.id.id] = param_val
                 param_idx = param_idx + 1
             case _: ()
 
