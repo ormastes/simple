@@ -25,12 +25,12 @@ executes exact, vectorized x86_64, AArch64, and RISC-V row probes. The broader
 Engine2D matrix in `cpu_simd_engine2d_arch_matrix_2026-07-10.md` still has zero
 passing Simple lanes and is not superseded by that focused result. A prototype
 that routed opaque square browser backgrounds through the existing native span
-ABI was rejected after three capped verification cycles: its AOT fixture did
-not prove the expected inline-style color and produced zero native hits. The
-multiple-style-block array-concat null call is resolved; the remaining quality
-blocker is tracked in
-`doc/08_tracking/bug/simple_web_layout_native_inline_style_color_missing_2026-07-10.md`.
-Full-size performance and RSS evidence therefore remains open.
+ABI was rejected after three capped verification cycles because its AOT fixture
+did not prove the expected inline-style color and produced zero native hits.
+Both root runtime blockers are now resolved: array concatenation is linked and
+dynamic array indices are decoded from tagged values. The strengthened scalar
+AOT fixture proves exact inline-style geometry and color. CPU-SIMD routing,
+full-size performance, and RSS evidence remain open.
 
 ## CPU Library Comparison
 

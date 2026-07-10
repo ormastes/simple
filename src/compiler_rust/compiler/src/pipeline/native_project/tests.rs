@@ -901,6 +901,17 @@ fn run_required_abi_probe(repo_root: &Path, temp_root: &Path, runtime: &Path, la
 
 int main(void) {
     __simple_runtime_init();
+    SplArray* values = rt_array_new(2);
+    if (!values) return 10;
+    if (!rt_array_push(values, rt_value_int(10))) return 11;
+    if (!rt_array_push(values, rt_value_int(20))) return 12;
+    if (rt_index_get((int64_t)values, rt_value_int(1)) != rt_value_int(20)) return 13;
+    if (rt_index_get((int64_t)values, rt_value_int(-1)) != rt_value_int(20)) return 14;
+    if (!rt_index_set((int64_t)values, rt_value_int(-1), rt_value_int(21))) return 15;
+    if (rt_index_get((int64_t)values, rt_value_int(1)) != rt_value_int(21)) return 16;
+    if (rt_index_get((int64_t)values, rt_value_int(-3)) != rt_value_nil()) return 17;
+    if (rt_index_set((int64_t)values, rt_value_int(2), rt_value_int(99))) return 18;
+    if (rt_index_get((int64_t)values, rt_value_nil()) != rt_value_nil()) return 19;
     int64_t out = rt_string_new((const uint8_t*)"out:", 4);
     int64_t err = rt_string_new((const uint8_t*)"err", 3);
     rt_stdout_write(out);

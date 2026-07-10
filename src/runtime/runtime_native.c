@@ -2058,7 +2058,10 @@ SplValue* rt_array_pop(SplArray* a) {
 
 int64_t rt_index_get(int64_t collection, int64_t idx) {
     RtCoreArray* a = rt_core_as_array(collection);
-    if (a) return rt_array_get((SplArray*)a, idx);
+    if (a) {
+        if (((uint64_t)idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return 3;
+        return rt_array_get((SplArray*)a, idx >> 3);
+    }
     RtCoreDict* d = rt_core_as_dict(collection);
     if (d) return rt_core_dict_lookup(d, idx);
     return 3;
@@ -2067,7 +2070,11 @@ int64_t rt_index_get(int64_t collection, int64_t idx) {
 int8_t rt_index_set(int64_t collection, int64_t idx, int64_t val) {
     RtCoreArray* a = rt_core_as_array(collection);
     if (a) {
-        rt_array_set((SplArray*)a, idx, val);
+        if (((uint64_t)idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return 0;
+        int64_t actual_idx = idx >> 3;
+        if (actual_idx < 0) actual_idx += a->len;
+        if (actual_idx < 0 || actual_idx >= a->len) return 0;
+        rt_array_set((SplArray*)a, actual_idx, val);
         return 1;
     }
     RtCoreDict* d = rt_core_as_dict(collection);
