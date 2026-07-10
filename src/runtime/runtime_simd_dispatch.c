@@ -687,8 +687,8 @@ static SplArray* engine2d_new_pixel_array(int64_t n) {
 }
 
 SplArray* rt_engine2d_simd_fill_row_u32(int64_t count, int64_t color) {
-    int64_t n = engine2d_numeric_arg(count);
-    int64_t color_word = engine2d_numeric_arg(color) & 0xffffffffLL;
+    int64_t n = count;
+    int64_t color_word = color & 0xffffffffLL;
     SplArray* a = engine2d_new_pixel_array(n);
     if (!a) return NULL;
     if (n <= 0) return a;

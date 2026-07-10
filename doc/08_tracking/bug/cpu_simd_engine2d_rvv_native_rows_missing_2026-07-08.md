@@ -2,7 +2,7 @@
 
 ## Status
 
-open
+closed
 
 ## Evidence
 
@@ -18,6 +18,10 @@ open
 - The public Simple row facade now builds and executes under QEMU for hosted
   AArch64 and RV64GC Linux. Both probes validate row length and exact
   `0xFF010203` pixel data and exit zero.
+- With `SIMPLE_RUNTIME_RISCV64_VECTOR=1`, the tracked RV64 binary compiles
+  `runtime_simd_dispatch.c` for `rv64gcv`, runs under vector-enabled QEMU, and
+  exits zero only after exact fill/copy checks and at least two native SIMD
+  hits. Disassembly contains `vsetvli`, `vmv.v.x`, `vle64.v`, and `vse64.v`.
 - The self-hosted hosted-native runtime compiler omitted
   `runtime_simd_dispatch.c`; it now includes that owner so generated binaries
   can link the public Engine2D SIMD row externs.
@@ -34,21 +38,21 @@ open
 
 ## Impact
 
-The compiler now proves the public Simple path through executable x86_64,
-AArch64, and RV64GC binaries. The remaining gap is narrower: the hosted RV64GC
-runtime does not prove an RVV vector kernel was selected and executed.
+The compiler proves the public Simple path through executable x86_64,
+AArch64, and RV64 binaries, including positive RVV hit and instruction evidence
+for the opt-in vector build.
 
-## Required Fix
+## Verification
 
-Build a riscv64 target Simple binary with RVV enabled, then run:
+The retained probe is `test/fixtures/compiler/llvm_simd_row_native_probe.spl`.
+Build with RVV enabled, then run on a vector-capable target:
 
 ```sh
-CPU_SIMD_ARCH_MATRIX_RISCV64_SIMPLE_BIN=<riscv64-simple> \
-CPU_SIMD_ARCH_MATRIX_STRICT=1 \
-sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs
+SIMPLE_RUNTIME_RISCV64_VECTOR=1 bin/simple native-build \
+  --source test/fixtures/compiler --source src/lib --entry-closure \
+  --entry test/fixtures/compiler/llvm_simd_row_native_probe.spl \
+  --backend llvm --target riscv64-unknown-linux-gnu \
+  --output build/llvm_simd_row_native_probe_rvv
+qemu-riscv64 -cpu rv64,v=true,vlen=128,elen=64 \
+  -L /usr/riscv64-linux-gnu build/llvm_simd_row_native_probe_rvv
 ```
-
-Completion requires `cpu_simd_engine2d_arch_matrix_riscv64_status=pass`,
-`cpu_simd_engine2d_arch_matrix_riscv64_rvv_runtime_compile_status=pass`, and
-the nested Engine2D evidence to report native SIMD execution plus bit-exact
-output.

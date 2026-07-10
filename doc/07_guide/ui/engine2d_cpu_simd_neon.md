@@ -89,10 +89,12 @@ provides.
   `(sa,s,d)` blend combos). This is the only gate that exercises the **C** path
   directly; the others run in the interpreter (Rust seed shim).
 - `scripts/check/check-cpu-simd-engine2d-evidence.shs` — interpreter evidence
-  (x86/NEON executed + bit-exact on capable hosts; RVV remains unavailable until
-  a native RVV row kernel exists). Its skip-guard checks the
+  (x86/NEON executed + bit-exact on capable hosts). Its skip-guard checks the
   `engine2d_simd_fill_row_u32_api` facade so a binary without the new externs
   skips cleanly rather than crashing.
+- `scripts/check/check-llvm-simd-row-native-arch.shs` — strict hosted LLVM
+  x86_64, AArch64, and RVV binary gate. RVV is an explicit opt-in through
+  `SIMPLE_RUNTIME_RISCV64_VECTOR=1` and must run only on an RVV-capable CPU.
 
 ## Deployment
 
@@ -104,13 +106,10 @@ verification.
 
 ### Open follow-ups
 
-- **Native end-to-end unverified.** `runtime_simd_dispatch.c` is wired into the
-  core-c runtime archive (`tools.rs`) and `.spl` calls the C-backed externs, but
-  this was only verified in interpreter mode + by the standalone C gate; a native
-  engine2d build that actually links and runs the C kernels has not been run here
-  (that build path is separately problematic). Confirm the native lane links the
-  `engine2d_simd_*_row_u32_api` facades from the C archive before claiming
-  production parity.
+- **Imported array syntax.** Hosted LLVM exact-output probes currently use
+  `rt_array_len` / `rt_array_get` because imported `[u32]` `.len()` and indexing
+  still lower incorrectly. See
+  `doc/08_tracking/bug/llvm_imported_array_len_index_runtime_handle_2026-07-10.md`.
 - **Dead legacy handlers.** The old `rt_simd_fill_row_u32` / `rt_simd_copy_row_u32`
   interpreter handlers (engine2d_simd_ops Rust backing) are no longer referenced
   by `.spl`; delete-unused cleanup is deferred to avoid an extra seed rebuild.

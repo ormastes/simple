@@ -64,6 +64,6 @@
   user-mode exit `0`.
 - All three binaries call the public `engine2d_simd_fill_row_u32` Simple wrapper
   and validate row length plus exact `0xFF010203` pixel data.
-- RVV-specific vector-hit evidence remains open; the hosted RV64 binary target
-  is `rv64gc`, while the separate runtime-owner C harness proves `rv64gcv`
-  compilation and execution.
+- RVV opt-in hosted binary: vector-enabled QEMU exit `0` after exact fill/copy
+  checks and at least two native SIMD hits. Disassembly contains `vsetvli`,
+  `vmv.v.x`, `vle64.v`, and `vse64.v`.
