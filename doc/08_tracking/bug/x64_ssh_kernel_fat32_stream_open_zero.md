@@ -97,11 +97,38 @@ bugs, each masking the next:
    detects the leading `/` from the RAW payload byte and uses the LITERAL path.
 2. **Deep-stack ring-3 spawn faults**: invoking the spawn from deep inside the
    sshd session dispatch (run→loop→packet→channel_request→exec + crypto) faults in
-   ring-0 (cr2=0) before the spawn's first line — kernel-stack overflow (the spawn's
-   own build+enter call tree exceeds the stack from that depth). FIX: DEFER — the
-   dispatch sets `SshSession.pending_ring3_exec` and the sshd accept loop performs
-   the spawn from a SHALLOW frame (like the prod boot entry). RSP delta deep→shallow
-   was ~13 KB, consistent with overflow.
+   ring-0 (cr2=0) before the spawn's first line. FIX (applied): DEFER — the dispatch
+   sets `SshSession.pending_ring3_exec` and the sshd accept loop performs the spawn
+   from a SHALLOW frame (like the prod boot entry). RSP delta deep→shallow was ~13 KB.
+
+   CORRECTED ROOT CAUSE (2026-07-10 diagnosis — NOT kernel-stack overflow): the
+   "kernel-stack overflow" label is a MISDIAGNOSIS. Evidence:
+   - sshd runs INLINE on the boot stack (`ssh_ring3_entry.spl` `daemon.start()`; no
+     context-switch / task stack in `src/os/apps/sshd/`). That boot stack is **8 MB**
+     (`examples/09_embedded/simple_os/arch/x86_64/linker.ld:88` `. = . + 8M`; RSP set
+     to `_stack_top` in long mode at `crt0.s:289`; low 4 GiB identity-mapped by crt0
+     PDPT[0..3], so the whole stack is mapped RW). A ~13 KB delta is 0.16 % of 8 MB —
+     it CANNOT overflow, and an overflow would fault silently on a WRITE deep in
+     mapped RAM, not immediately.
+   - The recorded fault is **errcode=0 (a READ) at cr2=0** = a supervisor NULL-pointer
+     deref, i.e. reading a dispatch/handle pointer out of a null object — the exact
+     signature of the `@cfg` mis-dispatch, not a push/spill overflow (which carries
+     errcode bit1=1 and cr2=stack-address).
+   - The ORIGINAL deep path called the **wrapper** `fs_exec_spawn_ring3` (removed
+     line 93 of commit `d2d67b5960b`), whose `_fs_exec_spawn_ring3_active` `@cfg`
+     variant selection mis-picks a non-x86_64 variant on `x86_64-unknown-none` and
+     routes to the VFS reader / null stub (`[vfs-read] len=0`) that never performs the
+     ring-3 handoff. The spawn path itself has NO frame bloat (buffers are
+     heap-allocated via `rt_array_new_with_cap`; `UserProcessImage` built on heap).
+   - The defer "fix" worked only because the shallow accept-loop path was ALSO
+     rewritten to call `x86_64_fs_exec_spawn` DIRECTLY (bug #4 remedy), bypassing the
+     mis-dispatching wrapper — not because depth was reduced.
+
+   CLASSIFICATION: **NOT a kernel-stack limit and NOT a codegen frame-bloat/stack-probe
+   bug.** Bug #2 and bug #4 are the SAME compiler bug (`@cfg` multi-variant dispatch
+   mis-selection in the seed). The correct fix is bug #4's (`@cfg` target-arch predicate
+   selection in `src/compiler_rust/**`); once that lands, the deep path can call the
+   wrapper (or the direct `x86_64_fs_exec_spawn`) with the defer REMOVED as redundant.
 3. **Exec-time FAT read returns 0**: device/FS state is clobbered after
    `rt_net_init` + vmm + SSH activity, so `simpleos_fat32_stream_open` at exec time
    returns 0 (the boot read gets 13888). FIX: the boot entry PRELOADS `/FSEXEC.ELF`
