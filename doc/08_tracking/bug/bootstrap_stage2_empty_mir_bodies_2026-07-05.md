@@ -796,3 +796,47 @@ Stage 4 is not deployable. Its link accepted 822 unresolved-symbol stubs, and
 the standard `-c 'print(1+1)'` smoke aborts with `field access on nil receiver`
 and exit 132. The next owner is unresolved-stub rejection/closure completeness;
 do not restore seed fallback or deploy this artifact.
+
+## 2026-07-10 macOS native_all duplicate-symbol follow-up
+
+Fresh full-bootstrap deploy on macOS arm64 still failed Stage 2 before deploy.
+The first blocker was a Darwin link failure from compiling hosted C runtime
+objects and then appending `libsimple_native_all.a`, which already contains the
+same hosted runtime symbols. The duplicate set included `rt_bytes_u64_le_at`,
+`rt_eprintln_value`, `rt_atomic_int_fetch_and`, `rt_raw_u64_to_string`,
+`rt_tuple_new`, and related `rt_*` definitions.
+
+`src/compiler/70.backend/backend/llvm_native_link.spl` now detects
+`SIMPLE_BOOTSTRAP=1` plus `SIMPLE_RUNTIME_PATH/libsimple_native_all.a` before
+runtime-object compilation. In that case it skips `compile_runtime_objects()`
+and links the native_all archive as the runtime owner. Focused Stage 2 retry:
+
+```text
+env PATH="/opt/homebrew/opt/llvm@18/bin:$PATH" \
+  SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
+  SIMPLE_BOOTSTRAP=1 \
+  src/compiler_rust/target/bootstrap/simple native-build \
+  --backend cranelift --source src/compiler --source src/app --source src/lib \
+  --entry-closure --threads 5 --cache-dir build/bootstrap/native_cache \
+  --mode dynload --entry src/app/cli/bootstrap_main.spl \
+  --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+  -o build/bootstrap/stage2/aarch64-apple-darwin/simple
+```
+
+Evidence log:
+`build/bootstrap/logs/aarch64-apple-darwin/stage2-native-build.skip-runtime-current.log`.
+The duplicate-symbol failure is gone. The new Stage 2 blocker is unresolved
+runtime entry symbols from the archive path:
+
+```text
+Undefined symbols for architecture arm64:
+  "___simple_runtime_init"
+  "___simple_runtime_shutdown"
+  "_rt_strlen"
+  "_spl_init_args"
+```
+
+Next owner: provide or route the entry shim/runtime ABI symbols when bootstrap
+links against `libsimple_native_all.a` without the separately compiled hosted C
+runtime objects. Do not restart the full deploy loop until this focused Stage 2
+link passes.

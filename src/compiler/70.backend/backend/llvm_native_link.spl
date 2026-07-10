@@ -150,17 +150,28 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if is_simpleos_riscv32_link(user_objects, output):
         return link_simpleos_riscv32(user_objects, output, verbose)
 
-    # Step 1: Compile C runtime to object files
+    var bootstrap_native_all = ""
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        val runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH") ?? ""
+        val native_all = runtime_path + "/libsimple_native_all.a"
+        if runtime_path != "" and rt_file_exists(native_all):
+            bootstrap_native_all = native_all
+
+    # Step 1: Compile C runtime to object files unless bootstrap links the
+    # Rust/native_all archive, which already owns the hosted runtime symbols.
     if trace:
         print "[LLVM-LINK] step 1: compile_runtime_objects..."
-    val rt_result = compile_runtime_objects(verbose, options.opt_level)
-    if trace:
-        print "[LLVM-LINK] compile_runtime_objects returned"
-    val runtime_objects = match rt_result:
-        case Ok(paths):
-            paths
-        case Err(err):
-            return Err("Runtime compilation failed: {err}")
+    val runtime_objects = if bootstrap_native_all != "":
+        []
+    else:
+        val rt_result = compile_runtime_objects(verbose, options.opt_level)
+        if trace:
+            print "[LLVM-LINK] compile_runtime_objects returned"
+        match rt_result:
+            case Ok(paths):
+                paths
+            case Err(err):
+                return Err("Runtime compilation failed: {err}")
     if trace:
         print "[LLVM-LINK] got {runtime_objects.len()} runtime objects"
 
@@ -185,12 +196,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         all_objects = all_objects.push(obj)
     for obj in runtime_objects:
         all_objects = all_objects.push(obj)
-    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-        val runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH") ?? ""
-        val native_all = runtime_path + "/libsimple_native_all.a"
-        if runtime_path != "":
-            if rt_file_exists(native_all):
-                all_objects = all_objects.push(native_all)
+    if bootstrap_native_all != "":
+        all_objects = all_objects.push(bootstrap_native_all)
     all_objects = all_objects.push(entry_obj_path)
     if trace:
         print "[LLVM-LINK] total objects: {all_objects.len()}"
