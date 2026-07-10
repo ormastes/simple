@@ -919,3 +919,15 @@ pub extern "C" fn rt_test_db_cleanup_stale_runs(db_path: RuntimeValue) -> i64 {
         Err(_) => -1,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_output_captures_stdout() {
+        let command = rt_string_new(b"printf runtime-output".as_ptr(), 21);
+        let output = rt_exec_output(command);
+        assert_eq!(extract_string(output).as_deref(), Some("runtime-output"));
+    }
+}
