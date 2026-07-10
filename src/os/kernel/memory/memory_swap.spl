@@ -5,7 +5,6 @@ struct MemorySwapSlot:
     slot_id: u64
     allocation_id: u64
     page_index: u64
-    bytes: [u8]
     checksum: u64
     occupied: bool
 
@@ -29,6 +28,7 @@ class MemorySwapStore:
     enabled: bool
     capacity_slots: u64
     slots: [MemorySwapSlot]
+    payloads: [[u8]]
     writes: u64
     reads: u64
     releases: u64
@@ -67,6 +67,7 @@ fn memory_swap_store_new(enabled: bool, capacity_slots: u64) -> MemorySwapStore:
         enabled: enabled,
         capacity_slots: capacity_slots,
         slots: [],
+        payloads: [],
         writes: 0,
         reads: 0,
         releases: 0,
@@ -102,14 +103,15 @@ impl MemorySwapStore:
             slot_id: slot_id,
             allocation_id: allocation_id,
             page_index: page_index,
-            bytes: copied,
             checksum: memory_swap_checksum(copied),
             occupied: true
         )
         if reusable_index >= 0:
             me.slots[reusable_index] = slot
+            me.payloads[reusable_index] = copied
         else:
             me.slots.push(slot)
+            me.payloads.push(copied)
         me.writes = me.writes + 1
         MemorySwapResult(
             ok: true,
@@ -135,17 +137,19 @@ impl MemorySwapStore:
         if slot.allocation_id != allocation_id or slot.page_index != page_index:
             me.errors = me.errors + 1
             return _memory_swap_failure("stale-mapping")
-        if memory_swap_checksum(slot.bytes) != slot.checksum:
+        val payload: [u8] = me.payloads[index]
+        if memory_swap_checksum(payload) != slot.checksum:
             me.errors = me.errors + 1
             return _memory_swap_failure("swap-checksum")
         me.reads = me.reads + 1
+        val restored_bytes: [u8] = _memory_swap_bytes_copy(payload)
         MemorySwapResult(
             ok: true,
             reason: "ok",
             slot_id: slot.slot_id,
             allocation_id: slot.allocation_id,
             page_index: slot.page_index,
-            bytes: _memory_swap_bytes_copy(slot.bytes)
+            bytes: restored_bytes
         )
 
     me release(slot_id: u64, allocation_id: u64) -> MemorySwapResult:
@@ -164,10 +168,10 @@ impl MemorySwapStore:
             slot_id: slot.slot_id,
             allocation_id: 0,
             page_index: 0,
-            bytes: [],
             checksum: 0,
             occupied: false
         )
+        me.payloads[index] = []
         me.releases = me.releases + 1
         MemorySwapResult(
             ok: true,
@@ -189,7 +193,6 @@ impl MemorySwapStore:
             slot_id: slot.slot_id,
             allocation_id: slot.allocation_id,
             page_index: slot.page_index,
-            bytes: slot.bytes,
             checksum: slot.checksum ^ 1,
             occupied: true
         )

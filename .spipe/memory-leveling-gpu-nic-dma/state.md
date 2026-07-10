@@ -46,7 +46,7 @@ Provide coordinated but separately configured Simple language/runtime and Simple
 - rejected_shortcuts: Device-specific global allocators, fixture-only swap behavior, raw `rt_*` imports in feature code, unsafe relocation of pinned/device-owned memory, and host-only QEMU substitutes.
 
 ## Phase
-verify-blocked-qemu-native-build
+verify-blocked-pure-simple-cli-build
 
 ## Log
 - dev: Created state file with 13 acceptance criteria (type: feature).
@@ -58,4 +58,5 @@ verify-blocked-qemu-native-build
 - implementation-review: Higher-model review found global-page-table rollback and munmap ownership hazards; fixes now use explicit process roots, release physical frames, remove failed multi-page registrations, and halt on unrecoverable fault-registration rollback.
 - evidence: Native pressure/swap/process isolation passes 3/3, including two real sparse address spaces mapping the same virtual address to different frames; GPU/NIC/DMA system evidence passes 8/8; NVMe swap-tail geometry passes 1/1.
 - sync: Latest focused evidence commit is `5907b31d5343`; JJ `main` and `main@origin` matched after fetch/push.
-- verify-blocker: `scripts/check/check-simpleos-memory-leveling-qemu.shs` and a no-bootstrap staged native build both time out in compiler source/lint loading before producing an ELF or serial log. AC-10 and AC-13 remain incomplete; no QEMU or hardware claim is accepted.
+- qemu-evidence: A current bootstrap compiler builds the strict freestanding kernel without fallback stubs and QEMU emits all required swap, GPU, NIC/DMA, capability, and `TEST PASSED` markers. The checker uses a dedicated linker contract, canonical CRT0, and the x86_64 bare-metal runtime capsule.
+- verify-blocker: Building a current pure-Simple CLI from the same source remains over the 900-second cap and emits no artifact. Canonical `bin/simple` verification and AC-13 remain incomplete; the Rust-built compiler is retained only as bootstrap evidence, not the normal tool.

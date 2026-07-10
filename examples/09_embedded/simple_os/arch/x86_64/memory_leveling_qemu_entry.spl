@@ -7,12 +7,22 @@ use std.memory_leveling.{simple_memory_iso_cpu_cold, simple_memory_placement_con
 use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_default}
 use os.kernel.memory.memory_leveling_device_adapters.{memory_leveling_device_migration_unavailable}
 use os.kernel.memory.memory_leveling_capabilities.{memory_leveling_qemu_capabilities}
-use os.kernel.memory.memory_swap.{memory_swap_store_new}
+use os.kernel.memory.memory_swap.{memory_swap_checksum, memory_swap_store_new}
 
 fn _memory_leveling_qemu_fail(reason: text):
     serial_println("[memory-leveling] FAIL reason=" + reason)
     serial_println("TEST FAILED")
     rt_port_outb(0xf4, 1)
+
+fn _memory_leveling_qemu_bytes_equal(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i: i64 = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
 
 fn _start():
     serial_println("[memory-leveling] qemu-start")
@@ -45,7 +55,14 @@ fn _start():
         _memory_leveling_qemu_fail("restore-prepare")
         return
     val restored = store.read(written.slot_id, allocation.allocation_id, 0)
-    if not restored.ok or restored.bytes != expected:
+    if not restored.ok:
+        _memory_leveling_qemu_fail("swap-read")
+        return
+    if restored.bytes.len() != expected.len():
+        serial_println("[memory-leveling] swap-length restored=" + restored.bytes.len().to_text() + " expected=" + expected.len().to_text())
+        _memory_leveling_qemu_fail("swap-length")
+        return
+    if not _memory_leveling_qemu_bytes_equal(restored.bytes, expected) or memory_swap_checksum(restored.bytes) != memory_swap_checksum(expected):
         _memory_leveling_qemu_fail("swap-bytes")
         return
     if not manager.commit_restore(allocation.allocation_id, 41).ok or not store.release(written.slot_id, allocation.allocation_id).ok:
@@ -53,10 +70,14 @@ fn _start():
         return
     serial_println("[memory-leveling] swap-roundtrip=pass")
 
-    if not manager.register_gpu_queue(501, 42, 4096, 0x200000).ok:
+    var gpu_config = simpleos_memory_leveling_config_default()
+    gpu_config.gpu_capacity_bytes = 65536
+    gpu_config.gpu_reserved_bytes = 0
+    val gpu_manager = memory_leveling_manager_new(gpu_config)
+    if not gpu_manager.register_gpu_queue(501, 42, 4096, 0x200000).ok:
         _memory_leveling_qemu_fail("gpu-register")
         return
-    if not manager.device_submit(501, 42).ok or not manager.device_complete(501, 42).ok or not manager.device_unmap(501, 42).ok:
+    if not gpu_manager.device_submit(501, 42).ok or not gpu_manager.device_complete(501, 42).ok or not gpu_manager.device_unmap(501, 42).ok:
         _memory_leveling_qemu_fail("gpu-lifecycle")
         return
     if memory_leveling_device_migration_unavailable(501).reason != "migration-unavailable":

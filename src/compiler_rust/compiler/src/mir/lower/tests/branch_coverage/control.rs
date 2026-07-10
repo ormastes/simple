@@ -151,6 +151,31 @@ fn unused_u64_array_push_result_is_discarded() {
 }
 
 #[test]
+fn struct_array_parameter_push_uses_array_runtime() {
+    let mir = compile_to_mir(
+        "struct Item:\n    value: i64\n\nfn append(items: [Item], item: Item) -> [Item]:\n    items.push(item)\n    return items\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_push"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".push") || func_name == "push")
+    }));
+}
+
+#[test]
+fn custom_class_push_remains_static_dispatch() {
+    let mir = compile_to_mir(
+        "class Sink:\n    fn push(value: i64):\n        pass\n\nfn send(sink: Sink):\n    sink.push(1)\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with("Sink.push"))
+    }));
+}
+
+#[test]
 fn index_set_float_boxing() {
     let mir = compile_to_mir("fn test():\n    var arr = [0.0, 0.0]\n    arr[0] = 3.14\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxFloat { .. })));

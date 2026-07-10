@@ -99,9 +99,13 @@ The process isolation scenario creates two real sparse page-table roots, maps
 the same virtual address to distinct frames, swaps exactly one mapping, proves
 the other PTE remains present, and restores the swapped mapping.
 
-Current QEMU status is blocked before boot: the staged native build times out
-before emitting `memory_leveling_qemu.elf`, so no serial transcript exists.
-Hosted/native specs do not substitute for AC-10 QEMU evidence.
+The strict QEMU lane now builds and boots with a current bootstrap compiler.
+Serial evidence proves configuration separation, swap roundtrip, GPU lifecycle,
+NIC/DMA lifecycle, truthful unavailable physical migration, and `TEST PASSED`.
+The remaining release blocker is producing a current pure-Simple CLI: the full
+CLI native build exceeded 900 seconds without an artifact, so canonical
+`bin/simple` verification is still pending. The Rust-built compiler remains a
+bootstrap-only verifier and is not accepted as the normal tool.
 
 Do not claim GPUDirect, RDMA hardware paging, CXL, or live GPU/NIC migration
 from model or QEMU-only evidence. Real device movement needs driver-owned
