@@ -82,6 +82,72 @@ pub(crate) fn file_arch_cfg_gate(source: &str, target_arch: TargetArch) -> Optio
     None
 }
 
+/// Evaluate a single `@cfg(...)` attribute's architecture verdict for
+/// `target_arch`. Mirrors [`file_arch_cfg_gate`] but reads the parsed
+/// `Attribute` args instead of raw source text. Returns:
+///   * `Some(true)`  -- this `@cfg` names an arch that matches the target,
+///   * `Some(false)` -- this `@cfg` names an arch that does NOT match,
+///   * `None`        -- not a bare arch alias (`test`, `baremetal`,
+///                      `("target_arch", "arm")`, empty `@cfg()`, etc.) --
+///                      leave ungated.
+fn cfg_attr_arch_verdict(attr: &simple_parser::ast::Attribute, target_arch: TargetArch) -> Option<bool> {
+    use simple_parser::ast::Expr;
+    let args = attr.args.as_ref()?;
+    // Only a single bare condition is an arch gate; `("key", "value")` string
+    // pairs and an empty `@cfg()` are not.
+    if args.len() != 1 {
+        return None;
+    }
+    match &args[0] {
+        // `@cfg(not(<arch>))`
+        Expr::Call { callee, args: call_args } => {
+            if let Expr::Identifier(fname) = callee.as_ref() {
+                if fname == "not" && call_args.len() == 1 {
+                    if let Expr::Identifier(name) = &call_args[0].value {
+                        return cfg_name_to_arch(name).map(|arch| arch != target_arch);
+                    }
+                }
+            }
+            None
+        }
+        // `@cfg(<arch>)`
+        Expr::Identifier(name) => cfg_name_to_arch(name).map(|arch| arch == target_arch),
+        _ => None,
+    }
+}
+
+/// Drop top-level `@cfg(<arch>)`-gated function definitions whose architecture
+/// does not match `target_arch`.
+///
+/// Same-named per-arch `@cfg` variants (e.g. six `fn foo` bodies, one per
+/// `@cfg(x86_64)`/`@cfg(riscv64)`/...) otherwise all survive into one
+/// compilation unit, where `declare_functions` (codegen/shared.rs) keeps
+/// whichever is declared FIRST and silently skips the rest. That first-wins
+/// choice is source-order, not target-aware, so every target whose variant is
+/// not written first is mis-dispatched to a wrong-arch body (bug
+/// `x64_freestanding_cfg_multivariant_misdispatch`). Removing the inactive
+/// variants here leaves exactly the target's own body as the sole definition.
+///
+/// Only recognized arch aliases (and `not(<arch>)`) gate; `test`, `baremetal`,
+/// `("key", "value")` cfgs, etc. are left untouched, matching the pure-Simple
+/// preprocessor (`parser_preprocessor.spl` `_pp_cfg_condition_matches`). Only
+/// functions are filtered -- a wrong-arch `@cfg` `use`/`extern`/`const` is
+/// harmless (an unused declaration) and dropping those risks perturbing import
+/// resolution.
+pub(crate) fn strip_inactive_cfg_arch_fns(module: &mut simple_parser::ast::Module, target_arch: TargetArch) {
+    use simple_parser::ast::Node;
+    module.items.retain(|item| {
+        if let Node::Function(f) = item {
+            for attr in &f.attributes {
+                if attr.name == "cfg" && cfg_attr_arch_verdict(attr, target_arch) == Some(false) {
+                    return false;
+                }
+            }
+        }
+        true
+    });
+}
+
 impl NativeProjectBuilder {
     /// Discover all .spl files in source directories.
     /// Returns ALL paths including symlink aliases (needed for import map indexing).

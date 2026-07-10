@@ -2707,6 +2707,77 @@ fn test_file_arch_cfg_gate_recognizes_arch_aliases_and_negation() {
     );
 }
 
+/// Regression for `x64_freestanding_cfg_multivariant_misdispatch`: six
+/// same-named `@cfg(<arch>)` function variants in one compilation unit must
+/// collapse to exactly the target's own variant. Before the fix, all six
+/// survived and `declare_functions` (codegen/shared.rs) kept whichever was
+/// declared FIRST -- source-order, not target-aware -- so a target whose
+/// variant was not written first was mis-dispatched. `strip_inactive_cfg_arch_fns`
+/// drops the wrong-arch variants so only the target's body remains, and the
+/// non-`@cfg` wrapper is always kept.
+#[test]
+fn test_strip_inactive_cfg_arch_fns_keeps_only_target_variant() {
+    use super::discovery::strip_inactive_cfg_arch_fns;
+    use simple_common::target::TargetArch;
+    use simple_parser::ast::Node;
+
+    // riscv64 is written FIRST, x86_64 LAST -- so a source-order pick would
+    // choose the wrong variant for an x86_64 target.
+    let src = "\
+@cfg(riscv64)\nfn h(): pass\n\
+@cfg(riscv32)\nfn h(): pass\n\
+@cfg(arm64)\nfn h(): pass\n\
+@cfg(arm32)\nfn h(): pass\n\
+@cfg(x86)\nfn h(): pass\n\
+@cfg(x86_64)\nfn h(): pass\n\
+fn wrapper(): h()\n";
+
+    let surviving_cfg_arch = |arch: TargetArch| -> String {
+        let mut parser = simple_parser::Parser::new(src);
+        let mut module = parser.parse().expect("parse");
+        strip_inactive_cfg_arch_fns(&mut module, arch);
+        let hs: Vec<&simple_parser::ast::FunctionDef> = module
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Node::Function(f) if f.name == "h" => Some(f),
+                _ => None,
+            })
+            .collect();
+        // Exactly one `h` variant survives for the target.
+        assert_eq!(hs.len(), 1, "expected one surviving `h` for {arch:?}");
+        // The wrapper (no `@cfg`) is always kept.
+        assert!(
+            module
+                .items
+                .iter()
+                .any(|it| matches!(it, Node::Function(f) if f.name == "wrapper")),
+            "wrapper must survive for {arch:?}"
+        );
+        let cfg_attr = hs[0]
+            .attributes
+            .iter()
+            .find(|a| a.name == "cfg")
+            .and_then(|a| a.args.as_ref())
+            .and_then(|v| v.first())
+            .expect("surviving variant keeps its @cfg");
+        format!("{cfg_attr:?}")
+    };
+
+    assert!(
+        surviving_cfg_arch(TargetArch::X86_64).contains("x86_64"),
+        "x86_64 target must keep the x86_64 variant"
+    );
+    assert!(
+        surviving_cfg_arch(TargetArch::Riscv64).contains("riscv64"),
+        "riscv64 target must keep the riscv64 variant"
+    );
+    assert!(
+        surviving_cfg_arch(TargetArch::Aarch64).contains("arm64"),
+        "aarch64 target must keep the arm64 variant"
+    );
+}
+
 /// End-to-end fixture for issue #57: a two-arch source tree with one file
 /// gated `@cfg(x86_64)` and one gated `@cfg(riscv64)`, discovered via
 /// `discover_files_full_scan` (the full-scan path, not entry-closure).
