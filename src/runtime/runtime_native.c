@@ -663,6 +663,10 @@ int64_t rt_value_int(int64_t value) {
     return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
 }
 
+int64_t rt_value_as_int(int64_t value) {
+    return value >> 3;
+}
+
 int64_t rt_value_float(int64_t raw_bits) {
     return (int64_t)(((uint64_t)raw_bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
 }

@@ -250,6 +250,7 @@ void     rt_stderr_flush(void);            /* flushes stderr */
 void     __simple_runtime_init(void);
 void     __simple_runtime_shutdown(void);
 int64_t  rt_value_int(int64_t value);
+int64_t  rt_value_as_int(int64_t value);
 int64_t  rt_value_float(int64_t raw_bits);
 int64_t  rt_value_bool(int64_t value);
 int64_t  rt_value_nil(void);

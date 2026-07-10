@@ -178,6 +178,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_entropy_hardware_ready",
     "rt_sleep_ms",
     "rt_value_int",
+    "rt_value_as_int",
     "rt_value_float",
     "rt_value_bool",
     "rt_value_nil",

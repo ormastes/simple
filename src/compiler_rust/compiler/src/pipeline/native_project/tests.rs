@@ -901,6 +901,7 @@ fn run_required_abi_probe(repo_root: &Path, temp_root: &Path, runtime: &Path, la
 
 int main(void) {
     __simple_runtime_init();
+    if (rt_value_as_int(rt_value_int(-7)) != -7) return 9;
     SplArray* values = rt_array_new(2);
     if (!values) return 10;
     if (!rt_array_push(values, rt_value_int(10))) return 11;

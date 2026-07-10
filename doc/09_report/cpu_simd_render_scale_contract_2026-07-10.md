@@ -29,8 +29,11 @@ ABI was rejected after three capped verification cycles because its AOT fixture
 did not prove the expected inline-style color and produced zero native hits.
 Both root runtime blockers are now resolved: array concatenation is linked and
 dynamic array indices are decoded from tagged values. The strengthened scalar
-AOT fixture proves exact inline-style geometry and color. CPU-SIMD routing,
-full-size performance, and RSS evidence remain open.
+AOT fixture proves exact inline-style geometry and color. Native exporter
+argument parsing still double-unboxes string integers (`3840x2160` becomes
+`480x270` after a dynload bootstrap that skipped the full CLI relink); see
+`doc/08_tracking/bug/self_hosted_cranelift_string_to_int_double_unbox_2026-07-10.md`.
+CPU-SIMD routing, full-size performance, and RSS evidence remain open.
 
 ## CPU Library Comparison
 
