@@ -1671,6 +1671,76 @@ int main(int argc, char** argv) {
 
 #[cfg(not(target_os = "windows"))]
 #[test]
+fn test_bootstrap_stub_mode_defers_libc_process_symbols_to_linker() {
+    let _guard = no_stub_fallback_env_lock().lock().unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    if std::process::Command::new(&cc).arg("--version").output().is_err() {
+        return;
+    }
+
+    let previous = std::env::var("SIMPLE_STUB_MISSING_RT").ok();
+    std::env::set_var("SIMPLE_STUB_MISSING_RT", "1");
+
+    let temp = tempfile::tempdir().unwrap();
+    let main_c = temp.path().join("main.c");
+    let main_o = temp.path().join("main.o");
+
+    std::fs::write(
+        &main_c,
+        r#"
+#include <stdio.h>
+int main(void) {
+    FILE* f = popen("printf 2", "r");
+    if (!f) return 1;
+    char buf[8];
+    char* got = fgets(buf, sizeof(buf), f);
+    return got ? pclose(f) : 1;
+}
+"#,
+    )
+    .unwrap();
+
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&main_c)
+        .arg("-o")
+        .arg(&main_o)
+        .status()
+        .unwrap()
+        .success());
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
+        fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        populate_global_struct_defs: false,
+        populate_global_enum_defs: false,
+    };
+
+    let stub_o = super::stubs::generate_stub_object(temp.path(), &[], &main_o, None, &imports).unwrap();
+
+    match previous.as_deref() {
+        Some(value) => std::env::set_var("SIMPLE_STUB_MISSING_RT", value),
+        None => std::env::remove_var("SIMPLE_STUB_MISSING_RT"),
+    }
+
+    let output = std::process::Command::new("nm").arg("-g").arg(stub_o).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("popen"));
+    assert!(!stdout.contains("fgets"));
+    assert!(!stdout.contains("pclose"));
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
 fn test_no_stub_fallback_defers_unresolved_host_symbols_to_linker() {
     let _guard = no_stub_fallback_env_lock().lock().unwrap();
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
