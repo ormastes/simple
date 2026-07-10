@@ -283,16 +283,20 @@ impl MemoryLevelingManager:
         if config_reason != "ok":
             me.stats.failure_count = me.stats.failure_count + 1
             return _memory_leveling_operation(false, config_reason, allocation_id, "failed")
-        if allocation_id == 0 or owner_id == 0 or byte_length == 0 or page_count == 0 or me._find(allocation_id) >= 0:
+        if owner_id == 0 or byte_length == 0 or page_count == 0 or (allocation_id != 0 and me._find(allocation_id) >= 0):
             return _memory_leveling_operation(false, "invalid-request", allocation_id, "failed")
         val admission = me._admission_reason(domain.name, byte_length)
         if admission != "ok":
             me.stats.failure_count = me.stats.failure_count + 1
             return _memory_leveling_operation(false, admission, allocation_id, "failed")
+        var resolved_allocation_id = allocation_id
+        if resolved_allocation_id == 0:
+            resolved_allocation_id = me.next_allocation_id
+            me.next_allocation_id = me.next_allocation_id + 1
         val pin_count: u64 = if permanent_pin: 1 else: 0
         val cpu_owned = memory_page_state(MEMORY_PAGE_STATE_CPU_OWNED, false, false)
         val allocation = MemoryAllocation(
-            allocation_id: allocation_id,
+            allocation_id: resolved_allocation_id,
             byte_length: byte_length,
             page_count: page_count,
             owner_id: owner_id,
@@ -314,13 +318,13 @@ impl MemoryLevelingManager:
         )
         me.allocations.push(allocation)
         me.generations.push(0)
-        if allocation_id >= me.next_allocation_id:
-            me.next_allocation_id = allocation_id + 1
+        if resolved_allocation_id >= me.next_allocation_id:
+            me.next_allocation_id = resolved_allocation_id + 1
         me.stats.allocation_count = me.stats.allocation_count + 1
         me.stats.byte_count = me.stats.byte_count + byte_length
         me.stats.pin_count = me.stats.pin_count + pin_count
         me._add_domain_bytes(domain.name, byte_length)
-        _memory_leveling_operation(true, "ok", allocation_id, cpu_owned.name)
+        _memory_leveling_operation(true, "ok", resolved_allocation_id, cpu_owned.name)
 
     me get(allocation_id: u64) -> MemoryAllocation?:
         val index = me._find(allocation_id)

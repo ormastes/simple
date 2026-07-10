@@ -29,7 +29,6 @@ var dma_alloc_device: [u64; 1024] = [0; 1024]
 var dma_alloc_cache_policy: [u8; 1024] = [0; 1024]
 var dma_alloc_id: [u64; 1024] = [0; 1024]
 var dma_alloc_active: [u8; 1024] = [0; 1024]
-var dma_alloc_next_id: u64 = 1
 
 # PCI device cache — lazy-initialized on first enumerate call
 val MAX_PCI_DEVICES: u64 = 256
@@ -411,23 +410,21 @@ fn _handle_alloc_dma(args: SyscallArgs, caller: TaskId) -> SyscallResult:
 
     _next_mmap_addr = base_virt + page_count * PAGE_SIZE
 
-    val allocation_id = dma_alloc_next_id
-    dma_alloc_next_id = dma_alloc_next_id + 1
+    val leveling_registered = memory_leveling_runtime_register_dma(0, caller.id, base_virt, first_phys, page_count * PAGE_SIZE, cache_policy == 0)
+    if not leveling_registered.ok:
+        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
+        return SyscallResult(value: -12)
+    val allocation_id = leveling_registered.allocation_ids[0]
 
     val registered = _dma_register_alloc(caller, base_virt, first_phys, page_count * PAGE_SIZE, owner_device, cache_policy, allocation_id)
     if not registered:
+        memory_leveling_runtime_unregister_dma(allocation_id, caller.id)
         _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
         return SyscallResult(value: -12)
 
     val cleanup_tracked = task_register_resource(caller.id, RES_DMA_BUFFER, base_virt, page_count * PAGE_SIZE)
     if not cleanup_tracked:
-        _dma_unregister_alloc(base_virt)
-        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
-        return SyscallResult(value: -12)
-
-    val leveling_registered = memory_leveling_runtime_register_dma(allocation_id, caller.id, base_virt, first_phys, page_count * PAGE_SIZE, cache_policy == 0)
-    if not leveling_registered.ok:
-        task_unregister_resource(caller.id, RES_DMA_BUFFER, base_virt)
+        memory_leveling_runtime_unregister_dma(allocation_id, caller.id)
         _dma_unregister_alloc(base_virt)
         _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
         return SyscallResult(value: -12)

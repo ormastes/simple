@@ -47,6 +47,7 @@ fn memory_leveling_runtime_register_cpu_range(virt_addr: u64, byte_length: u64, 
     val policy = memory_leveling_policy_from_intent(intent)
     val page_count = (byte_length + 4095) / 4096
     var allocation_ids: [u64] = []
+    val mapping_start = _memory_leveling_runtime_mappings.len()
     var page_index: u64 = 0
     while page_index < page_count:
         val remaining = byte_length - page_index * 4096
@@ -57,6 +58,8 @@ fn memory_leveling_runtime_register_cpu_range(virt_addr: u64, byte_length: u64, 
             while rollback_index < allocation_ids.len():
                 manager.release(allocation_ids[rollback_index], owner_id)
                 rollback_index = rollback_index + 1
+            while _memory_leveling_runtime_mappings.len() > mapping_start:
+                _memory_leveling_runtime_mappings.pop()
             _memory_leveling_runtime_manager = Some(manager)
             return MemoryLevelingRuntimeResult(ok: false, reason: requested.reason, allocation_ids: [])
         allocation_ids.push(requested.allocation_id)
@@ -80,7 +83,7 @@ fn memory_leveling_runtime_mapping(allocation_id: u64) -> MemoryLevelingRuntimeM
     nil
 
 fn memory_leveling_runtime_register_dma(allocation_id: u64, owner_id: u64, virt_addr: u64, phys_addr: u64, byte_length: u64, coherent: bool) -> MemoryLevelingRuntimeResult:
-    if allocation_id == 0 or owner_id == 0 or virt_addr == 0 or phys_addr == 0 or byte_length == 0:
+    if owner_id == 0 or virt_addr == 0 or phys_addr == 0 or byte_length == 0:
         return MemoryLevelingRuntimeResult(ok: false, reason: "invalid-request", allocation_ids: [])
     if not coherent:
         return MemoryLevelingRuntimeResult(ok: false, reason: "coherency-unproven", allocation_ids: [])
@@ -101,8 +104,9 @@ fn memory_leveling_runtime_register_dma(allocation_id: u64, owner_id: u64, virt_
     _memory_leveling_runtime_manager = Some(manager)
     if not registered.ok:
         return MemoryLevelingRuntimeResult(ok: false, reason: registered.reason, allocation_ids: [])
-    _memory_leveling_runtime_mappings.push(MemoryLevelingRuntimeMapping(allocation_id: allocation_id, owner_id: owner_id, virt_addr: virt_addr, page_index: 0, byte_length: byte_length))
-    MemoryLevelingRuntimeResult(ok: true, reason: "ok", allocation_ids: [allocation_id])
+    val registered_id = registered.allocation_id
+    _memory_leveling_runtime_mappings.push(MemoryLevelingRuntimeMapping(allocation_id: registered_id, owner_id: owner_id, virt_addr: virt_addr, page_index: 0, byte_length: byte_length))
+    MemoryLevelingRuntimeResult(ok: true, reason: "ok", allocation_ids: [registered_id])
 
 fn memory_leveling_runtime_unregister_dma(allocation_id: u64, owner_id: u64) -> MemoryLevelingRuntimeResult:
     val manager = memory_leveling_runtime_manager()
