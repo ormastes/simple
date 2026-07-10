@@ -16,6 +16,7 @@ extern fn rt_cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64
 extern fn rt_cli_handle_compile(args: [text]) -> i64
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
 # --- Shell/file helpers (local copies to avoid circular imports) ---
@@ -60,7 +61,7 @@ fn _cli_shell_bool(command: text) -> bool:
     result.exit_code == 0
 
 fn _cli_file_exists_impl(path: text) -> bool:
-    _cli_shell_bool("test -f '{path}'")
+    rt_file_exists(path)
 
 fn _cli_file_read_impl(path: text) -> text:
     val result = _cli_shell("cat '{path}' 2>/dev/null")
@@ -96,10 +97,7 @@ fn _cli_current_exe_path() -> text:
         val argv0 = args[0]
         if (argv0.last_index_of("/") ?? -1) >= 0:
             return argv0
-    val result = _cli_shell("parent=$(awk '{print $4}' /proc/$$/stat); parent=$(awk '{print $4}' /proc/$parent/stat); readlink -f /proc/$parent/exe")
-    if result.exit_code != 0:
-        return ""
-    result.stdout.trim()
+    ""
 
 fn _cli_seed_sibling_path(exe_path: text) -> text:
     val slash = exe_path.last_index_of("/") ?? -1
@@ -115,8 +113,7 @@ fn _cli_is_current_exe(path: text) -> bool:
         # If identity cannot be established, delegation is unsafe: the
         # candidate may be this process and recurse without bound.
         return true
-    val same = _cli_shell("test '{current}' -ef '{path}'")
-    same.exit_code == 0
+    current == path or current.ends_with("/" + path) or path.ends_with("/" + current)
 
 pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
     var resolved_cmd = cmd
@@ -156,13 +153,10 @@ pub fn _cli_driver_binary() -> text:
     if not _cli_is_windows_platform():
         val exe_path = _cli_current_exe_path()
         if exe_path.len() > 0:
-            val dir_result = _cli_shell("dirname '{exe_path}'")
-            val exe_dir = dir_result.stdout.trim()
-            if exe_dir.len() > 0:
-                val seed_sibling = "{exe_dir}/simple_seed"
-                if _cli_file_exists_impl(seed_sibling):
-                    if not _cli_is_current_exe(seed_sibling):
-                        return seed_sibling
+            val seed_sibling = _cli_seed_sibling_path(exe_path)
+            if _cli_file_exists_impl(seed_sibling):
+                if not _cli_is_current_exe(seed_sibling):
+                    return seed_sibling
 
     val ext = if _cli_is_windows_platform(): ".exe" else: ""
     val candidate = "bin/simple{ext}"
@@ -199,13 +193,10 @@ pub fn _cli_frontend_delegate_binary() -> text:
     if not _cli_is_windows_platform():
         val exe_path = _cli_current_exe_path()
         if exe_path.len() > 0:
-            val dir_result = _cli_shell("dirname '{exe_path}'")
-            val dir = dir_result.stdout.trim()
-            if dir.len() > 0:
-                val seed_candidate = "{dir}/simple_seed"
-                if _cli_file_exists_impl(seed_candidate):
-                    if not _cli_is_current_exe(seed_candidate):
-                        return seed_candidate
+            val seed_candidate = _cli_seed_sibling_path(exe_path)
+            if _cli_file_exists_impl(seed_candidate):
+                if not _cli_is_current_exe(seed_candidate):
+                    return seed_candidate
 
     ""
 

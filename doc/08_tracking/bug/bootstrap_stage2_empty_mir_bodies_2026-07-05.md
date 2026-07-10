@@ -878,3 +878,36 @@ until killed. The previous hosted-runtime retry also showed that forcing
 `deps/libsimple_runtime.a` path and still weak-stubs live runtime hooks, so the
 wrapper-shaped core-C path is the relevant lane. Do not deploy or mark bootstrap
 successful until the Stage 4 `-c` smoke returns `2`.
+
+## 2026-07-10 Stage 4 smoke no-shell continuation
+
+The Stage 4 `-c` smoke no longer hangs in early CLI process helpers after
+removing pre-smoke shell calls from `src/app/io/cli_ops.spl` and direct shell
+snippet staging from `src/app/io/_CliCommands/run_commands.spl`.
+
+Focused evidence:
+
+```text
+bin/simple check src/app/io/cli_ops.spl src/app/io/_CliCommands/run_commands.spl
+  => passed
+
+Stage 4 focused native-build with SIMPLE_STUB_MISSING_RT=1
+  => exit 0, linked build/bootstrap/full/aarch64-apple-darwin/simple
+
+nm -u build/bootstrap/full/aarch64-apple-darwin/simple | rg '^_rt_| _rt_' | wc -l
+  => 0
+```
+
+The blocker moved:
+
+```text
+timeout 30 build/bootstrap/full/aarch64-apple-darwin/simple -c 'print(1+1)'
+  => exit 1, stderr: error: failed to run -c snippet
+
+timeout 30 build/bootstrap/full/aarch64-apple-darwin/simple /tmp/simple_stage4_direct_file.spl
+  => exit 1, stderr: Parse error in /tmp/simple_stage4_direct_file.spl:
+```
+
+The next owner is the Stage 4 self-hosted parser/diagnostic path for script
+files. Do not re-open the process-run or temp-file staging fixes unless new
+evidence shows a regression; the smoke now reaches `interpret_file`.

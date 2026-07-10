@@ -47,3 +47,5 @@ verify-warn
 - verify: `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-driver` passed after fixing the existing unconditional `RefCell` import; existing runtime extern signature warnings remain.
 - verify: `bin/simple spipe-docgen test/03_system/feature/app/native_build_smf_spec.spl --output doc/06_spec --no-index` generated 0 stubs; duplicate generated path was discarded in favor of the existing canonical manual path.
 - blocked: `bin/simple check src/app/io/_CliCompile/compile_targets.spl` terminated twice with exit 143 during dependency loading; not re-run to avoid a runaway loop.
+- implement: Stage 4 `-c` smoke no longer depends on shelling out for current-exe discovery, file-exists checks, sibling seed lookup, or snippet staging; wrapper Stage 4/5 native-build now exports `SIMPLE_STUB_MISSING_RT=1` to match focused core-C link evidence.
+- verify: Focused Stage 4 native-build still links with zero unresolved `rt_*`; the smoke now reaches `interpret_file` and fails with an empty parse diagnostic instead of hanging or failing temp-file staging.
