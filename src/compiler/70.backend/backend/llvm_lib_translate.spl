@@ -18,9 +18,26 @@ pub fn translate_module_to_llvm(ctx: i64, mod_: i64, builder: i64, type_mapper: 
     # Pass 0: Declare runtime functions
     declare_runtime_functions(ctx, mod_, type_mapper)
 
+    # `mir_module.functions` is a `Dict<SymbolId, MirFunction>`; the runtime
+    # Dict is backed by a Rust HashMap with a per-process random hash seed, so
+    # `.values()` iteration order is NOT stable across process invocations.
+    # That nondeterminism propagates into LLVM's global/string-constant
+    # ordering (and downstream section sizes/offsets, unwind info, and the
+    # final code-signature hash), causing `bin/simple build bootstrap`'s
+    # stage1/stage2/stage3 outputs to differ byte-for-byte despite identical
+    # source. Sort by function name (already used as the unique dedup key in
+    # func_map below) before both passes to make emission order deterministic.
+    var by_name: {text: MirFunction} = {}
+    var names: [text] = []
+    for func in mir_module.functions.values():
+        by_name[func.name] = func
+        names = names.push(func.name)
+    names.sort()
+
     # Pass 1: Declare all functions (forward references)
     var func_map: {text: i64} = {}
-    for func in mir_module.functions.values():
+    for fname in names:
+        val func = by_name[fname]
         val fn_name = if func.name == "main": "__simple_main" else: func.name
         val fn_ty = build_function_type(ctx, type_mapper, func.signature)
         val llvm_fn = llvm_add_function(mod_, fn_name, fn_ty)
@@ -32,7 +49,8 @@ pub fn translate_module_to_llvm(ctx: i64, mod_: i64, builder: i64, type_mapper: 
         # SFFI rejects the legacy -1 value before LLVM sees it.
 
     # Pass 2: Compile function bodies
-    for func in mir_module.functions.values():
+    for fname in names:
+        val func = by_name[fname]
         val llvm_fn = func_map[func.name]
         compile_function(ctx, mod_, builder, type_mapper, func, llvm_fn, func_map)
 

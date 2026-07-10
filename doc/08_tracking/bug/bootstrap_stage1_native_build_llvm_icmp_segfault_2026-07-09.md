@@ -1538,3 +1538,87 @@ diagnostics; `llvm_target.spl` `Host` arm calls `detect_host_arch()`;
 
 **Everything in this update is uncommitted** (per session constraints — no
 commit/push, no Rust seed edits, no `test/**` edits).
+
+## Update 2026-07-10 (determinism session, per `stage2_determinism_guide.md`) — Stage-2 MISMATCH wall FIXED; `bin/simple build bootstrap` now prints **Bootstrap VERIFIED** end-to-end
+
+**Baseline (run 1 of 2, full `bin/simple build bootstrap`):** reproduced the
+mismatch with fresh outputs — all 3 stages OK at 35,576 bytes, hashes all
+over the place (this run: stage1 `90977c8c…`, stage2 `a2e3c687…`, stage3
+`c43152c2…` — i.e. NOT the stable "stage1==stage3" pattern from the prior
+session; every link differed). Note: `bootstrap/stageN/simple` are
+git-tracked files; the run overwrites them in place, and the comparator
+(`src/compiler_rust/driver/src/cli/commands/misc_commands.rs:440`,
+`compile_stage`→`sha256_file(output)`) hashes ONLY the binary — the
+`.simple_launch.sdn` wrappers are not part of the comparison.
+
+**Binary-diff classification (cmp -l + xxd + otool on the fresh stage
+outputs):** ~470 differing bytes between stage1/stage2, in 4 clusters:
+1. **`__TEXT,__cstring` content/size (~228 bytes + 9 header bytes)** —
+   stage1's cstring section was 0xE9 bytes with 16 bytes of leading padding
+   before "Simple Bootstrap Compiler v1.0.0-beta"; stage2/3's was 0xD9 with
+   none: the string-constant pool was emitted in a different order. Root
+   cause: `translate_module_to_llvm`
+   (`src/compiler/70.backend/backend/llvm_lib_translate.spl`) iterated
+   `mir_module.functions.values()` — a `Dict<SymbolId, MirFunction>` backed
+   by a random-seeded HashMap, so function (and therefore global-string)
+   emission order varied per process. Knock-on diffs: section
+   offsets/sizes in load commands, `__unwind_info`/`__eh_frame` content,
+   and the LC_CODE_SIGNATURE hashes over all of it.
+2. **LC_UUID (16 bytes @ offset ~0x558)** — ld64 generates a
+   content-derived/link-varying UUID per link; with (1) present it differed
+   because content differed, but even after fixing (1) it is not guaranteed
+   byte-stable and is pure non-semantic link metadata.
+3. **Output-basename echo in LINKEDIT (offset ~0x89CC)** — the symbol/export
+   entry embeds the output file's basename; NOT an issue in the real
+   bootstrap (all stages deliberately compile to the same basename
+   `simple`, per the comment in misc_commands.rs:397) — only visible in
+   diagnostic runs using distinct names.
+4. **Code-signature hashes (tail ~80 bytes)** — derived, follow (1)/(2).
+
+**Fixes (both deterministic-output at the source, uncommitted):**
+- `src/compiler/70.backend/backend/llvm_lib_translate.spl`
+  (`translate_module_to_llvm`): collect function names, `names.sort()`, and
+  run both declaration and body-compilation passes in sorted-name order
+  (name is already the unique `func_map` dedup key). Kills the
+  string-pool/section-layout nondeterminism.
+- `src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl`: pass
+  `-no_uuid` to ld64 on the macOS direct-linker path (and `-Wl,-no_uuid` on
+  the macOS cc-fallback path). This suppresses LC_UUID generation entirely —
+  the documented ld64 mechanism for reproducible output. This is the one
+  *documented normalization of non-semantic metadata* in this fix (the
+  UUID is link metadata, not program content); the stage comparison itself
+  remains a strict full-file SHA-256 — nothing was excluded from hashing.
+
+**Verification (cheap 3× `native-build` probes before spending the capped
+run):** pre-fix 3 runs → 3 distinct hashes; after sort-only → diffs
+collapsed to LC_UUID + code-signature only; after `-no_uuid` → runs to the
+same basename produce **identical SHA-256** (`11a9c3ca…`), 3/3.
+
+**Final state (run 2 of 2, full `bin/simple build bootstrap`):**
+```
+Stage 1: OK (35576 bytes, hash=11a9c3ca…b293250)
+Stage 2: OK (35576 bytes, hash=11a9c3ca…b293250)
+Stage 3: OK (35576 bytes, hash=11a9c3ca…b293250)
+Bootstrap VERIFIED: All 3 stages produce identical output
+Bootstrap deployed: bootstrap/stage3/aarch64-apple-darwin-macho/simple
+```
+The build's own final step copies stage3 to
+`bootstrap/stage3/<triple>/simple` (inside the bootstrap dir).
+`bin/release/<triple>/simple` was NOT touched (still the Jul-5 deploy) —
+redeploy to bin/release remains a separate user-approved step per the plan
+doc's re-gate criteria (extended smoke matrix first).
+
+**Runs used:** 2 of 2 full bootstraps (pgrep-verified no concurrent run
+before each) + 9 short isolated `native-build` probes to scratch paths.
+
+**Regression checkpoints re-verified intact post-session:**
+`llvm_lib_translate_expr.spl:504/506` `get_value(value_map, local.id)`; all
+3 `llvm_types.spl` copies NUL-terminate `LLVMSetDataLayout`'s layout; all 4
+`LLVMBuildCall2` sites NUL-terminate `Name`; the 3 named `Ret`-case
+diagnostics; `llvm_target.spl` `Host` arm → `detect_host_arch()`;
+`linker_wrapper_helpers.spl` multi-format magic check; all 8
+chained-replace hoists (cache_validator, smf_manifest, watcher_protocol,
+shb_cache, both incremental twins, mir_interp_intrinsics).
+
+**Everything in this update is uncommitted** (session constraints — no
+commit/push, no Rust seed edits, no `test/**` edits, no bin/release deploy).

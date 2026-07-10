@@ -38,17 +38,30 @@ generation run **interpreted** by the deployed `bin/simple`). As of
   in module_lowering.spl. The dispatcher-table fix itself is already on main
   (Rust seed) and becomes live at the next redeploy. Full detail in the bug
   doc's 2026-07-10 semantic-replace section.
-- **Current wall: Stage-2 determinism MISMATCH.** All three stages now
-  compile OK (first time in this arc):
+- **Determinism MISMATCH FIXED (2026-07-10, uncommitted in WC) —
+  `bin/simple build bootstrap` now prints Bootstrap VERIFIED end-to-end:**
   ```
-  Stage 1: OK (35576 bytes, hash=a2e3c687…d58c4ce1)
-  Stage 2: OK (35576 bytes, hash=c43152c2…7dcf880c)
-  Stage 3: OK (35576 bytes, hash=a2e3c687…d58c4ce1)
-  Bootstrap MISMATCH: outputs differ between stages
+  Stage 1: OK (35576 bytes, hash=11a9c3ca…b293250)
+  Stage 2: OK (35576 bytes, hash=11a9c3ca…b293250)
+  Stage 3: OK (35576 bytes, hash=11a9c3ca…b293250)
+  Bootstrap VERIFIED: All 3 stages produce identical output
+  Bootstrap deployed: bootstrap/stage3/aarch64-apple-darwin-macho/simple
   ```
-  Stage 1 == Stage 3, only Stage 2 differs at identical size — likely a
-  single alternating nondeterministic embedded value (temp path/PID/
-  ordering). Next session: binary-diff the two 35,576-byte outputs.
+  Two root causes, both fixed at the source (deterministic output, not a
+  weakened comparison): (1) `translate_module_to_llvm`
+  (`llvm_lib_translate.spl`) iterated `mir_module.functions.values()` — a
+  random-seeded `Dict` — so LLVM global/string-constant emission order (and
+  therefore `__cstring` layout, section offsets, unwind info, and the code
+  signature) varied per process; now both passes run in sorted-function-name
+  order. (2) ld64's LC_UUID varies per link; the macOS link paths
+  (`_LinkerWrapper/native_linking.spl`, direct-ld64 + cc-fallback) now pass
+  `-no_uuid` — a documented normalization of non-semantic link metadata; the
+  stage comparison itself is still a strict full-file SHA-256. Full diff
+  classification in the bug doc's 2026-07-10 determinism section. NOTE: the
+  build's final step copies stage3 only into
+  `bootstrap/stage3/<triple>/simple`; `bin/release` is untouched — redeploy
+  there is still gated on the extended smoke matrix (§ "Re-gate + redeploy
+  criteria" below).
 - Deployed `bin/simple` (unchanged) still works as a tool in the meantime.
 
 ## WHAT LANDED (fix arc, oldest → newest, all on origin/main)
@@ -74,11 +87,12 @@ Full per-fix diagnostic detail (probes, crash reports, budget accounting):
 1. ~~Semantic wall (`replace` in nested call context)~~ **DONE 2026-07-10**
    (uncommitted in WC — receiver hoists on the post-link SMF-cache path; see
    STATUS NOW and the bug doc's 2026-07-10 semantic-replace section).
-2. **Stage-2 determinism MISMATCH (current wall):** Stage 1/2/3 all compile
-   OK at 35,576 bytes, but Stage 2's hash differs from Stage 1/3 (which
-   match each other). Binary-diff the stage1 vs stage2 outputs; suspect one
-   alternating embedded value (temp path/PID/ordering). Check the bug doc's
-   latest section before starting new diagnosis to avoid re-treading ground.
+2. ~~Stage-2 determinism MISMATCH~~ **DONE 2026-07-10** (uncommitted in WC —
+   sorted-name function emission in `llvm_lib_translate.spl` + ld64
+   `-no_uuid` in `_LinkerWrapper/native_linking.spl`; `build bootstrap` now
+   prints **Bootstrap VERIFIED** with all 3 stage hashes identical. See the
+   bug doc's 2026-07-10 determinism section for the byte-level
+   classification).
 3. **Reconcile the two emit paths.** The original plan (2026-07-08) framed
    path 2 (llvm-lib AOT) as "long-horizon" and path 1 (cranelift/llc
    `SIMPLE_BOOTSTRAP`) as "the realistic route." That framing is now stale:
