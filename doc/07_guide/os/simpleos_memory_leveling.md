@@ -46,6 +46,17 @@ Swap commits only after bytes and checksum are stored. Restore validates content
 commits the CPU mapping, and then releases the slot. Failure leaves the original
 owner intact or marks an unrecoverable rollback explicitly failed.
 
+Process mappings carry both the page-table root and address-space identity.
+Swap prepare, unmap, rollback, restore, and `munmap` operate on that explicit
+space rather than the kernel-global page table. The page-fault path resolves the
+registered process space from the active CR3; scheduler create, fork, and exec
+register their address spaces. Registration failure rolls back the new page and
+halts if ownership cannot be restored safely.
+
+Production NVMe swap reserves one 4 KiB metadata slot after the declared FAT32
+volume. Boot writes an ownership signature there and starts swap data after the
+marker. If the marker cannot be written, swap installation fails closed.
+
 ## Placement Adapter
 
 Language-to-OS adapter:
@@ -78,8 +89,19 @@ remain unavailable until a hardware owner and evidence command are recorded.
 ## Focused Evidence
 
 ```sh
-bin/simple test test/03_system/os/simpleos_memory_leveling_spec.spl --mode=interpreter
+bin/simple test test/02_integration/os/memory_leveling_pressure_swap_spec.spl --mode=native
+bin/simple test test/01_unit/os/services/vfs/vfs_boot_memory_swap_range_spec.spl --mode=native
+bin/simple test test/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.spl --mode=native
+sh scripts/check/check-simpleos-memory-leveling-qemu.shs
 ```
+
+The process isolation scenario creates two real sparse page-table roots, maps
+the same virtual address to distinct frames, swaps exactly one mapping, proves
+the other PTE remains present, and restores the swapped mapping.
+
+Current QEMU status is blocked before boot: the staged native build times out
+before emitting `memory_leveling_qemu.elf`, so no serial transcript exists.
+Hosted/native specs do not substitute for AC-10 QEMU evidence.
 
 Do not claim GPUDirect, RDMA hardware paging, CXL, or live GPU/NIC migration
 from model or QEMU-only evidence. Real device movement needs driver-owned

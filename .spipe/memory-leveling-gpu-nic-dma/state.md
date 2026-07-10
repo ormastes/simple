@@ -40,13 +40,13 @@ Provide coordinated but separately configured Simple language/runtime and Simple
 - Generated-manual review owner: primary highest-capability model.
 
 ## Runtime Boundary Decision
-- runtime_need: Not yet proven; research must determine whether current SimpleOS physical/virtual memory and DMA facades can implement leveling without new runtime hooks.
-- facade_checked: Pending local research across SimpleOS memory, GPU, NIC, DMA, and swap owners.
-- chosen_path: `reuse-facade` unless evidence requires `add-smallest-owner-facade` or `fix-codegen-runtime-owner`.
+- runtime_need: No new runtime hook is required. The implementation uses the existing PMM, explicit-address-space VMM, DMA, block-device, and CR3 owner interfaces.
+- facade_checked: SimpleOS PMM/VMM, `SharedDmaBuffer`, device syscall, scheduler vmspace registry, and block-device facades were checked and reused.
+- chosen_path: `reuse-facade`; one compiler-owner GVN mutation fix was required so the native build could progress beyond the proven lowering defect.
 - rejected_shortcuts: Device-specific global allocators, fixture-only swap behavior, raw `rt_*` imports in feature code, unsafe relocation of pinned/device-owned memory, and host-only QEMU substitutes.
 
 ## Phase
-design-complete-system-tests
+verify-blocked-qemu-native-build
 
 ## Log
 - dev: Created state file with 13 acceptance criteria (type: feature).
@@ -54,3 +54,8 @@ design-complete-system-tests
 - research-review: Four lower-model lanes mapped PMM/VMM/swap, GPU/DMA, NIC rings, and prior docs; highest-capability review accepted the merged gaps and options.
 - requirements: User selected Feature D + NFR 1 and clarified SimpleQ was a typo for SimpleOS; language/runtime and SimpleOS configurations remain separate while sharing backend capability vocabulary.
 - design: Three independent lanes reviewed the shared contract, PMM/VMM/swap transactions, and DMA/GPU/NIC adapters. The primary reviewer fixed the boundary at two independently constructed configurations sharing only immutable contract values and request adapters.
+- implementation: Added the allocation registry, bounded pressure policy, device ownership transitions, block-backed swap coordinator, PMM pressure polling, fault restore, process-space-aware PTE transactions, scheduler vmspace registration, CR3-based fault-space resolution, and an NVMe-tail ownership marker.
+- implementation-review: Higher-model review found global-page-table rollback and munmap ownership hazards; fixes now use explicit process roots, release physical frames, remove failed multi-page registrations, and halt on unrecoverable fault-registration rollback.
+- evidence: Native pressure/swap/process isolation passes 3/3, including two real sparse address spaces mapping the same virtual address to different frames; GPU/NIC/DMA system evidence passes 8/8; NVMe swap-tail geometry passes 1/1.
+- sync: Latest focused evidence commit is `5907b31d5343`; JJ `main` and `main@origin` matched after fetch/push.
+- verify-blocker: `scripts/check/check-simpleos-memory-leveling-qemu.shs` and a no-bootstrap staged native build both time out in compiler source/lint loading before producing an ELF or serial log. AC-10 and AC-13 remain incomplete; no QEMU or hardware claim is accepted.
