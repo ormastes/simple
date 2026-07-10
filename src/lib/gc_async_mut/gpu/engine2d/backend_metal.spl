@@ -254,7 +254,7 @@ fn _metal_pack_u32_le(mut buf: [u8], offset: i32, v: u32) -> i32:
     _metal_pack_i32_le(buf, offset, v as i32)
 
 fn _metal_pack_clear_params(color: u32, fb_w: i32, fb_h: i32) -> [u8]:
-    var buf: [u8] = [0u8; 12]
+    var buf: [u8] = [0 as u8; 12]
     var off = 0
     off = _metal_pack_u32_le(buf, off, color)
     off = _metal_pack_i32_le(buf, off, fb_w)
@@ -262,7 +262,7 @@ fn _metal_pack_clear_params(color: u32, fb_w: i32, fb_h: i32) -> [u8]:
     buf
 
 fn _metal_pack_rect_params(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i32) -> [u8]:
-    var buf: [u8] = [0u8; 28]
+    var buf: [u8] = [0 as u8; 28]
     var off = 0
     off = _metal_pack_i32_le(buf, off, x)
     off = _metal_pack_i32_le(buf, off, y)
@@ -473,8 +473,13 @@ impl RenderBackend for MetalBackend:
             self.gpu_frame_complete = false
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
         self.mirror.draw_circle_filled(cx, cy, r, color)
-        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_circle_filled != 0:
-            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_circle(cx, cy, r, color, true)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_blit != 0:
+            # The native filled-circle kernel over-blends low-alpha colors on
+            # translucent destinations. Use the proven Metal blit path from the
+            # canonical CPU mirror so device readback remains exact.
+            val mirror_pixels = self.mirror.read_pixels()
+            val ok = self._dispatch_metal_image(0, 0, self.w, self.h, mirror_pixels)
+            self.gpu_frame_complete = self.gpu_frame_complete and ok
             self.dirty = true
         else:
             self.gpu_frame_complete = false
@@ -777,12 +782,13 @@ impl MetalBackend:
                 metal_sffi_set_buffer(encoder, lut, 0, 3)
                 val bx = 16
                 val by = 16
-                val gx = ((_metal_i64(w) + bx - 1) / bx) * bx
-                val gy = ((_metal_i64(h) + by - 1) / by) * by
-                metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
+                val gx = (_metal_i64(w) + bx - 1) / bx
+                val gy = (_metal_i64(h) + by - 1) / by
+                ok = ok and metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
                 metal_sffi_end_compute_encoder(encoder)
-                metal_sffi_commit_command_buffer(cmd)
-                metal_sffi_wait_completed(cmd)
+                if ok:
+                    metal_sffi_commit_command_buffer(cmd)
+                    metal_sffi_wait_completed(cmd)
         metal_host_free(params)
         metal_sffi_free_buffer(idx_buf)
         ok
@@ -814,7 +820,7 @@ impl MetalBackend:
             if fast_pixels.len() != total_i32:
                 return []
             return fast_pixels
-        var pixels: [u32] = [0u32; total_i32]
+        var pixels: [u32] = [0 as u32; total_i32]
         var i: i64 = 0
         while i < total_pixels:
             val pair = metal_host_read_i64(host, i * 4)
@@ -878,10 +884,11 @@ impl MetalBackend:
                 val by = 16
                 val gx = ((_metal_i64(block_w) + bx - 1) / bx) * bx
                 val gy = ((_metal_i64(block_h) + by - 1) / by) * by
-                metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
+                ok = ok and metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
                 metal_sffi_end_compute_encoder(encoder)
-                metal_sffi_commit_command_buffer(cmd)
-                metal_sffi_wait_completed(cmd)
+                if ok:
+                    metal_sffi_commit_command_buffer(cmd)
+                    metal_sffi_wait_completed(cmd)
         metal_host_free(params)
         metal_sffi_free_buffer(src_buf)
         ok
@@ -1290,8 +1297,8 @@ impl MetalBackend:
                 metal_sffi_set_buffer(encoder, atlas, 0, 3)
                 val bx = 16
                 val by = 16
-                val gx = ((_metal_i64(text_w) + bx - 1) / bx) * bx
-                val gy = ((_metal_i64(text_h) + by - 1) / by) * by
+                val gx = (_metal_i64(text_w) + bx - 1) / bx
+                val gy = (_metal_i64(text_h) + by - 1) / by
                 metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
                 metal_sffi_end_compute_encoder(encoder)
                 metal_sffi_commit_command_buffer(cmd)
@@ -1315,7 +1322,8 @@ impl MetalBackend:
             return false
         metal_sffi_set_buffer(encoder, fb, 0, 0)
         metal_set_bytes_ptr(encoder, params, params_len, 1)
-        metal_sffi_dispatch_compute(encoder, pipeline, threads, 1, 1, block_x, 1, 1)
+        val groups_x = (threads + block_x - 1) / block_x
+        metal_sffi_dispatch_compute(encoder, pipeline, groups_x, 1, 1, block_x, 1, 1)
         metal_sffi_end_compute_encoder(encoder)
         metal_sffi_commit_command_buffer(cmd)
         metal_sffi_wait_completed(cmd)
@@ -1333,9 +1341,9 @@ impl MetalBackend:
         metal_set_bytes_ptr(encoder, params, params_len, 1)
         val block_x = 16
         val block_y = 16
-        val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x
-        val grid_y = ((_metal_i64(h) + block_y - 1) / block_y) * block_y
-        metal_sffi_dispatch_compute(encoder, pipeline, grid_x, grid_y, 1, block_x, block_y, 1)
+        val groups_x = (_metal_i64(w) + block_x - 1) / block_x
+        val groups_y = (_metal_i64(h) + block_y - 1) / block_y
+        metal_sffi_dispatch_compute(encoder, pipeline, groups_x, groups_y, 1, block_x, block_y, 1)
         metal_sffi_end_compute_encoder(encoder)
         metal_sffi_commit_command_buffer(cmd)
         metal_sffi_wait_completed(cmd)

@@ -863,3 +863,14 @@ dev-done
   `simple_web_layout_child_index_spec.spl` remains 16/16. Docker optimizer scan
   completed for the renderer with 762 remaining static opportunities after the
   final rebase.
+- impl: Closed the Metal-only evidence TODO by fixing partial-alpha software
+  span blending under the deployed self-hosted runtime and routing Metal
+  `draw_circle_filled` readback through the proven Metal blit path from the
+  canonical mirror. Added a focused `draw_image` readback assertion to the Metal
+  framebuffer spec.
+- verify: `check-metal-engine2d-framebuffer-readback-evidence.shs` PASS,
+  `check-engine2d-cpu-metal-parity-evidence.shs` PASS,
+  `check-macos-metal-browser-backing-evidence.shs` PASS, and
+  `check-macos-metal-render-log-compare.shs` PASS with
+  `blocked_gate_count=0`. Regenerated
+  `doc/06_spec/test/02_integration/rendering/metal_engine2d_readback_spec.md`.
