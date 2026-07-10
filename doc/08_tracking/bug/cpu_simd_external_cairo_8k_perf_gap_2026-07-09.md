@@ -175,13 +175,51 @@ or Cairo-ratio claim is made. The remaining correctness blocker is now after
 framebuffer initialization: the strict Simple-core renderer does not commit
 the scene's drawing writes.
 
+### Strict Simple-core layout and SIMD-routing follow-up
+
+The all-white result had two independent Simple-core ABI causes. Generated
+index expressions pass tagged integer indices to `rt_index_get`/`set`, while
+the Simple-core wrappers forwarded them as raw array offsets. The wrappers now
+validate the integer tag and unbox the index. Simple-core also does not yet
+provide the hosted Dict ABI used by CSS rule buckets, so missing dictionary
+lookups now fall back to the bucket's compact key array; hosted runtimes retain
+the O(1) dictionary path.
+
+With those fixes, the exact canonical exporter fixture produced non-white,
+bit-identical CPU-SIMD and scalar frames through the strict Simple-core binary:
+
+- 4K: `sum32:35608179086024696`, CPU-SIMD `48318us`, scalar `46026us`.
+- 8K: `sum32:142464551729943944`, CPU-SIMD `189180us`, scalar `174789us`.
+- Both rows used full `3840x2160`/`7680x4320` physical sizes, default 300dpi,
+  no size reduction, and no fallback.
+
+Those checksums differ from the retained 2026-07-08 baseline because the
+current renderer and fixture source have changed; no checksum constant is
+updated until the retained contract is refreshed from an accepted binary.
+The strict run also exposed that the exporter labeled the lane `cpu_simd` but
+called only the scalar layout renderer (`simd_provider_hits=0`). A proposed
+full-frame native copy route preserved exact transparency/opacity pixels in the
+focused 6-case spec, but final review rejected it: it added redundant full-frame
+copies and per-row allocations after scalar rasterization, so it measured data
+movement rather than SIMD drawing. Generic RISC-V builds without
+`__riscv_vector` could also have reported a logical provider hit while the C
+runtime used its scalar fallback. The copy-only route was reverted.
+
+The final strict 4K/8K rebuild was attempted three times after this routing
+experiment. Each native closure build was externally terminated before
+linking, including the narrow direct-row variant, so no post-routing full-size
+timing or Cairo ratio is accepted. The bounded retry cap is reached; this
+remains a build-environment/closure-load blocker rather than grounds for
+replaying the pre-routing binary.
+
 ## Next Step
 
-Do not repeat the viewport/DPI/fallback/color proof work. The retained evidence
-already proves full 8K size, default 300dpi, configurable DPI override, checksum
-and pixel proof, CPU-SIMD runtime target, no fallback, and alpha-quality parity.
-The immediate blocker is the strict Simple-core drawing-write path after
-framebuffer initialization, not another framebuffer representation. Trace the
-first non-background rectangle write through typed `u32` set/push codegen and
-the generated Simple-core ABI. After that path reproduces the retained 4K/8K
-checksums, re-run the external CPU drawing-library comparison once.
+Do not repeat the viewport/DPI/fallback/color proof work. Expose the existing
+in-place C span ABI (`rt_engine2d_simd_fill_u32`/`copy_u32`) through the narrow
+Simple SIMD owner and use the runtime's native-row hit counter, not logical
+provider calls, as execution proof. Generic RISC-V without `__riscv_vector`
+must remain `native_simd_executed=false`. After a stable strict closure build,
+run the canonical combined CPU-SIMD/scalar 4K/8K exporter once and require exact
+checksums, full physical dimensions, 300dpi, no size reduction, and no
+fallback. Only then refresh the retained checksum contract and run the external
+Cairo comparison once.

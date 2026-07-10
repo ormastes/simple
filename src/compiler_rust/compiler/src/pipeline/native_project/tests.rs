@@ -2127,6 +2127,12 @@ int main(void) {
     if (rt_array_len(a) != 2) return 44;
     if (rt_array_get(a, 0) != rt_value_int(10)) return 45;
     if (rt_array_get(a, rt_value_int(1)) != rt_value_int(20)) return 46;
+    if (rt_index_get((int64_t)a, rt_value_int(1)) != rt_value_int(20)) return 80;
+    if (!rt_index_set((int64_t)a, rt_value_int(1), rt_value_int(21))) return 83;
+    if (rt_array_get(a, 1) != rt_value_int(21)) return 84;
+    if (rt_index_set((int64_t)a, 3, rt_value_int(99))) return 85;
+    if (rt_index_get((int64_t)a, 3) != 3) return 86;
+    if (rt_array_get(a, 0) != rt_value_int(10)) return 87;
     rt_array_set(a, -1, rt_value_int(30));
     if (rt_array_get(a, 1) != rt_value_int(30)) return 47;
     extern int64_t rt_array_pop(SplArray*);
@@ -2134,6 +2140,9 @@ int main(void) {
     if (rt_array_pop(a) != rt_value_int(30)) return 48;
     if (rt_array_len(a) != 1) return 49;
     if (rt_array_get(a, 99) != 3) return 50;
+    int64_t tuple = rt_tuple_new(1);
+    if (!rt_tuple_set(tuple, 0, rt_value_int(31))) return 81;
+    if (rt_tuple_get(tuple, 0) != rt_value_int(31)) return 82;
     SplArray* words = rt_array_new_with_cap_u64(2);
     if (!words) return 51;
     int64_t word_header = rt_array_header_ptr(words);

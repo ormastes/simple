@@ -4853,6 +4853,12 @@ fn rule_lists_from_counts(counts: [i32]) -> [[i32]]:
         i = i + 1
     lists
 
+fn dict_key_index_count(d: Dict<text, i32>, keys: [text], key: text, count: i32) -> i32:
+    if d.has(key):
+        return d[key]
+    # ponytail: linear fallback keeps Simple-core correct until its Dict ABI is available; hosted runtimes stay O(1).
+    text_key_index_count(keys, key, count)
+
 fn build_rule_buckets(rules: Rules) -> RuleBuckets:
     var bucket_capacity = 0
     var cr = 0
@@ -4888,10 +4894,8 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
             val kind = selector_bucket_kind_from_base(base)
             val key = selector_bucket_value_from_base(base)
             if kind == "id" and key.len() > 0:
-                var idx = -1
-                if id_key_dict.has(key):
-                    idx = id_key_dict[key]
-                else:
+                var idx = dict_key_index_count(id_key_dict, id_keys_raw, key, id_key_count)
+                if idx < 0:
                     idx = id_key_count
                     id_keys_raw[idx] = key
                     id_key_count = id_key_count + 1
@@ -4902,10 +4906,8 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
                 entry_rules[entry_count] = r
                 entry_count = entry_count + 1
             elif kind == "class" and key.len() > 0:
-                var idx = -1
-                if class_key_dict.has(key):
-                    idx = class_key_dict[key]
-                else:
+                var idx = dict_key_index_count(class_key_dict, class_keys_raw, key, class_key_count)
+                if idx < 0:
                     idx = class_key_count
                     class_keys_raw[idx] = key
                     class_key_count = class_key_count + 1
@@ -4916,10 +4918,8 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
                 entry_rules[entry_count] = r
                 entry_count = entry_count + 1
             elif kind == "tag" and key.len() > 0:
-                var idx = -1
-                if tag_key_dict.has(key):
-                    idx = tag_key_dict[key]
-                else:
+                var idx = dict_key_index_count(tag_key_dict, tag_keys_raw, key, tag_key_count)
+                if idx < 0:
                     idx = tag_key_count
                     tag_keys_raw[idx] = key
                     tag_key_count = tag_key_count + 1
@@ -4975,15 +4975,13 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
         entry_i = entry_i + 1
     RuleBuckets(id_keys: id_keys, id_rules: id_rules, class_keys: class_keys, class_rules: class_rules, tag_keys: tag_keys, tag_rules: tag_rules, fallback_rules: fallback_rules, id_key_dict: id_key_dict, class_key_dict: class_key_dict, tag_key_dict: tag_key_dict)
 
-fn dict_key_index(d: Dict<text, i32>, key: text) -> i32:
-    if d.has(key):
-        return d[key]
-    -1
+fn dict_key_index(d: Dict<text, i32>, keys: [text], key: text) -> i32:
+    dict_key_index_count(d, keys, key, keys.len().to_i32())
 
 fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
     val class_count = node.class_words.len()
     if class_count == 0 and node.id_attr.len() == 0:
-        val tag_idx = dict_key_index(buckets.tag_key_dict, node.tag)
+        val tag_idx = dict_key_index(buckets.tag_key_dict, buckets.tag_keys, node.tag)
         if tag_idx < 0:
             return buckets.fallback_rules
         return merge_two_sorted_rule_lists_unique(buckets.fallback_rules, buckets.tag_rules[tag_idx])
@@ -4992,11 +4990,11 @@ fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
     lists[list_count] = buckets.fallback_rules
     list_count = list_count + 1
     if node.id_attr.len() > 0:
-        val id_idx = dict_key_index(buckets.id_key_dict, node.id_attr)
+        val id_idx = dict_key_index(buckets.id_key_dict, buckets.id_keys, node.id_attr)
         if id_idx >= 0:
             lists[list_count] = buckets.id_rules[id_idx]
             list_count = list_count + 1
-    val tag_idx = dict_key_index(buckets.tag_key_dict, node.tag)
+    val tag_idx = dict_key_index(buckets.tag_key_dict, buckets.tag_keys, node.tag)
     if tag_idx >= 0:
         lists[list_count] = buckets.tag_rules[tag_idx]
         list_count = list_count + 1
@@ -5005,7 +5003,7 @@ fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
         val cls = node.class_words[i]
         if cls.len() > 0:
             if class_count <= 1 or not text_seen_before(node.class_words, i, cls):
-                val class_idx = dict_key_index(buckets.class_key_dict, cls)
+                val class_idx = dict_key_index(buckets.class_key_dict, buckets.class_keys, cls)
                 if class_idx >= 0:
                     lists[list_count] = buckets.class_rules[class_idx]
                     list_count = list_count + 1
