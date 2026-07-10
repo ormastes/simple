@@ -1008,3 +1008,26 @@ Next fix locus (all backend, `llvm_lib_*`): (a) type-mapper array→ptr mapping 
 (b) zext i1→i64 coercion in translate_binop arithmetic, (c) call-arg coercion to declared signature,
 (d) return-type coercion, (e) the last null Const operand. Each error is now printed with the exact
 LLVM instruction, so these are directly actionable.
+
+## Update 2026-07-10 (type-mapper wave, landed 2c15339a) — verifier errors 19→1; remaining = one MIR use-before-def producer
+
+Fixes verified across bootstrap runs 7-13: (1) LlvmLibTypeMapper Array→ptr (was LLVM array VALUE
+type; cleared 14/19 errors); (2) LLVM type-kind constants corrected everywhere after an empirical C
+probe against libLLVM 18 (Integer=8, Pointer=12; code had 10/14=Struct/Metadata) — this covered
+translate_cast TK_*, the Int(0)-as-ptr const_null gate (x==nil compares built an invalid ConstInt →
+the FoldCmp crasher), Eq/Ne ptr-compare branches, If-cond/Not zero choice; (3) ret coercion +
+binop i1 harmonization; (4) null-operand hardening: every null path now eprints a NAMED error
+(undefined local / operand kind / callee) and substitutes a diagnosable placeholder — no more
+segfaults from LLVMTypeOf/BuildCall2/Build* on null; (5) void calls unnamed.
+
+ALSO: peer WC-sweeps (e8444b6b + merge) re-reverted TWO landed fixes — translate_call local.id and
+the LLVMSetDataLayout NUL-termination (all 3 copies) — both restored in 2c15339a. WC sweeps from
+stale sessions are actively regressing landed bootstrap fixes; check these two sites after any
+peer "WC sweep" commit.
+
+**Current state [run 13]:** exit 139; diagnostics fired: `read of undefined local _3` +
+`binop operand translated to null (lhs=Copy#2 ok, rhs=0 Copy#3)`. So ONE MIR use-before-def
+producer remains (a _3 consumed by a binop directly — NOT the lower_if merge case, NOT the fixed
+lower_method_call sites), plus one residual crash path past the guarded sites (crash after the
+diagnostics printed). Next: find _3's producing expression in the MIR (the named diagnostic now
+survives to the log), fix its lowering; and guard/identify the residual post-diagnostic crash site.
