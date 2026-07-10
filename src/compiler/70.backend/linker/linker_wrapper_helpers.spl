@@ -338,10 +338,26 @@ fn write_elf_bytes_to_file(path: text, bytes: [i64]) -> Result<(), text>:
     if not rt_file_write_bytes(path, data):
         return Err("Failed to write ELF bytes to {path}")
 
-    # Lightweight magic check to catch obvious corruption
+    # Lightweight magic check to catch obvious corruption. Despite the
+    # function name (historically ELF-only, written when the native-build
+    # object emitter only ever targeted Linux), the in-process LLVM backend
+    # also runs on macOS/Windows hosts and legitimately emits Mach-O
+    # (0xFEEDFACE/0xFEEDFACF little-endian == bytes CE/CF FA ED FE, or the
+    # byte-swapped big-endian form FE ED FA CE/CF) or a fat/universal binary
+    # (0xCAFEBABE) there -- an ELF-only check was misfiring as "Invalid ELF
+    # magic" on those hosts even for a correctly-formed native object.
+    # Accept any recognized native object-format magic instead of hardcoding
+    # ELF, so this stays a corruption check, not an OS-format enforcement.
     if bytes.len() >= 4:
-        if bytes[0] != 0x7f or bytes[1] != 0x45 or bytes[2] != 0x4c or bytes[3] != 0x46:
-            return Err("Invalid ELF magic in {path}")
+        val is_elf = bytes[0] == 0x7f and bytes[1] == 0x45 and bytes[2] == 0x4c and bytes[3] == 0x46
+        val is_macho_64_le = bytes[0] == 0xcf and bytes[1] == 0xfa and bytes[2] == 0xed and bytes[3] == 0xfe
+        val is_macho_32_le = bytes[0] == 0xce and bytes[1] == 0xfa and bytes[2] == 0xed and bytes[3] == 0xfe
+        val is_macho_64_be = bytes[0] == 0xfe and bytes[1] == 0xed and bytes[2] == 0xfa and bytes[3] == 0xcf
+        val is_macho_32_be = bytes[0] == 0xfe and bytes[1] == 0xed and bytes[2] == 0xfa and bytes[3] == 0xce
+        val is_macho_fat = bytes[0] == 0xca and bytes[1] == 0xfe and bytes[2] == 0xba and bytes[3] == 0xbe
+        val is_pe_coff = bytes[0] == 0x4d and bytes[1] == 0x5a  # "MZ"
+        if not (is_elf or is_macho_64_le or is_macho_32_le or is_macho_64_be or is_macho_32_be or is_macho_fat or is_pe_coff):
+            return Err("Invalid object-file magic in {path} (bytes: {bytes[0]} {bytes[1]} {bytes[2]} {bytes[3]})")
 
     Ok(())
 

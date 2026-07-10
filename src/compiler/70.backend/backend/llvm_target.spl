@@ -229,7 +229,7 @@ impl LlvmTargetConfig:
         val plan = portable_numeric_default_plan_for_target(target)
 
         match target:
-            case X86_64 | Host | SimpleOS_X86_64:
+            case X86_64 | SimpleOS_X86_64:
                 # Use the canonical "x86-64" baseline, not the "x86-64-v1" microarch
                 # alias: the dlopen'd libLLVM-18 (llvm-lib backend) rejects the vN
                 # aliases with "64-bit code requested on a subtarget that doesn't
@@ -241,6 +241,39 @@ impl LlvmTargetConfig:
                     features: [],
                     abi: nil
                 )
+            case Host:
+                # Delegate to the detected host architecture -- Host must NOT
+                # inherit the X86_64 "x86-64" CPU string unconditionally: on an
+                # aarch64 host that string is not a recognized processor for
+                # the aarch64-apple-darwin target ("'x86-64' is not a
+                # recognized processor for this target"), which corrupts the
+                # emitted object file (wrong ISA => "Invalid ELF magic" /
+                # bad Mach-O downstream). Mirror for_target_with_mode's Host
+                # case here so the portable-numeric path stays triple-aware.
+                val detected = detect_host_arch()
+                if detected == "aarch64":
+                    LlvmTargetConfig(
+                        triple: triple,
+                        cpu: "generic",
+                        features: ["+neon", "+fp-armv8"],
+                        abi: nil
+                    )
+                elif detected == "riscv64":
+                    val contract = riscv_linux_target_contract_portable_numeric(CodegenTarget.Riscv64)
+                    LlvmTargetConfig(
+                        triple: triple,
+                        cpu: contract.cpu,
+                        features: contract.features,
+                        abi: Some(contract.abi.to_text())
+                    )
+                else:
+                    val cpu = if plan.capabilities.requires_runtime_simd_probe: "x86-64" else: "x86-64-v3"
+                    LlvmTargetConfig(
+                        triple: triple,
+                        cpu: cpu,
+                        features: [],
+                        abi: nil
+                    )
             case AArch64:
                 LlvmTargetConfig(
                     triple: triple,

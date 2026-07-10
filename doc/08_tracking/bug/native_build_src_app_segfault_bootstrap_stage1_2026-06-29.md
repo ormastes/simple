@@ -70,6 +70,10 @@ Stage-1 wall. All current diagnosis and fixes (SIGSEGV elimination via
 of the two "Function return type does not match operand type of return inst"
 IR-verifier errors via named `Ret`-case fixes in `llvm_lib_translate.spl`) are
 tracked in `bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`.
-As of 2026-07-10, Stage 1 is SIGSEGV-free, IR-verification-clean, and the wall
-has moved to object-file emission (an apparent x86-64/ELF target-cache
-mismatch on the aarch64 Mach-O host) — see that doc for the current state.
+As of 2026-07-10 (emission-wall session), Stage 1 is SIGSEGV-free,
+IR-verification-clean, and object-file emission now **succeeds** (fixed a
+triple-unaware `Host` CPU-string leak in `llvm_target.spl` and an ELF-only
+magic check in `linker_wrapper_helpers.spl` that rejected valid Mach-O
+objects on this aarch64 Mac host). Stage 1 still fails overall on a new,
+unrelated frontend wall (`semantic: method 'replace' not found on value of
+type str in nested call context`) — see that doc for the current state.

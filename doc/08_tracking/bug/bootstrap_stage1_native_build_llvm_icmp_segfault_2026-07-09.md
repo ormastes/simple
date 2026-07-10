@@ -1319,3 +1319,108 @@ probe). Kept: the 3 named `Ret`-case diagnostics + fixes above.
 
 **Everything in this update is uncommitted** (per session constraints — no
 commit/push, no Rust seed, no `test/**`).
+
+## Update 2026-07-10 (emission-wall session, per `emission_wall_guide.md`) — CPU-string + ELF-magic wall FIXED; object emission now succeeds (valid Mach-O arm64); wall moves to an unrelated frontend semantic error
+
+**Baseline (run 1, `bin/simple build bootstrap`):** reproduced the prior
+session's end state exactly — clean IR verification, then object emission
+failing with `'x86-64' is not a recognized processor for this target
+(ignoring processor)` followed by `Failed to write object file ...:
+Invalid ELF magic in ...object.app.cli.bootstrap_main.o` on this
+aarch64-apple-darwin host.
+
+**Diagnosis (static, no extra runs needed beyond the 1 verification run):**
+
+1. **"x86-64" leak — confirmed root cause.** `LlvmTargetConfig`
+   (`src/compiler/70.backend/backend/llvm_target.spl`) has two independent
+   CPU-selection functions: `for_target_with_mode` (used by some callers)
+   correctly special-cases `Host` by calling `detect_host_arch()` and
+   picking `generic`/`+neon`/`+fp-armv8` on aarch64. But the function that's
+   actually live for the `llvm-lib` backend —
+   `for_target_portable_numeric_with_mode`, called from
+   `llvm_lib_backend.spl:50` via `LlvmTargetConfig.for_target_portable_numeric`
+   — grouped `case X86_64 | Host | SimpleOS_X86_64:` together and
+   unconditionally returned `"x86-64"`/`"x86-64-v3"` for `Host`, regardless
+   of the actual detected architecture. On this aarch64 Mac, `Host` resolves
+   to an `aarch64-apple-darwin` triple but was being handed the x86-64 CPU
+   string, which LLVM correctly rejects as "not a recognized processor for
+   this target" and then falls back to an unspecified/garbage subtarget for
+   object emission.
+2. **"Invalid ELF magic" — case (a), confirmed.** With the corrupted
+   CPU/subtarget, LLVM's in-process `LLVMTargetMachineEmitToMemoryBuffer`
+   (invoked from `llvm_lib_backend.spl:114`) still emits an object for the
+   `aarch64-apple-darwin` triple — which is Mach-O, not ELF. The write path
+   (`driver_aot_output.spl:759` → `write_elf_bytes_to_file` in
+   `linker_wrapper_helpers.spl`) unconditionally validated the first 4 bytes
+   against the ELF magic (`0x7f 'E' 'L' 'F'`) with no OS/format awareness —
+   this is an ELF-only check on a Mach-O host, not a stale-cache issue; the
+   object being validated was freshly emitted this run, not read from a
+   cache.
+
+**Fixes applied (uncommitted, KEEPERS):**
+1. `src/compiler/70.backend/backend/llvm_target.spl` —
+   `for_target_portable_numeric_with_mode`: split `Host` out of the
+   `X86_64 | Host | SimpleOS_X86_64` case and gave it its own arm that calls
+   `detect_host_arch()` (mirroring `for_target_with_mode`'s existing Host
+   arm) — `aarch64` → `cpu: "generic", features: ["+neon", "+fp-armv8"]`;
+   `riscv64` → delegates to `riscv_linux_target_contract_portable_numeric`;
+   else → the existing x86-64/x86-64-v3 baseline logic. `X86_64` and
+   `SimpleOS_X86_64` keep their original (correct, target-fixed, not
+   host-detected) behavior unchanged. This is the only live copy of this
+   selection logic for the `llvm-lib` backend — the raw FFI
+   `llvm_create_target_machine` wrappers in
+   `src/lib/{nogc_sync_mut,nogc_async_mut}/{ffi,sffi}/llvm_target.spl` only
+   forward a `cpu: text` parameter and never hardcode a CPU string, so no
+   sibling fix was needed there.
+2. `src/compiler/70.backend/linker/linker_wrapper_helpers.spl` —
+   `write_elf_bytes_to_file`: replaced the ELF-only magic check with
+   recognition of ELF, Mach-O 32/64 (both byte orders), Mach-O fat/universal,
+   and PE/COFF ("MZ") magics, so a correctly-formed native object on a
+   non-Linux host is no longer rejected as corrupt. Kept as a genuine
+   corruption check (still errors if none of the known magics match), not a
+   blind bypass.
+
+**Post-fix state (run 1, `bin/simple build bootstrap`, only run this
+session):** the `'x86-64' is not a recognized processor` and `Invalid ELF
+magic` errors are both **gone**. Confirmed empirically:
+`build/native_cache/backend=llvm-lib;cpu=native;features=;opt=3/object.app.cli.bootstrap_main.o`
+was written this run and its first 16 bytes are `cf fa ed fe ...` — `file`
+identifies it as `Mach-O 64-bit object arm64`, i.e. a correctly-targeted,
+valid object for this host. Object emission for
+`app.cli.bootstrap_main` **succeeds**.
+
+Stage 1 still **FAILED** overall (exit 1) — but on a new, unrelated wall,
+later in the pipeline than object emission:
+```
+error: semantic: method 'replace' not found on value of type str in nested call context
+error: native-build worker exited with code 1.
+```
+This is a frontend/semantic error (missing `str.replace` resolution in a
+nested call context), not a codegen/emission issue, and was not
+investigated further this session (out of scope for the emission-wall
+guide; flagged for whoever picks this up next).
+
+**Runs used:** 1 of the 3-run cap (`pgrep` confirmed no concurrent
+bootstrap before starting; no probes needed since the two fixes were
+locatable and verifiable statically + via the resulting object file's magic
+bytes, so no extra diagnostic runs were spent).
+
+**Regression checkpoints re-verified intact post-session:**
+`llvm_lib_translate_expr.spl:504/506` still `get_value(value_map,
+local.id)`; all 3 `llvm_types.spl` copies still NUL-terminate
+`LLVMSetDataLayout`'s `layout` via `(layout + "\0").ptr()`; all 4
+`LLVMBuildCall2` call sites still NUL-terminate `Name` via `(name +
+"\0")`; the 3 named `Ret`-case diagnostics in `llvm_lib_translate.spl` from
+the prior session are unchanged.
+
+**Probes:** none added this session (fix was direct, no exploratory
+instrumentation needed).
+
+**Files touched this session (uncommitted, left for review):**
+- `src/compiler/70.backend/backend/llvm_target.spl` (triple-aware `Host`
+  CPU selection in `for_target_portable_numeric_with_mode`)
+- `src/compiler/70.backend/linker/linker_wrapper_helpers.spl`
+  (multi-format object-magic validation in `write_elf_bytes_to_file`)
+
+**Everything in this update is uncommitted** (per session constraints — no
+commit/push, no Rust seed, no `test/**`).
