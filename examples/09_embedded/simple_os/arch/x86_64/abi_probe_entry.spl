@@ -43,6 +43,16 @@ extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_bytes_alloc_packed_empty() -> [u8]
 extern fn rt_push_byte(arr: [u8], b: i64) -> [u8]
 
+# P13 helpers: text/string char-decode + starts_with (x64 freestanding text bug)
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
+extern fn rt_string_len(str: text) -> i64
+extern fn rt_string_char_at(str: text, idx: i64) -> u64        # raw tagged bits of 1-char string
+extern fn rt_string_char_code_at(str: text, idx: i64) -> i64   # actual code point
+extern fn rt_string_starts_with(str: text, prefix: text) -> i64
+extern fn rt_string_eq(a: text, b: text) -> i64
+extern fn rt_abi_probe_str_hdr_type(str: text) -> u64
+extern fn rt_abi_probe_str_handle(str: text) -> u64
+
 fn serial_wait_ready():
     var guard: i64 = 100000
     while guard > 0:
@@ -380,6 +390,115 @@ fn spl_start():
     serial_put(32)
     mark(103)  # 'g'= struct field [0] (expect 65)
     serial_dec_i64(h12.data[0] as i64)
+    serial_newline()
+
+    # ---- P13: text char-decode + starts_with (x64 freestanding text bug) ----
+    # Build "ABCDEFGH" text via rt_string_from_byte_array (the sshd wire-text
+    # construction path), plus a "ABC" prefix two ways (from_byte_array vs text
+    # literal) to discriminate literal-header breakage.
+    val tbytes = _mk_bytes_simple()               # packed "ABCDEFGH"
+    val t = rt_string_from_byte_array(tbytes)      # text from bytes
+
+    var pbytes = rt_bytes_alloc_packed_empty()
+    pbytes = rt_push_byte(pbytes, 0x41)  # 'A'
+    pbytes = rt_push_byte(pbytes, 0x42)  # 'B'
+    pbytes = rt_push_byte(pbytes, 0x43)  # 'C'
+    val pfba = rt_string_from_byte_array(pbytes)   # "ABC" from bytes
+    val plit: text = "ABC"                          # "ABC" literal
+    val tlit: text = "ABCDEFGH"                     # "ABCDEFGH" literal
+
+    # P13a: headers + lengths (HEAP_STRING == 1 means strict decode accepts it)
+    serial_put(80)
+    serial_put(49)
+    serial_put(51)
+    serial_put(97)  # "P13a"
+    serial_put(32)
+    mark(76)  # 'L'= len via extern rt_string_len (expect 8)
+    serial_dec_i64(rt_string_len(t))
+    serial_put(32)
+    mark(116)  # 't'= t hdr.type (expect 1)
+    serial_hex_u64(rt_abi_probe_str_hdr_type(t))
+    serial_put(32)
+    mark(102)  # 'f'= pfba hdr.type (expect 1)
+    serial_hex_u64(rt_abi_probe_str_hdr_type(pfba))
+    serial_put(32)
+    mark(108)  # 'l'= plit hdr.type (SUSPECT — literal header)
+    serial_hex_u64(rt_abi_probe_str_hdr_type(plit))
+    serial_newline()
+
+    # P13b: char_at raw bits (reproduce c0=c1=0x1200000001 fingerprint) + char_code_at
+    serial_put(80)
+    serial_put(49)
+    serial_put(51)
+    serial_put(98)  # "P13b"
+    serial_put(32)
+    mark(48)  # '0'= char_at(0) raw (bug: identical mangled tag)
+    serial_hex_u64(rt_string_char_at(t, 0))
+    serial_put(32)
+    mark(49)  # '1'= char_at(1) raw
+    serial_hex_u64(rt_string_char_at(t, 1))
+    serial_newline()
+
+    var ci: i64 = 0
+    while ci < 8:
+        serial_put(80)
+        serial_put(49)
+        serial_put(51)
+        serial_put(99)  # "P13c"
+        serial_put(91)  # '['
+        serial_dec_i64(ci)
+        serial_put(93)  # ']'
+        serial_put(32)
+        mark(99)  # 'c'= char_code_at (expect 65..72)
+        serial_dec_i64(rt_string_char_code_at(t, ci))
+        serial_newline()
+        ci = ci + 1
+
+    # P13d: starts_with — extern direct, all four receiver/prefix construction pairs
+    serial_put(80)
+    serial_put(49)
+    serial_put(51)
+    serial_put(100)  # "P13d"
+    serial_put(32)
+    mark(65)  # 'A'= sw(t, pfba)  extern recv + fba prefix  (expect 1)
+    serial_dec_i64(rt_string_starts_with(t, pfba))
+    serial_put(32)
+    mark(66)  # 'B'= sw(t, plit)  extern recv + literal prefix (SUSPECT; expect 1)
+    serial_dec_i64(rt_string_starts_with(t, plit))
+    serial_put(32)
+    mark(67)  # 'C'= sw(tlit, pfba)  literal recv + fba prefix (expect 1)
+    serial_dec_i64(rt_string_starts_with(tlit, pfba))
+    serial_put(32)
+    mark(68)  # 'D'= sw(tlit, plit)  literal recv + literal prefix (expect 1)
+    serial_dec_i64(rt_string_starts_with(tlit, plit))
+    serial_put(32)
+    mark(69)  # 'E'= eq(t, tlit) control (expect 1)
+    serial_dec_i64(rt_string_eq(t, tlit))
+    serial_newline()
+
+    # P13e: Simple-method dispatch (exact sshd `command.trim().starts_with("/")` shape)
+    val m_sw = t.starts_with(plit)                 # non-chained method
+    val m_cc = t.char_code_at(0)                   # non-chained method
+    val m_sw_chain = t.trim().starts_with(plit)    # CHAINED (sshd shape; documented-broken)
+    serial_put(80)
+    serial_put(49)
+    serial_put(51)
+    serial_put(101)  # "P13e"
+    serial_put(32)
+    mark(115)  # 's'= t.starts_with("ABC") method form (expect 1)
+    if m_sw:
+        serial_dec_i64(1)
+    else:
+        serial_dec_i64(0)
+    serial_put(32)
+    mark(99)  # 'c'= t.char_code_at(0) method form (expect 65)
+    serial_dec_i64(m_cc)
+    serial_put(32)
+    mark(120)  # 'x'= t.trim().starts_with("ABC") chained (SUSPECT; expect 1)
+    if m_sw_chain:
+        serial_dec_i64(1)
+    else:
+        serial_dec_i64(0)
     serial_newline()
 
     serial_put(80)

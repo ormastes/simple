@@ -6445,17 +6445,17 @@ RuntimeValue rt_string_from_byte_array(RuntimeValue arr)
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return rt_string_new(0, 0);
     uint32_t len = a->len;
-    RuntimeValue *items = runtime_array_items(a);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = len;
+    /* Header-dispatch each element: packed [u8] is 1 byte/element, legacy
+     * tagged arrays are 8-byte ENCODE_INT slots. Reading a packed buffer as
+     * 8-byte slots recovers only element 0 (its low byte) and reads garbage/OOB
+     * for every later element — the x64 freestanding text mis-decode bug. */
     for (uint32_t i = 0; i < len; i++) {
-        RuntimeValue v = items[i];
-        /* Items may be tagged (from BoxInt push) or raw */
-        int64_t byte_val = IS_INT(v) ? DECODE_INT(v) : (int64_t)v;
-        s->data[i] = (char)(byte_val & 0xFF);
+        s->data[i] = (char)_rt_bytes_get(a, i);
     }
     s->data[len] = '\0';
     return ENCODE_PTR(s);
@@ -9712,6 +9712,26 @@ uint64_t rt_abi_probe_items_ptr(RuntimeValue arr_rv)
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
     if (!arr || arr->hdr.type != HEAP_ARRAY) return 0xFFFFFFFFFFFFFFF2ULL;
     return (uint64_t)(uintptr_t)runtime_array_items(arr);
+}
+
+/* --- text/string decode probe helpers (x64 freestanding char_at/starts_with bug) --- */
+/* Report the heap header type byte of a text value. HEAP_STRING(1) means the
+ * strict decode_string() path (used by starts_with/contains/trim) accepts it;
+ * anything else is why starts_with returns 0 while rt_string_eq (which skips the
+ * header check) still matches. */
+uint64_t rt_abi_probe_str_hdr_type(RuntimeValue str_rv)
+{
+    if (!IS_HEAP(str_rv)) return 0xFFFFFFFFFFFFFF01ULL; /* not heap-tagged */
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str_rv);
+    if (!s) return 0xFFFFFFFFFFFFFF02ULL;
+    return (uint64_t)s->hdr.type;
+}
+
+/* Raw tagged bits of a text value (so a literal vs from_byte_array can be told
+ * apart, and char_at's returned 1-char-string pointer can be shown verbatim). */
+uint64_t rt_abi_probe_str_handle(RuntimeValue str_rv)
+{
+    return (uint64_t)str_rv;
 }
 
 int64_t rt_bytes_u16_be_at(RuntimeValue arr_rv, int64_t idx)
