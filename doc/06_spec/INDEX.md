@@ -7,13 +7,13 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 130
+- **Total Lines:** 40
 
 ---
 
-## Standard Library (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Simpleos Render Evidence Specification](test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.md) | Partial | N/A | 13 | 60% | 130 lines |
+| [Simple Web Backend Equivalence Specification](test/03_system/gui/wm_compare/simple_web_backend_equivalence_spec.md) | Minimal | N/A | 4 | 20% | 40 lines |
 

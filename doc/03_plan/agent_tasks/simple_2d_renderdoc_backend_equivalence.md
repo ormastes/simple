@@ -34,3 +34,12 @@
 4. Implement SimpleOS receipt/QMP correlation and target-native SIMD lanes.
 5. Implement replay inspection/aggregate and web corpus profiles.
 6. Refactor docs/wiki, verify once per AC, and run highest-capability review.
+
+## Remaining External-Evidence Handoff
+
+- TODO 528: run the Metal record/equivalence lane on a Metal-capable host; no
+  MoltenVK runtime exists on this Linux host.
+- TODO 529: obtain an independently reviewed SimpleOS QEMU framebuffer oracle
+  before enabling exact x86_64/AArch64/RV64 guest comparisons.
+- Do not replace either prerequisite with a software fallback, generated
+  baseline, tolerance, or synthetic positive receipt.

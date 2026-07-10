@@ -7,6 +7,11 @@
 # Driven by scripts/check/check-renderdoc-vulkan-capture.shs.
 
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.common.crypto.sha256.{sha256_text}
+use common.renderdoc.backend_render_record.{
+    backend_render_field, backend_render_record_finalize,
+    validate_backend_render_record
+}
 use app.test.renderdoc_runtime_ops.{
     renderdoc_available, renderdoc_capture_file_path_template_from_env,
     renderdoc_configure_capture_file_path_template_from_env,
@@ -14,6 +19,57 @@ use app.test.renderdoc_runtime_ops.{
     renderdoc_end_capture_for_device, renderdoc_num_captures,
     vulkan_renderdoc_device_pointer
 }
+
+fn _capture_pixel_text(pixels: [u32]) -> text:
+    var out = ""
+    for pixel in pixels:
+        out = out + pixel.to_text() + ","
+    out
+
+fn _capture_nonblank_pixels(pixels: [u32]) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel != 0:
+            count = count + 1
+    count
+
+fn _print_observed_frame_record(backend: text, device: i64, pixels: [u32]):
+    val pixel_hash = sha256_text(_capture_pixel_text(pixels))
+    val fields = [
+        backend_render_field("commands.000.kind", "clear", "text", true),
+        backend_render_field("commands.001.kind", "draw_rect_filled", "text", true),
+        backend_render_field("commands.002.kind", "draw_circle_filled", "text", true),
+        backend_render_field("commands.count", "3", "i64", true),
+        backend_render_field("frame.backend_handle", device.to_text(), "i64", false),
+        backend_render_field("frame.complete", "true", "bool", true),
+        backend_render_field("pipelines.000.pipeline_hash", sha256_text("engine2d-vulkan-compute"), "sha256", true),
+        backend_render_field("producer.actual_backend", backend, "text", false),
+        backend_render_field("producer.adapter", "renderdoc-vulkan-device", "text", false),
+        backend_render_field("producer.execution_kind", "native", "text", false),
+        backend_render_field("producer.native_api", "vulkan", "text", false),
+        backend_render_field("producer.requested_backend", "vulkan", "text", false),
+        backend_render_field("producer.translation_layer", "none", "text", false),
+        backend_render_field("readback.content_hash", pixel_hash, "sha256", true),
+        backend_render_field("readback.format", "argb-u32", "text", true),
+        backend_render_field("readback.height", "48", "i64", true),
+        backend_render_field("readback.nonblank_pixel_count", _capture_nonblank_pixels(pixels).to_text(), "i64", true),
+        backend_render_field("readback.pixel_count", pixels.len().to_text(), "i64", true),
+        backend_render_field("readback.source", "engine2d.read_pixels", "text", true),
+        backend_render_field("readback.stride", "256", "i64", true),
+        backend_render_field("readback.width", "64", "i64", true),
+        backend_render_field("target.content_hash", pixel_hash, "sha256", true),
+        backend_render_field("target.format", "argb-u32", "text", true),
+        backend_render_field("target.height", "48", "i64", true),
+        backend_render_field("target.stride", "256", "i64", true),
+        backend_render_field("target.width", "64", "i64", true),
+        backend_render_field("transitions.000.after", "readback", "text", true),
+        backend_render_field("transitions.000.before", "compute", "text", true)
+    ]
+    val record = backend_render_record_finalize("engine2d-vulkan-capture", fields)
+    match validate_backend_render_record(record):
+        Ok(_):
+            print("renderdoc_record_valid=1 semantic_hash=" + record.semantic_hash + " record_hash=" + record.record_hash + " pixel_hash=" + pixel_hash + "\n")
+        Err(error): print("renderdoc_record_valid=0 reason=" + error.code + "\n")
 
 fn main():
     val avail = renderdoc_available()
@@ -54,6 +110,7 @@ fn main():
     eng.clear(0xFF224466u32)
     eng.draw_rect_filled(8, 8, 40, 24, 0xFFCC2020u32)
     eng.draw_circle_filled(48, 36, 8, 0xFF30C060u32)
+    eng.present()
     val px = eng.read_pixels()
 
     val capturing_before_end = renderdoc_is_frame_capturing()
@@ -64,3 +121,4 @@ fn main():
         ended = renderdoc_end_capture_for_device(device)
     print("renderdoc_capturing_before_end=" + capturing_before_end.to_text() + "\n")
     print("renderdoc_end=" + ended.to_text() + " pixels=" + px.len().to_text() + " num_captures=" + renderdoc_num_captures().to_text() + "\n")
+    _print_observed_frame_record(eng.backend_name(), device, px)
