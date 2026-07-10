@@ -1,0 +1,33 @@
+use std.spec.*
+use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_reset_for_test, memory_leveling_runtime_register_cpu_range, memory_leveling_runtime_register_dma, memory_leveling_runtime_unregister_dma, memory_leveling_runtime_dma_sync_for_device, memory_leveling_runtime_dma_sync_for_cpu, memory_leveling_runtime_manager, memory_leveling_runtime_replace_manager}
+
+describe "SimpleOS DMA memory-leveling runtime":
+
+    it "tracks an allocation through ordered device ownership":
+        memory_leveling_runtime_reset_for_test()
+        expect(memory_leveling_runtime_register_dma(42, 7, 0x70000000, 0x200000, 4096, true).ok).to_equal(true)
+        expect(memory_leveling_runtime_dma_sync_for_device(42, 7).ok).to_equal(true)
+        var manager = memory_leveling_runtime_manager()
+        expect(manager.get(42).unwrap().state.name).to_equal("device_owned")
+        expect(manager.get(42).unwrap().in_flight_count).to_equal(1)
+        memory_leveling_runtime_replace_manager(manager)
+
+        expect(memory_leveling_runtime_dma_sync_for_cpu(42, 7).ok).to_equal(true)
+        manager = memory_leveling_runtime_manager()
+        expect(manager.get(42).unwrap().state.name).to_equal("cpu_owned")
+        expect(manager.get(42).unwrap().mapping_count).to_equal(0)
+        memory_leveling_runtime_replace_manager(manager)
+        expect(memory_leveling_runtime_unregister_dma(42, 7).ok).to_equal(true)
+
+    it "rejects non-coherent DMA without a cache-maintenance owner":
+        memory_leveling_runtime_reset_for_test()
+        expect(memory_leveling_runtime_register_dma(43, 7, 0x70001000, 0x201000, 4096, false).reason).to_equal("coherency-unproven")
+
+    it "allocates CPU and DMA identifiers from one manager sequence":
+        memory_leveling_runtime_reset_for_test()
+        val cpu = memory_leveling_runtime_register_cpu_range(0x60000000, 4096, 7)
+        val dma = memory_leveling_runtime_register_dma(0, 7, 0x70002000, 0x202000, 4096, true)
+
+        expect(cpu.ok).to_equal(true)
+        expect(dma.ok).to_equal(true)
+        expect(dma.allocation_ids[0]).to_not_equal(cpu.allocation_ids[0])
