@@ -1561,7 +1561,7 @@ int64_t rt_array_len(SplArray* a) {
 int64_t rt_array_get(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 3;
-    idx = rt_core_numeric_arg(idx);
+    /* Native array ABI matches the Rust runtime: indices are raw i64 values. */
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 3;
     if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
@@ -1577,7 +1577,6 @@ int64_t rt_array_get_text(SplArray* a, int64_t idx) {
 void rt_array_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return;
     if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {

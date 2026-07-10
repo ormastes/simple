@@ -37,13 +37,74 @@ fn u32_comparison_body() -> MirBody:
         return_ty: MirType.unit()
     )
 
+fn mixed_u32_comparison_body() -> MirBody:
+    val u32_ty = MirType(kind: MirTypeKind.U32)
+    MirBody(
+        name: "mixed_u32_comparison",
+        blocks: [
+            MirBlock(
+                id: BlockId.entry(),
+                label: Some("entry"),
+                instructions: [
+                    MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(4279246896), MirType.i64()), span: nil),
+                    MirInst(kind: MirInstKind.Cast(LocalId(id: 2), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), u32_ty), span: nil),
+                    MirInst(kind: MirInstKind.Const(LocalId(id: 3), MirConstValue.Int(4279246896), MirType.i64()), span: nil),
+                    MirInst(
+                        kind: MirInstKind.BinOp(
+                            LocalId(id: 4),
+                            MirBinOp.Ne,
+                            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                        ),
+                        span: nil
+                    )
+                ],
+                terminator: MirTerminator.Ret(nil)
+            )
+        ],
+        locals: [
+            MirLocal(id: LocalId(id: 1), name: Some("wide_source"), type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: LocalId(id: 2), name: Some("narrow_color"), type_: u32_ty, kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: LocalId(id: 3), name: Some("wide_color"), type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: LocalId(id: 4), name: Some("different"), type_: MirType.bool(), kind: LocalKind.Temp, is_ghost: false)
+        ],
+        arg_count: 0,
+        return_ty: MirType.unit()
+    )
+
+fn inline_u32_comparison_body() -> MirBody:
+    val u32_ty = MirType(kind: MirTypeKind.U32)
+    MirBody(
+        name: "inline_u32_comparison",
+        blocks: [MirBlock(
+            id: BlockId.entry(),
+            label: Some("entry"),
+            instructions: [MirInst(
+                kind: MirInstKind.BinOp(
+                    LocalId(id: 2),
+                    MirBinOp.Ne,
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(4279246896), u32_ty))
+                ),
+                span: nil
+            )],
+            terminator: MirTerminator.Ret(nil)
+        )],
+        locals: [
+            MirLocal(id: LocalId(id: 1), name: Some("wide_color"), type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: LocalId(id: 2), name: Some("different"), type_: MirType.bool(), kind: LocalKind.Temp, is_ghost: false)
+        ],
+        arg_count: 0,
+        return_ty: MirType.unit()
+    )
+
 describe "LLVM comparison operand type lowering":
     it "compares operands in operand type before producing bool result":
         val source = rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
 
         expect(source).to_contain("val eq_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))")
-        expect(source).to_contain("val eq_left = self.value_as_type(left_raw, self.get_operand_type(left), eq_cmp_ty)")
-        expect(source).to_contain("val eq_right = self.value_as_type(right_raw, self.get_operand_type(right), eq_cmp_ty)")
+        expect(source).to_contain("val eq_left = self.operand_as_type(left_raw, left, eq_cmp_ty)")
+        expect(source).to_contain("val eq_right = self.operand_as_type(right_raw, right, eq_cmp_ty)")
         expect(source).to_not_contain("self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, left_val, right_val)")
         expect(source).to_not_contain("self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, left_val, right_val)")
 
@@ -63,3 +124,26 @@ describe "LLVM comparison operand type lowering":
 
         expect(output).to_contain("%l3 = icmp ne i32 %l1, %l2")
         expect(output.contains("icmp ne i64 %l1, %l2")).to_equal(false)
+
+    it "zero extends a u32 operand for a mixed-width comparison":
+        val translator = MirToLlvm.create("test.llvm.u32_mixed_width", CodegenTarget.X86_64, nil)
+        translator.translate_function("mixed_u32_comparison", mixed_u32_comparison_body())
+        val output = translator.builder.build()
+
+        expect(output).to_contain("zext i32 %l2 to i64")
+        expect(output.contains("sext i32 %l2 to i64")).to_equal(false)
+
+    it "zero extends an inline u32 comparison operand":
+        val translator = MirToLlvm.create("test.llvm.u32_inline", CodegenTarget.X86_64, nil)
+        translator.translate_function("inline_u32_comparison", inline_u32_comparison_body())
+        val output = translator.builder.build()
+
+        expect(output).to_contain("zext i32 4279246896 to i64")
+        expect(output.contains("sext i32 4279246896 to i64")).to_equal(false)
+
+    it "clears stale unsigned metadata for an authoritative signed constant":
+        val translator = MirToLlvm.create("test.llvm.signed_override", CodegenTarget.X86_64, nil)
+        translator.unsigned_values["%l1"] = true
+        translator.translate_const(LocalId(id: 1), MirConstValue.Int(-1), MirType(kind: MirTypeKind.I32))
+
+        expect(translator.unsigned_values.has("%l1")).to_equal(false)

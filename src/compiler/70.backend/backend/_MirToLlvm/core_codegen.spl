@@ -175,6 +175,7 @@ impl MirTextCodegen for MirToLlvm:
         self.defined_func_names[name] = true
         self.local_types = {}
         self.value_types = {}
+        self.unsigned_values = {}
         self.defined_locals = {}
         self.return_locals = {}
         self.bool_locals = {}
@@ -188,6 +189,8 @@ impl MirTextCodegen for MirToLlvm:
             val llvm_ty = self.llvm_type_text(local.type_)
             val local_id = self.local_id_value(local.id)
             self.local_types[local_id] = llvm_ty
+            if mir_type_is_unsigned_integer(local.type_):
+                self.unsigned_values[self.get_local(local_id)] = true
             if llvm_ty == "ptr":
                 self.ptr_locals[local_id] = true
             if llvm_ty == "i1":
@@ -402,6 +405,17 @@ impl MirTextCodegen for MirToLlvm:
         "@{callee}"
 
     me value_as_type(value: text, from_ty: text, to_ty: text) -> text:
+        val source_is_unsigned = self.unsigned_values.get(value) ?? false
+        self.value_as_type_with_unsigned(value, from_ty, to_ty, source_is_unsigned)
+
+    me operand_as_type(value: text, operand: MirOperand, to_ty: text) -> text:
+        var source_is_unsigned = self.unsigned_values.get(value) ?? false
+        match operand.kind:
+            case Const(_, type_): source_is_unsigned = mir_type_is_unsigned_integer(type_)
+            case _: ()
+        self.value_as_type_with_unsigned(value, self.get_operand_type(operand), to_ty, source_is_unsigned)
+
+    me value_as_type_with_unsigned(value: text, from_ty: text, to_ty: text, source_is_unsigned: bool) -> text:
         var src_ty = self.valid_llvm_type(from_ty)
         match self.value_types.get(value):
             Some(actual_ty): src_ty = self.valid_llvm_type(actual_ty)
@@ -411,9 +425,15 @@ impl MirTextCodegen for MirToLlvm:
             return self.ret_value_for_type(dst_ty, value)
         if value == "0":
             return self.ret_value_for_type(dst_ty, "0")
-        val cast_inst = self.select_cast_instruction(src_ty, dst_ty)
+        var cast_inst = self.select_cast_instruction(src_ty, dst_ty)
+        if source_is_unsigned and cast_inst == "sext":
+            cast_inst = "zext"
+        elif source_is_unsigned and cast_inst == "sitofp":
+            cast_inst = "uitofp"
         val tmp = self.builder.fresh_local()
         self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
+        if source_is_unsigned:
+            self.unsigned_values[tmp] = true
         tmp
 
     me remember_function_return_type(name: text, ret_ty: text):
@@ -557,6 +577,10 @@ impl MirTextCodegen for MirToLlvm:
         val llvm_ty = self.valid_llvm_type(self.llvm_type_text(ty))
         self.local_types[dest_id] = llvm_ty
         self.value_types[dest_name] = llvm_ty
+        if mir_type_is_unsigned_integer(ty):
+            self.unsigned_values[dest_name] = true
+        else:
+            self.unsigned_values = self.unsigned_values.remove(dest_name)
 
         match value:
             case Int(v):
@@ -645,8 +669,8 @@ impl MirTextCodegen for MirToLlvm:
 
         match op:
             case Add:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.operand_as_type(left_raw, left, ty)
+                val right_val = self.operand_as_type(right_raw, right, ty)
                 if is_float_type(ty):
                     self.builder.emit_fadd(dest_name, ty, left_val, right_val)
                 elif is_signed_int_type(ty):
@@ -654,8 +678,8 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit_add(dest_name, ty, left_val, right_val)
             case Sub:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.operand_as_type(left_raw, left, ty)
+                val right_val = self.operand_as_type(right_raw, right, ty)
                 if is_float_type(ty):
                     self.builder.emit_fsub(dest_name, ty, left_val, right_val)
                 elif is_signed_int_type(ty):
@@ -663,8 +687,8 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit_sub(dest_name, ty, left_val, right_val)
             case Mul:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.operand_as_type(left_raw, left, ty)
+                val right_val = self.operand_as_type(right_raw, right, ty)
                 if is_float_type(ty):
                     self.builder.emit_fmul(dest_name, ty, left_val, right_val)
                 elif is_signed_int_type(ty):
@@ -672,22 +696,22 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit_mul(dest_name, ty, left_val, right_val)
             case Div:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.operand_as_type(left_raw, left, ty)
+                val right_val = self.operand_as_type(right_raw, right, ty)
                 if is_float_type(ty):
                     self.builder.emit_fdiv(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_div(dest_name, ty, left_val, right_val)
             case Rem:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.operand_as_type(left_raw, left, ty)
+                val right_val = self.operand_as_type(right_raw, right, ty)
                 if is_float_type(ty):
                     self.builder.emit_frem(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_rem(dest_name, ty, left_val, right_val)
             case Pow:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.operand_as_type(left_raw, left, ty)
+                val right_val = self.operand_as_type(right_raw, right, ty)
                 if is_float_type(ty):
                     val fsuffix = if ty == "double": "f64" else: "f32"
                     self.builder.emit("  {dest_name} = call {ty} @llvm.pow.{fsuffix}({ty} {left_val}, {ty} {right_val})")
@@ -695,60 +719,60 @@ impl MirTextCodegen for MirToLlvm:
                     val nit = self.native_int()
                     self.builder.emit("  {dest_name} = call {nit} @__simple_pow({nit} {left_val}, {nit} {right_val})")
             case BitAnd:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.operand_as_type(left_raw, left, ty)
+                val right_val = self.operand_as_type(right_raw, right, ty)
                 self.builder.emit_and(dest_name, ty, left_val, right_val)
             case BitOr:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.operand_as_type(left_raw, left, ty)
+                val right_val = self.operand_as_type(right_raw, right, ty)
                 self.builder.emit_or(dest_name, ty, left_val, right_val)
             case BitXor:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.operand_as_type(left_raw, left, ty)
+                val right_val = self.operand_as_type(right_raw, right, ty)
                 self.builder.emit_xor(dest_name, ty, left_val, right_val)
             case Shl:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.operand_as_type(left_raw, left, ty)
+                val right_val = self.operand_as_type(right_raw, right, ty)
                 self.builder.emit_shl(dest_name, ty, left_val, right_val)
             case Shr:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.operand_as_type(left_raw, left, ty)
+                val right_val = self.operand_as_type(right_raw, right, ty)
                 self.builder.emit_ashr(dest_name, ty, left_val, right_val)
             case Eq:
                 val eq_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
                 val eq_pred = if is_float_type(eq_cmp_ty): "oeq" else: "eq"
-                val eq_left = self.value_as_type(left_raw, self.get_operand_type(left), eq_cmp_ty)
-                val eq_right = self.value_as_type(right_raw, self.get_operand_type(right), eq_cmp_ty)
+                val eq_left = self.operand_as_type(left_raw, left, eq_cmp_ty)
+                val eq_right = self.operand_as_type(right_raw, right, eq_cmp_ty)
                 self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, eq_left, eq_right)
             case Ne:
                 val ne_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
                 val ne_pred = if is_float_type(ne_cmp_ty): "one" else: "ne"
-                val ne_left = self.value_as_type(left_raw, self.get_operand_type(left), ne_cmp_ty)
-                val ne_right = self.value_as_type(right_raw, self.get_operand_type(right), ne_cmp_ty)
+                val ne_left = self.operand_as_type(left_raw, left, ne_cmp_ty)
+                val ne_right = self.operand_as_type(right_raw, right, ne_cmp_ty)
                 self.emit_comparison(dest_name, ty, ne_pred, ne_cmp_ty, ne_left, ne_right)
             case Lt:
                 val lt_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
                 val lt_pred = if is_float_type(lt_cmp_ty): "olt" else: "slt"
-                val lt_left = self.value_as_type(left_raw, self.get_operand_type(left), lt_cmp_ty)
-                val lt_right = self.value_as_type(right_raw, self.get_operand_type(right), lt_cmp_ty)
+                val lt_left = self.operand_as_type(left_raw, left, lt_cmp_ty)
+                val lt_right = self.operand_as_type(right_raw, right, lt_cmp_ty)
                 self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, lt_left, lt_right)
             case Le:
                 val le_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
                 val le_pred = if is_float_type(le_cmp_ty): "ole" else: "sle"
-                val le_left = self.value_as_type(left_raw, self.get_operand_type(left), le_cmp_ty)
-                val le_right = self.value_as_type(right_raw, self.get_operand_type(right), le_cmp_ty)
+                val le_left = self.operand_as_type(left_raw, left, le_cmp_ty)
+                val le_right = self.operand_as_type(right_raw, right, le_cmp_ty)
                 self.emit_comparison(dest_name, ty, le_pred, le_cmp_ty, le_left, le_right)
             case Gt:
                 val gt_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
                 val gt_pred = if is_float_type(gt_cmp_ty): "ogt" else: "sgt"
-                val gt_left = self.value_as_type(left_raw, self.get_operand_type(left), gt_cmp_ty)
-                val gt_right = self.value_as_type(right_raw, self.get_operand_type(right), gt_cmp_ty)
+                val gt_left = self.operand_as_type(left_raw, left, gt_cmp_ty)
+                val gt_right = self.operand_as_type(right_raw, right, gt_cmp_ty)
                 self.emit_comparison(dest_name, ty, gt_pred, gt_cmp_ty, gt_left, gt_right)
             case Ge:
                 val ge_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
                 val ge_pred = if is_float_type(ge_cmp_ty): "oge" else: "sge"
-                val ge_left = self.value_as_type(left_raw, self.get_operand_type(left), ge_cmp_ty)
-                val ge_right = self.value_as_type(right_raw, self.get_operand_type(right), ge_cmp_ty)
+                val ge_left = self.operand_as_type(left_raw, left, ge_cmp_ty)
+                val ge_right = self.operand_as_type(right_raw, right, ge_cmp_ty)
                 self.emit_comparison(dest_name, ty, ge_pred, ge_cmp_ty, ge_left, ge_right)
             case MatMul:
                 self.emit_unsupported_panic("LLVM backend does not support MatMul lowering")
@@ -828,7 +852,7 @@ impl MirTextCodegen for MirToLlvm:
                     ()
             val param_ty = self.lookup_function_param_type(call_func_name, arg_i)
             if param_ty != "" and param_ty != nil:
-                arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
+                arg_val = self.operand_as_type(arg_val, arg, param_ty)
                 arg_ty = self.valid_llvm_type(param_ty)
             elif arg_val == "0":
                 arg_val = self.ret_value_for_type(arg_ty, "0")
