@@ -106,12 +106,22 @@ its standard smoke because its link accepted unresolved stubs, so no fresh
 
 ### Strict linker follow-up
 
-The reported 253-symbol strict exporter failure was a pre-link false positive:
-the stub scanner examined undefined references in all object sections before
-the linker discarded unreachable GPU backends. Strict mode now emits no stubs
-and lets the platform linker validate live sections after GC. A focused Rust
-regression passes, and an independent Luna review confirmed the ownership and
-minimal fix.
+The reported 253-symbol strict exporter failure began as a pre-link aggregate:
+the stub scanner examined undefined references in all object sections. Strict
+mode now emits no stubs and lets the platform linker validate live sections
+after GC. A focused Rust regression passes, and an independent Luna review
+confirmed the ownership and minimal linker fix.
+
+The in-process hosted-target build then proved that Cranelift emits one `.text`
+section per Simple module, so importing `web_render_backend` kept its Chromium,
+process/file, and every GPU backend reference linker-live even though this
+exporter only requested the pure software layout method. The exporter now calls
+`simple_web_layout_render_html_software_pixels` directly for all three accepted
+software backend labels. That is behavior-identical to the removed
+`web_render_backend("pure_simple", ...).render_html_software_pixels(...)` call
+and removes the broad module closure without changing GPU production paths.
+`cpu_simd_render_scale_contract_spec.spl` guards the absence of the generic
+backend import and passes 9/9.
 
 The full exporter still has no accepted fresh row. The debug bootstrap's
 interpreted native-build worker timed out while loading/parsing the broad

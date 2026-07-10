@@ -53,7 +53,9 @@ The escape hatch follows the repo convention `std::env::var_os("SIMPLE_...").is_
 
 `SIMPLE_NO_STUB_FALLBACK=1` now emits no weak linker stubs and disables each
 platform's unresolved-symbol ignore/force flags. Resolution is deferred to the
-real linker after section GC, so unreachable backend functions cannot create a
-false strict failure while unresolved live calls still fail the link. The
-focused regression is
+real linker after section GC, so discardable sections do not create a scanner
+false positive while unresolved live calls still fail the link. Cranelift
+currently emits one `.text` section per Simple module, so unused functions in
+an imported module remain live together and must still be removed at the module
+ownership boundary. The focused regression is
 `test_no_stub_fallback_defers_unresolved_host_symbols_to_linker`.
