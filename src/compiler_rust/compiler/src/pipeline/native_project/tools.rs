@@ -319,29 +319,115 @@ pub(crate) fn find_simple_core_runtime_library() -> Option<PathBuf> {
     None
 }
 
-pub(super) fn archive_defined_symbols(path: &Path) -> Option<HashSet<String>> {
-    for tool in ["llvm-nm", "nm"] {
-        let output = std::process::Command::new(tool)
-            .arg("-g")
-            .arg("--defined-only")
-            .arg(path)
-            .output();
-        let Ok(output) = output else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
+/// Resolve the `nm`-style symbol-table reader to use for scanning archives and
+/// object files.
+///
+/// Rationale: `std::process::Command::new("nm")` on macOS resolves to Xcode's
+/// bundled `nm`, whose LLVM reader generation can lag behind the LLVM IR
+/// generation rustc emits into `.rlib`/`.a` members. When that happens, `nm`
+/// silently drops the unreadable archive members instead of erroring, so
+/// defined-symbol scans under-report and legitimately-defined symbols get
+/// misclassified as undefined (spurious stub generation). The same applies to
+/// an *older* `llvm-nm` (e.g. the bootstrap script prepends the LLVM 18 keg to
+/// `PATH` for the llvm-lib backend, and LLVM 18's reader rejects rustc 1.94's
+/// LLVM 21-tagged members), so "any llvm-nm" is not sufficient — pick the
+/// NEWEST reader available:
+/// 1. `SIMPLE_NM` env override, if set (used verbatim).
+/// 2. The highest-LLVM-version `llvm-nm` among: `llvm-nm` on `PATH` and the
+///    Homebrew keg-only `llvm*` formulae (which don't symlink `llvm-nm` onto
+///    `PATH`): `/opt/homebrew/opt/llvm*/bin/llvm-nm`,
+///    `/usr/local/opt/llvm*/bin/llvm-nm`.
+/// 3. Fall back to plain `nm`.
+pub(super) fn nm_command() -> std::process::Command {
+    static NM_TOOL: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let tool = NM_TOOL.get_or_init(|| {
+        if let Ok(path) = std::env::var("SIMPLE_NM") {
+            if !path.is_empty() {
+                return PathBuf::from(path);
+            }
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let symbols = stdout
-            .lines()
-            .filter_map(|line| line.split_whitespace().last())
-            .filter(|token| !token.ends_with(':'))
-            .map(|token| token.trim_start_matches('_').to_string())
-            .collect::<HashSet<_>>();
-        return Some(symbols);
+
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(path) = which_on_path("llvm-nm") {
+            candidates.push(path);
+        }
+        candidates.extend(homebrew_llvm_nm_candidates());
+
+        let best = candidates
+            .into_iter()
+            .filter_map(|path| llvm_nm_major_version(&path).map(|version| (version, path)))
+            .max_by_key(|(version, _)| *version);
+        match best {
+            Some((_, path)) => path,
+            None => PathBuf::from("nm"),
+        }
+    });
+    std::process::Command::new(tool)
+}
+
+fn which_on_path(tool: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(tool);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
     }
     None
+}
+
+fn homebrew_llvm_nm_candidates() -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for prefix in ["/opt/homebrew/opt", "/usr/local/opt"] {
+        let Ok(entries) = std::fs::read_dir(prefix) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("llvm") {
+                continue;
+            }
+            let candidate = entry.path().join("bin/llvm-nm");
+            if candidate.is_file() {
+                found.push(candidate);
+            }
+        }
+    }
+    found
+}
+
+/// Parse the LLVM major version out of `llvm-nm --version` output
+/// (e.g. "... LLVM version 22.1.2 ..." -> 22). Returns None if the tool
+/// can't be run or the output doesn't contain a parsable version.
+fn llvm_nm_major_version(path: &Path) -> Option<u32> {
+    let output = std::process::Command::new(path).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let idx = stdout.find("LLVM version ")?;
+    let rest = &stdout[idx + "LLVM version ".len()..];
+    let major: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    major.parse().ok()
+}
+
+pub(super) fn archive_defined_symbols(path: &Path) -> Option<HashSet<String>> {
+    let output = nm_command().arg("-g").arg("--defined-only").arg(path).output();
+    let Ok(output) = output else {
+        return None;
+    };
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let symbols = stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().last())
+        .filter(|token| !token.ends_with(':'))
+        .map(|token| token.trim_start_matches('_').to_string())
+        .collect::<HashSet<_>>();
+    Some(symbols)
 }
 
 pub(crate) fn runtime_archive_has_core_required_symbols(path: &Path) -> bool {

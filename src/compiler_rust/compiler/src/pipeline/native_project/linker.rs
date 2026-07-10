@@ -7,7 +7,7 @@ use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports,
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     find_archive_tool, find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_native_all_library,
-    find_objcopy_tool, is_system_symbol, strip_llvm_constructors, target_c_compiler, target_cxx_compiler,
+    find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler,
 };
 
 impl NativeProjectBuilder {
@@ -75,7 +75,7 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
-        let output = std::process::Command::new("nm")
+        let output = nm_command()
             .arg("-g")
             .arg("-p")
             .arg(obj)
@@ -277,7 +277,7 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbols(obj: &Path) -> Result<Vec<String>, String> {
-        let output = std::process::Command::new("nm")
+        let output = nm_command()
             .arg("-g")
             .arg(obj)
             .output()
@@ -314,7 +314,7 @@ impl NativeProjectBuilder {
     }
 
     fn read_undefined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
-        let output = std::process::Command::new("nm")
+        let output = nm_command()
             .arg("-g")
             .arg("-p")
             .arg(obj)

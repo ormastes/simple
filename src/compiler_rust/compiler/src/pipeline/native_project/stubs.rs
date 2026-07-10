@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use super::{effective_target, ModuleImports};
 use super::tools::{
-    find_c_compiler, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol, target_c_compiler,
+    find_c_compiler, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol, nm_command,
+    target_c_compiler,
 };
 
 fn is_linker_provided_symbol(sym: &str, defined: &std::collections::HashSet<String>) -> bool {
@@ -135,12 +136,7 @@ pub(crate) fn generate_stub_object_freestanding(
     use std::collections::{BTreeSet, HashSet};
 
     fn scan_nm_defined_undefined(path: &Path) -> Option<(HashSet<String>, BTreeSet<String>)> {
-        let output = std::process::Command::new("nm")
-            .arg("-g")
-            .arg("-p")
-            .arg(path)
-            .output()
-            .ok()?;
+        let output = nm_command().arg("-g").arg("-p").arg(path).output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -520,7 +516,7 @@ pub(crate) fn generate_stub_object(
     };
 
     for path in &scan_paths {
-        let output = std::process::Command::new("nm")
+        let output = nm_command()
             .arg("-g")
             .arg("-p")
             .arg(path)
@@ -545,7 +541,7 @@ pub(crate) fn generate_stub_object(
         .map(|p| p.to_path_buf())
         .or_else(find_runtime_library);
     if let Some(ref rt_path) = runtime_lib {
-        let output = std::process::Command::new("nm")
+        let output = nm_command()
             .arg("-g")
             .arg("-p")
             .arg(rt_path)
@@ -569,7 +565,7 @@ pub(crate) fn generate_stub_object(
     let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
     for lib_path in &plat_config.system_scan_libs {
         if std::path::Path::new(lib_path).exists() {
-            let mut nm_cmd = std::process::Command::new("nm");
+            let mut nm_cmd = nm_command();
             for flag in &plat_config.nm_flags {
                 nm_cmd.arg(flag);
             }

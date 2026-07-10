@@ -184,7 +184,7 @@ symlink in the session scratchpad
 A durable fix requires a Rust seed source change, so per the task's
 instructions it is **proposed below, not applied**.
 
-### Proposed seed diff (NOT applied — requires peer review before landing)
+### Seed diff status (implemented locally, redeploy still pending)
 
 Root cause: `stubs.rs` and `linker.rs` invoke the platform's default `nm`
 unconditionally (`std::process::Command::new("nm")`, 4 call sites in
@@ -221,8 +221,70 @@ Proposed fix (sketch, not applied):
    405-symbol "core rt_*" bucket and probably a meaningful slice of buckets
    (a)/(c) should evaporate.
 
-This is flagged for peer review, not landed, per this task's "no Rust seed
-CODE edits" constraint.
+2026-07-11 implementation status: the shared `nm_command()` helper is now
+implemented in `tools.rs`, and the raw `Command::new("nm")` users in
+`stubs.rs`, `linker.rs`, and `archive_defined_symbols` route through it.
+The helper honors `SIMPLE_NM`, prefers the highest-version available
+`llvm-nm` across `PATH` and Homebrew LLVM keg paths, and falls back to `nm`.
+Focused Rust checks pass:
+
+- `cargo check -p simple-compiler`
+- `cargo check -p simple-driver`
+
+This is only the source-level prerequisite. The macOS GPU/backend TODO remains
+open until a fresh self-host candidate built with this source passes
+`scripts/check/cert/redeploy_gate/redeploy_gate.shs` and post-swap smoke.
+
+### Gate re-run WITH the nm fix (2026-07-11): measured results + NEW blocker — runtime-lane selection
+
+Seed rebuilt (`cargo --profile bootstrap`, script detected staleness itself),
+`bootstrap-from-scratch.sh --full-bootstrap --full-cli` run twice; stage2
+binary verified to contain the new code (`strings | grep SIMPLE_NM`). One
+amendment forced by the gate itself: **PATH-first llvm-nm resolution is
+unsafe** — `bootstrap-from-scratch.sh:261` prepends the llvm@18 keg to PATH,
+and LLVM 18's reader rejects rustc-1.94's LLVM21-tagged members exactly like
+Xcode `nm` (verified: `Unknown attribute kind (102) … Reader: 'LLVM 18.1.8'`,
+0 `rt_array_all` found). Hence the highest-`--version` selection in the
+landed helper.
+
+| Stage-4 config (stage2-driven, dynload, cranelift) | Stubs |
+|---|---|
+| Standard gate command (no `--runtime-path`) — pre-fix baseline | 822 |
+| Standard gate command — with nm fix | 807/808 |
+| + `--runtime-path src/compiler_rust/target/bootstrap`, `SIMPLE_NM=/usr/bin/nm` (broken reader, control) | 1041 |
+| + `--runtime-path …/target/bootstrap`, fixed reader | **662** |
+
+Interpretation:
+- **The nm fix works: 1041 → 662 (−379 symbols) when the full archive is in
+  the scan**, and a `comm -12` cross-check of the remaining 662 against the
+  llvm-nm-22 defined set of `target/bootstrap/deps/libsimple_runtime.a` is
+  **empty** — zero archive-resolvable symbols are still being stubbed. The
+  measurement bug this doc's Step 1 identified is fully closed.
+- **But the standard gate barely moves (822→807/808)** because the script's
+  *stage2-driven* stage-4 branch passes **no `--runtime-path`**
+  (`bootstrap-from-scratch.sh:692-706`; the seed-driven branch at :676-690
+  and stage2/3 DO pass it). Without it,
+  `config.rs::resolve_runtime_lane` → CoreCBootstrap →
+  `selected_runtime_library` puts the minimal on-the-fly
+  `build_core_c_runtime_library()` archive FIRST in the candidate list and
+  `candidates.into_iter().next()` selects it, shadowing the complete
+  `deps/libsimple_runtime.a` (appended second via `find_runtime_library`).
+  The minimal archive genuinely lacks ~700 `rt_*` symbols, so the stub wall
+  persists regardless of nm quality. **New ordered-plan item: pass
+  `--runtime-path` in the non-seed stage-4 branch (script fix) and/or fix the
+  candidate ordering in `selected_runtime_library` (seed fix).**
+- Re-audited buckets of the honest 662 (llvm-nm-verified, dump
+  `stubs_rtpath.txt` in session scratchpad): gpu/graphics 130,
+  cranelift/jit/smf 78, os/hw-specific 73, sqlite 27, http 22, `_dot_` trait
+  methods 11, type-descriptors 12, other `rt_*` 207, non-`rt_` misc 102.
+  These are the true bucket-(a)/(c) inputs for ordered-plan step 3
+  (scan-after-GC).
+- **Smoke matrix: FAIL in both configs — NOT deployed.** 807-build: `check`/
+  `test` exit 3 silently, `run` parse-errors (file/lexer externs stubbed).
+  662-build: `--version` OK but `run file.spl` and `-c 'print(1+1)'` ignore
+  argv and drop into interactive mode (CLI dispatch symbols among the 662,
+  e.g. bare `rt_cli`). Deployed `bin/release/aarch64-apple-darwin-macho/simple`
+  untouched; backup `simple.jul5.bak` intact.
 
 ## Ordered fix plan (superseded for item 1 — see Step 1 status above)
 
@@ -230,7 +292,7 @@ CODE edits" constraint.
    **SUPERSEDED.** Re-investigation (above) shows the archive was never
    incomplete — this was an `nm`-tool-version measurement artifact. Replace
    this step with: **fix the `nm`-tool resolution in `stubs.rs`/`linker.rs`/
-   `tools.rs`** (see "Proposed seed diff" above), then re-run stage4
+   `tools.rs`** (see "Seed diff status" above), then re-run stage4
    native-build and re-diff the stub list from a clean baseline before
    trusting any of buckets (a)/(b)/(c) in the table above.
    <details><summary>Original (incorrect) step 1 text, kept for history</summary>

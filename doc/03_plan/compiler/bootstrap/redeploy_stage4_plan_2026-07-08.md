@@ -1,6 +1,55 @@
 # Stage4 Self-Host Redeploy (#79) — Plan (updated 2026-07-11)
 
-## STATUS NOW (2026-07-11): redeploy gate wave RUN — smoke matrix FAILED, NOT deployed
+## STATUS NOW (2026-07-11, second wave): nm-fix seed landed (uncommitted) + gate re-run — smoke STILL FAILS, NOT deployed; blocker re-diagnosed to runtime-lane selection
+
+The proposed `nm_command()` seed fix from
+`stage4_stub_symbol_plan_2026-07-11.md` § "Step 1 status" was **applied**
+(user-authorized): shared helper in
+`src/compiler_rust/compiler/src/pipeline/native_project/tools.rs` (resolution:
+`SIMPLE_NM` env → highest-LLVM-major-version `llvm-nm` among PATH +
+Homebrew kegs, probed via `--version` — NOT PATH-first, because
+`bootstrap-from-scratch.sh:261` prepends the llvm@18 keg to PATH and LLVM 18's
+reader also rejects rustc-1.94's LLVM21-tagged archive members → plain `nm`
+fallback; cached in a `OnceLock`), used at all 7 `nm` call sites
+(`stubs.rs` ×4, `linker.rs` ×3) + `tools.rs::archive_defined_symbols`.
+Seed rebuilt (`--profile bootstrap`), gate re-run twice.
+
+Results (all measured, staged binary `build/bootstrap/full/aarch64-apple-darwin/simple`):
+
+- **Standard gate (`--full-bootstrap --full-cli`): 822 → 807/808 stubs.**
+  NOT the drastic drop — because the stage2-driven stage-4 branch of the
+  script passes **no `--runtime-path`**, so `config.rs::resolve_runtime_lane`
+  falls to the CoreCBootstrap lane and `selected_runtime_library` links the
+  **minimal built-on-the-fly core-C archive**
+  (`build_core_c_runtime_library`), which genuinely lacks ~700 `rt_*`
+  symbols. The full `target/bootstrap/deps/libsimple_runtime.a` is appended
+  as a *second* candidate and never chosen (`candidates.into_iter().next()`).
+  In this lane the nm fix has almost nothing to resolve against.
+- **Same stage-4 command + `--runtime-path src/compiler_rust/target/bootstrap`
+  (matching what the script's stage2/3 and seed-stage4 branches already do):**
+  broken reader (`SIMPLE_NM=/usr/bin/nm`) → **1041** stubs; fixed reader →
+  **662** stubs (62 MB binary). **The nm fix resolves 379 symbols** in this
+  config, and **0 of the remaining 662 are defined in the full archive**
+  (verified via llvm-nm 22 `comm -12` cross-check) — the measurement bug is
+  fully fixed; the remaining 662 are genuinely-undefined (over-linking /
+  unimplemented buckets: gpu 130, jit/smf 78, os-hw 73, sqlite 27, http 22,
+  `_dot_` 11, type-desc 12, misc rt_ 207, non-rt misc 102).
+- **Smoke matrix: FAIL in both configs.** Standard-gate binary: b/c exit 3
+  silent, d/e `Parse error` (lexer/file externs stubbed). `--runtime-path`
+  binary: `--version` OK but `run file.spl` and `-c` drop into interactive
+  mode ignoring argv (CLI dispatch symbols still in the 662).
+- **Deploy NOT performed** (gate held). `bin/release/aarch64-apple-darwin-macho/simple`
+  untouched (19,783,456 bytes, Jul 5); `bin/simple` symlink intact; backup
+  still at scratchpad `simple.jul5.bak` (size-verified).
+- **Next work items (ordered):** (1) make the stage2-driven stage-4 branch
+  pass `--runtime-path` (or fix `selected_runtime_library` candidate order)
+  so the full archive is linked — mechanical, −146 stubs and all
+  archive-resolvable symbols; (2) the scan-after-GC / entry-closure
+  tightening from the stub plan doc for the remaining ~662, which now have
+  trustworthy llvm-nm-verified counts; commit the nm seed fix after peer
+  review.
+
+## STATUS NOW (2026-07-11, first wave): redeploy gate wave RUN — smoke matrix FAILED, NOT deployed
 
 User authorized the redeploy; the gate wave was executed and the gate held.
 
