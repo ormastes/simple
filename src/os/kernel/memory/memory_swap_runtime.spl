@@ -4,7 +4,7 @@ use std.fs_driver.block_device.{BlockDevice}
 use os.kernel.memory.memory_swap_block.{memory_swap_block_store_new}
 use os.kernel.memory.memory_swap_coordinator.{MemorySwapCoordinator, memory_swap_coordinator_new}
 use os.kernel.memory.memory_leveling_manager.{MemoryPressureReport}
-use os.kernel.memory.memory_leveling_runtime.{MemoryLevelingRuntimeResult, memory_leveling_runtime_apply_pressure, memory_leveling_runtime_manager, memory_leveling_runtime_mapping, memory_leveling_runtime_mapping_at, memory_leveling_runtime_forget_mapping, memory_leveling_runtime_replace_manager}
+use os.kernel.memory.memory_leveling_runtime.{MemoryLevelingRuntimeResult, memory_leveling_runtime_apply_pressure, memory_leveling_runtime_manager, memory_leveling_runtime_mapping, memory_leveling_runtime_mapping_at, memory_leveling_runtime_mapping_at_space, memory_leveling_runtime_forget_mapping, memory_leveling_runtime_replace_manager}
 use os.kernel.memory.pmm.{pmm_free_memory}
 use os.kernel.types.memory_types.{VirtAddr}
 use os.kernel.types.task_types.{AddressSpace}
@@ -67,12 +67,19 @@ fn memory_swap_runtime_poll_pmm_pressure() -> MemorySwapPressureResult:
     memory_swap_runtime_apply_pressure(level)
 
 fn memory_swap_runtime_release_range(virt_addr: u64, byte_length: u64, owner_id: u64) -> MemoryLevelingRuntimeResult:
+    memory_swap_runtime_release_range_in_space(0, 0, virt_addr, byte_length, owner_id)
+
+fn memory_swap_runtime_release_range_in_space(space_root: u64, space_id: u64, virt_addr: u64, byte_length: u64, owner_id: u64) -> MemoryLevelingRuntimeResult:
     val end_addr = virt_addr + ((byte_length + 4095) / 4096) * 4096
     var manager = memory_leveling_runtime_manager()
     var released_ids: [u64] = []
     var page_addr = virt_addr
     while page_addr < end_addr:
-        match memory_leveling_runtime_mapping_at(page_addr):
+        val mapping_opt = if space_root == 0:
+            memory_leveling_runtime_mapping_at(page_addr)
+        else:
+            memory_leveling_runtime_mapping_at_space(space_root, space_id, page_addr)
+        match mapping_opt:
             Some(mapping):
                 if mapping.owner_id != owner_id:
                     return MemoryLevelingRuntimeResult(ok: false, reason: "not-owner", allocation_ids: released_ids)
