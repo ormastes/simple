@@ -63,12 +63,40 @@ Either Simple Web CPU-SIMD reaches the external CPU drawing-library baseline for
 the retained 8K scene, or the report keeps this blocker open with the measured
 ratio and the bottleneck owner.
 
+## 2026-07-10 stale deployment correction
+
+The retained `767.872 ms` Simple row does not measure the optimized
+`rt_array_repeat` implementation currently checked into the repository.
+`bin/simple` resolves to the shared self-hosted release binary built on
+2026-07-03. Disassembly of that binary's `rt_array_repeat` shows one
+`rt_array_push` call per element; it does not contain the current first-store
+plus doubling-`memcpy` implementation.
+
+A focused full-8K repeat probe on that deployed binary measured `762414us` for
+33,177,600 elements, matching the framebuffer trace and proving that the
+retained result is dominated by the stale push loop. The recorded `10.4x`
+Cairo ratio remains valid for the deployed 2026-07-03 binary, but it is not
+valid evidence for the current source implementation.
+
+An isolated pure-Simple bootstrap was attempted with the current source. Stage
+2 failed at the known bootstrap LLVM/`llc` lane, and the seed-driven Cranelift
+Stage 4 remained CPU-bound for 18 minutes without producing an executable. The
+attempt was stopped at the existing bounded bootstrap ceiling. Three focused
+AOT probe variants also failed in the current LLVM undefined-SSA/Cranelift type
+lowering lane, so no substitute fresh executable was accepted.
+
+Do not introduce packed framebuffer storage or another SIMD facade based on
+the stale timing. First produce a fresh self-hosted CLI, confirm its
+`rt_array_repeat` no longer contains the per-element push loop, then run the
+retained 4K/8K and external Cairo comparisons once.
+
 ## Next Step
 
 Do not repeat the viewport/DPI/fallback/color proof work. The retained evidence
 already proves full 8K size, default 300dpi, configurable DPI override, checksum
 and pixel proof, CPU-SIMD runtime target, no fallback, and alpha-quality parity.
-The remaining perf work is the owner-boundary framebuffer fill problem tracked
-in `browser_layout_large_simd_fill_facade_unsafe_2026-07-09.md`: design a safe
-browser-layout framebuffer owner facade, prove it preserves the retained 4K/8K
-checksums, and then re-run the external CPU drawing-library comparison.
+The immediate blocker is fresh self-host deployment, not another framebuffer
+representation. Rebuild the pure-Simple CLI, verify the deployed
+`rt_array_repeat` machine code uses the current bulk-fill implementation, and
+then re-run the external CPU drawing-library comparison. Revisit the owner
+facade only if that fresh measurement still shows a material gap.

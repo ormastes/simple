@@ -358,6 +358,7 @@ Rejected follow-up:
   `sum32:135445232233405312`, full `7680x4320`, strict binary-link status
   `pass`, and `gui_perf_cpu_base_compare_target_met=yes`.
 - `cargo test -p simple-runtime test_array_repeat` passed: `1 passed`.
+
 - `SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_compare/backend_measurement_capture_spec.spl --mode=interpreter --clean`
   passed after the trace split: `25 examples, 0 failures`.
 - Normal retained 8K CPU-SIMD row after adding the opt-in trace flag:
@@ -384,3 +385,19 @@ Rejected follow-up:
 - `sh scripts/audit/direct-env-runtime-guard.shs --working` and `--staged`
   passed.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
+
+## 2026-07-10 evidence correction
+
+The 4K/8K timings above were produced by a stale self-hosted `bin/simple`
+dated 2026-07-03. Its `rt_array_repeat` disassembly contains a counted loop
+that calls `rt_array_push` for every element. A focused 33,177,600-element
+probe measured `762414us`, which accounts for the retained 8K framebuffer
+initialization time.
+
+Therefore, the retained timings prove the behavior and quality contracts of
+that deployed binary, but they do not measure the current bulk-fill source in
+`runtime_native.c` and `simple_core/core_array_ops.spl`. Treat the `10.4x`
+Cairo comparison as a stale-deployment result pending a fresh self-hosted
+build. An isolated rebuild reached the known Stage 2 LLVM failure and then
+spent 18 bounded minutes in seed-driven Stage 4 without producing an
+executable; it was stopped rather than allowed to run unbounded.

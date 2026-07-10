@@ -143,3 +143,17 @@ Focused evidence:
 - A direct `bin/simple check` of the large renderer was attempted and exited
   `143` after the existing broad `SIMPLE_LIB=src` memory guard terminated the
   compile; no focused syntax failure was emitted before termination.
+
+## 2026-07-10 deployment correction
+
+The apparent `~765 ms` owner-fill bottleneck was traced to a stale deployed
+runtime rather than the current owner facade or current array-repeat source.
+The deployed `bin/simple` still implements `rt_array_repeat` as one
+`rt_array_push` call per pixel. A direct 33,177,600-element probe measured
+`762414us`, matching the retained 8K framebuffer initialization time.
+
+Current C and pure-Simple runtime source already allocates repeat-private
+uninitialized storage and fills it by doubling initialized spans with
+`memcpy`. No packed-u32 framebuffer or new unsafe mutable ABI should be added
+until that source is present in a fresh self-hosted binary and measured. The
+owner facade remains the correct containment boundary.
