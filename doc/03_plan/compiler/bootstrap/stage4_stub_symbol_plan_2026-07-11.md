@@ -251,6 +251,61 @@ CODE edits" constraint.
    route through a thin wrapper. Grep the remaining ~55 "misc" bucket for the
    same bare/`rt_` mismatch pattern first — likely more of that ~55 resolves
    the same mechanical way.
+
+   **STATUS (2026-07-11): DONE for both twins, partially resolvable.** Of the
+   30 bare externs declared in the block (22 was the doc's original live-stub
+   count; `path_join`/`path_normalize`/`path_is_absolute` are unused
+   in-module dead declarations not previously counted), verified against
+   `src/runtime/runtime.h` **and** `runtime.c`/`runtime_native.c` (several
+   real symbols — `rt_file_read_bytes`, `rt_file_write_bytes`,
+   `rt_file_move`, `rt_dir_delete`, `rt_dir_walk`, `rt_dir_list` — exist in
+   the `.c` sources but are missing from the `runtime.h` header, so both were
+   checked):
+   - **13 renamed 1:1** (extern decl + in-module call site changed to the
+     real `rt_` name): `file_read_text`→`rt_file_read_text`,
+     `file_read_bytes`→`rt_file_read_bytes`,
+     `file_write_text`→`rt_file_write_text`,
+     `file_write_bytes`→`rt_file_write_bytes`,
+     `file_append_text`→`rt_file_append_text`, `file_exists`→`rt_file_exists`,
+     `file_delete`→`rt_file_delete`, `file_copy`→`rt_file_copy`,
+     `file_size`→`rt_file_size`, `dir_create_all`→`rt_dir_create_all`,
+     `dir_delete`→`rt_dir_delete`, `dir_exists`→`rt_dir_exists`.
+   - **5 thin-wrapped** (real `rt_` symbol exists under a different name or
+     signature; old bare name kept as a plain `fn` so in-module call sites
+     didn't need to change): `file_rename`→wraps `rt_file_move` (name
+     differs), `dir_create`→wraps `rt_dir_create(path, false)` (real symbol
+     takes an extra `recursive: bool`), `dir_delete_all`→wraps
+     `rt_dir_remove_all` (name differs), `dir_read`→wraps
+     `Some(rt_dir_list(path))` (real symbol is non-optional `[text]`),
+     `dir_is_empty`→composed as `rt_dir_list(path).len() == 0` (no dedicated
+     symbol exists).
+   - **9 unresolvable-here, live** (no `rt_` symbol anywhere in the runtime
+     sources; a real fix needs new pure-Simple or new runtime implementation,
+     out of scope of a naming-mismatch fix): `path_parent`, `path_filename`,
+     `path_extension`, `path_stem`, `path_components`, `path_with_extension`,
+     `file_metadata` (no struct-returning `rt_` symbol), `walk_dir` (real
+     `rt_dir_walk`/`rt_dir_list` only return bare `[text]` paths, not
+     `[DirEntry]` — building that needs new per-entry stat logic, not a
+     rename), plus `glob_find`/`glob_matches` counted together (no
+     `rt_glob_*` symbols exist) = 9 total.
+   - **3 unresolvable-here, dead** (also no `rt_` symbol, and additionally
+     unreferenced anywhere in-module): `path_join`, `path_normalize`,
+     `path_is_absolute`.
+   - Verification: `bin/simple check` clean on both files; interpreted-mode
+     smoke tests (`SIMPLE_EXECUTION_MODE=interpret`) exercising every
+     renamed/wrapped symbol (dir create/list/is_empty/rename/delete, file
+     read/write/exists/delete) round-tripped correctly end-to-end.
+     `test/01_unit/app/cli_parser_spec.spl` still green (2/2).
+   - **Side finding (not fixed here, out of scope):** the 2-arg
+     `(text, bool)` extern signature (`rt_dir_create(path, recursive)`)
+     produces a wrong/corrupted result under the default JIT execution path
+     (`bin/simple run`, no env override) but is correct under
+     `SIMPLE_EXECUTION_MODE=interpret` — a pre-existing Cranelift-JIT FFI
+     marshalling bug for bool-typed extern args, reproduced with an
+     unmodified standalone extern declaration unrelated to this fix's
+     renames. Worth a follow-up bug entry; not blocking this step since the
+     interpreter path (what stage4/native-build symbol resolution and the
+     existing call sites rely on) is correct.
 3. **Scan-after-GC / entry-closure tightening (bucket c, potentially the
    largest remaining bucket — 130+70+78+27+22+12 ≈ 339 symbols).**
    Investigate `stubs.rs`'s own documented caveat ("scan runs before the
@@ -283,3 +338,23 @@ CODE edits" constraint.
   `SIMPLE_DUMP_STUBS` set and `--strict-no-stub-fallback` semantics compared,
   since the object scan's pre-GC visibility means "still undefined after a
   runtime-archive fix" is the honest test, not source-reading alone.
+
+## Step 2 status (2026-07-11): DONE — bare fs externs fixed in both variants
+
+30 bare externs in `src/lib/nogc_sync_mut/fs.spl` + `nogc_async_mut` twin audited against
+runtime.h/runtime.c/runtime_native.c: **12 renamed 1:1** to the real `rt_*` symbol
+(file_read_text/read_bytes/write_text/write_bytes/append_text/exists/delete/copy/size,
+dir_create_all/dir_delete/dir_exists); **5 thin-wrapped** where the real symbol differs
+(file_rename→rt_file_move, dir_create→rt_dir_create(path,false), dir_delete_all→rt_dir_remove_all,
+dir_read→Some(rt_dir_list), dir_is_empty via rt_dir_list().len()==0); **12 unresolvable-here**
+(9 live: path_parent/filename/extension/stem/components/with_extension, file_metadata, walk_dir,
+glob_find/glob_matches; 3 dead: path_join/normalize/is_absolute) — NO rt_ symbol exists; not
+invented; these remain stubs until runtime exports land.
+
+Verified: `bin/simple check` clean both files; cli_parser_spec 2/2; interpreter extern tables cover
+every renamed name; interpret-mode smoke round-tripped all renamed/wrapped symbols.
+
+Side findings: (1) `rt_dir_create(text,bool)` returns corrupted result under Cranelift JIT but
+correct under interpret — pre-existing JIT FFI marshalling bug for (text,bool) extern args
+(follow-up bug candidate). (2) Several rt_ symbols exist in runtime.c/runtime_native.c but are
+missing from runtime.h declarations (rt_file_read_bytes/write_bytes/move, rt_dir_delete/walk/list).
