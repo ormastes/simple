@@ -1345,10 +1345,19 @@ fn ssa_alloca_transform_blocks(blocks: [MirBlock], mir_locals: [MirLocal], entry
     before the use. No phi nodes, no join-predecessor dominance analysis -- an
     entry alloca dominates everything by construction, so this cannot produce
     `undef`/`use of undefined value` the way per-join phi materialization
-    could. Single-block functions and functions with no slotted locals are a
-    no-op (fast path)."""
-    if blocks.len() < 2:
-        return ssa_var_transform_reject("single block", blocks, [])
+    could. Functions with no slotted locals are a no-op (fast path).
+
+    A SINGLE-block function is NOT automatically a no-op: a straight-line
+    reassignment (e.g. `out = <returned runtime array>`, which lowers to two
+    writes of the same local within one block) is multi-def and would emit a
+    duplicate `%lN` SSA def in the textual LLVM path. The `ssa_var_transform`
+    SSA-rename fallback cannot rescue it because such a local typically ESCAPES
+    (it is returned/passed onward) and its escape gate rejects it. The alloca
+    slot has no escape restriction and lowers the reassignment correctly, so
+    single-block multi-def functions must be slotted here too (the
+    `slotted.len() == 0` check below keeps the no-reassignment case a no-op)."""
+    if blocks.len() == 0:
+        return ssa_var_transform_reject("empty function", blocks, [])
     if not ssa_instructions_supported_for_phi(blocks):
         return ssa_var_transform_reject("unsupported instruction", blocks, [])
 
