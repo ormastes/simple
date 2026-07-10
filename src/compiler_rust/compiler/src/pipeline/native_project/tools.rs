@@ -156,6 +156,22 @@ fn host_object_extension() -> &'static str {
     }
 }
 
+pub(crate) fn core_c_target_flags(
+    target: simple_common::target::Target,
+    source: &str,
+    riscv_vector: bool,
+) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    if target.arch == simple_common::target::TargetArch::Aarch64 {
+        flags.push("-mno-outline-atomics");
+    }
+    if source == "runtime_simd_dispatch.c" && target.arch == simple_common::target::TargetArch::Riscv64 && riscv_vector
+    {
+        flags.extend(["-march=rv64gcv", "-mabi=lp64d"]);
+    }
+    flags
+}
+
 fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -211,13 +227,15 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
 
     std::fs::create_dir_all(build_dir).ok()?;
 
-    let cc = target_c_compiler(effective_target());
+    let target = effective_target();
+    let cc = target_c_compiler(target);
     let ar = find_archive_tool();
     let obj_ext = host_object_extension();
     let mut objects = Vec::new();
 
     for source in runtime_inputs.iter().copied().filter(|input| input.ends_with(".c")) {
         let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
+        let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
         let status = std::process::Command::new(&cc)
             .arg("-c")
             .arg("-Os")
@@ -228,6 +246,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
             .arg("-fno-stack-protector")
             .arg("-fPIC")
             .arg("-std=gnu11")
+            .args(core_c_target_flags(target, source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))
             .arg(runtime_root.join(source))

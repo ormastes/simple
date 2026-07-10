@@ -860,6 +860,34 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     }
 }
 
+#[test]
+fn test_core_c_runtime_target_flags_cover_aarch64_atomics_and_riscv_vectors() {
+    use simple_common::target::{Target, TargetArch, TargetOS};
+
+    assert_eq!(
+        core_c_target_flags(
+            Target::new(TargetArch::Aarch64, TargetOS::Linux),
+            "runtime_native.c",
+            false
+        ),
+        ["-mno-outline-atomics"]
+    );
+    assert_eq!(
+        core_c_target_flags(
+            Target::new(TargetArch::Riscv64, TargetOS::Linux),
+            "runtime_simd_dispatch.c",
+            true
+        ),
+        ["-march=rv64gcv", "-mabi=lp64d"]
+    );
+    assert!(core_c_target_flags(
+        Target::new(TargetArch::Riscv64, TargetOS::Linux),
+        "runtime_native.c",
+        true
+    )
+    .is_empty());
+}
+
 #[cfg(target_os = "linux")]
 fn run_required_abi_probe(repo_root: &Path, temp_root: &Path, runtime: &Path, label: &str) {
     let source = temp_root.join(format!("{label}_abi_probe.c"));

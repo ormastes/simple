@@ -783,10 +783,16 @@ impl LlvmBackend {
         };
 
         let freestanding_riscv32_features = std::env::var("SIMPLE_RISCV32_LLVM_FEATURES").ok();
+        let hosted_riscv64_features = if std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1") {
+            "+m,+a,+f,+d,+c,+v"
+        } else {
+            "+m,+a,+f,+d,+c"
+        };
         let features = match self.target.arch {
             TargetArch::Riscv32 if is_freestanding => freestanding_riscv32_features.as_deref().unwrap_or("+m,+a,+c"),
             TargetArch::Riscv32 => "+m,+a,+c",
-            TargetArch::Riscv64 => "+m,+a,+c",
+            TargetArch::Riscv64 if is_freestanding => "+m,+a,+c",
+            TargetArch::Riscv64 => hosted_riscv64_features,
             _ => "",
         };
 
