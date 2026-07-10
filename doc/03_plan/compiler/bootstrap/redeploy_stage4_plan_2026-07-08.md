@@ -334,3 +334,36 @@ this session. Proposed discriminator for #79: one-shot MIR dump + function name 
 miss. Probes reverted (content grep = 0). Stage-1 state: still FAILED exit 139. Full detail:
 `doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
 (§ Update 2026-07-10 translate_binop null-operand trace).
+
+## Update 2026-07-10 (MIR-dump discriminator run) — VERDICT: (i) MIR use-before-def, backend exonerated
+
+Implemented the proposed one-shot discriminator: function-name `eprint` at `compile_function` entry
+plus a full-function MIR dump (block id + dest + instruction kind per line, via a new
+`describe_inst` helper) gated on `func.name == "main"` (identified in this same session). 3 bootstrap
+runs total (2 over budget — both burned on probe-code bugs, not inconclusive evidence: run 1 hit a
+parser rejection of a bare-assignment one-line `fn` body; run 2's dump was placed after the
+block-translation loop, which the SIGSEGV preempts, so it never printed. Run 3 moved the dump to
+function entry and was decisive).
+
+**Result:** `main`'s full MIR (19 blocks, ids 0-18) contains no instruction anywhere — in any block,
+before or after — with `dest.id == 3`. `_3` is used (`_4 = copy _3`) before it is ever defined, and
+no later block defines it either. **This rules out hypothesis (ii)** (a later block the backend's
+linear no-RPO pass misses) outright — there is no such block. **Verdict: (i) MIR use-before-def**,
+same bootstrap-gated HIR/MIR lowering-gap family as `#130` (wiped call/method args) and `#133`
+(dropped params). 13 similarly-shaped gaps in the same dump (`_3, _7, _13, _20, _24, _27, _41, _44,
+_46, _49, _52, _56, _64`) suggest one systematic lowering gap (likely a repeated
+comparison/branch-condition pattern in `main`'s source) rather than 13 independent bugs. Also offers a
+unifying explanation for the earlier-observed crash-site nondeterminism (134 DataLayout vs 139 ICmp):
+`get_value` silently returns 0 on any miss, so which propagated-zero operand reaches an LLVM C-API
+call first varies by iteration order over a MIR that already has genuine holes — no separate
+FFI-marshalling-corruption mechanism required.
+
+**Fix locus for #79 (not fixed this session):** HIR/MIR lowering — same files implicated by #130/#133
+(`src/compiler/20.hir/hir_lowering/expressions.spl`, `declaration_lowering.spl`,
+`src/compiler/50.mir/` builder) — for whatever `main`-body construct repeatedly computes a value
+without ever emitting its defining MIR instruction. NOT a backend/`llvm_lib_translate.spl` fix — the
+backend's linear block-list traversal is exonerated by this run (no def exists in any block for it to
+have missed). Probes reverted (`grep -rn "MIR-PROBE\|MIR_PROBE\|describe_inst\|mir_probe_" src/` = 0).
+Stage-1 state: still FAILED exit 139. Full detail:
+`doc/08_tracking/bug/bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
+(§ Update 2026-07-10 function-name + full-MIR-dump discriminator).

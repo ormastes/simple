@@ -671,3 +671,117 @@ to discriminate (i) vs (ii) in a single run; if (ii), the fix is contained to
 **Probes reverted** (exact inverse edits; `grep -rn "NULL OPERAND\|NULL-BINOP\|gt-trace" src/` = 0;
 `git diff` on the probed file is empty). Stage-1 state after this session's single run: unchanged —
 `native-build worker exited with code 139`, Stage 1 FAILED (log: scratchpad `gt_lhs_run1.log`).
+
+## Update 2026-07-10 (function-name + full-MIR-dump discriminator) — VERDICT: (i) MIR use-before-def, NOT (ii) backend block-order
+
+**Setup.** Implemented the proposed discriminator exactly: (1) `eprint` the enclosing MIR function
+name at the top of `compile_function` (`llvm_lib_translate.spl`) for every function; (2) on the first
+`value_map` miss, `get_value` (`llvm_lib_translate_expr.spl`) still fires `[MIR-PROBE] MISS
+local_id=<id>` as before. Added a `describe_inst(inst) -> text` helper (dest local id + instruction
+kind, covering every `MirInstKind` arm `translate_instruction` handles) and used it to dump full MIR
+(block id + one line per instruction) for `func.name == "main"` — gated on that name because run 1 of
+this session (see below) had already identified `main` as the crashing function.
+
+**Run 1 (probe-code bug, no data).** First attempt placed the dump *after* the per-block translation
+loop in `compile_function`, gated on "miss fired but not yet dumped". Also had a one-liner
+`pub fn mir_probe_mark_dumped(): MIR_PROBE_dumped = true` — a bare assignment as a one-line fn body,
+which the bootstrap-stage parser rejects (`Unexpected token: expected expression, found Assign`).
+Stage 1 failed at the **parse** stage before any native-build worker ran; zero runtime evidence.
+Fixed to a block-body `fn`.
+
+**Run 2 (probe-code bug, partial data only).** With the parse fix, the post-loop dump still could not
+fire: the SIGSEGV happens *inside* the same block-translation loop it was gated on (a NULL-operand
+`LLVMBuildICmp` kills the process immediately), so control never reaches the post-loop dump code. Log
+tail:
+```
+[MIR-PROBE] fn=main
+[MIR-PROBE] MISS local_id=3
+
+error: native-build worker exited with code 139.
+Stage 1 FAILED
+```
+This did confirm (again) that the crashing function is `main` and the missing local is `_3` — same
+identity as the 2026-07-10 "translate_binop trace" session above — but produced no MIR dump. Moved the
+dump to fire at function-*entry* instead (before any block is translated), gated on
+`func.name == "main"` using this run's own evidence.
+
+**Run 3 (decisive).** Full MIR of `main` printed before the crash. Complete dump (block id +
+`describe_inst` per instruction; blocks with an empty instruction list are `If`/`Goto`-only merge
+blocks — expected):
+```
+block0: Call(_1) Copy(_2) Copy(_4) Const(_5) BinOp(_6)
+block1: Const(_8) Call(_9) Const(_10) Call(_11) Const(_12)
+block2: (empty)
+block3: Const(_14) GEP(_15) Load(_16) Copy(_17) Const(_18) BinOp(_19)
+block4: Const(_21) Call(_22) Const(_23)
+block5: (empty)
+block6: Const(_25) BinOp(_26)
+block7: Const(_28) Call(_29) Const(_30) Call(_31) Const(_32) Call(_33) Const(_34) Call(_35) Const(_36) Call(_37) Const(_38) Call(_39) Const(_40)
+block8: (empty)
+block9: Const(_42) BinOp(_43)
+block10: Call(_45)
+block11: (empty)
+block12: Const(_47) BinOp(_48)
+block13: Const(_50) BinOp(_51)
+block14: (empty)
+block15: Const(_65) Call(_66) Const(_67)
+block16: Const(_53) Call(_54) Const(_55)
+block17: (empty)
+block18: Const(_57) GEP(_58) Load(_59) Copy(_60) Const(_61) Call(_62) Const(_63)
+[MIR-PROBE] MISS local_id=3
+```
+(19 blocks total, ids 0-18; full dump + surrounding log at scratchpad `mir_dump_run3.log`, lines
+2549-2623.)
+
+**The deciding check.** Local ids that actually appear as a `dest` anywhere across all 19 blocks:
+`{1,2,4,5,6,8,9,10,11,12,14,15,16,17,18,19,21,22,23,25,26,28..40,42,43,45,47,48,50,51,53,54,55,57..63,65,66,67}`
+(computed by extracting every `_<n>` from the dump and checking membership, not by inspection).
+`_3` is **absent from every block, including all blocks listed after block0** (blocks 1 through 18).
+Block0 itself shows the exact gap already characterized in the prior session: `Copy(_2)`, then no
+instruction defines `_3`, then `Copy(_4)` (the `_4 = copy _3` read of the still-undefined local),
+`Const(_5)`, `BinOp(_6)` (the `_6 = _4 <op> _5` that reads the propagated 0). No block anywhere later
+in the list — nor block0 itself — contains a `Const`/`Copy`/`Move`/`Call`/any dest-producing
+instruction with `dest.id == 3`. `_3` is also not a function parameter: `compile_function` seeds every
+`LocalKind.Arg` into `value_map` before block translation runs (verified clean in the prior session,
+post-#133), and this run's `MISS` fires *during* per-instruction translation, which is only reachable
+for locals the Arg-seeding loop did not already populate.
+
+**Verdict: (i) MIR use-before-def — CONFIRMED, not (ii) backend block-order.** The def for `_3` does
+not exist anywhere in `main`'s MIR as delivered to `translate_module_to_llvm`, in any block, listed
+before or after the use. This rules out hypothesis (ii) (a later block defining it, invisible to
+`compile_function`'s linear no-RPO block pass) outright — there is no such block. The bug is upstream
+of the LLVM backend entirely: HIR/MIR lowering emits a genuine use-before-def for whatever source
+construct in `main` produces local `_3` (same bootstrap-gated lowering-gap family as `#130` wiped
+call/method args and `#133` dropped params — a third instance of "a value that should exist in MIR
+does not"). The 13 similarly-patterned gaps in this same dump (`_3, _7, _13, _20, _24, _27, _41, _44,
+_46, _49, _52, _56, _64` — computed from the same block-by-block id extraction) are consistent with
+one dropped def per comparison/branch condition in `main`'s source (an `if`/argument-count-style
+check pattern repeated ~13 times), suggesting a single systematic lowering gap rather than 13
+independent bugs.
+
+**Exact fix locus for #79 (not fixed here, per this pass's scope).** HIR/MIR lowering for whatever
+`main`-body construct produces this repeated "compute a value, never emit its defining MIR
+instruction" pattern — look in the same lowering files already implicated by #130/#133
+(`src/compiler/20.hir/hir_lowering/expressions.spl`, `src/compiler/20.hir/hir_lowering/
+declaration_lowering.spl`, `src/compiler/50.mir/` builder) for a bootstrap-gated (`SIMPLE_BOOTSTRAP`)
+branch that still skips emitting a `Const`/`Call`/etc. instruction for a value that a later
+`Copy`/`Move` instruction (here, `_4 = copy _3`) expects to already be in scope. This is NOT a
+`compile_function`/`llvm_lib_translate.spl` backend fix — the backend's linear block-list traversal is
+exonerated by this run's evidence (no def exists in ANY block for the backend to have missed).
+
+**Also resolves the nondeterminism question raised in the 2026-07-09 "NONDETERMINISTIC FFI corruption"
+update.** Since `get_value` silently returns `0` for any value_map miss (`llvm_lib_translate_expr.spl`,
+`get_value`), and this class of MIR use-before-def can affect different locals/functions/paths
+depending on interpreter iteration order and exactly which comparison/branch is reached first before
+the process dies, a single root cause (systematic missing-def lowering gap) is sufficient to explain
+both the deterministic per-run `MISS local_id=<id>` signal captured across multiple sessions AND the
+earlier-observed crash-site flips (134 DataLayout / 139 ICmp) — no separate FFI-marshalling corruption
+mechanism is needed to explain the variance; "which propagated-zero operand reaches an LLVM C-API call
+first" varies run to run for the same reason `_3` vs other locals varies: iteration/scheduling order
+over a MIR that already has genuine holes in it.
+
+**Probes reverted.** `jj restore` on both `src/compiler/70.backend/backend/llvm_lib_translate.spl` and
+`src/compiler/70.backend/backend/llvm_lib_translate_expr.spl`; repo-wide `grep -rn "MIR-PROBE\|MIR_PROBE\|describe_inst\|mir_probe_" src/` = 0 after revert. Stage-1 state after this session:
+unchanged — `native-build worker exited with code 139`, Stage 1 FAILED. Logs: scratchpad
+`mir_dump_run1.log` (parse-error run), `mir_dump_run2.log` (post-loop dump, unreachable), `mir_dump_run3.log`
+(decisive — function-entry dump).
