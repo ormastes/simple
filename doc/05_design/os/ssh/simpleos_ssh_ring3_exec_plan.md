@@ -152,3 +152,35 @@ and system-wide re-verification. Everything else (2–3) is mechanical and gated
 it; item 4 is out of scope for `ssh guest run /ELF`. Items proven this session
 (fork builds, boots, sshd listens post-vmm, net survives vmm, TCP + version banner)
 are no longer risks.
+
+## 2026-07-10 status — SSH login DONE, one blocker left on the demo
+
+The blocker in "Critical path" above is **RESOLVED**. The x64 `[u8]` C↔Simple ABI
+was root-caused (packed-byte vs tagged-slot representation) and fixed
+(origin `19e2f81e` packed contract, `7dc03ab5` if-expr phi-merge workaround,
+`ee0d17c7` version-transcript fixes). **x64 SSH login now completes end-to-end
+with a real OpenSSH client** — full KEX → NEWKEYS → password auth (`simpleos`) →
+channel → `debug1: Exit status 0` (evidence `build/os/ssh_client.log`).
+
+Ledger now:
+| Piece | State |
+|-------|-------|
+| x64 SSH LOGIN (version→KEX→auth→channel) | **DONE** (ee0d17c7; real client, Exit status 0) |
+| SSH exec dispatch → `fs_exec_spawn_ring3` | **WIRED** (fires at runtime; byte-predicate path detect; builds 170/0) |
+| SSH→ring-3 one-shot demo runs the ELF | **BLOCKED** — see below |
+
+**Remaining blocker (the ONLY thing between here and the full goal):**
+`simpleos_fat32_stream_open("/FSEXEC.ELF")` returns **0** in the merged SSH kernel
+while the non-SSH prod entry reads **13888** from the *same image* via the *same
+extern calls* (disk image verified good — FSEXEC dirent + ELF magic + hello
+string all present). Filed:
+`doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md`. Prime suspects:
+(1) NVMe/FAT DMA state vs `rt_net_init` ordering in `ssh_ring3_entry.spl`;
+(2) `text` path mis-marshal on x64 freestanding
+(`doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md`). Isolation:
+mirror the prod `_read_fsexec_bytes` verbatim, positioned right after
+`simpleos_nvme_init` (before `rt_net_init`), and compare the stream_open rc.
+
+Compiler root fixes still pending (all worked around, documented): if-expr
+phi-merge, chained-method mis-lowering, extern-`[u8]`-return-into-typed-store,
+text `char_at`/`starts_with` mis-decode.
