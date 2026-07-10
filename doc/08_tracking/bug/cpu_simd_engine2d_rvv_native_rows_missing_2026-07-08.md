@@ -9,17 +9,15 @@ open
 - `scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` records x86_64,
   aarch64, and riscv64 Engine2D SIMD evidence independently.
 - Current retained evidence:
-  `doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-08.md`.
-- On the current x86_64 host, x86_64 passes and aarch64/riscv64 are unavailable
-  because target binaries are not supplied.
+  `doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-09.md`.
 - Runtime owner `src/runtime/runtime_simd_dispatch.c` now cross-compiles
   x86_64, aarch64, generic riscv64, and `rv64gcv` RVV row kernels when the
   matching C compilers are present.
 - Runtime owner `src/compiler_rust/simd/src/detection.rs` now detects RVV on
   Linux riscv64 from `AT_HWCAP` / `COMPAT_HWCAP_ISA_V`.
-- Simple owner facade `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`
-  still requires a riscv64 target binary run before RVV can count as native
-  drawing evidence.
+- The public Simple row facade now builds and executes under QEMU for hosted
+  AArch64 and RV64GC Linux. Both probes validate row length and exact
+  `0xFF010203` pixel data and exit zero.
 - The self-hosted hosted-native runtime compiler omitted
   `runtime_simd_dispatch.c`; it now includes that owner so generated binaries
   can link the public Engine2D SIMD row externs.
@@ -30,18 +28,15 @@ open
 - The same focused entry closure emits valid AArch64 and RV64GC ELF objects.
   Target disassembly contains calls to `engine2d_simd_fill_row_u32`,
   `rt_array_len`, and `rt_array_get` on both architectures.
-- Hosted cross compilation now selects target C compilers and no longer routes
-  generic RV64 Linux object names through the SimpleOS linker. Full AArch64
-  linking on this host remains unavailable because `aarch64-linux-gnu-ld` is
-  missing; RV64 linking remains unavailable because `riscv64-linux-gnu-gcc` is
-  missing.
+- Hosted cross compilation now selects target C compilers, uses GNU cross
+  linker flags, and no longer routes generic RV64 Linux object names through
+  the SimpleOS linker.
 
 ## Impact
 
-The compiler now proves the public Simple path through target object code, but
-the riscv64 lane cannot yet execute that code on this host. The matrix remains
-partial until the target linker/toolchain and runnable target binary are
-available.
+The compiler now proves the public Simple path through executable x86_64,
+AArch64, and RV64GC binaries. The remaining gap is narrower: the hosted RV64GC
+runtime does not prove an RVV vector kernel was selected and executed.
 
 ## Required Fix
 

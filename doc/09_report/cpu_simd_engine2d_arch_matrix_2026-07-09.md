@@ -55,3 +55,15 @@
 - cpu_simd_engine2d_arch_matrix_target_binary_failed_count=0
 - cpu_simd_engine2d_arch_matrix_status=pass
 - cpu_simd_engine2d_arch_matrix_reason=target-binary-builds-pass
+
+## Hosted Simple Binary Proof (2026-07-10)
+
+- x86_64 LLVM native binary: build pass, exact row probe exit `0`.
+- AArch64 LLVM hosted binary: `ELF 64-bit ARM aarch64`, QEMU user-mode exit `0`.
+- RV64GC LLVM hosted binary: `ELF 64-bit RISC-V, RVC, double-float ABI`, QEMU
+  user-mode exit `0`.
+- All three binaries call the public `engine2d_simd_fill_row_u32` Simple wrapper
+  and validate row length plus exact `0xFF010203` pixel data.
+- RVV-specific vector-hit evidence remains open; the hosted RV64 binary target
+  is `rv64gc`, while the separate runtime-owner C harness proves `rv64gcv`
+  compilation and execution.

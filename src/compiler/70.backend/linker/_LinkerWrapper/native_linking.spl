@@ -549,9 +549,10 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         return Err("cc fallback requires at least one object file")
     val obj0 = object_files[0]
 
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val hosted_cross = target.starts_with("aarch64-") or target.starts_with("riscv64-")
     var cc = env_get("SIMPLE_CC") ?? ""
     if cc == "":
-        val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
         if target.starts_with("aarch64-"):
             cc = "aarch64-linux-gnu-gcc"
         elif target.starts_with("riscv64-"):
@@ -608,7 +609,9 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
         return Err("cc linking failed: {err_msg}")
     else:
-        var args: [text] = ["-fuse-ld=lld"]
+        var args: [text] = []
+        if not hosted_cross:
+            args.push("-fuse-ld=lld")
         var has_native_all = false
         for obj in object_files:
             if obj.ends_with("libsimple_native_all.a"):
@@ -631,11 +634,13 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push("-lffi")
         args.push("-Wl,--as-needed")
         args.push("-lm")
-        args.push("-lSDL2")
+        if not hosted_cross:
+            args.push("-lSDL2")
         args.push("-Wl,--no-as-needed")
         args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
-        args.push("-Wl,--icf=safe")
+        if not hosted_cross:
+            args.push("-Wl,--icf=safe")
         args.push("-o")
         args.push(output)
         val (stdout, stderr, code) = process_run(cc, args)
