@@ -21,6 +21,7 @@ use os.kernel.arch.x86_64.cpu.{install_syscall_entry}
 use os.kernel.smp.percpu.{percpu_init}
 
 use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.boot.mmio.{mmio_disable_test_mode}
 
 # Use u64 sentinel — bool=false stores as 0x3 (NIL tag) which is non-zero,
 # causing the idempotency guard to fire prematurely. u64=0 is truly zero.
@@ -36,6 +37,15 @@ fn arch_x86_64_early_init():
     Idempotent — subsequent calls return immediately without re-running.
     Must be called BEFORE any code that can fault (memory, drivers, etc.).
     """
+    # Force MMIO out of the unit-test table BEFORE anything (percpu_init,
+    # parse_hhdm, topology-from-rsdp) touches a device via mmio_read*/write*.
+    # `_mmio_test_mode`'s `var bool = false` initializer never runs in a
+    # freestanding native-build image, so it reads garbage-true and silently
+    # routes every hardware access to the empty test table (returning 0).
+    # Idempotent, so it runs unconditionally — even before the count guard,
+    # which is itself a module-var-init sentinel that must not gate it.
+    mmio_disable_test_mode()
+
     if _arch_init_count > 0:
         return
     _arch_init_count = 1
