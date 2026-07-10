@@ -874,3 +874,12 @@ dev-done
   `check-macos-metal-render-log-compare.shs` PASS with
   `blocked_gate_count=0`. Regenerated
   `doc/06_spec/test/02_integration/rendering/metal_engine2d_readback_spec.md`.
+- plan-sync: Closed the remaining macOS Metal Spark plan card on Darwin/arm64.
+  `check-metal-generated-2d-readback.shs` PASS with zero mismatches, the
+  production host-GPU queue/readback wrapper records `readback_metal_verdict`,
+  `metal_spark_task_status`, and `metal_normal_llm_verification_status` as
+  `pass`, and `check-macos-metal-render-log-compare.shs` published
+  `doc/09_report/macos_metal_render_log_compare_2026-07-10.md` with
+  `blocked_gate_count=0` and GPU capture `not-required`. The production wrapper
+  aggregate remains fail/partial for broader non-Metal gates and is documented
+  as such in the active plans.

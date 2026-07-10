@@ -228,6 +228,24 @@ unavailable/provenance-only to production proof.
 
 ### Metal Spark Card
 
+Status update, 2026-07-11:
+
+- Completed on Darwin/arm64 with native Metal tools from `xcrun`.
+- `timeout 240 sh scripts/check/check-metal-generated-2d-readback.shs`
+  reported `metal_generated_2d_readback_status=pass`,
+  `metal_generated_2d_readback_reason=gpu-readback-verified`, and
+  `metal_generated_2d_readback_mismatch_count=0`.
+- The production wrapper report
+  `doc/09_report/production_gui_web_host_gpu_queue_readback_2026-07-10.md`
+  recorded `readback_metal_verdict=pass`,
+  `metal_spark_task_status=pass`, and
+  `metal_normal_llm_verification_status=pass`.
+- The same production wrapper still exited nonzero for broader
+  non-Metal gates (`browser-frame-first-render-budget-not-met`,
+  BrowserBackend host event roundtrip, compiler HostGpuLane cleanup, and
+  non-Metal platform children). Do not treat this Metal Spark completion as
+  full host-GPU platform matrix completion.
+
 - Spark task: run native Metal generated-2D readback on Darwin, then run the
   production wrapper.
 - Files: `scripts/check/check-metal-generated-2d-readback.shs`,

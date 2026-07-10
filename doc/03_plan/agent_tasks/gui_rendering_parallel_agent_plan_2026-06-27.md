@@ -46,12 +46,21 @@ required, platform render-log comparison, and separate full-CSS closure.
   missing `renderdoccmd` in the searched paths. Older reports that found
   RenderDoc tooling are dated diagnostics; current completion must use fresh
   host discovery plus real `.rdc` files with `RDOC` magic.
+- macOS Metal host evidence is current for native generated-2D readback,
+  framebuffer readback, Electron/Chrome/Simple Metal browser backing,
+  pairwise ARGB equivalence, and render-log comparison. See
+  `doc/09_report/metal_generated_2d_readback_2026-07-10.md`,
+  `doc/09_report/metal_engine2d_framebuffer_readback_2026-07-10.md`,
+  `doc/09_report/macos_metal_render_log_compare_2026-07-10.md`, and
+  `doc/09_report/production_gui_web_host_gpu_queue_readback_2026-07-10.md`.
+  The production host-GPU queue/readback aggregate still fails broader
+  non-Metal gates and must not be read as full platform-matrix completion.
 - The active completion blockers remain native RenderDoc `.rdc` evidence,
-  platform render-log comparison on Linux/macOS/Windows, and full CSS
-  specification coverage beyond the implemented Simple Web subset. Existing
-  Darwin production parity/font/raw-Metal reports are not reopened by this
-  Linux host plan; any final completion claim still needs the aggregate gate to
-  accept the relevant fresh evidence rows.
+  platform render-log comparison on Linux/Windows, and full CSS specification
+  coverage beyond the implemented Simple Web subset. Existing Darwin
+  production parity/font/raw-Metal reports are not reopened by this plan; any
+  final completion claim still needs the aggregate gate to accept the relevant
+  fresh evidence rows.
 - Current full-CSS evidence keys remain incomplete:
   `html_css_full_rendering_goal_status=incomplete`,
   `html_css_full_rendering_goal_full_css_rendered_count=233`, and
@@ -326,8 +335,10 @@ Accepted reviewed split:
 
 - Linux Vulkan lane: host readiness, browser Vulkan backing, direct ARGB
   comparison, RenderDoc `.rdc`, and Linux render-log normalization.
-- macOS Metal lane: native Metal readback, render-log normalization, and GPU
-  Capture evidence when capture is required.
+- macOS Metal lane: native Metal readback, browser/gui backing, pairwise ARGB
+  equivalence, render-log normalization, and GPU Capture evidence when capture
+  is required. Current Darwin evidence passes these gates; GPU capture is
+  recorded as `not-required`.
 - Windows D3D12 lane: native D3D12/DXGI readback, render-log normalization,
   PIX or equivalent GPU-debugger capture evidence, and strict D3D12 render-log
   comparison.
@@ -339,7 +350,6 @@ Host-preparable here:
 
 Requires another GUI platform:
 
-- macOS Metal proof on a real Darwin host with Metal tooling.
 - Windows D3D12 proof on a real Windows host with native capture tools and PIX
   or equivalent GPU-debugger evidence.
 
@@ -478,7 +488,7 @@ Each scenario maps to one completion gate:
 | Gate | Required proof | Host owner | Current state |
 | --- | --- | --- | --- |
 | Linux Vulkan RenderDoc | Chrome, Electron, and Simple Vulkan backing; nonblank pairwise ARGB equivalence; strict Linux render-log compare; `.rdc` artifacts with `RDOC` magic for Chrome, Electron, and Simple | Prepared Ubuntu GUI host | Blocked here by missing RenderDoc command |
-| macOS Metal | Native Metal readback; browser/gui backing; pairwise equivalence; macOS render-log compare; Xcode GPU Capture proof when required | Darwin GUI host | Not run on this Linux host |
+| macOS Metal | Native Metal readback; browser/gui backing; pairwise equivalence; macOS render-log compare; Xcode GPU Capture proof when required | Darwin GUI host | PASS on Darwin/arm64: generated/readback/browser/pairwise/render-log pass; GPU capture not required; production host-GPU wrapper Metal subcheck pass, broader aggregate still partial |
 | Windows D3D12 | Native D3D12/DXGI readback; D3D12-backed Chrome/Electron/Simple browser/gui backing; pairwise ARGB equivalence; D3D12 render-log compare; strict `WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1`; verified PIX artifact file/status/magic or equivalent GPU-debugger artifact files as required by the strict wrapper | Windows GUI host | Not run on this Linux host |
 | iOS Tauri/WKWebView Metal | Fresh simulator or device WKWebView + CAMetalLayer/Metal evidence; live screenshot PNG artifact checks; `ios_mdi_proof.validation.env`; coherent render-log source file/size identity; `[tauri-shell] render, html_len=` marker; production `device_readback` evidence | macOS/iOS host or simulator agent | Not run on this Linux host; source-level artifact gate only |
 | Android Tauri/WebView Vulkan | Fresh emulator or device WebView + Vulkan/skiavk evidence; live screenshot PNG artifact checks; `android_mdi_proof.validation.env`; coherent render-log source file/size identity; `[tauri-shell] render, html_len=` marker; `com.simple.ui` foreground marker; production `device_readback` evidence | Android emulator/device host agent | Not run on this Linux host; source-level artifact gate only |
@@ -549,7 +559,7 @@ This session's immediate integration target:
 | WO-3 Sidecar review | Normal/high-capability Lane C | Not Spark: review must catch overclaiming | `scripts/check/check-gui-web-2d-parallel-agent-review-evidence.shs`, `test/03_system/check/gui_web_2d_parallel_agent_review_evidence_spec.spl`, mirrored manual only | Findings accept/reject each sidecar claim, Spark quota failures stay attempts only, fallback sidecars stay advisory until reviewed, and the checker fails closed when the plan is missing |
 | WO-4 Plan/doc integration | Main agent | Not delegated | `doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md` and directly referenced guides only | Baseline names current commit, Spark status, review gates, and next host lanes |
 | WO-5 Linux Vulkan host execution | Future platform agent on prepared Ubuntu GUI host | Medium: Spark may run readiness probes only under supervision | Evidence dirs and reports only | Browser backing and direct ARGB pairwise diff pass first; strict Linux render-log compare remains blocked until Chrome/Electron/Simple RenderDoc `.rdc` artifacts have `RDOC` magic |
-| WO-6 macOS Metal host execution | Future Darwin agent | Medium: Spark may collect logs; normal review required | Evidence dirs and reports only | Native Metal readback, GPU capture if required, and macOS render-log compare pass |
+| WO-6 macOS Metal host execution | Done on Darwin/arm64; normal review retained | Medium: Spark may collect logs; normal review required | Evidence dirs and reports only | Native Metal generated/readback/browser/pairwise/render-log pass; GPU capture gate not-required; production host-GPU wrapper Metal subcheck pass while broader aggregate remains partial |
 | WO-7 Windows D3D12 host execution | Future Windows agent | Low/medium: Spark can collect command output; normal review required | Evidence dirs and reports only | Native D3D12/DXGI readback, `windows_d3d12_native_readback_api=d3d12`, D3D12-backed Chrome/Electron/Simple pairwise ARGB, strict `WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1`, PIX file/status/magic or equivalent GPU-debugger artifact proof, and Windows render-log compare pass; DirectX/D3D11 producer diagnostics are not completion proof |
 | WO-8 4K/8K perf freshness | Main or supervised perf sidecar | Medium: Spark can check retained rows; normal review required for perf claims | Reports/metrics only | Retained rows include viewport, source revision, timing, RSS, checksum/readback, and fallback state |
 | WO-9 Stale planning cleanup | Spark scan followed by normal review | High for discovery, review required for edits | `doc/03_plan/agent_tasks/gui_web_host_gpu_queue_readback_spark_tasks.md`, `doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md`, and directly referenced stale plan docs | Older queue/readback and platform-matrix docs either point to current aggregate/runbook evidence or are explicitly marked historical/superseded |
@@ -1183,8 +1193,6 @@ Remaining non-headless completion gates after this slice:
 
 - Linux Vulkan: real Chrome/Electron/Simple Vulkan RenderDoc `.rdc` captures
   with `RDOC` magic and pairwise ARGB equivalence on an Ubuntu GUI host.
-- macOS Metal: real Metal/Xcode GPU capture and Metal render-log compare on a
-  Darwin GUI host.
 - Windows D3D12: real D3D12/PIX or GPU-debugger capture and render-log compare
   on a Windows GUI host.
 - iOS/Android: real Tauri2/WKWebView/WebView device or emulator evidence with
