@@ -292,17 +292,25 @@ impl<'a> MirLowerer<'a> {
             .type_registry
             .and_then(|tr| recovered_receiver_ty.and_then(|ty| tr.get(ty)))
             .is_some_and(|ty| matches!(ty, HirType::Array { .. }));
+        // Mirror `receiver_is_array` (and Dict #117): test the ANY-recovered
+        // type, not the raw `receiver_ty`. When `[u8]`/`[u32]`/`[u64]` erases
+        // to ANY across extern facades, the raw ty is ANY and these typed
+        // fast-path flags would be false, dropping to generic `rt_index_get`
+        // with no narrow — mistagging the handle for strict C byte consumers
+        // (sshd banner garbage). `recovered_receiver_ty` degenerates to
+        // `Some(receiver_ty)` when the raw ty is not ANY, so this only widens
+        // the erased case.
         let receiver_is_u8_array = self
             .type_registry
-            .and_then(|tr| tr.get(receiver_ty))
+            .and_then(|tr| recovered_receiver_ty.and_then(|ty| tr.get(ty)))
             .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8));
         let receiver_is_u32_array = self
             .type_registry
-            .and_then(|tr| tr.get(receiver_ty))
+            .and_then(|tr| recovered_receiver_ty.and_then(|ty| tr.get(ty)))
             .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U32));
         let receiver_is_u64_array = self
             .type_registry
-            .and_then(|tr| tr.get(receiver_ty))
+            .and_then(|tr| recovered_receiver_ty.and_then(|ty| tr.get(ty)))
             .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U64));
         let element_expr_ty = if expr_ty == TypeId::ANY {
             self.type_registry

@@ -223,14 +223,55 @@ RuntimeValue bytes_to_u64_le(RuntimeValue b0, RuntimeValue b1,
 
 /* --- Byte unpacking (returns RuntimeArray) --- */
 
-/* Helper: create a small array of ENCODE_INT byte values */
+/* Arrays exchanged with Simple/baremetal_stubs.c use 64-bit len/cap plus an
+ * items pointer (inline region right after the struct, or a heap buffer) —
+ * not the shared header's inline RuntimeArray. Local view for [u8] paths. */
+typedef struct {
+    HeapHeader   hdr;
+    uint64_t     len;
+    uint64_t     cap;
+    RuntimeValue *items;
+} PrimByteArray;
+
+static inline RuntimeValue *prim_bytes_items(PrimByteArray *a)
+{
+    return a->items ? a->items
+                    : (RuntimeValue *)((uint8_t *)a + sizeof(PrimByteArray));
+}
+
+/* Read one element of a Simple [u8] regardless of representation:
+ * packed bytes (gc_flags BYTE_PACKED) or legacy 8-byte tagged slots. */
+static inline uint8_t prim_bytes_get(PrimByteArray *a, uint64_t i)
+{
+    RuntimeValue *it = prim_bytes_items(a);
+    if (a->hdr.gc_flags & BAREMETAL_GC_BYTE_PACKED)
+        return ((const uint8_t *)it)[i];
+    RuntimeValue v = it[i];
+    return (uint8_t)((IS_INT(v) ? DECODE_INT(v) : (int64_t)v) & 0xFF);
+}
+
+/* Packed [u8] producer for Simple-visible byte arrays (modeled on
+ * baremetal_stubs.c _rt_bytes_new): 1 byte/element + BYTE_PACKED flag. */
+static RuntimeValue prim_bytes_new(const uint8_t *bytes, uint64_t len)
+{
+    PrimByteArray *a = (PrimByteArray *)malloc(sizeof(PrimByteArray) + len);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = BAREMETAL_GC_BYTE_PACKED;
+    a->hdr.reserved = 0;
+    a->hdr.size = (uint32_t)(sizeof(PrimByteArray) + len);
+    a->len = len;
+    a->cap = len;
+    a->items = (RuntimeValue *)((uint8_t *)a + sizeof(PrimByteArray));
+    uint8_t *dst = (uint8_t *)a->items;
+    for (uint64_t i = 0; i < len; i++) dst[i] = bytes[i];
+    return ENCODE_PTR(a);
+}
+
+/* Helper: create a small Simple-visible [u8] (packed) */
 static RuntimeValue make_byte_array(const uint8_t *bytes, int count)
 {
-    RuntimeValue arr = rt_array_new(ENCODE_INT(count));
-    for (int i = 0; i < count; i++) {
-        rt_array_push(arr, ENCODE_INT(bytes[i]));
-    }
-    return arr;
+    return prim_bytes_new(bytes, (uint64_t)(count > 0 ? count : 0));
 }
 
 RuntimeValue u16_to_bytes_be(RuntimeValue v)
@@ -369,6 +410,8 @@ static RuntimeValue prim_int_to_str(int64_t n)
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
+    s->hdr.gc_flags = 0;
+    s->hdr.reserved = 0;
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = len;
     int out = 0;
@@ -516,6 +559,8 @@ RuntimeValue substring(RuntimeValue s, RuntimeValue start, RuntimeValue end)
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!r) return NIL_VALUE;
     r->hdr.type = HEAP_STRING;
+    r->hdr.gc_flags = 0;
+    r->hdr.reserved = 0;
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     r->len = len;
     for (uint32_t j = 0; j < len; j++) r->data[j] = str->data[a + j];
@@ -547,6 +592,8 @@ RuntimeValue trim_start(RuntimeValue s)
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!r) return NIL_VALUE;
     r->hdr.type = HEAP_STRING;
+    r->hdr.gc_flags = 0;
+    r->hdr.reserved = 0;
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     r->len = len;
     for (uint32_t j = 0; j < len; j++) r->data[j] = str->data[i + j];
@@ -571,6 +618,8 @@ RuntimeValue trim_end(RuntimeValue s)
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!r) return NIL_VALUE;
     r->hdr.type = HEAP_STRING;
+    r->hdr.gc_flags = 0;
+    r->hdr.reserved = 0;
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     r->len = len;
     for (uint32_t j = 0; j < len; j++) r->data[j] = str->data[j];
@@ -703,15 +752,10 @@ RuntimeValue spl_read_bytes(RuntimeValue ptr, RuntimeValue off, RuntimeValue len
     if (!base) return NIL_VALUE;
     int64_t offset = DECODE_INT(off);
     int64_t count = DECODE_INT(len);
-    if (count <= 0) return rt_array_new(ENCODE_INT(1));
+    if (count <= 0) return prim_bytes_new((const uint8_t *)base, 0);
     if (count > 0x100000) count = 0x100000; /* safety limit */
 
-    RuntimeValue arr = rt_array_new(ENCODE_INT(count));
-    uint8_t *src = base + offset;
-    for (int64_t i = 0; i < count; i++) {
-        rt_array_push(arr, ENCODE_INT(src[i]));
-    }
-    return arr;
+    return prim_bytes_new(base + offset, (uint64_t)count);
 }
 
 RuntimeValue spl_write_u8(RuntimeValue ptr, RuntimeValue off, RuntimeValue val)
@@ -740,10 +784,12 @@ RuntimeValue spl_write_bytes(RuntimeValue ptr, RuntimeValue off,
     uint8_t *dst = base + offset;
 
     if (hdr->type == HEAP_ARRAY) {
-        RuntimeArray *arr = (RuntimeArray *)hdr;
+        /* Byte-array source from Simple: use the stubs layout view and
+         * dispatch on the BYTE_PACKED flag. */
+        PrimByteArray *arr = (PrimByteArray *)hdr;
         if (count > (int64_t)arr->len) count = (int64_t)arr->len;
         for (int64_t i = 0; i < count; i++) {
-            dst[i] = (uint8_t)(DECODE_INT(arr->items[i]) & 0xFF);
+            dst[i] = prim_bytes_get(arr, (uint64_t)i);
         }
     } else if (hdr->type == HEAP_STRING) {
         RuntimeString *str = (RuntimeString *)hdr;

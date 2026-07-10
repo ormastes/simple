@@ -3950,8 +3950,12 @@ RuntimeValue rt_arm_array_empty_exact(void) { return rt_array_new(ENCODE_INT(0))
 RuntimeValue rt_arm_array_slice_bytes(void) { return rt_array_new(ENCODE_INT(0)); }
 RuntimeValue rt_arm_fat32_probe_bpb_from_virtio(void) { return NIL_VALUE; }
 RuntimeValue rt_arm_smf_elf_stub_size(void) { return ENCODE_INT(0); }
-RuntimeValue rt_byte_array_new(RuntimeValue capacity) { return rt_array_new(capacity); }
-RuntimeValue rt_bytes_alloc(RuntimeValue size) { return rt_array_new(size); }
+/* [u8] builders must honor the native packed contract (BYTE_PACKED flag,
+ * 1 byte/element). Builders live in baremetal_stubs.c next to the layout. */
+extern RuntimeValue rt_bytes_alloc_packed_empty(void);
+extern RuntimeValue rt_bytes_alloc_packed(RuntimeValue len_val);
+RuntimeValue rt_byte_array_new(RuntimeValue capacity) { (void)capacity; return rt_bytes_alloc_packed_empty(); }
+RuntimeValue rt_bytes_alloc(RuntimeValue size) { return rt_bytes_alloc_packed(size); }
 RuntimeValue rt_bytes_u32_le_at(void) { return ENCODE_INT(0); }
 RuntimeValue rt_bytes_u64_le_at(void) { return ENCODE_INT(0); }
 RuntimeValue rt_bytes_u8_set(void) { return TRUE_VALUE; }

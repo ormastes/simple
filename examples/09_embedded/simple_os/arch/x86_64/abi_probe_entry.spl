@@ -1,0 +1,144 @@
+# x86_64 [u8] ABI Round-Trip Corruption Probe
+#
+# Minimal freestanding --entry-closure probe isolating the documented
+# [u8] corruption bug: a RuntimeArray built C-side by
+# _tls_runtime_array_from_bytes (boot/baremetal_stubs.c) reads back
+# corrupt on the Simple side after round-tripping through x64 freestanding
+# native-build codegen (extern C fn returns [u8] -> Simple local -> passed
+# back into C rt_bytes_u8_at / probed raw via rt_abi_probe_raw).
+#
+# No OS deps (no nvme/net/vmm) -- direct port I/O serial + isa-debug-exit,
+# modeled on class_fault_probe_entry.spl.
+#
+# Expected (uncorrupted): bytes 0x41..0x48 ("ABCDEFGH"), len=8,
+# raw bits per element = ENCODE_INT(byte) = (byte << 3) | 0.
+#
+# IMPORTANT: this file uses NO `text` literal iteration (`for ch in s`) and
+# NO module-level `val` globals. Both were found, in earlier probe runs, to
+# be independently broken on this native-build config:
+#   - module `val` u64 globals got treated as unresolved extern symbols
+#     (SIMPLE_TRACE_STUBS=1 showed abi_probe_entry__SERIAL_DATA etc stubbed
+#     to 0) -- literals are inlined at each call site instead.
+#   - `for ch in s` over a `text` literal depends on rt_array_get_text /
+#     rt_array_data_ptr_text / rt_string_builder_* -- ALL of which showed up
+#     in the SAME unresolved-symbol trace (stubbed), and produced visibly
+#     scrambled output (an arithmetic-step garbage pattern) in an earlier
+#     probe run, while pure-arithmetic serial_dec_i64/serial_hex_u64 output
+#     interleaved in the SAME run came through byte-exact. All string labels
+#     below are therefore spelled out as explicit serial_put(<ascii-code>)
+#     sequences so this probe's own instrumentation cannot be confounded by
+#     that separate (and out-of-scope) text-iteration bug.
+
+extern fn rt_port_inb(port: u64) -> u64
+extern fn rt_port_outb(port: u64, value: u64)
+
+extern fn rt_abi_probe_bytes() -> [u8]
+extern fn rt_abi_probe_raw(arr: [u8], idx: i64) -> u64
+extern fn rt_abi_probe_handle(arr: [u8]) -> u64
+extern fn rt_abi_probe_len(arr: [u8]) -> u64
+extern fn rt_abi_probe_items_ptr(arr: [u8]) -> u64
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn serial_wait_ready():
+    var guard: i64 = 100000
+    while guard > 0:
+        if (rt_port_inb(0x3FD) & 0x20) != 0:
+            return
+        guard = guard - 1
+
+fn serial_put(ch: u64):
+    serial_wait_ready()
+    rt_port_outb(0x3F8, ch)
+
+fn serial_newline():
+    serial_put(13)
+    serial_put(10)
+
+fn serial_hex_nib(nib: u64):
+    if nib < 10:
+        serial_put(48 + nib)
+    else:
+        serial_put(87 + nib)
+
+fn serial_hex_u64(v: u64):
+    serial_put(48)
+    serial_put(120)
+    var shift: i64 = 60
+    var started: bool = false
+    while shift >= 0:
+        val nib = (v >> (shift as u64)) & 0xF
+        if nib != 0 or started or shift == 0:
+            started = true
+            serial_hex_nib(nib)
+        shift = shift - 4
+
+fn serial_dec_i64(v: i64):
+    if v < 0:
+        serial_put(45)
+        serial_dec_i64(0 - v)
+        return
+    if v >= 10:
+        serial_dec_i64(v / 10)
+    val digit = v % 10
+    serial_put((48 + digit) as u64)
+
+# Single-letter field markers instead of word labels (avoids text iteration).
+fn mark(c: u64):
+    serial_put(c)
+    serial_put(61)  # '='
+
+fn spl_start():
+    serial_put(80)
+    serial_put(49)
+    serial_newline()  # "P1"
+
+    var arr = rt_abi_probe_bytes()
+    serial_put(80)
+    serial_put(50)
+    serial_put(32)
+    mark(72)  # 'H'=
+    serial_hex_u64(rt_abi_probe_handle(arr))
+    serial_newline()  # "P2 H=0x..."
+
+    val len_c = rt_abi_probe_len(arr)
+    serial_put(80)
+    serial_put(51)
+    serial_put(32)
+    mark(76)  # 'L'=
+    serial_hex_u64(len_c)
+    serial_put(32)
+    mark(108)  # 'l'=
+    serial_dec_i64(arr.len())
+    serial_newline()  # "P3 L=0x... l=..."
+
+    serial_put(80)
+    serial_put(52)
+    serial_put(32)
+    mark(73)  # 'I'=
+    serial_hex_u64(rt_abi_probe_items_ptr(arr))
+    serial_newline()  # "P4 I=0x..."
+
+    var i: i64 = 0
+    while i < 8:
+        serial_put(80)
+        serial_put(53)
+        serial_put(91)  # '['
+        serial_dec_i64(i)
+        serial_put(93)  # ']'
+        serial_put(32)
+        mark(115)  # 's'= (Simple arr[i])
+        serial_dec_i64(arr[i] as i64)
+        serial_put(32)
+        mark(99)  # 'c'= (C rt_bytes_u8_at)
+        serial_dec_i64(rt_bytes_u8_at(arr, i))
+        serial_put(32)
+        mark(114)  # 'r'= (raw bits)
+        serial_hex_u64(rt_abi_probe_raw(arr, i))
+        serial_newline()
+        i = i + 1
+
+    serial_put(80)
+    serial_put(68)
+    serial_newline()  # "PD" (done)
+
+    rt_port_outb(0xF4, 0)

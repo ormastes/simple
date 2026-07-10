@@ -277,7 +277,9 @@ static int8_t _simpleos_log_write_cstr(int64_t level, const char *msg)
 #define FALSE_VALUE    ENCODE_INT(0)
 
 typedef struct {
-    uint32_t type;
+    uint8_t  type;      /* HeapObjectType (matches native runtime object_type@0) */
+    uint8_t  gc_flags;  /* native runtime gc_flags@1 (BYTE_PACKED lives here) */
+    uint16_t reserved;
     uint32_t size;
 } HeapHeader;
 
@@ -302,6 +304,16 @@ typedef struct {
 #define HEAP_MODULE  6
 #define HEAP_ENUM    7
 
+/* gc_flags bit marking a byte-packed [u8] array: `items`/data points to `len`
+ * PACKED bytes (1 byte/element), NOT 8-byte tagged RuntimeValue slots. This is
+ * the native compiler's [u8] contract (runtime value/heap.rs BYTE_PACKED=0b1000
+ * + value/collections.rs is_byte_packed). The compiler's trusted inline
+ * `[u8]` index reader (codegen/instr/calls.rs, rt_typed_bytes_u8_at) reads
+ * stride-1 packed unconditionally, so every [u8] handed to Simple MUST be
+ * packed+flagged. C consumers below stay defensive: they honor the flag and
+ * still accept legacy tagged arrays. */
+#define BYTE_PACKED  0x08
+
 static inline RuntimeValue *runtime_array_inline_items(RuntimeArray *a)
 {
     return (RuntimeValue *)((uint8_t *)a + sizeof(RuntimeArray));
@@ -314,6 +326,72 @@ static inline RuntimeValue *runtime_array_items(RuntimeArray *a)
 }
 
 void *malloc(size_t sz);
+
+/* ---- byte-array (packed [u8]) helpers, native-contract compliant ----
+ * Producer: allocate a HEAP_ARRAY whose `items` holds `len` PACKED bytes and
+ * whose gc_flags carry BYTE_PACKED. Consumers: read one element defensively
+ * (packed 1-byte OR legacy tagged slot) and copy the whole array to a scratch
+ * buffer defensively. */
+static RuntimeValue _rt_bytes_new(const uint8_t *buf, uint32_t len)
+{
+    size_t bytes = sizeof(RuntimeArray) + (size_t)len;
+    RuntimeArray *a = (RuntimeArray *)malloc(bytes);
+    if (!a) return (RuntimeValue)3 /* NIL */;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = BYTE_PACKED;
+    a->hdr.reserved = 0;
+    a->hdr.size = (uint32_t)bytes;
+    a->len = len;
+    a->cap = len;
+    a->items = (RuntimeValue *)((uint8_t *)a + sizeof(RuntimeArray));
+    uint8_t *dst = (uint8_t *)a->items;
+    for (uint32_t i = 0; i < len; i++) dst[i] = buf ? buf[i] : 0;
+    return (RuntimeValue)((uint64_t)(uintptr_t)a | 1 /* TAG_HEAP */);
+}
+
+/* Defensive single-element read from a byte array (RuntimeArray*). */
+static inline uint8_t _rt_bytes_get(RuntimeArray *a, uint32_t i)
+{
+    if (a->hdr.gc_flags & BYTE_PACKED)
+        return ((uint8_t *)(a->items ? a->items
+                    : (RuntimeValue *)((uint8_t *)a + sizeof(RuntimeArray))))[i];
+    RuntimeValue *items = a->items ? a->items
+                    : (RuntimeValue *)((uint8_t *)a + sizeof(RuntimeArray));
+    RuntimeValue v = items[i];
+    /* tagged INT slot -> decode; raw fallback -> low byte */
+    return (uint8_t)((((uint64_t)v & 0x7ULL) == 0 ? ((int64_t)((uint64_t)v >> 3))
+                                                  : (int64_t)v) & 0xFF);
+}
+
+/* Exported packed-empty [u8] builder for sibling translation units
+ * (rt_extras.c rt_byte_array_new). New byte arrays start packed so every
+ * subsequent push (inline codegen packed branch or the flag-aware C
+ * fallback) keeps the native packed contract. */
+RuntimeValue rt_bytes_alloc_packed_empty(void)
+{
+    return _rt_bytes_new(NULL, 0);
+}
+
+/* Zero-filled packed [u8] of a given length (tagged or raw length arg). */
+RuntimeValue rt_bytes_alloc_packed(RuntimeValue len_val)
+{
+    uint64_t raw = (uint64_t)len_val;
+    uint64_t len = ((raw & TAG_MASK) == TAG_INT) ? (raw >> 3) : raw;
+    if (len > 0x4000000ULL) return NIL_VALUE;
+    return _rt_bytes_new(NULL, (uint32_t)len);
+}
+
+/* Defensive single-element write into an existing byte array (honors the
+ * representation the array was allocated with). */
+static inline void _rt_bytes_set(RuntimeArray *a, uint32_t i, uint8_t b)
+{
+    RuntimeValue *items = a->items ? a->items
+                    : (RuntimeValue *)((uint8_t *)a + sizeof(RuntimeArray));
+    if (a->hdr.gc_flags & BYTE_PACKED)
+        ((uint8_t *)items)[i] = b;
+    else
+        items[i] = (RuntimeValue)(((uint64_t)(int64_t)b << 3) | 0 /* ENCODE_INT */);
+}
 
 RuntimeValue rt_u32_alloc_filled(uint64_t len, uint32_t fill)
 {
@@ -2753,17 +2831,7 @@ RuntimeValue simpleos_fat32_read_known_app_array(RuntimeValue app_id_val)
     if (fat32_find_file(name, &cluster, &file_size) != 0 || file_size > simpleos_fat32_read_buf_size)
         return rt_array_new((RuntimeValue)0);
 
-    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
-    if (!a)
-        return rt_array_new((RuntimeValue)0);
-    a->hdr.type = HEAP_ARRAY;
-    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
-    a->len = file_size;
-    a->cap = file_size;
-    a->items = runtime_array_inline_items(a);
-    for (uint32_t i = 0; i < file_size; i++)
-        a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_read_buf[i]);
-    return ENCODE_PTR(a);
+    return _rt_bytes_new(simpleos_fat32_read_buf, (uint32_t)file_size);
 }
 
 int64_t simpleos_fat32_read_path_size(const char *path, int64_t path_len)
@@ -2821,17 +2889,7 @@ RuntimeValue simpleos_fat32_read_path_array(const char *path, int64_t path_len)
     if (bytes_read != file_size)
         return rt_array_new((RuntimeValue)0);
 
-    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
-    if (!a)
-        return rt_array_new((RuntimeValue)0);
-    a->hdr.type = HEAP_ARRAY;
-    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
-    a->len = file_size;
-    a->cap = file_size;
-    a->items = runtime_array_inline_items(a);
-    for (uint32_t i = 0; i < file_size; i++)
-        a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_path_read_buf[i]);
-    return ENCODE_PTR(a);
+    return _rt_bytes_new(simpleos_fat32_path_read_buf, (uint32_t)file_size);
 }
 
 int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
@@ -5034,15 +5092,7 @@ static const uint32_t _sha256_H[8] = {
 
 static RuntimeValue rt_bytes_from_rodata(const uint8_t *data, size_t len)
 {
-    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
-    if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
-    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
-    a->len = (uint32_t)len;
-    a->cap = (uint32_t)len;
-    a->items = runtime_array_inline_items(a);
-    for (size_t i = 0; i < len; i++) a->items[i] = ENCODE_INT((int64_t)data[i]);
-    return ENCODE_PTR(a);
+    return _rt_bytes_new(data, (uint32_t)len);
 }
 
 static const uint8_t ssh_userauth_password_only_failure_payload[14] = {
@@ -5179,7 +5229,7 @@ int64_t rt_sha512_hash(int64_t data_rv, int64_t unused)
     uint8_t *data = (uint8_t *)malloc(data_len + 256);
     if (!data) return -1;
     for (uint32_t i = 0; i < data_len; i++)
-        data[i] = (uint8_t)(DECODE_INT(items[i]) & 0xFF);
+        data[i] = _rt_bytes_get(arr, i);
 
     /* SHA-512 padding */
     uint64_t bit_len = (uint64_t)data_len * 8;
@@ -6204,7 +6254,7 @@ static uint8_t *_ed_rv_to_bytes(int64_t rv, uint32_t *out_len)
     uint8_t *buf = (uint8_t *)malloc(len);
     if (!buf) return (void*)0;
     for (uint32_t i = 0; i < len; i++)
-        buf[i] = (uint8_t)(DECODE_INT(items[i]) & 0xFF);
+        buf[i] = _rt_bytes_get(arr, i);
     *out_len = len;
     return buf;
 }
@@ -6222,9 +6272,8 @@ static int _ed_bytes_to_rv(const uint8_t *src, uint32_t src_len, int64_t rv)
     if (!hdr || hdr->type != HEAP_ARRAY) return -1;
     RuntimeArray *arr = (RuntimeArray *)hdr;
     if (arr->len < src_len) return -1;
-    RuntimeValue *items = runtime_array_items(arr);
     for (uint32_t i = 0; i < src_len; i++)
-        items[i] = ENCODE_INT(src[i]);
+        _rt_bytes_set(arr, i, (uint8_t)src[i]);
     return 0;
 }
 
@@ -6278,13 +6327,7 @@ RuntimeValue rt_ed25519_sign_seed(RuntimeValue seed_rv, RuntimeValue pub_rv, Run
     free(seed);
     free(pub);
     if (msg) free(msg);
-    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue));
-    if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue);
-    a->len = 64; a->cap = 64;
-    a->items = runtime_array_inline_items(a);
-    for (int i = 0; i < 64; i++) a->items[i] = ENCODE_INT(sig[i]);
-    return ENCODE_PTR(a);
+    return _rt_bytes_new(sig, 64);
 }
 
 int64_t rt_ed25519_verify(int64_t msg_rv, int64_t pk_rv, int64_t sig_rv)
@@ -6424,17 +6467,7 @@ RuntimeValue rt_string_to_byte_array(RuntimeValue str)
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
     if (!s || s->hdr.type != HEAP_STRING) return rt_array_new(ENCODE_INT(0));
     uint32_t len = s->len;
-    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
-    if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
-    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
-    a->len = len;
-    a->cap = len;
-    a->items = runtime_array_inline_items(a);
-    for (uint32_t i = 0; i < len; i++) {
-        a->items[i] = ENCODE_INT((uint8_t)s->data[i]);
-    }
-    return ENCODE_PTR(a);
+    return _rt_bytes_new((const uint8_t *)s->data, len);
 }
 
 static inline void _tls_put_u16(uint8_t *buf, uint32_t *off, uint16_t v)
@@ -6535,15 +6568,7 @@ RuntimeValue rt_tls13_build_client_hello(RuntimeValue host_rv)
     _tls_put_u24(hs, &hoff, boff);
     for (uint32_t i = 0; i < boff; i++) hs[hoff++] = body[i];
 
-    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)hoff * sizeof(RuntimeValue));
-    if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
-    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)hoff * sizeof(RuntimeValue));
-    a->len = hoff;
-    a->cap = hoff;
-    a->items = runtime_array_inline_items(a);
-    for (uint32_t i = 0; i < hoff; i++) a->items[i] = ENCODE_INT(hs[i]);
-    return ENCODE_PTR(a);
+    return _rt_bytes_new(hs, hoff);
 }
 
 RuntimeValue rt_tls13_build_client_hello_record(RuntimeValue host_rv)
@@ -6552,22 +6577,22 @@ RuntimeValue rt_tls13_build_client_hello_record(RuntimeValue host_rv)
     if (!IS_HEAP(hs_rv)) return hs_rv;
     RuntimeArray *hs = (RuntimeArray *)DECODE_PTR(hs_rv);
     if (!hs || hs->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    RuntimeValue *hs_items = runtime_array_items(hs);
 
     uint32_t rec_len = hs->len + 5;
     RuntimeArray *rec = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)rec_len * sizeof(RuntimeValue));
     if (!rec) return NIL_VALUE;
     rec->hdr.type = HEAP_ARRAY;
+    rec->hdr.gc_flags = BYTE_PACKED;
     rec->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)rec_len * sizeof(RuntimeValue));
     rec->len = rec_len;
     rec->cap = rec_len;
     rec->items = runtime_array_inline_items(rec);
-    rec->items[0] = ENCODE_INT(0x16);
-    rec->items[1] = ENCODE_INT(0x03);
-    rec->items[2] = ENCODE_INT(0x01);
-    rec->items[3] = ENCODE_INT((hs->len >> 8) & 0xFF);
-    rec->items[4] = ENCODE_INT(hs->len & 0xFF);
-    for (uint32_t i = 0; i < hs->len; i++) rec->items[5 + i] = hs_items[i];
+    ((uint8_t *)rec->items)[0] = (uint8_t)(0x16);
+    ((uint8_t *)rec->items)[1] = (uint8_t)(0x03);
+    ((uint8_t *)rec->items)[2] = (uint8_t)(0x01);
+    ((uint8_t *)rec->items)[3] = (uint8_t)((hs->len >> 8) & 0xFF);
+    ((uint8_t *)rec->items)[4] = (uint8_t)(hs->len & 0xFF);
+    for (uint32_t i = 0; i < hs->len; i++) ((uint8_t *)rec->items)[5 + i] = _rt_bytes_get(hs, i);
     return ENCODE_PTR(rec);
 }
 
@@ -6599,6 +6624,7 @@ RuntimeValue rt_random_bytes_c(int64_t count)
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = BYTE_PACKED;
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     a->len = (uint32_t)count;
     a->cap = (uint32_t)count;
@@ -6615,7 +6641,7 @@ RuntimeValue rt_random_bytes_c(int64_t count)
     }
     for (int64_t i = 0; i < count; i++) {
         _rng ^= _rng << 13; _rng ^= _rng >> 7; _rng ^= _rng << 17;
-        a->items[i] = ENCODE_INT(_rng & 0xFF);
+        ((uint8_t *)a->items)[i] = (uint8_t)(_rng & 0xFF);
     }
     return ENCODE_PTR(a);
 }
@@ -6789,13 +6815,7 @@ RuntimeValue rt_ed25519_keypair_pk(RuntimeValue seed_rv)
     uint8_t pk[32], sk[64];
     _ed25519_create_keypair(seed, pk, sk);
     free(seed);
-    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue));
-    if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
-    a->len = 32; a->cap = 32;
-    a->items = runtime_array_inline_items(a);
-    for (int i = 0; i < 32; i++) a->items[i] = ENCODE_INT(pk[i]);
-    return ENCODE_PTR(a);
+    return _rt_bytes_new(pk, 32);
 }
 
 /* rt_ed25519_keypair_sk: return 32-byte seed (private key) */
@@ -6804,14 +6824,9 @@ RuntimeValue rt_ed25519_keypair_sk(RuntimeValue seed_rv)
     uint32_t slen = 0;
     uint8_t *seed = _ed_rv_to_bytes(seed_rv, &slen);
     if (!seed || slen != 32) { if (seed) free(seed); return NIL_VALUE; }
-    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue));
-    if (!a) { free(seed); return NIL_VALUE; }
-    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
-    a->len = 32; a->cap = 32;
-    a->items = runtime_array_inline_items(a);
-    for (int i = 0; i < 32; i++) a->items[i] = ENCODE_INT(seed[i]);
+    RuntimeValue rv = _rt_bytes_new(seed, 32);
     free(seed);
-    return ENCODE_PTR(a);
+    return rv;
 }
 
 /* rt_ed25519_keys_differ: 1 if different seeds produce different PKs, 0 if same */
@@ -6866,7 +6881,7 @@ int64_t rt_ipc_send_bytes(uint64_t port, uint64_t method, RuntimeValue data_rv)
         buf[2] = (uint8_t)((method >> 16) & 0xFF);
         buf[3] = (uint8_t)((method >> 24) & 0xFF);
         for (uint32_t i = 0; i < payload_len; i++) {
-            buf[i + 4] = _rv_byte(items[i]);
+            buf[i + 4] = _rt_bytes_get(arr, i);
         }
     }
     int64_t rc = _ipc_send_handler(port, method, 0, (uint64_t)(uintptr_t)buf, len);
@@ -6903,21 +6918,9 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         return ENCODE_PTR(a);
     }
     uint32_t len = (uint32_t)rc;
-    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
-    if (!a) {
-        free(buf);
-        return NIL_VALUE;
-    }
-    a->hdr.type = HEAP_ARRAY;
-    a->hdr.size = sizeof(RuntimeArray) + len * sizeof(RuntimeValue);
-    a->len = len;
-    a->cap = len;
-    a->items = runtime_array_inline_items(a);
-    for (uint32_t i = 0; i < len; i++) {
-        a->items[i] = ENCODE_INT(buf[i]);
-    }
+    RuntimeValue rv = _rt_bytes_new(buf, len);
     free(buf);
-    return ENCODE_PTR(a);
+    return rv;
 }
 
 int64_t rt_net_socket(int64_t proto)
@@ -7153,7 +7156,7 @@ int64_t rt_net_send_bytes(int64_t sock_fd, RuntimeValue data_rv)
     if (!buf) return ENCODE_INT(-12);
     uint32_t preview = data_len < 64 ? data_len : 64;
     for (uint32_t i = 0; i < data_len; i++) {
-        buf[i] = _rv_byte(items[i]);
+        buf[i] = _rt_bytes_get(arr, i);
     }
     serial_puts("[tcp-send] first-bytes=");
     for (uint32_t i = 0; i < preview; i++) {
@@ -7205,6 +7208,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
         a->hdr.type = HEAP_ARRAY;
+        a->hdr.gc_flags = BYTE_PACKED;
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -7218,6 +7222,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = BYTE_PACKED;
     a->hdr.size = sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue);
     a->len = read_len;
     a->cap = read_len;
@@ -7228,7 +7233,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     for (uint32_t i = 0; i < read_len; i++) {
         uint8_t byte = s->rxbuf[s->rx_tail];
         s->rx_tail = (s->rx_tail + 1) % TCP_RXBUF_SIZE;
-        a->items[i] = ENCODE_INT(byte);
+        ((uint8_t *)a->items)[i] = (uint8_t)(byte);
     }
     serial_puts("[tcp-recv] read ");
     serial_put_dec(read_len);
@@ -7237,7 +7242,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     serial_puts(" first-bytes=");
     for (uint32_t i = 0; i < preview; i++) {
         if (i) serial_puts(" ");
-        serial_put_hex((uint8_t)DECODE_INT(runtime_array_items(a)[i]));
+        serial_put_hex(_rt_bytes_get(a, i));
     }
     serial_puts("\r\n");
     return ENCODE_PTR(a);
@@ -7499,7 +7504,7 @@ int64_t rt_boot_tcp_send_plain_payload(int64_t fd, RuntimeValue data_rv)
     packet[3] = (uint8_t)packet_len;
     packet[4] = (uint8_t)padding_len;
     for (uint32_t i = 0; i < payload_len; i++) {
-        packet[5U + i] = _rv_byte(items[i]);
+        packet[5U + i] = _rt_bytes_get(payload, i);
     }
     for (uint32_t i = 0; i < padding_len; i++) {
         packet[5U + payload_len + i] = 0;
@@ -8720,6 +8725,15 @@ RuntimeValue rt_clone(RuntimeValue val)
     }
     if (h->type == HEAP_ARRAY) {
         RuntimeArray *a = (RuntimeArray *)h;
+        if (a->hdr.gc_flags & BYTE_PACKED) {
+            /* Packed [u8]: preserve packed representation on copy. */
+            RuntimeValue out_rv = _rt_bytes_new(NULL, a->len);
+            if (!IS_HEAP(out_rv)) return NIL_VALUE;
+            RuntimeArray *out = (RuntimeArray *)DECODE_PTR(out_rv);
+            uint8_t *dst = (uint8_t *)out->items;
+            for (uint32_t i = 0; i < a->len; i++) dst[i] = _rt_bytes_get(a, i);
+            return out_rv;
+        }
         RuntimeValue new_arr = rt_array_new(ENCODE_INT(a->cap));
         RuntimeValue *items = runtime_array_items(a);
         for (uint32_t i = 0; i < a->len; i++) {
@@ -9529,6 +9543,25 @@ static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    if (a->hdr.gc_flags & BYTE_PACKED) {
+        /* Byte-packed [u8]: append a PACKED byte (value may arrive tagged
+         * ENCODE_INT or raw), growing the packed buffer as needed. */
+        uint8_t byte = _rv_byte(val);
+        uint8_t *data = (uint8_t *)runtime_array_items(a);
+        if (a->len >= a->cap) {
+            uint32_t new_cap = a->cap * 2;
+            if (new_cap < 128) new_cap = 128;
+            uint8_t *new_data = (uint8_t *)malloc((size_t)new_cap);
+            if (!new_data) return ENCODE_PTR(a);
+            for (uint32_t i = 0; i < a->len; i++) new_data[i] = data[i];
+            a->items = (RuntimeValue *)new_data;
+            a->cap = new_cap;
+            data = new_data;
+        }
+        data[a->len] = byte;
+        a->len++;
+        return ENCODE_PTR(a);
+    }
     RuntimeValue *items = runtime_array_items(a);
     /* Values now arrive TAGGED from the compiler:
      * - Array literals: MIR BoxInt before rt_array_set
@@ -9582,19 +9615,15 @@ RuntimeValue rt_bytes_concat(RuntimeValue a_rv, RuntimeValue b_rv)
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(a_rv);
     RuntimeArray *b = (RuntimeArray *)DECODE_PTR(b_rv);
     if (!a || !b || a->hdr.type != HEAP_ARRAY || b->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    RuntimeValue *a_items = runtime_array_items(a);
-    RuntimeValue *b_items = runtime_array_items(b);
     uint32_t len = a->len + b->len;
-    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
-    if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
-    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
-    out->len = len;
-    out->cap = len;
-    out->items = runtime_array_inline_items(out);
-    for (uint32_t i = 0; i < a->len; i++) out->items[i] = a_items[i];
-    for (uint32_t i = 0; i < b->len; i++) out->items[a->len + i] = b_items[i];
-    return ENCODE_PTR(out);
+    /* Defensive read (either representation), packed emit (contract). */
+    RuntimeValue out_rv = _rt_bytes_new(NULL, len);
+    if (!IS_HEAP(out_rv)) return NIL_VALUE;
+    RuntimeArray *out = (RuntimeArray *)DECODE_PTR(out_rv);
+    uint8_t *dst = (uint8_t *)out->items;
+    for (uint32_t i = 0; i < a->len; i++) dst[i] = _rt_bytes_get(a, i);
+    for (uint32_t i = 0; i < b->len; i++) dst[a->len + i] = _rt_bytes_get(b, i);
+    return out_rv;
 }
 
 RuntimeValue rt_bytes_slice(RuntimeValue arr_rv, int64_t start, int64_t length)
@@ -9606,18 +9635,15 @@ RuntimeValue rt_bytes_slice(RuntimeValue arr_rv, int64_t start, int64_t length)
     if (length < 0) length = 0;
     uint32_t ustart = (uint32_t)start;
     uint32_t ulen = (uint32_t)length;
-    RuntimeValue *items = runtime_array_items(arr);
     if (ustart > arr->len) ustart = arr->len;
     if (ulen > arr->len - ustart) ulen = arr->len - ustart;
-    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)ulen * sizeof(RuntimeValue));
-    if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
-    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)ulen * sizeof(RuntimeValue));
-    out->len = ulen;
-    out->cap = ulen;
-    out->items = runtime_array_inline_items(out);
-    for (uint32_t i = 0; i < ulen; i++) out->items[i] = items[ustart + i];
-    return ENCODE_PTR(out);
+    /* Defensive read (either representation), packed emit (contract). */
+    RuntimeValue out_rv = _rt_bytes_new(NULL, ulen);
+    if (!IS_HEAP(out_rv)) return NIL_VALUE;
+    RuntimeArray *out = (RuntimeArray *)DECODE_PTR(out_rv);
+    uint8_t *dst = (uint8_t *)out->items;
+    for (uint32_t i = 0; i < ulen; i++) dst[i] = _rt_bytes_get(arr, ustart + i);
+    return out_rv;
 }
 
 int64_t rt_bytes_u8_at(RuntimeValue arr_rv, int64_t idx)
@@ -9626,7 +9652,57 @@ int64_t rt_bytes_u8_at(RuntimeValue arr_rv, int64_t idx)
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
     if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
     if (idx < 0 || (uint32_t)idx >= arr->len) return 0;
-    return (int64_t)_rv_byte(runtime_array_items(arr)[idx]);
+    return (int64_t)_rt_bytes_get(arr, (uint32_t)idx);
+}
+
+/* ---- ABI probe helpers (diagnostic-only, see doc/08_tracking/bug re: [u8]
+ * round-trip corruption on x86_64 freestanding native-build). Builds a known
+ * [u8] the exact same way _tls_runtime_array_from_bytes does, and exposes
+ * raw diagnostics so the Simple side can compare read-back vs expected. */
+RuntimeValue rt_abi_probe_bytes(void)
+{
+    static const uint8_t probe_data[8] = {0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48}; /* "ABCDEFGH" */
+    uint32_t len = 8U;
+    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_ARRAY;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    out->len = len;
+    out->cap = len;
+    out->items = runtime_array_inline_items(out);
+    out->hdr.gc_flags = BYTE_PACKED;
+    for (uint32_t i = 0; i < len; i++) ((uint8_t *)out->items)[i] = (uint8_t)(probe_data[i]);
+    return ENCODE_PTR(out);
+}
+
+uint64_t rt_abi_probe_raw(RuntimeValue arr_rv, int64_t idx)
+{
+    if (!IS_HEAP(arr_rv)) return 0xFFFFFFFFFFFFFFF1ULL;
+    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
+    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0xFFFFFFFFFFFFFFF2ULL;
+    if (idx < 0 || (uint32_t)idx >= arr->len) return 0xFFFFFFFFFFFFFFF3ULL;
+    return (uint64_t)runtime_array_items(arr)[idx];
+}
+
+uint64_t rt_abi_probe_handle(RuntimeValue arr_rv)
+{
+    return (uint64_t)arr_rv;
+}
+
+uint64_t rt_abi_probe_len(RuntimeValue arr_rv)
+{
+    if (!IS_HEAP(arr_rv)) return 0xFFFFFFFFFFFFFFF1ULL;
+    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
+    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0xFFFFFFFFFFFFFFF2ULL;
+    return (uint64_t)arr->len;
+}
+
+uint64_t rt_abi_probe_items_ptr(RuntimeValue arr_rv)
+{
+    if (!IS_HEAP(arr_rv)) return 0xFFFFFFFFFFFFFFF1ULL;
+    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
+    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0xFFFFFFFFFFFFFFF2ULL;
+    return (uint64_t)(uintptr_t)runtime_array_items(arr);
 }
 
 int64_t rt_bytes_u16_be_at(RuntimeValue arr_rv, int64_t idx)
@@ -9635,9 +9711,8 @@ int64_t rt_bytes_u16_be_at(RuntimeValue arr_rv, int64_t idx)
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
     if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
     if (idx < 0 || (uint32_t)(idx + 1) >= arr->len) return 0;
-    RuntimeValue *items = runtime_array_items(arr);
-    uint8_t hi = _rv_byte(items[(uint32_t)idx]);
-    uint8_t lo = _rv_byte(items[(uint32_t)idx + 1]);
+    uint8_t hi = _rt_bytes_get(arr, (uint32_t)idx);
+    uint8_t lo = _rt_bytes_get(arr, (uint32_t)idx + 1);
     return (int64_t)(((uint16_t)hi << 8) | (uint16_t)lo);
 }
 
@@ -9647,10 +9722,9 @@ int64_t rt_bytes_u24_be_at(RuntimeValue arr_rv, int64_t idx)
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
     if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
     if (idx < 0 || (uint32_t)(idx + 2) >= arr->len) return 0;
-    RuntimeValue *items = runtime_array_items(arr);
-    uint8_t b0 = _rv_byte(items[(uint32_t)idx]);
-    uint8_t b1 = _rv_byte(items[(uint32_t)idx + 1]);
-    uint8_t b2 = _rv_byte(items[(uint32_t)idx + 2]);
+    uint8_t b0 = _rt_bytes_get(arr, (uint32_t)idx);
+    uint8_t b1 = _rt_bytes_get(arr, (uint32_t)idx + 1);
+    uint8_t b2 = _rt_bytes_get(arr, (uint32_t)idx + 2);
     return (int64_t)(((uint32_t)b0 << 16) | ((uint32_t)b1 << 8) | (uint32_t)b2);
 }
 
@@ -9660,15 +9734,14 @@ int64_t rt_tls13_serverhello_cipher_suite(RuntimeValue body_rv)
     RuntimeArray *body = (RuntimeArray *)DECODE_PTR(body_rv);
     if (!body || body->hdr.type != HEAP_ARRAY) return 0;
     if (body->len < 38) return 0;
-    RuntimeValue *items = runtime_array_items(body);
 
     uint32_t offset = 34; /* after legacy_version + random */
-    uint32_t session_id_len = _rv_byte(items[offset]);
+    uint32_t session_id_len = _rt_bytes_get(body, offset);
     if (offset + 1u + session_id_len + 2u > body->len) return 0;
     offset = offset + 1u + session_id_len;
 
-    uint8_t hi = _rv_byte(items[offset]);
-    uint8_t lo = _rv_byte(items[offset + 1]);
+    uint8_t hi = _rt_bytes_get(body, offset);
+    uint8_t lo = _rt_bytes_get(body, offset + 1);
     return (int64_t)(((uint16_t)hi << 8) | (uint16_t)lo);
 }
 
@@ -9678,32 +9751,32 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
     RuntimeArray *body = (RuntimeArray *)DECODE_PTR(body_rv);
     if (!body || body->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     if (body->len < 38) return NIL_VALUE;
-    RuntimeValue *items = runtime_array_items(body);
     for (uint32_t scan = 0; scan + 40U <= body->len; scan++) {
-        if (_rv_byte(items[scan]) == 0x00 &&
-            _rv_byte(items[scan + 1U]) == 0x33 &&
-            _rv_byte(items[scan + 2U]) == 0x00 &&
-            _rv_byte(items[scan + 3U]) == 0x24 &&
-            _rv_byte(items[scan + 4U]) == 0x00 &&
-            _rv_byte(items[scan + 5U]) == 0x1d &&
-            _rv_byte(items[scan + 6U]) == 0x00 &&
-            _rv_byte(items[scan + 7U]) == 0x20) {
+        if (_rt_bytes_get(body, scan) == 0x00 &&
+            _rt_bytes_get(body, scan + 1U) == 0x33 &&
+            _rt_bytes_get(body, scan + 2U) == 0x00 &&
+            _rt_bytes_get(body, scan + 3U) == 0x24 &&
+            _rt_bytes_get(body, scan + 4U) == 0x00 &&
+            _rt_bytes_get(body, scan + 5U) == 0x1d &&
+            _rt_bytes_get(body, scan + 6U) == 0x00 &&
+            _rt_bytes_get(body, scan + 7U) == 0x20) {
             RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32U * sizeof(RuntimeValue));
             if (!out) return NIL_VALUE;
             out->hdr.type = HEAP_ARRAY;
+            out->hdr.gc_flags = BYTE_PACKED;
             out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + 32U * sizeof(RuntimeValue));
             out->len = 32U;
             out->cap = 32U;
             out->items = runtime_array_inline_items(out);
             for (uint32_t i = 0; i < 32U; i++) {
-                out->items[i] = ENCODE_INT(_rv_byte(items[scan + 8U + i]));
+                ((uint8_t *)out->items)[i] = _rt_bytes_get(body, scan + 8U + i);
             }
             return ENCODE_PTR(out);
         }
     }
 
     uint32_t offset = 34; /* after legacy_version + random */
-    uint32_t session_id_len = _rv_byte(items[offset]);
+    uint32_t session_id_len = _rt_bytes_get(body, offset);
     if (offset + 1u + session_id_len + 2u + 1u + 2u > body->len) return NIL_VALUE;
     offset = offset + 1u + session_id_len;
 
@@ -9711,26 +9784,26 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
     offset += 2u;
     offset += 1u;
 
-    uint16_t exts_len = ((uint16_t)_rv_byte(items[offset]) << 8) |
-                        (uint16_t)_rv_byte(items[offset + 1]);
+    uint16_t exts_len = ((uint16_t)_rt_bytes_get(body, offset) << 8) |
+                        (uint16_t)_rt_bytes_get(body, offset + 1);
     offset += 2u;
     uint32_t exts_end = offset + exts_len;
     if (exts_end > body->len) exts_end = body->len;
 
     while (offset + 4u <= exts_end) {
-        uint16_t ext_type = ((uint16_t)_rv_byte(items[offset]) << 8) |
-                            (uint16_t)_rv_byte(items[offset + 1]);
-        uint16_t ext_len = ((uint16_t)_rv_byte(items[offset + 2]) << 8) |
-                           (uint16_t)_rv_byte(items[offset + 3]);
+        uint16_t ext_type = ((uint16_t)_rt_bytes_get(body, offset) << 8) |
+                            (uint16_t)_rt_bytes_get(body, offset + 1);
+        uint16_t ext_len = ((uint16_t)_rt_bytes_get(body, offset + 2) << 8) |
+                           (uint16_t)_rt_bytes_get(body, offset + 3);
         offset += 4u;
         uint32_t ext_data_end = offset + ext_len;
         if (ext_data_end > exts_end) ext_data_end = exts_end;
 
         if (ext_type == 51 && offset + 4u <= ext_data_end) {
-            uint16_t group = ((uint16_t)_rv_byte(items[offset]) << 8) |
-                             (uint16_t)_rv_byte(items[offset + 1]);
-            uint16_t key_len = ((uint16_t)_rv_byte(items[offset + 2]) << 8) |
-                               (uint16_t)_rv_byte(items[offset + 3]);
+            uint16_t group = ((uint16_t)_rt_bytes_get(body, offset) << 8) |
+                             (uint16_t)_rt_bytes_get(body, offset + 1);
+            uint16_t key_len = ((uint16_t)_rt_bytes_get(body, offset + 2) << 8) |
+                               (uint16_t)_rt_bytes_get(body, offset + 3);
             uint32_t key_off = offset + 4u;
             uint32_t key_end = key_off + key_len;
             if (key_end > ext_data_end) key_end = ext_data_end;
@@ -9743,8 +9816,9 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
                 out->len = out_len;
                 out->cap = out_len;
                 out->items = runtime_array_inline_items(out);
+                out->hdr.gc_flags = BYTE_PACKED;
                 for (uint32_t i = 0; i < out_len; i++) {
-                    out->items[i] = ENCODE_INT(_rv_byte(items[key_off + i]));
+                    ((uint8_t *)out->items)[i] = _rt_bytes_get(body, key_off + i);
                 }
                 return ENCODE_PTR(out);
             }
@@ -10017,9 +10091,8 @@ int64_t rt_tls13_x25519_shared_secret_into(RuntimeValue scalar_rv, RuntimeValue 
     if (rt_tls13_ring_x25519_shared_secret_into_raw(scalar, point, out) != 0) {
         _tls_x25519_scalarmult(out, scalar, point);
     }
-    RuntimeValue *out_items = runtime_array_items(out_arr);
     for (uint32_t i = 0; i < 32U; i++) {
-        out_items[i] = ENCODE_INT(out[i]);
+        _rt_bytes_set(out_arr, i, (uint8_t)out[i]);
     }
     free(scalar);
     free(point);
@@ -10210,10 +10283,9 @@ static uint8_t *_tls_copy_runtime_bytes(RuntimeValue rv, uint32_t *out_len)
     if (!arr || arr->hdr.type != HEAP_ARRAY) return NULL;
     uint32_t len = arr->len;
     if (len > SIMPLEOS_TLS_RUNTIME_BYTE_CAP) return NULL;
-    RuntimeValue *items = runtime_array_items(arr);
     uint8_t *buf = (uint8_t *)malloc(len > 0 ? len : 1);
     if (!buf) return NULL;
-    for (uint32_t i = 0; i < len; i++) buf[i] = _rv_byte(items[i]);
+    for (uint32_t i = 0; i < len; i++) buf[i] = _rt_bytes_get(arr, i);
     *out_len = len;
     return buf;
 }
@@ -10233,8 +10305,7 @@ static int _tls_materialize_runtime_bytes(RuntimeValue rv,
     if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
     uint32_t len = arr->len;
     if (len <= stack_cap) {
-        RuntimeValue *items = runtime_array_items(arr);
-        for (uint32_t i = 0; i < len; i++) stack_buf[i] = _rv_byte(items[i]);
+        for (uint32_t i = 0; i < len; i++) stack_buf[i] = _rt_bytes_get(arr, i);
         *out_data = stack_buf;
         *out_len = len;
         return 1;
@@ -10324,15 +10395,8 @@ RuntimeValue rt_tls13_transcript_hash_record_payloads(RuntimeValue a_record_rv, 
 
 static RuntimeValue _tls_runtime_array_from_bytes(const uint8_t *buf, uint32_t len)
 {
-    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
-    if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
-    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
-    out->len = len;
-    out->cap = len;
-    out->items = runtime_array_inline_items(out);
-    for (uint32_t i = 0; i < len; i++) out->items[i] = ENCODE_INT(buf[i]);
-    return ENCODE_PTR(out);
+    /* Native [u8] contract: packed bytes + BYTE_PACKED flag. */
+    return _rt_bytes_new(buf, len);
 }
 
 RuntimeValue rt_tls13_sha512_full(RuntimeValue data_rv)
@@ -10391,9 +10455,8 @@ static int64_t _tls_write_runtime_bytes(RuntimeValue out_rv, const uint8_t *buf,
     if (!IS_HEAP(out_rv)) return 0;
     RuntimeArray *out_arr = (RuntimeArray *)DECODE_PTR(out_rv);
     if (!out_arr || out_arr->hdr.type != HEAP_ARRAY || out_arr->len != len) return 0;
-    RuntimeValue *out_items = runtime_array_items(out_arr);
     for (uint32_t i = 0; i < len; i++) {
-        out_items[i] = ENCODE_INT(buf[i]);
+        _rt_bytes_set(out_arr, i, (uint8_t)buf[i]);
     }
     return 1;
 }
@@ -13001,6 +13064,15 @@ RuntimeValue rt_array_clone(RuntimeValue arr)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    if (a->hdr.gc_flags & BYTE_PACKED) {
+        /* Packed [u8]: clone preserving the packed representation. */
+        RuntimeValue out_rv = _rt_bytes_new(NULL, a->len);
+        if (!IS_HEAP(out_rv)) return NIL_VALUE;
+        RuntimeArray *out = (RuntimeArray *)DECODE_PTR(out_rv);
+        uint8_t *dst = (uint8_t *)out->items;
+        for (uint32_t i = 0; i < a->len; i++) dst[i] = _rt_bytes_get(a, i);
+        return out_rv;
+    }
     RuntimeValue *items = runtime_array_items(a);
     RuntimeValue result = rt_array_new(ENCODE_INT(a->cap));
     for (uint32_t i = 0; i < a->len; i++) {
@@ -14123,6 +14195,7 @@ RuntimeValue rt_random_bytes(RuntimeValue count_rv)
     RuntimeArray *arr = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     if (!arr) return NIL_VALUE;
     arr->hdr.type = HEAP_ARRAY;
+    arr->hdr.gc_flags = BYTE_PACKED;
     arr->hdr.size = (uint32_t)(sizeof(RuntimeArray) + count * sizeof(RuntimeValue));
     arr->len = (uint32_t)count;
     arr->cap = (uint32_t)count;
@@ -14138,7 +14211,7 @@ RuntimeValue rt_random_bytes(RuntimeValue count_rv)
             val = ((uint64_t)hi << 32) | lo;
             val ^= (uint64_t)i * 0x9E3779B97F4A7C15ULL; /* mix */
         }
-        arr->items[i] = ENCODE_INT((int64_t)(val & 0xFF));
+        ((uint8_t *)arr->items)[i] = (uint8_t)(val & 0xFF);
     }
 
     return ENCODE_PTR(arr);
@@ -14540,12 +14613,11 @@ RuntimeValue rt_parse_auth_verify(RuntimeValue arr_rv, RuntimeValue exp_user_rv,
 
     /* Extract raw bytes from the RuntimeArray (items are BoxInt-tagged) */
     uint32_t len = a->len;
-    RuntimeValue *items = runtime_array_items(a);
     if (len < 2) { serial_puts("[rt_parse_auth_verify] too short\r\n"); return 0; }
 
     uint8_t *raw = (uint8_t *)__builtin_alloca(len);
     for (uint32_t i = 0; i < len; i++) {
-        raw[i] = (uint8_t)DECODE_INT(items[i]);
+        raw[i] = _rt_bytes_get(a, i);
     }
 
     /* Check message type */
@@ -14725,12 +14797,13 @@ RuntimeValue rt_build_byte_range(RuntimeValue count_rv)
     RuntimeArray *a = (RuntimeArray *)malloc(alloc);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = BYTE_PACKED;
     a->hdr.size = (uint32_t)alloc;
     a->len = (uint32_t)count;
     a->cap = (uint32_t)count;
     a->items = runtime_array_inline_items(a);
     for (int64_t i = 0; i < count; i++)
-        a->items[i] = ENCODE_INT(i & 0xFF);
+        ((uint8_t *)a->items)[i] = (uint8_t)(i & 0xFF);
     return ENCODE_PTR(a);
 }
 
@@ -14822,12 +14895,11 @@ int64_t rt_verify_kexinit_roundtrip(RuntimeValue data_rv)
     }
 
     uint32_t len = a->len;
-    RuntimeValue *items = runtime_array_items(a);
 
     /* Extract raw bytes */
     uint8_t *raw = (uint8_t *)__builtin_alloca(len);
     for (uint32_t i = 0; i < len; i++)
-        raw[i] = (uint8_t)DECODE_INT(items[i]);
+        raw[i] = _rt_bytes_get(a, i);
 
     /* Check message type */
     if (len < 17) {

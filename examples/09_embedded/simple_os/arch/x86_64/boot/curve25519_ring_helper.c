@@ -16,8 +16,14 @@ typedef int64_t RuntimeValue;
 #define IS_HEAP(v)     (((uint64_t)(v) & TAG_MASK) == TAG_HEAP)
 #define NIL_VALUE      ((RuntimeValue)TAG_SPECIAL)
 
+/* Native heap-header contract: type byte at offset 0, gc_flags byte at
+ * offset 1. gc_flags bit 0x08 (BYTE_PACKED) marks a [u8] array whose payload
+ * is packed bytes (1 byte/element) instead of 8-byte tagged slots. Binary
+ * compatible with the old uint32 `type` when flags are zero. */
 typedef struct {
-    uint32_t type;
+    uint8_t  type;
+    uint8_t  gc_flags;
+    uint16_t reserved;
     uint32_t size;
 } HeapHeader;
 
@@ -29,6 +35,7 @@ typedef struct {
 } RuntimeArray;
 
 #define HEAP_ARRAY 2
+#define GC_BYTE_PACKED 0x08
 
 extern void *malloc(size_t size);
 extern void free(void *ptr);
@@ -48,6 +55,33 @@ static inline uint8_t _rv_byte(RuntimeValue v)
 {
     int64_t byte_val = IS_INT(v) ? DECODE_INT(v) : (int64_t)v;
     return (uint8_t)(byte_val & 0xFF);
+}
+
+/* Read one element of a Simple [u8] regardless of representation:
+ * packed bytes (gc_flags BYTE_PACKED) or legacy 8-byte tagged slots. */
+static inline uint8_t _pk_byte(RuntimeArray *a, uint32_t i)
+{
+    RuntimeValue *it = runtime_array_items(a);
+    if (a->hdr.gc_flags & GC_BYTE_PACKED) return ((const uint8_t *)it)[i];
+    return _rv_byte(it[i]);
+}
+
+/* Build a Simple-visible [u8]: packed payload + BYTE_PACKED heap flag
+ * (modeled on baremetal_stubs.c _rt_bytes_new). */
+static RuntimeValue _pk_bytes_new(const uint8_t *buf, uint32_t len)
+{
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + len);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = GC_BYTE_PACKED;
+    a->hdr.reserved = 0;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + len);
+    a->len = len;
+    a->cap = len;
+    a->items = runtime_array_inline_items(a);
+    uint8_t *dst = (uint8_t *)a->items;
+    for (uint32_t i = 0; i < len; i++) dst[i] = buf[i];
+    return ENCODE_PTR(a);
 }
 
 int ring_core_0_17_14__CRYPTO_memcmp(const void *a, const void *b, size_t n)
@@ -310,14 +344,12 @@ RuntimeValue rt_tls13_x25519_shared_secret(RuntimeValue scalar_rv, RuntimeValue 
     if (!scalar || !point || scalar->hdr.type != HEAP_ARRAY || point->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     if (scalar->len != 32 || point->len != 32) return NIL_VALUE;
 
-    RuntimeValue *scalar_items = runtime_array_items(scalar);
-    RuntimeValue *point_items = runtime_array_items(point);
     uint8_t scalar_raw[32];
     uint8_t point_raw[32];
     uint8_t out_raw[32];
     for (uint32_t i = 0; i < 32; i++) {
-        scalar_raw[i] = _rv_byte(scalar_items[i]);
-        point_raw[i] = _rv_byte(point_items[i]);
+        scalar_raw[i] = _pk_byte(scalar, i);
+        point_raw[i] = _pk_byte(point, i);
     }
 
     /* ring's generic X25519 entrypoint expects a masked scalar. The Simple
@@ -333,15 +365,7 @@ RuntimeValue rt_tls13_x25519_shared_secret(RuntimeValue scalar_rv, RuntimeValue 
 
     x25519_scalar_mult_generic_masked(out_raw, scalar_raw, point_raw);
 
-    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32u * sizeof(RuntimeValue));
-    if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
-    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + 32u * sizeof(RuntimeValue));
-    out->len = 32;
-    out->cap = 32;
-    out->items = runtime_array_inline_items(out);
-    for (uint32_t i = 0; i < 32; i++) out->items[i] = ENCODE_INT(out_raw[i]);
-    return ENCODE_PTR(out);
+    return _pk_bytes_new(out_raw, 32);
 }
 
 RuntimeValue rt_tls13_x25519_public_key(RuntimeValue scalar_rv)
@@ -352,11 +376,10 @@ RuntimeValue rt_tls13_x25519_public_key(RuntimeValue scalar_rv)
     if (!scalar || scalar->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     if (scalar->len != 32) return NIL_VALUE;
 
-    RuntimeValue *scalar_items = runtime_array_items(scalar);
     uint8_t scalar_raw[32];
     uint8_t point_raw[32] = {9};
     uint8_t out_raw[32];
-    for (uint32_t i = 0; i < 32; i++) scalar_raw[i] = _rv_byte(scalar_items[i]);
+    for (uint32_t i = 0; i < 32; i++) scalar_raw[i] = _pk_byte(scalar, i);
 
     scalar_raw[0] &= 248u;
     scalar_raw[31] &= 127u;
@@ -364,15 +387,7 @@ RuntimeValue rt_tls13_x25519_public_key(RuntimeValue scalar_rv)
 
     x25519_scalar_mult_generic_masked(out_raw, scalar_raw, point_raw);
 
-    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32u * sizeof(RuntimeValue));
-    if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
-    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + 32u * sizeof(RuntimeValue));
-    out->len = 32;
-    out->cap = 32;
-    out->items = runtime_array_inline_items(out);
-    for (uint32_t i = 0; i < 32; i++) out->items[i] = ENCODE_INT(out_raw[i]);
-    return ENCODE_PTR(out);
+    return _pk_bytes_new(out_raw, 32);
 }
 
 int64_t rt_tls13_ring_x25519_shared_secret_into_raw(const uint8_t scalar[32],

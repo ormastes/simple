@@ -67,8 +67,18 @@ typedef int64_t RuntimeValue;
 #define HEAP_MAP    3
 #define HEAP_OBJECT 4
 
+/* Native-compiler heap header contract: object type is a single byte at
+ * offset 0 and gc_flags a byte at offset 1 (codegen loads both as I8).
+ * gc_flags bit 0x08 (BYTE_PACKED) marks a [u8] array whose payload is packed
+ * bytes (1 byte/element) instead of 8-byte tagged RuntimeValue slots.
+ * Splitting the old uint32 `type` keeps type checks correct when flags are
+ * set; the byte layout is unchanged when flags are zero (little-endian). */
+#define BAREMETAL_GC_BYTE_PACKED 0x08
+
 typedef struct {
-    uint32_t type;
+    uint8_t  type;
+    uint8_t  gc_flags;
+    uint16_t reserved;
     uint32_t size;
 } HeapHeader;
 
