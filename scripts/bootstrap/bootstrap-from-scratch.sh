@@ -685,6 +685,7 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
     --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
+    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${full_dir}/simple${exe_suffix}"
 else
   run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
