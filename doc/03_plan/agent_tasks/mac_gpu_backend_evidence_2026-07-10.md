@@ -15,6 +15,26 @@ GPU queue verification gap.
 | Self-host deploy | Mac agent B | Build the pure-Simple self-hosted binary, run redeploy gate, then run queue and GPU evidence checks. | Gate log; post-swap `-c` smoke; production queue report. |
 | Review | Higher-model reviewer | Check reports, platform assumptions, stale-artifact provenance, and requirement coverage. | PASS/FAIL review with exact missing evidence. |
 
+## Status, 2026-07-11
+
+- Metal readback lane: PASS on Darwin/arm64.
+  - `check-metal-generated-2d-readback.shs`: pass, submit/readback true, zero mismatches.
+  - `check-metal-engine2d-framebuffer-readback-evidence.shs`: pass, raw Metal framebuffer download proven.
+  - `check-engine2d-cpu-metal-parity-evidence.shs`: pass, CPU/Metal bit-exact.
+- Production queue wrapper: Metal subcheck PASS, aggregate FAIL/PARTIAL on broader non-Metal/browser gates.
+  - `readback_metal_verdict=pass`
+  - `metal_spark_task_status=pass`
+  - `metal_normal_llm_verification_status=pass`
+  - `production_gui_web_host_gpu_queue_readback_status=fail`
+  - `production_gui_web_host_gpu_queue_readback_reason=browser-frame-first-render-budget-not-met`
+- Self-host deploy lane: FAIL.
+  - `bin/simple` redeploy gate: `7/11 PASS (1 skipped)`.
+  - `bootstrap/stage3/simple` and `bootstrap/stage3/aarch64-apple-darwin-macho/simple`: `0/11 PASS (1 skipped)` and direct execution reports `missing LC_UUID`.
+  - `build/bootstrap/full/aarch64-apple-darwin/simple`: `0/11 PASS (1 skipped)` and `-c 'print(1+1)'` fails.
+  - `build/bootstrap/stage3/aarch64-apple-darwin/simple`: redeploy gate timed out.
+- Reviewer decision: FAIL to close TODO 119. Keep the TODO open until a fresh self-host candidate passes the redeploy gate and post-swap smoke.
+- Evidence report: `doc/09_report/mac_gpu_backend_evidence_2026-07-11.md`.
+
 ## Commands
 
 ```sh

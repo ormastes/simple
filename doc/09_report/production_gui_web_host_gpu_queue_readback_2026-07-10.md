@@ -121,7 +121,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - Runtime payload metadata roundtrip: pass (payload_size 512, payload_hash 98765).
 - Runtime payload text roundtrip: pass (queue probe payload command=draw_ir_rect id=runtime-backend).
 - BrowserBackend host event roundtrip: fail (source browser_backend_event_queue, exit 1, reason browser-backend-event-ingress-contract-fail).
-- BrowserBackend runtime queue handle/payload/perf: fail (backend vulkan, first_render_us 17016862, first_under_budget false, second_render_us 81, second_under_budget true, pixels 3072, checksum 858903428, nonuniform 3071, handle 7, packet 1, payload_size 12288, payload_hash 868306808, payload_text web-render-frame;backend=vulkan;pixels=3072;checksum=868306808, dispatch dispatched, dispatch_payload_size 512, dispatch_layout_commands 8, dispatch_payload_hash 941781836, dispatch_payload_text draw_ir schema=simple-draw-ir-v2, semantic rect/text/image 4/3/1, gui_ast true, widgets root/copy/action/image true/true/true/true, image_uri true, event_context true/browser-frame-16/gui_ast, cache reset not_requested/0).
+- BrowserBackend runtime queue handle/payload/perf: fail (backend vulkan, first_render_us 8431206, first_under_budget false, second_render_us 97, second_under_budget true, pixels 3072, checksum 858903428, nonuniform 3071, handle 7, packet 1, payload_size 12288, payload_hash 868306808, payload_text web-render-frame;backend=vulkan;pixels=3072;checksum=868306808, dispatch dispatched, dispatch_payload_size 512, dispatch_layout_commands 8, dispatch_payload_hash 941781836, dispatch_payload_text draw_ir schema=simple-draw-ir-v2, semantic rect/text/image 4/3/1, gui_ast true, widgets root/copy/action/image true/true/true/true, image_uri true, event_context true/browser-frame-16/gui_ast, cache reset not_requested/0).
 - Same-frame GUI/web Engine2D pixel readback receipt: pass (backend vulkan, pixels 3072, checksum 868306808, reason same-frame Engine2D read_pixels, cache reset not_requested).
 - Same-frame Vulkan/BrowserBackend device readback receipt: pass (source device_readback; only device_readback is accepted as device proof. BrowserBackend backend handle 7, same-frame checksum 868306808, Vulkan Engine2D child readback fail).
 - Browser input event to queued frame/readback correlation: pass (status event_frame_readback_correlated, event browser-input-1, summary event=browser-input-1;frame_packet=1;readback_source=device_readback;checksum=868306808, cache reset not_requested).
@@ -234,14 +234,14 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - browser_frame_probe_timeout_seconds=180
 - browser_frame_probe_timed_out=false
 - browser_backend=vulkan
-- browser_first_render_us=17016862
+- browser_first_render_us=8431206
 - browser_first_render_under_budget=false
-- browser_first_render_dom_layout_us=1164
+- browser_first_render_dom_layout_us=1160
 - browser_first_render_html_us=68
-- browser_first_render_pixel_artifact_us=16971569
-- browser_first_render_draw_ir_dispatch_us=1835
-- browser_first_render_framebuffer_copy_us=3654
-- browser_first_render_state_store_us=37
+- browser_first_render_pixel_artifact_us=8386437
+- browser_first_render_draw_ir_dispatch_us=1871
+- browser_first_render_framebuffer_copy_us=3689
+- browser_first_render_state_store_us=30
 - browser_first_pixel_count=3072
 - browser_first_checksum=858903428
 - browser_first_nonuniform_count=3071
@@ -294,7 +294,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - browser_event_host_gpu_forwarded=true
 - browser_event_host_gpu_backward_completed=false
 - browser_event_host_gpu_summary=event=browser-input-1;requested=gpu;decision=gpu;queued=true;gpu_batched=true;reason=
-- browser_second_render_us=81
+- browser_second_render_us=97
 - browser_second_render_under_budget=true
 - browser_second_fast_hits=1
 - browser_second_submit=not_requested

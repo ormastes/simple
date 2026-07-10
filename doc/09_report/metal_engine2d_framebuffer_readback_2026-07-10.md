@@ -119,7 +119,7 @@ invalidate GPU completeness and fall back to the software mirror.
     Files: 1
     Passed: 6
     Failed: 0
-    Duration: 582ms
+    Duration: 777ms
     
     PASS test/02_integration/rendering/metal_engine2d_readback_spec.spl
     [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
