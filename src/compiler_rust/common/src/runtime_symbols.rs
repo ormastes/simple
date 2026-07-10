@@ -775,6 +775,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simd_str_equal",
     "rt_engine2d_simd_fill_u32",
     "rt_engine2d_simd_copy_u32",
+    "rt_engine2d_simd_fill_span_u32",
     "rt_engine2d_simd_fill_row_u32",
     "rt_engine2d_simd_copy_row_u32",
     "rt_engine2d_simd_blend_row_u32",

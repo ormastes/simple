@@ -1458,6 +1458,31 @@ pub fn rt_engine2d_simd_fill_row_u32(args: &[Value]) -> Result<Value, CompileErr
     Ok(pack_u32_array(sffi_fill_row_u32(count, color)))
 }
 
+/// Interpreter bridge for the native in-place span ABI. Interpreter arrays
+/// are immutable Arc values, so return the updated array for Simple to retain.
+pub fn rt_engine2d_simd_fill_span_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_simd_fill_span_u32 expects 4 arguments (dst, offset, count, color)".to_string(),
+        ));
+    }
+    let mut dst = unpack_u32_array("rt_engine2d_simd_fill_span_u32(dst)", &args[0])?;
+    let offset_raw = require_u64_value("rt_engine2d_simd_fill_span_u32(offset)", &args[1])? as i64;
+    let requested_raw = require_u64_value("rt_engine2d_simd_fill_span_u32(count)", &args[2])? as i64;
+    let color = require_u32_value("rt_engine2d_simd_fill_span_u32(color)", &args[3])?;
+    if offset_raw >= 0 && requested_raw > 0 {
+        let offset = offset_raw as usize;
+        let requested = requested_raw as usize;
+        if offset >= dst.len() {
+            return Ok(pack_u32_array(dst));
+        }
+        let count = requested.min(dst.len() - offset);
+        let filled = sffi_fill_row_u32(count, color);
+        dst[offset..offset + count].copy_from_slice(&filled);
+    }
+    Ok(pack_u32_array(dst))
+}
+
 /// rt_engine2d_simd_copy_row_u32(src: [u32]) -> [u32]
 pub fn rt_engine2d_simd_copy_row_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {

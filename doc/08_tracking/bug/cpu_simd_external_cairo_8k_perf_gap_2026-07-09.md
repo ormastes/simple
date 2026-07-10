@@ -212,14 +212,38 @@ timing or Cairo ratio is accepted. The bounded retry cap is reached; this
 remains a build-environment/closure-load blocker rather than grounds for
 replaying the pre-routing binary.
 
+### In-place Engine2D span owner
+
+The C runtime already provided mutable fill/copy span kernels, but the Simple
+owner used return-row allocation plus element-by-element scatter. The software
+backend now uses a cross-mode return-array fill bridge: native builds mutate
+and return the same array, while the interpreter returns a replacement array
+after running the Rust row kernel. This removes per-row allocation/scatter from
+the native Engine2D fill owner without changing GPU backends or alpha math.
+
+Focused evidence:
+
+- Rebuilt-seed Engine2D backend spec: 14/14.
+- Rebuilt-seed SIMD kernel spec: 20/20, including bounded-span adjacency.
+- Native C span gate: pointer identity, exact `0xFF102030`, and a positive
+  hardware-vector counter on x86_64.
+- Runtime source compiles for x86_64, AArch64, generic RISC-V, and RVV RISC-V.
+- Existing C fill/copy/blend parity gate: PASS.
+- Exporter native execution now derives from instruction hits, not logical
+  provider calls; generic RISC-V scalar fallback therefore remains false.
+
+The tiny Simple AOT span probe still fails before linking because LLVM lowering
+emits an `i32` operand into `icmp ne i64` for an array-length comparison. The
+three-cycle cap was reached; the blocker is recorded in
+`llvm_aot_array_len_comparison_width_mismatch_2026-07-10.md`. No full 4K/8K or
+Cairo performance claim is made from this owner-only step.
+
 ## Next Step
 
-Do not repeat the viewport/DPI/fallback/color proof work. Expose the existing
-in-place C span ABI (`rt_engine2d_simd_fill_u32`/`copy_u32`) through the narrow
-Simple SIMD owner and use the runtime's native-row hit counter, not logical
-provider calls, as execution proof. Generic RISC-V without `__riscv_vector`
-must remain `native_simd_executed=false`. After a stable strict closure build,
-run the canonical combined CPU-SIMD/scalar 4K/8K exporter once and require exact
-checksums, full physical dimensions, 300dpi, no size reduction, and no
-fallback. Only then refresh the retained checksum contract and run the external
-Cairo comparison once.
+Do not repeat the viewport/DPI/fallback/color proof work. Fix the focused LLVM
+width mismatch, then use the in-place owner from explicit CPU-SIMD HTML solid
+spans without routing shared GPU staging through it. Run the canonical combined
+CPU-SIMD/scalar 4K/8K exporter once and require native instruction hits, exact
+checksums, full physical dimensions, 300dpi, no size reduction, and no fallback.
+Only then refresh the retained checksum contract and run the external Cairo
+comparison once.

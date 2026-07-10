@@ -18,7 +18,7 @@ use std.gpu.engine2d.color.{color_a, blend}
 use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
-use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, simd_fill_row, engine2d_simd_copy_row_u32, engine2d_simd_blend_row_u32}
+use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, simd_fill_row, rt_engine2d_simd_fill_span_u32, engine2d_simd_copy_row_u32, engine2d_simd_blend_row_u32}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -71,6 +71,7 @@ class SoftwareBackend:
     mask_w: i32
     mask_h: i32
     initialized: bool
+    native_simd_spans: bool
 
     static fn create() -> SoftwareBackend:
         """Create an uninitialized software backend."""
@@ -89,8 +90,14 @@ class SoftwareBackend:
             mask_buf: [],
             mask_w: 0,
             mask_h: 0,
-            initialized: false
+            initialized: false,
+            native_simd_spans: false
         )
+
+    static fn create_cpu_simd() -> SoftwareBackend:
+        var backend = SoftwareBackend.create()
+        backend.native_simd_spans = true
+        backend
 
 impl RenderBackend for SoftwareBackend:
 
@@ -639,6 +646,9 @@ impl SoftwareBackend:
 
     me sw_fill_raw_span(offset: i32, count: i32, color: u32):
         record_simd_fill_hit()
+        if self.native_simd_spans and native_pixel_rows_enabled():
+            self.buf = rt_engine2d_simd_fill_span_u32(self.buf, offset as i64, count as i64, color)
+            return
         simd_fill_row(self.buf, offset as i64, count as i64, color)
 
     me sw_copy_raw_span(dst_offset: i32, src: [u32], src_offset: i32, count: i32):
