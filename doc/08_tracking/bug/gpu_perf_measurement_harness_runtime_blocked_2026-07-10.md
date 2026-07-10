@@ -27,6 +27,16 @@ clear (`38.5x`, measured-gpu-faster), while Vulkan reported `2.70 ms` and was
 classified measured-gpu-slower-overhead. The normal self-hosted binary still
 needs deployment before this is release evidence.
 
+## Deployment Attempt
+
+`sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`
+rebuilt the Rust seed, but the self-hosted stage-4 native build did not produce
+`bin/release/x86_64-unknown-linux-gnu/simple`. It reported parser errors in
+`src/compiler/mir_opt/mir_opt/outline.spl`, `gvn.spl`, and
+`src/compiler/hir/hir_lowering/_Items/declaration_lowering.spl`, then timed out
+after 7200 seconds. Repair that compiler build before rerunning the deployed
+benchmark; the diagnostic-runtime numbers above are not release evidence.
+
 ## Evidence Rule
 
 Do not accept modeled transfer-pixel economics, empty subprocess output, or
