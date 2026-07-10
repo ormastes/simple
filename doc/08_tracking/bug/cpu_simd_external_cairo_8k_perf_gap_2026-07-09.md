@@ -129,6 +129,26 @@ closure at both 120 and 600 seconds, before producing a binary. This is the
 existing `bootstrap_stage4_graph_load_timeout_2026-07-05` blocker; no reduced
 viewport, cached replay, or stale binary result is substituted.
 
+### In-process runtime closure follow-up
+
+After narrowing the exporter, the strict in-process build reduced the failure
+to live Simple-core ABI symbols and one native mangling collision. The
+pure-Simple runtime now implements the required value untagging, string bytes,
+UTF-8 character lookup, iterable identity, dynamic addition, and single-thread
+bootstrap safepoint operations; a focused generated-archive C probe passes.
+Engine2D color's private `_to_i32` helper was renamed `_u32_to_i32`, preventing
+native suffix resolution from binding unrelated built-in `.to_i32()` calls to
+that private function. The focused Engine2D color spec passes 7/7.
+
+A strict Rust-runtime diagnostic binary then rendered full 3840x2160 and
+7680x4320 frames in `46125us` and `149266us` respectively, with 329984 KiB max
+RSS. Those timings are not accepted evidence: replacing `.to_i32()` with raw
+casts for that build produced tagged-value checksum drift
+(`17858061666742272` instead of the retained 8K checksum), so the workaround
+was reverted. The corrected helper rename and Simple-core ABI must be rebuilt
+and must reproduce the retained checksums before any current-source speed or
+Cairo-ratio claim is made.
+
 ## Next Step
 
 Do not repeat the viewport/DPI/fallback/color proof work. The retained evidence

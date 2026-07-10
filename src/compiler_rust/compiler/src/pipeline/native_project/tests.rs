@@ -2020,6 +2020,8 @@ fn test_simple_core_source_tree_emits_partial_runtime_archive() {
         "__simple_runtime_init",
         "__simple_runtime_shutdown",
         "rt_value_int",
+        "rt_value_as_int",
+        "rt_pool_safepoint",
         "rt_value_float",
         "rt_value_bool",
         "rt_value_nil",
@@ -2041,12 +2043,16 @@ fn test_simple_core_source_tree_emits_partial_runtime_archive() {
         "rt_array_set",
         "rt_array_push",
         "rt_array_pop",
+        "rt_for_iterable",
         "rt_typed_words_u64_data_at_checked",
         "rt_typed_words_u64_raw_data_at",
         "rt_typed_words_u64_store_known_data_at",
         "rt_string_new",
         "rt_string_len",
         "rt_string_data",
+        "rt_string_bytes",
+        "rt_string_char_code_at",
+        "rt_any_add",
         "rt_string_concat",
         "rt_len",
         "rt_native_eq",
@@ -2079,7 +2085,17 @@ fn test_simple_core_source_tree_emits_partial_runtime_archive() {
 #include "runtime.h"
 
 int main(void) {
+    extern int64_t rt_value_as_int(int64_t);
+    extern int64_t rt_string_bytes(int64_t);
+    extern int64_t rt_string_char_code_at(int64_t, int64_t);
+    extern int64_t rt_any_add(int64_t, int64_t);
+    extern int64_t rt_for_iterable(int64_t);
+    extern int64_t rt_pool_safepoint(void);
     if (rt_value_int(7) != 56) return 10;
+    if (rt_value_as_int(rt_value_int(-7)) != -7) return 15;
+    if (rt_pool_safepoint() != 0) return 16;
+    if (rt_for_iterable(rt_value_int(9)) != rt_value_int(9)) return 17;
+    if (rt_value_as_int(rt_any_add(rt_value_int(4), rt_value_int(5))) != 9) return 18;
     if (rt_value_bool(1) != 11) return 11;
     if (rt_value_bool(0) != 19) return 12;
     if (rt_value_nil() != 3) return 13;
@@ -2132,6 +2148,11 @@ int main(void) {
     if (memcmp(rt_string_data(s), " 123 ", 5) != 0) return 61;
     if (rt_len(s) != 5) return 62;
     int64_t t = rt_string_new((const uint8_t*)"abc", 3);
+    SplArray* t_bytes = (SplArray*)rt_string_bytes(t);
+    if (rt_array_len(t_bytes) != 3 || rt_value_as_int(rt_array_get(t_bytes, 1)) != 'b') return 77;
+    if (rt_string_char_code_at(t, 2) != 'c') return 78;
+    int64_t utf8 = rt_string_new((const uint8_t*)"\xC3\xA9", 2);
+    if (rt_string_char_code_at(utf8, 0) != 0xE9) return 79;
     int64_t u = rt_string_new((const uint8_t*)"def", 3);
     int64_t c = rt_string_concat(t, u);
     if (rt_string_len(c) != 6 || memcmp(rt_string_data(c), "abcdef", 6) != 0) return 63;
