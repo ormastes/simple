@@ -242,12 +242,7 @@ pub(crate) fn build_import_map(
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
         let prefix = module_prefix_from_path(path, &per_file_root);
         let mut parser = simple_parser::Parser::new(source);
-        if let Ok(mut ast) = parser.parse() {
-            // Keep the arity/return-type map consistent with the codegen unit:
-            // drop wrong-arch `@cfg` function variants so a non-target variant
-            // does not seed these maps (bug
-            // x64_freestanding_cfg_multivariant_misdispatch).
-            super::discovery::strip_inactive_cfg_arch_fns(&mut ast, super::effective_target().arch);
+        if let Ok(ast) = parser.parse() {
             for item in &ast.items {
                 match item {
                     simple_parser::ast::Node::Function(f) => {

@@ -492,10 +492,20 @@ bool rt_opencl_release_context(int64_t context) {
     return status == RT_OPENCL_SUCCESS;
 }
 
+static inline int64_t engine2d_numeric_arg(int64_t value) {
+    uint64_t raw = (uint64_t)value;
+    if ((raw & RT_VALUE_TAG_MASK_SIMD) == 0 && raw >= 8) {
+        return (int64_t)(raw >> 3);
+    }
+    return value;
+}
+
 static int engine2d_span_bounds(SplArray* array, int64_t offset, int64_t count,
                                 int64_t* out_offset, int64_t* out_count) {
     if (!array || !out_offset || !out_count) return 0;
     int64_t len = rt_array_len(array);
+    offset = engine2d_numeric_arg(offset);
+    count = engine2d_numeric_arg(count);
     if (offset < 0 || count <= 0 || offset >= len) return 0;
     if (count > len - offset) count = len - offset;
     *out_offset = offset;
@@ -804,7 +814,7 @@ int64_t rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, 
 
     int64_t* data = (int64_t*)(uintptr_t)rt_array_data_ptr(dst);
     if (!data) return 0;
-    int64_t color_word = (int64_t)((uint64_t)color & 0xffffffffULL);
+    int64_t color_word = engine2d_numeric_arg(color) & 0xffffffffLL;
 
 #if defined(__x86_64__) || defined(_M_X64)
     if (simd_detect_avx2()) {
@@ -825,12 +835,6 @@ int64_t rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, 
         data[off + i] = color_word;
     }
     return n;
-}
-
-SplArray* rt_engine2d_simd_fill_span_u32(SplArray* dst, int64_t offset,
-                                         int64_t count, int64_t color) {
-    rt_engine2d_simd_fill_u32(dst, offset, count, color);
-    return dst;
 }
 
 int64_t rt_engine2d_simd_copy_u32(SplArray* dst, int64_t dst_off, SplArray* src,

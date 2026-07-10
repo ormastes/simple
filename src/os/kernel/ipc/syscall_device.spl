@@ -8,8 +8,6 @@ use os.kernel.types.task_types.{TaskId}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_NO_EXECUTE, VM_CACHE_DISABLE}
 use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, PAGE_SIZE}
 use os.kernel.memory.pmm.{pmm_alloc_pages, pmm_free_page_range}
-use os.kernel.memory.memory_dma_pages.{memory_dma_free_partial_pages}
-use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_register_dma, memory_leveling_runtime_unregister_dma, memory_leveling_runtime_dma_sync_for_device, memory_leveling_runtime_dma_sync_for_cpu}
 use os.kernel.boot.mmio.{mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 use os.drivers.pci.pci.{pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
 use os.kernel.interrupts.irq_routing.{irq_route_register}
@@ -21,14 +19,15 @@ use os.kernel.ipc.syscall.{_next_mmap_addr, _is_userspace_ptr, _is_kernel_addr, 
 use os.kernel.types.device_mem_types.{device_grant_token_base, device_grant_bar_token, device_grant_irq_token, device_grant_dma_token, device_grant_iommu_token, device_grant_iommu_domain_id}
 
 val MAX_DMA_ALLOCS: u64 = 1024
-var dma_alloc_owner: [u64; 1024] = [0; 1024]
-var dma_alloc_virt: [u64; 1024] = [0; 1024]
-var dma_alloc_phys: [u64; 1024] = [0; 1024]
-var dma_alloc_size: [u64; 1024] = [0; 1024]
-var dma_alloc_device: [u64; 1024] = [0; 1024]
-var dma_alloc_cache_policy: [u8; 1024] = [0; 1024]
-var dma_alloc_id: [u64; 1024] = [0; 1024]
-var dma_alloc_active: [u8; 1024] = [0; 1024]
+var dma_alloc_owner: [u64; 1024]
+var dma_alloc_virt: [u64; 1024]
+var dma_alloc_phys: [u64; 1024]
+var dma_alloc_size: [u64; 1024]
+var dma_alloc_device: [u64; 1024]
+var dma_alloc_cache_policy: [u8; 1024]
+var dma_alloc_id: [u64; 1024]
+var dma_alloc_active: [u8; 1024]
+var dma_alloc_next_id: u64 = 1
 
 # PCI device cache — lazy-initialized on first enumerate call
 val MAX_PCI_DEVICES: u64 = 256
@@ -36,15 +35,15 @@ var _pci_devices_count: u64 = 0
 var _pci_scanned: bool = false
 
 # Flat arrays for cached PCI device info (primitive types for baremetal ABI)
-var _pci_dev_bus: [u8; 256] = [0; 256]
-var _pci_dev_device: [u8; 256] = [0; 256]
-var _pci_dev_func: [u8; 256] = [0; 256]
-var _pci_dev_vendor: [u16; 256] = [0; 256]
-var _pci_dev_devid: [u16; 256] = [0; 256]
-var _pci_dev_class: [u8; 256] = [0; 256]
-var _pci_dev_subclass: [u8; 256] = [0; 256]
-var _pci_dev_prog_if: [u8; 256] = [0; 256]
-var _pci_dev_irq: [u8; 256] = [0; 256]
+var _pci_dev_bus: [u8; 256]
+var _pci_dev_device: [u8; 256]
+var _pci_dev_func: [u8; 256]
+var _pci_dev_vendor: [u16; 256]
+var _pci_dev_devid: [u16; 256]
+var _pci_dev_class: [u8; 256]
+var _pci_dev_subclass: [u8; 256]
+var _pci_dev_prog_if: [u8; 256]
+var _pci_dev_irq: [u8; 256]
 
 # ============================================================================
 # Device Handlers
@@ -306,14 +305,6 @@ fn _dma_find_slot(virt_addr: u64) -> i64:
         i = i + 1
     -1
 
-fn _dma_find_allocation_id(allocation_id: u64) -> i64:
-    var i: u64 = 0
-    while i < MAX_DMA_ALLOCS:
-        if dma_alloc_active[i] != 0 and dma_alloc_id[i] == allocation_id:
-            return i.to_i64()
-        i = i + 1
-    -1
-
 fn _dma_register_alloc(owner: TaskId, virt_addr: u64, phys_addr: u64, size: u64, owner_device: u64, cache_policy: u8, allocation_id: u64) -> bool:
     var i: u64 = 0
     while i < MAX_DMA_ALLOCS:
@@ -346,7 +337,12 @@ fn _dma_unregister_alloc(virt_addr: u64):
 
 fn _dma_free_pages(virt_addr: u64, phys_addr: u64, size: u64):
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
-    memory_dma_free_partial_pages(virt_addr, phys_addr, page_count, page_count, PAGE_SIZE)
+    var offset: u64 = 0
+    while offset < page_count:
+        val virt = VirtAddr(addr: virt_addr + offset * PAGE_SIZE)
+        vmm_unmap_page(virt)
+        offset = offset + 1
+    pmm_free_page_range(PhysAddr(addr: phys_addr), page_count)
 
 fn _dma_release_task_allocs(owner: TaskId):
     """Release all live DMA records owned by a task before final cleanup."""
@@ -356,18 +352,16 @@ fn _dma_release_task_allocs(owner: TaskId):
             val virt_addr = dma_alloc_virt[i]
             val phys_addr = dma_alloc_phys[i]
             val size = dma_alloc_size[i]
-            val released = memory_leveling_runtime_unregister_dma(dma_alloc_id[i], owner.id)
-            if released.ok:
-                _dma_free_pages(virt_addr, phys_addr, size)
-                task_unregister_resource(owner.id, RES_DMA_BUFFER, virt_addr)
-                dma_alloc_active[i] = 0
-                dma_alloc_owner[i] = 0
-                dma_alloc_virt[i] = 0
-                dma_alloc_phys[i] = 0
-                dma_alloc_size[i] = 0
-                dma_alloc_device[i] = 0
-                dma_alloc_cache_policy[i] = 0
-                dma_alloc_id[i] = 0
+            _dma_free_pages(virt_addr, phys_addr, size)
+            task_unregister_resource(owner.id, RES_DMA_BUFFER, virt_addr)
+            dma_alloc_active[i] = 0
+            dma_alloc_owner[i] = 0
+            dma_alloc_virt[i] = 0
+            dma_alloc_phys[i] = 0
+            dma_alloc_size[i] = 0
+            dma_alloc_device[i] = 0
+            dma_alloc_cache_policy[i] = 0
+            dma_alloc_id[i] = 0
         i = i + 1
 
 fn _handle_alloc_dma(args: SyscallArgs, caller: TaskId) -> SyscallResult:
@@ -404,33 +398,27 @@ fn _handle_alloc_dma(args: SyscallArgs, caller: TaskId) -> SyscallResult:
         val virt = VirtAddr(addr: base_virt + offset * PAGE_SIZE)
         val ok = vmm_map_page(virt, phys, flags)
         if !ok:
-            memory_dma_free_partial_pages(base_virt, first_phys, offset, page_count, PAGE_SIZE)
+            _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
             return SyscallResult(value: -12)
         offset = offset + 1
 
     _next_mmap_addr = base_virt + page_count * PAGE_SIZE
 
-    val leveling_registered = memory_leveling_runtime_register_dma(0, caller.id, base_virt, first_phys, page_count * PAGE_SIZE, cache_policy == 0)
-    if not leveling_registered.ok:
-        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
-        return SyscallResult(value: -12)
-    val allocation_id = leveling_registered.allocation_ids[0]
-
-    val registered = _dma_register_alloc(caller, base_virt, first_phys, page_count * PAGE_SIZE, owner_device, cache_policy, allocation_id)
-    if not registered:
-        memory_leveling_runtime_unregister_dma(allocation_id, caller.id)
-        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
-        return SyscallResult(value: -12)
-
-    val cleanup_tracked = task_register_resource(caller.id, RES_DMA_BUFFER, base_virt, page_count * PAGE_SIZE)
-    if not cleanup_tracked:
-        memory_leveling_runtime_unregister_dma(allocation_id, caller.id)
-        _dma_unregister_alloc(base_virt)
-        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
-        return SyscallResult(value: -12)
+    val allocation_id = dma_alloc_next_id
+    dma_alloc_next_id = dma_alloc_next_id + 1
 
     mmio_write64(result_ptr + 0, first_phys)
     mmio_write64(result_ptr + 8, allocation_id)
+
+    val registered = _dma_register_alloc(caller, base_virt, first_phys, page_count * PAGE_SIZE, owner_device, cache_policy, allocation_id)
+    if not registered:
+        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
+        return SyscallResult(value: -12)
+    val cleanup_tracked = task_register_resource(caller.id, RES_DMA_BUFFER, base_virt, page_count * PAGE_SIZE)
+    if not cleanup_tracked:
+        _dma_unregister_alloc(base_virt)
+        _dma_free_pages(base_virt, first_phys, page_count * PAGE_SIZE)
+        return SyscallResult(value: -12)
 
     SyscallResult(value: base_virt as i64)
 
@@ -457,39 +445,8 @@ fn _handle_free_dma(args: SyscallArgs, caller: TaskId) -> SyscallResult:
     if dma_alloc_size[slot] != ((size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE:
         return SyscallResult(value: -22)
 
-    val leveling_released = memory_leveling_runtime_unregister_dma(dma_alloc_id[slot], caller.id)
-    if not leveling_released.ok:
-        return SyscallResult(value: -16)
     _dma_free_pages(virt_addr, dma_alloc_phys[slot], dma_alloc_size[slot])
     _dma_unregister_alloc(virt_addr)
     task_unregister_resource(caller.id, RES_DMA_BUFFER, virt_addr)
 
-    SyscallResult(value: 0)
-
-fn _handle_sync_dma_for_device(args: SyscallArgs, caller: TaskId) -> SyscallResult:
-    val allocation_id = args.arg0
-    val owner_device = args.arg1
-    val idx = _dma_find_allocation_id(allocation_id)
-    if idx < 0:
-        return SyscallResult(value: -22)
-    val slot = idx.to_u64()
-    if dma_alloc_owner[slot] != caller.id or dma_alloc_device[slot] != owner_device:
-        return SyscallResult(value: -1)
-    val synchronized = memory_leveling_runtime_dma_sync_for_device(allocation_id, caller.id)
-    if not synchronized.ok:
-        return SyscallResult(value: -16)
-    SyscallResult(value: 0)
-
-fn _handle_sync_dma_for_cpu(args: SyscallArgs, caller: TaskId) -> SyscallResult:
-    val allocation_id = args.arg0
-    val owner_device = args.arg1
-    val idx = _dma_find_allocation_id(allocation_id)
-    if idx < 0:
-        return SyscallResult(value: -22)
-    val slot = idx.to_u64()
-    if dma_alloc_owner[slot] != caller.id or dma_alloc_device[slot] != owner_device:
-        return SyscallResult(value: -1)
-    val synchronized = memory_leveling_runtime_dma_sync_for_cpu(allocation_id, caller.id)
-    if not synchronized.ok:
-        return SyscallResult(value: -16)
     SyscallResult(value: 0)

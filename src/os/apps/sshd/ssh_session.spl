@@ -24,6 +24,7 @@ use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.kernel.log.klog_api.{log_info}
+use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn_ring3}
 use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_send_ssh_banner, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_ssh_encrypted_packet, rt_net_recv_version_text, rt_net_recv_version_bytes, rt_net_close}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
 
@@ -264,7 +265,6 @@ class SshSession:
     ctr_counter_c2s: [u8]
     ctr_counter_s2c: [u8]
     active_remote_channel_id: u32
-    pending_ring3_exec: bool   # set by exec dispatch; consumed by the shallow accept loop
 
 impl SshSession:
 
@@ -329,8 +329,7 @@ impl SshSession:
             host_ed25519_public: host_ed25519_public,
             ctr_counter_c2s: [],
             ctr_counter_s2c: [],
-            active_remote_channel_id: 0,
-            pending_ring3_exec: false
+            active_remote_channel_id: 0
         )
 
     pub me run():
@@ -688,27 +687,23 @@ impl SshSession:
             self._finish_exec_request_inline(local_id, remote_id, 0, [])
             return
 
-        # Absolute-path command -> ring-3 filesystem exec of /FSEXEC.ELF. Detect the
-        # leading '/' from the RAW payload byte (off+4 is the first byte of the exec
-        # command string; off is its 4-byte length prefix) — text starts_with
-        # mis-decodes on the x64 freestanding path. Pass the path as a LITERAL text
-        # (rodata constant, marshals correctly to the C FAT open); the decoded
-        # `command` mis-decodes ("/FSEXEC.ELF" -> "/E") via the x64 freestanding
-        # text-return-into-store heap-tag mangling (root cause tracked in
-        # doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md). Send the
-        # channel exit FIRST (spawn does not return on success; the connection drops).
+        # Absolute FAT path → load and run the on-disk ELF in ring-3.
+        # Detect the leading '/' via the RAW payload byte (0x2F) rather than
+        # text `starts_with`/`char_at`: those mis-decode on the x86_64 freestanding
+        # native-build path (len()/== are fine, per-char text reads return garbage
+        # — see doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md).
+        # Byte reads on `payload` are reliable (the whole KEX/auth stack is [u8]).
+        # The command field starts at off+4 (u32 length prefix; _read_text_field_fast).
+        val ring3_path = command.trim()
         if _u8_at(payload, off + 4) == 0x2Fu8:
-            serial_println("[sshd-session] exec ring3 DEFER /FSEXEC.ELF")
-            # DEFER the ring-3 spawn out of this deep call stack. Spawning inline
-            # here (many frames deep: run->loop->handle_packet->channel_request->
-            # exec_request + crypto) faults in ring-0 before the spawn's first line
-            # (kernel-stack overflow); the sshd accept loop runs it from a SHALLOW
-            # frame (like the prod boot entry) instead. Set a pending flag; the accept
-            # loop performs the spawn after run() returns. No text stored — the target
-            # is the literal /FSEXEC.ELF.
+            # Send the channel exit response first (success already sent above),
+            # then hand off; on spawn success control never returns (the user
+            # program exits via isa-debug-exit, taking QEMU down — one-shot by
+            # design; the ssh client sees the connection drop).
+            serial_println("[sshd-session] exec ring3 spawn path={ring3_path}")
             self._finish_exec_request_inline(local_id, remote_id, 0, [])
-            self.pending_ring3_exec = true
-            self.state = SessionState.Closed
+            val rc = fs_exec_spawn_ring3(ring3_path, [ring3_path], [])
+            serial_println("[sshd-session] ring3 spawn returned rc={rc} (fell through — spawn failed)")
             return
 
         val direct_output = _exec_success_output_for_command(command)

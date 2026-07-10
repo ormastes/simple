@@ -1,45 +1,85 @@
 #!/bin/sh
-# ssh_clang_hello_ring3.shs — the full "hello over SSH" one-shot demo.
+# ssh_clang_hello_ring3.shs — one-shot "hello world over SSH" (ring-3 FS-exec).
 #
-# Stages a clang-built C "hello" ELF as /FSEXEC.ELF on a FAT32 NVMe image, boots
-# the merged SSH+ring-3 kernel (ssh_ring3_entry.spl), then over a REAL OpenSSH
-# client runs `ssh -p <port> root@127.0.0.1 /FSEXEC.ELF`. The exec dispatch
-# (ssh_session.spl _handle_exec_request_inline) detects the leading '/' from the
-# raw payload byte and calls fs_exec_spawn_ring3, which streams the ELF off FAT,
-# maps it into a fresh user address space, and iretq's to CPL3. On success the
-# process runs, prints, exits, and takes QEMU down — the SSH connection drops
-# (expected). Success is gated on the SERIAL log: both
+# Proves end-to-end: a real SSH client logs in to the SimpleOS sshd, runs
+# `ssh <guest> /FSEXEC.ELF`, and the sshd exec dispatch hands off to the ring-3
+# filesystem-exec loader, which loads a clang-built C ELF from FAT32, maps it at
+# its native 0x10000000, enters ring-3, prints, and exits(42) via isa-debug-exit
+# (taking QEMU down — one-shot by design; the SSH connection drops, which is
+# EXPECTED). Success is gated on the SERIAL log: it must contain BOTH
 #   "hello from clang on simpleos"  AND  "[user] exit rc=42".
 #
-# Env: SKIP_KERNEL=1 reuse kernel, SKIP_STAGE=1 reuse fat32-hello.img,
-#      QEMU_MEM (2G), BOOT_WAIT (25s), SSH_PORT (auto-pick if 2222 busy).
+# Prereqs (built once, same as build_clang_hello_ring3.shs):
+#   - host clang-20 on PATH; build/os/sysroot; cross ld.lld
+#   - base FAT32 image build/os/elfexec/fat32-fsexec.img (elfexec bake)
+#   - sshpass on PATH (password auth is "simpleos")
+#
+# Usage: sh scripts/os/ssh_clang_hello_ring3.shs
 set -eu
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-cd "$ROOT"
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
 
 SEED="src/compiler_rust/target/release/simple"
 ENTRY="examples/09_embedded/simple_os/arch/x86_64/ssh_ring3_entry.spl"
-LINKER="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
-KERNEL="build/os/simpleos_ssh_ring3.elf"
-HELLO_IMG="build/os/hello/fat32-hello.img"
-SERIAL="build/os/ssh_clang_hello_ring3.serial.log"
-CACHE="build/os/ssh_cache_private"
-QEMU_MEM="${QEMU_MEM:-2G}"
-BOOT_WAIT="${BOOT_WAIT:-25}"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+OUT_ELF="build/os/simpleos_ssh_ring3.elf"
+SERIAL_LOG="build/os/ssh_clang_hello_ring3.serial.log"
+CLIENT_LOG="build/os/ssh_clang_hello_ring3.client.log"
 
-mkdir -p build/os/generated/generated build/os/hello
+SR=build/os/sysroot
+LLD=build/os/llvm/cross-x86_64-unknown-simpleos/bin/ld.lld
+HELLO_SRC=examples/09_embedded/simpleos_hello_c/hello_fs.c
+HELLO_OUT=build/os/hello
+BASE_IMG=build/os/elfexec/fat32-fsexec.img
+HELLO_IMG=$HELLO_OUT/fat32-hello.img
 
-# ---- 1. Stage clang hello as /FSEXEC.ELF (reuse image if present) --------
-if [ "${SKIP_STAGE:-0}" != "1" ] && [ ! -f "$HELLO_IMG" ]; then
-    echo "[ssh-demo] staging clang hello -> $HELLO_IMG"
-    sh scripts/os/build_clang_hello_ring3.shs >/dev/null 2>&1 || true
+SSH_PORT="${SSH_PORT:-2222}"
+# Auto-pick a free forward port if the requested one is already bound (parallel
+# QEMU/VM sessions commonly hold 2222).
+if command -v ss >/dev/null 2>&1; then
+    for _p in "$SSH_PORT" 2223 2224 2299 3222 3223; do
+        if ! ss -ltn 2>/dev/null | grep -q ":$_p "; then
+            SSH_PORT="$_p"; break
+        fi
+    done
 fi
-[ -f "$HELLO_IMG" ] || { echo "[ssh-demo] FAIL: missing $HELLO_IMG (run build_clang_hello_ring3.shs)"; exit 1; }
+SSH_PASS="${SSH_PASS:-simpleos}"
+ACCEPT_TIMEOUT="${ACCEPT_TIMEOUT:-90}"
+QEMU_TIMEOUT="${QEMU_TIMEOUT:-60}"
 
-# ---- 2. Build markers + merged kernel ------------------------------------
-printf 'pub fn ssh_live_build_marker() -> text:\n    "ssh-ring3-build:demo"\n' \
+[ -x "$SEED" ] || { echo "[ssh-hello] missing seed binary $SEED"; exit 1; }
+command -v sshpass >/dev/null 2>&1 || { echo "[ssh-hello] need sshpass on PATH"; exit 1; }
+
+mkdir -p "$HELLO_OUT" build/os
+
+# --------------------------------------------------------------------------
+echo "[ssh-hello] 1/6 stage clang hello as /FSEXEC.ELF on a FAT32 image"
+if command -v clang-20 >/dev/null 2>&1 && [ -f "$SR/share/simpleos/simpleos.ld" ] \
+    && [ -x "$LLD" ] && [ -f "$BASE_IMG" ]; then
+    clang-20 --target=x86_64-unknown-simpleos --sysroot="$SR" -ffreestanding \
+        -fno-stack-protector -nostdlib -static -O0 -c "$HELLO_SRC" -o "$HELLO_OUT/hello_fs.o"
+    "$LLD" -T "$SR/share/simpleos/simpleos.ld" -e _start \
+        "$HELLO_OUT/hello_fs.o" -o "$HELLO_OUT/hello_fs.elf"
+    bin/simple run examples/09_embedded/simpleos_hello_c/patch_fsexec_image.spl \
+        | grep -v '^\[INFO\]' || true
+elif [ -f "$HELLO_IMG" ]; then
+    echo "[ssh-hello]   clang/sysroot missing — reusing existing $HELLO_IMG"
+else
+    echo "[ssh-hello] cannot stage image: no clang toolchain and no $HELLO_IMG"; exit 1
+fi
+[ -f "$HELLO_IMG" ] || { echo "[ssh-hello] image staging failed: no $HELLO_IMG"; exit 1; }
+if ! strings "$HELLO_IMG" 2>/dev/null | grep -q 'FSEXEC'; then
+    echo "[ssh-hello] staged image $HELLO_IMG has no FSEXEC.ELF dirent"; exit 1
+fi
+echo "[ssh-hello]   image ready: $HELLO_IMG (contains /FSEXEC.ELF)"
+
+# --------------------------------------------------------------------------
+echo "[ssh-hello] 2/6 build manual markers the x64 ssh-ring3 entry requires"
+mkdir -p build/os/generated/generated
+printf 'pub fn ssh_live_build_marker() -> text:\n    "ssh-ring3-build:cranelift:manual"\n' \
     > build/os/generated/ssh_live_build_marker.spl
-cat > build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+cat > build/os/generated/generated/simpleos_log_config.spl <<'EOF'
 val SIMPLEOS_LOG_COMPILED: bool = false
 
 fn simpleos_log_compile_enabled() -> bool:
@@ -49,83 +89,96 @@ fn simpleos_log_compile_mode_name() -> text:
     if SIMPLEOS_LOG_COMPILED:
         return "on"
     "off"
-SPL
+EOF
 
-if [ "${SKIP_KERNEL:-0}" != "1" ]; then
-    OBJCOPY_PREFIX=""
-    for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin; do
-        [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
-    done
-    rm -rf "$CACHE"; mkdir -p "$CACHE"      # private cache — parallel sessions clobber the default
-    rm -f "$KERNEL"
-    echo "[ssh-demo] building merged kernel -> $KERNEL"
-    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT/src" SIMPLE_OS_LOG_MODE=off SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
-    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
-        "$SEED" native-build --source build/os/generated --source src/os --source src/lib \
-        --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 \
-        --opt-level=aggressive --log off --entry-closure --cache-dir "$CACHE" \
-        --entry "$ENTRY" --target x86_64-unknown-none -o "$KERNEL" \
-        --linker-script "$LINKER" 2>&1 | tail -15
-    [ -f "$KERNEL" ] || { echo "[ssh-demo] KERNEL BUILD FAILED"; exit 1; }
-fi
-
-# ---- 3. Pick a free host port --------------------------------------------
-SSH_PORT="${SSH_PORT:-2222}"
-if ss -ltn 2>/dev/null | grep -q ":$SSH_PORT "; then
-    for p in 22222 23222 24222 25222; do
-        ss -ltn 2>/dev/null | grep -q ":$p " || { SSH_PORT=$p; break; }
-    done
-fi
-echo "[ssh-demo] host ssh port = $SSH_PORT -> guest 22"
-
-# ---- 4. Boot QEMU (serial -> FILE) ---------------------------------------
-rm -f "$SERIAL"
-qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
-    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
-    -kernel "$KERNEL" -serial "file:$SERIAL" \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-    -drive "file=$HELLO_IMG,if=none,id=nvm,format=raw" -device nvme,serial=deadbeef,drive=nvm \
-    -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22" -device virtio-net-pci,netdev=n0 &
-QEMU_PID=$!
-trap 'kill "$QEMU_PID" 2>/dev/null || true' EXIT
-
-# ---- 5. Wait for the accept loop, then exec over SSH ---------------------
-i=0
-while [ $i -lt "$BOOT_WAIT" ]; do
-    grep -qa "accept loop start" "$SERIAL" 2>/dev/null && break
-    kill -0 "$QEMU_PID" 2>/dev/null || break
-    sleep 1; i=$((i+1))
+# --------------------------------------------------------------------------
+echo "[ssh-hello] 3/6 native-build merged SSH + ring-3 kernel"
+LLVM_PATH=""
+for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /usr/local/opt/llvm/bin; do
+    [ -d "$d" ] && LLVM_PATH="$d" && break
 done
-if ! grep -qa "accept loop start" "$SERIAL" 2>/dev/null; then
-    echo "[ssh-demo] FAIL: sshd accept loop never started"; kill "$QEMU_PID" 2>/dev/null || true; exit 1
-fi
-echo "[ssh-demo] sshd up; running: ssh -p $SSH_PORT root@127.0.0.1 /FSEXEC.ELF"
-sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
-    root@127.0.0.1 /FSEXEC.ELF || true    # connection drop on ring-3 exit is EXPECTED
+# Use a PRIVATE native-build cache dir (the --cache-dir flag) so parallel-session
+# OS builds — which constantly repopulate the shared default build/native_cache
+# with their own (edit-free) module objects — cannot stale our compiled sshd
+# dispatch. Cleared each run so our current source is always compiled in.
+NB_CACHE="$ROOT_DIR/build/os/ssh_ring3_native_cache"
+rm -rf "$NB_CACHE"
+SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+SIMPLE_ALLOW_FREESTANDING_STUBS=1 PATH="$LLVM_PATH:$PATH" \
+"$SEED" native-build --cache-dir "$NB_CACHE" \
+    --source build/os/generated --source src/os --source src/lib \
+    --source examples/09_embedded/simple_os \
+    --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+    --entry-closure --entry "$ENTRY" \
+    --target x86_64-unknown-none -o "$OUT_ELF" \
+    --linker-script "$LINKER_SCRIPT"
+[ -f "$OUT_ELF" ] || { echo "[ssh-hello] kernel build failed: no $OUT_ELF"; exit 1; }
+echo "[ssh-hello]   kernel: $OUT_ELF"
 
-# ---- 6. Let the ring-3 program finish, then gate the serial log ----------
-j=0
-while [ $j -lt 15 ]; do
-    grep -qa "\[user\] exit rc=42" "$SERIAL" 2>/dev/null && break
-    kill -0 "$QEMU_PID" 2>/dev/null || break
-    sleep 1; j=$((j+1))
+# --------------------------------------------------------------------------
+echo "[ssh-hello] 4/6 boot QEMU (q35, nvme=hello img, net 2222->22)"
+rm -f "$SERIAL_LOG" "$CLIENT_LOG"
+qemu-system-x86_64 \
+    -no-user-config -monitor none -nographic -no-reboot -machine q35 -cpu qemu64 -m 2G \
+    -kernel "$OUT_ELF" -serial file:"$SERIAL_LOG" -display none \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive file="$HELLO_IMG",if=none,id=nvm,format=raw -device nvme,serial=deadbeef,drive=nvm \
+    -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 -device virtio-net-pci,netdev=n0 &
+QEMU_PID=$!
+trap 'kill "$QEMU_PID" 2>/dev/null || true' EXIT INT TERM
+
+echo "[ssh-hello] 5/6 wait for sshd accept loop (timeout ${ACCEPT_TIMEOUT}s)"
+waited=0
+while [ "$waited" -lt "$ACCEPT_TIMEOUT" ]; do
+    if [ -f "$SERIAL_LOG" ] && grep -qa 'accept loop start' "$SERIAL_LOG" 2>/dev/null; then
+        break
+    fi
+    if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+        echo "[ssh-hello] QEMU exited before sshd accept loop"; break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+if ! grep -qa 'accept loop start' "$SERIAL_LOG" 2>/dev/null; then
+    echo "[ssh-hello] FAIL: sshd never reached accept loop"
+    grep -a 'sshd\|pmm+vmm\|nvme' "$SERIAL_LOG" 2>/dev/null | tail -10 || true
+    exit 1
+fi
+echo "[ssh-hello]   sshd is listening"
+
+echo "[ssh-hello] 6/6 ssh root@127.0.0.1 /FSEXEC.ELF (connection WILL drop — expected)"
+# The user program exits via isa-debug-exit, taking QEMU down. The ssh client
+# sees the connection drop; do NOT fail on ssh's exit code.
+sshpass -p "$SSH_PASS" ssh -p "$SSH_PORT" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=20 -v \
+    root@127.0.0.1 /FSEXEC.ELF > "$CLIENT_LOG" 2>&1 || true
+
+# Wait for QEMU to exit (isa-debug-exit) or time out.
+waited=0
+while [ "$waited" -lt "$QEMU_TIMEOUT" ] && kill -0 "$QEMU_PID" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
 done
 kill "$QEMU_PID" 2>/dev/null || true
-sleep 1
+wait "$QEMU_PID" 2>/dev/null || true
+trap - EXIT INT TERM
 
-echo "===== gate ====="
-PASS=1
-if grep -qa "hello from clang on simpleos" "$SERIAL" 2>/dev/null; then
-    echo "PASS print: $(grep -a 'hello from clang on simpleos' "$SERIAL" | head -1)"
-else
-    echo "FAIL: no 'hello from clang on simpleos'"; PASS=0
+# --------------------------------------------------------------------------
+echo "[ssh-hello] ---- gate ----"
+OK_PRINT=0
+OK_EXIT=0
+grep -qa 'hello from clang on simpleos' "$SERIAL_LOG" 2>/dev/null && OK_PRINT=1
+grep -qa '\[user\] exit rc=42' "$SERIAL_LOG" 2>/dev/null && OK_EXIT=1
+echo "[ssh-hello] serial exec/spawn trail:"
+grep -aoE 'exec command=[^ ]*|exec ring3 spawn path=[^ ]*|\[fs-exec\] spawn:[^"]*|hello from clang on simpleos|\[user\] exit rc=42|ring3 spawn returned[^"]*' \
+    "$SERIAL_LOG" 2>/dev/null | tail -20 || true
+
+if [ "$OK_PRINT" -eq 1 ] && [ "$OK_EXIT" -eq 1 ]; then
+    echo "PASS ssh-clang-hello-ring3: clang ELF ran from FS in ring-3 over SSH and exited rc=42"
+    exit 0
 fi
-if grep -qa "\[user\] exit rc=42" "$SERIAL" 2>/dev/null; then
-    echo "PASS exit:  $(grep -a '\[user\] exit rc=42' "$SERIAL" | head -1)"
-else
-    echo "FAIL: no '[user] exit rc=42'"; PASS=0
-fi
-echo "== preread probe / spawn markers =="
-grep -a "preread probe\|exec ring3 spawn\|spawn:bytes\|spawn:resolve-fail" "$SERIAL" 2>/dev/null | head
-if [ "$PASS" = "1" ]; then echo "DEMO PASSES"; else echo "DEMO FAILS"; fi
+echo "FAIL ssh-clang-hello-ring3 (print=$OK_PRINT exit=$OK_EXIT)"
+echo "[ssh-hello] tail of serial log:"
+tail -20 "$SERIAL_LOG" 2>/dev/null || true
+exit 1

@@ -267,14 +267,9 @@ pub(crate) fn compile_file_to_object(
 
     // Parse
     let mut parser = simple_parser::Parser::new(&source);
-    let mut ast = parser
+    let ast = parser
         .parse()
         .map_err(|e| format!("{}: parse: {e}", file_path.display()))?;
-    // Drop `@cfg(<arch>)` function variants that do not match the effective
-    // build target, before same-named variants collapse to a source-order
-    // first-wins pick in codegen (bug
-    // x64_freestanding_cfg_multivariant_misdispatch).
-    super::discovery::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
     let ast = if is_entry { wrap_entry_script_as_main(ast) } else { ast };
 
     // Build per-module use_map from AST `use` statements.

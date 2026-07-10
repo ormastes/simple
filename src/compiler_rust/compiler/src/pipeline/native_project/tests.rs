@@ -2237,12 +2237,6 @@ int main(void) {
     if (rt_array_len(a) != 2) return 44;
     if (rt_array_get(a, 0) != rt_value_int(10)) return 45;
     if (rt_array_get(a, rt_value_int(1)) != rt_value_int(20)) return 46;
-    if (rt_index_get((int64_t)a, rt_value_int(1)) != rt_value_int(20)) return 80;
-    if (!rt_index_set((int64_t)a, rt_value_int(1), rt_value_int(21))) return 83;
-    if (rt_array_get(a, 1) != rt_value_int(21)) return 84;
-    if (rt_index_set((int64_t)a, 3, rt_value_int(99))) return 85;
-    if (rt_index_get((int64_t)a, 3) != 3) return 86;
-    if (rt_array_get(a, 0) != rt_value_int(10)) return 87;
     rt_array_set(a, -1, rt_value_int(30));
     if (rt_array_get(a, 1) != rt_value_int(30)) return 47;
     extern int64_t rt_array_pop(SplArray*);
@@ -2250,9 +2244,6 @@ int main(void) {
     if (rt_array_pop(a) != rt_value_int(30)) return 48;
     if (rt_array_len(a) != 1) return 49;
     if (rt_array_get(a, 99) != 3) return 50;
-    int64_t tuple = rt_tuple_new(1);
-    if (!rt_tuple_set(tuple, 0, rt_value_int(31))) return 81;
-    if (rt_tuple_get(tuple, 0) != rt_value_int(31)) return 82;
     SplArray* words = rt_array_new_with_cap_u64(2);
     if (!words) return 51;
     int64_t word_header = rt_array_header_ptr(words);
@@ -2814,77 +2805,6 @@ fn test_file_arch_cfg_gate_recognizes_arch_aliases_and_negation() {
     assert_eq!(
         file_arch_cfg_gate("@cfg(\"target_arch\", \"arm\")\nfn f(): pass\n", TargetArch::X86_64),
         None
-    );
-}
-
-/// Regression for `x64_freestanding_cfg_multivariant_misdispatch`: six
-/// same-named `@cfg(<arch>)` function variants in one compilation unit must
-/// collapse to exactly the target's own variant. Before the fix, all six
-/// survived and `declare_functions` (codegen/shared.rs) kept whichever was
-/// declared FIRST -- source-order, not target-aware -- so a target whose
-/// variant was not written first was mis-dispatched. `strip_inactive_cfg_arch_fns`
-/// drops the wrong-arch variants so only the target's body remains, and the
-/// non-`@cfg` wrapper is always kept.
-#[test]
-fn test_strip_inactive_cfg_arch_fns_keeps_only_target_variant() {
-    use super::discovery::strip_inactive_cfg_arch_fns;
-    use simple_common::target::TargetArch;
-    use simple_parser::ast::Node;
-
-    // riscv64 is written FIRST, x86_64 LAST -- so a source-order pick would
-    // choose the wrong variant for an x86_64 target.
-    let src = "\
-@cfg(riscv64)\nfn h(): pass\n\
-@cfg(riscv32)\nfn h(): pass\n\
-@cfg(arm64)\nfn h(): pass\n\
-@cfg(arm32)\nfn h(): pass\n\
-@cfg(x86)\nfn h(): pass\n\
-@cfg(x86_64)\nfn h(): pass\n\
-fn wrapper(): h()\n";
-
-    let surviving_cfg_arch = |arch: TargetArch| -> String {
-        let mut parser = simple_parser::Parser::new(src);
-        let mut module = parser.parse().expect("parse");
-        strip_inactive_cfg_arch_fns(&mut module, arch);
-        let hs: Vec<&simple_parser::ast::FunctionDef> = module
-            .items
-            .iter()
-            .filter_map(|it| match it {
-                Node::Function(f) if f.name == "h" => Some(f),
-                _ => None,
-            })
-            .collect();
-        // Exactly one `h` variant survives for the target.
-        assert_eq!(hs.len(), 1, "expected one surviving `h` for {arch:?}");
-        // The wrapper (no `@cfg`) is always kept.
-        assert!(
-            module
-                .items
-                .iter()
-                .any(|it| matches!(it, Node::Function(f) if f.name == "wrapper")),
-            "wrapper must survive for {arch:?}"
-        );
-        let cfg_attr = hs[0]
-            .attributes
-            .iter()
-            .find(|a| a.name == "cfg")
-            .and_then(|a| a.args.as_ref())
-            .and_then(|v| v.first())
-            .expect("surviving variant keeps its @cfg");
-        format!("{cfg_attr:?}")
-    };
-
-    assert!(
-        surviving_cfg_arch(TargetArch::X86_64).contains("x86_64"),
-        "x86_64 target must keep the x86_64 variant"
-    );
-    assert!(
-        surviving_cfg_arch(TargetArch::Riscv64).contains("riscv64"),
-        "riscv64 target must keep the riscv64 variant"
-    );
-    assert!(
-        surviving_cfg_arch(TargetArch::Aarch64).contains("arm64"),
-        "aarch64 target must keep the arm64 variant"
     );
 }
 

@@ -88,14 +88,17 @@ impl MirLowering:
                         if symbol_value_id < 0:
                             self.error("let binding has no resolved symbol", Some(span))
                             return
+                        val mir_type = match let_type:
+                            case Some(type_value):
+                                self.lower_type(type_value)
+                            case nil:
+                                MirType.i64()
+
                         val init_local = self.lower_expr(let_init)
                         val init_local_id = mir_stmt_local_id_value(init_local)
                         if init_local_id < 0:
                             self.error("let initializer produced no local", Some(span))
                             return
-                        val mir_type = match let_type:
-                            case Some(type_value): self.lower_type(type_value)
-                            case nil: self.local_mir_type_or_i64(init_local)
                         val bf_sym = self.bitfield_value_syms.get(init_local_id)
                         # Struct values are pointer-represented; alias the binding
                         # straight to the constructed local (like the bitfield
@@ -131,6 +134,12 @@ impl MirLowering:
                         # `val x = ...` without an explicit type annotation;
                         # the direct match keeps that nil from reaching
                         # lower_type and tripping a `.kind` read on nil.
+                        val mir_type = match type_:
+                            case Some(type_value):
+                                self.lower_type(type_value)
+                            case nil:
+                                MirType.i64()
+
                         # Lower the initializer first so a bitfield-construct
                         # pass-through can be aliased directly, without first
                         # materializing an intermediate I64 local.
@@ -140,11 +149,6 @@ impl MirLowering:
                             init_local = self.lower_expr(init_expr)
                             has_init = true
 
-                        val mir_type = match type_:
-                            case Some(type_value): self.lower_type(type_value)
-                            case nil:
-                                if has_init: self.local_mir_type_or_i64(init_local) else: MirType.i64()
-
                         # Bitfield construction (`val inst = BitfieldType(raw)`)
                         # is a bit-identical identity pass-through: alias the
                         # binding straight to the source local instead of
@@ -153,22 +157,27 @@ impl MirLowering:
                         # not sig_N(6 downto 0)). bitfield_value_syms is only
                         # populated for real bitfield types, so non-bitfield
                         # code always takes the ordinary new_local + Copy path.
-                        var bf_sym: i64? = nil
-                        var struct_sym: text? = nil
+                        # `i64?`/`text?` are shared (Option/heap) types, so the
+                        # W1003 mut-capability checker forbids reassigning a `var`
+                        # of these types. Compute the initializer's local id once
+                        # into a plain-i64 var (not a shared type, so a var-i64
+                        # reassignment is allowed) and then bind bf_sym/struct_sym
+                        # exactly once as `val`.
+                        var init_local_id: i64 = -1
                         if has_init:
-                            val init_local_id = mir_stmt_local_id_value(init_local)
+                            init_local_id = mir_stmt_local_id_value(init_local)
                             if init_local_id < 0:
                                 self.error("let initializer produced no local", Some(span))
                                 return
-                            bf_sym = self.bitfield_value_syms.get(init_local_id)
-                            # Struct values are pointer-represented; aliasing the
-                            # binding straight to the constructed local (like the
-                            # bitfield pass-through) keeps struct_value_syms (keyed
-                            # by the constructed local's .id) valid so a later
-                            # `p.x` field read can recover the field ordering.
-                            # Key on init_local.id directly to match how
-                            # lower_struct_construct writes the map.
-                            struct_sym = self.struct_value_syms.get(init_local.id)
+                        val bf_sym: i64? = if has_init: self.bitfield_value_syms.get(init_local_id) else: nil
+                        # Struct values are pointer-represented; aliasing the
+                        # binding straight to the constructed local (like the
+                        # bitfield pass-through) keeps struct_value_syms (keyed
+                        # by the constructed local's .id) valid so a later
+                        # `p.x` field read can recover the field ordering.
+                        # Key on init_local.id directly to match how
+                        # lower_struct_construct writes the map.
+                        val struct_sym: text? = if has_init: self.struct_value_syms.get(init_local.id) else: nil
                         if bf_sym != nil or struct_sym != nil:
                             self.local_map[symbol_id] = init_local
                         else:
@@ -258,7 +267,10 @@ impl MirLowering:
                 val index_local = self.lower_expr(index)
                 self.emit_bounds_check_for_index(base.type_, receiver, index_local)
 
-                # Create function operand for rt_array_set
+                # Create function operand for rt_array_set(ptr, i64, i64) -> void.
+                # Mirror the rt_array_get callee shape (see expr_dispatch.spl
+                # `case Index` getter): the callee MUST name the runtime symbol
+                # via MirConstValue.Str, not the integer 0, or the store no-ops.
                 val func_operand = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_array_set"),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(MirType.i64(), false), MirType.i64(), MirType.i64()], return_type: MirType.unit(), is_variadic: false)))
