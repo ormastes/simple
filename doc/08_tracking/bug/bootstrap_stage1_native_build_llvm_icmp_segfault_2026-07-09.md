@@ -1625,3 +1625,34 @@ shb_cache, both incremental twins, mir_interp_intrinsics).
 
 **Everything in this update is uncommitted** (session constraints — no
 commit/push, no Rust seed edits, no `test/**` edits, no bin/release deploy).
+
+## 2026-07-11 — Redeploy gate wave executed: stage-4 full CLI smoke FAILED, bin/release NOT touched
+
+User-authorized redeploy attempt. Built via
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-cli` (no --deploy):
+Stage 2 OK, Stage 3 self-host OK, Stage 4 full CLI linked
+(`build/bootstrap/full/aarch64-apple-darwin/simple`, 54,080,072 bytes,
+139.6s, 1193 modules, 0 compile failures) — but with **822 unresolved
+symbols stubbed** (`SIMPLE_STUB_MISSING_RT=1`), including `file_read_text`
+and the rest of the file/dir/path runtime family.
+
+Smoke matrix verdict: FAIL → NOT deployed.
+- `--version` PASS; everything that must read a file FAILS:
+  `check` exit 3 / zero output, both CLI specs exit 3 / zero output,
+  `run hello.spl` exit 1 `Parse error in :` (empty filename — file reads
+  return nothing through the stub), nested-replace oracle same,
+  `-c 'print(1+1)'` → `error: failed to run -c snippet` (this also killed
+  the wrapper script silently at its own `stage4_smoke` command
+  substitution under `set -e`).
+
+Final state: `bin/release/aarch64-apple-darwin-macho/simple` untouched
+(19,783,456 bytes, Jul 5 14:16), `bin/simple` symlink intact and verified
+working. Backup of the deployed binary at the session scratchpad
+(`simple.jul5.bak`, size-verified 19,783,456). Sentry sites re-verified
+intact (3× `llvm_types.spl` NUL-terminated DataLayout; `-no_uuid` still
+absent from link args; jj WC clean on `2509aa99`).
+
+Redeploy blocker is now precisely the stage-4 unresolved-symbol wall
+(same wall as the Jul-10 `simple.stubdump` / `stage4-stub-symbols.txt`
+retries), not the 3-stage verification and not the replace dispatcher.
+This section is uncommitted per session constraints.

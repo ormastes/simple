@@ -1,4 +1,45 @@
-# Stage4 Self-Host Redeploy (#79) — Plan (updated 2026-07-10)
+# Stage4 Self-Host Redeploy (#79) — Plan (updated 2026-07-11)
+
+## STATUS NOW (2026-07-11): redeploy gate wave RUN — smoke matrix FAILED, NOT deployed
+
+User authorized the redeploy; the gate wave was executed and the gate held.
+
+- Pipeline: `scripts/bootstrap/bootstrap-from-scratch.sh --full-cli` (no
+  `--deploy`; dynload mode, cranelift stage2/3/4, seed reused). Stage 2 OK,
+  Stage 3 self-host OK (hashes differ from stage 2 as expected — embedded
+  runtime), Stage 4 linked
+  `build/bootstrap/full/aarch64-apple-darwin/simple` (54,080,072 bytes) in
+  139.6s (1193 modules compiled, 0 failed).
+- **BUT the stage-4 link stubbed 822 unresolved symbols**
+  (`SIMPLE_STUB_MISSING_RT=1`), including core runtime:
+  `file_read_text`, `file_write_text`, `file_read_bytes`, `dir_read`,
+  `lexer_tokenize`, `panic`, `json_serialize`, `path_*`, plus
+  `_dot_`-mangled trait methods and `rt_arm_virtio_*`. Full list preview in
+  `build/bootstrap/logs/aarch64-apple-darwin/stage4-native-build.log`.
+- **Smoke matrix on the staged binary (gate criteria): FAIL.**
+  - a `--version` → PASS (`Simple v1.0.0-beta`).
+  - b `check src/app/cli/bootstrap_main.spl` → FAIL (exit 3, zero output).
+  - c both CLI specs → FAIL (exit 3, zero output — cannot read test files).
+  - d `run` hello script → FAIL (exit 1, `Parse error in :` — empty
+    filename: `file_read_text` is a stub, so every source read returns
+    nothing).
+  - e nested-replace oracle → FAIL (same `Parse error in :`).
+  - f `build bootstrap` re-verify → not attempted (pointless after b–e).
+  - `-c 'print(1+1)'` → `error: failed to run -c snippet` — this is also why
+    the wrapper script itself died silently at its own built-in smoke
+    (`set -e` + failing command substitution at the `stage4_smoke` line).
+- **Deploy NOT performed.** `bin/release/aarch64-apple-darwin-macho/simple`
+  is untouched (19,783,456 bytes, Jul 5 14:16); `bin/simple` symlink intact
+  and working. Backup taken anyway (scratchpad `simple.jul5.bak`,
+  size-verified).
+- **Conclusion:** the 3-stage minimal-driver bootstrap is VERIFIED, but the
+  stage-4 *full CLI* produced by the stage-2 dynload native-build is not
+  deployable — the 822-symbol stub wall (same wall as the Jul-10 peer
+  retries: `simple.stubdump`, `stage4-stub-symbols.txt` in the logs dir) is
+  the actual redeploy blocker. Next work item: resolve the unresolved-symbol
+  classes in stage-4 native-build (trait `_dot_` mangling, runtime `file_*`
+  externs) so the full CLI links closed, then re-run this exact gate.
+
 
 > Full dated archaeology of the fix arc (SIGSEGV → DataLayout → verifier
 > errors → object emission) moved to
