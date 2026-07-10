@@ -10,7 +10,7 @@ use os.apps.sshd.ssh_kex.{ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh
 use os.apps.sshd.ssh_kex_core.{ssh_kex_compute_exchange_hash, ssh_derive_keys}
 use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_REPLY, ssh_build_ed25519_host_key_blob, _append_byte, _push_bytes, _push_mpint_bytes, curve25519_shared_secret_mpint_bytes}
 use os.apps.sshd.ssh_session.{SshSession, SessionState}
-use os.apps.sshd.ssh_session_helpers.{_u8_at, _slice_range, _bytes_to_hex, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_live_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey}
+use os.apps.sshd.ssh_session_helpers.{_u8_at, _slice_range, _bytes_to_hex, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_live_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey, _zeroed_32_bytes}
 use os.kernel.log.klog_api.{log_info}
 use os.kernel.net.rt_net_socket_facade.{rt_net_last_ssh_plain_payload_len, rt_net_last_ssh_plain_payload_slice}
 use os.crypto.dual_backend.{dual_backend_alpha_default_mode, dual_backend_bytes_equal, dual_backend_choose_bytes, dual_backend_run_bytes}
@@ -560,10 +560,18 @@ impl SshSession:
             log_info("[app.sshd] " + "[sshd-session] host key blob={_bytes_to_hex(host_key_blob)}")
             serial_println("[sshd-session] host key blob={_bytes_to_hex(host_key_blob)}")
 
-        # Compute exchange hash
+        # Compute exchange hash.
+        # NOTE: an `if`-EXPRESSION whose branches mix an extern `[u8]`-returning
+        # call (ANY-erased across the C facade) with a Simple-fn `[u8]` return
+        # corrupts the taken extern branch's handle in x64 freestanding codegen
+        # (seed lower_if_expr phi-merge; reproduced in abi_probe P9: handle=0x15,
+        # non-deterministic). Assigning into a pre-declared `var` via an
+        # if-STATEMENT (lowering_stmt.rs path) avoids the buggy merge — verified
+        # clean by abi_probe P10.
         serial_println("[sshd-session] exchange hash generation start")
-        val exchange_hash = if using_live_openssh_profile:
-            rt_ssh_curve25519_exchange_hash(
+        var exchange_hash = _zeroed_32_bytes()
+        if using_live_openssh_profile:
+            exchange_hash = rt_ssh_curve25519_exchange_hash(
                 self.client_version_bytes,
                 self.server_version_bytes,
                 self.client_kexinit_payload,
@@ -574,7 +582,7 @@ impl SshSession:
                 shared_secret
             )
         else:
-            ssh_kex_compute_exchange_hash(
+            exchange_hash = ssh_kex_compute_exchange_hash(
                 self.client_version_bytes,
                 self.server_version_bytes,
                 self.client_kexinit_payload,
