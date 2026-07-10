@@ -840,3 +840,41 @@ Next owner: provide or route the entry shim/runtime ABI symbols when bootstrap
 links against `libsimple_native_all.a` without the separately compiled hosted C
 runtime objects. Do not restart the full deploy loop until this focused Stage 2
 link passes.
+
+## 2026-07-10 macOS bootstrap runtime handoff continuation
+
+Focused fixes advanced the bootstrap lane past several independent owner-path
+failures:
+
+- `src/compiler/70.backend/backend/llvm_native_link.spl` now emits a small
+  bootstrap-only C ABI support object when `SIMPLE_BOOTSTRAP=1` links against
+  `libsimple_native_all.a`, providing `spl_init_args`, `spl_arg_count`,
+  `spl_get_arg`, `__simple_runtime_init`, `__simple_runtime_shutdown`, and
+  `rt_strlen`. Focused Stage 2 native-build then linked successfully.
+- `src/compiler_rust/runtime/build.rs` no longer archives the stale
+  `runtime_smf_socket_shims.c` fallback into `libsimple_native_all.a`; Rust
+  `simple_runtime` owns those TCP symbols. This removed the Stage 3 duplicate
+  `rt_io_tcp_*` definitions.
+- The duplicate app-local `src/app/common/string_builder.spl` was removed and
+  `wm_compare` imports now use the library `common.string_builder` module. This
+  removed the Stage 4 duplicate `common__string_builder__StringBuilder_dot_*`
+  link failure.
+- `rt_alloc_page_aligned` is now provided by both hosted C runtime paths and the
+  rebuilt bootstrap runtime archive.
+
+Evidence:
+
+```text
+Stage 2 focused native-build: exit 0
+Stage 3 full wrapper segment: passed before Stage 4
+Stage 4 core-C focused native-build with SIMPLE_STUB_MISSING_RT=1: exit 0
+nm -u build/bootstrap/full/aarch64-apple-darwin/simple | rg '^_rt_| _rt_' | wc -l => 0
+```
+
+Remaining blocker: the Stage 4 binary now links and loads, but the required
+smoke `build/bootstrap/full/aarch64-apple-darwin/simple -c 'print(1+1)'` hangs
+until killed. The previous hosted-runtime retry also showed that forcing
+`--runtime-path src/compiler_rust/target/bootstrap` selects the Rust
+`deps/libsimple_runtime.a` path and still weak-stubs live runtime hooks, so the
+wrapper-shaped core-C path is the relevant lane. Do not deploy or mark bootstrap
+successful until the Stage 4 `-c` smoke returns `2`.

@@ -1380,6 +1380,15 @@ static void* rt_dma_aligned_alloc(size_t alignment, size_t size) {
 #endif
 }
 
+void* rt_alloc_page_aligned(int64_t size) {
+    if (size <= 0) return NULL;
+    void* p = rt_dma_aligned_alloc(RT_DMA_HOST_PAGE_SIZE, (size_t)size);
+    if (p) {
+        memset(p, 0, (size_t)size);
+    }
+    return p;
+}
+
 static void rt_dma_aligned_free(void* p) {
 #if defined(_WIN32)
     _aligned_free(p);
