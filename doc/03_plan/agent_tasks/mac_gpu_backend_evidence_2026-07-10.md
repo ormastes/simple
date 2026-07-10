@@ -49,3 +49,11 @@ SIMPLE_BIN=bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-h
 - Do not treat Linux Metal-unavailable output as Metal PASS.
 - Do not accept evidence from a stale binary; record binary path and timestamp.
 - Reviewer must approve before closing the TODO.
+## Remaining macOS Work
+
+- Build and install a fresh pure-Simple self-host binary containing
+  `rt_host_gpu_queue_emit_payload_text` dispatch.
+- Require the redeploy gate and post-swap `-c 'print(1+1)'` smoke to pass.
+- Run `host_gpu_queue_roundtrip_spec.spl`; require all 16 examples to pass.
+- Re-run the production queue wrapper and clear the browser first-render budget failure.
+- Obtain higher-model review before closing TODO 119.
