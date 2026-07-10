@@ -112,9 +112,129 @@ have its lane-selection logic prefer that complete archive over the stale
 391-symbol one when both exist. **Estimated blast radius: >100 symbols
 (measured 405-411), single largest lever in this inventory.**
 
-## Ordered fix plan
+## Step 1 status (2026-07-11, re-investigated): ORIGINAL DIAGNOSIS WAS WRONG — root cause is a broken `nm` on the analysis/build host, not a stale/partial archive
 
-1. **Runtime-archive completeness (highest leverage, ~400+ symbols).**
+**Correction: `target/bootstrap/deps/libsimple_runtime.a` is NOT stale or
+partial. It is essentially complete (~23.5k defined symbols, all core `rt_*`
+present) — every "391 T-symbols" / "405 missing core rt_* symbols" figure in
+this doc's Data-sources/Bucket-table/Highest-leverage sections above was an
+artifact of running the wrong `nm` binary, not a real property of the
+archive.**
+
+Evidence:
+- `nm src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a` on this
+  host resolves to **`/usr/bin/nm`** (Xcode's, LLVM-based reader bundled with
+  an older Xcode toolchain). Extracting a single archive member (e.g.
+  `simple_runtime.simple_runtime.cb7c9d2922500ad5-cgu.00.rcgu.o`) and running
+  `nm` on it directly fails: `error: ... Unknown attribute kind (102)
+  (Producer: 'LLVM21.1.8-rust-1.94.0-stable' Reader: 'LLVM
+  APPLE_1_1700.6.4.2_0')`. rustc 1.94 emits object files tagged with an LLVM
+  21 attribute Xcode's bundled nm/LLVM reader doesn't understand yet. `nm`
+  silently drops the unreadable members (no hard error at the archive level,
+  just "no symbols"/partial output per member), which is why a naive
+  `nm -g --defined-only libsimple_runtime.a` under-reports by ~98% (391 of
+  ~23.5k) — it isn't that the symbols are absent, `nm` just can't parse most
+  of the object files that contain them.
+- Installing/using a matching-generation reader
+  (`/opt/homebrew/opt/llvm@22/bin/llvm-nm`, Homebrew LLVM 22.1.2, which can
+  read LLVM 21 IR/attributes) on the **exact same, unmodified**
+  `target/bootstrap/deps/libsimple_runtime.a` gives **23,562** unique defined
+  symbols (**19,994** of type `T`), and `rt_array_all`, `rt_dict_new`, and
+  every other symbol from the doc's "405 missing core rt_*" bucket resolve as
+  `T`-defined. Diffing the full symbol sets of
+  `target/bootstrap/deps/libsimple_runtime.a` vs.
+  `target/debug/deps/libsimple_runtime.a` with `llvm-nm` (not system `nm`)
+  shows **0 `rt_*` symbols present in debug but missing from bootstrap** — the
+  405/411-symbol "highest-leverage fix" bucket in this doc does not exist as
+  described. (The two archives do still differ by ~28k non-`rt_` symbols —
+  Rust-mangled monomorphizations/dependency-crate internals pulled in by
+  whatever built `target/debug` — but none of those are stub-wall symbols the
+  CLI closure needs.)
+- Verification command used (reproducible, does not touch the archive or the
+  repo):
+  ```bash
+  ln -sf /opt/homebrew/opt/llvm@22/bin/llvm-nm /path/to/shim/nm
+  PATH="/path/to/shim:$PATH" nm -g -p src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a | wc -l   # -> 23562 unique names
+  PATH="/path/to/shim:$PATH" nm -g -p src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a | grep -E 'rt_array_all$|rt_dict_new$'  # both present as T
+  ```
+
+**Consequence for the rest of this doc:** the compiler's own stub-generation
+scan has the identical bug, so the 822/1052-symbol stub counts quoted
+throughout this doc are themselves suspect and likely inflated for the same
+reason — not just the "405 core rt_*" bucket. `stubs.rs` and `linker.rs`
+determine "is this symbol already defined in the runtime archive/other
+objects" by shelling out to a **hardcoded, unqualified `nm`** (see below),
+which resolves to the same broken `/usr/bin/nm` on any host with an
+LLVM21-generation rustc and an older Xcode toolchain. Any symbol whose only
+defining object happens to live in one of the archive members `nm` can't
+parse gets misclassified as "undefined" and a stub gets generated for it even
+though the real implementation is already linked in. This plausibly explains
+a large fraction of the 822-symbol wall, not only the core-runtime bucket —
+buckets (c) "over-linking" and (a) "genuinely unimplemented" in the table
+above should be re-audited with a working `nm` before trusting their counts.
+
+### Zero-code verification performed (this session)
+
+Confirmed via the `llvm-nm`-shim commands above; **no repo files, archives, or
+Rust seed source were modified**. This was pure read-only analysis using a
+symlink in the session scratchpad
+(`/private/tmp/claude-501/-Users-ormastes-simple/7597a415-f0b0-4c3f-822d-107292b34bec/scratchpad/nm_shim/nm`
+→ `/opt/homebrew/opt/llvm@22/bin/llvm-nm`), not wired into the real build.
+
+A durable fix requires a Rust seed source change, so per the task's
+instructions it is **proposed below, not applied**.
+
+### Proposed seed diff (NOT applied — requires peer review before landing)
+
+Root cause: `stubs.rs` and `linker.rs` invoke the platform's default `nm`
+unconditionally (`std::process::Command::new("nm")`, 4 call sites in
+`stubs.rs:138,523,548,572` + 3 in `linker.rs:78,280,317`), instead of
+preferring an LLVM-generation-matched reader. `tools.rs::archive_defined_symbols`
+(used by `runtime_archive_has_core_required_symbols` /
+`find_abi_complete_simple_core_runtime_library`) already has the right idea —
+`for tool in ["llvm-nm", "nm"] { ... }` — but even that is insufficient on
+this host: Homebrew's `llvm`/`llvm@22` formulae are keg-only and don't symlink
+`llvm-nm` onto `PATH`, so `Command::new("llvm-nm")` fails to spawn (`ENOENT`)
+and the loop silently falls through to the same broken `nm`.
+
+Proposed fix (sketch, not applied):
+1. Add a shared helper in `tools.rs`, e.g. `pub(crate) fn nm_command() -> std::process::Command`,
+   that resolves the tool once: honor an env override
+   (`SIMPLE_NM_TOOL`/reuse `SIMPLE_LLVM_NM` if such a knob already exists
+   elsewhere in the pipeline — grep before inventing a new name), else try
+   `llvm-nm` on `PATH`, else probe common Homebrew keg locations
+   (`brew --prefix llvm`/`llvm@<N>` — or just glob
+   `/opt/homebrew/opt/llvm*/bin/llvm-nm` and `/usr/local/opt/llvm*/bin/llvm-nm`
+   picking the highest version), else fall back to plain `nm`.
+2. Replace the 3 raw `Command::new("nm")` construction sites in `stubs.rs`
+   (`scan_nm_defined_undefined` at line ~138, and the two inline builds at
+   ~523 and ~548) and the `nm_cmd` build at ~572 (the `plat_config.system_scan_libs`
+   loop — currently `std::process::Command::new("nm")` with
+   `plat_config.nm_flags`) with calls to the new shared helper.
+3. Replace the 3 sites in `linker.rs` (`read_global_symbol_types` at line 78,
+   plus the two more at 280 and 317 — not yet inspected in this session, same
+   pattern expected) similarly.
+4. Update `tools.rs::archive_defined_symbols` (line ~323) to use the same
+   shared helper instead of its own narrower `["llvm-nm", "nm"]` loop, so
+   there is exactly one tool-resolution policy in the codebase.
+5. Re-run stage4 native-build after landing and re-diff the stub list — the
+   405-symbol "core rt_*" bucket and probably a meaningful slice of buckets
+   (a)/(c) should evaporate.
+
+This is flagged for peer review, not landed, per this task's "no Rust seed
+CODE edits" constraint.
+
+## Ordered fix plan (superseded for item 1 — see Step 1 status above)
+
+1. ~~**Runtime-archive completeness (highest leverage, ~400+ symbols).**~~
+   **SUPERSEDED.** Re-investigation (above) shows the archive was never
+   incomplete — this was an `nm`-tool-version measurement artifact. Replace
+   this step with: **fix the `nm`-tool resolution in `stubs.rs`/`linker.rs`/
+   `tools.rs`** (see "Proposed seed diff" above), then re-run stage4
+   native-build and re-diff the stub list from a clean baseline before
+   trusting any of buckets (a)/(b)/(c) in the table above.
+   <details><summary>Original (incorrect) step 1 text, kept for history</summary>
+
    Diagnose why `target/bootstrap/deps/libsimple_runtime.a` (391 T-symbols,
    built 2026-07-10T23:09) is far smaller than `target/debug/deps/libsimple_runtime.a`
    (22,576 T-symbols, built 2026-07-11T00:28) — likely a stale/partial
@@ -123,6 +243,7 @@ have its lane-selection logic prefer that complete archive over the stale
    `core-c-bootstrap` lane with `find_abi_complete_simple_core_runtime_library`
    returning a real hit. Rebuild or reroute so stage4 links the complete
    archive. Re-run stage4 native-build and re-diff the stub count.
+   </details>
 2. **Fix the bare-vs-`rt_`-prefixed extern mismatch (~22+ symbols, bucket b).**
    `src/lib/nogc_sync_mut/fs.spl:617-639` and the `nogc_async_mut/fs.spl`
    twin: rename externs to their `rt_`-prefixed forms (matching
