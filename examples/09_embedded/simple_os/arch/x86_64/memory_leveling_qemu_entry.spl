@@ -1,0 +1,85 @@
+# SimpleOS x86_64 QEMU evidence for memory leveling, swap, GPU, NIC, and DMA.
+
+extern fn serial_println(msg: text)
+extern fn rt_port_outb(port: u16, value: u8)
+
+use std.memory_leveling.{simple_memory_iso_cpu_cold, simple_memory_placement_config_from_intent, memory_leveling_policy_from_intent}
+use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_default}
+use os.kernel.memory.memory_leveling_device_adapters.{memory_leveling_device_migration_unavailable}
+use os.kernel.memory.memory_leveling_capabilities.{memory_leveling_qemu_capabilities}
+use os.kernel.memory.memory_swap.{memory_swap_store_new}
+
+fn _memory_leveling_qemu_fail(reason: text):
+    serial_println("[memory-leveling] FAIL reason=" + reason)
+    serial_println("TEST FAILED")
+    rt_port_outb(0xf4, 1)
+
+fn _start():
+    serial_println("[memory-leveling] qemu-start")
+
+    val intent = simple_memory_iso_cpu_cold()
+    val placement = simple_memory_placement_config_from_intent(intent)
+    var os_config = simpleos_memory_leveling_config_default()
+    os_config.pressure_batch_limit = 7
+    if placement.preferred_tier.name != "cpu_cold" or os_config.pressure_batch_limit != 7:
+        _memory_leveling_qemu_fail("config-separation")
+        return
+    serial_println("[memory-leveling] config-separation=pass")
+
+    val manager = memory_leveling_manager_new(os_config)
+    val policy = memory_leveling_policy_from_intent(intent)
+    val allocation = manager.request(placement, policy, 4, 1, 41)
+    if not allocation.ok:
+        _memory_leveling_qemu_fail("cpu-allocation")
+        return
+    val store = memory_swap_store_new(true, 2)
+    val expected: [u8] = [17, 34, 51, 68]
+    if not manager.prepare_swap(allocation.allocation_id, 41).ok:
+        _memory_leveling_qemu_fail("swap-prepare")
+        return
+    val written = store.write(allocation.allocation_id, 0, expected)
+    if not written.ok or not manager.commit_swap(allocation.allocation_id, 41, written.slot_id).ok:
+        _memory_leveling_qemu_fail("swap-write")
+        return
+    if not manager.prepare_restore(allocation.allocation_id, 41).ok:
+        _memory_leveling_qemu_fail("restore-prepare")
+        return
+    val restored = store.read(written.slot_id, allocation.allocation_id, 0)
+    if not restored.ok or restored.bytes != expected:
+        _memory_leveling_qemu_fail("swap-bytes")
+        return
+    if not manager.commit_restore(allocation.allocation_id, 41).ok or not store.release(written.slot_id, allocation.allocation_id).ok:
+        _memory_leveling_qemu_fail("restore-commit")
+        return
+    serial_println("[memory-leveling] swap-roundtrip=pass")
+
+    if not manager.register_gpu_queue(501, 42, 4096, 0x200000).ok:
+        _memory_leveling_qemu_fail("gpu-register")
+        return
+    if not manager.device_submit(501, 42).ok or not manager.device_complete(501, 42).ok or not manager.device_unmap(501, 42).ok:
+        _memory_leveling_qemu_fail("gpu-lifecycle")
+        return
+    if memory_leveling_device_migration_unavailable(501).reason != "migration-unavailable":
+        _memory_leveling_qemu_fail("gpu-migration-truth")
+        return
+    serial_println("[memory-leveling] gpu-lifecycle=pass migration=unavailable")
+
+    var nic_config = simpleos_memory_leveling_config_default()
+    nic_config.nic_capacity_bytes = 65536
+    nic_config.nic_reserved_bytes = 0
+    val nic_manager = memory_leveling_manager_new(nic_config)
+    if not nic_manager.register_nic_buffer(601, 43, 2048, 0x210000, true).ok:
+        _memory_leveling_qemu_fail("nic-register")
+        return
+    if not nic_manager.device_submit(601, 43).ok or not nic_manager.device_complete(601, 43).ok or not nic_manager.device_unmap(601, 43).ok:
+        _memory_leveling_qemu_fail("nic-lifecycle")
+        return
+    serial_println("[memory-leveling] nic-dma-lifecycle=pass")
+
+    val capabilities = memory_leveling_qemu_capabilities()
+    if not capabilities.virtio_gpu_backing or not capabilities.virtio_nic_buffers or capabilities.gpu_physical_migration or capabilities.nic_physical_migration:
+        _memory_leveling_qemu_fail("capability-report")
+        return
+    serial_println("[memory-leveling] qemu-capabilities=pass physical-migration=unavailable")
+    serial_println("TEST PASSED")
+    rt_port_outb(0xf4, 0)
