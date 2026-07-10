@@ -43,3 +43,17 @@ hosted LLVM code cannot yet rely on array length/index syntax for those values.
 Resolve the intermittent nested `str.replace` semantic failure, then run the
 tracked native probe and strict x86_64/AArch64/RISC-V matrix without restoring
 explicit accessor calls.
+
+## Fresh Seed Follow-up
+
+A Rust seed rebuilt from current source clears the stale nested `str.replace`
+dispatcher failure and produces an x86_64 ELF span probe. The binary contains
+`rt_engine2d_simd_fill_row_u32`, `rt_engine2d_simd_fill_span_u32`, and
+`rt_array_len`, but exits `1`. Disassembly shows the dynamic imported-array
+length guard folded to constant false before any `rt_array_len` call. It also
+passes zero as the span color, but the retained probe source was subsequently
+changed, so this binary alone does not attribute that zero to a specific
+literal syntax.
+
+The next verification must preserve runtime-array length and the exact packed
+color before accepting native quality or SIMD-hit evidence.

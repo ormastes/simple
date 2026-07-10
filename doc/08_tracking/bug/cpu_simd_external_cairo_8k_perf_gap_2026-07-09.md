@@ -212,6 +212,18 @@ timing or Cairo ratio is accepted. The bounded retry cap is reached; this
 remains a build-environment/closure-load blocker rather than grounds for
 replaying the pre-routing binary.
 
+### Current-source 8K comparison
+
+The 2026-07-10 profile runs full 7680x4320 at 300dpi with no size reduction.
+The CPU-SIMD-labeled Simple path measures `2389.121ms`, uses `732768 KiB` max
+RSS, and exactly matches the scalar checksum `sum32:17761116667698048`, but
+reports `simd_provider_hits=0` and `native_simd_executed=false`. The scalar row
+is `1461.001ms`; GTK3/Cairo reports `0.032ms` draw-only and 81408 KiB RSS.
+
+This is retained failure evidence: the current lane is slower than scalar and
+does not execute native SIMD. The Cairo row measures a narrower draw-only
+operation, so its ratio is directional rather than semantic parity.
+
 ### In-place Engine2D span owner
 
 The C runtime already provided mutable fill/copy span kernels, but the Simple
