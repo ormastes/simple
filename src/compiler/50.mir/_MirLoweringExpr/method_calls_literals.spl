@@ -40,6 +40,26 @@ impl MirLowering:
         mutation because the receiver is loaded as a value copy into a
         temporary (pure-Simple equivalent of Rust seed bug #28).
         """
+        # Reclassify `Shape.Circle(7)` — parsed as a MethodCall — into enum
+        # construction when the receiver names a registered enum and `method` is
+        # one of its variants. Real static methods (method NOT a variant) fall
+        # through. Name-keyed to dodge the interpreter symbol_id_value(-1) quirk.
+        var recv_enum_name = ""
+        match receiver.kind:
+            case Var(rsym):
+                val rs = self.symbols.get_symbol(rsym)
+                if rs.?: recv_enum_name = rs.name
+            case NamedVar(_, rname):
+                recv_enum_name = rname
+            case _: ()
+        if recv_enum_name != "" and self.enum_variant_index.has(recv_enum_name):
+            var is_variant = false
+            for vn in self.enum_variant_index[recv_enum_name]:
+                if vn == method:
+                    is_variant = true
+            if is_variant:
+                return self.lower_enum_construct_named(recv_enum_name, method, args)
+
         # Handle this.index() / this.thread_index() / this.group_index() for @simd
         match receiver.kind:
             case Var(sym):

@@ -21,6 +21,31 @@ use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
 extern fn rt_env_get(key: text) -> text
 
+fn enum_variant_disc(names: [text], variant: text) -> i64:
+    """Discriminant = index of `variant` in the enum's declared variant order."""
+    var i = 0
+    while i < names.len():
+        if names[i] == variant:
+            return i
+        i = i + 1
+    -1
+
+fn enum_pat_binding_sym(payload: HirPatternPayload?) -> SymbolId?:
+    """The single payload-binding symbol of `case Circle(r):` (Tuple([Binding(r)])),
+    or nil for Unit variants / unsupported multi-field payloads."""
+    if payload.?:
+        match payload.unwrap():
+            case Tuple(patterns):
+                if patterns.len() == 1:
+                    match patterns[0].kind:
+                        case Binding(sym, _):
+                            return Some(sym)
+                        case _:
+                            ()
+            case _:
+                ()
+    nil
+
 # ============================================================================
 # Expression Lowering
 # ============================================================================
@@ -506,6 +531,194 @@ impl MirLowering:
         val boot_temp = b.new_temp(MirType.unit())
         self.builder = b
         boot_temp
+
+    me lower_enum_match(scrutinee: HirExpr, arms: [HirMatchArm]) -> LocalId:
+        """Lower `match e: case Variant(x): ...` for enum patterns. Dispatches on
+        rt_enum_discriminant(e) compared to each variant's index; binds a single
+        i64 payload via rt_enum_payload(e). Mirrors emit_if_chain_dispatch."""
+        val scrut_local = self.lower_expr(scrutinee)
+        var bd = self.builder
+        val disc_func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_discriminant"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val disc_res = bd.emit_call(disc_func, [mir_operand_copy(scrut_local)], MirType.i64())
+        self.builder = bd
+        var disc_local = LocalId(id: 0)
+        if val dl = disc_res:
+            disc_local = dl
+
+        # Collect enum arms (disc, payload-binding symbol, body) + one default.
+        var enum_discs: [i64] = []
+        var enum_binds: [SymbolId?] = []
+        var enum_bodies: [HirBlock] = []
+        var has_default = false
+        var default_body = HirBlock(stmts: [], value: nil, span: scrutinee.span)
+        var enum_name = ""
+        var ai = 0
+        while ai < arms.len():
+            val arm = arms[ai]
+            match arm.pattern.kind:
+                case Enum(etype, variant, epayload):
+                    if enum_name == "":
+                        enum_name = match etype.kind:
+                            case Named(esym, _):
+                                val s = self.symbols.get_symbol(esym)
+                                if s.?: s.name else: ""
+                            case _: ""
+                    var d: i64 = -1
+                    if self.enum_variant_index.has(enum_name):
+                        d = enum_variant_disc(self.enum_variant_index[enum_name], variant)
+                    enum_discs = enum_discs.push(d)
+                    enum_binds = enum_binds.push(enum_pat_binding_sym(epayload))
+                    enum_bodies = enum_bodies.push(arm.body)
+                case Wildcard:
+                    has_default = true
+                    default_body = arm.body
+                case Binding(_, _):
+                    has_default = true
+                    default_body = arm.body
+                case _:
+                    self.error("enum match: unsupported arm pattern", Some(arm.pattern.span))
+            ai = ai + 1
+
+        var b = self.builder
+        val result = b.new_temp(MirType.i64())
+        val merge_block = b.new_block(Some("ematch_merge"))
+        self.builder = b
+        var result_defined = false
+        var ci = 0
+        while ci < enum_discs.len():
+            var b_cmp = self.builder
+            val key_local = b_cmp.emit_const_int(enum_discs[ci])
+            val cmp_local = b_cmp.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(key_local), MirType.bool())
+            val arm_block = b_cmp.new_block(Some("ematch_arm"))
+            val next_block = b_cmp.new_block(Some("ematch_next"))
+            b_cmp.terminate_if(mir_operand_copy(cmp_local), arm_block, next_block)
+            self.builder = b_cmp
+            var b_arm = self.builder
+            b_arm.switch_to_block(arm_block)
+            self.builder = b_arm
+            val bind_sym = enum_binds[ci]
+            if bind_sym.?:
+                var bp = self.builder
+                val pf = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_enum_payload"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val pr = bp.emit_call(pf, [mir_operand_copy(scrut_local)], MirType.i64())
+                self.builder = bp
+                if val pl = pr:
+                    self.local_map[bind_sym.unwrap().id] = pl
+            val arm_result = self.lower_block(enum_bodies[ci])
+            var b_arm2 = self.builder
+            if val arm_result_local = arm_result:
+                b_arm2.emit_copy(result, arm_result_local)
+                result_defined = true
+            # Guard: if the arm body already terminated (e.g. `return r`), do NOT
+            # overwrite that terminator with a goto (set_terminator clobbers).
+            if not b_arm2.current_block_has_explicit_terminator():
+                b_arm2.terminate_goto(merge_block)
+            self.builder = b_arm2
+            var b_n = self.builder
+            b_n.switch_to_block(next_block)
+            self.builder = b_n
+            ci = ci + 1
+
+        if has_default:
+            val dres = self.lower_block(default_body)
+            var b_d2 = self.builder
+            if val drl = dres:
+                b_d2.emit_copy(result, drl)
+                result_defined = true
+            self.builder = b_d2
+        var b_end = self.builder
+        if not b_end.current_block_has_explicit_terminator():
+            b_end.terminate_goto(merge_block)
+        self.builder = b_end
+
+        var b_m = self.builder
+        b_m.switch_to_block(merge_block)
+        if not result_defined:
+            b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
+        self.builder = b_m
+        result
+
+    me lower_enum_lit(type_: HirType, variant: text, payload: HirEnumPayload?) -> LocalId:
+        """Lower `Shape.Circle(7)` to `rt_enum_new(enum_id, discriminant, payload)`.
+        Discriminant = variant index (declared order). Payload = single i64 tuple
+        value or 0 for Unit variants. Only registered (module.enums) enums are
+        handled here — Option/Result use a separate path and fall through."""
+        val enum_name = match type_.kind:
+            case Named(symbol, _):
+                val s = self.symbols.get_symbol(symbol)
+                if s.?: s.name else: ""
+            case _: ""
+        if not self.enum_variant_index.has(enum_name):
+            self.error("enum construction: unregistered enum '{enum_name}'", nil)
+            var be = self.builder
+            val te = be.new_temp(MirType.i64())
+            self.builder = be
+            return te
+        val variant_names = self.enum_variant_index[enum_name]
+        val disc = enum_variant_disc(variant_names, variant)
+        var b = self.builder
+        val enum_id_local = b.emit_const_int(0)
+        val disc_local = b.emit_const_int(disc)
+        self.builder = b
+        var payload_local = LocalId(id: 0)
+        var has_payload = false
+        if payload.?:
+            match payload.unwrap():
+                case Tuple(values):
+                    if values.len() > 0:
+                        payload_local = self.lower_expr(values[0])
+                        has_payload = true
+                case _:
+                    ()
+        if not has_payload:
+            var bz = self.builder
+            payload_local = bz.emit_const_int(0)
+            self.builder = bz
+        val func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b2 = self.builder
+        val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
+        self.builder = b2
+        if val r = result:
+            return r
+        payload_local
+
+    me lower_enum_construct_named(enum_name: text, variant: text, args: [HirCallArg]) -> LocalId:
+        """Same as lower_enum_lit but entered from the MethodCall path, where
+        `Shape.Circle(7)` arrives as receiver=`Shape`, method=`Circle`. The enum
+        is known by NAME (registered in enum_variant_index); the single tuple
+        payload is args[0] (0 for Unit variants)."""
+        val variant_names = self.enum_variant_index[enum_name]
+        val disc = enum_variant_disc(variant_names, variant)
+        var b = self.builder
+        val enum_id_local = b.emit_const_int(0)
+        val disc_local = b.emit_const_int(disc)
+        self.builder = b
+        var payload_local = LocalId(id: 0)
+        if args.len() > 0:
+            payload_local = self.lower_expr(args[0].value)
+        else:
+            var bz = self.builder
+            payload_local = bz.emit_const_int(0)
+            self.builder = bz
+        val func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b2 = self.builder
+        val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
+        self.builder = b2
+        if val r = result:
+            return r
+        payload_local
 
     me lower_struct_construct(symbol: SymbolId, struct_name: text, args: [HirCallArg]) -> LocalId:
         """Lower `Point(x:3, y:4)` (or `Point{...}`) into an aggregate: one i64
