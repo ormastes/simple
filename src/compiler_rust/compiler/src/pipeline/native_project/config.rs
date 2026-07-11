@@ -51,8 +51,11 @@ fn is_compiler_like_entry(path: &Path) -> bool {
 }
 
 fn is_bootstrap_main_entry(path: &Option<PathBuf>) -> bool {
-    std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1")
-        && path.as_ref().and_then(|p| p.file_name()).and_then(|name| name.to_str()) == Some("bootstrap_main.spl")
+    path.as_ref().and_then(|p| p.file_name()).and_then(|name| name.to_str()) == Some("bootstrap_main.spl")
+}
+
+fn force_native_all() -> bool {
+    std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1")
 }
 
 fn runtime_path_has_abi_complete_simple_core(runtime_path: Option<&Path>) -> bool {
@@ -158,7 +161,7 @@ impl NativeProjectBuilder {
         selected_runtime: Option<&(PathBuf, bool)>,
     ) -> Result<(), String> {
         if let Some((runtime_lib, true)) = selected_runtime {
-            if is_bootstrap_main_entry(&self.entry_file) {
+            if is_bootstrap_main_entry(&self.entry_file) || force_native_all() {
                 return Ok(());
             }
             let entry = self
@@ -195,7 +198,7 @@ impl NativeProjectBuilder {
             "libsimple_runtime.a"
         };
 
-        if is_bootstrap_main_entry(&self.entry_file) {
+        if is_bootstrap_main_entry(&self.entry_file) || force_native_all() {
             if let Some(ref rp) = self.config.runtime_path {
                 let native_all = rp.join(native_all_name);
                 if native_all.exists() {

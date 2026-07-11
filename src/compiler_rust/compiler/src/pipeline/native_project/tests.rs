@@ -758,6 +758,45 @@ fn test_runtime_bundle_auto_prefers_core_c_for_compiler_entry() {
 }
 
 #[test]
+fn test_bootstrap_main_selects_native_all_without_env_flag() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&native_all, b"all").unwrap();
+
+    let config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    let mut builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple"))
+        .config(config);
+    builder.entry_file = Some(PathBuf::from("/project/src/app/cli/bootstrap_main.spl"));
+
+    assert_eq!(builder.selected_runtime_library(temp.path()).unwrap(), Some((native_all, true)));
+}
+
+#[test]
+fn test_force_whole_archive_selects_native_all() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&native_all, b"all").unwrap();
+    unsafe { std::env::set_var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE", "1") };
+
+    let config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    let mut builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple"))
+        .config(config);
+    builder.entry_file = Some(PathBuf::from("/project/src/app/cli/main.spl"));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap();
+    unsafe { std::env::remove_var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE") };
+
+    assert_eq!(selected, Some((native_all, true)));
+}
+
+#[test]
 fn test_runtime_bundle_auto_prefers_core_c_for_compiler_source_root() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
