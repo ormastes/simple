@@ -531,6 +531,24 @@ fn _js_parser_decode_string_literal(raw: text) -> text:
             else:
                 out = out + esc
                 i = i + 2
+        else if esc == "x" and i + 3 < raw.len():
+            val h0 = _js_parser_hex_digit(raw.slice(i + 2, i + 3))
+            val h1 = _js_parser_hex_digit(raw.slice(i + 3, i + 4))
+            if h0 >= 0 and h1 >= 0:
+                out = out + ((h0 << 4) | h1).chr()
+                i = i + 4
+            else:
+                out = out + esc
+                i = i + 2
+        else if esc == "b":
+            out = out + 8.chr()
+            i = i + 2
+        else if esc == "f":
+            out = out + 12.chr()
+            i = i + 2
+        else if esc == "v":
+            out = out + 11.chr()
+            i = i + 2
         else:
             out = out + esc
             i = i + 2
@@ -635,15 +653,46 @@ impl JsParser:
     me parse_assignment() -> Result<JsExpression, JsError>:
         Ok(_js_parser_expression(self.source))
 
+fn _js_bal_is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_" or c == "$"
+
+# Returns true if a `/` at the current position begins a regex literal rather
+# than a division operator, based on the previous significant (non-space,
+# non-comment) character `prev` and any trailing keyword captured in `prev_word`.
+fn _js_regex_context(prev: text, prev_word: text) -> bool:
+    if prev == "":
+        return true
+    # A regex may begin after an operator, an opening delimiter, or certain
+    # punctuation — but not after a value (identifier, number, string, `)`, `]`).
+    if (prev == "(" or prev == "," or prev == "=" or prev == ":" or prev == "["
+        or prev == "!" or prev == "&" or prev == "|" or prev == "?"
+        or prev == "{" or prev == "}" or prev == ";" or prev == "+"
+        or prev == "-" or prev == "*" or prev == "%" or prev == "<"
+        or prev == ">" or prev == "~" or prev == "^" or prev == "/"):
+        return true
+    # Keywords that expect an expression next (so `/` starts a regex).
+    if (prev_word == "return" or prev_word == "typeof" or prev_word == "instanceof"
+        or prev_word == "in" or prev_word == "of" or prev_word == "new"
+        or prev_word == "delete" or prev_word == "void" or prev_word == "do"
+        or prev_word == "else" or prev_word == "yield" or prev_word == "case"
+        or prev_word == "throw"):
+        return true
+    false
+
 # Fail-fast structural gate for eval: the subset expression parser recurses on
 # malformed input and unbalanced delimiters can make it effectively hang.
-# Scans outside string literals ('..' ".." `..`) and // and /* */ comments.
+# Scans outside string literals ('..' ".." `..`), // and /* */ comments, and
+# regex literals (/.../ — whose parens/brackets are not structural).
 pub fn js_source_delimiters_balanced(source: text) -> bool:
     val n = source.len()
     var paren = 0
     var bracket = 0
     var brace = 0
     var i = 0
+    # Previous significant character and, when it terminates an identifier, the
+    # word itself (for keyword-preceded regex literals like `return /re/`).
+    var prev = ""
+    var prev_word = ""
     while i < n:
         val c = source[i]
         if c == "'" or c == "\"" or c == "`":
@@ -656,14 +705,46 @@ pub fn js_source_delimiters_balanced(source: text) -> bool:
                 if source[i] == quote:
                     break
                 i = i + 1
+            prev = quote
+            prev_word = ""
+            i = i + 1
+            continue
         elif c == "/" and i + 1 < n and source[i + 1] == "/":
             while i < n and source[i] != "\n":
                 i = i + 1
+            continue
         elif c == "/" and i + 1 < n and source[i + 1] == "*":
             i = i + 2
             while i + 1 < n and not (source[i] == "*" and source[i + 1] == "/"):
                 i = i + 1
+            i = i + 2
+            continue
+        elif c == "/" and _js_regex_context(prev, prev_word):
+            # Regex literal: skip to the unescaped closing `/`, treating `[...]`
+            # character classes as regions where `/` does not close the literal.
             i = i + 1
+            var in_class = false
+            while i < n:
+                val rc = source[i]
+                if rc == "\\":
+                    i = i + 2
+                    continue
+                if rc == "[":
+                    in_class = true
+                elif rc == "]":
+                    in_class = false
+                elif rc == "/" and not in_class:
+                    break
+                elif rc == "\n":
+                    break  # Unterminated regex — stop regex scan.
+                i = i + 1
+            prev = "/"
+            prev_word = ""
+            i = i + 1
+            continue
+        elif c == " " or c == "\t" or c == "\n" or c == "\r":
+            i = i + 1
+            continue
         elif c == "(":
             paren = paren + 1
         elif c == ")":
@@ -678,5 +759,11 @@ pub fn js_source_delimiters_balanced(source: text) -> bool:
             brace = brace - 1
         if paren < 0 or bracket < 0 or brace < 0:
             return false
+        # Track the previous significant char / identifier word.
+        prev = c
+        if _js_bal_is_ident_char(c):
+            prev_word = prev_word + c
+        else:
+            prev_word = ""
         i = i + 1
     paren == 0 and bracket == 0 and brace == 0
