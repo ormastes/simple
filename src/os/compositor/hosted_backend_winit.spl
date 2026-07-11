@@ -1,4 +1,5 @@
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 
 extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
 extern fn rt_winit_buffer_fill_rect(buf: i64, x: i32, y: i32, w: i32, h: i32, color: i64) -> bool
@@ -13,9 +14,10 @@ class HostedWinitBufferBackend:
     w: i32
     h: i32
     present_count: i64
+    pixels: [u32]
 
     static fn new(window_id: i64, buffer_id: i64, w: i32, h: i32) -> HostedWinitBufferBackend:
-        HostedWinitBufferBackend(window_id: window_id, buffer_id: buffer_id, w: w, h: h, present_count: 0)
+        HostedWinitBufferBackend(window_id: window_id, buffer_id: buffer_id, w: w, h: h, present_count: 0, pixels: [0u32; w * h])
 
     static fn create(window_id: i64, w: i32, h: i32, clear_color: u32) -> HostedWinitBufferBackend?:
         if window_id <= 0 or w <= 0 or h <= 0:
@@ -27,6 +29,9 @@ class HostedWinitBufferBackend:
 
     static fn implementation_name() -> text:
         "winit-buffer-simple-web"
+
+    fn get_pixel_buffer() -> [u32]:
+        self.pixels
 
     me free():
         if self.buffer_id > 0:
@@ -44,14 +49,41 @@ impl CompositorBackend for HostedWinitBufferBackend:
     me clear(color: u32):
         if self.buffer_id > 0:
             rt_winit_buffer_fill_rect(self.buffer_id, 0, 0, self.w, self.h, color.to_i64())
+            self.pixels = [color; self.w * self.h]
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.buffer_id > 0:
             rt_winit_buffer_fill_rect(self.buffer_id, x, y, w, h, color.to_i64())
+            var row = 0
+            while row < h:
+                var col = 0
+                while col < w:
+                    val px = x + col
+                    val py = y + row
+                    if px >= 0 and py >= 0 and px < self.w and py < self.h:
+                        self.pixels[py * self.w + px] = color
+                    col = col + 1
+                row = row + 1
 
     me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
         if self.buffer_id > 0:
             rt_winit_buffer_draw_text(self.buffer_id, x, y, text_str, fg.to_i64(), bg.to_i64())
+            var cx = x
+            for ch in text_str:
+                val glyph = get_glyph_8x16(ch.char_code_at(0).to_u8())
+                var row = 0
+                while row < 16:
+                    val bits = glyph[row]
+                    var col = 0
+                    while col < 8:
+                        val px = cx + col
+                        val py = y + row
+                        if px >= 0 and py >= 0 and px < self.w and py < self.h:
+                            val mask = (0x80 >> col).to_u8()
+                            self.pixels[py * self.w + px] = if (bits & mask) != 0u8: fg else: bg
+                        col = col + 1
+                    row = row + 1
+                cx = cx + 8
 
     me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
         self.draw_text(x, y, "{ch}", fg, bg)
@@ -62,6 +94,17 @@ impl CompositorBackend for HostedWinitBufferBackend:
     me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if self.buffer_id > 0:
             rt_winit_buffer_blit_pixels(self.buffer_id, x, y, w, h, pixels)
+            var row = 0
+            while row < h:
+                var col = 0
+                while col < w:
+                    val src = row * w + col
+                    val px = x + col
+                    val py = y + row
+                    if src >= 0 and src < pixels.len() and px >= 0 and py >= 0 and px < self.w and py < self.h:
+                        self.pixels[py * self.w + px] = pixels[src]
+                    col = col + 1
+                row = row + 1
 
     me present():
         if self.window_id > 0 and self.buffer_id > 0:

@@ -201,33 +201,38 @@ expect(compositor.surfaces[0].session.body_html).to_contain("https://example.tes
 
 </details>
 
-#### keeps the 2D desktop overlay behind the shared CompositorBackend surface
+#### renders the live rich scene behind the shared CompositorBackend surface
 
 1. var backend =  backend
 
-2.  draw baremetal overlay
+2. Render the revision-matched Simple Web frame through the shared WM scene renderer
    - Expected: fill_seen equals `1`
    - Expected: text_seen equals `1`
    - Expected: backend.present_count equals `0`
-   - Expected: backend.last_text equals `12:34`
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var backend = _backend(800, 600)
-_draw_baremetal_overlay(backend, ["Editor"], ["7501 Editor running"], 0, 800, 600, "12:34")
+val window = simple_gui_internal_window(
+    "surface-41", "41", 7001u64, "editor", "Live Editor",
+    80, 70, 420, 300, "document=notes.spl", false, true, 0
+)
+val scene = simple_gui_internal_window_scene(800, 600, "simpleos-compositor", [window])
+val pixels = _solid_pixels(412 * 264, 0xFF102030u32)
+val frame = WmContentFrame(window_id: "41", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 412, height: 264, pixels: pixels, checksum: 1u64)
+render_baremetal_shared_wm_scene(backend, scene, empty_taskbar_model(), [frame], 7, 9, "12:34")
 
 val fill_seen = if backend.fill_count > 0: 1 else: 0
 val text_seen = if backend.text_count > 0: 1 else: 0
 expect(fill_seen).to_equal(1)
 expect(text_seen).to_equal(1)
 expect(backend.present_count).to_equal(0)
-expect(backend.last_text).to_equal("12:34")
 ```
 
 </details>

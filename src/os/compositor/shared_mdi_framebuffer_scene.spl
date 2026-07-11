@@ -2,11 +2,15 @@
 
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.shared_mdi_setup.{shared_mdi_surfaces}
-use common.ui.window_scene.{SharedWmScene, SharedWmWindow, simple_gui_internal_window, simple_gui_internal_window_scene}
+use common.ui.window_scene.{WM_CHROME_KIND_BORDERLESS, SharedWmScene, SharedWmWindow, SharedWmRenderInput, SharedWmTaskbarRenderInput, simple_gui_internal_window, simple_gui_internal_window_scene}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
+# Compatibility exports below still serve hosted/QEMU evidence callers. The
+# production SimpleOS shell now projects its live compositor directly and does
+# not seed windows through this module.
 use common.ui.window_scene_draw_ir.{
     shared_wm_scene_render_to_backend,
+    shared_wm_scene_render_taskbar_context_to_backend,
     shared_wm_scene_render_desktop_chrome,
     shared_wm_scene_draw_window_chrome,
     shared_wm_scene_render_taskbar,
@@ -329,6 +333,9 @@ fn draw_shared_mdi_taskbar(backend: CompositorBackend, windows: [SharedMdiRender
 fn render_shared_mdi_app_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
     shared_wm_scene_render_app_content(backend, title, cx, cy, cw, ch, state_text)
 
+# Deprecated compatibility API. Remaining callers render canonical seed/demo
+# surfaces that do not yet produce revisioned WmContentFrame values:
+# render_shared_mdi_framebuffer_scene_for_windows and lifecycle wrappers.
 fn render_shared_mdi_windows_to_backend(backend: CompositorBackend, windows: [SharedMdiRenderWindow], width: i32, height: i32):
     shared_wm_scene_render_to_backend(backend, _shared_mdi_scene_from_render_windows(width, height, "legacy-render-windows-to-backend", windows))
 
@@ -346,12 +353,17 @@ fn render_shared_mdi_framebuffer_scene(width: i32, height: i32, backend_kind: te
 # to animate through this API no matter what a future caller wired up
 # upstream — a caller with real time access must be able to reach the
 # resolver, not just tests constructing a SharedWmScene directly.
+# Deprecated compatibility API for shared MDI seed/evidence and lifecycle
+# callers. New production callers must construct SharedWmTaskbarRenderInput and
+# call render_shared_mdi_framebuffer_scene_for_taskbar_render_input.
 fn render_shared_mdi_framebuffer_scene_for_windows(width: i32, height: i32, backend_kind: text, windows: [SharedMdiRenderWindow], t_micros: i64 = 0) -> SharedMdiFramebufferScene:
     render_shared_mdi_framebuffer_scene_for_simple_gui_scene(_shared_mdi_scene_from_render_windows(width, height, backend_kind, windows), t_micros)
 
 # `t_micros` (default 0) is consumed only by a kind:"motion" scene background
 # (common.ui.window_scene_draw_ir / shared_wm_scene_resolve_background); every
 # existing caller keeps byte-identical output.
+# Deprecated compatibility API: title-derived canned content remains here only
+# for render_shared_mdi_framebuffer_scene_for_windows and direct legacy tests.
 fn render_shared_mdi_framebuffer_scene_for_simple_gui_scene(scene: SharedWmScene, t_micros: i64 = 0) -> SharedMdiFramebufferScene:
     val theme = wm_chrome_theme()
     val backend = SharedMdiFramebufferBackend.create(scene.width, scene.height, theme.compositor_bg)
@@ -366,6 +378,40 @@ fn render_shared_mdi_framebuffer_scene_for_simple_gui_scene(scene: SharedWmScene
         backend_kind: scene.backend,
         fallback_reason: "",
         readback_status: "unavailable:qemu-framebuffer-write-only"
+    )
+
+# Production framebuffer entry point. Unlike the compatibility wrappers above,
+# this consumes revision-validated Simple Web frames and the authoritative
+# taskbar object model through the rich common.ui executor.
+fn render_shared_mdi_framebuffer_scene_for_taskbar_render_input(input: SharedWmTaskbarRenderInput) -> SharedMdiFramebufferScene:
+    val scene = input.render.scene
+    val theme = wm_chrome_theme()
+    val backend = SharedMdiFramebufferBackend.create(scene.width, scene.height, theme.compositor_bg)
+    val stats = shared_wm_scene_render_taskbar_context_to_backend(backend, input)
+    backend.web_pixel_count = stats.content_pixel_count
+
+    var expected_content_pixel_count: i64 = 0
+    for window in scene.windows:
+        if not window.minimized:
+            val content_width = if window.chrome_kind == WM_CHROME_KIND_BORDERLESS: window.width else: window.width - 8
+            val titlebar_height = if input.render.metrics.titlebar_height > 0: input.render.metrics.titlebar_height else: 28
+            val content_height = if window.chrome_kind == WM_CHROME_KIND_BORDERLESS: window.height else: window.height - titlebar_height - 8
+            if content_width > 0 and content_height > 0:
+                expected_content_pixel_count = expected_content_pixel_count + content_width.to_i64() * content_height.to_i64()
+
+    val fallback_reason = if stats.content_pixel_count == expected_content_pixel_count:
+        ""
+    else:
+        "rejected-invalid-simple-web-content-frame"
+    SharedMdiFramebufferScene(
+        width: scene.width,
+        height: scene.height,
+        pixels: backend.pixels,
+        surface_count: scene.windows.len(),
+        web_pixel_count: stats.content_pixel_count,
+        backend_kind: scene.backend,
+        fallback_reason: fallback_reason,
+        readback_status: "verified:cpu-framebuffer-mirror"
     )
 
 fn render_shared_mdi_framebuffer_scene_for_lifecycle_windows(width: i32, height: i32, backend_kind: text, windows: [WmLifecycleWindowState]) -> SharedMdiFramebufferScene:

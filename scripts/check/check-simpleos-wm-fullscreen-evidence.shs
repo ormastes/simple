@@ -16,11 +16,14 @@ FULLSCREEN_PPM="$BUILD_DIR/fullscreen.ppm"
 RESTORED_PPM="$BUILD_DIR/restored.ppm"
 FULLSCREEN_RAW="$FULLSCREEN_PPM.raw"
 RESTORED_RAW="$RESTORED_PPM.raw"
+BASELINE_PPM="$BUILD_DIR/baseline.ppm"
+BASELINE_RAW="$BASELINE_PPM.raw"
 QEMU_PID=""
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$LAUNCH_OUT" "$SERIAL_LOG" "$QMP_SOCKET" "$CAPTURE_OUT" \
-    "$FULLSCREEN_PPM" "$RESTORED_PPM" "$FULLSCREEN_RAW" "$RESTORED_RAW" \
+    "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" \
+    "$BASELINE_RAW" "$FULLSCREEN_RAW" "$RESTORED_RAW" \
     "$BUILD_DIR/evidence.env"
 
 is_rust_seed_simple() {
@@ -43,9 +46,10 @@ else
     SIMPLE_BIN=""
     SIMPLE_BIN_SOURCE=missing
     for candidate in \
+        "$ROOT_DIR"/build/bootstrap/stage3/*/simple \
+        "$ROOT_DIR"/build/bootstrap/stage2/*/simple \
         "$ROOT_DIR"/bin/release/*/simple \
         "$ROOT_DIR"/release/*/simple \
-        "$ROOT_DIR"/build/bootstrap/stage3/simple \
         "$ROOT_DIR"/bin/simple
     do
         if [ -f "$candidate" ]; then
@@ -153,7 +157,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 1
 fi
 
-ENTRY="examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
 LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
 KERNEL_OUTPUT="build/os/simpleos_wm_simple_web_check_32.elf"
 
@@ -164,7 +168,14 @@ fi
 
 # Build the kernel (same flow as os.qemu_runner.build_os for the
 # wm-simple-web check target) unless a fresh artifact already exists.
-if [ ! -f "$KERNEL_OUTPUT" ] || [ "$ENTRY" -nt "$KERNEL_OUTPUT" ]; then
+kernel_stale=false
+if [ ! -f "$KERNEL_OUTPUT" ]; then
+    kernel_stale=true
+elif find src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64 \
+    -type f -name '*.spl' -newer "$KERNEL_OUTPUT" -print -quit | grep -q .; then
+    kernel_stale=true
+fi
+if [ "$kernel_stale" = true ]; then
     mkdir -p build/os/generated/generated
     cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
 val SIMPLEOS_LOG_COMPILED: bool = false
@@ -177,7 +188,7 @@ fn simpleos_log_compile_mode_name() -> text:
         return "on"
     "off"
 SPL
-    # gui_entry_engine2d.spl is a baremetal wrapper profile target
+    # gui_entry_desktop.spl is the production baremetal desktop target
     # (os.qemu_runner._needs_freestanding_stub_env /
     # _uses_baremetal_wrapper_profile): it needs freestanding stub linking
     # plus an llvm-objcopy on PATH for the ELF32 wrap step.
@@ -193,9 +204,9 @@ SPL
     SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
     PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
         "$SIMPLE_BIN" native-build \
-        --source build/os/generated --source src/os --source src/lib \
-        --source examples/09_embedded/simple_os/arch/x86_64 \
+        --source build/os/generated --source "$ENTRY" \
         --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+        --cache-dir build/mini_cache_simpleos_wm --mode dynload \
         --entry-closure --entry "$ENTRY" \
         --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
         --linker-script "$LINKER_SCRIPT" \
@@ -210,31 +221,54 @@ fi
 
 rm -f "$QMP_SOCKET" "$SERIAL_LOG"
 
+DISK_IMAGE="${SIMPLEOS_WM_DISK_IMAGE:-build/os/fat32-x86_64.img}"
+if [ ! -f "$DISK_IMAGE" ]; then
+    emit_failure "production-fat32-disk-missing"
+    exit 1
+fi
+
 # Launch QEMU directly with the exact wm-simple-web QMP-capture flags used by
-# os.qemu_runner._wm_simple_web_qmp_capture_target(): q35/qemu64/2G, serial
+# os.qemu_runner._wm_simple_web_qmp_capture_target(): q35/max/2G, serial
 # routed to a file, no display, BGA std VGA, QMP over a unix socket.
 qemu-system-x86_64 \
     -no-user-config -monitor none -net none \
-    -machine q35 -cpu qemu64 -m 2G \
+    -machine q35 -cpu max -m 2G \
     -serial "file:$SERIAL_LOG" \
     -display none \
     -no-reboot \
     -kernel "$KERNEL_OUTPUT" \
     -vga std \
+    -drive "file=$DISK_IMAGE,if=none,id=nvm,format=raw" \
+    -device "nvme,serial=deadbeef,drive=nvm" \
     -qmp "unix:$QMP_SOCKET,server,nowait" \
     >"$LAUNCH_OUT" 2>&1 &
 QEMU_PID=$!
 
-status=unavailable
+status=fail
 reason=not-run
-fullscreen_marker=""
-exit_marker=""
-fullscreen_size=""
-fullscreen_w=0
-fullscreen_h=0
+scanout_marker=""
+scanout_address=""
+scanout_width=0
+scanout_height=0
+scanout_stride=0
+scanout_pixel_format=""
+scanout_generation=0
+scanout_size=0
+input_nonce="simpleos-wm-$(date +%s)-$$"
+input_submit_marker=""
+input_irq_marker=""
+input_state_marker=""
+input_frame_marker=""
+restore_irq_marker=""
+restore_state_marker=""
+restore_frame_marker=""
+baseline_seq=0
+maximize_seq=0
+restore_seq=0
 changed_bytes=0
 before_sha256=
 after_sha256=
+restored_sha256=
 
 # Wait for the QMP socket.
 waited=0
@@ -251,11 +285,18 @@ if [ ! -S "$QMP_SOCKET" ]; then
 elif ! kill -0 "$QEMU_PID" 2>/dev/null; then
     reason="qemu-exited-early"
 else
-    # Wait for the fullscreen-enter marker (window maximized, holding).
+    # The guest marker is the only source of scanout metadata. No BGA address,
+    # dimensions, pitch, format, or generation defaults are accepted here.
     waited=0
     while [ "$waited" -le 60000 ]; do
-        fullscreen_marker="$(marker_line "$SERIAL_LOG" "[wm-demo] fullscreen-enter")"
-        if [ -n "$fullscreen_marker" ]; then
+        serial_bytes="$(wc -c <"$SERIAL_LOG" 2>/dev/null || echo 0)"
+        if [ "$serial_bytes" -gt 1048576 ]; then
+            reason="guest-serial-fault-storm"
+            break
+        fi
+        scanout_marker="$(marker_line "$SERIAL_LOG" "[scanout-evidence]")"
+        ready_marker="$(marker_line "$SERIAL_LOG" "[production-readiness]")"
+        if [ -n "$scanout_marker" ] && [ -n "$ready_marker" ]; then
             break
         fi
         if ! kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -265,51 +306,139 @@ else
         waited=$((waited + 100))
     done
 
-    if [ -z "$fullscreen_marker" ]; then
-        reason="fullscreen-enter-marker-missing"
-    else
-        fullscreen_size="$(marker_field "$fullscreen_marker" size)"
-        fullscreen_w="$(printf '%s' "$fullscreen_size" | sed -n 's/^\([0-9]*\)x[0-9]*$/\1/p')"
-        fullscreen_h="$(printf '%s' "$fullscreen_size" | sed -n 's/^[0-9]*x\([0-9]*\)$/\1/p')"
+    scanout_address="$(marker_field "$scanout_marker" address)"
+    scanout_width="$(marker_field "$scanout_marker" width)"
+    scanout_height="$(marker_field "$scanout_marker" height)"
+    scanout_stride="$(marker_field "$scanout_marker" stride)"
+    scanout_pixel_format="$(marker_field "$scanout_marker" pixel_format)"
+    scanout_generation="$(marker_field "$scanout_marker" generation)"
 
-        # Capture the maximized framebuffer immediately via QMP pmemsave.
+    case "$scanout_address:$scanout_width:$scanout_height:$scanout_stride:$scanout_generation" in
+        *[!0-9:]*|:*|*::*|*:) metadata_valid=false ;;
+        *) metadata_valid=true ;;
+    esac
+    if [ "$reason" = "guest-serial-fault-storm" ]; then
+        :
+    elif [ -z "$scanout_marker" ] || [ -z "${ready_marker:-}" ]; then
+        reason="dynamic-scanout-or-desktop-readiness-missing"
+    elif [ "$metadata_valid" != true ] || [ "$scanout_address" -le 0 ] || \
+         [ "$scanout_width" -le 0 ] || [ "$scanout_height" -le 0 ] || \
+         [ "$scanout_stride" -le 0 ] || [ "$scanout_generation" -le 0 ] || \
+         [ -z "$scanout_pixel_format" ]; then
+        reason="dynamic-scanout-metadata-invalid"
+    elif [ "$scanout_width" -gt 16384 ] || [ "$scanout_height" -gt 16384 ] || \
+         [ "$scanout_stride" -lt $((scanout_width * 4)) ] || \
+         [ $((scanout_stride % 4)) -ne 0 ]; then
+        reason="dynamic-scanout-bounds-or-byte-pitch-invalid"
+    else
+        scanout_size=$((scanout_stride * scanout_height))
+        scanout_end=$((scanout_address + scanout_size))
+        if [ "$scanout_size" -le 0 ] || [ "$scanout_end" -le "$scanout_address" ] || \
+           [ "$scanout_end" -gt 68719476736 ]; then
+            reason="dynamic-scanout-address-range-invalid"
+        else
+        # Capture baseline, inject two F11 make/break pairs, and map the host
+        # nonce to the guest's newly observed monotonic input sequences.
         set +e
-        python3 - "$QMP_SOCKET" "$FULLSCREEN_PPM" >"$CAPTURE_OUT" 2>&1 <<'PY'
+        python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" "$scanout_address" "$scanout_width" "$scanout_height" "$scanout_stride" "$scanout_pixel_format" "$scanout_size" "$input_nonce" >"$CAPTURE_OUT" 2>&1 <<'PY'
+import hashlib
 import json
 import os
+import re
 import socket
 import sys
 import time
 
-sock_path, ppm_path = sys.argv[1], sys.argv[2]
-raw_path = ppm_path + ".raw"
+sock_path, serial_path = sys.argv[1], sys.argv[2]
+baseline_ppm, fullscreen_ppm, restored_ppm = sys.argv[3], sys.argv[4], sys.argv[5]
+address, width, height, pitch = map(int, sys.argv[6:10])
+pixel_format, size, nonce = sys.argv[10], int(sys.argv[11]), sys.argv[12]
+
+qmp_id = [0]
 
 def write_qmp(f, obj):
+    qmp_id[0] += 1
+    request_id = qmp_id[0]
+    obj["id"] = request_id
     f.write(json.dumps(obj).encode() + b"\n")
     f.flush()
-    return f.readline()
+    while True:
+        line = f.readline()
+        if not line:
+            raise RuntimeError("qmp-connection-closed")
+        reply = json.loads(line)
+        if reply.get("id") != request_id:
+            continue
+        if "error" in reply:
+            raise RuntimeError(str(reply["error"]))
+        if "return" not in reply:
+            raise RuntimeError("qmp-command-unacknowledged")
+        return reply
 
 def hmp(f, cmd):
     return write_qmp(f, {"execute": "human-monitor-command", "arguments": {"command-line": cmd}})
 
 def wait_raw(path):
     for _ in range(100):
-        if os.path.exists(path) and os.path.getsize(path) >= 3145728:
+        if os.path.exists(path) and os.path.getsize(path) == size:
             return True
         time.sleep(0.1)
     return False
 
-def pmem(f, raw_path, ppm_path):
-    hmp(f, 'pmemsave 0xfd000000 3145728 "%s"' % raw_path)
+def pmem(f, ppm_path):
+    raw_path = ppm_path + ".raw"
+    try:
+        os.unlink(raw_path)
+    except FileNotFoundError:
+        pass
+    reply = hmp(f, 'pmemsave %d %d "%s"' % (address, size, raw_path))
+    if reply.get("return", "") != "":
+        raise RuntimeError("pmemsave rejected: %r" % reply)
     ok = wait_raw(raw_path)
     data = open(raw_path, "rb").read() if ok else b""
-    if len(data) == 3145728:
+    if len(data) == size:
         pix = bytearray()
-        for i in range(0, 1024 * 768 * 4, 4):
-            pix.extend([data[i + 2], data[i + 1], data[i]])
+        if pixel_format != "argb8888":
+            raise RuntimeError("unsupported pixel format: " + pixel_format)
+        for y in range(height):
+            row = y * pitch
+            for x in range(width):
+                i = row + x * 4
+                pix.extend([data[i + 2], data[i + 1], data[i]])
         with open(ppm_path, "wb") as out:
-            out.write(b"P6\n1024 768\n255\n" + bytes(pix))
+            out.write(("P6\n%d %d\n255\n" % (width, height)).encode() + bytes(pix))
     return data
+
+def serial_text():
+    try:
+        return open(serial_path, "r", errors="replace").read()
+    except OSError:
+        return ""
+
+def max_input_seq():
+    values = [int(v) for v in re.findall(r"\[wm-frame\] input_seq=(\d+) generation=\d+", serial_text())]
+    return max(values) if values else 0
+
+def wait_correlation(after_seq, action, expected_window=None):
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        text = serial_text()
+        seqs = sorted({int(v) for v in re.findall(r"\[wm-input-irq\] input_seq=(\d+) scancode=87(?:\r?$)", text, re.M) if int(v) > after_seq})
+        for seq in seqs:
+            irq = re.search(r"^\[wm-input-irq\] input_seq=%d scancode=87\r?$" % seq, text, re.M)
+            state = re.search(r"^\[wm-state\] input_seq=%d action=%s window=(\d+) maximized=(?:true|false)\r?$" % (seq, action), text, re.M)
+            frame = re.search(r"^\[wm-frame\] input_seq=%d generation=(\d+)\r?$" % seq, text, re.M)
+            if irq and state and frame and int(frame.group(1)) > 0:
+                window_id = int(state.group(1))
+                if window_id <= 0 or (expected_window is not None and window_id != expected_window):
+                    continue
+                return seq, window_id, irq.group(0), state.group(0), frame.group(0)
+        time.sleep(0.05)
+    raise RuntimeError("guest-input-irq-state-frame-correlation-missing action=" + action)
+
+def send_f11(f):
+    events = [{"type":"key","data":{"down":down,"key":{"type":"qcode","data":"f11"}}} for down in (True, False)]
+    write_qmp(f, {"execute":"input-send-event", "arguments":{"events":events}})
 
 s = socket.socket(socket.AF_UNIX)
 s.settimeout(5)
@@ -317,129 +446,58 @@ s.connect(sock_path)
 f = s.makefile("rwb", buffering=0)
 f.readline()
 write_qmp(f, {"execute": "qmp_capabilities"})
-mem = pmem(f, raw_path, ppm_path)
-print("simpleos_wm_fullscreen_capture bytes=%d ppm=%s" % (len(mem), ppm_path))
-sys.exit(0 if len(mem) == 3145728 else 5)
+baseline_seq = max_input_seq()
+baseline = pmem(f, baseline_ppm)
+send_f11(f)
+max_seq, target_window, max_irq, max_state, max_frame = wait_correlation(baseline_seq, "maximize")
+fullscreen = pmem(f, fullscreen_ppm)
+send_f11(f)
+restore_seq, restored_window, restore_irq, restore_state, restore_frame = wait_correlation(max_seq, "restore", target_window)
+restored = pmem(f, restored_ppm)
+
+base_hash = hashlib.sha256(baseline).hexdigest()
+full_hash = hashlib.sha256(fullscreen).hexdigest()
+restored_hash = hashlib.sha256(restored).hexdigest()
+changed = sum(1 for a, b in zip(baseline, fullscreen) if a != b)
+if not (len(baseline) == len(fullscreen) == len(restored) == size):
+    raise RuntimeError("capture-size-mismatch")
+if full_hash == base_hash or changed <= 4096:
+    raise RuntimeError("maximize-semantic-hash-not-distinct")
+if restored_hash != base_hash:
+    raise RuntimeError("restore-semantic-hash-mismatch")
+print("simpleos_wm_input_submitted host_nonce=%s baseline_seq=%d maximize_seq=%d restore_seq=%d qcode=f11" % (nonce, baseline_seq, max_seq, restore_seq))
+print("simpleos_wm_maximize_irq_marker=" + max_irq)
+print("simpleos_wm_maximize_state_marker=" + max_state)
+print("simpleos_wm_maximize_frame_marker=" + max_frame)
+print("simpleos_wm_restore_irq_marker=" + restore_irq)
+print("simpleos_wm_restore_state_marker=" + restore_state)
+print("simpleos_wm_restore_frame_marker=" + restore_frame)
+print("simpleos_wm_fullscreen_delta changed_bytes=%d before_sha256=%s after_sha256=%s restored_sha256=%s" % (changed, base_hash, full_hash, restored_hash))
 PY
         capture1_code=$?
         set -e
 
         if [ "$capture1_code" -ne 0 ]; then
-            reason="fullscreen-screendump-failed"
+            reason="capture-input-or-guest-correlation-failed"
         else
-            # Wait for the fullscreen-exit (restore) marker.
-            waited=0
-            while [ "$waited" -le 60000 ]; do
-                exit_marker="$(marker_line "$SERIAL_LOG" "[wm-demo] fullscreen-exit")"
-                if [ -n "$exit_marker" ]; then
-                    break
-                fi
-                if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-                    break
-                fi
-                sleep 0.1
-                waited=$((waited + 100))
-            done
-
-            if [ -z "$exit_marker" ]; then
-                reason="fullscreen-exit-marker-missing"
-            else
-                # Small settle delay: the guest already redrew before printing
-                # the marker, this only guards against QMP socket contention.
-                sleep 0.2
-                set +e
-                python3 - "$QMP_SOCKET" "$RESTORED_PPM" >>"$CAPTURE_OUT" 2>&1 <<'PY'
-import json
-import os
-import socket
-import sys
-import time
-
-sock_path, ppm_path = sys.argv[1], sys.argv[2]
-raw_path = ppm_path + ".raw"
-
-def write_qmp(f, obj):
-    f.write(json.dumps(obj).encode() + b"\n")
-    f.flush()
-    return f.readline()
-
-def hmp(f, cmd):
-    return write_qmp(f, {"execute": "human-monitor-command", "arguments": {"command-line": cmd}})
-
-def wait_raw(path):
-    for _ in range(100):
-        if os.path.exists(path) and os.path.getsize(path) >= 3145728:
-            return True
-        time.sleep(0.1)
-    return False
-
-def pmem(f, raw_path, ppm_path):
-    hmp(f, 'pmemsave 0xfd000000 3145728 "%s"' % raw_path)
-    ok = wait_raw(raw_path)
-    data = open(raw_path, "rb").read() if ok else b""
-    if len(data) == 3145728:
-        pix = bytearray()
-        for i in range(0, 1024 * 768 * 4, 4):
-            pix.extend([data[i + 2], data[i + 1], data[i]])
-        with open(ppm_path, "wb") as out:
-            out.write(b"P6\n1024 768\n255\n" + bytes(pix))
-    return data
-
-s = socket.socket(socket.AF_UNIX)
-s.settimeout(5)
-s.connect(sock_path)
-f = s.makefile("rwb", buffering=0)
-f.readline()
-write_qmp(f, {"execute": "qmp_capabilities"})
-mem = pmem(f, raw_path, ppm_path)
-print("simpleos_wm_fullscreen_capture bytes=%d ppm=%s" % (len(mem), ppm_path))
-sys.exit(0 if len(mem) == 3145728 else 5)
-PY
-                capture2_code=$?
-                set -e
-
-                if [ "$capture2_code" -ne 0 ]; then
-                    reason="restored-screendump-failed"
-                else
-                    # Compare the two screendumps: they must differ (real
-                    # visual change from maximize -> restore), and the
-                    # fullscreen size reported in the marker must match the
-                    # actual 1024x768 framebuffer resolution used by this
-                    # QEMU target (see _fb_w()/_fb_h() in gui_entry_engine2d.spl).
-                    set +e
-                    python3 - "$FULLSCREEN_RAW" "$RESTORED_RAW" >>"$CAPTURE_OUT" 2>&1 <<'PY'
-import hashlib
-import sys
-
-a_path, b_path = sys.argv[1], sys.argv[2]
-a = open(a_path, "rb").read()
-b = open(b_path, "rb").read()
-valid = len(a) == 3145728 and len(b) == 3145728
-changed = sum(1 for x, y in zip(a, b) if x != y) if valid else 0
-sha_a = hashlib.sha256(a).hexdigest() if a else ""
-sha_b = hashlib.sha256(b).hexdigest() if b else ""
-print("simpleos_wm_fullscreen_delta changed_bytes=%d before_sha256=%s after_sha256=%s" % (changed, sha_a, sha_b))
-sys.exit(0 if valid and changed > 4096 and sha_a != sha_b else 5)
-PY
-                    delta_code=$?
-                    set -e
-                    delta_line="$(sed -n '/^simpleos_wm_fullscreen_delta /p' "$CAPTURE_OUT" | tail -n 1)"
-                    changed_bytes="$(printf '%s\n' "$delta_line" | sed -n 's/.* changed_bytes=\([0-9][0-9]*\).*/\1/p')"
-                    before_sha256="$(printf '%s\n' "$delta_line" | sed -n 's/.* before_sha256=\([^ ]*\).*/\1/p')"
-                    after_sha256="$(printf '%s\n' "$delta_line" | sed -n 's/.* after_sha256=\([^ ]*\).*/\1/p')"
-
-                    if [ "$delta_code" -ne 0 ]; then
-                        status=fail
-                        reason="fullscreen-restore-pixel-delta-not-proven"
-                    elif [ "${fullscreen_w:-0}" != "1024" ] || [ "${fullscreen_h:-0}" != "768" ]; then
-                        status=fail
-                        reason="fullscreen-size-not-framebuffer-size"
-                    else
-                        status=pass
-                        reason=pass
-                    fi
-                fi
-            fi
+            input_submit_marker="$(sed -n '/^simpleos_wm_input_submitted /p' "$CAPTURE_OUT" | tail -n 1)"
+            baseline_seq="$(marker_field "$input_submit_marker" baseline_seq)"
+            maximize_seq="$(marker_field "$input_submit_marker" maximize_seq)"
+            restore_seq="$(marker_field "$input_submit_marker" restore_seq)"
+            input_irq_marker="$(sed -n 's/^simpleos_wm_maximize_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            input_state_marker="$(sed -n 's/^simpleos_wm_maximize_state_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            input_frame_marker="$(sed -n 's/^simpleos_wm_maximize_frame_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            restore_irq_marker="$(sed -n 's/^simpleos_wm_restore_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            restore_state_marker="$(sed -n 's/^simpleos_wm_restore_state_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            restore_frame_marker="$(sed -n 's/^simpleos_wm_restore_frame_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            delta_line="$(sed -n '/^simpleos_wm_fullscreen_delta /p' "$CAPTURE_OUT" | tail -n 1)"
+            changed_bytes="$(marker_field "$delta_line" changed_bytes)"
+            before_sha256="$(marker_field "$delta_line" before_sha256)"
+            after_sha256="$(marker_field "$delta_line" after_sha256)"
+            restored_sha256="$(marker_field "$delta_line" restored_sha256)"
+            status=pass
+            reason=pass
+        fi
         fi
     fi
 fi
@@ -455,18 +513,37 @@ fi
     echo "simpleos_wm_fullscreen_serial_log_bytes=$(file_byte_count "$SERIAL_LOG")"
     echo "simpleos_wm_fullscreen_qemu_out=$LAUNCH_OUT"
     echo "simpleos_wm_fullscreen_capture_out=$CAPTURE_OUT"
-    echo "simpleos_wm_fullscreen_enter_marker=$fullscreen_marker"
-    echo "simpleos_wm_fullscreen_exit_marker=$exit_marker"
-    echo "simpleos_wm_fullscreen_size=$fullscreen_size"
-    echo "simpleos_wm_fullscreen_width=${fullscreen_w:-0}"
-    echo "simpleos_wm_fullscreen_height=${fullscreen_h:-0}"
+    echo "simpleos_wm_fullscreen_scanout_marker=$scanout_marker"
+    echo "simpleos_wm_fullscreen_scanout_address=$scanout_address"
+    echo "simpleos_wm_fullscreen_scanout_width=$scanout_width"
+    echo "simpleos_wm_fullscreen_scanout_height=$scanout_height"
+    echo "simpleos_wm_fullscreen_scanout_byte_pitch=$scanout_stride"
+    echo "simpleos_wm_fullscreen_scanout_pixel_format=$scanout_pixel_format"
+    echo "simpleos_wm_fullscreen_scanout_generation=$scanout_generation"
+    echo "simpleos_wm_fullscreen_scanout_capture_size=$scanout_size"
+    echo "simpleos_wm_fullscreen_input_nonce=$input_nonce"
+    echo "simpleos_wm_fullscreen_baseline_input_seq=$baseline_seq"
+    echo "simpleos_wm_fullscreen_maximize_input_seq=$maximize_seq"
+    echo "simpleos_wm_fullscreen_restore_input_seq=$restore_seq"
+    echo "simpleos_wm_fullscreen_input_submit_marker=$input_submit_marker"
+    echo "simpleos_wm_fullscreen_input_irq_marker=$input_irq_marker"
+    echo "simpleos_wm_fullscreen_input_state_marker=$input_state_marker"
+    echo "simpleos_wm_fullscreen_input_frame_marker=$input_frame_marker"
+    echo "simpleos_wm_fullscreen_restore_irq_marker=$restore_irq_marker"
+    echo "simpleos_wm_fullscreen_restore_state_marker=$restore_state_marker"
+    echo "simpleos_wm_fullscreen_restore_frame_marker=$restore_frame_marker"
+    echo "simpleos_wm_fullscreen_baseline_ppm=$BASELINE_PPM"
+    echo "simpleos_wm_fullscreen_baseline_ppm_file_status=$(regular_file_status "$BASELINE_PPM")"
+    echo "simpleos_wm_fullscreen_baseline_ppm_magic_status=$(ppm_magic_status "$BASELINE_PPM")"
+    echo "simpleos_wm_fullscreen_baseline_ppm_bytes=$(file_byte_count "$BASELINE_PPM")"
     echo "simpleos_wm_fullscreen_changed_bytes=${changed_bytes:-0}"
-    echo "simpleos_wm_fullscreen_before_sha256=$before_sha256"
-    echo "simpleos_wm_fullscreen_after_sha256=$after_sha256"
-    echo "simpleos_wm_fullscreen_fullscreen_ppm=$FULLSCREEN_PPM"
-    echo "simpleos_wm_fullscreen_fullscreen_ppm_file_status=$(regular_file_status "$FULLSCREEN_PPM")"
-    echo "simpleos_wm_fullscreen_fullscreen_ppm_magic_status=$(ppm_magic_status "$FULLSCREEN_PPM")"
-    echo "simpleos_wm_fullscreen_fullscreen_ppm_bytes=$(file_byte_count "$FULLSCREEN_PPM")"
+    echo "simpleos_wm_fullscreen_baseline_sha256=$before_sha256"
+    echo "simpleos_wm_fullscreen_maximized_sha256=$after_sha256"
+    echo "simpleos_wm_fullscreen_restored_sha256=$restored_sha256"
+    echo "simpleos_wm_fullscreen_maximized_ppm=$FULLSCREEN_PPM"
+    echo "simpleos_wm_fullscreen_maximized_ppm_file_status=$(regular_file_status "$FULLSCREEN_PPM")"
+    echo "simpleos_wm_fullscreen_maximized_ppm_magic_status=$(ppm_magic_status "$FULLSCREEN_PPM")"
+    echo "simpleos_wm_fullscreen_maximized_ppm_bytes=$(file_byte_count "$FULLSCREEN_PPM")"
     echo "simpleos_wm_fullscreen_restored_ppm=$RESTORED_PPM"
     echo "simpleos_wm_fullscreen_restored_ppm_file_status=$(regular_file_status "$RESTORED_PPM")"
     echo "simpleos_wm_fullscreen_restored_ppm_magic_status=$(ppm_magic_status "$RESTORED_PPM")"
@@ -482,24 +559,28 @@ fi
     echo "- simple bin source: $SIMPLE_BIN_SOURCE"
     echo "- simple bin status: $SIMPLE_BIN_STATUS"
     echo "- qmp socket: $QMP_SOCKET"
-    echo "- fullscreen-enter marker: ${fullscreen_marker:--}"
-    echo "- fullscreen-exit marker: ${exit_marker:--}"
-    echo "- fullscreen size: ${fullscreen_size:--} (width=${fullscreen_w:-0} height=${fullscreen_h:-0})"
-    echo "- changed bytes (fullscreen vs restored): ${changed_bytes:-0}"
-    echo "- before sha256 (fullscreen): ${before_sha256:--}"
-    echo "- after sha256 (restored): ${after_sha256:--}"
-    echo "- fullscreen ppm: $FULLSCREEN_PPM ($(file_byte_count "$FULLSCREEN_PPM") bytes)"
+    echo "- scanout: address=${scanout_address:--} width=${scanout_width:-0} height=${scanout_height:-0} byte-pitch=${scanout_stride:-0} format=${scanout_pixel_format:--} generation=${scanout_generation:-0}"
+    echo "- host nonce: $input_nonce"
+    echo "- input sequences: baseline=$baseline_seq maximize=$maximize_seq restore=$restore_seq"
+    echo "- maximize IRQ/state/frame: ${input_irq_marker:--} | ${input_state_marker:--} | ${input_frame_marker:--}"
+    echo "- restore IRQ/state/frame: ${restore_irq_marker:--} | ${restore_state_marker:--} | ${restore_frame_marker:--}"
+    echo "- changed bytes (baseline vs maximized): ${changed_bytes:-0}"
+    echo "- baseline sha256: ${before_sha256:--}"
+    echo "- maximized sha256: ${after_sha256:--}"
+    echo "- restored sha256: ${restored_sha256:--}"
+    echo "- baseline ppm: $BASELINE_PPM ($(file_byte_count "$BASELINE_PPM") bytes)"
+    echo "- maximized ppm: $FULLSCREEN_PPM ($(file_byte_count "$FULLSCREEN_PPM") bytes)"
     echo "- restored ppm: $RESTORED_PPM ($(file_byte_count "$RESTORED_PPM") bytes)"
     echo "- serial log: $SERIAL_LOG ($(file_byte_count "$SERIAL_LOG") bytes)"
     echo
     echo "This wrapper boots the wm-simple-web SimpleOS QEMU target directly"
-    echo "(same q35/qemu64/2G/BGA-std flags as os.qemu_runner._wm_simple_web_qmp_capture_target),"
-    echo "waits for the boot-time WM fullscreen demo to maximize window 0 to the"
-    echo "full framebuffer, captures the maximized framebuffer over the QMP"
-    echo "\`pmemsave\` channel, waits for the restore marker, captures the"
-    echo "restored framebuffer, and requires the two captures to differ by a"
-    echo "real pixel delta. It does not use blur, downscaling, tolerance"
-    echo "matching, or copied reference pixels."
+    echo "(same q35/max/2G/BGA-std flags as os.qemu_runner._wm_simple_web_qmp_capture_target),"
+    echo "derives QMP \`pmemsave\` address and size from the guest's validated"
+    echo "scanout marker, converts visible pixels using its byte pitch, injects"
+    echo "F11 through QEMU input, maps its host nonce to newly observed guest"
+    echo "input sequences, and requires sequence-correlated IRQ, WM state, and"
+    echo "frame-generation markers. Boot-time choreography is never"
+    echo "accepted as interaction evidence; missing correlation fails closed."
 } >"$REPORT_PATH"
 
 cat "$BUILD_DIR/evidence.env"

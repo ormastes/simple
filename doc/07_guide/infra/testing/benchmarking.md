@@ -184,6 +184,17 @@ host-unavailable evidence instead of hidden success. The companion report is
 written under `doc/09_report/`, and per-backend logs/evidence files are written
 under `build/generated_2d_backend_readback_matrix/`.
 
+The portable toolchain wrapper executes the Simple emitter through a delimited
+SPipe payload and validates that every required entry symbol is present before
+invoking a native compiler. It must not substitute shell-authored CUDA, OpenCL,
+or Metal source. On Metal, scalar arguments use `constant T& [[buffer(n)]]`
+bindings after the storage buffers. The Metal readback harness compiles that
+same generated Simple source through the stdlib Metal SFFI facade, uploads host
+parameters and buffers, submits and waits for fill/copy/alpha/scroll kernels,
+then downloads device buffers and compares position-sensitive hashes. Empty
+source, missing tools, compiler failure, invalid artifact magic, missing entry
+symbols, absent submission, or unavailable readback are all fail-closed.
+
 Use `sh scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs
 --self-test` after changing the wrapper. It uses fake child lanes to prove a
 backend cannot report `pass` unless submit/readback provenance, positive

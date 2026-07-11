@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -630,6 +630,50 @@ pub extern "C" fn rt_winit_window_free(win: i64) -> i64 {
     1
 }
 
+// Outer-position transport only. Display-mode policy and the decision about
+// which coordinates to restore remain in the Simple host adapter.
+#[no_mangle]
+pub extern "C" fn rt_winit_window_position_x(win: i64) -> i64 {
+    PUMP.with(|cell| {
+        let borrow = cell.borrow();
+        borrow
+            .as_ref()
+            .and_then(|ps| ps.inner.windows.get(&win))
+            .and_then(|slot| slot.window.outer_position().ok())
+            .map(|pos| pos.x as i64)
+            .unwrap_or(0)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_window_position_y(win: i64) -> i64 {
+    PUMP.with(|cell| {
+        let borrow = cell.borrow();
+        borrow
+            .as_ref()
+            .and_then(|ps| ps.inner.windows.get(&win))
+            .and_then(|slot| slot.window.outer_position().ok())
+            .map(|pos| pos.y as i64)
+            .unwrap_or(0)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_window_set_position(win: i64, x: i64, y: i64) -> i64 {
+    PUMP.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(ps) = borrow.as_ref() else {
+            return 0;
+        };
+        let Some(slot) = ps.inner.windows.get(&win) else {
+            return 0;
+        };
+        slot.window
+            .set_outer_position(PhysicalPosition::new(x as i32, y as i32));
+        1
+    })
+}
+
 // ---- Event accessors --------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn rt_winit_event_get_type(ev: i64) -> i64 {
@@ -639,6 +683,24 @@ pub extern "C" fn rt_winit_event_get_type(ev: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_winit_event_get_window_id(ev: i64) -> i64 {
     with_event(ev, |e| e.window_id()).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_event_window_x(ev: i64) -> i64 {
+    with_event(ev, |e| match e {
+        StoredEvent::Moved { x, .. } => *x,
+        _ => 0,
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_event_window_y(ev: i64) -> i64 {
+    with_event(ev, |e| match e {
+        StoredEvent::Moved { y, .. } => *y,
+        _ => 0,
+    })
+    .unwrap_or(0)
 }
 
 #[no_mangle]

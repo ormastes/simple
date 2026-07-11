@@ -14,28 +14,39 @@ use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.host_compositor_entry.{
     HOST_WM_IDLE_SLEEP_MS,
     HostBackendKind,
+    HostDisplayMode,
+    HostDisplayTransitionPhase,
     HostCompositor,
     HostWmAppProcess,
     HostWmConfig,
     HostWmHandle,
+    HostWmLoopState,
     SimpleOsGuiAdapter,
     host_taskbar_dock_width,
     host_taskbar_item_width,
     host_taskbar_item_x,
     host_compositor_left_button,
     host_compositor_pointer_move,
+    host_surface_geometry,
+    host_surface_state,
+    request_display_mode,
+    ack_surface_resize,
+    ack_surface_scale,
+    ack_surface_event,
+    fail_or_timeout_display_transition,
     host_wm_surface_failure_reason,
     host_wm_content_renderer_name,
     host_wm_force_direct_chrome,
     host_wm_chrome_force_direct,
     host_chrome_scene_html,
     host_chrome_scene_fingerprint,
+    host_compositor_taskbar_model,
+    host_taskbar_clock_label,
     HostedWindow,
     simpleos_gui_adapter_display_path_name,
     simpleos_gui_adapter_content_renderer_name,
     init_host_wm,
 }
-use os.services.wm.wm_service.{WmService}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
@@ -49,6 +60,8 @@ var _capture_engine_title_count: i64 = 0
 var _capture_engine_content_count: i64 = 0
 var _capture_blit_count: i64 = 0
 var _capture_clear_color: u32 = 0u32
+var _capture_taskbar_pass_count: i64 = 0
+var _capture_texts: [text] = []
 
 class FakeCompositorBackend:
     w: i32
@@ -110,6 +123,8 @@ impl CompositorBackend for CaptureCompositorBackend:
         _capture_clear_color = color
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if x == 0 and y == self.h - 56 and w == self.w and h == 56:
+            _capture_taskbar_pass_count = _capture_taskbar_pass_count + 1
         if color == 0xFF2563EBu32:
             _capture_blue_count = _capture_blue_count + 1
         if color == 0xFFFFFFFFu32:
@@ -121,6 +136,7 @@ impl CompositorBackend for CaptureCompositorBackend:
         _capture_present_count = _capture_present_count
 
     me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        _capture_texts.push(text_str)
         if text_str.len() > 0 and fg == 0xFFFFFFFFu32:
             _capture_white_count = _capture_white_count + 1
 
@@ -166,6 +182,13 @@ fn _count_color(pixels: [u32], color: u32) -> i32:
         i = i + 1
     count
 
+fn _count_captured_text(value: text) -> i32:
+    var count = 0
+    for captured in _capture_texts:
+        if captured == value:
+            count = count + 1
+    count
+
 fn _browser_config() -> HostWmConfig:
     HostWmConfig(
         backend: HostBackendKind.Browser,
@@ -173,10 +196,55 @@ fn _browser_config() -> HostWmConfig:
         title: "browser-wm"
     )
 
-fn _running_wm_service() -> WmService:
-    val wm = WmService.new()
-    wm.running = true
-    wm
+fn _running_wm_service() -> HostWmLoopState:
+    HostWmLoopState(running: true)
+
+describe "host display transition state":
+
+    it "applies out-of-order scale and resize acknowledgements with a matching nonce":
+        val initial = host_surface_geometry(40, 60, 1280, 720, 1000)
+        val requested = request_display_mode(host_surface_state(initial), HostDisplayMode.BorderlessFullscreen, 7, 100)
+        expect(requested.accepted).to_be(true)
+        expect(requested.mode_request_required).to_be(true)
+        expect(requested.state.phase == HostDisplayTransitionPhase.Requested).to_be(true)
+
+        val scaled = ack_surface_scale(requested.state, 7, 1500, 200)
+        expect(scaled.state.phase == HostDisplayTransitionPhase.AwaitingResize).to_be(true)
+        expect(scaled.state.mode == HostDisplayMode.Windowed).to_be(true)
+        val applied = ack_surface_resize(scaled.state, 7, host_surface_geometry(0, 0, 1920, 1080, 1500), 300)
+        expect(applied.state.phase == HostDisplayTransitionPhase.Applied).to_be(true)
+        expect(applied.state.mode == HostDisplayMode.BorderlessFullscreen).to_be(true)
+        expect(applied.state.geometry.width).to_equal(1920)
+        expect(applied.state.geometry.scale_milli).to_equal(1500)
+        expect(applied.state.saved_windowed_geometry.x).to_equal(40)
+
+    it "rejects stale events and coalesces only the same in-flight request":
+        val initial = host_surface_state(host_surface_geometry(10, 20, 800, 600, 1000))
+        val requested = request_display_mode(initial, HostDisplayMode.BorderlessFullscreen, 9, 100)
+        val duplicate = request_display_mode(requested.state, HostDisplayMode.BorderlessFullscreen, 9, 110)
+        expect(duplicate.accepted).to_be(true)
+        expect(duplicate.mode_request_required).to_be(false)
+        val stale = ack_surface_event(requested.state, 8, host_surface_geometry(0, 0, 1920, 1080, 1000), 120)
+        expect(stale.accepted).to_be(false)
+        expect(stale.state.phase == HostDisplayTransitionPhase.Requested).to_be(true)
+
+    it "rolls back geometry and mode on explicit failure or timeout":
+        val initial = host_surface_state(host_surface_geometry(25, 35, 1024, 768, 1000))
+        val requested = request_display_mode(initial, HostDisplayMode.BorderlessFullscreen, 11, 100)
+        val resized = ack_surface_resize(requested.state, 11, host_surface_geometry(0, 0, 2560, 1440, 1000), 200)
+        val failed = fail_or_timeout_display_transition(resized.state, 11, "fullscreen denied", 300)
+        expect(failed.accepted).to_be(true)
+        expect(failed.rolled_back).to_be(true)
+        expect(failed.state.phase == HostDisplayTransitionPhase.Failed).to_be(true)
+        expect(failed.state.mode == HostDisplayMode.Windowed).to_be(true)
+        expect(failed.state.geometry.x).to_equal(25)
+        expect(failed.state.geometry.width).to_equal(1024)
+        expect(failed.state.failure_reason).to_equal("fullscreen denied")
+
+        val retry = request_display_mode(failed.state, HostDisplayMode.BorderlessFullscreen, 12, 400)
+        val timed_out = fail_or_timeout_display_transition(retry.state, 12, "", retry.state.deadline_micros + 1)
+        expect(timed_out.accepted).to_be(true)
+        expect(timed_out.state.failure_reason).to_equal("display transition timed out")
 
 describe "HostBackendKind variants":
 
@@ -344,7 +412,7 @@ describe "HostWmHandle loop behavior":
         _fake_present_count = 0
         val backend = FakeCompositorBackend(w: 320, h: 240)
         val comp = HostCompositor.new(backend, Size.wh(320, 240))
-        val wm = WmService.new()
+        val wm = HostWmLoopState(running: false)
         val handle = HostWmHandle(
             compositor: comp,
             wm: wm,
@@ -359,7 +427,7 @@ describe "HostWmHandle loop behavior":
         _fake_present_count = 0
         val backend = FakeCompositorBackend(w: 320, h: 240)
         val comp = HostCompositor.new(backend, Size.wh(320, 240))
-        val wm = WmService.new()
+        val wm = HostWmLoopState(running: false)
         val handle = HostWmHandle(
             compositor: comp,
             wm: wm,
@@ -386,6 +454,39 @@ describe "HostWmHandle loop behavior":
         expect(host_wm_content_renderer_name(tauri)).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
 
 describe "HostCompositor hosted window state":
+
+    it "renders one authoritative taskbar from real process window tray and clock state":
+        host_wm_force_direct_chrome(true)
+        _capture_taskbar_pass_count = 0
+        _capture_texts = []
+        val backend = CaptureCompositorBackend.with_color(400, 240, 0xFF000000u32)
+        val comp = HostCompositor.new(backend, Size.wh(400, 240))
+        comp.app_processes.push(HostWmAppProcess(title: "Pinned Editor", app_id: "/sys/apps/editor", source_path: "editor.spl", pid: 41, failed: false))
+        comp.app_processes.push(HostWmAppProcess(title: "Broken Tool", app_id: "/sys/apps/broken", source_path: "broken.spl", pid: 42, failed: true))
+        comp.apply_bridge_request(1, 11, COMP_CREATE_WINDOW.to_i64(), 0, "Live Terminal", 20, 60, 160, 100, "ready", 41, "/sys/apps/terminal")
+        comp.apply_bridge_request(2, 12, COMP_CREATE_WINDOW.to_i64(), 0, "Live Browser", 190, 60, 160, 100, "ready", 43, "/sys/apps/browser")
+        val first_id = comp.windows[0].id
+        comp.apply_bridge_request(3, 11, COMP_MINIMIZE.to_i64(), first_id, "", 0, 0, 0, 0, "", 0, "")
+
+        val taskbar = host_compositor_taskbar_model(comp)
+        expect(taskbar.pinned.len()).to_equal(0)
+        expect(taskbar.running[0].title).to_equal("Live Terminal")
+        expect(taskbar.running[0].minimized).to_be(true)
+        expect(taskbar.running[taskbar.running.len() - 1].title).to_equal("Live Browser")
+        expect(taskbar.tray[0].label).to_equal("1/2 active")
+        expect(host_taskbar_clock_label(45240000000)).to_equal("12:34")
+
+        comp.render_frame()
+        host_wm_force_direct_chrome(false)
+        expect(_capture_texts.contains("Pinned Editor")).to_be(false)
+        expect(_capture_texts.contains("Broken Tool")).to_be(false)
+        expect(_capture_texts).to_contain("Live Terminal")
+        expect(_capture_texts).to_contain("Live Browser")
+        expect(_capture_texts).to_contain("1/2 active")
+        expect(_capture_taskbar_pass_count).to_equal(1)
+        # The minimized window has no titlebar draw. One captured title is the
+        # authoritative taskbar object; a legacy second taskbar pass yields 2.
+        expect(_count_captured_text("Live Terminal")).to_equal(1)
 
     it "creates, updates, minimizes, restores, and destroys hosted windows":
         val backend = FakeCompositorBackend(w: 640, h: 480)

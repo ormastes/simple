@@ -37,39 +37,38 @@ shell_baremetal_backend_spec -> os
 
 ## Scenarios
 
-### baremetal desktop overlay backend contract
+### baremetal shared WM backend contract
 
-#### draws through CompositorBackend instead of requiring raw Engine2D
+#### renders a live rich scene through CompositorBackend
 
 1. var backend =  capture backend
+   - Expected: backend.clear_count equals `1`
    - Expected: backend.fill_count > 0 is true
    - Expected: backend.text_count > 0 is true
    - Expected: backend.present_count equals `0`
-   - Expected: backend.last_text equals `12:34`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var backend = _capture_backend()
-_draw_baremetal_overlay(
-    backend,
-    ["Editor"],
-    ["7501 Editor running"],
-    0,
-    800,
-    600,
-    "12:34"
+val window = simple_gui_internal_window(
+    "surface-41", "41", 7001u64, "editor", "Live Editor",
+    80, 70, 420, 300, "document=notes.spl", false, true, 0
 )
+val scene = simple_gui_internal_window_scene(800, 600, "simpleos-compositor", [window])
+val pixels = _solid_pixels(412 * 264, 0xFF102030u32)
+val frame = WmContentFrame(window_id: "41", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 412, height: 264, pixels: pixels, checksum: 1u64)
+render_baremetal_shared_wm_scene(backend, scene, empty_taskbar_model(), [frame], 7, 9, "12:34")
 
-expect(backend.fill_count > 0).to_equal(true)
-expect(backend.text_count > 0).to_equal(true)
+expect(backend.clear_count).to_equal(1)
+expect(backend.fill_count > 0).to_be(true)
+expect(backend.text_count > 0).to_be(true)
 expect(backend.present_count).to_equal(0)
-expect(backend.last_text).to_equal("12:34")
 ```
 
 </details>
@@ -87,7 +86,7 @@ expect(backend.last_text).to_equal("12:34")
 ## Overview
 
 Tests covering:
-- baremetal desktop overlay backend contract
+- baremetal shared WM backend contract
 
 ## Scenario Summary
 

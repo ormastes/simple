@@ -12,7 +12,9 @@ use os.compositor.wm_action_applier.{
     wm_move_action,
     wm_resize_action,
 }
-use os.desktop.shell_baremetal.{_draw_baremetal_overlay}
+use os.desktop.shell_baremetal.{render_baremetal_shared_wm_scene}
+use common.ui.taskbar_model.{empty_taskbar_model}
+use common.ui.window_scene.{WmContentFrame, WM_CONTENT_ORIGIN_SIMPLE_WEB, simple_gui_internal_window, simple_gui_internal_window_scene}
 use os.services.wm.wm_world.{WmAction}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_DESTROY_WINDOW, COMP_MAXIMIZE, COMP_MINIMIZE, COMP_MOVE, COMP_RESIZE, COMP_RESTORE, COMP_SET_TITLE, COMP_UPDATE_TREE}
 
@@ -63,6 +65,14 @@ impl CompositorBackend for SharedSpecBackend:
 
 fn _backend(w: i32, h: i32) -> SharedSpecBackend:
     SharedSpecBackend(w: w, h: h, clear_color: 0u32, fill_count: 0, text_count: 0, present_count: 0, last_text: "")
+
+fn _solid_pixels(count: i32, color: u32) -> [u32]:
+    var pixels: [u32] = []
+    var i = 0
+    while i < count:
+        pixels = pixels.push(color)
+        i = i + 1
+    pixels
 
 fn _action(kind: text, window_id: u64) -> WmAction:
     WmAction(kind: kind, window_id: window_id, title: "Window", x: 10, y: 20, width: 80, height: 60, content: "tree", process_id: 7, app_id: "app.test", owner_port: 9, src_port: 0)
@@ -140,13 +150,19 @@ describe "shared WM renderer unification behavior contract":
         expect(_applied_flag(compositor.surfaces[0].session.wants_pixels)).to_equal(1)
         expect(compositor.surfaces[0].session.body_html).to_contain("https://example.test")
 
-    it "keeps the 2D desktop overlay behind the shared CompositorBackend surface":
+    it "renders the live rich scene behind the shared CompositorBackend surface":
         var backend = _backend(800, 600)
-        _draw_baremetal_overlay(backend, ["Editor"], ["7501 Editor running"], 0, 800, 600, "12:34")
+        val window = simple_gui_internal_window(
+            "surface-41", "41", 7001u64, "editor", "Live Editor",
+            80, 70, 420, 300, "document=notes.spl", false, true, 0
+        )
+        val scene = simple_gui_internal_window_scene(800, 600, "simpleos-compositor", [window])
+        val pixels = _solid_pixels(412 * 264, 0xFF102030u32)
+        val frame = WmContentFrame(window_id: "41", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 412, height: 264, pixels: pixels, checksum: 1u64, parent_window_id: "", offset_x: 0, offset_y: 0)
+        render_baremetal_shared_wm_scene(backend, scene, empty_taskbar_model(), [frame], 7, 9, "12:34")
 
         val fill_seen = if backend.fill_count > 0: 1 else: 0
         val text_seen = if backend.text_count > 0: 1 else: 0
         expect(fill_seen).to_equal(1)
         expect(text_seen).to_equal(1)
         expect(backend.present_count).to_equal(0)
-        expect(backend.last_text).to_equal("12:34")

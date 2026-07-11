@@ -16,7 +16,7 @@ use os.kernel.ipc.notification.{notification_wait_any, notification_register_mul
 use os.kernel.log.klog.{KernelLog, klog_write}
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.loader.executable_source.{resolve_executable_bytes, resolve_executable_bytes_from_path_bytes}
-use os.kernel.loader.app_registry.{app_registry_lookup}
+use os.kernel.loader.app_registry.{app_registry_lookup, app_registry_cached_boot_app_id}
 use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.loader_api.{loader_dynopen_bytes, loader_dynsym, loader_dynclose}
@@ -701,6 +701,8 @@ fn _legacy_app_id_to_name(app_id: u64) -> text?:
         Some("/sys/apps/shell")
     elif app_id == 5:
         Some("/sys/apps/editor")
+    elif app_id == 12:
+        Some("/sys/apps/clang")
     else:
         nil
 
@@ -771,18 +773,33 @@ pub fn dispatch_spawn_binary_direct_state(path_ptr: u64, path_len: u64, priority
     in-place mutation of the passed instance."""
     log_raw_println("[syscall13] dispatch_direct enter")
     if path_len == 0:
-        val sentinel_path = _direct_spawn_app_id_path(path_ptr)
-        if sentinel_path != nil:
-            val path = sentinel_path.unwrap()
-            val grant_errno = _process_grant_errno_for_path(path, klog)
-            if grant_errno < 0:
-                return SpawnBinaryDirectState(pid: grant_errno, scheduler: scheduler)
-            val bytes_result = resolve_executable_bytes(path, CURRENT_EXEC_ARCH)
-            if bytes_result.is_ok():
-                return _spawn_from_resolved_bytes_state(path, [], bytes_result.unwrap(), priority_raw, scheduler, klog)
-            if _is_builtin_binary_path(path):
-                log_raw_println("[syscall13] builtin resident fallback path={path}")
-                return SpawnBinaryDirectState(pid: -2, scheduler: scheduler)
+        var path = ""
+        if path_ptr == 1u64:
+            path = "/sys/apps/browser_demo"
+        elif path_ptr == 2u64:
+            path = "/sys/apps/file_manager"
+        elif path_ptr == 3u64 or path_ptr == 103u64:
+            path = "/sys/apps/hello_world"
+        elif path_ptr == 4u64:
+            path = "/sys/apps/shell"
+        elif path_ptr == 5u64:
+            path = "/sys/apps/editor"
+        elif path_ptr == 12u64:
+            path = "/sys/apps/clang"
+        if path == "":
+            return SpawnBinaryDirectState(pid: -14, scheduler: scheduler)
+        val grant_errno = _process_grant_errno_for_path(path, klog)
+        if grant_errno < 0:
+            return SpawnBinaryDirectState(pid: grant_errno, scheduler: scheduler)
+        val boot_bytes = app_registry_cached_boot_app_id(path_ptr)
+        if boot_bytes.len() > 4:
+            return _spawn_from_resolved_bytes_state(path, [], boot_bytes, priority_raw, scheduler, klog)
+        val bytes_result = resolve_executable_bytes(path, CURRENT_EXEC_ARCH)
+        if bytes_result.is_ok():
+            return _spawn_from_resolved_bytes_state(path, [], bytes_result.unwrap(), priority_raw, scheduler, klog)
+        if _is_builtin_binary_path(path):
+            log_raw_println("[syscall13] builtin resident fallback path={path}")
+            return SpawnBinaryDirectState(pid: -2, scheduler: scheduler)
         return SpawnBinaryDirectState(pid: -14, scheduler: scheduler)
 
     if path_len > MAX_BINARY_PATH_LEN:

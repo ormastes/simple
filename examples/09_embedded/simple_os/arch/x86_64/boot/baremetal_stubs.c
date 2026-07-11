@@ -14194,6 +14194,18 @@ RuntimeValue rt_write_cr3_real(RuntimeValue val)
     return NIL_VALUE;
 }
 
+uint64_t rt_read_cr3_raw(void)
+{
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    return cr3;
+}
+
+void rt_write_cr3_raw(uint64_t val)
+{
+    __asm__ volatile("mov %0, %%cr3" : : "r"(val) : "memory");
+}
+
 RuntimeValue rt_read_cr2_real(RuntimeValue dummy)
 {
     (void)dummy;

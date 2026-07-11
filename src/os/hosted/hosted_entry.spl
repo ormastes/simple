@@ -7,15 +7,43 @@
 use common.window_protocol.geometry.{Size}
 use os.compositor.host_compositor_entry.{
     HostCompositor,
+    HostDisplayMode,
+    HostDisplayTransitionPhase,
+    HostSurfaceGeometry,
+    HostSurfaceState,
+    ack_surface_event,
+    fail_or_timeout_display_transition,
+    host_surface_geometry,
+    host_surface_state,
+    request_display_mode,
     host_compositor_cycle_focus,
     host_compositor_focused_window_id,
     host_compositor_minimize_focused,
+    host_compositor_maximize_focused,
     host_compositor_restore_all
+}
+use std.nogc_sync_mut.io.window_winit.{
+    WinitWindow,
+    WinitWindowPosition,
+    winit_event_window_position,
+    winit_window_get_position,
+    winit_window_get_size,
+    winit_window_is_fullscreen,
+    winit_window_scale_factor,
+    winit_window_set_fullscreen,
+    winit_window_set_position
 }
 use os.compositor.hosted_backend_winit.{HostedWinitBufferBackend}
 use os.compositor.shared_mdi_host_seed.{seed_host_compositor_shared_mdi}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use common.ui.window_scene.{shared_wm_motion_background_next_due_micros, shared_wm_motion_dirty_due, shared_wm_motion_background_consume_due}
+use os.hosted.hosted_wm_evidence.{
+    host_wm_evidence_config_from_env,
+    host_wm_evidence_read_command,
+    host_wm_evidence_snapshot,
+    host_wm_evidence_write_capture,
+    host_wm_evidence_write_snapshot
+}
 
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
@@ -30,6 +58,12 @@ extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_env_get(key: text) -> text?
+
+# Production evidence protocol keys are intentionally visible at the live
+# entry boundary. The hook is disabled unless all three are configured.
+# SIMPLE_WM_EVIDENCE_SNAPSHOT_PATH
+# SIMPLE_WM_EVIDENCE_CAPTURE_PATH
+# SIMPLE_WM_EVIDENCE_INPUT_FIFO
 
 # Engine2D raster-lane present sink: a raw winit buffer used only to blit the
 # Engine2D-composed frame onto the window when SIMPLE_WM_RASTER=engine2d is
@@ -54,6 +88,9 @@ val WINDOW_HEIGHT: i32 = 720
 val WINDOW_TITLE: text = "SimpleOS Shared Hosted WM"
 
 val EVT_CLOSE: i64 = 3
+val EVT_RESIZE: i64 = 1
+val EVT_MOVE: i64 = 2
+val EVT_SCALE_FACTOR: i64 = 7
 val EVT_FOCUS: i64 = 5
 val EVT_UNFOCUS: i64 = 6
 val EVT_KEY: i64 = 10
@@ -66,6 +103,7 @@ val KEY_TAB: i64 = 9
 val KEY_M: i64 = 77
 val KEY_R: i64 = 82
 val KEY_W: i64 = 87
+val KEY_F11: i64 = 122
 val HOSTED_CREATE_WEB_WINDOW: i64 = 14
 
 fn _live_proof_mode() -> bool:
@@ -88,6 +126,33 @@ fn _seed_live_proof_surface(comp: HostCompositor) -> HostCompositor:
         "terminal"
     )
     out
+
+fn _winit_window(win: i64) -> WinitWindow:
+    WinitWindow(handle: win, is_valid: win > 0)
+
+fn _physical_surface_geometry(win: i64) -> HostSurfaceGeometry:
+    val native = _winit_window(win)
+    val position = winit_window_get_position(native)
+    val (width, height) = winit_window_get_size(native)
+    val scale_milli = (winit_window_scale_factor(native) * 1000.0).to_i32()
+    host_surface_geometry(position.x, position.y, width.to_i32(), height.to_i32(), scale_milli)
+
+fn _restore_windowed_position(surface: HostSurfaceState, win: i64) -> bool:
+    winit_window_set_position(
+        _winit_window(win),
+        WinitWindowPosition(x: surface.saved_windowed_geometry.x, y: surface.saved_windowed_geometry.y)
+    )
+
+fn _request_host_fullscreen(surface: HostSurfaceState, win: i64, nonce: i64, now_micros: i64) -> HostSurfaceState:
+    val native = _winit_window(win)
+    val target = if winit_window_is_fullscreen(native): HostDisplayMode.Windowed else: HostDisplayMode.BorderlessFullscreen
+    val requested = request_display_mode(surface, target, nonce, now_micros)
+    if not requested.accepted or not requested.mode_request_required:
+        return requested.state
+    val fullscreen_enabled = target == HostDisplayMode.BorderlessFullscreen
+    if not winit_window_set_fullscreen(native, fullscreen_enabled):
+        return fail_or_timeout_display_transition(requested.state, nonce, "native borderless fullscreen request failed", now_micros).state
+    requested.state
 
 fn main() -> i64:
     print "SimpleOS shared hosted WM ({WINDOW_WIDTH}x{WINDOW_HEIGHT})"
@@ -112,8 +177,8 @@ fn main() -> i64:
             rt_winit_event_loop_free(el)
             return 1
         print "[hosted-wm] raster-backend=engine2d {e2d_backend.frame_provenance()}"
-        val comp = HostCompositor.new(e2d_backend, Size(width: WINDOW_WIDTH.to_u64(), height: WINDOW_HEIGHT.to_u64()))
-        return _run_hosted_wm(comp, el, win, true, present_sink, nil)
+        val comp = HostCompositor.new(e2d_backend, Size(width: WINDOW_WIDTH as u64, height: WINDOW_HEIGHT as u64))
+        return _run_hosted_wm(comp, el, win, true, present_sink, 0)
     else:
         val backend = HostedWinitBufferBackend.create(win, WINDOW_WIDTH, WINDOW_HEIGHT, 0xFF0F172Au32)
         if backend == nil:
@@ -121,8 +186,8 @@ fn main() -> i64:
             rt_winit_window_free(win)
             rt_winit_event_loop_free(el)
             return 1
-        val comp = HostCompositor.new(backend, Size(width: WINDOW_WIDTH.to_u64(), height: WINDOW_HEIGHT.to_u64()))
-        return _run_hosted_wm(comp, el, win, false, 0, backend)
+        val comp = HostCompositor.new(backend, Size(width: WINDOW_WIDTH as u64, height: WINDOW_HEIGHT as u64))
+        return _run_hosted_wm(comp, el, win, false, 0, backend.buffer_id)
 
 # Engine2D raster-lane present-sink flush: reads back the persistent
 # Engine2D session's pixels and forwards them to the OS window via the winit
@@ -139,9 +204,15 @@ fn _hosted_wm_flush_engine2d_frame(comp: HostCompositor, present_sink: i64, win:
 # Shared event loop + render/present + shutdown for both raster lanes. `comp`
 # arrives already backed by either HostedWinitBufferBackend (default) or
 # Engine2dCompositorBackend (SIMPLE_WM_RASTER=engine2d); `present_sink` and
-# `winit_backend` carry whichever lane-specific handle needs freeing on exit.
-fn _run_hosted_wm(comp_in: HostCompositor, el: i64, win: i64, engine2d_raster: bool, present_sink: i64, winit_backend: HostedWinitBufferBackend?) -> i64:
+# `owned_winit_buffer` carries the non-Engine2D buffer that needs freeing.
+fn _run_hosted_wm(comp_in: HostCompositor, el: i64, win: i64, engine2d_raster: bool, present_sink: i64, owned_winit_buffer: i64) -> i64:
     var comp = comp_in
+    var surface = host_surface_state(_physical_surface_geometry(win))
+    var display_nonce: i64 = 0
+    val evidence = host_wm_evidence_config_from_env()
+    if evidence.enabled and not evidence.valid:
+        print "ERROR: hosted WM evidence configuration rejected: {evidence.failure_reason}"
+        return 2
     val live_proof = _live_proof_mode()
     if live_proof:
         comp = _seed_live_proof_surface(comp)
@@ -158,6 +229,18 @@ fn _run_hosted_wm(comp_in: HostCompositor, el: i64, win: i64, engine2d_raster: b
     else:
         print "[hosted-wm] frame-presented renderer=simple-web host=linux-windowed width={WINDOW_WIDTH} height={WINDOW_HEIGHT} raster=winit"
     print "Frame presented: shared lifecycle windows + Simple Web MDI content"
+
+    var evidence_nonce: i64 = 0
+    var evidence_phase = "presented"
+    if evidence.enabled:
+        val initial_pixels = comp.backend.get_pixel_buffer()
+        val backend_name = if engine2d_raster: "engine2d" else: HostedWinitBufferBackend.implementation_name()
+        val readback = if initial_pixels.len() == comp.width * comp.height: "presented-pixel-buffer" else: "unavailable"
+        val initial_snapshot = host_wm_evidence_snapshot(comp, surface, backend_name, false, readback, evidence_nonce, evidence_phase)
+        if not host_wm_evidence_write_snapshot(evidence.snapshot_path, initial_snapshot) or not host_wm_evidence_write_capture(evidence.capture_path, comp.width, comp.height, initial_pixels):
+            print "ERROR: hosted WM initial evidence write failed"
+            return 2
+        print "[hosted-wm] evidence-ready nonce=0 phase=presented"
 
     var running = true
     var warmup_frames: i64 = 0
@@ -198,6 +281,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, el: i64, win: i64, engine2d_raster: b
         var other_dirty = false
         var motion_dirty = false
         val now_micros = rt_time_now_unix_micros()
+        if (surface.phase == HostDisplayTransitionPhase.Requested or surface.phase == HostDisplayTransitionPhase.AwaitingResize) and now_micros > surface.deadline_micros:
+            val timed_out = fail_or_timeout_display_transition(surface, surface.request_nonce, "", now_micros)
+            surface = timed_out.state
+            print "[hosted-wm] display-transition-failed nonce={surface.request_nonce} phase={surface.phase} reason={surface.failure_reason}"
         val motion_due = shared_wm_motion_background_next_due_micros()
         if shared_wm_motion_dirty_due(now_micros, motion_due, last_motion_fired_due):
             motion_dirty = true
@@ -207,7 +294,35 @@ fn _run_hosted_wm(comp_in: HostCompositor, el: i64, win: i64, engine2d_raster: b
         while ev != 0:
             val kind = rt_winit_event_get_type(ev)
             if kind == EVT_CLOSE:
+                if surface.phase == HostDisplayTransitionPhase.Requested or surface.phase == HostDisplayTransitionPhase.AwaitingResize:
+                    val cancelled = fail_or_timeout_display_transition(surface, surface.request_nonce, "window closed during display transition", now_micros)
+                    surface = cancelled.state
+                    print "[hosted-wm] display-transition-failed nonce={surface.request_nonce} phase={surface.phase} reason={surface.failure_reason}"
                 running = false
+            elif kind == EVT_RESIZE or kind == EVT_SCALE_FACTOR:
+                val physical = _physical_surface_geometry(win)
+                if surface.phase == HostDisplayTransitionPhase.Requested or surface.phase == HostDisplayTransitionPhase.AwaitingResize:
+                    val acknowledged = ack_surface_event(surface, surface.request_nonce, physical, now_micros)
+                    surface = acknowledged.state
+                    if evidence.enabled and acknowledged.accepted and surface.phase == HostDisplayTransitionPhase.Applied:
+                        evidence_phase = "display-applied"
+                    if acknowledged.accepted and surface.phase == HostDisplayTransitionPhase.Applied and surface.mode == HostDisplayMode.Windowed:
+                        if not _restore_windowed_position(surface, win):
+                            print "[hosted-wm] window-position-restore-failed x={surface.saved_windowed_geometry.x} y={surface.saved_windowed_geometry.y}"
+                else:
+                    surface.geometry = physical
+                if physical.width > 0 and physical.height > 0:
+                    comp.resize(physical.width, physical.height)
+                    other_dirty = true
+                print "[hosted-wm] event surface kind={kind} mode={surface.mode} phase={surface.phase} nonce={surface.request_nonce} width={physical.width} height={physical.height} scale_milli={physical.scale_milli}"
+            elif kind == EVT_MOVE:
+                val position = winit_event_window_position(ev)
+                surface.geometry.x = position.x
+                surface.geometry.y = position.y
+                if surface.mode == HostDisplayMode.Windowed and surface.phase != HostDisplayTransitionPhase.Requested and surface.phase != HostDisplayTransitionPhase.AwaitingResize:
+                    surface.saved_windowed_geometry.x = position.x
+                    surface.saved_windowed_geometry.y = position.y
+                print "[hosted-wm] event window-moved x={position.x} y={position.y} mode={surface.mode}"
             elif kind == EVT_FOCUS or kind == EVT_UNFOCUS:
                 focus_events = focus_events + 1
                 print "[hosted-wm] event focus count={focus_events} focused={kind == EVT_FOCUS}"
@@ -250,9 +365,47 @@ fn _run_hosted_wm(comp_in: HostCompositor, el: i64, win: i64, engine2d_raster: b
                         comp = host_compositor_minimize_focused(comp)
                     elif keycode == KEY_R:
                         comp = host_compositor_restore_all(comp)
+                    elif keycode == KEY_F11:
+                        display_nonce = display_nonce + 1
+                        surface = _request_host_fullscreen(surface, win, display_nonce, now_micros)
+                        print "[hosted-wm] display-request nonce={display_nonce} phase={surface.phase} requested_mode={surface.requested_mode}"
                     other_dirty = true
             rt_winit_event_free(ev)
             ev = rt_winit_event_loop_poll_events(el, 1)
+        if evidence.enabled:
+            val command = host_wm_evidence_read_command(evidence.input_fifo)
+            if command.valid and command.nonce > evidence_nonce:
+                evidence_nonce = command.nonce
+                evidence_phase = "accepted"
+                if command.action == "f11":
+                    display_nonce = display_nonce + 1
+                    surface = _request_host_fullscreen(surface, win, display_nonce, now_micros)
+                    evidence_phase = "display-requested"
+                elif command.action == "tab":
+                    comp = host_compositor_cycle_focus(comp)
+                    evidence_phase = "applied"
+                elif command.action == "minimize":
+                    comp = host_compositor_minimize_focused(comp)
+                    evidence_phase = "applied"
+                elif command.action == "maximize":
+                    comp = host_compositor_maximize_focused(comp)
+                    evidence_phase = "applied"
+                elif command.action == "restore":
+                    comp = host_compositor_restore_all(comp)
+                    evidence_phase = "applied"
+                elif command.action == "close":
+                    val focused = host_compositor_focused_window_id(comp)
+                    if focused > 0: comp.destroy_window(focused)
+                    evidence_phase = "applied"
+                elif command.action == "pointer":
+                    comp.pointer_move(command.x, command.y)
+                    evidence_phase = "applied"
+                elif command.action == "left":
+                    comp.handle_mouse_button(0, command.down)
+                    evidence_phase = "applied"
+                elif command.action == "snapshot":
+                    evidence_phase = "applied"
+                other_dirty = true
         if other_dirty or warmup_frames < 12:
             comp.render_frame()
             if engine2d_raster:
@@ -272,12 +425,22 @@ fn _run_hosted_wm(comp_in: HostCompositor, el: i64, win: i64, engine2d_raster: b
                 if engine2d_raster:
                     _hosted_wm_flush_engine2d_frame(comp, present_sink, win)
 
+        if evidence.enabled and evidence_nonce > 0 and other_dirty:
+            val evidence_pixels = comp.backend.get_pixel_buffer()
+            val evidence_backend = if engine2d_raster: "engine2d" else: HostedWinitBufferBackend.implementation_name()
+            val evidence_readback = if evidence_pixels.len() == comp.width * comp.height: "presented-pixel-buffer" else: "unavailable"
+            val snapshot = host_wm_evidence_snapshot(comp, surface, evidence_backend, false, evidence_readback, evidence_nonce, evidence_phase)
+            if not host_wm_evidence_write_snapshot(evidence.snapshot_path, snapshot) or not host_wm_evidence_write_capture(evidence.capture_path, comp.width, comp.height, evidence_pixels):
+                print "ERROR: hosted WM evidence write failed nonce={evidence_nonce}"
+                running = false
+            else:
+                print "[hosted-wm] evidence-ack nonce={evidence_nonce} phase={evidence_phase} surface_phase={surface.phase}"
     if engine2d_raster:
         print "[hosted-wm] frame-provenance-final {comp.backend.frame_provenance()}"
         comp.backend.shutdown()
         rt_winit_buffer_free(present_sink)
-    elif val wb = winit_backend:
-        wb.free()
+    elif owned_winit_buffer > 0:
+        rt_winit_buffer_free(owned_winit_buffer)
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
     print "SimpleOS shared hosted WM closed"

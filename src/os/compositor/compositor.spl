@@ -15,10 +15,19 @@ class WindowSurface:
     height: i32
     visible: bool
     session: any
+    # Runtime-owned client content. `session` may hold a typed UI tree or
+    # render request and must never be stringified to recover this value.
+    content_html: text
+    content_revision: i64
     dirty: bool
     owner_port: i64
     process_id: i64
     app_id: text
+    maximized: bool = false
+    restore_x: i32 = 0
+    restore_y: i32 = 0
+    restore_width: i32 = 0
+    restore_height: i32 = 0
 
 class Compositor:
     surfaces: [WindowSurface]
@@ -42,6 +51,8 @@ class Compositor:
     pending_wm_pointer_y: i32
     pending_wm_pointer_button: text
     pending_wm_pointer_kind: text
+    input_sequence: i64
+    pending_fullscreen_sequence: i64
 
     static fn with_backends(backend: CompositorBackend, input: InputBackend?, width: i32, height: i32) -> Compositor:
         Compositor(
@@ -65,7 +76,9 @@ class Compositor:
             pending_wm_pointer_x: 0,
             pending_wm_pointer_y: 0,
             pending_wm_pointer_button: "",
-            pending_wm_pointer_kind: ""
+            pending_wm_pointer_kind: "",
+            input_sequence: 0,
+            pending_fullscreen_sequence: 0
         )
 
     me create_window(title: text, x: i32, y: i32, width: i32, height: i32) -> i32:
@@ -80,6 +93,8 @@ class Compositor:
             height: height,
             visible: true,
             session: nil,
+            content_html: "",
+            content_revision: 1,
             dirty: true,
             owner_port: 0,
             process_id: 0,
@@ -107,6 +122,7 @@ class Compositor:
                 val surface = self.get_surface(wid.value)
                 if surface != nil and window.html != "":
                     self.update_window_tree(wid.value, window.html)
+                    self.update_window_content(wid.value, window.html)
             if window.process_id > 0u64 or window.app_id != "":
                 self.set_window_identity(wid.value.to_i32(), window.process_id.to_i64(), window.app_id)
             if window.minimized:
@@ -214,11 +230,17 @@ class Compositor:
         while i < self.surfaces.len():
             if self.surfaces[i].id.to_u64() == id:
                 var surface = self.surfaces[i]
+                if not surface.maximized:
+                    surface.restore_x = surface.x
+                    surface.restore_y = surface.y
+                    surface.restore_width = surface.width
+                    surface.restore_height = surface.height
                 surface.x = 0
-                surface.y = 0
+                surface.y = 44
                 surface.width = self.screen_width
-                surface.height = self.screen_height
+                surface.height = self.screen_height - 100
                 surface.visible = true
+                surface.maximized = true
                 surface.dirty = true
                 self.surfaces[i] = surface
             i = i + 1
@@ -228,7 +250,13 @@ class Compositor:
         while i < self.surfaces.len():
             if self.surfaces[i].id.to_u64() == id:
                 var surface = self.surfaces[i]
+                if surface.maximized and surface.restore_width > 0 and surface.restore_height > 0:
+                    surface.x = surface.restore_x
+                    surface.y = surface.restore_y
+                    surface.width = surface.restore_width
+                    surface.height = surface.restore_height
                 surface.visible = true
+                surface.maximized = false
                 surface.dirty = true
                 self.surfaces[i] = surface
             i = i + 1
@@ -241,6 +269,19 @@ class Compositor:
                 surface.session = tree
                 surface.dirty = true
                 self.surfaces[i] = surface
+            i = i + 1
+
+    me update_window_content(id: u64, content_html: text):
+        """Retain authoritative text/HTML without coercing an opaque tree."""
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id.to_u64() == id:
+                var surface = self.surfaces[i]
+                if surface.content_html != content_html:
+                    surface.content_html = content_html
+                    surface.content_revision = surface.content_revision + 1
+                    surface.dirty = true
+                    self.surfaces[i] = surface
             i = i + 1
 
     me set_window_identity(id: i32, process_id: i64, app_id: text):
@@ -400,6 +441,9 @@ class Compositor:
                 if self.focused_idx >= 0 and self.focused_idx < self.surfaces.len():
                     val focused_id = self.surfaces[self.focused_idx].id
                     self.destroy_window(focused_id)
+            elif sc == 0x57:
+                self.input_sequence = self.input_sequence + 1
+                self.pending_fullscreen_sequence = self.input_sequence
             var next_status = port_inb(0x64)
             status = next_status
 

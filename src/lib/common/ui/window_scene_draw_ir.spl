@@ -13,6 +13,7 @@ use common.ui.draw_ir.{
     draw_ir_box_with_style,
     draw_ir_composition,
     draw_ir_embedding_config,
+    draw_ir_group_command,
     draw_ir_rect,
     draw_ir_rect_bounds,
     draw_ir_source_info,
@@ -24,8 +25,14 @@ use common.ui.window_scene.{
     SharedWmScene,
     SharedWmWindow,
     SharedWmRect,
+    SharedWmRenderInput,
+    SharedWmTaskbarRenderInput,
+    WmRenderMetrics,
+    WmContentFrame,
     BackgroundSurface,
     WM_CHROME_KIND_BORDERLESS,
+    WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    WM_CONTENT_ORIGIN_GUI,
     shared_wm_scene_chrome,
     shared_wm_scene_layout_key,
     shared_wm_scene_resolve_background
@@ -36,6 +43,12 @@ use os.compositor.display_backend.{CompositorBackend}
 val WM_DRAW_IR_COMPOSITION_ID: text = "wm-composite"
 val WM_DRAW_IR_DESKTOP_SURFACE: text = "wm-desktop"
 val WM_DRAW_IR_CHROME_SURFACE: text = "wm-chrome"
+
+# Nested content-frame recursion cap (Lane C, "rendering inside rendering").
+# Depth 1 is a direct child of a top-level window frame, depth 2 a
+# grandchild, depth 3 a great-grandchild; deeper requests stop recursing
+# instead of walking an unbounded (or accidentally cyclic) parent chain.
+val WM_CONTENT_FRAME_MAX_NESTING_DEPTH: i32 = 3
 
 fn _wm_draw_ir_source(source_id: text, style_key: text, style_revision: text) -> DrawIrSourceInfo:
     draw_ir_source_info(DRAW_IR_SOURCE_WM_SCENE, source_id, "", "", "", "", style_key, style_revision)
@@ -227,6 +240,27 @@ fn _wm_draw_ir_window_batch(window: SharedWmWindow, backend_target: text) -> Dra
         _wm_draw_ir_source("wm.window.{window.window_id}", "wm.window", _wm_draw_ir_window_revision(window))
     )
 
+# Sibling of _wm_draw_ir_window_batch for a nested content frame (Lane C,
+# "rendering inside rendering"): a GUI-in-GUI or web-in-GUI child embedded in
+# a parent content frame rather than a top-level SharedWmWindow. The
+# embedding surface_id is the CHILD frame's own window_id (so downstream Draw
+# IR consumers can address it as its own surface), while the single command
+# carries parent_id so consumers can still walk the hierarchy up to the
+# parent. draw_ir_group_command is used because DrawIrCommand has no
+# raw-pixel-blit kind — content pixels are still delivered to the
+# CompositorBackend directly (_shared_wm_render_child_content_frames below);
+# this batch only threads the surface/parent relationship into Draw IR, it
+# does not duplicate the pixel data.
+fn _wm_draw_ir_child_content_frame_batch(frame: WmContentFrame, parent_window_id: text, backend_target: text) -> DrawIrBatch:
+    val embedding = draw_ir_embedding_config(frame.window_id, frame.window_id, frame.offset_x, frame.offset_y, frame.width, frame.height, 0, 1000, true)
+    draw_ir_batch_with_source(
+        "content-{frame.window_id}",
+        backend_target,
+        embedding,
+        [draw_ir_group_command(frame.window_id, parent_window_id)],
+        _wm_draw_ir_source("wm.content.{frame.window_id}", "wm.content", "rev={frame.content_revision}")
+    )
+
 fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarModel, backend_target: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> DrawIrComposition:
     val desktop_batch = _wm_draw_ir_desktop_batch(scene, backend_target)
     val windows = _wm_draw_ir_visible_windows_by_layer(scene)
@@ -248,6 +282,41 @@ fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarMod
             compact_batches[compact_batch_idx] = batches[compact_batch_idx]
             compact_batch_idx = compact_batch_idx + 1
         return draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, shared_wm_scene_layout_key(scene), backend_target, compact_batches)
+    draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, shared_wm_scene_layout_key(scene), backend_target, batches)
+
+# Recursively collects Draw IR batches for the content frames nested under
+# `parent_id` (parent_window_id == parent_id), one batch per child via
+# _wm_draw_ir_child_content_frame_batch, then recurses into each child's own
+# children up to WM_CONTENT_FRAME_MAX_NESTING_DEPTH — mirroring
+# _shared_wm_render_child_content_frames's traversal, but for Draw IR
+# projection instead of direct-to-backend pixels.
+fn _wm_draw_ir_child_content_batches_recursive(content_frames: [WmContentFrame], parent_id: text, backend_target: text, depth: i32) -> [DrawIrBatch]:
+    if depth > WM_CONTENT_FRAME_MAX_NESTING_DEPTH:
+        return []
+    var out: [DrawIrBatch] = []
+    for frame in content_frames:
+        if frame.parent_window_id == parent_id:
+            out.push(_wm_draw_ir_child_content_frame_batch(frame, parent_id, backend_target))
+            for nested in _wm_draw_ir_child_content_batches_recursive(content_frames, frame.window_id, backend_target, depth + 1):
+                out.push(nested)
+    out
+
+# Content-aware sibling of shared_wm_scene_draw_ir_composition: same
+# desktop/chrome/window batches (top-level behavior unchanged — this simply
+# builds on the existing composition), plus one additional batch per nested
+# content frame so downstream Draw IR consumers see the "rendering inside
+# rendering" hierarchy (child surface_id + parent_id). A scene with no
+# nested content frames produces byte-identical batches to
+# shared_wm_scene_draw_ir_composition.
+fn shared_wm_scene_draw_ir_composition_with_content(scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], backend_target: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> DrawIrComposition:
+    val base = shared_wm_scene_draw_ir_composition(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count)
+    if content_frames.len() == 0:
+        return base
+    var batches: [DrawIrBatch] = base.batches
+    for window in scene.windows:
+        if not window.minimized:
+            for child_batch in _wm_draw_ir_child_content_batches_recursive(content_frames, window.window_id, backend_target, 1):
+                batches.push(child_batch)
     draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, shared_wm_scene_layout_key(scene), backend_target, batches)
 
 # =========================================================================
@@ -277,6 +346,16 @@ fn wm_taskbar_item_x(screen_width: i32, count: i32, index: i32) -> i32:
     val start = (screen_width - dock_w) / 2 + 10
     start + index * wm_taskbar_item_width(screen_width, count)
 
+fn shared_wm_taskbar_object_rect(metrics: WmRenderMetrics, screen_width: i32, screen_height: i32, index: i32) -> SharedWmRect:
+    val slot_w = if metrics.min_hit_target > 0: metrics.min_hit_target else: 44
+    val taskbar_h = if metrics.taskbar_height > 0: metrics.taskbar_height else: 56
+    SharedWmRect(x: index * slot_w, y: screen_height - taskbar_h, width: slot_w, height: taskbar_h)
+
+fn shared_wm_taskbar_tray_object_rect(metrics: WmRenderMetrics, screen_width: i32, screen_height: i32, reverse_index: i32) -> SharedWmRect:
+    val slot_w = if metrics.min_hit_target > 0: metrics.min_hit_target else: 44
+    val taskbar_h = if metrics.taskbar_height > 0: metrics.taskbar_height else: 56
+    SharedWmRect(x: screen_width - (reverse_index + 2) * slot_w, y: screen_height - taskbar_h, width: slot_w, height: taskbar_h)
+
 # =========================================================================
 # SharedWmScene -> CompositorBackend executor
 #
@@ -295,7 +374,9 @@ fn wm_taskbar_item_x(screen_width: i32, count: i32, index: i32) -> i32:
 struct SharedWmSceneRenderStats:
     content_pixel_count: i64
 
-fn _shared_wm_scene_ascii_codes(value: text) -> [i32]:
+# Deprecated compatibility data for the title-derived canned app-content
+# renderer only. Production chrome and taskbar text must use backend.draw_text.
+fn _shared_wm_scene_legacy_content_ascii_codes(value: text) -> [i32]:
     if value == "Terminal": return [84, 101, 114, 109, 105, 110, 97, 108]
     if value == "Editor": return [69, 100, 105, 116, 111, 114]
     if value == "Browser": return [66, 114, 111, 119, 115, 101, 114]
@@ -325,7 +406,7 @@ fn _shared_wm_scene_ascii_codes(value: text) -> [i32]:
     []
 
 fn _draw_shared_wm_scene_text_fit(backend: CompositorBackend, x: i32, y: i32, text_value: text, fg: u32, bg: u32, max_chars: i32):
-    val codes = _shared_wm_scene_ascii_codes(text_value)
+    val codes = _shared_wm_scene_legacy_content_ascii_codes(text_value)
     var count = codes.len()
     if max_chars > 0 and count > max_chars:
         count = max_chars
@@ -336,15 +417,23 @@ fn _draw_shared_wm_scene_text_fit(backend: CompositorBackend, x: i32, y: i32, te
         cx = cx + 12
         i = i + 1
 
-fn shared_wm_scene_render_desktop_chrome(backend: CompositorBackend, width: i32, height: i32, theme: WmChromeColors, background_color: u32, background_surface: BackgroundSurface? = nil):
+fn _draw_shared_wm_backend_text_fit(backend: CompositorBackend, x: i32, y: i32, text_value: text, fg: u32, bg: u32, max_chars: i32):
+    if max_chars <= 0 or text_value.len() <= 0:
+        return
+    val bounded = if text_value.len() > max_chars: text_value.slice(0, max_chars) else: text_value
+    backend.draw_text(x, y, bounded, fg, bg)
+
+fn shared_wm_scene_render_desktop_chrome(backend: CompositorBackend, width: i32, height: i32, theme: WmChromeColors, background_color: u32, background_surface: BackgroundSurface? = nil, top_lane_height: i32 = 44, taskbar_height: i32 = 56):
     if val surface = background_surface:
         backend.blit_pixels(0, 0, surface.width, surface.height, surface.pixels)
     else:
         backend.clear(background_color)
-    backend.fill_rect(0, 0, width, 44, theme.command_lane)
-    backend.fill_rect(0, 42, width, 2, theme.accent)
-    backend.fill_rect(0, height - 56, width, 56, theme.taskbar)
-    backend.fill_rect(0, height - 56, width, 2, theme.accent)
+    val top_h = if top_lane_height > 0: top_lane_height else: 44
+    val taskbar_h = if taskbar_height > 0: taskbar_height else: 56
+    backend.fill_rect(0, 0, width, top_h, theme.command_lane)
+    backend.fill_rect(0, top_h - 2, width, 2, theme.accent)
+    backend.fill_rect(0, height - taskbar_h, width, taskbar_h, theme.taskbar)
+    backend.fill_rect(0, height - taskbar_h, width, 2, theme.accent)
 
 fn shared_wm_scene_draw_window_chrome(backend: CompositorBackend, window: SharedWmWindow, theme: WmChromeColors):
     if window.minimized:
@@ -356,9 +445,9 @@ fn shared_wm_scene_draw_window_chrome(backend: CompositorBackend, window: Shared
     backend.fill_rect(window.x + 12, window.y + 9, 10, 10, 0xFFE74C3Cu32)
     backend.fill_rect(window.x + 30, window.y + 9, 10, 10, 0xFFF1C40Fu32)
     backend.fill_rect(window.x + 48, window.y + 9, 10, 10, 0xFF27AE60u32)
-    _draw_shared_wm_scene_text_fit(backend, window.x + 66, window.y + 6, window.title, theme.text_primary, title_color, if window.width > 92: (window.width - 92) / 12 else: 0)
+    _draw_shared_wm_backend_text_fit(backend, window.x + 66, window.y + 6, window.title, theme.text_primary, title_color, if window.width > 92: (window.width - 92) / 8 else: 0)
     backend.fill_rect(window.x + window.width - 24, window.y + 2, 20, 20, theme.close_button)
-    _draw_shared_wm_scene_text_fit(backend, window.x + window.width - 18, window.y + 4, "X", theme.text_primary, theme.close_button, 1)
+    _draw_shared_wm_backend_text_fit(backend, window.x + window.width - 18, window.y + 4, "X", theme.text_primary, theme.close_button, 1)
 
 fn shared_wm_scene_render_taskbar(backend: CompositorBackend, windows: [SharedWmWindow], width: i32, height: i32, theme: WmChromeColors):
     val count = windows.len()
@@ -379,8 +468,40 @@ fn shared_wm_scene_render_taskbar(backend: CompositorBackend, windows: [SharedWm
         elif win.minimized:
             item_color = theme.host_window_body
         backend.fill_rect(ix + 2, dock_y + 4, item_w - 4, 36, item_color)
-        _draw_shared_wm_scene_text_fit(backend, ix + 8, dock_y + 14, win.title, theme.text_primary, item_color, if item_w > 16: (item_w - 16) / 12 else: 0)
+        _draw_shared_wm_backend_text_fit(backend, ix + 8, dock_y + 14, win.title, theme.text_primary, item_color, if item_w > 16: (item_w - 16) / 8 else: 0)
         i = i + 1
+
+fn shared_wm_scene_render_taskbar_model(backend: CompositorBackend, taskbar: TaskbarModel, width: i32, height: i32, theme: WmChromeColors, metrics: WmRenderMetrics, clock_label: text):
+    val taskbar_h = if metrics.taskbar_height > 0: metrics.taskbar_height else: 56
+    val taskbar_y = height - taskbar_h
+    # Desktop chrome owns the single taskbar background/accent pass. This
+    # function adds only authoritative taskbar objects.
+    val slot_w = if metrics.min_hit_target > 0: metrics.min_hit_target else: 44
+    val reserved_right = (taskbar.tray.len() + 1) * slot_w
+    val object_limit = width - reserved_right
+    var object_index = 0
+    for app in taskbar.pinned:
+        val rect = shared_wm_taskbar_object_rect(metrics, width, height, object_index)
+        if rect.x >= 0 and rect.x + rect.width <= object_limit:
+            backend.fill_rect(rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 8, theme.title_unfocused)
+            _draw_shared_wm_backend_text_fit(backend, rect.x + 6, rect.y + 14, app.display_name, theme.text_primary, theme.title_unfocused, if rect.width > 12: (rect.width - 12) / 8 else: 0)
+        object_index = object_index + 1
+    for window in taskbar.running:
+        val rect = shared_wm_taskbar_object_rect(metrics, width, height, object_index)
+        if rect.x >= 0 and rect.x + rect.width <= object_limit:
+            val color = if window.minimized: theme.host_window_body else: theme.accent
+            backend.fill_rect(rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 8, color)
+            _draw_shared_wm_backend_text_fit(backend, rect.x + 6, rect.y + 14, window.title, theme.text_primary, color, if rect.width > 12: (rect.width - 12) / 8 else: 0)
+        object_index = object_index + 1
+    var tray_index = 0
+    for tray in taskbar.tray:
+        val rect = shared_wm_taskbar_tray_object_rect(metrics, width, height, tray_index)
+        if rect.x >= 0 and rect.x + rect.width <= width - slot_w:
+            backend.fill_rect(rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 8, theme.host_window_body)
+            _draw_shared_wm_backend_text_fit(backend, rect.x + 6, rect.y + 14, tray.label, theme.text_primary, theme.host_window_body, if rect.width > 12: (rect.width - 12) / 8 else: 0)
+        tray_index = tray_index + 1
+    if width >= slot_w:
+        _draw_shared_wm_backend_text_fit(backend, width - slot_w + 4, taskbar_y + 14, clock_label, theme.text_primary, theme.taskbar, if slot_w > 8: (slot_w - 8) / 8 else: 0)
 
 fn _shared_wm_scene_content_line(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, line_index: i32, text_value: text, fg: u32, bg: u32):
     val y = cy + 34 + line_index * 22
@@ -444,10 +565,158 @@ fn _shared_wm_scene_window_content_pixel_count(window: SharedWmWindow) -> i64:
         return content.width.to_i64() * content.height.to_i64()
     0
 
+# Content frames may originate from the Simple Web adapter or from a GUI
+# panel producer (common.ui.wm_gui_content_frame) — both are legitimate,
+# fail-closed-validated content sources; anything else is rejected the same
+# way an unknown background kind is rejected (loud, no silent fallback).
+fn _wm_content_frame_origin_valid(origin_kind: text) -> bool:
+    origin_kind == WM_CONTENT_ORIGIN_SIMPLE_WEB or origin_kind == WM_CONTENT_ORIGIN_GUI
+
+fn _shared_wm_content_frame_for_window(input: SharedWmRenderInput, window: SharedWmWindow) -> WmContentFrame?:
+    var found: WmContentFrame? = nil
+    var matching_count = 0
+    for frame in input.content_frames:
+        if frame.window_id == window.window_id and frame.parent_window_id == "":
+            matching_count = matching_count + 1
+            val content = _shared_wm_scene_window_content_rect_with_titlebar(window, input.metrics.titlebar_height)
+            val valid = input.revision.scene_revision > 0 and _wm_content_frame_origin_valid(frame.origin_kind) and frame.scene_revision == input.revision.scene_revision and frame.content_revision > 0 and frame.checksum > 0u64 and frame.width == content.width and frame.height == content.height and frame.width > 0 and frame.height > 0 and frame.pixels.len() == frame.width * frame.height
+            if valid:
+                found = frame
+    if matching_count == 1:
+        return found
+    nil
+
+# Geometry-only rect intersection (no pixel data): used both by the pixel-crop
+# helper below and by the fail-closed magenta path, which needs the clipped
+# rect but never touches pixel data for an invalid child.
+fn _wm_rect_intersect(x: i32, y: i32, w: i32, h: i32, clip_rect: SharedWmRect) -> SharedWmRect:
+    val clip_x1 = clip_rect.x + clip_rect.width
+    val clip_y1 = clip_rect.y + clip_rect.height
+    val x1 = x + w
+    val y1 = y + h
+    val out_x0 = if x > clip_rect.x: x else: clip_rect.x
+    val out_y0 = if y > clip_rect.y: y else: clip_rect.y
+    val out_x1 = if x1 < clip_x1: x1 else: clip_x1
+    val out_y1 = if y1 < clip_y1: y1 else: clip_y1
+    val out_w = out_x1 - out_x0
+    val out_h = out_y1 - out_y0
+    if out_w <= 0 or out_h <= 0:
+        return SharedWmRect(x: out_x0, y: out_y0, width: 0, height: 0)
+    SharedWmRect(x: out_x0, y: out_y0, width: out_w, height: out_h)
+
+struct WmClippedPixelRect:
+    dest_x: i32
+    dest_y: i32
+    width: i32
+    height: i32
+    pixels: [u32]
+
+# Pure helper: crops a [u32] row-major pixel buffer (drawn at dest_x/dest_y,
+# src_w x src_h) to its intersection with clip_rect, returning the cropped
+# buffer plus the destination position to blit it at. CompositorBackend has
+# no clip primitive of its own (display_backend.spl:9), so nested content
+# frames that extend past their parent's content rect are clipped here,
+# before blit_pixels, rather than needing a new backend method. Callers must
+# check width/height > 0 before blitting (zero-area intersection is a no-op).
+fn _wm_content_frame_clip_to_rect(pixels: [u32], src_w: i32, src_h: i32, dest_x: i32, dest_y: i32, clip_rect: SharedWmRect) -> WmClippedPixelRect:
+    val out_rect = _wm_rect_intersect(dest_x, dest_y, src_w, src_h, clip_rect)
+    if out_rect.width <= 0 or out_rect.height <= 0:
+        return WmClippedPixelRect(dest_x: out_rect.x, dest_y: out_rect.y, width: 0, height: 0, pixels: [])
+    val crop_src_x = out_rect.x - dest_x
+    val crop_src_y = out_rect.y - dest_y
+    var cropped: [u32] = [0u32; out_rect.width * out_rect.height]
+    var row = 0
+    while row < out_rect.height:
+        val src_row = crop_src_y + row
+        val src_row_start = src_row * src_w + crop_src_x
+        val dst_row_start = row * out_rect.width
+        var col = 0
+        while col < out_rect.width:
+            cropped[dst_row_start + col] = pixels[src_row_start + col]
+            col = col + 1
+        row = row + 1
+    WmClippedPixelRect(dest_x: out_rect.x, dest_y: out_rect.y, width: out_rect.width, height: out_rect.height, pixels: cropped)
+
+# Recursively renders the content frames nested under `parent_id`
+# (parent_window_id == parent_id), clipped to `parent_rect` (the immediate
+# parent's own content rect), then recurses into each child's own children
+# (grandchildren etc.) up to WM_CONTENT_FRAME_MAX_NESTING_DEPTH. A valid
+# child is blitted (cropped to the parent rect); an invalid child (bad
+# revision/checksum/size) is fail-closed magenta-filled over its own rect
+# (also cropped to the parent rect) instead of drawing stale/fabricated
+# pixels — mirroring _shared_wm_content_frame_for_window's fail-closed
+# contract for top-level frames. Returns the pixel count actually blitted
+# (valid children only) so callers can fold it into SharedWmSceneRenderStats.
+fn _shared_wm_render_child_content_frames(backend: CompositorBackend, input: SharedWmRenderInput, parent_id: text, parent_rect: SharedWmRect, depth: i32) -> i64:
+    if depth > WM_CONTENT_FRAME_MAX_NESTING_DEPTH:
+        return 0
+    var content_pixel_count: i64 = 0
+    for frame in input.content_frames:
+        if frame.parent_window_id == parent_id:
+            val child_x = parent_rect.x + frame.offset_x
+            val child_y = parent_rect.y + frame.offset_y
+            val valid = input.revision.scene_revision > 0 and _wm_content_frame_origin_valid(frame.origin_kind) and frame.scene_revision == input.revision.scene_revision and frame.content_revision > 0 and frame.checksum > 0u64 and frame.width > 0 and frame.height > 0 and frame.pixels.len() == frame.width * frame.height
+            if valid:
+                val clipped = _wm_content_frame_clip_to_rect(frame.pixels, frame.width, frame.height, child_x, child_y, parent_rect)
+                if clipped.width > 0 and clipped.height > 0:
+                    backend.blit_pixels(clipped.dest_x, clipped.dest_y, clipped.width, clipped.height, clipped.pixels)
+                    content_pixel_count = content_pixel_count + (clipped.width.to_i64() * clipped.height.to_i64())
+                val child_rect = SharedWmRect(x: child_x, y: child_y, width: frame.width, height: frame.height)
+                content_pixel_count = content_pixel_count + _shared_wm_render_child_content_frames(backend, input, frame.window_id, child_rect, depth + 1)
+            else:
+                print("shared_wm_scene_render_context_to_backend: rejecting missing, stale, or invalid nested content frame for window '{frame.window_id}' (parent '{parent_id}')")
+                val fail_rect = _wm_rect_intersect(child_x, child_y, frame.width, frame.height, parent_rect)
+                if fail_rect.width > 0 and fail_rect.height > 0:
+                    backend.fill_rect(fail_rect.x, fail_rect.y, fail_rect.width, fail_rect.height, 0xFFFF00FFu32)
+    content_pixel_count
+
+fn _shared_wm_scene_window_content_rect_with_titlebar(window: SharedWmWindow, titlebar_height: i32) -> SharedWmRect:
+    if window.chrome_kind == WM_CHROME_KIND_BORDERLESS:
+        return SharedWmRect(x: window.x, y: window.y, width: window.width, height: window.height)
+    val title_h = if titlebar_height > 0: titlebar_height else: 28
+    SharedWmRect(x: window.x + 4, y: window.y + title_h + 4, width: window.width - 8, height: window.height - title_h - 8)
+
+# Rich content-frame executor. Unlike the compatibility API below, this path
+# never substitutes canned title-based content for a missing or stale frame.
+fn _shared_wm_scene_render_context_content_to_backend(backend: CompositorBackend, input: SharedWmRenderInput) -> SharedWmSceneRenderStats:
+    val scene = input.scene
+    val theme = wm_chrome_theme()
+    val resolved_background = shared_wm_scene_resolve_background(scene.background, scene.width, scene.height, input.t_micros)
+    shared_wm_scene_render_desktop_chrome(backend, scene.width, scene.height, theme, resolved_background.color, resolved_background.surface, input.metrics.top_lane_height, input.metrics.taskbar_height)
+    var content_pixel_count: i64 = 0
+    for window in scene.windows:
+        if not window.minimized:
+            if window.chrome_kind != WM_CHROME_KIND_BORDERLESS:
+                shared_wm_scene_draw_window_chrome(backend, window, theme)
+            val content = _shared_wm_scene_window_content_rect_with_titlebar(window, input.metrics.titlebar_height)
+            if val frame = _shared_wm_content_frame_for_window(input, window):
+                backend.blit_pixels(content.x, content.y, frame.width, frame.height, frame.pixels)
+                content_pixel_count = content_pixel_count + frame.pixels.len().to_i64()
+                content_pixel_count = content_pixel_count + _shared_wm_render_child_content_frames(backend, input, window.window_id, content, 1)
+            else:
+                print("shared_wm_scene_render_context_to_backend: rejecting missing, stale, or invalid Simple Web frame for window '{window.window_id}'")
+                backend.fill_rect(content.x, content.y, content.width, content.height, 0xFFFF00FFu32)
+    SharedWmSceneRenderStats(content_pixel_count: content_pixel_count)
+
+fn shared_wm_scene_render_context_to_backend(backend: CompositorBackend, input: SharedWmRenderInput) -> SharedWmSceneRenderStats:
+    val stats = _shared_wm_scene_render_context_content_to_backend(backend, input)
+    val scene = input.scene
+    shared_wm_scene_render_taskbar(backend, scene.windows, scene.width, scene.height, wm_chrome_theme())
+    stats
+
+# Authoritative rich executor. The final taskbar pass consumes TaskbarModel
+# objects directly; it never derives pinned, running, tray, or clock objects
+# from window titles.
+fn shared_wm_scene_render_taskbar_context_to_backend(backend: CompositorBackend, input: SharedWmTaskbarRenderInput) -> SharedWmSceneRenderStats:
+    val stats = _shared_wm_scene_render_context_content_to_backend(backend, input.render)
+    val scene = input.render.scene
+    shared_wm_scene_render_taskbar_model(backend, input.taskbar, scene.width, scene.height, wm_chrome_theme(), input.render.metrics, input.clock_label)
+    stats
+
 # `t_micros` (default 0) is only consumed by a kind:"motion" background (see
 # shared_wm_scene_resolve_background); every existing caller that never sets
 # a motion background is unaffected by the new trailing param.
-fn shared_wm_scene_render_to_backend(backend: CompositorBackend, scene: SharedWmScene, t_micros: i64 = 0) -> SharedWmSceneRenderStats:
+fn _shared_wm_scene_render_compat_content_to_backend(backend: CompositorBackend, scene: SharedWmScene, t_micros: i64 = 0) -> SharedWmSceneRenderStats:
     val theme = wm_chrome_theme()
     val resolved_background = shared_wm_scene_resolve_background(scene.background, scene.width, scene.height, t_micros)
     shared_wm_scene_render_desktop_chrome(backend, scene.width, scene.height, theme, resolved_background.color, resolved_background.surface)
@@ -459,5 +728,9 @@ fn shared_wm_scene_render_to_backend(backend: CompositorBackend, scene: SharedWm
             val content = _shared_wm_scene_window_content_rect(window)
             shared_wm_scene_render_app_content(backend, window.title, content.x, content.y, content.width, content.height, window.html)
             content_pixel_count = content_pixel_count + _shared_wm_scene_window_content_pixel_count(window)
-    shared_wm_scene_render_taskbar(backend, scene.windows, scene.width, scene.height, theme)
     SharedWmSceneRenderStats(content_pixel_count: content_pixel_count)
+
+fn shared_wm_scene_render_to_backend(backend: CompositorBackend, scene: SharedWmScene, t_micros: i64 = 0) -> SharedWmSceneRenderStats:
+    val stats = _shared_wm_scene_render_compat_content_to_backend(backend, scene, t_micros)
+    shared_wm_scene_render_taskbar(backend, scene.windows, scene.width, scene.height, wm_chrome_theme())
+    stats

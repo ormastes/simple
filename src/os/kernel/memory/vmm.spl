@@ -173,6 +173,8 @@ var g_vmm: VirtMemManager = VirtMemManager(
     pml4_phys: 0,
     hhdm_offset: 0
 )
+var _vmm_pml4_phys: u64 = 0
+var _vmm_hhdm_offset: u64 = 0
 # Initialized-flag workaround: use a u64 sentinel (0 = not initialized, 1 = initialized)
 var g_vmm_initialized: u64 = 0
 var _vmm_test_fail_map_after: i64 = -1
@@ -183,7 +185,30 @@ var g_next_as_id: u64 = 1
 
 fn _phys_to_virt(phys: u64) -> u64:
     """Convert physical to virtual address via HHDM."""
-    phys + g_vmm.hhdm_offset
+    phys + _vmm_hhdm_offset
+
+fn vmm_kernel_pml4_phys() -> u64:
+    _vmm_pml4_phys
+
+fn vmm_bootstrap_pml4_entry0() -> u64:
+    if _vmm_pml4_phys == 0:
+        return 0
+    _read_pte(_phys_to_virt(_vmm_pml4_phys), 0)
+
+fn vmm_bootstrap_pdpt_entry0() -> u64:
+    val pml4_entry = vmm_bootstrap_pml4_entry0()
+    if not _pte_is_present(pml4_entry):
+        return 0
+    _read_pte(_phys_to_virt(_pte_phys_addr(pml4_entry)), 0)
+
+fn vmm_bootstrap_pd_entry0() -> u64:
+    val pdpt_entry = vmm_bootstrap_pdpt_entry0()
+    if not _pte_is_present(pdpt_entry):
+        return 0
+    _read_pte(_phys_to_virt(_pte_phys_addr(pdpt_entry)), 0)
+
+fn vmm_manager_snapshot() -> VirtMemManager:
+    VirtMemManager(pml4_phys: _vmm_pml4_phys, hhdm_offset: _vmm_hhdm_offset)
 
 fn vmm_phys_to_virt(phys: u64) -> u64:
     _phys_to_virt(phys)
@@ -193,21 +218,18 @@ fn _alloc_table_page() -> u64:
 
     Returns physical address of the new table, or 0 on failure.
     """
-    val frame = pmm_alloc_page()
-    if val Some(f) = frame:
-        val phys = f.pfn * PAGE_SIZE
-        val virt = _phys_to_virt(phys)
+    val phys = pmm_alloc_page_raw()
+    if phys == 0:
+        return 0
+    val virt = _phys_to_virt(phys)
 
-        # Zero the page table
-        var i: u64 = 0
-        while i < ENTRIES_PER_TABLE:
-            _write_pte(virt, i, 0)
-            i = i + 1
+    # Zero the page table
+    var i: u64 = 0
+    while i < ENTRIES_PER_TABLE:
+        _write_pte(virt, i, 0)
+        i = i + 1
 
-        return phys
-
-    # Allocation failed
-    0
+    phys
 
 # ============================================================================
 # Page Table Walk & Mapping
@@ -253,9 +275,14 @@ fn vmm_init(pmm_manager: PhysMemManager, hhdm_offset: u64):
     Creates kernel PML4, identity-maps first 4GB, maps framebuffer.
     Does NOT switch CR3 yet — caller should do that after all mappings.
     """
+    val _manager = pmm_manager
+    vmm_init_from_global_pmm(hhdm_offset)
+
+fn vmm_init_from_global_pmm(hhdm_offset: u64):
+    """Initialize VMM without passing PMM aggregate state across the ABI."""
     log_raw_println("[VMM] Initializing virtual memory manager...")
 
-    g_vmm.hhdm_offset = hhdm_offset
+    _vmm_hhdm_offset = hhdm_offset
 
     # Allocate PML4
     val pml4_phys = _alloc_table_page()
@@ -263,7 +290,7 @@ fn vmm_init(pmm_manager: PhysMemManager, hhdm_offset: u64):
         log_raw_println("[VMM] FATAL: Could not allocate PML4")
         return
 
-    g_vmm.pml4_phys = pml4_phys
+    _vmm_pml4_phys = pml4_phys
     g_vmm_initialized = 1
 
     log_raw_println("[VMM] PML4 at physical 0x{pml4_phys}")
@@ -274,22 +301,29 @@ fn vmm_init(pmm_manager: PhysMemManager, hhdm_offset: u64):
 
     log_raw_println("[VMM] VMM initialization complete")
 
+fn vmm_activate() -> bool:
+    """Activate the initialized kernel page table on the current CPU."""
+    if g_vmm_initialized == 0 or _vmm_pml4_phys == 0:
+        return false
+    _load_cr3(_vmm_pml4_phys)
+    _read_cr3() == _vmm_pml4_phys
+
 fn vmm_init_sparse_for_test(pmm_manager: PhysMemManager, hhdm_offset: u64) -> bool:
     """Initialize only the root page table for deterministic host tests."""
     val _manager = pmm_manager
     if not mmio_test_mode_enabled():
         return false
-    g_vmm.hhdm_offset = hhdm_offset
+    _vmm_hhdm_offset = hhdm_offset
     val pml4_phys = _alloc_table_page()
     if pml4_phys == 0:
         return false
-    g_vmm.pml4_phys = pml4_phys
+    _vmm_pml4_phys = pml4_phys
     g_vmm_initialized = 1
     true
 
 fn _identity_map_4gb():
     """Identity-map first 4GB using 2MB huge pages."""
-    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+    val pml4_virt = _phys_to_virt(_vmm_pml4_phys)
 
     val pdpt_virt = _ensure_table_entry(pml4_virt, 0)
     if pdpt_virt == 0:
@@ -339,7 +373,7 @@ fn vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
             no_execute: true
         )
 
-    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+    val pml4_virt = _phys_to_virt(_vmm_pml4_phys)
 
     val pdpt_virt = _ensure_table_entry(pml4_virt, _pml4_index(vaddr))
     if pdpt_virt == 0:
@@ -374,7 +408,7 @@ fn vmm_clear_map_failure_for_test():
 fn vmm_unmap_page(virt: VirtAddr) -> bool:
     """Unmap a single 4KB virtual page."""
     val vaddr = virt_addr_value(virt)
-    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+    val pml4_virt = _phys_to_virt(_vmm_pml4_phys)
 
     val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
     if not _pte_is_present(pml4_entry):
@@ -403,7 +437,7 @@ fn vmm_unmap_page(virt: VirtAddr) -> bool:
 fn vmm_read_pte(virt: VirtAddr) -> u64:
     """Read the page table entry for a virtual address."""
     val vaddr = virt_addr_value(virt)
-    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+    val pml4_virt = _phys_to_virt(_vmm_pml4_phys)
 
     val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
     if not _pte_is_present(pml4_entry):
@@ -429,7 +463,7 @@ fn vmm_read_pte(virt: VirtAddr) -> u64:
 fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
     """Translate virtual address to physical by walking page tables."""
     val vaddr = virt_addr_value(virt)
-    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+    val pml4_virt = _phys_to_virt(_vmm_pml4_phys)
 
     val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
     if not _pte_is_present(pml4_entry):
@@ -470,8 +504,8 @@ fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
 # CPU Primitives (inline assembly)
 # ============================================================================
 
-extern fn rt_read_cr3() -> u64
-extern fn rt_write_cr3(value: u64)
+extern fn rt_read_cr3_raw() -> u64
+extern fn rt_write_cr3_raw(value: u64)
 
 var _vmm_fallback_cr3: u64 = 0
 fn rt_read_cr3__fallback() -> u64: _vmm_fallback_cr3
@@ -487,10 +521,10 @@ fn _load_cr3(pml4_phys: u64):
     if mmio_test_mode_enabled():
         _vmm_fallback_cr3 = pml4_phys
         return
-    rt_write_cr3(pml4_phys)
+    rt_write_cr3_raw(pml4_phys)
 
 fn _read_cr3() -> u64:
     """Read current CR3 register value."""
     if mmio_test_mode_enabled():
         return _vmm_fallback_cr3
-    rt_read_cr3()
+    rt_read_cr3_raw()

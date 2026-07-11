@@ -10,7 +10,7 @@
 use common.ui.widget.{WidgetNode, UITree, UIState, UIEvent}
 use nogc_sync_mut.ui.session.{UISession, new_session}
 use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef, TrayItem}
-use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WM_CHROME_KIND_TITLED, shared_wm_background_color}
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, WM_CHROME_KIND_TITLED, shared_wm_background_color}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
 use common.ui.wm_runtime_dispatch.{WmRuntimeDispatchCommand, WmRuntimeShellState, wm_runtime_shell_state_empty}
 use common.ui.builder.{
@@ -18,6 +18,7 @@ use common.ui.builder.{
     build_tree, build_tree_with_title, with_height, with_width, with_flex
 }
 use os.compositor.compositor.{Compositor, WindowSurface}
+use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached}
 use os.compositor.wm_action_applier.{apply_wm_action_to_compositor, wm_action_with_app_id}
 use os.compositor.app_content.{app_state_new}
 use os.drivers.framebuffer.fb_driver.{Color}
@@ -40,7 +41,9 @@ use os.desktop.shell_process.{
     _process_rows, _process_panel_rows, _window_overlay_rows,
     _selected_process_row, _normalized_process_selection, _process_is_live
 }
-use os.desktop.shell_baremetal.{_draw_baremetal_overlay, baremetal_engine2d_overlay_backend}
+use os.desktop.shell_baremetal.{baremetal_engine2d_overlay_backend, render_baremetal_shared_wm_scene}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
+use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
 use os.desktop.wm_runtime_bridge.{simpleos_wm_pointer_runtime_command, simpleos_wm_apply_pointer}
 use os.desktop.shell_types.{
     EditorResidentLaunch, _build_editor_resident_launch,
@@ -50,6 +53,63 @@ use os.desktop.shell_types.{
     APP_ID_BROWSER_DEMO, APP_ID_HELLO_WORLD, APP_ID_FILE_MANAGER,
     APP_ID_SHELL, APP_ID_EDITOR, APP_ID_SIMPLE_BROWSER
 }
+
+fn _simpleos_revision_mix_i64(seed: i64, value: i64) -> i64:
+    ((seed * 131 + value) % 2147483647) + 1
+
+fn _simpleos_revision_mix_text(seed: i64, value: text) -> i64:
+    var revision = seed
+    var i = 0
+    while i < value.len():
+        revision = _simpleos_revision_mix_i64(revision, value.char_at(i).ord().to_i64())
+        i = i + 1
+    revision
+
+fn simpleos_runtime_scene_revision(surfaces: [WindowSurface], focused_idx: i32) -> i64:
+    var revision: i64 = 17
+    var z = 0
+    while z < surfaces.len():
+        val surface = surfaces[z]
+        revision = _simpleos_revision_mix_i64(revision, surface.id.to_i64())
+        revision = _simpleos_revision_mix_i64(revision, surface.x.to_i64())
+        revision = _simpleos_revision_mix_i64(revision, surface.y.to_i64())
+        revision = _simpleos_revision_mix_i64(revision, surface.width.to_i64())
+        revision = _simpleos_revision_mix_i64(revision, surface.height.to_i64())
+        revision = _simpleos_revision_mix_i64(revision, surface.content_revision)
+        revision = _simpleos_revision_mix_text(revision, surface.title)
+        revision = _simpleos_revision_mix_text(revision, surface.app_id)
+        revision = _simpleos_revision_mix_i64(revision, surface.process_id)
+        revision = _simpleos_revision_mix_i64(revision, z.to_i64())
+        revision = _simpleos_revision_mix_i64(revision, if z == focused_idx: 1 else: 0)
+        revision = _simpleos_revision_mix_i64(revision, if surface.visible: 1 else: 0)
+        z = z + 1
+    revision
+
+fn simpleos_runtime_taskbar_revision(taskbar: TaskbarModel, clock: text) -> i64:
+    var revision = _simpleos_revision_mix_text(23, clock)
+    var i = 0
+    while i < taskbar.pinned.len():
+        val app = taskbar.pinned[i]
+        revision = _simpleos_revision_mix_text(revision, app.app_id)
+        revision = _simpleos_revision_mix_text(revision, app.display_name)
+        revision = _simpleos_revision_mix_text(revision, app.icon)
+        i = i + 1
+    i = 0
+    while i < taskbar.running.len():
+        val window = taskbar.running[i]
+        revision = _simpleos_revision_mix_text(revision, window.window_id)
+        revision = _simpleos_revision_mix_text(revision, window.app_id)
+        revision = _simpleos_revision_mix_text(revision, window.title)
+        revision = _simpleos_revision_mix_i64(revision, if window.minimized: 1 else: 0)
+        i = i + 1
+    i = 0
+    while i < taskbar.tray.len():
+        val item = taskbar.tray[i]
+        revision = _simpleos_revision_mix_text(revision, item.item_id)
+        revision = _simpleos_revision_mix_text(revision, item.label)
+        revision = _simpleos_revision_mix_text(revision, item.icon)
+        i = i + 1
+    revision
 # ============================================================================
 # Desktop Shell Constants
 # ============================================================================
@@ -184,6 +244,7 @@ class DesktopShell:
     task_reaper_enabled: bool
     wm_runtime_state: WmRuntimeShellState
     last_wm_loop_marker: text
+    web_content_caches: Dict<i64, WebRenderPixelArtifactCache>
 
 impl DesktopShell:
 
@@ -220,7 +281,8 @@ impl DesktopShell:
             selected_process_idx: 0,
             task_reaper_enabled: true,
             wm_runtime_state: wm_runtime_shell_state_empty(),
-            last_wm_loop_marker: ""
+            last_wm_loop_marker: "",
+            web_content_caches: {}
         )
 
     me set_task_reaper_enabled(enabled: bool):
@@ -253,6 +315,19 @@ impl DesktopShell:
             self.launcher_initialized = true
             log_info("[desktop] " + "[shell] init: launcher initialized")
         log_info("[desktop] " + "[shell] init: skipping taskbar (builder DSL unavailable in baremetal)")
+        log_info("[desktop] " + "[shell] init: desktop shell initialized")
+
+    me init_baremetal():
+        """Initialize the desktop without hosted manifest filesystem reads."""
+        if not self.wm.initialized:
+            if self.wm.init():
+                log_info("[desktop] " + "[shell] init: wm service initialized")
+            else:
+                log_info("[desktop] " + "[shell] init: wm service init failed")
+        if not self.launcher_initialized:
+            launcher_init()
+            self.launcher_initialized = true
+            log_info("[desktop] " + "[shell] init: canonical baremetal launcher initialized")
         log_info("[desktop] " + "[shell] init: desktop shell initialized")
 
     me update_taskbar():
@@ -601,32 +676,25 @@ impl DesktopShell:
             self.compositor.render_all()
 
     me launch_app_baremetal(name: text):
-        """Baremetal-safe app launch: record the app name so the
-        direct-render overlay draws a fake window for it.
+        """Launch an app without inventing an overlay-only window.
 
-        The widget builder DSL crashes in baremetal (WidgetNode.new
-        is auto-stubbed), so we bypass it entirely.
+        Apps that own the remote-window protocol publish their surface through
+        WmService. Other successful launches are materialized immediately as a
+        compositor-owned surface. A failed launch leaves no visible window.
         """
         if not self.launcher_initialized:
             launcher_init()
-            _sync_launcher_registry_with_manifests()
             self.launcher_initialized = true
         val pid = launcher_launch(name)
         if pid >= 0:
             log_info("[desktop] " + "[shell] launched (baremetal): {name} pid={pid}")
+            if not self.materialize_process_launch(name, pid.to_u64()):
+                log_info("[desktop] " + "[shell] baremetal materialization failed for {name} pid={pid}")
         else:
-            log_info("[desktop] " + "[shell] launcher launch failed for {name}, keeping overlay-only window")
-        if not _contains_text(self.baremetal_apps, name):
-            self.baremetal_apps = self.baremetal_apps.push(name)
+            log_info("[desktop] " + "[shell] launcher launch failed for {name}; no window created")
 
     me run_baremetal(engine: Engine2D):
-        """Baremetal event loop with direct Engine2D overlay.
-
-        Draws the taskbar, app launcher grid, and any launched app
-        windows directly through Engine2D — no compositor surfaces,
-        no widget tree, no builder DSL. The compositor still polls
-        input so Esc/Alt-F4 continue to work.
-        """
+        """Baremetal event loop rendering live compositor state through Engine2D."""
         log_info("[desktop] " + "[shell] entering baremetal event loop...")
         self.compositor.running = true
         val screen_w = self.compositor.screen_width
@@ -635,26 +703,55 @@ impl DesktopShell:
         while self.compositor.running:
             self.drain_wm_actions()
             self.compositor.handle_input()
+            val fullscreen_sequence = self.compositor.pending_fullscreen_sequence
+            var fullscreen_action = ""
+            var fullscreen_window_id: i32 = 0
+            if fullscreen_sequence > 0:
+                self.compositor.pending_fullscreen_sequence = 0
+                log_raw_println("[wm-input-irq] input_seq={fullscreen_sequence} scancode=87")
+                if self.compositor.focused_idx >= 0 and self.compositor.focused_idx < self.compositor.surfaces.len():
+                    fullscreen_window_id = self.compositor.surfaces[self.compositor.focused_idx].id
+                    if self.compositor.surfaces[self.compositor.focused_idx].maximized:
+                        self.compositor.restore_window(fullscreen_window_id.to_u64())
+                        fullscreen_action = "restore"
+                    else:
+                        self.compositor.maximize_window(fullscreen_window_id.to_u64())
+                        fullscreen_action = "maximize"
             self.handle_pending_wm_pointer_step()
             self.handle_pending_shell_input(true)
             self.reconcile_dead_process_windows()
-            val visible_apps = _window_overlay_rows()
-            self.baremetal_apps = visible_apps
-            val process_rows = _process_panel_rows()
-            # Clear desktop — dark blue background, matches the
-            # Engine2D verification scene in gui_entry_engine2d.
             var overlay_backend = baremetal_engine2d_overlay_backend(engine, screen_w, screen_h)
-            overlay_backend.clear(0xFF0A2540)
-            _draw_baremetal_overlay(
-                overlay_backend,
-                visible_apps,
-                process_rows,
-                self.selected_process_idx,
-                screen_w,
-                screen_h,
-                self.clock_text
-            )
+            val scene = self.runtime_scene_snapshot()
+            val taskbar = self.runtime_taskbar_model()
+            val scene_revision = self.runtime_scene_revision()
+            val taskbar_revision = self.runtime_taskbar_revision()
+            val content_frames = self.runtime_content_frames(scene_revision)
+            render_baremetal_shared_wm_scene(overlay_backend, scene, taskbar, content_frames, scene_revision, taskbar_revision, self.clock_text)
             overlay_backend.present()
+            if fullscreen_sequence > 0 and fullscreen_action != "":
+                val maximized = fullscreen_action == "maximize"
+                log_raw_println("[wm-state] input_seq={fullscreen_sequence} action={fullscreen_action} window={fullscreen_window_id} maximized={maximized}")
+                log_raw_println("[wm-frame] input_seq={fullscreen_sequence} generation={scene_revision}")
+
+    fn runtime_scene_revision() -> i64:
+        simpleos_runtime_scene_revision(self.compositor.surfaces, self.compositor.focused_idx)
+
+    fn runtime_taskbar_revision() -> i64:
+        simpleos_runtime_taskbar_revision(self.runtime_taskbar_model(), self.clock_text)
+
+    me runtime_content_frames(scene_revision: i64) -> [WmContentFrame]:
+        var frames: [WmContentFrame] = []
+        for surface in self.compositor.surfaces:
+            if surface.visible:
+                val content_w = surface.width - 8
+                val content_h = surface.height - 36
+                if content_w > 0 and content_h > 0:
+                    var cache = self.web_content_caches.get(surface.id.to_i64()) ?? WebRenderPixelArtifactCache.create(content_w, content_h, "auto")
+                    if cache.width != content_w or cache.height != content_h:
+                        cache = WebRenderPixelArtifactCache.create(content_w, content_h, "auto")
+                    frames = frames.push(simple_web_content_frame_cached(cache, "{surface.id}", scene_revision, surface.content_revision, default_theme_id(), surface.title, surface.content_html, content_w, content_h, 0))
+                    self.web_content_caches.set(surface.id.to_i64(), cache)
+        frames
 
     fn runtime_scene_snapshot() -> SharedWmScene:
         var windows: [SharedWmWindow] = []

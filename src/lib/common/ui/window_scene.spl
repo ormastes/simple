@@ -261,12 +261,102 @@ struct SharedWmChrome:
     right_icon_count: i32
     taskbar_icon_count: i32
 
+# Immutable revision tuple carried beside a SharedWmScene projection. Target
+# authorities own and advance these counters; common.ui only transports them.
+struct WmSceneRevision:
+    scene_revision: i64
+    input_revision: i64
+    taskbar_revision: i64
+
+val WM_CONTENT_ORIGIN_SIMPLE_WEB: text = "simple_web"
+val WM_CONTENT_ORIGIN_GUI: text = "gui"
+
+# Canonical rendered content supplied by the Simple Web adapter (or, with
+# origin_kind WM_CONTENT_ORIGIN_GUI, a GUI panel producer). Pixels are ARGB
+# u32 values in row-major order and must exactly match width * height.
+#
+# parent_window_id/offset_x/offset_y express nested content frames ("rendering
+# inside rendering"): a top-level frame (rendered directly into a WM window's
+# content rect) has parent_window_id == "" and offset_x/offset_y == 0. A
+# nested frame (a panel embedded inside another content frame — GUI-in-GUI or
+# web-in-GUI) carries the window_id of the PARENT content frame it is
+# embedded in, plus its pixel offset within that parent's content rect. This
+# lets the render executor discover children by scanning content_frames for
+# parent_window_id == some_frame.window_id without inventing a second parent
+# side-channel.
+struct WmContentFrame:
+    window_id: text
+    scene_revision: i64
+    content_revision: i64
+    origin_kind: text
+    width: i32
+    height: i32
+    pixels: [u32]
+    checksum: u64
+    parent_window_id: text
+    offset_x: i32
+    offset_y: i32
+
+# Shared checksum algorithm for WmContentFrame.checksum. Extracted from the
+# Simple Web adapter (os.compositor.simple_web_window_renderer) so every
+# content-frame producer (Simple Web, GUI) uses the exact same provenance
+# algorithm instead of each inventing its own — position is folded in
+# alongside color so equal-color permutations do not collapse to the same
+# value. A valid frame must never carry the executor's reserved zero
+# checksum (0u64 is reserved to mean "no/invalid content").
+#
+# The result is masked to 63 bits (high bit always 0) as a workaround for a
+# confirmed interpreter bug: a u64 struct field >= 2^63 corrupts `if val` /
+# Option-unwrap on the JIT-bailout interpreter path used by this checksum's
+# consumer (_shared_wm_content_frame_for_window in window_scene_draw_ir.spl —
+# `var found: WmContentFrame? = nil` triggers a "shared pointers cannot be
+# reassigned" JIT bail, and under that fallback a >= 2^63 u64 field makes
+# `if val f = fn_returning_option():` fail to narrow the Option, so a later
+# `f.field` access errors with "unknown property or method on Option"). See
+# doc/08_tracking/bug/interp_u64_high_bit_option_unwrap_corruption_2026-07-11.md
+# for the isolated repro. This costs one bit of hash space, not a redesign of
+# the algorithm.
+fn wm_content_frame_checksum(pixels: [u32]) -> u64:
+    var checksum = 0x9E3779B97F4A7C15u64
+    var i = 0
+    while i < pixels.len():
+        checksum = checksum ^ (pixels[i].to_u64() + (i + 1).to_u64() * 0x100000001B3u64)
+        i = i + 1
+    val masked = checksum & 0x7FFFFFFFFFFFFFFFu64
+    if masked == 0u64: 1u64 else: masked
+
+# Physical metrics shared by render and hit-test callers. Values are pixels
+# after scale_milli has been applied.
+struct WmRenderMetrics:
+    scale_milli: i32
+    top_lane_height: i32
+    titlebar_height: i32
+    taskbar_height: i32
+    min_hit_target: i32
+
 struct SharedWmScene:
     width: i32
     height: i32
     backend: text
     windows: [SharedWmWindow]
     background: BackgroundSpec
+
+# Rich renderer input. The scene remains the immutable projection; content
+# frames and metrics are inputs rather than new mutable scene ownership.
+struct SharedWmRenderInput:
+    scene: SharedWmScene
+    revision: WmSceneRevision
+    content_frames: [WmContentFrame]
+    metrics: WmRenderMetrics
+    t_micros: i64
+
+# Taskbar-aware rich renderer input. Kept distinct from SharedWmRenderInput so
+# existing content-frame producers remain source compatible while new callers
+# must supply the authoritative shell model and clock label explicitly.
+struct SharedWmTaskbarRenderInput:
+    render: SharedWmRenderInput
+    taskbar: TaskbarModel
+    clock_label: text
 
 struct SharedWmDispatchResult:
     action: text

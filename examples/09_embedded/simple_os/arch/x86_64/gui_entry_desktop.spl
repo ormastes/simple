@@ -9,10 +9,10 @@
 # 2. Kernel IDT + memory bootstrap (PMM/VMM)
 # 3. Syscall shim + interrupt runtime install
 # 4. VFS boot init (NVMe FAT32 mount)
-# 5. BGA framebuffer init (1024x768x32)
+# 5. BGA framebuffer init with validated hardware readback
 # 6. PS/2 keyboard + mouse init
 # 7. Compositor + DesktopShell
-# 8. Interactive event loop (shell.run)
+# 8. Persistent Engine2D-backed interactive event loop (shell.run_baremetal)
 #
 # Serial markers:
 #   [desktop-gui] spl_start
@@ -24,22 +24,25 @@
 
 use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
 use os.kernel.boot.cpu.{port_inb, port_outb}
-use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
+use os.drivers.framebuffer.bga_init.{bga_device_id, bga_init_scanout, bga_pci_decode_is_enabled, find_bga_pci_device, scanout_evidence_is_valid}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
-use os.kernel.boot.ports.{FramebufferInfo, framebuffer_info_addr, framebuffer_info_phys_addr}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
 use os.drivers.input.ps2_mouse.{Ps2Mouse, MouseState}
 use os.compositor.compositor.{Compositor}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.input_backend.{Ps2InputBackend}
+use os.compositor.engine2d_display.{create_fb_engine_sized}
 use os.desktop.shell.{DesktopShell}
-use os.services.launcher.launcher.{launcher_init, launcher_get_app_count}
+use os.services.launcher.launcher.{launcher_get_app_count}
 use os.services.vfs.vfs_init.{vfs_boot_init, vfs_mount_removable}
 use os.services.pkg.pkg_service.{pkg_service_init}
 use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
-use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
-use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
-use os.kernel.memory.vmm.{vmm_init}
+use os.kernel.arch.x86_64.arch_init.{arch_x86_64_direct_boot_init}
+use os.kernel.arch.x86_64.interrupt.{x86_dispatch_installed_syscall_abi}
+use os.kernel.memory.pmm.{pmm_init_identity_range}
+use os.kernel.memory.vmm.{vmm_activate, vmm_bootstrap_pd_entry0, vmm_bootstrap_pdpt_entry0, vmm_bootstrap_pml4_entry0, vmm_init_from_global_pmm, vmm_kernel_pml4_phys}
+use os.kernel.boot.mmio.{mmio_disable_test_mode}
 use os.kernel.abi.syscall_shim.{shim_init}
-use os.userlib.syscall_raw.{syscall}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
@@ -47,115 +50,87 @@ use os.kernel.log.klog.{KernelLog}
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
 
-val FB_W: u32 = 1024
-val FB_H: u32 = 768
-val FB_BPP: u32 = 32
-val FB_PITCH: u32 = FB_W * 4
-val PS2_DATA_PORT: u16 = 0x60
-val PS2_COMMAND_PORT: u16 = 0x64
-val MOUSE_COMMAND_PORT: u16 = 0x64
-val CMD_ENABLE_AUX: u8 = 0xA8
-val CMD_READ_CONFIG: u8 = 0x20
-val CMD_WRITE_CONFIG: u8 = 0x60
-val CMD_WRITE_AUX: u8 = 0xD4
-val MOUSE_CMD_SET_DEFAULTS: u8 = 0xF6
-val MOUSE_CMD_ENABLE_REPORTING: u8 = 0xF4
-val MOUSE_STATUS_PORT: u16 = 0x64
-val MOUSE_STATUS_OUTPUT_FULL: u8 = 0x01
-val MOUSE_STATUS_INPUT_FULL: u8 = 0x02
-val DIRECT_QEMU_TOTAL_MEMORY: u64 = 0x20000000
-val DIRECT_QEMU_KERNEL_START: u64 = 0x100000
-val DIRECT_QEMU_RESERVED_END: u64 = 0x14000000
-val SYS_IPC_CREATE_PORT: u64 = 22
-val WM_PORT_NAME_BOOT: text = "compositor"
-
 var g_vfs_mounted = false
 
 fn _ps2_wait_input_clear():
     var timeout: i64 = 100000
     while timeout > 0:
-        val status = port_inb(MOUSE_STATUS_PORT)
-        if (status & MOUSE_STATUS_INPUT_FULL) == 0:
+        val status = port_inb(0x64)
+        if (status & 0x02) == 0:
             return
         timeout = timeout - 1
 
 fn _ps2_wait_output_full():
     var timeout: i64 = 100000
     while timeout > 0:
-        val status = port_inb(MOUSE_STATUS_PORT)
-        if (status & MOUSE_STATUS_OUTPUT_FULL) != 0:
+        val status = port_inb(0x64)
+        if (status & 0x01) != 0:
             return
         timeout = timeout - 1
 
 fn _ps2_mouse_write(byte_val: u8):
     _ps2_wait_input_clear()
-    port_outb(MOUSE_COMMAND_PORT, CMD_WRITE_AUX)
+    port_outb(0x64, 0xD4)
     _ps2_wait_input_clear()
-    port_outb(PS2_DATA_PORT, byte_val)
+    port_outb(0x60, byte_val)
 
 fn _ps2_mouse_read() -> u8:
     _ps2_wait_output_full()
-    port_inb(PS2_DATA_PORT)
+    port_inb(0x60)
 
 fn _keyboard_bootstrap_init():
-    port_outb(PS2_COMMAND_PORT, 0xAD)
-    port_outb(PS2_COMMAND_PORT, 0xA7)
-    port_inb(PS2_DATA_PORT)
-    port_outb(PS2_COMMAND_PORT, 0xAE)
-    port_outb(PS2_DATA_PORT, 0xF4)
+    port_outb(0x64, 0xAD)
+    port_outb(0x64, 0xA7)
+    port_inb(0x60)
+    port_outb(0x64, 0xAE)
+    port_outb(0x60, 0xF4)
 
 fn _mouse_bootstrap_init(mouse: Ps2Mouse):
-    port_outb(MOUSE_COMMAND_PORT, CMD_ENABLE_AUX)
+    port_outb(0x64, 0xA8)
     _ps2_wait_input_clear()
-    port_outb(MOUSE_COMMAND_PORT, CMD_READ_CONFIG)
+    port_outb(0x64, 0x20)
     _ps2_wait_output_full()
-    val config = port_inb(PS2_DATA_PORT)
+    val config = port_inb(0x60)
     val new_config = (config | 0x02) & 0xDF
-    port_outb(MOUSE_COMMAND_PORT, CMD_WRITE_CONFIG)
+    port_outb(0x64, 0x60)
     _ps2_wait_input_clear()
-    port_outb(PS2_DATA_PORT, new_config)
+    port_outb(0x60, new_config)
     _ps2_wait_input_clear()
-    _ps2_mouse_write(MOUSE_CMD_SET_DEFAULTS)
+    _ps2_mouse_write(0xF6)
     _ps2_mouse_read()
-    _ps2_mouse_write(MOUSE_CMD_ENABLE_REPORTING)
+    _ps2_mouse_write(0xF4)
     _ps2_mouse_read()
     mouse.initialized = true
 
-fn _wm_bootstrap_init(shell: DesktopShell) -> bool:
-    if shell.wm.initialized:
-        return true
-    extern fn unsafe_addr_of(ref: any) -> u64
-    val name_ptr = unsafe_addr_of(WM_PORT_NAME_BOOT)
-    val name_len = WM_PORT_NAME_BOOT.len().to_u64()
-    val port = syscall(SYS_IPC_CREATE_PORT, name_ptr, name_len, 0, 0, 0)
-    if port < 0:
-        serial_println("[desktop-gui] wm-service: IPC port create failed ({port})")
-        return false
-    shell.wm.port_id = port.to_u64()
-    shell.wm.initialized = true
-    serial_println("[desktop-gui] wm-service: listening on IPC port {shell.wm.port_id}")
-    true
-
-fn _shell_bootstrap_init(shell: DesktopShell):
-    if _wm_bootstrap_init(shell):
-        serial_println("[desktop-gui] wm-service initialized")
-    else:
-        serial_println("[desktop-gui] wm-service init failed")
-    launcher_init()
-    shell.launcher_initialized = true
-    serial_println("[desktop-gui] launcher initialized")
-    serial_println("[desktop-gui] shell initialized")
-
 fn spl_start():
+    val total_memory: u64 = 0x20000000
+    val kernel_start: u64 = 0x100000
+    val reserved_end: u64 = 0x14000000
+    val framebuffer_width: u32 = 1024
+    val framebuffer_height: u32 = 768
+    val framebuffer_bpp: u32 = 32
+
     serial_init()
     serial_println("[desktop-gui] spl_start")
     serial_println("[desktop-gui] boot")
 
-    arch_x86_64_early_init()
+    arch_x86_64_direct_boot_init()
+    serial_println("[desktop-gui] arch-direct-bootstrap:ok")
+    mmio_disable_test_mode()
+    serial_println("[desktop-gui] hardware-mmio:ok")
 
-    if pmm_init_identity_range(DIRECT_QEMU_TOTAL_MEMORY, DIRECT_QEMU_KERNEL_START, DIRECT_QEMU_RESERVED_END):
-        vmm_init(g_pmm, 0)
-        serial_println("[desktop-gui] memory-bootstrap:ok")
+    serial_println("[desktop-gui] pmm-bootstrap:begin")
+    if pmm_init_identity_range(total_memory, kernel_start, reserved_end):
+        serial_println("[desktop-gui] pmm-bootstrap:ok")
+        serial_println("[desktop-gui] vmm-bootstrap:begin")
+        vmm_init_from_global_pmm(0)
+        serial_println("[desktop-gui] vmm-bootstrap:return")
+        serial_println("[desktop-gui] vmm-bootstrap:root={vmm_kernel_pml4_phys()} pml4e0={vmm_bootstrap_pml4_entry0()} pdpte0={vmm_bootstrap_pdpt_entry0()} pde0={vmm_bootstrap_pd_entry0()}")
+        if vmm_activate():
+            serial_println("[desktop-gui] memory-bootstrap:ok")
+        else:
+            serial_println("[desktop-gui] memory-bootstrap:activation-failed")
+            return
     else:
         serial_println("[desktop-gui] memory-bootstrap:fail")
 
@@ -179,17 +154,21 @@ fn spl_start():
     serial_println("[desktop-gui] pkg service initialized")
 
     serial_println("[desktop-gui] initializing framebuffer...")
-    val fb_boot = bga_init_framebuffer(FB_W, FB_H, FB_BPP)
-    val fb_info = FramebufferInfo(
-        addr: framebuffer_info_addr(fb_boot),
-        width: FB_W,
-        height: FB_H,
-        pitch: FB_PITCH,
-        bpp: FB_BPP
-    )
-    rt_gui_set_fb(framebuffer_info_phys_addr(fb_info), FB_W.to_u64())
-    var fb = FramebufferDriver.from_boot_info(fb_info)
-    serial_println("[desktop-gui] framebuffer ready")
+    val scanout = bga_init_scanout(framebuffer_width, framebuffer_height, framebuffer_bpp)
+    val bga_pci = find_bga_pci_device()
+    val bga_id = bga_device_id()
+    val pci_decode = bga_pci_decode_is_enabled(bga_pci)
+    serial_println("[scanout-evidence] address={scanout.address} width={scanout.width} height={scanout.height} stride={scanout.stride} pixel_format={scanout.pixel_format} generation={scanout.generation} device_id={bga_id} pci_found={bga_pci.found} pci_device={bga_pci.device} framebuffer_bar={bga_pci.framebuffer_bar} mmio_bar={bga_pci.mmio_bar} pci_decode={pci_decode}")
+    if not scanout_evidence_is_valid(scanout):
+        serial_println("[scanout-invalid] unsupported-or-incomplete-metadata")
+        return
+    rt_gui_set_fb(scanout.address, scanout.width.to_u64())
+    var fb = FramebufferDriver.from_scanout_raw(scanout.address, scanout.width, scanout.height, scanout.stride, framebuffer_bpp)
+    val screen_width = scanout.width.to_i32()
+    val screen_height = scanout.height.to_i32()
+    var engine = create_fb_engine_sized(fb, screen_width, screen_height)
+    serial_println("[desktop-gui] framebuffer ready width={scanout.width} height={scanout.height} pitch={scanout.stride}")
+    serial_println("[desktop-gui] engine2d-ready backend=baremetal-framebuffer persistent=true")
 
     var keyboard: Ps2Keyboard = Ps2Keyboard(
         shift_held: false,
@@ -201,15 +180,15 @@ fn spl_start():
     serial_println("[desktop-gui] keyboard ready")
 
     val initial_mouse_state = MouseState(
-        x: fb.width.to_i64() / 2,
-        y: fb.height.to_i64() / 2,
+        x: screen_width.to_i64() / 2,
+        y: screen_height.to_i64() / 2,
         left_button: false,
         right_button: false,
         middle_button: false,
         dx: 0,
         dy: 0,
-        screen_width: fb.width.to_i64(),
-        screen_height: fb.height.to_i64()
+        screen_width: screen_width.to_i64(),
+        screen_height: screen_height.to_i64()
     )
     var mouse: Ps2Mouse = Ps2Mouse(
         state: initial_mouse_state,
@@ -224,15 +203,55 @@ fn spl_start():
     _mouse_bootstrap_init(mouse)
     serial_println("[desktop-gui] mouse ready")
 
-    var compositor: Compositor = Compositor.new(fb, keyboard, mouse)
+    var compositor_backend = Engine2dCompositorBackend.create(engine)
+    compositor_backend.w = screen_width
+    compositor_backend.h = screen_height
+    var compositor_input = Ps2InputBackend.create(keyboard, mouse)
+    var compositor: Compositor = Compositor.with_backends(
+        compositor_backend,
+        compositor_input,
+        screen_width,
+        screen_height
+    )
     serial_println("[desktop-gui] compositor ready")
 
     var shell: DesktopShell = DesktopShell.new(compositor)
-    _shell_bootstrap_init(shell)
+    shell.init_baremetal()
+    serial_println("[desktop-gui] shell initialized")
+
+    # Keep launch and ownership validation in the entry scope. Bootstrap HIR
+    # lowering cannot reliably resolve a DesktopShell helper parameter yet.
+    serial_println("[desktop-gui] spawn begin app=Browser Demo app_id=1")
+    val browser_pid = x86_dispatch_installed_syscall_abi(13u64, 1u64, 0u64, 2u64, 0u64, 0u64, 0u64)
+    serial_println("[desktop-gui] spawn return app=Browser Demo pid={browser_pid}")
+    if browser_pid > 0:
+        shell.materialize_process_launch("Browser Demo", browser_pid.to_u64())
+
+    serial_println("[desktop-gui] spawn begin app=Hello World app_id=3")
+    val hello_pid = x86_dispatch_installed_syscall_abi(13u64, 3u64, 0u64, 2u64, 0u64, 0u64, 0u64)
+    serial_println("[desktop-gui] spawn return app=Hello World pid={hello_pid}")
+    if hello_pid > 0:
+        shell.materialize_process_launch("Hello World", hello_pid.to_u64())
+
+    serial_println("[desktop-gui] spawn begin app=Clang app_id=12")
+    val clang_pid = x86_dispatch_installed_syscall_abi(13u64, 12u64, 0u64, 2u64, 0u64, 0u64, 0u64)
+    serial_println("[desktop-gui] spawn return app=Clang pid={clang_pid}")
+    if clang_pid > 0:
+        shell.materialize_process_launch("Clang", clang_pid.to_u64())
+    var owned_surface_count: i64 = 0
+    for surface in shell.compositor.surfaces:
+        if surface.process_id > 0 and surface.app_id != "":
+            owned_surface_count = owned_surface_count + 1
+    if owned_surface_count < 3:
+        serial_println("[production-readiness-failed] reason=process-owned-surfaces expected=3 actual={owned_surface_count}")
+        port_outb(0xF4, 1)
+        return
+    serial_println("[desktop-gui] process-owned-surfaces-ready count={owned_surface_count}")
 
     val registered = launcher_get_app_count()
     serial_println("[desktop-gui] launcher apps={registered}")
     serial_println("[desktop-gui] desktop-ready")
+    serial_println("[production-readiness] wm=live simple_gui=object-tree simple_web=content-frame renderer=engine2d process_owned_surfaces={owned_surface_count} scanout_generation={scanout.generation}")
 
-    shell.run()
+    shell.run_baremetal(engine)
     serial_println("[desktop-gui] shell exited")

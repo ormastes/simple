@@ -1,0 +1,174 @@
+"""Simple Web Iframe Embedding Spec
+
+Covers the hidden rendering-inside-rendering capability of the production
+pure-Simple HTML layout renderer: an <iframe> is a replaced element whose child
+document (from the `srcdoc` attribute, entity-encoded) is rendered by the SAME
+pipeline into an offscreen buffer and blitted over the iframe's content box.
+
+Verifies, through the public pixel entrypoint:
+  (a) the child document's colored box shows inside the iframe region; pixels
+      outside the box stay unchanged;
+  (b) iframe fallback children are NOT laid out inline (hidden);
+  (c) a nested iframe (depth 2) renders;
+  (d) depth-4 nesting hits the cap placeholder and terminates (no runaway
+      recursion);
+  (e) space="separate" (default) styles the child from its own CSS only, while
+      space="shared" also applies the parent document's rules;
+  (f) width/height attributes size the replaced box.
+
+@tag: rendering, simple-web, iframe, embedding
+@cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl 8%
+"""
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels,
+    simple_web_layout_debug_layout_by_id
+}
+
+# HTML-attribute-encode a string so it can ride inside a double-quoted srcdoc.
+# The renderer's tag scanner splits on raw "<"/">", so an iframe's child markup
+# MUST be entity-encoded; the srcdoc attribute reader decodes it back on parse.
+# "&" first so entities we introduce are not double-encoded; matches the order
+# a real HTML serializer uses for attribute values.
+fn _enc(s: text) -> text:
+    var out = s.replace("&", "&amp;")
+    out = out.replace("<", "&lt;")
+    out = out.replace(">", "&gt;")
+    out = out.replace("\"", "&quot;")
+    out
+
+fn _pixel_at(pixels: [u32], width: i32, x: i32, y: i32) -> u32:
+    pixels[(y * width) + x]
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+# Box coordinates of an element by id, via the public layout debug entry.
+fn _box_x(html: text, w: i32, h: i32, id: text) -> i32:
+    simple_web_layout_debug_layout_by_id(html, w, h, id, "x").to_i32()
+
+fn _box_y(html: text, w: i32, h: i32, id: text) -> i32:
+    simple_web_layout_debug_layout_by_id(html, w, h, id, "y").to_i32()
+
+fn _box_w(html: text, w: i32, h: i32, id: text) -> i32:
+    simple_web_layout_debug_layout_by_id(html, w, h, id, "w").to_i32()
+
+fn _box_h(html: text, w: i32, h: i32, id: text) -> i32:
+    simple_web_layout_debug_layout_by_id(html, w, h, id, "h").to_i32()
+
+describe "simple web iframe embedding":
+
+    it "renders the child document's colored box inside the iframe region":
+        val child = "<div style='width:180px;height:100px;background:#00ff00'></div>"
+        val html = "<html><body><iframe id=\"f\" width=\"200\" height=\"120\" srcdoc=\"" + _enc(child) + "\"></iframe></body></html>"
+        val w = 320
+        val h = 240
+        val px = simple_web_layout_render_html_software_pixels(html, w, h)
+        expect(px.len()).to_equal(w * h)
+        val fx = _box_x(html, w, h, "f")
+        val fy = _box_y(html, w, h, "f")
+        # Inside the iframe content -> child green.
+        expect(_pixel_at(px, w, fx + 5, fy + 5)).to_equal(0xFF00FF00u32)
+        # The green child box is confined to the iframe region: a pixel well
+        # outside the iframe (bottom-right corner of the viewport) is untouched.
+        expect(_pixel_at(px, w, w - 2, h - 2)).to_equal(0xFFFFFFFFu32)
+        # And the child paints a meaningful number of green pixels.
+        expect(_count_color(px, 0xFF00FF00u32)).to_be_greater_than(100)
+
+    it "does not lay out iframe fallback children inline":
+        # No srcdoc: the child document is empty (blank), and the fallback
+        # subtree (a magenta block) must NOT be laid out or painted anywhere.
+        val html = "<html><body><iframe id=\"f\" width=\"200\" height=\"120\"><div style='width:150px;height:40px;background:#ff00ff'>fallback</div></iframe></body></html>"
+        val w = 320
+        val h = 240
+        val px = simple_web_layout_render_html_software_pixels(html, w, h)
+        expect(px.len()).to_equal(w * h)
+        expect(_count_color(px, 0xFFFF00FFu32)).to_equal(0)
+
+    it "renders a nested iframe (depth 2)":
+        val inner = "<div style='width:120px;height:60px;background:#0000ff'></div>"
+        val middle = "<iframe width='150' height='90' srcdoc=\"" + _enc(inner) + "\"></iframe>"
+        val html = "<html><body><iframe id=\"f\" width=\"220\" height=\"140\" srcdoc=\"" + _enc(middle) + "\"></iframe></body></html>"
+        val w = 320
+        val h = 240
+        val px = simple_web_layout_render_html_software_pixels(html, w, h)
+        expect(px.len()).to_equal(w * h)
+        val fx = _box_x(html, w, h, "f")
+        val fy = _box_y(html, w, h, "f")
+        # The doubly-embedded blue box appears near the top-left of the outer
+        # iframe content.
+        expect(_pixel_at(px, w, fx + 5, fy + 5)).to_equal(0xFF0000FFu32)
+        expect(_count_color(px, 0xFF0000FFu32)).to_be_greater_than(50)
+
+    it "stops recursion at the depth cap with a placeholder (depth 4)":
+        # 4 nested iframes wrapping a red div. The document at depth 3 holds the
+        # 4th iframe, whose child would be depth 4 (> cap 3): it is replaced by
+        # the flat grey placeholder, so the red div is NEVER rendered and the
+        # render terminates.
+        val red = "<div style='width:40px;height:30px;background:#ff0000'></div>"
+        val d = "<iframe width='80' height='60' srcdoc=\"" + _enc(red) + "\"></iframe>"
+        val c = "<iframe width='120' height='90' srcdoc=\"" + _enc(d) + "\"></iframe>"
+        val b = "<iframe width='170' height='110' srcdoc=\"" + _enc(c) + "\"></iframe>"
+        val a = "<iframe id=\"f\" width=\"240\" height=\"150\" srcdoc=\"" + _enc(b) + "\"></iframe>"
+        val html = "<html><body>" + a + "</body></html>"
+        val w = 320
+        val h = 240
+        val px = simple_web_layout_render_html_software_pixels(html, w, h)
+        expect(px.len()).to_equal(w * h)
+        # Red content beyond the cap must not appear.
+        expect(_count_color(px, 0xFFFF0000u32)).to_equal(0)
+        # The placeholder grey fill is present.
+        expect(_count_color(px, 0xFF888888u32)).to_be_greater_than(50)
+
+    it "scopes CSS with space=separate (default) vs space=shared":
+        # This scenario needs a parent <style> BLOCK (only block rules — not
+        # inline styles — participate in "shared"). It measures the shared effect
+        # through the parent rule `div{height:70px}`: shared grows the child div,
+        # so its inline-blue background covers many more rows than in separate.
+        #
+        # WARM-UP: an iframe + <style>-block render compiled first. Without it the
+        # first style-block full-paint in this file trips a pre-existing,
+        # order-dependent interpreter HIR-lowering flake ("variable
+        # `background`/`color` not found"). The warm-up (and the assertions) use
+        # only `height`/inline-`background`, both proven clear of the flake. See
+        # the bug doc referenced in the report.
+        val warm = simple_web_layout_render_html_software_pixels("<html><head><style>div{width:1px}</style></head><body><iframe srcdoc=\"" + _enc("<b>w</b>") + "\"></iframe></body></html>", 16, 16)
+        expect(warm.len()).to_equal(16 * 16)
+        # Child div: inline blue background (inline styles render safely), no
+        # height of its own — so its painted height is decided by the cascade.
+        val child = "<div style='background:#0000ff'>hi</div>"
+        val enc_child = _enc(child)
+        val head = "<html><head><style>div{height:70px}</style></head><body>"
+        val sep_html = head + "<iframe id=\"f\" width=\"200\" height=\"120\" srcdoc=\"" + enc_child + "\"></iframe></body></html>"
+        val shr_html = head + "<iframe id=\"f\" space=\"shared\" width=\"200\" height=\"120\" srcdoc=\"" + enc_child + "\"></iframe></body></html>"
+        val w = 320
+        val h = 240
+        val sep_px = simple_web_layout_render_html_software_pixels(sep_html, w, h)
+        val shr_px = simple_web_layout_render_html_software_pixels(shr_html, w, h)
+        val sep_blue = _count_color(sep_px, 0xFF0000FFu32)
+        val shr_blue = _count_color(shr_px, 0xFF0000FFu32)
+        # separate: the parent's div{height:70px} rule does NOT reach the child,
+        # so the child div keeps its small default (single line) height.
+        # shared: the parent rule DOES apply, growing the child div to 70px tall
+        # and covering many more rows of its blue background.
+        expect(sep_blue).to_be_greater_than(0)
+        expect(shr_blue).to_be_greater_than(sep_blue + 2000)
+
+    it "sizes the replaced box from width/height attributes and defaults":
+        val child = "<div style='height:10px'>x</div>"
+        val sized = "<html><body><iframe id=\"f\" width=\"250\" height=\"180\" srcdoc=\"" + _enc(child) + "\"></iframe></body></html>"
+        val defaulted = "<html><body><iframe id=\"f\" srcdoc=\"" + _enc(child) + "\"></iframe></body></html>"
+        val w = 400
+        val h = 320
+        expect(_box_w(sized, w, h, "f")).to_equal(250)
+        expect(_box_h(sized, w, h, "f")).to_equal(180)
+        # Browser default replaced size when no width/height/CSS is given.
+        expect(_box_w(defaulted, w, h, "f")).to_equal(300)
+        expect(_box_h(defaulted, w, h, "f")).to_equal(150)

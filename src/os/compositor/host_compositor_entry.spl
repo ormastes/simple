@@ -12,23 +12,25 @@ use common.ui.window_scene.{
     shared_wm_scene_register_motion_background_source,
     shared_wm_scene_resolve_background
 }
-use common.ui.window_scene_draw_ir.{shared_wm_scene_render_desktop_chrome}
+use common.ui.window_scene.{WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_render_taskbar_context_to_backend, shared_wm_scene_render_desktop_chrome}
+use common.ui.taskbar_model.{WindowRef, TrayItem, TaskbarModel}
 use os.compositor.background_image_provider.{HostBackgroundImageProvider}
 use os.compositor.background_motion_provider.{HostMotionBackgroundSource}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
-use os.compositor.simple_web_window_renderer.{render_simple_web_app_content_cached, content_paint_full_height}
-use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows, shared_mdi_render_windows_from_simple_gui_scene, draw_shared_mdi_window_chrome, draw_shared_mdi_taskbar}
+use os.compositor.simple_web_window_renderer.{render_simple_web_app_content_cached, simple_web_content_frame_cached, simple_web_content_revision, content_paint_full_height}
+use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
 use common.color.convert.{int_to_hex}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d, engine2d_fast_metal_available}
 use os.compositor.wm_action_applier.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
-use os.services.wm.wm_service.{WmService}
 use os.services.wm.wm_world.{WmAction}
-use os.userlib.ipc_protocol.{COMP_MINIMIZE, COMP_RESTORE}
+use common.window_protocol.compositor_methods.{COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 
 extern fn rt_sleep_ms(ms: i64)
 extern fn rt_env_get(key: text) -> text?
@@ -61,6 +63,144 @@ enum HostBackendKind:
     Win32
     Headless
 
+enum HostDisplayMode:
+    Windowed
+    BorderlessFullscreen
+
+enum HostDisplayTransitionPhase:
+    Idle
+    Requested
+    AwaitingResize
+    Applied
+    Failed
+
+struct HostSurfaceGeometry:
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    scale_milli: i32
+
+struct HostSurfaceState:
+    mode: HostDisplayMode
+    phase: HostDisplayTransitionPhase
+    requested_mode: HostDisplayMode
+    geometry: HostSurfaceGeometry
+    saved_windowed_geometry: HostSurfaceGeometry
+    rollback_geometry: HostSurfaceGeometry
+    request_nonce: i64
+    transition_revision: i64
+    deadline_micros: i64
+    resize_acknowledged: bool
+    scale_acknowledged: bool
+    failure_reason: text
+
+struct HostDisplayTransition:
+    state: HostSurfaceState
+    accepted: bool
+    mode_request_required: bool
+    rolled_back: bool
+
+val HOST_DISPLAY_TRANSITION_TIMEOUT_MICROS: i64 = 2000000
+
+fn host_surface_geometry(x: i32, y: i32, width: i32, height: i32, scale_milli: i32) -> HostSurfaceGeometry:
+    HostSurfaceGeometry(x: x, y: y, width: width, height: height, scale_milli: scale_milli)
+
+fn host_surface_state(initial_geometry: HostSurfaceGeometry) -> HostSurfaceState:
+    HostSurfaceState(
+        mode: HostDisplayMode.Windowed,
+        phase: HostDisplayTransitionPhase.Idle,
+        requested_mode: HostDisplayMode.Windowed,
+        geometry: initial_geometry,
+        saved_windowed_geometry: initial_geometry,
+        rollback_geometry: initial_geometry,
+        request_nonce: 0,
+        transition_revision: 0,
+        deadline_micros: 0,
+        resize_acknowledged: false,
+        scale_acknowledged: false,
+        failure_reason: ""
+    )
+
+fn _host_display_transition(state: HostSurfaceState, accepted: bool, mode_request_required: bool, rolled_back: bool) -> HostDisplayTransition:
+    HostDisplayTransition(state: state, accepted: accepted, mode_request_required: mode_request_required, rolled_back: rolled_back)
+
+fn request_display_mode(state: HostSurfaceState, mode: HostDisplayMode, nonce: i64, now_micros: i64) -> HostDisplayTransition:
+    if nonce <= 0:
+        return _host_display_transition(state, false, false, false)
+    if state.phase == HostDisplayTransitionPhase.Requested or state.phase == HostDisplayTransitionPhase.AwaitingResize:
+        val coalesced = state.request_nonce == nonce and state.requested_mode == mode
+        return _host_display_transition(state, coalesced, false, false)
+    if nonce <= state.request_nonce or mode == state.mode:
+        return _host_display_transition(state, false, false, false)
+    var out = state
+    out.requested_mode = mode
+    out.rollback_geometry = state.geometry
+    if state.mode == HostDisplayMode.Windowed:
+        out.saved_windowed_geometry = state.geometry
+    out.phase = HostDisplayTransitionPhase.Requested
+    out.request_nonce = nonce
+    out.transition_revision = state.transition_revision + 1
+    out.deadline_micros = now_micros + HOST_DISPLAY_TRANSITION_TIMEOUT_MICROS
+    out.resize_acknowledged = false
+    out.scale_acknowledged = false
+    out.failure_reason = ""
+    _host_display_transition(out, true, true, false)
+
+fn _ack_surface_parts(state: HostSurfaceState, nonce: i64, geometry: HostSurfaceGeometry, resize_acknowledged: bool, scale_acknowledged: bool, now_micros: i64) -> HostDisplayTransition:
+    if nonce != state.request_nonce or (state.phase != HostDisplayTransitionPhase.Requested and state.phase != HostDisplayTransitionPhase.AwaitingResize):
+        return _host_display_transition(state, false, false, false)
+    if now_micros > state.deadline_micros:
+        return fail_or_timeout_display_transition(state, nonce, "display transition timed out", now_micros)
+    var out = state
+    if resize_acknowledged:
+        if geometry.width <= 0 or geometry.height <= 0:
+            return _host_display_transition(state, false, false, false)
+        out.geometry.x = geometry.x
+        out.geometry.y = geometry.y
+        out.geometry.width = geometry.width
+        out.geometry.height = geometry.height
+        out.resize_acknowledged = true
+    if scale_acknowledged:
+        if geometry.scale_milli <= 0:
+            return _host_display_transition(state, false, false, false)
+        out.geometry.scale_milli = geometry.scale_milli
+        out.scale_acknowledged = true
+    if out.resize_acknowledged and out.scale_acknowledged:
+        out.mode = out.requested_mode
+        out.phase = HostDisplayTransitionPhase.Applied
+        out.deadline_micros = 0
+    else:
+        out.phase = HostDisplayTransitionPhase.AwaitingResize
+    out.transition_revision = state.transition_revision + 1
+    _host_display_transition(out, true, false, false)
+
+fn ack_surface_resize(state: HostSurfaceState, nonce: i64, geometry: HostSurfaceGeometry, now_micros: i64) -> HostDisplayTransition:
+    _ack_surface_parts(state, nonce, geometry, true, false, now_micros)
+
+fn ack_surface_scale(state: HostSurfaceState, nonce: i64, scale_milli: i32, now_micros: i64) -> HostDisplayTransition:
+    val geometry = host_surface_geometry(state.geometry.x, state.geometry.y, state.geometry.width, state.geometry.height, scale_milli)
+    _ack_surface_parts(state, nonce, geometry, false, true, now_micros)
+
+fn ack_surface_event(state: HostSurfaceState, nonce: i64, geometry: HostSurfaceGeometry, now_micros: i64) -> HostDisplayTransition:
+    _ack_surface_parts(state, nonce, geometry, true, true, now_micros)
+
+fn fail_or_timeout_display_transition(state: HostSurfaceState, nonce: i64, reason: text, now_micros: i64) -> HostDisplayTransition:
+    if nonce != state.request_nonce or (state.phase != HostDisplayTransitionPhase.Requested and state.phase != HostDisplayTransitionPhase.AwaitingResize):
+        return _host_display_transition(state, false, false, false)
+    if reason.len() == 0 and now_micros <= state.deadline_micros:
+        return _host_display_transition(state, false, false, false)
+    var out = state
+    out.geometry = state.rollback_geometry
+    out.requested_mode = state.mode
+    out.phase = HostDisplayTransitionPhase.Failed
+    out.deadline_micros = 0
+    out.resize_acknowledged = false
+    out.scale_acknowledged = false
+    out.failure_reason = if reason.len() > 0: reason else: "display transition timed out"
+    out.transition_revision = state.transition_revision + 1
+    _host_display_transition(out, true, false, true)
+
 class HostWmConfig:
     backend: HostBackendKind
     initial_size: Size
@@ -86,6 +226,46 @@ class HostedWindow:
     app_id: text
     minimized: bool
     focused: bool
+    maximized: bool = false
+    restore_x: i32 = 0
+    restore_y: i32 = 0
+    restore_w: i32 = 0
+    restore_h: i32 = 0
+
+fn host_taskbar_clock_label(now_micros: i64) -> text:
+    """Return a stable UTC HH:MM label from the host wall clock."""
+    val seconds = (now_micros / 1000000) % 86400
+    val hour = seconds / 3600
+    val minute = (seconds % 3600) / 60
+    val hour_text = if hour < 10: "0{hour}" else: "{hour}"
+    val minute_text = if minute < 10: "0{minute}" else: "{minute}"
+    "{hour_text}:{minute_text}"
+
+fn host_compositor_taskbar_model(comp: HostCompositor) -> TaskbarModel:
+    """Project authoritative host process and window state into shell objects."""
+    var active_process_count = 0
+    for process in comp.app_processes:
+        if not process.failed:
+            active_process_count = active_process_count + 1
+
+    # Focus is part of the source state even though WindowRef intentionally
+    # has no focus field: place the focused object last, matching host z-order.
+    var running: [WindowRef] = []
+    for window in comp.windows:
+        if not window.focused:
+            running.push(WindowRef(window_id: window.id.to_text(), app_id: window.app_id, title: window.title, minimized: window.minimized))
+    for window in comp.windows:
+        if window.focused:
+            running.push(WindowRef(window_id: window.id.to_text(), app_id: window.app_id, title: window.title, minimized: window.minimized))
+
+    val process_label = "{active_process_count}/{comp.app_processes.len()} active"
+    TaskbarModel(
+        # HostCompositor has no pinned-launcher registry. Processes are not
+        # launchers, so presenting them as pinned would synthesize authority.
+        pinned: [],
+        running: running,
+        tray: [TrayItem(item_id: "host-processes", label: process_label, icon: "process")]
+    )
 
 fn host_window_to_shared_mdi_render_window(win: HostedWindow, scroll_y: i32) -> SharedMdiRenderWindow:
     shared_mdi_render_window(
@@ -270,6 +450,7 @@ class HostCompositor:
     # LIVE theme.compositor_bg for the color kind on every call instead of
     # trusting this stored default (the theme can change after construction).
     background: BackgroundSpec
+    render_revision: i64
 
     static fn new(backend: CompositorBackend, size: Size) -> HostCompositor:
         HostCompositor(
@@ -299,7 +480,8 @@ class HostCompositor:
             _chrome_cache_key: "",
             _chrome_cache_pixels: [],
             content_caches: {},
-            background: shared_wm_background_color(0xFF0F172Au32)
+            background: shared_wm_background_color(0xFF0F172Au32),
+            render_revision: 0
         )
 
     # Returns the WebRenderPixelArtifactCache for `window_id`, creating (or
@@ -377,6 +559,7 @@ class HostCompositor:
 
     me render_frame():
         val theme = wm_chrome_theme()
+        self.render_revision = self.render_revision + 1
         val total = if self.width > 0 and self.height > 0: self.width * self.height else: 0
         # Fast CSS/GUI-web chrome lane: express the WM chrome (desktop backdrop,
         # window bodies, titlebars, close buttons, titles) as ONE HTML/CSS
@@ -468,36 +651,94 @@ class HostCompositor:
         # its scroll/cache state, but chrome/taskbar geometry and metadata come
         # from the same SharedWmScene boundary used by SimpleOS framebuffer
         # rendering.
-        val simple_gui_scene = shared_mdi_scene_from_render_windows(self.width, self.height, "host-compositor", shared_windows)
-        val simple_gui_windows = shared_mdi_render_windows_from_simple_gui_scene(simple_gui_scene)
+        var simple_gui_scene = shared_mdi_scene_from_render_windows(self.width, self.height, "host-compositor", shared_windows)
+        simple_gui_scene.background = if self.background.kind == WM_BACKGROUND_KIND_COLOR: shared_wm_background_color(theme.compositor_bg) else: self.background
+        var content_frames: [WmContentFrame] = []
         i = 0
         while i < window_count:
             val win = self.windows[i]
             if not win.minimized:
-                val scene_win = if i < simple_gui_windows.len(): simple_gui_windows[i] else: shared_windows[i]
-                draw_shared_mdi_window_chrome(self.backend, scene_win, theme)
-                val cx = win.x + 4
-                val cy = win.y + 32
                 val cw = win.w - 8
                 val ch = win.h - 36
                 val scroll = self.scroll_offset_for(win.id).to_i32()
                 val full_h = content_paint_full_height(ch, scroll)
                 val cache = self._content_cache_for(win.id, cw, full_h, "auto")
-                render_simple_web_app_content_cached(cache, self.backend, win.title, cx, cy, cw, ch, win.content, scroll)
-                # See the matching write-back comment in the fast chrome lane above.
+                val content_revision = simple_web_content_revision(win.title, win.content, cw, ch, scroll)
+                content_frames.push(simple_web_content_frame_cached(cache, win.id.to_text(), self.render_revision, content_revision, default_theme_id(), win.title, win.content, cw, ch, scroll))
                 self.content_caches.set(win.id, cache)
             i = i + 1
-        draw_shared_mdi_taskbar(self.backend, simple_gui_windows, self.width, self.height, theme)
+        val revision = WmSceneRevision(scene_revision: self.render_revision, input_revision: self.render_revision, taskbar_revision: self.render_revision)
+        val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 44)
+        val frame_time = rt_time_now_unix_micros()
+        val render_input = SharedWmRenderInput(scene: simple_gui_scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: frame_time)
+        val taskbar_input = SharedWmTaskbarRenderInput(render: render_input, taskbar: host_compositor_taskbar_model(self), clock_label: host_taskbar_clock_label(frame_time))
+        shared_wm_scene_render_taskbar_context_to_backend(self.backend, taskbar_input)
         self.backend.present()
 
     me apply_bridge_request(seq: i64, owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text):
+        if method == COMP_MAXIMIZE.to_i64():
+            self.maximize_window(window_id)
+            return
+        if method == COMP_RESTORE.to_i64():
+            self.restore_window(window_id)
+            return
         val action = wm_action_from_bridge_request(owner_port, method, window_id, title, x, y, w, h, content, process_id, app_id)
         self.apply_wm_action(action)
 
+    me maximize_window(window_id: i64):
+        val i = self._find_window_index(window_id)
+        if i < 0:
+            return
+        var win = self.windows[i]
+        if not win.maximized:
+            win.restore_x = win.x
+            win.restore_y = win.y
+            win.restore_w = win.w
+            win.restore_h = win.h
+        win.x = 0
+        win.y = 48
+        win.w = self.width
+        win.h = self.height - 96
+        win.minimized = false
+        win.maximized = true
+        self.windows[i] = win
+        var j = 0
+        while j < self.windows.len():
+            self.windows[j].focused = self.windows[j].id == window_id
+            j = j + 1
+
+    me restore_window(window_id: i64):
+        val i = self._find_window_index(window_id)
+        if i < 0:
+            return
+        var win = self.windows[i]
+        if win.maximized and win.restore_w > 0 and win.restore_h > 0:
+            win.x = win.restore_x
+            win.y = win.restore_y
+            win.w = win.restore_w
+            win.h = win.restore_h
+        win.minimized = false
+        win.maximized = false
+        win.focused = true
+        self.windows[i] = win
+
     me apply_wm_action(action: WmAction):
+        val prior_windows = self.windows
         val out = host_compositor_apply_lifecycle_action(self, action)
         self.windows = out.windows
         self.next_window_id = out.next_window_id
+        var i = 0
+        while i < self.windows.len():
+            var j = 0
+            while j < prior_windows.len():
+                if self.windows[i].id == prior_windows[j].id:
+                    self.windows[i].maximized = prior_windows[j].maximized
+                    self.windows[i].restore_x = prior_windows[j].restore_x
+                    self.windows[i].restore_y = prior_windows[j].restore_y
+                    self.windows[i].restore_w = prior_windows[j].restore_w
+                    self.windows[i].restore_h = prior_windows[j].restore_h
+                j = j + 1
+            i = i + 1
 
     fn _find_window_index(window_id: i64) -> i32:
         var i = 0
@@ -719,9 +960,12 @@ fn host_background_crop_surface(surface: BackgroundSurface, rect: SharedWmRect, 
         row = row + 1
     out
 
+class HostWmLoopState:
+    running: bool
+
 class HostWmHandle:
     compositor: HostCompositor
-    wm: WmService
+    wm: HostWmLoopState
     event_loop_id: i64
     window_id: i64
     backend: HostBackendKind
@@ -904,8 +1148,7 @@ fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
     val comp = HostCompositor.new(backend, cfg.initial_size)
     if val motion_bg = host_motion_background_registered_spec():
         comp.set_background(motion_bg)
-    val wm = WmService.new()
-    wm.running = true
+    val wm = HostWmLoopState(running: true)
     HostWmHandle(
         compositor: comp,
         wm: wm,
@@ -1089,6 +1332,14 @@ fn host_compositor_minimize_focused(comp: HostCompositor) -> HostCompositor:
         return comp
     var out = comp
     out.apply_bridge_request(0, 0, COMP_MINIMIZE.to_i64(), id, "", 0, 0, 0, 0, "", 0, "")
+    out
+
+fn host_compositor_maximize_focused(comp: HostCompositor) -> HostCompositor:
+    val id = host_compositor_focused_window_id(comp)
+    if id <= 0:
+        return comp
+    var out = comp
+    out.apply_bridge_request(0, 0, COMP_MAXIMIZE.to_i64(), id, "", 0, 0, 0, 0, "", 0, "")
     out
 
 fn host_compositor_restore_all(comp: HostCompositor) -> HostCompositor:
