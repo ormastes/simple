@@ -1,10 +1,19 @@
 use os.compositor.cursor.{CursorState}
-use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.display_backend_core.{CompositorBackend}
 use os.compositor.input_backend.{InputBackend}
 use os.drivers.framebuffer.fb_driver.{Color}
 use os.kernel.boot.cpu.{port_inb, port_outb}
 use common.window_protocol.geometry.{WindowId}
 use common.ui.window_scene.{SharedWmScene}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use os.compositor.shared_mdi_framebuffer_scene.{
+    SharedMdiRenderWindow,
+    shared_mdi_render_window,
+    render_shared_mdi_desktop_chrome,
+    draw_shared_mdi_window_chrome,
+    draw_shared_mdi_taskbar
+}
+use os.compositor.simple_web_window_renderer.{render_simple_web_content}
 
 class WindowSurface:
     id: i32
@@ -506,24 +515,48 @@ class Compositor:
                         self.dragging = false
 
     me render_all():
-        val bg = self.desktop_bg
-        val bg_color: u32 = ((bg.a.to_u32() & 0xFF) << 24) | ((bg.r.to_u32() & 0xFF) << 16) | ((bg.g.to_u32() & 0xFF) << 8) | (bg.b.to_u32() & 0xFF)
-        self.backend.fill_rect(0, 0, self.screen_width, self.screen_height, bg_color)
+        # Project the live SimpleOS compositor into the same shared-MDI model
+        # used by the hosted WM. Chrome/taskbar are executed by the common
+        # Draw-IR renderer and every visible body is rasterized by the same
+        # pure-Simple Web pixel pipeline as the host; only the final backend
+        # differs (framebuffer here, winit pixel buffer on the host).
+        val theme = wm_chrome_theme()
+        render_shared_mdi_desktop_chrome(self.backend, self.screen_width, self.screen_height, theme)
+        var shared_windows: [SharedMdiRenderWindow] = []
         var i = 0
         while i < self.surfaces.len():
             val s = self.surfaces[i]
+            val shared = shared_mdi_render_window(
+                s.id.to_i64(),
+                s.title,
+                s.app_id,
+                s.content_html,
+                s.x,
+                s.y,
+                s.width,
+                s.height,
+                s.process_id,
+                not s.visible,
+                i == self.focused_idx,
+                0
+            )
+            shared_windows.push(shared)
             if s.visible:
-                self.backend.fill_rect(s.x, s.y, s.width, 24, 0xFF4A90D9)
-                self.backend.fill_rect(s.x, s.y, s.width, 1, 0xFF2A70B9)
-                self.backend.fill_rect(s.x, s.y, 1, s.height, 0xFF2A70B9)
-                self.backend.fill_rect(s.x + s.width - 1, s.y, 1, s.height, 0xFF2A70B9)
-                self.backend.fill_rect(s.x, s.y + s.height - 1, s.width, 1, 0xFF2A70B9)
-                self.backend.fill_rect(s.x + s.width - 24, s.y, 24, 24, 0xFFCC3333)
-                val body_y = s.y + 24
-                val body_h = s.height - 24
-                if body_h > 0:
-                    self.backend.fill_rect(s.x, body_y, s.width, body_h, 0xFF1A1A2E)
+                draw_shared_mdi_window_chrome(self.backend, shared, theme)
+                val content_w = s.width - 8
+                val content_h = s.height - 36
+                if content_w > 0 and content_h > 0:
+                    render_simple_web_content(
+                        self.backend,
+                        s.title,
+                        s.x + 4,
+                        s.y + 32,
+                        content_w,
+                        content_h,
+                        s.content_html
+                    )
             i = i + 1
+        draw_shared_mdi_taskbar(self.backend, shared_windows, self.screen_width, self.screen_height, theme)
         val cx = self.cursor.x
         val cy = self.cursor.y
         self.backend.fill_rect(cx, cy, 8, 8, 0xFFFFFFFF)

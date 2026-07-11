@@ -3,12 +3,13 @@
 # SimpleOS compositor adapter for rendering app client areas through the
 # canonical Simple Web renderer and then blitting pixels to CompositorBackend.
 
-use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.display_backend_core.{CompositorBackend}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderArtifact, WebRenderRequest, web_render_full_html}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_checksum}
-use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use os.compositor.web_render_surface.{compositor_default_web_page_html, compositor_render_html_artifact, compositor_render_request_artifact}
-use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
+use std.gc_async_mut.ui.web_render_pixel_software_backend.{WebRenderPixelArtifactCache}
+
+val HOST_WM_DEFAULT_THEME_ID: text = "aetheric_dark"
 
 fn _is_simple_browser_title(title: text) -> bool:
     title == "Browser" or title == "Simple Browser"
@@ -70,7 +71,7 @@ fn simple_web_content_revision(title: text, body_html: text, width: i32, height:
     _simple_web_revision_mix(hash, _clamp_scroll_px(scroll_y).to_i64())
 
 fn themed_simple_web_html(title: text, body_html: text) -> text:
-    themed_simple_web_html_with_theme(default_theme_id(), title, body_html)
+    themed_simple_web_html_with_theme(HOST_WM_DEFAULT_THEME_ID, title, body_html)
 
 fn simple_web_app_html_with_theme(theme: text, title: text, state_text: text) -> text:
     web_render_full_html(simple_web_app_render_request_with_theme(theme, title, state_text, 0, 0))
@@ -89,7 +90,7 @@ fn simple_web_app_render_request_with_theme(theme: text, title: text, state_text
     simple_web_themed_render_request_with_theme(theme, title, "<div class='simple-web-line'>Simple Web app surface</div>", viewport_w, viewport_h)
 
 fn simple_web_app_html(title: text, state_text: text) -> text:
-    simple_web_app_html_with_theme(default_theme_id(), title, state_text)
+    simple_web_app_html_with_theme(HOST_WM_DEFAULT_THEME_ID, title, state_text)
 
 fn simple_web_html_pixel_artifact(html: text, cw: i32, ch: i32) -> WebRenderArtifact:
     val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "", html, "", "", cw, ch).with_pixel_output()
@@ -101,6 +102,17 @@ fn simple_web_app_pixel_artifact_with_theme(theme: text, title: text, cw: i32, c
 
 fn render_simple_web_html_content(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, html: text):
     render_simple_web_html_content_scrolled(backend, cx, cy, cw, ch, html, 0)
+
+# Uncached authoritative-body counterpart of simple_web_content_frame_cached.
+# Baremetal Compositor owns no long-lived WebRender cache yet, but it must use
+# the exact same request construction as the host and must never replace live
+# window HTML with the title-based compatibility/demo markup.
+fn render_simple_web_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, body_html: text):
+    if cw <= 0 or ch <= 0:
+        return
+    val req = simple_web_content_render_request_with_theme(HOST_WM_DEFAULT_THEME_ID, title, body_html, cw, ch).with_pixel_output()
+    val artifact = compositor_render_request_artifact(req)
+    blit_simple_web_pixels(backend, cx, cy, cw, ch, artifact.pixels)
 
 # Content-scroll headroom cap: HostCompositor.scroll_offsets accumulates raw
 # wheel delta unboundedly (no clamp at the input side — see
@@ -200,7 +212,7 @@ fn render_simple_web_html_content_scrolled(backend: CompositorBackend, cx: i32, 
     blit_simple_web_pixels(backend, cx, cy, cw, ch, visible)
 
 fn render_simple_web_app_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
-    render_simple_web_app_content_scrolled(backend, default_theme_id(), title, cx, cy, cw, ch, state_text, 0)
+    render_simple_web_app_content_scrolled(backend, HOST_WM_DEFAULT_THEME_ID, title, cx, cy, cw, ch, state_text, 0)
 
 fn render_simple_web_app_content_with_theme(backend: CompositorBackend, theme: text, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
     render_simple_web_app_content_scrolled(backend, theme, title, cx, cy, cw, ch, state_text, 0)
@@ -209,7 +221,7 @@ fn render_simple_web_app_content_with_theme(backend: CompositorBackend, theme: t
 # theming (e.g. host_compositor_entry.spl's render_frame) don't need their
 # own nogc_sync_mut.ui.theme_package import just to pass a scroll offset.
 fn render_simple_web_app_content_with_scroll(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text, scroll_y: i32):
-    render_simple_web_app_content_scrolled(backend, default_theme_id(), title, cx, cy, cw, ch, state_text, scroll_y)
+    render_simple_web_app_content_scrolled(backend, HOST_WM_DEFAULT_THEME_ID, title, cx, cy, cw, ch, state_text, scroll_y)
 
 # Task #15 remainder item 4 (S1 perf): same paint as
 # render_simple_web_app_content_with_scroll, but the pixel artifact is
@@ -227,7 +239,7 @@ fn render_simple_web_app_content_cached(cache: WebRenderPixelArtifactCache, back
         return
     val clamped_scroll = _clamp_scroll_px(scroll_y)
     val full_h = ch + clamped_scroll
-    val req = simple_web_app_render_request_with_theme(default_theme_id(), title, state_text, cw, full_h).with_pixel_output()
+    val req = simple_web_app_render_request_with_theme(HOST_WM_DEFAULT_THEME_ID, title, state_text, cw, full_h).with_pixel_output()
     val artifact = cache.request_to_pixel_artifact(req)
     val visible = _window_scrolled_pixels(artifact.pixels, cw, full_h, ch, clamped_scroll)
     blit_simple_web_pixels(backend, cx, cy, cw, ch, visible)

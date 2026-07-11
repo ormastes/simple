@@ -18,6 +18,8 @@ RESTORED_SNAPSHOT="$BUILD_DIR/restored.scene.json"
 COMMAND_PATH="$BUILD_DIR/evidence.commands"
 NATIVE_BIN="${HOSTED_WM_ARTIFACT:-$BUILD_DIR/hosted_entry}"
 BUILD_LOG="$BUILD_DIR/native-build.log"
+SPL_WINIT_LIB="${SIMPLE_WM_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.dylib}"
+SIMPLE_RUNTIME_DYLIB="${SIMPLE_WM_RUNTIME_DYLIB:-$ROOT_DIR/src/compiler_rust/target/bootstrap/deps/libsimple_runtime.dylib}"
 DRIVER_TIMEOUT_SECS="${WM_EVIDENCE_TIMEOUT_SECS:-20}"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=unchecked
@@ -176,6 +178,17 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 1
 fi
 
+if [ ! -s "$SPL_WINIT_LIB" ] || [ "$ROOT_DIR/src/runtime/spl_winit/src/lib.rs" -nt "$SPL_WINIT_LIB" ]; then
+    if ! sh scripts/build/build_spl_winit.shs >"$BUILD_DIR/build-spl-winit.log" 2>&1; then
+        emit_failure spl-winit-bridge-build-failed "$snapshot_hook" "$capture_hook" "$input_hook"
+        exit 1
+    fi
+fi
+if [ ! -s "$SPL_WINIT_LIB" ] || [ ! -s "$SIMPLE_RUNTIME_DYLIB" ]; then
+    emit_failure host-runtime-bridge-missing "$snapshot_hook" "$capture_hook" "$input_hook"
+    exit 1
+fi
+
 if [ -n "${HOSTED_WM_ARTIFACT:-}" ]; then
     if [ ! -x "$NATIVE_BIN" ]; then
         emit_failure cached-production-artifact-missing "$snapshot_hook" "$capture_hook" "$input_hook"
@@ -186,7 +199,7 @@ elif [ ! -x "$NATIVE_BIN" ] || find src/os/hosted src/os/compositor src/lib/comm
     if ! SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BIN" native-build \
         --source "$ENTRY" --entry "$ENTRY" --entry-closure --strip \
         --backend cranelift \
-        --cache-dir build/mini_cache_hosted_wm --mode dynload --output "$NATIVE_BIN" \
+        --cache-dir "$BUILD_DIR/native-cache" --mode dynload --output "$NATIVE_BIN" \
         >"$BUILD_LOG" 2>&1; then
         emit_failure production-native-build-failed "$snapshot_hook" "$capture_hook" "$input_hook"
         exit 1
@@ -220,7 +233,8 @@ printf '0 idle\n' >"$COMMAND_PATH"
 SIMPLE_WM_EVIDENCE_SNAPSHOT_PATH="$ROOT_DIR/$FULLSCREEN_SNAPSHOT.live" \
 SIMPLE_WM_EVIDENCE_CAPTURE_PATH="$ROOT_DIR/$FULLSCREEN_CAPTURE.live" \
 SIMPLE_WM_EVIDENCE_INPUT_FIFO="$ROOT_DIR/$COMMAND_PATH" \
-SIMPLE_WM_RASTER="${SIMPLE_WM_RASTER:-engine2d}" \
+SIMPLE_WM_RASTER="${SIMPLE_WM_RASTER:-simple-2d-winit-buffer}" \
+DYLD_INSERT_LIBRARIES="$SPL_WINIT_LIB:$SIMPLE_RUNTIME_DYLIB${DYLD_INSERT_LIBRARIES:+:$DYLD_INSERT_LIBRARIES}" \
     "$NATIVE_BIN" >"$LAUNCH_LOG" 2>&1 &
 wm_pid=$!
 cleanup() {
@@ -299,7 +313,7 @@ restored_elapsed=$(( $(now_ms) - restored_started ))
 save_phase "$RESTORED_SNAPSHOT" "$RESTORED_CAPTURE"
 
 for snapshot in "$WINDOWED_SNAPSHOT" "$FULLSCREEN_SNAPSHOT" "$RESTORED_SNAPSHOT"; do
-    jq -e '.render.backend == "engine2d" and .render.fallback_used == false and .render.readback == "presented-pixel-buffer" and (.compositor.windows|length) > 0 and (.compositor.taskbar.running|length) > 0' "$snapshot" >/dev/null || fail_live snapshot-provenance-invalid
+    jq -e '.render.backend == "simple-2d-winit-buffer" and .render.fallback_used == false and .render.readback == "presented-pixel-buffer" and (.compositor.windows|length) > 0 and (.compositor.taskbar.running|length) > 0' "$snapshot" >/dev/null || fail_live snapshot-provenance-invalid
     [ "$(jq -cS '{windows:.compositor.windows,taskbar:.compositor.taskbar}' "$snapshot")" = "$windowed_scene" ] || fail_live internal-scene-changed-across-physical-mode
 done
 jq -e --argjson x "$windowed_x" --argjson y "$windowed_y" --argjson w "$windowed_w" --argjson h "$windowed_h" '.surface.geometry.x==$x and .surface.geometry.y==$y and .surface.geometry.width==$w and .surface.geometry.height==$h and .surface.saved_windowed_geometry.x==$x and .surface.saved_windowed_geometry.y==$y and .surface.saved_windowed_geometry.width==$w and .surface.saved_windowed_geometry.height==$h and .input.nonce==12' "$RESTORED_SNAPSHOT" >/dev/null || fail_live restored-native-geometry-mismatch
@@ -331,7 +345,7 @@ trap - EXIT INT TERM
     echo "wm_production_fullscreen_status=pass"
     echo "wm_production_fullscreen_reason=live-production-evidence-verified"
     echo "wm_production_fullscreen_native_artifact=$NATIVE_BIN"
-    echo "wm_production_fullscreen_backend=engine2d"
+    echo "wm_production_fullscreen_backend=simple-2d-winit-buffer"
     echo "wm_production_fullscreen_fallback_used=false"
     echo "wm_production_fullscreen_readback=presented-pixel-buffer"
     echo "wm_production_fullscreen_internal_maximize_hook=verified"
@@ -346,7 +360,7 @@ trap - EXIT INT TERM
     echo
     echo "- status: pass"
     echo "- artifact: $NATIVE_BIN"
-    echo "- backend/readback: engine2d / presented-pixel-buffer (no fallback)"
+    echo "- backend/readback: simple-2d-winit-buffer / presented-pixel-buffer (no fallback)"
     echo "- fullscreen/restore: ${fullscreen_elapsed}ms / ${restored_elapsed}ms"
     echo "- internal interactions: focus, drag, minimize, taskbar restore"
     echo "- internal maximize/restore: verified exact"

@@ -269,7 +269,10 @@ char* spl_file_read(const char* path) {
     }
     long len = ftell(f);
     if (len < 0) len = 0;
-    rewind(f);
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return spl_str_new("");
+    }
     char* out = (char*)malloc((size_t)len + 1);
     if (!out) {
         fclose(f);

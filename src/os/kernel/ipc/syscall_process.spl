@@ -716,40 +716,18 @@ pub struct SpawnBinaryDirectState:
     scheduler: Scheduler
 
 fn _spawn_from_resolved_bytes_for_arch_state(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog, arch: Architecture) -> SpawnBinaryDirectState:
-    val _sp_argv: [text] = []
-    val _sp_envp: [text] = []
     val _path_bytes = path_bytes
-    log_raw_println("[syscall13] build_user_process_image begin")
-    val image_result = build_user_process_image(path, bytes, arch, _sp_argv, _sp_envp)
-    if image_result.is_ok():
-        log_raw_println("[syscall13] build_user_process_image ok")
-        if _use_x86_64_direct_spawn_handoff(arch):
-            val pid = _alloc_x86_64_direct_spawn_pid()
-            val pid_value = pid as i64
-            log_raw_println("[syscall13] user image handoff ok pid={pid_value}")
-            return SpawnBinaryDirectState(pid: pid_value, scheduler: scheduler)
-        val priority = _u64_to_priority(priority_raw)
-        val caps = CapabilitySet.full()
-        var sched = scheduler
-        log_raw_println("[syscall13] create_user_task begin")
-        val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
-        log_raw_println("[syscall13] create_user_task returned")
-        val pid = raw_pid
-        log_raw_println("[syscall13] pid resolved")
-        if pid == 0:
-            log_raw_println("[syscall13] create_user_task failed")
-            return SpawnBinaryDirectState(pid: -12, scheduler: sched)
-
-        val pid_value = pid as i64
-        log_raw_println("[syscall13] user image handoff ok pid={pid_value}")
-        return SpawnBinaryDirectState(pid: pid_value, scheduler: sched)
-    else:
-        log_raw_println("[syscall13] build_user_process_image failed")
-
-    var log = klog
-    klog_write(log, 3, 1, 0, "spawn_binary rejected invalid executable: {path}")
-    log_raw_println("[syscall13] rejected invalid filesystem executable")
-    SpawnBinaryDirectState(pid: -8, scheduler: scheduler)
+    val priority = _u64_to_priority(priority_raw)
+    val caps = CapabilitySet.full()
+    var sched = scheduler
+    log_raw_println("[syscall13] staged create_user_task begin")
+    val pid = sched.create_user_task_from_bytes_pid(path, bytes, arch, priority, caps)
+    log_raw_println("[syscall13] staged create_user_task returned pid={pid}")
+    if pid == 0:
+        var log = klog
+        klog_write(log, 3, 1, 0, "spawn_binary rejected invalid executable: {path}")
+        return SpawnBinaryDirectState(pid: -8, scheduler: sched)
+    SpawnBinaryDirectState(pid: pid as i64, scheduler: sched)
 
 fn _spawn_from_resolved_bytes_for_arch(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog, arch: Architecture) -> i64:
     _spawn_from_resolved_bytes_for_arch_state(path, path_bytes, bytes, priority_raw, scheduler, klog, arch).pid

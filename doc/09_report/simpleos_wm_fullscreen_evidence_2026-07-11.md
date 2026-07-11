@@ -2,12 +2,12 @@
 
 - status: fail
 - reason: dynamic-scanout-or-desktop-readiness-missing
-- simple bin: /Users/ormastes/simple/build/bootstrap/stage3/aarch64-apple-darwin/simple
-- simple bin source: self-hosted:/Users/ormastes/simple/build/bootstrap/stage3/aarch64-apple-darwin/simple
+- simple bin: build/bootstrap/stage3/aarch64-apple-darwin/simple
+- simple bin source: explicit-env
 - simple bin status: pass
-- qmp socket: build/simpleos_wm_fullscreen_evidence/qmp.sock
+- qmp socket: build/simpleos-wm-fullscreen-scalar-stage-serial-markers/qmp.sock
 - scanout: address=4244635648 width=1024 height=768 byte-pitch=4096 format=argb8888 generation=1
-- host nonce: simpleos-wm-1783754565-67514
+- host nonce: simpleos-wm-1783765146-9586
 - input sequences: baseline=0 maximize=0 restore=0
 - maximize IRQ/state/frame: - | - | -
 - restore IRQ/state/frame: - | - | -
@@ -15,10 +15,10 @@
 - baseline sha256: -
 - maximized sha256: -
 - restored sha256: -
-- baseline ppm: build/simpleos_wm_fullscreen_evidence/baseline.ppm (0 bytes)
-- maximized ppm: build/simpleos_wm_fullscreen_evidence/fullscreen.ppm (0 bytes)
-- restored ppm: build/simpleos_wm_fullscreen_evidence/restored.ppm (0 bytes)
-- serial log: build/simpleos_wm_fullscreen_evidence/serial.log (5005 bytes)
+- baseline ppm: build/simpleos-wm-fullscreen-scalar-stage-serial-markers/baseline.ppm (0 bytes)
+- maximized ppm: build/simpleos-wm-fullscreen-scalar-stage-serial-markers/fullscreen.ppm (0 bytes)
+- restored ppm: build/simpleos-wm-fullscreen-scalar-stage-serial-markers/restored.ppm (0 bytes)
+- serial log: build/simpleos-wm-fullscreen-scalar-stage-serial-markers/serial.log (4729 bytes)
 
 This wrapper boots the wm-simple-web SimpleOS QEMU target directly
 (same q35/max/2G/BGA-std flags as os.qemu_runner._wm_simple_web_qmp_capture_target),

@@ -999,7 +999,14 @@ fn is_macos_system_symbol(sym: &str) -> bool {
         return true;
     }
 
-    if name.starts_with("objc_") || name.starts_with("_objc_") || name.starts_with("OBJC_") {
+    if name.starts_with("objc_")
+        || name.starts_with("_objc_")
+        || name.starts_with("OBJC_")
+        || name.starts_with("class_")
+        || name.starts_with("ivar_")
+        || name.starts_with("method_")
+        || name.starts_with("protocol_")
+    {
         return true;
     }
 
@@ -1072,6 +1079,23 @@ fn is_macos_system_symbol(sym: &str) -> bool {
             | "proc_pidpath"
             | "issetugid"
             | "sandbox_check"
+            | "cfgetispeed"
+            | "cfgetospeed"
+            | "clock_getres"
+            | "clock_settime"
+            | "fsetattrlist"
+            | "setattrlist"
+            | "getegid"
+            | "getgid"
+            | "getpeereid"
+            | "mkfifo"
+            | "recvmsg"
+            | "sendfile"
+            | "sendmsg"
+            | "sigaltstack"
+            | "sigdelset"
+            | "sigismember"
+            | "socketpair"
     ) {
         return true;
     }
@@ -1234,6 +1258,7 @@ fn is_known_system_name(name: &str) -> bool {
             | "fflush"
             | "fseek"
             | "ftell"
+            | "rewind"
             | "feof"
             | "ferror"
             | "fileno"

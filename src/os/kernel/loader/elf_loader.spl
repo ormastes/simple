@@ -65,6 +65,16 @@ struct ElfImage:
     entry: u64
     segments: [ElfLoadSegment]
 
+# Freestanding stage3 cannot safely return Result<ElfImage, text> across a
+# module boundary. Keep the x86_64 load plan here and expose scalar accessors.
+var g_staged_x64_entry: u64 = 0u64
+var g_staged_x64_offsets: [u64] = []
+var g_staged_x64_file_sizes: [u64] = []
+var g_staged_x64_virt_addrs: [u64] = []
+var g_staged_x64_mem_sizes: [u64] = []
+var g_staged_x64_flags: [u32] = []
+var g_staged_x64_aligns: [u64] = []
+
 fn elf_segment_file_offset(segment: ElfLoadSegment) -> u64:
     segment.file_offset
 
@@ -266,6 +276,51 @@ fn _parse_elf64(data: [u8]) -> Result<ElfImage, text>:
     if segments.len() == 0:
         return Err("ELF64 image has no PT_LOAD segments")
     Ok(ElfImage(class_: ElfClass.Elf64, entry: entry, segments: segments))
+
+fn stage_x86_64_user_elf(data: [u8]) -> i64:
+    g_staged_x64_entry = 0u64
+    g_staged_x64_offsets = []
+    g_staged_x64_file_sizes = []
+    g_staged_x64_virt_addrs = []
+    g_staged_x64_mem_sizes = []
+    g_staged_x64_flags = []
+    g_staged_x64_aligns = []
+    if not _check_range(data, 0, ELF64_EHDR_SIZE): return -1
+    if _byte_at(data, 0) != ELF_MAGIC_0 or _byte_at(data, 1) != ELF_MAGIC_1 or _byte_at(data, 2) != ELF_MAGIC_2 or _byte_at(data, 3) != ELF_MAGIC_3: return -2
+    if _byte_at(data, 4) != ELFCLASS64 or _byte_at(data, 5) != ELFDATA2LSB or _byte_at(data, 6) != EV_CURRENT: return -3
+    if _read_u16_le(data, 16) != ET_EXEC or _read_u16_le(data, 18) != EM_X86_64: return -4
+    if _read_u32_le(data, 20) != EV_CURRENT or _read_u16_le(data, 52) != ELF64_EHDR_SIZE: return -5
+    val phoff = _read_u64_le(data, 32)
+    val phentsize = _read_u16_le(data, 54)
+    val phnum = _read_u16_le(data, 56)
+    if phentsize != ELF64_PHDR_SIZE or phnum <= 0: return -6
+    if not _check_range(data, phoff, phentsize * phnum): return -7
+    g_staged_x64_entry = _read_u64_le(data, 24) as u64
+    var idx = 0
+    while idx < phnum:
+        val off = phoff + idx * phentsize
+        if _read_u32_le(data, off) == PT_LOAD:
+            val file_offset = _read_u64_le(data, off + 8)
+            val file_size = _read_u64_le(data, off + 32)
+            val mem_size = _read_u64_le(data, off + 40)
+            if file_size > mem_size or not _check_range(data, file_offset, file_size): return -8
+            g_staged_x64_offsets.push(file_offset as u64)
+            g_staged_x64_file_sizes.push(file_size as u64)
+            g_staged_x64_virt_addrs.push(_read_u64_le(data, off + 16) as u64)
+            g_staged_x64_mem_sizes.push(mem_size as u64)
+            g_staged_x64_flags.push(_read_u32_le(data, off + 4) as u32)
+            g_staged_x64_aligns.push(_read_u64_le(data, off + 48) as u64)
+        idx = idx + 1
+    if g_staged_x64_offsets.len() == 0: return -9
+    g_staged_x64_offsets.len()
+
+fn staged_x86_64_entry() -> u64: g_staged_x64_entry
+fn staged_x86_64_file_offset(idx: i64) -> u64: g_staged_x64_offsets[idx]
+fn staged_x86_64_file_size(idx: i64) -> u64: g_staged_x64_file_sizes[idx]
+fn staged_x86_64_virt_addr(idx: i64) -> u64: g_staged_x64_virt_addrs[idx]
+fn staged_x86_64_mem_size(idx: i64) -> u64: g_staged_x64_mem_sizes[idx]
+fn staged_x86_64_flags(idx: i64) -> u32: g_staged_x64_flags[idx]
+fn staged_x86_64_align(idx: i64) -> u64: g_staged_x64_aligns[idx]
 
 fn load_user_executable(data: [u8], arch: Architecture) -> Result<ElfImage, text>:
     val expected_opt = _expected_class(arch)

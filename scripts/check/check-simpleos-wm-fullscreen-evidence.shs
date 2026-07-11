@@ -159,7 +159,7 @@ fi
 
 ENTRY="examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
 LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
-KERNEL_OUTPUT="build/os/simpleos_wm_simple_web_check_32.elf"
+KERNEL_OUTPUT="${SIMPLEOS_WM_KERNEL_ARTIFACT:-$BUILD_DIR/simpleos_wm_production_desktop.elf}"
 
 if [ ! -f "$ENTRY" ]; then
     emit_failure "wm-simple-web-source-missing"
@@ -169,7 +169,12 @@ fi
 # Build the kernel (same flow as os.qemu_runner.build_os for the
 # wm-simple-web check target) unless a fresh artifact already exists.
 kernel_stale=false
-if [ ! -f "$KERNEL_OUTPUT" ]; then
+if [ -n "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ]; then
+    if [ ! -f "$KERNEL_OUTPUT" ] || [ ! -s "$KERNEL_OUTPUT" ]; then
+        emit_failure "explicit-wm-kernel-artifact-missing"
+        exit 1
+    fi
+elif [ ! -f "$KERNEL_OUTPUT" ]; then
     kernel_stale=true
 elif find src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64 \
     -type f -name '*.spl' -newer "$KERNEL_OUTPUT" -print -quit | grep -q .; then
@@ -206,7 +211,7 @@ SPL
         "$SIMPLE_BIN" native-build \
         --source build/os/generated --source "$ENTRY" \
         --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
-        --cache-dir build/mini_cache_simpleos_wm --mode dynload \
+        --cache-dir "$BUILD_DIR/native-cache" --mode dynload \
         --entry-closure --entry "$ENTRY" \
         --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
         --linker-script "$LINKER_SCRIPT" \
@@ -238,7 +243,7 @@ qemu-system-x86_64 \
     -no-reboot \
     -kernel "$KERNEL_OUTPUT" \
     -vga std \
-    -drive "file=$DISK_IMAGE,if=none,id=nvm,format=raw" \
+    -drive "file=$DISK_IMAGE,if=none,id=nvm,format=raw,snapshot=on" \
     -device "nvme,serial=deadbeef,drive=nvm" \
     -qmp "unix:$QMP_SOCKET,server,nowait" \
     >"$LAUNCH_OUT" 2>&1 &

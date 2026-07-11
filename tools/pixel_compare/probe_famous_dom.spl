@@ -1,0 +1,147 @@
+# Conformance probe: famous-page DOM/script-host API patterns
+# Uses the real API contract: mutators return the modified object; caller reassigns.
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.script.dom_api.*
+use std.gc_async_mut.gpu.browser_engine.script.event_api.*
+use std.gc_async_mut.gpu.browser_engine.script.timer_api.*
+use std.gc_async_mut.gpu.browser_engine.script.storage_api.*
+use std.gc_async_mut.gpu.browser_engine.script.location_api.*
+use std.gc_async_mut.gpu.browser_engine.script.navigator_api.*
+use std.gc_async_mut.gpu.browser_engine.script.form_api.*
+use std.gc_async_mut.gpu.browser_engine.script.console_api.*
+use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
+use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn ok(name: text, cond: bool):
+    if cond:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name)
+
+fn build_dom() -> BeDomNode:
+    var root = document_create_element("div")
+    root = node_set_attribute(root, "id", "app")
+
+    var h1 = document_create_element("h1")
+    h1 = node_set_attribute(h1, "id", "title")
+    h1 = node_set_attribute(h1, "class", "hdr")
+    h1 = node_set_text_content(h1, "Hello")
+    root = node_append_child(root, h1)
+
+    var box = document_create_element("div")
+    box = node_set_attribute(box, "class", "box active")
+    var input = document_create_element("input")
+    input = node_set_attribute(input, "id", "name")
+    input = node_set_attribute(input, "value", "joe")
+    box = node_append_child(box, input)
+    var btn = document_create_element("button")
+    btn = node_set_attribute(btn, "id", "btn")
+    box = node_append_child(box, btn)
+    root = node_append_child(root, box)
+
+    var p = document_create_element("p")
+    p = node_set_attribute(p, "id", "para")
+    p = node_set_text_content(p, "world")
+    root = node_append_child(root, p)
+    root
+
+var root = build_dom()
+
+match document_get_element_by_id(root, "title"):
+    Some(n): ok("getElementById(#title)->h1", node_tag_name(n) == "h1")
+    _: ok("getElementById(#title)->h1", false)
+
+match document_query_selector(root, "#name"):
+    Some(n): ok("querySelector(#name)->input", node_tag_name(n) == "input")
+    _: ok("querySelector(#name)->input", false)
+
+match document_query_selector(root, "input"):
+    Some(n): ok("querySelector(input)->input", node_tag_name(n) == "input")
+    _: ok("querySelector(input)->input", false)
+
+match document_query_selector(root, ".box"):
+    Some(n): ok("querySelector(.box)->div", node_tag_name(n) == "div")
+    _: ok("querySelector(.box)->div", false)
+
+ok("querySelectorAll(p) count=1", document_query_selector_all(root, "p").len() == 1)
+ok("querySelectorAll(.active) count=1", document_query_selector_all(root, ".active").len() == 1)
+ok("getElementsByTagName(div) count=2", document_query_selector_all(root, "div").len() == 2)
+
+match document_get_element_by_id(root, "para"):
+    Some(n): ok("textContent(#para)=world", node_get_text_content(n) == "world")
+    _: ok("textContent(#para)=world", false)
+
+var el9 = document_create_element("p")
+el9 = node_set_text_content(el9, "changed")
+ok("set textContent", node_get_text_content(el9) == "changed")
+
+var el10 = document_create_element("button")
+el10 = node_set_attribute(el10, "data-x", "42")
+match node_get_attribute(el10, "data-x"):
+    Some(v): ok("setAttribute/getAttribute", v == "42")
+    _: ok("setAttribute/getAttribute", false)
+
+var el11 = document_create_element("button")
+el11 = node_class_list_add(el11, "primary")
+ok("classList.add+contains", node_class_list_contains(el11, "primary"))
+el11 = node_class_list_remove(el11, "primary")
+ok("classList.remove", not node_class_list_contains(el11, "primary"))
+
+match document_query_selector(root, ".box"):
+    Some(n): ok("classList.contains(active) from attr", node_class_list_contains(n, "active"))
+    _: ok("classList.contains(active) from attr", false)
+
+var host = document_create_element("div")
+host = node_append_child(host, document_create_element("section"))
+ok("appendChild adds child", document_query_selector_all(host, "section").len() == 1)
+host = node_remove_child(host, 0)
+ok("removeChild removes", document_query_selector_all(host, "section").len() == 0)
+
+ok("node_children count root=3", node_children(root).len() == 3)
+
+var pr = document_create_element("div")
+var pchild = document_create_element("span")
+pchild = node_set_attribute(pchild, "id", "pc")
+pr = node_append_child(pr, pchild)
+ok("node_parent_in finds parent", node_parent_in(pr, pchild).?)
+
+var btn16 = document_create_element("button")
+node_add_event_listener(btn16, "click", "handle_click", false)
+val ev16 = event_create("click", "btn")
+ok("addEventListener+dispatch returns action", event_dispatch(btn16, ev16).len() > 0)
+
+var evloop = EventLoop.new()
+val tid = set_timeout(evloop, 99, 10)
+val now0 = rt_time_now_unix_micros()
+ok("setTimeout not expired immediately", evloop.expired_timer_count_before(now0) == 0)
+val fired = evloop.drain_expired(now0 + 100000)
+ok("setTimeout fires after drain", fired.len() == 1 and fired[0] == 99)
+
+var evloop2 = EventLoop.new()
+val tid2 = set_timeout(evloop2, 7, 10)
+clear_timeout(evloop2, tid2)
+ok("clearTimeout cancels", evloop2.pending_timer_count() == 0)
+
+var store = BrowserStorage.new()
+store = storage_set_item(store, "k", "v")
+match storage_get_item(store, "k"):
+    Some(v): ok("localStorage set/get", v == "v")
+    _: ok("localStorage set/get", false)
+
+val loc = location_from_url("https://example.com/path/page?q=1#frag")
+ok("location.href", loc.href == "https://example.com/path/page?q=1#frag")
+ok("location.pathname", loc.pathname == "/path/page")
+
+ok("navigator.userAgent", navigator_user_agent(navigator_create(true)).len() > 0)
+
+match document_get_element_by_id(root, "name"):
+    Some(n): ok("form input value read", form_get_value(n) == "joe")
+    _: ok("form input value read", false)
+
+var cbuf = ConsoleBuffer.new()
+cbuf = console_log(cbuf, "hi")
+ok("console.log capture", cbuf.entries().len() == 1 and cbuf.entries()[0].message == "hi")
+
+print("PROBE DONE")

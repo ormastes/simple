@@ -13,6 +13,10 @@ use os.kernel.loader.elf_loader.{
     elf_image_entry, elf_image_segments,
     elf_segment_file_offset, elf_segment_file_size, elf_segment_virt_addr,
     elf_segment_mem_size, elf_segment_flags, elf_segment_align,
+    stage_x86_64_user_elf, staged_x86_64_entry,
+    staged_x86_64_file_offset, staged_x86_64_file_size,
+    staged_x86_64_virt_addr, staged_x86_64_mem_size,
+    staged_x86_64_flags, staged_x86_64_align,
     ElfLoadSegment
 }
 use os.kernel.loader.smf.{smf_has_header, smf_extract_executable_stub, smf_extract_executable_stub_for_arch, smf_extract_executable_stub_unchecked}
@@ -78,6 +82,28 @@ val ARM64_USER_STACK_TOP: u64 = 0x0000004000000000
 val ARM32_USER_STACK_TOP: u64 = 0x0000000081000000
 val RV64_USER_STACK_TOP: u64 = 0x0000004000000000
 val RV32_USER_STACK_TOP: u64 = 0x0000000081000000
+
+# Freestanding x86_64 stage3 currently cannot return UserProcessImage (or a
+# Result containing it) across a module boundary reliably. Keep the parsed
+# fields in this owner module and let the scheduler reconstruct the aggregate
+# locally. Arrays/text already use the runtime's stable reference ABI.
+var g_staged_process_path: text = ""
+var g_staged_process_entry: u64 = 0
+var g_staged_process_stack_top: u64 = 0
+var g_staged_process_stack_size: u64 = 0
+var g_staged_process_argv: [text] = []
+var g_staged_process_envp: [text] = []
+var g_staged_process_segments: [UserLoadSegment] = []
+var g_staged_process_segment_virt_addrs: [u64] = []
+var g_staged_process_segment_mem_sizes: [u64] = []
+var g_staged_process_segment_file_sizes: [u64] = []
+var g_staged_process_segment_flags: [u32] = []
+var g_staged_process_segment_aligns: [u64] = []
+var g_staged_process_segment_data: [[u8]] = []
+var g_staged_process_segment_count: i32 = 0
+var g_staged_process_file_bytes: [u8] = []
+var g_staged_process_initial_sp: u64 = 0
+var g_staged_process_initial_stack_bytes: [u8] = []
 
 fn _pi_byte_at(data: [u8], offset: u64) -> u8:
     # Freestanding x86_64 stores [u8] elements as 8-byte boxed RuntimeValues
@@ -397,6 +423,118 @@ fn build_user_process_image(
     Ok(_build_user_process_image_from_elf(
         path, native_data, arch, argv, envp, entry, elf_image_segments(elf), _pi_byte_len(data)
     ))
+
+fn stage_user_process_image_for_scheduler(
+    path: text,
+    data: [u8],
+    arch: Architecture,
+    argv: [text],
+    envp: [text]
+) -> i64:
+    """Parse and stage an image without returning the aggregate across modules."""
+    val input_len = _pi_byte_len(data)
+    val byte0 = if input_len > 0: _pi_byte_at(data, 0).to_u64() else: 0u64
+    val byte1 = if input_len > 1: _pi_byte_at(data, 1).to_u64() else: 0u64
+    val byte2 = if input_len > 2: _pi_byte_at(data, 2).to_u64() else: 0u64
+    val byte3 = if input_len > 3: _pi_byte_at(data, 3).to_u64() else: 0u64
+    serial_println("[process-image] stage begin len={input_len} magic={byte0},{byte1},{byte2},{byte3}")
+    # The syscall boot cache already owns this array. Direct ELF requires no
+    # container normalization, and stage3 corrupts Result<[u8], text> even for
+    # its Ok arm. Keep validated ELF bytes on the reference ABI directly.
+    var native_data: [u8] = data
+    # Do not call the aggregate bool helper here: the freestanding stage3 ABI
+    # has returned false from that helper even while these same decoded scalar
+    # bytes print as 127,69,76,70. Nested scalar comparisons keep the decision
+    # in this owner frame and avoid both the bool-return and Result<[u8],text>
+    # boundaries for a direct ELF boot-cache payload.
+    var direct_elf = false
+    if byte0 == 127u64:
+        if byte1 == 69u64:
+            if byte2 == 76u64:
+                if byte3 == 70u64:
+                    direct_elf = true
+    if not direct_elf:
+        val native_result = _normalise_executable_bytes(data, arch)
+        if native_result.is_err():
+            serial_println("[process-image] stage normalize failed")
+            return -8
+        native_data = native_result.unwrap()
+    val staged_segment_count = stage_x86_64_user_elf(native_data)
+    if staged_segment_count <= 0:
+        serial_println("[process-image] stage elf parse failed code={staged_segment_count}")
+        return -8
+    val entry = _user_entry_for_image(staged_x86_64_entry(), native_data)
+    val stack_top = _native_default_stack_top(arch)
+    var stack_size = compute_stack_size(_pi_byte_len(data))
+    if stack_size == 0:
+        stack_size = 8388608
+    var effective_argv: [text] = argv
+    if effective_argv.len() == 0:
+        effective_argv = [path]
+    var segments: [UserLoadSegment] = []
+    g_staged_process_segment_virt_addrs = []
+    g_staged_process_segment_mem_sizes = []
+    g_staged_process_segment_file_sizes = []
+    g_staged_process_segment_flags = []
+    g_staged_process_segment_aligns = []
+    g_staged_process_segment_data = []
+    var staged_idx = 0
+    while staged_idx < staged_segment_count:
+        val file_offset = staged_x86_64_file_offset(staged_idx)
+        val file_size = staged_x86_64_file_size(staged_idx)
+        val segment_data = _pi_slice_bytes(native_data, file_offset, file_size)
+        segments.push(UserLoadSegment(
+            virt_addr: staged_x86_64_virt_addr(staged_idx),
+            mem_size: staged_x86_64_mem_size(staged_idx),
+            file_size: file_size,
+            flags: staged_x86_64_flags(staged_idx),
+            align: staged_x86_64_align(staged_idx),
+            data: segment_data
+        ))
+        g_staged_process_segment_virt_addrs.push(staged_x86_64_virt_addr(staged_idx))
+        g_staged_process_segment_mem_sizes.push(staged_x86_64_mem_size(staged_idx))
+        g_staged_process_segment_file_sizes.push(file_size)
+        g_staged_process_segment_flags.push(staged_x86_64_flags(staged_idx))
+        g_staged_process_segment_aligns.push(staged_x86_64_align(staged_idx))
+        g_staged_process_segment_data.push(segment_data)
+        staged_idx = staged_idx + 1
+    if segments.len() == 0:
+        return -8
+    val extra_aux: [AuxEntry] = [AuxEntry(aux_type: 9, value: entry)]
+    val stack_frame = build_initial_stack(stack_top, effective_argv, envp, extra_aux)
+    val initial_sp = stack_build_result_sp(stack_frame)
+    val initial_stack_bytes = stack_build_result_bytes(stack_frame)
+    g_staged_process_path = path
+    g_staged_process_entry = entry
+    g_staged_process_stack_top = stack_top
+    g_staged_process_stack_size = stack_size
+    g_staged_process_argv = effective_argv
+    g_staged_process_envp = envp
+    g_staged_process_segments = segments
+    g_staged_process_segment_count = _user_segment_count_for_image(segments, native_data)
+    g_staged_process_file_bytes = native_data
+    g_staged_process_initial_sp = initial_sp
+    g_staged_process_initial_stack_bytes = initial_stack_bytes
+    serial_println("[process-image] staged entry={entry} stack_top={stack_top} stack_size={stack_size} initial_sp={initial_sp} segs={segments.len()}")
+    1
+
+fn staged_process_path() -> text: g_staged_process_path
+fn staged_process_entry() -> u64: g_staged_process_entry
+fn staged_process_stack_top() -> u64: g_staged_process_stack_top
+fn staged_process_stack_size() -> u64: g_staged_process_stack_size
+fn staged_process_argv() -> [text]: g_staged_process_argv
+fn staged_process_envp() -> [text]: g_staged_process_envp
+fn staged_process_segments() -> [UserLoadSegment]: g_staged_process_segments
+fn staged_process_segment_virt_addr(idx: i64) -> u64: g_staged_process_segment_virt_addrs[idx]
+fn staged_process_segment_mem_size(idx: i64) -> u64: g_staged_process_segment_mem_sizes[idx]
+fn staged_process_segment_file_size(idx: i64) -> u64: g_staged_process_segment_file_sizes[idx]
+fn staged_process_segment_flags(idx: i64) -> u32: g_staged_process_segment_flags[idx]
+fn staged_process_segment_align(idx: i64) -> u64: g_staged_process_segment_aligns[idx]
+fn staged_process_segment_data(idx: i64) -> [u8]: g_staged_process_segment_data[idx]
+fn staged_process_segment_count() -> i32: g_staged_process_segment_count
+fn staged_process_file_bytes() -> [u8]: g_staged_process_file_bytes
+fn staged_process_initial_sp() -> u64: g_staged_process_initial_sp
+fn staged_process_initial_stack_bytes() -> [u8]: g_staged_process_initial_stack_bytes
 
 @cfg(arm64)
 fn _build_arm64_user_process_image_from_native(

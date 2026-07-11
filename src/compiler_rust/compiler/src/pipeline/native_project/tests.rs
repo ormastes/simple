@@ -1613,6 +1613,25 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
     assert!(super::tools::is_system_symbol("_Unwind_Resume"));
     assert!(super::tools::is_system_symbol("cfsetispeed@GLIBC_2.2.5"));
     assert!(super::tools::is_system_symbol("pthread_atfork"));
+    assert!(super::tools::is_system_symbol("rewind"));
+    assert!(super::tools::is_system_symbol("_rewind"));
+    for symbol in [
+        "_cfgetispeed",
+        "_class_addMethod",
+        "_clock_getres",
+        "_fsetattrlist",
+        "_getpeereid",
+        "_ivar_getName",
+        "_method_getImplementation",
+        "_protocol_getName",
+        "_recvmsg",
+        "_sendfile",
+        "_setattrlist",
+        "_sigaltstack",
+        "_socketpair",
+    ] {
+        assert!(super::tools::is_system_symbol(symbol), "{symbol}");
+    }
     assert!(!super::tools::is_system_symbol("app__mcp__main"));
 }
 

@@ -257,15 +257,25 @@ fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
             i = i + 1
             continue
         if ci == first:
-            var j = 1
-            var matched = true
-            while j < key_len:
-                if inner.char_at(i + j) != key.char_at(j):
-                    matched = false
-                    break
-                j = j + 1
-            if matched:
-                return i
+            # Left word-boundary guard: a candidate match is only a real
+            # attribute when it starts the inner text or follows ASCII
+            # whitespace. Without this, a longer attribute name ending with
+            # the key falsely matches — `align=` inside `valign=`, `bgcolor=`
+            # inside `data-bgcolor=`, `width=` inside `data-width=`.
+            var at_token_start = i == 0
+            if not at_token_start:
+                val prev = inner.char_at(i - 1)
+                at_token_start = prev == " " or prev == "\t" or prev == "\n" or prev == "\r"
+            if at_token_start:
+                var j = 1
+                var matched = true
+                while j < key_len:
+                    if inner.char_at(i + j) != key.char_at(j):
+                        matched = false
+                        break
+                    j = j + 1
+                if matched:
+                    return i
         i = i + 1
     -1
 
@@ -5605,6 +5615,38 @@ fn _sort_style_order_indices(indices: [i32], count: i32, styles: [Style]) -> [i3
     src
 
 # ---------------------------------------------------------------------------
+# Presentational attributes (bgcolor/width/height/align -> CSS declarations)
+# ---------------------------------------------------------------------------
+# Map legacy HTML presentational attributes (bgcolor/width/height/align) to CSS
+# declarations. Applied with lowest priority: after tag defaults but before
+# matched CSS rules and inline style.
+fn presentational_attr_decls(node: HNode) -> text:
+    if node.attrs_raw.len() == 0:
+        return ""
+    var out = ""
+    var bg = attr_value_by_key(node.attrs_raw, "bgcolor=").trim()
+    if bg.len() == 6 and not bg.starts_with("#"):
+        bg = "#" + bg
+    if bg.len() > 0:
+        out = out + "background-color:" + bg + ";"
+    val w = attr_value_by_key(node.attrs_raw, "width=").trim()
+    if w.len() > 0:
+        if w.ends_with("%"):
+            out = out + "width:" + w + ";"
+        elif parse_int(w) > 0:
+            out = out + "width:" + parse_int(w).to_text() + "px;"
+    val h = attr_value_by_key(node.attrs_raw, "height=").trim()
+    if h.len() > 0:
+        if h.ends_with("%"):
+            out = out + "height:" + h + ";"
+        elif parse_int(h) > 0:
+            out = out + "height:" + parse_int(h).to_text() + "px;"
+    val align = attr_value_by_key(node.attrs_raw, "align=").trim().lower()
+    if align == "center" or align == "left" or align == "right":
+        out = out + "text-align:" + align + ";"
+    out
+
+# ---------------------------------------------------------------------------
 # Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
 # ---------------------------------------------------------------------------
 
@@ -5626,6 +5668,9 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> 
         # UA-default set by tag_defaults (so h1{font-size:1.5em} == 1.5 x parent).
         val em_base = if nd.parent >= 0: styles[nd.parent].font_size else: 16
         st = tag_defaults(st, nd.tag)
+        val pres_decls = presentational_attr_decls(nd)
+        if pres_decls.len() > 0:
+            st = apply_decls(st, pres_decls, em_base)
         var empty_cells_hide = false
         val candidates_raw = style_rule_candidates(nd, rule_buckets)
         val candidates = _sort_candidates_by_specificity(candidates_raw, rule_specificities)

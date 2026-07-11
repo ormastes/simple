@@ -26,6 +26,31 @@ On macOS the pure-Simple lane = **Engine2D CPU/NEON** (aarch64) + **Metal** (GPU
 | 2 | **GUI widgets** | `examples/06_io/ui/widget_showcase_gui.spl` | the full widget catalog (button, checkbox, radio, input, dropdown, slider, switch, list, table, tree, tabs, progress, card, …) with legible labels |
 | 3 | **HTML/web rendering** | `examples/06_io/ui/web_render_file_gui.spl <file.html>` | real HTML+CSS (header/nav, hero, flex two-column main+sidebar, form, footer) via the pure-Simple web layout → Engine2D |
 
+Canonical app IDs are `graphics_2d_showcase`, `web_standards_showcase`, and
+`gui_widget_showcase`. Their canonical launch surfaces are `standalone`,
+`host_wm`, and `simpleos_wm`; platform adapters must not invent alternate IDs.
+
+### Canonical showcase manual
+
+For each supported app/surface pair:
+
+1. Launch the app by canonical ID and select the named surface.
+2. Capture a UI snapshot and find the app or control by canonical ID, visible
+   text, or semantic role.
+3. Act on a semantic control. For the widget showcase, exercise at least one
+   stateful control such as button, checkbox, switch, or slider.
+4. Read action history and assert the dispatched target and local coordinates
+   where relevant; snapshot again and assert the semantic state changed.
+5. Capture the framebuffer and assert it is nonblank. Record drawing backend,
+   processing/offload backend, device/handle provenance, and fallback state from
+   the same run.
+
+Fail the scenario for dummy or blank frames, source-assertion-only evidence,
+synthetic handles claimed as real devices/backends, action logs without a
+post-action semantic-state assertion, or backend labels without same-run
+provenance. A screenshot is supplemental layout evidence, not a replacement for
+snapshot/find/act/history plus semantic state and framebuffer checks.
+
 Backend-specific 2D variants (same scene, different backend) for parity work:
 `engine2d_cpu_simd_gui.spl` (CPU-NEON) and `engine2d_metal_gui.spl` (Metal).
 

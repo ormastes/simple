@@ -37,7 +37,7 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::platform::pump_events::EventLoopExtPumpEvents;
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 // ---- Event type constants (must match the seed's winit_sffi/mod.rs) ---------
 const EVENT_WINDOW_RESIZED: i64 = 1;
@@ -671,6 +671,54 @@ pub extern "C" fn rt_winit_window_set_position(win: i64, x: i64, y: i64) -> i64 
         slot.window
             .set_outer_position(PhysicalPosition::new(x as i32, y as i32));
         1
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_window_set_fullscreen(win: i64, enabled: i64) -> i64 {
+    PUMP.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(ps) = borrow.as_ref() else { return 0; };
+        let Some(slot) = ps.inner.windows.get(&win) else { return 0; };
+        let mode = if enabled != 0 { Some(Fullscreen::Borderless(None)) } else { None };
+        slot.window.set_fullscreen(mode);
+        1
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_window_is_fullscreen(win: i64) -> i64 {
+    PUMP.with(|cell| {
+        let borrow = cell.borrow();
+        borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win))
+            .map(|slot| slot.window.fullscreen().is_some() as i64).unwrap_or(0)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_window_inner_width(win: i64) -> i64 {
+    PUMP.with(|cell| {
+        let borrow = cell.borrow();
+        borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win))
+            .map(|slot| slot.window.inner_size().width as i64).unwrap_or(0)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_window_inner_height(win: i64) -> i64 {
+    PUMP.with(|cell| {
+        let borrow = cell.borrow();
+        borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win))
+            .map(|slot| slot.window.inner_size().height as i64).unwrap_or(0)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_window_scale_factor_milli(win: i64) -> i64 {
+    PUMP.with(|cell| {
+        let borrow = cell.borrow();
+        borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win))
+            .map(|slot| (slot.window.scale_factor() * 1000.0).round() as i64).unwrap_or(1000)
     })
 }
 

@@ -49,6 +49,27 @@ handoff (`DrawIrEventTargetContext`) if rendering or backend routing changed.
 When the renderer/backend architecture changes, distinguish drawing backend
 evidence from processing/offload backend evidence.
 
+## Canonical Showcase Manual Flow
+
+Use these stable app IDs across every supported launch surface:
+
+| App ID | Purpose |
+|---|---|
+| `graphics_2d_showcase` | 2D primitive and text rendering |
+| `web_standards_showcase` | HTML/CSS/web standards rendering |
+| `gui_widget_showcase` | Widget state and interaction |
+
+Run each applicable app on `standalone`, `host_wm`, and `simpleos_wm`. For each
+combination: snapshot the surface, find the app by canonical ID or visible role,
+act on at least one semantic control, read history, then snapshot again. Assert
+the action target and resulting semantic state. Also require a nonblank frame
+and drawing/processing backend provenance from the same run.
+
+Evidence fails if it uses a dummy or blank frame, source-text assertions alone,
+synthetic handles presented as real backend handles, or an action log without a
+post-action semantic-state change. Screenshots supplement these checks; they do
+not replace snapshot/find/act/history or framebuffer/provenance evidence.
+
 ## Procedure
 
 ### Phase 1: Snapshot

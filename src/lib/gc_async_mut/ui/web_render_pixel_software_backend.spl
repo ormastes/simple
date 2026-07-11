@@ -1,0 +1,91 @@
+# Pure-Simple software WebRender facade for production WM entry closures.
+use std.common.ui.web_render_api.{
+    WEB_RENDER_TARGET_PURE_SIMPLE,
+    WebRenderArtifact,
+    WebRenderRequest,
+    web_render_full_html,
+    web_render_pixel_artifact,
+    web_render_url_request
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
+
+fn _software_pixels(req: WebRenderRequest, full_html: text) -> [u32]:
+    simple_web_layout_render_html_software_pixels(full_html, req.viewport_w, req.viewport_h)
+
+class WebRenderPixelArtifactCache:
+    width: i32
+    height: i32
+    backend_name: text
+    last_html: text
+    cached_pixels: [u32]
+    hit_count: i32
+    store_count: i32
+
+impl WebRenderPixelArtifactCache:
+    static fn create(width: i32, height: i32, backend_name: text) -> WebRenderPixelArtifactCache:
+        WebRenderPixelArtifactCache(
+            width: width,
+            height: height,
+            backend_name: "software",
+            last_html: "",
+            cached_pixels: [],
+            hit_count: 0,
+            store_count: 0
+        )
+
+    me html_request_to_pixel_artifact(req: WebRenderRequest, full_html: text) -> WebRenderArtifact:
+        if req.viewport_w == self.width and req.viewport_h == self.height and self.last_html == full_html and self.cached_pixels.len() == self.width * self.height:
+            self.hit_count = self.hit_count + 1
+        else:
+            self.width = req.viewport_w
+            self.height = req.viewport_h
+            self.last_html = full_html
+            self.cached_pixels = _software_pixels(req, full_html)
+            self.store_count = self.store_count + 1
+        web_render_pixel_artifact(req.with_pixel_output(), self.cached_pixels)
+
+    me request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
+        self.html_request_to_pixel_artifact(req, web_render_full_html(req))
+
+    fn hits() -> i32:
+        self.hit_count
+
+    fn stores() -> i32:
+        self.store_count
+
+fn web_render_request_to_pixels(req: WebRenderRequest) -> [u32]:
+    _software_pixels(req, web_render_full_html(req))
+
+fn web_render_request_to_pixels_with_backend(req: WebRenderRequest, backend_name: text) -> [u32]:
+    web_render_request_to_pixels(req)
+
+fn web_render_html_request_to_pixels(req: WebRenderRequest, full_html: text) -> [u32]:
+    _software_pixels(req, full_html)
+
+fn web_render_html_request_to_pixels_with_backend(req: WebRenderRequest, full_html: text, backend_name: text) -> [u32]:
+    _software_pixels(req, full_html)
+
+fn web_render_request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
+    web_render_pixel_artifact(req.with_pixel_output(), web_render_request_to_pixels(req))
+
+fn web_render_html_request_to_pixel_artifact(req: WebRenderRequest, full_html: text) -> WebRenderArtifact:
+    web_render_pixel_artifact(req.with_pixel_output(), _software_pixels(req, full_html))
+
+fn web_render_html_request_to_pixel_artifact_with_backend(req: WebRenderRequest, full_html: text, backend_name: text) -> WebRenderArtifact:
+    web_render_html_request_to_pixel_artifact(req, full_html)
+
+fn web_render_pixel_artifact_cache(width: i32, height: i32, backend_name: text) -> WebRenderPixelArtifactCache:
+    WebRenderPixelArtifactCache.create(width, height, "software")
+
+fn web_render_url_request_to_pixels(req: WebRenderRequest) -> [u32]:
+    web_render_request_to_pixels(req.with_pixel_output())
+
+fn web_render_url_to_request(target: text, url: text, width: i32, height: i32) -> WebRenderRequest:
+    web_render_url_request(target, url, width, height).with_pixel_output()
+
+fn web_render_default_page_html(url: text) -> text:
+    web_render_full_html(web_render_url_request(WEB_RENDER_TARGET_PURE_SIMPLE, url, 0, 0))
+
+fn web_render_resolved_engine2d_backend_name(width: i32, height: i32, backend_name: text) -> text:
+    "software"
+
