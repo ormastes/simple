@@ -2371,15 +2371,15 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_file_write_bytes" => Some(&[0]),
 
         // Directory operations
-        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk"
+        "rt_dir_list" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk"
         | "rt_set_current_dir" => Some(&[0]),
-        // rt_dir_create/rt_dir_create_all take (path_ptr, path_len[, recursive]) —
+        // rt_dir_create/rt_dir_create_all/rt_dir_remove take (path_ptr, path_len[, recursive]) —
         // the linked runtime (runtime/src/value/sffi/file_io/directory.rs) needs
         // the explicit length, not just a null-terminated pointer. These were
         // wrongly in text_cstr_arg_indices below, which dropped path_len and
         // shifted `recursive` into the length's register slot (same class of
         // bug as the rt_process_run arg-shift fix in expand_process_c_runtime_args).
-        "rt_dir_create" | "rt_dir_create_all" => Some(&[0]),
+        "rt_dir_create" | "rt_dir_create_all" | "rt_dir_remove" => Some(&[0]),
         "rt_file_find" => Some(&[0, 1]),
 
         // Async I/O driver text arguments

@@ -1015,7 +1015,13 @@ pub fn rt_dir_exists(args: &[Value]) -> Result<Value, CompileError> {
 /// Create directory
 pub fn rt_dir_create(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    match fs::create_dir(&path) {
+    let recursive = matches!(args.get(1), Some(Value::Bool(true)));
+    let result = if recursive {
+        fs::create_dir_all(&path)
+    } else {
+        fs::create_dir(&path)
+    };
+    match result {
         Ok(_) => Ok(Value::Bool(true)),
         Err(_) => Ok(Value::Bool(false)),
     }
@@ -1040,7 +1046,13 @@ pub fn rt_dir_list(args: &[Value]) -> Result<Value, CompileError> {
 /// Remove directory
 pub fn rt_dir_remove(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    match fs::remove_dir(&path) {
+    let recursive = matches!(args.get(1), Some(Value::Bool(true)));
+    let result = if recursive {
+        fs::remove_dir_all(&path)
+    } else {
+        fs::remove_dir(&path)
+    };
+    match result {
         Ok(_) => Ok(Value::Bool(true)),
         Err(_) => Ok(Value::Bool(false)),
     }

@@ -1575,7 +1575,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_dir_create", &[I64, I64, I8], &[I8]), // path_ptr, path_len, recursive -> bool
     RuntimeFuncSpec::new("rt_dir_create_all", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_dir_list", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
-    RuntimeFuncSpec::new("rt_dir_remove", &[I64, I64], &[I8]), // path -> bool
+    RuntimeFuncSpec::new("rt_dir_remove", &[I64, I64, I8], &[I8]), // path_ptr, path_len, recursive -> bool
     RuntimeFuncSpec::new("rt_dir_remove_all", &[I64, I64], &[I8]), // path -> bool
     RuntimeFuncSpec::new("rt_file_find", &[I64, I64, I64, I64], &[I64]), // dir, pattern -> RuntimeValue
     RuntimeFuncSpec::new("rt_dir_glob", &[I64, I64], &[I64]), // pattern -> RuntimeValue (array)
