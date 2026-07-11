@@ -2055,10 +2055,17 @@ int64_t rt_hash_text(int64_t value) {
     return (int64_t)hash;
 }
 
-SplValue* rt_array_pop(SplArray* a) {
-    static SplValue tmp;
-    tmp = spl_array_pop(a);
-    return &tmp;
+int64_t rt_array_pop(SplArray* a) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array || array->len <= 0 || !array->data) return 3;
+    int64_t idx = --array->len;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return (int64_t)((uint8_t*)array->data)[idx];
+    }
+    int64_t* data = (int64_t*)array->data;
+    int64_t value = data[idx];
+    data[idx] = 3;
+    return value;
 }
 
 int64_t rt_index_get(int64_t collection, int64_t idx) {
