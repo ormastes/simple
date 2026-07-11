@@ -264,8 +264,24 @@ impl LlvmBackend {
                 "len_is_array",
             )
             .map_err(|e| crate::error::factory::llvm_build_failed("len array check", &e))?;
+        // The freestanding/kernel runtime (riscv64-unknown-none, etc.) tags strings
+        // with a single-byte object_type == RT_HEAP_STRING (0x01) instead of the
+        // hosted 4-byte "STR1" magic (0x53545231). No hosted heap kind uses byte0 == 1
+        // (STRING=0x31, ARRAY=0x02, ENUM=0x04, DICT=0x06), so this extra check is safe
+        // on both tiers and lets text.len() reach the len load instead of returning -1.
+        let is_string_byte = builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                object_type,
+                i8_type.const_int(1, false),
+                "len_is_string_byte",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("len string byte check", &e))?;
+        let is_string_any = builder
+            .build_or(is_string, is_string_byte, "len_is_string_any")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len string or", &e))?;
         let string_or_array = builder
-            .build_or(is_string, is_array, "len_string_or_array")
+            .build_or(is_string_any, is_array, "len_string_or_array")
             .map_err(|e| crate::error::factory::llvm_build_failed("len collection or", &e))?;
         // Only string and array have known kind constants; dict/tuple lack rt_len inline support.
         let is_collection = string_or_array;
