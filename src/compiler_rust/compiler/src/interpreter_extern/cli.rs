@@ -5,6 +5,7 @@
 //! that require the full driver return errors in interpreter mode.
 
 use crate::error::CompileError;
+use crate::interpreter::interpreter_state::get_interpreter_args;
 use crate::value::Value;
 
 /// CLI version string
@@ -48,9 +49,28 @@ pub fn rt_cli_print_version(_args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get command line arguments
 pub fn rt_cli_get_args(_args: &[Value]) -> Result<Value, CompileError> {
-    let args: Vec<String> = std::env::args().collect();
+    let args = get_interpreter_args();
     let arr: Vec<Value> = args.into_iter().map(Value::Str).collect();
     Ok(Value::array(arr))
+}
+
+/// Get the command-line argument count through a scalar-only ABI.
+pub fn rt_cli_arg_count(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(get_interpreter_args().len() as i64))
+}
+
+/// Get one command-line argument through a scalar-only ABI.
+/// Invalid indices return non-nil empty text.
+pub fn rt_cli_arg_at(args: &[Value]) -> Result<Value, CompileError> {
+    let index = match args.first() {
+        Some(Value::Int(index)) => *index,
+        _ => -1,
+    };
+    let value = usize::try_from(index)
+        .ok()
+        .and_then(|index| get_interpreter_args().get(index).cloned())
+        .unwrap_or_default();
+    Ok(Value::Str(value))
 }
 
 /// Check if file exists

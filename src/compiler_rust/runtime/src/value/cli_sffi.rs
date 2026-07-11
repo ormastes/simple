@@ -59,6 +59,20 @@ pub extern "C" fn rt_cli_get_args() -> RuntimeValue {
     super::rt_get_args()
 }
 
+/// Get the command-line argument count through a scalar-only ABI.
+#[no_mangle]
+pub extern "C" fn rt_cli_arg_count() -> i64 {
+    super::args::cli_arg_count()
+}
+
+/// Get one command-line argument through a scalar-only ABI.
+/// Invalid indices return allocated empty text, never nil.
+#[no_mangle]
+pub extern "C" fn rt_cli_arg_at(index: i64) -> RuntimeValue {
+    let value = super::args::cli_arg_at(index);
+    rt_string_new(value.as_ptr(), value.len() as u64)
+}
+
 /// Check if a file exists (cli version)
 #[no_mangle]
 pub extern "C" fn rt_cli_file_exists(path: RuntimeValue) -> u8 {

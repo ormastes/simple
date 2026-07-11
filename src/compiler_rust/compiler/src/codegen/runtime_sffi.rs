@@ -1277,6 +1277,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cli_version", &[], &[I64]),
     RuntimeFuncSpec::new("rt_cli_print_help", &[], &[]),
     RuntimeFuncSpec::new("rt_cli_print_version", &[], &[]),
+    RuntimeFuncSpec::new("rt_cli_arg_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_arg_at", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cli_get_args", &[], &[I64]),
     RuntimeFuncSpec::new("rt_cli_file_exists", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_cli_read_file", &[I64], &[I64]),
@@ -1573,13 +1575,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_dir_create", &[I64, I64, I8], &[I8]), // path_ptr, path_len, recursive -> bool
     RuntimeFuncSpec::new("rt_dir_create_all", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
-    RuntimeFuncSpec::new("rt_dir_list", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_dir_list", &[I64, I64], &[I64]),      // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_dir_remove", &[I64, I64, I8], &[I8]), // path_ptr, path_len, recursive -> bool
     RuntimeFuncSpec::new("rt_dir_remove_all", &[I64, I64], &[I8]), // path -> bool
     RuntimeFuncSpec::new("rt_file_find", &[I64, I64, I64, I64], &[I64]), // dir, pattern -> RuntimeValue
-    RuntimeFuncSpec::new("rt_dir_glob", &[I64, I64], &[I64]), // pattern -> RuntimeValue (array)
-    RuntimeFuncSpec::new("rt_dir_walk", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
-    RuntimeFuncSpec::new("rt_current_dir", &[], &[I64]),      // () -> RuntimeValue
+    RuntimeFuncSpec::new("rt_dir_glob", &[I64, I64], &[I64]),      // pattern -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_dir_walk", &[I64, I64], &[I64]),      // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_current_dir", &[], &[I64]),           // () -> RuntimeValue
     RuntimeFuncSpec::new("rt_set_current_dir", &[I64, I64], &[I8]), // path -> bool
     // =========================================================================
     // File Descriptor Operations

@@ -1228,6 +1228,19 @@ SplArray* rt_cli_get_args(void) {
     return args;
 }
 
+int64_t rt_cli_arg_count(void) {
+    return spl_arg_count();
+}
+
+int64_t rt_cli_arg_at(int64_t index) {
+    if (index < 0 || index >= spl_arg_count()) {
+        return rt_string_new(NULL, 0);
+    }
+    const char* arg = spl_get_arg(index);
+    if (!arg) arg = "";
+    return rt_string_new((const uint8_t*)arg, (uint64_t)strlen(arg));
+}
+
 int64_t rt_file_preload_pages(int64_t path_value) {
 #if defined(_WIN32)
     (void)path_value;

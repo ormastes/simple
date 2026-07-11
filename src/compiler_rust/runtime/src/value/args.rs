@@ -29,6 +29,7 @@ use super::{rt_array_new, rt_array_push, rt_string_new, RuntimeValue};
 ///
 /// Uses `parking_lot::Mutex` for lock-free fast path (uncontended case).
 static PROGRAM_ARGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static ARGS_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Install-once guard for the parent-death watchdog thread.
 static WATCHDOG_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -111,6 +112,7 @@ pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
     if argc <= 0 || argv.is_null() {
         // No arguments - store empty vector
         *PROGRAM_ARGS.lock() = args;
+        ARGS_INITIALIZED.store(true, Ordering::Release);
         return;
     }
 
@@ -133,6 +135,7 @@ pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
 
     // Store in global storage (replacing any previous value)
     *PROGRAM_ARGS.lock() = args;
+    ARGS_INITIALIZED.store(true, Ordering::Release);
 }
 
 /// Set program arguments from Vec<String> (convenience for driver).
@@ -152,6 +155,22 @@ pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
 pub fn rt_set_args_vec(args: &[String]) {
     install_parent_death_watchdog();
     *PROGRAM_ARGS.lock() = args.to_vec();
+    ARGS_INITIALIZED.store(true, Ordering::Release);
+}
+
+/// Return the scalar CLI argument count without exposing the array ABI.
+pub(super) fn cli_arg_count() -> i64 {
+    auto_init_args_if_empty();
+    PROGRAM_ARGS.lock().len() as i64
+}
+
+/// Return one CLI argument as an owned string. Invalid indices are non-nil empty text.
+pub(super) fn cli_arg_at(index: i64) -> String {
+    auto_init_args_if_empty();
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| PROGRAM_ARGS.lock().get(index).cloned())
+        .unwrap_or_default()
 }
 
 /// Get program arguments as a RuntimeValue array.
@@ -220,6 +239,7 @@ pub extern "C" fn rt_get_argc() -> i32 {
 #[no_mangle]
 pub extern "C" fn rt_clear_args() {
     PROGRAM_ARGS.lock().clear();
+    ARGS_INITIALIZED.store(false, Ordering::Release);
 }
 
 /// Auto-initialize arguments from std::env::args() if not already set.
@@ -230,10 +250,12 @@ pub extern "C" fn rt_clear_args() {
 /// For SMF/JIT modes, arguments are explicitly set by the driver, so this
 /// function does nothing (args are already initialized).
 fn auto_init_args_if_empty() {
-    let mut args_lock = PROGRAM_ARGS.lock();
+    if ARGS_INITIALIZED.load(Ordering::Acquire) {
+        return;
+    }
 
-    // If already initialized, do nothing
-    if !args_lock.is_empty() {
+    let mut args_lock = PROGRAM_ARGS.lock();
+    if ARGS_INITIALIZED.load(Ordering::Acquire) {
         return;
     }
 
@@ -243,6 +265,7 @@ fn auto_init_args_if_empty() {
     if !args.is_empty() {
         *args_lock = args;
     }
+    ARGS_INITIALIZED.store(true, Ordering::Release);
 }
 
 #[cfg(test)]
@@ -305,5 +328,24 @@ mod tests {
         let args2 = vec!["prog".to_string(), "b".to_string(), "c".to_string()];
         rt_set_args_vec(&args2);
         assert_eq!(rt_get_argc(), 3);
+    }
+
+    #[test]
+    fn test_scalar_cli_args_zero_one_and_multiple() {
+        rt_set_args_vec(&[]);
+        assert_eq!(cli_arg_count(), 0);
+        assert_eq!(cli_arg_at(0), "");
+
+        rt_set_args_vec(&["program".to_string()]);
+        assert_eq!(cli_arg_count(), 1);
+        assert_eq!(cli_arg_at(0), "program");
+
+        rt_set_args_vec(&["program".to_string(), "one".to_string(), "two words".to_string()]);
+        assert_eq!(cli_arg_count(), 3);
+        assert_eq!(cli_arg_at(0), "program");
+        assert_eq!(cli_arg_at(1), "one");
+        assert_eq!(cli_arg_at(2), "two words");
+        assert_eq!(cli_arg_at(-1), "");
+        assert_eq!(cli_arg_at(3), "");
     }
 }

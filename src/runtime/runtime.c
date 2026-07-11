@@ -29,6 +29,7 @@
 #define _BSD_SOURCE
 #endif
 
+#define SPL_LEGACY_VALUE_RUNTIME 1
 #include "runtime.h"
 #include "platform/platform.h"
 #include "runtime_memtrack.h"
@@ -1526,6 +1527,18 @@ __attribute__((weak)) SplArray* rt_cli_get_args(void) {
         spl_array_push(arr, spl_str(g_argv && g_argv[i] ? g_argv[i] : ""));
     }
     return arr;
+}
+
+__attribute__((weak)) int64_t rt_cli_arg_count(void) {
+    return spl_arg_count();
+}
+
+__attribute__((weak)) SplValue rt_cli_arg_at(int64_t index) {
+    if (index < 0 || index >= spl_arg_count()) {
+        return spl_str("");
+    }
+    const char* arg = spl_get_arg(index);
+    return spl_str(arg ? arg : "");
 }
 
 /* rt_ FFI wrappers for prefetch */

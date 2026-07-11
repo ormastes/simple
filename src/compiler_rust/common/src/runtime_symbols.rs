@@ -710,6 +710,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_terminal_disable_raw_mode",
     "rt_stdin_read_byte",
     "stdin_read_char",
+    "rt_cli_arg_count",
+    "rt_cli_arg_at",
     "rt_cli_get_args",
     "rt_cli_print_help",
     "rt_cli_print_version",

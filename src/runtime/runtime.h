@@ -494,6 +494,12 @@ int         rt_file_create_excl(const char* path, const char* content);
 int64_t     rt_file_stat(const char* path);
 const char* rt_shell_output(const char* cmd);
 SplArray*   rt_cli_get_args(void);
+int64_t     rt_cli_arg_count(void);
+#if defined(SPL_LEGACY_VALUE_RUNTIME)
+SplValue    rt_cli_arg_at(int64_t index);
+#else
+int64_t     rt_cli_arg_at(int64_t index);
+#endif
 SplArray*   rt_dir_walk(const char* path);
 SplArray*   rt_dir_list_array(const char* path);
 int         rt_dir_create_all(const char* path);

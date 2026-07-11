@@ -632,6 +632,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_native_neq", sffi_value::rt_native_neq_fn);
     insert_simple!("rt_cli_exit", cli::rt_cli_exit);
     insert_simple!("rt_cli_file_exists", cli::rt_cli_file_exists);
+    insert_simple!("rt_cli_arg_at", cli::rt_cli_arg_at);
+    insert_simple!("rt_cli_arg_count", cli::rt_cli_arg_count);
     insert_simple!("rt_cli_get_args", cli::rt_cli_get_args);
     insert_simple!("rt_cli_handle_add", cli::rt_cli_handle_add);
     insert_simple!("rt_cli_handle_cache", cli::rt_cli_handle_cache);
