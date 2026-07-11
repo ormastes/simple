@@ -227,7 +227,7 @@ impl MirTextCodegen for MirToLlvm:
                         if index == arg_i:
                             val local_id = self.local_id_value(local.id)
                             val maybe_param_ty = self.get_local_type(local_id)
-                            val param_ty = if maybe_param_ty == nil: self.native_int() else: maybe_param_ty
+                            val param_ty = self.valid_llvm_type(maybe_param_ty)
                             self.defined_locals[local_id] = true
                             param_types = param_types.push(param_ty)
                             params = params.push("{param_ty} {self.get_local(local_id)}")
@@ -414,9 +414,11 @@ impl MirTextCodegen for MirToLlvm:
 
     me value_as_type(value: text, from_ty: text, to_ty: text) -> text:
         var src_ty = self.valid_llvm_type(from_ty)
-        match self.value_types.get(value):
-            Some(actual_ty): src_ty = self.valid_llvm_type(actual_ty)
-            nil: ()
+        # POSITIVE `.?` form only (see get_local_type): Option-match on
+        # Dict.get mis-dispatches under the seed interpreter.
+        val maybe_actual_ty = self.value_types.get(value)
+        if maybe_actual_ty.?:
+            src_ty = self.valid_llvm_type(maybe_actual_ty.unwrap())
         val dst_ty = self.valid_llvm_type(to_ty)
         if src_ty == dst_ty:
             return self.ret_value_for_type(dst_ty, value)
@@ -827,7 +829,7 @@ impl MirTextCodegen for MirToLlvm:
             val arg = args[arg_i]
             var arg_val = self.translate_operand(arg)
             val maybe_arg_ty = self.get_operand_type(arg)
-            var arg_ty = if maybe_arg_ty == nil: self.native_int() else: maybe_arg_ty
+            var arg_ty = self.valid_llvm_type(maybe_arg_ty)
             match arg.kind:
                 case Copy(local) | Move(local):
                     if self.bool_locals.has(self.local_id_value(local)):
@@ -966,13 +968,22 @@ impl MirTextCodegen for MirToLlvm:
             return "ptr"
         if self.bool_locals.has(id):
             return "i1"
-        match self.local_types.get(id):
-            case Some(ty):
-                if ty == nil or ty == "nil":
-                    self.native_int()
-                else:
-                    ty
-            case nil: self.native_int()
+        # POSITIVE `.?` form only: `match dict.get(): case Some(ty)/nil`
+        # mis-dispatches under the seed interpreter (same struct-boxed-optional
+        # quirk documented in var_reassign_ssa.spl), returning literal nil for
+        # locals whose type IS tracked -- every caller then fell back to
+        # native_int, which is the root of the "backend does not track local
+        # types" #135 symptom family (typed copies emitted as `add i64`,
+        # double operands fed to `mul nsw i64`, call args typed nil).
+        val maybe_ty = self.local_types.get(id)
+        if maybe_ty.?:
+            val ty = maybe_ty.unwrap()
+            if ty == nil or ty == "nil":
+                self.native_int()
+            else:
+                ty
+        else:
+            self.native_int()
 
     fn lookup_function_return_type(func_name: text) -> text:
         # ponytail: flattened (no nested match-as-expression) -- a nested
@@ -1022,7 +1033,7 @@ impl MirTextCodegen for MirToLlvm:
         self.ptr_locals[id] = true
 
     fn valid_llvm_type(ty: text) -> text:
-        if ty == nil or ty == "nil":
+        if ty == nil or ty == "" or ty == "nil":
             self.native_int()
         else:
             ty

@@ -216,6 +216,17 @@ impl HirLowering:
             val bootstrap_function_keys = bootstrap_module_functions.keys()
             if bootstrap_diag:
                 eprint("[hir-lower] functions:count module={module.name} count={bootstrap_function_keys.len()}")
+            # Pre-declare every module-level function name BEFORE lowering any
+            # body. declare_module_symbols is skipped under bootstrap, so
+            # without this a same-module callee (`check(...)`) hits
+            # lower_unresolved_ident -> HirExprKind.Error, and MIR lower_call's
+            # indirect arm then emits `call i64 %lN(...)` through whatever
+            # garbage local the Error expr lowered to (#135-class SIGSEGV).
+            var bootstrap_decl_idx = 0
+            while bootstrap_decl_idx < bootstrap_function_keys.len():
+                val bootstrap_decl_fn: Function = bootstrap_module_functions[bootstrap_function_keys[bootstrap_decl_idx]]
+                self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, nil, Span.empty(), false, false, nil)
+                bootstrap_decl_idx = bootstrap_decl_idx + 1
             while lower_idx < bootstrap_function_keys.len():
                 val bootstrap_fn: Function = bootstrap_module_functions[bootstrap_function_keys[lower_idx]]
                 if bootstrap_diag:

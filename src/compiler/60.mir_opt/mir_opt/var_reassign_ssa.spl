@@ -799,6 +799,22 @@ fn ssa_instructions_supported_for_phi(blocks: [MirBlock]) -> bool:
                 return false
     true
 
+fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
+    """Alloca-slot gate: superset of the phi gate. CallIndirect is safe for the
+    slot transform (its dest is a plain def -> store; its ptr/args are plain
+    reads -> load) even though the hand-built phi renamer never supported it.
+    Rejecting a whole function over one CallIndirect left every OTHER
+    reassigned local un-slotted -> duplicate `%lN` SSA defs at llc (#135)."""
+    for block in blocks:
+        for inst in block.instructions:
+            if not ssa_var_transform_inst_supported(inst):
+                match inst.kind:
+                    case CallIndirect(_, _, _, _):
+                        pass_do_nothing
+                    case _:
+                        return false
+    true
+
 fn ssa_phi_plan_pred_value_for_block(plan: SsaPhiPlan, block_id: i64) -> i64?:
     var i = 0
     while i < plan.pred_block_ids.len():
@@ -1014,6 +1030,10 @@ fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
             result = ssa_operand_push_local(result, func)
             for arg in args:
                 result = ssa_operand_push_local(result, arg)
+        case CallIndirect(_, ptr, args, _):
+            result = ssa_operand_push_local(result, ptr)
+            for arg in args:
+                result = ssa_operand_push_local(result, arg)
         case Intrinsic(_, _, args):
             for arg in args:
                 result = ssa_operand_push_local(result, arg)
@@ -1172,6 +1192,13 @@ fn ssa_alloca_rewrite_inst_operands(inst: MirInst, slot_keys: [i64], slot_values
             for p in ra[1]:
                 prepend = prepend.push(p)
             (MirInst(kind: MirInstKind.Call(dest, rf[0], ra[0]), span: inst.span), prepend, ra[2])
+        case CallIndirect(dest, ptr, args, sig):
+            val rp = ssa_alloca_rewrite_operand(ptr, slot_keys, slot_values, next_temp)
+            val ra = ssa_alloca_rewrite_operand_list(args, slot_keys, slot_values, rp[2])
+            var prepend = rp[1]
+            for p in ra[1]:
+                prepend = prepend.push(p)
+            (MirInst(kind: MirInstKind.CallIndirect(dest, rp[0], ra[0], sig), span: inst.span), prepend, ra[2])
         case Intrinsic(dest, name, args):
             val r = ssa_alloca_rewrite_operand_list(args, slot_keys, slot_values, next_temp)
             (MirInst(kind: MirInstKind.Intrinsic(dest, name, r[0]), span: inst.span), r[1], r[2])
@@ -1245,6 +1272,11 @@ fn ssa_alloca_rename_dest(inst: MirInst, original_id: i64, new_id: i64) -> MirIn
         case Call(dest, func, args):
             if dest.? and ssa_local_id_value(dest.unwrap()) == original_id:
                 MirInst(kind: MirInstKind.Call(Some(ssa_local(new_id)), func, args), span: inst.span)
+            else:
+                inst
+        case CallIndirect(dest, ptr, args, sig):
+            if dest.? and ssa_local_id_value(dest.unwrap()) == original_id:
+                MirInst(kind: MirInstKind.CallIndirect(Some(ssa_local(new_id)), ptr, args, sig), span: inst.span)
             else:
                 inst
         case Intrinsic(dest, name, args):
@@ -1358,7 +1390,7 @@ fn ssa_alloca_transform_blocks(blocks: [MirBlock], mir_locals: [MirLocal], entry
     `slotted.len() == 0` check below keeps the no-reassignment case a no-op)."""
     if blocks.len() == 0:
         return ssa_var_transform_reject("empty function", blocks, [])
-    if not ssa_instructions_supported_for_phi(blocks):
+    if not ssa_instructions_supported_for_alloca(blocks):
         return ssa_var_transform_reject("unsupported instruction", blocks, [])
 
     # Union of the multi-def set and the cross-block-live set. A multi-def
