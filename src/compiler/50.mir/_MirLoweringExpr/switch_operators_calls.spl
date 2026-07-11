@@ -579,6 +579,26 @@ impl MirLowering:
                     var d: i64 = -1
                     if self.enum_variant_index.has(enum_name):
                         d = enum_variant_disc(self.enum_variant_index[enum_name], variant)
+                    if d < 0:
+                        # Bare pattern (`case Circle(r)` — no qualifier survived
+                        # to HIR) or variant missing from the presumed enum:
+                        # resolve the variant name against every registered
+                        # enum. Exactly one owner -> use it; otherwise emit a
+                        # LOUD error instead of silently falling through.
+                        var owner = ""
+                        var owner_count = 0
+                        for ename in self.enum_variant_index.keys():
+                            if enum_variant_disc(self.enum_variant_index[ename], variant) >= 0:
+                                owner = ename
+                                owner_count = owner_count + 1
+                        if owner_count == 1:
+                            d = enum_variant_disc(self.enum_variant_index[owner], variant)
+                            if enum_name == "":
+                                enum_name = owner
+                        elif owner_count > 1:
+                            self.error("enum match: bare variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}", Some(arm.pattern.span))
+                        else:
+                            self.error("enum match: unknown variant '{variant}' (no registered enum declares it)", Some(arm.pattern.span))
                     enum_discs = enum_discs.push(d)
                     enum_binds = enum_binds.push(enum_pat_binding_sym(epayload))
                     enum_bodies = enum_bodies.push(arm.body)
