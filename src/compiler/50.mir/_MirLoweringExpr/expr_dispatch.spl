@@ -173,12 +173,40 @@ impl MirLowering:
             val interp_item = interps[k]
             val interp_expr = interp_item.expr
             val interp_local = self.lower_expr(interp_expr)
+            # Bug #136: coerce the operand to a raw char*. A string operand
+            # (Opaque "str") passes straight through rt_interp_cstr. A non-string
+            # operand -- e.g. `{a}` / `{a+b}` where `a` is an i64 -- must first be
+            # rendered to a decimal string via rt_raw_u64_to_string (a tagged
+            # string), which rt_interp_cstr then unwraps to its char* buffer.
+            # Without this, rt_interp_cstr treats the raw i64 as a char* pointer
+            # and derefs it -> SIGSEGV. The operand's lowered MIR type drives the
+            # choice; a `val x = <int>` binding propagates the i64 init type to
+            # the local so `{x}` routes to the numeric path.
+            var cstr_src = mir_operand_copy(interp_local)
+            var interp_is_str = false
+            if val interp_ty = self.local_mir_type_of(interp_local):
+                match interp_ty.kind:
+                    case MirTypeKind.Opaque(interp_ty_name):
+                        if interp_ty_name == "str":
+                            interp_is_str = true
+                    case _:
+                        ()
+            if not interp_is_str:
+                val num_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_raw_u64_to_string"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_num = self.builder
+                val num_res = b_num.emit_call(num_op, [mir_operand_copy(interp_local)], MirType.i64())
+                self.builder = b_num
+                if val num_local = num_res:
+                    cstr_src = mir_operand_copy(num_local)
             val cstr_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_interp_cstr"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
             ))
             var b_cstr = self.builder
-            val cstr_res = b_cstr.emit_call(cstr_op, [mir_operand_copy(interp_local)], MirType(kind: MirTypeKind.Opaque("str")))
+            val cstr_res = b_cstr.emit_call(cstr_op, [cstr_src], MirType(kind: MirTypeKind.Opaque("str")))
             self.builder = b_cstr
             if val cstr_local = cstr_res:
                 result_local = self.emit_raw_strcat(result_local, cstr_local)
