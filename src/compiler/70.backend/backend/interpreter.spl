@@ -16,26 +16,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_host_gpu_lane_event(lane_code: i64, phase_code: i64) -> i64
 extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64
 extern fn rt_env_get(key: text) -> text
-
-fn interp_expr_disc(value: HirExprKind) -> i64:
-    match value:
-        case HirExprKind.Field(_, _, _):
-            21232742  # hash("Field")
-        case _:
-            0
-
-fn interp_stmt_disc(value: HirStmtKind) -> i64:
-    match value:
-        case HirStmtKind.Expr(_):
-            0
-        case HirStmtKind.Let(_, _, _):
-            1
-        case HirStmtKind.Assign(_, _, _):
-            2
-        case HirStmtKind.Block(_):
-            3
-        case HirStmtKind.AsmAssert(_):
-            4
+extern fn rt_enum_discriminant(value: HirExprKind) -> i64
 
 # Env-gated interpreter trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
 # [EE]/[ES]/[EB] eval probe trail (invaluable for stage4 codegen diagnosis).
@@ -228,7 +209,7 @@ impl InterpreterBackendImpl:
         Some(Value.Struct(type_name, fields))
 
     fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
-        val ee_disc: i64 = interp_expr_disc(expr.kind)
+        val ee_disc: i64 = rt_enum_discriminant(expr.kind)
         itrace("[EE] eval_expr entry disc={ee_disc}")
         # DISC PRE-DISPATCH for struct-shadowed variant `Field` (bug doc
         # iteration 21, target (c)). `struct Field` (parser_types.spl:232) exists,
@@ -605,7 +586,7 @@ impl InterpreterBackendImpl:
         # SIGILL. Reading the discriminant first (iteration-18 disc pre-dispatch)
         # forces the value to materialize so the qualified arms test correctly.
         # Feed it into itrace so it is never dead-code-eliminated.
-        val stmt_disc = interp_stmt_disc(stmt.kind)
+        val stmt_disc = rt_enum_discriminant(stmt.kind)
         itrace("[ES] exec_stmt entry disc={stmt_disc}")
         # Arm ORDER matters on stage4: `Expr` and `Block` are struct-shadowed
         # variant names, so their pattern tests compile ALWAYS-TRUE (bug doc
@@ -632,7 +613,7 @@ impl InterpreterBackendImpl:
                 # discriminant (hash("Field")=21232742) BEFORE the name match,
                 # mirroring the eval_expr Field pre-dispatch. The mutation goes
                 # through the shared store so every holder of the handle sees it.
-                val tgt_disc_c: i64 = interp_expr_disc(target.kind)
+                val tgt_disc_c: i64 = rt_enum_discriminant(target.kind)
                 if tgt_disc_c == 21232742:  # hash("Field")
                     match target.kind:
                         case HirExprKind.Field(fbase, ffield, _):
