@@ -20,6 +20,7 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: HirExprKind) -> i64
 
 fn mir_expr_env_get(key: text) -> text:
     rt_env_get(key)
@@ -261,6 +262,71 @@ impl MirLowering:
         if expr != nil:
             expr_value = expr
 
+        val expr_disc = rt_enum_discriminant(expr_value.kind)
+        val field_disc = rt_enum_discriminant(HirExprKind.Field(nil_expr, "", nil))
+        if expr_disc == field_disc:
+            match expr_value.kind:
+                case HirExprKind.Field(base, field_name, resolved):
+                    var enum_name = ""
+                    match base.kind:
+                        case HirExprKind.Var(field_symbol):
+                            val field_sym = self.symbols.get_symbol(field_symbol)
+                            if field_sym.?: enum_name = field_sym.name
+                        case HirExprKind.NamedVar(_, field_base_name):
+                            enum_name = field_base_name
+                        case _:
+                            pass
+                    if enum_name != "" and self.enum_variant_index.has(enum_name):
+                        for variant_name in self.enum_variant_index[enum_name]:
+                            if variant_name == field_name:
+                                return self.lower_enum_construct_named(enum_name, field_name, [])
+                    val base_local = self.lower_expr(base)
+                    val bitfield_result = self.try_lower_bitfield_get(base, base_local, field_name)
+                    if val bitfield_local = bitfield_result:
+                        return bitfield_local
+                    val field_idx = self.resolve_field_index(base, base_local, field_name, resolved)
+                    var field_type = MirType.i64()
+                    if val expr_type = expr_value.type_:
+                        field_type = self.lower_type(expr_type)
+                    var field_builder = self.builder
+                    val field_result = field_builder.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
+                    self.builder = field_builder
+                    return field_result
+                case _:
+                    pass
+        val cast_disc = rt_enum_discriminant(HirExprKind.Cast(nil_expr, nil_expr.type_))
+        if expr_disc == cast_disc:
+            match expr_value.kind:
+                case HirExprKind.Cast(operand, target):
+                    val operand_local = self.lower_expr(operand)
+                    val mir_target = self.lower_type(target)
+                    var cast_builder = self.builder
+                    val cast_result = cast_builder.emit_cast(mir_operand_copy(operand_local), mir_target)
+                    self.builder = cast_builder
+                    return cast_result
+                case _:
+                    pass
+        val call_disc = rt_enum_discriminant(HirExprKind.Call(nil_expr, [], []))
+        if expr_disc == call_disc:
+            match expr_value.kind:
+                case HirExprKind.Call(callee, args, _):
+                    return self.lower_call(callee, args)
+                case _:
+                    pass
+        val block_disc = rt_enum_discriminant(HirExprKind.Block(HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)))
+        if expr_disc == block_disc:
+            match expr_value.kind:
+                case HirExprKind.Block(block):
+                    val result = self.lower_block(block)
+                    if val result_local = result:
+                        return result_local
+                    var block_builder = self.builder
+                    val block_temp = block_builder.new_temp(MirType.unit())
+                    self.builder = block_builder
+                    return block_temp
+                case _:
+                    pass
+
         match expr_value.kind:
             case IntLit(value, _):
 
@@ -486,9 +552,6 @@ impl MirLowering:
 
                 self.lower_if(cond, then_, else_)
 
-            case Call(callee, args, _):
-                self.lower_call(callee, args)
-
             case MethodCall(receiver, method, args, resolution):
                 self.lower_method_call(receiver, method, args, resolution)
 
@@ -548,16 +611,6 @@ impl MirLowering:
 
             case TupleLit(elements):
                 self.lower_tuple_lit(elements)
-
-            case Block(block):
-                val result = self.lower_block(block)
-                if val result_local = result:
-                    result_local
-                else:
-                    var b = self.builder
-                    val temp = b.new_temp(MirType.unit())
-                    self.builder = b
-                    temp
 
             case NullCoalesce(left, right):
                 val left_local = self.lower_expr(left)
@@ -681,51 +734,6 @@ impl MirLowering:
             # Target-qualified inline assembly
             case InlineAsmMatch(arms):
                 self.lower_inline_asm_match(arms)
-
-            # Field access: obj.field_name
-            case Field(base, field_name, resolved):
-                # Reclassify `Color.Red` — a bare unit-variant construction
-                # parsed as FIELD ACCESS — into enum construction when the base
-                # names a registered enum and the field is one of its variants
-                # (mirrors the MethodCall interception for `Shape.Circle(7)`).
-                # Without this the base lowers as an undefined variable load and
-                # the field read nil-derefs at runtime.
-                var fa_enum_name = ""
-                match base.kind:
-                    case Var(fa_sym):
-                        val fa_s = self.symbols.get_symbol(fa_sym)
-                        if fa_s.?: fa_enum_name = fa_s.name
-                    case NamedVar(_, fa_name):
-                        fa_enum_name = fa_name
-                    case _: ()
-                if fa_enum_name != "" and self.enum_variant_index.has(fa_enum_name):
-                    var fa_is_variant = false
-                    for fa_vn in self.enum_variant_index[fa_enum_name]:
-                        if fa_vn == field_name:
-                            fa_is_variant = true
-                    if fa_is_variant:
-                        return self.lower_enum_construct_named(fa_enum_name, field_name, [])
-                val base_local = self.lower_expr(base)
-                val bitfield_result = self.try_lower_bitfield_get(base, base_local, field_name)
-                if val bitfield_local = bitfield_result:
-                    return bitfield_local
-                val field_idx = self.resolve_field_index(base, base_local, field_name, resolved)
-                var field_type = MirType.i64()
-                if val expr_type = expr_value.type_:
-                    field_type = self.lower_type(expr_type)
-                var b = self.builder
-                val result = b.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
-                self.builder = b
-                result
-
-            # Type cast: expr as Type
-            case Cast(operand, target):
-                val operand_local = self.lower_expr(operand)
-                val mir_target = self.lower_type(target)
-                var b = self.builder
-                val result = b.emit_cast(mir_operand_copy(operand_local), mir_target)
-                self.builder = b
-                result
 
             # B5b Phase 1: lower MatchCase on integer-literal patterns to
             # MirTerminator.Switch (dense >=4 arms, span <= 1024) or to a
