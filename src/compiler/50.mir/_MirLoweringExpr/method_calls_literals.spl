@@ -623,6 +623,86 @@ impl MirLowering:
         self.runtime_array_locals[arr_local.id] = true
         arr_local
 
+    me lower_dict_key(key_expr: HirExpr) -> LocalId:
+        """Lower a dict key to the runtime ABI (i64).
+
+        A plain string literal lowers to a RAW char* pointer (getelementptr into
+        a [N x i8] global), but the runtime dict compares keys as tagged heap
+        strings via rt_native_eq. Tag plain string-literal keys with
+        rt_string_new(ptr, rt_strlen(ptr)); pass everything else (already-tagged
+        string variables, int keys) through unchanged.
+        """
+        # Every string literal -- plain OR interpolated -- lowers to a raw char*
+        # (Opaque "str"), never a tagged heap string, so any StringLit key needs
+        # tagging. (Do NOT inspect the interps list here: the seed `if val`
+        # presence-check can enter the true branch with the bound value nil, and
+        # `and` is eager, so a `.len()` guard crashes -- see lower_array_lit.)
+        var is_str_key = false
+        match key_expr.kind:
+            case StringLit(_, _):
+                is_str_key = true
+            case _:
+                is_str_key = false
+        val key_local = self.lower_expr(key_expr)
+        if not is_str_key:
+            return key_local
+        val strlen_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_strlen"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b_len = self.builder
+        val len_res = b_len.emit_call(strlen_op, [mir_operand_copy(key_local)], MirType.i64())
+        self.builder = b_len
+        if val key_len = len_res:
+            val newstr_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_new"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_new = self.builder
+            val tagged_res = b_new.emit_call(newstr_op, [mir_operand_copy(key_local), mir_operand_copy(key_len)], MirType.i64())
+            self.builder = b_new
+            if val tagged = tagged_res:
+                return tagged
+        key_local
+
+    me lower_dict_lit(entries: [(HirExpr, HirExpr)]) -> LocalId:
+        """Lower a dict literal `{k: v, ...}` to rt_dict_new + rt_dict_set calls.
+
+        The result is a tagged i64 dict handle; the local is registered in
+        runtime_dict_locals so a later `d[k]` read routes to rt_dict_get (see
+        expr_dispatch `case Index`). All keys/values use the flat i64 runtime
+        ABI; string-literal keys are tagged via lower_dict_key.
+        """
+        val new_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_dict_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val cap_hint = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))
+        var b_new = self.builder
+        val new_res = b_new.emit_call(new_op, [cap_hint], MirType.i64())
+        self.builder = b_new
+        if val dict_local = new_res:
+            for entry in entries:
+                val (key_expr, value_expr) = entry
+                val key_local = self.lower_dict_key(key_expr)
+                val value_local = self.lower_expr(value_expr)
+                val set_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_dict_set"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_set = self.builder
+                b_set.emit_call(set_op, [mir_operand_copy(dict_local), mir_operand_copy(key_local), mir_operand_copy(value_local)], MirType.i64())
+                self.builder = b_set
+            self.runtime_dict_locals[dict_local.id] = true
+            return dict_local
+        # rt_dict_new always returns a local; fall back to a const 0 handle only
+        # if the call somehow produced no result, to keep this total.
+        var b_fb = self.builder
+        val fb = b_fb.new_temp(MirType.i64())
+        b_fb.emit_const(fb, MirConstValue.Int(0), MirType.i64())
+        self.builder = b_fb
+        fb
+
     me lower_array_repeat(value: HirExpr, count: HirExpr) -> LocalId:
         """Lower array-repeat `[value; count]` to `rt_array_repeat(value, count)`.
 

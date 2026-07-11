@@ -45,6 +45,47 @@ impl MirLowering:
                     case _: return false
         false
 
+    fn local_is_runtime_dict(local: LocalId) -> bool:
+        self.runtime_dict_locals.has(local.id)
+
+    fn mir_type_is_str(t: MirType) -> bool:
+        """True for the native string MIR types: the fat-pointer struct
+        Tuple([Ptr(U8), U64]) that `Str` lowers to (function_lowering.lower_type)
+        and the Opaque("str") raw-char* temp used by literal/interpolation
+        lowering. The backend materializes both as a single raw char* value, so
+        string `+` and `.len` route to rt_strcat/rt_strlen on that pointer."""
+        match t.kind:
+            case MirTypeKind.Opaque(name):
+                return name == "str"
+            case MirTypeKind.Tuple(elems):
+                if elems.len() != 2:
+                    return false
+                var elem0_is_u8_ptr = false
+                match elems[0].kind:
+                    case MirTypeKind.Ptr(inner, _):
+                        match inner.kind:
+                            case MirTypeKind.U8: elem0_is_u8_ptr = true
+                            case _: ()
+                    case _: ()
+                if not elem0_is_u8_ptr:
+                    return false
+                match elems[1].kind:
+                    case MirTypeKind.U64: return true
+                    case _: return false
+            case _:
+                return false
+
+    fn local_is_str(local: LocalId) -> bool:
+        """True when a lowered local holds a native string value.
+
+        Keyed off the MIR local type because type-inferred HIR `.type_` is
+        frequently nil on this path (flat HIR), so string-directed lowering of
+        `+` (concat) and `.len` must key off the MIR local type instead."""
+        for item in self.builder.locals:
+            if item.id.id == local.id:
+                return self.mir_type_is_str(item.type_)
+        false
+
     me host_gpu_runtime_func(name: text) -> MirOperand:
         MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(name),
@@ -326,6 +367,46 @@ impl MirLowering:
                     return block_temp
                 case _:
                     pass
+        # Var/NamedVar reads need the same disc-guarded pre-dispatch as
+        # Field/Cast/Call/Block above: the seed's big `match expr_value.kind`
+        # mis-dispatches NamedVar into an earlier silent arm (UnitLit's bare
+        # new_temp), so every variable read returned a FRESH undefined local
+        # instead of the bound one -- local_map (and the runtime dict/array
+        # local tags keyed on it) never resolved, and the emitted IR referenced
+        # undefined `%lN` values (llc "defined with type 'ptr' but expected
+        # 'i64'" on the dict probe). Confirmed by disc trace: a NamedVar base
+        # reached `case Index` with rt_enum_discriminant(base.kind) equal to the
+        # NamedVar exemplar disc while the NamedVar match arm never fired.
+        val var_pre_disc = rt_enum_discriminant(HirExprKind.Var(SymbolId(id: -1)))
+        if expr_disc == var_pre_disc:
+            match expr_value.kind:
+                case HirExprKind.Var(pre_symbol):
+                    val pre_symbol_id = mir_expr_symbol_id_value(pre_symbol)
+                    if pre_symbol_id >= 0 and self.local_map.has(pre_symbol_id):
+                        return self.local_map[pre_symbol_id]
+                case _:
+                    pass
+        val namedvar_pre_disc = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
+        if expr_disc == namedvar_pre_disc:
+            match expr_value.kind:
+                case HirExprKind.NamedVar(pre_symbol, pre_name):
+                    if pre_name != "OUTPUT_LIMIT" and pre_name != "DEFAULT_TIMEOUT_MS":
+                        # Prefer the symbol id resolved onto the NamedVar node:
+                        # self.symbols.lookup(name) returns nil here (scope
+                        # state is not active during MIR lowering on this
+                        # path), which is why the name-based NamedVar arm
+                        # below never resolves locals. mir_expr_symbol_id_value
+                        # nil-guards the seed's `if val`-binds-nil hazard.
+                        val pre_sym_id = mir_expr_symbol_id_value(pre_symbol)
+                        if pre_sym_id >= 0 and self.local_map.has(pre_sym_id):
+                            return self.local_map[pre_sym_id]
+                        val pre_resolved = self.symbols.lookup(pre_name)
+                        if pre_resolved != nil:
+                            val pre_nv_id = pre_resolved.id
+                            if pre_nv_id >= 0 and self.local_map.has(pre_nv_id):
+                                return self.local_map[pre_nv_id]
+                case _:
+                    pass
 
         match expr_value.kind:
             case IntLit(value, _):
@@ -564,9 +645,28 @@ impl MirLowering:
             case ArrayRepeat(value, count, _):
                 self.lower_array_repeat(value, count)
 
+            case DictLit(entries, _, _):
+                self.lower_dict_lit(entries)
+
             case Index(base, index):
                 # Runtime arrays are tagged handles, not raw element pointers.
                 val base_local = self.lower_expr(base)
+                # Dict handles compare keys as tagged heap values, so a `d[k]`
+                # read routes to rt_dict_get with a tagged key -- NOT the raw GEP
+                # array path below (which would treat the string key pointer as
+                # an i64 element offset and emit invalid IR).
+                if self.local_is_runtime_dict(base_local):
+                    val dict_key = self.lower_dict_key(index)
+                    val get_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_dict_get"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_dget = self.builder
+                    val get_res = b_dget.emit_call(get_op, [mir_operand_copy(base_local), mir_operand_copy(dict_key)], MirType.i64())
+                    self.builder = b_dget
+                    if val get_local = get_res:
+                        return get_local
+                    return base_local
                 val index_local = self.lower_expr(index)
                 if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):
                     return cli_arg_local
@@ -747,6 +847,77 @@ impl MirLowering:
             # Target-qualified inline assembly
             case InlineAsmMatch(arms):
                 self.lower_inline_asm_match(arms)
+
+            # Field access: obj.field_name
+            case Field(base, field_name, resolved):
+                # Reclassify `Color.Red` — a bare unit-variant construction
+                # parsed as FIELD ACCESS — into enum construction when the base
+                # names a registered enum and the field is one of its variants
+                # (mirrors the MethodCall interception for `Shape.Circle(7)`).
+                # Without this the base lowers as an undefined variable load and
+                # the field read nil-derefs at runtime.
+                var fa_enum_name = ""
+                match base.kind:
+                    case Var(fa_sym):
+                        val fa_s = self.symbols.get_symbol(fa_sym)
+                        if fa_s.?: fa_enum_name = fa_s.name
+                    case NamedVar(_, fa_name):
+                        fa_enum_name = fa_name
+                    case _: ()
+                if fa_enum_name != "" and self.enum_variant_index.has(fa_enum_name):
+                    var fa_is_variant = false
+                    for fa_vn in self.enum_variant_index[fa_enum_name]:
+                        if fa_vn == field_name:
+                            fa_is_variant = true
+                    if fa_is_variant:
+                        return self.lower_enum_construct_named(fa_enum_name, field_name, [])
+                val base_local = self.lower_expr(base)
+                # `.len`/`.length` as a BARE FIELD ACCESS on a string must route
+                # to the raw-char* length helper `rt_strlen`, not emit_get_field.
+                # On the native path a string (literal, `+` concat, or interp
+                # result) is a RAW char*: translate_const emits a getelementptr
+                # into a [N x i8] global and rt_strcat returns raw char* (see
+                # lower_string_interpolation), and the lowered local carries MIR
+                # type Opaque("str"). A struct get_field on that pointer reads
+                # offset 0 -- the first data byte (e.g. 'f'=102 for "foobar") for
+                # a valid pointer, and nil-derefs -> SIGSEGV when the base is a
+                # concat result. `rt_strlen` (spl_str_len) is the correct
+                # raw-char* length accessor. Keyed off the MIR local type
+                # (Opaque str) because HIR `.type_` is nil on this path; user
+                # structs with a real `len` field and arrays are unaffected.
+                if field_name == "len" or field_name == "length":
+                    print "[TRACE-LEN2] field={field_name} base_ty={self.dbg_local_type(base_local)}"
+                if (field_name == "len" or field_name == "length") and self.local_is_str(base_local):
+                    val fa_func = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_strlen"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_fa = self.builder
+                    val fa_res = b_fa.emit_call(fa_func, [mir_operand_copy(base_local)], MirType.i64())
+                    self.builder = b_fa
+                    if val fa_res_local = fa_res:
+                        return fa_res_local
+                    return base_local
+                val bitfield_result = self.try_lower_bitfield_get(base, base_local, field_name)
+                if val bitfield_local = bitfield_result:
+                    return bitfield_local
+                val field_idx = self.resolve_field_index(base, base_local, field_name, resolved)
+                var field_type = MirType.i64()
+                if val expr_type = expr_value.type_:
+                    field_type = self.lower_type(expr_type)
+                var b = self.builder
+                val result = b.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
+                self.builder = b
+                result
+
+            # Type cast: expr as Type
+            case Cast(operand, target):
+                val operand_local = self.lower_expr(operand)
+                val mir_target = self.lower_type(target)
+                var b = self.builder
+                val result = b.emit_cast(mir_operand_copy(operand_local), mir_target)
+                self.builder = b
+                result
 
             # B5b Phase 1: lower MatchCase on integer-literal patterns to
             # MirTerminator.Switch (dense >=4 arms, span <= 1024) or to a

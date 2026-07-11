@@ -129,6 +129,8 @@ impl MirLowering:
                             self.local_map[symbol_value_id] = local
                             if self.runtime_array_locals.has(init_local.id):
                                 self.runtime_array_locals[local.id] = true
+                            if self.runtime_dict_locals.has(init_local.id):
+                                self.runtime_dict_locals[local.id] = true
                             var b2 = self.builder
                             b2.emit_copy(local, init_local)
                             self.builder = b2
@@ -230,6 +232,8 @@ impl MirLowering:
                             self.local_map[symbol_id] = local
                             if has_init and self.runtime_array_locals.has(init_local.id):
                                 self.runtime_array_locals[local.id] = true
+                            if has_init and self.runtime_dict_locals.has(init_local.id):
+                                self.runtime_dict_locals[local.id] = true
                             if has_init:
                                 var b2 = self.builder
                                 b2.emit_copy(local, init_local)
@@ -306,6 +310,19 @@ impl MirLowering:
                 # Index assignment: arr[i] = value
                 # Lower to runtime call: rt_array_set(arr, index, value)
                 val receiver = self.lower_expr(base)
+                # Dict handles insert via rt_dict_set with a tagged key, NOT the
+                # raw rt_array_set/GEP path below (which treats the string key as
+                # an element offset). Mirrors the dict getter in expr_dispatch.
+                if self.local_is_runtime_dict(receiver):
+                    val dict_key = self.lower_dict_key(index)
+                    val dict_set_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_dict_set"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_dset = self.builder
+                    b_dset.emit_call(dict_set_op, [mir_operand_copy(receiver), mir_operand_copy(dict_key), mir_operand_copy(value_local)], MirType.i64())
+                    self.builder = b_dset
+                    return
                 val index_local = self.lower_expr(index)
                 self.emit_bounds_check_for_index(base.type_, receiver, index_local)
 

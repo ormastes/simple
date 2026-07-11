@@ -489,7 +489,22 @@ fn convert_flat_expr(idx: i64) -> Expr:
             tui = tui + 1
         return Expr(kind: ExprKind.TupleLit(tuple_elems), span: span)
     elif tag == EXPR_DICT_LIT:
-        return Expr(kind: ExprKind.DictLit([]), span: span)
+        # Dict literal `{k: v, ...}`: the parser stores key node indices in the
+        # ARGS slot and value node indices in the STMTS slot (see
+        # expr_dict_lit(keys, vals, ...) / placeholder_lambda EXPR_DICT_LIT). The
+        # bridge previously dropped both and emitted an empty DictLit, so every
+        # `{...}` compiled to an empty dict (native path: rt_dict_new with no
+        # rt_dict_set). Rebuild the (key, value) entries here.
+        val dict_key_indices = expr_get_args(idx)
+        val dict_val_indices = expr_get_stmts(idx)
+        var dict_entries: [(Expr, Expr)] = []
+        var dict_ei = 0
+        while dict_ei < dict_key_indices.len() and dict_ei < dict_val_indices.len():
+            val dict_key = convert_flat_expr(dict_key_indices[dict_ei])
+            val dict_val = convert_flat_expr(dict_val_indices[dict_ei])
+            dict_entries.push((dict_key, dict_val))
+            dict_ei = dict_ei + 1
+        return Expr(kind: ExprKind.DictLit(dict_entries), span: span)
     elif tag == EXPR_UNIT:
         return Expr(kind: ExprKind.NilLit, span: span)
     elif tag == EXPR_PASS or tag == EXPR_PASS_DO_NOTHING or tag == EXPR_PASS_DN or tag == EXPR_PASS_TODO:
