@@ -1,7 +1,16 @@
 # BUG: GRUB-EFI multiboot1 faults loading the oversized merged ring-3 kernel
 
-**Status:** open (UEFI boot of the SSH kernel is PROVEN; only the 23 MB merged
-ring-3-exec build is blocked under UEFI)
+**Status:** RESOLVED 2026-07-11 — merged ring-3 kernel now boots under OVMF to
+`[sshd] accept loop start` and completes the `ssh root@127.0.0.1 /FSEXEC.ELF`
+bonus (`hello from clang on simpleos` + `[user] exit rc=42`). Fix: relink the
+kernel load base from 1MB (`0x100000`) to 128MB (`0x8000000`) in
+`examples/09_embedded/simple_os/arch/x86_64/linker.ld`. Root cause: the merged
+image (~23MB text + 236MB BSS) filled the low region [1MB, ~237MB], starving
+GRUB-EFI's multiboot1 relocator of a safe low trampoline slot → it faulted (#UD
+at RIP~0x1012, in long mode, before kernel `_start`). Loading at 128MB leaves
+[1MB,128MB) free for GRUB's relocator; the crt0 identity map already covers the
+first 4GiB and QEMU `-kernel` honours `p_paddr`, so both boot paths verified
+green (accept loop + hello + rc=42).
 **Severity:** medium (the ring-3 demo boots fine under QEMU `-kernel`; this only
 blocks the ring-3 `hello+rc=42` bonus under real UEFI firmware)
 **Component:** boot — GRUB-EFI multiboot1 handoff / kernel LOAD-segment layout
