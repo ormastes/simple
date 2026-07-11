@@ -6,8 +6,8 @@
 # the legacy corpus heuristic path.
 #
 # Run (window):
-#   SIMPLE_TIMEOUT_SECONDS=0 scripts/macos-gui-run.shs examples/ui/web_render_file_gui.spl \
-#     examples/ui/sample_web_renderer_sanity.html
+#   SIMPLE_TIMEOUT_SECONDS=0 scripts/gui/macos-gui-run.shs examples/06_io/ui/web_render_file_gui.spl \
+#     examples/06_io/ui/sample_web_renderer_sanity.html
 # Headless: drop SIMPLE_GUI / use bin/simple run.
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
@@ -18,6 +18,8 @@ use common.ui.state.{init_state}
 use app.ui.render.html_widgets.{render_html_tree}
 use std.io.window_winit.{WinitLoop, WinitWindow, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_close_requested}
 use std.sffi.cli.{cli_get_args}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
 use std.io_runtime.{env_get, read_file, file_exists}
 
@@ -30,7 +32,7 @@ fn html_path() -> text:
         if args[i].ends_with(".html"):
             return args[i]
         i = i + 1
-    "examples/ui/sample_web_renderer_sanity.html"
+    "examples/06_io/ui/sample_web_renderer_sanity.html"
 
 val RW: i32 = 80
 val RH: i32 = 60
@@ -87,14 +89,22 @@ fn main() -> i64:
         return 0
     val packed = pack_pixels(pixels)
     winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
+    # The rendered buffer is static, so present it once and then idle. Each
+    # iteration sleeps ~16ms (≈60Hz) and only re-presents the CACHED buffer every
+    # ~15 frames to keep the macOS surface composited — this keeps the process
+    # near-idle (~15% CPU) instead of the old busy-spin that pegged one core for
+    # hours. Polling still happens every frame so close events are handled
+    # promptly. Bounded to 60s wall-clock like examples/06_io/ui/web_engine2d_gui.
     var running = true
-    var iters = 0
-    while running and iters < 2000000:
+    var frames = 0
+    val end_at = time_now_unix_micros() + 60000000
+    while running and time_now_unix_micros() < end_at:
         if winit_poll_close_requested(lp):
             running = false
-        if iters % 200 == 0:
+        if frames % 15 == 0:
             winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
-        iters = iters + 1
+        thread_sleep(16)
+        frames = frames + 1
     winit_window_free(win)
     winit_loop_free(lp)
     return 0
