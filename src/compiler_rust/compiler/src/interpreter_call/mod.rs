@@ -422,6 +422,13 @@ pub(crate) fn evaluate_call(
             .with_code(codes::UNDEFINED_FUNCTION)
             .with_help("check that the function is defined and in scope");
 
+        // Every definition of this function may have been an inactive
+        // `@cfg(<arch>)` variant stripped for the host target -- say so
+        // instead of leaving a bare not-found (see pipeline::cfg_strip).
+        if let Some(hint) = crate::pipeline::cfg_strip::stripped_fn_hint(name) {
+            ctx = ctx.with_help(hint);
+        }
+
         if let Some(best_match) = suggestion {
             ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
         }

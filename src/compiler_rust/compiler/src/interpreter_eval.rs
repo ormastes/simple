@@ -302,6 +302,35 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     for item in items {
         match item {
             Node::Function(f) => {
+                // Never register an inactive `@cfg(<arch>)` variant: the
+                // interpreter executes on the HOST, and `functions.insert` is
+                // last-wins / overload push is order-driven, so a wrong-arch
+                // body would otherwise be dispatched (bug
+                // x64_freestanding_cfg_multivariant_misdispatch). Recording the
+                // name lets the undefined-function error explain "no active
+                // @cfg variant" when EVERY variant was stripped.
+                if crate::pipeline::cfg_strip::fn_inactive_cfg_arch_for_host(&f.attributes) {
+                    crate::pipeline::cfg_strip::note_stripped_fn(&f.name);
+                    continue;
+                }
+                // Two ACTIVE same-name @cfg(<arch>) variants are a duplicate
+                // definition that first-wins would silently collapse; warn
+                // (kept a warning, not an error -- see cfg_strip module docs).
+                if crate::pipeline::cfg_strip::fn_active_cfg_arch_for_host(&f.attributes) {
+                    if let Some(prev) = functions.get(&f.name) {
+                        if prev.params.len() == f.params.len()
+                            && crate::pipeline::cfg_strip::fn_active_cfg_arch_for_host(&prev.attributes)
+                        {
+                            eprintln!(
+                                "warning: duplicate active @cfg variants of `{}` for this host \
+                                 architecture; the first definition wins -- remove or re-gate \
+                                 the duplicates",
+                                f.name
+                            );
+                            continue;
+                        }
+                    }
+                }
                 let func = Arc::new(f.clone());
                 // This is the only registration pass exercised by the
                 // `bin/simple run`/`-c` entry path: imports were already
@@ -462,6 +491,11 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     for item in items {
         match item {
             Node::Function(f) => {
+                // Skip inactive @cfg(<arch>) variants (mirrors the first
+                // registration pass above).
+                if crate::pipeline::cfg_strip::fn_inactive_cfg_arch_for_host(&f.attributes) {
+                    continue;
+                }
                 // If function has decorators, apply them
                 if !f.decorators.is_empty() {
                     // Create a function value from the original function

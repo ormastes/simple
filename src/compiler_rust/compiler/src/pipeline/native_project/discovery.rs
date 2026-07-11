@@ -11,27 +11,13 @@ use super::{
     NativeProjectBuilder,
 };
 
-/// Resolve a `@cfg(...)` condition name to an architecture, if it names one.
-///
-/// Mirrors the arch-alias groups in the pure-Simple preprocessor
-/// (`src/compiler/10.frontend/core/parser_preprocessor.spl`
-/// `_pp_cfg_condition_matches`) so a whole-file arch gate is recognized the
-/// same way here as it is by the self-hosted compiler's own `@cfg`
-/// evaluation. Returns `None` for condition names that are not arch aliases
-/// (e.g. `test`, `baremetal`, a bare `not(...)` on a non-arch name, or a
-/// `"key", "value"` pair) -- those are intentionally left ungated by this
-/// discovery-time filter rather than risk excluding a file that should build.
-fn cfg_name_to_arch(name: &str) -> Option<TargetArch> {
-    match name {
-        "x86_64" | "amd64" | "x64" => Some(TargetArch::X86_64),
-        "x86" | "i386" | "i686" => Some(TargetArch::X86),
-        "aarch64" | "arm64" => Some(TargetArch::Aarch64),
-        "arm" | "armv7" | "armv6" | "arm32" => Some(TargetArch::Arm),
-        "riscv64" => Some(TargetArch::Riscv64),
-        "riscv32" => Some(TargetArch::Riscv32),
-        _ => None,
-    }
-}
+// `@cfg(<arch>)` evaluation + function-variant stripping now live in the
+// shared `pipeline::cfg_strip` module so the `bin/simple run` JIT/interpreter
+// paths apply the same filter as native-project builds (bug
+// `x64_freestanding_cfg_multivariant_misdispatch`). Re-exported here for the
+// existing native_project call sites (compiler.rs, imports.rs, tests.rs).
+pub(crate) use crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns;
+use crate::pipeline::cfg_strip::cfg_name_to_arch;
 
 /// Extract the arch-gating verdict for a `.spl` source, if its first
 /// meaningful line is a whole-file `@cfg(<arch>)` (optionally

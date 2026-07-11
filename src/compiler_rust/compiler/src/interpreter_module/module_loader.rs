@@ -736,7 +736,14 @@ pub fn load_and_merge_module(
     // internal imports whose names do not match the requested export list. Keep
     // the full module so runtime evaluation remains correct.
     // Move instead of clone — `module` is not used after this point.
-    let filtered_items: Vec<Node> = module.items;
+    let mut filtered_items: Vec<Node> = module.items;
+    // Drop wrong-arch @cfg(<arch>) fn variants before evaluating/registering
+    // the module: interpreted code executes on the HOST, and registration is
+    // order-driven (multivariant misdispatch, see pipeline::cfg_strip).
+    crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fn_nodes(
+        &mut filtered_items,
+        simple_common::target::TargetArch::host(),
+    );
     let load_start = Instant::now();
 
     // Evaluate the module to get its environment (including imports)

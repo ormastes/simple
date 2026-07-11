@@ -2812,6 +2812,136 @@ fn test_file_arch_cfg_gate_recognizes_arch_aliases_and_negation() {
     );
 }
 
+/// Regression for `x64_freestanding_cfg_multivariant_misdispatch`: six
+/// same-named `@cfg(<arch>)` function variants in one compilation unit must
+/// collapse to exactly the target's own variant. Before the fix, all six
+/// survived and `declare_functions` (codegen/shared.rs) kept whichever was
+/// declared FIRST -- source-order, not target-aware -- so a target whose
+/// variant was not written first was mis-dispatched. `strip_inactive_cfg_arch_fns`
+/// drops the wrong-arch variants so only the target's body remains, and the
+/// non-`@cfg` wrapper is always kept.
+#[test]
+fn test_strip_inactive_cfg_arch_fns_keeps_only_target_variant() {
+    use super::discovery::strip_inactive_cfg_arch_fns;
+    use simple_common::target::TargetArch;
+    use simple_parser::ast::Node;
+
+    // riscv64 is written FIRST, x86_64 LAST -- so a source-order pick would
+    // choose the wrong variant for an x86_64 target.
+    let src = "\
+@cfg(riscv64)\nfn h(): pass\n\
+@cfg(riscv32)\nfn h(): pass\n\
+@cfg(arm64)\nfn h(): pass\n\
+@cfg(arm32)\nfn h(): pass\n\
+@cfg(x86)\nfn h(): pass\n\
+@cfg(x86_64)\nfn h(): pass\n\
+fn wrapper(): h()\n";
+
+    let surviving_cfg_arch = |arch: TargetArch| -> String {
+        let mut parser = simple_parser::Parser::new(src);
+        let mut module = parser.parse().expect("parse");
+        strip_inactive_cfg_arch_fns(&mut module, arch);
+        let hs: Vec<&simple_parser::ast::FunctionDef> = module
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Node::Function(f) if f.name == "h" => Some(f),
+                _ => None,
+            })
+            .collect();
+        // Exactly one `h` variant survives for the target.
+        assert_eq!(hs.len(), 1, "expected one surviving `h` for {arch:?}");
+        // The wrapper (no `@cfg`) is always kept.
+        assert!(
+            module
+                .items
+                .iter()
+                .any(|it| matches!(it, Node::Function(f) if f.name == "wrapper")),
+            "wrapper must survive for {arch:?}"
+        );
+        let cfg_attr = hs[0]
+            .attributes
+            .iter()
+            .find(|a| a.name == "cfg")
+            .and_then(|a| a.args.as_ref())
+            .and_then(|v| v.first())
+            .expect("surviving variant keeps its @cfg");
+        format!("{cfg_attr:?}")
+    };
+
+    assert!(
+        surviving_cfg_arch(TargetArch::X86_64).contains("x86_64"),
+        "x86_64 target must keep the x86_64 variant"
+    );
+    assert!(
+        surviving_cfg_arch(TargetArch::Riscv64).contains("riscv64"),
+        "riscv64 target must keep the riscv64 variant"
+    );
+    assert!(
+        surviving_cfg_arch(TargetArch::Aarch64).contains("arm64"),
+        "aarch64 target must keep the arm64 variant"
+    );
+}
+
+/// Run-path regression (same bug, `bin/simple run` side): the interpreter
+/// executes on the HOST, so after the host-arch strip an entry module with a
+/// wrong-arch-first variant ordering must keep only the host's variant, and a
+/// module whose every variant is wrong-arch must strip them ALL (the call
+/// site then errors instead of silently running a wrong body).
+#[test]
+fn test_strip_inactive_cfg_arch_fns_for_host_run_path_semantics() {
+    use crate::pipeline::cfg_strip::{strip_inactive_cfg_arch_fns_for_host, stripped_fn_hint};
+    use simple_common::target::TargetArch;
+    use simple_parser::ast::Node;
+
+    let host = TargetArch::host().name();
+    let (wrong_a, wrong_b) = if host == "riscv64" {
+        ("x86_64", "arm64")
+    } else {
+        ("riscv64", "riscv32")
+    };
+
+    // Wrong-arch variant FIRST, host variant second (declaration-order trap).
+    let src = format!(
+        "@cfg({wrong_a})\nfn f(): pass\n@cfg({host})\nfn f(): pass\nfn main(): f()\n"
+    );
+    let mut parser = simple_parser::Parser::new(&src);
+    let mut module = parser.parse().expect("parse");
+    strip_inactive_cfg_arch_fns_for_host(&mut module);
+    let fs: Vec<_> = module
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Node::Function(f) if f.name == "f" => Some(f),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fs.len(), 1, "host strip must keep exactly the host variant");
+    assert!(
+        format!("{:?}", fs[0].attributes).contains(host),
+        "surviving variant must be the host's"
+    );
+
+    // NEITHER variant matches the host: both must be stripped (0 survivors),
+    // and the stripped-name registry must produce a call-site hint.
+    let src = format!(
+        "@cfg({wrong_a})\nfn g(): pass\n@cfg({wrong_b})\nfn g(): pass\nfn main(): g()\n"
+    );
+    let mut parser = simple_parser::Parser::new(&src);
+    let mut module = parser.parse().expect("parse");
+    strip_inactive_cfg_arch_fns_for_host(&mut module);
+    assert!(
+        !module
+            .items
+            .iter()
+            .any(|it| matches!(it, Node::Function(f) if f.name == "g")),
+        "no wrong-arch variant may survive the host strip"
+    );
+    let hint = stripped_fn_hint("g").expect("stripped fn must be recorded for the error path");
+    assert!(hint.contains("no active @cfg variant"), "hint: {hint}");
+    assert!(stripped_fn_hint("never_defined").is_none());
+}
+
 /// End-to-end fixture for issue #57: a two-arch source tree with one file
 /// gated `@cfg(x86_64)` and one gated `@cfg(riscv64)`, discovered via
 /// `discover_files_full_scan` (the full-scan path, not entry-closure).

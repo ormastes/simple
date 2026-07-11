@@ -482,7 +482,12 @@ impl ExecCore {
         self.display_error_hints(&parser, source);
 
         // Now check if parsing succeeded
-        let ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
+        let mut ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
+
+        // Drop wrong-arch @cfg(<arch>) fn variants before lowering: JIT/interp
+        // execute on the HOST, and without this strip first-wins registration
+        // runs whichever variant is declared first (multivariant misdispatch).
+        simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut ast);
 
         // Lower to HIR
         let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;
@@ -677,8 +682,14 @@ impl ExecCore {
         set_current_file(Some(path.to_path_buf()));
 
         // Load with import resolution (handles `use` statements)
-        let ast =
+        let mut ast =
             load_module_with_imports(path, &mut HashSet::new()).map_err(|e| format!("module load error: {}", e))?;
+
+        // Drop wrong-arch @cfg(<arch>) fn variants: the JIT executes on the
+        // HOST, and codegen's declare_functions is first-wins by source order,
+        // so an unstripped wrong-arch variant declared first would be the one
+        // that runs (bug x64_freestanding_cfg_multivariant_misdispatch).
+        simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut ast);
 
         // Lower to HIR with context so imported types (enums, classes) are resolved
         let hir_module = hir::lower_with_context(&ast, path).map_err(|e| format!("HIR lowering error: {}", e))?;
@@ -825,8 +836,12 @@ impl ExecCore {
         // Set current file for module resolution
         set_current_file(Some(path.to_path_buf()));
 
-        let module =
+        let mut module =
             load_module_with_imports(path, &mut HashSet::new()).map_err(|e| format!("compile failed: {}", e))?;
+
+        // Drop wrong-arch @cfg(<arch>) fn variants before interpretation (the
+        // interpreter's registration is also first-wins by source order).
+        simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
 
         let exit_code = evaluate_module(&module.items).map_err(|e| format!("{}", e))?;
 

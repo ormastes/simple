@@ -15,6 +15,7 @@
 //!    actual machine code. This mode is faster but supports fewer features.
 //!    Use `compile_native()` or `compile_source_to_memory_native()` for this mode.
 
+pub mod cfg_strip;
 pub mod module_loader;
 pub mod native_project;
 pub mod script_detection;

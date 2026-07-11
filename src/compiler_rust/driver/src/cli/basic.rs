@@ -175,6 +175,16 @@ fn print_cli_error(error: &str) {
     for help in diagnostic.help {
         eprintln!("  = help: {}", help);
     }
+    // Function-not-found where every definition was an inactive @cfg(<arch>)
+    // variant stripped for this host: explain WHY it is undefined (see
+    // simple_compiler::pipeline::cfg_strip) instead of a bare not-found.
+    if let Some(rest) = error.split("function `").nth(1) {
+        if let Some(fn_name) = rest.split('`').next() {
+            if let Some(hint) = simple_compiler::pipeline::cfg_strip::stripped_fn_hint(fn_name) {
+                eprintln!("  = note: {}", hint);
+            }
+        }
+    }
 }
 
 fn classify_cli_error(error: &str) -> CliErrorDiagnostic {
