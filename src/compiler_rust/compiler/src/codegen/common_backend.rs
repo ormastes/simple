@@ -1216,7 +1216,21 @@ impl<M: Module> CodegenBackend<M> {
                 // at least 8 bytes regardless of the declared type (BOOL=1, I32=4, etc.)
                 // to prevent buffer overflows when GlobalStore writes a full i64.
                 let size = std::cmp::max(super::types_util::type_id_size(*ty) as usize, 8);
-                if let Some(&init_val) = global_init_values.get(name) {
+                if let Some(&raw_init) = global_init_values.get(name) {
+                    // A typed BOOL global is loaded as a raw i8 (see GlobalLoad in
+                    // codegen/instr/mod.rs + types_util::type_id_to_cranelift), but the
+                    // module_pass capture stores a *tag-boxed* bool constant
+                    // (TAG_SPECIAL 0b011 | payload<<3): false=0b011=3, true=0b1011=11.
+                    // Writing that tagged byte into .data makes `false` read back as 3
+                    // (nonzero => truthy). Untag typed bools to raw 0/1 here so the i8
+                    // load matches native GlobalStore semantics (icmp results are 0/1).
+                    // ANY-typed bool globals keep the tagged encoding (loaded as i64
+                    // boxed values), so only untag when the declared type is BOOL.
+                    let init_val = if *ty == TypeId::BOOL && (raw_init & 0b111) == 0b011 {
+                        (raw_init >> 3) & 1
+                    } else {
+                        raw_init
+                    };
                     // Initialize with compile-time constant value
                     let bytes = init_val.to_le_bytes();
                     let mut buf = vec![0u8; size];
