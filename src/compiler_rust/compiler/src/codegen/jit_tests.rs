@@ -134,6 +134,39 @@ fn main() -> i64:
 }
 
 #[test]
+fn test_jit_module_init_all_zero_array_compact_fill_loop() {
+    // All-zero module-level array initializers ([0; N]) are emitted as a
+    // compact runtime fill loop instead of N unrolled push calls. The array
+    // must still be a real length-N zero-filled array handle (NOT a null/.bss
+    // zero handle), and nonzero initializers must be unaffected.
+    let source = r#"
+var big: [i64; 100000] = [0; 100000]
+var ones: [i64; 8] = [1; 8]
+
+fn big_len() -> i64:
+    return big.len()
+
+fn big_at_123() -> i64:
+    return big[123]
+
+fn big_at_last() -> i64:
+    return big[99999]
+
+fn ones_at_7() -> i64:
+    return ones[7]
+"#;
+    let jit = jit_compile(source).unwrap();
+    let len = unsafe { jit.call_i64_void("big_len").unwrap() };
+    assert_eq!(len, 100000, "all-zero [0; N] global must still have length N");
+    let elem = unsafe { jit.call_i64_void("big_at_123").unwrap() };
+    assert_eq!(elem, 0, "all-zero [0; N] global elements must read 0");
+    let last = unsafe { jit.call_i64_void("big_at_last").unwrap() };
+    assert_eq!(last, 0, "all-zero [0; N] global last element must read 0");
+    let one = unsafe { jit.call_i64_void("ones_at_7").unwrap() };
+    assert_eq!(one, 1, "nonzero repeat initializer must be unaffected");
+}
+
+#[test]
 fn test_jit_i32_return_controls_loop_condition() {
     let source = r#"
 fn as_i32(v: i64) -> i32:

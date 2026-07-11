@@ -1729,6 +1729,41 @@ impl<M: Module> CodegenBackend<M> {
     ) -> BackendResult<()> {
         use cranelift_codegen::ir::{types, MemFlags, UserFuncName};
 
+        /// Emit a compact runtime fill loop `for i in 0..count { push(array, 0) }`
+        /// instead of `count` unrolled push calls. Used for all-zero array
+        /// initializers ([0; N]), where N unrolled stores previously produced
+        /// megabytes of dead .text (e.g. fd_table's seven [T; 65536] arrays).
+        /// Semantics are identical: the array handle is still created and filled
+        /// to length N; only the code size drops from O(N) to O(1).
+        fn emit_zero_fill_push_loop(
+            builder: &mut cranelift_frontend::FunctionBuilder,
+            push_ref: cranelift_codegen::ir::FuncRef,
+            array: cranelift_codegen::ir::Value,
+            count: i64,
+        ) {
+            use cranelift_codegen::ir::condcodes::IntCC;
+            use cranelift_codegen::ir::{types, InstBuilder};
+            let header = builder.create_block();
+            builder.append_block_param(header, types::I64);
+            let body = builder.create_block();
+            let exit = builder.create_block();
+            let start = builder.ins().iconst(types::I64, 0);
+            builder.ins().jump(header, &[start]);
+            builder.switch_to_block(header);
+            let idx = builder.block_params(header)[0];
+            let cond = builder.ins().icmp_imm(IntCC::SignedLessThan, idx, count);
+            builder.ins().brif(cond, body, &[], exit, &[]);
+            builder.switch_to_block(body);
+            builder.seal_block(body);
+            let zero_elem = builder.ins().iconst(types::I64, 0);
+            builder.ins().call(push_ref, &[array, zero_elem]);
+            let next = builder.ins().iadd_imm(idx, 1);
+            builder.ins().jump(header, &[next]);
+            builder.seal_block(header);
+            builder.switch_to_block(exit);
+            builder.seal_block(exit);
+        }
+
         let init_name = match &self.module_prefix {
             Some(prefix) => {
                 // Sanitize dots → _dot_ so the symbol name matches _init_all.cpp references
@@ -1897,6 +1932,10 @@ impl<M: Module> CodegenBackend<M> {
         let mut sorted_arrays: Vec<_> = init_arrays.iter().collect();
         sorted_arrays.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, init) in &sorted_arrays {
+            // All-zero initializers ([0; N]) get a compact fill loop instead of
+            // N unrolled push calls (code size O(1) instead of O(N)).
+            let all_zero =
+                init.string_values.is_none() && !init.values.is_empty() && init.values.iter().all(|&v| v == 0);
             let element_count = init
                 .string_values
                 .as_ref()
@@ -1950,9 +1989,13 @@ impl<M: Module> CodegenBackend<M> {
                 let call_inst = builder.ins().call(new_ref, &[capacity]);
                 let array = builder.inst_results(call_inst)[0];
                 let push_ref = self.module.declare_func_in_func(byte_push_id.unwrap(), builder.func);
-                for value in &init.values {
-                    let byte = builder.ins().iconst(types::I64, (*value & 0xff) as i64);
-                    builder.ins().call(push_ref, &[array, byte]);
+                if all_zero {
+                    emit_zero_fill_push_loop(&mut builder, push_ref, array, element_count as i64);
+                } else {
+                    for value in &init.values {
+                        let byte = builder.ins().iconst(types::I64, (*value & 0xff) as i64);
+                        builder.ins().call(push_ref, &[array, byte]);
+                    }
                 }
                 array
             } else {
@@ -1960,11 +2003,16 @@ impl<M: Module> CodegenBackend<M> {
                 let call_inst = builder.ins().call(new_ref, &[capacity]);
                 let array = builder.inst_results(call_inst)[0];
                 let push_ref = self.module.declare_func_in_func(array_push_id.unwrap(), builder.func);
-                for value in &init.values {
-                    let raw = builder.ins().iconst(types::I64, *value);
-                    let shift = builder.ins().iconst(types::I64, 3);
-                    let boxed = builder.ins().ishl(raw, shift);
-                    builder.ins().call(push_ref, &[array, boxed]);
+                if all_zero {
+                    // Boxed zero is `0 << 3` == 0, so pushing raw 0 is identical.
+                    emit_zero_fill_push_loop(&mut builder, push_ref, array, element_count as i64);
+                } else {
+                    for value in &init.values {
+                        let raw = builder.ins().iconst(types::I64, *value);
+                        let shift = builder.ins().iconst(types::I64, 3);
+                        let boxed = builder.ins().ishl(raw, shift);
+                        builder.ins().call(push_ref, &[array, boxed]);
+                    }
                 }
                 array
             };

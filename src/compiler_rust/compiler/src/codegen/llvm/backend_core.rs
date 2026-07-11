@@ -453,6 +453,54 @@ impl LlvmBackend {
                 .unwrap_or_else(|| i64_type.const_int(0, false)))
         };
 
+        // Emit a compact runtime fill loop `for i in 0..count { push(array, 0) }`
+        // instead of `count` unrolled push calls. Used for all-zero array
+        // initializers ([0; N]), where N unrolled calls previously produced
+        // megabytes of dead .text (fd_table's seven [T; 65536] arrays = 8.5 MB,
+        // pipe_compat's [u8; 262144] = 5 MB in the merged kernel). Semantics are
+        // identical: the array handle is still created and filled to length N;
+        // only the code size drops from O(N) to O(1).
+        let emit_zero_fill_loop = |push_fn: inkwell::values::FunctionValue<'static>,
+                                   array: inkwell::values::IntValue<'static>,
+                                   count: inkwell::values::IntValue<'static>,
+                                   tag: &str|
+         -> Result<(), CompileError> {
+            let preheader = builder
+                .get_insert_block()
+                .ok_or_else(|| CompileError::Codegen("zero-fill loop: no insert block".to_string()))?;
+            let cond_bb = ctx.append_basic_block(init_fn, &format!("{tag}_cond"));
+            let body_bb = ctx.append_basic_block(init_fn, &format!("{tag}_body"));
+            let exit_bb = ctx.append_basic_block(init_fn, &format!("{tag}_exit"));
+            builder
+                .build_unconditional_branch(cond_bb)
+                .map_err(|e| crate::error::factory::llvm_build_failed("zfill br cond", &e))?;
+            builder.position_at_end(cond_bb);
+            let phi = builder
+                .build_phi(i64_type, &format!("{tag}_i"))
+                .map_err(|e| crate::error::factory::llvm_build_failed("zfill phi", &e))?;
+            let zero_idx = i64_type.const_int(0, false);
+            phi.add_incoming(&[(&zero_idx, preheader)]);
+            let idx = phi.as_basic_value().into_int_value();
+            let cmp = builder
+                .build_int_compare(inkwell::IntPredicate::SLT, idx, count, &format!("{tag}_cmp"))
+                .map_err(|e| crate::error::factory::llvm_build_failed("zfill cmp", &e))?;
+            builder
+                .build_conditional_branch(cmp, body_bb, exit_bb)
+                .map_err(|e| crate::error::factory::llvm_build_failed("zfill condbr", &e))?;
+            builder.position_at_end(body_bb);
+            let zero_elem = i64_type.const_int(0, false);
+            let _ = call_i64(push_fn, &[array, zero_elem], tag)?;
+            let next = builder
+                .build_int_add(idx, i64_type.const_int(1, false), &format!("{tag}_next"))
+                .map_err(|e| crate::error::factory::llvm_build_failed("zfill add", &e))?;
+            phi.add_incoming(&[(&next, body_bb)]);
+            builder
+                .build_unconditional_branch(cond_bb)
+                .map_err(|e| crate::error::factory::llvm_build_failed("zfill br back", &e))?;
+            builder.position_at_end(exit_bb);
+            Ok(())
+        };
+
         // --- strings ---
         let mut sorted_strings: Vec<_> = module_ir.global_init_strings.iter().collect();
         sorted_strings.sort_by_key(|(name, _)| (*name).clone());
@@ -471,6 +519,10 @@ impl LlvmBackend {
         let mut sorted_arrays: Vec<_> = module_ir.global_init_arrays.iter().collect();
         sorted_arrays.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, init) in sorted_arrays {
+            // All-zero initializers ([0; N]) get a compact fill loop instead of
+            // N unrolled push calls (code size O(1) instead of O(N)).
+            let all_zero =
+                init.string_values.is_none() && !init.values.is_empty() && init.values.iter().all(|&v| v == 0);
             let element_count = init
                 .string_values
                 .as_ref()
@@ -494,23 +546,32 @@ impl LlvmBackend {
                 let byte_array_new = get_rt("rt_byte_array_new", 1);
                 let byte_push = get_rt("rt_typed_bytes_u8_push", 2);
                 let array = call_i64(byte_array_new, &[capacity], "init_barr")?;
-                for value in &init.values {
-                    let byte = i64_type.const_int((*value & 0xff) as u64, false);
-                    let _ = call_i64(byte_push, &[array, byte], "init_barr_push")?;
+                if all_zero {
+                    emit_zero_fill_loop(byte_push, array, capacity, "init_barr_zfill")?;
+                } else {
+                    for value in &init.values {
+                        let byte = i64_type.const_int((*value & 0xff) as u64, false);
+                        let _ = call_i64(byte_push, &[array, byte], "init_barr_push")?;
+                    }
                 }
                 array
             } else {
                 let array_new = get_rt("rt_array_new", 1);
                 let array_push = get_rt("rt_array_push", 2);
                 let array = call_i64(array_new, &[capacity], "init_iarr")?;
-                for value in &init.values {
-                    // Box small ints: raw << 3 (matches cranelift compile path).
-                    let raw = i64_type.const_int(*value as u64, true);
-                    let shift = i64_type.const_int(3, false);
-                    let boxed = builder
-                        .build_left_shift(raw, shift, "box")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("init box shl", &e))?;
-                    let _ = call_i64(array_push, &[array, boxed], "init_iarr_push")?;
+                if all_zero {
+                    // Boxed zero is `0 << 3` == 0, so pushing raw 0 is identical.
+                    emit_zero_fill_loop(array_push, array, capacity, "init_iarr_zfill")?;
+                } else {
+                    for value in &init.values {
+                        // Box small ints: raw << 3 (matches cranelift compile path).
+                        let raw = i64_type.const_int(*value as u64, true);
+                        let shift = i64_type.const_int(3, false);
+                        let boxed = builder
+                            .build_left_shift(raw, shift, "box")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("init box shl", &e))?;
+                        let _ = call_i64(array_push, &[array, boxed], "init_iarr_push")?;
+                    }
                 }
                 array
             };
