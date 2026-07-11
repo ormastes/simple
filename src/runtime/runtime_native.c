@@ -28,6 +28,12 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+#if defined(__FreeBSD__)
+#include <sys/sysctl.h>
+#endif
 #if defined(_WIN32)
 #include <io.h>
 #include <malloc.h>
@@ -1211,6 +1217,53 @@ int32_t rt_get_argc(void) {
 
 SplArray* rt_get_args(void) {
     return rt_cli_get_args();
+}
+
+int64_t rt_current_exe_path(void) {
+    char buf[4096];
+    size_t len = 0;
+
+#if defined(__APPLE__)
+    uint32_t size = (uint32_t)sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) == 0) {
+        buf[sizeof(buf) - 1] = '\0';
+        len = strlen(buf);
+    }
+#elif defined(__linux__)
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        len = (size_t)n;
+    }
+#elif defined(__FreeBSD__)
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+    size_t size = sizeof(buf);
+    if (sysctl(mib, 4, buf, &size, NULL, 0) == 0 && size > 0) {
+        buf[sizeof(buf) - 1] = '\0';
+        len = strlen(buf);
+    }
+#endif
+
+    if (len == 0 && rt_core_argv && rt_core_argv[0] && rt_core_argv[0][0] != '\0') {
+        len = strlen(rt_core_argv[0]);
+        if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+        memcpy(buf, rt_core_argv[0], len);
+        buf[len] = '\0';
+    }
+
+    if (len > 0) {
+        char resolved[4096];
+        if (realpath(buf, resolved) != NULL) {
+            resolved[sizeof(resolved) - 1] = '\0';
+            len = strlen(resolved);
+            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+            memcpy(buf, resolved, len);
+            buf[len] = '\0';
+        }
+    }
+
+    if (len == 0) return rt_core_nil();
+    return rt_string_new((const uint8_t*)buf, (uint64_t)len);
 }
 
 SplArray* rt_cli_get_args(void) {

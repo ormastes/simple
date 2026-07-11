@@ -434,3 +434,50 @@ Side findings: (1) `rt_dir_create(text,bool)` returns corrupted result under Cra
 correct under interpret — pre-existing JIT FFI marshalling bug for (text,bool) extern args
 (follow-up bug candidate). (2) Several rt_ symbols exist in runtime.c/runtime_native.c but are
 missing from runtime.h declarations (rt_file_read_bytes/write_bytes/move, rt_dir_delete/walk/list).
+
+## 2026-07-11 (later) — root-caused: 07:52 fix (22111765) is self-defeating
+
+The "select cli-capable runtime for stage4" fix added
+`runtime_archive_has_bootstrap_cli_symbols()` in
+`src/compiler_rust/compiler/src/pipeline/native_project/config.rs`, requiring
+`__simple_runtime_init` and `__simple_runtime_shutdown` to be **defined**
+symbols inside `libsimple_runtime.a`. Those two symbols are weak, per-program
+module-init hooks the compiler generates for each *compiled entry point*
+(`stubs.rs`, `linker.rs`) — they are never exports of the runtime archive
+itself. `llvm-nm` confirms they do not exist anywhere in
+`src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a` (31889 symbols,
+all 9 other required symbols — `rt_get_args`, `rt_cli_get_args`,
+`rt_array_len`, `rt_array_get`, `rt_array_get_text`, `rt_string_len`,
+`rt_string_data`, `rt_file_read_text`, `rt_process_run` — present and defined).
+
+Effect: `runtime_archive_has_bootstrap_cli_symbols` always returns `false` for
+the real archive → `CoreCBootstrap` lane candidate list stays empty →
+`selected_runtime_library` falls through to the minimal
+`build_core_c_runtime_library` fallback (also filtered by the same
+unsatisfiable check) → stage4 link had **no real runtime archive at all**,
+only `SIMPLE_STUB_MISSING_RT=1` generated stubs (807, including core
+`rt_array_all`/`rt_get_args`/`rt_file_read_text` — worse than the prior
+662-stub baseline, and no "selected runtime"/lane logging appears in
+`stage4-native-build.log` at all, corroborating zero real archive candidates).
+
+Fix landed: dropped the two unsatisfiable symbols from
+`runtime_archive_has_bootstrap_cli_symbols` (3 call sites, all wanting the
+same semantics; one function edit fixes all). Since this is Rust seed source,
+it requires a `cargo` rebuild of `src/compiler_rust/target/bootstrap/simple`
+(incremental) before the next `bootstrap-from-scratch.sh` gate run picks it
+up — normal dynload-mode runs reuse the existing seed and will NOT see a
+config.rs-only edit.
+
+## 2026-07-11 (fourth wave) — stage4 deployed; stub wall back to 662
+
+After dropping the unsatisfiable runtime-archive lifecycle-symbol check and
+adding `rt_current_exe_path()` for CLI seed-driver discovery, full bootstrap
+with deploy succeeds:
+
+- `bootstrap-from-scratch.sh --full-bootstrap --deploy --no-mcp --jobs=half`: PASS.
+- `stage4-native-build.log`: `Generating 662 stub functions for unresolved symbols...`.
+- `bin/simple -c 'print(1+1)'` and `bin/simple run <tmp>`: PASS via installed
+  `bin/release/aarch64-apple-darwin/simple_seed` delegate.
+- Redeploy behavioral gate remains open: 7/11 PASS, 1 skipped; failures are
+  `val-scalar`, `struct-copy-isolation`, `class-in-array-mutation`, and
+  `cfg-arch-dispatch-b`.

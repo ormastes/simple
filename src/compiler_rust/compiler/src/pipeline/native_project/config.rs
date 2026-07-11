@@ -73,9 +73,13 @@ pub(crate) fn runtime_archive_has_bootstrap_cli_symbols(path: &Path) -> bool {
     let Some(symbols) = archive_defined_symbols(path) else {
         return false;
     };
+    // NOTE: `__simple_runtime_init`/`__simple_runtime_shutdown` are intentionally
+    // NOT checked here — they are weak, per-program module-init hooks emitted by
+    // the compiler for each compiled entry point (see stubs.rs/linker.rs), never
+    // exports of libsimple_runtime.a itself. Requiring them here made this check
+    // unsatisfiable for every real runtime archive, forcing a silent fallback to
+    // the minimal core-C runtime and stubbing out core `rt_*` symbols.
     [
-        "__simple_runtime_init",
-        "__simple_runtime_shutdown",
         "rt_get_args",
         "rt_cli_get_args",
         "rt_array_len",

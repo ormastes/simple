@@ -1,6 +1,32 @@
 # Stage4 Self-Host Redeploy (#79) — Plan (updated 2026-07-11)
 
-## STATUS NOW (2026-07-11, third wave): runtime-path + argv/runtime selection landed locally; stage4 links, smoke still fails in parser path, NOT deployed
+## STATUS NOW (2026-07-11, fourth wave): bootstrap/deploy PASS; redeploy behavioral gate still FAILS
+
+The stage4 deploy blocker moved from "cannot smoke `-c`/`run`" to behavioral
+parity failures:
+
+- `timeout 1800 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy --no-mcp --jobs=half`: PASS.
+- `bin/simple -c 'print(1+1)'`: PASS (`2`, delegated to installed `simple_seed`).
+- `bin/simple run <tmp file with print(1+1)>`: PASS (`2`, delegated to installed `simple_seed`).
+- `build/bootstrap/full/aarch64-apple-darwin/simple -c 'print(1+1)'`: PASS.
+- `timeout 240 sh scripts/check/cert/redeploy_gate/redeploy_gate.shs bin/simple`: FAIL, 7/11 PASS, 1 skipped. Remaining failures:
+  `val-scalar`, `struct-copy-isolation`, `class-in-array-mutation`, and
+  `cfg-arch-dispatch-b`.
+
+Fourth-wave fixes:
+
+- Added runtime-owned `rt_current_exe_path() -> text` and registered it in
+  Rust SFFI metadata so CLI driver discovery can use a real executable path
+  instead of normalized CLI argv.
+- Canonicalized that path with `realpath()` for installed `bin/simple`
+  symlink launches.
+- Added release-layout `simple_seed` fallback discovery and relaxed explicit
+  bootstrap-driver rejection when current-exe identity is unavailable.
+
+TODO 119 remains open pending redeploy behavioral gate parity and reviewer
+approval.
+
+## PRIOR STATUS (2026-07-11, third wave): runtime-path + argv/runtime selection landed locally; stage4 links, smoke still fails in parser path, NOT deployed
 
 The second-wave ordered item (pass `--runtime-path` in the non-seed stage-4
 branch and stop selecting stale bootstrap `deps/libsimple_runtime.a` when it
@@ -251,6 +277,23 @@ Full per-fix diagnostic detail (probes, crash reports, budget accounting):
    isolation) and the extended smoke matrix before any redeploy to
    `bin/release/<triple>/simple`. Do not redeploy on a Stage-1-only pass.
 
+## 2026-07-11 fourth-wave status
+
+- runtime_need: stage4 `-c`/`run` still fell back to the pure parser path after
+  argv/runtime selection because `_cli_current_exe_path()` could not establish
+  the executing binary path when runtime argv was normalized. That made
+  `_cli_driver_binary()` reject `SIMPLE_BOOTSTRAP_DRIVER` as potentially
+  self-recursive and prevented sibling `simple_seed` discovery.
+- facade_checked: existing `rt_cli_get_args()` exposes CLI args but is not a
+  stable current-executable facade; no existing runtime function returned the
+  current executable path for native CLI code.
+- chosen_path: add runtime-owned `rt_current_exe_path() -> text` in the core-C
+  runtime, register it in Rust SFFI metadata, and have `src/app/io/cli_ops.spl`
+  use it before the older argv0 fallback.
+- rejected_shortcuts: do not rely only on `SIMPLE_BOOTSTRAP_DRIVER` in the
+  bootstrap script, because redeploy gates and normal installed binaries must
+  discover sibling `simple_seed` without an injected environment variable.
+
 ## STANDING TRAPS
 
 - **Peer WC-sweeps re-reverting fixes.** A concurrent full-WC sync from
@@ -284,6 +327,34 @@ Full per-fix diagnostic detail (probes, crash reports, budget accounting):
   `strlen`s it must be NUL-terminated explicitly via `(s + "\0").ptr()` —
   this was the root cause of two separate SIGSEGVs in this arc
   (`LLVMSetDataLayout`, `LLVMBuildCall2`).
+
+## 2026-07-11 — 07:52 cli-capable-runtime fix (22111765) was self-defeating
+
+`runtime_archive_has_bootstrap_cli_symbols()` (added in `config.rs` by
+22111765) required `__simple_runtime_init`/`__simple_runtime_shutdown` to be
+**defined** symbols inside `libsimple_runtime.a`. Those are weak, per-program
+module-init hooks the compiler emits for each *compiled entry point*
+(`stubs.rs`/`linker.rs`), never runtime-archive exports — `llvm-nm` confirms
+they don't exist anywhere in the archive. Result: the check always failed,
+`CoreCBootstrap` candidate list stayed empty, and `selected_runtime_library`
+fell back to the minimal `build_core_c_runtime_library` (also gated by the
+same unsatisfiable check) — so stage4 linked with **no real runtime archive
+at all**, only `SIMPLE_STUB_MISSING_RT=1` stubs (807, including core
+`rt_array_all`/`rt_get_args`/`rt_file_read_text` — worse than the prior
+662-stub baseline). Full root-cause + fix detail:
+`doc/03_plan/compiler/bootstrap/stage4_stub_symbol_plan_2026-07-11.md`
+(2026-07-11 "later" section).
+
+Fix: dropped the two unsatisfiable symbols from the required list (one
+function, 3 call sites all want the same semantics). This is a Rust seed
+source change — it only takes effect after `cargo build --profile bootstrap
+-p simple-driver` **and** `-p simple-native-all` (stage2/stage3/stage4
+dynload the native-all archive, which is where the check actually executes)
+are rebuilt, and after clearing `build/bootstrap/native_cache` +
+`build/bootstrap/{stage2,stage3,full}/<triple>/simple` so stage2 relinks
+against the fixed archive instead of serving a stale cached binary.
+**As of this note the fix is uncommitted** — if it doesn't land in git before
+the next `--full-bootstrap`, the buggy check regresses.
 
 ## Reference
 

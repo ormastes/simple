@@ -10,6 +10,7 @@ extern fn sys_get_args() -> [text]
 # recursed infinitely (Stage 4 SIGSEGV at startup —
 # bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21).
 extern fn rt_cli_get_args() -> [text]
+extern fn rt_current_exe_path() -> text
 extern fn rt_exit(code: i64)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64
@@ -92,6 +93,9 @@ fn _cli_eprint(msg: text):
 fn _cli_current_exe_path() -> text:
     if _cli_is_windows_platform():
         return ""
+    val runtime_path = rt_current_exe_path() ?? ""
+    if runtime_path.len() > 0:
+        return runtime_path
     val args = rt_cli_get_args() ?? []
     if args.len() > 0:
         val argv0 = args[0]
@@ -113,6 +117,14 @@ fn _cli_is_current_exe(path: text) -> bool:
         # If identity cannot be established, delegation is unsafe: the
         # candidate may be this process and recurse without bound.
         return true
+    current == path or current.ends_with("/" + path) or path.ends_with("/" + current)
+
+fn _cli_is_known_current_exe(path: text) -> bool:
+    if path == "" or _cli_is_windows_platform():
+        return false
+    val current = _cli_current_exe_path()
+    if current.len() == 0:
+        return false
     current == path or current.ends_with("/" + path) or path.ends_with("/" + current)
 
 pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
@@ -143,7 +155,7 @@ pub fn _cli_driver_binary() -> text:
         # Self-exec guard: an inherited override that points at THIS binary
         # would delegate to ourselves recursively without bound (simple.bak
         # fork bomb OOM-killed the user session, 2026-06-12).
-        if _cli_is_current_exe(override):
+        if _cli_is_known_current_exe(override):
             return ""
         return override
 
@@ -155,8 +167,18 @@ pub fn _cli_driver_binary() -> text:
         if exe_path.len() > 0:
             val seed_sibling = _cli_seed_sibling_path(exe_path)
             if _cli_file_exists_impl(seed_sibling):
-                if not _cli_is_current_exe(seed_sibling):
+                if not _cli_is_known_current_exe(seed_sibling):
                     return seed_sibling
+
+    for seed_candidate in [
+        "bin/release/aarch64-apple-darwin/simple_seed",
+        "bin/release/macos-arm64/simple_seed",
+        "bin/release/darwin-aarch64/simple_seed",
+        "bin/release/linux-x86_64/simple_seed",
+    ]:
+        if _cli_file_exists_impl(seed_candidate):
+            if not _cli_is_known_current_exe(seed_candidate):
+                return seed_candidate
 
     val ext = if _cli_is_windows_platform(): ".exe" else: ""
     val candidate = "bin/simple{ext}"
