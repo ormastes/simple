@@ -55,3 +55,16 @@ comment reference when this bug is fixed.
 Interpreter pattern resolution for qualified enum-variant patterns
 (`Enum.Variant:` match arms) must resolve `Variant` within the enum's own
 namespace before falling back to imported type names.
+
+## New instance (2026-07-11): duplicate class NAMES across modules — `Logger`
+
+Loading `app.io.mod` (→ `src/compiler/00.common/config.spl`, which constructs
+its own `Logger(level: ...)`) together with the JS engine
+(`std.js.engine.js_error.Logger`, fields `(name)`) in one interpreter graph
+fails SEMANTIC analysis with `class Logger has no field named level` — the
+compiler-config construction resolves against the js-engine Logger. Four
+distinct `Logger` classes exist (`js_error`, `browser_engine/shared/logging`,
+`common/web/logging`, compiler config); which one wins appears to be
+load-order dependent. Workaround used in probes: avoid importing `app.io.mod`
+into graphs that load the JS engine (raw `rt_file_read_text` extern instead).
+Real fix should make interpreter class resolution module-scoped.
