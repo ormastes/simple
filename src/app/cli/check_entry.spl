@@ -3,8 +3,41 @@
 use std.cli.cli_util.{get_cli_args}
 use app.io.process_ops.{process_run_timeout}
 
+extern fn rt_file_exists(path: text) -> bool
+
 val OUTPUT_LIMIT = 12000
 val CHECK_WORKER_TIMEOUT_MS = 300000
+
+# Spawn the worker via the REAL release binary path, not the bin/simple
+# symlink: with a symlinked argv0 the worker's _cli_driver_binary() sibling
+# lookup (simple_seed next to argv0) misses the seed, so its `run` grinds
+# in-process with the slow self-hosted frontend instead of delegating
+# (300s timeout per file). The real release path always has simple_seed
+# as a sibling, so delegation works there.
+fn resolve_worker_binary() -> text:
+    val (os_out, _os_err, os_code) = process_run_timeout("uname", ["-s"], 10000)
+    val (arch_out, _arch_err, arch_code) = process_run_timeout("uname", ["-m"], 10000)
+    if os_code != 0 or arch_code != 0:
+        return "bin/simple"
+    val os_name = os_out.trim()
+    var arch = arch_out.trim()
+    if arch == "arm64":
+        arch = "aarch64"
+    if arch == "amd64":
+        arch = "x86_64"
+    var triple = ""
+    if os_name == "Darwin":
+        triple = "{arch}-apple-darwin"
+    elif os_name == "Linux":
+        triple = "{arch}-unknown-linux-gnu"
+    elif os_name == "FreeBSD":
+        triple = "{arch}-unknown-freebsd"
+    else:
+        return "bin/simple"
+    val candidate = "bin/release/{triple}/simple"
+    if rt_file_exists(candidate):
+        return candidate
+    "bin/simple"
 
 fn print_help():
     print "Usage: simple check <file.spl> [file2.spl ...]"
@@ -96,11 +129,11 @@ fn check_files_from_args(args: [text]) -> [text]:
         i = i + 1
     files
 
-fn run_single_worker(args: [text], as_json: bool) -> i64:
+fn run_single_worker(worker_bin: text, args: [text], as_json: bool) -> i64:
     var worker_args = ["run", "src/app/check/main.spl"]
     for arg in args:
         worker_args.push(arg)
-    val (stdout, stderr, code) = process_run_timeout("bin/simple", worker_args, CHECK_WORKER_TIMEOUT_MS)
+    val (stdout, stderr, code) = process_run_timeout(worker_bin, worker_args, CHECK_WORKER_TIMEOUT_MS)
     print_bounded_stdout(stdout, as_json)
     if code != 0:
         print_bounded_stderr(stderr)
@@ -114,8 +147,9 @@ fn main() -> i64:
 
     val as_json = wants_json(args)
     val files = check_files_from_args(args)
+    val worker_bin = resolve_worker_binary()
     if files.len() <= 1:
-        return run_single_worker(args, as_json)
+        return run_single_worker(worker_bin, args, as_json)
 
     var checked = 0
     var errors = 0
@@ -128,7 +162,7 @@ fn main() -> i64:
         var worker_args = ["run", "src/app/check/main.spl"]
         for arg in single_args:
             worker_args.push(arg)
-        val (stdout, stderr, code) = process_run_timeout("bin/simple", worker_args, CHECK_WORKER_TIMEOUT_MS)
+        val (stdout, stderr, code) = process_run_timeout(worker_bin, worker_args, CHECK_WORKER_TIMEOUT_MS)
         if not as_json:
             print_bounded_stdout(stdout, false)
         if code != 0:

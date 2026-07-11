@@ -105,3 +105,53 @@ Build walls cleared to get this far (all landed):
    `self_hosted_parser_dedent_continuation_2026-07-11.md`);
 2. duplicate module `common.string_builder` from src/app+src/lib source roots
    (peer twin deleted, 4 imports retargeted to the lib canonical).
+
+## 2026-07-11 evening follow-up: print-path exonerated at the bottom; check wall re-diagnosed
+
+**Tiny compiled probe validates print pipeline:** bare `fn main()` with 2 `print()` calls,
+compiled via identical LLVM-backend-to-arm64 pipeline (SIMPLE_BOOTSTRAP=1, llvm-lib), executes
+correctly (28 bytes output, both strings present, exit 0). Disassembly shows 2 `bl _rt_print`
+call instructions, arguments loaded; runtime archive (Jul 11 17:54, includes dict growth fix)
+linked statically. Verdict: rt_print linkage ✅, literal-print lowering ✅. The 15:09 CLI's
+print-loss is NOT rt_print itself — see the root cause below.
+
+**Print-loss ROOT CAUSE (probe matrix + lldb, later same evening):** the seed's
+bootstrap-MIR/LLVM lane lowers `[text].join(sep)` to a **silent null constant** — the
+disassembly of a minimal failing probe shows `mov x0, xzr; bl _rt_print` with no join call
+and no join symbol linked at all; no compile error is raised. The CLI's print builtin
+(`src/app/interpreter/call/builtins.spl:36-38`) routes every argument list through
+`args.map(\a: a.to_display_string()).join(" ")`, so ALL in-process prints receive a null
+text. Second layer: `rt_print_str` (`src/runtime/simple_core/core_string.spl:569`) treats
+the degenerate `(ptr=0x1, len=0)` pair like a legitimate empty string and silently skips the
+write — turning a lowering bug into clean exit-0 data loss (`rt_println_str` still writes
+its unconditional `\n`, hence the observed 1-byte outputs). Probe matrix: literal ✅,
+`+`-concat ✅, function-returned concat ✅, `.join()` ✗, `.map().join()` ✗; interpolation
+`"{n}"` prints the braces literally (separate open gap in the same lane). Live repro on the
+deployed binary without rebuild: `SIMPLE_BOOTSTRAP_DRIVER=<abs path of the deployed binary>`
+trips `_cli_driver_binary()`'s self-exec guard and forces the in-process path (note: `run`/
+`-c` normally delegate to the seed sibling unconditionally — SIMPLE_FRONTEND_DELEGATED only
+gates lint/check — which is what masked this). Fix direction: route `.join()` through an
+rt_* runtime call mirroring `b48d79b8c6` (`i64.to_string()` — same disease), make the
+silent-null lowering path loud, and harden `rt_print_str` against invalid (ptr,len).
+
+**Native `check` wall root-cause:** the check chain's worker is spawned as the literal
+`bin/simple` **symlink**; `_cli_driver_binary()`'s seed-sibling lookup is argv0-based
+(`src/app/io/cli_ops.spl:125`), so the symlinked argv0 yields a nonexistent `bin/simple_seed`
+sibling, delegation fails, and the worker falls into the **compiled in-process frontend**
+(the stage-4 binary parses the whole check app + transitive compiler-frontend imports itself
+instead of handing `run` to the seed's fast Rust frontend, which finishes the same worker in
+~3s). Minutes of CPU time, then parser gap #2 (block-lambda call arg, `filter(\msg:` +
+if/else block + dedented `)`) at `src/app/interpreter/async_runtime/mailbox.spl:525`
+→ "expected ), got BoolLit" → killed by 300s timeout. (An earlier env-guard-leak theory —
+SIMPLE_FRONTEND_DELEGATED — was disproven: that flag only gates lint/check delegation, not
+`run`; symlink-vs-realpath was proven by direct experiment, 60s-timeout vs 3s.) Fix in
+working copy: `resolve_worker_binary()` in `src/app/cli/check_entry.spl` resolves
+`bin/release/<triple>/simple` for the worker spawn (outer check 300s+ → 2.9s); durable fix
+(symlink-resolving argv0 in `_cli_driver_binary`) filed as
+`cli_driver_binary_symlink_argv0_2026-07-11.md` — needs a stage-4 rebuild to take effect.
+
+**Per-token getenv hoist:** `src/compiler/10.frontend/core/parser.spl` lines 185–198
+(`par_line_set`, `par_col_set`) call `rt_env_get("SIMPLE_BOOTSTRAP_PAR_ENV_SAVE")` on every
+token advance — unconditional syscall on the hottest parser loop. Cached-flag variant (lazy
+process-lifetime cache; the env var is never set mid-process) reduces overhead in both
+interpreted and compiled parsing; 5 sites switched to `par_env_save_enabled()`.

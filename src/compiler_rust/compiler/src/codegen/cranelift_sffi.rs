@@ -33,7 +33,7 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_module::{FuncId, Linkage, Module, ModuleError};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use target_lexicon::Triple;
 
@@ -581,6 +581,22 @@ pub unsafe extern "C" fn rt_cranelift_end_function(ctx: i64) -> i64 {
     ctx
 }
 
+/// Describe a `cranelift_module::ModuleError` for diagnostics, surfacing the
+/// full per-instruction Cranelift verifier detail instead of the generic
+/// "Verifier errors" string that `CodegenError`'s own `Display` impl produces
+/// (the `VerifierErrors` payload is discarded there — see
+/// vendor/cranelift-codegen/src/result.rs). `VerifierErrors` has a `Display`
+/// impl that lists every individual error with its location/context/message,
+/// so we match it out explicitly here rather than patching the vendored crate.
+fn describe_module_error(err: &ModuleError) -> String {
+    match err {
+        ModuleError::Compilation(cranelift_codegen::CodegenError::Verifier(errors)) => {
+            format!("Verifier errors:\n{}", errors)
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Define a function in a JIT module.
 /// Returns true on success.
 #[no_mangle]
@@ -606,7 +622,7 @@ pub unsafe extern "C" fn rt_cranelift_define_function(module: i64, _func_id: i64
                     true
                 }
                 Err(e) => {
-                    eprintln!("cranelift: define_function error: {}", e);
+                    eprintln!("cranelift: define_function error: {}", describe_module_error(&e));
                     false
                 }
             }
@@ -1237,7 +1253,7 @@ pub unsafe extern "C" fn rt_cranelift_aot_define_function(module: i64, name_ptr:
                     true
                 }
                 Err(e) => {
-                    eprintln!("cranelift: AOT define_function error: {}", e);
+                    eprintln!("cranelift: AOT define_function error: {}", describe_module_error(&e));
                     false
                 }
             }
