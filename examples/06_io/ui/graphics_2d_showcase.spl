@@ -1,12 +1,10 @@
 # graphics_2d_showcase.spl — canonical standalone Engine2D primitive gallery.
 #
 # Headless: bin/simple run examples/06_io/ui/graphics_2d_showcase.spl
-# Window:   SIMPLE_GUI=1 bin/simple run examples/06_io/ui/graphics_2d_showcase.spl
+# Window:   bin/simple run examples/06_io/ui/graphics_2d_showcase_gui.spl
 
 use std.gpu.engine2d.engine.{Engine2D}
 use std.io.window_winit.{WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
-use std.io_runtime.{get_args}
-use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 
 val W: i32 = 800
@@ -21,15 +19,11 @@ val AMBER: u32 = 0xFFF59E0Bu32
 val RED: u32 = 0xFFEF4444u32
 val PURPLE: u32 = 0xFFA855F7u32
 
-fn requested_backend() -> text:
-    val args = get_args()
-    for arg in args:
-        if arg.starts_with("--backend="):
-            val value = arg.substring(10, arg.len()).trim()
-            if value != "":
-                return value
-    val value = (env_get("SIMPLE_GUI_BACKEND") ?? "").trim()
-    if value == "": "software" else: value
+fn gpu_backend_requested(name: text) -> bool:
+    name == "metal" or name == "vulkan" or name == "cuda" or
+        name == "rocm" or name == "directx" or name == "opencl" or
+        name == "opengl" or name == "webgpu" or name == "intel" or
+        name == "qualcomm" or name == "virtio_gpu"
 
 fn checker_pixels() -> [u32]:
     [RED, AMBER, GREEN, CYAN, BLUE, PURPLE, WHITE, PANEL,
@@ -148,9 +142,24 @@ fn should_close(input: WinitInput) -> bool:
             return true
     false
 
-fn main() -> i64:
-    val requested = requested_backend()
-    var engine = Engine2D.create_with_backend_fast(W, H, requested)
+fn semantic_sample_differences(pixels: [u32]) -> i32:
+    # Exact interiors of five independently rendered primitives. Adjacent
+    # samples must differ, preventing a uniform/background-only frame from
+    # satisfying the showcase evidence contract.
+    val samples = [pixels[90 * W + 100], pixels[105 * W + 375],
+                   pixels[200 * W + 570], pixels[165 * W + 405],
+                   pixels[590 * W + 790]]
+    var differences = 0
+    var i = 1
+    while i < samples.len():
+        if samples[i] != samples[i - 1]:
+            differences = differences + 1
+        i = i + 1
+    differences
+
+fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
+    var engine = if backend == "software": Engine2D.create_offscreen(W, H) else: Engine2D.create_with_backend_fast(W, H, backend)
+    val actual = engine.backend_name()
     draw_showcase(engine)
     engine.present()
     val readback = engine.read_pixels_with_source()
@@ -158,17 +167,26 @@ fn main() -> i64:
     for pixel in readback.pixels:
         if pixel != 0u32:
             nonzero = nonzero + 1
-    print "graphics_2d_backend={engine.backend_name()}"
+    val semantic_differences = semantic_sample_differences(readback.pixels)
+    val gpu_requested = gpu_backend_requested(backend)
+    print "graphics_2d_requested_backend={backend}"
+    print "graphics_2d_backend={actual}"
     print "graphics_2d_source={readback.source}"
+    print "graphics_2d_backend_handle={readback.backend_handle}"
     print "graphics_2d_checksum={readback.checksum}"
     print "graphics_2d_nonzero={nonzero}"
+    print "graphics_2d_semantic_differences={semantic_differences}"
     print "graphics_2d_dimensions={W}x{H}"
     print "graphics_2d_pixels={readback.pixel_count}"
-    if readback.pixel_count != (W * H).to_i64() or nonzero == 0:
+    if actual != backend or readback.pixel_count != (W * H).to_i64() or
+            readback.checksum == 0 or nonzero == 0 or semantic_differences < 4:
+        engine.shutdown()
+        return 1
+    if gpu_requested and (readback.source != "device_readback" or readback.backend_handle <= 0):
         engine.shutdown()
         return 1
 
-    if (env_get("SIMPLE_GUI") ?? "") != "1":
+    if not gui:
         engine.shutdown()
         return 0
 
@@ -192,3 +210,8 @@ fn main() -> i64:
     winit_loop_free(lp)
     engine.shutdown()
     0
+
+fn main() -> i64:
+    run_graphics_2d_showcase(false, "software")
+
+export run_graphics_2d_showcase

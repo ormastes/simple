@@ -303,6 +303,30 @@ class Compositor:
                 self.surfaces[i] = surface
             i = i + 1
 
+    me compositor_materialize_process_surface_scalar(title: text, x: i32, y: i32, width: i32, height: i32, process_id: i64, app_id: text, content_html: text) -> i64:
+        val id = self.create_window(title, x, y, width, height)
+        if id <= 0:
+            return 0
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                var surface = self.surfaces[i]
+                surface.process_id = process_id
+                surface.app_id = app_id
+                surface.content_html = content_html
+                surface.content_revision = surface.content_revision + 1
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+        id
+
+    fn compositor_process_owned_surface_count_scalar() -> i64:
+        var count: i64 = 0
+        for surface in self.surfaces:
+            if surface.process_id > 0 and surface.app_id != "":
+                count = count + 1
+        count
+
     fn window_count() -> i32:
         self.surfaces.len()
 
@@ -394,6 +418,9 @@ class Compositor:
             return
         self._handle_input_ps2()
 
+    me handle_input_baremetal_ps2():
+        self._handle_input_ps2()
+
     me _handle_input_backend():
         val inp = self.input
         if inp == nil:
@@ -436,9 +463,9 @@ class Compositor:
     me _handle_input_ps2():
         var alt_held = false
         var status = port_inb(0x64)
-        while (status.to_i32() & 1) != 0:
+        while ((status as i32) & 1) != 0:
             var scancode = port_inb(0x60)
-            var sc = scancode.to_i32()
+            var sc = scancode as i32
             if sc == 0x38:
                 alt_held = true
                 self.pending_meta_key = 1
@@ -457,19 +484,19 @@ class Compositor:
             status = next_status
 
         var mstatus = port_inb(0x64)
-        if (mstatus.to_i32() & 0x21) == 0x21:
+        if ((mstatus as i32) & 0x21) == 0x21:
             var b0 = port_inb(0x60)
             var ms1 = port_inb(0x64)
-            if (ms1.to_i32() & 1) != 0:
+            if ((ms1 as i32) & 1) != 0:
                 var b1 = port_inb(0x60)
                 var ms2 = port_inb(0x64)
-                if (ms2.to_i32() & 1) != 0:
+                if ((ms2 as i32) & 1) != 0:
                     var b2 = port_inb(0x60)
-                    var dx = b1.to_i32()
-                    var dy = b2.to_i32()
-                    if (b0.to_i32() & 0x10) != 0:
+                    var dx = b1 as i32
+                    var dy = b2 as i32
+                    if ((b0 as i32) & 0x10) != 0:
                         dx = dx - 256
-                    if (b0.to_i32() & 0x20) != 0:
+                    if ((b0 as i32) & 0x20) != 0:
                         dy = dy - 256
                     var new_x = self.cursor.x + dx
                     var new_y = self.cursor.y - dy
@@ -485,7 +512,7 @@ class Compositor:
                     cursor_ref.x = new_x
                     cursor_ref.y = new_y
                     self.cursor = cursor_ref
-                    val left_btn = (b0.to_i32() & 0x01) != 0
+                    val left_btn = ((b0 as i32) & 0x01) != 0
                     if left_btn:
                         self.note_pending_wm_pointer_step(new_x, new_y, "left", "down")
                         if self.dragging:

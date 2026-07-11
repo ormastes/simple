@@ -41,7 +41,8 @@ use os.desktop.shell_process.{
     _process_rows, _process_panel_rows, _window_overlay_rows,
     _selected_process_row, _normalized_process_selection, _process_is_live
 }
-use os.desktop.shell_baremetal.{baremetal_engine2d_overlay_backend, render_baremetal_shared_wm_scene}
+use os.desktop.shell_baremetal.{baremetal_engine2d_overlay_backend, render_baremetal_shared_wm_scene, render_baremetal_shared_wm_scene_to_pixel_buffer}
+use common.ui.window_scene_draw_ir.{SharedWmPixelBufferBackend, shared_wm_pixel_buffer_addr, shared_wm_pixel_buffer_count}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
 use os.desktop.wm_runtime_bridge.{simpleos_wm_pointer_runtime_command, simpleos_wm_apply_pointer}
@@ -53,6 +54,9 @@ use os.desktop.shell_types.{
     APP_ID_BROWSER_DEMO, APP_ID_HELLO_WORLD, APP_ID_FILE_MANAGER,
     APP_ID_SHELL, APP_ID_EDITOR, APP_ID_SIMPLE_BROWSER
 }
+
+extern fn memcpy(dst: i64, src: i64, n: i64) -> i64
+extern fn serial_println(msg: text)
 
 fn _simpleos_revision_mix_i64(seed: i64, value: i64) -> i64:
     ((seed * 131 + value) % 2147483647) + 1
@@ -245,6 +249,10 @@ class DesktopShell:
     wm_runtime_state: WmRuntimeShellState
     last_wm_loop_marker: text
     web_content_caches: Dict<i64, WebRenderPixelArtifactCache>
+    baremetal_web_cache_ids: [i64]
+    baremetal_web_caches: [WebRenderPixelArtifactCache]
+    last_rendered_scene_revision: i64
+    last_rendered_taskbar_revision: i64
 
 impl DesktopShell:
 
@@ -282,7 +290,11 @@ impl DesktopShell:
             task_reaper_enabled: true,
             wm_runtime_state: wm_runtime_shell_state_empty(),
             last_wm_loop_marker: "",
-            web_content_caches: {}
+            web_content_caches: {},
+            baremetal_web_cache_ids: [],
+            baremetal_web_caches: [],
+            last_rendered_scene_revision: 0,
+            last_rendered_taskbar_revision: 0
         )
 
     me set_task_reaper_enabled(enabled: bool):
@@ -513,6 +525,44 @@ impl DesktopShell:
                 self.register_materialized_window(wid, pid, app_id)
                 true
 
+    me materialize_process_launch_scalar(app_kind: i64, pid: u64) -> bool:
+        """Baremetal owner-safe materialization keyed by the numeric boot app id."""
+        if pid == 0:
+            return false
+        var title = "Clang"
+        var app_id = "/sys/apps/clang"
+        var content = "<h1>Clang</h1><p>/sys/apps/clang process ready</p>"
+        var x: i32 = 520
+        var y: i32 = 260
+        var width: i32 = 420
+        var height: i32 = 260
+        if app_kind == 1:
+            title = "Browser Demo"
+            app_id = "/sys/apps/browser_demo"
+            content = "<h1>Simple Web Browser</h1><p>PID rendered in SimpleOS</p><p>about:network</p>"
+            x = 80
+            y = 82
+            width = 460
+            height = 300
+        elif app_kind == 3:
+            title = "Hello World"
+            app_id = "/sys/apps/hello_world"
+            content = "<h1>Hello World</h1><p>Pure Simple GUI/Web/2D rendering</p>"
+            x = 300
+            y = 180
+            width = 400
+            height = 240
+        log_raw_println("[surface-materialize] begin kind={app_kind} pid={pid}")
+        var next_compositor = self.compositor
+        val window_id = next_compositor.compositor_materialize_process_surface_scalar(title, x, y, width, height, pid as i64, app_id, content)
+        if window_id <= 0:
+            log_raw_println("[surface-materialize] failed kind={app_kind} pid={pid} reason=create")
+            return false
+        self.compositor = next_compositor
+        launcher_note_window_opened(pid)
+        log_raw_println("[surface-materialize] committed kind={app_kind} pid={pid} wid={window_id} count={self.compositor.compositor_process_owned_surface_count_scalar()} content_len={content.len()}")
+        true
+
     me handle_shortcut(modifier: text, key: text, baremetal: bool):
         """Match a modifier+key combination against registered shortcuts.
 
@@ -693,45 +743,98 @@ impl DesktopShell:
         else:
             log_info("[desktop] " + "[shell] launcher launch failed for {name}; no window created")
 
-    me run_baremetal(engine: Engine2D):
-        """Baremetal event loop rendering live compositor state through Engine2D."""
-        log_info("[desktop] " + "[shell] entering baremetal event loop...")
-        self.compositor.running = true
+    me render_baremetal_frame_and_blit(pixel_backend: SharedWmPixelBufferBackend, scanout_addr: u64, scanout_stride: i32) -> i64:
+        """Render one full shared-WM frame into the scalar-owned pixel buffer
+        and blit it row-wise to the scanout. Returns the rendered scene
+        revision. The [u32] class-field/array-return boundary is a proven
+        stage3 corruption — see window_scene_draw_ir.spl."""
         val screen_w = self.compositor.screen_width
         val screen_h = self.compositor.screen_height
+        val scene = self.runtime_scene_snapshot()
+        val taskbar = self.runtime_taskbar_model()
+        val scene_revision = self.runtime_scene_revision()
+        val taskbar_revision = self.runtime_taskbar_revision()
+        val content_frames = self.runtime_content_frames(scene_revision)
+        render_baremetal_shared_wm_scene_to_pixel_buffer(pixel_backend, scene, taskbar, content_frames, scene_revision, taskbar_revision, self.clock_text)
+        val frame_buffer_addr = shared_wm_pixel_buffer_addr()
+        val frame_pixel_count = shared_wm_pixel_buffer_count()
+        if frame_buffer_addr != 0 and frame_pixel_count >= screen_w as i64 * screen_h as i64:
+            val row_bytes: i64 = screen_w as i64 * 4
+            var frame_y: i64 = 0
+            while frame_y < screen_h as i64:
+                memcpy(scanout_addr as i64 + frame_y * scanout_stride as i64, frame_buffer_addr + frame_y * row_bytes, row_bytes)
+                frame_y = frame_y + 1
+        self.last_rendered_scene_revision = scene_revision
+        self.last_rendered_taskbar_revision = taskbar_revision
+        scene_revision
+
+    me render_baremetal_first_frame(scanout_addr: u64, scanout_stride: i32):
+        """Render and blit the first desktop frame BEFORE readiness markers
+        are announced, so the evidence baseline capture cannot race an
+        unpainted scanout."""
+        val pixel_backend = SharedWmPixelBufferBackend.new(self.compositor.screen_width, self.compositor.screen_height)
+        val revision = self.render_baremetal_frame_and_blit(pixel_backend, scanout_addr, scanout_stride)
+        serial_println("[desktop-gui] first-frame-blitted scene_revision={revision}")
+
+    me run_baremetal(engine: Engine2D, scanout_addr: u64, scanout_stride: i32):
+        """Baremetal event loop rendering live compositor state through the
+        shared pixel-buffer path. Re-renders only when the scene/taskbar
+        revision changes (or on an explicit fullscreen action) so the input
+        poll cadence stays far inside the evidence wrapper's correlation
+        windows; VRAM retains the last blitted frame between changes."""
+        log_info("[desktop] " + "[shell] entering baremetal event loop...")
+        self.compositor.running = true
+        val _engine = engine
+        val pixel_backend = SharedWmPixelBufferBackend.new(self.compositor.screen_width, self.compositor.screen_height)
 
         while self.compositor.running:
-            self.drain_wm_actions()
-            self.compositor.handle_input()
-            val fullscreen_sequence = self.compositor.pending_fullscreen_sequence
+            # Idle path must stay ALLOCATION-FREE: the baremetal bump
+            # allocator never frees, revision/taskbar recomputation leaks
+            # megabytes per pass, and past the 144MB watermark every alloc
+            # emits heap-debug serial lines that slow the loop below the
+            # evidence wrapper's 10s input-correlation windows (proven live).
+            # Only a PS/2 poll runs when no input is pending.
+            #
+            # Copy-commit idiom (same fix as materialize_process_launch_scalar
+            # / state.md "explicitly committing the nested compositor copy"):
+            # stage3 materializes `self.compositor.method()` receivers as
+            # discardable copies, so the PS/2 poll's pending_fullscreen_
+            # sequence write was lost and F11 never correlated (proven live).
+            # Mutate a local handle and commit it back on any input.
+            var input_compositor = self.compositor
+            input_compositor.handle_input_baremetal_ps2()
+            val fullscreen_sequence = input_compositor.pending_fullscreen_sequence
+            val input_active = (fullscreen_sequence > 0 or input_compositor.pending_meta_key > 0 or input_compositor.pending_shortcut != "" or input_compositor.pending_wm_pointer_valid)
+            if not input_active:
+                continue
             var fullscreen_action = ""
             var fullscreen_window_id: i32 = 0
             if fullscreen_sequence > 0:
-                self.compositor.pending_fullscreen_sequence = 0
-                log_raw_println("[wm-input-irq] input_seq={fullscreen_sequence} scancode=87")
-                if self.compositor.focused_idx >= 0 and self.compositor.focused_idx < self.compositor.surfaces.len():
-                    fullscreen_window_id = self.compositor.surfaces[self.compositor.focused_idx].id
-                    if self.compositor.surfaces[self.compositor.focused_idx].maximized:
-                        self.compositor.restore_window(fullscreen_window_id.to_u64())
+                input_compositor.pending_fullscreen_sequence = 0
+                serial_println("[wm-input-irq] input_seq={fullscreen_sequence} scancode=87")
+                if input_compositor.focused_idx >= 0 and input_compositor.focused_idx < input_compositor.surfaces.len():
+                    fullscreen_window_id = input_compositor.surfaces[input_compositor.focused_idx].id
+                    if input_compositor.surfaces[input_compositor.focused_idx].maximized:
+                        input_compositor.restore_window(fullscreen_window_id.to_u64())
                         fullscreen_action = "restore"
                     else:
-                        self.compositor.maximize_window(fullscreen_window_id.to_u64())
+                        input_compositor.maximize_window(fullscreen_window_id.to_u64())
                         fullscreen_action = "maximize"
+            self.compositor = input_compositor
+            self.drain_wm_actions()
             self.handle_pending_wm_pointer_step()
             self.handle_pending_shell_input(true)
             self.reconcile_dead_process_windows()
-            var overlay_backend = baremetal_engine2d_overlay_backend(engine, screen_w, screen_h)
-            val scene = self.runtime_scene_snapshot()
-            val taskbar = self.runtime_taskbar_model()
             val scene_revision = self.runtime_scene_revision()
             val taskbar_revision = self.runtime_taskbar_revision()
-            val content_frames = self.runtime_content_frames(scene_revision)
-            render_baremetal_shared_wm_scene(overlay_backend, scene, taskbar, content_frames, scene_revision, taskbar_revision, self.clock_text)
-            overlay_backend.present()
+            val need_render = (fullscreen_sequence > 0 and fullscreen_action != "") or scene_revision != self.last_rendered_scene_revision or taskbar_revision != self.last_rendered_taskbar_revision
+            var rendered_revision = scene_revision
+            if need_render:
+                rendered_revision = self.render_baremetal_frame_and_blit(pixel_backend, scanout_addr, scanout_stride)
             if fullscreen_sequence > 0 and fullscreen_action != "":
                 val maximized = fullscreen_action == "maximize"
-                log_raw_println("[wm-state] input_seq={fullscreen_sequence} action={fullscreen_action} window={fullscreen_window_id} maximized={maximized}")
-                log_raw_println("[wm-frame] input_seq={fullscreen_sequence} generation={scene_revision}")
+                serial_println("[wm-state] input_seq={fullscreen_sequence} action={fullscreen_action} window={fullscreen_window_id} maximized={maximized}")
+                serial_println("[wm-frame] input_seq={fullscreen_sequence} generation={rendered_revision}")
 
     fn runtime_scene_revision() -> i64:
         simpleos_runtime_scene_revision(self.compositor.surfaces, self.compositor.focused_idx)
@@ -746,11 +849,23 @@ impl DesktopShell:
                 val content_w = surface.width - 8
                 val content_h = surface.height - 36
                 if content_w > 0 and content_h > 0:
-                    var cache = self.web_content_caches.get(surface.id.to_i64()) ?? WebRenderPixelArtifactCache.create(content_w, content_h, "auto")
+                    var cache = WebRenderPixelArtifactCache.create(content_w, content_h, "software")
+                    var cache_index = -1
+                    var cache_scan = 0
+                    while cache_scan < self.baremetal_web_cache_ids.len():
+                        if self.baremetal_web_cache_ids[cache_scan] == surface.id as i64:
+                            cache_index = cache_scan
+                        cache_scan = cache_scan + 1
+                    if cache_index >= 0:
+                        cache = self.baremetal_web_caches[cache_index]
                     if cache.width != content_w or cache.height != content_h:
-                        cache = WebRenderPixelArtifactCache.create(content_w, content_h, "auto")
+                        cache = WebRenderPixelArtifactCache.create(content_w, content_h, "software")
                     frames = frames.push(simple_web_content_frame_cached(cache, "{surface.id}", scene_revision, surface.content_revision, default_theme_id(), surface.title, surface.content_html, content_w, content_h, 0))
-                    self.web_content_caches.set(surface.id.to_i64(), cache)
+                    if cache_index >= 0:
+                        self.baremetal_web_caches[cache_index] = cache
+                    else:
+                        self.baremetal_web_cache_ids.push(surface.id as i64)
+                        self.baremetal_web_caches.push(cache)
         frames
 
     fn runtime_scene_snapshot() -> SharedWmScene:

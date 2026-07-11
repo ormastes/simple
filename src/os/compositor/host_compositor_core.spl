@@ -13,7 +13,14 @@ use common.ui.window_scene.{
     shared_wm_scene_resolve_background
 }
 use common.ui.window_scene.{WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput}
-use common.ui.window_scene_draw_ir.{shared_wm_scene_render_taskbar_context_to_backend, shared_wm_scene_render_desktop_chrome}
+use common.ui.window_scene_draw_ir.{
+    SharedWmPixelBufferBackend,
+    shared_wm_pixel_buffer_pixels,
+    shared_wm_pixel_buffer_resize,
+    shared_wm_scene_render_taskbar_context_to_backend,
+    shared_wm_scene_render_taskbar_context_to_pixel_buffer,
+    shared_wm_scene_render_desktop_chrome
+}
 use common.ui.taskbar_model.{WindowRef, TrayItem, TaskbarModel}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.simple_web_window_renderer.{render_simple_web_app_content_cached, simple_web_content_frame_cached, simple_web_content_revision, content_paint_full_height}
@@ -237,31 +244,21 @@ fn host_taskbar_clock_label(now_micros: i64) -> text:
     val minute_text = if minute < 10: "0{minute}" else: "{minute}"
     "{hour_text}:{minute_text}"
 
+fn _host_evidence_json_text(value: text) -> text:
+    # Hoisted local is REQUIRED: stage3 native builds emit an interpolation
+    # containing escaped string literals as literal source text (see
+    # hosted_wm_evidence._json_text for the live-proven failure).
+    val escaped = value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+    "\"{escaped}\""
+
 fn host_compositor_taskbar_model(comp: HostCompositor) -> TaskbarModel:
-    """Project authoritative host process and window state into shell objects."""
-    var active_process_count = 0
-    for process in comp.app_processes:
-        if not process.failed:
-            active_process_count = active_process_count + 1
+    """Project authoritative host process and window state into shell objects.
 
-    # Focus is part of the source state even though WindowRef intentionally
-    # has no focus field: place the focused object last, matching host z-order.
-    var running: [WindowRef] = []
-    for window in comp.windows:
-        if not window.focused:
-            running.push(WindowRef(window_id: window.id.to_text(), app_id: window.app_id, title: window.title, minimized: window.minimized))
-    for window in comp.windows:
-        if window.focused:
-            running.push(WindowRef(window_id: window.id.to_text(), app_id: window.app_id, title: window.title, minimized: window.minimized))
-
-    val process_label = "{active_process_count}/{comp.app_processes.len()} active"
-    TaskbarModel(
-        # HostCompositor has no pinned-launcher registry. Processes are not
-        # launchers, so presenting them as pinned would synthesize authority.
-        pinned: [],
-        running: running,
-        tray: [TrayItem(item_id: "host-processes", label: process_label, icon: "process")]
-    )
+    Thin delegating wrapper kept for existing import sites; the body lives in
+    HostCompositor.taskbar_model() because stage3 native codegen corrupts the
+    windows array elements when the full HostCompositor aggregate crosses this
+    free-function boundary by value (nil-receiver trap on window.focused)."""
+    comp.taskbar_model()
 
 fn host_window_to_shared_mdi_render_window(win: HostedWindow, scroll_y: i32) -> SharedMdiRenderWindow:
     shared_mdi_render_window(
@@ -390,7 +387,7 @@ impl CompositorBackend for HeadlessHostCompositorBackend:
     me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         # Inline writes with once-up-front clamping — same me->me put_pixel
         # framebuffer-clone hazard as fill_rect (see comment there).
-        val src_len = pixels.len().to_i32()
+        val src_len = pixels.len() as i32
         var row: i32 = 0
         while row < h:
             val dy = y + row
@@ -421,6 +418,16 @@ impl CompositorBackend for HeadlessHostCompositorBackend:
 
 class HostCompositor:
     backend: CompositorBackend
+    headless_backend: HeadlessHostCompositorBackend?
+    # NON-Optional on purpose: stage3 native codegen returns a NIL payload
+    # from Optional-class-field unwrap (LLDB-proven: self==0 entering
+    # _px_clear via self.pixel_backend.unwrap()), which also fabricated the
+    # null trait vtable seen one slice earlier. The field is always
+    # constructed (0x0 when unused) and gated by native_pixel_lane.
+    pixel_backend: SharedWmPixelBufferBackend
+    native_pixel_lane: bool
+    native_cache_window_ids: [i64]
+    native_content_caches: [WebRenderPixelArtifactCache]
     width: i32
     height: i32
     windows: [HostedWindow]
@@ -485,8 +492,13 @@ class HostCompositor:
     static fn new(backend: CompositorBackend, size: Size) -> HostCompositor:
         HostCompositor(
             backend: backend,
-            width: size.width.to_i32(),
-            height: size.height.to_i32(),
+            headless_backend: nil,
+            pixel_backend: SharedWmPixelBufferBackend.new(0, 0),
+            native_pixel_lane: false,
+            native_cache_window_ids: [],
+            native_content_caches: [],
+            width: size.width as i32,
+            height: size.height as i32,
             windows: [],
             next_window_id: 1,
             app_processes: [],
@@ -514,6 +526,14 @@ class HostCompositor:
             render_revision: 0
         )
 
+    static fn new_headless(size: Size) -> HostCompositor:
+        val concrete = HeadlessHostCompositorBackend.new(size.width as i32, size.height as i32)
+        val compositor = HostCompositor.new(concrete, size)
+        compositor.headless_backend = concrete
+        compositor.pixel_backend = SharedWmPixelBufferBackend.new(size.width as i32, size.height as i32)
+        compositor.native_pixel_lane = true
+        compositor
+
     # Returns the WebRenderPixelArtifactCache for `window_id`, creating (or
     # replacing) it when there is none yet or its (width, height,
     # backend_name) identity no longer matches what this frame needs. A
@@ -521,6 +541,21 @@ class HostCompositor:
     # next content render after a resize/rescroll/backend change is
     # correctly a miss+store, not a stale hit.
     me _content_cache_for(window_id: i64, cw: i32, full_h: i32, backend_name: text) -> WebRenderPixelArtifactCache:
+        if self.native_pixel_lane:
+            var native_idx = 0
+            while native_idx < self.native_cache_window_ids.len():
+                if self.native_cache_window_ids[native_idx] == window_id:
+                    val native_cache = self.native_content_caches[native_idx]
+                    if native_cache.width == cw and native_cache.height == full_h and native_cache.backend_name == backend_name:
+                        return native_cache
+                    val replacement = web_render_pixel_artifact_cache(cw, full_h, backend_name)
+                    self.native_content_caches[native_idx] = replacement
+                    return replacement
+                native_idx = native_idx + 1
+            val native_fresh = web_render_pixel_artifact_cache(cw, full_h, backend_name)
+            self.native_cache_window_ids.push(window_id)
+            self.native_content_caches.push(native_fresh)
+            return native_fresh
         val existing = self.content_caches.get(window_id)
         if existing != nil and existing.width == cw and existing.height == full_h and existing.backend_name == backend_name:
             return existing
@@ -528,9 +563,86 @@ class HostCompositor:
         self.content_caches.set(window_id, fresh)
         fresh
 
+    # Receiver-based taskbar projection. Stage3 native codegen yields nil
+    # window elements when HostCompositor is passed by value into a free
+    # function and its windows are iterated with for-in; indexed access on
+    # the method receiver (the exact pattern render_frame uses) is proven
+    # sound, so the authoritative body lives here.
+    fn taskbar_model() -> TaskbarModel:
+        var active_process_count = 0
+        var pi = 0
+        while pi < self.app_processes.len():
+            if not self.app_processes[pi].failed:
+                active_process_count = active_process_count + 1
+            pi = pi + 1
+
+        # Focus is part of the source state even though WindowRef intentionally
+        # has no focus field: place the focused object last, matching host z-order.
+        var running: [WindowRef] = []
+        var wi = 0
+        while wi < self.windows.len():
+            val window = self.windows[wi]
+            if not window.focused:
+                running.push(WindowRef(window_id: window.id.to_text(), app_id: window.app_id, title: window.title, minimized: window.minimized))
+            wi = wi + 1
+        wi = 0
+        while wi < self.windows.len():
+            val window = self.windows[wi]
+            if window.focused:
+                running.push(WindowRef(window_id: window.id.to_text(), app_id: window.app_id, title: window.title, minimized: window.minimized))
+            wi = wi + 1
+
+        val process_label = "{active_process_count}/{self.app_processes.len()} active"
+        TaskbarModel(
+            # HostCompositor has no pinned-launcher registry. Processes are not
+            # launchers, so presenting them as pinned would synthesize authority.
+            pinned: [],
+            running: running,
+            tray: [TrayItem(item_id: "host-processes", label: process_label, icon: "process")]
+        )
+
+    # Receiver-built production evidence JSON for the compositor sub-object.
+    # The evidence writer previously received the whole HostCompositor by
+    # value; stage3 corrupts window elements at that free-function boundary
+    # (LLDB: nil receiver inside host_wm_evidence_snapshot's element loop),
+    # so the compositor fragment is built here on the receiver and crosses
+    # the evidence boundary as a plain text scalar.
+    fn evidence_compositor_json() -> text:
+        var windows = ""
+        var i = 0
+        while i < self.windows.len():
+            val w = self.windows[i]
+            if i > 0: windows = windows + ","
+            windows = windows + "{\"id\":{w.id},\"owner_port\":{w.owner_port},\"title\":{_host_evidence_json_text(w.title)},\"app_id\":{_host_evidence_json_text(w.app_id)},\"process_id\":{w.process_id},\"x\":{w.x},\"y\":{w.y},\"width\":{w.w},\"height\":{w.h},\"minimized\":{w.minimized},\"focused\":{w.focused},\"maximized\":{w.maximized},\"content\":{_host_evidence_json_text(w.content)}}"
+            i = i + 1
+        val model = self.taskbar_model()
+        var running = ""
+        i = 0
+        while i < model.running.len():
+            val item = model.running[i]
+            if i > 0: running = running + ","
+            running = running + "{\"window_id\":{_host_evidence_json_text(item.window_id)},\"app_id\":{_host_evidence_json_text(item.app_id)},\"title\":{_host_evidence_json_text(item.title)},\"minimized\":{item.minimized}}"
+            i = i + 1
+        "{\"width\":{self.width},\"height\":{self.height},\"render_revision\":{self.render_revision},\"pointer_x\":{self.pointer_x},\"pointer_y\":{self.pointer_y},\"dragging\":{self.dragging},\"resizing\":{self.resizing},\"windows\":[{windows}],\"taskbar\":{\"running\":[{running}],\"tray_count\":{model.tray.len()}}}"
+
     me resize(width: i32, height: i32):
         self.width = width
         self.height = height
+        if self.native_pixel_lane:
+            # Native lane: the pixel mirror is authoritative; the headless
+            # trait mirror is unused and its Optional unwrap is a stage3
+            # nil-payload trap, so it is not touched here.
+            shared_wm_pixel_buffer_resize(self.pixel_backend, width, height)
+            return
+        if self.headless_backend != nil:
+            headless_host_compositor_resize(self.headless_backend.unwrap(), width, height)
+
+    fn pure_simple_pixel_buffer() -> [u32]:
+        if self.native_pixel_lane:
+            return shared_wm_pixel_buffer_pixels(self.pixel_backend)
+        if self.headless_backend == nil:
+            return []
+        headless_host_compositor_pixels(self.headless_backend.unwrap())
 
     me set_background(spec: BackgroundSpec):
         """Configure the scene background (color/image/motion) this
@@ -635,13 +747,14 @@ class HostCompositor:
         # render_shared_mdi_desktop_chrome(self.backend, ..., theme) call this
         # replaces.
         val resolved_bg = self._resolve_background(theme, rt_time_now_unix_micros())
-        shared_wm_scene_render_desktop_chrome(self.backend, self.width, self.height, theme, resolved_bg.color, resolved_bg.surface)
+        if not self.native_pixel_lane:
+            shared_wm_scene_render_desktop_chrome(self.backend, self.width, self.height, theme, resolved_bg.color, resolved_bg.surface)
         var shared_windows: [SharedMdiRenderWindow] = []
         val window_count = self.windows.len()
         var i = 0
         while i < window_count:
             val win = self.windows[i]
-            val scroll = self.scroll_offset_for(win.id).to_i32()
+            val scroll = self.scroll_offset_for(win.id) as i32
             shared_windows.push(host_window_to_shared_mdi_render_window(win, scroll))
             i = i + 1
         # Route host WM chrome/taskbar through the shared Simple GUI internal-
@@ -658,20 +771,28 @@ class HostCompositor:
             if not win.minimized:
                 val cw = win.w - 8
                 val ch = win.h - 36
-                val scroll = self.scroll_offset_for(win.id).to_i32()
+                val scroll = self.scroll_offset_for(win.id) as i32
                 val full_h = content_paint_full_height(ch, scroll)
                 val cache = self._content_cache_for(win.id, cw, full_h, "auto")
                 val content_revision = simple_web_content_revision(win.title, win.content, cw, ch, scroll)
                 content_frames.push(simple_web_content_frame_cached(cache, win.id.to_text(), self.render_revision, content_revision, HOST_WM_CORE_DEFAULT_THEME_ID, win.title, win.content, cw, ch, scroll))
-                self.content_caches.set(win.id, cache)
+                # Native lane keeps caches in the scalar parallel arrays owned
+                # by _content_cache_for; the Dict mirror is only for the
+                # non-native lane (native runtime has no Dict.set owner —
+                # "function not found: set" at runtime).
+                if not self.native_pixel_lane:
+                    self.content_caches.set(win.id, cache)
             i = i + 1
         val revision = WmSceneRevision(scene_revision: self.render_revision, input_revision: self.render_revision, taskbar_revision: self.render_revision)
         val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 44)
         val frame_time = rt_time_now_unix_micros()
         val render_input = SharedWmRenderInput(scene: simple_gui_scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: frame_time)
-        val taskbar_input = SharedWmTaskbarRenderInput(render: render_input, taskbar: host_compositor_taskbar_model(self), clock_label: host_taskbar_clock_label(frame_time))
-        shared_wm_scene_render_taskbar_context_to_backend(self.backend, taskbar_input)
-        self.backend.present()
+        val taskbar_input = SharedWmTaskbarRenderInput(render: render_input, taskbar: self.taskbar_model(), clock_label: host_taskbar_clock_label(frame_time))
+        if self.native_pixel_lane:
+            shared_wm_scene_render_taskbar_context_to_pixel_buffer(self.pixel_backend, taskbar_input)
+        else:
+            shared_wm_scene_render_taskbar_context_to_backend(self.backend, taskbar_input)
+            self.backend.present()
 
     me apply_bridge_request(seq: i64, owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text):
         if method == COMP_MAXIMIZE.to_i64():
@@ -1031,7 +1152,7 @@ fn simpleos_gui_adapter_content_renderer_name(adapter: SimpleOsGuiAdapter) -> te
 fn host_wm_surface_failure_reason(cfg: HostWmConfig, event_loop_id: i64, window_id: i64) -> text?:
     if cfg.backend == HostBackendKind.Tui:
         return "tui host compositor bootstrap is not implemented"
-    if cfg.initial_size.width.to_i32() <= 0 or cfg.initial_size.height.to_i32() <= 0:
+    if (cfg.initial_size.width as i32) <= 0 or (cfg.initial_size.height as i32) <= 0:
         return "host compositor size must be nonzero"
     if event_loop_id == 0 or window_id == 0:
         return "host compositor surface must be nonzero"
@@ -1246,7 +1367,7 @@ fn host_compositor_draw_taskbar(backend: CompositorBackend, windows: [HostedWind
     clicks is what they see. Item colors come from the shared theme:
     focused window -> accent, minimized -> window body, else unfocused
     titlebar color."""
-    val count = windows.len().to_i32()
+    val count = windows.len() as i32
     if count <= 0:
         return
     val dock_w = wm_taskbar_dock_width(width, count)
@@ -1308,7 +1429,7 @@ fn host_chrome_scene_html(windows: [HostedWindow], width: i32, height: i32) -> t
     # through its item). Geometry mirrors wm_lifecycle_hit_taskbar exactly
     # (band at height-62, 44 tall; centered items) so what the user clicks
     # is what they see.
-    val tb_count = windows.len().to_i32()
+    val tb_count = windows.len() as i32
     if tb_count > 0:
         val taskbar_hex = _argb_to_css_hex(theme.taskbar)
         val unfocused_hex = _argb_to_css_hex(theme.title_unfocused)

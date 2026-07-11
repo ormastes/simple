@@ -35,6 +35,7 @@ use os.compositor.engine2d_display.{create_fb_engine_sized}
 use os.desktop.shell.{DesktopShell}
 use os.services.launcher.launcher.{launcher_get_app_count}
 use os.services.vfs.vfs_init.{vfs_boot_init, vfs_mount_removable}
+use os.services.vfs.vfs_write_ops.{g_vfs_file_exists}
 use os.services.pkg.pkg_service.{pkg_service_init}
 use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_direct_boot_init}
@@ -42,6 +43,16 @@ use os.kernel.arch.x86_64.interrupt.{x86_dispatch_installed_syscall_abi}
 use os.kernel.memory.pmm.{pmm_init_identity_range}
 use os.kernel.memory.vmm.{vmm_activate, vmm_bootstrap_pd_entry0, vmm_bootstrap_pdpt_entry0, vmm_bootstrap_pml4_entry0, vmm_init_from_global_pmm, vmm_kernel_pml4_phys}
 use os.kernel.boot.mmio.{mmio_disable_test_mode}
+
+@export("C", name: "rt_file_exists")
+fn rt_file_exists(path: text) -> bool:
+    g_vfs_file_exists(path)
+
+@export("C", name: "ord")
+fn ord(value: text) -> i64:
+    if value.len() == 0:
+        return 0
+    value.char_code_at(0) as i64
 use os.kernel.abi.syscall_shim.{shim_init}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
@@ -49,6 +60,38 @@ use os.kernel.log.klog.{KernelLog}
 
 extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
+
+fn _vram_mapping_probe(fb_addr: i64, pml4_phys: i64):
+    """One-shot scalar diagnostics for the black-capture fault: prove where
+    virt fb_addr maps (page-walk the live tables) and whether a direct
+    write lands (read back). All scalar reads — no aggregates."""
+    # Page walk for fb_addr (identity CR3 root is a physical address that is
+    # itself identity-mapped, so raw reads walk the live tables).
+    val pml4_index = (fb_addr >> 39) & 0x1FF
+    val pdpt_index = (fb_addr >> 30) & 0x1FF
+    val pd_index = (fb_addr >> 21) & 0x1FF
+    val pml4e = rt_ptr_read_i64(pml4_phys, pml4_index * 8)
+    var pdpte: i64 = 0
+    var pde: i64 = 0
+    if (pml4e & 1) != 0:
+        val pdpt_phys = pml4e & 0x000FFFFFFFFFF000
+        pdpte = rt_ptr_read_i64(pdpt_phys, pdpt_index * 8)
+        if (pdpte & 1) != 0 and (pdpte & 0x80) == 0:
+            val pd_phys = pdpte & 0x000FFFFFFFFFF000
+            pde = rt_ptr_read_i64(pd_phys, pd_index * 8)
+    serial_println("[vram-probe] fb={fb_addr} pml4i={pml4_index} pdpti={pdpt_index} pdi={pd_index} pml4e={pml4e} pdpte={pdpte} pde={pde}")
+    # Direct write + readback at fb offset 0 and 64.
+    rt_ptr_write_i32(fb_addr, 0, unsafe_cast_probe_color())
+    rt_ptr_write_i32(fb_addr, 64, unsafe_cast_probe_color())
+    val rb0 = rt_ptr_read_i32(fb_addr, 0)
+    val rb64 = rt_ptr_read_i32(fb_addr, 64)
+    serial_println("[vram-probe] write-readback rb0={rb0} rb64={rb64} expected={unsafe_cast_probe_color()}")
+
+fn unsafe_cast_probe_color() -> i32:
+    2054847231  # 0x7A7B7C7F: distinctive non-black test pattern
 
 var g_vfs_mounted = false
 
@@ -163,6 +206,7 @@ fn spl_start():
         serial_println("[scanout-invalid] unsupported-or-incomplete-metadata")
         return
     rt_gui_set_fb(scanout.address, scanout.width.to_u64())
+    _vram_mapping_probe(scanout.address as i64, vmm_kernel_pml4_phys() as i64)
     var fb = FramebufferDriver.from_scanout_raw(scanout.address, scanout.width, scanout.height, scanout.stride, framebuffer_bpp)
     val screen_width = scanout.width.to_i32()
     val screen_height = scanout.height.to_i32()
@@ -225,23 +269,23 @@ fn spl_start():
     val browser_pid = x86_dispatch_installed_syscall_abi(13u64, 1u64, 0u64, 2u64, 0u64, 0u64, 0u64)
     serial_println("[desktop-gui] spawn return app=Browser Demo pid={browser_pid}")
     if browser_pid > 0:
-        shell.materialize_process_launch("Browser Demo", browser_pid.to_u64())
+        val browser_materialized = shell.materialize_process_launch_scalar(1, browser_pid as u64)
+        serial_println("[desktop-gui] materialize return app=Browser Demo ok={browser_materialized} owned={shell.compositor.compositor_process_owned_surface_count_scalar()}")
 
     serial_println("[desktop-gui] spawn begin app=Hello World app_id=3")
     val hello_pid = x86_dispatch_installed_syscall_abi(13u64, 3u64, 0u64, 2u64, 0u64, 0u64, 0u64)
     serial_println("[desktop-gui] spawn return app=Hello World pid={hello_pid}")
     if hello_pid > 0:
-        shell.materialize_process_launch("Hello World", hello_pid.to_u64())
+        val hello_materialized = shell.materialize_process_launch_scalar(3, hello_pid as u64)
+        serial_println("[desktop-gui] materialize return app=Hello World ok={hello_materialized} owned={shell.compositor.compositor_process_owned_surface_count_scalar()}")
 
     serial_println("[desktop-gui] spawn begin app=Clang app_id=12")
     val clang_pid = x86_dispatch_installed_syscall_abi(13u64, 12u64, 0u64, 2u64, 0u64, 0u64, 0u64)
     serial_println("[desktop-gui] spawn return app=Clang pid={clang_pid}")
     if clang_pid > 0:
-        shell.materialize_process_launch("Clang", clang_pid.to_u64())
-    var owned_surface_count: i64 = 0
-    for surface in shell.compositor.surfaces:
-        if surface.process_id > 0 and surface.app_id != "":
-            owned_surface_count = owned_surface_count + 1
+        val clang_materialized = shell.materialize_process_launch_scalar(12, clang_pid as u64)
+        serial_println("[desktop-gui] materialize return app=Clang ok={clang_materialized} owned={shell.compositor.compositor_process_owned_surface_count_scalar()}")
+    val owned_surface_count = shell.compositor.compositor_process_owned_surface_count_scalar()
     if owned_surface_count < 3:
         serial_println("[production-readiness-failed] reason=process-owned-surfaces expected=3 actual={owned_surface_count}")
         port_outb(0xF4, 1)
@@ -250,8 +294,13 @@ fn spl_start():
 
     val registered = launcher_get_app_count()
     serial_println("[desktop-gui] launcher apps={registered}")
+    # Paint the first desktop frame BEFORE announcing readiness: the evidence
+    # wrapper captures its baseline immediately after the readiness markers,
+    # and an unpainted scanout at that instant is an honest FAIL, not a race
+    # to be excused.
+    shell.render_baremetal_first_frame(scanout.address, scanout.stride as i32)
     serial_println("[desktop-gui] desktop-ready")
     serial_println("[production-readiness] wm=live simple_gui=object-tree simple_web=content-frame renderer=engine2d process_owned_surfaces={owned_surface_count} scanout_generation={scanout.generation}")
 
-    shell.run_baremetal(engine)
+    shell.run_baremetal(engine, scanout.address, scanout.stride as i32)
     serial_println("[desktop-gui] shell exited")

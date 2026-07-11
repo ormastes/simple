@@ -45,9 +45,27 @@ use common.render_scene.scene.{SceneCommand, scene_fill_rect}
 # silently drop over-limit rules/declarations so the first, load-bearing rules
 # still win.
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_env_get(key: text) -> text
 
 # Default wall-clock budget for one software render, in milliseconds.
 val WEB_RENDER_BUDGET_MS: i64 = 10000
+
+# Optional override for WEB_RENDER_BUDGET_MS, read from the environment at the
+# start of every render so long/headless probes can raise the budget without
+# threading an explicit i64 arg through the public entry points (an explicit
+# i64 default-arg on those entry points has a known seed-interpreter bug that
+# whites out painted backgrounds — see
+# doc/08_tracking/bug/seed_interp_explicit_i64_default_arg_poisons_render_backgrounds_2026-07-11.md).
+# Unset or non-numeric -> falls back to WEB_RENDER_BUDGET_MS / the caller's
+# explicit budget_ms as before.
+fn _web_render_budget_ms_env_override() -> i64:
+    val raw = rt_env_get("SIMPLE_WEB_RENDER_BUDGET_MS")
+    if raw == nil or raw == "":
+        return 0
+    val n = raw.trim().to_i64()
+    if n == nil or n <= 0:
+        return 0
+    n
 # Cap on the number of style rules the cascade will apply per node; rules beyond
 # this index (CSS source order) are skipped so the first rules keep their effect.
 val WEB_STYLE_RULE_QUOTA: i32 = 4096
@@ -73,8 +91,16 @@ pub fn simple_web_layout_last_render_degraded() -> bool:
     _web_render_degraded
 
 # Arm the budget for a fresh render: record the deadline and clear the flag.
+# A budget_ms that is <= 0, or that is still the module default (i.e. the
+# caller went through the public entry point's default arg rather than
+# passing an explicit override), is subject to the SIMPLE_WEB_RENDER_BUDGET_MS
+# env override; an explicit non-default budget_ms from the caller always wins.
 fn _web_budget_begin(budget_ms: i64):
-    val ms = if budget_ms <= 0: WEB_RENDER_BUDGET_MS else: budget_ms
+    val env_override = _web_render_budget_ms_env_override()
+    val ms = if budget_ms <= 0 or budget_ms == WEB_RENDER_BUDGET_MS:
+        if env_override > 0: env_override else: WEB_RENDER_BUDGET_MS
+    else:
+        budget_ms
     _web_render_deadline_us = rt_time_now_unix_micros() + ms * 1000
     _web_render_degraded = false
 
@@ -217,16 +243,16 @@ fn find_from(s: text, needle: text, pos: i32) -> i32:
     # bounds), so byte-index native search is semantics-preserving for the ASCII
     # HTML/CSS these paths handle.
     val start = if pos < 0: 0 else: pos
-    val nlen = needle.len().to_i32()
+    val nlen = needle.len() as i32
     if nlen == 0:
         return start
-    val slen = s.len().to_i32()
+    val slen = s.len() as i32
     if start >= slen or slen < nlen:
         return -1
     if start <= 0:
-        return s.index_of(needle).to_i32()
+        return s.index_of(needle) as i32
     val tail = s.substring(start, slen)
-    val idx = tail.index_of(needle).to_i32()
+    val idx = tail.index_of(needle) as i32
     if idx < 0:
         return -1
     start + idx
@@ -481,7 +507,7 @@ fn html_text_range_has_non_ws(html: text, start: i32, end: i32) -> bool:
 
 fn _html_scan_events(html: text) -> [[text]]:
     val parts = html.split("<")
-    val np = parts.len().to_i32()
+    val np = parts.len() as i32
     val cap = np * 2 + 2
     var kinds: [text] = [""; cap]
     var payloads: [text] = [""; cap]
@@ -496,14 +522,14 @@ fn _html_scan_events(html: text) -> [[text]]:
         if seg.starts_with("!--"):
             # Comment: content may contain "<" (spanning later parts), but
             # "-->" contains no "<" so it always lies within a single part.
-            var cidx = seg.index_of("-->").to_i32()
+            var cidx = seg.index_of("-->") as i32
             var terminated = cidx >= 0
             while not terminated:
                 k = k + 1
                 if k >= np:
                     break
                 seg = parts[k]
-                cidx = seg.index_of("-->").to_i32()
+                cidx = seg.index_of("-->") as i32
                 terminated = cidx >= 0
             if not terminated:
                 # Unterminated comment: old scanner broke out, discarding the rest.
@@ -517,14 +543,14 @@ fn _html_scan_events(html: text) -> [[text]]:
             continue
         # Normal tag: the old scanner searched ">" from the "<" across any
         # embedded "<", so accumulate parts until the segment holds a ">".
-        var gt = seg.index_of(">").to_i32()
+        var gt = seg.index_of(">") as i32
         while gt < 0:
             k = k + 1
             if k >= np:
                 # No ">" until EOF: old scanner broke out, discarding the rest.
                 return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
             seg = seg + "<" + parts[k]
-            gt = seg.index_of(">").to_i32()
+            gt = seg.index_of(">") as i32
         val inner = seg.substring(0, gt)
         var rest = seg.substring(gt + 1, seg.len())
         if out < cap:
@@ -548,7 +574,7 @@ fn _html_scan_events(html: text) -> [[text]]:
                     if found >= 0:
                         # First ">" from the closer on (may cross a "<").
                         var seg2 = parts[found]
-                        var gt2 = seg2.index_of(">").to_i32()
+                        var gt2 = seg2.index_of(">") as i32
                         while gt2 < 0:
                             found = found + 1
                             if found >= np:
@@ -556,7 +582,7 @@ fn _html_scan_events(html: text) -> [[text]]:
                                 # "</name", found no ">", and broke out.
                                 return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
                             seg2 = seg2 + "<" + parts[found]
-                            gt2 = seg2.index_of(">").to_i32()
+                            gt2 = seg2.index_of(">") as i32
                         rest = seg2.substring(gt2 + 1, seg2.len())
                         k = found
                     # Closer missing entirely: old scanner left pos after the
@@ -637,11 +663,11 @@ fn _decode_numeric_entities(s: text) -> text:
                 break
             var d = -1
             if c >= "0" and c <= "9":
-                d = c.ord() - 48
+                d = c.char_code_at(0) - 48
             elif is_hex and c >= "a" and c <= "f":
-                d = c.ord() - 87
+                d = c.char_code_at(0) - 87
             elif is_hex and c >= "A" and c <= "F":
-                d = c.ord() - 55
+                d = c.char_code_at(0) - 55
             if d < 0:
                 valid = false
                 break
@@ -699,7 +725,7 @@ fn parse_html(html: text) -> [HNode]:
     val ev = _html_scan_events(html)
     val kinds = ev[0]
     val payloads = ev[1]
-    val ev_count = kinds.len().to_i32()
+    val ev_count = kinds.len() as i32
     # Counting pass: arena size, mirroring the node-creation rules below.
     # (Replaces the old count_html_nodes second full scan of the document.)
     var node_count = 1
@@ -885,7 +911,7 @@ pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32,
     val rules = extract_css_vw(html, width)
     val child_index = build_child_index(nodes)
     val styles = compute_styles(nodes, rules, child_index)
-    val node_count = nodes.len().to_i32()
+    val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
     val boxes = layout(
@@ -4012,7 +4038,7 @@ fn css_bytes_trimmed_eq(cb: [i64], start: i32, end: i32, target: text) -> bool:
     while b > a and (cb[b - 1] == 32 or cb[b - 1] == 9 or cb[b - 1] == 10 or cb[b - 1] == 13):
         b = b - 1
     val tb = target.bytes()
-    val tn = tb.len().to_i32()
+    val tn = tb.len() as i32
     if b - a != tn:
         return false
     var i = 0
@@ -5281,7 +5307,7 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
     RuleBuckets(id_keys: id_keys, id_rules: id_rules, class_keys: class_keys, class_rules: class_rules, tag_keys: tag_keys, tag_rules: tag_rules, fallback_rules: fallback_rules, id_key_dict: id_key_dict, class_key_dict: class_key_dict, tag_key_dict: tag_key_dict)
 
 fn dict_key_index(d: Dict<text, i32>, keys: [text], key: text) -> i32:
-    dict_key_index_count(d, keys, key, keys.len().to_i32())
+    dict_key_index_count(d, keys, key, keys.len() as i32)
 
 fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
     val class_count = node.class_words.len()
@@ -9183,7 +9209,7 @@ fn _web_render_child_pixels(child_html: text, cw: i32, ch: i32, extra_rules: Rul
     val rules = Rules(group_parts: extra_rules.group_parts + own_rules.group_parts, decls: extra_rules.decls + own_rules.decls)
     val child_index = build_child_index(nodes)
     val styles = compute_styles(nodes, rules, child_index)
-    val node_count = nodes.len().to_i32()
+    val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
     val boxes = layout(nodes, styles, child_index, 0, 0, 0, cw, ch, zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), empty_starts, empty_ends, neg_one_i32_list(node_count))
@@ -9201,7 +9227,7 @@ fn _web_render_child_pixels(child_html: text, cw: i32, ch: i32, extra_rules: Rul
 # a flat placeholder and never recursed into.
 fn _web_paint_iframes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], parent_rules: Rules, fb: [u32], fbw: i32, fbh: i32, depth: i32) -> [u32]:
     var out = fb
-    val node_count = nodes.len().to_i32()
+    val node_count = nodes.len() as i32
     var i = 0
     while i < node_count:
         val nd = nodes[i]
@@ -9239,7 +9265,7 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
     val rules = extract_css_vw(html, width)
     val child_index = build_child_index(nodes)
     val styles = compute_styles(nodes, rules, child_index)
-    val node_count = nodes.len().to_i32()
+    val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
     val boxes = layout(
@@ -9279,7 +9305,7 @@ pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i
     val styles = compute_styles(nodes, rules, child_index)
     val t3 = rt_time_now_unix_micros()
     print "[layout-trace] compute_styles_ms={(t3 - t2) / 1000}"
-    val node_count = nodes.len().to_i32()
+    val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
     val boxes = layout(nodes, styles, child_index, 0, 0, 0, width, height, zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), empty_starts, empty_ends, neg_one_i32_list(node_count))
@@ -9323,7 +9349,7 @@ pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, hei
     val styles = compute_styles(nodes, rules, child_index)
     # Layout always gets a slice up to 90%, even if style spent its whole 70%.
     _web_budget_rearm(render_start_us + budget_us * 9 / 10)
-    val node_count = nodes.len().to_i32()
+    val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
     val boxes = layout(
@@ -9380,7 +9406,7 @@ fn _web_gpu_solid_fill_ops(nodes: [HNode], styles: [Style], bx: [i32], by: [i32]
     var ops: [SceneCommand] = []
     if widget_mode:
         return ops
-    val node_count = nodes.len().to_i32()
+    val node_count = nodes.len() as i32
     var i: i32 = 0
     while i < node_count:
         val nd = nodes[i]
@@ -9405,7 +9431,7 @@ fn _web_gpu_solid_fill_ops(nodes: [HNode], styles: [Style], bx: [i32], by: [i32]
 fn _web_gpu_solid_only_frame(nodes: [HNode], styles: [Style], widget_mode: bool) -> bool:
     if widget_mode:
         return false
-    val node_count = nodes.len().to_i32()
+    val node_count = nodes.len() as i32
     var i: i32 = 0
     while i < node_count:
         val nd = nodes[i]
@@ -9464,7 +9490,7 @@ pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i
     val rules = extract_css_vw(html, width)
     val child_index = build_child_index(nodes)
     val styles = compute_styles(nodes, rules, child_index)
-    val node_count = nodes.len().to_i32()
+    val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
     val boxes = layout(
@@ -9510,7 +9536,7 @@ pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width
     val rules = extract_css_vw(html, width)
     val child_index = build_child_index(nodes)
     val styles = compute_styles(nodes, rules, child_index)
-    val node_count = nodes.len().to_i32()
+    val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
     val boxes = layout(

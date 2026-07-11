@@ -1,8 +1,7 @@
 # Pure-Simple production evidence protocol for the hosted WM.
 
-use os.compositor.host_compositor_core.{HostCompositor, HostSurfaceState, host_compositor_taskbar_model}
+use os.compositor.host_compositor_core.{HostCompositor, HostSurfaceState}
 use std.env.variables.{env_get}
-use std.common.base_encoding.utilities.{text_to_bytes}
 
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -58,25 +57,20 @@ fn host_wm_evidence_parse_command(raw: text) -> HostWmEvidenceCommand:
     HostWmEvidenceCommand(valid: false, nonce: nonce, action: action, x: 0, y: 0, down: false)
 
 fn _json_text(value: text) -> text:
-    "\"{value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")}\""
+    # The replace chain MUST be hoisted into a local: stage3 native builds
+    # emit a `{...}` interpolation containing escaped string literals as
+    # LITERAL SOURCE TEXT instead of evaluating it (live-proven: every text
+    # field of the first production snapshot contained this function's body).
+    val escaped = value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+    "\"{escaped}\""
 
-fn host_wm_evidence_snapshot(comp: HostCompositor, surface: HostSurfaceState, backend: text, fallback_used: bool, readback: text, command_nonce: i64, command_phase: text) -> text:
-    var windows = ""
-    var i = 0
-    while i < comp.windows.len():
-        val w = comp.windows[i]
-        if i > 0: windows = windows + ","
-        windows = windows + "{\"id\":{w.id},\"owner_port\":{w.owner_port},\"title\":{_json_text(w.title)},\"app_id\":{_json_text(w.app_id)},\"process_id\":{w.process_id},\"x\":{w.x},\"y\":{w.y},\"width\":{w.w},\"height\":{w.h},\"minimized\":{w.minimized},\"focused\":{w.focused},\"maximized\":{w.maximized},\"content\":{_json_text(w.content)}}"
-        i = i + 1
-    val taskbar = host_compositor_taskbar_model(comp)
-    var running = ""
-    i = 0
-    while i < taskbar.running.len():
-        val item = taskbar.running[i]
-        if i > 0: running = running + ","
-        running = running + "{\"window_id\":{_json_text(item.window_id)},\"app_id\":{_json_text(item.app_id)},\"title\":{_json_text(item.title)},\"minimized\":{item.minimized}}"
-        i = i + 1
-    "{\"schema\":\"simple-wm-production-evidence-v1\",\"surface\":{\"mode\":{_json_text("{surface.mode}")},\"phase\":{_json_text("{surface.phase}")},\"requested_mode\":{_json_text("{surface.requested_mode}")},\"geometry\":{\"x\":{surface.geometry.x},\"y\":{surface.geometry.y},\"width\":{surface.geometry.width},\"height\":{surface.geometry.height},\"scale_milli\":{surface.geometry.scale_milli}},\"saved_windowed_geometry\":{\"x\":{surface.saved_windowed_geometry.x},\"y\":{surface.saved_windowed_geometry.y},\"width\":{surface.saved_windowed_geometry.width},\"height\":{surface.saved_windowed_geometry.height},\"scale_milli\":{surface.saved_windowed_geometry.scale_milli}},\"rollback_geometry\":{\"x\":{surface.rollback_geometry.x},\"y\":{surface.rollback_geometry.y},\"width\":{surface.rollback_geometry.width},\"height\":{surface.rollback_geometry.height},\"scale_milli\":{surface.rollback_geometry.scale_milli}},\"request_nonce\":{surface.request_nonce},\"transition_revision\":{surface.transition_revision},\"deadline_micros\":{surface.deadline_micros},\"resize_acknowledged\":{surface.resize_acknowledged},\"scale_acknowledged\":{surface.scale_acknowledged},\"failure_reason\":{_json_text(surface.failure_reason)}},\"compositor\":{\"width\":{comp.width},\"height\":{comp.height},\"render_revision\":{comp.render_revision},\"pointer_x\":{comp.pointer_x},\"pointer_y\":{comp.pointer_y},\"dragging\":{comp.dragging},\"resizing\":{comp.resizing},\"windows\":[{windows}],\"taskbar\":{\"running\":[{running}],\"tray_count\":{taskbar.tray.len()}}},\"render\":{\"backend\":{_json_text(backend)},\"fallback_used\":{fallback_used},\"readback\":{_json_text(readback)}},\"input\":{\"nonce\":{command_nonce},\"phase\":{_json_text(command_phase)}}}}\n"
+# `compositor_json` is the receiver-built HostCompositor.evidence_compositor_json()
+# fragment. Passing the HostCompositor aggregate by value into this free
+# function corrupts its window elements under stage3 native codegen
+# (LLDB-proven nil receiver in the element loop), so only scalars and the
+# prebuilt text fragment cross this boundary.
+fn host_wm_evidence_snapshot(compositor_json: text, surface: HostSurfaceState, backend: text, fallback_used: bool, readback: text, command_nonce: i64, command_phase: text) -> text:
+    "{\"schema\":\"simple-wm-production-evidence-v1\",\"surface\":{\"mode\":{_json_text("{surface.mode}")},\"phase\":{_json_text("{surface.phase}")},\"requested_mode\":{_json_text("{surface.requested_mode}")},\"geometry\":{\"x\":{surface.geometry.x},\"y\":{surface.geometry.y},\"width\":{surface.geometry.width},\"height\":{surface.geometry.height},\"scale_milli\":{surface.geometry.scale_milli}},\"saved_windowed_geometry\":{\"x\":{surface.saved_windowed_geometry.x},\"y\":{surface.saved_windowed_geometry.y},\"width\":{surface.saved_windowed_geometry.width},\"height\":{surface.saved_windowed_geometry.height},\"scale_milli\":{surface.saved_windowed_geometry.scale_milli}},\"rollback_geometry\":{\"x\":{surface.rollback_geometry.x},\"y\":{surface.rollback_geometry.y},\"width\":{surface.rollback_geometry.width},\"height\":{surface.rollback_geometry.height},\"scale_milli\":{surface.rollback_geometry.scale_milli}},\"request_nonce\":{surface.request_nonce},\"transition_revision\":{surface.transition_revision},\"deadline_micros\":{surface.deadline_micros},\"resize_acknowledged\":{surface.resize_acknowledged},\"scale_acknowledged\":{surface.scale_acknowledged},\"failure_reason\":{_json_text(surface.failure_reason)}},\"compositor\":{compositor_json},\"render\":{\"backend\":{_json_text(backend)},\"fallback_used\":{fallback_used},\"readback\":{_json_text(readback)}},\"input\":{\"nonce\":{command_nonce},\"phase\":{_json_text(command_phase)}}}}\n"
 
 fn host_wm_evidence_write_snapshot(path: text, snapshot: text) -> bool:
     if path == "":
@@ -87,7 +81,15 @@ fn host_wm_evidence_write_snapshot(path: text, snapshot: text) -> bool:
 fn host_wm_evidence_ppm(width: i32, height: i32, pixels: [u32]) -> [u8]:
     if width <= 0 or height <= 0 or pixels.len() != width * height:
         return []
-    var out = text_to_bytes("P6\n{width} {height}\n255\n")
+    # Header bytes are pushed per-character: text_to_bytes returned an EMPTY
+    # array in the stage3 native build (live-proven: the first production
+    # capture was exactly width*height*3 raw bytes with no P6 header).
+    val header = "P6\n{width} {height}\n255\n"
+    var out: [u8] = []
+    var hi = 0
+    while hi < header.len():
+        out.push((header.char_code_at(hi) & 0xFF).to_u8())
+        hi = hi + 1
     for pixel in pixels:
         out.push(((pixel >> 16) & 0xFFu32).to_u8())
         out.push(((pixel >> 8) & 0xFFu32).to_u8())

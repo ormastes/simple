@@ -62,7 +62,7 @@ bootstrap-blocking regressions.
   to a SILENT NULL constant (no runtime call emitted, no error) — CLI print builtin joins its
   args, so all in-process prints die; `rt_print_str` (core_string.spl) silently no-ops on the
   degenerate (0x1,0) pair → exit-0 loss. Literals/concat fine; interpolation `"{n}"` prints
-  literal braces in the same lane (separate open gap). Fix pattern = commit `b48d79b8c6`
+  literal braces in the same lane ([bootstrap_mir_interpolation_literal_braces_2026-07-11.md](../../../../doc/08_tracking/bug/bootstrap_mir_interpolation_literal_braces_2026-07-11.md)). Fix pattern = commit `b48d79b8c6`
   (route method through rt_* runtime call).
 - **self-hosted parser gaps:** dedent-continuation CLOSED (lexer rule G27,
   [self_hosted_parser_dedent_continuation_2026-07-11.md](../../../../doc/08_tracking/bug/self_hosted_parser_dedent_continuation_2026-07-11.md));

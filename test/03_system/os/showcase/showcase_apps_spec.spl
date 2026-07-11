@@ -1,0 +1,128 @@
+# Showcase applications across standalone, hosted WM, and SimpleOS WM.
+# @req REQ-SHOWCASE-001 REQ-SHOWCASE-002 REQ-SHOWCASE-003 REQ-SHOWCASE-004
+# @evidence-display: links
+# @tag: system, gui, web, 2d, wm, simpleos, qemu, showcase
+
+"""
+Launches each canonical showcase through every required surface. Acceptance
+requires the real installed identity, process-owned window, nonblank rendered
+frame, and a state or pixel change caused by production input routing.
+
+The launch/evidence adapter is deliberately fail-fast until the standalone,
+host-WM, and SimpleOS/QEMU wrappers expose correlated evidence. Source scans,
+dummy frames, synthetic handles, and synthetic input cannot satisfy this spec.
+"""
+
+use std.spec.*
+
+val GRAPHICS_2D: text = "graphics_2d_showcase"
+val WEB_STANDARDS: text = "web_standards_showcase"
+val GUI_WIDGETS: text = "gui_widget_showcase"
+
+val STANDALONE: text = "standalone"
+val HOST_WM: text = "host_wm"
+val SIMPLEOS_WM: text = "simpleos_wm"
+
+# These five names are the shared wrapper interface. They fail explicitly until
+# a production evidence adapter supplies same-run launch, ownership, and pixels.
+fn launch_showcase(app_id: text, surface: text):
+    fail("showcase wrapper missing: launch {app_id} on {surface} through the production catalog action")
+
+fn require_installed_identity(app_id: text, surface: text):
+    fail("showcase wrapper missing: prove canonical installed identity for {app_id} on {surface}; SimpleOS requires /sys/apps/{app_id}.smf bytes")
+
+fn require_owned_window(app_id: text, surface: text):
+    fail("showcase wrapper missing: prove positive process PID and matching compositor window owner for {app_id} on {surface}")
+
+fn require_nonblank_frame(app_id: text, surface: text):
+    fail("showcase wrapper missing: prove a nonblank same-run framebuffer/readback with real backend provenance for {app_id} on {surface}")
+
+fn require_post_input_change(app_id: text, surface: text):
+    fail("showcase wrapper missing: route production input and prove later semantic state or framebuffer hash change for {app_id} on {surface}")
+
+# @inline
+fn run_showcase_acceptance(app_id: text, surface: text):
+    step("Launch {app_id} through the {surface} catalog action")
+    expect(app_id.ends_with("showcase")).to_be(true)
+    expect(surface == STANDALONE or surface == HOST_WM or surface == SIMPLEOS_WM).to_be(true)
+    launch_showcase(app_id, surface)
+    step("Verify the canonical installed application identity")
+    require_installed_identity(app_id, surface)
+    step("Verify the guest or host process owns the visible window")
+    require_owned_window(app_id, surface)
+    step("Capture a nonblank frame with real backend provenance")
+    require_nonblank_frame(app_id, surface)
+    step("Send production input and capture the resulting change")
+    require_post_input_change(app_id, surface)
+
+fn rejected_evidence_reason(
+    source_only: bool,
+    blank_frame: bool,
+    dummy_renderer: bool,
+    synthetic_handle: bool,
+    synthetic_input: bool,
+    frame_changed: bool
+) -> text:
+    if source_only:
+        return "source-only"
+    if blank_frame:
+        return "blank-frame"
+    if dummy_renderer:
+        return "dummy-renderer"
+    if synthetic_handle:
+        return "synthetic-handle"
+    if synthetic_input:
+        return "synthetic-input"
+    if not frame_changed:
+        return "unchanged-frame"
+    ""
+
+describe "Showcase applications on every launch surface":
+    # codex-system-test
+    it "should run the 2D rendering showcase as a standalone app":
+        run_showcase_acceptance(GRAPHICS_2D, STANDALONE)
+
+    it "should run the 2D rendering showcase inside the host WM":
+        run_showcase_acceptance(GRAPHICS_2D, HOST_WM)
+
+    it "should run the installed 2D rendering showcase inside SimpleOS WM":
+        run_showcase_acceptance(GRAPHICS_2D, SIMPLEOS_WM)
+
+    it "should run the web standards showcase as a standalone app":
+        run_showcase_acceptance(WEB_STANDARDS, STANDALONE)
+
+    it "should run the web standards showcase inside the host WM":
+        run_showcase_acceptance(WEB_STANDARDS, HOST_WM)
+
+    it "should run the installed web standards showcase inside SimpleOS WM":
+        run_showcase_acceptance(WEB_STANDARDS, SIMPLEOS_WM)
+
+    it "should run the GUI widget showcase as a standalone app":
+        run_showcase_acceptance(GUI_WIDGETS, STANDALONE)
+
+    it "should run the GUI widget showcase inside the host WM":
+        run_showcase_acceptance(GUI_WIDGETS, HOST_WM)
+
+    it "should run the installed GUI widget showcase inside SimpleOS WM":
+        run_showcase_acceptance(GUI_WIDGETS, SIMPLEOS_WM)
+
+describe "Showcase evidence rejects non-production substitutes":
+    it "should reject source inspection without a launched surface":
+        step("Submit source-only evidence without a live application")
+        expect(rejected_evidence_reason(true, false, false, false, false, true)).to_equal("source-only")
+
+    it "should reject blank and unchanged framebuffer captures":
+        step("Submit a blank framebuffer capture")
+        expect(rejected_evidence_reason(false, true, false, false, false, true)).to_equal("blank-frame")
+        step("Submit equal before and after framebuffer hashes")
+        expect(rejected_evidence_reason(false, false, false, false, false, false)).to_equal("unchanged-frame")
+
+    it "should reject dummy renderers and synthetic backend handles":
+        step("Substitute a dummy renderer")
+        expect(rejected_evidence_reason(false, false, true, false, false, true)).to_equal("dummy-renderer")
+        step("Substitute a synthetic backend handle")
+        expect(rejected_evidence_reason(false, false, false, true, false, true)).to_equal("synthetic-handle")
+
+    it "should reject synthetic input even when pixels differ":
+        step("Mutate pixels through a synthetic event rather than the production input route")
+        expect(rejected_evidence_reason(false, false, false, false, true, true)).to_equal("synthetic-input")

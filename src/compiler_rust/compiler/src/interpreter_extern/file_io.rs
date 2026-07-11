@@ -987,11 +987,8 @@ mod tests {
         std::fs::write(&path, b"abc").expect("seed write");
         let path = path.to_string_lossy().to_string();
 
-        let ok = rt_file_truncate(&[
-            Value::Str(path.clone()),
-            Value::UInt { value: 4096, width: 64 },
-        ])
-        .expect("truncate with boxed u64 size");
+        let ok = rt_file_truncate(&[Value::Str(path.clone()), Value::UInt { value: 4096, width: 64 }])
+            .expect("truncate with boxed u64 size");
         assert_eq!(ok, Value::Bool(true));
         assert_eq!(std::fs::metadata(&path).expect("metadata").len(), 4096);
     }

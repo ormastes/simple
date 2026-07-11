@@ -51,7 +51,6 @@ struct X86Interrupt:
 # ============================================================================
 
 var g_trap_runtime_installed: bool = false
-var g_trap_runtime: X86TrapRuntime? = nil
 var g_trap_scheduler: Scheduler = Scheduler.new_bootstrap()
 var g_trap_ipc: IpcManager = IpcManager.new()
 var g_trap_klog: KernelLog = KernelLog.new(256)
@@ -196,24 +195,11 @@ fn _log_bridge_failure(message: text):
     if g_trap_runtime_installed:
         g_trap_klog.write(3, 0, 0, message)
 
-fn _sync_trap_runtime_state():
-    """Mirror the live bridge globals back into the installed runtime bundle."""
-    if not g_trap_runtime_installed:
-        return
-    if g_trap_runtime == nil:
-        return
-    var runtime = g_trap_runtime.unwrap()
-    runtime.scheduler = g_trap_scheduler
-    runtime.ipc = g_trap_ipc
-    runtime.klog = g_trap_klog
-    g_trap_runtime = Some(runtime)
-
 fn x86_install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
     """Install the kernel runtime objects used by the x86_64 trap bridge."""
     g_trap_scheduler = scheduler
     g_trap_ipc = ipc
     g_trap_klog = klog
-    g_trap_runtime = Some(X86TrapRuntime.new(scheduler, ipc, klog))
     g_trap_runtime_installed = true
 
 fn x86_install_runtime_bundle(runtime: X86TrapRuntime):
@@ -221,7 +207,6 @@ fn x86_install_runtime_bundle(runtime: X86TrapRuntime):
     g_trap_scheduler = runtime.scheduler
     g_trap_ipc = runtime.ipc
     g_trap_klog = runtime.klog
-    g_trap_runtime = Some(runtime)
     g_trap_runtime_installed = true
 
 fn x86_install_bootstrap_runtime(log_capacity: u64):
@@ -232,7 +217,6 @@ fn x86_install_bootstrap_runtime(log_capacity: u64):
     g_trap_scheduler = scheduler
     g_trap_ipc = ipc
     g_trap_klog = klog
-    g_trap_runtime = Some(X86TrapRuntime.new(scheduler, ipc, klog))
     g_trap_runtime_installed = true
 
 fn x86_runtime_installed() -> bool:
@@ -260,11 +244,9 @@ fn x86_dispatch_installed_syscall(args: SyscallArgs) -> Result<SyscallResult, te
         val ipc_state = syscall_handler_ipc_state(args, g_trap_scheduler, g_trap_ipc, g_trap_klog)
         g_trap_scheduler = ipc_state.scheduler
         g_trap_ipc = ipc_state.ipc
-        _sync_trap_runtime_state()
         return Ok(ipc_state.result)
 
     val result = syscall_handler(args, g_trap_scheduler, g_trap_ipc, g_trap_klog)
-    _sync_trap_runtime_state()
     Ok(result)
 
 fn x86_dispatch_installed_syscall_abi(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64:
@@ -274,7 +256,6 @@ fn x86_dispatch_installed_syscall_abi(id: u64, arg0: u64, arg1: u64, arg2: u64, 
         # returned scheduler so the spawned task survives in the trap globals.
         val spawn_state = dispatch_spawn_binary_direct_state(arg0, arg1, arg2, g_trap_scheduler, g_trap_klog)
         g_trap_scheduler = spawn_state.scheduler
-        _sync_trap_runtime_state()
         return spawn_state.pid
 
     if id == 14:
@@ -294,7 +275,6 @@ fn x86_dispatch_installed_syscall_abi(id: u64, arg0: u64, arg1: u64, arg2: u64, 
     if result.is_err():
         return -38
     val value = result.unwrap().value
-    _sync_trap_runtime_state()
     value
 
 @export("C", name: "spl_x86_dispatch_installed_syscall_abi")

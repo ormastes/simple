@@ -13458,7 +13458,6 @@ RuntimeValue rt_map_for_each(RuntimeValue map, RuntimeValue callback)
 
 TRAP_STUB_RET(rt_file_read, 1)
 TRAP_STUB_RET(rt_file_write, 2)
-TRAP_STUB_RET(rt_file_exists, 1)
 TRAP_STUB_RET(rt_file_delete, 1)
 TRAP_STUB_RET(rt_file_append, 2)
 TRAP_STUB_RET(rt_file_size, 1)

@@ -143,6 +143,13 @@ trait MotionBackgroundSource:
     me next_frame_due_micros() -> i64
 
 var _wm_motion_background_source: MotionBackgroundSource? = nil
+# Scalar mirror of "a source is registered". Stage3 native builds corrupt
+# the module-global Optional trait read above: with nothing registered the
+# `if val` arm still entered and hit the duck-typed no-vtable trap
+# (LLDB-proven in shared_wm_motion_background_next_due_micros from the
+# hosted production loop). The scalar bool is checked FIRST so the
+# unregistered path never touches the Optional or trait dispatch.
+var _wm_motion_background_source_registered: bool = false
 
 # Registers (or clears, with nil) the single process-wide motion-background
 # source. Same lifecycle contract as
@@ -153,6 +160,7 @@ var _wm_motion_background_source: MotionBackgroundSource? = nil
 # fake and must unregister (nil) when done.
 fn shared_wm_scene_register_motion_background_source(source: MotionBackgroundSource?):
     _wm_motion_background_source = source
+    _wm_motion_background_source_registered = source != nil
 
 # Present-loop seam: returns the absolute wall-clock micros at which the next
 # motion-background frame becomes due, or -1 if no motion source is
@@ -162,6 +170,8 @@ fn shared_wm_scene_register_motion_background_source(source: MotionBackgroundSou
 # any new polling/sleeping, it only adds a condition to a loop that already
 # runs on a fixed cadence.
 fn shared_wm_motion_background_next_due_micros() -> i64:
+    if not _wm_motion_background_source_registered:
+        return -1
     if val source = _wm_motion_background_source:
         return source.next_frame_due_micros()
     -1
@@ -195,6 +205,8 @@ fn shared_wm_motion_dirty_due(now_micros: i64, due_micros: i64, last_fired_due_m
 # the motion source, so the seam re-arms itself instead of firing once and
 # then going permanently stale.
 fn shared_wm_motion_background_consume_due(t_micros: i64):
+    if not _wm_motion_background_source_registered:
+        return
     if val source = _wm_motion_background_source:
         source.frame_for_time(t_micros)
 

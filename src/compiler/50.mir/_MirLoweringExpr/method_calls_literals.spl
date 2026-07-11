@@ -205,6 +205,67 @@ impl MirLowering:
                 return ts_cstr_local
             return ts_tagged
 
+        # Task #145 (join-family silent-null): `[...].join(sep)` on the
+        # bootstrap flat-HIR path resolves to MethodResolution.Unresolved (no
+        # method-resolution info at this stage), so it fell through to
+        # `case Unresolved:` below, which emits an error and returns a
+        # placeholder const-0 i64 WITHOUT lowering the receiver, the array
+        # elements, or the call. `print([...].join(sep))` then received a raw
+        # 0 in place of a string pointer -> rt_print silently printed nothing
+        # (see scratchpad/dynamic_text_probe_result.md probes p4/p5/p6).
+        #
+        # Handle the case where the receiver is a literal array `[...]`
+        # (HIR ArrayLit) directly -- the elements are statically known here,
+        # before any runtime array boxing. Lower each element and the
+        # separator, coerce every operand to a raw char* via
+        # bootstrap_coerce_to_raw_str (Bug #136's string-interpolation
+        # coercion scheme: Opaque("str") passes through, anything else is
+        # rendered via rt_raw_i64_to_string then unwrapped by rt_interp_cstr),
+        # then splice with rt_strcat (emit_raw_strcat) -- exactly how `+`
+        # concatenation already lowers correctly (p2/p7 PASS in the probe
+        # matrix).
+        #
+        # `[...].map(...).join(...)` (receiver NOT a literal ArrayLit) is NOT
+        # handled here: the runtime array built by rt_array_new/rt_array_push
+        # stores each pushed element as a RAW i64 word with no tag applied
+        # (see aggregate_intrinsics.spl translate_aggregate `case Array`), so
+        # routing through rt_array_join/rt_string_join (which expect TAGGED
+        # RuntimeValue elements) would misinterpret raw string-literal words
+        # as corrupt tagged handles. Fixing that generically requires tagging
+        # every array element at construction time -- broader change, out of
+        # scope here (documented in join_lowering_fix_report.md).
+        if method == "join" and args.len() == 1 and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            match receiver.kind:
+                case ArrayLit(jn_elements, _):
+                    if jn_elements.len() == 0:
+                        return self.emit_bootstrap_str_const("")
+                    # Every self-call below is un-nested through an
+                    # intermediate val on purpose: the seed interpreter
+                    # drops/misevaluates a self-method call nested as an
+                    # argument to another self-method call (same quirk the
+                    # Bug #136 interpolation code documents as "Intermediate
+                    # var for the index access"). The nested form
+                    # `self.coerce(self.lower_expr(x))` emitted
+                    # self-referential IR (`%l0 = call ...(i64 %l0)`) with
+                    # the element lowering silently skipped.
+                    val jn_sep_arg = args[0]
+                    val jn_sep_expr = jn_sep_arg.value
+                    val jn_sep_raw = self.lower_expr(jn_sep_expr)
+                    val jn_sep_local = self.bootstrap_coerce_to_raw_str(jn_sep_raw)
+                    val jn_first_expr = jn_elements[0]
+                    val jn_first_raw = self.lower_expr(jn_first_expr)
+                    var jn_result = self.bootstrap_coerce_to_raw_str(jn_first_raw)
+                    var jn_i = 1
+                    while jn_i < jn_elements.len():
+                        jn_result = self.emit_raw_strcat(jn_result, jn_sep_local)
+                        val jn_elem_expr = jn_elements[jn_i]
+                        val jn_elem_raw = self.lower_expr(jn_elem_expr)
+                        val jn_elem_local = self.bootstrap_coerce_to_raw_str(jn_elem_raw)
+                        jn_result = self.emit_raw_strcat(jn_result, jn_elem_local)
+                        jn_i = jn_i + 1
+                    return jn_result
+                case _: ()
+
         # Bug #137 (follow-up): `x.starts_with(literal)` on the bootstrap
         # argv-element path resolves to MethodResolution.Unresolved (the flat
         # bootstrap HIR has no method resolution), so it fell through to the
@@ -502,6 +563,15 @@ impl MirLowering:
 
             case Unresolved:
                 self.error("unresolved method call: {method}", nil)
+                # Task #145: self.error only COLLECTS -- both the bootstrap
+                # lane (driver_bootstrap.spl reads ctx.errors, never
+                # MirLowering.errors) and the native-build worker drop the
+                # list (see mir_lowering_stmts.spl lower_for_iterator's
+                # belt-and-braces note). The const-0 placeholder below then
+                # ships as SILENT data loss (exit 0, no stderr) -- exactly
+                # how the `.join()` no-op survived undetected. Surface it
+                # loudly at lowering time, naming the method.
+                print "[mir-lower] WARNING: unresolved method call '{method}' lowered to const-0 placeholder (silent-null risk, Task #145)"
                 var b = self.builder
                 val temp = b.new_temp(MirType.i64())
                 # self.error only collects; returning an undefined temp here
@@ -510,6 +580,48 @@ impl MirLowering:
                 b.emit_const(temp, MirConstValue.Int(0), MirType.i64())
                 self.builder = b
                 temp
+
+    me bootstrap_coerce_to_raw_str(local: LocalId) -> LocalId:
+        """Bootstrap-only: coerce a lowered value to a raw char* (Opaque
+        "str"), reusing Bug #136's string-interpolation coercion scheme (see
+        `lower_string_interpolation` in expr_dispatch.spl). A string operand
+        (Opaque "str") passes straight through rt_interp_cstr unchanged. A
+        non-string operand (e.g. an i64) is first rendered to a decimal
+        string via rt_raw_i64_to_string (a tagged heap string), which
+        rt_interp_cstr then unwraps to its char* buffer. Used by the
+        bootstrap `.join()` fix (Task #145) to normalize array-literal
+        elements and the separator to the raw char* representation
+        `emit_raw_strcat`/rt_strcat expects.
+        """
+        var is_str = false
+        if val ty = self.local_mir_type_of(local):
+            match ty.kind:
+                case MirTypeKind.Opaque(ty_name):
+                    if ty_name == "str":
+                        is_str = true
+                case _: ()
+        var cstr_src = mir_operand_copy(local)
+        if not is_str:
+            val num_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_raw_i64_to_string"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_num = self.builder
+            val num_res = b_num.emit_call(num_op, [mir_operand_copy(local)], MirType.i64())
+            self.builder = b_num
+            if val num_local = num_res:
+                cstr_src = mir_operand_copy(num_local)
+        val cstr_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_interp_cstr"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+        ))
+        var b_cstr = self.builder
+        val cstr_res = b_cstr.emit_call(cstr_op, [cstr_src], MirType(kind: MirTypeKind.Opaque("str")))
+        self.builder = b_cstr
+        if val cstr_local = cstr_res:
+            cstr_local
+        else:
+            local
 
     me len_runtime_symbol_for_hir_type(type_: HirType?) -> text:
         """Return a concrete len helper for built-in collection types.

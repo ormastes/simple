@@ -13,32 +13,15 @@
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_engine2d_backend,
     simple_web_resolved_engine2d_backend_name}
-use common.ui.builder.{button, column, build_tree_with_title, with_icon}
-use common.ui.state.{init_state}
-use app.ui.render.html_widgets.{render_html_tree}
 use std.io.window_winit.{WinitLoop, WinitWindow, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_close_requested}
-use std.sffi.cli.{cli_get_args}
-use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
-use std.io_runtime.{env_get, read_file, file_exists}
-
-# First argv entry that ends in .html, else the bundled sample page. Pass an
-# absolute path when launching via a .app bundle (its cwd is a temp directory).
-fn html_path() -> text:
-    val args = cli_get_args()
-    var i = 0
-    while i < args.len():
-        if args[i].ends_with(".html"):
-            return args[i]
-        i = i + 1
-    "examples/06_io/ui/browser_common_elements_showcase.html"
+use std.io_runtime.{read_file, file_exists}
 
 val RW: i32 = 80
 val RH: i32 = 60
 val W: i32 = 80
 val H: i32 = 60
-val SAMPLE_MARKER: text = "data-simple-actual-gui-button"
 
 fn pack_pixels(src: [u32]) -> [i64]:
     var out: [i64] = [0; src.len()]
@@ -48,53 +31,57 @@ fn pack_pixels(src: [u32]) -> [i64]:
         i = i + 1
     out
 
-fn actual_gui_button_html() -> text:
-    val btn = with_icon(button("actual_gui_button", "RUN", "run_actual_gui_button"), "image")
-    val root = column("actual_gui_root", [btn])
-    val tree = build_tree_with_title(root, "Actual GUI Button", "light")
-    val state = init_state(tree)
-    render_html_tree(state.tree.root_node(), state)
+fn showcase_checksum(pixels: [u32]) -> i64:
+    var checksum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        checksum = (checksum + (pixels[i].to_i64() & 0xFFFFFFFF) * ((i % 251) + 1)) % 2147483647
+        i = i + 1
+    checksum
 
-fn html_for_render(html: text) -> text:
-    if html.contains(SAMPLE_MARKER):
-        return actual_gui_button_html()
-    html
-
-fn main() -> i64:
-    val path = html_path()
+pub fn run_web_standards_showcase(gui: bool, path: text) -> i64:
     if not file_exists(path):
         print "HTML file not found: {path}"
         return 1
     val raw_html = read_file(path)
-    val html = html_for_render(raw_html)
     val resolved = simple_web_resolved_engine2d_backend_name(RW, RH, "cpu_simd")
-    print "Pure-Simple web render of {path} ({raw_html.len()} bytes html, {html.len()} bytes render html) at {W}x{H}"
-    if raw_html.contains(SAMPLE_MARKER):
-        print "Rendered actual common.ui button widget HTML through Simple Web Renderer"
-    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, RW, RH, "cpu_simd")
-    print "Rendered {pixels.len()} px via requested backend 'cpu_simd' resolved='{resolved}'"
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(raw_html, RW, RH, "cpu_simd")
+    if pixels.len() != RW * RH:
+        print "web_standards_showcase status=fail reason=wrong-pixel-count expected={RW * RH} actual={pixels.len()}"
+        return 2
+    val checksum = showcase_checksum(pixels)
+    var first = pixels[0]
+    var varied = false
+    var nonzero = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] != first:
+            varied = true
+        if (pixels[i] & 0x00FFFFFFu32) != 0u32:
+            nonzero = nonzero + 1
+        i = i + 1
+    if not varied or nonzero == 0 or checksum == 0:
+        print "web_standards_showcase status=fail reason=blank-or-uniform pixels={pixels.len()} nonzero={nonzero} checksum={checksum}"
+        return 3
+    print "web_standards_showcase status=pass path={path} html_bytes={raw_html.len()} width={RW} height={RH} pixels={pixels.len()} nonzero={nonzero} checksum={checksum} requested=cpu_simd resolved={resolved}"
 
-    if env_get("SIMPLE_GUI") != "1":
-        print "No GUI requested; headless render only."
+    if not gui:
         return 0
 
     val lp = winit_loop_new()
     if not lp.is_valid:
         print "No GUI runtime available."
-        return 2
+        return 4
     val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "Pure-Simple web renderer CPU SIMD — {path}")
     if not win.is_valid:
         print "Window creation failed."
         winit_loop_free(lp)
-        return 3
+        return 5
     val packed = pack_pixels(pixels)
     winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
     # The rendered buffer is static, so present it once and then idle. Each
-    # iteration sleeps ~16ms (≈60Hz) and only re-presents the CACHED buffer every
-    # ~15 frames to keep the macOS surface composited — this keeps the process
-    # near-idle (~15% CPU) instead of the old busy-spin that pegged one core for
-    # hours. Polling still happens every frame so close events are handled
-    # promptly. Bounded to 60s wall-clock like examples/06_io/ui/web_engine2d_gui.
+    # Poll continuously so AppKit retains its event handler between frames; the
+    # reusable headless path never enters this loop. Re-present only periodically.
     var running = true
     var frames = 0
     val end_at = time_now_unix_micros() + 60000000
@@ -103,8 +90,10 @@ fn main() -> i64:
             running = false
         if frames % 15 == 0:
             winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
-        thread_sleep(16)
         frames = frames + 1
     winit_window_free(win)
     winit_loop_free(lp)
     return 0
+
+fn main() -> i64:
+    run_web_standards_showcase(false, "examples/06_io/ui/browser_common_elements_showcase.html")

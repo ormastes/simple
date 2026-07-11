@@ -7,7 +7,6 @@
 use common.window_protocol.geometry.{Size}
 use os.compositor.host_compositor_core.{
     HostCompositor,
-    HeadlessHostCompositorBackend,
     HostDisplayMode,
     HostDisplayTransitionPhase,
     HostSurfaceGeometry,
@@ -21,9 +20,7 @@ use os.compositor.host_compositor_core.{
     host_compositor_focused_window_id,
     host_compositor_minimize_focused,
     host_compositor_maximize_focused,
-    host_compositor_restore_all,
-    headless_host_compositor_pixels,
-    headless_host_compositor_resize
+    host_compositor_restore_all
 }
 use os.compositor.hosted_backend_winit.{HostedWinitBufferBackend, hosted_winit_present_pure_simple_pixels}
 use os.compositor.shared_mdi_setup.{
@@ -184,13 +181,12 @@ fn main() -> i64:
         rt_winit_event_loop_free(el)
         return 1
     print "[hosted-wm] raster-backend=simple-2d-winit-buffer source=pure-simple-pixel-mirror"
-    val raster = HeadlessHostCompositorBackend.new(WINDOW_WIDTH, WINDOW_HEIGHT)
-    val comp = HostCompositor.new(raster, Size(width: WINDOW_WIDTH as u64, height: WINDOW_HEIGHT as u64))
-    _run_hosted_wm(comp, raster, backend, el, win)
+    val comp = HostCompositor.new_headless(Size(width: WINDOW_WIDTH as u64, height: WINDOW_HEIGHT as u64))
+    _run_hosted_wm(comp, backend, el, win)
 
 # Dependency-light production event loop. Pure Simple owns scene, Web/GUI/2D
 # raster, and the pixel mirror; winit only presents that final buffer.
-fn _run_hosted_wm(comp_in: HostCompositor, raster: HeadlessHostCompositorBackend, presenter: HostedWinitBufferBackend, el: i64, win: i64) -> i64:
+fn _run_hosted_wm(comp_in: HostCompositor, presenter: HostedWinitBufferBackend, el: i64, win: i64) -> i64:
     var comp = comp_in
     var surface = host_surface_state(_physical_surface_geometry(win))
     var display_nonce: i64 = 0
@@ -206,7 +202,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster: HeadlessHostCompositorBackend
         comp = _seed_host_compositor_shared_mdi(comp)
     print "[hosted-wm] windows-ready count={comp.windows.len()}"
     comp.render_frame()
-    if not hosted_winit_present_pure_simple_pixels(presenter, headless_host_compositor_pixels(raster), comp.width, comp.height):
+    if not hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height):
         print "ERROR: hosted WM initial pure-Simple frame presentation failed"
         return 3
     print "[hosted-wm] frame-presented renderer=simple-web host=windowed width={WINDOW_WIDTH} height={WINDOW_HEIGHT} raster=simple-2d-winit-buffer"
@@ -215,10 +211,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster: HeadlessHostCompositorBackend
     var evidence_nonce: i64 = 0
     var evidence_phase = "presented"
     if evidence.enabled:
-        val initial_pixels = headless_host_compositor_pixels(raster)
+        val initial_pixels = comp.pure_simple_pixel_buffer()
         val backend_name = HostedWinitBufferBackend.implementation_name()
         val readback = if initial_pixels.len() == comp.width * comp.height: "presented-pixel-buffer" else: "unavailable"
-        val initial_snapshot = host_wm_evidence_snapshot(comp, surface, backend_name, false, readback, evidence_nonce, evidence_phase)
+        val initial_snapshot = host_wm_evidence_snapshot(comp.evidence_compositor_json(), surface, backend_name, false, readback, evidence_nonce, evidence_phase)
         if not host_wm_evidence_write_snapshot(evidence.snapshot_path, initial_snapshot) or not host_wm_evidence_write_capture(evidence.capture_path, comp.width, comp.height, initial_pixels):
             print "ERROR: hosted WM initial evidence write failed"
             return 2
@@ -295,7 +291,6 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster: HeadlessHostCompositorBackend
                     surface.geometry = physical
                 if physical.width > 0 and physical.height > 0:
                     comp.resize(physical.width, physical.height)
-                    headless_host_compositor_resize(raster, physical.width, physical.height)
                     other_dirty = true
                 print "[hosted-wm] event surface kind={kind} mode={surface.mode} phase={surface.phase} nonce={surface.request_nonce} width={physical.width} height={physical.height} scale_milli={physical.scale_milli}"
             elif kind == EVT_MOVE:
@@ -397,7 +392,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster: HeadlessHostCompositorBackend
                 other_dirty = true
         if other_dirty or warmup_frames < 12:
             comp.render_frame()
-            hosted_winit_present_pure_simple_pixels(presenter, headless_host_compositor_pixels(raster), comp.width, comp.height)
+            hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height)
             if warmup_frames < 12:
                 warmup_frames = warmup_frames + 1
                 if warmup_frames == 12:
@@ -405,13 +400,13 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster: HeadlessHostCompositorBackend
         elif motion_dirty:
             if not comp.render_background_only(motion_due):
                 comp.render_frame()
-            hosted_winit_present_pure_simple_pixels(presenter, headless_host_compositor_pixels(raster), comp.width, comp.height)
+            hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height)
 
         if evidence.enabled and evidence_nonce > 0 and other_dirty:
-            val evidence_pixels = headless_host_compositor_pixels(raster)
+            val evidence_pixels = comp.pure_simple_pixel_buffer()
             val evidence_backend = HostedWinitBufferBackend.implementation_name()
             val evidence_readback = if evidence_pixels.len() == comp.width * comp.height: "presented-pixel-buffer" else: "unavailable"
-            val snapshot = host_wm_evidence_snapshot(comp, surface, evidence_backend, false, evidence_readback, evidence_nonce, evidence_phase)
+            val snapshot = host_wm_evidence_snapshot(comp.evidence_compositor_json(), surface, evidence_backend, false, evidence_readback, evidence_nonce, evidence_phase)
             if not host_wm_evidence_write_snapshot(evidence.snapshot_path, snapshot) or not host_wm_evidence_write_capture(evidence.capture_path, comp.width, comp.height, evidence_pixels):
                 print "ERROR: hosted WM evidence write failed nonce={evidence_nonce}"
                 running = false

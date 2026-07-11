@@ -5,8 +5,8 @@ The canonical app IDs are `graphics_2d_showcase`, `web_standards_showcase`, and 
 ## Standalone
 
 ```text
-SIMPLE_GUI=1 scripts/gui/macos-gui-run.shs examples/06_io/ui/graphics_2d_showcase.spl
-SIMPLE_GUI=1 scripts/gui/macos-gui-run.shs examples/06_io/ui/web_render_file_gui.spl examples/06_io/ui/browser_common_elements_showcase.html
+scripts/gui/macos-gui-run.shs examples/06_io/ui/graphics_2d_showcase_gui.spl
+scripts/gui/macos-gui-run.shs examples/06_io/ui/web_standards_showcase_gui.spl
 SIMPLE_GUI=1 scripts/gui/macos-gui-run.shs examples/06_io/ui/widget_showcase_gui.spl
 ```
 
