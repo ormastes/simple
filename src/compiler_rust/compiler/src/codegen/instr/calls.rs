@@ -2372,7 +2372,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
         // Directory operations
         "rt_dir_list" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk"
-        | "rt_set_current_dir" => Some(&[0]),
+        | "rt_set_current_dir" | "rt_dir_exists" => Some(&[0]),
         // rt_dir_create/rt_dir_create_all/rt_dir_remove take (path_ptr, path_len[, recursive]) —
         // the linked runtime (runtime/src/value/sffi/file_io/directory.rs) needs
         // the explicit length, not just a null-terminated pointer. These were
