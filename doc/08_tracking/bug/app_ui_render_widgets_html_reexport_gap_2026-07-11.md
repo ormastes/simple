@@ -1,6 +1,6 @@
 # app.ui.render.widgets does not re-export render_html_widget/render_html_tree (pre-existing, unrelated to Lane A/C)
 
-**Date:** 2026-07-11 · **Status:** partially fixed (re-export landed; LayoutKind collision remains)
+**Date:** 2026-07-11 · **Status:** fixed (re-export + LayoutKind rename + stale assertions retargeted)
 **Found:** Lane E ("rendering-inside-rendering") baseline run of the existing
 widget/chrome specs before writing
 `test/02_integration/rendering/browser_chrome_embedded_rendering_spec.spl`.
@@ -95,3 +95,25 @@ Results: `html_render_spec` 0/26 → 21/26; `widget_button_checkbox_dropdown_spe
    checkbox (`<div class="widget-checkbox">…<div class="check-box">`). These
    should be retargeted to current renderer output per the #38 stale-spec
    method.
+
+## Residual fixes landed (2026-07-11, later same day)
+
+1. **LayoutKind collision fixed** — compiler-internal enum renamed to
+   `TypeLayoutKind` (`src/compiler/30.types/_TypeLayout/layout_core.spl:119`
+   + 11 more compiler files + compiler-side test imports). The UI enum in
+   `src/lib/common/ui/widget_kind.spl` keeps the `LayoutKind` name. Verified:
+   the three "not focused" Vbox cases pass; `sffi_lint_spec` 23/23.
+2. **Stale assertions retargeted** — 5 assertions across the two specs
+   updated to the real renderer output (div-based checkbox `widget-checkbox`/
+   `check-box`; `<option selected>` on default index 0).
+
+Final: `html_render_spec` 26/26; `widget_button_checkbox_dropdown_spec` 65/65.
+
+Noted for separate follow-up (pre-existing, unrelated to this bug):
+`struct_reorder_spec`/`bitfield_reorder_spec` assert `case` arms via
+`read_text("src/compiler/30.types/type_layout.spl")`, but that file is a
+28-line re-export shim with no `case` statements (real arms live in
+`layout_core.spl`/`arch_and_verify.spl`) — stale spec, already failing
+before the rename. Also `runtime_layout_verification_spec`/
+`mir_exported_types_spec` fail on legacy `from hir_definitions import`
+module resolution, pre-existing.
