@@ -9,7 +9,8 @@ pub fn simple_db_http_request(request: text) -> bool:
     request.starts_with("POST /db ")
 
 fn _simple_db_http_response(status: text, body: text) -> text:
-    "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: {body.len()}\r\n\r\n{body}"
+    # Connection-close framing avoids the broken RV64 native text.len() path.
+    "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}"
 
 struct SimpleDbRow:
     table: text
@@ -23,16 +24,20 @@ class SimpleDbService:
     static fn new() -> SimpleDbService:
         SimpleDbService(tables: [], rows: [])
 
-    fn table_count() -> i64: self.tables.len()
-    fn row_count() -> i64: self.rows.len()
+    # `me` instead of `fn` on the four read-only methods below: the seed LLVM
+    # backend emits self.<fn-method>() calls with a self arg the callee
+    # signature lacks, failing LLVM verification ("Incorrect number of
+    # arguments"). See doc/08_tracking/bug/stage4_seed_llvmlib_method_arity_2026-07-06.md
+    me table_count() -> i64: self.tables.len()
+    me row_count() -> i64: self.rows.len()
 
-    fn has_table(name: text) -> bool:
+    me has_table(name: text) -> bool:
         for table in self.tables:
             if table == name:
                 return true
         false
 
-    fn has_key(table: text, key: text) -> bool:
+    me has_key(table: text, key: text) -> bool:
         for row in self.rows:
             if row.table == table and row.key == key:
                 return true
@@ -91,15 +96,22 @@ class SimpleDbService:
         val separator = request.find("\r\n\r\n")
         if separator < 0:
             return _simple_db_http_response("400 Bad Request", "ERR missing body")
-        # Hoist request.len() into a local: as a nested call argument it
-        # evaluates to nil (-1) on the RV64 LLVM native path (chained-method
-        # compiler bug), making slice(sep+4, -1) drop the body's last byte.
-        val request_len = request.len()
-        val body = request.slice(separator + 4, request_len)
+        # The boot listener reads at most this cap and slice clamps its end, so
+        # no broken RV64 native text.len() result is needed here.
+        val body = request.slice(separator + 4, SIMPLE_DB_MAX_HTTP_BYTES)
         val result = self.execute(body.trim())
         if result.starts_with("ERR"):
             return _simple_db_http_response("400 Bad Request", result)
         _simple_db_http_response("200 OK", result)
 
+# The boot HTTP service is single-threaded and needs one database lifetime across
+# accepted connections. Keeping that owner at module scope also avoids copying a
+# mutable class receiver through the RV64 listener loop.
+var g_simple_db_service: SimpleDbService = SimpleDbService(tables: [], rows: [])
+
+pub fn simple_db_execute_http_request(request: text) -> text:
+    g_simple_db_service.execute_http_request(request)
+
 export SimpleDbService
 export simple_db_http_request
+export simple_db_execute_http_request

@@ -1065,6 +1065,11 @@ void rt_riscv_uart_put(spl_u64 byte) {
     uart_put_byte((spl_u8)byte);
 }
 
+/* RV64 equivalent of x86 invlpg: per-address TLB invalidate via sfence.vma. */
+void rt_invlpg(spl_u64 addr) {
+    __asm__ volatile("sfence.vma %0, zero" : : "r"(addr) : "memory");
+}
+
 static void uart_write_bytes(const char *data, spl_u64 len) {
     if (!data) {
         return;

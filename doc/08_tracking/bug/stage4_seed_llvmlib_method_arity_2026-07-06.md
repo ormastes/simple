@@ -43,3 +43,21 @@ the extern signature registration for `rt_dir_create`.
 Hits a frozen MIR-empty bug ("MIR module has no functions" for the entry) — not a viable
 redeploy path on the deployed binary. So redeploy cannot bootstrap through the deployed
 binary either; it must go through a fixed seed backend.
+
+## Minimal single-file repro (2026-07-11, RV64 `--backend llvm` — same bug class)
+The plain `llvm` backend hits the identical arity failure on ONE small file, making this
+a much cheaper debug target than the 545-error full-CLI run:
+
+- File: `src/os/services/database/simple_db_service.spl` — a class whose read-only
+  methods were declared `fn` (not `me`) and called via `self.`:
+  `self.has_table(t)` → `call i64 @...SimpleDbService.has_table(i64, i64)` fails LLVM
+  verification with "Incorrect number of arguments passed to called function!"
+  (same for `has_key`, 3 args). Pattern: the call site passes `self` but the emitted
+  callee signature for a non-`me` `fn` class method does not include it (or vice versa).
+- Command (fails deterministically with a clean cache):
+  `rm -rf .simple/native_cache && src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry src/os/kernel/arch/riscv64/boot.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64.elf --linker-script src/os/kernel/arch/riscv64/linker.ld`
+- Source-side workaround (applied 2026-07-11): declare those methods `me`; the fresh
+  build then completes `51 compiled, 0 cached, 0 failed`.
+- NOTE: with a warm cache this failure is MASKED — the file is "skipped (non-critical)"
+  and a stale cached object links instead. See
+  `native_build_noncritical_skip_stale_cache_masking_2026-07-11.md`.
