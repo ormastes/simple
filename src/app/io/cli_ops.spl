@@ -10,7 +10,6 @@ extern fn sys_get_args() -> [text]
 # recursed infinitely (Stage 4 SIGSEGV at startup —
 # bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21).
 extern fn rt_cli_get_args() -> [text]
-extern fn rt_current_exe_path() -> text
 extern fn rt_exit(code: i64)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64
@@ -18,6 +17,10 @@ extern fn rt_cli_handle_compile(args: [text]) -> i64
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
 # --- Shell/file helpers (local copies to avoid circular imports) ---
@@ -64,28 +67,43 @@ fn _cli_shell_bool(command: text) -> bool:
 fn _cli_file_exists_impl(path: text) -> bool:
     rt_file_exists(path)
 
+# Direct runtime primitives below — no shell-out: rt_process_run drops the
+# args array under the deployed binary's Cranelift JIT SFFI arg marshalling
+# (seed calls.rs:2550), so every _cli_shell user silently fails under JIT.
+
 fn _cli_file_read_impl(path: text) -> text:
-    val result = _cli_shell("cat '{path}' 2>/dev/null")
-    if result.exit_code == 0:
-        result.stdout
-    else:
-        ""
+    # Returns "" on failure like the old `cat` path.
+    rt_file_read_text(path)
 
 fn _cli_file_write_impl(path: text, content: text) -> bool:
-    val result = _cli_shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
-    result.exit_code == 0
+    # rt_file_write_text is also mis-marshalled under the deployed JIT (4-arg
+    # spec vs 2-arg C impl, seed runtime_sffi.rs:1548): delete + write-at-0.
+    val deleted = rt_file_delete(path)
+    if content.len() == 0:
+        deleted or true
+    else:
+        val written = rt_file_write_text_at(path, 0, content)
+        written >= 0
 
 fn _cli_file_copy_impl(src: text, dst: text) -> bool:
-    val result = _cli_shell("cp '{src}' '{dst}'")
-    result.exit_code == 0
+    # rt_file_copy is mis-marshalled under the deployed JIT
+    # (seed runtime_sffi.rs:1557): stage via read + delete + write-at-0.
+    if not rt_file_exists(src):
+        false
+    else:
+        val content = rt_file_read_text(src)
+        val deleted = rt_file_delete(dst)
+        if content.len() == 0:
+            deleted or true
+        else:
+            val written = rt_file_write_text_at(dst, 0, content)
+            written >= 0
 
 fn _cli_dir_create_impl(path: text, recursive: bool) -> bool:
-    if recursive:
-        val result = _cli_shell("mkdir -p '{path}'")
-        result.exit_code == 0
-    else:
-        val result = _cli_shell("mkdir '{path}'")
-        result.exit_code == 0
+    # mkdir -p semantics for both branches via rt_mkdir_p; rt_file_exists
+    # fallback accepts a pre-existing directory (verified working under the
+    # deployed JIT while the mkdir shell-out reports failure).
+    rt_mkdir_p(path) or rt_file_exists(path)
 
 fn _cli_eprint(msg: text):
     eprint(msg)
@@ -93,9 +111,6 @@ fn _cli_eprint(msg: text):
 fn _cli_current_exe_path() -> text:
     if _cli_is_windows_platform():
         return ""
-    val runtime_path = rt_current_exe_path() ?? ""
-    if runtime_path.len() > 0:
-        return runtime_path
     val args = rt_cli_get_args() ?? []
     if args.len() > 0:
         val argv0 = args[0]
@@ -117,14 +132,6 @@ fn _cli_is_current_exe(path: text) -> bool:
         # If identity cannot be established, delegation is unsafe: the
         # candidate may be this process and recurse without bound.
         return true
-    current == path or current.ends_with("/" + path) or path.ends_with("/" + current)
-
-fn _cli_is_known_current_exe(path: text) -> bool:
-    if path == "" or _cli_is_windows_platform():
-        return false
-    val current = _cli_current_exe_path()
-    if current.len() == 0:
-        return false
     current == path or current.ends_with("/" + path) or path.ends_with("/" + current)
 
 pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
@@ -155,7 +162,7 @@ pub fn _cli_driver_binary() -> text:
         # Self-exec guard: an inherited override that points at THIS binary
         # would delegate to ourselves recursively without bound (simple.bak
         # fork bomb OOM-killed the user session, 2026-06-12).
-        if _cli_is_known_current_exe(override):
+        if _cli_is_current_exe(override):
             return ""
         return override
 
@@ -167,18 +174,8 @@ pub fn _cli_driver_binary() -> text:
         if exe_path.len() > 0:
             val seed_sibling = _cli_seed_sibling_path(exe_path)
             if _cli_file_exists_impl(seed_sibling):
-                if not _cli_is_known_current_exe(seed_sibling):
+                if not _cli_is_current_exe(seed_sibling):
                     return seed_sibling
-
-    for seed_candidate in [
-        "bin/release/aarch64-apple-darwin/simple_seed",
-        "bin/release/macos-arm64/simple_seed",
-        "bin/release/darwin-aarch64/simple_seed",
-        "bin/release/linux-x86_64/simple_seed",
-    ]:
-        if _cli_file_exists_impl(seed_candidate):
-            if not _cli_is_known_current_exe(seed_candidate):
-                return seed_candidate
 
     val ext = if _cli_is_windows_platform(): ".exe" else: ""
     val candidate = "bin/simple{ext}"
