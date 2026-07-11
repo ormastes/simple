@@ -2661,6 +2661,44 @@ static uint64_t g_fsexec_preload_size = 0;
 void simpleos_fat32_note_preload_size(uint64_t sz) { g_fsexec_preload_size = sz; }
 uint64_t simpleos_fat32_preloaded_size(void) { return g_fsexec_preload_size; }
 
+/* Copy a text's bytes + NUL to a physical/identity-mapped address; returns
+ * the RAW i64 byte length. Uses THIS file's RuntimeString layout (same decode
+ * as rt_print_str, which prints loader-passed text correctly). NOTE:
+ * rt_extras.c's RuntimeString header is 4 bytes SHORTER than this layout, so
+ * its string-data reads (rt_text_to_bytes elements, etc.) are shifted 4 bytes
+ * early — that is why the .spl [u8] channel yields header zeros. */
+int64_t rt_text_copy_to_phys(RuntimeValue str, uint64_t phys)
+{
+    RuntimeString *s = 0;
+    if (IS_HEAP(str)) {
+        RuntimeString *c = (RuntimeString *)DECODE_PTR(str);
+        if (c && c->hdr.type == HEAP_STRING && c->len < 0x100000) s = c;
+    }
+    if (!s && str != 0) {
+        RuntimeString *c = (RuntimeString *)(uintptr_t)str;
+        if (c->hdr.type == HEAP_STRING && c->len < 0x100000) s = c;
+    }
+    if (!s) return -1;
+    uint8_t *dst = (uint8_t *)(uintptr_t)phys;
+    for (uint32_t i = 0; i < s->len; i++) dst[i] = (uint8_t)s->data[i];
+    dst[s->len] = 0;
+    return (int64_t)s->len;
+}
+
+/* Ground-truth byte dump via plain C loads for freestanding .spl loaders —
+ * mmio_read8 readbacks can falsely return 0 (address-dependent
+ * rt_mmio_read_u8 zero bug). Raw u64 arg (rt_user_heap_init precedent). */
+void rt_dump_phys16(uint64_t phys)
+{
+    serial_puts("[cdump]");
+    const uint8_t *p = (const uint8_t *)(uintptr_t)phys;
+    for (int i = 0; i < 16; i++) {
+        serial_puts(" ");
+        serial_put_dec((int64_t)p[i]);
+    }
+    serial_puts("\r\n");
+}
+
 int64_t simpleos_fat32_stream_open(const char *path, int64_t path_len)
 {
     char path_buf[128];
