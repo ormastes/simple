@@ -230,18 +230,29 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if is_simpleos_riscv32_link(user_objects, output):
         return link_simpleos_riscv32(user_objects, output, verbose)
 
+    # Link the Rust native_all archive whenever SIMPLE_RUNTIME_PATH points at
+    # one — not only under SIMPLE_BOOTSTRAP=1. The normal path needs it too for
+    # modules calling seed-owned externs (e.g. bootstrap_main's
+    # rt_native_build), which the C runtime objects do not define; without it
+    # the link dies with "undefined symbol: rt_native_build" (#146/#79).
     var bootstrap_native_all = ""
-    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-        val runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH") ?? ""
-        val native_all = runtime_path + "/libsimple_native_all.a"
-        if runtime_path != "" and rt_file_exists(native_all):
+    val native_all_runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH") ?? ""
+    if native_all_runtime_path != "":
+        val native_all = native_all_runtime_path + "/libsimple_native_all.a"
+        if rt_file_exists(native_all):
             bootstrap_native_all = native_all
 
     # Step 1: Compile C runtime to object files unless bootstrap links the
     # Rust/native_all archive, which already owns the hosted runtime symbols.
+    # On the NORMAL path the C runtime objects stay in even when native_all is
+    # linked: ld pulls archive members only for still-undefined symbols, so
+    # native_all just backfills seed-owned externs (rt_native_build) while the
+    # C runtime keeps owning rt_interp_cstr/rt_strcat/etc.
+    val native_all_replaces_c_runtime = bootstrap_native_all != "" and
+        (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
     if trace:
         print "[LLVM-LINK] step 1: compile_runtime_objects..."
-    val runtime_objects = if bootstrap_native_all != "":
+    val runtime_objects = if native_all_replaces_c_runtime:
         []
     else:
         val rt_result = compile_runtime_objects(verbose, options.opt_level)
@@ -255,7 +266,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if trace:
         print "[LLVM-LINK] got {runtime_objects.len()} runtime objects"
 
-    val bootstrap_support_result = if bootstrap_native_all != "":
+    val bootstrap_support_result = if native_all_replaces_c_runtime:
         compile_bootstrap_native_all_support_c(pid, verbose, options.opt_level)
     else:
         Ok("")
