@@ -16,8 +16,8 @@ from live agent verification on current HEAD (not from stale lane logs).
 | 6 | QEMU WM + host WM rendering hardened, same Simple GUI | `simpleos-qemu-host-gpu-2d` | requirements-done | **PASS** — shared stack confirmed; host checks green; QEMU render+event gate 7/7 |
 | 7 | UI CLI interface (T32-style LLM access), common library, wm window list | `ui-cli-llm-access` | design-done | **13/18 checker scenarios PASS**; rest blocked on parallel-session files / redeploy / final review |
 | 8 | QEMU vs host WM same-GUI verification with capture (gui/web/2d) | `simpleos-qemu-host-gpu-2d` | requirements-done | **PASS** — WM host+QEMU captures, 2D + web pixel-exact vs oracles (cross-pixel diff = future hardening) |
-| 9 | WM hidden daemon mode revived; CLI reaches WM headless; daemon/windowed share code | (extends `ui-cli-llm-access`) | added 2026-07-11 | IMPL IN PROGRESS |
-| 10 | Process-manage gateway + interface on host (simple app) and SimpleOS | (new, reuse existing process APIs) | added 2026-07-11 | IMPL IN PROGRESS |
+| 9 | WM hidden daemon mode revived; CLI reaches WM headless; daemon/windowed share code | (extends `ui-cli-llm-access`) | added 2026-07-11 | **DONE** — spec PASS 2/0; CLI wrappers blocked by seed parser bug (filed) |
+| 10 | Process-manage gateway + interface on host (simple app) and SimpleOS | (new, reuse existing process APIs) | added 2026-07-11 | **DONE** — host gateway new; SimpleOS ps/kill already existed |
 
 ### Item 7: ui-cli-llm-access — compile blockers cleared, 13/18 checker scenarios pass
 - Root compile blocker fixed in `access_cli_grammar.spl` (parser rejects dedented multi-line `+`
@@ -214,3 +214,44 @@ Design (minimal, shared-code):
 - Order: I10-simpleos (cheap, independent) → I10-host → I9 (needs ui-cli lane merged; the
   compiled-ui hang and module-cap are tracked blockers for full GUI daemon; headless-backend
   daemon does not hit them).
+
+Implementation result (2026-07-11, committed 9feb36cb72a2):
+- I10-simpleos: premise stale — shell `ps`/`kill` already exist (`commands_fs.spl:369,395`,
+  syscalls 5/6/7 reading the live scheduler, richer than `pt_ext_*`); nothing added.
+- I10-host: `simple process list|spawn|kill|wait` (`src/app/process/{main,registry}.spl`,
+  dispatch `table.spl:680`); SDN registry `~/.simple/cache/process_gateway.sdn`; `--json`;
+  shared AccessResult/AccessError shapes. List covers gateway-managed processes (no /proc).
+- I9: `src/app/play/wm_daemon.spl` — resident headless WM via `init_host_wm(Headless)`, same
+  compositor code as windowed; daemon_sdk file-IPC (serve/start/windows-list/window-open/
+  window-close/status/stop) + `wm_daemon_client.spl`; `wm windows list` tries daemon first.
+- Evidence: `wm_process_gateway_spec.spl` PASS 2/0 (real sleep-5 spawn/kill/wait; daemon
+  open→list(1, Terminal)→stop). Untested: CLI wrappers under the seed (parser dedent bug on
+  `access_cli_grammar.spl`, filed `seed_parse_access_cli_grammar_dedent_2026-07-11.md` —
+  also blocks the pre-existing `simple play windows`); daemon serve loop over real IPC;
+  SimpleOS builtins at runtime.
+- Interpreter finding (for future lanes): in-place mutations through TYPED class params are
+  lost when the frame returns (dynamic params persist; module-scope scalars persist, class
+  vars don't) — pattern: return-the-object. And sspec `expect(a == b)` desugars to
+  `.to_equal(b)` — bind comparisons to a `val` first.
+
+## Operator guide (canonical commands after this pass)
+
+- Startup policy probe: `bin/simple run src/app/startup/launch_meta_check.spl check
+  --simpleos-host <file>` (expect `source=filesystem|cache=mmap`) / `--simpleos-baremetal`
+  (expect `source=baremetal_got`).
+- Servers live gate: `sh scripts/qemu/qemu_rv64_http_test.shs --with-db --expect-http-only`
+  (5/5 incl. `codex-41`; add `--allow-prebuilt-artifact` while the deployed binary is a seed).
+- clang-from-FS ring-3 gate: `sh scripts/os/ssh_clang_hello_ring3.shs`.
+- WM parity: `sh scripts/check/check-shared-wm-renderer-unification-evidence.shs`,
+  `check-hosted-wm-capture-evidence.shs` (warm run), and QEMU
+  `check-simpleos-x86-64-wm-render-event-evidence.shs` (render + 7/7 events).
+- 2D/web pixel parity: `check-cpu-simd-engine2d-evidence.shs`,
+  `check-simple-web-engine2d-js-bitmap-evidence.shs`.
+- UI CLI access: `bin/simple run scripts/check/check-ui-cli-access.spl --scenario <name>`.
+- Process gateway: `bin/simple process list|spawn|kill|wait [--json]`.
+- WM daemon: `simple play daemon start|windows-list|window-open|window-close|status|stop`
+  (backing modules spec-proven; CLI wrapper pending the seed parser bug fix).
+- Redeploy wall (next lane): follow the sequence in
+  `doc/08_tracking/bug/self_hosted_simpleos_target_native_build_crash_2026-07-11.md` —
+  cranelift output must be proven non-stub-collapsed; the seed external-llc path is the
+  memory-documented real route (llc blockers #131/#133 apply to full-app scope).
