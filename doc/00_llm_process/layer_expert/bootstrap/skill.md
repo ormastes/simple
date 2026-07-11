@@ -31,6 +31,18 @@ bootstrap-blocking regressions.
 **Wall:** short-circuit `and`/`or` undef dominance (#135, not yet fixed).
 
 **Fixed (landed):**
+- **RuntimeDict never grew — THE stage-4 in-process wall (2026-07-11):** compiled-code
+  dicts were fixed-capacity (slots inline, `rt_dict_set` → `false` on full, bool
+  ignored by compiled code) so the 9th insert into any `{}` silently dropped —
+  `SymbolTable.scopes` lost scope 9+ → nil-receiver trap = deployed binary's instant
+  `native-build` crash, `check` exit-3, and the reason test/check still delegate.
+  Fix: [src/compiler_rust/runtime/src/value/dict.rs](../../../../src/compiler_rust/runtime/src/value/dict.rs)
+  (separate slot alloc + ×2 growth at 3/4 load). Reaches `bin/simple` only after
+  seed/runtime rebuild + stage-4 redeploy. Companion fix: Cranelift adapter mapped
+  `Host` → x86-64 (Linux ELF objects on arm64 macs);
+  [cranelift_codegen_adapter.spl](../../../../src/compiler/70.backend/backend/cranelift_codegen_adapter.spl)
+  now resolves via `host_arch()`. Debug chain:
+  [stage4_compiled_dict_no_growth_2026-07-11.md](../../../../doc/08_tracking/bug/stage4_compiled_dict_no_growth_2026-07-11.md).
 - **#131 dup-SSA phi allocation** (var_reassign_ssa.spl): alloca slot reuse
   across distinct SSA values caused phi duplication under Cranelift. Fix:
   [src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl](../../../../src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl)

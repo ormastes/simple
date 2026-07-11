@@ -1,5 +1,23 @@
 # Stage4 Self-Host Redeploy (#79) — Plan (updated 2026-07-11)
 
+## UPDATE (2026-07-11, later): the "narrower root cause" below is FOUND and FIXED — RuntimeDict never grew
+
+The check-exit-3 / native-build-trap wall flagged in the section below is root-caused:
+the Rust runtime's compiled-code dict (`RuntimeDict`) was **fixed-capacity** — slots
+inline after the header, `rt_dict_set` returning `false // Dict is full` (ignored by
+compiled code), so the 9th insert into any default `{}` was silently dropped.
+`SymbolTable.scopes` drops scope 9+ → `lookup` nil-receiver trap = the deployed
+binary's instant `native-build` crash; interpreted runs (Rust HashMap) never see it —
+which is exactly why delegation works and in-process doesn't. Fixed in
+`src/compiler_rust/runtime/src/value/dict.rs` (separate slot allocation + ×2 growth
+at 3/4 load, regression test). Second same-day fix: pure-Simple Cranelift adapter
+mapped `CodegenTarget.Host` to `CL_TARGET_X86_64` → x86-64 Linux ELF entry objects
+on arm64 macs (`cranelift_codegen_adapter.spl`, now resolves via `host_arch()`).
+Full debug chain + deployment steps: `doc/08_tracking/bug/stage4_compiled_dict_no_growth_2026-07-11.md`.
+The retained check/test delegation decisions below stay correct until a redeployed
+binary (with the grown-dict runtime) proves the native paths; then retirement can be
+re-attempted.
+
 ## seed-delegation retirement pass (2026-07-11, uncommitted) — check/test delegation RETAINED, `build bootstrap` entry-point fixed
 
 Separate workstream (not the redeploy gate itself): audited the CLI's

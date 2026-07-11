@@ -580,6 +580,30 @@ fn test_dict_new() {
 }
 
 #[test]
+fn test_dict_grows_past_initial_capacity() {
+    // Regression: the fixed-capacity dict silently dropped the 9th insert
+    // (rt_dict_set returned false, compiled code ignores the bool). This is
+    // the exact SymbolTable.scopes failure that broke stage-4 native-build.
+    let dict = rt_dict_new(0); // clamps to minimum capacity 8
+    for i in 0..100 {
+        assert!(
+            rt_dict_set(dict, RuntimeValue::from_int(i), RuntimeValue::from_int(i * 10)),
+            "insert {i} failed"
+        );
+    }
+    assert_eq!(rt_dict_len(dict), 100);
+    for i in 0..100 {
+        let v = rt_dict_get(dict, RuntimeValue::from_int(i));
+        assert!(v.is_int(), "key {i} missing after growth");
+        assert_eq!(v.as_int(), i * 10);
+    }
+    // Removal still works across the grown table
+    assert_eq!(rt_dict_remove(dict, RuntimeValue::from_int(50)).as_int(), 500);
+    assert_eq!(rt_dict_len(dict), 99);
+    assert!(rt_dict_get(dict, RuntimeValue::from_int(50)).is_nil());
+}
+
+#[test]
 fn test_dict_set_and_get() {
     let dict = rt_dict_new(10);
 
