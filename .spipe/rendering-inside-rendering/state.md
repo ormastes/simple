@@ -89,6 +89,8 @@ done
 
 - Side fix DONE: widgets.spl re-export gap — one line `export use app.ui.render.html_widgets.{render_html_widget, render_html_tree}` recovers html_render_spec 0/26→21/26 and widget_button_checkbox_dropdown 35/65→57/65. Residual failures = (1) LayoutKind merged-graph collision with compiler enum (same class as Logger collision; proper fix = rename compiler TypeLayoutKind ~10 files, out of scope) + (2) stale div-checkbox assertions; bug doc updated to partially-fixed with both causes.
 
+- Residuals CLOSED (2026-07-11, post-arc): (1) LayoutKind merged-graph collision FIXED — compiler enum renamed TypeLayoutKind (src/compiler/30.types/_TypeLayout/layout_core.spl:119 + 11 compiler files + compiler-side test imports; UI enum in common/ui/widget_kind.spl keeps LayoutKind); (2) stale div-checkbox/dropdown assertions retargeted to real renderer output (5 assertions). Final: html_render_spec 26/26, widget_button_checkbox_dropdown_spec 65/65. Bug doc app_ui_render_widgets_html_reexport_gap_2026-07-11.md status → fixed.
+
 ## Log
 - dev: Goal set via /goal; state file created with 8 acceptance criteria (type: feature).
 - research: Launched 4 parallel agents (2d stack, web stack, gui/wm/3d interfaces, prior-art) + 1 bootstrap-regression fix agent. `bin/simple build bootstrap` fails with "No entry point specified for native-build backend" (known follow-up regression).

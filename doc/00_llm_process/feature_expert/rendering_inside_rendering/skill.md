@@ -52,3 +52,10 @@ parallel one-off mechanisms.
   opaque black, or parent pixels are wrongly occluded on composite.
 - Full-scene batches (e.g. `widget-root`) must bypass the offscreen path or
   every frame pays a redundant full-framebuffer copy.
+- Merged interpreter graphs share one enum namespace: the UI `LayoutKind`
+  (common/ui/widget_kind.spl) was shadowed by an unrelated compiler enum of
+  the same name (`unknown variant or method 'Vbox'`); fixed by renaming the
+  compiler enum `TypeLayoutKind` (same class as the Logger collision). When a
+  UI spec errors on a variant that plainly exists, grep for same-named types
+  in src/compiler/ first. See
+  doc/08_tracking/bug/app_ui_render_widgets_html_reexport_gap_2026-07-11.md.
