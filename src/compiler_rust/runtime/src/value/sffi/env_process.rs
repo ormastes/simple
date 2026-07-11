@@ -520,7 +520,7 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
 
 /// Spawn a child that transparently inherits the current process stdio.
 #[no_mangle]
-pub unsafe extern "C" fn rt_process_spawn_inherit(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue) -> i64 {
+pub unsafe extern "C" fn rt_process_spawn_inherit(cmd_ptr: *const u8, cmd_len: u64) -> i64 {
     use std::process::{Command, Stdio};
     if cmd_ptr.is_null() {
         return -1;
@@ -532,11 +532,6 @@ pub unsafe extern "C" fn rt_process_spawn_inherit(cmd_ptr: *const u8, cmd_len: u
     };
     let mut command = Command::new(cmd_str);
     clear_simple_child_stack_env(&mut command);
-    for i in 0..rt_array_len(args) {
-        if let Some(arg_str) = extract_string(rt_array_get(args, i)) {
-            command.arg(arg_str);
-        }
-    }
     command.stdin(Stdio::inherit());
     command.stdout(Stdio::inherit());
     command.stderr(Stdio::inherit());
