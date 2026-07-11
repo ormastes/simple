@@ -175,6 +175,22 @@ impl HirLowering:
         val host_gpu_lane = self.try_lower_host_gpu_lane_expr(e)
         if val lowered_host_gpu_lane = host_gpu_lane:
             return lowered_host_gpu_lane
+        match expr_kind_value:
+            case ExprKind.Call(callee, args):
+                val call_callee_t: Expr = callee
+                val call_args_t: [CallArg] = args
+                var hir_args: [HirCallArg] = []
+                for arg in call_args_t:
+                    val arg_t: CallArg = arg
+                    hir_args = hir_args.push(HirCallArg(
+                        has_name: arg_t.has_name,
+                        name: arg_t.name,
+                        value: self.lower_hir_expr(arg_t.value),
+                        span: arg_t.span
+                    ))
+                return HirExpr(kind: HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, []), type_: nil, span: e.span)
+            case _:
+                pass
         if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_expr:kind")
         # SEED PATTERN HAZARD (bug doc iteration 18): when a variant pattern's
@@ -329,32 +345,6 @@ impl HirLowering:
                 val un_operand_t: Expr = operand
                 val hir_op = self.lower_unaryop(un_op_t)
                 HirExprKind.Unary(hir_op, self.lower_hir_expr(un_operand_t))
-
-            case ExprKind.Call(callee, args):
-                # Typed rebinds: extracted ANY-ish payloads misread on stage4
-                # when consumed directly (bug doc iteration 18).
-                val call_callee_t: Expr = callee
-                val call_args_t: [CallArg] = args
-                # NOTE: a former SIMPLE_BOOTSTRAP branch here wiped the argument
-                # list to `[]` (commit 050209d9b "speed up bootstrap"), so under
-                # bootstrap EVERY call lost ALL args — print(x) became
-                # rt_println("") and nested-call args like print(canary()) were
-                # never lowered (#130). Always run the safe all-four-field loop.
-                var hir_args: [HirCallArg] = []
-                for arg in call_args_t:
-                    val arg_t: CallArg = arg
-                    # Pass ALL FOUR fields in declaration order: HirCallArg
-                    # has a hand-desugared `has_name` field; a 3-field
-                    # named construction is filled POSITIONALLY by the seed
-                    # (value landed in the `name` slot, .value read the
-                    # span → disc=-1 garbage; bug doc iteration 18).
-                    hir_args = hir_args.push(HirCallArg(
-                        has_name: arg_t.has_name,
-                        name: arg_t.name,
-                        value: self.lower_hir_expr(arg_t.value),
-                        span: arg_t.span
-                    ))
-                HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, [])
 
             case ExprKind.MethodCall(receiver, method, args):
                 # Same #130 fix as the Call arm: the former SIMPLE_BOOTSTRAP branch
