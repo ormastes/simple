@@ -68,6 +68,8 @@ use compiler.driver.driver_source_loading.{
     _driver_should_skip_dir, _driver_is_bootstrap_entry_source,
     _driver_module_name_from_path, _driver_module_aliases,
     _driver_collect_sources, _driver_collect_sources_via_find,
+    _driver_entry_import_dirname, _driver_entry_import_module_paths,
+    _driver_resolve_entry_import,
     _format_type_infer_error, _format_nll_error, _format_coherence_error, _format_trait_error
 }
 
@@ -77,6 +79,7 @@ extern fn rt_file_append_text(path: text, content: text) -> bool
 extern fn rt_hash_text(s: text) -> i64
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
 
 fn native_build_cache_dir() -> text:
     val dir = rt_env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
@@ -454,6 +457,70 @@ pub class CompilerDriver:
             if input_path.starts_with("src/"):
                 has_project_source = true
             i = i + 1
+
+        # ROOT FIX (#138 Wall #1): a native-build entry OUTSIDE src/ used to
+        # load ONLY the entry file — never its import closure. ctx.modules then
+        # lacked every imported module, resolve_import_symbols registered no
+        # imported symbols, and any cross-module callee lowered to
+        # HirExprKind.Error -> MIR CallIndirect(func=Copy(nil)) -> nil `.id`
+        # crash / llc "use of undefined value '%l0'". Resolve and load the
+        # entry's transitive import closure here (fixpoint over the growing
+        # source list = depth-first with the seen_sources visited set), then
+        # flip the existing --entry-closure pipeline gates so every closure
+        # module is parsed, lowered, and compiled into the binary. The src/
+        # bulk-load path below is untouched.
+        val nb_entry_env = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        val nb_entry_closure_pre = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        if nb_entry_env != "" and not has_project_source and not nb_entry_closure_pre and self.ctx.options.mode == CompileMode.Aot:
+            var closure_added = 0
+            var closure_seen_mods: Dict<text, bool> = {}
+            var closure_idx = 0
+            while closure_idx < all_sources.len():
+                val closure_src = all_sources[closure_idx]
+                val closure_dir = _driver_entry_import_dirname(closure_src.path)
+                val closure_imports = _driver_entry_import_module_paths(closure_src.content)
+                if source_trace:
+                    print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
+                for closure_mp in closure_imports:
+                    if closure_seen_mods.contains(closure_mp):
+                        continue
+                    closure_seen_mods[closure_mp] = true
+                    val closure_file = _driver_resolve_entry_import(closure_mp, closure_dir)
+                    if closure_file == "":
+                        # LOUD error naming the module path. Single-segment
+                        # unresolved names are skipped: they are more likely
+                        # prose/scoped pseudo-imports than real module files.
+                        if closure_mp.contains("."):
+                            self.ctx.add_error("unresolved import '{closure_mp}' (used in {closure_src.path}): no source file found for this module path relative to the working directory, src/, or '{closure_dir}'")
+                        continue
+                    val closure_loaded = _driver_collect_sources(closure_file)
+                    if closure_loaded.len() == 0:
+                        self.ctx.add_error("import '{closure_mp}' (used in {closure_src.path}) resolved to '{closure_file}' but that file is empty or excluded from compilation")
+                        continue
+                    var closure_has_exact = false
+                    var closure_content = ""
+                    for cs in closure_loaded:
+                        closure_content = cs.content
+                        if cs.module_name == closure_mp:
+                            closure_has_exact = true
+                        val closure_key = cs.path + "::" + cs.module_name
+                        if not seen_sources.contains(closure_key):
+                            seen_sources[closure_key] = true
+                            all_sources = all_sources.push(cs)
+                            closure_added = closure_added + 1
+                    if not closure_has_exact:
+                        # The path-derived module name differs from the import
+                        # path (e.g. an entry-directory-relative import). Alias
+                        # the file under the import path so
+                        # resolve_import_symbols finds it by name.
+                        val closure_alias_key = closure_file + "::" + closure_mp
+                        if not seen_sources.contains(closure_alias_key):
+                            seen_sources[closure_alias_key] = true
+                            all_sources = all_sources.push(SourceFile(path: closure_file, content: closure_content, module_name: closure_mp))
+                            closure_added = closure_added + 1
+                closure_idx = closure_idx + 1
+            if closure_added > 0 and self.ctx.errors.len() == 0:
+                rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
 
         # Add core source roots only when compiling project sources (self-hosted build).
         # native-build --entry-closure suppresses this implicit whole-src bulk-load

@@ -14,6 +14,7 @@ use compiler.traits.trait_coherence.{CoherenceError}
 use compiler.traits.trait_validation.{TraitError}
 
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(key: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
@@ -70,6 +71,107 @@ pub fn _driver_module_aliases(path: text, content: text, module_name: text) -> [
         val std_alias = "std." + module_name.substring("lib.".len())
         aliases = aliases.push(SourceFile(path: path, content: content, module_name: std_alias))
     aliases
+
+pub fn _driver_entry_import_dirname(path: text) -> text:
+    """Directory part of a path ("" when the path has no directory)."""
+    val parts = path.split("/")
+    if parts.len() <= 1:
+        return ""
+    var dir = ""
+    var i = 0
+    while i < parts.len() - 1:
+        if i > 0:
+            dir = dir + "/"
+        dir = dir + parts[i]
+        i = i + 1
+    dir
+
+fn _driver_import_path_token(rest_in: text) -> text:
+    # Dotted module path prefix of a use/import tail; "" when the tail is not
+    # a plausible module path (guards against prose lines that begin with
+    # "use " inside strings the docstring toggle missed).
+    val word_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_."
+    val rest = rest_in.trim()
+    var cut = rest.len()
+    var i = 0
+    while i < rest.len():
+        val ch = rest.substring(i, i + 1)
+        if ch == " " or ch == "{" or ch == "(" or ch == "*" or ch == "#":
+            cut = i
+            break
+        if not word_chars.contains(ch):
+            return ""
+        i = i + 1
+    var path_text = rest[0:cut]
+    while path_text.ends_with("."):
+        path_text = path_text[0:path_text.len() - 1]
+    path_text.trim()
+
+pub fn _driver_entry_import_module_paths(content: text) -> [text]:
+    """Dotted module paths of the use/export-use/import declarations in a
+    source text. `use lazy` imports are dynamic-by-design and skipped.
+    Docstring bodies are skipped via a triple-quote toggle."""
+    var result: [text] = []
+    var in_doc = false
+    val lines = content.split("\n")
+    for raw in lines:
+        val line = raw.trim()
+        var quote_count = 0
+        var scan_pos = 0
+        while scan_pos + 3 <= line.len():
+            if line.substring(scan_pos, scan_pos + 3) == "\"\"\"":
+                quote_count = quote_count + 1
+                scan_pos = scan_pos + 3
+            else:
+                scan_pos = scan_pos + 1
+        val was_in_doc = in_doc
+        if quote_count % 2 == 1:
+            in_doc = not in_doc
+        if was_in_doc or quote_count > 0:
+            continue
+        var rest = ""
+        if line.starts_with("use lazy "):
+            continue
+        elif line.starts_with("export use "):
+            rest = line.substring(11)
+        elif line.starts_with("use "):
+            rest = line.substring(4)
+        elif line.starts_with("import "):
+            rest = line.substring(7)
+        else:
+            continue
+        val mp = _driver_import_path_token(rest)
+        if mp != "":
+            result = result.push(mp)
+    result
+
+pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
+    """File path backing a dotted module path, or "" when none exists.
+    Candidates are ordered so the module name derived from the returned path
+    (_driver_module_name_from_path) matches the import path when possible:
+    working-directory-relative first, then src/, then the importing file's
+    directory, then the std -> src/lib alias root."""
+    val rel = module_path.replace(".", "/")
+    var roots: [text] = ["", "src/"]
+    if entry_dir != "":
+        roots = roots.push(entry_dir + "/")
+    for root in roots:
+        val base = root + rel
+        if rt_file_exists(base + ".spl"):
+            return base + ".spl"
+        if rt_file_exists(base + "/mod.spl"):
+            return base + "/mod.spl"
+        if rt_file_exists(base + "/__init__.spl"):
+            return base + "/__init__.spl"
+    if module_path.starts_with("std."):
+        val lib_base = "src/lib/" + rel.substring(4)
+        if rt_file_exists(lib_base + ".spl"):
+            return lib_base + ".spl"
+        if rt_file_exists(lib_base + "/mod.spl"):
+            return lib_base + "/mod.spl"
+        if rt_file_exists(lib_base + "/__init__.spl"):
+            return lib_base + "/__init__.spl"
+    ""
 
 pub fn _driver_collect_sources(p: text) -> [SourceFile]:
     """Collect source files from a path (file or directory). Returns list of SourceFile."""
