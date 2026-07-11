@@ -161,31 +161,28 @@ class FetchEngine:
                 Ok(false)
 
     # Attach stored cookies to the request as a Cookie header.
+    # NOTE: FetchRequest.headers/credentials are declared as raw `text`
+    # (see entity/request_types.spl), not [Pair]/enum — this must stay
+    # text-in, text-out or it corrupts the header block on redirects.
     fn attach_cookies(request: FetchRequest) -> FetchRequest:
         # Only attach cookies if credentials mode allows it
-        val should_send = match request.credentials:
-            RequestCredentials.Omit: false
-            RequestCredentials.SameOrigin: true
-            RequestCredentials.Include: true
-
-        if not should_send:
+        if not credentials_allows_cookies(request.credentials):
             return request
 
-        val cookies = self.cookie_store.get_cookies_for(request.url)
-        if cookies.is_empty():
+        # CookieStore exposes the already-formatted "name=value; name2=value2"
+        # header text via get_header(host, path) — there is no
+        # get_cookies_for(Url) method (a prior version of this call site
+        # referenced one that was never defined; that would throw as soon
+        # as any non-Omit credentials mode reached this code).
+        val cookie_header = self.cookie_store.get_header(request.url.host, request.url.path)
+        if cookie_header.len() == 0:
             return request
 
-        # Build Cookie header value: name=value; name2=value2
-        var parts = [text]()
-        for cookie in cookies:
-            parts.push("{cookie.first}={cookie.second}")
-        val cookie_header = parts.join("; ")
-
-        # Append Cookie header to the request
-        var new_headers: [Pair<text, text>] = []
-        for h in request.headers:
-            new_headers.push(h)
-        new_headers.push(Pair("Cookie", cookie_header))
+        # Append Cookie header to the raw header text block
+        var new_headers = request.headers
+        if new_headers.len() > 0 and not new_headers.ends_with("\r\n"):
+            new_headers = new_headers + "\r\n"
+        new_headers = new_headers + "Cookie: {cookie_header}\r\n"
 
         FetchRequest(
             url: request.url,
@@ -235,37 +232,42 @@ class FetchEngine:
 
     # Create a new request for a redirect, adjusting the method per HTTP semantics.
     # 303 always becomes GET; 301/302 become GET for POST; 307/308 preserve method.
+    # NOTE: FetchRequest.method/headers are declared as raw `text` (see
+    # entity/request_types.spl) — compare/rebuild as text, not HttpMethod/Pair.
     fn create_redirect_request(original: FetchRequest, new_url: Url, status: i64) -> FetchRequest:
         val redirect_method = if status == 303:
             # 303 See Other: always use GET
-            HttpMethod.Get
+            "GET"
         else if status == 301 or status == 302:
             # 301/302: POST becomes GET (historical browser behavior), others preserved
-            match original.method:
-                HttpMethod.Post: HttpMethod.Get
-                _: original.method
+            if original.method.to_upper() == "POST":
+                "GET"
+            else:
+                original.method
         else:
             # 307/308: preserve original method
             original.method
 
-        val redirect_body = match redirect_method:
-            HttpMethod.Get: ""
-            HttpMethod.Head: ""
-            _: original.body
+        val redirect_body = if redirect_method.to_upper() == "GET" or redirect_method.to_upper() == "HEAD":
+            []
+        else:
+            original.body
 
         # Strip sensitive headers on cross-origin redirect
         val original_origin = Origin.from_url(original.url)
         val new_origin = Origin.from_url(new_url)
         val is_cross_origin = (original_origin.to_text() != new_origin.to_text())
 
-        var new_headers: [Pair<text, text>] = []
-        for header in original.headers:
-            val name = header.first.to_lowercase()
-            # Strip Authorization and Cookie headers on cross-origin redirects
-            if is_cross_origin and (name == "authorization" or name == "cookie"):
-                pass_do_nothing
-            else:
-                new_headers.push(header)
+        var new_headers = ""
+        for line in original.headers.split("\r\n"):
+            val colon = line.index_of(":")
+            if colon > 0:
+                val name = line.slice(0, colon).trim().to_lower()
+                # Strip Authorization and Cookie headers on cross-origin redirects
+                if is_cross_origin and (name == "authorization" or name == "cookie"):
+                    pass_do_nothing
+                else:
+                    new_headers = new_headers + line.trim() + "\r\n"
 
         FetchRequest(
             url: new_url,
@@ -289,6 +291,20 @@ class FetchEngine:
         nil
 
 # -- Module-level functions --
+
+# Determine whether cookies should be attached for a request's credentials
+# mode. FetchRequest.credentials is raw `text` (doc convention:
+# "omit"/"same-origin"/"include"); tolerate the enum's own to_text() form
+# ("RequestCredentials::Omit") since some callers assign the enum value
+# directly into the text field. Only an explicit "omit" suppresses cookies.
+fn credentials_allows_cookies(value: text) -> bool:
+    # Some callers store the RequestCredentials enum itself in this
+    # nominally-`text` field; stringify defensively before inspecting it.
+    var v = "{value}"
+    if v.contains("::"):
+        val idx = v.last_index_of(":")
+        v = v.slice(idx + 1, v.len())
+    v.to_lower() != "omit"
 
 # Determine whether an HTTP status code indicates a redirect.
 fn should_redirect(status: i64) -> bool:

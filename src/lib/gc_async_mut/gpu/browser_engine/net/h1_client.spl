@@ -262,12 +262,12 @@ class H1Client:
         if not flushed:
             val _ = rt_io_tcp_close(conn.tcp_fd)
             return Err(network_error("h1: TCP flush failed for {conn.host}:{conn.port}"))
-        val raw_response = read_tcp_response_text(conn.tcp_fd)
+        val raw_response = read_tcp_response_bytes(conn.tcp_fd)
         val _ = rt_io_tcp_close(conn.tcp_fd)
         conn.is_keep_alive = false
         if raw_response.len() == 0:
             return Err(network_error("h1: TCP read returned no response for {conn.host}:{conn.port}"))
-        val parsed = parse_http_response(raw_response)?
+        val parsed = parse_http_response_bytes(raw_response)?
         return Ok(parsed)
 
     me execute_tls_http(req: FetchRequest, conn: H1Connection, request_bytes: text) -> Result<FetchResponse>:
@@ -281,7 +281,13 @@ class H1Client:
             conn.is_keep_alive = false
             if raw_response.len() == 0:
                 return Err(network_error("h1: TLS read returned no response for {conn.host}:{conn.port}"))
-            match parse_http_response(raw_response):
+            # NOTE: the pure-Simple TLS transport (rt_tls_client_*) is not yet
+            # wired to a real implementation (see execute_host_https above) so
+            # this path is not exercised against live servers today. It still
+            # goes through rt_text_to_bytes here so any future TLS-transport
+            # fix inherits the same byte-accurate framing as the plain-HTTP
+            # path rather than reintroducing the char/byte mismatch bug.
+            match parse_http_response_bytes(rt_text_to_bytes(raw_response)):
                 Ok(parsed):
                     return Ok(parsed)
                 Err(e):
@@ -373,14 +379,14 @@ fn build_request_bytes(req: FetchRequest) -> text:
 
 # --- Response parsing ---
 
-fn read_tcp_response_text(fd: i64) -> text:
+fn read_tcp_response_bytes(fd: i64) -> [u8]:
     var bytes: [u8] = []
     while true:
         val chunk = rt_io_tcp_read(fd, 8192)
         if chunk.len() == 0:
             break
         bytes = bytes + chunk
-    rt_bytes_to_text(bytes)
+    bytes
 
 fn read_tls_response_text(conn: TlsConnection) -> text:
     var response = ""
@@ -391,9 +397,19 @@ fn read_tls_response_text(conn: TlsConnection) -> text:
         response = response + chunk
     response
 
-fn parse_http_response(raw: text) -> Result<FetchResponse>:
-    val parts = split_header_body(raw)
-    val header_lines = split_lines(parts.first)
+# Parse a raw HTTP/1.x response given as bytes.
+# NOTE: operates on [u8] rather than `text` for the header/body split and
+# body-length accounting. Content-Length and chunk sizes are BYTE counts
+# per RFC 7230; a real response body routinely contains multi-byte UTF-8
+# characters (curly quotes, non-Latin text, emoji), and `text.len()`/`s[i]`
+# character-indexing goes out of sync with those byte counts on such input
+# (observed crash: "string index out of bounds" fetching real google.com/
+# wikipedia.org bodies). Only the header block — which is ASCII per spec —
+# is decoded to `text` for line-based parsing.
+fn parse_http_response_bytes(raw: [u8]) -> Result<FetchResponse>:
+    val parts = split_header_body_bytes(raw)
+    val header_text = rt_bytes_to_text(parts.first)
+    val header_lines = split_lines(header_text)
     if header_lines.len() == 0:
         return Err(parse_error("h1: empty HTTP response"))
     val status = parse_status_line(header_lines[0])?
@@ -403,11 +419,11 @@ fn parse_http_response(raw: text) -> Result<FetchResponse>:
         raw_headers = raw_headers + header_lines[i] + "\r\n"
         i = i + 1
     val headers = parse_headers(raw_headers)
-    val body = read_response_body(parts.second, headers)
+    val body = read_response_body_bytes(parts.second, headers)
     return Ok(FetchResponse(
         status: status.first,
         headers: raw_headers,
-        body: rt_text_to_bytes(body)
+        body: body
     ))
 
 fn parse_status_line(line: text) -> Result<Pair<i64, text>>:
@@ -464,24 +480,26 @@ fn parse_headers(raw: text) -> [Pair<text, text>]:
                 headers.push(p)
     headers
 
-fn read_response_body(raw_body: text, headers: [Pair<text, text>]) -> text:
+fn read_response_body_bytes(raw_body: [u8], headers: [Pair<text, text>]) -> [u8]:
     # Read the response body based on headers.
-    # Supports Content-Length and chunked transfer encoding.
+    # Supports Content-Length and chunked transfer encoding. Both are BYTE
+    # counts per RFC 7230, so this operates on [u8] directly (see the
+    # byte-vs-char note on parse_http_response_bytes above).
     val transfer_encoding = find_header(headers, "transfer-encoding")
     if val te = transfer_encoding:
         if net_ascii_lower("{te}").contains("chunked"):
-            return parse_chunked_body(raw_body)
+            return parse_chunked_body_bytes(raw_body)
 
     val content_length_str = find_header(headers, "content-length")
     if val cl_str = content_length_str:
         val cl = parse_int(cl_str)
         if cl >= 0 and cl <= raw_body.len():
-            return h1_substring(raw_body, 0, cl)
+            return raw_body.slice(0, cl)
 
     # Fall back to returning the entire body
     raw_body
 
-fn parse_chunked_body(raw: text) -> text:
+fn parse_chunked_body_bytes(raw: [u8]) -> [u8]:
     # Decode a chunked transfer-encoded body.
     # Format:
     #   <chunk-size-hex>\r\n
@@ -489,17 +507,17 @@ fn parse_chunked_body(raw: text) -> text:
     #   ...
     #   0\r\n
     #   \r\n
-    var result = ""
+    var result: [u8] = []
     var pos = 0
 
     while pos < raw.len():
         # Find end of chunk size line
-        val line_end = h1_find_crlf(raw, pos)
+        val line_end = bytes_find_crlf(raw, pos)
         if line_end < 0:
             break
 
-        # Parse chunk size (hex)
-        val size_str = h1_substring(raw, pos, line_end).trim()
+        # Parse chunk size (hex) — the size line is pure ASCII
+        val size_str = rt_bytes_to_text(raw.slice(pos, line_end)).trim()
         if size_str.len() == 0:
             break
 
@@ -514,10 +532,10 @@ fn parse_chunked_body(raw: text) -> text:
 
         if data_end > raw.len():
             # Incomplete chunk, take what we have
-            result = result + h1_substring(raw, data_start, raw.len())
+            result = result + raw.slice(data_start, raw.len())
             break
 
-        result = result + h1_substring(raw, data_start, data_end)
+        result = result + raw.slice(data_start, data_end)
 
         # Skip \r\n after chunk data
         pos = data_end + 2
@@ -599,16 +617,6 @@ fn h1_find_char(s: text, ch: text) -> i64:
         i = i + 1
     -1
 
-fn h1_find_crlf(s: text, start: i64) -> i64:
-    # Find the index of "\r\n" in s starting from the given position.
-    # Returns the index of '\r', or -1 if not found.
-    var i = start
-    while i < s.len() - 1:
-        if s[i] == "\r" and s[i + 1] == "\n":
-            return i
-        i = i + 1
-    -1
-
 fn h1_substring(s: text, start: i64, end: i64) -> text:
     var result = ""
     var i = start
@@ -654,18 +662,30 @@ fn net_ascii_lower_char(ch: text) -> text:
     if ch == "Z": return "z"
     ch
 
-fn split_header_body(raw: text) -> Pair<text, text>:
-    # Split an HTTP response into header section and body, separated by \r\n\r\n.
+fn split_header_body_bytes(raw: [u8]) -> Pair<[u8], [u8]>:
+    # Split an HTTP response into header section and body, separated by
+    # \r\n\r\n (bytes 13,10,13,10). Byte-indexed so this stays correct
+    # regardless of multi-byte UTF-8 content later in the body.
     var i = 0
     while i < raw.len() - 3:
-        if (raw[i] == "\r" and raw[i + 1] == "\n"
-            and raw[i + 2] == "\r" and raw[i + 3] == "\n"):
-            val headers = h1_substring(raw, 0, i)
-            val body = h1_substring(raw, i + 4, raw.len())
+        if (raw[i] == 13 and raw[i + 1] == 10
+            and raw[i + 2] == 13 and raw[i + 3] == 10):
+            val headers = raw.slice(0, i)
+            val body = raw.slice(i + 4, raw.len())
             return Pair(headers, body)
         i = i + 1
     # No separator found — treat entire response as headers with empty body
-    Pair(raw, "")
+    Pair(raw, [])
+
+fn bytes_find_crlf(raw: [u8], start: i64) -> i64:
+    # Find the index of "\r\n" (bytes 13,10) in raw starting from `start`.
+    # Returns the index of '\r', or -1 if not found.
+    var i = start
+    while i < raw.len() - 1:
+        if raw[i] == 13 and raw[i + 1] == 10:
+            return i
+        i = i + 1
+    -1
 
 fn split_lines(s: text) -> [text]:
     # Split a string by \r\n line endings.
@@ -723,6 +743,14 @@ fn parse_hex(s: text) -> i64:
 
     result
 
+# NOTE: the trailing "not found" value below is `return -1`, not a bare
+# `-1` expression. A bare negative-integer literal immediately after a run
+# of single-line `if cond: return X` statements is silently dropped by the
+# interpreter (the function implicitly returns nil instead) — confirmed by
+# isolated repro; see doc/08_tracking/bug/browser_net_real_site_gaps_2026-07-11.md.
+# This is exactly what corrupted chunked-transfer decoding for real sites
+# (parse_hex("d2c") returned 32 instead of 3372 because hex_char_to_digit
+# returned nil/0 for 'd' and 'c').
 fn char_to_digit(ch: text) -> i64:
     if ch == "0": return 0
     if ch == "1": return 1
@@ -734,7 +762,7 @@ fn char_to_digit(ch: text) -> i64:
     if ch == "7": return 7
     if ch == "8": return 8
     if ch == "9": return 9
-    -1
+    return -1
 
 fn hex_char_to_digit(ch: text) -> i64:
     val d = char_to_digit(ch)
@@ -746,4 +774,4 @@ fn hex_char_to_digit(ch: text) -> i64:
     if ch == "d": return 13
     if ch == "e": return 14
     if ch == "f": return 15
-    -1
+    return -1
