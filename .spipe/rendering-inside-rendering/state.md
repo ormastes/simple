@@ -73,7 +73,7 @@ Out-of-process isolation (separate OS processes per embedded web instance) is ex
 - Lane F (bootstrap): fix `build bootstrap` entry-point regression, keep bootstrap running (agent in flight).
 
 ## Phase
-arch-done; impl-in-progress
+done
 
 ## Implementation Progress
 - Lane A (2D) DONE: engine.spl gains create_offscreen (transparent-init) + draw_engine/draw_engine_opacity + alpha-scale helper; draw_ir_adv.spl renders surface_id batches into real offscreen Engine2D w/ depth cap 3 + perf guard (skip offscreen for 0,0/full-opacity/full-size batches). New spec engine2d_embedded_surface_spec 5/5; regressions green (drawing 2/2, clip 3/3, draw_ir_adv 5/5, runtime_queue 1/1, wm_scene_metal_offload 4/4 bit-exact, ui_draw_ir_pipeline 6/6, nomirror mism=0). Side effect (intended): WM batches already set surface_id → opacity_milli=930 for unfocused windows now honored. Mirrors are re-export facades; nothing to sync.

@@ -32,6 +32,9 @@ CSS.
     (cross-engine widget parity gate).
   - [wm_gui_window_drawing](../../feature_expert/wm_gui_window_drawing/skill.md)
     (giant-glyph regression gate; consumer, not owner).
+  - [rendering_inside_rendering](../../feature_expert/rendering_inside_rendering/skill.md)
+    (iframe embedding is implemented INSIDE `simple_web_html_layout_renderer.spl`:
+    replaced element, srcdoc, `space=separate|shared`, `WEB_IFRAME_DEPTH_CAP=3`).
 - Related layer: [os_compositor](../os_compositor/skill.md).
 
 ## Public Contract / Key Entry Points

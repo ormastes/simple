@@ -34,7 +34,10 @@ bridge (`web_render_surface.spl`, `simple_web_window_renderer.spl`).
   is the reference idiom for constructing `HostCompositor` with a fake/headless
   backend and driving it via `apply_bridge_request`).
 - Downstream feature experts depending on this layer:
-  [doc/00_llm_process/feature_expert/wm_gui_window_drawing/skill.md](../../feature_expert/wm_gui_window_drawing/skill.md).
+  [doc/00_llm_process/feature_expert/wm_gui_window_drawing/skill.md](../../feature_expert/wm_gui_window_drawing/skill.md),
+  [doc/00_llm_process/feature_expert/rendering_inside_rendering/skill.md](../../feature_expert/rendering_inside_rendering/skill.md)
+  (nested `WmContentFrame` compositing: `parent_window_id`/offsets, `WM_CONTENT_ORIGIN_GUI`,
+  producers `wm_gui_content_frame_from_pixels` / `simple_web_child_content_frame_cached`).
 
 ## Update Rule
 
