@@ -25,7 +25,7 @@ full CLI relink. Expensive boundaries are explicit:
 | Linux | Portable fingerprint pruning; dynload-only default | PASS: Stage 2/3, no Cargo, no Stage 4; 54 seconds |
 | macOS | `shasum`, `gtimeout`, Homebrew prefix, LLVM-major validation | Static contract only; no macOS host available |
 | Windows | Git Bash/`.cmd` entrypoints, MinGW/MSVC triples, `.exe`/`.lib`, WFFI/DLL names | Rust host check PASS; no Windows host available |
-| FreeBSD | Shared wrapper, portable hashes/timeouts, canonical QEMU flow, 600-second pristine-image SSH wait, nested-worktree rsync exclusions | Smoke PASS on FreeBSD 14.3; full mode remains pending |
+| FreeBSD | Shared wrapper, portable hashes/timeouts, canonical QEMU flow, 900-second pristine-image SSH wait, nested-worktree rsync exclusions | Smoke PASS on FreeBSD 14.3; full mode remains pending |
 
 ## FreeBSD Evidence and Remaining Gate
 
@@ -65,3 +65,21 @@ sh scripts/check/check-freebsd-bootstrap-qemu.shs --full
   available in this workspace.
 - PENDING: one fresh FreeBSD QEMU `--full` run after the three-cycle session
   limit resets.
+
+## Remote-Main Recheck (2026-07-11)
+
+- GitHub `main` at `fab59408bfaf` still contains `3a044561a84e`; GitHub reports
+  the target is 89 commits behind and 0 commits divergent.
+- No relevant changed path contains Git conflict markers, and the index has no
+  unresolved merge entries.
+- PASS: `sh scripts/check/check-bootstrap-portability.shs`.
+- PASS: an isolated archive of `fab59408bfaf` completed pure-Simple Linux
+  Stage 2/3 dynload bootstrap with no Stage 4 relink.
+- FreeBSD full mode booted the pristine guest and reached `sshd`, but the
+  image's mandatory update requested a reboot as the 600-second SSH budget
+  expired. The checker now fails immediately if QEMU exits during either SSH
+  wait and defaults to 900 seconds. The three-cycle cap prevented another run.
+- A focused production-consumer probe built and rebuilt a two-module dynload
+  fixture successfully, then `bin/simple <refreshed-main.smf>` exited 1 with
+  `file not found`. No fake or knowingly failing spec was committed; production
+  SMF dispatch remains a concrete loader/runtime blocker.

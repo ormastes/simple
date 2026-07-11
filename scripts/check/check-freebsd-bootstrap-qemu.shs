@@ -28,7 +28,7 @@ QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
 QEMU_MEM="${QEMU_MEM:-4G}"
 QEMU_CPUS="${QEMU_CPUS:-4}"
-QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-600}"
+QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-900}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
 FREEBSD_VERSION="14.3"
 FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
@@ -229,12 +229,21 @@ if ! qemu-system-x86_64 \
     fail "QEMU failed to start"
 fi
 
-if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-    pass "QEMU started (pid=$(cat "$PID_FILE"), accel=${ACCEL})"
+QEMU_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
+    pass "QEMU started (pid=${QEMU_PID}, accel=${ACCEL})"
 else
     [ -s "$QEMU_START_LOG" ] && tail -10 "$QEMU_START_LOG" >&2
     fail "QEMU failed to start"
 fi
+
+require_qemu_alive() {
+    if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+        [ -s "$QEMU_START_LOG" ] && tail -10 "$QEMU_START_LOG" >&2
+        [ -s "$SERIAL_LOG" ] && tail -20 "$SERIAL_LOG" >&2
+        fail "QEMU exited while waiting for SSH"
+    fi
+}
 
 # ── SSH Connectivity ───────────────────────────────────────────────────
 printf '[6/7] SSH connectivity\n'
@@ -248,6 +257,7 @@ CONNECTED=0
 
 info "Waiting for SSH (up to ${SSH_TIMEOUT}s)..."
 while [ "$ELAPSED" -lt "$SSH_TIMEOUT" ]; do
+    require_qemu_alive
     if $SSH_CMD true 2>/dev/null; then
         CONNECTED=1
         break
@@ -273,6 +283,7 @@ info "Waiting for root SSH (up to ${QEMU_ROOT_SSH_TIMEOUT}s after initial connec
 ROOT_ELAPSED=0
 ROOT_OK=0
 while [ "$ROOT_ELAPSED" -lt "$QEMU_ROOT_SSH_TIMEOUT" ]; do
+    require_qemu_alive
     if $ROOT_SSH_CMD true 2>/dev/null; then
         ROOT_OK=1
         break

@@ -8,9 +8,13 @@
 - Rust `simple-runtime` and `simple-compiler` host checks: PASS.
 - Portable macOS/Windows paths are implemented but not executed on native
   hosts.
-- Full FreeBSD verification reached the mandatory three-cycle cap after
-  exposing rsync duplication, monolithic Stage 4 cost, and stale QEMU startup
-  state. All three defects are patched; the final full run remains pending.
+- A 2026-07-11 full FreeBSD cycle booted the pristine guest and reached `sshd`,
+  but cloud-init requested a reboot as the old 600-second budget expired. The
+  checker now monitors QEMU during SSH waits and defaults to 900 seconds; one
+  final full run remains pending after the three-cycle cap resets.
+- A two-module production-consumer probe rebuilt dynload artifacts but exposed
+  a real `bin/simple <main.smf>` `file not found` failure. Consumer dispatch is
+  blocked on loader/runtime ownership, not missing test assertions.
 
 ## Remaining Work
 
@@ -51,6 +55,11 @@
    Acceptance: edit one leaf `.spl`, rebuild only that module, observe a cache
    hit for unchanged modules, and execute the changed behavior through the
    production launcher without replacing the monolithic CLI.
+
+   Current blocker: reproduce and fix production `.smf` file dispatch. Keep
+   the integration spec out of release gates until it launches the real
+   refreshed artifact and can assert behavior, cache hits, and unchanged
+   launcher identity without mocks or source-text checks.
 
 5. After all native-host gates pass, update the status report, close TODO rows,
    and run the normal verify/release process. Do not use a Rust seed fallback as
