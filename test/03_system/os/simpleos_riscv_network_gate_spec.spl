@@ -260,6 +260,35 @@ fn expect_qemu_deferred_script_contract(path: text):
     expect(http_tests).to_be_greater_than(deferred_marker)
 
 describe "SimpleOS RISC-V QEMU HTTP scripts":
+    it "requires live POST database state evidence beyond boot readiness":
+        step("Inspect the live guest request client")
+        val smoke = rt_file_read_text("scripts/qemu/qemu_rv64_http_test.shs")
+        val checker = rt_file_read_text("scripts/qemu/check_simpleos_rv64_db_server.shs")
+
+        expect(smoke).to_contain("--with-db")
+        expect(smoke).to_contain("WITH_DB=true\n      WITH_STORAGE=true")
+        expect(smoke).to_contain("printf 'POST /db HTTP/1.0")
+
+        step("Require CREATE INSERT and SELECT in one boot session")
+        val create = smoke.find("db_request 'CREATE codex'")
+        val insert = smoke.find("db_request 'INSERT codex answer codex-41'")
+        val select = smoke.find("db_request 'SELECT codex answer'")
+        expect(create).to_be_greater_than(-1)
+        expect(insert).to_be_greater_than(create)
+        expect(select).to_be_greater_than(insert)
+
+        step("Reject readiness-only retained evidence")
+        expect(checker).to_contain("[ -f \"$db_query_log\" ] || fail \"db_query_log_missing\"")
+        expect(checker).to_contain("grep -c 'HTTP/1.1 200 OK' \"$db_query_log\"")
+        expect(checker).to_contain("grep -q 'OK CREATE' \"$db_query_log\"")
+        expect(checker).to_contain("grep -q 'OK INSERT' \"$db_query_log\"")
+        val readiness = checker.find("pass \"serial_live_request_path_ready\"")
+        val selected_value = checker.find("grep -q 'codex-41' \"$db_query_log\"")
+        val connected = checker.find("pass \"simpleos_rv64_db_server_connected\"")
+        expect(readiness).to_be_greater_than(-1)
+        expect(selected_value).to_be_greater_than(readiness)
+        expect(connected).to_be_greater_than(selected_value)
+
     it "keeps the RV64 smoke script explicit about the deferred boundary":
         expect_qemu_deferred_script_contract("scripts/qemu/qemu_rv64_http_test.shs")
         val script = rt_file_read_text("scripts/qemu/qemu_rv64_http_test.shs")

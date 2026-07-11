@@ -216,7 +216,6 @@ pub fn vfs_boot_init_production() -> bool:
     true
 
 struct VfsBootMemorySwapRange:
-    marker_lba: u64
     base_lba: u64
     capacity_slots: u64
 
@@ -230,38 +229,15 @@ fn vfs_boot_memory_swap_range(volume_sectors: u64, volume_sector_size: u32, name
     if base_lba >= namespace_sectors:
         return nil
     val sectors_per_slot = (4096 + namespace_sector_size.to_u64() - 1) / namespace_sector_size.to_u64()
-    val capacity_slots_with_marker = (namespace_sectors - base_lba) / sectors_per_slot
-    if capacity_slots_with_marker <= 1:
+    val capacity_slots = (namespace_sectors - base_lba) / sectors_per_slot
+    if capacity_slots == 0:
         return nil
-    Some(VfsBootMemorySwapRange(
-        marker_lba: base_lba,
-        base_lba: base_lba + sectors_per_slot,
-        capacity_slots: capacity_slots_with_marker - 1
-    ))
-
-fn _vfs_boot_claim_memory_swap_tail(marker_lba: u64, sector_size: u32) -> bool:
-    var marker: [u8] = rt_array_new_with_cap(sector_size.to_i64())
-    var i: u32 = 0
-    while i < sector_size:
-        rt_typed_bytes_u8_push(marker, 0)
-        i = i + 1
-    val magic: [u8] = [83, 73, 77, 80, 83, 87, 65, 80, 1]
-    var m: u64 = 0
-    while m < magic.len():
-        marker[m as i64] = magic[m as i64]
-        m = m + 1
-    val device_impl = BootNvmeBlockDevice(sector_size_bytes: sector_size)
-    val written = device_impl.write_sector(marker_lba, marker)
-    match written:
-        Ok(ok): ok
-        Err(_): false
+    Some(VfsBootMemorySwapRange(base_lba: base_lba, capacity_slots: capacity_slots))
 
 fn _vfs_boot_install_memory_swap() -> text:
     match vfs_boot_memory_swap_range(g_boot_fat32_total_sectors, g_boot_fat32_bytes_per_sector, g_nvme.get_sector_count(), g_nvme.get_sector_size()):
         nil: "unavailable:no-dedicated-range"
         swap_range:
-            if not _vfs_boot_claim_memory_swap_tail(swap_range.marker_lba, g_nvme.get_sector_size()):
-                return "unavailable:swap-tail-ownership"
             val device_impl = BootNvmeBlockDevice(sector_size_bytes: g_nvme.get_sector_size())
             val device: BlockDevice = device_impl
             memory_swap_runtime_install_block_device(device, swap_range.base_lba, swap_range.capacity_slots)

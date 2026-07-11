@@ -305,7 +305,11 @@ impl LlvmBackend {
                     if module_ir.extern_fn_names.contains(name) {
                         continue;
                     }
-                    if !self.data_exports.contains(name) && !module_ir.local_globals.contains(name) {
+                    let local_init = module_ir.global_init_values.get(name);
+                    if !self.data_exports.contains(name)
+                        && !module_ir.local_globals.contains(name)
+                        && local_init.is_none()
+                    {
                         continue;
                     }
                     if m.get_global(name).is_some() || m.get_function(name).is_some() {
@@ -313,6 +317,9 @@ impl LlvmBackend {
                     }
                     let global = m.add_global(rv_type, None, name);
                     global.set_constant(!is_store);
+                    if let Some(value) = local_init {
+                        global.set_initializer(&rv_type.const_int(*value as u64, true));
+                    }
                     global.set_linkage(inkwell::module::Linkage::External);
                 }
             }
@@ -783,16 +790,10 @@ impl LlvmBackend {
         };
 
         let freestanding_riscv32_features = std::env::var("SIMPLE_RISCV32_LLVM_FEATURES").ok();
-        let hosted_riscv64_features = if std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1") {
-            "+m,+a,+f,+d,+c,+v"
-        } else {
-            "+m,+a,+f,+d,+c"
-        };
         let features = match self.target.arch {
             TargetArch::Riscv32 if is_freestanding => freestanding_riscv32_features.as_deref().unwrap_or("+m,+a,+c"),
             TargetArch::Riscv32 => "+m,+a,+c",
-            TargetArch::Riscv64 if is_freestanding => "+m,+a,+c",
-            TargetArch::Riscv64 => hosted_riscv64_features,
+            TargetArch::Riscv64 => "+m,+a,+c",
             _ => "",
         };
 

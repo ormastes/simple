@@ -4,22 +4,27 @@
 use app.t32_cli.types.{T32BridgeResult}
 use app.t32_cli.bridge.{bridge_sessions_list, bridge_session_open, bridge_session_resume, bridge_session_close, bridge_session_info, bridge_core_list, bridge_core_select, bridge_cmd_run, bridge_cmm_run, bridge_eval, bridge_window_list, bridge_window_open, bridge_window_capture, bridge_window_describe, bridge_screenshot, bridge_action_invoke, bridge_action_list, bridge_field_get, bridge_field_set, bridge_history_tail, bridge_resources_list, bridge_resource_read, bridge_setup_headless, bridge_area_read, bridge_cmm_commands, bridge_cmm_validate, bridge_status_snapshot, bridge_error_check, bridge_job_list, bridge_job_get, bridge_job_cancel, bridge_job_result, bridge_dialog_parse, bridge_dialog_get, bridge_dialog_set, bridge_dialog_click}
 use app.t32_cli.render.{render_result, render_error}
-use app.t32_cli.commands.{all_top_level_names, subcmds_for}
+use app.t32_cli.commands.{all_top_level_names, subcmds_for, find_shared_access_command}
 use app.t32_cli.cli_shell.{start_t32_shell}
 use app.t32_cli.error_codes.{t32_err_unknown_cmd, t32_err_unknown_subcmd, t32_err_missing_args}
+use common.ui.access_cli_grammar.{AccessError, access_render_json, access_error_to_json, ACCESS_OUTPUT_HUMAN, ACCESS_OUTPUT_JSON}
 
 extern fn sys_get_args() -> [text]
+
+var t32_access_operation = ""
+var t32_access_output_mode = ACCESS_OUTPUT_HUMAN
 
 fn t32_cli_main(args: [text]):
     if args.len() == 0:
         print_usage()
         return
 
-    val cmd = args[0]
+    val dispatch_args = prepare_access_args(args)
+    val cmd = dispatch_args[0]
     var rest: [text] = []
     var i = 1
-    while i < args.len():
-        rest.push(args[i])
+    while i < dispatch_args.len():
+        rest.push(dispatch_args[i])
         i = i + 1
 
     match cmd:
@@ -62,8 +67,77 @@ fn main():
 
 fn print_bridge(result: Result<T32BridgeResult, text>):
     match result:
-        Ok(r): print render_result(r)
-        Err(e): print render_error(e)
+        Ok(r):
+            var normalized = r
+            if t32_access_operation != "":
+                normalized.operation = t32_access_operation
+                normalized.source_id = "t32"
+            if t32_access_output_mode == ACCESS_OUTPUT_JSON and t32_access_operation != "":
+                print access_render_json(normalized)
+            else:
+                print render_result(normalized)
+        Err(e): print_access_error(e, true)
+
+fn print_access_error(message: text, decorate_human: bool):
+    if t32_access_output_mode == ACCESS_OUTPUT_JSON and t32_access_operation != "":
+        print access_error_to_json(t32_access_operation, "", t32_map_access_error(message))
+    elif decorate_human:
+        print render_error(message)
+    else:
+        print message
+
+fn t32_map_access_error(message: text) -> AccessError:
+    val lower = message.to_lower()
+    var code = "source_unavailable"
+    var retryable = true
+    if lower.contains("required") or lower.contains("invalid") or message.starts_with("T400"):
+        code = "invalid_argument"
+        retryable = false
+    elif lower.contains("not found") or message.starts_with("T4030") or message.starts_with("T4050"):
+        code = "target_not_found"
+        retryable = false
+    elif lower.contains("disabled"):
+        code = "target_disabled"
+        retryable = false
+    elif lower.contains("busy"):
+        code = "target_busy"
+    elif lower.contains("timeout") or lower.contains("timed out"):
+        code = "timeout"
+    elif lower.contains("permission") or lower.contains("denied"):
+        code = "permission_denied"
+        retryable = false
+    elif lower.contains("unsupported") or lower.contains("no capture command") or lower.contains("no open command"):
+        code = "unsupported_action"
+        retryable = false
+    AccessError.detailed(code, message, t32_source_code(message), "", retryable, false)
+
+fn t32_source_code(message: text) -> text:
+    if message.len() >= 5 and message.starts_with("T4"):
+        return message.slice(0, 5)
+    ""
+
+fn prepare_access_args(args: [text]) -> [text]:
+    t32_access_operation = ""
+    t32_access_output_mode = ACCESS_OUTPUT_HUMAN
+    val name = args[0]
+    var subcmd = ""
+    if (name == "window" or name == "action") and args.len() > 1:
+        subcmd = args[1]
+    match find_shared_access_command(name, subcmd):
+        Some(descriptor):
+            t32_access_operation = descriptor.operation
+            if has_flag(args, "--json"):
+                t32_access_output_mode = ACCESS_OUTPUT_JSON
+                return without_flag(args, "--json")
+        nil: ()
+    args
+
+fn without_flag(args: [text], flag: text) -> [text]:
+    var filtered: [text] = []
+    for arg in args:
+        if arg != flag:
+            filtered.push(arg)
+    filtered
 
 # --- Help ---
 
@@ -85,21 +159,21 @@ fn print_usage():
     print "  eval <expression>           Evaluate TRACE32 expression"
     print ""
     print "Window Commands:"
-    print "  windows                     List available windows"
-    print "  window show <key>           Capture window content"
+    print "  windows [--json]            List available windows"
+    print "  window show <key> [--json]  Capture window content"
     print "  window open <key>           Open a TRACE32 window"
-    print "  window describe <key>       Describe window actions/fields"
+    print "  window describe <key> [--json]  Describe window actions/fields"
     print "  screenshot <key> [path]     Save window screenshot"
     print ""
     print "Field/Action Commands:"
     print "  field get <key>             Get field value"
     print "  field set <key> <value>     Set field value"
-    print "  action do <key> [args]      Execute an action"
-    print "  action list [window_key]    List actions"
+    print "  action do <key> [args] [--json]  Execute an action"
+    print "  action list [window_key] [--json]  List actions"
     print ""
     print "Observability Commands:"
     print "  status                      Show CPU run state"
-    print "  history [count]             Show command history"
+    print "  history [count] [--json]    Show command history"
     print "  resources list              List MCP resources"
     print "  resource read <uri>         Read resource by URI"
     print "  error-check                 Check TRACE32 error state"
@@ -221,7 +295,7 @@ fn cmd_windows(args: [text]):
 
 fn cmd_window(args: [text]):
     if args.len() < 2:
-        print t32_err_missing_args("window", "window <show|open|describe> <key>", "window show register")
+        print_access_error(t32_err_missing_args("window", "window <show|open|describe> <key>", "window show register"), false)
         return
 
     val sub = args[0]
@@ -231,7 +305,7 @@ fn cmd_window(args: [text]):
         "show": print_bridge(bridge_window_capture(key))
         "open": print_bridge(bridge_window_open(key))
         "describe": print_bridge(bridge_window_describe(key))
-        _: print t32_err_unknown_subcmd("window", sub, subcmds_for("window"))
+        _: print_access_error(t32_err_unknown_subcmd("window", sub, subcmds_for("window")), false)
 
 fn cmd_screenshot(args: [text]):
     if args.len() == 0:
@@ -265,21 +339,21 @@ fn cmd_field(args: [text]):
 
 fn cmd_action(args: [text]):
     if args.len() == 0:
-        print t32_err_missing_args("action", "action <do|list> [key]", "action do step_into")
+        print_access_error(t32_err_missing_args("action", "action <do|list> [key]", "action do step_into"), false)
         return
 
     val sub = args[0]
     match sub:
         "do":
             if args.len() < 2:
-                print t32_err_missing_args("action do", "action do <key> [args]", "action do step_into")
+                print_access_error(t32_err_missing_args("action do", "action do <key> [args]", "action do step_into"), false)
                 return
             val extra_args = if args.len() > 2: args[2] else: ""
             print_bridge(bridge_action_invoke(args[1], extra_args))
         "list":
             val window_filter = if args.len() > 1: args[1] else: ""
             print_bridge(bridge_action_list(window_filter))
-        _: print t32_err_unknown_subcmd("action", sub, subcmds_for("action"))
+        _: print_access_error(t32_err_unknown_subcmd("action", sub, subcmds_for("action")), false)
 
 # --- Observability Commands ---
 

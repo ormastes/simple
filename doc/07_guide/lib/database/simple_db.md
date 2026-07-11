@@ -3,9 +3,18 @@
 Simple DB is a two-tier database system written in Simple:
 
 - **Simple DB Embedded** (stdlib) — lightweight embedded database for compiler metadata, project tracking, and application-level key-value/table storage. Ships with every Simple installation. Uses SDN format with atomic file I/O.
-- **Simple DB Full** (example) — full-featured PostgreSQL-compatible storage engine with MVCC, WAL, TOAST, B-tree indexing, and NVFS-backed append-only storage. Lives in `examples/11_advanced/simple_db/`.
+- **Simple DB Full** (historical example) — its submodule history is recoverable,
+  but the recorded implementation is an unfinished skeleton with `pass_todo`;
+  it is not a working server and is not present in the current worktree.
 
-Both tiers share a common trait interface (`simple_db_if`) and reuse core logic (SDN parsing, atomic I/O, QueryBuilder, string interning) from the stdlib. The full engine extends the embedded foundation with transactional storage, buffer management, and recovery.
+The embedded and planned full tiers share `simple_db_if`. SimpleOS now has a
+bounded persistent boot-service core at
+`src/os/services/database/simple_db_service.spl`. The existing boot HTTP
+listener routes `POST /db` bodies through `CREATE table`,
+`INSERT table key value`, and `SELECT table key`; other web requests keep the
+existing response path. This source path is not a live-QEMU claim. The canonical
+RV64 gate must return the inserted `codex-41` value; readiness strings alone
+still fail.
 
 ```
 ┌──────────────────────────────────────────────────┐

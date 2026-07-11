@@ -19,21 +19,12 @@ strict layout-rendering fix. Scalar/SIMD-labeled outputs remain bit-identical,
 but the retained constants are not updated because the lane reports zero SIMD
 provider and native hits.
 
-The strict C-kernel matrix executes x86_64, AArch64, and RISC-V target binaries.
-The separate `check-llvm-simd-row-native-arch.shs` self-hosted matrix now
-executes exact, vectorized x86_64, AArch64, and RISC-V row probes. The broader
-Engine2D matrix in `cpu_simd_engine2d_arch_matrix_2026-07-10.md` still has zero
-passing Simple lanes and is not superseded by that focused result. A prototype
-that routed opaque square browser backgrounds through the existing native span
-ABI was rejected after three capped verification cycles because its AOT fixture
-did not prove the expected inline-style color and produced zero native hits.
-Both root runtime blockers are now resolved: array concatenation is linked and
-dynamic array indices are decoded from tagged values. The strengthened scalar
-AOT fixture proves exact inline-style geometry and color. Native exporter
-argument parsing still double-unboxes string integers (`3840x2160` becomes
-`480x270` after a dynload bootstrap that skipped the full CLI relink); see
-`doc/08_tracking/bug/self_hosted_cranelift_string_to_int_double_unbox_2026-07-10.md`.
-CPU-SIMD routing, full-size performance, and RSS evidence remain open.
+The strict C-kernel matrix executes x86_64, AArch64, and RISC-V target binaries;
+the separate RVV row is compile-only. The Simple architecture lanes have zero
+passes. A Simple x86_64 span probe compiles to an ELF binary containing the
+fill-row/fill-span symbols, but exits `1`; disassembly shows dynamic array
+length folded to zero. Native quality and architecture-complete Simple
+binaries remain open.
 
 ## CPU Library Comparison
 

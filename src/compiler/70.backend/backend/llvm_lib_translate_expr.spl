@@ -420,68 +420,44 @@ fn translate_cast(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                   func_map: {text: i64}) -> {i64: i64}:
     var local_value_map: Dict<i64, i64> = value_map
     val op_val = translate_operand(ctx, mod_, builder, tm, operand, value_map, local_types, func_map)
-    val src_ty_ref = get_operand_type_ref(operand, local_types, tm)
     val target_ty = tm.map_type(target)
-    val src_ty_kind = llvm_get_type_kind(src_ty_ref)
-    val dst_ty_kind = llvm_get_type_kind(target_ty)
-
-    # Type kind constants (from LLVM)
-    # 0=Void, 2=Float, 3=Double, 7=Label, 10=Integer, 11=Function, 12=Struct, 14=Pointer
-    val TK_FLOAT = 2
-    val TK_DOUBLE = 3
-    val TK_INTEGER = 8   # LLVM C API: 8=Integer (was 10=Struct)
-    val TK_POINTER = 12  # LLVM C API: 12=Pointer (was 14=Metadata)
-
-    val src_is_int = src_ty_kind == TK_INTEGER
-    val src_is_float = src_ty_kind == TK_FLOAT or src_ty_kind == TK_DOUBLE
-    val src_is_ptr = src_ty_kind == TK_POINTER
-    val dst_is_int = dst_ty_kind == TK_INTEGER
-    val dst_is_float = dst_ty_kind == TK_FLOAT or dst_ty_kind == TK_DOUBLE
-    val dst_is_ptr = dst_ty_kind == TK_POINTER
-
-    val result = if src_is_int and dst_is_int:
-        # Int-to-int: sext, trunc, or zext depending on sizes
-        # Use sext for signed widening, trunc for narrowing
-        val src_bits = get_int_type_width(src_ty_ref)
-        val dst_bits = get_int_type_width(target_ty)
-        if src_bits < dst_bits:
-            if src_bits == 1:
-                llvm_build_zext(builder, op_val, target_ty, "cast")
-            else:
-                llvm_build_sext(builder, op_val, target_ty, "cast")
-        elif src_bits > dst_bits:
-            llvm_build_trunc(builder, op_val, target_ty, "cast")
-        else:
-            op_val
-    elif src_is_int and dst_is_float:
-        llvm_build_si_to_fp(builder, op_val, target_ty, "cast")
-    elif src_is_float and dst_is_int:
-        llvm_build_fp_to_si(builder, op_val, target_ty, "cast")
-    elif src_is_float and dst_is_float:
-        val src_bits = if src_ty_kind == TK_FLOAT: 32 else: 64
-        val dst_bits = if dst_ty_kind == TK_FLOAT: 32 else: 64
-        if src_bits < dst_bits:
-            llvm_build_fpext(builder, op_val, target_ty, "cast")
-        elif src_bits > dst_bits:
-            llvm_build_fptrunc(builder, op_val, target_ty, "cast")
-        else:
-            op_val
-    elif src_is_ptr and dst_is_int:
-        llvm_build_ptr_to_int(builder, op_val, target_ty, "cast")
-    elif src_is_int and dst_is_ptr:
-        llvm_build_int_to_ptr(builder, op_val, target_ty, "cast")
-    else:
-        llvm_build_bitcast(builder, op_val, target_ty, "cast")
-
-    local_value_map[dest.id] = result
+    local_value_map[dest.id] = coerce_llvm_value(builder, op_val, target_ty)
     local_value_map
-
-fn get_int_type_width(ty: i64) -> i64:
-    llvm_get_int_type_width(ty)
 
 # ============================================================================
 # Call Translation
 # ============================================================================
+
+fn coerce_llvm_value(builder: i64, value: i64, target_ty: i64) -> i64:
+    val source_ty = llvm_type_of(value)
+    if source_ty == target_ty:
+        return value
+
+    val source_kind = llvm_get_type_kind(source_ty)
+    val target_kind = llvm_get_type_kind(target_ty)
+    if source_kind == 8 and target_kind == 8:
+        val source_bits = llvm_get_int_type_width(source_ty)
+        val target_bits = llvm_get_int_type_width(target_ty)
+        if source_bits > target_bits:
+            return llvm_build_trunc(builder, value, target_ty, "coerce")
+        if source_bits == 1:
+            return llvm_build_zext(builder, value, target_ty, "coerce")
+        return llvm_build_sext(builder, value, target_ty, "coerce")
+    if source_kind == 8 and (target_kind == 2 or target_kind == 3):
+        return llvm_build_si_to_fp(builder, value, target_ty, "coerce")
+    if (source_kind == 2 or source_kind == 3) and target_kind == 8:
+        return llvm_build_fp_to_si(builder, value, target_ty, "coerce")
+    if (source_kind == 2 or source_kind == 3) and (target_kind == 2 or target_kind == 3):
+        if source_kind == 2 and target_kind == 3:
+            return llvm_build_fpext(builder, value, target_ty, "coerce")
+        if source_kind == 3 and target_kind == 2:
+            return llvm_build_fptrunc(builder, value, target_ty, "coerce")
+        return value
+    if source_kind == 8 and target_kind == 12:
+        return llvm_build_int_to_ptr(builder, value, target_ty, "coerce")
+    if source_kind == 12 and target_kind == 8:
+        return llvm_build_ptr_to_int(builder, value, target_ty, "coerce")
+    llvm_build_bitcast(builder, value, target_ty, "coerce")
 
 fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                   dest: LocalId?, func: MirOperand, args: [MirOperand],
@@ -512,8 +488,9 @@ fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
 
     # Build args
     var arg_vals: [i64] = []
+    var arg_i = 0
     for arg in args:
-        val arg_val = translate_operand(ctx, mod_, builder, tm, arg, value_map, local_types, func_map)
+        var arg_val = translate_operand(ctx, mod_, builder, tm, arg, value_map, local_types, func_map)
         if arg_val == 0:
             # A null LLVMValueRef argument segfaults inside LLVMBuildCall2 (or
             # fails verification as "Operand is null"). Name the operand kind so
@@ -523,9 +500,11 @@ fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                 case Move(local): "Move#" + local.id.to_text()
                 case Const(_, _): "Const"
             eprint("[llvm-lib] ERROR: call arg translated to null (" + arg_desc + ") for callee '" + fn_name + "' — substituting i64 0 to avoid segfault")
-            arg_vals.push(llvm_const_int(llvm_int64_type_in_context(ctx), 0, true))
-        else:
-            arg_vals.push(arg_val)
+            arg_val = llvm_const_int(llvm_int64_type_in_context(ctx), 0, true)
+        if arg_i < llvm_count_params(func_ref):
+            arg_val = coerce_llvm_value(builder, arg_val, llvm_type_of(llvm_get_param(func_ref, arg_i)))
+        arg_vals.push(arg_val)
+        arg_i = arg_i + 1
 
     # Get function type — use LLVMGlobalGetValueType for opaque pointers (LLVM 15+)
     val fn_ty = llvm_global_get_value_type(func_ref)
@@ -564,8 +543,9 @@ fn translate_call_indirect(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMap
 
     # Build args
     var arg_vals: [i64] = []
+    var arg_i = 0
     for arg in args:
-        val arg_val = translate_operand(ctx, mod_, builder, tm, arg, value_map, local_types, func_map)
+        var arg_val = translate_operand(ctx, mod_, builder, tm, arg, value_map, local_types, func_map)
         if arg_val == 0:
             # A null LLVMValueRef argument segfaults inside LLVMBuildCall2.
             # Name the operand kind so the producing translation path is
@@ -575,9 +555,11 @@ fn translate_call_indirect(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMap
                 case Move(local): "Move#" + local.id.to_text()
                 case Const(_, _): "Const"
             eprint("[llvm-lib] ERROR: indirect call arg translated to null (" + arg_desc + ") — substituting i64 0 to avoid segfault")
-            arg_vals.push(llvm_const_int(llvm_int64_type_in_context(ctx), 0, true))
-        else:
-            arg_vals.push(arg_val)
+            arg_val = llvm_const_int(llvm_int64_type_in_context(ctx), 0, true)
+        if arg_i < param_types.len():
+            arg_val = coerce_llvm_value(builder, arg_val, param_types[arg_i])
+        arg_vals.push(arg_val)
+        arg_i = arg_i + 1
 
     val call_name = if dest.?: "icall" else: ""
     val call_val = llvm_build_call2(builder, fn_ty, fn_ptr, arg_vals, call_name)
@@ -626,8 +608,9 @@ fn translate_intrinsic(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
         return local_value_map
 
     var arg_vals: [i64] = []
+    var arg_i = 0
     for arg in args:
-        val arg_val = translate_operand(ctx, mod_, builder, tm, arg, value_map, local_types, func_map)
+        var arg_val = translate_operand(ctx, mod_, builder, tm, arg, value_map, local_types, func_map)
         if arg_val == 0:
             # A null LLVMValueRef argument segfaults inside LLVMBuildCall2.
             # Name the operand kind so the producing translation path is
@@ -637,9 +620,11 @@ fn translate_intrinsic(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                 case Move(local): "Move#" + local.id.to_text()
                 case Const(_, _): "Const"
             eprint("[llvm-lib] ERROR: intrinsic call arg translated to null (" + arg_desc + ") for '" + name + "' — substituting i64 0 to avoid segfault")
-            arg_vals.push(llvm_const_int(llvm_int64_type_in_context(ctx), 0, true))
-        else:
-            arg_vals.push(arg_val)
+            arg_val = llvm_const_int(llvm_int64_type_in_context(ctx), 0, true)
+        if arg_i < llvm_count_params(func_ref):
+            arg_val = coerce_llvm_value(builder, arg_val, llvm_type_of(llvm_get_param(func_ref, arg_i)))
+        arg_vals.push(arg_val)
+        arg_i = arg_i + 1
 
     val fn_ty = llvm_global_get_value_type(func_ref)
     val call_name = if dest.?: "intrinsic" else: ""

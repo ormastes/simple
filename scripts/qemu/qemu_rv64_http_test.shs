@@ -23,7 +23,6 @@ cd "$REPO_ROOT"
 ELF="${ELF:-build/os/simpleos_riscv64.elf}"
 HTTP_PORT="${HTTP_PORT:-8080}"
 HTTPS_PORT="${HTTPS_PORT:-8443}"
-DB_PORT="${DB_PORT:-15432}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 SERIAL_LOG="${SERIAL_LOG:-build/qemu-rv64-serial.log}"
 EXPECT_DEFERRED=false
@@ -71,7 +70,7 @@ while [ "$#" -gt 0 ]; do
       echo "  --expect-http-only  Pass the live HTTP gate while HTTPS/TLS remains blocked"
       echo "  --with-display      Expose a virtio-gpu PCI device and require display readiness"
       echo "  --with-storage      Expose a virtio-blk PCI device and require sector-read readiness"
-      echo "  --with-db           Forward host port 15432 to guest DB port 5432 and require a query response"
+      echo "  --with-db           Exercise the guest Simple DB service through POST /db"
       echo "  --allow-prebuilt-artifact"
       echo "                      Permit smoke-only evidence from an ELF without a current-source build stamp"
       exit 0
@@ -177,17 +176,13 @@ STORAGE_ARGS=""
 if [ "$WITH_STORAGE" = "true" ]; then
   STORAGE_ARGS="-drive file=${STORAGE_IMG},format=raw,if=none,id=blk0 -device virtio-blk-pci,drive=blk0"
 fi
-DB_HOSTFWD=""
-if [ "$WITH_DB" = "true" ]; then
-  DB_HOSTFWD=",hostfwd=tcp::${DB_PORT}-:5432"
-fi
 qemu-system-riscv64 \
   -machine virt \
   -cpu rv64 \
   -m 256M \
   -nographic \
   -monitor none \
-  -netdev user,id=net0,hostfwd=tcp::${HTTP_PORT}-:${HTTP_PORT},hostfwd=tcp::${HTTPS_PORT}-:${HTTPS_PORT}${DB_HOSTFWD} \
+  -netdev user,id=net0,hostfwd=tcp::${HTTP_PORT}-:${HTTP_PORT},hostfwd=tcp::${HTTPS_PORT}-:${HTTPS_PORT} \
   -device virtio-net-pci,netdev=net0 \
   ${DISPLAY_ARGS} \
   ${STORAGE_ARGS} \
@@ -271,18 +266,6 @@ while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
 	    if [ "$WITH_STORAGE" = "true" ]; then
 	      echo "  NVFS root superblock verified"
 	    fi
-	    if [ "$WITH_DB" = "true" ] &&
-	      ! grep -Eq "DB service ready|Simple DB server listening" "$SERIAL_LOG" 2>/dev/null; then
-	      sleep 1
-      if ! grep -Eq "DB service ready|Simple DB server listening" "$SERIAL_LOG" 2>/dev/null; then
-        echo "FAILED: DB server was requested but did not become ready" >&2
-        print_serial_tail
-	        exit 1
-	      fi
-	    fi
-	    if [ "$WITH_DB" = "true" ]; then
-	      echo "  DB service verified"
-	    fi
 	    BOOTED=true
     break
   fi
@@ -337,8 +320,17 @@ https_status_code() {
   fi
 }
 
+db_request() {
+  body="$1"
+  length=${#body}
+  printf 'POST /db HTTP/1.0\r\nHost: localhost\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' "$length" "$body" |
+    nc -w 5 localhost "${HTTP_PORT}" 2>/dev/null || true
+}
+
 db_query_response() {
-  printf 'SELECT 1;\n' | nc -w 5 localhost "${DB_PORT}" 2>/dev/null || true
+  db_request 'CREATE codex'
+  db_request 'INSERT codex answer codex-41'
+  db_request 'SELECT codex answer'
 }
 
 # ---- run HTTP tests ----
@@ -406,10 +398,12 @@ else
 fi
 
 if [ "$WITH_DB" = "true" ]; then
-  printf '%s' "  DB SELECT 1... "
+  printf '%s' "  DB CREATE/INSERT/SELECT... "
   DB_RESPONSE=$(db_query_response)
-  if echo "$DB_RESPONSE" | grep -Eq 'result=1|row: 1|DB_QUERY_OK|1'; then
-    echo "PASS"
+  if echo "$DB_RESPONSE" | grep -q 'OK CREATE' &&
+    echo "$DB_RESPONSE" | grep -q 'OK INSERT' &&
+    echo "$DB_RESPONSE" | grep -q 'codex-41'; then
+    echo "PASS (codex-41)"
     PASS=$((PASS + 1))
   else
     echo "FAIL (expected DB query result, got: ${DB_RESPONSE})"

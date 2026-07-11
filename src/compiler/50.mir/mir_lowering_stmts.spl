@@ -90,6 +90,20 @@ impl MirLowering:
                         if symbol_value_id < 0:
                             self.error("let binding has no resolved symbol", Some(span))
                             return
+                        # `val f = \x: ...` -- record the lambda for inline
+                        # beta-reduction at direct call sites (see lower_call's
+                        # try_inline_lambda_call). Emitting no binding here is
+                        # deliberate: the seed's expr lowering has no closure
+                        # representation, so a direct call is the only supported
+                        # use. First-class lambda values remain a gap.
+                        val is_lambda_bind = match let_init.kind:
+                            case Lambda(_, _, _):
+                                true
+                            case _:
+                                false
+                        if is_lambda_bind:
+                            self.lambda_bindings[symbol_value_id] = let_init
+                            return
                         val mir_type = match let_type:
                             case Some(type_value):
                                 self.lower_type(type_value)
@@ -110,7 +124,29 @@ impl MirLowering:
                         # pointer; translate_copy_move keys off the source local),
                         # so value semantics are preserved -- only the read-path
                         # decision is corrected.
+                        # Same preservation for a string binding (`val c = a + b`):
+                        # a `+` concat produces a string temp (Opaque str) but the
+                        # binding's HIR type is nil / a non-string arithmetic type,
+                        # so mir_type defaulted to i64 and `c` lost its string type
+                        # -- a later `c.len` then took the struct get_field path
+                        # (reading the first byte / nil-deref -> SIGSEGV) instead
+                        # of rt_strlen. When the initializer is a real string
+                        # value, thread its string MIR type onto the binding
+                        # regardless of the (unreliable) inferred let_type.
+                        # Same preservation for a float binding (`val y = x * 4.0`):
+                        # the inferred let_type is unreliably non-nil (i64) on this
+                        # path, so mir_type defaulted to i64, the binding's SSA
+                        # spill slot was alloca'd i64, and the f64 value
+                        # round-tripped through fptosi/store i64 (10.0 -> 10),
+                        # degrading later comparisons to icmp on truncated ints.
+                        # When the initializer is a real float value, thread its
+                        # F64/F32 MIR type onto the binding (same rationale as the
+                        # string case above).
                         val effective_type = if let_type == nil and self.local_is_runtime_array(init_local):
+                            self.local_mir_type_of(init_local) ?? mir_type
+                        else if self.local_is_str(init_local):
+                            self.local_mir_type_of(init_local) ?? mir_type
+                        else if self.local_is_float(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else:
                             mir_type
@@ -220,6 +256,8 @@ impl MirLowering:
                         # Let today -- disc==1 handles it above -- but kept in sync
                         # so the two paths cannot silently diverge.)
                         val effective_type = if type_ == nil and has_init and self.local_is_runtime_array(init_local):
+                            self.local_mir_type_of(init_local) ?? mir_type
+                        else if has_init and self.local_is_float(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else:
                             mir_type

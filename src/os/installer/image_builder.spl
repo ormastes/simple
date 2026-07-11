@@ -136,6 +136,11 @@ impl ImageBuilder:
     fn build() -> Result<text, text>:
         val arch_name = pkg_arch_to_text(self.config.arch)
         val artifact_kind = if self.config.include_installer: "installer-dvd" else: "disk-image"
+        val simple_binary = _effective_simple_binary(self.config)
+        if simple_binary != "":
+            val simple_check = _validate_simple_binary(simple_binary, self.config.arch)
+            if val Err(e) = simple_check:
+                return Err(e)
         print "Creating {artifact_kind}: {self.config.output_path}"
         print "  Architecture: {arch_name}"
         print "  Size: {self.config.image_size_mb} MB"
@@ -228,15 +233,11 @@ impl ImageBuilder:
         if not rt_file_exists(simple_binary):
             return _manifest_file("/SYS/SIMPLETOOL.SDN", "simple-toolchain-missing", "simpleos-tools")
 
-        val payload = rt_file_read_bytes(simple_binary) ?? []
-        if payload.len() == 0:
-            return _manifest_file("/SYS/SIMPLETOOL.SDN", "simple-toolchain-empty", "simpleos-tools")
-
         var manifest = ""
         for guest_path in _SIMPLE_TOOLCHAIN_ROLE_PATHS:
             val target_path = "{rootfs_root}{guest_path}"
             _ensure_parent_dirs(rootfs_root, guest_path)
-            val ok = rt_file_write_bytes(target_path, payload)
+            val ok = _copy_file(simple_binary, target_path)
             if ok:
                 manifest = manifest + _manifest_file(guest_path, "simple-toolchain-role", "simpleos-tools")
 
@@ -761,14 +762,47 @@ fn _effective_simple_binary(config: ImageConfig) -> text:
         "bin/release/x86_64-simpleos/simple",
     ]
     for candidate in candidates:
-        if rt_file_exists(candidate):
+        if rt_file_exists(candidate) and rt_file_exists("{candidate}.build_stamp"):
             return candidate
     ""
+
+fn _validate_simple_binary(path: text, arch: PkgArch) -> Result<bool, text>:
+    if not rt_file_exists(path):
+        return Err("SimpleOS Simple payload is missing: {path}")
+    val stamp_path = "{path}.build_stamp"
+    if not rt_file_exists(stamp_path):
+        return Err("SimpleOS Simple payload lacks target provenance: {stamp_path}")
+    val expected_target = match arch:
+        PkgArch.X86_64: "x86_64-unknown-simpleos"
+        PkgArch.Arm64: "aarch64-unknown-simpleos"
+        PkgArch.Riscv64: "riscv64-unknown-simpleos"
+        PkgArch.Riscv32: "riscv32-unknown-simpleos"
+        PkgArch.Any: "x86_64-unknown-simpleos"
+    val stamp = rt_file_read_text(stamp_path)
+    if not stamp.contains("target={expected_target}\n"):
+        return Err("SimpleOS Simple payload target mismatch: expected {expected_target}")
+    if not stamp.contains("entry=src/app/cli/main.spl\n") or not stamp.contains("entry_closure=true\n"):
+        return Err("SimpleOS Simple payload is not the full CLI entry closure")
+
+    val payload = rt_file_read_bytes(path) ?? []
+    if payload.len() < 64 or payload[0] != 0x7fu8 or payload[1] != 0x45u8 or payload[2] != 0x4cu8 or payload[3] != 0x46u8:
+        return Err("SimpleOS Simple payload is not an ELF executable")
+    val expected_class = if arch == PkgArch.Riscv32: 1u8 else: 2u8
+    val expected_machine = match arch:
+        PkgArch.X86_64: 62
+        PkgArch.Arm64: 183
+        PkgArch.Riscv64 | PkgArch.Riscv32: 243
+        PkgArch.Any: 62
+    val machine = (payload[18] as i64) | ((payload[19] as i64) << 8)
+    if payload[4] != expected_class or machine != expected_machine:
+        return Err("SimpleOS Simple payload ELF architecture mismatch")
+    Ok(true)
 
 fn _simple_toolchain_manifest_payload(simple_binary: text) -> text:
     var out = "[simple_toolchain]\n"
     out = out + "status = \"embedded\"\n"
     out = out + "host_payload = \"{simple_binary}\"\n"
+    out = out + "build_stamp = \"{simple_binary}.build_stamp\"\n"
     out = out + "runtime_source = \"simpleos-filesystem\"\n"
     for role_path in _SIMPLE_TOOLCHAIN_ROLE_PATHS:
         out = out + "role = \"{role_path}\"\n"

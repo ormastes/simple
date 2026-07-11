@@ -26,6 +26,7 @@ pub struct StartupLaunchPlan:
     include_dynlib_loader: bool
     load_native_dynlibs: [text]
     load_smf_dynlibs: [text]
+    executable_source: text
     cache_strategy: text
     supported: bool
     error: text
@@ -87,6 +88,19 @@ pub fn launch_metadata_for_simpleos_path(path: text) -> LaunchMetadata:
         required_smf_dynlibs: []
     )
 
+pub fn launch_metadata_for_simpleos_baremetal_path(path: text) -> LaunchMetadata:
+    val metadata = launch_metadata_for_simpleos_path(path)
+    LaunchMetadata(
+        entry_kind: metadata.entry_kind,
+        target_os: metadata.target_os,
+        target_arch: metadata.target_arch,
+        target_abi: "simpleos-baremetal",
+        uses_arg_parser: metadata.uses_arg_parser,
+        mmap_hint: metadata.mmap_hint,
+        required_native_dynlibs: metadata.required_native_dynlibs,
+        required_smf_dynlibs: metadata.required_smf_dynlibs
+    )
+
 fn _has_dynlibs(metadata: LaunchMetadata) -> bool:
     metadata.required_native_dynlibs.len() > 0 or metadata.required_smf_dynlibs.len() > 0
 
@@ -98,6 +112,11 @@ fn _cache_strategy(metadata: LaunchMetadata, host_mmap_supported: bool, simpleos
     if simpleos_cache_supported:
         return "simpleos_vfs_prewarm"
     "normal_read"
+
+fn _executable_source(metadata: LaunchMetadata) -> text:
+    if metadata.target_os == "simpleos" and metadata.target_abi == "simpleos-baremetal":
+        return "baremetal_got"
+    "filesystem"
 
 pub fn startup_plan_from_metadata(entry_path: text, args: [text], metadata: LaunchMetadata, host_mmap_supported: bool, simpleos_cache_supported: bool) -> StartupLaunchPlan:
     val strategy = _cache_strategy(metadata, host_mmap_supported, simpleos_cache_supported)
@@ -115,6 +134,7 @@ pub fn startup_plan_from_metadata(entry_path: text, args: [text], metadata: Laun
         include_dynlib_loader: dynlibs_needed,
         load_native_dynlibs: metadata.required_native_dynlibs,
         load_smf_dynlibs: metadata.required_smf_dynlibs,
+        executable_source: _executable_source(metadata),
         cache_strategy: strategy,
         supported: true,
         error: ""
@@ -123,6 +143,7 @@ pub fn startup_plan_from_metadata(entry_path: text, args: [text], metadata: Laun
 pub fn startup_feature_summary(plan: StartupLaunchPlan) -> text:
     "kind=" + plan.entry_kind +
         "|os=" + plan.target_os +
+        "|source=" + plan.executable_source +
         "|arg_parser=" + plan.include_arg_parser.to_text() +
         "|cache=" + plan.cache_strategy +
         "|dynlib=" + plan.include_dynlib_loader.to_text()

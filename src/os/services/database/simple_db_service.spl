@@ -1,0 +1,109 @@
+"""Small in-memory command core for the SimpleOS database service."""
+
+pub val SIMPLE_DB_MAX_COMMAND_BYTES: i64 = 256
+pub val SIMPLE_DB_MAX_HTTP_BYTES: i64 = 1024
+pub val SIMPLE_DB_MAX_TABLES: i64 = 16
+pub val SIMPLE_DB_MAX_ROWS: i64 = 128
+
+pub fn simple_db_http_request(request: text) -> bool:
+    request.starts_with("POST /db ")
+
+fn _simple_db_http_response(status: text, body: text) -> text:
+    # Hoist body.len() into a local: a method call nested inside string
+    # interpolation loses its result on the RV64 LLVM native path
+    # (chained-method compiler bug) and rendered "Content-Length: -1".
+    val body_len = body.len()
+    "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: {body_len}\r\n\r\n{body}"
+
+struct SimpleDbRow:
+    table: text
+    key: text
+    value: text
+
+class SimpleDbService:
+    tables: [text]
+    rows: [SimpleDbRow]
+
+    static fn new() -> SimpleDbService:
+        SimpleDbService(tables: [], rows: [])
+
+    fn table_count() -> i64: self.tables.len()
+    fn row_count() -> i64: self.rows.len()
+
+    fn has_table(name: text) -> bool:
+        for table in self.tables:
+            if table == name:
+                return true
+        false
+
+    fn has_key(table: text, key: text) -> bool:
+        for row in self.rows:
+            if row.table == table and row.key == key:
+                return true
+        false
+
+    me execute(command: text) -> text:
+        if command.len() == 0:
+            return "ERR empty command"
+        if command.len() > SIMPLE_DB_MAX_COMMAND_BYTES:
+            return "ERR command too long"
+
+        val parts = command.split(" ")
+        if parts.len() == 2 and parts[0] == "CREATE":
+            val table = parts[1]
+            if table == "":
+                return "ERR invalid table"
+            if self.has_table(table):
+                return "ERR table exists"
+            if self.tables.len() >= SIMPLE_DB_MAX_TABLES:
+                return "ERR table limit"
+            self.tables = self.tables.push(table)
+            return "OK CREATE"
+
+        if parts.len() == 4 and parts[0] == "INSERT":
+            val table = parts[1]
+            val key = parts[2]
+            val value = parts[3]
+            if table == "" or key == "" or value == "":
+                return "ERR invalid row"
+            if not self.has_table(table):
+                return "ERR table not found"
+            if self.has_key(table, key):
+                return "ERR key exists"
+            if self.rows.len() >= SIMPLE_DB_MAX_ROWS:
+                return "ERR row limit"
+            self.rows = self.rows.push(SimpleDbRow(table: table, key: key, value: value))
+            return "OK INSERT"
+
+        if parts.len() == 3 and parts[0] == "SELECT":
+            val table = parts[1]
+            val key = parts[2]
+            if not self.has_table(table):
+                return "ERR table not found"
+            for row in self.rows:
+                if row.table == table and row.key == key:
+                    return row.value
+            return "ERR key not found"
+
+        "ERR invalid command"
+
+    me execute_http_request(request: text) -> text:
+        if request.len() > SIMPLE_DB_MAX_HTTP_BYTES:
+            return _simple_db_http_response("413 Payload Too Large", "ERR request too long")
+        if not simple_db_http_request(request):
+            return _simple_db_http_response("404 Not Found", "ERR route not found")
+        val separator = request.find("\r\n\r\n")
+        if separator < 0:
+            return _simple_db_http_response("400 Bad Request", "ERR missing body")
+        # Hoist request.len() into a local: as a nested call argument it
+        # evaluates to nil (-1) on the RV64 LLVM native path (chained-method
+        # compiler bug), making slice(sep+4, -1) drop the body's last byte.
+        val request_len = request.len()
+        val body = request.slice(separator + 4, request_len)
+        val result = self.execute(body.trim())
+        if result.starts_with("ERR"):
+            return _simple_db_http_response("400 Bad Request", result)
+        _simple_db_http_response("200 OK", result)
+
+export SimpleDbService
+export simple_db_http_request

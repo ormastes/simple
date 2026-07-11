@@ -1,0 +1,62 @@
+# codex-impl
+use std.spec.*
+use app.t32_cli.commands.{all_cli_commands, shared_access_commands, find_shared_access_command}
+use app.t32_cli.types.{T32BridgeResult}
+use app.t32_cli.render.{render_result}
+use app.t32_cli.mod.{prepare_access_args, t32_map_access_error}
+use common.ui.access_cli_grammar.{ACCESS_OPERATION_LIST, ACCESS_OPERATION_SNAPSHOT, ACCESS_OPERATION_SURFACE, ACCESS_OPERATION_FIND, ACCESS_OPERATION_ACT, ACCESS_OPERATION_HISTORY, access_render_json}
+
+describe "T32 shared GUI access grammar":
+    it "projects the six overlapping operations without changing the T32 catalog":
+        expect(all_cli_commands().len()).to_equal(36)
+        val shared = shared_access_commands()
+        expect(shared.len()).to_equal(6)
+        expect(shared[0].operation).to_equal(ACCESS_OPERATION_LIST)
+        expect(shared[1].operation).to_equal(ACCESS_OPERATION_SNAPSHOT)
+        expect(shared[2].operation).to_equal(ACCESS_OPERATION_SURFACE)
+        expect(shared[3].operation).to_equal(ACCESS_OPERATION_FIND)
+        expect(shared[4].operation).to_equal(ACCESS_OPERATION_ACT)
+        expect(shared[5].operation).to_equal(ACCESS_OPERATION_HISTORY)
+
+    it "keeps reads safe and marks action execution explicitly":
+        val reads = shared_access_commands()
+        expect(reads[0].safety.read_only).to_be(true)
+        expect(reads[1].safety.read_only).to_be(true)
+        expect(reads[2].safety.read_only).to_be(true)
+        expect(reads[3].safety.read_only).to_be(true)
+        expect(reads[5].safety.read_only).to_be(true)
+        expect(reads[4].safety.read_only).to_be(false)
+        expect(reads[4].safety.may_prompt).to_be(true)
+
+    it "maps canonical T32 spellings to shared handler keys":
+        match find_shared_access_command("window", "show"):
+            Some(command): expect(command.handler_key).to_equal("t32_window_capture")
+            nil: fail("window show mapping missing")
+        match find_shared_access_command("action", "do"):
+            Some(command): expect(command.handler_key).to_equal("t32_action_invoke")
+            nil: fail("action do mapping missing")
+        expect(find_shared_access_command("cmm", "")).to_be_nil()
+
+    it "uses the common result and render owners for human and JSON output":
+        var result = T32BridgeResult.table("Windows", [["Key", "Title"], ["register", "Register"]])
+        result.operation = ACCESS_OPERATION_LIST
+        result.source_id = "t32"
+        expect(render_result(result)).to_contain("register  Register")
+        val json = access_render_json(result)
+        expect(json).to_contain("\"schema\":\"simple.access/v1\"")
+        expect(json).to_contain("\"operation\":\"list\"")
+        expect(json).to_contain("\"source\":{\"id\":\"t32\"")
+
+    it "consumes JSON mode only for shared GUI operations":
+        val shared = prepare_access_args(["window", "show", "register", "--json"])
+        expect(shared).to_equal(["window", "show", "register"])
+        val private = prepare_access_args(["cmm", "startup.cmm", "--json"])
+        expect(private).to_equal(["cmm", "startup.cmm", "--json"])
+
+    it "maps T-codes to stable common errors at the adapter boundary":
+        val missing = t32_map_access_error("T4030: Window not found: register")
+        expect(missing.code).to_equal("target_not_found")
+        expect(missing.source_code).to_equal("T4030")
+        val invalid = t32_map_access_error("T4003: Missing required argument")
+        expect(invalid.code).to_equal("invalid_argument")
+        expect(invalid.source_code).to_equal("T4003")

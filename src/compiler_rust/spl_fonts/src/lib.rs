@@ -1,12 +1,11 @@
 // spl_fonts — Phase 1 font rasterization SFFI backed by fontdue.
 //
-// C ABI entry points, all i64-in / i64-out, using a single global slot
-// for the loaded font and a single global slot for the most recently
-// rasterized glyph bitmap. This is deliberately minimal — Phase 2 will grow a
-// proper handle table.
+// C ABI entry points, all i64-in / i64-out. The loaded face is process-global;
+// each rasterized glyph is an owned snapshot released by rt_fonts_glyph_free.
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
 use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
@@ -28,8 +27,10 @@ struct LayoutGlyphSlot {
 
 static FONT_SLOT: Mutex<Option<Font>> = Mutex::new(None);
 static FREETYPE_SLOT: Mutex<Option<FreetypeSlot>> = Mutex::new(None);
-static GLYPH_SLOT: Mutex<Option<GlyphSlot>> = Mutex::new(None);
 static LAYOUT_SLOT: Mutex<Vec<LayoutGlyphSlot>> = Mutex::new(Vec::new());
+static FONT_GENERATION: AtomicI64 = AtomicI64::new(0);
+// ponytail: process-global face/layout; add owned face/layout handles only when
+// concurrent distinct-font rendering becomes a selected requirement.
 
 struct FreetypeSlot {
     library: usize,
@@ -183,9 +184,31 @@ pub extern "C" fn rt_fonts_init(path_ptr: i64, path_len: i64) -> i64 {
                 }
                 *ft_slot = freetype;
             }
+            FONT_GENERATION.fetch_add(1, Ordering::SeqCst);
             1
         }
         Err(_) => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_fonts_generation() -> i64 {
+    FONT_GENERATION.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_fonts_has_glyph(codepoint: i64) -> i64 {
+    let ch = match char::from_u32(codepoint as u32) {
+        Some(c) => c,
+        None => return 0,
+    };
+    let guard = match FONT_SLOT.lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    match guard.as_ref() {
+        Some(font) if font.lookup_glyph_index(ch) != 0 => 1,
+        _ => 0,
     }
 }
 
@@ -209,8 +232,8 @@ fn load_freetype_face(path: &str) -> Option<FreetypeSlot> {
     }
 }
 
-/// Rasterize a single codepoint at a pixel size. Returns an opaque handle
-/// (1 for the one-and-only global slot, 0 on failure).
+/// Rasterize a single codepoint at a pixel size. Returns an owned opaque
+/// snapshot handle, or 0 on failure.
 #[no_mangle]
 pub extern "C" fn rt_fonts_rasterize_glyph(codepoint: i64, font_size_px: i64) -> i64 {
     if font_size_px <= 0 {
@@ -235,13 +258,37 @@ pub extern "C" fn rt_fonts_rasterize_glyph(codepoint: i64, font_size_px: i64) ->
             GlyphSlot { metrics, bitmap }
         }
     };
-    match GLYPH_SLOT.lock() {
-        Ok(mut slot) => {
-            *slot = Some(glyph);
-            1
-        }
-        Err(_) => 0,
+    Box::into_raw(Box::new(glyph)) as i64
+}
+
+fn glyph_from_handle(handle: i64) -> Option<&'static GlyphSlot> {
+    if handle == 0 {
+        return None;
     }
+    unsafe { (handle as *const GlyphSlot).as_ref() }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_fonts_glyph_pixels_ptr(handle: i64) -> i64 {
+    glyph_from_handle(handle)
+        .map(|glyph| glyph.bitmap.as_ptr() as i64)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_fonts_glyph_pixels_len(handle: i64) -> i64 {
+    glyph_from_handle(handle)
+        .map(|glyph| glyph.bitmap.len() as i64)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_fonts_glyph_free(handle: i64) -> i64 {
+    if handle == 0 {
+        return 0;
+    }
+    unsafe { drop(Box::from_raw(handle as *mut GlyphSlot)) };
+    1
 }
 
 fn rasterize_with_freetype(ch: char, font_size_px: i64) -> Option<GlyphSlot> {
@@ -326,13 +373,7 @@ pub extern "C" fn rt_fonts_rasterize_glyph_subpixel(codepoint: i64, font_size_px
             GlyphSlot { metrics, bitmap }
         }
     };
-    match GLYPH_SLOT.lock() {
-        Ok(mut slot) => {
-            *slot = Some(glyph);
-            1
-        }
-        Err(_) => 0,
-    }
+    Box::into_raw(Box::new(glyph)) as i64
 }
 
 fn rasterize_subpixel_with_freetype(ch: char, font_size_px: i64) -> Option<GlyphSlot> {
@@ -404,7 +445,7 @@ fn rasterize_subpixel_with_freetype(ch: char, font_size_px: i64) -> Option<Glyph
     }
 }
 
-/// Return a metric field for the most recent glyph. Fields:
+/// Return a metric field for an owned glyph snapshot. Fields:
 ///   0 = width (px)
 ///   1 = height (px)
 ///   2 = advance (px, rounded)
@@ -412,14 +453,7 @@ fn rasterize_subpixel_with_freetype(ch: char, font_size_px: i64) -> Option<Glyph
 ///   4 = bitmap ymin/bottom offset (px, rounded)
 #[no_mangle]
 pub extern "C" fn rt_fonts_glyph_metric(handle: i64, field: i64) -> i64 {
-    if handle != 1 {
-        return 0;
-    }
-    let guard = match GLYPH_SLOT.lock() {
-        Ok(g) => g,
-        Err(_) => return 0,
-    };
-    let glyph = match guard.as_ref() {
+    let glyph = match glyph_from_handle(handle) {
         Some(g) => g,
         None => return 0,
     };
@@ -581,18 +615,14 @@ pub extern "C" fn rt_fonts_layout_glyph_metric(index: i64, field: i64) -> i64 {
     }
 }
 
-/// Return the alpha coverage (0..=255) for pixel (x,y) in the most recent
-/// glyph bitmap. Out-of-bounds reads return 0.
+/// Return the alpha coverage (0..=255) for pixel (x,y) in an owned glyph
+/// snapshot. Out-of-bounds reads return 0.
 #[no_mangle]
 pub extern "C" fn rt_fonts_glyph_pixel(handle: i64, x: i64, y: i64) -> i64 {
-    if handle != 1 || x < 0 || y < 0 {
+    if x < 0 || y < 0 {
         return 0;
     }
-    let guard = match GLYPH_SLOT.lock() {
-        Ok(g) => g,
-        Err(_) => return 0,
-    };
-    let glyph = match guard.as_ref() {
+    let glyph = match glyph_from_handle(handle) {
         Some(g) => g,
         None => return 0,
     };
@@ -609,14 +639,10 @@ pub extern "C" fn rt_fonts_glyph_pixel(handle: i64, x: i64, y: i64) -> i64 {
 /// Return RGB subpixel coverage (0..=255) for pixel (x,y), channel 0..2.
 #[no_mangle]
 pub extern "C" fn rt_fonts_glyph_subpixel_pixel(handle: i64, x: i64, y: i64, channel: i64) -> i64 {
-    if handle != 1 || x < 0 || y < 0 || !(0..=2).contains(&channel) {
+    if x < 0 || y < 0 || !(0..=2).contains(&channel) {
         return 0;
     }
-    let guard = match GLYPH_SLOT.lock() {
-        Ok(g) => g,
-        Err(_) => return 0,
-    };
-    let glyph = match guard.as_ref() {
+    let glyph = match glyph_from_handle(handle) {
         Some(g) => g,
         None => return 0,
     };
@@ -634,35 +660,66 @@ pub extern "C" fn rt_fonts_glyph_subpixel_pixel(handle: i64, x: i64, y: i64, cha
 mod tests {
     use super::*;
 
-    const LIBERATION_SERIF: &str = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    const OWNED_TEST_FONT: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../vendor/sctk-adwaita/src/title/Cantarell-Regular.ttf"
+    );
+    const OWNED_DEMO_FONT: &[u8] = include_bytes!(
+        "../../vendor/ttf-parser/tests/fonts/demo.ttf"
+    );
 
-    fn init_liberation_serif() -> bool {
-        if !std::path::Path::new(LIBERATION_SERIF).exists() {
-            return false;
+    fn init_owned_test_font() {
+        assert!(std::path::Path::new(OWNED_TEST_FONT).exists());
+        assert_eq!(
+            rt_fonts_init(OWNED_TEST_FONT.as_ptr() as i64, OWNED_TEST_FONT.len() as i64),
+            1
+        );
+    }
+
+    fn init_owned_kern_test_font() {
+        let mut source = OWNED_DEMO_FONT.to_vec();
+        source[4..12].copy_from_slice(&[0, 8, 0, 128, 0, 3, 0, 0]);
+        for index in 0..7 {
+            let offset_pos = 12 + index * 16 + 8;
+            let offset = u32::from_be_bytes(source[offset_pos..offset_pos + 4].try_into().unwrap()) + 16;
+            source[offset_pos..offset_pos + 4].copy_from_slice(&offset.to_be_bytes());
         }
-        rt_fonts_init(LIBERATION_SERIF.as_ptr() as i64, LIBERATION_SERIF.len() as i64) == 1
+        let kern_directory = [
+            b'k', b'e', b'r', b'n', 0, 8, 255, 215, 0, 0, 1, 160, 0, 0, 0, 24,
+        ];
+        let kern_table = [
+            0, 0, 0, 1, 0, 0, 0, 20, 0, 1, 0, 1, 0, 6, 0, 0, 0, 0, 0, 1, 0, 1, 255, 192,
+        ];
+        let mut font = Vec::with_capacity(source.len() + kern_directory.len() + kern_table.len());
+        font.extend_from_slice(&source[..92]);
+        font.extend_from_slice(&kern_directory);
+        font.extend_from_slice(&source[92..]);
+        font.extend_from_slice(&kern_table);
+        let path = std::env::temp_dir().join(format!("simple-owned-kern-{}.ttf", std::process::id()));
+        std::fs::write(&path, font).unwrap();
+        let path = path.to_str().unwrap();
+        assert_eq!(rt_fonts_init(path.as_ptr() as i64, path.len() as i64), 1);
     }
 
     #[test]
     fn horizontal_kern_rejects_invalid_inputs() {
+        let _guard = TEST_LOCK.lock().unwrap();
         assert_eq!(rt_fonts_horizontal_kern('A' as i64, 'V' as i64, 0), 0);
         assert_eq!(rt_fonts_horizontal_kern(-1, 'V' as i64, 16), 0);
     }
 
     #[test]
-    fn horizontal_kern_returns_font_pair_adjustment_when_available() {
-        if !init_liberation_serif() {
-            return;
-        }
-        let av = rt_fonts_horizontal_kern('A' as i64, 'V' as i64, 16);
-        assert!(av <= 0, "expected AV kerning to be non-positive, got {av}");
+    fn horizontal_kern_returns_owned_font_pair_adjustment() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        init_owned_kern_test_font();
+        assert!(rt_fonts_horizontal_kern('A' as i64, 'A' as i64, 32) < 0);
     }
 
     #[test]
     fn horizontal_line_metrics_return_scaled_values() {
-        if !init_liberation_serif() {
-            return;
-        }
+        let _guard = TEST_LOCK.lock().unwrap();
+        init_owned_test_font();
         let ascent = rt_fonts_horizontal_line_metric(16, 0);
         let descent = rt_fonts_horizontal_line_metric(16, 1);
         let new_line_size = rt_fonts_horizontal_line_metric(16, 3);
@@ -675,25 +732,23 @@ mod tests {
 
     #[test]
     fn layout_text_returns_positioned_glyphs() {
-        if !init_liberation_serif() {
-            return;
-        }
+        let _guard = TEST_LOCK.lock().unwrap();
+        init_owned_test_font();
         let text = "Google search deterministic compatibility fixture";
         let count = rt_fonts_layout_text(text.as_ptr() as i64, text.len() as i64, 16, 112);
         assert!(count > 0, "expected positioned glyphs, got {count}");
         assert_eq!(rt_fonts_layout_glyph_metric(0, 0), 'G' as i64);
-        assert_eq!(rt_fonts_layout_glyph_metric(0, 1), 0);
+        assert_eq!(rt_fonts_layout_glyph_metric(0, 1), 1);
         assert!(rt_fonts_layout_glyph_metric(0, 4) > 0);
         assert_eq!(rt_fonts_layout_text(0, text.len() as i64, 16, 112), -1);
     }
 
     #[test]
     fn subpixel_rasterize_returns_rgb_triplet_coverage() {
-        if !init_liberation_serif() {
-            return;
-        }
+        let _guard = TEST_LOCK.lock().unwrap();
+        init_owned_test_font();
         let handle = rt_fonts_rasterize_glyph_subpixel('G' as i64, 16);
-        assert_eq!(handle, 1);
+        assert!(handle > 0);
         let width = rt_fonts_glyph_metric(handle, 0);
         let height = rt_fonts_glyph_metric(handle, 1);
         assert!(width > 0, "expected positive width, got {width}");
@@ -708,15 +763,31 @@ mod tests {
         }
         assert!(max_sample > 0, "expected non-empty subpixel coverage");
         assert_eq!(rt_fonts_glyph_subpixel_pixel(handle, 0, 0, 99), 0);
+        assert_eq!(rt_fonts_glyph_free(handle), 1);
     }
 
     #[test]
     fn glyph_metric_field_four_is_hinted_bitmap_bottom_offset() {
-        if !init_liberation_serif() {
-            return;
-        }
+        let _guard = TEST_LOCK.lock().unwrap();
+        init_owned_test_font();
         let handle = rt_fonts_rasterize_glyph('G' as i64, 16);
-        assert_eq!(handle, 1);
-        assert_eq!(rt_fonts_glyph_metric(handle, 4), 0);
+        assert!(handle > 0);
+        assert_eq!(rt_fonts_glyph_metric(handle, 4), -1);
+        assert_eq!(rt_fonts_glyph_free(handle), 1);
+    }
+
+    #[test]
+    fn rasterized_glyph_handles_keep_independent_snapshots() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        init_owned_test_font();
+        let first = rt_fonts_rasterize_glyph('A' as i64, 16);
+        let first_width = rt_fonts_glyph_metric(first, 0);
+        let second = rt_fonts_rasterize_glyph('G' as i64, 24);
+        assert!(first > 0 && second > 0 && first != second);
+        assert_eq!(rt_fonts_glyph_metric(first, 0), first_width);
+        assert!(rt_fonts_glyph_pixels_len(first) > 0);
+        assert!(rt_fonts_glyph_pixels_len(second) > 0);
+        assert_eq!(rt_fonts_glyph_free(first), 1);
+        assert_eq!(rt_fonts_glyph_free(second), 1);
     }
 }

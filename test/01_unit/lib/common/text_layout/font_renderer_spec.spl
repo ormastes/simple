@@ -3,7 +3,7 @@ use common.text_layout.font_renderer.{
     browser_chrome_compatible_normal_font_name,
     browser_chrome_compatible_normal_font_path,
     browser_chrome_compatible_vector_font_name,
-    FontRenderer, browser_font_download_script_path, browser_font_face_source_urls,
+    CachedGlyph, GlyphCache, FontRenderer, browser_font_download_script_path, browser_font_face_source_urls,
     browser_font_face_family_value, browser_font_face_source_from_family_value,
     browser_font_cache_dir, browser_font_face_cached_source_path, ensure_browser_font_face_sources,
     browser_font_candidates_for_family, browser_mono_font_candidates,
@@ -190,7 +190,7 @@ describe "shared font renderer fallbacks":
 
         val result = ensure_browser_provided_fonts(false, 1)
         expect(result.attempted_download).to_equal(false)
-        expect(result.status == "available" or result.status == "missing").to_equal(true)
+        expect("available,missing").to_contain(result.status)
 
     it "extracts font-face source URLs for browser font materialization":
         val css = "@font-face { font-family: Demo; src: url('/fonts/demo.woff2') format('woff2'), url(\"https://cdn.example/demo.ttf\") format('truetype'); } body { color: red }"
@@ -220,3 +220,28 @@ describe "shared font renderer fallbacks":
         val result = ensure_browser_font_face_sources(css, false)
         expect(result.attempted_download).to_equal(false)
         expect(result.status).to_equal("remote_sources_missing")
+
+    it "enforces glyph-cache entry and alpha-payload bounds":
+        var cache = GlyphCache.new(512)
+        expect(cache.max_entries).to_equal(512)
+        expect(cache.max_bytes).to_equal(33554432)
+        var codepoint = 0
+        while codepoint < 513:
+            cache.insert(CachedGlyph(codepoint: codepoint, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [1u8]))
+            codepoint = codepoint + 1
+        val stats = cache.stats()
+        expect(stats.entries).to_equal(512)
+        expect(stats.bytes).to_equal(512)
+        expect(stats.evictions).to_equal(1)
+        val oversized = CachedGlyph(codepoint: 600, font_size: 16, width: 33554433, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [1u8; 33554433])
+        expect(cache.insert(oversized)).to_be(false)
+        val after_reject = cache.stats()
+        expect(after_reject.entries).to_equal(512)
+        expect(after_reject.bytes).to_equal(512)
+        expect(after_reject.evictions).to_equal(1)
+        cache.lookup(512, 16)
+        expect(cache.stats().hits).to_equal(1)
+        expect(cache.lookup(512, 17)).to_be_nil()
+        expect(cache.stats().misses).to_equal(1)
+        cache.sync_generation(1)
+        expect(cache.stats().entries).to_equal(0)

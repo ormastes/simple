@@ -547,9 +547,11 @@ Current status:
 
 - `Browser Demo`, `Hello World`, `File Manager`, and `Shell` are represented in
   the FAT32 manifest table for the disk-backed resident-manifest bridge
-- `spawn_binary()` currently resolves direct ELF bytes first, then consults the
-  disk-backed resident-manifest bridge, then falls back to the legacy builtin
-  resident registry
+- hosted SimpleOS startup is filesystem-backed (`source=filesystem`) and may
+  use mmap; it never selects the resident table
+- the kernel `spawn_binary()` path resolves direct ELF/SMF filesystem bytes
+  first; the legacy resident table is an explicit bare-metal-only fallback
+  (`source=baremetal_got`)
 - `browser_engine_in_qemu_spec.spl` is the right place for direct ELF boot
   coverage, not for packaged disk launch coverage
 - `simpleos_desktop_disk_boot_spec.spl` is the right place for disk-backed
@@ -559,8 +561,7 @@ That means:
 
 - the launcher/manifest path and the direct ELF path are now documented as
   different execution modes
-- Browser Demo is still transitional because it appears in the resident-manifest
-  bridge and in legacy builtin fallback code
+- Browser Demo is still transitional in the bare-metal compatibility lane
 - the next cleanup step is to remove Browser Demo from the fallback path once the
   packaged-app route is the only supported launch form for that app
 

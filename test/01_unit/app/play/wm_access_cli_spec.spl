@@ -1,0 +1,25 @@
+use std.spec.*
+use std.play.types.{WindowInfo}
+use app.play.wm_access_cli.{wm_access_descriptors, wm_access_is_command, wm_access_snapshot_from_windows}
+use common.ui.access.{ACCESS_OPERATION_LIST, access_find_descriptor, access_result_from_snapshot, access_render_json}
+
+fn _window(id: text, title: text, focused: bool) -> WindowInfo:
+    WindowInfo(window_id: id, target_id: id, title: title, url: "", width: 800, height: 600, focused: focused)
+
+describe "Play WM access CLI adapter":
+    it "shares the windows grammar without removing wm-list":
+        expect(wm_access_is_command("windows")).to_be(true)
+        expect(wm_access_is_command("wm-list")).to_be(true)
+        match access_find_descriptor("wm-list", "", wm_access_descriptors()):
+            Some(descriptor): expect(descriptor.operation).to_equal(ACCESS_OPERATION_LIST)
+            nil: fail("wm-list compatibility alias was not found")
+
+    it "normalizes scalar WM snapshots and delegates deterministic rendering":
+        val snapshot = wm_access_snapshot_from_windows([_window("20", "Zulu", false), _window("10", "Alpha", true)], 1000)
+        val result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "host_wm", "", snapshot.access, 100)
+        expect(result.rows.len()).to_equal(3)
+        expect(result.rows[1][0]).to_equal("wm:10")
+        expect(result.rows[1][1]).to_equal("Alpha")
+        expect(result.rows[1][6]).to_equal("yes")
+        expect(result.rows[2][0]).to_equal("wm:20")
+        expect(access_render_json(result)).to_contain("\"source\":{\"id\":\"host_wm\"")

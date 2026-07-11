@@ -322,6 +322,15 @@ offload selection instead of per-frame or per-glyph ad hoc probing. Treat an
 accelerated font path as valid only when readback/checksum evidence matches the
 CPU reference for the covered fixture.
 
+This offload planner prepares generated vector/bitmap glyphs; it is not the
+opt-in TTF loader. `Engine2D.load_font(path)` uses the CPU `spl_fonts` owner for
+layout/rasterization, keeps a per-engine bounded glyph cache, and sends one
+tight alpha payload to the selected drawing backend. Without `load_font`,
+Engine2D continues to use the backend bitmap font. Trusted local paths may use
+non-ASCII names. The current native face/layout owner is a serialized
+process-global singleton; concurrent distinct faces require the documented
+future owned-handle upgrade.
+
 | Lane | App | Renders |
 |------|-----|---------|
 | 2D | `engine2d_cpu_simd_gui.spl` (CPU) / `engine2d_metal_gui.spl` (Metal) | text, rect, circle, line, gradient, rounded-rect |

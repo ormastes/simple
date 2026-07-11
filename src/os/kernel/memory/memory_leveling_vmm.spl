@@ -4,14 +4,12 @@ use os.kernel.types.memory_types.{
     PhysAddr, VirtAddr, VmFlags,
     VM_PRESENT, VM_WRITABLE, VM_USER, VM_WRITE_THROUGH, VM_CACHE_DISABLE, VM_NO_EXECUTE
 }
-use os.kernel.types.task_types.{AddressSpace}
 use os.kernel.memory.vmm.{
     PAGE_SIZE,
     PTE_PRESENT, PTE_WRITABLE, PTE_USER, PTE_WRITE_THROUGH, PTE_CACHE_DISABLE,
     PTE_HUGE_PAGE, PTE_NO_EXECUTE, PTE_ADDR_MASK,
     vmm_read_pte, vmm_map_page, vmm_unmap_page, vmm_phys_to_virt
 }
-use os.kernel.memory.vmm_address_space.{vmm_read_pte_in, vmm_map_page_in, vmm_unmap_page_in}
 use os.kernel.boot.mmio.{mmio_read8, mmio_write8}
 
 struct MemoryVmmMoveTxn:
@@ -29,8 +27,6 @@ struct MemoryVmmMoveResult:
     txn: MemoryVmmMoveTxn
 
 struct MemoryVmmSwapTxn:
-    space_root: u64
-    space_id: u64
     virt_addr: u64
     source_phys_addr: u64
     source_pte: u64
@@ -143,20 +139,18 @@ fn memory_vmm_finalize_move(txn: MemoryVmmMoveTxn) -> Result<PhysAddr, text>:
     Ok(PhysAddr(addr: txn.source_phys_addr))
 
 fn _memory_vmm_empty_swap_txn() -> MemoryVmmSwapTxn:
-    MemoryVmmSwapTxn(space_root: 0, space_id: 0, virt_addr: 0, source_phys_addr: 0, source_pte: 0, flags: VmFlags(bits: 0), prepared: false, committed: false)
+    MemoryVmmSwapTxn(virt_addr: 0, source_phys_addr: 0, source_pte: 0, flags: VmFlags(bits: 0), prepared: false, committed: false)
 
 fn _memory_vmm_swap_result(ok: bool, reason: text, txn: MemoryVmmSwapTxn) -> MemoryVmmSwapResult:
     MemoryVmmSwapResult(ok: ok, reason: reason, txn: txn)
 
-fn memory_vmm_prepare_swap(space: AddressSpace, virt_addr: u64) -> MemoryVmmSwapResult:
+fn memory_vmm_prepare_swap(virt_addr: u64) -> MemoryVmmSwapResult:
     if virt_addr == 0 or (virt_addr % PAGE_SIZE) != 0:
         return _memory_vmm_swap_result(false, "invalid-alignment", _memory_vmm_empty_swap_txn())
-    val pte = vmm_read_pte_in(space, VirtAddr(addr: virt_addr))
+    val pte = vmm_read_pte(VirtAddr(addr: virt_addr))
     if (pte & PTE_PRESENT) == 0 or (pte & PTE_HUGE_PAGE) != 0:
         return _memory_vmm_swap_result(false, "source-not-present", _memory_vmm_empty_swap_txn())
     val txn = MemoryVmmSwapTxn(
-        space_root: space.phys_root,
-        space_id: space.id,
         virt_addr: virt_addr,
         source_phys_addr: pte & PTE_ADDR_MASK,
         source_pte: pte,
@@ -169,11 +163,10 @@ fn memory_vmm_prepare_swap(space: AddressSpace, virt_addr: u64) -> MemoryVmmSwap
 fn memory_vmm_commit_swap(txn: MemoryVmmSwapTxn) -> MemoryVmmSwapResult:
     if not txn.prepared or txn.committed:
         return _memory_vmm_swap_result(false, "invalid-state", txn)
-    val space = AddressSpace(phys_root: txn.space_root, id: txn.space_id)
-    val current = vmm_read_pte_in(space, VirtAddr(addr: txn.virt_addr))
+    val current = vmm_read_pte(VirtAddr(addr: txn.virt_addr))
     if (current & PTE_PRESENT) == 0 or (current & PTE_ADDR_MASK) != txn.source_phys_addr:
         return _memory_vmm_swap_result(false, "stale-mapping", txn)
-    if not vmm_unmap_page_in(space, VirtAddr(addr: txn.virt_addr)):
+    if not vmm_unmap_page(VirtAddr(addr: txn.virt_addr)):
         return _memory_vmm_swap_result(false, "unmap-failed", txn)
     var committed = txn
     committed.committed = true
@@ -184,8 +177,7 @@ fn memory_vmm_rollback_swap(txn: MemoryVmmSwapTxn) -> MemoryVmmSwapResult:
         return _memory_vmm_swap_result(false, "invalid-state", txn)
     if not txn.committed:
         return _memory_vmm_swap_result(true, "no-change", txn)
-    val space = AddressSpace(phys_root: txn.space_root, id: txn.space_id)
-    if not vmm_map_page_in(space, VirtAddr(addr: txn.virt_addr), PhysAddr(addr: txn.source_phys_addr), txn.flags):
+    if not vmm_map_page(VirtAddr(addr: txn.virt_addr), PhysAddr(addr: txn.source_phys_addr), txn.flags):
         return _memory_vmm_swap_result(false, "rollback-failed", txn)
     var rolled_back = txn
     rolled_back.committed = false
@@ -194,10 +186,9 @@ fn memory_vmm_rollback_swap(txn: MemoryVmmSwapTxn) -> MemoryVmmSwapResult:
 fn memory_vmm_restore_swap(txn: MemoryVmmSwapTxn, destination_phys_addr: u64) -> bool:
     if not txn.prepared or not txn.committed or destination_phys_addr == 0 or (destination_phys_addr % PAGE_SIZE) != 0:
         return false
-    val space = AddressSpace(phys_root: txn.space_root, id: txn.space_id)
-    if (vmm_read_pte_in(space, VirtAddr(addr: txn.virt_addr)) & PTE_PRESENT) != 0:
+    if (vmm_read_pte(VirtAddr(addr: txn.virt_addr)) & PTE_PRESENT) != 0:
         return false
-    vmm_map_page_in(space, VirtAddr(addr: txn.virt_addr), PhysAddr(addr: destination_phys_addr), txn.flags)
+    vmm_map_page(VirtAddr(addr: txn.virt_addr), PhysAddr(addr: destination_phys_addr), txn.flags)
 
 fn memory_vmm_read_physical(phys_addr: u64, byte_length: u64) -> [u8]:
     var bytes: [u8] = []

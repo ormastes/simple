@@ -14,6 +14,16 @@ use os.apps.sshd.ssh_kex.{ssh_build_kexinit_for_host_keys_and_certs}
 use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet}
 use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
 use os.kernel.net.rt_net_socket_facade.{rt_net_close}
+# NOTE: call the x86_64 spawn DIRECTLY (single non-@cfg pub fn) rather than the
+# cross-arch fs_exec_spawn_ring3 wrapper — the @cfg multi-variant dispatch of
+# _fs_exec_spawn_ring3_active mis-selects a non-x86_64 variant on the
+# x86_64-unknown-none build and routes to the VFS reader (fs_exec_spawn_as ->
+# g_vfs_read_executable_bytes -> [vfs-read] len=0), never reaching the x86_64 FAT +
+# ring-3 handoff. x86_64-ONLY: guarded with @cfg(x86_64) so the shared sshd.spl
+# still compiles for the rv64 SSH lane (arch/riscv64/ssh_live_entry.spl imports
+# SshDaemon from here) — the import is stripped on non-x86_64 targets.
+@cfg(x86_64)
+use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn}
 extern fn serial_println(msg: text)
 extern fn rt_boot_tcp_bind(addr: text) -> i64
 extern fn rt_boot_tcp_accept_timeout(fd: i64, ms: i64) -> i64
@@ -24,6 +34,37 @@ extern fn rt_boot_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 
 val SSHD_PORT: u16 = 22
 val SSHD_BACKLOG: i32 = 5
+
+# Deferred ring-3 exec of /FSEXEC.ELF, run from the SHALLOW accept-loop frame.
+# x86_64-only: it calls x86_64_fs_exec_spawn directly (bypassing the mis-dispatching
+# @cfg wrapper — see note above the import). Other arches get a no-op variant so the
+# shared sshd.spl compiles for the rv64 SSH lane. Does not return on success (the
+# ring-3 process runs and exits, taking QEMU down).
+@cfg(x86_64)
+fn _sshd_run_pending_ring3_exec():
+    serial_println("[sshd] ring3 deferred spawn /FSEXEC.ELF")
+    x86_64_fs_exec_spawn("/FSEXEC.ELF", ["/FSEXEC.ELF"], [])
+    serial_println("[sshd] ring3 deferred spawn returned (failure)")
+
+@cfg(x86)
+fn _sshd_run_pending_ring3_exec():
+    pass_dn
+
+@cfg(arm64)
+fn _sshd_run_pending_ring3_exec():
+    pass_dn
+
+@cfg(arm32)
+fn _sshd_run_pending_ring3_exec():
+    pass_dn
+
+@cfg(riscv64)
+fn _sshd_run_pending_ring3_exec():
+    pass_dn
+
+@cfg(riscv32)
+fn _sshd_run_pending_ring3_exec():
+    pass_dn
 
 fn _sshd_bytes_equal(a: [u8], b: [u8]) -> bool:
     if a.len() != b.len():
@@ -311,6 +352,13 @@ impl SshDaemon:
                     session.run()
                     serial_println("[sshd] session close")
                     session.close()
+                    # Deferred ring-3 exec: perform the spawn HERE, from the shallow
+                    # accept-loop frame (mirrors the prod entry's shallow boot stack),
+                    # not deep inside the session's exec dispatch where it faults. The
+                    # actual spawn is x86_64-only (behind an @cfg helper — the shared
+                    # rv64 sshd lane gets a no-op variant); the flag check is arch-neutral.
+                    if session.pending_ring3_exec:
+                        _sshd_run_pending_ring3_exec()
             else:
                 # Accept error — if we're shutting down, that's expected
                 if not self.running:

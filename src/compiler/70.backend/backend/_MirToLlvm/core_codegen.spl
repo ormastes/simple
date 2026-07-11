@@ -629,6 +629,10 @@ impl MirTextCodegen for MirToLlvm:
             self.bool_locals[dest_id] = true
         val comment = if is_move: "move" else: "copy"
         self.value_types[dest_name] = ty
+        # Register by id too: copy dests created by the var_reassign_ssa pass
+        # have no MirLocal entry, so a later get_local_type/get_operand_type on
+        # them would fall back to i64 (e.g. typing an f64 Store as i64).
+        self.local_types[dest_id] = ty
 
         if is_float_type(ty):
             self.builder.emit("  {dest_name} = fadd {ty} {src_name}, 0.0  ; {comment}")
@@ -1067,14 +1071,31 @@ impl MirTextCodegen for MirToLlvm:
         val dest_name = self.get_local(dest_id)
         val llvm_ty = self.valid_llvm_type(self.llvm_type_text(ty))
         self.mark_ptr_local(dest_id)
+        # Record the slot's element type so Load/Store through this slot use
+        # it. The var_reassign_ssa spill temps have no MirLocal entry, so
+        # typing loads/stores off those temps falls back to i64 and an f64
+        # slot value round-trips through fptosi (10.0 -> 10, data loss).
+        self.alloca_elem_types[dest_id] = llvm_ty
         self.builder.emit_alloca(dest_name, llvm_ty)
+
+    fn operand_alloca_elem_type(ptr: MirOperand) -> text:
+        """Element type of the alloca slot behind `ptr`, or "" if unknown."""
+        match ptr.kind:
+            case Copy(local) | Move(local):
+                self.alloca_elem_types.get(self.local_id_value(local)) ?? ""
+            case _:
+                ""
 
     me translate_load(dest: LocalId, ptr: MirOperand):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val raw_ptr_val = self.translate_operand(ptr)
         val ptr_val = self.value_as_type(raw_ptr_val, self.get_operand_type(ptr), "ptr")
-        val load_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+        # Prefer the alloca slot's element type: the dest is often an SSA-pass
+        # temp with no tracked type (defaults i64), which would read an f64
+        # slot's bits as an integer.
+        val slot_elem = self.operand_alloca_elem_type(ptr)
+        val load_ty = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_local_type(dest_id))
         if load_ty == "ptr":
             self.mark_ptr_local(dest_id)
         # Register the load result's type. Locals materialized after the
@@ -1090,6 +1111,8 @@ impl MirTextCodegen for MirToLlvm:
         val raw_ptr_val = self.translate_operand(ptr)
         val ptr_val = self.value_as_type(raw_ptr_val, self.get_operand_type(ptr), "ptr")
         val raw_value_val = self.translate_operand(value)
-        val store_ty = self.valid_llvm_type(self.get_operand_type(value))
+        # Prefer the alloca slot's element type (see translate_load).
+        val slot_elem = self.operand_alloca_elem_type(ptr)
+        val store_ty = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_operand_type(value))
         val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), store_ty)
         self.builder.emit_store(store_ty, value_val, ptr_val)

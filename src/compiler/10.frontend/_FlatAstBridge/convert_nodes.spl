@@ -6,8 +6,11 @@ use compiler.frontend.flat_ast_bridge.*
 # Module shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
-use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path}
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_advance, par_kind_get}
 use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.parser_expr.{parse_expr}
+use compiler.frontend.core.lexer.{lex_init_with_path}
+use compiler.core.tokens.{TOK_EOF}
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
 use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
@@ -338,6 +341,70 @@ fn flat_asm_match_arm(arm_idx: i64, span: Span) -> AsmMatchArm:
         span: span
     )
 
+fn flat_bridge_parse_interp_inner(inner: text) -> i64:
+    # Sub-lex + parse a single expression from `inner`, APPENDING to the shared
+    # flat AST arena (no ast_reset), so the outer conversion's arena stays
+    # intact. This is safe because the lexer is idle during flat->frontend
+    # conversion: parse_and_build_module runs parse_module_body() to completion
+    # (filling the arena) BEFORE flat_ast_to_module() converts it. Returns the
+    # parsed expr idx, or -1 when `inner` is not a single clean expression
+    # (leftover tokens / parse failure) so the caller can fall back to a plain
+    # literal.
+    lex_init_with_path(inner, "")
+    parser_advance()
+    val idx = parse_expr()
+    if idx < 0:
+        return -1
+    if par_kind_get() != TOK_EOF:
+        return -1
+    idx
+
+fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
+    # Bug #136 (normal native path): the core lexer copies each `{expr}`
+    # interpolation region VERBATIM into the string token and never parses the
+    # inner expression, so the bridge previously emitted StringLit(value, nil)
+    # and the MIR interpolation lowering (lower_string_interpolation) had no
+    # parts to splice -- `{expr}` printed literally. Scan top-level `{...}`
+    # regions here (brace-depth tracked so nested braces stay in one region,
+    # mirroring the MIR split logic) and sub-parse each inner into a real Expr
+    # so the HIR/MIR interpolation chain can evaluate and splice it. If any
+    # region is not a clean single expression, return [] so the string is
+    # treated as a plain literal (preserves brace-bearing non-interp strings
+    # like CSS/JSON).
+    var interps: [Interpolation] = []
+    var depth = 0
+    var inner = ""
+    var i = 0
+    val n = value.len()
+    while i < n:
+        val ch = value[i:i + 1]
+        if depth == 0 and ch == "{":
+            depth = 1
+            inner = ""
+        elif depth > 0 and ch == "{":
+            depth = depth + 1
+            inner = inner + ch
+        elif depth > 0 and ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                val part_idx = flat_bridge_parse_interp_inner(inner)
+                if part_idx < 0:
+                    return []
+                interps.push(Interpolation(
+                    expr: convert_flat_expr(part_idx),
+                    has_format: false,
+                    format: "",
+                    span: span
+                ))
+            else:
+                inner = inner + ch
+        elif depth > 0:
+            inner = inner + ch
+        i = i + 1
+    if depth != 0:
+        return []
+    interps
+
 fn convert_flat_expr(idx: i64) -> Expr:
     if idx < 0:
         return Expr(kind: ExprKind.NilLit, span: make_span())
@@ -349,9 +416,12 @@ fn convert_flat_expr(idx: i64) -> Expr:
     if tag == EXPR_INT_LIT:
         return Expr(kind: ExprKind.IntLit(expr_get_int(idx)), span: span)
     elif tag == EXPR_FLOAT_LIT:
-        return Expr(kind: ExprKind.FloatLit(0.0), span: span)
+        return Expr(kind: ExprKind.FloatLit(expr_get_float(idx).to_float()), span: span)
     elif tag == EXPR_STRING_LIT:
-        return Expr(kind: ExprKind.StringLit(expr_get_str(idx), nil), span: span)
+        val str_val = expr_get_str(idx)
+        val str_interps = flat_bridge_build_string_interps(str_val, span)
+        val str_interps_opt = if str_interps.len() > 0: str_interps else: nil
+        return Expr(kind: ExprKind.StringLit(str_val, str_interps_opt), span: span)
     elif tag == EXPR_BOOL_LIT:
         return Expr(kind: ExprKind.BoolLit(expr_get_int(idx) != 0), span: span)
     elif tag == EXPR_NIL_LIT:

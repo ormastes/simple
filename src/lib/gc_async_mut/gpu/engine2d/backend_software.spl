@@ -18,7 +18,7 @@ use std.gpu.engine2d.color.{color_a, blend}
 use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
-use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, simd_fill_row, engine2d_simd_copy_row_u32, engine2d_simd_blend_row_u32}
+use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, simd_fill_row, rt_engine2d_simd_fill_span_u32, engine2d_simd_copy_row_u32, engine2d_simd_blend_row_u32}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -71,6 +71,7 @@ class SoftwareBackend:
     mask_w: i32
     mask_h: i32
     initialized: bool
+    native_simd_spans: bool
 
     static fn create() -> SoftwareBackend:
         """Create an uninitialized software backend."""
@@ -89,8 +90,14 @@ class SoftwareBackend:
             mask_buf: [],
             mask_w: 0,
             mask_h: 0,
-            initialized: false
+            initialized: false,
+            native_simd_spans: false
         )
+
+    static fn create_cpu_simd() -> SoftwareBackend:
+        var backend = SoftwareBackend.create()
+        backend.native_simd_spans = true
+        backend
 
 impl RenderBackend for SoftwareBackend:
 
@@ -550,7 +557,40 @@ impl RenderBackend for SoftwareBackend:
         emu_draw_rect_blend(self, x, y, w, h, color)
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        emu_draw_image_blend(self, x, y, w, h, pixels)
+        if w <= 0 or h <= 0:
+            return
+        val pixels_len = pixels.len()
+        val slow_checked = self.clip_enabled or self.mask_buf.len() > 0
+        var row = 0
+        while row < h:
+            val py = y + row
+            if py >= 0 and py < self.h:
+                val src_row_base = row * w
+                var start_x = x
+                var src_x = 0
+                var count = w
+                if start_x < 0:
+                    src_x = -start_x
+                    count = count + start_x
+                    start_x = 0
+                if start_x + count > self.w:
+                    count = self.w - start_x
+                if count > 0 and src_row_base + src_x + count <= pixels_len:
+                    var col = 0
+                    if slow_checked:
+                        while col < count:
+                            self.sw_set_pixel_blend(start_x + col, py, pixels[src_row_base + src_x + col])
+                            col = col + 1
+                    else:
+                        val dst_off = py * self.w + start_x
+                        val src_off = src_row_base + src_x
+                        while col < count:
+                            val src = pixels[src_off + col]
+                            if color_a(src) > 0:
+                                self.buf[dst_off + col] = blend(src, self.buf[dst_off + col])
+                            col = col + 1
+                        self.mark_span_dirty(start_x, py, count)
+            row = row + 1
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         emu_draw_image_scaled(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
@@ -639,6 +679,9 @@ impl SoftwareBackend:
 
     me sw_fill_raw_span(offset: i32, count: i32, color: u32):
         record_simd_fill_hit()
+        if self.native_simd_spans and native_pixel_rows_enabled():
+            self.buf = rt_engine2d_simd_fill_span_u32(self.buf, offset as i64, count as i64, color)
+            return
         simd_fill_row(self.buf, offset as i64, count as i64, color)
 
     me sw_copy_raw_span(dst_offset: i32, src: [u32], src_offset: i32, count: i32):
@@ -665,13 +708,6 @@ impl SoftwareBackend:
 
     me sw_blend_const_raw_span(offset: i32, count: i32, color: u32):
         record_simd_alpha_hit()
-        val sa = (color >> 24) & 0xFF
-        if sa > 0 and sa < 255:
-            var k = 0
-            while k < count:
-                self.buf[offset + k] = blend(color, self.buf[offset + k])
-                k = k + 1
-            return
         if native_pixel_rows_enabled():
             var dst_row: [u32] = [0; count]
             var src_row: [u32] = [color; count]
@@ -857,7 +893,7 @@ fn _sw_mask_blocks(backend: SoftwareBackend, x: i32, y: i32) -> bool:
     val mi = y * backend.mask_w + x
     if mi < 0 or mi >= backend.mask_buf.len():
         return false
-    backend.mask_buf[mi] == 0 as u8
+    backend.mask_buf[mi] == 0u8
 
 # ============================================================================
 # Triangle Edge Interpolation

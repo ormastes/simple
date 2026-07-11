@@ -9,10 +9,10 @@ use os.kernel.types.task_types.{TaskId}
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VMA_READ, VMA_WRITE, VMA_ANON, VMA_FILE, VMA_SHARED}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.memory.vmm.{vmm_mmap, vmm_munmap, vmm_new_process_space, vmm_cache_file_backing, vmm_copyin_bytes_from_space, vmm_copy_bytes_result_ok, VmmCopyBytesResult}
-use os.kernel.memory.vmm.{PAGE_SIZE, _read_cr3}
-use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_poll_pmm_pressure, memory_swap_runtime_release_range_in_space}
+use os.kernel.memory.vmm.{PAGE_SIZE}
+use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_poll_pmm_pressure, memory_swap_runtime_release_range}
 use os.kernel.arch.reset.{hal_system_reset}
-use os.kernel.ipc.capability.{PrivilegeTable, GrantTable, _vma_range_readable, register_task_vmspace, task_vmspace_of, task_vmspace_by_root}
+use os.kernel.ipc.capability.{PrivilegeTable, GrantTable, _vma_range_readable, register_task_vmspace, task_vmspace_of}
 use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, PRIVCTL_SET_MASK_FULL}
 use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
 use os.kernel.ipc.spm_claim.{spm_claim_for_task}
@@ -187,11 +187,8 @@ fn _handle_safecopy_to(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult
 var g_current_vmspace: ProcessVmSpace = vmm_new_process_space(0, 0)
 
 fn syscall_current_vmspace() -> ProcessVmSpace:
-    """Return the space loaded on the current CPU, with boot fallback."""
-    val cr3 = _read_cr3()
-    match task_vmspace_by_root(cr3):
-        Some(space): space
-        nil: g_current_vmspace
+    """Return the current task's virtual address space for ISR dispatch."""
+    g_current_vmspace
 
 struct TaskBrkEntry:
     """Per-task program break state."""
@@ -322,7 +319,7 @@ fn _handle_sys_munmap(args: SyscallArgs, task_id: u64) -> SyscallResult:
     if registered != nil:
         map_space = registered
         used_registered = true
-    val released = memory_swap_runtime_release_range_in_space(map_space.pml4, map_space.id, vaddr, len, map_space.id)
+    val released = memory_swap_runtime_release_range(vaddr, len, task_id)
     if not released.ok:
         return SyscallResult(value: -16)
     val rc = vmm_munmap(map_space, vaddr, len)

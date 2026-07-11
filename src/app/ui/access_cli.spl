@@ -1,0 +1,340 @@
+# codex-impl
+# Live `simple ui` access adapter. Shared grammar/rendering lives in common;
+# this module owns only CLI-to-/api/test/ui/* translation and bounded I/O.
+
+use common.text_advanced.{escape_json}
+use common.ui.access.{
+    AccessCommandDescriptor,
+    AccessError,
+    AccessRequest,
+    AccessResult,
+    AccessSafety,
+    ACCESS_OPERATION_ACT,
+    ACCESS_OPERATION_FIND,
+    ACCESS_OPERATION_HISTORY,
+    ACCESS_OPERATION_LIST,
+    ACCESS_OPERATION_SNAPSHOT,
+    ACCESS_OPERATION_SURFACE,
+    ACCESS_OUTPUT_HUMAN,
+    ACCESS_OUTPUT_JSON,
+    access_error_to_json,
+    access_find_descriptor,
+    access_render_human,
+    access_render_json,
+    access_validate_request
+}
+use std.nogc_sync_mut.io.{
+    HttpMethod,
+    http_client_destroy,
+    http_client_new,
+    http_client_request,
+    http_client_set_timeout,
+    url_encode
+}
+use std.log.{error}
+use app.io.mod.{time_now_unix_micros}
+
+val UI_ACCESS_SOURCE = "simple_ui"
+val UI_ACCESS_DEFAULT_TIMEOUT_MS: i64 = 2000
+val UI_ACCESS_MAX_TIMEOUT_MS: i64 = 30000
+val UI_ACCESS_DEFAULT_LIMIT: i64 = 50
+val UI_ACCESS_MAX_LIMIT: i64 = 1000
+val UI_ACCESS_DEFAULT_HISTORY: i64 = 20
+val UI_ACCESS_MAX_HISTORY: i64 = 64
+
+fn ui_access_cli_descriptors() -> [AccessCommandDescriptor]:
+    val read = AccessSafety.read(UI_ACCESS_DEFAULT_TIMEOUT_MS)
+    [
+        AccessCommandDescriptor.create("windows", "", "ui.windows", ACCESS_OPERATION_LIST, "simple ui windows [--json] [--port N]", "simple ui windows --json", 0, "List live UI surfaces", [], read),
+        AccessCommandDescriptor.create("snapshot", "", "ui.snapshot", ACCESS_OPERATION_SNAPSHOT, "simple ui snapshot [--json] [--port N]", "simple ui snapshot --json", 0, "Capture the live semantic UI", [], read),
+        AccessCommandDescriptor.create("surface", "", "ui.surface", ACCESS_OPERATION_SURFACE, "simple ui surface <id> [--json] [--port N]", "simple ui surface main --json", 1, "Inspect one live UI surface", [], read),
+        AccessCommandDescriptor.create("find", "", "ui.find", ACCESS_OPERATION_FIND, "simple ui find [--surface ID] [--kind KIND] [--text TEXT] [--limit N]", "simple ui find --surface main --kind button --text build", 0, "Find live semantic nodes", [], read),
+        AccessCommandDescriptor.create("act", "", "ui.act", ACCESS_OPERATION_ACT, "simple ui act --canonical ID --action ACTION [--timeout MS]", "simple ui act --canonical main#build --action click", 0, "Run one advertised semantic action", [], AccessSafety.action(UI_ACCESS_DEFAULT_TIMEOUT_MS, false, false, false)),
+        AccessCommandDescriptor.create("history", "", "ui.history", ACCESS_OPERATION_HISTORY, "simple ui history [--surface ID] [--count N]", "simple ui history --surface main --count 10", 0, "Read bounded access history", [], read)
+    ]
+
+fn ui_access_cli_parse_request(args: [text]) -> Result<AccessRequest, AccessError>:
+    if args.len() == 0:
+        return Err(AccessError.detailed("invalid_argument", "missing UI access command", "", "Use windows, snapshot, surface, find, act, or history", false, false))
+    val descriptor = access_find_descriptor(args[0], "", ui_access_cli_descriptors())
+    if descriptor == nil:
+        return Err(AccessError.detailed("invalid_argument", "unknown UI access command '" + args[0] + "'", "", "Use windows, snapshot, surface, find, act, or history", false, false))
+    val command_args = _ui_access_tail(args)
+    val timeout_result = _ui_access_positive_option(command_args, "--timeout", descriptor.safety.timeout_ms, UI_ACCESS_MAX_TIMEOUT_MS)
+    match timeout_result:
+        Err(e): return Err(e)
+        Ok(timeout_ms):
+            val output_mode = if _ui_access_has_flag(command_args, "--json"): ACCESS_OUTPUT_JSON else: ACCESS_OUTPUT_HUMAN
+            val request = AccessRequest.create(descriptor, output_mode, UI_ACCESS_SOURCE, "", "", command_args, timeout_ms, _ui_access_has_flag(command_args, "--confirm"))
+            if val Err(e) = access_validate_request(request):
+                return Err(e)
+            if val Err(e) = _ui_access_validate_command(request):
+                return Err(e)
+            Ok(request)
+
+fn ui_access_cli_route(request: AccessRequest) -> Result<text, AccessError>:
+    val operation = request.descriptor.operation
+    if operation == ACCESS_OPERATION_LIST or operation == ACCESS_OPERATION_SNAPSHOT:
+        return Ok("/api/test/ui/snapshot")
+    if operation == ACCESS_OPERATION_SURFACE:
+        val surface_id = _ui_access_first_positional(request.args)
+        return Ok("/api/test/ui/surface?id=" + url_encode(surface_id))
+    if operation == ACCESS_OPERATION_FIND:
+        return Ok(_ui_access_find_route(request.args))
+    if operation == ACCESS_OPERATION_HISTORY:
+        return Ok(_ui_access_history_route(request.args))
+    if operation == ACCESS_OPERATION_ACT:
+        return Ok("/api/test/ui/act")
+    Err(AccessError.create("invalid_argument", "unsupported UI access operation"))
+
+fn ui_access_cli_action_body(request: AccessRequest, request_id: text) -> text:
+    val canonical_id = _ui_access_option(request.args, "--canonical")
+    val surface_id = _ui_access_option(request.args, "--surface")
+    val action = _ui_access_option(request.args, "--action")
+    "{" +
+        "\"surface_id\":\"{escape_json(surface_id)}\"," +
+        "\"canonical_id\":\"{escape_json(canonical_id)}\"," +
+        "\"action\":\"{escape_json(action)}\"," +
+        "\"request_id\":\"{escape_json(request_id)}\"" +
+    "}"
+
+fn ui_access_cli_db_error(operation: text, path: text) -> AccessError:
+    val action_note = if operation == ACCESS_OPERATION_ACT: "Database access is read-only; act requires a live UI service" else: "The existing UiAccessStore open path initializes schema and cannot be opened read-only"
+    AccessError.detailed("source_unavailable", action_note, "", "Start the UI test API or add a read-only UiAccessStore open API before using --ui-access-db=" + path, false, false)
+
+fn run_ui_access_cli(args: [text], port: i32, access_db_path: text) -> i64:
+    val parsed = ui_access_cli_parse_request(args)
+    match parsed:
+        Err(e):
+            return _ui_access_emit_error(_ui_access_output_mode(args), "", e, 2)
+        Ok(request):
+            if access_db_path != "":
+                return _ui_access_emit_error(request.output_mode, request.descriptor.operation, ui_access_cli_db_error(request.descriptor.operation, access_db_path), 1)
+            val result = _ui_access_execute_live(request, port)
+            match result:
+                Err(e): return _ui_access_emit_error(request.output_mode, request.descriptor.operation, e, 1)
+                Ok(access_result):
+                    if request.output_mode == ACCESS_OUTPUT_JSON:
+                        print access_render_json(access_result)
+                    else:
+                        print access_render_human(access_result)
+                    0
+
+fn _ui_access_execute_live(request: AccessRequest, port: i32) -> Result<AccessResult, AccessError>:
+    val route = ui_access_cli_route(request)?
+    val base_url = "http://127.0.0.1:{port}"
+    if request.descriptor.operation != ACCESS_OPERATION_ACT:
+        val body = _ui_access_http_once(HttpMethod.GET, base_url + route, "", request.timeout_ms)?
+        return Ok(AccessResult.document(request.descriptor.operation, UI_ACCESS_SOURCE, "", 0, body, 0, false))
+
+    val request_id = "ui-act-" + time_now_unix_micros().to_text()
+    val action_body = ui_access_cli_action_body(request, request_id)
+    val action_result = _ui_access_http_once(HttpMethod.POST, base_url + route, action_body, request.timeout_ms)?
+    val canonical_id = _ui_access_option(request.args, "--canonical")
+    val surface_id = if _ui_access_option(request.args, "--surface") != "": _ui_access_option(request.args, "--surface") else: _ui_access_surface_from_canonical(canonical_id)
+    val observation_route = if surface_id == "": "/api/test/ui/history?count=1" else: "/api/test/ui/surface?id=" + url_encode(surface_id)
+    val observed = _ui_access_http_once(HttpMethod.GET, base_url + observation_route, "", request.timeout_ms)
+    val observation = match observed:
+        Err(e): return Err(AccessError.detailed(e.code, "action was dispatched but its single observation failed", e.source_code, "Do not retry blindly; inspect history before acting again. " + e.hint, e.retryable, e.interaction_required))
+        Ok(body): body
+    val payload = "{\"action\":" + action_result + ",\"observation\":" + observation + "}"
+    var result = AccessResult.document(ACCESS_OPERATION_ACT, UI_ACCESS_SOURCE, "", 0, payload, 1, false)
+    result.correlation_id = request_id
+    Ok(result)
+
+fn _ui_access_http_once(method: HttpMethod, url: text, body: text, timeout_ms: i64) -> Result<text, AccessError>:
+    val client = http_client_new()
+    if not client.is_valid:
+        return Err(AccessError.detailed("source_unavailable", "failed to create HTTP client", "", "Start a live GUI/web or TUI-web session", true, false))
+    if not http_client_set_timeout(client, timeout_ms):
+        http_client_destroy(client)
+        return Err(AccessError.create("invalid_argument", "failed to configure finite HTTP timeout"))
+    val headers = if method == HttpMethod.POST: ["Content-Type: application/json", "Accept: application/json"] else: ["Accept: application/json"]
+    val response = http_client_request(client, method, url, headers, body)
+    http_client_destroy(client)
+    if response.is_ok:
+        return Ok(response.body)
+    Err(_ui_access_http_error(response.status_code, response.error, response.body))
+
+fn _ui_access_http_error(status: i64, transport_error: text, body: text) -> AccessError:
+    val detail = if body != "": body else: transport_error
+    if transport_error.lower().contains("timeout") or status == 408 or status == 504:
+        return AccessError.detailed("timeout", "UI access request timed out", "", detail, true, false)
+    if status == 400:
+        val lowered = detail.lower()
+        if lowered.contains("unsupported"):
+            return AccessError.detailed("unsupported_action", "UI action is not supported", "", detail, false, false)
+        if lowered.contains("disabled"):
+            return AccessError.detailed("target_disabled", "UI target is disabled", "", detail, false, false)
+        if lowered.contains("busy"):
+            return AccessError.detailed("target_busy", "UI target is busy", "", detail, true, false)
+        if lowered.contains("interaction") or lowered.contains("prompt"):
+            return AccessError.detailed("interaction_required", "UI action requires interaction", "", detail, false, true)
+        if lowered.contains("stale"):
+            return AccessError.detailed("stale_target", "UI target is stale", "", detail, false, false)
+        return AccessError.detailed("invalid_argument", "UI service rejected the request", "", detail, false, false)
+    if status == 403:
+        return AccessError.detailed("permission_denied", "UI service denied the request", "", detail, false, false)
+    if status == 404:
+        return AccessError.detailed("target_not_found", "UI target was not found", "", detail, false, false)
+    AccessError.detailed("source_unavailable", "live UI access service is unavailable", "", detail, true, false)
+
+fn _ui_access_validate_command(request: AccessRequest) -> Result<(), AccessError>:
+    val operation = request.descriptor.operation
+    if val Err(e) = _ui_access_validate_args_shape(operation, request.args):
+        return Err(e)
+    if operation == ACCESS_OPERATION_SURFACE and _ui_access_first_positional(request.args) == "":
+        return Err(AccessError.detailed("invalid_argument", "surface requires an id", "", "Usage: " + request.descriptor.usage, false, false))
+    if operation == ACCESS_OPERATION_ACT:
+        val canonical_id = _ui_access_option(request.args, "--canonical")
+        val action = _ui_access_option(request.args, "--action")
+        if not _ui_access_canonical_valid(canonical_id):
+            return Err(AccessError.detailed("invalid_argument", "act requires a canonical surface#widget id", "", "Usage: " + request.descriptor.usage, false, false))
+        if action == "":
+            return Err(AccessError.detailed("invalid_argument", "act requires --action", "", "Usage: " + request.descriptor.usage, false, false))
+        if canonical_id.len() > 1024 or action.len() > 128:
+            return Err(AccessError.create("invalid_argument", "act target or action exceeds the bounded input limit"))
+    if operation == ACCESS_OPERATION_FIND:
+        if val Err(e) = _ui_access_positive_option(request.args, "--limit", UI_ACCESS_DEFAULT_LIMIT, UI_ACCESS_MAX_LIMIT):
+            return Err(e)
+        if _ui_access_option(request.args, "--text").len() > 1024 or _ui_access_option(request.args, "--surface").len() > 256 or _ui_access_option(request.args, "--kind").len() > 128:
+            return Err(AccessError.create("invalid_argument", "find selector exceeds the bounded input limit"))
+    if operation == ACCESS_OPERATION_HISTORY:
+        if val Err(e) = _ui_access_positive_option(request.args, "--count", UI_ACCESS_DEFAULT_HISTORY, UI_ACCESS_MAX_HISTORY):
+            return Err(e)
+    Ok(())
+
+fn _ui_access_validate_args_shape(operation: text, args: [text]) -> Result<(), AccessError>:
+    var positional_count = 0
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--"):
+            if not _ui_access_option_allowed(operation, arg):
+                return Err(AccessError.create("invalid_argument", "unsupported option '" + arg + "'"))
+            if _ui_access_option_takes_value(arg) and not arg.contains("="):
+                if i + 1 >= args.len() or args[i + 1].starts_with("--"):
+                    return Err(AccessError.create("invalid_argument", "missing value for '" + arg + "'"))
+                i = i + 1
+        else:
+            positional_count = positional_count + 1
+        i = i + 1
+    if operation == ACCESS_OPERATION_SURFACE and positional_count != 1:
+        return Err(AccessError.create("invalid_argument", "surface requires exactly one id"))
+    if operation != ACCESS_OPERATION_SURFACE and positional_count != 0:
+        return Err(AccessError.create("invalid_argument", "unexpected positional argument"))
+    Ok(())
+
+fn _ui_access_option_allowed(operation: text, arg: text) -> bool:
+    if arg == "--json" or _ui_access_arg_matches(arg, "--port") or _ui_access_arg_matches(arg, "--ui-access-db") or _ui_access_arg_matches(arg, "--timeout"):
+        return true
+    if operation == ACCESS_OPERATION_FIND:
+        return _ui_access_arg_matches(arg, "--surface") or _ui_access_arg_matches(arg, "--canonical") or _ui_access_arg_matches(arg, "--kind") or _ui_access_arg_matches(arg, "--text") or _ui_access_arg_matches(arg, "--limit") or arg == "--focused-only"
+    if operation == ACCESS_OPERATION_ACT:
+        return _ui_access_arg_matches(arg, "--surface") or _ui_access_arg_matches(arg, "--canonical") or _ui_access_arg_matches(arg, "--action") or arg == "--confirm"
+    if operation == ACCESS_OPERATION_HISTORY:
+        return _ui_access_arg_matches(arg, "--surface") or _ui_access_arg_matches(arg, "--count")
+    false
+
+fn _ui_access_arg_matches(arg: text, name: text) -> bool:
+    arg == name or arg.starts_with(name + "=")
+
+fn _ui_access_find_route(args: [text]) -> text:
+    var parts: [text] = []
+    parts = _ui_access_add_query(parts, "surface_id", _ui_access_option(args, "--surface"))
+    parts = _ui_access_add_query(parts, "canonical_id", _ui_access_option(args, "--canonical"))
+    parts = _ui_access_add_query(parts, "kind", _ui_access_option(args, "--kind"))
+    parts = _ui_access_add_query(parts, "text", _ui_access_option(args, "--text"))
+    if _ui_access_has_flag(args, "--focused-only"):
+        parts = parts.push("focused_only=true")
+    val limit = _ui_access_option_number(args, "--limit", UI_ACCESS_DEFAULT_LIMIT)
+    parts = parts.push("limit=" + limit.to_text())
+    "/api/test/ui/query?" + parts.join("&")
+
+fn _ui_access_history_route(args: [text]) -> text:
+    var parts: [text] = []
+    parts = _ui_access_add_query(parts, "surface_id", _ui_access_option(args, "--surface"))
+    val count = _ui_access_option_number(args, "--count", UI_ACCESS_DEFAULT_HISTORY)
+    parts = parts.push("count=" + count.to_text())
+    "/api/test/ui/history?" + parts.join("&")
+
+fn _ui_access_add_query(parts: [text], key: text, value: text) -> [text]:
+    if value != "":
+        return parts.push(key + "=" + url_encode(value))
+    parts
+
+fn _ui_access_positive_option(args: [text], name: text, default_value: i64, max_value: i64) -> Result<i64, AccessError>:
+    val raw = _ui_access_option(args, name)
+    if raw == "":
+        return Ok(default_value)
+    for ch in raw:
+        if ch < "0" or ch > "9":
+            return Err(AccessError.create("invalid_argument", name + " must be a positive integer"))
+    val value = raw.to_int() ?? 0
+    if value <= 0 or value > max_value:
+        return Err(AccessError.create("invalid_argument", name + " must be between 1 and " + max_value.to_text()))
+    Ok(value)
+
+fn _ui_access_option_number(args: [text], name: text, default_value: i64) -> i64:
+    val raw = _ui_access_option(args, name)
+    if raw == "": default_value else: raw.to_int() ?? default_value
+
+fn _ui_access_option(args: [text], name: text) -> text:
+    var i = 0
+    while i < args.len():
+        if args[i] == name and i + 1 < args.len():
+            return args[i + 1]
+        if args[i].starts_with(name + "="):
+            return args[i][name.len() + 1:]
+        i = i + 1
+    ""
+
+fn _ui_access_has_flag(args: [text], name: text) -> bool:
+    for arg in args:
+        if arg == name:
+            return true
+    false
+
+fn _ui_access_first_positional(args: [text]) -> text:
+    var skip_value = false
+    for arg in args:
+        if skip_value:
+            skip_value = false
+        elif _ui_access_option_takes_value(arg):
+            skip_value = not arg.contains("=")
+        elif not arg.starts_with("-"):
+            return arg
+    ""
+
+fn _ui_access_option_takes_value(arg: text) -> bool:
+    arg == "--port" or arg.starts_with("--port=") or arg == "--ui-access-db" or arg.starts_with("--ui-access-db=") or arg == "--timeout" or arg.starts_with("--timeout=") or arg == "--surface" or arg.starts_with("--surface=") or arg == "--canonical" or arg.starts_with("--canonical=") or arg == "--action" or arg.starts_with("--action=") or arg == "--kind" or arg.starts_with("--kind=") or arg == "--text" or arg.starts_with("--text=") or arg == "--limit" or arg.starts_with("--limit=") or arg == "--count" or arg.starts_with("--count=")
+
+fn _ui_access_tail(args: [text]) -> [text]:
+    var result: [text] = []
+    var i = 1
+    while i < args.len():
+        result = result.push(args[i])
+        i = i + 1
+    result
+
+fn _ui_access_surface_from_canonical(canonical_id: text) -> text:
+    val parts = canonical_id.split("#")
+    if parts.len() < 2: "" else: parts[0]
+
+fn _ui_access_canonical_valid(canonical_id: text) -> bool:
+    val parts = canonical_id.split("#")
+    parts.len() == 2 and parts[0] != "" and parts[1] != ""
+
+fn _ui_access_output_mode(args: [text]) -> text:
+    if _ui_access_has_flag(args, "--json"): ACCESS_OUTPUT_JSON else: ACCESS_OUTPUT_HUMAN
+
+fn _ui_access_emit_error(output_mode: text, operation: text, access_error: AccessError, exit_code: i64) -> i64:
+    if output_mode == ACCESS_OUTPUT_JSON:
+        print access_error_to_json(operation, "", access_error)
+    else:
+        val hint = if access_error.hint != "": " (" + access_error.hint + ")" else: ""
+        error("ui.access", access_error.code + ": " + access_error.message + hint)
+    exit_code
+
+export ui_access_cli_descriptors, ui_access_cli_parse_request, ui_access_cli_route
+export ui_access_cli_action_body, ui_access_cli_db_error, run_ui_access_cli

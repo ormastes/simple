@@ -45,7 +45,7 @@ simple_app_startup_spec -> compiler
 #### should classify SMF files as SMF launches
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -60,7 +60,7 @@ expect(startup_detect_launch_kind("TOOL.SMF")).to_equal("smf")
 #### should classify Simple source files as script launches
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -75,7 +75,7 @@ expect(startup_detect_launch_kind("run.shs")).to_equal("script")
 #### should classify other executable files as native launches
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -92,7 +92,7 @@ expect(startup_detect_launch_kind("app.bin")).to_equal("native")
 #### should add the entry path as argv zero when missing
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -109,7 +109,7 @@ expect(args[2]).to_equal("two")
 #### should not duplicate argv zero when caller already passed it
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -126,7 +126,7 @@ expect(args[1]).to_equal("one")
 #### should exclude app arg parser code when metadata says the app does not use it
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -145,14 +145,15 @@ expect(startup_feature_summary(plan)).to_contain("arg_parser=false")
 #### should use host mmap when metadata requests cache and host supports mmap
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val metadata = _metadata("script", true, true, [], [])
 val plan = startup_plan_from_metadata("main.spl", [], metadata, true, false)
+expect(plan.executable_source).to_equal("filesystem")
 expect(plan.include_mmap_cache).to_equal(true)
 expect(plan.cache_strategy).to_equal("mmap")
 ```
@@ -162,7 +163,7 @@ expect(plan.cache_strategy).to_equal("mmap")
 #### should use SimpleOS VFS prewarm when host mmap is unavailable
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -179,7 +180,7 @@ expect(plan.cache_strategy).to_equal("simpleos_vfs_prewarm")
 #### should make SimpleOS app metadata use the SimpleOS VFS prewarm lane
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -198,7 +199,7 @@ expect(startup_feature_summary(plan)).to_contain("os=simpleos")
 #### should fall back to normal read when no cache support is available
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -217,7 +218,7 @@ expect(plan.cache_strategy).to_equal("normal_read")
 #### should include no dynlib loader when no dependencies are declared
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -235,7 +236,7 @@ expect(plan.load_smf_dynlibs.len()).to_equal(0)
 #### should load native dynlibs declared by native build metadata
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -252,7 +253,7 @@ expect(plan.load_native_dynlibs[0]).to_equal("libsimple_gui.dylib")
 #### should load SMF dynlibs declared by SMF metadata
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -272,7 +273,7 @@ expect(plan.program_args[0]).to_equal("app.smf")
 #### should render native build launch metadata as a sidecar
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -291,7 +292,7 @@ expect(sidecar).to_contain("mmap_hint: false")
 #### should parse sidecar metadata with native and SMF dynlib dependencies
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -322,7 +323,7 @@ expect(plan.cache_strategy).to_equal("simpleos_vfs_prewarm")
 #### should name sidecars next to the artifact path
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -337,9 +338,8 @@ expect(launch_metadata_sidecar_path("build/app")).to_equal("build/app.simple_lau
 
 #### should parse embedded SMF metadata for SimpleOS startup
 
-1. var opts = SmfBuildOptions create
-
-2. opts launch metadata bytes = sidecar bytes
+- var opts = SmfBuildOptions create
+- opts launch metadata bytes = sidecar bytes
    - Expected: metadata.entry_kind equals `smf`
    - Expected: metadata.target_os equals `simpleos`
    - Expected: plan.include_arg_parser is true
@@ -351,7 +351,7 @@ expect(launch_metadata_sidecar_path("build/app")).to_equal("build/app.simple_lau
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -390,7 +390,7 @@ expect(plan.program_args[0]).to_equal("/sys/apps/simple.smf")
 #### should parse native launch metadata from the binary trailer
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -419,7 +419,7 @@ expect(plan.include_mmap_cache).to_equal(false)
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-11 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

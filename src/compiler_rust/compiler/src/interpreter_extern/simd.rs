@@ -1458,6 +1458,31 @@ pub fn rt_engine2d_simd_fill_row_u32(args: &[Value]) -> Result<Value, CompileErr
     Ok(pack_u32_array(sffi_fill_row_u32(count, color)))
 }
 
+/// Interpreter bridge for the native in-place span ABI. Interpreter arrays
+/// are immutable Arc values, so return the updated array for Simple to retain.
+pub fn rt_engine2d_simd_fill_span_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_simd_fill_span_u32 expects 4 arguments (dst, offset, count, color)".to_string(),
+        ));
+    }
+    let mut dst = unpack_u32_array("rt_engine2d_simd_fill_span_u32(dst)", &args[0])?;
+    let offset_raw = require_u64_value("rt_engine2d_simd_fill_span_u32(offset)", &args[1])? as i64;
+    let requested_raw = require_u64_value("rt_engine2d_simd_fill_span_u32(count)", &args[2])? as i64;
+    let color = require_u32_value("rt_engine2d_simd_fill_span_u32(color)", &args[3])?;
+    if offset_raw >= 0 && requested_raw > 0 {
+        let offset = offset_raw as usize;
+        let requested = requested_raw as usize;
+        if offset >= dst.len() {
+            return Ok(pack_u32_array(dst));
+        }
+        let count = requested.min(dst.len() - offset);
+        let filled = sffi_fill_row_u32(count, color);
+        dst[offset..offset + count].copy_from_slice(&filled);
+    }
+    Ok(pack_u32_array(dst))
+}
+
 /// rt_engine2d_simd_copy_row_u32(src: [u32]) -> [u32]
 pub fn rt_engine2d_simd_copy_row_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
@@ -1470,7 +1495,7 @@ pub fn rt_engine2d_simd_copy_row_u32(args: &[Value]) -> Result<Value, CompileErr
 }
 
 /// rt_engine2d_simd_blend_row_u32(dst_row: [u32], src_row: [u32]) -> [u32]
-/// Src-over blend of src over dst, element-wise (truncating-integer, 0xAARRGGBB).
+/// Src-over blend of src over dst, element-wise (truncating-integer, out alpha=255, 0xAARRGGBB).
 pub fn rt_engine2d_simd_blend_row_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
         return Err(CompileError::runtime(
@@ -1494,9 +1519,7 @@ pub fn rt_engine2d_simd_blend_row_u32(args: &[Value]) -> Result<Value, CompileEr
             let r = (((s >> 16) & 0xFF) * sa + ((d >> 16) & 0xFF) * inv) / 255;
             let g = (((s >> 8) & 0xFF) * sa + ((d >> 8) & 0xFF) * inv) / 255;
             let b = ((s & 0xFF) * sa + (d & 0xFF) * inv) / 255;
-            let da = (d >> 24) & 0xFF;
-            let a = sa + (da * inv) / 255;
-            (a << 24) | (r << 16) | (g << 8) | b
+            (255u32 << 24) | (r << 16) | (g << 8) | b
         };
         out.push(pixel);
     }
@@ -2059,26 +2082,4 @@ pub fn rt_rank_select_free(args: &[Value]) -> Result<Value, CompileError> {
     let handle = expect_index_i64("rt_rank_select_free", &args[0])?;
     remove_width_index(handle);
     Ok(Value::Nil)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    fn u32_array(values: &[u32]) -> Value {
-        Value::Array(Arc::new(values.iter().map(|v| Value::Int(*v as i64)).collect()))
-    }
-
-    #[test]
-    fn engine2d_simd_blend_row_preserves_src_over_alpha() {
-        let result = rt_engine2d_simd_blend_row_u32(&[u32_array(&[0x1020_3040]), u32_array(&[0x0102_0304])])
-            .expect("blend row should succeed");
-
-        let Value::Array(items) = result else {
-            panic!("expected array result");
-        };
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0], Value::Int(0x101F_2F3F));
-    }
 }

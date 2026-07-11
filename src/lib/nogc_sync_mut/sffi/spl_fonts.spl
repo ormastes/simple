@@ -7,6 +7,10 @@
 #   rt_fonts_rasterize_glyph(codepoint: i64, font_size_px: i64) -> i64
 #   rt_fonts_rasterize_glyph_subpixel(codepoint: i64, font_size_px: i64) -> i64
 #   rt_fonts_glyph_metric(handle: i64, field: i64) -> i64
+#   rt_fonts_glyph_pixels_ptr/len(handle: i64) -> i64
+#   rt_fonts_glyph_free(handle: i64) -> i64
+#   rt_fonts_has_glyph(codepoint: i64) -> i64
+#   rt_fonts_generation() -> i64
 #   rt_fonts_glyph_pixel(handle: i64, x: i64, y: i64) -> i64
 #   rt_fonts_glyph_subpixel_pixel(handle: i64, x: i64, y: i64, channel: i64) -> i64
 #   rt_fonts_horizontal_kern(left: i64, right: i64, size_px: i64) -> i64
@@ -14,9 +18,9 @@
 #   rt_fonts_layout_text(text_ptr: i64, text_len: i64, size_px: i64, max_width: i64) -> i64
 #   rt_fonts_layout_glyph_metric(index: i64, field: i64) -> i64
 #
-# Phase 1 invariants (internal model is a single global font slot + single
-# global glyph slot in the Rust dylib):
-#   - rt_fonts_rasterize_glyph always returns handle=1 on success, 0 on failure
+# Owner invariants (internal model is one process-global face/layout slot):
+#   - rasterization returns an owned glyph handle, copied and freed here
+#   - successful face selection advances generation for cache invalidation
 #   - Metric fields: 0=width, 1=height, 2=advance, 3=bearing_x,
 #     4=fontdue bitmap ymin/bottom offset. The legacy Simple field is named
 #     bearing_y; layout_text() positions already expose top-y for PositiveYDown.
@@ -26,8 +30,8 @@
 # DynLib.unwrap method lookup is broken. Raw spl_dlopen/spl_dlsym only.
 # Phase 4 cleanup: once DynLib works in interpreter mode, refactor to reuse.
 #
-# Phase 3 integration (pending): drop into font_renderer.spl as a
-# prefer-TTF, fall-back-to-builtin-bitmap path.
+# FontRenderer integrates this owner as its selected TTF path and falls back to
+# the built-in vector/bitmap renderers for unsupported glyphs.
 #
 # Usage:
 #   val maybe = FontRasterizer.load("build/libspl_fonts.dylib",
@@ -52,12 +56,9 @@ extern fn spl_dlopen(path: text) -> i64
 extern fn spl_dlsym(handle: i64, name: text) -> i64
 extern fn spl_dlclose(handle: i64) -> i64
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
-# `spl_str_ptr` has no native-build implementation anywhere in the tree
-# (only in the rejected hosted native_all runtime); `rt_string_data` is the
-# always-linked core-required equivalent with the same `(text) -> i64` ABI.
-extern fn rt_string_data(s: text) -> i64
-fn spl_str_ptr(s: text) -> i64:
-    rt_string_data(s)
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64
 
 # ============================================================================
 # GlyphBitmap — metrics + an owned snapshot of the glyph pixel coverage
@@ -75,7 +76,7 @@ class GlyphBitmap:
     bearing_x: i64
     bearing_y: i64
     handle: i64
-    pixels: [i64]
+    pixels: [u8]
 
 impl GlyphBitmap:
     # Alpha coverage (0..255) at pixel (x,y) in the rasterized glyph.
@@ -86,7 +87,7 @@ impl GlyphBitmap:
         if x >= self.width or y >= self.height:
             return 0
         val idx = y * self.width + x
-        self.pixels[idx]
+        self.pixels[idx].to_i64()
 
 class LayoutGlyph:
     codepoint: i64
@@ -131,6 +132,11 @@ class FontRasterizer:
     line_metric_fp: i64
     layout_fp: i64
     layout_glyph_metric_fp: i64
+    glyph_pixels_ptr_fp: i64
+    glyph_pixels_len_fp: i64
+    glyph_free_fp: i64
+    has_glyph_fp: i64
+    generation_fp: i64
     font_path: text
     dylib_path: text
 
@@ -139,11 +145,8 @@ impl FontRasterizer:
     # `ttf_path`. Returns nil on any failure (dylib missing, symbol missing,
     # font file unreadable, font parse error).
     #
-    # The font path is marshalled as (ptr, len):
-    #   ptr = spl_str_ptr(ttf_path)  — leaked CString pointer
-    #   len = ttf_path.length()      — byte length, no NUL
-    # Works for ASCII paths. Non-ASCII paths would need a byte-length helper
-    # (not currently exposed — see Phase 2 report "Known problems").
+    # The font path is marshalled as owned UTF-8 bytes so non-ASCII local paths
+    # use the exact byte length expected by the native owner.
     static fn load(dylib_path: text, ttf_path: text) -> FontRasterizer?:
         val h = spl_dlopen(dylib_path)
         if h == 0:
@@ -158,11 +161,17 @@ impl FontRasterizer:
         val line_metric_fp = spl_dlsym(h, "rt_fonts_horizontal_line_metric")
         val layout_fp = spl_dlsym(h, "rt_fonts_layout_text")
         val layout_glyph_metric_fp = spl_dlsym(h, "rt_fonts_layout_glyph_metric")
-        if init_fp == 0 or raster_fp == 0 or metric_fp == 0 or pixel_fp == 0:
+        val glyph_pixels_ptr_fp = spl_dlsym(h, "rt_fonts_glyph_pixels_ptr")
+        val glyph_pixels_len_fp = spl_dlsym(h, "rt_fonts_glyph_pixels_len")
+        val glyph_free_fp = spl_dlsym(h, "rt_fonts_glyph_free")
+        val has_glyph_fp = spl_dlsym(h, "rt_fonts_has_glyph")
+        val generation_fp = spl_dlsym(h, "rt_fonts_generation")
+        if init_fp == 0 or raster_fp == 0 or metric_fp == 0 or pixel_fp == 0 or glyph_pixels_ptr_fp == 0 or glyph_pixels_len_fp == 0 or glyph_free_fp == 0 or has_glyph_fp == 0 or generation_fp == 0:
             spl_dlclose(h)
             return nil
-        val path_ptr = spl_str_ptr(ttf_path)
-        val path_len = ttf_path.length()
+        val path_bytes = rt_text_to_bytes(ttf_path)
+        val path_ptr = rt_array_data_ptr_u8(path_bytes)
+        val path_len = path_bytes.len()
         var init_args: [i64] = []
         init_args.push(path_ptr)
         init_args.push(path_len)
@@ -182,6 +191,11 @@ impl FontRasterizer:
             line_metric_fp: line_metric_fp,
             layout_fp: layout_fp,
             layout_glyph_metric_fp: layout_glyph_metric_fp,
+            glyph_pixels_ptr_fp: glyph_pixels_ptr_fp,
+            glyph_pixels_len_fp: glyph_pixels_len_fp,
+            glyph_free_fp: glyph_free_fp,
+            has_glyph_fp: has_glyph_fp,
+            generation_fp: generation_fp,
             font_path: ttf_path,
             dylib_path: dylib_path,
         )
@@ -192,6 +206,11 @@ impl FontRasterizer:
         args.push(handle)
         args.push(field)
         spl_wffi_call_i64(self.metric_fp, args, 2)
+
+    fn _free_glyph(handle: i64):
+        var args: [i64] = []
+        args.push(handle)
+        spl_wffi_call_i64(self.glyph_free_fp, args, 1)
 
     # Rasterize the given Unicode codepoint at the given pixel size.
     # Returns a GlyphBitmap with metrics and an OWNED pixel snapshot, or nil
@@ -218,28 +237,33 @@ impl FontRasterizer:
         # Eagerly copy the glyph slot's alpha buffer into an owned array
         # so it cannot be aliased out from under the caller by a later
         # rasterize() that overwrites the global slot in the dylib.
-        var pixels: [i64] = []
-        var y: i64 = 0
-        while y < h:
-            var x: i64 = 0
-            while x < w:
-                var pa: [i64] = []
-                pa.push(handle)
-                pa.push(x)
-                pa.push(y)
-                val alpha = spl_wffi_call_i64(self.pixel_fp, pa, 3)
-                pixels.push(alpha)
-                x = x + 1
-            y = y + 1
+        var pixel_args: [i64] = []
+        pixel_args.push(handle)
+        val pixel_ptr = spl_wffi_call_i64(self.glyph_pixels_ptr_fp, pixel_args, 1)
+        val pixel_len = spl_wffi_call_i64(self.glyph_pixels_len_fp, pixel_args, 1)
+        if pixel_ptr == 0 or pixel_len != w * h:
+            self._free_glyph(handle)
+            return nil
+        val pixels = rt_bytes_from_raw(pixel_ptr, pixel_len)
+        self._free_glyph(handle)
         GlyphBitmap(
             width: w,
             height: h,
             advance: adv,
             bearing_x: bx,
             bearing_y: by,
-            handle: handle,
+            handle: 0,
             pixels: pixels,
         )
+
+    fn has_glyph(codepoint: i64) -> bool:
+        var args: [i64] = []
+        args.push(codepoint)
+        spl_wffi_call_i64(self.has_glyph_fp, args, 1) == 1
+
+    fn generation() -> i64:
+        var args: [i64] = []
+        spl_wffi_call_i64(self.generation_fp, args, 0)
 
     fn rasterize_subpixel(codepoint: i64, size_px: i64) -> SubpixelGlyphBitmap?:
         if self.subpixel_raster_fp == 0 or self.subpixel_pixel_fp == 0:
@@ -271,13 +295,14 @@ impl FontRasterizer:
                     channel = channel + 1
                 x = x + 1
             y = y + 1
+        self._free_glyph(handle)
         SubpixelGlyphBitmap(
             width: w,
             height: h,
             advance: adv,
             bearing_x: bx,
             bearing_y: by,
-            handle: handle,
+            handle: 0,
             pixels: pixels,
         )
 
@@ -301,9 +326,10 @@ impl FontRasterizer:
     fn layout_text(text_val: text, size_px: i64, max_width: i64) -> [LayoutGlyph]:
         if self.layout_fp == 0 or self.layout_glyph_metric_fp == 0:
             return []
+        val text_bytes = rt_text_to_bytes(text_val)
         var args: [i64] = []
-        args.push(spl_str_ptr(text_val))
-        args.push(text_val.length())
+        args.push(rt_array_data_ptr_u8(text_bytes))
+        args.push(text_bytes.len())
         args.push(size_px)
         args.push(max_width)
         val count = spl_wffi_call_i64(self.layout_fp, args, 4)
@@ -344,4 +370,9 @@ impl FontRasterizer:
         self.line_metric_fp = 0
         self.layout_fp = 0
         self.layout_glyph_metric_fp = 0
+        self.glyph_pixels_ptr_fp = 0
+        self.glyph_pixels_len_fp = 0
+        self.glyph_free_fp = 0
+        self.has_glyph_fp = 0
+        self.generation_fp = 0
         rc

@@ -162,6 +162,10 @@ Host input
 - Font offload uses `engine2d_font_offload_backend_order()` for vector and
   bitmap glyph preparation, with readback/checksum parity against the CPU
   reference path before a backend is treated as valid.
+- Opt-in `Engine2D.load_font` is separate: CPU `spl_fonts` raster/layout,
+  per-engine glyph cache, then one tight payload blended by the drawing backend.
+  UTF-8 local paths are supported; the face/layout is a serialized
+  process-global singleton. The unspecified default remains bitmap text.
 - Text fallback hot path: AA glyph loops touch only glyph coverage pixels; the
   prefilled buffer owns advance gaps and font-size padding rows as background.
 - WM dispatch adapter: `src/lib/common/ui/wm_runtime_dispatch.spl` converts

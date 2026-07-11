@@ -72,6 +72,12 @@ launch surface adapters:
 | `src/os/services/vfs/*` | SimpleOS file read-ahead and executable byte materialization | Process launch policy |
 | `src/os/services/launcher/launcher.spl` | WM hover/click intent, app registry warm checks, process launch dispatch | Mapping process-callable code during hover |
 
+`StartupLaunchPlan.executable_source` makes the host/bare-metal boundary
+explicit. Normal Linux and SimpleOS-host metadata select `filesystem`; only
+metadata created by `launch_metadata_for_simpleos_baremetal_path(...)` selects
+`baremetal_got`. Cache strategy is independent: hosted files may use `mmap`,
+while the bare-metal equivalent uses SimpleOS VFS prewarm before the loader.
+
 The important optimization rule is that metadata policy remains pure. Fast
 startup changes should add or improve a mechanism behind one of the adapters,
 then prove the `StartupLaunchPlan` still gates it. Do not move file reads,

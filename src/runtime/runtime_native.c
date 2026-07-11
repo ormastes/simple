@@ -669,10 +669,6 @@ int64_t rt_value_int(int64_t value) {
     return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
 }
 
-int64_t rt_value_as_int(int64_t value) {
-    return value >> 3;
-}
-
 int64_t rt_value_float(int64_t raw_bits) {
     return (int64_t)(((uint64_t)raw_bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
 }
@@ -1437,15 +1433,6 @@ static void* rt_dma_aligned_alloc(size_t alignment, size_t size) {
 #endif
 }
 
-void* rt_alloc_page_aligned(int64_t size) {
-    if (size <= 0) return NULL;
-    void* p = rt_dma_aligned_alloc(RT_DMA_HOST_PAGE_SIZE, (size_t)size);
-    if (p) {
-        memset(p, 0, (size_t)size);
-    }
-    return p;
-}
-
 static void rt_dma_aligned_free(void* p) {
 #if defined(_WIN32)
     _aligned_free(p);
@@ -1627,7 +1614,7 @@ int64_t rt_array_len(SplArray* a) {
 int64_t rt_array_get(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 3;
-    idx = rt_core_numeric_arg(idx);
+    /* Native array ABI matches the Rust runtime: indices are raw i64 values. */
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 3;
     if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
@@ -1643,7 +1630,6 @@ int64_t rt_array_get_text(SplArray* a, int64_t idx) {
 void rt_array_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return;
     if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
@@ -1670,33 +1656,6 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
         ((int64_t*)array->data)[array->len++] = val;
     }
     return 1;
-}
-
-SplArray* rt_array_concat(SplArray* a, SplArray* b) {
-    RtCoreArray* left = rt_core_array_ptr(a);
-    RtCoreArray* right = rt_core_array_ptr(b);
-    if (!left || !right) return NULL;
-    if (left->len < 0 || right->len < 0 || left->len > INT64_MAX - right->len) return NULL;
-    int64_t total = left->len + right->len;
-    if (total > 100000000) return NULL;
-    uint8_t byte_flags = ((left->flags & RT_CORE_ARRAY_FLAG_BYTES) &&
-                          (right->flags & RT_CORE_ARRAY_FLAG_BYTES))
-                             ? RT_CORE_ARRAY_FLAG_BYTES
-                             : 0;
-    SplArray* result = rt_core_array_new_fill(total, byte_flags, 0);
-    RtCoreArray* out = rt_core_array_ptr(result);
-    if (!out) return result;
-    out->len = total;
-    if (total == 0 || !out->data) return result;
-    if (byte_flags) {
-        if (left->len > 0) memcpy(out->data, left->data, (size_t)left->len);
-        if (right->len > 0) memcpy((uint8_t*)out->data + left->len, right->data, (size_t)right->len);
-        return result;
-    }
-    int64_t* dst = (int64_t*)out->data;
-    for (int64_t i = 0; i < left->len; i++) dst[i] = rt_array_get(a, i);
-    for (int64_t i = 0; i < right->len; i++) dst[left->len + i] = rt_array_get(b, i);
-    return result;
 }
 
 /* FR-COMPILER-012: array-repeat for `[value; count]` syntax in JIT.
@@ -2123,10 +2082,7 @@ int64_t rt_array_pop(SplArray* a) {
 
 int64_t rt_index_get(int64_t collection, int64_t idx) {
     RtCoreArray* a = rt_core_as_array(collection);
-    if (a) {
-        if (((uint64_t)idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return 3;
-        return rt_array_get((SplArray*)a, idx >> 3);
-    }
+    if (a) return rt_array_get((SplArray*)a, idx);
     RtCoreDict* d = rt_core_as_dict(collection);
     if (d) return rt_core_dict_lookup(d, idx);
     return 3;
@@ -2135,11 +2091,7 @@ int64_t rt_index_get(int64_t collection, int64_t idx) {
 int8_t rt_index_set(int64_t collection, int64_t idx, int64_t val) {
     RtCoreArray* a = rt_core_as_array(collection);
     if (a) {
-        if (((uint64_t)idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return 0;
-        int64_t actual_idx = idx >> 3;
-        if (actual_idx < 0) actual_idx += a->len;
-        if (actual_idx < 0 || actual_idx >= a->len) return 0;
-        rt_array_set((SplArray*)a, actual_idx, val);
+        rt_array_set((SplArray*)a, idx, val);
         return 1;
     }
     RtCoreDict* d = rt_core_as_dict(collection);

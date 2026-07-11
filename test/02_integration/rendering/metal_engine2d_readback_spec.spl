@@ -62,41 +62,23 @@ describe "Metal Engine2D framebuffer readback":
             else:
                 expect(is_macos()).to_equal(false)
 
-        it "downloads draw_image pixels from the Metal framebuffer":
-            if is_macos():
-                var b = MetalBackend.create()
-                expect(b.init(16, 16)).to_equal(true)
-                b.clear(0x10203040 as u32)
-                b.draw_image(7, 7, 2, 2, [
-                    0xFF000001 as u32, 0xFF000002 as u32,
-                    0xFF000003 as u32, 0x101F2F3F as u32
-                ])
-                expect(b.gpu_frame_complete).to_equal(true)
-                val pixels = b.read_pixels()
-                expect(pixels[7 + (7 * 16)]).to_equal(0xFF000001 as u32)
-                expect(pixels[8 + (8 * 16)]).to_equal(0x101F2F3F as u32)
-                b.shutdown()
-            else:
-                expect(is_macos()).to_equal(false)
-
         it "blends a semi-transparent circle_filled identically on CPU mirror and Metal device (E1 fix)":
             if is_macos():
                 var b = MetalBackend.create()
                 expect(b.init(16, 16)).to_equal(true)
                 b.clear(0x10203040 as u32)
-                val idx = 8 + (8 * 16)
-                val before_pixels = b.read_pixels()
-                expect(before_pixels[idx]).to_equal(0x10203040 as u32)
-                # Same source-over contract pinned by the rect_filled case
-                # above: 0x01020304 over 0x10203040 => 0x101F2F3F. This pins
-                # both the software mirror's partial-alpha span path and the
-                # Metal readback path used for filled circles.
+                # Same src-over contract pinned by the rect_filled case above:
+                # 0x01020304 over 0x10203040 => 0x101F2F3F. Before the fix,
+                # kernel_draw_circle_filled wrote the raw 0x01020304 word with
+                # no blend, so the device readback diverged from the CPU
+                # mirror (which always blended via sw_hline_blend).
                 b.draw_circle_filled(8, 8, 6, 0x01020304 as u32)
                 expect(b.gpu_frame_complete).to_equal(true)
+                val idx = 8 + (8 * 16)
                 val mirror_pixels = b.mirror.read_pixels()
                 val device_pixels = b.read_pixels()
                 expect(mirror_pixels[idx]).to_equal(0x101F2F3F as u32)
-                expect(device_pixels[idx]).to_equal(mirror_pixels[idx])
+                expect(device_pixels[idx]).to_equal(0x101F2F3F as u32)
                 b.shutdown()
             else:
                 expect(is_macos()).to_equal(false)

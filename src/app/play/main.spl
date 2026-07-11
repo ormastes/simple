@@ -4,6 +4,8 @@
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
+use common.ui.access.{ACCESS_OUTPUT_HUMAN, ACCESS_OUTPUT_JSON, access_error_to_json}
+use app.play.wm_access_cli.{wm_access_is_command, wm_access_operation, wm_access_execute}
 
 val TOOL_NAME = "Simple Play"
 val TOOL_VERSION = "0.1.0"
@@ -46,6 +48,20 @@ fn main() -> i64:
             error("play", message)
         return 1
 
+    if wm_access_is_command(subcommand):
+        val command_args = if args.len() > 1: args[1:] else: []
+        val output_mode = if log_opts.log_mode == "json": ACCESS_OUTPUT_JSON else: ACCESS_OUTPUT_HUMAN
+        match wm_access_execute(subcommand, command_args, output_mode):
+            Ok(output):
+                print output
+                return 0
+            Err(e):
+                if output_mode == ACCESS_OUTPUT_JSON:
+                    print access_error_to_json(wm_access_operation(subcommand), "", e)
+                else:
+                    error("play", e.message)
+                return if e.code == "invalid_argument" or e.code == "interaction_required": 2 else: 1
+
     val required = play_required_arg_count(subcommand)
     if args.len() - 1 < required:
         val message = "Subcommand {subcommand} requires {required} argument(s)"
@@ -81,10 +97,11 @@ fn print_help():
     print "  evaluate <sid> <js>             Evaluate JavaScript"
     print "  close <sid>                     Close a session"
     print "  wm-list                         List native windows"
+    print "  windows                         List native windows (shared access grammar)"
     print "  wm-click <x> <y>                Native click"
-    print "  wm-text-snapshot <source>       Plan common WM text snapshot facade"
-    print "  wm-text-find <source> <text>    Plan common WM text query facade"
-    print "  wm-text-act <target> <action>   Plan common WM text action facade"
+    print "  wm-text-snapshot <source>       Snapshot native windows"
+    print "  wm-text-find <source> <text>    Find native windows"
+    print "  wm-text-act <target> <action>   Act on a native window"
     print "  sdl2-connect <url>              Connect to SDL2 test API"
     print "  ui-snapshot <sid>               Read canonical UI snapshot"
     print "  ui-query <sid> [flags]          Query canonical UI nodes"
@@ -132,6 +149,8 @@ fn play_is_subcommand(name: text) -> bool:
         return true
     if name == "wm-list":
         return true
+    if name == "windows":
+        return true
     if name == "wm-click":
         return true
     if name == "wm-type":
@@ -168,6 +187,8 @@ fn play_is_subcommand(name: text) -> bool:
 
 fn play_required_arg_count(name: text) -> i64:
     if name == "wm-list":
+        return 0
+    if name == "windows":
         return 0
     if play_has_one_required_arg(name):
         return 1

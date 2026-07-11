@@ -1,6 +1,6 @@
 # Startup Argparse Mmap Perf Specification
 
-> Verifies startup-sensitive behavior used by the low_dependency_ui_dynsmf app root path. The spec proves declarative CLI parsing remains responsive when run through `simple run`, and file-backed mmap loading stays bounded for repeated reads.
+> Verifies startup-sensitive behavior used by the low_dependency_ui_dynsmf app root path. The spec proves declarative CLI parsing remains responsive through the early direct-file executable path, and file-backed mmap loading stays bounded for repeated reads.
 
 <!-- sdn-diagram:id=startup_argparse_mmap_perf_spec.arch -->
 <details class="sdn-source">
@@ -36,7 +36,7 @@ startup_argparse_mmap_perf_spec -> std
 
 # Startup Argparse Mmap Perf Specification
 
-Verifies startup-sensitive behavior used by the low_dependency_ui_dynsmf app root path. The spec proves declarative CLI parsing remains responsive when run through `simple run`, and file-backed mmap loading stays bounded for repeated reads.
+Verifies startup-sensitive behavior used by the low_dependency_ui_dynsmf app root path. The spec proves declarative CLI parsing remains responsive through the early direct-file executable path, and file-backed mmap loading stays bounded for repeated reads.
 
 ## At a Glance
 
@@ -49,21 +49,21 @@ Verifies startup-sensitive behavior used by the low_dependency_ui_dynsmf app roo
 | Design | doc/05_design/low_dependency_ui_dynsmf.md |
 | Research | doc/01_research/local/low_dependency_ui_dynsmf.md |
 | Source | `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-11 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
 Verifies startup-sensitive behavior used by the low_dependency_ui_dynsmf app
-root path. The spec proves declarative CLI parsing remains responsive when run
-through `simple run`, and file-backed mmap loading stays bounded for repeated
-reads.
+root path. The spec proves declarative CLI parsing remains responsive through
+the early direct-file executable path, and file-backed mmap loading stays
+bounded for repeated reads.
 
 ## Examples
 
 The CLI startup scenario writes a temporary Simple entrypoint that parses flags,
-options, and positionals, runs it through the current Simple launcher, checks
-the parsed output, and enforces a warm average latency budget. Subprocess
+options, and positionals, launches it directly with the current self-hosted
+Simple binary, checks the parsed output, and enforces a warm average latency budget. Subprocess
 failures are hard failures with diagnostics. The mmap scenario writes a fixture,
 reads it repeatedly through `file_mmap_read_text`, checks exact content, and
 enforces a read latency budget.

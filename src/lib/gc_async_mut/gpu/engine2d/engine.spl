@@ -49,6 +49,7 @@ use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_defau
 use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_counters, tick_once}
 use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_default}
 use std.gc_async_mut.io.mod_stub.{env_get}
+use std.gc_async_mut.text_layout.font_renderer.{FontCacheStats, FontRenderer}
 
 # ============================================================================
 # Config / environment backend selection
@@ -112,6 +113,15 @@ class Engine2D:
     h: i32
     pacing: FramePacingCounters
     selected_backend_name: text
+    font_renderer: FontRenderer? = nil
+
+    me fonts() -> FontRenderer:
+        val active = self.font_renderer
+        if active != nil:
+            return active
+        val created = FontRenderer.new()
+        self.font_renderer = created
+        created
 
     # ========================================================================
     # Constructors
@@ -279,7 +289,7 @@ class Engine2D:
         # If requested here by name, fall through to CPU fallback.
 
         if requested_backend == "cpu_simd":
-            var cpu_simd = CpuBackend.create()
+            var cpu_simd = CpuBackend.create_simd()
             cpu_simd.init(width, height)
             return Ok(Engine2D(backend: cpu_simd, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd"))
 
@@ -626,13 +636,42 @@ class Engine2D:
             self.backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-        """Draw text using bitmap font."""
+        """Draw selected vector text, or the existing bitmap default."""
+        val selected = self.font_renderer
+        if selected != nil:
+            val fonts = selected
+            if fonts.has_sffi_ttf():
+                val payload = fonts.render_text_payload(text_val, color, font_size)
+                self.font_renderer = fonts
+                if payload.valid:
+                    if not payload.is_empty():
+                        self.draw_image_blend(x + payload.offset_x, y + payload.offset_y, payload.width, payload.height, payload.pixels)
+                    return
         if val Some(vg) = self.virtio_gpu_backend:
             vg.draw_text(x, y, text_val, color, font_size)
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_text(x, y, text_val, color, font_size)
         else:
             self.backend.draw_text(x, y, text_val, color, font_size)
+
+    me load_font(path: text) -> bool:
+        """Select one trusted TTF/OTF for process-wide Simple 2D text."""
+        val fonts = self.fonts()
+        val loaded = fonts.try_load_runtime_ttf(path)
+        self.font_renderer = fonts
+        loaded
+
+    me unload_font():
+        """Restore the zero-config bitmap text path."""
+        val selected = self.font_renderer
+        if selected != nil:
+            val fonts = selected
+            fonts.clear_ttf()
+        self.font_renderer = nil
+
+    me font_cache_stats() -> FontCacheStats:
+        val fonts = self.fonts()
+        fonts.cache_stats()
 
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
         """Draw text with an explicit background colour per glyph cell.
@@ -759,11 +798,11 @@ class Engine2D:
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if val Some(vg) = self.virtio_gpu_backend:
-            emu_draw_image_blend(self.backend, x, y, w, h, pixels)
+            vg.draw_image_blend(x, y, w, h, pixels)
         elif val Some(bm) = self.baremetal_backend:
-            emu_draw_image_blend(self.backend, x, y, w, h, pixels)
+            bm.draw_image_blend(x, y, w, h, pixels)
         else:
-            emu_draw_image_blend(self.backend, x, y, w, h, pixels)
+            self.backend.draw_image_blend(x, y, w, h, pixels)
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         if val Some(vg) = self.virtio_gpu_backend:
@@ -884,6 +923,7 @@ class Engine2D:
 
     me shutdown():
         """Shut down the backend and release all resources."""
+        self.unload_font()
         if val Some(vg) = self.virtio_gpu_backend:
             vg.shutdown()
         elif val Some(bm) = self.baremetal_backend:

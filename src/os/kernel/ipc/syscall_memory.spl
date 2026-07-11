@@ -7,7 +7,8 @@ use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_PRE
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_read_pte, PAGE_SIZE, PTE_PRESENT, PTE_ADDR_MASK}
 use os.kernel.memory.memory_owned_pages.{memory_map_owned_pages, memory_release_owned_pages}
-use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_register_cpu_range, memory_leveling_runtime_release_range}
+use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_register_cpu_range}
+use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_poll_pmm_pressure, memory_swap_runtime_release_range}
 use os.kernel.ipc.syscall.{_next_mmap_addr, _is_kernel_addr, NULL_GUARD_LIMIT}
 
 # ============================================================================
@@ -70,6 +71,8 @@ fn _handle_memory_map(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     if hint == 0:
         _next_mmap_addr = base_addr + page_count * PAGE_SIZE
 
+    _ = memory_swap_runtime_poll_pmm_pressure()
+
     SyscallResult(value: base_addr as i64)
 
 fn _handle_memory_unmap(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
@@ -91,7 +94,7 @@ fn _handle_memory_unmap(args: SyscallArgs, scheduler: Scheduler) -> SyscallResul
 
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
     val owner_id = scheduler.current.id
-    val released = memory_leveling_runtime_release_range(addr, page_count * PAGE_SIZE, owner_id)
+    val released = memory_swap_runtime_release_range(addr, page_count * PAGE_SIZE, owner_id)
     if not released.ok:
         return SyscallResult(value: -16)
     memory_release_owned_pages(addr, page_count)

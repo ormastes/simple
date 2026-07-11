@@ -116,7 +116,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val src = _src()
-expect(src).to_contain("fn win_text_host_wm_snapshot")
+expect(src).to_contain("fn win_text_host_wm_single_window_snapshot")
+expect(src.contains("play.types.{WindowInfo}")).to_be(false)
 expect(src).to_contain("WIN_TEXT_SOURCE_HOST_WM")
 expect(src).to_contain("host_window")
 expect(src).to_contain("click_xy")
@@ -136,7 +137,7 @@ Reproduction: this block contains the complete executable scenario source.
 val hub = _hub()
 expect(hub).to_contain("use common.ui.win_text_access")
 expect(hub).to_contain("win_text_trace32_snapshot")
-expect(hub).to_contain("win_text_host_wm_snapshot")
+expect(hub).to_contain("win_text_host_wm_single_window_snapshot")
 expect(hub).to_contain("win_text_route_action")
 ```
 
@@ -396,4 +397,3 @@ expect(unsupported.code).to_equal("unsupported_operation")
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-

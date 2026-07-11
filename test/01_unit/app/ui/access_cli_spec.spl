@@ -1,0 +1,72 @@
+# Focused source-level contract for the live Simple UI CLI adapter.
+
+use std.spec.{describe, it, expect}
+use app.ui.access_cli.{
+    ui_access_cli_action_body,
+    ui_access_cli_db_error,
+    ui_access_cli_descriptors,
+    ui_access_cli_parse_request,
+    ui_access_cli_route
+}
+
+describe "simple ui access CLI adapter":
+    it "registers the six T32-style operations through shared descriptors":
+        val descriptors = ui_access_cli_descriptors()
+        expect(descriptors.len()).to_equal(6)
+        expect(descriptors[0].name).to_equal("windows")
+        expect(descriptors[0].operation).to_equal("list")
+        expect(descriptors[0].safety.read_only).to_equal(true)
+        expect(descriptors[4].name).to_equal("act")
+        expect(descriptors[4].operation).to_equal("act")
+        expect(descriptors[4].safety.read_only).to_equal(false)
+        expect(descriptors[5].operation).to_equal("history")
+
+    it "maps reads to the existing UI test API with encoded selectors":
+        val snapshot = ui_access_cli_parse_request(["snapshot", "--json"])?
+        expect(ui_access_cli_route(snapshot)?).to_equal("/api/test/ui/snapshot")
+        val surface = ui_access_cli_parse_request(["surface", "main pane", "--json"])?
+        expect(ui_access_cli_route(surface)?).to_equal("/api/test/ui/surface?id=main%20pane")
+        val find = ui_access_cli_parse_request(["find", "--surface", "main", "--kind", "button", "--text", "Build now", "--limit", "20"])?
+        val find_route = ui_access_cli_route(find)?
+        expect(find_route).to_start_with("/api/test/ui/query?")
+        expect(find_route).to_contain("surface_id=main")
+        expect(find_route).to_contain("kind=button")
+        expect(find_route).to_contain("text=Build%20now")
+        expect(find_route).to_contain("limit=20")
+        val history = ui_access_cli_parse_request(["history", "--surface", "main", "--count", "10"])?
+        expect(ui_access_cli_route(history)?).to_equal("/api/test/ui/history?surface_id=main&count=10")
+
+    it "validates and serializes one semantic action without raw input fallback":
+        val request = ui_access_cli_parse_request(["act", "--canonical", "main#build", "--action", "click", "--timeout", "2000", "--json"])?
+        expect(request.timeout_ms).to_equal(2000)
+        expect(request.output_mode).to_equal("json")
+        expect(ui_access_cli_route(request)?).to_equal("/api/test/ui/act")
+        val body = ui_access_cli_action_body(request, "act-7")
+        expect(body).to_contain("\"canonical_id\":\"main#build\"")
+        expect(body).to_contain("\"action\":\"click\"")
+        expect(body).to_contain("\"request_id\":\"act-7\"")
+
+    it "rejects invalid action targets and unbounded numeric options":
+        match ui_access_cli_parse_request(["act", "--canonical", "build", "--action", "click"]):
+            Err(e): expect(e.code).to_equal("invalid_argument")
+            Ok(_): expect(false).to_equal(true)
+        match ui_access_cli_parse_request(["act", "--canonical", "main#", "--action", "click"]):
+            Err(e): expect(e.code).to_equal("invalid_argument")
+            Ok(_): expect(false).to_equal(true)
+        match ui_access_cli_parse_request(["history", "--count", "65"]):
+            Err(e): expect(e.code).to_equal("invalid_argument")
+            Ok(_): expect(false).to_equal(true)
+        match ui_access_cli_parse_request(["find", "--limit", "many"]):
+            Err(e): expect(e.code).to_equal("invalid_argument")
+            Ok(_): expect(false).to_equal(true)
+        match ui_access_cli_parse_request(["snapshot", "--invented"]):
+            Err(e): expect(e.code).to_equal("invalid_argument")
+            Ok(_): expect(false).to_equal(true)
+
+    it "fails explicit database access closed until a read-only store owner exists":
+        val read_error = ui_access_cli_db_error("snapshot", "/tmp/ui.db")
+        expect(read_error.code).to_equal("source_unavailable")
+        expect(read_error.message).to_contain("cannot be opened read-only")
+        val act_error = ui_access_cli_db_error("act", "/tmp/ui.db")
+        expect(act_error.code).to_equal("source_unavailable")
+        expect(act_error.message).to_contain("read-only")

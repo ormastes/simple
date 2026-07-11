@@ -6,10 +6,6 @@ its facade spec and AArch64/RISC-V Simple binaries are unavailable. The final
 `status=pass` below is therefore C-target-only, not architecture-complete SIMD
 evidence.
 
-The newer focused `check-llvm-simd-row-native-arch.shs` matrix separately
-executes exact vectorized row probes on x86_64, AArch64, and RISC-V. That result
-does not change this broader Engine2D matrix's zero-pass Simple-lane status.
-
 - cpu_simd_engine2d_arch_matrix_host_arch=x86_64
 - cpu_simd_engine2d_arch_matrix_strict=1
 - cpu_simd_engine2d_arch_matrix_target_build=1

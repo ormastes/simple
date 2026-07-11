@@ -63,12 +63,10 @@ static int64_t ref_blend_pixel(int64_t s, int64_t d) {
     uint32_t inv = 255u - sa;
     uint32_t sr = (sp >> 16) & 0xFFu, sg = (sp >> 8) & 0xFFu, sb = sp & 0xFFu;
     uint32_t dr = (dp >> 16) & 0xFFu, dg = (dp >> 8) & 0xFFu, db = dp & 0xFFu;
-    uint32_t da = (dp >> 24) & 0xFFu;
     uint32_t r = (sr * sa + dr * inv) / 255u;
     uint32_t g = (sg * sa + dg * inv) / 255u;
     uint32_t b = (sb * sa + db * inv) / 255u;
-    uint32_t a = sa + (da * inv) / 255u;
-    uint32_t out = (a << 24) | (r << 16) | (g << 8) | b;
+    uint32_t out = (255u << 24) | (r << 16) | (g << 8) | b; /* alpha forced 255 */
     return (int64_t)(uint64_t)out;
 }
 

@@ -12,6 +12,7 @@ Covered:
 - capability-gated arg parser, mmap/cache, and dynlib startup inclusion
 - native dynlib and role-2 SMF dynlib dependency policy
 - explicit SimpleOS launch metadata and VFS prewarm policy
+- hosted filesystem source versus explicit SimpleOS bare-metal GOT source
 - SimpleOS WM hover prefetch of executable/SMF bytes without execution
 - SimpleOS WM hover miss materialization through VFS/rootfs read-ahead into the
   app registry
@@ -45,11 +46,13 @@ Generated/manual docs mirror the executable paths:
 - Direct launch args are normalized without duplicate argv zero.
 - Mmap/cache strategy is selected only when metadata requests it and the
   platform supports a cache lane.
+- `baremetal_got` is selected only by explicit SimpleOS bare-metal metadata;
+  Linux and SimpleOS-host plans remain `filesystem` backed.
 - Dynlib loader is included only when native or SMF dynlib dependencies are
   declared.
 - SimpleOS hover prefetch records/warm-checks executable bytes, uses VFS to
   materialize bytes on cache miss when available, and does not launch a process.
-- `simple run` startup remains responsive for `.shs`, `get_cli_args`, and
+- direct-file startup remains responsive for `.shs`, `get_cli_args`, and
   `std.cli` script workloads.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
 
@@ -67,4 +70,4 @@ Generated/manual docs mirror the executable paths:
 | REQ-100 | SimpleOS launch metadata and VFS prewarm | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
 | REQ-101 | SimpleOS hover prefetch and VFS miss warmup | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
 | REQ-102 | SimpleOS launcher icon prefetch | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
-| NFR-STARTUP-001 | `simple run` arg parsing and mmap performance stay responsive | `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` | `doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md` | Full |
+| NFR-STARTUP-001 | Direct-file arg parsing and mmap performance stay responsive | `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` | `doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md` | Full |

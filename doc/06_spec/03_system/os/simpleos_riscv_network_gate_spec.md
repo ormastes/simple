@@ -429,6 +429,17 @@ expect(boot_shim).to_contain("fn rt_io_tcp_write_text(fd: i64, data: text) -> i6
 
 ### SimpleOS RISC-V QEMU HTTP scripts
 
+#### requires live POST database state evidence beyond boot readiness
+
+1. Inspect the live `POST /db` client used by `--with-db`.
+2. Require ordered `CREATE codex`, `INSERT codex answer codex-41`, and
+   `SELECT codex answer` requests in one boot session.
+3. Require the retained checker to see three HTTP `200` responses,
+   `OK CREATE`, `OK INSERT`, and the selected `codex-41` value.
+
+Serial network/bind readiness is checked first but cannot reach the final
+connected PASS without the selected-value evidence.
+
 #### keeps the RV64 smoke script explicit about the deferred boundary
 
 - expect qemu deferred script contract
@@ -607,7 +618,7 @@ expect_no_fake_network_pass("test/03_system/os/os_full_stack_spec.spl")
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/03_system/os/simpleos_riscv_network_gate_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-11 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -621,8 +632,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

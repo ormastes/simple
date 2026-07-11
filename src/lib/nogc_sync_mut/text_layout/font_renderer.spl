@@ -13,11 +13,12 @@ use std.nogc_sync_mut.text_layout.font_rasterizer.{
     blit_glyph
 }
 use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands}
+export use std.nogc_sync_mut.text_layout.font_types.{CachedGlyph, FontCacheStats, FontTextPayload}
 
 # Shared Font Renderer — unified text rendering for both OS and browser
 #
 # Provides buffer-based text rendering using three font backends:
-#   1. TrueType (via stb_truetype SFFI) — full Unicode, AA, proportional
+#   1. TrueType/OpenType (via the spl_fonts fontdue/FreeType owner) — Unicode, AA, proportional
 #   2. Vector font (outline commands) — 29 glyphs, 2x2 sub-pixel AA
 #   3. Bitmap 8x16 (VGA fallback) — monospace, no AA
 #
@@ -35,44 +36,67 @@ use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands}
 #   font_vector_data.spl  — vector outline tables + system font constants
 
 # ============================================================================
-# Glyph Cache Entry
-# ============================================================================
-
-class CachedGlyph:
-    codepoint: i32
-    font_size: i32
-    width: i32
-    height: i32
-    advance: i32
-    bearing_x: i32
-    bearing_y: i32
-    pixels: [u8]    # grayscale alpha (0-255) per pixel, row-major
-
-    static fn empty(cp: i32, fs: i32) -> CachedGlyph:
-        CachedGlyph(codepoint: cp, font_size: fs, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
-
-# ============================================================================
 # Glyph Cache
 # ============================================================================
 
 class GlyphCache:
     entries: [CachedGlyph]
     max_entries: i32
+    max_bytes: i64
+    payload_bytes: i64
+    hits: i64
+    misses: i64
+    rasterizations: i64
+    evictions: i64
+    observed_generation: i64
 
     static fn new(max_size: i32) -> GlyphCache:
-        GlyphCache(entries: [], max_entries: max_size)
+        GlyphCache(entries: [], max_entries: max_size, max_bytes: 33554432, payload_bytes: 0, hits: 0, misses: 0, rasterizations: 0, evictions: 0, observed_generation: 0)
 
-    fn lookup(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    me lookup(codepoint: i32, font_size: i32) -> CachedGlyph?:
         for entry in self.entries:
             if entry.codepoint == codepoint and entry.font_size == font_size:
+                self.hits = self.hits + 1
                 return entry
+        self.misses = self.misses + 1
         nil
 
-    me insert(glyph: CachedGlyph):
-        # Evict oldest if cache full
-        if self.entries.len() >= self.max_entries:
+    me record_rasterization():
+        self.rasterizations = self.rasterizations + 1
+
+    me insert(glyph: CachedGlyph) -> bool:
+        val glyph_bytes = glyph.pixels.len().to_i64()
+        if glyph_bytes > self.max_bytes:
+            return false
+        while self.entries.len() >= self.max_entries or self.payload_bytes + glyph_bytes > self.max_bytes:
+            if self.entries.len() == 0:
+                return false
+            self.payload_bytes = self.payload_bytes - self.entries[0].pixels.len().to_i64()
             self.entries = self.entries.slice(1, self.entries.len())
-        self.entries.push(glyph)
+            self.evictions = self.evictions + 1
+        var entries = self.entries
+        entries.push(glyph)
+        self.entries = entries
+        self.payload_bytes = self.payload_bytes + glyph_bytes
+        true
+
+    me invalidate():
+        self.entries = []
+        self.payload_bytes = 0
+
+    me sync_generation(generation: i64):
+        if generation != self.observed_generation:
+            self.invalidate()
+            self.observed_generation = generation
+
+    me reset_stats():
+        self.hits = 0
+        self.misses = 0
+        self.rasterizations = 0
+        self.evictions = 0
+
+    fn stats() -> FontCacheStats:
+        FontCacheStats(entries: self.entries.len().to_i64(), bytes: self.payload_bytes, generation: self.observed_generation, hits: self.hits, misses: self.misses, rasterizations: self.rasterizations, evictions: self.evictions)
 
 # ============================================================================
 # Font Renderer
@@ -129,9 +153,38 @@ class FontRenderer:
     me try_enable_ttf(dylib_path: text, ttf_path: text) -> bool:
         val r = FontRasterizer.load(dylib_path, ttf_path)
         if r != nil:
+            val old = self.ttf_rasterizer
             self.ttf_rasterizer = r
+            if old != nil:
+                old.close()
+            var cache = self.cache
+            cache.invalidate()
+            self.cache = cache
             return true
         false
+
+    me try_load_runtime_ttf(ttf_path: text) -> bool:
+        if ttf_path.trim() == "":
+            return false
+        for dylib_path in browser_font_dylib_candidates():
+            if self.try_enable_ttf(dylib_path, ttf_path):
+                return true
+        false
+
+    me clear_ttf():
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            rast.close()
+        self.ttf_rasterizer = nil
+        var cache = self.cache
+        cache.invalidate()
+        self.cache = cache
+
+    fn cache_stats() -> FontCacheStats: self.cache.stats()
+    me reset_cache_stats():
+        var cache = self.cache
+        cache.reset_stats()
+        self.cache = cache
 
     me try_enable_browser_serif_default() -> bool:
         for dylib_path in browser_font_dylib_candidates():
@@ -170,13 +223,20 @@ class FontRenderer:
     # -----------------------------------------------------------------------
     # Get glyph (cached) — returns rasterized alpha bitmap
     # -----------------------------------------------------------------------
-    me get_glyph(codepoint: i32, font_size: i32) -> CachedGlyph:
+    fn glyph_with_cache(codepoint: i32, font_size: i32, initial_cache: GlyphCache) -> (CachedGlyph, GlyphCache):
+        if codepoint < 0 or codepoint > 1114111 or font_size <= 0 or font_size > 512:
+            return (CachedGlyph.empty(codepoint, font_size), initial_cache)
+        val active_rasterizer = self.ttf_rasterizer
+        var cache = initial_cache
+        if active_rasterizer != nil:
+            cache.sync_generation(active_rasterizer.generation())
         # Check cache first
-        val cached = self.cache.lookup(codepoint, font_size)
-        if val Some(g) = cached:
-            return g
+        val cached = cache.lookup(codepoint, font_size)
+        if cached != nil:
+            return (cached, cache)
 
         # Rasterize
+        cache.record_rasterization()
         var glyph = CachedGlyph.empty(codepoint, font_size)
 
         # Phase 3b: prefer SFFI spl_fonts TrueType backend when the caller
@@ -185,8 +245,8 @@ class FontRenderer:
         # static-fn Option<T> returns are typed as T directly, so we use
         # `!= nil` rather than `if val Some(x) =` destructuring.
         var handled = false
-        val rast = self.ttf_rasterizer
-        if rast != nil:
+        val rast = active_rasterizer
+        if rast != nil and rast.has_glyph(codepoint.to_i64()):
             val gb = rast.rasterize(codepoint.to_i64(), font_size.to_i64())
             if gb != nil:
                 glyph = _sffi_glyph_to_cached(gb, codepoint, font_size)
@@ -205,8 +265,15 @@ class FontRenderer:
         else if self.use_bitmap:
             glyph = rasterize_bitmap_accelerated(codepoint, font_size)
 
-        self.cache.insert(glyph)
-        glyph
+        val expected_pixels = glyph.width.to_i64() * glyph.height.to_i64()
+        if glyph.advance > 0 and expected_pixels == glyph.pixels.len().to_i64():
+            cache.insert(glyph)
+        (glyph, cache)
+
+    me get_glyph(codepoint: i32, font_size: i32) -> CachedGlyph:
+        val result = self.glyph_with_cache(codepoint, font_size, self.cache)
+        self.cache = result.1
+        result.0
 
     # -----------------------------------------------------------------------
     # Measure text width using actual glyph advances
@@ -214,17 +281,21 @@ class FontRenderer:
     me measure_text_width(content: text, font_size: i32) -> i32:
         var total_w = 0
         var prev_cp = -1
+        var cache = self.cache
         for ch in content:
             val cp = ch.char_code_at(0)
             if prev_cp >= 0:
                 total_w = total_w + self.horizontal_kern(prev_cp, cp, font_size)
-            val glyph = self.get_glyph(cp, font_size)
+            val result = self.glyph_with_cache(cp, font_size, cache)
+            val glyph = result.0
+            cache = result.1
             if glyph.advance > 0:
                 total_w = total_w + glyph.advance
             else:
                 # Fallback: approximate
                 total_w = total_w + font_size * 55 / 100
             prev_cp = cp
+        self.cache = cache
         total_w
 
     # -----------------------------------------------------------------------
@@ -237,13 +308,82 @@ class FontRenderer:
         var out = buffer
         var cx = x
         var prev_cp = -1
+        var cache = self.cache
         for ch in content:
             val cp = ch.char_code_at(0)
             if prev_cp >= 0:
                 cx = cx + self.horizontal_kern(prev_cp, cp, font_size)
-            val glyph = self.get_glyph(cp, font_size)
+            val result = self.glyph_with_cache(cp, font_size, cache)
+            val glyph = result.0
+            cache = result.1
             if glyph.width > 0 and glyph.height > 0:
                 out = blit_glyph(out, buf_w, buf_h, cx, y, glyph, color)
             cx = cx + glyph.advance
             prev_cp = cp
+        self.cache = cache
         out
+
+    me render_text_payload(content: text, color: u32, font_size: i32) -> FontTextPayload:
+        if font_size <= 0 or font_size > 512:
+            return FontTextPayload(valid: false, width: 0, height: 0, offset_x: 0, offset_y: 0, pixels: [])
+        if content == "":
+            return FontTextPayload(valid: true, width: 0, height: 0, offset_x: 0, offset_y: 0, pixels: [])
+        val layout = self.layout_text(content, font_size, 0)
+        if layout.len() == 0:
+            return FontTextPayload(valid: false, width: 0, height: 0, offset_x: 0, offset_y: 0, pixels: [])
+        var glyphs: [CachedGlyph] = []
+        var min_x = 2147483647
+        var min_y = 2147483647
+        var max_x = -2147483647
+        var max_y = -2147483647
+        var cache = self.cache
+        var i = 0
+        while i < layout.len():
+            val positioned = layout[i]
+            val result = self.glyph_with_cache(positioned.codepoint.to_i32(), font_size, cache)
+            val glyph = result.0
+            cache = result.1
+            glyphs.push(glyph)
+            if glyph.width > 0 and glyph.height > 0:
+                val gx = positioned.x.to_i32()
+                val gy = positioned.y.to_i32()
+                if gx < min_x:
+                    min_x = gx
+                if gy < min_y:
+                    min_y = gy
+                if gx + glyph.width > max_x:
+                    max_x = gx + glyph.width
+                if gy + glyph.height > max_y:
+                    max_y = gy + glyph.height
+            i = i + 1
+        self.cache = cache
+        if max_x <= min_x or max_y <= min_y:
+            return FontTextPayload(valid: true, width: 0, height: 0, offset_x: 0, offset_y: 0, pixels: [])
+        val width = max_x - min_x
+        val height = max_y - min_y
+        var pixels: [u32] = [0u32; width * height]
+        val rgb = color & 0x00FFFFFFu32
+        val color_alpha = ((color >> 24) & 0xFF).to_i32()
+        i = 0
+        while i < layout.len():
+            val positioned = layout[i]
+            val glyph = glyphs[i]
+            val dst_x = positioned.x.to_i32() - min_x
+            val dst_y = positioned.y.to_i32() - min_y
+            var row = 0
+            while row < glyph.height:
+                var col = 0
+                while col < glyph.width:
+                    val src_idx = row * glyph.width + col
+                    if src_idx < glyph.pixels.len():
+                        val src_a = glyph.pixels[src_idx].to_i32() * color_alpha / 255
+                        if src_a > 0:
+                            val dst_idx = (dst_y + row) * width + dst_x + col
+                            if dst_idx >= 0 and dst_idx < pixels.len():
+                                val dst_a = ((pixels[dst_idx] >> 24) & 0xFF).to_i32()
+                                val out_a = src_a + dst_a * (255 - src_a) / 255
+                                pixels[dst_idx] = (out_a.to_u32() << 24) | rgb
+                    col = col + 1
+                row = row + 1
+            i = i + 1
+        FontTextPayload(valid: true, width: width, height: height, offset_x: min_x, offset_y: min_y, pixels: pixels)

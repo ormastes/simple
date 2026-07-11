@@ -342,11 +342,39 @@ fn is_simpleos_riscv64_link(user_objects: [text], output: text) -> bool:
 
 fn is_simpleos_x86_64_link(user_objects: [text], output: text) -> bool:
     val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-    if target == "x86_64-unknown-none" or target == "x86_64-unknown-none-elf":
+    if is_simpleos_x86_64_target(target):
         return true
     if output.contains("simpleos_wm_simple_web_check") or output.contains("simpleos_x86_64"):
         return true
     false
+
+fn is_simpleos_x86_64_target(target: text) -> bool:
+    target == "simpleos" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos" or target == "x86_64-unknown-none" or target == "x86_64-unknown-none-elf"
+
+fn simpleos_x86_64_sysroot() -> text:
+    val configured = rt_env_get("SIMPLE_SYSROOT") ?? ""
+    if configured != "":
+        return configured
+    val legacy = rt_env_get("SIMPLEOS_SYSROOT") ?? ""
+    if legacy != "":
+        return legacy
+    "build/os/sysroot"
+
+fn simpleos_x86_64_user_link_inputs(sysroot: text) -> [text]:
+    val configured_runtime = rt_env_get("SIMPLE_SIMPLE_CORE_PATH") ?? ""
+    val target_runtime = "build/os/simple-core-simpleos/libsimple_runtime.a"
+    val runtime = if configured_runtime != "":
+        configured_runtime
+    elif rt_file_exists(target_runtime):
+        target_runtime
+    else:
+        "{sysroot}/lib/libsimple_runtime.a"
+    val inputs: [text] = [
+        "{sysroot}/lib/crt0.o",
+        runtime,
+        "{sysroot}/lib/libsimpleos_c.a"
+    ]
+    inputs
 
 fn is_simpleos_riscv32_link(user_objects: [text], output: text) -> bool:
     val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
@@ -385,6 +413,44 @@ fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
     Ok(obj)
 
 fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if target == "simpleos" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos":
+        val sysroot = simpleos_x86_64_sysroot()
+        val support = simpleos_x86_64_user_link_inputs(sysroot)
+        for path in support:
+            if not rt_file_exists(path):
+                return Err("SimpleOS x86_64 sysroot is incomplete: missing {path}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
+        val linker_script = "{sysroot}/share/simpleos/simpleos.ld"
+        if not rt_file_exists(linker_script):
+            return Err("SimpleOS x86_64 sysroot is incomplete: missing {linker_script}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
+
+        val entry_result = compile_entry_point_c(getpid(), verbose, opt_level)
+        val entry_object = match entry_result:
+            case Ok(path): path
+            case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
+
+        val support0 = support[0]
+        var user_args: [text] = [
+            "-T", linker_script, "-nostdlib", "-static", "--gc-sections",
+            "-o", output, support0, entry_object
+        ]
+        for obj in user_objects:
+            user_args.push(obj)
+        user_args.push("--start-group")
+        user_args.push(support[1])
+        user_args.push(support[2])
+        user_args.push("--end-group")
+        val (_user_out, user_err, user_code) = rt_process_run("ld.lld", user_args)
+        rt_file_delete(entry_object)
+        if user_code != 0:
+            return Err("SimpleOS x86_64 user executable link failed: {user_err}")
+        if verbose:
+            print "[llvm-link] SimpleOS x86_64 user executable: {output}"
+        return Ok(output)
+
+    # Legacy `*-unknown-none[-elf]` and filename-selected kernel builds keep
+    # their boot CRT/stub path. The canonical `*-simpleos` target above is a
+    # filesystem-launched user process and must use the installed sysroot.
     val pid = getpid()
     val crt_o = "build/os/simpleos_x86_64_crt0_{pid}.o"
     val stubs_o = "build/os/simpleos_x86_64_baremetal_stubs_{pid}.o"

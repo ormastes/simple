@@ -170,24 +170,6 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
 
 ### macOS Metal
 
-Status update, 2026-07-11:
-
-- Completed on Darwin/arm64 with native Metal tools from `xcrun`.
-- `timeout 240 sh scripts/check/check-metal-generated-2d-readback.shs`
-  reported `metal_generated_2d_readback_status=pass`,
-  `metal_generated_2d_readback_reason=gpu-readback-verified`, and
-  `metal_generated_2d_readback_mismatch_count=0`.
-- The production wrapper report
-  `doc/09_report/production_gui_web_host_gpu_queue_readback_2026-07-10.md`
-  recorded `readback_metal_verdict=pass`,
-  `metal_spark_task_status=pass`, and
-  `metal_normal_llm_verification_status=pass`.
-- The production wrapper aggregate remained fail/partial for broader
-  non-Metal gates, including `browser-frame-first-render-budget-not-met`,
-  BrowserBackend host event roundtrip, compiler HostGpuLane cleanup, and
-  non-Metal platform children. This closes the macOS Metal Spark task only,
-  not the full host-GPU queue/readback matrix.
-
 - Spark task: on Darwin, run
   `timeout 240 sh scripts/check/check-metal-generated-2d-readback.shs`, then run
   the production wrapper with a Metal-capable `bin/simple`.

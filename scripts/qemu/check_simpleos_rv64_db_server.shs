@@ -7,13 +7,12 @@ usage() {
     cat <<'USAGE'
 Usage: sh scripts/qemu/check_simpleos_rv64_db_server.shs --artifacts DIR
 
-Validates QEMU RV64 SimpleOS DB server evidence. This gate intentionally does
-not accept DBFS/storage-only readiness as proof of a connected DB server.
+Validates QEMU RV64 SimpleOS DB service evidence. This gate intentionally does
+not accept DBFS/storage-only readiness or a bind marker as proof of a request.
 
 Required files in DIR:
-  serial.log       QEMU RV64 SimpleOS serial log with DB service bind marker
-  db_health.log    Host DB health transcript
-  db_query.log     Host DB query transcript
+  serial.log       QEMU RV64 SimpleOS serial log with the live HTTP bind
+  db_query.log     Host POST /db CREATE/INSERT/SELECT transcript
 USAGE
 }
 
@@ -51,29 +50,24 @@ done
 [ -d "$ARTIFACT_DIR" ] || fail "artifact_dir_not_found path=$ARTIFACT_DIR"
 
 serial_log="$ARTIFACT_DIR/serial.log"
-db_health_log="$ARTIFACT_DIR/db_health.log"
 db_query_log="$ARTIFACT_DIR/db_query.log"
 
 [ -f "$serial_log" ] || fail "serial_log_missing"
-[ -f "$db_health_log" ] || fail "db_health_log_missing"
 [ -f "$db_query_log" ] || fail "db_query_log_missing"
 
 grep -q 'SimpleOS RV64' "$serial_log" ||
     fail "serial_simpleos_rv64_marker_missing"
-grep -Eq 'DB service ready|Simple DB server listening' "$serial_log" ||
-    fail "serial_db_service_ready_missing"
-grep -Eq 'port=(5432|15432)|0\.0\.0\.0:(5432|15432)' "$serial_log" ||
-    fail "serial_db_port_missing"
-pass "serial_db_service_ready"
+grep -q 'Network service ready' "$serial_log" ||
+    fail "serial_network_ready_missing"
+grep -q 'Bootstrap TCP shim bound on 0.0.0.0:8080' "$serial_log" ||
+    fail "serial_http_bind_missing"
+pass "serial_live_request_path_ready"
 
-grep -Eq 'status=(ok|ready)|DB_HEALTH_OK|health: ok' "$db_health_log" ||
-    fail "db_health_ok_missing"
-pass "db_health_ok"
-
-grep -Eq 'SELECT 1|select 1|query=health' "$db_query_log" ||
-    fail "db_query_probe_missing"
-grep -Eq 'result=1|row: 1|DB_QUERY_OK' "$db_query_log" ||
-    fail "db_query_result_missing"
-pass "db_query_ok"
+[ "$(grep -c 'HTTP/1.1 200 OK' "$db_query_log" || true)" -ge 3 ] ||
+    fail "db_success_response_count_missing"
+grep -q 'OK CREATE' "$db_query_log" || fail "db_create_result_missing"
+grep -q 'OK INSERT' "$db_query_log" || fail "db_insert_result_missing"
+grep -q 'codex-41' "$db_query_log" || fail "db_select_value_missing"
+pass "db_create_insert_select_ok"
 
 pass "simpleos_rv64_db_server_connected"

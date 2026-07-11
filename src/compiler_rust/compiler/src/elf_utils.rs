@@ -512,8 +512,6 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_host_gpu_lane_last_phase" => host_gpu_lane::rt_host_gpu_lane_last_phase as *const () as usize,
         "rt_host_gpu_queue_reset" => host_gpu_lane::rt_host_gpu_queue_reset as *const () as usize,
         "rt_host_gpu_queue_emit" => host_gpu_lane::rt_host_gpu_queue_emit as *const () as usize,
-        "rt_host_gpu_queue_emit_payload" => host_gpu_lane::rt_host_gpu_queue_emit_payload as *const () as usize,
-        "rt_host_gpu_queue_emit_payload_text" => host_gpu_lane::rt_host_gpu_queue_emit_payload_text as *const () as usize,
         "rt_host_gpu_queue_drain" => host_gpu_lane::rt_host_gpu_queue_drain as *const () as usize,
         "rt_host_gpu_queue_submit" => host_gpu_lane::rt_host_gpu_queue_submit as *const () as usize,
         "rt_host_gpu_queue_complete" => host_gpu_lane::rt_host_gpu_queue_complete as *const () as usize,
@@ -525,10 +523,6 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_host_gpu_queue_last_backend_handle" => {
             host_gpu_lane::rt_host_gpu_queue_last_backend_handle as *const () as usize
         }
-        "rt_host_gpu_queue_last_device_time_us" => host_gpu_lane::rt_host_gpu_queue_last_device_time_us as *const () as usize,
-        "rt_host_gpu_queue_last_payload_size" => host_gpu_lane::rt_host_gpu_queue_last_payload_size as *const () as usize,
-        "rt_host_gpu_queue_last_payload_hash" => host_gpu_lane::rt_host_gpu_queue_last_payload_hash as *const () as usize,
-        "rt_host_gpu_queue_last_payload_text" => host_gpu_lane::rt_host_gpu_queue_last_payload_text as *const () as usize,
 
         // Process operations
         "rt_process_run" => value::rt_process_run as *const () as usize,

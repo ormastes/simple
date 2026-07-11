@@ -1,45 +1,36 @@
 # @tag:system
+# @req REQ-005 REQ-006
 
-use std.spec
-use std.nogc_sync_mut.ffi.io.{dir_create_all}
-
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_file_write_text(path: text, content: text) -> bool
-
-fn run_shell(cmd: text) -> (text, text, i64):
-    rt_process_run("/bin/sh", ["-c", cmd])
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_read, file_write, file_exists}
+use os.installer.image_builder.{build_install_image_with_simple_binary}
+use os.tools.pkg.pkg_format.{PkgArch}
 
 describe "SimpleOS deploy image Simple toolchain payload":
-    it "bakes a supplied target Simple payload into compiler interpreter and loader roles":
+    it "rejects marker payloads and requires the full target CLI provenance":
         val root = "build/tmp/simpleos_deploy_image_simple_toolchain"
         dir_create_all(root)
         val payload = root + "/simple-target.smf"
         val image = root + "/simpleos-disk.img"
-        expect(rt_file_write_text(payload, "SMF_FAKE_TARGET_SIMPLE\nrole=compiler-interpreter-loader\n")).to_equal(true)
 
-        val (out, err, code) = run_shell(
-            "SIMPLEOS_SIMPLE_BINARY='" + payload + "' " +
-            "sh scripts/os/make_os_disk.shs 64 '" + image + "' '' x86_64 >/tmp/simpleos-deploy-image-toolchain.out 2>/tmp/simpleos-deploy-image-toolchain.err"
-        )
-        if code != 0:
-            print out
-            print err
-            val logs = run_shell("cat /tmp/simpleos-deploy-image-toolchain.out /tmp/simpleos-deploy-image-toolchain.err 2>/dev/null || true")
-            print logs.0
-        expect(code).to_equal(0)
+        step("Reject a marker pretending to be a target compiler")
+        expect(file_write(payload, "SMF_FAKE_TARGET_SIMPLE\nrole=compiler-interpreter-loader\n")).to_be(true)
+        val result = build_install_image_with_simple_binary(PkgArch.X86_64, "", "", image, 64, payload)
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain("lacks target provenance")
+        expect(file_exists("{image}.contents/rootfs/SYS/SIMPLETOOL.SDN")).to_be(false)
 
-        val (scan_out, scan_err, scan_code) = run_shell(
-            "grep -a -q 'SMF_FAKE_TARGET_SIMPLE' '" + image + "' && " +
-            "grep -a -q 'SIMPLSTC' '" + image + "' && " +
-            "grep -a -q 'SCOMPSMF' '" + image + "' && " +
-            "grep -a -q 'SINTSMF' '" + image + "' && " +
-            "grep -a -q 'SLOADSMF' '" + image + "' && " +
-            "grep -a -q '/usr/bin/simple status=standalone-required' '" + image + "' && " +
-            "grep -a -q '/sys/apps/simple_compiler status=standalone-required' '" + image + "' && " +
-            "grep -a -q '/sys/apps/simple_interpreter status=standalone-required' '" + image + "' && " +
-            "grep -a -q '/sys/apps/simple_loader status=standalone-required' '" + image + "'"
-        )
-        if scan_code != 0:
-            print scan_out
-            print scan_err
-        expect(scan_code).to_equal(0)
+        step("Require the full Simple CLI entry closure in the target build")
+        val builder = file_read("scripts/os/simpleos-native-build.shs")
+        expect(builder).to_contain("--entry-closure")
+        expect(builder).to_contain("--entry src/app/cli/main.spl")
+        expect(builder).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
+        expect(builder).to_contain(".build_stamp")
+
+        step("Require target provenance before any role is staged")
+        val image_builder = file_read("src/os/installer/image_builder.spl")
+        expect(image_builder).to_contain("_validate_simple_binary(simple_binary, self.config.arch)")
+        expect(image_builder).to_contain("target={expected_target}")
+        expect(image_builder).to_contain("entry=src/app/cli/main.spl")
+        expect(image_builder).to_contain("entry_closure=true")

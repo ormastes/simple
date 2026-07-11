@@ -2412,7 +2412,8 @@ impl LlvmBackend {
             };
 
         // Check if declared param count matches expanded arg count
-        let declared_params = called_func.get_type().get_param_types().len();
+        let declared_param_types = called_func.get_type().get_param_types();
+        let declared_params = declared_param_types.len();
         let call_site = if declared_params != arg_vals.len() {
             // Arity mismatch: use indirect call with matching function type
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
@@ -2423,8 +2424,14 @@ impl LlvmBackend {
                 .build_indirect_call(fn_type, fn_ptr, &arg_vals, "call")
                 .map_err(|e| crate::error::factory::llvm_build_failed("indirect call (arity)", &e))?
         } else {
+            let mut adapted_args = Vec::with_capacity(arg_vals.len());
+            for (arg, target_ty) in arg_vals.into_iter().zip(declared_param_types) {
+                let value = inkwell::values::BasicValueEnum::try_from(arg)
+                    .map_err(|_| CompileError::semantic("metadata value used as a runtime call argument"))?;
+                adapted_args.push(self.coerce_value_to_type(value, Some(target_ty), builder)?.into());
+            }
             builder
-                .build_call(called_func, &arg_vals, "call")
+                .build_call(called_func, &adapted_args, "call")
                 .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?
         };
 

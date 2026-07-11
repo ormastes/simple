@@ -121,6 +121,19 @@ BOOT_TIMEOUT=3 SERIAL_TAIL_LINES=20 \
 On failure the wrapper prints only the serial tail. This keeps repeated RV64
 banner loops from flooding the calling session.
 
+As of 2026-07-11 the retained HTTP transcript is historical only. A fresh
+`bin/simple os build --arch=riscv64` fails because the deployed compiler is the
+Rust seed without LLVM, and `build/os/simpleos_riscv64.elf` is absent. Do not use
+`--allow-prebuilt-artifact` for a current-source claim.
+
+With `--with-db`, `scripts/qemu/qemu_rv64_http_test.shs` now sends three real
+`POST /db` requests in one guest boot: create `codex`, insert `answer=codex-41`,
+then select it. It passes only when all three HTTP responses succeed and the
+selected body contains `codex-41`. The retained-evidence checker likewise
+requires three `200` responses plus `OK CREATE`, `OK INSERT`, and `codex-41`;
+serial readiness alone cannot pass. A current-source QEMU run is still blocked
+until the RV64 ELF can be rebuilt by the self-hosted compiler.
+
 When `nm` is available, the wrapper also fail-fast checks the RV64 ELF before
 launch. If `_start` aliases `rt_riscv_uart_put`, the artifact is the known
 native entry-closure symbol-mismatch build and QEMU evidence is not useful until

@@ -232,8 +232,6 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                             Some(TypeId::STRING)
                         }
                         "rt_string_eq" | "rt_native_eq" | "rt_native_neq" => Some(TypeId::I64),
-                        "rt_string_to_int" | "rt_string_to_int_lenient" => Some(TypeId::I64),
-                        "rt_string_to_float" => Some(TypeId::F64),
                         // Array/collection length returns a native i64. Recording
                         // it here types the `len()` result VReg so a CHAINED
                         // `arr.len().to_i64()` (or `.to_u32()` etc.) sees an i64
@@ -1210,36 +1208,6 @@ mod tests {
 
         assert_eq!(map.get(&word).copied(), Some(TypeId::U64));
         assert_eq!(map.get(&hoisted_word).copied(), Some(TypeId::U64));
-    }
-
-    #[test]
-    fn build_vreg_types_stamps_string_parse_runtime_reads() {
-        let mut func = MirFunction::new("test".to_string(), TypeId::I64, Visibility::Private);
-        let string = func.new_vreg();
-        let integer = func.new_vreg();
-        let float = func.new_vreg();
-
-        let entry = func.block_mut(BlockId(0)).unwrap();
-        entry.instructions.push(MirInst::ConstString {
-            dest: string,
-            value: "3840".to_string(),
-        });
-        entry.instructions.push(MirInst::Call {
-            dest: Some(integer),
-            target: CallTarget::from_name("rt_string_to_int"),
-            args: vec![string],
-        });
-        entry.instructions.push(MirInst::Call {
-            dest: Some(float),
-            target: CallTarget::from_name("rt_string_to_float"),
-            args: vec![string],
-        });
-        entry.terminator = Terminator::Return(Some(integer));
-
-        let map = build_vreg_types(&func);
-
-        assert_eq!(map.get(&integer).copied(), Some(TypeId::I64));
-        assert_eq!(map.get(&float).copied(), Some(TypeId::F64));
     }
 
     /// Signedness classification derived from `build_vreg_types` output —

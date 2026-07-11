@@ -722,9 +722,14 @@ This iteration moved the stack toward the target above (see design doc
   `office_style_resolver` cascade; the opt-in `editor/render/md_draw_ir.spl`
   projects TUI lines into the same `DrawIrComposition` the GUI dispatches, making
   the TUI lane GPU-offloadable like the GUI.
-- **Font GPU offload (vector + bitmap) at parity** with checksum-gated backend
-  payloads and a load-bearing CPU fallback; transparency composites through
-  `blit_glyph`. Default unspecified font is Fira Code Nerd (glyph + HTML seams).
+- **Two distinct font lanes.** Generated vector/bitmap glyph preparation can
+  use checksum-gated GPU-offload payloads with CPU fallback. Separately,
+  `Engine2D.load_font` selects a real TTF/OTF through the CPU `spl_fonts`
+  owner, caches glyph alpha, builds one tight payload, and composites it on the
+  selected drawing backend. Engine2D's unspecified default remains backend
+  bitmap text; Fira Code Nerd is the common/browser font-candidate default.
+  Trusted local paths use UTF-8 bytes. The selected native face/layout remains
+  one serialized process-global singleton until concurrent owned handles are required.
 - **MD WYSIWYG wired end-to-end** via `app/office/md_wysiwyg_{ppm,gui}.spl`.
 - **Other 2D APIs share the SIMD-CPU/GPU interface via additive bridges** —
   `engine2d/bridge_game2d.spl`, `skia/bridge/engine2d_bridge.spl`,

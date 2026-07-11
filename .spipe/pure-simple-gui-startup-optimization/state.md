@@ -863,23 +863,3 @@ dev-done
   `simple_web_layout_child_index_spec.spl` remains 16/16. Docker optimizer scan
   completed for the renderer with 762 remaining static opportunities after the
   final rebase.
-- impl: Closed the Metal-only evidence TODO by fixing partial-alpha software
-  span blending under the deployed self-hosted runtime and routing Metal
-  `draw_circle_filled` readback through the proven Metal blit path from the
-  canonical mirror. Added a focused `draw_image` readback assertion to the Metal
-  framebuffer spec.
-- verify: `check-metal-engine2d-framebuffer-readback-evidence.shs` PASS,
-  `check-engine2d-cpu-metal-parity-evidence.shs` PASS,
-  `check-macos-metal-browser-backing-evidence.shs` PASS, and
-  `check-macos-metal-render-log-compare.shs` PASS with
-  `blocked_gate_count=0`. Regenerated
-  `doc/06_spec/test/02_integration/rendering/metal_engine2d_readback_spec.md`.
-- plan-sync: Closed the remaining macOS Metal Spark plan card on Darwin/arm64.
-  `check-metal-generated-2d-readback.shs` PASS with zero mismatches, the
-  production host-GPU queue/readback wrapper records `readback_metal_verdict`,
-  `metal_spark_task_status`, and `metal_normal_llm_verification_status` as
-  `pass`, and `check-macos-metal-render-log-compare.shs` published
-  `doc/09_report/macos_metal_render_log_compare_2026-07-10.md` with
-  `blocked_gate_count=0` and GPU capture `not-required`. The production wrapper
-  aggregate remains fail/partial for broader non-Metal gates and is documented
-  as such in the active plans.

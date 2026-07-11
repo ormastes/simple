@@ -170,7 +170,8 @@ Inputs:
 
 Behavior:
 
-- maps each top-level `WindowInfo` to a surface.
+- keeps `WindowInfo` adapter-owned and maps each top-level window through the
+  scalar `win_text_host_wm_single_window_snapshot` common boundary.
 - maps each top-level window to one root node.
 - internal controls are not invented.
 - click/type/focus actions are exposed only at window/coordinate level.
@@ -223,7 +224,7 @@ Unsupported:
 Canonical operations:
 
 - snapshot construction through `win_text_trace32_snapshot`,
-  `win_text_simple_ui_snapshot`, `win_text_host_wm_snapshot`, and
+  `win_text_simple_ui_snapshot`, `win_text_host_wm_single_window_snapshot`, and
   `win_text_compositor_snapshot`
 - shared query through `win_text_find_nodes`
 - shared action validation/routing through `win_text_route_action`

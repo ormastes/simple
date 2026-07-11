@@ -492,20 +492,10 @@ bool rt_opencl_release_context(int64_t context) {
     return status == RT_OPENCL_SUCCESS;
 }
 
-static inline int64_t engine2d_numeric_arg(int64_t value) {
-    uint64_t raw = (uint64_t)value;
-    if ((raw & RT_VALUE_TAG_MASK_SIMD) == 0 && raw >= 8) {
-        return (int64_t)(raw >> 3);
-    }
-    return value;
-}
-
 static int engine2d_span_bounds(SplArray* array, int64_t offset, int64_t count,
                                 int64_t* out_offset, int64_t* out_count) {
     if (!array || !out_offset || !out_count) return 0;
     int64_t len = rt_array_len(array);
-    offset = engine2d_numeric_arg(offset);
-    count = engine2d_numeric_arg(count);
     if (offset < 0 || count <= 0 || offset >= len) return 0;
     if (count > len - offset) count = len - offset;
     *out_offset = offset;
@@ -619,9 +609,7 @@ static inline int64_t engine2d_blend_pixel(int64_t s, int64_t d) {
     uint32_t r = (((sp >> 16) & 0xFFu) * sa + ((dp >> 16) & 0xFFu) * inv) / 255u;
     uint32_t g = (((sp >> 8) & 0xFFu) * sa + ((dp >> 8) & 0xFFu) * inv) / 255u;
     uint32_t b = ((sp & 0xFFu) * sa + (dp & 0xFFu) * inv) / 255u;
-    uint32_t da = (dp >> 24) & 0xFFu;
-    uint32_t a = sa + (da * inv) / 255u;
-    uint32_t out = (a << 24) | (r << 16) | (g << 8) | b;
+    uint32_t out = (255u << 24) | (r << 16) | (g << 8) | b;
     return (int64_t)(uint64_t)out;
 }
 
@@ -663,12 +651,8 @@ static void engine2d_blend_into(int64_t* out, const int64_t* dst,
 
         uint32_t r0 = a0[0] / 255u, g0 = a0[1] / 255u, b0 = a0[2] / 255u;
         uint32_t r1 = a1[0] / 255u, g1 = a1[1] / 255u, b1 = a1[2] / 255u;
-        uint32_t da0 = (d0 >> 24) & 0xFFu;
-        uint32_t da1 = (d1 >> 24) & 0xFFu;
-        uint32_t oa0 = sa0 + (da0 * (255u - sa0)) / 255u;
-        uint32_t oa1 = sa1 + (da1 * (255u - sa1)) / 255u;
-        uint32_t o0 = (oa0 << 24) | (r0 << 16) | (g0 << 8) | b0;
-        uint32_t o1 = (oa1 << 24) | (r1 << 16) | (g1 << 8) | b1;
+        uint32_t o0 = (255u << 24) | (r0 << 16) | (g0 << 8) | b0;
+        uint32_t o1 = (255u << 24) | (r1 << 16) | (g1 << 8) | b1;
         if (sa0 == 255u) o0 = s0; else if (sa0 == 0u) o0 = d0;
         if (sa1 == 255u) o1 = s1; else if (sa1 == 0u) o1 = d1;
         out[i] = (int64_t)(uint64_t)o0;
@@ -825,7 +809,7 @@ int64_t rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, 
 
     int64_t* data = (int64_t*)(uintptr_t)rt_array_data_ptr(dst);
     if (!data) return 0;
-    int64_t color_word = engine2d_numeric_arg(color) & 0xffffffffLL;
+    int64_t color_word = (int64_t)((uint64_t)color & 0xffffffffULL);
 
 #if defined(__x86_64__) || defined(_M_X64)
     if (simd_detect_avx2()) {
@@ -846,6 +830,12 @@ int64_t rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, 
         data[off + i] = color_word;
     }
     return n;
+}
+
+SplArray* rt_engine2d_simd_fill_span_u32(SplArray* dst, int64_t offset,
+                                         int64_t count, int64_t color) {
+    rt_engine2d_simd_fill_u32(dst, offset, count, color);
+    return dst;
 }
 
 int64_t rt_engine2d_simd_copy_u32(SplArray* dst, int64_t dst_off, SplArray* src,

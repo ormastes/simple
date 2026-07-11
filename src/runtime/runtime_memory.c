@@ -8,29 +8,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(_WIN32)
-#include <malloc.h>
-#endif
 
 uint8_t* rt_alloc(uint64_t size) {
     if (size == 0) return NULL;
     return (uint8_t*)calloc(1, size);
-}
-
-uint8_t* rt_alloc_page_aligned(uint64_t size) {
-    if (size == 0) return NULL;
-    void* ptr = NULL;
-#if defined(_WIN32)
-    ptr = _aligned_malloc((size_t)size, 4096);
-#else
-    if (posix_memalign(&ptr, 4096, (size_t)size) != 0) {
-        return NULL;
-    }
-#endif
-    if (ptr != NULL) {
-        memset(ptr, 0, (size_t)size);
-    }
-    return (uint8_t*)ptr;
 }
 
 void rt_free(uint8_t* ptr, uint64_t size) {

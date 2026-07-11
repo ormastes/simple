@@ -198,11 +198,13 @@ Simple extends Clean Architecture with dimensions:
 
 ### Script Startup Performance
 
-The `simple run` driver keeps script startup competitive by selecting the
-interpreter for script-shaped workloads that are cheaper to run directly than to
-compile first. Files ending in `.shs` and scripts that use CLI argument helpers
-such as `get_cli_args` or `std.cli` should prefer interpreter execution unless
-`SIMPLE_EXECUTION_MODE` is explicitly set.
+The direct-file driver path (`simple file.spl ...`) keeps script startup
+competitive by parsing the file argument before normal command initialization
+and selecting the interpreter for script-shaped workloads that are cheaper to
+run directly than to compile first. `simple run file.spl` is a command surface,
+not the startup-latency oracle. Files ending in `.shs` and scripts that use CLI
+argument helpers such as `get_cli_args` or `std.cli` should prefer interpreter
+execution unless `SIMPLE_EXECUTION_MODE` is explicitly set.
 
 When changing this path, verify both behavior and speed with the startup/mmap
 performance spec:

@@ -19,6 +19,34 @@ just not on the `PATH` and not under the name the disk-bake gate expects.
 The cross `clang-20` is a **host executable** (Linux ELF) that emits
 `x86_64-unknown-simpleos` code — a cross-compiler, not a guest-native binary.
 
+## Current filesystem-exec status (2026-07-11)
+
+The guest candidate now exists at
+`build/os/clang_static/bin/clang_static` (124,602,568-byte static ELF), but it
+has **not** passed mounted-filesystem execution. The production x86_64 loader
+now opens the exact requested FAT32 path, retains only a bounded ELF header and
+program-header prefix, and streams every PT_LOAD directly into its mapped user
+frames. It rejects short reads and no longer consults the unkeyed boot preload.
+The loader also builds bounded SysV argv/envp/auxv state. This is source-ready,
+not QEMU proof: the latest retained production log still predates the fix and
+ends `TEST FAILED`. Historical SSH preload success remains invalid evidence.
+
+Completion requires one fail-closed transcript that opens `/usr/bin/clang` from
+the mounted image, runs `--version`, compiles a guest `hello.c`, and launches the
+resulting mounted ELF. Reject any run containing `spawn:preloaded` as hosted
+filesystem proof. The active design and test plan are
+`doc/04_architecture/simpleos_filesystem_toolchain_servers.md` and
+`doc/03_plan/sys_test/simpleos_filesystem_toolchain_servers.md`.
+
+The companion target-Simple builder is
+`sh scripts/os/simpleos-native-build.shs`. It defaults to
+`x86_64-unknown-simpleos`, refuses the Rust bootstrap seed, compiles the full
+`src/app/cli/main.spl` entry closure with stub fallback disabled, and writes a
+target build stamp. Canonical target lowering now keeps the SimpleOS triple and
+links user programs against the SimpleOS sysroot; the current deployed
+self-hosted runner still times out before focused specs execute. Do not fall
+back to the seed.
+
 ## Build + link hello world (verified)
 
 ```sh
@@ -39,19 +67,21 @@ $BIN/llvm-nm /tmp/hello.elf | grep -E ' _start| main'
 Result: a valid, statically-linked `x86_64-unknown-simpleos` ELF. **Compile and
 link work today.**
 
-## Running it in-guest — blocked
+## Running it in-guest — source path implemented, live proof blocked
 
 Actually *executing* the ELF inside SimpleOS under QEMU (SSH in → run) is **not
 yet provable**. Two tracked blockers:
 
-1. **Kernel exec handoff** — `test/03_system/os/port/x86_64_elf_load_spec.spl`
-   skips the behavioural run: *"blocked on P0-C QEMU smoke (disk image + VFS
-   mount)"*. Live context transfer into a spawned guest task is unproven.
+1. **Kernel exec handoff** — exact-path streaming and SysV argv/envp population
+   are implemented in `x86_64_fs_exec_spawn.spl` and
+   `x86_64_fs_exec_ring3.spl`, but a fresh QEMU run has not passed yet.
 2. **Guest-native `clang_static`** — the disk bake / SSH live lane want
    `build/os/clang_static/bin/clang_static` (a static clang that runs **on**
    SimpleOS, not the host cross-compiler above) plus
    `build/os/.bake_include_toolchain`. `--status` gate =
-   `guest-toolchain-exec-gate BLOCKED`. **On desktop SimpleOS this static path
+   `guest-toolchain-exec-gate BLOCKED`. `build_clang_disk.shs` currently proves
+   LLVM bitcode emission only; its own source records `-emit-obj` as blocked.
+   **On desktop SimpleOS this static path
    is DEPRECATED — see the launch-policy section below.**
 
 Full detail & remaining steps: `doc/08_tracking/bug/simpleos_in_guest_toolchain_execution.md`.
