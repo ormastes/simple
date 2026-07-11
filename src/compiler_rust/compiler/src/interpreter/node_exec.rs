@@ -797,7 +797,59 @@ fn exec_assignment(
                 }
             }
         }
-        // Case 2: Nested field access: obj.inner.field = value
+        // Case 2: Indexed object field: arr[index].field = value
+        else if let Expr::Index { receiver: array_expr, index } = receiver.as_ref() {
+            if let Expr::Identifier(array_name) = array_expr.as_ref() {
+                let index_value = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
+                let idx = index_value.as_int()? as usize;
+                if let Some(Value::Array(mut values)) = env.get(array_name).cloned() {
+                    let items = Arc::make_mut(&mut values);
+                    if idx >= items.len() {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_ASSIGNMENT)
+                            .with_help("check that the array index is in bounds");
+                        return Err(CompileError::semantic_with_context(
+                            format!("invalid assignment: array index {} is out of bounds", idx),
+                            ctx,
+                        ));
+                    }
+                    match items[idx].clone() {
+                        Value::Object { class, mut fields } => {
+                            Arc::make_mut(&mut fields).insert(field.clone(), value);
+                            items[idx] = Value::Object { class, fields };
+                            env.insert(array_name.clone(), Value::Array(values));
+                            Ok(Control::Next)
+                        }
+                        other => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_ASSIGNMENT)
+                                .with_help("indexed field assignment requires an object element");
+                            Err(CompileError::semantic_with_context(
+                                format!("invalid assignment: cannot set field on {} array element", other.type_name()),
+                                ctx,
+                            ))
+                        }
+                    }
+                } else {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_ASSIGNMENT)
+                        .with_help("indexed field assignment requires an array identifier");
+                    Err(CompileError::semantic_with_context(
+                        "invalid assignment: indexed field receiver is not an array",
+                        ctx,
+                    ))
+                }
+            } else {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("indexed field assignment requires a simple array identifier");
+                Err(CompileError::semantic_with_context(
+                    "invalid assignment: complex indexed field receiver is not supported",
+                    ctx,
+                ))
+            }
+        }
+        // Case 3: Nested field access: obj.inner.field = value
         else if let Expr::FieldAccess {
             receiver: inner_receiver,
             field: inner_field,

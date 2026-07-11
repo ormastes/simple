@@ -327,8 +327,8 @@ impl<'a> Parser<'a> {
             self.check_loop_limit(iterations, "parse_module")?;
             iterations += 1;
 
-            // Skip newlines at top level
-            while self.check(&TokenKind::Newline) {
+            // Semicolons separate same-line statements just like newlines.
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Semicolon) {
                 self.advance();
             }
             if self.is_at_end() {
@@ -349,8 +349,8 @@ impl<'a> Parser<'a> {
             return Ok(self.pending_statements.remove(0));
         }
 
-        // Skip leading newlines
-        while self.check(&TokenKind::Newline) {
+        // Skip leading statement separators.
+        while self.check(&TokenKind::Newline) || self.check(&TokenKind::Semicolon) {
             self.advance();
         }
 

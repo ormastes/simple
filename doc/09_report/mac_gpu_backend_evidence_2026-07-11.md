@@ -8,9 +8,10 @@ Host: Darwin arm64 (`Yoons-MacBook-Air.local`)
 - Metal generated 2D readback: PASS.
 - Metal Engine2D framebuffer readback: PASS.
 - CPU/Metal parity: PASS.
-- Production host-GPU queue wrapper: Metal subcheck PASS, aggregate FAIL/PARTIAL on broader non-Metal/browser gates.
-- Fresh self-host redeploy gate: FAIL for all checked candidates; TODO 119 remains open.
-- Reviewer decision: FAIL to close TODO 119 because the self-host deployment gate is not satisfied.
+- Production host-GPU queue wrapper follow-up: PASS with native Metal readback.
+- MCP default-wrapper numeric/string ID correlation: PASS; separate full-server handshake: PASS.
+- Fresh-cache bootstrap: Stage 2 and Stage 3 FAIL; fallback stopped without deployment.
+- Reviewer decision: FAIL to close TODO 119 because self-host deployment is not satisfied.
 
 ## Evidence
 
@@ -66,3 +67,20 @@ Self-host redeploy gate:
 Do not close TODO 119. The macOS Metal readback/parity portion is complete, but
 the fresh self-host deployment requirement and reviewer approval gate are not
 satisfied by any current candidate.
+
+## Follow-up Results
+
+- Host queue roundtrip: 16 examples passed.
+- Production queue wrapper: `production_gui_web_host_gpu_queue_readback_status=pass`,
+  `host_native_device_readback_backend=metal`, and
+  `browser_first_render_under_budget=true`.
+- MCP integration: `3 examples, 0 failures`; the tracked setup source and default
+  core wrapper preserved numeric ID `17` and string ID `request-alpha`. The
+  separate full-server startup/tool flow also passed.
+- Bootstrap command:
+  `scripts/bootstrap/bootstrap-from-scratch.sh --deploy --jobs=half --fresh-cache`.
+  Stage 2 and Stage 3 failed; no new deployed SHA-256 or timestamp exists.
+
+The earlier Metal/queue failure statements above are retained as historical
+evidence. These follow-up results supersede them only for Metal and MCP, not for
+the deployment gate.

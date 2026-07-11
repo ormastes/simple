@@ -34,6 +34,7 @@ if [ ! -x "$LSP_MCP_SERVER" ]; then
 fi
 
 SIMPLE_LIB="${SIMPLE_LIB:-src}" sh scripts/check/check-interface-cache-contract.shs
+sh scripts/check/check-mcp-wrapper-contract.shs
 
 APP_DIRECT_RT_VALID=true
 LSP_APP_DIRECT_RT_VALID=true
@@ -78,6 +79,26 @@ mcp_tools_list='{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
     printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_initialized}" "$mcp_initialized"
     printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_tools_list}" "$mcp_tools_list"
 } > "$TMPDIR/mcp.in"
+
+# The default production wrapper is a separate fast-handshake implementation.
+# Exercise it explicitly because SIMPLE_MCP_FULL=1 bypasses this path.
+core_numeric_init='{"jsonrpc":"2.0","id":17,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
+core_string_list='{"jsonrpc":"2.0","id":"request-alpha","method":"tools/list","params":{}}'
+{
+    printf 'Content-Length: %s\r\n\r\n%s' "${#core_numeric_init}" "$core_numeric_init"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#core_string_list}" "$core_string_list"
+} > "$TMPDIR/mcp_core.in"
+set +e
+SIMPLE_MCP_FULL=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp_core.in" > "$TMPDIR/mcp_core.out" 2> "$TMPDIR/mcp_core.err"
+MCP_CORE_RC=$?
+set -e
+MCP_CORE_IDS_OK=false
+if [ "$MCP_CORE_RC" -eq 0 ] && \
+   grep -q '"id":17' "$TMPDIR/mcp_core.out" && \
+   grep -q '"id":"request-alpha"' "$TMPDIR/mcp_core.out" && \
+   ! grep -q '"id":null' "$TMPDIR/mcp_core.out"; then
+    MCP_CORE_IDS_OK=true
+fi
 
 set +e
 MCP_START_MS="$(now_ms)"
@@ -168,6 +189,7 @@ echo "mcpgdb_app_direct_rt_valid=$MCPGDB_APP_DIRECT_RT_VALID"
 echo "ui_mcp_app_direct_rt_valid=$UI_MCP_APP_DIRECT_RT_VALID"
 echo "serial_mcp_app_direct_rt_valid=$SERIAL_MCP_APP_DIRECT_RT_VALID"
 echo "mcp_stdio_spec_direct_rt_valid=$SPEC_DIRECT_RT_VALID"
+echo "mcp_core_request_ids_preserved=$MCP_CORE_IDS_OK"
 echo "mcp_startup_ms=$MCP_STARTUP_MS"
 echo "lsp_mcp_startup_ms=$LSP_STARTUP_MS"
 echo "mcp_startup_under_${MCP_NATIVE_STARTUP_MAX_MS}ms=$([ "$MCP_STARTUP_MS" -le "$MCP_NATIVE_STARTUP_MAX_MS" ] && printf true || printf false)"
@@ -238,7 +260,7 @@ if [ "$APP_DIRECT_RT_VALID" != "true" ] || [ "$LSP_APP_DIRECT_RT_VALID" != "true
     exit 1
 fi
 
-if [ "$MCP_RC" -ne 0 ] || [ "$LSP_RC" -ne 0 ]; then
+if [ "$MCP_CORE_RC" -ne 0 ] || [ "$MCP_CORE_IDS_OK" != "true" ] || [ "$MCP_RC" -ne 0 ] || [ "$LSP_RC" -ne 0 ]; then
     exit 1
 fi
 if [ "$MCP_STARTUP_MS" -gt "$MCP_NATIVE_STARTUP_MAX_MS" ] || [ "$LSP_STARTUP_MS" -gt "$MCP_NATIVE_STARTUP_MAX_MS" ]; then

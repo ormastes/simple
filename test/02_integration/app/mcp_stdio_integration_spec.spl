@@ -85,7 +85,36 @@ fn send_mcp(messages: text) -> text:
     val result = run("/bin/sh", ["-c", "cat " + tmp + " | SIMPLE_MCP_FULL=1 SIMPLE_MCP_TOOL_SET=all bin/simple_mcp_server 2>/dev/null"])
     result.stdout
 
+fn send_mcp_core(messages: text) -> text:
+    val tmp = "/tmp/mcp_protocol_core_input_" + messages.len().to_string() + ".txt"
+    file_write(tmp, messages)
+    val result = run("/bin/sh", ["-c", "cat " + tmp + " | SIMPLE_MCP_FULL=0 bin/simple_mcp_server 2>/dev/null"])
+    result.stdout
+
 describe "MCP Protocol Runtime":
+    # @inline
+    slow_it "generates a correlated core wrapper from tracked setup source":
+        val contract = run("/bin/sh", ["scripts/check/check-mcp-wrapper-contract.shs"])
+        expect(contract.exit_code).to_equal(0)
+        expect(contract.stdout.contains("mcp_wrapper_source_contract=pass")).to_equal(true)
+
+    # @inline
+    # @capture(protocol)
+    slow_it "preserves numeric and string request ids in the production core wrapper":
+        # @step: Correlate a numeric initialize request id
+        step("Correlate a numeric initialize request id")
+        val numeric_init = "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+        val numeric_output = send_mcp_core(mcp_msg(numeric_init))
+        expect(numeric_output.contains("\"id\":17")).to_equal(true)
+        expect(numeric_output.contains("\"id\":null")).to_equal(false)
+
+        # @step: Correlate a string tools/list request id
+        step("Correlate a string tools/list request id")
+        val string_list = "{\"jsonrpc\":\"2.0\",\"id\":\"request-alpha\",\"method\":\"tools/list\",\"params\":{}}"
+        val string_output = send_mcp_core(mcp_jsonl(string_list))
+        expect(string_output.contains("\"id\":\"request-alpha\"")).to_equal(true)
+        expect(string_output.contains("\"id\":null")).to_equal(false)
+
     # @inline
     # @capture(protocol)
     slow_it "handles initialize, tools/list, and unknown-tool MCP startup flows":

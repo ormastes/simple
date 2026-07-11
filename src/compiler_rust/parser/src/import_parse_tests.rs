@@ -11,6 +11,11 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parses_same_line_statements_separated_by_semicolon() {
+        assert_eq!(try_parse("val x = 5; print(x)\n").unwrap(), 2);
+    }
+
     fn parse_file_detail(path: &str) -> String {
         let full_path = format!("/home/ormastes/dev/pub/simple/{}", path);
         let source = match std::fs::read_to_string(&full_path) {

@@ -71,3 +71,24 @@ SIMPLE_BIN=bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-h
   - `browser_first_render_under_budget=true`
 - Generated evidence: `doc/09_report/production_gui_web_host_gpu_queue_readback_2026-07-11.md`.
 - TODO 119 remains open until the required reviewer approval and final redeploy-gate closure decision are recorded.
+
+## MCP Recurrence Prevention (2026-07-11)
+
+- Root cause: `check-mcp-native-smoke.shs` forced `SIMPLE_MCP_FULL=1`, which
+  bypassed the default production shell handshake implementation. The setup
+  wrapper ID fix therefore had no test on the path used by default clients.
+- The MCP integration spec now sends a numeric initialize ID and a string
+  tools/list ID through `SIMPLE_MCP_FULL=0 bin/simple_mcp_server` and rejects a
+  `null` response ID.
+- The native smoke gate independently checks the same default-wrapper path
+  before its full-server checks.
+- Focused result: `mcp_stdio_integration_spec.spl`, 3 examples, 0 failures,
+  including isolated generation from tracked `setup.shs` and nested-ID rejection.
+
+## Final Boundary
+
+- The fresh-cache bootstrap still failed Stage 2 and Stage 3 with the
+  parameter-local LLVM defect. The Stage 4 fallback was stopped by request.
+- Metal and MCP work is complete, but deployment provenance cannot be produced
+  without a passing fresh candidate. TODO 119 must remain open; no stale
+  `bin/simple` result may be used to satisfy the deployment criterion.

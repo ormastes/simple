@@ -27,7 +27,7 @@ mcp_stdio_integration_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -73,6 +73,18 @@ N/A
 
 ### MCP Protocol Runtime
 
+#### generates a correlated core wrapper from tracked setup source
+
+1. Extract the generated wrapper directly from tracked `scripts/setup/setup.shs`.
+   - Expected: numeric and string IDs remain correlated and nested `params.id` values are ignored.
+
+#### preserves numeric and string request ids in the production core wrapper
+
+1. Send numeric initialize ID `17` through the default wrapper.
+   - Expected: the response contains numeric ID `17`, not `null`.
+2. Send string tools/list ID `request-alpha` through the default wrapper.
+   - Expected: the response contains string ID `request-alpha`, not `null`.
+
 #### handles initialize, tools/list, and unknown-tool MCP startup flows
 
 1. Initialize the full MCP server.
@@ -88,9 +100,9 @@ N/A
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
-| Slow scenarios | 1 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
+| Slow scenarios | 3 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 

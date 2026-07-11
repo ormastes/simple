@@ -8,12 +8,22 @@ use crate::interpreter::await_value;
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Parameter, SelfMode, Type};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
+
+fn copy_value_type_parameter(value: Value, value_type_names: &HashSet<String>) -> Value {
+    match value {
+        Value::Object { class, fields } if value_type_names.contains(&class) => Value::Object {
+            class,
+            fields: Arc::new((*fields).clone()),
+        },
+        other => other,
+    }
+}
 
 /// Static empty map to avoid allocation on every `bind_args` call.
 static EMPTY_INJECTED: std::sync::LazyLock<HashMap<String, Value>> = std::sync::LazyLock::new(HashMap::new);
@@ -61,6 +71,11 @@ pub(crate) fn bind_args_with_injected(
 
     // Check if there's a variadic parameter (should be last)
     let variadic_param_idx = params_to_bind.iter().position(|p| p.variadic);
+    let value_type_names: HashSet<String> = classes
+        .iter()
+        .filter(|(_, def)| def.is_value_type)
+        .map(|(name, _)| name.clone())
+        .collect();
 
     let mut bound = HashMap::new();
     let mut positional_idx = 0usize;
@@ -114,7 +129,7 @@ pub(crate) fn bind_args_with_injected(
                 }
             }
         }
-        value
+        copy_value_type_parameter(value, &value_type_names)
     };
 
     for arg in args {
@@ -347,6 +362,11 @@ pub(crate) fn bind_args_with_values(
         .iter()
         .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
         .collect();
+    let value_type_names: HashSet<String> = classes
+        .iter()
+        .filter(|(_, def)| def.is_value_type)
+        .map(|(name, _)| name.clone())
+        .collect();
 
     if args.len() > params_to_bind.len() {
         let ctx = ErrorContext::new()
@@ -410,7 +430,7 @@ pub(crate) fn bind_args_with_values(
                 }
             }
         }
-        value
+        copy_value_type_parameter(value, &value_type_names)
     };
 
     let mut bound = HashMap::new();

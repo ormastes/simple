@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT INT TERM
+
+awk '
+  /^cat > simple_mcp_server <<'"'"'EOF'"'"'$/ { copying = 1; next }
+  copying && /^EOF$/ { exit }
+  copying { print }
+' scripts/setup/setup.shs > "$TMPDIR/simple_mcp_server"
+chmod +x "$TMPDIR/simple_mcp_server"
+
+cat > "$TMPDIR/input" <<'EOF'
+{"jsonrpc":"2.0","id":17,"method":"initialize","params":{"id":999}}
+{"jsonrpc":"2.0","method":"tools/list","params":{"id":"nested"},"id":"request-alpha"}
+EOF
+
+SIMPLE_MCP_FULL=0 "$TMPDIR/simple_mcp_server" < "$TMPDIR/input" > "$TMPDIR/output"
+grep -q '"id":17' "$TMPDIR/output"
+grep -q '"id":"request-alpha"' "$TMPDIR/output"
+if grep -q '"id":999\|"id":"nested"\|"id":null' "$TMPDIR/output"; then
+  exit 1
+fi
+
+echo "mcp_wrapper_source_contract=pass"
