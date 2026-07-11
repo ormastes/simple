@@ -60,7 +60,7 @@ emit_env() {
         echo "metal_generated_2d_readback_expected_checksum=0"
         echo "metal_generated_2d_readback_actual_checksum=0"
         echo "metal_generated_2d_readback_ops=fill,copy,alpha,scroll"
-        echo "metal_generated_2d_readback_required_path='Metal source -> metallib -> MTLDevice -> compute pipeline -> command buffer/encoder -> submit -> wait -> buffer readback -> per-op checksums'"
+        echo "metal_generated_2d_readback_required_path='Simple emitter -> runtime MSL compile -> MTLDevice -> host upload -> compute pipeline -> submit -> wait -> host download -> per-op hashes; separate generated source -> metallib validation'"
     } >"$BUILD_DIR/evidence.env"
 }
 
@@ -74,12 +74,23 @@ readback_positive_decimal() {
 }
 
 readback_checksum_sum() {
-    awk 'BEGIN {
-        sum = 0
-        for (i = 1; i < ARGC; i++) {
-            sum += ARGV[i]
+    # Decimal string addition avoids IEEE-754 rounding above 2^53.
+    awk '
+    function add_decimal(a, b,    ia, ib, carry, digit, out) {
+        ia = length(a); ib = length(b); carry = 0; out = ""
+        while (ia > 0 || ib > 0 || carry > 0) {
+            digit = carry
+            if (ia > 0) { digit += substr(a, ia, 1) + 0; ia-- }
+            if (ib > 0) { digit += substr(b, ib, 1) + 0; ib-- }
+            out = (digit % 10) out
+            carry = int(digit / 10)
         }
-        printf "%.0f\n", sum
+        return out == "" ? "0" : out
+    }
+    BEGIN {
+        sum = "0"
+        for (i = 1; i < ARGC; i++) sum = add_decimal(sum, ARGV[i])
+        print sum
     }' "$@"
 }
 
@@ -98,10 +109,12 @@ emit_env_harness() {
     h_scroll_ex="$(grep '^scroll_expected=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
     h_readback="$(grep '^readback_available=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
     h_submit="$(grep '^submit_attempted=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    h_upload="$(grep '^host_upload_available=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
     # Default unknowns
     h_status="${h_status:-fail}"
     h_readback="${h_readback:-false}"
     h_submit="${h_submit:-false}"
+    h_upload="${h_upload:-false}"
     h_fill_ck="${h_fill_ck:-0}"
     h_copy_ck="${h_copy_ck:-0}"
     h_alpha_ck="${h_alpha_ck:-0}"
@@ -121,6 +134,9 @@ emit_env_harness() {
         elif [ "$h_readback" != "true" ]; then
             h_status="fail"
             reason="missing-readback"
+        elif [ "$h_upload" != "true" ]; then
+            h_status="fail"
+            reason="missing-host-upload"
         elif ! readback_positive_decimal "$h_fill_ck" || ! readback_positive_decimal "$h_fill_ex"; then
             h_status="fail"
             reason="fill-checksum-missing-or-zero"
@@ -169,6 +185,7 @@ emit_env_harness() {
         echo "metal_generated_2d_readback_module_verified=$module_verified"
         echo "metal_generated_2d_readback_submit_attempted=$h_submit"
         echo "metal_generated_2d_readback_readback_available=$h_readback"
+        echo "metal_generated_2d_readback_host_upload_available=$h_upload"
         echo "metal_generated_2d_readback_expected_checksum=$h_expected"
         echo "metal_generated_2d_readback_actual_checksum=$h_actual"
         echo "metal_generated_2d_readback_mismatch_count=$h_mismatch_count"
@@ -181,7 +198,7 @@ emit_env_harness() {
         echo "metal_generated_2d_readback_scroll_checksum=$h_scroll_ck"
         echo "metal_generated_2d_readback_scroll_expected=$h_scroll_ex"
         echo "metal_generated_2d_readback_ops=fill,copy,alpha,scroll"
-        echo "metal_generated_2d_readback_required_path='Metal source -> metallib -> MTLDevice -> compute pipeline -> command buffer/encoder -> submit -> wait -> buffer readback -> per-op checksums'"
+        echo "metal_generated_2d_readback_required_path='Simple emitter -> runtime MSL compile -> MTLDevice -> host upload -> compute pipeline -> submit -> wait -> host download -> per-op hashes; separate generated source -> metallib validation'"
     } >"$BUILD_DIR/evidence.env"
 }
 
@@ -241,6 +258,7 @@ EOF
 status=pass
 submit_attempted=true
 readback_available=true
+host_upload_available=true
 fill_checksum=1
 fill_expected=1
 copy_checksum=1
@@ -263,10 +281,38 @@ EOF
         exit 1
     fi
 
+    cat >"$self_dir/missing_upload.out" <<'EOF'
+status=pass
+submit_attempted=true
+readback_available=true
+fill_checksum=1
+fill_expected=1
+copy_checksum=1
+copy_expected=1
+alpha_checksum=1
+alpha_expected=1
+scroll_checksum=1
+scroll_expected=1
+EOF
+    emit_env_harness "$self_dir/missing_upload.out"
+    if ! grep -q '^metal_generated_2d_readback_reason=missing-host-upload$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-host-upload-accepted"
+        exit 1
+    fi
+
+    exact_large_sum="$(readback_checksum_sum 7254485133350916837 7254485133350916837 6000179358840187557 4349638615600894485)"
+    if [ "$exact_large_sum" != "24858788241142915716" ]; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=large-checksum-rounded"
+        exit 1
+    fi
+
     cat >"$self_dir/zero_alpha.out" <<'EOF'
 status=pass
 submit_attempted=true
 readback_available=true
+host_upload_available=true
 fill_checksum=1
 fill_expected=1
 copy_checksum=1
@@ -288,6 +334,7 @@ EOF
 status=pass
 submit_attempted=true
 readback_available=true
+host_upload_available=true
 fill_checksum=2
 fill_expected=1
 copy_checksum=1
@@ -356,14 +403,14 @@ else
         harness_out="$BUILD_DIR/harness.out"
         harness_err="$BUILD_DIR/harness.err"
         SIMPLE_EXECUTION_MODE=interpret SIMPLE_LIB="${SIMPLE_LIB:-src}" \
-            "$SIMPLE_BIN" run "$HARNESS_SPL" --mode=interpreter \
+            "$SIMPLE_BIN" test "$HARNESS_SPL" \
             >"$harness_out" 2>"$harness_err" || true
         emit_env_harness "$harness_out"
     fi
 fi
 
 . "$BUILD_DIR/evidence.env"
-metal_report_note="Generated Metal evidence is intentionally fail-closed until a verified metallib module, Metal runtime device/pipeline/encoder handles, submit, synchronization, and readback checksum are all present.\n\n## Host Validation Checklist (Darwin/macOS)\n- Ensure Xcode command-line tools are installed and discoverable: xcode-select --install.\n- Validate toolchain and runtime visibility: xcrun --find metal, xcrun --find metallib, system_profiler SPDisplaysDataType.\n- Refresh and rebuild generated toolchains:\n  SIMPLE_BIN=${SIMPLE_BIN:-bin/simple} SIMPLE_LIB=${SIMPLE_LIB:-src} sh scripts/check/check-portable-compute-toolchains.shs\n- Run proof lane directly:\n  SIMPLE_BIN=${SIMPLE_BIN:-bin/simple} sh scripts/check/check-metal-generated-2d-readback.shs\n- Promote through platform aggregate:\n  SIMPLE_BIN=${SIMPLE_BIN:-bin/simple} SIMPLE_LIB=${SIMPLE_LIB:-src} sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs"
+metal_report_note="Generated Metal evidence has two explicit proofs: the native tools validate a metallib built from Simple-emitted MSL, while the runtime harness independently compiles the same current emitter output through Metal SFFI and executes it. The harness does not claim to load the metallib. Runtime proof is fail-closed until device/pipeline/encoder calls, a patterned host upload, submit, synchronization, host download, and position-sensitive per-op hashes all succeed.\n\n## Host Validation Checklist (Darwin/macOS)\n- Ensure Xcode command-line tools are installed and discoverable: xcode-select --install.\n- Validate toolchain and runtime visibility: xcrun --find metal, xcrun --find metallib, system_profiler SPDisplaysDataType.\n- Refresh and rebuild generated toolchains:\n  SIMPLE_BIN=${SIMPLE_BIN:-bin/simple} SIMPLE_LIB=${SIMPLE_LIB:-src} sh scripts/check/check-portable-compute-toolchains.shs\n- Run proof lane directly:\n  SIMPLE_BIN=${SIMPLE_BIN:-bin/simple} sh scripts/check/check-metal-generated-2d-readback.shs\n- Promote through platform aggregate:\n  SIMPLE_BIN=${SIMPLE_BIN:-bin/simple} SIMPLE_LIB=${SIMPLE_LIB:-src} sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs"
 
 generated_2d_report_from_env "$REPORT_PATH" "Metal Generated 2D Readback Evidence" "$BUILD_DIR/evidence.env" "$metal_report_note"
 

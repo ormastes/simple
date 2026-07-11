@@ -11,7 +11,9 @@ use compiler.backend.gpu_codegen_types.{GpuCodegen, GpuBarrierScope}
 use compiler.backend.gpu_backend_metadata.{gpu_backend_supports_target}
 use compiler.backend.vulkan_type_mapper.*
 use compiler.backend.vulkan.spirv_builder.{SpirvBuilder}
-use compiler.hir.hir_types.MemorySpace
+use compiler.hir.hir_types.{MemorySpace, SymbolId}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
 
 # ============================================================================
 # Vulkan Backend
@@ -25,13 +27,14 @@ class VulkanBackend:
     SPIR-V is a binary intermediate representation that gets executed
     by Vulkan-compatible GPU drivers.
 
-    Features:
-    - Full MIR instruction support
-    - Compute shader generation
-    - Storage buffer bindings
-    - Shared memory (workgroup storage)
-    - Atomic operations
-    - Synchronization barriers
+    Supported subset:
+    - Compute entry-point generation
+    - Global, local, and workgroup invocation IDs
+    - Void return and unreachable terminators
+
+    All other MIR operations fail with a typed Vulkan backend error. This is
+    intentionally narrower than emitting SPIR-V comments or unresolved IDs
+    that an assembler could mistake for a usable shader.
 
     Usage:
         val _tup_0 = [1, 3]
@@ -48,7 +51,7 @@ class VulkanBackend:
         VulkanBackend(
             type_mapper: VulkanTypeMapper.create_version(vk_version[0], vk_version[1], 1, 6),
             vulkan_version: vk_version,
-            options: compileoptions_default_options().with_target(CodegenTarget.Native)  # Stub for seed.cpp
+            options: compileoptions_default_options()
         )
 
     static fn create_with_options(vk_version: [i64], opts: CompileOptions) -> VulkanBackend:
@@ -85,6 +88,11 @@ class VulkanBackend:
             val symbol = _item_0[0]
             val func = _item_0[1]
             if self.is_compute_shader(func):
+                if shaders.len() > 0:
+                    return Err(compileerror_backend_error(
+                        BackendKind.Vulkan,
+                        "Vulkan SPIR-V currently supports one compute entry point per module"
+                    ))
                 val result = self.compile_compute_shader(builder, func)
                 match result:
                     case Ok(shader):
@@ -116,35 +124,30 @@ class VulkanBackend:
     fn compile_compute_shader(builder: SpirvBuilder, func: MirFunction) -> text:
         """Compile a compute shader."""
 
-        # Emit types
-        val void_type = builder.emit_type_void()
-        val bool_type = builder.emit_type_bool()
-        val i32_type = builder.emit_type_int(32, true)
-        val u32_type = builder.emit_type_int(32, false)
-        val i64_type = builder.emit_type_int(64, true)
-        val f32_type = builder.emit_type_float(32)
+        if func.blocks.len() != 1 or func.blocks[0].id.id != 0:
+            return Err(compileerror_backend_error(
+                BackendKind.Vulkan,
+                "Vulkan SPIR-V currently supports exactly one entry block"
+            ))
 
-        # Emit vector types for builtins
-        val uvec3_type = builder.emit_type_vector(u32_type, 3)
-
-        # Emit pointer types
-        val uvec3_input_ptr = builder.emit_type_pointer("Input", uvec3_type)
-
-        # Emit function type (void -> void for compute)
-        val func_type = builder.emit_type_function(void_type, [])
-
-        # Emit builtin variables
-        val global_invocation_id = builder.emit_variable(uvec3_input_ptr, "Input")
-        builder.emit_decorate_builtin(global_invocation_id, SpirvBuiltin.GlobalInvocationId)
-
-        val local_invocation_id = builder.emit_variable(uvec3_input_ptr, "Input")
-        builder.emit_decorate_builtin(local_invocation_id, SpirvBuiltin.LocalInvocationId)
-
-        val workgroup_id = builder.emit_variable(uvec3_input_ptr, "Input")
-        builder.emit_decorate_builtin(workgroup_id, SpirvBuiltin.WorkgroupId)
-
-        # Emit entry point
+        # Allocate IDs first so the module can follow SPIR-V logical layout:
+        # entry points and annotations must precede types and global variables.
+        val void_type = builder.alloc_id()
+        val u32_type = builder.alloc_id()
+        # Scalar lowering is rejected below; keep tuple aliases without
+        # declaring unused capability-bearing scalar types in the module.
+        val bool_type = u32_type
+        val i32_type = u32_type
+        val i64_type = u32_type
+        val f32_type = u32_type
+        val uvec3_type = builder.alloc_id()
+        val uvec3_input_ptr = builder.alloc_id()
+        val func_type = builder.alloc_id()
+        val global_invocation_id = builder.alloc_id()
+        val local_invocation_id = builder.alloc_id()
+        val workgroup_id = builder.alloc_id()
         val func_id = builder.alloc_id()
+
         val interface_ids = [global_invocation_id, local_invocation_id, workgroup_id]
         builder.emit_entry_point(func.name, func_id, interface_ids)
 
@@ -152,8 +155,22 @@ class VulkanBackend:
         val workgroup_size = [256, 1, 1]
         builder.emit_execution_mode(func_id, workgroup_size)
 
+        builder.emit_decorate_builtin(global_invocation_id, SpirvBuiltin.GlobalInvocationId)
+        builder.emit_decorate_builtin(local_invocation_id, SpirvBuiltin.LocalInvocationId)
+        builder.emit_decorate_builtin(workgroup_id, SpirvBuiltin.WorkgroupId)
+
         # Decorations section complete
         builder.emit_comment("--- End Decorations ---")
+        builder.emit("")
+
+        builder.emit("{builder.id_str(void_type)} = OpTypeVoid")
+        builder.emit("{builder.id_str(u32_type)} = OpTypeInt 32 0")
+        builder.emit("{builder.id_str(uvec3_type)} = OpTypeVector {builder.id_str(u32_type)} 3")
+        builder.emit("{builder.id_str(uvec3_input_ptr)} = OpTypePointer Input {builder.id_str(uvec3_type)}")
+        builder.emit("{builder.id_str(func_type)} = OpTypeFunction {builder.id_str(void_type)}")
+        builder.emit("{builder.id_str(global_invocation_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
+        builder.emit("{builder.id_str(local_invocation_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
+        builder.emit("{builder.id_str(workgroup_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
         builder.emit("")
 
         # Emit function
@@ -175,7 +192,9 @@ class VulkanBackend:
                     case Err(e):
                         return Err(e)
 
-            self.compile_terminator(builder, block.terminator)
+            val terminator_result = self.compile_terminator(builder, block.terminator)
+            if terminator_result.is_err():
+                return Err(terminator_result.unwrap_err())
 
         builder.emit_function_end()
 
@@ -189,7 +208,7 @@ class VulkanBackend:
         builder: SpirvBuilder,
         inst: MirInst,
         types: (i64, i64, i64, i64, i64, i64, i64, i64, i64)  # (i32, u32, i64, f32, bool, uvec3, global_id, local_id, workgroup_id)
-    ) -> text:
+    ) -> Result<(), CompileError>:
         """Compile a single MIR instruction to SPIR-V."""
         val _destruct_1 = types
         val i32_type = _destruct_1[0]
@@ -204,26 +223,25 @@ class VulkanBackend:
 
         match inst.kind:
             case Const(dest, value, ty):
-                self.compile_const(builder, dest, value, ty, (i32_type, i64_type, f32_type, bool_type))
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V constant lowering is not implemented"))
 
             case Copy(dest, src):
-                # SPIR-V is SSA, so we need to load and assign
-                builder.emit_comment("copy _l{src.id} to _l{dest.id}")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V copy lowering is not implemented"))
 
             case Move(dest, src):
-                builder.emit_comment("move _l{src.id} to _l{dest.id}")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V move lowering is not implemented"))
 
             case BinOp(dest, op, left, right):
-                self.compile_binop(builder, dest, op, left, right, (i32_type, f32_type, bool_type))
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V binary operation lowering is not implemented: {op}"))
 
             case UnaryOp(dest, op, operand):
-                self.compile_unaryop(builder, dest, op, operand, (i32_type, f32_type))
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V unary operation lowering is not implemented: {op}"))
 
             case Load(dest, ptr):
-                builder.emit_comment("load to _l{dest.id}")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V host/device load lowering is not implemented"))
 
             case Store(ptr, value):
-                builder.emit_comment("store")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V host/device store lowering is not implemented"))
 
             # GPU-specific instructions
             case GpuGlobalId(dest, dim):
@@ -243,162 +261,42 @@ class VulkanBackend:
                 builder.emit_comment("workgroup_id[{dim}] -> _l{dest.id}")
 
             case GpuBarrier(scope):
-                match scope:
-                    case Workgroup:
-                        # Workgroup barrier
-                        builder.emit_comment("workgroup barrier")
-                        # Need scope constants: Workgroup=2, AcquireRelease|WorkgroupMemory
-                        builder.emit("OpControlBarrier %workgroup_scope %workgroup_scope %acquire_release_workgroup")
-                    case Device:
-                        builder.emit_comment("device barrier")
-                        builder.emit("OpControlBarrier %device_scope %device_scope %acquire_release")
-                    case Subgroup:
-                        builder.emit_comment("subgroup barrier")
-                        builder.emit("OpControlBarrier %subgroup_scope %subgroup_scope %acquire_release")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V barrier lowering is not implemented"))
 
             case GpuMemFence(scope):
-                match scope:
-                    case Workgroup:
-                        builder.emit_comment("workgroup memory fence")
-                        builder.emit("OpMemoryBarrier %workgroup_scope %acquire_release_workgroup")
-                    case Device:
-                        builder.emit_comment("device memory fence")
-                        builder.emit("OpMemoryBarrier %device_scope %acquire_release")
-                    case _:
-                        builder.emit_comment("memory fence")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V memory fence lowering is not implemented"))
 
             case GpuSharedAlloc(dest, ty, size):
-                builder.emit_comment("shared memory allocation: {size} elements")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V shared memory lowering is not implemented"))
 
             case GpuAtomicOp(dest, op, ptr, value):
-                self.compile_atomic(builder, dest, op, ptr, value, i32_type)
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V atomic operation lowering is not implemented: {op}"))
 
             case GpuAtomicCas(dest, ptr, expected, desired):
-                builder.emit_comment("atomic compare exchange (CAS)")
-                # OpAtomicCompareExchange %result %ptr %scope %equal_sem %unequal_sem %value %comparator
-                builder.emit("OpAtomicCompareExchange %r{dest.id} %r{ptr} %device_scope %relaxed %relaxed %r{desired} %r{expected}")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V atomic compare-exchange lowering is not implemented"))
 
             case Nop:
                 ()
 
             case _:
-                builder.emit_comment("Unsupported instruction")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan backend does not support instruction: {inst.kind}"))
 
         Ok(())
 
-    fn compile_const(builder: SpirvBuilder, dest: LocalId, value: MirConstValue, ty: MirType, types: [i64]):
-        """Compile constant."""
-        val _destruct_2 = types
-        val i32_type = _destruct_2[0]
-        val i64_type = _destruct_2[1]
-        val f32_type = _destruct_2[2]
-        val bool_type = _destruct_2[3]
-
-        match value:
-            case Int(v):
-                match ty.kind:
-                    case I32:
-                        builder.emit_const_int(i32_type, v)
-                    case U32:
-                        builder.emit_const_int(i32_type, v)
-                    case I64:
-                        builder.emit_const_int(i64_type, v)
-                    case U64:
-                        builder.emit_const_int(i64_type, v)
-                    case _:
-                        builder.emit_const_int(i32_type, v)
-            case Float(v):
-                builder.emit_const_float(f32_type, v)
-            case Bool(v):
-                if v:
-                    builder.emit_const_true(bool_type)
-                else:
-                    builder.emit_const_false(bool_type)
-            case _:
-                builder.emit_comment("Unsupported constant")
-
-    fn compile_binop(builder: SpirvBuilder, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand, types: [i64]):
-        """Compile binary operation."""
-        val _destruct_3 = types
-        val i32_type = _destruct_3[0]
-        val f32_type = _destruct_3[1]
-        val bool_type = _destruct_3[2]
-
-        # For now, emit comments (full implementation needs value tracking)
-        match op:
-            case Add:
-                builder.emit_comment("iadd or fadd")
-            case Sub:
-                builder.emit_comment("isub or fsub")
-            case Mul:
-                builder.emit_comment("imul or fmul")
-            case Div:
-                builder.emit_comment("div")
-            case Eq:
-                builder.emit_comment("equal")
-            case Ne:
-                builder.emit_comment("not equal")
-            case Lt:
-                builder.emit_comment("less than")
-            case Le:
-                builder.emit_comment("less equal")
-            case Gt:
-                builder.emit_comment("greater than")
-            case Ge:
-                builder.emit_comment("greater equal")
-            case _:
-                builder.emit_comment("binop")
-
-    fn compile_unaryop(builder: SpirvBuilder, dest: LocalId, op: MirUnaryOp, operand: MirOperand, types: [i64]):
-        """Compile unary operation."""
-        val _destruct_4 = types
-        val i32_type = _destruct_4[0]
-        val f32_type = _destruct_4[1]
-
-        match op:
-            case Neg:
-                builder.emit_comment("negate")
-            case Not:
-                builder.emit_comment("logical not")
-            case _:
-                builder.emit_comment("unaryop")
-
-    fn compile_atomic(builder: SpirvBuilder, dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand, i32_type: i64):
-        """Compile atomic operation."""
-        match op:
-            case Add:
-                builder.emit_comment("atomic add")
-            case Sub:
-                builder.emit_comment("atomic sub")
-            case Min:
-                builder.emit_comment("atomic min")
-            case Max:
-                builder.emit_comment("atomic max")
-            case And:
-                builder.emit_comment("atomic and")
-            case Or:
-                builder.emit_comment("atomic or")
-            case Xor:
-                builder.emit_comment("atomic xor")
-            case Exchange:
-                builder.emit_comment("atomic exchange")
-            case CompareExchange:
-                # CAS via GpuAtomicOp is deprecated — use GpuAtomicCas instead
-                builder.emit_comment("atom.cas via GpuAtomicOp deprecated; use GpuAtomicCas instruction")
-
-    fn compile_terminator(builder: SpirvBuilder, term: MirTerminator):
+    fn compile_terminator(builder: SpirvBuilder, term: MirTerminator) -> Result<(), CompileError>:
         """Compile block terminator."""
         match term:
             case Ret(_):
                 builder.emit_return()
             case Goto(target):
-                builder.emit_comment("branch to BB{target.id}")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V loop/goto lowering is not implemented"))
             case Branch(cond, true_target, false_target):
-                builder.emit_comment("conditional branch")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V if/branch lowering is not implemented"))
             case Unreachable:
                 builder.emit("OpUnreachable")
             case _:
-                builder.emit_comment("terminator")
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan backend does not support terminator: {term}"))
+        Ok(())
 
 # ============================================================================
 # Vulkan Compilation Results
@@ -443,6 +341,10 @@ impl Codegen for VulkanBackend:
 impl GpuCodegen for VulkanBackend:
     fn compile_kernel(func_name: text, body: MirBody) -> Result<text, CompileError>:
         val builder = SpirvBuilder.create(self.vulkan_version)
+        builder.emit_header()
+        builder.emit_capabilities()
+        builder.emit_extensions()
+        builder.emit_memory_model()
         val mir_body: MirBody = body
         var vk_param_types: [MirType] = []
         var vk_pi = 0
@@ -451,7 +353,15 @@ impl GpuCodegen for VulkanBackend:
             vk_param_types = vk_param_types.push(vk_loc.type_)
             vk_pi = vk_pi + 1
         val vk_sig = MirSignature(params: vk_param_types, return_type: mir_body.return_ty, is_variadic: false)
-        val func = MirFunction(name: func_name, body: mir_body, is_extern: false, signature: vk_sig)
+        val func = MirFunction(
+            symbol: SymbolId(id: 0), name: func_name, signature: vk_sig,
+            locals: mir_body.locals, blocks: mir_body.blocks, entry_block: BlockId.entry(), span: Span.empty(),
+            generic_params: [], is_generic_template: false, specialization_of: nil,
+            type_bindings: {}, layout_phase: nil, is_kernel: true,
+            gpu_target: "vulkan", gpu_backend_order: "vulkan", is_export_c: false,
+            export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
+            has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
+        )
         val result = self.compile_compute_shader(builder, func)
         match result:
             case Ok(_):
@@ -466,16 +376,13 @@ impl GpuCodegen for VulkanBackend:
         ))
 
     fn compile_gpu_instruction(inst: MirInst) -> text:
-        "; spirv instruction"
+        panic("Vulkan compile_gpu_instruction cannot propagate CompileError; use compile_kernel")
 
     fn compile_barrier(scope: GpuBarrierScope) -> text:
-        match scope:
-            case Workgroup: "OpControlBarrier %workgroup %workgroup %acquire_release"
-            case Device: "OpControlBarrier %device %device %acquire_release"
-            case Subgroup: "OpControlBarrier %subgroup %subgroup %acquire_release"
+        panic("Vulkan compile_barrier cannot propagate CompileError; use compile_kernel")
 
     fn compile_atomic(op: GpuAtomicOpKind, dest: LocalId, ptr: MirOperand, value: MirOperand) -> text:
-        "; atomic op"
+        panic("Vulkan compile_atomic cannot propagate CompileError; use compile_kernel")
 
     fn gpu_memory_model() -> text:
         "SPIR-V GLSL450"

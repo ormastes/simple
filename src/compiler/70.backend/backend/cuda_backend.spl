@@ -44,6 +44,7 @@ class CudaBackend:
     type_mapper: CudaTypeMapper
     compute_capability: (i64, i64)
     options: CompileOptions
+    function_signatures: Dict<text, MirSignature>
 
     static fn create(compute_cap: (i64, i64)) -> CudaBackend:
         """Create CUDA backend for specific compute capability."""
@@ -52,7 +53,8 @@ class CudaBackend:
         CudaBackend(
             type_mapper: cuda_type_mapper_create_sm(compute_cap.0, compute_cap.1),
             compute_capability: compute_cap,
-            options: opts
+            options: opts,
+            function_signatures: {}
         )
 
     static fn create_with_options(compute_cap: (i64, i64), opts: CompileOptions) -> CudaBackend:
@@ -60,7 +62,8 @@ class CudaBackend:
         CudaBackend(
             type_mapper: cuda_type_mapper_create_sm(compute_cap.0, compute_cap.1),
             compute_capability: compute_cap,
-            options: opts
+            options: opts,
+            function_signatures: {}
         )
 
     static fn for_target(target: CodegenTarget) -> Result<CudaBackend, CompileError>:
@@ -86,6 +89,14 @@ class CudaBackend:
         # Collect kernel functions
         var kernels: [CudaKernel] = []
         var device_functions: [CudaDeviceFunction] = []
+
+        # Resolve static direct calls from module declarations instead of
+        # destructuring FuncPtr payloads inside a nested MirOperand match. The
+        # bootstrap interpreter currently misbinds that payload accessor.
+        self.function_signatures = {}
+        for signature_symbol in module.functions.keys():
+            val signature_func: MirFunction = module.functions[signature_symbol]
+            self.function_signatures[signature_func.name] = signature_func.signature
 
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for symbol in module.functions.keys():
@@ -126,6 +137,10 @@ class CudaBackend:
         """Compile a single function."""
         val is_kernel = self.is_kernel_function(func)
 
+        for local in func.locals:
+            if not self.cuda_type_supported(local.type_):
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support local type: {local.type_.kind}"))
+
         if is_kernel:
             builder.emit_kernel_entry(func.name, func.locals)
         else:
@@ -139,7 +154,19 @@ class CudaBackend:
         for local in func.locals:
             match local.kind:
                 case Arg(_):
-                    ()  # Arguments are parameters
+                    val reg = "%r{local.id.id}"
+                    match local.type_.kind:
+                        case Bool:
+                            builder.emit_pred_decl(reg)
+                            match local.kind:
+                                case Arg(index): builder.emit_bool_param_load(reg, index)
+                                case _: ()
+                        case _:
+                            val prim_ty = self.mir_type_to_primitive(local.type_)
+                            builder.emit_reg_decl(reg, prim_ty)
+                            match local.kind:
+                                case Arg(index): builder.emit_param_load(reg, prim_ty, index)
+                                case _: ()
                 case Var | Temp | Return:
                     self.emit_local_decl(builder, local)
 
@@ -149,11 +176,13 @@ class CudaBackend:
             builder.emit_label(label)
 
             for inst in block.instructions:
-                val result = self.compile_instruction(builder, inst)
+                val result = self.compile_instruction(builder, inst, func)
                 if result.is_err():
                     return Err(result.unwrap_err())
 
-            self.compile_terminator(builder, block.terminator, is_kernel)
+            val terminator_result = self.compile_terminator(builder, block.terminator, is_kernel, func.signature.return_type)
+            if terminator_result.is_err():
+                return Err(terminator_result.unwrap_err())
 
         if is_kernel:
             builder.emit_kernel_end()
@@ -206,29 +235,41 @@ class CudaBackend:
             case Bool: builder.emit_pred_decl(reg)
             case _: ()
 
-    me compile_instruction(builder: PtxBuilder, inst: MirInst) -> Result<(), CompileError>:
+    me compile_instruction(builder: PtxBuilder, inst: MirInst, func: MirFunction) -> Result<(), CompileError>:
         """Compile a single MIR instruction to PTX."""
         match inst.kind:
             case Const(dest, value, ty):
+                match value:
+                    case Int(_) | Float(_) | Bool(_): ()
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support constant: {value}"))
                 self.compile_const(builder, dest, value, ty)
 
             case Copy(dest, src):
-                self.compile_copy(builder, dest, src)
+                self.compile_copy(builder, dest, src, self.local_primitive_type(func, dest)?)
 
             case Move(dest, src):
-                self.compile_copy(builder, dest, src)  # Same as copy in PTX
+                self.compile_copy(builder, dest, src, self.local_primitive_type(func, dest)?)  # Same as copy in PTX
 
             case BinOp(dest, op, left, right):
-                self.compile_binop(builder, dest, op, left, right)
+                match op:
+                    case Add | Sub | Mul | Div | Eq | Ne | Lt | Le | Gt | Ge: ()
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support binary operation: {op}"))
+                self.compile_binop(builder, dest, op, left, right, self.local_primitive_type(func, dest)?)
 
             case UnaryOp(dest, op, operand):
-                self.compile_unaryop(builder, dest, op, operand)
+                match op:
+                    case Neg | Not: ()
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support unary operation: {op}"))
+                self.compile_unaryop(builder, dest, op, operand, self.local_primitive_type(func, dest)?)
 
             case Load(dest, ptr):
-                self.compile_load(builder, dest, ptr)
+                self.compile_load(builder, dest, ptr, self.local_primitive_type(func, dest)?)
 
             case Store(ptr, value):
-                self.compile_store(builder, ptr, value)
+                self.compile_store(builder, ptr, value, self.operand_primitive_type(func, value)?)
 
             # GPU-specific instructions
             case GpuGlobalId(dest, dim):
@@ -272,12 +313,17 @@ class CudaBackend:
                         builder.emit_membar_cta()
 
             case GpuSharedAlloc(dest, ty, size):
+                if size <= 0:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA shared allocation size must be positive"))
                 val name = "shared_{dest.id}"
                 val prim_ty = self.mir_type_to_primitive(ty)
                 builder.emit_shared_memory(name, prim_ty, size)
+                builder.emit_shared_address("%r{dest.id}", name)
 
             case GpuAtomicOp(dest, op, ptr, value):
-                self.compile_atomic(builder, dest, op, ptr, value)
+                if op == CompareExchange:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA compare-exchange requires GpuAtomicCas"))
+                self.compile_atomic(builder, dest, op, ptr, value, self.local_primitive_type(func, dest)?)
 
             case GpuAtomicCas(dest, ptr, expected, desired):
                 self.compile_atomic_cas(builder, dest, ptr, expected, desired)
@@ -285,11 +331,15 @@ class CudaBackend:
             # --- Function Calls ---
 
             case Call(dest, func, args):
-                self.compile_call(builder, dest, func, args)
+                val call_result = self.compile_call(builder, dest, func, args)
+                if call_result.is_err():
+                    return Err(call_result.unwrap_err())
 
             case CallIndirect(dest, ptr, args, sig):
-                # Indirect calls are not supported in PTX; emit comment
-                builder.emit_comment("Indirect call not supported on GPU")
+                return Err(compileerror_backend_error(
+                    BackendKind.Cuda,
+                    "CUDA backend does not support indirect GPU calls"
+                ))
 
             # --- Aggregate Operations ---
 
@@ -324,12 +374,14 @@ class CudaBackend:
             # --- Checked Arithmetic ---
 
             case CheckedBinOp(dest, op, left, right):
-                # Checked operations compile same as unchecked on GPU
-                self.compile_binop(builder, dest, op, left, right)
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support checked arithmetic"))
 
             # --- Intrinsics ---
 
             case Intrinsic(dest, name, args):
+                val validation = self.validate_intrinsic(name, dest, args.len())
+                if validation.is_err():
+                    return Err(validation.unwrap_err())
                 self.compile_intrinsic(builder, dest, name, args)
 
             # --- Debug ---
@@ -364,21 +416,19 @@ class CudaBackend:
             case _:
                 builder.emit_comment("Unsupported constant type")
 
-    me compile_copy(builder: PtxBuilder, dest: LocalId, src: LocalId):
+    me compile_copy(builder: PtxBuilder, dest: LocalId, src: LocalId, ty: PrimitiveType):
         """Compile copy/move."""
         val dest_reg = "%r{dest.id}"
         val src_reg = "%r{src.id}"
         # Use mov instruction
-        builder.emit_line("mov.u64 {dest_reg}, {src_reg};")
+        val ptx_ty = self.type_mapper.ptx_type(ty)
+        builder.emit_line("mov{ptx_ty} {dest_reg}, {src_reg};")
 
-    me compile_binop(builder: PtxBuilder, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
+    me compile_binop(builder: PtxBuilder, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand, ty: PrimitiveType):
         """Compile binary operation."""
         val dest_reg = "%r{dest.id}"
         val left_reg = self.operand_to_reg(builder, left)
         val right_reg = self.operand_to_reg(builder, right)
-
-        # Determine type from left operand
-        val ty = PrimitiveType.I64  # Default, should be inferred
 
         match op:
             case Add:
@@ -404,12 +454,10 @@ class CudaBackend:
             case _:
                 builder.emit_comment("Unsupported binop: {op}")
 
-    me compile_unaryop(builder: PtxBuilder, dest: LocalId, op: MirUnaryOp, operand: MirOperand):
+    me compile_unaryop(builder: PtxBuilder, dest: LocalId, op: MirUnaryOp, operand: MirOperand, ty: PrimitiveType):
         """Compile unary operation."""
         val dest_reg = "%r{dest.id}"
         val src_reg = self.operand_to_reg(builder, operand)
-        val ty = PrimitiveType.I64
-
         match op:
             case Neg:
                 builder.emit_neg(dest_reg, ty, src_reg)
@@ -418,25 +466,23 @@ class CudaBackend:
             case _:
                 builder.emit_comment("Unsupported unaryop: {op}")
 
-    me compile_load(builder: PtxBuilder, dest: LocalId, ptr: MirOperand):
+    me compile_load(builder: PtxBuilder, dest: LocalId, ptr: MirOperand, ty: PrimitiveType):
         """Compile load instruction."""
         val dest_reg = "%r{dest.id}"
         val addr_reg = self.operand_to_reg(builder, ptr)
-        builder.emit_load(dest_reg, PrimitiveType.I64, addr_reg, MemorySpace.Global)
+        builder.emit_load(dest_reg, ty, addr_reg, MemorySpace.Global)
 
-    me compile_store(builder: PtxBuilder, ptr: MirOperand, value: MirOperand):
+    me compile_store(builder: PtxBuilder, ptr: MirOperand, value: MirOperand, ty: PrimitiveType):
         """Compile store instruction."""
         val addr_reg = self.operand_to_reg(builder, ptr)
         val value_reg = self.operand_to_reg(builder, value)
-        builder.emit_store(PrimitiveType.I64, addr_reg, value_reg, MemorySpace.Global)
+        builder.emit_store(ty, addr_reg, value_reg, MemorySpace.Global)
 
-    me compile_atomic(builder: PtxBuilder, dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand):
+    me compile_atomic(builder: PtxBuilder, dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand, ty: PrimitiveType):
         """Compile atomic operation."""
         val dest_reg = "%r{dest.id}"
         val addr_reg = self.operand_to_reg(builder, ptr)
         val value_reg = self.operand_to_reg(builder, value)
-        val ty = PrimitiveType.I64
-
         match op:
             case Add:
                 builder.emit_atomic_add(dest_reg, ty, addr_reg, value_reg, MemorySpace.Global)
@@ -469,18 +515,43 @@ class CudaBackend:
         val ty = PrimitiveType.I64
         builder.emit_atomic_cas(dest_reg, ty, addr_reg, cmp_reg, val_reg, MemorySpace.Global)
 
-    me compile_call(builder: PtxBuilder, dest: LocalId?, func: MirOperand, args: [MirOperand]):
+    me compile_call(builder: PtxBuilder, dest: LocalId?, callee: MirOperand, args: [MirOperand]) -> Result<(), CompileError>:
         """Compile device function call."""
         val arg_regs = args.map(self.operand_to_reg(builder, _))
 
-        # Get function name from operand
-        val func_name = self.operand_to_reg(builder, func)
+        var func_name = ""
+        var return_ty = PrimitiveType.I64
+        var returns_value = false
+        var arg_types: [PrimitiveType] = []
+        match callee.kind:
+            case Const(Str(name), ty):
+                func_name = name
+                if not self.function_signatures.contains_key(name):
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct call target is not defined in the MIR module: {name}"))
+                val sig = self.function_signatures[name]
+                if sig.params.len() != args.len():
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct call argument count does not match its signature"))
+                for param_ty in sig.params:
+                    if param_ty.kind == MirTypeKind.Bool:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct calls do not yet support boolean parameters"))
+                    arg_types = arg_types.push(self.mir_type_to_primitive(param_ty))
+                returns_value = sig.return_type.kind != MirTypeKind.Unit
+                if sig.return_type.kind == MirTypeKind.Bool:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct calls do not yet support boolean return values"))
+                return_ty = self.mir_type_to_primitive(sig.return_type)
+            case _:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct call requires a statically named callee"))
 
+        if dest.? and not returns_value:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA void device call cannot have a destination"))
+        if not dest.? and returns_value:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA value-returning device call requires a destination"))
         if dest.?:
             val dest_reg = "%r{dest.unwrap().id}"
-            builder.emit_call(dest_reg, PrimitiveType.I64, func_name, arg_regs)
+            builder.emit_call(dest_reg, return_ty, func_name, arg_regs, arg_types)
         else:
-            builder.emit_call_void(func_name, arg_regs)
+            builder.emit_call_void(func_name, arg_regs, arg_types)
+        Ok(())
 
     me compile_aggregate(builder: PtxBuilder, dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
         """Compile aggregate construction via local memory."""
@@ -851,13 +922,20 @@ class CudaBackend:
             case _:
                 builder.emit_comment("Unknown intrinsic: {name}")
 
-    me compile_terminator(builder: PtxBuilder, term: MirTerminator, is_kernel: bool):
+    me compile_terminator(builder: PtxBuilder, term: MirTerminator, is_kernel: bool, return_type: MirType) -> Result<(), CompileError>:
         """Compile block terminator."""
         match term:
-            case Ret(_):
+            case Ret(value):
                 if is_kernel:
+                    if value.?:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA kernels cannot return a value"))
                     builder.emit_exit()
                 else:
+                    if value.?:
+                        val src = self.operand_to_reg(builder, value.unwrap())
+                        builder.emit_return_value(self.mir_type_to_primitive(return_type), src)
+                    elif return_type.kind != MirTypeKind.Unit:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA device function must return a value"))
                     builder.emit_ret()
             case Goto(target):
                 builder.emit_branch("BB{target.id}")
@@ -865,10 +943,18 @@ class CudaBackend:
                 val cond_reg = self.operand_to_reg(builder, cond)
                 builder.emit_branch_if(cond_reg, "BB{true_target.id}")
                 builder.emit_branch("BB{false_target.id}")
+            case If(cond, true_target, false_target):
+                val cond_reg = self.operand_to_reg(builder, cond)
+                builder.emit_branch_if(cond_reg, "BB{true_target.id}")
+                builder.emit_branch("BB{false_target.id}")
             case Unreachable:
                 builder.emit_line("trap;")
             case _:
-                builder.emit_comment("Unsupported terminator")
+                return Err(compileerror_backend_error(
+                    BackendKind.Cuda,
+                    "CUDA backend does not support terminator: {term}"
+                ))
+        Ok(())
 
     me operand_to_reg(builder: PtxBuilder, operand: MirOperand) -> text:
         """Convert operand to register name, materializing constants into temp registers."""
@@ -906,7 +992,45 @@ class CudaBackend:
             case F64: PrimitiveType.F64
             case F32: PrimitiveType.F32
             case Bool: PrimitiveType.Bool
+            case Ptr(_, _) | Ref(_, _) | FuncPtr(_): PrimitiveType.U64
             case _: PrimitiveType.I64
+
+    fn cuda_type_supported(ty: MirType) -> bool:
+        match ty.kind:
+            case I64 | I32 | I16 | I8 | U64 | U32 | U16 | U8 | F64 | F32 | Bool | Unit | Ptr(_, _) | Ref(_, _) | FuncPtr(_): true
+            case _: false
+
+    me local_primitive_type(func: MirFunction, id: LocalId) -> Result<PrimitiveType, CompileError>:
+        for local in func.locals:
+            if local.id == id:
+                return Ok(self.mir_type_to_primitive(local.type_))
+        Err(compileerror_backend_error(BackendKind.Cuda, "CUDA MIR references unknown local %{id.id}"))
+
+    me operand_primitive_type(func: MirFunction, operand: MirOperand) -> Result<PrimitiveType, CompileError>:
+        match operand.kind:
+            case Copy(id) | Move(id): self.local_primitive_type(func, id)
+            case Const(_, ty): Ok(self.mir_type_to_primitive(ty))
+
+    me validate_intrinsic(name: text, dest: LocalId?, arg_count: i64) -> Result<(), CompileError>:
+        var required_args = -1
+        var requires_dest = true
+        match name:
+            case "sin" | "cos" | "sqrt" | "abs" | "exp2" | "log2" | "rcp" | "gpu_warp_reduce_add" | "gpu_lane_id" | "gpu_warp_id" | "gpu_warp_size": required_args = if name == "gpu_lane_id" or name == "gpu_warp_id" or name == "gpu_warp_size": 0 else: 1
+            case "min" | "max" | "gpu_atomic_add_i64" | "gpu_atomic_add_i32" | "gpu_atomic_add_f32" | "gpu_atomic_min_i64" | "gpu_atomic_max_i64" | "gpu_warp_shuffle" | "gpu_warp_shuffle_down" | "gpu_warp_shuffle_up" | "gpu_warp_shuffle_xor" | "gpu_warp_ballot" | "gpu_warp_broadcast" | "gpu_warp_scan_add" | "gpu_spec_const_i64" | "gpu_vec4_load_f32" | "gpu_vec2_load_f32": required_args = 2
+            case "fma" | "gpu_atomic_cas_i64": required_args = 3
+            case "gpu_vec4_store_f32":
+                required_args = 6
+                requires_dest = false
+            case "gpu_vec2_store_f32":
+                required_args = 4
+                requires_dest = false
+            case _:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support intrinsic: {name}"))
+        if arg_count < required_args:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA intrinsic '{name}' requires {required_args} arguments"))
+        if requires_dest and not dest.?:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA intrinsic '{name}' requires a destination"))
+        Ok(())
 
 # ============================================================================
 # CUDA Compilation Results

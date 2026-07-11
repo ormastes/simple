@@ -26,6 +26,7 @@ All notable changes to Simple Language will be documented in this file.
 - **Stdlib exports** — missing `pub` exports added for `std.common` (compress, math, easy_fix, drawing, sdn, image)
 
 ### Fixed
+- **GPU binary generation** — Simple-emitted Metal kernels now use valid constant-buffer ABI bindings, compile to verified metallib artifacts, and pass live host-upload/device-submit/GPU-readback checks; CUDA/Vulkan unsupported MIR paths now fail with typed backend diagnostics instead of placeholder output
 - **Interpreter: Break/Continue in block closures** — BDD `it` blocks now correctly handle Break/Continue control flow
 - **Interpreter: While/Loop in block closures** — `it` blocks execute while/loop constructs correctly
 - **Interpreter: index-receiver method write-back** — `Value::Array` arm clone fix (bug #28)

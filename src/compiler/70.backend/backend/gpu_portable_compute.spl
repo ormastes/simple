@@ -444,6 +444,11 @@ fn portable_compute_const_ptr(target: PortableComputeTarget, ty: text, name: tex
         case Metal: "device const {ty}* {name} [[buffer({binding})]]"
         case WebGpu: "@group(0) @binding({binding}) var<storage, read> {name}: array<{ty}>"
 
+fn portable_compute_scalar_param(target: PortableComputeTarget, ty: text, name: text, binding: i64) -> text:
+    match target:
+        case Metal: "constant {ty}& {name} [[buffer({binding})]]"
+        case _: "{ty} {name}"
+
 fn portable_compute_index_expr(target: PortableComputeTarget) -> text:
     match target:
         case Cuda: "blockIdx.x * blockDim.x + threadIdx.x"
@@ -463,7 +468,9 @@ fn portable_compute_kernel_prefix(target: PortableComputeTarget, name: text, par
 fn emit_portable_u32_fill_kernel(target: PortableComputeTarget, name: text) -> PortableComputeArtifact:
     val ty = portable_compute_u32_type(target)
     val dst = portable_compute_global_ptr(target, ty, "dst")
-    val params = "{dst}, {ty} value, {ty} count"
+    val value = portable_compute_scalar_param(target, ty, "value", 1)
+    val count = portable_compute_scalar_param(target, ty, "count", 2)
+    val params = "{dst}, {value}, {count}"
     val prefix = portable_compute_kernel_prefix(target, name, params)
     val idx = portable_compute_index_expr(target)
     val source = "{prefix} {\n    {ty} i = {idx};\n    if (i >= count) {\n        return;\n    }\n    dst[i] = value;\n}\n"
@@ -487,9 +494,10 @@ fn emit_portable_u32_add_kernel(target: PortableComputeTarget, name: text) -> Po
     val b = portable_compute_const_ptr(target, ty, "b", 1)
     val out_binding = if target == PortableComputeTarget.Metal: 2 else: 0
     val out = portable_compute_global_ptr(target, ty, "out")
+    val count = portable_compute_scalar_param(target, ty, "count", 3)
     val params = match target:
-        case Metal: "{a}, {b}, device {ty}* out [[buffer({out_binding})]], {ty} count"
-        case _: "{a}, {b}, {out}, {ty} count"
+        case Metal: "{a}, {b}, device {ty}* out [[buffer({out_binding})]], {count}"
+        case _: "{a}, {b}, {out}, {count}"
     val prefix = portable_compute_kernel_prefix(target, name, params)
     val idx = portable_compute_index_expr(target)
     val source = "{prefix} {\n    {ty} i = {idx};\n    if (i >= count) {\n        return;\n    }\n    out[i] = a[i] + b[i];\n}\n"
@@ -638,7 +646,8 @@ fn emit_portable_2d_copy_u32_kernel(target: PortableComputeTarget) -> PortableCo
     val ty = portable_compute_u32_type(target)
     val src = portable_compute_const_ptr(target, ty, "src", 0)
     val dst = portable_compute_global_ptr_at(target, ty, "dst", 1)
-    val params = "{src}, {dst}, {ty} count"
+    val count = portable_compute_scalar_param(target, ty, "count", 2)
+    val params = "{src}, {dst}, {count}"
     val prefix = portable_compute_kernel_prefix(target, "simple_2d_copy_u32", params)
     val idx = portable_compute_index_expr(target)
     val source = "{prefix} {\n    {ty} i = {idx};\n    if (i >= count) {\n        return;\n    }\n    dst[i] = src[i];\n}\n"
@@ -653,7 +662,9 @@ fn emit_portable_2d_alpha_u32_kernel(target: PortableComputeTarget) -> PortableC
     val ty = portable_compute_u32_type(target)
     val src = portable_compute_const_ptr(target, ty, "src", 0)
     val dst = portable_compute_global_ptr_at(target, ty, "dst", 1)
-    val params = "{src}, {dst}, {ty} alpha, {ty} count"
+    val alpha = portable_compute_scalar_param(target, ty, "alpha", 2)
+    val count = portable_compute_scalar_param(target, ty, "count", 3)
+    val params = "{src}, {dst}, {alpha}, {count}"
     val prefix = portable_compute_kernel_prefix(target, "simple_2d_alpha_u32", params)
     val idx = portable_compute_index_expr(target)
     val source = "{prefix} {\n    {ty} i = {idx};\n    if (i >= count) {\n        return;\n    }\n    {ty} s = src[i];\n    {ty} d = dst[i];\n    {ty} inv = 255u - alpha;\n    {ty} rb = (((s & 0x00ff00ffu) * alpha) + ((d & 0x00ff00ffu) * inv)) >> 8;\n    {ty} g = (((s & 0x0000ff00u) * alpha) + ((d & 0x0000ff00u) * inv)) >> 8;\n    dst[i] = 0xff000000u | (rb & 0x00ff00ffu) | (g & 0x0000ff00u);\n}\n"
@@ -668,7 +679,10 @@ fn emit_portable_2d_scroll_u32_kernel(target: PortableComputeTarget) -> Portable
     val ty = portable_compute_u32_type(target)
     val src = portable_compute_const_ptr(target, ty, "src", 0)
     val dst = portable_compute_global_ptr_at(target, ty, "dst", 1)
-    val params = "{src}, {dst}, {ty} width, {ty} height, int delta_y"
+    val width = portable_compute_scalar_param(target, ty, "width", 2)
+    val height = portable_compute_scalar_param(target, ty, "height", 3)
+    val delta_y = portable_compute_scalar_param(target, "int", "delta_y", 4)
+    val params = "{src}, {dst}, {width}, {height}, {delta_y}"
     val prefix = portable_compute_kernel_prefix(target, "simple_2d_scroll_u32", params)
     val idx = portable_compute_index_expr(target)
     val source = "{prefix} {\n    {ty} i = {idx};\n    {ty} count = width * height;\n    if (i >= count) {\n        return;\n    }\n    {ty} x = i % width;\n    {ty} y = i / width;\n    int sy = int(y) - delta_y;\n    if (sy < 0 || sy >= int(height)) {\n        dst[i] = 0u;\n        return;\n    }\n    dst[i] = src[({ty})sy * width + x];\n}\n"
@@ -683,7 +697,12 @@ fn emit_portable_2d_bitmap_glyph_raster_u32_kernel(target: PortableComputeTarget
     val ty = portable_compute_u32_type(target)
     val glyph_bits = portable_compute_const_ptr(target, ty, "glyph_bits", 0)
     val dst = portable_compute_global_ptr_at(target, ty, "dst", 1)
-    val params = "{glyph_bits}, {dst}, {ty} width, {ty} height, {ty} glyph_count, {ty} font_size, {ty} color"
+    val width = portable_compute_scalar_param(target, ty, "width", 2)
+    val height = portable_compute_scalar_param(target, ty, "height", 3)
+    val glyph_count = portable_compute_scalar_param(target, ty, "glyph_count", 4)
+    val font_size = portable_compute_scalar_param(target, ty, "font_size", 5)
+    val color = portable_compute_scalar_param(target, ty, "color", 6)
+    val params = "{glyph_bits}, {dst}, {width}, {height}, {glyph_count}, {font_size}, {color}"
     val prefix = portable_compute_kernel_prefix(target, "simple_2d_bitmap_glyph_raster_u32", params)
     val idx = portable_compute_index_expr(target)
     val source = "{prefix} {\n    {ty} i = {idx};\n    {ty} count = width * height;\n    if (i >= count) {\n        return;\n    }\n    {ty} mask = glyph_bits[i];\n    dst[i] = mask == 0u ? 0u : color;\n}\n"

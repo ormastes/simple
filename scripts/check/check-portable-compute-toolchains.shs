@@ -56,6 +56,7 @@ write_generated_source() {
     target="$1"
     path="$2"
     program="$BUILD_DIR/emit_${target}_portable_2d_source.spl"
+    raw_output="$BUILD_DIR/${target}_source.raw"
     case "$target" in
         cuda) target_ctor=Cuda ;;
         hip) target_ctor=Hip ;;
@@ -66,118 +67,27 @@ write_generated_source() {
     cat >"$program" <<SIMPLE
 use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_2d_optimization_module}
 
-fn main() -> i64:
-    val artifact = emit_portable_2d_optimization_module(PortableComputeTarget.${target_ctor})
-    print(artifact.source)
-    return 0
+describe "emit ${target} portable 2D source":
+    it "prints the generated shader payload":
+        val artifact = emit_portable_2d_optimization_module(PortableComputeTarget.${target_ctor})
+        print("__PORTABLE_COMPUTE_SOURCE_BEGIN__")
+        print(artifact.source)
+        print("__PORTABLE_COMPUTE_SOURCE_END__")
 SIMPLE
-    SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" run "$program" --mode=interpreter --clean >"$path" 2>"$BUILD_DIR/${target}_source.err"
-}
-
-write_cuda_source() {
-    path="$1"
-    {
-        printf '%s\n' 'extern "C" __global__ void simple_2d_fill_u32(unsigned int* dst, unsigned int value, unsigned int count) {'
-        printf '%s\n' '    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;'
-        printf '%s\n' '    if (i >= count) { return; }'
-        printf '%s\n' '    dst[i] = value;'
-        printf '%s\n' '}'
-        printf '%s\n' 'extern "C" __global__ void simple_2d_copy_u32(const unsigned int* src, unsigned int* dst, unsigned int count) {'
-        printf '%s\n' '    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;'
-        printf '%s\n' '    if (i >= count) { return; }'
-        printf '%s\n' '    dst[i] = src[i];'
-        printf '%s\n' '}'
-        printf '%s\n' 'extern "C" __global__ void simple_2d_alpha_u32(const unsigned int* src, unsigned int* dst, unsigned int alpha, unsigned int count) {'
-        printf '%s\n' '    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;'
-        printf '%s\n' '    if (i >= count) { return; }'
-        printf '%s\n' '    unsigned int s = src[i];'
-        printf '%s\n' '    unsigned int d = dst[i];'
-        printf '%s\n' '    unsigned int inv = 255u - alpha;'
-        printf '%s\n' '    unsigned int rb = (((s & 0x00ff00ffu) * alpha) + ((d & 0x00ff00ffu) * inv)) >> 8;'
-        printf '%s\n' '    unsigned int g = (((s & 0x0000ff00u) * alpha) + ((d & 0x0000ff00u) * inv)) >> 8;'
-        printf '%s\n' '    dst[i] = 0xff000000u | (rb & 0x00ff00ffu) | (g & 0x0000ff00u);'
-        printf '%s\n' '}'
-        printf '%s\n' 'extern "C" __global__ void simple_2d_scroll_u32(const unsigned int* src, unsigned int* dst, unsigned int width, unsigned int height, int delta_y) {'
-        printf '%s\n' '    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;'
-        printf '%s\n' '    unsigned int count = width * height;'
-        printf '%s\n' '    if (i >= count) { return; }'
-        printf '%s\n' '    unsigned int x = i % width;'
-        printf '%s\n' '    unsigned int y = i / width;'
-        printf '%s\n' '    int sy = (int)y - delta_y;'
-        printf '%s\n' '    if (sy < 0 || sy >= (int)height) { dst[i] = 0u; return; }'
-        printf '%s\n' '    dst[i] = src[(unsigned int)sy * width + x];'
-        printf '%s\n' '}'
-    } >"$path"
-}
-
-write_opencl_source() {
-    path="$1"
-    {
-        printf '%s\n' '__kernel void simple_2d_fill_u32(__global uint* dst, uint value, uint count) {'
-        printf '%s\n' '    uint i = get_global_id(0);'
-        printf '%s\n' '    if (i >= count) { return; }'
-        printf '%s\n' '    dst[i] = value;'
-        printf '%s\n' '}'
-        printf '%s\n' '__kernel void simple_2d_copy_u32(__global const uint* src, __global uint* dst, uint count) {'
-        printf '%s\n' '    uint i = get_global_id(0);'
-        printf '%s\n' '    if (i >= count) { return; }'
-        printf '%s\n' '    dst[i] = src[i];'
-        printf '%s\n' '}'
-        printf '%s\n' '__kernel void simple_2d_alpha_u32(__global const uint* src, __global uint* dst, uint alpha, uint count) {'
-        printf '%s\n' '    uint i = get_global_id(0);'
-        printf '%s\n' '    if (i >= count) { return; }'
-        printf '%s\n' '    uint s = src[i];'
-        printf '%s\n' '    uint d = dst[i];'
-        printf '%s\n' '    uint inv = 255u - alpha;'
-        printf '%s\n' '    uint rb = (((s & 0x00ff00ffu) * alpha) + ((d & 0x00ff00ffu) * inv)) >> 8;'
-        printf '%s\n' '    uint g = (((s & 0x0000ff00u) * alpha) + ((d & 0x0000ff00u) * inv)) >> 8;'
-        printf '%s\n' '    dst[i] = 0xff000000u | (rb & 0x00ff00ffu) | (g & 0x0000ff00u);'
-        printf '%s\n' '}'
-        printf '%s\n' '__kernel void simple_2d_scroll_u32(__global const uint* src, __global uint* dst, uint width, uint height, int delta_y) {'
-        printf '%s\n' '    uint i = get_global_id(0);'
-        printf '%s\n' '    uint count = width * height;'
-        printf '%s\n' '    if (i >= count) { return; }'
-        printf '%s\n' '    uint x = i % width;'
-        printf '%s\n' '    uint y = i / width;'
-        printf '%s\n' '    int sy = (int)y - delta_y;'
-        printf '%s\n' '    if (sy < 0 || sy >= (int)height) { dst[i] = 0u; return; }'
-        printf '%s\n' '    dst[i] = src[(uint)sy * width + x];'
-        printf '%s\n' '}'
-    } >"$path"
-}
-
-write_metal_source() {
-    path="$1"
-    {
-        printf '%s\n' '#include <metal_stdlib>'
-        printf '%s\n' 'using namespace metal;'
-        printf '%s\n' 'kernel void simple_2d_fill_u32(device uint* dst [[buffer(0)]], constant uint& value [[buffer(1)]], constant uint& count [[buffer(2)]], uint gid [[thread_position_in_grid]]) {'
-        printf '%s\n' '    if (gid >= count) { return; }'
-        printf '%s\n' '    dst[gid] = value;'
-        printf '%s\n' '}'
-        printf '%s\n' 'kernel void simple_2d_copy_u32(device const uint* src [[buffer(0)]], device uint* dst [[buffer(1)]], constant uint& count [[buffer(2)]], uint gid [[thread_position_in_grid]]) {'
-        printf '%s\n' '    if (gid >= count) { return; }'
-        printf '%s\n' '    dst[gid] = src[gid];'
-        printf '%s\n' '}'
-        printf '%s\n' 'kernel void simple_2d_alpha_u32(device const uint* src [[buffer(0)]], device uint* dst [[buffer(1)]], constant uint& alpha [[buffer(2)]], constant uint& count [[buffer(3)]], uint gid [[thread_position_in_grid]]) {'
-        printf '%s\n' '    if (gid >= count) { return; }'
-        printf '%s\n' '    uint s = src[gid];'
-        printf '%s\n' '    uint d = dst[gid];'
-        printf '%s\n' '    uint inv = 255u - alpha;'
-        printf '%s\n' '    uint rb = (((s & 0x00ff00ffu) * alpha) + ((d & 0x00ff00ffu) * inv)) >> 8;'
-        printf '%s\n' '    uint g = (((s & 0x0000ff00u) * alpha) + ((d & 0x0000ff00u) * inv)) >> 8;'
-        printf '%s\n' '    dst[gid] = 0xff000000u | (rb & 0x00ff00ffu) | (g & 0x0000ff00u);'
-        printf '%s\n' '}'
-        printf '%s\n' 'kernel void simple_2d_scroll_u32(device const uint* src [[buffer(0)]], device uint* dst [[buffer(1)]], constant uint& width [[buffer(2)]], constant uint& height [[buffer(3)]], constant int& delta_y [[buffer(4)]], uint gid [[thread_position_in_grid]]) {'
-        printf '%s\n' '    uint count = width * height;'
-        printf '%s\n' '    if (gid >= count) { return; }'
-        printf '%s\n' '    uint x = gid % width;'
-        printf '%s\n' '    uint y = gid / width;'
-        printf '%s\n' '    int sy = (int)y - delta_y;'
-        printf '%s\n' '    if (sy < 0 || sy >= (int)height) { dst[gid] = 0u; return; }'
-        printf '%s\n' '    dst[gid] = src[(uint)sy * width + x];'
-        printf '%s\n' '}'
-    } >"$path"
+    if ! SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" test "$program" >"$raw_output" 2>"$BUILD_DIR/${target}_source.err"; then
+        return 1
+    fi
+    awk '/^__PORTABLE_COMPUTE_SOURCE_BEGIN__$/ { emit = 1; next } /^__PORTABLE_COMPUTE_SOURCE_END__$/ { emit = 0 } emit { print }' "$raw_output" >"$path"
+    if [ ! -s "$path" ]; then
+        echo "generated source is empty" >>"$BUILD_DIR/${target}_source.err"
+        return 1
+    fi
+    for symbol in simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32; do
+        if ! grep -F "$symbol" "$path" >/dev/null 2>&1; then
+            echo "generated source is missing entry symbol: $symbol" >>"$BUILD_DIR/${target}_source.err"
+            return 1
+        fi
+    done
 }
 
 status_for_artifact() {
@@ -309,7 +219,11 @@ EOF
 run_opencl() {
     src="$BUILD_DIR/simple_2d_optimization.cl"
     out="$BUILD_DIR/simple_2d_optimization.spirv"
-    write_opencl_source "$src"
+    if ! write_generated_source opencl "$src"; then
+        cmd="$SIMPLE_BIN run <opencl portable emitter> > $src"
+        emit_result opencl generated_source_failed generated-source-failed 0 "$cmd" "$out"
+        return
+    fi
     cmd="$OPENCL_SPIRV_TOOL -cl-std=CL2.0 -emit-spirv -o $out $src"
     if ! have "$OPENCL_SPIRV_TOOL"; then
         emit_result opencl unavailable missing-primary-tool 0 "$cmd" "$out"
@@ -333,7 +247,11 @@ run_metal() {
     src="$BUILD_DIR/simple_2d_optimization.metal"
     air="$BUILD_DIR/simple_2d_optimization.air"
     out="$BUILD_DIR/simple_2d_optimization.metallib"
-    write_metal_source "$src"
+    if ! write_generated_source metal "$src"; then
+        cmd="$SIMPLE_BIN run <metal portable emitter> > $src"
+        emit_result metal generated_source_failed generated-source-failed 0 "$cmd" "$out"
+        return
+    fi
     cmd="$METAL_TOOL -c $src -o $air && $METALLIB_TOOL $air -o $out"
     if ! have "$METAL_TOOL"; then
         emit_result metal unavailable missing-primary-tool 0 "$cmd" "$out"

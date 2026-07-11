@@ -188,10 +188,15 @@ The portable toolchain wrapper executes the Simple emitter through a delimited
 SPipe payload and validates that every required entry symbol is present before
 invoking a native compiler. It must not substitute shell-authored CUDA, OpenCL,
 or Metal source. On Metal, scalar arguments use `constant T& [[buffer(n)]]`
-bindings after the storage buffers. The Metal readback harness compiles that
-same generated Simple source through the stdlib Metal SFFI facade, uploads host
-parameters and buffers, submits and waits for fill/copy/alpha/scroll kernels,
-then downloads device buffers and compares position-sensitive hashes. Empty
+bindings after the storage buffers. Metal validation deliberately records two
+separate proofs: native `metal`/`metallib` tools build and inspect a metallib,
+while the runtime harness independently compiles the current generated Simple
+source through the stdlib Metal SFFI facade (it does not load that metallib).
+The harness uploads a non-uniform host buffer plus scalar parameters, submits
+and waits for fill/copy/alpha/scroll kernels, then downloads device buffers and
+compares position-sensitive hashes. It checks every bind, dispatch, encoder,
+commit, wait, upload, and download result; `submit_attempted=true` is emitted
+only after a command buffer commit succeeds. Empty
 source, missing tools, compiler failure, invalid artifact magic, missing entry
 symbols, absent submission, or unavailable readback are all fail-closed.
 
