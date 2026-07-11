@@ -1,7 +1,7 @@
 # Live host-window CLI adapter.
 # Backend records stop here; common owns grammar, query, and rendering.
 
-use app.io.mod.{current_time_ms, getpid}
+use std.nogc_sync_mut.io_runtime.{getpid, time_now_unix_micros}
 use common.ui.access.*
 use std.play.types.{WindowInfo, PlayError}
 use std.play.wm.mod.{wm_list_windows, wm_focus_window, wm_click, wm_type_text, wm_screenshot}
@@ -15,6 +15,9 @@ val WM_ACCESS_MAX_TEXT_CHARS: i64 = 4096
 val WM_ACCESS_MAX_PATH_CHARS: i64 = 4096
 val WM_ACCESS_MAX_COORDINATE: i64 = 1000000
 var wm_access_request_sequence: i64 = 0
+
+fn _wm_access_now_ms() -> i64:
+    time_now_unix_micros() / 1000
 
 pub fn wm_access_descriptors() -> [AccessCommandDescriptor]:
     [
@@ -51,7 +54,7 @@ pub fn wm_access_snapshot_from_windows(windows: [WindowInfo], captured_at_ms: i6
     win_text_merge_snapshots("host_wm", snapshots)
 
 pub fn wm_access_execute(command: text, args: [text], output_mode: AccessOutputMode) -> Result<text, AccessError>:
-    val started_at_ms = current_time_ms()
+    val started_at_ms = _wm_access_now_ms()
     val descriptor = match access_find_descriptor(command, "", wm_access_descriptors()):
         Some(found): found
         nil: return Err(AccessError.create("invalid_argument", "unsupported WM access command '" + command + "'"))
@@ -71,7 +74,7 @@ pub fn wm_access_execute(command: text, args: [text], output_mode: AccessOutputM
         Err(e): return Err(_wm_access_backend_error(e))
     if _wm_access_timed_out(started_at_ms):
         return Err(AccessError.detailed("timeout", "WM access request timed out", "TIMEOUT", "Observe current state before retrying", true, false))
-    val captured_at_ms = current_time_ms()
+    val captured_at_ms = _wm_access_now_ms()
     val snapshot = wm_access_snapshot_from_windows(windows, captured_at_ms)
     val result = match descriptor.operation:
         ACCESS_OPERATION_LIST: access_result_from_snapshot(ACCESS_OPERATION_LIST, WM_ACCESS_SOURCE, "", snapshot.access, WM_ACCESS_LIMIT)
@@ -89,7 +92,7 @@ fn _wm_access_act(snapshot: WinTextSnapshot, args: [text], output_mode: AccessOu
     val target_id = args[0]
     val action = args[1]
     wm_access_request_sequence = wm_access_request_sequence + 1
-    val request_id = "wm-act-" + getpid().to_text() + "-" + current_time_ms().to_text() + "-" + wm_access_request_sequence.to_text()
+    val request_id = "wm-act-" + getpid().to_text() + "-" + _wm_access_now_ms().to_text() + "-" + wm_access_request_sequence.to_text()
     if not _wm_access_record(request_id, "request", action):
         return Err(AccessError.create("source_unavailable", "WM access history store is unavailable"))
     match access_validate_snapshot_action(snapshot.access, target_id, action):
@@ -125,7 +128,7 @@ fn _wm_access_act(snapshot: WinTextSnapshot, args: [text], output_mode: AccessOu
     val observed_windows = match wm_list_windows():
         Err(e): return _wm_access_fail(request_id, _wm_access_backend_error(e))
         Ok(found): found
-    val observed = wm_access_snapshot_from_windows(observed_windows, current_time_ms())
+    val observed = wm_access_snapshot_from_windows(observed_windows, _wm_access_now_ms())
     if _wm_access_timed_out(started_at_ms):
         return _wm_access_fail(request_id, AccessError.detailed("timeout", "WM post-action observation timed out", "TIMEOUT", "Observe current state before retrying", true, false))
     if ui_access_find_node(observed.access, target_id) == nil:
@@ -187,7 +190,7 @@ fn _wm_access_history(output_mode: AccessOutputMode) -> Result<text, AccessError
 fn _wm_access_record(request_id: text, phase: text, code: text) -> bool:
     var store = ui_access_store_runtime_open("wm_access", WM_ACCESS_SOURCE)
     if store == nil: return false
-    val event = UiAccessEvent(surface_id: WM_ACCESS_SOURCE, widget_id: "", canonical_id: "", event_kind: "access_" + phase, payload: "request_id=" + request_id + ";code=" + code, sequence: current_time_ms())
+    val event = UiAccessEvent(surface_id: WM_ACCESS_SOURCE, widget_id: "", canonical_id: "", event_kind: "access_" + phase, payload: "request_id=" + request_id + ";code=" + code, sequence: _wm_access_now_ms())
     val recorded = match store.insert_event(event):
         Ok(_): true
         Err(_): false
@@ -195,7 +198,7 @@ fn _wm_access_record(request_id: text, phase: text, code: text) -> bool:
     recorded
 
 fn _wm_access_timed_out(started_at_ms: i64) -> bool:
-    current_time_ms() - started_at_ms >= WM_ACCESS_TIMEOUT_MS
+    _wm_access_now_ms() - started_at_ms >= WM_ACCESS_TIMEOUT_MS
 
 fn _wm_access_window_id(snapshot: UiAccessSnapshot, target_id: text) -> text:
     val node = ui_access_find_node(snapshot, target_id)

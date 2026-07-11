@@ -2083,7 +2083,14 @@ int64_t rt_array_pop(SplArray* a) {
 
 int64_t rt_index_get(int64_t collection, int64_t idx) {
     RtCoreArray* a = rt_core_as_array(collection);
-    if (a) return rt_array_get((SplArray*)a, idx);
+    if (a) {
+        if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_core_nil();
+        return rt_array_get((SplArray*)a, idx >> 3);
+    }
+    if (rt_core_as_string(collection)) {
+        if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_core_nil();
+        return rt_string_char_at(collection, idx >> 3);
+    }
     RtCoreDict* d = rt_core_as_dict(collection);
     if (d) return rt_core_dict_lookup(d, idx);
     return 3;
@@ -2092,7 +2099,8 @@ int64_t rt_index_get(int64_t collection, int64_t idx) {
 int8_t rt_index_set(int64_t collection, int64_t idx, int64_t val) {
     RtCoreArray* a = rt_core_as_array(collection);
     if (a) {
-        rt_array_set((SplArray*)a, idx, val);
+        if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return 0;
+        rt_array_set((SplArray*)a, idx >> 3, val);
         return 1;
     }
     RtCoreDict* d = rt_core_as_dict(collection);

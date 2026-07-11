@@ -174,6 +174,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_string_new"
             | "rt_string_data"
             | "rt_string_len"
+            | "rt_string_bytes"
             | "rt_string_builder_new"
             | "rt_string_builder_push"
             | "rt_string_builder_finish"
@@ -1781,18 +1782,7 @@ impl<M: Module> CodegenBackend<M> {
             builder.seal_block(exit);
         }
 
-        let init_name = match &self.module_prefix {
-            Some(prefix) => {
-                // Sanitize dots → _dot_ so the symbol name matches _init_all.cpp references
-                let sanitized = if cfg!(target_os = "macos") {
-                    prefix.replace('.', "_dot_")
-                } else {
-                    prefix.to_string()
-                };
-                format!("__module_init_{}", sanitized)
-            }
-            None => "__module_init".to_string(),
-        };
+        let init_name = module_init_symbol(self.module_prefix.as_deref());
 
         // Declare the init function: fn() -> void
         let call_conv = super::shared::platform_call_conv();
@@ -2195,6 +2185,13 @@ impl<M: Module> CodegenBackend<M> {
     }
 }
 
+pub(crate) fn module_init_symbol(module_prefix: Option<&str>) -> String {
+    match module_prefix {
+        Some(prefix) if !prefix.is_empty() => format!("__module_init_{}", prefix.replace('.', "_dot_")),
+        _ => "__module_init".to_string(),
+    }
+}
+
 /// Compute a module prefix from a file path relative to a source root.
 ///
 /// Example: `src/compiler/10.frontend/core/lexer.spl` → `compiler__frontend__core__lexer`
@@ -2256,6 +2253,11 @@ mod tests {
             .push(MirInst::ConstInt { dest: ret, value: 0 });
         main.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(ret));
         main
+    }
+
+    #[test]
+    fn synthesized_string_bytes_runtime_symbol_is_retained() {
+        assert!(runtime_symbol_is_codegen_root("rt_string_bytes"));
     }
 
     #[test]

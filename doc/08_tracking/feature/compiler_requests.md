@@ -31,6 +31,35 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 
 ## Open Requests
 
+### FR-COMPILER-013 — Lower builtin `list + [item]` to fresh-copy push
+
+- **Filed-on:** 2026-07-11
+- **Filed-by:** Codex / UI CLI native verification
+- **Target:** native HIR/MIR lowering and Cranelift/LLVM codegen
+- **Priority:** P1
+- **Status:** Open
+- **Requested-semantics:**
+  Recognize only builtin single-item list concatenation and lower it to a fresh
+  representation-aware shallow copy followed by typed push. Preserve operand
+  evaluation order, type inference, value semantics, and aliases. User-defined
+  `+` and general list concatenation remain unchanged.
+- **Acceptance-criteria:**
+  - [ ] Empty, non-empty, text, nested, and generic lists match builtin concat.
+  - [ ] Left and item expressions are evaluated exactly once in source order.
+  - [ ] Given `alias = left; result = left + [item]`, `left` and `alias` remain
+        unchanged and `result` contains the appended item.
+  - [ ] User-defined `+` overloads are never matched.
+  - [ ] Cranelift and LLVM emit the direct typed copy/push path.
+  - [ ] Packed `[u8]` and `[u64]` preserve representation and values, or the
+        optimization explicitly declines them until typed copy is available.
+  - [ ] Interpreter, JIT, Cranelift, and LLVM regressions cover the form.
+- **Related-upfront:** none
+- **Related-design-doc:** tbd
+- **Notes:**
+  UI CLI native verification exposed an unresolved `rt_array_concat` call for
+  fresh-local `result = result + [item]`; standalone `result.push(item)` is the
+  local workaround. Optimization is separate from restoring concat correctness.
+
 ### FR-COMPILER-012 — JIT-compile pure-Simple software rendering loops (unblock high-DPI 2D)
 
 - **Filed-on:** 2026-05-30

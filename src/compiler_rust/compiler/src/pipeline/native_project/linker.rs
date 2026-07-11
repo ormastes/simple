@@ -516,15 +516,15 @@ impl NativeProjectBuilder {
             }
         }
 
-        // Lifecycle, argv capture, and fallback dispatch are invoked from
-        // generated C stubs or unresolved-call paths and may not appear as
-        // direct object undefineds. Other runtime functions should be retained
-        // only when entry objects reference them.
+        // Lifecycle, argv capture, fallback dispatch, and synthesized method
+        // GOT slots may not appear as direct object undefineds. Other runtime
+        // functions should be retained only when entry objects reference them.
         for root in [
             "__simple_runtime_init",
             "__simple_runtime_shutdown",
             "rt_set_args",
             "rt_function_not_found",
+            "rt_string_bytes",
         ] {
             if runtime_defined.contains(root) {
                 required.insert(root.to_string());
@@ -548,7 +548,7 @@ impl NativeProjectBuilder {
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    fn add_elf_undefined_roots(cmd: &mut std::process::Command, symbols: &[String]) {
+    pub(crate) fn add_elf_undefined_roots(cmd: &mut std::process::Command, symbols: &[String]) {
         for sym in symbols {
             cmd.arg(format!("-Wl,-u,{sym}"));
         }

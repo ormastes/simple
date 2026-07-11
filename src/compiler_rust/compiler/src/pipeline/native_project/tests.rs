@@ -1479,7 +1479,9 @@ fn test_runtime_retention_symbols_include_object_undefineds_and_roots() {
     let runtime_c = temp.path().join("runtime.c");
     let app_c = temp.path().join("app.c");
     let runtime_o = temp.path().join("runtime.o");
+    let runtime_a = temp.path().join("runtime.a");
     let app_o = temp.path().join("app.o");
+    let linked = temp.path().join("app");
 
     std::fs::write(
         &runtime_c,
@@ -1493,6 +1495,7 @@ void rt_function_not_found(void) {}
 void rt_string_new(void) {}
 void rt_string_data(void) {}
 void rt_string_len(void) {}
+void rt_string_bytes(void) {}
 void rt_array_new(void) {}
 void rt_array_len(void) {}
 void rt_declared_only(void) {}
@@ -1505,6 +1508,7 @@ void rt_declared_only(void) {}
 extern void rt_used(void);
 __asm__(".weak rt_declared_only");
 void app_call(void) { rt_used(); }
+int main(void) { app_call(); return 0; }
 "#,
     )
     .unwrap();
@@ -1513,6 +1517,13 @@ void app_call(void) { rt_used(); }
         .args(["-c", "-ffunction-sections", "-fdata-sections"])
         .arg(&runtime_c)
         .arg("-o")
+        .arg(&runtime_o)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new(find_archive_tool())
+        .arg("crs")
+        .arg(&runtime_a)
         .arg(&runtime_o)
         .status()
         .unwrap()
@@ -1547,7 +1558,7 @@ void app_call(void) { rt_used(); }
         std::slice::from_ref(&app_o),
         &app_o,
         None,
-        &runtime_o,
+        &runtime_a,
         &imports,
     )
     .unwrap();
@@ -1555,8 +1566,27 @@ void app_call(void) { rt_used(); }
     assert!(roots.contains(&"rt_used".to_string()));
     assert!(roots.contains(&"__simple_runtime_init".to_string()));
     assert!(roots.contains(&"rt_function_not_found".to_string()));
+    assert!(roots.contains(&"rt_string_bytes".to_string()));
     assert!(!roots.contains(&"rt_unused".to_string()));
     assert!(!roots.contains(&"rt_declared_only".to_string()));
+
+    let mut link = std::process::Command::new(&cc);
+    link.arg(&app_o);
+    NativeProjectBuilder::add_elf_undefined_roots(&mut link, &roots);
+    assert!(link
+        .arg(&runtime_a)
+        .arg("-Wl,--gc-sections")
+        .arg("-o")
+        .arg(&linked)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new(&linked).status().unwrap().success());
+    let symbols = nm_command().arg("-g").arg(&linked).output().unwrap();
+    assert!(symbols.status.success());
+    assert!(String::from_utf8_lossy(&symbols.stdout)
+        .lines()
+        .any(|line| line.split_whitespace().last() == Some("rt_string_bytes")));
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -2269,6 +2299,8 @@ int main(void) {
     extern int64_t rt_string_char_code_at(int64_t, int64_t);
     extern int64_t rt_any_add(int64_t, int64_t);
     extern int64_t rt_for_iterable(int64_t);
+    extern int64_t rt_index_get(int64_t, int64_t);
+    extern int8_t rt_index_set(int64_t, int64_t, int64_t);
     extern int64_t rt_pool_safepoint(void);
     if (rt_value_int(7) != 56) return 10;
     if (rt_value_as_int(rt_value_int(-7)) != -7) return 15;
@@ -2305,7 +2337,7 @@ int main(void) {
     if (!rt_array_push(a, rt_value_int(20))) return 43;
     if (rt_array_len(a) != 2) return 44;
     if (rt_array_get(a, 0) != rt_value_int(10)) return 45;
-    if (rt_array_get(a, rt_value_int(1)) != rt_value_int(20)) return 46;
+    if (rt_array_get(a, 1) != rt_value_int(20)) return 46;
     rt_array_set(a, -1, rt_value_int(30));
     if (rt_array_get(a, 1) != rt_value_int(30)) return 47;
     extern int64_t rt_array_pop(SplArray*);
@@ -2313,6 +2345,14 @@ int main(void) {
     if (rt_array_pop(a) != rt_value_int(30)) return 48;
     if (rt_array_len(a) != 1) return 49;
     if (rt_array_get(a, 99) != 3) return 50;
+    SplArray* indexed = rt_array_new(10);
+    if (!indexed) return 51;
+    for (int64_t i = 0; i < 10; i++) {
+        if (!rt_array_push(indexed, rt_value_int(i))) return 52;
+    }
+    if (rt_index_get((int64_t)indexed, rt_value_int(8)) != rt_value_int(8)) return 53;
+    if (!rt_index_set((int64_t)indexed, rt_value_int(8), rt_value_int(80))) return 54;
+    if (rt_array_get(indexed, 8) != rt_value_int(80)) return 55;
     SplArray* words = rt_array_new_with_cap_u64(2);
     if (!words) return 51;
     int64_t word_header = rt_array_header_ptr(words);
