@@ -57,3 +57,17 @@ SIMPLE_BIN=bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-h
 - Run `host_gpu_queue_roundtrip_spec.spl`; require all 16 examples to pass.
 - Re-run the production queue wrapper and clear the browser first-render budget failure.
 - Obtain higher-model review before closing TODO 119.
+
+## Follow-up Evidence (2026-07-11)
+
+- Fresh `bin/simple` bootstrap/deploy and `-c`/`run` smoke evidence passed in the bootstrap lane.
+- `SIMPLE_LIB=src bin/simple test test/02_integration/lib/gpu/host_gpu_queue_roundtrip_spec.spl --mode=interpreter --fail-fast` passed all 16 examples.
+- `SIMPLE_BIN=bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs` passed on Darwin/arm64.
+  - `production_gui_web_host_gpu_queue_readback_status=pass`
+  - `host_native_device_readback_status=pass`
+  - `host_native_device_readback_backend=metal`
+  - `browser_frame_queue_status=pass`
+  - `browser_event_host_gpu_backward_completed=true`
+  - `browser_first_render_under_budget=true`
+- Generated evidence: `doc/09_report/production_gui_web_host_gpu_queue_readback_2026-07-11.md`.
+- TODO 119 remains open until the required reviewer approval and final redeploy-gate closure decision are recorded.
