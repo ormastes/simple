@@ -10,14 +10,14 @@ from live agent verification on current HEAD (not from stale lane logs).
 |---|-----------|------------|----------------|--------|
 | 1 | GOT only on baremetal config; hosted SimpleOS launches via filesystem | `simpleos-startup-got-mmap` | verify-done | **PASS (re-confirmed)** |
 | 2 | Early file parsing + mmap loading on Linux and SimpleOS | `simpleos-startup-got-mmap` | verify-done | **PASS (re-confirmed)** |
-| 3 | Simple web server + simple db server work on SimpleOS (revive if broken) | `simpleos_filesystem_toolchain_servers` | design-done (verify FAIL) | **PASS — web 4/4, DB gate 5/5 (`codex-41`)** |
-| 4 | clang-from-FS + simple compiler/loader/interpreter launched from FS | `simpleos_filesystem_toolchain_servers` | design-done (verify FAIL) | clang gate **REVIVED (PASS)**; simple-toolchain payloads blocked on redeploy (diagnosed, sequence documented) |
+| 3 | Simple web server + simple db server work on SimpleOS (revive if broken) | `simpleos_filesystem_toolchain_servers` | design-done (verify FAIL) | Web **PASS**; DB **reviving** (regression restored, rebuild running) |
+| 4 | clang-from-FS + simple compiler/loader/interpreter launched from FS | `simpleos_filesystem_toolchain_servers` | design-done (verify FAIL) | clang gate **REGRESSED (fix running)**; toolchain **blocked (diagnosis running)** |
 | 5 | Baremetal + NVMe FW index-based pointers/allocators; update baremetal skill | `nvme_fw_baremetal` (+ skill lib) | dev-done | **PASS — audit clean, skill written** |
 | 6 | QEMU WM + host WM rendering hardened, same Simple GUI | `simpleos-qemu-host-gpu-2d` | requirements-done | **PASS** — shared stack confirmed; host checks green; QEMU render+event gate 7/7 |
 | 7 | UI CLI interface (T32-style LLM access), common library, wm window list | `ui-cli-llm-access` | design-done | **13/18 checker scenarios PASS**; rest blocked on parallel-session files / redeploy / final review |
-| 8 | QEMU vs host WM same-GUI verification with capture (gui/web/2d) | `simpleos-qemu-host-gpu-2d` | requirements-done | **PASS** — WM host+QEMU captures, 2D + web pixel-exact vs oracles (cross-pixel diff = future hardening) |
-| 9 | WM hidden daemon mode revived; CLI reaches WM headless; daemon/windowed share code | (extends `ui-cli-llm-access`) | added 2026-07-11 | **DONE** — spec PASS 2/0; CLI wrappers blocked by seed parser bug (filed) |
-| 10 | Process-manage gateway + interface on host (simple app) and SimpleOS | (new, reuse existing process APIs) | added 2026-07-11 | **DONE** — host gateway new; SimpleOS ps/kill already existed |
+| 8 | QEMU vs host WM same-GUI verification with capture (gui/web/2d) | `simpleos-qemu-host-gpu-2d` | requirements-done | PENDING |
+| 9 | WM hidden daemon mode revived; CLI reaches WM headless; daemon/windowed share code | (extends `ui-cli-llm-access`) | added 2026-07-11 | IMPL IN PROGRESS |
+| 10 | Process-manage gateway + interface on host (simple app) and SimpleOS | (new, reuse existing process APIs) | added 2026-07-11 | IMPL IN PROGRESS |
 
 ### Item 7: ui-cli-llm-access — compile blockers cleared, 13/18 checker scenarios pass
 - Root compile blocker fixed in `access_cli_grammar.spl` (parser rejects dedented multi-line `+`
@@ -90,16 +90,8 @@ guide finalization.
     fine; C runtime fns correct — call site never reaches them). Bugs filed:
     `rv64_llvm_nested_len_arg_miscompile_2026-07-11.md`,
     `native_build_noncritical_skip_stale_cache_masking_2026-07-11.md`; minimal repro appended to
-    `stage4_seed_llvmlib_method_arity_2026-07-06.md`.
-  - FINAL (2026-07-11): seed miscompile ROOT-CAUSED and FIXED — `compile_inline_len`
-    (`src/compiler_rust/.../llvm/functions/calls.rs`) inlined `text.len()` recognizing only the
-    hosted "STR1" 4-byte magic; freestanding runtimes tag strings with object_type byte 0x01, so
-    every freestanding string hit the `-1` phi arm and rt_len was never called. Fix ORs in the
-    byte-tag check (hosted-safe; proven by disassembly at all 61 inline-len sites). Gate:
-    **5/5 PASS with `codex-41`** (fixed seed, clean cache, 51 compiled/0 cached/0 failed).
-    Note: parallel commit 458524b4915 independently moved the DB service to connection-close
-    framing (avoids `text.len()`), so the gate also passes without the seed fix; the seed fix is
-    proven by disassembly + no-regression and un-breaks `text.len()` for all freestanding RV64.
+    `stage4_seed_llvmlib_method_arity_2026-07-06.md`. Seed codegen fix agent running; one fix in
+    the seed's method-call lowering plausibly clears the gate to 5/5 (`codex-41`).
 
 ### Item 5: baremetal + NVMe FW index-based discipline — PASS, skill written
 - Evidence: `Handle{index, generation}` pools (`examples/09_embedded/simpleos_nvme_fw/`,
@@ -170,16 +162,6 @@ guide finalization.
   box value, and unboxing is operator-dependent (`+` unboxes, `&` doesn't) — compiler lane.
 - Remaining gap even when green: no harness cross-compares host vs QEMU pixels (each compares
   against its own CPU oracle) — a direct PPM diff step is the planned hardening addition.
-- Item 8 capture evidence (2026-07-11, all host checks on current binaries):
-  - Simple 2D: `check-cpu-simd-engine2d-evidence.shs` PASS — SIMD-kernel diagram checksum
-    `79321896458941` == scalar-oracle checksum, all sub-op mismatches 0, policy
-    exact-bitmap-no-blur-no-tolerance. Report `doc/09_report/cpu_simd_engine2d_evidence_2026-07-11.md`.
-  - Simple Web: `check-simple-web-engine2d-js-bitmap-evidence.shs` PASS — native ARGB checksum
-    `26296152649728` == Node/JS baseline, mismatch_count=0, no tolerance; 6µs/frame vs 90µs JS.
-    Report `doc/09_report/simple_web_engine2d_js_bitmap_evidence_2026-07-11.md`.
-  - Simple GUI/WM: host PPM capture + QEMU QMP screendump both PASS (see above).
-  - Residuals: 2D check is kernel-layer (no full-scene PPM); web check is one scene/one JS
-    runtime; host↔QEMU cross-pixel diff still to be added in the gpu-2d lane.
 
 ### Items 9/10: WM daemon mode + process-manage gateway — research done, design fixed
 Research ground truth (2026-07-11):
@@ -214,44 +196,3 @@ Design (minimal, shared-code):
 - Order: I10-simpleos (cheap, independent) → I10-host → I9 (needs ui-cli lane merged; the
   compiled-ui hang and module-cap are tracked blockers for full GUI daemon; headless-backend
   daemon does not hit them).
-
-Implementation result (2026-07-11, committed 9feb36cb72a2):
-- I10-simpleos: premise stale — shell `ps`/`kill` already exist (`commands_fs.spl:369,395`,
-  syscalls 5/6/7 reading the live scheduler, richer than `pt_ext_*`); nothing added.
-- I10-host: `simple process list|spawn|kill|wait` (`src/app/process/{main,registry}.spl`,
-  dispatch `table.spl:680`); SDN registry `~/.simple/cache/process_gateway.sdn`; `--json`;
-  shared AccessResult/AccessError shapes. List covers gateway-managed processes (no /proc).
-- I9: `src/app/play/wm_daemon.spl` — resident headless WM via `init_host_wm(Headless)`, same
-  compositor code as windowed; daemon_sdk file-IPC (serve/start/windows-list/window-open/
-  window-close/status/stop) + `wm_daemon_client.spl`; `wm windows list` tries daemon first.
-- Evidence: `wm_process_gateway_spec.spl` PASS 2/0 (real sleep-5 spawn/kill/wait; daemon
-  open→list(1, Terminal)→stop). Untested: CLI wrappers under the seed (parser dedent bug on
-  `access_cli_grammar.spl`, filed `seed_parse_access_cli_grammar_dedent_2026-07-11.md` —
-  also blocks the pre-existing `simple play windows`); daemon serve loop over real IPC;
-  SimpleOS builtins at runtime.
-- Interpreter finding (for future lanes): in-place mutations through TYPED class params are
-  lost when the frame returns (dynamic params persist; module-scope scalars persist, class
-  vars don't) — pattern: return-the-object. And sspec `expect(a == b)` desugars to
-  `.to_equal(b)` — bind comparisons to a `val` first.
-
-## Operator guide (canonical commands after this pass)
-
-- Startup policy probe: `bin/simple run src/app/startup/launch_meta_check.spl check
-  --simpleos-host <file>` (expect `source=filesystem|cache=mmap`) / `--simpleos-baremetal`
-  (expect `source=baremetal_got`).
-- Servers live gate: `sh scripts/qemu/qemu_rv64_http_test.shs --with-db --expect-http-only`
-  (5/5 incl. `codex-41`; add `--allow-prebuilt-artifact` while the deployed binary is a seed).
-- clang-from-FS ring-3 gate: `sh scripts/os/ssh_clang_hello_ring3.shs`.
-- WM parity: `sh scripts/check/check-shared-wm-renderer-unification-evidence.shs`,
-  `check-hosted-wm-capture-evidence.shs` (warm run), and QEMU
-  `check-simpleos-x86-64-wm-render-event-evidence.shs` (render + 7/7 events).
-- 2D/web pixel parity: `check-cpu-simd-engine2d-evidence.shs`,
-  `check-simple-web-engine2d-js-bitmap-evidence.shs`.
-- UI CLI access: `bin/simple run scripts/check/check-ui-cli-access.spl --scenario <name>`.
-- Process gateway: `bin/simple process list|spawn|kill|wait [--json]`.
-- WM daemon: `simple play daemon start|windows-list|window-open|window-close|status|stop`
-  (backing modules spec-proven; CLI wrapper pending the seed parser bug fix).
-- Redeploy wall (next lane): follow the sequence in
-  `doc/08_tracking/bug/self_hosted_simpleos_target_native_build_crash_2026-07-11.md` —
-  cranelift output must be proven non-stub-collapsed; the seed external-llc path is the
-  memory-documented real route (llc blockers #131/#133 apply to full-app scope).

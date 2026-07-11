@@ -1,46 +1,6 @@
 # BUG: RV64 LLVM native — `text.len()` evaluates to nil (-1); hoisting into a local does NOT fix it
 
-**Status:** FIXED in seed codegen 2026-07-11 (fix built + gate 5/5; commit pending)
-
-## Root cause + fix (2026-07-11)
-
-`compile_inline_len` in
-`src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs` (~lines
-236-271) inlines `rt_len` and detects strings ONLY via the hosted runtime's
-4-byte "STR1" magic (`kind_u32 == 0x53545231`, `src/runtime/runtime_native.c`).
-The freestanding kernel runtime
-(`src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`) tags strings with a
-single-byte `RtHeapHeader.object_type == RT_HEAP_STRING (0x01)` instead. So on
-the freestanding lane every heap string matched neither the string magic nor
-the array kind (0x02), and the inline sequence's phi returned the `-1`
-("invalid") arm without ever calling `rt_len`/`rt_string_len`. Array `.len()`
-worked because both tiers use kind byte `0x02`; `starts_with`/`find`/`split`/
-`trim` worked because they are real runtime calls, not inlined.
-
-**Fix:** add an `object_type == 0x01` string check OR-ed with the existing
-magic + array checks (safe on the hosted tier: no hosted heap kind has
-byte0 == 1 — STRING magic byte0=0x31, ARRAY=0x02, ENUM=0x04, DICT=0x06). Both
-layouts store the i64 length at offset 8, so the existing len load is correct
-for both. Verified in the emitted RV64 code: the inline site becomes the
-optimized range check `addi a2,a2,-1; li a3,0x1; bgeu` (kind byte in {1,2})
-instead of `li a3,0x2; beq` (array only).
-
-**Gate:** fresh seed (cargo `--features llvm`) + `rm -rf .simple/native_cache`
-+ stamped native-build of `build/os/simpleos_riscv64.elf`, then
-`sh scripts/qemu/qemu_rv64_http_test.shs --with-db --expect-http-only
---allow-prebuilt-artifact` → **5/5 PASS (codex-41 in SELECT)**. Note: commit
-458524b4915 independently reworked `simple_db_service.spl` to connection-close
-framing (avoids `text.len()` on the request path), so the DB gate also passes
-without the seed fix on current sources; the seed fix is proven at the
-instruction level (above) and un-breaks `text.len()` for all other
-freestanding RV64 code.
-
-**WC hazard note:** the seed source edit was clobbered once by a
-parallel-session workspace reconcile; recovered from snapshot commit
-`9ef0004deea6`. Verify `len_is_string_byte` is present in `calls.rs` before
-rebuilding the seed.
-
-## Original report (pre-fix)
+**Status:** open (blocks the SimpleOS RV64 DB gate)
 **Severity:** high (silent wrong values; corrupts HTTP framing and body slicing in the boot DB service)
 **Component:** seed native-build codegen — `--backend llvm --target riscv64-unknown-none --opt-level=aggressive` (freestanding entry-closure lane)
 **Found:** 2026-07-11, SimpleOS RV64 DB server gate (`scripts/qemu/qemu_rv64_http_test.shs --with-db`)
