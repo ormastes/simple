@@ -13,6 +13,8 @@ use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 
+extern fn rt_enum_discriminant(value: HirStmtKind) -> i64
+
 fn mir_stmt_symbol_id_value(symbol: SymbolId) -> i64:
     match symbol:
         case SymbolId(id): id
@@ -24,19 +26,7 @@ fn mir_stmt_local_id_value(local: LocalId) -> i64:
         case _: -1
 
 fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:
-    match k:
-        case HirStmtKind.Expr(_):
-            0
-        case HirStmtKind.Let(_, _, _):
-            1
-        case HirStmtKind.Assign(_, _, _):
-            2
-        case HirStmtKind.Block(_):
-            3
-        case HirStmtKind.AsmAssert(_):
-            4
-        case _:
-            -1
+    rt_enum_discriminant(k)
 
 # ============================================================================
 # Statement Lowering
@@ -71,9 +61,10 @@ impl MirLowering:
         match stmt:
             case HirStmt(kind, span):
                 val stmt_kind_value: HirStmtKind = kind
-                if mir_hir_stmt_kind_disc(stmt_kind_value) == 1:
-                    val nil_span = Span.empty()
-                    val fallback_type = HirType(kind: HirTypeKind.Unit, span: nil_span)
+                val fallback_type = HirType(kind: HirTypeKind.Unit, span: Span.empty())
+                val fallback_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: fallback_type, span: span)
+                val let_disc = mir_hir_stmt_kind_disc(HirStmtKind.Let(SymbolId(id: -1), fallback_type, fallback_expr))
+                if mir_hir_stmt_kind_disc(stmt_kind_value) == let_disc:
                     val let_symbol = match stmt_kind_value:
                         case HirStmtKind.Let(symbol, _, _):
                             if symbol != nil:
@@ -91,7 +82,7 @@ impl MirLowering:
                         case HirStmtKind.Let(_, _, init):
                             init
                         case _:
-                            HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: fallback_type, span: span)
+                            fallback_expr
 
                     if let_symbol.?:
                         val symbol_value = let_symbol ?? SymbolId(id: -1)
