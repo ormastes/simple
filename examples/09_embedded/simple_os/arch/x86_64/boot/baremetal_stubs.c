@@ -15625,6 +15625,14 @@ int64_t rt_x86_tss_init(void) {
  * Forwards to spl_handle_* weak stubs (or future strong overrides).
  * Returns -38 (ENOSYS) for unknown syscall numbers.
  * -------------------------------------------------------------------------- */
+
+/* ring-3 resume (setjmp/longjmp) helpers — defined in enter_user_first.s.
+ * rt_x86_enter_user_first saves a kernel savepoint before iretq'ing to CPL3;
+ * on exit(2) we longjmp back into the sshd accept loop instead of halting. */
+extern void    rt_x86_ring3_resume(int64_t rc);   /* does not return */
+extern int64_t rt_x86_ring3_resume_valid(void);
+extern int64_t rt_x86_ring3_exit_rc(void);
+
 int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                             uint64_t a3, uint64_t a4, uint64_t a5) {
     if (_bare_exec_mode) {
@@ -15644,6 +15652,15 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                 serial_puts("[user] exit rc=");
                 serial_put_dec((int64_t)a0);
                 serial_puts("\r\n");
+                /* Multi-command SSH: if the FS-exec ring-3 loader established a
+                 * kernel savepoint (rt_x86_enter_user_first), longjmp back into
+                 * the sshd accept loop with this exit status instead of taking
+                 * QEMU down — so the kernel survives and can run a second
+                 * command in the same boot. The savepoint is consumed on use;
+                 * absent one (non-ring3 exit path) we fall back to halting. */
+                if (rt_x86_ring3_resume_valid()) {
+                    rt_x86_ring3_resume((int64_t)a0);   /* does not return */
+                }
                 outb(0xf4, (uint8_t)((a0 << 1) | 1)); /* isa-debug-exit (QEMU) */
                 for (;;) __asm__ volatile("cli; hlt");  /* board: halt (0xf4 unused) */
             }

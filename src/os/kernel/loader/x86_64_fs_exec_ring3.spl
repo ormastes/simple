@@ -45,6 +45,11 @@ extern fn serial_println(msg: text)
 extern fn pmm_alloc_page_raw() -> u64
 extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i64
 extern fn rt_text_to_bytes(s: text) -> [u8]
+# Multi-command SSH: rt_x86_enter_user_first saves a kernel savepoint before
+# iretq'ing to CPL3; on the ring-3 program's exit(2) syscall the kernel longjmps
+# back here (so arch_x86_64_enter_user_task RETURNS) and stashes the exit status.
+# rax is clobbered by the intervening serial_println calls, so read it explicitly.
+extern fn rt_x86_ring3_exit_rc() -> i64
 
 # Little-endian scalar reads straight off the identity-mapped RAW file buffer.
 # The [u8] channel (byte_utils/read_*_le over image.file_bytes) reads boxed
@@ -364,8 +369,19 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, file_len: u64, stre
     serial_println("[spawn] entering user cs=0x2b iopl=3 rip=0x{entry} rsp=0x{user_rsp_u}")
     arch_x86_64_enter_user_task(ctx, space.phys_root)
 
-    serial_println("[spawn] returned from user (unexpected)")
-    -9
+    # Multi-command SSH: control lands HERE when the ring-3 program exits — the
+    # exit(2) syscall longjmps back through rt_x86_enter_user_first's savepoint,
+    # so arch_x86_64_enter_user_task returns instead of QEMU halting. Surface the
+    # program's exit status up to the sshd accept loop, which then accepts the
+    # next connection/command in the same boot.
+    #
+    # Remaining gap: the user address space built above is abandoned (its PML4 +
+    # PT_LOAD/stack frames leak); each spawn calls create_user_address_space()
+    # fresh with fresh pmm frames, so a later command's ELF load cannot be
+    # corrupted by this one's mappings — but the frames are not reclaimed.
+    val exit_rc = rt_x86_ring3_exit_rc()
+    serial_println("[spawn] ring3 program exited rc={exit_rc} (kernel resumed)")
+    exit_rc
 
 pub fn x86_64_fs_exec_enter_stream_ring3(binary_path: text, header_blob: u64, file_len: u64, argv: [text], envp: [text]) -> i64:
     """Stream an opened filesystem ELF into a fresh user address space."""

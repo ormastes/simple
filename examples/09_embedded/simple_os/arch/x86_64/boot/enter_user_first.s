@@ -35,6 +35,35 @@
     .type rt_x86_enter_user_first, @function
     .align 16
 rt_x86_enter_user_first:
+    /* --- ring-3 resume savepoint (setjmp) ---------------------------------
+     * Capture the kernel context of THIS caller (the sshd accept-loop frame,
+     * via x86_64_fs_exec_enter_image_ring3 -> arch_x86_64_enter_user_task) so
+     * that when the ring-3 program calls exit(2), rt_syscall_dispatch case 0
+     * can longjmp back here (rt_x86_ring3_resume) instead of taking QEMU down
+     * via isa-debug-exit. This makes the spawn call chain RETURNING, so the
+     * accept loop survives and can service a second command in one boot.
+     *
+     * Safety of the saved rsp: the ring-3 program runs with IF=0 (ctx.rflags
+     * 0x3002, bit 9 clear) and TSS.RSP0 is not used for the syscall path, so
+     * nothing preempts onto — and corrupts — this saved kernel stack while the
+     * user program runs. The exit syscall runs on the separate global
+     * _kernel_syscall_stack, leaving [saved_rsp] (the return address) intact.
+     *
+     * cr3 is captured HERE, before the `movq %rax,%cr3` swap below, so it is
+     * the KERNEL cr3 — restoring it on resume is required (the user AS clones
+     * only the low half; the high-half NVMe BAR / kernel-only mappings live in
+     * the kernel PML4). Must run before `movq %r9,%rax` reloads rax. */
+    movq    %rbx, _ring3_resume_buf+0(%rip)
+    movq    %rbp, _ring3_resume_buf+8(%rip)
+    movq    %r12, _ring3_resume_buf+16(%rip)
+    movq    %r13, _ring3_resume_buf+24(%rip)
+    movq    %r14, _ring3_resume_buf+32(%rip)
+    movq    %r15, _ring3_resume_buf+40(%rip)
+    movq    %rsp, _ring3_resume_buf+48(%rip)   /* rsp -> return address */
+    movq    %cr3, %rax
+    movq    %rax, _ring3_resume_buf+56(%rip)   /* kernel cr3 (pre-swap) */
+    movq    $1, _ring3_resume_valid(%rip)
+
     /* Stash CR3 into a callee-saved register before any stack push so the
      * stack writes happen before we swap address spaces. The pushes below
      * write to the kernel stack, which must still be mapped after cr3 load
@@ -72,5 +101,65 @@ rt_x86_enter_user_first:
 
     iretq
     .size rt_x86_enter_user_first, . - rt_x86_enter_user_first
+
+/* --------------------------------------------------------------------------
+ * rt_x86_ring3_resume(int64_t rc)  [rdi = rc]  — longjmp counterpart.
+ *
+ * Called from rt_syscall_dispatch case 0 when a standalone ring-3 program
+ * exits. Restores the kernel context captured at the top of
+ * rt_x86_enter_user_first and `ret`s — so rt_x86_enter_user_first appears to
+ * return to arch_x86_64_enter_user_task, which returns to
+ * x86_64_fs_exec_enter_image_ring3, which returns up to the sshd accept loop.
+ * The exit code is stashed in _ring3_exit_rc for the Simple loader to read
+ * (rax cannot be trusted through the intervening serial_println calls).
+ * Does NOT return to its own caller. -------------------------------------- */
+    .globl rt_x86_ring3_resume
+    .type rt_x86_ring3_resume, @function
+    .align 16
+rt_x86_ring3_resume:
+    movq    %rdi, _ring3_exit_rc(%rip)          /* stash rc */
+    movq    $0, _ring3_resume_valid(%rip)       /* consume the savepoint */
+    movq    _ring3_resume_buf+56(%rip), %rax
+    movq    %rax, %cr3                           /* restore kernel cr3 FIRST */
+    movq    _ring3_resume_buf+0(%rip), %rbx
+    movq    _ring3_resume_buf+8(%rip), %rbp
+    movq    _ring3_resume_buf+16(%rip), %r12
+    movq    _ring3_resume_buf+24(%rip), %r13
+    movq    _ring3_resume_buf+32(%rip), %r14
+    movq    _ring3_resume_buf+40(%rip), %r15
+    movq    _ring3_resume_buf+48(%rip), %rsp    /* back on the accept-loop stack */
+    xorl    %eax, %eax
+    ret
+    .size rt_x86_ring3_resume, . - rt_x86_ring3_resume
+
+/* int64_t rt_x86_ring3_resume_valid(void) — 1 while a savepoint is live. */
+    .globl rt_x86_ring3_resume_valid
+    .type rt_x86_ring3_resume_valid, @function
+    .align 16
+rt_x86_ring3_resume_valid:
+    movq    _ring3_resume_valid(%rip), %rax
+    ret
+    .size rt_x86_ring3_resume_valid, . - rt_x86_ring3_resume_valid
+
+/* int64_t rt_x86_ring3_exit_rc(void) — last ring-3 program's exit status. */
+    .globl rt_x86_ring3_exit_rc
+    .type rt_x86_ring3_exit_rc, @function
+    .align 16
+rt_x86_ring3_exit_rc:
+    movq    _ring3_exit_rc(%rip), %rax
+    ret
+    .size rt_x86_ring3_exit_rc, . - rt_x86_ring3_exit_rc
+
+    .section .bss
+    .align 16
+    .globl _ring3_resume_buf
+_ring3_resume_buf:
+    .skip 64            /* rbx,rbp,r12,r13,r14,r15,rsp,cr3 */
+    .globl _ring3_resume_valid
+_ring3_resume_valid:
+    .skip 8
+    .globl _ring3_exit_rc
+_ring3_exit_rc:
+    .skip 8
 
     .section .note.GNU-stack,"",@progbits
