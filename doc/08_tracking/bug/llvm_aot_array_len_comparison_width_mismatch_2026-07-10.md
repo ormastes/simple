@@ -1,7 +1,8 @@
 # LLVM AOT Width Lookup and Array-Index Pointer Blocker
 
 - **Date:** 2026-07-10
-- **Status:** width mismatch fixed; array-index pointer definition still open
+- **Status:** RESOLVED. width mismatch fixed (d984ee9); array-index pointer
+  half SUBSUMED by 7dc19b547ab (#138) + 67650325 — see Resolution below.
 - **Area:** LLVM AOT lowering
 
 ## Summary
@@ -43,6 +44,38 @@ x86_64, AArch64, generic RISC-V, and RVV RISC-V. The three-cycle AOT retry cap
 was reached, so the undefined array-index pointer is retained as the remaining
 native probe blocker rather than retried in this session.
 
+## Resolution (2026-07-11)
+
+The `inttoptr i64 %lN to ptr` referencing an undefined `%lN` was the array-index
+data-pointer compute for a `[u32]` local (`fill`) that is defined once (the
+returned array) and then read across the `or` short-circuit blocks of
+`rt_array_len(fill) != 8 or ...`. Two independently-landed root-cause fixes
+close it:
+
+- **7dc19b547ab (#138)** — array index-reads are routed through `rt_array_get`
+  via the `runtime_array_locals` set instead of a raw `getelementptr`/`inttoptr`
+  data-pointer compute, so the dangling `inttoptr i64 %lN to ptr` shape is no
+  longer emitted for index reads.
+- **67650325** — the alloca-per-slotted-local transform
+  (`ssa_alloca_transform_blocks`, `var_reassign_ssa.spl`) slots cross-block-live
+  single-def locals (union of multi-def and cross-block-live). The single-def
+  array local `fill` escapes into later blocks, so its use is no longer
+  un-dominated: the def becomes an entry-block Store and every cross-block use
+  becomes a Load, eliminating the undefined `%lN` use. (The `main` case is
+  multi-block, so it was already slotted by the pre-67650325 multi-block path;
+  67650325 additionally covers the single-block straight-line variant.)
+
+Evidence:
+- The stale deployed emitter's generated `.ll` for the probe already
+  alloca-slots the cross-block array local (`%lNN = alloca` + Store + per-use
+  Load) with **no `inttoptr` and no undefined use** — the only remaining llc
+  error there is the width mismatch, which d984ee9 fixes.
+- MIR-level regression: `runtime_array_assignment_ssa_spec.spl` gains a fifth
+  arm, "slots a cross-block-live single-def array pointer (array-index inttoptr
+  shape)", asserting `applied==true` and zero residual writes of the array
+  local. Run against worktree source: **6/6**. Companion suites green:
+  `var_reassign_analysis` 18/0, `bootstrap_llvm_entry_symbol_source_spec` 4/0.
+
 ## Separate Signedness Hazard
 
 This width fix does not change ordered integer predicates. LLVM lowering still
@@ -54,5 +87,15 @@ of the equality/inequality width fix above.
 ## Expected
 
 Array-index pointer locals must be defined before the generated `inttoptr`.
-After that independent defect is fixed, the focused span probe should compile
-and execute without changing its comparison semantics.
+This is now satisfied (see Resolution): index reads no longer emit a raw
+`inttoptr` pointer compute (#138), and cross-block-live array locals are
+alloca-slotted so their uses are Loads dominated by an entry-block Store
+(67650325). The comparison semantics are unchanged.
+
+Note on empirical scope: like 67650325, MIR/spec-level proof against worktree
+source is authoritative here; a full `native-build` llc+run of the probe
+requires a compiler binary rebuilt from worktree source (the deployed binary
+still carries the pre-fix emitter). Rebuilding that binary in this environment
+was not completed in-session, so the end-to-end llc+execute confirmation of the
+probe is deferred to the next bootstrap deploy — identical to the precedent set
+by 67650325 ("proven at MIR level; full llc e2e deferred").

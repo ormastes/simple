@@ -139,6 +139,38 @@ describe "runtime array assignment SSA (bug: duplicate %lN def)":
         expect(result.reason).to_equal("ready")
         expect(writes_of(result.blocks, 5)).to_equal(0)
 
+    it "slots a cross-block-live single-def array pointer (array-index inttoptr shape)":
+        # Regression for the array-index pointer half of
+        #   doc/08_tracking/bug/llvm_aot_array_len_comparison_width_mismatch_2026-07-10.md
+        # `val fill = <returned [u32]>` is a SINGLE def (local 5, a GetElementPtr
+        # of the returned array data), but it is READ in later blocks -- the `or`
+        # short-circuit of `rt_array_len(fill) != 8 or ...` splits the CFG. A
+        # cross-block-live use is not dominated by its in-entry def once the CFG
+        # splits, so the textual `%lN` emitter could reference an undefined local
+        # in `... = call i64 @rt_array_len(i64 %lN)` (surfacing as the reported
+        # `inttoptr i64 %lN to ptr` / "use of undefined value"). The entry-block
+        # alloca slot dominates every use, so each read becomes a Load and no
+        # undefined use survives. Single def -> the SSA-rename fallback is
+        # inapplicable (the local escapes); only the cross-block-live slot rescues
+        # it. This is the cross-block-live extension, distinct from the
+        # single-block multi-def straight-line arm above.
+        val blocks = [
+            MirBlock(id: BlockId.new(0), label: "entry",
+                instructions: [inst(MirInstKind.GetElementPtr(local(5), copy_operand(4), [int_operand(0)]))],
+                terminator: MirTerminator.If(copy_operand(9), BlockId.new(1), BlockId.new(2))),
+            MirBlock(id: BlockId.new(1), label: "use_a", instructions: [],
+                terminator: MirTerminator.Ret(Some(copy_operand(5)))),
+            MirBlock(id: BlockId.new(2), label: "use_b", instructions: [],
+                terminator: MirTerminator.Ret(Some(copy_operand(5))))
+        ]
+        val locals = [i64_local(4), i64_local(5), i64_local(9)]
+        val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("ready")
+        # The single def of local 5 is rewritten to a Store; both cross-block
+        # reads become Loads, so local 5 is written zero times afterward.
+        expect(writes_of(result.blocks, 5)).to_equal(0)
+
     it "stays a no-op for a single-block function with no reassignment":
         val blocks = [
             MirBlock(
