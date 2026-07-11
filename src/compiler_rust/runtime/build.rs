@@ -114,7 +114,6 @@ fn compile_c_runtime_sources() {
         "runtime_time.c",
         "runtime_db.c",
         "runtime_pool.c",
-        "runtime_smf_socket_shims.c",
     ];
 
     let mut build = cc::Build::new();
@@ -177,7 +176,6 @@ fn collect_c_runtime_exports(root: &Path, exported: &mut HashSet<String>) {
         "runtime_time.c",
         "runtime_db.c",
         "runtime_pool.c",
-        "runtime_smf_socket_shims.c",
     ];
     for source in LINKED_C_SOURCES {
         let path = root.join(source);
