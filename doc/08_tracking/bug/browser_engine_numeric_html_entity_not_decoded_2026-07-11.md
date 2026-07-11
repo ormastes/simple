@@ -1,6 +1,6 @@
 # Numeric HTML entities render as literal text in the web engine
 
-- **Status:** Open
+- **Status:** Fixed (layout-renderer path, 2026-07-11)
 - **Date:** 2026-07-11
 - **Area:** lib / browser_engine (HTML entity decoding → text painting)
 - **Severity:** P2 (visible garbage on any non-ASCII page)
@@ -34,3 +34,15 @@ an empty-box fallback is acceptable, literal `&#...;` text is not).
 Found during the 2026-07-11 browser/web-engine hardening arc (live
 google.com fetch through the now-runnable FetchEngine lane, commit
 `f68e8def`).
+
+## Fixed (2026-07-11, same day)
+
+`_decode_numeric_entities` (decimal + hex, WHATWG-style, malformed refs kept
+literal) now runs at the top of `decode_html_entities` in
+`simple_web_html_layout_renderer.spl`, with `_codepoint_to_text` encoding
+code points to UTF-8 through `rt_bytes_to_text` (the common-tier
+`char_from_codepoint` returns U+FFFD for non-ASCII — separate latent gap,
+left in place). Probe: decoded `&#66;/&#x44;/&#51060;…` renders
+pixel-identical to the pre-decoded text and differs from the literal form.
+Status: fixed on the layout-renderer path; the html_tokenizer path still has
+no numeric decoding (follow-up if a consumer needs it).

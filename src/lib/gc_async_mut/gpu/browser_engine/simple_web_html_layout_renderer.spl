@@ -539,6 +539,78 @@ fn _html_tag_event_makes_node(inner: text) -> bool:
 # Parser -> arena
 # ---------------------------------------------------------------------------
 
+# Encode a Unicode code point to UTF-8 text. The common-tier helper
+# (char_from_codepoint) returns U+FFFD for bytes >= 128, so non-ASCII must go
+# through the runtime byte->text boundary here instead.
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+fn _codepoint_to_text(cp: i64) -> text:
+    if cp <= 0 or cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF):
+        return "�"
+    var bytes: [u8] = []
+    if cp < 0x80:
+        bytes.push(cp)
+    elif cp < 0x800:
+        bytes.push(0xC0 + cp / 64)
+        bytes.push(0x80 + cp % 64)
+    elif cp < 0x10000:
+        bytes.push(0xE0 + cp / 4096)
+        bytes.push(0x80 + (cp / 64) % 64)
+        bytes.push(0x80 + cp % 64)
+    else:
+        bytes.push(0xF0 + cp / 262144)
+        bytes.push(0x80 + (cp / 4096) % 64)
+        bytes.push(0x80 + (cp / 64) % 64)
+        bytes.push(0x80 + cp % 64)
+    rt_bytes_to_text(bytes)
+
+# Decode decimal (&#NNNN;) and hex (&#xHHHH;) numeric character references per
+# the WHATWG character-reference rules. Runs BEFORE the named-entity replaces:
+# "&amp;#38;" contains no literal "&#" pair, so double-decoding cannot occur.
+fn _decode_numeric_entities(s: text) -> text:
+    var start = find_from(s, "&#", 0)
+    if start < 0:
+        return s
+    val n = s.len()
+    var out = ""
+    var i = 0
+    while start >= 0:
+        out = out + s.substring(i, start)
+        var j = start + 2
+        var is_hex = false
+        if j < n and (s[j] == "x" or s[j] == "X"):
+            is_hex = true
+            j = j + 1
+        var cp = 0i64
+        var digits = 0
+        var valid = true
+        while j < n and digits <= 7:
+            val c = s[j]
+            if c == ";":
+                break
+            var d = -1
+            if c >= "0" and c <= "9":
+                d = c.ord() - 48
+            elif is_hex and c >= "a" and c <= "f":
+                d = c.ord() - 87
+            elif is_hex and c >= "A" and c <= "F":
+                d = c.ord() - 55
+            if d < 0:
+                valid = false
+                break
+            cp = cp * (if is_hex: 16 else: 10) + d
+            digits = digits + 1
+            j = j + 1
+        if valid and digits > 0 and j < n and s[j] == ";":
+            out = out + _codepoint_to_text(cp)
+            i = j + 1
+        else:
+            # Not a well-formed reference: emit "&#" literally and move on.
+            out = out + "&#"
+            i = start + 2
+        start = find_from(s, "&#", i)
+    out + s.substring(i, n)
+
 # Decode the HTML character entities the markdown/office HTML emitters produce
 # (markdown_escape_html: & < > " '). Text nodes carry escaped content, so the
 # painter would otherwise show "&quot;" literally instead of a quote. Decode
@@ -548,7 +620,8 @@ fn decode_html_entities(s: text) -> text:
         return s
     if find_from(s, "&", 0) < 0:
         return s
-    var out = s.replace("&lt;", "<")
+    var out = _decode_numeric_entities(s)
+    out = out.replace("&lt;", "<")
     out = out.replace("&gt;", ">")
     out = out.replace("&quot;", "\"")
     out = out.replace("&#39;", "'")
