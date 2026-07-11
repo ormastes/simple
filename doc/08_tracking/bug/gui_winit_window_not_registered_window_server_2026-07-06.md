@@ -82,3 +82,18 @@ Re-run the drag repro above; PASS criteria:
    `drag_before.png`/`drag_after.png` window bounding boxes);
 3. a CGEvent click on the "Run" button increments the on-frame `Clicks` counter
    (`SIMPLE_EVT_LOG` shows `[widget-showcase] input left_button …`).
+
+## Update (2026-07-11) — reproduced on the .app-bundle lane
+
+During the browser hardening arc: `tools`-launched
+`scripts/gui/macos-gui-run.shs` (proper LSEnvironment .app bundle, window
+composites and titles correctly, `screencapture -l <wid>` captures it) still
+does NOT receive input. Real CGEvent left-clicks posted at the close button
+(3 attempts, adjacent offsets, mouseMoved first, window frontmost via
+`open -a`) were never delivered: the process kept running and its winit
+close-requested poll never fired. Display registration is fixed by the
+bundle; INPUT registration remains broken. Also note: `computer-use`
+tooling cannot allowlist these windows because the wrapper mints a fresh
+`com.simple.gui.run.$$` bundle id per launch and the bundle is not
+"installed" — consider a stable bundle id + optional install path for
+input-verification lanes.
