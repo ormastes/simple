@@ -144,6 +144,52 @@ impl MirLowering:
                     return result_local
                 return receiver_local
 
+        # Task #144: `n.to_string()` on the bootstrap flat-HIR path resolves to
+        # MethodResolution.Unresolved (no method-resolution info), so it fell
+        # through to `case Unresolved:` below, which emits an error and returns
+        # a placeholder const-0 i64 WITHOUT lowering the receiver or calling any
+        # runtime conversion. `print(n.to_string())` then received the raw i64
+        # 0 in place of a string pointer -> rt_print silently printed nothing.
+        #
+        # Lower the receiver, then render it exactly like Bug #136's numeric
+        # string-interpolation coercion: rt_raw_i64_to_string(i64) -> a TAGGED
+        # heap string, then rt_interp_cstr unwraps that tag to the raw char*
+        # (Opaque "str") that rt_print/rt_println expect. A receiver that is
+        # already a string (`s.to_string()`) is an identity — detected from its
+        # lowered MIR type and returned as-is instead of being fed to the
+        # integer conversion.
+        if method == "to_string" and args.len() == 0 and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            val ts_receiver = self.lower_expr(receiver)
+            var ts_is_str = false
+            if val ts_recv_ty = self.local_mir_type_of(ts_receiver):
+                match ts_recv_ty.kind:
+                    case MirTypeKind.Opaque(ts_recv_ty_name):
+                        if ts_recv_ty_name == "str":
+                            ts_is_str = true
+                    case _: ()
+            if ts_is_str:
+                return ts_receiver
+            val i64s_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_raw_i64_to_string"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_i64s = self.builder
+            val i64s_res = b_i64s.emit_call(i64s_op, [mir_operand_copy(ts_receiver)], MirType.i64())
+            self.builder = b_i64s
+            var ts_tagged = ts_receiver
+            if val i64s_local = i64s_res:
+                ts_tagged = i64s_local
+            val ts_cstr_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_interp_cstr"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+            ))
+            var b_ts_cstr = self.builder
+            val ts_cstr_res = b_ts_cstr.emit_call(ts_cstr_op, [mir_operand_copy(ts_tagged)], MirType(kind: MirTypeKind.Opaque("str")))
+            self.builder = b_ts_cstr
+            if val ts_cstr_local = ts_cstr_res:
+                return ts_cstr_local
+            return ts_tagged
+
         # Bug #137 (follow-up): `x.starts_with(literal)` on the bootstrap
         # argv-element path resolves to MethodResolution.Unresolved (the flat
         # bootstrap HIR has no method resolution), so it fell through to the
