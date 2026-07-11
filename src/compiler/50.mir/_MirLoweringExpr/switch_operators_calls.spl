@@ -681,6 +681,45 @@ impl MirLowering:
         self.builder = b_m
         result
 
+    me lower_try_expr(base: HirExpr) -> LocalId:
+        """Lower `expr?` (Try) on a Result value. If the runtime discriminant
+        is Err (=1), propagate: return the whole Result from the enclosing
+        function (which must itself return Result). Otherwise yield the Ok
+        payload via rt_enum_payload. Without this arm, Try fell to the default
+        `unsupported MIR expression` path and emitted a use of an undefined
+        SSA value (llc: use of undefined value)."""
+        val res_local = self.lower_expr(base)
+        var b = self.builder
+        val disc_func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_discriminant"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val disc_res = b.emit_call(disc_func, [mir_operand_copy(res_local)], MirType.i64())
+        var disc_local = LocalId(id: 0)
+        if val dl = disc_res:
+            disc_local = dl
+        val err_key = b.emit_const_int(1)
+        val cmp_local = b.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(err_key), MirType.bool())
+        val err_block = b.new_block(Some("try_err"))
+        val ok_block = b.new_block(Some("try_ok"))
+        b.terminate_if(mir_operand_copy(cmp_local), err_block, ok_block)
+        self.builder = b
+        var b_err = self.builder
+        b_err.switch_to_block(err_block)
+        b_err.terminate_return(Some(mir_operand_copy(res_local)))
+        self.builder = b_err
+        var b_ok = self.builder
+        b_ok.switch_to_block(ok_block)
+        val pf = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_payload"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val pr = b_ok.emit_call(pf, [mir_operand_copy(res_local)], MirType.i64())
+        self.builder = b_ok
+        if val pl = pr:
+            return pl
+        res_local
+
     me lower_enum_lit(type_: HirType, variant: text, payload: HirEnumPayload?) -> LocalId:
         """Lower `Shape.Circle(7)` to `rt_enum_new(enum_id, discriminant, payload)`.
         Discriminant = variant index (declared order). Payload = single i64 tuple
@@ -787,6 +826,35 @@ impl MirLowering:
         self.struct_value_syms[dest.id] = struct_name
         dest
 
+    me try_inline_lambda_call(symbol: SymbolId, args: [HirCallArg]) -> LocalId?:
+        """Inline a direct call to a val-bound lambda by beta-reduction.
+
+        `val f = \x: x + 1` records the Lambda in lambda_bindings; a later
+        `f(6)` binds each parameter symbol to its lowered argument local and
+        lowers the lambda body in the current scope. Non-capturing lambdas work
+        directly; capture-by-read works incidentally (outer locals remain in
+        local_map). Lambdas used as first-class values are not handled here.
+        """
+        val sid = mir_expr_symbol_id_value(symbol)
+        if sid < 0:
+            return nil
+        if not self.lambda_bindings.has(sid):
+            return nil
+        val lam = self.lambda_bindings[sid]
+        match lam.kind:
+            case Lambda(params, body, _):
+                var pi = 0
+                while pi < params.len():
+                    if pi < args.len():
+                        val arg_local = self.lower_expr(args[pi].value)
+                        val pid = mir_expr_symbol_id_value(params[pi].symbol)
+                        if pid >= 0:
+                            self.local_map[pid] = arg_local
+                    pi = pi + 1
+                Some(self.lower_expr(body))
+            case _:
+                nil
+
     me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
         """Lower function call.
 
@@ -819,6 +887,16 @@ impl MirLowering:
                     is_direct = true
                 case _:
                     pass
+
+        if is_direct:
+            # Inline a val-bound lambda `f(args)` by beta-reduction (lambda-lift).
+            val inl = self.try_inline_lambda_call(direct_symbol, args)
+            if inl.?:
+                return inl.unwrap()
+            # Built-in Result construction: `Ok(v)` / `Err(e)` -> rt_enum_new with
+            # Result's discriminants (Ok=0, Err=1, registered in enum_variant_index).
+            if (direct_name == "Ok" or direct_name == "Err") and self.enum_variant_index.has("Result"):
+                return self.lower_enum_construct_named("Result", direct_name, args)
 
         if is_direct:
             if direct_name == "print" or direct_name == "_cli_eprint":
