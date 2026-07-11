@@ -45,7 +45,11 @@ FILE.md files) are allowed.
 | `.vscode` | VS Code settings |
 | `build` | Build output (mutable, includes target/ and bootstrap/) |
 | `tmp` | Temporary files (mutable) |
+| `release` | Deployed self-hosted binaries (`release/<triple>/simple`); root-relative `SIMPLE_BIN` default for check scripts |
+| `target` | Native test/codegen artifacts referenced root-relative by check scripts |
 | `variants` | Module-variant-override overlays (platform/renderer seams selected by explicit `variant:` build config) |
+| `.opencode` | OpenCode tool settings |
+| `.cache` | Host cache (e.g. `cpu_config.sdn`) |
 
 **No other files at root.**
 
