@@ -522,15 +522,31 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
 #[no_mangle]
 pub extern "C" fn rt_process_spawn_inherit() -> i64 {
     use std::process::{Command, Stdio};
-    let cmd_str = if cfg!(windows) { "bin/simple_mcp_server.cmd" } else { "./bin/simple_mcp_server" };
+    let wrapper_name = if cfg!(windows) { "simple_mcp_server.cmd" } else { "simple_mcp_server" };
+    let current_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("failed to resolve current executable for MCP: {err}");
+            return -1;
+        }
+    };
+    let exe_dir = match current_exe.parent() {
+        Some(path) => path,
+        None => return -1,
+    };
+    let bin_dir = exe_dir.parent().and_then(|path| path.parent()).unwrap_or(exe_dir);
+    let wrapper = {
+        let bin_wrapper = bin_dir.join(wrapper_name);
+        if bin_wrapper.is_file() { bin_wrapper } else { exe_dir.join(wrapper_name) }
+    };
     #[cfg(windows)]
     let mut command = {
         let mut command = Command::new("cmd.exe");
-        command.args(["/c", cmd_str]);
+        command.arg("/c").arg(&wrapper);
         command
     };
     #[cfg(not(windows))]
-    let mut command = Command::new(cmd_str);
+    let mut command = Command::new(&wrapper);
     clear_simple_child_stack_env(&mut command);
     command.stdin(Stdio::inherit());
     command.stdout(Stdio::inherit());
@@ -544,7 +560,7 @@ pub extern "C" fn rt_process_spawn_inherit() -> i64 {
             pid
         }
         Err(err) => {
-            eprintln!("failed to spawn inherited-stdio process '{cmd_str}': {err}");
+            eprintln!("failed to spawn inherited-stdio process '{}': {err}", wrapper.display());
             -1
         }
     }
