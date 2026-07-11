@@ -8,7 +8,7 @@
 # Port of: rust/compiler/src/monomorphize/metadata.rs (190 lines)
 
 
-use .types (ConcreteType, SpecializationKey)
+use .types (ConcreteType, SpecializationKey, PointerKind, ReferenceCapability)
 
 # ============================================================================
 # Monomorphization Metadata
@@ -373,7 +373,7 @@ impl TraitImplEntry:
 #
 # SpecializationEntry:
 #   arg_count: u8
-#   type_args: [length-prefixed String (ConcreteType.to_string())]
+#   type_args: [length-prefixed String (meta_concrete_type_string())]
 #   mangled_name_len: u32
 #   mangled_name: bytes
 #   binding_count: u8
@@ -406,6 +406,59 @@ fn meta_serialize_text(buf: [u8], value: text) -> [u8]:
     out = out.concat(bytes)
     out
 
+fn meta_concrete_type_string(ct: ConcreteType) -> text:
+    """Metadata string for a ConcreteType (mirrors Rust ConcreteType Display).
+
+    Replaces the former ambiguous bare ct.to_string() call: the monomorphize
+    ConcreteType enum defines no to_string method, so the seed JIT could not
+    resolve it (32 candidates) and fell back to the interpreter.
+    """
+    match ct:
+        ConcreteType.Int: "Int"
+        ConcreteType.Float: "Float"
+        ConcreteType.Bool: "Bool"
+        ConcreteType.String: "String"
+        ConcreteType.Nil: "Nil"
+        ConcreteType.Named(n): n
+        ConcreteType.Array(elem): "Array_{meta_concrete_type_string(elem)}"
+        ConcreteType.Tuple(elems):
+            var parts: [text] = []
+            for e in elems:
+                parts.push(meta_concrete_type_string(e))
+            "Tuple_{parts.join('_')}"
+        ConcreteType.Dict(k, v): "Dict_{meta_concrete_type_string(k)}_{meta_concrete_type_string(v)}"
+        ConcreteType.Function(params, ret):
+            var parts: [text] = []
+            for p in params:
+                parts.push(meta_concrete_type_string(p))
+            "Fn_{parts.join('_')}_{meta_concrete_type_string(ret)}"
+        ConcreteType.Optional(inner): "Opt_{meta_concrete_type_string(inner)}"
+        ConcreteType.Union(members):
+            var parts: [text] = []
+            for m in members:
+                parts.push(meta_concrete_type_string(m))
+            "Union_{parts.join('_')}"
+        ConcreteType.Pointer(kind, cap, inner):
+            val k = match kind:
+                PointerKind.Unique: "Unique"
+                PointerKind.Shared: "Shared"
+                PointerKind.Weak: "Weak"
+                PointerKind.Handle: "Handle"
+                PointerKind.Borrow: "Borrow"
+                PointerKind.BorrowMut: "BorrowMut"
+                PointerKind.RawConst: "RawConst"
+                PointerKind.RawMut: "RawMut"
+            val c = match cap:
+                ReferenceCapability.Shared: "sh"
+                ReferenceCapability.Exclusive: "ex"
+                ReferenceCapability.Isolated: "iso"
+            "{k}{c}_{meta_concrete_type_string(inner)}"
+        ConcreteType.Specialized(name, args):
+            var parts: [text] = []
+            for a in args:
+                parts.push(meta_concrete_type_string(a))
+            "{name}_{parts.join('_')}"
+
 fn serialize_specialization_entry(buf: [u8], entry: SpecializationEntry) -> [u8]:
     """Serialize a single SpecializationEntry."""
     var out = buf
@@ -413,7 +466,7 @@ fn serialize_specialization_entry(buf: [u8], entry: SpecializationEntry) -> [u8]
     # Type args count + serialized type strings
     out = out.push(entry.type_args.len().to_u8())
     for arg in entry.type_args:
-        out = meta_serialize_text(out, arg.to_string())
+        out = meta_serialize_text(out, meta_concrete_type_string(arg))
 
     # Mangled name
     out = meta_serialize_text(out, entry.mangled_name)
@@ -424,7 +477,7 @@ fn serialize_specialization_entry(buf: [u8], entry: SpecializationEntry) -> [u8]
     for key in entry.bindings.keys():
         val value = entry.bindings[key]
         out = meta_serialize_text(out, key)
-        out = meta_serialize_text(out, value.to_string())
+        out = meta_serialize_text(out, meta_concrete_type_string(value))
 
     out
 
@@ -438,7 +491,7 @@ fn serialize_trait_impl_entry(buf: [u8], entry: TraitImplEntry) -> [u8]:
     # Type args count + serialized type strings
     out = out.push(entry.type_args.len().to_u8())
     for arg in entry.type_args:
-        out = meta_serialize_text(out, arg.to_string())
+        out = meta_serialize_text(out, meta_concrete_type_string(arg))
 
     # Impl for type
     out = meta_serialize_text(out, entry.impl_for_type)
