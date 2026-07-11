@@ -167,6 +167,18 @@ impl MirToLlvm:
     # === Overrides: indirect calls / intrinsics ===
 
     me translate_call_indirect(dest: LocalId?, ptr: MirOperand, args: [MirOperand], sig: MirSignature):
+        # Guard (#138 Wall #1): a CallIndirect whose callee operand carries a
+        # nil local means the frontend lowered an unresolved callee
+        # (HirExprKind.Error -> CallIndirect(func=Copy(nil))). Reading `.id`
+        # off that nil (local_id_value in core_codegen.spl) crashed the whole
+        # build with a bare "semantic: undefined field 'id'". Fail as a
+        # readable compile error instead.
+        match ptr.kind:
+            case Copy(callee_local) | Move(callee_local):
+                if callee_local == nil:
+                    panic("compile error: indirect call with unresolved callee — likely an unresolved import or unsupported first-class function value")
+            case _:
+                ()
         val dest_name: text? = match dest:
             case Some(dest_local): Some(self.get_local(self.local_id_value(dest_local)))
             case nil: nil
