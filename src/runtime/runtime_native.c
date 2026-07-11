@@ -832,6 +832,13 @@ int64_t rt_raw_u64_to_string(int64_t raw) {
     return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
 }
 
+int64_t rt_raw_i64_to_string(int64_t raw) {
+    char buf[32];
+    /* %lld handles INT64_MIN correctly (no manual negation needed). */
+    int len = snprintf(buf, sizeof(buf), "%lld", (long long)raw);
+    return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+}
+
 int64_t rt_value_to_string(int64_t value) {
     return rt_to_string(value);
 }

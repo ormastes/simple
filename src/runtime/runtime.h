@@ -273,6 +273,7 @@ int64_t  rt_any_add(int64_t left, int64_t right);
 int64_t  rt_len(int64_t value);
 int64_t  rt_to_string(int64_t value);
 int64_t  rt_raw_u64_to_string(int64_t raw);
+int64_t  rt_raw_i64_to_string(int64_t raw);
 int64_t  rt_value_to_string(int64_t value);
 int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
 int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
