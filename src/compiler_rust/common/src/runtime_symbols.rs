@@ -654,6 +654,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_run",
     "rt_process_spawn",
     "rt_process_spawn_async",
+    "rt_process_spawn_inherit",
     "rt_process_is_running",
     "rt_process_wait",
     "rt_process_kill",

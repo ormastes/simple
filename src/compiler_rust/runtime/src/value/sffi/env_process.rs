@@ -518,6 +518,40 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
     }
 }
 
+/// Spawn a child that transparently inherits the current process stdio.
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_spawn_inherit(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue) -> i64 {
+    use std::process::{Command, Stdio};
+    if cmd_ptr.is_null() {
+        return -1;
+    }
+    let cmd_bytes = std::slice::from_raw_parts(cmd_ptr, cmd_len as usize);
+    let cmd_str = match std::str::from_utf8(cmd_bytes) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let mut command = Command::new(cmd_str);
+    clear_simple_child_stack_env(&mut command);
+    for i in 0..rt_array_len(args) {
+        if let Some(arg_str) = extract_string(rt_array_get(args, i)) {
+            command.arg(arg_str);
+        }
+    }
+    command.stdin(Stdio::inherit());
+    command.stdout(Stdio::inherit());
+    command.stderr(Stdio::inherit());
+    match command.spawn() {
+        Ok(child) => {
+            let pid = child.id() as i64;
+            if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
+                map.insert(pid, child);
+            }
+            pid
+        }
+        Err(_) => -1,
+    }
+}
+
 /// Check if a previously spawned async process is still running.
 /// Returns true if the process exists in the registry and has not yet exited.
 #[no_mangle]
