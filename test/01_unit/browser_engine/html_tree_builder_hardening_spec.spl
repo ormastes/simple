@@ -1,0 +1,140 @@
+"""
+# HTML Tree Builder — Defensive Limits
+
+**Category:** Browser Engine / HTML Parsing
+**Status:** Implemented
+
+## Overview
+
+`html_tree_builder.spl` caps open-element depth at `HTML_MAX_TREE_DEPTH`
+(512) and total element-node creation at `HTML_MAX_NODES` (65536), matching
+Blink/WebKit defensive limits. A hostile/deeply-nested document must still
+parse to completion (never abort, never drop already-open content) — once
+the depth cap is hit, further nesting flattens into siblings at the cap
+level instead of recursing deeper.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_get_children
+}
+
+fn build_nested_markup(depth: i32) -> text:
+    var open_tags = ""
+    var close_tags = ""
+    var i = 0
+    while i < depth:
+        open_tags = "{open_tags}<div>"
+        close_tags = "{close_tags}</div>"
+        i = i + 1
+    return "{open_tags}{close_tags}"
+
+fn _max_depth(node: BeDomNode) -> i32:
+    """Iterative BFS depth measurement — avoids relying on interpreter
+    recursion depth (which would confound a depth-cap oracle)."""
+    var frontier: [BeDomNode] = [node]
+    var depth = 0
+    while frontier.len() > 0:
+        depth = depth + 1
+        var next_frontier: [BeDomNode] = []
+        var i = 0
+        while i < frontier.len():
+            val ch = be_dom_get_children(frontier[i])
+            var j = 0
+            while j < ch.len():
+                next_frontier.push(ch[j])
+                j = j + 1
+            i = i + 1
+        frontier = next_frontier
+    return depth
+
+fn _count_by_tag(node: BeDomNode, tag: text) -> i32:
+    """Iterative worklist traversal — avoids relying on interpreter
+    recursion depth over a possibly-deep tree."""
+    var count = 0
+    var worklist: [BeDomNode] = [node]
+    while worklist.len() > 0:
+        val n = worklist.len()
+        val cur = worklist[n - 1]
+        var rest: [BeDomNode] = []
+        var i = 0
+        while i < n - 1:
+            rest.push(worklist[i])
+            i = i + 1
+        worklist = rest
+        if be_dom_get_tag(cur) == tag:
+            count = count + 1
+        val ch = be_dom_get_children(cur)
+        var j = 0
+        while j < ch.len():
+            worklist.push(ch[j])
+            j = j + 1
+    return count
+
+fn _find_first_by_tag(node: BeDomNode, tag: text) -> BeDomNode:
+    if be_dom_get_tag(node) == tag:
+        return node
+    val ch = be_dom_get_children(node)
+    var i = 0
+    while i < ch.len():
+        val child = ch[i]
+        if be_dom_get_tag(child) == tag:
+            return child
+        val nested = _find_first_by_tag(child, tag)
+        if be_dom_get_tag(nested) == tag:
+            return nested
+        i = i + 1
+    return node
+
+# ============================================================================
+# Scenarios
+# ============================================================================
+
+describe "HtmlTreeBuilder depth cap":
+    it "deeply nested markup parses to completion with bounded depth":
+        step("Build 2000 levels of nested <div> markup")
+        val html = build_nested_markup(2000)
+
+        step("Parse the markup into a DOM tree")
+        val doc = html_tree_builder_build(html)
+
+        step("Then measured tree depth stays within the HTML_MAX_TREE_DEPTH cap")
+        val measured_depth = _max_depth(doc)
+        expect(measured_depth).to_be_less_than(513)
+
+        step("Then no content was dropped — all 2000 divs are still present as siblings")
+        val measured_count = _count_by_tag(doc, "div")
+        expect(measured_count).to_equal(2000)
+
+# NOTE: a node-quota scenario (>65536 siblings) was intentionally left out
+# of the affordable test set. Triggering the HTML_MAX_NODES=65536 cap
+# requires first building 65536+ real DOM nodes, which is the expensive
+# part; measured interpreted timing (array+join sibling-markup builder,
+# same machine): 5000 siblings ~24s, non-linear beyond that (parsing's
+# copy-on-write children-append is the cost, not just string building).
+# That does not extrapolate to an affordable run at 65536+ within the test
+# daemon's 120s budget, and the quota constant may not be lowered for
+# testing (project rule: prod constants only). The `else: truncated = true`
+# branch is therefore verified by CODE INSPECTION ONLY, not exercised by
+# any test in this file: every element-creation site in
+# html_tree_builder.spl is gated by `if node_count < HTML_MAX_NODES: ...
+# else: truncated = true`. The depth-cap scenario above exercises the same
+# `if/else` *shape* at an affordable scale, but for the depth condition,
+# not the node-count condition — it does not substitute for a quota test.
+
+describe "HtmlTreeBuilder honest content":
+    it "normal nesting is unchanged by the defensive limits":
+        step("Parse a shallow, well-formed document (depth 3)")
+        val doc = html_tree_builder_build("<div><p><span>text</span></p></div>")
+
+        step("Then parent-child structure is exact, unaffected by the caps")
+        val div = _find_first_by_tag(doc, "div")
+        val p = _find_first_by_tag(div, "p")
+        val span = _find_first_by_tag(p, "span")
+        expect(be_dom_get_tag(span)).to_equal("span")
+        expect(be_dom_get_children(p).len()).to_equal(1)
+        expect(be_dom_get_children(div).len()).to_equal(1)
