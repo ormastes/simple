@@ -716,6 +716,17 @@ SplArray* rt_engine2d_simd_copy_row_u32(SplArray* src) {
     return a;
 }
 
+int64_t rt_engine2d_simd_row_probe(void) {
+    const int64_t color = 0xff00ff03LL;
+    rt_simd_engine2d_neon_reset();
+    SplArray* fill = rt_engine2d_simd_fill_row_u32(8, color);
+    if (rt_array_len(fill) != 8 || (rt_array_get(fill, 7) & 0xffffffffLL) != color) abort();
+    SplArray* copy = rt_engine2d_simd_copy_row_u32(fill);
+    if (rt_array_len(copy) != 8 || (rt_array_get(copy, 3) & 0xffffffffLL) != color) abort();
+    if (rt_simd_engine2d_neon_hits() < 2) abort();
+    return 0;
+}
+
 SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src) {
     int64_t dn = rt_array_len(dst);
     int64_t sn = rt_array_len(src);
