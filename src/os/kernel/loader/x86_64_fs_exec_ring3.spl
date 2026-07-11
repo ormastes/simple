@@ -155,13 +155,23 @@ fn _build_sysv_stack_frame(stack_phys: u64, stack_top: u64, binary_path: text, a
     _wr64(stack_phys + frame_off + ((slot + 5) * 8), 0)
     user_rsp
 
-# Map every PT_LOAD of the ELF held in the raw buffer `blob` into `space` at its
-# p_vaddr, page by page (one frame per page, so segments sharing a page are mapped
-# once with the UNION of their perms). Each frame is zeroed (BSS) before the
-# file-backed range of every covering segment is streamed from the opened file.
+# Map every PT_LOAD of the ELF described by the header+phdr table resident at
+# `blob` into `space` at its p_vaddr, page by page (one frame per page, so
+# segments sharing a page are mapped once with the UNION of their perms). Each
+# frame is zeroed (BSS) before the file-backed range of every covering segment
+# is filled in — copied via mmio from the resident buffer (use_stream=false,
+# hdr_len == file_len) or streamed per-page straight from the OPENED file via
+# simpleos_fat32_stream_read_at into the destination frame (use_stream=true,
+# only hdr_len header/phdr bytes resident; file size not capped at 4 MiB).
+#
+# `hdr_len` bounds how many bytes at `blob` are actually RESIDENT (phdr-table
+# OOB check — in streaming mode file_len exceeds the resident prefix, so
+# bounding against file_len would let a corrupt phdr drive mmio reads past the
+# header buffer into adjacent kernel memory). `file_len` is the TRUE on-disk
+# size (per-segment file-range OOB check; the streamer also EOF-clamps).
 # Per-page perms: user_rw if any covering PT_LOAD is writable, else user_rx.
 # Returns 1 on success, 0 on failure.
-fn _map_pt_loads(space: AddressSpace, blob: u64, file_len: u64, stream_file: bool) -> i64:
+fn _map_pt_loads(space: AddressSpace, blob: u64, hdr_len: u64, file_len: u64, use_stream: bool) -> i64:
     val PAGE: u64 = 4096
     val PT_LOAD: u64 = 1
     val PF_W: u64 = 2
@@ -169,15 +179,14 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, file_len: u64, stream_file: boo
     val phoff = _rd64(blob, 32)
     val phentsize = _rd16(blob, 54)
     val phnum = _rd16(blob, 56)
-    serial_println("[spawn] phoff={phoff} phentsize={phentsize} phnum={phnum}")
+    serial_println("[spawn] phoff={phoff} phentsize={phentsize} phnum={phnum} use_stream={use_stream}")
     if phnum == 0 or phentsize < 56:
         serial_println("[spawn] FAIL no program headers")
         return 0
-    # Bound the phdr table + each segment's file range against the known file size,
-    # so a corrupt/oversized phdr can't drive mmio reads past the raw buffer into
-    # adjacent kernel memory (info-leak / fault) — the raw buffer carries no length.
-    if phoff < 64 or phoff > file_len or phnum > ((file_len - phoff) / phentsize):
-        serial_println("[spawn] FAIL phdr table OOB phoff={phoff} phnum={phnum} phentsize={phentsize} file_len={file_len}")
+    # Bound the phdr table against the RESIDENT header bytes, and each segment's
+    # file range against the true file size — the raw buffer carries no length.
+    if phoff < 64 or phoff > hdr_len or phnum > ((hdr_len - phoff) / phentsize):
+        serial_println("[spawn] FAIL phdr table OOB phoff={phoff} phnum={phnum} phentsize={phentsize} hdr_len={hdr_len}")
         return 0
 
     var lo: u64 = 0xFFFFFFFFFFFFFFFF
@@ -257,7 +266,7 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, file_len: u64, stream_file: boo
                     val clen = copy_end - copy_start
                     val file_pos = foff + (copy_start - sv)
                     val dst = phys + (copy_start - va)
-                    if stream_file:
+                    if use_stream:
                         val read_len = simpleos_fat32_stream_read_at(file_pos, dst, clen)
                         if read_len < 0 or (read_len as u64) != clen:
                             serial_println("[spawn] FAIL short PT_LOAD read off={file_pos} want={clen} got={read_len}")
@@ -274,7 +283,7 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, file_len: u64, stream_file: boo
     serial_println("[spawn] PT_LOAD segments mapped")
     1
 
-fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, file_len: u64, stream_file: bool, argv: [text], envp: [text]) -> i64:
+fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_len: u64, use_stream: bool, argv: [text], envp: [text]) -> i64:
     # Parse the ELF from the identity-mapped RAW file buffer `blob` (mmio), NOT the
     # [u8] image.file_bytes channel — freestanding native-build stores [u8] as boxed
     # RuntimeValues so byte_utils reads stride-1 garbage (phoff=16). Guard that the
@@ -307,7 +316,7 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, file_len: u64, stre
         return -1
     serial_println("[spawn] user AS ready (private low) root={space.phys_root}")
 
-    if _map_pt_loads(space, blob, file_len, stream_file) == 0:
+    if _map_pt_loads(space, blob, hdr_len, file_len, use_stream) == 0:
         serial_println("[spawn] FAIL segment mapping")
         return -2
 
@@ -383,10 +392,17 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, file_len: u64, stre
     serial_println("[spawn] ring3 program exited rc={exit_rc} (kernel resumed)")
     exit_rc
 
-pub fn x86_64_fs_exec_enter_stream_ring3(binary_path: text, header_blob: u64, file_len: u64, argv: [text], envp: [text]) -> i64:
-    """Stream an opened filesystem ELF into a fresh user address space."""
-    serial_println("[spawn] stream path={binary_path} file_len={file_len}")
-    _x86_64_fs_exec_enter_ring3(binary_path, header_blob, file_len, true, argv, envp)
+pub fn x86_64_fs_exec_enter_stream_ring3(binary_path: text, header_blob: u64, hdr_len: u64, file_len: u64, argv: [text], envp: [text]) -> i64:
+    """Stream an opened filesystem ELF into a fresh user address space.
+
+    `header_blob` must hold at least `hdr_len` RESIDENT bytes covering the ELF
+    header + full phdr table; PT_LOAD segment bytes are streamed straight from
+    the opened file (caller must have called simpleos_fat32_stream_open) into
+    freshly allocated pmm frames — the whole file is never buffered, so
+    `file_len` is not capped by the 4 MiB path-read buffer.
+    """
+    serial_println("[spawn] stream path={binary_path} hdr_len={hdr_len} file_len={file_len}")
+    _x86_64_fs_exec_enter_ring3(binary_path, header_blob, hdr_len, file_len, true, argv, envp)
 
 pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64, argv: [text], envp: [text]) -> i64:
     """Map a general-built UserProcessImage into a fresh user AS and enter ring 3."""
@@ -397,4 +413,4 @@ pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64, argv
     val builder_top = user_process_image_stack_top(image)
     val stk_bytes = user_process_image_initial_stack_bytes(image)
     serial_println("[spawn] image path={image.binary_path} entry=0x{img_entry} segments={seg_count} builder_top=0x{builder_top} builder_sp=0x{builder_sp} stk_bytes={stk_bytes.len()} file_len={fb.len()}")
-    _x86_64_fs_exec_enter_ring3(image.binary_path, blob, fb.len().to_u64(), false, argv, envp)
+    _x86_64_fs_exec_enter_ring3(image.binary_path, blob, fb.len().to_u64(), fb.len().to_u64(), false, argv, envp)
