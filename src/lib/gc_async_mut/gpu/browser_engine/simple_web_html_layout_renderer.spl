@@ -34,6 +34,54 @@ use common.ui.draw_ir.{
 use common.render_scene.scene.{SceneCommand, scene_fill_rect}
 
 # ---------------------------------------------------------------------------
+# Render budget + CSS quotas (hostile-page hardening)
+# ---------------------------------------------------------------------------
+# A hostile or pathological page (a huge <style>, thousands of rules matching a
+# single node, a giant DOM) can drive the O(rules) cascade or the O(nodes) paint
+# loops for minutes. These guards degrade GRACEFULLY: on wall-clock budget expiry
+# the current phase stops at a loop boundary and whatever has been resolved or
+# painted so far is returned (never a panic, never an empty buffer — the
+# framebuffer is always allocated at width*height before paint). CSS quotas
+# silently drop over-limit rules/declarations so the first, load-bearing rules
+# still win.
+extern fn rt_time_now_unix_micros() -> i64
+
+# Default wall-clock budget for one software render, in milliseconds.
+val WEB_RENDER_BUDGET_MS: i64 = 10000
+# Cap on the number of style rules the cascade will apply per node; rules beyond
+# this index (CSS source order) are skipped so the first rules keep their effect.
+val WEB_STYLE_RULE_QUOTA: i32 = 4096
+# Cap on declarations processed for a single rule; a rule with more is skipped.
+val WEB_RULE_DECL_QUOTA: i32 = 256
+
+# Per-render mutable state (reset at the start of every public render entry).
+var _web_render_deadline_us: i64 = 0
+var _web_render_degraded: bool = false
+
+# True iff the most recent render tripped its wall-clock budget (a phase stopped
+# early). Quota drops do NOT set this — they are silent by design.
+pub fn simple_web_layout_last_render_degraded() -> bool:
+    _web_render_degraded
+
+# Arm the budget for a fresh render: record the deadline and clear the flag.
+fn _web_budget_begin(budget_ms: i64):
+    val ms = if budget_ms <= 0: WEB_RENDER_BUDGET_MS else: budget_ms
+    _web_render_deadline_us = rt_time_now_unix_micros() + ms * 1000
+    _web_render_degraded = false
+
+# True once the wall-clock deadline has passed; latches the degraded flag so
+# callers can report the render as degraded. A deadline of 0 means "not armed"
+# (guards are inert), so any code path that never called _web_budget_begin runs
+# unbounded exactly as before.
+fn _web_budget_expired() -> bool:
+    if _web_render_deadline_us <= 0:
+        return false
+    if rt_time_now_unix_micros() > _web_render_deadline_us:
+        _web_render_degraded = true
+        return true
+    false
+
+# ---------------------------------------------------------------------------
 # Flat node arena
 # ---------------------------------------------------------------------------
 
@@ -630,6 +678,7 @@ pub fn simple_web_layout_debug_attr_by_id(html: text, id: text, attr: text) -> t
     ""
 
 pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) -> text:
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
     val nodes = parse_html(html)
     val rules = extract_css(html)
     val child_index = build_child_index(nodes)
@@ -711,6 +760,7 @@ pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) ->
     ""
 
 pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32, id: text, field: text) -> text:
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
     val nodes = parse_html(html)
     val rules = extract_css_vw(html, width)
     val child_index = build_child_index(nodes)
@@ -1913,8 +1963,30 @@ fn parse_box_shadow_agg(value: text) -> BoxShadowAgg:
     val combined = 255 - inv
     BoxShadowAgg(found: true, x: avg_ox, y: avg_oy, blur: if avg_blur < 0: 0 else: avg_blur, alpha: if combined > 255: 255 else: combined, color: avg_color)
 
+# True if a declaration block carries more than WEB_RULE_DECL_QUOTA declarations.
+# Early-exits once the cap is crossed, so ordinary small rules pay only a short
+# semicolon scan. (A `;` inside a data: URI value slightly overcounts — harmless
+# for a coarse abuse threshold.)
+fn _decl_over_quota(decls: text) -> bool:
+    var count = 1
+    var pos = 0
+    val n = decls.len()
+    while pos < n:
+        val semi = find_from(decls, ";", pos)
+        if semi < 0:
+            break
+        count = count + 1
+        if count > WEB_RULE_DECL_QUOTA:
+            return true
+        pos = semi + 1
+    false
+
 fn apply_decls(st: Style, decls: text) -> Style:
     if decls.len() == 0:
+        return st
+    # Per-rule declaration quota: a rule carrying more than the cap is dropped
+    # wholesale (graceful — the cascade continues with the remaining rules).
+    if _decl_over_quota(decls):
         return st
     var bg_v = st.bg
     var background_gradient_from_v = st.background_gradient_from
@@ -5323,6 +5395,10 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> 
     var styles: [Style] = [renderer_default_style(); node_count]
     var i = 0
     while i < node_count:
+        # Budget guard (outer): stop resolving further nodes on expiry; nodes not
+        # yet reached keep their renderer_default_style() so the array stays valid.
+        if _web_budget_expired():
+            break
         val nd = nodes[i]
         var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: renderer_default_style()
         st = tag_defaults(st, nd.tag)
@@ -5332,7 +5408,17 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> 
         var candidate_i = 0
         val candidate_count = candidates.len()
         while candidate_i < candidate_count:
+            # Budget guard (inner): this is the apply_decls call site loop where a
+            # single node can match thousands of rules (the hostile case). Sample
+            # the clock so the legit large-theme path pays no per-rule clock cost.
+            if (candidate_i & 255) == 0 and _web_budget_expired():
+                break
             val r = candidates[candidate_i]
+            # Rule quota: rules past the cap (CSS source order) are dropped so the
+            # first, load-bearing rules keep winning without unbounded cascade work.
+            if r >= WEB_STYLE_RULE_QUOTA:
+                candidate_i = candidate_i + 1
+                continue
             if selector_matches_node_group_parts(nodes, selector_ctx, i, rules.group_parts[r]):
                 val empty_cells_decl = decl_get(rules.decls[r], "empty-cells")
                 if empty_cells_decl.trim().lower() == "hide":
@@ -7123,6 +7209,13 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
     out_by[i] = y
     val st = styles[i]
     val node = nodes[i]
+    # Budget guard: short-circuit layout of not-yet-processed subtrees on expiry.
+    # Emit a zero-size box for this node and return a valid LayoutResult so the
+    # recursion unwinds cleanly while already-computed boxes stay intact.
+    if _web_budget_expired():
+        out_bw[i] = 0
+        out_bh[i] = 0
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, 0)
     val legacy_widget_box = node.has_widget_class or node.has_icon_image_class
     if st.display == "none":
         out_bw[i] = 0
@@ -8114,6 +8207,10 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     var i = 0
     var has_absolute_node = false
     while i < node_count:
+        # Budget guard: stop painting backgrounds on expiry; the framebuffer keeps
+        # whatever was painted so far (already sized width*height).
+        if _web_budget_expired():
+            break
         val nd = nodes[i]
         val st = styles[i]
         if st.position_absolute:
@@ -8329,6 +8426,9 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     # text on top
     i = 0
     while i < node_count:
+        # Budget guard: stop drawing text on expiry; painted pixels are kept.
+        if _web_budget_expired():
+            break
         val nd = nodes[i]
         val st = styles[i]
         val x = bx[i]
@@ -8645,7 +8745,31 @@ fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, 
         i = i + 1
     commands
 
+# CSS canvas background propagation: the viewport (canvas) background comes from
+# the root <html> element's computed background-color, or from <body> if the root
+# has none, and covers the ENTIRE viewport regardless of the body's content
+# height. Returns `fallback` (white) when neither carries a background. The result
+# is forced opaque so the whole framebuffer clears to a solid color.
+fn _web_canvas_background(nodes: [HNode], styles: [Style], fallback: u32) -> u32:
+    val n = nodes.len()
+    var html_bg = 0u32
+    var body_bg = 0u32
+    var i = 0
+    while i < n:
+        val nd = nodes[i]
+        if nd.tag == "html" and html_bg == 0u32:
+            html_bg = styles[i].bg
+        else if nd.tag == "body" and body_bg == 0u32:
+            body_bg = styles[i].bg
+        i = i + 1
+    if html_bg != 0u32:
+        return html_bg | 0xFF000000u32
+    if body_bg != 0u32:
+        return body_bg | 0xFF000000u32
+    fallback
+
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
     val nodes = parse_html(html)
     val rules = extract_css_vw(html, width)
     val child_index = build_child_index(nodes)
@@ -8675,11 +8799,10 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
     val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, _html_draw_ir_commands(nodes, styles, boxes, width, height), source)
     draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [batch])
 
-extern fn rt_time_now_unix_micros() -> i64
-
 # Stage-timed variant of the software render entry: prints per-stage wall
 # times so render-cost regressions can be localized without a debugger.
-pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i32, height: i32) -> [u32]:
+pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
+    _web_budget_begin(budget_ms)
     val t0 = rt_time_now_unix_micros()
     val nodes = parse_html(html)
     val t1 = rt_time_now_unix_micros()
@@ -8706,7 +8829,7 @@ pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i
         trace_i = trace_i + 1
     val white = argb(255, 255, 255)
     val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
-    val base = if widget_mode: argb(245, 245, 245) else: white
+    val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
     var fb = browser_layout_framebuffer_filled(base, width, height)
     val t_init = rt_time_now_unix_micros()
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
@@ -8716,7 +8839,8 @@ pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i
     print "[layout-trace] framebuffer_init_ms={(t_init - t4) / 1000} trace_setup_ms={(t_paint - t_init) / 1000} paint_draw_ms={(t5 - t_paint) / 1000} paint_ms={(t5 - t4) / 1000} widget_mode={widget_mode}"
     painted
 
-pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32) -> [u32]:
+pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
+    _web_budget_begin(budget_ms)
     val nodes = parse_html(html)
     val rules = extract_css_vw(html, width)
     val child_index = build_child_index(nodes)
@@ -8743,7 +8867,7 @@ pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, hei
     )
     val white = argb(255, 255, 255)
     val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
-    val base = if widget_mode: argb(245, 245, 245) else: white
+    val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
     var fb = browser_layout_framebuffer_filled(base, width, height)
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
     val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
@@ -8849,7 +8973,8 @@ fn _web_gpu_simulate_fill_ops(fill_ops: [SceneCommand], width: i32, height: i32,
         oi = oi + 1
     out
 
-pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i32) -> WebGpuPaintFrame:
+pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> WebGpuPaintFrame:
+    _web_budget_begin(budget_ms)
     val nodes = parse_html(html)
     val rules = extract_css_vw(html, width)
     val child_index = build_child_index(nodes)
@@ -8876,7 +9001,7 @@ pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i
     )
     val white = argb(255, 255, 255)
     val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
-    val base = if widget_mode: argb(245, 245, 245) else: white
+    val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
     val fill_ops = _web_gpu_solid_fill_ops(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height, widget_mode)
     if _web_gpu_solid_only_frame(nodes, styles, widget_mode):
         val gpu_fb = _web_gpu_simulate_fill_ops(fill_ops, width, height, base)
@@ -8889,7 +9014,8 @@ pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i
 # Render at a scroll offset: lay out with the full scroll extent, then shift
 # paint coordinates into the viewport so allocation stays bounded by WxH.
 # This re-render approach keeps each call stateless.
-pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width: i32, height: i32, scroll_y: i32) -> [u32]:
+pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width: i32, height: i32, scroll_y: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
+    _web_budget_begin(budget_ms)
     if width <= 0 or height <= 0:
         return []
     val clamp_scroll = if scroll_y < 0: 0 else: scroll_y
@@ -8920,7 +9046,7 @@ pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width
     )
     val white = argb(255, 255, 255)
     val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
-    val base = if widget_mode: argb(245, 245, 245) else: white
+    val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
     var fb = browser_layout_framebuffer_filled(base, width, height)
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
     val shifted_by = shifted_i32_list(boxes.by, 0 - clamp_scroll)
