@@ -520,16 +520,16 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
 
 /// Spawn a child that transparently inherits the current process stdio.
 #[no_mangle]
-pub unsafe extern "C" fn rt_process_spawn_inherit(cmd_ptr: *const u8, cmd_len: u64) -> i64 {
+pub extern "C" fn rt_process_spawn_inherit() -> i64 {
     use std::process::{Command, Stdio};
-    if cmd_ptr.is_null() {
-        return -1;
-    }
-    let cmd_bytes = std::slice::from_raw_parts(cmd_ptr, cmd_len as usize);
-    let cmd_str = match std::str::from_utf8(cmd_bytes) {
-        Ok(s) => s,
-        Err(_) => return -1,
+    let cmd_str = if cfg!(windows) { "bin/simple_mcp_server.cmd" } else { "./bin/simple_mcp_server" };
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = Command::new("cmd.exe");
+        command.args(["/c", cmd_str]);
+        command
     };
+    #[cfg(not(windows))]
     let mut command = Command::new(cmd_str);
     clear_simple_child_stack_env(&mut command);
     command.stdin(Stdio::inherit());
