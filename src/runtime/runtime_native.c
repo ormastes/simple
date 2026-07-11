@@ -2758,9 +2758,34 @@ SplArray* rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     return result;
 }
 
-char* rt_file_read_bytes(const char* path) {
-    /* Reads file into a buffer; for native linking, returns raw bytes as char* */
-    return spl_file_read(path);
+int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
+    char* path = (char*)malloc((size_t)path_len + 1);
+    if (!path) return 0;
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = '\0';
+
+    FILE* f = fopen(path, "rb");
+    free(path);
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return 0;
+    }
+    long file_len = ftell(f);
+    if (file_len < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return 0;
+    }
+
+    SplArray* result = rt_byte_array_new_len((uint64_t)file_len);
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (!array || (file_len > 0 && fread(array->data, 1, (size_t)file_len, f) != (size_t)file_len)) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    return (int64_t)(uintptr_t)result;
 }
 
 int64_t rt_file_read_all_text(int64_t path_tagged) {
@@ -2776,9 +2801,14 @@ int64_t rt_file_read_all_text(int64_t path_tagged) {
 }
 
 
-int rt_file_write_bytes(const char* path, const void* data, int64_t len) {
-    if (!path || !data) return 0;
+int rt_file_write_bytes(const uint8_t* path_ptr, uint64_t path_len, const uint8_t* data, uint64_t len) {
+    if (!path_ptr || (!data && len != 0) || path_len > SIZE_MAX - 1) return 0;
+    char* path = (char*)malloc((size_t)path_len + 1);
+    if (!path) return 0;
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = '\0';
     FILE* f = fopen(path, "wb");
+    free(path);
     if (!f) return 0;
     size_t written = fwrite(data, 1, (size_t)len, f);
     fclose(f);
