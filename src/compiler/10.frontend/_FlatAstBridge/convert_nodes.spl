@@ -1001,14 +1001,24 @@ fn convert_decl_extern_fn(idx: i64) -> Function:
         ))
         pi = pi + 1
 
+    # decl_get_ret_type returns a type tag (>0 when a `-> T` return type was
+    # declared). This was previously fetched into `ret` and then discarded --
+    # every extern function was constructed with has_return_type=false and an
+    # Infer return type, silently dropping the declared return type. Downstream,
+    # the symbol's Function type then carried a Unit return (module_lowering),
+    # so MIR lowered any extern call in value position as void (dest=None),
+    # emitting `call void @f()` plus an orphaned `bitcast void %l to T` that
+    # llc rejects ("void type only allowed for function results"). Mirror the
+    # convert_decl_fn fix: thread the real return type through. (#146)
     val ret = decl_get_ret_type(idx)
     val extern_params: [Param] = params
-    val extern_inferred_ret = Type(kind: TypeKind.Infer, span: span)
+    val extern_has_ret = ret > 0
+    val extern_inferred_ret = if extern_has_ret: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span)
     parser_function_new(
         name,
         [],
         extern_params,
-        false,
+        extern_has_ret,
         extern_inferred_ret,
         Block(stmts: [], span: span),
         Visibility.Private,
