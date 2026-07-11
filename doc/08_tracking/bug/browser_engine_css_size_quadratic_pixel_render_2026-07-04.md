@@ -324,3 +324,84 @@ pure-Simple scan.
   so it pegs a core after the first paint. Caching the parsed `Rules` keyed on
   the CSS content hash (allowed: parse artifact, NOT final pixels) makes
   frames 2..N instant. High-value follow-up for live smoothness.
+
+## Greenwash fast path REMOVED (2026-07-11)
+
+The hard-coded spec-widget-id fast path is **gone**. Removed from
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl`:
+the `_toolbar_modal_grid_pixels()` helper (formerly ~:777-798, painted 18
+fixed rectangles) and its dispatch branch
+`if html.contains("simple-web-engine2d-toolbar-modal-grid"): return
+_toolbar_modal_grid_pixels(...)` (formerly ~:812-813). A repo-wide grep found
+**no production caller injects that marker** (office `gui.spl`/`gui_apps.spl`
+and the `ui.browser` chain never emit it) — the entire blast radius was two
+`simple_web_engine2d_renderer_spec.spl` files.
+
+**Correction to the 2026-07-04 audit note above:** the greenwash consumer was
+NOT `browser_backend_pixel_paths_spec` (a prior session already de-greenwashed
+that spec — it now drives generic `BrowserBackend` widget trees, no marker).
+The branch had been repurposed and its only exact-pixel assertion lived in
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl`
+(the "renders the …toolbar-modal-grid exact fixture marker" `it`, asserting
+the 18 hard-coded rectangle colors — a pure tautology against production). That
+`it` is now rewritten to the honest **"ignores the …toolbar-modal-grid marker
+class (no scene-name special-casing)"** form (marked HTML == plain HTML),
+matching the six sibling marker-ignored assertions already in that file. The
+real pixel path is exercised honestly by that file's existing class-selector
+box oracles (`.box` at 40x24 → exact sampled `#22c55e` block color, `#ffffff`
+background corner, count == 20*12) plus a new **zero-size viewport → empty
+buffer (len == 0)** contract scenario.
+
+The stale non-canonical dup
+`test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl`
+(pre-reorg path, not collected by the `test/01_unit/` runner) still asserts the
+old hard-coded pixels for several markers production no longer special-cases —
+it was already red at HEAD and remains dead; left untouched.
+
+**The CSS-size ~quadratic render cost is NOT addressed by this change** — the
+real interpreted path is still the slow path documented above; only the
+false-green fast path was removed. (Verification note: the `test/01_unit`
+specs above passed cleanly earlier in the 2026-07-11 session — renderer_spec
+15/15 in ~5.9s, facade real-path oracle 2/2 in ~6.7s — but the machine later
+went to load-avg ~18 under concurrent agent sessions and the shared test
+daemon began hitting its 120s wall timeout on even trivial specs; the timeouts
+are infra contention, not the render path. A peer stage-4 deploy sweep also
+reverted this change once on 2026-07-11 before commit; it was re-applied —
+reviewer: verify `grep -c _toolbar_modal_grid_pixels` is 0 at commit time.)
+
+## Budget + CSS quota guards landed (2026-07-11) — does NOT close this bug
+
+Graceful hostile-page hardening added to
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+so a pathological page degrades instead of hanging (the `compute_styles`
+superlinearity above is still OPEN — this only bounds worst-case wall time, it
+does not make the cascade faster):
+
+- **Wall-clock render budget** (default `WEB_RENDER_BUDGET_MS = 10000`,
+  overridable via a new optional `budget_ms` param on the four render entries).
+  Armed via `_web_budget_begin()` at the start of every public entry; deadline
+  0 = inert. Checked at loop boundaries and, on expiry, the phase STOPS
+  gracefully (never panics, always returns a full width*height framebuffer):
+  `compute_styles` outer node loop + inner `apply_decls` candidate loop
+  (sampled every 256 candidates); `layout()` top (short-circuits un-laid
+  subtrees to zero-size boxes); `paint()` background + text loops.
+  New accessor `simple_web_layout_last_render_degraded() -> bool` reports
+  whether the budget tripped (quota drops do NOT set it — silent by design).
+- **CSS quotas** (`WEB_STYLE_RULE_QUOTA = 4096`, `WEB_RULE_DECL_QUOTA = 256`):
+  cascade skips rules past the source-order cap so first rules keep winning;
+  `_decl_over_quota()` drops any single rule carrying >256 declarations.
+
+Spec: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_engine_budget_hardening_spec.spl`
+(4/4 green via `bin/simple test --no-session-daemon`, ~12s; neighbor
+`simple_web_renderer_spec` 81/81 and `browser_renderer_smoke_spec` 4/4 —
+no regression). NOTE: the shared test daemon still hits its 120s wall on the
+seed binary; verification here used `--no-session-daemon` direct execution.
+This change was ALSO clobbered by the same peer stage-4 sweep on 2026-07-11
+and re-applied — reviewer: verify `grep -c WEB_RENDER_BUDGET_MS` > 0 at
+commit time.
+
+Also fixed in the same diff: **canvas background propagation** — the root
+`html`/`body` computed background-color now clears the ENTIRE viewport
+(`_web_canvas_background()`), matching Chrome. Fixture (320x240,
+body `#204060` + 170px of content): pixel (160,200) was `0xFFFFFFFF` (white),
+now `0xFF204060`.
