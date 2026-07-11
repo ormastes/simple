@@ -74,3 +74,34 @@ The deployed stage-4 binary links the OLD runtime archive; the dict fix reaches
 simple-driver / -p simple-native-all --features llvm`) + stage-4 rebuild + redeploy.
 After redeploy, re-test: `bin/simple native-build …` (SymbolTable wall), native
 `check` exit-3, and whether test/check delegation can begin to retire.
+
+## 15:09 redeploy attempt: dict fix NECESSARY but NOT SUFFICIENT — rolled back
+
+A stage-4 binary built from source with all fixes (dict growth, Host triple,
+`__simple_main`, parse normalizations, StringBuilder dedup) deployed at 15:09 and
+FAILED the matrix:
+
+- `run` / `-c`: exit 0 but ALL print output lost (1 byte written) — a worse
+  regression than the 11:02 binary (which delegates run to the seed sibling).
+- `check` (native, delegation retired in that build): still silent exit 3.
+- `--version`, `test` (seed-delegated by design): pass.
+
+Rolled back to the 11:02 binary (scratchpad simple.jul11.bak → bin/release);
+restore verified (run prints, check green, cli_parser spec passes). The
+check/lint delegation retirement (5d64ffc2) was surgically reverted on top of
+origin (preserving peer commit 8a47830799's cli_ops changes) — retire again only
+after a deployed binary passes the native-path matrix.
+
+Conclusion: beyond RuntimeDict, the compiled full CLI has at least one more
+in-process correctness wall (print/output path loses writes; check crashes
+pre-output). The morning redeploy-gate failures (val-scalar,
+struct-copy-isolation, class-in-array-mutation, cfg-arch-dispatch-b) remain the
+best breadcrumbs — same class: compiled-code semantics diverging from
+interpreted. Next probe: build a tiny compiled binary via the SAME stage-4
+pipeline that only prints, then bisect print loss (rt_print* linkage vs lowering).
+
+Build walls cleared to get this far (all landed):
+1. self-hosted parser dedent-continuation (4 sites normalized + bug filed
+   `self_hosted_parser_dedent_continuation_2026-07-11.md`);
+2. duplicate module `common.string_builder` from src/app+src/lib source roots
+   (peer twin deleted, 4 imports retargeted to the lib canonical).
