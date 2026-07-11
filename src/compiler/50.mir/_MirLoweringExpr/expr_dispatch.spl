@@ -330,6 +330,23 @@ impl MirLowering:
                             if variant_name == field_name:
                                 return self.lower_enum_construct_named(enum_name, field_name, [])
                     val base_local = self.lower_expr(base)
+                    # `.len`/`.length` on a native string must route to
+                    # rt_strlen, not emit_get_field: the string is a raw char*
+                    # and a struct get_field reads its first data byte (or
+                    # nil-derefs). This mirrors the identical routing in the
+                    # main `case Field` arm below -- this disc-guarded
+                    # pre-dispatch returns before that arm is reached.
+                    if (field_name == "len" or field_name == "length") and self.local_is_str(base_local):
+                        val strlen_func = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_strlen"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                        ))
+                        var b_sl = self.builder
+                        val sl_res = b_sl.emit_call(strlen_func, [mir_operand_copy(base_local)], MirType.i64())
+                        self.builder = b_sl
+                        if val sl_local = sl_res:
+                            return sl_local
+                        return base_local
                     val bitfield_result = self.try_lower_bitfield_get(base, base_local, field_name)
                     if val bitfield_local = bitfield_result:
                         return bitfield_local
@@ -624,6 +641,32 @@ impl MirLowering:
                     case _:
                         val left_local = self.lower_expr(left)
                         val right_local = self.lower_expr(right)
+                        # String `+` is CONCATENATION, not arithmetic. On the
+                        # native path a string is a raw char*, so `a + b` must
+                        # call rt_strcat (raw char* concat, same representation as
+                        # lower_string_interpolation). The generic emit_binop(Add)
+                        # below would integer-ADD the two char* pointers, yielding
+                        # a garbage pointer that SIGSEGVs on any deref (`print(c)`,
+                        # `c.len`). Detect string operands by their MIR local type
+                        # (Opaque str) because HIR `.type_` is nil on this path;
+                        # any non-string arithmetic keeps the generic binop.
+                        var bin_is_str_concat = false
+                        match op:
+                            case Add:
+                                if self.local_is_str(left_local) or self.local_is_str(right_local):
+                                    bin_is_str_concat = true
+                            case _:
+                                ()
+                        if bin_is_str_concat:
+                            val cat_func = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("rt_strcat"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                            ))
+                            var b_cat = self.builder
+                            val cat_res = b_cat.emit_call(cat_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType(kind: MirTypeKind.Opaque("str")))
+                            self.builder = b_cat
+                            if val cat_local = cat_res:
+                                return cat_local
                         val mir_op = self.lower_binop(op)
                         val result_type = self.infer_binop_type(op)
                         var b = self.builder
@@ -893,8 +936,6 @@ impl MirLowering:
                 # raw-char* length accessor. Keyed off the MIR local type
                 # (Opaque str) because HIR `.type_` is nil on this path; user
                 # structs with a real `len` field and arrays are unaffected.
-                if field_name == "len" or field_name == "length":
-                    print "[TRACE-LEN2] field={field_name} base_ty={self.dbg_local_type(base_local)}"
                 if (field_name == "len" or field_name == "length") and self.local_is_str(base_local):
                     val fa_func = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_strlen"),
