@@ -1,7 +1,10 @@
 # Unicode Font System — Design Document
 
 **Date:** 2026-04-07
-**Status:** Implemented (Phase 1)
+**Status:** Legacy Phase-1 baseline; superseded for font selection/rendering by
+[`shared_multilingual_gpu_fonts.md`](../../shared_multilingual_gpu_fonts.md)
+and the selected requirements in
+`doc/02_requirements/feature/shared_multilingual_gpu_fonts.md`.
 
 ## Overview
 
@@ -45,18 +48,25 @@ decode([i64], Encoding) -> text     # bytes -> text
 transcode([i64], from, to) -> [i64] # bytes -> bytes (via codepoints)
 ```
 
-### Font Organization — 10 Languages
+### Legacy Font Organization
+
+This table describes the old registry, not the selected top-ten oracle. It used
+Korean to reach ten languages and covered only four font kinds. The replacement
+derives `en, zh, es, hi, ar, fr, pt, ru, ur, id` from pinned CLDR 48.2 and uses a
+ten-category sparse matrix. Indonesian is Latin-script; Urdu shares the Arabic
+fallback; Bengali is rank 11 and remains extra coverage.
 
 | # | Script Group | Languages | Sans | Serif | Mono | stb_truetype? |
 |---|---|---|---|---|---|---|
 | 1 | Latin+Cyrillic | EN, ES, FR, PT, RU | Noto Sans | Noto Serif | JetBrains Mono | YES |
 | 2 | CJK-SC | Chinese | Noto Sans SC | Noto Serif SC | — | YES |
-| 3 | Hangul | Korean | Noto Sans KR | Noto Serif KR | D2Coding | YES |
+| 3 | Hangul | Korean (legacy, outside selected CLDR-derived set) | Noto Sans KR | Noto Serif KR | D2Coding | YES |
 | 4 | Devanagari | Hindi | Noto Sans Devanagari | Noto Serif Devanagari | — | NO* |
 | 5 | Arabic | Arabic | Noto Sans Arabic | Noto Naskh Arabic | — | NO* |
 | 6 | Bengali | Bengali | Noto Sans Bengali | Noto Serif Bengali | — | NO* |
 
-\* Requires HarfBuzz for complex text shaping (Tier 2, future)
+\* The selected implementation hardens the existing Pure Simple shaper/BiDi
+path; this document's older HarfBuzz-only statement is no longer authoritative.
 
 ### OS Text Rendering (glass_render.c)
 
@@ -71,13 +81,18 @@ transcode([i64], from, to) -> [i64] # bytes -> bytes (via codepoints)
 ### Tiered Implementation
 
 - **Tier 1 (done):** UTF-8 decoding, encoding module, font registry, OS placeholder rendering
-- **Tier 2 (future):** stb_truetype.h integration for actual TTF glyph rasterization
-- **Tier 3 (future):** HarfBuzz for Hindi/Arabic/Bengali complex shaping
+- **Current owner:** canonical `FontRenderer` with the existing `spl_fonts`
+  TrueType path and bounded cache.
+- **Selected extension:** shared `FontRenderBatch` material, portable Simple GPU
+  atlas-composition emission, and common 2D/3D consumption.
 
 ## Key Decisions
 
 1. **UTF-8 as default** — matches Rust internal representation, O(1) length
 2. **Noto font family** — consistent design across all scripts, OFL licensed
-3. **Placeholder boxes** — non-ASCII chars show hex codepoint until TTF fonts loaded
-4. **No HarfBuzz yet** — 7/10 languages work with simple glyph lookup
-5. **Font files not embedded** — download script fetches from GitHub releases
+3. **Fail closed** — missing/unsupported faces retain explicit fallback or
+   unavailable state; no category/coverage claim is inferred from a filename.
+4. **Pure Simple shaping selected** — complex-script conformance is executable
+   work, not delegated to an undeclared HarfBuzz dependency.
+5. **Pinned unchanged assets selected** — every imported binary requires exact
+   upstream commit, checksum, license/RFN metadata, tables, size, and coverage.

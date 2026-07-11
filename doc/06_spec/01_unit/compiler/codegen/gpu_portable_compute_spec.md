@@ -27,7 +27,7 @@ gpu_portable_compute_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 27 | 27 | 0 | 0 |
+| 30 | 30 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -744,6 +744,26 @@ expect(unsupported.diagnostic).to_contain("unsupported generated 2D operation fa
 
 </details>
 
+### Font companion artifact addendum
+
+> Manually synchronized on 2026-07-12 because executable Simple/docgen attempts
+> were already exhausted for this session. These scenarios are statically
+> reviewed but not execution evidence.
+
+The executable spec now also:
+
+- emits the exact `simple_font_atlas_composite_v1_u32` entry for CUDA, HIP,
+  OpenCL, Metal, and source-only WGSL;
+- makes each selected backend plan an ordered optimization/font pair with
+  distinct `_font_atlas` artifact paths (two targets produce four artifacts and
+  four plans);
+- rejects missing and suffixed near-miss font entry symbols; and
+- maps only `font_atlas_composite` / `atlas_font_composite` operation aliases to
+  the font entry while retaining CPU preprocessing.
+
+The paired WGSL sources remain separate because their bindings overlap. None of
+these assertions claims toolchain compilation, device submission, or readback.
+
 ## At a Glance
 
 | Field | Value |
@@ -751,8 +771,8 @@ expect(unsupported.diagnostic).to_contain("unsupported generated 2D operation fa
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/codegen/gpu_portable_compute_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-12 (manual static synchronization) |
+| Generator | `simple spipe-docgen` baseline; manual addendum pending next docgen run |
 
 ## Overview
 
@@ -763,8 +783,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 27 |
-| Active scenarios | 27 |
+| Total scenarios | 30 |
+| Active scenarios | 30 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

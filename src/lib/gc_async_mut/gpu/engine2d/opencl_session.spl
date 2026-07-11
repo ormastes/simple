@@ -12,8 +12,11 @@ use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
 }
 use std.gc_async_mut.gpu.engine2d.session_support.{gpu_session_launch_gate_status, gpu_session_readback_status}
 use std.gc_async_mut.gpu.engine2d.sffi_opencl.{OpenClFfi}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY}
 
 extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+
+val OPENCL_FONT_COORD_LIMIT: i64 = 2147483647
 
 fn opencl_session_host_read_i64(addr: i64, offset: i64) -> i64:
     rt_ptr_read_i64(addr, offset)
@@ -328,6 +331,75 @@ class OpenClSession:
 
     me launch_blit_nonzero_u32(dst: i64, src: i64, x: i64, y: i64, w: i64, h: i64, surface_width: i64, surface_height: i64) -> i64:
         self._launch_blit_u32("simple_2d_blit_nonzero_u32", dst, src, x, y, w, h, surface_width, surface_height)
+
+    me launch_blit_alpha_u32(dst: i64, src: i64, x: i64, y: i64, w: i64, h: i64, surface_width: i64, surface_height: i64) -> i64:
+        self._launch_blit_u32("simple_2d_blit_alpha_u32", dst, src, x, y, w, h, surface_width, surface_height)
+
+    me launch_font_atlas_composite_u32(
+        atlas: i64, dst: i64,
+        atlas_width: i64, atlas_height: i64, atlas_count: i64,
+        atlas_x: i64, atlas_y: i64, quad_width: i64, quad_height: i64,
+        dst_width: i64, dst_height: i64, dst_count: i64,
+        dst_x: i64, dst_y: i64, color: i64
+    ) -> i64:
+        if self.ffi == nil or self.queue == 0 or self.program == 0 or atlas == 0 or dst == 0:
+            return 1
+        if atlas_width <= 0 or atlas_height <= 0 or quad_width <= 0 or quad_height <= 0:
+            return 1
+        if dst_width <= 0 or dst_height <= 0 or atlas_x < 0 or atlas_y < 0:
+            return 1
+        if (atlas_width > OPENCL_FONT_COORD_LIMIT or atlas_height > OPENCL_FONT_COORD_LIMIT or
+                quad_width > OPENCL_FONT_COORD_LIMIT or quad_height > OPENCL_FONT_COORD_LIMIT or
+                dst_width > OPENCL_FONT_COORD_LIMIT or dst_height > OPENCL_FONT_COORD_LIMIT):
+            return 1
+        if atlas_count != atlas_width * atlas_height or dst_count != dst_width * dst_height:
+            return 1
+        if atlas_x >= atlas_width or atlas_y >= atlas_height:
+            return 1
+        if quad_width > atlas_width - atlas_x or quad_height > atlas_height - atlas_y:
+            return 1
+        if dst_x < -quad_width or dst_y < -quad_height or dst_x >= dst_width or dst_y >= dst_height:
+            return 1
+        if color < 0 or color > 4294967295:
+            return 1
+        self._cache_kernel(self.ffi.create_kernel(self.program, FONT_ATLAS_COMPOSITE_ENTRY))
+        if self.kernel_cache == 0:
+            return 1
+        if not self.set_kernel_arg_buffer(self.kernel_cache, 0, atlas):
+            return 1
+        if not self.set_kernel_arg_buffer(self.kernel_cache, 1, dst):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 2, atlas_width):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 3, atlas_height):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 4, atlas_count):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 5, atlas_x):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 6, atlas_y):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 7, quad_width):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 8, quad_height):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 9, dst_width):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 10, dst_height):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 11, dst_count):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 12, dst_x):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 13, dst_y):
+            return 1
+        if not self.set_kernel_arg_i64(self.kernel_cache, 14, color):
+            return 1
+        val total = quad_width * quad_height
+        if self.ffi.enqueue_ndrange(self.queue, self.kernel_cache, total, 1, 1, 0, 0, 0):
+            0
+        else:
+            1
 
     me fill_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
         self.launch_generated_2d(GENERATED_2D_FILL, width, height, args_ptr)

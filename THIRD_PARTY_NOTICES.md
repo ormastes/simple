@@ -15,11 +15,20 @@ components that are intended to ship with Simple distributions.
 | stb_image | `src/runtime/stb_image.h` | https://github.com/nothings/stb | MIT |
 | stb_truetype | `src/runtime/stb_truetype.h` | https://github.com/nothings/stb | MIT |
 | liburing subset | `src/runtime/vendor/liburing/` | https://github.com/axboe/liburing | MIT for dual-licensed liburing files; `io_uring.h` keeps its upstream SPDX identifier `(GPL-2.0 WITH Linux-syscall-note) OR MIT` |
+| Google Fonts pinned font set | `assets/fonts/google-fonts/` | https://github.com/google/fonts at `ec0464b978de222073645d6d3366f3fdf03376d8` | Fifteen font files under OFL-1.1; Roboto Slab under Apache-2.0. Each family directory includes its upstream `METADATA.pb` and license; Roboto Slab also includes `COPYRIGHT.txt`. |
+| Unicode CLDR 48.2 ranking inputs | `assets/fonts/cldr/release-48-2/` | https://github.com/unicode-org/cldr tag `release-48-2`, commit `11299982335beb974c1c63c45265184e759c0f41` | Unicode License v3 (`Unicode-3.0`); the adjacent `LICENSE` is bundled unchanged. |
 
 ## Distribution Notes
 
 - Keep this file together with [LICENSE](LICENSE) when redistributing source or packaged builds.
 - Keep the embedded headers and SPDX notices intact in vendored files.
+- Keep every `assets/fonts/google-fonts/**/METADATA.pb`, `OFL.txt`,
+  `LICENSE.txt`, and `COPYRIGHT.txt` beside its unchanged font binary. The
+  pinned set is 16 files / 51,764,704 font bytes. `Source` and
+  `UnifrakturCook` are upstream Reserved Font Names; Simple ships unchanged
+  bytes and must not reuse those names for modified versions.
+- Keep `assets/fonts/cldr/release-48-2/LICENSE` with the three pinned
+  supplemental XML inputs and their derived source/ranking manifests.
 - `src/runtime/vendor/liburing/include/liburing/io_uring.h` is carried with its original upstream SPDX identifier because it mirrors kernel interface definitions. The vendored copy remains dual-licensed exactly as marked in the file.
 - Release bundles should exclude development-only caches and downloaded runtimes such as `src/app/vscode_extension/node_modules/`, `src/app/vscode_extension/.vscode-test/`, and `src/compiler_rust/target/`.
 

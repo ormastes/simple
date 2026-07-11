@@ -2,6 +2,39 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Pinned multilingual font catalog** — bundle 16 unchanged Google Fonts
+  binaries plus notices for the CLDR 48.2 top-ten language scripts and ten
+  honest sparse categories, with immutable hashes and license/RFN metadata.
+- **Pinned CLDR ranking inputs** — bundle the three exact CLDR 48.2
+  supplemental inputs, Unicode-3.0 license, annotated-tag/source witnesses, and
+  deterministic top-eleven language/script ledger; correct stale rounded totals.
+- **Unicode cmap format 12** — the Pure Simple OpenType owner validates and
+  resolves full-repertoire Unicode groups with Windows 3/10 precedence,
+  covering bundled Noto Emoji `U+1F600`.
+- **Bound shaped-glyph rendering** — Engine2D can consume neutral material from
+  explicitly face-bound Pure Simple shaped runs through the existing indexed
+  runtime rasterizer, with live face-generation/glyph/size cache identity.
+- **Engine3D neutral glyph runs** — CPU HUD/world compatibility entrypoints now
+  consume the same generation-safe `FontGlyphRun`/atlas material as Engine2D.
+- **Shared font atlas material** — `FontRenderer.prepare_text` owns a bounded
+  persistent glyph atlas consumed by Engine2D and Engine3D CPU compatibility
+  paths; the compiler emits one versioned CUDA/HIP/OpenCL/Metal/WGSL subrect
+  compositor without claiming native execution. OpenCL compiler emission and
+  Engine2D runtime compilation reuse the same common Simple source owner.
+- **Engine2D font selection** — GUI/2D callers can switch between the zero-config bitmap font and a loaded TTF/OTF through `load_font`/`unload_font`; foreground and background text share the selected face.
+- **GPU font composition** — OpenCL now binds and submits the shared versioned
+  atlas-composite kernel through `Engine2D.draw_text`, with a persistent
+  generation-keyed atlas and suffix fallback; other backends retain their
+  existing rendered-payload routes.
+
+### Fixed
+- **Font/docgen bootstrap hardening** — filter the SPipe docgen entrypoint from
+  spec inputs and register interpreter byte-array pointers for runtime font
+  loading; a full self-hosted rebuild remains unverified.
+
 ## [1.0.0-beta] - 2026-05-20
 
 ### Added

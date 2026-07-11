@@ -1,6 +1,7 @@
 use std.nogc_sync_mut.sffi.spl_fonts.{GlyphBitmap}
 use std.nogc_sync_mut.text_layout.font_types.{CachedGlyph}
 use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_width}
+use std.nogc_sync_mut.io.font_sffi.{font_face_is_live}
 use std.io_runtime.{env_get}
 
 # Font Rasterizer — glyph rasterization backends and blit helpers.
@@ -31,6 +32,9 @@ fn _sffi_glyph_to_cached(gb: GlyphBitmap, codepoint: i32, font_size: i32) -> Cac
 
     CachedGlyph(
         codepoint: codepoint,
+        face_id: 0,
+        face_generation: 0,
+        glyph_index: -1,
         font_size: font_size,
         width: w,
         height: h,
@@ -45,11 +49,13 @@ fn _sffi_glyph_to_cached(gb: GlyphBitmap, codepoint: i32, font_size: i32) -> Cac
 # ============================================================================
 
 extern fn rt_font_glyph_bitmap(font_handle: i64, codepoint: i64, size: f64) -> i64
+extern fn rt_font_glyph_bitmap_index(font_handle: i64, glyph_index: i64, size: f64) -> i64
 extern fn rt_font_bitmap_width(bitmap_handle: i64) -> i64
 extern fn rt_font_bitmap_height(bitmap_handle: i64) -> i64
 extern fn rt_font_bitmap_get_pixel(bitmap_handle: i64, x: i64, y: i64) -> i64
 extern fn rt_font_bitmap_free(bitmap_handle: i64)
 extern fn rt_font_glyph_advance(font_handle: i64, codepoint: i64, size: f64) -> i64
+extern fn rt_font_glyph_advance_index(font_handle: i64, glyph_index: i64, size: f64) -> i64
 
 fn rasterize_ttf(font_handle: i64, codepoint: i32, font_size: i32) -> CachedGlyph:
     val bmp = rt_font_glyph_bitmap(font_handle, codepoint.to_i64(), font_size.to_f64())
@@ -74,6 +80,9 @@ fn rasterize_ttf(font_handle: i64, codepoint: i32, font_size: i32) -> CachedGlyp
 
     CachedGlyph(
         codepoint: codepoint,
+        face_id: font_handle,
+        face_generation: 0,
+        glyph_index: -1,
         font_size: font_size,
         width: w,
         height: h,
@@ -81,6 +90,31 @@ fn rasterize_ttf(font_handle: i64, codepoint: i32, font_size: i32) -> CachedGlyp
         bearing_x: 0,
         bearing_y: 0,
         pixels: pixels
+    )
+
+fn rasterize_ttf_index(font_handle: i64, face_generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
+    if not font_face_is_live(font_handle, face_generation) or glyph_index < 0 or font_size <= 0:
+        return CachedGlyph(codepoint: -1, face_id: font_handle, face_generation: face_generation, glyph_index: glyph_index, font_size: font_size, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
+    val bmp = rt_font_glyph_bitmap_index(font_handle, glyph_index.to_i64(), font_size.to_f64())
+    if bmp == 0:
+        return CachedGlyph(codepoint: -1, face_id: font_handle, face_generation: face_generation, glyph_index: glyph_index, font_size: font_size, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
+    val w = rt_font_bitmap_width(bmp).to_i32()
+    val h = rt_font_bitmap_height(bmp).to_i32()
+    val advance = rt_font_glyph_advance_index(font_handle, glyph_index.to_i64(), font_size.to_f64()).to_i32()
+    var pixels: [u8] = []
+    var row = 0
+    while row < h:
+        var col = 0
+        while col < w:
+            pixels.push(rt_font_bitmap_get_pixel(bmp, col.to_i64(), row.to_i64()).to_i32().to_u8())
+            col = col + 1
+        row = row + 1
+    rt_font_bitmap_free(bmp)
+    CachedGlyph(
+        codepoint: -1, face_id: font_handle, face_generation: face_generation, glyph_index: glyph_index,
+        font_size: font_size, width: w, height: h,
+        advance: if advance > 0: advance else: w + 1,
+        bearing_x: 0, bearing_y: 0, pixels: pixels
     )
 
 # ============================================================================
@@ -223,6 +257,9 @@ fn _try_vector_font_glyph_slot(prefix: text, slot: text, codepoint: i32, font_si
         return nil
     CachedGlyph(
         codepoint: codepoint,
+        face_id: 0,
+        face_generation: 0,
+        glyph_index: -1,
         font_size: font_size,
         width: width,
         height: height,
@@ -436,6 +473,9 @@ fn rasterize_vector(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
 
     CachedGlyph(
         codepoint: codepoint,
+        face_id: 0,
+        face_generation: 0,
+        glyph_index: -1,
         font_size: font_size,
         width: pixel_w,
         height: pixel_h,
@@ -507,6 +547,9 @@ fn rasterize_bitmap(codepoint: i32, font_size: i32) -> CachedGlyph:
     if glyph_data.len() < 16:
         return CachedGlyph(
             codepoint: codepoint,
+            face_id: 0,
+            face_generation: 0,
+            glyph_index: -1,
             font_size: font_size,
             width: out_w,
             height: out_h,
@@ -534,6 +577,9 @@ fn rasterize_bitmap(codepoint: i32, font_size: i32) -> CachedGlyph:
 
     CachedGlyph(
         codepoint: codepoint,
+        face_id: 0,
+        face_generation: 0,
+        glyph_index: -1,
         font_size: font_size,
         width: out_w,
         height: out_h,
@@ -613,6 +659,9 @@ fn _try_bitmap_font_glyph_slot(prefix: text, slot: text, codepoint: i32, font_si
         return nil
     CachedGlyph(
         codepoint: codepoint,
+        face_id: 0,
+        face_generation: 0,
+        glyph_index: -1,
         font_size: font_size,
         width: width,
         height: height,

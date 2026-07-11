@@ -401,8 +401,31 @@ The compute path shares the same resource pool and bind group system as the rend
 
 ---
 
+## Shared Multilingual Text Status
+
+The selected font design uses the canonical `FontRenderer` and one
+`FontRenderBatch` for both engines. Current source prepares stable per-glyph
+quads over one bounded persistent white-alpha atlas. Engine3D now exposes
+`load_font`, `unload_font`, `draw_text_hud`, and `draw_text_world`; HUD consumes
+the shared batch through the CPU image path, while world text projects through
+the stored view/projection matrices before using that fallback. These methods
+are compatibility behavior, not native GPU evidence.
+
+The native blocker is end-to-end graphics evidence: atlas texture creation and
+upload, texture/sampler/pipeline binding, HUD or world transform and depth
+behavior, draw submission, completed fence, and device-origin readback compared
+with the CPU oracle. Existing CPU delegation, compute dispatch, emitted source,
+or texture upload alone does not establish Engine3D GPU font rendering. Do not
+document a promoted native backend until those source and test gates pass.
+
+See [Shared Multilingual GPU Fonts](../shared_multilingual_gpu_fonts.md) for the
+selected languages, ten-category candidate catalog, and evidence contract.
+
+---
+
 ## See Also
 
+- [Shared Multilingual GPU Fonts](../shared_multilingual_gpu_fonts.md) — shared material and current 2D/3D status
 - [WebGPU Integration Guide](../api/webgpu_guide.md) — WebGPU backend and browser context
 - [GPU Compute API](../api/gpu_api.md) — underlying GPU compute and 3D engine API reference
 - [std.gpu.engine3d source](../../../src/lib/gc_async_mut/gpu/engine3d/) — source files

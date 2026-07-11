@@ -4,6 +4,8 @@
 # emitted as CUDA, HIP, OpenCL C, or Metal Shading Language without duplicating
 # each kernel body in backend-specific modules.
 
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_composite_opencl_source}
+
 enum PortableComputeTarget:
     Cuda
     Hip
@@ -172,6 +174,7 @@ class PortableComputeOperationMetadata:
             return PortableComputeOperationMetadata.unavailable(tag_kind, backend_order, portable_compute_target_name(target), operation_family, "unsupported-operation-family", "unsupported generated 2D operation family: {operation_family}")
         val target_name = portable_compute_target_name(target)
         val binary = portable_compute_binary_format(target)
+        val artifact_stem = if generated == FONT_ATLAS_COMPOSITE_ENTRY: "{output_stem}_font_atlas" else: output_stem
         PortableComputeOperationMetadata(
             tag_kind: tag_kind,
             backend_order: backend_order,
@@ -181,7 +184,7 @@ class PortableComputeOperationMetadata:
             entry_symbol: generated,
             source_format: portable_compute_source_format(target),
             binary_format: binary,
-            artifact_path_suffix: "{output_stem}.{binary}",
+            artifact_path_suffix: "{artifact_stem}.{binary}",
             cpu_preprocess_required: portable_compute_operation_needs_cpu_preprocess(operation_family),
             ready: true,
             status: "metadata-ready",
@@ -545,6 +548,8 @@ fn portable_compute_required_symbols_reason(required_symbols: text, exported_sym
         return "missing-entry-symbol:simple_2d_scroll_u32"
     if required_symbols.contains("simple_2d_bitmap_glyph_raster_u32") and not exported_symbols.contains("simple_2d_bitmap_glyph_raster_u32"):
         return "missing-entry-symbol:simple_2d_bitmap_glyph_raster_u32"
+    if required_symbols.contains(FONT_ATLAS_COMPOSITE_ENTRY) and not portable_compute_exported_symbol_present(exported_symbols, FONT_ATLAS_COMPOSITE_ENTRY):
+        return "missing-entry-symbol:{FONT_ATLAS_COMPOSITE_ENTRY}"
     if required_symbols.contains("simple_2d_clear_screen_u32") and not exported_symbols.contains("simple_2d_clear_screen_u32"):
         return "missing-entry-symbol:simple_2d_clear_screen_u32"
     if required_symbols.contains("simple_2d_set_pixel_u32") and not exported_symbols.contains("simple_2d_set_pixel_u32"):
@@ -614,6 +619,19 @@ fn portable_compute_toolchain_command_line(plan: PortableComputeCompilePlan, sou
     if plan.target == PortableComputeTarget.Metal:
         return "{primary_tool_path} -c {source_path} -o {output_path}.air && {secondary_tool_path} {output_path}.air -o {output_path}"
     ""
+
+fn portable_compute_exported_symbol_present(exported_symbols: text, symbol: text) -> bool:
+    var normalized = exported_symbols
+    normalized = normalized.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    normalized = normalized.replace("\"", " ").replace("'", " ")
+    normalized = normalized.replace("(", " ").replace(")", " ")
+    normalized = normalized.replace("[", " ").replace("]", " ")
+    normalized = normalized.replace("{", " ").replace("}", " ")
+    normalized = normalized.replace(",", " ").replace(";", " ").replace(":", " ")
+    for token in normalized.split(" "):
+        if token.trim() == symbol:
+            return true
+    false
 
 fn portable_compute_toolchain_invocation(plan: PortableComputeCompilePlan, source_path: text, output_path: text, primary_tool_path: text, secondary_tool_path: text) -> PortableComputeToolchainInvocation:
     PortableComputeToolchainInvocation.create(plan, source_path, output_path, primary_tool_path, secondary_tool_path)
@@ -713,6 +731,39 @@ fn emit_portable_2d_bitmap_glyph_raster_u32_kernel(target: PortableComputeTarget
         binary_format: portable_compute_binary_format(target)
     )
 
+fn emit_portable_font_atlas_composite_kernel(target: PortableComputeTarget) -> PortableComputeArtifact:
+    val name = FONT_ATLAS_COMPOSITE_ENTRY
+    if target == PortableComputeTarget.OpenCl:
+        return PortableComputeArtifact(
+            target: target,
+            entry_name: name,
+            source: font_atlas_composite_opencl_source(),
+            binary_format: portable_compute_binary_format(target)
+        )
+    if target == PortableComputeTarget.Metal:
+        return PortableComputeArtifact(
+            target: target,
+            entry_name: name,
+            source: "#include <metal_stdlib>\nusing namespace metal;\n\nstruct FontAtlasCompositeParams {\n    uint atlas_width;\n    uint atlas_height;\n    uint atlas_count;\n    uint atlas_x;\n    uint atlas_y;\n    uint quad_width;\n    uint quad_height;\n    uint dst_width;\n    uint dst_height;\n    uint dst_count;\n    int dst_x;\n    int dst_y;\n    uint color;\n};\n\nkernel void {name}(\n    device const uint* atlas [[buffer(0)]],\n    device uint* dst [[buffer(1)]],\n    constant FontAtlasCompositeParams& p [[buffer(2)]],\n    uint i [[thread_position_in_grid]]) {\n    if (i >= p.quad_width * p.quad_height) { return; }\n    uint sx = p.atlas_x + i % p.quad_width;\n    uint sy = p.atlas_y + i / p.quad_width;\n    if (sx >= p.atlas_width || sy >= p.atlas_height) { return; }\n    uint si = sy * p.atlas_width + sx;\n    if (si >= p.atlas_count) { return; }\n    int dx = int(i % p.quad_width) + p.dst_x;\n    int dy = int(i / p.quad_width) + p.dst_y;\n    if (dx < 0 || dy < 0 || dx >= int(p.dst_width) || dy >= int(p.dst_height)) { return; }\n    uint di = uint(dy) * p.dst_width + uint(dx);\n    if (di >= p.dst_count) { return; }\n    uint mask_a = atlas[si] >> 24u;\n    uint sa = (mask_a * (p.color >> 24u) + 127u) / 255u;\n    if (sa == 0u) { return; }\n    uint d = dst[di];\n    uint da = d >> 24u;\n    uint inv = 255u - sa;\n    uint out_a = sa + (da * inv) / 255u;\n    uint out_r = (((p.color >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * inv) / 255u;\n    uint out_g = (((p.color >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * inv) / 255u;\n    uint out_b = ((p.color & 255u) * sa + (d & 255u) * inv) / 255u;\n    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n}\n",
+            binary_format: portable_compute_binary_format(target)
+        )
+    if target == PortableComputeTarget.WebGpu:
+        return PortableComputeArtifact(
+            target: target,
+            entry_name: name,
+            source: "@group(0) @binding(0) var<storage, read> atlas: array<u32>;\n@group(0) @binding(1) var<storage, read_write> dst: array<u32>;\n@group(0) @binding(2) var<storage, read> params: array<i32>;\n\n@compute @workgroup_size(64)\nfn {name}(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    if (arrayLength(&params) < 11u) { return; }\n    let atlas_width = u32(params[0]);\n    let atlas_height = u32(params[1]);\n    let atlas_x = u32(params[2]);\n    let atlas_y = u32(params[3]);\n    let quad_width = u32(params[4]);\n    let quad_height = u32(params[5]);\n    let dst_width = u32(params[6]);\n    let dst_height = u32(params[7]);\n    let color = bitcast<u32>(params[10]);\n    let i = global_id.x;\n    if (i >= quad_width * quad_height) { return; }\n    let sx = atlas_x + i % quad_width;\n    let sy = atlas_y + i / quad_width;\n    if (sx >= atlas_width || sy >= atlas_height) { return; }\n    let si = sy * atlas_width + sx;\n    if (si >= arrayLength(&atlas)) { return; }\n    let dx = i32(i % quad_width) + params[8];\n    let dy = i32(i / quad_width) + params[9];\n    if (dx < 0 || dy < 0 || dx >= i32(dst_width) || dy >= i32(dst_height)) { return; }\n    let di = u32(dy) * dst_width + u32(dx);\n    if (di >= arrayLength(&dst)) { return; }\n    let mask_a = atlas[si] >> 24u;\n    let sa = (mask_a * (color >> 24u) + 127u) / 255u;\n    if (sa == 0u) { return; }\n    let d = dst[di];\n    let da = d >> 24u;\n    let inv = 255u - sa;\n    let out_a = sa + (da * inv) / 255u;\n    let out_r = (((color >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * inv) / 255u;\n    let out_g = (((color >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * inv) / 255u;\n    let out_b = ((color & 255u) * sa + (d & 255u) * inv) / 255u;\n    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n}\n",
+            binary_format: portable_compute_binary_format(target)
+        )
+    val ty = portable_compute_u32_type(target)
+    val atlas = portable_compute_const_ptr(target, ty, "atlas", 0)
+    val dst = portable_compute_global_ptr_at(target, ty, "dst", 1)
+    val params = "{atlas}, {dst}, {ty} atlas_width, {ty} atlas_height, {ty} atlas_count, {ty} atlas_x, {ty} atlas_y, {ty} quad_width, {ty} quad_height, {ty} dst_width, {ty} dst_height, {ty} dst_count, int dst_x, int dst_y, {ty} color"
+    val prefix = portable_compute_kernel_prefix(target, name, params)
+    val idx = portable_compute_index_expr(target)
+    val cast_prefix = if target == PortableComputeTarget.OpenCl: "(int)(" else: "int("
+    val source = "{prefix} {\n    {ty} i = {idx};\n    if (i >= quad_width * quad_height) { return; }\n    {ty} sx = atlas_x + i % quad_width;\n    {ty} sy = atlas_y + i / quad_width;\n    if (sx >= atlas_width || sy >= atlas_height) { return; }\n    {ty} si = sy * atlas_width + sx;\n    if (si >= atlas_count) { return; }\n    int dx = {cast_prefix}i % quad_width) + dst_x;\n    int dy = {cast_prefix}i / quad_width) + dst_y;\n    if (dx < 0 || dy < 0 || dx >= {cast_prefix}dst_width) || dy >= {cast_prefix}dst_height)) { return; }\n    {ty} di = ({ty})dy * dst_width + ({ty})dx;\n    if (di >= dst_count) { return; }\n    {ty} mask_a = atlas[si] >> 24u;\n    {ty} sa = (mask_a * (color >> 24u) + 127u) / 255u;\n    if (sa == 0u) { return; }\n    {ty} d = dst[di];\n    {ty} da = d >> 24u;\n    {ty} inv = 255u - sa;\n    {ty} out_a = sa + (da * inv) / 255u;\n    {ty} out_r = (((color >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * inv) / 255u;\n    {ty} out_g = (((color >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * inv) / 255u;\n    {ty} out_b = ((color & 255u) * sa + (d & 255u) * inv) / 255u;\n    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n}\n"
+    PortableComputeArtifact(target: target, entry_name: name, source: source, binary_format: portable_compute_binary_format(target))
+
 fn emit_portable_2d_optimization_kernels(target: PortableComputeTarget) -> [PortableComputeArtifact]:
     [
         emit_portable_2d_fill_u32_kernel(target),
@@ -735,6 +786,8 @@ fn portable_compute_2d_required_symbols_for_target(target: PortableComputeTarget
 
 fn portable_compute_operation_generated_name(operation_family: text) -> text:
     val clean = operation_family.trim().lower()
+    if clean == "font_atlas_composite" or clean == "atlas_font_composite":
+        return FONT_ATLAS_COMPOSITE_ENTRY
     if clean == "bitmap_glyph_raster" or clean == "bitmap_font_raster" or clean == "gpu_bitmap_glyph" or clean == "glyph_bitmap_raster":
         return "simple_2d_bitmap_glyph_raster_u32"
     if clean == "vector" or clean == "rect" or clean == "rect_filled" or clean == "fill":
@@ -751,7 +804,7 @@ fn portable_compute_operation_needs_cpu_preprocess(operation_family: text) -> bo
     val clean = operation_family.trim().lower()
     if clean == "bitmap_glyph_raster" or clean == "bitmap_font_raster" or clean == "gpu_bitmap_glyph" or clean == "glyph_bitmap_raster":
         return false
-    clean == "font" or clean == "text" or clean == "text_blit"
+    clean == "font" or clean == "text" or clean == "text_blit" or clean == "font_atlas_composite" or clean == "atlas_font_composite"
 
 fn emit_webgpu_2d_optimization_module() -> PortableComputeArtifact:
     PortableComputeArtifact(
@@ -827,6 +880,12 @@ fn portable_compute_2d_optimization_compile_plan(target: PortableComputeTarget, 
         portable_compute_2d_required_symbols_for_target(target)
     )
 
+fn portable_compute_font_atlas_compile_plan(target: PortableComputeTarget, output_stem: text) -> PortableComputeCompilePlan:
+    portable_compute_compile_plan(
+        emit_portable_font_atlas_composite_kernel(target),
+        "{output_stem}_font_atlas"
+    )
+
 fn portable_compute_2d_optimization_backend_plan(backend_order: text, output_stem: text) -> PortableComputeBackendArtifactPlan:
     val request = portable_compute_backend_targets_from_order(backend_order)
     var artifacts: [PortableComputeArtifact] = []
@@ -834,6 +893,8 @@ fn portable_compute_2d_optimization_backend_plan(backend_order: text, output_ste
     for target in request.targets:
         artifacts.push(emit_portable_2d_optimization_module(target))
         plans.push(portable_compute_2d_optimization_compile_plan(target, output_stem))
+        artifacts.push(emit_portable_font_atlas_composite_kernel(target))
+        plans.push(portable_compute_font_atlas_compile_plan(target, output_stem))
     PortableComputeBackendArtifactPlan(
         request: request,
         artifacts: artifacts,

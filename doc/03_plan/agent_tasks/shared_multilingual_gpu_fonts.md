@@ -1,0 +1,69 @@
+<!-- codex-design -->
+# Shared Multilingual GPU Fonts Agent Tasks
+
+## Coordination contract
+
+Primary interfaces are frozen before sidecar work:
+
+- Owner: `FontRenderer`.
+- Values: `FontRenderQuad`, `FontRenderBatch`.
+- Material call: `FontRenderer.prepare_text(content, color, font_size)`.
+- Emitter: `emit_portable_font_atlas_composite_kernel(target)`.
+- Engine3D adapters: `draw_text_hud`, `draw_text_world`.
+- Manual steps and setup/checkers are those in the system-test plan.
+- Temporary helpers must call `assert(false)` or `fail(...)`.
+
+No lane may add `SharedFontRenderer`, `GpuFontEmitter`, another atlas/cache,
+raw `rt_*` shortcuts, a new dependency, or a fake device-success path.
+
+## Work lanes
+
+| Lane | Owner/scope | Writable area | Completion evidence |
+|---|---|---|---|
+| A — manifests/assets | implementation agent; Spark-style sidecar may audit metadata read-only | generated manifests, font assets, `common/encoding/font_registry.spl`, notices | REQ-001–005 and NFR-001/003 manifest scenarios |
+| B — shared material | implementation agent; small sidecar may review shaping fixtures | canonical text-layout types/renderer/rasterizer and existing shaper/BiDi | REQ-006–009 shared-surface scenarios and cache counters |
+| C — emission | implementation agent; Spark-style sidecar may inspect target markers read-only | existing compiler portable-compute/generated-artifact files | REQ-010 deterministic emission/compile scenarios |
+| D — 2D/3D native | implementation agent; small sidecar may audit evidence completeness read-only | existing Engine2D/Engine3D adapters and backend facade only | REQ-011–013 plus NFR-002/004–008 native evidence |
+| E — specs/manuals/docs | test/doc owner; small sidecar may review generated-manual readability | four planned SSpecs/manuals, affected guides, SPipe recipe | REQ-014, zero stubs, freshness audits |
+| F — final verification | primary/best available reviewer only | verification report; fixes returned to owning lane | requirement-by-requirement PASS/WARN/FAIL |
+
+Sidecars do not accept broad findings, exclusions, generated-manual quality, or
+done marks. The primary normal/highest-capability reviewer decides those after
+checking source and executable evidence.
+
+## Dependency order
+
+1. Lane A lands deterministic inputs and validation before binaries are usable.
+2. Lane B lands the shared batch and CPU oracle.
+3. Lane C may proceed beside B after the batch field contract is frozen.
+4. Lane D begins only after B/C contracts compile; Engine2D precedes Engine3D
+   promotion so the CPU/material oracle is stable.
+5. Lane E writes specs with each owner and generates manuals after executable
+   behavior exists.
+6. Lane F runs each acceptance gate once. At most three verify/fix cycles are
+   allowed; repeated green checks are not rerun.
+
+## Merge ownership and review
+
+- **Merge owner:** primary Codex agent for the active font worktree.
+- **Final reviewer:** best available normal/highest-capability model, independent
+  of Spark/small-model drafts.
+- **Generated-manual reviewer:** same final reviewer, reading the manual as a
+  user/operator document.
+- Preserve unrelated dirty files and report them separately; each lane hands off
+  only its owned paths.
+
+## Handoff gates
+
+- A: exact upstream revisions/hashes/licenses and honest sparse cells.
+- B: one canonical owner/batch, selected-script shaping, bounded cache, CPU
+  oracle, no partial unsupported-format rendering.
+- C: deterministic source/SPIR-V artifacts and compile evidence without native
+  claims.
+- D: one real graphics backend with texture/bind/draw/fence/device-readback proof
+  for both 2D and 3D, plus selected performance/resource evidence.
+- E: four native SSpecs, four mirrored zero-stub manuals, updated guides/notices,
+  and no executable spec under `doc/06_spec`.
+- F: all REQ-001–014 and NFR-001–008 traced to authoritative current evidence;
+  direct-env runtime guards pass and verification reports `STATUS: PASS`.
+

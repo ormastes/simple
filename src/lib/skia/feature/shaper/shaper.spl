@@ -7,9 +7,13 @@ use std.skia.feature.shaper.script_detect.{Script, script_of, script_is_rtl}
 use std.skia.feature.shaper.feature_tags.{OpenTypeFeature}
 use std.skia.feature.shaper.font_fallback.{FallbackChain, fallback_chain_font_for_script, fallback_chain_font_for_run}
 use std.skia.feature.glyph.ot_parser.{OtFont}
-use std.skia.feature.glyph.ot_parser_cmap.{CmapFormat4, parse_cmap_format4, cmap_lookup}
+use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
 use std.skia.feature.glyph.ot_parser_metrics.{HorizontalMetrics, parse_hmtx}
 use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup, parse_gsub_skeleton, parse_gpos_skeleton, parse_gdef_glyph_class}
+use std.nogc_sync_mut.text_layout.font_types.{FontGlyphRun}
+use std.nogc_sync_mut.io.font_sffi.{font_face_current_generation, font_face_is_live}
+
+extern fn rt_font_glyph_index(font_handle: i64, codepoint: i64) -> i64
 
 # ===== Arabic joining form =====
 
@@ -282,7 +286,12 @@ fn classify_mongolian_char(codepoint: i64) -> MongolianClass:
 
 class ShapedGlyph:
     glyph_id: u32
+    source_index: i64
+    cluster: i64
     x_advance: f64
+    y_advance: f64
+    x_offset: f64
+    y_offset: f64
     join_form: ArabicJoinForm
     indic_class: IndicClass
 
@@ -290,11 +299,24 @@ class ShapedGlyph:
 
 class ShapedRun:
     script: Script
+    language: text
     glyph_ids: [u32]
     positions: [SkPoint]
     font_handle: i64
+    font_generation: i64
+    glyph_indices_valid: bool
+    substitution_complete: bool
+    positioning_complete: bool
     is_rtl: bool
     glyphs: [ShapedGlyph]
+
+fn _shaped_glyph(glyph_id: u32, source_index: i64, cluster: i64, x_advance: f64,
+                 join_form: ArabicJoinForm, indic_class: IndicClass) -> ShapedGlyph:
+    ShapedGlyph(
+        glyph_id: glyph_id, source_index: source_index, cluster: cluster,
+        x_advance: x_advance, y_advance: 0.0, x_offset: 0.0, y_offset: 0.0,
+        join_form: join_form, indic_class: indic_class
+    )
 
 # ===== Shaper =====
 
@@ -302,15 +324,20 @@ class Shaper:
     fallback: FallbackChain
     features_enabled: [OpenTypeFeature]
     ot_font: Option<OtFont>
+    ot_font_handle: i64
+    ot_font_generation: i64
 
 fn shaper_new(fallback: FallbackChain) -> Shaper:
-    Shaper(fallback: fallback, features_enabled: [], ot_font: None)
+    Shaper(fallback: fallback, features_enabled: [], ot_font: None, ot_font_handle: 0, ot_font_generation: 0)
 
 fn shaper_with_features(shaper: Shaper, features: [OpenTypeFeature]) -> Shaper:
-    Shaper(fallback: shaper.fallback, features_enabled: features, ot_font: shaper.ot_font)
+    Shaper(fallback: shaper.fallback, features_enabled: features, ot_font: shaper.ot_font, ot_font_handle: shaper.ot_font_handle, ot_font_generation: shaper.ot_font_generation)
 
 fn shaper_with_ot_font(shaper: Shaper, font: OtFont) -> Shaper:
-    Shaper(fallback: shaper.fallback, features_enabled: shaper.features_enabled, ot_font: Some(font))
+    Shaper(fallback: shaper.fallback, features_enabled: shaper.features_enabled, ot_font: Some(font), ot_font_handle: 0, ot_font_generation: 0)
+
+fn shaper_with_ot_face(shaper: Shaper, font_handle: i64, font: OtFont) -> Shaper:
+    Shaper(fallback: shaper.fallback, features_enabled: shaper.features_enabled, ot_font: Some(font), ot_font_handle: font_handle, ot_font_generation: font_face_current_generation(font_handle))
 
 fn ascii_to_codepoints(s: text) -> [u32]:
     val n = s.len()
@@ -351,16 +378,8 @@ fn _gpos_advance(ot_font: Option<OtFont>, glyph_id: u32, font_size: f64) -> f64:
 
 # ===== cmap: resolve codepoint to glyph id =====
 fn _cmap_glyph_id_from_font(ot_font: OtFont, cp: u32) -> u32:
-    val maybe_cmap = parse_cmap_format4(ot_font)
-    match maybe_cmap:
-        case Some(cmap):
-            val gid = cmap_lookup(cmap, cp)
-            if gid == 0:
-                cp
-            else:
-                gid
-        case None:
-            cp
+    val glyph = cmap_glyph_id(ot_font, cp)
+    if glyph == 0: cp else: glyph
 
 fn _cmap_glyph_id(ot_font: Option<OtFont>, cp: u32) -> u32:
     match ot_font:
@@ -368,6 +387,13 @@ fn _cmap_glyph_id(ot_font: Option<OtFont>, cp: u32) -> u32:
             _cmap_glyph_id_from_font(font, cp)
         case None:
             cp
+
+fn _cmap_has_mapping(ot_font: Option<OtFont>, cp: u32) -> bool:
+    match ot_font:
+        case Some(font):
+            cmap_glyph_id(font, cp) > 0
+        case None:
+            false
 
 # ===== get GSUB lookups from OT font =====
 fn _get_gsub_lookups(ot_font: Option<OtFont>) -> [GsubLookup]:
@@ -378,9 +404,8 @@ fn _get_gsub_lookups(ot_font: Option<OtFont>) -> [GsubLookup]:
             []
 
 # ===== Arabic glyph id with joining form encoding =====
-fn _arabic_glyph_id(raw_gid: u32, cp: u32, form_offset: u32, gsub_lookups: [GsubLookup]) -> u32:
-    # If raw_gid == cp, cmap had no mapping — encode form offset into cp
-    if raw_gid == cp:
+fn _arabic_glyph_id(raw_gid: u32, cp: u32, form_offset: u32, cmap_mapped: bool, gsub_lookups: [GsubLookup]) -> u32:
+    if not cmap_mapped:
         cp + form_offset
     else:
         _gsub_apply(gsub_lookups, raw_gid)
@@ -395,7 +420,7 @@ fn _shape_latin_run(codepoints: [u32], start: i64, end_idx: i64, ot_font: Option
         val raw_gid = _cmap_glyph_id(ot_font, cp)
         val gid = _gsub_apply(gsub_lookups, raw_gid)
         val advance = _gpos_advance(ot_font, gid, font_size)
-        val sg = ShapedGlyph(glyph_id: gid, x_advance: advance, join_form: ArabicJoinForm.Isolated, indic_class: IndicClass.Normal)
+        val sg = _shaped_glyph(gid, idx, idx, advance, ArabicJoinForm.Isolated, IndicClass.Normal)
         result.push(sg)
         idx = idx + 1
     result
@@ -408,9 +433,9 @@ fn _shape_arabic_run(codepoints: [u32], start: i64, end_idx: i64, ot_font: Optio
         val form = arabic_join_form(codepoints, idx)
         val form_offset = arabic_form_offset(form)
         val raw_gid = _cmap_glyph_id(ot_font, cp)
-        val gid = _arabic_glyph_id(raw_gid: raw_gid, cp: cp, form_offset: form_offset, gsub_lookups: gsub_lookups)
+        val gid = _arabic_glyph_id(raw_gid: raw_gid, cp: cp, form_offset: form_offset, cmap_mapped: _cmap_has_mapping(ot_font, cp), gsub_lookups: gsub_lookups)
         val advance = _gpos_advance(ot_font, raw_gid, font_size)
-        val sg = ShapedGlyph(glyph_id: gid, x_advance: advance, join_form: form, indic_class: IndicClass.Normal)
+        val sg = _shaped_glyph(gid, idx, idx, advance, form, IndicClass.Normal)
         result.push(sg)
         idx = idx + 1
     # RTL: reverse glyph order
@@ -433,30 +458,15 @@ fn _shape_devanagari_run(codepoints: [u32], start: i64, end_idx: i64, ot_font: O
             val base_gid_raw = _cmap_glyph_id(ot_font, base_cp)
             val base_gid = _gsub_apply(gsub_lookups, base_gid_raw)
             val base_advance = _gpos_advance(ot_font, base_gid, font_size)
-            result.push(ShapedGlyph(
-                glyph_id: base_gid,
-                x_advance: base_advance,
-                join_form: ArabicJoinForm.Isolated,
-                indic_class: IndicClass.Normal
-            ))
+            result.push(_shaped_glyph(base_gid, start + 2, start + 2, base_advance, ArabicJoinForm.Isolated, IndicClass.Normal))
 
             val ra_gid_raw = _cmap_glyph_id(ot_font, cp0)
             val ra_gid = _gsub_apply(gsub_lookups, ra_gid_raw)
-            result.push(ShapedGlyph(
-                glyph_id: ra_gid,
-                x_advance: 0.0,
-                join_form: ArabicJoinForm.Isolated,
-                indic_class: IndicClass.Reph
-            ))
+            result.push(_shaped_glyph(ra_gid, start, start, 0.0, ArabicJoinForm.Isolated, IndicClass.Reph))
 
             val halant_gid_raw = _cmap_glyph_id(ot_font, cp1)
             val halant_gid = _gsub_apply(gsub_lookups, halant_gid_raw)
-            result.push(ShapedGlyph(
-                glyph_id: halant_gid,
-                x_advance: 0.0,
-                join_form: ArabicJoinForm.Isolated,
-                indic_class: IndicClass.Halant
-            ))
+            result.push(_shaped_glyph(halant_gid, start + 1, start + 1, 0.0, ArabicJoinForm.Isolated, IndicClass.Halant))
 
             var idx_after_reph: i64 = start + 3
             while idx_after_reph < end_idx:
@@ -467,12 +477,7 @@ fn _shape_devanagari_run(codepoints: [u32], start: i64, end_idx: i64, ot_font: O
                 var advance = _gpos_advance(ot_font, gid, font_size)
                 if iclass == IndicClass.Matra or iclass == IndicClass.Halant:
                     advance = 0.0
-                result.push(ShapedGlyph(
-                    glyph_id: gid,
-                    x_advance: advance,
-                    join_form: ArabicJoinForm.Isolated,
-                    indic_class: iclass
-                ))
+                result.push(_shaped_glyph(gid, idx_after_reph, idx_after_reph, advance, ArabicJoinForm.Isolated, iclass))
                 idx_after_reph = idx_after_reph + 1
             return result
 
@@ -491,7 +496,7 @@ fn _shape_devanagari_run(codepoints: [u32], start: i64, end_idx: i64, ot_font: O
         # Reph and Halant do not consume x-advance
         if iclass == IndicClass.Reph or iclass == IndicClass.Halant:
             advance = 0.0
-        pre_result.push(ShapedGlyph(glyph_id: gid, x_advance: advance, join_form: ArabicJoinForm.Isolated, indic_class: iclass))
+        pre_result.push(_shaped_glyph(gid, idx, idx, advance, ArabicJoinForm.Isolated, iclass))
         idx = idx + 1
     # Reph pre-base reorder: scan for consecutive Reph+Halant at position i,
     # find the next base consonant after i+1, and splice the pair after it.
@@ -541,7 +546,7 @@ fn _shape_generic_run(codepoints: [u32], start: i64, end_idx: i64, ot_font: Opti
         val raw_gid = _cmap_glyph_id(ot_font, cp)
         val gid = _gsub_apply(gsub_lookups, raw_gid)
         val advance = _gpos_advance(ot_font, gid, font_size)
-        val sg = ShapedGlyph(glyph_id: gid, x_advance: advance, join_form: ArabicJoinForm.Isolated, indic_class: IndicClass.Normal)
+        val sg = _shaped_glyph(gid, idx, idx, advance, ArabicJoinForm.Isolated, IndicClass.Normal)
         result.push(sg)
         idx = idx + 1
     result
@@ -565,7 +570,7 @@ fn _dispatch_shape_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script,
             val raw_gid = _cmap_glyph_id(ot_font, codepoints[tidx])
             val gid = _gsub_apply(gsub_lookups, raw_gid)
             val base_advance = _gpos_advance(ot_font, gid, font_size)
-            val sg_base = ShapedGlyph(glyph_id: gid, x_advance: base_advance, join_form: ArabicJoinForm.Isolated, indic_class: IndicClass.Normal)
+            val sg_base = _shaped_glyph(gid, tidx, tidx, base_advance, ArabicJoinForm.Isolated, IndicClass.Normal)
             result_thai.push(sg_base)
             # Consume any immediately following vowels and tone marks (zero advance)
             var next_t = tidx + 1
@@ -576,7 +581,7 @@ fn _dispatch_shape_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script,
                 if next_class == ThaiClass.Vowel or next_class == ThaiClass.ToneMark:
                     val nr_gid = _cmap_glyph_id(ot_font, codepoints[next_t])
                     val n_gid = _gsub_apply(gsub_lookups, nr_gid)
-                    result_thai.push(ShapedGlyph(glyph_id: n_gid, x_advance: 0.0, join_form: ArabicJoinForm.Isolated, indic_class: IndicClass.Normal))
+                    result_thai.push(_shaped_glyph(n_gid, next_t, tidx, 0.0, ArabicJoinForm.Isolated, IndicClass.Normal))
                     next_t = next_t + 1
                 else:
                     keep_consuming = false
@@ -585,7 +590,24 @@ fn _dispatch_shape_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script,
     else:
         _shape_latin_run(codepoints, start: start, end_idx: end_idx, ot_font: ot_font, gsub_lookups: gsub_lookups, font_size: font_size)
 
-fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, font: SkFont, ot_font: Option<OtFont>, gsub_lookups: [GsubLookup], start_x: f64, start_y: f64) -> ShapedRun:
+fn _run_has_mapped_glyphs(ot_font: Option<OtFont>, font_handle: i64, codepoints: [u32], start: i64, end_idx: i64) -> bool:
+    match ot_font:
+        case Some(font):
+            var i = start
+            while i < end_idx:
+                val mapped = cmap_glyph_id(font, codepoints[i])
+                if mapped == 0 or rt_font_glyph_index(font_handle, codepoints[i].to_i64()) != mapped.to_i64():
+                    return false
+                i = i + 1
+            true
+        case None:
+            false
+
+fn _run_can_render_direct(scr: Script, start: i64, end_idx: i64, total: i64) -> bool:
+    if scr == Script.Emoji: return start == 0 and end_idx == total and total == 1
+    scr == Script.Latin or scr == Script.Cyrillic or scr == Script.CJK
+
+fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, language: text, font: SkFont, ot_font: Option<OtFont>, ot_font_handle: i64, ot_font_generation: i64, gsub_lookups: [GsubLookup], start_x: f64, start_y: f64) -> ShapedRun:
     val rtl = script_is_rtl(scr)
     val shaped_glyphs = _dispatch_shape_run(codepoints, start: start, end_idx: end_idx, scr: scr, ot_font: ot_font, gsub_lookups: gsub_lookups, font_size: font.size)
     var glyph_ids: [u32] = []
@@ -595,34 +617,67 @@ fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, font: Sk
     while gi < shaped_glyphs.len():
         val sg = shaped_glyphs[gi]
         glyph_ids.push(sg.glyph_id)
-        positions.push(SkPoint(x: x_cursor, y: start_y))
+        positions.push(SkPoint(x: x_cursor + sg.x_offset, y: start_y + sg.y_offset))
         x_cursor = x_cursor + sg.x_advance
         gi = gi + 1
-    ShapedRun(script: scr, glyph_ids: glyph_ids, positions: positions, font_handle: font.typeface.font_handle, is_rtl: rtl, glyphs: shaped_glyphs)
+    val handle_matches = (ot_font_handle > 0 and
+        font.typeface.font_handle == ot_font_handle and
+        font.typeface.font_generation == ot_font_generation and
+        font_face_is_live(font.typeface.font_handle, font.typeface.font_generation))
+    var glyph_indices_valid = false
+    if handle_matches and _run_can_render_direct(scr, start, end_idx, codepoints.len()):
+        glyph_indices_valid = _run_has_mapped_glyphs(ot_font, font.typeface.font_handle, codepoints, start: start, end_idx: end_idx)
+    ShapedRun(
+        script: scr, language: language, glyph_ids: glyph_ids, positions: positions,
+        font_handle: font.typeface.font_handle, font_generation: font.typeface.font_generation,
+        glyph_indices_valid: glyph_indices_valid,
+        substitution_complete: false, positioning_complete: false,
+        is_rtl: rtl, glyphs: shaped_glyphs
+    )
 
-fn shaper_shape(shaper: Shaper, codepoints: [u32], font: SkFont, start_x: f64, start_y: f64) -> [ShapedRun]:
+fn shaped_run_to_font_glyph_run(run: ShapedRun) -> FontGlyphRun:
+    var xs: [i32] = []
+    var ys: [i32] = []
+    for position in run.positions:
+        xs.push(position.x.to_i32())
+        ys.push(position.y.to_i32())
+    FontGlyphRun(valid: run.glyph_indices_valid, face_generation: run.font_generation, glyph_ids: run.glyph_ids, xs: xs, ys: ys)
+
+fn _run_advance(run: ShapedRun) -> f64:
+    var advance: f64 = 0.0
+    for glyph in run.glyphs: advance = advance + glyph.x_advance
+    advance
+
+fn shaper_shape_with_language(shaper: Shaper, codepoints: [u32], font: SkFont, start_x: f64, start_y: f64, language: text) -> [ShapedRun]:
     val n = codepoints.len()
     var runs: [ShapedRun] = []
     if n == 0:
         return runs
+    val trimmed_language = language.trim()
+    val run_language = if trimmed_language == "": "und" else: trimmed_language
     val gsub_lookups = _get_gsub_lookups(shaper.ot_font)
     var run_start: i64 = 0
     var run_script = script_of(codepoints[0])
+    var run_x = start_x
     var i: i64 = 1
     while i < n:
         val cp = codepoints[i]
         val s = script_of(cp)
         if s != run_script:
             val run_font = fallback_chain_font_for_run(shaper.fallback, run_script, codepoints, start: run_start, end_idx: i)
-            val run = _build_run(codepoints, start: run_start, end_idx: i, scr: run_script, font: run_font, ot_font: shaper.ot_font, gsub_lookups: gsub_lookups, start_x: start_x, start_y: start_y)
+            val run = _build_run(codepoints, start: run_start, end_idx: i, scr: run_script, language: run_language, font: run_font, ot_font: shaper.ot_font, ot_font_handle: shaper.ot_font_handle, ot_font_generation: shaper.ot_font_generation, gsub_lookups: gsub_lookups, start_x: run_x, start_y: start_y)
             runs.push(run)
+            run_x = run_x + _run_advance(run)
             run_start = i
             run_script = s
         i = i + 1
     val last_font = fallback_chain_font_for_run(shaper.fallback, run_script, codepoints, start: run_start, end_idx: n)
-    val last_run = _build_run(codepoints, start: run_start, end_idx: n, scr: run_script, font: last_font, ot_font: shaper.ot_font, gsub_lookups: gsub_lookups, start_x: start_x, start_y: start_y)
+    val last_run = _build_run(codepoints, start: run_start, end_idx: n, scr: run_script, language: run_language, font: last_font, ot_font: shaper.ot_font, ot_font_handle: shaper.ot_font_handle, ot_font_generation: shaper.ot_font_generation, gsub_lookups: gsub_lookups, start_x: run_x, start_y: start_y)
     runs.push(last_run)
     runs
+
+fn shaper_shape(shaper: Shaper, codepoints: [u32], font: SkFont, start_x: f64, start_y: f64) -> [ShapedRun]:
+    shaper_shape_with_language(shaper, codepoints, font, start_x, start_y, "und")
 
 fn shaped_runs_to_text_blob(runs: [ShapedRun], font: SkFont) -> SkTextBlob:
     var sk_runs: [SkGlyphRun] = []

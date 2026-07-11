@@ -1,0 +1,181 @@
+# Neutral sfnt directory and default-instance TrueType validation.
+
+use std.common.string_core.{char_from_code}
+
+fn read_u16_be(buf: [u8], offset: i64) -> u32:
+    if offset < 0 or offset + 1 >= buf.len(): return 0
+    ((buf[offset] as u32) << 8) | (buf[offset + 1] as u32)
+
+fn read_i16_be(buf: [u8], offset: i64) -> i32:
+    val raw = read_u16_be(buf, offset)
+    if raw >= 32768: (raw as i32) - 65536
+    else: raw as i32
+
+fn read_u32_be(buf: [u8], offset: i64) -> u32:
+    if offset < 0 or offset + 3 >= buf.len(): return 0
+    ((buf[offset] as u32) << 24) | ((buf[offset + 1] as u32) << 16) |
+        ((buf[offset + 2] as u32) << 8) | (buf[offset + 3] as u32)
+
+fn read_fixed_1616(buf: [u8], offset: i64) -> f64:
+    val raw = read_u32_be(buf, offset) as i64
+    val signed = if raw >= 2147483648: raw - 4294967296 else: raw
+    signed as f64 / 65536.0
+
+fn read_f2dot14(buf: [u8], offset: i64) -> f64:
+    read_i16_be(buf, offset) as f64 / 16384.0
+
+class OtTable:
+    tag: u32
+    offset: u32
+    length: u32
+
+class OtFont:
+    blob: [u8]
+    tables: [OtTable]
+
+fn parse_offset_table(blob: [u8]) -> Option<OtFont>:
+    if blob.len() < 12: return None
+    val version = read_u32_be(blob, 0)
+    if (version != 65536 and version != 1330926671 and
+        version != 1953658213 and version != 1954115633): return None
+    val table_count = read_u16_be(blob, 4) as i64
+    if table_count > (blob.len() - 12) / 16: return None
+    val directory_end = 12 + table_count * 16
+    var tables: [OtTable] = []
+    var index: i64 = 0
+    while index < table_count:
+        val record = 12 + index * 16
+        val tag = read_u32_be(blob, record)
+        val offset = read_u32_be(blob, record + 8)
+        val length = read_u32_be(blob, record + 12)
+        val start = offset as i64
+        val size = length as i64
+        if start > blob.len() or size > blob.len() - start: return None
+        if size > 0 and start < directory_end: return None
+        for existing in tables:
+            if existing.tag == tag: return None
+            val existing_start = existing.offset as i64
+            val existing_size = existing.length as i64
+            if (size > 0 and existing_size > 0 and start < existing_start + existing_size and
+                existing_start < start + size): return None
+        tables.push(OtTable(tag: tag, offset: offset, length: length))
+        index = index + 1
+    Some(OtFont(blob: blob, tables: tables))
+
+fn find_table(font: OtFont, tag: u32) -> Option<OtTable>:
+    for table in font.tables:
+        if table.tag == tag: return Some(table)
+    None
+
+class FvarAxis:
+    tag: u32
+    min_value: f64
+    default_value: f64
+    max_value: f64
+
+fn parse_fvar_axes(font: OtFont) -> [FvarAxis]:
+    val maybe_table = find_table(font, 1719034226)
+    val table = match maybe_table:
+        Some(value): value
+        None: return []
+    val base = table.offset as i64
+    val limit = base + table.length as i64
+    val blob = font.blob
+    if (table.length < 16 or read_u16_be(blob, base) != 1 or
+        read_u16_be(blob, base + 2) != 0 or read_u16_be(blob, base + 6) != 2): return []
+    val axes_offset = read_u16_be(blob, base + 4) as i64
+    val axis_count = read_u16_be(blob, base + 8) as i64
+    val axis_size = read_u16_be(blob, base + 10) as i64
+    val instance_count = read_u16_be(blob, base + 12) as i64
+    val instance_size = read_u16_be(blob, base + 14) as i64
+    if axes_offset < 16 or axis_count < 1 or axis_size != 20: return []
+    val axes_base = base + axes_offset
+    if axes_base > limit or axis_count > (limit - axes_base) / axis_size: return []
+    val instances_base = axes_base + axis_count * axis_size
+    val minimum_instance_size = 4 + axis_count * 4
+    if instance_size != minimum_instance_size and instance_size != minimum_instance_size + 2: return []
+    if instances_base > limit or instance_count > (limit - instances_base) / instance_size: return []
+    var axes: [FvarAxis] = []
+    var index: i64 = 0
+    while index < axis_count:
+        val axis_base = axes_base + index * axis_size
+        val tag = read_u32_be(blob, axis_base)
+        val min_value = read_fixed_1616(blob, axis_base + 4)
+        val default_value = read_fixed_1616(blob, axis_base + 8)
+        val max_value = read_fixed_1616(blob, axis_base + 12)
+        if tag == 0 or min_value > default_value or default_value > max_value: return []
+        for axis in axes:
+            if axis.tag == tag: return []
+        axes.push(FvarAxis(tag: tag, min_value: min_value, default_value: default_value, max_value: max_value))
+        index = index + 1
+    axes
+
+class SfntValidation:
+    supported: bool
+    reason: text
+
+fn _sfnt_supported() -> SfntValidation:
+    SfntValidation(supported: true, reason: "supported-default-glyf")
+
+fn _sfnt_unsupported(reason: text) -> SfntValidation:
+    SfntValidation(supported: false, reason: reason)
+
+fn validate_default_glyf_font(blob: [u8]) -> SfntValidation:
+    if read_u32_be(blob, 0) != 65536: return _sfnt_unsupported("unsupported-sfnt-version")
+    val maybe_font = parse_offset_table(blob)
+    val font = match maybe_font:
+        Some(value): value
+        None: return _sfnt_unsupported("invalid-sfnt-directory")
+    val required: [u32] = [1735162214, 1819239265, 1751474532, 1835104368, 1668112752, 1751672161, 1752003704]
+    for tag in required:
+        val maybe_table = find_table(font, tag)
+        match maybe_table:
+            Some(table):
+                if table.length == 0: return _sfnt_unsupported("empty-required-table")
+            None: return _sfnt_unsupported("missing-required-table")
+    val excluded: [u32] = [1128678944, 1128678962, 1129270354, 1129333068, 1398163232, 1128416340, 1128418371, 1161970772, 1161972803, 1161974595, 1935829368]
+    for tag in excluded:
+        if find_table(font, tag) != None: return _sfnt_unsupported("unsupported-sfnt-table")
+    if find_table(font, 1719034226) != None and parse_fvar_axes(font).len() == 0:
+        return _sfnt_unsupported("invalid-fvar-default")
+    _sfnt_supported()
+
+fn font_runtime_ttf_default_supported(blob: [u8]) -> bool:
+    validate_default_glyf_font(blob).supported
+
+fn _sfnt_tag_text(tag: u32) -> text:
+    char_from_code(((tag >> 24) & 255) as i64) +
+        char_from_code(((tag >> 16) & 255) as i64) +
+        char_from_code(((tag >> 8) & 255) as i64) +
+        char_from_code((tag & 255) as i64)
+
+fn _sfnt_names_contain(names: [text], wanted: text) -> bool:
+    for name in names:
+        if name == wanted: return true
+    false
+
+fn sfnt_manifest_tables_match(blob: [u8], manifest: text) -> bool:
+    val maybe_font = parse_offset_table(blob)
+    val font = match maybe_font:
+        Some(value): value
+        None: return false
+    val names = manifest.split(",")
+    if names.len() != font.tables.len(): return false
+    for table in font.tables:
+        if not _sfnt_names_contain(names, _sfnt_tag_text(table.tag)): return false
+    true
+
+fn sfnt_manifest_default_axes_match(blob: [u8], manifest: text) -> bool:
+    val maybe_font = parse_offset_table(blob)
+    val font = match maybe_font:
+        Some(value): value
+        None: return false
+    if find_table(font, 1719034226) == None: return manifest == "static"
+    val axes = parse_fvar_axes(font)
+    val defaults = manifest.split(",")
+    if axes.len() == 0 or defaults.len() != axes.len(): return false
+    for axis in axes:
+        val integer = axis.default_value as i64
+        val value = if integer as f64 == axis.default_value: integer.to_text() else: axis.default_value.to_text()
+        if not _sfnt_names_contain(defaults, _sfnt_tag_text(axis.tag) + "=" + value): return false
+    true

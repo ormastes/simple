@@ -333,9 +333,10 @@ For GUI/web/2D Vulkan comparison, use
 `--browser-backing` for focused direct Electron Chromium backing proof, `--run`
 for direct Electron/Chrome/Simple launch probes, and
 `--renderdoc-simple` for the Simple in-application RenderDoc debug path on a
-prepared Linux or macOS RenderDoc host. Leave `RDOC_SIMPLE_BIN` unset for normal
-runs so the helper builds `src/compiler_rust/target/release/simple` with current
-`rt_renderdoc_*` externs. Use all-lane `--renderdoc` only for cross-surface
+prepared Linux or macOS RenderDoc host. Normal runs use the repo-managed
+self-hosted `bin/simple` selected by the wrapper. If it is unavailable or lacks
+the current RenderDoc externs, report the bootstrap/runtime gap; never substitute
+the Rust seed. Use all-lane `--renderdoc` only for cross-surface
 evidence collection. For Windows setup, read
 `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`: `vulkaninfo --summary`,
 DirectX availability, Chrome installation, and Electron installation are host
@@ -515,19 +516,66 @@ When a feature claims work is offloaded to the GPU (or that an effect like
 transparency/blend is applied), the spec must *discriminate the claim*, not just
 observe a pass:
 
-- **Offload payload-gating.** Font glyph offload is proven via a checksum-verified
-  backend payload (`{CUDA,ROCM,HIP,OPENCL}_{VECTOR,BITMAP}_FONT_*` env transport).
-  A real offload spec asserts BOTH states: with NO payload → CPU fallback
+- **Legacy font payload bridge.** The checksum-verified
+  `{CUDA,ROCM,HIP,OPENCL}_{VECTOR,BITMAP}_FONT_*` environment transport proves
+  only the legacy payload bridge, not direct native dispatch. Its compatibility
+  spec asserts BOTH states: with NO payload → CPU fallback
   (`gpu_returned_glyphs == 0`, `cpu_fallback_hits > 0`, reason
   `production-gpu-dispatch-not-wired`); with a matching payload → GPU stats
   (`gpu_returned_glyphs == 1`, `cpu_fallback_hits == 0`). Add a corrupt-checksum
   case that must be REJECTED (falls back). If the impl reports GPU-offloaded
-  regardless of payload, it is a cover-up and the spec must fail it. See
+  regardless of payload, it is a cover-up and the compatibility spec must fail
+  it. See
   `test/01_unit/lib/common/text_layout/bitmap_font_gpu_offload_spec.spl`.
-- **Effect oracles are absolute, not "non-zero".** Transparency/blend specs assert
-  the exact composited value: full coverage replaces (channel == fg), half
-  coverage hits the midpoint (`(fg*128 + bg*127)/255`), zero coverage leaves bg
-  untouched. See `font_glyph_transparency_spec.spl`.
+- **Shared font batch native proof.** Direct 2D/3D font composition must begin
+  with the same batch generation plus quad/atlas payload hash (do not infer
+  face/glyph identity from fields the current compatibility batch lacks), then
+  separately prove compiled
+  versioned entry, nonzero device/program/texture/sampler/pipeline handles,
+  true atlas/destination allocation counts with guarded indices, atlas upload
+  and bind, submit/draw, completed fence, and device-origin
+  readback against an absolute CPU oracle. Emitted source, environment payload,
+  upload alone, software backend names, simulation, or equal checksums are not
+  native proof. Record unavailable hardware as `unavailable`; never promote it.
+  Before native promotion, the exact Pure Simple shaping/corpus gate must accept
+  the face for the language/script; a codepoint raster/layout witness alone is
+  diagnostic and leaves the matrix cell `unavailable`.
+  Supplementary-plane/emoji claims must exercise a real format-12 cmap witness
+  (currently `U+1F600`) and prove the selected run face owns the returned glyph
+  ID; parser-only lookup is not fallback acceptance.
+  Shaped-run rendering must fail closed unless the `OtFont` is explicitly bound
+  to the same live runtime face generation, blob/runtime cmap glyph IDs agree
+  for every codepoint, and cache/atlas identity includes face + generation +
+  glyph index + size. A codepoint used as a fabricated glyph index or a stale
+  freed handle is a hard failure. Engines consume the neutral text-layout run
+  and `FontRenderBatch`, never the Skia shaper type directly.
+  Preserve absolute source index and cluster identity inside each shaped glyph
+  before any reversal/reorder; language/script/direction and current advance/
+  offset metadata must stay aligned with glyph order. Cmap parity is direct
+  material evidence only: complex scripts and multi-codepoint emoji sequences
+  remain invalid while substitution/positioning completeness is false.
+  Engine3D neutral HUD/world acceptance is CPU compatibility evidence only:
+  world text projects one anchor into a screen-space billboard. It does not
+  prove native texture upload, depth/occlusion, pipeline draw, fence, or
+  device-origin readback.
+  Distinguish GPU atlas composition from CPU glyph rasterization and from direct
+  GPU outline rasterization.
+  The OpenCL adapter must additionally prove the versioned shared source,
+  generation-keyed atlas upload with load/unload invalidation, exact 0..14
+  argument binding, submit/synchronize, and `device_readback`; conditional unit
+  execution is not a release PASS when the device is unavailable.
+- **CLDR ranking replay.** A release top-language claim requires pinned
+  `common/supplemental/{supplementalData,supplementalMetadata,likelySubtags}.xml`
+  from the selected CLDR object, verified source hashes, two byte-identical
+  `cldr_rank_languages` generations, and exact top-10 plus rank-11 comparison.
+  Compare every language total and script subtotal with the checked-in derived
+  ledger. The synthetic unit fixture proves scanner/arithmetic behavior only.
+- **Effect oracles are absolute, not "non-zero".** Transparency/blend specs use
+  effective alpha `sa=(coverage*fg_a+127)/255`, then assert
+  `out_rgb=(fg_rgb*sa+bg_rgb*(255-sa))/255` and
+  `out_a=sa+bg_a*(255-sa)/255`; zero coverage leaves the background untouched.
+  Full coverage replaces the foreground only when `fg_a==255`. See
+  `font_glyph_transparency_spec.spl`.
 - **Config/env backend selection.** When one API selects its lane (SIMD CPU vs
   GPU) by environment (`SIMPLE_2D_BACKEND`), assert the override is honored when
   the backend initializes AND ignored (auto-probe, value changes) when it cannot —
@@ -544,11 +592,15 @@ observe a pass:
   the CPU reference (`ran_on_cpu=true`, no masquerade); the value must equal the CPU
   oracle in both branches. Avoid generic `!=`/2-arg `==` on `[T]` in comparators
   (interp bug; use `less` + derive equality).
-- **Per-backend kernel EMISSION (no GPU needed).** "cuda/metal/vulkan backed" is
-  verified at emission level like `gpu_portable_compute_spec`: assert backend markers
-  on the emitted source — CUDA `__global__ void`, OpenCL `__kernel void`, Metal
-  `kernel void` + `[[thread_position_in_grid]]`, WebGPU `@compute @workgroup_size`.
-  See `gpu_compute_algorithm_kernels_spec.spl`.
+- **Per-backend kernel EMISSION (no GPU needed).** Verify only targets the
+  emitter actually supports: CUDA `__global__ void`, OpenCL `__kernel void`,
+  Metal `kernel void` + `[[thread_position_in_grid]]`, and WebGPU
+  `@compute @workgroup_size`. Vulkan requires validated SPIR-V evidence, not a
+  fabricated text marker. See `gpu_compute_algorithm_kernels_spec.spl`.
+  When font composition accompanies a generated optimization module, require a
+  separate font artifact/compile plan, a distinct `_font_atlas` path, and the
+  versioned font entry in exported-symbol evidence. Never concatenate WGSL
+  modules whose storage/uniform bindings overlap.
 
 ### GPU / drawing / event honest backend baseline (2026-07-06)
 

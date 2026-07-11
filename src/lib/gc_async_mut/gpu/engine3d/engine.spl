@@ -19,11 +19,34 @@
 
 use std.gpu.engine3d.backend.{RenderBackend3D}
 use std.gpu.engine3d.backend_cpu.{CpuBackend3D}
-use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, LightParams3D}
+use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, LightParams3D, mat4_identity, mat4_mul}
 use std.gpu.engine3d.resource_pool.{ResourcePool3D, TextureHandle3D, BufferHandle3D, ShaderHandle3D, PipelineHandle3D}
 use std.gpu.engine3d.texture3d.{TextureDescriptor3D, SamplerDescriptor3D, TextureView3D}
 use std.gpu.engine3d.texture3d.{TEX_DIM_2D, TEX_DIM_3D, TEX_DIM_CUBE, TEX_FMT_RGBA8_UNORM, TEX_FMT_DEPTH32_FLOAT}
 use std.gpu.engine3d.texture3d.{TEX_USAGE_TEXTURE_BINDING, TEX_USAGE_COPY_DST}
+use std.gc_async_mut.text_layout.font_renderer.{FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderQuad, FontRenderer}
+use std.gpu.engine3d.color3d.{blend3d}
+
+fn _engine3d_font_subrect(batch: FontRenderBatch, quad: FontRenderQuad) -> [u32]:
+    if quad.width <= 0 or quad.height <= 0 or batch.atlas_width <= 0 or batch.atlas_height <= 0:
+        return []
+    var pixels: [u32] = [0u32; quad.width * quad.height]
+    var row = 0
+    while row < quad.height:
+        var col = 0
+        while col < quad.width:
+            val src_x = quad.atlas_x + col
+            val src_y = quad.atlas_y + row
+            if src_x >= 0 and src_x < batch.atlas_width and src_y >= 0 and src_y < batch.atlas_height:
+                val src = src_y * batch.atlas_width + src_x
+                if src.to_i64() < batch.atlas_pixels.len():
+                    val mask_alpha = (batch.atlas_pixels[src] >> 24) & 0xFFu32
+                    val color_alpha = (quad.color >> 24) & 0xFFu32
+                    val alpha = (mask_alpha * color_alpha + 127u32) / 255u32
+                    pixels[row * quad.width + col] = if alpha == 0u32: 0u32 else: (alpha << 24) | (quad.color & 0x00FFFFFFu32)
+            col = col + 1
+        row = row + 1
+    pixels
 
 # ============================================================================
 # Engine3D
@@ -53,6 +76,17 @@ class Engine3D:
     _w: i32
     _h: i32
     _resources: ResourcePool3D
+    _font_renderer: FontRenderer? = nil
+    _view: [f32]
+    _proj: [f32]
+
+    me fonts() -> FontRenderer:
+        val active = self._font_renderer
+        if active != nil:
+            return active
+        val created = FontRenderer.new()
+        self._font_renderer = created
+        created
 
     # ========================================================================
     # Constructors
@@ -87,7 +121,15 @@ class Engine3D:
         # For now, all paths lead to CPU backend
         var cpu = CpuBackend3D.create()
         cpu.init(width, height)
-        Engine3D(_cpu: cpu, _backend_name: "cpu", _w: width, _h: height, _resources: ResourcePool3D.create())
+        Engine3D(
+            _cpu: cpu,
+            _backend_name: "cpu",
+            _w: width,
+            _h: height,
+            _resources: ResourcePool3D.create(),
+            _view: mat4_identity(),
+            _proj: mat4_identity()
+        )
 
     # ========================================================================
     # Backend Info
@@ -105,9 +147,14 @@ class Engine3D:
         self._cpu.name()
 
     me init(width: i32, height: i32) -> bool:
-        self._cpu.init(width, height)
+        val initialized = self._cpu.init(width, height)
+        if initialized:
+            self._w = width
+            self._h = height
+        initialized
 
     me shutdown():
+        self.unload_font()
         self._cpu.shutdown()
 
     me begin_frame():
@@ -124,6 +171,8 @@ class Engine3D:
     # ========================================================================
 
     me set_camera(view: [f32], proj: [f32]):
+        self._view = view
+        self._proj = proj
         self._cpu.set_camera(view, proj)
 
     me set_viewport(x: i32, y: i32, w: i32, h: i32):
@@ -195,6 +244,106 @@ class Engine3D:
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         self._cpu.draw_image(x, y, w, h, pixels)
+
+    me load_font(path: text) -> bool:
+        val fonts = self.fonts()
+        val loaded = fonts.try_load_runtime_ttf(path)
+        self._font_renderer = fonts
+        loaded
+
+    me unload_font():
+        val active = self._font_renderer
+        if active != nil:
+            val fonts = active
+            fonts.clear_ttf()
+        self._font_renderer = nil
+
+    me font_cache_stats() -> FontCacheStats:
+        val fonts = self.fonts()
+        val stats = fonts.cache_stats()
+        self._font_renderer = fonts
+        stats
+
+    me _draw_font_batch_hud(x: i32, y: i32, batch: FontRenderBatch) -> bool:
+        if not batch.valid or batch.is_empty():
+            return false
+        val target_w = self._cpu.width()
+        val target_h = self._cpu.height()
+        var target = self._cpu.read_pixels()
+        var drawn = false
+        var i = 0
+        while i < batch.quads.len():
+            val quad = batch.quads[i]
+            val dst_x = x + quad.dst_x
+            val dst_y = y + quad.dst_y
+            if (quad.width > 0 and quad.height > 0 and
+                dst_x < target_w and dst_y < target_h and
+                dst_x + quad.width > 0 and dst_y + quad.height > 0):
+                val pixels = _engine3d_font_subrect(batch, quad)
+                if pixels.len() > 0:
+                    var row = 0
+                    while row < quad.height:
+                        var col = 0
+                        while col < quad.width:
+                            val tx = dst_x + col
+                            val ty = dst_y + row
+                            if tx >= 0 and tx < target_w and ty >= 0 and ty < target_h:
+                                val src = pixels[row * quad.width + col]
+                                val target_index = ty * target_w + tx
+                                if src != 0u32 and target_index.to_i64() < target.len():
+                                    target[target_index] = blend3d(src, target[target_index])
+                                    drawn = true
+                            col = col + 1
+                        row = row + 1
+            i = i + 1
+        if drawn:
+            self._cpu.draw_image(0, 0, target_w, target_h, target)
+        drawn
+
+    me draw_glyph_run_hud(x: i32, y: i32, run: FontGlyphRun, color: u32, font_size: i32) -> bool:
+        val fonts = self.fonts()
+        val batch = fonts.prepare_glyph_run(run, color, font_size)
+        self._font_renderer = fonts
+        self._draw_font_batch_hud(x, y, batch)
+
+    me draw_text_hud(x: i32, y: i32, content: text, color: u32, font_size: i32) -> bool:
+        val fonts = self.fonts()
+        val batch = fonts.prepare_text(content, color, font_size)
+        self._font_renderer = fonts
+        self._draw_font_batch_hud(x, y, batch)
+
+    fn _font_world_screen(x: f32, y: f32, z: f32) -> (bool, i32, i32):
+        val target_w = self._cpu.width()
+        val target_h = self._cpu.height()
+        if self._view.len() != 16 or self._proj.len() != 16 or target_w <= 0 or target_h <= 0:
+            return (false, 0, 0)
+        val vp = mat4_mul(self._proj, self._view)
+        val clip_x = vp[0] * x + vp[4] * y + vp[8] * z + vp[12]
+        val clip_y = vp[1] * x + vp[5] * y + vp[9] * z + vp[13]
+        val clip_z = vp[2] * x + vp[6] * y + vp[10] * z + vp[14]
+        val clip_w = vp[3] * x + vp[7] * y + vp[11] * z + vp[15]
+        if clip_w <= 0.0:
+            return (false, 0, 0)
+        val ndc_x = clip_x / clip_w
+        val ndc_y = clip_y / clip_w
+        val ndc_z = clip_z / clip_w
+        if ndc_x < -1.0 or ndc_x > 1.0 or ndc_y < -1.0 or ndc_y > 1.0 or ndc_z < -1.0 or ndc_z > 1.0:
+            return (false, 0, 0)
+        val screen_x = ((ndc_x + 1.0) * (target_w as f32) / 2.0) as i32
+        val screen_y = ((1.0 - ndc_y) * (target_h as f32) / 2.0) as i32
+        (true, screen_x, screen_y)
+
+    me draw_text_world(x: f32, y: f32, z: f32, content: text, color: u32, font_size: i32) -> bool:
+        val projected = self._font_world_screen(x, y, z)
+        if not projected.0:
+            return false
+        self.draw_text_hud(projected.1, projected.2, content, color, font_size)
+
+    me draw_glyph_run_world(x: f32, y: f32, z: f32, run: FontGlyphRun, color: u32, font_size: i32) -> bool:
+        val projected = self._font_world_screen(x, y, z)
+        if not projected.0:
+            return false
+        self.draw_glyph_run_hud(projected.1, projected.2, run, color, font_size)
 
     fn read_pixels() -> [u32]:
         self._cpu.read_pixels()

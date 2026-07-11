@@ -130,6 +130,37 @@ describe "shared font renderer fallbacks":
         expect(_count_painted_pixels(rendered, bg)).to_be_greater_than(0)
         expect(_count_antialiased_argb_pixels(rendered, bg, fg)).to_be_greater_than(0)
 
+    it "reuses a persistent glyph atlas without warm dirty uploads":
+        var renderer = FontRenderer.browser_serif_default()
+        val cold = renderer.prepare_text("AB", 0xFF336699u32, 16)
+        val warm = renderer.prepare_text("AB", 0xFFCC8844u32, 16)
+
+        expect(cold.valid).to_be(true)
+        expect(cold.quads.len()).to_equal(2)
+        expect(cold.dirty_rects.len()).to_equal(2)
+        expect(cold.atlas_pixels.len()).to_equal(1024 * 1024)
+        expect(cold.quads[0].codepoint).to_equal(65)
+        expect(cold.quads[1].codepoint).to_equal(66)
+        expect(cold.quads[0].byte_offset).to_equal(0)
+        expect(cold.quads[1].byte_offset).to_equal(1)
+        expect(cold.quads[1].dst_x).to_be_greater_than(cold.quads[0].dst_x)
+        expect(cold.quads[1].atlas_x).to_be_greater_than(cold.quads[0].atlas_x)
+        expect(warm.atlas_generation).to_equal(cold.atlas_generation)
+        expect(warm.dirty_rects.len()).to_equal(0)
+        expect(warm.quads[0].atlas_x).to_equal(cold.quads[0].atlas_x)
+        expect(warm.quads[1].dst_x).to_equal(cold.quads[1].dst_x)
+        expect(warm.quads[0].color).to_equal(0xFFCC8844u32)
+
+    it "resets and repacks the atlas when the face generation changes":
+        var renderer = FontRenderer.browser_serif_default()
+        val first = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
+        renderer.atlas_face_generation = renderer.atlas_face_generation + 1
+        val reset = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
+
+        expect(reset.valid).to_be(true)
+        expect(reset.atlas_generation).to_be_greater_than(first.atlas_generation)
+        expect(reset.dirty_rects.len()).to_equal(1)
+
     it "renders bitmap glyph fallback with exact mask evidence":
         var renderer = FontRenderer.new()
         renderer.use_vector = false
@@ -144,29 +175,29 @@ describe "shared font renderer fallbacks":
     it "keeps Chrome-compatible serif font candidates ahead of fallback fonts":
         val candidates = browser_serif_font_candidates()
         expect(candidates[0]).to_equal(browser_chrome_compatible_normal_font_path())
-        expect(candidates[1]).to_equal("examples/09_embedded/simple_os/fonts/serif/NotoSerif-Regular.ttf")
-        expect(candidates[2]).to_equal("examples/09_embedded/simple_os/fonts/serif/NotoSerifSC-Regular.otf")
+        expect(candidates[1]).to_equal("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
+        expect(candidates[2]).to_equal("assets/fonts/google-fonts/ofl/notoserifdevanagari/NotoSerifDevanagari[wdth,wght].ttf")
 
     it "keeps provided browser sans and mono candidates ahead of host fallbacks":
         val sans = browser_sans_font_candidates()
         val mono = browser_mono_font_candidates()
-        expect(sans[0]).to_equal("examples/09_embedded/simple_os/fonts/sans/NotoSans-Regular.ttf")
-        expect(sans[1]).to_equal("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
-        expect(mono[0]).to_equal("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
+        expect(sans[0]).to_equal("assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf")
+        expect(sans[4]).to_equal("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
+        expect(mono[0]).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
         expect(mono[1]).to_equal("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf")
 
     it "maps browser CSS font-family names to provided font lanes":
-        expect(browser_font_candidates_for_family("monospace")[0]).to_equal("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
-        expect(browser_font_candidates_for_family("'Fira Code', monospace")[0]).to_equal("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
-        expect(browser_font_candidates_for_family("Arial, sans-serif")[0]).to_equal("examples/09_embedded/simple_os/fonts/sans/NotoSans-Regular.ttf")
+        expect(browser_font_candidates_for_family("monospace")[0]).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
+        expect(browser_font_candidates_for_family("'Fira Code', monospace")[0]).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
+        expect(browser_font_candidates_for_family("Arial, sans-serif")[0]).to_equal("assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf")
         expect(browser_font_candidates_for_family("system")[0]).to_equal(browser_chrome_compatible_normal_font_path())
         expect(browser_font_candidates_for_family("Times New Roman, serif")[0]).to_equal(browser_chrome_compatible_normal_font_path())
 
-    it "defaults unspecified text to Fira Code Nerd mono":
-        # Unspecified / unmatched family falls back to Fira Code Nerd mono,
+    it "defaults unspecified text to bundled Noto Sans Mono":
+        # Unspecified / unmatched family falls back to bundled Noto Sans Mono,
         # while explicit families above keep their own lanes.
-        expect(browser_font_candidates_for_family("")[0]).to_equal("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
-        expect(browser_font_candidates_for_family("UnknownFamily")[0]).to_equal("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
+        expect(browser_font_candidates_for_family("")[0]).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
+        expect(browser_font_candidates_for_family("UnknownFamily")[0]).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
 
     it "selects one Chrome-compatible normal font and one vector fallback":
         expect(browser_chrome_compatible_normal_font_name()).to_equal("Liberation Serif Regular")
@@ -183,10 +214,10 @@ describe "shared font renderer fallbacks":
 
     it "exposes an opt-in browser default font materialization surface":
         val provided = browser_provided_font_paths()
-        expect(provided).to_contain("examples/09_embedded/simple_os/fonts/sans/NotoSans-Regular.ttf")
-        expect(provided).to_contain("examples/09_embedded/simple_os/fonts/serif/NotoSerif-Regular.ttf")
-        expect(provided).to_contain("examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
-        expect(browser_font_download_script_path()).to_equal("examples/09_embedded/simple_os/fonts/download_fonts.shs")
+        expect(provided).to_contain("assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf")
+        expect(provided).to_contain("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
+        expect(provided).to_contain("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
+        expect(browser_font_download_script_path()).to_equal("")
 
         val result = ensure_browser_provided_fonts(false, 1)
         expect(result.attempted_download).to_equal(false)
@@ -200,10 +231,10 @@ describe "shared font renderer fallbacks":
         expect(urls[1]).to_equal("https://cdn.example/demo.ttf")
 
     it "puts resolved local font-face sources ahead of generic fallback candidates":
-        val family = browser_font_face_family_value("Demo Serif, serif", "examples/09_embedded/simple_os/fonts/serif/NotoSerif-Regular.ttf")
+        val family = browser_font_face_family_value("Demo Serif, serif", "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
         val candidates = browser_font_candidates_for_family(family)
-        expect(browser_font_face_source_from_family_value(family)).to_equal("examples/09_embedded/simple_os/fonts/serif/NotoSerif-Regular.ttf")
-        expect(candidates[0]).to_equal("examples/09_embedded/simple_os/fonts/serif/NotoSerif-Regular.ttf")
+        expect(browser_font_face_source_from_family_value(family)).to_equal("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
+        expect(candidates[0]).to_equal("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
         expect(candidates[1]).to_equal(browser_chrome_compatible_normal_font_path())
 
     it "keeps remote font-face sources out of renderer file candidates until fetched":
@@ -227,13 +258,13 @@ describe "shared font renderer fallbacks":
         expect(cache.max_bytes).to_equal(33554432)
         var codepoint = 0
         while codepoint < 513:
-            cache.insert(CachedGlyph(codepoint: codepoint, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [1u8]))
+            cache.insert(CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [1u8]))
             codepoint = codepoint + 1
         val stats = cache.stats()
         expect(stats.entries).to_equal(512)
         expect(stats.bytes).to_equal(512)
         expect(stats.evictions).to_equal(1)
-        val oversized = CachedGlyph(codepoint: 600, font_size: 16, width: 33554433, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [1u8; 33554433])
+        val oversized = CachedGlyph(codepoint: 600, face_id: 0, face_generation: 0, glyph_index: -1, font_size: 16, width: 33554433, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [1u8; 33554433])
         expect(cache.insert(oversized)).to_be(false)
         val after_reject = cache.stats()
         expect(after_reject.entries).to_equal(512)
@@ -245,3 +276,12 @@ describe "shared font renderer fallbacks":
         expect(cache.stats().misses).to_equal(1)
         cache.sync_generation(1)
         expect(cache.stats().entries).to_equal(0)
+
+    it "keys shaped glyphs by face, glyph index, and size":
+        var cache = GlyphCache.new(8)
+        cache.insert(CachedGlyph(codepoint: -1, face_id: 11, face_generation: 7, glyph_index: 3, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [255u8]))
+        expect(cache.lookup_index(11, 7, 3, 16)).to_not_be_nil()
+        expect(cache.lookup_index(11, 8, 3, 16)).to_be_nil()
+        expect(cache.lookup_index(12, 7, 3, 16)).to_be_nil()
+        expect(cache.lookup_index(11, 7, 4, 16)).to_be_nil()
+        expect(cache.lookup_index(11, 7, 3, 17)).to_be_nil()

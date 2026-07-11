@@ -1,0 +1,123 @@
+# @cover src/lib/common/encoding/sfnt.spl 80%
+
+use std.spec.*
+use std.common.encoding.sfnt.{read_u32_be, read_fixed_1616, parse_offset_table, validate_default_glyf_font, font_runtime_ttf_default_supported, sfnt_manifest_tables_match, sfnt_manifest_default_axes_match}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var bytes: [u8] = []
+    var index: i64 = 0
+    while index < count:
+        bytes.push(0 as u8)
+        index = index + 1
+    bytes
+
+fn _set_u16_be(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var result = bytes
+    result[offset] = ((value / 256) % 256) as u8
+    result[offset + 1] = (value % 256) as u8
+    result
+
+fn _set_u32_be(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var result = bytes
+    result[offset] = ((value / 16777216) % 256) as u8
+    result[offset + 1] = ((value / 65536) % 256) as u8
+    result[offset + 2] = ((value / 256) % 256) as u8
+    result[offset + 3] = (value % 256) as u8
+    result
+
+fn _sfnt(entries: [(i64, [u8])]) -> [u8]:
+    val directory_size = 12 + entries.len() * 16
+    var total_size = directory_size
+    for entry in entries:
+        total_size = ((total_size + 3) / 4) * 4 + entry.1.len()
+    var bytes = _zero_bytes(total_size)
+    bytes = _set_u32_be(bytes, 0, 65536)
+    bytes = _set_u16_be(bytes, 4, entries.len())
+    var data_offset = directory_size
+    var index: i64 = 0
+    while index < entries.len():
+        val entry = entries[index]
+        val record = 12 + index * 16
+        data_offset = ((data_offset + 3) / 4) * 4
+        bytes = _set_u32_be(bytes, record, entry.0)
+        bytes = _set_u32_be(bytes, record + 8, data_offset)
+        bytes = _set_u32_be(bytes, record + 12, entry.1.len())
+        var byte_index: i64 = 0
+        while byte_index < entry.1.len():
+            bytes[data_offset + byte_index] = entry.1[byte_index]
+            byte_index = byte_index + 1
+        data_offset = data_offset + entry.1.len()
+        index = index + 1
+    bytes
+
+fn _valid_fvar() -> [u8]:
+    var bytes = _zero_bytes(36)
+    bytes = _set_u16_be(bytes, 0, 1)
+    bytes = _set_u16_be(bytes, 4, 16)
+    bytes = _set_u16_be(bytes, 6, 2)
+    bytes = _set_u16_be(bytes, 8, 1)
+    bytes = _set_u16_be(bytes, 10, 20)
+    bytes = _set_u16_be(bytes, 14, 8)
+    bytes = _set_u32_be(bytes, 16, 2003265652)
+    bytes = _set_u32_be(bytes, 20, 6553600)
+    bytes = _set_u32_be(bytes, 24, 26214400)
+    bytes = _set_u32_be(bytes, 28, 58982400)
+    bytes = _set_u16_be(bytes, 34, 256)
+    bytes
+
+fn _valid_font(extra: [(i64, [u8])]) -> [u8]:
+    var entries: [(i64, [u8])] = [
+        (1735162214, [1u8]), (1819239265, [1u8]),
+        (1751474532, [1u8]), (1835104368, [1u8]),
+        (1668112752, [1u8]), (1751672161, [1u8]),
+        (1752003704, [1u8])
+    ]
+    for entry in extra: entries.push(entry)
+    _sfnt(entries)
+
+describe "default glyf sfnt validation":
+    it "accepts static/default-variable fonts and rejects malformed or excluded data":
+        val static_font = _valid_font([])
+        val variable_font = _valid_font([(1719034226, _valid_fvar())])
+        var out_of_range = static_font
+        out_of_range = _set_u32_be(out_of_range, 20, out_of_range.len() + 1)
+        var duplicate = static_font
+        duplicate = _set_u32_be(duplicate, 28, 1735162214)
+        var directory_overlap = static_font
+        directory_overlap = _set_u32_be(directory_overlap, 20, 12)
+        var table_overlap = static_font
+        table_overlap = _set_u32_be(table_overlap, 36, read_u32_be(table_overlap, 20))
+        val fvar_base = read_u32_be(variable_font, 12 + 7 * 16 + 8) as i64
+        var malformed_fvar = variable_font
+        malformed_fvar = _set_u16_be(malformed_fvar, fvar_base + 10, 19)
+        var malformed_fvar_header = variable_font
+        malformed_fvar_header = _set_u16_be(malformed_fvar_header, fvar_base + 6, 0)
+        val cases: [(text, [u8], bool, text)] = [
+            ("static glyf", static_font, true, "supported-default-glyf"),
+            ("default variable glyf", variable_font, true, "supported-default-glyf"),
+            ("out-of-range table", out_of_range, false, "invalid-sfnt-directory"),
+            ("duplicate table", duplicate, false, "invalid-sfnt-directory"),
+            ("directory overlap", directory_overlap, false, "invalid-sfnt-directory"),
+            ("table overlap", table_overlap, false, "invalid-sfnt-directory"),
+            ("missing glyf", _sfnt([(1668112752, [1u8])]), false, "missing-required-table"),
+            ("excluded CFF2", _valid_font([(1128678962, [1u8])]), false, "unsupported-sfnt-table"),
+            ("malformed fvar", malformed_fvar, false, "invalid-fvar-default"),
+            ("malformed fvar header", malformed_fvar_header, false, "invalid-fvar-default")
+        ]
+        for case in cases:
+            val result = validate_default_glyf_font(case.1)
+            expect(result.supported).to_be(case.2)
+            expect(result.reason).to_equal(case.3)
+            expect(font_runtime_ttf_default_supported(case.1)).to_be(case.2)
+        val excluded: [i64] = [1128678944, 1128678962, 1129270354, 1129333068, 1398163232, 1128416340, 1128418371, 1161970772, 1161972803, 1161974595, 1935829368]
+        for tag in excluded:
+            val result = validate_default_glyf_font(_valid_font([(tag, [1u8])]))
+            expect(result.supported).to_be(false)
+            expect(result.reason).to_equal("unsupported-sfnt-table")
+        expect(validate_default_glyf_font(_sfnt([(1668112752, [1u8])])).reason).to_equal("missing-required-table")
+        expect(parse_offset_table(out_of_range)).to_be_nil()
+        expect(read_fixed_1616([255u8, 255u8, 0u8, 0u8], 0)).to_equal(-1.0)
+        expect(sfnt_manifest_tables_match(static_font, "cmap,glyf,head,hhea,hmtx,loca,maxp")).to_be(true)
+        expect(sfnt_manifest_tables_match(static_font, "cmap,glyf")).to_be(false)
+        expect(sfnt_manifest_default_axes_match(static_font, "static")).to_be(true)
+        expect(sfnt_manifest_default_axes_match(variable_font, "wght=400")).to_be(true)

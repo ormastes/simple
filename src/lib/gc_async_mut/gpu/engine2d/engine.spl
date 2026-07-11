@@ -50,7 +50,7 @@ use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_defau
 use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_counters, tick_once}
 use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_default}
 use std.gc_async_mut.io.mod_stub.{env_get}
-use std.gc_async_mut.text_layout.font_renderer.{FontCacheStats, FontRenderer}
+use std.gc_async_mut.text_layout.font_renderer.{FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderer}
 
 # ============================================================================
 # Config / environment backend selection
@@ -84,6 +84,30 @@ fn engine2d_scale_pixel_alpha(pixels: [u32], opacity_milli: i32) -> [u32]:
         i = i + 1
     out
 
+fn engine2d_font_atlas_subrect_pixels(atlas_pixels: [u32], atlas_width: i32, atlas_height: i32,
+                                      atlas_x: i32, atlas_y: i32, width: i32, height: i32,
+                                      color: u32) -> [u32]:
+    if atlas_width <= 0 or atlas_height <= 0 or width <= 0 or height <= 0:
+        return []
+    if atlas_x < 0 or atlas_y < 0 or atlas_x > atlas_width or atlas_y > atlas_height:
+        return []
+    if width > atlas_width - atlas_x or height > atlas_height - atlas_y:
+        return []
+    if atlas_pixels.len().to_i64() < atlas_width.to_i64() * atlas_height.to_i64():
+        return []
+    val rgb = color & 0x00FFFFFFu32
+    val color_alpha = (color >> 24) & 0xFFu32
+    var pixels: [u32] = []
+    var row = 0
+    while row < height:
+        var col = 0
+        while col < width:
+            val atlas_pixel = atlas_pixels[(atlas_y + row) * atlas_width + atlas_x + col]
+            val alpha = (((atlas_pixel >> 24) & 0xFFu32) * color_alpha + 127u32) / 255u32
+            pixels.push(if alpha == 0u32: 0u32 else: (alpha << 24) | rgb)
+            col = col + 1
+        row = row + 1
+    pixels
 # ============================================================================
 # Engine2D
 # ============================================================================
@@ -124,6 +148,7 @@ class Engine2D:
     capability: BackendCapability
     baremetal_backend: BaremetalBackend?
     virtio_gpu_backend: VirtioGpuBackend?
+    opencl_backend: OpenClBackend? = nil
     w: i32
     h: i32
     pacing: FramePacingCounters
@@ -274,7 +299,7 @@ class Engine2D:
         if requested_backend == "opencl":
             var opencl = OpenClBackend.create()
             if opencl.init(width, height):
-                return Ok(Engine2D(backend: opencl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl"))
+                return Ok(Engine2D(backend: opencl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, opencl_backend: opencl, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl"))
 
         if requested_backend == "opengl":
             var opengl = OpenGLBackend.create()
@@ -673,17 +698,43 @@ class Engine2D:
         else:
             self.backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
 
+    me _draw_font_batch(x: i32, y: i32, batch: FontRenderBatch) -> bool:
+        if not batch.valid:
+            return false
+        var quad_index: i64 = 0
+        val active_opencl = self.opencl_backend
+        if active_opencl != nil:
+            val opencl = active_opencl
+            quad_index = opencl.draw_font_batch(x, y, batch)
+            self.opencl_backend = opencl
+            if quad_index < 0 or quad_index > batch.quads.len():
+                quad_index = 0
+        while quad_index < batch.quads.len():
+            val quad = batch.quads[quad_index]
+            val pixels = engine2d_font_atlas_subrect_pixels(
+                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
+            )
+            if pixels.len() == (quad.width * quad.height).to_i64():
+                self.draw_image_blend(x + quad.dst_x, y + quad.dst_y, quad.width, quad.height, pixels)
+            quad_index = quad_index + 1
+        true
+
+    me draw_glyph_run(x: i32, y: i32, run: FontGlyphRun, color: u32, font_size: i32) -> bool:
+        val fonts = self.fonts()
+        val batch = fonts.prepare_glyph_run(run, color, font_size)
+        self.font_renderer = fonts
+        self._draw_font_batch(x, y, batch)
+
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         """Draw selected vector text, or the existing bitmap default."""
         val selected = self.font_renderer
         if selected != nil:
             val fonts = selected
             if fonts.has_sffi_ttf():
-                val payload = fonts.render_text_payload(text_val, color, font_size)
+                val batch = fonts.prepare_text(text_val, color, font_size)
                 self.font_renderer = fonts
-                if payload.valid:
-                    if not payload.is_empty():
-                        self.draw_image_blend(x + payload.offset_x, y + payload.offset_y, payload.width, payload.height, payload.pixels)
+                if self._draw_font_batch(x, y, batch):
                     return
         if val Some(vg) = self.virtio_gpu_backend:
             vg.draw_text(x, y, text_val, color, font_size)
@@ -694,6 +745,11 @@ class Engine2D:
 
     me load_font(path: text) -> bool:
         """Select one trusted TTF/OTF for process-wide Simple 2D text."""
+        val active_opencl = self.opencl_backend
+        if active_opencl != nil:
+            val opencl = active_opencl
+            opencl.invalidate_font_atlas()
+            self.opencl_backend = opencl
         val fonts = self.fonts()
         val loaded = fonts.try_load_runtime_ttf(path)
         self.font_renderer = fonts
@@ -701,6 +757,11 @@ class Engine2D:
 
     me unload_font():
         """Restore the zero-config bitmap text path."""
+        val active_opencl = self.opencl_backend
+        if active_opencl != nil:
+            val opencl = active_opencl
+            opencl.invalidate_font_atlas()
+            self.opencl_backend = opencl
         val selected = self.font_renderer
         if selected != nil:
             val fonts = selected
@@ -714,14 +775,24 @@ class Engine2D:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
         """Draw text with an explicit background colour per glyph cell.
 
-        Delegates to the backend's `Engine2DExtended.draw_text_bg` which
-        paints the text foreground plus a per-pixel background, preserving
-        antialiased glyph edges (unlike a pre-paint-rect hack that would
-        destroy them). This is the method `Engine2dCompositorBackend`
-        (and any other `CompositorBackend`-shaped wrapper) should call
-        instead of pre-painting an opaque rect and then overlaying
-        `draw_text`.
+        A selected vector face uses its measured advance/line height and the
+        same antialiased `draw_text` path. Bitmap mode keeps the existing
+        backend cell painter. This is the method `Engine2dCompositorBackend`
+        and other GUI wrappers should call.
         """
+        val selected = self.font_renderer
+        if selected != nil:
+            val fonts = selected
+            if fonts.has_sffi_ttf() and font_size > 0 and font_size <= 512:
+                val text_width = fonts.measure_text_width(text_val, font_size)
+                var line_height = fonts.horizontal_line_metric(font_size, 3)
+                self.font_renderer = fonts
+                if line_height <= 0:
+                    line_height = font_size
+                if text_width > 0:
+                    self.draw_rect_filled(x, y, text_width, line_height, bg)
+                self.draw_text(x, y, text_val, fg, font_size)
+                return
         if val Some(vg) = self.virtio_gpu_backend:
             emu_draw_text_bg(self.backend, x, y, text_val, fg, bg, font_size)
         elif val Some(bm) = self.baremetal_backend:

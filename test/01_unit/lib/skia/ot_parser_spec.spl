@@ -3,7 +3,7 @@
 use std.spipe.*
 use std.skia.entity.path.{sk_path_new}
 use std.skia.feature.glyph.ot_parser.{read_u16_be, read_i16_be, read_u32_be, read_fixed_1616, read_f2dot14, OtTable, OtFont, parse_offset_table, find_table}
-use std.skia.feature.glyph.ot_parser_cmap.{CmapFormat4, parse_cmap_format4, cmap_lookup}
+use std.skia.feature.glyph.ot_parser_cmap.{CmapFormat4, parse_cmap_format12, cmap_lookup, cmap12_lookup, cmap_glyph_id}
 use std.skia.feature.glyph.ot_parser_metrics.{HorizontalMetrics, parse_hmtx}
 use std.skia.feature.glyph.ot_parser_glyf.{parse_glyf_simple, parse_glyf_compound}
 use std.skia.feature.glyph.ot_parser_cff.{parse_cff_charstring}
@@ -149,6 +149,63 @@ describe "cmap_lookup":
         )
         val gid = cmap_lookup(cmap, 90)
         expect(gid).to_equal(0)
+
+describe "cmap format 12":
+    it "parses a preferred Windows full-repertoire table and maps emoji":
+        val blob: [u8] = [
+            0, 0, 0, 1,
+            0, 3, 0, 10, 0, 0, 0, 12,
+            0, 12, 0, 0, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 0, 2,
+            0, 0, 0, 65, 0, 0, 0, 90, 0, 0, 0, 3,
+            0, 1, 246, 0, 0, 1, 246, 79, 0, 0, 3, 127
+        ]
+        val font = OtFont(blob: blob, tables: [OtTable(tag: 1668112752, offset: 0, length: 52)])
+        val parsed = parse_cmap_format12(font)
+
+        expect(parsed != None).to_equal(true)
+        val cmap = parsed.unwrap()
+        expect(cmap12_lookup(cmap, 65)).to_equal(3)
+        expect(cmap12_lookup(cmap, 128512)).to_equal(895)
+        expect(cmap12_lookup(cmap, 128592)).to_equal(0)
+        expect(cmap_glyph_id(font, 128512)).to_equal(895)
+
+    it "rejects a format 12 subtable truncated by its cmap table boundary":
+        val blob: [u8] = [
+            0, 0, 0, 1,
+            0, 3, 0, 10, 0, 0, 0, 12,
+            0, 12, 0, 0, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 0, 2,
+            0, 0, 0, 65, 0, 0, 0, 90, 0, 0, 0, 3,
+            0, 1, 246, 0, 0, 1, 246, 79, 0, 0, 3, 127
+        ]
+        val font = OtFont(blob: blob, tables: [OtTable(tag: 1668112752, offset: 0, length: 51)])
+
+        expect(parse_cmap_format12(font) == None).to_equal(true)
+
+    it "prefers Windows full-repertoire format 12 over a conflicting format 4 mapping":
+        val blob: [u8] = [
+            0, 0, 0, 2,
+            0, 3, 0, 1, 0, 0, 0, 20,
+            0, 3, 0, 10, 0, 0, 0, 52,
+            0, 4, 0, 32, 0, 0, 0, 4, 0, 4, 0, 1, 0, 0,
+            0, 65, 255, 255, 0, 0, 0, 65, 255, 255,
+            255, 201, 0, 1, 0, 0, 0, 0,
+            0, 12, 0, 0, 0, 0, 0, 28, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 65, 0, 0, 0, 65, 0, 0, 0, 99
+        ]
+        val font = OtFont(blob: blob, tables: [OtTable(tag: 1668112752, offset: 0, length: 80)])
+
+        expect(cmap_glyph_id(font, 65)).to_equal(99)
+
+    it "rejects format 12 records from non-Unicode platforms":
+        val blob: [u8] = [
+            0, 0, 0, 1,
+            0, 1, 0, 0, 0, 0, 0, 12,
+            0, 12, 0, 0, 0, 0, 0, 28, 0, 0, 0, 0, 0, 0, 0, 1,
+            0, 0, 0, 65, 0, 0, 0, 65, 0, 0, 0, 99
+        ]
+        val font = OtFont(blob: blob, tables: [OtTable(tag: 1668112752, offset: 0, length: 40)])
+
+        expect(parse_cmap_format12(font) == None).to_equal(true)
 
 describe "parse_hmtx":
     it "returns last advance for glyph beyond num_long_metrics":

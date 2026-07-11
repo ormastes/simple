@@ -1,0 +1,79 @@
+# codex-system-test
+# @tag: rendering, font, atlas, engine2d, engine3d
+"""# Shared Font Material Across 2D and 3D
+
+Prepares one persistent glyph batch, checks warm atlas reuse, exercises the 2D
+atlas-subrect consumer, and checks the Engine3D CPU HUD/world compatibility
+surface. CPU output is an oracle and compatibility path, not native GPU proof.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer, FontRenderBatch}
+use std.gc_async_mut.gpu.engine2d.engine.{engine2d_font_atlas_subrect_pixels}
+use std.gpu.engine3d.engine.{Engine3D}
+use std.gpu.engine3d.types3d.{mat4_identity, mat4_perspective}
+
+fn setup_shared_font_fixture() -> FontRenderer:
+    FontRenderer.new()
+
+fn expect_shared_font_batch(batch: FontRenderBatch, expected_quads: i64):
+    expect(batch.valid).to_be(true)
+    expect(batch.quads.len()).to_equal(expected_quads)
+    expect(batch.atlas_width).to_equal(1024)
+    expect(batch.atlas_height).to_equal(1024)
+    expect(batch.atlas_pixels.len()).to_equal(1024 * 1024)
+
+fn _nonzero_pixels(pixels: [u32]) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel != 0u32:
+            count = count + 1
+    count
+
+describe "shared font surfaces":
+    # @req REQ-006 REQ-009
+    it "should prepare stable glyph quads and no warm dirty upload":
+        step("Prepare one shared font batch for 2D and 3D")
+        var renderer = setup_shared_font_fixture()
+        val cold = renderer.prepare_text("AB", 0xFF336699u32, 16)
+        val warm = renderer.prepare_text("AB", 0xFFCC8844u32, 16)
+        expect_shared_font_batch(cold, 2)
+        expect_shared_font_batch(warm, 2)
+        expect(cold.dirty_rects.len()).to_equal(2)
+        expect(warm.dirty_rects.len()).to_equal(0)
+        expect(warm.atlas_generation).to_equal(cold.atlas_generation)
+        expect(warm.quads[0].atlas_x).to_equal(cold.quads[0].atlas_x)
+        expect(warm.quads[0].byte_offset).to_equal(0)
+        expect(warm.quads[1].byte_offset).to_equal(1)
+
+    # @req REQ-006 REQ-011
+    it "should feed the 2D blend surface from the shared white-alpha atlas":
+        var renderer = setup_shared_font_fixture()
+        val batch = renderer.prepare_text("A", 0x80402010u32, 16)
+        expect_shared_font_batch(batch, 1)
+        val quad = batch.quads[0]
+        val pixels = engine2d_font_atlas_subrect_pixels(
+            batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+            quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
+        )
+        expect(pixels.len()).to_equal((quad.width * quad.height).to_i64())
+        expect(_nonzero_pixels(pixels)).to_be_greater_than(0)
+
+    # @req REQ-006
+    it "should render HUD and projected world text through the honest CPU fallback":
+        var engine = Engine3D.create_with_backend(64, 64, "cpu")
+        engine.clear(0u32)
+        expect(engine.draw_text_hud(2, 2, "HUD", 0xFFFFFFFFu32, 14)).to_be(true)
+        engine.set_camera(mat4_identity(), mat4_perspective(1.0, 1.0, 0.1, 100.0))
+        expect(engine.draw_text_world(0.0, 0.0, -1.0, "W", 0xFF00FF00u32, 12)).to_be(true)
+        expect(engine.backend_name()).to_equal("cpu")
+        expect(_nonzero_pixels(engine.read_pixels())).to_be_greater_than(0)
+        engine.shutdown()
+
+    it "should fail closed for invalid sizes and empty content":
+        var renderer = setup_shared_font_fixture()
+        expect(renderer.prepare_text("A", 0xFFFFFFFFu32, 0).valid).to_be(false)
+        expect(renderer.prepare_text("A", 0xFFFFFFFFu32, 513).valid).to_be(false)
+        val empty = renderer.prepare_text("", 0xFFFFFFFFu32, 16)
+        expect(empty.valid).to_be(true)
+        expect(empty.is_empty()).to_be(true)
