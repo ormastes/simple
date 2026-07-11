@@ -907,10 +907,25 @@ pub fn rt_file_extract_smf_dynlib(args: &[Value]) -> Result<Value, CompileError>
 /// (BPB+FATs+root dir+payload) and let the kernel zero-fill the remainder.
 pub fn rt_file_truncate(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
+    // Handles both `Value::Int(n)` (plain integer) and `Value::UInt { value, .. }`
+    // (u64-typed values from `u64` literals / `as u64` casts, as used by disk-image
+    // builders). Previously only matched `Int`, so a boxed u64 size arg silently
+    // fell through to `Bool(false)` with no error, no set_len -- see
+    // doc/08_tracking/bug/disk_image_fat32_builder_defects.md #2.
     let size: u64 = match args.get(1) {
         Some(Value::Int(n)) => *n as u64,
-        _ => return Ok(Value::Bool(false)),
+        Some(Value::UInt { value, .. }) => *value,
+        other => {
+            return Err(CompileError::semantic(format!(
+                "rt_file_truncate() expects (path: text, size: u64), got size arg {:?}",
+                other
+            )));
+        }
     };
+    // I/O failures (missing dir, permissions, disk full, ...) stay as `Bool(false)`
+    // rather than a hard error: callers such as disk_image.spl's `build()` already
+    // handle a `false` return with their own fallback/Err path. Only the arg-type
+    // mismatch above (a genuine programming bug, not a runtime condition) hard-errors.
     let file = match OpenOptions::new().write(true).create(true).truncate(false).open(&path) {
         Ok(f) => f,
         Err(_) => return Ok(Value::Bool(false)),
@@ -957,6 +972,53 @@ mod tests {
         assert_eq!(first, Value::Int(3));
         assert_eq!(second, Value::Int(3));
         assert_eq!(std::fs::read_to_string(path).expect("read"), "abcdef");
+    }
+
+    #[test]
+    fn truncate_accepts_boxed_u64_size_arg() {
+        // disk_image.spl (a `u64`-typed disk-image builder) calls
+        // rt_file_truncate(path, size_mb * 1024u64 * 1024u64); the size arg
+        // arrives as the boxed `Value::UInt { value, width: 64 }` form, not
+        // `Value::Int`. Previously this silently fell through to
+        // `Bool(false)` with no error and no set_len -- see
+        // doc/08_tracking/bug/disk_image_fat32_builder_defects.md #2.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("truncate_boxed.bin");
+        std::fs::write(&path, b"abc").expect("seed write");
+        let path = path.to_string_lossy().to_string();
+
+        let ok = rt_file_truncate(&[
+            Value::Str(path.clone()),
+            Value::UInt { value: 4096, width: 64 },
+        ])
+        .expect("truncate with boxed u64 size");
+        assert_eq!(ok, Value::Bool(true));
+        assert_eq!(std::fs::metadata(&path).expect("metadata").len(), 4096);
+    }
+
+    #[test]
+    fn truncate_accepts_plain_int_size_arg() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("truncate_int.bin");
+        std::fs::write(&path, b"abc").expect("seed write");
+        let path = path.to_string_lossy().to_string();
+
+        let ok = rt_file_truncate(&[Value::Str(path.clone()), Value::Int(2048)]).expect("truncate with int size");
+        assert_eq!(ok, Value::Bool(true));
+        assert_eq!(std::fs::metadata(&path).expect("metadata").len(), 2048);
+    }
+
+    #[test]
+    fn truncate_errors_on_non_integer_size_arg() {
+        // A genuinely bad arg (wrong type) should hard-error, not silently
+        // return Bool(false).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("truncate_bad.bin");
+        std::fs::write(&path, b"abc").expect("seed write");
+        let path = path.to_string_lossy().to_string();
+
+        let result = rt_file_truncate(&[Value::Str(path), Value::Str("not-a-size".to_string())]);
+        assert!(result.is_err());
     }
 
     #[test]

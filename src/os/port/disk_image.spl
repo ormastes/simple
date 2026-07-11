@@ -1,9 +1,14 @@
 # SimpleOS FAT32 disk-image builder — IF-06 + IF-07 / Wave-4a.
 #
 # Produces a minimal but mountable FAT32 raw disk image:
-#   BPB (sector 0), FSInfo (sector 1), FAT1 (sectors 32-159),
-#   FAT2 (sectors 160-287), root dir (cluster 2 / sector 288),
-#   payload data (cluster 3+ / sector 289+).
+#   BPB (sector 0), FSInfo (sector 1), reserved (sectors 2-31),
+#   FAT1 (sector 32, `fat_sectors` long), FAT2 (immediately after FAT1,
+#   same length), root dir (cluster 2, immediately after FAT2),
+#   payload data (cluster 3+, immediately after root dir).
+#   `fat_sectors` is sized dynamically from the total data-cluster count
+#   (see `build()` "FAT sizing" below) -- it is NOT a fixed constant, so
+#   compute sector offsets from `fat_size_32` in the BPB rather than
+#   hardcoding sector 288/289 as earlier revisions of this file did.
 #
 # Wave-4a: single payload file, 8.3 name, no LFN, no subdirectories.
 #
@@ -40,10 +45,17 @@ struct DiskImageConfig:
     """Builder configuration for one disk image."""
     size_mb: u64
     payloads: [PayloadEntry]
-    nested_payloads: [PayloadEntry] # Real FAT32 subdirectory placements (guest_path
-                                     # required, e.g. "/usr/bin/clang"). Kept separate
-                                     # from `payloads` so existing flat-root callers are
-                                     # byte-for-byte unaffected.
+    # Real FAT32 subdirectory placements (guest_path required, e.g.
+    # "/usr/bin/clang"). Kept separate from `payloads` so existing flat-root
+    # callers are byte-for-byte unaffected. Defaults to `[]` so callers that
+    # only need flat-root payloads can omit this field entirely -- see
+    # doc/08_tracking/bug/disk_image_fat32_builder_defects.md #1: omitting a
+    # non-defaulted `[T]` struct field silently binds it to `nil` at runtime
+    # (a compiler struct-literal-init defect, not caught at compile time),
+    # and `for x in nil:` / `nil.length` then blow up downstream. Working
+    # around it here with a field default avoids relying on a fix to that
+    # compiler defect.
+    nested_payloads: [PayloadEntry] = []
 
 # -- Internal LE helpers ----------------------------------------------------
 #
@@ -98,6 +110,41 @@ fn _push_str11(buf: [u8], s: text) -> [u8]:
             buf.push(0x20u8)
         i = i + 1u64
     buf
+
+fn _pad_trunc(s: text, width: u64) -> text:
+    """Truncate/space-pad `s` to exactly `width` chars (helper for 8.3 names)."""
+    var result: text = ""
+    var i: u64 = 0u64
+    while i < width:
+        if i < s.length:
+            result = result + s.substring(i, i + 1u64)
+        else:
+            result = result + " "
+        i = i + 1u64
+    result
+
+fn _to_8_3_name(name: text) -> text:
+    """Convert a filename like "FSEXECBG.ELF" into an 11-char FAT 8.3 name
+    "FSEXECBGELF" (dot dropped, base padded/truncated to 8 chars, extension
+    padded/truncated to 3 chars, uppercased). Matches the C reader's
+    `_fat32_make_8_3_name` in
+    examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c, which
+    takes the LAST '.' in the name as the extension separator -- see
+    doc/08_tracking/bug/disk_image_fat32_builder_defects.md #3 (dirents were
+    previously stored verbatim-with-dot, e.g. "FSEXECBG.EL", so the C reader's
+    8.3-normalized lookup never matched)."""
+    var dot_idx: i64 = -1
+    var i: u64 = 0u64
+    while i < name.length:
+        if (name[i] as u8) == 0x2Eu8:
+            dot_idx = i as i64
+        i = i + 1u64
+    var base: text = name
+    var ext: text = ""
+    if dot_idx >= 0:
+        base = name.substring(0u64, dot_idx as u64)
+        ext = name.substring((dot_idx as u64) + 1u64, name.length)
+    _pad_trunc(base.upper(), 8u64) + _pad_trunc(ext.upper(), 3u64)
 
 # -- Nested-directory helpers (real FAT32 subdirs for cfg.nested_payloads) --
 
@@ -269,11 +316,6 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
         return Err("disk_image.build: at least one payload required")
 
     val total_sectors: u32 = (cfg.size_mb * 2048u64) as u32
-    # Production 32 MiB images keep the historical 128-sector FAT. Tiny 1 MiB
-    # unit-test images only need one FAT sector and avoid interpreter timeouts
-    # (this is what makes nested_payloads verifiable via `bin/simple run` in
-    # a couple of seconds instead of a 128*512*2-byte zero-padding wait).
-    val fat_sectors: u64 = if cfg.size_mb <= 1u64: 1u64 else: 128u64
     val bytes_per_cluster: u64 = 512u64
 
     # --- Cluster layout order: [flat payloads] [nested file data] [dir nodes] ---
@@ -344,6 +386,36 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
     val flat_count: u64 = cfg.payloads.length as u64
     val nested_count: u64 = cfg.nested_payloads.length as u64
 
+    # -- FAT sizing (bug #4): size the FAT to the actual data-cluster count
+    # instead of a fixed 128-sector table. `running` is now
+    # 3 + total_data_clusters (data clusters start at cluster 3, per
+    # _build_fat / first_cluster_all above), so total FAT entries needed =
+    # entries 0,1,2 (reserved) + one per data cluster = `running`.
+    # A fixed 128-sector FAT (16,384 entries) previously overflowed for any
+    # payload set needing more than 16,384-3 clusters (~8.39 MB at 512
+    # B/cluster): the cluster chain silently overran FAT1 into FAT2 and then
+    # into the root directory. See
+    # doc/08_tracking/bug/disk_image_fat32_builder_defects.md #4.
+    val total_data_clusters: u64 = running - 3u64
+    val fat_entries_needed: u64 = running
+    val fat_bytes_needed: u64 = fat_entries_needed * 4u64
+    var fat_sectors: u64 = fat_bytes_needed / 512u64
+    if fat_bytes_needed % 512u64 > 0u64:
+        fat_sectors = fat_sectors + 1u64
+    if fat_sectors == 0u64:
+        fat_sectors = 1u64
+
+    # Reserved(32) + FAT1 + FAT2 + root-dir(1 cluster/sector) + data clusters
+    # must all fit inside the requested image size, or the FAT/root-dir/data
+    # regions would overlap. Error out clearly instead of silently truncating.
+    val sectors_needed: u64 = 32u64 + fat_sectors * 2u64 + 1u64 + total_data_clusters
+    if sectors_needed > total_sectors as u64:
+        return Err("disk_image.build: payload data needs " + sectors_needed.to_text() +
+            " sectors (" + total_data_clusters.to_text() + " data clusters + " +
+            fat_sectors.to_text() + "-sector FAT x2 + reserved/root) but the image is only " +
+            cfg.size_mb.to_text() + " MiB (" + (total_sectors as u64).to_text() +
+            " sectors); increase size_mb")
+
     var img: [u8] = []
 
     # Sector 0: BPB
@@ -355,20 +427,20 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
     # Sectors 2-31: reserved (zeros)
     img = _push_zeros(img, 30u64 * 512u64)
 
-    # Sectors 32-159: FAT1
+    # FAT1: starts at sector 32, `fat_sectors` sectors long (dynamically sized above)
     img = _build_fat(img, fat_sectors: fat_sectors, cluster_counts: cluster_counts)
 
-    # Sectors 160-287: FAT2 (copy)
+    # FAT2: copy, immediately follows FAT1
     img = _build_fat(img, fat_sectors: fat_sectors, cluster_counts: cluster_counts)
 
-    # Sector 288 (cluster 2): root directory.
+    # Root directory (cluster 2), immediately follows FAT2.
     # One entry per flat payload (unchanged), plus one directory entry for each
     # top-level nested directory node, plus one file entry for any nested
     # payload placed directly at root (single-component guest_path, e.g. "/x").
     var pi: u64 = 0u64
     while pi < flat_count:
         val p = cfg.payloads[pi]
-        img = _build_dir_entry(img, p.path, first_cluster: first_cluster_all[pi] as u32, file_size: p.data.length as u32)
+        img = _build_dir_entry(img, _to_8_3_name(p.path), first_cluster: first_cluster_all[pi] as u32, file_size: p.data.length as u32)
         pi = pi + 1u64
     var root_entry_count: u64 = flat_count
     var di2: u64 = 0u64

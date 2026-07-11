@@ -1,0 +1,109 @@
+## Unit spec for the FAT32 disk-image builder's 4 fixed defects, see
+## doc/08_tracking/bug/disk_image_fat32_builder_defects.md:
+##   1. DiskImageConfig without `nested_payloads` builds (struct field default)
+##   2. rt_file_truncate accepts the boxed u64 size arg (covered separately in
+##      src/compiler_rust/compiler/src/interpreter_extern/file_io.rs tests)
+##   3. Flat-root dirent names are stored as proper 8.3 (dot dropped)
+##   4. FAT sectors are sized from the actual payload cluster count, and
+##      build() errors clearly when a payload cannot fit
+use std.spec
+use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_dir_create_all(path: text) -> bool
+
+fn _cleanup(path: text):
+    val _ = rt_process_run("/bin/sh", ["-c", "rm -rf '" + path + "'"])
+
+fn _od_hex(path: text, offset: i64, length: i64) -> text:
+    val command = "od -An -tx1 -j " + offset.to_text() + " -N " + length.to_text() + " '" + path + "' | tr '\\n' ' ' | tr -s ' ' | sed 's/^ //; s/ $//'"
+    val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    expect(code).to_equal(0)
+    stdout
+
+fn _repeat_byte(count: i64, byte: u8) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(byte)
+        i = i + 1
+    out
+
+describe "disk_image.build -- FAT32 builder defect fixes":
+    it "builds when nested_payloads is omitted from DiskImageConfig":
+        """Bug #1: omitting `nested_payloads` used to bind it to `nil` at
+        runtime (a struct-literal-init gap) and crash `for p in cfg.payloads:`
+        even though `payloads` was set correctly. `nested_payloads` now
+        defaults to `[]` so flat-root-only callers don't need to pass it."""
+        val root = "/tmp/disk_image_builder_spec_defaults"
+        _cleanup(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val out_path = root + "/disk.img"
+        val cfg = DiskImageConfig(size_mb: 1u64, payloads: [PayloadEntry(path: "A.TXT", data: [1u8, 2u8, 3u8], guest_path: "")])
+        val result = build(cfg, out_path)
+        expect(result.is_ok()).to_equal(true)
+        _cleanup(root)
+
+    it "stores flat-root dirent names as proper 8.3 (dot dropped, uppercased)":
+        """Bug #3: build() previously passed p.path verbatim to
+        _build_dir_entry, so "FSEXECBG.ELF" was stored as the 11 raw bytes
+        "FSEXECBG.EL" (dot kept, truncated) instead of the 8.3 form
+        "FSEXECBGELF" the C reader's fat32_find_file expects."""
+        val root = "/tmp/disk_image_builder_spec_83name"
+        _cleanup(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val out_path = root + "/disk.img"
+        val cfg = DiskImageConfig(size_mb: 1u64, payloads: [PayloadEntry(path: "FSEXECBG.ELF", data: [9u8, 9u8], guest_path: "")])
+        val result = build(cfg, out_path)
+        expect(result.is_ok()).to_equal(true)
+
+        # Single flat payload -> fat_sectors is small (1 sector: 3 reserved +
+        # 1 data cluster = 4 entries * 4 bytes = 16 bytes, well under 512).
+        # Root dir cluster therefore starts at sector 32 + 2*1 = 34.
+        val root_dir_offset: i64 = 34 * 512
+        expect(_od_hex(out_path, root_dir_offset, 11)).to_equal("46 53 45 58 45 43 42 47 45 4c 46")
+        _cleanup(root)
+
+    it "sizes the FAT from the payload cluster count instead of a fixed 128 sectors":
+        """Bug #4: FAT was fixed at 128 sectors (16,384 entries, ~8.39 MB at
+        512 B/cluster); a larger payload's cluster chain silently overran
+        FAT1 into FAT2 and then into the root directory. fat_size_32 in the
+        BPB (offset 36, LE u32) must now reflect the actual sectors needed
+        instead of always being 128 (0x80): a 64,100-byte payload needs
+        ceil(64100/512)=126 data clusters -> 129 FAT entries (3 reserved +
+        126) -> ceil(129*4/512)=2 sectors. This is also proven at production
+        scale end-to-end: a real 8,400,000-byte ELF payload (fat_size_32=129,
+        0x81) built by this same `build()` was booted under QEMU and its C
+        reader (fat32_find_file) found and ran it -- see
+        doc/08_tracking/bug/disk_image_fat32_builder_defects.md #4."""
+        val root = "/tmp/disk_image_builder_spec_fatsize"
+        _cleanup(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val out_path = root + "/disk.img"
+        val payload = _repeat_byte(64100, 1u8)
+        val cfg = DiskImageConfig(size_mb: 1u64, payloads: [PayloadEntry(path: "BIG.BIN", data: payload, guest_path: "")])
+        val result = build(cfg, out_path)
+        expect(result.is_ok()).to_equal(true)
+        expect(_od_hex(out_path, 36, 4)).to_equal("02 00 00 00")
+        _cleanup(root)
+
+    it "errors clearly instead of silently overflowing when a payload cannot fit":
+        """Bug #4 (error path): a payload whose data + FAT + reserved sectors
+        exceed the requested image size must return a clear Err, not silently
+        truncate structural regions into each other. A 1.1 MB payload cannot
+        fit a 1 MiB (2048-sector) image once FAT + reserved + root overhead
+        is included."""
+        val root = "/tmp/disk_image_builder_spec_toobig"
+        _cleanup(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val out_path = root + "/disk.img"
+        val payload = _repeat_byte(1100000, 1u8)
+        val cfg = DiskImageConfig(size_mb: 1u64, payloads: [PayloadEntry(path: "BIG.BIN", data: payload, guest_path: "")])
+        val result = build(cfg, out_path)
+        expect(result.is_ok()).to_equal(false)
+        match result:
+            Ok(_):
+                expect(false).to_equal(true)
+            Err(e):
+                expect(e).to_contain("increase size_mb")
+        _cleanup(root)
