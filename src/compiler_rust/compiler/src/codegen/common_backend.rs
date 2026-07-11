@@ -147,6 +147,23 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
     names
 }
 
+/// Compute the `__module_init[_<prefix>]` symbol name for a module, shared by
+/// the Cranelift and LLVM backends so both linkers agree on the same name.
+pub(crate) fn module_init_symbol(module_prefix: Option<&str>) -> String {
+    match module_prefix {
+        Some(prefix) => {
+            // Sanitize dots → _dot_ so the symbol name matches _init_all.cpp references
+            let sanitized = if cfg!(target_os = "macos") {
+                prefix.replace('.', "_dot_")
+            } else {
+                prefix.to_string()
+            };
+            format!("__module_init_{}", sanitized)
+        }
+        None => "__module_init".to_string(),
+    }
+}
+
 pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
     matches!(
         name,

@@ -21,6 +21,13 @@ macro_rules! as_typed_ptr {
 }
 
 /// A heap-allocated dictionary (hash map)
+///
+/// Slot storage lives in a SEPARATE allocation (`data`) so the table can GROW.
+/// The old inline-slots layout made every dict fixed-capacity: `rt_dict_set`
+/// returned `false // Dict is full` and compiled Simple code ignores that bool,
+/// so the 9th insert into a default `{}` was silently dropped. That single
+/// defect broke every dict-heavy compiled path (stage-4 `check`, `native-build`
+/// SymbolTable scopes, ...) while interpreted runs (Rust HashMap) worked.
 #[repr(C)]
 pub struct RuntimeDict {
     pub header: HeapHeader,
@@ -28,14 +35,70 @@ pub struct RuntimeDict {
     pub len: u64,
     /// Capacity (number of slots)
     pub capacity: u64,
-    // Followed by key-value pairs as (RuntimeValue, RuntimeValue)
+    /// Slot storage: `capacity * 2` RuntimeValues as (key, value) pairs
+    pub data: *mut RuntimeValue,
+}
+
+/// Allocate a NIL-initialized slot array for `capacity` entries.
+unsafe fn dict_alloc_slots(capacity: u64) -> *mut RuntimeValue {
+    let size = capacity as usize * 2 * std::mem::size_of::<RuntimeValue>();
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+    let data = std::alloc::alloc(layout) as *mut RuntimeValue;
+    if data.is_null() {
+        return std::ptr::null_mut();
+    }
+    // Initialize all key-value slots to NIL (NIL is not 0!)
+    for i in 0..(capacity as usize * 2) {
+        *data.add(i) = RuntimeValue::NIL;
+    }
+    data
+}
+
+unsafe fn dict_free_slots(data: *mut RuntimeValue, capacity: u64) {
+    if data.is_null() {
+        return;
+    }
+    let size = capacity as usize * 2 * std::mem::size_of::<RuntimeValue>();
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+    std::alloc::dealloc(data as *mut u8, layout);
+}
+
+/// Double the dict's capacity, rehashing all entries. Returns false on OOM.
+unsafe fn dict_grow(d: *mut RuntimeDict) -> bool {
+    let old_capacity = (*d).capacity;
+    let old_data = (*d).data;
+    let new_capacity = (old_capacity * 2).max(8);
+    let new_data = dict_alloc_slots(new_capacity);
+    if new_data.is_null() {
+        return false;
+    }
+    for i in 0..old_capacity as usize {
+        let k = *old_data.add(i * 2);
+        if k.is_nil() {
+            continue;
+        }
+        let v = *old_data.add(i * 2 + 1);
+        let hash = hash_value(k);
+        for probe in 0..new_capacity {
+            let idx = ((hash + probe) % new_capacity) as usize;
+            if (*new_data.add(idx * 2)).is_nil() {
+                *new_data.add(idx * 2) = k;
+                *new_data.add(idx * 2 + 1) = v;
+                break;
+            }
+        }
+    }
+    dict_free_slots(old_data, old_capacity);
+    (*d).capacity = new_capacity;
+    (*d).data = new_data;
+    true
 }
 
 /// Allocate a new dictionary with the given capacity
 #[no_mangle]
 pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
     let capacity = capacity.max(8); // Minimum capacity
-    let size = std::mem::size_of::<RuntimeDict>() + capacity as usize * 2 * std::mem::size_of::<RuntimeValue>();
+    let size = std::mem::size_of::<RuntimeDict>();
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
 
     unsafe {
@@ -44,15 +107,16 @@ pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
             return RuntimeValue::NIL;
         }
 
+        let data = dict_alloc_slots(capacity);
+        if data.is_null() {
+            std::alloc::dealloc(ptr as *mut u8, layout);
+            return RuntimeValue::NIL;
+        }
+
         (*ptr).header = HeapHeader::new(HeapObjectType::Dict, size as u32);
         (*ptr).len = 0;
         (*ptr).capacity = capacity;
-
-        // Initialize all key-value slots to NIL (NIL is not 0!)
-        let data_ptr = ptr.add(1) as *mut RuntimeValue;
-        for i in 0..(capacity * 2) {
-            *data_ptr.add(i as usize) = RuntimeValue::NIL;
-        }
+        (*ptr).data = data;
 
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
     }
@@ -64,9 +128,8 @@ pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
 pub extern "C" fn rt_dict_free(dict: RuntimeValue) {
     let ptr = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, ());
     unsafe {
-        let size =
-            std::mem::size_of::<RuntimeDict>() + (*ptr).capacity as usize * 2 * std::mem::size_of::<RuntimeValue>();
-        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        dict_free_slots((*ptr).data, (*ptr).capacity);
+        let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeDict>(), 8).unwrap();
         unregister_heap_ptr(ptr as *mut HeapHeader);
         std::alloc::dealloc(ptr as *mut u8, layout);
     }
@@ -145,7 +208,7 @@ pub extern "C" fn rt_dict_get(dict: RuntimeValue, key: RuntimeValue) -> RuntimeV
         }
 
         let hash = hash_value(key);
-        let data_ptr = (d.add(1)) as *const RuntimeValue;
+        let data_ptr = (*d).data as *const RuntimeValue;
 
         // Linear probing
         for i in 0..capacity {
@@ -162,7 +225,7 @@ pub extern "C" fn rt_dict_get(dict: RuntimeValue, key: RuntimeValue) -> RuntimeV
     }
 }
 
-/// Set a value in a dictionary
+/// Set a value in a dictionary (grows the table as needed)
 #[no_mangle]
 pub extern "C" fn rt_dict_set(dict: RuntimeValue, key: RuntimeValue, value: RuntimeValue) -> bool {
     if key.is_nil() {
@@ -170,13 +233,19 @@ pub extern "C" fn rt_dict_set(dict: RuntimeValue, key: RuntimeValue, value: Runt
     }
     let d = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, false);
     unsafe {
+        // Grow at 3/4 load so linear probing stays effective and an insert
+        // can never hit a full table (the old fixed-capacity behavior
+        // silently dropped inserts once the initial 8 slots filled).
+        if ((*d).len + 1) * 4 >= (*d).capacity * 3 && !dict_grow(d) {
+            return false;
+        }
         let capacity = (*d).capacity;
         if capacity == 0 {
             return false;
         }
 
         let hash = hash_value(key);
-        let data_ptr = (d.add(1)) as *mut RuntimeValue;
+        let data_ptr = (*d).data;
 
         // Linear probing
         for i in 0..capacity {
@@ -191,7 +260,7 @@ pub extern "C" fn rt_dict_set(dict: RuntimeValue, key: RuntimeValue, value: Runt
                 return true;
             }
         }
-        false // Dict is full
+        false // Unreachable after growth, kept as a safety net
     }
 }
 
@@ -201,7 +270,7 @@ pub extern "C" fn rt_dict_clear(dict: RuntimeValue) -> bool {
     let d = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, false);
     unsafe {
         let capacity = (*d).capacity;
-        let data_ptr = (d.add(1)) as *mut RuntimeValue;
+        let data_ptr = (*d).data;
         for i in 0..(capacity * 2) {
             *data_ptr.add(i as usize) = RuntimeValue::NIL;
         }
@@ -223,7 +292,7 @@ where
         if result.is_nil() {
             return result;
         }
-        let data_ptr = (d.add(1)) as *const RuntimeValue;
+        let data_ptr = (*d).data as *const RuntimeValue;
         for i in 0..capacity as usize {
             let k = *data_ptr.add(i * 2);
             if !k.is_nil() {
@@ -276,7 +345,7 @@ pub extern "C" fn rt_dict_remove(dict: RuntimeValue, key: RuntimeValue) -> Runti
         }
 
         let hash = hash_value(key);
-        let data_ptr = (d.add(1)) as *mut RuntimeValue;
+        let data_ptr = (*d).data;
 
         // Find the key using linear probing
         for i in 0..capacity {
