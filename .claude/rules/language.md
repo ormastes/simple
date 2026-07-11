@@ -19,7 +19,7 @@ alwaysApply: false
 ## Runtime Limitations
 - **Multi-line booleans** - wrap in parentheses: `if (a and\n   b):` works
 - **Nested closure capture** - can READ outer vars, CANNOT MODIFY (module closures work fine)
-- **Chained methods broken** - use intermediate `var`
+- **Chained methods on erased receivers** - chains fail only when a link's receiver type is erased (e.g. from ANY/dict); typed chains work. Workaround: intermediate typed `val`
 - **Reserved keywords:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`
 
 ## Syntax Quick Reference

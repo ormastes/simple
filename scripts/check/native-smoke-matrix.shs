@@ -1,0 +1,352 @@
+#!/bin/sh
+# native-smoke-matrix.shs — extended native-build language-feature smoke matrix.
+#
+# #138 progress gauge / memory note: "extended smoke matrix is mandatory
+# pre-deploy". For each language-feature probe below this script:
+#   1. Writes a tiny, uniquely-named .spl source (timestamp+pid suffix, so the
+#      object cache keyed on source hash — #69 — never serves a stale build).
+#   2. Runs `env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry <probe>
+#      -o <out> --clean` (SIMPLE_BOOTSTRAP unset so this always exercises the
+#      self-hosted pure-Simple compiler, per repo default-tooling rule).
+#   3. Executes the resulting binary and compares its exit code (rc) to the
+#      expected value.
+#   4. Classifies the result as PASS / FAIL / XFAIL / XPASS. Cases marked
+#      XFAIL are known-broken today (match-on-enum, closures, Result `?`);
+#      they do not fail the run unless they start passing (XPASS), which is
+#      reported so we notice the moment a blocker clears.
+#   5. Scans build stderr for `CODEGEN-AMBIGUOUS-METHOD` / "falling back to
+#      interpreter" as a JIT-health signal and tallies hits across the run.
+#
+# Usage: sh scripts/check/native-smoke-matrix.shs
+# Env:   SIMPLE_BINARY (default bin/simple), NATIVE_SMOKE_WORK_DIR (default
+#        /tmp/native-smoke-matrix.$$), NATIVE_SMOKE_CASES (space-separated
+#        subset of case ids to run, default = all).
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${NATIVE_SMOKE_WORK_DIR:-/tmp/native-smoke-matrix.$$}"
+mkdir -p "$WORK_DIR"
+
+STAMP="$(date +%s)_$$"
+RESULTS_FILE="$WORK_DIR/results.tsv"
+: >"$RESULTS_FILE"
+
+TOTAL=0
+PASS_N=0
+FAIL_N=0
+XFAIL_N=0
+XPASS_N=0
+FALLBACK_TOTAL=0
+
+# ---------------------------------------------------------------------------
+# Case source writers — one tiny .spl program per language feature.
+# ---------------------------------------------------------------------------
+
+write_case_arith() {
+    cat >"$1" <<'EOF'
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+
+fn main() -> i64:
+    return add(3, 4)
+EOF
+}
+
+write_case_ifelse() {
+    cat >"$1" <<'EOF'
+fn classify(n: i64) -> i64:
+    if n < 0:
+        return 1
+    else if n == 0:
+        return 2
+    else:
+        return 3
+
+fn main() -> i64:
+    return classify(5)
+EOF
+}
+
+write_case_while() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    var i = 0
+    var total = 0
+    while i < 10:
+        total = total + i
+        i = i + 1
+    return total
+EOF
+}
+
+write_case_forin() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val nums = [1, 2, 3, 4, 5]
+    var total = 0
+    for n in nums:
+        total = total + n
+    return total
+EOF
+}
+
+write_case_array_index() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    var arr = [1, 2, 3]
+    arr[1] = 70
+    return arr[0] + arr[1]
+EOF
+}
+
+write_case_struct() {
+    cat >"$1" <<'EOF'
+struct Point:
+    x: i64
+    y: i64
+
+fn main() -> i64:
+    val p = Point(x: 30, y: 41)
+    return p.x + p.y
+EOF
+}
+
+write_case_enum_construct() {
+    cat >"$1" <<'EOF'
+enum Shape:
+    Circle(i64)
+    Square(i64)
+
+fn main() -> i64:
+    val s = Shape.Circle(7)
+    return 42
+EOF
+}
+
+write_case_enum_match() {
+    cat >"$1" <<'EOF'
+enum Shape:
+    Circle(i64)
+    Square(i64)
+
+fn main() -> i64:
+    val s = Shape.Circle(7)
+    match s:
+        case Shape.Circle(r): return r
+        case Shape.Square(r): return 0
+    return 0
+EOF
+}
+
+write_case_string_concat() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a = "foo"
+    val b = "bar"
+    val c = a + b
+    return c.len
+EOF
+}
+
+write_case_string_interp() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a = 7
+    val s = "value={a}"
+    return s.len
+EOF
+}
+
+write_case_nested_fn() {
+    cat >"$1" <<'EOF'
+fn f3(x: i64) -> i64:
+    return x + 1
+
+fn f2(x: i64) -> i64:
+    return f3(x) + 1
+
+fn f1(x: i64) -> i64:
+    return f2(x) + 1
+
+fn main() -> i64:
+    return f1(4)
+EOF
+}
+
+write_case_closure() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val add_one = \x: x + 1
+    return add_one(6)
+EOF
+}
+
+write_case_dict() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val scores = {"a": 1, "b": 6}
+    return scores["a"] + scores["b"]
+EOF
+}
+
+write_case_option() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val x: i64? = 7
+    if val v = x.?:
+        return v
+    return 0
+EOF
+}
+
+write_case_result_try() {
+    cat >"$1" <<'EOF'
+fn get() -> Result<i64, text>:
+    return Ok(7)
+
+fn compute() -> Result<i64, text>:
+    val v = get()?
+    return Ok(v)
+
+fn main() -> i64:
+    match compute():
+        case Ok(v): return v
+        case Err(_): return 0
+    return 0
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
+run_case() {
+    id="$1"
+    desc="$2"
+    writer="$3"
+    expected_rc="$4"
+    xfail="$5"
+
+    TOTAL=$((TOTAL + 1))
+
+    src="$WORK_DIR/case_${id}_${STAMP}.spl"
+    bin="$WORK_DIR/case_${id}_${STAMP}_bin"
+    build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
+
+    "$writer" "$src"
+
+    build_ok=1
+    if ! env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" native-build \
+        --entry "$src" -o "$bin" --clean >"$build_log" 2>&1; then
+        build_ok=0
+    fi
+
+    fallback_hits="$(grep -Ec 'CODEGEN-AMBIGUOUS-METHOD|falling back to interpreter' "$build_log" 2>/dev/null || true)"
+    fallback_hits="${fallback_hits:-0}"
+    FALLBACK_TOTAL=$((FALLBACK_TOTAL + fallback_hits))
+
+    got_rc="build-failed"
+    if [ "$build_ok" -eq 1 ] && [ -x "$bin" ]; then
+        set +e
+        "$bin" >/dev/null 2>>"$build_log"
+        got_rc=$?
+        set -e
+    fi
+
+    base_status="FAIL"
+    if [ "$got_rc" = "$expected_rc" ]; then
+        base_status="PASS"
+    fi
+
+    status="$base_status"
+    if [ "$xfail" = "yes" ]; then
+        if [ "$base_status" = "PASS" ]; then
+            status="XPASS"
+        else
+            status="XFAIL"
+        fi
+    fi
+
+    err_tail=""
+    if [ "$status" = "FAIL" ] || [ "$status" = "XPASS" ]; then
+        err_tail="$(tail -n 1 "$build_log" 2>/dev/null | tr -d '\n' | tr -d '\t')"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$id" "$desc" "$status" "$got_rc" "$expected_rc" "$fallback_hits" "$err_tail" \
+        >>"$RESULTS_FILE"
+
+    case "$status" in
+        PASS) PASS_N=$((PASS_N + 1)) ;;
+        FAIL) FAIL_N=$((FAIL_N + 1)) ;;
+        XFAIL) XFAIL_N=$((XFAIL_N + 1)) ;;
+        XPASS) XPASS_N=$((XPASS_N + 1)) ;;
+    esac
+
+    echo "[$id] $desc -> $status (rc got=$got_rc want=$expected_rc, fallback_hits=$fallback_hits)"
+}
+
+# id | description | writer | expected rc | xfail(yes/no)
+CASES="
+arith_fn_call|(1) arithmetic + fn call|write_case_arith|7|no
+if_elif_else|(2) if/else if/else|write_case_ifelse|3|no
+while_sum|(3) while loop sum|write_case_while|45|no
+for_in_array|(4) for-in array|write_case_forin|15|no
+array_index_rw|(5) array literal + index read/write|write_case_array_index|71|no
+struct_field|(6) struct construct + field read|write_case_struct|71|no
+enum_construct|(7) enum construct (Shape.Circle)|write_case_enum_construct|42|no
+enum_match|(8) match on enum|write_case_enum_match|7|yes
+string_concat_len|(9) string concat + len|write_case_string_concat|6|no
+string_interp|(10) string interpolation|write_case_string_interp|7|no
+nested_fn_3deep|(11) nested fn calls 3 deep|write_case_nested_fn|7|no
+closure_lambda|(12) closure/lambda|write_case_closure|7|yes
+dict_index|(13) dict literal + index|write_case_dict|7|no
+option_nil_check|(14) Option/nil check (x.?)|write_case_option|7|no
+result_try_op|(15) Result + ? operator|write_case_result_try|7|yes
+"
+
+# NOTE: read from a file (not a pipe) so the loop body runs in THIS shell,
+# not a subshell — otherwise TOTAL/PASS_N/etc. updates inside run_case would
+# be lost when the subshell exits.
+CASES_FILE="$WORK_DIR/cases.tsv"
+printf '%s\n' "$CASES" >"$CASES_FILE"
+
+if [ -n "${NATIVE_SMOKE_CASES:-}" ]; then
+    for want_id in $NATIVE_SMOKE_CASES; do
+        while IFS='|' read -r id desc writer rc xfail; do
+            [ -z "$id" ] && continue
+            [ "$id" = "$want_id" ] || continue
+            run_case "$id" "$desc" "$writer" "$rc" "$xfail"
+        done <"$CASES_FILE"
+    done
+else
+    while IFS='|' read -r id desc writer rc xfail; do
+        [ -z "$id" ] && continue
+        run_case "$id" "$desc" "$writer" "$rc" "$xfail"
+    done <"$CASES_FILE"
+fi
+
+echo ""
+echo "===== native-smoke-matrix summary ====="
+printf '%-20s %-42s %-6s %-6s %-6s %-6s %s\n' "ID" "DESCRIPTION" "STATUS" "GOT" "WANT" "FALL" "ERR_TAIL"
+while IFS="$(printf '\t')" read -r id desc status got want fall err; do
+    printf '%-20s %-42s %-6s %-6s %-6s %-6s %s\n' "$id" "$desc" "$status" "$got" "$want" "$fall" "$err"
+done <"$RESULTS_FILE"
+
+echo ""
+echo "total=$TOTAL pass=$PASS_N fail=$FAIL_N xfail=$XFAIL_N xpass=$XPASS_N codegen_fallback_hits=$FALLBACK_TOTAL"
+echo "results_file=$RESULTS_FILE"
+
+if [ "$XPASS_N" -gt 0 ]; then
+    echo "NOTE: $XPASS_N case(s) marked XFAIL now PASS — promote them to real PASS cases."
+fi
+
+if [ "$FAIL_N" -gt 0 ]; then
+    echo "native_smoke_matrix=false"
+    exit 1
+fi
+
+echo "native_smoke_matrix=true"
