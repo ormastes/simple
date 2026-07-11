@@ -155,3 +155,21 @@ working copy: `resolve_worker_binary()` in `src/app/cli/check_entry.spl` resolve
 token advance — unconditional syscall on the hottest parser loop. Cached-flag variant (lazy
 process-lifetime cache; the env var is never set mid-process) reduces overhead in both
 interpreted and compiled parsing; 5 sites switched to `par_env_save_enabled()`.
+
+## 2026-07-12 status update — fix restored to source after rollback loss
+
+The dict-growth fix (originally `5e9ace8c01`) had been lost from source by the same-day
+rollback; `rt_dict_set` at HEAD was again fixed-capacity. Restored verbatim in commit
+`b64b89d3` (dict.rs indirect slots + grow ×2 at 3/4 load + `test_dict_grows_past_initial_capacity`,
+plus the missing `common_backend::module_init_symbol()` that `4a6250175e` referenced but never
+landed). Verified: broken-HEAD dict test fails on the 9th insert; fixed tree passes 13/13 dict
+tests; full runtime suite unchanged (971 pass / 6 pre-existing failures).
+
+With a freshly built seed (`cargo build --profile bootstrap -p simple-driver --features llvm`),
+seed-driven `build bootstrap` no longer SIGILLs at stage 1. Next wall (pre-existing, separate):
+stage 1 delegates to the deployed `bin/release/aarch64-apple-darwin-macho/simple` worker, which
+emits parser errors on `src/app/web_stack_sample/app.spl` (generics in class body, lines 48/88)
+and times out after 180s before producing a binary — the known slow-interpreted-parse deploy
+blocker (see `doc/03_plan/compiler/bootstrap/redeploy_stage4_plan_2026-07-08.md`). Stage-4
+rebuild/redeploy with the fixed runtime is still required for the deployed binary to pick up
+dict growth.
