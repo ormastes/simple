@@ -38,6 +38,50 @@ fn _driver_env_bool(key: text) -> bool:
     val value = (rt_env_get(key) ?? "").to_lower()
     value == "1" or value == "true" or value == "yes" or value == "on"
 
+# Diagnostics-plumbing: MirLowering.errors was silently dropped on the
+# native-build worker path (nothing outside 70.backend read it), so a bare
+# `nosuchfn(1)` call or an unsupported construct produced broken MIR that
+# only surfaced later as an llc crash / nil-callee far from the real cause.
+# Format each MirError the same way jit_interpreter.spl / compiler.spl
+# already report them (message, plus file:line:col when the span is known).
+fn _format_mir_error(err: MirError) -> text:
+    match err.span:
+        Some(sp):
+            if sp.file != "":
+                "MIR lowering error ({sp.file}:{sp.line}:{sp.col}): {err.message}"
+            else:
+                "MIR lowering error: {err.message}"
+        nil:
+            "MIR lowering error: {err.message}"
+
+# MirLowering.errors mixes genuine "this MIR is broken" failures with
+# recoverable/informational entries the lowering pipeline pushes through the
+# same channel and then continues past (e.g. `lower_type` falling back to
+# MirType.I64 for a HIR type it can't map 1:1 — commonly HirTypeKind.Infer,
+# since this pipeline has no expression type-inference pass; or the asm
+# target-match "note:"-prefixed advisories in asm_and_targets.spl). Treating
+# every entry as fatal regresses currently-passing builds: confirmed
+# empirically that native-smoke-matrix cases (8) enum_match and (13)
+# dict_index both hit "unsupported MIR type kind: ..." on every
+# currently-passing build and still produce correct output.
+#
+# So this allowlists the specific message shapes that name an actually
+# unresolved symbol/construct with no fallback — the class of bug this fix
+# targets (a bare `nosuchfn(1)` call, or a first-class lambda value passed
+# where only a direct call is supported) — and leaves everything else as a
+# non-fatal warning.
+fn _mir_error_is_fatal(message: text) -> bool:
+    message.starts_with("undefined variable:") or
+        message.starts_with("unresolved method call:") or
+        message.starts_with("unsupported MIR expression:")
+
+fn _driver_collect_mir_errors(ctx: CompileContext, errors: [MirError]):
+    for err in errors:
+        if _mir_error_is_fatal(err.message):
+            ctx.add_error(_format_mir_error(err))
+        else:
+            ctx.add_warning(_format_mir_error(err))
+
 impl CompilerDriver:
     # --------------------------------------------------------------------------
     # Mode: JIT Compile and Run
@@ -321,6 +365,7 @@ impl CompilerDriver:
             var bootstrap_lowering = MirLowering.new(bootstrap_hir.symbols)
             var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
+            _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
             log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()}")
             return self.ctx.errors.len() == 0
 
@@ -395,6 +440,7 @@ impl CompilerDriver:
                 if name_direct == "app.cli.bootstrap_main":
                     self.ctx.bootstrap_entry_mir = Some(mir_direct)
                 direct_idx = direct_idx + 1
+            _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
             return self.ctx.errors.len() == 0
 
         var lowering = MirLowering(
@@ -443,6 +489,7 @@ impl CompilerDriver:
                 self.ctx.mir_modules[name] = mir_module
                 if name == "app.cli.bootstrap_main":
                     self.ctx.bootstrap_entry_mir = Some(mir_module)
+            _driver_collect_mir_errors(self.ctx, lowering.errors)
             log_debug("[lower_to_mir] MIR done")
             return self.ctx.errors.len() == 0
         for src3 in self.ctx.sources:
