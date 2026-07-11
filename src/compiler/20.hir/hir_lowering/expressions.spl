@@ -372,12 +372,19 @@ impl HirLowering:
             case ExprKind.MatchCase(scrutinee, arms):
                 var hir_arms: [HirMatchArm] = []
                 for arm in arms:
-                    val guard_ = if arm.guard.?: self.lower_hir_expr(arm.guard) else: nil
+                    # Typed rebind: without it the deployed seed interpreter
+                    # treats `arm` as ANY and field reads mis-decode (a list
+                    # field comes back as a scalar handle, so a later `.len()`
+                    # crashes with "len on i64"). Every other arm-iterating pass
+                    # (40.mono, 30.types) does the same rebind. guard is a
+                    # DESUGARED (has_guard, guard) pair — not an Option.
+                    val typed_arm: MatchArm = arm
                     hir_arms = hir_arms.push(HirMatchArm(
-                        pattern: self.lower_pattern(arm.pattern),
-                        guard: guard_,
-                        body: self.lower_hir_block(arm.body),
-                        span: arm.span
+                        pattern: self.lower_pattern(typed_arm.pattern),
+                        has_guard: typed_arm.has_guard,
+                        guard: self.lower_hir_expr(typed_arm.guard),
+                        body: self.lower_hir_block(typed_arm.body),
+                        span: typed_arm.span
                     ))
                 HirExprKind.MatchCase(self.lower_hir_expr(scrutinee), hir_arms)
 
@@ -638,18 +645,22 @@ impl HirLowering:
                     HirType(kind: HirTypeKind.Named(symbol, []), span: p.span)
                 else:
                     HirType(kind: HirTypeKind.Error, span: p.span)
-                val hir_payload = payload.map(\pl: match pl:
-                    case Tuple(patterns):
-                        var hir_patterns: [HirPattern] = []
-                        for pat in patterns:
-                            hir_patterns = hir_patterns.push(self.lower_pattern(pat))
-                        HirPatternPayload.Tuple(hir_patterns)
-                    case Struct(fields):
-                        var hir_fields: [(text, HirPattern)] = []
-                        for (fname, fpat) in fields:
-                            hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
-                        HirPatternPayload.Struct(hir_fields)
-                )
+                # No `.map(\pl: ...)` lambda here: the seed interpreter does not
+                # bind `self` inside a lambda body, so `self.lower_pattern` in a
+                # closure fails native-build with "variable `self` not found".
+                var hir_payload: HirPatternPayload? = nil
+                if val pl = payload:
+                    match pl:
+                        case Tuple(patterns):
+                            var hir_patterns: [HirPattern] = []
+                            for pat in patterns:
+                                hir_patterns = hir_patterns.push(self.lower_pattern(pat))
+                            hir_payload = Some(HirPatternPayload.Tuple(hir_patterns))
+                        case Struct(fields):
+                            var hir_fields: [(text, HirPattern)] = []
+                            for (fname, fpat) in fields:
+                                hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
+                            hir_payload = Some(HirPatternPayload.Struct(hir_fields))
                 HirPatternKind.Enum(hir_type, variant, hir_payload)
 
             case Or(patterns):

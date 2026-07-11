@@ -811,6 +811,13 @@ fn decl_set_derives(idx: i64, derives: [text]):
 var arm_pattern: [i64] = []
 var arm_guard: [i64] = []
 var arm_body: [[i64]] = []
+# Flat mirror of arm_body: joined "a,b,c" text per arm. The arm_body arena is
+# [[i64]] and the native-build seed erases the inner list to a boxed i64 handle,
+# so a direct arm_body[idx] read fails `.len()` with "len on i64". A flat [text]
+# arena has no nested element to erase, and unlike env dual-storage it is
+# per-process and index-aligned with arm_pattern, so it can never leak stale
+# bodies across compilations or into child processes.
+var arm_body_flat: [text] = []
 var arm_binding: [text] = []
 var arm_rationale: [text] = []
 
@@ -819,6 +826,7 @@ fn arm_new(pattern: i64, guard: i64, body: [i64]) -> i64:
     arm_pattern.push(pattern)
     arm_guard.push(guard)
     arm_body.push(body)
+    arm_body_flat.push(ast_i64_list_join(body))
     arm_binding.push("")
     arm_rationale.push("")
     idx
@@ -828,6 +836,7 @@ fn arm_new_with_binding(pattern: i64, guard: i64, body: [i64], binding: text) ->
     arm_pattern.push(pattern)
     arm_guard.push(guard)
     arm_body.push(body)
+    arm_body_flat.push(ast_i64_list_join(body))
     arm_binding.push(binding)
     arm_rationale.push("")
     idx
@@ -837,6 +846,7 @@ fn arm_new_with_binding_and_rationale(pattern: i64, guard: i64, body: [i64], bin
     arm_pattern.push(pattern)
     arm_guard.push(guard)
     arm_body.push(body)
+    arm_body_flat.push(ast_i64_list_join(body))
     arm_binding.push(binding)
     arm_rationale.push(rationale)
     idx
@@ -848,6 +858,10 @@ fn arm_get_guard(idx: i64) -> i64:
     arm_guard[idx]
 
 fn arm_get_body(idx: i64) -> [i64]:
+    # Read from the flat [text] mirror (see arm_body_flat above): decoding a
+    # fresh [i64] from text sidesteps the seed's nested-[[i64]] element erasure.
+    if idx >= 0 and idx < arm_body_flat.len():
+        return ast_i64_list_split(arm_body_flat[idx])
     arm_body[idx]
 
 fn arm_get_binding(idx: i64) -> text:

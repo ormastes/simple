@@ -574,6 +574,59 @@ fn convert_flat_expr(idx: i64) -> Expr:
     else:
         return Expr(kind: ExprKind.NilLit, span: span)
 
+fn convert_flat_pattern(pat_eid: i64) -> Pattern:
+    """Convert a match-arm 'pattern' (parsed as an EXPRESSION in the flat AST)
+    into a structured Pattern. `Shape.Circle(x)` is EXPR_CALL over an
+    EXPR_FIELD_ACCESS -> Enum(Shape, Circle, Tuple([Binding x])); bare
+    `Shape.Red` -> unit Enum; `_` -> Wildcard; other ident -> Binding;
+    literal -> Literal."""
+    val pspan = make_span()
+    if pat_eid < 0:
+        return Pattern(kind: PatternKind.Wildcard, span: pspan)
+    val ptag = expr_get_tag(pat_eid)
+    if ptag == EXPR_METHOD_CALL:
+        # `Shape.Circle(x)` parses as a METHOD_CALL: receiver=Shape (obj),
+        # method=Circle (variant), args=[x] (payload bindings) -- same form as
+        # enum construction.
+        val mc_obj = expr_get_left(pat_eid)
+        val mc_enum = if expr_get_tag(mc_obj) == EXPR_IDENT: expr_get_str(mc_obj) else: ""
+        val mc_variant = expr_get_str(pat_eid)
+        var mc_sub: [Pattern] = []
+        for a_eid in expr_get_args(pat_eid):
+            if expr_get_tag(a_eid) == EXPR_IDENT:
+                mc_sub.push(Pattern(kind: PatternKind.Binding(expr_get_str(a_eid), false), span: pspan))
+            else:
+                mc_sub.push(convert_flat_pattern(a_eid))
+        if mc_sub.len() == 0:
+            return Pattern(kind: PatternKind.Enum(mc_enum, mc_variant, nil), span: pspan)
+        return Pattern(kind: PatternKind.Enum(mc_enum, mc_variant, EnumPatternPayload.Tuple(mc_sub)), span: pspan)
+    elif ptag == EXPR_CALL:
+        val callee = expr_get_left(pat_eid)
+        if expr_get_tag(callee) == EXPR_FIELD_ACCESS:
+            val base = expr_get_left(callee)
+            val enum_name = if expr_get_tag(base) == EXPR_IDENT: expr_get_str(base) else: ""
+            val variant = expr_get_str(callee)
+            var sub: [Pattern] = []
+            for a_eid in expr_get_args(pat_eid):
+                if expr_get_tag(a_eid) == EXPR_IDENT:
+                    sub.push(Pattern(kind: PatternKind.Binding(expr_get_str(a_eid), false), span: pspan))
+                else:
+                    sub.push(convert_flat_pattern(a_eid))
+            return Pattern(kind: PatternKind.Enum(enum_name, variant, EnumPatternPayload.Tuple(sub)), span: pspan)
+        return Pattern(kind: PatternKind.Wildcard, span: pspan)
+    elif ptag == EXPR_FIELD_ACCESS:
+        val fbase = expr_get_left(pat_eid)
+        val f_enum = if expr_get_tag(fbase) == EXPR_IDENT: expr_get_str(fbase) else: ""
+        return Pattern(kind: PatternKind.Enum(f_enum, expr_get_str(pat_eid), nil), span: pspan)
+    elif ptag == EXPR_IDENT:
+        val nm = expr_get_str(pat_eid)
+        if nm == "_":
+            return Pattern(kind: PatternKind.Wildcard, span: pspan)
+        return Pattern(kind: PatternKind.Binding(nm, false), span: pspan)
+    elif ptag == EXPR_INT_LIT or ptag == EXPR_STRING_LIT or ptag == EXPR_BOOL_LIT:
+        return Pattern(kind: PatternKind.Literal(convert_flat_expr(pat_eid)), span: pspan)
+    return Pattern(kind: PatternKind.Wildcard, span: pspan)
+
 fn convert_flat_stmt(idx: i64) -> Stmt:
     if idx < 0:
         val nil_span = make_span()
@@ -677,6 +730,44 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Block(Block(stmts: body, span: span)), span: span)), span: span)
     elif tag == STMT_GPU_LAUNCH:
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
+    elif tag == STMT_MATCH:
+        # Ordinary `match s: Pat => body` was previously dropped to NilLit here,
+        # so match never reached HIR lowering on the native path. Build a real
+        # MatchCase: scrutinee from EXPR, arms from BODY. Each arm's "pattern"
+        # is an expression eid (convert_flat_pattern reclassifies enum variants).
+        val m_scrut = convert_flat_expr(stmt_get_expr(idx))
+        val m_arm_ids = stmt_get_body(idx)
+        var m_arms: [MatchArm] = []
+        var mi = 0
+        while mi < m_arm_ids.len():
+            val arm_id = m_arm_ids[mi]
+            val m_pat = convert_flat_pattern(arm_get_pattern(arm_id))
+            # Explicit type: arm_get_body returns [i64] but the deployed seed
+            # erases the nested-[[i64]] element to a boxed i64 handle on a bare
+            # `val`, so `.len()` fails with "len on i64". The annotation forces
+            # the list decode (same ANY-field landmine as the MatchArm rebind).
+            val m_body_ids: [i64] = arm_get_body(arm_id)
+            var m_arm_body: [Stmt] = []
+            var mbi = 0
+            while mbi < m_body_ids.len():
+                m_arm_body.push(convert_flat_stmt(m_body_ids[mbi]))
+                mbi = mbi + 1
+
+            val m_guard_eid = arm_get_guard(arm_id)
+            var m_g_has = false
+            var m_g_expr = Expr(kind: ExprKind.NilLit, span: span)
+            if m_guard_eid >= 0:
+                m_g_has = true
+                m_g_expr = convert_flat_expr(m_guard_eid)
+            m_arms.push(MatchArm(
+                pattern: m_pat,
+                has_guard: m_g_has,
+                guard: m_g_expr,
+                body: Block(stmts: m_arm_body, span: span),
+                span: span
+            ))
+            mi = mi + 1
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.MatchCase(m_scrut, m_arms), span: span)), span: span)
     else:
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
 

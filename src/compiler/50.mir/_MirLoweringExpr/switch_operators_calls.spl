@@ -20,7 +20,6 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
 extern fn rt_env_get(key: text) -> text
-extern fn rt_enum_discriminant(value: HirExprKind) -> i64
 
 fn enum_variant_disc(names: [text], variant: text) -> i64:
     """Discriminant = index of `variant` in the enum's declared variant order."""
@@ -613,12 +612,17 @@ impl MirLowering:
                     self.local_map[bind_sym.unwrap().id] = pl
             val arm_result = self.lower_block(enum_bodies[ci])
             var b_arm2 = self.builder
-            if val arm_result_local = arm_result:
-                b_arm2.emit_copy(result, arm_result_local)
-                result_defined = true
-            # Guard: if the arm body already terminated (e.g. `return r`), do NOT
-            # overwrite that terminator with a goto (set_terminator clobbers).
+            # Guard: if the arm body already terminated (e.g. `return r`), emit
+            # NOTHING more into this block. set_terminator would clobber the
+            # terminator, and emitting a post-terminator copy is worse: the
+            # buffered copy gets flushed by the NEXT switch_to_block, and
+            # finalize_block REPLACES block.instructions — wiping every
+            # instruction the arm body emitted (the `return 17` const vanished
+            # this way, leaving rets of undefined locals).
             if not b_arm2.current_block_has_explicit_terminator():
+                if val arm_result_local = arm_result:
+                    b_arm2.emit_copy(result, arm_result_local)
+                    result_defined = true
                 b_arm2.terminate_goto(merge_block)
             self.builder = b_arm2
             var b_n = self.builder
@@ -629,9 +633,11 @@ impl MirLowering:
         if has_default:
             val dres = self.lower_block(default_body)
             var b_d2 = self.builder
-            if val drl = dres:
-                b_d2.emit_copy(result, drl)
-                result_defined = true
+            # Same post-terminator guard as the arm loop above.
+            if not b_d2.current_block_has_explicit_terminator():
+                if val drl = dres:
+                    b_d2.emit_copy(result, drl)
+                    result_defined = true
             self.builder = b_d2
         var b_end = self.builder
         if not b_end.current_block_has_explicit_terminator():
@@ -761,75 +767,91 @@ impl MirLowering:
         if val bf_local = bitfield_construct:
             return bf_local
 
-        val callee_disc = rt_enum_discriminant(callee.kind)
-        val fallback_symbol = SymbolId(id: -1)
-        var direct_symbol = fallback_symbol
-        var direct_name = ""
-        var is_direct = false
-        if callee_disc == rt_enum_discriminant(HirExprKind.Var(fallback_symbol)):
-            match callee.kind:
-                case HirExprKind.Var(symbol):
-                    direct_symbol = symbol
-                    val sym = self.symbols.get_symbol(symbol)
-                    direct_name = if sym.?: sym.name else: ""
-                    is_direct = true
-                case _:
-                    pass
-        elif callee_disc == rt_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
-            match callee.kind:
-                case HirExprKind.NamedVar(symbol, name):
-                    direct_symbol = symbol
-                    direct_name = name
-                    is_direct = true
-                case _:
-                    pass
-
-        # Check for builtins, GPU intrinsics, and struct construction before arguments.
-        if is_direct:
-            if direct_name == "print" or direct_name == "_cli_eprint":
-                return self.lower_bootstrap_print_call(args, "rt_print")
-            if direct_name == "println":
-                return self.lower_bootstrap_print_call(args, "rt_println")
-            if is_gpu_intrinsic(direct_name):
-                return self.lower_gpu_intrinsic_call(direct_name, args)
-            if self.struct_field_order.has(direct_name):
-                return self.lower_struct_construct(direct_symbol, direct_name, args)
+        # Check for GPU intrinsic calls before lowering arguments
+        match callee.kind:
+            case Var(symbol):
+                val sym = self.symbols.get_symbol(symbol)
+                val callee_name = if sym.?: sym.name else: ""
+                if callee_name == "print" or callee_name == "_cli_eprint":
+                    return self.lower_bootstrap_print_call(args, "rt_print")
+                if callee_name == "println":
+                    return self.lower_bootstrap_print_call(args, "rt_println")
+                if is_gpu_intrinsic(callee_name):
+                    return self.lower_gpu_intrinsic_call(callee_name, args)
+                # Reclassify `Point(x:3,y:4)` paren-constructor Calls whose callee
+                # names a struct into stack-aggregate construction. Name-keyed so
+                # it dodges the interpreter symbol_id_value(-1) quirk.
+                if self.struct_field_order.has(callee_name):
+                    return self.lower_struct_construct(symbol, callee_name, args)
+            case NamedVar(nv_symbol, callee_name):
+                if callee_name == "print" or callee_name == "_cli_eprint":
+                    return self.lower_bootstrap_print_call(args, "rt_print")
+                if callee_name == "println":
+                    return self.lower_bootstrap_print_call(args, "rt_println")
+                if is_gpu_intrinsic(callee_name):
+                    return self.lower_gpu_intrinsic_call(callee_name, args)
+                if self.struct_field_order.has(callee_name):
+                    return self.lower_struct_construct(nv_symbol, callee_name, args)
+            case _: ()
 
         var arg_operands: [MirOperand] = []
         for arg in args:
             val arg_local = self.lower_expr(arg.value)
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
 
-        if is_direct:
-            val resolved_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
-            val return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name)
-            val func_operand = if resolved_name != "":
-                MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str(resolved_name),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: return_type, is_variadic: false)))
-                ))
-            else:
-                self.symbol_to_operand(direct_symbol)
-            return self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
+        # Check if this is a direct call (Var) or indirect call
+        match callee.kind:
+            case Var(symbol):
+                # Direct call - use Call instruction
+                # Recover the callee's bare name so the bootstrap return-type table
+                # (get_cli_args/get_args/bootstrap_* -> ptr) types the call-result
+                # local correctly. bootstrap_symbol_name(symbol) can miss it, which
+                # defaults the dest local to i64 and emits `call i64 @get_cli_args()`
+                # against a `ptr`-returning definition; the i64 copy then feeds a
+                # `getelementptr ... ptr %lN` and llc rejects the type mismatch.
+                val call_name = self.bootstrap_resolved_call_name(symbol)
+                val return_type = self.bootstrap_resolved_call_return_type(symbol, call_name)
+                val func_operand = if call_name != "":
+                    MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str(call_name),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: return_type, is_variadic: false)))
+                    ))
+                else:
+                    self.symbol_to_operand(symbol)
+                self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
 
-        # Indirect call - lower callee expression and use CallIndirect.
-        val callee_local = self.lower_expr(callee)
-        var param_types: [MirType] = []
-        for arg_op in arg_operands:
-            param_types.push(MirType.i64())
-        var ret_type = MirType.i64()
-        if val callee_type = callee.type_:
-            ret_type = self.lower_type(callee_type)
-        val sig = MirSignature(params: param_types, return_type: ret_type, is_variadic: false)
-        var b = self.builder
-        val result = b.emit_call_indirect(mir_operand_copy(callee_local), arg_operands, sig, ret_type)
-        if val result_local = result:
-            self.builder = b
-            result_local
-        else:
-            val temp = b.new_temp(MirType.unit())
-            self.builder = b
-            temp
+            case NamedVar(symbol, callee_name):
+                val func_operand = self.symbol_to_operand(symbol)
+                val return_type = self.bootstrap_resolved_call_return_type(symbol, callee_name)
+                self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
+
+            case _:
+                # Indirect call - lower callee expression and use CallIndirect
+                if (rt_env_get("SIMPLE_SSA_DEBUG") ?? "") == "1":
+                    print "[call-dbg] indirect callee kind={callee.kind}"
+                val callee_local = self.lower_expr(callee)
+                # Infer parameter types from arguments
+                var param_types: [MirType] = []
+                for arg_op in arg_operands:
+                    param_types.push(MirType.i64())
+                # Infer return type from callee's type annotation if available
+                var ret_type = MirType.i64()
+                if val callee_type = callee.type_:
+                    ret_type = self.lower_type(callee_type)
+                val sig = MirSignature(
+                    params: param_types,
+                    return_type: ret_type,
+                    is_variadic: false
+                )
+                var b = self.builder
+                val result = b.emit_call_indirect(mir_operand_copy(callee_local), arg_operands, sig, ret_type)
+                if val result_local = result:
+                    self.builder = b
+                    result_local
+                else:
+                    val temp = b.new_temp(MirType.unit())
+                    self.builder = b
+                    temp
 
     me is_mutating_method(name: text) -> bool:
         """Allow-list of methods that mutate `self`.
