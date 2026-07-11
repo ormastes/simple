@@ -268,31 +268,44 @@ fn _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan: Simple2
         pixels: pixels
     )
 
-fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
-    var images: [Engine2dResolvedDrawIrImage] = []
-    engine2d_draw_ir_adv_batch_with_images(engine, batch, gpu_available, images)
+# Maximum embedded-surface nesting depth for _engine2d_draw_ir_render_batch_embedded.
+# The current DrawIrBatch/DrawIrComposition schema has no field that lets one
+# batch reference a nested child batch/composition directly, so a single
+# executor call never structurally recurses past depth 0 today — this cap is
+# forward-proofing the offscreen render path so that IF a future producer
+# feeds an embedded surface's own pixels back in (e.g. as a resolved
+# DRAW_IR_COMMAND_IMAGE built from another embedded render, composing surfaces
+# by hand across two executor calls), unbounded nesting still can't blow the
+# stack: past this depth the batch falls back to today's direct translate+clip
+# render instead of allocating another offscreen Engine2D.
+val ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH: i32 = 3
 
-fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
-    val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
-    if batch.embedding.clip:
-        engine.set_clip(batch.embedding.x, batch.embedding.y, batch.embedding.width, batch.embedding.height)
+# Render one batch's flat command list onto `engine`, with every command's
+# local (x, y) shifted by (offset_x, offset_y). Shared by the direct
+# translate+clip path and the offscreen embedded-surface path (where
+# offset_x/offset_y are 0 since the surface origin IS the batch origin).
+# Engine2D is value-copied across this free-function boundary (see
+# _engine2d_draw_ir_render_box), so the caller MUST reassign from element .0
+# of the returned tuple: (engine, rendered_count, skipped_count, unsupported_kinds).
+fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage]) -> (Engine2D, i32, i32, text):
+    var eng = engine
     var rendered = 0
     var skipped = 0
     var unsupported_kinds = ""
-    for command in batch.commands:
-        val x = batch.embedding.x + command.x
-        val y = batch.embedding.y + command.y
+    for command in commands:
+        val x = offset_x + command.x
+        val y = offset_y + command.y
         if command.kind == DRAW_IR_COMMAND_RECT:
-            engine = _engine2d_draw_ir_render_box(engine, command, x, y, command.width, command.height)
+            eng = _engine2d_draw_ir_render_box(eng, command, x, y, command.width, command.height)
             rendered = rendered + 1
         elif command.kind == DRAW_IR_COMMAND_TEXT:
-            engine.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+            eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
             rendered = rendered + 1
         elif command.kind == DRAW_IR_COMMAND_IMAGE:
             val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
             if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):
                 val image = images[image_index]
-                engine.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                eng.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
                 rendered = rendered + 1
             else:
                 skipped = skipped + 1
@@ -304,11 +317,69 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, 
             if unsupported_kinds != "":
                 unsupported_kinds = unsupported_kinds + ","
             unsupported_kinds = unsupported_kinds + command.kind
-    if batch.embedding.clip:
-        engine.clear_clip()
+    (eng, rendered, skipped, unsupported_kinds)
+
+# Render one batch onto `engine`, honoring a real embedded render target when
+# the batch declares a non-empty embedding.surface_id: the batch's commands
+# render into a fresh offscreen Engine2D sized embedding.width x
+# embedding.height (positioned relative to the SURFACE origin, i.e. WITHOUT
+# adding embedding.x/y — that offset applies exactly once, at composite time
+# below), then the finished surface is stitched into `engine` at
+# (embedding.x, embedding.y) honoring embedding.opacity_milli. The offscreen
+# buffer's own bounds enforce embedding.clip for free (commands can never
+# paint outside a canvas that small), so `clip` needs no extra handling here.
+#
+# Batches with an empty surface_id (or a degenerate/too-deep embedding) keep
+# today's exact direct translate+clip behavior — this is the load-bearing
+# backward-compatibility path: no regression for callers that never opted
+# into a real embedded surface.
+fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32) -> (Engine2D, i32, i32, text):
+    var eng = engine
+    val embedding = batch.embedding
+    # Perf short-circuit: a batch whose embedding is (0,0) at full opacity and
+    # EXACTLY the size of the target it renders onto composites as a plain 1:1
+    # copy with no cropping/offset/alpha effect — offscreen-then-blit would be
+    # provably identical pixels for strictly more work (an extra full-size
+    # buffer alloc/init/clear plus a second full-canvas read_pixels+blend
+    # pass). Root/full-page batches (e.g. widget_draw_ir.spl's "widget-root",
+    # window_scene_draw_ir.spl's desktop batch) hit this every render, so
+    # skipping the redundant round trip here matters under the interpreter
+    # (see doc/08_tracking/bug/engine2d_interpreted_mirror_dominates_render_2026-07-03.md
+    # for the same class of cost). Smaller/offset/sub-opaque batches (real
+    # windows, dialogs, thumbnails) are unaffected and still get a real
+    # offscreen surface.
+    val fills_target_exactly = embedding.x == 0 and embedding.y == 0 and embedding.opacity_milli >= 1000 and embedding.width == eng.width() and embedding.height == eng.height()
+    val use_embedded_surface = embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and embedding.width > 0 and embedding.height > 0 and not fills_target_exactly
+    if not use_embedded_surface:
+        if embedding.clip:
+            eng.set_clip(embedding.x, embedding.y, embedding.width, embedding.height)
+        val direct = _engine2d_draw_ir_render_commands(eng, batch.commands, embedding.x, embedding.y, images)
+        eng = direct.0
+        if embedding.clip:
+            eng.clear_clip()
+        return (eng, direct.1, direct.2, direct.3)
+
+    var offscreen = Engine2D.create_offscreen(embedding.width, embedding.height)
+    val inner = _engine2d_draw_ir_render_commands(offscreen, batch.commands, 0, 0, images)
+    offscreen = inner.0
+    if embedding.opacity_milli >= 1000:
+        eng.draw_engine(embedding.x, embedding.y, offscreen)
+    else:
+        eng.draw_engine_opacity(embedding.x, embedding.y, offscreen, embedding.opacity_milli)
+    (eng, inner.1, inner.2, inner.3)
+
+fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
+    var images: [Engine2dResolvedDrawIrImage] = []
+    engine2d_draw_ir_adv_batch_with_images(engine, batch, gpu_available, images)
+
+fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+    val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    val outcome = _engine2d_draw_ir_render_batch_embedded(engine, batch, images, 0)
+    val eng = outcome.0
+    var unsupported_kinds = outcome.3
     if unsupported_kinds == "":
         unsupported_kinds = "none"
-    _engine2d_draw_ir_result_from_plan_with_unsupported(plan, rendered, skipped, unsupported_kinds, engine.read_pixels())
+    _engine2d_draw_ir_result_from_plan_with_unsupported(plan, outcome.1, outcome.2, unsupported_kinds, eng.read_pixels())
 
 fn engine2d_draw_ir_adv_apply_runtime_dispatch(engine: Engine2D, dispatch: Engine2dHostGpuRuntimeDispatchResult) -> Engine2dDrawIrAdvResult:
     if not dispatch.dispatched:
@@ -354,42 +425,30 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
 
 fn engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
+    var eng = engine
     var rendered = 0
     var skipped = 0
     var unsupported_kinds = ""
+    # NOTE(layer ordering): batches composite in array order, not re-sorted by
+    # embedding.layer. Every real producer (e.g. window_scene_draw_ir.spl)
+    # already emits batches desktop-first/chrome-next/windows-by-ascending-
+    # z_index, i.e. already in ascending layer order, so batch order is a
+    # faithful proxy for layer order today. Re-sorting here would need to
+    # restructure this loop (stable sort + re-derive rendered/skipped
+    # accounting) for no behavior change against any current producer, so it
+    # is left as a documented limitation rather than done speculatively.
     for batch in composition.batches:
-        if batch.embedding.clip:
-            engine.set_clip(batch.embedding.x, batch.embedding.y, batch.embedding.width, batch.embedding.height)
-        for command in batch.commands:
-            val x = batch.embedding.x + command.x
-            val y = batch.embedding.y + command.y
-            if command.kind == DRAW_IR_COMMAND_RECT:
-                engine = _engine2d_draw_ir_render_box(engine, command, x, y, command.width, command.height)
-                rendered = rendered + 1
-            elif command.kind == DRAW_IR_COMMAND_TEXT:
-                engine.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
-                rendered = rendered + 1
-            elif command.kind == DRAW_IR_COMMAND_IMAGE:
-                val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
-                if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):
-                    val image = images[image_index]
-                    engine.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
-                    rendered = rendered + 1
-                else:
-                    skipped = skipped + 1
-                    if unsupported_kinds != "":
-                        unsupported_kinds = unsupported_kinds + ","
-                    unsupported_kinds = unsupported_kinds + command.kind
-            else:
-                skipped = skipped + 1
-                if unsupported_kinds != "":
-                    unsupported_kinds = unsupported_kinds + ","
-                unsupported_kinds = unsupported_kinds + command.kind
-        if batch.embedding.clip:
-            engine.clear_clip()
+        val outcome = _engine2d_draw_ir_render_batch_embedded(eng, batch, images, 0)
+        eng = outcome.0
+        rendered = rendered + outcome.1
+        skipped = skipped + outcome.2
+        if outcome.3 != "" and outcome.3 != "none":
+            if unsupported_kinds != "":
+                unsupported_kinds = unsupported_kinds + ","
+            unsupported_kinds = unsupported_kinds + outcome.3
     if unsupported_kinds == "":
         unsupported_kinds = "none"
-    _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, rendered, skipped, unsupported_kinds, engine.read_pixels())
+    _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, rendered, skipped, unsupported_kinds, eng.read_pixels())
 
 export Engine2dDrawIrAdvResult
 export Engine2dDrawIrRuntimeQueueResult

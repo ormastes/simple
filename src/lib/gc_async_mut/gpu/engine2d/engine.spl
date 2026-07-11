@@ -15,6 +15,7 @@
 #   val pixels = engine.read_pixels()
 
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback}
+use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_text_bg,
     emu_draw_ellipse, emu_draw_ellipse_filled,
@@ -68,6 +69,20 @@ fn engine2d_env_backend_override() -> text:
 
 fn engine2d_env_get(key: text) -> text:
     env_get(key)
+
+fn engine2d_scale_pixel_alpha(pixels: [u32], opacity_milli: i32) -> [u32]:
+    """Scale every pixel's alpha channel by opacity_milli/1000 (1000 = no
+    change), used by draw_engine_opacity() to fade an embedded surface before
+    compositing it into a parent Engine2D."""
+    val count = pixels.len()
+    var out: [u32] = [0u32; count]
+    var i = 0
+    while i < count:
+        val p = pixels[i]
+        val scaled_a = (color_a(p) * opacity_milli) / 1000
+        out[i] = rgba(color_r(p), color_g(p), color_b(p), scaled_a)
+        i = i + 1
+    out
 
 # ============================================================================
 # Engine2D
@@ -199,6 +214,23 @@ class Engine2D:
                 metal.use_gpu_only()
                 return Engine2D(backend: metal, capability: metal.capability(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal")
         Engine2D.create_with_backend(width, height, backend_name)
+
+    static fn create_offscreen(width: i32, height: i32) -> Engine2D:
+        """Create an offscreen CPU/software render target for embedding.
+
+        This is the "rendering-inside-rendering" CPU lane: an Engine2D that is
+        always backed by the software rasterizer — never a window or GPU
+        backend — so a caller can render an independent sub-scene and later
+        stitch its pixels into a parent Engine2D via draw_engine() /
+        draw_engine_opacity(). The buffer starts fully TRANSPARENT (not the
+        default opaque-black fill every other backend init uses) so pixels the
+        embedded scene never touches let the parent's own content show through
+        once composited, instead of punching an opaque black hole in it.
+        """
+        var sw = SoftwareBackend.create()
+        sw.init(width, height)
+        sw.clear(0x00000000u32)
+        Engine2D(backend: sw, capability: sw.capability(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
     static fn create_requested_backend(width: i32, height: i32, backend_name: text) -> Result<Engine2D, text>:
         """Create one canonical backend without silently falling back."""
@@ -803,6 +835,32 @@ class Engine2D:
             bm.draw_image_blend(x, y, w, h, pixels)
         else:
             self.backend.draw_image_blend(x, y, w, h, pixels)
+
+    me draw_engine(dst_x: i32, dst_y: i32, src: Engine2D):
+        """Composite an embedded render target (typically an offscreen Engine2D
+        from create_offscreen()) into self at (dst_x, dst_y).
+
+        Reads back src's framebuffer and alpha-blends it over self via
+        draw_image_blend — the core "rendering-inside-rendering" primitive:
+        a nested engine's finished frame becomes one blit into the parent.
+        """
+        self.draw_image_blend(dst_x, dst_y, src.width(), src.height(), src.read_pixels())
+
+    me draw_engine_opacity(dst_x: i32, dst_y: i32, src: Engine2D, opacity_milli: i32):
+        """Like draw_engine, but scales src's pixel alpha by opacity_milli/1000
+        (1000 = fully opaque) before compositing.
+
+        draw_image_blend has no opacity parameter of its own, so a
+        sub-opacity embed premultiplies the scale into each source pixel's
+        alpha channel first, then blends normally.
+        """
+        if opacity_milli >= 1000:
+            self.draw_engine(dst_x, dst_y, src)
+            return
+        if opacity_milli <= 0:
+            return
+        val scaled = engine2d_scale_pixel_alpha(src.read_pixels(), opacity_milli)
+        self.draw_image_blend(dst_x, dst_y, src.width(), src.height(), scaled)
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         if val Some(vg) = self.virtio_gpu_backend:

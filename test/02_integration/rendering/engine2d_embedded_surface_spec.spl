@@ -1,0 +1,165 @@
+# @tag: rendering, engine2d, draw_ir, embedded_surface
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 20%
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 30%
+"""
+# Engine2D Embedded Render Surface (Lane A: CPU embedded render target)
+
+Proves the 2D renderer's real internal embedded render target: an offscreen
+Engine2D (always CPU/software-backed) can be drawn to independently and then
+stitched into a parent Engine2D as one blit (`draw_engine`/
+`draw_engine_opacity`), and the Draw IR executor activates this same offscreen
+path automatically for any batch whose `embedding.surface_id` is non-empty —
+while batches that never set a surface_id keep the exact legacy
+translate+clip behavior (no regression for existing callers).
+
+All scenarios run on the "cpu" backend so they are headless/deterministic.
+"""
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_batch,
+    engine2d_draw_ir_adv_batch_with_images,
+    engine2d_resolved_draw_ir_image
+}
+use std.gpu.engine2d.color.{rgb, rgba, color_r, color_g, color_b, color_a}
+use common.ui.draw_ir.{
+    draw_ir_batch,
+    draw_ir_embedding_config,
+    draw_ir_image_command,
+    draw_ir_rect
+}
+
+val BG: u32 = rgb(0, 0, 0)
+val RED: u32 = rgb(255, 0, 0)
+val GREEN: u32 = rgb(0, 255, 0)
+
+describe "Engine2D embedded render surface":
+
+    context "create_offscreen + draw_engine (engine.spl primitives)":
+
+        it "composites child pixels at the right offset and leaves untouched child pixels transparent":
+            var parent = Engine2D.create_with_backend(20, 20, "cpu")
+            parent.clear(BG)
+            var child = Engine2D.create_offscreen(6, 4)
+            child.draw_rect_filled(2, 1, 2, 2, RED)
+
+            parent.draw_engine(3, 5, child)
+            val pixels = parent.read_pixels()
+
+            # Child's red square (local x:2..4, y:1..3) lands at parent
+            # (3+2, 5+1) = (5,6) .. (3+4, 5+3) = (7,8) exclusive.
+            expect(pixels[6 * 20 + 5]).to_equal(RED)
+            expect(pixels[7 * 20 + 6]).to_equal(RED)
+            # Just above the square: still inside the child's box but never
+            # painted, so the transparent offscreen pixel lets BG show through.
+            expect(pixels[5 * 20 + 5]).to_equal(BG)
+            # The child's own origin corner (parent 3,5) was never painted either.
+            expect(pixels[5 * 20 + 3]).to_equal(BG)
+            # Far outside the child's box entirely.
+            expect(pixels[0 * 20 + 0]).to_equal(BG)
+            parent.shutdown()
+            child.shutdown()
+
+    context "Draw IR batch embedding.surface_id activates the offscreen path":
+
+        it "renders offscreen and blits at (x,y), clipped to the surface's own bounds":
+            var engine = Engine2D.create_with_backend(20, 20, "cpu")
+            engine.clear(BG)
+            val embedding = draw_ir_embedding_config("surf-b", "win-b", 4, 3, 8, 6, 0, 1000, true)
+            val batch = draw_ir_batch("batch-b", "cpu", embedding, [
+                draw_ir_rect("body", 1, 1, 3, 3, RED),
+                # This rect's local origin (6,4) plus its own 10x10 extent would
+                # spill far outside the 8x6 embedded surface; the offscreen
+                # canvas itself is only 8x6, so it is cropped at the surface
+                # edge regardless of the (here true) `clip` flag.
+                draw_ir_rect("overflow", 6, 4, 10, 10, GREEN)
+            ])
+
+            val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+            val pixels = result.pixels
+
+            # body: local (1,1)-(4,4) -> global (4+1,3+1)=(5,4) .. (4+4,3+4)=(8,7)
+            expect(pixels[5 * 20 + 6]).to_equal(RED)
+            # overflow: only local (6,4)-(8,6) is inside the 8x6 surface ->
+            # global (4+6,3+4)=(10,7) .. (4+8,3+6)=(12,9)
+            expect(pixels[7 * 20 + 10]).to_equal(GREEN)
+            # Anything past the surface's own width/height never gets painted,
+            # even though it would sit inside the 10x10 rect's nominal extent.
+            expect(pixels[7 * 20 + 13]).to_equal(BG)
+            # Outside the embedding box entirely.
+            expect(pixels[0 * 20 + 0]).to_equal(BG)
+            engine.shutdown()
+
+        it "opacity_milli=500 blends the embedded surface at ~50% over the background":
+            var engine = Engine2D.create_with_backend(4, 4, "cpu")
+            engine.clear(BG)
+            val embedding = draw_ir_embedding_config("surf-c", "win-c", 0, 0, 4, 4, 0, 500, false)
+            val batch = draw_ir_batch("batch-c", "cpu", embedding, [
+                draw_ir_rect("body", 0, 0, 4, 4, RED)
+            ])
+
+            val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+            val p = result.pixels[1 * 4 + 1]
+
+            # Opaque RED (alpha 255) scaled by opacity_milli=500 -> alpha 127,
+            # then Porter-Duff src-over onto opaque BG (black): the integer
+            # math resolves to exactly rgba(127, 0, 0, 255) — ~50% red.
+            expect(color_a(p)).to_equal(255)
+            expect(color_r(p)).to_equal(127)
+            expect(color_g(p)).to_equal(0)
+            expect(color_b(p)).to_equal(0)
+            engine.shutdown()
+
+        it "nested embedding depth 2: an embedded surface can itself display another embedded render's output":
+            # Level 1 (innermost): an independent offscreen render target, built
+            # directly with the engine.spl primitives from task 1.
+            var inner = Engine2D.create_offscreen(4, 4)
+            inner.draw_rect_filled(0, 0, 4, 4, GREEN)
+            val inner_image = engine2d_resolved_draw_ir_image("nested://inner", 4, 4, inner.read_pixels())
+            inner.shutdown()
+
+            # Level 2: an outer batch that ALSO declares a surface_id (so it
+            # renders through the same offscreen embedded-surface path) whose
+            # own commands include an IMAGE draw op sourced from the level-1
+            # render above. This is the re-entrant proof: the offscreen render
+            # path is exercised twice, once to produce `inner_image` and once
+            # for the outer batch that consumes it, composed by the caller
+            # rather than by any nested schema field (DrawIrBatch has no
+            # nested-batch reference — see _engine2d_draw_ir_render_batch_embedded).
+            val outer_embedding = draw_ir_embedding_config("surf-outer", "win-outer", 5, 5, 10, 10, 0, 1000, true)
+            val outer_batch = draw_ir_batch("batch-outer", "cpu", outer_embedding, [
+                draw_ir_image_command("inner-surface", 2, 2, 4, 4, "nested://inner", [])
+            ])
+
+            var parent = Engine2D.create_with_backend(20, 20, "cpu")
+            parent.clear(BG)
+            val result = engine2d_draw_ir_adv_batch_with_images(parent, outer_batch, false, [inner_image])
+            val pixels = result.pixels
+
+            # inner image local (2,2)-(6,6) inside the outer 10x10 surface ->
+            # global (5+2,5+2)=(7,7) .. (5+6,5+6)=(11,11)
+            expect(pixels[8 * 20 + 8]).to_equal(GREEN)
+            expect(result.rendered_command_count).to_equal(1)
+            parent.shutdown()
+
+    context "batch WITHOUT surface_id keeps the exact legacy translate+clip behavior":
+
+        it "renders at embedding.x + command.x / embedding.y + command.y with no offscreen surface involved":
+            var engine = Engine2D.create_with_backend(20, 20, "cpu")
+            engine.clear(BG)
+            val embedding = draw_ir_embedding_config("", "win-legacy", 4, 5, 8, 6, 0, 1000, true)
+            val batch = draw_ir_batch("batch-legacy", "cpu", embedding, [
+                draw_ir_rect("body", 2, 1, 3, 3, RED)
+            ])
+
+            val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+            val pixels = result.pixels
+
+            # Direct translate: global (4+2, 5+1) = (6,6) .. (4+5, 5+4) = (9,9)
+            expect(pixels[6 * 20 + 6]).to_equal(RED)
+            expect(pixels[8 * 20 + 8]).to_equal(RED)
+            # Outside the clip rect entirely.
+            expect(pixels[0 * 20 + 0]).to_equal(BG)
+            expect(result.rendered_command_count).to_equal(1)
+            engine.shutdown()
