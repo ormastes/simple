@@ -101,34 +101,49 @@ impl MirLowering:
             if found_receiver_type != nil:
                 receiver_type = self.lower_type(found_receiver_type)
 
+        # Bug #138: `resolution == Unresolved` (no method-resolution info for
+        # this receiver -- HIR type inference never populated receiver.type_)
+        # is the actual condition the untyped string-method fallbacks below
+        # need, on EITHER the bootstrap flat-HIR path or the normal
+        # native-build path -- both produce Unresolved here for the same
+        # reason. Representation is identical on both paths too: argv
+        # elements always come from `rt_get_args` -> `rt_cli_get_args`, which
+        # tags them via `rt_string_new` regardless of SIMPLE_BOOTSTRAP.
+        val resolution_is_unresolved = match resolution:
+            case Unresolved: true
+            case _: false
+
         if (method == "len" or method == "length") and args.len() == 0:
             var len_symbol = ""
             if maybe_receiver_type_for_call != nil:
                 val found_receiver_type = maybe_receiver_type_for_call
                 if found_receiver_type != nil:
                     len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)
-            if len_symbol == "" and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                # Bug #137 (follow-up): bootstrap flat HIR lacks type inference,
-                # so BOTH `all_args.len()` (an argv ARRAY) and `first.len()` (a
-                # single argv element, a tagged STRING) hit this untyped branch.
-                # Forcing `rt_array_len` was correct only for the array: on a
-                # tagged string it calls rt_core_array_ptr on a string handle
-                # and silently returns 0, so every `first.len() == N` guard in
-                # bootstrap_main (--version/--help/compile/native-build) was
-                # dead and never dispatched. rt_len is the unified accessor --
-                # it routes a tagged string to its length and a (raw or tagged)
-                # array ptr to its element count -- so one symbol serves both
-                # call sites correctly.
-                len_symbol = "rt_len"
             var receiver_local: LocalId = 0
             var receiver_lowered = false
             if len_symbol == "":
                 match resolution:
                     case Unresolved:
-                        receiver_local = self.lower_expr(receiver)
-                        receiver_lowered = true
-                        if self.local_is_runtime_array(receiver_local):
-                            len_symbol = "rt_array_len"
+                        # Bug #137/#138 (follow-up): an untyped receiver (no HIR
+                        # type inference ran -- receiver.type_ is nil) leaves
+                        # `resolution` Unresolved both under the bootstrap flat
+                        # HIR path AND on the normal native-build path (the same
+                        # gap: bootstrap_main.spl's `all_args[i]`/`first` locals
+                        # never get a synthesized type). Forcing `rt_array_len`
+                        # was correct only for arrays: on a tagged string it
+                        # calls rt_core_array_ptr on a string handle and
+                        # silently returns 0, so every `first.len() == N` guard
+                        # in bootstrap_main (--version/--help/compile/
+                        # native-build) was dead and never dispatched. rt_len is
+                        # the unified accessor -- it routes a tagged string to
+                        # its length and a (raw or tagged) array ptr to its
+                        # element count -- so one symbol serves both call sites
+                        # correctly, on either path. Previously this was gated
+                        # behind SIMPLE_BOOTSTRAP=1; that env check was only ever
+                        # a proxy for "no type info" and excluded the identical
+                        # normal-path gap, so it now keys directly off
+                        # `resolution == Unresolved` instead.
+                        len_symbol = "rt_len"
                     case _: ()
             if len_symbol != "":
                 if not receiver_lowered:
@@ -209,7 +224,7 @@ impl MirLowering:
         # bounds-checked (returns 0 when prefix longer than receiver), which
         # matters now that `and` is eager -- `starts_with` runs even when the
         # preceding `len == N` guard is false.
-        if method == "starts_with" and args.len() == 1 and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if method == "starts_with" and args.len() == 1 and resolution_is_unresolved:
             val sw_receiver = self.lower_expr(receiver)
             val sw_prefix_ptr = self.lower_expr(args[0].value)
             val strlen_op = MirOperand(kind: MirOperandKind.Const(
@@ -239,13 +254,15 @@ impl MirLowering:
                         return sw_local
             return sw_receiver
 
-        # Bug #137 (follow-up): the typed substring/slice special case below is
-        # gated on receiver.type_ == Some(Str), but bootstrap flat HIR sets
-        # EVERY expr type_ to nil, so `args[i].substring(2)` /
-        # `args[i].substring(9)` (the -oFILE / --output=FILE path parsing in
-        # bootstrap_main lines 17,21) never reached it and fell through to
-        # `case Unresolved:` -> const 0 -> wrong/garbage filename. Handle it
-        # type-independently under bootstrap, mirroring the starts_with fix.
+        # Bug #137/#138 (follow-up): the typed substring/slice special case
+        # below is gated on receiver.type_ == Some(Str), but an untyped
+        # receiver (no HIR type inference ran -- both under the bootstrap flat
+        # HIR path and on the normal native-build path) sets expr type_ to
+        # nil, so `args[i].substring(2)` / `args[i].substring(9)` (the -oFILE
+        # / --output=FILE path parsing in bootstrap_main lines 17,21) never
+        # reached it and fell through to `case Unresolved:` -> const 0 ->
+        # wrong/garbage filename. Handle it type-independently whenever
+        # resolution is Unresolved, mirroring the starts_with fix.
         #
         # Representation: the receiver is a tagged argv element (rt_string_new-
         # built), but spl_str_slice/spl_str_len operate on RAW char*. Coerce the
@@ -254,7 +271,7 @@ impl MirLowering:
         # Str-path representation the downstream -o/--output filename handling
         # expects. Supports both `.substring(start)` (1 arg; end = spl_str_len)
         # and `.substring(start, end)` (2 args).
-        if (method == "substring" or method == "slice") and (args.len() == 1 or args.len() == 2) and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (method == "substring" or method == "slice") and (args.len() == 1 or args.len() == 2) and resolution_is_unresolved:
             val sub_recv_tagged = self.lower_expr(receiver)
             val strdata_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_string_data"),

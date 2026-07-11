@@ -158,7 +158,22 @@ impl MirLowering:
                         # When the initializer is a real float value, thread its
                         # F64/F32 MIR type onto the binding (same rationale as the
                         # string case above).
-                        val effective_type = if let_type == nil and self.local_is_runtime_array(init_local):
+                        #
+                        # Bug #138: the array case above was gated on
+                        # `let_type == nil`, unlike its str/float siblings just
+                        # below (which thread unconditionally) -- but
+                        # `val all_args = get_cli_args()` (a call returning
+                        # `[text]`) gets a non-nil-but-wrong synthesized
+                        # `let_type` (the HirTypeKind.Infer -> i64 default noted
+                        # throughout this file), same as the str/float cases'
+                        # "unreliably non-nil" HIR type. That left `all_args`
+                        # bound as plain i64, so `all_args[i]` took the raw-GEP
+                        # path instead of rt_array_get -- reading raw bytes off
+                        # the SplArray header as if they were an element, then
+                        # feeding that garbage i64 to rt_len/rt_string_starts_with
+                        # as a tagged handle (SIGSEGV). Thread unconditionally,
+                        # matching str/float.
+                        val effective_type = if self.local_is_runtime_array(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_str(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
@@ -249,13 +264,15 @@ impl MirLowering:
                         # Key on init_local.id directly to match how
                         # lower_struct_construct writes the map.
                         val struct_sym: text? = if has_init: self.struct_value_syms.get(init_local.id) else: nil
-                        # See the disc==1 early-Let path: an un-annotated
-                        # `var xs = [...]` must inherit the initializer's real
-                        # Array/Slice type so later `xs[i]` reads take
-                        # rt_array_get instead of a raw GEP. (This arm is dead for
-                        # Let today -- disc==1 handles it above -- but kept in sync
-                        # so the two paths cannot silently diverge.)
-                        val effective_type = if type_ == nil and has_init and self.local_is_runtime_array(init_local):
+                        # See the disc==1 early-Let path: a `val`/`var xs = ...`
+                        # must inherit the initializer's real Array/Slice type
+                        # (unconditionally -- a non-nil-but-Infer-defaulted
+                        # `type_` is as unreliable as a nil one, see Bug #138)
+                        # so later `xs[i]` reads take rt_array_get instead of a
+                        # raw GEP. (This arm is dead for Let today -- disc==1
+                        # handles it above -- but kept in sync so the two paths
+                        # cannot silently diverge.)
+                        val effective_type = if has_init and self.local_is_runtime_array(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if has_init and self.local_is_float(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
