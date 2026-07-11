@@ -42,3 +42,20 @@ FETCH_URL="https://en.wikipedia.org/wiki/Main_Page" FETCH_OUT=/tmp/wiki.html \
 PIXEL_HTML=/tmp/wiki.html PIXEL_W=480 PIXEL_H=360 PIXEL_OUT_JSON=/tmp/wiki.argb.json \
   bin/simple run tools/pixel_compare/render_and_save_simple.spl
 ```
+
+## Quota-spec marginality (measured 2026-07-11 evening)
+
+The quota test (`test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_engine_budget_hardening_spec.spl`) "keeps the first stylesheet rule effective when total rules exceed the quota" is now intermittently flaking under machine load (load avg ~15, multiple concurrent agent sessions). It exercises 4300 CSS rules on 3 nodes within a 60s budget.
+
+Stage timings via `simple_web_layout_render_html_software_pixels_traced` on the exact quota-test HTML (3 nodes, 4300 rules, 96×64):
+- parse_html: 6–23ms
+- extract_css: 2.4–5.9s
+- compute_styles: **50–76s** (dominant cost; ~12–18ms per rule for interpreted preprocessing inside `build_rule_buckets` + `build_rule_specificities` + per-rule work)
+- layout: 0–10ms
+- paint: 3–7ms
+
+When compute_styles exceeds the budget slice, the render correctly reports `degraded=true` and the body-background pixel assertion fails (white instead of #3050a0)—the failure is honest, just load-marginal.
+
+The staged-budget change (style ≤70% of total budget) reduced the quota test's effective style budget from 60s to 42s, widening the flake window under load. Not a correctness bug—the test's "generous budget" assumption (60s >> work) no longer holds on a loaded interpreter.
+
+Follow-ups to consider (do not implement): (a) raise the quota test's budget or lower its junk-rule count so intent (rule quota, not wall clock) is tested with margin; (b) reduce per-rule preprocessing cost (memoize specificity parsing); (c) count rule preprocessing against its own guarded sub-slice so a preprocessing overrun degrades earlier and cheaper.
