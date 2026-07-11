@@ -341,6 +341,22 @@ impl TypeChecker {
 
                     // Bind all identifiers in the pattern
                     self.bind_pattern(&let_stmt.pattern);
+                } else {
+                    // Uninitialized declaration (`var name: [T; N]` with no
+                    // initializer): still bind the pattern so later uses do
+                    // not report "undefined identifier". The annotated type,
+                    // if any, is applied via unification below.
+                    self.bind_pattern(&let_stmt.pattern);
+                    let type_annotation = match &let_stmt.pattern {
+                        Pattern::Typed { ty, .. } => Some(ty),
+                        _ => let_stmt.ty.as_ref(),
+                    };
+                    if let Some(ast_ty) = type_annotation {
+                        if let Some(name) = self.pattern_root_name(&let_stmt.pattern).map(str::to_string) {
+                            let expected_ty = self.ast_type_to_type(ast_ty);
+                            self.env.insert(name, expected_ty);
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -575,6 +591,16 @@ impl TypeChecker {
                 Ok(())
             }
             _ => Ok(()),
+        }
+    }
+
+    fn pattern_root_name<'p>(&self, pattern: &'p Pattern) -> Option<&'p str> {
+        match pattern {
+            Pattern::Identifier(name)
+            | Pattern::MutIdentifier(name)
+            | Pattern::MoveIdentifier(name) => Some(name),
+            Pattern::Typed { pattern, .. } => self.pattern_root_name(pattern),
+            _ => None,
         }
     }
 

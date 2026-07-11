@@ -175,6 +175,21 @@ fn record_const_array_init(
                 string_values: Some(strings),
             },
         );
+    } else if expr.is_none() {
+        // `var name: [T; N]` with no initializer — lower to a zero-filled
+        // global, exactly like `= [0; N]`. Without this the global stays a
+        // scalar tagged slot: reads return garbage and writes are lost or
+        // fault (seed segfault on uninit module array var).
+        if let Some(HirType::Array { size: Some(n), .. }) = types.get(ty) {
+            map.insert(
+                name.to_string(),
+                HirGlobalArrayInit {
+                    element_type,
+                    values: vec![0; *n],
+                    string_values: None,
+                },
+            );
+        }
     }
 }
 
