@@ -3,8 +3,8 @@
 
 use std.js.types.js_types.JsValue
 use std.js.types.js_types.JsObject
-use std.js.engine.js_error.{JsError, Logger, BrowserResult}
-use std.js.engine.parser.{js_parse_program_subset}
+use std.js.engine.js_error.{JsError, script_error, Logger, BrowserResult}
+use std.js.engine.parser.{js_parse_program_subset, js_source_delimiters_balanced}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_async.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
@@ -240,6 +240,11 @@ class JsRuntime:
     me eval(source: text) -> BrowserResult<JsValue>:
         if val Some(value) = self._eval_browser_host_fast_path(source):
             return Ok(value)
+        # Fail fast on structurally broken input: the subset parser can
+        # recurse unboundedly on unbalanced delimiters (demonstrated hang on
+        # "syntax error ((").
+        if not js_source_delimiters_balanced(source):
+            return Err(script_error("SyntaxError: unbalanced delimiters"))
         val program = js_parse_program_subset(source)
         var interpreter = self.interpreter
         val result = interpreter.execute(program)
@@ -1168,3 +1173,9 @@ export NATIVE_DATA_VIEW_GET_UINT32, NATIVE_DATA_VIEW_SET_UINT32
 export NATIVE_DATA_VIEW_GET_INT32, NATIVE_DATA_VIEW_SET_INT32
 export NATIVE_DATA_VIEW_GET_INT8, NATIVE_DATA_VIEW_SET_INT8
 export NATIVE_DATA_VIEW_GET_INT16, NATIVE_DATA_VIEW_SET_INT16
+
+# Convenience factory for hosts outside this module: import aliasing does not
+# register constructors/enums (interpreter gap), so embedders that have their
+# own Logger type in scope construct the engine through this named function.
+pub fn js_runtime_with_default_logger(name: text) -> JsRuntime:
+    JsRuntime.new(Logger(name: name))

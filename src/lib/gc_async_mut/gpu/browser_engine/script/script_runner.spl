@@ -27,6 +27,9 @@ use std.gc_async_mut.gpu.browser_engine.script.storage_api.{BrowserStorage}
 use std.gc_async_mut.gpu.browser_engine.script.clipboard_api.{BrowserClipboard}
 use std.gc_async_mut.gpu.browser_engine.script.location_api.{BrowserLocation, BrowserHistory}
 use std.gc_async_mut.gpu.browser_engine.script.js_transpiler.{js_transpile, js_is_javascript, js_is_simple}
+use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.runtime.{js_runtime_with_default_logger}
+use std.js.types.js_types.{JsValue}
 use std.process.{process_run}
 
 extern fn rt_file_write_text(path: text, content: text)
@@ -41,6 +44,28 @@ var _current_dom_root: BeDomNode? = nil
 var _current_console: ConsoleBuffer? = nil
 var _current_event_loop: EventLoop? = nil
 var _script_counter: i64 = 0
+
+# The JS engine lives on the ScriptRunner instance so successive <script>
+# tags of a page share globals (e.g. google.* built up across tags).
+# Module-level `var` writes from functions do not reliably persist under the
+# interpreter (documented landmine), which silently recreated the engine per
+# call and broke cross-tag globals.
+pub fn reset_js_runtime():
+    """Deprecated no-op: create a fresh ScriptRunner for a fresh JS global
+    environment."""
+    pass_do_nothing
+
+fn _js_value_text(v: JsValue) -> text:
+    match v:
+        JsValue.Undefined: ""
+        JsValue.Null: "null"
+        JsValue.Boolean(b): b.to_text()
+        JsValue.Number(n): n.to_text()
+        JsValue.String(s): s
+        JsValue.Object(id): "[object #{id}]"
+        JsValue.Array(id): "[array #{id}]"
+        JsValue.Function(id): "[function #{id}]"
+        JsValue.Symbol(id): "[symbol #{id}]"
 
 # =========================================================================
 # ScriptRunner
@@ -88,7 +113,7 @@ pub class ScriptRunner:
             _dom_dirty: false
         )
 
-pub fn run_script_with_type(runner: ScriptRunner, source: text, script_type: text):
+pub fn run_script_with_type(runner: ScriptRunner, source: text, script_type: text) -> text:
     """Execute a script with type detection and optional JS transpilation.
 
     If script_type indicates JavaScript (empty, "text/javascript", etc.),
@@ -99,13 +124,47 @@ pub fn run_script_with_type(runner: ScriptRunner, source: text, script_type: tex
         runner      - the ScriptRunner context
         source      - raw script source (JS or Simple)
         script_type - the type attribute from the <script> tag
+
+    JavaScript runs IN-PROCESS on the real JS engine (JsRuntime: lexer/
+    parser/VM). The previous lane transpiled JS to Simple text and ran it in
+    a subprocess — real-world JS (IIFEs, closures, regex literals) produced
+    invalid Simple, the subprocess failed, and the dropped return value made
+    it all read as success. Returns the eval result text or "js-error: ..."
+    so failures are visible to callers.
     """
     if source.trim().len() == 0:
-        return
-    var effective_source = source
+        return ""
     if js_is_javascript(script_type):
-        effective_source = js_transpile(source)
-    run_script(runner, effective_source)
+        # Fresh engine per call: JsRuntime state does not survive storage in
+        # a class field (interpreter copy semantics corrupt it across
+        # accesses — verified empirically; a LOCAL engine works). For pages
+        # whose <script> tags share globals, use run_page_scripts, which
+        # holds one local engine across all tags.
+        var rt = js_runtime_with_default_logger("script-runner-js")
+        match rt.eval(source):
+            Ok(v):
+                runner._dom_dirty = true
+                return _js_value_text(v)
+            Err(e):
+                return "js-error: " + e.message
+    run_script(runner, source)
+
+pub fn run_page_scripts(scripts: [text]) -> [text]:
+    """Execute all of a page's <script> sources on ONE JS engine so globals
+    built up by earlier tags (e.g. window.google) are visible to later tags.
+    Returns one result per script: eval result text or "js-error: ..."."""
+    var rt = js_runtime_with_default_logger("page-scripts")
+    var out: [text] = []
+    for source in scripts:
+        if source.trim().len() == 0:
+            out.push("")
+            continue
+        match rt.eval(source):
+            Ok(v):
+                out.push(_js_value_text(v))
+            Err(e):
+                out.push("js-error: " + e.message)
+    out
 
 pub fn run_script(runner: ScriptRunner, source: text) -> text:
     """Execute a Simple script against the runner's DOM tree.
