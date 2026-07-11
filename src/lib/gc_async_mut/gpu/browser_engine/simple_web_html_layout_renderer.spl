@@ -1489,6 +1489,37 @@ fn parse_line_height_value(raw: text) -> i32:
         return 0 - mult10
     0
 
+# Parse a CSS decimal number to its value times ten (e.g. "1.5" -> 15, "2" -> 20,
+# "0.8" -> 8). Only the first fractional digit is honored, matching the
+# line-height parser's precision. Trailing units (em/rem/%) are ignored because
+# parse_int stops at the first non-digit run.
+fn parse_decimal_x10(raw: text) -> i32:
+    val whole = parse_int(raw)
+    var m10 = whole * 10
+    val dot = find_from(raw, ".", 0)
+    if dot >= 0 and dot + 1 < raw.len():
+        m10 = whole * 10 + parse_int(raw.substring(dot + 1, dot + 2))
+    m10
+
+# Split on ASCII whitespace, dropping empty tokens (collapses runs of spaces).
+fn ws_tokens(s: text) -> [text]:
+    var out: [text] = []
+    val parts = s.split(" ")
+    var i = 0
+    while i < parts.len():
+        val t = parts[i].trim()
+        if t.len() > 0:
+            out.push(t)
+        i = i + 1
+    out
+
+# Resolve one margin token to px. Percent values use the negative sentinel that
+# the longhand margin handlers also use (resolved against parent at layout).
+fn margin_token_px(tok: text) -> i32:
+    if tok.ends_with("%"):
+        return 0 - parse_int(tok)
+    parse_int(tok)
+
 fn object_position_axis_pct(token: text, horizontal: bool) -> i32:
     val t = token.trim().lower()
     if t == "left":
@@ -2054,7 +2085,7 @@ fn _decl_over_quota(decls: text) -> bool:
         pos = semi + 1
     false
 
-fn apply_decls(st: Style, decls: text) -> Style:
+fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
     if decls.len() == 0:
         return st
     # Per-rule declaration quota: a rule carrying more than the cap is dropped
@@ -2356,9 +2387,26 @@ fn apply_decls(st: Style, decls: text) -> Style:
     val fs = decl_get(decls, "font-size")
     val fs_pos = decl_last_pos(decls, "font-size")
     if fs.len() > 0 and (font_pos < 0 or fs_pos > font_pos):
-        val v = parse_int(fs)
-        if v > 0:
-            font_size_v = v
+        val fsl = fs.trim().lower()
+        if fsl.ends_with("rem"):
+            # rem is relative to the root font-size (16px default).
+            val computed = (16 * parse_decimal_x10(fsl)) / 10
+            if computed > 0:
+                font_size_v = computed
+        elif fsl.ends_with("em"):
+            # em is relative to the inherited (parent) font-size.
+            val computed = (em_base * parse_decimal_x10(fsl)) / 10
+            if computed > 0:
+                font_size_v = computed
+        elif fsl.ends_with("%"):
+            # percent font-size is relative to the inherited font-size.
+            val computed = (em_base * parse_int(fsl)) / 100
+            if computed > 0:
+                font_size_v = computed
+        else:
+            val v = parse_int(fs)
+            if v > 0:
+                font_size_v = v
     val font_size_adjust_decl = decl_get(decls, "font-size-adjust")
     if font_size_adjust_decl.len() > 0:
         val font_size_adjust_norm = font_size_adjust_decl.trim().lower()
@@ -2388,6 +2436,12 @@ fn apply_decls(st: Style, decls: text) -> Style:
             # parent's available width at layout time, where it is known).
             val wp = parse_int(width)
             width_v = if wp > 0: 0 - wp else: 0
+        elif width.ends_with("vw"):
+            # Viewport width unit: exact for viewport-level elements (parent ==
+            # viewport). Reuse the percent sentinel so it resolves against the
+            # parent's available width at layout time.
+            val wv = parse_int(width)
+            width_v = if wv > 0: 0 - wv else: 0
         else:
             width_v = parse_int(width)
     val height = decl_get(decls, "height")
@@ -3616,22 +3670,37 @@ fn apply_decls(st: Style, decls: text) -> Style:
                     box_shadow_color_v = if shadow_color != 0u32: shadow_color else: argb(0, 0, 0)
     val margin = decl_get(decls, "margin")
     if margin.len() > 0:
-        val m0 = parse_nth_int(margin, 0)
-        val m1 = parse_nth_int(margin, 1)
-        val m2 = parse_nth_int(margin, 2)
-        val m3 = parse_nth_int(margin, 3)
-        if m0 >= 0:
-            margin_t_v = m0
-            margin_r_v = m0
-            margin_b_v = m0
-            margin_l_v = m0
-            if m1 >= 0:
-                margin_r_v = m1
-                margin_l_v = m1
-            if m2 >= 0:
-                margin_b_v = m2
-            if m3 >= 0:
-                margin_l_v = m3
+        # Token-aware shorthand so per-side "auto" (centering) and "%" survive.
+        val mtoks = ws_tokens(margin.trim().lower())
+        val mn = mtoks.len()
+        if mn > 0:
+            var t_tok = mtoks[0]
+            var r_tok = mtoks[0]
+            var b_tok = mtoks[0]
+            var l_tok = mtoks[0]
+            if mn == 2:
+                r_tok = mtoks[1]
+                l_tok = mtoks[1]
+            elif mn == 3:
+                r_tok = mtoks[1]
+                l_tok = mtoks[1]
+                b_tok = mtoks[2]
+            elif mn >= 4:
+                r_tok = mtoks[1]
+                b_tok = mtoks[2]
+                l_tok = mtoks[3]
+            margin_t_auto_v = t_tok == "auto"
+            margin_r_auto_v = r_tok == "auto"
+            margin_b_auto_v = b_tok == "auto"
+            margin_l_auto_v = l_tok == "auto"
+            # Horizontal margins honor the % negative-sentinel (resolved at
+            # layout); vertical margins have no percentage resolver, so treat
+            # them as plain px (matching prior behavior — no negative-margin
+            # sign flip on `margin: 5% 10%`).
+            margin_t_v = if t_tok == "auto": 0 else: parse_int(t_tok)
+            margin_r_v = if r_tok == "auto": 0 else: margin_token_px(r_tok)
+            margin_b_v = if b_tok == "auto": 0 else: parse_int(b_tok)
+            margin_l_v = if l_tok == "auto": 0 else: margin_token_px(l_tok)
     val ml = decl_get(decls, "margin-left")
     if ml.len() > 0:
         if ml == "auto":
@@ -3996,21 +4065,49 @@ fn _css_resolve_vars(css: text, props: text) -> text:
         val open = find_from(css, "var(", scan)
         if open < 0:
             break
-        val close = find_from(css, ")", open + 4)
-        if close < 0:
+        # Match the closing paren by depth: var() args may nest more var()/
+        # calc() parens, so the first ")" is not necessarily the close.
+        var depth = 1
+        var k = open + 4
+        while k < css_len and depth > 0:
+            if css[k] == "(":
+                depth = depth + 1
+            elif css[k] == ")":
+                depth = depth - 1
+            k = k + 1
+        if depth != 0:
             break
+        val close = k - 1
         if chunk_count + 2 >= chunks.len():
             break
-        val prop_name = css.substring(open + 4, close).trim()
+        # Split "--name, fallback" at the first TOP-LEVEL comma; the fallback
+        # itself may be another var() and is resolved recursively per spec.
+        val inner = css.substring(open + 4, close)
+        var cdepth = 0
+        var comma = -1
+        var m = 0
+        val inner_len = inner.len()
+        while m < inner_len:
+            val ch = inner[m]
+            if ch == "(":
+                cdepth = cdepth + 1
+            elif ch == ")":
+                cdepth = cdepth - 1
+            elif ch == "," and cdepth == 0:
+                comma = m
+                break
+            m = m + 1
+        val prop_name = (if comma >= 0: inner.substring(0, comma) else: inner).trim()
         val prop_idx = text_key_index_count(names, prop_name, prop_count)
+        chunks[chunk_count] = css.substring(scan, open)
+        chunk_count = chunk_count + 1
         if prop_idx >= 0:
-            chunks[chunk_count] = css.substring(scan, open)
-            chunk_count = chunk_count + 1
             chunks[chunk_count] = values[prop_idx]
-            chunk_count = chunk_count + 1
+        elif comma >= 0:
+            chunks[chunk_count] = _css_resolve_vars(inner.substring(comma + 1, inner_len).trim(), props)
         else:
-            chunks[chunk_count] = css.substring(scan, close + 1)
-            chunk_count = chunk_count + 1
+            chunks[chunk_count] = css.substring(open, close + 1)
+        chunk_count = chunk_count + 1
         scan = close + 1
     if scan < css_len and chunk_count < chunks.len():
         chunks[chunk_count] = css.substring(scan, css_len)
@@ -5472,6 +5569,9 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> 
             break
         val nd = nodes[i]
         var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: renderer_default_style()
+        # em/% font-size resolve against the inherited (parent) font-size, not the
+        # UA-default set by tag_defaults (so h1{font-size:1.5em} == 1.5 x parent).
+        val em_base = if nd.parent >= 0: styles[nd.parent].font_size else: 16
         st = tag_defaults(st, nd.tag)
         var empty_cells_hide = false
         val candidates_raw = style_rule_candidates(nd, rule_buckets)
@@ -5494,15 +5594,15 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> 
                 val empty_cells_decl = decl_get(rules.decls[r], "empty-cells")
                 if empty_cells_decl.trim().lower() == "hide":
                     empty_cells_hide = true
-                st = apply_decls(st, rules.decls[r])
+                st = apply_decls(st, rules.decls[r], em_base)
             candidate_i = candidate_i + 1
         if nd.style_attr.len() > 0:
             val inline_empty_cells_decl = decl_get(nd.style_attr, "empty-cells")
             if inline_empty_cells_decl.trim().lower() == "hide":
                 empty_cells_hide = true
-            st = apply_decls(st, nd.style_attr)
+            st = apply_decls(st, nd.style_attr, em_base)
         if empty_cells_hide and (nd.tag == "td" or nd.tag == "th") and not selector_ctx.has_content_child[i]:
-            st = apply_decls(st, "background-color:transparent;background-image:none")
+            st = apply_decls(st, "background-color:transparent;background-image:none", em_base)
         styles[i] = st
         i = i + 1
     styles
@@ -8074,12 +8174,30 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             var child_w = child_inner_w - cml - cmr
             if child_w < 1:
                 child_w = 1
+            # Horizontal margin:auto centering. When an in-flow block has an
+            # explicit (non-auto) width narrower than the available space and
+            # left/right margins are auto, the free space is distributed: both
+            # auto -> centered, one auto -> pushed to that side.
+            var auto_offset = 0
+            if cst.margin_l_auto or cst.margin_r_auto:
+                val child_outer = if cst.width_px > 0:
+                    css_outer_width(nodes[c], cst, cst.width_px)
+                elif cst.width_px < 0:
+                    css_outer_width(nodes[c], cst, child_w * (0 - cst.width_px) / 100)
+                else:
+                    0
+                if child_outer > 0 and child_outer < child_w:
+                    val free = child_w - child_outer
+                    if cst.margin_l_auto and cst.margin_r_auto:
+                        auto_offset = free / 2
+                    elif cst.margin_l_auto:
+                        auto_offset = free
             val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
             val child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
                 styles_with_height(styles, c, child_height_px)
             else:
                 styles
-            val child = layout(nodes, child_styles, child_index, c, ix + cml, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+            val child = layout(nodes, child_styles, child_index, c, ix + cml + auto_offset, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
             out_bx = child.bx
             out_by = child.by
             out_bw = child.bw
