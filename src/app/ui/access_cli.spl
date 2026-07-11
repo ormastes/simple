@@ -31,8 +31,9 @@ use common.ui.access.{
     ui_access_snapshot_to_json,
     ui_access_surface_to_json
 }
-use std.nogc_sync_mut.io.{
+use std.nogc_sync_mut.io.http_sffi.{
     HttpMethod,
+    HttpResponse,
     http_client_destroy,
     http_client_new,
     http_client_request,
@@ -41,6 +42,7 @@ use std.nogc_sync_mut.io.{
 use std.log.{error}
 use app.io.mod.{cli_file_exists, getpid, time_now_unix_micros}
 use nogc_sync_mut.ui.access_store.{UiAccessStore}
+use std.database.sql.types.{DbError}
 use std.common.json.parser.{json_parse}
 use std.common.json.object_ops.{json_object_get}
 use std.common.json.array_ops.{json_array_get, json_array_length}
@@ -157,7 +159,7 @@ fn _ui_access_execute_db(request: AccessRequest, path: text) -> Result<AccessRes
     if not cli_file_exists(path):
         return Err(AccessError.create("source_unavailable", "UI access database does not exist: " + path))
     var store = match UiAccessStore.open_existing(path):
-        Err(e): return Err(AccessError.create("source_unavailable", e.message()))
+        Err(e): return Err(_ui_access_store_error(e))
         Ok(opened): opened
     val operation = request.descriptor.operation
     var result = if operation == ACCESS_OPERATION_HISTORY:
@@ -166,7 +168,7 @@ fn _ui_access_execute_db(request: AccessRequest, path: text) -> Result<AccessRes
         match store.list_events(surface_id, count):
             Err(e):
                 store.close()
-                return Err(AccessError.create("source_unavailable", e.message()))
+                return Err(_ui_access_store_error(e))
             Ok(events):
                 var history_result = _ui_access_read_result(operation, ui_access_events_to_json(events))?
                 history_result.session_id = "persisted"
@@ -178,14 +180,14 @@ fn _ui_access_execute_db(request: AccessRequest, path: text) -> Result<AccessRes
         match store.query_nodes(_ui_access_option(request.args, "--surface"), _ui_access_option(request.args, "--kind"), text_query, limit + 1):
             Err(e):
                 store.close()
-                return Err(AccessError.create("source_unavailable", e.message()))
+                return Err(_ui_access_store_error(e))
             Ok(nodes): _ui_access_db_find_result(nodes, request.args, limit)
     else:
         val limit = _ui_access_option_number(request.args, "--limit", UI_ACCESS_MAX_LIMIT)
         val loaded_snapshot = match store.read_snapshot(limit):
             Err(e):
                 store.close()
-                return Err(AccessError.create("source_unavailable", e.message()))
+                return Err(_ui_access_store_error(e))
             Ok(value): value
         val snapshot_truncated = loaded_snapshot.nodes.len().to_i64() > limit
         val snapshot = _ui_access_limit_snapshot(loaded_snapshot, limit)
@@ -200,7 +202,7 @@ fn _ui_access_execute_db(request: AccessRequest, path: text) -> Result<AccessRes
                     val candidates = match store.query_nodes(surface_id, "", "", limit + 1):
                         Err(e):
                             store.close()
-                            return Err(AccessError.create("source_unavailable", e.message()))
+                            return Err(_ui_access_store_error(e))
                         Ok(found): found
                     val content_truncated = candidates.len().to_i64() > limit
                     val nodes = if content_truncated: candidates[0:limit.to_i32()] else: candidates
@@ -222,6 +224,9 @@ fn _ui_access_execute_db(request: AccessRequest, path: text) -> Result<AccessRes
         Ok(_): pass_dn
         Err(_): pass_dn
     Ok(result)
+
+fn _ui_access_store_error(db_error: DbError) -> AccessError:
+    AccessError.create("source_unavailable", db_error.message())
 
 fn _ui_access_limit_snapshot(snapshot: UiAccessSnapshot, limit: i64) -> UiAccessSnapshot:
     if snapshot.nodes.len().to_i64() <= limit:
@@ -287,13 +292,13 @@ fn _ui_access_http_once(method: HttpMethod, url: text, body: text, timeout_ms: i
         http_client_destroy(client)
         return Err(AccessError.create("invalid_argument", "failed to configure finite HTTP timeout"))
     val headers = if method == HttpMethod.POST: ["Content-Type: application/json", "Accept: application/json"] else: ["Accept: application/json"]
-    val response = http_client_request(client, method, url, headers, body)
+    val response: HttpResponse = http_client_request(client, method, url, headers, body)
     http_client_destroy(client)
     if response.is_ok:
         return Ok(response.body)
-    Err(_ui_access_http_error(response.status_code, response.error, response.body))
+    Err(ui_access_cli_http_error(response.status_code, response.error, response.body))
 
-fn _ui_access_http_error(status: i64, transport_error: text, body: text) -> AccessError:
+pub fn ui_access_cli_http_error(status: i64, transport_error: text, body: text) -> AccessError:
     val detail = if body != "": body else: transport_error
     if transport_error.lower().contains("timeout") or status == 408 or status == 504:
         return AccessError.detailed("timeout", "UI access request timed out", "", detail, true, false)
@@ -600,13 +605,10 @@ fn _ui_access_positive_option(args: [text], name: text, default_value: i64, max_
     val raw = _ui_access_option(args, name)
     if raw == "":
         return Ok(default_value)
-    for ch in raw:
-        if ch < "0" or ch > "9":
-            return Err(AccessError.create("invalid_argument", name + " must be a positive integer"))
-    val value = raw.to_int() ?? 0
-    if value <= 0 or value > max_value:
+    val parsed = raw.to_int()
+    if parsed == nil or parsed <= 0 or parsed > max_value:
         return Err(AccessError.create("invalid_argument", name + " must be between 1 and " + max_value.to_text()))
-    Ok(value)
+    Ok(parsed)
 
 fn _ui_access_option_number(args: [text], name: text, default_value: i64) -> i64:
     val raw = _ui_access_option(args, name)

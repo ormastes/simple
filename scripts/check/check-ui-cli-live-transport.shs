@@ -1,0 +1,85 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT"
+
+SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
+OUT=build/test-artifacts/03_system/app/ui_cli_llm_access
+DB=$OUT/live-ui.sqlite
+PORT=18765
+IMAGE_OUT=doc/06_spec/image/03_system/app/ui_cli_llm_access
+mkdir -p "$OUT"
+mkdir -p "$IMAGE_OUT"
+rm -f "$DB" "$OUT"/live-*.json "$OUT"/live-*.log "$OUT"/live-ui-transport.txt
+
+cleanup() {
+    if [ "${SERVER_PID:-}" ]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1 SIMPLE_UI_ACCESS_DB_PATH="$DB" "$SIMPLE_BIN" run test/fixtures/ui_cli_access/live_server.spl >"$OUT/live-server.log" 2>&1 &
+SERVER_PID=$!
+
+ready=0
+i=0
+while [ "$i" -lt 50 ]; do
+    if "$SIMPLE_BIN" ui windows --port "$PORT" --json >"$OUT/live-windows.json" 2>"$OUT/live-windows.log"; then
+        ready=1
+        break
+    fi
+    i=$((i + 1))
+    sleep 0.1
+done
+[ "$ready" -eq 1 ]
+
+CHROME_BIN=${CHROME_BIN:-}
+if [ -z "$CHROME_BIN" ]; then
+    CHROME_BIN=$(rg --files "$HOME/.cache/ms-playwright" 2>/dev/null | rg '/chrome-headless-shell$' | sort | tail -1)
+fi
+[ -n "$CHROME_BIN" ]
+"$CHROME_BIN" --headless --no-sandbox --disable-gpu --window-size=1280,800 --screenshot="$IMAGE_OUT/gui-before.png" "http://127.0.0.1:$PORT/" >"$OUT/live-gui-before.log" 2>&1
+
+"$SIMPLE_BIN" ui find --surface main --kind button --text noop --limit 10 --port "$PORT" --json >"$OUT/live-find.json" 2>"$OUT/live-find.log"
+"$SIMPLE_BIN" ui act --canonical main#noop --action focus_noop --port "$PORT" --timeout 2000 --json >"$OUT/live-act.json" 2>"$OUT/live-act.log"
+"$SIMPLE_BIN" ui history --surface main --count 10 --port "$PORT" --json >"$OUT/live-history.json" 2>"$OUT/live-history.log"
+"$CHROME_BIN" --headless --no-sandbox --disable-gpu --window-size=1280,800 --screenshot="$IMAGE_OUT/gui-after.png" "http://127.0.0.1:$PORT/" >"$OUT/live-gui-after.log" 2>&1
+
+kill "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+
+if "$SIMPLE_BIN" ui windows --port "$PORT" --timeout 200 --json >"$OUT/live-stopped.json" 2>"$OUT/live-stopped.log"; then
+    exit 1
+fi
+"$SIMPLE_BIN" ui snapshot --ui-access-db "$DB" --json >"$OUT/live-db-snapshot.json" 2>"$OUT/live-db-snapshot.log"
+if "$SIMPLE_BIN" ui act --canonical main#noop --action focus_noop --ui-access-db "$DB" --json >"$OUT/live-db-act.json" 2>"$OUT/live-db-act.log"; then
+    exit 1
+fi
+
+rg -q '"schema":"simple.access/v1"' "$OUT/live-windows.json"
+rg -q 'main#noop' "$OUT/live-find.json"
+rg -q '"request_id":' "$OUT/live-act.json"
+rg -q 'access_request' "$OUT/live-history.json"
+rg -q 'source_unavailable' "$OUT/live-stopped.log" "$OUT/live-stopped.json"
+rg -q '"mode":"persisted"' "$OUT/live-db-snapshot.json"
+rg -q 'source_unavailable' "$OUT/live-db-act.log" "$OUT/live-db-act.json"
+cp "$OUT/live-windows.json" "$OUT/protocol.json"
+
+{
+    printf '%s\n' 'transport=existing-test-api'
+    printf '%s\n' 'client_process=separate'
+    printf '%s\n' 'loopback_default=true'
+    printf '%s\n' 'live_windows=pass'
+    printf '%s\n' 'live_find=pass'
+    printf '%s\n' 'live_act=pass'
+    printf '%s\n' 'correlated_history=pass'
+    printf '%s\n' 'service_stop=source_unavailable'
+    printf '%s\n' 'db_fallback=read_only'
+    printf '%s\n' 'db_act=source_unavailable'
+} >"$OUT/live-ui-transport.txt"
+
+printf '%s\n' 'STATUS: PASS ui-cli-live-transport'

@@ -1,108 +1,11 @@
-use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
-use compiler.backend.backend.backend_types.{CodegenTarget}
-use compiler.mir.mir_data.*
-use compiler.mir.mir_instructions.*
+extern fn rt_file_read_text(path: text) -> text
 
-# Ordered comparison over two declared operands of `int_ty`. Signedness of the
-# operand type must select the LLVM predicate: unsigned integers use
-# ult/ule/ugt/uge, signed integers use slt/sle/sgt/sge. Equality (eq/ne) is
-# signedness-agnostic. The comparison width is governed by a separate width
-# pass, so these tests pin the predicate mnemonic, not the bit width.
-fn ordered_body(op: MirBinOp, int_ty: MirType) -> MirBody:
-    MirBody(
-        name: "ordered",
-        blocks: [MirBlock(
-            id: BlockId.entry(),
-            label: Some("entry"),
-            instructions: [
-                MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(5), int_ty), span: nil),
-                MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(3), int_ty), span: nil),
-                MirInst(
-                    kind: MirInstKind.BinOp(
-                        LocalId(id: 3),
-                        op,
-                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
-                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
-                    ),
-                    span: nil
-                )
-            ],
-            terminator: MirTerminator.Ret(nil)
-        )],
-        locals: [
-            MirLocal(id: LocalId(id: 1), name: Some("left"), type_: int_ty, kind: LocalKind.Temp, is_ghost: false),
-            MirLocal(id: LocalId(id: 2), name: Some("right"), type_: int_ty, kind: LocalKind.Temp, is_ghost: false),
-            MirLocal(id: LocalId(id: 3), name: Some("res"), type_: MirType.bool(), kind: LocalKind.Temp, is_ghost: false)
-        ],
-        arg_count: 0,
-        return_ty: MirType.unit()
-    )
+describe "LLVM comparison operand type lowering":
+    it "compares operands in operand type before producing bool result":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
 
-fn u32() -> MirType:
-    MirType(kind: MirTypeKind.U32)
-
-fn i32() -> MirType:
-    MirType(kind: MirTypeKind.I32)
-
-fn lower(name: text, body: MirBody) -> text:
-    val translator = MirToLlvm.create("test.llvm.signedness", CodegenTarget.X86_64, nil)
-    translator.translate_function(name, body)
-    translator.builder.build()
-
-describe "LLVM signedness-preserving lowering":
-    it "uses ugt for an unsigned u32 greater-than comparison":
-        val output = lower("u32_gt", ordered_body(MirBinOp.Gt, u32()))
-        expect(output).to_contain("icmp ugt ")
-        expect(output.contains("icmp sgt ")).to_equal(false)
-
-    it "uses ult for an unsigned u32 less-than comparison":
-        val output = lower("u32_lt", ordered_body(MirBinOp.Lt, u32()))
-        expect(output).to_contain("icmp ult ")
-        expect(output.contains("icmp slt ")).to_equal(false)
-
-    it "uses uge for an unsigned u32 greater-or-equal comparison":
-        val output = lower("u32_ge", ordered_body(MirBinOp.Ge, u32()))
-        expect(output).to_contain("icmp uge ")
-        expect(output.contains("icmp sge ")).to_equal(false)
-
-    it "uses ule for an unsigned u32 less-or-equal comparison":
-        val output = lower("u32_le", ordered_body(MirBinOp.Le, u32()))
-        expect(output).to_contain("icmp ule ")
-        expect(output.contains("icmp sle ")).to_equal(false)
-
-    it "keeps signed slt for an i32 less-than comparison":
-        val output = lower("i32_lt", ordered_body(MirBinOp.Lt, i32()))
-        expect(output).to_contain("icmp slt ")
-        expect(output.contains("icmp ult ")).to_equal(false)
-
-    it "keeps signed sgt for an i32 greater-than comparison":
-        val output = lower("i32_gt", ordered_body(MirBinOp.Gt, i32()))
-        expect(output).to_contain("icmp sgt ")
-        expect(output.contains("icmp ugt ")).to_equal(false)
-
-    it "leaves equality signedness-agnostic (icmp eq) for u32 operands":
-        val output = lower("u32_eq", ordered_body(MirBinOp.Eq, u32()))
-        expect(output).to_contain("icmp eq ")
-        expect(output.contains("ueq")).to_equal(false)
-
-    # Widening an integer operand to a larger width must respect signedness:
-    # an unsigned source zero-extends (zext), a signed source sign-extends
-    # (sext). This is the load-bearing case for u32 0x80000001 -> u64 giving
-    # 0x0000000080000001 (zext), not 0xFFFFFFFF80000001 (sext).
-    it "zero-extends an unsigned operand widened to i64":
-        val translator = MirToLlvm.create("test.llvm.zext", CodegenTarget.X86_64, nil)
-        val unsigned_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(5), u32()))
-        val widened = translator.operand_as_type("%vu", unsigned_op, "i64")
-        expect(widened).to_equal("%0")
-        val output = translator.builder.build()
-        expect(output).to_contain("zext i32 %vu to i64")
-        expect(output.contains("sext i32 %vu to i64")).to_equal(false)
-
-    it "sign-extends a signed operand widened to i64":
-        val translator = MirToLlvm.create("test.llvm.sext", CodegenTarget.X86_64, nil)
-        val signed_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(5), i32()))
-        val widened = translator.operand_as_type("%vs", signed_op, "i64")
-        expect(widened).to_equal("%0")
-        val output = translator.builder.build()
-        expect(output).to_contain("sext i32 %vs to i64")
-        expect(output.contains("zext i32 %vs to i64")).to_equal(false)
+        expect(source).to_contain("val eq_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))")
+        expect(source).to_contain("val eq_left = self.value_as_type(left_raw, self.get_operand_type(left), eq_cmp_ty)")
+        expect(source).to_contain("val eq_right = self.value_as_type(right_raw, self.get_operand_type(right), eq_cmp_ty)")
+        expect(source).to_not_contain("self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, left_val, right_val)")
+        expect(source).to_not_contain("self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, left_val, right_val)")

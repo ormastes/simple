@@ -5,21 +5,24 @@ use app.io.mod.{current_time_ms, getpid}
 use common.ui.access.*
 use std.play.types.{WindowInfo, PlayError}
 use std.play.wm.mod.{wm_list_windows, wm_focus_window, wm_click, wm_type_text, wm_screenshot}
-use app.play.wm_daemon_client.{wm_daemon_list_windows}
 use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open}
 
 val WM_ACCESS_SOURCE = "host_wm"
 val WM_ACCESS_MAX_AGE_MS: i64 = 5000
 val WM_ACCESS_LIMIT: i64 = 100
+val WM_ACCESS_TIMEOUT_MS: i64 = 20000
+val WM_ACCESS_MAX_TEXT_CHARS: i64 = 4096
+val WM_ACCESS_MAX_PATH_CHARS: i64 = 4096
+val WM_ACCESS_MAX_COORDINATE: i64 = 1000000
 var wm_access_request_sequence: i64 = 0
 
 pub fn wm_access_descriptors() -> [AccessCommandDescriptor]:
     [
-        AccessCommandDescriptor.create("windows", "", "wm.list", ACCESS_OPERATION_LIST, "windows", "simple play windows --json", 0, "List native windows", ["wm-list"], AccessSafety.read(2000)),
-        AccessCommandDescriptor.create("wm-text-snapshot", "", "wm.snapshot", ACCESS_OPERATION_SNAPSHOT, "wm-text-snapshot <source>", "simple play wm-text-snapshot host_wm", 1, "Snapshot native windows", [], AccessSafety.read(2000)),
-        AccessCommandDescriptor.create("wm-text-find", "", "wm.find", ACCESS_OPERATION_FIND, "wm-text-find <source> <text>", "simple play wm-text-find host_wm Editor", 2, "Find native windows", [], AccessSafety.read(2000)),
-        AccessCommandDescriptor.create("wm-text-act", "", "wm.act", ACCESS_OPERATION_ACT, "wm-text-act <target> <action> [args]", "simple play wm-text-act wm:123#root focus", 2, "Act on a native window", [], AccessSafety.action(2000, false, false, false)),
-        AccessCommandDescriptor.create("wm-text-history", "", "wm.history", ACCESS_OPERATION_HISTORY, "wm-text-history", "simple play wm-text-history --json", 0, "Read bounded WM access history", [], AccessSafety.read(2000))
+        AccessCommandDescriptor.create("windows", "", "wm.list", ACCESS_OPERATION_LIST, "windows", "simple play windows --json", 0, "List native windows", ["wm-list"], AccessSafety.read(WM_ACCESS_TIMEOUT_MS)),
+        AccessCommandDescriptor.create("wm-text-snapshot", "", "wm.snapshot", ACCESS_OPERATION_SNAPSHOT, "wm-text-snapshot <source>", "simple play wm-text-snapshot host_wm", 1, "Snapshot native windows", [], AccessSafety.read(WM_ACCESS_TIMEOUT_MS)),
+        AccessCommandDescriptor.create("wm-text-find", "", "wm.find", ACCESS_OPERATION_FIND, "wm-text-find <source> <text>", "simple play wm-text-find host_wm Editor", 2, "Find native windows", [], AccessSafety.read(WM_ACCESS_TIMEOUT_MS)),
+        AccessCommandDescriptor.create("wm-text-act", "", "wm.act", ACCESS_OPERATION_ACT, "wm-text-act <target> <action> [args]", "simple play wm-text-act wm:123#root focus", 2, "Act on a native window", [], AccessSafety.action(WM_ACCESS_TIMEOUT_MS, false, false, false)),
+        AccessCommandDescriptor.create("wm-text-history", "", "wm.history", ACCESS_OPERATION_HISTORY, "wm-text-history", "simple play wm-text-history --json", 0, "Read bounded WM access history", [], AccessSafety.read(WM_ACCESS_TIMEOUT_MS))
     ]
 
 pub fn wm_access_is_command(command: text) -> bool:
@@ -48,6 +51,7 @@ pub fn wm_access_snapshot_from_windows(windows: [WindowInfo], captured_at_ms: i6
     win_text_merge_snapshots("host_wm", snapshots)
 
 pub fn wm_access_execute(command: text, args: [text], output_mode: AccessOutputMode) -> Result<text, AccessError>:
+    val started_at_ms = current_time_ms()
     val descriptor = match access_find_descriptor(command, "", wm_access_descriptors()):
         Some(found): found
         nil: return Err(AccessError.create("invalid_argument", "unsupported WM access command '" + command + "'"))
@@ -61,23 +65,19 @@ pub fn wm_access_execute(command: text, args: [text], output_mode: AccessOutputM
     if descriptor.operation == ACCESS_OPERATION_HISTORY:
         return _wm_access_history(output_mode)
 
-    # `windows list` prefers the resident WM daemon channel when one is running
-    # (headless daemon owns the live window table); otherwise it falls back to
-    # the OS-window shell adapter. Other operations stay on the shell adapter.
-    val daemon_windows = if descriptor.operation == ACCESS_OPERATION_LIST: wm_daemon_list_windows() else: nil
-    val windows = match daemon_windows:
-        Some(found): found
-        nil:
-            match wm_list_windows():
-                Ok(found): found
-                Err(e): return Err(_wm_access_backend_error(e))
+    # Every operation resolves against the same owner so listed IDs remain actionable.
+    val windows = match wm_list_windows():
+        Ok(found): found
+        Err(e): return Err(_wm_access_backend_error(e))
+    if _wm_access_timed_out(started_at_ms):
+        return Err(AccessError.detailed("timeout", "WM access request timed out", "TIMEOUT", "Observe current state before retrying", true, false))
     val captured_at_ms = current_time_ms()
     val snapshot = wm_access_snapshot_from_windows(windows, captured_at_ms)
     val result = match descriptor.operation:
         ACCESS_OPERATION_LIST: access_result_from_snapshot(ACCESS_OPERATION_LIST, WM_ACCESS_SOURCE, "", snapshot.access, WM_ACCESS_LIMIT)
         ACCESS_OPERATION_SNAPSHOT: AccessResult.document(ACCESS_OPERATION_SNAPSHOT, WM_ACCESS_SOURCE, "", snapshot.access.snapshot_revision, ui_access_snapshot_to_json(snapshot.access), snapshot.access.nodes.len().to_i64(), false)
         ACCESS_OPERATION_FIND: _wm_access_find(snapshot, args[1])
-        ACCESS_OPERATION_ACT: return _wm_access_act(snapshot, args, output_mode)
+        ACCESS_OPERATION_ACT: return _wm_access_act(snapshot, args, output_mode, started_at_ms)
         _: return Err(AccessError.create("invalid_argument", "unsupported WM operation"))
     Ok(_wm_access_render(result, output_mode))
 
@@ -85,16 +85,19 @@ fn _wm_access_find(snapshot: WinTextSnapshot, query: text) -> AccessResult:
     val nodes = win_text_find_nodes(snapshot, "", "", query, WM_ACCESS_LIMIT.to_i32())
     AccessResult.document(ACCESS_OPERATION_FIND, WM_ACCESS_SOURCE, "", snapshot.access.snapshot_revision, ui_access_query_to_json(ui_access_query_result(nodes)), nodes.len().to_i64(), false)
 
-fn _wm_access_act(snapshot: WinTextSnapshot, args: [text], output_mode: AccessOutputMode) -> Result<text, AccessError>:
+fn _wm_access_act(snapshot: WinTextSnapshot, args: [text], output_mode: AccessOutputMode, started_at_ms: i64) -> Result<text, AccessError>:
     val target_id = args[0]
     val action = args[1]
     wm_access_request_sequence = wm_access_request_sequence + 1
     val request_id = "wm-act-" + getpid().to_text() + "-" + current_time_ms().to_text() + "-" + wm_access_request_sequence.to_text()
-    _wm_access_record(request_id, "request", action)
-    val routed = win_text_route_action(snapshot, WinTextActionRequest(target_id: target_id, action: action, text_value: if args.len() > 2: args[2] else: "", x: if args.len() > 2: args[2].to_i64() ?? 0 else: 0, y: if args.len() > 3: args[3].to_i64() ?? 0 else: 0))
-    if not routed.ok:
-        val code = if routed.code == "unsupported_operation": "unsupported_action" else: routed.code
-        return _wm_access_fail(request_id, AccessError.create(code, routed.message))
+    if not _wm_access_record(request_id, "request", action):
+        return Err(AccessError.create("source_unavailable", "WM access history store is unavailable"))
+    match access_validate_snapshot_action(snapshot.access, target_id, action):
+        Err(e): return _wm_access_fail(request_id, e)
+        Ok(_): ()
+    match wm_access_validate_action_args(action, args):
+        Err(e): return _wm_access_fail(request_id, e)
+        Ok(_): ()
 
     val window_id = _wm_access_window_id(snapshot.access, target_id)
     if window_id == "":
@@ -104,20 +107,12 @@ fn _wm_access_act(snapshot: WinTextSnapshot, args: [text], output_mode: AccessOu
         "type_text":
             if not _wm_access_target_focused(snapshot.access, target_id):
                 return _wm_access_fail(request_id, AccessError.create("target_disabled", "type_text requires the target window to be focused"))
-            if args.len() < 3:
-                return _wm_access_fail(request_id, AccessError.detailed("invalid_argument", "missing text", "", "Usage: wm-text-act <target> type_text <text>", false, false))
             wm_type_text(args[2])
         "click_xy":
-            if args.len() < 4:
-                return _wm_access_fail(request_id, AccessError.detailed("invalid_argument", "missing coordinates", "", "Usage: wm-text-act <target> click_xy <x> <y>", false, false))
-            val x = args[2].to_i64()
-            val y = args[3].to_i64()
-            if x == nil or y == nil:
-                return _wm_access_fail(request_id, AccessError.create("invalid_argument", "coordinates must be integers"))
+            val x = _wm_access_parse_coordinate(args[2])
+            val y = _wm_access_parse_coordinate(args[3])
             wm_click(x ?? 0, y ?? 0)
         "screenshot":
-            if args.len() < 3:
-                return _wm_access_fail(request_id, AccessError.detailed("invalid_argument", "missing path", "", "Usage: wm-text-act <target> screenshot <path>", false, false))
             match wm_screenshot(args[2]):
                 Ok(_): Ok(())
                 Err(e): Err(e)
@@ -125,13 +120,55 @@ fn _wm_access_act(snapshot: WinTextSnapshot, args: [text], output_mode: AccessOu
     match owner_result:
         Err(e): return _wm_access_fail(request_id, _wm_access_backend_error(e))
         Ok(_): ()
-    _wm_access_record(request_id, "result", "ok")
+    if _wm_access_timed_out(started_at_ms):
+        return _wm_access_fail(request_id, AccessError.detailed("timeout", "WM action timed out", "TIMEOUT", "Observe current state before retrying", true, false))
+    val observed_windows = match wm_list_windows():
+        Err(e): return _wm_access_fail(request_id, _wm_access_backend_error(e))
+        Ok(found): found
+    val observed = wm_access_snapshot_from_windows(observed_windows, current_time_ms())
+    if _wm_access_timed_out(started_at_ms):
+        return _wm_access_fail(request_id, AccessError.detailed("timeout", "WM post-action observation timed out", "TIMEOUT", "Observe current state before retrying", true, false))
+    if ui_access_find_node(observed.access, target_id) == nil:
+        return _wm_access_fail(request_id, AccessError.create("target_not_found", "target disappeared before post-action observation"))
+    if not _wm_access_record(request_id, "observation", "present") or not _wm_access_record(request_id, "result", "ok"):
+        return Err(AccessError.create("source_unavailable", "WM access history write failed after action"))
     var result = AccessResult.status([["target", target_id], ["action", action], ["status", "ok"]], "")
-    result.set_context(ACCESS_OPERATION_ACT, WM_ACCESS_SOURCE, "", snapshot.access.snapshot_revision, request_id, "", false)
+    result.set_context(ACCESS_OPERATION_ACT, WM_ACCESS_SOURCE, "", observed.access.snapshot_revision, request_id, "", false)
     Ok(_wm_access_render(result, output_mode))
 
+pub fn wm_access_validate_action_args(action: text, args: [text]) -> Result<(), AccessError>:
+    if action == "type_text":
+        if args.len() < 3: return Err(AccessError.create("invalid_argument", "missing text"))
+        if args[2].len() > WM_ACCESS_MAX_TEXT_CHARS: return Err(AccessError.create("invalid_argument", "text exceeds the 4096-character limit"))
+    elif action == "click_xy":
+        if args.len() < 4: return Err(AccessError.create("invalid_argument", "missing coordinates"))
+        val x = _wm_access_parse_coordinate(args[2])
+        val y = _wm_access_parse_coordinate(args[3])
+        if x == nil or y == nil: return Err(AccessError.create("invalid_argument", "coordinates must be integers"))
+        if (x ?? 0).abs() > WM_ACCESS_MAX_COORDINATE or (y ?? 0).abs() > WM_ACCESS_MAX_COORDINATE:
+            return Err(AccessError.create("invalid_argument", "coordinates exceed the supported range"))
+    elif action == "screenshot":
+        if args.len() < 3 or args[2] == "" or args[2].len() > WM_ACCESS_MAX_PATH_CHARS:
+            return Err(AccessError.create("invalid_argument", "screenshot path must contain 1..4096 characters"))
+    Ok(())
+
+fn _wm_access_parse_coordinate(raw: text) -> i64?:
+    if raw == "": return nil
+    var digits = 0
+    var index = 0
+    for ch in raw:
+        if ch == "-":
+            if index != 0: return nil
+        else:
+            if not "0123456789".contains(ch): return nil
+            digits = digits + 1
+        index = index + 1
+    if digits == 0: return nil
+    raw.to_i64()
+
 fn _wm_access_fail(request_id: text, access_error: AccessError) -> Result<text, AccessError>:
-    _wm_access_record(request_id, "result", access_error.code)
+    if not _wm_access_record(request_id, "result", access_error.code):
+        return Err(AccessError.detailed("source_unavailable", "WM access history write failed", access_error.code, access_error.message, true, false))
     Err(access_error)
 
 fn _wm_access_history(output_mode: AccessOutputMode) -> Result<text, AccessError>:
@@ -147,14 +184,18 @@ fn _wm_access_history(output_mode: AccessOutputMode) -> Result<text, AccessError
     val result = AccessResult.document(ACCESS_OPERATION_HISTORY, WM_ACCESS_SOURCE, "", 0, ui_access_events_to_json(events), events.len().to_i64(), false)
     Ok(_wm_access_render(result, output_mode))
 
-fn _wm_access_record(request_id: text, phase: text, code: text):
+fn _wm_access_record(request_id: text, phase: text, code: text) -> bool:
     var store = ui_access_store_runtime_open("wm_access", WM_ACCESS_SOURCE)
-    if store == nil: return
+    if store == nil: return false
     val event = UiAccessEvent(surface_id: WM_ACCESS_SOURCE, widget_id: "", canonical_id: "", event_kind: "access_" + phase, payload: "request_id=" + request_id + ";code=" + code, sequence: current_time_ms())
-    match store.insert_event(event):
-        Ok(_): pass_dn
-        Err(_): pass_dn
+    val recorded = match store.insert_event(event):
+        Ok(_): true
+        Err(_): false
     store.close()
+    recorded
+
+fn _wm_access_timed_out(started_at_ms: i64) -> bool:
+    current_time_ms() - started_at_ms >= WM_ACCESS_TIMEOUT_MS
 
 fn _wm_access_window_id(snapshot: UiAccessSnapshot, target_id: text) -> text:
     val node = ui_access_find_node(snapshot, target_id)
@@ -177,5 +218,5 @@ fn _wm_access_render(result: AccessResult, output_mode: AccessOutputMode) -> tex
     access_render_human(result)
 
 fn _wm_access_backend_error(error: PlayError) -> AccessError:
-    val code = if error.code == "TIMEOUT": "timeout" else: "source_unavailable"
+    val code = if error.code == "TIMEOUT" or error.message.contains("TIMEOUT"): "timeout" else: "source_unavailable"
     AccessError.detailed(code, error.message, error.code, "Check the native WM backend and permissions", code == "timeout", false)

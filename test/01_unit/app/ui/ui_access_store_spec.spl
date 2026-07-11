@@ -5,8 +5,9 @@
 # public store API directly.
 
 use std.spec.{describe, it, expect}
-use common.ui.access.{UiAccessStore, UiAccessNode, UiAccessSurface, UiAccessEvent, UiAccessSnapshot, ui_access_canonical_id}
+use common.ui.access.{UiAccessStore, UiAccessNode, UiAccessProp, UiAccessSurface, UiAccessEvent, UiAccessSnapshot, ui_access_canonical_id}
 use app.io.mod.{file_exists, file_delete}
+use std.database.sql.connection.{Database}
 
 fn _surface(surface_id: text, title: text, active: bool, root_widget_id: text) -> UiAccessSurface:
     UiAccessSurface(
@@ -54,6 +55,22 @@ fn _snapshot(active_surface: text, surfaces: [UiAccessSurface], nodes: [UiAccess
         surfaces: surfaces,
         nodes: nodes,
         recent_events: [],
+    )
+
+fn _node_with_prop(surface_id: text, widget_id: text, kind: text, text_value: text, key: text, value: text) -> UiAccessNode:
+    UiAccessNode(
+        canonical_id: ui_access_canonical_id(surface_id, widget_id),
+        surface_id: surface_id,
+        widget_id: widget_id,
+        kind: kind,
+        visible: true,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text_value: text_value,
+        props: [UiAccessProp(key: key, value: value)],
+        child_ids: [],
+        action_names: []
     )
 
 fn _event(sequence: i64, surface_id: text, widget_id: text, event_kind: text, payload: text) -> UiAccessEvent:
@@ -163,6 +180,34 @@ describe "UiAccessStore":
         expect(all_nodes.len()).to_equal(5)
         val limited = store.query_nodes("", "", "", 2)?
         expect(limited.len()).to_equal(2)
+
+    it "round-trips node properties used for capture and staleness metadata":
+        var store = UiAccessStore.memory()?
+        store.persist_snapshot(_snapshot(
+            "main",
+            [_surface("main", "Main", true, "root")],
+            [_node_with_prop("main", "root", "root", "Main", "captured_at_ms", "123:|=")]
+        ))?
+        val nodes = store.query_nodes("main", "root", "", 1)?
+        expect(nodes.len()).to_equal(1)
+        expect(nodes[0].props.len()).to_equal(1)
+        expect(nodes[0].props[0].key).to_equal("captured_at_ms")
+        expect(nodes[0].props[0].value).to_equal("123:|=")
+
+    it "reads pre-property-schema stores without requiring a write migration":
+        val db_path = "/tmp/ui_access_store_legacy_props.sqlite"
+        if file_exists(db_path):
+            file_delete(db_path)
+        var db = Database.open(db_path)?
+        db.exec_sql("CREATE TABLE ui_access_nodes (canonical_id TEXT PRIMARY KEY, surface_id TEXT NOT NULL, widget_id TEXT NOT NULL, kind TEXT NOT NULL, visible INTEGER NOT NULL, focused INTEGER NOT NULL, enabled INTEGER NOT NULL, selected INTEGER NOT NULL, text_value TEXT NOT NULL, child_ids_text TEXT NOT NULL, action_names_text TEXT NOT NULL)")?
+        db.exec_sql("INSERT INTO ui_access_nodes VALUES ('main#root','main','root','root',1,0,1,0,'Main','','')")?
+        db.close()?
+        var legacy = UiAccessStore.open_existing(db_path)?
+        val nodes = legacy.query_nodes("main", "root", "", 1)?
+        expect(nodes.len()).to_equal(1)
+        expect(nodes[0].props.len()).to_equal(0)
+        legacy.close()?
+        file_delete(db_path)
 
     it "reopens a file-backed store and preserves current nodes and events":
         val db_path = "/tmp/ui_access_store_reopen.sqlite"

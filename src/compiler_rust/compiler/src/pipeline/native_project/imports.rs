@@ -773,7 +773,8 @@ fn collect_imported_names_flat(
 }
 
 fn mangled_matches_use_path(mangled: &str, use_segments: &[&str]) -> bool {
-    let parts: Vec<&str> = mangled.split("__").collect();
+    let normalized = mangled.replace("_dot_", "__").replace('.', "__");
+    let parts: Vec<&str> = normalized.split("__").collect();
     if subsequence_match_parts(&parts, use_segments) {
         return true;
     }

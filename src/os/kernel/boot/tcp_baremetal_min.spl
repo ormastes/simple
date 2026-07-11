@@ -30,15 +30,54 @@ pub fn boot_tcp_probe_bind(addr: text) -> i64:
 pub fn boot_tcp_probe_close(fd: i64) -> bool:
     rt_boot_tcp_close(fd) == 0
 
+fn bare_tcp_content_length(data: text, sep: i64) -> i64:
+    """Best-effort Content-Length value from the raw header block [0, sep); -1 when absent."""
+    var idx = data.find("Content-Length:")
+    if idx < 0:
+        idx = data.find("content-length:")
+    if idx < 0 or idx >= sep:
+        return -1
+    var pos = idx + 15
+    while pos < sep and (data.char_at(pos) as u8) == 0x20:
+        pos = pos + 1
+    var value: i64 = 0
+    var digits = 0
+    while pos < sep:
+        val ch = data.char_at(pos) as u8
+        if ch < 0x30 or ch > 0x39:
+            break
+        value = value * 10 + ((ch - 0x30) as i64)
+        digits = digits + 1
+        pos = pos + 1
+    if digits == 0:
+        return -1
+    value
+
 pub fn boot_tcp_read_text(max_len: i64) -> text:
     var out = ""
     var remaining = max_len
+    var spins = 0
+    var sep: i64 = -1
+    var want: i64 = -1
     while remaining > 0:
         val chunk = rt_boot_tcp_read_bytes(remaining)
         if chunk.len() == 0:
-            break
-        out = out + rt_bytes_to_text(chunk)
-        remaining = remaining - chunk.len()
+            # A POST body can land in a later TCP segment than the headers, so on a
+            # short read keep polling until Content-Length is satisfied (bounded spins).
+            if sep < 0:
+                sep = out.find("\r\n\r\n")
+                if sep >= 0:
+                    want = bare_tcp_content_length(out, sep)
+            if sep >= 0:
+                if want <= 0 or (max_len - remaining) - (sep + 4) >= want:
+                    break
+            spins = spins + 1
+            if spins > 20000:
+                break
+        else:
+            spins = 0
+            out = out + rt_bytes_to_text(chunk)
+            remaining = remaining - chunk.len()
     out
 
 fn bare_tcp_find(fd: i64) -> BareTcpEntry?:

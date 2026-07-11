@@ -254,8 +254,8 @@ _check_gate("identity-ordering-staleness", [
     "stable_identity=pass",
     "deterministic_order=pass",
     "unavailable_fields=explicit",
-    "removed_target=stale_target",
-    "reused_target=target_not_found"
+    "removed_target=target_not_found",
+    "stale_response=stale_target"
 ])
 ```
 
@@ -373,7 +373,7 @@ _check_gate("environment-states", [
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -569,8 +569,10 @@ _check_gate("live-ui-transport", [
     "transport=existing-test-api",
     "client_process=separate",
     "loopback_default=true",
-    "requests_per_read=1",
-    "post_action_request_count=2",
+    "live_windows=pass",
+    "live_find=pass",
+    "live_act=pass",
+    "correlated_history=pass",
     "service_stop=source_unavailable",
     "db_fallback=read_only",
     "db_act=source_unavailable"

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use crate::codegen::common_backend::module_prefix_from_path;
+use crate::codegen::common_backend::{module_init_symbol, module_prefix_from_path};
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
@@ -264,12 +264,23 @@ fn test_module_prefix_from_path() {
     );
 
     assert_eq!(
+        module_prefix_from_path(&PathBuf::from("/project/src/app/ui.render/ansi.spl"), &source_root),
+        "app__ui.render__ansi"
+    );
+
+    assert_eq!(
         module_prefix_from_path(
             &PathBuf::from("/project/test/01_unit/lib/nogc_async_mut/concurrent_wrappers_spec.spl"),
             &PathBuf::from("/project/test")
         ),
         "m_01_unit__lib__nogc_async_mut__concurrent_wrappers_spec"
     );
+}
+
+#[test]
+fn test_dotted_module_init_symbol_matches_portable_c_reference() {
+    assert_eq!(module_init_symbol(Some("app__ui.render__ansi")), "__module_init_app__ui_dot_render__ansi");
+    assert_eq!(module_init_symbol(None), "__module_init");
 }
 
 #[test]
@@ -1207,6 +1218,41 @@ fn test_build_use_map_glob_import_populates_symbol_entries() {
     let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
 
     assert_eq!(use_map.get("log_info"), Some(&expected));
+}
+
+#[test]
+fn test_build_use_map_resolves_data_from_dotted_module_with_name_collision() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let app_root = src_root.join("app");
+    let ansi_path = app_root.join("ui.render/ansi.spl");
+    let colors_path = app_root.join("dashboard.render/colors.spl");
+    let consumer_path = app_root.join("ui.tui/screen.spl");
+    std::fs::create_dir_all(ansi_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(colors_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(consumer_path.parent().unwrap()).unwrap();
+
+    std::fs::write(&ansi_path, "val RESET: text = \"ansi\"\n").unwrap();
+    std::fs::write(&colors_path, "val RESET: text = \"dashboard\"\n").unwrap();
+    std::fs::write(
+        &consumer_path,
+        "use app.ui.render.ansi.{RESET}\nfn main():\n    print RESET\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![
+        (colors_path.clone(), std::fs::read_to_string(&colors_path).unwrap()),
+        (ansi_path.clone(), std::fs::read_to_string(&ansi_path).unwrap()),
+        (consumer_path.clone(), std::fs::read_to_string(&consumer_path).unwrap()),
+    ];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&app_root), &src_root);
+    let expected = format!("{}__RESET", module_prefix_from_path(&ansi_path, &app_root));
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
+
+    assert_eq!(use_map.get("RESET"), Some(&expected));
 }
 
 #[test]

@@ -72,7 +72,6 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_get_env")
         || name.starts_with("rt_set_env")
         || name.starts_with("rt_get_args")
-        || name.starts_with("rt_current_exe_path")
         || name.starts_with("rt_platform_name")
         || name.starts_with("rt_term_enable_ansi")
         || name.starts_with("rt_term_get_size")
@@ -1271,8 +1270,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_exists", &[I64], &[I64]),
     // rt_getpid() -> process id
     RuntimeFuncSpec::new("rt_getpid", &[], &[I64]),
-    // rt_current_exe_path() -> RuntimeValue text with the current executable path
-    RuntimeFuncSpec::new("rt_current_exe_path", &[], &[I64]),
     // =========================================================================
     // CLI SFFI functions (for Simple-based CLI)
     // =========================================================================
@@ -1834,17 +1831,6 @@ mod tests {
             *counts.get(&RuntimeFuncTier::Ext).unwrap_or(&0) >= 20,
             "Ext tier should have at least 20 functions"
         );
-    }
-
-    #[test]
-    fn rt_current_exe_path_is_registered() {
-        let spec = RUNTIME_FUNCS
-            .iter()
-            .find(|spec| spec.name == "rt_current_exe_path")
-            .expect("rt_current_exe_path must be registered for native codegen");
-        assert!(spec.params.is_empty());
-        assert_eq!(spec.returns, [I64]);
-        assert_eq!(tier_of(spec.name), RuntimeFuncTier::Sys);
     }
 
     #[test]

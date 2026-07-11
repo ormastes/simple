@@ -1,129 +1,6 @@
 # Stage4 Self-Host Redeploy (#79) — Plan (updated 2026-07-11)
 
-## UPDATE (2026-07-11, later): the "narrower root cause" below is FOUND and FIXED — RuntimeDict never grew
-
-The check-exit-3 / native-build-trap wall flagged in the section below is root-caused:
-the Rust runtime's compiled-code dict (`RuntimeDict`) was **fixed-capacity** — slots
-inline after the header, `rt_dict_set` returning `false // Dict is full` (ignored by
-compiled code), so the 9th insert into any default `{}` was silently dropped.
-`SymbolTable.scopes` drops scope 9+ → `lookup` nil-receiver trap = the deployed
-binary's instant `native-build` crash; interpreted runs (Rust HashMap) never see it —
-which is exactly why delegation works and in-process doesn't. Fixed in
-`src/compiler_rust/runtime/src/value/dict.rs` (separate slot allocation + ×2 growth
-at 3/4 load, regression test). Second same-day fix: pure-Simple Cranelift adapter
-mapped `CodegenTarget.Host` to `CL_TARGET_X86_64` → x86-64 Linux ELF entry objects
-on arm64 macs (`cranelift_codegen_adapter.spl`, now resolves via `host_arch()`).
-Full debug chain + deployment steps: `doc/08_tracking/bug/stage4_compiled_dict_no_growth_2026-07-11.md`.
-The retained check/test delegation decisions below stay correct until a redeployed
-binary (with the grown-dict runtime) proves the native paths; then retirement can be
-re-attempted.
-
-## seed-delegation retirement pass (2026-07-11, uncommitted) — check/test delegation RETAINED, `build bootstrap` entry-point fixed
-
-Separate workstream (not the redeploy gate itself): audited the CLI's
-`simple_seed` sibling-delegation for `test`/`check` per the CLAUDE.md
-"pure-Simple default tooling" rule, and fixed the `build bootstrap`
-"No entry point specified" regression. Findings:
-
-- **`check` delegation is asymmetric-but-real, and currently load-bearing.**
-  `src/app/cli/_CliMain/main_and_help.spl` gates `check`/`lint` through
-  `_cli_frontend_delegate_binary()` (`src/app/io/cli_ops.spl`), which finds
-  the `simple_seed` sibling next to the running binary and delegates unless
-  `SIMPLE_FRONTEND_DELEGATED=1` is already set (loop guard). Forcing that env
-  var to force the native `run_check()` path on the **currently deployed**
-  `bin/simple` (63MB, built 2026-07-11 11:02 — this wave's stage4 output)
-  reproduces a **silent exit 3, zero output**, even on a trivial one-line
-  `.spl` file — not a "check found errors" exit, a crash before any check
-  output. This lines up with the same-day redeploy-gate failures logged
-  above (`val-scalar`, `struct-copy-isolation`, `class-in-array-mutation`,
-  `cfg-arch-dispatch-b` — i.e. this stage4 binary has active correctness
-  gaps in basic language features right now). By contrast, forcing native
-  `lint` the same way DOES run and produce real output (workspace-root-guard
-  + backend-isolation checks execute), so the breakage is check-specific,
-  not a blanket "native frontend is dead" — a narrower root cause may exist,
-  but finding it is out of scope for this pass (it's downstream of the same
-  stub/behavioral-parity wall tracked above). **Decision: check/lint
-  delegation is retained as-is; NOT retired.** Retiring it now would trade a
-  cosmetic banner for a broken command, which the task's "no easy pass"
-  constraint explicitly forbids in the other direction.
-- **`test` delegation is not a `.spl`-level decision at all.** `rt_cli_run_tests`
-  (`src/compiler_rust/runtime/src/value/cli_sffi.rs:372`) is a Rust runtime
-  extern statically linked into every Simple binary (seed and self-hosted
-  alike). It unconditionally subprocess-delegates to
-  `simple_binary_path()` (env override, else
-  `target/{bootstrap,release}/simple`, else `bin/simple`) — there is no
-  in-process pure-Simple test-execution path to flip to; the actual test
-  runner logic lives only in the Rust driver's
-  `cli/test_runner/runner.rs`, reached via `SIMPLE_TEST_RUNNER_RUST=1` on the
-  delegate child. This was already investigated and resolved-as-designed on
-  2026-06-12 (`doc/08_tracking/bug/stage4_deploy_no_seed_test_runner_blocked_2026-06-11.md`)
-  as a deliberate self-exec-guard fallback, not an oversight. **Decision:
-  test delegation is retained** — building a native pure-Simple test runner
-  to replace it is a real feature gap, not a "smallest change" fix, and is
-  out of scope here.
-- **`build bootstrap` "No entry point" root cause: not a regression, a
-  pre-existing feature gap.** `src/app/build/cli_entry.spl::handle_build`'s
-  `"bootstrap"` branch never added default `--entry`/`--source` flags — it
-  just stripped the subcommand and forwarded whatever args (if any) were
-  left straight to `native-build`, so a bare `simple build bootstrap` always
-  had no entry point. The **Rust seed** has a real, complete 3-stage
-  implementation (`handle_bootstrap` in
-  `src/compiler_rust/driver/src/cli/commands/misc_commands.rs`: compiles
-  3x with hardcoded `--source src/app --entry src/app/cli/bootstrap_main.spl
-  --entry-closure --strip --threads 1`, hashes each stage output, reports
-  VERIFIED/PARTIAL/MISMATCH, and stages the verified binary — it does NOT
-  touch `bin/release`). The self-hosted `.spl` CLI never had an equivalent;
-  this was a **feature gap**, not "regressed at the CLI entry-point
-  plumbing level" as originally framed. **Fix (uncommitted):** ported the
-  Rust `handle_bootstrap`/`compile_stage`/`deploy_verified_bootstrap_stage`
-  logic into `src/app/build/cli_entry.spl` as `handle_build_bootstrap()` +
-  helpers, calling the in-process `cli_native_build()` three times (no
-  subprocess needed — we already are the compiler) with the same defaults,
-  comparing `file_hash_sha256()` per stage, and staging the verified/partial
-  result under `<output-dir>/<triple>/simple` (default `build/bootstrap`,
-  triple via new `_bootstrap_triple()` off `app.io.env_ops.{host_os,
-  host_arch}`) — never `bin/release`. An explicit `--entry` still falls
-  through to the old raw-passthrough behavior for scripting compatibility.
-  Verification: syntax-checked via `bin/simple check` (delegated); a
-  standalone self-test script that imports `handle_build` and calls it with
-  `["bootstrap", "--output=build/bootstrap_selftest"]` was run via
-  `bin/simple run` (interpreted, so it exercises the fix's actual source
-  without needing a redeploy) — see report for the outcome. `bin/simple
-  build bootstrap` on the **currently deployed** compiled binary still hits
-  the old error until this source change is compiled in and redeployed
-  (redeploy stays gate-blocked per the sections below; not performed here).
-- Constraints followed: no commit, no redeploy of `bin/release`, one
-  bootstrap-ish build at a time (checked `pgrep` first — no live
-  `native-build`/`bootstrap-from-scratch` holder), stale-WC backup drill
-  applies to `src/app/build/cli_entry.spl` and this doc.
-
-## STATUS NOW (2026-07-11, fourth wave): bootstrap/deploy PASS; redeploy behavioral gate still FAILS
-
-The stage4 deploy blocker moved from "cannot smoke `-c`/`run`" to behavioral
-parity failures:
-
-- `timeout 1800 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy --no-mcp --jobs=half`: PASS.
-- `bin/simple -c 'print(1+1)'`: PASS (`2`, delegated to installed `simple_seed`).
-- `bin/simple run <tmp file with print(1+1)>`: PASS (`2`, delegated to installed `simple_seed`).
-- `build/bootstrap/full/aarch64-apple-darwin/simple -c 'print(1+1)'`: PASS.
-- `timeout 240 sh scripts/check/cert/redeploy_gate/redeploy_gate.shs bin/simple`: FAIL, 7/11 PASS, 1 skipped. Remaining failures:
-  `val-scalar`, `struct-copy-isolation`, `class-in-array-mutation`, and
-  `cfg-arch-dispatch-b`.
-
-Fourth-wave fixes:
-
-- Added runtime-owned `rt_current_exe_path() -> text` and registered it in
-  Rust SFFI metadata so CLI driver discovery can use a real executable path
-  instead of normalized CLI argv.
-- Canonicalized that path with `realpath()` for installed `bin/simple`
-  symlink launches.
-- Added release-layout `simple_seed` fallback discovery and relaxed explicit
-  bootstrap-driver rejection when current-exe identity is unavailable.
-
-TODO 119 remains open pending redeploy behavioral gate parity and reviewer
-approval.
-
-## PRIOR STATUS (2026-07-11, third wave): runtime-path + argv/runtime selection landed locally; stage4 links, smoke still fails in parser path, NOT deployed
+## STATUS NOW (2026-07-11, third wave): runtime-path + argv/runtime selection landed locally; stage4 links, smoke still fails in parser path, NOT deployed
 
 The second-wave ordered item (pass `--runtime-path` in the non-seed stage-4
 branch and stop selecting stale bootstrap `deps/libsimple_runtime.a` when it
@@ -354,32 +231,6 @@ Full per-fix diagnostic detail (probes, crash reports, budget accounting):
 1. ~~Semantic wall (`replace` in nested call context)~~ **DONE 2026-07-10**
    (uncommitted in WC — receiver hoists on the post-link SMF-cache path; see
    STATUS NOW and the bug doc's 2026-07-10 semantic-replace section).
-   **Hoists RETIRED 2026-07-11 (uncommitted in WC):** premise re-verified on
-   the current `bin/simple` — chained `.replace(...).replace(...)`,
-   `.trim().replace(...)`, and `.unwrap().replace(...)` all execute correctly
-   in val/return/if-statement position (the newly deployed binary carries the
-   real dispatcher fix). Reverted all 7 documented-temporary hoists from
-   `73553244` back to idiomatic chained form: `cache_validator.spl`
-   (`source_to_cache_path`), `smf_manifest.spl`
-   (`parse_manifest_entry_line`, 5 fields), `watcher_protocol.spl`
-   (`request_path_for`), `shb_cache.spl` (`source_to_shb_path`),
-   `driver/incremental.spl` + `driver_build/incremental.spl` twins (both
-   `cached_mir_functions`/`cache_mir_function`), and
-   `mir_interp_intrinsics.spl` (`str_replace` intrinsic only — the sibling
-   `str_slice` receiver-hoist a few lines below is a pre-existing, unrelated
-   pattern and was left untouched, as was the `module_lowering.spl`
-   trace-eprint keeper fix from the same commit). Verified: `bin/simple
-   check` clean on all 7 files; `cli_parser_spec`/`cli_dispatch_spec` green
-   (2/2, 25/25); `watcher_protocol_spec` (8/8), `shb_cache_spec` (26/26),
-   `cache_validator_spec` (9/9, including an explicit
-   `source_to_cache_path` case) all green; a trivial `bin/simple run`
-   exercised the cache path cleanly. `smf_manifest_spec.spl` has 2
-   pre-existing failures (`parses entry line correctly`,
-   `returns nil for malformed entry line`) — confirmed present identically
-   before and after the revert (spec/matcher issue, unrelated to this
-   change), so not a blocker. No spec directly exercises the two
-   `incremental.spl` MIR-cache methods; verified via `check` + the trivial
-   run only. Full retirement, no partial holds.
 2. ~~Stage-2 determinism MISMATCH~~ **PARTIAL 2026-07-10** — sorted-name
    function emission fixed the string-pool/section-layout nondeterminism. The
    attempted ld64 `-no_uuid` normalization produced byte-stable files but is
@@ -399,23 +250,6 @@ Full per-fix diagnostic detail (probes, crash reports, budget accounting):
    run the full `bin/simple build bootstrap` 3-stage (not just Stage 1 in
    isolation) and the extended smoke matrix before any redeploy to
    `bin/release/<triple>/simple`. Do not redeploy on a Stage-1-only pass.
-
-## 2026-07-11 fourth-wave status
-
-- runtime_need: stage4 `-c`/`run` still fell back to the pure parser path after
-  argv/runtime selection because `_cli_current_exe_path()` could not establish
-  the executing binary path when runtime argv was normalized. That made
-  `_cli_driver_binary()` reject `SIMPLE_BOOTSTRAP_DRIVER` as potentially
-  self-recursive and prevented sibling `simple_seed` discovery.
-- facade_checked: existing `rt_cli_get_args()` exposes CLI args but is not a
-  stable current-executable facade; no existing runtime function returned the
-  current executable path for native CLI code.
-- chosen_path: add runtime-owned `rt_current_exe_path() -> text` in the core-C
-  runtime, register it in Rust SFFI metadata, and have `src/app/io/cli_ops.spl`
-  use it before the older argv0 fallback.
-- rejected_shortcuts: do not rely only on `SIMPLE_BOOTSTRAP_DRIVER` in the
-  bootstrap script, because redeploy gates and normal installed binaries must
-  discover sibling `simple_seed` without an injected environment variable.
 
 ## STANDING TRAPS
 
@@ -450,34 +284,6 @@ Full per-fix diagnostic detail (probes, crash reports, budget accounting):
   `strlen`s it must be NUL-terminated explicitly via `(s + "\0").ptr()` —
   this was the root cause of two separate SIGSEGVs in this arc
   (`LLVMSetDataLayout`, `LLVMBuildCall2`).
-
-## 2026-07-11 — 07:52 cli-capable-runtime fix (22111765) was self-defeating
-
-`runtime_archive_has_bootstrap_cli_symbols()` (added in `config.rs` by
-22111765) required `__simple_runtime_init`/`__simple_runtime_shutdown` to be
-**defined** symbols inside `libsimple_runtime.a`. Those are weak, per-program
-module-init hooks the compiler emits for each *compiled entry point*
-(`stubs.rs`/`linker.rs`), never runtime-archive exports — `llvm-nm` confirms
-they don't exist anywhere in the archive. Result: the check always failed,
-`CoreCBootstrap` candidate list stayed empty, and `selected_runtime_library`
-fell back to the minimal `build_core_c_runtime_library` (also gated by the
-same unsatisfiable check) — so stage4 linked with **no real runtime archive
-at all**, only `SIMPLE_STUB_MISSING_RT=1` stubs (807, including core
-`rt_array_all`/`rt_get_args`/`rt_file_read_text` — worse than the prior
-662-stub baseline). Full root-cause + fix detail:
-`doc/03_plan/compiler/bootstrap/stage4_stub_symbol_plan_2026-07-11.md`
-(2026-07-11 "later" section).
-
-Fix: dropped the two unsatisfiable symbols from the required list (one
-function, 3 call sites all want the same semantics). This is a Rust seed
-source change — it only takes effect after `cargo build --profile bootstrap
--p simple-driver` **and** `-p simple-native-all` (stage2/stage3/stage4
-dynload the native-all archive, which is where the check actually executes)
-are rebuilt, and after clearing `build/bootstrap/native_cache` +
-`build/bootstrap/{stage2,stage3,full}/<triple>/simple` so stage2 relinks
-against the fixed archive instead of serving a stale cached binary.
-**As of this note the fix is uncommitted** — if it doesn't land in git before
-the next `--full-bootstrap`, the buggy check regresses.
 
 ## Reference
 

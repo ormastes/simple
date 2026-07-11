@@ -5,6 +5,7 @@ use app.ui.access_cli.{
     ui_access_cli_action_body,
     ui_access_cli_db_error,
     ui_access_cli_descriptors,
+    ui_access_cli_http_error,
     ui_access_cli_parse_request,
     ui_access_cli_route
 }
@@ -59,14 +60,29 @@ describe "simple ui access CLI adapter":
         match ui_access_cli_parse_request(["find", "--limit", "many"]):
             Err(e): expect(e.code).to_equal("invalid_argument")
             Ok(_): expect(false).to_equal(true)
+        match ui_access_cli_parse_request(["find", "--limit", "0"]):
+            Err(e): expect(e.code).to_equal("invalid_argument")
+            Ok(_): expect(false).to_equal(true)
         match ui_access_cli_parse_request(["snapshot", "--invented"]):
             Err(e): expect(e.code).to_equal("invalid_argument")
             Ok(_): expect(false).to_equal(true)
 
-    it "fails explicit database access closed until a read-only store owner exists":
+    it "keeps database action fallback read-only and fail-closed":
         val read_error = ui_access_cli_db_error("snapshot", "/tmp/ui.db")
         expect(read_error.code).to_equal("source_unavailable")
-        expect(read_error.message).to_contain("cannot be opened read-only")
+        expect(read_error.message).to_contain("unavailable")
         val act_error = ui_access_cli_db_error("act", "/tmp/ui.db")
         expect(act_error.code).to_equal("source_unavailable")
         expect(act_error.message).to_contain("read-only")
+
+    it "maps live transport failures to the stable shared taxonomy":
+        expect(ui_access_cli_http_error(500, "", "").code).to_equal("source_unavailable")
+        expect(ui_access_cli_http_error(409, "", "prompt required").code).to_equal("interaction_required")
+        expect(ui_access_cli_http_error(403, "", "denied").code).to_equal("permission_denied")
+        expect(ui_access_cli_http_error(409, "", "unsupported").code).to_equal("unsupported_action")
+        expect(ui_access_cli_http_error(404, "", "missing").code).to_equal("target_not_found")
+        expect(ui_access_cli_http_error(409, "", "stale").code).to_equal("stale_target")
+        expect(ui_access_cli_http_error(409, "", "disabled").code).to_equal("target_disabled")
+        expect(ui_access_cli_http_error(409, "", "busy").code).to_equal("target_busy")
+        expect(ui_access_cli_http_error(504, "", "").code).to_equal("timeout")
+        expect(ui_access_cli_http_error(400, "", "bad input").code).to_equal("invalid_argument")

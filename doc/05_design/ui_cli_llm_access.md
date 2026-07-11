@@ -22,7 +22,9 @@ Implement the selected `REQ-UCLA-001..025` and `NFR-UCLA-001..022` by extracting
 | `src/app/play/main.spl` | Replace planned WM branches with live calls; preserve spellings | play entry |
 | `scripts/check/check-ui-cli-access.spl` | Pure Simple focused scenario checker | evidence |
 
-No renderer, generic adapter trait, new service, new database schema, or raw runtime call is added.
+No renderer, generic adapter trait, or new service is added. The persisted UI
+store gains one additive property column so capture/staleness metadata survives
+read-only fallback.
 
 ## Shared grammar types
 
@@ -87,6 +89,7 @@ class AccessResult:
     payload_json: text
     returned_count: i64
     truncated: bool
+    gui_status: i32
 ```
 
 `AccessResult` retains the existing T32 scalar/table/kv/list/raw constructors so `T32BridgeResult` can be a zero-behavior type alias. New snapshot/document constructors add source, revision, payload, and bounds.
@@ -94,21 +97,21 @@ class AccessResult:
 ## Common functions
 
 ```simple
-fn access_parse_request(args: [text], descriptors: [AccessCommandDescriptor], source_id: text) -> Result<AccessRequest, AccessError>
 fn access_find_descriptor(name: text, subcommand: text, descriptors: [AccessCommandDescriptor]) -> AccessCommandDescriptor?
 fn access_validate_request(request: AccessRequest) -> Result<(), AccessError>
-fn access_validate_action(snapshot: WinTextSnapshot, request: AccessRequest) -> Result<WinTextActionRequest, AccessError>
+fn access_validate_snapshot_action(snapshot: UiAccessSnapshot, target_id: text, action: text) -> Result<UiAccessNode, AccessError>
 fn access_result_from_snapshot(operation: AccessOperation, source_id: text, session_id: text, snapshot: UiAccessSnapshot, limit: i64) -> AccessResult
 fn access_render_human(result: AccessResult) -> text
 fn access_render_json(result: AccessResult) -> text
 fn access_error_to_json(operation: AccessOperation, request_id: text, error: AccessError) -> text
 ```
 
-The parser handles `--json`, bounds, timeout, source/session scope, aliases, missing args, and unknown operations once. Source adapters parse only their private arguments.
+Parsing remains adapter-owned. Common validation owns operation/output validity,
+minimum arguments, timeout positivity, confirmation policy, and snapshot action preflight.
 
 ## T32 mapping
 
-- Keep `t32-cli` as the real executable root.
+- Keep `simple t32` as the executable root.
 - Existing `T32CliCommand` catalog stays authoritative for all 36 T32 commands.
 - Its overlapping `windows`, `window show/describe`, `action do/list`, and `history` entries expose mapped `AccessCommandDescriptor` values.
 - `T32BridgeResult` aliases `AccessResult`; existing bridge constructors compile unchanged.
@@ -133,15 +136,21 @@ When `--ui-access-db` is explicitly chosen, the adapter opens the existing `UiAc
 
 ## WM adapter
 
-`wm_access_cli.spl` calls `wm_list_windows()` exactly once, converts each private `WindowInfo` to a `UiAccessSurface` plus root `UiAccessNode`, then calls common projection/query/rendering. Action execution re-lists once, re-resolves the scoped root, verifies the advertised action, invokes the existing WM owner function, and records/returns the correlated result. No host type crosses into common UI.
+`wm_access_cli.spl` calls the WM owner for each inventory operation, converts
+private `WindowInfo` values to a `UiAccessSurface` plus root `UiAccessNode`, then
+uses common projection/query/rendering. Actions inventory once before dispatch
+and once for post-action observation. Text/path/coordinate inputs are bounded,
+each owner subprocess is capped at two seconds, and the adapter stops later
+phases when the 20-second request deadline expires. Correlation-store failure
+is an action failure, not best-effort success. No host type crosses into common UI.
 
 ## Identity and ordering
 
 - UI identity remains `surface_id#widget_id` within a UI session generation.
 - T32 identity combines session plus catalog/live-window disambiguator; titles remain labels.
-- WM identity combines source generation plus native handle; title is never the key.
-- List ordering is `(source_id, session_id, surface_id)`.
-- A source restart or revision mismatch returns `stale_target`/`target_not_found` before action.
+- WM identity uses the current native target identifier; title is never the key where a native handle exists.
+- A single-source list is ordered by `surface_id`.
+- UI may return `stale_target`; WM v1 has revision `0` and re-resolves to typed not-found/state/action errors.
 
 ## Rendering and exits
 
@@ -158,6 +167,11 @@ Adapters map private failures to the selected stable codes. Empty is success onl
 ## Test and evidence hooks
 
 The Pure Simple checker `scripts/check/check-ui-cli-access.spl` owns deterministic fixtures and calls real common/app entry functions. System scenarios call it through `bin/simple run`, require scenario-specific evidence markers, and capture TUI/protocol/GUI artifacts. The checker has no alternate pass path: missing live fixtures, commands, measurements, captures, or final review evidence fail nonzero.
+
+`scripts/check/check-ui-cli-live-transport.shs` separately launches
+`test/fixtures/ui_cli_access/live_server.spl`, drives windows/find/act/history
+through a second CLI process, stops the service, and verifies read-only database
+fallback plus fail-closed database action.
 
 ## Performance plan
 

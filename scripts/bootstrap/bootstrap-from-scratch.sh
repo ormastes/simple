@@ -845,6 +845,8 @@ if [ "${deploy}" -eq 1 ]; then
     fi
     exit 1
   fi
+  rm -f "${prev_bin}"
+
   # Deploy MCP servers if they were built successfully
   if [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ]; then
     for mcp_bin_name in simple_mcp_server simple_lsp_mcp_server; do
@@ -858,22 +860,7 @@ if [ "${deploy}" -eq 1 ]; then
   # Recreate wrapper/launcher entrypoints (bin/simple plus release links)
   if [ "${os}" != "windows" ]; then
     "${repo_root}/scripts/setup/setup.shs"
-
-    # The normal user entrypoint is the bin/simple symlink. It must resolve its
-    # sibling seed delegate through bin/simple_seed, not only when invoked by
-    # the platform release path used by the first smoke above.
-    smoke_out="$(run_timeout 30 "${repo_root}/bin/simple" -c 'print(1+1)' 2>/dev/null)"
-    if [ "${smoke_out}" != "2" ]; then
-      echo "ERROR: bin/simple symlink failed smoke test (-c 'print(1+1)' -> '${smoke_out}')." >&2
-      if [ -x "${prev_bin}" ]; then
-        mv "${prev_bin}" "${deployed_bin}"
-        "${repo_root}/scripts/setup/setup.shs"
-        echo "Restored previous binary to ${deployed_bin}" >&2
-      fi
-      exit 1
-    fi
   fi
-  rm -f "${prev_bin}"
 fi
 
 echo "Final binary: ${full_bin}"

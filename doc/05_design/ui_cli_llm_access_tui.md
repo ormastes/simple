@@ -2,7 +2,7 @@
 # UI CLI LLM Access — CLI/TUI Design
 
 **Feature:** `ui_cli_llm_access`  
-**Status:** implementation target  
+**Status:** normative/aspirational mockup; current renderer is simpler
 **Requirements:** REQ-UCLA-001..025, NFR-UCLA-001..022
 
 ## One grammar, existing command roots
@@ -27,11 +27,11 @@ The shared vocabulary is deliberately small:
 These are grammar records, not a new snapshot model. Payloads continue to use
 `UiAccess*` and `WinText*` records.
 
-| Grammar operation | `t32-cli` | `simple ui` | `simple play` host WM |
+| Grammar operation | `simple t32` | `simple ui` | `simple play` host WM |
 |---|---|---|---|
-| `list` | `windows` | `windows` | `wm-list` |
+| `list` | `windows` | `windows` | `windows` (`wm-list` alias) |
 | `snapshot` | `window show <key>` | `snapshot` | `wm-text-snapshot host_wm` |
-| `surface` | `window show <key>` | `surface <id>` | `wm-text-snapshot host_wm --window <id>` |
+| `surface` | `window show <key>` | `surface <id>` | not implemented in WM v1; use `wm-text-find` |
 | `find` | captured-text query | `find` | `wm-text-find host_wm <text>` |
 | `act` | `action do <key>` | `act` | `wm-text-act <canonical-id> <action>` |
 | `history` | `history [count]` | `history` | correlated WM access history |
@@ -64,7 +64,7 @@ main            Simple Editor     simple.ui   gui   ready   0,0 1280x800   yes  
 build-log       Build Log         simple.ui   tui   ready   -              no    yes     snapshot,find,history
 2 windows  truncated=no  stale=no
 
-$ t32-cli windows
+$ simple t32 windows
 TRACE32 windows (v1)  source=trace32  session=s1  captured=2026-07-11T12:00:01Z
 ID                  TITLE        OWNER    KIND          STATE     GEOMETRY FOCUS VISIBLE CAPS
 trace32:register    Registers    trace32  remote_text   available -        -     -       open,capture,find,act
@@ -145,7 +145,7 @@ $ simple ui act --canonical main#build --action click --timeout 2000
 ok  request=act-000184  source=simple_ui  target=main#build  action=click
 revision 42 -> 43  observed=yes
 
-$ simple play wm-text-act wm:0x04a00007#root focus --timeout 2000
+$ simple play wm-text-act wm:0x04a00007#root focus
 ok  request=act-000185  source=host_wm  target=wm:0x04a00007#root  action=focus
 observed=yes
 ```

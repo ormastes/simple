@@ -17,6 +17,7 @@ use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{SessionToken, load_secret, TOKEN_TTL_DEFAULT_MS}
 use std.nogc_sync_mut.io.tls_sffi.{rt_tls_server_create}
 use nogc_sync_mut.ui.session.{UISession}
+use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open_with_override}
 use common.text_advanced.{escape_json}
 use common.ui.widget.{UITree}
 use nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}
@@ -197,6 +198,9 @@ class WebServer:
         )
 
     static fn new(file_path: text, port: i32, wm_mode: bool) -> Result<WebServer, text>:
+        return WebServer.new_with_access_store_path(file_path, port, wm_mode, "")
+
+    static fn new_with_access_store_path(file_path: text, port: i32, wm_mode: bool, access_db_path: text) -> Result<WebServer, text>:
         val tree_result = parse_ui_to_tree(file_path)
         match tree_result:
             Err(e):
@@ -205,6 +209,9 @@ class WebServer:
                 val state = WebServer.build_state(tree)
                 var session = UISession.new(tree)
                 session.set_active_backend("web")
+                val store = ui_access_store_runtime_open_with_override(access_db_path, file_path, "web")
+                if store != nil:
+                    session.attach_access_store(store)
                 val content = if file_exists(file_path):
                     read_file(file_path)
                 else:
@@ -1059,7 +1066,7 @@ fn run_web_with_access_store(file_path: text, port: i32, access_db_path: text) -
         print "Press Ctrl+C to stop"
         return serve_tls(file_path, port, tls_handle, access_db_path)
 
-    val server_result = WebServer.new(file_path, port, false)
+    val server_result = WebServer.new_with_access_store_path(file_path, port, false, access_db_path)
     match server_result:
         Err(e):
             print "Error: " + str(e)

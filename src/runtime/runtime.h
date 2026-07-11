@@ -494,7 +494,6 @@ int         rt_file_create_excl(const char* path, const char* content);
 int64_t     rt_file_stat(const char* path);
 const char* rt_shell_output(const char* cmd);
 SplArray*   rt_cli_get_args(void);
-int64_t     rt_current_exe_path(void);
 SplArray*   rt_dir_walk(const char* path);
 SplArray*   rt_dir_list_array(const char* path);
 int         rt_dir_create_all(const char* path);

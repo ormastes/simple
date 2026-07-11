@@ -16,11 +16,6 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
 }
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style}
 
-# Defensive limits (Blink/WebKit-style): a hostile/deeply-nested page must
-# never blow the interpreter stack or grow the tree unboundedly.
-val HTML_MAX_TREE_DEPTH = 512
-val HTML_MAX_NODES = 65536
-
 # Append child to node at top of stack, write it back
 fn _stk_append(stack: [BeDomNode], child: BeDomNode) -> [BeDomNode]:
     """Append child to top of stack; return modified stack."""
@@ -32,22 +27,6 @@ fn _stk_append(stack: [BeDomNode], child: BeDomNode) -> [BeDomNode]:
     parent.children = kids
     stack[n - 1] = parent
     stack
-
-# Append child as sibling of the current top (child of the top's parent),
-# without growing the open-element stack. Used once HTML_MAX_TREE_DEPTH is
-# reached so further nesting flattens into siblings instead of recursing
-# deeper (matches Blink's open-elements-stack depth cap).
-fn _stk_append_sibling(stack: [BeDomNode], child: BeDomNode) -> [BeDomNode]:
-    """Append child under the parent of the current top; top stays unchanged."""
-    val n = stack.len()
-    if n < 2: return _stk_append(stack, child)
-    var s = stack
-    var parent = s[n - 2]
-    var kids = parent.children
-    kids.push(child)
-    parent.children = kids
-    s[n - 2] = parent
-    s
 
 # Pop top from stack, return it (caller writes back result stack)
 fn _stk_pop_and_append(stack: [BeDomNode]) -> [BeDomNode]:
@@ -196,13 +175,10 @@ pub class TreeBuilderResult:
         doc       - the built DOM tree (#document node)
         scripts   - collected <script> bodies in document order
         src_paths - collected <script src="..."> paths in document order
-        truncated - true if HTML_MAX_NODES was hit and element creation
-                    was skipped for the remainder of the document
     """
     doc: BeDomNode
     scripts: [text]
     src_paths: [text]
-    truncated: bool
 
 pub fn html_tree_builder_build(html_text: text) -> BeDomNode:
     """Build a BeDomNode tree. Returns a #document node with an html child."""
@@ -239,10 +215,6 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
     var script_content = ""
     var script_src = ""
 
-    # Defensive-limit bookkeeping
-    var node_count = 0
-    var truncated = false
-
     val ntok = tokens.len()
     var ti = 0
     while ti < ntok:
@@ -273,13 +245,9 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
 
             elif t == "title" or t == "meta" or t == "link" or t == "base":
                 # head elements — add to top of stack as void children
-                if node_count < HTML_MAX_NODES:
-                    node_count = node_count + 1
-                    val he_raw = BeDomNode.element(t)
-                    val he = _apply_attrs(he_raw, tok.attrs)
-                    stack = _stk_append(stack, he)
-                else:
-                    truncated = true
+                val he_raw = BeDomNode.element(t)
+                val he = _apply_attrs(he_raw, tok.attrs)
+                stack = _stk_append(stack, he)
 
             elif t == "script":
                 # M15: Collect script content for execution
@@ -332,48 +300,30 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
                 val is_table_content = _is_table_content(t)
 
                 if _is_void(t):
-                    if node_count < HTML_MAX_NODES:
-                        node_count = node_count + 1
-                        val vn_raw = BeDomNode.element(t)
-                        val vnode = _apply_attrs(vn_raw, tok.attrs)
-                        if in_table_ctx and not is_table_content:
-                            stack = _stk_foster_append(stack, vnode)
-                        else:
-                            stack = _stk_append(stack, vnode)
+                    val vn_raw = BeDomNode.element(t)
+                    val vnode = _apply_attrs(vn_raw, tok.attrs)
+                    if in_table_ctx and not is_table_content:
+                        stack = _stk_foster_append(stack, vnode)
                     else:
-                        truncated = true
+                        stack = _stk_append(stack, vnode)
                 elif in_table_ctx and not is_table_content:
                     # Foster-parent non-table elements that appear inside table context
-                    if node_count < HTML_MAX_NODES:
-                        node_count = node_count + 1
-                        val fp_raw = BeDomNode.element(t)
-                        val fp_el = _apply_attrs(fp_raw, tok.attrs)
-                        # Insert before table: find table ancestor, insert in its parent
-                        val tbl_idx = _stk_find_table_ancestor(stack)
-                        if tbl_idx > 0:
-                            var tbl_parent = stack[tbl_idx - 1]
-                            var fp_kids = tbl_parent.children
-                            fp_kids.push(fp_el)
-                            tbl_parent.children = fp_kids
-                            stack[tbl_idx - 1] = tbl_parent
-                        else:
-                            stack = _stk_append(stack, fp_el)
+                    val fp_raw = BeDomNode.element(t)
+                    val fp_el = _apply_attrs(fp_raw, tok.attrs)
+                    # Insert before table: find table ancestor, insert in its parent
+                    val tbl_idx = _stk_find_table_ancestor(stack)
+                    if tbl_idx > 0:
+                        var tbl_parent = stack[tbl_idx - 1]
+                        var fp_kids = tbl_parent.children
+                        fp_kids.push(fp_el)
+                        tbl_parent.children = fp_kids
+                        stack[tbl_idx - 1] = tbl_parent
                     else:
-                        truncated = true
+                        stack = _stk_append(stack, fp_el)
                 else:
-                    if node_count < HTML_MAX_NODES:
-                        node_count = node_count + 1
-                        val el_raw = BeDomNode.element(t)
-                        val new_el = _apply_attrs(el_raw, tok.attrs)
-                        if stack.len() >= HTML_MAX_TREE_DEPTH:
-                            # Depth cap reached — insert as sibling of the
-                            # current open element instead of descending
-                            # further (Blink-style open-elements-stack cap).
-                            stack = _stk_append_sibling(stack, new_el)
-                        else:
-                            stack.push(new_el)
-                    else:
-                        truncated = true
+                    val el_raw = BeDomNode.element(t)
+                    val new_el = _apply_attrs(el_raw, tok.attrs)
+                    stack.push(new_el)
 
         elif tok.token_kind == HtmlTokenKind.EndTag:
             val et = tok.tag_name
@@ -422,4 +372,4 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
     # stack[0] is now doc_node with html as only child (after drain)
     # But since we modified stack[0] in place, we need to return it
     val final_doc = if stack.len() > 0: stack[0] else: doc_node
-    TreeBuilderResult(doc: final_doc, scripts: script_bodies, src_paths: script_src_paths, truncated: truncated)
+    TreeBuilderResult(doc: final_doc, scripts: script_bodies, src_paths: script_src_paths)

@@ -2,12 +2,11 @@
 # UI CLI LLM Access — GUI Design
 
 **Feature:** `ui_cli_llm_access`  
-**Status:** implementation and evidence target
+**Status:** conceptual evidence fixture; not a production inspector
 
-The feature does not require a new production GUI. Existing GUI and TUI apps
-become inspectable through the shared access grammar. A small access-inspector
-fixture is designed only for operator understanding and system evidence; it
-uses the same canonical snapshot/result records as the CLI.
+The feature does not add a production Access Inspector or source selector.
+Existing GUI and TUI fixtures are exercised through the CLI. The mockup below
+is normative design guidance for a future evidence fixture only.
 
 ## Inspector layout
 

@@ -24,6 +24,12 @@ TRACE32, process, environment, persistence, or mutable-host dependency.
 shared grammar describes commands and presentation; it does not introduce a
 second snapshot, selector, action, or history model.
 
+Current implementation deltas are explicit: parsing stays adapter-owned;
+TRACE32 shares descriptors/results/rendering but keeps its established argument
+dispatcher; WM has no `surface` verb or client revision check in v1; and the
+actual JSON envelope is the additive `schema_version/kind/rows/kv/scalar/raw/
+items/result/page{returned,truncated}` shape emitted by common UI.
+
 Live enumeration, capture, refresh, and action execution remain in the source
 that already owns them. Common code owns only descriptor validation,
 normalization, ordering, safe pre-dispatch checks, stable errors, bounded

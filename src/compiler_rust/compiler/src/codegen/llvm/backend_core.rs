@@ -367,10 +367,7 @@ impl LlvmBackend {
         let i64_type = self.runtime_int_type();
         let ptr_type = ctx.ptr_type(AddressSpace::default());
 
-        let init_name = match &self.module_prefix {
-            Some(prefix) => format!("__module_init_{}", prefix),
-            None => "__module_init".to_string(),
-        };
+        let init_name = crate::codegen::common_backend::module_init_symbol(self.module_prefix.as_deref());
 
         let void_type = ctx.void_type();
         let fn_type = void_type.fn_type(&[], false);

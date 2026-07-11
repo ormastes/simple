@@ -1,6 +1,6 @@
 use std.spec.*
 use std.play.types.{WindowInfo}
-use app.play.wm_access_cli.{wm_access_descriptors, wm_access_is_command, wm_access_snapshot_from_windows}
+use app.play.wm_access_cli.{WM_ACCESS_TIMEOUT_MS, wm_access_descriptors, wm_access_is_command, wm_access_snapshot_from_windows, wm_access_validate_action_args}
 use common.ui.access.{ACCESS_OPERATION_LIST, access_find_descriptor, access_result_from_snapshot, access_render_json}
 
 fn _window(id: text, title: text, focused: bool) -> WindowInfo:
@@ -23,3 +23,16 @@ describe "Play WM access CLI adapter":
         expect(result.rows[1][6]).to_equal("yes")
         expect(result.rows[2][0]).to_equal("wm:20")
         expect(access_render_json(result)).to_contain("\"source\":{\"id\":\"host_wm\"")
+
+    it "advertises the bounded end-to-end WM command budget":
+        expect(WM_ACCESS_TIMEOUT_MS).to_equal(20000)
+        for descriptor in wm_access_descriptors():
+            expect(descriptor.safety.timeout_ms).to_equal(WM_ACCESS_TIMEOUT_MS)
+
+    it "rejects unbounded or malformed WM action arguments before dispatch":
+        if not wm_access_validate_action_args("type_text", ["target", "type_text"]).is_err(): fail("missing type_text was accepted")
+        if not wm_access_validate_action_args("type_text", ["target", "type_text", "x" * 4097]).is_err(): fail("oversized type_text was accepted")
+        if not wm_access_validate_action_args("click_xy", ["target", "click_xy", "x", "0"]).is_err(): fail("non-numeric coordinate was accepted")
+        if not wm_access_validate_action_args("click_xy", ["target", "click_xy", "1000001", "0"]).is_err(): fail("out-of-range coordinate was accepted")
+        if not wm_access_validate_action_args("screenshot", ["target", "screenshot", ""]).is_err(): fail("empty screenshot path was accepted")
+        if not wm_access_validate_action_args("type_text", ["target", "type_text", "ok"]).is_ok(): fail("bounded type_text was rejected")
