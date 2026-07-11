@@ -543,7 +543,10 @@ pub unsafe extern "C" fn rt_process_spawn_inherit(cmd_ptr: *const u8, cmd_len: u
             }
             pid
         }
-        Err(_) => -1,
+        Err(err) => {
+            eprintln!("failed to spawn inherited-stdio process '{cmd_str}': {err}");
+            -1
+        }
     }
 }
 
