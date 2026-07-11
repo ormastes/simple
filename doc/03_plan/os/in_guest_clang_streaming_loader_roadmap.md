@@ -21,41 +21,38 @@ Running clang in-guest = the ring-3 FS-exec loader at scale. clang-20 is
    `src/os/kernel/loader/x86_64_fs_exec_ring3.spl::_map_pt_loads`, replacing the
    whole-file buffering. This removes the cap and scales to 125 MB.
 
-Secondary (necessary but after the above): clang's static-link GOT/SIGSEGV fix
-(see clang_static/GOT bug docs), and ≥512 MB guest RAM.
+Secondary (necessary but after the above): ≥512 MB guest RAM. The clang
+static-link GOT fix is DONE (0b073602d83: .got placed in simpleos.ld; in-guest
+`-emit-obj` verified no-SIGSEGV).
 
-## Blocker that stops everything first (2026-07-11)
+## Blocker status (2026-07-11, updated): DMA hypothesis DISPROVEN
 
-Before scale matters, the **4,728-byte** `/FSEXEC.ELF` fails to materialize in
-the `fs_exec_prod_ring3_entry` / `fs_exec_general_ring3_entry` lanes on a
-from-source rebuild at origin tip:
+Instrumented verification on the prod entry disproved the earlier "post-vmm
+NVMe read-data DMA failure" theory entirely:
 
-```
-[prod] /FSEXEC.ELF read size=4728 buf=0x0D5D8020   <- stream_open+read report success (n>0)
-[prod] blob materialized len=4728 magic=248,3,0,0  <- [u8] readback bug (0x7F<<3), loader ignores it
-[spawn] FAIL blob not ELF ... w0=0                  <- mmio readback of the buffer is ZERO
-```
+- Device side is correct post-vmm: `[rd-dbg] lba=49 dma=0x1981000 b=127,69,76,70`.
+- C memcpy writes AND reads back the ELF correctly even at the previously
+  "bad" destination (`[wr-probe] dst=0x0d5d4120 done=4728 out=127,69,76,70`).
+- At origin tip (≥55c8bdf963b) the full post-vmm path passes from source:
+  stream_open/read → ELF magic 127,69,76,70 → ring-3 exec → FSEXEC_OK rc=42.
 
-`stream_read_at` returns n>0 (no failure branch) but the destination buffer
-reads back zero via mmio. The buffer `0x0D5D8020` (~224 MB) is inside vmm_init's
-0..4 GB identity map (PRP=virt=phys valid), so this looks like an **NVMe
-read-data DMA completion/coherence failure post-vmm** — the CQ reports success
-without the data landing. Same family as
-`doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md`;
-`vmm_map_nvme_bar_high()` fixed the doorbell MMIO but not the read-data DMA.
-
-NOTE: the SSH demo (`ssh_ring3_entry`) uses a BOOT PRELOAD (reads /FSEXEC.ELF
-BEFORE vmm_init into the static buffer, then short-circuits) and is guarded by
-`mmio_disable_test_mode()`, so it is not necessarily subject to this post-vmm
-read failure — but the `prod`/`general` entries' post-vmm read path must be
-fixed before the streaming-loader work, and the SSH demo's current-tip status
-should be re-confirmed.
+The residual defect is a **compiler bug, not an OS/DMA bug**: freestanding
+`rt_mmio_read_u8` returns 0 at addresses (~0x0D5Dxxxx region) where a plain C
+load reads the correct byte — address/layout-dependent, latent at tip, only
+manifests when .bss layout shifts the buffer into the bad region. Tracked in
+`doc/08_tracking/bug/x64_freestanding_mmio_read_u8_address_dependent_zero.md`.
+`doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md` was an earlier
+sighting of the same family.
 
 ## Order of work
 
-1. Fix the post-vmm NVMe read-data DMA (the buffer must actually receive the
-   bytes the CQ says it did) — in the `nvme_*` / `_fat32_read_cluster`
-   DMA-completion path in baremetal_stubs.c.
-2. Replace whole-file 4 MiB buffering with per-`PT_LOAD` `stream_read_at` into
-   `pmm` frames in `x86_64_fs_exec_ring3.spl::_map_pt_loads`.
-3. clang static-link GOT fix + ≥512 MB RAM; then attempt clang in-guest.
+1. Streaming loader: replace whole-file 4 MiB buffering with per-`PT_LOAD`
+   `stream_read_at` into `pmm` frames in
+   `x86_64_fs_exec_ring3.spl::_map_pt_loads` (post-vmm reads are proven good).
+   Parse via the raw-buffer mmio path, NOT the boxed `[u8]` channel (still
+   boxing-broken: magic reads 248,3,0,0 = 0x7F<<3).
+2. Compiler: fix the address-dependent `rt_mmio_read_u8` miscompile (+ add the
+   regression from the bug doc) so layout shifts can't silently zero readbacks.
+3. ≥512 MB RAM; put clang-20 on the FAT image; attempt `clang --version` then
+   `-c hello.c` in-guest. Note: guest clang currently emits LLVM bitcode (not
+   an ELF .o) due to harness argv — separate, tracked.
