@@ -30,10 +30,10 @@ parallel one-off mechanisms.
   full-size/full-opacity perf bypass; `opacity_milli` now honored — unfocused
   WM windows carry 930).
 - 2D spec: [test/02_integration/rendering/engine2d_embedded_surface_spec.spl](../../../../test/02_integration/rendering/engine2d_embedded_surface_spec.spl)
-- Web embedding (in flight): iframe-as-replaced-element in
+- Web embedding (landed): iframe-as-replaced-element in
   `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
   with `space=separate|shared` semantics.
-- WM nesting (in flight): `WmContentFrame.parent_window_id/offset_*` in
+- WM nesting (landed): `WmContentFrame.parent_window_id/offset_*` in
   `src/lib/common/ui/window_scene.spl`, executor recursion in
   `src/lib/common/ui/window_scene_draw_ir.spl`, producers in
   `src/os/compositor/simple_web_window_renderer.spl`.

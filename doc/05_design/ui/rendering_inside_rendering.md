@@ -32,7 +32,7 @@ Spec: `test/02_integration/rendering/engine2d_embedded_surface_spec.spl`
 (offset composite + transparency, IR surface clipping, 500-milli blend math,
 depth-2 nesting, no-`surface_id` regression guard).
 
-## Web — iframe-like embedding (Lane B, in flight)
+## Web — iframe-like embedding (Lane B, landed)
 File: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
 - Parse: `iframe` becomes a replaced element; inner content never lays out in
   the parent. Attributes: `srcdoc` (primary), `src` (local file only),
@@ -47,7 +47,7 @@ File: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.s
 
 Spec: `test/02_integration/rendering/simple_web_iframe_embedding_spec.spl`.
 
-## GUI/WM — nested content frames (Lane C, in flight)
+## GUI/WM — nested content frames (Lane C, landed)
 File: `src/lib/common/ui/window_scene.spl`
 - `WmContentFrame` += `parent_window_id: text` (empty = top-level),
   `offset_x: i32`, `offset_y: i32` (relative to parent content rect).
@@ -73,13 +73,12 @@ File: `src/os/compositor/simple_web_window_renderer.spl`
 
 Spec: `test/02_integration/rendering/wm_nested_content_frame_spec.spl`.
 
-## 3D — node nesting (Lane D, in flight)
+## 3D — node nesting (Lane D, landed)
 File: `src/app/model3d/main.spl`
 - `Node3.children: [Node3]` (child `center` relative to parent); recursive
   raster traversal, depth cap 8; `Scene3.embed(parent_name, child) -> bool`.
 
-Spec: `test/unit/app/model3d_nested_nodes_spec.spl` (location may follow
-existing app spec layout).
+Spec: `test/02_integration/app/model3d/model3d_nested_nodes_spec.spl`.
 
 ## Final verification
 Browser chrome (buttons, GUI widgets, text fields) rendered through the

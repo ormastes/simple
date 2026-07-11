@@ -63,6 +63,12 @@ class Node3:
     center: Vec3
     size: Vec3
     color: u32
+    # Nested objects: a child's `center` is RELATIVE to its parent's world
+    # center (positions compose additively through the tree). `size` is the
+    # node's absolute box extent in world units, not a normalized scale
+    # factor, so it does NOT compose — a child's size is never multiplied by
+    # its parent's size. See `_submit_node_tree` / `node_world_positions`.
+    children: [Node3]
 
 class Scene3:
     name: text
@@ -71,6 +77,69 @@ class Scene3:
     target: Vec3
     fov_deg: f64
     nodes: [Node3]
+
+    # Find a node by name (searching the tree, depth-first) and append
+    # `child` under it. Returns false without modifying the scene if no node
+    # named `parent_name` exists.
+    me embed(parent_name: text, child: Node3) -> bool:
+        val r = _embed_into(self.nodes, parent_name, child)
+        self.nodes = r.nodes
+        r.found
+
+class _EmbedResult:
+    nodes: [Node3]
+    found: bool
+
+# Recursive helper for Scene3.embed — searches `nodes` and their descendants
+# for `parent_name` and returns a REBUILT array with `child` appended under
+# it (assigning through an indexed nested field, e.g. `nodes[i].children =
+# ...`, is not a supported assignment target — only plain `self.field` /
+# local-`var` targets are — so this rebuilds the tree functionally instead).
+fn _embed_into(nodes: [Node3], parent_name: text, child: Node3) -> _EmbedResult:
+    var out: [Node3] = []
+    var found = false
+    for n in nodes:
+        if found:
+            out.push(n)
+        elif n.name == parent_name:
+            var kids = n.children
+            kids.push(child)
+            out.push(Node3(name: n.name, shape: n.shape, center: n.center, size: n.size, color: n.color, children: kids))
+            found = true
+        else:
+            val r = _embed_into(n.children, parent_name, child)
+            if r.found:
+                out.push(Node3(name: n.name, shape: n.shape, center: n.center, size: n.size, color: n.color, children: r.nodes))
+                found = true
+            else:
+                out.push(n)
+    _EmbedResult(nodes: out, found: found)
+
+# Maximum nesting depth for both rendering and world-position traversal.
+val MAX_NODE_DEPTH: i64 = 8
+
+class NodeWorldPos:
+    name: text
+    pos: Vec3
+
+fn _collect_world_positions(n: Node3, offset: Vec3, depth: i64) -> [NodeWorldPos]:
+    val world = Vec3(x: n.center.x + offset.x, y: n.center.y + offset.y, z: n.center.z + offset.z)
+    var out: [NodeWorldPos] = [NodeWorldPos(name: n.name, pos: world)]
+    if depth < MAX_NODE_DEPTH:
+        for c in n.children:
+            for p in _collect_world_positions(c, world, depth + 1):
+                out.push(p)
+    out
+
+# Pure introspection helper: flattens the scene's node tree (parent, then
+# children) into world-space positions, composing each child's relative
+# `center` additively with its parent's already-composed world position.
+fn node_world_positions(scene: Scene3) -> [NodeWorldPos]:
+    var out: [NodeWorldPos] = []
+    for n in scene.nodes:
+        for p in _collect_world_positions(n, Vec3(x: 0.0, y: 0.0, z: 0.0), 0):
+            out.push(p)
+    out
 
 # ============================================================================
 # Scene loading + validation (trust boundary)
@@ -169,7 +238,7 @@ fn _node_of(v: SdnValue, idx: i64) -> Result<Node3, text>:
             color = c
     else:
         return Err("nodes[{idx}] \"{name}\": missing required field `color`")
-    Ok(Node3(name: name, shape: shape, center: center, size: size, color: color))
+    Ok(Node3(name: name, shape: shape, center: center, size: size, color: color, children: []))
 
 fn load_scene(path: text) -> Result<Scene3, text>:
     if not file_exists(path):
@@ -309,35 +378,80 @@ fn cmd_inspect(path: text) -> i64:
 # render
 # ============================================================================
 
-fn _submit_box(mut e: Engine3D, n: Node3):
-    val m = mat4_identity()
-    val mat = material_unlit(n.color)
-    val x0 = (n.center.x - n.size.x / 2.0) as f32
-    val x1 = (n.center.x + n.size.x / 2.0) as f32
-    val y0 = (n.center.y - n.size.y / 2.0) as f32
-    val y1 = (n.center.y + n.size.y / 2.0) as f32
-    val z0 = (n.center.z - n.size.z / 2.0) as f32
-    val z1 = (n.center.z + n.size.z / 2.0) as f32
-    # front (+z)
-    e.submit_triangle(vertex3d_pos_normal(x0,y0,z1,0.0,0.0,1.0), vertex3d_pos_normal(x1,y0,z1,0.0,0.0,1.0), vertex3d_pos_normal(x1,y1,z1,0.0,0.0,1.0), mat, m)
-    e.submit_triangle(vertex3d_pos_normal(x0,y0,z1,0.0,0.0,1.0), vertex3d_pos_normal(x1,y1,z1,0.0,0.0,1.0), vertex3d_pos_normal(x0,y1,z1,0.0,0.0,1.0), mat, m)
-    # back (-z)
-    e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,0.0,0.0,-1.0), vertex3d_pos_normal(x1,y1,z0,0.0,0.0,-1.0), vertex3d_pos_normal(x1,y0,z0,0.0,0.0,-1.0), mat, m)
-    e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,0.0,0.0,-1.0), vertex3d_pos_normal(x0,y1,z0,0.0,0.0,-1.0), vertex3d_pos_normal(x1,y1,z0,0.0,0.0,-1.0), mat, m)
-    # top (+y)
-    e.submit_triangle(vertex3d_pos_normal(x0,y1,z0,0.0,1.0,0.0), vertex3d_pos_normal(x0,y1,z1,0.0,1.0,0.0), vertex3d_pos_normal(x1,y1,z1,0.0,1.0,0.0), mat, m)
-    e.submit_triangle(vertex3d_pos_normal(x0,y1,z0,0.0,1.0,0.0), vertex3d_pos_normal(x1,y1,z1,0.0,1.0,0.0), vertex3d_pos_normal(x1,y1,z0,0.0,1.0,0.0), mat, m)
-    # bottom (-y)
-    e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,0.0,-1.0,0.0), vertex3d_pos_normal(x1,y0,z1,0.0,-1.0,0.0), vertex3d_pos_normal(x0,y0,z1,0.0,-1.0,0.0), mat, m)
-    e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,0.0,-1.0,0.0), vertex3d_pos_normal(x1,y0,z0,0.0,-1.0,0.0), vertex3d_pos_normal(x1,y0,z1,0.0,-1.0,0.0), mat, m)
-    # left (-x)
-    e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,-1.0,0.0,0.0), vertex3d_pos_normal(x0,y0,z1,-1.0,0.0,0.0), vertex3d_pos_normal(x0,y1,z1,-1.0,0.0,0.0), mat, m)
-    e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,-1.0,0.0,0.0), vertex3d_pos_normal(x0,y1,z1,-1.0,0.0,0.0), vertex3d_pos_normal(x0,y1,z0,-1.0,0.0,0.0), mat, m)
-    # right (+x)
-    e.submit_triangle(vertex3d_pos_normal(x1,y0,z0,1.0,0.0,0.0), vertex3d_pos_normal(x1,y1,z1,1.0,0.0,0.0), vertex3d_pos_normal(x1,y0,z1,1.0,0.0,0.0), mat, m)
-    e.submit_triangle(vertex3d_pos_normal(x1,y0,z0,1.0,0.0,0.0), vertex3d_pos_normal(x1,y1,z0,1.0,0.0,0.0), vertex3d_pos_normal(x1,y1,z1,1.0,0.0,0.0), mat, m)
+# Flattens `n` and its descendants (parent first, then children — matches
+# `node_world_positions`' traversal order) into a plain list of world-space
+# nodes (`children` cleared, since world coordinates are already baked in).
+# Capped at MAX_NODE_DEPTH to bound pathological/cyclic embed()-built trees.
+# Pure data — no `Engine3D` handle in scope at all.
+fn _flatten_node_tree(n: Node3, offset: Vec3, depth: i64) -> [Node3]:
+    val world_center = Vec3(x: n.center.x + offset.x, y: n.center.y + offset.y, z: n.center.z + offset.z)
+    var out: [Node3] = [Node3(name: n.name, shape: n.shape, center: world_center, size: n.size, color: n.color, children: [])]
+    if depth < MAX_NODE_DEPTH:
+        for c in n.children:
+            for wn in _flatten_node_tree(c, world_center, depth + 1):
+                out.push(wn)
+    out
 
+# Plain parallel arrays — one entry per world-space box to draw.
+class _BoxArrays:
+    cx: [f32]
+    cy: [f32]
+    cz: [f32]
+    sx: [f32]
+    sy: [f32]
+    sz: [f32]
+    col: [u32]
+
+fn _flatten_to_arrays(scene: Scene3) -> _BoxArrays:
+    var cx: [f32] = []
+    var cy: [f32] = []
+    var cz: [f32] = []
+    var sx: [f32] = []
+    var sy: [f32] = []
+    var sz: [f32] = []
+    var col: [u32] = []
+    for n in scene.nodes:
+        for wn in _flatten_node_tree(n, Vec3(x: 0.0, y: 0.0, z: 0.0), 0):
+            cx.push(wn.center.x as f32)
+            cy.push(wn.center.y as f32)
+            cz.push(wn.center.z as f32)
+            sx.push(wn.size.x as f32)
+            sy.push(wn.size.y as f32)
+            sz.push(wn.size.z as f32)
+            col.push(wn.color)
+    _BoxArrays(cx: cx, cy: cy, cz: cz, sx: sx, sy: sy, sz: sz, col: col)
+
+# NOTE: box-drawing is INLINED into `render_scene`'s loop rather than routed
+# through a `_submit_box(mut e: Engine3D, cx, cy, cz, sx, sy, sz, col)`
+# free-function helper, deliberately. Reproduced in isolation with an A/B
+# probe: a free function taking `mut Engine3D` as an explicit parameter,
+# called with 6 or more OTHER arguments that are genuinely dynamic
+# (loaded from an array/variable rather than compile-time literals/consts),
+# silently drops every `submit_triangle` call inside it — the returned
+# framebuffer still clears to the right background color, but no geometry
+# ever rasterizes. This reproduces regardless of how the 6+ dynamic values
+# are packaged (separate scalar args, pre-bound locals, a packed `[f32]`
+# array, or a slice) and regardless of scalar width (`f32`/`f64`) — the
+# threshold is strictly the COUNT of non-constant values reaching such a
+# call (5 dynamic args: fine; 6+: broken). Calling `e.submit_triangle(...)`
+# directly as a METHOD on the local `e` (not passing `e` positionally into
+# another free function) avoids the bug entirely, which is why this is
+# inlined instead of factored into a reusable helper. See
+# doc/08_tracking/bug/model3d_mut_engine_free_fn_six_dynamic_args_drops_mutation_2026-07-11.md
+# — presumably the same family as the already-tracked
+# `struct_param_mutation_semantics_2026-07-03.md` /
+# `browser_engine_free_fn_arg_mutation_lost_2026-06-30.md` class-mutation
+# codegen bugs, just triggered by dynamic-argument COUNT rather than a
+# class-typed argument.
 fn render_scene(scene: Scene3, w: i64, h: i64) -> [u32]:
+    val boxes = _flatten_to_arrays(scene)
+    val cx = boxes.cx
+    val cy = boxes.cy
+    val cz = boxes.cz
+    val sx = boxes.sx
+    val sy = boxes.sy
+    val sz = boxes.sz
+    val col = boxes.col
     var e = Engine3D.create(w as i32, h as i32)
     val fov_rad = scene.fov_deg * 3.141592653589793 / 180.0
     val proj = mat4_perspective(fov_rad as f32, (w as f32) / (h as f32), 0.1, 100.0)
@@ -350,8 +464,35 @@ fn render_scene(scene: Scene3, w: i64, h: i64) -> [u32]:
     e.begin_frame()
     e.clear(scene.background)
     e.clear_depth()
-    for n in scene.nodes:
-        _submit_box(e, n)
+    var i: i64 = 0
+    while i < cx.len():
+        val m = mat4_identity()
+        val mat = material_unlit(col[i])
+        val x0 = cx[i] - sx[i] / 2.0
+        val x1 = cx[i] + sx[i] / 2.0
+        val y0 = cy[i] - sy[i] / 2.0
+        val y1 = cy[i] + sy[i] / 2.0
+        val z0 = cz[i] - sz[i] / 2.0
+        val z1 = cz[i] + sz[i] / 2.0
+        # front (+z)
+        e.submit_triangle(vertex3d_pos_normal(x0,y0,z1,0.0,0.0,1.0), vertex3d_pos_normal(x1,y0,z1,0.0,0.0,1.0), vertex3d_pos_normal(x1,y1,z1,0.0,0.0,1.0), mat, m)
+        e.submit_triangle(vertex3d_pos_normal(x0,y0,z1,0.0,0.0,1.0), vertex3d_pos_normal(x1,y1,z1,0.0,0.0,1.0), vertex3d_pos_normal(x0,y1,z1,0.0,0.0,1.0), mat, m)
+        # back (-z)
+        e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,0.0,0.0,-1.0), vertex3d_pos_normal(x1,y1,z0,0.0,0.0,-1.0), vertex3d_pos_normal(x1,y0,z0,0.0,0.0,-1.0), mat, m)
+        e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,0.0,0.0,-1.0), vertex3d_pos_normal(x0,y1,z0,0.0,0.0,-1.0), vertex3d_pos_normal(x1,y1,z0,0.0,0.0,-1.0), mat, m)
+        # top (+y)
+        e.submit_triangle(vertex3d_pos_normal(x0,y1,z0,0.0,1.0,0.0), vertex3d_pos_normal(x0,y1,z1,0.0,1.0,0.0), vertex3d_pos_normal(x1,y1,z1,0.0,1.0,0.0), mat, m)
+        e.submit_triangle(vertex3d_pos_normal(x0,y1,z0,0.0,1.0,0.0), vertex3d_pos_normal(x1,y1,z1,0.0,1.0,0.0), vertex3d_pos_normal(x1,y1,z0,0.0,1.0,0.0), mat, m)
+        # bottom (-y)
+        e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,0.0,-1.0,0.0), vertex3d_pos_normal(x1,y0,z1,0.0,-1.0,0.0), vertex3d_pos_normal(x0,y0,z1,0.0,-1.0,0.0), mat, m)
+        e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,0.0,-1.0,0.0), vertex3d_pos_normal(x1,y0,z0,0.0,-1.0,0.0), vertex3d_pos_normal(x1,y0,z1,0.0,-1.0,0.0), mat, m)
+        # left (-x)
+        e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,-1.0,0.0,0.0), vertex3d_pos_normal(x0,y0,z1,-1.0,0.0,0.0), vertex3d_pos_normal(x0,y1,z1,-1.0,0.0,0.0), mat, m)
+        e.submit_triangle(vertex3d_pos_normal(x0,y0,z0,-1.0,0.0,0.0), vertex3d_pos_normal(x0,y1,z1,-1.0,0.0,0.0), vertex3d_pos_normal(x0,y1,z0,-1.0,0.0,0.0), mat, m)
+        # right (+x)
+        e.submit_triangle(vertex3d_pos_normal(x1,y0,z0,1.0,0.0,0.0), vertex3d_pos_normal(x1,y1,z1,1.0,0.0,0.0), vertex3d_pos_normal(x1,y0,z1,1.0,0.0,0.0), mat, m)
+        e.submit_triangle(vertex3d_pos_normal(x1,y0,z0,1.0,0.0,0.0), vertex3d_pos_normal(x1,y1,z0,1.0,0.0,0.0), vertex3d_pos_normal(x1,y1,z1,1.0,0.0,0.0), mat, m)
+        i = i + 1
     e.end_frame()
     e.read_pixels()
 

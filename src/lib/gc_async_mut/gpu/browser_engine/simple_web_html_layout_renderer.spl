@@ -53,6 +53,15 @@ val WEB_RENDER_BUDGET_MS: i64 = 10000
 val WEB_STYLE_RULE_QUOTA: i32 = 4096
 # Cap on declarations processed for a single rule; a rule with more is skipped.
 val WEB_RULE_DECL_QUOTA: i32 = 256
+# Maximum embedding depth for iframe rendering-inside-rendering. The top document
+# is depth 0; each nested iframe child renders one level deeper. A child whose
+# depth would EXCEED this cap is not recursed into — its content box is filled
+# with a flat placeholder instead — so a page that embeds itself (or a cycle)
+# can never drive unbounded recursion.
+val WEB_IFRAME_DEPTH_CAP: i32 = 3
+# Placeholder fill painted in place of an iframe whose child would exceed the
+# depth cap (opaque grey).
+val WEB_IFRAME_PLACEHOLDER: u32 = 0xFF888888u32
 
 # Per-render mutable state (reset at the start of every public render entry).
 var _web_render_deadline_us: i64 = 0
@@ -68,6 +77,19 @@ fn _web_budget_begin(budget_ms: i64):
     val ms = if budget_ms <= 0: WEB_RENDER_BUDGET_MS else: budget_ms
     _web_render_deadline_us = rt_time_now_unix_micros() + ms * 1000
     _web_render_degraded = false
+
+# Re-arm the deadline mid-render to hand the NEXT stage its own slice of the
+# total budget, without ever extending the overall wall-clock past whatever
+# the caller originally granted. Used to stage-partition a single budget_ms
+# across style -> layout -> paint so an early stage exhausting its slice does
+# not zero out every later stage (see simple_web_layout_render_html_software_pixels).
+# A stage that already tripped the deadline stays expired: rearming only ever
+# raises the deadline to a point <= the original total, so if the previous
+# absolute deadline was already in the past, moving it later just grants the
+# next stage its fresh slice; it never un-expires a stage's own past work.
+fn _web_budget_rearm(deadline_us: i64):
+    if _web_render_deadline_us > 0:
+        _web_render_deadline_us = deadline_us
 
 # True once the wall-clock deadline has passed; latches the degraded flag so
 # callers can report the render as degraded. A deadline of 0 means "not armed"
@@ -218,8 +240,23 @@ fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
     val first = key.char_at(0)
     val limit = inner_len - key_len
     var i = 0
+    # Quote-aware scan: a key substring that lands INSIDE a quoted attribute
+    # value is not a real attribute. This matters for values that embed markup —
+    # e.g. an <iframe srcdoc="...div style='height:10px'..."> must not have its
+    # own `style=`/`width=`/`height=` read from inside the srcdoc value.
+    var quote = ""
     while i <= limit:
-        if inner.char_at(i) == first:
+        val ci = inner.char_at(i)
+        if quote != "":
+            if ci == quote:
+                quote = ""
+            i = i + 1
+            continue
+        if ci == "\"" or ci == "'":
+            quote = ci
+            i = i + 1
+            continue
+        if ci == first:
             var j = 1
             var matched = true
             while j < key_len:
@@ -1518,6 +1555,11 @@ fn ws_tokens(s: text) -> [text]:
 fn margin_token_px(tok: text) -> i32:
     if tok.ends_with("%"):
         return 0 - parse_int(tok)
+    parse_int(tok)
+
+fn margin_token_vh_px(tok: text) -> i32:
+    if tok.ends_with("vh"):
+        return 0 - (1000 + parse_int(tok))
     parse_int(tok)
 
 fn object_position_axis_pct(token: text, horizontal: bool) -> i32:
@@ -3694,12 +3736,13 @@ fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
             margin_b_auto_v = b_tok == "auto"
             margin_l_auto_v = l_tok == "auto"
             # Horizontal margins honor the % negative-sentinel (resolved at
-            # layout); vertical margins have no percentage resolver, so treat
-            # them as plain px (matching prior behavior — no negative-margin
-            # sign flip on `margin: 5% 10%`).
-            margin_t_v = if t_tok == "auto": 0 else: parse_int(t_tok)
+            # layout); vertical margins honor the vh negative-sentinel
+            # (-(1000+N), resolved at layout via resolve_vertical_margin_px)
+            # but otherwise stay plain px (matching prior behavior — no
+            # negative-margin sign flip on `margin: 5% 10%`).
+            margin_t_v = if t_tok == "auto": 0 else: margin_token_vh_px(t_tok)
             margin_r_v = if r_tok == "auto": 0 else: margin_token_px(r_tok)
-            margin_b_v = if b_tok == "auto": 0 else: parse_int(b_tok)
+            margin_b_v = if b_tok == "auto": 0 else: margin_token_vh_px(b_tok)
             margin_l_v = if l_tok == "auto": 0 else: margin_token_px(l_tok)
     val ml = decl_get(decls, "margin-left")
     if ml.len() > 0:
@@ -3781,7 +3824,7 @@ fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
             margin_t_v = 0
             margin_t_auto_v = true
         else:
-            margin_t_v = parse_int(mt)
+            margin_t_v = margin_token_vh_px(mt)
             margin_t_auto_v = false
     val mr = decl_get(decls, "margin-right")
     if mr.len() > 0:
@@ -3797,7 +3840,7 @@ fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
             margin_b_v = 0
             margin_b_auto_v = true
         else:
-            margin_b_v = parse_int(mb)
+            margin_b_v = margin_token_vh_px(mb)
             margin_b_auto_v = false
     if display_v == "contents":
         bg_v = 0u32
@@ -3843,6 +3886,8 @@ fn tag_defaults(st: Style, tag: text) -> Style:
     var margin_b_v = st.margin_b
     var border_box_v = st.border_box
     var bold_v = st.bold
+    var fg_v = st.fg
+    var underline_v = st.text_decoration_underline
     if is_non_rendered_tag(tag):
         return Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: margin_t_v, margin_r: st.margin_r, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: "none", overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: bold_v)
     if is_inline_tag(tag):
@@ -3885,9 +3930,17 @@ fn tag_defaults(st: Style, tag: text) -> Style:
         pad_t_v = 1
         pad_b_v = 1
         margin_b_v = 3
-    elif tag == "header" or tag == "footer" or tag == "nav" or tag == "section" or tag == "table" or tag == "tr" or tag == "td" or tag == "th" or tag == "div" or tag == "ul" or tag == "li":
+    elif tag == "a":
+        fg_v = argb(0, 0, 238)
+        underline_v = true
+    elif tag == "ul" or tag == "ol":
         display_v = "block"
-    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: border_box_v, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: display_v, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: bold_v)
+        pad_l_v = 40
+        margin_t_v = 16
+        margin_b_v = 16
+    elif tag == "header" or tag == "footer" or tag == "nav" or tag == "section" or tag == "table" or tag == "tr" or tag == "td" or tag == "th" or tag == "div" or tag == "li":
+        display_v = "block"
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: fg_v, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: border_box_v, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: display_v, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: underline_v, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: bold_v)
 
 # ---------------------------------------------------------------------------
 # CSS rules from <style> blocks
@@ -7333,6 +7386,13 @@ fn resolve_percent_height_px(height_px: i32, containing_h: i32) -> i32:
         return containing_h * (0 - height_px) / 100
     height_px
 
+fn resolve_vertical_margin_px(margin_px: i32, viewport_h: i32) -> i32:
+    if margin_px <= -1000:
+        return viewport_h * ((0 - margin_px) - 1000) / 100
+    if margin_px < 0:
+        return 0
+    margin_px
+
 fn absolute_child_x(parent_x: i32, parent: Style, child_node: HNode, child: Style, containing_w: i32) -> i32:
     if child.right_px >= 0:
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
@@ -7404,7 +7464,8 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             val cmr = resolve_horizontal_margin_px(cst.margin_r, w)
             if child_count_contents > 0:
                 cy_contents = cy_contents + st.gap_px
-            val collapsed_margin_contents = if prev_margin_b_contents > cst.margin_t: prev_margin_b_contents else: cst.margin_t
+            val cst_margin_t_contents = resolve_vertical_margin_px(cst.margin_t, viewport_h)
+            val collapsed_margin_contents = if prev_margin_b_contents > cst_margin_t_contents: prev_margin_b_contents else: cst_margin_t_contents
             cy_contents = cy_contents + collapsed_margin_contents
             var child_w_contents = w - cml - cmr
             if child_w_contents < 1:
@@ -7418,7 +7479,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             out_wrap_ends = child.wrap_ends
             out_intrinsic_widths = child.intrinsic_widths
             cy_contents = cy_contents + child.height
-            prev_margin_b_contents = cst.margin_b
+            prev_margin_b_contents = resolve_vertical_margin_px(cst.margin_b, viewport_h)
             child_count_contents = child_count_contents + 1
             c_contents = child_index.next_sibling[c_contents]
         if child_count_contents > 0:
@@ -7446,6 +7507,23 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             node_w = nowrap_intrinsic.width
     node_w = constrained_outer_width(node, st, node_w)
     out_bw[i] = node_w
+    if node.tag == "iframe":
+        # Replaced element (like img): fixed box from CSS width/height, else the
+        # width/height HTML attributes, else the browser default 300x150. The
+        # subtree is never laid out (returns without recursing into children).
+        if st.width_px == 0:
+            val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
+            var iframe_w = if attr_w > 0: attr_w else: 300
+            iframe_w = constrained_outer_width(node, st, iframe_w)
+            out_bw[i] = iframe_w
+        val explicit_iframe_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+        var iframe_h = explicit_iframe_h
+        if st.height_px == 0:
+            val attr_h = parse_int(attr_value(node.attrs_raw, "height"))
+            iframe_h = if attr_h > 0: attr_h else: 150
+        iframe_h = constrained_outer_height(node, st, iframe_h)
+        out_bh[i] = iframe_h
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, iframe_h)
     if node.tag == "#text":
         # white-space:pre/nowrap (st.white_space_nowrap, inherited from e.g. a
         # <pre> code block) preserves the raw text incl. leading indentation;
@@ -8158,10 +8236,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                 inline_line_h = 0
             if child_count > 0:
                 cy = cy + st.gap_px
-            val collapsed_margin = if prev_margin_b > cst.margin_t: prev_margin_b else: cst.margin_t
+            val resolved_cst_margin_t = resolve_vertical_margin_px(cst.margin_t, viewport_h)
+            val collapsed_margin = if prev_margin_b > resolved_cst_margin_t: prev_margin_b else: resolved_cst_margin_t
             if child_count == 0 and nodes[i].tag == "body" and st.border_t == 0 and st.pad_t == 0:
-                val collapsed_body_top = if st.margin_t > cst.margin_t: st.margin_t else: cst.margin_t
-                cy = cy - st.margin_t + collapsed_body_top
+                val resolved_st_margin_t = resolve_vertical_margin_px(st.margin_t, viewport_h)
+                val collapsed_body_top = if resolved_st_margin_t > resolved_cst_margin_t: resolved_st_margin_t else: resolved_cst_margin_t
+                cy = cy - resolved_st_margin_t + collapsed_body_top
             else:
                 cy = cy + collapsed_margin
             var child_inner_w = iw
@@ -8206,7 +8286,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             out_wrap_ends = child.wrap_ends
             out_intrinsic_widths = child.intrinsic_widths
             cy = cy + child.height
-            prev_margin_b = cst.margin_b
+            prev_margin_b = resolve_vertical_margin_px(cst.margin_b, viewport_h)
             child_count = child_count + 1
         c = child_index.next_sibling[c]
     if child_count > 0:
@@ -8286,7 +8366,11 @@ fn has_relative_paint_root(nodes: [HNode], styles: [Style], i: i32) -> bool:
 fn content_hidden_by_ancestor(nodes: [HNode], styles: [Style], i: i32) -> bool:
     var cur = nodes[i].parent as i32
     while cur >= 0:
-        if styles[cur].content_visibility_hidden:
+        # An <iframe> is a replaced element: its DOM subtree (fallback content or
+        # any inline children) is NOT laid out or painted in the parent document.
+        # The iframe's real content is rendered separately from srcdoc/src and
+        # blitted over its box by _web_paint_iframes, so descendants stay hidden.
+        if styles[cur].content_visibility_hidden or nodes[cur].tag == "iframe":
             return true
         cur = nodes[cur].parent as i32
     false
@@ -8386,6 +8470,19 @@ fn ancestor_bottom_inset(nodes: [HNode], styles: [Style], i: i32) -> i32:
 
 fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
     var out = fb
+    # Reserve roughly half of whatever time remains in the paint stage for the
+    # text pass. Draw order requires backgrounds/structural passes to run
+    # first (text must land on top), but on a large real page those passes
+    # alone can consume the entire remaining budget before the text pass —
+    # the actually-visible content — ever gets a turn, leaving a degraded
+    # render blank even though real geometry was computed. Restored to the
+    # full paint deadline before the text pass below. In the common case
+    # (budget never trips) this never matters: every pass finishes long
+    # before either deadline.
+    val paint_now_us = rt_time_now_unix_micros()
+    val paint_deadline_us = _web_render_deadline_us
+    if paint_deadline_us > paint_now_us:
+        _web_budget_rearm(paint_now_us + (paint_deadline_us - paint_now_us) / 2)
     val need_widget_text = widget_mode and fbw >= 38 and fbh >= 62
     val widget_flags = compute_widget_paint_flags(nodes, widget_mode, need_widget_text)
     val has_widget_panel = widget_flags.has_widget_panel
@@ -8450,6 +8547,14 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         i = i + 1
     i = 0
     while i < node_count:
+        # Budget guard: stop scanning for relative-paint-root nodes on expiry.
+        # This pass was completely unguarded — unlike every other O(node_count)
+        # paint pass — so on a large real page it silently burned the rest of
+        # the paint slice walking has_relative_paint_root/content_hidden_by_ancestor
+        # for every node before the text pass ever got a chance to run, which is
+        # why a degraded render still came out fully blank.
+        if _web_budget_expired():
+            break
         val nd = nodes[i]
         val st = styles[i]
         if has_relative_paint_root(nodes, styles, i) and not st.position_absolute:
@@ -8494,6 +8599,13 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     if has_absolute_node:
         i = 0
         while i < node_count:
+            # Budget guard: stop scanning for absolute/z-index nodes on expiry.
+            # This loop was unbounded — unlike the normal-flow background loop
+            # right above it — so a page with any position:absolute node could
+            # silently burn the rest of the paint slice here before the text
+            # pass ever ran.
+            if _web_budget_expired():
+                break
             val nd = nodes[i]
             val st = styles[i]
             if st.position_absolute and st.z_index <= 0:
@@ -8601,6 +8713,13 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     if not widget_mode:
         i = 0
         while i < node_count:
+            # Budget guard: stop drawing scrollbars on expiry. This loop sits
+            # between two already-guarded passes (backgrounds above, text below)
+            # but was itself unbounded — on a large real page it could silently
+            # burn the entire remaining paint slice walking content_hidden_by_ancestor
+            # for every node before the text pass ever got a chance to run.
+            if _web_budget_expired():
+                break
             val nd = nodes[i]
             val st = styles[i]
             if st.display != "none" and not st.visibility_hidden and not content_hidden_by_ancestor(nodes, styles, i) and nd.tag != "#text" and st.overflow_auto_y and st.overflow_hidden:
@@ -8612,6 +8731,10 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                     val clip = paint_clip_at(clip_cache, i)
                     out = fb_vertical_scrollbar_clip(out, fbw, fbh, x + w - st.border_r - 15, y + st.border_t, h - st.border_t - st.border_b, st.scrollbar_track_color, st.scrollbar_thumb_color, clip)
             i = i + 1
+    # Text is the actually-visible content: restore the full paint-stage
+    # deadline (undoing the halving above) so the text pass gets whatever
+    # time is left, instead of sharing what the structural passes didn't use.
+    _web_budget_rearm(paint_deadline_us)
     # text on top
     i = 0
     while i < node_count:
@@ -8957,6 +9080,114 @@ fn _web_canvas_background(nodes: [HNode], styles: [Style], fallback: u32) -> u32
         return body_bg | 0xFF000000u32
     fallback
 
+# ---------------------------------------------------------------------------
+# Iframe embedding (rendering-inside-rendering). A hidden/private capability:
+# <iframe srcdoc="..."> is a replaced element whose child document is rendered
+# by this SAME pipeline into an offscreen [u32] buffer and blitted into the
+# parent framebuffer over the iframe's content box. `space` selects the CSS
+# scope: "separate" (default) styles the child from its own <style>/attributes
+# only; "shared" also applies the parent document's collected CSS rules (parent
+# first, child overrides). Depth is capped by WEB_IFRAME_DEPTH_CAP.
+# ---------------------------------------------------------------------------
+
+fn _web_empty_rules() -> Rules:
+    var gp: [[[text]]] = []
+    var dc: [text] = []
+    Rules(group_parts: gp, decls: dc)
+
+fn _web_iframe_child_html(nd: HNode) -> text:
+    # srcdoc is the primary (and only supported) content source. attr_value
+    # entity-decodes the value, so a srcdoc written with &lt;/&gt;/&quot; yields
+    # real child markup (the scanner splits on raw "<"/">", so an iframe's markup
+    # MUST arrive entity-encoded inside the attribute). NOTE: the `src` attribute
+    # (external URL / local file:// path) is intentionally UNSUPPORTED here — this
+    # layout module imports no filesystem or network helper, so there is no
+    # reachable way to fetch a src document. srcdoc-only by design.
+    attr_value(nd.attrs_raw, "srcdoc")
+
+# Copy a child [u32] buffer (cw*ch) into the parent framebuffer at (dx,dy),
+# clipped to the parent bounds. Opaque replace (the iframe box owns its pixels).
+fn _web_blit_child(fb: [u32], fbw: i32, fbh: i32, dx: i32, dy: i32, cw: i32, ch: i32, child: [u32]) -> [u32]:
+    var out = fb
+    if cw <= 0 or ch <= 0:
+        return out
+    var ry = 0
+    while ry < ch:
+        val py = dy + ry
+        if py >= 0 and py < fbh:
+            val src_row = ry * cw
+            val dst_row = py * fbw
+            var rx = 0
+            while rx < cw:
+                val px = dx + rx
+                if px >= 0 and px < fbw:
+                    out[dst_row + px] = child[src_row + rx]
+                rx = rx + 1
+        ry = ry + 1
+    out
+
+# Render one child document to a cw*ch [u32] buffer via the full pipeline.
+# `extra_rules` are prepended to the child's own rules for "shared" space (empty
+# for "separate"). `depth` is the child's own embedding depth; its own iframes
+# recurse one level deeper.
+fn _web_render_child_pixels(child_html: text, cw: i32, ch: i32, extra_rules: Rules, depth: i32) -> [u32]:
+    if cw <= 0 or ch <= 0:
+        return []
+    val nodes = parse_html(child_html)
+    val own_rules = extract_css_vw(child_html, cw)
+    val rules = Rules(group_parts: extra_rules.group_parts + own_rules.group_parts, decls: extra_rules.decls + own_rules.decls)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index)
+    val node_count = nodes.len().to_i32()
+    val empty_starts = empty_i32_lists(node_count)
+    val empty_ends = empty_i32_lists(node_count)
+    val boxes = layout(nodes, styles, child_index, 0, 0, 0, cw, ch, zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), empty_starts, empty_ends, neg_one_i32_list(node_count))
+    val white = argb(255, 255, 255)
+    val base = _web_canvas_background(nodes, styles, white)
+    var fb = browser_layout_framebuffer_filled(base, cw, ch)
+    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
+    var painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, cw, ch, false)
+    painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, cw, ch, depth)
+    painted
+
+# Blit every iframe's rendered child document over its content box. `parent_rules`
+# is the current document's rule set, forwarded to "shared" children. `depth` is
+# the current document's depth; a child at depth+1 beyond the cap is replaced by
+# a flat placeholder and never recursed into.
+fn _web_paint_iframes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], parent_rules: Rules, fb: [u32], fbw: i32, fbh: i32, depth: i32) -> [u32]:
+    var out = fb
+    val node_count = nodes.len().to_i32()
+    var i = 0
+    while i < node_count:
+        val nd = nodes[i]
+        if nd.tag == "iframe":
+            val st = styles[i]
+            val hidden = st.display == "none" or st.visibility_hidden or content_hidden_by_ancestor(nodes, styles, i)
+            if not hidden:
+                val cx = bx[i] + st.border_l + st.pad_l
+                val cy = by[i] + st.border_t + st.pad_t
+                val cw = bw[i] - st.border_l - st.border_r - st.pad_l - st.pad_r
+                val ch = bh[i] - st.border_t - st.border_b - st.pad_t - st.pad_b
+                if cw > 0 and ch > 0 and cx < fbw and cy < fbh:
+                    if depth + 1 > WEB_IFRAME_DEPTH_CAP:
+                        out = fb_rect(out, fbw, fbh, cx, cy, cw, ch, WEB_IFRAME_PLACEHOLDER)
+                    else:
+                        val child_html = _web_iframe_child_html(nd)
+                        val shared = attr_value(nd.attrs_raw, "space").trim().lower() == "shared"
+                        val extra = if shared: parent_rules else: _web_empty_rules()
+                        # Give the child at most HALF the parent's remaining budget
+                        # so a heavy child cannot stall the parent render.
+                        val save_deadline = _web_render_deadline_us
+                        val now = rt_time_now_unix_micros()
+                        if _web_render_deadline_us > now:
+                            _web_render_deadline_us = now + (_web_render_deadline_us - now) / 2
+                        val child_px = _web_render_child_pixels(child_html, cw, ch, extra, depth + 1)
+                        _web_render_deadline_us = save_deadline
+                        if child_px.len() == cw * ch:
+                            out = _web_blit_child(out, fbw, fbh, cx, cy, cw, ch, child_px)
+        i = i + 1
+    out
+
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
     _web_budget_begin(WEB_RENDER_BUDGET_MS)
     val nodes = parse_html(html)
@@ -9023,17 +9254,30 @@ pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i
     val t_init = rt_time_now_unix_micros()
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
     val t_paint = rt_time_now_unix_micros()
-    val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    var painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
     val t5 = rt_time_now_unix_micros()
     print "[layout-trace] framebuffer_init_ms={(t_init - t4) / 1000} trace_setup_ms={(t_paint - t_init) / 1000} paint_draw_ms={(t5 - t_paint) / 1000} paint_ms={(t5 - t4) / 1000} widget_mode={widget_mode}"
     painted
 
 pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
+    # Stage-local budget allocation: a single wall-clock budget is partitioned
+    # across style -> layout -> paint so a phase that consumes its whole slice
+    # (compute_styles on a hostile/huge real page, in practice) doesn't zero out
+    # every later phase. Total wall-clock never exceeds the caller's budget_ms —
+    # only the boundary between phases moves. See _web_budget_rearm().
+    val render_start_us = rt_time_now_unix_micros()
     _web_budget_begin(budget_ms)
+    val resolved_budget_ms = if budget_ms <= 0: WEB_RENDER_BUDGET_MS else: budget_ms
+    val budget_us = resolved_budget_ms * 1000
     val nodes = parse_html(html)
     val rules = extract_css_vw(html, width)
     val child_index = build_child_index(nodes)
+    # Style gets at most 70% of the total budget.
+    _web_budget_rearm(render_start_us + budget_us * 7 / 10)
     val styles = compute_styles(nodes, rules, child_index)
+    # Layout always gets a slice up to 90%, even if style spent its whole 70%.
+    _web_budget_rearm(render_start_us + budget_us * 9 / 10)
     val node_count = nodes.len().to_i32()
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
@@ -9054,12 +9298,15 @@ pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, hei
         empty_ends,
         neg_one_i32_list(node_count)
     )
+    # Paint gets the final slice: the original full deadline.
+    _web_budget_rearm(render_start_us + budget_us)
     val white = argb(255, 255, 255)
     val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
     val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
     var fb = browser_layout_framebuffer_filled(base, width, height)
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
-    val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    var painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
     painted
 
 # GPU display-list frame: the CPU ground-truth framebuffer PLUS a list of real
@@ -9120,6 +9367,10 @@ fn _web_gpu_solid_only_frame(nodes: [HNode], styles: [Style], widget_mode: bool)
         val st = styles[i]
         val visible = st.display != "none" and not st.visibility_hidden and not st.content_visibility_hidden
         if visible:
+            if nd.tag == "iframe":
+                # Iframe content is a blitted child bitmap, not a solid fill op;
+                # force the full CPU paint path so _web_paint_iframes can run.
+                return false
             if nd.tag == "#text":
                 if nd.text_trimmed != "":
                     return false
@@ -9197,7 +9448,8 @@ pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i
         return WebGpuPaintFrame(fb: gpu_fb, fill_ops: fill_ops, width: width, height: height, cpu_paint_pixels: 0)
     var fb = browser_layout_framebuffer_filled(base, width, height)
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
-    val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    var painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
     WebGpuPaintFrame(fb: painted, fill_ops: fill_ops, width: width, height: height, cpu_paint_pixels: width * height)
 
 # Render at a scroll offset: lay out with the full scroll extent, then shift
@@ -9239,4 +9491,6 @@ pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width
     var fb = browser_layout_framebuffer_filled(base, width, height)
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
     val shifted_by = shifted_i32_list(boxes.by, 0 - clamp_scroll)
-    paint(nodes, styles, boxes.bx, shifted_by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    var painted = paint(nodes, styles, boxes.bx, shifted_by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    painted = _web_paint_iframes(nodes, styles, boxes.bx, shifted_by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
+    painted

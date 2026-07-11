@@ -1,6 +1,6 @@
 # Architecture: Rendering Inside Rendering (2D / Web / GUI-WM / 3D)
 
-Status: in progress (Lane A landed; Lanes B/C/D in flight)
+Status: implemented (Lanes A–E landed; GPU render-to-texture and input routing remain follow-ups)
 Research: `doc/01_research/domain/rendering_inside_rendering.md`
 SPipe state: `.spipe/rendering-inside-rendering/state.md`
 
