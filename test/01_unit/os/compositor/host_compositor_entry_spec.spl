@@ -749,6 +749,39 @@ describe "click-on-release chrome semantics (FIX 2)":
         expect(comp.windows[comp.windows.len() - 1].id).to_equal(first_id)
         expect(comp.armed_chrome_target).to_equal("")
 
+    it "clears the press record after release so a later press on a different target arms cleanly":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "One", 40, 60, 200, 140, "", 1, "/sys/apps/one")
+        comp.apply_bridge_request(2, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Two", 300, 60, 200, 140, "", 2, "/sys/apps/two")
+        val one_id = comp.windows[0].id
+        val two_id = comp.windows[1].id
+        val one_close_x = 40 + 200 - 12
+        val one_close_y = 60 + 12
+        # Full down+up cycle on One's close button: closes One, then clears
+        # the armed-chrome record (armed_chrome_target/_window_id back to
+        # the empty/zero rest state) rather than leaving stale press state
+        # that could leak into the next interaction.
+        comp.handle_mouse_move(one_close_x, one_close_y)
+        comp.handle_left_button(true)
+        comp.handle_left_button(false)
+        expect(comp.windows.len()).to_equal(1)
+        expect(comp.windows[0].id).to_equal(two_id)
+        expect(comp.armed_chrome_target).to_equal("")
+        expect(comp.armed_chrome_window_id).to_equal(0)
+        # Second, independent down+up cycle on Two's close button: since the
+        # press record was cleared above, this arms and fires on Two alone —
+        # it must not still be carrying One's (now-stale) target/window id.
+        val two_close_x = 300 + 200 - 12
+        val two_close_y = 60 + 12
+        comp.handle_mouse_move(two_close_x, two_close_y)
+        comp.handle_left_button(true)
+        expect(comp.armed_chrome_target).to_equal("close")
+        expect(comp.armed_chrome_window_id).to_equal(two_id)
+        comp.handle_left_button(false)
+        expect(comp.windows.len()).to_equal(0)
+        expect(comp.armed_chrome_target).to_equal("")
+
 describe "resize-corner hover arming honors minimized windows (FIX 2)":
 
     it "does not arm resize over a minimized window's stale screen rect":

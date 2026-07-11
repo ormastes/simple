@@ -1,7 +1,43 @@
 # WM click semantics fire on down, hit-test recomputed repeatedly without caching
 
 ## Status
-Open.
+B1 and B2 landed (commit `0ac3480c8d`, 2026-07-05: "fix(wm): wheel+right/middle
+button routing, click-on-release chrome semantics, single hit-test layout per
+event, timer deadline clock base"). S3 is **partially** landed by the same
+commit — see the 2026-07-11 update below. Line numbers in the sections below
+are historical (as of the original report) and no longer match current
+`host_compositor_entry.spl` (the close/taskbar dispatch now lives around
+:980-1058; :566-577 is now `handle_mouse_wheel`).
+
+## Update (2026-07-11)
+- **B1 (fire-on-down) — FIXED.** `host_compositor_left_button_at` in
+  `src/os/compositor/host_compositor_entry.spl` (:980-1058) now arms a press
+  target (`armed_chrome_target` / `armed_chrome_window_id`) on pointer-down for
+  both the close button and taskbar items, and only fires the action on
+  pointer-up when the release hit-test still resolves to the same armed
+  target (release-inside). A drag-away before release, or a release over a
+  different target, cancels the action and clears the armed state
+  unconditionally. Covered by `describe "click-on-release chrome semantics
+  (FIX 2)"` in
+  `test/01_unit/os/compositor/host_compositor_entry_spec.spl`, which now also
+  has an explicit "clears the press record after release" scenario proving a
+  second independent press/release cycle on a different window is not
+  affected by a prior cycle's stale state.
+- **B2 (resize-hover minimized guard) — FIXED.** `wm_lifecycle_pointer_move`
+  in `src/os/compositor/wm_action_applier.spl:304-313` now gates the
+  resize-corner arm check on `not win.minimized`, matching the click hit-test
+  and render loop. Covered by `describe "resize-corner hover arming honors
+  minimized windows (FIX 2)"` in the same spec file.
+- **S3 (hit-test recompute) — PARTIALLY FIXED, remainder still open.** The
+  same commit made a single mouse-down event share one `compute_layout()`
+  pass across `widget_set_pressed` and `widget_dispatch_click`
+  (`src/lib/common/ui/event.spl` `handle_pointer`, `src/lib/common/ui/
+  widget_hit.spl`'s `layout` param), cutting a down event from 2 full layout
+  passes to 1. Still open: `widget_dispatch_hover` on every mouse-move
+  (`event.spl`) still runs its own independent `compute_layout()` with no
+  dirty-flag/tree-revision cache, so a move-heavy interaction still pays one
+  full layout pass per move event. Left open per this bug's original Next
+  Step (layout cache keyed on widget-tree revision + hover short-circuit).
 
 ## Severity
 Medium — behavioral/performance gaps in user interaction; compounding with frame-cache issues.
