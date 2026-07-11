@@ -87,6 +87,13 @@ impl MirLowering:
         false
 
     fn local_is_float(local: LocalId) -> bool:
+        """True when a lowered local holds an f64/f32 value.
+
+        Keyed off the MIR local type (same rationale as local_is_str): HIR
+        `.type_` is frequently nil on the flat path, so float-directed binop
+        lowering must key off the MIR local type. Without this, arithmetic on
+        floats gets an i64 dest from infer_binop_type and the backend emits
+        integer add/mul on double BIT PATTERNS (garbage results)."""
         for item in self.builder.locals:
             if item.id.id == local.id:
                 match item.type_.kind:
@@ -696,7 +703,19 @@ impl MirLowering:
                             if val cat_local = cat_res:
                                 return cat_local
                         val mir_op = self.lower_binop(op)
-                        val result_type = self.infer_binop_type(op)
+                        # Float arithmetic must carry an F64 dest: infer_binop_type
+                        # defaults arithmetic to i64, which makes translate_binop
+                        # emit integer add/mul on the operands' double BIT PATTERNS
+                        # (e.g. `2.5 * 4.0` natively computed garbage). Detect float
+                        # operands by their MIR local type (HIR `.type_` is nil on
+                        # this path), mirroring the string-concat detection above.
+                        var result_type = self.infer_binop_type(op)
+                        match op:
+                            case Add | Sub | Mul | Div | Mod | Pow:
+                                if self.local_is_float(left_local) or self.local_is_float(right_local):
+                                    result_type = MirType.f64()
+                            case _:
+                                ()
                         var b = self.builder
                         val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_local), mir_operand_copy(right_local), result_type)
                         self.builder = b
