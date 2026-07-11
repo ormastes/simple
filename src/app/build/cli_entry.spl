@@ -10,9 +10,6 @@
 
 use app.io.cli_ops.{cli_native_build, cli_run_lint, cli_run_fmt}
 use app.cli.check.{run_check}
-use app.io.file_ops.{file_exists, file_copy, file_hash_sha256, file_size}
-use app.io.dir_ops.{dir_create}
-use app.io.env_ops.{host_arch, host_os}
 
 fn handle_build(args: [text]) -> i64:
     """Dispatch the 'build' subcommand to the appropriate pipeline."""
@@ -27,143 +24,16 @@ fn handle_build(args: [text]) -> i64:
     if subcmd == "check":
         return run_check(args[1:])
 
-    if subcmd == "bootstrap":
-        return handle_build_bootstrap(args[1:])
-
-    # Default (no subcommand) invokes the native-build pipeline directly with
-    # whatever flags the caller supplied.
+    # Both 'bootstrap' and default invoke the native-build pipeline.
+    # For 'bootstrap', strip the subcommand so it isn't treated as a source path.
+    # Prepend "native-build" so cli_native_build can identify and skip it.
     var native_args: [text] = ["native-build"]
+    val pass_args = if subcmd == "bootstrap": args[1:] else: args
     var k = 0
-    while k < args.len():
-        native_args.push(args[k])
+    while k < pass_args.len():
+        native_args.push(pass_args[k])
         k = k + 1
-    cli_native_build(native_args)
-
-# ============================================================================
-# `simple build bootstrap` — 3-stage self-compilation verification
-# ============================================================================
-#
-# Parity fix (2026-07-11): this used to forward raw CLI args straight to
-# `native-build` with no defaults at all, so a bare `simple build bootstrap`
-# failed with "No entry point specified for native-build backend" — it never
-# actually ran a 3-stage pipeline. The Rust seed's `build bootstrap`
-# (src/compiler_rust/driver/src/cli/commands/misc_commands.rs::handle_bootstrap)
-# DOES implement the full 3-stage compile-and-verify pipeline with hardcoded
-# defaults (--source src/app --entry src/app/cli/bootstrap_main.spl
-# --entry-closure --strip --threads 1 --backend=llvm-lib); this port mirrors
-# that behavior in pure Simple, calling the in-process `cli_native_build`
-# three times (no subprocess spawn needed since we ARE the compiler) and
-# comparing output hashes for determinism, then staging the verified binary
-# under `<output-dir>/<triple>/simple` (NOT bin/release — that redeploy step
-# stays a separate, explicit action).
-
-fn _bootstrap_triple() -> text:
-    val os = host_os()
-    val arch = host_arch()
-    if os == "macos":
-        "{arch}-apple-darwin"
-    elif os == "windows":
-        "{arch}-pc-windows-msvc"
-    elif os == "linux":
-        "{arch}-unknown-linux-gnu"
-    elif os == "freebsd":
-        "{arch}-unknown-freebsd"
-    else:
-        "{arch}-unknown-{os}"
-
-fn _bootstrap_has_explicit_entry(args: [text]) -> bool:
-    for a in args:
-        if a == "--entry" or a.starts_with("--entry="):
-            return true
-    false
-
-fn _bootstrap_stage_output_path(output_dir: text, stage_name: text) -> text:
-    "{output_dir}/{stage_name}/simple"
-
-fn _bootstrap_default_native_build_args(output: text) -> [text]:
-    ["native-build", "--source", "src/app", "--entry", "src/app/cli/bootstrap_main.spl",
-     "--entry-closure", "--strip", "--threads", "1", "--backend=llvm-lib", "-o", output]
-
-fn _bootstrap_compile_stage(stage_label: text, output: text) -> (bool, text, i64):
-    print ""
-    print "=== {stage_label} ==="
-    print "  Running (in-process): native-build --source src/app --entry-closure --strip --threads 1 --entry src/app/cli/bootstrap_main.spl -o {output} --backend=llvm-lib"
-    val exit_code = cli_native_build(_bootstrap_default_native_build_args(output))
-    if exit_code != 0 or not file_exists(output):
-        print "{stage_label} FAILED (exit {exit_code}, output exists={file_exists(output)})"
-        return (false, "", 0)
-    val hash = file_hash_sha256(output)
-    val size = file_size(output)
-    print "{stage_label}: OK ({size} bytes, hash={hash})"
-    (true, hash, size)
-
-fn _bootstrap_deploy(stage3_path: text, output_dir: text) -> bool:
-    val triple = _bootstrap_triple()
-    val deploy_dir = "{output_dir}/{triple}"
-    if not dir_create(deploy_dir, true):
-        print "Bootstrap deploy FAILED: could not create {deploy_dir}"
-        return false
-    val deploy_path = "{deploy_dir}/simple"
-    if not file_copy(stage3_path, deploy_path):
-        print "Bootstrap deploy FAILED: could not copy {stage3_path} -> {deploy_path}"
-        return false
-    print "Bootstrap deployed: {deploy_path}"
-    true
-
-fn handle_build_bootstrap(args: [text]) -> i64:
-    # Legacy escape hatch: if the caller passes an explicit --entry, treat
-    # this as a single raw native-build invocation instead of the 3-stage
-    # pipeline (keeps `build bootstrap --entry <x> -o <y>` scripting usable).
-    if _bootstrap_has_explicit_entry(args):
-        var native_args: [text] = ["native-build"]
-        var k = 0
-        while k < args.len():
-            native_args.push(args[k])
-            k = k + 1
-        return cli_native_build(native_args)
-
-    var output_dir = "build/bootstrap"
-    for a in args:
-        if a.starts_with("--output="):
-            output_dir = a.substring(9)
-
-    print "Bootstrap pipeline starting..."
-    print "Output dir: {output_dir}"
-
-    val (ok1, hash1, _size1) = _bootstrap_compile_stage("Stage 1: Compile with current compiler",
-        _bootstrap_stage_output_path(output_dir, "stage1"))
-    if not ok1:
-        return 1
-
-    val (ok2, hash2, _size2) = _bootstrap_compile_stage("Stage 2: Compile with current compiler (determinism check)",
-        _bootstrap_stage_output_path(output_dir, "stage2"))
-    if not ok2:
-        return 1
-
-    val (ok3, hash3, _size3) = _bootstrap_compile_stage("Stage 3: Compile with current compiler (triple check)",
-        _bootstrap_stage_output_path(output_dir, "stage3"))
-    if not ok3:
-        return 1
-
-    print ""
-    val stage3_path = _bootstrap_stage_output_path(output_dir, "stage3")
-    if hash1 == hash2 and hash2 == hash3:
-        print "Bootstrap VERIFIED: All 3 stages produce identical output"
-        print "  Hash: {hash1}"
-        if not _bootstrap_deploy(stage3_path, output_dir):
-            return 1
-        return 0
-    elif hash2 == hash3:
-        print "Bootstrap PARTIAL: Stage 2 and Stage 3 match (Stage 1 differs)"
-        print "  Stage 1: {hash1}"
-        print "  Stage 2: {hash2}"
-        print "  Stage 3: {hash3}"
-        if not _bootstrap_deploy(stage3_path, output_dir):
-            return 1
-        return 0
-    else:
-        print "Bootstrap MISMATCH: outputs differ between stages"
-        print "  Stage 1: {hash1}"
-        print "  Stage 2: {hash2}"
-        print "  Stage 3: {hash3}"
-        return 1
+    # Propagate the pipeline's exit code explicitly. `bin/simple build bootstrap`
+    # must fail (nonzero) when a stage fails; relying on implicit last-expression
+    # return here previously let a failed native-build stage surface as exit 0.
+    return cli_native_build(native_args)

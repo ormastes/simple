@@ -44,6 +44,22 @@ impl MirLowering:
                 return Some(item.type_)
         nil
 
+    fn local_is_float(local: LocalId) -> bool:
+        """True when a lowered local holds a native float value (F32/F64).
+
+        Keyed off the MIR local type (mirrors local_is_str/local_mir_type_of)
+        because the inferred HIR `let_type` for `val y = x * 4.0` is
+        unreliably a non-nil i64 on this path. Without threading the real
+        F64/F32 type onto the binding, its spill slot is alloca'd i64 and the
+        float round-trips through an i64 store (10.0 -> 10)."""
+        for item in self.builder.locals:
+            if item.id.id == local.id:
+                match item.type_.kind:
+                    case MirTypeKind.F32: return true
+                    case MirTypeKind.F64: return true
+                    case _: return false
+        false
+
     me lower_stmt(stmt: HirStmt):
         """Lower HIR statement to MIR."""
         # NOTE: previously declared `val stmt_kind: HirStmtKind` / `val
@@ -174,26 +190,10 @@ impl MirLowering:
                         self.error("let binding has no resolved symbol", Some(span))
                     return
 
-                val expr_disc = mir_hir_stmt_kind_disc(HirStmtKind.Expr(fallback_expr))
-                if mir_hir_stmt_kind_disc(stmt_kind_value) == expr_disc:
-                    match stmt_kind_value:
-                        case HirStmtKind.Expr(expr):
-                            self.lower_expr(expr)
-                            return
-                        case _:
-                            pass
-
-                val fallback_block = HirBlock(stmts: [], has: false, value: fallback_expr, span: span)
-                val block_disc = mir_hir_stmt_kind_disc(HirStmtKind.Block(fallback_block))
-                if mir_hir_stmt_kind_disc(stmt_kind_value) == block_disc:
-                    match stmt_kind_value:
-                        case HirStmtKind.Block(block):
-                            self.lower_block(block)
-                            return
-                        case _:
-                            pass
-
                 match kind:
+                    case Expr(expr):
+                        self.lower_expr(expr)
+
                     case Let(symbol, type_, init):
                         val symbol_id = mir_stmt_symbol_id_value(symbol)
                         if symbol_id < 0:
@@ -280,6 +280,9 @@ impl MirLowering:
                     case Assign(target, op, value):
                         val value_local = self.lower_expr(value)
                         self.lower_assign(target, op, value_local)
+
+                    case Block(block):
+                        self.lower_block(block)
 
                     case AsmAssert(spec):
                         self.lower_asm_assert(spec, span)
