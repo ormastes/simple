@@ -28,6 +28,27 @@ fn is_interp_builtin_fn(name: text) -> bool:
      name == "file_read" or name == "file_write" or name == "file_delete" or
      name == "env_get" or name == "env_set")
 
+fn primitive_cast_type_kind(name: text) -> HirTypeKind?:
+    """`i32(x)`-style primitive casts: a fixed-width numeric type name used
+    as a call target is a CAST, not a function call. These names are not in
+    the value symbol table, so lowering them as ordinary callees yields
+    HirExprKind.Error and native codegen then emits an indirect call on an
+    undefined local (llc: "use of undefined value '%l0'"). Restricted to
+    fixed-width numeric names -- `int`/`float`/`bool` remain calls (they are
+    value-parsing builtins, not pure numeric casts)."""
+    match name:
+        case "i8": HirTypeKind.Int(8, true)
+        case "i16": HirTypeKind.Int(16, true)
+        case "i32": HirTypeKind.Int(32, true)
+        case "i64": HirTypeKind.Int(64, true)
+        case "u8": HirTypeKind.Int(8, false)
+        case "u16": HirTypeKind.Int(16, false)
+        case "u32": HirTypeKind.Int(32, false)
+        case "u64": HirTypeKind.Int(64, false)
+        case "f32": HirTypeKind.Float(32)
+        case "f64": HirTypeKind.Float(64)
+        case _: nil
+
 fn is_bootstrap_builtin_fn(name: text) -> bool:
     name == "get_args" or
     name == "rt_get_args" or
@@ -185,6 +206,25 @@ impl HirLowering:
             case ExprKind.Call(callee, args):
                 val call_callee_t: Expr = callee
                 val call_args_t: [CallArg] = args
+                # `i32(x)` / `f64(x)`: fixed-width primitive type name used as
+                # a callee is a numeric CAST (see primitive_cast_type_kind).
+                # Lower it as HirExprKind.Cast -- the callee name would
+                # otherwise fail symbol lookup and become HirExprKind.Error.
+                match call_callee_t.kind:
+                    case ExprKind.Ident(callee_ident):
+                        val callee_ident_t: text = callee_ident
+                        if call_args_t.len() == 1 and not call_args_t[0].has_name:
+                            val prim_kind = primitive_cast_type_kind(callee_ident_t)
+                            if prim_kind.?:
+                                val cast_arg_t: CallArg = call_args_t[0]
+                                val cast_target = HirType(kind: prim_kind.unwrap(), span: e.span)
+                                return HirExpr(
+                                    kind: HirExprKind.Cast(self.lower_hir_expr(cast_arg_t.value), cast_target),
+                                    type_: cast_target,
+                                    span: e.span
+                                )
+                    case _:
+                        pass
                 var hir_args: [HirCallArg] = []
                 for arg in call_args_t:
                     val arg_t: CallArg = arg
