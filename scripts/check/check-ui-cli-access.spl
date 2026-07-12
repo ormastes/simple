@@ -91,7 +91,8 @@ fn _json_parser_ok() -> bool:
     if body.len() != 86: return _base_fail("json body length")
     if indices[8] != 8: return _base_fail("array index 8")
     if "abc"[1] != "b": return _base_fail("text index 1")
-    if extract_field(body, "surface_id") != "main": return _base_fail("json surface_id")
+    val surface_id = extract_field(body, "surface_id")
+    if surface_id != "main": return _base_fail("json surface_id value=" + surface_id)
     if extract_field(body, "canonical_id") != "main#run": return _base_fail("json canonical_id")
     if extract_field(body, "action") != "run": return _base_fail("json action")
     if extract_field(body, "request_id") != "gate-run": return _base_fail("json request_id")
@@ -200,9 +201,10 @@ fn _manual_evidence_ok() -> bool:
 fn _ui_loop_ok(backend: text) -> bool:
     val tree = build_tree(column("root", [button("run", "Run", "run")]))
     var session = UISession.new(tree)
+    val is_tui = backend.contains("tui")
     session.set_active_backend(backend)
     val state = session.current_state()
-    val rendered = if backend.contains("tui"):
+    val rendered = if is_tui:
         val rects = compute_layout(state.tree.root_node(), 0, 0, 40, 10)
         render_tui_tree(Screen.new(40, 10), state.tree.root_node(), rects, state).render()
     else:
@@ -219,21 +221,23 @@ fn _ui_loop_ok(backend: text) -> bool:
     var i: i64 = 0
     while i < events.len():
         val event = events[i]
-        if event.event_kind == "access_request" and event.payload.contains("gate-run"): request_seen = true
-        if event.event_kind == "action" and event.payload == "run": dispatch_seen = true
-        if event.event_kind == "access_result" and event.payload.contains("gate-run") and event.payload.contains("code=ok"): result_seen = true
+        val kind = event.event_kind
+        val payload = event.payload
+        if kind == "access_request": request_seen = payload == "request_id=gate-run;code=run"
+        elif kind == "action": dispatch_seen = payload == "run"
+        elif kind == "access_result": result_seen = payload == "request_id=gate-run;code=ok"
         i = i + 1
     if not request_seen: return _base_fail("ui request history")
     if not dispatch_seen: return _base_fail("ui dispatch history")
     if not result_seen: return _base_fail("ui result history")
     val after_state = session.current_state()
-    val rendered_after = if backend.contains("tui"):
+    val rendered_after = if is_tui:
         val rects = compute_layout(after_state.tree.root_node(), 0, 0, 40, 10)
         render_tui_tree(Screen.new(40, 10), after_state.tree.root_node(), rects, after_state).render()
     else:
         render_html_tree(after_state.tree.root_node(), after_state)
     if not rendered_after.contains("Run"): return _base_fail("ui post-action render")
-    if backend.contains("tui"):
+    if is_tui:
         val out = "build/test-artifacts/03_system/app/ui_cli_llm_access"
         if not dir_create_all(out): return _base_fail("tui evidence directory")
         if not file_write(out + "/tui-before.txt", rendered): return _base_fail("tui before evidence")

@@ -247,22 +247,20 @@ fn _handle_ui_act(body: text, inject_event: fn(UIEvent), session: UISession?) ->
     val action = extract_json_field(body, "action")
     var request_id = extract_json_field(body, "request_id")
     val widget_id = ui_access_widget_id_from_canonical(canonical_id)
-    var resolved_surface_id = surface_id
     if action == "":
         return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: action\"}")
-    if widget_id == "" and canonical_id != "":
+    if canonical_id == "":
+        return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: canonical_id\"}")
+    if widget_id == "":
         return (400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"Invalid canonical_id\"}")
-    if canonical_id != "":
-        resolved_surface_id = ui_access_surface_id_from_canonical(canonical_id)
-    if resolved_surface_id == "":
-        return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: surface_id\"}")
+    val resolved_surface_id = ui_access_surface_id_from_canonical(canonical_id)
+    if surface_id != "" and surface_id != resolved_surface_id:
+        return (400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"surface_id does not match canonical_id\"}")
     if session == nil:
         return (503, "application/json", "{\"error\":\"source_unavailable\",\"message\":\"A live UI session is required for actions\"}")
     if session != nil and not session.has_surface(resolved_surface_id):
         return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Surface not found: {resolved_surface_id}\"}")
-    if session != nil:
-        session.set_active_surface(resolved_surface_id)
-    val action_name = if session != nil and canonical_id != "":
+    val action_name = if session != nil:
         if request_id == "":
             request_id = "ui-act-" + (session.access_snapshot().snapshot_revision + 1).to_text()
         session.record_access_correlation(resolved_surface_id, widget_id, request_id, "request", action)
@@ -275,11 +273,11 @@ fn _handle_ui_act(body: text, inject_event: fn(UIEvent), session: UISession?) ->
                 return (status, "application/json", "{\"error\":\"{escape_json(error.code)}\",\"message\":\"{escape_json(error.message)}\",\"request_id\":\"{escape_json(request_id)}\"}")
     else:
         action
+    session.set_active_surface(resolved_surface_id)
     inject_event(UIEvent.Action(name: action_name))
-    if session != nil and canonical_id != "":
+    if session != nil:
         session.record_access_correlation(resolved_surface_id, widget_id, request_id, "result", "ok")
-    val response_surface_id = if surface_id != "": surface_id else: resolved_surface_id
-    return (200, "application/json", "{\"ok\":true,\"surface_id\":\"{escape_json(response_surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\",\"request_id\":\"{escape_json(request_id)}\"}")
+    return (200, "application/json", "{\"ok\":true,\"surface_id\":\"{escape_json(resolved_surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\",\"request_id\":\"{escape_json(request_id)}\"}")
 
 fn _handle_ui_state_post(body: text, inject_event: fn(UIEvent), session: UISession?) -> (i32, text, text):
     """Handle POST /api/test/ui/state — declarative UI state route."""
