@@ -3,9 +3,9 @@
 
 ## Scope
 
-Three draft SSpec files cover manifest/assets, shared 2D/3D batch, and portable
-emission. A fourth native graphics readback scenario remains planned and does
-not exist yet. Unit/integration suites for the
+Four draft SSpec files cover manifest/assets, exact-face shaping, shared 2D/3D
+batch, and portable emission. A fifth native graphics readback scenario remains
+planned and does not exist yet. Unit/integration suites for the
 existing shaper, Engine2D, Engine3D texture path, emitter, and backend readback
 remain supporting evidence; they do not replace these end-to-end scenarios.
 
@@ -14,6 +14,7 @@ Planned executable/manual pairs:
 | Executable SSpec | Generated manual |
 |---|---|
 | `test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/shared_font_manifest_spec.md` |
+| `test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.md` |
 | `test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/shared_font_surfaces_spec.md` |
 | `test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/gpu_font_emission_spec.md` |
 | `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md` |
@@ -26,14 +27,17 @@ rasterization, and native success on unavailable hardware.
 Visible primary steps:
 
 - `step("Load the pinned multilingual font manifest")`
+- `step("Accept exact-face-bound simple-script shaping")`
 - `step("Prepare one shared font batch for 2D and 3D")`
 - `step("Emit the selected font composite program and plan compilation")`
 - `step("Prove native submission and device readback")`
 
-Shared helpers are `setup_shared_font_fixture`, `expect_font_license`,
+Shared helpers are `setup_shared_font_fixture`, `setup_selected_shaping_face`,
+`expect_simple_identity_run`, `expect_complex_run_pending`, `expect_font_license`,
 `expect_language_coverage`, `expect_shared_font_batch`,
-`expect_backend_emission`, and `expect_font_render_parity`. Until implemented,
-each helper fails explicitly. New assertions use built-in matchers only.
+`expect_backend_emission`, and `expect_font_render_parity`. Implemented helpers
+assert their named oracle; any pending helper fails explicitly. New assertions
+use built-in matchers only.
 
 ## Requirement traceability
 
@@ -48,7 +52,7 @@ behavior.
 | REQ-004 | `shared_font_manifest_spec.spl` | complete license metadata; checksum/table validation; missing field rejection | 3 |
 | REQ-005 | `shared_font_manifest_spec.spl` | pinned catalog revision; unchanged accepted bytes; corpus rejection | 3 |
 | REQ-006 | `shared_font_surfaces_spec.spl` | one owner; identical batch identity; no duplicate material cache | 3 |
-| REQ-007 | pending shaping acceptance spec | selected-script shaping; BiDi/cluster offsets; missing-glyph fallback | 0/3 |
+| REQ-007 | `shared_font_shaping_acceptance_spec.spl` | exact-face Latin/Han/Cyrillic oracle; missing/stale rejection; Arabic/Devanagari fail-closed guard | 0/3 |
 | REQ-008 | `shared_font_manifest_spec.spl` | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection and bitmap fixture pending | 1/3 |
 | REQ-009 | `shared_font_surfaces_spec.spl` | key separation; bounded eviction/counters; generation/dirty regions | 3 |
 | REQ-010 | `gpu_font_emission_spec.spl` | five source targets; Vulkan contract; deterministic failures/hashes | 3 |
@@ -72,6 +76,8 @@ behavior.
 
 - Manifest oracle: source hashes, expected manifest hash, exact ordered IDs,
   full contribution recomputation, and cutoff evidence.
+- Shaping oracle: a selected asset's live handle/generation, parsed owned bytes,
+  exact-face run metadata, canonical material, and stale-face rejection.
 - Surface oracle: shaped glyph/cluster records and identical batch/atlas identity
   before structured 2D/3D object evidence.
 - Emission oracle: target-specific entry/syntax markers, exported symbol,
@@ -84,8 +90,8 @@ behavior.
 
 ## Environment and order
 
-Use the self-hosted release binary. Run manifest first, then shared surfaces,
-emission, and native readback. Native specs require a declared promoted graphics
+Use the self-hosted release binary. Run manifest first, then shaping, shared
+surfaces, emission, and native readback. Native specs require a declared promoted graphics
 backend/driver; other backends may provide compile-only rows. Pin fixtures,
 viewport, premultiplication, rounding, warmups, samples, and percentile method.
 
@@ -108,7 +114,7 @@ operator flow without opening source and docgen must report zero stubs.
 
 ## Pass/fail
 
-Pass requires every REQ/NFR row above, four zero-stub manuals, one real promoted
+Pass requires every REQ/NFR row above, five zero-stub manuals, one real promoted
 graphics backend for both 2D and 3D, and all selected thresholds. Missing
 hardware is not a failure for non-promoted rows, but no promoted native row is a
 release failure. Placeholder assertions, environment-only payloads, mirrors, or

@@ -6,7 +6,7 @@ use std.skia.entity.geometry.{SkPoint}
 use std.skia.feature.shaper.script_detect.{Script, script_of, script_is_rtl}
 use std.skia.feature.shaper.feature_tags.{OpenTypeFeature}
 use std.skia.feature.shaper.font_fallback.{FallbackChain, fallback_chain_font_for_script, fallback_chain_font_for_run}
-use std.skia.feature.glyph.ot_parser.{OtFont}
+use std.skia.feature.glyph.ot_parser.{OtFont, find_table, read_u16_be}
 use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
 use std.skia.feature.glyph.ot_parser_metrics.{HorizontalMetrics, parse_hmtx}
 use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup, parse_gsub_skeleton, parse_gpos_skeleton, parse_gdef_glyph_class}
@@ -385,13 +385,46 @@ fn _gsub_apply(gsub_lookups: [GsubLookup], glyph_id: u32) -> u32:
     glyph_id
 
 # ===== GPOS: get x-advance from hmtx or font-size estimate =====
+fn _bounded_hmtx(font: OtFont, glyph_id: u32) -> Option<HorizontalMetrics>:
+    val hhea = match find_table(font, 1751672161u32):
+        Some(table): table
+        None: return None
+    if hhea.length < 36u32: return None
+    val count = read_u16_be(font.blob, hhea.offset as i64 + 34)
+    if count == 0u32: return None
+    val hmtx = match find_table(font, 1752003704u32):
+        Some(table): table
+        None: return None
+    val required = if glyph_id < count:
+        glyph_id as i64 * 4 + 4
+    else:
+        count as i64 * 4 + (glyph_id - count) as i64 * 2 + 2
+    if required > hmtx.length as i64: return None
+    parse_hmtx(font, count, glyph_id)
+
+fn _bounded_units_per_em(font: OtFont) -> Option<u32>:
+    val head = match find_table(font, 1751474532u32):
+        Some(table): table
+        None: return None
+    if head.length < 20u32: return None
+    val units_per_em = read_u16_be(font.blob, head.offset as i64 + 18)
+    if units_per_em == 0u32: None else: Some(units_per_em)
+
+fn _bounded_hmtx_advance(font: OtFont, glyph_id: u32, font_size: f64) -> Option<f64>:
+    val metrics = match _bounded_hmtx(font, glyph_id):
+        Some(value): value
+        None: return None
+    val units_per_em = match _bounded_units_per_em(font):
+        Some(value): value
+        None: return None
+    val advance = metrics.advance_width as f64 * font_size / units_per_em as f64
+    if (advance != advance or advance - advance != 0.0 or advance < 0.0): None
+    else: Some(advance)
+
 fn _gpos_advance_from_font(ot_font: OtFont, glyph_id: u32, font_size: f64) -> f64:
-    val maybe_metrics = parse_hmtx(ot_font, glyph_id + 1, glyph_id)
-    match maybe_metrics:
-        case Some(metrics):
-            # Scale from font units (assume 1000 upem) to pixels
-            val units_per_em: f64 = 1000.0
-            (metrics.advance_width as f64) * font_size / units_per_em
+    match _bounded_hmtx_advance(ot_font, glyph_id, font_size):
+        case Some(advance):
+            advance
         case None:
             font_size * 0.6
 
@@ -633,7 +666,38 @@ fn _run_can_render_direct(scr: Script, start: i64, end_idx: i64, total: i64) -> 
     if scr == Script.Emoji: return start == 0 and end_idx == total and total == 1
     scr == Script.Latin or scr == Script.Cyrillic or scr == Script.CJK
 
-fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, language: text, font: SkFont, ot_font: Option<OtFont>, ot_font_handle: i64, ot_font_generation: i64, gsub_lookups: [GsubLookup], start_x: f64, start_y: f64) -> ShapedRun:
+fn _simple_identity_complete(codepoints: [u32], start: i64, end_idx: i64, scr: Script,
+                             font: SkFont, ot_font: Option<OtFont>, ot_font_handle: i64,
+                             ot_font_generation: i64, features_empty: bool,
+                             glyphs: [ShapedGlyph]) -> bool:
+    if (not features_empty or not _run_can_render_direct(scr, start, end_idx, codepoints.len()) or
+        (scr != Script.Latin and scr != Script.Cyrillic and scr != Script.CJK) or
+        glyphs.len() != end_idx - start or ot_font_handle <= 0 or
+        font.typeface.font_handle != ot_font_handle or
+        font.typeface.font_generation != ot_font_generation or
+        not font_face_is_live(ot_font_handle, ot_font_generation)):
+        return false
+    val parsed = match ot_font:
+        Some(value): value
+        None: return false
+    var index: i64 = 0
+    while index < glyphs.len():
+        val source = start + index
+        val glyph = glyphs[index]
+        val mapped = cmap_glyph_id(parsed, codepoints[source])
+        val expected_advance = _bounded_hmtx_advance(parsed, mapped, font.size)
+        if (mapped == 0u32 or glyph.glyph_id != mapped or
+            rt_font_glyph_index(ot_font_handle, codepoints[source].to_i64()) != mapped.to_i64() or
+            glyph.source_index != source or glyph.cluster != source or
+            glyph.x_offset != 0.0 or glyph.y_offset != 0.0 or glyph.y_advance != 0.0 or
+            glyph.x_advance != glyph.x_advance or
+            glyph.x_advance - glyph.x_advance != 0.0 or glyph.x_advance < 0.0 or
+            expected_advance == None or glyph.x_advance != expected_advance.unwrap()):
+            return false
+        index = index + 1
+    true
+
+fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, language: text, font: SkFont, ot_font: Option<OtFont>, ot_font_handle: i64, ot_font_generation: i64, gsub_lookups: [GsubLookup], features_empty: bool, start_x: f64, start_y: f64) -> ShapedRun:
     val rtl = script_is_rtl(scr)
     val shaped_glyphs = _dispatch_shape_run(codepoints, start: start, end_idx: end_idx, scr: scr, ot_font: ot_font, gsub_lookups: gsub_lookups, font_size: font.size)
     var glyph_ids: [u32] = []
@@ -653,11 +717,13 @@ fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, language
     var glyph_indices_valid = false
     if handle_matches and _run_can_render_direct(scr, start, end_idx, codepoints.len()):
         glyph_indices_valid = _run_has_mapped_glyphs(ot_font, font.typeface.font_handle, codepoints, start: start, end_idx: end_idx)
+    val identity_complete = _simple_identity_complete(codepoints, start, end_idx, scr, font,
+        ot_font, ot_font_handle, ot_font_generation, features_empty, shaped_glyphs)
     ShapedRun(
         script: scr, language: language, glyph_ids: glyph_ids, positions: positions,
         font_handle: font.typeface.font_handle, font_generation: font.typeface.font_generation,
         glyph_indices_valid: glyph_indices_valid,
-        substitution_complete: false, positioning_complete: false,
+        substitution_complete: identity_complete, positioning_complete: identity_complete,
         is_rtl: rtl, glyphs: shaped_glyphs
     )
 
@@ -683,7 +749,7 @@ fn shaped_run_to_font_glyph_run(run: ShapedRun) -> FontGlyphRun:
         for glyph in run.glyphs:
             clusters.push(glyph.cluster)
     val lengths_match = run.glyph_ids.len() == xs.len() and run.glyph_ids.len() == ys.len() and run.glyph_ids.len() == clusters.len()
-    FontGlyphRun(valid: run.glyph_indices_valid and run.substitution_complete and metadata_valid and lengths_match, face_id: run.font_handle,
+    FontGlyphRun(valid: run.glyph_indices_valid and run.substitution_complete and run.positioning_complete and metadata_valid and lengths_match, face_id: run.font_handle,
         face_generation: run.font_generation, glyph_ids: run.glyph_ids,
         xs: xs, ys: ys, clusters: clusters)
 
@@ -734,7 +800,7 @@ fn shaper_shape_with_language(shaper: Shaper, codepoints: [u32], font: SkFont, s
         if s != run_script:
             val run_font = fallback_chain_font_for_run(shaper.fallback, run_script, codepoints, start: run_start, end_idx: i)
             val bound = _shaper_ot_face(shaper, run_font)
-            val run = _build_run(codepoints, start: run_start, end_idx: i, scr: run_script, language: run_language, font: run_font, ot_font: bound.0, ot_font_handle: bound.1, ot_font_generation: bound.2, gsub_lookups: _get_gsub_lookups(bound.0), start_x: run_x, start_y: start_y)
+            val run = _build_run(codepoints, start: run_start, end_idx: i, scr: run_script, language: run_language, font: run_font, ot_font: bound.0, ot_font_handle: bound.1, ot_font_generation: bound.2, gsub_lookups: _get_gsub_lookups(bound.0), features_empty: shaper.features_enabled.len() == 0, start_x: run_x, start_y: start_y)
             runs.push(run)
             run_x = run_x + _run_advance(run)
             run_start = i
@@ -742,7 +808,7 @@ fn shaper_shape_with_language(shaper: Shaper, codepoints: [u32], font: SkFont, s
         i = i + 1
     val last_font = fallback_chain_font_for_run(shaper.fallback, run_script, codepoints, start: run_start, end_idx: n)
     val last_bound = _shaper_ot_face(shaper, last_font)
-    val last_run = _build_run(codepoints, start: run_start, end_idx: n, scr: run_script, language: run_language, font: last_font, ot_font: last_bound.0, ot_font_handle: last_bound.1, ot_font_generation: last_bound.2, gsub_lookups: _get_gsub_lookups(last_bound.0), start_x: run_x, start_y: start_y)
+    val last_run = _build_run(codepoints, start: run_start, end_idx: n, scr: run_script, language: run_language, font: last_font, ot_font: last_bound.0, ot_font_handle: last_bound.1, ot_font_generation: last_bound.2, gsub_lookups: _get_gsub_lookups(last_bound.0), features_empty: shaper.features_enabled.len() == 0, start_x: run_x, start_y: start_y)
     runs.push(last_run)
     runs
 

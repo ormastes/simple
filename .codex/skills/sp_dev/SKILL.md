@@ -415,8 +415,9 @@ font GPU emission, or GUI/Web/2D/3D text.
 7. Shaping and material preparation fail closed unless every required operation
    completed and the final glyphs remain bound to the exact live face handle
    and generation.
-8. Freeze these four SSpec phrases exactly:
+8. Freeze these five SSpec phrases exactly:
    `Load the pinned multilingual font manifest`;
+   `Accept exact-face-bound simple-script shaping`;
    `Prepare one shared font batch for 2D and 3D`;
    `Emit the selected font composite program and plan compilation`;
    `Prove native submission and device readback`.
