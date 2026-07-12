@@ -12,7 +12,7 @@ use os.kernel.memory.memory_dma_pages.{memory_dma_free_partial_pages}
 use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_register_dma, memory_leveling_runtime_unregister_dma, memory_leveling_runtime_dma_sync_for_device, memory_leveling_runtime_dma_sync_for_cpu}
 use os.kernel.boot.mmio.{mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
-use os.drivers.pci.pci_bar64.{pci_bar64_decode, pci_bar64_assignment, pci_function_is_qemu_ivshmem}
+use os.drivers.pci.pci_bar64.{pci_bar64_decode, pci_function_is_qemu_ivshmem}
 use os.kernel.interrupts.irq_routing.{irq_route_register}
 use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
 use os.kernel.lifecycle.task_cleanup.{task_register_resource, task_unregister_resource, RES_NOTIFICATION, RES_IRQ_ROUTE, RES_DMA_BUFFER}
@@ -330,14 +330,15 @@ fn _map_qemu_ivshmem_bar64(bus: u8, dev: u8, func: u8, bar_index: u8) -> Syscall
     var info = pci_bar64_decode(raw_low, raw_high, probe_low, probe_high)
     if not info.implemented:
         return SyscallResult(value: -19)
-    val window_base = _direct_boot_ivshmem_window_base(dev)
-    val assignment = pci_bar64_assignment(info, window_base, window_base + 0x01000000u64)
-    if not assignment.ok:
+    if info.size != 0x00800000u64:
         return SyscallResult(value: -28)
-    pci_write_config(bus, dev, func, high_offset, assignment.programmed_high)
-    pci_write_config(bus, dev, func, low_offset, assignment.programmed_low)
+    val window_base = _direct_boot_ivshmem_window_base(dev)
+    val programmed_low = ((window_base & 0xFFFFFFF0u64).to_u32()) | (info.raw_low & 0xFu32)
+    val programmed_high = (window_base >> 32).to_u32()
+    pci_write_config(bus, dev, func, high_offset, programmed_high)
+    pci_write_config(bus, dev, func, low_offset, programmed_low)
     pci_write_config(bus, dev, func, 0x04u8, command_status | 0x2u32)
-    info = pci_bar64_decode(assignment.programmed_low, assignment.programmed_high, probe_low, probe_high)
+    info = pci_bar64_decode(programmed_low, programmed_high, probe_low, probe_high)
     _direct_boot_bar_address(info.base, info.size)
 
 fn map_qemu_host_gpu_ivshmem_bar2() -> SyscallResult:
