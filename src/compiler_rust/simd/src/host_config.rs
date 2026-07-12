@@ -62,8 +62,25 @@ impl From<std::io::Error> for HostCpuConfigError {
 #[derive(Clone)]
 struct CachedConfig {
     path: PathBuf,
-    source: Option<String>,
+    fingerprint: Option<ConfigFingerprint>,
     config: HostCpuConfig,
+}
+
+/// Cheap on-disk staleness marker: (mtime, length). Detected via `fs::metadata`
+/// (a `stat`/`statx` syscall), never `openat` — unlike reading the full file
+/// content, this lets `host_cpu_config()` re-verify freshness on every call
+/// without re-opening `cpu_config.sdn` when nothing has changed.
+type ConfigFingerprint = (std::time::SystemTime, u64);
+
+fn config_fingerprint(path: &Path) -> Result<Option<ConfigFingerprint>, HostCpuConfigError> {
+    match fs::metadata(path) {
+        Ok(meta) => {
+            let modified = meta.modified()?;
+            Ok(Some((modified, meta.len())))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn config_cache() -> &'static Mutex<Option<CachedConfig>> {
@@ -90,19 +107,19 @@ pub fn active_simd_tier() -> SimdTier {
 
 pub fn host_cpu_config() -> Result<HostCpuConfig, HostCpuConfigError> {
     let path = cpu_config_path().ok_or(HostCpuConfigError::MissingPath)?;
-    let source = config_file_source(&path)?;
+    let fingerprint = config_fingerprint(&path)?;
     let mut guard = config_cache().lock().unwrap();
     if let Some(cached) = guard.as_ref() {
-        if cached.path == path && cached.source == source {
+        if cached.path == path && cached.fingerprint == fingerprint {
             return Ok(cached.config.clone());
         }
     }
 
     let config = load_or_initialize_config(&path)?;
-    let source = config_file_source(&path)?;
+    let fingerprint = config_fingerprint(&path)?;
     *guard = Some(CachedConfig {
         path,
-        source,
+        fingerprint,
         config: config.clone(),
     });
     Ok(config)
@@ -149,14 +166,6 @@ fn load_or_initialize_config(path: &Path) -> Result<HostCpuConfig, HostCpuConfig
 
     write_config(path, &detected)?;
     Ok(detected)
-}
-
-fn config_file_source(path: &Path) -> Result<Option<String>, HostCpuConfigError> {
-    match fs::read_to_string(path) {
-        Ok(source) => Ok(Some(source)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err.into()),
-    }
 }
 
 fn detected_config() -> HostCpuConfig {

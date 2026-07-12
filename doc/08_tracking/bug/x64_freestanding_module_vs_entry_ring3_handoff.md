@@ -1,40 +1,9 @@
-# BUG: [RESOLVED 2026-07-12] clang runs in-guest on SimpleOS — abort-134 was a zero-sized user heap from a `.to_u64()` codegen bug
+# BUG: [BOTH premises DISPROVEN] clang aborts 134 during static-libc init in ring-3 — genuine unimplemented frontier, not a regression
 
-**Status:** RESOLVED (2026-07-12). clang_static now runs in ring-3 on SimpleOS to
-`clang version 20.0.0git ...` + clean exit(0). Both prior premises (module-vs-entry,
-seed regression) were disproven; the true cause was a zero-sized user heap.
-**Severity:** was high (blocked in-guest clang)
-**Component:** SimpleOS ring-3 user-heap setup (loader) + a `.to_u64()` codegen bug
-
-## Resolution
-
-The abort-134 was clang's libc calling `abort()` because its FIRST `mmap` in ring-3
-returned ENOMEM. The user heap had zero capacity: in
-`src/os/kernel/loader/x86_64_fs_exec_ring3.spl` the map_heap block computed page size
-via `PAGE.to_u64()` (where `PAGE` is a function-local `val PAGE: i64 = 4096`), and that
-conversion evaluates to **0** under freestanding native-build. So (a) the size passed to
-`rt_user_heap_init` was `16384 * 0 = 0` (heap end == base), and (b) the page-mapping loop
-mapped all 16384 pages to `HEAP_VA + hp*0` = the same VA (only 4 KB really backed).
-
-Fix: use a fresh `val HEAP_PAGE_SZ: u64 = 4096` in both the mapping loop and the size,
-instead of `PAGE.to_u64()`. Serial then shows the heap 64 MiB backed, clang's mmap
-succeeds, clang stats its resource dir and prints `clang version 20.0.0git
-(https://github.com/ormastes/llvm-project.git 92fa402...)` then `[syscall] exit status=0`.
-
-The underlying `.to_u64()`-returns-0 codegen bug is filed separately
-(`freestanding_i64_to_u64_returns_zero.md`) and worked around at this call site.
-
-Regression-verified after the loader change: `ssh_clang_hello_ring3.shs` DEMO PASSES
-(hello + rc=42), `ssh_multi_cmd.shs` MULTI-COMMAND SSH WORKS (both commands resume).
-
-The syscall dispatcher was NOT at fault — it correctly returned ENOMEM for an exhausted
-heap. No missing syscall; the earlier "static-libc/CRT/syscall frontier" conclusion was
-wrong.
-
----
-
-## Investigation history (premises disproven en route)
-
+**Status:** open — NOT a seed regression, NOT module-vs-entry; the abort is clang's own
+static libc calling abort()/SIGABRT during process init in ring-3.
+**Severity:** high (sole remaining blocker for in-guest clang; the hello FS-exec path is green)
+**Component:** SimpleOS ring-3 process runtime — freestanding static-libc / CRT / syscall completeness
 **Found:** 2026-07-11; two successive premises disproven 2026-07-12 (opus main loop)
 
 ## Two disproven premises

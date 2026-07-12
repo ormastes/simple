@@ -9,6 +9,7 @@ T32 GUI access, Simple GUI/TUI, and host WM share one dependency-light command/r
 - `t32-cli`, `simple ui`, and `simple play` adapt overlapping list/snapshot/surface/find/act/history operations to the common grammar.
 - UI live access uses the existing loopback `/api/test/ui/*` service; explicit DB fallback is stale-aware and read-only.
 - Host WM and T32 keep enumeration, capture, refresh, and action execution in their owner adapters.
+- Protocol v1 never exposes renderer state; optional v2 inspection must reuse `simple-draw-ir-v2` and stable component IDs from the canonical Draw IR P5/P6 plan.
 - MDSOC weaving and a generic adapter registry are rejected: downward imports plus ordinary composition are smaller and acyclic.
 
 ## Operational Notes
@@ -25,4 +26,3 @@ T32 GUI access, Simple GUI/TUI, and host WM share one dependency-light command/r
 - [Detail design](../05_design/ui_cli_llm_access.md)
 - [System test plan](../03_plan/sys_test/ui_cli_llm_access.md)
 - [Common UI access source](../../src/lib/common/ui/access.spl)
-

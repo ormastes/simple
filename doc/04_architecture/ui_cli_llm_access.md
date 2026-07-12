@@ -236,6 +236,15 @@ not pull T32 or host-WM implementation modules, T32 does not pull UI renderers,
 and WM does not pull UI/T32 adapters. The UI access command closure may import
 the existing HTTP/client and persisted-store facades, but not a UI renderer.
 
+## Renderer and IR boundary
+
+Protocol v1 access remains semantic and renderer-independent: it exposes
+`UiAccessSnapshot`/WinText identities, never WebIR/DrawIR objects, backend
+handles, or readback state. Any future Protocol v2 render inspection must reuse
+stable component IDs and the existing `simple-draw-ir-v2` owners under the
+canonical [Draw IR P5/P6 plan](../03_plan/ui/rendering/draw_ir_multibackend_plan.md),
+including its web fold-in; this feature must not create a parallel IR.
+
 ## Hot paths, cache, and invalidation
 
 - `list` refreshes once per source, then normalizes and sorts in memory; never

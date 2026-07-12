@@ -90,7 +90,10 @@ then drives both through the CLI grammar:
 
 The GUI golden verifies visible state and layout at a stable viewport. Semantic
 assertions verify identity, state, capability, action, and history. Pixel
-evidence alone is insufficient.
+evidence alone is insufficient. GUI/web/2D evidence pairs the semantic/SGTTI
+snapshot with DrawIR structure when applicable, then checks CPU-oracle/backend
+pixel parity and records selected backend, readback, fallback, retained-cache,
+culling, dirty-area, and draw-call provenance.
 
 ## Accessibility
 

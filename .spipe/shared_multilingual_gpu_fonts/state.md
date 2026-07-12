@@ -282,15 +282,6 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   tests. The replacement contract requires one integrated, section-bounded
   selector/application slice for `latn/cyrl/hani/deva/arab`, with every active
   unsupported lookup retained as incomplete.
-- integrated selector rejection: a second Spark implementation and full frozen
-  fixture draft were deleted before commit after independent review found that
-  it invented sibling subtable ends, rejected legal shared OpenType child
-  offsets, used LangSys encounter order instead of script shaping stages, and
-  allowed renderable material without substitution completion/post-GSUB glyph
-  validation. The corrected contract now requires legal shared-target support,
-  per-reference parent-metadata/cycle rejection, explicit versioned script-stage
-  ordering, deterministic Common/Inherited mark inheritance, checked wide table
-  addressing, and completion-gated face-valid material.
 - OpenCL source ownership (pre-host milestone): compiler emission and Engine2D
   runtime compilation were first unified on
   `common.gpu.font_atlas_composite` for the exact versioned kernel source.
