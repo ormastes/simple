@@ -110,6 +110,7 @@ remain promotion gates rather than fields fabricated on the artifact.
 A font-specific Vulkan SPIR-V contract remains required. Tests inspect source
 syntax and entry markers, but never call that execution evidence.
 
+Engine2D and Engine3D reuse the same common atlas subrect/color material.
 Engine2D maps batch quads to the shared CUDA, native Metal, or OpenCL atlas-composite launch
 when that backend is active, caching by atlas generation and invalidating on
 font replacement; an unsubmitted suffix uses the image/alpha route. CUDA uses

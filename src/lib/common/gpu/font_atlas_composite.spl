@@ -3,6 +3,45 @@
 
 val FONT_ATLAS_COMPOSITE_ENTRY: text = "simple_font_atlas_composite_v1_u32"
 
+fn font_atlas_subrect_pixels(atlas_pixels: [u32], atlas_width: i32, atlas_height: i32,
+                             atlas_x: i32, atlas_y: i32, width: i32, height: i32,
+                             color: u32) -> [u32]:
+    if atlas_width <= 0 or atlas_height <= 0 or width <= 0 or height <= 0:
+        return []
+    if atlas_x < 0 or atlas_y < 0 or atlas_x > atlas_width or atlas_y > atlas_height:
+        return []
+    if width > atlas_width - atlas_x or height > atlas_height - atlas_y:
+        return []
+    val atlas_count = atlas_width.to_i64() * atlas_height.to_i64()
+    val quad_count = width.to_i64() * height.to_i64()
+    if atlas_count <= 0 or atlas_count > 2147483647 or quad_count <= 0 or quad_count > 2147483647:
+        return []
+    if atlas_pixels.len().to_i64() < atlas_count:
+        return []
+    val rgb = color & 0x00FFFFFFu32
+    val color_alpha = (color >> 24) & 0xFFu32
+    var pixels: [u32] = []
+    var row = 0
+    while row < height:
+        var col = 0
+        while col < width:
+            val source = (atlas_y + row).to_i64() * atlas_width.to_i64() + (atlas_x + col).to_i64()
+            val atlas_pixel = atlas_pixels[source]
+            val alpha = (((atlas_pixel >> 24) & 0xFFu32) * color_alpha + 127u32) / 255u32
+            pixels.push(if alpha == 0u32: 0u32 else: (alpha << 24) | rgb)
+            col = col + 1
+        row = row + 1
+    pixels
+
+fn font_destination_origin(origin: i32, offset: i32, extent: i32) -> i32?:
+    if extent <= 0:
+        return nil
+    val start = origin.to_i64() + offset.to_i64()
+    val end = start + extent.to_i64() - 1
+    if start < -2147483648 or start > 2147483647 or end < -2147483648 or end > 2147483647:
+        return nil
+    start as i32
+
 fn font_atlas_composite_opencl_source() -> text:
     "__kernel void simple_font_atlas_composite_v1_u32(\n" +
     "    __global const uint* atlas, __global uint* dst,\n" +
@@ -47,4 +86,4 @@ fn font_atlas_composite_opencl_source() -> text:
 fn font_atlas_composite_metal_source() -> text:
     "#include <metal_stdlib>\nusing namespace metal;\n\nstruct FontAtlasCompositeParams {\n    uint atlas_width;\n    uint atlas_height;\n    uint atlas_count;\n    uint atlas_x;\n    uint atlas_y;\n    uint quad_width;\n    uint quad_height;\n    uint dst_width;\n    uint dst_height;\n    uint dst_count;\n    int dst_x;\n    int dst_y;\n    uint color;\n};\n\nkernel void simple_font_atlas_composite_v1_u32(\n    device const uint* atlas [[buffer(0)]],\n    device uint* dst [[buffer(1)]],\n    constant FontAtlasCompositeParams& p [[buffer(2)]],\n    uint i [[thread_position_in_grid]]) {\n    if (i >= p.quad_width * p.quad_height) { return; }\n    uint sx = p.atlas_x + i % p.quad_width;\n    uint sy = p.atlas_y + i / p.quad_width;\n    if (sx >= p.atlas_width || sy >= p.atlas_height) { return; }\n    uint si = sy * p.atlas_width + sx;\n    if (si >= p.atlas_count) { return; }\n    int dx = int(i % p.quad_width) + p.dst_x;\n    int dy = int(i / p.quad_width) + p.dst_y;\n    if (dx < 0 || dy < 0 || dx >= int(p.dst_width) || dy >= int(p.dst_height)) { return; }\n    uint di = uint(dy) * p.dst_width + uint(dx);\n    if (di >= p.dst_count) { return; }\n    uint mask_a = atlas[si] >> 24u;\n    uint sa = (mask_a * (p.color >> 24u) + 127u) / 255u;\n    if (sa == 0u) { return; }\n    uint d = dst[di];\n    uint da = d >> 24u;\n    uint inv = 255u - sa;\n    uint out_a = sa + (da * inv) / 255u;\n    uint out_r = (((p.color >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * inv) / 255u;\n    uint out_g = (((p.color >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * inv) / 255u;\n    uint out_b = ((p.color & 255u) * sa + (d & 255u) * inv) / 255u;\n    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n}\n"
 
-export FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_composite_opencl_source, font_atlas_composite_metal_source
+export FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_subrect_pixels, font_destination_origin, font_atlas_composite_opencl_source, font_atlas_composite_metal_source

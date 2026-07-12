@@ -24,29 +24,9 @@ use std.gpu.engine3d.resource_pool.{ResourcePool3D, TextureHandle3D, BufferHandl
 use std.gpu.engine3d.texture3d.{TextureDescriptor3D, SamplerDescriptor3D, TextureView3D}
 use std.gpu.engine3d.texture3d.{TEX_DIM_2D, TEX_DIM_3D, TEX_DIM_CUBE, TEX_FMT_RGBA8_UNORM, TEX_FMT_DEPTH32_FLOAT}
 use std.gpu.engine3d.texture3d.{TEX_USAGE_TEXTURE_BINDING, TEX_USAGE_COPY_DST}
-use std.gc_async_mut.text_layout.font_renderer.{FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderQuad, FontRenderer}
+use std.gc_async_mut.text_layout.font_renderer.{FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderer}
+use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
 use std.gpu.engine3d.color3d.{blend3d}
-
-fn _engine3d_font_subrect(batch: FontRenderBatch, quad: FontRenderQuad) -> [u32]:
-    if quad.width <= 0 or quad.height <= 0 or batch.atlas_width <= 0 or batch.atlas_height <= 0:
-        return []
-    var pixels: [u32] = [0u32; quad.width * quad.height]
-    var row = 0
-    while row < quad.height:
-        var col = 0
-        while col < quad.width:
-            val src_x = quad.atlas_x + col
-            val src_y = quad.atlas_y + row
-            if src_x >= 0 and src_x < batch.atlas_width and src_y >= 0 and src_y < batch.atlas_height:
-                val src = src_y * batch.atlas_width + src_x
-                if src.to_i64() < batch.atlas_pixels.len():
-                    val mask_alpha = (batch.atlas_pixels[src] >> 24) & 0xFFu32
-                    val color_alpha = (quad.color >> 24) & 0xFFu32
-                    val alpha = (mask_alpha * color_alpha + 127u32) / 255u32
-                    pixels[row * quad.width + col] = if alpha == 0u32: 0u32 else: (alpha << 24) | (quad.color & 0x00FFFFFFu32)
-            col = col + 1
-        row = row + 1
-    pixels
 
 # ============================================================================
 # Engine3D
@@ -274,22 +254,23 @@ class Engine3D:
         var i = 0
         while i < batch.quads.len():
             val quad = batch.quads[i]
-            val dst_x = x + quad.dst_x
-            val dst_y = y + quad.dst_y
-            if (quad.width > 0 and quad.height > 0 and
-                dst_x < target_w and dst_y < target_h and
-                dst_x + quad.width > 0 and dst_y + quad.height > 0):
-                val pixels = _engine3d_font_subrect(batch, quad)
+            val dst_x = font_destination_origin(x, quad.dst_x, quad.width)
+            val dst_y = font_destination_origin(y, quad.dst_y, quad.height)
+            if (dst_x != nil and dst_y != nil and quad.width > 0 and quad.height > 0 and
+                dst_x.?.to_i64() < target_w.to_i64() and dst_y.?.to_i64() < target_h.to_i64() and
+                dst_x.?.to_i64() + quad.width.to_i64() > 0 and dst_y.?.to_i64() + quad.height.to_i64() > 0):
+                val pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                    quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color)
                 if pixels.len() > 0:
                     var row = 0
                     while row < quad.height:
                         var col = 0
                         while col < quad.width:
-                            val tx = dst_x + col
-                            val ty = dst_y + row
-                            if tx >= 0 and tx < target_w and ty >= 0 and ty < target_h:
+                            val tx = dst_x.?.to_i64() + col.to_i64()
+                            val ty = dst_y.?.to_i64() + row.to_i64()
+                            if tx >= 0 and tx < target_w.to_i64() and ty >= 0 and ty < target_h.to_i64():
                                 val src = pixels[row * quad.width + col]
-                                val target_index = ty * target_w + tx
+                                val target_index = ty * target_w.to_i64() + tx
                                 if src != 0u32 and target_index.to_i64() < target.len():
                                     target[target_index] = blend3d(src, target[target_index])
                                     drawn = true

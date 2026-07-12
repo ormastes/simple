@@ -200,6 +200,11 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   binding is a no-op, pipeline layouts are empty/hard-coded, and fences are not
   connected to graphics submission. No native patch or readback spec was
   accepted; the existing Engine3D dispatch tracker remains the owner.
+- shared 2D/3D material: The pure atlas bounds, alpha-color application, and
+  subrect extraction routine now lives beside the generated GPU sources in
+  `common.gpu.font_atlas_composite`; Engine2D CUDA/Metal/fallback and Engine3D
+  CPU compatibility all call it. No fake 3D GPU lane was added: Engine3D still
+  requires a real device-backed scene target before native font promotion.
 - emitter/docs review: Native-target font kernels now take true atlas/destination
   element counts and guard computed indices; WGSL also guards its parameter,
   atlas, and destination storage lengths. Metal emission now follows the owned

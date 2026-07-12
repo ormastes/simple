@@ -11,7 +11,8 @@ use std.gpu.engine2d.backend_cuda_kernels.{cuda_2d_ptx_source}
 use std.gpu.engine2d.backend_cuda_launch_args.{CUDA_FONT_ARG_BYTES, _i64, _i64_from_u32, cuda_launch_args_read_i32, cuda_launch_args_write_i64, _read_u32_pixels_from_host, _write_clear_launch_args, _write_rect_launch_args, _write_image_launch_args, _write_gradient_launch_args, _write_line_launch_args, _write_circle_launch_args, _write_rounded_rect_launch_args, _write_font_atlas_composite_launch_args, _write_u32_pixels_to_host}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, cuda_memcpy_htod, cuda_memcpy_dtoh, cuda_launch_kernel, CUDA_SUCCESS}
-use std.gpu.engine2d.helpers_text.{font_atlas_subrect_pixels, text_transparent_blit_buffer}
+use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
+use std.gpu.engine2d.helpers_text.{text_transparent_blit_buffer}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
 
 extern fn rt_alloc(size: i64) -> i64
@@ -625,12 +626,16 @@ class CudaBackend:
             )
             if pixels.len() != total:
                 return submitted
+            val dst_x = font_destination_origin(origin_x, quad.dst_x, quad.width)
+            val dst_y = font_destination_origin(origin_y, quad.dst_y, quad.height)
+            if dst_x == nil or dst_y == nil:
+                return submitted
             _write_font_atlas_composite_launch_args(
                 self.font_val_ptr, self.font_args_ptr, self.d_font_atlas, self.d_framebuffer,
                 batch.atlas_width as u32, batch.atlas_height as u32, batch.atlas_pixels.len() as u32,
                 quad.atlas_x as u32, quad.atlas_y as u32, quad.width as u32, quad.height as u32,
                 self.width() as u32, self.height() as u32, dst_count as u32,
-                origin_x + quad.dst_x, origin_y + quad.dst_y, quad.color
+                dst_x.?, dst_y.?, quad.color
             )
             val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
             val rc = self.session.launch_kernel_args("simple_font_atlas_composite_v1_u32", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.font_args_ptr)
@@ -638,7 +643,7 @@ class CudaBackend:
                 return submitted
             if self.session.sync() != CUDA_SUCCESS:
                 return submitted
-            self.mirror.draw_image_blend(origin_x + quad.dst_x, origin_y + quad.dst_y, quad.width, quad.height, pixels)
+            self.mirror.draw_image_blend(dst_x.?, dst_y.?, quad.width, quad.height, pixels)
             submitted = submitted + 1
         submitted
 

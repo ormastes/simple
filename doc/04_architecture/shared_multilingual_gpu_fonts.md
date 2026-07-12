@@ -22,7 +22,7 @@ plugin interface, renderer factory, or new native dependency.
 | `src/lib/common/encoding/font_registry.spl` | Static pinned language/category/candidate catalog; CLDR regeneration and candidate acceptance remain gates. |
 | `src/lib/common/encoding/font_cldr_rank.spl` | Targeted, exact-arithmetic CLDR ranking core with fixture evidence; validating XML input and pinned-source replay remain gates. |
 | `src/lib/common/encoding/sfnt.spl` | Neutral sfnt directory/fvar owner and typed default-`glyf` preflight shared by both production loaders; the old Skia parser modules are compatibility re-exports. |
-| `src/lib/common/gpu/font_atlas_composite.spl` | Exact OpenCL font-atlas kernel source shared by compiler emission and Engine2D runtime compilation/launch. |
+| `src/lib/common/gpu/font_atlas_composite.spl` | Shared atlas subrect/color material plus exact OpenCL and Metal kernel sources used by compiler emission and runtime adapters. |
 | `src/lib/nogc_sync_mut/text_layout/font_types.spl` | Canonical shared values; gains `FontGlyphRun`, `FontRenderQuad`, and `FontRenderBatch`. `FontGlyphRun` carries a revocable face-generation token, never a native pointer. |
 | `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` | Canonical renderer, glyph cache, CPU payload; gains `prepare_text`, the bound glyph-run adapter, and fail-closed sfnt preflight before native loading. |
 | `src/lib/skia/feature/shaper/shaper.spl` and `src/lib/skia/feature/text/bidi.spl` | Existing incomplete Pure Simple shaping/BiDi owners; face-bound glyph IDs plus source/cluster/language/current-placement metadata are present. Complex runs fail closed while per-fallback `OtFont`, GSUB/GPOS, canonical language handling, and full BiDi remain gates. |
