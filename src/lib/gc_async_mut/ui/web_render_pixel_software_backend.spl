@@ -3,6 +3,7 @@ use std.common.ui.web_render_api.{
     WEB_RENDER_TARGET_PURE_SIMPLE,
     WebRenderArtifact,
     WebRenderRequest,
+    web_render_engine2d_compatibility_artifact,
     web_render_full_html,
     web_render_pixel_artifact,
     web_render_url_request
@@ -83,6 +84,16 @@ fn _native_safe_wm_pixels(req: WebRenderRequest, full_html: text) -> [u32]:
 fn _software_pixels(req: WebRenderRequest, full_html: text) -> [u32]:
     simple_web_layout_render_html_software_pixels(full_html, req.viewport_w, req.viewport_h)
 
+# _native_safe_wm_pixels is a degraded tag-stripping/bitmap-glyph renderer
+# meant only as an explicit crash-recovery fallback when the full HTML
+# layout engine (_software_pixels) cannot be used. Its artifact is stamped
+# with engine2d_status=compatibility_renderer and engine2d_backend
+# ="native-safe-fallback" so evidence capture / pixel-diff tooling can
+# detect and reject a fallback frame that leaked into a path expecting the
+# real renderer, instead of silently treating tag-strip output as authentic.
+fn _native_safe_fallback_provenance(base: WebRenderArtifact) -> WebRenderArtifact:
+    web_render_engine2d_compatibility_artifact(base, "native-safe-fallback", "tag-strip bitmap-glyph fallback renderer (crash-recovery path, not the full HTML layout engine)")
+
 class WebRenderPixelArtifactCache:
     width: i32
     height: i32
@@ -118,6 +129,11 @@ impl WebRenderPixelArtifactCache:
     me request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
         self.html_request_to_pixel_artifact(req, web_render_full_html(req))
 
+    # Explicit crash-recovery fallback only — see _native_safe_fallback_provenance.
+    # Production content-frame rendering should use request_to_pixel_artifact
+    # (the full HTML layout engine) instead; this tag-strip path must be
+    # invoked explicitly by a caller that has actually hit the failure mode
+    # it exists for, not wired in as a default.
     me request_to_native_safe_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
         val full_html = web_render_full_html(req)
         if req.viewport_w == self.width and req.viewport_h == self.height and self.last_html == full_html and self.cached_pixels.len() == self.width * self.height:
@@ -128,7 +144,7 @@ impl WebRenderPixelArtifactCache:
             self.last_html = full_html
             self.cached_pixels = _native_safe_wm_pixels(req, full_html)
             self.store_count = self.store_count + 1
-        web_render_pixel_artifact(req.with_pixel_output(), self.cached_pixels)
+        _native_safe_fallback_provenance(web_render_pixel_artifact(req.with_pixel_output(), self.cached_pixels))
 
     fn hits() -> i32:
         self.hit_count
@@ -152,7 +168,7 @@ fn web_render_request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtif
     web_render_pixel_artifact(req.with_pixel_output(), web_render_request_to_pixels(req))
 
 fn web_render_request_to_native_safe_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
-    web_render_pixel_artifact(req.with_pixel_output(), _native_safe_wm_pixels(req, web_render_full_html(req)))
+    _native_safe_fallback_provenance(web_render_pixel_artifact(req.with_pixel_output(), _native_safe_wm_pixels(req, web_render_full_html(req))))
 
 fn web_render_html_request_to_pixel_artifact(req: WebRenderRequest, full_html: text) -> WebRenderArtifact:
     web_render_pixel_artifact(req.with_pixel_output(), _software_pixels(req, full_html))
