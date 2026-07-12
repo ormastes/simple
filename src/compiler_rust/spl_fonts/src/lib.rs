@@ -384,6 +384,35 @@ pub extern "C" fn rt_fonts_rasterize_glyph(codepoint: i64, font_size_px: i64) ->
     Box::into_raw(Box::new(glyph)) as i64
 }
 
+/// Rasterize only through the loaded native FreeType face. Selected bundled
+/// fonts use this entry point so a native miss remains available to the Pure
+/// Simple outline fallback instead of being hidden by fontdue.
+#[no_mangle]
+pub extern "C" fn rt_fonts_rasterize_glyph_native_only(codepoint: i64, font_size_px: i64) -> i64 {
+    if font_size_px <= 0 {
+        return 0;
+    }
+    let ch = match char::from_u32(codepoint as u32) {
+        Some(c) => c,
+        None => return 0,
+    };
+    let font_guard = match FONT_SLOT.lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    let font = match font_guard.as_ref() {
+        Some(f) => f,
+        None => return 0,
+    };
+    if font.lookup_glyph_index(ch) == 0 {
+        return 0;
+    }
+    match rasterize_with_freetype(ch, font_size_px) {
+        Some(glyph) => Box::into_raw(Box::new(glyph)) as i64,
+        None => 0,
+    }
+}
+
 fn glyph_from_handle(handle: i64) -> Option<&'static GlyphSlot> {
     if handle == 0 {
         return None;
@@ -893,6 +922,19 @@ mod tests {
         assert!(handle > 0);
         assert_eq!(rt_fonts_glyph_metric(handle, 4), -1);
         assert_eq!(rt_fonts_glyph_free(handle), 1);
+    }
+
+    #[test]
+    fn native_only_miss_does_not_hide_legacy_raster_success() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        init_owned_test_font();
+        let native_face = FREETYPE_SLOT.lock().unwrap().take();
+        let native_miss = rt_fonts_rasterize_glyph_native_only('A' as i64, 16);
+        let legacy = rt_fonts_rasterize_glyph('A' as i64, 16);
+        *FREETYPE_SLOT.lock().unwrap() = native_face;
+        assert_eq!(native_miss, 0);
+        assert!(legacy > 0);
+        assert_eq!(rt_fonts_glyph_free(legacy), 1);
     }
 
     #[test]

@@ -1,0 +1,61 @@
+use std.spec
+use std.common.encoding.sfnt.{OtFont, OtTable}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYF_MOVE, parse_sfnt_glyf_outline, parse_sfnt_glyf_simple_at, rasterize_sfnt_glyf}
+
+fn _glyf_test_font() -> OtFont:
+    var blob: [u8] = []
+    var index: i64 = 0
+    while index < 68:
+        blob.push(0)
+        index = index + 1
+    # head: unitsPerEm=1000, long loca.
+    blob[18] = 3
+    blob[19] = 232
+    blob[50] = 0
+    blob[51] = 1
+    # maxp: one glyph.
+    blob[58] = 0
+    blob[59] = 1
+    # loca: [0, 19].
+    blob[64] = 0
+    blob[65] = 0
+    blob[66] = 0
+    blob[67] = 19
+    # One on-curve point at (2, 3).
+    val glyph: [u8] = [0, 1, 0, 2, 0, 3, 0, 2, 0, 3, 0, 0, 0, 0, 1, 0, 2, 0, 3]
+    for byte in glyph: blob.push(byte)
+    OtFont(blob: blob, tables: [
+        OtTable(tag: 1751474532, offset: 0, length: 54),
+        OtTable(tag: 1835104368, offset: 54, length: 6),
+        OtTable(tag: 1819239265, offset: 60, length: 8),
+        OtTable(tag: 1735162214, offset: 68, length: 19)
+    ])
+
+fn _glyf_raster_test_font() -> OtFont:
+    var font = _glyf_test_font()
+    val hhea = font.blob.len()
+    var index: i64 = 0
+    while index < 36:
+        font.blob.push(0)
+        index = index + 1
+    font.blob[hhea + 35] = 1
+    val hmtx = font.blob.len()
+    for byte in [3, 232, 0, 50]: font.blob.push(byte)
+    font.tables.push(OtTable(tag: 1751672161, offset: hhea as u32, length: 36))
+    font.tables.push(OtTable(tag: 1752003704, offset: hmtx as u32, length: 4))
+    font
+
+describe "neutral sfnt glyf owner":
+    it "parses commands without a Skia dependency":
+        val outline = parse_sfnt_glyf_outline(_glyf_test_font(), 0)
+        expect(outline != None).to_equal(true)
+        expect(outline.unwrap().commands[0].verb).to_equal(SFNT_GLYF_MOVE)
+        expect(parse_sfnt_glyf_simple_at(_glyf_test_font(), 68) != None).to_equal(true)
+
+    it "fails closed when raster metrics are absent":
+        expect(rasterize_sfnt_glyf(_glyf_test_font(), 0, 16) == None).to_equal(true)
+
+    it "rasterizes directly without a Skia dependency":
+        val bitmap = rasterize_sfnt_glyf(_glyf_raster_test_font(), 0, 16)
+        expect(bitmap != None).to_equal(true)
+        expect(bitmap.unwrap().pixels.len()).to_equal(bitmap.unwrap().width * bitmap.unwrap().height)

@@ -34,7 +34,9 @@
 # the built-in vector/bitmap renderers for unsupported glyphs.
 
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
-use std.common.encoding.sfnt.{font_runtime_ttf_default_supported}
+use std.common.encoding.sfnt.{font_runtime_ttf_default_supported, parse_offset_table}
+use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id}
+use std.common.encoding.sfnt_glyf.{rasterize_sfnt_glyf}
 use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, validate_selected_font_asset}
 #
 # Usage:
@@ -145,6 +147,7 @@ class FontRasterizer:
     dylib_path: text
     font_cache_identity: text
     loaded_generation: i64
+    selected_blob: [u8]
 
 impl FontRasterizer:
     # Load libspl_fonts from `dylib_path` and initialize it with the TTF at
@@ -171,7 +174,10 @@ impl FontRasterizer:
             spl_dlsym(h, "rt_fonts_init_verified_bytes")
         else:
             spl_dlsym(h, "rt_fonts_init")
-        val raster_fp = spl_dlsym(h, "rt_fonts_rasterize_glyph")
+        val raster_fp = if selected != nil:
+            spl_dlsym(h, "rt_fonts_rasterize_glyph_native_only")
+        else:
+            spl_dlsym(h, "rt_fonts_rasterize_glyph")
         val subpixel_raster_fp = spl_dlsym(h, "rt_fonts_rasterize_glyph_subpixel")
         val metric_fp = spl_dlsym(h, "rt_fonts_glyph_metric")
         val pixel_fp = spl_dlsym(h, "rt_fonts_glyph_pixel")
@@ -231,6 +237,7 @@ impl FontRasterizer:
             dylib_path: dylib_path,
             font_cache_identity: font_cache_identity,
             loaded_generation: loaded_generation,
+            selected_blob: if selected != nil: blob else: [],
         )
 
     # Internal: read a single metric field for the active glyph handle.
@@ -244,6 +251,27 @@ impl FontRasterizer:
         var args: [i64] = []
         args.push(handle)
         spl_wffi_call_i64(self.glyph_free_fp, args, 1)
+
+    fn _rasterize_selected_outline(codepoint: i64, size_px: i64) -> GlyphBitmap?:
+        if self.selected_blob.len() == 0 or codepoint < 0 or codepoint > 1114111 or size_px <= 0:
+            return nil
+        if val font = parse_offset_table(self.selected_blob):
+            val glyph_id = sfnt_cmap_glyph_id(font, codepoint as u32)
+            if glyph_id == 0:
+                return nil
+            if val bitmap = rasterize_sfnt_glyf(font, glyph_id, size_px):
+                if not self.is_current():
+                    return nil
+                return GlyphBitmap(
+                    width: bitmap.width,
+                    height: bitmap.height,
+                    advance: bitmap.advance,
+                    bearing_x: bitmap.bearing_x,
+                    bearing_y: bitmap.bearing_y,
+                    handle: 0,
+                    pixels: bitmap.pixels,
+                )
+        nil
 
     # Rasterize the given Unicode codepoint at the given pixel size.
     # Returns a GlyphBitmap with metrics and an OWNED pixel snapshot, or nil
@@ -262,8 +290,12 @@ impl FontRasterizer:
         args.push(codepoint)
         args.push(size_px)
         val handle = spl_wffi_call_i64(self.raster_fp, args, 2)
-        if handle <= 0:
+        if handle < 0:
             return nil
+        if handle == 0:
+            if not self.is_current():
+                return nil
+            return self._rasterize_selected_outline(codepoint, size_px)
         val w = self._metric(handle, 0)
         val h = self._metric(handle, 1)
         val adv = self._metric(handle, 2)
@@ -438,4 +470,5 @@ impl FontRasterizer:
         self.has_glyph_fp = 0
         self.generation_fp = 0
         self.loaded_generation = 0
+        self.selected_blob = []
         rc

@@ -540,9 +540,15 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   roots/124 direct components, and requires a nonempty Pure Simple outline for
   every mapped compound root. Native rasterizers stay the production owner;
   execution and the 0/0/26/74 matrix remain unchanged.
-- selected outline fallback capability: Skia now provides bounded Pure Simple
-  cmap/glyf rasterization with exact integer metrics, but production routing is
-  deferred. The neutral encoding owner cannot depend upward on Skia, and the
-  typed native wrapper keeps its prior native `handle <= 0` fail-closed
-  behavior rather than retaining duplicate font bytes. A neutral lower owner,
-  behavioral native-miss evidence, and matrix promotion remain outstanding.
+- selected outline fallback: the typed native wrapper retains already
+  validated selected bytes and routes only a current selected face's native
+  zero-handle miss through neutral common cmap/glyf rasterization. Negative
+  errors, native successes, unmanaged/CFF paths, missing mappings, stale
+  wrappers, and malformed native handles do not enter the fallback; close
+  clears the retained bytes and rasterization performs no file I/O. Source
+  contracts cover routing/ownership, but no fake native-miss injection or
+  matrix promotion is claimed.
+- compositional miss evidence: selected faces resolve the FreeType-only ABI,
+  whose focused test forces a zero native result while the unchanged legacy
+  ABI succeeds. Independent common sfnt raster assertions cover the second
+  half; unmanaged faces keep the legacy ABI. No matrix promotion.

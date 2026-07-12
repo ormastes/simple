@@ -86,11 +86,12 @@ A complete raw audit found 7,594 compound glyphs (16,194 components) in 14
 candidate faces; the exact witness corpus reaches 76 roots/124 direct
 components. The bounded glyph-ID Pure Simple parser now reconstructs and
 rasterizes those roots with bounded dimensions and exact integer metrics.
-Production selected-font loading still remains owned by the native rasterizers:
-the neutral encoding layer cannot depend upward on Skia, and the current typed
-native wrapper does not retain a second blob for per-glyph fallback. Routing
-through this Pure Simple capability is deferred until a neutral lower owner can
-hold the validated bytes. No coverage cell is promoted.
+The typed native wrapper retains the already validated selected bytes and uses
+the neutral common cmap/glyf rasterizer only for a current selected face after
+the native call returns the zero no-glyph handle. Negative native errors,
+unmanaged/CFF faces, absent mappings, stale wrappers, and malformed nonzero
+handles fail closed. Native success remains unchanged, no per-glyph file I/O
+occurs, and close releases the retained bytes. No coverage cell is promoted.
 
 The manifest scenario now prepares exact `CORPUS.sdn` codepoint and raster
 witnesses for all 16 candidates, including Bengali rank 11 and Noto Emoji
@@ -291,3 +292,9 @@ independently prove GPU execution.
 See the [architecture](../../04_architecture/shared_multilingual_gpu_fonts.md),
 [design](../../05_design/shared_multilingual_gpu_fonts.md), and
 [requirements](../../02_requirements/feature/shared_multilingual_gpu_fonts.md).
+
+Selected bundled faces resolve the native-only raster ABI. A zero native
+handle composes with the retained-byte common cmap/glyf rasterizer; unmanaged
+faces retain the legacy native-plus-fontdue ABI. Focused native tests force a
+real native miss while proving the legacy raster remains successful, and the
+common raster tests independently prove successful outline output.
