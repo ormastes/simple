@@ -7,9 +7,17 @@
 extern fn rt_port_inl(port: u16) -> u32
 extern fn rt_port_outl(port: u16, value: u32)
 
+use os.drivers.pci.pci_provider.{PciConfigTarget, pci_ecam_addr}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
+
 # PCI configuration ports
 val PCI_CONFIG_ADDR: u16 = 0xCF8
 val PCI_CONFIG_DATA: u16 = 0xCFC
+
+@cfg(arm64)
+val PCI_ECAM_BASE: u64 = 0x4010000000
+@cfg(riscv64)
+val PCI_ECAM_BASE: u64 = 0x30000000
 
 # ============================================================================
 # PCI Device Identifier
@@ -55,17 +63,35 @@ fn pci_config_addr(bus: u8, device: u8, func: u8, offset: u8) -> u32:
     val o = offset.to_u32()
     (1u32 << 31) | (b << 16) | (d << 11) | (f << 8) | (o & 0xFCu32)
 
+@cfg(x86_64)
 fn pci_read_config(bus: u8, device: u8, func: u8, offset: u8) -> u32:
     """Read 32-bit value from PCI config space."""
     val addr = pci_config_addr(bus, device, func, offset)
     rt_port_outl(PCI_CONFIG_ADDR, addr)
     rt_port_inl(PCI_CONFIG_DATA)
 
+@cfg(arm64)
+fn pci_read_config(bus: u8, device: u8, func: u8, offset: u8) -> u32:
+    mmio_read32(pci_ecam_addr(PCI_ECAM_BASE, PciConfigTarget(bus: bus, device: device, func: func, offset: offset.to_u16())))
+
+@cfg(riscv64)
+fn pci_read_config(bus: u8, device: u8, func: u8, offset: u8) -> u32:
+    mmio_read32(pci_ecam_addr(PCI_ECAM_BASE, PciConfigTarget(bus: bus, device: device, func: func, offset: offset.to_u16())))
+
+@cfg(x86_64)
 fn pci_write_config(bus: u8, device: u8, func: u8, offset: u8, value: u32):
     """Write 32-bit value to PCI config space."""
     val addr = pci_config_addr(bus, device, func, offset)
     rt_port_outl(PCI_CONFIG_ADDR, addr)
     rt_port_outl(PCI_CONFIG_DATA, value)
+
+@cfg(arm64)
+fn pci_write_config(bus: u8, device: u8, func: u8, offset: u8, value: u32):
+    mmio_write32(pci_ecam_addr(PCI_ECAM_BASE, PciConfigTarget(bus: bus, device: device, func: func, offset: offset.to_u16())), value)
+
+@cfg(riscv64)
+fn pci_write_config(bus: u8, device: u8, func: u8, offset: u8, value: u32):
+    mmio_write32(pci_ecam_addr(PCI_ECAM_BASE, PciConfigTarget(bus: bus, device: device, func: func, offset: offset.to_u16())), value)
 
 fn pci_read_vendor(bus: u8, device: u8, func: u8) -> u16:
     val raw = pci_read_config(bus, device, func, 0x00) & 0xFFFF
