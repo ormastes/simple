@@ -615,7 +615,21 @@ void *malloc(size_t sz)
 {
     void *caller = __builtin_return_address(0);
     sz = simpleos_heap_align(sz);
-    if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
+    /* Watermark warning: emit ONCE when the bump offset first crosses the
+     * 144MB mark, not on every subsequent allocation. The per-alloc form
+     * flooded the serial line with ~11800 lines during a full first-frame
+     * render (which legitimately allocates past 144MB in the 192MB heap),
+     * which the evidence wrapper flags as guest-serial-fault-storm and which
+     * also starves the guest via per-alloc serial I/O. Large (>=1MB)
+     * allocations are still logged individually. */
+    static int _heap_warned = 0;
+    if (_heap_off >= BAREMETAL_HEAP_WARN_SIZE && !_heap_warned) {
+        _heap_warned = 1;
+        serial_puts("[heap] warn: crossed watermark off=");
+        serial_put_hex((uint64_t)_heap_off);
+        serial_puts("\r\n");
+    }
+    if (sz >= 0x100000) {
         serial_puts("[heap] alloc sz=");
         serial_put_hex((uint64_t)sz);
         serial_puts(" off_before=");
@@ -637,7 +651,7 @@ void *malloc(size_t sz)
     }
     void *p = &_heap[_heap_off];
     _heap_off += sz;
-    if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
+    if (sz >= 0x100000) {
         serial_puts("[heap] alloc off_after=");
         serial_put_hex((uint64_t)_heap_off);
         serial_puts("\r\n");
