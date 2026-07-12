@@ -1,51 +1,59 @@
-# BUG: [PREMISE DISPROVEN → relocated] clang ring-3 abort 134 is a seed codegen regression (Jul 11 ~12:27 seed), not module-vs-entry
+# BUG: [BOTH premises DISPROVEN] clang aborts 134 during static-libc init in ring-3 — genuine unimplemented frontier, not a regression
 
-**Status:** open — root cause relocated 2026-07-12; next step = seed bisect
-**Severity:** high (blocks in-guest clang; any freestanding build with the post-12:27 seed aborts)
-**Component:** Rust seed native-build codegen (regression window: seed rebuilt 2026-07-11 12:27)
-**Found:** 2026-07-11; premise disproven by single-variable bisection 2026-07-12
+**Status:** open — NOT a seed regression, NOT module-vs-entry; the abort is clang's own
+static libc calling abort()/SIGABRT during process init in ring-3.
+**Severity:** high (sole remaining blocker for in-guest clang; the hello FS-exec path is green)
+**Component:** SimpleOS ring-3 process runtime — freestanding static-libc / CRT / syscall completeness
+**Found:** 2026-07-11; two successive premises disproven 2026-07-12 (opus main loop)
 
-## Original (false) premise
+## Two disproven premises
 
-The streamed clang_static pipeline was believed to abort 134 when run from the
-loader MODULE but exit 0 from the entry-closure file. Exhaustive single-variable
-elimination disproved this.
+1. **"module-vs-entry compilation defect."** DISPROVEN: the all-inline entry-closure smoke,
+   rebuilt from current source, aborts 134 identically to the loader-module path; frame bytes
+   dumped from both paths in the same run are byte-identical and correct.
+2. **"seed codegen regression (Jul 11 12:27 seed)."** DISPROVEN: a release seed rebuilt CLEAN
+   from origin (commit f61639f0c12, built 2026-07-12 03:18) still produces clang exit 134,
+   while the SAME clean seed builds the hello FS-exec demo GREEN (ssh_clang_hello_ring3.shs:
+   "hello from clang on simpleos" / "[user] exit rc=42" / DEMO PASSES). So the seed is
+   exonerated for clang.
 
-## What the bisection actually established (2026-07-12)
+## The invalid comparison that produced the "seed regression" theory
 
-Eliminated one variable per run (full table: BISECT_NOTES.md in the lane
-worktree, run logs step0/buildA..J in the session scratchpad):
+The bisection's "green binary exits 0, red aborts 134, only the seed changed" compared TWO
+DIFFERENT PAYLOADS: the green anchor runs the **hello FSEXEC.ELF smoke** (small static ELF →
+rc=42), the red run streams **clang_static** (124,602,568 bytes). clang and hello were never
+the same binary, so "only the seed changed between them" was never true. There is no evidence
+clang ever ran green — it is unimplemented frontier, not a regression.
 
-- RuntimeString header fix (u64 len): still 134
-- Frame bytes: entry-built vs module-built frames dumped in the SAME run are
-  byte-identical and correct: still 134
-- Green's exact 13-arg cc1 argv: 134 · 4 GB RAM: 134 · kernel_end 0x18000000:
-  134 · linker.ld variants: 134
-- DECISIVE: the "proven green" all-inline entry-closure smoke, rebuilt from
-  current source, ALSO aborts 134 — identical to the module path.
-- The pre-existing green BINARY (built Jul 11 08:53) still exits 0 today
-  against the same image/QEMU.
-- Zero repo commits between the green build (08:53) and the first red build
-  (13:26); the only changed input is the Rust seed, rebuilt 12:27 (that day's
-  seed inline-len STR1-vs-byte-tag change is the prime suspect).
+## Abort characterization (stable across every configuration)
 
-## Abort characterization
+clang streams fully (125 MB, PT_LOADs mapped, 64 MiB user heap mapped), enters CPL3 with a
+correct SysV frame (argc readback=2), performs mmap + getpid, then aborts during libc init —
+the second getpid is raise()'s kill(getpid, SIGABRT); exit status = 134 (128 + SIGABRT 6).
+Insensitive to: frame bytes, argv (green's exact 13-arg cc1 set), RAM size (4 GB), pmm bound
+(0x18000000), linker script. The hello smoke on the identical kernel/AS path exits cleanly, so
+the ring-3 machinery is sound — the failure is specific to clang's static-libc init sequence.
 
-clang reaches CPL3, performs mmap+getpid, then aborts during libc init
-(second getpid is raise()'s kill(getpid, SIGABRT); exit 0x86) — insensitive
-to frame/argv/layout/memory size.
+## Next step (characterize, don't bisect)
 
-## Next step (single-variable proof, then fix)
+Run clang with FULL syscall serial logging (SIMPLE_OS_LOG_MODE on, not off) and dump every
+syscall number + args clang's libc issues before the SIGABRT. The abort is almost certainly
+clang's libc asserting on an unsupported/incorrect syscall return (candidates: brk/mmap flags,
+arch_prctl/TLS setup, ioctl(TCGETS) on stderr, rt_sigprocmask, set_tid_address, futex). Fix =
+implement/repair the offending syscall(s) in the bare user-exec dispatcher
+(baremetal_stubs.c). This is CRT/syscall-completeness work, not a compiler or seed fix.
 
-Rebuild the seed at the pre-12:27 Rust commit; rebuild the same kernel source;
-if it exits 0, bisect the seed change. Note: foreign-worktree seeds from
-08:28/10:31 produce kernel-faulting builds — a clean seed rebuild at the
-pinned commit is required for the proof.
+## Related (surfaced during investigation, still valid)
 
-## Related (surfaced during bisection)
+- `x64_freestanding_layout_sensitive_dup_displaced_stores.md` — real dumped bytes showed
+  duplicated slot0/1 stores + all later stores displaced +16 in one build, vanishing when
+  unrelated code was added to the entry file (separate latent codegen fragility).
+- `simpleos_pmm_bound_breaks_128mb_base_kernels.md` — RESOLVED (bound raised to 0x18000000).
 
-- `x64_freestanding_layout_sensitive_dup_displaced_stores.md` — real dumped
-  bytes showed duplicated slot0/1 stores + all later stores displaced +16 in
-  one build, vanishing when unrelated code was added to the entry file.
-- `simpleos_pmm_bound_breaks_128mb_base_kernels.md` — committed
-  kernel_end=0x14000000 makes the green baseline unbuildable from origin/main.
+## Note on the stale seed (fixed as a side effect)
+
+The gates' release seed (src/compiler_rust/target/release/simple) was stale at 2026-07-11
+12:27, built from a since-diverged lineage. It was rebuilt clean from origin f61639f0c12 on
+2026-07-12; this fixed the unrelated process_queue.spl "function too large" phantom (see
+memory) but did NOT change the clang abort. Always verify seed provenance before trusting a
+kernel-gate result.
