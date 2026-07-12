@@ -645,6 +645,7 @@ int64_t  rt_image_get_pixel(int64_t handle, int64_t x, int64_t y);
 /* ===== Font Rendering (stb_truetype backend) ===== */
 
 int64_t  rt_font_load(const char* path);
+int64_t  rt_font_load_bytes(int64_t data_ptr, int64_t size);
 void     rt_font_free(int64_t handle);
 int64_t  rt_font_glyph_bitmap(int64_t font_handle, int64_t codepoint, double size);
 int64_t  rt_font_glyph_index(int64_t font_handle, int64_t codepoint);

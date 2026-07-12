@@ -496,8 +496,8 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
 - skill freshness: the guide now names `$sp_dev` as process owner for bundled
   fonts, shaping, glyph material, and GPU text; no source, test, or manual was
   regenerated for this documentation-only slice.
-- loader selected-byte handoff: primary `spl_fonts` validates exact selected
-  paths and calls `rt_fonts_init_verified_bytes` with the same owned blob plus
-  pinned digest, avoiding a selected-path reopen race. Aliases retain the
-  unmanaged legacy ABI; `font_sffi` still has preflight/reopen TOCTOU. No
-  matrix promotion.
+- loader selected-byte handoff: both native roots load exact selected bundled
+  paths from owned verified/prevalidated bytes. Aliases and unmanaged fonts
+  retain legacy path loading and are outside the race-free claim. The Pure
+  Simple SHA `[u8]` to `[i64]` conversion amplifies memory for candidates up to
+  25 MiB and must be replaced or measured before promotion. No matrix promotion.

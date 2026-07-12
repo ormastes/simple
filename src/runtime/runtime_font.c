@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <limits.h>
+#include <string.h>
 
 /* ================================================================
  * Wrapper structs
@@ -28,41 +30,69 @@ typedef struct {
     int w, h;
 } BitmapData;
 
+#define RT_FONT_MAX_BYTES (256LL * 1024LL * 1024LL)
+
 /* ================================================================
  * Font load / free
  * ================================================================ */
 
-int64_t rt_font_load(const char* path) {
-    if (!path) return 0;
-
-    FILE* f = fopen(path, "rb");
-    if (!f) return 0;
-
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (size <= 0) { fclose(f); return 0; }
-
+/* Trusted exact-selected font bytes only. Callers must complete manifest hash
+ * and structural prevalidation before crossing this ownership boundary. */
+int64_t rt_font_load_bytes(int64_t data_ptr, int64_t size) {
+    if (!data_ptr || size < 12 || size > RT_FONT_MAX_BYTES || size > INT_MAX ||
+        (uint64_t)size > SIZE_MAX) return 0;
+    const unsigned char* source = (const unsigned char*)(uintptr_t)data_ptr;
     unsigned char* file_data = (unsigned char*)malloc((size_t)size);
-    if (!file_data) { fclose(f); return 0; }
+    if (!file_data) return 0;
+    memcpy(file_data, source, (size_t)size);
 
-    size_t read = fread(file_data, 1, (size_t)size, f);
-    fclose(f);
-    if ((long)read != size) { free(file_data); return 0; }
-
+    /* A TTC index-0 lookup reads the first offset through byte 15. */
+    if (size < 16 && file_data[0] == 't' && file_data[1] == 't' &&
+        file_data[2] == 'c' && file_data[3] == 'f') {
+        free(file_data);
+        return 0;
+    }
+    int offset = stbtt_GetFontOffsetForIndex(file_data, 0);
+    if (offset < 0 || (int64_t)offset > size - 12) {
+        free(file_data);
+        return 0;
+    }
     FontData* font = (FontData*)malloc(sizeof(FontData));
     if (!font) { free(file_data); return 0; }
-
     font->file_data = file_data;
 
-    if (!stbtt_InitFont(&font->info, file_data,
-                        stbtt_GetFontOffsetForIndex(file_data, 0))) {
+    if (!stbtt_InitFont(&font->info, file_data, offset)) {
         free(file_data);
         free(font);
         return 0;
     }
 
+    return (int64_t)(uintptr_t)font;
+}
+
+int64_t rt_font_load(const char* path) {
+    if (!path) return 0;
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    long size = ftell(f);
+    if (size < 12 || size > RT_FONT_MAX_BYTES || size > INT_MAX || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return 0;
+    }
+    unsigned char* bytes = (unsigned char*)malloc((size_t)size);
+    if (!bytes) { fclose(f); return 0; }
+    size_t read = fread(bytes, 1, (size_t)size, f);
+    fclose(f);
+    if (read != (size_t)size) { free(bytes); return 0; }
+    FontData* font = (FontData*)malloc(sizeof(FontData));
+    if (!font) { free(bytes); return 0; }
+    font->file_data = bytes;
+    if (!stbtt_InitFont(&font->info, bytes, stbtt_GetFontOffsetForIndex(bytes, 0))) {
+        free(bytes);
+        free(font);
+        return 0;
+    }
     return (int64_t)(uintptr_t)font;
 }
 
