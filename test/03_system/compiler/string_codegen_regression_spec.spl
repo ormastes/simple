@@ -13,15 +13,24 @@ natively before this session's fixes landed:
   never matched, and any `and`-fused condition built on the comparison never
   took its true arm.
 - #149 (58b0f33701f): `.push()` on an untyped `[text]` array hit a fatal
-  "unresolved method call" native-build error, and `[""; N]` fill-literals
-  produced invalid LLVM IR from a return-type mismatch (`rt_array_repeat`
-  declared `i64` against an Array-typed destination).
+  "unresolved method call" native-build error (a compile-time failure, so its
+  teeth are in the "compiles the fixture" step, not a stdout mismatch), and
+  `[""; N]` fill-literals produced invalid LLVM IR from a return-type
+  mismatch (`rt_array_repeat` declared `i64` against an Array-typed
+  destination).
 
 All of the above are native-codegen-only miscompiles: the interpreter always
 executed them correctly, so this spec has teeth only when it actually drives
 `native-build` + runs the resulting binary (which it does directly via
 `rt_process_run`, independent of whichever mode the spec runner itself uses
 to execute this file's `it` bodies).
+
+The fixture double-checks itself: every fact that CAN be verified from
+inside the running process (all of the above except the print/println
+routing bug, which is only observable in the literal bytes written to
+stdout) is ALSO asserted internally via a hard `rt_exit(N)` on mismatch, so a
+nonzero exit code independently confirms which class regressed even without
+the stdout comparison below.
 
 ## Examples
 
@@ -48,6 +57,7 @@ val EXPECTED_STDOUT =
     "ab\n" +
     "helloworld\n" +
     "mixed\n" +
+    "CATLEN:6\n" +
     "EQ_AND_LEN:true\n" +
     "NEG:false\n" +
     "FILLED:xyz\n" +
@@ -78,13 +88,22 @@ describe "string/text native-codegen regression guard":
     it "produced binary exists after compile":
         expect(rt_file_exists(OUTPUT_BIN)).to_equal(true)
 
-    it "native binary exits 0 (no crash/segfault on any concat/eq/push path)":
+    it "native binary exits 0 -- every internal rt_exit(N) self-check passed (rc encodes which check failed: 1=concat.len, 2=text==+fused-bool, 3=text== negative control, 4=fill-literal, 5=push, 6=interpolation)":
         val result = run_shell(OUTPUT_BIN)
         if result.2 != 0:
             print "UNEXPECTED EXIT CODE: " + result.2.to_text()
             print "stdout: " + result.0
             print "stderr: " + result.1
         expect(result.2).to_equal(0)
+
+    it "concat `.len()` reads the tagged string's real length, not the RtCoreString header byte":
+        # Pre-fix, rt_strlen read the tagged pointer directly and returned 3
+        # (stopped at the header's reserved-field NUL) instead of 6.
+        val result = run_shell(OUTPUT_BIN)
+        val stdout = result.0
+        if not stdout.contains("CATLEN:6"):
+            print "concat .len() wrong; stdout: " + stdout
+        expect(stdout.contains("CATLEN:6")).to_equal(true)
 
     it "print/println of a `+`-concat result outputs the real string, not a tagged-pointer fragment":
         # Pre-fix, this line would contain the RtCoreString header bytes
